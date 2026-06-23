@@ -758,3 +758,33 @@ pub struct BacktestReport {
     /// without needing access to the original config struct.
     pub sizing: StrategySizingConfig,
 }
+
+impl BacktestReport {
+    /// Minimal, explicit test fixture **for unit tests only**.
+    ///
+    /// # ⚠ Not for real evaluation
+    ///
+    /// Mirrors [`BacktestConfig::test_defaults`]: every field is a zero/empty
+    /// placeholder so call sites can override only the fields a given test
+    /// cares about via functional-update syntax (`..BacktestReport::test_fixture()`).
+    /// `BacktestEngine::run` never calls this — production reports are always
+    /// built field-by-field from real run state (see `engine.rs`).
+    pub fn test_fixture() -> Self {
+        Self {
+            strategy_name: String::new(),
+            run_id: Uuid::nil(),
+            config_id: Uuid::nil(),
+            input_data_hash: String::new(),
+            halted: false,
+            halt_reason: None,
+            equity_curve: Vec::new(),
+            orders: Vec::new(),
+            fills: Vec::new(),
+            last_prices: BTreeMap::new(),
+            execution_blocked: false,
+            first_bar_open_micros: None,
+            last_bar_close_micros: None,
+            sizing: StrategySizingConfig::default_sizing(),
+        }
+    }
+}

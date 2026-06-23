@@ -22,9 +22,8 @@
 //!    function.  Replaying the exact fills produced by the backtest engine
 //!    through `apply_fill` directly yields identical portfolio state.
 
-use mqk_backtest::{BacktestBar, BacktestConfig, BacktestEngine, StressProfile};
+use mqk_backtest::{BacktestBar, BacktestConfig, BacktestEngine};
 use mqk_execution::{targets_to_order_intents, Side, StrategyOutput, TargetPosition};
-use mqk_integrity::CalendarSpec;
 use mqk_portfolio::{apply_fill, compute_equity_micros, PortfolioState, MICROS_SCALE};
 use mqk_risk::{
     evaluate as risk_evaluate, PdtContext, RequestKind, RiskAction, RiskConfig, RiskInput,
@@ -78,28 +77,12 @@ fn spread_bar(symbol: &str, ts: i64, close_micros: i64, spread_micros: i64) -> B
 /// Minimal config for alignment tests: known deterministic settings.
 fn alignment_config(initial_cash_micros: i64, daily_loss_limit_micros: i64) -> BacktestConfig {
     BacktestConfig {
-        timeframe_secs: 60,
         bar_history_len: 10,
         initial_cash_micros,
-        shadow_mode: false,
         daily_loss_limit_micros,
-        max_drawdown_limit_micros: 0,
-        reject_storm_max_rejects: 100,
-        pdt_enabled: false,
         kill_switch_flattens: false,
         max_gross_exposure_mult_micros: 3_000_000, // 3x — permissive for test isolation
-        stress: StressProfile {
-            slippage_bps: 0,
-            volatility_mult_bps: 0,
-        },
-        commission: mqk_backtest::CommissionModel::ZERO,
-        integrity_enabled: false,
-        integrity_stale_threshold_ticks: 0,
-        integrity_gap_tolerance_bars: 0,
-        integrity_enforce_feed_disagreement: false,
-        integrity_calendar: CalendarSpec::AlwaysOn,
-        corporate_action_policy: mqk_backtest::CorporateActionPolicy::Allow,
-        sizing: mqk_backtest::StrategySizingConfig::default_sizing(),
+        ..BacktestConfig::test_defaults()
     }
 }
 

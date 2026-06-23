@@ -656,10 +656,7 @@ impl Strategy for HoldStrategy {
 /// Run a 3-bar daily backtest (Fri / Mon / Tue) with a heartbeat feed seeded at
 /// the first bar and the given stale threshold. Returns `execution_blocked`.
 fn run_daily_weekend_gap_with_stale_threshold(stale_threshold_ticks: u64) -> bool {
-    use mqk_backtest::{
-        BacktestBar, BacktestConfig, BacktestEngine, CommissionModel, CorporateActionPolicy,
-        StrategySizingConfig, StressProfile,
-    };
+    use mqk_backtest::{BacktestBar, BacktestConfig, BacktestEngine};
 
     let base_ts = 1_700_000_000i64;
     // Friday close, then a 3-day weekend gap to Monday, then a normal Tuesday.
@@ -689,28 +686,12 @@ fn run_daily_weekend_gap_with_stale_threshold(stale_threshold_ticks: u64) -> boo
 
     let cfg = BacktestConfig {
         timeframe_secs: 86_400,
-        bar_history_len: 50,
-        initial_cash_micros: 100_000_000_000,
-        shadow_mode: false,
-        daily_loss_limit_micros: 0,
-        max_drawdown_limit_micros: 0,
-        reject_storm_max_rejects: 100,
-        pdt_enabled: false,
-        kill_switch_flattens: true,
         max_gross_exposure_mult_micros: 10_000_000,
-        stress: StressProfile {
-            slippage_bps: 0,
-            volatility_mult_bps: 0,
-        },
-        commission: CommissionModel::ZERO,
         integrity_enabled: true,
         integrity_stale_threshold_ticks: stale_threshold_ticks,
         // Large so gap detection never halts — isolate the stale gate.
         integrity_gap_tolerance_bars: 100,
-        integrity_enforce_feed_disagreement: false,
-        integrity_calendar: mqk_integrity::CalendarSpec::AlwaysOn,
-        corporate_action_policy: CorporateActionPolicy::Allow,
-        sizing: StrategySizingConfig::default_sizing(),
+        ..BacktestConfig::test_defaults()
     };
 
     let mut engine = BacktestEngine::new(cfg);

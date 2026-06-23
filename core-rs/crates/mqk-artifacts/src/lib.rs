@@ -1370,8 +1370,6 @@ mod tests {
             run_id: Uuid::new_v5(&Uuid::from_bytes([2u8; 16]), b"run"),
             config_id: Uuid::new_v5(&Uuid::from_bytes([3u8; 16]), b"cfg"),
             input_data_hash: derive_input_data_hash(&[]),
-            halted: false,
-            halt_reason: None,
             equity_curve: vec![(1_000, 1_000_000_000), (2_000, 1_010_000_000)],
             orders: vec![
                 BacktestOrder {
@@ -1402,10 +1400,9 @@ mod tests {
                 m.insert("SPY".to_string(), 151_000_000i64);
                 m
             },
-            execution_blocked: false,
             first_bar_open_micros: Some(150_000_000),
             last_bar_close_micros: Some(151_000_000),
-            sizing: mqk_backtest::StrategySizingConfig::default_sizing(),
+            ..BacktestReport::test_fixture()
         }
     }
 
@@ -1589,16 +1586,8 @@ mod tests {
             run_id: Uuid::new_v5(&Uuid::from_bytes([0u8; 16]), b"r"),
             config_id: Uuid::new_v5(&Uuid::from_bytes([0u8; 16]), b"c"),
             input_data_hash: derive_input_data_hash(&[]),
-            halted: false,
-            halt_reason: None,
             equity_curve,
-            orders: vec![],
-            fills: vec![],
-            last_prices: BTreeMap::new(),
-            execution_blocked: false,
-            first_bar_open_micros: None,
-            last_bar_close_micros: None,
-            sizing: mqk_backtest::StrategySizingConfig::default_sizing(),
+            ..BacktestReport::test_fixture()
         }
     }
 

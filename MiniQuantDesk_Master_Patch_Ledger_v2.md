@@ -2144,3 +2144,51 @@ PORTFOLIO-LIVE-WEIGHTS-01
 `BACKTEST-MULTIPLIER-MARGIN-01` remains `PARTIAL` — this patch wires the engine seam and proves full-run multiplier-aware notional/P&L/equity behavior, but the artifact/report/config-identity layer (`metrics.json`, `manifest.json`, `run_id`) is still entirely multiplier=1/unaware, and there is still no CLI/daemon/GUI path to use it.
 
 **Recommended next slice:** thread `with_economics` through to an operator-facing surface — either (a) fix the one out-of-scope exhaustive `BacktestConfig` literal in `mqk-daemon/tests/scenario_backtest_jobs_01.rs` as its own tiny, explicitly-scoped patch so a `BacktestConfig.economics` field becomes safe to add, or (b) add a narrow CLI flag (e.g. `--contract-multiplier`) that calls `.with_economics(...)` directly without touching `BacktestConfig` at all — then fold `contract_multiplier`/margin metadata into `BacktestReport`/`metrics.json`/`manifest.json` and into `config_id()`/`run_id` so replay identity is sensitive to economics.
+
+### BACKTEST-ECONOMICS-CONFIG-READY-01 — CLOSED_LOCAL / PARTIAL
+
+**Commit:** single local commit, message `"backtest: make economics config additions safe"` (code + tests + this ledger/audit update). Hash intentionally not hardcoded here — this entry is part of that commit's own tree; see `git log --oneline -1` for the exact hash.
+
+**Mission:** close the exact blocker `BACKTEST-MULTIPLIER-RUN-WIRE-01-COMBINED` identified directly above: exhaustive `BacktestConfig`/`BacktestReport` struct literals outside `mqk-backtest` that would fail to compile the moment either struct gained a new field. This patch adds no economics field — it only removes/isolates the literals that were blocking one, per its own explicit no-bundling instruction.
+
+**Repo evidence found before writing any code (current HEAD, not prior session claims):**
+- `BacktestConfig::test_defaults()` and `BacktestConfig::conservative_defaults()` already exist (`mqk-backtest/src/types.rs`) and are already used correctly via `..BacktestConfig::test_defaults()` spread syntax in `mqk-backtest/tests/scenario_corporate_action_policy.rs` and `mqk-testkit/tests/scenario_corp_act_01.rs` — these were false leads, not blockers.
+- Two **additional, previously undocumented** exhaustive `BacktestConfig { .. }` literals (all 19 fields named, no `..` spread) were found in `mqk-backtest/tests/`: `scenario_backtest_live_semantics_alignment.rs`'s `alignment_config()` and `scenario_stale_data_stops_execution.rs`'s `config_with_integrity()`. The prior patch's note above ("every in-scope `mqk-backtest/tests/*` literal use `..BacktestConfig::test_defaults()`") was incomplete — repo evidence overrides that claim per this repo's audit rules.
+- The exact blocker the prior patch named — `mqk-daemon/tests/scenario_backtest_jobs_01.rs:690`, a 19-field exhaustive `BacktestConfig` literal inside `run_daily_weekend_gap_with_stale_threshold()` — was confirmed present and unchanged at current HEAD.
+- `BacktestReport` has **no** constructor, builder, or `Default` impl at all (unlike `BacktestConfig`). Its sole production constructor is the one real, fully-explicit literal in `mqk-backtest/src/engine.rs::run()` — correct and left untouched.
+- The two exhaustive `BacktestReport { .. }` test-fixture literals the prior patch named in `mqk-artifacts/src/lib.rs`'s own `#[cfg(test)] mod tests` (`test_report_with_orders()`, `make_report_no_fills()`) were confirmed present.
+- **New finding, outside this patch's strict file scope:** `mqk-promotion/tests/` contains **seven** additional exhaustive `BacktestReport { .. }` literals across six files (`scenario_fail_below_threshold.rs` ×2, `scenario_promotion_requires_partial_fill_stress.rs` ×3, `scenario_pass_above_threshold.rs`, `scenario_backtest_to_promotion_pipeline.rs`, `scenario_golden_artifact_hash_lock.rs`). `mqk-promotion` was not named in this patch's allowed/read-only/forbidden file lists, so per "minimal scope only" / "do not touch files outside the patch's stated scope" it was **left untouched**. This is now the single largest remaining blocker to adding a `BacktestReport` field — see Recommended next slice.
+
+**Built:**
+- `BacktestReport::test_fixture() -> Self` added to `mqk-backtest/src/types.rs`, mirroring `BacktestConfig::test_defaults()`'s convention exactly: a named, explicitly-documented "test only, never production" constructor, not a `std::default::Default` impl — avoiding any implicit/silent empty-report default ever being reachable from non-test code, consistent with this repo's no-fabricated-truth posture. Returns zero/empty/nil values for all 14 fields. Automatically available wherever `BacktestReport` is already used (inherent impl on an already-`pub use`-exported type; no `lib.rs` change needed).
+- Converted the two newly found `mqk-backtest/tests/` `BacktestConfig` literals and the one `mqk-daemon/tests/scenario_backtest_jobs_01.rs` literal to `..BacktestConfig::test_defaults()` spread syntax, keeping only each test's actually-overridden fields. Trimmed now-unused local imports (`StressProfile` in two `mqk-backtest` test files; `CommissionModel`, `CorporateActionPolicy`, `StrategySizingConfig`, `StressProfile` from the daemon test's function-scoped `use`).
+- Converted both `mqk-artifacts/src/lib.rs` `BacktestReport` literals to `..BacktestReport::test_fixture()` spread syntax, keeping only each fixture's actually-distinguishing fields.
+- Field-by-field diff confirms every rewritten literal produces byte-identical values to the original — this is a mechanical de-sugaring, not a behavior change.
+
+**Construction/default pattern added:** Option B from this patch's own preferred-design list (functional-update spread against an explicit named constructor), applied symmetrically to `BacktestConfig` (already had `test_defaults()`) and `BacktestReport` (gained `test_fixture()`). No `std::default::Default` trait impl was added to either type, by design.
+
+**Proof existing behavior is unchanged:**
+- `cargo test -p mqk-backtest` — full suite, 28 lib unit tests + every scenario/integration binary, 0 failures, including `scenario_backtest_live_semantics_alignment` (9 tests) and `scenario_stale_data_stops_execution` (6 tests) — the two rewritten files.
+- `cargo test -p mqk-daemon --test scenario_backtest_jobs_01` — 12/12 pass, including `bj_d04_daily_weekend_gap_not_blocked_by_default_stale_threshold` (the test exercising the rewritten literal).
+- `cargo test -p mqk-artifacts` — 32/32 pass (13 lib + 6 e2e + 13 strategy_lab_artifact), including both CSV-header tests that consume the rewritten fixtures.
+- `cargo check -p mqk-backtest` / `cargo check -p mqk-daemon` / `cargo check -p mqk-artifacts` — all clean.
+- `cargo clippy -p mqk-backtest --all-targets -- -D warnings` — clean.
+- `cargo clippy -p mqk-artifacts --lib -- -D warnings` — clean (isolates the touched `src/lib.rs`). `cargo clippy -p mqk-artifacts --all-targets -- -D warnings` fails on a **pre-existing, unrelated** `clippy::ptr_arg` finding in `tests/strategy_lab_artifact.rs` (lines 22/56, `&PathBuf` should be `&Path`) — confirmed via `git diff --name-only` that this file was not touched by this patch; flagged separately as its own follow-up, not fixed here.
+
+**Proof no economics output behavior changed:** zero lines in `mqk-backtest/src/engine.rs`, `mqk-backtest/src/economics.rs`, or any economics code path were touched. No field was added to `BacktestConfig` or `BacktestReport`. `BacktestEngine::with_economics`/`economics()`/`economics_equity_curve()`/`economics_realized_pnl_micros()` are all unmodified.
+
+**Proof no daemon/CLI request JSON shape changed:** `mqk-daemon/src/routes/backtests.rs` and `mqk-cli/src/commands/*` were not modified and do not appear in `git diff --name-only`. The only daemon file touched is a `#[cfg(test)]`-only integration test (`tests/scenario_backtest_jobs_01.rs`), which has no bearing on any API/CLI request or response shape.
+
+**Unrelated/pre-existing failures and handling:** `clippy::ptr_arg` in `mqk-artifacts/tests/strategy_lab_artifact.rs:22,56` — pre-existing (file untouched by this patch), unrelated to backtest config/report construction safety. Flagged as a standalone follow-up task rather than fixed inline, to keep this patch's diff to its stated scope.
+
+**Not done (explicit):**
+- No economics field added to `BacktestConfig`, `BacktestReport`, `metrics.json`, `manifest.json`, or `config_id()`/`run_id` — this patch is construction-safety preparation only, exactly as scoped.
+- `mqk-promotion/tests/` (7 exhaustive `BacktestReport` literals across 6 files) was **not** de-risked — it was outside this patch's strict file scope and is now the largest concrete blocker remaining before a `BacktestReport` field can be added without an additional, separately-scoped patch.
+- No daemon route, CLI command, GUI, DB migration, broker/provider call, or live/paper trading path was touched.
+- `config_id()`/`run_id` are byte-for-byte unchanged in formula.
+
+`BACKTEST-MULTIPLIER-MARGIN-01` remains `PARTIAL`. This patch only removes the construction-safety blocker that `BACKTEST-MULTIPLIER-RUN-WIRE-01-COMBINED` identified for `mqk-backtest`/`mqk-daemon`/`mqk-artifacts`; it does not add economics fields, and a comparably-sized blocker now confirmed in `mqk-promotion/tests/` still stands between today's repo and a safe `BacktestReport` field addition.
+
+**Recommended next slice:** either (a) a narrowly-scoped follow-up patch that applies the same `..BacktestReport::test_fixture()` treatment to the seven literals now found in `mqk-promotion/tests/` (mechanical, same pattern, low risk — this is the last remaining `BacktestReport` blocker), after which a `contract_multiplier`/margin field could be added to `BacktestReport` with reasonable confidence, or (b) proceed directly to adding the `BacktestConfig.economics`-equivalent field now that `mqk-backtest`/`mqk-daemon` are de-risked, accepting that `mqk-promotion`'s `BacktestReport` literals would need fixing in the same patch that adds a `BacktestReport` field (not before).
+
+**Full detail, exact test names, and validation commands:** this entry (above) is the full detail; see `git log --oneline -1` in the repo for the exact commit hash.

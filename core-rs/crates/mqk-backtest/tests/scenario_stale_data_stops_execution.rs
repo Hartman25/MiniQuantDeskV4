@@ -8,7 +8,7 @@
 //! feed advances with each bar, the heartbeat goes stale, triggering DISARM,
 //! which gates all subsequent order submissions.
 
-use mqk_backtest::{BacktestBar, BacktestConfig, BacktestEngine, StressProfile};
+use mqk_backtest::{BacktestBar, BacktestConfig, BacktestEngine};
 use mqk_execution::{StrategyOutput, TargetPosition};
 use mqk_strategy::{Strategy, StrategyContext, StrategySpec};
 
@@ -81,29 +81,12 @@ impl Strategy for BuyEveryBarStrategy {
 /// was more than 120 seconds ago.
 fn config_with_integrity(stale_threshold_ticks: u64) -> BacktestConfig {
     BacktestConfig {
-        timeframe_secs: 60,
-        bar_history_len: 50,
-        initial_cash_micros: 100_000_000_000, // 100k USD
-        shadow_mode: false,
-        daily_loss_limit_micros: 0,
-        max_drawdown_limit_micros: 0,
-        reject_storm_max_rejects: 100,
-        pdt_enabled: false,
-        kill_switch_flattens: true,
         max_gross_exposure_mult_micros: 10_000_000, // 10x (generous)
-        stress: StressProfile {
-            slippage_bps: 0,
-            volatility_mult_bps: 0,
-        },
-        commission: mqk_backtest::CommissionModel::ZERO,
         // PATCH 22: integrity ON
         integrity_enabled: true,
         integrity_stale_threshold_ticks: stale_threshold_ticks,
         integrity_gap_tolerance_bars: 100, // large so gap detection doesn't trigger halt
-        integrity_enforce_feed_disagreement: false,
-        integrity_calendar: mqk_integrity::CalendarSpec::AlwaysOn, // Patch B3
-        corporate_action_policy: mqk_backtest::CorporateActionPolicy::Allow, // Patch B4
-        sizing: mqk_backtest::StrategySizingConfig::default_sizing(),
+        ..BacktestConfig::test_defaults()
     }
 }
 
