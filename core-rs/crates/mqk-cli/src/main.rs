@@ -136,6 +136,23 @@ enum BacktestCmd {
         #[arg(long)]
         max_position_notional_usd: Option<i64>,
 
+        /// Contract multiplier for multiplier-bearing instruments (futures/options-style
+        /// metadata; e.g. ES futures = 50, standard equity options = 100). Omitted = equity
+        /// default (multiplier=1), identical to current behavior. Metadata only -- does
+        /// not enable non-equity execution or change order routing. Must be > 0 if supplied.
+        #[arg(long)]
+        contract_multiplier: Option<i64>,
+
+        /// Optional initial margin metadata in micros, carried into report/artifact
+        /// economics. Metadata only -- never enforced.
+        #[arg(long)]
+        initial_margin_micros: Option<i64>,
+
+        /// Optional maintenance margin metadata in micros, carried into report/artifact
+        /// economics. Metadata only -- never enforced.
+        #[arg(long)]
+        maintenance_margin_micros: Option<i64>,
+
         /// Optional output directory for deterministic artifacts (fills/equity/metrics).
         #[arg(long)]
         out_dir: Option<String>,
@@ -689,6 +706,9 @@ async fn main() -> Result<()> {
                 target_qty,
                 max_target_qty,
                 max_position_notional_usd,
+                contract_multiplier,
+                initial_margin_micros,
+                maintenance_margin_micros,
                 out_dir,
             } => {
                 run_backtest_csv(
@@ -705,6 +725,9 @@ async fn main() -> Result<()> {
                     target_qty,
                     max_target_qty,
                     max_position_notional_usd,
+                    contract_multiplier,
+                    initial_margin_micros,
+                    maintenance_margin_micros,
                     out_dir,
                 )
                 .await?;

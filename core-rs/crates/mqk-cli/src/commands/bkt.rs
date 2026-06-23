@@ -4,8 +4,9 @@ use clap::ValueEnum;
 use std::path::Path;
 
 use mqk_backtest::{
-    BacktestBar, BacktestConfig, BacktestEngine, MarketRegimeClassification, MarketRegimeFeatures,
-    MarketRegimePolicy, StrategySizingConfig, SweepGrid, SweepRowResult, SWEEP_MAX_COMBINATIONS,
+    BacktestBar, BacktestConfig, BacktestEngine, BacktestInstrumentEconomics,
+    MarketRegimeClassification, MarketRegimeFeatures, MarketRegimePolicy, StrategySizingConfig,
+    SweepGrid, SweepRowResult, SWEEP_MAX_COMBINATIONS,
 };
 use mqk_integrity::CalendarSpec;
 use mqk_strategy::{engines::register_builtin_strategies_with_sizing, PluginRegistry};
@@ -47,6 +48,9 @@ pub async fn run_backtest_csv(
     target_qty: i64,
     max_target_qty: Option<i64>,
     max_position_notional_usd: Option<i64>,
+    contract_multiplier: Option<i64>,
+    initial_margin_micros: Option<i64>,
+    maintenance_margin_micros: Option<i64>,
     out_dir: Option<String>,
 ) -> Result<()> {
     let bars = mqk_backtest::load_csv_file(&bars_path)
@@ -97,6 +101,27 @@ pub async fn run_backtest_csv(
     })?;
 
     let mut engine = BacktestEngine::new(cfg);
+
+    // BACKTEST-ECONOMICS-CLI-ENTRY-01: opt-in economics wiring. If none of
+    // --contract-multiplier/--initial-margin-micros/--maintenance-margin-micros
+    // are supplied, the engine keeps its default equity economics
+    // (multiplier=1, no margin) and behavior is unchanged from before this flag
+    // existed. An explicit non-positive --contract-multiplier fails closed here,
+    // before any artifact directory is created.
+    if contract_multiplier.is_some()
+        || initial_margin_micros.is_some()
+        || maintenance_margin_micros.is_some()
+    {
+        let multiplier = contract_multiplier.unwrap_or(1);
+        let economics = BacktestInstrumentEconomics::new(
+            multiplier,
+            initial_margin_micros,
+            maintenance_margin_micros,
+        )
+        .with_context(|| format!("invalid --contract-multiplier {}", multiplier))?;
+        engine = engine.with_economics(economics);
+    }
+
     engine
         .add_strategy(strategy_instance)
         .with_context(|| format!("add_strategy failed for '{}'", strategy))?;
@@ -112,6 +137,14 @@ pub async fn run_backtest_csv(
     println!("strategy={}", report.strategy_name);
     println!("git_hash={}", git_hash);
     println!("config_hash={}", config_hash);
+    println!(
+        "economics_contract_multiplier={}",
+        report.economics.contract_multiplier
+    );
+    println!(
+        "economics_margin_enforced={}",
+        report.economics.margin_enforced
+    );
 
     // BKT-02P: if an output directory is requested, initialize the full run
     // artifact structure (manifest.json + placeholder files) before writing
