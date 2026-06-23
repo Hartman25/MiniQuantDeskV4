@@ -15,6 +15,7 @@
 //! - FIFO portfolio accounting via mqk-portfolio
 
 pub mod corporate_actions; // Patch B4
+mod economics; // BACKTEST-MULTIPLIER-MARGIN-01
 mod engine;
 pub mod loader;
 pub mod regime;
@@ -23,6 +24,10 @@ pub mod sweep;
 pub mod types;
 
 pub use corporate_actions::{CorporateActionPolicy, ForbidEntry}; // Patch B4
+pub use economics::{
+    mark_to_market_value_micros, notional_micros, realized_pnl_micros,
+    BacktestInstrumentEconomics, EconomicsError,
+}; // BACKTEST-MULTIPLIER-MARGIN-01
 pub use engine::{BacktestEngine, BacktestError};
 pub use loader::{load_csv_file, parse_csv_bars, LoadError};
 pub use regime::{

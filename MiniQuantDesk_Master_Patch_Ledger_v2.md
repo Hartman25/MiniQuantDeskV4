@@ -2049,3 +2049,47 @@ PORTFOLIO-LIVE-WEIGHTS-01
 **Audit finding (honesty note, not a defect to fix in this patch):** the `MarketCalendarProvider` trait and its implementors (`NyseWeekdaysProvider`, `FixedWindowOverrideProvider`, `ExchangeSourcedCalendarProvider`) in `mqk-daemon/src/state/market_calendar.rs` are consulted only by their own test files — production runtime gating (`session_controller.rs`) depends directly on `mqk_integrity::CalendarSpec::NyseWeekdays`, not on this trait/seam. Both call sites converge on the same underlying holiday/early-close table in `mqk-integrity`, so there is no truth drift today, but the `MarketCalendarProvider` seam itself remains an unconsumed abstraction in production code.
 
 **Recommended next slice:** wire `resolve_session_profile_for_instrument_metadata` as a read-only diagnostic (e.g., a status route) once a second real consumer exists beyond status reporting — or, if multi-asset trading is actually prioritized next, scope true per-instrument runtime session routing as its own patch with its own proof standard (this is explicitly NOT what ASSET-CORE-05B-COMBINED did).
+
+### BACKTEST-MULTIPLIER-MARGIN-01-COMBINED — CLOSED_LOCAL / PARTIAL
+
+**Commit:** single combined local commit, message `"backtest: add multiplier-aware economics seam"` (code + tests + this ledger/audit update, per this patch's explicit one-commit instruction). Hash intentionally not hardcoded here — this entry is part of that commit's own tree, so it cannot self-reference its own resulting hash; see `git log --oneline -1` in the repo for the exact hash.
+
+**Repo evidence found before writing any code:**
+- backtest realized P&L is not computed in `mqk-backtest` at all — `BacktestEngine::run` calls `mqk_portfolio::apply_fill` (`mqk-portfolio/src/accounting.rs`'s `buy_fifo`/`sell_fifo`), which computes `(price_a - price_b) * qty` with multiplier implicitly `1`
+- backtest unrealized/equity-curve P&L is likewise delegated: `compute_equity_micros` / `compute_exposure_micros` / `compute_unrealized_pnl_micros` (`mqk-portfolio/src/metrics.rs`), same implicit multiplier-1 `qty * mark` math
+- `mqk-portfolio` is the **same accounting engine used by the live/paper path** — `mqk-runtime/src/orchestrator.rs` and `orchestrator/apply.rs` call the identical `apply_fill`/`compute_equity_micros` functions — so any change to existing `mqk-portfolio` function bodies would be a live-accounting change, not a backtest-only one
+- `ContractDefinitionV2::Future`/`Option` already carry a validated `multiplier: i64` field (`mqk-md/src/instrument_registry_v2.rs`, from `ASSET-CORE-01B`), but it is registry-validation-only — zero consumers in any P&L, notional, or accounting path
+- no existing margin concept anywhere in the repo (the only prior "margin" hits are Alpaca's unrelated `marginable: Option<bool>` asset flag)
+
+**Built:**
+- new pure module `core-rs/crates/mqk-backtest/src/economics.rs` (not `mqk-portfolio` — kept structurally unreachable from the live path, since `mqk-runtime` does not depend on `mqk-backtest`)
+- `BacktestInstrumentEconomics { contract_multiplier: i64, initial_margin_micros: Option<i64>, maintenance_margin_micros: Option<i64> }`; `::equity()` (multiplier=1, infallible) and `::new(multiplier, initial_margin, maintenance_margin) -> Result<Self, EconomicsError>` (fails closed on multiplier <= 0)
+- three pure helpers, each saturating through `i128` (no panic/wrap on extreme i64 inputs — a 3-factor `qty * price * multiplier` product can exceed `i128` range, unlike the existing 2-factor `qty * price` math): `notional_micros`, `mark_to_market_value_micros`, `realized_pnl_micros`
+- margin fields are carried as metadata only — no function reads them; `bmm05` proves this explicitly
+- re-exported from `mqk-backtest::lib` (`mod economics;` + `pub use economics::{...}`); zero existing files modified inside `mqk-backtest` or `mqk-portfolio`
+- **not wired into `BacktestEngine`** — this is a standalone, additively-tested foundation only; the engine's existing inline notional clamp and all `mqk-portfolio` calls are untouched, so there is no possible behavior drift to prove against
+
+**Equity multiplier=1 preservation proof (`bmm01`):**
+- `notional_micros`/`realized_pnl_micros`/`mark_to_market_value_micros` at multiplier=1 are checked against the exact fixture values from `mqk-portfolio/tests/scenario_pnl_partial_fills_fifo.rs` (sell 5 @ 120 closing a 100-entry long → realized 100; 15 shares @ mark 115 → market value 1,725 → equity 100,225) — same numbers, same results
+
+**Synthetic futures/options multiplier proof (`bmm02`/`bmm03`):**
+- futures-style multiplier 50: notional, long-side realized P&L, short-side realized P&L (sign-convention proof), and mark-to-market all scale correctly
+- options-style multiplier 100: notional and realized P&L scale correctly
+
+**Validation:**
+- `cargo test -p mqk-backtest --lib bmm` — 14/14 new tests pass
+- `cargo test -p mqk-backtest` — full crate suite passes, no regression (includes unchanged `scenario_allocation_cap_enforced.rs`, which exercises the same notional-clamp shape this patch left untouched)
+- `cargo test -p mqk-portfolio` — full crate suite passes (untouched crate, confirmed unaffected)
+- `cargo check -p mqk-backtest` / `cargo check -p mqk-portfolio` — clean
+- `cargo clippy -p mqk-backtest --all-targets -- -D warnings` / `cargo clippy -p mqk-portfolio --all-targets -- -D warnings` — clean
+
+**Not done:**
+- no wiring into `BacktestEngine` (no per-symbol economics config, no `BacktestConfig` field, no API/CLI change)
+- no futures/options registry entries, no contract roll logic, no options assignment/expiration
+- no margin enforcement (margin is `Option<i64>` metadata only, read by nothing)
+- no live/paper portfolio accounting change — `mqk-portfolio` was not modified
+- no broker/provider/DB/daemon path touched; no non-equity asset class enabled
+
+`BACKTEST-MULTIPLIER-MARGIN-01` remains `PARTIAL` — this combined patch is the foundation seam only (pure helpers + proof), not engine wiring or asset-class enablement.
+
+**Recommended next slice:** wire `BacktestInstrumentEconomics` into `BacktestEngine` for a single explicitly-flagged synthetic instrument path (e.g. an opt-in per-run economics override defaulting to `equity()`), proven against a full synthetic futures-style backtest run rather than pure-helper unit tests alone — only after that wiring exists does per-instrument multiplier selection (reading `ContractDefinitionV2::multiplier` from the registry) become a meaningful next step.
