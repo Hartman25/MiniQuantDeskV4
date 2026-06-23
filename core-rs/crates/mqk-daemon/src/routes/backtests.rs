@@ -27,8 +27,8 @@ use uuid::Uuid;
 
 use crate::{
     api_types::{
-        BacktestJobAcceptedResponse, BacktestJobRequest, BacktestJobStatusResponse,
-        BacktestJobSummary, BacktestJobsListResponse,
+        BacktestEconomicsRequest, BacktestJobAcceptedResponse, BacktestJobRequest,
+        BacktestJobStatusResponse, BacktestJobSummary, BacktestJobsListResponse,
     },
     backtest_jobs::{BacktestJobRecord, BacktestJobStatus},
     state::AppState,
@@ -291,6 +291,7 @@ pub(crate) async fn backtest_job_submit(
     let integrity_enabled = req.integrity_enabled.unwrap_or(false);
     let integrity_stale_threshold_ticks = req.integrity_stale_threshold_ticks;
     let shadow = req.shadow.unwrap_or(false);
+    let economics = req.economics.clone();
     let db_pool = st.db.clone();
 
     // --- Spawn background task ---
@@ -317,6 +318,7 @@ pub(crate) async fn backtest_job_submit(
                 integrity_enabled,
                 integrity_stale_threshold_ticks,
                 shadow,
+                economics,
                 out_dir,
             )
             .await
@@ -332,6 +334,7 @@ pub(crate) async fn backtest_job_submit(
                     integrity_enabled,
                     integrity_stale_threshold_ticks,
                     shadow,
+                    economics,
                     out_dir,
                 )
             })
@@ -483,6 +486,24 @@ fn resolve_integrity_stale_threshold(explicit: Option<u64>, timeframe_secs: i64)
     explicit.unwrap_or_else(|| default_integrity_stale_threshold_ticks(timeframe_secs))
 }
 
+fn build_backtest_economics_from_request(
+    economics: Option<BacktestEconomicsRequest>,
+) -> Result<Option<mqk_backtest::BacktestInstrumentEconomics>, String> {
+    match economics {
+        None => Ok(None),
+        Some(economics) => {
+            let contract_multiplier = economics.contract_multiplier.unwrap_or(1);
+            mqk_backtest::BacktestInstrumentEconomics::new(
+                contract_multiplier,
+                economics.initial_margin_micros,
+                economics.maintenance_margin_micros,
+            )
+            .map(Some)
+            .map_err(|e| format!("invalid backtest economics: {e}"))
+        }
+    }
+}
+
 /// Run a CSV backtest synchronously and write artifacts.
 ///
 /// Returns `(artifact_dir, manifest_path, metrics_path)` on success.
@@ -500,8 +521,11 @@ fn run_backtest_csv_blocking(
     integrity_enabled: bool,
     integrity_stale_threshold_ticks: Option<u64>,
     shadow: bool,
+    economics: Option<BacktestEconomicsRequest>,
     out_dir: String,
 ) -> Result<(String, String, String), String> {
+    let economics = build_backtest_economics_from_request(economics)?;
+
     // Load bars from CSV.
     let bars = mqk_backtest::load_csv_file(&bars_path)
         .map_err(|e| format!("load bars csv failed: {}: {}", bars_path, e))?;
@@ -537,6 +561,9 @@ fn run_backtest_csv_blocking(
     })?;
 
     let mut engine = mqk_backtest::BacktestEngine::new(cfg);
+    if let Some(economics) = economics {
+        engine = engine.with_economics(economics);
+    }
     engine
         .add_strategy(strategy_instance)
         .map_err(|e| format!("add_strategy failed for '{}': {}", strategy, e))?;
@@ -637,6 +664,7 @@ async fn run_backtest_md_bars_job(
     integrity_enabled: bool,
     integrity_stale_threshold_ticks: Option<u64>,
     shadow: bool,
+    economics: Option<BacktestEconomicsRequest>,
     out_dir: String,
 ) -> Result<(String, String, String), String> {
     let pool = db_pool
@@ -675,6 +703,7 @@ async fn run_backtest_md_bars_job(
             integrity_enabled,
             integrity_stale_threshold_ticks,
             shadow,
+            economics,
             out_dir,
         )
     })
@@ -723,8 +752,10 @@ fn run_backtest_md_bars_blocking(
     integrity_enabled: bool,
     integrity_stale_threshold_ticks: Option<u64>,
     shadow: bool,
+    economics: Option<BacktestEconomicsRequest>,
     out_dir: String,
 ) -> Result<(String, String, String), String> {
+    let economics = build_backtest_economics_from_request(economics)?;
     let bar_count = bars.len();
 
     let mut cfg = mqk_backtest::BacktestConfig::conservative_defaults();
@@ -753,6 +784,9 @@ fn run_backtest_md_bars_blocking(
     })?;
 
     let mut engine = mqk_backtest::BacktestEngine::new(cfg);
+    if let Some(economics) = economics {
+        engine = engine.with_economics(economics);
+    }
     engine
         .add_strategy(strategy_instance)
         .map_err(|e| format!("add_strategy failed for '{}': {}", strategy, e))?;
@@ -871,7 +905,8 @@ fn augment_manifest_with_md_bars_provenance(
     );
     let pretty =
         serde_json::to_string_pretty(&value).map_err(|e| format!("serialize failed: {e}"))?;
-    std::fs::write(manifest_path, format!("{pretty}\n")).map_err(|e| format!("write failed: {e}"))?;
+    std::fs::write(manifest_path, format!("{pretty}\n"))
+        .map_err(|e| format!("write failed: {e}"))?;
     Ok(())
 }
 

@@ -3603,6 +3603,13 @@ pub struct BacktestJobRequest {
     pub integrity_stale_threshold_ticks: Option<u64>,
     /// Run in shadow mode (strategy signals observed but not executed). Defaults to false.
     pub shadow: Option<bool>,
+    /// Optional backtest-only instrument economics override.
+    ///
+    /// Omitted requests preserve default equity economics exactly. When present,
+    /// omitted `contract_multiplier` defaults to 1 and margins remain
+    /// metadata-only.
+    #[serde(default)]
+    pub economics: Option<BacktestEconomicsRequest>,
     /// BACKTEST-DB-BARS-SOURCE-01: `md_bars` timeframe string for the DB query
     /// (e.g. `"1D"`, `"5m"`) — independent of `timeframe_secs`, which only
     /// drives the engine config. Required when `source="md_bars"`; ignored
@@ -3617,6 +3624,13 @@ pub struct BacktestJobRequest {
     /// `source="md_bars"`. Must be `>= start`.
     #[serde(default)]
     pub end: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct BacktestEconomicsRequest {
+    pub contract_multiplier: Option<i64>,
+    pub initial_margin_micros: Option<i64>,
+    pub maintenance_margin_micros: Option<i64>,
 }
 
 fn default_backtest_job_source() -> String {
