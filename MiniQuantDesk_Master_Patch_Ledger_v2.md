@@ -1980,3 +1980,35 @@ PORTFOLIO-LIVE-WEIGHTS-01
 **Safety confirmation:** no broker submit changes; no Alpaca adapter changes; no live routing changes; no order/outbox writes; no DB migrations; `.env.local` not read or touched; no provider/broker network calls; no paper/live orders submitted; no non-equity asset class enabled anywhere; disabled-asset gates untouched; daemon was not started at any point (all proof is `axum::Router::oneshot` route-level testing); production still reads only the v1 registry (`config/instruments/equities.json` via `AppState::instrument_registry_path`) for every trading/ingestion/backtest/GUI decision. `MiniQuantDesk_Master_Patch_Ledger_v2_updated.md` and `smoke_logs/` were not staged or touched.
 
 **Recommended next slice:** `ASSET-CORE-05` (market calendar/session generalization) — this patch's own read-only status surface is sufficient proof-of-consumption for `InstrumentRegistryV2`; a controlled default-off v2 loader integration (`ASSET-CORE-01D`) has no current operator-facing motivation now that the conversion/validation truth is observable, and would be the right next step only once a real second registry-consuming feature (not just status reporting) is scoped.
+
+### ASSET-CORE-05A — CLOSED_LOCAL / PARTIAL
+
+**Commit:** `37a6440` "daemon: add multi-asset session classification seam"
+
+**Built:**
+- additive multi-asset session-classification seam (`mqk-daemon/src/state/market_calendar.rs`)
+- equity US regular profile (real, backed by the existing `MarketCalendarProvider`/`MarketSessionState`)
+- crypto continuous model-only profile
+- futures regular / extended / overnight / closed model-only profile
+- forex weekday-continuous / weekend-closed model-only profile
+- tests proving Unknown/fail-closed behavior remains intact
+- current `MarketCalendarProvider` and `MarketSessionState` preserved unchanged
+
+**Validation:**
+- `cargo test -p mqk-daemon --test scenario_market_calendar_session_provider_01` — 20/20 pass
+- `cargo test -p mqk-daemon --test scenario_gui_daemon_contract_gate` — 23/23 pass
+- `cargo check -p mqk-daemon` — clean
+- `cargo clippy -p mqk-daemon --lib -- -D warnings` — clean
+
+**Not done:**
+- no production runtime cutover
+- no authoritative new holiday/early-close expansion
+- no per-instrument session routing
+- no DB migration
+- no daemon smoke
+- no provider/broker calls
+- no crypto/futures/forex enablement
+
+`ASSET-CORE-05` remains `PARTIAL`.
+
+**Recommended next slice:** `ASSET-CORE-05B` — authoritative equity calendar / holiday / early-close provider.

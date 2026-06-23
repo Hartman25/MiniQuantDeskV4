@@ -501,3 +501,9 @@ Docs/ledger-only maintenance patch. No production code, config, DB, or trading-p
 **Full detail, exact test names, and validation commands:** `MiniQuantDesk_Master_Patch_Ledger_v2.md`'s `ASSET-CORE-01C` entry (end of §19).
 
 **Safety confirmation:** no broker submit changes; no Alpaca adapter changes; no live routing changes; no order/outbox writes; no DB migrations; `.env.local` untouched; no provider/broker calls; no paper/live orders; no non-equity asset class enabled; disabled-asset gates untouched. No daemon started — all proof is route/unit-level (`axum::Router::oneshot`).
+
+## 21. ASSET-CORE-05A Closure Note (maintenance)
+
+ASSET-CORE-05A added an additive session-classification seam for equity US regular, crypto continuous, futures regular/extended/overnight, and forex 24x5 concepts. It is model/test-only and does not switch runtime behavior, enable non-equity assets, add DB state, or change trading. `ASSET-CORE-05` remains `PARTIAL` pending authoritative calendar/holiday/early-close and per-instrument session routing work.
+
+**Full detail, exact test names, and validation commands:** `MiniQuantDesk_Master_Patch_Ledger_v2.md`'s `ASSET-CORE-05A` entry (end of §19).
