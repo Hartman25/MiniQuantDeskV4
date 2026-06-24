@@ -38,8 +38,9 @@ use crate::market_data_freshness::{
 };
 use crate::parity_evidence::{evaluate_parity_evidence_guarded, ParityEvidenceOutcome};
 use crate::state::{
-    autonomous_session_schedule_from_env, session_window_from_env, AppState,
-    AutonomousSessionTruth, BrokerSnapshotTruthSource, DeploymentMode, StrategyMarketDataSource,
+    autonomous_session_schedule_from_env, session_window_from_env, supported_session_profiles,
+    AppState, AutonomousSessionTruth, BrokerSnapshotTruthSource, DeploymentMode,
+    MarketSessionProfile, SessionAuthority, SessionProfileStatus, StrategyMarketDataSource,
     SESSION_START_HH_MM_ENV, SESSION_STOP_HH_MM_ENV, STRATEGY_MD_TIMEFRAME_ENV,
 };
 
@@ -1620,6 +1621,36 @@ pub(crate) async fn system_runtime_leadership(
 // GET /api/v1/system/session
 // ---------------------------------------------------------------------------
 
+fn session_profile_status_for_calendar_spec(
+    calendar_spec_id: &str,
+    market_session: &str,
+) -> SessionProfileStatus {
+    let is_open = Some(market_session == "regular");
+    match calendar_spec_id {
+        "always_on" => SessionProfileStatus {
+            profile: MarketSessionProfile::EquityUsRegular,
+            authority: SessionAuthority::ConfiguredOverride,
+            is_open,
+            reason_code: "equity_regular_always_on_policy",
+            message: "Equity regular session profile displayed through the existing always-on daemon calendar policy.",
+        },
+        "nyse_weekdays" => SessionProfileStatus {
+            profile: MarketSessionProfile::EquityUsRegular,
+            authority: SessionAuthority::Fallback,
+            is_open,
+            reason_code: "equity_regular_nyse_weekdays_heuristic",
+            message: "Equity regular session using the existing NYSE weekdays heuristic calendar behavior.",
+        },
+        _ => SessionProfileStatus {
+            profile: MarketSessionProfile::EquityUsRegular,
+            authority: SessionAuthority::Unavailable,
+            is_open: None,
+            reason_code: "session_calendar_unavailable",
+            message: "Session profile could not be tied to a recognized calendar spec.",
+        },
+    }
+}
+
 pub(crate) async fn system_session(State(st): State<Arc<AppState>>) -> impl IntoResponse {
     let status = match st.current_status_snapshot().await {
         Ok(snapshot) => snapshot,
@@ -1669,6 +1700,14 @@ pub(crate) async fn system_session(State(st): State<Arc<AppState>>) -> impl Into
     // this display surface.  In production the override is None and it falls through
     // to Utc::now().timestamp() — identical behavior, but now hermetically testable.
     let now_ts = st.session_now_ts().await;
+    let market_session = calendar.classify_market_session(now_ts).to_string();
+    let calendar_spec_id = calendar.spec_id().to_string();
+    let session_profile_status =
+        session_profile_status_for_calendar_spec(&calendar_spec_id, &market_session);
+    let supported_session_profiles = supported_session_profiles()
+        .into_iter()
+        .map(|profile| profile.as_str().to_string())
+        .collect();
     (
         StatusCode::OK,
         Json(SessionStateResponse {
@@ -1684,9 +1723,15 @@ pub(crate) async fn system_session(State(st): State<Arc<AppState>>) -> impl Into
             } else {
                 "disabled".to_string()
             },
-            market_session: calendar.classify_market_session(now_ts).to_string(),
+            market_session,
             exchange_calendar_state: calendar.classify_exchange_calendar(now_ts).to_string(),
-            calendar_spec_id: calendar.spec_id().to_string(),
+            calendar_spec_id,
+            session_profile: session_profile_status.profile.as_str().to_string(),
+            session_authority: session_profile_status.authority.as_str().to_string(),
+            session_profile_is_open: session_profile_status.is_open,
+            session_profile_reason_code: session_profile_status.reason_code.to_string(),
+            session_profile_message: session_profile_status.message.to_string(),
+            supported_session_profiles,
             notes: vec![calendar.session_truth_note().to_string()],
             // C4: Live-trust ceiling fields — same evaluator as C1/C2/C3.
             parity_evidence_state,

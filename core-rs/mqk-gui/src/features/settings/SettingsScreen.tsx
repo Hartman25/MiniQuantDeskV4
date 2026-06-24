@@ -9,6 +9,9 @@ import type { SystemModel } from "../system/types";
 export function SettingsScreen({ model }: { model: SystemModel }) {
   const saved = getSavedDaemonUrl();
   const current = saved ?? defaultDaemonUrl();
+  const session = model.sessionState;
+  const profileOpen = session.session_profile_is_open;
+  const supportedProfiles = session.supported_session_profiles ?? [];
 
   const handleUseDefault = () => {
     clearSavedDaemonUrl();
@@ -45,6 +48,22 @@ export function SettingsScreen({ model }: { model: SystemModel }) {
           <div><span>Endpoint status</span><strong>{formatLabel(model.metadata.endpoint_status)}</strong></div>
           <div><span>Environment</span><strong>{model.status.environment}</strong></div>
           <div><span>Config profile</span><strong>{model.status.config_profile ?? "—"}</strong></div>
+        </div>
+      </Panel>
+      <Panel title="Session profile">
+        <div className="metric-list">
+          <div><span>Profile</span><strong>{formatLabel(session.session_profile ?? "unavailable")}</strong></div>
+          <div><span>Authority</span><strong>{formatLabel(session.session_authority ?? "unavailable")}</strong></div>
+          <div>
+            <span>Open</span>
+            <strong>{profileOpen == null ? "—" : profileOpen ? "Yes" : "No"}</strong>
+          </div>
+          <div><span>Reason</span><strong>{formatLabel(session.session_profile_reason_code ?? "unavailable")}</strong></div>
+          <div><span>Message</span><strong>{session.session_profile_message ?? "—"}</strong></div>
+          <div>
+            <span>Supported profiles</span>
+            <strong>{supportedProfiles.length > 0 ? supportedProfiles.map(formatLabel).join(", ") : "—"}</strong>
+          </div>
         </div>
       </Panel>
       {systemStatusScreenIncludes("instrument-registry-v2-source") && <InstrumentRegistryV2SourcePanel />}

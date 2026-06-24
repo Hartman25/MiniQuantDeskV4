@@ -63,9 +63,10 @@ use chrono::{TimeZone, Utc};
 use mqk_daemon::state::{
     classify_crypto_continuous_session, classify_equity_us_regular_session,
     classify_forex_weekday_continuous_session, classify_futures_globex_session,
-    resolve_session_profile_for_instrument_metadata, FixedWindowOverrideProvider,
-    FuturesSessionWindows, MarketCalendarProvider, MarketSessionProfile, MarketSessionState,
-    MarketSessionTruth, MarketVenueSessionKind, NyseWeekdaysProvider, SessionProfileResolutionTruth,
+    resolve_session_profile_for_instrument_metadata, supported_session_profiles,
+    FixedWindowOverrideProvider, FuturesSessionWindows, MarketCalendarProvider,
+    MarketSessionProfile, MarketSessionState, MarketSessionTruth, MarketVenueSessionKind,
+    NyseWeekdaysProvider, SessionAuthority, SessionProfileResolutionTruth, SessionProfileStatus,
     SessionWindow,
 };
 
@@ -881,6 +882,50 @@ fn acs05a07_only_equity_profile_is_implemented_current() {
             "ACS05A07: {model_only_profile:?} must be model_only, not implemented_current"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// ACS05A08 — Session authority/status diagnostics are typed and explicit
+// ---------------------------------------------------------------------------
+
+/// The read-only session-profile diagnostics use typed authority/status values
+/// instead of raw strings at the model boundary. This proves every authority
+/// label is explicit and the supported-profile list names exactly the four
+/// scaffolded profiles; it does not wire any non-equity profile into trading.
+#[test]
+fn acs05a08_session_authority_and_supported_profiles_are_explicit() {
+    let status = SessionProfileStatus {
+        profile: MarketSessionProfile::EquityUsRegular,
+        authority: SessionAuthority::Fallback,
+        is_open: Some(true),
+        reason_code: "test_reason",
+        message: "test message",
+    };
+    assert_eq!(status.profile.as_str(), "equity_us_regular");
+    assert_eq!(status.authority.as_str(), "fallback");
+    assert_eq!(status.is_open, Some(true));
+
+    assert_eq!(SessionAuthority::Authoritative.as_str(), "authoritative");
+    assert_eq!(
+        SessionAuthority::ConfiguredOverride.as_str(),
+        "configured_override"
+    );
+    assert_eq!(SessionAuthority::Unavailable.as_str(), "unavailable");
+
+    let profiles: Vec<&'static str> = supported_session_profiles()
+        .into_iter()
+        .map(MarketSessionProfile::as_str)
+        .collect();
+    assert_eq!(
+        profiles,
+        vec![
+            "equity_us_regular",
+            "crypto_continuous",
+            "futures_globex",
+            "forex_24x5"
+        ],
+        "ACS05A08: supported profile diagnostics must remain additive and deterministic"
+    );
 }
 
 // ---------------------------------------------------------------------------

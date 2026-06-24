@@ -1082,6 +1082,28 @@ pub struct SessionStateResponse {
     /// Stable identifier for the calendar spec driving this session response.
     /// `"always_on"` (paper/backtest) or `"nyse_weekdays"` (live/shadow).
     pub calendar_spec_id: String,
+    /// Active session-profile model for this response.
+    ///
+    /// Current execution remains equity-only. Non-equity profile names are
+    /// surfaced only in `supported_session_profiles` as read-only scaffolds.
+    pub session_profile: String,
+    /// Authority for the active session-profile answer.
+    ///
+    /// `"configured_override"` covers existing always-on daemon modes; `"fallback"`
+    /// covers the current NYSE weekday heuristic. No live/paper trading decision
+    /// is changed by this diagnostic field.
+    pub session_authority: String,
+    /// Open/closed answer for the active profile when this route can derive one.
+    pub session_profile_is_open: Option<bool>,
+    /// Machine-readable reason for the active profile/authority status.
+    pub session_profile_reason_code: String,
+    /// Operator-facing explanation of the active profile/authority status.
+    pub session_profile_message: String,
+    /// Session profiles the current model can name.
+    ///
+    /// Only `equity_us_regular` is wired into current behavior. Crypto/futures/FX
+    /// entries are model-only scaffolds and do not enable trading.
+    pub supported_session_profiles: Vec<String>,
     /// Operator-facing notes describing the authority basis of session truth.
     pub notes: Vec<String>,
     /// C4: Current parity-evidence state on this surface.

@@ -516,6 +516,12 @@ Part A found the existing bounded table (`mqk-integrity::calendar`, 2023–2028,
 
 **Full detail, exact test names, and validation commands:** `MiniQuantDesk_Master_Patch_Ledger_v2.md`'s `ASSET-CORE-05B-COMBINED` entry (end of §19).
 
+## 22A. ASSET-CORE-05-MARKET-CALENDAR-GENERALIZE-01-COMBINED Closure Note (maintenance)
+
+ASSET-CORE-05-MARKET-CALENDAR-GENERALIZE-01-COMBINED added additive session-profile modeling diagnostics and read-only GUI/API visibility for equity regular, 24/7 crypto scaffold, futures-electronic/Globex-style scaffold, and FX 24/5 scaffold sessions. Current equity behavior remains unchanged; non-equity profiles are not used for trading and do not enable non-equity execution. `ASSET-CORE-05` remains `PARTIAL` pending true per-instrument session routing, authoritative non-equity calendars, and maintenance-break-aware product calendars.
+
+**Full detail, exact test names, and validation commands:** `MiniQuantDesk_Master_Patch_Ledger_v2.md`'s `ASSET-CORE-05-MARKET-CALENDAR-GENERALIZE-01-COMBINED` entry (end of §19).
+
 ## 23. BACKTEST-MULTIPLIER-MARGIN-01-COMBINED Closure Note (maintenance)
 
 BACKTEST-MULTIPLIER-MARGIN-01-COMBINED added/proved a multiplier-aware backtest economics seam (`core-rs/crates/mqk-backtest/src/economics.rs`: `BacktestInstrumentEconomics` + pure `notional_micros`/`mark_to_market_value_micros`/`realized_pnl_micros` helpers). Equity behavior remains multiplier=1 and unchanged — the seam is additive only and is not wired into `BacktestEngine`. Futures/options-style multipliers (50 and 100) are proven by synthetic unit tests only; no futures/options registry, broker, execution, or live portfolio path was enabled or modified. `mqk-portfolio` (the accounting engine shared with the live/paper runtime) was not touched. Margin is scaffolded as `Option<i64>` metadata only — read by nothing, enforced nowhere. `BACKTEST-MULTIPLIER-MARGIN-01` remains `PARTIAL` pending engine wiring and broader non-equity backtest readiness.

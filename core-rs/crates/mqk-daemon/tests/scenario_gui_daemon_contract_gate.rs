@@ -427,6 +427,31 @@ async fn gui_session_config_strategy_and_audit_surfaces_are_semantically_truthfu
     assert!(!session["deployment_blocker"].is_null());
     assert_eq!(session["strategy_allowed"], false);
     assert_eq!(session["execution_allowed"], false);
+    assert_eq!(json_str(&session, "session_profile"), "equity_us_regular");
+    assert_eq!(
+        json_str(&session, "session_authority"),
+        "configured_override"
+    );
+    assert_eq!(session["session_profile_is_open"], true);
+    assert_eq!(
+        json_str(&session, "session_profile_reason_code"),
+        "equity_regular_always_on_policy"
+    );
+    assert!(
+        session["session_profile_message"]
+            .as_str()
+            .is_some_and(|msg| msg.contains("always-on daemon calendar policy")),
+        "session profile message must explain always-on authority: {session}"
+    );
+    let supported_profiles = session["supported_session_profiles"]
+        .as_array()
+        .expect("supported_session_profiles array");
+    assert!(
+        supported_profiles
+            .iter()
+            .any(|v| v.as_str() == Some("crypto_continuous")),
+        "session diagnostics must list crypto scaffold without enabling it: {session}"
+    );
 
     let config_req = Request::builder()
         .method("GET")

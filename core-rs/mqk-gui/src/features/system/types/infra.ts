@@ -57,6 +57,18 @@ export interface SessionStateSummary {
   /** Stable identifier for the calendar spec driving this response.
    *  "always_on" (paper/backtest) or "nyse_weekdays" (live/shadow). */
   calendar_spec_id?: string;
+  /** Active session-profile model for the current session route answer. */
+  session_profile?: string;
+  /** Authority level for the active session-profile answer. */
+  session_authority?: "authoritative" | "fallback" | "configured_override" | "unavailable" | string;
+  /** Open/closed answer for the active profile when known. */
+  session_profile_is_open?: boolean | null;
+  /** Machine-readable reason for the active profile/authority status. */
+  session_profile_reason_code?: string;
+  /** Operator-facing profile/authority status. */
+  session_profile_message?: string;
+  /** Session profiles the daemon model can name; non-equity entries are scaffold only. */
+  supported_session_profiles?: string[];
   notes: string[];
   /**
    * AP-09: Deployment mode label from daemon session truth.

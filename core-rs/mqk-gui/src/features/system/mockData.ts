@@ -586,6 +586,19 @@ export const MOCK_SESSION_STATE: SessionStateSummary = {
   system_trading_window: "enabled",
   strategy_allowed: true,
   next_session_change_at: iso(-383),
+  calendar_spec_id: "always_on",
+  session_profile: "equity_us_regular",
+  session_authority: "configured_override",
+  session_profile_is_open: true,
+  session_profile_reason_code: "equity_regular_always_on_policy",
+  session_profile_message:
+    "Equity regular session profile displayed through the existing always-on daemon calendar policy.",
+  supported_session_profiles: [
+    "equity_us_regular",
+    "crypto_continuous",
+    "futures_globex",
+    "forex_24x5",
+  ],
   notes: ["Regular session active.", "Live routing disabled at environment layer.", "Exit-only override not engaged."],
 };
 

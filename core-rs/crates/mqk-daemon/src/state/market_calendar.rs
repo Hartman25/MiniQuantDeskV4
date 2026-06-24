@@ -627,6 +627,56 @@ impl MarketSessionProfile {
     }
 }
 
+/// Authority level for a session-profile status answer.
+///
+/// This is diagnostic metadata only. It is not consumed by any trading,
+/// admission, risk, broker, or runtime path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SessionAuthority {
+    /// Backed by a source that can truthfully answer for the requested profile.
+    Authoritative,
+    /// Known model or heuristic, but not a complete exchange-specific calendar.
+    Fallback,
+    /// Explicit operator/configured override rather than exchange calendar truth.
+    ConfiguredOverride,
+    /// No trustworthy answer is available.
+    Unavailable,
+}
+
+impl SessionAuthority {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Authoritative => "authoritative",
+            Self::Fallback => "fallback",
+            Self::ConfiguredOverride => "configured_override",
+            Self::Unavailable => "unavailable",
+        }
+    }
+}
+
+/// Read-only status for the active session profile.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionProfileStatus {
+    pub profile: MarketSessionProfile,
+    pub authority: SessionAuthority,
+    pub is_open: Option<bool>,
+    pub reason_code: &'static str,
+    pub message: &'static str,
+}
+
+/// Profiles that the current model can name.
+///
+/// Only `equity_us_regular` is wired into current session/trading behavior.
+/// The other entries are diagnostic/model-only scaffolds.
+pub fn supported_session_profiles() -> Vec<MarketSessionProfile> {
+    vec![
+        MarketSessionProfile::EquityUsRegular,
+        MarketSessionProfile::CryptoContinuous,
+        MarketSessionProfile::FuturesGlobex,
+        MarketSessionProfile::ForexWeekdayContinuous,
+    ]
+}
+
 /// Classify the US equity regular-session profile — ASSET-CORE-05A.
 ///
 /// Thin wrapper over [`MarketSessionState::to_venue_kind`] so callers can

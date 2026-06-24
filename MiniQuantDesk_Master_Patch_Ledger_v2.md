@@ -2553,3 +2553,15 @@ PORTFOLIO-LIVE-WEIGHTS-01
 **Validation:** GUI validation only: `npm test -- --run` and `npm run build` in `core-rs/mqk-gui`.
 
 **Relation to parent:** this closes the GUI placement partial from `ASSET-CORE-01D-REGISTRY-V2-STATUS-01-COMBINED`. Registry source health and disabled non-equity capability truth are now visible from the operator System/Status surface rather than relying on Backtest Results placement or API-only inspection.
+
+### ASSET-CORE-05-MARKET-CALENDAR-GENERALIZE-01-COMBINED — CLOSED_LOCAL / PARTIAL
+
+**Mission:** add truthful, read-only session-profile diagnostics on top of the existing ASSET-CORE-05A/05B market-calendar/session model without changing live/paper trading behavior, broker behavior, risk gates, OMS/outbox/inbox, portfolio accounting, DB schema, or autonomous startup behavior.
+
+**Built:** `mqk-daemon/src/state/market_calendar.rs` now has typed `SessionAuthority` (`authoritative`, `fallback`, `configured_override`, `unavailable`), `SessionProfileStatus`, and deterministic `supported_session_profiles()` over the repo-native profiles `equity_us_regular`, `crypto_continuous`, `futures_globex`, and `forex_24x5`. `/api/v1/system/session` gained additive fields: `session_profile`, `session_authority`, `session_profile_is_open`, `session_profile_reason_code`, `session_profile_message`, and `supported_session_profiles`. Current active behavior remains `equity_us_regular`; paper/backtest always-on calendar policy reports `configured_override`, while the current NYSE weekdays heuristic reports `fallback`.
+
+**GUI:** `Settings / Operations` now renders a read-only Session profile panel showing profile, authority, open truth, reason, message, and supported profile labels. No session-profile controls were added, and the GUI fields are optional for compatibility with older daemon responses.
+
+**Behavior unchanged:** existing `market_session`, `exchange_calendar_state`, and `calendar_spec_id` still come from the same `CalendarSpec` path as before. Autonomous readiness/session-window decisions still use the pre-existing `autonomous_session_schedule_from_env()` path with fixed UTC override when configured. The crypto/futures/FX profiles remain diagnostic/model-only scaffolds and are not used for admission, routing, broker submission, risk, OMS/outbox/inbox, portfolio accounting, or runtime startup.
+
+`ASSET-CORE-05` remains `PARTIAL`: this closes the read-only diagnostics slice, but true per-instrument session routing, authoritative non-equity calendars, maintenance-break modeling by product/exchange, and any use of non-equity profiles in trading/admission remain deliberately unwired.
