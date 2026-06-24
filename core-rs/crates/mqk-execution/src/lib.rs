@@ -31,7 +31,10 @@ pub use types::{
 // asset_class_scope: "equity_only" on /api/v1/system/status are the active
 // enforcement surfaces.  Do not wire V2 types into MAIN paths without a
 // dedicated scope-reviewed patch.
-pub use types::{equity_instrument, ExecutionIntentV2, OrderIntentV2};
+pub use types::{
+    equity_instrument, ExecutionIntentV2, IntentV2Contract, IntentV2Routability,
+    IntentV2Validation, OrderIntentV2,
+};
 
 // Price fixed-point helpers expected by testkit.
 pub use prices::{micros_to_price, price_to_micros, MICROS_PER_UNIT};

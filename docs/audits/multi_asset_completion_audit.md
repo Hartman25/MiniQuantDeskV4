@@ -621,3 +621,13 @@ GUI-SYSTEM-STATUS-SURFACE-01-COMBINED moved/surfaced the InstrumentRegistryV2 so
 Concretely: the repo already had `Settings / Operations` registered as an operator screen and left-rail target, rendering daemon endpoint and operations metadata. The read-only registry-v2 source status and asset capability matrix panels now live in `features/system/*` and render from that surface; Backtest Results no longer owns those unrelated status panels. The helper/tests still prove `not_configured`/`configured_valid`/`registry_unavailable`/`validation_failed` labels, unavailable/fail-closed rendering, and disabled non-equity capability truth. No daemon route, live/paper runtime, broker/provider, OMS/outbox/inbox, risk, portfolio, DB migration, or non-equity trading enablement changed.
 
 **Full detail, exact test names, and validation commands:** `MiniQuantDesk_Master_Patch_Ledger_v2.md`'s `GUI-SYSTEM-STATUS-SURFACE-01-COMBINED` entry (end of §19).
+
+## 36. ASSET-CORE-02-ORDER-INTENT-V2-FOUNDATION-01-COMBINED Closure Note (maintenance)
+
+ASSET-CORE-02-ORDER-INTENT-V2-FOUNDATION-01-COMBINED hardened the inert `OrderIntentV2` / `ExecutionIntentV2` scaffold with pure validation/routability helpers and model-level multi-asset fixtures. The v2 model remains research/foundation-only and is not wired to live or paper trading; non-equity remains disabled.
+
+Concretely: `OrderIntentV2` now carries additive v2-only model metadata for instrument identity, contract shape, order type/prices, time in force, strategy/source metadata, and research-only marking. `IntentV2Validation` separates structural validity from routability via `IntentV2Routability::{ResearchOnly, EquityRoutableCandidate, DisabledAssetClass, Invalid}`. Equity and ETF-as-equity fixtures validate as model-level candidates; crypto, future, option, and forex fixtures validate structurally but return disabled/not-routable. Invalid quantity and missing required price fixtures fail with explicit reason codes. A caller-supplied routing request flag cannot make disabled non-equity routable.
+
+No daemon/API/GUI status surface was added in this slice; the change stayed in `mqk-execution` model/tests plus docs. No broker adapter, runtime, OMS/outbox/inbox, risk, portfolio, DB migration, provider, registry trading path, or current equity lifecycle code was changed.
+
+**Full detail, exact test names, and validation commands:** `MiniQuantDesk_Master_Patch_Ledger_v2.md`'s `ASSET-CORE-02-ORDER-INTENT-V2-FOUNDATION-01-COMBINED` entry (end of §6).
