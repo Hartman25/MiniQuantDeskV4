@@ -23,6 +23,78 @@ pub struct RunManifest {
     pub host_fingerprint: String,
     pub created_at_utc: DateTime<Utc>,
     pub artifacts: ArtifactList,
+    /// BACKTEST-ECONOMICS-REGISTRY-MANIFEST-01: truthful economics metadata.
+    ///
+    /// Always written for new manifests (never silently omitted) -- see
+    /// [`ManifestEconomics`]. `#[serde(default)]` lets manifests written
+    /// before this field existed keep parsing: a missing key defaults to
+    /// [`ManifestEconomics::default_equity`], which is exactly the implicit
+    /// behavior every pre-existing manifest's run actually had.
+    #[serde(default)]
+    pub economics: ManifestEconomics,
+}
+
+/// Truthful backtest-economics metadata recorded on `manifest.json`.
+///
+/// BACKTEST-ECONOMICS-REGISTRY-MANIFEST-01: mirrors the economics already
+/// carried by `metrics.json` (see `EconomicsSection` below) so the manifest
+/// is self-describing without requiring a consumer to also read
+/// `metrics.json`. `source` is derived purely from whether the values equal
+/// the implicit default (multiplier=1, no margin) -- the same
+/// value-equality semantics as `BacktestInstrumentEconomics::is_default_equity`,
+/// not a record of operator intent.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ManifestEconomics {
+    pub contract_multiplier: i64,
+    #[serde(default)]
+    pub initial_margin_micros: Option<i64>,
+    #[serde(default)]
+    pub maintenance_margin_micros: Option<i64>,
+    pub margin_enforced: bool,
+    pub source: String,
+}
+
+impl ManifestEconomics {
+    /// Default equity economics: multiplier=1, no margin, not enforced.
+    ///
+    /// Used by [`init_run_artifacts`] (which has no backtest-specific
+    /// economics input -- it is shared by the live/paper run CLI too) and as
+    /// the `#[serde(default)]` fallback for manifests written before this
+    /// field existed.
+    pub fn default_equity() -> Self {
+        Self {
+            contract_multiplier: 1,
+            initial_margin_micros: None,
+            maintenance_margin_micros: None,
+            margin_enforced: false,
+            source: "default_equity".to_string(),
+        }
+    }
+
+    /// Build manifest economics from a backtest run's actual economics.
+    pub fn from_backtest_economics(economics: &mqk_backtest::BacktestEconomicsReport) -> Self {
+        let is_default = economics.contract_multiplier == 1
+            && economics.initial_margin_micros.is_none()
+            && economics.maintenance_margin_micros.is_none();
+        Self {
+            contract_multiplier: economics.contract_multiplier,
+            initial_margin_micros: economics.initial_margin_micros,
+            maintenance_margin_micros: economics.maintenance_margin_micros,
+            margin_enforced: economics.margin_enforced,
+            source: if is_default {
+                "default_equity"
+            } else {
+                "explicit_request"
+            }
+            .to_string(),
+        }
+    }
+}
+
+impl Default for ManifestEconomics {
+    fn default() -> Self {
+        Self::default_equity()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -103,6 +175,10 @@ pub fn init_run_artifacts(args: InitRunArtifactsArgs<'_>) -> Result<InitRunArtif
             equity_curve_csv: "equity_curve.csv".to_string(),
             metrics_json: "metrics.json".to_string(),
         },
+        // This function has no backtest-specific economics input (it is
+        // shared by the live/paper run CLI). Backtest callers correct this
+        // to the run's real economics via `write_backtest_report`.
+        economics: ManifestEconomics::default_equity(),
     };
 
     let manifest_path = run_dir.join("manifest.json");
@@ -1167,6 +1243,45 @@ pub fn write_backtest_report(
     fs::write(&report_md_path, report_md)
         .with_context(|| format!("write report.md failed: {}", report_md_path.display()))?;
 
+    // BACKTEST-ECONOMICS-REGISTRY-MANIFEST-01: correct manifest.json's
+    // economics block to this run's real economics. Skipped (not
+    // fabricated) when no manifest.json exists yet -- some callers in this
+    // crate's own tests write artifacts directly into a bare temp dir
+    // without first calling `init_run_artifacts`.
+    let manifest_path = run_dir.join("manifest.json");
+    if manifest_path.exists() {
+        merge_manifest_economics(
+            &manifest_path,
+            &ManifestEconomics::from_backtest_economics(&report.economics),
+        )
+        .with_context(|| format!("merge manifest economics failed: {}", manifest_path.display()))?;
+    }
+
+    Ok(())
+}
+
+/// Read-parse-merge-write `manifest.json`'s `economics` key in place.
+/// Additive only -- every other field `init_run_artifacts` (or a later
+/// provenance augmentation such as the daemon's md_bars source merge) wrote
+/// is left untouched.
+fn merge_manifest_economics(manifest_path: &Path, economics: &ManifestEconomics) -> Result<()> {
+    let raw = fs::read_to_string(manifest_path)
+        .with_context(|| format!("read manifest failed: {}", manifest_path.display()))?;
+    let mut value: serde_json::Value = serde_json::from_str(&raw)
+        .with_context(|| format!("parse manifest failed: {}", manifest_path.display()))?;
+    let obj = value.as_object_mut().with_context(|| {
+        format!(
+            "manifest.json is not a JSON object: {}",
+            manifest_path.display()
+        )
+    })?;
+    obj.insert(
+        "economics".to_string(),
+        serde_json::to_value(economics).context("serialize manifest economics failed")?,
+    );
+    let pretty = serde_json::to_string_pretty(&value).context("serialize manifest failed")?;
+    fs::write(manifest_path, format!("{pretty}\n"))
+        .with_context(|| format!("write manifest failed: {}", manifest_path.display()))?;
     Ok(())
 }
 
@@ -1888,5 +2003,142 @@ mod tests {
         assert!(v["final_equity_micros"].is_number());
 
         let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // -----------------------------------------------------------------------
+    // BACKTEST-ECONOMICS-REGISTRY-MANIFEST-01: manifest.json economics tests
+    // -----------------------------------------------------------------------
+
+    /// Run `init_run_artifacts` then `write_backtest_report` for `report` into
+    /// a fresh temp dir, then read back and parse the resulting manifest.json.
+    fn init_and_write_manifest(tag: &str, report: &BacktestReport) -> (PathBuf, RunManifest) {
+        let tmp = std::env::temp_dir().join(format!("mqk_art_test_mre_{}_{}", tag, std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp);
+
+        let init = init_run_artifacts(InitRunArtifactsArgs {
+            exports_root: &tmp,
+            schema_version: 1,
+            run_id: report.run_id,
+            strategy_name: &report.strategy_name,
+            engine_id: "mqk-backtest",
+            mode: "backtest",
+            timeframe: None,
+            timeframe_secs: Some(60),
+            git_hash: "test",
+            config_hash: &report.config_id.to_string(),
+            host_fingerprint: "test-host",
+            now_utc: Utc::now(), // allow: test-only manifest timestamp
+        })
+        .expect("init_run_artifacts must succeed");
+
+        write_backtest_report(&init.run_dir, report, 1_000_000_000)
+            .expect("write_backtest_report must succeed");
+
+        let manifest_json =
+            std::fs::read_to_string(&init.manifest_path).expect("manifest.json must be readable");
+        let manifest: RunManifest =
+            serde_json::from_str(&manifest_json).expect("manifest.json must parse as RunManifest");
+
+        (init.run_dir, manifest)
+    }
+
+    /// MRE-01: a default (equity) report writes truthful default_equity
+    /// economics into manifest.json.
+    #[test]
+    fn mre01_manifest_default_equity_economics_is_truthful() {
+        let report = test_report_with_orders();
+        let (run_dir, manifest) = init_and_write_manifest("mre01", &report);
+
+        assert_eq!(manifest.economics.contract_multiplier, 1);
+        assert_eq!(manifest.economics.initial_margin_micros, None);
+        assert_eq!(manifest.economics.maintenance_margin_micros, None);
+        assert!(!manifest.economics.margin_enforced);
+        assert_eq!(manifest.economics.source, "default_equity");
+
+        let _ = std::fs::remove_dir_all(run_dir.parent().unwrap_or(&run_dir));
+    }
+
+    /// MRE-02: an explicit multiplier=50 report writes truthful explicit
+    /// economics into manifest.json (source="explicit_request").
+    #[test]
+    fn mre02_manifest_explicit_multiplier_50_economics_is_truthful() {
+        let mut report = test_report_with_orders();
+        report.run_id = Uuid::new_v5(&Uuid::from_bytes([4u8; 16]), b"mre02");
+        report.economics = mqk_backtest::BacktestEconomicsReport {
+            contract_multiplier: 50,
+            initial_margin_micros: None,
+            maintenance_margin_micros: None,
+            realized_pnl_micros: 12_345,
+            margin_enforced: false,
+        };
+        let (run_dir, manifest) = init_and_write_manifest("mre02", &report);
+
+        assert_eq!(manifest.economics.contract_multiplier, 50);
+        assert!(!manifest.economics.margin_enforced);
+        assert_eq!(manifest.economics.source, "explicit_request");
+
+        let _ = std::fs::remove_dir_all(run_dir.parent().unwrap_or(&run_dir));
+    }
+
+    /// MRE-03: margin metadata reaches manifest.json truthfully, and
+    /// margin_enforced stays false -- the margin scaffold is never enforced.
+    #[test]
+    fn mre03_manifest_margin_metadata_is_truthful_with_margin_not_enforced() {
+        let mut report = test_report_with_orders();
+        report.run_id = Uuid::new_v5(&Uuid::from_bytes([5u8; 16]), b"mre03");
+        report.economics = mqk_backtest::BacktestEconomicsReport {
+            contract_multiplier: 50,
+            initial_margin_micros: Some(10_000_000_000),
+            maintenance_margin_micros: Some(5_000_000_000),
+            realized_pnl_micros: 0,
+            margin_enforced: false,
+        };
+        let (run_dir, manifest) = init_and_write_manifest("mre03", &report);
+
+        assert_eq!(manifest.economics.contract_multiplier, 50);
+        assert_eq!(manifest.economics.initial_margin_micros, Some(10_000_000_000));
+        assert_eq!(
+            manifest.economics.maintenance_margin_micros,
+            Some(5_000_000_000)
+        );
+        assert!(
+            !manifest.economics.margin_enforced,
+            "margin metadata must never claim enforcement"
+        );
+        assert_eq!(manifest.economics.source, "explicit_request");
+
+        let _ = std::fs::remove_dir_all(run_dir.parent().unwrap_or(&run_dir));
+    }
+
+    /// MRE-04: a minimal manifest.json written before this field existed (no
+    /// `economics` key at all) still parses, defaulting to default_equity --
+    /// never a parse failure, never a fabricated non-default value.
+    #[test]
+    fn mre04_old_manifest_without_economics_still_parses_with_default() {
+        let old_manifest_json = serde_json::json!({
+            "schema_version": 1,
+            "run_id": "00000000-0000-0000-0000-000000000000",
+            "strategy_name": "legacy",
+            "engine_id": "mqk-backtest",
+            "mode": "backtest",
+            "git_hash": "deadbeef",
+            "config_hash": "cafef00d",
+            "host_fingerprint": "old-host",
+            "created_at_utc": "2026-01-01T00:00:00Z",
+            "artifacts": {
+                "audit_jsonl": "audit.jsonl",
+                "manifest_json": "manifest.json",
+                "orders_csv": "orders.csv",
+                "fills_csv": "fills.csv",
+                "equity_curve_csv": "equity_curve.csv",
+                "metrics_json": "metrics.json"
+            }
+        })
+        .to_string();
+
+        let manifest: RunManifest = serde_json::from_str(&old_manifest_json)
+            .expect("manifest.json without economics must still parse");
+
+        assert_eq!(manifest.economics, ManifestEconomics::default_equity());
     }
 }

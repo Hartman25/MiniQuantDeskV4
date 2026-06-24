@@ -220,6 +220,20 @@ function ManifestSection({ manifest }: { manifest: BacktestManifest }) {
           <span>Host</span>
           <strong className="bt-mono-wrap" style={{ fontSize: "0.82rem" }}>{manifest.host_fingerprint ?? "—"}</strong>
         </div>
+        <div>
+          <span>Contract multiplier</span>
+          <strong>{manifest.economics?.contract_multiplier ?? "not reported"}</strong>
+        </div>
+        <div>
+          <span>Margin enforced</span>
+          <strong>
+            {manifest.economics?.margin_enforced == null
+              ? "not reported"
+              : manifest.economics.margin_enforced
+                ? "true"
+                : "false"}
+          </strong>
+        </div>
         {isMdBars && (
           <>
             <div>

@@ -115,6 +115,32 @@ pub struct InstrumentDefinitionV2 {
     /// explicit, deliberate gate rather than an accidental omission.
     #[serde(default)]
     pub allow_enabled_non_equity_for_testing: bool,
+    /// BACKTEST-ECONOMICS-REGISTRY-MANIFEST-01: optional backtest-economics
+    /// metadata (contract multiplier + margin scaffold). Metadata only — see
+    /// [`InstrumentEconomicsMetadataV2`]. Never read by any trading/execution
+    /// path; never enables or implies enablement of any asset class.
+    #[serde(default)]
+    pub economics: Option<InstrumentEconomicsMetadataV2>,
+}
+
+/// Backtest-economics metadata for a registry-v2 instrument: contract
+/// multiplier + optional margin scaffold.
+///
+/// Mirrors `mqk_backtest::BacktestInstrumentEconomics`'s shape without
+/// introducing a dependency on `mqk-backtest` from `mqk-md` (consistent with
+/// this module's existing no-new-Cargo-dependency precedent). Metadata only:
+/// nothing in this module enforces margin or reads this to gate, block, or
+/// route any order. `contract_multiplier` is `Option` (rather than the
+/// always-positive `i64` on the backtest-side type) so an instrument can
+/// omit it entirely rather than a caller fabricating a value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InstrumentEconomicsMetadataV2 {
+    #[serde(default)]
+    pub contract_multiplier: Option<i64>,
+    #[serde(default)]
+    pub initial_margin_micros: Option<i64>,
+    #[serde(default)]
+    pub maintenance_margin_micros: Option<i64>,
 }
 
 /// Contract details for non-spot / derivative instruments.
@@ -280,6 +306,8 @@ pub fn validate_registry_v2(registry: &InstrumentRegistryV2) -> Result<()> {
             &inst.symbol,
         )?;
 
+        validate_economics_v2(&inst.economics, &inst.symbol)?;
+
         if inst.enabled
             && inst.asset_class != "equity"
             && !inst.allow_enabled_non_equity_for_testing
@@ -430,6 +458,106 @@ fn validate_contract_v2(
     }
 }
 
+/// Validate one instrument's optional backtest-economics metadata. Called
+/// only from [`validate_registry_v2`]. Metadata-only: this never checks
+/// `enabled`/asset class -- any instrument, equity or not, may carry
+/// `economics`.
+fn validate_economics_v2(economics: &Option<InstrumentEconomicsMetadataV2>, symbol: &str) -> Result<()> {
+    let Some(econ) = economics else {
+        return Ok(());
+    };
+    if let Some(multiplier) = econ.contract_multiplier {
+        if multiplier <= 0 {
+            anyhow::bail!(
+                "instrument_registry_v2: economics.contract_multiplier must be positive for symbol={symbol}, got {multiplier}"
+            );
+        }
+    }
+    if let Some(margin) = econ.initial_margin_micros {
+        if margin < 0 {
+            anyhow::bail!(
+                "instrument_registry_v2: economics.initial_margin_micros must be non-negative for symbol={symbol}, got {margin}"
+            );
+        }
+    }
+    if let Some(margin) = econ.maintenance_margin_micros {
+        if margin < 0 {
+            anyhow::bail!(
+                "instrument_registry_v2: economics.maintenance_margin_micros must be non-negative for symbol={symbol}, got {margin}"
+            );
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// BACKTEST-ECONOMICS-REGISTRY-MANIFEST-01: read-only backtest economics
+// suggestion helper
+// ---------------------------------------------------------------------------
+
+/// Read-only backtest-economics suggestion derived from one v2 instrument
+/// definition. Pure; no IO; never reads `enabled`, `paper_trading_enabled`,
+/// or `live_trading_enabled` -- this has no bearing on, and never implies,
+/// trading enablement for any asset class.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BacktestEconomicsSuggestionV2 {
+    /// `"active"` or `"no_contract_economics"`.
+    pub truth_state: &'static str,
+    pub contract_multiplier: Option<i64>,
+    pub initial_margin_micros: Option<i64>,
+    pub maintenance_margin_micros: Option<i64>,
+    pub reason: &'static str,
+}
+
+/// Suggest backtest economics for `inst`:
+///
+/// 1. Explicit `inst.economics.contract_multiplier` wins when present --
+///    `"active"`, `reason="registry_v2_explicit"`, regardless of asset class.
+/// 2. Otherwise, equity/ETF instruments (no contract, or `Equity`/`Etf`) fall
+///    back to the implicit default -- `"active"`, multiplier=1, no margin,
+///    `reason="equity_default"` -- matching
+///    `mqk_backtest::BacktestInstrumentEconomics::equity()`.
+/// 3. Otherwise, `"no_contract_economics"` -- truthfully reports that no
+///    economics metadata is available rather than fabricating a multiplier.
+pub fn backtest_economics_suggestion_for_instrument(
+    inst: &InstrumentDefinitionV2,
+) -> BacktestEconomicsSuggestionV2 {
+    if let Some(econ) = &inst.economics {
+        if let Some(multiplier) = econ.contract_multiplier {
+            return BacktestEconomicsSuggestionV2 {
+                truth_state: "active",
+                contract_multiplier: Some(multiplier),
+                initial_margin_micros: econ.initial_margin_micros,
+                maintenance_margin_micros: econ.maintenance_margin_micros,
+                reason: "registry_v2_explicit",
+            };
+        }
+    }
+
+    let is_equity_like = inst.asset_class == "equity"
+        && matches!(
+            inst.contract,
+            None | Some(ContractDefinitionV2::Equity) | Some(ContractDefinitionV2::Etf)
+        );
+    if is_equity_like {
+        return BacktestEconomicsSuggestionV2 {
+            truth_state: "active",
+            contract_multiplier: Some(1),
+            initial_margin_micros: None,
+            maintenance_margin_micros: None,
+            reason: "equity_default",
+        };
+    }
+
+    BacktestEconomicsSuggestionV2 {
+        truth_state: "no_contract_economics",
+        contract_multiplier: None,
+        initial_margin_micros: None,
+        maintenance_margin_micros: None,
+        reason: "registry has no supported equity contract economics and no explicit economics metadata",
+    }
+}
+
 /// Convert one v1 `TrackedInstrument` into its v2 shape. Pure; no IO; does not
 /// mutate or read from `input` beyond field access. `provider_symbols` carries
 /// exactly the one provider identity v1 already proves (`provider` ->
@@ -471,6 +599,10 @@ pub fn convert_tracked_instrument_to_v2(input: &TrackedInstrument) -> Instrument
             Some(input.notes.clone())
         },
         allow_enabled_non_equity_for_testing: false,
+        // v1 has no multiplier/margin data — leave economics unset rather
+        // than fabricating a value. The equity-default fallback in
+        // `backtest_economics_suggestion_for_instrument` covers this case.
+        economics: None,
     }
 }
 
@@ -512,6 +644,7 @@ mod tests {
             metadata: InstrumentMetadataV2::default(),
             notes: None,
             allow_enabled_non_equity_for_testing: false,
+            economics: None,
         }
     }
 
@@ -552,6 +685,7 @@ mod tests {
             metadata: InstrumentMetadataV2::default(),
             notes: Some("backlog fixture; not enabled".to_string()),
             allow_enabled_non_equity_for_testing: false,
+            economics: None,
         }
     }
 
@@ -579,6 +713,7 @@ mod tests {
             metadata: InstrumentMetadataV2::default(),
             notes: Some("backlog fixture; not enabled".to_string()),
             allow_enabled_non_equity_for_testing: false,
+            economics: None,
         }
     }
 
@@ -603,6 +738,7 @@ mod tests {
             metadata: InstrumentMetadataV2::default(),
             notes: Some("backlog fixture; not enabled".to_string()),
             allow_enabled_non_equity_for_testing: false,
+            economics: None,
         }
     }
 
@@ -627,6 +763,7 @@ mod tests {
             metadata: InstrumentMetadataV2::default(),
             notes: Some("backlog fixture; not enabled".to_string()),
             allow_enabled_non_equity_for_testing: false,
+            economics: None,
         }
     }
 
@@ -1128,5 +1265,203 @@ mod tests {
             assert!(!inst.paper_trading_enabled, "symbol={}", inst.symbol);
             assert!(!inst.live_trading_enabled, "symbol={}", inst.symbol);
         }
+    }
+
+    // ── BACKTEST-ECONOMICS-REGISTRY-MANIFEST-01: economics metadata ────────
+
+    fn with_economics(
+        mut inst: InstrumentDefinitionV2,
+        economics: InstrumentEconomicsMetadataV2,
+    ) -> InstrumentDefinitionV2 {
+        inst.economics = Some(economics);
+        inst
+    }
+
+    // ECON-01: a valid positive contract_multiplier validates cleanly.
+    #[test]
+    fn econ01_valid_contract_multiplier_validates() {
+        let inst = with_economics(
+            base_equity("AAPL"),
+            InstrumentEconomicsMetadataV2 {
+                contract_multiplier: Some(1),
+                initial_margin_micros: None,
+                maintenance_margin_micros: None,
+            },
+        );
+        validate_registry_v2(&registry_of(vec![inst]))
+            .expect("positive contract_multiplier must validate");
+    }
+
+    // ECON-02: contract_multiplier <= 0 fails validation, for both zero and negative.
+    #[test]
+    fn econ02_non_positive_contract_multiplier_fails() {
+        for bad in [0i64, -1, -50] {
+            let inst = with_economics(
+                base_equity("AAPL"),
+                InstrumentEconomicsMetadataV2 {
+                    contract_multiplier: Some(bad),
+                    initial_margin_micros: None,
+                    maintenance_margin_micros: None,
+                },
+            );
+            let err = validate_registry_v2(&registry_of(vec![inst])).unwrap_err();
+            assert!(
+                err.to_string().contains("economics.contract_multiplier must be positive"),
+                "multiplier={bad} message={err}"
+            );
+        }
+    }
+
+    // ECON-03: negative margin metadata fails validation (both fields, independently).
+    #[test]
+    fn econ03_negative_margin_metadata_fails() {
+        let with_initial = with_economics(
+            base_equity("AAPL"),
+            InstrumentEconomicsMetadataV2 {
+                contract_multiplier: Some(1),
+                initial_margin_micros: Some(-1),
+                maintenance_margin_micros: None,
+            },
+        );
+        let err = validate_registry_v2(&registry_of(vec![with_initial])).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("economics.initial_margin_micros must be non-negative"));
+
+        let mut with_maintenance = base_equity("MSFT");
+        with_maintenance.instrument_id = "equity:US:MSFT".to_string();
+        let with_maintenance = with_economics(
+            with_maintenance,
+            InstrumentEconomicsMetadataV2 {
+                contract_multiplier: Some(1),
+                initial_margin_micros: None,
+                maintenance_margin_micros: Some(-1),
+            },
+        );
+        let err = validate_registry_v2(&registry_of(vec![with_maintenance])).unwrap_err();
+        assert!(err
+            .to_string()
+            .contains("economics.maintenance_margin_micros must be non-negative"));
+    }
+
+    // ECON-04: zero-valued margins are non-negative and validate cleanly.
+    #[test]
+    fn econ04_zero_margins_validate() {
+        let inst = with_economics(
+            base_equity("AAPL"),
+            InstrumentEconomicsMetadataV2 {
+                contract_multiplier: Some(1),
+                initial_margin_micros: Some(0),
+                maintenance_margin_micros: Some(0),
+            },
+        );
+        validate_registry_v2(&registry_of(vec![inst])).expect("zero margins must validate");
+    }
+
+    // ECON-05: absent economics (None) is always valid -- metadata is opt-in.
+    #[test]
+    fn econ05_absent_economics_is_valid() {
+        for inst in [
+            base_equity("AAPL"),
+            base_future("ES2026U"),
+            base_option("AAPL20260918C150"),
+            base_crypto("BTC/USD"),
+            base_forex("EUR/USD"),
+        ] {
+            assert_eq!(inst.economics, None);
+        }
+        validate_registry_v2(&registry_of(vec![base_equity("AAPL")]))
+            .expect("absent economics must validate");
+    }
+
+    // ── BACKTEST-ECONOMICS-REGISTRY-MANIFEST-01: suggestion helper ──────────
+
+    // SUG-01: explicit registry-v2 economics on a non-equity fixture wins
+    // truth_state="active" with the explicit multiplier/margins, even though
+    // no production non-equity registry data exists today (this proves the
+    // helper, not a wired production path -- see module docs).
+    #[test]
+    fn sug01_explicit_economics_on_non_equity_fixture_returns_active() {
+        let inst = with_economics(
+            base_future("ES2026U"),
+            InstrumentEconomicsMetadataV2 {
+                contract_multiplier: Some(50),
+                initial_margin_micros: Some(500_000_000),
+                maintenance_margin_micros: Some(400_000_000),
+            },
+        );
+        let suggestion = backtest_economics_suggestion_for_instrument(&inst);
+        assert_eq!(suggestion.truth_state, "active");
+        assert_eq!(suggestion.contract_multiplier, Some(50));
+        assert_eq!(suggestion.initial_margin_micros, Some(500_000_000));
+        assert_eq!(suggestion.maintenance_margin_micros, Some(400_000_000));
+        assert_eq!(suggestion.reason, "registry_v2_explicit");
+    }
+
+    // SUG-02: explicit economics on an equity instrument also wins over the
+    // equity-default fallback (explicit always takes precedence).
+    #[test]
+    fn sug02_explicit_economics_on_equity_overrides_default() {
+        let inst = with_economics(
+            base_equity("AAPL"),
+            InstrumentEconomicsMetadataV2 {
+                contract_multiplier: Some(5),
+                initial_margin_micros: None,
+                maintenance_margin_micros: None,
+            },
+        );
+        let suggestion = backtest_economics_suggestion_for_instrument(&inst);
+        assert_eq!(suggestion.truth_state, "active");
+        assert_eq!(suggestion.contract_multiplier, Some(5));
+        assert_eq!(suggestion.reason, "registry_v2_explicit");
+    }
+
+    // SUG-03: equity/ETF instruments with no explicit economics fall back to
+    // the truthful equity default (multiplier=1, no margin).
+    #[test]
+    fn sug03_equity_and_etf_without_explicit_economics_default_to_multiplier_one() {
+        for inst in [base_equity("AAPL"), base_etf("SPY")] {
+            let suggestion = backtest_economics_suggestion_for_instrument(&inst);
+            assert_eq!(suggestion.truth_state, "active", "symbol={}", inst.symbol);
+            assert_eq!(suggestion.contract_multiplier, Some(1), "symbol={}", inst.symbol);
+            assert_eq!(suggestion.initial_margin_micros, None);
+            assert_eq!(suggestion.maintenance_margin_micros, None);
+            assert_eq!(suggestion.reason, "equity_default");
+        }
+    }
+
+    // SUG-04: non-equity instruments without explicit economics truthfully
+    // report no_contract_economics -- never a fabricated multiplier.
+    #[test]
+    fn sug04_non_equity_without_explicit_economics_reports_no_contract_economics() {
+        for inst in [
+            base_future("ES2026U"),
+            base_option("AAPL20260918C150"),
+            base_crypto("BTC/USD"),
+            base_forex("EUR/USD"),
+        ] {
+            let suggestion = backtest_economics_suggestion_for_instrument(&inst);
+            assert_eq!(
+                suggestion.truth_state, "no_contract_economics",
+                "symbol={}",
+                inst.symbol
+            );
+            assert_eq!(suggestion.contract_multiplier, None);
+        }
+    }
+
+    // SUG-05: the suggestion helper never reads enabled/paper/live trading
+    // flags -- proven by flipping them and observing no change in output.
+    #[test]
+    fn sug05_suggestion_ignores_enablement_flags() {
+        let mut inst = base_equity("AAPL");
+        let baseline = backtest_economics_suggestion_for_instrument(&inst);
+
+        inst.enabled = false;
+        inst.paper_trading_enabled = true;
+        inst.live_trading_enabled = true;
+        let flipped = backtest_economics_suggestion_for_instrument(&inst);
+
+        assert_eq!(baseline, flipped);
     }
 }

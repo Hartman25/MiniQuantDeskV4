@@ -346,6 +346,96 @@ fn backtest_csv_economics_margin_only_defaults_multiplier_one() -> anyhow::Resul
     Ok(())
 }
 
+/// BACKTEST-ECONOMICS-REGISTRY-MANIFEST-01: no economics flags -> manifest.json
+/// carries truthful default_equity economics (mirrors metrics.json).
+#[test]
+fn backtest_csv_economics_default_manifest_is_truthful() -> anyhow::Result<()> {
+    let bars = write_bars_csv("becli08")?;
+    let bars_s = bars.to_string_lossy().to_string();
+    let out_dir = fresh_out_dir("becli08");
+    let out_dir_s = out_dir.to_string_lossy().to_string();
+
+    let stdout = run_cli_ok(&[
+        "backtest",
+        "csv",
+        "--bars",
+        &bars_s,
+        "--strategy",
+        "intraday_scalper",
+        "--symbol",
+        "AAPL",
+        "--timeframe-secs",
+        "300",
+        "--out-dir",
+        &out_dir_s,
+    ])?;
+
+    let run_dir = extract_artifacts_dir(&stdout);
+    let manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(run_dir.join("manifest.json"))?)?;
+    let econ = &manifest["economics"];
+    assert_eq!(econ["contract_multiplier"], 1);
+    assert!(econ["initial_margin_micros"].is_null());
+    assert!(econ["maintenance_margin_micros"].is_null());
+    assert_eq!(econ["margin_enforced"], false);
+    assert_eq!(econ["source"], "default_equity");
+
+    Ok(())
+}
+
+/// BACKTEST-ECONOMICS-REGISTRY-MANIFEST-01: --contract-multiplier 50 reaches
+/// manifest.json (not just metrics.json/report.md).
+#[test]
+fn backtest_csv_economics_multiplier_50_reaches_manifest() -> anyhow::Result<()> {
+    let bars = write_bars_csv("becli09")?;
+    let bars_s = bars.to_string_lossy().to_string();
+    let out_dir = fresh_out_dir("becli09");
+    let out_dir_s = out_dir.to_string_lossy().to_string();
+
+    let stdout = run_cli_ok(&[
+        "backtest",
+        "csv",
+        "--bars",
+        &bars_s,
+        "--strategy",
+        "intraday_scalper",
+        "--symbol",
+        "AAPL",
+        "--timeframe-secs",
+        "300",
+        "--contract-multiplier",
+        "50",
+        "--initial-margin-micros",
+        "10000000000",
+        "--maintenance-margin-micros",
+        "5000000000",
+        "--out-dir",
+        &out_dir_s,
+    ])?;
+
+    let run_dir = extract_artifacts_dir(&stdout);
+    let manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(run_dir.join("manifest.json"))?)?;
+    let econ = &manifest["economics"];
+    assert_eq!(econ["contract_multiplier"], 50);
+    assert_eq!(econ["initial_margin_micros"], 10_000_000_000i64);
+    assert_eq!(econ["maintenance_margin_micros"], 5_000_000_000i64);
+    assert_eq!(
+        econ["margin_enforced"], false,
+        "margin metadata must never claim enforcement"
+    );
+    assert_eq!(econ["source"], "explicit_request");
+
+    // metrics.json/report.md must carry the same economics, unregressed.
+    let metrics: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(run_dir.join("metrics.json"))?)?;
+    assert_eq!(metrics["economics"]["contract_multiplier"], 50);
+    let report_md = std::fs::read_to_string(run_dir.join("report.md"))?;
+    assert!(report_md.contains("Contract Multiplier | 50"));
+
+    Ok(())
+}
+
 /// Parses the `artifacts_dir=<path>` line that `run_backtest_csv` prints to stdout.
 fn extract_artifacts_dir(stdout: &str) -> PathBuf {
     for line in stdout.lines() {

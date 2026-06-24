@@ -371,6 +371,44 @@ test("parseManifest leaves md_bars provenance fields undefined for a csv-sourced
   assert.equal(manifest.bar_count, undefined);
 });
 
+// --- parseManifest: BACKTEST-ECONOMICS-REGISTRY-MANIFEST-01 economics passthrough ---
+
+test("parseManifest passes through economics when present", () => {
+  const json = JSON.stringify({
+    schema_version: 1,
+    run_id: "abc-123",
+    strategy_name: "swing_momentum",
+    engine_id: "mqk-backtest",
+    mode: "backtest",
+    created_at_utc: "2026-05-01T12:00:00Z",
+    economics: {
+      contract_multiplier: 50,
+      initial_margin_micros: 10_000_000_000,
+      maintenance_margin_micros: 5_000_000_000,
+      margin_enforced: false,
+      source: "explicit_request",
+    },
+  });
+  const manifest = parseManifest(json);
+  assert.equal(manifest.economics?.contract_multiplier, 50);
+  assert.equal(manifest.economics?.initial_margin_micros, 10_000_000_000);
+  assert.equal(manifest.economics?.maintenance_margin_micros, 5_000_000_000);
+  assert.equal(manifest.economics?.margin_enforced, false);
+});
+
+test("parseManifest leaves economics undefined for an old manifest without it", () => {
+  const json = JSON.stringify({
+    schema_version: 1,
+    run_id: "abc-123",
+    strategy_name: "swing_momentum",
+    engine_id: "mqk-backtest",
+    mode: "backtest",
+    created_at_utc: "2026-05-01T12:00:00Z",
+  });
+  const manifest = parseManifest(json);
+  assert.equal(manifest.economics, undefined, "old manifests carry no economics field — absence is not multiplier=1");
+});
+
 // --- timeframeLabelFromSecs (mirrors Rust timeframe_from_secs) ---
 
 test("timeframeLabelFromSecs maps the canonical bar intervals", () => {

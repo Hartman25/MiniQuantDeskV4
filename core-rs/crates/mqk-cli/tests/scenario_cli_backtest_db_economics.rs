@@ -332,6 +332,64 @@ async fn backtest_db_economics_margin_metadata_not_enforced() -> anyhow::Result<
 }
 
 // ---------------------------------------------------------------------------
+// BACKTEST-ECONOMICS-REGISTRY-MANIFEST-01: --contract-multiplier 50 reaches
+// manifest.json via the DB-backed entry point too.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn backtest_db_economics_multiplier_50_reaches_manifest() -> anyhow::Result<()> {
+    let Some(pool) = maybe_pool().await else {
+        return Ok(());
+    };
+    let db_url = std::env::var(mqk_db::ENV_DB_URL).expect("set, just checked by maybe_pool");
+
+    let symbol = unique_symbol("manifest");
+    delete_test_bars(&pool, &symbol).await;
+    seed_three_bars(&pool, &symbol, "5m").await?;
+
+    let out_dir = fresh_out_dir("dbecon_manifest");
+    let out_dir_s = out_dir.to_string_lossy().to_string();
+
+    let result = run_cli_ok(
+        &[
+            "backtest",
+            "db",
+            "--timeframe",
+            "5m",
+            "--start-end-ts",
+            "1700000000",
+            "--end-end-ts",
+            "1700001000",
+            "--symbols",
+            &symbol,
+            "--strategy",
+            "intraday_scalper",
+            "--symbol",
+            &symbol,
+            "--timeframe-secs",
+            "300",
+            "--contract-multiplier",
+            "50",
+            "--out-dir",
+            &out_dir_s,
+        ],
+        &db_url,
+    );
+    delete_test_bars(&pool, &symbol).await;
+    let stdout = result?;
+
+    let run_dir = extract_artifacts_dir(&stdout);
+    let manifest: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(run_dir.join("manifest.json"))?)?;
+    let econ = &manifest["economics"];
+    assert_eq!(econ["contract_multiplier"], 50);
+    assert_eq!(econ["margin_enforced"], false);
+    assert_eq!(econ["source"], "explicit_request");
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // No DB required: invalid multiplier fails closed before any DB connect
 // or artifact directory is created.
 // ---------------------------------------------------------------------------

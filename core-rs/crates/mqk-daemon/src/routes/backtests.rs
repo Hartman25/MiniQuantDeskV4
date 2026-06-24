@@ -23,7 +23,6 @@ use axum::{
     Json,
 };
 use chrono::{DateTime, Utc};
-use mqk_md::instrument_registry_v2::ContractDefinitionV2;
 use serde::Deserialize;
 use uuid::Uuid;
 
@@ -478,6 +477,8 @@ pub(crate) async fn backtest_economics_suggestion(
                 "error",
                 requested_symbol,
                 None,
+                None,
+                None,
                 Some("symbol is required".to_string()),
             )),
         )
@@ -489,6 +490,8 @@ pub(crate) async fn backtest_economics_suggestion(
         return Json(backtest_economics_suggestion_response(
             "registry_unavailable",
             requested_symbol,
+            None,
+            None,
             None,
             Some("instrument registry path is unavailable".to_string()),
         ))
@@ -503,6 +506,8 @@ pub(crate) async fn backtest_economics_suggestion(
                 "registry_unavailable",
                 requested_symbol,
                 None,
+                None,
+                None,
                 Some(format!("v1 registry load failed: {err}")),
             ))
             .into_response();
@@ -514,6 +519,8 @@ pub(crate) async fn backtest_economics_suggestion(
         return Json(backtest_economics_suggestion_response(
             "registry_unavailable",
             requested_symbol,
+            None,
+            None,
             None,
             Some(format!("v2 registry validation failed: {err}")),
         ))
@@ -529,48 +536,41 @@ pub(crate) async fn backtest_economics_suggestion(
             "not_found",
             requested_symbol,
             None,
+            None,
+            None,
             Some("symbol not found in instrument registry".to_string()),
         ))
         .into_response();
     };
 
-    if instrument.asset_class != "equity" {
-        return Json(backtest_economics_suggestion_response(
-            "unsupported",
-            &instrument.symbol,
-            None,
-            Some(
-                "non-equity registry entries are not supported for backtest economics suggestions"
-                    .to_string(),
-            ),
-        ))
-        .into_response();
-    }
-
-    match &instrument.contract {
-        None | Some(ContractDefinitionV2::Equity) | Some(ContractDefinitionV2::Etf) => {
-            Json(backtest_economics_suggestion_response(
-                "active",
-                &instrument.symbol,
-                Some(1),
-                Some("equity_default".to_string()),
-            ))
-            .into_response()
-        }
-        Some(_) => Json(backtest_economics_suggestion_response(
-            "no_contract_economics",
-            &instrument.symbol,
-            None,
-            Some("registry has no supported equity contract economics".to_string()),
-        ))
-        .into_response(),
-    }
+    // BACKTEST-ECONOMICS-REGISTRY-MANIFEST-01: explicit registry-v2 economics
+    // (when present) wins over the equity-default fallback, for any asset
+    // class. Today's only data path here is the converted v1 registry
+    // (equity/ETF only, never carries `economics`), so this only ever
+    // exercises the equity-default branch in production -- see
+    // `backtest_economics_suggestion_for_instrument`'s own tests for the
+    // explicit-economics proof via a fixture instrument.
+    let suggestion = mqk_md::instrument_registry_v2::backtest_economics_suggestion_for_instrument(
+        instrument,
+    );
+    Json(backtest_economics_suggestion_response(
+        suggestion.truth_state,
+        &instrument.symbol,
+        suggestion.contract_multiplier,
+        suggestion.initial_margin_micros,
+        suggestion.maintenance_margin_micros,
+        Some(suggestion.reason.to_string()),
+    ))
+    .into_response()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn backtest_economics_suggestion_response(
     truth_state: &str,
     symbol: &str,
     contract_multiplier: Option<i64>,
+    initial_margin_micros: Option<i64>,
+    maintenance_margin_micros: Option<i64>,
     reason: Option<String>,
 ) -> BacktestEconomicsSuggestionResponse {
     BacktestEconomicsSuggestionResponse {
@@ -578,8 +578,8 @@ fn backtest_economics_suggestion_response(
         symbol: symbol.to_string(),
         source: "instrument_registry_v2".to_string(),
         contract_multiplier,
-        initial_margin_micros: None,
-        maintenance_margin_micros: None,
+        initial_margin_micros,
+        maintenance_margin_micros,
         reason,
     }
 }

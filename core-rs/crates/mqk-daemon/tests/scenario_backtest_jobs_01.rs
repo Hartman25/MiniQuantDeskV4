@@ -129,6 +129,13 @@ fn read_metrics_json(artifact_dir: &str) -> serde_json::Value {
     serde_json::from_str(&raw).expect("metrics.json must be valid JSON")
 }
 
+fn read_manifest_json(artifact_dir: &str) -> serde_json::Value {
+    let manifest_path = std::path::Path::new(artifact_dir).join("manifest.json");
+    assert!(manifest_path.exists(), "manifest.json must exist");
+    let raw = std::fs::read_to_string(&manifest_path).expect("manifest.json must be readable");
+    serde_json::from_str(&raw).expect("manifest.json must be valid JSON")
+}
+
 fn read_report_md(artifact_dir: &str) -> String {
     let report_path = std::path::Path::new(artifact_dir).join("report.md");
     assert!(report_path.exists(), "report.md must exist");
@@ -644,6 +651,130 @@ async fn bj13_economics_request_writes_multiplier_and_margin_metadata() {
     assert!(report_md.contains("| Initial Margin | $500.00 |"));
     assert!(report_md.contains("| Maintenance Margin | $400.00 |"));
     assert!(report_md.contains("| Margin Enforced | false |"));
+}
+
+// ---------------------------------------------------------------------------
+// BJ-15: omitted economics writes default_equity economics into manifest.json
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn bj15_no_economics_request_writes_default_equity_manifest_economics() {
+    let tmp = tempfile::tempdir().expect("temp dir must be creatable");
+    let out_dir = tmp.path().display().to_string();
+
+    let (st, _) = make_router_with_state();
+    let router_post = routes::build_router(Arc::clone(&st));
+    let body = post_json_body(serde_json::json!({
+        "bars_path": fixture_bars_path(),
+        "strategy": "swing_momentum",
+        "symbol": "TEST",
+        "timeframe_secs": 86400,
+        "initial_cash_micros": 100_000_000_000i64,
+        "out_dir": out_dir
+    }));
+    let (status, resp) = call(router_post, body).await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    let post_json = parse_json(resp);
+    let job_id = json_str(&post_json, "job_id").to_string();
+
+    let json = wait_for_terminal_job(Arc::clone(&st), &job_id).await;
+    assert_eq!(json_str(&json, "status"), "completed");
+    let artifact_dir = json
+        .get("artifact_dir")
+        .and_then(|v| v.as_str())
+        .expect("completed job must have artifact_dir");
+
+    let manifest = read_manifest_json(artifact_dir);
+    let economics = manifest
+        .get("economics")
+        .expect("manifest.json must include economics");
+    assert_eq!(
+        economics.get("contract_multiplier").and_then(|v| v.as_i64()),
+        Some(1)
+    );
+    assert_eq!(economics.get("initial_margin_micros"), Some(&serde_json::Value::Null));
+    assert_eq!(economics.get("maintenance_margin_micros"), Some(&serde_json::Value::Null));
+    assert_eq!(
+        economics.get("margin_enforced").and_then(|v| v.as_bool()),
+        Some(false)
+    );
+    assert_eq!(
+        economics.get("source").and_then(|v| v.as_str()),
+        Some("default_equity")
+    );
+}
+
+// ---------------------------------------------------------------------------
+// BJ-16: explicit multiplier=50 economics reaches manifest.json
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn bj16_economics_request_writes_multiplier_into_manifest() {
+    let tmp = tempfile::tempdir().expect("temp dir must be creatable");
+    let out_dir = tmp.path().display().to_string();
+
+    let (st, _) = make_router_with_state();
+    let router_post = routes::build_router(Arc::clone(&st));
+    let body = post_json_body(serde_json::json!({
+        "bars_path": fixture_bars_path(),
+        "strategy": "swing_momentum",
+        "symbol": "TEST",
+        "timeframe_secs": 86400,
+        "initial_cash_micros": 100_000_000_000i64,
+        "out_dir": out_dir,
+        "economics": {
+            "contract_multiplier": 50,
+            "initial_margin_micros": 500_000_000i64,
+            "maintenance_margin_micros": 400_000_000i64
+        }
+    }));
+    let (status, resp) = call(router_post, body).await;
+    assert_eq!(status, StatusCode::ACCEPTED);
+    let post_json = parse_json(resp);
+    let job_id = json_str(&post_json, "job_id").to_string();
+
+    let json = wait_for_terminal_job(Arc::clone(&st), &job_id).await;
+    assert_eq!(json_str(&json, "status"), "completed");
+    let artifact_dir = json
+        .get("artifact_dir")
+        .and_then(|v| v.as_str())
+        .expect("completed job must have artifact_dir");
+
+    let manifest = read_manifest_json(artifact_dir);
+    let economics = manifest
+        .get("economics")
+        .expect("manifest.json must include economics");
+    assert_eq!(
+        economics.get("contract_multiplier").and_then(|v| v.as_i64()),
+        Some(50)
+    );
+    assert_eq!(
+        economics.get("initial_margin_micros").and_then(|v| v.as_i64()),
+        Some(500_000_000)
+    );
+    assert_eq!(
+        economics.get("maintenance_margin_micros").and_then(|v| v.as_i64()),
+        Some(400_000_000)
+    );
+    assert_eq!(
+        economics.get("margin_enforced").and_then(|v| v.as_bool()),
+        Some(false),
+        "margin metadata must remain metadata-only"
+    );
+    assert_eq!(
+        economics.get("source").and_then(|v| v.as_str()),
+        Some("explicit_request")
+    );
+
+    // metrics.json must carry the same multiplier, unregressed.
+    let metrics = read_metrics_json(artifact_dir);
+    assert_eq!(
+        metrics
+            .get("economics")
+            .and_then(|e| e.get("contract_multiplier"))
+            .and_then(|v| v.as_i64()),
+        Some(50)
+    );
 }
 
 // ---------------------------------------------------------------------------

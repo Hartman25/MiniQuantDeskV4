@@ -50,6 +50,14 @@ export interface BacktestManifest {
    * Only present for md_bars-sourced backtest jobs.
    */
   bar_count?: number | null;
+  /**
+   * BACKTEST-ECONOMICS-REGISTRY-MANIFEST-01: truthful economics metadata
+   * mirroring metrics.json's `economics` (see BacktestEconomicsMetadata).
+   * Absent on manifests written before this field existed — absence means
+   * "not reported by this manifest", not multiplier=1; callers should fall
+   * back to metrics.json's economics rather than assuming a default.
+   */
+  economics?: BacktestEconomicsMetadata | null;
 }
 
 /**
