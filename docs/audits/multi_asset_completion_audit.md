@@ -641,3 +641,13 @@ Concretely: `mqk-execution` now exposes static `AssetRiskPolicy` summaries, `Ass
 No daemon/API/GUI status surface was added in this slice. No broker adapter, runtime, OMS/outbox/inbox, `mqk-risk`, `RiskRequestContext`, portfolio accounting, DB migration, provider, registry trading path, or current equity order lifecycle code was changed.
 
 **Full detail, exact test names, and validation commands:** `MiniQuantDesk_Master_Patch_Ledger_v2.md`'s `ASSET-CORE-03-RISK-ROUTER-FOUNDATION-01-COMBINED` entry (end of §6).
+
+## 38. SHORT-SIDE-EXTERNAL-SIGNAL-WIRING-01-COMBINED Closure Note (maintenance)
+
+SHORT-SIDE-EXTERNAL-SIGNAL-WIRING-01-COMBINED wired short-entry policy into the external `strategy_signal` path, added a read-only shortable-preflight broker asset route, and extended canonical paper flatten to close short positions with buy-to-cover orders. Short opens remain default-off/fail-closed unless the existing capital-policy JSON explicitly enables them and the broker asset preflight proves the symbol is tradable/shortable/easy-to-borrow.
+
+Concretely: `routes/strategy.rs` now classifies external signal order intent against the current execution snapshot before outbox enqueue, denies sell-from-flat/sell-beyond-long short opens when policy or preflight proof is missing, and preserves sell-to-reduce-long behavior. `GET /api/v1/broker/assets/:symbol/shortable-preflight` reports read-only truth states (`active`, `not_configured`, `unsupported_adapter`, `symbol_not_found`, `broker_unavailable`, `query_failed`) without exposing submit/cancel/replace behavior. Alpaca integration only added `GET /v2/assets/{symbol}` asset metadata fetch. `flatten-paper-positions` now accepts negative paper positions and enqueues canonical buy-to-cover close JSON, while rejecting duplicate/blank-symbol snapshot ambiguity before enqueue.
+
+Validation was targeted only: the new external signal gate tests, preflight route tests, canonical flatten tests, existing short-entry/intent/preflight/flatten/lifecycle/reconcile/Alpaca-parser regressions, asset-class guard regressions, and the requested daemon/execution/Alpaca clippy plus rustfmt checks passed. The default target directory was blocked by an already-running local `mqk-daemon.exe`, so proof used `C:\tmp\mqk-target-short-side`. No daemon live/paper runtime, provider/live/paper smoke, broker submit/cancel/replace, full workspace test, DB migration, or paper/live order was run.
+
+Status: `CLOSED_LOCAL / PARTIAL`. The local short-side external signal and flatten gaps are closed. Market-hours proof remains partial because the separate stale intraday data/provider freshness gap still blocks a trustworthy live-market retry.

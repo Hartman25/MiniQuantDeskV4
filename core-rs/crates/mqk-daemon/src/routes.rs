@@ -54,7 +54,7 @@ pub(crate) mod watchlist;
 use std::sync::Arc;
 
 use axum::{
-    extract::State,
+    extract::{Path, State},
     http::{header, Request, StatusCode},
     middleware::Next,
     response::{IntoResponse, Response},
@@ -63,8 +63,8 @@ use axum::{
 };
 
 use crate::{
-    api_types::GateRefusedResponse,
-    state::{AppState, OperatorAuthMode},
+    api_types::{GateRefusedResponse, ShortablePreflightResponse},
+    state::{AppState, BrokerAssetShortablePreflightOutcome, OperatorAuthMode},
 };
 
 // ---------------------------------------------------------------------------
@@ -124,6 +124,107 @@ async fn token_auth_middleware(
         )
             .into_response(),
     }
+}
+
+async fn broker_asset_shortable_preflight(
+    State(st): State<Arc<AppState>>,
+    Path(symbol): Path<String>,
+) -> impl IntoResponse {
+    let normalized = symbol.trim().to_ascii_uppercase();
+    let canonical_route = "/api/v1/broker/assets/:symbol/shortable-preflight".to_string();
+    if normalized.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ShortablePreflightResponse {
+                canonical_route,
+                symbol: normalized,
+                asset_class: None,
+                tradable: None,
+                shortable: None,
+                marginable: None,
+                easy_to_borrow: None,
+                truth_state: "query_failed".to_string(),
+                source: None,
+                message: "symbol path parameter must not be blank".to_string(),
+            }),
+        );
+    }
+
+    let response = match st.broker_asset_shortable_preflight(&normalized) {
+        BrokerAssetShortablePreflightOutcome::Active(asset) => ShortablePreflightResponse {
+            canonical_route,
+            symbol: asset.symbol,
+            asset_class: Some(asset.asset_class),
+            tradable: Some(asset.tradable),
+            shortable: Some(asset.shortable),
+            marginable: asset.marginable,
+            easy_to_borrow: asset.easy_to_borrow,
+            truth_state: "active".to_string(),
+            source: Some(asset.source),
+            message: "Read-only broker asset shortable preflight.".to_string(),
+        },
+        BrokerAssetShortablePreflightOutcome::NotConfigured => ShortablePreflightResponse {
+            canonical_route,
+            symbol: normalized,
+            asset_class: Some("equity".to_string()),
+            tradable: None,
+            shortable: None,
+            marginable: None,
+            easy_to_borrow: None,
+            truth_state: "not_configured".to_string(),
+            source: None,
+            message: "Read-only broker asset shortable preflight is not configured.".to_string(),
+        },
+        BrokerAssetShortablePreflightOutcome::UnsupportedAdapter => ShortablePreflightResponse {
+            canonical_route,
+            symbol: normalized,
+            asset_class: Some("equity".to_string()),
+            tradable: None,
+            shortable: None,
+            marginable: None,
+            easy_to_borrow: None,
+            truth_state: "unsupported_adapter".to_string(),
+            source: None,
+            message: "Selected broker adapter does not support asset shortable preflight."
+                .to_string(),
+        },
+        BrokerAssetShortablePreflightOutcome::SymbolNotFound => ShortablePreflightResponse {
+            canonical_route,
+            symbol: normalized,
+            asset_class: Some("equity".to_string()),
+            tradable: None,
+            shortable: None,
+            marginable: None,
+            easy_to_borrow: None,
+            truth_state: "symbol_not_found".to_string(),
+            source: None,
+            message: "Broker asset registry did not contain the requested symbol.".to_string(),
+        },
+        BrokerAssetShortablePreflightOutcome::QueryFailed(err) => {
+            let truth_state = if err
+                .trim_start()
+                .to_ascii_lowercase()
+                .starts_with("broker_unavailable")
+            {
+                "broker_unavailable"
+            } else {
+                "query_failed"
+            };
+            ShortablePreflightResponse {
+                canonical_route,
+                symbol: normalized,
+                asset_class: Some("equity".to_string()),
+                tradable: None,
+                shortable: None,
+                marginable: None,
+                easy_to_borrow: None,
+                truth_state: truth_state.to_string(),
+                source: None,
+                message: format!("Read-only broker asset shortable preflight query failed: {err}"),
+            }
+        }
+    };
+    (StatusCode::OK, Json(response))
 }
 
 // ---------------------------------------------------------------------------
@@ -288,6 +389,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         )
         .route("/api/v1/system/config-diffs", get(system_config_diffs))
         .route("/api/v1/strategy/summary", get(strategy_summary))
+        .route(
+            "/api/v1/broker/assets/:symbol/shortable-preflight",
+            get(broker_asset_shortable_preflight),
+        )
         .route("/api/v1/strategy/suppressions", get(strategy_suppressions))
         .route(
             "/api/v1/strategy/multi-symbol-dispatch-summary",

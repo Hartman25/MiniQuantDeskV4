@@ -535,3 +535,32 @@ pub fn evaluate_strategy_budget_from_env(strategy_id: &str) -> StrategyBudgetOut
     };
     evaluate_strategy_budget(path.as_deref(), strategy_id)
 }
+
+/// Read [`ENV_CAPITAL_POLICY_PATH`] and parse the `short_entry_policy` section.
+///
+/// Unlike the long-side budget/sizing gates, short-entry is fail-closed when no
+/// policy file is configured. Absence therefore returns
+/// [`ShortEntryConfig::fail_closed`], not a "not configured" pass-through.
+pub fn short_entry_config_from_env() -> Result<ShortEntryConfig, String> {
+    let raw = std::env::var(ENV_CAPITAL_POLICY_PATH).unwrap_or_default();
+    if raw.trim().is_empty() {
+        return Ok(ShortEntryConfig::fail_closed());
+    }
+
+    let path = std::path::PathBuf::from(raw.trim());
+    let text = std::fs::read_to_string(&path).map_err(|err| {
+        format!(
+            "capital policy file unreadable at '{}': {err}",
+            path.display()
+        )
+    })?;
+    let json: serde_json::Value = serde_json::from_str(&text)
+        .map_err(|err| format!("capital policy file is not valid JSON: {err}"))?;
+    match json.get("schema_version").and_then(|v| v.as_str()) {
+        Some(CAPITAL_POLICY_SCHEMA_VERSION) => Ok(parse_short_entry_config(&json)),
+        Some(other) => Err(format!(
+            "unsupported capital policy schema_version '{other}' (expected '{CAPITAL_POLICY_SCHEMA_VERSION}')"
+        )),
+        None => Err("capital policy missing required schema_version".to_string()),
+    }
+}

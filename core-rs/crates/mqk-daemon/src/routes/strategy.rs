@@ -33,6 +33,7 @@ use super::helpers::{
 use crate::notify::CriticalAlertPayload;
 use crate::state::{AlpacaWsContinuityState, AppState, StrategyBarInput, StrategyMarketDataSource};
 use chrono::Utc;
+use mqk_runtime::observability::ExecutionSnapshot;
 
 // ---------------------------------------------------------------------------
 // RTS-07: Outbox provenance mark
@@ -706,6 +707,31 @@ pub(crate) async fn strategy_signal(
                 },
             );
         }
+    }
+
+    // Gate 1j: short-entry policy and shortable preflight.
+    //
+    // The external signal route accepts only buy/sell, so this gate derives
+    // direction from current execution snapshot quantity plus the signed order
+    // delta. Caller-supplied metadata cannot bypass it. A sell from flat or a
+    // sell larger than the current long position is denied before outbox unless
+    // the fail-closed short-entry policy and read-only broker shortable
+    // preflight both allow the transition.
+    if let Err((status, disposition, blocker)) =
+        evaluate_external_signal_short_entry_gate(&st, &validated).await
+    {
+        return refused_signal_response(
+            status,
+            "external_gate_1j_short_entry",
+            &disposition,
+            RefusedSignalArgs {
+                signal_id: validated.signal_id,
+                strategy_id: validated.strategy_id,
+                symbol: validated.symbol.clone(),
+                active_run_id: None,
+                blockers: vec![blocker],
+            },
+        );
     }
 
     // Gate 1b: WS continuity must be Live for Alpaca signal ingestion (PT-DAY-02).
@@ -1413,6 +1439,184 @@ fn parse_signal_integer_field(name: &str, value: &serde_json::Value) -> Result<i
             .parse::<i64>()
             .map_err(|_| format!("{name} must be an integer without lossy conversion")),
         _ => Err(format!("{name} must be an integer-compatible value")),
+    }
+}
+
+async fn evaluate_external_signal_short_entry_gate(
+    st: &AppState,
+    validated: &ValidatedStrategySignal,
+) -> Result<(), (StatusCode, String, String)> {
+    use crate::capital_policy::{
+        classify_order_intent, evaluate_short_entry_policy_with_preflight,
+        order_intent_to_short_entry_intent, short_entry_config_from_env, ShortEntryPolicyDecision,
+    };
+
+    let signed_delta = match validated.side.as_str() {
+        "sell" => -validated.qty,
+        "buy" => validated.qty,
+        _ => return Ok(()),
+    };
+    let current_qty = match st.current_execution_snapshot().await {
+        Some(snapshot) => current_qty_for_symbol(&snapshot, &validated.symbol).map_err(|err| {
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "short_entry_policy_invalid".to_string(),
+                format!("strategy signal unavailable: {err}"),
+            )
+        })?,
+        None => 0,
+    };
+    let order_intent = classify_order_intent(current_qty, signed_delta);
+    if !order_intent.requires_short_entry_policy() {
+        return Ok(());
+    }
+
+    let config = short_entry_config_from_env().map_err(|err| {
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "short_entry_policy_invalid".to_string(),
+            format!("strategy signal unavailable: short_entry_policy invalid: {err}"),
+        )
+    })?;
+    let preflight = shortability_preflight_for_policy(st, &validated.symbol);
+    let projected_qty = current_qty.saturating_add(signed_delta);
+    let projected_short_shares = if projected_qty < 0 {
+        Some(projected_qty.saturating_abs())
+    } else {
+        Some(0)
+    };
+    let projected_short_notional_usd =
+        projected_short_shares.and_then(|shares| match validated.limit_price {
+            Some(price_micros) if shares > 0 => {
+                Some((shares as f64) * (price_micros as f64) / 1_000_000.0)
+            }
+            _ => None,
+        });
+
+    let decision = evaluate_short_entry_policy_with_preflight(
+        &config,
+        order_intent_to_short_entry_intent(order_intent),
+        matches!(st.deployment_mode(), crate::state::DeploymentMode::Paper),
+        &preflight,
+        projected_short_shares,
+        projected_short_notional_usd,
+    );
+
+    match decision {
+        ShortEntryPolicyDecision::NotShortOpen
+        | ShortEntryPolicyDecision::ShortOpenAllowed { .. } => Ok(()),
+        ShortEntryPolicyDecision::ShortOpenBlocked {
+            reason_code,
+            detail,
+        } => {
+            let (status, disposition) = short_entry_blocker_status(reason_code);
+            Err((
+                status,
+                disposition.to_string(),
+                format!(
+                    "strategy signal refused: short-entry gate denied {order_intent:?} \
+                     for symbol={} current_qty={} delta={} reason_code={reason_code}: {detail}",
+                    validated.symbol, current_qty, signed_delta
+                ),
+            ))
+        }
+    }
+}
+
+fn current_qty_for_symbol(snapshot: &ExecutionSnapshot, symbol: &str) -> Result<i64, String> {
+    let target = symbol.trim().to_ascii_uppercase();
+    let mut found: Option<i64> = None;
+    for position in &snapshot.portfolio.positions {
+        if position.symbol.trim().to_ascii_uppercase() != target {
+            continue;
+        }
+        if found.is_some() {
+            return Err(format!(
+                "short-entry gate cannot determine position truth: duplicate position rows for symbol '{target}'"
+            ));
+        }
+        found = Some(position.net_qty);
+    }
+    Ok(found.unwrap_or(0))
+}
+
+fn shortability_preflight_for_policy(
+    st: &AppState,
+    symbol: &str,
+) -> crate::capital_policy::ShortabilityPreflightResult {
+    use crate::capital_policy::{ShortabilityPreflightResult, ShortabilitySource};
+    use crate::state::BrokerAssetShortablePreflightOutcome;
+
+    match st.broker_asset_shortable_preflight(symbol) {
+        BrokerAssetShortablePreflightOutcome::Active(asset) => {
+            if !asset.tradable {
+                ShortabilityPreflightResult::NotTradable {
+                    symbol: asset.symbol,
+                }
+            } else if !asset.shortable {
+                ShortabilityPreflightResult::NotShortable {
+                    symbol: asset.symbol,
+                }
+            } else if asset.easy_to_borrow == Some(false) {
+                ShortabilityPreflightResult::NotEasyToBorrow {
+                    symbol: asset.symbol,
+                }
+            } else {
+                ShortabilityPreflightResult::Confirmed {
+                    symbol: asset.symbol,
+                    tradable: asset.tradable,
+                    shortable: asset.shortable,
+                    easy_to_borrow: asset.easy_to_borrow,
+                    source: ShortabilitySource::AlpacaAsset,
+                }
+            }
+        }
+        BrokerAssetShortablePreflightOutcome::NotConfigured => {
+            ShortabilityPreflightResult::Unavailable {
+                symbol: symbol.to_string(),
+                reason: "shortable preflight fetcher is not configured".to_string(),
+            }
+        }
+        BrokerAssetShortablePreflightOutcome::UnsupportedAdapter => {
+            ShortabilityPreflightResult::Unavailable {
+                symbol: symbol.to_string(),
+                reason: "selected broker adapter does not support shortable preflight".to_string(),
+            }
+        }
+        BrokerAssetShortablePreflightOutcome::SymbolNotFound => {
+            ShortabilityPreflightResult::SymbolNotFound {
+                symbol: symbol.to_string(),
+            }
+        }
+        BrokerAssetShortablePreflightOutcome::QueryFailed(err) => {
+            ShortabilityPreflightResult::Unavailable {
+                symbol: symbol.to_string(),
+                reason: err,
+            }
+        }
+    }
+}
+
+fn short_entry_blocker_status(reason_code: &str) -> (StatusCode, &'static str) {
+    match reason_code {
+        "short_entries_disabled"
+        | "paper_short_entries_disabled"
+        | "live_short_entries_blocked" => (StatusCode::FORBIDDEN, "short_entry_disabled"),
+        "shortable_check_required" | "shortable_check_unavailable" => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "shortable_preflight_unavailable",
+        ),
+        "shortable_symbol_not_found"
+        | "shortable_not_tradable"
+        | "shortable_not_shortable"
+        | "shortable_not_easy_to_borrow" => (StatusCode::FORBIDDEN, "symbol_not_shortable"),
+        "max_short_shares_exceeded" | "max_short_notional_exceeded" => {
+            (StatusCode::FORBIDDEN, "short_entry_policy_denied")
+        }
+        _ => (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "short_entry_policy_invalid",
+        ),
     }
 }
 

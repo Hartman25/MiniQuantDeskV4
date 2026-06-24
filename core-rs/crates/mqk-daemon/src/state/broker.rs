@@ -16,8 +16,9 @@ use mqk_execution::{
 
 use super::types::{BrokerKind, DeploymentMode, RuntimeLifecycleError};
 use super::{
-    BrokerFillActivityFetcher, BrokerSnapshotFetcher, WsGapFillFetcher, ALPACA_BASE_URL_PAPER_ENV,
-    ALPACA_KEY_LIVE_ENV, ALPACA_KEY_PAPER_ENV, ALPACA_SECRET_LIVE_ENV, ALPACA_SECRET_PAPER_ENV,
+    BrokerAssetShortablePreflight, BrokerAssetShortablePreflightFetcher, BrokerFillActivityFetcher,
+    BrokerSnapshotFetcher, WsGapFillFetcher, ALPACA_BASE_URL_PAPER_ENV, ALPACA_KEY_LIVE_ENV,
+    ALPACA_KEY_PAPER_ENV, ALPACA_SECRET_LIVE_ENV, ALPACA_SECRET_PAPER_ENV,
 };
 
 // ---------------------------------------------------------------------------
@@ -401,4 +402,86 @@ pub(super) fn build_snapshot_fetcher_from_env(
             api_secret_key: secret,
         },
     ))))
+}
+
+// ---------------------------------------------------------------------------
+// SHORT-SIDE-EXTERNAL-SIGNAL-WIRING-01: read-only asset shortability preflight
+// ---------------------------------------------------------------------------
+
+/// Thin newtype wrapping `AlpacaBrokerAdapter` for read-only asset metadata.
+///
+/// Only `GET /v2/assets/{symbol}` is exposed through this type. Order submit,
+/// cancel, replace, and event fetch methods are not reachable.
+struct AlpacaAssetShortablePreflightFetcher {
+    adapter: AlpacaBrokerAdapter,
+    source: &'static str,
+}
+
+impl BrokerAssetShortablePreflightFetcher for AlpacaAssetShortablePreflightFetcher {
+    fn fetch_asset_shortable_preflight(
+        &self,
+        symbol: &str,
+    ) -> Result<Option<BrokerAssetShortablePreflight>, String> {
+        match self.adapter.fetch_asset(symbol) {
+            Ok(asset) => Ok(Some(BrokerAssetShortablePreflight {
+                symbol: asset.symbol.to_ascii_uppercase(),
+                asset_class: "equity".to_string(),
+                tradable: asset.tradable,
+                shortable: asset.shortable,
+                marginable: asset.marginable,
+                easy_to_borrow: asset.easy_to_borrow,
+                source: self.source.to_string(),
+            })),
+            Err(mqk_execution::BrokerError::Reject { code, .. }) if code == "404" => Ok(None),
+            Err(err) => Err(err.to_string()),
+        }
+    }
+}
+
+pub(super) fn build_asset_shortable_preflight_fetcher_from_env(
+    broker_kind: Option<BrokerKind>,
+    deployment_mode: DeploymentMode,
+) -> Option<Arc<dyn BrokerAssetShortablePreflightFetcher>> {
+    match broker_kind {
+        Some(BrokerKind::Alpaca) => {}
+        _ => return None,
+    }
+
+    let (key_env, secret_env, source) = match deployment_mode {
+        DeploymentMode::Paper => (
+            ALPACA_KEY_PAPER_ENV,
+            ALPACA_SECRET_PAPER_ENV,
+            "alpaca_paper_asset",
+        ),
+        _ => (
+            ALPACA_KEY_LIVE_ENV,
+            ALPACA_SECRET_LIVE_ENV,
+            "alpaca_live_asset",
+        ),
+    };
+    let paper_override = match deployment_mode {
+        DeploymentMode::Paper => std::env::var(ALPACA_BASE_URL_PAPER_ENV).ok(),
+        _ => None,
+    };
+    let base_url = match alpaca_base_url_for_mode(deployment_mode, paper_override.as_deref()) {
+        Ok(u) => u,
+        Err(_) => return None,
+    };
+    let key_id = match std::env::var(key_env) {
+        Ok(v) => v,
+        Err(_) => return None,
+    };
+    let secret = match std::env::var(secret_env) {
+        Ok(v) => v,
+        Err(_) => return None,
+    };
+
+    Some(Arc::new(AlpacaAssetShortablePreflightFetcher {
+        adapter: AlpacaBrokerAdapter::new(AlpacaConfig {
+            base_url,
+            api_key_id: key_id,
+            api_secret_key: secret,
+        }),
+        source,
+    }))
 }

@@ -49,8 +49,8 @@ pub use autonomous_bar_ticker::{
     spawn_autonomous_bar_ticker, BAR_INTERVAL_SECS_ENV, DEFAULT_QTY_ENV,
 };
 use broker::{
-    build_fill_activity_fetcher_from_env, build_snapshot_fetcher_from_env,
-    build_ws_gap_fill_fetcher_from_env,
+    build_asset_shortable_preflight_fetcher_from_env, build_fill_activity_fetcher_from_env,
+    build_snapshot_fetcher_from_env, build_ws_gap_fill_fetcher_from_env,
 };
 pub use broker::{DeploymentReadiness, RuntimeSelection, StrategyFleetEntry};
 pub use dry_run_strategy::{
@@ -542,6 +542,12 @@ pub struct AppState {
     /// `None` when credentials are absent or broker kind is not Alpaca.
     /// Tests inject a fake implementation via `set_snapshot_fetcher_for_test`.
     pub snapshot_fetcher: Option<Arc<dyn BrokerSnapshotFetcher>>,
+    /// SHORT-SIDE-EXTERNAL-SIGNAL-WIRING-01: read-only broker asset shortability
+    /// preflight fetcher.
+    ///
+    /// `None` when the selected broker is unsupported or credentials are absent.
+    /// Signal admission treats absence as fail-closed for short-open intents.
+    pub asset_shortable_preflight_fetcher: Option<Arc<dyn BrokerAssetShortablePreflightFetcher>>,
     /// DISCORD-SIGNAL-BLOCKED-GATE-ALERTS-01: Per-run set of symbols for which a
     /// B5 short-sale guard Discord alert has already been fired.
     ///
@@ -616,6 +622,39 @@ pub trait BrokerSnapshotFetcher: Send + Sync {
     /// Returns `Err(String)` if the fetch fails; the adoption route treats this
     /// as `repair.broker_snapshot_refresh_failed` and refuses adoption.
     fn fetch_snapshot(&self) -> Result<mqk_schemas::BrokerSnapshot, String>;
+}
+
+/// Read-only broker asset shortability metadata used as a short-entry
+/// preflight input.
+#[derive(Debug, Clone)]
+pub struct BrokerAssetShortablePreflight {
+    pub symbol: String,
+    pub asset_class: String,
+    pub tradable: bool,
+    pub shortable: bool,
+    pub marginable: Option<bool>,
+    pub easy_to_borrow: Option<bool>,
+    pub source: String,
+}
+
+/// Outcome of querying read-only broker asset shortability metadata.
+#[derive(Debug, Clone)]
+pub enum BrokerAssetShortablePreflightOutcome {
+    Active(BrokerAssetShortablePreflight),
+    NotConfigured,
+    UnsupportedAdapter,
+    SymbolNotFound,
+    QueryFailed(String),
+}
+
+/// SHORT-SIDE-EXTERNAL-SIGNAL-WIRING-01: injectable read-only asset preflight.
+///
+/// Implementations must not submit orders or mutate broker/DB state.
+pub trait BrokerAssetShortablePreflightFetcher: Send + Sync {
+    fn fetch_asset_shortable_preflight(
+        &self,
+        symbol: &str,
+    ) -> Result<Option<BrokerAssetShortablePreflight>, String>;
 }
 
 impl Default for AppState {
@@ -863,6 +902,14 @@ impl AppState {
         self.snapshot_fetcher = Some(fetcher);
     }
 
+    /// Test helper: inject a read-only asset shortability preflight fetcher.
+    pub fn set_asset_shortable_preflight_fetcher_for_test(
+        &mut self,
+        fetcher: Arc<dyn BrokerAssetShortablePreflightFetcher>,
+    ) {
+        self.asset_shortable_preflight_fetcher = Some(fetcher);
+    }
+
     /// BRK-07R: Seed WS continuity state from the last persisted broker cursor.
     ///
     /// Called at daemon boot (before the WS transport task starts) to give the
@@ -1079,6 +1126,10 @@ impl AppState {
             runtime_selection.broker_kind,
             runtime_selection.deployment_mode,
         );
+        let asset_shortable_preflight_fetcher = build_asset_shortable_preflight_fetcher_from_env(
+            runtime_selection.broker_kind,
+            runtime_selection.deployment_mode,
+        );
 
         Self {
             bus,
@@ -1151,6 +1202,7 @@ impl AppState {
             ws_gap_fill_fetcher,
             broker_baseline: Arc::new(RwLock::new(None)),
             snapshot_fetcher,
+            asset_shortable_preflight_fetcher,
             b5_alerted_symbols: Arc::new(RwLock::new(HashSet::new())),
             day_limit_alert_fired: Arc::new(AtomicBool::new(false)),
             per_symbol_position_cap_alerted_symbols: Arc::new(RwLock::new(HashSet::new())),
@@ -1985,7 +2037,8 @@ operator_reconcile_or_repair_required"
                 timeframe: md_timeframe,
                 bar_context_source: "stale_bars",
                 bars_loaded: db_bars.len() as i64,
-                latest_bar_ts_utc: latest_end_ts.and_then(|ts| DateTime::<Utc>::from_timestamp(ts, 0)),
+                latest_bar_ts_utc: latest_end_ts
+                    .and_then(|ts| DateTime::<Utc>::from_timestamp(ts, 0)),
                 signal_generated: false,
                 signal_qty: None,
                 reason_code: no_order_reason,
@@ -2041,7 +2094,8 @@ operator_reconcile_or_repair_required"
                 timeframe: md_timeframe,
                 bar_context_source: "db_loaded",
                 bars_loaded: bars_loaded as i64,
-                latest_bar_ts_utc: latest_end_ts.and_then(|ts| DateTime::<Utc>::from_timestamp(ts, 0)),
+                latest_bar_ts_utc: latest_end_ts
+                    .and_then(|ts| DateTime::<Utc>::from_timestamp(ts, 0)),
                 signal_generated: signal_qty != 0,
                 signal_qty: Some(signal_qty),
                 reason_code: diagnostic_decision,
@@ -2508,6 +2562,24 @@ operator_reconcile_or_repair_required"
 
     pub async fn current_broker_snapshot(&self) -> Option<mqk_schemas::BrokerSnapshot> {
         self.broker_snapshot.read().await.clone()
+    }
+
+    pub fn broker_asset_shortable_preflight(
+        &self,
+        symbol: &str,
+    ) -> BrokerAssetShortablePreflightOutcome {
+        let Some(fetcher) = self.asset_shortable_preflight_fetcher.as_ref() else {
+            return if self.runtime_selection.broker_kind == Some(BrokerKind::Alpaca) {
+                BrokerAssetShortablePreflightOutcome::NotConfigured
+            } else {
+                BrokerAssetShortablePreflightOutcome::UnsupportedAdapter
+            };
+        };
+        match fetcher.fetch_asset_shortable_preflight(symbol) {
+            Ok(Some(asset)) => BrokerAssetShortablePreflightOutcome::Active(asset),
+            Ok(None) => BrokerAssetShortablePreflightOutcome::SymbolNotFound,
+            Err(err) => BrokerAssetShortablePreflightOutcome::QueryFailed(err),
+        }
     }
 
     pub async fn current_local_order_sides(&self) -> BTreeMap<String, mqk_reconcile::Side> {

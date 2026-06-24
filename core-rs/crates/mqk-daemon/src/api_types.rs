@@ -2275,6 +2275,26 @@ pub struct StrategySignalResponse {
 }
 
 // ---------------------------------------------------------------------------
+// /api/v1/broker/assets/:symbol/shortable-preflight
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ShortablePreflightResponse {
+    pub canonical_route: String,
+    pub symbol: String,
+    pub asset_class: Option<String>,
+    pub tradable: Option<bool>,
+    pub shortable: Option<bool>,
+    pub marginable: Option<bool>,
+    pub easy_to_borrow: Option<bool>,
+    /// "active" | "not_configured" | "broker_unavailable" |
+    /// "symbol_not_found" | "query_failed" | "unsupported_adapter".
+    pub truth_state: String,
+    pub source: Option<String>,
+    pub message: String,
+}
+
+// ---------------------------------------------------------------------------
 // /api/v1/execution/orders — canonical OMS order surface
 // ---------------------------------------------------------------------------
 

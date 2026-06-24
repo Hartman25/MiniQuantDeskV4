@@ -8,7 +8,7 @@
 mod run_lifecycle;
 pub(crate) use run_lifecycle::{run_halt, run_start, run_stop};
 
-use std::sync::Arc;
+use std::{collections::BTreeSet, sync::Arc};
 
 use axum::{
     extract::State,
@@ -1129,8 +1129,7 @@ pub(crate) async fn ops_action(
         //   6. runtime_state == "running" — not running → block
         //   7. execution_snapshot present — position truth unavailable → block
         //   8. target positions non-empty — nothing to flatten → block
-        //   9. no short positions (v1)    — net_qty < 0 → block (unsupported)
-        //  10. outbox_enqueue per symbol  — normal path; idempotent by UUIDv5 key
+        //   9. outbox_enqueue per symbol  — normal path; idempotent by UUIDv5 key
         "flatten-paper-positions" => {
             let env_label = st.deployment_mode().as_api_label().to_string();
 
@@ -1373,8 +1372,11 @@ pub(crate) async fn ops_action(
             };
 
             // Collect non-flat positions, filtered by symbol if provided.
+            // Duplicate or blank symbols make position truth ambiguous, so the
+            // route fails closed before enqueuing any close orders.
             let symbol_filter = body.symbol.as_deref().map(|s| s.trim().to_uppercase());
-            let positions_to_flatten: Vec<(String, i64)> = exec_snap
+            let mut seen_position_symbols = BTreeSet::new();
+            let raw_positions_to_flatten: Vec<(String, String, i64)> = exec_snap
                 .portfolio
                 .positions
                 .iter()
@@ -1384,8 +1386,63 @@ pub(crate) async fn ops_action(
                         .as_deref()
                         .is_none_or(|f| p.symbol.to_uppercase() == f)
                 })
-                .map(|p| (p.symbol.clone(), p.net_qty))
+                .map(|p| {
+                    let normalized = p.symbol.trim().to_ascii_uppercase();
+                    (p.symbol.clone(), normalized, p.net_qty)
+                })
+                .collect::<Vec<_>>();
+            let mut malformed_positions = Vec::new();
+            let mut duplicate_positions = Vec::new();
+            let positions_to_flatten: Vec<(String, i64)> = raw_positions_to_flatten
+                .into_iter()
+                .filter_map(|(raw_symbol, normalized, net_qty)| {
+                    if normalized.is_empty() {
+                        malformed_positions.push(raw_symbol);
+                        return None;
+                    }
+                    if !seen_position_symbols.insert(normalized.clone()) {
+                        duplicate_positions.push(normalized);
+                        return None;
+                    }
+                    Some((raw_symbol, net_qty))
+                })
                 .collect();
+            if !malformed_positions.is_empty() || !duplicate_positions.is_empty() {
+                let mut blockers = Vec::new();
+                if !malformed_positions.is_empty() {
+                    blockers.push(format!(
+                        "flatten-paper-positions refused: malformed blank position symbol(s): {}",
+                        malformed_positions.join(", ")
+                    ));
+                }
+                if !duplicate_positions.is_empty() {
+                    blockers.push(format!(
+                        "flatten-paper-positions refused: duplicate position snapshot row(s): {}",
+                        duplicate_positions.join(", ")
+                    ));
+                }
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(OperatorActionResponse {
+                        requested_action: "flatten-paper-positions".to_string(),
+                        accepted: false,
+                        disposition: "ambiguous_position_snapshot".to_string(),
+                        resulting_integrity_state: None,
+                        resulting_desired_armed: None,
+                        blockers,
+                        warnings: vec![],
+                        environment: Some(env_label),
+                        scope: Some("daemon_instance".to_string()),
+                        audit: OperatorActionAuditFields {
+                            durable_db_write: false,
+                            durable_targets: vec![],
+                            audit_event_id: None,
+                        },
+                        pending_restart_intent: None,
+                    }),
+                )
+                    .into_response();
+            }
 
             // Gate 8: must have at least one non-flat position to flatten.
             if positions_to_flatten.is_empty() {
@@ -1417,41 +1474,8 @@ pub(crate) async fn ops_action(
                     .into_response();
             }
 
-            // Gate 9 (v1): short positions are not supported.
-            let short_symbols: Vec<String> = positions_to_flatten
-                .iter()
-                .filter(|(_, qty)| *qty < 0)
-                .map(|(sym, _)| sym.clone())
-                .collect();
-            if !short_symbols.is_empty() {
-                return (
-                    StatusCode::FORBIDDEN,
-                    Json(OperatorActionResponse {
-                        requested_action: "flatten-paper-positions".to_string(),
-                        accepted: false,
-                        disposition: "short_positions_not_supported_v1".to_string(),
-                        resulting_integrity_state: None,
-                        resulting_desired_armed: None,
-                        blockers: vec![format!(
-                            "flatten-paper-positions (v1) does not support short positions; \
-                             short symbols: {}",
-                            short_symbols.join(", ")
-                        )],
-                        warnings: vec![],
-                        environment: Some(env_label),
-                        scope: Some("daemon_instance".to_string()),
-                        audit: OperatorActionAuditFields {
-                            durable_db_write: false,
-                            durable_targets: vec![],
-                            audit_event_id: None,
-                        },
-                        pending_restart_intent: None,
-                    }),
-                )
-                    .into_response();
-            }
-
-            // Gate 10: submit sell orders for all long positions via normal outbox path.
+            // Gate 9: submit close orders for all positions via normal outbox path.
+            // Long positions produce sells; short positions produce buy-to-cover.
             let ts_secs = Utc::now().timestamp();
             let mut enqueued_symbols: Vec<String> = vec![];
             let mut already_pending_symbols: Vec<String> = vec![];
@@ -1476,8 +1500,9 @@ pub(crate) async fn ops_action(
                             "operator_flatten_close_enqueued"
                         );
                         enqueued_symbols.push(symbol.clone());
+                        let side = if *net_qty > 0 { "sell" } else { "buy" };
                         warnings.push(format!(
-                            "enqueued: symbol={symbol} qty={} side=sell key={key}",
+                            "enqueued: symbol={symbol} qty={} side={side} key={key}",
                             net_qty.abs()
                         ));
                     }
@@ -1864,7 +1889,7 @@ pub(crate) async fn ops_catalog(State(st): State<Arc<AppState>>) -> impl IntoRes
             action_key: "flatten-paper-positions".to_string(),
             label: "Flatten Paper Positions".to_string(),
             level: 3,
-            description: "Submit market sell orders for all open long paper positions \
+            description: "Submit market close orders for all open paper positions \
                            via the normal OMS/outbox/broker adapter path. \
                            Paper mode only. Requires armed + running + reconcile ok. \
                            Provide symbol in body to flatten a single position."

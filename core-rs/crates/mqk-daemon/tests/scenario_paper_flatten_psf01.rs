@@ -2,9 +2,9 @@
 //!
 //! Verifies that `POST /api/v1/ops/action { "action_key": "flatten-paper-positions" }`:
 //! - Gates correctly on mode, reconcile, arm, run, and position state.
-//! - Routes sell orders through the normal OMS/outbox path (not raw broker).
-//! - Prevents oversell (qty == net_qty).
-//! - Rejects short positions (v1 fail-closed).
+//! - Routes close orders through the normal OMS/outbox path (not raw broker).
+//! - Prevents oversell/overcover (qty == abs(net_qty)).
+//! - Covers short positions with buy-to-cover close orders.
 //! - Requires operator auth (token middleware).
 //!
 //! ## Proof matrix
@@ -18,9 +18,10 @@
 //! | PSF-04   | DB       | Absent arm state → 403 not_armed                        |
 //! | PSF-05   | DB       | No active run → 409 no_active_run                       |
 //! | PSF-08   | DB       | Running, no positions → 409 no_positions                |
-//! | PSF-09   | DB       | Running, short position → 403 short_positions_not_supported_v1 |
+//! | PSF-09   | DB       | Running, short position → 200 enqueued buy-to-cover |
 //! | PSF-10   | DB       | Running, long position → 200 enqueued; outbox row present |
 //! | PSF-12   | DB       | Running, two longs → single-symbol flatten only targets that symbol |
+//! | PSF-13   | DB       | Duplicate position snapshot row → fail-closed ambiguity refusal |
 //!
 //! PSF-01, PSF-02, PSF-11 are pure in-process (no DB required).
 //! PSF-03..PSF-12 require MQK_DATABASE_URL and skip gracefully without it.
@@ -435,11 +436,11 @@ async fn psf_08_no_positions_returns_409_no_positions() {
     );
 }
 
-/// PSF-09: Running, snapshot with short position (net_qty < 0) → 403.
+/// PSF-09: Running, snapshot with short position (net_qty < 0) → buy-to-cover.
 ///
-/// Proves short positions are fail-closed in v1.
+/// Proves canonical paper flatten can cover shorts through the normal outbox path.
 #[tokio::test]
-async fn psf_09_short_position_returns_403_short_positions_not_supported_v1() {
+async fn psf_09_short_position_enqueues_buy_to_cover() {
     let Some(pool) = maybe_pool().await else {
         eprintln!("PSF-09: MQK_DATABASE_URL not set; skipping");
         return;
@@ -457,25 +458,49 @@ async fn psf_09_short_position_returns_403_short_positions_not_supported_v1() {
     .await;
     assert_eq!(
         status,
-        StatusCode::FORBIDDEN,
-        "PSF-09: short position must return 403; body: {j}"
+        StatusCode::OK,
+        "PSF-09: short position must enqueue buy-to-cover; body: {j}"
     );
     assert_eq!(
-        j["accepted"], false,
-        "PSF-09: accepted must be false; body: {j}"
+        j["accepted"], true,
+        "PSF-09: accepted must be true; body: {j}"
     );
     assert_eq!(
         j["disposition"].as_str(),
-        Some("short_positions_not_supported_v1"),
-        "PSF-09: disposition must be short_positions_not_supported_v1; body: {j}"
+        Some("enqueued"),
+        "PSF-09: disposition must be enqueued; body: {j}"
     );
-    let blockers = j["blockers"].as_array().expect("blockers is array");
+
+    let warnings = j["warnings"].as_array().expect("warnings is array");
+    let key_entry = warnings
+        .iter()
+        .find(|w| w.as_str().unwrap_or("").contains("AAPL"))
+        .expect("PSF-09: must have AAPL warning");
+    let key_str = key_entry.as_str().unwrap();
     assert!(
-        blockers
-            .iter()
-            .any(|b| b.as_str().unwrap_or("").contains("AAPL")),
-        "PSF-09: AAPL must appear in blockers; body: {j}"
+        key_str.contains("qty=50") && key_str.contains("side=buy"),
+        "PSF-09: warning must show buy-to-cover qty=50; got: {key_str}"
     );
+    let key = key_str
+        .split("key=")
+        .nth(1)
+        .expect("PSF-09: key= must appear in warning message")
+        .trim();
+
+    let outbox_row = mqk_db::outbox_fetch_by_idempotency_key(st.db.as_ref().unwrap(), key)
+        .await
+        .expect("PSF-09: outbox fetch must succeed")
+        .expect("PSF-09: outbox row must exist");
+    let order_json = &outbox_row.order_json;
+    assert_eq!(order_json["symbol"].as_str(), Some("AAPL"), "{order_json}");
+    assert_eq!(order_json["side"].as_str(), Some("buy"), "{order_json}");
+    assert_eq!(order_json["qty"].as_i64(), Some(50), "{order_json}");
+    assert_eq!(
+        order_json["signal_source"].as_str(),
+        Some("operator_flatten"),
+        "{order_json}"
+    );
+    assert!(order_json.get("is_risk_reducing").is_none(), "{order_json}");
 }
 
 /// PSF-10: Running, long AAPL position (100 shares) → 200, outbox row enqueued.
@@ -647,5 +672,52 @@ async fn psf_12_flatten_single_symbol_only_targets_that_symbol() {
             .iter()
             .any(|w| w.as_str().unwrap_or("").contains("SPY")),
         "PSF-12: SPY must NOT appear in warnings — only AAPL was targeted; body: {j}"
+    );
+}
+
+/// PSF-13: Duplicate position rows for one symbol are ambiguous and refused.
+#[tokio::test]
+async fn psf_13_duplicate_position_snapshot_rows_are_refused() {
+    let Some(pool) = maybe_pool().await else {
+        eprintln!("PSF-13: MQK_DATABASE_URL not set; skipping");
+        return;
+    };
+    let st = daemon_state_with_db(pool).await;
+    set_reconcile_ok(&st).await;
+    let run_id = seed_running_run(&st).await;
+    set_execution_snapshot(
+        &st,
+        run_id,
+        vec![("AAPL".to_string(), -20), ("aapl".to_string(), -30)],
+    )
+    .await;
+    let router = build_router(Arc::clone(&st));
+    let (status, j) = call_flatten(
+        router,
+        serde_json::json!({
+            "action_key": "flatten-paper-positions",
+            "reason": "psf-13-test-ambiguous-position"
+        }),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "PSF-13: duplicate position rows must fail closed; body: {j}"
+    );
+    assert_eq!(j["accepted"], false, "PSF-13: body: {j}");
+    assert_eq!(
+        j["disposition"].as_str(),
+        Some("ambiguous_position_snapshot"),
+        "PSF-13: body: {j}"
+    );
+    assert!(
+        j["blockers"]
+            .as_array()
+            .unwrap_or(&vec![])
+            .iter()
+            .any(|b| b.as_str().unwrap_or("").contains("duplicate")),
+        "PSF-13: blocker must mention duplicate position rows; body: {j}"
     );
 }

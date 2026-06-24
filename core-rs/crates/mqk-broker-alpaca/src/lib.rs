@@ -52,9 +52,10 @@ pub mod snapshot;
 pub mod types;
 use crate::normalize::normalize_trade_update;
 use crate::types::{
-    AlpacaAccountRaw, AlpacaFetchCursor, AlpacaOpenOrderRaw, AlpacaOrder, AlpacaOrderActivity,
-    AlpacaOrderFull, AlpacaPositionRaw, AlpacaReplaceBody, AlpacaReplaceResponse, AlpacaSubmitBody,
-    AlpacaSubmitResponse, AlpacaTradeUpdate, AlpacaTradeUpdatesResume,
+    AlpacaAccountRaw, AlpacaAssetRaw, AlpacaFetchCursor, AlpacaOpenOrderRaw, AlpacaOrder,
+    AlpacaOrderActivity, AlpacaOrderFull, AlpacaPositionRaw, AlpacaReplaceBody,
+    AlpacaReplaceResponse, AlpacaSubmitBody, AlpacaSubmitResponse, AlpacaTradeUpdate,
+    AlpacaTradeUpdatesResume,
 };
 pub use inbound::{
     build_inbound_batch_from_ws_update, mark_gap_detected, parse_ws_message, AlpacaWsMessage,
@@ -376,6 +377,16 @@ impl AlpacaBrokerAdapter {
             .map(normalize_open_order)
             .collect::<Result<Vec<_>, _>>()?;
         Ok(build_snapshot(now_utc, account, positions, orders))
+    }
+
+    /// Fetch read-only asset shortability metadata from Alpaca.
+    ///
+    /// Calls `GET /v2/assets/{symbol}`. This method does not submit, cancel,
+    /// replace, or inspect orders; it is used only as a shortability preflight
+    /// input for daemon policy gates.
+    pub fn fetch_asset(&self, symbol: &str) -> Result<AlpacaAssetRaw, BrokerError> {
+        let normalized = symbol.trim().to_ascii_uppercase();
+        self.get(&format!("/v2/assets/{normalized}"))
     }
 }
 // ---------------------------------------------------------------------------
