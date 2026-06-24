@@ -183,6 +183,45 @@ export interface MetadataSummary {
 }
 
 // ---------------------------------------------------------------------------
+// ASSET-CORE-01D-REGISTRY-V2-STATUS-01-COMBINED: status of the separate v2
+// instrument registry source configured via MQK_INSTRUMENT_REGISTRY_V2_PATH.
+// Operator visibility only; never proof of live/paper trading readiness.
+// ---------------------------------------------------------------------------
+
+export interface InstrumentRegistryV2EnabledCounts {
+  enabled: number;
+  paper_trading_enabled: number;
+  live_trading_enabled: number;
+}
+
+export type InstrumentRegistryV2SourceTruthState =
+  | "not_configured"
+  | "configured_valid"
+  | "registry_unavailable"
+  | "validation_failed";
+
+export interface InstrumentRegistryV2SourceStatusResponse {
+  truth_state: InstrumentRegistryV2SourceTruthState | string;
+  configured: boolean;
+  path: string | null;
+  source: string;
+  schema_version: number | null;
+  purpose: string;
+  used_for_trading: boolean;
+  enabled_for_live_trading: boolean;
+  enabled_for_paper_trading: boolean;
+  total_instruments: number;
+  asset_class_counts: Record<string, number>;
+  enabled_counts: InstrumentRegistryV2EnabledCounts;
+  non_equity_present: boolean;
+  non_equity_all_disabled: boolean;
+  has_economics_metadata: boolean;
+  sample_symbols: string[];
+  validation_errors: string[];
+  message: string;
+}
+
+// ---------------------------------------------------------------------------
 // GUI-OPS-01: Paper journal surface — cross-module composite type.
 // FillQualityRow (execution.ts) + PaperJournalAdmissionRow (ops.ts)
 // are combined here because system.ts is the only module that imports both.

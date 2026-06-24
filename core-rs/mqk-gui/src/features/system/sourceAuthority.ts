@@ -150,12 +150,18 @@ const PANEL_EVIDENCE_HINTS: Record<CorePanelKey, PanelEvidenceHints> = {
     broker: [],
     placeholder: ["status", "preflight", "configDiffs", "operatorTimeline", "actionCatalog"],
   },
-  // Config fingerprint and metadata are daemon runtime state. Config diffs are DB-persisted.
+  // Config fingerprint, metadata, and registry-v2 source status are daemon
+  // runtime state. Config diffs are DB-persisted.
   settings: {
     db: ["/system/config-diffs"],
-    runtime: ["/system/metadata", "/system/config-fingerprint", "/system/runtime-leadership"],
+    runtime: [
+      "/system/metadata",
+      "/system/instrument-registry-v2-source/status",
+      "/system/config-fingerprint",
+      "/system/runtime-leadership",
+    ],
     broker: [],
-    placeholder: ["metadata", "configFingerprint", "runtimeLeadership", "configDiffs"],
+    placeholder: ["metadata", "instrumentRegistryV2SourceStatus", "configFingerprint", "runtimeLeadership", "configDiffs"],
   },
   // Topology is daemon runtime state — no DB backing.
   topology: {

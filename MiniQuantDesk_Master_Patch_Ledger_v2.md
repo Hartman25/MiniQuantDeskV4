@@ -2539,3 +2539,17 @@ PORTFOLIO-LIVE-WEIGHTS-01
 `ASSET-CORE-01` status: still `PARTIAL`. The separate v2 source's configuration/validity/disabled-non-equity status and the static asset-capability matrix are now both genuinely operator-visible (daemon route + GUI panels), closing the specific visibility gap this patch targeted — but `InstrumentRegistryV2` is still never read by any trading/execution/risk/OMS/ingestion path, the v1 registry remains the sole source of trading truth, and the new GUI surfaces live on the Backtest Results screen rather than a dedicated System screen (see "Honest PARTIAL on placement" above).
 
 **Recommended next slice:** if a dedicated System/Settings screen is ever brought into a patch's file scope, move (not duplicate) the two new panels there and let `BacktestResultsScreen.tsx` link out to it instead; until then, the Backtest Results placement is the honest ceiling for this patch's scope.
+
+### GUI-SYSTEM-STATUS-SURFACE-01-COMBINED — CLOSED_LOCAL
+
+**Mission:** close `ASSET-CORE-01D-REGISTRY-V2-STATUS-01-COMBINED`'s GUI placement partial by moving the read-only InstrumentRegistryV2 source status and Asset Capability Matrix visibility off Backtest Results and onto the existing operator System/Status surface.
+
+**Repo evidence found:** `Settings / Operations` already exists in `core-rs/mqk-gui/src/features/screens/screenRegistry.tsx`, is registered in the operator monitor group, is reachable from the left rail, and already renders daemon endpoint plus operations metadata from `model.metadata`. That is the current repo-native System/Status operator surface; no duplicate System screen was added.
+
+**Built:** `InstrumentRegistryV2SourcePanel` and `AssetCapabilityMatrixPanel` were moved into `features/system/*` and rendered from `SettingsScreen`. Registry-v2 source status types and the read-only `GET /api/v1/system/instrument-registry-v2-source/status` GUI client now live under `features/system`, with compatibility re-exports left for the existing backtest tests. Backtest Results no longer renders or owns those unrelated system-status panels. The registry-v2 status helpers still label `not_configured`, `configured_valid`, `registry_unavailable`, and `validation_failed` truthfully; the asset capability helpers still fail closed on absent metadata and independently prove non-equity classes disabled from `entries`.
+
+**Safety confirmation:** backend files were not changed; daemon routes were not changed; no trading/runtime/broker/risk/portfolio/OMS/outbox/inbox/DB migration path was changed; no daemon live/paper runtime was started; no broker/provider calls; no paper/live orders; no live routing; no non-equity trading was enabled; smoke logs and the untracked ledger draft were untouched.
+
+**Validation:** GUI validation only: `npm test -- --run` and `npm run build` in `core-rs/mqk-gui`.
+
+**Relation to parent:** this closes the GUI placement partial from `ASSET-CORE-01D-REGISTRY-V2-STATUS-01-COMBINED`. Registry source health and disabled non-equity capability truth are now visible from the operator System/Status surface rather than relying on Backtest Results placement or API-only inspection.

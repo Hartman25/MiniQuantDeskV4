@@ -129,3 +129,14 @@ test("runtime leadership field is mixed because the route blends runtime and dur
 
   assert.equal(authority, "mixed");
 });
+
+test("settings source authority includes registry-v2 source status as runtime system metadata", () => {
+  const sources = classifyPanelSources(
+    baseDataSource({
+      realEndpoints: ["/api/v1/system/instrument-registry-v2-source/status"],
+    }),
+    true,
+  );
+
+  assert.equal(sources.settings, "runtime_memory");
+});

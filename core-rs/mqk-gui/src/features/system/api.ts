@@ -85,6 +85,7 @@ import type {
   ExecutionFlowSurface,
   ExecutionOrderRow,
   ExecutionSummary,
+  InstrumentRegistryV2SourceStatusResponse,
   ModeChangeGuidanceResponse,
   OrderCausalityResponse,
   OrderChartResponse,
@@ -120,6 +121,33 @@ import type {
 import { DEFAULT_PREFLIGHT, DEFAULT_STATUS } from "./types";
 
 export { invokeOperatorAction } from "./actions";
+
+export interface GetInstrumentRegistryV2SourceStatusResult {
+  ok: boolean;
+  status?: number;
+  data?: InstrumentRegistryV2SourceStatusResponse;
+  error?: string;
+}
+
+// Read-only status of the separate v2 registry source
+// (MQK_INSTRUMENT_REGISTRY_V2_PATH). Public route, no operator token. Never
+// used for trade submission.
+export async function getInstrumentRegistryV2SourceStatus(): Promise<GetInstrumentRegistryV2SourceStatusResult> {
+  const result = await fetchJsonCandidate<InstrumentRegistryV2SourceStatusResponse>(
+    "/api/v1/system/instrument-registry-v2-source/status",
+  );
+
+  if (!result.ok) {
+    return {
+      ok: false,
+      error: result.error === "HTTP 404"
+        ? "Instrument registry v2 source status API unavailable (route not found)."
+        : (result.error ?? "Instrument registry v2 source status fetch failed."),
+    };
+  }
+
+  return { ok: true, data: result.data };
+}
 
 // ---------------------------------------------------------------------------
 // Internal helpers (used only within fetchOperatorModel)

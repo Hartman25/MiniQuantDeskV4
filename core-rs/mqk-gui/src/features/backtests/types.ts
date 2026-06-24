@@ -1,3 +1,15 @@
+import type {
+  InstrumentRegistryV2EnabledCounts,
+  InstrumentRegistryV2SourceStatusResponse,
+  InstrumentRegistryV2SourceTruthState,
+} from "../system/types.ts";
+
+export type {
+  InstrumentRegistryV2EnabledCounts,
+  InstrumentRegistryV2SourceStatusResponse,
+  InstrumentRegistryV2SourceTruthState,
+};
+
 export interface BacktestManifest {
   schema_version: number;
   run_id: string;
@@ -453,39 +465,6 @@ export interface BacktestEconomicsSuggestionResponse {
 // enabled_for_paper_trading are always false — this source is read only by
 // the read-only GET /api/v1/backtests/economics-suggestion route.
 // ---------------------------------------------------------------------------
-
-export interface InstrumentRegistryV2EnabledCounts {
-  enabled: number;
-  paper_trading_enabled: number;
-  live_trading_enabled: number;
-}
-
-export type InstrumentRegistryV2SourceTruthState =
-  | "not_configured"
-  | "configured_valid"
-  | "registry_unavailable"
-  | "validation_failed";
-
-export interface InstrumentRegistryV2SourceStatusResponse {
-  truth_state: InstrumentRegistryV2SourceTruthState | string;
-  configured: boolean;
-  path: string | null;
-  source: string;
-  schema_version: number | null;
-  purpose: string;
-  used_for_trading: boolean;
-  enabled_for_live_trading: boolean;
-  enabled_for_paper_trading: boolean;
-  total_instruments: number;
-  asset_class_counts: Record<string, number>;
-  enabled_counts: InstrumentRegistryV2EnabledCounts;
-  non_equity_present: boolean;
-  non_equity_all_disabled: boolean;
-  has_economics_metadata: boolean;
-  sample_symbols: string[];
-  validation_errors: string[];
-  message: string;
-}
 
 export interface BacktestJobAcceptedResponse {
   accepted: boolean;

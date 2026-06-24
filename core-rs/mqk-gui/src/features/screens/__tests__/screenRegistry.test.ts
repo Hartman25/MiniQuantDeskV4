@@ -4,6 +4,7 @@ import {
   LEFT_RAIL_PRIMARY,
   LEFT_RAIL_SECONDARY,
 } from "../../../components/layout/leftRailNav.ts";
+import { MONITOR_GROUPS, SCREEN_REGISTRY } from "../screenRegistry.tsx";
 
 const ALL_LEFT_RAIL = [...LEFT_RAIL_PRIMARY, ...LEFT_RAIL_SECONDARY];
 
@@ -45,4 +46,11 @@ test("marketData and backtests are present in left-rail nav", () => {
 // 5. dashboard is in primary (smoke check that primary list is intact).
 test("dashboard is in LEFT_RAIL_PRIMARY", () => {
   assert.ok(LEFT_RAIL_PRIMARY.includes("dashboard"), "dashboard was removed from LEFT_RAIL_PRIMARY");
+});
+
+test("Settings / Operations is registered as the operator System/Status surface", () => {
+  assert.equal(SCREEN_REGISTRY.settings.title, "Settings / Operations");
+  assert.equal(SCREEN_REGISTRY.settings.monitorGroup, "operator");
+  assert.ok(MONITOR_GROUPS.operator.includes("settings"), "settings is not reachable in the operator monitor group");
+  assert.ok(ALL_LEFT_RAIL.includes("settings"), "settings was removed from the left rail");
 });

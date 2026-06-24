@@ -6,7 +6,6 @@ import type {
   EvidenceReviewArtifact,
   EvidenceReviewParseResult,
   FillRow,
-  InstrumentRegistryV2SourceStatusResponse,
   OrderRow,
   PaperReadinessParseResult,
   PaperReadinessReport,
@@ -22,6 +21,11 @@ import type {
   WatchlistPromotionDecision,
   WatchlistPromotionParseResult,
 } from "./types.ts";
+export {
+  describeInstrumentRegistryV2SourceNonEquity,
+  describeInstrumentRegistryV2SourceTradingUse,
+  instrumentRegistryV2SourceStatusLabel,
+} from "../system/instrumentRegistryV2Source.ts";
 
 export function parseManifest(json: string): BacktestManifest {
   const obj: unknown = JSON.parse(json);
@@ -231,56 +235,6 @@ export function describeEconomicsSuggestionTradability(
     return "not enabled for trading (suggestion only)";
   }
   return null;
-}
-
-// ---------------------------------------------------------------------------
-// ASSET-CORE-01D-REGISTRY-V2-STATUS-01-COMBINED: instrument registry v2
-// source status (MQK_INSTRUMENT_REGISTRY_V2_PATH) — pure render helpers.
-// ---------------------------------------------------------------------------
-
-/** One-line operator label for the configured v2 source's truth_state. */
-export function instrumentRegistryV2SourceStatusLabel(
-  s: InstrumentRegistryV2SourceStatusResponse,
-): string {
-  switch (s.truth_state) {
-    case "not_configured":
-      return "Not configured";
-    case "configured_valid":
-      return "Configured & valid";
-    case "registry_unavailable":
-      return "Configured — unavailable";
-    case "validation_failed":
-      return "Configured — validation failed";
-    default:
-      return s.truth_state;
-  }
-}
-
-/**
- * Truthful trading-use note, derived from the response's own boolean rather
- * than a hardcoded string -- if the backend invariant were ever violated
- * (`used_for_trading: true`), this surfaces a loud warning instead of
- * silently repeating a "never used for trading" claim that is no longer true.
- */
-export function describeInstrumentRegistryV2SourceTradingUse(
-  s: InstrumentRegistryV2SourceStatusResponse,
-): string {
-  if (s.used_for_trading) {
-    return "WARNING: backend reports this source IS used for trading — contact engineering before trusting this build.";
-  }
-  return "Read-only — used only for backtest economics suggestions, never for live or paper trading.";
-}
-
-/** Truthful non-equity-disablement note for the configured v2 source. */
-export function describeInstrumentRegistryV2SourceNonEquity(
-  s: InstrumentRegistryV2SourceStatusResponse,
-): string {
-  if (!s.non_equity_present) {
-    return "No non-equity instruments in this source.";
-  }
-  return s.non_equity_all_disabled
-    ? "Non-equity instruments are present and all disabled."
-    : "WARNING: non-equity instruments are present and NOT all disabled.";
 }
 
 /**
