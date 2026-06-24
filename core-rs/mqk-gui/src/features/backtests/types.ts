@@ -436,6 +436,11 @@ export interface BacktestEconomicsSuggestionResponse {
   initial_margin_micros: number | null;
   maintenance_margin_micros: number | null;
   reason: string | null;
+  /** Populated whenever a matching instrument is found; null otherwise. */
+  asset_class: string | null;
+  enabled: boolean | null;
+  paper_trading_enabled: boolean | null;
+  live_trading_enabled: boolean | null;
 }
 
 export interface BacktestJobAcceptedResponse {

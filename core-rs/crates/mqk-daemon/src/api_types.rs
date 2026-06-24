@@ -3638,6 +3638,14 @@ pub struct BacktestEconomicsRequest {
 /// Read-only operator hint for backtest economics. This is not a trading
 /// permission surface and does not make InstrumentRegistryV2 a live/runtime
 /// input.
+///
+/// INSTRUMENT-REGISTRY-V2-SOURCE-01-COMBINED: `asset_class`, `enabled`,
+/// `paper_trading_enabled`, and `live_trading_enabled` are populated whenever
+/// a matching instrument is found (v1-converted or from a configured separate
+/// v2 source), and `None` otherwise. They exist so an operator viewing a
+/// suggestion for a disabled/non-equity instrument (e.g. a future or crypto
+/// pair carried only in a configured v2 source) cannot mistake the presence
+/// of economics metadata for trading permission.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BacktestEconomicsSuggestionResponse {
     pub truth_state: String,
@@ -3647,6 +3655,10 @@ pub struct BacktestEconomicsSuggestionResponse {
     pub initial_margin_micros: Option<i64>,
     pub maintenance_margin_micros: Option<i64>,
     pub reason: Option<String>,
+    pub asset_class: Option<String>,
+    pub enabled: Option<bool>,
+    pub paper_trading_enabled: Option<bool>,
+    pub live_trading_enabled: Option<bool>,
 }
 
 fn default_backtest_job_source() -> String {

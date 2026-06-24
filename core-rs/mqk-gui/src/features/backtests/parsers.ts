@@ -1,4 +1,5 @@
 import type {
+  BacktestEconomicsSuggestionResponse,
   BacktestManifest,
   BacktestMetrics,
   EquityCurveRow,
@@ -213,6 +214,22 @@ export function classifyAlpha(alphaPct: number | null | undefined): AlphaSummary
   if (alphaPct > 0) return { label: "Outperformed buy & hold", tone: "good" };
   if (alphaPct < 0) return { label: "Underperformed buy & hold", tone: "bad" };
   return { label: "Matched buy & hold exactly", tone: "neutral" };
+}
+
+/**
+ * Truthful operator-facing tradability warning for a backtest economics
+ * suggestion. Returns null when `enabled` is unknown (e.g. not_found,
+ * registry_unavailable, validation_failed -- no instrument was matched) or
+ * `true` -- callers must never infer trading permission merely from the
+ * presence of suggested economics metadata (INSTRUMENT-REGISTRY-V2-SOURCE-01-COMBINED).
+ */
+export function describeEconomicsSuggestionTradability(
+  s: BacktestEconomicsSuggestionResponse,
+): string | null {
+  if (s.enabled === false) {
+    return "not enabled for trading (suggestion only)";
+  }
+  return null;
 }
 
 /**

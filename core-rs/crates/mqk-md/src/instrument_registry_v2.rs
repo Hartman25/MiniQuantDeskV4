@@ -1464,4 +1464,67 @@ mod tests {
 
         assert_eq!(baseline, flipped);
     }
+
+    // ── INSTRUMENT-REGISTRY-V2-SOURCE-01-COMBINED: committed example fixture ──
+
+    fn instruments_v2_example_fixture_path() -> PathBuf {
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        PathBuf::from(manifest_dir)
+            .join("../../../config/instruments/instruments_v2.backtest_suggestions.example.json")
+    }
+
+    // EX-01: the committed example v2 fixture loads and validates cleanly, and
+    // every entry stays disabled/non-tradable while still carrying explicit
+    // economics metadata -- proving the file can demonstrate non-equity
+    // backtest economics suggestions without enabling any trading.
+    #[test]
+    fn ex01_committed_example_v2_fixture_loads_validates_and_stays_disabled() {
+        let registry = load_instrument_registry_v2(&instruments_v2_example_fixture_path())
+            .expect("committed example v2 fixture must load");
+        validate_registry_v2(&registry).expect("committed example v2 fixture must validate");
+        assert!(!registry.instruments.is_empty());
+        for inst in &registry.instruments {
+            assert!(
+                !inst.enabled,
+                "example fixture symbol={} must stay disabled",
+                inst.symbol
+            );
+            assert!(!inst.paper_trading_enabled, "symbol={}", inst.symbol);
+            assert!(!inst.live_trading_enabled, "symbol={}", inst.symbol);
+            assert_ne!(
+                inst.asset_class, "equity",
+                "example fixture symbol={} is meant to demonstrate non-equity economics",
+                inst.symbol
+            );
+            assert!(
+                inst.economics.is_some_and(|e| e.contract_multiplier.is_some()),
+                "example fixture symbol={} should demonstrate an explicit contract_multiplier",
+                inst.symbol
+            );
+        }
+    }
+
+    // EX-02: the suggestion helper reports "active"/"registry_v2_explicit" for
+    // every committed example fixture instrument (end-to-end through the same
+    // pure helper the daemon route calls), proving the file is wired
+    // correctly rather than merely well-formed JSON.
+    #[test]
+    fn ex02_committed_example_v2_fixture_instruments_yield_explicit_active_suggestions() {
+        let registry = load_instrument_registry_v2(&instruments_v2_example_fixture_path())
+            .expect("committed example v2 fixture must load");
+        for inst in &registry.instruments {
+            let suggestion = backtest_economics_suggestion_for_instrument(inst);
+            assert_eq!(suggestion.truth_state, "active", "symbol={}", inst.symbol);
+            assert_eq!(
+                suggestion.reason, "registry_v2_explicit",
+                "symbol={}",
+                inst.symbol
+            );
+            assert!(
+                suggestion.contract_multiplier.is_some(),
+                "symbol={}",
+                inst.symbol
+            );
+        }
+    }
 }

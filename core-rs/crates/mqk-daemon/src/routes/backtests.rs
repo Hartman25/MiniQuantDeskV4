@@ -485,6 +485,62 @@ pub(crate) async fn backtest_economics_suggestion(
             .into_response();
     }
 
+    // INSTRUMENT-REGISTRY-V2-SOURCE-01-COMBINED: when a separate v2 source is
+    // configured (MQK_INSTRUMENT_REGISTRY_V2_PATH), search it first. A
+    // configured-but-broken v2 source fails closed here (registry_unavailable
+    // / validation_failed) rather than silently falling back to v1 -- a bad
+    // explicit config must never look like success. A configured-and-valid
+    // v2 source that simply does not carry the requested symbol falls through
+    // to the unchanged v1 path below. `None` (the default, no env var set)
+    // skips this block entirely, so existing v1-only behavior is unchanged.
+    if let Some(v2_path) = st.instrument_registry_v2_path.clone() {
+        let path = Path::new(&v2_path);
+        if !path.exists() {
+            return Json(backtest_economics_suggestion_response(
+                "registry_unavailable",
+                requested_symbol,
+                None,
+                None,
+                None,
+                Some("configured instrument registry v2 path is unavailable".to_string()),
+            ))
+            .into_response();
+        }
+
+        let v2 = match mqk_md::instrument_registry_v2::load_instrument_registry_v2(path) {
+            Ok(registry) => registry,
+            Err(err) => {
+                return Json(backtest_economics_suggestion_response(
+                    "registry_unavailable",
+                    requested_symbol,
+                    None,
+                    None,
+                    None,
+                    Some(format!("instrument registry v2 load failed: {err}")),
+                ))
+                .into_response();
+            }
+        };
+
+        if let Err(err) = mqk_md::instrument_registry_v2::validate_registry_v2(&v2) {
+            return Json(backtest_economics_suggestion_response(
+                "validation_failed",
+                requested_symbol,
+                None,
+                None,
+                None,
+                Some(format!("instrument registry v2 validation failed: {err}")),
+            ))
+            .into_response();
+        }
+
+        if let Some(instrument) = find_v2_instrument_by_symbol(&v2, requested_symbol) {
+            return Json(backtest_economics_suggestion_for_found_instrument(instrument))
+                .into_response();
+        }
+        // Not found in the configured v2 source -- fall through to v1 below.
+    }
+
     let registry_path = st.instrument_registry_path.clone();
     if !Path::new(&registry_path).exists() {
         return Json(backtest_economics_suggestion_response(
@@ -527,11 +583,7 @@ pub(crate) async fn backtest_economics_suggestion(
         .into_response();
     }
 
-    let Some(instrument) = v2
-        .instruments
-        .iter()
-        .find(|inst| inst.symbol.eq_ignore_ascii_case(requested_symbol))
-    else {
+    let Some(instrument) = find_v2_instrument_by_symbol(&v2, requested_symbol) else {
         return Json(backtest_economics_suggestion_response(
             "not_found",
             requested_symbol,
@@ -545,26 +597,50 @@ pub(crate) async fn backtest_economics_suggestion(
 
     // BACKTEST-ECONOMICS-REGISTRY-MANIFEST-01: explicit registry-v2 economics
     // (when present) wins over the equity-default fallback, for any asset
-    // class. Today's only data path here is the converted v1 registry
-    // (equity/ETF only, never carries `economics`), so this only ever
-    // exercises the equity-default branch in production -- see
-    // `backtest_economics_suggestion_for_instrument`'s own tests for the
-    // explicit-economics proof via a fixture instrument.
-    let suggestion = mqk_md::instrument_registry_v2::backtest_economics_suggestion_for_instrument(
-        instrument,
-    );
-    Json(backtest_economics_suggestion_response(
-        suggestion.truth_state,
-        &instrument.symbol,
-        suggestion.contract_multiplier,
-        suggestion.initial_margin_micros,
-        suggestion.maintenance_margin_micros,
-        Some(suggestion.reason.to_string()),
-    ))
-    .into_response()
+    // class. The converted-v1 path is equity/ETF only and never carries
+    // `economics`, so this only ever exercises the equity-default branch when
+    // reached via v1 -- see `backtest_economics_suggestion_for_instrument`'s
+    // own tests, and the configured-v2-source branch above, for the
+    // explicit-economics proof.
+    Json(backtest_economics_suggestion_for_found_instrument(instrument)).into_response()
 }
 
-#[allow(clippy::too_many_arguments)]
+fn find_v2_instrument_by_symbol<'a>(
+    registry: &'a mqk_md::instrument_registry_v2::InstrumentRegistryV2,
+    symbol: &str,
+) -> Option<&'a mqk_md::instrument_registry_v2::InstrumentDefinitionV2> {
+    registry
+        .instruments
+        .iter()
+        .find(|inst| inst.symbol.eq_ignore_ascii_case(symbol))
+}
+
+/// Build the full suggestion response for a matched v2 instrument, including
+/// `asset_class`/`enabled`/`paper_trading_enabled`/`live_trading_enabled` so
+/// an operator can never mistake a disabled/non-equity suggestion (e.g. a
+/// future or crypto pair carried only in a configured v2 source) for trading
+/// permission.
+fn backtest_economics_suggestion_for_found_instrument(
+    instrument: &mqk_md::instrument_registry_v2::InstrumentDefinitionV2,
+) -> BacktestEconomicsSuggestionResponse {
+    let suggestion =
+        mqk_md::instrument_registry_v2::backtest_economics_suggestion_for_instrument(instrument);
+    BacktestEconomicsSuggestionResponse {
+        asset_class: Some(instrument.asset_class.clone()),
+        enabled: Some(instrument.enabled),
+        paper_trading_enabled: Some(instrument.paper_trading_enabled),
+        live_trading_enabled: Some(instrument.live_trading_enabled),
+        ..backtest_economics_suggestion_response(
+            suggestion.truth_state,
+            &instrument.symbol,
+            suggestion.contract_multiplier,
+            suggestion.initial_margin_micros,
+            suggestion.maintenance_margin_micros,
+            Some(suggestion.reason.to_string()),
+        )
+    }
+}
+
 fn backtest_economics_suggestion_response(
     truth_state: &str,
     symbol: &str,
@@ -581,6 +657,10 @@ fn backtest_economics_suggestion_response(
         initial_margin_micros,
         maintenance_margin_micros,
         reason,
+        asset_class: None,
+        enabled: None,
+        paper_trading_enabled: None,
+        live_trading_enabled: None,
     }
 }
 

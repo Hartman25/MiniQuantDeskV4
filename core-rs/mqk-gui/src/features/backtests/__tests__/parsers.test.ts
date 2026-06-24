@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   classifyAlpha,
   deriveStrategyFitGateFlags,
+  describeEconomicsSuggestionTradability,
   describeExecutionWarnings,
   describeNoTradeActivity,
   DISCORD_WORKFLOWS,
@@ -24,7 +25,7 @@ import {
   parseWatchlistPromotion,
   timeframeLabelFromSecs,
 } from "../parsers.ts";
-import type { BacktestMetrics } from "../types.ts";
+import type { BacktestEconomicsSuggestionResponse, BacktestMetrics } from "../types.ts";
 
 // --- baseMetrics test fixture helper ---
 
@@ -662,6 +663,52 @@ test("classifyAlpha labels zero alpha as an exact match", () => {
   const result = classifyAlpha(0);
   assert.equal(result.tone, "neutral");
   assert.match(result.label, /Matched/);
+});
+
+// --- describeEconomicsSuggestionTradability ---
+
+function baseEconomicsSuggestion(
+  overrides: Partial<BacktestEconomicsSuggestionResponse> = {},
+): BacktestEconomicsSuggestionResponse {
+  return {
+    truth_state: "active",
+    symbol: "AAPL",
+    source: "instrument_registry_v2",
+    contract_multiplier: 1,
+    initial_margin_micros: null,
+    maintenance_margin_micros: null,
+    reason: "equity_default",
+    asset_class: "equity",
+    enabled: true,
+    paper_trading_enabled: false,
+    live_trading_enabled: false,
+    ...overrides,
+  };
+}
+
+test("describeEconomicsSuggestionTradability returns null for an enabled instrument", () => {
+  const result = describeEconomicsSuggestionTradability(baseEconomicsSuggestion({ enabled: true }));
+  assert.equal(result, null);
+});
+
+test("describeEconomicsSuggestionTradability warns when the instrument is explicitly disabled", () => {
+  const result = describeEconomicsSuggestionTradability(
+    baseEconomicsSuggestion({ enabled: false, asset_class: "future" }),
+  );
+  assert.match(result ?? "", /not enabled for trading/i);
+});
+
+test("describeEconomicsSuggestionTradability returns null when enablement is unknown (e.g. not_found)", () => {
+  const result = describeEconomicsSuggestionTradability(
+    baseEconomicsSuggestion({
+      truth_state: "not_found",
+      enabled: null,
+      asset_class: null,
+      contract_multiplier: null,
+      reason: "symbol not found in instrument registry",
+    }),
+  );
+  assert.equal(result, null);
 });
 
 // --- describeNoTradeActivity ---

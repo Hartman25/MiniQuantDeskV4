@@ -1,0 +1,73 @@
+{
+  "schema_version": 1,
+  "instruments": [
+    {
+      "instrument_id": "future:CME:ES_TEST",
+      "symbol": "ES_TEST",
+      "asset_class": "future",
+      "venue": "CME",
+      "currency": "USD",
+      "enabled": false,
+      "paper_trading_enabled": false,
+      "live_trading_enabled": false,
+      "timeframes": ["1D"],
+      "contract": {
+        "kind": "future",
+        "root": "ES",
+        "expiry": "2026-09-18",
+        "multiplier": 50,
+        "tick_size_micros": 250000
+      },
+      "notes": "EXAMPLE/TEST fixture for INSTRUMENT-REGISTRY-V2-SOURCE-01-COMBINED. Not a real tradable instrument: disabled, not ingested, not paper- or live-tradable, and never read by any broker/runtime/risk/OMS path. Demonstrates explicit futures contract economics for the read-only GET /api/v1/backtests/economics-suggestion route only.",
+      "economics": {
+        "contract_multiplier": 50,
+        "initial_margin_micros": 13200000000,
+        "maintenance_margin_micros": 12000000000
+      }
+    },
+    {
+      "instrument_id": "future:CME:MES_TEST",
+      "symbol": "MES_TEST",
+      "asset_class": "future",
+      "venue": "CME",
+      "currency": "USD",
+      "enabled": false,
+      "paper_trading_enabled": false,
+      "live_trading_enabled": false,
+      "timeframes": ["1D"],
+      "contract": {
+        "kind": "future",
+        "root": "MES",
+        "expiry": "2026-09-18",
+        "multiplier": 5,
+        "tick_size_micros": 250000
+      },
+      "notes": "EXAMPLE/TEST fixture for INSTRUMENT-REGISTRY-V2-SOURCE-01-COMBINED. Not a real tradable instrument: disabled, not ingested, not paper- or live-tradable, and never read by any broker/runtime/risk/OMS path. Demonstrates explicit micro-futures contract economics for the read-only GET /api/v1/backtests/economics-suggestion route only.",
+      "economics": {
+        "contract_multiplier": 5,
+        "initial_margin_micros": 1320000000,
+        "maintenance_margin_micros": 1200000000
+      }
+    },
+    {
+      "instrument_id": "crypto:GLOBAL:BTCUSD_TEST",
+      "symbol": "BTCUSD_TEST",
+      "asset_class": "crypto",
+      "currency": "USD",
+      "quote_currency": "USD",
+      "enabled": false,
+      "paper_trading_enabled": false,
+      "live_trading_enabled": false,
+      "timeframes": ["1D"],
+      "contract": {
+        "kind": "crypto_pair",
+        "base": "BTC",
+        "quote": "USD"
+      },
+      "notes": "EXAMPLE/TEST fixture for INSTRUMENT-REGISTRY-V2-SOURCE-01-COMBINED. Not a real tradable instrument: disabled, not ingested, not paper- or live-tradable, and never read by any broker/runtime/risk/OMS path. Demonstrates explicit unit-multiplier crypto economics for the read-only GET /api/v1/backtests/economics-suggestion route only.",
+      "economics": {
+        "contract_multiplier": 1
+      }
+    }
+  ]
+}

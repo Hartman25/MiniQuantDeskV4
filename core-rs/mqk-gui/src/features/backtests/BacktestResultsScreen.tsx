@@ -5,6 +5,7 @@ import { StatCard } from "../../components/common/StatCard";
 import { formatDateTime } from "../../lib/format";
 import {
   classifyAlpha,
+  describeEconomicsSuggestionTradability,
   describeExecutionWarnings,
   describeNoTradeActivity,
   DISCORD_WORKFLOWS,
@@ -2586,6 +2587,13 @@ export function BacktestResultsScreen() {
               <div className="bt-field-hint" style={{ marginTop: 6, fontSize: "0.79rem", color: "var(--text-muted, #888)" }}>
                 Registry economics: <strong>{economicsSuggestion.truth_state}</strong>
                 {economicsSuggestion.contract_multiplier !== null ? <> · multiplier <code>{economicsSuggestion.contract_multiplier}</code></> : null}
+                {economicsSuggestion.asset_class ? <> · {economicsSuggestion.asset_class}</> : null}
+                {describeEconomicsSuggestionTradability(economicsSuggestion) ? (
+                  <>
+                    {" "}
+                    · <strong style={{ color: "var(--warning)" }}>{describeEconomicsSuggestionTradability(economicsSuggestion)}</strong>
+                  </>
+                ) : null}
                 {economicsSuggestion.reason ? <> · {economicsSuggestion.reason}</> : null}
               </div>
             )}
