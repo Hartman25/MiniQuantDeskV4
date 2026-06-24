@@ -2,6 +2,7 @@
 
 //! Execution-side types + order intent generation utilities.
 
+pub mod asset_risk_policy;
 pub mod broker_error;
 mod engine;
 pub mod gateway;
@@ -34,6 +35,15 @@ pub use types::{
 pub use types::{
     equity_instrument, ExecutionIntentV2, IntentV2Contract, IntentV2Routability,
     IntentV2Validation, OrderIntentV2,
+};
+
+pub use asset_risk_policy::{
+    asset_risk_policy_for_asset_class, default_asset_risk_policies,
+    evaluate_asset_risk_for_order_intent_v2,
+    evaluate_asset_risk_for_order_intent_v2_with_caller_routing_request, AssetRiskPolicy,
+    AssetRiskPolicyState, AssetRiskRouteDecision, AssetRiskRouteEvaluation,
+    ASSET_RISK_NON_EQUITY_ROUTING_ENABLED, ASSET_RISK_POLICY_SOURCE,
+    ASSET_RISK_PRODUCTION_ENFORCEMENT_ENABLED,
 };
 
 // Price fixed-point helpers expected by testkit.

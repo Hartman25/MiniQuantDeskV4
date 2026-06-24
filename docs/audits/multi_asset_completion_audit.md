@@ -631,3 +631,13 @@ Concretely: `OrderIntentV2` now carries additive v2-only model metadata for inst
 No daemon/API/GUI status surface was added in this slice; the change stayed in `mqk-execution` model/tests plus docs. No broker adapter, runtime, OMS/outbox/inbox, risk, portfolio, DB migration, provider, registry trading path, or current equity lifecycle code was changed.
 
 **Full detail, exact test names, and validation commands:** `MiniQuantDesk_Master_Patch_Ledger_v2.md`'s `ASSET-CORE-02-ORDER-INTENT-V2-FOUNDATION-01-COMBINED` entry (end of §6).
+
+## 37. ASSET-CORE-03-RISK-ROUTER-FOUNDATION-01-COMBINED Closure Note (maintenance)
+
+ASSET-CORE-03-RISK-ROUTER-FOUNDATION-01-COMBINED added a pure asset-aware risk policy/router foundation for equity, ETF-as-equity, crypto, futures, options, forex, and rates/fixed-income scaffolds. The model remains foundation-only and is not wired into production live/paper execution; existing fail-closed disabled-asset gates remain the active enforcement boundary and non-equity remains disabled.
+
+Concretely: `mqk-execution` now exposes static `AssetRiskPolicy` summaries, `AssetRiskRouteDecision`, and a pure `OrderIntentV2` bridge that validates intent structure before policy routing. Equity and ETF-as-equity fixtures classify only as model-level `AllowedEquity` candidates. Crypto, future, option, and forex fixtures remain `DisabledAssetClass`; rates/fixed-income remains a research-only scaffold unless represented by current equity/ETF metadata. Caller-supplied routing flags cannot force disabled non-equity to become allowed.
+
+No daemon/API/GUI status surface was added in this slice. No broker adapter, runtime, OMS/outbox/inbox, `mqk-risk`, `RiskRequestContext`, portfolio accounting, DB migration, provider, registry trading path, or current equity order lifecycle code was changed.
+
+**Full detail, exact test names, and validation commands:** `MiniQuantDesk_Master_Patch_Ledger_v2.md`'s `ASSET-CORE-03-RISK-ROUTER-FOUNDATION-01-COMBINED` entry (end of §6).
