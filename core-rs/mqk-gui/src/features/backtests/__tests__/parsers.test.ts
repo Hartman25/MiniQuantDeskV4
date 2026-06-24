@@ -5,11 +5,14 @@ import {
   deriveStrategyFitGateFlags,
   describeEconomicsSuggestionTradability,
   describeExecutionWarnings,
+  describeInstrumentRegistryV2SourceNonEquity,
+  describeInstrumentRegistryV2SourceTradingUse,
   describeNoTradeActivity,
   DISCORD_WORKFLOWS,
   formatMicrosAsDollars,
   formatNullableNumber,
   formatNullablePercent,
+  instrumentRegistryV2SourceStatusLabel,
   manifestTimeframeLabel,
   microsToUsd,
   parseCsvRows,
@@ -25,7 +28,11 @@ import {
   parseWatchlistPromotion,
   timeframeLabelFromSecs,
 } from "../parsers.ts";
-import type { BacktestEconomicsSuggestionResponse, BacktestMetrics } from "../types.ts";
+import type {
+  BacktestEconomicsSuggestionResponse,
+  BacktestMetrics,
+  InstrumentRegistryV2SourceStatusResponse,
+} from "../types.ts";
 
 // --- baseMetrics test fixture helper ---
 
@@ -709,6 +716,109 @@ test("describeEconomicsSuggestionTradability returns null when enablement is unk
     }),
   );
   assert.equal(result, null);
+});
+
+// --- instrument registry v2 source status helpers ---
+
+function baseV2SourceStatus(
+  overrides: Partial<InstrumentRegistryV2SourceStatusResponse> = {},
+): InstrumentRegistryV2SourceStatusResponse {
+  return {
+    truth_state: "not_configured",
+    configured: false,
+    path: null,
+    source: "MQK_INSTRUMENT_REGISTRY_V2_PATH",
+    schema_version: null,
+    purpose: "backtest_economics_suggestions_only",
+    used_for_trading: false,
+    enabled_for_live_trading: false,
+    enabled_for_paper_trading: false,
+    total_instruments: 0,
+    asset_class_counts: {},
+    enabled_counts: { enabled: 0, paper_trading_enabled: 0, live_trading_enabled: 0 },
+    non_equity_present: false,
+    non_equity_all_disabled: true,
+    has_economics_metadata: false,
+    sample_symbols: [],
+    validation_errors: [],
+    message: "MQK_INSTRUMENT_REGISTRY_V2_PATH is not set; no separate v2 registry source is configured.",
+    ...overrides,
+  };
+}
+
+function configuredValidV2SourceStatus(): InstrumentRegistryV2SourceStatusResponse {
+  return baseV2SourceStatus({
+    truth_state: "configured_valid",
+    configured: true,
+    path: "config/instruments/instruments_v2.backtest_suggestions.example.json",
+    schema_version: 1,
+    total_instruments: 3,
+    asset_class_counts: { future: 2, crypto: 1 },
+    non_equity_present: true,
+    non_equity_all_disabled: true,
+    has_economics_metadata: true,
+    sample_symbols: ["ES_TEST", "MES_TEST", "BTCUSD_TEST"],
+    message: "Configured v2 registry source is valid and is used only for read-only backtest economics suggestions.",
+  });
+}
+
+test("instrumentRegistryV2SourceStatusLabel labels not_configured", () => {
+  assert.equal(instrumentRegistryV2SourceStatusLabel(baseV2SourceStatus()), "Not configured");
+});
+
+test("instrumentRegistryV2SourceStatusLabel labels configured_valid", () => {
+  assert.equal(
+    instrumentRegistryV2SourceStatusLabel(configuredValidV2SourceStatus()),
+    "Configured & valid",
+  );
+});
+
+test("instrumentRegistryV2SourceStatusLabel labels registry_unavailable", () => {
+  const status = baseV2SourceStatus({
+    truth_state: "registry_unavailable",
+    configured: true,
+    path: "/nonexistent/path.json",
+  });
+  assert.equal(instrumentRegistryV2SourceStatusLabel(status), "Configured — unavailable");
+});
+
+test("instrumentRegistryV2SourceStatusLabel labels validation_failed", () => {
+  const status = baseV2SourceStatus({
+    truth_state: "validation_failed",
+    configured: true,
+    path: "/tmp/bad.json",
+    validation_errors: ["instrument_registry_v2: enabled non-equity instrument ..."],
+  });
+  assert.equal(instrumentRegistryV2SourceStatusLabel(status), "Configured — validation failed");
+});
+
+test("describeInstrumentRegistryV2SourceTradingUse reports read-only when used_for_trading is false", () => {
+  const result = describeInstrumentRegistryV2SourceTradingUse(configuredValidV2SourceStatus());
+  assert.match(result, /Read-only/);
+  assert.match(result, /never for live or paper trading/);
+});
+
+// Adversarial fixture: proves the helper derives its language from the
+// response field rather than hardcoding a "never used for trading" claim.
+test("describeInstrumentRegistryV2SourceTradingUse warns loudly if used_for_trading were ever true", () => {
+  const status = baseV2SourceStatus({ used_for_trading: true });
+  assert.match(describeInstrumentRegistryV2SourceTradingUse(status), /WARNING/);
+});
+
+test("describeInstrumentRegistryV2SourceNonEquity reports 'no non-equity instruments' when absent", () => {
+  const result = describeInstrumentRegistryV2SourceNonEquity(baseV2SourceStatus());
+  assert.match(result, /No non-equity instruments/);
+});
+
+test("describeInstrumentRegistryV2SourceNonEquity proves disabled-and-present for the committed example shape", () => {
+  const result = describeInstrumentRegistryV2SourceNonEquity(configuredValidV2SourceStatus());
+  assert.match(result, /present and all disabled/);
+});
+
+test("describeInstrumentRegistryV2SourceNonEquity warns when non-equity is present but not all disabled", () => {
+  const status = configuredValidV2SourceStatus();
+  status.non_equity_all_disabled = false;
+  assert.match(describeInstrumentRegistryV2SourceNonEquity(status), /WARNING/);
 });
 
 // --- describeNoTradeActivity ---

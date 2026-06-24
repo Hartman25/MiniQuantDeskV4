@@ -1593,6 +1593,82 @@ pub struct InstrumentRegistryV2StatusResponse {
 }
 
 // ---------------------------------------------------------------------------
+// /api/v1/system/instrument-registry-v2-source/status — ASSET-CORE-01D
+// ---------------------------------------------------------------------------
+
+/// Per-instrument enablement counts nested under
+/// [`InstrumentRegistryV2SourceStatusResponse`]. Observational only — these
+/// counts are never read to gate, block, or route any order.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InstrumentRegistryV2EnabledCounts {
+    pub enabled: usize,
+    pub paper_trading_enabled: usize,
+    pub live_trading_enabled: usize,
+}
+
+/// Read-only operator-visibility status for the separate v2 registry
+/// **source** configured via `MQK_INSTRUMENT_REGISTRY_V2_PATH`
+/// (ASSET-CORE-01D-REGISTRY-V2-STATUS-01-COMBINED).
+///
+/// This is a distinct surface from
+/// [`InstrumentRegistryV2StatusResponse`] (`/api/v1/system/instrument-registry-v2/status`,
+/// ASSET-CORE-01C), which converts the *v1* registry (`equities.json`) to v2
+/// shape for diagnostics. This response instead answers: is a *separate* v2
+/// source configured, and if so, what does it contain? The only production
+/// reader of `AppState::instrument_registry_v2_path` is the read-only
+/// `GET /api/v1/backtests/economics-suggestion` route
+/// (INSTRUMENT-REGISTRY-V2-SOURCE-01-COMBINED) — `used_for_trading`,
+/// `enabled_for_live_trading`, and `enabled_for_paper_trading` are always
+/// `false`, independent of any per-instrument flag in the configured file.
+///
+/// `truth_state`:
+/// - `"not_configured"` — `MQK_INSTRUMENT_REGISTRY_V2_PATH` is unset.
+/// - `"configured_valid"` — configured, loads, and validates cleanly.
+/// - `"registry_unavailable"` — configured but the file is missing/unreadable.
+/// - `"validation_failed"` — configured, loads, but fails `validate_registry_v2`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InstrumentRegistryV2SourceStatusResponse {
+    pub truth_state: String,
+    /// `true` iff `MQK_INSTRUMENT_REGISTRY_V2_PATH` is set, regardless of
+    /// whether the configured path is healthy.
+    pub configured: bool,
+    /// The configured path. `None` only when `configured` is `false`.
+    pub path: Option<String>,
+    /// Env var this source is read from. Always `"MQK_INSTRUMENT_REGISTRY_V2_PATH"`.
+    pub source: String,
+    /// `InstrumentRegistryV2::schema_version` once loaded; `None` otherwise.
+    pub schema_version: Option<u32>,
+    /// Always `"backtest_economics_suggestions_only"`.
+    pub purpose: String,
+    /// Always `false`. No daemon/runtime/ingest/risk/OMS/broker path reads
+    /// this source for any decision.
+    pub used_for_trading: bool,
+    /// Always `false`, independent of `enabled_counts.live_trading_enabled`.
+    pub enabled_for_live_trading: bool,
+    /// Always `false`, independent of `enabled_counts.paper_trading_enabled`.
+    pub enabled_for_paper_trading: bool,
+    pub total_instruments: usize,
+    /// Instrument count by `asset_class`. Empty unless `truth_state` is
+    /// `"configured_valid"`.
+    pub asset_class_counts: BTreeMap<String, usize>,
+    pub enabled_counts: InstrumentRegistryV2EnabledCounts,
+    pub non_equity_present: bool,
+    /// `true` when every non-equity instrument is disabled. Vacuously `true`
+    /// when `non_equity_present` is `false` (including on failure paths,
+    /// where there is nothing enabled to report).
+    pub non_equity_all_disabled: bool,
+    pub has_economics_metadata: bool,
+    /// First N symbols in registry order. Empty unless `truth_state` is
+    /// `"configured_valid"`.
+    pub sample_symbols: Vec<String>,
+    /// Populated only when `truth_state` is `"registry_unavailable"` or
+    /// `"validation_failed"`.
+    pub validation_errors: Vec<String>,
+    /// One-line human-readable summary for operator surfaces.
+    pub message: String,
+}
+
+// ---------------------------------------------------------------------------
 // /api/v1/ops/action  — canonical operator action dispatcher
 // ---------------------------------------------------------------------------
 

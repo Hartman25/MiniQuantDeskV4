@@ -14,6 +14,7 @@ import type {
   BacktestJobRequest,
   BacktestJobStatusKind,
   BacktestJobStatusResponse,
+  InstrumentRegistryV2SourceStatusResponse,
 } from "./types";
 
 // ---------------------------------------------------------------------------
@@ -190,6 +191,33 @@ export async function getBacktestEconomicsSuggestion(
       error: result.error === "HTTP 404"
         ? "Backtest economics suggestion API unavailable (route not found)."
         : (result.error ?? "Economics suggestion fetch failed."),
+    };
+  }
+
+  return { ok: true, data: result.data };
+}
+
+export interface GetInstrumentRegistryV2SourceStatusResult {
+  ok: boolean;
+  status?: number;
+  data?: InstrumentRegistryV2SourceStatusResponse;
+  error?: string;
+}
+
+// ASSET-CORE-01D-REGISTRY-V2-STATUS-01-COMBINED: read-only status of the
+// separate v2 registry source (MQK_INSTRUMENT_REGISTRY_V2_PATH). Public route,
+// no operator token. Never used for trade submission.
+export async function getInstrumentRegistryV2SourceStatus(): Promise<GetInstrumentRegistryV2SourceStatusResult> {
+  const result = await fetchJsonCandidate<InstrumentRegistryV2SourceStatusResponse>(
+    "/api/v1/system/instrument-registry-v2-source/status",
+  );
+
+  if (!result.ok) {
+    return {
+      ok: false,
+      error: result.error === "HTTP 404"
+        ? "Instrument registry v2 source status API unavailable (route not found)."
+        : (result.error ?? "Instrument registry v2 source status fetch failed."),
     };
   }
 

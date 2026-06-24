@@ -558,6 +558,102 @@ pub fn backtest_economics_suggestion_for_instrument(
     }
 }
 
+// ---------------------------------------------------------------------------
+// ASSET-CORE-01D-REGISTRY-V2-STATUS-01-COMBINED: read-only operator-visibility
+// summary for a configured v2 registry SOURCE (MQK_INSTRUMENT_REGISTRY_V2_PATH).
+// ---------------------------------------------------------------------------
+
+/// Cap on [`InstrumentRegistryV2Summary::sample_symbols`] length, so an
+/// arbitrarily large configured source still produces a bounded operator
+/// status payload.
+pub const SAMPLE_SYMBOLS_LIMIT: usize = 10;
+
+/// Pure, read-only summary of one [`InstrumentRegistryV2`] document.
+///
+/// Used only by operator-visibility surfaces (the daemon's
+/// registry-v2-source status route). Nothing here is read by, or implies
+/// enablement for, any trading/execution/ingestion/backtest path -- counting
+/// `enabled`/`paper_trading_enabled`/`live_trading_enabled` is observational
+/// only.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct InstrumentRegistryV2Summary {
+    pub total_instruments: usize,
+    /// Instrument count by `asset_class`. Counts all entries, not just enabled.
+    pub asset_class_counts: BTreeMap<String, usize>,
+    pub enabled_count: usize,
+    pub paper_trading_enabled_count: usize,
+    pub live_trading_enabled_count: usize,
+    pub non_equity_count: usize,
+    pub non_equity_present: bool,
+    /// `true` when every non-equity instrument has `enabled == false`.
+    /// Vacuously `true` when `non_equity_present` is `false`.
+    pub non_equity_all_disabled: bool,
+    /// `true` when at least one instrument carries `economics` metadata.
+    pub has_economics_metadata: bool,
+    /// First [`SAMPLE_SYMBOLS_LIMIT`] symbols in registry order (deterministic;
+    /// not sorted or randomized).
+    pub sample_symbols: Vec<String>,
+}
+
+/// Summarize `registry` for operator visibility. Pure; no IO. The daemon
+/// route that calls this never uses the result to gate, block, or route any
+/// order -- see module docs and [`InstrumentRegistryV2Summary`].
+pub fn summarize_instrument_registry_v2_status(
+    registry: &InstrumentRegistryV2,
+) -> InstrumentRegistryV2Summary {
+    let mut asset_class_counts: BTreeMap<String, usize> = BTreeMap::new();
+    let mut enabled_count = 0usize;
+    let mut paper_trading_enabled_count = 0usize;
+    let mut live_trading_enabled_count = 0usize;
+    let mut non_equity_count = 0usize;
+    let mut non_equity_all_disabled = true;
+    let mut has_economics_metadata = false;
+
+    for inst in &registry.instruments {
+        *asset_class_counts
+            .entry(inst.asset_class.clone())
+            .or_insert(0) += 1;
+        if inst.enabled {
+            enabled_count += 1;
+        }
+        if inst.paper_trading_enabled {
+            paper_trading_enabled_count += 1;
+        }
+        if inst.live_trading_enabled {
+            live_trading_enabled_count += 1;
+        }
+        if inst.asset_class != "equity" {
+            non_equity_count += 1;
+            if inst.enabled {
+                non_equity_all_disabled = false;
+            }
+        }
+        if inst.economics.is_some() {
+            has_economics_metadata = true;
+        }
+    }
+
+    let sample_symbols = registry
+        .instruments
+        .iter()
+        .take(SAMPLE_SYMBOLS_LIMIT)
+        .map(|inst| inst.symbol.clone())
+        .collect();
+
+    InstrumentRegistryV2Summary {
+        total_instruments: registry.instruments.len(),
+        asset_class_counts,
+        enabled_count,
+        paper_trading_enabled_count,
+        live_trading_enabled_count,
+        non_equity_count,
+        non_equity_present: non_equity_count > 0,
+        non_equity_all_disabled,
+        has_economics_metadata,
+        sample_symbols,
+    }
+}
+
 /// Convert one v1 `TrackedInstrument` into its v2 shape. Pure; no IO; does not
 /// mutate or read from `input` beyond field access. `provider_symbols` carries
 /// exactly the one provider identity v1 already proves (`provider` ->
@@ -1526,5 +1622,165 @@ mod tests {
                 inst.symbol
             );
         }
+    }
+
+    // ── ASSET-CORE-01D: summarize_instrument_registry_v2_status ────────────
+
+    // V2STATUS-01: asset_class_counts tallies every instrument, mixed classes.
+    #[test]
+    fn v2status_01_summary_counts_asset_classes_correctly() {
+        let registry = registry_of(vec![
+            base_equity("AAPL"),
+            base_etf("SPY"),
+            base_future("ES2026U"),
+            base_crypto("BTC/USD"),
+        ]);
+        let summary = summarize_instrument_registry_v2_status(&registry);
+
+        assert_eq!(summary.total_instruments, 4);
+        assert_eq!(summary.asset_class_counts["equity"], 2);
+        assert_eq!(summary.asset_class_counts["future"], 1);
+        assert_eq!(summary.asset_class_counts["crypto"], 1);
+        assert_eq!(summary.asset_class_counts.len(), 3);
+    }
+
+    // V2STATUS-02: enabled/paper/live counts tally independently of each other.
+    #[test]
+    fn v2status_02_summary_counts_enabled_paper_live_flags_correctly() {
+        let mut paper_only = base_equity("MSFT");
+        paper_only.instrument_id = "equity:US:MSFT".to_string();
+        paper_only.paper_trading_enabled = true;
+
+        let mut live_only = base_equity("GOOG");
+        live_only.instrument_id = "equity:US:GOOG".to_string();
+        live_only.enabled = false;
+        live_only.live_trading_enabled = true;
+
+        let registry = registry_of(vec![base_equity("AAPL"), paper_only, live_only]);
+        let summary = summarize_instrument_registry_v2_status(&registry);
+
+        assert_eq!(summary.enabled_count, 2, "AAPL + MSFT are enabled");
+        assert_eq!(summary.paper_trading_enabled_count, 1);
+        assert_eq!(summary.live_trading_enabled_count, 1);
+    }
+
+    // V2STATUS-03: non_equity_all_disabled is true when every non-equity
+    // instrument is disabled (the only production-safe configuration).
+    #[test]
+    fn v2status_03_summary_non_equity_all_disabled_true_when_all_disabled() {
+        let registry = registry_of(vec![
+            base_equity("AAPL"),
+            base_future("ES2026U"),
+            base_crypto("BTC/USD"),
+        ]);
+        let summary = summarize_instrument_registry_v2_status(&registry);
+
+        assert!(summary.non_equity_present);
+        assert_eq!(summary.non_equity_count, 2);
+        assert!(summary.non_equity_all_disabled);
+    }
+
+    // V2STATUS-03b: an enabled non-equity instrument (test-only escape hatch)
+    // flips non_equity_all_disabled to false -- the summary must not hide it.
+    #[test]
+    fn v2status_03b_summary_non_equity_all_disabled_false_when_any_enabled() {
+        let mut enabled_future = base_future("ES2026U");
+        enabled_future.enabled = true;
+        enabled_future.allow_enabled_non_equity_for_testing = true;
+        enabled_future
+            .provider_symbols
+            .insert("synthetic".to_string(), "ES".to_string());
+
+        let registry = registry_of(vec![base_equity("AAPL"), enabled_future]);
+        let summary = summarize_instrument_registry_v2_status(&registry);
+
+        assert!(!summary.non_equity_all_disabled);
+    }
+
+    // V2STATUS-03c: with zero non-equity instruments, non_equity_present is
+    // false and non_equity_all_disabled is vacuously true.
+    #[test]
+    fn v2status_03c_summary_non_equity_all_disabled_vacuously_true_when_no_non_equity() {
+        let registry = registry_of(vec![base_equity("AAPL"), base_etf("SPY")]);
+        let summary = summarize_instrument_registry_v2_status(&registry);
+
+        assert!(!summary.non_equity_present);
+        assert_eq!(summary.non_equity_count, 0);
+        assert!(summary.non_equity_all_disabled);
+    }
+
+    // V2STATUS-04: has_economics_metadata is true iff at least one instrument
+    // carries `economics`.
+    #[test]
+    fn v2status_04_summary_has_economics_metadata_true_when_any_present() {
+        let with_econ = with_economics(
+            base_future("ES2026U"),
+            InstrumentEconomicsMetadataV2 {
+                contract_multiplier: Some(50),
+                initial_margin_micros: None,
+                maintenance_margin_micros: None,
+            },
+        );
+        let registry = registry_of(vec![base_equity("AAPL"), with_econ]);
+        let summary = summarize_instrument_registry_v2_status(&registry);
+
+        assert!(summary.has_economics_metadata);
+    }
+
+    // V2STATUS-04b: has_economics_metadata is false when no instrument carries
+    // `economics` -- must not default to true.
+    #[test]
+    fn v2status_04b_summary_has_economics_metadata_false_when_none_present() {
+        let registry = registry_of(vec![base_equity("AAPL"), base_future("ES2026U")]);
+        let summary = summarize_instrument_registry_v2_status(&registry);
+
+        assert!(!summary.has_economics_metadata);
+    }
+
+    // V2STATUS-05: sample_symbols preserves registry order and is capped at
+    // SAMPLE_SYMBOLS_LIMIT for a larger registry.
+    #[test]
+    fn v2status_05_summary_sample_symbols_capped_and_ordered() {
+        let instruments: Vec<InstrumentDefinitionV2> = (0..(SAMPLE_SYMBOLS_LIMIT + 5))
+            .map(|i| {
+                let mut inst = base_equity(&format!("SYM{i}"));
+                inst.instrument_id = format!("equity:US:SYM{i}");
+                inst
+            })
+            .collect();
+        let registry = registry_of(instruments);
+        let summary = summarize_instrument_registry_v2_status(&registry);
+
+        assert_eq!(summary.sample_symbols.len(), SAMPLE_SYMBOLS_LIMIT);
+        assert_eq!(summary.sample_symbols[0], "SYM0");
+        assert_eq!(summary.sample_symbols[SAMPLE_SYMBOLS_LIMIT - 1], format!("SYM{}", SAMPLE_SYMBOLS_LIMIT - 1));
+    }
+
+    // V2STATUS-06: the committed example v2 fixture summarizes to the exact
+    // shape ASSET-CORE-01D's daemon route response documents: 3 instruments
+    // (2 future + 1 crypto), all disabled, all carrying economics metadata.
+    #[test]
+    fn v2status_06_committed_example_fixture_summary_matches_expected_shape() {
+        let registry = load_instrument_registry_v2(&instruments_v2_example_fixture_path())
+            .expect("committed example v2 fixture must load");
+        let summary = summarize_instrument_registry_v2_status(&registry);
+
+        assert_eq!(summary.total_instruments, 3);
+        assert_eq!(summary.asset_class_counts["future"], 2);
+        assert_eq!(summary.asset_class_counts["crypto"], 1);
+        assert_eq!(summary.enabled_count, 0);
+        assert_eq!(summary.paper_trading_enabled_count, 0);
+        assert_eq!(summary.live_trading_enabled_count, 0);
+        assert!(summary.non_equity_present);
+        assert!(summary.non_equity_all_disabled);
+        assert!(summary.has_economics_metadata);
+        assert_eq!(
+            summary.sample_symbols,
+            vec![
+                "ES_TEST".to_string(),
+                "MES_TEST".to_string(),
+                "BTCUSD_TEST".to_string(),
+            ]
+        );
     }
 }

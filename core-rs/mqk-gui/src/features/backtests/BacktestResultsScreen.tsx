@@ -7,12 +7,15 @@ import {
   classifyAlpha,
   describeEconomicsSuggestionTradability,
   describeExecutionWarnings,
+  describeInstrumentRegistryV2SourceNonEquity,
+  describeInstrumentRegistryV2SourceTradingUse,
   describeNoTradeActivity,
   DISCORD_WORKFLOWS,
   EVIDENCE_REVIEW_SCHEMA_VERSION,
   formatMicrosAsDollars,
   formatNullableNumber,
   formatNullablePercent,
+  instrumentRegistryV2SourceStatusLabel,
   manifestTimeframeLabel,
   timeframeLabelFromSecs,
   PAPER_READINESS_SCHEMA_VERSION,
@@ -40,10 +43,19 @@ import {
   extractArtifactDir,
   getBacktestEconomicsSuggestion,
   getBacktestJob,
+  getInstrumentRegistryV2SourceStatus,
   isTerminalJobStatus,
   normalizeJobStatus,
   submitBacktestJob,
 } from "./api.ts";
+import { fetchJsonCandidate } from "../system/http.ts";
+import {
+  assetCapabilityMatrixStatusLabel,
+  describeAssetCapabilityEntry,
+  describeNonEquityAssetClassState,
+  nonEquityAssetClassState,
+} from "../system/assetCapability.ts";
+import type { AssetCapabilityMatrix, MetadataSummary } from "../system/types.ts";
 import {
   classifyArtifactPathInput,
   buildRepoRelativePath,
@@ -66,6 +78,7 @@ import type {
   EvidenceReviewParseResult,
   FileResult,
   FillRow,
+  InstrumentRegistryV2SourceStatusResponse,
   OrderRow,
   PaperReadinessParseResult,
   ParsedCsvResult,
@@ -1656,6 +1669,153 @@ function EvidenceReviewContent({ artifact }: { artifact: EvidenceReviewParseResu
 }
 
 // ---------------------------------------------------------------------------
+// ASSET-CORE-01D-REGISTRY-V2-STATUS-01-COMBINED: instrument registry v2
+// source status + asset capability matrix (read-only operator visibility).
+//
+// Both panels self-fetch on mount via plain GET requests -- no broker or
+// provider calls, no order controls, no auto-run/auto-submit behavior. They
+// live here (rather than a dedicated System screen) because this is the
+// screen that already owns the per-symbol "Load registry economics" control
+// fed by the same MQK_INSTRUMENT_REGISTRY_V2_PATH source.
+// ---------------------------------------------------------------------------
+
+function InstrumentRegistryV2SourceStatusPanel() {
+  const [status, setStatus] = useState<InstrumentRegistryV2SourceStatusResponse | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    void getInstrumentRegistryV2SourceStatus().then((result) => {
+      if (cancelled) return;
+      setLoading(false);
+      if (!result.ok || !result.data) {
+        setError(result.error ?? "Instrument registry v2 source status unavailable.");
+        setStatus(null);
+        return;
+      }
+      setError(null);
+      setStatus(result.data);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  return (
+    <Panel
+      title="Instrument registry v2 source"
+      subtitle="Read-only status of the separate v2 registry configured via MQK_INSTRUMENT_REGISTRY_V2_PATH. Suggestion-only — never used for live or paper trading."
+    >
+      {loading && <div className="unavailable-notice">Checking instrument registry v2 source…</div>}
+      {!loading && error && (
+        <div className="unavailable-notice unavailable-critical">
+          <strong>Instrument registry v2 source status unavailable:</strong> {error}
+        </div>
+      )}
+      {!loading && !error && status && (
+        <div className="metric-list">
+          <div><span>Status</span><strong>{instrumentRegistryV2SourceStatusLabel(status)}</strong></div>
+          <div><span>Configured path</span><strong style={{ wordBreak: "break-all" }}>{status.path ?? "—"}</strong></div>
+          <div><span>Trading use</span><strong>{describeInstrumentRegistryV2SourceTradingUse(status)}</strong></div>
+          {status.truth_state === "configured_valid" && (
+            <>
+              <div><span>Total instruments</span><strong>{status.total_instruments}</strong></div>
+              <div>
+                <span>By asset class</span>
+                <strong>
+                  {Object.entries(status.asset_class_counts)
+                    .map(([assetClass, count]) => `${assetClass}: ${count}`)
+                    .join(", ") || "—"}
+                </strong>
+              </div>
+              <div>
+                <span>Enabled / paper / live</span>
+                <strong>
+                  {status.enabled_counts.enabled} / {status.enabled_counts.paper_trading_enabled} /{" "}
+                  {status.enabled_counts.live_trading_enabled}
+                </strong>
+              </div>
+              <div><span>Non-equity</span><strong>{describeInstrumentRegistryV2SourceNonEquity(status)}</strong></div>
+              <div>
+                <span>Economics metadata</span>
+                <strong>{status.has_economics_metadata ? "present" : "not present"}</strong>
+              </div>
+              <div>
+                <span>Sample symbols</span>
+                <strong>{status.sample_symbols.length > 0 ? status.sample_symbols.join(", ") : "—"}</strong>
+              </div>
+            </>
+          )}
+          {status.validation_errors.length > 0 && (
+            <div><span>Validation errors</span><strong>{status.validation_errors.join("; ")}</strong></div>
+          )}
+          <div><span>Message</span><strong>{status.message}</strong></div>
+        </div>
+      )}
+    </Panel>
+  );
+}
+
+function AssetCapabilityMatrixPanel() {
+  const [matrix, setMatrix] = useState<AssetCapabilityMatrix | undefined>(undefined);
+  const [unavailable, setUnavailable] = useState(false);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    void fetchJsonCandidate<MetadataSummary>("/api/v1/system/metadata").then((result) => {
+      if (cancelled) return;
+      setLoading(false);
+      if (!result.ok || !result.data) {
+        setUnavailable(true);
+        setMatrix(undefined);
+        return;
+      }
+      setUnavailable(false);
+      setMatrix(result.data.asset_capability_matrix);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  return (
+    <Panel
+      title="Asset capability matrix"
+      subtitle="Read-only, statically-defined per-asset-class trading capability. Never used for order routing."
+    >
+      {loading && <div className="unavailable-notice">Checking asset capability matrix…</div>}
+      {!loading && unavailable && (
+        <div className="unavailable-notice unavailable-critical">
+          <strong>Asset capability matrix unavailable:</strong> daemon unreachable or metadata route failed.
+        </div>
+      )}
+      {!loading && !unavailable && (
+        <div className="metric-list">
+          <div><span>Status</span><strong>{assetCapabilityMatrixStatusLabel(matrix)}</strong></div>
+          <div>
+            <span>Non-equity classes</span>
+            <strong>{describeNonEquityAssetClassState(nonEquityAssetClassState(matrix))}</strong>
+          </div>
+        </div>
+      )}
+      {!loading && !unavailable && matrix && (
+        <ul style={{ marginTop: 10 }}>
+          {matrix.entries.map((entry) => (
+            <li key={entry.asset_class} style={{ fontSize: "0.83rem", marginBottom: 4 }}>
+              {describeAssetCapabilityEntry(entry)}
+            </li>
+          ))}
+        </ul>
+      )}
+    </Panel>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Discord observability workflow guidance (static, read-only reference)
 // ---------------------------------------------------------------------------
 
@@ -2367,6 +2527,9 @@ export function BacktestResultsScreen() {
           watch its status, then auto-load results. No live or paper orders.
         </span>
       </div>
+
+      <InstrumentRegistryV2SourceStatusPanel />
+      <AssetCapabilityMatrixPanel />
 
       <Panel
         title="B — Run a new backtest (offline research only)"

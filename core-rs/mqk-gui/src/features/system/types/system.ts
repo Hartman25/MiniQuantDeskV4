@@ -143,11 +143,43 @@ export interface PreflightStatus {
   session_window_state?: string | null;
 }
 
+// ---------------------------------------------------------------------------
+// ASSET-CAPABILITY-MATRIX-01 / ASSET-CAPABILITY-MATRIX-GUI-VISIBILITY-01:
+// static, read-only asset-class capability matrix carried on
+// /api/v1/system/metadata. Never used for order routing — operator
+// visibility only.
+// ---------------------------------------------------------------------------
+
+export interface AssetCapabilityEntry {
+  asset_class: string;
+  enabled: boolean;
+  paper_ready: boolean;
+  live_ready: boolean;
+  broker_adapter: string;
+  notes: string;
+}
+
+export interface AssetCapabilityMatrix {
+  schema_version: string;
+  static_source: string;
+  live_capital_ready: boolean;
+  default_enabled_asset_classes: string[];
+  disabled_asset_classes: string[];
+  entries: AssetCapabilityEntry[];
+}
+
 export interface MetadataSummary {
   build_version: string;
   api_version: string;
   broker_adapter: string;
   endpoint_status: HealthState;
+  /**
+   * ASSET-CAPABILITY-MATRIX-01: present on every live `/api/v1/system/metadata`
+   * response. Optional here (not on `unavailableMetadata`'s fallback in api.ts)
+   * so an unreachable daemon reports the matrix as genuinely absent rather
+   * than fabricating one.
+   */
+  asset_capability_matrix?: AssetCapabilityMatrix;
 }
 
 // ---------------------------------------------------------------------------

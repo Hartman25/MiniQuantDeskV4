@@ -6,8 +6,24 @@ import {
   extractArtifactDir,
   buildActiveJob,
   buildBacktestEconomicsRequest,
+  getInstrumentRegistryV2SourceStatus,
 } from "../api.ts";
-import type { BacktestJobRequest, BacktestJobStatusResponse, FileResult } from "../types.ts";
+import type {
+  BacktestJobRequest,
+  BacktestJobStatusResponse,
+  FileResult,
+  InstrumentRegistryV2SourceStatusResponse,
+} from "../types.ts";
+
+function jsonResponse(body: unknown, status = 200): Response {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    async json() {
+      return body;
+    },
+  } as Response;
+}
 
 // ---------------------------------------------------------------------------
 // normalizeJobStatus
@@ -543,4 +559,101 @@ test("ECON-GUI-05: non-integer economics fields are rejected", () => {
   });
   assert.equal(result.ok, false);
   assert.match(result.ok ? "" : result.error, /integer/);
+});
+
+// ---------------------------------------------------------------------------
+// getInstrumentRegistryV2SourceStatus (ASSET-CORE-01D-REGISTRY-V2-STATUS-01-COMBINED)
+// ---------------------------------------------------------------------------
+
+function notConfiguredV2SourceResponse(): InstrumentRegistryV2SourceStatusResponse {
+  return {
+    truth_state: "not_configured",
+    configured: false,
+    path: null,
+    source: "MQK_INSTRUMENT_REGISTRY_V2_PATH",
+    schema_version: null,
+    purpose: "backtest_economics_suggestions_only",
+    used_for_trading: false,
+    enabled_for_live_trading: false,
+    enabled_for_paper_trading: false,
+    total_instruments: 0,
+    asset_class_counts: {},
+    enabled_counts: { enabled: 0, paper_trading_enabled: 0, live_trading_enabled: 0 },
+    non_equity_present: false,
+    non_equity_all_disabled: true,
+    has_economics_metadata: false,
+    sample_symbols: [],
+    validation_errors: [],
+    message: "MQK_INSTRUMENT_REGISTRY_V2_PATH is not set; no separate v2 registry source is configured.",
+  };
+}
+
+function configuredValidV2SourceResponse(): InstrumentRegistryV2SourceStatusResponse {
+  return {
+    truth_state: "configured_valid",
+    configured: true,
+    path: "config/instruments/instruments_v2.backtest_suggestions.example.json",
+    source: "MQK_INSTRUMENT_REGISTRY_V2_PATH",
+    schema_version: 1,
+    purpose: "backtest_economics_suggestions_only",
+    used_for_trading: false,
+    enabled_for_live_trading: false,
+    enabled_for_paper_trading: false,
+    total_instruments: 3,
+    asset_class_counts: { future: 2, crypto: 1 },
+    enabled_counts: { enabled: 0, paper_trading_enabled: 0, live_trading_enabled: 0 },
+    non_equity_present: true,
+    non_equity_all_disabled: true,
+    has_economics_metadata: true,
+    sample_symbols: ["ES_TEST", "MES_TEST", "BTCUSD_TEST"],
+    validation_errors: [],
+    message: "Configured v2 registry source is valid and is used only for read-only backtest economics suggestions.",
+  };
+}
+
+test("getInstrumentRegistryV2SourceStatus parses a not_configured response", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => jsonResponse(notConfiguredV2SourceResponse())) as typeof fetch;
+
+  try {
+    const result = await getInstrumentRegistryV2SourceStatus();
+    assert.equal(result.ok, true);
+    assert.equal(result.data?.truth_state, "not_configured");
+    assert.equal(result.data?.configured, false);
+    assert.equal(result.data?.path, null);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("getInstrumentRegistryV2SourceStatus parses a configured_valid response with full counts", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => jsonResponse(configuredValidV2SourceResponse())) as typeof fetch;
+
+  try {
+    const result = await getInstrumentRegistryV2SourceStatus();
+    assert.equal(result.ok, true);
+    assert.equal(result.data?.truth_state, "configured_valid");
+    assert.equal(result.data?.total_instruments, 3);
+    assert.deepEqual(result.data?.asset_class_counts, { future: 2, crypto: 1 });
+    assert.equal(result.data?.non_equity_present, true);
+    assert.equal(result.data?.non_equity_all_disabled, true);
+    assert.equal(result.data?.used_for_trading, false);
+    assert.deepEqual(result.data?.sample_symbols, ["ES_TEST", "MES_TEST", "BTCUSD_TEST"]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("getInstrumentRegistryV2SourceStatus reports a friendly error when the route is not mounted (404)", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => jsonResponse({ error: "not found" }, 404)) as typeof fetch;
+
+  try {
+    const result = await getInstrumentRegistryV2SourceStatus();
+    assert.equal(result.ok, false);
+    assert.match(result.error ?? "", /route not found/);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });

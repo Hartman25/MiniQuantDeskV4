@@ -193,8 +193,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     };
     use system::{
         autonomous_readiness, health, status_handler, system_config_diffs,
-        system_config_fingerprint, system_instrument_registry_v2_status, system_metadata,
-        system_preflight, system_runtime_leadership, system_session, system_status,
+        system_config_fingerprint, system_instrument_registry_v2_source_status,
+        system_instrument_registry_v2_status, system_metadata, system_preflight,
+        system_runtime_leadership, system_session, system_status,
     };
     use system_artifact::{
         system_artifact_intake, system_parity_evidence, system_run_artifact, system_topology,
@@ -226,6 +227,14 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/v1/system/instrument-registry-v2/status",
             get(system_instrument_registry_v2_status),
+        )
+        // ASSET-CORE-01D: read-only status for the *separate* v2 registry source
+        // configured via MQK_INSTRUMENT_REGISTRY_V2_PATH (public, no auth). No DB,
+        // no provider/broker calls, no writes. used_for_trading and the
+        // enabled_for_live_trading/enabled_for_paper_trading flags are always false.
+        .route(
+            "/api/v1/system/instrument-registry-v2-source/status",
+            get(system_instrument_registry_v2_source_status),
         )
         .route("/api/v1/execution/summary", get(execution_summary))
         .route("/api/v1/execution/orders", get(execution_orders))

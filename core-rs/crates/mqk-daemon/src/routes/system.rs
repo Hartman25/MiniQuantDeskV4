@@ -2,7 +2,8 @@
 //!
 //! Contains: health, status_handler, system_status, system_preflight,
 //! autonomous_readiness, system_metadata, system_instrument_registry_v2_status,
-//! system_runtime_leadership, system_session.
+//! system_instrument_registry_v2_source_status, system_runtime_leadership,
+//! system_session.
 //!
 //! Config-surface handlers (system_config_fingerprint, system_config_diffs)
 //! live in the `config` submodule (MT-07D split).
@@ -26,6 +27,7 @@ use chrono::Utc;
 
 use crate::api_types::{
     AssetCapabilityEntry, AssetCapabilityMatrix, AutonomousPaperReadinessResponse, HealthResponse,
+    InstrumentRegistryV2EnabledCounts, InstrumentRegistryV2SourceStatusResponse,
     InstrumentRegistryV2StatusResponse, MultiSymbolFreshnessReport, PreflightStatusResponse,
     RuntimeLeadershipCheckpointRow, RuntimeLeadershipResponse, SessionStateResponse,
     StrategyDecisionDiagnostics, SystemMetadataResponse, SystemStatusResponse,
@@ -1357,6 +1359,165 @@ pub(crate) async fn system_instrument_registry_v2_status(
             "InstrumentRegistryV2 is read-only/diagnostic via this route; no consumer reads it for decisions."
                 .to_string(),
         ],
+    })
+    .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/system/instrument-registry-v2-source/status — ASSET-CORE-01D
+// ---------------------------------------------------------------------------
+
+const INSTRUMENT_REGISTRY_V2_SOURCE_ENV_VAR: &str = "MQK_INSTRUMENT_REGISTRY_V2_PATH";
+const INSTRUMENT_REGISTRY_V2_SOURCE_PURPOSE: &str = "backtest_economics_suggestions_only";
+
+fn instrument_registry_v2_source_status_not_configured() -> InstrumentRegistryV2SourceStatusResponse
+{
+    InstrumentRegistryV2SourceStatusResponse {
+        truth_state: "not_configured".to_string(),
+        configured: false,
+        path: None,
+        source: INSTRUMENT_REGISTRY_V2_SOURCE_ENV_VAR.to_string(),
+        schema_version: None,
+        purpose: INSTRUMENT_REGISTRY_V2_SOURCE_PURPOSE.to_string(),
+        used_for_trading: false,
+        enabled_for_live_trading: false,
+        enabled_for_paper_trading: false,
+        total_instruments: 0,
+        asset_class_counts: BTreeMap::new(),
+        enabled_counts: InstrumentRegistryV2EnabledCounts {
+            enabled: 0,
+            paper_trading_enabled: 0,
+            live_trading_enabled: 0,
+        },
+        non_equity_present: false,
+        non_equity_all_disabled: true,
+        has_economics_metadata: false,
+        sample_symbols: Vec::new(),
+        validation_errors: Vec::new(),
+        message: "MQK_INSTRUMENT_REGISTRY_V2_PATH is not set; no separate v2 registry source is configured."
+            .to_string(),
+    }
+}
+
+/// Shared failure-path builder for `"registry_unavailable"` / `"validation_failed"`.
+/// `configured` is always `true` here — only reached once a path was set.
+fn instrument_registry_v2_source_status_failure(
+    truth_state: &str,
+    path: String,
+    error: String,
+    message: String,
+) -> InstrumentRegistryV2SourceStatusResponse {
+    InstrumentRegistryV2SourceStatusResponse {
+        truth_state: truth_state.to_string(),
+        configured: true,
+        path: Some(path),
+        source: INSTRUMENT_REGISTRY_V2_SOURCE_ENV_VAR.to_string(),
+        schema_version: None,
+        purpose: INSTRUMENT_REGISTRY_V2_SOURCE_PURPOSE.to_string(),
+        used_for_trading: false,
+        enabled_for_live_trading: false,
+        enabled_for_paper_trading: false,
+        total_instruments: 0,
+        asset_class_counts: BTreeMap::new(),
+        enabled_counts: InstrumentRegistryV2EnabledCounts {
+            enabled: 0,
+            paper_trading_enabled: 0,
+            live_trading_enabled: 0,
+        },
+        non_equity_present: false,
+        non_equity_all_disabled: true,
+        has_economics_metadata: false,
+        sample_symbols: Vec::new(),
+        validation_errors: vec![error],
+        message,
+    }
+}
+
+/// GET /api/v1/system/instrument-registry-v2-source/status
+/// (ASSET-CORE-01D-REGISTRY-V2-STATUS-01-COMBINED).
+///
+/// Read-only operator-visibility surface for the separate v2 registry
+/// **source** configured via `MQK_INSTRUMENT_REGISTRY_V2_PATH`
+/// (`AppState::instrument_registry_v2_path`) — distinct from
+/// [`system_instrument_registry_v2_status`], which diagnoses the v1->v2
+/// *conversion* of `equities.json`. No DB pool, no provider or broker calls,
+/// no writes. `used_for_trading`/`enabled_for_live_trading`/
+/// `enabled_for_paper_trading` are always `false`: the only production
+/// reader of this configured path is the read-only
+/// `GET /api/v1/backtests/economics-suggestion` route.
+pub(crate) async fn system_instrument_registry_v2_source_status(
+    State(st): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let Some(configured_path) = st.instrument_registry_v2_path.clone() else {
+        return Json(instrument_registry_v2_source_status_not_configured()).into_response();
+    };
+
+    let path = std::path::Path::new(&configured_path);
+    if !path.exists() {
+        return Json(instrument_registry_v2_source_status_failure(
+            "registry_unavailable",
+            configured_path.clone(),
+            "configured instrument registry v2 path is unavailable".to_string(),
+            format!(
+                "MQK_INSTRUMENT_REGISTRY_V2_PATH is configured ({configured_path}) but the file does not exist."
+            ),
+        ))
+        .into_response();
+    }
+
+    let registry = match mqk_md::instrument_registry_v2::load_instrument_registry_v2(path) {
+        Ok(r) => r,
+        Err(err) => {
+            return Json(instrument_registry_v2_source_status_failure(
+                "registry_unavailable",
+                configured_path.clone(),
+                format!("instrument registry v2 load failed: {err}"),
+                format!(
+                    "MQK_INSTRUMENT_REGISTRY_V2_PATH is configured ({configured_path}) but failed to load."
+                ),
+            ))
+            .into_response();
+        }
+    };
+
+    if let Err(err) = mqk_md::instrument_registry_v2::validate_registry_v2(&registry) {
+        return Json(instrument_registry_v2_source_status_failure(
+            "validation_failed",
+            configured_path.clone(),
+            format!("instrument registry v2 validation failed: {err}"),
+            format!(
+                "MQK_INSTRUMENT_REGISTRY_V2_PATH is configured ({configured_path}) but failed validation."
+            ),
+        ))
+        .into_response();
+    }
+
+    let summary = mqk_md::instrument_registry_v2::summarize_instrument_registry_v2_status(&registry);
+
+    Json(InstrumentRegistryV2SourceStatusResponse {
+        truth_state: "configured_valid".to_string(),
+        configured: true,
+        path: Some(configured_path),
+        source: INSTRUMENT_REGISTRY_V2_SOURCE_ENV_VAR.to_string(),
+        schema_version: Some(registry.schema_version),
+        purpose: INSTRUMENT_REGISTRY_V2_SOURCE_PURPOSE.to_string(),
+        used_for_trading: false,
+        enabled_for_live_trading: false,
+        enabled_for_paper_trading: false,
+        total_instruments: summary.total_instruments,
+        asset_class_counts: summary.asset_class_counts,
+        enabled_counts: InstrumentRegistryV2EnabledCounts {
+            enabled: summary.enabled_count,
+            paper_trading_enabled: summary.paper_trading_enabled_count,
+            live_trading_enabled: summary.live_trading_enabled_count,
+        },
+        non_equity_present: summary.non_equity_present,
+        non_equity_all_disabled: summary.non_equity_all_disabled,
+        has_economics_metadata: summary.has_economics_metadata,
+        sample_symbols: summary.sample_symbols,
+        validation_errors: Vec::new(),
+        message: "Configured v2 registry source is valid and is used only for read-only backtest economics suggestions."
+            .to_string(),
     })
     .into_response()
 }
