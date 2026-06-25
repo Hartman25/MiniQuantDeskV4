@@ -24,6 +24,9 @@ use crate::api_types::{
     ExecutionTransportResponse, IntradayRefreshStatusResponse, IntradayRefreshSymbolStatus,
     MarketDataQualityResponse, MdBarsCoverageResponse, MdBarsCoverageRow, TransportQueueRow,
 };
+use crate::market_data_freshness::{
+    default_max_allowed_age_secs_for_timeframe, is_intraday_timeframe,
+};
 use crate::state::{AlpacaWsContinuityState, AppState, StrategyMarketDataSource};
 
 // ---------------------------------------------------------------------------
@@ -361,11 +364,34 @@ const INTRADAY_EVIDENCE_SCHEMA_VERSION: &str = "intraday-refresh-v1";
 /// Evidence older than this is flagged stale.
 const INTRADAY_EVIDENCE_STALE_SECS: i64 = 86_400;
 
-/// Parse one symbol object from the evidence JSON.
+const REASON_PROVIDER_RETURNED_STALE_INTRADAY_DATA: &str = "provider_returned_stale_intraday_data";
+const REASON_LATEST_BAR_STALE_AFTER_REFRESH: &str = "latest_bar_stale_after_refresh";
+const REASON_LATEST_COMPLETED_BAR_MISSING: &str = "latest_completed_bar_missing";
+const REASON_PROVIDER_RETURNED_NO_ROWS: &str = "provider_returned_no_rows";
+const REASON_PROVIDER_ERROR: &str = "provider_error";
+const REASON_FRESH_AFTER_REFRESH: &str = "fresh_after_refresh";
+const REASON_REFRESH_FAILED: &str = "refresh_failed";
+
+fn evidence_i64(v: &serde_json::Value, key: &str) -> Option<i64> {
+    v.get(key).and_then(|n| n.as_i64())
+}
+
+fn evidence_string(v: &serde_json::Value, key: &str) -> Option<String> {
+    v.get(key)
+        .and_then(|s| s.as_str())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+}
+
+/// Parse one symbol object from the evidence JSON and compute a conservative
+/// route-level post-refresh verdict from durable evidence fields.
 ///
 /// All fields are optional — evidence files may omit provider fields (check_only mode).
-fn parse_refresh_symbol(v: &serde_json::Value) -> IntradayRefreshSymbolStatus {
-    let fail_reasons: Vec<String> = v
+fn parse_refresh_symbol(
+    v: &serde_json::Value,
+    evidence_timeframe: Option<&str>,
+) -> IntradayRefreshSymbolStatus {
+    let mut fail_reasons: Vec<String> = v
         .get("fail_reasons")
         .and_then(|r| r.as_array())
         .map(|arr| {
@@ -375,39 +401,117 @@ fn parse_refresh_symbol(v: &serde_json::Value) -> IntradayRefreshSymbolStatus {
         })
         .unwrap_or_default();
 
+    let row_timeframe = evidence_string(v, "timeframe")
+        .or_else(|| evidence_timeframe.map(|s| s.to_string()))
+        .unwrap_or_default();
+    let max_allowed_age_secs = evidence_i64(v, "max_allowed_age_secs")
+        .or_else(|| evidence_i64(v, "max_allowed_age_seconds"))
+        .or_else(|| {
+            (!row_timeframe.is_empty())
+                .then(|| default_max_allowed_age_secs_for_timeframe(&row_timeframe))
+        });
+    let latest_completed_bar_age_secs = evidence_i64(v, "latest_completed_bar_age_secs")
+        .or_else(|| evidence_i64(v, "latest_completed_bar_age_seconds"))
+        .or_else(|| evidence_i64(v, "staleness_min").and_then(|m| (m >= 0).then_some(m * 60)));
+    let provider_success = v.get("provider_success").and_then(|b| b.as_bool());
+    let rows_read = evidence_i64(v, "provider_rows_read").or_else(|| evidence_i64(v, "rows_read"));
+    let rows_ok = evidence_i64(v, "provider_rows_ok").or_else(|| evidence_i64(v, "rows_ok"));
+    let completed_count = evidence_i64(v, "completed_count");
+    let gate = evidence_string(v, "gate");
+
+    let mut freshness_truth_state = evidence_string(v, "freshness_truth_state");
+    let mut reason_code = evidence_string(v, "reason_code");
+    let mut passed = v
+        .get("passed")
+        .and_then(|b| b.as_bool())
+        .unwrap_or_else(|| gate.as_deref() != Some("FAIL") && fail_reasons.is_empty());
+
+    let derived_failure = if provider_success == Some(false) {
+        Some((REASON_PROVIDER_ERROR, REASON_PROVIDER_ERROR))
+    } else if provider_success == Some(true) && rows_read == Some(0) {
+        Some((
+            REASON_PROVIDER_RETURNED_NO_ROWS,
+            REASON_PROVIDER_RETURNED_NO_ROWS,
+        ))
+    } else if completed_count == Some(0) {
+        Some((
+            REASON_LATEST_COMPLETED_BAR_MISSING,
+            REASON_LATEST_COMPLETED_BAR_MISSING,
+        ))
+    } else if let (Some(age), Some(max_age)) = (latest_completed_bar_age_secs, max_allowed_age_secs)
+    {
+        if age > max_age {
+            if is_intraday_timeframe(&row_timeframe) && provider_success == Some(true) {
+                Some((
+                    "stale_after_refresh",
+                    REASON_PROVIDER_RETURNED_STALE_INTRADAY_DATA,
+                ))
+            } else {
+                Some(("stale_after_refresh", REASON_LATEST_BAR_STALE_AFTER_REFRESH))
+            }
+        } else {
+            None
+        }
+    } else {
+        None
+    };
+
+    if let Some((state, reason)) = derived_failure {
+        passed = false;
+        freshness_truth_state = Some(state.to_string());
+        reason_code = Some(reason.to_string());
+        if !fail_reasons.iter().any(|r| r == reason) {
+            fail_reasons.push(reason.to_string());
+        }
+    } else if passed && freshness_truth_state.is_none() && reason_code.is_none() {
+        freshness_truth_state = Some(REASON_FRESH_AFTER_REFRESH.to_string());
+        reason_code = Some(REASON_FRESH_AFTER_REFRESH.to_string());
+    } else if !passed {
+        if freshness_truth_state.is_none() {
+            freshness_truth_state = Some(REASON_REFRESH_FAILED.to_string());
+        }
+        if reason_code.is_none() {
+            reason_code = Some(REASON_REFRESH_FAILED.to_string());
+        }
+    }
+
     IntradayRefreshSymbolStatus {
         symbol: v
             .get("symbol")
             .and_then(|s| s.as_str())
             .unwrap_or("")
             .to_string(),
-        gate: v
-            .get("gate")
-            .and_then(|s| s.as_str())
-            .map(|s| s.to_string()),
-        completed_count: v.get("completed_count").and_then(|n| n.as_i64()),
+        gate,
+        completed_count,
         latest_completed_bar_ts: v
-            .get("max_ts_iso")
+            .get("latest_completed_bar_ts")
+            .or_else(|| v.get("max_ts_iso"))
             .and_then(|s| s.as_str())
             .filter(|s| !s.is_empty())
             .map(|s| s.to_string()),
-        staleness_min: v.get("staleness_min").and_then(|n| n.as_i64()),
-        provider_source: v
-            .get("provider_source")
-            .and_then(|s| s.as_str())
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string()),
+        staleness_min: evidence_i64(v, "staleness_min"),
+        provider_source: evidence_string(v, "provider_source")
+            .or_else(|| evidence_string(v, "provider")),
         provider_configured: v.get("provider_configured").and_then(|b| b.as_bool()),
         provider_attempted: v.get("provider_attempted").and_then(|b| b.as_bool()),
-        provider_success: v.get("provider_success").and_then(|b| b.as_bool()),
-        rows_inserted: v.get("provider_rows_inserted").and_then(|n| n.as_i64()),
-        rows_updated: v.get("provider_rows_updated").and_then(|n| n.as_i64()),
+        provider_success,
+        rows_read,
+        rows_ok,
+        rows_inserted: evidence_i64(v, "provider_rows_inserted")
+            .or_else(|| evidence_i64(v, "rows_inserted")),
+        rows_updated: evidence_i64(v, "provider_rows_updated")
+            .or_else(|| evidence_i64(v, "rows_updated")),
         rows_filtered_incomplete: v
             .get("provider_rows_dropped_incomplete")
             .and_then(|n| n.as_i64()),
         rows_filtered_in_progress: v
             .get("provider_rows_dropped_current")
             .and_then(|n| n.as_i64()),
+        latest_completed_bar_age_secs,
+        max_allowed_age_secs,
+        freshness_truth_state,
+        reason_code,
+        passed,
         fail_reasons,
     }
 }
@@ -597,11 +701,19 @@ pub(crate) async fn intraday_refresh_status(State(st): State<Arc<AppState>>) -> 
         .map(|s| s.to_string());
     let stale_or_missing_evidence = is_evidence_stale(produced_at_utc.as_deref());
 
+    let evidence_timeframe = raw.get("timeframe").and_then(|v| v.as_str());
     let symbols: Vec<IntradayRefreshSymbolStatus> = raw
         .get("symbols")
         .and_then(|v| v.as_array())
-        .map(|arr| arr.iter().map(parse_refresh_symbol).collect())
+        .map(|arr| {
+            arr.iter()
+                .map(|symbol| parse_refresh_symbol(symbol, evidence_timeframe))
+                .collect()
+        })
         .unwrap_or_default();
+    let evidence_all_passed = raw.get("all_passed").and_then(|v| v.as_bool());
+    let all_passed =
+        evidence_all_passed.map(|passed| passed && symbols.iter().all(|symbol| symbol.passed));
 
     (
         StatusCode::OK,
@@ -625,7 +737,7 @@ pub(crate) async fn intraday_refresh_status(State(st): State<Arc<AppState>>) -> 
                 .get("timeframe")
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string()),
-            all_passed: raw.get("all_passed").and_then(|v| v.as_bool()),
+            all_passed,
             reason: raw
                 .get("reason")
                 .and_then(|v| v.as_str())

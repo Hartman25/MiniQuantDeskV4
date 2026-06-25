@@ -5,10 +5,10 @@
 //! routes, or the database.
 
 use mqk_daemon::market_data_freshness::{
-    evaluate_md_freshness_snapshot, DEFAULT_INTRADAY_BAR_MAX_AGE_SECS,
-    REASON_CODE_INTRADAY_BAR_STALE,
+    DEFAULT_INTRADAY_BAR_MAX_AGE_SECS, REASON_CODE_INTRADAY_BAR_NOT_CURRENT,
+    REASON_CODE_INTRADAY_BAR_STALE, evaluate_md_freshness_snapshot,
 };
-use mqk_md::{filter_completed_provider_bars, refresh_attempt_decision, ProviderBar, Timeframe};
+use mqk_md::{ProviderBar, Timeframe, filter_completed_provider_bars, refresh_attempt_decision};
 
 const NOW_TS: i64 = 2_000_000_000;
 
@@ -107,4 +107,27 @@ fn rf_04_failed_or_disabled_refresh_leaves_stale_5m_blocked() {
         freshness.age_seconds.unwrap_or_default() > freshness.max_allowed_age_seconds,
         "stale rows must remain blocked if refresh is disabled or failed"
     );
+}
+
+#[test]
+fn rf_05_provider_rows_with_no_completed_rows_leave_intraday_missing() {
+    let fake_provider_rows = vec![
+        provider_bar(NOW_TS - 60, true),
+        provider_bar(NOW_TS - 30, true),
+        provider_bar(NOW_TS - 600, false),
+    ];
+
+    let (completed_rows, report) =
+        filter_completed_provider_bars(fake_provider_rows, Timeframe::M5, NOW_TS);
+
+    assert_eq!(report.rows_in, 3);
+    assert_eq!(report.rows_kept, 0);
+    assert_eq!(report.rows_dropped_current, 2);
+    assert_eq!(report.rows_dropped_incomplete_flag, 1);
+    assert_eq!(report.latest_completed_end_ts, None);
+
+    let freshness =
+        evaluate_md_freshness_snapshot("AAPL", "5m", completed_rows.len() as u64, None, NOW_TS);
+    assert_eq!(freshness.freshness_state, "missing");
+    assert_eq!(freshness.reason_code, REASON_CODE_INTRADAY_BAR_NOT_CURRENT);
 }

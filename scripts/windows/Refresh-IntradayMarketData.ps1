@@ -28,7 +28,9 @@
 #                          Minimum seconds between refresh attempts in loop mode. Default: 300
 #   -DurationSeconds      Total loop duration in seconds. Default: 1800
 #   -MinCompletedBars     Minimum completed bars to report OK. Default: 30
-#   -MaxStalenessMinutes  Maximum minutes since latest complete bar before warning. Default: 1440
+#   -MaxStalenessMinutes  Maximum minutes since latest complete bar before warning.
+#                          Default: derived from timeframe. Intraday uses
+#                          MQK_INTRADAY_BAR_MAX_AGE_SECS or 900 seconds.
 #   -PaperDbUrl           Paper DB connection URL. Default: postgres://postgres:postgres@127.0.0.1:5440/miniquantdesk_paper?sslmode=disable
 #   -RepoRoot             Repo root. Default: auto-resolved two levels up from this script.
 #   -CheckOnly            Read-only check: bar count, freshness, key presence. No mutations.
@@ -53,7 +55,7 @@ param(
     [int]    $MinRefreshIntervalSeconds = 300,
     [int]    $DurationSeconds     = 1800,
     [int]    $MinCompletedBars    = 30,
-    [int]    $MaxStalenessMinutes = 1440,
+    [int]    $MaxStalenessMinutes = -1,
     [string] $PaperDbUrl         = 'postgres://postgres:postgres@127.0.0.1:5440/miniquantdesk_paper?sslmode=disable',
     [string] $RepoRoot            = '',
     [switch] $CheckOnly,
@@ -160,7 +162,43 @@ if ($symbolList.Count -eq 0) {
     exit 1
 }
 Write-Step "Symbols: $($symbolList -join ', ')  Timeframe: $Timeframe"
-Write-Step "MinCompletedBars: $MinCompletedBars  MaxStalenessMinutes: $MaxStalenessMinutes"
+
+function Test-IsIntradayTimeframe {
+    param([string]$Tf)
+    $t = $Tf.Trim().ToLowerInvariant().Replace(' ', '')
+    if ([string]::IsNullOrWhiteSpace($t)) { return $false }
+    switch ($t) {
+        '1d' { return $false }
+        'd1' { return $false }
+        '1day' { return $false }
+        'daily' { return $false }
+        default { return $true }
+    }
+}
+
+function Get-MaxAllowedAgeSeconds {
+    param([string]$Tf, [int]$ExplicitMaxStalenessMinutes)
+    if ($ExplicitMaxStalenessMinutes -ge 0) {
+        return [int64]$ExplicitMaxStalenessMinutes * 60
+    }
+    if (Test-IsIntradayTimeframe -Tf $Tf) {
+        $raw = $env:MQK_INTRADAY_BAR_MAX_AGE_SECS
+        $parsed = 0
+        if ((-not [string]::IsNullOrWhiteSpace($raw)) -and [int]::TryParse($raw, [ref]$parsed) -and $parsed -ge 0) {
+            return [int64]$parsed
+        }
+        return [int64]900
+    }
+    return [int64](4 * 24 * 3600)
+}
+
+$MaxAllowedAgeSecs = Get-MaxAllowedAgeSeconds -Tf $Timeframe -ExplicitMaxStalenessMinutes $MaxStalenessMinutes
+$EffectiveMaxStalenessMinutes = [int][math]::Ceiling($MaxAllowedAgeSecs / 60.0)
+if ($MaxStalenessMinutes -lt 0) {
+    $MaxStalenessMinutes = $EffectiveMaxStalenessMinutes
+}
+
+Write-Step "MinCompletedBars: $MinCompletedBars  MaxStalenessMinutes: $MaxStalenessMinutes  MaxAllowedAgeSecs: $MaxAllowedAgeSecs"
 
 if ($MinRefreshIntervalSeconds -lt 300) {
     Write-Warn "MinRefreshIntervalSeconds=$MinRefreshIntervalSeconds is below 300; using 300 to avoid provider hammering."
@@ -209,17 +247,64 @@ function Get-MdBarSummary {
 }
 
 # ---------------------------------------------------------------------------
-# Helper: staleness in minutes from latest bar end_ts to now UTC
+# Helper: staleness in seconds from latest bar end_ts to now UTC
 # Returns -1 if end_ts is null/unparseable.
 # ---------------------------------------------------------------------------
-function Get-StalenessMinutes {
+function Get-StalenessSeconds {
     param($MaxTsUnix)
     if ($null -eq $MaxTsUnix) { return -1 }
     try {
         $nowUnix     = [long](Get-Date -UFormat '%s' -Date (Get-Date).ToUniversalTime())
         $diffSeconds = $nowUnix - [long]$MaxTsUnix
-        return [int][math]::Floor($diffSeconds / 60)
+        return [int64][math]::Max(0, $diffSeconds)
     } catch { return -1 }
+}
+
+function Get-StalenessMinutes {
+    param($MaxTsUnix)
+    $seconds = Get-StalenessSeconds -MaxTsUnix $MaxTsUnix
+    if ($seconds -lt 0) { return -1 }
+    return [int][math]::Floor($seconds / 60)
+}
+
+function New-FreshnessVerdict {
+    param(
+        [bool]$ProviderSuccess,
+        $ProviderRowsRead,
+        $LatestTsUnix,
+        [int]$CompletedCount,
+        [string[]]$ExistingReasons
+    )
+    $ageSecs = Get-StalenessSeconds -MaxTsUnix $LatestTsUnix
+    $reasonCode = 'fresh_after_refresh'
+    $truthState = 'fresh_after_refresh'
+    $passed = $true
+
+    if ($ProviderSuccess -and $null -ne $ProviderRowsRead -and [int64]$ProviderRowsRead -eq 0) {
+        $passed = $false
+        $truthState = 'provider_returned_no_rows'
+        $reasonCode = 'provider_returned_no_rows'
+    } elseif ($CompletedCount -le 0 -or $null -eq $LatestTsUnix) {
+        $passed = $false
+        $truthState = 'latest_completed_bar_missing'
+        $reasonCode = 'latest_completed_bar_missing'
+    } elseif ($ageSecs -gt $MaxAllowedAgeSecs) {
+        $passed = $false
+        $truthState = 'stale_after_refresh'
+        $reasonCode = if ($ProviderSuccess) { 'provider_returned_stale_intraday_data' } else { 'latest_bar_stale_after_refresh' }
+    } elseif ($ExistingReasons.Count -gt 0) {
+        $passed = $false
+        $truthState = 'refresh_failed'
+        $reasonCode = if ($ExistingReasons -match 'provider') { 'provider_error' } else { 'refresh_failed' }
+    }
+
+    return [pscustomobject]@{
+        latest_completed_bar_age_secs = if ($ageSecs -ge 0) { $ageSecs } else { $null }
+        max_allowed_age_secs          = $MaxAllowedAgeSecs
+        freshness_truth_state         = $truthState
+        reason_code                   = $reasonCode
+        passed                        = $passed
+    }
 }
 
 # ---------------------------------------------------------------------------
@@ -242,6 +327,7 @@ function Write-Evidence {
         effective_interval_secs     = $EffectiveIntervalSeconds
         min_completed_bars_required = $MinCompletedBars
         max_staleness_minutes       = $MaxStalenessMinutes
+        max_allowed_age_secs        = $MaxAllowedAgeSecs
         all_passed                  = $AllPassed
         reason                      = $Reason
         symbols                     = $SymbolResults
@@ -299,6 +385,8 @@ if ($CheckOnly) {
             provider_configured = if ($Source -eq 'alpaca') { $alpacaKeyPresent } else { $twelvekeyPresent }
             completed_count = $s.completed_count
             max_ts_iso      = $s.max_ts_iso
+            latest_completed_bar_age_secs = (Get-StalenessSeconds -MaxTsUnix $s.max_ts_unix)
+            max_allowed_age_secs = $MaxAllowedAgeSecs
             staleness_min   = (Get-StalenessMinutes -MaxTsUnix $s.max_ts_unix)
             query_ok        = $s.query_ok
         }
@@ -344,6 +432,7 @@ function Invoke-OneRefresh {
         $providerSuccess = $false
         $providerExitCode = $null
         $providerRowsRead = $null
+        $providerRowsOk = $null
         $providerRowsInserted = $null
         $providerRowsUpdated = $null
         $providerRowsKept = $null
@@ -384,6 +473,7 @@ function Invoke-OneRefresh {
                     }
                     if ($lineText -match 'rows_read=(\d+) rows_ok=(\d+) rejected=(\d+) inserted=(\d+) updated=(\d+)') {
                         $providerRowsRead = [int]$Matches[1]
+                        $providerRowsOk = [int]$Matches[2]
                         $providerRowsInserted = [int]$Matches[4]
                         $providerRowsUpdated = [int]$Matches[5]
                     }
@@ -423,6 +513,7 @@ function Invoke-OneRefresh {
                 provider_success = $providerSuccess
                 provider_exit_code = $providerExitCode
                 provider_rows_read = $providerRowsRead
+                provider_rows_ok = $providerRowsOk
                 provider_rows_inserted = $providerRowsInserted
                 provider_rows_updated = $providerRowsUpdated
                 provider_rows_kept_after_completion_filter = $providerRowsKept
@@ -432,6 +523,11 @@ function Invoke-OneRefresh {
                 gate            = 'FAIL'
                 completed_count = 0
                 max_ts_iso      = $null
+                latest_completed_bar_age_secs = $null
+                max_allowed_age_secs = $MaxAllowedAgeSecs
+                freshness_truth_state = 'latest_completed_bar_missing'
+                reason_code = 'latest_completed_bar_missing'
+                passed = $false
                 staleness_min   = -1
                 fail_reasons    = $symReasons
             }
@@ -446,14 +542,28 @@ function Invoke-OneRefresh {
             $symFailed = $true
             $symReasons += "completed_count $($after.completed_count) below MinCompletedBars $MinCompletedBars"
         }
-        if ($staleMinAfter -gt $MaxStalenessMinutes) {
-            Write-Warn "[$sym/$Timeframe] Still stale by ${staleMinAfter}min (threshold=${MaxStalenessMinutes}min)."
+        $staleSecsAfter = Get-StalenessSeconds -MaxTsUnix $after.max_ts_unix
+        if ($staleSecsAfter -gt $MaxAllowedAgeSecs) {
+            Write-Warn "[$sym/$Timeframe] Still stale by ${staleSecsAfter}s (threshold=${MaxAllowedAgeSecs}s)."
             Write-Warn "  This is expected outside market hours or when no new 5m bars have completed."
             Write-Warn "  Smoke readiness fails closed on stale data regardless of cause (PAPER-SMOKE-MD-REFRESH-FAIL-CLOSED-01)."
             $symFailed = $true
-            $symReasons += "stale by ${staleMinAfter}min (threshold=${MaxStalenessMinutes}min)"
+            $symReasons += "latest_bar_stale_after_refresh: stale by ${staleSecsAfter}s (threshold=${MaxAllowedAgeSecs}s)"
         } else {
-            Write-Ok "[$sym/$Timeframe] Freshness OK (${staleMinAfter}min <= ${MaxStalenessMinutes}min)."
+            Write-Ok "[$sym/$Timeframe] Freshness OK (${staleSecsAfter}s <= ${MaxAllowedAgeSecs}s)."
+        }
+
+        $verdict = New-FreshnessVerdict `
+            -ProviderSuccess $providerSuccess `
+            -ProviderRowsRead $providerRowsRead `
+            -LatestTsUnix $after.max_ts_unix `
+            -CompletedCount $after.completed_count `
+            -ExistingReasons $symReasons
+        if (-not $verdict.passed) {
+            $symFailed = $true
+            if ($symReasons -notcontains $verdict.reason_code) {
+                $symReasons += $verdict.reason_code
+            }
         }
 
         if ($symFailed) { $anyFailed = $true }
@@ -469,6 +579,7 @@ function Invoke-OneRefresh {
             provider_success = $providerSuccess
             provider_exit_code = $providerExitCode
             provider_rows_read = $providerRowsRead
+            provider_rows_ok = $providerRowsOk
             provider_rows_inserted = $providerRowsInserted
             provider_rows_updated = $providerRowsUpdated
             provider_rows_kept_after_completion_filter = $providerRowsKept
@@ -478,6 +589,11 @@ function Invoke-OneRefresh {
             gate            = $gate
             completed_count = $after.completed_count
             max_ts_iso      = $after.max_ts_iso
+            latest_completed_bar_age_secs = $verdict.latest_completed_bar_age_secs
+            max_allowed_age_secs = $verdict.max_allowed_age_secs
+            freshness_truth_state = $verdict.freshness_truth_state
+            reason_code = $verdict.reason_code
+            passed = $verdict.passed
             staleness_min   = $staleMinAfter
             fail_reasons    = $symReasons
         }

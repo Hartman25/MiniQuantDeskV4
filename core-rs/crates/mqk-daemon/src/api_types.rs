@@ -4135,6 +4135,10 @@ pub struct IntradayRefreshSymbolStatus {
     pub provider_attempted: Option<bool>,
     /// Whether the provider sync succeeded (exit code 0).
     pub provider_success: Option<bool>,
+    /// Rows read from provider output before DB upsert.
+    pub rows_read: Option<i64>,
+    /// Rows accepted by provider/DB ingest validation.
+    pub rows_ok: Option<i64>,
     /// Rows inserted into md_bars during the refresh.
     pub rows_inserted: Option<i64>,
     /// Rows updated in md_bars during the refresh.
@@ -4143,6 +4147,16 @@ pub struct IntradayRefreshSymbolStatus {
     pub rows_filtered_incomplete: Option<i64>,
     /// Rows dropped because the bar was still in-progress (current bar).
     pub rows_filtered_in_progress: Option<i64>,
+    /// Age of the latest completed bar in seconds, from refresh evidence or route derivation.
+    pub latest_completed_bar_age_secs: Option<i64>,
+    /// Maximum allowed completed-bar age in seconds for this symbol/timeframe.
+    pub max_allowed_age_secs: Option<i64>,
+    /// Machine-readable post-refresh freshness state.
+    pub freshness_truth_state: Option<String>,
+    /// Machine-readable post-refresh verdict reason.
+    pub reason_code: Option<String>,
+    /// Conservative route-level symbol verdict.
+    pub passed: bool,
     /// Fail reasons for this symbol, empty on PASS.
     pub fail_reasons: Vec<String>,
 }

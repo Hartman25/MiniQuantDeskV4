@@ -1234,6 +1234,37 @@ clippy remains blocked by unrelated existing drift in
 
 **Status:** CLOSED
 
+### INTRADAY-MD-PROVIDER-FRESHNESS-TRUTH-01-COMBINED — CLOSED_LOCAL
+
+**Purpose:** Close the stale intraday/provider freshness truth gap found during the market-hours short proof attempt: the provider sync completed with rows read/updated, but AAPL/5m still had only prior-session completed bars while the operator evidence/status surface could still report `all_passed=true`.
+
+**Root cause found in current repo:**
+
+- The Windows intraday refresher wrote evidence under `exports/market_data/intraday_refresh_*.json`.
+- `all_passed` was computed in `scripts/windows/Refresh-IntradayMarketData.ps1` from provider/config success plus completed-row and staleness checks, but its default `-MaxStalenessMinutes` was `1440`, wider than the daemon intraday gate's `MQK_INTRADAY_BAR_MAX_AGE_SECS` default of `900` seconds.
+- `GET /api/v1/market-data/intraday-refresh/status` in `mqk-daemon/src/routes/transport_quality.rs` read only the latest evidence file and relayed `all_passed`; it did not independently recompute stale-after-refresh truth from the evidence fields.
+- No concrete TwelveData request-parameter bug was proven in this patch. Current request construction uses interval `5min`, `start_date`, `end_date`, `timezone=UTC`, and date-window chunking. The live provider may still return stale data; this patch makes that condition visible and fail-closed in evidence/status.
+
+**Closure:**
+
+- `Refresh-IntradayMarketData.ps1` now derives the default freshness cap from timeframe: intraday uses `MQK_INTRADAY_BAR_MAX_AGE_SECS` or `900` seconds; daily keeps the existing 4-day tolerance. The script writes per-symbol post-refresh verdict fields: `latest_completed_bar_age_secs`, `max_allowed_age_secs`, `freshness_truth_state`, `reason_code`, and `passed`.
+- New/used reason codes include `fresh_after_refresh`, `provider_returned_stale_intraday_data`, `latest_bar_stale_after_refresh`, `latest_completed_bar_missing`, `provider_returned_no_rows`, `provider_error`, and `refresh_failed`.
+- `IntradayRefreshSymbolStatus` now surfaces provider row counts plus the freshness verdict fields.
+- The read-only status route recomputes a conservative symbol verdict from evidence fields. If any symbol is stale or otherwise failed, response `all_passed` is forced false even when an older evidence file claims `all_passed=true`.
+- Tests remain fixture-only/pure: no TwelveData, Alpaca, yfinance, Polygon, broker, order, autonomous runtime, or market-hours proof calls.
+
+**Tests:**
+
+- `scenario_intraday_md_refresher_01`: added RF-05 proving provider rows can be present while all usable completed rows are dropped, leaving intraday freshness missing/fail-closed.
+- `scenario_intraday_md_refresher_operator_surface_01`: added IRS-10/IRS-11 proving stale-after-refresh and provider-success/no-rows evidence force `all_passed=false` with explicit reason codes.
+- Regression proof also includes `scenario_intraday_md_freshness_autonomous_01`, `scenario_premarket_data_readiness_gate_01`, and the closest existing market-data coverage target `scenario_md_coverage_data_ingest_gui_results_01`.
+
+**Validation:** Focused tests and compile/clippy checks passed. `cargo fmt -p mqk-daemon -p mqk-cli -p mqk-md -p mqk-db -- --check` still fails on pre-existing unrelated formatting drift in files outside this patch scope; patch-owned Rust files were formatted locally. No DB migration.
+
+**Remaining requirement before retrying market-hours short proof:** Run a fresh allowed market-hours paper proof only after a real provider refresh produces current-session completed 5m bars and `/api/v1/market-data/intraday-refresh/status` reports `all_passed=true` with per-symbol `passed=true` and `fresh_after_refresh`.
+
+**Status:** CLOSED_LOCAL
+
 ### INTRADAY-MD-REFRESHER-GUI-01 — CLOSED
 
 **Purpose:** Add read-only GUI display for intraday refresh status exposed by INTRADAY-MD-REFRESHER-OPERATOR-SURFACE-01.

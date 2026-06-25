@@ -23,6 +23,8 @@
 //! | IRS-07    | Provider fields in evidence → rows_inserted/updated/filtered surfaced         |
 //! | IRS-08    | Old produced_at_utc → stale_or_missing_evidence=true even on active response  |
 //! | IRS-09    | Latest file selected from multiple candidates (alphabetical last)             |
+//! | IRS-10    | Provider success + stale intraday bar forces all_passed=false                 |
+//! | IRS-11    | Provider success + zero provider rows forces all_passed=false                 |
 //!
 //! All tests use synthetic temp-dir evidence files.
 //! No real providers called. No DB writes. No orders. No broker calls.
@@ -373,10 +375,139 @@ async fn irs_07_provider_fields_surfaced_when_present() {
     assert_eq!(sym["provider_configured"].as_bool(), Some(true));
     assert_eq!(sym["provider_attempted"].as_bool(), Some(true));
     assert_eq!(sym["provider_success"].as_bool(), Some(true));
+    assert_eq!(sym["rows_read"].as_i64(), Some(100));
     assert_eq!(sym["rows_inserted"].as_i64(), Some(12));
     assert_eq!(sym["rows_updated"].as_i64(), Some(3));
     assert_eq!(sym["rows_filtered_incomplete"].as_i64(), Some(4));
     assert_eq!(sym["rows_filtered_in_progress"].as_i64(), Some(1));
+}
+
+// ---------------------------------------------------------------------------
+// IRS-10: Provider success + stale intraday bar → active, all_passed=false
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn irs_10_stale_after_refresh_overrides_optimistic_all_passed() {
+    let dir = tempfile::tempdir().expect("create temp dir");
+    let produced = recent_ts();
+    let evidence = format!(
+        r#"{{
+  "schema_version": "intraday-refresh-v1",
+  "produced_at_utc": "{produced}",
+  "mode": "once",
+  "source": "twelvedata",
+  "timeframe": "5m",
+  "min_completed_bars_required": 30,
+  "max_staleness_minutes": 1440,
+  "all_passed": true,
+  "reason": "provider sync complete",
+  "symbols": [
+    {{
+      "symbol": "AAPL",
+      "timeframe": "5m",
+      "provider_source": "twelvedata",
+      "provider_configured": true,
+      "provider_attempted": true,
+      "provider_success": true,
+      "provider_exit_code": 0,
+      "provider_rows_read": 156,
+      "provider_rows_ok": 156,
+      "provider_rows_inserted": 0,
+      "provider_rows_updated": 156,
+      "gate": "PASS",
+      "completed_count": 5761,
+      "max_ts_iso": "2026-06-23T19:55:00Z",
+      "latest_completed_bar_age_secs": 84000,
+      "max_allowed_age_secs": 900,
+      "staleness_min": 1400,
+      "fail_reasons": []
+    }}
+  ]
+}}"#,
+        produced = produced
+    );
+
+    write_evidence(&dir, "intraday_refresh_20260625_120000.json", &evidence);
+    let router = make_router_with_evidence_dir(dir.path().to_str().unwrap());
+    let (status, v) = call(router, get_refresh_status()).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(str_field(&v, "truth_state"), "active");
+    assert_eq!(
+        v["all_passed"].as_bool(),
+        Some(false),
+        "route must not preserve optimistic all_passed=true when symbol evidence is stale"
+    );
+
+    let symbols = v["symbols"].as_array().expect("symbols array");
+    let sym = &symbols[0];
+    assert_eq!(sym["passed"].as_bool(), Some(false));
+    assert_eq!(
+        sym["freshness_truth_state"].as_str(),
+        Some("stale_after_refresh")
+    );
+    assert_eq!(
+        sym["reason_code"].as_str(),
+        Some("provider_returned_stale_intraday_data")
+    );
+    assert_eq!(sym["latest_completed_bar_age_secs"].as_i64(), Some(84000));
+    assert_eq!(sym["max_allowed_age_secs"].as_i64(), Some(900));
+    assert_eq!(sym["rows_read"].as_i64(), Some(156));
+    assert_eq!(sym["rows_ok"].as_i64(), Some(156));
+}
+
+// ---------------------------------------------------------------------------
+// IRS-11: Provider success + no rows → active, all_passed=false
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn irs_11_provider_success_no_rows_is_failed_reason() {
+    let dir = tempfile::tempdir().expect("create temp dir");
+    let produced = recent_ts();
+    let evidence = format!(
+        r#"{{
+  "schema_version": "intraday-refresh-v1",
+  "produced_at_utc": "{produced}",
+  "mode": "once",
+  "source": "twelvedata",
+  "timeframe": "5m",
+  "all_passed": true,
+  "reason": "provider sync complete",
+  "symbols": [
+    {{
+      "symbol": "AAPL",
+      "timeframe": "5m",
+      "provider_source": "twelvedata",
+      "provider_attempted": true,
+      "provider_success": true,
+      "provider_rows_read": 0,
+      "provider_rows_ok": 0,
+      "gate": "PASS",
+      "completed_count": 30,
+      "latest_completed_bar_age_secs": 60,
+      "max_allowed_age_secs": 900,
+      "staleness_min": 1,
+      "fail_reasons": []
+    }}
+  ]
+}}"#,
+        produced = produced
+    );
+
+    write_evidence(&dir, "intraday_refresh_20260625_121000.json", &evidence);
+    let router = make_router_with_evidence_dir(dir.path().to_str().unwrap());
+    let (status, v) = call(router, get_refresh_status()).await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(str_field(&v, "truth_state"), "active");
+    assert_eq!(v["all_passed"].as_bool(), Some(false));
+    let sym = &v["symbols"].as_array().expect("symbols array")[0];
+    assert_eq!(sym["passed"].as_bool(), Some(false));
+    assert_eq!(
+        sym["reason_code"].as_str(),
+        Some("provider_returned_no_rows")
+    );
+    assert_eq!(sym["rows_read"].as_i64(), Some(0));
 }
 
 // ---------------------------------------------------------------------------
