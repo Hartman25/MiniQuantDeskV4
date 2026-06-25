@@ -374,7 +374,11 @@ fn pmr_a07_aggregate_multi_symbol_one_insufficient_blocks_and_names_symbol() {
 fn pmr_a08_aggregate_multi_symbol_two_blocking_is_mixed_blocked() {
     let report = aggregate_freshness_statuses(
         vec!["AAPL".to_string(), "MSFT".to_string(), "TSLA".to_string()],
-        vec![ok_status("AAPL"), missing_status("MSFT"), stale_status("TSLA")],
+        vec![
+            ok_status("AAPL"),
+            missing_status("MSFT"),
+            stale_status("TSLA"),
+        ],
     );
     assert_eq!(report.aggregate_status, "mixed_blocked");
     assert!(!report.start_allowed);
@@ -392,7 +396,10 @@ async fn pmr_a09_aggregate_multi_symbol_unavailable_without_blockers_is_unavaila
         vec![unavailable_a, unavailable_b],
     );
     assert_eq!(report.aggregate_status, "unavailable");
-    assert!(report.start_allowed, "PMR-A09: unavailable must not block start");
+    assert!(
+        report.start_allowed,
+        "PMR-A09: unavailable must not block start"
+    );
     assert!(report.blockers.is_empty());
 }
 

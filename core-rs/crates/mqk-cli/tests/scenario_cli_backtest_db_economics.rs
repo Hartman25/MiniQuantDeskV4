@@ -24,7 +24,11 @@ fn unique_symbol(tag: &str) -> String {
 
 /// Fresh, never-created output directory path for a single test run.
 fn fresh_out_dir(tag: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("mqk_cli_bkt_db_econ_out_{}_{}", tag, Uuid::new_v4()))
+    std::env::temp_dir().join(format!(
+        "mqk_cli_bkt_db_econ_out_{}_{}",
+        tag,
+        Uuid::new_v4()
+    ))
 }
 
 /// Same three bars as `scenario_cli_backtest_economics.rs`'s CSV fixture
@@ -32,18 +36,39 @@ fn fresh_out_dir(tag: &str) -> PathBuf {
 /// seeded into `md_bars` instead of a CSV file.
 async fn seed_three_bars(pool: &sqlx::PgPool, symbol: &str, timeframe: &str) -> anyhow::Result<()> {
     insert_test_bar(
-        pool, symbol, timeframe, 1_700_000_300, 100_000_000, 101_000_000, 99_000_000,
-        100_500_000, 1_000,
+        pool,
+        symbol,
+        timeframe,
+        1_700_000_300,
+        100_000_000,
+        101_000_000,
+        99_000_000,
+        100_500_000,
+        1_000,
     )
     .await?;
     insert_test_bar(
-        pool, symbol, timeframe, 1_700_000_600, 100_500_000, 101_500_000, 100_000_000,
-        101_000_000, 1_200,
+        pool,
+        symbol,
+        timeframe,
+        1_700_000_600,
+        100_500_000,
+        101_500_000,
+        100_000_000,
+        101_000_000,
+        1_200,
     )
     .await?;
     insert_test_bar(
-        pool, symbol, timeframe, 1_700_000_900, 101_000_000, 102_000_000, 100_500_000,
-        101_500_000, 1_300,
+        pool,
+        symbol,
+        timeframe,
+        1_700_000_900,
+        101_000_000,
+        102_000_000,
+        100_500_000,
+        101_500_000,
+        1_300,
     )
     .await?;
     Ok(())

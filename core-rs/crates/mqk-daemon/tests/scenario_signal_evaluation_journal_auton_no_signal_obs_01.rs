@@ -186,13 +186,12 @@ async fn so01_db_loaded_evaluation_persists_with_full_context_and_no_outbox_rows
     seed_one_bar(&pool, symbol, timeframe, bar_end_ts).await;
     cleanup_signal_evaluations(&pool, symbol).await;
 
-    let outbox_before: i64 = sqlx::query_scalar(
-        "select count(*) from oms_outbox where order_json->>'symbol' = $1",
-    )
-    .bind(symbol)
-    .fetch_one(&pool)
-    .await
-    .expect("oms_outbox pre-count failed");
+    let outbox_before: i64 =
+        sqlx::query_scalar("select count(*) from oms_outbox where order_json->>'symbol' = $1")
+            .bind(symbol)
+            .fetch_one(&pool)
+            .await
+            .expect("oms_outbox pre-count failed");
 
     let st = db_state(pool.clone()).await;
     st.set_per_symbol_bar_staleness_secs_for_test(Some(3600));
@@ -218,11 +217,20 @@ async fn so01_db_loaded_evaluation_persists_with_full_context_and_no_outbox_rows
         .find(|r| r.symbol == symbol)
         .expect("SO-01: exactly one journal row must exist for this symbol");
 
-    assert_eq!(row.strategy_id, "swing_momentum", "SO-01: strategy_id must round-trip");
+    assert_eq!(
+        row.strategy_id, "swing_momentum",
+        "SO-01: strategy_id must round-trip"
+    );
     assert_eq!(row.symbol, symbol, "SO-01: symbol must round-trip");
     assert_eq!(row.timeframe, timeframe, "SO-01: timeframe must round-trip");
-    assert_eq!(row.bar_context_source, "db_loaded", "SO-01: bar_context_source must be db_loaded");
-    assert_eq!(row.bars_loaded, 1, "SO-01: exactly one md_bars row was seeded");
+    assert_eq!(
+        row.bar_context_source, "db_loaded",
+        "SO-01: bar_context_source must be db_loaded"
+    );
+    assert_eq!(
+        row.bars_loaded, 1,
+        "SO-01: exactly one md_bars row was seeded"
+    );
     assert_eq!(
         row.latest_bar_ts_utc.map(|t| t.timestamp()),
         Some(bar_end_ts),
@@ -242,17 +250,19 @@ async fn so01_db_loaded_evaluation_persists_with_full_context_and_no_outbox_rows
         row.decision_stage, "strategy_evaluated",
         "SO-01: the strategy's on_bar ran to completion"
     );
-    assert!(!row.reason_code.is_empty(), "SO-01: reason_code must be present");
+    assert!(
+        !row.reason_code.is_empty(),
+        "SO-01: reason_code must be present"
+    );
     assert!(!row.reason.is_empty(), "SO-01: reason must be present");
     assert_eq!(row.run_id, None, "SO-01: no run was active in this test");
 
-    let outbox_after: i64 = sqlx::query_scalar(
-        "select count(*) from oms_outbox where order_json->>'symbol' = $1",
-    )
-    .bind(symbol)
-    .fetch_one(&pool)
-    .await
-    .expect("oms_outbox post-count failed");
+    let outbox_after: i64 =
+        sqlx::query_scalar("select count(*) from oms_outbox where order_json->>'symbol' = $1")
+            .bind(symbol)
+            .fetch_one(&pool)
+            .await
+            .expect("oms_outbox post-count failed");
     assert_eq!(
         outbox_before, outbox_after,
         "SO-01: signal-evaluation persistence must never create oms_outbox rows"
@@ -303,9 +313,18 @@ async fn so02_missing_bars_persists_pre_dispatch_gate_with_zero_bars_loaded() {
         .expect("SO-02: a journal row must exist even though the strategy never ran");
 
     assert_eq!(row.bars_loaded, 0, "SO-02: zero bars were available");
-    assert_eq!(row.latest_bar_ts_utc, None, "SO-02: no bar exists to report a timestamp for");
-    assert!(!row.signal_generated, "SO-02: no signal — the strategy never ran");
-    assert_eq!(row.signal_qty, None, "SO-02: signal_qty must be honestly absent, not zero");
+    assert_eq!(
+        row.latest_bar_ts_utc, None,
+        "SO-02: no bar exists to report a timestamp for"
+    );
+    assert!(
+        !row.signal_generated,
+        "SO-02: no signal — the strategy never ran"
+    );
+    assert_eq!(
+        row.signal_qty, None,
+        "SO-02: signal_qty must be honestly absent, not zero"
+    );
     assert_eq!(
         row.bar_context_source, "no_bars_available",
         "SO-02: bar_context_source must name the missing-bars case"
@@ -314,7 +333,10 @@ async fn so02_missing_bars_persists_pre_dispatch_gate_with_zero_bars_loaded() {
         row.decision_stage, "pre_dispatch_gate",
         "SO-02: a pre-dispatch gate refused before on_bar ran"
     );
-    assert!(!row.reason_code.is_empty(), "SO-02: reason_code must be present");
+    assert!(
+        !row.reason_code.is_empty(),
+        "SO-02: reason_code must be present"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -360,13 +382,19 @@ async fn so03_stale_bars_persists_pre_dispatch_gate_with_stale_bar_ts() {
         .find(|r| r.symbol == symbol)
         .expect("SO-03: a journal row must exist even though the strategy never ran");
 
-    assert_eq!(row.bars_loaded, 1, "SO-03: exactly one (stale) bar was seeded");
+    assert_eq!(
+        row.bars_loaded, 1,
+        "SO-03: exactly one (stale) bar was seeded"
+    );
     assert_eq!(
         row.latest_bar_ts_utc.map(|t| t.timestamp()),
         Some(bar_end_ts),
         "SO-03: latest_bar_ts_utc must be the real stale bar's own end_ts"
     );
-    assert!(!row.signal_generated, "SO-03: no signal — the strategy never ran");
+    assert!(
+        !row.signal_generated,
+        "SO-03: no signal — the strategy never ran"
+    );
     assert_eq!(
         row.bar_context_source, "stale_bars",
         "SO-03: bar_context_source must name the stale-bars case"
@@ -634,7 +662,9 @@ async fn so06b_route_returns_active_with_seeded_rows() {
         "SO-06b: backend must name the durable table"
     );
 
-    let rows = body["rows"].as_array().expect("SO-06b: rows must be an array");
+    let rows = body["rows"]
+        .as_array()
+        .expect("SO-06b: rows must be an array");
     let row = rows
         .iter()
         .find(|r| r["symbol"].as_str() == Some(symbol))

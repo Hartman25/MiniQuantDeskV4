@@ -472,7 +472,10 @@ pub fn aggregate_freshness_statuses(
             .unwrap_or_else(|| "mixed_blocked".to_string())
     } else if blocking_count > 1 {
         "mixed_blocked".to_string()
-    } else if per_symbol.iter().any(|s| s.freshness_state == "unavailable") {
+    } else if per_symbol
+        .iter()
+        .any(|s| s.freshness_state == "unavailable")
+    {
         "unavailable".to_string()
     } else {
         REASON_CODE_OK.to_string()

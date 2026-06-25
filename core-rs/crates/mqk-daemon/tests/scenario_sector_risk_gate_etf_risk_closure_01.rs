@@ -151,7 +151,12 @@ fn cleanup_dir(dir: &PathBuf) {
     let _ = std::fs::remove_dir_all(dir);
 }
 
-fn make_decision(decision_id: &str, strategy_id: &str, side: &str, qty: i64) -> InternalStrategyDecision {
+fn make_decision(
+    decision_id: &str,
+    strategy_id: &str,
+    side: &str,
+    qty: i64,
+) -> InternalStrategyDecision {
     InternalStrategyDecision {
         decision_id: decision_id.to_string(),
         strategy_id: strategy_id.to_string(),
@@ -619,4 +624,3 @@ async fn srg08_risk_reducing_sell_is_still_allowed_through_to_accepted() {
         assert_eq!(outbox_after, outbox_before);
     }
 }
-

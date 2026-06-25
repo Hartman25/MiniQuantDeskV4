@@ -652,11 +652,20 @@ fn acs05a01_equity_regular_session_maps_to_generic_regular_open() {
 #[test]
 fn acs05a02_equity_outside_window_states_map_to_non_open_kinds() {
     let cases = [
-        (MarketSessionState::PreMarket, MarketVenueSessionKind::PreMarket),
-        (MarketSessionState::AfterHours, MarketVenueSessionKind::PostMarket),
+        (
+            MarketSessionState::PreMarket,
+            MarketVenueSessionKind::PreMarket,
+        ),
+        (
+            MarketSessionState::AfterHours,
+            MarketVenueSessionKind::PostMarket,
+        ),
         (MarketSessionState::Closed, MarketVenueSessionKind::Closed),
         (MarketSessionState::Holiday, MarketVenueSessionKind::Closed),
-        (MarketSessionState::EarlyClose, MarketVenueSessionKind::PostMarket),
+        (
+            MarketSessionState::EarlyClose,
+            MarketVenueSessionKind::PostMarket,
+        ),
     ];
     for (equity_state, expected_kind) in cases {
         let kind = equity_state.to_venue_kind();
@@ -691,7 +700,10 @@ fn acs05a03_unknown_remains_fail_closed_on_generic_model() {
         "ACS05A03: generic Unknown must fail closed (is_open=false)"
     );
 
-    let open_kinds = [MarketVenueSessionKind::Regular, MarketVenueSessionKind::Continuous];
+    let open_kinds = [
+        MarketVenueSessionKind::Regular,
+        MarketVenueSessionKind::Continuous,
+    ];
     let closed_kinds = [
         MarketVenueSessionKind::Closed,
         MarketVenueSessionKind::PreMarket,
@@ -719,10 +731,10 @@ fn acs05a03_unknown_remains_fail_closed_on_generic_model() {
 #[test]
 fn acs05a04_crypto_continuous_profile_open_at_any_time() {
     let probes = [
-        ts(2026, 3, 30, 14, 0, 0),       // Monday, regular-equity-hours-equivalent
-        ts(2026, 3, 28, 3, 0, 0),        // Saturday, 03:00 UTC
-        ts(2026, 3, 29, 23, 59, 0),      // Sunday, 23:59 UTC
-        ts(2026, 7, 3, 0, 0, 0),         // known equity holiday date, midnight UTC
+        ts(2026, 3, 30, 14, 0, 0),  // Monday, regular-equity-hours-equivalent
+        ts(2026, 3, 28, 3, 0, 0),   // Saturday, 03:00 UTC
+        ts(2026, 3, 29, 23, 59, 0), // Sunday, 23:59 UTC
+        ts(2026, 7, 3, 0, 0, 0),    // known equity holiday date, midnight UTC
         Utc.with_ymd_and_hms(9999, 12, 31, 23, 59, 59).unwrap(), // far future
     ];
     for probe in probes {
@@ -762,12 +774,15 @@ fn acs05a05_futures_distinguishes_regular_extended_overnight_closed() {
 
     // Weekday inside regular window (Monday 2026-03-30).
     let regular = classify_futures_globex_session(ts(2026, 3, 30, 15, 0, 0), &windows);
-    assert_eq!(regular, MarketVenueSessionKind::Regular, "ACS05A05: regular window");
+    assert_eq!(
+        regular,
+        MarketVenueSessionKind::Regular,
+        "ACS05A05: regular window"
+    );
     assert!(regular.is_open(), "ACS05A05: Regular must be is_open");
 
     // Weekday inside extended window, before regular opens.
-    let extended_before =
-        classify_futures_globex_session(ts(2026, 3, 30, 12, 30, 0), &windows);
+    let extended_before = classify_futures_globex_session(ts(2026, 3, 30, 12, 30, 0), &windows);
     assert_eq!(
         extended_before,
         MarketVenueSessionKind::Extended,
@@ -793,7 +808,10 @@ fn acs05a05_futures_distinguishes_regular_extended_overnight_closed() {
         MarketVenueSessionKind::Overnight,
         "ACS05A05: outside both windows must be Overnight"
     );
-    assert!(!overnight.is_open(), "ACS05A05: Overnight must NOT be is_open");
+    assert!(
+        !overnight.is_open(),
+        "ACS05A05: Overnight must NOT be is_open"
+    );
 
     // Saturday: Closed regardless of time-of-day, even during what would
     // otherwise be the regular window.
@@ -847,7 +865,10 @@ fn acs05a06_forex_distinguishes_weekday_open_vs_weekend_closed() {
             MarketVenueSessionKind::Closed,
             "ACS05A06: weekend {we} must classify as Closed"
         );
-        assert!(!kind.is_open(), "ACS05A06: weekend {we} must NOT be is_open");
+        assert!(
+            !kind.is_open(),
+            "ACS05A06: weekend {we} must NOT be is_open"
+        );
     }
 
     assert_eq!(
@@ -960,7 +981,10 @@ fn eqcal01_every_covered_year_has_a_known_holiday() {
             MarketSessionState::Holiday,
             "EQCAL01: {label} ({y}-{m:02}-{d:02}) must classify as Holiday"
         );
-        assert!(!t.is_in_session(), "EQCAL01: {label} must not be in-session");
+        assert!(
+            !t.is_in_session(),
+            "EQCAL01: {label} must not be in-session"
+        );
         assert!(!t.is_trading_day, "EQCAL01: {label} is not a trading day");
     }
 }
@@ -983,12 +1007,47 @@ type EarlyCloseCoverageCase = (i32, u32, u32, (u32, u32), (u32, u32), &'static s
 fn eqcal02_every_covered_year_has_a_known_early_close() {
     let p = provider();
     let cases: &[EarlyCloseCoverageCase] = &[
-        (2023, 11, 24, (17, 59), (18, 1), "2023 day-after-Thanksgiving (EST)"),
-        (2024, 7, 3, (16, 59), (17, 1), "2024 Independence Day Eve (EDT)"),
+        (
+            2023,
+            11,
+            24,
+            (17, 59),
+            (18, 1),
+            "2023 day-after-Thanksgiving (EST)",
+        ),
+        (
+            2024,
+            7,
+            3,
+            (16, 59),
+            (17, 1),
+            "2024 Independence Day Eve (EDT)",
+        ),
         (2025, 12, 24, (17, 59), (18, 1), "2025 Christmas Eve (EST)"),
-        (2026, 11, 27, (17, 59), (18, 1), "2026 day-after-Thanksgiving (EST)"),
-        (2027, 11, 26, (17, 59), (18, 1), "2027 day-after-Thanksgiving (EST)"),
-        (2028, 11, 24, (17, 59), (18, 1), "2028 day-after-Thanksgiving (EST)"),
+        (
+            2026,
+            11,
+            27,
+            (17, 59),
+            (18, 1),
+            "2026 day-after-Thanksgiving (EST)",
+        ),
+        (
+            2027,
+            11,
+            26,
+            (17, 59),
+            (18, 1),
+            "2027 day-after-Thanksgiving (EST)",
+        ),
+        (
+            2028,
+            11,
+            24,
+            (17, 59),
+            (18, 1),
+            "2028 day-after-Thanksgiving (EST)",
+        ),
     ];
     for (y, m, d, (bh, bm), (ah, am), label) in cases {
         let before = p.session_for(ts(*y, *m, *d, *bh, *bm, 0));
@@ -1104,7 +1163,10 @@ fn acs05b05_forex_resolves_to_model_only_known_profile_unsupported() {
         r.truth_state,
         SessionProfileResolutionTruth::UnsupportedAssetClass
     );
-    assert_eq!(r.profile, Some(MarketSessionProfile::ForexWeekdayContinuous));
+    assert_eq!(
+        r.profile,
+        Some(MarketSessionProfile::ForexWeekdayContinuous)
+    );
     assert_eq!(r.profile.unwrap().implementation_status(), "model_only");
 }
 
@@ -1142,7 +1204,13 @@ fn acs05b06_options_singular_and_plural_resolve_to_unsupported_with_no_profile()
 /// closed to `Unknown` with no profile.
 #[test]
 fn acs05b07_unknown_asset_class_fails_closed() {
-    for asset_class in ["bond", "commodity", "EQUITY", "Crypto", "totally-unrecognized"] {
+    for asset_class in [
+        "bond",
+        "commodity",
+        "EQUITY",
+        "Crypto",
+        "totally-unrecognized",
+    ] {
         let r = resolve_session_profile_for_instrument_metadata(asset_class, None);
         assert_eq!(
             r.truth_state,

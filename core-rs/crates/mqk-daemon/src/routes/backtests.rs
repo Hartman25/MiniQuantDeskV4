@@ -535,8 +535,10 @@ pub(crate) async fn backtest_economics_suggestion(
         }
 
         if let Some(instrument) = find_v2_instrument_by_symbol(&v2, requested_symbol) {
-            return Json(backtest_economics_suggestion_for_found_instrument(instrument))
-                .into_response();
+            return Json(backtest_economics_suggestion_for_found_instrument(
+                instrument,
+            ))
+            .into_response();
         }
         // Not found in the configured v2 source -- fall through to v1 below.
     }
@@ -602,7 +604,10 @@ pub(crate) async fn backtest_economics_suggestion(
     // reached via v1 -- see `backtest_economics_suggestion_for_instrument`'s
     // own tests, and the configured-v2-source branch above, for the
     // explicit-economics proof.
-    Json(backtest_economics_suggestion_for_found_instrument(instrument)).into_response()
+    Json(backtest_economics_suggestion_for_found_instrument(
+        instrument,
+    ))
+    .into_response()
 }
 
 fn find_v2_instrument_by_symbol<'a>(

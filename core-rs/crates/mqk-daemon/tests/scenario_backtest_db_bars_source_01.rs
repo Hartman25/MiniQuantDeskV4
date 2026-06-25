@@ -157,7 +157,11 @@ async fn db01_unknown_source_refused() {
         "initial_cash_micros": 100_000_000_000i64
     }));
     let (status, resp) = call(router, body).await;
-    assert_eq!(status, StatusCode::BAD_REQUEST, "unknown source must -> 400");
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "unknown source must -> 400"
+    );
     let json = parse_json(resp);
     assert!(!json_bool(&json, "accepted"));
     let err = json_str(&json, "error");
@@ -374,7 +378,11 @@ async fn db10_csv_request_explicit_source_still_works() {
         "initial_cash_micros": 100_000_000_000i64
     }));
     let (status, resp) = call(router, body).await;
-    assert_eq!(status, StatusCode::ACCEPTED, "explicit source=csv must work identically");
+    assert_eq!(
+        status,
+        StatusCode::ACCEPTED,
+        "explicit source=csv must work identically"
+    );
     let json = parse_json(resp);
     assert!(json_bool(&json, "accepted"));
 }
@@ -391,7 +399,11 @@ async fn db12_source_mixed_case_normalizes() {
         "initial_cash_micros": 100_000_000_000i64
     }));
     let (status, resp) = call(router, body).await;
-    assert_eq!(status, StatusCode::ACCEPTED, "mixed-case 'CSV' must normalize to csv");
+    assert_eq!(
+        status,
+        StatusCode::ACCEPTED,
+        "mixed-case 'CSV' must normalize to csv"
+    );
     let json = parse_json(resp);
     assert!(json_bool(&json, "accepted"));
 }
@@ -415,7 +427,11 @@ async fn db11_md_bars_no_db_configured_fails_closed() {
         "end": "2026-06-20T00:00:00Z"
     }));
     let (status, resp) = call(router, body).await;
-    assert_eq!(status, StatusCode::ACCEPTED, "validation alone must accept the request");
+    assert_eq!(
+        status,
+        StatusCode::ACCEPTED,
+        "validation alone must accept the request"
+    );
     let job_id = parse_json(resp)
         .get("job_id")
         .and_then(|v| v.as_str())
@@ -506,7 +522,14 @@ async fn dbdb01_md_bars_job_completes_and_manifest_records_provenance() {
     let base_ts: i64 = 1_790_000_000;
     let bar_tss = [base_ts, base_ts + 86_400, base_ts + 172_800];
     for (i, ts) in bar_tss.iter().enumerate() {
-        insert_test_bar(&pool, symbol, "1D", *ts, 100_000_000 + (i as i64) * 1_000_000).await;
+        insert_test_bar(
+            &pool,
+            symbol,
+            "1D",
+            *ts,
+            100_000_000 + (i as i64) * 1_000_000,
+        )
+        .await;
     }
 
     let start_ts = base_ts - 86_400;
@@ -542,7 +565,11 @@ async fn dbdb01_md_bars_job_completes_and_manifest_records_provenance() {
         "end": end_rfc3339
     }));
     let (status, resp) = call(router_post, body).await;
-    assert_eq!(status, StatusCode::ACCEPTED, "DBDB01: valid md_bars job must be accepted");
+    assert_eq!(
+        status,
+        StatusCode::ACCEPTED,
+        "DBDB01: valid md_bars job must be accepted"
+    );
     let job_id = parse_json(resp)
         .get("job_id")
         .and_then(|v| v.as_str())
@@ -551,7 +578,10 @@ async fn dbdb01_md_bars_job_completes_and_manifest_records_provenance() {
 
     let json = poll_job_status(&st, &job_id, std::time::Duration::from_secs(20)).await;
     if json_str(&json, "status") == "failed" {
-        let err = json.get("error").and_then(|v| v.as_str()).unwrap_or("(no error)");
+        let err = json
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("(no error)");
         panic!("DBDB01: job failed unexpectedly: {err}");
     }
     assert_eq!(json_str(&json, "status"), "completed");
@@ -561,17 +591,39 @@ async fn dbdb01_md_bars_job_completes_and_manifest_records_provenance() {
         .and_then(|v| v.as_str())
         .expect("completed job must have artifact_dir");
     let manifest_path = std::path::Path::new(artifact_dir).join("manifest.json");
-    let manifest_raw = std::fs::read_to_string(&manifest_path).expect("manifest.json must be readable");
+    let manifest_raw =
+        std::fs::read_to_string(&manifest_path).expect("manifest.json must be readable");
     let manifest: serde_json::Value =
         serde_json::from_str(&manifest_raw).expect("manifest.json must be valid JSON");
 
-    assert_eq!(manifest["source"], "md_bars", "manifest must record source=md_bars");
-    assert_eq!(manifest["symbol"], symbol, "manifest must record the queried symbol");
-    assert_eq!(manifest["start"], start_rfc3339, "manifest must record the requested start");
-    assert_eq!(manifest["end"], end_rfc3339, "manifest must record the requested end");
-    assert_eq!(manifest["bar_count"], 3, "manifest must record the loaded bar count");
-    assert_eq!(manifest["timeframe"], "1D", "manifest must record the md_bars timeframe string");
-    assert_eq!(manifest["timeframe_secs"], 86400, "manifest must record timeframe_secs");
+    assert_eq!(
+        manifest["source"], "md_bars",
+        "manifest must record source=md_bars"
+    );
+    assert_eq!(
+        manifest["symbol"], symbol,
+        "manifest must record the queried symbol"
+    );
+    assert_eq!(
+        manifest["start"], start_rfc3339,
+        "manifest must record the requested start"
+    );
+    assert_eq!(
+        manifest["end"], end_rfc3339,
+        "manifest must record the requested end"
+    );
+    assert_eq!(
+        manifest["bar_count"], 3,
+        "manifest must record the loaded bar count"
+    );
+    assert_eq!(
+        manifest["timeframe"], "1D",
+        "manifest must record the md_bars timeframe string"
+    );
+    assert_eq!(
+        manifest["timeframe_secs"], 86400,
+        "manifest must record timeframe_secs"
+    );
 
     delete_test_bars(&pool, symbol).await;
 }
@@ -619,5 +671,8 @@ async fn dbdb02_md_bars_job_with_zero_matching_rows_fails_with_no_data() {
         "DBDB02: zero matching md_bars rows must fail the job, never fabricate an equity curve"
     );
     let err = json_str(&json, "error");
-    assert!(err.contains("no_data"), "error must explicitly name no_data, got: {err}");
+    assert!(
+        err.contains("no_data"),
+        "error must explicitly name no_data, got: {err}"
+    );
 }

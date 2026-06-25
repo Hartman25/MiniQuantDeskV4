@@ -1493,7 +1493,8 @@ pub(crate) async fn system_instrument_registry_v2_source_status(
         .into_response();
     }
 
-    let summary = mqk_md::instrument_registry_v2::summarize_instrument_registry_v2_status(&registry);
+    let summary =
+        mqk_md::instrument_registry_v2::summarize_instrument_registry_v2_status(&registry);
 
     Json(InstrumentRegistryV2SourceStatusResponse {
         truth_state: "configured_valid".to_string(),

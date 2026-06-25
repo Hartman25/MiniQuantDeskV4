@@ -353,7 +353,10 @@ async fn ber07_configured_v2_disabled_future_with_economics_returns_explicit_met
         "explicit v2 multiplier must win: {body}"
     );
     assert_eq!(body["initial_margin_micros"].as_i64(), Some(500_000_000));
-    assert_eq!(body["maintenance_margin_micros"].as_i64(), Some(400_000_000));
+    assert_eq!(
+        body["maintenance_margin_micros"].as_i64(),
+        Some(400_000_000)
+    );
     assert_eq!(body["reason"], "registry_v2_explicit");
     assert_eq!(body["asset_class"], "future");
     assert_eq!(
@@ -401,7 +404,11 @@ async fn ber09_configured_v2_missing_path_returns_registry_unavailable_without_v
     );
     let (status, body) = call(router, &format!("{ROUTE}?symbol=AAPL")).await;
 
-    assert_eq!(status, StatusCode::OK, "must return 200 with truth_state: {body}");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "must return 200 with truth_state: {body}"
+    );
     assert_eq!(
         body["truth_state"], "registry_unavailable",
         "must fail closed, not fall back to v1: {body}"
@@ -429,7 +436,11 @@ async fn ber10_configured_v2_invalid_registry_returns_validation_failed() {
     let (status, body) = call(router, &format!("{ROUTE}?symbol=AAPL")).await;
     std::fs::remove_file(&v2_path).ok();
 
-    assert_eq!(status, StatusCode::OK, "must return 200 with truth_state: {body}");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "must return 200 with truth_state: {body}"
+    );
     assert_eq!(
         body["truth_state"], "validation_failed",
         "must distinguish from registry_unavailable: {body}"

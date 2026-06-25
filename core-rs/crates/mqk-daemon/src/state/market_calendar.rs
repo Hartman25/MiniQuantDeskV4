@@ -707,9 +707,7 @@ pub fn classify_crypto_continuous_session(_now_utc: DateTime<Utc>) -> MarketVenu
 /// rollover used by real FX market centers — that refinement is future work
 /// if/when a forex asset class is actually enabled. Not wired into any
 /// runtime path; forex remains disabled.
-pub fn classify_forex_weekday_continuous_session(
-    now_utc: DateTime<Utc>,
-) -> MarketVenueSessionKind {
+pub fn classify_forex_weekday_continuous_session(now_utc: DateTime<Utc>) -> MarketVenueSessionKind {
     match now_utc.weekday() {
         Weekday::Sat | Weekday::Sun => MarketVenueSessionKind::Closed,
         _ => MarketVenueSessionKind::Continuous,

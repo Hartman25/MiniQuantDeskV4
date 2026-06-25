@@ -108,11 +108,7 @@ fn make_snapshot(cash_micros: i64, positions: &[(&str, i64)]) -> ExecutionSnapsh
 #[tokio::test]
 async fn plw01_no_snapshot_returns_no_snapshot_truth_state() {
     let (_st, router) = make_router_with_state();
-    let (status, body) = call(
-        router,
-        get_live_weights("/api/v1/portfolio/live-weights"),
-    )
-    .await;
+    let (status, body) = call(router, get_live_weights("/api/v1/portfolio/live-weights")).await;
 
     assert_eq!(status, StatusCode::OK);
     let v = parse_json(body);
@@ -139,11 +135,7 @@ async fn plw02_no_positions_is_active_without_db() {
         .await
         .replace(make_snapshot(500_000_000, &[]));
 
-    let (status, body) = call(
-        router,
-        get_live_weights("/api/v1/portfolio/live-weights"),
-    )
-    .await;
+    let (status, body) = call(router, get_live_weights("/api/v1/portfolio/live-weights")).await;
 
     assert_eq!(status, StatusCode::OK);
     let v = parse_json(body);
@@ -169,11 +161,7 @@ async fn plw03_non_flat_position_without_db_is_db_unavailable() {
         .await
         .replace(make_snapshot(100_000_000, &[("AAPL", 10)]));
 
-    let (status, body) = call(
-        router,
-        get_live_weights("/api/v1/portfolio/live-weights"),
-    )
-    .await;
+    let (status, body) = call(router, get_live_weights("/api/v1/portfolio/live-weights")).await;
 
     assert_eq!(status, StatusCode::OK);
     let v = parse_json(body);
@@ -211,11 +199,7 @@ async fn plw04_timeframe_param_is_echoed() {
 #[tokio::test]
 async fn plw05_missing_timeframe_param_defaults_to_1d() {
     let (_st, router) = make_router_with_state();
-    let (status, body) = call(
-        router,
-        get_live_weights("/api/v1/portfolio/live-weights"),
-    )
-    .await;
+    let (status, body) = call(router, get_live_weights("/api/v1/portfolio/live-weights")).await;
 
     assert_eq!(status, StatusCode::OK);
     let v = parse_json(body);
@@ -230,13 +214,12 @@ async fn plw05_missing_timeframe_param_defaults_to_1d() {
 async fn plw06_execution_snapshot_unchanged_after_call() {
     let (st, router) = make_router_with_state();
     let snapshot = make_snapshot(100_000_000, &[("AAPL", 10)]);
-    st.execution_snapshot.write().await.replace(snapshot.clone());
+    st.execution_snapshot
+        .write()
+        .await
+        .replace(snapshot.clone());
 
-    let (status, _body) = call(
-        router,
-        get_live_weights("/api/v1/portfolio/live-weights"),
-    )
-    .await;
+    let (status, _body) = call(router, get_live_weights("/api/v1/portfolio/live-weights")).await;
     assert_eq!(status, StatusCode::OK);
 
     let after = st.execution_snapshot.read().await.clone();

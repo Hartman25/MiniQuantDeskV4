@@ -208,9 +208,21 @@ async fn arc01d_03_committed_example_fixture_counts_match_expected_shape() {
     let (_, body) = get_status(router).await;
 
     assert_eq!(body["total_instruments"].as_u64(), Some(3), "{body}");
-    assert_eq!(body["asset_class_counts"]["future"].as_u64(), Some(2), "{body}");
-    assert_eq!(body["asset_class_counts"]["crypto"].as_u64(), Some(1), "{body}");
-    assert_eq!(body["asset_class_counts"].as_object().unwrap().len(), 2, "{body}");
+    assert_eq!(
+        body["asset_class_counts"]["future"].as_u64(),
+        Some(2),
+        "{body}"
+    );
+    assert_eq!(
+        body["asset_class_counts"]["crypto"].as_u64(),
+        Some(1),
+        "{body}"
+    );
+    assert_eq!(
+        body["asset_class_counts"].as_object().unwrap().len(),
+        2,
+        "{body}"
+    );
 
     let counts = &body["enabled_counts"];
     assert_eq!(counts["enabled"].as_u64(), Some(0), "{body}");
@@ -233,7 +245,11 @@ async fn arc01d_04_committed_example_fixture_proves_non_equity_disabled_and_sugg
         .iter()
         .map(|v| v.as_str().unwrap())
         .collect();
-    assert_eq!(samples, vec!["ES_TEST", "MES_TEST", "BTCUSD_TEST"], "{body}");
+    assert_eq!(
+        samples,
+        vec!["ES_TEST", "MES_TEST", "BTCUSD_TEST"],
+        "{body}"
+    );
 }
 
 // ---------------------------------------------------------------------------

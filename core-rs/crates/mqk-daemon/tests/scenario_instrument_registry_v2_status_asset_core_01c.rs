@@ -40,14 +40,16 @@ fn make_router_with_real_registry() -> axum::Router {
         .to_string_lossy()
         .to_string();
 
-    let mut st = state::AppState::new_with_operator_auth(state::OperatorAuthMode::ExplicitDevNoToken);
+    let mut st =
+        state::AppState::new_with_operator_auth(state::OperatorAuthMode::ExplicitDevNoToken);
     st.instrument_registry_path = registry_path;
     routes::build_router(Arc::new(st))
 }
 
 /// Router pointing `instrument_registry_path` at a guaranteed-nonexistent path.
 fn make_router_with_missing_registry() -> axum::Router {
-    let mut st = state::AppState::new_with_operator_auth(state::OperatorAuthMode::ExplicitDevNoToken);
+    let mut st =
+        state::AppState::new_with_operator_auth(state::OperatorAuthMode::ExplicitDevNoToken);
     st.instrument_registry_path = "/nonexistent/path/that/cannot/exist/equities.json".to_string();
     routes::build_router(Arc::new(st))
 }
@@ -55,7 +57,10 @@ fn make_router_with_missing_registry() -> axum::Router {
 /// Router pointing `instrument_registry_path` at a temp file containing
 /// `content`. Returns the router and the temp path so the caller can clean
 /// up after the request.
-fn make_router_with_registry_content(content: &str, tag: &str) -> (axum::Router, std::path::PathBuf) {
+fn make_router_with_registry_content(
+    content: &str,
+    tag: &str,
+) -> (axum::Router, std::path::PathBuf) {
     let path = std::env::temp_dir().join(format!(
         "mqk_test_registry_v2_status_{}_{}.json",
         tag,
@@ -63,7 +68,8 @@ fn make_router_with_registry_content(content: &str, tag: &str) -> (axum::Router,
     ));
     std::fs::write(&path, content).expect("write temp registry fixture");
 
-    let mut st = state::AppState::new_with_operator_auth(state::OperatorAuthMode::ExplicitDevNoToken);
+    let mut st =
+        state::AppState::new_with_operator_auth(state::OperatorAuthMode::ExplicitDevNoToken);
     st.instrument_registry_path = path.to_string_lossy().to_string();
     (routes::build_router(Arc::new(st)), path)
 }
@@ -130,7 +136,9 @@ async fn arc01c_01_active_status_for_real_production_registry() {
         "truth_state must be active: {body}"
     );
     assert!(
-        body["registry_path"].as_str().is_some_and(|s| !s.is_empty()),
+        body["registry_path"]
+            .as_str()
+            .is_some_and(|s| !s.is_empty()),
         "registry_path must be a non-empty string: {body}"
     );
     assert_eq!(
@@ -372,7 +380,11 @@ async fn arc01c_09_valid_v1_but_invalid_v2_reports_v2_validation_failed() {
         body["truth_state"], "v2_validation_failed",
         "truth_state must be v2_validation_failed: {body}"
     );
-    assert_eq!(body["v1_count"].as_u64(), Some(1), "v1 load succeeded: {body}");
+    assert_eq!(
+        body["v1_count"].as_u64(),
+        Some(1),
+        "v1 load succeeded: {body}"
+    );
     assert_eq!(
         body["v2_count"].as_u64(),
         Some(1),
@@ -382,7 +394,11 @@ async fn arc01c_09_valid_v1_but_invalid_v2_reports_v2_validation_failed() {
     let errors = body["validation_errors"]
         .as_array()
         .expect("validation_errors must be an array");
-    assert_eq!(errors.len(), 1, "validator fails closed on first violation: {body}");
+    assert_eq!(
+        errors.len(),
+        1,
+        "validator fails closed on first violation: {body}"
+    );
     assert!(
         errors[0]
             .as_str()

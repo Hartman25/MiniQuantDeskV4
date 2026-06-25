@@ -388,9 +388,10 @@ async fn ip06_nothing_configured_is_not_configured_and_never_uses_instrument_reg
     );
     let warnings = v["warnings"].as_array().unwrap();
     assert!(
-        warnings
-            .iter()
-            .any(|w| w.as_str().unwrap_or_default().contains("MQK_STRATEGY_MD_TIMEFRAME")),
+        warnings.iter().any(|w| w
+            .as_str()
+            .unwrap_or_default()
+            .contains("MQK_STRATEGY_MD_TIMEFRAME")),
         "IP-06: warnings must explain the missing timeframe; got {v}"
     );
 }
@@ -483,7 +484,10 @@ async fn ip09_response_shape_has_all_documented_fields_with_correct_types() {
     assert!(v["truth_state"].is_string());
     assert!(v["symbol_source"].is_string());
     assert!(v["required_symbols"].is_array());
-    assert!(v["timeframe"].is_string(), "timeframe must be present (Some) in this fixture");
+    assert!(
+        v["timeframe"].is_string(),
+        "timeframe must be present (Some) in this fixture"
+    );
     assert!(v["required_symbol_timeframes"].is_array());
     for entry in v["required_symbol_timeframes"].as_array().unwrap() {
         assert!(entry["symbol"].is_string());
@@ -491,7 +495,10 @@ async fn ip09_response_shape_has_all_documented_fields_with_correct_types() {
         assert!(entry["source"].is_string());
     }
     assert!(v["coverage_expectation"].is_object());
-    assert_eq!(v["coverage_expectation"]["uses_market_data_readiness"], true);
+    assert_eq!(
+        v["coverage_expectation"]["uses_market_data_readiness"],
+        true
+    );
     assert_eq!(v["coverage_expectation"]["uses_md_bars"], true);
     assert!(v["warnings"].is_array());
     assert!(v["checked_at_utc"].is_string());

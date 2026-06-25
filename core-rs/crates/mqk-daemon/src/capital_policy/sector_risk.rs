@@ -200,9 +200,8 @@ mod tests {
 
     #[test]
     fn duplicate_sector_key_is_rejected() {
-        let err =
-            parse_sector_exposure_limits_bps("sector_technology=2500,sector_technology=3000")
-                .unwrap_err();
+        let err = parse_sector_exposure_limits_bps("sector_technology=2500,sector_technology=3000")
+            .unwrap_err();
         assert!(err.contains("duplicate"));
     }
 

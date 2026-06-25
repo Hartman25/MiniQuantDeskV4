@@ -689,11 +689,19 @@ async fn bj15_no_economics_request_writes_default_equity_manifest_economics() {
         .get("economics")
         .expect("manifest.json must include economics");
     assert_eq!(
-        economics.get("contract_multiplier").and_then(|v| v.as_i64()),
+        economics
+            .get("contract_multiplier")
+            .and_then(|v| v.as_i64()),
         Some(1)
     );
-    assert_eq!(economics.get("initial_margin_micros"), Some(&serde_json::Value::Null));
-    assert_eq!(economics.get("maintenance_margin_micros"), Some(&serde_json::Value::Null));
+    assert_eq!(
+        economics.get("initial_margin_micros"),
+        Some(&serde_json::Value::Null)
+    );
+    assert_eq!(
+        economics.get("maintenance_margin_micros"),
+        Some(&serde_json::Value::Null)
+    );
     assert_eq!(
         economics.get("margin_enforced").and_then(|v| v.as_bool()),
         Some(false)
@@ -745,15 +753,21 @@ async fn bj16_economics_request_writes_multiplier_into_manifest() {
         .get("economics")
         .expect("manifest.json must include economics");
     assert_eq!(
-        economics.get("contract_multiplier").and_then(|v| v.as_i64()),
+        economics
+            .get("contract_multiplier")
+            .and_then(|v| v.as_i64()),
         Some(50)
     );
     assert_eq!(
-        economics.get("initial_margin_micros").and_then(|v| v.as_i64()),
+        economics
+            .get("initial_margin_micros")
+            .and_then(|v| v.as_i64()),
         Some(500_000_000)
     );
     assert_eq!(
-        economics.get("maintenance_margin_micros").and_then(|v| v.as_i64()),
+        economics
+            .get("maintenance_margin_micros")
+            .and_then(|v| v.as_i64()),
         Some(400_000_000)
     );
     assert_eq!(

@@ -462,7 +462,10 @@ fn validate_contract_v2(
 /// only from [`validate_registry_v2`]. Metadata-only: this never checks
 /// `enabled`/asset class -- any instrument, equity or not, may carry
 /// `economics`.
-fn validate_economics_v2(economics: &Option<InstrumentEconomicsMetadataV2>, symbol: &str) -> Result<()> {
+fn validate_economics_v2(
+    economics: &Option<InstrumentEconomicsMetadataV2>,
+    symbol: &str,
+) -> Result<()> {
     let Some(econ) = economics else {
         return Ok(());
     };
@@ -554,7 +557,8 @@ pub fn backtest_economics_suggestion_for_instrument(
         contract_multiplier: None,
         initial_margin_micros: None,
         maintenance_margin_micros: None,
-        reason: "registry has no supported equity contract economics and no explicit economics metadata",
+        reason:
+            "registry has no supported equity contract economics and no explicit economics metadata",
     }
 }
 
@@ -1402,7 +1406,8 @@ mod tests {
             );
             let err = validate_registry_v2(&registry_of(vec![inst])).unwrap_err();
             assert!(
-                err.to_string().contains("economics.contract_multiplier must be positive"),
+                err.to_string()
+                    .contains("economics.contract_multiplier must be positive"),
                 "multiplier={bad} message={err}"
             );
         }
@@ -1519,7 +1524,12 @@ mod tests {
         for inst in [base_equity("AAPL"), base_etf("SPY")] {
             let suggestion = backtest_economics_suggestion_for_instrument(&inst);
             assert_eq!(suggestion.truth_state, "active", "symbol={}", inst.symbol);
-            assert_eq!(suggestion.contract_multiplier, Some(1), "symbol={}", inst.symbol);
+            assert_eq!(
+                suggestion.contract_multiplier,
+                Some(1),
+                "symbol={}",
+                inst.symbol
+            );
             assert_eq!(suggestion.initial_margin_micros, None);
             assert_eq!(suggestion.maintenance_margin_micros, None);
             assert_eq!(suggestion.reason, "equity_default");
@@ -1593,7 +1603,8 @@ mod tests {
                 inst.symbol
             );
             assert!(
-                inst.economics.is_some_and(|e| e.contract_multiplier.is_some()),
+                inst.economics
+                    .is_some_and(|e| e.contract_multiplier.is_some()),
                 "example fixture symbol={} should demonstrate an explicit contract_multiplier",
                 inst.symbol
             );
@@ -1753,7 +1764,10 @@ mod tests {
 
         assert_eq!(summary.sample_symbols.len(), SAMPLE_SYMBOLS_LIMIT);
         assert_eq!(summary.sample_symbols[0], "SYM0");
-        assert_eq!(summary.sample_symbols[SAMPLE_SYMBOLS_LIMIT - 1], format!("SYM{}", SAMPLE_SYMBOLS_LIMIT - 1));
+        assert_eq!(
+            summary.sample_symbols[SAMPLE_SYMBOLS_LIMIT - 1],
+            format!("SYM{}", SAMPLE_SYMBOLS_LIMIT - 1)
+        );
     }
 
     // V2STATUS-06: the committed example v2 fixture summarizes to the exact
