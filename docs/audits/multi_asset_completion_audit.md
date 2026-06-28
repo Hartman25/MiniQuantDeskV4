@@ -536,6 +536,20 @@ Validation passed in full: the focused ASSET-CORE-05B daemon test (11/11), ASSET
 
 **Full detail, exact test names, and validation commands:** `MiniQuantDesk_Master_Patch_Ledger_v2.md`'s `ASSET-CORE-05B-INSTRUMENT-SESSION-STATUS-01-COMBINED` entry (end of §19).
 
+## 22C. ASSET-CORE-05C-SESSION-PARITY-STATUS-SHADOW-01-COMBINED — CLOSED_LOCAL / PARTIAL Note (maintenance)
+
+ASSET-CORE-05C-SESSION-PARITY-STATUS-SHADOW-01-COMBINED added a read-only shadow-parity daemon route, `GET /api/v1/system/instrument-sessions/parity`, that independently re-derives production session truth (via `NyseWeekdaysProvider`) per equity instrument and compares it against ASSET-CORE-05B's per-instrument session-profile classification, plus a compact `instrument_session_shadow` summary embedded on `/api/v1/system/status` and `/api/v1/system/preflight`.
+
+Real-registry proof at a fixed timestamp (`2026-06-25T15:00:00Z`): all 88 production equity rows report `parity_state="matched"` (`checked_count=88`, `matched_count=88`, `mismatched_count=0`, `unknown_count=0`, `model_only_count=0`, `all_equity_profiles_match_production=true`). Holiday (2026-07-03) and early-close (2024-11-29, before/after 13:00 ET) fixed timestamps were also proven matched against the same production calendar. Non-equity (crypto/futures/forex) classification was proven model-only at the pure-function level (`resolve_session_profile_for_instrument_metadata` resolves to `UnsupportedAssetClass`/`model_only`, never `Active`) — a route-level non-equity fixture row is not constructible because `mqk-md`'s v1→v2 conversion unconditionally assigns an `Equity` contract regardless of the v1 `asset_class` string, and the real production v1 registry contains only equity rows.
+
+The new route and both summary fields hard-report `production_cutover_enabled=false`, `runtime_uses_session_v2=false`, `trading_uses_session_v2=false`, and `shadow_only=true`. The shadow summary is observability only: it is never added to `blockers`/`warnings` on `/api/v1/system/preflight` and never affects `deployment_start_allowed` on either surface. No DB, provider/broker call, daemon runtime start, order submission, or strategy/risk/OMS/portfolio/broker code was touched.
+
+`ASSET-CORE-05` remains `PARTIAL` pending authoritative non-equity calendars where missing, any approved production runtime cutover, and actual per-instrument enforcement/routing — this patch is observability only and does not change which session truth gates trading today.
+
+Validation passed in full: the focused ASSET-CORE-05C daemon test (15/15), ASSET-CORE-05B/market-calendar/01C regressions (11/11, 31/31, 13/13), the GUI daemon contract gate (23/23), the route contract gate (2/2), `cargo check`, daemon clippy (`-D warnings`), and fmt check all passed.
+
+**Full detail, exact test names, and validation commands:** `MiniQuantDesk_Master_Patch_Ledger_v2.md`'s `ASSET-CORE-05C-SESSION-PARITY-STATUS-SHADOW-01-COMBINED` entry (end of §19).
+
 ## 23. BACKTEST-MULTIPLIER-MARGIN-01-COMBINED Closure Note (maintenance)
 
 BACKTEST-MULTIPLIER-MARGIN-01-COMBINED added/proved a multiplier-aware backtest economics seam (`core-rs/crates/mqk-backtest/src/economics.rs`: `BacktestInstrumentEconomics` + pure `notional_micros`/`mark_to_market_value_micros`/`realized_pnl_micros` helpers). Equity behavior remains multiplier=1 and unchanged — the seam is additive only and is not wired into `BacktestEngine`. Futures/options-style multipliers (50 and 100) are proven by synthetic unit tests only; no futures/options registry, broker, execution, or live portfolio path was enabled or modified. `mqk-portfolio` (the accounting engine shared with the live/paper runtime) was not touched. Margin is scaffolded as `Option<i64>` metadata only — read by nothing, enforced nowhere. `BACKTEST-MULTIPLIER-MARGIN-01` remains `PARTIAL` pending engine wiring and broader non-equity backtest readiness.

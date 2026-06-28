@@ -2106,6 +2106,54 @@ PORTFOLIO-LIVE-WEIGHTS-01
 
 **Recommended next slice:** wire `resolve_session_profile_for_instrument_metadata` as a read-only diagnostic (e.g., a status route) once a second real consumer exists beyond status reporting — or, if multi-asset trading is actually prioritized next, scope true per-instrument runtime session routing as its own patch with its own proof standard (this is explicitly NOT what ASSET-CORE-05B-COMBINED did).
 
+### ASSET-CORE-05C-SESSION-PARITY-STATUS-SHADOW-01-COMBINED — CLOSED_LOCAL / PARTIAL
+
+**Mission:** read-only shadow observability comparing current production session truth (the equity-only `MarketSessionState`/`NyseWeekdaysProvider` path that actually gates trading today) against the ASSET-CORE-05A/05B per-instrument session-profile seam, surfaced both as a dedicated parity route and as a compact summary on `/api/v1/system/status` and `/api/v1/system/preflight`. Not production cutover; not per-instrument runtime enforcement; not trading behavior.
+
+**Repo evidence found before writing any code:**
+- Production session/readiness truth today is `NyseWeekdaysProvider::session_for` (`mqk-daemon/src/state/market_calendar.rs`), which delegates to `mqk_integrity::CalendarSpec::NyseWeekdays`. `/api/v1/autonomous/readiness` and `/api/v1/system/preflight` both consult `AutonomousSessionSchedule::is_in_session` (a separate session-window truth) for `session_in_window`; neither route exposed per-instrument session state before this patch.
+- `/api/v1/system/status` (`SystemStatusResponse`, `api_types.rs`) carried no session field at all.
+- ASSET-CORE-05B's `GET /api/v1/system/instrument-sessions/status` already classifies a `session_state` per instrument via `instrument_session_state_for_profile`, which for equity rows calls the same `NyseWeekdaysProvider`, but it does not separately label "production state" vs "v2/model state" or compute any parity verdict — that join did not exist anywhere in the repo.
+
+**Built:**
+- Pure-ish parity classifier `classify_instrument_session_parity_row` (`mqk-daemon/src/routes/system.rs`) — for equity/ETF instruments, re-derives real `NyseWeekdaysProvider` truth independently and compares it against ASSET-CORE-05B's per-instrument profile classification; for crypto/futures/forex, reports `model_only`/`unsupported_model_only` with `production_session_state="not_applicable"` and never claims a production match; for unrecognized asset classes, reports `unknown`.
+- `build_instrument_session_parity_response` — aggregates rows, counts (`matched`/`mismatched`/`unknown`/`model_only`), and `all_equity_profiles_match_production` (true only when every production-backed row matched).
+- New read-only route `GET /api/v1/system/instrument-sessions/parity` (`system_instrument_sessions_parity`), registered in `routes.rs`, reusing the same v1-load → v2-convert → v2-validate path as ASSET-CORE-05B. Query params: `now_utc` (RFC3339, optional), `symbol` (optional filter), `limit` (optional cap). Response always reports `production_cutover_enabled=false`, `runtime_uses_session_v2=false`, `trading_uses_session_v2=false`, `shadow_only=true`.
+- `instrument_session_shadow_summary_now(&AppState) -> InstrumentSessionShadowSummary` — a compact, non-panicking summary (no per-instrument rows) computed via the same registry path at `Utc::now()`, degrading to `truth_state: "unavailable"` (never an error/panic) if the registry cannot be loaded/converted/validated. New field `instrument_session_shadow` added to both `SystemStatusResponse` and `PreflightStatusResponse`; never added to `blockers`/`warnings`, never reads from or affects `deployment_start_allowed`.
+- New response types in `api_types.rs`: `InstrumentSessionParityRow`, `InstrumentSessionParityResponse`, `InstrumentSessionShadowSummary`.
+
+**Tests added:**
+- `core-rs/crates/mqk-daemon/tests/scenario_instrument_session_parity_status_shadow_asset_core_05c.rs` — 15 tests: real registry at a fixed regular-open timestamp (88/88 matched), a fixed weekend-closed timestamp (matched-closed or unknown, never matched-open), a known holiday timestamp (2026-07-03, observed Independence Day — all matched holiday), a known early-close day before/after the 13:00 ET close (Black Friday 2024-11-29 — matched regular_open then matched early_close), invalid `now_utc` (`timestamp_invalid`, no panic), missing registry (`registry_missing`, no panic), malformed registry (`registry_invalid`, no panic), symbol filter, non-equity model-only proof (at the pure-function level — see note below), no-cutover/shadow-only flag proof, `/system/status` and `/system/preflight` shadow-summary presence/compactness/non-blocking proof, and 05B/01C regression smoke checks.
+
+**Architectural note (non-equity route-level limitation, documented rather than worked around):** `convert_tracked_instrument_to_v2` (`mqk-md/src/instrument_registry_v2.rs`) unconditionally assigns `ContractDefinitionV2::Equity` regardless of the v1 `asset_class` string, and v2 validation then rejects non-equity `asset_class` values paired with an `Equity` contract. Since the real production v1 registry only ever contains `asset_class="equity"` rows, a v1-file-shaped fixture cannot produce a *route-level* non-equity parity row today. Test 9 therefore proves the model-only classification at the pure-function level (`resolve_session_profile_for_instrument_metadata`), mirroring the precedent already set by ASSET-CORE-05B's own test file (`ac05b_07/08/09`).
+
+**Real registry parity proof (fixed `now_utc=2026-06-25T15:00:00Z`):** `checked_count=88`, `matched_count=88`, `mismatched_count=0`, `unknown_count=0`, `model_only_count=0`, `all_equity_profiles_match_production=true`.
+
+**Non-equity fixture proof:** crypto/futures/forex resolve via `resolve_session_profile_for_instrument_metadata` to `SessionProfileResolutionTruth::UnsupportedAssetClass` with `implementation_status()=="model_only"` — never `Active`, never reported as the real session authority.
+
+**Validation:**
+- `cargo test -p mqk-daemon --test scenario_instrument_session_parity_status_shadow_asset_core_05c` — 15/15 pass.
+- `cargo test -p mqk-daemon --test scenario_instrument_session_status_asset_core_05b` — 11/11 pass (regression).
+- `cargo test -p mqk-daemon --test scenario_market_calendar_session_provider_01` — 31/31 pass (regression).
+- `cargo test -p mqk-daemon --test scenario_instrument_registry_v2_status_asset_core_01c` — 13/13 pass (regression).
+- `cargo test -p mqk-daemon --test scenario_gui_daemon_contract_gate` — 23/23 pass (regression; no GUI/contract type was touched — fields were additive to existing daemon response structs and the gate already tolerates additive fields).
+- `cargo test -p mqk-daemon --test scenario_route_contract_rt01` — 2/2 pass (regression).
+- `cargo check -p mqk-daemon -p mqk-cli -p mqk-md` — clean.
+- `cargo clippy -p mqk-daemon --lib -- -D warnings` — clean.
+- `cargo fmt -p mqk-daemon -p mqk-cli -p mqk-md -- --check` — clean (after running `cargo fmt` once to settle line-wrapping on the new code).
+
+**Not done:**
+- no production runtime/session enforcement change — `session_controller.rs` and `start_execution_runtime` are untouched
+- no per-instrument runtime cutover or routing
+- no authoritative non-equity (crypto/futures/forex) session calendar — those remain model-only fixtures, disabled
+- no market-hours proof — all tests use injected fixed timestamps
+- no DB migration, DB mutation, broker/provider call, or daemon runtime start
+- GUI/frontend was not touched (no `mqk-gui` file in scope, none modified)
+
+`ASSET-CORE-05` remains `PARTIAL` — production session/readiness gating still does not consult this shadow seam in any way, non-equity session truth remains unmodeled by any authoritative source, and no per-instrument enforcement exists.
+
+**Recommended next slice:** if a second real per-instrument consumer ever needs production-vs-v2 parity beyond observability (e.g. an alerting/CI gate that fails a build on `all_equity_profiles_match_production=false`), build that as its own patch consuming this route's existing output — do not fold enforcement into this shadow seam itself.
+
 ### BACKTEST-MULTIPLIER-MARGIN-01-COMBINED — CLOSED_LOCAL / PARTIAL
 
 **Commit:** single combined local commit, message `"backtest: add multiplier-aware economics seam"` (code + tests + this ledger/audit update, per this patch's explicit one-commit instruction). Hash intentionally not hardcoded here — this entry is part of that commit's own tree, so it cannot self-reference its own resulting hash; see `git log --oneline -1` in the repo for the exact hash.

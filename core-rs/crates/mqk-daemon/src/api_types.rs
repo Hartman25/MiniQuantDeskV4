@@ -326,6 +326,12 @@ pub struct SystemStatusResponse {
     /// `null` when parity evidence is absent, invalid, not configured, or the
     /// evaluator is unavailable.  Null is not a positive trust claim.
     pub live_trust_complete: Option<bool>,
+
+    /// ASSET-CORE-05C: compact shadow summary comparing production session
+    /// truth against the ASSET-CORE-05B per-instrument session-profile seam.
+    /// Observability only — never a readiness gate or blocker. See
+    /// `/api/v1/system/instrument-sessions/parity` for the full breakdown.
+    pub instrument_session_shadow: InstrumentSessionShadowSummary,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -595,6 +601,13 @@ pub struct PreflightStatusResponse {
     ///
     /// `null` when not applicable (non-paper+alpaca).
     pub market_data_readiness: Option<MultiSymbolFreshnessReport>,
+
+    /// ASSET-CORE-05C: compact shadow summary comparing production session
+    /// truth against the ASSET-CORE-05B per-instrument session-profile seam.
+    /// Observability only — never a readiness gate or blocker, and never
+    /// added to `blockers`/`warnings`. See
+    /// `/api/v1/system/instrument-sessions/parity` for the full breakdown.
+    pub instrument_session_shadow: InstrumentSessionShadowSummary,
 }
 
 // ---------------------------------------------------------------------------
@@ -1670,6 +1683,98 @@ pub struct InstrumentSessionStatusResponse {
     pub profiles: Vec<InstrumentSessionProfileSummary>,
     pub instruments: Vec<InstrumentSessionStatusRow>,
     pub errors: Vec<String>,
+}
+
+// ---------------------------------------------------------------------------
+// /api/v1/system/instrument-sessions/parity — ASSET-CORE-05C
+// ---------------------------------------------------------------------------
+//
+// Read-only shadow comparison: production session truth (the equity-only
+// `MarketSessionState`/`MarketCalendarProvider` path that actually gates
+// trading today) versus the ASSET-CORE-05A/05B per-instrument session-profile
+// seam. This is observability only — see module docs in
+// `state/market_calendar.rs` and the route handler in `routes/system.rs` for
+// the full honesty contract. Nothing here is consumed by any trading,
+// runtime, or routing decision.
+
+/// Per-instrument parity row — ASSET-CORE-05C.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InstrumentSessionParityRow {
+    pub symbol: String,
+    pub asset_class: String,
+    pub instrument_kind: Option<String>,
+    pub session_profile_id: String,
+    /// Production session-state string (`MarketSessionState::as_str()`), or
+    /// `"not_applicable"` when no production calendar exists for this asset
+    /// class (i.e. anything other than equity/ETF).
+    pub production_session_state: String,
+    /// ASSET-CORE-05B per-instrument profile session-state string.
+    pub profile_session_state: String,
+    /// `"matched"` | `"mismatched"` | `"unknown"` | `"model_only"` |
+    /// `"unsupported_model_only"` | `"registry_missing"` | `"registry_invalid"`
+    /// | `"conversion_failed"` | `"timestamp_invalid"`.
+    pub parity_state: String,
+    pub production_backed: bool,
+    pub model_only: bool,
+    /// Always `false`. No trading/runtime path consumes this row.
+    pub trading_uses_this: bool,
+    pub reason_code: String,
+}
+
+/// Read-only shadow parity status — ASSET-CORE-05C.
+///
+/// Compares current production session truth against the ASSET-CORE-05B
+/// per-instrument session-profile seam for every (filtered) registry
+/// instrument at a supplied timestamp. Diagnostic only: never feeds trading,
+/// routing, risk, OMS, portfolio, broker, or runtime enforcement.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InstrumentSessionParityResponse {
+    pub truth_state: String,
+    pub as_of_utc: String,
+    pub registry_v2_valid: bool,
+    /// Always `false`. No production v2 session/profile cutover exists.
+    pub production_cutover_enabled: bool,
+    /// Always `false`. Runtime session gates are not switched to this surface.
+    pub runtime_uses_session_v2: bool,
+    /// Always `false`. No trading path consumes this profile assignment.
+    pub trading_uses_session_v2: bool,
+    /// Always `true`. This route is shadow/observability only.
+    pub shadow_only: bool,
+    /// `true` only when every checked equity row's parity_state is `"matched"`.
+    pub all_equity_profiles_match_production: bool,
+    pub checked_count: usize,
+    pub matched_count: usize,
+    pub mismatched_count: usize,
+    pub unknown_count: usize,
+    pub model_only_count: usize,
+    pub rows: Vec<InstrumentSessionParityRow>,
+    pub errors: Vec<String>,
+}
+
+/// Compact shadow-parity summary embedded on `/api/v1/system/status` and
+/// `/api/v1/system/preflight` — ASSET-CORE-05C.
+///
+/// Intentionally does NOT carry per-instrument rows; see the dedicated
+/// `route` field for the full breakdown. Never used as a readiness gate or
+/// blocker on either surface.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InstrumentSessionShadowSummary {
+    /// `"active"` when computed successfully, `"unavailable"` when the
+    /// registry could not be loaded/converted/validated (registry missing,
+    /// invalid, or conversion failed). Never blocks the parent surface.
+    pub truth_state: String,
+    /// Always `true`. This summary is shadow/observability only.
+    pub shadow_only: bool,
+    pub production_cutover_enabled: bool,
+    pub runtime_uses_session_v2: bool,
+    pub trading_uses_session_v2: bool,
+    pub checked_count: usize,
+    pub matched_count: usize,
+    pub mismatched_count: usize,
+    pub unknown_count: usize,
+    pub model_only_count: usize,
+    pub all_equity_profiles_match_production: bool,
+    pub route: String,
 }
 
 // ---------------------------------------------------------------------------

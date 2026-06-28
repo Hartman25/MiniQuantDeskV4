@@ -295,8 +295,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     use system::{
         autonomous_readiness, health, status_handler, system_config_diffs,
         system_config_fingerprint, system_instrument_registry_v2_source_status,
-        system_instrument_registry_v2_status, system_instrument_sessions_status, system_metadata,
-        system_preflight, system_runtime_leadership, system_session, system_status,
+        system_instrument_registry_v2_status, system_instrument_sessions_parity,
+        system_instrument_sessions_status, system_metadata, system_preflight,
+        system_runtime_leadership, system_session, system_status,
     };
     use system_artifact::{
         system_artifact_intake, system_parity_evidence, system_run_artifact, system_topology,
@@ -334,6 +335,16 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/v1/system/instrument-sessions/status",
             get(system_instrument_sessions_status),
+        )
+        // ASSET-CORE-05C: read-only shadow parity comparing production
+        // session truth against the ASSET-CORE-05B per-instrument
+        // session-profile seam. No DB, provider/broker calls, runtime start,
+        // writes, or trading cutover. production_cutover_enabled,
+        // runtime_uses_session_v2, and trading_uses_session_v2 are always
+        // false; shadow_only is always true.
+        .route(
+            "/api/v1/system/instrument-sessions/parity",
+            get(system_instrument_sessions_parity),
         )
         // ASSET-CORE-01D: read-only status for the *separate* v2 registry source
         // configured via MQK_INSTRUMENT_REGISTRY_V2_PATH (public, no auth). No DB,

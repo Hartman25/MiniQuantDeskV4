@@ -29,7 +29,8 @@ use serde::Deserialize;
 use crate::api_types::{
     AssetCapabilityEntry, AssetCapabilityMatrix, AutonomousPaperReadinessResponse, HealthResponse,
     InstrumentRegistryV2EnabledCounts, InstrumentRegistryV2SourceStatusResponse,
-    InstrumentRegistryV2StatusResponse, InstrumentSessionProfileSummary,
+    InstrumentRegistryV2StatusResponse, InstrumentSessionParityResponse,
+    InstrumentSessionParityRow, InstrumentSessionProfileSummary, InstrumentSessionShadowSummary,
     InstrumentSessionStatusResponse, InstrumentSessionStatusRow, MultiSymbolFreshnessReport,
     PreflightStatusResponse, RuntimeLeadershipCheckpointRow, RuntimeLeadershipResponse,
     SessionStateResponse, StrategyDecisionDiagnostics, SystemMetadataResponse,
@@ -46,9 +47,10 @@ use crate::state::{
     classify_futures_globex_session, resolve_session_profile_for_instrument_metadata,
     session_window_from_env, supported_session_profiles, AppState, AutonomousSessionTruth,
     BrokerSnapshotTruthSource, DeploymentMode, FuturesSessionWindows, MarketCalendarProvider,
-    MarketSessionProfile, MarketVenueSessionKind, NyseWeekdaysProvider, SessionAuthority,
-    SessionProfileResolutionTruth, SessionProfileStatus, SessionWindow, StrategyMarketDataSource,
-    SESSION_START_HH_MM_ENV, SESSION_STOP_HH_MM_ENV, STRATEGY_MD_TIMEFRAME_ENV,
+    MarketSessionProfile, MarketSessionState, MarketVenueSessionKind, NyseWeekdaysProvider,
+    SessionAuthority, SessionProfileResolutionTruth, SessionProfileStatus, SessionWindow,
+    StrategyMarketDataSource, SESSION_START_HH_MM_ENV, SESSION_STOP_HH_MM_ENV,
+    STRATEGY_MD_TIMEFRAME_ENV,
 };
 
 use super::helpers::{
@@ -296,6 +298,9 @@ pub(crate) async fn system_status(State(st): State<Arc<AppState>>) -> impl IntoR
             // operators see the explicit trust ceiling on the primary surface.
             parity_evidence_state,
             live_trust_complete,
+            // ASSET-CORE-05C: compact shadow-parity summary. Observability
+            // only; never gates deployment_start_allowed or any other field.
+            instrument_session_shadow: instrument_session_shadow_summary_now(&st),
         }),
     )
         .into_response()
@@ -549,6 +554,10 @@ pub(crate) async fn system_preflight(State(st): State<Arc<AppState>>) -> impl In
             live_trust_complete,
             market_data_freshness: pf_md_freshness,
             market_data_readiness: pf_md_readiness,
+            // ASSET-CORE-05C: compact shadow-parity summary. Observability
+            // only; never added to `blockers`/`warnings` and never gates
+            // `deployment_start_allowed`.
+            instrument_session_shadow: instrument_session_shadow_summary_now(&st),
         }),
     )
         .into_response()
@@ -1666,6 +1675,341 @@ pub(crate) async fn system_instrument_sessions_status(
         query.limit,
     ))
     .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/system/instrument-sessions/parity — ASSET-CORE-05C
+// ---------------------------------------------------------------------------
+//
+// Read-only shadow comparison: production session truth (the equity-only
+// `MarketSessionState`/`NyseWeekdaysProvider` path that actually gates
+// trading today) versus the ASSET-CORE-05A/05B per-instrument session-profile
+// seam. Reuses the same v1->v2 registry load/convert/validate path as
+// ASSET-CORE-05B; adds no new registry, DB, provider, or broker dependency.
+//
+// Honesty contract:
+// - `production_cutover_enabled`, `runtime_uses_session_v2`, and
+//   `trading_uses_session_v2` are always `false`; `shadow_only` is always
+//   `true`. Nothing here is consumed by any trading, runtime, or routing
+//   decision.
+// - Equity/ETF rows compare against real `NyseWeekdaysProvider` truth.
+//   Non-equity (crypto/futures/forex) rows have no production calendar at
+//   all: they are classified `model_only`/`unsupported_model_only` and never
+//   reported as matching production, regardless of what the model-only
+//   classifier returns.
+// - `unknown` on either side of the comparison yields `unknown`, never
+//   `matched`.
+
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct InstrumentSessionsParityQuery {
+    now_utc: Option<String>,
+    limit: Option<usize>,
+    symbol: Option<String>,
+}
+
+fn instrument_session_parity_failure_response(
+    truth_state: &str,
+    as_of_utc: String,
+    error: String,
+) -> InstrumentSessionParityResponse {
+    InstrumentSessionParityResponse {
+        truth_state: truth_state.to_string(),
+        as_of_utc,
+        registry_v2_valid: false,
+        production_cutover_enabled: false,
+        runtime_uses_session_v2: false,
+        trading_uses_session_v2: false,
+        shadow_only: true,
+        all_equity_profiles_match_production: false,
+        checked_count: 0,
+        matched_count: 0,
+        mismatched_count: 0,
+        unknown_count: 0,
+        model_only_count: 0,
+        rows: Vec::new(),
+        errors: vec![error],
+    }
+}
+
+/// Pure parity classifier for a single instrument — ASSET-CORE-05C.
+///
+/// Compares the real production `MarketSessionState` (equity/ETF only,
+/// derived from `NyseWeekdaysProvider`) against the ASSET-CORE-05B
+/// per-instrument session-profile resolution at `now_utc`. Conservative
+/// rules: exact-same production-backed state => matched; any `unknown` on
+/// either side => unknown (never matched); model-only non-equity profiles
+/// are reported as `model_only`/`unsupported_model_only`, never as matching
+/// production.
+fn classify_instrument_session_parity_row(
+    symbol: &str,
+    asset_class: &str,
+    instrument_kind: Option<&str>,
+    now_utc: DateTime<Utc>,
+) -> InstrumentSessionParityRow {
+    let resolution = resolve_session_profile_for_instrument_metadata(asset_class, instrument_kind);
+    let session_profile_id = resolution
+        .profile
+        .map(|p| p.as_str())
+        .unwrap_or("session_profile_unavailable");
+
+    let is_equity_active = resolution.truth_state == SessionProfileResolutionTruth::Active
+        && resolution.profile == Some(MarketSessionProfile::EquityUsRegular);
+    let model_only = resolution.truth_state == SessionProfileResolutionTruth::UnsupportedAssetClass
+        && resolution.profile.is_some();
+
+    let (profile_session_state, _profile_reason) =
+        instrument_session_state_for_profile(resolution.profile, now_utc);
+
+    let (production_session_state, parity_state, reason_code, production_backed) =
+        if is_equity_active {
+            let production_truth = NyseWeekdaysProvider.session_for(now_utc);
+            let production_state_str = production_truth.state.as_str();
+            let parity = if production_truth.state == MarketSessionState::Unknown {
+                "unknown"
+            } else if profile_session_state == production_state_str {
+                "matched"
+            } else {
+                // ASSET-CORE-05B's instrument_session_state_for_profile classifies
+                // equity instruments via the same NyseWeekdaysProvider call, so a
+                // mismatch here would indicate the two call sites have diverged
+                // (e.g. a future change to one without the other). Report it
+                // truthfully rather than collapsing it into "matched".
+                "mismatched"
+            };
+            (
+                production_state_str.to_string(),
+                parity,
+                "equity_profile_compared_against_production_calendar",
+                true,
+            )
+        } else if model_only {
+            (
+                "not_applicable".to_string(),
+                "model_only",
+                "non_equity_profile_is_model_only_no_production_calendar_exists",
+                false,
+            )
+        } else if resolution.truth_state == SessionProfileResolutionTruth::Unknown {
+            (
+                "not_applicable".to_string(),
+                "unknown",
+                "asset_class_not_classifiable_by_session_profile_seam",
+                false,
+            )
+        } else {
+            // UnsupportedAssetClass with profile == None (e.g. options): no
+            // session-profile shape exists, so parity cannot be computed.
+            (
+                "not_applicable".to_string(),
+                "unsupported_model_only",
+                "no_session_profile_shape_modeled_for_this_asset_class",
+                false,
+            )
+        };
+
+    InstrumentSessionParityRow {
+        symbol: symbol.to_string(),
+        asset_class: asset_class.to_string(),
+        instrument_kind: instrument_kind.map(|s| s.to_string()),
+        session_profile_id: session_profile_id.to_string(),
+        production_session_state,
+        profile_session_state: profile_session_state.to_string(),
+        parity_state: parity_state.to_string(),
+        production_backed,
+        model_only,
+        trading_uses_this: false,
+        reason_code: reason_code.to_string(),
+    }
+}
+
+fn build_instrument_session_parity_response(
+    v2: &mqk_md::instrument_registry_v2::InstrumentRegistryV2,
+    as_of_utc: DateTime<Utc>,
+    symbol_filter: Option<&str>,
+    limit: Option<usize>,
+) -> InstrumentSessionParityResponse {
+    let normalized_symbol_filter = symbol_filter.map(|s| s.trim().to_ascii_uppercase());
+    let mut rows = Vec::new();
+    let mut matched_count = 0usize;
+    let mut mismatched_count = 0usize;
+    let mut unknown_count = 0usize;
+    let mut model_only_count = 0usize;
+
+    for inst in &v2.instruments {
+        if normalized_symbol_filter
+            .as_deref()
+            .is_some_and(|s| inst.symbol.to_ascii_uppercase() != s)
+        {
+            continue;
+        }
+        if limit.is_some_and(|max| rows.len() >= max) {
+            continue;
+        }
+
+        let row = classify_instrument_session_parity_row(
+            &inst.symbol,
+            &inst.asset_class,
+            inst.instrument_kind.as_deref(),
+            as_of_utc,
+        );
+
+        match row.parity_state.as_str() {
+            "matched" => matched_count += 1,
+            "mismatched" => mismatched_count += 1,
+            "unknown" => unknown_count += 1,
+            "model_only" | "unsupported_model_only" => model_only_count += 1,
+            _ => {}
+        }
+
+        rows.push(row);
+    }
+
+    let checked_count = rows.len();
+    let equity_rows_checked = rows.iter().filter(|r| r.production_backed).count();
+    let equity_rows_matched = rows
+        .iter()
+        .filter(|r| r.production_backed && r.parity_state == "matched")
+        .count();
+    let all_equity_profiles_match_production =
+        equity_rows_checked > 0 && equity_rows_checked == equity_rows_matched;
+
+    InstrumentSessionParityResponse {
+        truth_state: "active".to_string(),
+        as_of_utc: as_of_utc.to_rfc3339(),
+        registry_v2_valid: true,
+        production_cutover_enabled: false,
+        runtime_uses_session_v2: false,
+        trading_uses_session_v2: false,
+        shadow_only: true,
+        all_equity_profiles_match_production,
+        checked_count,
+        matched_count,
+        mismatched_count,
+        unknown_count,
+        model_only_count,
+        rows,
+        errors: Vec::new(),
+    }
+}
+
+/// GET /api/v1/system/instrument-sessions/parity (ASSET-CORE-05C).
+///
+/// Read-only shadow parity surface: loads the same configured v1 registry as
+/// ASSET-CORE-05B, converts it to v2 in memory, validates it, then for each
+/// instrument compares production session truth (equity/ETF only, via
+/// `NyseWeekdaysProvider`) against the ASSET-CORE-05A/05B per-instrument
+/// session-profile seam at a supplied timestamp. No DB, provider, broker,
+/// runtime, or trading path is touched. Never a production cutover.
+pub(crate) async fn system_instrument_sessions_parity(
+    State(st): State<Arc<AppState>>,
+    Query(query): Query<InstrumentSessionsParityQuery>,
+) -> impl IntoResponse {
+    let as_of_utc = match query.now_utc.as_deref() {
+        Some(raw) => match DateTime::parse_from_rfc3339(raw).map(|dt| dt.with_timezone(&Utc)) {
+            Ok(dt) => dt,
+            Err(err) => {
+                return Json(instrument_session_parity_failure_response(
+                    "timestamp_invalid",
+                    raw.to_string(),
+                    format!("invalid now_utc timestamp: {err}"),
+                ))
+                .into_response();
+            }
+        },
+        None => Utc::now(),
+    };
+
+    let registry_path = st.instrument_registry_path.clone();
+    let path = std::path::Path::new(&registry_path);
+    let v1 = match mqk_md::instrument_registry::load_instrument_registry(path) {
+        Ok(v) => v,
+        Err(err) => {
+            let truth_state = if path.exists() {
+                "registry_invalid"
+            } else {
+                "registry_missing"
+            };
+            return Json(instrument_session_parity_failure_response(
+                truth_state,
+                as_of_utc.to_rfc3339(),
+                err.to_string(),
+            ))
+            .into_response();
+        }
+    };
+
+    let v2 = mqk_md::instrument_registry_v2::convert_v1_registry_to_v2(&v1);
+    if let Err(err) = mqk_md::instrument_registry_v2::validate_registry_v2(&v2) {
+        return Json(instrument_session_parity_failure_response(
+            "registry_invalid",
+            as_of_utc.to_rfc3339(),
+            err.to_string(),
+        ))
+        .into_response();
+    }
+
+    Json(build_instrument_session_parity_response(
+        &v2,
+        as_of_utc,
+        query.symbol.as_deref(),
+        query.limit,
+    ))
+    .into_response()
+}
+
+/// Compact shadow-parity summary for embedding on `/api/v1/system/status`
+/// and `/api/v1/system/preflight` — ASSET-CORE-05C.
+///
+/// Reuses the exact same registry-load/convert/validate/classify path as the
+/// dedicated parity route, evaluated at `Utc::now()`. Never panics: any
+/// registry load/convert/validate failure degrades to
+/// `truth_state: "unavailable"` rather than failing the parent surface.
+pub(crate) fn instrument_session_shadow_summary_now(
+    st: &AppState,
+) -> InstrumentSessionShadowSummary {
+    const ROUTE: &str = "/api/v1/system/instrument-sessions/parity";
+    let registry_path = &st.instrument_registry_path;
+    let path = std::path::Path::new(registry_path);
+
+    let unavailable = |reason: &str| InstrumentSessionShadowSummary {
+        truth_state: "unavailable".to_string(),
+        shadow_only: true,
+        production_cutover_enabled: false,
+        runtime_uses_session_v2: false,
+        trading_uses_session_v2: false,
+        checked_count: 0,
+        matched_count: 0,
+        mismatched_count: 0,
+        unknown_count: 0,
+        model_only_count: 0,
+        all_equity_profiles_match_production: false,
+        route: format!("{ROUTE} ({reason})"),
+    };
+
+    let v1 = match mqk_md::instrument_registry::load_instrument_registry(path) {
+        Ok(v) => v,
+        Err(_) => return unavailable("registry_unavailable"),
+    };
+    let v2 = mqk_md::instrument_registry_v2::convert_v1_registry_to_v2(&v1);
+    if mqk_md::instrument_registry_v2::validate_registry_v2(&v2).is_err() {
+        return unavailable("registry_invalid");
+    }
+
+    let full = build_instrument_session_parity_response(&v2, Utc::now(), None, None);
+    InstrumentSessionShadowSummary {
+        truth_state: full.truth_state,
+        shadow_only: full.shadow_only,
+        production_cutover_enabled: full.production_cutover_enabled,
+        runtime_uses_session_v2: full.runtime_uses_session_v2,
+        trading_uses_session_v2: full.trading_uses_session_v2,
+        checked_count: full.checked_count,
+        matched_count: full.matched_count,
+        mismatched_count: full.mismatched_count,
+        unknown_count: full.unknown_count,
+        model_only_count: full.model_only_count,
+        all_equity_profiles_match_production: full.all_equity_profiles_match_production,
+        route: ROUTE.to_string(),
+    }
 }
 
 // ---------------------------------------------------------------------------
