@@ -522,6 +522,20 @@ ASSET-CORE-05-MARKET-CALENDAR-GENERALIZE-01-COMBINED added additive session-prof
 
 **Full detail, exact test names, and validation commands:** `MiniQuantDesk_Master_Patch_Ledger_v2.md`'s `ASSET-CORE-05-MARKET-CALENDAR-GENERALIZE-01-COMBINED` entry (end of §19).
 
+## 22B. ASSET-CORE-05B-INSTRUMENT-SESSION-STATUS-01-COMBINED — CLOSED_LOCAL / PARTIAL Note (maintenance)
+
+ASSET-CORE-05B-INSTRUMENT-SESSION-STATUS-01-COMBINED added a read-only daemon status route, `GET /api/v1/system/instrument-sessions/status`, that connects the ASSET-CORE-01C v1→v2 registry conversion truth to the ASSET-CORE-05A/05B session-profile seam on a per-instrument basis. It reports the profile each converted instrument maps to, the session state at an injected UTC timestamp, and whether that profile is production-backed or model-only.
+
+The current real registry remains equity-only: all converted production rows map to `equity_us_regular`, ETFs remain equity instruments with `instrument_kind="etf"`, and zero non-equity rows are enabled. Crypto, futures, and forex are proven only through disabled/model-only fixtures; no non-equity registry row, route, gate, broker adapter, risk path, OMS path, portfolio path, strategy path, or runtime path was enabled.
+
+The new route hard-reports `production_cutover_enabled=false`, `trading_uses_session_v2=false`, `runtime_uses_session_v2=false`, and per-instrument `trading_uses_this=false`. CLI was skipped to keep this slice bounded; ASSET-CORE-01C's existing `mqk md registry-v2-status` remains unchanged.
+
+`ASSET-CORE-05` remains `PARTIAL` pending authoritative non-equity calendars where missing, any approved production runtime cutover, and actual per-instrument enforcement/routing.
+
+Validation passed in full: the focused ASSET-CORE-05B daemon test (11/11), ASSET-CORE-05A/01C regressions (31/31, 13/13), the GUI daemon contract gate (23/23), `cargo check`, daemon clippy (`-D warnings`), and fmt check all passed. This slice is closed; `ASSET-CORE-05` as a whole remains `PARTIAL` per the note above.
+
+**Full detail, exact test names, and validation commands:** `MiniQuantDesk_Master_Patch_Ledger_v2.md`'s `ASSET-CORE-05B-INSTRUMENT-SESSION-STATUS-01-COMBINED` entry (end of §19).
+
 ## 23. BACKTEST-MULTIPLIER-MARGIN-01-COMBINED Closure Note (maintenance)
 
 BACKTEST-MULTIPLIER-MARGIN-01-COMBINED added/proved a multiplier-aware backtest economics seam (`core-rs/crates/mqk-backtest/src/economics.rs`: `BacktestInstrumentEconomics` + pure `notional_micros`/`mark_to_market_value_micros`/`realized_pnl_micros` helpers). Equity behavior remains multiplier=1 and unchanged — the seam is additive only and is not wired into `BacktestEngine`. Futures/options-style multipliers (50 and 100) are proven by synthetic unit tests only; no futures/options registry, broker, execution, or live portfolio path was enabled or modified. `mqk-portfolio` (the accounting engine shared with the live/paper runtime) was not touched. Margin is scaffolded as `Option<i64>` metadata only — read by nothing, enforced nowhere. `BACKTEST-MULTIPLIER-MARGIN-01` remains `PARTIAL` pending engine wiring and broader non-equity backtest readiness.

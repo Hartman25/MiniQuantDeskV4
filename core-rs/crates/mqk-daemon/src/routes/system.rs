@@ -18,19 +18,22 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use axum::{
-    extract::State,
+    extract::{Query, State},
     http::StatusCode,
     response::{IntoResponse, Response},
     Json,
 };
-use chrono::Utc;
+use chrono::{DateTime, Utc};
+use serde::Deserialize;
 
 use crate::api_types::{
     AssetCapabilityEntry, AssetCapabilityMatrix, AutonomousPaperReadinessResponse, HealthResponse,
     InstrumentRegistryV2EnabledCounts, InstrumentRegistryV2SourceStatusResponse,
-    InstrumentRegistryV2StatusResponse, MultiSymbolFreshnessReport, PreflightStatusResponse,
-    RuntimeLeadershipCheckpointRow, RuntimeLeadershipResponse, SessionStateResponse,
-    StrategyDecisionDiagnostics, SystemMetadataResponse, SystemStatusResponse,
+    InstrumentRegistryV2StatusResponse, InstrumentSessionProfileSummary,
+    InstrumentSessionStatusResponse, InstrumentSessionStatusRow, MultiSymbolFreshnessReport,
+    PreflightStatusResponse, RuntimeLeadershipCheckpointRow, RuntimeLeadershipResponse,
+    SessionStateResponse, StrategyDecisionDiagnostics, SystemMetadataResponse,
+    SystemStatusResponse,
 };
 use crate::market_data_freshness::{
     evaluate_md_freshness_status, evaluate_md_freshness_status_for_symbols,
@@ -38,9 +41,13 @@ use crate::market_data_freshness::{
 };
 use crate::parity_evidence::{evaluate_parity_evidence_guarded, ParityEvidenceOutcome};
 use crate::state::{
-    autonomous_session_schedule_from_env, session_window_from_env, supported_session_profiles,
-    AppState, AutonomousSessionTruth, BrokerSnapshotTruthSource, DeploymentMode,
-    MarketSessionProfile, SessionAuthority, SessionProfileStatus, StrategyMarketDataSource,
+    autonomous_session_schedule_from_env, classify_crypto_continuous_session,
+    classify_equity_us_regular_session, classify_forex_weekday_continuous_session,
+    classify_futures_globex_session, resolve_session_profile_for_instrument_metadata,
+    session_window_from_env, supported_session_profiles, AppState, AutonomousSessionTruth,
+    BrokerSnapshotTruthSource, DeploymentMode, FuturesSessionWindows, MarketCalendarProvider,
+    MarketSessionProfile, MarketVenueSessionKind, NyseWeekdaysProvider, SessionAuthority,
+    SessionProfileResolutionTruth, SessionProfileStatus, SessionWindow, StrategyMarketDataSource,
     SESSION_START_HH_MM_ENV, SESSION_STOP_HH_MM_ENV, STRATEGY_MD_TIMEFRAME_ENV,
 };
 
@@ -1361,6 +1368,303 @@ pub(crate) async fn system_instrument_registry_v2_status(
                 .to_string(),
         ],
     })
+    .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/system/instrument-sessions/status — ASSET-CORE-05B
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct InstrumentSessionsStatusQuery {
+    now_utc: Option<String>,
+    limit: Option<usize>,
+    symbol: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+struct InstrumentSessionProfileAccumulator {
+    asset_class: String,
+    instrument_kind: String,
+    production_backed: bool,
+    model_only: bool,
+    instrument_count: usize,
+}
+
+fn instrument_sessions_failure_response(
+    truth_state: &str,
+    as_of_utc: String,
+    registry_path: String,
+    error: String,
+) -> InstrumentSessionStatusResponse {
+    InstrumentSessionStatusResponse {
+        truth_state: truth_state.to_string(),
+        as_of_utc,
+        registry_path,
+        registry_v2_valid: false,
+        v1_count: 0,
+        v2_count: 0,
+        instrument_count: 0,
+        production_cutover_enabled: false,
+        trading_uses_session_v2: false,
+        runtime_uses_session_v2: false,
+        non_equity_enabled: false,
+        profiles: Vec::new(),
+        instruments: Vec::new(),
+        errors: vec![error],
+    }
+}
+
+fn parse_instrument_sessions_as_of(
+    now_utc: Option<&str>,
+) -> Result<DateTime<Utc>, Box<InstrumentSessionStatusResponse>> {
+    match now_utc {
+        Some(raw) => DateTime::parse_from_rfc3339(raw)
+            .map(|dt| dt.with_timezone(&Utc))
+            .map_err(|err| {
+                Box::new(instrument_sessions_failure_response(
+                    "timestamp_invalid",
+                    raw.to_string(),
+                    String::new(),
+                    format!("invalid now_utc timestamp: {err}"),
+                ))
+            }),
+        None => Ok(Utc::now()),
+    }
+}
+
+fn instrument_session_state_for_profile(
+    profile: Option<MarketSessionProfile>,
+    now_utc: DateTime<Utc>,
+) -> (&'static str, &'static str) {
+    match profile {
+        Some(MarketSessionProfile::EquityUsRegular) => {
+            let equity_truth = NyseWeekdaysProvider.session_for(now_utc);
+            let _venue_kind = classify_equity_us_regular_session(equity_truth.state);
+            (
+                equity_truth.state.as_str(),
+                "classified_by_market_calendar_provider",
+            )
+        }
+        Some(MarketSessionProfile::CryptoContinuous) => (
+            classify_crypto_continuous_session(now_utc).as_str(),
+            "classified_by_model_only_crypto_continuous",
+        ),
+        Some(MarketSessionProfile::FuturesGlobex) => {
+            let windows = FuturesSessionWindows {
+                regular: SessionWindow::parse("14:30", "21:00")
+                    .expect("static futures regular window must parse"),
+                extended: SessionWindow::parse("12:00", "23:00")
+                    .expect("static futures extended window must parse"),
+            };
+            (
+                classify_futures_globex_session(now_utc, &windows).as_str(),
+                "classified_by_model_only_futures_fixture_windows",
+            )
+        }
+        Some(MarketSessionProfile::ForexWeekdayContinuous) => (
+            classify_forex_weekday_continuous_session(now_utc).as_str(),
+            "classified_by_model_only_forex_weekday_continuous",
+        ),
+        None => (
+            MarketVenueSessionKind::Unknown.as_str(),
+            "session_profile_unavailable",
+        ),
+    }
+}
+
+fn instrument_kind_profile_label(profile_id: &str, kind: Option<&str>) -> String {
+    if profile_id == MarketSessionProfile::EquityUsRegular.as_str() {
+        return "stock_or_etf".to_string();
+    }
+    match kind {
+        Some(value) => value.to_string(),
+        None => "none".to_string(),
+    }
+}
+
+fn push_profile_count(
+    profiles: &mut BTreeMap<String, InstrumentSessionProfileAccumulator>,
+    profile_id: &str,
+    asset_class: &str,
+    instrument_kind: Option<&str>,
+    production_backed: bool,
+    model_only: bool,
+) {
+    let entry = profiles.entry(profile_id.to_string()).or_insert_with(|| {
+        InstrumentSessionProfileAccumulator {
+            asset_class: asset_class.to_string(),
+            instrument_kind: instrument_kind_profile_label(profile_id, instrument_kind),
+            production_backed,
+            model_only,
+            instrument_count: 0,
+        }
+    });
+    entry.instrument_count += 1;
+}
+
+fn build_instrument_sessions_status_response(
+    registry_path: String,
+    v1_count: usize,
+    v2: &mqk_md::instrument_registry_v2::InstrumentRegistryV2,
+    as_of_utc: DateTime<Utc>,
+    symbol_filter: Option<&str>,
+    limit: Option<usize>,
+) -> InstrumentSessionStatusResponse {
+    let normalized_symbol_filter = symbol_filter.map(|s| s.trim().to_ascii_uppercase());
+    let mut profile_counts: BTreeMap<String, InstrumentSessionProfileAccumulator> = BTreeMap::new();
+    let mut rows = Vec::new();
+    let mut non_equity_enabled = false;
+
+    for inst in &v2.instruments {
+        if inst.enabled && inst.asset_class != "equity" {
+            non_equity_enabled = true;
+        }
+        if normalized_symbol_filter
+            .as_deref()
+            .is_some_and(|s| inst.symbol.to_ascii_uppercase() != s)
+        {
+            continue;
+        }
+        if limit.is_some_and(|max| rows.len() >= max) {
+            continue;
+        }
+
+        let resolution = resolve_session_profile_for_instrument_metadata(
+            &inst.asset_class,
+            inst.instrument_kind.as_deref(),
+        );
+        let session_profile_id = resolution
+            .profile
+            .map(|p| p.as_str())
+            .unwrap_or("session_profile_unavailable");
+        let production_backed = resolution.truth_state == SessionProfileResolutionTruth::Active
+            && resolution.profile == Some(MarketSessionProfile::EquityUsRegular);
+        let model_only =
+            resolution.truth_state == SessionProfileResolutionTruth::UnsupportedAssetClass;
+        let profile_truth_state = match resolution.truth_state {
+            SessionProfileResolutionTruth::Active => "production_backed",
+            SessionProfileResolutionTruth::UnsupportedAssetClass
+                if resolution.profile.is_some() =>
+            {
+                "model_only"
+            }
+            _ => "session_profile_unavailable",
+        };
+        let (session_state, reason_code) =
+            instrument_session_state_for_profile(resolution.profile, as_of_utc);
+
+        push_profile_count(
+            &mut profile_counts,
+            session_profile_id,
+            &inst.asset_class,
+            inst.instrument_kind.as_deref(),
+            production_backed,
+            model_only,
+        );
+
+        rows.push(InstrumentSessionStatusRow {
+            symbol: inst.symbol.clone(),
+            instrument_id: inst.instrument_id.clone(),
+            asset_class: inst.asset_class.clone(),
+            instrument_kind: inst.instrument_kind.clone(),
+            session_profile_id: session_profile_id.to_string(),
+            profile_truth_state: profile_truth_state.to_string(),
+            session_state: session_state.to_string(),
+            reason_code: reason_code.to_string(),
+            production_backed,
+            model_only,
+            trading_uses_this: false,
+        });
+    }
+
+    let profiles = profile_counts
+        .into_iter()
+        .map(|(profile_id, count)| InstrumentSessionProfileSummary {
+            profile_id,
+            asset_class: count.asset_class,
+            instrument_kind: count.instrument_kind,
+            production_backed: count.production_backed,
+            model_only: count.model_only,
+            instrument_count: count.instrument_count,
+        })
+        .collect();
+
+    InstrumentSessionStatusResponse {
+        truth_state: "active".to_string(),
+        as_of_utc: as_of_utc.to_rfc3339(),
+        registry_path,
+        registry_v2_valid: true,
+        v1_count,
+        v2_count: v2.instruments.len(),
+        instrument_count: rows.len(),
+        production_cutover_enabled: false,
+        trading_uses_session_v2: false,
+        runtime_uses_session_v2: false,
+        non_equity_enabled,
+        profiles,
+        instruments: rows,
+        errors: Vec::new(),
+    }
+}
+
+/// GET /api/v1/system/instrument-sessions/status (ASSET-CORE-05B).
+///
+/// Read-only diagnostic surface: loads the same configured v1 registry as
+/// ASSET-CORE-01C, converts it to v2 in memory, validates it, then maps each
+/// v2 instrument to the ASSET-CORE-05A/05B session profile seam at a supplied
+/// timestamp. No DB, provider, broker, runtime, or trading path is touched.
+pub(crate) async fn system_instrument_sessions_status(
+    State(st): State<Arc<AppState>>,
+    Query(query): Query<InstrumentSessionsStatusQuery>,
+) -> impl IntoResponse {
+    let as_of_utc = match parse_instrument_sessions_as_of(query.now_utc.as_deref()) {
+        Ok(dt) => dt,
+        Err(mut response) => {
+            response.registry_path = st.instrument_registry_path.clone();
+            return Json(response).into_response();
+        }
+    };
+
+    let registry_path = st.instrument_registry_path.clone();
+    let path = std::path::Path::new(&registry_path);
+    let v1 = match mqk_md::instrument_registry::load_instrument_registry(path) {
+        Ok(v) => v,
+        Err(err) => {
+            let truth_state = if path.exists() {
+                "registry_invalid"
+            } else {
+                "registry_missing"
+            };
+            return Json(instrument_sessions_failure_response(
+                truth_state,
+                as_of_utc.to_rfc3339(),
+                registry_path,
+                err.to_string(),
+            ))
+            .into_response();
+        }
+    };
+
+    let v2 = mqk_md::instrument_registry_v2::convert_v1_registry_to_v2(&v1);
+    if let Err(err) = mqk_md::instrument_registry_v2::validate_registry_v2(&v2) {
+        return Json(instrument_sessions_failure_response(
+            "registry_invalid",
+            as_of_utc.to_rfc3339(),
+            registry_path,
+            err.to_string(),
+        ))
+        .into_response();
+    }
+
+    Json(build_instrument_sessions_status_response(
+        registry_path,
+        v1.len(),
+        &v2,
+        as_of_utc,
+        query.symbol.as_deref(),
+        query.limit,
+    ))
     .into_response()
 }
 

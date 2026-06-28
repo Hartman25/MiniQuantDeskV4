@@ -2077,6 +2077,31 @@ PORTFOLIO-LIVE-WEIGHTS-01
 
 `ASSET-CORE-05` remains `PARTIAL` pending true per-instrument runtime session routing and authoritative non-equity session providers.
 
+### ASSET-CORE-05B-INSTRUMENT-SESSION-STATUS-01-COMBINED — CLOSED_LOCAL / PARTIAL
+
+**Built:**
+- `GET /api/v1/system/instrument-sessions/status` in `mqk-daemon`, a read-only operator/CI surface that loads the configured v1 registry path, converts it to `InstrumentRegistryV2` in memory, validates v2, maps each instrument to the existing session-profile seam, and classifies the profile at an explicit `now_utc` timestamp.
+- Response fields explicitly report `production_cutover_enabled=false`, `trading_uses_session_v2=false`, `runtime_uses_session_v2=false`, per-row `trading_uses_this=false`, and `non_equity_enabled` from converted registry truth.
+- Current real registry proof remains equities-only: converted rows map to `equity_us_regular`; ETFs remain `asset_class="equity"` with `instrument_kind="etf"` and do not create a separate tradable asset class.
+- Non-equity fixture coverage remains model-only/disabled: crypto maps to `crypto_continuous`, futures to `futures_globex`, forex to `forex_24x5`; none are production-backed or used by trading.
+- CLI was deliberately skipped to keep this slice route-only and bounded; the existing ASSET-CORE-01C CLI (`mqk md registry-v2-status`) remains unchanged.
+
+**Tests added:**
+- `core-rs/crates/mqk-daemon/tests/scenario_instrument_session_status_asset_core_05b.rs`: real registry route checks, fixed-timestamp deterministic equity classification, missing/malformed registry failure envelopes, timestamp-invalid failure envelope, crypto/futures/forex model-only fixture mapping, and Unknown/fail-closed regression.
+
+**Validation:** focused ASSET-CORE-05B daemon test (11/11 pass), ASSET-CORE-05A/01C regression tests (31/31 and 13/13 pass), GUI daemon contract gate (23/23 pass), `cargo check` for `mqk-daemon`/`mqk-cli`/`mqk-md` (clean), daemon clippy with `-D warnings` (clean after boxing the large `Err` variant returned by `parse_instrument_sessions_as_of`), and fmt check (clean) all passed.
+
+**Not done:**
+- no production runtime cutover
+- no per-instrument enforcement/routing
+- no authoritative holiday/early-close expansion beyond the existing bounded table
+- no non-equity trading enablement
+- no DB migration or DB mutation
+- no provider/broker calls
+- no daemon runtime start
+
+`ASSET-CORE-05` remains `PARTIAL` pending authoritative session providers where missing, approved runtime cutover if ever scoped, and actual per-instrument enforcement/routing.
+
 **Audit finding (honesty note, not a defect to fix in this patch):** the `MarketCalendarProvider` trait and its implementors (`NyseWeekdaysProvider`, `FixedWindowOverrideProvider`, `ExchangeSourcedCalendarProvider`) in `mqk-daemon/src/state/market_calendar.rs` are consulted only by their own test files — production runtime gating (`session_controller.rs`) depends directly on `mqk_integrity::CalendarSpec::NyseWeekdays`, not on this trait/seam. Both call sites converge on the same underlying holiday/early-close table in `mqk-integrity`, so there is no truth drift today, but the `MarketCalendarProvider` seam itself remains an unconsumed abstraction in production code.
 
 **Recommended next slice:** wire `resolve_session_profile_for_instrument_metadata` as a read-only diagnostic (e.g., a status route) once a second real consumer exists beyond status reporting — or, if multi-asset trading is actually prioritized next, scope true per-instrument runtime session routing as its own patch with its own proof standard (this is explicitly NOT what ASSET-CORE-05B-COMBINED did).

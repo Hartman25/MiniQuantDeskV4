@@ -1615,6 +1615,64 @@ pub struct InstrumentRegistryV2StatusResponse {
 }
 
 // ---------------------------------------------------------------------------
+// /api/v1/system/instrument-sessions/status — ASSET-CORE-05B
+// ---------------------------------------------------------------------------
+
+/// Per-profile summary for the read-only instrument session diagnostics.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InstrumentSessionProfileSummary {
+    pub profile_id: String,
+    pub asset_class: String,
+    pub instrument_kind: String,
+    pub production_backed: bool,
+    pub model_only: bool,
+    pub instrument_count: usize,
+}
+
+/// Per-instrument session-profile diagnostic row.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InstrumentSessionStatusRow {
+    pub symbol: String,
+    pub instrument_id: String,
+    pub asset_class: String,
+    pub instrument_kind: Option<String>,
+    pub session_profile_id: String,
+    pub profile_truth_state: String,
+    pub session_state: String,
+    pub reason_code: String,
+    pub production_backed: bool,
+    pub model_only: bool,
+    pub trading_uses_this: bool,
+}
+
+/// Read-only per-instrument session-profile status.
+///
+/// This is diagnostic only. It makes the v1->v2 registry conversion truth and
+/// ASSET-CORE-05A session profile seam visible per instrument, but never feeds
+/// trading, routing, risk, OMS, portfolio, broker, or runtime enforcement.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InstrumentSessionStatusResponse {
+    pub truth_state: String,
+    pub as_of_utc: String,
+    pub registry_path: String,
+    pub registry_v2_valid: bool,
+    pub v1_count: usize,
+    pub v2_count: usize,
+    pub instrument_count: usize,
+    /// Always `false`. No production v2 session/profile cutover exists.
+    pub production_cutover_enabled: bool,
+    /// Always `false`. No trading path consumes this profile assignment.
+    pub trading_uses_session_v2: bool,
+    /// Always `false`. Runtime session gates are not switched to this surface.
+    pub runtime_uses_session_v2: bool,
+    /// `true` only if a converted v2 non-equity row is enabled.
+    pub non_equity_enabled: bool,
+    pub profiles: Vec<InstrumentSessionProfileSummary>,
+    pub instruments: Vec<InstrumentSessionStatusRow>,
+    pub errors: Vec<String>,
+}
+
+// ---------------------------------------------------------------------------
 // /api/v1/system/instrument-registry-v2-source/status — ASSET-CORE-01D
 // ---------------------------------------------------------------------------
 

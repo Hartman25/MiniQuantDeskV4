@@ -295,8 +295,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     use system::{
         autonomous_readiness, health, status_handler, system_config_diffs,
         system_config_fingerprint, system_instrument_registry_v2_source_status,
-        system_instrument_registry_v2_status, system_metadata, system_preflight,
-        system_runtime_leadership, system_session, system_status,
+        system_instrument_registry_v2_status, system_instrument_sessions_status, system_metadata,
+        system_preflight, system_runtime_leadership, system_session, system_status,
     };
     use system_artifact::{
         system_artifact_intake, system_parity_evidence, system_run_artifact, system_topology,
@@ -328,6 +328,12 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/v1/system/instrument-registry-v2/status",
             get(system_instrument_registry_v2_status),
+        )
+        // ASSET-CORE-05B: read-only per-instrument session-profile diagnostics.
+        // No DB, provider/broker calls, runtime start, writes, or trading cutover.
+        .route(
+            "/api/v1/system/instrument-sessions/status",
+            get(system_instrument_sessions_status),
         )
         // ASSET-CORE-01D: read-only status for the *separate* v2 registry source
         // configured via MQK_INSTRUMENT_REGISTRY_V2_PATH (public, no auth). No DB,
