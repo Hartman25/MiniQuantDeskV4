@@ -10,6 +10,7 @@
 
 mod accounting;
 mod fixedpoint;
+mod instrument_economics;
 mod metrics;
 mod ordering;
 mod types;
@@ -48,6 +49,13 @@ pub use types::{CashEntry, Fill, LedgerEntry, Lot, PortfolioState, PositionState
 pub use valuation::{
     compute_portfolio_weights, PositionMark, PositionWeightInput, PositionWeightRow,
     PortfolioWeightsSnapshot,
+};
+
+// ASSET-CORE-04A: pure, default-unused instrument economics model
+// (multiplier/currency/quantity-scale-aware single-position valuation).
+pub use instrument_economics::{
+    value_position_economics, InstrumentEconomics, InstrumentEconomicsTruthState,
+    PositionEconomicsInput, PositionEconomicsValue,
 };
 
 use std::collections::BTreeMap;
