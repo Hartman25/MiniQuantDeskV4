@@ -16,6 +16,7 @@ pub mod market_calendar;
 mod multi_symbol_config;
 mod orchestrator_build;
 mod per_symbol_bar_window;
+pub mod runtime_session_source;
 mod session_controller;
 mod signal_intake;
 mod snapshot;
@@ -80,6 +81,12 @@ pub use per_symbol_bar_window::{
     classify_bar_staleness, load_recent_completed_bars_for_symbol_window,
     per_symbol_loaded_bars_from_rows, EmptySymbolError, PerSymbolBarInput, PerSymbolBarWindow,
     PerSymbolBarWindowError, PerSymbolLoadedBars, PerSymbolPendingBarInputs,
+};
+pub use runtime_session_source::{
+    evaluate_runtime_session_source_candidate, evaluate_runtime_session_source_from_registry_path,
+    parse_runtime_session_source_mode, runtime_session_source_mode_from_env,
+    runtime_session_source_summary, RuntimeSessionSourceEvaluation, RuntimeSessionSourceMode,
+    RuntimeSessionSourceModeParse, RuntimeSessionSourceSummary, RUNTIME_SESSION_SOURCE_ENV,
 };
 pub use session_controller::{
     autonomous_session_schedule_from_env, run_session_controller_tick, session_window_from_env,

@@ -33,8 +33,8 @@ use crate::api_types::{
     InstrumentSessionParityRow, InstrumentSessionProfileSummary, InstrumentSessionShadowSummary,
     InstrumentSessionStatusResponse, InstrumentSessionStatusRow, MultiSymbolFreshnessReport,
     PreflightStatusResponse, RuntimeLeadershipCheckpointRow, RuntimeLeadershipResponse,
-    SessionStateResponse, StrategyDecisionDiagnostics, SystemMetadataResponse,
-    SystemStatusResponse,
+    RuntimeSessionSourceSummaryResponse, SessionStateResponse, StrategyDecisionDiagnostics,
+    SystemMetadataResponse, SystemStatusResponse,
 };
 use crate::market_data_freshness::{
     evaluate_md_freshness_status, evaluate_md_freshness_status_for_symbols,
@@ -45,11 +45,11 @@ use crate::state::{
     autonomous_session_schedule_from_env, classify_crypto_continuous_session,
     classify_equity_us_regular_session, classify_forex_weekday_continuous_session,
     classify_futures_globex_session, resolve_session_profile_for_instrument_metadata,
-    session_window_from_env, supported_session_profiles, AppState, AutonomousSessionTruth,
-    BrokerSnapshotTruthSource, DeploymentMode, FuturesSessionWindows, MarketCalendarProvider,
-    MarketSessionProfile, MarketSessionState, MarketVenueSessionKind, NyseWeekdaysProvider,
-    SessionAuthority, SessionProfileResolutionTruth, SessionProfileStatus, SessionWindow,
-    StrategyMarketDataSource, SESSION_START_HH_MM_ENV, SESSION_STOP_HH_MM_ENV,
+    runtime_session_source_summary, session_window_from_env, supported_session_profiles, AppState,
+    AutonomousSessionTruth, BrokerSnapshotTruthSource, DeploymentMode, FuturesSessionWindows,
+    MarketCalendarProvider, MarketSessionProfile, MarketSessionState, MarketVenueSessionKind,
+    NyseWeekdaysProvider, SessionAuthority, SessionProfileResolutionTruth, SessionProfileStatus,
+    SessionWindow, StrategyMarketDataSource, SESSION_START_HH_MM_ENV, SESSION_STOP_HH_MM_ENV,
     STRATEGY_MD_TIMEFRAME_ENV,
 };
 
@@ -301,6 +301,9 @@ pub(crate) async fn system_status(State(st): State<Arc<AppState>>) -> impl IntoR
             // ASSET-CORE-05C: compact shadow-parity summary. Observability
             // only; never gates deployment_start_allowed or any other field.
             instrument_session_shadow: instrument_session_shadow_summary_now(&st),
+            // ASSET-CORE-05D: compact runtime session-source scaffold
+            // summary. Default-off; observability only.
+            runtime_session_source: runtime_session_source_summary_now(&st),
         }),
     )
         .into_response()
@@ -558,6 +561,9 @@ pub(crate) async fn system_preflight(State(st): State<Arc<AppState>>) -> impl In
             // only; never added to `blockers`/`warnings` and never gates
             // `deployment_start_allowed`.
             instrument_session_shadow: instrument_session_shadow_summary_now(&st),
+            // ASSET-CORE-05D: compact runtime session-source scaffold
+            // summary. Default-off; observability only.
+            runtime_session_source: runtime_session_source_summary_now(&st),
         }),
     )
         .into_response()
@@ -2009,6 +2015,32 @@ pub(crate) fn instrument_session_shadow_summary_now(
         model_only_count: full.model_only_count,
         all_equity_profiles_match_production: full.all_equity_profiles_match_production,
         route: ROUTE.to_string(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ASSET-CORE-05D: runtime session-source cutover scaffold (default-off)
+// ---------------------------------------------------------------------------
+
+/// Compact runtime session-source summary for embedding on
+/// `/api/v1/system/status` and `/api/v1/system/preflight` — ASSET-CORE-05D.
+///
+/// Thin mapping wrapper over `state::runtime_session_source_summary`, which
+/// holds the actual env-parsing and candidate-evaluation logic. Never
+/// panics: any registry load/convert/validate failure surfaces as a
+/// `fallback_reason`, never as a parent-surface error.
+fn runtime_session_source_summary_now(st: &AppState) -> RuntimeSessionSourceSummaryResponse {
+    let summary = runtime_session_source_summary(&st.instrument_registry_path, Utc::now());
+    RuntimeSessionSourceSummaryResponse {
+        session_source_mode: summary.session_source_mode,
+        production_cutover_enabled: summary.production_cutover_enabled,
+        runtime_uses_session_v2: summary.runtime_uses_session_v2,
+        trading_uses_session_v2: summary.trading_uses_session_v2,
+        legacy_session_state: summary.legacy_session_state,
+        candidate_v2_session_state: summary.candidate_v2_session_state,
+        candidate_v2_parity_state: summary.candidate_v2_parity_state,
+        fallback_reason: summary.fallback_reason,
+        activation_refusal_reason: summary.activation_refusal_reason,
     }
 }
 
