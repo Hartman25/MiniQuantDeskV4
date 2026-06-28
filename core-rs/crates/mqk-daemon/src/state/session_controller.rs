@@ -39,10 +39,14 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::{Timelike, Utc};
+use chrono::{DateTime, Timelike, Utc};
 use mqk_integrity::CalendarSpec;
 use tracing::{info, warn};
 
+use super::runtime_session_source::{
+    evaluate_runtime_session_source_active_decision, runtime_session_source_mode_from_env,
+    RuntimeSessionSourceMode,
+};
 use super::types::{AutonomousSessionTruth, DeploymentMode, StrategyMarketDataSource};
 use super::AppState;
 use crate::notify::{CriticalAlertPayload, OperatorNotifyPayload, RunStatusPayload};
@@ -60,12 +64,41 @@ pub enum AutonomousSessionSchedule {
 }
 
 impl AutonomousSessionSchedule {
+    /// The single production in-window/outside-window decision consumed by
+    /// the autonomous session controller tick, `/api/v1/system/preflight`,
+    /// and `/api/v1/autonomous/paper-status` (`routes/autonomous_paper_status.rs`).
+    ///
+    /// ASSET-CORE-05E: the `NyseRegularSession` arm additionally checks
+    /// `MQK_RUNTIME_SESSION_SOURCE`. By default (unset, `"legacy"`, or
+    /// `"v2_equity_shadow"`) this performs exactly the original legacy
+    /// calendar check below — zero new env reads' effect, no v2 registry
+    /// load, no behavior change. Only an explicit
+    /// `"v2_equity_active"` selection evaluates the v2 equity candidate; if
+    /// it proves safe, its in-window boolean is authoritative for this call,
+    /// and if it is refused, this returns `false` (fail closed) rather than
+    /// silently falling back to the legacy boolean. `FixedUtcWindow` (an
+    /// explicit, non-calendar operator override) is never affected by this
+    /// hook.
     pub async fn is_in_session(&self, state: &Arc<AppState>, now: chrono::DateTime<Utc>) -> bool {
         match self {
             Self::FixedUtcWindow(window) => window.is_in_session(now),
             Self::NyseRegularSession => {
                 let ts = state.session_now_ts().await;
-                CalendarSpec::NyseWeekdays.classify_market_session(ts) == "regular"
+                let legacy_in_session =
+                    CalendarSpec::NyseWeekdays.classify_market_session(ts) == "regular";
+
+                if runtime_session_source_mode_from_env().resolved_mode()
+                    != RuntimeSessionSourceMode::V2EquityActive
+                {
+                    return legacy_in_session;
+                }
+
+                let now_for_eval = DateTime::<Utc>::from_timestamp(ts, 0).unwrap_or(now);
+                evaluate_runtime_session_source_active_decision(
+                    &state.instrument_registry_path,
+                    now_for_eval,
+                )
+                .in_session_fail_closed()
             }
         }
     }
@@ -334,6 +367,9 @@ fn env_label(state: &AppState) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
+    use super::super::runtime_session_source::{
+        RUNTIME_SESSION_SOURCE_ENV, RUNTIME_SESSION_SOURCE_ENV_TEST_LOCK,
+    };
     use super::*;
     use chrono::TimeZone;
 
@@ -435,6 +471,16 @@ mod tests {
 
     #[tokio::test]
     async fn sw11_nyse_regular_session_weekday_is_in_session() {
+        // ASSET-CORE-05E: is_in_session's NyseRegularSession arm now reads
+        // RUNTIME_SESSION_SOURCE_ENV. Take the shared lock and force it
+        // unset so this pre-existing legacy-path test cannot observe a
+        // transient v2_equity_active mutation from a concurrently-running
+        // test in this same `--lib` binary (sw16-20 / runtime_session_source
+        // tests share this same process-global env var).
+        let _guard = RUNTIME_SESSION_SOURCE_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var(RUNTIME_SESSION_SOURCE_ENV);
         let state = Arc::new(AppState::new_for_test_with_broker_kind(
             super::super::types::BrokerKind::Alpaca,
         ));
@@ -458,6 +504,10 @@ mod tests {
 
     #[tokio::test]
     async fn sw12_nyse_premarket_is_out_of_session() {
+        let _guard = RUNTIME_SESSION_SOURCE_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var(RUNTIME_SESSION_SOURCE_ENV);
         let state = Arc::new(AppState::new_for_test_with_broker_kind(
             super::super::types::BrokerKind::Alpaca,
         ));
@@ -478,6 +528,10 @@ mod tests {
 
     #[tokio::test]
     async fn sw13_nyse_after_hours_is_out_of_session() {
+        let _guard = RUNTIME_SESSION_SOURCE_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var(RUNTIME_SESSION_SOURCE_ENV);
         let state = Arc::new(AppState::new_for_test_with_broker_kind(
             super::super::types::BrokerKind::Alpaca,
         ));
@@ -498,6 +552,10 @@ mod tests {
 
     #[tokio::test]
     async fn sw14_nyse_weekend_is_out_of_session() {
+        let _guard = RUNTIME_SESSION_SOURCE_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var(RUNTIME_SESSION_SOURCE_ENV);
         let state = Arc::new(AppState::new_for_test_with_broker_kind(
             super::super::types::BrokerKind::Alpaca,
         ));
@@ -518,6 +576,10 @@ mod tests {
 
     #[tokio::test]
     async fn sw15_nyse_holiday_is_out_of_session() {
+        let _guard = RUNTIME_SESSION_SOURCE_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var(RUNTIME_SESSION_SOURCE_ENV);
         let state = Arc::new(AppState::new_for_test_with_broker_kind(
             super::super::types::BrokerKind::Alpaca,
         ));
@@ -543,6 +605,162 @@ mod tests {
             ),
             "holiday",
             "current NYSE seam can honestly prove holiday closure"
+        );
+    }
+
+    // ── ASSET-CORE-05E: v2_equity_active hook on is_in_session ──────────────
+
+    fn real_registry_path() -> String {
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        std::path::PathBuf::from(manifest_dir)
+            .join("../../../config/instruments/equities.json")
+            .canonicalize()
+            .expect("registry path must resolve from CARGO_MANIFEST_DIR")
+            .to_string_lossy()
+            .to_string()
+    }
+
+    fn state_with_registry(path: String) -> Arc<AppState> {
+        let mut st =
+            AppState::new_for_test_with_broker_kind(super::super::types::BrokerKind::Alpaca);
+        st.instrument_registry_path = path;
+        Arc::new(st)
+    }
+
+    #[tokio::test]
+    async fn sw16_v2_equity_active_real_registry_drives_in_session_true_at_regular_open() {
+        let _guard = RUNTIME_SESSION_SOURCE_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::set_var(RUNTIME_SESSION_SOURCE_ENV, "v2_equity_active");
+        let state = state_with_registry(real_registry_path());
+        let ts = Utc.with_ymd_and_hms(2026, 6, 25, 15, 0, 0).unwrap();
+        state.set_session_clock_ts_for_test(ts.timestamp()).await;
+
+        let in_session = AutonomousSessionSchedule::NyseRegularSession
+            .is_in_session(&state, ts)
+            .await;
+        std::env::remove_var(RUNTIME_SESSION_SOURCE_ENV);
+
+        assert!(
+            in_session,
+            "v2_equity_active with a clean real registry must agree with legacy regular-open truth"
+        );
+    }
+
+    #[tokio::test]
+    async fn sw17_v2_equity_active_real_registry_drives_in_session_false_at_closed_weekend() {
+        let _guard = RUNTIME_SESSION_SOURCE_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::set_var(RUNTIME_SESSION_SOURCE_ENV, "v2_equity_active");
+        let state = state_with_registry(real_registry_path());
+        // Saturday 2026-06-27 15:00:00 UTC — same fixed closed-weekend
+        // timestamp runtime_session_source.rs's own tests use.
+        let ts = Utc.with_ymd_and_hms(2026, 6, 27, 15, 0, 0).unwrap();
+        state.set_session_clock_ts_for_test(ts.timestamp()).await;
+
+        let in_session = AutonomousSessionSchedule::NyseRegularSession
+            .is_in_session(&state, ts)
+            .await;
+        std::env::remove_var(RUNTIME_SESSION_SOURCE_ENV);
+
+        assert!(
+            !in_session,
+            "v2_equity_active with a clean real registry must agree with legacy closed-weekend truth"
+        );
+    }
+
+    #[tokio::test]
+    async fn sw18_v2_equity_active_missing_registry_fails_closed_even_at_legacy_regular_open() {
+        let _guard = RUNTIME_SESSION_SOURCE_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::set_var(RUNTIME_SESSION_SOURCE_ENV, "v2_equity_active");
+        let missing_path = std::env::temp_dir()
+            .join(format!(
+                "mqk_session_controller_missing_registry_{}.json",
+                std::process::id()
+            ))
+            .to_string_lossy()
+            .to_string();
+        let state = state_with_registry(missing_path);
+        // Regular NYSE open — legacy alone would say "in session". The active
+        // hook must still refuse and fail closed because the registry cannot
+        // be loaded, proving this is a real override, not a coincidental
+        // agreement with legacy.
+        let ts = Utc.with_ymd_and_hms(2026, 6, 25, 15, 0, 0).unwrap();
+        state.set_session_clock_ts_for_test(ts.timestamp()).await;
+
+        let in_session = AutonomousSessionSchedule::NyseRegularSession
+            .is_in_session(&state, ts)
+            .await;
+        std::env::remove_var(RUNTIME_SESSION_SOURCE_ENV);
+
+        assert!(
+            !in_session,
+            "v2_equity_active must fail closed (false) when the registry cannot be loaded, \
+             even though the legacy NYSE calendar alone would report regular-open"
+        );
+    }
+
+    #[tokio::test]
+    async fn sw19_v2_equity_shadow_never_changes_is_in_session_decision() {
+        let _guard = RUNTIME_SESSION_SOURCE_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::set_var(RUNTIME_SESSION_SOURCE_ENV, "v2_equity_shadow");
+        // Point at a missing registry: if shadow mode touched this decision
+        // at all, a registry load failure would have some observable effect.
+        // It must not — is_in_session must match the plain legacy boolean.
+        let missing_path = std::env::temp_dir()
+            .join(format!(
+                "mqk_session_controller_shadow_missing_registry_{}.json",
+                std::process::id()
+            ))
+            .to_string_lossy()
+            .to_string();
+        let state = state_with_registry(missing_path);
+        let ts = Utc.with_ymd_and_hms(2026, 6, 25, 15, 0, 0).unwrap();
+        state.set_session_clock_ts_for_test(ts.timestamp()).await;
+
+        let in_session = AutonomousSessionSchedule::NyseRegularSession
+            .is_in_session(&state, ts)
+            .await;
+        std::env::remove_var(RUNTIME_SESSION_SOURCE_ENV);
+
+        assert!(
+            in_session,
+            "v2_equity_shadow must never drive is_in_session; legacy regular-open truth must \
+             pass through unchanged regardless of v2 registry health"
+        );
+    }
+
+    #[tokio::test]
+    async fn sw20_default_unset_mode_is_in_session_unaffected_by_missing_registry() {
+        let _guard = RUNTIME_SESSION_SOURCE_ENV_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        std::env::remove_var(RUNTIME_SESSION_SOURCE_ENV);
+        let missing_path = std::env::temp_dir()
+            .join(format!(
+                "mqk_session_controller_default_missing_registry_{}.json",
+                std::process::id()
+            ))
+            .to_string_lossy()
+            .to_string();
+        let state = state_with_registry(missing_path);
+        let ts = Utc.with_ymd_and_hms(2026, 6, 25, 15, 0, 0).unwrap();
+        state.set_session_clock_ts_for_test(ts.timestamp()).await;
+
+        let in_session = AutonomousSessionSchedule::NyseRegularSession
+            .is_in_session(&state, ts)
+            .await;
+
+        assert!(
+            in_session,
+            "default (unset) mode must never depend on the v2 registry at all; legacy \
+             regular-open truth must pass through unchanged"
         );
     }
 }

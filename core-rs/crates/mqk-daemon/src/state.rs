@@ -83,9 +83,10 @@ pub use per_symbol_bar_window::{
     PerSymbolBarWindowError, PerSymbolLoadedBars, PerSymbolPendingBarInputs,
 };
 pub use runtime_session_source::{
-    evaluate_runtime_session_source_candidate, evaluate_runtime_session_source_from_registry_path,
-    parse_runtime_session_source_mode, runtime_session_source_mode_from_env,
-    runtime_session_source_summary, RuntimeSessionSourceEvaluation, RuntimeSessionSourceMode,
+    evaluate_runtime_session_source_active_decision, evaluate_runtime_session_source_candidate,
+    evaluate_runtime_session_source_from_registry_path, parse_runtime_session_source_mode,
+    runtime_session_source_mode_from_env, runtime_session_source_summary,
+    RuntimeSessionSourceActiveDecision, RuntimeSessionSourceEvaluation, RuntimeSessionSourceMode,
     RuntimeSessionSourceModeParse, RuntimeSessionSourceSummary, RUNTIME_SESSION_SOURCE_ENV,
 };
 pub use session_controller::{

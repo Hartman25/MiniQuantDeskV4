@@ -2023,10 +2023,11 @@ pub(crate) fn instrument_session_shadow_summary_now(
 // ---------------------------------------------------------------------------
 
 /// Compact runtime session-source summary for embedding on
-/// `/api/v1/system/status` and `/api/v1/system/preflight` — ASSET-CORE-05D.
+/// `/api/v1/system/status` and `/api/v1/system/preflight` — ASSET-CORE-05D /
+/// ASSET-CORE-05E.
 ///
 /// Thin mapping wrapper over `state::runtime_session_source_summary`, which
-/// holds the actual env-parsing and candidate-evaluation logic. Never
+/// holds the actual env-parsing and candidate/active-evaluation logic. Never
 /// panics: any registry load/convert/validate failure surfaces as a
 /// `fallback_reason`, never as a parent-surface error.
 fn runtime_session_source_summary_now(st: &AppState) -> RuntimeSessionSourceSummaryResponse {
@@ -2039,6 +2040,8 @@ fn runtime_session_source_summary_now(st: &AppState) -> RuntimeSessionSourceSumm
         legacy_session_state: summary.legacy_session_state,
         candidate_v2_session_state: summary.candidate_v2_session_state,
         candidate_v2_parity_state: summary.candidate_v2_parity_state,
+        candidate_would_activate: summary.candidate_would_activate,
+        active_source_used: summary.active_source_used,
         fallback_reason: summary.fallback_reason,
         activation_refusal_reason: summary.activation_refusal_reason,
     }

@@ -1792,6 +1792,7 @@ pub struct InstrumentSessionShadowSummary {
 
 // ---------------------------------------------------------------------------
 // ASSET-CORE-05D: runtime session-source cutover scaffold (default-off)
+// ASSET-CORE-05E: active runtime cutover hook (default-off)
 // ---------------------------------------------------------------------------
 //
 // Compact, additive operator-visibility surface embedded on
@@ -1800,42 +1801,68 @@ pub struct InstrumentSessionShadowSummary {
 //
 // Honesty contract:
 // - `production_cutover_enabled`, `runtime_uses_session_v2`, and
-//   `trading_uses_session_v2` are always `false` in this patch — regardless
-//   of `session_source_mode`. No trading, risk, OMS, broker, or
-//   `session_controller.rs` path reads this seam for any decision.
+//   `trading_uses_session_v2` are always `false` in `"legacy"` and
+//   `"v2_equity_shadow"` modes. No trading, risk, OMS, or broker path reads
+//   this seam for any decision in any mode.
 // - Default (no `MQK_RUNTIME_SESSION_SOURCE` set): `session_source_mode ==
 //   "legacy"`, `candidate_v2_session_state`/`candidate_v2_parity_state` are
 //   both `null`, and no v2 registry is loaded at all.
 // - `"v2_equity_shadow"` mode only ever reports a *candidate* evaluation; it
 //   never silently activates non-equity rows or an unproven/mismatched
-//   registry — see `fallback_reason` and `activation_refusal_reason`.
+//   registry, and it never drives `session_controller.rs` — see
+//   `fallback_reason` and `activation_refusal_reason`.
+// - `"v2_equity_active"` mode (ASSET-CORE-05E) may drive
+//   `session_controller.rs::AutonomousSessionSchedule::is_in_session`, but
+//   only when the same candidate evaluation proves
+//   `candidate_would_activate: true` — see `active_source_used`. Refusal
+//   fails closed; it is surfaced via `fallback_reason`, never silent.
 
-/// Compact runtime session-source summary — ASSET-CORE-05D.
+/// Compact runtime session-source summary — ASSET-CORE-05D / ASSET-CORE-05E.
 ///
 /// See `mqk_daemon::state::runtime_session_source` for the full evaluation
 /// seam this summary is built from.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RuntimeSessionSourceSummaryResponse {
-    /// `"legacy"` | `"v2_equity_shadow"`. Always `"legacy"` by default.
+    /// `"legacy"` | `"v2_equity_shadow"` | `"v2_equity_active"`. Always
+    /// `"legacy"` by default.
     pub session_source_mode: String,
-    /// Always `false`. No default production cutover exists.
+    /// `true` only when `session_source_mode == "v2_equity_active"` is
+    /// explicitly configured (regardless of whether it was accepted) —
+    /// see `active_source_used` for "currently in effect". Always `false`
+    /// for `"legacy"`/`"v2_equity_shadow"`.
     pub production_cutover_enabled: bool,
-    /// Always `false`. `session_controller.rs` does not read this seam.
+    /// `true` only when `active_source_used` is `true`. `session_controller.rs`
+    /// does not read this seam unless `"v2_equity_active"` is explicitly
+    /// configured AND the candidate evaluation proves safe.
     pub runtime_uses_session_v2: bool,
-    /// Always `false`. No trading/risk/OMS path reads this seam.
+    /// Mirrors `runtime_uses_session_v2`: the only session gate on the
+    /// autonomous paper-trading path is `AutonomousSessionSchedule::is_in_session`,
+    /// so "runtime" and "trading" readiness share the same v2-usage truth. No
+    /// separate trading/risk/OMS path reads this seam.
     pub trading_uses_session_v2: bool,
     /// Real legacy production session state at evaluation time (the actual
     /// state the daemon uses today), e.g. `"regular_open"`.
     pub legacy_session_state: String,
-    /// Candidate v2 session state. `null` unless `session_source_mode ==
-    /// "v2_equity_shadow"`.
+    /// Candidate v2 session state. `null` unless `session_source_mode` is
+    /// `"v2_equity_shadow"` or `"v2_equity_active"`.
     pub candidate_v2_session_state: Option<String>,
     /// `"matched"` | `"mismatched"` | `"no_instruments_checked"` | `null`.
-    /// `null` unless `session_source_mode == "v2_equity_shadow"`.
+    /// `null` unless `session_source_mode` is `"v2_equity_shadow"` or
+    /// `"v2_equity_active"`.
     pub candidate_v2_parity_state: Option<String>,
-    /// Operator-facing reason the v2 candidate could not activate (registry
-    /// missing/invalid, non-equity row enabled, or parity mismatch). `null`
-    /// in `"legacy"` mode or when the candidate activates cleanly.
+    /// `true` when the candidate evaluation proved safe to activate, `false`
+    /// when it was evaluated but refused, `null` when no evaluation occurred
+    /// at all (`"legacy"` mode, or the registry could not be loaded at all —
+    /// see `fallback_reason`).
+    pub candidate_would_activate: Option<bool>,
+    /// `true` only when the v2 equity source is actually driving the
+    /// in-window decision for this evaluation. The headline ASSET-CORE-05E
+    /// operator-visible signal; equivalent to `runtime_uses_session_v2`.
+    pub active_source_used: bool,
+    /// Operator-facing reason the v2 candidate/active evaluation could not
+    /// activate (registry missing/invalid, non-equity row enabled, or parity
+    /// mismatch). `null` in `"legacy"` mode or when the evaluation activates
+    /// cleanly.
     pub fallback_reason: Option<String>,
     /// Operator-facing reason an explicitly-configured but unrecognized
     /// `MQK_RUNTIME_SESSION_SOURCE` value was refused (mode fell back to
