@@ -1,0 +1,62 @@
+{
+  "patch_id": "ASSET-CORE-04E-NON-EQUITY-MARK-DATA-SOURCE-DECISION-01-COMBINED",
+  "truth_state": "decision_made",
+  "decided_at_head_commit": "1b47a639",
+  "chosen_lane": "crypto_spot_local_csv_first",
+  "chosen_asset_class": "crypto",
+  "chosen_symbols": ["BTC/USD", "ETH/USD"],
+  "chosen_storage_phase": "local_csv_then_existing_md_bars_schema_no_migration",
+  "provider_network_calls_allowed": false,
+  "trading_enabled": false,
+  "paper_trading_enabled": false,
+  "live_trading_enabled": false,
+  "requires_db_migration_before_production": true,
+  "requires_db_migration_for_next_patch": false,
+  "requires_registry_v2_fixture": true,
+  "requires_fx_conversion": false,
+  "requires_session_calendar": "crypto_24x7_model_only_before_runtime",
+  "rejected_lanes": [
+    {
+      "lane": "futures",
+      "reason": "requires continuous contract/roll logic, a real margin model, contract-multiplier enforcement, and a Globex session calendar (ASSET-CORE-05 is still NYSE-shaped only); higher prerequisite count than crypto on every repo-evidenced axis despite having a committed test fixture (ES_TEST/MES_TEST)."
+    },
+    {
+      "lane": "options",
+      "reason": "requires chain/Greeks/IV/OI/assignment data the repo has never ingested (OHLCV-bars-only pipeline today), plus the same margin/multiplier requirements as futures; zero committed fixture exists for options anywhere in the repo."
+    },
+    {
+      "lane": "forex",
+      "reason": "requires a margin model, pip/lot/leverage sizing, a 24x5 session model, and a non-trivial currency-conversion requirement for non-USD pairs; lower priority per the mission brief's own default, which current repo evidence supports rather than contradicts; zero committed fixture exists for forex anywhere in the repo."
+    },
+    {
+      "lane": "live_network_crypto_provider",
+      "reason": "deferred, not rejected outright: TwelveData's HTTP transport is mechanically symbol-agnostic but is self-labeled implemented_equity_provider and verification_status=repo_implemented_official_limits_unverified in providers.json, and has never been exercised with a non-equity symbol in any test or production path; CoinLore (the one crypto-scoped provider config) has zero implementation and enabled=false. This patch is barred from network calls and does not verify either candidate."
+    }
+  ],
+  "recommended_next_patch": "CRYPTO-DATA-01A-LOCAL-CSV-MARKS-01",
+  "recommended_next_patch_scope": "Add one real (disabled) registry-v2 entry for BTC/USD (optionally ETH/USD), closing CRYPTO-REGISTRY-01 from the existing multi-asset audit roadmap as a side effect, plus a committed local CSV fixture loaded through the existing mqk-md ingest_csv.rs path into the existing md_bars schema, with a no-network proof that a real (non-fixture-economics) mark reaches the unmodified ASSET-CORE-04A/04B/04C/04D model chain for at least one crypto position. Zero network calls, zero DB migration, zero trading enablement.",
+  "current_repo_evidence": {
+    "head_commit": "1b47a639",
+    "md_bars_primary_key": "(symbol, timeframe, end_ts) -- text symbol column, no instrument_id, no asset_class column (core-rs/crates/mqk-db/migrations/0003_backtest_schema.sql, unchanged through migration 0043)",
+    "mark_lookup_chain_is_symbol_keyed": "mqk-daemon/src/routes/portfolio.rs::portfolio_economics_status sources marks via mqk_db::fetch_recent_completed_bars_for_strategy(pool, symbol, timeframe, 1) -- bare symbol string end-to-end, no instrument_id anywhere",
+    "registry_v2_crypto_contract_shape": "ContractDefinitionV2::CryptoPair { base: String, quote: String } in core-rs/crates/mqk-md/src/instrument_registry_v2.rs (ASSET-CORE-01B), validated and fixture-proven (BTCUSD_TEST in config/instruments/instruments_v2.backtest_suggestions.example.json)",
+    "asset_risk_policy_crypto_is_lowest_requirement_count": "mqk-execution::asset_risk_policy::crypto_policy() (commit 04a8fb50) is the only non-equity policy with requires_margin_model=false AND requires_contract_multiplier=false",
+    "no_real_non_equity_provider_implementation_exists": "providers.json declares broader asset_classes for twelvedata/alphavantage/polygon/yfinance but only twelvedata and alpaca are implementation_status=implemented_equity_provider/enabled=true; coinlore (crypto-only) is candidate_unverified/enabled=false with zero Rust implementation",
+    "independent_audit_corroboration": "docs/audits/multi_asset_completion_audit.md sections 1, 7, 8, 9 independently concluded crypto should be the first live non-equity vertical, sequenced via CRYPTO-REGISTRY-01 -> CRYPTO-DATA-01"
+  },
+  "files_added_by_this_patch": [
+    "docs/specs/asset_core_04e_non_equity_mark_source_decision.md",
+    "docs/specs/asset_core_04e_non_equity_mark_source_decision.json",
+    "scripts/guards/validate_asset_core_04e_decision.ps1"
+  ],
+  "files_modified_by_this_patch": [
+    "MiniQuantDesk_Master_Patch_Ledger_v2.md",
+    "docs/audits/multi_asset_completion_audit.md"
+  ],
+  "notes": [
+    "requires_db_migration_before_production refers only to a hypothetical future real trading/production cutover for non-equity marks (e.g. an instrument-aware md_bars schema); it does NOT mean the recommended next patch (CRYPTO-DATA-01A-LOCAL-CSV-MARKS-01) requires one -- see requires_db_migration_for_next_patch=false and decision doc section 6.",
+    "requires_fx_conversion=false reflects the common case of a USD-quoted pair (BTC/USD, ETH/USD) against the existing hardcoded USD account_currency in ASSET-CORE-04D's route -- it is not a general claim that crypto never needs currency conversion.",
+    "chosen_lane combines mission-brief candidate A (crypto spot) and candidate E (local CSV fixture-first): crypto is the asset class, local CSV is the source phase.",
+    "This artifact records a decision only. No code in mqk-daemon, mqk-runtime, mqk-execution, mqk-broker-alpaca, mqk-broker-paper, mqk-risk, mqk-md provider implementations, mqk-portfolio, or any GUI/config/DB-migration file was changed by this patch."
+  ]
+}
