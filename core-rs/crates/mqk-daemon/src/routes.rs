@@ -18,7 +18,7 @@
 //! |                  | ops_catalog, ops_mode_change_guidance                 |
 //! | `execution`      | execution_summary, execution_orders, order submit/cancel |
 //! | `portfolio`      | portfolio_summary/positions/orders/fills/live-weights,|
-//! |                  | risk                                                  |
+//! |                  | economics_status, risk                                |
 //! | `reconcile`      | reconcile_status, reconcile_mismatches                |
 //! | `strategy`       | strategy_summary, strategy_suppressions,              |
 //! |                   | strategy_dry_run_status                               |
@@ -279,8 +279,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     use oms_metrics::{metrics_dashboards, oms_overview};
     use paper_journal::paper_journal;
     use portfolio::{
-        portfolio_fills, portfolio_live_weights, portfolio_open_orders, portfolio_positions,
-        portfolio_summary, risk_denials, risk_summary,
+        portfolio_economics_status, portfolio_fills, portfolio_live_weights, portfolio_open_orders,
+        portfolio_positions, portfolio_summary, risk_denials, risk_summary,
     };
     use reconcile::{reconcile_mismatches, reconcile_status};
     use repair::{
@@ -402,6 +402,16 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/v1/portfolio/live-weights",
             get(portfolio_live_weights),
+        )
+        // ASSET-CORE-04D: read-only composition of the ASSET-CORE-04B registry-v2
+        // bridge with the ASSET-CORE-04A/04C economics model against the live
+        // execution snapshot + completed md_bars marks. No DB writes, no
+        // provider/broker calls, no order/risk/runtime path consumes this route.
+        // model_only and every *_uses_portfolio_economics flag are always as
+        // documented; account_currency is a hardcoded "USD" constant.
+        .route(
+            "/api/v1/portfolio/economics/status",
+            get(portfolio_economics_status),
         )
         .route("/api/v1/risk/summary", get(risk_summary))
         .route("/api/v1/risk/denials", get(risk_denials))

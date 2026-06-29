@@ -2032,6 +2032,160 @@ pub struct InstrumentEconomicsStatusResponse {
 }
 
 // ---------------------------------------------------------------------------
+// GET /api/v1/portfolio/economics/status — ASSET-CORE-04D
+// ---------------------------------------------------------------------------
+//
+// Read-only diagnostic route composing the ASSET-CORE-04B registry-v2 ->
+// instrument-economics bridge with the ASSET-CORE-04A/04C economics model
+// against the *live* in-memory execution snapshot's positions/cash and the
+// latest completed `md_bars` mark per non-flat symbol -- the same
+// position/cash and mark sources `/api/v1/portfolio/live-weights`
+// (`PORTFOLIO-LIVE-WEIGHTS-01`) already uses. This is an observability seam,
+// not a cutover: nothing here feeds any trading, runtime, risk, order, or
+// broker path, and `account_currency` is a hardcoded `"USD"` constant
+// (`PortfolioSnapshot` carries no account-currency field today).
+
+/// Per-position diagnostic row — ASSET-CORE-04D.
+///
+/// `asset_class`/`quote_currency` are empty strings when the position's
+/// symbol could not be resolved to a registry-v2 instrument at all — the
+/// route never fabricates equity/USD defaults for an unresolved symbol;
+/// `truth_state`/`reason_code` explain why in that case.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortfolioEconomicsStatusPositionRow {
+    pub symbol: String,
+    pub instrument_id: String,
+    pub asset_class: String,
+    pub quote_currency: String,
+    /// Signed whole-unit quantity as held in the execution snapshot
+    /// (positive = long, negative = short, 0 = flat). Not micros-scaled.
+    pub signed_qty: i64,
+    pub mark_price_micros: Option<i64>,
+    pub mark_ts_utc: Option<i64>,
+    /// Provenance string, e.g. `"md_bars:1D:close"`. `None` when no mark was
+    /// looked up (flat position) or none was found.
+    pub mark_source: Option<String>,
+    pub notional_micros: Option<i64>,
+    pub absolute_notional_micros: Option<i64>,
+    /// Absolute (always non-negative) weight in basis points of NAV. `Some`
+    /// only when the overall snapshot truth_state is `"active"`.
+    pub weight_bps: Option<i64>,
+    /// `true` when the resolved registry instrument's asset class is not
+    /// `"equity"`. `false` (never fabricated `true`) when the symbol could
+    /// not be resolved at all — absence of evidence is not evidence of
+    /// non-equity status.
+    pub model_only: bool,
+    /// `"active"` | `"position_value_unavailable"` | `"currency_conversion_unsupported"`.
+    pub truth_state: String,
+    pub reason_code: String,
+}
+
+/// One row of [`PortfolioEconomicsStatusResponse::asset_class_exposures`] or
+/// `::currency_exposures`. Direct passthrough of the ASSET-CORE-04C exposure
+/// breakdown, `i128` clamped to `i64` for transport (matches
+/// `PortfolioLiveWeightsResponse`'s existing convention).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortfolioEconomicsStatusExposureRow {
+    pub key: String,
+    pub signed_notional_micros: i64,
+    pub absolute_notional_micros: i64,
+    pub weight_bps: Option<i64>,
+}
+
+/// Response for `GET /api/v1/portfolio/economics/status` — ASSET-CORE-04D.
+///
+/// Composes the ASSET-CORE-04B registry-v2 bridge with the ASSET-CORE-04A/04C
+/// economics model against the live execution snapshot. Read-only,
+/// diagnostic-only: the honesty flags below are always as documented
+/// regardless of `truth_state` — no caller anywhere in the workspace reads
+/// this route's output for any trading, runtime, risk, or order decision.
+///
+/// `truth_state`:
+/// - `"no_snapshot"` — no in-memory execution snapshot exists yet.
+/// - `"registry_unavailable"` — no file exists at `registry_path`.
+/// - `"registry_invalid"` — the registry file exists but failed to load as
+///   v1, or failed v2 conversion/validation.
+/// - `"no_positions"` — snapshot present, zero positions, NAV == cash.
+/// - `"active"` — every position is either valued or flat; NAV/gross/net/
+///   weights are populated.
+/// - `"position_value_unavailable"` — at least one position could not be
+///   valued for a reason other than a missing mark or currency mismatch
+///   (e.g. its symbol is absent from the registry, or its registry row
+///   failed to bridge to economics).
+/// - `"missing_marks"` — DB is present but every unvalued position is
+///   missing a completed `md_bars` row at `timeframe`.
+/// - `"db_unavailable"` — no DB pool is configured at all, so no mark could
+///   be looked up for any non-flat position (distinct from `"missing_marks"`,
+///   mirroring `PortfolioLiveWeightsResponse`'s existing precedent).
+/// - `"currency_conversion_unsupported"` — a resolved position's quote
+///   currency differs from `account_currency`.
+/// - `"nav_unavailable"` — every position is valued/flat but `nav_micros <= 0`.
+/// - `"aggregation_unavailable"` — summing NAV/exposure overflowed `i128`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortfolioEconomicsStatusResponse {
+    pub truth_state: String,
+    pub reason_code: String,
+    pub message: String,
+
+    /// Always `true`. This route is model/diagnostic-only.
+    pub model_only: bool,
+    /// Always `false`. No trading path reads this route.
+    pub trading_uses_portfolio_economics: bool,
+    /// Always `false`. No runtime path reads this route.
+    pub runtime_uses_portfolio_economics: bool,
+    /// Always `false`. No risk path reads this route.
+    pub risk_uses_portfolio_economics: bool,
+    /// Always `false`. No order path reads this route.
+    pub order_path_uses_portfolio_economics: bool,
+
+    /// Timeframe used for the md_bars mark lookup (echoed; defaults to `"1D"`).
+    pub timeframe: String,
+    /// Normalized (uppercased) `symbol` query param, if supplied.
+    pub symbol_filter: Option<String>,
+    pub registry_path: String,
+    pub registry_v2_valid: bool,
+
+    pub has_execution_snapshot: bool,
+    /// Total positions in the execution snapshot. Unaffected by `symbol`/
+    /// `limit` — always the full-portfolio total, even when `positions`
+    /// below is filtered/truncated.
+    pub position_count: usize,
+    pub valued_position_count: usize,
+    pub failed_position_count: usize,
+    /// Count of positions whose only blocker is a missing completed mark.
+    pub missing_mark_count: usize,
+    /// Count of held positions whose resolved registry instrument is not
+    /// `"equity"`. Always counts only *resolved* positions — a position
+    /// whose symbol is absent from the registry contributes to neither this
+    /// nor an equity count, since its asset class is genuinely unknown.
+    pub non_equity_position_count: usize,
+    /// Whole-registry count of rows that are both `enabled` and non-equity
+    /// (ASSET-CORE-04B `InstrumentEconomicsBridgeSummary::non_equity_enabled_count`,
+    /// unaffected by which symbols are currently held). Always `0` for any
+    /// registry that passed `validate_registry_v2` without the test-only
+    /// escape hatch.
+    pub non_equity_enabled_count: usize,
+
+    /// Hardcoded `"USD"`. `PortfolioSnapshot` carries no account-currency
+    /// field today; this mirrors the implicit USD assumption every other
+    /// live portfolio/accounting path in this crate already makes. Never
+    /// used to perform FX conversion.
+    pub account_currency: String,
+    pub cash_micros: Option<i64>,
+    pub nav_micros: Option<i64>,
+    pub gross_exposure_micros: Option<i64>,
+    pub net_exposure_micros: Option<i64>,
+
+    /// Per-position rows, filtered by `symbol` and truncated by `limit` when
+    /// supplied. May be a strict subset of `position_count`.
+    pub positions: Vec<PortfolioEconomicsStatusPositionRow>,
+    pub asset_class_exposures: Vec<PortfolioEconomicsStatusExposureRow>,
+    pub currency_exposures: Vec<PortfolioEconomicsStatusExposureRow>,
+    /// Human-readable, one entry per position that could not be valued.
+    pub blockers: Vec<String>,
+}
+
+// ---------------------------------------------------------------------------
 // /api/v1/ops/action  — canonical operator action dispatcher
 // ---------------------------------------------------------------------------
 
