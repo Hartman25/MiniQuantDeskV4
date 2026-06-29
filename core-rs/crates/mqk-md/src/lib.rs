@@ -6,6 +6,7 @@
 //! It does **not** write to the DB; callers (CLI) fetch bars and hand them to mqk-db ingestion.
 
 pub mod alpaca_provider;
+pub mod ingest_csv;
 pub mod instrument_registry;
 pub mod instrument_registry_v2;
 pub mod normalizer;
