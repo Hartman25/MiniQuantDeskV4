@@ -2032,7 +2032,7 @@ pub struct InstrumentEconomicsStatusResponse {
 }
 
 // ---------------------------------------------------------------------------
-// GET /api/v1/portfolio/economics/status — ASSET-CORE-04D
+// GET /api/v1/portfolio/economics/status — ASSET-CORE-04D / ASSET-CORE-04F
 // ---------------------------------------------------------------------------
 //
 // Read-only diagnostic route composing the ASSET-CORE-04B registry-v2 ->
@@ -2044,6 +2044,16 @@ pub struct InstrumentEconomicsStatusResponse {
 // not a cutover: nothing here feeds any trading, runtime, risk, order, or
 // broker path, and `account_currency` is a hardcoded `"USD"` constant
 // (`PortfolioSnapshot` carries no account-currency field today).
+//
+// ASSET-CORE-04F added an explicit, default-off `?registry_source=v2` lane:
+// the route's registry input defaults to exactly the pre-existing v1-load ->
+// `convert_v1_registry_to_v2` behavior (`"legacy"`), but a caller may instead
+// request a server-side-configured registry-v2 file
+// (`AppState::portfolio_economics_registry_v2_path`, sourced only from
+// `MQK_PORTFOLIO_ECONOMICS_REGISTRY_V2_PATH`) so a real (non-equity-only) v2
+// document can be valued through this route. There is no client-supplied
+// filesystem path and no fallback from a requested-but-unavailable v2 source
+// back to legacy.
 
 /// Per-position diagnostic row — ASSET-CORE-04D.
 ///
@@ -2121,6 +2131,8 @@ pub struct PortfolioEconomicsStatusExposureRow {
 ///   currency differs from `account_currency`.
 /// - `"nav_unavailable"` — every position is valued/flat but `nav_micros <= 0`.
 /// - `"aggregation_unavailable"` — summing NAV/exposure overflowed `i128`.
+/// - `"invalid_registry_source"` — ASSET-CORE-04F: the `registry_source`
+///   query param was supplied but is neither `"legacy"` nor `"v2"`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PortfolioEconomicsStatusResponse {
     pub truth_state: String,
@@ -2144,6 +2156,34 @@ pub struct PortfolioEconomicsStatusResponse {
     pub symbol_filter: Option<String>,
     pub registry_path: String,
     pub registry_v2_valid: bool,
+
+    /// ASSET-CORE-04F: normalized `registry_source` query param this response
+    /// answers for — `"legacy"` (default/omitted/explicit) or `"v2"`, or the
+    /// verbatim lowercased value the caller sent when it is neither (paired
+    /// with `truth_state == "invalid_registry_source"`).
+    pub registry_source_requested: String,
+    /// ASSET-CORE-04F: which registry lane actually produced this response —
+    /// `"legacy"` | `"v2"` | `"none"`. `"none"` whenever the requested lane
+    /// was never loaded at all (unknown `registry_source`, v2 requested but
+    /// not configured/missing/invalid) — this route never silently falls
+    /// back from a requested `"v2"` to `"legacy"`.
+    pub registry_source_used: String,
+    /// ASSET-CORE-04F: `true` iff `MQK_PORTFOLIO_ECONOMICS_REGISTRY_V2_PATH`
+    /// is set server-side, independent of what `registry_source` this
+    /// specific call requested.
+    pub registry_v2_configured: bool,
+    /// ASSET-CORE-04F: echo of the configured v2 path (`None` when
+    /// unconfigured), independent of `registry_source_used`. Never a
+    /// client-supplied path — this route never accepts an arbitrary
+    /// filesystem path from a query parameter.
+    pub registry_v2_path: Option<String>,
+    /// ASSET-CORE-04F: `Some(reason_code)` whenever `truth_state` is
+    /// specifically a registry load/validate/selection failure
+    /// (`"registry_unavailable"`, `"registry_invalid"`, or
+    /// `"invalid_registry_source"`), `None` otherwise — lets an operator
+    /// detect a broken registry-source configuration without string-matching
+    /// the general-purpose `reason_code` vocabulary.
+    pub registry_error_code: Option<String>,
 
     pub has_execution_snapshot: bool,
     /// Total positions in the execution snapshot. Unaffected by `symbol`/

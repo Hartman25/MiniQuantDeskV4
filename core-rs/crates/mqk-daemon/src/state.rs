@@ -493,6 +493,21 @@ pub struct AppState {
     /// read by live/paper trading, broker adapters, risk gates, OMS, or
     /// ingestion — read-only backtest economics suggestions only.
     pub instrument_registry_v2_path: Option<String>,
+    /// ASSET-CORE-04F: Optional filesystem path to a registry-v2 source
+    /// consumed only by `GET /api/v1/portfolio/economics/status` when a
+    /// caller explicitly requests `?registry_source=v2`.
+    ///
+    /// `None` (the default, unset `MQK_PORTFOLIO_ECONOMICS_REGISTRY_V2_PATH`)
+    /// means the route always uses its pre-existing legacy v1-registry
+    /// behavior regardless of what `registry_source` a caller passes -- there
+    /// is no fixed-path fallback, so committing an example v2 fixture file
+    /// never silently changes default route behavior. Deliberately separate
+    /// from `instrument_registry_v2_path` above (read only by
+    /// `GET /api/v1/backtests/economics-suggestion`) so the two read-only
+    /// routes' v2 configuration can never be accidentally conflated under one
+    /// operator-set env var. Never read by live/paper trading, broker
+    /// adapters, risk gates, OMS, ingestion, or any runtime/risk/order path.
+    pub portfolio_economics_registry_v2_path: Option<String>,
     /// DATA-PROVIDER-REGISTRY-01: Filesystem path to the canonical provider registry.
     ///
     /// Read at route-time (not cached) by provider dry-run handlers.
@@ -1201,6 +1216,10 @@ impl AppState {
             instrument_registry_path: std::env::var("MQK_INSTRUMENT_REGISTRY_PATH")
                 .unwrap_or_else(|_| "config/instruments/equities.json".to_string()),
             instrument_registry_v2_path: std::env::var("MQK_INSTRUMENT_REGISTRY_V2_PATH").ok(),
+            portfolio_economics_registry_v2_path: std::env::var(
+                "MQK_PORTFOLIO_ECONOMICS_REGISTRY_V2_PATH",
+            )
+            .ok(),
             provider_registry_path: std::env::var("MQK_PROVIDER_REGISTRY_PATH")
                 .unwrap_or_else(|_| "config/providers/providers.json".to_string()),
             md_refresh_evidence_dir: std::env::var("MQK_MD_REFRESH_EVIDENCE_DIR")

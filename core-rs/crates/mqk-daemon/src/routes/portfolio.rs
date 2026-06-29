@@ -560,7 +560,7 @@ pub(crate) async fn portfolio_live_weights(
 }
 
 // ---------------------------------------------------------------------------
-// GET /api/v1/portfolio/economics/status (ASSET-CORE-04D)
+// GET /api/v1/portfolio/economics/status (ASSET-CORE-04D / ASSET-CORE-04F)
 // ---------------------------------------------------------------------------
 
 #[derive(serde::Deserialize)]
@@ -568,7 +568,16 @@ pub(crate) struct PortfolioEconomicsStatusParams {
     pub timeframe: Option<String>,
     pub symbol: Option<String>,
     pub limit: Option<usize>,
+    /// ASSET-CORE-04F: `"legacy"` (default when omitted) or `"v2"`. Any other
+    /// non-empty value fails closed as `"invalid_registry_source"`.
+    pub registry_source: Option<String>,
 }
+
+/// ASSET-CORE-04F registry-source lane names, shared by the query-param
+/// normalizer and every response field that echoes which lane ran.
+const REGISTRY_SOURCE_LEGACY: &str = "legacy";
+const REGISTRY_SOURCE_V2: &str = "v2";
+const REGISTRY_SOURCE_NONE: &str = "none";
 
 const DEFAULT_PORTFOLIO_ECONOMICS_TIMEFRAME: &str = "1D";
 
@@ -612,6 +621,9 @@ fn portfolio_economics_status_message(truth_state: &str) -> String {
             "Every position is valued or flat but nav_micros is not positive.".to_string()
         }
         "aggregation_unavailable" => "Summing NAV or exposure overflowed i128.".to_string(),
+        "invalid_registry_source" => "The registry_source query parameter is not a recognized \
+            value (expected \"legacy\" or \"v2\")."
+            .to_string(),
         _ => "Unrecognized truth state.".to_string(),
     }
 }
@@ -627,7 +639,20 @@ fn portfolio_economics_status_envelope(
     has_execution_snapshot: bool,
     timeframe: String,
     symbol_filter: Option<String>,
+    registry_source_requested: String,
+    registry_source_used: &str,
+    registry_v2_configured: bool,
+    registry_v2_path: Option<String>,
 ) -> PortfolioEconomicsStatusResponse {
+    // ASSET-CORE-04F: namespaced mirror of `reason_code`, populated only when
+    // the failure is specifically about registry selection/load/validation —
+    // never about position valuation, marks, or NAV.
+    let registry_error_code = matches!(
+        truth_state,
+        "registry_unavailable" | "registry_invalid" | "invalid_registry_source"
+    )
+    .then(|| reason_code.to_string());
+
     PortfolioEconomicsStatusResponse {
         truth_state: truth_state.to_string(),
         reason_code: reason_code.to_string(),
@@ -641,6 +666,11 @@ fn portfolio_economics_status_envelope(
         symbol_filter,
         registry_path,
         registry_v2_valid,
+        registry_source_requested,
+        registry_source_used: registry_source_used.to_string(),
+        registry_v2_configured,
+        registry_v2_path,
+        registry_error_code,
         has_execution_snapshot,
         position_count: 0,
         valued_position_count: 0,
@@ -911,6 +941,85 @@ fn map_portfolio_economics_truth_state(
     }
 }
 
+/// ASSET-CORE-04F: resolve which [`mqk_md::instrument_registry_v2::InstrumentRegistryV2`]
+/// document `portfolio_economics_status` should bridge/value positions
+/// against, based on the caller's normalized `registry_source`.
+///
+/// The `"legacy"` branch is byte-for-byte the route's pre-existing
+/// unconditional behavior (v1 load -> `convert_v1_registry_to_v2` ->
+/// `validate_registry_v2`), only moved into this function so it can sit
+/// alongside the new `"v2"` branch. The `"v2"` branch never reads a
+/// client-supplied filesystem path -- the only path it ever opens is
+/// `v2_configured_path`, which the caller must have already sourced from the
+/// server-side `AppState::portfolio_economics_registry_v2_path`
+/// (`MQK_PORTFOLIO_ECONOMICS_REGISTRY_V2_PATH`). On any failure in the `"v2"`
+/// branch, this function returns `Err` with this route's existing
+/// `"registry_unavailable"`/`"registry_invalid"` truth-state vocabulary and a
+/// `reason_code` naming the v2 seam specifically -- it never falls back to
+/// loading the legacy v1 path instead.
+fn resolve_portfolio_economics_registry(
+    registry_source: &str,
+    v1_registry_path: &str,
+    v2_configured_path: Option<&str>,
+) -> Result<
+    (
+        mqk_md::instrument_registry_v2::InstrumentRegistryV2,
+        &'static str,
+    ),
+    (String, String),
+> {
+    if registry_source == REGISTRY_SOURCE_V2 {
+        let Some(v2_path) = v2_configured_path else {
+            return Err((
+                "registry_unavailable".to_string(),
+                "registry_v2_not_configured".to_string(),
+            ));
+        };
+        let path = std::path::Path::new(v2_path);
+        if !path.exists() {
+            return Err((
+                "registry_unavailable".to_string(),
+                "registry_v2_path_not_found".to_string(),
+            ));
+        }
+
+        let v2 = match mqk_md::instrument_registry_v2::load_instrument_registry_v2(path) {
+            Ok(v) => v,
+            Err(err) => {
+                return Err((
+                    "registry_invalid".to_string(),
+                    format!("registry_v2_load_failed:{err}"),
+                ));
+            }
+        };
+        if let Err(err) = mqk_md::instrument_registry_v2::validate_registry_v2(&v2) {
+            return Err((
+                "registry_invalid".to_string(),
+                format!("registry_v2_validation_failed:{err}"),
+            ));
+        }
+        return Ok((v2, REGISTRY_SOURCE_V2));
+    }
+
+    let path = std::path::Path::new(v1_registry_path);
+    let v1 = match mqk_md::instrument_registry::load_instrument_registry(path) {
+        Ok(v) => v,
+        Err(err) => {
+            let truth_state = if path.exists() {
+                "registry_invalid"
+            } else {
+                "registry_unavailable"
+            };
+            return Err((truth_state.to_string(), err.to_string()));
+        }
+    };
+    let v2 = mqk_md::instrument_registry_v2::convert_v1_registry_to_v2(&v1);
+    if let Err(err) = mqk_md::instrument_registry_v2::validate_registry_v2(&v2) {
+        return Err(("registry_invalid".to_string(), err.to_string()));
+    }
+    Ok((v2, REGISTRY_SOURCE_LEGACY))
+}
+
 /// Truthful, read-only composition of the ASSET-CORE-04B registry-v2 bridge
 /// and the ASSET-CORE-04A/04C economics model against the live execution
 /// snapshot -- ASSET-CORE-04D.
@@ -938,6 +1047,14 @@ pub(crate) async fn portfolio_economics_status(
         .map(|s| s.trim().to_ascii_uppercase())
         .filter(|s| !s.is_empty());
     let registry_path = st.instrument_registry_path.clone();
+    let registry_v2_configured_path = st.portfolio_economics_registry_v2_path.clone();
+    let registry_v2_configured = registry_v2_configured_path.is_some();
+    let registry_source_requested = params
+        .registry_source
+        .as_deref()
+        .map(|s| s.trim().to_ascii_lowercase())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| REGISTRY_SOURCE_LEGACY.to_string());
 
     let snap = st.execution_snapshot.read().await.clone();
     let Some(snapshot) = snap else {
@@ -951,52 +1068,63 @@ pub(crate) async fn portfolio_economics_status(
                 false,
                 timeframe,
                 symbol_filter,
+                registry_source_requested,
+                REGISTRY_SOURCE_NONE,
+                registry_v2_configured,
+                registry_v2_configured_path,
             )),
         )
             .into_response();
     };
 
-    let path = std::path::Path::new(&registry_path);
-    let v1 = match mqk_md::instrument_registry::load_instrument_registry(path) {
-        Ok(v) => v,
-        Err(err) => {
-            let truth_state = if path.exists() {
-                "registry_invalid"
-            } else {
-                "registry_unavailable"
-            };
-            return (
-                StatusCode::OK,
-                Json(portfolio_economics_status_envelope(
-                    truth_state,
-                    &err.to_string(),
-                    registry_path,
-                    false,
-                    true,
-                    timeframe,
-                    symbol_filter,
-                )),
-            )
-                .into_response();
-        }
-    };
-
-    let v2 = mqk_md::instrument_registry_v2::convert_v1_registry_to_v2(&v1);
-    if let Err(err) = mqk_md::instrument_registry_v2::validate_registry_v2(&v2) {
+    if registry_source_requested != REGISTRY_SOURCE_LEGACY
+        && registry_source_requested != REGISTRY_SOURCE_V2
+    {
         return (
             StatusCode::OK,
             Json(portfolio_economics_status_envelope(
-                "registry_invalid",
-                &err.to_string(),
+                "invalid_registry_source",
+                "unknown_registry_source_value",
                 registry_path,
                 false,
                 true,
                 timeframe,
                 symbol_filter,
+                registry_source_requested,
+                REGISTRY_SOURCE_NONE,
+                registry_v2_configured,
+                registry_v2_configured_path,
             )),
         )
             .into_response();
     }
+
+    let (v2, registry_source_used) = match resolve_portfolio_economics_registry(
+        &registry_source_requested,
+        &registry_path,
+        registry_v2_configured_path.as_deref(),
+    ) {
+        Ok(resolved) => resolved,
+        Err((truth_state, reason_code)) => {
+            return (
+                StatusCode::OK,
+                Json(portfolio_economics_status_envelope(
+                    &truth_state,
+                    &reason_code,
+                    registry_path,
+                    false,
+                    true,
+                    timeframe,
+                    symbol_filter,
+                    registry_source_requested,
+                    REGISTRY_SOURCE_NONE,
+                    registry_v2_configured,
+                    registry_v2_configured_path,
+                )),
+            )
+                .into_response();
+        }
+    };
 
     let bridge_summary = bridge_instrument_registry_v2_to_economics(&v2);
     let bridge_by_symbol: BTreeMap<String, &InstrumentEconomicsBridgeResult> = bridge_summary
@@ -1139,6 +1267,11 @@ pub(crate) async fn portfolio_economics_status(
             symbol_filter,
             registry_path,
             registry_v2_valid: true,
+            registry_source_requested,
+            registry_source_used: registry_source_used.to_string(),
+            registry_v2_configured,
+            registry_v2_path: registry_v2_configured_path,
+            registry_error_code: None,
             has_execution_snapshot: true,
             position_count,
             valued_position_count,
