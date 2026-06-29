@@ -13,6 +13,7 @@ mod fixedpoint;
 mod instrument_economics;
 mod metrics;
 mod ordering;
+mod portfolio_economics;
 mod types;
 mod valuation;
 
@@ -56,6 +57,13 @@ pub use valuation::{
 pub use instrument_economics::{
     value_position_economics, InstrumentEconomics, InstrumentEconomicsTruthState,
     PositionEconomicsInput, PositionEconomicsValue,
+};
+
+// ASSET-CORE-04C: pure, default-unused multi-asset portfolio NAV/exposure
+// aggregation model (composes PositionEconomicsValue rows into a snapshot).
+pub use portfolio_economics::{
+    aggregate_portfolio_economics, PortfolioEconomicsExposureRow, PortfolioEconomicsInput,
+    PortfolioEconomicsPositionRow, PortfolioEconomicsSnapshot, PortfolioEconomicsTruthState,
 };
 
 use std::collections::BTreeMap;
