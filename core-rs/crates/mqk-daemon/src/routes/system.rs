@@ -28,6 +28,7 @@ use serde::Deserialize;
 
 use crate::api_types::{
     AssetCapabilityEntry, AssetCapabilityMatrix, AutonomousPaperReadinessResponse, HealthResponse,
+    InstrumentEconomicsStatusResponse, InstrumentEconomicsStatusRow,
     InstrumentRegistryV2EnabledCounts, InstrumentRegistryV2SourceStatusResponse,
     InstrumentRegistryV2StatusResponse, InstrumentSessionParityResponse,
     InstrumentSessionParityRow, InstrumentSessionProfileSummary, InstrumentSessionShadowSummary,
@@ -42,15 +43,16 @@ use crate::market_data_freshness::{
 };
 use crate::parity_evidence::{evaluate_parity_evidence_guarded, ParityEvidenceOutcome};
 use crate::state::{
-    autonomous_session_schedule_from_env, classify_crypto_continuous_session,
-    classify_equity_us_regular_session, classify_forex_weekday_continuous_session,
-    classify_futures_globex_session, resolve_session_profile_for_instrument_metadata,
-    runtime_session_source_summary, session_window_from_env, supported_session_profiles, AppState,
-    AutonomousSessionTruth, BrokerSnapshotTruthSource, DeploymentMode, FuturesSessionWindows,
-    MarketCalendarProvider, MarketSessionProfile, MarketSessionState, MarketVenueSessionKind,
-    NyseWeekdaysProvider, SessionAuthority, SessionProfileResolutionTruth, SessionProfileStatus,
-    SessionWindow, StrategyMarketDataSource, SESSION_START_HH_MM_ENV, SESSION_STOP_HH_MM_ENV,
-    STRATEGY_MD_TIMEFRAME_ENV,
+    autonomous_session_schedule_from_env, bridge_instrument_registry_v2_to_economics,
+    classify_crypto_continuous_session, classify_equity_us_regular_session,
+    classify_forex_weekday_continuous_session, classify_futures_globex_session,
+    resolve_session_profile_for_instrument_metadata, runtime_session_source_summary,
+    session_window_from_env, supported_session_profiles, AppState, AutonomousSessionTruth,
+    BrokerSnapshotTruthSource, DeploymentMode, FuturesSessionWindows,
+    InstrumentEconomicsBridgeResult, MarketCalendarProvider, MarketSessionProfile,
+    MarketSessionState, MarketVenueSessionKind, NyseWeekdaysProvider, SessionAuthority,
+    SessionProfileResolutionTruth, SessionProfileStatus, SessionWindow, StrategyMarketDataSource,
+    SESSION_START_HH_MM_ENV, SESSION_STOP_HH_MM_ENV, STRATEGY_MD_TIMEFRAME_ENV,
 };
 
 use super::helpers::{
@@ -2203,6 +2205,145 @@ pub(crate) async fn system_instrument_registry_v2_source_status(
         validation_errors: Vec::new(),
         message: "Configured v2 registry source is valid and is used only for read-only backtest economics suggestions."
             .to_string(),
+    })
+    .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/system/instrument-economics/status — ASSET-CORE-04B
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct InstrumentEconomicsStatusQuery {
+    symbol: Option<String>,
+    limit: Option<usize>,
+}
+
+fn instrument_economics_status_failure(
+    truth_state: &str,
+    registry_path: String,
+    error: String,
+) -> InstrumentEconomicsStatusResponse {
+    InstrumentEconomicsStatusResponse {
+        truth_state: truth_state.to_string(),
+        registry_path,
+        registry_v2_valid: false,
+        bridge_model_only: true,
+        trading_uses_instrument_economics: false,
+        runtime_uses_instrument_economics: false,
+        risk_uses_instrument_economics: false,
+        order_path_uses_instrument_economics: false,
+        instrument_count: 0,
+        bridged_count: 0,
+        failed_count: 0,
+        model_only_count: 0,
+        non_equity_enabled_count: 0,
+        rows: Vec::new(),
+        errors: vec![error],
+    }
+}
+
+fn instrument_economics_status_row(
+    result: &InstrumentEconomicsBridgeResult,
+) -> InstrumentEconomicsStatusRow {
+    InstrumentEconomicsStatusRow {
+        symbol: result.symbol.clone(),
+        instrument_id: result.instrument_id.clone(),
+        asset_class: result.asset_class.clone(),
+        instrument_kind: result.instrument_kind.clone(),
+        enabled: result.enabled,
+        paper_trading_enabled: result.paper_trading_enabled,
+        live_trading_enabled: result.live_trading_enabled,
+        truth_state: result.truth_state.clone(),
+        reason_code: result.reason_code.clone(),
+        model_only: result.model_only,
+        trading_enabled_by_bridge: result.trading_enabled_by_bridge,
+        quote_currency: result.economics.as_ref().map(|e| e.quote_currency.clone()),
+        contract_multiplier_micros: result
+            .economics
+            .as_ref()
+            .map(|e| e.contract_multiplier_micros),
+        quantity_scale: result.economics.as_ref().map(|e| e.quantity_scale),
+        tick_size_micros: result.economics.as_ref().and_then(|e| e.tick_size_micros),
+    }
+}
+
+/// GET /api/v1/system/instrument-economics/status (ASSET-CORE-04B).
+///
+/// Read-only diagnostic surface: loads the same configured v1 registry as
+/// ASSET-CORE-01C/05B, converts it to v2 in memory, validates it, then
+/// bridges each v2 instrument to `mqk_portfolio::InstrumentEconomics` via
+/// `mqk_daemon::state::instrument_economics_bridge`. No DB, provider,
+/// broker, runtime, or trading path is touched, and none of them read this
+/// bridge's output for any decision.
+pub(crate) async fn system_instrument_economics_status(
+    State(st): State<Arc<AppState>>,
+    Query(query): Query<InstrumentEconomicsStatusQuery>,
+) -> impl IntoResponse {
+    let registry_path = st.instrument_registry_path.clone();
+    let path = std::path::Path::new(&registry_path);
+
+    let v1 = match mqk_md::instrument_registry::load_instrument_registry(path) {
+        Ok(v) => v,
+        Err(err) => {
+            let truth_state = if path.exists() {
+                "v1_load_failed"
+            } else {
+                "unavailable"
+            };
+            return Json(instrument_economics_status_failure(
+                truth_state,
+                registry_path,
+                err.to_string(),
+            ))
+            .into_response();
+        }
+    };
+
+    let v2 = mqk_md::instrument_registry_v2::convert_v1_registry_to_v2(&v1);
+    if let Err(err) = mqk_md::instrument_registry_v2::validate_registry_v2(&v2) {
+        return Json(instrument_economics_status_failure(
+            "v2_validation_failed",
+            registry_path,
+            err.to_string(),
+        ))
+        .into_response();
+    }
+
+    let summary = bridge_instrument_registry_v2_to_economics(&v2);
+
+    let normalized_symbol_filter = query
+        .symbol
+        .as_deref()
+        .map(|s| s.trim().to_ascii_uppercase());
+    let rows: Vec<InstrumentEconomicsStatusRow> = summary
+        .rows
+        .iter()
+        .filter(|row| {
+            normalized_symbol_filter
+                .as_deref()
+                .is_none_or(|s| row.symbol.to_ascii_uppercase() == s)
+        })
+        .take(query.limit.unwrap_or(usize::MAX))
+        .map(instrument_economics_status_row)
+        .collect();
+
+    Json(InstrumentEconomicsStatusResponse {
+        truth_state: "active".to_string(),
+        registry_path,
+        registry_v2_valid: true,
+        bridge_model_only: true,
+        trading_uses_instrument_economics: false,
+        runtime_uses_instrument_economics: false,
+        risk_uses_instrument_economics: false,
+        order_path_uses_instrument_economics: false,
+        instrument_count: summary.total_instruments,
+        bridged_count: summary.bridged_count,
+        failed_count: summary.failed_count,
+        model_only_count: summary.model_only_count,
+        non_equity_enabled_count: summary.non_equity_enabled_count,
+        rows,
+        errors: Vec::new(),
     })
     .into_response()
 }

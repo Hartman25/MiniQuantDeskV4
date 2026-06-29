@@ -10,6 +10,7 @@ mod broker;
 mod deadman;
 mod dry_run_strategy;
 mod env;
+pub mod instrument_economics_bridge;
 mod lifecycle;
 mod loop_runner;
 pub mod market_calendar;
@@ -59,6 +60,10 @@ pub use dry_run_strategy::{
     DryRunStrategyDiagnostic, DRY_RUN_STRATEGY_IDS_ENV,
 };
 pub use env::{operator_auth_mode_from_env_values, spawn_heartbeat, uptime_secs};
+pub use instrument_economics_bridge::{
+    bridge_instrument_registry_v2_to_economics, instrument_v2_to_economics,
+    InstrumentEconomicsBridgeResult, InstrumentEconomicsBridgeSummary,
+};
 pub use loop_runner::spawn_reconcile_tick;
 pub use market_calendar::{
     classify_crypto_continuous_session, classify_equity_us_regular_session,

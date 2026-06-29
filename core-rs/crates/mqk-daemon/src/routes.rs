@@ -294,10 +294,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     };
     use system::{
         autonomous_readiness, health, status_handler, system_config_diffs,
-        system_config_fingerprint, system_instrument_registry_v2_source_status,
-        system_instrument_registry_v2_status, system_instrument_sessions_parity,
-        system_instrument_sessions_status, system_metadata, system_preflight,
-        system_runtime_leadership, system_session, system_status,
+        system_config_fingerprint, system_instrument_economics_status,
+        system_instrument_registry_v2_source_status, system_instrument_registry_v2_status,
+        system_instrument_sessions_parity, system_instrument_sessions_status, system_metadata,
+        system_preflight, system_runtime_leadership, system_session, system_status,
     };
     use system_artifact::{
         system_artifact_intake, system_parity_evidence, system_run_artifact, system_topology,
@@ -353,6 +353,15 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/v1/system/instrument-registry-v2-source/status",
             get(system_instrument_registry_v2_source_status),
+        )
+        // ASSET-CORE-04B: read-only registry-v2 -> mqk_portfolio::InstrumentEconomics
+        // bridge status. No DB, no provider/broker calls, no writes. The bridge is
+        // pure/default-unused: trading_uses_instrument_economics,
+        // runtime_uses_instrument_economics, risk_uses_instrument_economics, and
+        // order_path_uses_instrument_economics are always false.
+        .route(
+            "/api/v1/system/instrument-economics/status",
+            get(system_instrument_economics_status),
         )
         .route("/api/v1/execution/summary", get(execution_summary))
         .route("/api/v1/execution/orders", get(execution_orders))

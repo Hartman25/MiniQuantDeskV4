@@ -1948,6 +1948,90 @@ pub struct InstrumentRegistryV2SourceStatusResponse {
 }
 
 // ---------------------------------------------------------------------------
+// /api/v1/system/instrument-economics/status — ASSET-CORE-04B
+// ---------------------------------------------------------------------------
+//
+// Read-only operator-visibility surface for the ASSET-CORE-04B registry-v2
+// -> `mqk_portfolio::InstrumentEconomics` bridge
+// (`mqk_daemon::state::instrument_economics_bridge`). Loads the same
+// configured v1 registry as ASSET-CORE-01C/05B, converts it to v2 in memory,
+// validates it, and bridges every instrument. Diagnostic only: no DB,
+// provider, or broker call; no writes; no trading/runtime/risk/order-path
+// consumer of this bridge exists anywhere in the workspace.
+
+/// Per-instrument economics-bridge diagnostic row — ASSET-CORE-04B.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InstrumentEconomicsStatusRow {
+    pub symbol: String,
+    pub instrument_id: String,
+    pub asset_class: String,
+    pub instrument_kind: Option<String>,
+    pub enabled: bool,
+    pub paper_trading_enabled: bool,
+    pub live_trading_enabled: bool,
+    /// `"active"` | `"missing_currency"` | `"currency_conversion_unsupported"`
+    /// | `"missing_contract"` | `"missing_multiplier"` | `"invalid_multiplier"`
+    /// | `"unsupported_instrument"`.
+    pub truth_state: String,
+    pub reason_code: String,
+    /// `true` for every non-`"equity"` row. See
+    /// `mqk_daemon::state::instrument_economics_bridge` module docs.
+    pub model_only: bool,
+    /// Always `false`. This bridge never enables, implies, or decides
+    /// trading permission for any instrument.
+    pub trading_enabled_by_bridge: bool,
+    /// `Some` only when `truth_state == "active"`.
+    pub quote_currency: Option<String>,
+    pub contract_multiplier_micros: Option<i64>,
+    pub quantity_scale: Option<i64>,
+    pub tick_size_micros: Option<i64>,
+}
+
+/// Read-only registry-v2 -> instrument-economics bridge status — ASSET-CORE-04B.
+///
+/// Honesty contract: `bridge_model_only`, and every `*_uses_instrument_economics`
+/// flag, are always as documented on the field regardless of `truth_state` or
+/// per-row outcomes — this route can never observe a state where any of them
+/// would be `true`, because no such caller exists in the workspace.
+///
+/// `truth_state`:
+/// - `"active"` — v1 loaded, converted to v2, validated, and bridged.
+/// - `"unavailable"` — no file exists at `registry_path`.
+/// - `"v1_load_failed"` — registry file exists but failed to parse/load as v1.
+/// - `"v2_validation_failed"` — converted v2 registry failed `validate_registry_v2`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct InstrumentEconomicsStatusResponse {
+    pub truth_state: String,
+    pub registry_path: String,
+    pub registry_v2_valid: bool,
+    /// Always `true`. The bridge as a whole is model/diagnostic-only.
+    pub bridge_model_only: bool,
+    /// Always `false`. No trading path reads this bridge.
+    pub trading_uses_instrument_economics: bool,
+    /// Always `false`. No runtime path reads this bridge.
+    pub runtime_uses_instrument_economics: bool,
+    /// Always `false`. No risk path reads this bridge.
+    pub risk_uses_instrument_economics: bool,
+    /// Always `false`. No order path reads this bridge.
+    pub order_path_uses_instrument_economics: bool,
+    /// Total instruments in the converted v2 registry. Unaffected by the
+    /// `symbol`/`limit` query params -- always the full-registry total, even
+    /// when `rows` below is filtered/truncated.
+    pub instrument_count: usize,
+    pub bridged_count: usize,
+    pub failed_count: usize,
+    pub model_only_count: usize,
+    /// Count of rows that are both `enabled` and non-`"equity"`. Always `0`
+    /// for any registry that passed `validate_registry_v2` without the
+    /// test-only `allow_enabled_non_equity_for_testing` escape hatch.
+    pub non_equity_enabled_count: usize,
+    /// Per-instrument rows, filtered by `symbol` and truncated by `limit`
+    /// when supplied. May be a strict subset of `instrument_count`.
+    pub rows: Vec<InstrumentEconomicsStatusRow>,
+    pub errors: Vec<String>,
+}
+
+// ---------------------------------------------------------------------------
 // /api/v1/ops/action  — canonical operator action dispatcher
 // ---------------------------------------------------------------------------
 
