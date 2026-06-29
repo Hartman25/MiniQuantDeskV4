@@ -1,0 +1,118 @@
+{
+  "patch_id": "CRYPTO-DATA-01C-PROVIDER-INGEST-SCHEDULER-DESIGN-01-COMBINED",
+  "truth_state": "decision_made",
+  "decided_at_head_commit": "6535db8e",
+  "chosen_source_lane": "explicit_operator_local_csv_scheduler",
+  "chosen_provider": "none",
+  "canonical_symbols": ["BTC/USD", "ETH/USD"],
+  "provider_symbol_aliases_required": true,
+  "storage_target": "md_bars",
+  "storage_key": ["symbol", "timeframe", "end_ts"],
+  "requires_db_migration": false,
+  "requires_network_calls_in_next_patch": false,
+  "next_patch_network_calls_allowed": false,
+  "trading_enabled": false,
+  "paper_trading_enabled": false,
+  "live_trading_enabled": false,
+  "default_off": true,
+  "operator_explicit_run_required": true,
+  "scheduler_implementation_deferred": true,
+  "recommended_next_patch": "CRYPTO-DATA-01D-EXPLICIT-LOCAL-CRYPTO-INGEST-RUNNER-01",
+  "rejected_or_deferred_sources": [
+    {
+      "source": "twelvedata_crypto",
+      "status": "deferred_unverified",
+      "reason": "TwelveDataHistoricalProvider exists and is mechanically symbol-agnostic; providers.json declares crypto in asset_classes. But implementation_status=implemented_equity_provider and verification_status=repo_implemented_official_limits_unverified, and it has never been exercised against a non-equity symbol anywhere in the repo. Verifying it requires a network call this patch is barred from making."
+    },
+    {
+      "source": "alpaca_crypto",
+      "status": "deferred_not_supported_today",
+      "reason": "providers.json's alpaca entry declares asset_classes=[equity, etf] only -- crypto is not even claimed. mqk-broker-alpaca has no /v2/crypto/* call anywhere in the repo, confirmed by direct read."
+    },
+    {
+      "source": "coinbase_public",
+      "status": "deferred_unimplemented",
+      "reason": "Zero presence anywhere in the repo: no providers.json entry, no Rust type, no factory arm, no test."
+    },
+    {
+      "source": "kraken_public",
+      "status": "deferred_unimplemented",
+      "reason": "Zero presence anywhere in the repo: no providers.json entry, no Rust type, no factory arm, no test."
+    },
+    {
+      "source": "polygon_crypto",
+      "status": "deferred_unimplemented",
+      "reason": "providers.json declares crypto in asset_classes but implementation_status=candidate_unverified, enabled=false, zero Rust client, zero provider_registry.rs factory arm."
+    },
+    {
+      "source": "coinlore",
+      "status": "deferred_unimplemented_leading_future_candidate",
+      "reason": "The only provider config scoped exclusively to crypto with no API key required. candidate_unverified, enabled=false, zero Rust implementation, zero factory arm today. Ranked as the leading candidate for a future, separately network-authorized verification patch, but not chosen now."
+    },
+    {
+      "source": "alphavantage_crypto",
+      "status": "deferred_unimplemented",
+      "reason": "providers.json declares crypto in asset_classes but implementation_status=candidate_unverified, enabled=false, zero Rust implementation."
+    },
+    {
+      "source": "yfinance_crypto",
+      "status": "deferred_unimplemented",
+      "reason": "providers.json declares crypto in asset_classes but implementation_status=candidate_unverified, enabled=false, zero Rust implementation; unofficial wrapper subject to ToS changes."
+    }
+  ],
+  "required_evidence_fields": [
+    "schema_version",
+    "produced_at_utc",
+    "mode",
+    "source",
+    "symbols",
+    "per_symbol.completed_count",
+    "per_symbol.max_ts_iso",
+    "per_symbol.latest_completed_bar_age_secs",
+    "per_symbol.staleness_min",
+    "per_symbol.gate",
+    "per_symbol.passed",
+    "per_symbol.fail_reasons",
+    "all_passed",
+    "reason"
+  ],
+  "required_fail_closed_states": [
+    "csv_file_missing",
+    "csv_missing_header_column",
+    "rows_read_zero",
+    "rows_ok_zero",
+    "latest_completed_bar_missing",
+    "latest_bar_stale_after_import",
+    "non_paper_database_target_refused"
+  ],
+  "current_repo_evidence": {
+    "head_commit": "6535db8e",
+    "provider_factory_match_arms": "mqk-md/src/provider_registry.rs::build_market_data_provider_from_config matches exactly \"fake\"|\"twelvedata\"|\"alpaca\"; every other provider_id (coinlore, polygon, alphavantage, yfinance) returns ProviderFactoryError::UnsupportedProvider -- mechanical proof, not inference, that no crypto-capable provider factory exists in code today.",
+    "alpaca_asset_classes_exclude_crypto": "config/providers/providers.json alpaca entry: asset_classes=[\"equity\",\"etf\"] only.",
+    "twelvedata_crypto_unverified": "config/providers/providers.json twelvedata entry: asset_classes includes crypto, but implementation_status=implemented_equity_provider, verification_status=repo_implemented_official_limits_unverified.",
+    "existing_generic_csv_ingest_cli_command": "core-rs/crates/mqk-cli/src/main.rs::MdCmd::IngestCsv { path: String, timeframe: String, source: String (default \"csv\", free text) } -> commands/md.rs::md_ingest_csv -> mqk_db::md::ingest_csv_to_md_bars -> mqk_db::md::ingest_provider_bars_to_md_bars. Already works for any local CSV path and any source label with zero new Rust code.",
+    "ingest_provider_and_sync_provider_hardcoded_to_two_equity_providers": "commands/md.rs::md_ingest_provider and md_sync_provider both bail!() unless source is exactly \"twelvedata\" or \"alpaca\" -- cannot be honestly pointed at a crypto symbol today.",
+    "md_bars_schema_unchanged": "core-rs/crates/mqk-db/migrations/0003_backtest_schema.sql primary key (symbol, timeframe, end_ts), bare unconstrained text symbol column, unchanged through migration 0043.",
+    "csv_provider_metadata_gap": "mqk_db::md::ingest_csv_to_md_bars always calls the metadata-less mqk_db::md::ingest_provider_bars_to_md_bars (MdBarProviderMetadata::unknown()), not the existing ingest_provider_bars_to_md_bars_with_provider_metadata sibling -- CSV-ingested rows always carry provider_id=\"unknown\" regardless of the --source CLI flag value.",
+    "scheduler_precedent_premarket": "scripts/windows/Register-PremarketDataRefreshTask.ps1 registers a Windows Scheduled Task whose action calls only Prep-PremarketMarketData.ps1; explicit -CheckOnly/-Unregister modes; never references daemon/runtime/trading scripts (confirmed by the script's own header and by its own test_premarket_data_scheduler.ps1 hard rules).",
+    "scheduler_precedent_intraday": "scripts/windows/Refresh-IntradayMarketData.ps1: -CheckOnly/-Once/interval-loop modes; refuses to run unless MQK_DATABASE_URL contains port 5440; calls only mqk-cli md sync-provider (equity-only); fails closed per its own documented PAPER-SMOKE-MD-REFRESH-FAIL-CLOSED-01 convention; writes evidence JSON under exports/market_data/.",
+    "no_eth_usd_fixture_exists": "Repo-wide search for ETH/USD, ETHUSD, ETH_USD matches no config, fixture, test, or source file anywhere -- only this patch's own forthcoming docs.",
+    "crypto_local_marks_registry_fixture": "config/instruments/instruments_v2.crypto_local_marks.example.json carries exactly one instrument, BTC/USD, CryptoPair{base:BTC,quote:USD}, enabled=false/paper_trading_enabled=false/live_trading_enabled=false, provider_symbols={local_csv: BTC/USD}.",
+    "prior_lane_proofs": "CRYPTO-DATA-01A (in-memory CSV-to-model-chain proof), CRYPTO-DATA-01B (DB persistence + readback proof), ASSET-CORE-04F (route-level ?registry_source=v2 valuation proof) already prove the local-CSV lane end-to-end at every layer except a recurring/operator-explicit scheduler wrapper, which this patch designs and the next patch should build."
+  },
+  "files_added_by_this_patch": [
+    "docs/specs/crypto_data_01c_provider_ingest_scheduler_design.md",
+    "docs/specs/crypto_data_01c_provider_ingest_scheduler_plan.json",
+    "scripts/guards/validate_crypto_data_01c_plan.ps1"
+  ],
+  "files_modified_by_this_patch": [
+    "MiniQuantDesk_Master_Patch_Ledger_v2.md",
+    "docs/audits/multi_asset_completion_audit.md"
+  ],
+  "notes": [
+    "chosen_provider=none is deliberate: no live/network crypto data provider is implemented or verified anywhere in this repo today (see rejected_or_deferred_sources), and this patch is barred from making any network call to verify one. The chosen lane is local-file ingestion, not a provider.",
+    "requires_network_calls_in_next_patch=false and next_patch_network_calls_allowed=false both describe CRYPTO-DATA-01D as scoped by this design (a scheduler wrapper around the existing local-CSV ingest path) -- not a general claim that no future patch may ever make a network call.",
+    "canonical_symbols includes ETH/USD for consistency with ASSET-CORE-04E's original decision scope, even though no ETH/USD registry-v2 entry or CSV fixture exists yet (see current_repo_evidence.no_eth_usd_fixture_exists). Adding one is an optional, additive next-patch decision, not a requirement.",
+    "This artifact records a design decision only. No code in mqk-daemon, mqk-runtime, mqk-execution, mqk-broker-alpaca, mqk-broker-paper, mqk-risk, mqk-md provider implementations, mqk-portfolio, or any GUI/config/DB-migration/scheduler/provider-implementation file was changed by this patch."
+  ]
+}
