@@ -183,12 +183,103 @@ These evidence files are **not staged** — they are operator artifacts only.
 
 ---
 
-## Remaining Gaps (not addressed by this runbook)
+## Optional: Windows Scheduled Task (CRYPTO-DATA-01E)
+
+**Patch:** `CRYPTO-DATA-01E-LOCAL-CRYPTO-INGEST-TASK-REGISTRATION-01-COMBINED`
+
+`scripts/windows/Register-LocalCryptoIngestTask.ps1` provides an optional,
+default-unregistered Windows Scheduled Task wrapper for the import runner.
+The task is **not registered by default** — an operator must explicitly choose
+to register it.
+
+### What the task does
+
+- Runs `Import-LocalCryptoMarks.ps1 -Once` daily at a configurable local time
+  (default `07:30`).
+- No daemon, no runtime, no provider, no broker, no order path is touched.
+- The task does **not** set `MQK_DATABASE_URL`.  See MQK_DATABASE_URL note below.
+
+### MQK_DATABASE_URL and the scheduled task
+
+`MQK_DATABASE_URL` is **not** embedded in the task and is not read from
+`.env.local`.  For the import to succeed, `MQK_DATABASE_URL` must be set as a
+persistent Windows **user** or **system** environment variable before the task
+runs.  Shell-session variables (`$env:VAR = ...`) are **not** inherited by
+scheduled tasks.
+
+If `MQK_DATABASE_URL` is absent or does not target port `5440` /
+`miniquantdesk_paper`, the import runner **fails closed** — no partial write
+occurs, evidence is written with `all_passed=false` and
+`reason_code=database_url_missing`.
+
+### Preview (no mutation)
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\windows\Register-LocalCryptoIngestTask.ps1 `
+    -CheckOnly `
+    -CsvPath .\path\to\btcusd_1d_local.csv
+```
+
+With the committed fixture (safe to run at any time):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\windows\Register-LocalCryptoIngestTask.ps1 `
+    -CheckOnly `
+    -CsvPath .\core-rs\crates\mqk-md\tests\fixtures\crypto_btcusd_1d_local.csv
+```
+
+### Register the task
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\windows\Register-LocalCryptoIngestTask.ps1 `
+    -CsvPath .\path\to\btcusd_1d_local.csv `
+    -At 07:30
+```
+
+`-CsvPath` is required for registration.  Do not point the task at the committed
+test fixture for production use — supply a path to your regularly-updated CSV.
+
+### Unregister the task
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\windows\Register-LocalCryptoIngestTask.ps1 `
+    -Unregister
+```
+
+Unregister is safe and idempotent when the task does not exist.
+
+### Evidence
+
+Every run writes (overwrites) two files:
+
+```
+exports\market_data\local_crypto_ingest_task_registration.json
+exports\market_data\local_crypto_ingest_task_registration.txt
+```
+
+The JSON includes `schema_version`, `mode`, `task_exists_before`,
+`task_exists_after`, `registered`, `check_only`, `task_action`, `runner_path`,
+`csv_path`, `all_passed`, `reason_code`, and a `safety` block with
+`calls_import_runner_only=true`.
+
+### Warnings
+
+- The task calls **only** `Import-LocalCryptoMarks.ps1`.  It does not start
+  the daemon, runtime, broker, or any provider script.
+- The task does **not** set `MQK_DATABASE_URL`.  A persistent env var is required.
+- **Crypto trading remains disabled.**  This task imports local data only.
+- This is a **local-file import** only — not a live network provider.
+- Each run applies the same staleness gate as the runner.  If the CSV has not
+  been updated since the last run, the runner fails closed with
+  `latest_completed_bar_stale`.
+
+---
+
+## Remaining Gaps
 
 - `provider_id` in `md_bars` rows will be `"unknown"` (the CLI's CSV path does
   not yet call `ingest_provider_bars_to_md_bars_with_provider_metadata`).
   This does not affect valuation — the mark-read path never queries `provider_id`.
 - No `ETH/USD` fixture or registry-v2 entry exists yet.
-- No Windows Scheduled Task registration (planned as CRYPTO-DATA-01E).
 - No live network crypto provider is implemented or verified.
 - This does not enable crypto trading, paper trading, or live trading.
