@@ -1,0 +1,146 @@
+{
+  "patch_id": "CRYPTO-DATA-01H-LIVE-CRYPTO-PROVIDER-DECISION-01-COMBINED",
+  "truth_state": "decision_made",
+  "decision_scope": "provider_decision_only_no_network_calls",
+  "decided_at_head_commit": "6271c048",
+  "canonical_symbols": ["BTC/USD", "ETH/USD"],
+  "storage_target": "md_bars",
+  "storage_key": ["symbol", "timeframe", "end_ts"],
+  "trading_enabled": false,
+  "paper_trading_enabled": false,
+  "live_trading_enabled": false,
+  "network_calls_made": false,
+  "db_mutation_made": false,
+  "requires_db_migration": false,
+  "chosen_first_verification_provider": "coinlore",
+  "chosen_first_verification_patch": "CRYPTO-DATA-01I-COINLORE-READONLY-NETWORK-VERIFY-01",
+  "chosen_first_implementation_patch": "CRYPTO-DATA-01J-COINLORE-PROVIDER-ADAPTER-LOCAL-INGEST-01",
+  "provider_candidates": [
+    {
+      "provider": "twelvedata",
+      "repo_status": "repo_implemented_equity_only",
+      "crypto_status": "unverified",
+      "decision": "deferred",
+      "reason": "TwelveDataHistoricalProvider exists and is mechanically symbol-agnostic (generic /time_series HTTP/JSON client); providers.json declares crypto in asset_classes. But implementation_status=implemented_equity_provider and verification_status=repo_implemented_official_limits_unverified; never exercised against a non-equity symbol anywhere in the repo. Would share the equity-provisioned TWELVEDATA_API_KEY rate-limit budget (8 req/min free tier), risking equity ingestion if a crypto verification call misbehaves."
+    },
+    {
+      "provider": "alpaca",
+      "repo_status": "repo_implemented_equity_only",
+      "crypto_status": "not_claimed",
+      "decision": "rejected_for_first_lane",
+      "reason": "providers.json's alpaca entry declares asset_classes=[equity, etf] only -- crypto is not even claimed. alpaca_provider.rs::bars_url() is hardcoded to /v2/stocks/bars; no /v1beta3/crypto/* call exists anywhere in the file. Structurally unfit as a first crypto verification lane, independent of Alpaca's actual crypto API quality (never called by this repo)."
+    },
+    {
+      "provider": "coinbase",
+      "repo_status": "repo_unimplemented",
+      "crypto_status": "unverified",
+      "decision": "rejected_for_first_lane",
+      "reason": "Zero presence anywhere in the repo: no providers.json entry, no Rust type, no factory arm, no test, no doc reference outside this decision's own evaluation."
+    },
+    {
+      "provider": "kraken",
+      "repo_status": "repo_unimplemented",
+      "crypto_status": "unverified",
+      "decision": "rejected_for_first_lane",
+      "reason": "Zero presence anywhere in the repo: no providers.json entry, no Rust type, no factory arm, no test, no doc reference outside this decision's own evaluation."
+    },
+    {
+      "provider": "polygon",
+      "repo_status": "repo_config_only",
+      "crypto_status": "unverified",
+      "decision": "deferred",
+      "reason": "providers.json declares crypto in asset_classes but implementation_status=candidate_unverified, enabled=false, zero Rust client, zero provider_registry.rs factory arm."
+    },
+    {
+      "provider": "coinlore",
+      "repo_status": "repo_config_only",
+      "crypto_status": "unverified",
+      "decision": "candidate_for_network_verification",
+      "reason": "The only provider config scoped exclusively to crypto (asset_classes=[crypto]), api_key_required=false. candidate_unverified, enabled=false, zero Rust implementation, zero factory arm today. Chosen as the safest first network-verification lane: no credential, no shared rate-limit budget with equity ingestion, simplest scope for a single bounded, operator-authorized verification call."
+    },
+    {
+      "provider": "alphavantage",
+      "repo_status": "repo_config_only",
+      "crypto_status": "unverified",
+      "decision": "deferred",
+      "reason": "providers.json declares crypto in asset_classes but implementation_status=candidate_unverified, enabled=false, zero Rust implementation."
+    },
+    {
+      "provider": "yfinance",
+      "repo_status": "repo_config_only",
+      "crypto_status": "unverified",
+      "decision": "deferred",
+      "reason": "providers.json declares crypto in asset_classes but implementation_status=candidate_unverified, enabled=false, zero Rust implementation; unofficial wrapper subject to ToS changes."
+    },
+    {
+      "provider": "local_csv",
+      "repo_status": "repo_implemented",
+      "crypto_status": "proven",
+      "decision": "continue_as_baseline_pending_network_lane",
+      "reason": "mqk_md::ingest_csv::parse_csv_file + mqk_db::ingest_provider_bars_to_md_bars_with_provider_metadata + mqk-cli md ingest-csv + Import-LocalCryptoMarks.ps1/Register-LocalCryptoIngestTask.ps1 already prove this path end-to-end for BTC/USD and ETH/USD (CRYPTO-DATA-01A-01G). Zero network, zero unverified claims. Remains the only proven crypto mark path until 01I/01J close the network-provider gap."
+    }
+  ],
+  "symbol_convention": {
+    "canonical_registry_symbol": ["BTC/USD", "ETH/USD"],
+    "provider_symbol_alias_map_field": "provider_symbols",
+    "existing_alias_key": "local_csv",
+    "future_alias_key_planned": "coinlore",
+    "md_bars_symbol": "identical to canonical registry symbol, unchanged",
+    "route_query_symbol": "identical to canonical registry symbol (URL-encoded slash), unchanged"
+  },
+  "required_next_patch_guardrails": [
+    "operator_explicit_network_authorization_required",
+    "no_trading_enablement",
+    "no_broker_calls",
+    "evidence_required",
+    "rate_limit_required",
+    "single_bounded_verification_call_only_in_01i",
+    "provider_default_disabled_in_01j",
+    "no_credential_shared_with_equity_providers"
+  ],
+  "required_evidence_fields": [
+    "schema_version",
+    "produced_at_utc",
+    "request_url_no_secrets",
+    "http_status",
+    "response_shape_sample",
+    "rate_limit_headers_observed",
+    "all_passed",
+    "reason_code"
+  ],
+  "required_fail_closed_states": [
+    "provider_disabled",
+    "malformed_response",
+    "rate_limited",
+    "provider_unavailable",
+    "missing_credential",
+    "non_paper_database_target_refused"
+  ],
+  "current_repo_evidence": {
+    "head_commit": "6271c048",
+    "provider_factory_match_arms": "mqk-md/src/provider_registry.rs::build_market_data_provider_from_config matches exactly \"fake\"|\"twelvedata\"|\"alpaca\"; every other provider_id (coinlore, polygon, alphavantage, yfinance) returns ProviderFactoryError::UnsupportedProvider.",
+    "cli_provider_commands_hardcoded": "commands/md.rs::md_ingest_provider and md_sync_provider both bail!() unless source is exactly \"twelvedata\" or \"alpaca\", independent of and stricter than the provider_registry.rs factory limit.",
+    "alpaca_asset_classes_exclude_crypto": "config/providers/providers.json alpaca entry: asset_classes=[\"equity\",\"etf\"] only; alpaca_provider.rs::bars_url() hardcoded to /v2/stocks/bars.",
+    "twelvedata_crypto_unverified": "config/providers/providers.json twelvedata entry: asset_classes includes crypto, but implementation_status=implemented_equity_provider, verification_status=repo_implemented_official_limits_unverified; TwelveDataHistoricalProvider is mechanically symbol-agnostic but never exercised against a non-equity symbol.",
+    "coinlore_config_shape": "config/providers/providers.json coinlore entry: asset_classes=[\"crypto\"] only, api_key_required=false, enabled=false, implementation_status=candidate_unverified.",
+    "md_bars_schema_unchanged": "core-rs/crates/mqk-db/migrations primary key (symbol, timeframe, end_ts), bare unconstrained text symbol column, unchanged through the current latest migration.",
+    "provider_symbols_map_extensible": "config/instruments/instruments_v2.crypto_local_marks.example.json each instrument already carries a provider_symbols map (currently {\"local_csv\": \"BTC/USD\"} / {\"local_csv\": \"ETH/USD\"}); adding a future provider key requires no schema change.",
+    "local_csv_lane_fully_proven": "CRYPTO-DATA-01A (in-memory CSV-to-model-chain proof), 01B (DB persistence+readback), 01D-01E (operator-run wrapper + optional scheduled task), 01F (provider-metadata stamping), 01G (ETH/USD second-symbol proof), ASSET-CORE-04F (route-level ?registry_source=v2 valuation) together prove the local-CSV lane end-to-end at every layer for both BTC/USD and ETH/USD."
+  },
+  "files_added_by_this_patch": [
+    "docs/specs/crypto_data_01h_live_provider_decision.md",
+    "docs/specs/crypto_data_01h_live_provider_decision.json",
+    "scripts/guards/validate_crypto_data_01h_provider_decision.ps1"
+  ],
+  "files_modified_by_this_patch": [
+    "docs/runbooks/local_crypto_marks_ingest.md",
+    "MiniQuantDesk_Master_Patch_Ledger_v2.md",
+    "docs/audits/multi_asset_completion_audit.md"
+  ],
+  "notes": [
+    "chosen_first_verification_provider=coinlore is a scope/blast-radius decision, not a claim that TwelveData's crypto endpoint is technically inferior -- TwelveData is the cheaper code-reuse candidate (working Rust client exists) but shares a rate-limited credential with equity ingestion; CoinLore is public, keyless, and crypto-only, isolating verification risk entirely.",
+    "This decision does not assume CoinLore's public API returns OHLCV bars -- 01I's own single verification call must first confirm what shape (ticker vs. bars) is actually available before 01J assumes a RawBar-compatible response.",
+    "No code in mqk-daemon, mqk-runtime, mqk-execution, mqk-broker-alpaca, mqk-broker-paper, mqk-risk, mqk-md provider implementations, mqk-portfolio, or any GUI/config/DB-migration/scheduler/provider-implementation file was changed by this patch.",
+    "Parent statuses unchanged and still PARTIAL: CRYPTO-DATA-01, CRYPTO-REGISTRY-01, ASSET-CORE-04. This patch does not claim crypto trading readiness or live provider readiness."
+  ]
+}

@@ -315,6 +315,19 @@ stamping, and the `ASSET-CORE-04A`/`04B`/`04C` model chain are generic over
 symbol, not hardcoded to `BTC/USD`. `ETH/USD` remains disabled and
 model-only, exactly like `BTC/USD` — this does not enable crypto trading.
 
+## Live Provider Decision (CRYPTO-DATA-01H)
+
+A live network crypto provider is still absent. `CRYPTO-DATA-01H` decided
+only the *next lane* — it chose CoinLore as the first network-authorized
+verification candidate (`CRYPTO-DATA-01I`, not yet built) and a CoinLore
+provider adapter as the first implementation candidate after that
+(`CRYPTO-DATA-01J`, not yet built). No network call was made, no provider
+code was added, and no CLI/config file was changed by that decision. Local
+CSV import (this runbook) remains the only proven crypto mark ingest path
+until `01I`/`01J` close the network-provider gap. See
+`docs/specs/crypto_data_01h_live_provider_decision.md` for the full
+evaluation of all candidates.
+
 ## Remaining Gaps
 
 - No live network crypto provider is implemented or verified.
