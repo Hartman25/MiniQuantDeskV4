@@ -275,11 +275,27 @@ The JSON includes `schema_version`, `mode`, `task_exists_before`,
 
 ---
 
+## Provider Metadata (CRYPTO-DATA-01F)
+
+CSV-ingested rows now carry the `-Source` / `--source` label as truthful
+`md_bars` provenance instead of `"unknown"`:
+
+- `provider_id` = the `--source` value (e.g. `local_crypto_manual`), or
+  `"unknown"` only if the label is blank/whitespace-only.
+- `provider_source` = the same `--source` value.
+- `ingest_mode` = `"csv_import"` — a mechanical fact of how the row was
+  ingested, not a claim about the data's origin.
+- `provider_symbol` is left unset: it is a single value applied to every row
+  in one ingest batch, and a CSV file is not guaranteed to be single-symbol.
+
+This is **provenance only**. It does not verify the accuracy, timeliness, or
+source of the price data — that remains the operator's responsibility (see
+"CSV Schema" above). It does not enable trading. It does not add a network
+provider. The mark-read path used by `ASSET-CORE-04` still never queries
+`provider_id` for valuation.
+
 ## Remaining Gaps
 
-- `provider_id` in `md_bars` rows will be `"unknown"` (the CLI's CSV path does
-  not yet call `ingest_provider_bars_to_md_bars_with_provider_metadata`).
-  This does not affect valuation — the mark-read path never queries `provider_id`.
 - No `ETH/USD` fixture or registry-v2 entry exists yet.
 - No live network crypto provider is implemented or verified.
 - This does not enable crypto trading, paper trading, or live trading.

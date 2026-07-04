@@ -443,7 +443,19 @@ pub async fn ingest_csv_to_md_bars(pool: &PgPool, args: IngestCsvArgs) -> Result
         result
     };
 
-    ingest_provider_bars_to_md_bars(
+    // CRYPTO-DATA-01F: stamp truthful provider metadata instead of falling through
+    // to the metadata-less helper's "unknown" default. provider_id/provider_source
+    // are the operator-supplied --source label (the only provenance the CLI is
+    // given); ingest_mode records the true ingestion mechanism ("csv_import").
+    // provider_symbol is left unset: it is a single value applied to every row in
+    // the batch, and a CSV file is not guaranteed to be single-symbol.
+    let provider_metadata = MdBarProviderMetadata {
+        provider_source: Some(args.source.clone()),
+        ingest_mode: Some("csv_import".to_string()),
+        ..MdBarProviderMetadata::provider_id_or_unknown(args.source.clone())
+    };
+
+    ingest_provider_bars_to_md_bars_with_provider_metadata(
         pool,
         IngestProviderBarsArgs {
             source: args.source,
@@ -451,6 +463,7 @@ pub async fn ingest_csv_to_md_bars(pool: &PgPool, args: IngestCsvArgs) -> Result
             ingest_id: args.ingest_id,
             bars,
         },
+        provider_metadata,
     )
     .await
 }
