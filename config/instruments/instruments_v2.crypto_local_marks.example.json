@@ -25,6 +25,31 @@
         "tags": ["local_csv_fixture", "model_only"]
       },
       "notes": "Disabled BTC/USD local-CSV-fixture entry for CRYPTO-DATA-01A-LOCAL-CSV-MARKS-01 / CRYPTO-REGISTRY-01. Not a tradable instrument: enabled=false, paper_trading_enabled=false, live_trading_enabled=false, allow_enabled_non_equity_for_testing absent. Sourced only from a committed local CSV fixture (provider_symbols.local_csv) -- no provider/network call, no DB migration, no trading enablement. Never read by any broker/runtime/risk/OMS/order path."
+    },
+    {
+      "instrument_id": "crypto:GLOBAL:ETHUSD",
+      "symbol": "ETH/USD",
+      "asset_class": "crypto",
+      "venue": "GLOBAL",
+      "currency": "USD",
+      "quote_currency": "USD",
+      "provider_symbols": {
+        "local_csv": "ETH/USD"
+      },
+      "enabled": false,
+      "paper_trading_enabled": false,
+      "live_trading_enabled": false,
+      "timeframes": ["1D"],
+      "contract": {
+        "kind": "crypto_pair",
+        "base": "ETH",
+        "quote": "USD"
+      },
+      "metadata": {
+        "category": "crypto_spot",
+        "tags": ["local_csv_fixture", "model_only"]
+      },
+      "notes": "Disabled ETH/USD local-CSV-fixture entry for CRYPTO-DATA-01G-ETHUSD-LOCAL-CSV-MARKS-01-COMBINED, added beside the existing BTC/USD entry to prove the local crypto mark lane is not hardcoded to one symbol. Not a tradable instrument: enabled=false, paper_trading_enabled=false, live_trading_enabled=false, allow_enabled_non_equity_for_testing absent. Sourced only from a committed local CSV fixture (provider_symbols.local_csv) -- no provider/network call, no DB migration, no trading enablement. Never read by any broker/runtime/risk/OMS/order path."
     }
   ]
 }

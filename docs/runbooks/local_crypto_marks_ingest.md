@@ -73,8 +73,13 @@ symbol,timeframe,end_ts,open,high,low,close,volume,is_complete
 - `volume`: integer
 - `is_complete`: `true` or `false`
 
-The committed fixture for testing is:
-`core-rs/crates/mqk-md/tests/fixtures/crypto_btcusd_1d_local.csv`
+The committed fixtures for testing are:
+`core-rs/crates/mqk-md/tests/fixtures/crypto_btcusd_1d_local.csv` and
+`core-rs/crates/mqk-md/tests/fixtures/crypto_ethusd_1d_local.csv`
+(`CRYPTO-DATA-01G-ETHUSD-LOCAL-CSV-MARKS-01-COMBINED` added the `ETH/USD`
+fixture beside the existing `BTC/USD` one to prove this ingest path is not
+hardcoded to a single symbol). Both fixtures use deterministic, committed
+test data only — neither claims to be a current or live market price.
 
 **Source file provenance is the operator's responsibility.** The script validates
 the file format but not the accuracy, timeliness, or source of the price data.
@@ -294,8 +299,25 @@ source of the price data — that remains the operator's responsibility (see
 provider. The mark-read path used by `ASSET-CORE-04` still never queries
 `provider_id` for valuation.
 
+## ETH/USD Fixture (CRYPTO-DATA-01G)
+
+A second disabled registry-v2 row and committed local CSV fixture exist for
+`ETH/USD`, added beside the existing `BTC/USD` entry:
+
+- Registry-v2 row: `config/instruments/instruments_v2.crypto_local_marks.example.json`
+  (`ETH/USD`, `CryptoPair{base:"ETH",quote:"USD"}`, `enabled=false`,
+  `paper_trading_enabled=false`, `live_trading_enabled=false`).
+- CSV fixture: `core-rs/crates/mqk-md/tests/fixtures/crypto_ethusd_1d_local.csv`
+  (3 deterministic daily bars, latest completed close `$3,200.00`).
+
+This proves the local-CSV ingest path, the `CRYPTO-DATA-01F` provider-metadata
+stamping, and the `ASSET-CORE-04A`/`04B`/`04C` model chain are generic over
+symbol, not hardcoded to `BTC/USD`. `ETH/USD` remains disabled and
+model-only, exactly like `BTC/USD` — this does not enable crypto trading.
+
 ## Remaining Gaps
 
-- No `ETH/USD` fixture or registry-v2 entry exists yet.
 - No live network crypto provider is implemented or verified.
+- No production registry-v2 cutover (registry-v2 still has zero production
+  route callers for the default/legacy config).
 - This does not enable crypto trading, paper trading, or live trading.
