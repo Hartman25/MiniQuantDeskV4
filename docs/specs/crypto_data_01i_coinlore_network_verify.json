@@ -1,0 +1,79 @@
+{
+  "patch_id": "CRYPTO-DATA-01I-COINLORE-READONLY-NETWORK-VERIFY-01",
+  "truth_state": "verified",
+  "verification_scope": "read_only_network_verification",
+  "network_calls_made": true,
+  "request_count": 2,
+  "provider": "coinlore",
+  "credentials_used": false,
+  "api_key_used": false,
+  "db_mutation_made": false,
+  "requires_db_migration": false,
+  "trading_enabled": false,
+  "paper_trading_enabled": false,
+  "live_trading_enabled": false,
+  "canonical_symbols": ["BTC/USD", "ETH/USD"],
+  "provider_symbols_verified": ["BTC", "ETH"],
+  "coin_ids_verified": ["90", "80"],
+  "btc": {
+    "verified": true,
+    "http_status": 200,
+    "has_usd_price": true,
+    "has_timestamp": false,
+    "has_ohlcv": false,
+    "has_volume": true,
+    "usable_for_raw_bar": false,
+    "usable_for_latest_mark_only": true
+  },
+  "eth": {
+    "verified": true,
+    "http_status": 200,
+    "has_usd_price": true,
+    "has_timestamp": false,
+    "has_ohlcv": false,
+    "has_volume": true,
+    "usable_for_raw_bar": false,
+    "usable_for_latest_mark_only": true
+  },
+  "rate_limit_observations": {
+    "headers_present": false,
+    "official_guidance": "not fetched in this patch to keep request count minimal; unknown, must not be assumed by 01J"
+  },
+  "decision": "PARTIAL_TICKER_ONLY",
+  "recommended_next_patch": "CRYPTO-DATA-01J-COINLORE-PROVIDER-ADAPTER-LOCAL-INGEST-01",
+  "required_next_patch_guardrails": [
+    "do_not_fabricate_open_high_low_from_close",
+    "do_not_fabricate_end_ts_as_provider_supplied_when_it_is_client_observed",
+    "do_not_assert_is_complete_true_for_a_non_bar_ticker_value",
+    "introduce_explicit_latest_mark_concept_or_loudly_document_non_fabrication_convention",
+    "if_real_ohlcv_required_must_make_separate_authorized_call_to_undiscovered_endpoint_eg_coin_markets",
+    "implement_empty_response_and_malformed_response_error_handling",
+    "default_provider_disabled_until_explicit_operator_opt_in",
+    "do_not_assume_specific_rate_limit_from_header_absence",
+    "add_provider_symbols_coinlore_alias_in_01j_not_01i"
+  ],
+  "requests": [
+    {
+      "purpose": "discover_coinlore_ids_for_btc_eth_and_confirm_top_level_shape",
+      "url_no_secrets": "https://api.coinlore.net/api/tickers/",
+      "http_status": 200,
+      "response_shape": "object_with_data_array_of_100_tickers_and_info_object",
+      "response_size_bytes": 37100
+    },
+    {
+      "purpose": "confirm_targeted_per_id_ticker_endpoint_shape_for_btc_and_eth_together",
+      "url_no_secrets": "https://api.coinlore.net/api/ticker/?id=90,80",
+      "http_status": 200,
+      "response_shape": "bare_array_of_2_ticker_objects",
+      "response_size_bytes": 725
+    }
+  ],
+  "fail_reasons": [],
+  "notes": [
+    "CoinLore reliably identifies BTC (id=90) and ETH (id=80) and returns USD-denominated spot price_usd for both, confirmed on 2 independent endpoints.",
+    "Neither verified endpoint exposes OHLCV history or a per-ticker timestamp; volume24 is a rolling 24h figure, not a bar-period volume.",
+    "This patch did not call /api/coin/markets/?id= or fetch CoinLore's docs page; conclusions are scoped to the 2 endpoints actually called, not all of CoinLore's API surface.",
+    "A RawBar/ProviderBar populated from this data would require fabricating open/high/low (copying close) and end_ts/is_complete (asserting client request time as a provider-confirmed bar close) -- forbidden by this patch's authorization and CLAUDE.md's no-fabricated-truth invariant.",
+    "01J must adapt scope to a ticker/latest-mark model or make its own further-authorized verification call before assuming real OHLCV exists."
+  ]
+}

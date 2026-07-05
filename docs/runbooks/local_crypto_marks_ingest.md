@@ -328,9 +328,25 @@ until `01I`/`01J` close the network-provider gap. See
 `docs/specs/crypto_data_01h_live_provider_decision.md` for the full
 evaluation of all candidates.
 
+## CoinLore Read-Only Network Verification (CRYPTO-DATA-01I)
+
+`CRYPTO-DATA-01I` made the first explicitly-authorized, bounded, read-only
+network verification of CoinLore (2 keyless HTTP GETs to
+`api.coinlore.net`). Result: CoinLore reliably identifies BTC/ETH and
+returns USD spot prices, but exposes **no OHLCV history and no per-ticker
+timestamp** on the endpoints checked — decision `PARTIAL_TICKER_ONLY`. No
+provider code was written, no CLI/config file was changed, no DB was
+written or migrated, and no trading was enabled. Local CSV import (this
+runbook) remains the only proven crypto mark ingest path until `01J` adapts
+its scope to a ticker/latest-mark model (or makes a further-authorized call
+to check for a real history endpoint) and actually builds the adapter. See
+`docs/specs/crypto_data_01i_coinlore_network_verify.md` for full evidence.
+
 ## Remaining Gaps
 
 - No live network crypto provider is implemented or verified.
+- CoinLore's verified public endpoints are ticker/spot-only, not OHLCV —
+  any future adapter must model a "latest mark," not a fabricated bar.
 - No production registry-v2 cutover (registry-v2 still has zero production
   route callers for the default/legacy config).
 - This does not enable crypto trading, paper trading, or live trading.
