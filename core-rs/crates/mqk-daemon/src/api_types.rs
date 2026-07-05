@@ -4737,6 +4737,89 @@ pub struct IntradayRefreshStatusResponse {
 }
 
 // ---------------------------------------------------------------------------
+// CRYPTO-DATA-01N-O-P-LATEST-MARK-EVIDENCE-STATUS-BUNDLE-01-COMBINED:
+// read-only latest-mark evidence status
+// ---------------------------------------------------------------------------
+
+/// One latest-mark row surfaced by `GET /api/v1/market-data/latest-marks/status`.
+///
+/// Fields map directly from a `LatestMark` value serialized into the
+/// `coinlore-latest-mark-v1` evidence contract. All fields are optional --
+/// a malformed or partial evidence file must never be filled in with a
+/// default value here; `None` means the field was absent or not a string/
+/// number of the expected type. This type intentionally has no `open`/
+/// `high`/`low`/`is_complete`/`end_ts` field: it represents a ticker-style
+/// latest mark, never a completed OHLCV bar.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LatestMarkStatusRow {
+    pub canonical_symbol: String,
+    pub provider_id: Option<String>,
+    pub provider_symbol: Option<String>,
+    pub provider_coin_id: Option<String>,
+    pub price_usd: Option<String>,
+    pub volume24_usd: Option<String>,
+    pub as_of_client_request_ts: Option<i64>,
+    pub provider_ts: Option<i64>,
+    pub truth_state: Option<String>,
+    pub kind: Option<String>,
+}
+
+/// Response for `GET /api/v1/market-data/latest-marks/status`.
+///
+/// Read-only. Reads the latest `coinlore_latest_mark_*.json` evidence file
+/// written by `mqk md coinlore-latest-mark --output-dir`. No DB connection,
+/// no provider/network call, no CLI execution, no daemon runtime start, no
+/// trading state mutation.
+///
+/// `truth_state` values:
+/// - `"active"`             — latest evidence file parsed successfully and is fresh.
+/// - `"stale"`               — evidence parsed successfully but is older than
+///   `max_evidence_age_secs`, or carries no `produced_at_utc`.
+/// - `"no_evidence"`        — no evidence file found in the evidence directory.
+/// - `"parse_error"`        — evidence file found but JSON is malformed or has
+///   an unsupported `schema_version`.
+/// - `"unsafe_evidence"`    — evidence claims `db_write`/`md_bars_write`/
+///   `completed_bar_claim=true`, or a mark carries a bar-like field
+///   (`open`/`high`/`low`/`close`/`is_complete`/`end_ts`). Never surfaced as
+///   `active` regardless of freshness -- this is a fail-closed safety state,
+///   not a freshness state.
+/// - `"backend_unavailable"` — evidence directory or file could not be read.
+///
+/// This route reuses the same evidence directory as
+/// `GET /api/v1/market-data/intraday-refresh/status`
+/// (`st.md_refresh_evidence_dir`, default `exports/market_data`), filtered to
+/// the distinct `coinlore_latest_mark_*.json` filename prefix so the two
+/// evidence streams never collide.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LatestMarkStatusResponse {
+    pub canonical_route: String,
+    pub truth_state: String,
+    pub provider: Option<String>,
+    pub produced_at_utc: Option<String>,
+    /// Filesystem path of the evidence file that was read. `null` when no file found.
+    pub evidence_path: Option<String>,
+    /// `true` when evidence is absent, unreadable, malformed, unsafe, or
+    /// older than `max_evidence_age_secs`.
+    pub stale_or_missing_evidence: bool,
+    /// Maximum evidence age (seconds) before `truth_state` becomes `"stale"`.
+    /// Default 86400 (24h); overridable via `MQK_LATEST_MARK_EVIDENCE_MAX_AGE_SECS`.
+    pub max_evidence_age_secs: i64,
+    pub network_call_made: Option<bool>,
+    pub db_write: Option<bool>,
+    pub md_bars_write: Option<bool>,
+    pub completed_bar_claim: Option<bool>,
+    pub provider_enabled: Option<bool>,
+    pub symbols_requested: Vec<String>,
+    pub marks: Vec<LatestMarkStatusRow>,
+    pub all_passed: Option<bool>,
+    pub reason_code: Option<String>,
+    pub fail_reasons: Vec<String>,
+    /// Error description when `truth_state` is `"parse_error"`,
+    /// `"unsafe_evidence"`, or `"backend_unavailable"`.
+    pub error: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
 // DATA-INGEST-GUI-SYNC-ALL-01: Tracked-equities registry preview
 // ---------------------------------------------------------------------------
 

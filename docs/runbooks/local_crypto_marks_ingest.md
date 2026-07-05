@@ -361,14 +361,64 @@ opens a DB connection and never writes `md_bars`. `providers.json`'s
 `docs/specs/crypto_data_01j_klm_coinlore_latest_mark_provider_bundle.md`
 for full detail.
 
+## Latest-Mark Evidence Status Route (CRYPTO-DATA-01N-O-P-LATEST-MARK-EVIDENCE-STATUS-BUNDLE-01-COMBINED)
+
+Continuing after `01J-K-L-M`, this bundle decided to keep latest-mark storage
+evidence-file-only (no `latest_marks` DB table, no `md_bars` reuse — see
+`docs/specs/crypto_data_01n_op_latest_mark_evidence_status_bundle.md` for the
+full decision) and added a read-only daemon status route on top of it.
+
+**Standardized evidence contract (`01O`):** `mqk md coinlore-latest-mark
+--output-dir <dir>` writes `<dir>/coinlore_latest_mark_<epoch_seconds>.json`
+carrying `schema_version`, `producer`, `produced_at_utc`, `provider`, `mode`
+(`"input_file"` | `"network_smoke"`), `network_call_made`, `db_write`
+(always `false`), `md_bars_write` (always `false`), `completed_bar_claim`
+(always `false`), `provider_enabled` (read from `--provider-registry`,
+default `config/providers/providers.json`, for operator visibility only —
+never gates parsing or the network call), `registry_path`,
+`symbols_requested`, `truth_state`, `stale_or_missing`, `marks` (each
+carrying only `LatestMark`'s own fields — never `open`/`high`/`low`/`close`/
+`is_complete`/`end_ts`), `all_passed`, `reason_code`, `fail_reasons`.
+
+Generate a local fixture evidence file (zero network calls):
+
+```powershell
+cargo run --manifest-path .\core-rs\Cargo.toml -p mqk-cli --bin mqk-cli -- md coinlore-latest-mark `
+  --registry .\config\instruments\instruments_v2.crypto_local_marks.example.json `
+  --symbols BTC/USD,ETH/USD `
+  --input-file .\path\to\coinlore_ticker_response.json `
+  --output-dir .\exports\market_data
+```
+
+**Read-only status route (`01P`):** `GET
+/api/v1/market-data/latest-marks/status` reads the latest
+`coinlore_latest_mark_*.json` evidence file from the same evidence directory
+`intraday-refresh/status` reads (`MQK_MD_REFRESH_EVIDENCE_DIR`, default
+`exports/market_data`), filtered to its own filename prefix so the two
+evidence streams never collide. It never opens a DB connection, never calls
+CoinLore or any provider, and never mutates trading state — it is
+read-only, evidence-file-backed.
+
+`truth_state` values: `active` (fresh, safe evidence found), `stale`
+(evidence found but older than `MQK_LATEST_MARK_EVIDENCE_MAX_AGE_SECS`,
+default 86 400 s), `no_evidence` (no matching file), `parse_error`
+(malformed JSON or wrong `schema_version`), `unsafe_evidence` (evidence
+claims a `db_write`/`md_bars_write`/`completed_bar_claim`, or a mark carries
+a bar-like field — never surfaced as `active`), `backend_unavailable`
+(evidence directory/file unreadable).
+
+**Reminder:** this route reports on ticker-only latest marks. It is **not**
+`md_bars`, **not** OHLCV, and does not enable crypto trading.
+
 ## Remaining Gaps
 
 - No live network crypto provider is implemented or verified for
   completed-bar/OHLCV ingestion.
 - CoinLore's verified public endpoints are ticker/spot-only, not OHLCV; a
-  `LatestMark` parser/model now exists for that ticker data, but no
-  dedicated latest-mark storage/route exists yet — the CLI surface is
-  evidence-only, not persisted.
+  `LatestMark` parser/model and a read-only evidence-file status route now
+  exist for that ticker data, but no `latest_marks` DB table exists — the
+  route is evidence-file-only, not backed by persisted/queryable storage.
+- No GUI surface for crypto latest marks.
 - No production registry-v2 cutover (registry-v2 still has zero production
   route callers for the default/legacy config).
 - This does not enable crypto trading, paper trading, or live trading.

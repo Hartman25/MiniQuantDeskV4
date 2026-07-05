@@ -1,14 +1,15 @@
 //! Route handlers for execution transport and market-data quality (Batch A2).
 //!
 //! Contains: `execution_transport`, `market_data_quality`, `market_data_coverage`,
-//!           `intraday_refresh_status`.
+//!           `intraday_refresh_status`, `latest_mark_status`.
 //!
 //! Both A2 surfaces derive entirely from daemon in-memory state — no DB dependency,
 //! no lifecycle lock, no broker snapshot required.  They are always 200 OK;
 //! `truth_state` / `overall_health` communicate data availability.
 //!
-//! `intraday_refresh_status` is read-only filesystem access to the evidence directory.
-//! No DB writes, no broker calls, no provider API calls.
+//! `intraday_refresh_status` and `latest_mark_status` are read-only filesystem
+//! access to the evidence directory. No DB writes, no broker calls, no
+//! provider API calls.
 
 use std::sync::Arc;
 
@@ -22,7 +23,8 @@ use chrono::Utc;
 
 use crate::api_types::{
     ExecutionTransportResponse, IntradayRefreshStatusResponse, IntradayRefreshSymbolStatus,
-    MarketDataQualityResponse, MdBarsCoverageResponse, MdBarsCoverageRow, TransportQueueRow,
+    LatestMarkStatusResponse, LatestMarkStatusRow, MarketDataQualityResponse,
+    MdBarsCoverageResponse, MdBarsCoverageRow, TransportQueueRow,
 };
 use crate::market_data_freshness::{
     default_max_allowed_age_secs_for_timeframe, is_intraday_timeframe,
@@ -743,6 +745,350 @@ pub(crate) async fn intraday_refresh_status(State(st): State<Arc<AppState>>) -> 
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string()),
             symbols,
+            error: None,
+        }),
+    )
+        .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/market-data/latest-marks/status
+// (CRYPTO-DATA-01N-O-P-LATEST-MARK-EVIDENCE-STATUS-BUNDLE-01-COMBINED)
+// ---------------------------------------------------------------------------
+
+const LATEST_MARK_ROUTE: &str = "/api/v1/market-data/latest-marks/status";
+const LATEST_MARK_EVIDENCE_PREFIX: &str = "coinlore_latest_mark_";
+const LATEST_MARK_EVIDENCE_SUFFIX: &str = ".json";
+const LATEST_MARK_SCHEMA_VERSION: &str = "coinlore-latest-mark-v1";
+/// Default max evidence age (seconds) before `truth_state` becomes `"stale"`.
+const LATEST_MARK_DEFAULT_MAX_AGE_SECS: i64 = 86_400;
+const ENV_LATEST_MARK_MAX_AGE_SECS: &str = "MQK_LATEST_MARK_EVIDENCE_MAX_AGE_SECS";
+
+/// Bar-like field names a latest-mark evidence file (or any mark within it)
+/// must never carry. Presence of any of these on a mark means the evidence
+/// is claiming (or could be mistaken for claiming) a completed OHLCV bar,
+/// which this route must refuse to surface as active.
+const FORBIDDEN_MARK_FIELDS: [&str; 6] = ["open", "high", "low", "close", "is_complete", "end_ts"];
+
+fn latest_mark_max_age_secs() -> i64 {
+    std::env::var(ENV_LATEST_MARK_MAX_AGE_SECS)
+        .ok()
+        .and_then(|v| v.parse::<i64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(LATEST_MARK_DEFAULT_MAX_AGE_SECS)
+}
+
+/// Build a `LatestMarkStatusResponse` for a non-`active` outcome (missing,
+/// unreadable, malformed, or unsafe evidence). `stale_or_missing_evidence`
+/// is always `true` for these outcomes.
+fn latest_mark_response_for_non_active(
+    truth_state: &str,
+    max_evidence_age_secs: i64,
+    evidence_path: Option<String>,
+    error: Option<String>,
+) -> LatestMarkStatusResponse {
+    LatestMarkStatusResponse {
+        canonical_route: LATEST_MARK_ROUTE.to_string(),
+        truth_state: truth_state.to_string(),
+        provider: None,
+        produced_at_utc: None,
+        evidence_path,
+        stale_or_missing_evidence: true,
+        max_evidence_age_secs,
+        network_call_made: None,
+        db_write: None,
+        md_bars_write: None,
+        completed_bar_claim: None,
+        provider_enabled: None,
+        symbols_requested: vec![],
+        marks: vec![],
+        all_passed: None,
+        reason_code: None,
+        fail_reasons: vec![],
+        error,
+    }
+}
+
+fn latest_mark_row_from_value(v: &serde_json::Value) -> LatestMarkStatusRow {
+    LatestMarkStatusRow {
+        canonical_symbol: v
+            .get("canonical_symbol")
+            .and_then(|x| x.as_str())
+            .unwrap_or("")
+            .to_string(),
+        provider_id: v
+            .get("provider_id")
+            .and_then(|x| x.as_str())
+            .map(|s| s.to_string()),
+        provider_symbol: v
+            .get("provider_symbol")
+            .and_then(|x| x.as_str())
+            .map(|s| s.to_string()),
+        provider_coin_id: v
+            .get("provider_coin_id")
+            .and_then(|x| x.as_str())
+            .map(|s| s.to_string()),
+        price_usd: v
+            .get("price_usd")
+            .and_then(|x| x.as_str())
+            .map(|s| s.to_string()),
+        volume24_usd: v
+            .get("volume24_usd")
+            .and_then(|x| x.as_str())
+            .map(|s| s.to_string()),
+        as_of_client_request_ts: v.get("as_of_client_request_ts").and_then(|x| x.as_i64()),
+        provider_ts: v.get("provider_ts").and_then(|x| x.as_i64()),
+        truth_state: v
+            .get("truth_state")
+            .and_then(|x| x.as_str())
+            .map(|s| s.to_string()),
+        kind: v
+            .get("kind")
+            .and_then(|x| x.as_str())
+            .map(|s| s.to_string()),
+    }
+}
+
+fn value_string_array(v: &serde_json::Value, key: &str) -> Vec<String> {
+    v.get(key)
+        .and_then(|x| x.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// `GET /api/v1/market-data/latest-marks/status`
+///
+/// Read-only. Reads the latest `coinlore_latest_mark_*.json` evidence file
+/// from `st.md_refresh_evidence_dir` (env var `MQK_MD_REFRESH_EVIDENCE_DIR`,
+/// default `exports/market_data` — the same directory
+/// `intraday_refresh_status` reads, filtered to a distinct filename prefix).
+///
+/// Safety:
+/// - No provider/network API calls.
+/// - No DB reads or writes.
+/// - No broker interaction.
+/// - No order/OMS/outbox state accessed.
+/// - No CLI execution, no daemon runtime start.
+/// - Missing or malformed evidence never panics; surfaces truth_state honestly.
+/// - Evidence claiming `db_write`/`md_bars_write`/`completed_bar_claim=true`,
+///   or a mark carrying a bar-like field, is surfaced as `"unsafe_evidence"`,
+///   never `"active"` — this is a fail-closed check independent of the
+///   CLI's own invariants, so a hand-edited or future-buggy evidence file
+///   cannot make this route lie about what it is looking at.
+pub(crate) async fn latest_mark_status(State(st): State<Arc<AppState>>) -> impl IntoResponse {
+    let max_age_secs = latest_mark_max_age_secs();
+    let evidence_dir = st.md_refresh_evidence_dir.clone();
+    let dir_path = std::path::Path::new(&evidence_dir);
+
+    let read_dir = match std::fs::read_dir(dir_path) {
+        Err(e) => {
+            return (
+                StatusCode::OK,
+                Json(latest_mark_response_for_non_active(
+                    "backend_unavailable",
+                    max_age_secs,
+                    None,
+                    Some(format!("evidence directory unreadable: {e}")),
+                )),
+            )
+                .into_response();
+        }
+        Ok(rd) => rd,
+    };
+
+    let mut candidates: Vec<String> = read_dir
+        .flatten()
+        .filter_map(|e| {
+            let name = e.file_name().to_string_lossy().to_string();
+            if name.starts_with(LATEST_MARK_EVIDENCE_PREFIX)
+                && name.ends_with(LATEST_MARK_EVIDENCE_SUFFIX)
+            {
+                Some(name)
+            } else {
+                None
+            }
+        })
+        .collect();
+
+    if candidates.is_empty() {
+        return (
+            StatusCode::OK,
+            Json(latest_mark_response_for_non_active(
+                "no_evidence",
+                max_age_secs,
+                None,
+                None,
+            )),
+        )
+            .into_response();
+    }
+
+    // Alphabetical sort = chronological (epoch-seconds timestamp in filename).
+    candidates.sort();
+    let latest_name = candidates.last().expect("candidates non-empty");
+    let latest_path = dir_path.join(latest_name);
+    let evidence_path_str = latest_path.to_string_lossy().to_string();
+
+    let content = match std::fs::read_to_string(&latest_path) {
+        Err(e) => {
+            return (
+                StatusCode::OK,
+                Json(latest_mark_response_for_non_active(
+                    "backend_unavailable",
+                    max_age_secs,
+                    Some(evidence_path_str),
+                    Some(format!("evidence file unreadable: {e}")),
+                )),
+            )
+                .into_response();
+        }
+        Ok(c) => c,
+    };
+
+    let raw: serde_json::Value = match serde_json::from_str(&content) {
+        Err(e) => {
+            return (
+                StatusCode::OK,
+                Json(latest_mark_response_for_non_active(
+                    "parse_error",
+                    max_age_secs,
+                    Some(evidence_path_str),
+                    Some(format!("evidence JSON parse failed: {e}")),
+                )),
+            )
+                .into_response();
+        }
+        Ok(v) => v,
+    };
+
+    let schema_version = raw.get("schema_version").and_then(|v| v.as_str());
+    if schema_version != Some(LATEST_MARK_SCHEMA_VERSION) {
+        return (
+            StatusCode::OK,
+            Json(latest_mark_response_for_non_active(
+                "parse_error",
+                max_age_secs,
+                Some(evidence_path_str),
+                Some(format!(
+                    "unsupported schema_version (expected '{LATEST_MARK_SCHEMA_VERSION}')"
+                )),
+            )),
+        )
+            .into_response();
+    }
+
+    // Fail-closed safety check: evidence must not claim a DB/md_bars write or
+    // a completed-bar status, regardless of what the CLI that produced it
+    // promises to do -- this route does not trust the producer, it verifies.
+    let claims_db_write = raw
+        .get("db_write")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let claims_md_bars_write = raw
+        .get("md_bars_write")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let claims_completed_bar = raw
+        .get("completed_bar_claim")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if claims_db_write || claims_md_bars_write || claims_completed_bar {
+        return (
+            StatusCode::OK,
+            Json(latest_mark_response_for_non_active(
+                "unsafe_evidence",
+                max_age_secs,
+                Some(evidence_path_str),
+                Some(
+                    "evidence claims a db_write/md_bars_write/completed_bar_claim; refusing to surface as active"
+                        .to_string(),
+                ),
+            )),
+        )
+            .into_response();
+    }
+
+    let marks_raw: Vec<serde_json::Value> = raw
+        .get("marks")
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    for mark in &marks_raw {
+        if let Some(obj) = mark.as_object() {
+            for forbidden in FORBIDDEN_MARK_FIELDS {
+                if obj.contains_key(forbidden) {
+                    return (
+                        StatusCode::OK,
+                        Json(latest_mark_response_for_non_active(
+                            "unsafe_evidence",
+                            max_age_secs,
+                            Some(evidence_path_str),
+                            Some(format!(
+                                "mark contains forbidden bar-like field '{forbidden}'"
+                            )),
+                        )),
+                    )
+                        .into_response();
+                }
+            }
+        }
+    }
+
+    let produced_at_utc = raw
+        .get("produced_at_utc")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let stale_or_missing_evidence = match &produced_at_utc {
+        None => true,
+        Some(ts) => match chrono::DateTime::parse_from_rfc3339(ts) {
+            Err(_) => true,
+            Ok(produced_at) => {
+                (Utc::now() - produced_at.with_timezone(&Utc)).num_seconds() > max_age_secs
+            }
+        },
+    };
+
+    let marks: Vec<LatestMarkStatusRow> =
+        marks_raw.iter().map(latest_mark_row_from_value).collect();
+    let symbols_requested = value_string_array(&raw, "symbols_requested");
+    let fail_reasons = value_string_array(&raw, "fail_reasons");
+
+    let truth_state = if stale_or_missing_evidence {
+        "stale"
+    } else {
+        "active"
+    };
+
+    (
+        StatusCode::OK,
+        Json(LatestMarkStatusResponse {
+            canonical_route: LATEST_MARK_ROUTE.to_string(),
+            truth_state: truth_state.to_string(),
+            provider: raw
+                .get("provider")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            produced_at_utc,
+            evidence_path: Some(evidence_path_str),
+            stale_or_missing_evidence,
+            max_evidence_age_secs: max_age_secs,
+            network_call_made: raw.get("network_call_made").and_then(|v| v.as_bool()),
+            db_write: Some(claims_db_write),
+            md_bars_write: Some(claims_md_bars_write),
+            completed_bar_claim: Some(claims_completed_bar),
+            provider_enabled: raw.get("provider_enabled").and_then(|v| v.as_bool()),
+            symbols_requested,
+            marks,
+            all_passed: raw.get("all_passed").and_then(|v| v.as_bool()),
+            reason_code: raw
+                .get("reason_code")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            fail_reasons,
             error: None,
         }),
     )

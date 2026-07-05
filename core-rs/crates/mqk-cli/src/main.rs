@@ -472,6 +472,13 @@ enum MdCmd {
         /// Directory to write a JSON evidence artifact. Not staged/committed.
         #[arg(long)]
         output_dir: Option<PathBuf>,
+
+        /// Path to the provider registry JSON (used only to report
+        /// provider_enabled in stdout/evidence; never gates parsing or the
+        /// network call, which remain controlled solely by --input-file /
+        /// MQK_ALLOW_COINLORE_NETWORK_SMOKE).
+        #[arg(long, default_value = "config/providers/providers.json")]
+        provider_registry: PathBuf,
     },
 }
 
@@ -743,8 +750,16 @@ async fn main() -> Result<()> {
                 symbols,
                 input_file,
                 output_dir,
+                provider_registry,
             } => {
-                md_coinlore_latest_mark(registry, symbols, input_file, output_dir).await?;
+                md_coinlore_latest_mark(
+                    registry,
+                    symbols,
+                    input_file,
+                    output_dir,
+                    provider_registry,
+                )
+                .await?;
             }
         },
 

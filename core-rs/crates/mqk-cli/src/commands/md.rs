@@ -686,7 +686,9 @@ pub fn md_registry_v2_status(registry: PathBuf) -> Result<()> {
 
 // ---------------------------------------------------------------------------
 // coinlore-latest-mark — CRYPTO-DATA-01J-K-L-COINLORE-LATEST-MARK-PROVIDER-
-// BUNDLE-01-COMBINED: read-only latest-mark evidence surface.
+// BUNDLE-01-COMBINED, evidence contract standardized by
+// CRYPTO-DATA-01N-O-P-LATEST-MARK-EVIDENCE-STATUS-BUNDLE-01-COMBINED:
+// read-only latest-mark evidence surface.
 //
 // Default mode reads a local fixture/response file (`--input-file`) --
 // zero network calls. Network mode is opt-in only, gated behind the
@@ -697,12 +699,22 @@ pub fn md_registry_v2_status(registry: PathBuf) -> Result<()> {
 
 const ENV_ALLOW_COINLORE_NETWORK_SMOKE: &str = "MQK_ALLOW_COINLORE_NETWORK_SMOKE";
 
+/// Schema version of the evidence JSON written by `--output-dir`. The daemon's
+/// `GET /api/v1/market-data/latest-marks/status` route (01P) refuses to
+/// surface evidence carrying any other value as `active`.
+const COINLORE_LATEST_MARK_EVIDENCE_SCHEMA_VERSION: &str = "coinlore-latest-mark-v1";
+
 /// Execute `mqk md coinlore-latest-mark`: resolve CoinLore aliases for
 /// `--symbols` from the registry-v2 fixture at `--registry`, obtain a
 /// CoinLore ticker response body (from `--input-file` by default, or via
 /// exactly one live HTTP GET when `MQK_ALLOW_COINLORE_NETWORK_SMOKE=1` and
 /// no `--input-file` is given), parse it into `LatestMark`s, print them, and
 /// optionally write a JSON evidence artifact to `--output-dir`.
+///
+/// `--provider-registry` (default `config/providers/providers.json`) is read
+/// only to report `provider_enabled` in the evidence artifact/stdout; it is
+/// never used to gate parsing or the network call itself (the CLI's own
+/// `MQK_ALLOW_COINLORE_NETWORK_SMOKE` opt-in remains the sole network gate).
 ///
 /// Read-only: never opens a DB connection, never writes `md_bars`, never
 /// registers a scheduler, never touches a broker/runtime/risk/order path.
@@ -711,6 +723,7 @@ pub async fn md_coinlore_latest_mark(
     symbols: String,
     input_file: Option<PathBuf>,
     output_dir: Option<PathBuf>,
+    provider_registry: PathBuf,
 ) -> Result<()> {
     let requested: Vec<String> = symbols
         .split(',')
@@ -738,11 +751,11 @@ pub async fn md_coinlore_latest_mark(
         aliases.push(alias);
     }
 
-    let (body, network_call_made) = match &input_file {
+    let (body, network_call_made, mode) = match &input_file {
         Some(path) => {
             let content = fs::read_to_string(path)
                 .with_context(|| format!("coinlore-latest-mark: input-file read failed: {}", path.display()))?;
-            (content, false)
+            (content, false, "input_file")
         }
         None => {
             let allowed = std::env::var(ENV_ALLOW_COINLORE_NETWORK_SMOKE)
@@ -758,7 +771,7 @@ pub async fn md_coinlore_latest_mark(
             let body = mqk_md::fetch_coinlore_ticker_body(&coin_ids)
                 .await
                 .map_err(|e| anyhow::anyhow!("coinlore-latest-mark: network fetch failed: {e}"))?;
-            (body, true)
+            (body, true, "network_smoke")
         }
     };
 
@@ -766,11 +779,27 @@ pub async fn md_coinlore_latest_mark(
     let marks = mqk_md::parse_coinlore_ticker_response(&body, &aliases, as_of_client_request_ts)
         .map_err(|e| anyhow::anyhow!("coinlore-latest-mark: parse failed: {e}"))?;
 
+    // provider_enabled is reported for operator visibility only -- it does not
+    // gate parsing or the network call above (see the doc comment on this fn).
+    // A missing/unreadable/malformed provider registry fails closed to `false`
+    // rather than panicking or defaulting to `true`.
+    let provider_enabled = mqk_md::provider_registry::load_provider_registry(&provider_registry)
+        .ok()
+        .and_then(|providers| {
+            providers
+                .into_iter()
+                .find(|p| p.provider_id == mqk_md::COINLORE_PROVIDER_ID)
+                .map(|p| p.enabled)
+        })
+        .unwrap_or(false);
+
     println!("provider_id={}", mqk_md::COINLORE_PROVIDER_ID);
+    println!("mode={mode}");
     println!("network_call_made={network_call_made}");
     println!("db_write=false");
     println!("md_bars_write=false");
     println!("completed_bar_claim=false");
+    println!("provider_enabled={provider_enabled}");
     for mark in &marks {
         println!(
             "symbol={} provider_symbol={} provider_coin_id={} price_usd={} volume24_usd={} as_of_client_request_ts={} provider_ts={} truth_state={:?} kind={:?}",
@@ -789,15 +818,29 @@ pub async fn md_coinlore_latest_mark(
     if let Some(dir) = &output_dir {
         fs::create_dir_all(dir)
             .with_context(|| format!("coinlore-latest-mark: create output dir failed: {}", dir.display()))?;
+        let produced_at_utc = chrono::DateTime::<Utc>::from_timestamp(as_of_client_request_ts, 0)
+            .unwrap_or_else(Utc::now)
+            .to_rfc3339();
         let evidence = serde_json::json!({
-            "schema_version": "coinlore-latest-mark-v1",
+            "schema_version": COINLORE_LATEST_MARK_EVIDENCE_SCHEMA_VERSION,
+            "producer": "mqk-cli md coinlore-latest-mark",
+            "produced_at_utc": produced_at_utc,
+            "provider": mqk_md::COINLORE_PROVIDER_ID,
             "provider_id": mqk_md::COINLORE_PROVIDER_ID,
+            "mode": mode,
             "network_call_made": network_call_made,
             "db_write": false,
             "md_bars_write": false,
             "completed_bar_claim": false,
-            "requested_symbols": requested,
+            "provider_enabled": provider_enabled,
+            "registry_path": registry.display().to_string(),
+            "symbols_requested": requested,
+            "truth_state": "active",
+            "stale_or_missing": false,
             "marks": marks,
+            "all_passed": true,
+            "reason_code": "latest_mark_evidence_generated",
+            "fail_reasons": Vec::<String>::new(),
         });
         let out_path = dir.join(format!(
             "coinlore_latest_mark_{}.json",

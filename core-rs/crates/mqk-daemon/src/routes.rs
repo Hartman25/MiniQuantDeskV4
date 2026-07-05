@@ -307,7 +307,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         trading_positions, trading_snapshot, trading_snapshot_clear, trading_snapshot_set,
     };
     use transport_quality::{
-        execution_transport, intraday_refresh_status, market_data_coverage, market_data_quality,
+        execution_transport, intraday_refresh_status, latest_mark_status, market_data_coverage,
+        market_data_quality,
     };
     use watchlist::{watchlist_admission_check, watchlist_status};
 
@@ -494,6 +495,16 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/v1/market-data/intraday-refresh/status",
             get(intraday_refresh_status),
+        )
+        // CRYPTO-DATA-01N-O-P-LATEST-MARK-EVIDENCE-STATUS-BUNDLE-01-COMBINED:
+        // read-only CoinLore latest-mark evidence status (public, no auth).
+        // Reads the same evidence dir as intraday-refresh/status, filtered to a
+        // distinct filename prefix. No DB, no provider/network call, no trading
+        // state mutation. Never surfaces evidence claiming a db/md_bars write or
+        // a completed-bar status as "active".
+        .route(
+            "/api/v1/market-data/latest-marks/status",
+            get(latest_mark_status),
         )
         .route(
             "/api/v1/market-data/feed/status",
