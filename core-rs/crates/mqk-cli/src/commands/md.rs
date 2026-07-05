@@ -685,6 +685,133 @@ pub fn md_registry_v2_status(registry: PathBuf) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------
+// coinlore-latest-mark — CRYPTO-DATA-01J-K-L-COINLORE-LATEST-MARK-PROVIDER-
+// BUNDLE-01-COMBINED: read-only latest-mark evidence surface.
+//
+// Default mode reads a local fixture/response file (`--input-file`) --
+// zero network calls. Network mode is opt-in only, gated behind the
+// `MQK_ALLOW_COINLORE_NETWORK_SMOKE=1` environment variable, and performs at
+// most one HTTP GET. Neither mode connects to the DB, writes to `md_bars`,
+// or touches any broker/runtime/risk/order path.
+// ---------------------------------------------------------------------------
+
+const ENV_ALLOW_COINLORE_NETWORK_SMOKE: &str = "MQK_ALLOW_COINLORE_NETWORK_SMOKE";
+
+/// Execute `mqk md coinlore-latest-mark`: resolve CoinLore aliases for
+/// `--symbols` from the registry-v2 fixture at `--registry`, obtain a
+/// CoinLore ticker response body (from `--input-file` by default, or via
+/// exactly one live HTTP GET when `MQK_ALLOW_COINLORE_NETWORK_SMOKE=1` and
+/// no `--input-file` is given), parse it into `LatestMark`s, print them, and
+/// optionally write a JSON evidence artifact to `--output-dir`.
+///
+/// Read-only: never opens a DB connection, never writes `md_bars`, never
+/// registers a scheduler, never touches a broker/runtime/risk/order path.
+pub async fn md_coinlore_latest_mark(
+    registry: PathBuf,
+    symbols: String,
+    input_file: Option<PathBuf>,
+    output_dir: Option<PathBuf>,
+) -> Result<()> {
+    let requested: Vec<String> = symbols
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect();
+    if requested.is_empty() {
+        anyhow::bail!("--symbols must contain at least one canonical symbol");
+    }
+
+    let registry_v2 = mqk_md::instrument_registry_v2::load_instrument_registry_v2(&registry)
+        .with_context(|| format!("coinlore-latest-mark: registry load failed: {}", registry.display()))?;
+    let all_aliases = mqk_md::coinlore_aliases_from_registry_v2(&registry_v2);
+
+    let mut aliases = Vec::with_capacity(requested.len());
+    for symbol in &requested {
+        let alias = all_aliases
+            .iter()
+            .find(|a| &a.canonical_symbol == symbol)
+            .cloned()
+            .with_context(|| {
+                format!("coinlore-latest-mark: no coinlore alias configured for symbol {symbol}")
+            })?;
+        aliases.push(alias);
+    }
+
+    let (body, network_call_made) = match &input_file {
+        Some(path) => {
+            let content = fs::read_to_string(path)
+                .with_context(|| format!("coinlore-latest-mark: input-file read failed: {}", path.display()))?;
+            (content, false)
+        }
+        None => {
+            let allowed = std::env::var(ENV_ALLOW_COINLORE_NETWORK_SMOKE)
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
+            if !allowed {
+                anyhow::bail!(
+                    "coinlore-latest-mark: no --input-file provided and {ENV_ALLOW_COINLORE_NETWORK_SMOKE} is not set; \
+                     refusing to make a network call by default"
+                );
+            }
+            let coin_ids: Vec<String> = aliases.iter().map(|a| a.coinlore_id.clone()).collect();
+            let body = mqk_md::fetch_coinlore_ticker_body(&coin_ids)
+                .await
+                .map_err(|e| anyhow::anyhow!("coinlore-latest-mark: network fetch failed: {e}"))?;
+            (body, true)
+        }
+    };
+
+    let as_of_client_request_ts = Utc::now().timestamp();
+    let marks = mqk_md::parse_coinlore_ticker_response(&body, &aliases, as_of_client_request_ts)
+        .map_err(|e| anyhow::anyhow!("coinlore-latest-mark: parse failed: {e}"))?;
+
+    println!("provider_id={}", mqk_md::COINLORE_PROVIDER_ID);
+    println!("network_call_made={network_call_made}");
+    println!("db_write=false");
+    println!("md_bars_write=false");
+    println!("completed_bar_claim=false");
+    for mark in &marks {
+        println!(
+            "symbol={} provider_symbol={} provider_coin_id={} price_usd={} volume24_usd={} as_of_client_request_ts={} provider_ts={} truth_state={:?} kind={:?}",
+            mark.canonical_symbol,
+            mark.provider_symbol,
+            mark.provider_coin_id.as_deref().unwrap_or("none"),
+            mark.price_usd,
+            mark.volume24_usd.as_deref().unwrap_or("none"),
+            mark.as_of_client_request_ts,
+            fmt_opt_i64(mark.provider_ts),
+            mark.truth_state,
+            mark.kind,
+        );
+    }
+
+    if let Some(dir) = &output_dir {
+        fs::create_dir_all(dir)
+            .with_context(|| format!("coinlore-latest-mark: create output dir failed: {}", dir.display()))?;
+        let evidence = serde_json::json!({
+            "schema_version": "coinlore-latest-mark-v1",
+            "provider_id": mqk_md::COINLORE_PROVIDER_ID,
+            "network_call_made": network_call_made,
+            "db_write": false,
+            "md_bars_write": false,
+            "completed_bar_claim": false,
+            "requested_symbols": requested,
+            "marks": marks,
+        });
+        let out_path = dir.join(format!(
+            "coinlore_latest_mark_{}.json",
+            as_of_client_request_ts
+        ));
+        fs::write(&out_path, serde_json::to_string_pretty(&evidence)?)
+            .with_context(|| format!("coinlore-latest-mark: write evidence failed: {}", out_path.display()))?;
+        println!("evidence_path={}", out_path.display());
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

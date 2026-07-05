@@ -342,11 +342,33 @@ its scope to a ticker/latest-mark model (or makes a further-authorized call
 to check for a real history endpoint) and actually builds the adapter. See
 `docs/specs/crypto_data_01i_coinlore_network_verify.md` for full evidence.
 
+## CoinLore Latest-Mark Provider Bundle (CRYPTO-DATA-01J-K-L-COINLORE-LATEST-MARK-PROVIDER-BUNDLE-01-COMBINED)
+
+Adapting to `01I`'s ticker-only finding, this bundle added: an explicit
+`LatestMark` model (`mqk_md::latest_mark`, no `open`/`high`/`low`/
+`is_complete`/`end_ts` field and no conversion to `RawBar`/`ProviderBar`); a
+CoinLore ticker parser (`mqk_md::providers::coinlore`) that rejects
+malformed/empty/missing-asset/mismatched-identity responses rather than
+fabricating data; CoinLore `provider_symbols.coinlore_id`/
+`coinlore_symbol` aliases on both disabled `BTC/USD`/`ETH/USD` registry-v2
+rows (`90`/`BTC` and `80`/`ETH`, matching `01I`'s verified IDs); and a
+read-only `mqk md coinlore-latest-mark` CLI command that defaults to
+parsing a local `--input-file` fixture (zero network calls) and only
+attempts a live network call — at most one GET — when the operator
+explicitly sets `MQK_ALLOW_COINLORE_NETWORK_SMOKE=1`. The command never
+opens a DB connection and never writes `md_bars`. `providers.json`'s
+`coinlore` entry remains `enabled: false`. See
+`docs/specs/crypto_data_01j_klm_coinlore_latest_mark_provider_bundle.md`
+for full detail.
+
 ## Remaining Gaps
 
-- No live network crypto provider is implemented or verified.
-- CoinLore's verified public endpoints are ticker/spot-only, not OHLCV —
-  any future adapter must model a "latest mark," not a fabricated bar.
+- No live network crypto provider is implemented or verified for
+  completed-bar/OHLCV ingestion.
+- CoinLore's verified public endpoints are ticker/spot-only, not OHLCV; a
+  `LatestMark` parser/model now exists for that ticker data, but no
+  dedicated latest-mark storage/route exists yet — the CLI surface is
+  evidence-only, not persisted.
 - No production registry-v2 cutover (registry-v2 still has zero production
   route callers for the default/legacy config).
 - This does not enable crypto trading, paper trading, or live trading.

@@ -9,7 +9,9 @@
       "currency": "USD",
       "quote_currency": "USD",
       "provider_symbols": {
-        "local_csv": "BTC/USD"
+        "local_csv": "BTC/USD",
+        "coinlore_id": "90",
+        "coinlore_symbol": "BTC"
       },
       "enabled": false,
       "paper_trading_enabled": false,
@@ -24,7 +26,7 @@
         "category": "crypto_spot",
         "tags": ["local_csv_fixture", "model_only"]
       },
-      "notes": "Disabled BTC/USD local-CSV-fixture entry for CRYPTO-DATA-01A-LOCAL-CSV-MARKS-01 / CRYPTO-REGISTRY-01. Not a tradable instrument: enabled=false, paper_trading_enabled=false, live_trading_enabled=false, allow_enabled_non_equity_for_testing absent. Sourced only from a committed local CSV fixture (provider_symbols.local_csv) -- no provider/network call, no DB migration, no trading enablement. Never read by any broker/runtime/risk/OMS/order path."
+      "notes": "Disabled BTC/USD local-CSV-fixture entry for CRYPTO-DATA-01A-LOCAL-CSV-MARKS-01 / CRYPTO-REGISTRY-01. Not a tradable instrument: enabled=false, paper_trading_enabled=false, live_trading_enabled=false, allow_enabled_non_equity_for_testing absent. Sourced only from a committed local CSV fixture (provider_symbols.local_csv) -- no provider/network call, no DB migration, no trading enablement. Never read by any broker/runtime/risk/OMS/order path. provider_symbols.coinlore_id/coinlore_symbol (CRYPTO-DATA-01J-K-L-COINLORE-LATEST-MARK-PROVIDER-BUNDLE-01-COMBINED) are latest-mark-only aliases verified by CRYPTO-DATA-01I; they are read only by mqk_md::providers::coinlore and are not a CSV/md_bars provider_symbols entry."
     },
     {
       "instrument_id": "crypto:GLOBAL:ETHUSD",
@@ -34,7 +36,9 @@
       "currency": "USD",
       "quote_currency": "USD",
       "provider_symbols": {
-        "local_csv": "ETH/USD"
+        "local_csv": "ETH/USD",
+        "coinlore_id": "80",
+        "coinlore_symbol": "ETH"
       },
       "enabled": false,
       "paper_trading_enabled": false,
@@ -49,7 +53,7 @@
         "category": "crypto_spot",
         "tags": ["local_csv_fixture", "model_only"]
       },
-      "notes": "Disabled ETH/USD local-CSV-fixture entry for CRYPTO-DATA-01G-ETHUSD-LOCAL-CSV-MARKS-01-COMBINED, added beside the existing BTC/USD entry to prove the local crypto mark lane is not hardcoded to one symbol. Not a tradable instrument: enabled=false, paper_trading_enabled=false, live_trading_enabled=false, allow_enabled_non_equity_for_testing absent. Sourced only from a committed local CSV fixture (provider_symbols.local_csv) -- no provider/network call, no DB migration, no trading enablement. Never read by any broker/runtime/risk/OMS/order path."
+      "notes": "Disabled ETH/USD local-CSV-fixture entry for CRYPTO-DATA-01G-ETHUSD-LOCAL-CSV-MARKS-01-COMBINED, added beside the existing BTC/USD entry to prove the local crypto mark lane is not hardcoded to one symbol. Not a tradable instrument: enabled=false, paper_trading_enabled=false, live_trading_enabled=false, allow_enabled_non_equity_for_testing absent. Sourced only from a committed local CSV fixture (provider_symbols.local_csv) -- no provider/network call, no DB migration, no trading enablement. Never read by any broker/runtime/risk/OMS/order path. provider_symbols.coinlore_id/coinlore_symbol (CRYPTO-DATA-01J-K-L-COINLORE-LATEST-MARK-PROVIDER-BUNDLE-01-COMBINED) are latest-mark-only aliases verified by CRYPTO-DATA-01I; they are read only by mqk_md::providers::coinlore and are not a CSV/md_bars provider_symbols entry."
     }
   ]
 }

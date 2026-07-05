@@ -9,12 +9,18 @@ pub mod alpaca_provider;
 pub mod ingest_csv;
 pub mod instrument_registry;
 pub mod instrument_registry_v2;
+pub mod latest_mark;
 pub mod normalizer;
 pub mod provider;
 pub mod provider_registry;
+pub mod providers;
 
 pub use alpaca_provider::{
     load_alpaca_paper_credentials, AlpacaHistoricalProvider, ALPACA_DATA_BASE_URL,
+};
+pub use latest_mark::{
+    LatestMark, LatestMarkBatch, LatestMarkError, LatestMarkKind, LatestMarkProviderId,
+    LatestMarkRequest, LatestMarkTruthState,
 };
 pub use provider::{
     provider_asset_class_instrument_kind, provider_asset_class_trading_class, CanonicalBar,
@@ -27,6 +33,10 @@ pub use provider_registry::{
     build_market_data_provider, build_market_data_provider_from_config,
     build_market_data_provider_from_env, capabilities_from_provider_config,
     provider_supports_historical_bars, MarketDataProviderBox, ProviderConfig, ProviderFactoryError,
+};
+pub use providers::coinlore::{
+    coinlore_aliases_from_registry_v2, fetch_coinlore_ticker_body,
+    parse_coinlore_ticker_response, CoinloreAlias, CoinloreTickerRaw, COINLORE_PROVIDER_ID,
 };
 pub mod quality;
 

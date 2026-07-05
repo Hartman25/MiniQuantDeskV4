@@ -83,18 +83,18 @@
   },
   {
     "provider_id": "coinlore",
-    "display_name": "CoinLore (crypto spot prices)",
+    "display_name": "CoinLore (crypto spot ticker)",
     "asset_classes": ["crypto"],
     "free_tier_available": true,
     "api_key_required": false,
-    "rate_limit_notes": "requires external verification",
-    "supported_timeframes": ["1D"],
-    "historical_depth_notes": "requires external verification",
-    "realtime_support_notes": "requires external verification",
+    "rate_limit_notes": "no rate-limit headers observed on 2 bounded GETs (CRYPTO-DATA-01I); official numeric limit still unknown, must not be assumed",
+    "supported_timeframes": [],
+    "historical_depth_notes": "verified (CRYPTO-DATA-01I): /api/tickers/ and /api/ticker/?id= expose ticker/spot-only data, no OHLCV history and no per-ticker timestamp -- not usable as a HistoricalProvider bar source",
+    "realtime_support_notes": "verified (CRYPTO-DATA-01I): current price_usd + rolling volume24 only, via mqk_md::providers::coinlore's LatestMark parser (CRYPTO-DATA-01J-K-L-COINLORE-LATEST-MARK-PROVIDER-BUNDLE-01-COMBINED), not a bar/OHLCV feed",
     "licensing_notes": "requires external verification",
-    "implementation_status": "candidate_unverified",
+    "implementation_status": "latest_mark_parser_implemented_bar_provider_not_applicable",
     "enabled": false,
-    "verification_status": "requires_external_verification",
+    "verification_status": "ticker_only_network_verified_01i_no_ohlcv",
     "docs_url": "https://www.coinlore.com/cryptocurrency-data-api"
   }
 ]

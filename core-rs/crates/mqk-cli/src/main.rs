@@ -10,7 +10,10 @@ use commands::{
         run_strategy_lab_rank, run_sweep_csv, IntegrityCalendarArg,
     },
     load_payload,
-    md::{md_ingest_csv, md_ingest_provider, md_registry_v2_status, md_sync_provider},
+    md::{
+        md_coinlore_latest_mark, md_ingest_csv, md_ingest_provider, md_registry_v2_status,
+        md_sync_provider,
+    },
     run::{
         run_arm, run_begin, run_deadman_check, run_deadman_enforce, run_halt, run_heartbeat,
         run_start, run_status, run_stop,
@@ -441,6 +444,35 @@ enum MdCmd {
         #[arg(long)]
         registry: PathBuf,
     },
+
+    /// CRYPTO-DATA-01J-K-L-COINLORE-LATEST-MARK-PROVIDER-BUNDLE-01-COMBINED:
+    /// read-only CoinLore latest-mark evidence surface. Resolves CoinLore
+    /// aliases for --symbols from a registry-v2 fixture, parses a ticker
+    /// response (from --input-file by default; --input-file is required
+    /// unless MQK_ALLOW_COINLORE_NETWORK_SMOKE=1 is set), and prints
+    /// LatestMark values. Never opens a DB connection, never writes
+    /// md_bars, never claims a completed OHLCV bar.
+    CoinloreLatestMark {
+        /// Path to a registry-v2 JSON file carrying provider_symbols.coinlore_id
+        /// / provider_symbols.coinlore_symbol aliases (e.g.
+        /// config/instruments/instruments_v2.crypto_local_marks.example.json).
+        #[arg(long)]
+        registry: PathBuf,
+
+        /// Comma-separated canonical symbols (e.g. BTC/USD,ETH/USD).
+        #[arg(long)]
+        symbols: String,
+
+        /// Path to a local file containing a CoinLore /api/ticker/?id=...
+        /// response body (bare JSON array). When omitted, a live network
+        /// call is attempted only if MQK_ALLOW_COINLORE_NETWORK_SMOKE=1.
+        #[arg(long)]
+        input_file: Option<PathBuf>,
+
+        /// Directory to write a JSON evidence artifact. Not staged/committed.
+        #[arg(long)]
+        output_dir: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -705,6 +737,14 @@ async fn main() -> Result<()> {
             }
             MdCmd::RegistryV2Status { registry } => {
                 md_registry_v2_status(registry)?;
+            }
+            MdCmd::CoinloreLatestMark {
+                registry,
+                symbols,
+                input_file,
+                output_dir,
+            } => {
+                md_coinlore_latest_mark(registry, symbols, input_file, output_dir).await?;
             }
         },
 
