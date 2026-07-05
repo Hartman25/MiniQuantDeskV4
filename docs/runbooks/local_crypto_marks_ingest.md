@@ -410,6 +410,51 @@ a bar-like field — never surfaced as `active`), `backend_unavailable`
 **Reminder:** this route reports on ticker-only latest marks. It is **not**
 `md_bars`, **not** OHLCV, and does not enable crypto trading.
 
+## GUI Surface for Latest-Mark Evidence Status (CRYPTO-DATA-01Q-R-LATEST-MARK-GUI-SURFACE-BUNDLE-01-COMBINED)
+
+The operator GUI (Ingest screen, `core-rs/mqk-gui/src/features/ingest/`) now
+consumes `GET /api/v1/market-data/latest-marks/status` read-only and renders
+a "Crypto latest marks" panel directly below the existing "Intraday refresh
+status" panel.
+
+- **Types** (`types.ts`): `LatestMarkStatusResponse`, `LatestMarkStatusMark`
+  mirror the daemon's `LatestMarkStatusResponse`/`LatestMarkStatusRow`
+  structs field-for-field.
+- **API client** (`api.ts`): `fetchLatestMarkStatus` (GET only, no auth
+  token, no CLI/provider call), `isLatestMarkStatusActive`,
+  `latestMarkStatusTruthLabel` (words `unsafe_evidence` as a severe
+  fail-closed condition, not a plain label), and a defense-in-depth
+  `isLatestMarkEvidenceUnsafe` helper that also treats
+  `db_write`/`md_bars_write`/`completed_bar_claim=true` as unsafe
+  independent of the backend's own `truth_state` classification.
+- **Panel** (`IngestScreen.tsx`): shows truth state, provider,
+  `produced_at_utc`, evidence path, the `network_call_made`/`db_write`/
+  `md_bars_write`/`completed_bar_claim`/`provider_enabled` flags, symbols
+  requested, and one row per mark (`canonical_symbol`, `price_usd`,
+  `volume24_usd`, `provider_symbol`, `provider_coin_id`,
+  `as_of_client_request_ts`, `provider_ts` or "none", `kind`, `truth_state`).
+  All six truth states (`active`, `stale`, `no_evidence`, `parse_error`,
+  `unsafe_evidence`, `backend_unavailable`) render distinctly; `stale`/
+  `no_evidence`/`backend_unavailable` show a stale/missing-evidence notice;
+  `unsafe_evidence` (or the defense-in-depth check) renders a dedicated
+  critical banner and suppresses the marks table even if the backend
+  response also included data. The panel carries a fixed caption: "Ticker-only
+  latest marks. Not OHLCV, not md_bars, not portfolio valuation, and not
+  trading enablement." The only button is a local "Refresh" that re-GETs
+  the same read-only route — no provider/network/CLI-triggering action.
+- **Tests** (`__tests__/api.test.ts`): pure-function/shape tests for the new
+  helpers and for the response shape under all six `truth_state` values,
+  following this repo's established GUI test pattern. Note: this repo has no
+  `.tsx` component-render test harness (no jsdom/testing-library dependency,
+  zero existing `.test.tsx` files) — all GUI test coverage here and
+  elsewhere in `mqk-gui` is pure-function/shape-level via `tsx --test`, not
+  DOM rendering assertions. This bundle follows that existing convention
+  rather than introducing new test infrastructure.
+
+No backend/daemon route, API contract, CLI, DB, or trading-path code was
+changed by this bundle. No CoinLore/provider/network call was added. No
+`latest_marks` DB table or `md_bars` write was added.
+
 ## Remaining Gaps
 
 - No live network crypto provider is implemented or verified for
@@ -418,7 +463,8 @@ a bar-like field — never surfaced as `active`), `backend_unavailable`
   `LatestMark` parser/model and a read-only evidence-file status route now
   exist for that ticker data, but no `latest_marks` DB table exists — the
   route is evidence-file-only, not backed by persisted/queryable storage.
-- No GUI surface for crypto latest marks.
+- A read-only GUI surface for crypto latest marks now exists (see above);
+  no GUI action can trigger a provider/network/CLI call.
 - No production registry-v2 cutover (registry-v2 still has zero production
   route callers for the default/legacy config).
 - This does not enable crypto trading, paper trading, or live trading.

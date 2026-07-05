@@ -35,8 +35,13 @@ import {
   pollMarketDataFeedOnce,
   startMarketDataFeedScheduler,
   stopMarketDataFeedScheduler,
+  fetchLatestMarkStatus,
+  formatUnixSecondsDateTime,
+  isLatestMarkEvidenceUnsafe,
+  isLatestMarkStatusActive,
+  latestMarkStatusTruthLabel,
 } from "../api.ts";
-import type { IngestJobStatusResponse, IntradayRefreshStatusResponse, MdBarsCoverageResponse, MdBarsCoverageRow, TrackedEquitiesResponse } from "../types.ts";
+import type { IngestJobStatusResponse, IntradayRefreshStatusResponse, LatestMarkStatusResponse, MdBarsCoverageResponse, MdBarsCoverageRow, TrackedEquitiesResponse } from "../types.ts";
 
 // ---------------------------------------------------------------------------
 // normalizeIngestJobStatus
@@ -1661,6 +1666,364 @@ test("startMarketDataFeedScheduler normalizes already-running error response", a
     assert.equal(result.error, "latest-bar scheduler is already running");
     assert.equal(result.data?.truth_state, "already_running");
     assert.equal(result.data?.last_error, "latest-bar scheduler is already running");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+// ---------------------------------------------------------------------------
+// CRYPTO-DATA-01Q-R-LATEST-MARK-GUI-SURFACE-BUNDLE-01-COMBINED:
+// Latest-mark evidence status helpers
+// ---------------------------------------------------------------------------
+
+function makeActiveLatestMarkStatusResponse(
+  overrides: Partial<LatestMarkStatusResponse> = {},
+): LatestMarkStatusResponse {
+  return {
+    canonical_route: "/api/v1/market-data/latest-marks/status",
+    truth_state: "active",
+    provider: "coinlore",
+    produced_at_utc: "2026-07-04T12:00:00Z",
+    evidence_path: "exports/market_data/coinlore_latest_mark_20260704_120000.json",
+    stale_or_missing_evidence: false,
+    max_evidence_age_secs: 86400,
+    network_call_made: false,
+    db_write: false,
+    md_bars_write: false,
+    completed_bar_claim: false,
+    provider_enabled: false,
+    symbols_requested: ["BTC/USD", "ETH/USD"],
+    marks: [
+      {
+        canonical_symbol: "BTC/USD",
+        provider_id: "coinlore",
+        provider_symbol: "BTC",
+        provider_coin_id: "90",
+        price_usd: "62906.61",
+        volume24_usd: "16261421089.448309",
+        as_of_client_request_ts: 1783264281,
+        provider_ts: null,
+        truth_state: "client_observed_only",
+        kind: "ticker",
+      },
+      {
+        canonical_symbol: "ETH/USD",
+        provider_id: "coinlore",
+        provider_symbol: "ETH",
+        provider_coin_id: "80",
+        price_usd: "1777.74",
+        volume24_usd: "9252669028.469555",
+        as_of_client_request_ts: 1783264281,
+        provider_ts: null,
+        truth_state: "client_observed_only",
+        kind: "ticker",
+      },
+    ],
+    all_passed: true,
+    reason_code: "latest_mark_evidence_generated",
+    fail_reasons: [],
+    error: null,
+    ...overrides,
+  };
+}
+
+// isLatestMarkStatusActive
+
+test("isLatestMarkStatusActive returns true for active", () => {
+  assert.ok(isLatestMarkStatusActive("active"));
+});
+
+test("isLatestMarkStatusActive returns false for stale", () => {
+  assert.ok(!isLatestMarkStatusActive("stale"));
+});
+
+test("isLatestMarkStatusActive returns false for no_evidence", () => {
+  assert.ok(!isLatestMarkStatusActive("no_evidence"));
+});
+
+test("isLatestMarkStatusActive returns false for parse_error", () => {
+  assert.ok(!isLatestMarkStatusActive("parse_error"));
+});
+
+test("isLatestMarkStatusActive returns false for unsafe_evidence", () => {
+  assert.ok(!isLatestMarkStatusActive("unsafe_evidence"));
+});
+
+test("isLatestMarkStatusActive returns false for backend_unavailable", () => {
+  assert.ok(!isLatestMarkStatusActive("backend_unavailable"));
+});
+
+// latestMarkStatusTruthLabel
+
+test("latestMarkStatusTruthLabel active -> active", () => {
+  assert.equal(latestMarkStatusTruthLabel("active"), "active");
+});
+
+test("latestMarkStatusTruthLabel stale -> stale", () => {
+  assert.equal(latestMarkStatusTruthLabel("stale"), "stale");
+});
+
+test("latestMarkStatusTruthLabel no_evidence -> no evidence", () => {
+  assert.equal(latestMarkStatusTruthLabel("no_evidence"), "no evidence");
+});
+
+test("latestMarkStatusTruthLabel parse_error -> parse error", () => {
+  assert.equal(latestMarkStatusTruthLabel("parse_error"), "parse error");
+});
+
+test("latestMarkStatusTruthLabel unsafe_evidence is worded as a severe fail-closed state", () => {
+  const label = latestMarkStatusTruthLabel("unsafe_evidence");
+  assert.match(label, /unsafe/i);
+  assert.notEqual(label, "unsafe_evidence"); // must not be a bare passthrough
+});
+
+test("latestMarkStatusTruthLabel backend_unavailable -> backend unavailable", () => {
+  assert.equal(latestMarkStatusTruthLabel("backend_unavailable"), "backend unavailable");
+});
+
+test("latestMarkStatusTruthLabel unknown string passes through", () => {
+  assert.equal(latestMarkStatusTruthLabel("some_other_state"), "some_other_state");
+});
+
+// isLatestMarkEvidenceUnsafe (defense-in-depth check)
+
+test("isLatestMarkEvidenceUnsafe returns true when truth_state is unsafe_evidence", () => {
+  const resp = makeActiveLatestMarkStatusResponse({ truth_state: "unsafe_evidence" });
+  assert.ok(isLatestMarkEvidenceUnsafe(resp));
+});
+
+test("isLatestMarkEvidenceUnsafe returns true when db_write=true even if truth_state says active", () => {
+  const resp = makeActiveLatestMarkStatusResponse({ db_write: true });
+  assert.ok(isLatestMarkEvidenceUnsafe(resp));
+});
+
+test("isLatestMarkEvidenceUnsafe returns true when md_bars_write=true even if truth_state says active", () => {
+  const resp = makeActiveLatestMarkStatusResponse({ md_bars_write: true });
+  assert.ok(isLatestMarkEvidenceUnsafe(resp));
+});
+
+test("isLatestMarkEvidenceUnsafe returns true when completed_bar_claim=true even if truth_state says active", () => {
+  const resp = makeActiveLatestMarkStatusResponse({ completed_bar_claim: true });
+  assert.ok(isLatestMarkEvidenceUnsafe(resp));
+});
+
+test("isLatestMarkEvidenceUnsafe returns false for a genuinely safe active response", () => {
+  const resp = makeActiveLatestMarkStatusResponse();
+  assert.ok(!isLatestMarkEvidenceUnsafe(resp));
+});
+
+test("isLatestMarkEvidenceUnsafe returns false for provider_enabled=false alone (not an error by itself)", () => {
+  const resp = makeActiveLatestMarkStatusResponse({ provider_enabled: false });
+  assert.ok(!isLatestMarkEvidenceUnsafe(resp));
+});
+
+// formatUnixSecondsDateTime
+
+test("formatUnixSecondsDateTime formats a known unix timestamp", () => {
+  assert.equal(formatUnixSecondsDateTime(1783264281), "2026-07-05 15:11:21");
+});
+
+test("formatUnixSecondsDateTime returns em dash for null", () => {
+  assert.equal(formatUnixSecondsDateTime(null), "—");
+});
+
+test("formatUnixSecondsDateTime returns em dash for undefined", () => {
+  assert.equal(formatUnixSecondsDateTime(undefined), "—");
+});
+
+test("formatUnixSecondsDateTime returns em dash for zero", () => {
+  assert.equal(formatUnixSecondsDateTime(0), "—");
+});
+
+// LatestMarkStatusResponse shape — mirrors backend truth_state contract
+
+test("LatestMarkStatusResponse active shape has BTC/USD and ETH/USD marks", () => {
+  const resp = makeActiveLatestMarkStatusResponse();
+  assert.ok(isLatestMarkStatusActive(resp.truth_state));
+  assert.ok(!isLatestMarkEvidenceUnsafe(resp));
+  assert.equal(resp.marks.length, 2);
+  assert.equal(resp.marks[0].canonical_symbol, "BTC/USD");
+  assert.equal(resp.marks[0].price_usd, "62906.61");
+  assert.equal(resp.marks[1].canonical_symbol, "ETH/USD");
+  assert.equal(resp.marks[1].price_usd, "1777.74");
+  assert.equal(resp.stale_or_missing_evidence, false);
+  assert.equal(resp.provider_enabled, false);
+  assert.equal(resp.db_write, false);
+  assert.equal(resp.md_bars_write, false);
+  assert.equal(resp.completed_bar_claim, false);
+});
+
+test("LatestMarkStatusResponse no_evidence shape is honest (empty marks, path null)", () => {
+  const resp: LatestMarkStatusResponse = {
+    canonical_route: "/api/v1/market-data/latest-marks/status",
+    truth_state: "no_evidence",
+    provider: null,
+    produced_at_utc: null,
+    evidence_path: null,
+    stale_or_missing_evidence: true,
+    max_evidence_age_secs: 86400,
+    network_call_made: null,
+    db_write: null,
+    md_bars_write: null,
+    completed_bar_claim: null,
+    provider_enabled: null,
+    symbols_requested: [],
+    marks: [],
+    all_passed: null,
+    reason_code: null,
+    fail_reasons: [],
+    error: null,
+  };
+  assert.ok(!isLatestMarkStatusActive(resp.truth_state));
+  assert.equal(resp.marks.length, 0);
+  assert.equal(resp.evidence_path, null);
+  assert.equal(resp.stale_or_missing_evidence, true);
+});
+
+test("LatestMarkStatusResponse stale shape has stale_or_missing_evidence=true", () => {
+  const resp = makeActiveLatestMarkStatusResponse({
+    truth_state: "stale",
+    stale_or_missing_evidence: true,
+  });
+  assert.ok(!isLatestMarkStatusActive(resp.truth_state));
+  assert.equal(resp.stale_or_missing_evidence, true);
+});
+
+test("LatestMarkStatusResponse parse_error shape has error field and empty marks", () => {
+  const resp: LatestMarkStatusResponse = {
+    canonical_route: "/api/v1/market-data/latest-marks/status",
+    truth_state: "parse_error",
+    provider: null,
+    produced_at_utc: null,
+    evidence_path: "exports/market_data/coinlore_latest_mark_20260704_120000.json",
+    stale_or_missing_evidence: true,
+    max_evidence_age_secs: 86400,
+    network_call_made: null,
+    db_write: null,
+    md_bars_write: null,
+    completed_bar_claim: null,
+    provider_enabled: null,
+    symbols_requested: [],
+    marks: [],
+    all_passed: null,
+    reason_code: null,
+    fail_reasons: [],
+    error: "unsupported schema_version: unknown-v99",
+  };
+  assert.ok(!isLatestMarkStatusActive(resp.truth_state));
+  assert.equal(resp.error, "unsupported schema_version: unknown-v99");
+  assert.equal(resp.marks.length, 0);
+});
+
+test("LatestMarkStatusResponse unsafe_evidence shape is never active and flagged unsafe", () => {
+  const resp = makeActiveLatestMarkStatusResponse({
+    truth_state: "unsafe_evidence",
+    db_write: true,
+    error: "evidence claims db_write=true",
+  });
+  assert.ok(!isLatestMarkStatusActive(resp.truth_state));
+  assert.ok(isLatestMarkEvidenceUnsafe(resp));
+  assert.equal(resp.error, "evidence claims db_write=true");
+});
+
+test("LatestMarkStatusResponse backend_unavailable shape is honest", () => {
+  const resp: LatestMarkStatusResponse = {
+    canonical_route: "/api/v1/market-data/latest-marks/status",
+    truth_state: "backend_unavailable",
+    provider: null,
+    produced_at_utc: null,
+    evidence_path: null,
+    stale_or_missing_evidence: true,
+    max_evidence_age_secs: 86400,
+    network_call_made: null,
+    db_write: null,
+    md_bars_write: null,
+    completed_bar_claim: null,
+    provider_enabled: null,
+    symbols_requested: [],
+    marks: [],
+    all_passed: null,
+    reason_code: null,
+    fail_reasons: [],
+    error: "evidence directory could not be read",
+  };
+  assert.ok(!isLatestMarkStatusActive(resp.truth_state));
+  assert.equal(resp.error, "evidence directory could not be read");
+});
+
+// fetchLatestMarkStatus
+
+test("fetchLatestMarkStatus GETs the canonical latest-marks status route", async () => {
+  const calls: Array<{ url: string; init?: RequestInit }> = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+    calls.push({ url: String(url), init });
+    return new Response(
+      JSON.stringify(makeActiveLatestMarkStatusResponse()),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  }) as typeof fetch;
+
+  try {
+    const result = await fetchLatestMarkStatus();
+    assert.equal(result.ok, true);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].url, "http://127.0.0.1:8899/api/v1/market-data/latest-marks/status");
+    assert.equal(calls[0].init?.method ?? "GET", "GET");
+    assert.equal(result.data?.truth_state, "active");
+    assert.equal(result.data?.marks.length, 2);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("fetchLatestMarkStatus surfaces backend_unavailable without throwing", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () =>
+    new Response(
+      JSON.stringify({
+        canonical_route: "/api/v1/market-data/latest-marks/status",
+        truth_state: "backend_unavailable",
+        provider: null,
+        produced_at_utc: null,
+        evidence_path: null,
+        stale_or_missing_evidence: true,
+        max_evidence_age_secs: 86400,
+        network_call_made: null,
+        db_write: null,
+        md_bars_write: null,
+        completed_bar_claim: null,
+        provider_enabled: null,
+        symbols_requested: [],
+        marks: [],
+        all_passed: null,
+        reason_code: null,
+        fail_reasons: [],
+        error: "evidence directory could not be read",
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    )) as typeof fetch;
+
+  try {
+    const result = await fetchLatestMarkStatus();
+    assert.equal(result.ok, true);
+    assert.equal(result.data?.truth_state, "backend_unavailable");
+    assert.ok(!isLatestMarkStatusActive(result.data!.truth_state));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("fetchLatestMarkStatus maps a network/transport failure to ok:false", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => {
+    throw new Error("network unreachable");
+  }) as typeof fetch;
+
+  try {
+    const result = await fetchLatestMarkStatus();
+    assert.equal(result.ok, false);
+    assert.ok(result.error);
   } finally {
     globalThis.fetch = originalFetch;
   }

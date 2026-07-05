@@ -311,3 +311,57 @@ export interface MarketDataFeedSchedulerStatusResponse {
   unchanged_or_skipped_count: number | null;
   error_count: number | null;
 }
+
+// ---------------------------------------------------------------------------
+// CRYPTO-DATA-01Q-R-LATEST-MARK-GUI-SURFACE-BUNDLE-01-COMBINED:
+// Latest-mark evidence status (read-only, ticker-only, not OHLCV/md_bars)
+// ---------------------------------------------------------------------------
+
+/**
+ * One latest-mark row from GET /api/v1/market-data/latest-marks/status.
+ * Mirrors LatestMarkStatusRow in api_types.rs. Intentionally has no
+ * open/high/low/is_complete/end_ts field: this is a ticker-style latest
+ * mark, never a completed OHLCV bar.
+ */
+export interface LatestMarkStatusMark {
+  canonical_symbol: string;
+  provider_id: string | null;
+  provider_symbol: string | null;
+  provider_coin_id: string | null;
+  price_usd: string | null;
+  volume24_usd: string | null;
+  as_of_client_request_ts: number | null;
+  provider_ts: number | null;
+  truth_state: string | null;
+  kind: string | null;
+}
+
+/**
+ * Response for GET /api/v1/market-data/latest-marks/status.
+ * Mirrors LatestMarkStatusResponse in api_types.rs.
+ *
+ * truth_state: "active" | "stale" | "no_evidence" | "parse_error" |
+ * "unsafe_evidence" | "backend_unavailable". "unsafe_evidence" is a
+ * fail-closed safety state, not a freshness state — never treat it as
+ * usable data regardless of produced_at_utc.
+ */
+export interface LatestMarkStatusResponse {
+  canonical_route: string;
+  truth_state: string;
+  provider: string | null;
+  produced_at_utc: string | null;
+  evidence_path: string | null;
+  stale_or_missing_evidence: boolean;
+  max_evidence_age_secs: number;
+  network_call_made: boolean | null;
+  db_write: boolean | null;
+  md_bars_write: boolean | null;
+  completed_bar_claim: boolean | null;
+  provider_enabled: boolean | null;
+  symbols_requested: string[];
+  marks: LatestMarkStatusMark[];
+  all_passed: boolean | null;
+  reason_code: string | null;
+  fail_reasons: string[];
+  error: string | null;
+}

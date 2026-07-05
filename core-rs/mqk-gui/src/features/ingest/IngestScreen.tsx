@@ -18,21 +18,26 @@ import {
   computeMissingTrackedSymbols,
   coverageTruthLabel,
   fetchIntradayRefreshStatus,
+  fetchLatestMarkStatus,
   fetchMdBarsCoverage,
   fetchTrackedEquities,
   filterCoverageRows,
   formatEndTs,
+  formatUnixSecondsDateTime,
   getIngestJob,
   getMarketDataFeedSchedulerStatus,
   getMarketDataFeedStatus,
   isCoverageActive,
   isIntradayRefreshActive,
   isCancellableIngestStatus,
+  isLatestMarkEvidenceUnsafe,
+  isLatestMarkStatusActive,
   isMarketDataFeedRealActionAllowed,
   isProviderSyncAllowed,
   isTrackedEquitiesActive,
   isTerminalIngestStatus,
   intradayRefreshTruthLabel,
+  latestMarkStatusTruthLabel,
   normalizeIngestJobStatus,
   parseMarketDataFeedSymbols,
   pollMarketDataFeedOnce,
@@ -47,7 +52,7 @@ import {
 import { buildRepoRelativePath, buildMd1DSymbolPath, MD_BACKUP_1D_SEGMENTS, MD_INGEST_SEGMENTS } from "../backtests/pathHelpers.ts";
 import { getDesktopRepoRoot } from "../../desktop/bootstrap.ts";
 import type { CoverageSortMode } from "./api.ts";
-import type { ActiveIngestJob, ActiveProviderJob, IngestJobStatusKind, IntradayRefreshStatusResponse, MarketDataFeedPollOnceResponse, MarketDataFeedSchedulerStatusResponse, MarketDataFeedStatusResponse, MdBarsCoverageResponse, MdBarsCoverageRow, TrackedEquitiesResponse } from "./types.ts";
+import type { ActiveIngestJob, ActiveProviderJob, IngestJobStatusKind, IntradayRefreshStatusResponse, LatestMarkStatusResponse, MarketDataFeedPollOnceResponse, MarketDataFeedSchedulerStatusResponse, MarketDataFeedStatusResponse, MdBarsCoverageResponse, MdBarsCoverageRow, TrackedEquitiesResponse } from "./types.ts";
 
 // ---------------------------------------------------------------------------
 // Status badge
@@ -215,6 +220,11 @@ export function IngestScreen() {
   const [intradayRefreshLoading, setIntradayRefreshLoading] = useState(false);
   const [intradayRefreshError, setIntradayRefreshError] = useState<string | null>(null);
 
+  // CRYPTO-DATA-01Q-R-LATEST-MARK-GUI-SURFACE-BUNDLE-01-COMBINED: Latest-mark evidence status state
+  const [latestMarkStatus, setLatestMarkStatus] = useState<LatestMarkStatusResponse | null>(null);
+  const [latestMarkStatusLoading, setLatestMarkStatusLoading] = useState(false);
+  const [latestMarkStatusError, setLatestMarkStatusError] = useState<string | null>(null);
+
   // DATA-PROVIDER-GUI-FEED-SCHEDULER-01: Latest closed-bar feed scheduler state
   const [latestFeedProviderId, setLatestFeedProviderId] = useState("alpaca");
   const [latestFeedTimeframe, setLatestFeedTimeframe] = useState("5m");
@@ -299,6 +309,24 @@ export function IngestScreen() {
   // Auto-load intraday refresh status on mount
   useEffect(() => {
     void loadIntradayRefresh();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const loadLatestMarkStatus = useCallback(async () => {
+    setLatestMarkStatusLoading(true);
+    setLatestMarkStatusError(null);
+    const result = await fetchLatestMarkStatus();
+    setLatestMarkStatusLoading(false);
+    if (!result.ok) {
+      setLatestMarkStatusError(result.error ?? "Latest-mark status fetch failed.");
+      return;
+    }
+    setLatestMarkStatus(result.data ?? null);
+  }, []);
+
+  // Auto-load latest-mark evidence status on mount
+  useEffect(() => {
+    void loadLatestMarkStatus();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -2089,6 +2117,154 @@ export function IngestScreen() {
         {intradayRefreshLoading && (
           <div className="bt-job-meta" style={{ color: "var(--accent)" }}>
             Loading intraday refresh status…
+          </div>
+        )}
+      </Panel>
+
+      {/* CRYPTO-DATA-01Q-R-LATEST-MARK-GUI-SURFACE-BUNDLE-01-COMBINED: Crypto latest marks */}
+      <Panel
+        title="Crypto latest marks"
+        subtitle="Read-only evidence from mqk md coinlore-latest-mark. No provider calls. No DB writes."
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+          <button
+            type="button"
+            className="action-button"
+            onClick={() => void loadLatestMarkStatus()}
+            disabled={latestMarkStatusLoading}
+            style={{ padding: "2px 12px" }}
+          >
+            {latestMarkStatusLoading ? "Loading…" : "Refresh"}
+          </button>
+        </div>
+
+        <div className="unavailable-notice" style={{ marginBottom: 10, color: "var(--text-muted, #888)" }}>
+          <strong>Ticker-only latest marks.</strong> Not OHLCV, not md_bars, not portfolio valuation, and not trading enablement.
+        </div>
+
+        {latestMarkStatusError && (
+          <div className="unavailable-notice unavailable-critical" style={{ marginBottom: 8 }}>
+            <strong>Fetch failed:</strong> {latestMarkStatusError}
+          </div>
+        )}
+
+        {latestMarkStatus === null && !latestMarkStatusLoading && !latestMarkStatusError && (
+          <div className="unavailable-notice" style={{ color: "var(--text-muted, #888)" }}>
+            Not loaded yet. Click Refresh or wait for auto-load.
+          </div>
+        )}
+
+        {latestMarkStatus !== null && (
+          <>
+            {isLatestMarkEvidenceUnsafe(latestMarkStatus) && (
+              <div className="unavailable-notice unavailable-critical" style={{ marginBottom: 8 }}>
+                <strong>{latestMarkStatusTruthLabel("unsafe_evidence")}</strong>
+                {latestMarkStatus.error ? ` — ${latestMarkStatus.error}` : ""}
+              </div>
+            )}
+
+            <div className="bt-job-meta" style={{ marginBottom: 6 }}>
+              <span className="eyebrow">truth_state</span>{" "}
+              <strong>{latestMarkStatusTruthLabel(latestMarkStatus.truth_state)}</strong>
+              {latestMarkStatus.provider && (
+                <>
+                  {" "}<span className="eyebrow">provider</span>{" "}
+                  <strong>{latestMarkStatus.provider}</strong>
+                </>
+              )}
+              {latestMarkStatus.produced_at_utc && (
+                <>
+                  {" "}<span className="eyebrow">produced</span>{" "}
+                  <strong>{latestMarkStatus.produced_at_utc.slice(0, 19).replace("T", " ")}</strong>
+                </>
+              )}
+              {" "}<span className="eyebrow">provider_enabled</span>{" "}
+              <strong>{latestMarkStatus.provider_enabled === null ? "unknown" : String(latestMarkStatus.provider_enabled)}</strong>
+            </div>
+
+            {latestMarkStatus.evidence_path && (
+              <div className="bt-field-hint" style={{ marginBottom: 8, fontSize: "0.82rem" }}>
+                <span className="eyebrow">evidence</span>{" "}
+                <code style={{ wordBreak: "break-all" }}>{latestMarkStatus.evidence_path}</code>
+              </div>
+            )}
+
+            {latestMarkStatus.stale_or_missing_evidence && (
+              <div className="unavailable-notice" style={{ marginBottom: 8 }}>
+                <strong>Evidence is stale or missing.</strong>{" "}
+                Run <code>mqk md coinlore-latest-mark</code> to refresh.
+              </div>
+            )}
+
+            <div className="timeline-meta-grid" style={{ marginBottom: 8 }}>
+              <div>
+                <span>network_call_made</span>
+                <strong>{latestMarkStatus.network_call_made === null ? "unknown" : String(latestMarkStatus.network_call_made)}</strong>
+              </div>
+              <div>
+                <span>db_write</span>
+                <strong>{latestMarkStatus.db_write === null ? "unknown" : String(latestMarkStatus.db_write)}</strong>
+              </div>
+              <div>
+                <span>md_bars_write</span>
+                <strong>{latestMarkStatus.md_bars_write === null ? "unknown" : String(latestMarkStatus.md_bars_write)}</strong>
+              </div>
+              <div>
+                <span>completed_bar_claim</span>
+                <strong>{latestMarkStatus.completed_bar_claim === null ? "unknown" : String(latestMarkStatus.completed_bar_claim)}</strong>
+              </div>
+            </div>
+
+            <div className="bt-job-meta" style={{ marginBottom: 8 }}>
+              <span className="eyebrow">symbols requested</span>{" "}
+              <strong>{latestMarkStatus.symbols_requested.length > 0 ? latestMarkStatus.symbols_requested.join(", ") : "—"}</strong>
+            </div>
+
+            {isLatestMarkStatusActive(latestMarkStatus.truth_state) && !isLatestMarkEvidenceUnsafe(latestMarkStatus) && latestMarkStatus.marks.length > 0 && (
+              <table className="bt-table" style={{ width: "100%", tableLayout: "auto" }}>
+                <thead>
+                  <tr>
+                    <th>Symbol</th>
+                    <th>Price (USD)</th>
+                    <th>Volume 24h (USD)</th>
+                    <th>Provider symbol</th>
+                    <th>Coin ID</th>
+                    <th>As-of (client)</th>
+                    <th>Provider ts</th>
+                    <th>Kind</th>
+                    <th>Truth state</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {latestMarkStatus.marks.map((mark) => (
+                    <tr key={mark.canonical_symbol}>
+                      <td><strong>{mark.canonical_symbol}</strong></td>
+                      <td style={{ fontVariantNumeric: "tabular-nums" }}>{mark.price_usd ?? "—"}</td>
+                      <td style={{ fontVariantNumeric: "tabular-nums" }}>{mark.volume24_usd ?? "—"}</td>
+                      <td>{mark.provider_symbol ?? "—"}</td>
+                      <td>{mark.provider_coin_id ?? "—"}</td>
+                      <td style={{ fontVariantNumeric: "tabular-nums" }}>{formatUnixSecondsDateTime(mark.as_of_client_request_ts)}</td>
+                      <td style={{ fontVariantNumeric: "tabular-nums" }}>{mark.provider_ts === null ? "none" : formatUnixSecondsDateTime(mark.provider_ts)}</td>
+                      <td>{mark.kind ?? "—"}</td>
+                      <td>{mark.truth_state ?? "—"}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+
+            {!isLatestMarkStatusActive(latestMarkStatus.truth_state) && (
+              <div className="unavailable-notice" style={{ color: "var(--text-muted, #888)" }}>
+                <strong>truth_state:</strong> {latestMarkStatusTruthLabel(latestMarkStatus.truth_state)}
+                {latestMarkStatus.error ? ` — ${latestMarkStatus.error}` : ""}
+              </div>
+            )}
+          </>
+        )}
+
+        {latestMarkStatusLoading && (
+          <div className="bt-job-meta" style={{ color: "var(--accent)" }}>
+            Loading latest-mark status…
           </div>
         )}
       </Panel>

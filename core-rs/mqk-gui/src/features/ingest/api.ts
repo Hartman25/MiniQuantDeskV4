@@ -19,6 +19,7 @@ import type {
   IngestJobStatusResponse,
   IngestJobsListResponse,
   IntradayRefreshStatusResponse,
+  LatestMarkStatusResponse,
   MarketDataFeedPollOnceRequest,
   MarketDataFeedPollOnceResponse,
   MarketDataFeedPollSymbolResult,
@@ -964,4 +965,94 @@ export function computeMissingTrackedSymbols(
   }
 
   return missing.sort();
+}
+
+// ---------------------------------------------------------------------------
+// CRYPTO-DATA-01Q-R-LATEST-MARK-GUI-SURFACE-BUNDLE-01-COMBINED:
+// Latest-mark evidence status
+// ---------------------------------------------------------------------------
+
+export interface FetchLatestMarkStatusResult {
+  ok: boolean;
+  data?: LatestMarkStatusResponse;
+  error?: string;
+}
+
+/**
+ * Return true only for the truth_state that means "usable display data".
+ * stale/no_evidence/parse_error/unsafe_evidence/backend_unavailable are all
+ * explicitly not active.
+ */
+export function isLatestMarkStatusActive(truthState: string): boolean {
+  return truthState === "active";
+}
+
+/**
+ * Human-readable label for a latest-mark truth_state. unsafe_evidence is
+ * worded as a severe fail-closed condition, not a plain status label.
+ */
+export function latestMarkStatusTruthLabel(truthState: string): string {
+  switch (truthState) {
+    case "active":
+      return "active";
+    case "stale":
+      return "stale";
+    case "no_evidence":
+      return "no evidence";
+    case "parse_error":
+      return "parse error";
+    case "unsafe_evidence":
+      return "UNSAFE EVIDENCE — fail-closed, not displayed as active";
+    case "backend_unavailable":
+      return "backend unavailable";
+    default:
+      return truthState;
+  }
+}
+
+/**
+ * Defense-in-depth check independent of the backend's own truth_state
+ * classification: if the evidence body claims any DB/md_bars/completed-bar
+ * write, treat it as unsafe even if truth_state were somehow not
+ * "unsafe_evidence". The backend should already classify these as
+ * unsafe_evidence -- this is a second, GUI-side guard so a misclassified
+ * response is never rendered as trustworthy.
+ */
+export function isLatestMarkEvidenceUnsafe(response: LatestMarkStatusResponse): boolean {
+  return (
+    response.truth_state === "unsafe_evidence" ||
+    response.db_write === true ||
+    response.md_bars_write === true ||
+    response.completed_bar_claim === true
+  );
+}
+
+/**
+ * Format a Unix-second timestamp as "YYYY-MM-DD HH:MM:SS". Returns "—" for
+ * null/undefined/zero/invalid values.
+ */
+export function formatUnixSecondsDateTime(ts: number | null | undefined): string {
+  if (!ts) return "—";
+  const d = new Date(ts * 1000);
+  if (isNaN(d.getTime())) return "—";
+  return d.toISOString().slice(0, 19).replace("T", " ");
+}
+
+/**
+ * Fetch GET /api/v1/market-data/latest-marks/status.
+ *
+ * Safety: Read-only. No DB connection. No provider/network call. No CLI
+ * execution. No trading state mutation. Ticker-only latest marks -- not
+ * OHLCV, not md_bars, not portfolio valuation, not trading enablement.
+ */
+export async function fetchLatestMarkStatus(): Promise<FetchLatestMarkStatusResult> {
+  const result = await fetchJsonCandidate<LatestMarkStatusResponse>(
+    "/api/v1/market-data/latest-marks/status",
+  );
+
+  if (!result.ok) {
+    return { ok: false, error: result.error ?? "Latest-mark status fetch failed." };
+  }
+
+  return { ok: true, data: result.data };
 }
