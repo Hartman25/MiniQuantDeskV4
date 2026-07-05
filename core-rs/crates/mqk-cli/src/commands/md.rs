@@ -855,6 +855,159 @@ pub async fn md_coinlore_latest_mark(
 }
 
 // ---------------------------------------------------------------------------
+// kraken-ohlc-dry-run — CRYPTO-DATA-01U-V-W-KRAKEN-OHLCV-ADAPTER-PARSER-CLI-
+// BUNDLE-01-COMBINED: read-only Kraken OHLC parser evidence surface.
+//
+// Default mode reads a local fixture/response file (`--input-file`) --
+// zero network calls, zero DB connection, zero `md_bars` write. Network mode
+// is opt-in only, gated behind `MQK_ALLOW_KRAKEN_NETWORK_SMOKE=1`, and
+// performs at most one HTTP GET. Neither mode connects to the DB, writes to
+// `md_bars`, or touches any broker/runtime/risk/order path.
+// ---------------------------------------------------------------------------
+
+const ENV_ALLOW_KRAKEN_NETWORK_SMOKE: &str = "MQK_ALLOW_KRAKEN_NETWORK_SMOKE";
+
+/// Schema version of the evidence JSON written by `--output-dir`.
+const KRAKEN_OHLC_DRY_RUN_EVIDENCE_SCHEMA_VERSION: &str = "kraken-ohlc-dry-run-v1";
+
+/// Execute `mqk md kraken-ohlc-dry-run`: resolve the Kraken alias for
+/// `--symbol` from the registry-v2 fixture at `--registry`, obtain a Kraken
+/// `/0/public/OHLC` response body (from `--input-file` by default, or via
+/// exactly one live HTTP GET when `MQK_ALLOW_KRAKEN_NETWORK_SMOKE=1` and no
+/// `--input-file` is given), parse it, print a summary, and optionally write
+/// a JSON evidence artifact to `--output-dir`.
+///
+/// Read-only: never opens a DB connection, never writes `md_bars`, never
+/// registers a scheduler, never touches a broker/runtime/risk/order path.
+/// Only `--timeframe 1D` is supported by the current adapter.
+pub async fn md_kraken_ohlc_dry_run(
+    registry: PathBuf,
+    symbol: String,
+    timeframe: String,
+    input_file: Option<PathBuf>,
+    output_dir: Option<PathBuf>,
+) -> Result<()> {
+    let tf = mqk_md::Timeframe::parse(&timeframe)?;
+    if tf != mqk_md::Timeframe::D1 {
+        anyhow::bail!(
+            "kraken-ohlc-dry-run: only --timeframe 1D is supported by this adapter, got {timeframe}"
+        );
+    }
+
+    let registry_v2 = mqk_md::instrument_registry_v2::load_instrument_registry_v2(&registry)
+        .with_context(|| format!("kraken-ohlc-dry-run: registry load failed: {}", registry.display()))?;
+    let aliases = mqk_md::kraken_aliases_from_registry_v2(&registry_v2);
+    let alias = aliases
+        .iter()
+        .find(|a| a.canonical_symbol == symbol)
+        .cloned()
+        .with_context(|| {
+            format!("kraken-ohlc-dry-run: no kraken alias configured for symbol {symbol}")
+        })?;
+
+    let (body, network_call_made, mode) = match &input_file {
+        Some(path) => {
+            let content = fs::read_to_string(path).with_context(|| {
+                format!("kraken-ohlc-dry-run: input-file read failed: {}", path.display())
+            })?;
+            (content, false, "input_file")
+        }
+        None => {
+            let allowed = std::env::var(ENV_ALLOW_KRAKEN_NETWORK_SMOKE)
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
+            if !allowed {
+                anyhow::bail!(
+                    "kraken-ohlc-dry-run: no --input-file provided and {ENV_ALLOW_KRAKEN_NETWORK_SMOKE} is not set; \
+                     refusing to make a network call by default"
+                );
+            }
+            let body = mqk_md::fetch_kraken_ohlc_body(&alias.kraken_pair)
+                .await
+                .map_err(|e| anyhow::anyhow!("kraken-ohlc-dry-run: network fetch failed: {e}"))?;
+            (body, true, "network_smoke")
+        }
+    };
+
+    let interval_seconds = tf.duration_secs();
+    let parsed = mqk_md::parse_kraken_ohlc_response(&body, &alias.kraken_pair, interval_seconds)
+        .map_err(|e| anyhow::anyhow!("kraken-ohlc-dry-run: parse failed: {e}"))?;
+
+    let completed = parsed
+        .completed_provider_bars(&symbol, tf.as_str())
+        .map_err(|e| anyhow::anyhow!("kraken-ohlc-dry-run: bar conversion failed: {e}"))?;
+    let bars_excluded_forming = parsed.forming_bars().len();
+    let forming_candle_excluded = bars_excluded_forming > 0;
+
+    let latest_completed = completed.iter().max_by_key(|b| b.end_ts);
+    let latest_completed_end_ts = latest_completed.map(|b| b.end_ts);
+    let latest_completed_start_ts = latest_completed.map(|b| b.end_ts - interval_seconds);
+
+    println!("provider_id={}", mqk_md::KRAKEN_PROVIDER_ID);
+    println!("mode={mode}");
+    println!("network_call_made={network_call_made}");
+    println!("db_write=false");
+    println!("md_bars_write=false");
+    println!("completed_bar_claim={}", !completed.is_empty());
+    println!("forming_candle_excluded={forming_candle_excluded}");
+    println!(
+        "volume_semantics=kraken_base_asset_volume_scaled_by_{}_not_whole_coins_not_usd",
+        mqk_md::KRAKEN_VOLUME_SCALE
+    );
+    println!("volume_scale={}", mqk_md::KRAKEN_VOLUME_SCALE);
+    println!("symbol={symbol}");
+    println!("bars_completed={}", completed.len());
+    println!("bars_excluded_forming={bars_excluded_forming}");
+    println!("latest_completed_start_ts={}", fmt_opt_i64(latest_completed_start_ts));
+    println!("latest_completed_end_ts={}", fmt_opt_i64(latest_completed_end_ts));
+    for bar in &completed {
+        println!(
+            "end_ts={} open={} high={} low={} close={} volume_scaled={} is_complete={}",
+            bar.end_ts, bar.open, bar.high, bar.low, bar.close, bar.volume, bar.is_complete
+        );
+    }
+
+    if let Some(dir) = &output_dir {
+        fs::create_dir_all(dir).with_context(|| {
+            format!("kraken-ohlc-dry-run: create output dir failed: {}", dir.display())
+        })?;
+        let produced_at_ts = Utc::now().timestamp();
+        let produced_at_utc = chrono::DateTime::<Utc>::from_timestamp(produced_at_ts, 0)
+            .unwrap_or_else(Utc::now)
+            .to_rfc3339();
+        let evidence = serde_json::json!({
+            "schema_version": KRAKEN_OHLC_DRY_RUN_EVIDENCE_SCHEMA_VERSION,
+            "producer": "mqk-cli md kraken-ohlc-dry-run",
+            "produced_at_utc": produced_at_utc,
+            "provider": mqk_md::KRAKEN_PROVIDER_ID,
+            "mode": mode,
+            "network_call_made": network_call_made,
+            "db_write": false,
+            "md_bars_write": false,
+            "completed_bar_claim": !completed.is_empty(),
+            "forming_candle_excluded": forming_candle_excluded,
+            "volume_semantics": "kraken_base_asset_volume_scaled_by_1e8_not_whole_coins_not_usd",
+            "volume_scale": mqk_md::KRAKEN_VOLUME_SCALE,
+            "symbols_requested": [symbol.clone()],
+            "bars_completed": completed.len(),
+            "bars_excluded_forming": bars_excluded_forming,
+            "latest_completed_start_ts": latest_completed_start_ts,
+            "latest_completed_end_ts": latest_completed_end_ts,
+            "all_passed": true,
+            "reason_code": "kraken_ohlc_dry_run_evidence_generated",
+            "fail_reasons": Vec::<String>::new(),
+        });
+        let out_path = dir.join(format!("kraken_ohlc_dry_run_{produced_at_ts}.json"));
+        fs::write(&out_path, serde_json::to_string_pretty(&evidence)?).with_context(|| {
+            format!("kraken-ohlc-dry-run: write evidence failed: {}", out_path.display())
+        })?;
+        println!("evidence_path={}", out_path.display());
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

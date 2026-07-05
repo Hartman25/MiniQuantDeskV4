@@ -96,5 +96,22 @@
     "enabled": false,
     "verification_status": "ticker_only_network_verified_01i_no_ohlcv",
     "docs_url": "https://www.coinlore.com/cryptocurrency-data-api"
+  },
+  {
+    "provider_id": "kraken",
+    "display_name": "Kraken (public OHLC)",
+    "asset_classes": ["crypto"],
+    "free_tier_available": true,
+    "api_key_required": false,
+    "credential_env_vars": [],
+    "rate_limit_notes": "no numeric public rate limit established (CRYPTO-DATA-01S-T); do not assume a specific limit before any recurring/scheduled call is built",
+    "supported_timeframes": ["1D"],
+    "historical_depth_notes": "public /0/public/OHLC endpoint returned 721 daily rows for both BTC/USD and ETH/USD in CRYPTO-DATA-01S-T's live verification; the final row is always the current, not-yet-committed candle and must be excluded, never ingested",
+    "realtime_support_notes": "not applicable; this is a completed-bar historical adapter only, no streaming/latest-mark support",
+    "licensing_notes": "requires external verification",
+    "implementation_status": "ohlcv_adapter_fixture_proven_network_opt_in_only",
+    "enabled": false,
+    "verification_status": "fixture_parser_proven_live_network_not_exercised_by_this_patch",
+    "docs_url": "https://docs.kraken.com/api/docs/rest-api/get-ohlc-data"
   }
 ]

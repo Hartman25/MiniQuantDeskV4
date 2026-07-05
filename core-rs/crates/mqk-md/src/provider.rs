@@ -464,6 +464,20 @@ where
         self
     }
 
+    /// Override the capabilities set by [`Self::new`]. `new` always seeds
+    /// `supported_asset_classes` with [`ProviderAssetClass::Equity`]
+    /// (`MarketDataProviderCapabilities::historical_only`'s default), which
+    /// is correct for the equity-only providers this adapter originally
+    /// wrapped (Alpaca, TwelveData) but would be false for a non-equity
+    /// provider (e.g. a crypto adapter). Callers building a non-equity
+    /// provider through this adapter must call this with capabilities
+    /// derived from the provider's own registry config (see
+    /// `capabilities_from_provider_config`) rather than trust the default.
+    pub fn with_capabilities(mut self, capabilities: MarketDataProviderCapabilities) -> Self {
+        self.capabilities = capabilities;
+        self
+    }
+
     /// Enable `fetch_latest_closed_bar` by delegating to a bounded historical window.
     ///
     /// Only call this when the underlying `HistoricalProvider` is known to support a

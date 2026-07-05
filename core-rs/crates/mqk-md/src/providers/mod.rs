@@ -1,7 +1,9 @@
-//! Latest-mark provider implementations.
+//! Concrete provider implementations grouped by provider, not by shape.
 //!
-//! Distinct from `provider_registry`'s bar-oriented `MarketDataProvider`
-//! factory: these providers produce [`crate::latest_mark::LatestMark`]
-//! values only, never a completed OHLCV bar.
+//! `coinlore` produces [`crate::latest_mark::LatestMark`] values only, never
+//! a completed OHLCV bar. `kraken` produces completed OHLCV bars
+//! (`crate::ProviderBar`) via a parser plus a `crate::HistoricalProvider`
+//! adapter, default-disabled in `config/providers/providers.json`.
 
 pub mod coinlore;
+pub mod kraken;

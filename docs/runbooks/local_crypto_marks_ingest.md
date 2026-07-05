@@ -480,17 +480,65 @@ lands and its own DB-backed proof closes. Coinbase Exchange and Binance/
 Binance.US were not ruled out but were not live-tested in this bundle;
 Binance carries an unresolved, honestly-flagged geo-restriction risk.
 
+## Kraken OHLCV Adapter, Parser, CLI Evidence (CRYPTO-DATA-01U-V-W-KRAKEN-OHLCV-ADAPTER-PARSER-CLI-BUNDLE-01-COMBINED)
+
+Continuing after `01S-T`'s decision/verification, this bundle built the
+first disabled-by-default, fixture-first Kraken OHLCV adapter lane:
+
+- A Kraken `/0/public/OHLC` parser/model
+  (`mqk_md::providers::kraken`) that rejects malformed/unsafe data and
+  derives `is_complete` from `row.time <= result.last` (never a fabricated
+  flag) and `end_ts = row.time + interval_seconds` (Kraken's `time` is the
+  bar **start**).
+- An explicit, tested volume-scaling convention: Kraken's fractional
+  base-asset `volume` string is scaled by `1e8` into `ProviderBar.volume:
+  i64` (e.g. `"1317.15941434"` -> `131715941434`) — not whole coins, not
+  quote-currency (USD) volume. Overflow and >8 fractional digits are
+  rejected, never truncated or wrapped.
+- A `KrakenHistoricalProvider` implementing `HistoricalProvider`, wrapped by
+  the existing adapter, plus a fourth `provider_registry.rs` factory arm
+  (`"kraken"`) reached only when `providers.json`'s `kraken` entry is
+  `enabled: true` — the committed registry keeps it `false`.
+- Disabled `kraken_pair`/`kraken_result_key` registry-v2 aliases on the
+  existing `BTC/USD`/`ETH/USD` fixture rows (still `enabled: false`,
+  `paper_trading_enabled: false`, `live_trading_enabled: false`).
+- A read-only `mqk md kraken-ohlc-dry-run` CLI command, fixture-first by
+  default:
+
+```powershell
+cargo run --manifest-path .\core-rs\Cargo.toml -p mqk-cli --bin mqk-cli -- md kraken-ohlc-dry-run `
+  --registry .\config\instruments\instruments_v2.crypto_local_marks.example.json `
+  --symbol BTC/USD `
+  --timeframe 1D `
+  --input-file .\core-rs\crates\mqk-md\tests\fixtures\kraken_ohlc_xbtusd_1d.json `
+  --output-dir .\exports\market_data
+```
+
+A live network call is only attempted when no `--input-file` is given and
+`MQK_ALLOW_KRAKEN_NETWORK_SMOKE=1` is explicitly set — this is not run by
+default validation. See
+`docs/specs/crypto_data_01u_v_w_kraken_ohlcv_adapter_parser_cli.md` for the
+full decision record, including why a DB-backed ingest proof was
+deliberately deferred (no ingest command wires `"kraken"` into
+`ingest-provider`/`sync-provider` yet).
+
+**No recurring ingestion, no scheduler, no daemon job, no GUI surface, and
+no crypto trading enablement.** Local CSV import (this runbook) remains the
+only DB-backed **proven** crypto `md_bars` ingest path.
+
 ## Remaining Gaps
 
-- No live network crypto provider is implemented for completed-bar/OHLCV
-  ingestion. Kraken is the selected next adapter candidate (see above) but
-  the adapter itself does not exist yet.
+- No live network crypto provider writes to `md_bars` yet. Kraken's parser
+  and disabled adapter now exist (see above), but no ingest command wires
+  `"kraken"` into `ingest-provider`/`sync-provider`, and no DB-backed
+  ingest proof has been run for Kraken.
 - CoinLore's verified public endpoints are ticker/spot-only, not OHLCV; a
   `LatestMark` parser/model and a read-only evidence-file status route now
   exist for that ticker data, but no `latest_marks` DB table exists — the
   route is evidence-file-only, not backed by persisted/queryable storage.
 - A read-only GUI surface for crypto latest marks now exists (see above);
-  no GUI action can trigger a provider/network/CLI call.
+  no GUI action can trigger a provider/network/CLI call. No GUI surface
+  exists for Kraken OHLCV.
 - No production registry-v2 cutover (registry-v2 still has zero production
   route callers for the default/legacy config).
 - This does not enable crypto trading, paper trading, or live trading.

@@ -14,8 +14,9 @@
 
 use crate::{
     AlpacaHistoricalProvider, FakeMarketDataProvider, HistoricalProviderMarketDataAdapter,
-    MarketDataProvider, MarketDataProviderCapabilities, MarketDataProviderHealth,
-    MarketDataProviderRateLimits, ProviderAssetClass, Timeframe, TwelveDataHistoricalProvider,
+    KrakenHistoricalProvider, MarketDataProvider, MarketDataProviderCapabilities,
+    MarketDataProviderHealth, MarketDataProviderRateLimits, ProviderAssetClass, Timeframe,
+    TwelveDataHistoricalProvider,
 };
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
@@ -278,6 +279,20 @@ where
                 .with_rate_limits(rate_limits),
             ))
         }
+        "kraken" => Ok(Box::new(
+            HistoricalProviderMarketDataAdapter::new(
+                KrakenHistoricalProvider::new(),
+                config.provider_id.clone(),
+                config.display_name.clone(),
+                capabilities.supported_timeframes.clone(),
+            )
+            // `new`'s default capabilities hardcode ProviderAssetClass::Equity
+            // (correct for Alpaca/TwelveData, wrong for Kraken); override with
+            // the config-derived capabilities so `crypto` is advertised truthfully.
+            .with_capabilities(capabilities)
+            .with_health(MarketDataProviderHealth::unknown())
+            .with_rate_limits(rate_limits),
+        )),
         _ => Err(ProviderFactoryError::UnsupportedProvider { provider_id }),
     }
 }
@@ -755,5 +770,79 @@ mod tests {
             "alpaca factory provider must report latest_closed_bar=true"
         );
         assert_eq!(provider.provider_id(), "alpaca");
+    }
+
+    // -----------------------------------------------------------------------
+    // Kraken factory arm — CRYPTO-DATA-01U-V-W
+    // -----------------------------------------------------------------------
+
+    fn kraken_provider_config(enabled: bool) -> ProviderConfig {
+        ProviderConfig {
+            provider_id: "kraken".into(),
+            display_name: "Kraken (public OHLC)".into(),
+            asset_classes: vec!["crypto".into()],
+            free_tier_available: true,
+            api_key_required: false,
+            credential_env_vars: vec![],
+            rate_limit_notes: "test limits".into(),
+            supported_timeframes: vec!["1D".into()],
+            historical_depth_notes: "test".into(),
+            realtime_support_notes: "test".into(),
+            licensing_notes: "test".into(),
+            implementation_status: "ohlcv_adapter_fixture_proven_network_opt_in_only".into(),
+            enabled,
+            verification_status: "fixture_parser_proven_live_network_not_exercised_by_this_patch"
+                .into(),
+            docs_url: "".into(),
+        }
+    }
+
+    // KRAKEN-FACTORY-01: the real registry's kraken entry is disabled by
+    // default and building it is refused before any network call is possible.
+    #[test]
+    fn kraken_factory_01_real_registry_entry_is_disabled_by_default() {
+        let providers = load_provider_registry(&registry_path()).unwrap();
+        let kraken = find_provider(&providers, "kraken").expect("kraken must be registered");
+        assert!(!kraken.enabled, "kraken must be disabled by default");
+
+        let err = match build_market_data_provider("kraken", &providers, |_| None) {
+            Ok(_) => panic!("disabled kraken provider must fail to build"),
+            Err(err) => err,
+        };
+        assert_eq!(
+            err,
+            ProviderFactoryError::DisabledProvider {
+                provider_id: "kraken".into()
+            }
+        );
+    }
+
+    // KRAKEN-FACTORY-02: an explicitly-enabled config (test-only, not the
+    // committed registry) builds successfully with no credential and no
+    // network call performed by construction alone.
+    #[test]
+    fn kraken_factory_02_builds_with_no_credential_when_explicitly_enabled() {
+        let providers = vec![kraken_provider_config(true)];
+
+        let provider = build_market_data_provider("kraken", &providers, |_| None)
+            .expect("kraken provider must build without credentials");
+
+        assert_eq!(provider.provider_id(), "kraken");
+        assert!(provider.capabilities().historical_bars);
+        assert!(provider
+            .capabilities()
+            .supported_asset_classes
+            .contains(&ProviderAssetClass::Crypto));
+    }
+
+    // KRAKEN-FACTORY-03: capabilities do not advertise latest_closed_bar
+    // (only alpaca does, unchanged behavior).
+    #[test]
+    fn kraken_factory_03_does_not_advertise_latest_closed_bar() {
+        let config = kraken_provider_config(true);
+        let capabilities = capabilities_from_provider_config(&config)
+            .expect("kraken capabilities must derive from config");
+        assert!(!capabilities.latest_closed_bar);
+        assert!(capabilities.historical_bars);
     }
 }
