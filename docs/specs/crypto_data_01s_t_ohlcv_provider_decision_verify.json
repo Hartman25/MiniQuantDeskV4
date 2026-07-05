@@ -1,0 +1,203 @@
+{
+  "schema_version": "crypto-data-01s-t-ohlcv-provider-decision-v1",
+  "patch_id": "CRYPTO-DATA-01S-T-OHLCV-PROVIDER-DECISION-VERIFY-BUNDLE-01-COMBINED",
+  "decided_and_verified_at_head": "064ca584",
+  "decision": "SELECTED_KRAKEN_PUBLIC_OHLC_AS_FIRST_OHLCV_ADAPTER_LANE",
+  "selected_provider": "kraken",
+  "selected_provider_status": "selected_for_adapter_implementation",
+  "selected_provider_display_name": "Kraken (public OHLC)",
+  "network_requests_used": 3,
+  "max_network_requests_allowed": 6,
+  "requests": [
+    {
+      "purpose": "confirm_ohlc_endpoint_docs_auth_fields_completion_caveat",
+      "method": "GET",
+      "url": "https://docs.kraken.com/api/docs/rest-api/get-ohlc-data",
+      "authenticated": false,
+      "credential_used": false,
+      "api_key_used": false,
+      "timestamp_utc": "2026-07-05",
+      "http_status": 200,
+      "response_kind": "documentation_page"
+    },
+    {
+      "purpose": "live_ohlc_verification_btcusd",
+      "method": "GET",
+      "url": "https://api.kraken.com/0/public/OHLC?pair=XBTUSD&interval=1440",
+      "authenticated": false,
+      "credential_used": false,
+      "api_key_used": false,
+      "timestamp_utc": "2026-07-05T20:38:09Z",
+      "http_status": 200,
+      "response_size_bytes": 62277,
+      "response_kind": "provider_json"
+    },
+    {
+      "purpose": "live_ohlc_verification_ethusd",
+      "method": "GET",
+      "url": "https://api.kraken.com/0/public/OHLC?pair=ETHUSD&interval=1440",
+      "authenticated": false,
+      "credential_used": false,
+      "api_key_used": false,
+      "timestamp_utc": "2026-07-05T20:38:21Z",
+      "http_status": 200,
+      "response_size_bytes": 61855,
+      "response_kind": "provider_json"
+    }
+  ],
+  "candidates": [
+    {
+      "candidate_id": "kraken",
+      "repo_presence_before_this_patch": "none",
+      "auth_required": false,
+      "live_verified_this_patch": true,
+      "classification": "selected_first_ohlcv_adapter_lane"
+    },
+    {
+      "candidate_id": "coinbase_exchange",
+      "repo_presence_before_this_patch": "none",
+      "auth_required": "publicly_documented_unauthenticated_not_independently_verified",
+      "live_verified_this_patch": false,
+      "classification": "repo_unimplemented_not_network_verified_this_patch"
+    },
+    {
+      "candidate_id": "binance_binanceus",
+      "repo_presence_before_this_patch": "none",
+      "auth_required": "publicly_documented_unauthenticated_not_independently_verified",
+      "live_verified_this_patch": false,
+      "classification": "repo_unimplemented_not_network_verified_this_patch_geo_restriction_risk_flagged"
+    },
+    {
+      "candidate_id": "twelvedata_crypto",
+      "repo_presence_before_this_patch": "implemented_equity_provider_untested_for_crypto",
+      "auth_required": true,
+      "live_verified_this_patch": false,
+      "classification": "credential_required_excluded_from_this_verification"
+    },
+    {
+      "candidate_id": "alpaca_crypto",
+      "repo_presence_before_this_patch": "equity_etf_only_no_crypto_endpoint_code",
+      "auth_required": true,
+      "live_verified_this_patch": false,
+      "classification": "structurally_unfit_for_first_lane"
+    },
+    {
+      "candidate_id": "coinlore",
+      "repo_presence_before_this_patch": "latest_mark_model_parser_cli_route_gui_fully_built",
+      "auth_required": false,
+      "live_verified_this_patch": false,
+      "classification": "ticker_only_network_verified_01i_no_ohlcv_not_eligible_for_completed_bar_lane"
+    },
+    {
+      "candidate_id": "local_csv",
+      "repo_presence_before_this_patch": "proven_end_to_end_01a_through_01g",
+      "auth_required": false,
+      "live_verified_this_patch": false,
+      "classification": "repo_implemented_remains_only_proven_ingest_path"
+    }
+  ],
+  "symbols_verified": [
+    {
+      "canonical_symbol": "BTC/USD",
+      "provider_query_pair": "XBTUSD",
+      "provider_response_pair_key": "XXBTZUSD",
+      "verified": true,
+      "sample_committed_row": {
+        "time": 1783123200,
+        "open": "62539.0",
+        "high": "63443.4",
+        "low": "62290.9",
+        "close": "63085.8",
+        "vwap": "62887.5",
+        "volume": "1317.15941434",
+        "count": 34953
+      },
+      "sample_forming_row_excluded": {
+        "time": 1783209600,
+        "open": "63085.4",
+        "high": "63085.4",
+        "low": "62393.3",
+        "close": "62662.2",
+        "vwap": "62710.6",
+        "volume": "546.31624218",
+        "count": 23702
+      },
+      "result_last_cursor": 1783123200
+    },
+    {
+      "canonical_symbol": "ETH/USD",
+      "provider_query_pair": "ETHUSD",
+      "provider_response_pair_key": "XETHZUSD",
+      "verified": true,
+      "sample_committed_row": {
+        "time": 1783123200,
+        "open": "1756.30",
+        "high": "1805.52",
+        "low": "1742.93",
+        "close": "1778.72",
+        "vwap": "1777.37",
+        "volume": "15588.01759742",
+        "count": 16101
+      },
+      "sample_forming_row_excluded": {
+        "time": 1783209600,
+        "open": "1778.72",
+        "high": "1784.35",
+        "low": "1747.15",
+        "close": "1775.24",
+        "vwap": "1771.74",
+        "volume": "13144.87516625",
+        "count": 11548
+      },
+      "result_last_cursor": 1783123200
+    }
+  ],
+  "completion_semantics": {
+    "provider_documents_forming_last_candle": true,
+    "documented_quote": "The last entry in the OHLC array is for the current, not-yet-committed timeframe, and will always be present, regardless of the value of since.",
+    "live_confirmation": "result.last equals the second-to-last row's time in both BTC and ETH responses; the final row is exactly one interval (86400s at interval=1440) later",
+    "is_complete_rule": "row.time <= result.last",
+    "end_ts_correction_required": "row.time is bar START; RawBar.end_ts must be computed as row.time + interval_seconds, not read directly",
+    "fabrication_free": true
+  },
+  "future_adapter_scope": {
+    "recommended_next_patch_id": "CRYPTO-DATA-01U-KRAKEN-OHLCV-PROVIDER-ADAPTER-LOCAL-INGEST-01",
+    "steps": [
+      "mocked_parser_unit_tests_first",
+      "kraken_historical_provider_plus_fourth_factory_arm",
+      "cli_dry_run_input_file_default_network_opt_in",
+      "db_ingest_reuse_ingest_provider_bars_to_md_bars_with_provider_metadata_only_after_proof",
+      "gui_status_surface_later_if_warranted",
+      "resolve_volume_i64_conversion_and_numeric_rate_limit_before_recurring_calls"
+    ]
+  },
+  "rate_limit_credential_posture": {
+    "credential_required": false,
+    "numeric_rate_limit_established_this_patch": false,
+    "rate_limit_headers_observed": false,
+    "notes": "Kraken OHLC endpoint requires no auth (security: [] per official docs). Numeric public rate limit not fetched in this bounded verification; recorded as an open item for the future adapter patch, not assumed."
+  },
+  "safety": {
+    "no_credentials": true,
+    "no_db_write": true,
+    "no_md_bars_write": true,
+    "no_provider_adapter_added": true,
+    "no_trading_enabled": true,
+    "no_rust_gui_config_changed": true,
+    "no_db_migration": true,
+    "no_raw_responses_staged": true
+  },
+  "remaining_gaps": [
+    "no_kraken_adapter_implemented",
+    "kraken_numeric_rate_limit_unknown",
+    "raw_bar_volume_i64_vs_kraken_fractional_volume_unresolved",
+    "ingest_provider_sync_provider_still_locked_to_twelvedata_alpaca",
+    "coinbase_exchange_and_binance_binanceus_remain_unverified_candidates",
+    "no_production_registry_v2_cutover",
+    "no_crypto_session_calendar_runtime_enforcement",
+    "no_crypto_risk_policy_activation",
+    "no_crypto_broker_paper_execution",
+    "no_crypto_strategy",
+    "local_csv_remains_only_proven_crypto_md_bars_ingest_path"
+  ]
+}

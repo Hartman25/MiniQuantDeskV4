@@ -455,10 +455,36 @@ No backend/daemon route, API contract, CLI, DB, or trading-path code was
 changed by this bundle. No CoinLore/provider/network call was added. No
 `latest_marks` DB table or `md_bars` write was added.
 
+## OHLCV Provider Decision + Verification (CRYPTO-DATA-01S-T-OHLCV-PROVIDER-DECISION-VERIFY-BUNDLE-01-COMBINED)
+
+CoinLore (verified ticker-only, `01I`) cannot supply completed-bar/OHLCV
+data. This bundle compared Kraken, Coinbase Exchange, Binance/Binance.US,
+TwelveData crypto, and Alpaca crypto against current repo evidence, then
+made 3 bounded, keyless, read-only GETs (1 docs fetch + BTC/USD + ETH/USD)
+to confirm **Kraken's public `/0/public/OHLC` endpoint** as the selected
+next completed-bar/OHLCV adapter lane: no credential required, real
+`open`/`high`/`low`/`close`/`volume` fields for both symbols, and a
+provider-supplied cursor (`result.last`) that lets a future adapter derive
+`is_complete` honestly instead of guessing or fabricating it. Full
+evidence, the candidate comparison table, and the exact completion-semantics
+rule (`row.time <= result.last`, plus an `end_ts = row.time + interval_seconds`
+correction since Kraken's `time` field is the bar's start, not its end) are
+recorded in `docs/specs/crypto_data_01s_t_ohlcv_provider_decision_verify.md`.
+
+**No adapter exists yet.** No provider code, factory arm, or CLI ingestion
+path was added by this bundle. No DB write. No `md_bars` write. No crypto
+trading. Local CSV import (this runbook) remains the only **proven** crypto
+mark ingest path until a future, separately-authorized adapter patch
+(recommended: `CRYPTO-DATA-01U-KRAKEN-OHLCV-PROVIDER-ADAPTER-LOCAL-INGEST-01`)
+lands and its own DB-backed proof closes. Coinbase Exchange and Binance/
+Binance.US were not ruled out but were not live-tested in this bundle;
+Binance carries an unresolved, honestly-flagged geo-restriction risk.
+
 ## Remaining Gaps
 
-- No live network crypto provider is implemented or verified for
-  completed-bar/OHLCV ingestion.
+- No live network crypto provider is implemented for completed-bar/OHLCV
+  ingestion. Kraken is the selected next adapter candidate (see above) but
+  the adapter itself does not exist yet.
 - CoinLore's verified public endpoints are ticker/spot-only, not OHLCV; a
   `LatestMark` parser/model and a read-only evidence-file status route now
   exist for that ticker data, but no `latest_marks` DB table exists — the
