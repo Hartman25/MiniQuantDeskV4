@@ -365,3 +365,62 @@ export interface LatestMarkStatusResponse {
   fail_reasons: string[];
   error: string | null;
 }
+
+// ---------------------------------------------------------------------------
+// CRYPTO-DATA-01AE-KRAKEN-SYNC-GUI-STATUS-SURFACE-01:
+// Kraken OHLC ingest/sync evidence status (read-only)
+// ---------------------------------------------------------------------------
+
+/**
+ * Response for GET /api/v1/market-data/kraken-ohlc/status.
+ * Mirrors KrakenOhlcStatusResponse in api_types.rs.
+ *
+ * truth_state: "active" | "stale" | "no_evidence" | "parse_error" |
+ * "unsafe_evidence" | "backend_unavailable". "unsafe_evidence" is a
+ * fail-closed safety state, not a freshness state — never treat it as
+ * usable data regardless of produced_at_utc.
+ *
+ * Fields absent from the selected evidence file's own schema (e.g.
+ * sync_policy when latest_mode="ingest") are null, never fabricated.
+ */
+export interface KrakenOhlcStatusResponse {
+  canonical_route: string;
+  truth_state: string;
+  provider: string | null;
+  latest_mode: string | null;
+  latest_schema_version: string | null;
+  produced_at_utc: string | null;
+  evidence_path: string | null;
+  stale_or_missing_evidence: boolean;
+  max_evidence_age_secs: number;
+  network_call_made: boolean | null;
+  db_write: boolean | null;
+  md_bars_write: boolean | null;
+  provider_id: string | null;
+  provider_source: string | null;
+  provider_symbol: string | null;
+  ingest_mode: string | null;
+  sync_policy: string | null;
+  no_update_existing: boolean | null;
+  symbols_requested: string[];
+  bars_completed: number | null;
+  bars_excluded_forming: number | null;
+  bars_considered_for_sync: number | null;
+  bars_missing_new: number | null;
+  bars_existing_candidate: number | null;
+  rows_changed: number | null;
+  rows_skipped_unchanged: number | null;
+  rows_changed_skipped_due_to_no_update_existing: number | null;
+  rows_inserted: number | null;
+  rows_updated: number | null;
+  rows_skipped_if_known: number | null;
+  latest_existing_end_ts_before: number | null;
+  latest_completed_start_ts: number | null;
+  latest_completed_end_ts: number | null;
+  volume_semantics: string | null;
+  volume_scale: number | null;
+  all_passed: boolean | null;
+  reason_code: string | null;
+  fail_reasons: string[];
+  error: string | null;
+}

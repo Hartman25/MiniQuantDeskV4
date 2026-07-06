@@ -40,8 +40,13 @@ import {
   isLatestMarkEvidenceUnsafe,
   isLatestMarkStatusActive,
   latestMarkStatusTruthLabel,
+  fetchKrakenOhlcStatus,
+  isKrakenOhlcEvidenceUnsafe,
+  isKrakenOhlcStatusActive,
+  krakenOhlcStatusTruthLabel,
+  KRAKEN_OHLC_STATUS_WARNING_TEXT,
 } from "../api.ts";
-import type { IngestJobStatusResponse, IntradayRefreshStatusResponse, LatestMarkStatusResponse, MdBarsCoverageResponse, MdBarsCoverageRow, TrackedEquitiesResponse } from "../types.ts";
+import type { IngestJobStatusResponse, IntradayRefreshStatusResponse, KrakenOhlcStatusResponse, LatestMarkStatusResponse, MdBarsCoverageResponse, MdBarsCoverageRow, TrackedEquitiesResponse } from "../types.ts";
 
 // ---------------------------------------------------------------------------
 // normalizeIngestJobStatus
@@ -2022,6 +2027,355 @@ test("fetchLatestMarkStatus maps a network/transport failure to ok:false", async
 
   try {
     const result = await fetchLatestMarkStatus();
+    assert.equal(result.ok, false);
+    assert.ok(result.error);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+// ---------------------------------------------------------------------------
+// CRYPTO-DATA-01AE-KRAKEN-SYNC-GUI-STATUS-SURFACE-01:
+// Kraken OHLC ingest/sync evidence status helpers
+// ---------------------------------------------------------------------------
+
+function makeActiveKrakenOhlcStatusResponse(
+  overrides: Partial<KrakenOhlcStatusResponse> = {},
+): KrakenOhlcStatusResponse {
+  return {
+    canonical_route: "/api/v1/market-data/kraken-ohlc/status",
+    truth_state: "active",
+    provider: "kraken",
+    latest_mode: "sync",
+    latest_schema_version: "kraken-ohlc-sync-v2",
+    produced_at_utc: "2026-07-05T12:00:00Z",
+    evidence_path: "exports/market_data/kraken_ohlc_sync_1783300000.json",
+    stale_or_missing_evidence: false,
+    max_evidence_age_secs: 86400,
+    network_call_made: false,
+    db_write: true,
+    md_bars_write: true,
+    provider_id: "kraken",
+    provider_source: "kraken",
+    provider_symbol: "XXBTZUSD",
+    ingest_mode: "provider_sync",
+    sync_policy: "content_diff_skip_unchanged_update_changed_insert_missing",
+    no_update_existing: false,
+    symbols_requested: ["BTC/USD", "ETH/USD"],
+    bars_completed: 2,
+    bars_excluded_forming: 1,
+    bars_considered_for_sync: 2,
+    bars_missing_new: 1,
+    bars_existing_candidate: 1,
+    rows_changed: 1,
+    rows_skipped_unchanged: 0,
+    rows_changed_skipped_due_to_no_update_existing: 0,
+    rows_inserted: 1,
+    rows_updated: 1,
+    rows_skipped_if_known: 0,
+    latest_existing_end_ts_before: 1783123200,
+    latest_completed_start_ts: 1783123200,
+    latest_completed_end_ts: 1783209600,
+    volume_semantics: "kraken_base_asset_volume_scaled_by_1e8_not_whole_coins_not_usd",
+    volume_scale: 100000000,
+    all_passed: true,
+    reason_code: "kraken_sync_evidence_generated",
+    fail_reasons: [],
+    error: null,
+    ...overrides,
+  };
+}
+
+// isKrakenOhlcStatusActive
+
+test("isKrakenOhlcStatusActive returns true for active", () => {
+  assert.ok(isKrakenOhlcStatusActive("active"));
+});
+
+test("isKrakenOhlcStatusActive returns false for stale", () => {
+  assert.ok(!isKrakenOhlcStatusActive("stale"));
+});
+
+test("isKrakenOhlcStatusActive returns false for no_evidence", () => {
+  assert.ok(!isKrakenOhlcStatusActive("no_evidence"));
+});
+
+test("isKrakenOhlcStatusActive returns false for parse_error", () => {
+  assert.ok(!isKrakenOhlcStatusActive("parse_error"));
+});
+
+test("isKrakenOhlcStatusActive returns false for unsafe_evidence", () => {
+  assert.ok(!isKrakenOhlcStatusActive("unsafe_evidence"));
+});
+
+test("isKrakenOhlcStatusActive returns false for backend_unavailable", () => {
+  assert.ok(!isKrakenOhlcStatusActive("backend_unavailable"));
+});
+
+// krakenOhlcStatusTruthLabel
+
+test("krakenOhlcStatusTruthLabel active -> active", () => {
+  assert.equal(krakenOhlcStatusTruthLabel("active"), "active");
+});
+
+test("krakenOhlcStatusTruthLabel stale -> stale", () => {
+  assert.equal(krakenOhlcStatusTruthLabel("stale"), "stale");
+});
+
+test("krakenOhlcStatusTruthLabel no_evidence -> no evidence", () => {
+  assert.equal(krakenOhlcStatusTruthLabel("no_evidence"), "no evidence");
+});
+
+test("krakenOhlcStatusTruthLabel parse_error -> parse error", () => {
+  assert.equal(krakenOhlcStatusTruthLabel("parse_error"), "parse error");
+});
+
+test("krakenOhlcStatusTruthLabel unsafe_evidence is worded as a severe fail-closed state", () => {
+  const label = krakenOhlcStatusTruthLabel("unsafe_evidence");
+  assert.match(label, /unsafe/i);
+  assert.notEqual(label, "unsafe_evidence"); // must not be a bare passthrough
+});
+
+test("krakenOhlcStatusTruthLabel backend_unavailable -> backend unavailable", () => {
+  assert.equal(krakenOhlcStatusTruthLabel("backend_unavailable"), "backend unavailable");
+});
+
+test("krakenOhlcStatusTruthLabel unknown string passes through", () => {
+  assert.equal(krakenOhlcStatusTruthLabel("some_other_state"), "some_other_state");
+});
+
+// isKrakenOhlcEvidenceUnsafe (defense-in-depth check)
+
+test("isKrakenOhlcEvidenceUnsafe returns true when truth_state is unsafe_evidence", () => {
+  const resp = makeActiveKrakenOhlcStatusResponse({ truth_state: "unsafe_evidence" });
+  assert.ok(isKrakenOhlcEvidenceUnsafe(resp));
+});
+
+test("isKrakenOhlcEvidenceUnsafe returns true when provider is not kraken", () => {
+  const resp = makeActiveKrakenOhlcStatusResponse({ provider: "coinlore" });
+  assert.ok(isKrakenOhlcEvidenceUnsafe(resp));
+});
+
+test("isKrakenOhlcEvidenceUnsafe returns true when db_write=false but rows_inserted > 0", () => {
+  const resp = makeActiveKrakenOhlcStatusResponse({ db_write: false, rows_inserted: 1 });
+  assert.ok(isKrakenOhlcEvidenceUnsafe(resp));
+});
+
+test("isKrakenOhlcEvidenceUnsafe returns true when db_write=false but rows_updated > 0", () => {
+  const resp = makeActiveKrakenOhlcStatusResponse({ db_write: false, rows_updated: 2 });
+  assert.ok(isKrakenOhlcEvidenceUnsafe(resp));
+});
+
+test("isKrakenOhlcEvidenceUnsafe returns false for a genuinely safe active response", () => {
+  const resp = makeActiveKrakenOhlcStatusResponse();
+  assert.ok(!isKrakenOhlcEvidenceUnsafe(resp));
+});
+
+test("isKrakenOhlcEvidenceUnsafe returns false when db_write=false and no rows were written", () => {
+  const resp = makeActiveKrakenOhlcStatusResponse({
+    db_write: false,
+    rows_inserted: 0,
+    rows_updated: 0,
+    md_bars_write: false,
+  });
+  assert.ok(!isKrakenOhlcEvidenceUnsafe(resp));
+});
+
+// KrakenOhlcStatusResponse shape — mirrors backend truth_state contract,
+// including the 01AB-AC content-diff fields.
+
+test("KrakenOhlcStatusResponse active sync shape has BTC/USD and ETH/USD requested symbols", () => {
+  const resp = makeActiveKrakenOhlcStatusResponse();
+  assert.ok(isKrakenOhlcStatusActive(resp.truth_state));
+  assert.ok(!isKrakenOhlcEvidenceUnsafe(resp));
+  assert.deepEqual(resp.symbols_requested, ["BTC/USD", "ETH/USD"]);
+  assert.equal(resp.latest_mode, "sync");
+});
+
+test("KrakenOhlcStatusResponse content-diff fields are present and typed as numbers for sync evidence", () => {
+  const resp = makeActiveKrakenOhlcStatusResponse();
+  assert.equal(typeof resp.rows_changed, "number");
+  assert.equal(typeof resp.rows_skipped_unchanged, "number");
+  assert.equal(typeof resp.rows_changed_skipped_due_to_no_update_existing, "number");
+});
+
+test("KrakenOhlcStatusResponse ingest-mode shape has sync-only fields null, never fabricated", () => {
+  const resp = makeActiveKrakenOhlcStatusResponse({
+    latest_mode: "ingest",
+    latest_schema_version: "kraken-ohlc-ingest-v1",
+    ingest_mode: "provider_ingest",
+    sync_policy: null,
+    no_update_existing: null,
+    bars_considered_for_sync: null,
+    bars_missing_new: null,
+    bars_existing_candidate: null,
+    rows_changed: null,
+    rows_skipped_unchanged: null,
+    rows_changed_skipped_due_to_no_update_existing: null,
+    rows_skipped_if_known: null,
+    latest_existing_end_ts_before: null,
+  });
+  assert.ok(isKrakenOhlcStatusActive(resp.truth_state));
+  assert.equal(resp.latest_mode, "ingest");
+  assert.equal(resp.sync_policy, null);
+  assert.equal(resp.rows_changed, null);
+});
+
+test("KrakenOhlcStatusResponse no_evidence shape is honest (empty symbols, path null)", () => {
+  const resp: KrakenOhlcStatusResponse = {
+    canonical_route: "/api/v1/market-data/kraken-ohlc/status",
+    truth_state: "no_evidence",
+    provider: null,
+    latest_mode: null,
+    latest_schema_version: null,
+    produced_at_utc: null,
+    evidence_path: null,
+    stale_or_missing_evidence: true,
+    max_evidence_age_secs: 86400,
+    network_call_made: null,
+    db_write: null,
+    md_bars_write: null,
+    provider_id: null,
+    provider_source: null,
+    provider_symbol: null,
+    ingest_mode: null,
+    sync_policy: null,
+    no_update_existing: null,
+    symbols_requested: [],
+    bars_completed: null,
+    bars_excluded_forming: null,
+    bars_considered_for_sync: null,
+    bars_missing_new: null,
+    bars_existing_candidate: null,
+    rows_changed: null,
+    rows_skipped_unchanged: null,
+    rows_changed_skipped_due_to_no_update_existing: null,
+    rows_inserted: null,
+    rows_updated: null,
+    rows_skipped_if_known: null,
+    latest_existing_end_ts_before: null,
+    latest_completed_start_ts: null,
+    latest_completed_end_ts: null,
+    volume_semantics: null,
+    volume_scale: null,
+    all_passed: null,
+    reason_code: null,
+    fail_reasons: [],
+    error: null,
+  };
+  assert.ok(!isKrakenOhlcStatusActive(resp.truth_state));
+  assert.equal(resp.evidence_path, null);
+  assert.equal(resp.symbols_requested.length, 0);
+});
+
+test("KrakenOhlcStatusResponse unsafe_evidence shape is never active and flagged unsafe", () => {
+  const resp = makeActiveKrakenOhlcStatusResponse({
+    truth_state: "unsafe_evidence",
+    error: "evidence provider field is not 'kraken'",
+  });
+  assert.ok(!isKrakenOhlcStatusActive(resp.truth_state));
+  assert.ok(isKrakenOhlcEvidenceUnsafe(resp));
+});
+
+// KRAKEN_OHLC_STATUS_WARNING_TEXT
+
+test("KRAKEN_OHLC_STATUS_WARNING_TEXT names data-ingestion visibility, not trading enablement", () => {
+  assert.match(KRAKEN_OHLC_STATUS_WARNING_TEXT, /data-ingestion visibility only/i);
+  assert.match(KRAKEN_OHLC_STATUS_WARNING_TEXT, /not.*crypto trading enablement/i);
+});
+
+// fetchKrakenOhlcStatus
+
+test("fetchKrakenOhlcStatus GETs the canonical kraken-ohlc status route", async () => {
+  const calls: Array<{ url: string; init?: RequestInit }> = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+    calls.push({ url: String(url), init });
+    return new Response(
+      JSON.stringify(makeActiveKrakenOhlcStatusResponse()),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  }) as typeof fetch;
+
+  try {
+    const result = await fetchKrakenOhlcStatus();
+    assert.equal(result.ok, true);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].url, "http://127.0.0.1:8899/api/v1/market-data/kraken-ohlc/status");
+    assert.equal(calls[0].init?.method ?? "GET", "GET");
+    assert.equal(result.data?.truth_state, "active");
+    assert.equal(result.data?.rows_changed, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("fetchKrakenOhlcStatus surfaces backend_unavailable without throwing", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () =>
+    new Response(
+      JSON.stringify({
+        canonical_route: "/api/v1/market-data/kraken-ohlc/status",
+        truth_state: "backend_unavailable",
+        provider: null,
+        latest_mode: null,
+        latest_schema_version: null,
+        produced_at_utc: null,
+        evidence_path: null,
+        stale_or_missing_evidence: true,
+        max_evidence_age_secs: 86400,
+        network_call_made: null,
+        db_write: null,
+        md_bars_write: null,
+        provider_id: null,
+        provider_source: null,
+        provider_symbol: null,
+        ingest_mode: null,
+        sync_policy: null,
+        no_update_existing: null,
+        symbols_requested: [],
+        bars_completed: null,
+        bars_excluded_forming: null,
+        bars_considered_for_sync: null,
+        bars_missing_new: null,
+        bars_existing_candidate: null,
+        rows_changed: null,
+        rows_skipped_unchanged: null,
+        rows_changed_skipped_due_to_no_update_existing: null,
+        rows_inserted: null,
+        rows_updated: null,
+        rows_skipped_if_known: null,
+        latest_existing_end_ts_before: null,
+        latest_completed_start_ts: null,
+        latest_completed_end_ts: null,
+        volume_semantics: null,
+        volume_scale: null,
+        all_passed: null,
+        reason_code: null,
+        fail_reasons: [],
+        error: "evidence directory could not be read",
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    )) as typeof fetch;
+
+  try {
+    const result = await fetchKrakenOhlcStatus();
+    assert.equal(result.ok, true);
+    assert.equal(result.data?.truth_state, "backend_unavailable");
+    assert.ok(!isKrakenOhlcStatusActive(result.data!.truth_state));
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("fetchKrakenOhlcStatus maps a network/transport failure to ok:false", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => {
+    throw new Error("network unreachable");
+  }) as typeof fetch;
+
+  try {
+    const result = await fetchKrakenOhlcStatus();
     assert.equal(result.ok, false);
     assert.ok(result.error);
   } finally {

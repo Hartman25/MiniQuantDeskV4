@@ -18,6 +18,7 @@ import {
   computeMissingTrackedSymbols,
   coverageTruthLabel,
   fetchIntradayRefreshStatus,
+  fetchKrakenOhlcStatus,
   fetchLatestMarkStatus,
   fetchMdBarsCoverage,
   fetchTrackedEquities,
@@ -30,6 +31,8 @@ import {
   isCoverageActive,
   isIntradayRefreshActive,
   isCancellableIngestStatus,
+  isKrakenOhlcEvidenceUnsafe,
+  isKrakenOhlcStatusActive,
   isLatestMarkEvidenceUnsafe,
   isLatestMarkStatusActive,
   isMarketDataFeedRealActionAllowed,
@@ -37,6 +40,8 @@ import {
   isTrackedEquitiesActive,
   isTerminalIngestStatus,
   intradayRefreshTruthLabel,
+  krakenOhlcStatusTruthLabel,
+  KRAKEN_OHLC_STATUS_WARNING_TEXT,
   latestMarkStatusTruthLabel,
   normalizeIngestJobStatus,
   parseMarketDataFeedSymbols,
@@ -52,7 +57,7 @@ import {
 import { buildRepoRelativePath, buildMd1DSymbolPath, MD_BACKUP_1D_SEGMENTS, MD_INGEST_SEGMENTS } from "../backtests/pathHelpers.ts";
 import { getDesktopRepoRoot } from "../../desktop/bootstrap.ts";
 import type { CoverageSortMode } from "./api.ts";
-import type { ActiveIngestJob, ActiveProviderJob, IngestJobStatusKind, IntradayRefreshStatusResponse, LatestMarkStatusResponse, MarketDataFeedPollOnceResponse, MarketDataFeedSchedulerStatusResponse, MarketDataFeedStatusResponse, MdBarsCoverageResponse, MdBarsCoverageRow, TrackedEquitiesResponse } from "./types.ts";
+import type { ActiveIngestJob, ActiveProviderJob, IngestJobStatusKind, IntradayRefreshStatusResponse, KrakenOhlcStatusResponse, LatestMarkStatusResponse, MarketDataFeedPollOnceResponse, MarketDataFeedSchedulerStatusResponse, MarketDataFeedStatusResponse, MdBarsCoverageResponse, MdBarsCoverageRow, TrackedEquitiesResponse } from "./types.ts";
 
 // ---------------------------------------------------------------------------
 // Status badge
@@ -225,6 +230,11 @@ export function IngestScreen() {
   const [latestMarkStatusLoading, setLatestMarkStatusLoading] = useState(false);
   const [latestMarkStatusError, setLatestMarkStatusError] = useState<string | null>(null);
 
+  // CRYPTO-DATA-01AE-KRAKEN-SYNC-GUI-STATUS-SURFACE-01: Kraken OHLC evidence status state
+  const [krakenOhlcStatus, setKrakenOhlcStatus] = useState<KrakenOhlcStatusResponse | null>(null);
+  const [krakenOhlcStatusLoading, setKrakenOhlcStatusLoading] = useState(false);
+  const [krakenOhlcStatusError, setKrakenOhlcStatusError] = useState<string | null>(null);
+
   // DATA-PROVIDER-GUI-FEED-SCHEDULER-01: Latest closed-bar feed scheduler state
   const [latestFeedProviderId, setLatestFeedProviderId] = useState("alpaca");
   const [latestFeedTimeframe, setLatestFeedTimeframe] = useState("5m");
@@ -327,6 +337,24 @@ export function IngestScreen() {
   // Auto-load latest-mark evidence status on mount
   useEffect(() => {
     void loadLatestMarkStatus();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const loadKrakenOhlcStatus = useCallback(async () => {
+    setKrakenOhlcStatusLoading(true);
+    setKrakenOhlcStatusError(null);
+    const result = await fetchKrakenOhlcStatus();
+    setKrakenOhlcStatusLoading(false);
+    if (!result.ok) {
+      setKrakenOhlcStatusError(result.error ?? "Kraken OHLC status fetch failed.");
+      return;
+    }
+    setKrakenOhlcStatus(result.data ?? null);
+  }, []);
+
+  // Auto-load Kraken OHLC evidence status on mount
+  useEffect(() => {
+    void loadKrakenOhlcStatus();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -2265,6 +2293,203 @@ export function IngestScreen() {
         {latestMarkStatusLoading && (
           <div className="bt-job-meta" style={{ color: "var(--accent)" }}>
             Loading latest-mark status…
+          </div>
+        )}
+      </Panel>
+
+      {/* CRYPTO-DATA-01AE-KRAKEN-SYNC-GUI-STATUS-SURFACE-01: Kraken OHLCV sync status */}
+      <Panel
+        title="Kraken OHLCV sync status"
+        subtitle="Read-only evidence from mqk md kraken-ohlc-ingest / kraken-ohlc-sync. No provider calls. No DB writes."
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+          <button
+            type="button"
+            className="action-button"
+            onClick={() => void loadKrakenOhlcStatus()}
+            disabled={krakenOhlcStatusLoading}
+            style={{ padding: "2px 12px" }}
+          >
+            {krakenOhlcStatusLoading ? "Loading…" : "Refresh"}
+          </button>
+        </div>
+
+        <div className="unavailable-notice" style={{ marginBottom: 10, color: "var(--text-muted, #888)" }}>
+          <strong>{KRAKEN_OHLC_STATUS_WARNING_TEXT}</strong>
+        </div>
+
+        {krakenOhlcStatusError && (
+          <div className="unavailable-notice unavailable-critical" style={{ marginBottom: 8 }}>
+            <strong>Fetch failed:</strong> {krakenOhlcStatusError}
+          </div>
+        )}
+
+        {krakenOhlcStatus === null && !krakenOhlcStatusLoading && !krakenOhlcStatusError && (
+          <div className="unavailable-notice" style={{ color: "var(--text-muted, #888)" }}>
+            Not loaded yet. Click Refresh or wait for auto-load.
+          </div>
+        )}
+
+        {krakenOhlcStatus !== null && (
+          <>
+            {isKrakenOhlcEvidenceUnsafe(krakenOhlcStatus) && (
+              <div className="unavailable-notice unavailable-critical" style={{ marginBottom: 8 }}>
+                <strong>{krakenOhlcStatusTruthLabel("unsafe_evidence")}</strong>
+                {krakenOhlcStatus.error ? ` — ${krakenOhlcStatus.error}` : ""}
+              </div>
+            )}
+
+            <div className="bt-job-meta" style={{ marginBottom: 6 }}>
+              <span className="eyebrow">truth_state</span>{" "}
+              <strong>{krakenOhlcStatusTruthLabel(krakenOhlcStatus.truth_state)}</strong>
+              {krakenOhlcStatus.provider && (
+                <>
+                  {" "}<span className="eyebrow">provider</span>{" "}
+                  <strong>{krakenOhlcStatus.provider}</strong>
+                </>
+              )}
+              {krakenOhlcStatus.latest_mode && (
+                <>
+                  {" "}<span className="eyebrow">mode</span>{" "}
+                  <strong>{krakenOhlcStatus.latest_mode}</strong>
+                </>
+              )}
+              {krakenOhlcStatus.produced_at_utc && (
+                <>
+                  {" "}<span className="eyebrow">produced</span>{" "}
+                  <strong>{krakenOhlcStatus.produced_at_utc.slice(0, 19).replace("T", " ")}</strong>
+                </>
+              )}
+            </div>
+
+            {krakenOhlcStatus.evidence_path && (
+              <div className="bt-field-hint" style={{ marginBottom: 8, fontSize: "0.82rem" }}>
+                <span className="eyebrow">evidence</span>{" "}
+                <code style={{ wordBreak: "break-all" }}>{krakenOhlcStatus.evidence_path}</code>
+              </div>
+            )}
+
+            {krakenOhlcStatus.stale_or_missing_evidence && (
+              <div className="unavailable-notice" style={{ marginBottom: 8 }}>
+                <strong>Evidence is stale or missing.</strong>{" "}
+                Run <code>mqk md kraken-ohlc-sync</code> to refresh.
+              </div>
+            )}
+
+            <div className="timeline-meta-grid" style={{ marginBottom: 8 }}>
+              <div>
+                <span>network_call_made</span>
+                <strong>{krakenOhlcStatus.network_call_made === null ? "unknown" : String(krakenOhlcStatus.network_call_made)}</strong>
+              </div>
+              <div>
+                <span>db_write</span>
+                <strong>{krakenOhlcStatus.db_write === null ? "unknown" : String(krakenOhlcStatus.db_write)}</strong>
+              </div>
+              <div>
+                <span>md_bars_write</span>
+                <strong>{krakenOhlcStatus.md_bars_write === null ? "unknown" : String(krakenOhlcStatus.md_bars_write)}</strong>
+              </div>
+              <div>
+                <span>provider_id</span>
+                <strong>{krakenOhlcStatus.provider_id ?? "—"}</strong>
+              </div>
+              <div>
+                <span>provider_source</span>
+                <strong>{krakenOhlcStatus.provider_source ?? "—"}</strong>
+              </div>
+              <div>
+                <span>provider_symbol</span>
+                <strong>{krakenOhlcStatus.provider_symbol ?? "—"}</strong>
+              </div>
+              <div>
+                <span>ingest_mode</span>
+                <strong>{krakenOhlcStatus.ingest_mode ?? "—"}</strong>
+              </div>
+              <div>
+                <span>sync_policy</span>
+                <strong>{krakenOhlcStatus.sync_policy ?? "—"}</strong>
+              </div>
+              <div>
+                <span>bars completed</span>
+                <strong>{krakenOhlcStatus.bars_completed ?? "—"}</strong>
+              </div>
+              <div>
+                <span>bars excluded forming</span>
+                <strong>{krakenOhlcStatus.bars_excluded_forming ?? "—"}</strong>
+              </div>
+              <div>
+                <span>rows inserted</span>
+                <strong>{krakenOhlcStatus.rows_inserted ?? "—"}</strong>
+              </div>
+              <div>
+                <span>rows updated</span>
+                <strong>{krakenOhlcStatus.rows_updated ?? "—"}</strong>
+              </div>
+              <div>
+                <span>rows skipped unchanged</span>
+                <strong>{krakenOhlcStatus.rows_skipped_unchanged ?? "—"}</strong>
+              </div>
+              <div>
+                <span>rows changed</span>
+                <strong>{krakenOhlcStatus.rows_changed ?? "—"}</strong>
+              </div>
+              <div>
+                <span>rows changed skipped (no-update-existing)</span>
+                <strong>{krakenOhlcStatus.rows_changed_skipped_due_to_no_update_existing ?? "—"}</strong>
+              </div>
+              <div>
+                <span>latest existing end_ts before</span>
+                <strong>{krakenOhlcStatus.latest_existing_end_ts_before ?? "—"}</strong>
+              </div>
+              <div>
+                <span>latest completed start_ts</span>
+                <strong>{krakenOhlcStatus.latest_completed_start_ts ?? "—"}</strong>
+              </div>
+              <div>
+                <span>latest completed end_ts</span>
+                <strong>{krakenOhlcStatus.latest_completed_end_ts ?? "—"}</strong>
+              </div>
+              <div>
+                <span>volume semantics</span>
+                <strong>{krakenOhlcStatus.volume_semantics ?? "—"}</strong>
+              </div>
+              <div>
+                <span>volume scale</span>
+                <strong>{krakenOhlcStatus.volume_scale ?? "—"}</strong>
+              </div>
+              <div>
+                <span>all_passed</span>
+                <strong>{krakenOhlcStatus.all_passed === null ? "unknown" : String(krakenOhlcStatus.all_passed)}</strong>
+              </div>
+              <div>
+                <span>reason_code</span>
+                <strong>{krakenOhlcStatus.reason_code ?? "—"}</strong>
+              </div>
+            </div>
+
+            <div className="bt-job-meta" style={{ marginBottom: 8 }}>
+              <span className="eyebrow">symbols requested</span>{" "}
+              <strong>{krakenOhlcStatus.symbols_requested.length > 0 ? krakenOhlcStatus.symbols_requested.join(", ") : "—"}</strong>
+            </div>
+
+            {krakenOhlcStatus.fail_reasons.length > 0 && (
+              <div className="unavailable-notice" style={{ marginBottom: 8 }}>
+                <strong>fail_reasons:</strong> {krakenOhlcStatus.fail_reasons.join(", ")}
+              </div>
+            )}
+
+            {!isKrakenOhlcStatusActive(krakenOhlcStatus.truth_state) && (
+              <div className="unavailable-notice" style={{ color: "var(--text-muted, #888)" }}>
+                <strong>truth_state:</strong> {krakenOhlcStatusTruthLabel(krakenOhlcStatus.truth_state)}
+                {krakenOhlcStatus.error ? ` — ${krakenOhlcStatus.error}` : ""}
+              </div>
+            )}
+          </>
+        )}
+
+        {krakenOhlcStatusLoading && (
+          <div className="bt-job-meta" style={{ color: "var(--accent)" }}>
+            Loading Kraken OHLC status…
           </div>
         )}
       </Panel>

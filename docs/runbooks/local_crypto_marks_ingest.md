@@ -665,6 +665,33 @@ for full detail.
 **This is data-ingestion visibility only.** It is not scheduling, not
 strategy input, not broker execution, and not crypto trading enablement.
 
+## Kraken OHLCV Sync Status Panel (CRYPTO-DATA-01AE-KRAKEN-SYNC-GUI-STATUS-SURFACE-01)
+
+Read-only GUI panel ("Kraken OHLCV sync status") on the Ingest screen
+consuming `GET /api/v1/market-data/kraken-ohlc/status`, mirroring the
+existing "Crypto latest marks" panel. Displays `truth_state`, `provider`,
+`latest_mode` (ingest/sync), `produced_at_utc`, `evidence_path`, staleness,
+`network_call_made`/`db_write`/`md_bars_write`, provider provenance
+(`provider_id`/`provider_source`/`provider_symbol`/`ingest_mode`),
+`sync_policy`, symbols requested, bar/row counts including the `01AB-AC`
+content-diff fields (`rows_changed`, `rows_skipped_unchanged`,
+`rows_changed_skipped_due_to_no_update_existing`, `rows_inserted`,
+`rows_updated`), latest end_ts fields, volume semantics/scale, and
+`fail_reasons`. `unsafe_evidence` is rendered as a critical fail-closed
+notice, never as usable data.
+
+The panel carries a fixed warning:
+*"Kraken OHLCV evidence is data-ingestion visibility only. It is not
+scheduling, not strategy input by itself, not broker execution, and not
+crypto trading enablement."*
+
+The panel never triggers a Kraken sync, never runs the CLI, never calls a
+provider, never starts a daemon job, and has no scheduler button. Read-only
+in every respect — a "Refresh" button re-fetches the same GET route only.
+
+Implemented in `core-rs/mqk-gui/src/features/ingest/{types.ts,api.ts,IngestScreen.tsx}`,
+tested in `core-rs/mqk-gui/src/features/ingest/__tests__/api.test.ts`.
+
 ## Remaining Gaps
 
 - `sync-provider` (incremental backfill) still has no Kraken path — an
@@ -672,15 +699,13 @@ strategy input, not broker execution, and not crypto trading enablement.
   `docs/specs/crypto_data_01x_y_kraken_ingest_provider_db_proof.md` §5). A
   Kraken-specific `kraken-ohlc-sync` command now exists instead (see above).
 - No recurring/scheduled Kraken sync of any kind; no daemon ingest job.
-- No GUI surface consuming the Kraken OHLC status route yet (tracked as
-  `CRYPTO-DATA-01AE-KRAKEN-SYNC-GUI-STATUS-SURFACE-01`).
 - CoinLore's verified public endpoints are ticker/spot-only, not OHLCV; a
   `LatestMark` parser/model and a read-only evidence-file status route now
   exist for that ticker data, but no `latest_marks` DB table exists — the
   route is evidence-file-only, not backed by persisted/queryable storage.
-- A read-only GUI surface for crypto latest marks now exists (see above);
-  no GUI action can trigger a provider/network/CLI call. No GUI surface
-  exists for Kraken OHLCV.
+- Read-only GUI surfaces for crypto latest marks and Kraken OHLCV sync
+  status now both exist (see above); no GUI action can trigger a
+  provider/network/CLI/scheduler call for either.
 - No production registry-v2 cutover (registry-v2 still has zero production
   route callers for the default/legacy config).
 - This does not enable crypto trading, paper trading, or live trading.

@@ -19,6 +19,7 @@ import type {
   IngestJobStatusResponse,
   IngestJobsListResponse,
   IntradayRefreshStatusResponse,
+  KrakenOhlcStatusResponse,
   LatestMarkStatusResponse,
   MarketDataFeedPollOnceRequest,
   MarketDataFeedPollOnceResponse,
@@ -1052,6 +1053,95 @@ export async function fetchLatestMarkStatus(): Promise<FetchLatestMarkStatusResu
 
   if (!result.ok) {
     return { ok: false, error: result.error ?? "Latest-mark status fetch failed." };
+  }
+
+  return { ok: true, data: result.data };
+}
+
+// ---------------------------------------------------------------------------
+// CRYPTO-DATA-01AE-KRAKEN-SYNC-GUI-STATUS-SURFACE-01: Kraken OHLC
+// ingest/sync evidence status
+// ---------------------------------------------------------------------------
+
+export interface FetchKrakenOhlcStatusResult {
+  ok: boolean;
+  data?: KrakenOhlcStatusResponse;
+  error?: string;
+}
+
+/**
+ * Fixed warning text the GUI panel must display verbatim, so the operator
+ * cannot mistake this read-only evidence surface for scheduling, strategy
+ * input, or trading enablement.
+ */
+export const KRAKEN_OHLC_STATUS_WARNING_TEXT =
+  "Kraken OHLCV evidence is data-ingestion visibility only. It is not scheduling, not strategy input by itself, not broker execution, and not crypto trading enablement.";
+
+/**
+ * Return true only for the truth_state that means "usable display data".
+ * stale/no_evidence/parse_error/unsafe_evidence/backend_unavailable are all
+ * explicitly not active.
+ */
+export function isKrakenOhlcStatusActive(truthState: string): boolean {
+  return truthState === "active";
+}
+
+/**
+ * Human-readable label for a Kraken OHLC status truth_state.
+ * unsafe_evidence is worded as a severe fail-closed condition, not a plain
+ * status label.
+ */
+export function krakenOhlcStatusTruthLabel(truthState: string): string {
+  switch (truthState) {
+    case "active":
+      return "active";
+    case "stale":
+      return "stale";
+    case "no_evidence":
+      return "no evidence";
+    case "parse_error":
+      return "parse error";
+    case "unsafe_evidence":
+      return "UNSAFE EVIDENCE — fail-closed, not displayed as active";
+    case "backend_unavailable":
+      return "backend unavailable";
+    default:
+      return truthState;
+  }
+}
+
+/**
+ * Defense-in-depth check independent of the backend's own truth_state
+ * classification: if the evidence body's own fields look inconsistent or
+ * unsafe, treat it as unsafe even if truth_state were somehow not
+ * "unsafe_evidence". The backend already classifies these as
+ * unsafe_evidence -- this is a second, GUI-side guard so a misclassified
+ * response is never rendered as trustworthy.
+ */
+export function isKrakenOhlcEvidenceUnsafe(response: KrakenOhlcStatusResponse): boolean {
+  return (
+    response.truth_state === "unsafe_evidence" ||
+    (response.provider !== null && response.provider !== "kraken") ||
+    (response.db_write === false &&
+      ((response.rows_inserted ?? 0) > 0 || (response.rows_updated ?? 0) > 0))
+  );
+}
+
+/**
+ * Fetch GET /api/v1/market-data/kraken-ohlc/status.
+ *
+ * Safety: Read-only. No DB connection. No provider/network call. No CLI
+ * execution. No sync/ingest triggered. No trading state mutation. Data-
+ * ingestion visibility only -- not scheduling, not strategy input by
+ * itself, not broker execution, and not crypto trading enablement.
+ */
+export async function fetchKrakenOhlcStatus(): Promise<FetchKrakenOhlcStatusResult> {
+  const result = await fetchJsonCandidate<KrakenOhlcStatusResponse>(
+    "/api/v1/market-data/kraken-ohlc/status",
+  );
+
+  if (!result.ok) {
+    return { ok: false, error: result.error ?? "Kraken OHLC status fetch failed." };
   }
 
   return { ok: true, data: result.data };
