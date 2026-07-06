@@ -13,6 +13,7 @@ import type {
   ActiveIngestJob,
   ActiveProviderJob,
   CancelIngestJobResponse,
+  CryptoRegistryReadinessResponse,
   IngestJobAcceptedResponse,
   IngestJobRequest,
   IngestJobStatusKind,
@@ -1142,6 +1143,99 @@ export async function fetchKrakenOhlcStatus(): Promise<FetchKrakenOhlcStatusResu
 
   if (!result.ok) {
     return { ok: false, error: result.error ?? "Kraken OHLC status fetch failed." };
+  }
+
+  return { ok: true, data: result.data };
+}
+
+// ---------------------------------------------------------------------------
+// CRYPTO-REGISTRY-04-KRAKEN-DATA-ONLY-REGISTRY-STATUS-SURFACE-01: crypto
+// registry readiness
+// ---------------------------------------------------------------------------
+
+export interface FetchCryptoRegistryReadinessResult {
+  ok: boolean;
+  data?: CryptoRegistryReadinessResponse;
+  error?: string;
+}
+
+/**
+ * Fixed warning text the GUI panel must display verbatim, so the operator
+ * cannot mistake this read-only registry-visibility surface for crypto
+ * trading, broker routing, strategy execution, or scheduling.
+ */
+export const CRYPTO_REGISTRY_READINESS_WARNING_TEXT =
+  "Registry readiness is data-pipeline visibility only. It does not enable crypto trading, broker routing, strategy execution, or scheduling.";
+
+/**
+ * Return true only for the truth_state that means "usable display data".
+ * missing_provider/missing_symbol/missing_alias/unsafe_trading_enabled/
+ * unsafe_provider_enabled/parse_error are all explicitly not active.
+ */
+export function isCryptoRegistryReadinessActive(truthState: string): boolean {
+  return truthState === "active";
+}
+
+/**
+ * Human-readable label for a crypto registry readiness truth_state. The two
+ * "unsafe_*" states are worded as severe fail-closed conditions, not plain
+ * status labels.
+ */
+export function cryptoRegistryReadinessTruthLabel(truthState: string): string {
+  switch (truthState) {
+    case "active":
+      return "active";
+    case "missing_provider":
+      return "provider not found";
+    case "missing_symbol":
+      return "symbol not found or wrong asset class";
+    case "missing_alias":
+      return "Kraken alias incomplete";
+    case "unsafe_trading_enabled":
+      return "UNSAFE — trading flag unexpectedly enabled";
+    case "unsafe_provider_enabled":
+      return "UNSAFE — provider unexpectedly enabled";
+    case "parse_error":
+      return "parse error";
+    default:
+      return truthState;
+  }
+}
+
+/**
+ * Defense-in-depth check independent of the backend's own truth_state
+ * classification: if the response's own fields look inconsistent or unsafe,
+ * treat it as unsafe even if truth_state were somehow not one of the
+ * unsafe_* states. The backend already classifies these -- this is a
+ * second, GUI-side guard so a misclassified response is never rendered as
+ * trustworthy.
+ */
+export function isCryptoRegistryReadinessUnsafe(
+  response: CryptoRegistryReadinessResponse,
+): boolean {
+  return (
+    response.truth_state === "unsafe_trading_enabled" ||
+    response.truth_state === "unsafe_provider_enabled" ||
+    response.provider_enabled === true ||
+    response.symbols.some((s) => s.paper_trading_enabled === true || s.live_trading_enabled === true)
+  );
+}
+
+/**
+ * Fetch GET /api/v1/market-data/crypto-registry/readiness.
+ *
+ * Safety: Read-only. No DB connection. No provider/network call. No CLI
+ * execution. No config file mutated. No scheduler. No trading state.
+ * Data-pipeline visibility only -- not crypto trading, broker routing,
+ * strategy execution, or scheduling.
+ */
+export async function fetchCryptoRegistryReadiness(): Promise<FetchCryptoRegistryReadinessResult> {
+  const result = await fetchJsonCandidate<CryptoRegistryReadinessResponse>(
+    "/api/v1/market-data/crypto-registry/readiness",
+  );
+
+  if (!result.ok) {
+    return { ok: false, error: result.error ?? "Crypto registry readiness fetch failed." };
   }
 
   return { ok: true, data: result.data };

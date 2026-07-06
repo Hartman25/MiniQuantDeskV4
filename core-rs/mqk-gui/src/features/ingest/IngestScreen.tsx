@@ -17,6 +17,9 @@ import {
   computeCoverageSummary,
   computeMissingTrackedSymbols,
   coverageTruthLabel,
+  CRYPTO_REGISTRY_READINESS_WARNING_TEXT,
+  cryptoRegistryReadinessTruthLabel,
+  fetchCryptoRegistryReadiness,
   fetchIntradayRefreshStatus,
   fetchKrakenOhlcStatus,
   fetchLatestMarkStatus,
@@ -31,6 +34,8 @@ import {
   isCoverageActive,
   isIntradayRefreshActive,
   isCancellableIngestStatus,
+  isCryptoRegistryReadinessActive,
+  isCryptoRegistryReadinessUnsafe,
   isKrakenOhlcEvidenceUnsafe,
   isKrakenOhlcStatusActive,
   isLatestMarkEvidenceUnsafe,
@@ -57,7 +62,7 @@ import {
 import { buildRepoRelativePath, buildMd1DSymbolPath, MD_BACKUP_1D_SEGMENTS, MD_INGEST_SEGMENTS } from "../backtests/pathHelpers.ts";
 import { getDesktopRepoRoot } from "../../desktop/bootstrap.ts";
 import type { CoverageSortMode } from "./api.ts";
-import type { ActiveIngestJob, ActiveProviderJob, IngestJobStatusKind, IntradayRefreshStatusResponse, KrakenOhlcStatusResponse, LatestMarkStatusResponse, MarketDataFeedPollOnceResponse, MarketDataFeedSchedulerStatusResponse, MarketDataFeedStatusResponse, MdBarsCoverageResponse, MdBarsCoverageRow, TrackedEquitiesResponse } from "./types.ts";
+import type { ActiveIngestJob, ActiveProviderJob, CryptoRegistryReadinessResponse, IngestJobStatusKind, IntradayRefreshStatusResponse, KrakenOhlcStatusResponse, LatestMarkStatusResponse, MarketDataFeedPollOnceResponse, MarketDataFeedSchedulerStatusResponse, MarketDataFeedStatusResponse, MdBarsCoverageResponse, MdBarsCoverageRow, TrackedEquitiesResponse } from "./types.ts";
 
 // ---------------------------------------------------------------------------
 // Status badge
@@ -235,6 +240,11 @@ export function IngestScreen() {
   const [krakenOhlcStatusLoading, setKrakenOhlcStatusLoading] = useState(false);
   const [krakenOhlcStatusError, setKrakenOhlcStatusError] = useState<string | null>(null);
 
+  // CRYPTO-REGISTRY-04-KRAKEN-DATA-ONLY-REGISTRY-STATUS-SURFACE-01: Crypto registry readiness state
+  const [cryptoRegistryReadiness, setCryptoRegistryReadiness] = useState<CryptoRegistryReadinessResponse | null>(null);
+  const [cryptoRegistryReadinessLoading, setCryptoRegistryReadinessLoading] = useState(false);
+  const [cryptoRegistryReadinessError, setCryptoRegistryReadinessError] = useState<string | null>(null);
+
   // DATA-PROVIDER-GUI-FEED-SCHEDULER-01: Latest closed-bar feed scheduler state
   const [latestFeedProviderId, setLatestFeedProviderId] = useState("alpaca");
   const [latestFeedTimeframe, setLatestFeedTimeframe] = useState("5m");
@@ -355,6 +365,24 @@ export function IngestScreen() {
   // Auto-load Kraken OHLC evidence status on mount
   useEffect(() => {
     void loadKrakenOhlcStatus();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const loadCryptoRegistryReadiness = useCallback(async () => {
+    setCryptoRegistryReadinessLoading(true);
+    setCryptoRegistryReadinessError(null);
+    const result = await fetchCryptoRegistryReadiness();
+    setCryptoRegistryReadinessLoading(false);
+    if (!result.ok) {
+      setCryptoRegistryReadinessError(result.error ?? "Crypto registry readiness fetch failed.");
+      return;
+    }
+    setCryptoRegistryReadiness(result.data ?? null);
+  }, []);
+
+  // Auto-load crypto registry readiness on mount
+  useEffect(() => {
+    void loadCryptoRegistryReadiness();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -2490,6 +2518,120 @@ export function IngestScreen() {
         {krakenOhlcStatusLoading && (
           <div className="bt-job-meta" style={{ color: "var(--accent)" }}>
             Loading Kraken OHLC status…
+          </div>
+        )}
+      </Panel>
+
+      {/* CRYPTO-REGISTRY-04-KRAKEN-DATA-ONLY-REGISTRY-STATUS-SURFACE-01: Crypto registry readiness */}
+      <Panel
+        title="Crypto registry readiness"
+        subtitle="Read-only re-exposure of mqk md crypto-registry-readiness. No provider calls. No DB writes. No config mutated."
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+          <button
+            type="button"
+            className="action-button"
+            onClick={() => void loadCryptoRegistryReadiness()}
+            disabled={cryptoRegistryReadinessLoading}
+            style={{ padding: "2px 12px" }}
+          >
+            {cryptoRegistryReadinessLoading ? "Loading…" : "Refresh"}
+          </button>
+        </div>
+
+        <div className="unavailable-notice" style={{ marginBottom: 10, color: "var(--text-muted, #888)" }}>
+          <strong>{CRYPTO_REGISTRY_READINESS_WARNING_TEXT}</strong>
+        </div>
+
+        {cryptoRegistryReadinessError && (
+          <div className="unavailable-notice unavailable-critical" style={{ marginBottom: 8 }}>
+            <strong>Fetch failed:</strong> {cryptoRegistryReadinessError}
+          </div>
+        )}
+
+        {cryptoRegistryReadiness === null && !cryptoRegistryReadinessLoading && !cryptoRegistryReadinessError && (
+          <div className="unavailable-notice" style={{ color: "var(--text-muted, #888)" }}>
+            Not loaded yet. Click Refresh or wait for auto-load.
+          </div>
+        )}
+
+        {cryptoRegistryReadiness !== null && (
+          <>
+            {isCryptoRegistryReadinessUnsafe(cryptoRegistryReadiness) && (
+              <div className="unavailable-notice unavailable-critical" style={{ marginBottom: 8 }}>
+                <strong>{cryptoRegistryReadinessTruthLabel(cryptoRegistryReadiness.truth_state)}</strong>
+              </div>
+            )}
+
+            <div className="bt-job-meta" style={{ marginBottom: 6 }}>
+              <span className="eyebrow">truth_state</span>{" "}
+              <strong>{cryptoRegistryReadinessTruthLabel(cryptoRegistryReadiness.truth_state)}</strong>{" "}
+              <span className="eyebrow">provider</span>{" "}
+              <strong>{cryptoRegistryReadiness.provider}</strong>
+            </div>
+
+            <div className="timeline-meta-grid" style={{ marginBottom: 8 }}>
+              <div>
+                <span>data_readiness_state</span>
+                <strong>{cryptoRegistryReadiness.data_readiness_state}</strong>
+              </div>
+              <div>
+                <span>trading_readiness_state</span>
+                <strong>{cryptoRegistryReadiness.trading_readiness_state}</strong>
+              </div>
+              <div>
+                <span>scheduler_readiness_state</span>
+                <strong>{cryptoRegistryReadiness.scheduler_readiness_state}</strong>
+              </div>
+              <div>
+                <span>provider_enabled</span>
+                <strong>{String(cryptoRegistryReadiness.provider_enabled)}</strong>
+              </div>
+              <div>
+                <span>api_key_required</span>
+                <strong>{String(cryptoRegistryReadiness.api_key_required)}</strong>
+              </div>
+              <div>
+                <span>all_passed</span>
+                <strong>{String(cryptoRegistryReadiness.all_passed)}</strong>
+              </div>
+              <div>
+                <span>reason_code</span>
+                <strong>{cryptoRegistryReadiness.reason_code}</strong>
+              </div>
+            </div>
+
+            <div className="bt-job-meta" style={{ marginBottom: 8 }}>
+              <strong>Per-symbol status</strong>
+            </div>
+            <div className="timeline-meta-grid" style={{ marginBottom: 8 }}>
+              {cryptoRegistryReadiness.symbols.map((sym) => (
+                <div key={sym.symbol}>
+                  <span>{sym.symbol}</span>
+                  <strong>
+                    found={String(sym.found)} alias_ok={String(sym.alias_ok)} enabled={sym.enabled === null ? "—" : String(sym.enabled)} paper_trading_enabled={sym.paper_trading_enabled === null ? "—" : String(sym.paper_trading_enabled)} live_trading_enabled={sym.live_trading_enabled === null ? "—" : String(sym.live_trading_enabled)}
+                  </strong>
+                </div>
+              ))}
+            </div>
+
+            {cryptoRegistryReadiness.fail_reasons.length > 0 && (
+              <div className="unavailable-notice" style={{ marginBottom: 8 }}>
+                <strong>fail_reasons:</strong> {cryptoRegistryReadiness.fail_reasons.join(", ")}
+              </div>
+            )}
+
+            {!isCryptoRegistryReadinessActive(cryptoRegistryReadiness.truth_state) && (
+              <div className="unavailable-notice" style={{ color: "var(--text-muted, #888)" }}>
+                <strong>truth_state:</strong> {cryptoRegistryReadinessTruthLabel(cryptoRegistryReadiness.truth_state)}
+              </div>
+            )}
+          </>
+        )}
+
+        {cryptoRegistryReadinessLoading && (
+          <div className="bt-job-meta" style={{ color: "var(--accent)" }}>
+            Loading crypto registry readiness…
           </div>
         )}
       </Panel>

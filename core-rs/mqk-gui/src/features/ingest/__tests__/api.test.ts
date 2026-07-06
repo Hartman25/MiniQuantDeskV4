@@ -45,8 +45,13 @@ import {
   isKrakenOhlcStatusActive,
   krakenOhlcStatusTruthLabel,
   KRAKEN_OHLC_STATUS_WARNING_TEXT,
+  fetchCryptoRegistryReadiness,
+  isCryptoRegistryReadinessActive,
+  isCryptoRegistryReadinessUnsafe,
+  cryptoRegistryReadinessTruthLabel,
+  CRYPTO_REGISTRY_READINESS_WARNING_TEXT,
 } from "../api.ts";
-import type { IngestJobStatusResponse, IntradayRefreshStatusResponse, KrakenOhlcStatusResponse, LatestMarkStatusResponse, MdBarsCoverageResponse, MdBarsCoverageRow, TrackedEquitiesResponse } from "../types.ts";
+import type { CryptoRegistryReadinessResponse, IngestJobStatusResponse, IntradayRefreshStatusResponse, KrakenOhlcStatusResponse, LatestMarkStatusResponse, MdBarsCoverageResponse, MdBarsCoverageRow, TrackedEquitiesResponse } from "../types.ts";
 
 // ---------------------------------------------------------------------------
 // normalizeIngestJobStatus
@@ -2376,6 +2381,257 @@ test("fetchKrakenOhlcStatus maps a network/transport failure to ok:false", async
 
   try {
     const result = await fetchKrakenOhlcStatus();
+    assert.equal(result.ok, false);
+    assert.ok(result.error);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+// ---------------------------------------------------------------------------
+// CRYPTO-REGISTRY-04-KRAKEN-DATA-ONLY-REGISTRY-STATUS-SURFACE-01:
+// Crypto registry readiness helpers
+// ---------------------------------------------------------------------------
+
+function makeActiveCryptoRegistryReadinessResponse(
+  overrides: Partial<CryptoRegistryReadinessResponse> = {},
+): CryptoRegistryReadinessResponse {
+  return {
+    canonical_route: "/api/v1/market-data/crypto-registry/readiness",
+    truth_state: "active",
+    data_readiness_state: "data_ready_manual_only",
+    trading_readiness_state: "disabled",
+    scheduler_readiness_state: "absent",
+    provider: "kraken",
+    provider_enabled: false,
+    api_key_required: false,
+    provider_asset_classes: ["crypto"],
+    provider_implementation_status: "ohlcv_adapter_fixture_proven_network_opt_in_only",
+    registry_path: "config/instruments/instruments_v2.crypto_local_marks.example.json",
+    providers_path: "config/providers/providers.json",
+    symbols: [
+      {
+        symbol: "BTC/USD",
+        found: true,
+        asset_class_ok: true,
+        kraken_pair: "XBTUSD",
+        kraken_result_key: "XXBTZUSD",
+        alias_ok: true,
+        enabled: false,
+        paper_trading_enabled: false,
+        live_trading_enabled: false,
+        trading_flags_safe: true,
+        passed: true,
+      },
+      {
+        symbol: "ETH/USD",
+        found: true,
+        asset_class_ok: true,
+        kraken_pair: "ETHUSD",
+        kraken_result_key: "XETHZUSD",
+        alias_ok: true,
+        enabled: false,
+        paper_trading_enabled: false,
+        live_trading_enabled: false,
+        trading_flags_safe: true,
+        passed: true,
+      },
+    ],
+    all_passed: true,
+    reason_code: "crypto_registry_readiness_data_ready_manual_only",
+    fail_reasons: [],
+    safety: {
+      no_scheduler: true,
+      no_db_connection: true,
+      no_network_call: true,
+      no_trading_enabled: true,
+      no_config_file_mutated: true,
+    },
+    ...overrides,
+  };
+}
+
+// isCryptoRegistryReadinessActive
+
+test("isCryptoRegistryReadinessActive returns true for active", () => {
+  assert.ok(isCryptoRegistryReadinessActive("active"));
+});
+
+test("isCryptoRegistryReadinessActive returns false for missing_provider", () => {
+  assert.ok(!isCryptoRegistryReadinessActive("missing_provider"));
+});
+
+test("isCryptoRegistryReadinessActive returns false for missing_symbol", () => {
+  assert.ok(!isCryptoRegistryReadinessActive("missing_symbol"));
+});
+
+test("isCryptoRegistryReadinessActive returns false for missing_alias", () => {
+  assert.ok(!isCryptoRegistryReadinessActive("missing_alias"));
+});
+
+test("isCryptoRegistryReadinessActive returns false for unsafe_trading_enabled", () => {
+  assert.ok(!isCryptoRegistryReadinessActive("unsafe_trading_enabled"));
+});
+
+test("isCryptoRegistryReadinessActive returns false for unsafe_provider_enabled", () => {
+  assert.ok(!isCryptoRegistryReadinessActive("unsafe_provider_enabled"));
+});
+
+test("isCryptoRegistryReadinessActive returns false for parse_error", () => {
+  assert.ok(!isCryptoRegistryReadinessActive("parse_error"));
+});
+
+// cryptoRegistryReadinessTruthLabel
+
+test("cryptoRegistryReadinessTruthLabel active -> active", () => {
+  assert.equal(cryptoRegistryReadinessTruthLabel("active"), "active");
+});
+
+test("cryptoRegistryReadinessTruthLabel missing_provider -> provider not found", () => {
+  assert.equal(cryptoRegistryReadinessTruthLabel("missing_provider"), "provider not found");
+});
+
+test("cryptoRegistryReadinessTruthLabel missing_symbol -> symbol not found or wrong asset class", () => {
+  assert.equal(
+    cryptoRegistryReadinessTruthLabel("missing_symbol"),
+    "symbol not found or wrong asset class",
+  );
+});
+
+test("cryptoRegistryReadinessTruthLabel missing_alias -> Kraken alias incomplete", () => {
+  assert.equal(cryptoRegistryReadinessTruthLabel("missing_alias"), "Kraken alias incomplete");
+});
+
+test("cryptoRegistryReadinessTruthLabel unsafe_trading_enabled is worded as a severe fail-closed state", () => {
+  const label = cryptoRegistryReadinessTruthLabel("unsafe_trading_enabled");
+  assert.ok(label.includes("UNSAFE"));
+});
+
+test("cryptoRegistryReadinessTruthLabel unsafe_provider_enabled is worded as a severe fail-closed state", () => {
+  const label = cryptoRegistryReadinessTruthLabel("unsafe_provider_enabled");
+  assert.ok(label.includes("UNSAFE"));
+});
+
+test("cryptoRegistryReadinessTruthLabel parse_error -> parse error", () => {
+  assert.equal(cryptoRegistryReadinessTruthLabel("parse_error"), "parse error");
+});
+
+test("cryptoRegistryReadinessTruthLabel passes through an unknown truth_state verbatim", () => {
+  assert.equal(cryptoRegistryReadinessTruthLabel("something_new"), "something_new");
+});
+
+// isCryptoRegistryReadinessUnsafe
+
+test("isCryptoRegistryReadinessUnsafe is false for a genuinely safe response", () => {
+  assert.ok(!isCryptoRegistryReadinessUnsafe(makeActiveCryptoRegistryReadinessResponse()));
+});
+
+test("isCryptoRegistryReadinessUnsafe is true for truth_state=unsafe_trading_enabled", () => {
+  const resp = makeActiveCryptoRegistryReadinessResponse({ truth_state: "unsafe_trading_enabled" });
+  assert.ok(isCryptoRegistryReadinessUnsafe(resp));
+});
+
+test("isCryptoRegistryReadinessUnsafe is true for truth_state=unsafe_provider_enabled", () => {
+  const resp = makeActiveCryptoRegistryReadinessResponse({ truth_state: "unsafe_provider_enabled" });
+  assert.ok(isCryptoRegistryReadinessUnsafe(resp));
+});
+
+test("isCryptoRegistryReadinessUnsafe is true when provider_enabled is unexpectedly true", () => {
+  const resp = makeActiveCryptoRegistryReadinessResponse({ provider_enabled: true });
+  assert.ok(isCryptoRegistryReadinessUnsafe(resp));
+});
+
+test("isCryptoRegistryReadinessUnsafe is true when a symbol carries paper_trading_enabled=true", () => {
+  const base = makeActiveCryptoRegistryReadinessResponse();
+  const resp: CryptoRegistryReadinessResponse = {
+    ...base,
+    symbols: [{ ...base.symbols[0], paper_trading_enabled: true }, base.symbols[1]],
+  };
+  assert.ok(isCryptoRegistryReadinessUnsafe(resp));
+});
+
+test("isCryptoRegistryReadinessUnsafe is true when a symbol carries live_trading_enabled=true", () => {
+  const base = makeActiveCryptoRegistryReadinessResponse();
+  const resp: CryptoRegistryReadinessResponse = {
+    ...base,
+    symbols: [base.symbols[0], { ...base.symbols[1], live_trading_enabled: true }],
+  };
+  assert.ok(isCryptoRegistryReadinessUnsafe(resp));
+});
+
+// CRYPTO_REGISTRY_READINESS_WARNING_TEXT
+
+test("CRYPTO_REGISTRY_READINESS_WARNING_TEXT states data-pipeline-visibility-only scope", () => {
+  assert.ok(CRYPTO_REGISTRY_READINESS_WARNING_TEXT.includes("data-pipeline visibility only"));
+  assert.ok(CRYPTO_REGISTRY_READINESS_WARNING_TEXT.includes("does not enable crypto trading"));
+});
+
+// fetchCryptoRegistryReadiness
+
+test("fetchCryptoRegistryReadiness GETs the canonical crypto-registry readiness route", async () => {
+  const calls: Array<{ url: string; init?: RequestInit }> = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+    calls.push({ url: String(url), init });
+    return new Response(
+      JSON.stringify(makeActiveCryptoRegistryReadinessResponse()),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  }) as typeof fetch;
+
+  try {
+    const result = await fetchCryptoRegistryReadiness();
+    assert.equal(result.ok, true);
+    assert.equal(calls.length, 1);
+    assert.equal(
+      calls[0].url,
+      "http://127.0.0.1:8899/api/v1/market-data/crypto-registry/readiness",
+    );
+    assert.equal(calls[0].init?.method ?? "GET", "GET");
+    assert.equal(result.data?.truth_state, "active");
+    assert.equal(result.data?.data_readiness_state, "data_ready_manual_only");
+    assert.equal(result.data?.symbols.length, 2);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("fetchCryptoRegistryReadiness surfaces missing_provider without throwing", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () =>
+    new Response(
+      JSON.stringify(
+        makeActiveCryptoRegistryReadinessResponse({
+          truth_state: "missing_provider",
+          data_readiness_state: "blocked",
+          provider_enabled: false,
+          all_passed: false,
+          reason_code: "provider_not_found",
+          fail_reasons: ["provider 'kraken' not found in config/providers/providers.json"],
+        }),
+      ),
+      { status: 200, headers: { "content-type": "application/json" } },
+    )) as typeof fetch;
+
+  try {
+    const result = await fetchCryptoRegistryReadiness();
+    assert.equal(result.ok, true);
+    assert.equal(result.data?.truth_state, "missing_provider");
+    assert.ok(!isCryptoRegistryReadinessActive(result.data!.truth_state));
+    assert.equal(result.data?.fail_reasons.length, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("fetchCryptoRegistryReadiness maps a network/transport failure to ok:false", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => {
+    throw new Error("network unreachable");
+  }) as typeof fetch;
+
+  try {
+    const result = await fetchCryptoRegistryReadiness();
     assert.equal(result.ok, false);
     assert.ok(result.error);
   } finally {

@@ -4906,6 +4906,91 @@ pub struct KrakenOhlcStatusResponse {
 }
 
 // ---------------------------------------------------------------------------
+// CRYPTO-REGISTRY-04-KRAKEN-DATA-ONLY-REGISTRY-STATUS-SURFACE-01: read-only
+// re-exposure of CRYPTO-REGISTRY-03's crypto-registry-readiness CLI
+// classification via `GET /api/v1/market-data/crypto-registry/readiness`.
+// ---------------------------------------------------------------------------
+
+/// Per-symbol readiness check, mirroring `mqk-cli`'s
+/// `CryptoRegistrySymbolCheck`. `enabled`/`paper_trading_enabled`/
+/// `live_trading_enabled` are `None` only when the symbol was not found in
+/// the registry at all (distinct from `Some(false)`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CryptoRegistrySymbolReadiness {
+    pub symbol: String,
+    pub found: bool,
+    pub asset_class_ok: bool,
+    pub kraken_pair: Option<String>,
+    pub kraken_result_key: Option<String>,
+    pub alias_ok: bool,
+    pub enabled: Option<bool>,
+    pub paper_trading_enabled: Option<bool>,
+    pub live_trading_enabled: Option<bool>,
+    pub trading_flags_safe: bool,
+    pub passed: bool,
+}
+
+/// Fixed, always-true-in-practice safety flags. Present as explicit fields
+/// (rather than inferred) so a GUI/operator surface never has to assume what
+/// this route did not do.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CryptoRegistryReadinessSafety {
+    pub no_scheduler: bool,
+    pub no_db_connection: bool,
+    pub no_network_call: bool,
+    pub no_trading_enabled: bool,
+    pub no_config_file_mutated: bool,
+}
+
+/// Response for `GET /api/v1/market-data/crypto-registry/readiness`.
+///
+/// `truth_state` values:
+/// - `"active"`                  — provider found, both symbols found with
+///   complete Kraken aliases, all trading flags `false`.
+/// - `"missing_provider"`        — `provider` (`"kraken"`) has no entry in
+///   `providers_path`.
+/// - `"missing_symbol"`          — a requested symbol is absent from
+///   `registry_path`, or is present with the wrong `asset_class`.
+/// - `"missing_alias"`           — a symbol is present but missing
+///   `kraken_pair`/`kraken_result_key` in `provider_symbols`.
+/// - `"unsafe_trading_enabled"`  — a symbol carries
+///   `paper_trading_enabled=true` or `live_trading_enabled=true`.
+/// - `"unsafe_provider_enabled"` — the provider carries `enabled=true`,
+///   treated as unsafe pending an explicit, separate cutover decision
+///   (`CRYPTO-REGISTRY-02`).
+/// - `"parse_error"`             — `registry_path` or `providers_path`
+///   could not be read/parsed.
+///
+/// `data_readiness_state` is `"data_ready_manual_only"` (not a failure) when
+/// all checks pass and every symbol's `enabled` is `false`; `"blocked"` when
+/// any check fails; `"production_default"` would require a symbol's
+/// `enabled` to be `true`, which no currently-committed fixture does.
+/// `trading_readiness_state` is always `"disabled"` and
+/// `scheduler_readiness_state` is always `"absent"` -- this route has no
+/// branch that could report otherwise, since no trading path or scheduler
+/// exists in this repo to query.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CryptoRegistryReadinessResponse {
+    pub canonical_route: String,
+    pub truth_state: String,
+    pub data_readiness_state: String,
+    pub trading_readiness_state: String,
+    pub scheduler_readiness_state: String,
+    pub provider: String,
+    pub provider_enabled: bool,
+    pub api_key_required: bool,
+    pub provider_asset_classes: Vec<String>,
+    pub provider_implementation_status: String,
+    pub registry_path: String,
+    pub providers_path: String,
+    pub symbols: Vec<CryptoRegistrySymbolReadiness>,
+    pub all_passed: bool,
+    pub reason_code: String,
+    pub fail_reasons: Vec<String>,
+    pub safety: CryptoRegistryReadinessSafety,
+}
+
+// ---------------------------------------------------------------------------
 // DATA-INGEST-GUI-SYNC-ALL-01: Tracked-equities registry preview
 // ---------------------------------------------------------------------------
 

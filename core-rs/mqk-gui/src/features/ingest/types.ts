@@ -424,3 +424,75 @@ export interface KrakenOhlcStatusResponse {
   fail_reasons: string[];
   error: string | null;
 }
+
+// ---------------------------------------------------------------------------
+// CRYPTO-REGISTRY-04-KRAKEN-DATA-ONLY-REGISTRY-STATUS-SURFACE-01:
+// Crypto registry readiness (read-only)
+// ---------------------------------------------------------------------------
+
+/**
+ * Per-symbol readiness check. Mirrors CryptoRegistrySymbolReadiness in
+ * api_types.rs. `enabled`/`paper_trading_enabled`/`live_trading_enabled` are
+ * `null` only when the symbol was not found in the registry at all
+ * (distinct from `false`).
+ */
+export interface CryptoRegistrySymbolReadiness {
+  symbol: string;
+  found: boolean;
+  asset_class_ok: boolean;
+  kraken_pair: string | null;
+  kraken_result_key: string | null;
+  alias_ok: boolean;
+  enabled: boolean | null;
+  paper_trading_enabled: boolean | null;
+  live_trading_enabled: boolean | null;
+  trading_flags_safe: boolean;
+  passed: boolean;
+}
+
+/**
+ * Fixed safety flags, mirroring CryptoRegistryReadinessSafety in
+ * api_types.rs. Present as explicit fields rather than inferred so the GUI
+ * never has to assume what this route did not do.
+ */
+export interface CryptoRegistryReadinessSafety {
+  no_scheduler: boolean;
+  no_db_connection: boolean;
+  no_network_call: boolean;
+  no_trading_enabled: boolean;
+  no_config_file_mutated: boolean;
+}
+
+/**
+ * Response for GET /api/v1/market-data/crypto-registry/readiness.
+ * Mirrors CryptoRegistryReadinessResponse in api_types.rs.
+ *
+ * truth_state: "active" | "missing_provider" | "missing_symbol" |
+ * "missing_alias" | "unsafe_trading_enabled" | "unsafe_provider_enabled" |
+ * "parse_error".
+ *
+ * data_readiness_state is "data_ready_manual_only" (not a failure) when all
+ * checks pass and every symbol's `enabled` is false; "blocked" when any
+ * check fails. trading_readiness_state is always "disabled" and
+ * scheduler_readiness_state is always "absent" — this route has no branch
+ * that could ever report otherwise.
+ */
+export interface CryptoRegistryReadinessResponse {
+  canonical_route: string;
+  truth_state: string;
+  data_readiness_state: string;
+  trading_readiness_state: string;
+  scheduler_readiness_state: string;
+  provider: string;
+  provider_enabled: boolean;
+  api_key_required: boolean;
+  provider_asset_classes: string[];
+  provider_implementation_status: string;
+  registry_path: string;
+  providers_path: string;
+  symbols: CryptoRegistrySymbolReadiness[];
+  all_passed: boolean;
+  reason_code: string;
+  fail_reasons: string[];
+  safety: CryptoRegistryReadinessSafety;
+}

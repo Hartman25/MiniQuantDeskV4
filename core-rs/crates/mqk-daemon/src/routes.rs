@@ -307,8 +307,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         trading_positions, trading_snapshot, trading_snapshot_clear, trading_snapshot_set,
     };
     use transport_quality::{
-        execution_transport, intraday_refresh_status, kraken_ohlc_status, latest_mark_status,
-        market_data_coverage, market_data_quality,
+        crypto_registry_readiness, execution_transport, intraday_refresh_status,
+        kraken_ohlc_status, latest_mark_status, market_data_coverage, market_data_quality,
     };
     use watchlist::{watchlist_admission_check, watchlist_status};
 
@@ -516,6 +516,16 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/v1/market-data/kraken-ohlc/status",
             get(kraken_ohlc_status),
+        )
+        // CRYPTO-REGISTRY-04-KRAKEN-DATA-ONLY-REGISTRY-STATUS-SURFACE-01:
+        // read-only re-exposure of CRYPTO-REGISTRY-03's crypto-registry-
+        // readiness CLI classification (public, no auth). No DB, no
+        // provider/network call, no CLI subprocess, no config-file mutation,
+        // no scheduler, no trading state. provider_enabled=false and
+        // per-symbol enabled=false are expected states, not failures.
+        .route(
+            "/api/v1/market-data/crypto-registry/readiness",
+            get(crypto_registry_readiness),
         )
         .route(
             "/api/v1/market-data/feed/status",

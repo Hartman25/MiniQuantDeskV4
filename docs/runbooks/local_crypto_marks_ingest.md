@@ -734,6 +734,38 @@ writes a `crypto-registry-readiness-v1` JSON evidence artifact.
 Implemented in `core-rs/crates/mqk-cli/src/commands/md.rs::md_crypto_registry_readiness`,
 tested in `core-rs/crates/mqk-cli/tests/scenario_cli_crypto_registry_readiness_03.rs`.
 
+## Crypto Registry Readiness Status Route + GUI Panel (CRYPTO-REGISTRY-04-KRAKEN-DATA-ONLY-REGISTRY-STATUS-SURFACE-01)
+
+Read-only daemon route re-exposing the same classification as the
+`CRYPTO-REGISTRY-03` CLI:
+
+```
+GET /api/v1/market-data/crypto-registry/readiness
+```
+
+Reads `MQK_INSTRUMENT_REGISTRY_V2_PATH` (falling back to the committed
+`instruments_v2.crypto_local_marks.example.json` fixture when unset) and
+`MQK_PROVIDER_REGISTRY_PATH`/its `config/providers/providers.json` default —
+neither is ever mutated. Returns the same `truth_state` values as the CLI
+(`active`, `missing_provider`, `missing_symbol`, `missing_alias`,
+`unsafe_trading_enabled`, `unsafe_provider_enabled`, `parse_error`). No DB
+connection, no provider/network call, no CLI subprocess, no scheduler.
+
+A read-only "Crypto registry readiness" GUI panel on the Ingest screen
+(next to the Kraken OHLCV sync status panel) displays: provider, data/
+trading/scheduler readiness states, provider enabled flag,
+`BTC/USD`/`ETH/USD` alias status, paper/live trading flags, and fail
+reasons. Fixed warning: *"Registry readiness is data-pipeline visibility
+only. It does not enable crypto trading, broker routing, strategy
+execution, or scheduling."* No button mutates config or triggers a sync —
+"Refresh" only re-issues the same read-only GET.
+
+Implemented in `core-rs/crates/mqk-daemon/src/routes/transport_quality.rs::crypto_registry_readiness`,
+`core-rs/crates/mqk-daemon/src/api_types.rs::CryptoRegistryReadinessResponse`,
+`core-rs/mqk-gui/src/features/ingest/{types.ts,api.ts,IngestScreen.tsx}`.
+Tested in `core-rs/crates/mqk-daemon/tests/scenario_crypto_registry_readiness_route_04.rs`
+and `core-rs/mqk-gui/src/features/ingest/__tests__/api.test.ts`.
+
 ## Remaining Gaps
 
 - `sync-provider` (incremental backfill) still has no Kraken path — an

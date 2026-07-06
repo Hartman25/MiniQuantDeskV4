@@ -3689,3 +3689,126 @@ execution; no crypto strategy.
 `CRYPTO-REGISTRY-04-KRAKEN-DATA-ONLY-REGISTRY-STATUS-SURFACE-01` — expose the
 same read-only truth through a daemon route and GUI panel, only if it stays
 small.
+
+---
+
+### CRYPTO-REGISTRY-04-KRAKEN-DATA-ONLY-REGISTRY-STATUS-SURFACE-01 — CLOSED_LOCAL / PARTIAL
+
+**Mission:** continuing after `CRYPTO-REGISTRY-03-KRAKEN-DATA-ONLY-REGISTRY-READINESS-CLI-01`
+(committed `9ced0989`), expose the same read-only crypto-registry-readiness
+classification through a daemon route and GUI panel, since it stayed small
+enough not to require stopping after Phase B.
+
+**Concretely:** `GET /api/v1/market-data/crypto-registry/readiness`
+reimplements the identical classification the CLI performs, reusing the
+same two pure `mqk-md` loaders (`provider_registry::load_provider_registry`,
+`instrument_registry_v2::load_instrument_registry_v2`) already used
+elsewhere in the daemon (`routes/ingest.rs`, `routes/system.rs`) — no new
+`mqk-md` code. Path resolution reuses two already-existing `AppState`
+fields with no new field added: `instrument_registry_v2_path` (from
+`MQK_INSTRUMENT_REGISTRY_V2_PATH`, falling back to the committed
+`instruments_v2.crypto_local_marks.example.json` fixture when unset — the
+one difference from the ASSET-CORE-01D route, which requires the env var
+explicitly) and `provider_registry_path` (already defaults to
+`config/providers/providers.json`). Neither file is ever mutated.
+
+**Built:**
+- `core-rs/crates/mqk-daemon/src/api_types.rs` — new
+  `CryptoRegistrySymbolReadiness`, `CryptoRegistryReadinessSafety`, and
+  `CryptoRegistryReadinessResponse` structs, field-for-field mirroring the
+  CLI's evidence shape.
+- `core-rs/crates/mqk-daemon/src/routes/transport_quality.rs` — new
+  `crypto_registry_readiness` handler, identical classification logic to
+  `mqk-cli md crypto-registry-readiness` (provider existence/enablement,
+  per-symbol asset class, Kraken alias completeness, trading-flag safety).
+  Always returns `200 OK`; `truth_state`/`all_passed` communicate the
+  result, matching every other read-only status route's convention (never a
+  non-2xx for "not ready").
+- `core-rs/crates/mqk-daemon/src/routes.rs` — registered
+  `GET /api/v1/market-data/crypto-registry/readiness` (public, no auth)
+  alongside the sibling `kraken-ohlc/status` route.
+- `core-rs/crates/mqk-daemon/tests/scenario_crypto_registry_readiness_route_04.rs`
+  (new) — 8 tests (`crr_01`..`crr_08`): real committed fixtures (`active`/
+  `data_ready_manual_only`), missing provider, missing/incomplete alias,
+  missing symbol, `paper_trading_enabled=true`, `live_trading_enabled=true`,
+  `kraken.enabled=true` (six failure modes each with a distinct
+  `truth_state`, always `200 OK`), and an explicit no-DB-pool-configured
+  proof.
+- `core-rs/mqk-gui/src/features/ingest/types.ts` — new
+  `CryptoRegistrySymbolReadiness`, `CryptoRegistryReadinessSafety`,
+  `CryptoRegistryReadinessResponse` interfaces, field-for-field mirroring
+  the Rust types.
+- `core-rs/mqk-gui/src/features/ingest/api.ts` — new
+  `fetchCryptoRegistryReadiness`, `isCryptoRegistryReadinessActive`,
+  `cryptoRegistryReadinessTruthLabel` (the two `unsafe_*` states worded as
+  severe fail-closed conditions), `isCryptoRegistryReadinessUnsafe`
+  (GUI-side defense-in-depth: also flags `provider_enabled=true` or any
+  symbol's `paper_trading_enabled`/`live_trading_enabled=true`
+  independently of the backend's own `truth_state`), and the exported
+  `CRYPTO_REGISTRY_READINESS_WARNING_TEXT` constant.
+- `core-rs/mqk-gui/src/features/ingest/IngestScreen.tsx` — new state/loader
+  (auto-loaded on mount, manual Refresh button that only re-issues the same
+  read-only GET) and a new "Crypto registry readiness" `Panel` rendering
+  `truth_state`/`provider`, the three readiness-state fields, provider
+  enabled/api-key-required flags, `all_passed`/`reason_code`, a per-symbol
+  grid (found/alias_ok/enabled/paper_trading_enabled/live_trading_enabled
+  for both `BTC/USD` and `ETH/USD`), `fail_reasons`, and the fixed warning
+  text. No button mutates config or triggers a sync.
+- `core-rs/mqk-gui/src/features/ingest/__tests__/api.test.ts` — 25 new
+  tests: `isCryptoRegistryReadinessActive` for all 7 `truth_state` values,
+  `cryptoRegistryReadinessTruthLabel` for all 7 plus an unknown-passthrough
+  case and explicit "worded as unsafe" assertions for the two `unsafe_*`
+  states, `isCryptoRegistryReadinessUnsafe` (6 cases: safe, both unsafe
+  truth_states, `provider_enabled=true`, and per-symbol
+  `paper_trading_enabled`/`live_trading_enabled=true`), a warning-text
+  content assertion, and `fetchCryptoRegistryReadiness` route/
+  `missing_provider`/transport-failure tests.
+- `docs/runbooks/local_crypto_marks_ingest.md` — new "Crypto Registry
+  Readiness Status Route + GUI Panel" section.
+- `MiniQuantDesk_Master_Patch_Ledger_v2.md` — this entry.
+- `docs/audits/multi_asset_completion_audit.md` — new closure note.
+
+**Validation results (`CARGO_TARGET_DIR=C:\tmp\mqk-target-crypto-registry-04-status`):**
+`cargo check -p mqk-daemon -p mqk-cli -p mqk-md` — clean. `cargo test -p
+mqk-daemon --test scenario_crypto_registry_readiness_route_04` — 8/8 pass.
+`cargo test -p mqk-cli --test scenario_cli_crypto_registry_readiness_03` —
+9/9 pass (unaffected). `cargo clippy -p mqk-daemon --lib -- -D warnings` and
+`cargo clippy -p mqk-daemon --test scenario_crypto_registry_readiness_route_04
+-- -D warnings` (scoped to this bundle's own code) — both clean, zero
+warnings. `cargo clippy -p mqk-daemon --all-targets -- -D warnings`
+**fails on this machine's toolchain (rustc 1.93) due to the same
+pre-existing, unrelated `clippy::await_holding_lock` errors in
+`state/session_controller.rs` already documented and confirmed pre-existing
+in the `CRYPTO-DATA-01AD` entry above** — not a regression introduced here.
+GUI: `npm test -- --run` — 653/653 pass (up from 628 pre-existing; 25 new
+crypto-registry-readiness tests, zero regressions). `npm run build` —
+`tsc` type-checks clean, `vite build` succeeds (pre-existing, unrelated
+chunk-size-warning note only). `git diff --check` — clean.
+
+**Manual browser verification was not performed, honestly:** per this
+mission's hard safety rule ("Do NOT start daemon runtime except isolated
+route tests"), no live daemon was started, and the Ingest screen requires
+one to render past its "Connecting to daemon…" bootstrap screen — the same
+constraint and the same resolution (`01AE`'s exhaustive unit/route test
+suite as the verification standard) already documented for the sibling
+Kraken OHLCV GUI panel above.
+
+**Honest PARTIAL — `CRYPTO-DATA-01`/`CRYPTO-REGISTRY-01`/`ASSET-CORE-04`
+remain PARTIAL, not `CLOSED`:** this bundle adds read-only operator
+visibility for crypto registry readiness — it does not enable the `kraken`
+provider, does not flip any registry flag, does not add a button that
+mutates config or triggers a sync, and does not add recurring/scheduled
+ingestion. `config/providers/providers.json` and
+`config/instruments/instruments_v2.crypto_local_marks.example.json` are
+both unchanged. Remaining gaps unchanged from `CRYPTO-REGISTRY-02`/`03`: no
+recurring/scheduled Kraken sync; no production registry-v2 cutover; no
+crypto risk policy activation; no crypto paper/live execution; no crypto
+strategy.
+
+**Recommended next slice:** none required for continued crypto data-registry
+visibility progress on this specific thread — the natural next patches are
+either resuming the still-open production-registry-v2-cutover/live-provider-
+verification/scheduler-design threads tracked across the broader
+`CRYPTO-DATA-01`/`CRYPTO-REGISTRY-01` ledger, or a decision on Kraken's
+numeric public rate limit (still unestablished, unchanged from `01S-T`)
+before any future scheduler-design patch could be considered.

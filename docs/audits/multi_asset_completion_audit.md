@@ -1188,3 +1188,64 @@ connection; no scheduler added; no daemon runtime started; no
 broker/risk/execution/OMS/runtime/strategy file touched; no live or paper
 order submitted; no crypto/futures/options/forex trading enabled; only the
 files in this bundle's stated scope changed.
+
+## 66. CRYPTO-REGISTRY-04-KRAKEN-DATA-ONLY-REGISTRY-STATUS-SURFACE-01 Closure Note (maintenance)
+
+Continuing after `§65` (`CRYPTO-REGISTRY-03`, readiness CLI), this bundle
+exposes the same read-only classification through a daemon route and GUI
+panel, since Phase B stayed small enough to proceed without stopping.
+Recorded here per `audit_repo_truth_rules.md` rather than left only in
+commit history.
+
+**Concretely:** `GET /api/v1/market-data/crypto-registry/readiness`
+reimplements the CLI's classification using the same two pure `mqk-md`
+loaders already used elsewhere in the daemon — no new `mqk-md` code. Path
+resolution reuses two pre-existing `AppState` fields
+(`instrument_registry_v2_path`, `provider_registry_path`) with no new field
+added; the registry path falls back to the committed
+`instruments_v2.crypto_local_marks.example.json` fixture when
+`MQK_INSTRUMENT_REGISTRY_V2_PATH` is unset. Neither config file is ever
+mutated. The GUI's "Crypto registry readiness" panel (Ingest screen)
+displays provider/readiness-state fields, per-symbol alias/trading-flag
+status, and fail reasons behind the fixed warning: *"Registry readiness is
+data-pipeline visibility only. It does not enable crypto trading, broker
+routing, strategy execution, or scheduling."* No button mutates config or
+triggers a sync.
+
+**Test proof:** `core-rs/crates/mqk-daemon/tests/scenario_crypto_registry_readiness_route_04.rs`
+gained 8 tests (real fixtures, missing provider, missing/incomplete alias,
+missing symbol, both trading-flag-unsafe cases, provider-enabled-unsafe
+case, no-DB-pool proof) — all `200 OK` with a distinct `truth_state`.
+`core-rs/mqk-gui/src/features/ingest/__tests__/api.test.ts` gained 25 tests
+mirroring the Kraken OHLC status test pattern. `cargo test -p mqk-daemon
+--test scenario_crypto_registry_readiness_route_04` — 8/8 pass. `npm test
+-- --run` — 653/653 pass (628 pre-existing + 25 new, zero regressions).
+`npm run build` — clean. `cargo clippy -p mqk-daemon --lib` and the scoped
+test-target clippy run both clean; `--all-targets` still fails only on the
+same pre-existing, unrelated `await_holding_lock` errors in
+`state/session_controller.rs` already documented in the `CRYPTO-DATA-01AD`
+closure note (§62) — confirmed not a regression.
+
+**Manual browser verification not performed, honestly:** this mission's
+hard safety rule forbids starting daemon runtime beyond isolated route
+tests for this phase, and the Ingest screen requires a live daemon to
+render past its bootstrap screen — the same constraint and resolution
+already documented for the sibling Kraken OHLCV panel (§63).
+
+**Not resolved (`ASSET-CORE-04`/`CRYPTO-REGISTRY-01`/`CRYPTO-DATA-01` remain
+`PARTIAL`, not `CLOSED`):** `kraken.enabled` stays `false`; no registry flag
+flipped; no recurring/scheduled Kraken sync; no production registry-v2
+cutover; no crypto risk policy activation; no crypto broker/paper
+execution; no crypto strategy.
+
+**Full detail, exact evidence citations, and validation commands:**
+`MiniQuantDesk_Master_Patch_Ledger_v2.md`'s
+`CRYPTO-REGISTRY-04-KRAKEN-DATA-ONLY-REGISTRY-STATUS-SURFACE-01` entry;
+runbook update at `docs/runbooks/local_crypto_marks_ingest.md`.
+
+**Safety confirmation:** no config flag changed; no config file mutated; no
+network call; no DB connection from the route; no scheduler added; no
+daemon runtime started outside isolated Rust tests; no
+broker/risk/execution/OMS/runtime/strategy file touched; no live or paper
+order submitted; no crypto/futures/options/forex trading enabled; only the
+files in this bundle's stated scope changed.

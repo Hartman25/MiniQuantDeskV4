@@ -22,6 +22,7 @@ use axum::{
 use chrono::Utc;
 
 use crate::api_types::{
+    CryptoRegistryReadinessResponse, CryptoRegistryReadinessSafety, CryptoRegistrySymbolReadiness,
     ExecutionTransportResponse, IntradayRefreshStatusResponse, IntradayRefreshSymbolStatus,
     KrakenOhlcStatusResponse, LatestMarkStatusResponse, LatestMarkStatusRow,
     MarketDataQualityResponse, MdBarsCoverageResponse, MdBarsCoverageRow, TransportQueueRow,
@@ -1519,4 +1520,238 @@ pub(crate) async fn kraken_ohlc_status(State(st): State<Arc<AppState>>) -> impl 
         }),
     )
         .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/market-data/crypto-registry/readiness
+// (CRYPTO-REGISTRY-04-KRAKEN-DATA-ONLY-REGISTRY-STATUS-SURFACE-01)
+//
+// Read-only re-exposure of the same classification
+// `mqk-cli md crypto-registry-readiness` (CRYPTO-REGISTRY-03) performs,
+// reusing the identical `mqk_md::provider_registry`/
+// `mqk_md::instrument_registry_v2` pure loaders -- no CLI subprocess, no DB
+// connection, no provider/network call, no scheduler, no config-file
+// mutation, no trading state. `provider_enabled=false` and per-symbol
+// `enabled=false` are expected, correct states and classify as
+// `data_ready_manual_only`, not a failure.
+// ---------------------------------------------------------------------------
+
+/// Registry-v2 fixture path used when `MQK_INSTRUMENT_REGISTRY_V2_PATH` is
+/// not configured -- the same, single, already-committed crypto fixture
+/// `CRYPTO-REGISTRY-03`'s CLI documentation examples read. Read-only; never
+/// mutated by this route.
+const CRYPTO_REGISTRY_READINESS_DEFAULT_REGISTRY_PATH: &str =
+    "config/instruments/instruments_v2.crypto_local_marks.example.json";
+
+const CRYPTO_REGISTRY_READINESS_PROVIDER: &str = "kraken";
+const CRYPTO_REGISTRY_READINESS_SYMBOLS: &[&str] = &["BTC/USD", "ETH/USD"];
+
+pub(crate) async fn crypto_registry_readiness(
+    State(st): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let registry_path = st
+        .instrument_registry_v2_path
+        .clone()
+        .unwrap_or_else(|| CRYPTO_REGISTRY_READINESS_DEFAULT_REGISTRY_PATH.to_string());
+    let providers_path = st.provider_registry_path.clone();
+    let provider_id = CRYPTO_REGISTRY_READINESS_PROVIDER;
+
+    let mut fail_reasons: Vec<String> = Vec::new();
+    let mut truth_state = "active";
+
+    let provider_configs = mqk_md::provider_registry::load_provider_registry(std::path::Path::new(
+        &providers_path,
+    ));
+    let (provider_enabled, api_key_required, provider_asset_classes, provider_implementation_status) =
+        match &provider_configs {
+            Ok(cfgs) => match mqk_md::provider_registry::find_provider(cfgs, provider_id) {
+                Some(cfg) => {
+                    if cfg.enabled {
+                        truth_state = "unsafe_provider_enabled";
+                        fail_reasons.push(format!(
+                            "provider '{provider_id}' is enabled=true; expected false pending an explicit, separate cutover decision (CRYPTO-REGISTRY-02)"
+                        ));
+                    }
+                    (
+                        cfg.enabled,
+                        cfg.api_key_required,
+                        cfg.asset_classes.clone(),
+                        cfg.implementation_status.clone(),
+                    )
+                }
+                None => {
+                    truth_state = "missing_provider";
+                    fail_reasons.push(format!(
+                        "provider '{provider_id}' not found in {providers_path}"
+                    ));
+                    (false, false, Vec::new(), String::new())
+                }
+            },
+            Err(err) => {
+                truth_state = "parse_error";
+                fail_reasons.push(format!("providers registry load failed: {err}"));
+                (false, false, Vec::new(), String::new())
+            }
+        };
+
+    let registry_v2 =
+        mqk_md::instrument_registry_v2::load_instrument_registry_v2(std::path::Path::new(
+            &registry_path,
+        ));
+
+    let mut symbols: Vec<CryptoRegistrySymbolReadiness> =
+        Vec::with_capacity(CRYPTO_REGISTRY_READINESS_SYMBOLS.len());
+    match &registry_v2 {
+        Err(err) => {
+            if truth_state == "active" {
+                truth_state = "parse_error";
+            }
+            fail_reasons.push(format!("registry load failed: {err}"));
+            for symbol in CRYPTO_REGISTRY_READINESS_SYMBOLS {
+                symbols.push(CryptoRegistrySymbolReadiness {
+                    symbol: symbol.to_string(),
+                    found: false,
+                    asset_class_ok: false,
+                    kraken_pair: None,
+                    kraken_result_key: None,
+                    alias_ok: false,
+                    enabled: None,
+                    paper_trading_enabled: None,
+                    live_trading_enabled: None,
+                    trading_flags_safe: false,
+                    passed: false,
+                });
+            }
+        }
+        Ok(registry) => {
+            for symbol in CRYPTO_REGISTRY_READINESS_SYMBOLS {
+                let inst = registry.instruments.iter().find(|i| i.symbol == *symbol);
+                let check = match inst {
+                    None => {
+                        if truth_state == "active" {
+                            truth_state = "missing_symbol";
+                        }
+                        fail_reasons.push(format!(
+                            "symbol '{symbol}' not found in {registry_path}"
+                        ));
+                        CryptoRegistrySymbolReadiness {
+                            symbol: symbol.to_string(),
+                            found: false,
+                            asset_class_ok: false,
+                            kraken_pair: None,
+                            kraken_result_key: None,
+                            alias_ok: false,
+                            enabled: None,
+                            paper_trading_enabled: None,
+                            live_trading_enabled: None,
+                            trading_flags_safe: false,
+                            passed: false,
+                        }
+                    }
+                    Some(inst) => {
+                        let asset_class_ok = inst.asset_class == "crypto";
+                        if !asset_class_ok && truth_state == "active" {
+                            truth_state = "missing_symbol";
+                            fail_reasons.push(format!(
+                                "symbol '{symbol}' asset_class is '{}', expected 'crypto'",
+                                inst.asset_class
+                            ));
+                        }
+                        let kraken_pair = inst.provider_symbols.get("kraken_pair").cloned();
+                        let kraken_result_key =
+                            inst.provider_symbols.get("kraken_result_key").cloned();
+                        let alias_ok = kraken_pair.is_some() && kraken_result_key.is_some();
+                        if !alias_ok {
+                            if truth_state == "active" {
+                                truth_state = "missing_alias";
+                            }
+                            fail_reasons.push(format!(
+                                "symbol '{symbol}' missing kraken_pair/kraken_result_key alias"
+                            ));
+                        }
+                        let trading_flags_safe =
+                            !inst.paper_trading_enabled && !inst.live_trading_enabled;
+                        if inst.paper_trading_enabled {
+                            truth_state = "unsafe_trading_enabled";
+                            fail_reasons
+                                .push(format!("symbol '{symbol}' paper_trading_enabled=true"));
+                        }
+                        if inst.live_trading_enabled {
+                            truth_state = "unsafe_trading_enabled";
+                            fail_reasons
+                                .push(format!("symbol '{symbol}' live_trading_enabled=true"));
+                        }
+                        let passed = asset_class_ok && alias_ok && trading_flags_safe;
+                        CryptoRegistrySymbolReadiness {
+                            symbol: symbol.to_string(),
+                            found: true,
+                            asset_class_ok,
+                            kraken_pair,
+                            kraken_result_key,
+                            alias_ok,
+                            enabled: Some(inst.enabled),
+                            paper_trading_enabled: Some(inst.paper_trading_enabled),
+                            live_trading_enabled: Some(inst.live_trading_enabled),
+                            trading_flags_safe,
+                            passed,
+                        }
+                    }
+                };
+                symbols.push(check);
+            }
+        }
+    }
+
+    let all_symbols_disabled = symbols.iter().all(|c| c.enabled == Some(false));
+    let all_passed = truth_state == "active" && fail_reasons.is_empty();
+
+    let data_readiness_state = if !all_passed {
+        "blocked"
+    } else if all_symbols_disabled {
+        "data_ready_manual_only"
+    } else {
+        "production_default"
+    };
+
+    let reason_code = if all_passed {
+        "crypto_registry_readiness_data_ready_manual_only"
+    } else {
+        match truth_state {
+            "missing_provider" => "provider_not_found",
+            "missing_symbol" => "symbol_not_found_or_wrong_asset_class",
+            "missing_alias" => "kraken_alias_incomplete",
+            "unsafe_trading_enabled" => "trading_flag_unexpectedly_true",
+            "unsafe_provider_enabled" => "provider_unexpectedly_enabled",
+            "parse_error" => "registry_or_providers_parse_error",
+            _ => "readiness_check_failed",
+        }
+    };
+
+    let response = CryptoRegistryReadinessResponse {
+        canonical_route: "/api/v1/market-data/crypto-registry/readiness".to_string(),
+        truth_state: truth_state.to_string(),
+        data_readiness_state: data_readiness_state.to_string(),
+        trading_readiness_state: "disabled".to_string(),
+        scheduler_readiness_state: "absent".to_string(),
+        provider: provider_id.to_string(),
+        provider_enabled,
+        api_key_required,
+        provider_asset_classes,
+        provider_implementation_status,
+        registry_path,
+        providers_path,
+        symbols,
+        all_passed,
+        reason_code: reason_code.to_string(),
+        fail_reasons,
+        safety: CryptoRegistryReadinessSafety {
+            no_scheduler: true,
+            no_db_connection: true,
+            no_network_call: true,
+            no_trading_enabled: true,
+            no_config_file_mutated: true,
+        },
+    };
+
+    (StatusCode::OK, Json(response)).into_response()
 }
