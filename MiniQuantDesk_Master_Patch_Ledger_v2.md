@@ -3812,3 +3812,68 @@ verification/scheduler-design threads tracked across the broader
 `CRYPTO-DATA-01`/`CRYPTO-REGISTRY-01` ledger, or a decision on Kraken's
 numeric public rate limit (still unestablished, unchanged from `01S-T`)
 before any future scheduler-design patch could be considered.
+
+### CRYPTO-DATA-02A-KRAKEN-SCHEDULER-RATE-LIMIT-DECISION-01 — CLOSED_LOCAL / PARTIAL
+
+**Mission:** continuing after `CRYPTO-REGISTRY-04-KRAKEN-DATA-ONLY-REGISTRY-STATUS-SURFACE-01`
+(committed `49be663b`), verify Kraken's public rate limit against official
+documentation and record a conservative, repo-local cadence policy for a
+**future** Kraken scheduled sync — the gap `CRYPTO-REGISTRY-02`'s §7 and
+`CRYPTO-DATA-01S-T` both left explicitly open. Decision/spec only. No
+scheduler registered, no source code changed.
+
+**Concretely:** performed exactly 2 bounded, keyless documentation-page
+reads (zero calls to any Kraken **API** endpoint):
+`docs.kraken.com/api/docs/guides/spot-rest-ratelimits` (authenticated-tier
+call-counter system; does not cover public endpoints) and
+`support.kraken.com/hc/en-us/articles/206548367-What-is-the-API-call-rate-limit`
+(states public endpoints may be called at up to 1 request/second and remain
+within limits; states OHLC/Trades are rate-limited by IP address **and**
+currency pair, other public endpoints by IP only; states exceeding the
+limit causes temporary throttling). Classified
+`rate_limit_verification_status="verified"`. Recorded a conservative policy:
+daily cadence, sequential-only pair calls (never concurrent), minimum 2
+seconds between per-pair calls (2x the verified guideline), maximum 2 OHLC
+calls per run (`BTC/USD` + `ETH/USD`), bounded exponential-backoff retries
+(max 2, jitter, fail-closed once exhausted), and an explicit invariant list
+a future task-registration patch must satisfy first.
+
+**Built:**
+- `docs/specs/crypto_data_02a_kraken_scheduler_rate_limit_decision.md` — full
+  decision record: source quotes/URLs/access dates, answers to all 15
+  required decision questions, rationale, safety boundaries, remaining gaps.
+- `docs/specs/crypto_data_02a_kraken_scheduler_rate_limit_decision.json` —
+  machine-readable policy artifact (`schema_version`,
+  `rate_limit_verification_status`, cadence/spacing/retry/concurrency
+  fields, `safety` block, `required_invariants_before_scheduler`,
+  `remaining_gaps`).
+- `scripts/guards/validate_crypto_data_02a_kraken_scheduler_decision.ps1` —
+  16-check pure JSON/docs validator (schema/patch identity, symbols,
+  scheduler-registration status, cadence/spacing bounds, concurrency,
+  safety booleans, doc-content forbidden-phrase checks).
+- `docs/runbooks/local_crypto_marks_ingest.md` — new "Kraken Scheduler
+  Rate-Limit Decision" section.
+- `MiniQuantDesk_Master_Patch_Ledger_v2.md` — this entry.
+- `docs/audits/multi_asset_completion_audit.md` — new closure note (§67).
+
+**Validation results:** `python -m json.tool` on the JSON artifact — valid.
+`scripts/guards/validate_crypto_data_02a_kraken_scheduler_decision.ps1` —
+all 16 checks pass. `scripts/guards/validate_crypto_registry_02_kraken_cutover_decision.ps1`,
+`validate_crypto_data_01s_t_ohlcv_provider_decision.ps1`,
+`validate_crypto_data_01i_coinlore_verify.ps1` — all still pass (unaffected,
+regression check). `git diff --check` — clean.
+
+**Honest PARTIAL — `CRYPTO-DATA-01`/`CRYPTO-REGISTRY-01`/`ASSET-CORE-04`
+remain PARTIAL, not `CLOSED`:** this is a decision/policy patch only. No
+scheduler is registered. No Windows Scheduled Task. No daemon recurring
+job. `config/providers/providers.json` and
+`config/instruments/instruments_v2.crypto_local_marks.example.json` are
+both unchanged; `kraken.enabled` stays `false`; both crypto rows stay
+`enabled=false`/`paper_trading_enabled=false`/`live_trading_enabled=false`.
+No Rust/TypeScript source file changed. No DB migration, no DB write, no
+network call beyond the 2 bounded documentation-page reads recorded above.
+
+**Recommended next slice:** `CRYPTO-DATA-02B-KRAKEN-SCHEDULER-READINESS-CLI-01`
+— a read-only operator CLI proving whether a future Kraken scheduled sync
+is currently allowed by this policy, the provider/registry config, and
+(optionally) latest Kraken evidence, without registering anything.

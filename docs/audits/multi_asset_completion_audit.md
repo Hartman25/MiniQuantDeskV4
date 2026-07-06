@@ -1249,3 +1249,52 @@ daemon runtime started outside isolated Rust tests; no
 broker/risk/execution/OMS/runtime/strategy file touched; no live or paper
 order submitted; no crypto/futures/options/forex trading enabled; only the
 files in this bundle's stated scope changed.
+
+## 67. CRYPTO-DATA-02A-KRAKEN-SCHEDULER-RATE-LIMIT-DECISION-01 Closure Note (maintenance)
+
+Continuing after `§66` (`CRYPTO-REGISTRY-04`, registry readiness route/GUI),
+this decision patch verifies Kraken's public-endpoint rate-limit guidance
+via 2 bounded, keyless documentation-page reads (zero Kraken API calls) and
+records a conservative, repo-local cadence policy for a **future** Kraken
+scheduled sync. No scheduler is registered by this patch. Recorded here per
+`audit_repo_truth_rules.md` rather than left only in commit history.
+
+**Sources checked:** `docs.kraken.com/api/docs/guides/spot-rest-ratelimits`
+(authenticated-tier call-counter system only, does not cover public
+endpoints) and `support.kraken.com/hc/en-us/articles/206548367` (states
+public endpoints may be called at up to 1 request/second and remain within
+limits; OHLC/Trades specifically rate-limited by IP address **and**
+currency pair; exceeding the limit triggers temporary throttling).
+`rate_limit_verification_status="verified"`.
+
+**Decision:** daily cadence; sequential-only pair calls (never concurrent);
+minimum 2 seconds between per-pair calls (2x the verified guideline);
+maximum 2 OHLC calls per run (`BTC/USD` + `ETH/USD`); bounded exponential
+backoff retries (max 2, jitter, fail-closed once exhausted); explicit
+invariant list required before any future task-registration patch (registry
+readiness must be active/ready, Kraken evidence must not be unsafe, trading
+flags must stay false, task must not share a lock/cursor with any existing
+scheduler).
+
+**Built:** `docs/specs/crypto_data_02a_kraken_scheduler_rate_limit_decision.md`,
+`docs/specs/crypto_data_02a_kraken_scheduler_rate_limit_decision.json`,
+`scripts/guards/validate_crypto_data_02a_kraken_scheduler_decision.ps1`.
+
+**Not resolved (`ASSET-CORE-04`/`CRYPTO-REGISTRY-01`/`CRYPTO-DATA-01` remain
+`PARTIAL`, not `CLOSED`):** no scheduler registered; no Windows Scheduled
+Task; no daemon recurring job; `kraken.enabled` stays `false`; no registry
+flag flipped; no production registry-v2 cutover; no crypto risk policy
+activation; no crypto broker/paper execution; no crypto strategy.
+
+**Full detail, exact evidence citations, and validation commands:**
+`MiniQuantDesk_Master_Patch_Ledger_v2.md`'s
+`CRYPTO-DATA-02A-KRAKEN-SCHEDULER-RATE-LIMIT-DECISION-01` entry; runbook
+update at `docs/runbooks/local_crypto_marks_ingest.md`.
+
+**Safety confirmation:** no config flag changed; no config file mutated; no
+Kraken API call (only 2 bounded documentation/support page fetches); no DB
+connection; no scheduler registered; no daemon job added; no daemon runtime
+started; no broker/risk/execution/OMS/runtime/strategy file touched; no
+live or paper order submitted; no crypto/futures/options/forex trading
+enabled; only the
+files in this bundle's stated scope changed.

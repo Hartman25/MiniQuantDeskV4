@@ -1,0 +1,68 @@
+{
+  "schema_version": "crypto-data-02a-kraken-scheduler-rate-limit-decision-v1",
+  "patch_id": "CRYPTO-DATA-02A-KRAKEN-SCHEDULER-RATE-LIMIT-DECISION-01",
+  "decided_at_head_commit": "49be663b",
+  "decision": "scheduler_not_registered_readiness_only",
+  "provider": "kraken",
+  "symbols": ["BTC/USD", "ETH/USD"],
+  "timeframe": "1D",
+  "official_sources": [
+    {
+      "url": "https://docs.kraken.com/api/docs/guides/spot-rest-ratelimits",
+      "accessed_utc": "2026-07-06",
+      "summary": "Documents authenticated REST call-counter tiers (Starter max 15 counter / -0.33 per sec decay, Intermediate max 20 / -0.5 per sec, Pro max 20 / -1 per sec). Does not state a numeric limit for public, non-authenticated market-data endpoints and does not say whether public calls share this counter."
+    },
+    {
+      "url": "https://support.kraken.com/hc/en-us/articles/206548367-What-is-the-API-call-rate-limit",
+      "accessed_utc": "2026-07-06",
+      "summary": "States: 'Calling the public endpoints at a frequency of 1 per second (or less) would remain within the rate limits.' States public endpoints are 'rate limited by IP address and currency pair for calls to Trades and OHLC, and by IP address only for calls to all other public endpoints.' States exceeding the limit causes additional calls to be restricted for a few seconds, or longer if calls continue while limits are active. Does not give a precise numeric requests-per-minute ceiling beyond the 1/sec guideline."
+    }
+  ],
+  "rate_limit_verification_status": "verified",
+  "public_rest_rate_limit_summary": "Kraken's official support article states public REST endpoints may be called at up to 1 request/second and remain within rate limits; exceeding this risks temporary throttling (a few seconds or longer) of further calls. No stricter numeric per-minute/per-day ceiling is published for public endpoints.",
+  "ohlc_rate_limit_scope": "ip_and_pair",
+  "recommended_default_cadence": "daily",
+  "min_seconds_between_pair_calls": 2,
+  "min_seconds_between_scheduled_runs": 86400,
+  "max_ohlc_calls_per_run": 2,
+  "max_total_network_calls_per_run": 2,
+  "concurrency": "sequential_only",
+  "retry_policy": {
+    "enabled": true,
+    "max_retries": 2,
+    "backoff": "exponential",
+    "jitter": true,
+    "fail_closed_after_exhausted": true
+  },
+  "scheduler_registration_status": "not_registered",
+  "safety": {
+    "no_scheduled_task_registered": true,
+    "no_daemon_job_added": true,
+    "no_network_call_to_kraken_api": true,
+    "no_db_write": true,
+    "no_trading_enabled": true,
+    "kraken_provider_enabled": false,
+    "paper_trading_enabled": false,
+    "live_trading_enabled": false
+  },
+  "required_invariants_before_scheduler": [
+    "kraken_provider_must_remain_disabled_unless_a_separate_explicit_operator_decision_enables_it",
+    "btc_usd_and_eth_usd_paper_trading_enabled_and_live_trading_enabled_must_remain_false",
+    "crypto_registry_readiness_must_classify_active_data_ready_manual_only_or_better_immediately_before_any_run",
+    "kraken_scheduler_readiness_check_must_report_a_ready_state_not_just_the_registry_readiness_check",
+    "recurring_call_design_must_reuse_the_existing_market_data_provider_rate_limits_capability_surface_calls_per_minute_calls_per_day_remaining_calls_notes",
+    "task_registration_must_be_a_separately_authorized_patch_with_its_own_decision_document_this_document_does_not_authorize_one",
+    "task_registration_must_default_to_unregistered_opt_in_mirroring_every_other_provider_enablement_default_in_this_repo",
+    "task_registration_must_not_share_a_lock_cursor_or_state_slot_with_any_existing_equity_ingestion_scheduler_or_the_local_crypto_csv_import_task",
+    "task_registration_must_not_proceed_if_latest_kraken_ohlc_evidence_status_route_or_cli_reports_unsafe_evidence_or_stale_beyond_policy"
+  ],
+  "remaining_gaps": [
+    "no_recurring_or_scheduled_kraken_sync_of_any_kind",
+    "no_windows_scheduled_task_registered_for_kraken",
+    "no_daemon_recurring_job_for_kraken",
+    "no_production_registry_v2_cutover",
+    "no_crypto_risk_policy_activation",
+    "no_crypto_paper_or_live_execution",
+    "no_crypto_strategy"
+  ]
+}

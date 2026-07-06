@@ -766,6 +766,25 @@ Implemented in `core-rs/crates/mqk-daemon/src/routes/transport_quality.rs::crypt
 Tested in `core-rs/crates/mqk-daemon/tests/scenario_crypto_registry_readiness_route_04.rs`
 and `core-rs/mqk-gui/src/features/ingest/__tests__/api.test.ts`.
 
+## Kraken Scheduler Rate-Limit Decision (CRYPTO-DATA-02A-KRAKEN-SCHEDULER-RATE-LIMIT-DECISION-01)
+
+Decision-only patch, continuing after `CRYPTO-REGISTRY-04`. Verified Kraken's
+public-endpoint rate-limit guidance via 2 bounded, keyless documentation-page
+reads (no Kraken **API** call): Kraken's official support article states
+public endpoints may be called at up to 1 request/second and remain within
+limits, with OHLC/Trades specifically rate-limited by IP address **and**
+currency pair (other public endpoints by IP only), and exceeding the limit
+triggers a temporary throttle. Based on this, the decision records a
+conservative, repo-local policy for a **future** scheduled Kraken sync — no
+scheduler is registered by this patch: daily cadence, sequential-only pair
+calls (never concurrent), at least 2 seconds between per-pair calls (double
+the verified guideline), at most 2 OHLC calls per run (`BTC/USD` + `ETH/USD`),
+bounded exponential-backoff retries (max 2, with jitter, fail-closed once
+exhausted), and an explicit list of invariants a future task-registration
+patch must satisfy first. `kraken.enabled` and both crypto rows' trading
+flags remain unchanged (`false`). Full detail, exact quotes, and source URLs:
+`docs/specs/crypto_data_02a_kraken_scheduler_rate_limit_decision.md`.
+
 ## Remaining Gaps
 
 - `sync-provider` (incremental backfill) still has no Kraken path — an
