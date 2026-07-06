@@ -820,6 +820,45 @@ adds a daemon job.
 Implemented in `core-rs/crates/mqk-cli/src/commands/md.rs::md_kraken_scheduler_readiness`,
 tested in `core-rs/crates/mqk-cli/tests/scenario_cli_kraken_scheduler_readiness_02b.rs`.
 
+## Kraken Scheduler Readiness Status Route + GUI Panel (CRYPTO-DATA-02C-KRAKEN-SCHEDULER-READINESS-STATUS-SURFACE-01)
+
+Read-only daemon route re-exposing the same classification as the
+`CRYPTO-DATA-02B` CLI:
+
+```
+GET /api/v1/market-data/kraken-scheduler/readiness
+```
+
+Reads the committed `CRYPTO-DATA-02A` policy JSON (`AppState.kraken_scheduler_policy_path`,
+override `MQK_KRAKEN_SCHEDULER_POLICY_PATH`), the registry-v2 fixture
+(`MQK_INSTRUMENT_REGISTRY_V2_PATH`, falling back to the committed disabled
+fixture), and the provider registry (`MQK_PROVIDER_REGISTRY_PATH`, default
+`config/providers/providers.json`) — none is ever mutated. Also inspects
+(read-only, never required) the latest Kraken OHLC evidence file in
+`AppState.md_refresh_evidence_dir`. Returns the same `truth_state` values as
+the CLI (`active`, `policy_missing`, `policy_invalid`, `registry_unsafe`,
+`provider_unsafe`, `trading_flags_unsafe`, `scheduler_already_registered`,
+`evidence_unsafe`, `parse_error`, `backend_unavailable`). No DB connection,
+no provider/network call, no CLI subprocess, no scheduler registered, no
+daemon job added.
+
+A read-only "Kraken scheduler readiness" GUI panel on the Ingest screen
+(below the Kraken OHLCV sync status and Crypto registry readiness panels)
+displays: truth/scheduler/rate-limit/registry/provider/evidence readiness
+states, cadence/spacing/concurrency policy fields, scheduler registration
+status, daemon job status, per-symbol alias/trading-flag status, and fail
+reasons/warnings. Fixed warning: *"Scheduler readiness is data-pipeline
+visibility only. It does not register a scheduled task, start a daemon job,
+call Kraken, enable crypto trading, or route broker orders."* No button
+registers a scheduler, starts a daemon job, or mutates config — "Refresh"
+only re-issues the same read-only GET.
+
+Implemented in `core-rs/crates/mqk-daemon/src/routes/transport_quality.rs::kraken_scheduler_readiness`,
+`core-rs/crates/mqk-daemon/src/api_types.rs::KrakenSchedulerReadinessResponse`,
+`core-rs/mqk-gui/src/features/ingest/{types.ts,api.ts,IngestScreen.tsx}`.
+Tested in `core-rs/crates/mqk-daemon/tests/scenario_kraken_scheduler_readiness_route_02c.rs`
+and `core-rs/mqk-gui/src/features/ingest/__tests__/api.test.ts`.
+
 ## Remaining Gaps
 
 - `sync-provider` (incremental backfill) still has no Kraken path — an

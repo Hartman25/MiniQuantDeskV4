@@ -521,6 +521,14 @@ pub struct AppState {
     /// Default: "exports/market_data" (relative to daemon CWD).
     /// Override: MQK_MD_REFRESH_EVIDENCE_DIR env var.
     pub md_refresh_evidence_dir: String,
+    /// CRYPTO-DATA-02C-KRAKEN-SCHEDULER-READINESS-STATUS-SURFACE-01: Filesystem
+    /// path to the CRYPTO-DATA-02A scheduler rate-limit/cadence policy JSON.
+    ///
+    /// Read at route-time (not cached) by
+    /// GET /api/v1/market-data/kraken-scheduler/readiness. Never mutated.
+    /// Default: "docs/specs/crypto_data_02a_kraken_scheduler_rate_limit_decision.json"
+    /// (relative to daemon CWD). Override: MQK_KRAKEN_SCHEDULER_POLICY_PATH env var.
+    pub kraken_scheduler_policy_path: String,
     /// DATA-INGEST-DAEMON-PROVIDER-JOBS-01: Injectable provider client for sync jobs.
     ///
     /// `None` in production: the provider sync background task reads
@@ -1224,6 +1232,11 @@ impl AppState {
                 .unwrap_or_else(|_| "config/providers/providers.json".to_string()),
             md_refresh_evidence_dir: std::env::var("MQK_MD_REFRESH_EVIDENCE_DIR")
                 .unwrap_or_else(|_| "exports/market_data".to_string()),
+            kraken_scheduler_policy_path: std::env::var("MQK_KRAKEN_SCHEDULER_POLICY_PATH")
+                .unwrap_or_else(|_| {
+                    "docs/specs/crypto_data_02a_kraken_scheduler_rate_limit_decision.json"
+                        .to_string()
+                }),
             provider_client: None,
             latest_bar_provider_client: None,
             market_data_feed_status: Arc::new(RwLock::new(None)),

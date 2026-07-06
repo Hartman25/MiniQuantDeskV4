@@ -1338,5 +1338,55 @@ at `docs/runbooks/local_crypto_marks_ingest.md`.
 Kraken API call; no provider/network call; no DB connection; no scheduler
 registered; no daemon job added; no daemon runtime started; no
 broker/risk/execution/OMS/runtime/strategy file touched; no live or paper
+order submitted; no crypto/futures/options/forex trading enabled; only the files in this bundle's stated scope changed.
+
+## 69. CRYPTO-DATA-02C-KRAKEN-SCHEDULER-READINESS-STATUS-SURFACE-01 Closure Note (maintenance)
+
+Continuing after `§68` (`CRYPTO-DATA-02B`, scheduler readiness CLI), this
+bundle exposes the same read-only classification through a daemon route
+and GUI panel, since Phase B stayed small enough to proceed without
+stopping. Recorded here per `audit_repo_truth_rules.md` rather than left
+only in commit history.
+
+**Built:** `GET /api/v1/market-data/kraken-scheduler/readiness` (an
+independent reimplementation of the CLI's classification, not a shared code
+path); new `AppState.kraken_scheduler_policy_path` field (default the
+committed `CRYPTO-DATA-02A` policy JSON, override
+`MQK_KRAKEN_SCHEDULER_POLICY_PATH`); "Kraken scheduler readiness" read-only
+GUI panel on the Ingest screen.
+
+**Test proof:** `core-rs/crates/mqk-daemon/tests/scenario_kraken_scheduler_readiness_route_02c.rs`,
+8/8 pass; GUI `npm test -- --run`, 687/687 pass (34 new). `cargo clippy -p
+mqk-daemon --lib -- -D warnings` clean after fixing one
+`clippy::unnecessary_get_then_check` lint caught during this pass (not a
+pre-existing issue — introduced and fixed within this same bundle).
+`cargo clippy -p mqk-daemon --all-targets -- -D warnings` still fails only
+on the same pre-existing, unrelated `await_holding_lock` errors in
+`state/session_controller.rs` already documented in the `CRYPTO-DATA-01AD`
+closure note (§62) — confirmed not a regression.
+
+**Manual browser verification not performed, honestly:** this mission's
+hard safety rule forbids starting daemon runtime beyond isolated route
+tests for this phase, and the Ingest screen requires a live daemon to
+render past its bootstrap screen — the same constraint and resolution
+already documented for the sibling Kraken OHLCV/registry-readiness panels
+(§63, §66).
+
+**Not resolved (`ASSET-CORE-04`/`CRYPTO-REGISTRY-01`/`CRYPTO-DATA-01` remain
+`PARTIAL`, not `CLOSED`):** no scheduler registered; no Windows Scheduled
+Task; no daemon recurring job; `kraken.enabled` stays `false`; no registry
+flag flipped; no production registry-v2 cutover; no crypto risk policy
+activation; no crypto broker/paper execution; no crypto strategy.
+
+**Full detail, exact evidence citations, and validation commands:**
+`MiniQuantDesk_Master_Patch_Ledger_v2.md`'s
+`CRYPTO-DATA-02C-KRAKEN-SCHEDULER-READINESS-STATUS-SURFACE-01` entry;
+runbook update at `docs/runbooks/local_crypto_marks_ingest.md`.
+
+**Safety confirmation:** no config flag changed; no config file mutated; no
+Kraken API call; no provider/network call; no DB connection from the
+route; no scheduler registered; no daemon job added; no daemon runtime
+started outside isolated Rust tests; no
+broker/risk/execution/OMS/runtime/strategy file touched; no live or paper
 order submitted; no crypto/futures/options/forex trading enabled; only the
 files in this bundle's stated scope changed.

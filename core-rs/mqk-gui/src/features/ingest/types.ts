@@ -496,3 +496,86 @@ export interface CryptoRegistryReadinessResponse {
   fail_reasons: string[];
   safety: CryptoRegistryReadinessSafety;
 }
+
+// ---------------------------------------------------------------------------
+// CRYPTO-DATA-02C-KRAKEN-SCHEDULER-READINESS-STATUS-SURFACE-01:
+// Kraken scheduler readiness (read-only)
+// ---------------------------------------------------------------------------
+
+/**
+ * Per-symbol readiness check. Mirrors KrakenSchedulerSymbolReadiness in
+ * api_types.rs. `enabled`/`paper_trading_enabled`/`live_trading_enabled` are
+ * `null` only when the symbol was not found in the registry at all
+ * (distinct from `false`).
+ */
+export interface KrakenSchedulerSymbolReadiness {
+  symbol: string;
+  found: boolean;
+  asset_class_ok: boolean;
+  alias_ok: boolean;
+  enabled: boolean | null;
+  paper_trading_enabled: boolean | null;
+  live_trading_enabled: boolean | null;
+  trading_flags_safe: boolean;
+}
+
+/**
+ * Fixed safety flags, mirroring KrakenSchedulerReadinessSafety in
+ * api_types.rs. Present as explicit fields rather than inferred so the GUI
+ * never has to assume what this route did not do.
+ */
+export interface KrakenSchedulerReadinessSafety {
+  no_scheduled_task_registered: boolean;
+  no_daemon_job_added: boolean;
+  no_network_call_made: boolean;
+  no_db_connection: boolean;
+  no_trading_enabled: boolean;
+  no_config_file_mutated: boolean;
+}
+
+/**
+ * Response for GET /api/v1/market-data/kraken-scheduler/readiness. Mirrors
+ * KrakenSchedulerReadinessResponse in api_types.rs.
+ *
+ * truth_state: "active" | "policy_missing" | "policy_invalid" |
+ * "registry_unsafe" | "provider_unsafe" | "trading_flags_unsafe" |
+ * "scheduler_already_registered" | "evidence_unsafe" | "parse_error" |
+ * "backend_unavailable".
+ *
+ * "active" (scheduler_readiness_state =
+ * "scheduler_ready_manual_registration_blocked") never means a scheduler is
+ * registered — it means every prerequisite this route can check is
+ * satisfied for a future, separately authorized scheduler-registration
+ * patch to be considered.
+ */
+export interface KrakenSchedulerReadinessResponse {
+  canonical_route: string;
+  truth_state: string;
+  scheduler_readiness_state: string;
+  rate_limit_policy_state: string;
+  registry_readiness_state: string;
+  provider_readiness_state: string;
+  evidence_readiness_state: string;
+  provider: string;
+  provider_enabled: boolean;
+  symbols: KrakenSchedulerSymbolReadiness[];
+  recommended_default_cadence: string;
+  min_seconds_between_pair_calls: number;
+  min_seconds_between_scheduled_runs: number;
+  max_ohlc_calls_per_run: number;
+  max_total_network_calls_per_run: number;
+  concurrency: string;
+  scheduler_registration_status: string;
+  daemon_job_status: string;
+  network_call_made: boolean;
+  db_write: boolean;
+  trading_enabled: boolean;
+  policy_path: string;
+  registry_path: string;
+  providers_path: string;
+  all_passed: boolean;
+  reason_code: string;
+  fail_reasons: string[];
+  warnings: string[];
+  safety: KrakenSchedulerReadinessSafety;
+}

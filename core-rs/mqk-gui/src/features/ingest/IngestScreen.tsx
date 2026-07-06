@@ -38,6 +38,8 @@ import {
   isCryptoRegistryReadinessUnsafe,
   isKrakenOhlcEvidenceUnsafe,
   isKrakenOhlcStatusActive,
+  isKrakenSchedulerReadinessActive,
+  isKrakenSchedulerReadinessUnsafe,
   isLatestMarkEvidenceUnsafe,
   isLatestMarkStatusActive,
   isMarketDataFeedRealActionAllowed,
@@ -45,8 +47,11 @@ import {
   isTrackedEquitiesActive,
   isTerminalIngestStatus,
   intradayRefreshTruthLabel,
+  fetchKrakenSchedulerReadiness,
   krakenOhlcStatusTruthLabel,
+  krakenSchedulerReadinessTruthLabel,
   KRAKEN_OHLC_STATUS_WARNING_TEXT,
+  KRAKEN_SCHEDULER_READINESS_WARNING_TEXT,
   latestMarkStatusTruthLabel,
   normalizeIngestJobStatus,
   parseMarketDataFeedSymbols,
@@ -62,7 +67,7 @@ import {
 import { buildRepoRelativePath, buildMd1DSymbolPath, MD_BACKUP_1D_SEGMENTS, MD_INGEST_SEGMENTS } from "../backtests/pathHelpers.ts";
 import { getDesktopRepoRoot } from "../../desktop/bootstrap.ts";
 import type { CoverageSortMode } from "./api.ts";
-import type { ActiveIngestJob, ActiveProviderJob, CryptoRegistryReadinessResponse, IngestJobStatusKind, IntradayRefreshStatusResponse, KrakenOhlcStatusResponse, LatestMarkStatusResponse, MarketDataFeedPollOnceResponse, MarketDataFeedSchedulerStatusResponse, MarketDataFeedStatusResponse, MdBarsCoverageResponse, MdBarsCoverageRow, TrackedEquitiesResponse } from "./types.ts";
+import type { ActiveIngestJob, ActiveProviderJob, CryptoRegistryReadinessResponse, IngestJobStatusKind, IntradayRefreshStatusResponse, KrakenOhlcStatusResponse, KrakenSchedulerReadinessResponse, LatestMarkStatusResponse, MarketDataFeedPollOnceResponse, MarketDataFeedSchedulerStatusResponse, MarketDataFeedStatusResponse, MdBarsCoverageResponse, MdBarsCoverageRow, TrackedEquitiesResponse } from "./types.ts";
 
 // ---------------------------------------------------------------------------
 // Status badge
@@ -245,6 +250,11 @@ export function IngestScreen() {
   const [cryptoRegistryReadinessLoading, setCryptoRegistryReadinessLoading] = useState(false);
   const [cryptoRegistryReadinessError, setCryptoRegistryReadinessError] = useState<string | null>(null);
 
+  // CRYPTO-DATA-02C-KRAKEN-SCHEDULER-READINESS-STATUS-SURFACE-01: Kraken scheduler readiness state
+  const [krakenSchedulerReadiness, setKrakenSchedulerReadiness] = useState<KrakenSchedulerReadinessResponse | null>(null);
+  const [krakenSchedulerReadinessLoading, setKrakenSchedulerReadinessLoading] = useState(false);
+  const [krakenSchedulerReadinessError, setKrakenSchedulerReadinessError] = useState<string | null>(null);
+
   // DATA-PROVIDER-GUI-FEED-SCHEDULER-01: Latest closed-bar feed scheduler state
   const [latestFeedProviderId, setLatestFeedProviderId] = useState("alpaca");
   const [latestFeedTimeframe, setLatestFeedTimeframe] = useState("5m");
@@ -383,6 +393,24 @@ export function IngestScreen() {
   // Auto-load crypto registry readiness on mount
   useEffect(() => {
     void loadCryptoRegistryReadiness();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const loadKrakenSchedulerReadiness = useCallback(async () => {
+    setKrakenSchedulerReadinessLoading(true);
+    setKrakenSchedulerReadinessError(null);
+    const result = await fetchKrakenSchedulerReadiness();
+    setKrakenSchedulerReadinessLoading(false);
+    if (!result.ok) {
+      setKrakenSchedulerReadinessError(result.error ?? "Kraken scheduler readiness fetch failed.");
+      return;
+    }
+    setKrakenSchedulerReadiness(result.data ?? null);
+  }, []);
+
+  // Auto-load Kraken scheduler readiness on mount
+  useEffect(() => {
+    void loadKrakenSchedulerReadiness();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -2632,6 +2660,154 @@ export function IngestScreen() {
         {cryptoRegistryReadinessLoading && (
           <div className="bt-job-meta" style={{ color: "var(--accent)" }}>
             Loading crypto registry readiness…
+          </div>
+        )}
+      </Panel>
+
+      {/* CRYPTO-DATA-02C-KRAKEN-SCHEDULER-READINESS-STATUS-SURFACE-01: Kraken scheduler readiness */}
+      <Panel
+        title="Kraken scheduler readiness"
+        subtitle="Read-only re-exposure of mqk md kraken-scheduler-readiness. No task registration. No daemon job. No Kraken calls. No trading enablement."
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+          <button
+            type="button"
+            className="action-button"
+            onClick={() => void loadKrakenSchedulerReadiness()}
+            disabled={krakenSchedulerReadinessLoading}
+            style={{ padding: "2px 12px" }}
+          >
+            {krakenSchedulerReadinessLoading ? "Loading…" : "Refresh"}
+          </button>
+        </div>
+
+        <div className="unavailable-notice" style={{ marginBottom: 10, color: "var(--text-muted, #888)" }}>
+          <strong>{KRAKEN_SCHEDULER_READINESS_WARNING_TEXT}</strong>
+        </div>
+
+        {krakenSchedulerReadinessError && (
+          <div className="unavailable-notice unavailable-critical" style={{ marginBottom: 8 }}>
+            <strong>Fetch failed:</strong> {krakenSchedulerReadinessError}
+          </div>
+        )}
+
+        {krakenSchedulerReadiness === null && !krakenSchedulerReadinessLoading && !krakenSchedulerReadinessError && (
+          <div className="unavailable-notice" style={{ color: "var(--text-muted, #888)" }}>
+            Not loaded yet. Click Refresh or wait for auto-load.
+          </div>
+        )}
+
+        {krakenSchedulerReadiness !== null && (
+          <>
+            {isKrakenSchedulerReadinessUnsafe(krakenSchedulerReadiness) && (
+              <div className="unavailable-notice unavailable-critical" style={{ marginBottom: 8 }}>
+                <strong>{krakenSchedulerReadinessTruthLabel(krakenSchedulerReadiness.truth_state)}</strong>
+              </div>
+            )}
+
+            <div className="bt-job-meta" style={{ marginBottom: 6 }}>
+              <span className="eyebrow">truth_state</span>{" "}
+              <strong>{krakenSchedulerReadinessTruthLabel(krakenSchedulerReadiness.truth_state)}</strong>{" "}
+              <span className="eyebrow">provider</span>{" "}
+              <strong>{krakenSchedulerReadiness.provider}</strong>
+            </div>
+
+            <div className="timeline-meta-grid" style={{ marginBottom: 8 }}>
+              <div>
+                <span>scheduler_readiness_state</span>
+                <strong>{krakenSchedulerReadiness.scheduler_readiness_state}</strong>
+              </div>
+              <div>
+                <span>rate_limit_policy_state</span>
+                <strong>{krakenSchedulerReadiness.rate_limit_policy_state}</strong>
+              </div>
+              <div>
+                <span>registry_readiness_state</span>
+                <strong>{krakenSchedulerReadiness.registry_readiness_state}</strong>
+              </div>
+              <div>
+                <span>provider_readiness_state</span>
+                <strong>{krakenSchedulerReadiness.provider_readiness_state}</strong>
+              </div>
+              <div>
+                <span>evidence_readiness_state</span>
+                <strong>{krakenSchedulerReadiness.evidence_readiness_state}</strong>
+              </div>
+              <div>
+                <span>recommended_default_cadence</span>
+                <strong>{krakenSchedulerReadiness.recommended_default_cadence}</strong>
+              </div>
+              <div>
+                <span>min_seconds_between_pair_calls</span>
+                <strong>{krakenSchedulerReadiness.min_seconds_between_pair_calls}</strong>
+              </div>
+              <div>
+                <span>min_seconds_between_scheduled_runs</span>
+                <strong>{krakenSchedulerReadiness.min_seconds_between_scheduled_runs}</strong>
+              </div>
+              <div>
+                <span>max_ohlc_calls_per_run</span>
+                <strong>{krakenSchedulerReadiness.max_ohlc_calls_per_run}</strong>
+              </div>
+              <div>
+                <span>concurrency</span>
+                <strong>{krakenSchedulerReadiness.concurrency}</strong>
+              </div>
+              <div>
+                <span>scheduler_registration_status</span>
+                <strong>{krakenSchedulerReadiness.scheduler_registration_status}</strong>
+              </div>
+              <div>
+                <span>daemon_job_status</span>
+                <strong>{krakenSchedulerReadiness.daemon_job_status}</strong>
+              </div>
+              <div>
+                <span>all_passed</span>
+                <strong>{String(krakenSchedulerReadiness.all_passed)}</strong>
+              </div>
+              <div>
+                <span>reason_code</span>
+                <strong>{krakenSchedulerReadiness.reason_code}</strong>
+              </div>
+            </div>
+
+            <div className="bt-job-meta" style={{ marginBottom: 8 }}>
+              <strong>Per-symbol status</strong>
+            </div>
+            <div className="timeline-meta-grid" style={{ marginBottom: 8 }}>
+              {krakenSchedulerReadiness.symbols.map((sym) => (
+                <div key={sym.symbol}>
+                  <span>{sym.symbol}</span>
+                  <strong>
+                    found={String(sym.found)} alias_ok={String(sym.alias_ok)} enabled={sym.enabled === null ? "—" : String(sym.enabled)} paper_trading_enabled={sym.paper_trading_enabled === null ? "—" : String(sym.paper_trading_enabled)} live_trading_enabled={sym.live_trading_enabled === null ? "—" : String(sym.live_trading_enabled)}
+                  </strong>
+                </div>
+              ))}
+            </div>
+
+            {krakenSchedulerReadiness.fail_reasons.length > 0 && (
+              <div className="unavailable-notice" style={{ marginBottom: 8 }}>
+                <strong>fail_reasons:</strong> {krakenSchedulerReadiness.fail_reasons.join(", ")}
+              </div>
+            )}
+
+            {krakenSchedulerReadiness.warnings.length > 0 && (
+              <div className="unavailable-notice" style={{ marginBottom: 8, color: "var(--text-muted, #888)" }}>
+                <strong>warnings:</strong> {krakenSchedulerReadiness.warnings.join(", ")}
+              </div>
+            )}
+
+            {!isKrakenSchedulerReadinessActive(krakenSchedulerReadiness.truth_state) && (
+              <div className="unavailable-notice" style={{ color: "var(--text-muted, #888)" }}>
+                <strong>truth_state:</strong> {krakenSchedulerReadinessTruthLabel(krakenSchedulerReadiness.truth_state)}
+              </div>
+            )}
+          </>
+        )}
+
+        {krakenSchedulerReadinessLoading && (
+          <div className="bt-job-meta" style={{ color: "var(--accent)" }}>
+            Loading Kraken scheduler readiness…
           </div>
         )}
       </Panel>

@@ -24,7 +24,8 @@ use chrono::Utc;
 use crate::api_types::{
     CryptoRegistryReadinessResponse, CryptoRegistryReadinessSafety, CryptoRegistrySymbolReadiness,
     ExecutionTransportResponse, IntradayRefreshStatusResponse, IntradayRefreshSymbolStatus,
-    KrakenOhlcStatusResponse, LatestMarkStatusResponse, LatestMarkStatusRow,
+    KrakenOhlcStatusResponse, KrakenSchedulerReadinessResponse, KrakenSchedulerReadinessSafety,
+    KrakenSchedulerSymbolReadiness, LatestMarkStatusResponse, LatestMarkStatusRow,
     MarketDataQualityResponse, MdBarsCoverageResponse, MdBarsCoverageRow, TransportQueueRow,
 };
 use crate::market_data_freshness::{
@@ -1748,6 +1749,472 @@ pub(crate) async fn crypto_registry_readiness(
             no_scheduler: true,
             no_db_connection: true,
             no_network_call: true,
+            no_trading_enabled: true,
+            no_config_file_mutated: true,
+        },
+    };
+
+    (StatusCode::OK, Json(response)).into_response()
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/market-data/kraken-scheduler/readiness
+// (CRYPTO-DATA-02C-KRAKEN-SCHEDULER-READINESS-STATUS-SURFACE-01)
+// ---------------------------------------------------------------------------
+
+const KRAKEN_SCHEDULER_READINESS_ROUTE: &str = "/api/v1/market-data/kraken-scheduler/readiness";
+const KRAKEN_SCHEDULER_READINESS_PROVIDER: &str = "kraken";
+const KRAKEN_SCHEDULER_READINESS_SYMBOLS: &[&str] = &["BTC/USD", "ETH/USD"];
+const KRAKEN_SCHEDULER_POLICY_SCHEMA_VERSION: &str =
+    "crypto-data-02a-kraken-scheduler-rate-limit-decision-v1";
+
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+struct KrakenSchedulerPolicySafetyDoc {
+    #[serde(default)]
+    no_scheduled_task_registered: bool,
+    #[serde(default)]
+    no_daemon_job_added: bool,
+    #[serde(default)]
+    no_network_call_to_kraken_api: bool,
+    #[serde(default)]
+    no_db_write: bool,
+    #[serde(default)]
+    no_trading_enabled: bool,
+    #[serde(default)]
+    kraken_provider_enabled: bool,
+    #[serde(default)]
+    paper_trading_enabled: bool,
+    #[serde(default)]
+    live_trading_enabled: bool,
+}
+
+/// Mirrors `mqk-cli`'s `KrakenSchedulerPolicy` -- deserialized directly from
+/// `KRAKEN_SCHEDULER_READINESS_POLICY_PATH`; never mutated, never written
+/// back.
+#[derive(Debug, Clone, serde::Deserialize)]
+struct KrakenSchedulerPolicyDoc {
+    #[serde(default)]
+    schema_version: String,
+    #[serde(default)]
+    recommended_default_cadence: String,
+    #[serde(default)]
+    min_seconds_between_pair_calls: i64,
+    #[serde(default)]
+    min_seconds_between_scheduled_runs: i64,
+    #[serde(default)]
+    max_ohlc_calls_per_run: i64,
+    #[serde(default)]
+    max_total_network_calls_per_run: i64,
+    #[serde(default)]
+    concurrency: String,
+    #[serde(default)]
+    scheduler_registration_status: String,
+    #[serde(default)]
+    safety: KrakenSchedulerPolicySafetyDoc,
+}
+
+/// Mirrors `mqk-cli`'s `validate_kraken_scheduler_policy_contract`. Kept as
+/// an independent reimplementation (not a shared crate dependency) exactly
+/// like `crypto_registry_readiness` above mirrors its own CLI sibling --
+/// this route must never trust the CLI's own validation, it re-derives it.
+fn validate_kraken_scheduler_policy_doc(policy: &KrakenSchedulerPolicyDoc) -> Vec<String> {
+    let mut violations = Vec::new();
+    if policy.schema_version != KRAKEN_SCHEDULER_POLICY_SCHEMA_VERSION {
+        violations.push(format!(
+            "schema_version must be '{KRAKEN_SCHEDULER_POLICY_SCHEMA_VERSION}', got '{}'",
+            policy.schema_version
+        ));
+    }
+    if policy.min_seconds_between_pair_calls < 2 {
+        violations.push(format!(
+            "min_seconds_between_pair_calls must be >= 2, got {}",
+            policy.min_seconds_between_pair_calls
+        ));
+    }
+    if policy.min_seconds_between_scheduled_runs < 86400 {
+        violations.push(format!(
+            "min_seconds_between_scheduled_runs must be >= 86400, got {}",
+            policy.min_seconds_between_scheduled_runs
+        ));
+    }
+    if policy.max_ohlc_calls_per_run > 2 {
+        violations.push(format!(
+            "max_ohlc_calls_per_run must be <= 2, got {}",
+            policy.max_ohlc_calls_per_run
+        ));
+    }
+    if policy.max_total_network_calls_per_run > 4 {
+        violations.push(format!(
+            "max_total_network_calls_per_run must be <= 4, got {}",
+            policy.max_total_network_calls_per_run
+        ));
+    }
+    if policy.concurrency != "sequential_only" {
+        violations.push(format!(
+            "concurrency must be 'sequential_only', got '{}'",
+            policy.concurrency
+        ));
+    }
+    let safety = &policy.safety;
+    if !safety.no_scheduled_task_registered
+        || !safety.no_daemon_job_added
+        || !safety.no_network_call_to_kraken_api
+        || !safety.no_db_write
+        || !safety.no_trading_enabled
+    {
+        violations.push(
+            "safety.no_scheduled_task_registered/no_daemon_job_added/no_network_call_to_kraken_api/no_db_write/no_trading_enabled must all be true"
+                .to_string(),
+        );
+    }
+    if safety.kraken_provider_enabled || safety.paper_trading_enabled || safety.live_trading_enabled
+    {
+        violations.push(
+            "safety.kraken_provider_enabled/paper_trading_enabled/live_trading_enabled must all be false"
+                .to_string(),
+        );
+    }
+    violations
+}
+
+/// Finds the most recent `kraken_ohlc_ingest_<epoch>.json` or
+/// `kraken_ohlc_sync_<epoch>.json` file in `dir` by the epoch-seconds
+/// embedded in the filename, mirroring `kraken_ohlc_status`'s own selection
+/// rule above (kept as an independent copy since that function's evidence
+/// parsing is intertwined with its own response type).
+fn find_latest_kraken_ohlc_evidence_for_scheduler(
+    dir: &std::path::Path,
+) -> Option<(std::path::PathBuf, i64)> {
+    let entries = std::fs::read_dir(dir).ok()?;
+    let mut best: Option<(std::path::PathBuf, i64)> = None;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = path.file_name().and_then(|n| n.to_str())?.to_string();
+        let stem = name.strip_suffix(KRAKEN_OHLC_EVIDENCE_SUFFIX)?;
+        let epoch_str = stem
+            .strip_prefix(KRAKEN_OHLC_INGEST_PREFIX)
+            .or_else(|| stem.strip_prefix(KRAKEN_OHLC_SYNC_PREFIX))?;
+        let epoch: i64 = epoch_str.parse().ok()?;
+        if best.as_ref().map(|(_, e)| epoch > *e).unwrap_or(true) {
+            best = Some((path, epoch));
+        }
+    }
+    best
+}
+
+/// `GET /api/v1/market-data/kraken-scheduler/readiness`
+///
+/// Read-only re-exposure of `mqk-cli md kraken-scheduler-readiness`'s
+/// classification: whether a *future*, not-yet-authorized Kraken scheduled
+/// sync is currently allowed by the `CRYPTO-DATA-02A` policy, the current
+/// provider/registry config, and (if present) the latest Kraken OHLC
+/// evidence. Evidence is inspected read-only (never required to be fresh by
+/// this route -- missing/unsafe evidence never blocks `active` here, only
+/// downgrades `evidence_readiness_state`) since this route has no operator
+/// flag equivalent to the CLI's `--require-fresh-evidence`.
+///
+/// `"active"` never means a scheduler is registered. This route never opens
+/// a DB connection, never calls Kraken or any provider/network endpoint,
+/// never runs a CLI subprocess, never registers a scheduler, never mutates
+/// any config file.
+pub(crate) async fn kraken_scheduler_readiness(
+    State(st): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let policy_path = st.kraken_scheduler_policy_path.clone();
+    let registry_path = st
+        .instrument_registry_v2_path
+        .clone()
+        .unwrap_or_else(|| CRYPTO_REGISTRY_READINESS_DEFAULT_REGISTRY_PATH.to_string());
+    let providers_path = st.provider_registry_path.clone();
+    let provider_id = KRAKEN_SCHEDULER_READINESS_PROVIDER;
+
+    let mut fail_reasons: Vec<String> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
+    let mut truth_state = "active";
+
+    // -- 1. Policy: existence, parse, contract, scheduler_registration_status --
+    let mut rate_limit_policy_state = "missing";
+    let mut policy: Option<KrakenSchedulerPolicyDoc> = None;
+    let policy_fs_path = std::path::Path::new(&policy_path);
+    if !policy_fs_path.exists() {
+        truth_state = "policy_missing";
+        fail_reasons.push(format!("policy file not found: {policy_path}"));
+    } else {
+        match std::fs::read_to_string(policy_fs_path)
+            .ok()
+            .and_then(|s| serde_json::from_str::<KrakenSchedulerPolicyDoc>(&s).ok())
+        {
+            None => {
+                truth_state = "policy_invalid";
+                rate_limit_policy_state = "invalid";
+                fail_reasons.push(format!(
+                    "policy file is not valid JSON or does not match the expected schema: {policy_path}"
+                ));
+            }
+            Some(p) => {
+                let violations = validate_kraken_scheduler_policy_doc(&p);
+                if violations.is_empty() {
+                    rate_limit_policy_state = "valid";
+                } else {
+                    rate_limit_policy_state = "invalid";
+                    if truth_state == "active" {
+                        truth_state = "policy_invalid";
+                    }
+                    fail_reasons.extend(violations);
+                }
+                if p.scheduler_registration_status != "not_registered" {
+                    if truth_state == "active" {
+                        truth_state = "scheduler_already_registered";
+                    }
+                    fail_reasons.push(format!(
+                        "policy scheduler_registration_status is '{}', expected 'not_registered'",
+                        p.scheduler_registration_status
+                    ));
+                }
+                policy = Some(p);
+            }
+        }
+    }
+
+    // -- 2. Providers: existence, parse, provider entry, enabled flag --
+    let mut provider_readiness_state = "unknown";
+    let mut provider_enabled = false;
+    let provider_configs =
+        mqk_md::provider_registry::load_provider_registry(std::path::Path::new(&providers_path));
+    match &provider_configs {
+        Ok(cfgs) => match mqk_md::provider_registry::find_provider(cfgs, provider_id) {
+            Some(cfg) => {
+                provider_enabled = cfg.enabled;
+                if cfg.enabled {
+                    provider_readiness_state = "unsafe";
+                    if truth_state == "active" {
+                        truth_state = "provider_unsafe";
+                    }
+                    fail_reasons.push(format!(
+                        "provider '{provider_id}' is enabled=true; expected false pending a separate, explicit cutover decision (CRYPTO-REGISTRY-02)"
+                    ));
+                } else {
+                    provider_readiness_state = "ready";
+                }
+            }
+            None => {
+                provider_readiness_state = "unsafe";
+                if truth_state == "active" {
+                    truth_state = "provider_unsafe";
+                }
+                fail_reasons.push(format!(
+                    "provider '{provider_id}' not found in {providers_path}"
+                ));
+            }
+        },
+        Err(err) => {
+            if truth_state == "active" {
+                truth_state = "parse_error";
+            }
+            fail_reasons.push(format!("providers registry load failed: {err}"));
+        }
+    }
+
+    // -- 3. Registry: existence, parse, per-symbol alias/asset-class/trading flags --
+    let mut registry_readiness_state = "unknown";
+    let registry_v2 = mqk_md::instrument_registry_v2::load_instrument_registry_v2(
+        std::path::Path::new(&registry_path),
+    );
+    let mut symbols: Vec<KrakenSchedulerSymbolReadiness> =
+        Vec::with_capacity(KRAKEN_SCHEDULER_READINESS_SYMBOLS.len());
+    match &registry_v2 {
+        Err(err) => {
+            if truth_state == "active" {
+                truth_state = "parse_error";
+            }
+            fail_reasons.push(format!("registry load failed: {err}"));
+            for symbol in KRAKEN_SCHEDULER_READINESS_SYMBOLS {
+                symbols.push(KrakenSchedulerSymbolReadiness {
+                    symbol: symbol.to_string(),
+                    found: false,
+                    asset_class_ok: false,
+                    alias_ok: false,
+                    enabled: None,
+                    paper_trading_enabled: None,
+                    live_trading_enabled: None,
+                    trading_flags_safe: false,
+                });
+            }
+        }
+        Ok(registry) => {
+            let mut registry_ok = true;
+            let mut trading_unsafe = false;
+            for symbol in KRAKEN_SCHEDULER_READINESS_SYMBOLS {
+                let inst = registry.instruments.iter().find(|i| i.symbol == *symbol);
+                let check = match inst {
+                    None => {
+                        registry_ok = false;
+                        fail_reasons.push(format!("symbol '{symbol}' not found in {registry_path}"));
+                        KrakenSchedulerSymbolReadiness {
+                            symbol: symbol.to_string(),
+                            found: false,
+                            asset_class_ok: false,
+                            alias_ok: false,
+                            enabled: None,
+                            paper_trading_enabled: None,
+                            live_trading_enabled: None,
+                            trading_flags_safe: false,
+                        }
+                    }
+                    Some(inst) => {
+                        let asset_class_ok = inst.asset_class == "crypto";
+                        let alias_ok = inst.provider_symbols.contains_key("kraken_pair")
+                            && inst.provider_symbols.contains_key("kraken_result_key");
+                        if !asset_class_ok || !alias_ok {
+                            registry_ok = false;
+                            fail_reasons.push(format!(
+                                "symbol '{symbol}' failed registry checks (asset_class_ok={asset_class_ok}, alias_ok={alias_ok})"
+                            ));
+                        }
+                        if inst.paper_trading_enabled || inst.live_trading_enabled {
+                            trading_unsafe = true;
+                        }
+                        let trading_flags_safe =
+                            !inst.paper_trading_enabled && !inst.live_trading_enabled;
+                        KrakenSchedulerSymbolReadiness {
+                            symbol: symbol.to_string(),
+                            found: true,
+                            asset_class_ok,
+                            alias_ok,
+                            enabled: Some(inst.enabled),
+                            paper_trading_enabled: Some(inst.paper_trading_enabled),
+                            live_trading_enabled: Some(inst.live_trading_enabled),
+                            trading_flags_safe,
+                        }
+                    }
+                };
+                symbols.push(check);
+            }
+            registry_readiness_state = if registry_ok { "ready" } else { "unsafe" };
+            if !registry_ok && truth_state == "active" {
+                truth_state = "registry_unsafe";
+            }
+            if trading_unsafe {
+                if truth_state == "active" {
+                    truth_state = "trading_flags_unsafe";
+                }
+                fail_reasons.push(
+                    "one or more requested symbols has paper_trading_enabled or live_trading_enabled = true"
+                        .to_string(),
+                );
+            }
+        }
+    }
+
+    // -- 4. Evidence (read-only, never required by this route) --
+    let evidence_dir = st.md_refresh_evidence_dir.clone();
+    let evidence_readiness_state = match find_latest_kraken_ohlc_evidence_for_scheduler(
+        std::path::Path::new(&evidence_dir),
+    ) {
+        None => "missing",
+        Some((path, _epoch)) => {
+            let parsed = std::fs::read_to_string(&path)
+                .ok()
+                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
+            match parsed {
+                None => "unsafe",
+                Some(v) => {
+                    let provider_ok = v.get("provider").and_then(|p| p.as_str()) == Some("kraken");
+                    let evidence_all_passed =
+                        v.get("all_passed").and_then(|b| b.as_bool()).unwrap_or(false);
+                    if !provider_ok || !evidence_all_passed {
+                        "unsafe"
+                    } else {
+                        "safe"
+                    }
+                }
+            }
+        }
+    };
+    if evidence_readiness_state == "missing" || evidence_readiness_state == "unsafe" {
+        warnings.push(format!(
+            "Kraken OHLC evidence is {evidence_readiness_state} in {evidence_dir}; this route never requires fresh evidence to report active"
+        ));
+    }
+
+    let all_passed = truth_state == "active" && fail_reasons.is_empty();
+    let scheduler_readiness_state = if all_passed {
+        "scheduler_ready_manual_registration_blocked"
+    } else if matches!(
+        truth_state,
+        "policy_missing" | "policy_invalid" | "scheduler_already_registered"
+    ) {
+        "policy_blocked"
+    } else {
+        "scheduler_not_ready"
+    };
+
+    let reason_code = if all_passed {
+        "kraken_scheduler_prerequisites_satisfied_manual_registration_blocked"
+    } else {
+        match truth_state {
+            "policy_missing" => "scheduler_policy_file_missing",
+            "policy_invalid" => "scheduler_policy_contract_violation",
+            "scheduler_already_registered" => "policy_declares_scheduler_already_registered",
+            "registry_unsafe" => "registry_alias_or_asset_class_check_failed",
+            "provider_unsafe" => "provider_not_found_or_unexpectedly_enabled",
+            "trading_flags_unsafe" => "trading_flag_unexpectedly_true",
+            "parse_error" => "registry_or_providers_file_parse_error",
+            _ => "readiness_check_failed",
+        }
+    };
+
+    let (recommended_default_cadence, min_pair, min_run, max_ohlc, max_total, concurrency) =
+        match &policy {
+            Some(p) => (
+                p.recommended_default_cadence.clone(),
+                p.min_seconds_between_pair_calls,
+                p.min_seconds_between_scheduled_runs,
+                p.max_ohlc_calls_per_run,
+                p.max_total_network_calls_per_run,
+                p.concurrency.clone(),
+            ),
+            None => (String::new(), 0, 0, 0, 0, String::new()),
+        };
+    let scheduler_registration_status = policy
+        .as_ref()
+        .map(|p| p.scheduler_registration_status.clone())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    let response = KrakenSchedulerReadinessResponse {
+        canonical_route: KRAKEN_SCHEDULER_READINESS_ROUTE.to_string(),
+        truth_state: truth_state.to_string(),
+        scheduler_readiness_state: scheduler_readiness_state.to_string(),
+        rate_limit_policy_state: rate_limit_policy_state.to_string(),
+        registry_readiness_state: registry_readiness_state.to_string(),
+        provider_readiness_state: provider_readiness_state.to_string(),
+        evidence_readiness_state: evidence_readiness_state.to_string(),
+        provider: provider_id.to_string(),
+        provider_enabled,
+        symbols,
+        recommended_default_cadence,
+        min_seconds_between_pair_calls: min_pair,
+        min_seconds_between_scheduled_runs: min_run,
+        max_ohlc_calls_per_run: max_ohlc,
+        max_total_network_calls_per_run: max_total,
+        concurrency,
+        scheduler_registration_status,
+        daemon_job_status: "absent".to_string(),
+        network_call_made: false,
+        db_write: false,
+        trading_enabled: false,
+        policy_path,
+        registry_path,
+        providers_path,
+        all_passed,
+        reason_code: reason_code.to_string(),
+        fail_reasons,
+        warnings,
+        safety: KrakenSchedulerReadinessSafety {
+            no_scheduled_task_registered: true,
+            no_daemon_job_added: true,
+            no_network_call_made: true,
+            no_db_connection: true,
             no_trading_enabled: true,
             no_config_file_mutated: true,
         },

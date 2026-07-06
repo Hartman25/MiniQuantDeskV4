@@ -308,7 +308,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     };
     use transport_quality::{
         crypto_registry_readiness, execution_transport, intraday_refresh_status,
-        kraken_ohlc_status, latest_mark_status, market_data_coverage, market_data_quality,
+        kraken_ohlc_status, kraken_scheduler_readiness, latest_mark_status, market_data_coverage,
+        market_data_quality,
     };
     use watchlist::{watchlist_admission_check, watchlist_status};
 
@@ -526,6 +527,16 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/v1/market-data/crypto-registry/readiness",
             get(crypto_registry_readiness),
+        )
+        // CRYPTO-DATA-02C-KRAKEN-SCHEDULER-READINESS-STATUS-SURFACE-01:
+        // read-only re-exposure of CRYPTO-DATA-02B's kraken-scheduler-
+        // readiness CLI classification (public, no auth). No DB, no
+        // provider/network call, no CLI subprocess, no config-file mutation,
+        // no scheduler registered, no daemon job added, no trading state.
+        // "active" never means a scheduler is registered.
+        .route(
+            "/api/v1/market-data/kraken-scheduler/readiness",
+            get(kraken_scheduler_readiness),
         )
         .route(
             "/api/v1/market-data/feed/status",

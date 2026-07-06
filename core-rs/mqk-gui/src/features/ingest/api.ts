@@ -21,6 +21,7 @@ import type {
   IngestJobsListResponse,
   IntradayRefreshStatusResponse,
   KrakenOhlcStatusResponse,
+  KrakenSchedulerReadinessResponse,
   LatestMarkStatusResponse,
   MarketDataFeedPollOnceRequest,
   MarketDataFeedPollOnceResponse,
@@ -1236,6 +1237,112 @@ export async function fetchCryptoRegistryReadiness(): Promise<FetchCryptoRegistr
 
   if (!result.ok) {
     return { ok: false, error: result.error ?? "Crypto registry readiness fetch failed." };
+  }
+
+  return { ok: true, data: result.data };
+}
+
+// ---------------------------------------------------------------------------
+// CRYPTO-DATA-02C-KRAKEN-SCHEDULER-READINESS-STATUS-SURFACE-01: Kraken
+// scheduler readiness
+// ---------------------------------------------------------------------------
+
+export interface FetchKrakenSchedulerReadinessResult {
+  ok: boolean;
+  data?: KrakenSchedulerReadinessResponse;
+  error?: string;
+}
+
+/**
+ * Fixed warning text the GUI panel must display verbatim, so the operator
+ * cannot mistake this read-only scheduler-readiness visibility surface for
+ * an actual registered task, a daemon job, a Kraken call, or crypto trading
+ * enablement.
+ */
+export const KRAKEN_SCHEDULER_READINESS_WARNING_TEXT =
+  "Scheduler readiness is data-pipeline visibility only. It does not register a scheduled task, start a daemon job, call Kraken, enable crypto trading, or route broker orders.";
+
+/**
+ * Return true only for the truth_state that means "usable display data".
+ * `active` never means a scheduler is registered -- see
+ * `scheduler_readiness_state` for that distinction.
+ */
+export function isKrakenSchedulerReadinessActive(truthState: string): boolean {
+  return truthState === "active";
+}
+
+/**
+ * Human-readable label for a Kraken scheduler readiness truth_state. The
+ * fail-closed states are worded as severe conditions, not plain status
+ * labels.
+ */
+export function krakenSchedulerReadinessTruthLabel(truthState: string): string {
+  switch (truthState) {
+    case "active":
+      return "active";
+    case "policy_missing":
+      return "UNSAFE — scheduler policy file missing";
+    case "policy_invalid":
+      return "UNSAFE — scheduler policy violates its own contract";
+    case "registry_unsafe":
+      return "UNSAFE — registry alias or asset-class check failed";
+    case "provider_unsafe":
+      return "UNSAFE — provider not found or unexpectedly enabled";
+    case "trading_flags_unsafe":
+      return "UNSAFE — trading flag unexpectedly enabled";
+    case "scheduler_already_registered":
+      return "UNSAFE — policy declares a scheduler already registered";
+    case "evidence_unsafe":
+      return "UNSAFE — latest Kraken evidence unsafe or stale";
+    case "parse_error":
+      return "parse error";
+    case "backend_unavailable":
+      return "registry/providers file unreadable";
+    default:
+      return truthState;
+  }
+}
+
+/**
+ * Defense-in-depth check independent of the backend's own truth_state
+ * classification: if the response's own fields look inconsistent or unsafe,
+ * treat it as unsafe even if truth_state were somehow not one of the
+ * fail-closed states. The backend already classifies these -- this is a
+ * second, GUI-side guard so a misclassified response is never rendered as
+ * trustworthy, and so "active" is never confused with "a scheduler is
+ * registered".
+ */
+export function isKrakenSchedulerReadinessUnsafe(
+  response: KrakenSchedulerReadinessResponse,
+): boolean {
+  return (
+    response.truth_state !== "active" ||
+    response.provider_enabled === true ||
+    response.scheduler_registration_status !== "not_registered" ||
+    response.network_call_made === true ||
+    response.db_write === true ||
+    response.trading_enabled === true ||
+    response.symbols.some(
+      (s) => s.paper_trading_enabled === true || s.live_trading_enabled === true,
+    )
+  );
+}
+
+/**
+ * Fetch GET /api/v1/market-data/kraken-scheduler/readiness.
+ *
+ * Safety: Read-only. No DB connection. No provider/network call. No CLI
+ * execution. No config or policy file mutated. No scheduler registered. No
+ * daemon job added. No trading state. Data-pipeline visibility only -- not
+ * a registered scheduler, not crypto trading, not broker routing.
+ */
+export async function fetchKrakenSchedulerReadiness(): Promise<FetchKrakenSchedulerReadinessResult> {
+  const result = await fetchJsonCandidate<KrakenSchedulerReadinessResponse>(
+    "/api/v1/market-data/kraken-scheduler/readiness",
+  );
+
+  if (!result.ok) {
+    return { ok: false, error: result.error ?? "Kraken scheduler readiness fetch failed." };
   }
 
   return { ok: true, data: result.data };

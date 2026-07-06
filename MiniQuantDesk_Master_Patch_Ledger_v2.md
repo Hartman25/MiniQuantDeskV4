@@ -3961,3 +3961,138 @@ both unchanged; `kraken.enabled` stays `false`; both crypto rows stay
 **Recommended next slice:** `CRYPTO-DATA-02C-KRAKEN-SCHEDULER-READINESS-STATUS-SURFACE-01`
 (conditional on this staying small) — expose the same read-only
 classification through a daemon route and GUI panel.
+
+### CRYPTO-DATA-02C-KRAKEN-SCHEDULER-READINESS-STATUS-SURFACE-01 — CLOSED_LOCAL / PARTIAL
+
+**Mission:** continuing after `CRYPTO-DATA-02B-KRAKEN-SCHEDULER-READINESS-CLI-01`
+(committed `50c30326`), expose the same read-only Kraken scheduler-readiness
+classification through a daemon route and GUI panel, since it stayed small
+enough not to require stopping after Phase B.
+
+**Concretely:** `GET /api/v1/market-data/kraken-scheduler/readiness`
+reimplements the identical classification the CLI performs (an independent
+copy, not a shared code path — mirroring the same "never trust the CLI's
+own validation, re-derive it" discipline `CRYPTO-REGISTRY-04` established),
+reusing the same two pure `mqk-md` loaders
+(`provider_registry::load_provider_registry`,
+`instrument_registry_v2::load_instrument_registry_v2`) already used
+elsewhere in the daemon. A new `AppState.kraken_scheduler_policy_path`
+field (default: the committed `CRYPTO-DATA-02A` policy JSON, override
+`MQK_KRAKEN_SCHEDULER_POLICY_PATH`) was added, mirroring the existing
+`provider_registry_path` pattern — needed because daemon integration tests
+run with CWD at the crate directory, not repo root, so a hardcoded relative
+path would have made the "happy path" test read the wrong (missing) file.
+Evidence inspection reuses `AppState.md_refresh_evidence_dir` (no new field
+needed) and is read-only/never-required by this route (unlike the CLI's
+`--require-fresh-evidence` opt-in) since there is no operator flag
+equivalent for a GET route.
+
+**Built:**
+- `core-rs/crates/mqk-daemon/src/api_types.rs` — new
+  `KrakenSchedulerSymbolReadiness`, `KrakenSchedulerReadinessSafety`, and
+  `KrakenSchedulerReadinessResponse` structs, field-for-field mirroring the
+  CLI's evidence shape.
+- `core-rs/crates/mqk-daemon/src/routes/transport_quality.rs` — new
+  `kraken_scheduler_readiness` handler plus supporting types/helpers
+  (`KrakenSchedulerPolicyDoc`, `KrakenSchedulerPolicySafetyDoc`,
+  `validate_kraken_scheduler_policy_doc`,
+  `find_latest_kraken_ohlc_evidence_for_scheduler`), identical
+  classification logic to `mqk-cli md kraken-scheduler-readiness`. Always
+  returns `200 OK`; `truth_state`/`all_passed` communicate the result.
+- `core-rs/crates/mqk-daemon/src/routes.rs` — registered
+  `GET /api/v1/market-data/kraken-scheduler/readiness` (public, no auth)
+  alongside the sibling `crypto-registry/readiness` route.
+- `core-rs/crates/mqk-daemon/src/state.rs` — new
+  `AppState.kraken_scheduler_policy_path: String` field (default from
+  `MQK_KRAKEN_SCHEDULER_POLICY_PATH` env var, else the committed
+  `CRYPTO-DATA-02A` policy path).
+- `core-rs/crates/mqk-daemon/tests/scenario_kraken_scheduler_readiness_route_02c.rs`
+  (new) — 8 tests (`ksr_01`..`ksr_08`): real committed fixtures (`active`,
+  `scheduler_ready_manual_registration_blocked`,
+  `scheduler_registration_status=not_registered`), missing policy file,
+  too-fast cadence policy, `kraken.enabled=true`,
+  `paper_trading_enabled=true`, `live_trading_enabled=true`, missing BTC
+  alias (each with a distinct `truth_state`, always `200 OK`), and an
+  explicit no-DB-pool-configured proof.
+- `core-rs/mqk-gui/src/features/ingest/types.ts` — new
+  `KrakenSchedulerSymbolReadiness`, `KrakenSchedulerReadinessSafety`,
+  `KrakenSchedulerReadinessResponse` interfaces, field-for-field mirroring
+  the Rust types.
+- `core-rs/mqk-gui/src/features/ingest/api.ts` — new
+  `fetchKrakenSchedulerReadiness`, `isKrakenSchedulerReadinessActive`,
+  `krakenSchedulerReadinessTruthLabel` (fail-closed states worded as severe
+  conditions), `isKrakenSchedulerReadinessUnsafe` (GUI-side defense-in-depth:
+  also flags `provider_enabled`/`network_call_made`/`db_write`/
+  `trading_enabled=true`, `scheduler_registration_status!=not_registered`,
+  or any symbol's trading flags, independent of the backend's own
+  `truth_state`), and the exported `KRAKEN_SCHEDULER_READINESS_WARNING_TEXT`
+  constant.
+- `core-rs/mqk-gui/src/features/ingest/IngestScreen.tsx` — new state/loader
+  (auto-loaded on mount, manual Refresh button that only re-issues the same
+  read-only GET) and a new "Kraken scheduler readiness" `Panel` rendering
+  all readiness states, cadence/spacing/concurrency policy fields,
+  scheduler-registration/daemon-job status, per-symbol grid, fail_reasons/
+  warnings, and the fixed warning text. No button registers a scheduler,
+  starts a daemon job, or mutates config.
+- `core-rs/mqk-gui/src/features/ingest/__tests__/api.test.ts` — 34 new
+  tests: `isKrakenSchedulerReadinessActive` for `active` plus all 9
+  fail-closed `truth_state` values, `krakenSchedulerReadinessTruthLabel`
+  for all states plus an unknown-passthrough case and explicit "worded as
+  UNSAFE" assertions, `isKrakenSchedulerReadinessUnsafe` (9 cases covering
+  truth_state, provider_enabled, scheduler_registration_status,
+  network_call_made, db_write, trading_enabled, and per-symbol trading
+  flags), a warning-text content assertion, and `fetchKrakenSchedulerReadiness`
+  route/`policy_missing`/transport-failure tests.
+- `docs/runbooks/local_crypto_marks_ingest.md` — new "Kraken Scheduler
+  Readiness Status Route + GUI Panel" section.
+- `MiniQuantDesk_Master_Patch_Ledger_v2.md` — this entry.
+- `docs/audits/multi_asset_completion_audit.md` — new closure note (§69).
+
+**Validation results (`CARGO_TARGET_DIR=C:\tmp\mqk-target-crypto-data-02c-kraken-scheduler-status`):**
+`cargo check -p mqk-daemon -p mqk-cli -p mqk-md` — clean. `cargo test -p
+mqk-daemon --test scenario_kraken_scheduler_readiness_route_02c` — 8/8
+pass. `cargo test -p mqk-cli --test scenario_cli_kraken_scheduler_readiness_02b`
+— 12/12 pass (unaffected). `cargo clippy -p mqk-daemon --lib -- -D
+warnings` and `cargo clippy -p mqk-daemon --test
+scenario_kraken_scheduler_readiness_route_02c -- -D warnings` (scoped to
+this bundle's own code) — both clean, zero warnings after fixing one
+`clippy::unnecessary_get_then_check` lint (`get(...).is_some()` →
+`contains_key(...)`) caught during this pass. `cargo clippy -p mqk-daemon
+--all-targets -- -D warnings` **fails on this machine's toolchain (rustc
+1.93) due to the same pre-existing, unrelated `clippy::await_holding_lock`
+errors in `state/session_controller.rs` already documented in the
+`CRYPTO-DATA-01AD`/`CRYPTO-REGISTRY-04` entries above** — not a regression
+introduced here. GUI: `npm test -- --run` — 687/687 pass (up from 653
+pre-existing; 34 new kraken-scheduler-readiness tests, zero regressions).
+`npm run build` — `tsc` type-checks clean, `vite build` succeeds
+(pre-existing, unrelated chunk-size-warning note only). `git diff --check`
+— clean.
+
+**Manual browser verification was not performed, honestly:** per this
+mission's hard safety rule ("Do NOT start daemon runtime except isolated
+route tests"), no live daemon was started, and the Ingest screen requires
+one to render past its "Connecting to daemon…" bootstrap screen — the same
+constraint and the same resolution (exhaustive unit/route test suite as the
+verification standard) already documented for the sibling `CRYPTO-DATA-01AE`/
+`CRYPTO-REGISTRY-04` GUI panels above.
+
+**Honest PARTIAL — `CRYPTO-DATA-01`/`CRYPTO-REGISTRY-01`/`ASSET-CORE-04`
+remain PARTIAL, not `CLOSED`:** this bundle adds read-only operator
+visibility for Kraken scheduler readiness — it does not register a
+scheduler, does not add a daemon job, does not enable the `kraken`
+provider, does not flip any registry flag, and does not add a button that
+mutates config or triggers a sync. `config/providers/providers.json` and
+`config/instruments/instruments_v2.crypto_local_marks.example.json` are
+both unchanged. Remaining gaps: no recurring/scheduled Kraken sync of any
+kind; no Windows Scheduled Task; no daemon recurring job; no production
+registry-v2 cutover; no crypto risk policy activation; no crypto paper/live
+execution; no crypto strategy.
+
+**Recommended next slice:** none required for continued crypto scheduler-
+readiness visibility progress on this specific thread — the natural next
+step, if ever pursued, is a separately authorized
+"CRYPTO-DATA-03-KRAKEN-SCHEDULER-TASK-REGISTRATION" decision/patch that
+would actually register a Windows Scheduled Task, gated behind every
+invariant `CRYPTO-DATA-02A`/`02B`/`02C` recorded and this readiness surface
+reporting `active`/`scheduler_ready_manual_registration_blocked` at
+registration time.

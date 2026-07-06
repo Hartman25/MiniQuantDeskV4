@@ -50,8 +50,13 @@ import {
   isCryptoRegistryReadinessUnsafe,
   cryptoRegistryReadinessTruthLabel,
   CRYPTO_REGISTRY_READINESS_WARNING_TEXT,
+  fetchKrakenSchedulerReadiness,
+  isKrakenSchedulerReadinessActive,
+  isKrakenSchedulerReadinessUnsafe,
+  krakenSchedulerReadinessTruthLabel,
+  KRAKEN_SCHEDULER_READINESS_WARNING_TEXT,
 } from "../api.ts";
-import type { CryptoRegistryReadinessResponse, IngestJobStatusResponse, IntradayRefreshStatusResponse, KrakenOhlcStatusResponse, LatestMarkStatusResponse, MdBarsCoverageResponse, MdBarsCoverageRow, TrackedEquitiesResponse } from "../types.ts";
+import type { CryptoRegistryReadinessResponse, IngestJobStatusResponse, IntradayRefreshStatusResponse, KrakenOhlcStatusResponse, KrakenSchedulerReadinessResponse, LatestMarkStatusResponse, MdBarsCoverageResponse, MdBarsCoverageRow, TrackedEquitiesResponse } from "../types.ts";
 
 // ---------------------------------------------------------------------------
 // normalizeIngestJobStatus
@@ -2632,6 +2637,274 @@ test("fetchCryptoRegistryReadiness maps a network/transport failure to ok:false"
 
   try {
     const result = await fetchCryptoRegistryReadiness();
+    assert.equal(result.ok, false);
+    assert.ok(result.error);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+// ---------------------------------------------------------------------------
+// CRYPTO-DATA-02C-KRAKEN-SCHEDULER-READINESS-STATUS-SURFACE-01:
+// Kraken scheduler readiness helpers
+// ---------------------------------------------------------------------------
+
+function makeActiveKrakenSchedulerReadinessResponse(
+  overrides: Partial<KrakenSchedulerReadinessResponse> = {},
+): KrakenSchedulerReadinessResponse {
+  return {
+    canonical_route: "/api/v1/market-data/kraken-scheduler/readiness",
+    truth_state: "active",
+    scheduler_readiness_state: "scheduler_ready_manual_registration_blocked",
+    rate_limit_policy_state: "valid",
+    registry_readiness_state: "ready",
+    provider_readiness_state: "ready",
+    evidence_readiness_state: "not_required",
+    provider: "kraken",
+    provider_enabled: false,
+    symbols: [
+      {
+        symbol: "BTC/USD",
+        found: true,
+        asset_class_ok: true,
+        alias_ok: true,
+        enabled: false,
+        paper_trading_enabled: false,
+        live_trading_enabled: false,
+        trading_flags_safe: true,
+      },
+      {
+        symbol: "ETH/USD",
+        found: true,
+        asset_class_ok: true,
+        alias_ok: true,
+        enabled: false,
+        paper_trading_enabled: false,
+        live_trading_enabled: false,
+        trading_flags_safe: true,
+      },
+    ],
+    recommended_default_cadence: "daily",
+    min_seconds_between_pair_calls: 2,
+    min_seconds_between_scheduled_runs: 86400,
+    max_ohlc_calls_per_run: 2,
+    max_total_network_calls_per_run: 2,
+    concurrency: "sequential_only",
+    scheduler_registration_status: "not_registered",
+    daemon_job_status: "absent",
+    network_call_made: false,
+    db_write: false,
+    trading_enabled: false,
+    policy_path: "docs/specs/crypto_data_02a_kraken_scheduler_rate_limit_decision.json",
+    registry_path: "config/instruments/instruments_v2.crypto_local_marks.example.json",
+    providers_path: "config/providers/providers.json",
+    all_passed: true,
+    reason_code: "kraken_scheduler_prerequisites_satisfied_manual_registration_blocked",
+    fail_reasons: [],
+    warnings: [],
+    safety: {
+      no_scheduled_task_registered: true,
+      no_daemon_job_added: true,
+      no_network_call_made: true,
+      no_db_connection: true,
+      no_trading_enabled: true,
+      no_config_file_mutated: true,
+    },
+    ...overrides,
+  };
+}
+
+// isKrakenSchedulerReadinessActive
+
+test("isKrakenSchedulerReadinessActive returns true for active", () => {
+  assert.ok(isKrakenSchedulerReadinessActive("active"));
+});
+
+for (const truthState of [
+  "policy_missing",
+  "policy_invalid",
+  "registry_unsafe",
+  "provider_unsafe",
+  "trading_flags_unsafe",
+  "scheduler_already_registered",
+  "evidence_unsafe",
+  "parse_error",
+  "backend_unavailable",
+]) {
+  test(`isKrakenSchedulerReadinessActive returns false for ${truthState}`, () => {
+    assert.ok(!isKrakenSchedulerReadinessActive(truthState));
+  });
+}
+
+// krakenSchedulerReadinessTruthLabel
+
+test("krakenSchedulerReadinessTruthLabel active -> active", () => {
+  assert.equal(krakenSchedulerReadinessTruthLabel("active"), "active");
+});
+
+for (const truthState of [
+  "policy_missing",
+  "policy_invalid",
+  "registry_unsafe",
+  "provider_unsafe",
+  "trading_flags_unsafe",
+  "scheduler_already_registered",
+  "evidence_unsafe",
+]) {
+  test(`krakenSchedulerReadinessTruthLabel ${truthState} is worded as a severe fail-closed state`, () => {
+    assert.ok(krakenSchedulerReadinessTruthLabel(truthState).includes("UNSAFE"));
+  });
+}
+
+test("krakenSchedulerReadinessTruthLabel parse_error -> parse error", () => {
+  assert.equal(krakenSchedulerReadinessTruthLabel("parse_error"), "parse error");
+});
+
+test("krakenSchedulerReadinessTruthLabel backend_unavailable -> registry/providers file unreadable", () => {
+  assert.equal(
+    krakenSchedulerReadinessTruthLabel("backend_unavailable"),
+    "registry/providers file unreadable",
+  );
+});
+
+test("krakenSchedulerReadinessTruthLabel passes through an unknown truth_state verbatim", () => {
+  assert.equal(krakenSchedulerReadinessTruthLabel("something_new"), "something_new");
+});
+
+// isKrakenSchedulerReadinessUnsafe
+
+test("isKrakenSchedulerReadinessUnsafe is false for a genuinely safe, active response", () => {
+  assert.ok(!isKrakenSchedulerReadinessUnsafe(makeActiveKrakenSchedulerReadinessResponse()));
+});
+
+test("isKrakenSchedulerReadinessUnsafe is true when truth_state is not active", () => {
+  const resp = makeActiveKrakenSchedulerReadinessResponse({ truth_state: "policy_invalid" });
+  assert.ok(isKrakenSchedulerReadinessUnsafe(resp));
+});
+
+test("isKrakenSchedulerReadinessUnsafe is true when provider_enabled is unexpectedly true", () => {
+  const resp = makeActiveKrakenSchedulerReadinessResponse({ provider_enabled: true });
+  assert.ok(isKrakenSchedulerReadinessUnsafe(resp));
+});
+
+test("isKrakenSchedulerReadinessUnsafe is true when scheduler_registration_status is not not_registered", () => {
+  const resp = makeActiveKrakenSchedulerReadinessResponse({
+    scheduler_registration_status: "registered",
+  });
+  assert.ok(isKrakenSchedulerReadinessUnsafe(resp));
+});
+
+test("isKrakenSchedulerReadinessUnsafe is true when network_call_made is unexpectedly true", () => {
+  const resp = makeActiveKrakenSchedulerReadinessResponse({ network_call_made: true });
+  assert.ok(isKrakenSchedulerReadinessUnsafe(resp));
+});
+
+test("isKrakenSchedulerReadinessUnsafe is true when db_write is unexpectedly true", () => {
+  const resp = makeActiveKrakenSchedulerReadinessResponse({ db_write: true });
+  assert.ok(isKrakenSchedulerReadinessUnsafe(resp));
+});
+
+test("isKrakenSchedulerReadinessUnsafe is true when trading_enabled is unexpectedly true", () => {
+  const resp = makeActiveKrakenSchedulerReadinessResponse({ trading_enabled: true });
+  assert.ok(isKrakenSchedulerReadinessUnsafe(resp));
+});
+
+test("isKrakenSchedulerReadinessUnsafe is true when a symbol carries paper_trading_enabled=true", () => {
+  const base = makeActiveKrakenSchedulerReadinessResponse();
+  const resp: KrakenSchedulerReadinessResponse = {
+    ...base,
+    symbols: [{ ...base.symbols[0], paper_trading_enabled: true }, base.symbols[1]],
+  };
+  assert.ok(isKrakenSchedulerReadinessUnsafe(resp));
+});
+
+test("isKrakenSchedulerReadinessUnsafe is true when a symbol carries live_trading_enabled=true", () => {
+  const base = makeActiveKrakenSchedulerReadinessResponse();
+  const resp: KrakenSchedulerReadinessResponse = {
+    ...base,
+    symbols: [base.symbols[0], { ...base.symbols[1], live_trading_enabled: true }],
+  };
+  assert.ok(isKrakenSchedulerReadinessUnsafe(resp));
+});
+
+// KRAKEN_SCHEDULER_READINESS_WARNING_TEXT
+
+test("KRAKEN_SCHEDULER_READINESS_WARNING_TEXT states data-pipeline-visibility-only scope", () => {
+  assert.ok(KRAKEN_SCHEDULER_READINESS_WARNING_TEXT.includes("data-pipeline visibility only"));
+  assert.ok(KRAKEN_SCHEDULER_READINESS_WARNING_TEXT.includes("does not register a scheduled task"));
+  assert.ok(KRAKEN_SCHEDULER_READINESS_WARNING_TEXT.includes("enable crypto trading"));
+});
+
+// fetchKrakenSchedulerReadiness
+
+test("fetchKrakenSchedulerReadiness GETs the canonical kraken-scheduler readiness route", async () => {
+  const calls: Array<{ url: string; init?: RequestInit }> = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+    calls.push({ url: String(url), init });
+    return new Response(
+      JSON.stringify(makeActiveKrakenSchedulerReadinessResponse()),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  }) as typeof fetch;
+
+  try {
+    const result = await fetchKrakenSchedulerReadiness();
+    assert.equal(result.ok, true);
+    assert.equal(calls.length, 1);
+    assert.equal(
+      calls[0].url,
+      "http://127.0.0.1:8899/api/v1/market-data/kraken-scheduler/readiness",
+    );
+    assert.equal(calls[0].init?.method ?? "GET", "GET");
+    assert.equal(result.data?.truth_state, "active");
+    assert.equal(
+      result.data?.scheduler_readiness_state,
+      "scheduler_ready_manual_registration_blocked",
+    );
+    assert.equal(result.data?.scheduler_registration_status, "not_registered");
+    assert.equal(result.data?.symbols.length, 2);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("fetchKrakenSchedulerReadiness surfaces policy_missing without throwing", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () =>
+    new Response(
+      JSON.stringify(
+        makeActiveKrakenSchedulerReadinessResponse({
+          truth_state: "policy_missing",
+          scheduler_readiness_state: "policy_blocked",
+          rate_limit_policy_state: "missing",
+          all_passed: false,
+          reason_code: "scheduler_policy_file_missing",
+          fail_reasons: ["policy file not found: docs/specs/crypto_data_02a_kraken_scheduler_rate_limit_decision.json"],
+        }),
+      ),
+      { status: 200, headers: { "content-type": "application/json" } },
+    )) as typeof fetch;
+
+  try {
+    const result = await fetchKrakenSchedulerReadiness();
+    assert.equal(result.ok, true);
+    assert.equal(result.data?.truth_state, "policy_missing");
+    assert.ok(!isKrakenSchedulerReadinessActive(result.data!.truth_state));
+    assert.equal(result.data?.fail_reasons.length, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("fetchKrakenSchedulerReadiness maps a network/transport failure to ok:false", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => {
+    throw new Error("network unreachable");
+  }) as typeof fetch;
+
+  try {
+    const result = await fetchKrakenSchedulerReadiness();
     assert.equal(result.ok, false);
     assert.ok(result.error);
   } finally {

@@ -4991,6 +4991,89 @@ pub struct CryptoRegistryReadinessResponse {
 }
 
 // ---------------------------------------------------------------------------
+// CRYPTO-DATA-02C-KRAKEN-SCHEDULER-READINESS-STATUS-SURFACE-01: read-only
+// re-exposure of CRYPTO-DATA-02B's kraken-scheduler-readiness CLI
+// classification via `GET /api/v1/market-data/kraken-scheduler/readiness`.
+// ---------------------------------------------------------------------------
+
+/// Per-symbol readiness check, mirroring `mqk-cli`'s
+/// `KrakenSchedulerSymbolCheck`. `enabled`/`paper_trading_enabled`/
+/// `live_trading_enabled` are `None` only when the symbol was not found in
+/// the registry at all (distinct from `Some(false)`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KrakenSchedulerSymbolReadiness {
+    pub symbol: String,
+    pub found: bool,
+    pub asset_class_ok: bool,
+    pub alias_ok: bool,
+    pub enabled: Option<bool>,
+    pub paper_trading_enabled: Option<bool>,
+    pub live_trading_enabled: Option<bool>,
+    pub trading_flags_safe: bool,
+}
+
+/// Fixed, always-true-in-practice safety flags. Present as explicit fields
+/// (rather than inferred) so a GUI/operator surface never has to assume what
+/// this route did not do.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KrakenSchedulerReadinessSafety {
+    pub no_scheduled_task_registered: bool,
+    pub no_daemon_job_added: bool,
+    pub no_network_call_made: bool,
+    pub no_db_connection: bool,
+    pub no_trading_enabled: bool,
+    pub no_config_file_mutated: bool,
+}
+
+/// Response for `GET /api/v1/market-data/kraken-scheduler/readiness`.
+///
+/// `truth_state` mirrors `mqk-cli md kraken-scheduler-readiness` exactly:
+/// `"active"`, `"policy_missing"`, `"policy_invalid"`, `"registry_unsafe"`,
+/// `"provider_unsafe"`, `"trading_flags_unsafe"`,
+/// `"scheduler_already_registered"`, `"evidence_unsafe"`, `"parse_error"`,
+/// `"backend_unavailable"`.
+///
+/// `"active"` (`scheduler_readiness_state =
+/// "scheduler_ready_manual_registration_blocked"`) never means a scheduler
+/// is registered — it means every prerequisite this route can check is
+/// satisfied for a future, separately authorized scheduler-registration
+/// patch to be considered. This route never opens a DB connection, never
+/// calls Kraken or any provider/network endpoint, never runs a CLI
+/// subprocess, never registers a scheduler, never mutates any config file.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KrakenSchedulerReadinessResponse {
+    pub canonical_route: String,
+    pub truth_state: String,
+    pub scheduler_readiness_state: String,
+    pub rate_limit_policy_state: String,
+    pub registry_readiness_state: String,
+    pub provider_readiness_state: String,
+    pub evidence_readiness_state: String,
+    pub provider: String,
+    pub provider_enabled: bool,
+    pub symbols: Vec<KrakenSchedulerSymbolReadiness>,
+    pub recommended_default_cadence: String,
+    pub min_seconds_between_pair_calls: i64,
+    pub min_seconds_between_scheduled_runs: i64,
+    pub max_ohlc_calls_per_run: i64,
+    pub max_total_network_calls_per_run: i64,
+    pub concurrency: String,
+    pub scheduler_registration_status: String,
+    pub daemon_job_status: String,
+    pub network_call_made: bool,
+    pub db_write: bool,
+    pub trading_enabled: bool,
+    pub policy_path: String,
+    pub registry_path: String,
+    pub providers_path: String,
+    pub all_passed: bool,
+    pub reason_code: String,
+    pub fail_reasons: Vec<String>,
+    pub warnings: Vec<String>,
+    pub safety: KrakenSchedulerReadinessSafety,
+}
+
+// ---------------------------------------------------------------------------
 // DATA-INGEST-GUI-SYNC-ALL-01: Tracked-equities registry preview
 // ---------------------------------------------------------------------------
 
