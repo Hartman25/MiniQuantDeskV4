@@ -1233,6 +1233,278 @@ pub async fn md_kraken_ohlc_ingest(
 }
 
 // ---------------------------------------------------------------------------
+// kraken-ohlc-sync — CRYPTO-DATA-01Z-AA-KRAKEN-INCREMENTAL-SYNC-DB-PROOF-
+// BUNDLE-01-COMBINED: safe incremental sync proof on top of the fixture-
+// first Kraken ingest path proven by 01X-Y.
+//
+// This is a separate, additive command from `kraken-ohlc-ingest` -- not a
+// change to it. It shares the same fail-closed fixture/network gate, the
+// same parser, and the same canonical `md_bars` write helper
+// (`ingest_provider_bars_to_md_bars_with_provider_metadata`, unchanged), but
+// adds a pre-write read of existing `md_bars` state
+// (`latest_stored_bar_end_ts`, an existing, unmodified helper) so an
+// operator can see what was already stored before this invocation, and
+// stamps rows with `ingest_mode="provider_sync"` (distinct from
+// `kraken-ohlc-ingest`'s `"provider_ingest"`) so DB rows/quality-report
+// history can be traced back to which command wrote them.
+//
+// Honest limitation (documented, not hidden): the underlying upsert helper
+// has no row-content-diff "skip if unchanged" capability, and this command
+// does not add one (that would require touching `mqk-db`'s write path,
+// out of scope here). "Existing" classification is by `end_ts` presence
+// relative to the pre-sync high-water mark, not by OHLCV-value comparison.
+// Default policy (`--no-update-existing` absent) upserts every completed
+// bar exactly like `kraken-ohlc-ingest` -- a previously-stored row with
+// different values is updated, a previously-stored row with identical
+// values is harmlessly re-written to the same values. Passing
+// `--no-update-existing` skips (never sends to the write helper) any
+// completed bar whose `end_ts` was already <= the pre-sync high-water mark,
+// which is a real, provable skip (by presence, not by value-equality).
+// ---------------------------------------------------------------------------
+
+/// Schema version of the evidence JSON written by `--output-dir`.
+const KRAKEN_OHLC_SYNC_EVIDENCE_SCHEMA_VERSION: &str = "kraken-ohlc-sync-v1";
+
+/// Execute `mqk md kraken-ohlc-sync`: resolve the Kraken alias for
+/// `--symbol`, obtain a Kraken `/0/public/OHLC` response body (fixture-first,
+/// same fail-closed gate as `kraken-ohlc-ingest`), parse it, read the
+/// pre-sync latest stored `end_ts` for this symbol/timeframe, then upsert
+/// only the completed (non-forming) bars into `md_bars` via the existing
+/// provider-metadata-aware helper, stamped `ingest_mode="provider_sync"`.
+///
+/// Only `--timeframe 1D` is supported. Never touches
+/// broker/runtime/risk/order/strategy code and never registers a scheduler
+/// -- this is a single explicit operator invocation, not recurring sync.
+#[allow(clippy::too_many_arguments)]
+pub async fn md_kraken_ohlc_sync(
+    registry: PathBuf,
+    symbol: String,
+    timeframe: String,
+    input_file: Option<PathBuf>,
+    output_dir: Option<PathBuf>,
+    no_update_existing: bool,
+) -> Result<()> {
+    let tf = mqk_md::Timeframe::parse(&timeframe)?;
+    if tf != mqk_md::Timeframe::D1 {
+        anyhow::bail!(
+            "kraken-ohlc-sync: only --timeframe 1D is supported by this adapter, got {timeframe}"
+        );
+    }
+
+    let registry_v2 = mqk_md::instrument_registry_v2::load_instrument_registry_v2(&registry)
+        .with_context(|| format!("kraken-ohlc-sync: registry load failed: {}", registry.display()))?;
+    let aliases = mqk_md::kraken_aliases_from_registry_v2(&registry_v2);
+    let alias = aliases
+        .iter()
+        .find(|a| a.canonical_symbol == symbol)
+        .cloned()
+        .with_context(|| {
+            format!("kraken-ohlc-sync: no kraken alias configured for symbol {symbol}")
+        })?;
+
+    // Fail-closed gate: refuses before any file/network/DB access when
+    // neither --input-file nor the network opt-in env var is present.
+    let (body, network_call_made, mode) = match &input_file {
+        Some(path) => {
+            let content = fs::read_to_string(path).with_context(|| {
+                format!("kraken-ohlc-sync: input-file read failed: {}", path.display())
+            })?;
+            (content, false, "input_file")
+        }
+        None => {
+            let allowed = std::env::var(ENV_ALLOW_KRAKEN_NETWORK_SMOKE)
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
+            if !allowed {
+                anyhow::bail!(
+                    "kraken-ohlc-sync: no --input-file provided and {ENV_ALLOW_KRAKEN_NETWORK_SMOKE} is not set; \
+                     refusing to make a network call by default (kraken_sync_requires_input_file_or_network_opt_in)"
+                );
+            }
+            let body = mqk_md::fetch_kraken_ohlc_body(&alias.kraken_pair)
+                .await
+                .map_err(|e| anyhow::anyhow!("kraken-ohlc-sync: network fetch failed: {e}"))?;
+            (body, true, "network_smoke")
+        }
+    };
+
+    let interval_seconds = tf.duration_secs();
+    let parsed = mqk_md::parse_kraken_ohlc_response(&body, &alias.kraken_pair, interval_seconds)
+        .map_err(|e| anyhow::anyhow!("kraken-ohlc-sync: parse failed: {e}"))?;
+
+    let completed = parsed
+        .completed_provider_bars(&symbol, tf.as_str())
+        .map_err(|e| anyhow::anyhow!("kraken-ohlc-sync: bar conversion failed: {e}"))?;
+    let bars_excluded_forming = parsed.forming_bars().len();
+    let forming_candle_excluded = bars_excluded_forming > 0;
+
+    let latest_completed = completed.iter().max_by_key(|b| b.end_ts);
+    let latest_completed_end_ts = latest_completed.map(|b| b.end_ts);
+    let latest_completed_start_ts = latest_completed.map(|b| b.end_ts - interval_seconds);
+
+    // DB connection only happens after the parse/gate above has passed.
+    let pool = mqk_db::connect_from_env().await?;
+
+    // Pre-write read of existing md_bars state for this symbol/timeframe
+    // (existing, unmodified helper -- no mqk-db source change).
+    let latest_existing_end_ts_before =
+        mqk_db::md::latest_stored_bar_end_ts(&pool, &symbol, tf.as_str()).await?;
+    let high_water_mark = latest_existing_end_ts_before.unwrap_or(i64::MIN);
+
+    // Classify each completed bar as missing/new (end_ts beyond what was
+    // already stored) vs an existing candidate (end_ts already covered).
+    // This is a presence check, not an OHLCV-value comparison -- see the
+    // module note above for why.
+    let bars_missing_new = completed.iter().filter(|b| b.end_ts > high_water_mark).count();
+    let bars_existing_candidate = completed.len() - bars_missing_new;
+
+    let sync_policy = if no_update_existing {
+        "skip_existing_end_ts_no_update_content_diff_not_detected"
+    } else {
+        "upsert_existing_matches_ingest_helper_default_no_content_diff_skip_detection"
+    };
+
+    // mqk_md::ProviderBar -> mqk_db::md::ProviderBar, filtered per policy.
+    let db_bars: Vec<mqk_db::md::ProviderBar> = completed
+        .iter()
+        .filter(|b| !no_update_existing || b.end_ts > high_water_mark)
+        .map(|b| mqk_db::md::ProviderBar {
+            symbol: b.symbol.clone(),
+            timeframe: b.timeframe.clone(),
+            end_ts: b.end_ts,
+            open: b.open.clone(),
+            high: b.high.clone(),
+            low: b.low.clone(),
+            close: b.close.clone(),
+            volume: b.volume,
+            is_complete: b.is_complete,
+        })
+        .collect();
+    let rows_skipped_if_known = (completed.len() - db_bars.len()) as u64;
+    let md_bars_write = !db_bars.is_empty();
+
+    // Deterministic ingest_id, distinct namespace from kraken-ohlc-ingest's
+    // so this command's md_quality_reports history never collides with it.
+    let ingest_id = Uuid::new_v5(
+        &Uuid::NAMESPACE_DNS,
+        format!(
+            "mqk-md-ingest.kraken.sync.v1|{}|{}|{}",
+            symbol,
+            tf.as_str(),
+            alias.kraken_pair
+        )
+        .as_bytes(),
+    );
+
+    let provider_metadata = mqk_db::md::MdBarProviderMetadata {
+        provider_id: mqk_md::KRAKEN_PROVIDER_ID.to_string(),
+        provider_source: Some(mqk_md::KRAKEN_PROVIDER_ID.to_string()),
+        provider_symbol: Some(parsed.provider_pair_key.clone()),
+        ingest_mode: Some("provider_sync".to_string()),
+        provider_bar_id: None,
+        provider_updated_at_utc: None,
+    };
+
+    let res = mqk_db::md::ingest_provider_bars_to_md_bars_with_provider_metadata(
+        &pool,
+        mqk_db::md::IngestProviderBarsArgs {
+            source: mqk_md::KRAKEN_PROVIDER_ID.to_string(),
+            timeframe: tf.as_str().to_string(),
+            ingest_id,
+            bars: db_bars,
+        },
+        provider_metadata,
+    )
+    .await?;
+
+    println!("provider_id={}", mqk_md::KRAKEN_PROVIDER_ID);
+    println!("provider_source={}", mqk_md::KRAKEN_PROVIDER_ID);
+    println!("provider_symbol={}", parsed.provider_pair_key);
+    println!("ingest_mode=provider_sync");
+    println!("mode={mode}");
+    println!("network_call_made={network_call_made}");
+    println!("db_write=true");
+    println!("md_bars_write={md_bars_write}");
+    println!("forming_candle_excluded={forming_candle_excluded}");
+    println!(
+        "volume_semantics=kraken_base_asset_volume_scaled_by_{}_not_whole_coins_not_usd",
+        mqk_md::KRAKEN_VOLUME_SCALE
+    );
+    println!("volume_scale={}", mqk_md::KRAKEN_VOLUME_SCALE);
+    println!("symbol={symbol}");
+    println!("ingest_id={}", res.ingest_id);
+    println!("sync_policy={sync_policy}");
+    println!("no_update_existing={no_update_existing}");
+    println!("latest_existing_end_ts_before={}", fmt_opt_i64(latest_existing_end_ts_before));
+    println!("bars_completed={}", completed.len());
+    println!("bars_excluded_forming={bars_excluded_forming}");
+    println!("bars_considered_for_sync={}", completed.len());
+    println!("bars_missing_new={bars_missing_new}");
+    println!("bars_existing_candidate={bars_existing_candidate}");
+    println!("rows_skipped_if_known={rows_skipped_if_known}");
+    println!("latest_completed_start_ts={}", fmt_opt_i64(latest_completed_start_ts));
+    println!("latest_completed_end_ts={}", fmt_opt_i64(latest_completed_end_ts));
+    println!(
+        "rows_read={} rows_ok={} rejected={} inserted={} updated={}",
+        res.report.coverage.rows_read,
+        res.report.coverage.rows_ok,
+        res.report.coverage.rows_rejected,
+        res.report.coverage.rows_inserted,
+        res.report.coverage.rows_updated
+    );
+
+    if let Some(dir) = &output_dir {
+        fs::create_dir_all(dir).with_context(|| {
+            format!("kraken-ohlc-sync: create output dir failed: {}", dir.display())
+        })?;
+        let produced_at_ts = Utc::now().timestamp();
+        let produced_at_utc = chrono::DateTime::<Utc>::from_timestamp(produced_at_ts, 0)
+            .unwrap_or_else(Utc::now)
+            .to_rfc3339();
+        let evidence = serde_json::json!({
+            "schema_version": KRAKEN_OHLC_SYNC_EVIDENCE_SCHEMA_VERSION,
+            "producer": "mqk-cli md kraken-ohlc-sync",
+            "produced_at_utc": produced_at_utc,
+            "provider": mqk_md::KRAKEN_PROVIDER_ID,
+            "mode": mode,
+            "network_call_made": network_call_made,
+            "db_write": true,
+            "md_bars_write": md_bars_write,
+            "provider_id": mqk_md::KRAKEN_PROVIDER_ID,
+            "provider_source": mqk_md::KRAKEN_PROVIDER_ID,
+            "provider_symbol": parsed.provider_pair_key,
+            "ingest_mode": "provider_sync",
+            "sync_policy": sync_policy,
+            "no_update_existing": no_update_existing,
+            "symbols_requested": [symbol.clone()],
+            "bars_completed": completed.len(),
+            "bars_excluded_forming": bars_excluded_forming,
+            "bars_considered_for_sync": completed.len(),
+            "bars_missing_new": bars_missing_new,
+            "bars_existing_candidate": bars_existing_candidate,
+            "rows_inserted": res.report.coverage.rows_inserted,
+            "rows_updated": res.report.coverage.rows_updated,
+            "rows_skipped_if_known": rows_skipped_if_known,
+            "latest_existing_end_ts_before": latest_existing_end_ts_before,
+            "latest_completed_start_ts": latest_completed_start_ts,
+            "latest_completed_end_ts": latest_completed_end_ts,
+            "volume_semantics": "kraken_base_asset_volume_scaled_by_1e8_not_whole_coins_not_usd",
+            "volume_scale": mqk_md::KRAKEN_VOLUME_SCALE,
+            "all_passed": true,
+            "reason_code": "kraken_sync_evidence_generated",
+            "fail_reasons": Vec::<String>::new(),
+        });
+        let out_path = dir.join(format!("kraken_ohlc_sync_{produced_at_ts}.json"));
+        fs::write(&out_path, serde_json::to_string_pretty(&evidence)?).with_context(|| {
+            format!("kraken-ohlc-sync: write evidence failed: {}", out_path.display())
+        })?;
+        println!("evidence_path={}", out_path.display());
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

@@ -567,11 +567,64 @@ exact fixture keys — it can never touch pre-existing non-Kraken history).
 no crypto trading enablement.** `kraken-ohlc-ingest` is a single explicit
 operator invocation, proven safe with fixture data only.
 
+## Kraken Incremental Sync DB Proof (CRYPTO-DATA-01Z-AA-KRAKEN-INCREMENTAL-SYNC-DB-PROOF-BUNDLE-01-COMBINED)
+
+Continuing after `01X-Y`'s one-shot ingest, this bundle added a
+Kraken-specific incremental sync command that inspects existing `md_bars`
+state before writing:
+
+```powershell
+$env:MQK_DATABASE_URL = "postgres://postgres:postgres@127.0.0.1:5434/mqk_test?sslmode=disable"
+
+cargo run --manifest-path .\core-rs\Cargo.toml -p mqk-cli --bin mqk-cli -- md kraken-ohlc-sync `
+  --registry .\config\instruments\instruments_v2.crypto_local_marks.example.json `
+  --symbol BTC/USD `
+  --timeframe 1D `
+  --input-file .\core-rs\crates\mqk-md\tests\fixtures\kraken_ohlc_xbtusd_1d.json `
+  --output-dir .\exports\market_data
+```
+
+Same fail-closed gate as `kraken-ohlc-ingest`, with its own named reason:
+without `--input-file`, the command refuses before any DB connection unless
+`MQK_ALLOW_KRAKEN_NETWORK_SMOKE=1` is explicitly set
+(`kraken_sync_requires_input_file_or_network_opt_in`). Before writing, it
+reads the pre-sync latest stored `end_ts` for the symbol/timeframe (via the
+existing, unmodified `mqk_db::md::latest_stored_bar_end_ts` helper — no
+`mqk-db` source change) and classifies each completed candidate bar as
+missing/new or an existing candidate by `end_ts` presence. Rows are stamped
+`ingest_mode="provider_sync"` (distinct from `kraken-ohlc-ingest`'s
+`"provider_ingest"`) so DB history can be traced to which command wrote it.
+
+**Honest limitation, documented not hidden:** the reused write helper has no
+row-content-diff "skip if unchanged" capability. The default policy upserts
+every completed bar (a previously-stored row is always updated, never
+skipped by value-equality). An optional `--no-update-existing` flag proves a
+real, provable-by-presence skip instead: any completed bar whose `end_ts`
+was already covered is never sent to the write helper at all. Neither policy
+claims a content-equality skip the code cannot actually prove.
+
+DB-backed proof:
+`core-rs/crates/mqk-cli/tests/scenario_cli_kraken_ohlc_sync_db_01zaa.rs`
+proves insert-vs-update classification against a deliberately stale seeded
+row, forming-row exclusion, exact scaled-volume readback, idempotent
+re-runs, the `--no-update-existing` skip proof, zero `oms_outbox` side
+effects, and zero-leftover cleanup. See
+`docs/specs/crypto_data_01z_aa_kraken_incremental_sync_db_proof.md` for full
+detail.
+
+`sync-provider`/`ingest-provider` remain untouched and TwelveData/
+Alpaca-only. **No recurring ingestion, no scheduler, no daemon job, no GUI
+surface, and no crypto trading enablement.**
+
 ## Remaining Gaps
 
 - `sync-provider` (incremental backfill) still has no Kraken path — an
   explicit deferral, not an oversight (see
-  `docs/specs/crypto_data_01x_y_kraken_ingest_provider_db_proof.md` §5).
+  `docs/specs/crypto_data_01x_y_kraken_ingest_provider_db_proof.md` §5). A
+  Kraken-specific `kraken-ohlc-sync` command now exists instead (see above).
+- Kraken sync has no row-content-diff "skip if unchanged" detection — an
+  explicit, documented deferral (see
+  `docs/specs/crypto_data_01z_aa_kraken_incremental_sync_db_proof.md` §2/§7).
 - CoinLore's verified public endpoints are ticker/spot-only, not OHLCV; a
   `LatestMark` parser/model and a read-only evidence-file status route now
   exist for that ticker data, but no `latest_marks` DB table exists — the

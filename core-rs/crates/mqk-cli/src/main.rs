@@ -12,7 +12,7 @@ use commands::{
     load_payload,
     md::{
         md_coinlore_latest_mark, md_ingest_csv, md_ingest_provider, md_kraken_ohlc_dry_run,
-        md_kraken_ohlc_ingest, md_registry_v2_status, md_sync_provider,
+        md_kraken_ohlc_ingest, md_kraken_ohlc_sync, md_registry_v2_status, md_sync_provider,
     },
     run::{
         run_arm, run_begin, run_deadman_check, run_deadman_enforce, run_halt, run_heartbeat,
@@ -547,6 +547,48 @@ enum MdCmd {
         #[arg(long)]
         output_dir: Option<PathBuf>,
     },
+
+    /// CRYPTO-DATA-01Z-AA-KRAKEN-INCREMENTAL-SYNC-DB-PROOF-BUNDLE-01-
+    /// COMBINED: safe incremental Kraken sync proof. Reads the pre-sync
+    /// latest stored `end_ts` for --symbol/--timeframe, then upserts only
+    /// the completed (non-forming) bars into md_bars via the same
+    /// provider-metadata-aware helper `kraken-ohlc-ingest` uses, stamped
+    /// `ingest_mode="provider_sync"` (distinct from `kraken-ohlc-ingest`'s
+    /// `"provider_ingest"`) so DB rows can be traced to which command wrote
+    /// them. Same fail-closed fixture/network gate as `kraken-ohlc-ingest`.
+    /// Only --timeframe 1D is supported. Not recurring sync: no scheduler,
+    /// daemon, or GUI wiring is added by this command.
+    KrakenOhlcSync {
+        /// Path to a registry-v2 JSON file carrying provider_symbols.kraken_pair
+        /// (e.g. config/instruments/instruments_v2.crypto_local_marks.example.json).
+        #[arg(long)]
+        registry: PathBuf,
+
+        /// Canonical symbol (e.g. BTC/USD or ETH/USD).
+        #[arg(long)]
+        symbol: String,
+
+        /// Timeframe. Only 1D is supported by this adapter.
+        #[arg(long, default_value = "1D")]
+        timeframe: String,
+
+        /// Path to a local file containing a Kraken /0/public/OHLC response
+        /// body. When omitted, a live network call is attempted only if
+        /// MQK_ALLOW_KRAKEN_NETWORK_SMOKE=1.
+        #[arg(long)]
+        input_file: Option<PathBuf>,
+
+        /// Directory to write a JSON evidence artifact. Not staged/committed.
+        #[arg(long)]
+        output_dir: Option<PathBuf>,
+
+        /// Conservative alternate policy: skip (never upsert) any completed
+        /// bar whose end_ts was already <= the pre-sync latest stored
+        /// end_ts for this symbol/timeframe. Default (absent) upserts every
+        /// completed bar, matching kraken-ohlc-ingest's behavior exactly.
+        #[arg(long, default_value_t = false, action = clap::ArgAction::SetTrue)]
+        no_update_existing: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -847,6 +889,24 @@ async fn main() -> Result<()> {
             } => {
                 md_kraken_ohlc_ingest(registry, symbol, timeframe, input_file, output_dir)
                     .await?;
+            }
+            MdCmd::KrakenOhlcSync {
+                registry,
+                symbol,
+                timeframe,
+                input_file,
+                output_dir,
+                no_update_existing,
+            } => {
+                md_kraken_ohlc_sync(
+                    registry,
+                    symbol,
+                    timeframe,
+                    input_file,
+                    output_dir,
+                    no_update_existing,
+                )
+                .await?;
             }
         },
 

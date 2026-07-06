@@ -202,7 +202,11 @@ already exist (added by an earlier patch), and
 ## 5. What remains open
 
 - `sync-provider` (incremental backfill) has no Kraken path — an explicit
-  deferral (§1), not an oversight.
+  deferral (§1), not an oversight. A Kraken-specific incremental sync
+  command (`kraken-ohlc-sync`) now exists instead, closed by
+  `CRYPTO-DATA-01Z-AA-KRAKEN-INCREMENTAL-SYNC-DB-PROOF-BUNDLE-01-COMBINED` —
+  see `docs/specs/crypto_data_01z_aa_kraken_incremental_sync_db_proof.md`.
+  `sync-provider` itself remains untouched and TwelveData/Alpaca-only.
 - No recurring/scheduled Kraken ingestion of any kind.
 - No GUI status surface for Kraken ingest (mirroring `01N`-`01R`'s CoinLore
   pattern would be the natural next step if warranted).
