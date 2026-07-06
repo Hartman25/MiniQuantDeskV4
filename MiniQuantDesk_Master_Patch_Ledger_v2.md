@@ -3602,3 +3602,90 @@ registry-v2 cutover in any respect.
 `CRYPTO-REGISTRY-03-KRAKEN-DATA-ONLY-REGISTRY-READINESS-CLI-01` — a read-only
 operator CLI proving the current, unmodified registry/provider configs are
 ready for data-only Kraken OHLCV operations without touching any config flag.
+
+---
+
+### CRYPTO-REGISTRY-03-KRAKEN-DATA-ONLY-REGISTRY-READINESS-CLI-01 — CLOSED_LOCAL / PARTIAL
+
+**Mission:** continuing after `CRYPTO-REGISTRY-02-KRAKEN-DATA-REGISTRY-CUTOVER-DECISION-01`
+(decision-only, committed `4f157253`), add a read-only operator CLI/validator
+surface proving the current, unmodified registry-v2 fixture and providers
+config are ready for data-only Kraken OHLCV operations for `BTC/USD`/`ETH/USD`
+— without touching any config flag, DB, or network call.
+
+**Concretely:** `mqk-cli md crypto-registry-readiness` reads `--providers`
+(default `config/providers/providers.json`) via the existing
+`mqk_md::provider_registry::load_provider_registry`, and `--registry` via the
+existing `mqk_md::instrument_registry_v2::load_instrument_registry_v2` — both
+already-proven pure loaders, no new mqk-md code. It classifies: provider
+existence, `provider_enabled` (an unexpected `enabled=true` fails closed as
+`unsafe_provider_enabled`, per `CRYPTO-REGISTRY-02`'s decision not to permit
+provider enablement yet), per-symbol `asset_class=="crypto"`, per-symbol
+`kraken_pair`/`kraken_result_key` alias completeness (`missing_alias` if
+either is absent), and per-symbol `paper_trading_enabled`/
+`live_trading_enabled` (`unsafe_trading_enabled` if either is `true`). When
+all checks pass and every requested symbol's `enabled` is `false` (the
+current, correct state), the report classifies
+`data_readiness_state=data_ready_manual_only` — explicitly not a failure and
+distinct from `production_default`. `trading_readiness_state` is always
+`"disabled"` and `scheduler_readiness_state` is always `"absent"` — this
+command has no branch that could ever report otherwise, since neither a
+trading path nor a scheduler exists in this repo to query.
+
+**Built:**
+- `core-rs/crates/mqk-cli/src/commands/md.rs` — new
+  `CryptoRegistrySymbolCheck` struct and `md_crypto_registry_readiness`
+  function (plus a small `fmt_opt_bool` stdout-formatting helper alongside
+  the existing `fmt_opt_i64`). Prints a `key=value` report to stdout and
+  optionally writes a `crypto-registry-readiness-v1` JSON evidence artifact
+  to `--output-dir`. Returns `Err` (nonzero exit) whenever `all_passed` is
+  `false`, mirroring `md_registry_v2_status`'s fail-closed convention.
+- `core-rs/crates/mqk-cli/src/main.rs` — new `MdCmd::CryptoRegistryReadiness`
+  subcommand (`--registry`, `--providers` default
+  `config/providers/providers.json`, `--provider` default `kraken`,
+  `--symbols` default `BTC/USD,ETH/USD`, `--output-dir`) and its dispatch arm.
+- `core-rs/crates/mqk-cli/tests/scenario_cli_crypto_registry_readiness_03.rs`
+  (new) — 9 tests (`rc_01`..`rc_09`) invoking the built `mqk-cli` binary:
+  happy path against the real committed fixture files (`active`/
+  `data_ready_manual_only`, exit 0), missing provider entry, missing/
+  incomplete Kraken alias, missing symbol entirely, `paper_trading_enabled=true`,
+  `live_trading_enabled=true`, `kraken.enabled=true` (all six failure cases
+  fail closed with nonzero exit and a distinct `truth_state`), an evidence-JSON
+  content proof (`schema_version`, all six `safety` booleans `true`, no
+  DB/network/order/broker/position/account key present anywhere in the
+  envelope), and a byte-for-byte proof that `--registry`/`--providers` are
+  never mutated by a real invocation.
+- `docs/runbooks/local_crypto_marks_ingest.md` — new "Crypto Registry
+  Readiness CLI" section; "Remaining Gaps" unchanged in substance (this
+  patch adds visibility, not a new gap or a closed one).
+- `MiniQuantDesk_Master_Patch_Ledger_v2.md` — this entry.
+- `docs/audits/multi_asset_completion_audit.md` — new closure note.
+
+**Validation results (`CARGO_TARGET_DIR=C:\tmp\mqk-target-crypto-registry-03-readiness`):**
+`cargo check -p mqk-cli -p mqk-md` — clean. `cargo test -p mqk-cli --test
+scenario_cli_crypto_registry_readiness_03` — 9/9 pass. `cargo test -p mqk-md
+--test scenario_crypto_local_marks_registry_data_01a` — 31/31 pass (unaffected).
+`cargo test -p mqk-md --test scenario_kraken_ohlcv_provider_01uvw` — 7/7 pass
+(unaffected). `cargo test -p mqk-cli --test scenario_cli_kraken_ohlc_dry_run_01w`
+— 7/7 pass (unaffected). `cargo clippy -p mqk-cli -p mqk-md --all-targets --
+-D warnings` — clean. `powershell -File
+scripts\guards\validate_crypto_registry_02_kraken_cutover_decision.ps1` —
+still passes, unaffected (no shared file touched with a semantic change).
+`git diff --check` — clean.
+
+**Honest PARTIAL — `CRYPTO-DATA-01`/`CRYPTO-REGISTRY-01`/`ASSET-CORE-04`
+remain PARTIAL, not `CLOSED`:** this bundle adds a read-only CLI readiness
+surface — it does not add a daemon route or GUI panel (tracked as
+`CRYPTO-REGISTRY-04`, next, conditional), does not enable the `kraken`
+provider, does not flip any registry flag, and does not add recurring/
+scheduled ingestion. `config/providers/providers.json` and
+`config/instruments/instruments_v2.crypto_local_marks.example.json` are both
+byte-for-byte unchanged (proven by `rc_09`). Remaining gaps unchanged from
+`CRYPTO-REGISTRY-02`: no recurring/scheduled Kraken sync; no production
+registry-v2 cutover; no crypto risk policy activation; no crypto paper/live
+execution; no crypto strategy.
+
+**Recommended next slice:**
+`CRYPTO-REGISTRY-04-KRAKEN-DATA-ONLY-REGISTRY-STATUS-SURFACE-01` — expose the
+same read-only truth through a daemon route and GUI panel, only if it stays
+small.

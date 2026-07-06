@@ -1134,3 +1134,57 @@ network call; no DB connection; no scheduler added; no daemon runtime
 started; no broker/risk/execution/OMS/runtime/strategy file touched; no live
 or paper order submitted; no crypto/futures/options/forex trading enabled;
 only the files in this bundle's stated scope changed.
+
+## 65. CRYPTO-REGISTRY-03-KRAKEN-DATA-ONLY-REGISTRY-READINESS-CLI-01 Closure Note (maintenance)
+
+Continuing after `§64` (`CRYPTO-REGISTRY-02`, cutover decision), this bundle
+adds `mqk-cli md crypto-registry-readiness`, a read-only operator CLI proving
+the current, unmodified registry-v2 fixture and providers config are ready
+for data-only Kraken OHLCV operations for `BTC/USD`/`ETH/USD`. Recorded here
+per `audit_repo_truth_rules.md` rather than left only in commit history.
+
+**Concretely:** the command reuses two already-proven pure loaders
+(`mqk_md::provider_registry::load_provider_registry`,
+`mqk_md::instrument_registry_v2::load_instrument_registry_v2`) — no new
+`mqk-md` code was added. It classifies provider existence/enablement,
+per-symbol asset class, Kraken alias completeness
+(`kraken_pair`/`kraken_result_key`), and trading-flag safety
+(`paper_trading_enabled`/`live_trading_enabled`). The current disabled state
+classifies as `data_readiness_state=data_ready_manual_only` — expected and
+correct, not a failure. `kraken.enabled=true` fails closed as
+`unsafe_provider_enabled`, consistent with `CRYPTO-REGISTRY-02`'s decision
+not to permit provider enablement yet.
+
+**Test proof:** `core-rs/crates/mqk-cli/tests/scenario_cli_crypto_registry_readiness_03.rs`
+gained 9 tests invoking the built binary: happy path (exit 0,
+`active`/`data_ready_manual_only`), missing provider, missing/incomplete
+Kraken alias, missing symbol, `paper_trading_enabled=true`,
+`live_trading_enabled=true`, `kraken.enabled=true` (six failure modes, each
+nonzero exit with a distinct `truth_state`), an evidence-JSON content proof
+(no DB/network/order/broker/position/account key anywhere in the envelope),
+and a byte-for-byte proof that `--registry`/`--providers` are never mutated.
+`cargo test -p mqk-cli --test scenario_cli_crypto_registry_readiness_03` —
+9/9 pass. `cargo clippy -p mqk-cli -p mqk-md --all-targets -- -D warnings` —
+clean. Regression: `scenario_crypto_local_marks_registry_data_01a` (31/31),
+`scenario_kraken_ohlcv_provider_01uvw` (7/7), and
+`scenario_cli_kraken_ohlc_dry_run_01w` (7/7) all still pass, unaffected.
+
+**Not resolved (`ASSET-CORE-04`/`CRYPTO-REGISTRY-01`/`CRYPTO-DATA-01` remain
+`PARTIAL`, not `CLOSED`):** no daemon route or GUI panel yet (tracked as
+`CRYPTO-REGISTRY-04`, conditional next slice); `kraken.enabled` stays
+`false`; no registry flag flipped; no recurring/scheduled Kraken sync; no
+production registry-v2 cutover; no crypto risk policy activation; no crypto
+broker/paper execution; no crypto strategy.
+
+**Full detail, exact evidence citations, and validation commands:**
+`MiniQuantDesk_Master_Patch_Ledger_v2.md`'s
+`CRYPTO-REGISTRY-03-KRAKEN-DATA-ONLY-REGISTRY-READINESS-CLI-01` entry;
+runbook update at `docs/runbooks/local_crypto_marks_ingest.md`.
+
+**Safety confirmation:** no config flag changed; `config/providers/providers.json`
+and `config/instruments/instruments_v2.crypto_local_marks.example.json` both
+byte-for-byte unchanged (proven by test `rc_09`); no network call; no DB
+connection; no scheduler added; no daemon runtime started; no
+broker/risk/execution/OMS/runtime/strategy file touched; no live or paper
+order submitted; no crypto/futures/options/forex trading enabled; only the
+files in this bundle's stated scope changed.

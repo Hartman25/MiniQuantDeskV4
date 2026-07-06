@@ -706,6 +706,34 @@ this decision. `kraken.enabled` stays `false`; both crypto rows stay
 unchanged. Full detail:
 `docs/specs/crypto_registry_02_kraken_data_registry_cutover_decision.md`.
 
+## Crypto Registry Readiness CLI (CRYPTO-REGISTRY-03-KRAKEN-DATA-ONLY-REGISTRY-READINESS-CLI-01)
+
+Read-only operator readiness command:
+
+```powershell
+cargo run --manifest-path .\core-rs\Cargo.toml -p mqk-cli --bin mqk-cli -- md crypto-registry-readiness `
+  --registry .\config\instruments\instruments_v2.crypto_local_marks.example.json `
+  --providers .\config\providers\providers.json `
+  --provider kraken `
+  --symbols BTC/USD,ETH/USD
+```
+
+Reads `--registry`/`--providers` (never mutated) and classifies whether the
+current configs are ready for data-only Kraken OHLCV operations: provider
+exists, `kraken.enabled=false` (an unexpected `enabled=true` fails closed as
+`unsafe_provider_enabled`, per `CRYPTO-REGISTRY-02`'s decision), both
+`BTC/USD`/`ETH/USD` rows are `asset_class=crypto` with complete
+`kraken_pair`/`kraken_result_key` aliases, and `paper_trading_enabled`/
+`live_trading_enabled` are both `false` (either being `true` fails closed as
+`unsafe_trading_enabled`). The current disabled state classifies as
+`data_readiness_state=data_ready_manual_only` — expected and correct, not a
+failure. Never opens a DB connection, never calls a provider/network
+endpoint, never writes `md_bars`, never registers a scheduler. `--output-dir`
+writes a `crypto-registry-readiness-v1` JSON evidence artifact.
+
+Implemented in `core-rs/crates/mqk-cli/src/commands/md.rs::md_crypto_registry_readiness`,
+tested in `core-rs/crates/mqk-cli/tests/scenario_cli_crypto_registry_readiness_03.rs`.
+
 ## Remaining Gaps
 
 - `sync-provider` (incremental backfill) still has no Kraken path — an

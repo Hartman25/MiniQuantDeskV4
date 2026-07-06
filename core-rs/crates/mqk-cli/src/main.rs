@@ -11,8 +11,9 @@ use commands::{
     },
     load_payload,
     md::{
-        md_coinlore_latest_mark, md_ingest_csv, md_ingest_provider, md_kraken_ohlc_dry_run,
-        md_kraken_ohlc_ingest, md_kraken_ohlc_sync, md_registry_v2_status, md_sync_provider,
+        md_coinlore_latest_mark, md_crypto_registry_readiness, md_ingest_csv, md_ingest_provider,
+        md_kraken_ohlc_dry_run, md_kraken_ohlc_ingest, md_kraken_ohlc_sync, md_registry_v2_status,
+        md_sync_provider,
     },
     run::{
         run_arm, run_begin, run_deadman_check, run_deadman_enforce, run_halt, run_heartbeat,
@@ -593,6 +594,40 @@ enum MdCmd {
         #[arg(long, default_value_t = false, action = clap::ArgAction::SetTrue)]
         no_update_existing: bool,
     },
+
+    /// CRYPTO-REGISTRY-03-KRAKEN-DATA-ONLY-REGISTRY-READINESS-CLI-01:
+    /// read-only operator readiness surface. Reads `--registry` and
+    /// `--providers` (neither is ever mutated) and classifies whether the
+    /// current, unmodified configs are ready for data-only `--provider`
+    /// OHLCV operations for `--symbols`. `provider_enabled=false` and
+    /// per-symbol `enabled=false` are expected, correct states here
+    /// (`data_ready_manual_only`), not a failure. Never implies trading,
+    /// scheduler, or production-cutover readiness. Never opens a DB
+    /// connection, never calls a provider/network endpoint, never writes
+    /// `md_bars`, never registers a scheduler.
+    CryptoRegistryReadiness {
+        /// Path to a registry-v2 JSON file carrying provider_symbols.kraken_pair
+        /// / provider_symbols.kraken_result_key aliases (e.g.
+        /// config/instruments/instruments_v2.crypto_local_marks.example.json).
+        #[arg(long)]
+        registry: PathBuf,
+
+        /// Path to the provider registry JSON.
+        #[arg(long, default_value = "config/providers/providers.json")]
+        providers: PathBuf,
+
+        /// Provider id to check readiness for.
+        #[arg(long, default_value = "kraken")]
+        provider: String,
+
+        /// Comma-separated canonical symbols (e.g. BTC/USD,ETH/USD).
+        #[arg(long, default_value = "BTC/USD,ETH/USD")]
+        symbols: String,
+
+        /// Directory to write a JSON evidence artifact. Not staged/committed.
+        #[arg(long)]
+        output_dir: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -911,6 +946,15 @@ async fn main() -> Result<()> {
                     no_update_existing,
                 )
                 .await?;
+            }
+            MdCmd::CryptoRegistryReadiness {
+                registry,
+                providers,
+                provider,
+                symbols,
+                output_dir,
+            } => {
+                md_crypto_registry_readiness(registry, providers, provider, symbols, output_dir)?;
             }
         },
 
