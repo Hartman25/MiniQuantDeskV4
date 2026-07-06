@@ -307,8 +307,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         trading_positions, trading_snapshot, trading_snapshot_clear, trading_snapshot_set,
     };
     use transport_quality::{
-        execution_transport, intraday_refresh_status, latest_mark_status, market_data_coverage,
-        market_data_quality,
+        execution_transport, intraday_refresh_status, kraken_ohlc_status, latest_mark_status,
+        market_data_coverage, market_data_quality,
     };
     use watchlist::{watchlist_admission_check, watchlist_status};
 
@@ -505,6 +505,17 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/v1/market-data/latest-marks/status",
             get(latest_mark_status),
+        )
+        // CRYPTO-DATA-01AD-KRAKEN-SYNC-EVIDENCE-STATUS-ROUTE-01: read-only
+        // Kraken OHLC ingest/sync evidence status (public, no auth). Reads
+        // the same evidence dir as latest-marks/status, filtered to the
+        // kraken_ohlc_ingest_*/kraken_ohlc_sync_* filename prefixes. No DB,
+        // no provider/network call, no CLI/sync trigger, no trading state
+        // mutation. Fail-closed safety checks independent of the CLI's own
+        // invariants -- never surfaces unsafe evidence as "active".
+        .route(
+            "/api/v1/market-data/kraken-ohlc/status",
+            get(kraken_ohlc_status),
         )
         .route(
             "/api/v1/market-data/feed/status",

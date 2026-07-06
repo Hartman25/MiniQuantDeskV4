@@ -639,6 +639,32 @@ side effects, and zero-leftover cleanup for both BTC/USD and ETH/USD. See
 Alpaca-only. **No recurring ingestion, no scheduler, no daemon job, no GUI
 surface, and no crypto trading enablement.**
 
+## Kraken OHLC Evidence Status Route (CRYPTO-DATA-01AD-KRAKEN-SYNC-EVIDENCE-STATUS-ROUTE-01)
+
+Read-only operator visibility for Kraken ingest/sync evidence, mirroring the
+existing `latest-marks/status` pattern:
+
+```text
+GET /api/v1/market-data/kraken-ohlc/status
+```
+
+Reads the latest `kraken_ohlc_ingest_*.json` or `kraken_ohlc_sync_*.json`
+evidence file (selected by the epoch-seconds timestamp embedded in the
+filename, not alphabetical order) from the same evidence directory as
+`latest-marks/status`/`intraday-refresh/status`. Never connects to a DB,
+never calls Kraken, never runs the CLI, never triggers a sync, never
+mutates trading state, never stages evidence. `truth_state`: `"active"`,
+`"stale"`, `"no_evidence"`, `"parse_error"`, `"unsafe_evidence"`,
+`"backend_unavailable"` — with fail-closed safety checks (wrong provider,
+an unexplained network call, internally inconsistent write claims, missing
+required provenance fields, execution-like fields) that can surface
+`"unsafe_evidence"` even for content this route's own producer wrote
+correctly. See `docs/specs/crypto_data_01ad_kraken_sync_evidence_status_route.md`
+for full detail.
+
+**This is data-ingestion visibility only.** It is not scheduling, not
+strategy input, not broker execution, and not crypto trading enablement.
+
 ## Remaining Gaps
 
 - `sync-provider` (incremental backfill) still has no Kraken path — an
@@ -646,6 +672,8 @@ surface, and no crypto trading enablement.**
   `docs/specs/crypto_data_01x_y_kraken_ingest_provider_db_proof.md` §5). A
   Kraken-specific `kraken-ohlc-sync` command now exists instead (see above).
 - No recurring/scheduled Kraken sync of any kind; no daemon ingest job.
+- No GUI surface consuming the Kraken OHLC status route yet (tracked as
+  `CRYPTO-DATA-01AE-KRAKEN-SYNC-GUI-STATUS-SURFACE-01`).
 - CoinLore's verified public endpoints are ticker/spot-only, not OHLCV; a
   `LatestMark` parser/model and a read-only evidence-file status route now
   exist for that ticker data, but no `latest_marks` DB table exists — the

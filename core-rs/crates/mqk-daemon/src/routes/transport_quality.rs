@@ -23,8 +23,8 @@ use chrono::Utc;
 
 use crate::api_types::{
     ExecutionTransportResponse, IntradayRefreshStatusResponse, IntradayRefreshSymbolStatus,
-    LatestMarkStatusResponse, LatestMarkStatusRow, MarketDataQualityResponse,
-    MdBarsCoverageResponse, MdBarsCoverageRow, TransportQueueRow,
+    KrakenOhlcStatusResponse, LatestMarkStatusResponse, LatestMarkStatusRow,
+    MarketDataQualityResponse, MdBarsCoverageResponse, MdBarsCoverageRow, TransportQueueRow,
 };
 use crate::market_data_freshness::{
     default_max_allowed_age_secs_for_timeframe, is_intraday_timeframe,
@@ -1089,6 +1089,432 @@ pub(crate) async fn latest_mark_status(State(st): State<Arc<AppState>>) -> impl 
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string()),
             fail_reasons,
+            error: None,
+        }),
+    )
+        .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/market-data/kraken-ohlc/status
+// (CRYPTO-DATA-01AD-KRAKEN-SYNC-EVIDENCE-STATUS-ROUTE-01)
+// ---------------------------------------------------------------------------
+
+const KRAKEN_OHLC_ROUTE: &str = "/api/v1/market-data/kraken-ohlc/status";
+const KRAKEN_OHLC_INGEST_PREFIX: &str = "kraken_ohlc_ingest_";
+const KRAKEN_OHLC_SYNC_PREFIX: &str = "kraken_ohlc_sync_";
+const KRAKEN_OHLC_EVIDENCE_SUFFIX: &str = ".json";
+const KRAKEN_OHLC_INGEST_SCHEMA_VERSION: &str = "kraken-ohlc-ingest-v1";
+const KRAKEN_OHLC_SYNC_SCHEMA_VERSION: &str = "kraken-ohlc-sync-v2";
+/// Default max evidence age (seconds) before `truth_state` becomes `"stale"`.
+const KRAKEN_OHLC_DEFAULT_MAX_AGE_SECS: i64 = 86_400;
+const ENV_KRAKEN_OHLC_MAX_AGE_SECS: &str = "MQK_KRAKEN_OHLC_EVIDENCE_MAX_AGE_SECS";
+
+/// Top-level evidence fields whose presence would imply this route is
+/// looking at an order/broker/execution artifact, not a market-data
+/// ingest/sync evidence file. Kraken ingest/sync evidence never carries any
+/// of these; presence is treated as a fail-closed safety violation.
+const KRAKEN_OHLC_FORBIDDEN_EXECUTION_FIELDS: [&str; 8] = [
+    "order_id",
+    "broker_order_id",
+    "fill_price",
+    "position_id",
+    "account_id",
+    "side",
+    "limit_price",
+    "stop_price",
+];
+
+fn kraken_ohlc_max_age_secs() -> i64 {
+    std::env::var(ENV_KRAKEN_OHLC_MAX_AGE_SECS)
+        .ok()
+        .and_then(|v| v.parse::<i64>().ok())
+        .filter(|v| *v > 0)
+        .unwrap_or(KRAKEN_OHLC_DEFAULT_MAX_AGE_SECS)
+}
+
+/// Build a `KrakenOhlcStatusResponse` for a non-`active` outcome (missing,
+/// unreadable, malformed, or unsafe evidence). `stale_or_missing_evidence`
+/// is always `true` for these outcomes.
+fn kraken_ohlc_response_for_non_active(
+    truth_state: &str,
+    max_evidence_age_secs: i64,
+    evidence_path: Option<String>,
+    error: Option<String>,
+) -> KrakenOhlcStatusResponse {
+    KrakenOhlcStatusResponse {
+        canonical_route: KRAKEN_OHLC_ROUTE.to_string(),
+        truth_state: truth_state.to_string(),
+        provider: None,
+        latest_mode: None,
+        latest_schema_version: None,
+        produced_at_utc: None,
+        evidence_path,
+        stale_or_missing_evidence: true,
+        max_evidence_age_secs,
+        network_call_made: None,
+        db_write: None,
+        md_bars_write: None,
+        provider_id: None,
+        provider_source: None,
+        provider_symbol: None,
+        ingest_mode: None,
+        sync_policy: None,
+        no_update_existing: None,
+        symbols_requested: vec![],
+        bars_completed: None,
+        bars_excluded_forming: None,
+        bars_considered_for_sync: None,
+        bars_missing_new: None,
+        bars_existing_candidate: None,
+        rows_changed: None,
+        rows_skipped_unchanged: None,
+        rows_changed_skipped_due_to_no_update_existing: None,
+        rows_inserted: None,
+        rows_updated: None,
+        rows_skipped_if_known: None,
+        latest_existing_end_ts_before: None,
+        latest_completed_start_ts: None,
+        latest_completed_end_ts: None,
+        volume_semantics: None,
+        volume_scale: None,
+        all_passed: None,
+        reason_code: None,
+        fail_reasons: vec![],
+        error,
+    }
+}
+
+/// Fail-closed safety check, independent of the CLI's own invariants: this
+/// route does not trust the producer of the evidence file, it verifies.
+/// Returns `Some(reason)` when the evidence must never be surfaced as
+/// `"active"`, regardless of freshness.
+fn kraken_ohlc_unsafe_reason(raw: &serde_json::Value) -> Option<String> {
+    let provider = raw.get("provider").and_then(|v| v.as_str());
+    if provider != Some(mqk_md::KRAKEN_PROVIDER_ID) {
+        return Some(format!(
+            "evidence provider field is not '{}': {:?}",
+            mqk_md::KRAKEN_PROVIDER_ID,
+            provider
+        ));
+    }
+
+    // network_call_made=true is only safe when the evidence's own `mode`
+    // field names the explicit operator opt-in path the CLI uses
+    // (`mode="network_smoke"`, only ever set when
+    // MQK_ALLOW_KRAKEN_NETWORK_SMOKE=1 was set at the time the CLI ran).
+    let network_call_made = raw
+        .get("network_call_made")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    let mode = raw.get("mode").and_then(|v| v.as_str());
+    if network_call_made && mode != Some("network_smoke") {
+        return Some(
+            "evidence claims network_call_made=true without the expected network_smoke opt-in mode"
+                .to_string(),
+        );
+    }
+
+    if raw
+        .get("completed_bar_claim")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return Some(
+            "evidence carries a completed_bar_claim=true field, which Kraken ingest/sync evidence never sets"
+                .to_string(),
+        );
+    }
+
+    if raw
+        .get("forming_candle_excluded")
+        .and_then(|v| v.as_bool())
+        == Some(false)
+    {
+        return Some("evidence claims forming_candle_excluded=false".to_string());
+    }
+
+    let rows_inserted = raw.get("rows_inserted").and_then(|v| v.as_i64()).unwrap_or(0);
+    let rows_updated = raw.get("rows_updated").and_then(|v| v.as_i64()).unwrap_or(0);
+    let db_write = raw.get("db_write").and_then(|v| v.as_bool());
+    if db_write == Some(false) && (rows_inserted > 0 || rows_updated > 0) {
+        return Some(
+            "evidence claims db_write=false but reports rows_inserted/rows_updated > 0".to_string(),
+        );
+    }
+
+    let md_bars_write = raw.get("md_bars_write").and_then(|v| v.as_bool());
+    let bars_excluded_forming = raw.get("bars_excluded_forming").and_then(|v| v.as_i64());
+    if md_bars_write == Some(true) && bars_excluded_forming == Some(0) {
+        return Some(
+            "evidence claims md_bars_write=true with bars_excluded_forming=0, inconsistent with the committed Kraken fixtures (which always carry one forming row)"
+                .to_string(),
+        );
+    }
+
+    for required in ["volume_semantics", "provider_id", "provider_source", "ingest_mode"] {
+        if raw.get(required).and_then(|v| v.as_str()).is_none() {
+            return Some(format!("evidence is missing required field '{required}'"));
+        }
+    }
+
+    if let Some(obj) = raw.as_object() {
+        for forbidden in KRAKEN_OHLC_FORBIDDEN_EXECUTION_FIELDS {
+            if obj.contains_key(forbidden) {
+                return Some(format!(
+                    "evidence contains forbidden trading/execution field '{forbidden}'"
+                ));
+            }
+        }
+    }
+
+    None
+}
+
+/// `GET /api/v1/market-data/kraken-ohlc/status`
+///
+/// Read-only. Reads the latest `kraken_ohlc_ingest_*.json` or
+/// `kraken_ohlc_sync_*.json` evidence file (selected by the epoch-seconds
+/// timestamp embedded in the filename, not by alphabetical filename order --
+/// `"ingest"` sorts before `"sync"` lexically, which would otherwise pick a
+/// stale ingest file over a newer sync file) from
+/// `st.md_refresh_evidence_dir` (env var `MQK_MD_REFRESH_EVIDENCE_DIR`,
+/// default `exports/market_data` -- the same directory
+/// `latest_mark_status`/`intraday_refresh_status` read, filtered to these
+/// two distinct filename prefixes).
+///
+/// Safety:
+/// - No provider/network API calls (Kraken or otherwise).
+/// - No DB reads or writes.
+/// - No broker interaction.
+/// - No order/OMS/outbox state accessed.
+/// - No CLI execution, no sync/ingest triggered, no daemon runtime start.
+/// - Never stages or writes evidence -- read-only.
+/// - Missing or malformed evidence never panics; surfaces truth_state honestly.
+/// - Evidence failing any check in `kraken_ohlc_unsafe_reason` is surfaced as
+///   `"unsafe_evidence"`, never `"active"`, regardless of freshness.
+pub(crate) async fn kraken_ohlc_status(State(st): State<Arc<AppState>>) -> impl IntoResponse {
+    let max_age_secs = kraken_ohlc_max_age_secs();
+    let evidence_dir = st.md_refresh_evidence_dir.clone();
+    let dir_path = std::path::Path::new(&evidence_dir);
+
+    let read_dir = match std::fs::read_dir(dir_path) {
+        Err(e) => {
+            return (
+                StatusCode::OK,
+                Json(kraken_ohlc_response_for_non_active(
+                    "backend_unavailable",
+                    max_age_secs,
+                    None,
+                    Some(format!("evidence directory unreadable: {e}")),
+                )),
+            )
+                .into_response();
+        }
+        Ok(rd) => rd,
+    };
+
+    let mut candidates: Vec<(i64, &'static str, String)> = Vec::new();
+    for entry in read_dir.flatten() {
+        let name = entry.file_name().to_string_lossy().to_string();
+        let (mode, prefix): (&'static str, &'static str) = if name.starts_with(KRAKEN_OHLC_INGEST_PREFIX)
+        {
+            ("ingest", KRAKEN_OHLC_INGEST_PREFIX)
+        } else if name.starts_with(KRAKEN_OHLC_SYNC_PREFIX) {
+            ("sync", KRAKEN_OHLC_SYNC_PREFIX)
+        } else {
+            continue;
+        };
+        if !name.ends_with(KRAKEN_OHLC_EVIDENCE_SUFFIX) {
+            continue;
+        }
+        let epoch: Option<i64> = name
+            .strip_prefix(prefix)
+            .and_then(|s| s.strip_suffix(KRAKEN_OHLC_EVIDENCE_SUFFIX))
+            .and_then(|s| s.parse::<i64>().ok());
+        if let Some(epoch) = epoch {
+            candidates.push((epoch, mode, name));
+        }
+    }
+
+    if candidates.is_empty() {
+        return (
+            StatusCode::OK,
+            Json(kraken_ohlc_response_for_non_active(
+                "no_evidence",
+                max_age_secs,
+                None,
+                None,
+            )),
+        )
+            .into_response();
+    }
+
+    candidates.sort_by_key(|(epoch, _, _)| *epoch);
+    let (_, latest_mode, latest_name) = candidates.last().expect("candidates non-empty");
+    let latest_path = dir_path.join(latest_name);
+    let evidence_path_str = latest_path.to_string_lossy().to_string();
+
+    let content = match std::fs::read_to_string(&latest_path) {
+        Err(e) => {
+            return (
+                StatusCode::OK,
+                Json(kraken_ohlc_response_for_non_active(
+                    "backend_unavailable",
+                    max_age_secs,
+                    Some(evidence_path_str),
+                    Some(format!("evidence file unreadable: {e}")),
+                )),
+            )
+                .into_response();
+        }
+        Ok(c) => c,
+    };
+
+    let raw: serde_json::Value = match serde_json::from_str(&content) {
+        Err(e) => {
+            return (
+                StatusCode::OK,
+                Json(kraken_ohlc_response_for_non_active(
+                    "parse_error",
+                    max_age_secs,
+                    Some(evidence_path_str),
+                    Some(format!("evidence JSON parse failed: {e}")),
+                )),
+            )
+                .into_response();
+        }
+        Ok(v) => v,
+    };
+
+    let schema_version = raw
+        .get("schema_version")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let schema_ok = matches!(
+        schema_version.as_deref(),
+        Some(KRAKEN_OHLC_INGEST_SCHEMA_VERSION) | Some(KRAKEN_OHLC_SYNC_SCHEMA_VERSION)
+    );
+    if !schema_ok {
+        return (
+            StatusCode::OK,
+            Json(kraken_ohlc_response_for_non_active(
+                "parse_error",
+                max_age_secs,
+                Some(evidence_path_str),
+                Some(format!(
+                    "unsupported schema_version (expected '{KRAKEN_OHLC_INGEST_SCHEMA_VERSION}' or '{KRAKEN_OHLC_SYNC_SCHEMA_VERSION}', got {schema_version:?})"
+                )),
+            )),
+        )
+            .into_response();
+    }
+
+    if let Some(reason) = kraken_ohlc_unsafe_reason(&raw) {
+        return (
+            StatusCode::OK,
+            Json(kraken_ohlc_response_for_non_active(
+                "unsafe_evidence",
+                max_age_secs,
+                Some(evidence_path_str),
+                Some(reason),
+            )),
+        )
+            .into_response();
+    }
+
+    let produced_at_utc = raw
+        .get("produced_at_utc")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let stale_or_missing_evidence = match &produced_at_utc {
+        None => true,
+        Some(ts) => match chrono::DateTime::parse_from_rfc3339(ts) {
+            Err(_) => true,
+            Ok(produced_at) => {
+                (Utc::now() - produced_at.with_timezone(&Utc)).num_seconds() > max_age_secs
+            }
+        },
+    };
+    let truth_state = if stale_or_missing_evidence {
+        "stale"
+    } else {
+        "active"
+    };
+
+    (
+        StatusCode::OK,
+        Json(KrakenOhlcStatusResponse {
+            canonical_route: KRAKEN_OHLC_ROUTE.to_string(),
+            truth_state: truth_state.to_string(),
+            provider: raw
+                .get("provider")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            latest_mode: Some((*latest_mode).to_string()),
+            latest_schema_version: schema_version,
+            produced_at_utc,
+            evidence_path: Some(evidence_path_str),
+            stale_or_missing_evidence,
+            max_evidence_age_secs: max_age_secs,
+            network_call_made: raw.get("network_call_made").and_then(|v| v.as_bool()),
+            db_write: raw.get("db_write").and_then(|v| v.as_bool()),
+            md_bars_write: raw.get("md_bars_write").and_then(|v| v.as_bool()),
+            provider_id: raw
+                .get("provider_id")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            provider_source: raw
+                .get("provider_source")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            provider_symbol: raw
+                .get("provider_symbol")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            ingest_mode: raw
+                .get("ingest_mode")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            sync_policy: raw
+                .get("sync_policy")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            no_update_existing: raw.get("no_update_existing").and_then(|v| v.as_bool()),
+            symbols_requested: value_string_array(&raw, "symbols_requested"),
+            bars_completed: raw.get("bars_completed").and_then(|v| v.as_i64()),
+            bars_excluded_forming: raw.get("bars_excluded_forming").and_then(|v| v.as_i64()),
+            bars_considered_for_sync: raw.get("bars_considered_for_sync").and_then(|v| v.as_i64()),
+            bars_missing_new: raw.get("bars_missing_new").and_then(|v| v.as_i64()),
+            bars_existing_candidate: raw
+                .get("bars_existing_candidate")
+                .and_then(|v| v.as_i64()),
+            rows_changed: raw.get("rows_changed").and_then(|v| v.as_i64()),
+            rows_skipped_unchanged: raw.get("rows_skipped_unchanged").and_then(|v| v.as_i64()),
+            rows_changed_skipped_due_to_no_update_existing: raw
+                .get("rows_changed_skipped_due_to_no_update_existing")
+                .and_then(|v| v.as_i64()),
+            rows_inserted: raw.get("rows_inserted").and_then(|v| v.as_i64()),
+            rows_updated: raw.get("rows_updated").and_then(|v| v.as_i64()),
+            rows_skipped_if_known: raw.get("rows_skipped_if_known").and_then(|v| v.as_i64()),
+            latest_existing_end_ts_before: raw
+                .get("latest_existing_end_ts_before")
+                .and_then(|v| v.as_i64()),
+            latest_completed_start_ts: raw
+                .get("latest_completed_start_ts")
+                .and_then(|v| v.as_i64()),
+            latest_completed_end_ts: raw.get("latest_completed_end_ts").and_then(|v| v.as_i64()),
+            volume_semantics: raw
+                .get("volume_semantics")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            volume_scale: raw.get("volume_scale").and_then(|v| v.as_i64()),
+            all_passed: raw.get("all_passed").and_then(|v| v.as_bool()),
+            reason_code: raw
+                .get("reason_code")
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string()),
+            fail_reasons: value_string_array(&raw, "fail_reasons"),
             error: None,
         }),
     )

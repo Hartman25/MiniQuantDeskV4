@@ -4820,6 +4820,92 @@ pub struct LatestMarkStatusResponse {
 }
 
 // ---------------------------------------------------------------------------
+// CRYPTO-DATA-01AD-KRAKEN-SYNC-EVIDENCE-STATUS-ROUTE-01: read-only Kraken
+// OHLC ingest/sync evidence status
+// ---------------------------------------------------------------------------
+
+/// Response for `GET /api/v1/market-data/kraken-ohlc/status`.
+///
+/// Read-only. Reads the latest `kraken_ohlc_ingest_*.json` (from
+/// `mqk md kraken-ohlc-ingest --output-dir`) or `kraken_ohlc_sync_*.json`
+/// (from `mqk md kraken-ohlc-sync --output-dir`) evidence file, selected by
+/// the epoch-seconds timestamp embedded in the filename. No DB connection,
+/// no provider/network call, no CLI execution, no sync/ingest triggered, no
+/// daemon runtime start, no trading state mutation, no evidence staged.
+///
+/// `truth_state` values:
+/// - `"active"`             — latest evidence file parsed successfully, passed
+///   every safety check, and is fresh.
+/// - `"stale"`               — evidence parsed and passed safety checks but is
+///   older than `max_evidence_age_secs`, or carries no `produced_at_utc`.
+/// - `"no_evidence"`        — no `kraken_ohlc_ingest_*.json` or
+///   `kraken_ohlc_sync_*.json` file found in the evidence directory.
+/// - `"parse_error"`        — evidence file found but JSON is malformed or has
+///   an unsupported `schema_version`.
+/// - `"unsafe_evidence"`    — evidence fails a fail-closed safety check (wrong
+///   `provider`, an unexplained `network_call_made=true`, a
+///   `completed_bar_claim`/execution-like field, an internal
+///   `db_write`/`rows_inserted`/`rows_updated` inconsistency, a missing
+///   required provenance field, etc. — see `kraken_ohlc_unsafe_reason` in
+///   `routes/transport_quality.rs`). Never surfaced as `active` regardless of
+///   freshness.
+/// - `"backend_unavailable"` — evidence directory or file could not be read.
+///
+/// Fields not present in the selected evidence file's schema (e.g.
+/// `sync_policy` when `latest_mode="ingest"`) are `None`, never fabricated.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KrakenOhlcStatusResponse {
+    pub canonical_route: String,
+    pub truth_state: String,
+    pub provider: Option<String>,
+    /// `"ingest"` or `"sync"` — which command produced the selected evidence file.
+    pub latest_mode: Option<String>,
+    pub latest_schema_version: Option<String>,
+    pub produced_at_utc: Option<String>,
+    /// Filesystem path of the evidence file that was read. `null` when no file found.
+    pub evidence_path: Option<String>,
+    /// `true` when evidence is absent, unreadable, malformed, unsafe, or
+    /// older than `max_evidence_age_secs`.
+    pub stale_or_missing_evidence: bool,
+    /// Maximum evidence age (seconds) before `truth_state` becomes `"stale"`.
+    /// Default 86400 (24h); overridable via `MQK_KRAKEN_OHLC_EVIDENCE_MAX_AGE_SECS`.
+    pub max_evidence_age_secs: i64,
+    pub network_call_made: Option<bool>,
+    pub db_write: Option<bool>,
+    pub md_bars_write: Option<bool>,
+    pub provider_id: Option<String>,
+    pub provider_source: Option<String>,
+    pub provider_symbol: Option<String>,
+    pub ingest_mode: Option<String>,
+    /// Only present for `latest_mode="sync"` evidence.
+    pub sync_policy: Option<String>,
+    pub no_update_existing: Option<bool>,
+    pub symbols_requested: Vec<String>,
+    pub bars_completed: Option<i64>,
+    pub bars_excluded_forming: Option<i64>,
+    pub bars_considered_for_sync: Option<i64>,
+    pub bars_missing_new: Option<i64>,
+    pub bars_existing_candidate: Option<i64>,
+    pub rows_changed: Option<i64>,
+    pub rows_skipped_unchanged: Option<i64>,
+    pub rows_changed_skipped_due_to_no_update_existing: Option<i64>,
+    pub rows_inserted: Option<i64>,
+    pub rows_updated: Option<i64>,
+    pub rows_skipped_if_known: Option<i64>,
+    pub latest_existing_end_ts_before: Option<i64>,
+    pub latest_completed_start_ts: Option<i64>,
+    pub latest_completed_end_ts: Option<i64>,
+    pub volume_semantics: Option<String>,
+    pub volume_scale: Option<i64>,
+    pub all_passed: Option<bool>,
+    pub reason_code: Option<String>,
+    pub fail_reasons: Vec<String>,
+    /// Error description when `truth_state` is `"parse_error"`,
+    /// `"unsafe_evidence"`, or `"backend_unavailable"`.
+    pub error: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
 // DATA-INGEST-GUI-SYNC-ALL-01: Tracked-equities registry preview
 // ---------------------------------------------------------------------------
 
