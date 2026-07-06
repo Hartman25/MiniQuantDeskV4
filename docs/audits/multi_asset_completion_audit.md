@@ -1296,5 +1296,47 @@ Kraken API call (only 2 bounded documentation/support page fetches); no DB
 connection; no scheduler registered; no daemon job added; no daemon runtime
 started; no broker/risk/execution/OMS/runtime/strategy file touched; no
 live or paper order submitted; no crypto/futures/options/forex trading
-enabled; only the
+enabled; only the files in this bundle's stated scope changed.
+
+## 68. CRYPTO-DATA-02B-KRAKEN-SCHEDULER-READINESS-CLI-01 Closure Note (maintenance)
+
+Continuing after `§67` (`CRYPTO-DATA-02A`, scheduler rate-limit decision),
+this bundle adds `mqk-cli md kraken-scheduler-readiness`, a read-only
+operator CLI proving whether a **future** Kraken scheduled sync is
+currently allowed by the `02A` policy, the current provider/registry
+config, and (optionally) the latest Kraken OHLC evidence. Recorded here per
+`audit_repo_truth_rules.md` rather than left only in commit history.
+
+**Truth states:** `active`, `policy_missing`, `policy_invalid`,
+`registry_unsafe`, `provider_unsafe`, `trading_flags_unsafe`,
+`scheduler_already_registered`, `evidence_unsafe`, `parse_error`,
+`backend_unavailable`. `active` never means a scheduler is registered — it
+means prerequisites are satisfied for a future, separately authorized
+registration patch.
+
+**Test proof:** `core-rs/crates/mqk-cli/tests/scenario_cli_kraken_scheduler_readiness_02b.rs`,
+12/12 pass, covering the happy path, missing/invalid policy, unsafe
+provider/registry/trading-flag states, evidence required-vs-warning-only
+behavior, evidence-JSON safety-claim proof, and no-file-mutation proof.
+
+**Build note:** added `#![recursion_limit = "256"]` to `mqk-cli`'s crate
+root — a compiler macro-expansion limit needed for the new command's
+`serde_json::json!` evidence envelope; not a runtime/behavior change.
+
+**Not resolved (`ASSET-CORE-04`/`CRYPTO-REGISTRY-01`/`CRYPTO-DATA-01` remain
+`PARTIAL`, not `CLOSED`):** no scheduler registered; no Windows Scheduled
+Task; no daemon recurring job; `kraken.enabled` stays `false`; no registry
+flag flipped; no production registry-v2 cutover; no crypto risk policy
+activation; no crypto broker/paper execution; no crypto strategy.
+
+**Full detail, exact evidence citations, and validation commands:**
+`MiniQuantDesk_Master_Patch_Ledger_v2.md`'s
+`CRYPTO-DATA-02B-KRAKEN-SCHEDULER-READINESS-CLI-01` entry; runbook update
+at `docs/runbooks/local_crypto_marks_ingest.md`.
+
+**Safety confirmation:** no config flag changed; no config file mutated; no
+Kraken API call; no provider/network call; no DB connection; no scheduler
+registered; no daemon job added; no daemon runtime started; no
+broker/risk/execution/OMS/runtime/strategy file touched; no live or paper
+order submitted; no crypto/futures/options/forex trading enabled; only the
 files in this bundle's stated scope changed.

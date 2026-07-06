@@ -785,6 +785,41 @@ patch must satisfy first. `kraken.enabled` and both crypto rows' trading
 flags remain unchanged (`false`). Full detail, exact quotes, and source URLs:
 `docs/specs/crypto_data_02a_kraken_scheduler_rate_limit_decision.md`.
 
+## Kraken Scheduler Readiness CLI (CRYPTO-DATA-02B-KRAKEN-SCHEDULER-READINESS-CLI-01)
+
+Read-only operator readiness command proving whether a **future**, not-yet-
+authorized Kraken scheduled sync is currently allowed by the
+`CRYPTO-DATA-02A` policy, the current provider/registry config, and
+(optionally) the latest Kraken OHLC evidence:
+
+```powershell
+cargo run --manifest-path .\core-rs\Cargo.toml -p mqk-cli --bin mqk-cli -- md kraken-scheduler-readiness `
+  --policy .\docs\specs\crypto_data_02a_kraken_scheduler_rate_limit_decision.json `
+  --registry .\config\instruments\instruments_v2.crypto_local_marks.example.json `
+  --providers .\config\providers\providers.json `
+  --symbols BTC/USD,ETH/USD
+```
+
+`active` (`scheduler_readiness_state=scheduler_ready_manual_registration_blocked`)
+does **not** mean a scheduler is registered — it means every prerequisite
+this command can check (policy contract validity, provider disabled,
+registry aliases present, trading flags false, no evidence of an already-
+registered scheduler) is satisfied for a future, separately authorized
+scheduler-registration patch to be considered. Truth states: `active`,
+`policy_missing`, `policy_invalid`, `registry_unsafe`, `provider_unsafe`,
+`trading_flags_unsafe`, `scheduler_already_registered`, `evidence_unsafe`,
+`parse_error`, `backend_unavailable`. Kraken OHLC evidence
+(`--evidence-dir`) is optional and only fails closed
+(`evidence_readiness_state=unsafe`/`stale`/`missing`) when
+`--require-fresh-evidence` is explicitly passed; otherwise missing/unsafe
+evidence is a warning only. Never opens a DB connection, never calls
+Kraken or any provider/network endpoint, never mutates
+`--policy`/`--registry`/`--providers`, never registers a scheduler, never
+adds a daemon job.
+
+Implemented in `core-rs/crates/mqk-cli/src/commands/md.rs::md_kraken_scheduler_readiness`,
+tested in `core-rs/crates/mqk-cli/tests/scenario_cli_kraken_scheduler_readiness_02b.rs`.
+
 ## Remaining Gaps
 
 - `sync-provider` (incremental backfill) still has no Kraken path — an

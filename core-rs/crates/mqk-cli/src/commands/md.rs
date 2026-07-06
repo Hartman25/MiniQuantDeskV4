@@ -1874,6 +1874,638 @@ pub fn md_crypto_registry_readiness(
 }
 
 // ---------------------------------------------------------------------------
+// CRYPTO-DATA-02B-KRAKEN-SCHEDULER-READINESS-CLI-01
+// ---------------------------------------------------------------------------
+
+const KRAKEN_SCHEDULER_READINESS_SCHEMA_VERSION: &str = "kraken-scheduler-readiness-v1";
+const KRAKEN_SCHEDULER_POLICY_SCHEMA_VERSION: &str =
+    "crypto-data-02a-kraken-scheduler-rate-limit-decision-v1";
+const KRAKEN_OHLC_EVIDENCE_INGEST_PREFIX: &str = "kraken_ohlc_ingest_";
+const KRAKEN_OHLC_EVIDENCE_SYNC_PREFIX: &str = "kraken_ohlc_sync_";
+
+/// Mirrors the `safety` object in
+/// `docs/specs/crypto_data_02a_kraken_scheduler_rate_limit_decision.json`.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+struct KrakenSchedulerPolicySafety {
+    #[serde(default)]
+    no_scheduled_task_registered: bool,
+    #[serde(default)]
+    no_daemon_job_added: bool,
+    #[serde(default)]
+    no_network_call_to_kraken_api: bool,
+    #[serde(default)]
+    no_db_write: bool,
+    #[serde(default)]
+    no_trading_enabled: bool,
+    #[serde(default)]
+    kraken_provider_enabled: bool,
+    #[serde(default)]
+    paper_trading_enabled: bool,
+    #[serde(default)]
+    live_trading_enabled: bool,
+}
+
+/// Mirrors `docs/specs/crypto_data_02a_kraken_scheduler_rate_limit_decision.json`.
+/// Deserialized directly from the operator-supplied `--policy` file; never
+/// mutated, never written back.
+#[derive(Debug, Clone, serde::Deserialize)]
+struct KrakenSchedulerPolicy {
+    #[serde(default)]
+    schema_version: String,
+    #[serde(default)]
+    recommended_default_cadence: String,
+    #[serde(default)]
+    min_seconds_between_pair_calls: i64,
+    #[serde(default)]
+    min_seconds_between_scheduled_runs: i64,
+    #[serde(default)]
+    max_ohlc_calls_per_run: i64,
+    #[serde(default)]
+    max_total_network_calls_per_run: i64,
+    #[serde(default)]
+    concurrency: String,
+    #[serde(default)]
+    scheduler_registration_status: String,
+    #[serde(default)]
+    safety: KrakenSchedulerPolicySafety,
+}
+
+/// Validates the *contract* the policy JSON must satisfy (independent of
+/// `scheduler_registration_status`, which is checked separately so it can
+/// surface its own distinct `scheduler_already_registered` truth state
+/// rather than being folded into a generic `policy_invalid`).
+fn validate_kraken_scheduler_policy_contract(policy: &KrakenSchedulerPolicy) -> Vec<String> {
+    let mut violations = Vec::new();
+    if policy.schema_version != KRAKEN_SCHEDULER_POLICY_SCHEMA_VERSION {
+        violations.push(format!(
+            "schema_version must be '{KRAKEN_SCHEDULER_POLICY_SCHEMA_VERSION}', got '{}'",
+            policy.schema_version
+        ));
+    }
+    if policy.min_seconds_between_pair_calls < 2 {
+        violations.push(format!(
+            "min_seconds_between_pair_calls must be >= 2, got {}",
+            policy.min_seconds_between_pair_calls
+        ));
+    }
+    if policy.min_seconds_between_scheduled_runs < 86400 {
+        violations.push(format!(
+            "min_seconds_between_scheduled_runs must be >= 86400, got {}",
+            policy.min_seconds_between_scheduled_runs
+        ));
+    }
+    if policy.max_ohlc_calls_per_run > 2 {
+        violations.push(format!(
+            "max_ohlc_calls_per_run must be <= 2, got {}",
+            policy.max_ohlc_calls_per_run
+        ));
+    }
+    if policy.max_total_network_calls_per_run > 4 {
+        violations.push(format!(
+            "max_total_network_calls_per_run must be <= 4, got {}",
+            policy.max_total_network_calls_per_run
+        ));
+    }
+    if policy.concurrency != "sequential_only" {
+        violations.push(format!(
+            "concurrency must be 'sequential_only', got '{}'",
+            policy.concurrency
+        ));
+    }
+    let safety = &policy.safety;
+    if !safety.no_scheduled_task_registered
+        || !safety.no_daemon_job_added
+        || !safety.no_network_call_to_kraken_api
+        || !safety.no_db_write
+        || !safety.no_trading_enabled
+    {
+        violations.push(
+            "safety.no_scheduled_task_registered/no_daemon_job_added/no_network_call_to_kraken_api/no_db_write/no_trading_enabled must all be true"
+                .to_string(),
+        );
+    }
+    if safety.kraken_provider_enabled || safety.paper_trading_enabled || safety.live_trading_enabled
+    {
+        violations.push(
+            "safety.kraken_provider_enabled/paper_trading_enabled/live_trading_enabled must all be false"
+                .to_string(),
+        );
+    }
+    violations
+}
+
+/// Per-symbol readiness check result for the scheduler-readiness command.
+/// `enabled`/`paper_trading_enabled`/`live_trading_enabled` are `None` only
+/// when the symbol was not found in the registry at all.
+#[derive(Debug, Clone, serde::Serialize)]
+struct KrakenSchedulerSymbolCheck {
+    symbol: String,
+    found: bool,
+    asset_class_ok: bool,
+    alias_ok: bool,
+    enabled: Option<bool>,
+    paper_trading_enabled: Option<bool>,
+    live_trading_enabled: Option<bool>,
+    trading_flags_safe: bool,
+}
+
+/// Finds the most recent `kraken_ohlc_ingest_<epoch>.json` or
+/// `kraken_ohlc_sync_<epoch>.json` file in `dir` by the epoch-seconds
+/// embedded in the filename (never by mtime/alphabetical order, matching the
+/// `CRYPTO-DATA-01AD` status route convention). Returns `None` if the
+/// directory is unreadable or no matching file exists.
+fn find_latest_kraken_ohlc_evidence_file(dir: &Path) -> Option<(PathBuf, i64)> {
+    let entries = fs::read_dir(dir).ok()?;
+    let mut best: Option<(PathBuf, i64)> = None;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = path.file_name().and_then(|n| n.to_str())?.to_string();
+        let stem = name.strip_suffix(".json")?;
+        let epoch_str = stem
+            .strip_prefix(KRAKEN_OHLC_EVIDENCE_INGEST_PREFIX)
+            .or_else(|| stem.strip_prefix(KRAKEN_OHLC_EVIDENCE_SYNC_PREFIX))?;
+        let epoch: i64 = epoch_str.parse().ok()?;
+        if best.as_ref().map(|(_, e)| epoch > *e).unwrap_or(true) {
+            best = Some((path, epoch));
+        }
+    }
+    best
+}
+
+/// Execute `mqk md kraken-scheduler-readiness`: a read-only operator command
+/// proving whether a **future**, not-yet-authorized Kraken scheduled sync is
+/// currently allowed by (a) the `CRYPTO-DATA-02A` rate-limit/cadence policy,
+/// (b) the current, unmodified provider/registry config, and (c) optionally,
+/// the latest Kraken OHLC ingest/sync evidence.
+///
+/// `active` does **not** mean a scheduler is registered — it means every
+/// prerequisite this command can check is satisfied for a future,
+/// separately authorized scheduler-registration patch to be considered.
+/// This command never registers a Windows Scheduled Task, never adds a
+/// daemon job, never calls Kraken or any provider/network endpoint, never
+/// opens a DB connection, and never mutates any config file.
+#[allow(clippy::too_many_arguments)]
+pub fn md_kraken_scheduler_readiness(
+    policy_path: PathBuf,
+    registry: PathBuf,
+    providers: PathBuf,
+    provider_id: String,
+    symbols: String,
+    evidence_dir: Option<PathBuf>,
+    require_fresh_evidence: bool,
+    evidence_max_age_secs: i64,
+    output_dir: Option<PathBuf>,
+) -> Result<()> {
+    let requested: Vec<String> = symbols
+        .split(',')
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(|s| s.to_string())
+        .collect();
+    if requested.is_empty() {
+        anyhow::bail!(
+            "kraken-scheduler-readiness: --symbols must contain at least one canonical symbol"
+        );
+    }
+
+    let mut fail_reasons: Vec<String> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
+    let mut truth_state = "active";
+
+    // -- 1. Policy: existence, parse, contract, scheduler_registration_status --
+    let mut rate_limit_policy_state = "missing";
+    let mut policy: Option<KrakenSchedulerPolicy> = None;
+    if !policy_path.exists() {
+        truth_state = "policy_missing";
+        fail_reasons.push(format!("policy file not found: {}", policy_path.display()));
+    } else {
+        match fs::read_to_string(&policy_path)
+            .ok()
+            .and_then(|s| serde_json::from_str::<KrakenSchedulerPolicy>(&s).ok())
+        {
+            None => {
+                truth_state = "policy_invalid";
+                rate_limit_policy_state = "invalid";
+                fail_reasons.push(format!(
+                    "policy file is not valid JSON or does not match the expected schema: {}",
+                    policy_path.display()
+                ));
+            }
+            Some(p) => {
+                let violations = validate_kraken_scheduler_policy_contract(&p);
+                if violations.is_empty() {
+                    rate_limit_policy_state = "valid";
+                } else {
+                    rate_limit_policy_state = "invalid";
+                    if truth_state == "active" {
+                        truth_state = "policy_invalid";
+                    }
+                    fail_reasons.extend(violations);
+                }
+                if p.scheduler_registration_status != "not_registered" {
+                    if truth_state == "active" {
+                        truth_state = "scheduler_already_registered";
+                    }
+                    fail_reasons.push(format!(
+                        "policy scheduler_registration_status is '{}', expected 'not_registered'",
+                        p.scheduler_registration_status
+                    ));
+                }
+                policy = Some(p);
+            }
+        }
+    }
+
+    // -- 2. Providers: existence, parse, provider entry, enabled flag --
+    let mut provider_readiness_state = "unknown";
+    let mut provider_enabled = false;
+    if !providers.exists() {
+        if truth_state == "active" {
+            truth_state = "backend_unavailable";
+        }
+        fail_reasons.push(format!(
+            "providers file not found: {}",
+            providers.display()
+        ));
+    } else {
+        match mqk_md::provider_registry::load_provider_registry(&providers) {
+            Err(e) => {
+                if truth_state == "active" {
+                    truth_state = "parse_error";
+                }
+                fail_reasons.push(format!(
+                    "providers file failed to parse: {}: {e}",
+                    providers.display()
+                ));
+            }
+            Ok(provider_configs) => {
+                match provider_configs.iter().find(|p| p.provider_id == provider_id) {
+                    None => {
+                        provider_readiness_state = "unsafe";
+                        if truth_state == "active" {
+                            truth_state = "provider_unsafe";
+                        }
+                        fail_reasons.push(format!(
+                            "provider '{provider_id}' not found in {}",
+                            providers.display()
+                        ));
+                    }
+                    Some(cfg) => {
+                        provider_enabled = cfg.enabled;
+                        if cfg.enabled {
+                            provider_readiness_state = "unsafe";
+                            if truth_state == "active" {
+                                truth_state = "provider_unsafe";
+                            }
+                            fail_reasons.push(format!(
+                                "provider '{provider_id}' is enabled=true; expected false pending a separate, explicit cutover decision (CRYPTO-REGISTRY-02)"
+                            ));
+                        } else {
+                            provider_readiness_state = "ready";
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // -- 3. Registry: existence, parse, per-symbol alias/asset-class/trading flags --
+    let mut registry_readiness_state = "unknown";
+    let mut paper_trading_enabled_any = false;
+    let mut live_trading_enabled_any = false;
+    let mut symbol_checks: Vec<KrakenSchedulerSymbolCheck> = Vec::with_capacity(requested.len());
+    if !registry.exists() {
+        if truth_state == "active" {
+            truth_state = "backend_unavailable";
+        }
+        fail_reasons.push(format!("registry file not found: {}", registry.display()));
+    } else {
+        match mqk_md::instrument_registry_v2::load_instrument_registry_v2(&registry) {
+            Err(e) => {
+                if truth_state == "active" {
+                    truth_state = "parse_error";
+                }
+                fail_reasons.push(format!(
+                    "registry file failed to parse: {}: {e}",
+                    registry.display()
+                ));
+            }
+            Ok(registry_v2) => {
+                let mut registry_ok = true;
+                for symbol in &requested {
+                    let inst = registry_v2.instruments.iter().find(|i| &i.symbol == symbol);
+                    let check = match inst {
+                        None => {
+                            registry_ok = false;
+                            fail_reasons.push(format!(
+                                "symbol '{symbol}' not found in {}",
+                                registry.display()
+                            ));
+                            KrakenSchedulerSymbolCheck {
+                                symbol: symbol.clone(),
+                                found: false,
+                                asset_class_ok: false,
+                                alias_ok: false,
+                                enabled: None,
+                                paper_trading_enabled: None,
+                                live_trading_enabled: None,
+                                trading_flags_safe: false,
+                            }
+                        }
+                        Some(inst) => {
+                            let asset_class_ok = inst.asset_class == "crypto";
+                            let kraken_pair = inst.provider_symbols.get("kraken_pair");
+                            let kraken_result_key = inst.provider_symbols.get("kraken_result_key");
+                            let alias_ok = kraken_pair.is_some() && kraken_result_key.is_some();
+                            if !asset_class_ok || !alias_ok {
+                                registry_ok = false;
+                                fail_reasons.push(format!(
+                                    "symbol '{symbol}' failed registry checks (asset_class_ok={asset_class_ok}, alias_ok={alias_ok})"
+                                ));
+                            }
+                            if inst.paper_trading_enabled {
+                                paper_trading_enabled_any = true;
+                            }
+                            if inst.live_trading_enabled {
+                                live_trading_enabled_any = true;
+                            }
+                            let trading_flags_safe =
+                                !inst.paper_trading_enabled && !inst.live_trading_enabled;
+                            KrakenSchedulerSymbolCheck {
+                                symbol: symbol.clone(),
+                                found: true,
+                                asset_class_ok,
+                                alias_ok,
+                                enabled: Some(inst.enabled),
+                                paper_trading_enabled: Some(inst.paper_trading_enabled),
+                                live_trading_enabled: Some(inst.live_trading_enabled),
+                                trading_flags_safe,
+                            }
+                        }
+                    };
+                    symbol_checks.push(check);
+                }
+                registry_readiness_state = if registry_ok { "ready" } else { "unsafe" };
+                if !registry_ok && truth_state == "active" {
+                    truth_state = "registry_unsafe";
+                }
+                if paper_trading_enabled_any || live_trading_enabled_any {
+                    if truth_state == "active" {
+                        truth_state = "trading_flags_unsafe";
+                    }
+                    fail_reasons.push(
+                        "one or more requested symbols has paper_trading_enabled or live_trading_enabled = true"
+                            .to_string(),
+                    );
+                }
+            }
+        }
+    }
+
+    // -- 4. Evidence (optional): only checked/required when the operator opts in --
+    let mut evidence_readiness_state = "not_required";
+    let mut evidence_path: Option<String> = None;
+    let mut evidence_age_secs: Option<i64> = None;
+    if let Some(dir) = &evidence_dir {
+        match find_latest_kraken_ohlc_evidence_file(dir) {
+            None => {
+                evidence_readiness_state = "missing";
+            }
+            Some((path, epoch)) => {
+                evidence_path = Some(path.display().to_string());
+                let age = (Utc::now().timestamp() - epoch).max(0);
+                evidence_age_secs = Some(age);
+                let parsed = fs::read_to_string(&path)
+                    .ok()
+                    .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
+                match parsed {
+                    None => {
+                        evidence_readiness_state = "unsafe";
+                    }
+                    Some(v) => {
+                        let provider_ok =
+                            v.get("provider").and_then(|p| p.as_str()) == Some("kraken");
+                        let evidence_all_passed =
+                            v.get("all_passed").and_then(|b| b.as_bool()).unwrap_or(false);
+                        if !provider_ok || !evidence_all_passed {
+                            evidence_readiness_state = "unsafe";
+                        } else if require_fresh_evidence && age > evidence_max_age_secs {
+                            evidence_readiness_state = "stale";
+                        } else {
+                            evidence_readiness_state = "safe";
+                        }
+                    }
+                }
+            }
+        }
+
+        if require_fresh_evidence {
+            match evidence_readiness_state {
+                "missing" => {
+                    if truth_state == "active" {
+                        truth_state = "evidence_unsafe";
+                    }
+                    fail_reasons.push(format!(
+                        "no Kraken OHLC evidence found in --evidence-dir {} and --require-fresh-evidence was set",
+                        dir.display()
+                    ));
+                }
+                "unsafe" => {
+                    if truth_state == "active" {
+                        truth_state = "evidence_unsafe";
+                    }
+                    fail_reasons.push(
+                        "latest Kraken OHLC evidence failed safety/content checks".to_string(),
+                    );
+                }
+                "stale" => {
+                    if truth_state == "active" {
+                        truth_state = "evidence_unsafe";
+                    }
+                    fail_reasons.push(format!(
+                        "latest Kraken OHLC evidence is stale: age_secs={} > max={evidence_max_age_secs}",
+                        evidence_age_secs.unwrap_or(-1)
+                    ));
+                }
+                _ => {}
+            }
+        } else if evidence_readiness_state == "missing" || evidence_readiness_state == "unsafe" {
+            warnings.push(format!(
+                "Kraken OHLC evidence is {evidence_readiness_state} in --evidence-dir; not required by this run (pass --require-fresh-evidence to enforce)"
+            ));
+        }
+    }
+
+    let all_passed = truth_state == "active" && fail_reasons.is_empty();
+    let scheduler_readiness_state = if all_passed {
+        "scheduler_ready_manual_registration_blocked"
+    } else if matches!(
+        truth_state,
+        "policy_missing" | "policy_invalid" | "scheduler_already_registered"
+    ) {
+        "policy_blocked"
+    } else {
+        "scheduler_not_ready"
+    };
+
+    let reason_code = if all_passed {
+        "kraken_scheduler_prerequisites_satisfied_manual_registration_blocked"
+    } else {
+        match truth_state {
+            "policy_missing" => "scheduler_policy_file_missing",
+            "policy_invalid" => "scheduler_policy_contract_violation",
+            "scheduler_already_registered" => "policy_declares_scheduler_already_registered",
+            "registry_unsafe" => "registry_alias_or_asset_class_check_failed",
+            "provider_unsafe" => "provider_not_found_or_unexpectedly_enabled",
+            "trading_flags_unsafe" => "trading_flag_unexpectedly_true",
+            "evidence_unsafe" => "latest_kraken_evidence_unsafe_missing_or_stale",
+            "parse_error" => "registry_or_providers_file_parse_error",
+            "backend_unavailable" => "registry_or_providers_file_unreadable",
+            _ => "readiness_check_failed",
+        }
+    };
+
+    let (recommended_default_cadence, min_pair, min_run, max_ohlc, max_total, concurrency) =
+        match &policy {
+            Some(p) => (
+                p.recommended_default_cadence.clone(),
+                p.min_seconds_between_pair_calls,
+                p.min_seconds_between_scheduled_runs,
+                p.max_ohlc_calls_per_run,
+                p.max_total_network_calls_per_run,
+                p.concurrency.clone(),
+            ),
+            None => (String::new(), 0, 0, 0, 0, String::new()),
+        };
+    let scheduler_registration_status = policy
+        .as_ref()
+        .map(|p| p.scheduler_registration_status.clone())
+        .unwrap_or_else(|| "unknown".to_string());
+
+    println!("schema_version={KRAKEN_SCHEDULER_READINESS_SCHEMA_VERSION}");
+    println!("provider={provider_id}");
+    println!("policy_path={}", policy_path.display());
+    println!("registry_path={}", registry.display());
+    println!("providers_path={}", providers.display());
+    println!("truth_state={truth_state}");
+    println!("scheduler_readiness_state={scheduler_readiness_state}");
+    println!("rate_limit_policy_state={rate_limit_policy_state}");
+    println!("registry_readiness_state={registry_readiness_state}");
+    println!("provider_readiness_state={provider_readiness_state}");
+    println!("evidence_readiness_state={evidence_readiness_state}");
+    println!("provider_enabled={provider_enabled}");
+    println!("paper_trading_enabled_any={paper_trading_enabled_any}");
+    println!("live_trading_enabled_any={live_trading_enabled_any}");
+    println!("recommended_default_cadence={recommended_default_cadence}");
+    println!("min_seconds_between_pair_calls={min_pair}");
+    println!("min_seconds_between_scheduled_runs={min_run}");
+    println!("max_ohlc_calls_per_run={max_ohlc}");
+    println!("max_total_network_calls_per_run={max_total}");
+    println!("concurrency={concurrency}");
+    println!("scheduler_registration_status={scheduler_registration_status}");
+    println!("daemon_job_status=absent");
+    println!("network_call_made=false");
+    println!("db_write=false");
+    println!("trading_enabled=false");
+    println!("all_passed={all_passed}");
+    println!("reason_code={reason_code}");
+    for check in &symbol_checks {
+        println!(
+            "symbol={} found={} asset_class_ok={} alias_ok={} enabled={} paper_trading_enabled={} live_trading_enabled={}",
+            check.symbol,
+            check.found,
+            check.asset_class_ok,
+            check.alias_ok,
+            fmt_opt_bool(check.enabled),
+            fmt_opt_bool(check.paper_trading_enabled),
+            fmt_opt_bool(check.live_trading_enabled),
+        );
+    }
+    for reason in &fail_reasons {
+        println!("fail_reason={reason}");
+    }
+    for warning in &warnings {
+        println!("warning={warning}");
+    }
+
+    if let Some(dir) = &output_dir {
+        fs::create_dir_all(dir).with_context(|| {
+            format!(
+                "kraken-scheduler-readiness: create output dir failed: {}",
+                dir.display()
+            )
+        })?;
+        let produced_at_ts = Utc::now().timestamp();
+        let produced_at_utc = chrono::DateTime::<Utc>::from_timestamp(produced_at_ts, 0)
+            .unwrap_or_else(Utc::now)
+            .to_rfc3339();
+        let evidence = serde_json::json!({
+            "schema_version": KRAKEN_SCHEDULER_READINESS_SCHEMA_VERSION,
+            "producer": "mqk-cli md kraken-scheduler-readiness",
+            "produced_at_utc": produced_at_utc,
+            "provider": provider_id,
+            "policy_path": policy_path.display().to_string(),
+            "registry_path": registry.display().to_string(),
+            "providers_path": providers.display().to_string(),
+            "evidence_dir": evidence_dir.as_ref().map(|d| d.display().to_string()),
+            "symbols_requested": requested,
+            "truth_state": truth_state,
+            "scheduler_readiness_state": scheduler_readiness_state,
+            "rate_limit_policy_state": rate_limit_policy_state,
+            "registry_readiness_state": registry_readiness_state,
+            "provider_readiness_state": provider_readiness_state,
+            "evidence_readiness_state": evidence_readiness_state,
+            "evidence_path": evidence_path,
+            "evidence_age_secs": evidence_age_secs,
+            "provider_enabled": provider_enabled,
+            "paper_trading_enabled_any": paper_trading_enabled_any,
+            "live_trading_enabled_any": live_trading_enabled_any,
+            "recommended_default_cadence": recommended_default_cadence,
+            "min_seconds_between_pair_calls": min_pair,
+            "min_seconds_between_scheduled_runs": min_run,
+            "max_ohlc_calls_per_run": max_ohlc,
+            "max_total_network_calls_per_run": max_total,
+            "concurrency": concurrency,
+            "scheduler_registration_status": scheduler_registration_status,
+            "daemon_job_status": "absent",
+            "network_call_made": false,
+            "db_write": false,
+            "trading_enabled": false,
+            "symbol_checks": symbol_checks,
+            "all_passed": all_passed,
+            "reason_code": reason_code,
+            "fail_reasons": fail_reasons,
+            "warnings": warnings,
+            "safety": {
+                "no_scheduled_task_registered": true,
+                "no_daemon_job_added": true,
+                "no_network_call_made": true,
+                "no_db_connection": true,
+                "no_trading_enabled": true,
+                "no_config_file_mutated": true,
+            },
+        });
+        let out_path = dir.join(format!("kraken_scheduler_readiness_{produced_at_ts}.json"));
+        fs::write(&out_path, serde_json::to_string_pretty(&evidence)?).with_context(|| {
+            format!(
+                "kraken-scheduler-readiness: write evidence failed: {}",
+                out_path.display()
+            )
+        })?;
+        println!("evidence_path_out={}", out_path.display());
+    }
+
+    if !all_passed {
+        anyhow::bail!(
+            "kraken-scheduler-readiness: {reason_code}: {}",
+            fail_reasons.join("; ")
+        );
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

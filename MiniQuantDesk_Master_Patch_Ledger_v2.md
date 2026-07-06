@@ -3877,3 +3877,87 @@ network call beyond the 2 bounded documentation-page reads recorded above.
 — a read-only operator CLI proving whether a future Kraken scheduled sync
 is currently allowed by this policy, the provider/registry config, and
 (optionally) latest Kraken evidence, without registering anything.
+
+### CRYPTO-DATA-02B-KRAKEN-SCHEDULER-READINESS-CLI-01 — CLOSED_LOCAL / PARTIAL
+
+**Mission:** continuing after `CRYPTO-DATA-02A-KRAKEN-SCHEDULER-RATE-LIMIT-DECISION-01`
+(committed `26a31cf3`), add a read-only operator CLI proving whether a
+**future**, not-yet-authorized Kraken scheduled sync is currently allowed by
+the `02A` policy, the current provider/registry config, and (optionally)
+the latest Kraken OHLC evidence — without registering anything.
+
+**Concretely:** `mqk md kraken-scheduler-readiness` deserializes
+`--policy` (default: the `CRYPTO-DATA-02A` JSON artifact) into a typed
+`KrakenSchedulerPolicy`, re-validates its own contract (schema version,
+cadence/spacing bounds, concurrency, safety booleans) independent of the
+PowerShell validator, and separately checks its
+`scheduler_registration_status` field (`scheduler_already_registered` is
+its own distinct truth state, not folded into `policy_invalid`). It reuses
+the same two pure `mqk-md` loaders as `CRYPTO-REGISTRY-03`/`04`
+(`provider_registry::load_provider_registry`,
+`instrument_registry_v2::load_instrument_registry_v2`) to classify provider
+enablement, per-symbol Kraken alias completeness, and trading-flag safety.
+`--evidence-dir` is optional: when supplied, it finds the latest
+`kraken_ohlc_ingest_*.json`/`kraken_ohlc_sync_*.json` file by embedded
+epoch (same selection rule as `CRYPTO-DATA-01AD`'s status route) and
+classifies it `safe`/`unsafe`/`missing`/`stale` — but only fails closed
+(`evidence_unsafe`) when `--require-fresh-evidence` is explicitly passed;
+otherwise unsafe/missing evidence is a warning only. `active`
+(`scheduler_readiness_state=scheduler_ready_manual_registration_blocked`)
+never means a scheduler is registered.
+
+**Built:**
+- `core-rs/crates/mqk-cli/src/commands/md.rs::md_kraken_scheduler_readiness`
+  plus supporting types (`KrakenSchedulerPolicy`,
+  `KrakenSchedulerPolicySafety`, `KrakenSchedulerSymbolCheck`,
+  `validate_kraken_scheduler_policy_contract`,
+  `find_latest_kraken_ohlc_evidence_file`).
+- `core-rs/crates/mqk-cli/src/main.rs` — new `MdCmd::KrakenSchedulerReadiness`
+  subcommand (`--policy`, `--registry`, `--providers`, `--provider`,
+  `--symbols`, `--evidence-dir`, `--require-fresh-evidence`,
+  `--evidence-max-age-secs`, `--output-dir`) and match arm. Added
+  `#![recursion_limit = "256"]` at the crate root — the `serde_json::json!`
+  macro invocation building this command's ~30-field evidence envelope
+  exceeded the default recursion limit at compile time; this is a
+  compiler-macro-expansion limit only, not a runtime behavior change, and
+  applies identically to every other `json!` call already in this crate.
+- `core-rs/crates/mqk-cli/tests/scenario_cli_kraken_scheduler_readiness_02b.rs`
+  (new) — 12 tests (`ks_01`..`ks_12`): happy path against real fixtures
+  (`active`, `scheduler_ready_manual_registration_blocked`,
+  `scheduler_registration_status=not_registered`), missing policy file,
+  too-fast cadence policy, `kraken.enabled=true`, BTC
+  `paper_trading_enabled=true`, ETH `live_trading_enabled=true`, missing
+  BTC alias, missing ETH alias, unsafe evidence with
+  `--require-fresh-evidence` (fails closed), missing evidence without the
+  flag (warning only, still `active`), evidence-JSON safety/no-forbidden-key
+  proof, and input-files-never-mutated proof.
+- `docs/runbooks/local_crypto_marks_ingest.md` — new "Kraken Scheduler
+  Readiness CLI" section.
+- `MiniQuantDesk_Master_Patch_Ledger_v2.md` — this entry.
+- `docs/audits/multi_asset_completion_audit.md` — new closure note (§68).
+
+**Validation results (`CARGO_TARGET_DIR=C:\tmp\mqk-target-crypto-data-02b-kraken-scheduler-readiness`):**
+`cargo check -p mqk-cli -p mqk-md` — clean. `cargo test -p mqk-cli --test
+scenario_cli_kraken_scheduler_readiness_02b` — 12/12 pass. `cargo test -p
+mqk-cli --test scenario_cli_crypto_registry_readiness_03` — 9/9 pass
+(unaffected). `cargo test -p mqk-cli --test
+scenario_cli_kraken_ohlc_dry_run_01w` — 7/7 pass (unaffected). `cargo test
+-p mqk-md --test scenario_kraken_ohlcv_provider_01uvw` — 7/7 pass
+(unaffected). `cargo clippy -p mqk-cli -p mqk-md --all-targets -- -D
+warnings` — clean, zero warnings. Manual smoke run against the real
+committed fixture files confirmed the exact printed output documented
+above. `scripts/guards/validate_crypto_data_02a_kraken_scheduler_decision.ps1`
+still passes (regression check, unaffected). `git diff --check` — clean.
+
+**Honest PARTIAL — `CRYPTO-DATA-01`/`CRYPTO-REGISTRY-01`/`ASSET-CORE-04`
+remain PARTIAL, not `CLOSED`:** this is a read-only CLI readiness check
+only. No scheduler is registered. No Windows Scheduled Task. No daemon
+recurring job. No Kraken API call, no provider/network call, no DB
+connection. `config/providers/providers.json` and
+`config/instruments/instruments_v2.crypto_local_marks.example.json` are
+both unchanged; `kraken.enabled` stays `false`; both crypto rows stay
+`enabled=false`/`paper_trading_enabled=false`/`live_trading_enabled=false`.
+
+**Recommended next slice:** `CRYPTO-DATA-02C-KRAKEN-SCHEDULER-READINESS-STATUS-SURFACE-01`
+(conditional on this staying small) — expose the same read-only
+classification through a daemon route and GUI panel.

@@ -1,3 +1,5 @@
+#![recursion_limit = "256"]
+
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use std::path::PathBuf;
@@ -12,8 +14,8 @@ use commands::{
     load_payload,
     md::{
         md_coinlore_latest_mark, md_crypto_registry_readiness, md_ingest_csv, md_ingest_provider,
-        md_kraken_ohlc_dry_run, md_kraken_ohlc_ingest, md_kraken_ohlc_sync, md_registry_v2_status,
-        md_sync_provider,
+        md_kraken_ohlc_dry_run, md_kraken_ohlc_ingest, md_kraken_ohlc_sync,
+        md_kraken_scheduler_readiness, md_registry_v2_status, md_sync_provider,
     },
     run::{
         run_arm, run_begin, run_deadman_check, run_deadman_enforce, run_halt, run_heartbeat,
@@ -628,6 +630,63 @@ enum MdCmd {
         #[arg(long)]
         output_dir: Option<PathBuf>,
     },
+
+    /// CRYPTO-DATA-02B-KRAKEN-SCHEDULER-READINESS-CLI-01: read-only operator
+    /// readiness surface proving whether a *future*, not-yet-authorized
+    /// Kraken scheduled sync is currently allowed by the `CRYPTO-DATA-02A`
+    /// rate-limit/cadence policy, the current provider/registry config, and
+    /// (optionally) the latest Kraken OHLC evidence. `active` does not mean
+    /// a scheduler is registered -- it means prerequisites are satisfied for
+    /// a future, separately authorized registration patch to be considered.
+    /// Never registers a Windows Scheduled Task, never adds a daemon job,
+    /// never calls Kraken or any provider/network endpoint, never opens a
+    /// DB connection, never mutates any config file.
+    KrakenSchedulerReadiness {
+        /// Path to the CRYPTO-DATA-02A policy JSON artifact.
+        #[arg(
+            long,
+            default_value = "docs/specs/crypto_data_02a_kraken_scheduler_rate_limit_decision.json"
+        )]
+        policy: PathBuf,
+
+        /// Path to a registry-v2 JSON file carrying provider_symbols.kraken_pair
+        /// / provider_symbols.kraken_result_key aliases.
+        #[arg(long)]
+        registry: PathBuf,
+
+        /// Path to the provider registry JSON.
+        #[arg(long, default_value = "config/providers/providers.json")]
+        providers: PathBuf,
+
+        /// Provider id to check readiness for.
+        #[arg(long, default_value = "kraken")]
+        provider: String,
+
+        /// Comma-separated canonical symbols (e.g. BTC/USD,ETH/USD).
+        #[arg(long, default_value = "BTC/USD,ETH/USD")]
+        symbols: String,
+
+        /// Optional directory to inspect for the latest Kraken OHLC
+        /// ingest/sync evidence file. When omitted, evidence is not checked
+        /// at all (evidence_readiness_state=not_required).
+        #[arg(long)]
+        evidence_dir: Option<PathBuf>,
+
+        /// When set, missing/unsafe/stale evidence in --evidence-dir fails
+        /// closed (evidence_unsafe). When absent (default), missing/unsafe
+        /// evidence is only a warning.
+        #[arg(long, default_value_t = false, action = clap::ArgAction::SetTrue)]
+        require_fresh_evidence: bool,
+
+        /// Maximum evidence age (seconds) before it is considered stale,
+        /// only enforced when --require-fresh-evidence is set.
+        #[arg(long, default_value_t = 172_800)]
+        evidence_max_age_secs: i64,
+
+        /// Directory to write a JSON evidence artifact. Not staged/committed.
+        #[arg(long)]
+        output_dir: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -955,6 +1014,29 @@ async fn main() -> Result<()> {
                 output_dir,
             } => {
                 md_crypto_registry_readiness(registry, providers, provider, symbols, output_dir)?;
+            }
+            MdCmd::KrakenSchedulerReadiness {
+                policy,
+                registry,
+                providers,
+                provider,
+                symbols,
+                evidence_dir,
+                require_fresh_evidence,
+                evidence_max_age_secs,
+                output_dir,
+            } => {
+                md_kraken_scheduler_readiness(
+                    policy,
+                    registry,
+                    providers,
+                    provider,
+                    symbols,
+                    evidence_dir,
+                    require_fresh_evidence,
+                    evidence_max_age_secs,
+                    output_dir,
+                )?;
             }
         },
 
