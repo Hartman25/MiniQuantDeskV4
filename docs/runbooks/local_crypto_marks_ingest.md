@@ -518,20 +518,60 @@ A live network call is only attempted when no `--input-file` is given and
 `MQK_ALLOW_KRAKEN_NETWORK_SMOKE=1` is explicitly set — this is not run by
 default validation. See
 `docs/specs/crypto_data_01u_v_w_kraken_ohlcv_adapter_parser_cli.md` for the
-full decision record, including why a DB-backed ingest proof was
-deliberately deferred (no ingest command wires `"kraken"` into
-`ingest-provider`/`sync-provider` yet).
+full decision record. At the time this bundle landed, a DB-backed ingest
+proof was deliberately deferred (no ingest command wired `"kraken"` into
+`ingest-provider`/`sync-provider` yet) — that gap is now closed by
+`CRYPTO-DATA-01X-Y` below.
 
 **No recurring ingestion, no scheduler, no daemon job, no GUI surface, and
 no crypto trading enablement.** Local CSV import (this runbook) remains the
-only DB-backed **proven** crypto `md_bars` ingest path.
+only DB-backed crypto `md_bars` ingest path proven **before** `01X-Y`.
+
+## Kraken Ingest-Provider DB Proof (CRYPTO-DATA-01X-Y-KRAKEN-INGEST-PROVIDER-DB-PROOF-BUNDLE-01-COMBINED)
+
+Continuing after `01U-V-W`'s parser/dry-run, this bundle wired the same
+fixture-proven Kraken parser into the canonical `md_bars` DB write path via
+a new, additive `mqk md kraken-ohlc-ingest` command — **not** a change to
+`ingest-provider`/`sync-provider`, which remain hard-locked to
+`"twelvedata"|"alpaca"` exactly as before (see
+`docs/specs/crypto_data_01x_y_kraken_ingest_provider_db_proof.md` §1 for
+the full "why a new command instead" rationale).
+
+```powershell
+$env:MQK_DATABASE_URL = "postgres://postgres:postgres@127.0.0.1:5434/mqk_test?sslmode=disable"
+
+cargo run --manifest-path .\core-rs\Cargo.toml -p mqk-cli --bin mqk-cli -- md kraken-ohlc-ingest `
+  --registry .\config\instruments\instruments_v2.crypto_local_marks.example.json `
+  --symbol BTC/USD `
+  --timeframe 1D `
+  --input-file .\core-rs\crates\mqk-md\tests\fixtures\kraken_ohlc_xbtusd_1d.json `
+  --output-dir .\exports\market_data
+```
+
+Same fail-closed gate as `kraken-ohlc-dry-run`: without `--input-file`, the
+command refuses before any DB connection unless
+`MQK_ALLOW_KRAKEN_NETWORK_SMOKE=1` is explicitly set. The forming
+(not-yet-committed) Kraken row is never written to `md_bars`. Rows are
+stamped with truthful `provider_id="kraken"`, `provider_source="kraken"`,
+`provider_symbol=<Kraken's own result key, e.g. "XXBTZUSD">`,
+`ingest_mode="provider_ingest"`. No DB migration was needed.
+
+DB-backed proof:
+`core-rs/crates/mqk-cli/tests/scenario_cli_kraken_ohlc_ingest_db_01xy.rs`
+proves completed-bar DB writes, forming-row exclusion, exact scaled-volume
+readback, idempotent re-runs, zero `oms_outbox` side effects, and
+zero-leftover cleanup (deleting only `provider_id='kraken'` rows at the
+exact fixture keys — it can never touch pre-existing non-Kraken history).
+
+**No recurring ingestion, no scheduler, no daemon job, no GUI surface, and
+no crypto trading enablement.** `kraken-ohlc-ingest` is a single explicit
+operator invocation, proven safe with fixture data only.
 
 ## Remaining Gaps
 
-- No live network crypto provider writes to `md_bars` yet. Kraken's parser
-  and disabled adapter now exist (see above), but no ingest command wires
-  `"kraken"` into `ingest-provider`/`sync-provider`, and no DB-backed
-  ingest proof has been run for Kraken.
+- `sync-provider` (incremental backfill) still has no Kraken path — an
+  explicit deferral, not an oversight (see
+  `docs/specs/crypto_data_01x_y_kraken_ingest_provider_db_proof.md` §5).
 - CoinLore's verified public endpoints are ticker/spot-only, not OHLCV; a
   `LatestMark` parser/model and a read-only evidence-file status route now
   exist for that ticker data, but no `latest_marks` DB table exists — the

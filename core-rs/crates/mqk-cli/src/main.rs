@@ -12,7 +12,7 @@ use commands::{
     load_payload,
     md::{
         md_coinlore_latest_mark, md_ingest_csv, md_ingest_provider, md_kraken_ohlc_dry_run,
-        md_registry_v2_status, md_sync_provider,
+        md_kraken_ohlc_ingest, md_registry_v2_status, md_sync_provider,
     },
     run::{
         run_arm, run_begin, run_deadman_check, run_deadman_enforce, run_halt, run_heartbeat,
@@ -513,6 +513,40 @@ enum MdCmd {
         #[arg(long)]
         output_dir: Option<PathBuf>,
     },
+
+    /// CRYPTO-DATA-01X-Y-KRAKEN-INGEST-PROVIDER-DB-PROOF-BUNDLE-01-COMBINED:
+    /// fixture-first Kraken provider-ingest path. Resolves the Kraken alias
+    /// for --symbol, parses a Kraken /0/public/OHLC response (from
+    /// --input-file by default; --input-file is required unless
+    /// MQK_ALLOW_KRAKEN_NETWORK_SMOKE=1 is set), and ingests only the
+    /// completed (non-forming) bars into md_bars with truthful
+    /// provider_id="kraken" metadata. Only --timeframe 1D is supported. This
+    /// is a single explicit operator invocation, not recurring ingestion:
+    /// no scheduler, daemon, or GUI wiring is added by this command.
+    KrakenOhlcIngest {
+        /// Path to a registry-v2 JSON file carrying provider_symbols.kraken_pair
+        /// (e.g. config/instruments/instruments_v2.crypto_local_marks.example.json).
+        #[arg(long)]
+        registry: PathBuf,
+
+        /// Canonical symbol (e.g. BTC/USD or ETH/USD).
+        #[arg(long)]
+        symbol: String,
+
+        /// Timeframe. Only 1D is supported by this adapter.
+        #[arg(long, default_value = "1D")]
+        timeframe: String,
+
+        /// Path to a local file containing a Kraken /0/public/OHLC response
+        /// body. When omitted, a live network call is attempted only if
+        /// MQK_ALLOW_KRAKEN_NETWORK_SMOKE=1.
+        #[arg(long)]
+        input_file: Option<PathBuf>,
+
+        /// Directory to write a JSON evidence artifact. Not staged/committed.
+        #[arg(long)]
+        output_dir: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -802,6 +836,16 @@ async fn main() -> Result<()> {
                 output_dir,
             } => {
                 md_kraken_ohlc_dry_run(registry, symbol, timeframe, input_file, output_dir)
+                    .await?;
+            }
+            MdCmd::KrakenOhlcIngest {
+                registry,
+                symbol,
+                timeframe,
+                input_file,
+                output_dir,
+            } => {
+                md_kraken_ohlc_ingest(registry, symbol, timeframe, input_file, output_dir)
                     .await?;
             }
         },

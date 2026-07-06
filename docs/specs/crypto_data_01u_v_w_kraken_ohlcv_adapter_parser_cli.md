@@ -175,28 +175,31 @@ recorded live by `CRYPTO-DATA-01S-T`'s `docs/specs/crypto_data_01s_t_ohlcv_provi
 
 ---
 
-## 8. DB-backed ingest proof — not run in this bundle
+## 8. DB-backed ingest proof — closed by `CRYPTO-DATA-01X-Y`
 
-Per this bundle's own closure standard, a DB-backed ingest test is
-**optional** and only warranted once the volume representation is proven
-safe (§2, done here). This bundle chose **not** to add one:
+At the time this bundle (`01U-V-W`) landed, a DB-backed ingest test was
+deferred (see the superseded text below, kept for history). It has since
+been closed by
+`CRYPTO-DATA-01X-Y-KRAKEN-INGEST-PROVIDER-DB-PROOF-BUNDLE-01-COMBINED` — see
+`docs/specs/crypto_data_01x_y_kraken_ingest_provider_db_proof.md` for the
+full DB-write proof (new `mqk md kraken-ohlc-ingest` command, fixture-first,
+default-off network, truthful provider metadata, forming-candle exclusion,
+scaled-volume DB readback, idempotency, and zero-leftover cleanup proof).
+
+Original `01U-V-W` deferral rationale (superseded):
 
 - The parser + `HistoricalProvider` adapter proof (httpmock, no live
-  network) already exercises the full `ProviderBar` conversion path,
+  network) already exercised the full `ProviderBar` conversion path,
   including the documented volume scale.
 - `ingest_provider_bars_to_md_bars_with_provider_metadata` (the reuse path
-  identified by `01S-T` §2 item 7) is unchanged and provider-agnostic by
-  construction — no schema change is needed for a future Kraken-sourced
-  row.
-- Adding a DB-backed test here would require standing up/asserting against
-  the local paper Postgres and would not prove anything the pure
-  parser/adapter tests do not already prove (no ingest command wires
-  `"kraken"` into `ingest-provider`/`sync-provider` in this patch — those
-  remain hard-locked to `"twelvedata"|"alpaca"`).
-
-This is an explicit deferral, not an oversight: a future patch that wires
-Kraken into `ingest-provider`/`sync-provider` (a DB-writing, operator-
-authorized change) is the natural place for a DB-backed proof.
+  identified by `01S-T` §2 item 7) was unchanged and provider-agnostic by
+  construction — no schema change was needed for a future Kraken-sourced
+  row (this remained true in `01X-Y`; no migration was added).
+- No ingest command wired `"kraken"` into `ingest-provider`/`sync-provider`
+  in `01U-V-W` — those commands remained hard-locked to
+  `"twelvedata"|"alpaca"`. `01X-Y` did **not** change that lock either: it
+  added a separate Kraken-specific `kraken-ohlc-ingest` command instead
+  (see the new spec doc §"CLI surface decision" for why).
 
 ---
 
@@ -216,11 +219,13 @@ authorized change) is the natural place for a DB-backed proof.
 ## 10. What remains open
 
 - No recurring/scheduled Kraken ingestion.
-- No daemon ingest job wiring `"kraken"` into `ingest-provider`/`sync-provider`.
+- No daemon ingest job wiring `"kraken"` into `ingest-provider`/`sync-provider`
+  (the generic commands); `01X-Y` added a separate Kraken-specific
+  `kraken-ohlc-ingest` command instead — see
+  `docs/specs/crypto_data_01x_y_kraken_ingest_provider_db_proof.md`.
 - No GUI status surface for Kraken OHLCV (mirroring `01N`-`01R`'s CoinLore
   pattern would be the natural next step if warranted).
-- No DB-backed ingest proof (§8) — deferred to the patch that first wires
-  Kraken into a DB-writing ingest path.
+- DB-backed ingest proof (§8) is now closed by `01X-Y`.
 - Kraken's numeric public rate limit remains unestablished (`01S-T` §8,
   unchanged).
 - Coinbase Exchange and Binance/Binance.US remain unverified candidates

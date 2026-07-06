@@ -1008,6 +1008,231 @@ pub async fn md_kraken_ohlc_dry_run(
 }
 
 // ---------------------------------------------------------------------------
+// kraken-ohlc-ingest — CRYPTO-DATA-01X-Y-KRAKEN-INGEST-PROVIDER-DB-PROOF-
+// BUNDLE-01-COMBINED: fixture-first Kraken provider-ingest path into
+// `md_bars`.
+//
+// A Kraken-specific command (Option B), not a change to the generic
+// `ingest-provider`/`sync-provider` commands: those are tightly coupled to
+// TwelveData/Alpaca's date-range-chunked `HistoricalProvider::fetch_bars`
+// semantics and have no fixture/input-file mode. This command mirrors
+// `kraken-ohlc-dry-run`'s parse path but adds the canonical `md_bars` DB
+// write, stamped with truthful Kraken provider metadata.
+//
+// Default mode reads a local fixture/response file (`--input-file`) -- zero
+// network calls. Network mode is opt-in only, gated behind
+// `MQK_ALLOW_KRAKEN_NETWORK_SMOKE=1`, and performs at most one HTTP GET. The
+// forming (not-yet-committed) candle is never converted or written to
+// `md_bars` -- only `KrakenPairOhlc::completed_provider_bars` output reaches
+// the DB write path.
+// ---------------------------------------------------------------------------
+
+/// Schema version of the evidence JSON written by `--output-dir`.
+const KRAKEN_OHLC_INGEST_EVIDENCE_SCHEMA_VERSION: &str = "kraken-ohlc-ingest-v1";
+
+/// Execute `mqk md kraken-ohlc-ingest`: resolve the Kraken alias for
+/// `--symbol` from the registry-v2 fixture at `--registry`, obtain a Kraken
+/// `/0/public/OHLC` response body (from `--input-file` by default, or via
+/// exactly one live HTTP GET when `MQK_ALLOW_KRAKEN_NETWORK_SMOKE=1` and no
+/// `--input-file` is given), parse it, and ingest only the completed rows
+/// into `md_bars` via
+/// [`mqk_db::md::ingest_provider_bars_to_md_bars_with_provider_metadata`]
+/// with truthful `provider_id="kraken"` / `provider_source="kraken"`
+/// metadata. Only `--timeframe 1D` is supported by the current adapter.
+///
+/// Never touches broker/runtime/risk/order/strategy code and never
+/// registers a scheduler -- this is a single explicit operator invocation.
+pub async fn md_kraken_ohlc_ingest(
+    registry: PathBuf,
+    symbol: String,
+    timeframe: String,
+    input_file: Option<PathBuf>,
+    output_dir: Option<PathBuf>,
+) -> Result<()> {
+    let tf = mqk_md::Timeframe::parse(&timeframe)?;
+    if tf != mqk_md::Timeframe::D1 {
+        anyhow::bail!(
+            "kraken-ohlc-ingest: only --timeframe 1D is supported by this adapter, got {timeframe}"
+        );
+    }
+
+    let registry_v2 = mqk_md::instrument_registry_v2::load_instrument_registry_v2(&registry)
+        .with_context(|| format!("kraken-ohlc-ingest: registry load failed: {}", registry.display()))?;
+    let aliases = mqk_md::kraken_aliases_from_registry_v2(&registry_v2);
+    let alias = aliases
+        .iter()
+        .find(|a| a.canonical_symbol == symbol)
+        .cloned()
+        .with_context(|| {
+            format!("kraken-ohlc-ingest: no kraken alias configured for symbol {symbol}")
+        })?;
+
+    let (body, network_call_made, mode) = match &input_file {
+        Some(path) => {
+            let content = fs::read_to_string(path).with_context(|| {
+                format!("kraken-ohlc-ingest: input-file read failed: {}", path.display())
+            })?;
+            (content, false, "input_file")
+        }
+        None => {
+            let allowed = std::env::var(ENV_ALLOW_KRAKEN_NETWORK_SMOKE)
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
+            if !allowed {
+                anyhow::bail!(
+                    "kraken-ohlc-ingest: no --input-file provided and {ENV_ALLOW_KRAKEN_NETWORK_SMOKE} is not set; \
+                     refusing to make a network call by default (kraken_requires_input_file_or_network_opt_in)"
+                );
+            }
+            let body = mqk_md::fetch_kraken_ohlc_body(&alias.kraken_pair)
+                .await
+                .map_err(|e| anyhow::anyhow!("kraken-ohlc-ingest: network fetch failed: {e}"))?;
+            (body, true, "network_smoke")
+        }
+    };
+
+    let interval_seconds = tf.duration_secs();
+    let parsed = mqk_md::parse_kraken_ohlc_response(&body, &alias.kraken_pair, interval_seconds)
+        .map_err(|e| anyhow::anyhow!("kraken-ohlc-ingest: parse failed: {e}"))?;
+
+    let completed = parsed
+        .completed_provider_bars(&symbol, tf.as_str())
+        .map_err(|e| anyhow::anyhow!("kraken-ohlc-ingest: bar conversion failed: {e}"))?;
+    let bars_excluded_forming = parsed.forming_bars().len();
+    let forming_candle_excluded = bars_excluded_forming > 0;
+
+    let latest_completed = completed.iter().max_by_key(|b| b.end_ts);
+    let latest_completed_end_ts = latest_completed.map(|b| b.end_ts);
+    let latest_completed_start_ts = latest_completed.map(|b| b.end_ts - interval_seconds);
+
+    // mqk_md::ProviderBar -> mqk_db::md::ProviderBar: same field shape used
+    // by md_ingest_provider's own conversion above.
+    let db_bars: Vec<mqk_db::md::ProviderBar> = completed
+        .iter()
+        .map(|b| mqk_db::md::ProviderBar {
+            symbol: b.symbol.clone(),
+            timeframe: b.timeframe.clone(),
+            end_ts: b.end_ts,
+            open: b.open.clone(),
+            high: b.high.clone(),
+            low: b.low.clone(),
+            close: b.close.clone(),
+            volume: b.volume,
+            is_complete: b.is_complete,
+        })
+        .collect();
+
+    // Deterministic ingest_id from (symbol, timeframe, kraken pair) -- stable
+    // across re-runs against the same registry/symbol so retries stay
+    // idempotent, mirroring md_ingest_csv/md_ingest_provider's UUIDv5
+    // convention (D1-5: no random UUID in src/).
+    let ingest_id = Uuid::new_v5(
+        &Uuid::NAMESPACE_DNS,
+        format!(
+            "mqk-md-ingest.kraken.v1|{}|{}|{}",
+            symbol,
+            tf.as_str(),
+            alias.kraken_pair
+        )
+        .as_bytes(),
+    );
+
+    let provider_metadata = mqk_db::md::MdBarProviderMetadata {
+        provider_id: mqk_md::KRAKEN_PROVIDER_ID.to_string(),
+        provider_source: Some(mqk_md::KRAKEN_PROVIDER_ID.to_string()),
+        provider_symbol: Some(parsed.provider_pair_key.clone()),
+        ingest_mode: Some("provider_ingest".to_string()),
+        provider_bar_id: None,
+        provider_updated_at_utc: None,
+    };
+
+    let pool = mqk_db::connect_from_env().await?;
+    let res = mqk_db::md::ingest_provider_bars_to_md_bars_with_provider_metadata(
+        &pool,
+        mqk_db::md::IngestProviderBarsArgs {
+            source: mqk_md::KRAKEN_PROVIDER_ID.to_string(),
+            timeframe: tf.as_str().to_string(),
+            ingest_id,
+            bars: db_bars,
+        },
+        provider_metadata,
+    )
+    .await?;
+
+    println!("provider_id={}", mqk_md::KRAKEN_PROVIDER_ID);
+    println!("provider_source={}", mqk_md::KRAKEN_PROVIDER_ID);
+    println!("provider_symbol={}", parsed.provider_pair_key);
+    println!("ingest_mode=provider_ingest");
+    println!("mode={mode}");
+    println!("network_call_made={network_call_made}");
+    println!("db_write=true");
+    println!("md_bars_write=true");
+    println!("forming_candle_excluded={forming_candle_excluded}");
+    println!(
+        "volume_semantics=kraken_base_asset_volume_scaled_by_{}_not_whole_coins_not_usd",
+        mqk_md::KRAKEN_VOLUME_SCALE
+    );
+    println!("volume_scale={}", mqk_md::KRAKEN_VOLUME_SCALE);
+    println!("symbol={symbol}");
+    println!("ingest_id={}", res.ingest_id);
+    println!("bars_completed={}", completed.len());
+    println!("bars_excluded_forming={bars_excluded_forming}");
+    println!("latest_completed_start_ts={}", fmt_opt_i64(latest_completed_start_ts));
+    println!("latest_completed_end_ts={}", fmt_opt_i64(latest_completed_end_ts));
+    println!(
+        "rows_read={} rows_ok={} rejected={} inserted={} updated={}",
+        res.report.coverage.rows_read,
+        res.report.coverage.rows_ok,
+        res.report.coverage.rows_rejected,
+        res.report.coverage.rows_inserted,
+        res.report.coverage.rows_updated
+    );
+
+    if let Some(dir) = &output_dir {
+        fs::create_dir_all(dir).with_context(|| {
+            format!("kraken-ohlc-ingest: create output dir failed: {}", dir.display())
+        })?;
+        let produced_at_ts = Utc::now().timestamp();
+        let produced_at_utc = chrono::DateTime::<Utc>::from_timestamp(produced_at_ts, 0)
+            .unwrap_or_else(Utc::now)
+            .to_rfc3339();
+        let evidence = serde_json::json!({
+            "schema_version": KRAKEN_OHLC_INGEST_EVIDENCE_SCHEMA_VERSION,
+            "producer": "mqk-cli md kraken-ohlc-ingest",
+            "produced_at_utc": produced_at_utc,
+            "provider": mqk_md::KRAKEN_PROVIDER_ID,
+            "mode": mode,
+            "network_call_made": network_call_made,
+            "db_write": true,
+            "md_bars_write": true,
+            "provider_id": mqk_md::KRAKEN_PROVIDER_ID,
+            "provider_source": mqk_md::KRAKEN_PROVIDER_ID,
+            "provider_symbol": parsed.provider_pair_key,
+            "ingest_mode": "provider_ingest",
+            "symbols_requested": [symbol.clone()],
+            "bars_completed": completed.len(),
+            "bars_excluded_forming": bars_excluded_forming,
+            "latest_completed_start_ts": latest_completed_start_ts,
+            "latest_completed_end_ts": latest_completed_end_ts,
+            "volume_semantics": "kraken_base_asset_volume_scaled_by_1e8_not_whole_coins_not_usd",
+            "volume_scale": mqk_md::KRAKEN_VOLUME_SCALE,
+            "rows_inserted": res.report.coverage.rows_inserted,
+            "rows_updated": res.report.coverage.rows_updated,
+            "all_passed": true,
+            "reason_code": "kraken_ingest_evidence_generated",
+            "fail_reasons": Vec::<String>::new(),
+        });
+        let out_path = dir.join(format!("kraken_ohlc_ingest_{produced_at_ts}.json"));
+        fs::write(&out_path, serde_json::to_string_pretty(&evidence)?).with_context(|| {
+            format!("kraken-ohlc-ingest: write evidence failed: {}", out_path.display())
+        })?;
+        println!("evidence_path={}", out_path.display());
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
