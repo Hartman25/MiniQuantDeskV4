@@ -1,0 +1,88 @@
+{
+  "schema_version": "crypto-registry-02-kraken-cutover-decision-v1",
+  "patch_id": "CRYPTO-REGISTRY-02-KRAKEN-DATA-REGISTRY-CUTOVER-DECISION-01",
+  "decided_at_head_commit": "82d14e31",
+  "decision": "do_not_flip_enabled_flags_yet",
+  "selected_provider": "kraken",
+  "symbols": ["BTC/USD", "ETH/USD"],
+  "data_path_status": "kraken_fixture_db_sync_status_gui_proven",
+  "trading_status": "disabled",
+  "scheduler_status": "absent",
+  "registry_cutover_status": "decision_only",
+  "safety": {
+    "kraken_provider_enabled": false,
+    "btc_usd_enabled": false,
+    "eth_usd_enabled": false,
+    "paper_trading_enabled": false,
+    "live_trading_enabled": false,
+    "no_scheduler": true,
+    "no_network_call": true,
+    "no_db_write": true,
+    "no_trading_enabled": true,
+    "no_provider_adapter_added": true,
+    "no_db_migration": true,
+    "no_config_flag_changed": true
+  },
+  "schema_facts": {
+    "enabled_field_meaning": "tracked_at_all_for_ingestion_backtest_gui_scope_not_a_trading_flag",
+    "paper_and_live_trading_flags_independent_of_enabled": true,
+    "any_production_path_treats_enabled_true_as_tradable": false,
+    "any_production_path_reads_instrument_registry_v2_schema": "read_only_economics_status_bridge_only_asset_core_04f",
+    "enabled_true_for_non_equity_requires_test_only_flag": "allow_enabled_non_equity_for_testing",
+    "test_only_flag_has_production_enablement_path": false
+  },
+  "registry_candidate_decision": {
+    "use_separate_candidate_file": false,
+    "keep_existing_disabled_fixture_unchanged": true,
+    "fixture_path": "config/instruments/instruments_v2.crypto_local_marks.example.json"
+  },
+  "required_invariants_before_scheduler": [
+    "kraken_public_rate_limit_must_be_numerically_verified",
+    "recurring_call_must_reuse_market_data_provider_rate_limits_capability_surface",
+    "scheduler_must_be_separately_authorized_patch_with_own_decision_doc",
+    "scheduler_must_default_disabled_opt_in",
+    "scheduler_must_not_share_lock_cursor_state_with_equity_ingestion_scheduler",
+    "scheduler_must_not_be_task_scheduler_registered_without_separate_explicit_decision"
+  ],
+  "required_invariants_before_trading": [
+    "crypto_specific_risk_policy_must_exist_and_be_tested",
+    "crypto_broker_or_paper_execution_adapter_must_exist",
+    "crypto_strategy_must_exist_and_be_backtested",
+    "crypto_24_7_session_calendar_must_be_authoritative_runtime_source",
+    "account_currency_generalization_must_be_resolved",
+    "explicit_separate_operator_decision_required_before_paper_trading_enabled_true",
+    "live_trading_enabled_true_requires_all_above_plus_live_broker_integration_decision"
+  ],
+  "remaining_gaps": [
+    "no_recurring_or_scheduled_kraken_sync",
+    "no_production_registry_v2_cutover",
+    "no_crypto_risk_policy_activation",
+    "no_crypto_paper_execution",
+    "no_crypto_live_execution",
+    "no_crypto_strategy"
+  ],
+  "current_repo_evidence": {
+    "head_commit": "82d14e31",
+    "kraken_provider_config": "config/providers/providers.json kraken entry: asset_classes=[\"crypto\"], enabled=false, api_key_required=false, implementation_status=ohlcv_adapter_fixture_proven_network_opt_in_only.",
+    "btc_usd_row": "instruments_v2.crypto_local_marks.example.json: enabled=false, paper_trading_enabled=false, live_trading_enabled=false, provider_symbols.kraken_pair=XBTUSD, provider_symbols.kraken_result_key=XXBTZUSD.",
+    "eth_usd_row": "instruments_v2.crypto_local_marks.example.json: enabled=false, paper_trading_enabled=false, live_trading_enabled=false, provider_symbols.kraken_pair=ETHUSD, provider_symbols.kraken_result_key=XETHZUSD.",
+    "validator_gate": "mqk-md/src/instrument_registry_v2.rs::validate_registry_v2 rejects enabled=true for non-equity asset_class unless allow_enabled_non_equity_for_testing=true, documented as test/fixture-only with no production enablement path.",
+    "schema_not_wired_to_production": "instrument_registry_v2.rs module docs: 'Nothing in this module is wired into any consumer' except the read-only ASSET-CORE-04F ?registry_source=v2 economics-status bridge.",
+    "generic_ingest_sync_provider_unchanged": "commands/md.rs::md_ingest_provider / md_sync_provider remain hard-gated to source in {\"twelvedata\",\"alpaca\"}; kraken is reached only via the dedicated kraken-ohlc-dry-run/kraken-ohlc-ingest/kraken-ohlc-sync commands."
+  },
+  "files_added_by_this_patch": [
+    "docs/specs/crypto_registry_02_kraken_data_registry_cutover_decision.md",
+    "docs/specs/crypto_registry_02_kraken_data_registry_cutover_decision.json",
+    "scripts/guards/validate_crypto_registry_02_kraken_cutover_decision.ps1"
+  ],
+  "files_modified_by_this_patch": [
+    "docs/runbooks/local_crypto_marks_ingest.md",
+    "MiniQuantDesk_Master_Patch_Ledger_v2.md",
+    "docs/audits/multi_asset_completion_audit.md"
+  ],
+  "notes": [
+    "This decision concludes the registry-v2 schema DOES structurally distinguish data-tracking (enabled) from paper/live trading enablement, but the safe production path to exercise that distinction for enabled specifically does not exist yet -- validate_registry_v2's fail-closed gate requires a test-only escape hatch to set enabled=true for any non-equity instrument.",
+    "No code in mqk-daemon, mqk-runtime, mqk-execution, mqk-broker-alpaca, mqk-broker-paper, mqk-risk, mqk-portfolio, or any GUI/config/DB-migration/scheduler file was changed by this patch.",
+    "Parent statuses unchanged and still PARTIAL: CRYPTO-DATA-01, CRYPTO-REGISTRY-01, ASSET-CORE-04. This patch does not claim crypto trading readiness or production registry-v2 cutover completion."
+  ]
+}

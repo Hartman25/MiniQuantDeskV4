@@ -692,6 +692,20 @@ in every respect — a "Refresh" button re-fetches the same GET route only.
 Implemented in `core-rs/mqk-gui/src/features/ingest/{types.ts,api.ts,IngestScreen.tsx}`,
 tested in `core-rs/mqk-gui/src/features/ingest/__tests__/api.test.ts`.
 
+## Kraken Data Registry Cutover Decision (CRYPTO-REGISTRY-02-KRAKEN-DATA-REGISTRY-CUTOVER-DECISION-01)
+
+Decision-only patch. Answers what "production registry-v2 cutover" means for
+Kraken-sourced `BTC/USD`/`ETH/USD` data after the fixture/DB/sync/status/GUI
+lane above closed: the registry-v2 schema structurally distinguishes data
+tracking (`enabled`) from trading enablement (`paper_trading_enabled`/
+`live_trading_enabled`), but `validate_registry_v2` fail-closed blocks
+`enabled=true` for non-equity instruments without the test-only
+`allow_enabled_non_equity_for_testing` flag — so no config flag is flipped by
+this decision. `kraken.enabled` stays `false`; both crypto rows stay
+`enabled=false`/`paper_trading_enabled=false`/`live_trading_enabled=false`,
+unchanged. Full detail:
+`docs/specs/crypto_registry_02_kraken_data_registry_cutover_decision.md`.
+
 ## Remaining Gaps
 
 - `sync-provider` (incremental backfill) still has no Kraken path — an
@@ -707,5 +721,6 @@ tested in `core-rs/mqk-gui/src/features/ingest/__tests__/api.test.ts`.
   status now both exist (see above); no GUI action can trigger a
   provider/network/CLI/scheduler call for either.
 - No production registry-v2 cutover (registry-v2 still has zero production
-  route callers for the default/legacy config).
+  route callers for the default/legacy config); `CRYPTO-REGISTRY-02` records
+  the decision not to flip `enabled` yet (see above).
 - This does not enable crypto trading, paper trading, or live trading.

@@ -3524,3 +3524,81 @@ PORTFOLIO-LIVE-WEIGHTS-01
 **Honest PARTIAL — `CRYPTO-DATA-01`/`CRYPTO-REGISTRY-01`/`ASSET-CORE-04` remain PARTIAL, not `CLOSED`:** this bundle adds a read-only GUI panel for Kraken OHLC evidence — it does not add a scheduler button, does not trigger any provider/CLI/daemon-job call from the GUI, does not enable the `kraken` provider by default, and does not add recurring/scheduled ingestion. Remaining gaps: `kraken` provider config stays `enabled: false`; `sync-provider`/`ingest-provider` remain hard-locked to `"twelvedata"|"alpaca"`; no recurring/scheduled Kraken sync of any kind; no daemon ingest job; no production registry-v2 cutover; no crypto session/calendar runtime enforcement; no crypto risk policy activation; no crypto broker/paper execution; no crypto strategy. This bundle does not imply crypto trading readiness in any respect.
 
 **Recommended next slice:** none required for continued crypto data-lane progress on this specific Kraken OHLCV visibility thread — the natural next patches are either a `latest_marks`/Kraken-evidence persisted-history decision (if a real consumer needs queryable history beyond "latest evidence file"), or resuming the still-open `sync-provider`/production-registry-v2-cutover/live-provider-verification threads tracked across the broader `CRYPTO-DATA-01` ledger.
+
+---
+
+### CRYPTO-REGISTRY-02-KRAKEN-DATA-REGISTRY-CUTOVER-DECISION-01 — CLOSED_LOCAL / PARTIAL
+
+**Mission:** continuing after the fully proven Kraken OHLCV data lane
+(`5762cf88`→`82d14e31`: fixture/parser/dry-run, DB ingest, incremental sync,
+content-diff sync, evidence status route, GUI panel), decide what "production
+registry-v2 cutover" means for `BTC/USD`/`ETH/USD` Kraken data without
+enabling crypto trading. Decision/spec patch only — no config flag, no
+source code, no scheduler, no trading enablement.
+
+**Concretely:** direct inspection of
+`mqk-md/src/instrument_registry_v2.rs::InstrumentDefinitionV2` confirmed the
+schema already carries three independent booleans — `enabled` ("tracked at
+all"), `paper_trading_enabled`, `live_trading_enabled` — and that no
+production execution/broker/risk/OMS path reads this schema at all (the only
+consumer is `ASSET-CORE-04F`'s read-only, default-off `?registry_source=v2`
+economics-status bridge). However, `validate_registry_v2` fail-closed rejects
+`enabled=true` for any non-equity instrument (crypto included) unless the
+test/fixture-only `allow_enabled_non_equity_for_testing` flag is also set —
+itself documented as having "no production enablement path through this
+schema." Decision: do not flip `enabled` (or any other flag) on the existing
+`config/instruments/instruments_v2.crypto_local_marks.example.json` fixture;
+keep the single existing file rather than introducing a separate candidate
+registry; treat Kraken as data-path-ready (`kraken_fixture_db_sync_status_gui_proven`)
+but not production-default, not scheduled, not tradable
+(`registry_cutover_status: "decision_only"`).
+
+**Built:**
+- `docs/specs/crypto_registry_02_kraken_data_registry_cutover_decision.md`
+  (new) — full decision doc answering all nine pre-flight questions from
+  direct repo evidence, plus explicit invariant lists required before a
+  future scheduler (§7) or crypto risk/execution/strategy (§8) could be
+  considered.
+- `docs/specs/crypto_registry_02_kraken_data_registry_cutover_decision.json`
+  (new) — machine-readable decision artifact: `decision`,
+  `selected_provider="kraken"`, `symbols=["BTC/USD","ETH/USD"]`, `safety`
+  booleans (all false-trading/no-mutation flags in their safe state),
+  `schema_facts`, `registry_candidate_decision`,
+  `required_invariants_before_scheduler`,
+  `required_invariants_before_trading`, `remaining_gaps`.
+- `scripts/guards/validate_crypto_registry_02_kraken_cutover_decision.ps1`
+  (new) — 10 checks: JSON parses, `schema_version`, `patch_id`,
+  `selected_provider="kraken"`, `BTC/USD`/`ETH/USD` present, all safety
+  booleans in required state, decision doc exists, and three forbidden-phrase
+  scans (no crypto-trading-readiness claim, no scheduler-readiness claim, no
+  instruction to set `paper_trading_enabled`/`live_trading_enabled` to
+  `true`).
+- `docs/runbooks/local_crypto_marks_ingest.md` — new "Kraken Data Registry
+  Cutover Decision" section; "Remaining Gaps" updated.
+- `MiniQuantDesk_Master_Patch_Ledger_v2.md` — this entry.
+- `docs/audits/multi_asset_completion_audit.md` — new closure note.
+
+**Validation results:** `python -m json.tool
+docs/specs/crypto_registry_02_kraken_data_registry_cutover_decision.json` —
+parses clean. `powershell -File
+scripts\guards\validate_crypto_registry_02_kraken_cutover_decision.ps1` —
+all 10 checks pass, exit 0. `powershell -File
+scripts\guards\validate_crypto_data_01s_t_ohlcv_provider_decision.ps1` and
+`scripts\guards\validate_crypto_data_01i_coinlore_verify.ps1` — both still
+pass unaffected (no shared file touched). `git diff --check` — clean. No
+Rust build/test run in this phase (no source code changed).
+
+**Honest PARTIAL — `CRYPTO-DATA-01`/`CRYPTO-REGISTRY-01`/`ASSET-CORE-04`
+remain PARTIAL, not `CLOSED`:** this patch is a decision/spec artifact only.
+It does not change `config/providers/providers.json` or
+`config/instruments/instruments_v2.crypto_local_marks.example.json` — both
+stay exactly as they were. `kraken.enabled` stays `false`; `BTC/USD`/`ETH/USD`
+`enabled`/`paper_trading_enabled`/`live_trading_enabled` all stay `false`. No
+scheduler, no daemon job, no crypto risk/execution/strategy exists after this
+patch. This patch does not imply crypto trading readiness or a completed
+registry-v2 cutover in any respect.
+
+**Recommended next slice:**
+`CRYPTO-REGISTRY-03-KRAKEN-DATA-ONLY-REGISTRY-READINESS-CLI-01` — a read-only
+operator CLI proving the current, unmodified registry/provider configs are
+ready for data-only Kraken OHLCV operations without touching any config flag.
