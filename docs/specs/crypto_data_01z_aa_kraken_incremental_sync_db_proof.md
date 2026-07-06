@@ -2,6 +2,13 @@
 
 Patch ID: `CRYPTO-DATA-01Z-AA-KRAKEN-INCREMENTAL-SYNC-DB-PROOF-BUNDLE-01-COMBINED`
 
+> **Note:** The presence-based classification and "no content-diff skip"
+> limitation documented in §2 and §7 below was closed by
+> `CRYPTO-DATA-01AB-AC-KRAKEN-CONTENT-DIFF-SYNC-BUNDLE-01-COMBINED` — see
+> `docs/specs/crypto_data_01ab_ac_kraken_content_diff_sync.md` for the
+> current behavior of `kraken-ohlc-sync`. This document is preserved as a
+> historical record of what 01Z-AA itself proved.
+
 Continues the crypto data lane after
 `CRYPTO-DATA-01X-Y-KRAKEN-INGEST-PROVIDER-DB-PROOF-BUNDLE-01-COMBINED`
 (fixture-first Kraken `md_bars` DB-write proof via `kraken-ohlc-ingest`).

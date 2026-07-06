@@ -595,22 +595,45 @@ missing/new or an existing candidate by `end_ts` presence. Rows are stamped
 `ingest_mode="provider_sync"` (distinct from `kraken-ohlc-ingest`'s
 `"provider_ingest"`) so DB history can be traced to which command wrote it.
 
-**Honest limitation, documented not hidden:** the reused write helper has no
-row-content-diff "skip if unchanged" capability. The default policy upserts
-every completed bar (a previously-stored row is always updated, never
-skipped by value-equality). An optional `--no-update-existing` flag proves a
-real, provable-by-presence skip instead: any completed bar whose `end_ts`
-was already covered is never sent to the write helper at all. Neither policy
-claims a content-equality skip the code cannot actually prove.
+`01Z-AA`'s "existing" classification was presence-only (by `end_ts` relative
+to the pre-sync high-water mark), because the reused write helper had no
+row-content-diff "skip if unchanged" capability — the default policy
+upserted every completed bar unconditionally. That gap is now closed; see the
+next section.
+
+## Kraken Content-Diff Sync (CRYPTO-DATA-01AB-AC-KRAKEN-CONTENT-DIFF-SYNC-BUNDLE-01-COMBINED)
+
+`kraken-ohlc-sync` now reads existing `md_bars` rows for the exact candidate
+`end_ts` keys (`mqk_db::md::fetch_md_bars_for_provider_sync_keys`, a new
+read-only helper) and compares OHLCV/`is_complete`/provider provenance
+(`mqk_db::md::provider_bar_matches_existing`) before deciding to write. Every
+completed (non-forming) bar is classified as:
+
+- **missing/new** — no existing row for that `end_ts` — always written.
+- **changed** — existing row present, content differs — written unless
+  `--no-update-existing` is passed, in which case it is counted as
+  `rows_changed_skipped_due_to_no_update_existing` and never written.
+- **unchanged** — existing row present, content identical — never written,
+  counted as `rows_skipped_unchanged`, regardless of the flag.
+
+If no candidate bar requires a write, the upsert helper is not called at all
+(`md_bars_write=false`, `rows_inserted=0`, `rows_updated=0`). `sync_policy`
+is now the single fixed string
+`content_diff_skip_unchanged_update_changed_insert_missing`. Evidence bumped
+to `schema_version="kraken-ohlc-sync-v2"` with new `rows_changed` /
+`rows_skipped_unchanged` / `rows_changed_skipped_due_to_no_update_existing`
+fields.
 
 DB-backed proof:
 `core-rs/crates/mqk-cli/tests/scenario_cli_kraken_ohlc_sync_db_01zaa.rs`
-proves insert-vs-update classification against a deliberately stale seeded
-row, forming-row exclusion, exact scaled-volume readback, idempotent
-re-runs, the `--no-update-existing` skip proof, zero `oms_outbox` side
-effects, and zero-leftover cleanup. See
-`docs/specs/crypto_data_01z_aa_kraken_incremental_sync_db_proof.md` for full
-detail.
+(updated for the new semantics) and the new
+`core-rs/crates/mqk-cli/tests/scenario_cli_kraken_ohlc_content_diff_sync_db_01abac.rs`
+prove missing-row insert, changed-row update, true unchanged-row skip (no
+write-helper call), `--no-update-existing`'s changed-vs-unchanged
+distinction with the stale value provably left in place, forming-row
+exclusion, exact scaled-volume readback, true idempotency, zero `oms_outbox`
+side effects, and zero-leftover cleanup for both BTC/USD and ETH/USD. See
+`docs/specs/crypto_data_01ab_ac_kraken_content_diff_sync.md` for full detail.
 
 `sync-provider`/`ingest-provider` remain untouched and TwelveData/
 Alpaca-only. **No recurring ingestion, no scheduler, no daemon job, no GUI
@@ -622,9 +645,7 @@ surface, and no crypto trading enablement.**
   explicit deferral, not an oversight (see
   `docs/specs/crypto_data_01x_y_kraken_ingest_provider_db_proof.md` §5). A
   Kraken-specific `kraken-ohlc-sync` command now exists instead (see above).
-- Kraken sync has no row-content-diff "skip if unchanged" detection — an
-  explicit, documented deferral (see
-  `docs/specs/crypto_data_01z_aa_kraken_incremental_sync_db_proof.md` §2/§7).
+- No recurring/scheduled Kraken sync of any kind; no daemon ingest job.
 - CoinLore's verified public endpoints are ticker/spot-only, not OHLCV; a
   `LatestMark` parser/model and a read-only evidence-file status route now
   exist for that ticker data, but no `latest_marks` DB table exists — the

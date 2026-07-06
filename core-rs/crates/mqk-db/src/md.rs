@@ -1499,9 +1499,217 @@ pub async fn latest_stored_bar_end_ts(
     Ok(val)
 }
 
+// ---------------------------------------------------------------------------
+// CRYPTO-DATA-01AB-AC: content-diff read helper + comparison for provider sync
+// ---------------------------------------------------------------------------
+
+/// One existing `md_bars` row, read for the purpose of content-diff
+/// comparison against a candidate provider bar before deciding to write.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ExistingMdBarForProviderSync {
+    pub symbol: String,
+    pub timeframe: String,
+    pub end_ts: i64,
+    pub open_micros: i64,
+    pub high_micros: i64,
+    pub low_micros: i64,
+    pub close_micros: i64,
+    pub volume: i64,
+    pub is_complete: bool,
+    pub provider_id: Option<String>,
+    pub provider_source: Option<String>,
+    pub provider_symbol: Option<String>,
+    pub ingest_mode: Option<String>,
+}
+
+/// Read existing `md_bars` rows for exactly the given `(symbol, timeframe,
+/// end_ts)` keys, keyed by `end_ts` for O(1) lookup by the caller's
+/// candidate list.
+///
+/// Read-only. No migration, no schema change. Never touches
+/// broker/order/OMS tables and never queries a broader range than the exact
+/// candidate keys supplied. Returns an empty map (no query issued) when
+/// `end_ts_keys` is empty.
+pub async fn fetch_md_bars_for_provider_sync_keys(
+    pool: &PgPool,
+    symbol: &str,
+    timeframe: &str,
+    end_ts_keys: &[i64],
+) -> Result<BTreeMap<i64, ExistingMdBarForProviderSync>> {
+    if end_ts_keys.is_empty() {
+        return Ok(BTreeMap::new());
+    }
+
+    let rows = sqlx::query(
+        r#"
+        select
+          symbol, timeframe, end_ts,
+          open_micros, high_micros, low_micros, close_micros,
+          volume, is_complete,
+          provider_id, provider_source, provider_symbol, ingest_mode
+        from md_bars
+        where symbol = $1
+          and timeframe = $2
+          and end_ts = any($3)
+        "#,
+    )
+    .bind(symbol)
+    .bind(timeframe)
+    .bind(end_ts_keys)
+    .fetch_all(pool)
+    .await
+    .context("fetch_md_bars_for_provider_sync_keys query failed")?;
+
+    let mut out = BTreeMap::new();
+    for r in rows {
+        let end_ts: i64 = r.try_get("end_ts").context("md_bars.end_ts")?;
+        out.insert(
+            end_ts,
+            ExistingMdBarForProviderSync {
+                symbol: r.try_get("symbol").context("md_bars.symbol")?,
+                timeframe: r.try_get("timeframe").context("md_bars.timeframe")?,
+                end_ts,
+                open_micros: r.try_get("open_micros").context("md_bars.open_micros")?,
+                high_micros: r.try_get("high_micros").context("md_bars.high_micros")?,
+                low_micros: r.try_get("low_micros").context("md_bars.low_micros")?,
+                close_micros: r.try_get("close_micros").context("md_bars.close_micros")?,
+                volume: r.try_get("volume").context("md_bars.volume")?,
+                is_complete: r.try_get("is_complete").context("md_bars.is_complete")?,
+                provider_id: r.try_get("provider_id").context("md_bars.provider_id")?,
+                provider_source: r
+                    .try_get("provider_source")
+                    .context("md_bars.provider_source")?,
+                provider_symbol: r
+                    .try_get("provider_symbol")
+                    .context("md_bars.provider_symbol")?,
+                ingest_mode: r.try_get("ingest_mode").context("md_bars.ingest_mode")?,
+            },
+        );
+    }
+    Ok(out)
+}
+
+/// Compare a candidate `ProviderBar` plus its intended write-time
+/// `MdBarProviderMetadata` against an existing `md_bars` row for the same
+/// `(symbol, timeframe, end_ts)`.
+///
+/// Compares OHLCV, `is_complete`, and provider provenance (`provider_id`,
+/// `provider_source`, `provider_symbol`, `ingest_mode`). Deliberately does
+/// not compare `provider_bar_id` / `provider_updated_at_utc`: Kraken never
+/// supplies either, and every write path here always leaves them `None`, so
+/// comparing them would only ever compare `None == None` and add no signal.
+///
+/// Returns `Ok(true)` when content is identical (safe to skip the write).
+pub fn provider_bar_matches_existing(
+    candidate: &ProviderBar,
+    metadata: &MdBarProviderMetadata,
+    existing: &ExistingMdBarForProviderSync,
+) -> Result<bool> {
+    let open_micros = price_to_micros(&candidate.open).context("content-diff open parse")?;
+    let high_micros = price_to_micros(&candidate.high).context("content-diff high parse")?;
+    let low_micros = price_to_micros(&candidate.low).context("content-diff low parse")?;
+    let close_micros = price_to_micros(&candidate.close).context("content-diff close parse")?;
+
+    Ok(existing.open_micros == open_micros
+        && existing.high_micros == high_micros
+        && existing.low_micros == low_micros
+        && existing.close_micros == close_micros
+        && existing.volume == candidate.volume
+        && existing.is_complete == candidate.is_complete
+        && existing.provider_id.as_deref() == Some(metadata.provider_id.as_str())
+        && existing.provider_source.as_deref() == metadata.provider_source.as_deref()
+        && existing.provider_symbol.as_deref() == metadata.provider_symbol.as_deref()
+        && existing.ingest_mode.as_deref() == metadata.ingest_mode.as_deref())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn sample_candidate() -> ProviderBar {
+        ProviderBar {
+            symbol: "BTC/USD".to_string(),
+            timeframe: "1D".to_string(),
+            end_ts: 1_783_209_600,
+            open: "62539.0".to_string(),
+            high: "63443.4".to_string(),
+            low: "62290.9".to_string(),
+            close: "63085.8".to_string(),
+            volume: 131_715_941_434,
+            is_complete: true,
+        }
+    }
+
+    fn sample_metadata() -> MdBarProviderMetadata {
+        MdBarProviderMetadata {
+            provider_id: "kraken".to_string(),
+            provider_source: Some("kraken".to_string()),
+            provider_symbol: Some("XXBTZUSD".to_string()),
+            ingest_mode: Some("provider_sync".to_string()),
+            provider_bar_id: None,
+            provider_updated_at_utc: None,
+        }
+    }
+
+    fn sample_existing_matching() -> ExistingMdBarForProviderSync {
+        ExistingMdBarForProviderSync {
+            symbol: "BTC/USD".to_string(),
+            timeframe: "1D".to_string(),
+            end_ts: 1_783_209_600,
+            open_micros: 62_539_000_000,
+            high_micros: 63_443_400_000,
+            low_micros: 62_290_900_000,
+            close_micros: 63_085_800_000,
+            volume: 131_715_941_434,
+            is_complete: true,
+            provider_id: Some("kraken".to_string()),
+            provider_source: Some("kraken".to_string()),
+            provider_symbol: Some("XXBTZUSD".to_string()),
+            ingest_mode: Some("provider_sync".to_string()),
+        }
+    }
+
+    #[test]
+    fn provider_bar_matches_existing_true_when_identical() {
+        assert!(provider_bar_matches_existing(
+            &sample_candidate(),
+            &sample_metadata(),
+            &sample_existing_matching()
+        )
+        .unwrap());
+    }
+
+    #[test]
+    fn provider_bar_matches_existing_false_when_close_differs() {
+        let mut existing = sample_existing_matching();
+        existing.close_micros = 60_000_000_000;
+        assert!(!provider_bar_matches_existing(&sample_candidate(), &sample_metadata(), &existing)
+            .unwrap());
+    }
+
+    #[test]
+    fn provider_bar_matches_existing_false_when_volume_differs() {
+        let mut existing = sample_existing_matching();
+        existing.volume = 1_000_000_000;
+        assert!(!provider_bar_matches_existing(&sample_candidate(), &sample_metadata(), &existing)
+            .unwrap());
+    }
+
+    #[test]
+    fn provider_bar_matches_existing_false_when_provider_symbol_differs() {
+        let mut existing = sample_existing_matching();
+        existing.provider_symbol = Some("seed_stale".to_string());
+        assert!(!provider_bar_matches_existing(&sample_candidate(), &sample_metadata(), &existing)
+            .unwrap());
+    }
+
+    #[test]
+    fn provider_bar_matches_existing_false_when_ingest_mode_differs() {
+        let mut existing = sample_existing_matching();
+        existing.ingest_mode = Some("provider_ingest".to_string());
+        assert!(!provider_bar_matches_existing(&sample_candidate(), &sample_metadata(), &existing)
+            .unwrap());
+    }
 
     #[test]
     fn md_bar_provider_metadata_unknown_defaults_to_unknown_id() {

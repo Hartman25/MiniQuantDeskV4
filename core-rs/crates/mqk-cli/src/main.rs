@@ -548,11 +548,13 @@ enum MdCmd {
         output_dir: Option<PathBuf>,
     },
 
-    /// CRYPTO-DATA-01Z-AA-KRAKEN-INCREMENTAL-SYNC-DB-PROOF-BUNDLE-01-
-    /// COMBINED: safe incremental Kraken sync proof. Reads the pre-sync
-    /// latest stored `end_ts` for --symbol/--timeframe, then upserts only
-    /// the completed (non-forming) bars into md_bars via the same
-    /// provider-metadata-aware helper `kraken-ohlc-ingest` uses, stamped
+    /// CRYPTO-DATA-01AB-AC-KRAKEN-CONTENT-DIFF-SYNC-BUNDLE-01-COMBINED:
+    /// content-diff-aware Kraken sync. Reads existing md_bars rows for the
+    /// exact candidate end_ts keys, classifies each completed (non-forming)
+    /// bar as missing/changed/unchanged by comparing OHLCV + is_complete +
+    /// provider provenance, then upserts only missing and (unless
+    /// --no-update-existing) changed bars via the same provider-metadata-
+    /// aware helper `kraken-ohlc-ingest` uses, stamped
     /// `ingest_mode="provider_sync"` (distinct from `kraken-ohlc-ingest`'s
     /// `"provider_ingest"`) so DB rows can be traced to which command wrote
     /// them. Same fail-closed fixture/network gate as `kraken-ohlc-ingest`.
@@ -582,10 +584,12 @@ enum MdCmd {
         #[arg(long)]
         output_dir: Option<PathBuf>,
 
-        /// Conservative alternate policy: skip (never upsert) any completed
-        /// bar whose end_ts was already <= the pre-sync latest stored
-        /// end_ts for this symbol/timeframe. Default (absent) upserts every
-        /// completed bar, matching kraken-ohlc-ingest's behavior exactly.
+        /// Conservative alternate policy: never write an existing row, even
+        /// if its content is classified as changed (still reports it as
+        /// rows_changed_skipped_due_to_no_update_existing, distinct from a
+        /// truly-unchanged row). Missing/new rows are still inserted.
+        /// Default (absent): missing rows are inserted, changed rows are
+        /// updated, unchanged rows are always skipped.
         #[arg(long, default_value_t = false, action = clap::ArgAction::SetTrue)]
         no_update_existing: bool,
     },
