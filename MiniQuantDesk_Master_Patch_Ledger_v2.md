@@ -4544,3 +4544,51 @@ staged.
 
 **Recommended next slice:** `REGISTRY-V2-PRODUCTION-CUTOVER-DECISION-01` —
 see `docs/specs/asset_core_01h_instrument_registry_v2_consumption_boundary_decision.md`.
+
+### ASSET-CORE-01H-INSTRUMENT-REGISTRY-V2-CONSUMPTION-BOUNDARY-DECISION-01 — CLOSED_LOCAL / DECISION-ONLY
+
+**Mission:** `ASSET-CORE-01F` proved the only remaining gap keeping
+`ASSET-CORE-01` from being unconditionally `CLOSED` is that no production
+trading/execution/risk/OMS/ingestion path consumes `InstrumentRegistryV2`.
+This patch records that boundary explicitly — decision doc only, no code,
+no wiring, no cutover.
+
+**Built:**
+`docs/specs/asset_core_01h_instrument_registry_v2_consumption_boundary_decision.md`
+— answers whether `ASSET-CORE-01` is foundation-complete (yes), whether
+`InstrumentRegistryV2` is production trading truth (no), which production
+paths still consume v1/hardcoded assumptions (all of them), the risks of a
+production cutover, what must be true before one is attempted, the
+recommended next boundary-crossing patch
+(`REGISTRY-V2-PRODUCTION-CUTOVER-DECISION-01`), which files are forbidden
+until that patch, and which tests must exist for it.
+
+**Closure decision:** `ASSET-CORE-01` overall status: `CLOSED_LOCAL /
+FOUNDATION-COMPLETE`. Production consumption remains a separate,
+boundary-crossing patch — not started, not implied, not silently assumed.
+`ASSET-CORE-02`, `ASSET-CORE-04` (beyond its already-closed `04A`-`04F`
+metadata-bridge slices), `CRYPTO-REGISTRY-01`, `CRYPTO-DATA-01`, and
+`CRYPTO-RISK-01`/`CRYPTO-EXEC-01`/`CRYPTO-STRAT-01` remain exactly as
+`PARTIAL`/`MISSING` as recorded elsewhere in this ledger — this patch does
+not touch or reclassify any of them.
+
+**Deliberately not done:** no runtime/execution/risk/OMS/ingestion code
+touched; no config flag changed; no trading enabled; no network or DB
+call made.
+
+**Validation:** `powershell -ExecutionPolicy Bypass -File
+scripts\guards\validate_asset_core_01f_instrument_registry_v2_completion.ps1`
+— all checks passed (validator is shared across `01F`/`01H` since both are
+part of the same closure bundle). `git diff --check` — clean.
+
+**Safety confirmation:** zero network calls; zero DB access/mutation; zero
+config flag changes; no crypto/futures/options/forex/rates trading enabled;
+no broker/order/risk/runtime/strategy code touched; no generated evidence
+staged.
+
+**Recommended next slice:** `REGISTRY-V2-PRODUCTION-CUTOVER-DECISION-01`, if
+and when an operator explicitly authorizes crossing the production-
+consumption boundary. Until then, `ASSET-CORE-05` (market-calendar/session
+generalization, already `PARTIAL`, closest to done) or
+`BACKTEST-MULTIPLIER-MARGIN-01` (backtest P&L multiplier support) are
+independent, lower-risk next patches that do not require crossing it.
