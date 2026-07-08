@@ -1820,3 +1820,25 @@ satisfied; #4 (live-network non-equity provider proof) and #5 (explicit
 operator enablement) remain open. Docs+tests-only in terms of behavior — no
 runtime/broker/risk/OMS/config/DB/network change, no trading enabled. Full
 detail: `docs/specs/registry_v2_gate_parity_01d_closure_decision.md`.
+
+## 85. REGISTRY-V2-LIVE-PROVIDER-01A-CURRENT-NON-EQUITY-PROVIDER-AUDIT-01 Closure Note (maintenance)
+
+`AUDIT-ONLY`. Audits every current non-equity provider/data proof candidate
+against prerequisite #4 of `ASSET-CORE-01H`'s production-cutover checklist
+(at least one non-equity market-data provider live-network-verified
+end-to-end into `md_bars`). Finds Kraken (`config/providers/providers.json`'s
+`kraken` entry, `core-rs/crates/mqk-md/src/providers/kraken.rs`) is the
+safest and most complete first candidate: a real, tested
+`HistoricalProvider` adapter with an existing DB-writing CLI command
+(`mqk md kraken-ohlc-ingest`) that already writes to `md_bars` via the
+canonical provider-ingest path, no credentials required, and a network
+call already fail-closed behind `MQK_ALLOW_KRAKEN_NETWORK_SMOKE=1` — but
+that command has never been run in `network_smoke` mode against the live
+endpoint. CoinLore is ticker-only and cannot structurally produce `md_bars`
+rows; TwelveData/Alpaca have no implemented non-equity code path and would
+require new credentials; Alpha Vantage/Polygon/yfinance have no adapter
+code at all. Only `BTC/USD`/`ETH/USD` at `1D` are eligible (the only
+symbols/timeframe Kraken's adapter and the registry-v2 fixture support).
+Docs-only — no code touched, no network call, no DB access, no trading
+enabled. Does not close prerequisite #4. Full detail:
+`docs/specs/registry_v2_live_provider_01a_current_non_equity_provider_audit.md`.
