@@ -1794,3 +1794,29 @@ accepted by the parity helper, matching `CANONICAL_ASSET_CLASSES_V2`'s own
 strictness (`validate_registry_v2` already rejects them). Docs-only — no
 code touched, no trading enabled, no DB/network call made. Full detail:
 `docs/specs/registry_v2_gate_parity_01a_current_gate_audit.md`.
+
+## 84. REGISTRY-V2-GATE-PARITY-01B/01C/01D Closure Note (maintenance)
+
+`CLOSED_LOCAL / REGRESSION-TEST-ONLY`. Closes `ASSET-CORE-01H` prerequisite
+#3. `01B` added a pure, fail-closed `registry_v2_gate_asset_class` helper
+(`core-rs/crates/mqk-md/src/instrument_registry_v2.rs`) classifying any
+`InstrumentRegistryV2.asset_class` string into the same allow-equity/
+reject-non-equity/fail-closed-unknown decision Gate 0 and the broker-submit
+routing guard already enforce; 12 unit tests cover all six
+`CANONICAL_ASSET_CLASSES_V2` values, plural-alias rejection (`"futures"`/
+`"options"` are deliberately not accepted), `"etf"` (instrument_kind, not
+asset_class), and empty/unknown fail-closed cases. `01C` added 20
+regression tests — `scenario_registry_v2_gate0_parity_01c.rs` (4 tests
+against the live `POST /api/v1/strategy/signal` route) and
+`scenario_registry_v2_routing_guard_parity_01c.rs` (8 tests against the
+live `BrokerGateway::submit`, requiring a new `mqk-md` *dev*-dependency in
+`mqk-execution`'s `Cargo.toml`) — proving the helper's decisions match both
+gates' actual behavior exhaustively, including documenting that `"rate"`
+(no `mqk_schemas::AssetClass` counterpart) can never even be constructed
+as a `BrokerSubmitRequest`. Neither gate was modified; zero production
+paths consume the helper. `01D` decides prerequisite #3 is `CLOSED_LOCAL`
+and updates the production-cutover checklist: prerequisites #1-#3 now
+satisfied; #4 (live-network non-equity provider proof) and #5 (explicit
+operator enablement) remain open. Docs+tests-only in terms of behavior — no
+runtime/broker/risk/OMS/config/DB/network change, no trading enabled. Full
+detail: `docs/specs/registry_v2_gate_parity_01d_closure_decision.md`.

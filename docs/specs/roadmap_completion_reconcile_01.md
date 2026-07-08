@@ -37,7 +37,7 @@ items outside this session's scope.
 | `CRYPTO-RISK-01` | `MISSING` (0%, unchanged) | Missing execution/risk/strategy | No spread-gate, no counterparty-risk model. Not touched — `mqk-risk/*` forbidden this session. |
 | `CRYPTO-EXEC-01` | `MISSING` (0%, unchanged) | Missing execution/risk/strategy | Alpaca adapter never calls `/v2/crypto/*` (confirmed by direct source read, `mqk-broker-alpaca/src/lib.rs`). Not touched — `mqk-broker-*` forbidden this session. |
 | `CRYPTO-STRAT-01` | `MISSING` (0%, unchanged) | Missing execution/risk/strategy | Depends on `CRYPTO-EXEC-01`; no strategy code exists. Not touched this session. |
-| `REGISTRY-V2-PRODUCTION-CUTOVER-DECISION-01` | Not started (decision-only patch, not yet written) | Production-consumption-open (this *is* the boundary-crossing decision point) | Blocked on three of five `ASSET-CORE-01H` §5 prerequisites: (1) `BACKTEST-MULTIPLIER-MARGIN-01` closed — **satisfied**; (2) symbol/`instrument_id` translation layer — **now satisfied** by `REGISTRY-V2-TRANSLATION-01A`-`01D` (pure fail-closed `RegistryV2SymbolTranslationIndex`, proven collision-free and round-trippable across the full 88-row equity universe, zero production callers); (3) Gate 0 / broker-submit routing-guard parity re-verification against `InstrumentRegistryV2::asset_class` — open; (4) a live-network-verified non-equity market-data provider end-to-end into `md_bars` — open (requires live network calls, forbidden this session); (5) an explicit operator enablement decision for a named non-equity instrument — open. |
+| `REGISTRY-V2-PRODUCTION-CUTOVER-DECISION-01` | Not started (decision-only patch, not yet written) | Production-consumption-open (this *is* the boundary-crossing decision point) | Blocked on two of five `ASSET-CORE-01H` §5 prerequisites: (1) `BACKTEST-MULTIPLIER-MARGIN-01` closed — **satisfied**; (2) symbol/`instrument_id` translation layer — **satisfied** by `REGISTRY-V2-TRANSLATION-01A`-`01D` (pure fail-closed `RegistryV2SymbolTranslationIndex`, proven collision-free and round-trippable across the full 88-row equity universe, zero production callers); (3) Gate 0 / broker-submit routing-guard parity re-verification against `InstrumentRegistryV2::asset_class` — **now satisfied** by `REGISTRY-V2-GATE-PARITY-01A`-`01D` (pure fail-closed `registry_v2_gate_asset_class` helper, 20 regression tests proving Gate 0 and the routing guard reject the same asset classes whether keyed off `mqk_schemas::AssetClass` or `InstrumentRegistryV2::asset_class`, zero production callers, neither gate modified); (4) a live-network-verified non-equity market-data provider end-to-end into `md_bars` — open (requires live network calls, forbidden this session); (5) an explicit operator enablement decision for a named non-equity instrument — open. |
 
 ## 3. Next best patch
 
@@ -52,27 +52,38 @@ equity universe via a read-only CLI (`mqk md registry-v2-translation-check`);
 see `docs/specs/registry_v2_translation_01d_closure_decision.md` for the
 full closure decision. Zero production paths consume it.
 
-**`REGISTRY-V2-GATE-PARITY-01`** — prerequisite #3, **Gate 0 / broker-submit
-routing-guard parity re-verification** against `InstrumentRegistryV2::asset_class`
-— is now the next best value-per-risk patch:
+**Update (`REGISTRY-V2-GATE-PARITY-01A`-`01D`, this session's later work):**
+prerequisite #3 — Gate 0 / broker-submit routing-guard parity
+re-verification against `InstrumentRegistryV2::asset_class` — is now
+**satisfied**. A pure, fail-closed `registry_v2_gate_asset_class` helper was
+built (`core-rs/crates/mqk-md/src/instrument_registry_v2.rs`) and 20
+regression tests (`scenario_registry_v2_gate0_parity_01c.rs`,
+`scenario_registry_v2_routing_guard_parity_01c.rs`) proved it classifies
+every `InstrumentRegistryV2.asset_class` string identically to Gate 0's and
+the routing guard's actual, already-tested behavior — equity allowed,
+every other canonical class rejected, malformed/unknown input fails
+closed, and `"rate"` (no `mqk_schemas::AssetClass` counterpart) is
+unconstructable through the routing guard's closed enum. Neither gate was
+modified; zero production paths consume the helper. See
+`docs/specs/registry_v2_gate_parity_01d_closure_decision.md` for the full
+closure decision.
 
-- It is a **regression-test-only** patch against code that already exists
-  (`mqk_schemas::AssetClass` gates), requiring no new runtime behavior, only
-  a parity proof that Gate 0 and the routing guard reject the same set of
-  asset classes whether keyed off `mqk_schemas::AssetClass` or
-  `InstrumentRegistryV2::asset_class`.
-- It directly satisfies prerequisite #3 named by `ASSET-CORE-01H` §5, moving
-  `REGISTRY-V2-PRODUCTION-CUTOVER-DECISION-01` one item closer without
-  crossing the production-consumption boundary itself.
-- Prerequisites #4 (live non-equity provider verification) and #5 (explicit
-  operator enablement) are **not** recommended next — #4 requires a live
-  network call (forbidden under this session's hard safety rules and
-  arguably every prior session's, since no prior patch in this entire
-  roadmap has made one), and #5 is an operator decision that should not
-  precede #3-#4 being settled.
+**`REGISTRY-V2-LIVE-PROVIDER-PROOF-BOUNDARY-DECISION-01`** — prerequisite
+#4's boundary decision — is now the next best value-per-risk patch:
+
+- Prerequisites #1-#3 are now all satisfied; #4 (live-network-verified
+  non-equity provider proof) and #5 (explicit operator enablement) are the
+  only two remaining, and #4 must be settled first — enabling an instrument
+  before its data source is live-network-proven would invert the
+  checklist's own ordering.
+- It is a decision/design patch (not code), naming the exact first
+  non-equity provider and the exact network-call/operator-authorization
+  boundary required before any live network call is made — consistent
+  with this session's (and every prior session's) hard safety rule against
+  making live network calls without an explicit boundary decision first.
 
 **Do not** recommend `REGISTRY-V2-PRODUCTION-CUTOVER-DECISION-01` itself
-next — three of its five prerequisites remain open; recommending it now
+next — two of its five prerequisites remain open; recommending it now
 would be the exact "stale recommendation pointing to already-closed work"
 pattern this document is required to avoid the opposite of (recommending
 unready work as if it were ready).

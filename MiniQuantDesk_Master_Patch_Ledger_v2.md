@@ -5089,3 +5089,187 @@ evidence staged.
 of `ASSET-CORE-01H`'s production-cutover checklist (Gate 0 / broker-submit
 routing-guard parity re-verification against `InstrumentRegistryV2::asset_class`,
 regression-test-only, no new runtime behavior).
+
+### REGISTRY-V2-GATE-PARITY-01A-CURRENT-GATE-AUDIT-01 — CLOSED_LOCAL / AUDIT-ONLY
+
+**Mission:** ground `ASSET-CORE-01H`'s production-cutover prerequisite #3
+(Gate 0 / broker-submit routing-guard parity re-verification against
+`InstrumentRegistryV2::asset_class`) in current repo evidence before
+writing any parity helper or tests. Docs-only.
+
+**Built:** `docs/specs/registry_v2_gate_parity_01a_current_gate_audit.md`
+— names Gate 0's exact location/behavior/tests
+(`mqk-daemon::routes::strategy::validate_strategy_signal`, `AS-01`-`AS-12`)
+and the broker-submit routing guard's exact location/behavior/tests
+(`mqk-execution::gateway::BrokerGateway::enforce_gates`, `G01`-`G08`),
+confirms neither reads `InstrumentRegistryV2` today, names both
+asset-class vocabularies (`mqk_schemas::AssetClass`'s five variants vs.
+`CANONICAL_ASSET_CLASSES_V2`'s six strings, the extra being `"rate"`),
+decides plural aliases (`"futures"`/`"options"`) will **not** be accepted
+by the coming parity helper (matching `CANONICAL_ASSET_CLASSES_V2`'s own
+strictness), and defines the exact parity contract Phase B/C must prove.
+`scripts/guards/validate_registry_v2_gate_parity_01a_audit.ps1` — 9-check
+pure docs validator mirroring the `validate_registry_v2_translation_01a_audit.ps1`
+pattern.
+
+**Deliberately not done:** no code file touched; no config flag changed; no
+trading enabled; no network or DB call made; no production registry-v2
+cutover attempted or implied.
+
+**Validation:** `powershell -ExecutionPolicy Bypass -File
+scripts\guards\validate_registry_v2_gate_parity_01a_audit.ps1` — all 9
+checks passed. `git diff --check` — clean.
+
+**Safety confirmation:** zero network calls; zero DB access/mutation; zero
+config flag changes; no crypto/futures/options/forex/rates trading enabled;
+no broker/order/risk/runtime/strategy/portfolio code touched; no generated
+evidence staged.
+
+**Recommended next slice:** `REGISTRY-V2-GATE-PARITY-01B-PURE-ASSET-CLASS-PARITY-HELPER-01`
+— a pure, fail-closed `InstrumentRegistryV2.asset_class` -> gate-decision
+helper in `core-rs/crates/mqk-md/src/instrument_registry_v2.rs`,
+implementing exactly the parity contract named above.
+
+### REGISTRY-V2-GATE-PARITY-01B-PURE-ASSET-CLASS-PARITY-HELPER-01 — CLOSED_LOCAL / MODEL-ONLY
+
+**Mission:** implement the parity contract named by `01A` as a pure,
+fail-closed helper, with no runtime caller.
+
+**Built:** `registry_v2_gate_asset_class` /
+`registry_v2_gate_allows_asset_class` in
+`core-rs/crates/mqk-md/src/instrument_registry_v2.rs` — classifies any
+string into `RegistryV2GateAssetClass::Equity` / `::NonEquity { asset_class
+}` after `trim().to_ascii_lowercase()` normalization (matching Gate 0's own
+normalization), or a typed `RegistryV2GateAssetClassError::EmptyAssetClass`
+/ `::UnknownAssetClass` on anything not in `CANONICAL_ASSET_CLASSES_V2` —
+including plural aliases (`"futures"`, `"options"`) and `"etf"`
+(instrument_kind, not asset_class), per `01A`'s explicit decision not to
+accept them. 12 new unit tests (`gp01`-`gp12`): equity allowed (plain and
+case/whitespace-normalized), all five non-equity canonical classes
+individually proven `NonEquity`, plural-alias rejection, `"etf"` rejection,
+empty-input and unknown-input fail-closed, an exhaustive
+"every `CANONICAL_ASSET_CLASSES_V2` value classifies, none silently
+defaults" test, and a "no non-equity class ever maps to allowed" test.
+
+**Deliberately not done:** no runtime caller wired (still model/test-only);
+no change to Gate 0 or the routing guard; no DB/network call; no config
+flag changed; no trading enabled.
+
+**Validation:** `cargo check -p mqk-md` clean. `cargo test -p mqk-md
+instrument_registry_v2` — 72 passed (60 pre-existing + 12 new `gp*`), 0
+failed. `cargo clippy -p mqk-md --all-targets -- -D warnings` — clean, 0
+warnings. `powershell -ExecutionPolicy Bypass -File
+scripts\guards\validate_registry_v2_gate_parity_01a_audit.ps1` — all 9
+checks still pass. `git diff --check` — clean.
+
+**Safety confirmation:** zero network calls; zero DB access/mutation; zero
+config flag changes; no crypto/futures/options/forex/rates trading enabled;
+no broker/order/risk/runtime/strategy/portfolio code touched; no generated
+evidence staged.
+
+**Recommended next slice:** `REGISTRY-V2-GATE-PARITY-01C-GATE0-ROUTING-GUARD-PARITY-TESTS-01`
+— regression tests proving the `01B` helper's decisions match Gate 0's and
+the routing guard's actual, already-tested behavior.
+
+### REGISTRY-V2-GATE-PARITY-01C-GATE0-ROUTING-GUARD-PARITY-TESTS-01 — CLOSED_LOCAL / REGRESSION-TEST-ONLY
+
+**Mission:** prove `01B`'s helper matches Gate 0's and the broker-submit
+routing guard's actual behavior against their own existing test surfaces,
+without wiring any production v2 consumption.
+
+**Built:** `core-rs/crates/mqk-daemon/tests/scenario_registry_v2_gate0_parity_01c.rs`
+— 4 tests (`gd01`-`gd04`) driving the live `POST /api/v1/strategy/signal`
+route with every `CANONICAL_ASSET_CLASSES_V2` string plus malformed/unknown
+input, asserting the helper's Equity/NonEquity/Err classification matches
+Gate 0's actual 400/`disposition` outcome in every case, exhaustively.
+`core-rs/crates/mqk-execution/tests/scenario_registry_v2_routing_guard_parity_01c.rs`
+— 8 tests (`rg01`-`rg08`) driving the live `BrokerGateway::submit` with a
+`PanicBroker`/`EchoBroker` test-double pair (mirroring
+`scenario_asset_class_guard_multi_asset_routing_guard_01.rs`'s own
+pattern), proving parity for the five canonical classes with a
+`mqk_schemas::AssetClass` counterpart and documenting that `"rate"` (the
+sole gap) can never be constructed as a `BrokerSubmitRequest` at all —
+a stronger-than-runtime-rejection guarantee. Required a new `mqk-md`
+*dev*-dependency in `mqk-execution/Cargo.toml` (test-only; `mqk-execution`'s
+`[dependencies]` gain no new edge) and a matching `[[test]]` /
+`required-features = ["testkit"]` entry.
+
+**Deliberately not done:** neither Gate 0 nor the routing guard modified;
+no production path wired to consume `InstrumentRegistryV2`; no DB/network
+call; no config flag changed; no trading enabled.
+
+**Validation:** `cargo check -p mqk-md -p mqk-daemon -p mqk-execution
+--all-features` clean. `cargo test -p mqk-daemon --test
+scenario_registry_v2_gate0_parity_01c` — 4 passed. `cargo test -p
+mqk-execution --test scenario_registry_v2_routing_guard_parity_01c
+--features testkit` — 8 passed. Sibling regressions unaffected: `cargo test
+-p mqk-daemon --test scenario_asset_class_scope_b8` — 12 passed; `cargo
+test -p mqk-execution --test
+scenario_asset_class_guard_multi_asset_routing_guard_01 --features testkit`
+— 8 passed; `cargo test -p mqk-md instrument_registry_v2` — 72 passed.
+`cargo clippy -p mqk-md -p mqk-execution --all-targets --features testkit
+-- -D warnings` — clean. `cargo clippy -p mqk-daemon --all-targets -- -D
+warnings` failed on a pre-existing, unrelated `await_holding_lock` lint in
+`crates/mqk-daemon/src/state/session_controller.rs` (untouched by this
+patch); isolated per the prompt's documented fallback: `cargo clippy -p
+mqk-daemon --lib -- -D warnings` and `cargo clippy -p mqk-daemon --test
+scenario_registry_v2_gate0_parity_01c -- -D warnings` both clean. `powershell
+-ExecutionPolicy Bypass -File scripts\guards\validate_registry_v2_gate_parity_01a_audit.ps1`
+— all 9 checks still pass. `git diff --check` — clean.
+
+**Safety confirmation:** zero network calls; zero DB access/mutation; zero
+config flag changes; no crypto/futures/options/forex/rates trading enabled;
+no broker/order/risk/runtime/strategy/portfolio code touched; no generated
+evidence staged.
+
+**Recommended next slice:** `REGISTRY-V2-GATE-PARITY-01D-CLOSURE-AND-ROADMAP-RECONCILE-01`
+— decide whether `ASSET-CORE-01H` prerequisite #3 is closed and reconcile
+the roadmap accordingly.
+
+### REGISTRY-V2-GATE-PARITY-01D-CLOSURE-AND-ROADMAP-RECONCILE-01 — CLOSED_LOCAL / DOCS-ONLY
+
+**Mission:** decide whether `ASSET-CORE-01H` prerequisite #3 (Gate 0 /
+broker-submit routing-guard parity re-verification) is closed given `01A`-
+`01C`'s work, and reconcile the roadmap/production-cutover checklist
+accordingly. Docs-only.
+
+**Built:** `docs/specs/registry_v2_gate_parity_01d_closure_decision.md` —
+answers all 8 required questions from current repo evidence: prerequisite
+#3 is `CLOSED_LOCAL` for the re-verification scope it names (re-verified,
+not migrated — neither gate was modified); names the exact Gate 0 and
+routing-guard parity proofs (`GD-01`-`GD-04`, `RG-01`-`RG-08`); confirms
+zero production paths consume `InstrumentRegistryV2` (the helper's only
+callers are its own unit tests and the two new parity test files); confirms
+all non-equity v2 classes remain rejected and equity remains allowed;
+updates the production-cutover checklist (prerequisites #1-#3 now
+satisfied, #4-#5 still open); and recommends
+`REGISTRY-V2-LIVE-PROVIDER-PROOF-BOUNDARY-DECISION-01` next (prerequisite
+#4's boundary decision, since #4 itself requires a live network call this
+session's hard safety rules forbid).
+
+**Updated:** `docs/specs/roadmap_completion_reconcile_01.md` §2's
+`REGISTRY-V2-PRODUCTION-CUTOVER-DECISION-01` row (prerequisite #3 marked
+satisfied) and §3's next-best-patch recommendation (now
+`REGISTRY-V2-LIVE-PROVIDER-PROOF-BOUNDARY-DECISION-01`);
+`docs/audits/multi_asset_completion_audit.md` §84 closure note.
+
+**Deliberately not done:** no code touched; no config flag changed; no
+trading enabled; no network or DB call made; no production registry-v2
+cutover attempted or implied; `REGISTRY-V2-PRODUCTION-CUTOVER-DECISION-01`
+itself not recommended next (two of its five prerequisites remain open).
+
+**Validation:** `powershell -ExecutionPolicy Bypass -File
+scripts\guards\validate_registry_v2_gate_parity_01a_audit.ps1` — all 9
+checks passed, including the closure-decision-doc status-label check
+(newly satisfied by this phase's doc). `git diff --check` — clean.
+
+**Safety confirmation:** zero network calls; zero DB access/mutation; zero
+config flag changes; no crypto/futures/options/forex/rates trading enabled;
+no broker/order/risk/runtime/strategy/portfolio code touched; no generated
+evidence staged.
+
+**Recommended next slice:** `REGISTRY-V2-LIVE-PROVIDER-PROOF-BOUNDARY-DECISION-01`
+— prerequisite #4 of `ASSET-CORE-01H`'s production-cutover checklist (name
+the exact first non-equity market-data provider and the exact
+network-call/operator-authorization boundary required before any live
+network call is made).
