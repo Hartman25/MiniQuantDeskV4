@@ -139,8 +139,8 @@ Difficulty: S (days) / M (1-2 weeks) / L (3-6 weeks) / XL (6+ weeks, likely mult
 | `ASSET-CORE-01` Unified Instrument Registry v2 | PARTIAL | 25% | L | none | `mqk-schemas::Instrument`/`ContractSpec` isolated; `equities.json` single-asset-class, no sector/lot/margin fields | 4 | Should also resolve the two-enum split (§2). |
 | `ASSET-CORE-02` Multi-Asset Order Intent Model | PARTIAL | 25% | L | `ASSET-CORE-01` | `OrderIntentV2`/`ExecutionIntentV2` exist, explicitly unwired (`RESEARCH-NON-EQ-01`); no bracket/OCO anywhere | 7 | Wiring this is itself a scope-reviewed patch per its own code comment. |
 | `ASSET-CORE-03` Asset-Aware Risk Router | PARTIAL | 35% | L | `ASSET-CORE-01`, `ASSET-CORE-04` | Two tested fail-closed gates exist (Gate 0, routing guard); zero graduated per-class policy behind them | 8 | Most mature of the five — finish what's started. |
-| `ASSET-CORE-04` Multi-Asset Portfolio Ledger | MISSING (effectively) | 20% | XL | none | `cash_micros` single-currency; FIFO P&L multiplier-naive; no margin/NAV-by-asset-class | 14 | Highest-risk patch in this entire roadmap — touches live capital accounting invariants. Needs its own scenario-test proof standard per `audit_repo_truth_rules.md`. |
-| `ASSET-CORE-05` Market Calendar & Session Provider | PARTIAL | 30% | M | none | `MarketCalendarProvider` trait + 3 providers exist and are fail-closed/pluggable; `MarketSessionState` enum is NYSE-vocabulary-coupled (no 24/7, no Globex RTH/ETH, no FX session windows) | 5 | Cheaper than it looks — the hard part (trait, fail-closed contract, fallback) is already built. |
+| `ASSET-CORE-04` Multi-Asset Portfolio Ledger | MISSING (effectively, live path) / PARTIAL (read-only economics scaffold) | 20% (live ledger, unchanged) — see §78 for the separate `04A`-`04F` scaffold | XL | none | `cash_micros` single-currency; FIFO P&L multiplier-naive; `PositionSnapshot.net_qty` whole-unit `i64` (no fractional crypto qty); no margin/NAV-by-asset-class in the live path. A parallel, zero-live-caller economics model+bridge+aggregation+status chain (`04A`-`04F`) exists and is tested but does not touch `mqk-portfolio::accounting.rs` | 14 | Highest-risk patch in this entire roadmap — touches live capital accounting invariants. Needs its own scenario-test proof standard per `audit_repo_truth_rules.md`. |
+| `ASSET-CORE-05` Market Calendar & Session Provider | PARTIAL | ~35% (up from 30%; see §78) | M | none | `MarketCalendarProvider` trait + 3 providers exist and are fail-closed/pluggable; `MarketSessionState` enum is NYSE-vocabulary-coupled (no 24/7, no Globex RTH/ETH, no FX session windows); `ASSET-CORE-05-MARKET-CALENDAR-GENERALIZE-01-COMBINED` since added read-only session-profile diagnostics (4 profiles, daemon route + GUI panel), still model-only/unwired into trading | 5 | Cheaper than it looks — the hard part (trait, fail-closed contract, fallback) is already built. |
 
 ### Phase 1 — Futures Trading Engine
 
@@ -1687,3 +1687,37 @@ live-network-verified non-equity provider, and an explicit operator
 enablement decision) remain entirely open.
 
 **Full detail:** `docs/specs/backtest_multiplier_margin_01_closure_decision.md`.
+
+## 78. ROADMAP-COMPLETION-RECONCILE-01 Closure Note (maintenance)
+
+A completion-sweep session reconciled the multi-asset roadmap after closing
+`BACKTEST-MULTIPLIER-MARGIN-01` (§75-§77 above). Two stale-relative-to-HEAD
+rows were corrected in §5's roadmap table: `ASSET-CORE-04`'s evidence column
+now separately names the additive, zero-live-caller `04A`-`04F` economics
+model/bridge/aggregation/status scaffold (already committed prior to this
+session, previously undistinguished from the still-unchanged live-ledger
+gap it sits beside — the live path itself remains single-currency,
+multiplier-naive, whole-unit-`i64`-quantity, exactly as before);
+`ASSET-CORE-05`'s percentage was bumped from 30% to ~35%, citing the
+already-committed `ASSET-CORE-05-MARKET-CALENDAR-GENERALIZE-01-COMBINED`
+entry (read-only session-profile diagnostics) that had not yet been
+reflected in the table.
+
+`ASSET-CORE-02`, `ASSET-CORE-03`, and the full `CRYPTO-*` lane were left
+unchanged — closing any of them further requires either a live network call
+or broker/risk/execution code changes, all forbidden by this session's hard
+safety rules; no new evidence was gathered for them this session.
+
+**Next recommended patch:** a symbol/`instrument_id` translation layer
+between `InstrumentRegistryV2` and the existing symbol-string-keyed tables
+(`md_bars`, outbox rows, portfolio positions) — prerequisite #2 of
+`ASSET-CORE-01H`'s five-item production-cutover checklist, now that
+prerequisite #1 (`BACKTEST-MULTIPLIER-MARGIN-01`) is closed.
+`REGISTRY-V2-PRODUCTION-CUTOVER-DECISION-01` itself is explicitly **not**
+recommended next — four of its five prerequisites remain open.
+
+This reconciliation changed no config flag, enabled no trading, made no
+network or DB call, and touched no broker/execution/risk/OMS/runtime/
+strategy/portfolio code.
+
+**Full detail:** `docs/specs/roadmap_completion_reconcile_01.md`.

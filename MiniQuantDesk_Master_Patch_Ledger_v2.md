@@ -4837,3 +4837,60 @@ touches. Independently, `ASSET-CORE-05` (market-calendar/session
 generalization, already `PARTIAL`, closest to done) remains available as a
 lower-risk next patch that does not cross the production-consumption
 boundary.
+
+### ROADMAP-COMPLETION-RECONCILE-01 — CLOSED_LOCAL / DOCS-ONLY
+
+**Mission:** reconcile `docs/audits/multi_asset_completion_audit.md`'s
+roadmap after this session's `BACKTEST-MULTIPLIER-MARGIN-01` audit/
+closure work, list every major parent roadmap item's current status
+distinguishing closed-foundation / backtest-complete / production-
+consumption-open / missing-execution-risk-strategy, and recommend the next
+highest-value patch without recommending production cutover or pointing at
+already-closed work. Docs-only.
+
+**Built:** `docs/specs/roadmap_completion_reconcile_01.md` — full status
+table for `ASSET-CORE-01`..`05`, `BACKTEST-MULTIPLIER-MARGIN-01`,
+`CRYPTO-REGISTRY-01`, `CRYPTO-DATA-01`, `CRYPTO-RISK-01`, `CRYPTO-EXEC-01`,
+`CRYPTO-STRAT-01`, and `REGISTRY-V2-PRODUCTION-CUTOVER-DECISION-01`
+(dependency-chain status, since the decision patch itself has not been
+written); next-best-patch recommendation; explicit list of what this
+reconciliation changed (with cited evidence) vs. left alone (with the
+forbidden-file reason named). Appended §78 to
+`docs/audits/multi_asset_completion_audit.md` and corrected two rows in its
+§5 roadmap table (`ASSET-CORE-04`'s evidence column, `ASSET-CORE-05`'s
+percentage) that were stale relative to already-committed prior-session
+work, not this session's own code changes.
+
+**Repo evidence for the two corrected rows:** `ASSET-CORE-04`'s row
+previously did not distinguish the still-unchanged live-ledger gap
+(`mqk-portfolio::accounting.rs`, confirmed untouched by this session's own
+`BACKTEST-MULTIPLIER-MARGIN-01` closure-decision evidence, §5 of that doc)
+from the separate, already-committed `04A`-`04F` read-only economics
+scaffold (instrument economics model → registry-v2 bridge → NAV aggregation
+→ status route → registry-v2 seam) that exists beside it with zero live
+callers. `ASSET-CORE-05`'s 30% figure predated the already-committed
+`ASSET-CORE-05-MARKET-CALENDAR-GENERALIZE-01-COMBINED` ledger entry (session-
+profile diagnostics, daemon route, GUI panel) found during this session's
+own Phase A inspection.
+
+**Deliberately not done:** no fresh audit of `ASSET-CORE-02`, `ASSET-CORE-03`,
+or the `CRYPTO-*` lane — closing any of them further requires either a live
+network call or `mqk-execution`/`mqk-risk`/`mqk-broker-*` code changes, all
+forbidden this session; their percentages are carried forward unchanged, not
+re-derived. No code touched. No config flag changed. No trading enabled. No
+network or DB call made.
+
+**Validation:** `git diff --check` — clean. This phase's allowed files are
+docs-only per its own scope; no cargo/npm build or test was required or run.
+
+**Safety confirmation:** zero network calls; zero DB access/mutation; zero
+config flag changes; no crypto/futures/options/forex/rates trading enabled;
+no broker/order/risk/runtime/strategy/portfolio code touched; no generated
+evidence staged.
+
+**Recommended next slice:** a symbol/`instrument_id` translation layer
+between `InstrumentRegistryV2` and the existing symbol-string-keyed tables
+(`md_bars`, outbox rows, portfolio positions) — prerequisite #2 of
+`ASSET-CORE-01H`'s production-cutover checklist, now that prerequisite #1 is
+closed. `REGISTRY-V2-PRODUCTION-CUTOVER-DECISION-01` itself remains blocked
+on four of its five prerequisites and is explicitly not recommended yet.
