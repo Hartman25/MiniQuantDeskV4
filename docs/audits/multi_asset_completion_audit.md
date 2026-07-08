@@ -1748,3 +1748,16 @@ BTC/USD crypto fixture, typed-miss (not panicking) for unknown lookups, and
 deterministic in rebuild ordering — 11 new tests, 60/60 passing, clippy
 clean. Not wired into any consumer; no production path reads this index.
 Full detail: ledger entry for `REGISTRY-V2-TRANSLATION-01B-PURE-LOOKUP-LAYER-01`.
+
+## 81. REGISTRY-V2-TRANSLATION-01C-VALIDATOR-CLI-AND-REPORT-01 Closure Note (maintenance)
+
+`CLOSED_LOCAL / READ-ONLY-CLI`. Adds `mqk md registry-v2-translation-check`,
+a read-only CLI proving `RegistryV2SymbolTranslationIndex` end-to-end
+against the real 88-row converted v1 equity universe (100% round-tripped)
+and, independently, the committed disabled BTC/USD+ETH/USD crypto v2
+fixture. Fails closed (nonzero exit) on a duplicate converted-v1 symbol, a
+duplicate v2 `instrument_id`, or an enabled non-equity trading flag — the
+last case reported as `truth_state=unsafe_trading_enabled`, distinct from a
+plain collision. 8 new subprocess-driven scenario tests, all passing;
+clippy clean; no DB/network call; no consumer wired. Full detail: ledger
+entry for `REGISTRY-V2-TRANSLATION-01C-VALIDATOR-CLI-AND-REPORT-01`.

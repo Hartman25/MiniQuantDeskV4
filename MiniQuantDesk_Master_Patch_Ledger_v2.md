@@ -4986,3 +4986,57 @@ evidence staged.
 **Recommended next slice:** `REGISTRY-V2-TRANSLATION-01C-VALIDATOR-CLI-AND-REPORT-01`
 — a read-only CLI/report command proving this index against the current
 v1 registry (and, separately, the disabled v2 crypto fixture) end-to-end.
+
+### REGISTRY-V2-TRANSLATION-01C-VALIDATOR-CLI-AND-REPORT-01 — CLOSED_LOCAL / READ-ONLY-CLI
+
+**Mission:** prove `RegistryV2SymbolTranslationIndex` (`01B`) end-to-end via
+a read-only CLI/report command, against both the real converted v1 equity
+universe and the committed disabled crypto v2 fixture. Read-only: no DB
+connection, no provider/broker call, no mutation of either input file.
+
+**Built:** `mqk md registry-v2-translation-check` — new `MdCmd` variant
+(`core-rs/crates/mqk-cli/src/main.rs`) and handler
+`md_registry_v2_translation_check` (`core-rs/crates/mqk-cli/src/commands/md.rs`).
+Two independent lanes, never merged: `--registry-v1` loads+converts the v1
+registry and round-trip-checks every converted instrument through the
+translation index (legacy symbol -> instrument_id -> legacy symbol, and the
+reverse); `--registry-v2` loads a standalone v2 fixture and builds a second,
+independent index, flagging any enabled non-equity trading flag as
+`truth_state=unsafe_trading_enabled` (distinct from a plain
+`translation_collision`). Deliberately skips the v1/v2 schema validators
+(`validate_registry`/`validate_registry_v2`) so collisions surface through
+the translation index's own fail-closed build, not a different validator's
+error path. Evidence (`registry-v2-translation-check-v1` schema) is written
+only when `--output-dir` is supplied, carrying `all_passed`/`reason_code`/
+`fail_reasons`/`warnings`/`safety` fields, matching this bundle's evidence
+contract. 8 new scenario tests
+(`core-rs/crates/mqk-cli/tests/scenario_cli_registry_v2_translation_check_01c.rs`,
+subprocess-driven, no `MQK_DATABASE_URL` set): happy path v1-only (88/88
+round-tripped), happy path v1+crypto-v2-fixture, duplicate converted-v1
+symbol fails closed, duplicate v2 `instrument_id` fails closed, enabled
+crypto `live_trading_enabled` fails closed as `unsafe_trading_enabled`,
+evidence carries no DB/network/trading claim, no `--output-dir` means no
+evidence file, and a missing `--registry-v1` path returns a clear
+non-panicking error.
+
+**Deliberately not done:** no consumer wired (still model/report-only); no
+provider-alias translation (out of scope per `01A`); no merge of v1/v2
+lanes; no DB/network call; no config flag changed; no trading enabled.
+
+**Validation:** `cargo check -p mqk-cli -p mqk-md` clean. `cargo test -p
+mqk-cli --test scenario_cli_registry_v2_translation_check_01c` — 8 passed,
+0 failed. `cargo test -p mqk-md instrument_registry_v2` — 60 passed, 0
+failed (unchanged from `01B`). `cargo clippy -p mqk-cli -p mqk-md
+--all-targets -- -D warnings` — clean, 0 warnings. `powershell
+-ExecutionPolicy Bypass -File
+scripts\guards\validate_registry_v2_translation_01a_audit.ps1` — all 8
+checks still pass. `git diff --check` — clean.
+
+**Safety confirmation:** zero network calls; zero DB access/mutation; zero
+config flag changes; no crypto/futures/options/forex/rates trading enabled;
+no broker/order/risk/runtime/strategy/portfolio code touched; no generated
+evidence staged.
+
+**Recommended next slice:** `REGISTRY-V2-TRANSLATION-01D-CLOSURE-AND-ROADMAP-RECONCILE-01`
+— decide whether `ASSET-CORE-01H` prerequisite #2 is closed and reconcile
+the roadmap accordingly.

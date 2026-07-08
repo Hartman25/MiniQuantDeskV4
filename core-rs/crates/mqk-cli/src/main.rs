@@ -15,7 +15,8 @@ use commands::{
     md::{
         md_coinlore_latest_mark, md_crypto_registry_readiness, md_ingest_csv, md_ingest_provider,
         md_kraken_ohlc_dry_run, md_kraken_ohlc_ingest, md_kraken_ohlc_sync,
-        md_kraken_scheduler_readiness, md_registry_v2_status, md_sync_provider,
+        md_kraken_scheduler_readiness, md_registry_v2_status, md_registry_v2_translation_check,
+        md_sync_provider,
     },
     run::{
         run_arm, run_begin, run_deadman_check, run_deadman_enforce, run_halt, run_heartbeat,
@@ -708,6 +709,36 @@ enum MdCmd {
         #[arg(long)]
         output_dir: Option<PathBuf>,
     },
+
+    /// REGISTRY-V2-TRANSLATION-01C: read-only proof that
+    /// `RegistryV2SymbolTranslationIndex` (mqk-md) builds collision-free and
+    /// round-trips for the current registry universe. Loads --registry-v1
+    /// (v1 equities.json), converts it to InstrumentRegistryV2 in memory via
+    /// the existing v1->v2 conversion, builds a translation index, and
+    /// round-trip-checks every converted instrument. Optionally loads
+    /// --registry-v2 (a separate v2 fixture, e.g. the disabled crypto local-
+    /// marks fixture) and builds a second, independent translation index for
+    /// it, reporting any enabled non-equity row as a failure. No DB
+    /// connection, no provider/broker calls, no writes, no mutation of
+    /// either input file. Evidence is written only when --output-dir is
+    /// supplied.
+    RegistryV2TranslationCheck {
+        /// Path to the v1 instrument registry JSON (e.g. config/instruments/equities.json).
+        #[arg(long)]
+        registry_v1: Option<PathBuf>,
+
+        /// Path to a standalone registry-v2 JSON fixture (e.g.
+        /// config/instruments/instruments_v2.crypto_local_marks.example.json).
+        /// Built and checked independently of --registry-v1; never merged
+        /// with it.
+        #[arg(long)]
+        registry_v2: Option<PathBuf>,
+
+        /// Directory to write a JSON evidence artifact. Not staged/committed.
+        /// When omitted, no evidence file is written.
+        #[arg(long)]
+        output_dir: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1058,6 +1089,13 @@ async fn main() -> Result<()> {
                     evidence_max_age_secs,
                     output_dir,
                 )?;
+            }
+            MdCmd::RegistryV2TranslationCheck {
+                registry_v1,
+                registry_v2,
+                output_dir,
+            } => {
+                md_registry_v2_translation_check(registry_v1, registry_v2, output_dir)?;
             }
         },
 

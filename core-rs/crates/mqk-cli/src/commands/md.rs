@@ -2608,6 +2608,267 @@ pub fn md_kraken_scheduler_readiness(
 }
 
 // ---------------------------------------------------------------------------
+// registry-v2-translation-check — REGISTRY-V2-TRANSLATION-01C: read-only
+// proof that mqk_md::instrument_registry_v2::RegistryV2SymbolTranslationIndex
+// (REGISTRY-V2-TRANSLATION-01B) builds collision-free and round-trips
+// against the current registry universe.
+//
+// Two independent lanes, never merged:
+// - `--registry-v1`: loads the v1 registry, converts it to
+//   InstrumentRegistryV2 via the existing convert_v1_registry_to_v2, builds a
+//   translation index, and round-trip-checks every converted instrument
+//   (legacy symbol -> instrument_id -> legacy symbol, and the reverse).
+// - `--registry-v2`: loads a standalone v2 fixture and builds a second,
+//   independent translation index for it, reporting any enabled non-equity
+//   trading flag as an unsafe-state failure.
+//
+// No DB connection, no provider/network call, no mutation of either input
+// file. Evidence is written only when --output-dir is supplied.
+// ---------------------------------------------------------------------------
+
+const REGISTRY_V2_TRANSLATION_CHECK_EVIDENCE_SCHEMA_VERSION: &str =
+    "registry-v2-translation-check-v1";
+
+/// Execute `mqk md registry-v2-translation-check`. See module-section docs
+/// above. Read-only: never opens a DB connection, never calls a
+/// provider/broker, never mutates `--registry-v1`/`--registry-v2`, never
+/// registers a scheduler.
+pub fn md_registry_v2_translation_check(
+    registry_v1: Option<PathBuf>,
+    registry_v2: Option<PathBuf>,
+    output_dir: Option<PathBuf>,
+) -> Result<()> {
+    if registry_v1.is_none() && registry_v2.is_none() {
+        anyhow::bail!(
+            "registry-v2-translation-check: at least one of --registry-v1 or --registry-v2 is required"
+        );
+    }
+
+    let mut fail_reasons: Vec<String> = Vec::new();
+    let warnings: Vec<String> = Vec::new();
+    let mut asset_class_counts: std::collections::BTreeMap<String, usize> =
+        std::collections::BTreeMap::new();
+
+    let mut converted_v1_instrument_count = 0usize;
+    let mut round_trip_checked_count = 0usize;
+
+    if let Some(path) = &registry_v1 {
+        let v1 = mqk_md::instrument_registry::load_instrument_registry(path).with_context(|| {
+            format!(
+                "registry-v2-translation-check: v1 load failed: {}",
+                path.display()
+            )
+        })?;
+        // Deliberately not calling `validate_registry` here: this command
+        // exists to prove `RegistryV2SymbolTranslationIndex::build`'s own
+        // fail-closed behavior (duplicate/empty instrument_id/symbol), not
+        // to duplicate the v1 registry validator's independent checks. A
+        // malformed v1 file still fails closed below, via the translation
+        // index build itself.
+        let v2 = mqk_md::instrument_registry_v2::convert_v1_registry_to_v2(&v1);
+        converted_v1_instrument_count = v2.instruments.len();
+
+        match mqk_md::instrument_registry_v2::RegistryV2SymbolTranslationIndex::build(&v2) {
+            Ok(index) => {
+                for inst in &v2.instruments {
+                    *asset_class_counts
+                        .entry(inst.asset_class.clone())
+                        .or_insert(0) += 1;
+
+                    let forward = index.instrument_id_to_legacy_symbol(&inst.instrument_id);
+                    if forward != Some(inst.symbol.as_str()) {
+                        fail_reasons.push(format!(
+                            "v1_round_trip_mismatch symbol={} instrument_id={} got={:?}",
+                            inst.symbol, inst.instrument_id, forward
+                        ));
+                        continue;
+                    }
+                    let reverse = index.legacy_symbol_to_instrument_id(&inst.symbol);
+                    if reverse != Some(inst.instrument_id.as_str()) {
+                        fail_reasons.push(format!(
+                            "v1_reverse_lookup_mismatch symbol={} instrument_id={} got={:?}",
+                            inst.symbol, inst.instrument_id, reverse
+                        ));
+                        continue;
+                    }
+                    round_trip_checked_count += 1;
+                }
+            }
+            Err(e) => {
+                fail_reasons.push(format!("v1_translation_index_build_failed: {e}"));
+            }
+        }
+    }
+
+    let mut v2_instrument_count = 0usize;
+    let mut non_tradable_count = 0usize;
+    let mut enabled_count = 0usize;
+    let mut paper_trading_enabled_count = 0usize;
+    let mut live_trading_enabled_count = 0usize;
+
+    if let Some(path) = &registry_v2 {
+        let registry = mqk_md::instrument_registry_v2::load_instrument_registry_v2(path)
+            .with_context(|| {
+                format!(
+                    "registry-v2-translation-check: v2 load failed: {}",
+                    path.display()
+                )
+            })?;
+        // Deliberately not calling `validate_registry_v2` here, for the same
+        // reason as the v1 lane above: this command proves the translation
+        // index's own fail-closed behavior, not the schema validator's.
+        v2_instrument_count = registry.instruments.len();
+
+        match mqk_md::instrument_registry_v2::RegistryV2SymbolTranslationIndex::build(&registry) {
+            Ok(_index) => {
+                for inst in &registry.instruments {
+                    *asset_class_counts
+                        .entry(inst.asset_class.clone())
+                        .or_insert(0) += 1;
+                    if inst.enabled {
+                        enabled_count += 1;
+                    } else {
+                        non_tradable_count += 1;
+                    }
+                    if inst.paper_trading_enabled {
+                        paper_trading_enabled_count += 1;
+                    }
+                    if inst.live_trading_enabled {
+                        live_trading_enabled_count += 1;
+                    }
+                    if inst.asset_class != "equity"
+                        && (inst.paper_trading_enabled || inst.live_trading_enabled)
+                    {
+                        fail_reasons.push(format!(
+                            "non_equity_trading_flag_enabled symbol={} asset_class={} paper_trading_enabled={} live_trading_enabled={}",
+                            inst.symbol, inst.asset_class, inst.paper_trading_enabled, inst.live_trading_enabled
+                        ));
+                    }
+                }
+            }
+            Err(e) => {
+                fail_reasons.push(format!("v2_translation_index_build_failed: {e}"));
+            }
+        }
+    }
+
+    let legacy_symbol_count = converted_v1_instrument_count + v2_instrument_count;
+    let instrument_id_count = legacy_symbol_count;
+    let all_passed = fail_reasons.is_empty();
+    let has_unsafe_trading_flag = fail_reasons
+        .iter()
+        .any(|r| r.starts_with("non_equity_trading_flag_enabled"));
+    let truth_state = if !all_passed {
+        if has_unsafe_trading_flag {
+            "unsafe_trading_enabled"
+        } else {
+            "translation_collision"
+        }
+    } else {
+        "active"
+    };
+    let reason_code = if all_passed {
+        "translation_check_passed"
+    } else {
+        "translation_check_failed"
+    };
+
+    let produced_at_ts = Utc::now().timestamp();
+    let produced_at_utc = chrono::DateTime::<Utc>::from_timestamp(produced_at_ts, 0)
+        .unwrap_or_else(Utc::now)
+        .to_rfc3339();
+
+    println!(
+        "registry_v1_path={}",
+        registry_v1
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "none".to_string())
+    );
+    println!(
+        "registry_v2_path={}",
+        registry_v2
+            .as_ref()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| "none".to_string())
+    );
+    println!("truth_state={truth_state}");
+    println!("converted_v1_instrument_count={converted_v1_instrument_count}");
+    println!("v2_instrument_count={v2_instrument_count}");
+    println!("legacy_symbol_count={legacy_symbol_count}");
+    println!("instrument_id_count={instrument_id_count}");
+    println!("round_trip_checked_count={round_trip_checked_count}");
+    println!("non_tradable_count={non_tradable_count}");
+    println!("enabled_count={enabled_count}");
+    println!("paper_trading_enabled_count={paper_trading_enabled_count}");
+    println!("live_trading_enabled_count={live_trading_enabled_count}");
+    println!("db_write=false");
+    println!("network_call_made=false");
+    println!("production_cutover_enabled=false");
+    println!("trading_uses_v2=false");
+    println!("all_passed={all_passed}");
+    println!("reason_code={reason_code}");
+    for reason in &fail_reasons {
+        println!("fail_reason={reason}");
+    }
+
+    if let Some(dir) = &output_dir {
+        fs::create_dir_all(dir).with_context(|| {
+            format!(
+                "registry-v2-translation-check: create output dir failed: {}",
+                dir.display()
+            )
+        })?;
+        let evidence = serde_json::json!({
+            "schema_version": REGISTRY_V2_TRANSLATION_CHECK_EVIDENCE_SCHEMA_VERSION,
+            "producer": "mqk-cli md registry-v2-translation-check",
+            "produced_at_utc": produced_at_utc,
+            "registry_v1_path": registry_v1.as_ref().map(|p| p.display().to_string()),
+            "registry_v2_path": registry_v2.as_ref().map(|p| p.display().to_string()),
+            "truth_state": truth_state,
+            "converted_v1_instrument_count": converted_v1_instrument_count,
+            "v2_instrument_count": v2_instrument_count,
+            "legacy_symbol_count": legacy_symbol_count,
+            "instrument_id_count": instrument_id_count,
+            "round_trip_checked_count": round_trip_checked_count,
+            "asset_class_counts": asset_class_counts,
+            "non_tradable_count": non_tradable_count,
+            "enabled_count": enabled_count,
+            "paper_trading_enabled_count": paper_trading_enabled_count,
+            "live_trading_enabled_count": live_trading_enabled_count,
+            "all_passed": all_passed,
+            "reason_code": reason_code,
+            "fail_reasons": fail_reasons,
+            "warnings": warnings,
+            "safety": {
+                "no_db_connection": true,
+                "no_network_call_made": true,
+                "no_production_cutover": true,
+                "no_trading_enabled": true,
+                "no_config_file_mutated": true,
+            },
+        });
+        let out_path = dir.join(format!("registry_v2_translation_check_{produced_at_ts}.json"));
+        fs::write(&out_path, serde_json::to_string_pretty(&evidence)?).with_context(|| {
+            format!(
+                "registry-v2-translation-check: write evidence failed: {}",
+                out_path.display()
+            )
+        })?;
+        println!("evidence_path={}", out_path.display());
+    }
+
+    if !all_passed {
+        anyhow::bail!(
+            "registry-v2-translation-check: {reason_code}: {}",
+            fail_reasons.join("; ")
+        );
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
