@@ -5514,3 +5514,57 @@ cutover.
 **Recommended next slice:** an explicit operator-enablement decision for
 prerequisite #5 — only if and when the operator makes that decision
 explicitly. No further registry-v2 boundary work is otherwise recommended.
+
+### REGISTRY-V2-INSTRUMENT-ENABLEMENT-01-BTC-USD-DECISION-01 — CLOSED_LOCAL / DECISION-ONLY
+
+**Mission:** address `ASSET-CORE-01H` §5 prerequisite #5 — an explicit
+operator decision to enable `enabled=true` for a specific, named
+non-equity instrument — after the operator explicitly authorized a
+decision-only review naming `BTC/USD`, with hard instructions not to
+enable trading, route orders, or change broker/risk/runtime behavior, and
+to stop after the enablement decision evidence.
+
+**Built:** `docs/specs/registry_v2_instrument_enablement_01_btc_usd_decision.md`
+— records the operator's explicit decision (`BTC/USD` named as the first
+non-equity instrument for eventual `enabled=true` status) and confirms,
+by direct source read of
+`core-rs/crates/mqk-md/src/instrument_registry_v2.rs`, that zero
+production paths (Gate 0, routing guard, ingestion, backtest engine,
+portfolio accounting, risk engine, OMS) read `InstrumentRegistryV2` today
+— so flipping `enabled=true` would change no trading/execution/risk/
+broker/OMS behavior. Surfaces a schema constraint discovered during this
+review: `validate_registry_v2` fail-closed rejects loading the entire
+registry file if any non-equity instrument has `enabled=true` without
+also setting `allow_enabled_non_equity_for_testing=true` — a flag the
+schema's own bail-message documents as "test/fixture only; no production
+path reads this schema." Decides the *decision* for prerequisite #5 now
+exists (BTC/USD, explicitly named, not inferred), but the *implementation*
+(the actual config flag change) is deliberately not taken in this patch,
+per the operator's "stop after the enablement decision evidence"
+instruction — it is left for a separate, explicit follow-up
+authorization.
+
+**Updated:** `docs/audits/multi_asset_completion_audit.md` §88 closure
+note; `docs/specs/roadmap_completion_reconcile_01.md` §2 row (prerequisite
+#5 now has an explicit decision, implementation still pending) and §3.
+
+**Deliberately not done:** `BTC/USD.enabled` not set to `true`;
+`allow_enabled_non_equity_for_testing` not set on any instrument; no
+trading (paper or live) enabled; no order routed; no broker/risk/runtime/
+strategy/OMS/portfolio code touched; no network call; no DB access;
+`REGISTRY-V2-PRODUCTION-CUTOVER-DECISION-01` not written.
+
+**Validation:** `git diff --name-only` — only docs touched, no config or
+source file changed (confirmed `config/instruments/instruments_v2.crypto_local_marks.example.json`
+and `config/providers/providers.json` byte-identical to pre-review
+state). `git diff --check` — clean.
+
+**Safety confirmation:** zero network calls; zero DB access/mutation; zero
+config flag changes (`BTC/USD.enabled`/`paper_trading_enabled`/
+`live_trading_enabled` all remain `false`); no trading enabled; no order
+routed; no broker/risk/runtime/strategy/portfolio code touched.
+
+**Recommended next slice:** a separate, explicit operator authorization
+naming exactly which flags to flip, if the operator wants the config
+change actually implemented — distinct from this decision-only review.
+Otherwise, no further action recommended.

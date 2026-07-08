@@ -37,7 +37,7 @@ items outside this session's scope.
 | `CRYPTO-RISK-01` | `MISSING` (0%, unchanged) | Missing execution/risk/strategy | No spread-gate, no counterparty-risk model. Not touched — `mqk-risk/*` forbidden this session. |
 | `CRYPTO-EXEC-01` | `MISSING` (0%, unchanged) | Missing execution/risk/strategy | Alpaca adapter never calls `/v2/crypto/*` (confirmed by direct source read, `mqk-broker-alpaca/src/lib.rs`). Not touched — `mqk-broker-*` forbidden this session. |
 | `CRYPTO-STRAT-01` | `MISSING` (0%, unchanged) | Missing execution/risk/strategy | Depends on `CRYPTO-EXEC-01`; no strategy code exists. Not touched this session. |
-| `REGISTRY-V2-PRODUCTION-CUTOVER-DECISION-01` | Not started (decision-only patch, not yet written) | Production-consumption-open (this *is* the boundary-crossing decision point) | Blocked on two of five `ASSET-CORE-01H` §5 prerequisites: (1) `BACKTEST-MULTIPLIER-MARGIN-01` closed — **satisfied**; (2) symbol/`instrument_id` translation layer — **satisfied** by `REGISTRY-V2-TRANSLATION-01A`-`01D` (pure fail-closed `RegistryV2SymbolTranslationIndex`, proven collision-free and round-trippable across the full 88-row equity universe, zero production callers); (3) Gate 0 / broker-submit routing-guard parity re-verification against `InstrumentRegistryV2::asset_class` — **satisfied** by `REGISTRY-V2-GATE-PARITY-01A`-`01D` (pure fail-closed `registry_v2_gate_asset_class` helper, 20 regression tests proving Gate 0 and the routing guard reject the same asset classes whether keyed off `mqk_schemas::AssetClass` or `InstrumentRegistryV2::asset_class`, zero production callers, neither gate modified); (4) a live-network-verified non-equity market-data provider end-to-end into `md_bars` — **satisfied** by `REGISTRY-V2-KRAKEN-LIVE-PROVIDER-PROOF-01`: after explicit operator authorization, `mqk md kraken-ohlc-ingest` made one live Kraken OHLC network call each for `BTC/USD`/`ETH/USD` (`--timeframe 1D`) and wrote 720 real completed bars each into `md_bars` in the isolated `mqk_test` proof database, confirmed via evidence JSON and direct `psql` query, with zero rows in the paper database and no config/enablement change; (5) an explicit operator enablement decision for a named non-equity instrument — still open, and must not be inferred from #4's proof succeeding. |
+| `REGISTRY-V2-PRODUCTION-CUTOVER-DECISION-01` | Not started (decision-only patch, not yet written) | Production-consumption-open (this *is* the boundary-crossing decision point) | Blocked on two of five `ASSET-CORE-01H` §5 prerequisites: (1) `BACKTEST-MULTIPLIER-MARGIN-01` closed — **satisfied**; (2) symbol/`instrument_id` translation layer — **satisfied** by `REGISTRY-V2-TRANSLATION-01A`-`01D` (pure fail-closed `RegistryV2SymbolTranslationIndex`, proven collision-free and round-trippable across the full 88-row equity universe, zero production callers); (3) Gate 0 / broker-submit routing-guard parity re-verification against `InstrumentRegistryV2::asset_class` — **satisfied** by `REGISTRY-V2-GATE-PARITY-01A`-`01D` (pure fail-closed `registry_v2_gate_asset_class` helper, 20 regression tests proving Gate 0 and the routing guard reject the same asset classes whether keyed off `mqk_schemas::AssetClass` or `InstrumentRegistryV2::asset_class`, zero production callers, neither gate modified); (4) a live-network-verified non-equity market-data provider end-to-end into `md_bars` — **satisfied** by `REGISTRY-V2-KRAKEN-LIVE-PROVIDER-PROOF-01`: after explicit operator authorization, `mqk md kraken-ohlc-ingest` made one live Kraken OHLC network call each for `BTC/USD`/`ETH/USD` (`--timeframe 1D`) and wrote 720 real completed bars each into `md_bars` in the isolated `mqk_test` proof database, confirmed via evidence JSON and direct `psql` query, with zero rows in the paper database and no config/enablement change; (5) an explicit operator enablement decision for a named non-equity instrument — **decision now made** by `REGISTRY-V2-INSTRUMENT-ENABLEMENT-01-BTC-USD-DECISION-01` (`BTC/USD` explicitly named), but **not yet implemented**: the config flag itself remains `enabled=false`, since flipping it would require the schema's test-only `allow_enabled_non_equity_for_testing` escape hatch (discovered during this review to carry no production path) and zero production code reads `InstrumentRegistryV2` regardless; a separate, explicit authorization is needed to actually implement the flag change. |
 
 ## 3. Next best patch
 
@@ -117,6 +117,30 @@ recommending the cutover-decision patch now would be the exact "stale
 recommendation pointing to already-closed work" pattern this document is
 required to avoid the opposite of (recommending unready work as if it were
 ready).
+
+**Update (`REGISTRY-V2-INSTRUMENT-ENABLEMENT-01-BTC-USD-DECISION-01`, this
+session's later work):** prerequisite #5's *decision* — not its
+*implementation* — is now made. After explicit operator authorization for
+a decision-only review, `BTC/USD` was named as the first non-equity
+instrument for eventual `enabled=true` status. This review confirmed (by
+direct source read) that zero production paths read `InstrumentRegistryV2`
+today, so the flag change would affect no trading behavior regardless, and
+surfaced that `validate_registry_v2` fail-closed requires pairing
+`enabled=true` on any non-equity instrument with the test-only
+`allow_enabled_non_equity_for_testing` escape hatch or the whole registry
+file fails to load — a flag explicitly documented as carrying no
+production path. Per the operator's "stop after the enablement decision
+evidence" instruction, the config flag itself was **not** flipped;
+`BTC/USD.enabled` remains `false`. See
+`docs/specs/registry_v2_instrument_enablement_01_btc_usd_decision.md` for
+the full decision record.
+
+**Still not recommended:** `REGISTRY-V2-PRODUCTION-CUTOVER-DECISION-01` —
+prerequisite #5's *implementation* (the actual config change) remains a
+separate, distinct action requiring its own explicit authorization, and no
+production consumption path for `InstrumentRegistryV2` exists regardless
+of that flag's value. Recommending the cutover-decision patch now would
+still be premature.
 
 Independent of the registry-v2 boundary entirely, `ASSET-CORE-05`'s
 remaining per-instrument session-routing gap is the next-closest-to-done

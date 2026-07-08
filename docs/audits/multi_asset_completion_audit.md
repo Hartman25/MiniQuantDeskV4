@@ -1893,3 +1893,27 @@ enablement) remains explicitly `OPEN` and was not inferred from this
 proof's success. `REGISTRY-V2-PRODUCTION-CUTOVER-DECISION-01` remains
 blocked on prerequisite #5 alone. Full detail:
 `docs/specs/registry_v2_kraken_live_provider_proof_01_closure_decision.md`.
+
+## 88. REGISTRY-V2-INSTRUMENT-ENABLEMENT-01-BTC-USD-DECISION-01 Closure Note (maintenance)
+
+`CLOSED_LOCAL / DECISION-ONLY`. Addresses `ASSET-CORE-01H` §5 prerequisite
+#5 after explicit operator authorization for a decision-only review naming
+`BTC/USD`. Records the operator's decision (`BTC/USD` named as the first
+non-equity instrument for eventual `enabled=true` status) without
+implementing it. Confirms by direct source read that zero production
+paths read `InstrumentRegistryV2` today, so the flag change (if made)
+would affect no trading/execution/risk/broker/OMS behavior — only
+read-only status/GUI surfaces. Surfaces a schema constraint:
+`validate_registry_v2` fail-closed rejects the whole registry file if a
+non-equity instrument has `enabled=true` without also setting the
+test-only `allow_enabled_non_equity_for_testing` escape hatch, which the
+schema's own bail message documents as carrying no production path. The
+*decision* for prerequisite #5 now exists; the *implementation* (actual
+config change) is deliberately deferred to a separate, explicit follow-up
+authorization, per the operator's "stop after the enablement decision
+evidence" instruction. `config/instruments/instruments_v2.crypto_local_marks.example.json`
+remains byte-identical to its pre-review state — `BTC/USD.enabled`,
+`paper_trading_enabled`, `live_trading_enabled` all still `false`. No
+trading enabled, no orders routed, no broker/risk/runtime code touched.
+Full detail:
+`docs/specs/registry_v2_instrument_enablement_01_btc_usd_decision.md`.
