@@ -1842,3 +1842,29 @@ symbols/timeframe Kraken's adapter and the registry-v2 fixture support).
 Docs-only — no code touched, no network call, no DB access, no trading
 enabled. Does not close prerequisite #4. Full detail:
 `docs/specs/registry_v2_live_provider_01a_current_non_equity_provider_audit.md`.
+
+## 86. REGISTRY-V2-LIVE-PROVIDER-01B/01C/01D Closure Note (maintenance)
+
+`CLOSED_LOCAL / BOUNDARY-DECISION-ONLY`. Closes the *boundary decision* for
+`ASSET-CORE-01H` prerequisite #4 — explicitly not prerequisite #4 itself,
+which requires a live network call this and every prior session's hard
+safety rules forbid. `01B` names Kraken/`BTC/USD`+`ETH/USD`/`1D` as the
+selected first proof; `mqk md kraken-ohlc-ingest` (with
+`MQK_ALLOW_KRAKEN_NETWORK_SMOKE=1`, no `--input-file`) as the only future
+allowed command; an isolated proof/test database (never paper/live) as the
+only allowed `MQK_DATABASE_URL` target; the exact verbatim operator
+authorization phrase required before any future network call; the exact
+proof fields required to close prerequisite #4
+(`network_call_made=true`, `db_write=true`, `md_bars_write=true`,
+`bars_completed>0`); the fields that must stay false (`kraken.enabled`,
+both crypto fixture rows' enablement flags, no scheduler registration); and
+leaves prerequisite #5 explicitly untouched. `01C` adds a purely local,
+no-network, no-DB preflight guard
+(`scripts/guards/validate_registry_v2_live_provider_01c_preflight.ps1`, 15
+checks) proving `01B` contains every required element — including the
+authorization phrase byte-for-byte — and that this bundle's own diff
+touched no forbidden source/config file. `01D` decides the boundary
+decision is `CLOSED_LOCAL` while prerequisite #4 itself remains `OPEN`, and
+updates the production-cutover checklist accordingly. No network call, DB
+access, or trading enablement occurred in any of `01B`-`01D`. Full detail:
+`docs/specs/registry_v2_live_provider_01d_boundary_closure_decision.md`.

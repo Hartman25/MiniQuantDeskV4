@@ -37,7 +37,7 @@ items outside this session's scope.
 | `CRYPTO-RISK-01` | `MISSING` (0%, unchanged) | Missing execution/risk/strategy | No spread-gate, no counterparty-risk model. Not touched — `mqk-risk/*` forbidden this session. |
 | `CRYPTO-EXEC-01` | `MISSING` (0%, unchanged) | Missing execution/risk/strategy | Alpaca adapter never calls `/v2/crypto/*` (confirmed by direct source read, `mqk-broker-alpaca/src/lib.rs`). Not touched — `mqk-broker-*` forbidden this session. |
 | `CRYPTO-STRAT-01` | `MISSING` (0%, unchanged) | Missing execution/risk/strategy | Depends on `CRYPTO-EXEC-01`; no strategy code exists. Not touched this session. |
-| `REGISTRY-V2-PRODUCTION-CUTOVER-DECISION-01` | Not started (decision-only patch, not yet written) | Production-consumption-open (this *is* the boundary-crossing decision point) | Blocked on two of five `ASSET-CORE-01H` §5 prerequisites: (1) `BACKTEST-MULTIPLIER-MARGIN-01` closed — **satisfied**; (2) symbol/`instrument_id` translation layer — **satisfied** by `REGISTRY-V2-TRANSLATION-01A`-`01D` (pure fail-closed `RegistryV2SymbolTranslationIndex`, proven collision-free and round-trippable across the full 88-row equity universe, zero production callers); (3) Gate 0 / broker-submit routing-guard parity re-verification against `InstrumentRegistryV2::asset_class` — **now satisfied** by `REGISTRY-V2-GATE-PARITY-01A`-`01D` (pure fail-closed `registry_v2_gate_asset_class` helper, 20 regression tests proving Gate 0 and the routing guard reject the same asset classes whether keyed off `mqk_schemas::AssetClass` or `InstrumentRegistryV2::asset_class`, zero production callers, neither gate modified); (4) a live-network-verified non-equity market-data provider end-to-end into `md_bars` — open (requires live network calls, forbidden this session); (5) an explicit operator enablement decision for a named non-equity instrument — open. |
+| `REGISTRY-V2-PRODUCTION-CUTOVER-DECISION-01` | Not started (decision-only patch, not yet written) | Production-consumption-open (this *is* the boundary-crossing decision point) | Blocked on two of five `ASSET-CORE-01H` §5 prerequisites: (1) `BACKTEST-MULTIPLIER-MARGIN-01` closed — **satisfied**; (2) symbol/`instrument_id` translation layer — **satisfied** by `REGISTRY-V2-TRANSLATION-01A`-`01D` (pure fail-closed `RegistryV2SymbolTranslationIndex`, proven collision-free and round-trippable across the full 88-row equity universe, zero production callers); (3) Gate 0 / broker-submit routing-guard parity re-verification against `InstrumentRegistryV2::asset_class` — **satisfied** by `REGISTRY-V2-GATE-PARITY-01A`-`01D` (pure fail-closed `registry_v2_gate_asset_class` helper, 20 regression tests proving Gate 0 and the routing guard reject the same asset classes whether keyed off `mqk_schemas::AssetClass` or `InstrumentRegistryV2::asset_class`, zero production callers, neither gate modified); (4) a live-network-verified non-equity market-data provider end-to-end into `md_bars` — **boundary decided, proof still open**: `REGISTRY-V2-LIVE-PROVIDER-01A`-`01D` named Kraken/`BTC/USD`+`ETH/USD`/`1D` via `mqk md kraken-ohlc-ingest` as the exact future command, an isolated proof/test DB as the only allowed target, and the exact operator authorization phrase required before any live call — but no live network call has been made, so prerequisite #4 itself remains open; (5) an explicit operator enablement decision for a named non-equity instrument — open, and must not precede #4's actual proof. |
 
 ## 3. Next best patch
 
@@ -68,25 +68,38 @@ modified; zero production paths consume the helper. See
 `docs/specs/registry_v2_gate_parity_01d_closure_decision.md` for the full
 closure decision.
 
-**`REGISTRY-V2-LIVE-PROVIDER-PROOF-BOUNDARY-DECISION-01`** — prerequisite
-#4's boundary decision — is now the next best value-per-risk patch:
+**Update (`REGISTRY-V2-LIVE-PROVIDER-01A`-`01D`, this session's later work):**
+prerequisite #4's *boundary decision* — not prerequisite #4 itself — is now
+**satisfied**. `01A` audited every non-equity provider candidate and
+selected Kraken (`BTC/USD`/`ETH/USD`, `1D`, via the existing, tested
+`mqk md kraken-ohlc-ingest` CLI command) as the safest first live-proof
+candidate: no credentials required, a network call already fail-closed
+behind `MQK_ALLOW_KRAKEN_NETWORK_SMOKE=1`, and an existing DB-writing path
+into `md_bars`. `01B` named the exact allowed future command, the required
+isolated proof/test database target (never paper/live), the exact
+verbatim operator authorization phrase required before any future network
+call, and the exact evidence fields required to close prerequisite #4.
+`01C` added a purely local, no-network, no-DB preflight guard
+(`scripts/guards/validate_registry_v2_live_provider_01c_preflight.ps1`)
+proving `01B`'s boundary decision is complete. `01D` decided the boundary
+is `CLOSED_LOCAL` while explicitly keeping prerequisite #4 itself `OPEN`
+until a future, separately-authorized live proof actually runs. See
+`docs/specs/registry_v2_live_provider_01d_boundary_closure_decision.md`
+for the full closure decision. Zero network calls, zero DB access, and no
+trading enablement occurred in any of `01A`-`01D`.
 
-- Prerequisites #1-#3 are now all satisfied; #4 (live-network-verified
-  non-equity provider proof) and #5 (explicit operator enablement) are the
-  only two remaining, and #4 must be settled first — enabling an instrument
-  before its data source is live-network-proven would invert the
-  checklist's own ordering.
-- It is a decision/design patch (not code), naming the exact first
-  non-equity provider and the exact network-call/operator-authorization
-  boundary required before any live network call is made — consistent
-  with this session's (and every prior session's) hard safety rule against
-  making live network calls without an explicit boundary decision first.
+**`REGISTRY-V2-KRAKEN-LIVE-PROVIDER-PROOF-01`** — the actual live proof —
+is the next patch, **but only if the operator has given the exact
+authorization phrase** named in
+`docs/specs/registry_v2_live_provider_01b_first_proof_boundary_decision.md`
+§7. Absent that explicit phrase, the correct next step is to stop and ask
+for it, not to proceed as if it were already given.
 
 **Do not** recommend `REGISTRY-V2-PRODUCTION-CUTOVER-DECISION-01` itself
-next — two of its five prerequisites remain open; recommending it now
-would be the exact "stale recommendation pointing to already-closed work"
-pattern this document is required to avoid the opposite of (recommending
-unready work as if it were ready).
+next — prerequisite #4's proof (not just its boundary) and prerequisite #5
+remain open; recommending it now would be the exact "stale recommendation
+pointing to already-closed work" pattern this document is required to
+avoid the opposite of (recommending unready work as if it were ready).
 
 Independent of the registry-v2 boundary entirely, `ASSET-CORE-05`'s
 remaining per-instrument session-routing gap is the next-closest-to-done

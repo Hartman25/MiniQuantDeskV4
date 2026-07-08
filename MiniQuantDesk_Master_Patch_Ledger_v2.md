@@ -5273,3 +5273,175 @@ evidence staged.
 the exact first non-equity market-data provider and the exact
 network-call/operator-authorization boundary required before any live
 network call is made).
+
+### REGISTRY-V2-LIVE-PROVIDER-01A-CURRENT-NON-EQUITY-PROVIDER-AUDIT-01 — CLOSED_LOCAL / AUDIT-ONLY
+
+**Mission:** ground `ASSET-CORE-01H` prerequisite #4 (at least one
+non-equity market-data provider live-network-verified end-to-end into
+`md_bars`) in current repo evidence before any boundary decision is
+written. Audit-only.
+
+**Built:** `docs/specs/registry_v2_live_provider_01a_current_non_equity_provider_audit.md`
+— audits every non-equity provider candidate against
+`config/providers/providers.json` and the actual adapter source in
+`core-rs/crates/mqk-md/src/providers/`: Kraken (real tested
+`HistoricalProvider` adapter, existing DB-writing CLI command
+`kraken-ohlc-ingest`, no credentials, network call already fail-closed
+behind `MQK_ALLOW_KRAKEN_NETWORK_SMOKE=1`, but never run in
+`network_smoke` mode against the live endpoint), CoinLore (ticker-only,
+structurally cannot produce `md_bars` rows), TwelveData/Alpaca (no
+implemented non-equity code path, would require new credentials), Alpha
+Vantage/Polygon/yfinance (no adapter code at all). Selects Kraken
+`BTC/USD`/`ETH/USD` at `1D` as the only eligible symbols/timeframe.
+`scripts/guards/validate_registry_v2_live_provider_01a_audit.ps1` — 8
+checks (audit doc exists; mentions prerequisite #4; mentions Kraken;
+mentions BTC/USD/ETH/USD; states no network call occurred; states no DB
+mutation occurred; no forbidden closure claim; no forbidden
+trading-enablement claim).
+
+**Updated:** `docs/audits/multi_asset_completion_audit.md` §85 closure
+note.
+
+**Deliberately not done:** no code touched; no network call; no DB
+access/mutation; no credentials used; `.env.local` not read; no trading
+enablement; no production registry-v2 cutover; no claim that prerequisite
+#4 is closed.
+
+**Validation:** `powershell -ExecutionPolicy Bypass -File
+scripts\guards\validate_registry_v2_live_provider_01a_audit.ps1` — all 8
+checks passed. `git diff --check` — clean.
+
+**Safety confirmation:** zero network calls; zero DB access/mutation; zero
+config flag changes; no crypto/futures/options/forex/rates trading
+enabled; no broker/order/risk/runtime/strategy/portfolio code touched; no
+generated evidence staged.
+
+**Recommended next slice:** `REGISTRY-V2-LIVE-PROVIDER-01B-FIRST-PROOF-BOUNDARY-DECISION-01`
+— name the exact provider/symbol/timeframe/command/DB-target/authorization
+boundary for the eventual live proof.
+
+### REGISTRY-V2-LIVE-PROVIDER-01B-FIRST-PROOF-BOUNDARY-DECISION-01 — CLOSED_LOCAL / DOCS-ONLY
+
+**Mission:** name the exact boundary a future, separately-authorized
+session must respect before making any live network call toward
+prerequisite #4. Decision-only.
+
+**Built:** `docs/specs/registry_v2_live_provider_01b_first_proof_boundary_decision.md`
+— names Kraken/`BTC/USD`+`ETH/USD`/`1D` as the selected first proof;
+`mqk md kraken-ohlc-ingest` (with `MQK_ALLOW_KRAKEN_NETWORK_SMOKE=1`, no
+`--input-file`) as the only allowed future command; an isolated proof/test
+database (never paper/live) as the only allowed `MQK_DATABASE_URL` target;
+a dedicated, non-tracked evidence directory as the only allowed
+`--output-dir`; the exact verbatim operator authorization phrase required
+before any future network call; the exact proof fields
+(`network_call_made=true`, `db_write=true`, `md_bars_write=true`,
+`bars_completed>0`, truthful `provider_id="kraken"`) required to close
+prerequisite #4; the fields that must stay false
+(`kraken.enabled`, both crypto fixture rows' enablement flags, no
+scheduler registration) to avoid implying trading readiness; a post-proof
+no-cutover check; and an explicit statement that prerequisite #5 remains
+untouched and must not precede #4's actual proof.
+
+**Deliberately not done:** no code touched; no network call; no DB
+access/mutation; no credentials used; no trading enablement; the live
+proof itself is not run.
+
+**Validation:** `powershell -ExecutionPolicy Bypass -File
+scripts\guards\validate_registry_v2_live_provider_01a_audit.ps1` — all 8
+checks still pass. `git diff --check` — clean.
+
+**Safety confirmation:** zero network calls; zero DB access/mutation; zero
+config flag changes; no crypto/futures/options/forex/rates trading
+enabled; no broker/order/risk/runtime/strategy/portfolio code touched; no
+generated evidence staged.
+
+**Recommended next slice:** `REGISTRY-V2-LIVE-PROVIDER-01C-NO-NETWORK-PREFLIGHT-GUARD-01`
+— a purely local guard script proving `01B`'s boundary decision is
+complete and safe.
+
+### REGISTRY-V2-LIVE-PROVIDER-01C-NO-NETWORK-PREFLIGHT-GUARD-01 — CLOSED_LOCAL / GUARD-SCRIPT-ONLY
+
+**Mission:** add a no-network, no-DB guard script that mechanically
+validates `01A`/`01B`'s boundary decision is complete and that this
+bundle's own diff touched nothing forbidden, before any future live proof
+is attempted.
+
+**Built:** `scripts/guards/validate_registry_v2_live_provider_01c_preflight.ps1`
+— 15 checks, all pure local file inspection (no `Invoke-RestMethod`, no
+`curl`, no `cargo run`, no DB, no Docker, no `.env.local`): `01A`/`01B`
+existence and Kraken naming; `01B` names the selected symbol(s); `01B`
+contains the exact required authorization phrase byte-for-byte; `01B`
+requires an isolated proof DB and forbids paper/live DB, credentials,
+trading enablement, scheduled sync/task registration, and production
+registry-v2 cutover; `01B` ties prerequisite #4 closure to a future live
+proof and leaves prerequisite #5 open; no generated-evidence-looking file
+or forbidden source/config file (per `ASSET-CORE-01H` §7's forbidden-file
+list, plus `providers.json`/registry-v2 fixture/`.env.local`) appears in
+`git diff`.
+
+**Deliberately not done:** no network call; no DB access/mutation; no
+credentials used; no cargo/npm build or test; no Docker call; the live
+proof itself is not run.
+
+**Validation:** `powershell -ExecutionPolicy Bypass -File
+scripts\guards\validate_registry_v2_live_provider_01a_audit.ps1` — all 8
+checks pass. `powershell -ExecutionPolicy Bypass -File
+scripts\guards\validate_registry_v2_live_provider_01c_preflight.ps1` — all
+15 checks pass. `git diff --check` — clean.
+
+**Safety confirmation:** zero network calls; zero DB access/mutation; zero
+config flag changes; no crypto/futures/options/forex/rates trading
+enabled; no broker/order/risk/runtime/strategy/portfolio code touched; no
+generated evidence staged.
+
+**Recommended next slice:** `REGISTRY-V2-LIVE-PROVIDER-01D-CLOSURE-AND-ROADMAP-RECONCILE-01`
+— decide whether the boundary decision (not prerequisite #4 itself) is
+closed, and reconcile the roadmap accordingly.
+
+### REGISTRY-V2-LIVE-PROVIDER-01D-CLOSURE-AND-ROADMAP-RECONCILE-01 — CLOSED_LOCAL / DOCS-ONLY
+
+**Mission:** decide whether the boundary decision for `ASSET-CORE-01H`
+prerequisite #4 is closed given `01A`-`01C`'s work — explicitly not
+whether prerequisite #4 itself is closed — and reconcile the roadmap
+accordingly. Docs-only.
+
+**Built:** `docs/specs/registry_v2_live_provider_01d_boundary_closure_decision.md`
+— answers all 9 required questions: prerequisite #4 itself is **not**
+closed (no live network call was made in this bundle); the *boundary
+decision* for prerequisite #4 **is** `CLOSED_LOCAL`, since `01A`-`01C` each
+passed their validators; restates the selected provider/symbol/timeframe,
+required authorization phrase, allowed future command, required future
+evidence, and fields that must stay false; updates the production-cutover
+checklist (prerequisites #1-#3 satisfied, #4's boundary decided but the
+proof itself open, #5 open); and recommends
+`REGISTRY-V2-KRAKEN-LIVE-PROVIDER-PROOF-01` next, **only** if the operator
+explicitly provides the exact authorization phrase named in `01B`/`01D`
+§4 — otherwise stop and ask.
+
+**Updated:** `docs/specs/roadmap_completion_reconcile_01.md` §2's
+`REGISTRY-V2-PRODUCTION-CUTOVER-DECISION-01` row (prerequisite #4 now
+distinguished as "boundary decided, proof open") and §3's next-best-patch
+recommendation; `docs/audits/multi_asset_completion_audit.md` §86 closure
+note.
+
+**Deliberately not done:** no code touched; no network call; no DB
+access/mutation; no credentials used; no trading enablement; no production
+registry-v2 cutover attempted or implied; `REGISTRY-V2-PRODUCTION-CUTOVER-DECISION-01`
+itself not recommended next (prerequisites #4's proof and #5 remain open);
+`REGISTRY-V2-KRAKEN-LIVE-PROVIDER-PROOF-01` not recommended unconditionally
+— gated on explicit operator authorization.
+
+**Validation:** `powershell -ExecutionPolicy Bypass -File
+scripts\guards\validate_registry_v2_live_provider_01a_audit.ps1` — all 8
+checks pass. `powershell -ExecutionPolicy Bypass -File
+scripts\guards\validate_registry_v2_live_provider_01c_preflight.ps1` — all
+15 checks pass. `git diff --check` — clean.
+
+**Safety confirmation:** zero network calls; zero DB access/mutation; zero
+config flag changes; no crypto/futures/options/forex/rates trading
+enabled; no broker/order/risk/runtime/strategy/portfolio code touched; no
+generated evidence staged; no production cutover.
+
+**Recommended next slice:** `REGISTRY-V2-KRAKEN-LIVE-PROVIDER-PROOF-01`
+— **only** once the operator has given the exact authorization phrase
+named in this bundle's `01B`/`01D` docs. Otherwise, stop.
