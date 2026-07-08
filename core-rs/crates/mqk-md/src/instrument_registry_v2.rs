@@ -1,8 +1,8 @@
 //! Instrument registry v2 — additive schema, loader, and validator (ASSET-CORE-01B).
 //!
 //! This module is a **model + loader seam, not a production cutover**. It exists
-//! so a future unified instrument registry (futures/options/crypto/forex) has a
-//! real schema to build on, without changing any current trading behavior:
+//! so a future unified instrument registry (futures/options/crypto/forex/rates)
+//! has a real schema to build on, without changing any current trading behavior:
 //!
 //! - The canonical v1 registry (`super::instrument_registry`, `TrackedInstrument`,
 //!   `config/instruments/equities.json`) remains the only registry any daemon,
@@ -50,8 +50,15 @@ pub const SCHEMA_VERSION_V2: u32 = 1;
 
 /// Canonical asset-class vocabulary. Matches
 /// `mqk_md::provider::provider_asset_class_trading_class`'s output strings and
-/// `mqk_schemas::AssetClass`'s variant names, lower-cased and singular.
-pub const CANONICAL_ASSET_CLASSES_V2: &[&str] = &["equity", "option", "future", "crypto", "forex"];
+/// `mqk_schemas::AssetClass`'s variant names, lower-cased and singular, with
+/// one addition: `"rate"` (fixed income / rates), which has no counterpart in
+/// either of those two types today — this schema is additive/model-only
+/// (see module docs), so it is free to represent an asset class neither of
+/// the two live execution-adjacent enums models yet. `"rate"` carries the
+/// same fail-closed non-equity-enablement rule as every other non-equity
+/// class in [`validate_registry_v2`]; it is not enabled anywhere.
+pub const CANONICAL_ASSET_CLASSES_V2: &[&str] =
+    &["equity", "option", "future", "crypto", "forex", "rate"];
 
 /// Top-level v2 registry document.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -95,8 +102,8 @@ pub struct InstrumentDefinitionV2 {
     /// Timeframe(s) to track, e.g. `["1D"]`.
     #[serde(default)]
     pub timeframes: Vec<String>,
-    /// Contract details. Required for option/future/crypto/forex; optional
-    /// (implied `Equity`/`Etf`) for equity.
+    /// Contract details. Required for option/future/crypto/forex/rate;
+    /// optional (implied `Equity`/`Etf`) for equity.
     #[serde(default)]
     pub contract: Option<ContractDefinitionV2>,
     /// Descriptive metadata. Required (sector + category) for ETF-tagged equities.
@@ -170,6 +177,16 @@ pub enum ContractDefinitionV2 {
     },
     /// Spot/currency-future forex pair.
     ForexPair { base: String, quote: String },
+    /// Fixed-income / rates instrument (e.g. a bond). `coupon_bps` is
+    /// basis points and may be `0` (zero-coupon); `face_value_micros` must
+    /// be positive, matching this repo's micros convention used elsewhere
+    /// (e.g. `strike_micros`, `tick_size_micros`).
+    Rate {
+        issuer: String,
+        maturity: String,
+        coupon_bps: i64,
+        face_value_micros: i64,
+    },
 }
 
 /// Descriptive metadata, separate from trading/contract semantics.
@@ -450,6 +467,35 @@ fn validate_contract_v2(
             }
             _ => anyhow::bail!(
                 "instrument_registry_v2: forex symbol={symbol} requires contract=ForexPair with base/quote"
+            ),
+        },
+        "rate" => match contract {
+            Some(ContractDefinitionV2::Rate {
+                issuer,
+                maturity,
+                coupon_bps,
+                face_value_micros,
+            }) => {
+                if issuer.trim().is_empty() {
+                    anyhow::bail!("instrument_registry_v2: rate symbol={symbol} missing issuer");
+                }
+                if maturity.trim().is_empty() {
+                    anyhow::bail!("instrument_registry_v2: rate symbol={symbol} missing maturity");
+                }
+                if *coupon_bps < 0 {
+                    anyhow::bail!(
+                        "instrument_registry_v2: rate symbol={symbol} coupon_bps must be non-negative (zero-coupon is 0, not negative)"
+                    );
+                }
+                if *face_value_micros <= 0 {
+                    anyhow::bail!(
+                        "instrument_registry_v2: rate symbol={symbol} face_value_micros must be positive"
+                    );
+                }
+                Ok(())
+            }
+            _ => anyhow::bail!(
+                "instrument_registry_v2: rate symbol={symbol} requires contract=Rate with issuer/maturity/coupon_bps/face_value_micros"
             ),
         },
         other => anyhow::bail!(
@@ -867,6 +913,33 @@ mod tests {
         }
     }
 
+    fn base_rate(symbol: &str) -> InstrumentDefinitionV2 {
+        InstrumentDefinitionV2 {
+            instrument_id: format!("rate:US:{symbol}"),
+            symbol: symbol.to_string(),
+            asset_class: "rate".to_string(),
+            instrument_kind: None,
+            venue: None,
+            currency: "USD".to_string(),
+            quote_currency: None,
+            provider_symbols: BTreeMap::new(),
+            enabled: false,
+            paper_trading_enabled: false,
+            live_trading_enabled: false,
+            timeframes: vec!["1D".to_string()],
+            contract: Some(ContractDefinitionV2::Rate {
+                issuer: "US Treasury".to_string(),
+                maturity: "2036-05-15".to_string(),
+                coupon_bps: 425,
+                face_value_micros: 100_000_000,
+            }),
+            metadata: InstrumentMetadataV2::default(),
+            notes: Some("backlog fixture; not enabled".to_string()),
+            allow_enabled_non_equity_for_testing: false,
+            economics: None,
+        }
+    }
+
     fn registry_of(instruments: Vec<InstrumentDefinitionV2>) -> InstrumentRegistryV2 {
         InstrumentRegistryV2 {
             schema_version: SCHEMA_VERSION_V2,
@@ -942,6 +1015,14 @@ mod tests {
                     "currency": "USD",
                     "enabled": false,
                     "contract": {"kind": "forex_pair", "base": "EUR", "quote": "USD"}
+                },
+                {
+                    "instrument_id": "rate:US:UST10Y",
+                    "symbol": "UST10Y",
+                    "asset_class": "rate",
+                    "currency": "USD",
+                    "enabled": false,
+                    "contract": {"kind": "rate", "issuer": "US Treasury", "maturity": "2036-05-15", "coupon_bps": 425, "face_value_micros": 100000000}
                 }
             ]
         }
@@ -949,7 +1030,7 @@ mod tests {
 
         let registry: InstrumentRegistryV2 =
             serde_json::from_str(json).expect("v2 registry json must parse");
-        assert_eq!(registry.instruments.len(), 6);
+        assert_eq!(registry.instruments.len(), 7);
         validate_registry_v2(&registry).expect("mixed fixture registry must validate");
 
         let spy = registry
@@ -961,7 +1042,13 @@ mod tests {
         assert_eq!(spy.instrument_kind.as_deref(), Some("etf"));
         assert_eq!(spy.contract, Some(ContractDefinitionV2::Etf));
 
-        for symbol in ["ES2026U", "AAPL20260918C150", "BTC/USD", "EUR/USD"] {
+        for symbol in [
+            "ES2026U",
+            "AAPL20260918C150",
+            "BTC/USD",
+            "EUR/USD",
+            "UST10Y",
+        ] {
             let inst = registry
                 .instruments
                 .iter()
@@ -1034,6 +1121,7 @@ mod tests {
             base_option("AAPL20260918C150"),
             base_crypto("BTC/USD"),
             base_forex("EUR/USD"),
+            base_rate("UST10Y"),
         ] {
             inst.contract = None;
             let err = validate_registry_v2(&registry_of(vec![inst.clone()])).unwrap_err();
@@ -1166,6 +1254,56 @@ mod tests {
     }
 
     #[test]
+    fn v2_11b_rate_contract_field_violations_fail() {
+        let cases = [
+            ContractDefinitionV2::Rate {
+                issuer: "".to_string(),
+                maturity: "2036-05-15".to_string(),
+                coupon_bps: 425,
+                face_value_micros: 100_000_000,
+            },
+            ContractDefinitionV2::Rate {
+                issuer: "US Treasury".to_string(),
+                maturity: "".to_string(),
+                coupon_bps: 425,
+                face_value_micros: 100_000_000,
+            },
+            ContractDefinitionV2::Rate {
+                issuer: "US Treasury".to_string(),
+                maturity: "2036-05-15".to_string(),
+                coupon_bps: -1,
+                face_value_micros: 100_000_000,
+            },
+            ContractDefinitionV2::Rate {
+                issuer: "US Treasury".to_string(),
+                maturity: "2036-05-15".to_string(),
+                coupon_bps: 425,
+                face_value_micros: 0,
+            },
+        ];
+        for contract in cases {
+            let mut inst = base_rate("UST10Y");
+            inst.contract = Some(contract);
+            assert!(validate_registry_v2(&registry_of(vec![inst])).is_err());
+        }
+    }
+
+    // v2_11c: a zero coupon_bps (zero-coupon instrument) is valid — only a
+    // negative coupon_bps is rejected, per the "non-negative" rule above.
+    #[test]
+    fn v2_11c_rate_zero_coupon_validates() {
+        let mut inst = base_rate("UST0CPN");
+        inst.instrument_id = "rate:US:UST0CPN".to_string();
+        inst.contract = Some(ContractDefinitionV2::Rate {
+            issuer: "US Treasury".to_string(),
+            maturity: "2030-01-01".to_string(),
+            coupon_bps: 0,
+            face_value_micros: 100_000_000,
+        });
+        validate_registry_v2(&registry_of(vec![inst])).expect("zero-coupon rate must validate");
+    }
+
+    #[test]
     fn v2_12_etf_missing_sector_or_category_fails() {
         let mut missing_sector = base_etf("SPY");
         missing_sector.metadata.sector = None;
@@ -1235,6 +1373,7 @@ mod tests {
             base_option("AAPL20260918C150"),
             base_crypto("BTC/USD"),
             base_forex("EUR/USD"),
+            base_rate("UST10Y"),
         ]);
         validate_registry_v2(&registry).expect("disabled backlog fixtures must validate");
     }
@@ -1468,6 +1607,7 @@ mod tests {
             base_option("AAPL20260918C150"),
             base_crypto("BTC/USD"),
             base_forex("EUR/USD"),
+            base_rate("UST10Y"),
         ] {
             assert_eq!(inst.economics, None);
         }
@@ -1545,6 +1685,7 @@ mod tests {
             base_option("AAPL20260918C150"),
             base_crypto("BTC/USD"),
             base_forex("EUR/USD"),
+            base_rate("UST10Y"),
         ] {
             let suggestion = backtest_economics_suggestion_for_instrument(&inst);
             assert_eq!(

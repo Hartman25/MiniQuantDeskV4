@@ -4392,3 +4392,75 @@ strategy.
 separately-authorized action outside any patch's own validation — no
 further code patch is required to close that gap; it is an operational
 decision, not an engineering one.
+
+### ASSET-CORE-01E-REGISTRY-V2-RATES-SCHEMA-GAP-01 — CLOSED_LOCAL
+
+**Mission:** a session was asked to "start `ASSET-CORE-01`" via a three-phase
+plan (schema audit doc → enum mapping → validator CLI). Direct inspection at
+`HEAD` (`1d51a69a`) found all three already built and `CLOSED_LOCAL` under
+`ASSET-CORE-01A`/`01B`/`01C` (commit `7322b280` and after), plus `01D` and
+the full `CRYPTO-DATA-01A`..`03C` lineage. Rather than duplicate that work,
+this patch traced the ledger's own "Recommended next slice" chain forward to
+`HEAD` and found every open thread now blocked by hard session constraints
+(live network calls, production cutover, trading enablement). A direct read
+of the schema against the mission's own required-fields list (equities,
+ETFs, crypto spot, futures, options, forex, rates/fixed income) found one
+real, previously-unrecorded gap instead: `ContractDefinitionV2` had no
+variant for rates/fixed income at all.
+
+**Repo evidence found:** `CANONICAL_ASSET_CLASSES_V2` and
+`ContractDefinitionV2` (`mqk-md/src/instrument_registry_v2.rs`) covered
+`equity`/`etf`/`crypto`/`future`/`option`/`forex` — six of the seven asset
+categories this schema is meant to represent per its own module docs and the
+mission's own list. Rates/fixed income was absent from every enum, match
+arm, and test fixture in the file; no committed patch across the entire
+`ASSET-CORE-01`/`04` or `CRYPTO-DATA-01` lineage had ever added it.
+
+**Built:** `CANONICAL_ASSET_CLASSES_V2` gained `"rate"`.
+`ContractDefinitionV2::Rate { issuer, maturity, coupon_bps,
+face_value_micros }` (zero-coupon representable via `coupon_bps=0`; positive
+`face_value_micros` required, following the repo's micros convention).
+`validate_contract_v2` gained a `"rate"` match arm (non-empty
+issuer/maturity, non-negative coupon, positive face value) — same
+fail-closed shape-validation pattern as every other derivative class. Tests:
+`base_rate` fixture; `rate` added to `v2_01` (mixed-registry parse/validate),
+`v2_07` (missing-contract-entirely exhaustive check), `v2_17` (disabled-
+backlog fixtures), `econ05`/`sug04` (economics-absence coverage); new
+`v2_11b` (four field-violation cases) and `v2_11c` (zero-coupon validates).
+`mqk-daemon/src/routes/system.rs::contract_kind_label` (the pure, read-only
+label helper backing `ASSET-CORE-01C`'s `contract_kind_counts`) gained a
+`Rate { .. } => "rate"` arm — required for the crate to compile against the
+new enum variant; label-only, no behavior change.
+
+**Deliberately not done:** no change to `mqk_schemas::AssetClass`/
+`ContractSpec` (live execution-path types); no change to
+`mqk_md::provider::ProviderAssetClass` (no provider serves rates/bonds
+today); no `Cargo.toml` edited anywhere; no config file touched; no DB
+migration; `"rate"` cannot become `enabled=true` without the same
+`allow_enabled_non_equity_for_testing` test-only escape hatch every other
+non-equity class already requires.
+
+**Validation results
+(`CARGO_TARGET_DIR=C:\tmp\mqk-target-asset-core-01-rate-schema`):**
+`cargo check -p mqk-md -p mqk-schemas` — clean. `cargo test -p mqk-md
+instrument_registry_v2` — 50/50 pass. `cargo test -p mqk-md` (full crate,
+all binaries) — 353 total pass (307 lib + 7 + 31 + 7 scenario + 1 doc-test),
+zero failures, zero regressions. `cargo clippy -p mqk-md -p mqk-schemas
+--all-targets -- -D warnings` — clean. `cargo check -p mqk-daemon -p
+mqk-cli` (downstream dependents) — clean after the one required
+`contract_kind_label` arm. `cargo test -p mqk-daemon --test
+scenario_instrument_registry_v2_status_asset_core_01c` — 13/13 pass
+(regression, unaffected). `cargo clippy -p mqk-daemon --lib -- -D warnings`
+— clean. `git diff --check` — clean.
+
+**Honest status:** `ASSET-CORE-01`'s registry-v2 schema is now
+feature-complete against its own seven-category requirement. The three
+structural gaps every prior slice in this lineage has named — no trading/
+execution/risk/OMS path reads `InstrumentRegistryV2`, no live non-equity
+provider network-verified beyond existing CoinLore/Kraken checks, no
+production cutover decision made — remain open by design, each blocked on a
+boundary (execution-path change, live network call, or an explicit
+cutover decision) outside this patch's and this session's scope.
+
+**Recommended next slice:** none required to keep the registry-v2 schema
+itself complete. Full detail: `docs/specs/asset_core_01e_registry_v2_rates_schema_gap.md`.

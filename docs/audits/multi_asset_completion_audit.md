@@ -1523,6 +1523,53 @@ crypto paper/live execution; no crypto strategy.
 `MiniQuantDesk_Master_Patch_Ledger_v2.md`'s
 `CRYPTO-DATA-03C-KRAKEN-SCHEDULER-TASK-STATUS-SURFACE-01` entry.
 
+## 73. ASSET-CORE-01E-REGISTRY-V2-RATES-SCHEMA-GAP-01 Closure Note (maintenance)
+
+A session asked to "start `ASSET-CORE-01`" found, on direct inspection at
+`HEAD` (`1d51a69a`), that the requested enum-mapping/schema/validator-CLI
+work already existed and was `CLOSED_LOCAL` under `ASSET-CORE-01A`/`01B`/`01C`
+(and `01D`, and the full `CRYPTO-DATA-01A`..`03C` lineage). Rather than
+duplicate it, this patch traced the ledger's "Recommended next slice" chain
+to `HEAD`, found every thread blocked by hard session constraints (network
+calls, production cutover, trading enablement), then read the registry-v2
+schema directly against its own stated seven-category requirement
+(equities, ETFs, crypto spot, futures, options, forex, rates/fixed income)
+and found rates/fixed income was never modeled anywhere in
+`ContractDefinitionV2`.
+
+**Built:** `core-rs/crates/mqk-md/src/instrument_registry_v2.rs` —
+`"rate"` added to `CANONICAL_ASSET_CLASSES_V2`;
+`ContractDefinitionV2::Rate { issuer, maturity, coupon_bps,
+face_value_micros }`; a `"rate"` match arm in `validate_contract_v2`
+(fail-closed shape validation, same pattern as `future`/`option`/`crypto`/
+`forex`); a `base_rate` test fixture; `rate` folded into the existing
+exhaustive multi-class tests (`v2_01`, `v2_07`, `v2_17`, `econ05`, `sug04`);
+two new tests (`v2_11b` field violations, `v2_11c` zero-coupon validates).
+`core-rs/crates/mqk-daemon/src/routes/system.rs::contract_kind_label` gained
+a `Rate { .. } => "rate"` arm (required for the crate to compile against the
+new variant; label-only).
+
+**Test proof:** `cargo test -p mqk-md instrument_registry_v2` — 50/50 pass.
+`cargo test -p mqk-md` (full crate) — 353 total pass, zero regressions.
+`cargo clippy -p mqk-md -p mqk-schemas --all-targets -- -D warnings` —
+clean. `cargo check -p mqk-daemon -p mqk-cli` — clean. `cargo test -p
+mqk-daemon --test scenario_instrument_registry_v2_status_asset_core_01c` —
+13/13 pass (regression, unaffected). `cargo clippy -p mqk-daemon --lib --
+-D warnings` — clean.
+
+**Not resolved (`ASSET-CORE-01` remains `PARTIAL`, not `CLOSED`):**
+`InstrumentRegistryV2` is still never read by any trading/execution/risk/
+OMS/ingestion path; no live non-equity provider network-verified beyond
+existing CoinLore/Kraken checks; no production registry-v2 cutover
+decision made. Each requires crossing a boundary (execution-path change,
+live network call, or an explicit cutover decision) this patch and its
+predecessors were barred from crossing.
+
+**Full detail, exact evidence citations, and validation commands:**
+`MiniQuantDesk_Master_Patch_Ledger_v2.md`'s
+`ASSET-CORE-01E-REGISTRY-V2-RATES-SCHEMA-GAP-01` entry, and
+`docs/specs/asset_core_01e_registry_v2_rates_schema_gap.md`.
+
 **Safety confirmation:** no config flag changed; no config file mutated; no
 Kraken API call; no provider/network call of any kind; no DB
 connection/mutation; no scheduled task registered, unregistered, or

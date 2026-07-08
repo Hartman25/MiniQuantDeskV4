@@ -1241,6 +1241,7 @@ fn contract_kind_label(
         Some(ContractDefinitionV2::Option { .. }) => "option",
         Some(ContractDefinitionV2::CryptoPair { .. }) => "crypto_pair",
         Some(ContractDefinitionV2::ForexPair { .. }) => "forex_pair",
+        Some(ContractDefinitionV2::Rate { .. }) => "rate",
     }
 }
 
