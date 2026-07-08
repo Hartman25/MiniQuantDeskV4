@@ -1721,3 +1721,15 @@ network or DB call, and touched no broker/execution/risk/OMS/runtime/
 strategy/portfolio code.
 
 **Full detail:** `docs/specs/roadmap_completion_reconcile_01.md`.
+
+## 79. REGISTRY-V2-TRANSLATION-01A-SYMBOL-KEYED-CONSUMER-AUDIT-01 Closure Note (maintenance)
+
+`CLOSED_LOCAL / AUDIT-ONLY`. Names every current symbol-string-keyed
+production surface relevant to `ASSET-CORE-01H` prerequisite #2 (`md_bars`,
+`oms_outbox` order_json, `mqk-portfolio`/`mqk-reconcile`/`mqk-runtime`
+positions/snapshots, backtest/bar lookup CLI surfaces), confirms the current
+88-row `config/instruments/equities.json` universe has zero duplicate
+`symbol`/`instrument_id` values, and names the minimal translation contract
+the next phase (`REGISTRY-V2-TRANSLATION-01B`) must implement. Docs-only —
+no code touched, no trading enabled, no DB/network call made. Full detail:
+`docs/specs/registry_v2_translation_01a_symbol_keyed_consumer_audit.md`.

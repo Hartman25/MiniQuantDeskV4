@@ -4894,3 +4894,45 @@ between `InstrumentRegistryV2` and the existing symbol-string-keyed tables
 `ASSET-CORE-01H`'s production-cutover checklist, now that prerequisite #1 is
 closed. `REGISTRY-V2-PRODUCTION-CUTOVER-DECISION-01` itself remains blocked
 on four of its five prerequisites and is explicitly not recommended yet.
+
+### REGISTRY-V2-TRANSLATION-01A-SYMBOL-KEYED-CONSUMER-AUDIT-01 — CLOSED_LOCAL / AUDIT-ONLY
+
+**Mission:** ground `ASSET-CORE-01H`'s production-cutover prerequisite #2
+(an explicit `instrument_id`/symbol translation layer) in current repo
+evidence before writing any translation code, per
+`docs/specs/roadmap_completion_reconcile_01.md`'s next-best-patch
+recommendation. Docs-only.
+
+**Built:** `docs/specs/registry_v2_translation_01a_symbol_keyed_consumer_audit.md`
+— names every current symbol-string-keyed production surface (`md_bars`,
+`oms_outbox` order_json, `mqk-portfolio`/`mqk-reconcile`/`mqk-runtime`
+`PositionSnapshot`/`PortfolioState` positions, backtest/bar lookup CLI
+surfaces), the current `InstrumentRegistryV2`/v1 identity fields available
+for translation, direct confirmation that the current 88-row
+`config/instruments/equities.json` universe has zero duplicate
+`symbol`/`instrument_id` values (14 ETF rows share the same bare-ticker
+keyspace as plain equities, no separate namespace), and the minimal
+translation contract (`instrument_id<->legacy symbol`,
+`canonical symbol->instrument_id`, `canonical symbol->legacy symbol`) Phase
+B must implement. `scripts/guards/validate_registry_v2_translation_01a_audit.ps1`
+— 8-check pure docs validator mirroring the
+`validate_backtest_multiplier_margin_01_completion.ps1` pattern.
+
+**Deliberately not done:** no code file touched; no config flag changed; no
+trading enabled; no network or DB call made; no production registry-v2
+cutover attempted or implied; provider-alias-to-canonical-symbol
+translation explicitly scoped out (no current consumer needs it).
+
+**Validation:** `powershell -ExecutionPolicy Bypass -File
+scripts\guards\validate_registry_v2_translation_01a_audit.ps1` — all 8
+checks passed. `git diff --check` — clean.
+
+**Safety confirmation:** zero network calls; zero DB access/mutation; zero
+config flag changes; no crypto/futures/options/forex/rates trading enabled;
+no broker/order/risk/runtime/strategy/portfolio code touched; no generated
+evidence staged.
+
+**Recommended next slice:** `REGISTRY-V2-TRANSLATION-01B-PURE-LOOKUP-LAYER-01`
+— a pure, fail-closed translation/lookup index in
+`core-rs/crates/mqk-md/src/instrument_registry_v2.rs`, implementing exactly
+the contract named above.
