@@ -639,6 +639,51 @@ side effects, and zero-leftover cleanup for both BTC/USD and ETH/USD. See
 Alpaca-only. **No recurring ingestion, no scheduler, no daemon job, no GUI
 surface, and no crypto trading enablement.**
 
+## Kraken Scheduled-Sync Network Gate (CRYPTO-DATA-03A-KRAKEN-SCHEDULED-NETWORK-GATE-01)
+
+`kraken-ohlc-sync` now accepts a second, explicit network opt-in env var
+distinct from the manual-smoke gate:
+
+```text
+MQK_ALLOW_KRAKEN_NETWORK_SMOKE=1     # existing: manual operator smoke test
+MQK_ALLOW_KRAKEN_SCHEDULED_SYNC=1    # new: a future, separately-registered
+                                      # scheduled task (see CRYPTO-DATA-03B)
+```
+
+`MQK_ALLOW_KRAKEN_NETWORK_SMOKE` is the right name for a human running a
+one-off manual smoke test; it is the wrong name for an unattended scheduled
+task to depend on. Both env vars are accepted only by `kraken-ohlc-sync` --
+neither is read by `kraken-ohlc-dry-run` or `kraken-ohlc-ingest`, which keep
+their existing single-gate behavior unchanged.
+
+Without `--input-file`, the command still fails closed
+(`kraken_sync_requires_input_file_or_network_opt_in`) if neither env var is
+set. If either is set, the command now also fails closed
+(`kraken_sync_requires_database_url_for_network_mode`) if `MQK_DATABASE_URL`
+is not configured, before making any network call -- a run that cannot
+persist its result must never spend a live Kraken API call first. Evidence
+records which gate authorized the run via `network_authorization_mode`
+(`"input_file"` / `"manual_smoke_env"` / `"scheduled_sync_env"`), printed to
+stdout and written into the evidence JSON alongside the existing `mode`
+field.
+
+The gate decision itself
+(`kraken_sync_network_gate` in `core-rs/crates/mqk-cli/src/commands/md.rs`)
+is a pure, I/O-free function, exhaustively unit-tested in place
+(`cargo test -p mqk-cli --bin mqk-cli kraken_sync_network_gate`). This repo's
+local dev `.env.local` always supplies a real `MQK_DATABASE_URL` to any
+spawned `mqk-cli` process (via `dotenvy::from_filename(".env.local")` in
+`main.rs`), which makes the "DB url absent" case unobservable through a
+subprocess-based CLI test in this environment -- the pure-function unit test
+is what actually proves that fail-closed path; see
+`core-rs/crates/mqk-cli/tests/scenario_cli_kraken_scheduler_task_gate_03a.rs`
+for the full explanation and the two subprocess-safe cases it does cover.
+
+**No Windows Scheduled Task registration, no daemon job, and no crypto
+trading enablement.** This patch only adds a second opt-in env var and a
+DB-url presence check to an existing, already-fail-closed, single-operator-
+invocation command.
+
 ## Kraken OHLC Evidence Status Route (CRYPTO-DATA-01AD-KRAKEN-SYNC-EVIDENCE-STATUS-ROUTE-01)
 
 Read-only operator visibility for Kraken ingest/sync evidence, mirroring the

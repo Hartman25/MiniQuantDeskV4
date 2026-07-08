@@ -4096,3 +4096,119 @@ would actually register a Windows Scheduled Task, gated behind every
 invariant `CRYPTO-DATA-02A`/`02B`/`02C` recorded and this readiness surface
 reporting `active`/`scheduler_ready_manual_registration_blocked` at
 registration time.
+
+### CRYPTO-DATA-03A-KRAKEN-SCHEDULED-NETWORK-GATE-01 — CLOSED_LOCAL / PARTIAL
+
+**Mission:** continuing after `CRYPTO-DATA-02C-KRAKEN-SCHEDULER-READINESS-STATUS-SURFACE-01`
+(committed `ad7b9aca`), add a second, explicit network opt-in env var to
+`mqk md kraken-ohlc-sync`, distinct from the existing manual-smoke gate
+`MQK_ALLOW_KRAKEN_NETWORK_SMOKE`, so a future, separately-authorized
+Windows Scheduled Task (`CRYPTO-DATA-03B`, not built by this patch) can
+authorize itself without depending on a variable named "SMOKE".
+
+**Concretely:** `kraken-ohlc-sync` now accepts either
+`MQK_ALLOW_KRAKEN_NETWORK_SMOKE=1` (unchanged, manual operator smoke) or
+`MQK_ALLOW_KRAKEN_SCHEDULED_SYNC=1` (new) to authorize a live network
+fetch when `--input-file` is absent; `kraken-ohlc-dry-run` and
+`kraken-ohlc-ingest` are untouched and still read only the original
+manual-smoke gate. The gate decision was extracted into a pure, I/O-free
+function, `kraken_sync_network_gate(manual_smoke_env, scheduled_sync_env,
+db_url_present) -> Result<&'static str, &'static str>`, in
+`core-rs/crates/mqk-cli/src/commands/md.rs`, exhaustively unit-tested in
+place. The command now also fails closed
+(`kraken_sync_requires_database_url_for_network_mode`) when
+`MQK_DATABASE_URL` is not configured, *before* attempting any network
+call — a run that cannot persist its result must never spend a live
+Kraken API call first. Evidence gained a new `network_authorization_mode`
+field (`"input_file"` / `"manual_smoke_env"` / `"scheduled_sync_env"`),
+printed to stdout and written into the evidence JSON.
+
+**Built:**
+- `core-rs/crates/mqk-cli/src/commands/md.rs` — new
+  `ENV_ALLOW_KRAKEN_SCHEDULED_SYNC` constant, new pure
+  `kraken_sync_network_gate` function plus its `#[cfg(test)]` unit-test
+  module (`kraken_sync_network_gate_tests`, 4 tests), `md_kraken_ohlc_sync`
+  updated to call it and to print/emit `network_authorization_mode`.
+- `core-rs/crates/mqk-cli/src/main.rs` — doc-comment updates on
+  `KrakenOhlcSync::input_file` only; no clap surface change (the new env
+  var needs no new flag).
+- `core-rs/crates/mqk-cli/tests/scenario_cli_kraken_scheduler_task_gate_03a.rs`
+  — new: 1 negative-path subprocess test (neither env var set, names both
+  gates), 1 `--input-file`-mode-unaffected subprocess test (using a
+  deliberately-unreachable `MQK_DATABASE_URL` override so it fails on a
+  connection error, never touching a real database), and 1 `#[ignore]`-gated
+  DB-backed evidence-shape test following the existing explicit-`.env(...)`-
+  override convention.
+- `docs/runbooks/local_crypto_marks_ingest.md` — new "Kraken Scheduled-Sync
+  Network Gate" section, including the `.env.local`/dotenvy caveat below.
+- `docs/specs/crypto_data_02a_kraken_scheduler_rate_limit_decision.md` — no
+  content change; re-validated against the existing guard, unaffected.
+- `MiniQuantDesk_Master_Patch_Ledger_v2.md` — this entry.
+- `docs/audits/multi_asset_completion_audit.md` — new closure note.
+
+**Safety incident during development, disclosed honestly:** an earlier
+version of `scenario_cli_kraken_scheduler_task_gate_03a.rs` tried to prove
+"env var recognized" by removing `MQK_DATABASE_URL` from the test
+subprocess's environment and expecting the new DB-url gate to trip. This
+does not work in this repo: `mqk-cli`'s `main.rs` calls
+`dotenvy::from_filename(".env.local")` at startup, which re-populates any
+env var not already present in the child process from the repo's
+`.env.local` file — so the removed `MQK_DATABASE_URL` came back as a real
+paper-DB URL inside the spawned process, regardless of the test harness's
+removal. Two of those tests then proceeded past the (correctly-passing)
+opt-in gate and the (correctly-passing, because a real DB URL was now
+present) DB-url gate, reached the live network-fetch call, and made a
+genuine live call to Kraken's public OHLC endpoint for BTC/USD; a third
+(`--input-file` mode) wrote real fetched-and-fixture data into the local
+paper DB (`postgres://…@127.0.0.1:5440/miniquantdesk_paper`). This was
+caught immediately from the tests' own unexpected-success failures (not
+from silent success), disclosed to the operator before any further action,
+and remediated with the operator's explicit go-ahead: `psql` confirmed 720
+`provider_id='kraken'` rows for `BTC/USD` (none for `ETH/USD`, confirming
+the incident's exact scope) and zero unexpected `oms_outbox` rows; all 720
+were deleted and a re-query confirmed zero `provider_id='kraken'` rows
+remain. The test file was then redesigned as described above (pure-function
+unit tests for the "recognized" cases; the two subprocess tests kept are
+both safe regardless of `.env.local`'s contents) specifically so this
+failure mode cannot recur. No live order, broker, or trading path was
+touched; the incident was confined to a public, keyless market-data GET
+and a `md_bars` write for a symbol/provider this repo already treats as
+disabled-by-default for trading.
+
+**Validation results (`CARGO_TARGET_DIR=C:\tmp\mqk-target-crypto-data-03a-kraken-scheduled-gate`):**
+`cargo check -p mqk-cli -p mqk-md -p mqk-db` — clean. `cargo test -p
+mqk-cli --test scenario_cli_kraken_scheduler_task_gate_03a` — 2/2 non-
+ignored pass, 1 correctly `#[ignore]`d. `cargo test -p mqk-cli --bin
+mqk-cli kraken_sync_network_gate` — 4/4 unit tests pass. `cargo test -p
+mqk-cli --test scenario_cli_kraken_ohlc_sync_db_01zaa` — 1/1 non-ignored
+pass (unaffected). `cargo test -p mqk-cli --test
+scenario_cli_kraken_ohlc_dry_run_01w` — 7/7 pass (unaffected; this command
+was not touched). `cargo test -p mqk-cli --test
+scenario_cli_kraken_scheduler_readiness_02b` — 12/12 pass (unaffected).
+`cargo clippy -p mqk-cli -p mqk-md -p mqk-db --all-targets -- -D warnings`
+— clean, zero warnings. `validate_crypto_data_02a_kraken_scheduler_decision.ps1`
+— all 16 checks pass (unaffected; this patch changes no policy artifact).
+`git diff --check` — clean. The `#[ignore]`-gated DB-backed evidence test
+(`gate03_evidence_records_input_file_network_authorization_mode`) was
+**not executed** during this validation pass, out of caution following the
+incident above — it requires the operator to explicitly run it with
+`--include-ignored` and a `MQK_DATABASE_URL` they choose.
+
+**Zero live Kraken API calls, zero DB mutation, and zero scheduler
+registration in the final validated state of this patch** — the incident
+above occurred during development, was fully disclosed and remediated
+before this entry was written, and the shipped test suite cannot reproduce
+it (proven by 2/2 passing subprocess tests that are safe by construction
+plus 4/4 passing pure unit tests, with no code path in the committed test
+file capable of reaching a live network call).
+
+**Honest PARTIAL — `CRYPTO-DATA-01`/`CRYPTO-REGISTRY-01`/`ASSET-CORE-04`
+remain PARTIAL, not `CLOSED`:** this patch only adds a second opt-in env
+var and a DB-url presence check to an already-fail-closed,
+single-operator-invocation command. `kraken.enabled` stays `false`.
+`BTC/USD`/`ETH/USD` trading flags stay `false`. No Windows Scheduled Task,
+no daemon job, no GUI surface change.
+
+**Recommended next slice:** `CRYPTO-DATA-03B-KRAKEN-SCHEDULER-TASK-SCRIPTS-01`
+— the optional, default-unregistered Windows runner/registration scripts
+that will actually depend on `MQK_ALLOW_KRAKEN_SCHEDULED_SYNC`.

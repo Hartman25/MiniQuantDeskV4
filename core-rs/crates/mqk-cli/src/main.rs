@@ -579,7 +579,10 @@ enum MdCmd {
 
         /// Path to a local file containing a Kraken /0/public/OHLC response
         /// body. When omitted, a live network call is attempted only if
-        /// MQK_ALLOW_KRAKEN_NETWORK_SMOKE=1.
+        /// MQK_ALLOW_KRAKEN_NETWORK_SMOKE=1 (manual operator smoke) or
+        /// MQK_ALLOW_KRAKEN_SCHEDULED_SYNC=1 (a future, separately-
+        /// registered scheduled task); either also requires
+        /// MQK_DATABASE_URL to already be set.
         #[arg(long)]
         input_file: Option<PathBuf>,
 

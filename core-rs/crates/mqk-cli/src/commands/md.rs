@@ -1273,12 +1273,91 @@ pub async fn md_kraken_ohlc_ingest(
 // all (`md_bars_write=false`).
 // ---------------------------------------------------------------------------
 
+/// CRYPTO-DATA-03A-KRAKEN-SCHEDULED-NETWORK-GATE-01: a second, explicit
+/// network opt-in distinct from `MQK_ALLOW_KRAKEN_NETWORK_SMOKE`. That name
+/// is right for a human operator's manual smoke test, but wrong for an
+/// intentional, future, operator-registered scheduled sync task to depend
+/// on -- a scheduled task should not authorize itself via a variable named
+/// "SMOKE". Both env vars are accepted by `kraken-ohlc-sync` only; neither
+/// is read by `kraken-ohlc-dry-run` or `kraken-ohlc-ingest`.
+const ENV_ALLOW_KRAKEN_SCHEDULED_SYNC: &str = "MQK_ALLOW_KRAKEN_SCHEDULED_SYNC";
+
 /// Schema version of the evidence JSON written by `--output-dir`.
 const KRAKEN_OHLC_SYNC_EVIDENCE_SCHEMA_VERSION: &str = "kraken-ohlc-sync-v2";
 
+/// Pure decision (no I/O) for `kraken-ohlc-sync`'s network-fetch branch:
+/// which network-authorization mode, if any, governs this run. Exhaustively
+/// unit-tested below (`kraken_sync_network_gate_tests`); `md_kraken_ohlc_sync`
+/// is the only I/O-performing caller. Fails closed with a reason code if
+/// neither opt-in env var is set, or if the DB write target is not
+/// configured -- a scheduled/smoke run that cannot persist its result must
+/// never spend a live Kraken API call first. Deliberately takes plain
+/// booleans rather than reading the environment itself, so this exact
+/// decision can be unit tested without spawning a process or touching a
+/// real `.env.local`-provided `MQK_DATABASE_URL` (which this repo's dev
+/// environment always supplies, making the DB-absent case unreachable via a
+/// subprocess-based CLI test).
+fn kraken_sync_network_gate(
+    manual_smoke_env: bool,
+    scheduled_sync_env: bool,
+    db_url_present: bool,
+) -> Result<&'static str, &'static str> {
+    if !manual_smoke_env && !scheduled_sync_env {
+        return Err("kraken_sync_requires_input_file_or_network_opt_in");
+    }
+    if !db_url_present {
+        return Err("kraken_sync_requires_database_url_for_network_mode");
+    }
+    Ok(if manual_smoke_env { "manual_smoke_env" } else { "scheduled_sync_env" })
+}
+
+#[cfg(test)]
+mod kraken_sync_network_gate_tests {
+    use super::kraken_sync_network_gate;
+
+    #[test]
+    fn neither_env_var_refuses_regardless_of_db_url() {
+        assert_eq!(
+            kraken_sync_network_gate(false, false, true),
+            Err("kraken_sync_requires_input_file_or_network_opt_in")
+        );
+        assert_eq!(
+            kraken_sync_network_gate(false, false, false),
+            Err("kraken_sync_requires_input_file_or_network_opt_in")
+        );
+    }
+
+    #[test]
+    fn manual_smoke_env_recognized_but_requires_db_url() {
+        assert_eq!(
+            kraken_sync_network_gate(true, false, false),
+            Err("kraken_sync_requires_database_url_for_network_mode")
+        );
+        assert_eq!(kraken_sync_network_gate(true, false, true), Ok("manual_smoke_env"));
+    }
+
+    #[test]
+    fn scheduled_sync_env_recognized_but_requires_db_url() {
+        assert_eq!(
+            kraken_sync_network_gate(false, true, false),
+            Err("kraken_sync_requires_database_url_for_network_mode")
+        );
+        assert_eq!(kraken_sync_network_gate(false, true, true), Ok("scheduled_sync_env"));
+    }
+
+    #[test]
+    fn both_env_vars_set_prefers_manual_smoke_label() {
+        assert_eq!(kraken_sync_network_gate(true, true, true), Ok("manual_smoke_env"));
+    }
+}
+
 /// Execute `mqk md kraken-ohlc-sync`: resolve the Kraken alias for
-/// `--symbol`, obtain a Kraken `/0/public/OHLC` response body (fixture-first,
-/// same fail-closed gate as `kraken-ohlc-ingest`), parse it, read existing
+/// `--symbol`, obtain a Kraken `/0/public/OHLC` response body (fixture-first;
+/// without `--input-file`, a live fetch is authorized by either
+/// `MQK_ALLOW_KRAKEN_NETWORK_SMOKE=1` (manual operator smoke) or
+/// `MQK_ALLOW_KRAKEN_SCHEDULED_SYNC=1` (CRYPTO-DATA-03A: a future,
+/// separately-registered scheduled task) -- neither is read by
+/// `kraken-ohlc-dry-run` or `kraken-ohlc-ingest`), parse it, read existing
 /// `md_bars` rows for the exact candidate `end_ts` keys, classify each
 /// completed (non-forming) bar as missing/changed/unchanged by comparing
 /// OHLCV + `is_complete` + provider provenance, then upsert only the
@@ -1326,19 +1405,40 @@ pub async fn md_kraken_ohlc_sync(
             (content, false, "input_file")
         }
         None => {
-            let allowed = std::env::var(ENV_ALLOW_KRAKEN_NETWORK_SMOKE)
+            let manual_smoke_env = std::env::var(ENV_ALLOW_KRAKEN_NETWORK_SMOKE)
                 .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
                 .unwrap_or(false);
-            if !allowed {
-                anyhow::bail!(
-                    "kraken-ohlc-sync: no --input-file provided and {ENV_ALLOW_KRAKEN_NETWORK_SMOKE} is not set; \
-                     refusing to make a network call by default (kraken_sync_requires_input_file_or_network_opt_in)"
-                );
-            }
+            let scheduled_sync_env = std::env::var(ENV_ALLOW_KRAKEN_SCHEDULED_SYNC)
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false);
+            let db_url_present = std::env::var(mqk_db::ENV_DB_URL).is_ok();
+
+            let network_authorization_mode = match kraken_sync_network_gate(
+                manual_smoke_env,
+                scheduled_sync_env,
+                db_url_present,
+            ) {
+                Ok(mode) => mode,
+                Err("kraken_sync_requires_input_file_or_network_opt_in") => {
+                    anyhow::bail!(
+                        "kraken-ohlc-sync: no --input-file provided and neither \
+                         {ENV_ALLOW_KRAKEN_NETWORK_SMOKE} nor {ENV_ALLOW_KRAKEN_SCHEDULED_SYNC} is set; \
+                         refusing to make a network call by default \
+                         (kraken_sync_requires_input_file_or_network_opt_in)"
+                    );
+                }
+                Err(reason_code) => {
+                    anyhow::bail!(
+                        "kraken-ohlc-sync: {} is not set; refusing network fetch without a configured \
+                         DB target ({reason_code})",
+                        mqk_db::ENV_DB_URL
+                    );
+                }
+            };
             let body = mqk_md::fetch_kraken_ohlc_body(&alias.kraken_pair)
                 .await
                 .map_err(|e| anyhow::anyhow!("kraken-ohlc-sync: network fetch failed: {e}"))?;
-            (body, true, "network_smoke")
+            (body, true, network_authorization_mode)
         }
     };
 
@@ -1474,6 +1574,7 @@ pub async fn md_kraken_ohlc_sync(
     println!("provider_symbol={}", parsed.provider_pair_key);
     println!("ingest_mode=provider_sync");
     println!("mode={mode}");
+    println!("network_authorization_mode={mode}");
     println!("network_call_made={network_call_made}");
     println!("db_write=true");
     println!("md_bars_write={md_bars_write}");
@@ -1517,6 +1618,7 @@ pub async fn md_kraken_ohlc_sync(
             "produced_at_utc": produced_at_utc,
             "provider": mqk_md::KRAKEN_PROVIDER_ID,
             "mode": mode,
+            "network_authorization_mode": mode,
             "network_call_made": network_call_made,
             "db_write": true,
             "md_bars_write": md_bars_write,
