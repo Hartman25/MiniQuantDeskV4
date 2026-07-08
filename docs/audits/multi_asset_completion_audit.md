@@ -1451,3 +1451,39 @@ touched; no live or paper order submitted; no crypto/futures/options/forex
 trading enabled; only the files in this bundle's stated scope changed. The
 one incident that did occur during development (see above) was fully
 remediated before this note was written.
+
+## 71. CRYPTO-DATA-03B-KRAKEN-SCHEDULER-TASK-SCRIPTS-01 Closure Note (maintenance)
+
+Continuing after `§70` (`CRYPTO-DATA-03A`, scheduled-sync network gate),
+this patch adds the optional Windows runner (`Run-KrakenOhlcSync.ps1`) and
+registration wrapper (`Register-KrakenOhlcSyncTask.ps1`) scripts for a
+future Kraken OHLC scheduled sync, plus a 17-check validator. Recorded here
+per `audit_repo_truth_rules.md` rather than left only in commit history.
+
+**Built:** `scripts/windows/Run-KrakenOhlcSync.ps1`,
+`scripts/windows/Register-KrakenOhlcSyncTask.ps1`,
+`scripts/guards/validate_crypto_data_03b_kraken_scheduler_task_scripts.ps1`,
+`docs/specs/crypto_data_03b_kraken_scheduler_task_scripts.md`.
+
+**Test proof:** validator — 17/17 checks pass.
+`Register-KrakenOhlcSyncTask.ps1 -CheckOnly` and
+`Run-KrakenOhlcSync.ps1 -CheckOnly` (with the local paper DB URL set) both
+exit 0 with evidence proving zero network/DB/task mutation; a direct
+`Get-ScheduledTask` query confirmed no task was left registered after any
+validation step. `-Register` was never invoked.
+
+**Not resolved (`ASSET-CORE-04`/`CRYPTO-REGISTRY-01`/`CRYPTO-DATA-01` remain
+`PARTIAL`, not `CLOSED`):** no Windows Scheduled Task registered; no daemon
+recurring job; `kraken.enabled` stays `false`; no registry flag flipped; no
+crypto trading enablement.
+
+**Full detail, exact evidence citations, and validation commands:**
+`MiniQuantDesk_Master_Patch_Ledger_v2.md`'s
+`CRYPTO-DATA-03B-KRAKEN-SCHEDULER-TASK-SCRIPTS-01` entry.
+
+**Safety confirmation:** no config flag changed; no config file mutated; no
+Kraken API call; no DB mutation; no scheduled task registered or started;
+no daemon job added; no daemon runtime started;
+no broker/risk/execution/OMS/runtime/strategy file touched; no live or
+paper order submitted; no crypto trading enabled; only the files in this
+bundle's stated scope changed.

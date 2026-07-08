@@ -904,6 +904,38 @@ Implemented in `core-rs/crates/mqk-daemon/src/routes/transport_quality.rs::krake
 Tested in `core-rs/crates/mqk-daemon/tests/scenario_kraken_scheduler_readiness_route_02c.rs`
 and `core-rs/mqk-gui/src/features/ingest/__tests__/api.test.ts`.
 
+## Kraken Scheduler Task Scripts (CRYPTO-DATA-03B-KRAKEN-SCHEDULER-TASK-SCRIPTS-01)
+
+Optional, default-unregistered Windows Scheduled Task scripts for a
+**future** Kraken OHLC scheduled sync:
+
+```text
+scripts\windows\Run-KrakenOhlcSync.ps1
+scripts\windows\Register-KrakenOhlcSyncTask.ps1
+```
+
+`Run-KrakenOhlcSync.ps1` is what a scheduled task would call. It validates
+repo/policy/registry/providers paths, `cargo`/`MQK_DATABASE_URL` (paper DB
+only)/`MQK_ALLOW_KRAKEN_SCHEDULED_SYNC` presence, symbol count/timeframe,
+and a live `kraken-scheduler-readiness` check reporting `truth_state=active`
+— all before ever calling `kraken-ohlc-sync`. Defaults to `-CheckOnly`,
+which performs every gate and writes evidence but never calls
+`kraken-ohlc-sync`, never makes a network call, and never writes to the
+database.
+
+`Register-KrakenOhlcSyncTask.ps1` is the registration wrapper, mirroring
+`Register-LocalCryptoIngestTask.ps1` (`CRYPTO-DATA-01E`). Defaults to
+`-CheckOnly` (preview only) whenever neither `-Register` nor `-Unregister`
+is explicitly passed; the task action never embeds `MQK_DATABASE_URL` or
+any credential, and the script never reads `.env.local` or starts the task
+it registers.
+
+**The task is not registered by this patch.** `-Register` was never
+invoked during this patch's own validation — see
+`docs/specs/crypto_data_03b_kraken_scheduler_task_scripts.md` and
+`scripts/guards/validate_crypto_data_03b_kraken_scheduler_task_scripts.ps1`
+for the full contract and proof.
+
 ## Remaining Gaps
 
 - `sync-provider` (incremental backfill) still has no Kraken path — an

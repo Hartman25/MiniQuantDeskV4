@@ -4212,3 +4212,71 @@ no daemon job, no GUI surface change.
 **Recommended next slice:** `CRYPTO-DATA-03B-KRAKEN-SCHEDULER-TASK-SCRIPTS-01`
 — the optional, default-unregistered Windows runner/registration scripts
 that will actually depend on `MQK_ALLOW_KRAKEN_SCHEDULED_SYNC`.
+
+### CRYPTO-DATA-03B-KRAKEN-SCHEDULER-TASK-SCRIPTS-01 — CLOSED_LOCAL / PARTIAL
+
+**Mission:** continuing after `CRYPTO-DATA-03A-KRAKEN-SCHEDULED-NETWORK-GATE-01`
+(committed `2ec1aab0`), add the optional Windows runner and registration
+scripts for a **future** Kraken OHLC scheduled sync — without registering a
+task, without a live Kraken network call, and without mutating the
+database during this patch's own validation.
+
+**Concretely:** two new scripts under `scripts\windows\`:
+`Run-KrakenOhlcSync.ps1` (the runner a future task would call — validates
+17 prerequisite gates including a live, read-only `kraken-scheduler-readiness`
+check, defaults to `-CheckOnly` which never calls `kraken-ohlc-sync`) and
+`Register-KrakenOhlcSyncTask.ps1` (the registration wrapper, defaults to
+`-CheckOnly`/preview whenever neither `-Register` nor `-Unregister` is
+passed, mirroring `Register-LocalCryptoIngestTask.ps1`'s `CRYPTO-DATA-01E`
+pattern). Plus a validator and a spec doc.
+
+**Built:**
+- `scripts/windows/Run-KrakenOhlcSync.ps1` — new.
+- `scripts/windows/Register-KrakenOhlcSyncTask.ps1` — new.
+- `scripts/guards/validate_crypto_data_03b_kraken_scheduler_task_scripts.ps1`
+  — new, 17 checks (parser, task-name references, check-only defaults,
+  explicit `-Register`/`-Unregister`, no embedded `MQK_DATABASE_URL`/
+  credentials, no `.env.local` read, no `Start-ScheduledTask` call, DB-url
+  and scheduled-sync-env fail-closed gates, `kraken-scheduler-readiness`/
+  `kraken-ohlc-sync` call-shape checks, sequential-call/sleep enforcement,
+  forbidden-pattern absence, two live `-CheckOnly` runtime proofs with
+  evidence-field assertions, idempotent `-Unregister`, and spec-doc
+  content checks). Two initial false positives (a doc comment saying
+  "does NOT read .env.local" and a CheckOnly section header saying "no
+  kraken-ohlc-sync call" both tripped naive substring checks) were fixed
+  by making checks [6]/[11] pattern-match actual functional calls instead
+  of any substring — both scripts were correct; only the validator's
+  first-draft checks were too naive.
+- `docs/specs/crypto_data_03b_kraken_scheduler_task_scripts.md` — new.
+- `docs/runbooks/local_crypto_marks_ingest.md` — new "Kraken Scheduler Task
+  Scripts" pointer section.
+- `MiniQuantDesk_Master_Patch_Ledger_v2.md` — this entry.
+- `docs/audits/multi_asset_completion_audit.md` — new closure note.
+
+**Validation results:** validator — 17/17 checks pass (after the two
+false-positive fixes above). `Register-KrakenOhlcSyncTask.ps1 -CheckOnly`
+— exit 0, `task_exists_before=false`, `task_exists_after=false`,
+`registered=false`. `Run-KrakenOhlcSync.ps1 -CheckOnly` with
+`MQK_DATABASE_URL` pointed at the local paper DB — exit 0, evidence shows
+`network_call_made=false`, `db_write=false`, `md_bars_write=false`,
+`scheduled_task_mutation=false`, `readiness_truth_state=active`.
+`Run-KrakenOhlcSync.ps1 -CheckOnly` with no `MQK_DATABASE_URL` set (this
+session's actual persistent-env state) — exit 1, `database_url_missing`,
+proving the fail-closed gate works as designed rather than silently
+passing. `validate_crypto_data_02a_kraken_scheduler_decision.ps1` — all 16
+checks still pass (unaffected; no policy artifact changed). `git diff
+--check` — clean. `-Register` was **not** invoked at any point during this
+patch's validation; a direct `Get-ScheduledTask` query confirmed
+`MiniQuantDesk-KrakenOhlcSync` does not exist in Task Scheduler after every
+validation step.
+
+**Honest PARTIAL — `CRYPTO-DATA-01`/`CRYPTO-REGISTRY-01`/`ASSET-CORE-04`
+remain PARTIAL, not `CLOSED`:** no Windows Scheduled Task was registered by
+this patch. `kraken.enabled` stays `false`. `BTC/USD`/`ETH/USD` trading
+flags stay `false`. No daemon job, no GUI surface change, no config file
+touched.
+
+**Recommended next slice:** `CRYPTO-DATA-03C-KRAKEN-SCHEDULER-TASK-STATUS-SURFACE-01`
+(conditional on staying small) — read-only daemon route + GUI panel
+exposing `kraken_ohlc_task_registration.json` evidence, mirroring the
+`CRYPTO-DATA-02C` pattern.
