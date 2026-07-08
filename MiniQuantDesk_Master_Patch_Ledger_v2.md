@@ -4280,3 +4280,115 @@ touched.
 (conditional on staying small) — read-only daemon route + GUI panel
 exposing `kraken_ohlc_task_registration.json` evidence, mirroring the
 `CRYPTO-DATA-02C` pattern.
+
+### CRYPTO-DATA-03C-KRAKEN-SCHEDULER-TASK-STATUS-SURFACE-01 — CLOSED_LOCAL / PARTIAL
+
+**Mission:** continuing after `CRYPTO-DATA-03B-KRAKEN-SCHEDULER-TASK-SCRIPTS-01`
+(committed `c886865a`), build the deferred read-only status surface for the
+`kraken_ohlc_task_registration.json` task-registration evidence contract:
+evidence → daemon read-only status route → GUI read-only panel. No task
+registration, no Kraken call, no DB access, no trading — Phase C only.
+
+**Concretely:** new `GET /api/v1/market-data/kraken-scheduler/task-status`
+route reads the fixed `kraken_ohlc_task_registration.json` file from the
+existing `md_refresh_evidence_dir` (no new `AppState` field needed — reuses
+the same evidence directory `kraken-ohlc/status`/`latest-marks/status`/
+`intraday-refresh/status` already read). `truth_state`: `active`,
+`no_evidence`, `parse_error`, `unsafe_evidence`, `backend_unavailable`
+(wrong `schema_version` classifies as `parse_error`, matching the existing
+`kraken-ohlc/status`/`intraday-refresh/status` convention rather than
+`unsafe_evidence`). Fail-closed unsafe-evidence checks cover:
+`mode="check_only"` combined with `scheduled_task_mutation=true` or
+`registered=true`; `network_call_made`/`db_write`/`md_bars_write=true`; a
+non-empty `env_vars_embedded`; a missing/empty `task_name`/`task_action`/
+`runner_path`; a `task_action` that doesn't reference
+`Run-KrakenOhlcSync.ps1`; and any broker/order/risk/runtime field
+(`order_id`, `broker_order_id`, `fill_price`, `position_id`, `account_id`,
+`side`, `limit_price`, `stop_price`) or claimed `task_started`/
+`daemon_job_added`/`trading_enabled`/`paper_trading_enabled`/
+`live_trading_enabled`. A genuine `mode="register"` evidence file with
+`registered=true` is surfaced truthfully as `active` (registration is the
+evidence contract's own documented outcome, not a route-side mutation) —
+only `check_only` claiming a mutation is unsafe.
+
+**Built:**
+- `core-rs/crates/mqk-daemon/src/api_types.rs` — new
+  `KrakenSchedulerTaskStatusResponse` and
+  `KrakenSchedulerTaskStatusEvidenceSafety` structs (the latter mirrors the
+  evidence file's own `safety` block verbatim — a producer claim passed
+  through, not a route-authored assertion).
+- `core-rs/crates/mqk-daemon/src/routes/transport_quality.rs` — new
+  `kraken_scheduler_task_status` handler, `kraken_scheduler_task_status_unsafe_reason`
+  fail-closed check function, and supporting constants/helpers.
+- `core-rs/crates/mqk-daemon/src/routes.rs` — route registered on the
+  public (no-auth) router, alongside the other read-only market-data
+  evidence routes.
+- `core-rs/crates/mqk-daemon/tests/scenario_kraken_scheduler_task_status_route_03c.rs`
+  — new, 13 tests (KTS-01..13): missing evidence dir, no evidence file,
+  valid check-only evidence round-trip, valid register evidence with
+  `registered=true` surfaced truthfully, malformed JSON, wrong
+  `schema_version`, `network_call_made`/`db_write`/`md_bars_write=true`,
+  non-empty `env_vars_embedded`, check-only claiming
+  `scheduled_task_mutation=true`, `task_action` missing the runner
+  reference, and no-DB-pool-required.
+- `core-rs/mqk-gui/src/features/ingest/types.ts` — new
+  `KrakenSchedulerTaskStatusResponse`/`KrakenSchedulerTaskStatusEvidenceSafety`
+  interfaces mirroring the daemon structs field-for-field.
+- `core-rs/mqk-gui/src/features/ingest/api.ts` — new
+  `fetchKrakenSchedulerTaskStatus`, `isKrakenSchedulerTaskStatusActive`,
+  `krakenSchedulerTaskStatusTruthLabel`, `isKrakenSchedulerTaskEvidenceUnsafe`
+  (defense-in-depth GUI-side guard), and the fixed
+  `KRAKEN_SCHEDULER_TASK_STATUS_WARNING_TEXT`.
+- `core-rs/mqk-gui/src/features/ingest/IngestScreen.tsx` — new "Kraken
+  scheduled task status" panel directly below the existing "Kraken
+  scheduler readiness" panel. Displays truth state, task
+  name/mode/exists-before/exists-after/registered/unregistered/check-only,
+  task action, runner path, schedule time, env vars required/embedded, the
+  mutation/network/db/md_bars flags, `all_passed`/`reason_code`/
+  `fail_reasons`/`warnings`, and evidence path. Only button is a local
+  "Refresh" re-GET — no register/unregister/start/run/sync button exists.
+- `core-rs/mqk-gui/src/features/ingest/__tests__/api.test.ts` — 24 new
+  tests covering all five truth-state labels, all `isKrakenSchedulerTaskEvidenceUnsafe`
+  branches (including the check-only-vs-register `registered=true`
+  distinction), fetch-route-path/GET-method assertions, `no_evidence`
+  handling, and network-failure mapping.
+- `docs/specs/crypto_data_03b_kraken_scheduler_task_scripts.md` — remaining-gaps
+  note updated: the route/panel gap is now closed by this patch.
+- `docs/runbooks/local_crypto_marks_ingest.md` — new "Kraken Scheduled Task
+  Status Route + GUI Panel" pointer section.
+- `MiniQuantDesk_Master_Patch_Ledger_v2.md` — this entry.
+- `docs/audits/multi_asset_completion_audit.md` — closure note.
+
+**Validation results:** `cargo check -p mqk-daemon` — clean.
+`cargo test -p mqk-daemon --test scenario_kraken_scheduler_task_status_route_03c`
+— 13/13 pass. `cargo test -p mqk-daemon --test scenario_kraken_scheduler_readiness_route_02c`
+— 8/8 pass (unaffected). `cargo test -p mqk-daemon --test scenario_kraken_ohlc_status_route_01ad`
+— 11/11 pass (unaffected). `cargo clippy -p mqk-daemon --lib -- -D warnings`
+— clean. `npm test -- --run` (mqk-gui) — 711/711 pass (24 new). `npm run
+build` (mqk-gui) — clean TypeScript compile + Vite build.
+`validate_crypto_data_03b_kraken_scheduler_task_scripts.ps1` — all checks
+still pass (unaffected; no script/guard file touched by this patch). No
+Windows Scheduled Task registered/unregistered/started at any point. No
+live Kraken API call. No DB connection opened. No PowerShell subprocess or
+CLI execution from the new route. GUI-side browser preview was not run
+against a live daemon per this patch's explicit "no daemon runtime except
+isolated route tests" safety rule — verification relies on the isolated
+Axum route tests above plus the GUI's pure-function test suite and a clean
+TypeScript build, matching this repo's established verification convention
+for these read-only evidence panels (no `.tsx` render-test harness exists
+in this repo).
+
+**Honest PARTIAL — `CRYPTO-DATA-01`/`CRYPTO-REGISTRY-01`/`ASSET-CORE-04`
+remain PARTIAL, not `CLOSED`:** this patch adds read-only evidence
+visibility only. No Windows Scheduled Task is registered by any patch or
+route — `Register-KrakenOhlcSyncTask.ps1 -Register` still requires an
+explicit, separate operator invocation. No daemon-native recurring job. No
+production registry-v2 cutover. No crypto session/calendar runtime
+enforcement. No crypto risk. No crypto paper/live execution. No crypto
+strategy.
+
+**Recommended next step:** operator-driven task registration
+(`Register-KrakenOhlcSyncTask.ps1 -Register`) remains a manual, explicit,
+separately-authorized action outside any patch's own validation — no
+further code patch is required to close that gap; it is an operational
+decision, not an engineering one.

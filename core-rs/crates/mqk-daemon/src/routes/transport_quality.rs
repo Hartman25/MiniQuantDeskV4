@@ -25,7 +25,8 @@ use crate::api_types::{
     CryptoRegistryReadinessResponse, CryptoRegistryReadinessSafety, CryptoRegistrySymbolReadiness,
     ExecutionTransportResponse, IntradayRefreshStatusResponse, IntradayRefreshSymbolStatus,
     KrakenOhlcStatusResponse, KrakenSchedulerReadinessResponse, KrakenSchedulerReadinessSafety,
-    KrakenSchedulerSymbolReadiness, LatestMarkStatusResponse, LatestMarkStatusRow,
+    KrakenSchedulerSymbolReadiness, KrakenSchedulerTaskStatusEvidenceSafety,
+    KrakenSchedulerTaskStatusResponse, LatestMarkStatusResponse, LatestMarkStatusRow,
     MarketDataQualityResponse, MdBarsCoverageResponse, MdBarsCoverageRow, TransportQueueRow,
 };
 use crate::market_data_freshness::{
@@ -2218,6 +2219,401 @@ pub(crate) async fn kraken_scheduler_readiness(
             no_trading_enabled: true,
             no_config_file_mutated: true,
         },
+    };
+
+    (StatusCode::OK, Json(response)).into_response()
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/market-data/kraken-scheduler/task-status
+// (CRYPTO-DATA-03C-KRAKEN-SCHEDULER-TASK-STATUS-SURFACE-01)
+// ---------------------------------------------------------------------------
+
+const KRAKEN_SCHEDULER_TASK_STATUS_ROUTE: &str =
+    "/api/v1/market-data/kraken-scheduler/task-status";
+const KRAKEN_SCHEDULER_TASK_STATUS_EVIDENCE_FILENAME: &str = "kraken_ohlc_task_registration.json";
+const KRAKEN_SCHEDULER_TASK_STATUS_SCHEMA_VERSION: &str = "kraken-ohlc-task-registration-v1";
+
+/// Top-level evidence fields whose presence would imply this route is
+/// looking at a broker/order/risk/runtime artifact, not a task-registration
+/// evidence file. `Register-KrakenOhlcSyncTask.ps1` never emits any of
+/// these; presence is treated as a fail-closed safety violation.
+const KRAKEN_SCHEDULER_TASK_STATUS_FORBIDDEN_FIELDS: [&str; 8] = [
+    "order_id",
+    "broker_order_id",
+    "fill_price",
+    "position_id",
+    "account_id",
+    "side",
+    "limit_price",
+    "stop_price",
+];
+
+fn kraken_scheduler_task_status_response_for_non_active(
+    truth_state: &str,
+    evidence_path: Option<String>,
+    error: Option<String>,
+) -> KrakenSchedulerTaskStatusResponse {
+    KrakenSchedulerTaskStatusResponse {
+        canonical_route: KRAKEN_SCHEDULER_TASK_STATUS_ROUTE.to_string(),
+        truth_state: truth_state.to_string(),
+        schema_version: None,
+        produced_at_utc: None,
+        mode: None,
+        task_name: None,
+        task_exists_before: None,
+        task_exists_after: None,
+        registered: None,
+        unregistered: None,
+        check_only: None,
+        task_action: None,
+        runner_path: None,
+        policy_path: None,
+        registry_path: None,
+        providers_path: None,
+        symbols: vec![],
+        timeframe: None,
+        at: None,
+        scheduled_task_mutation: None,
+        network_call_made: None,
+        db_write: None,
+        md_bars_write: None,
+        env_vars_embedded: vec![],
+        env_vars_required: vec![],
+        all_passed: None,
+        reason_code: None,
+        fail_reasons: vec![],
+        warnings: vec![],
+        safety: None,
+        evidence_path,
+        error,
+    }
+}
+
+/// Fail-closed safety check, independent of the CLI/PowerShell producer's
+/// own invariants: this route does not trust the writer of the evidence
+/// file, it verifies. Returns `Some(reason)` when the evidence must never be
+/// surfaced as `"active"`. Callers must check `schema_version` separately
+/// before calling this (a schema mismatch is classified as `"parse_error"`,
+/// matching this codebase's existing `kraken-ohlc/status` /
+/// `intraday-refresh/status` convention).
+fn kraken_scheduler_task_status_unsafe_reason(raw: &serde_json::Value) -> Option<String> {
+    let mode = raw.get("mode").and_then(|v| v.as_str());
+
+    let scheduled_task_mutation = raw
+        .get("scheduled_task_mutation")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if mode == Some("check_only") && scheduled_task_mutation {
+        return Some(
+            "evidence claims mode=\"check_only\" but scheduled_task_mutation=true".to_string(),
+        );
+    }
+
+    let registered = raw
+        .get("registered")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+    if mode == Some("check_only") && registered {
+        return Some("evidence claims mode=\"check_only\" but registered=true".to_string());
+    }
+
+    if raw
+        .get("network_call_made")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return Some("evidence claims network_call_made=true".to_string());
+    }
+    if raw.get("db_write").and_then(|v| v.as_bool()).unwrap_or(false) {
+        return Some("evidence claims db_write=true".to_string());
+    }
+    if raw
+        .get("md_bars_write")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return Some("evidence claims md_bars_write=true".to_string());
+    }
+
+    let env_vars_embedded_nonempty = raw
+        .get("env_vars_embedded")
+        .and_then(|v| v.as_array())
+        .map(|a| !a.is_empty())
+        .unwrap_or(false);
+    if env_vars_embedded_nonempty {
+        return Some("evidence claims a non-empty env_vars_embedded".to_string());
+    }
+
+    let task_name = raw
+        .get("task_name")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty());
+    if task_name.is_none() {
+        return Some("evidence is missing a non-empty task_name".to_string());
+    }
+
+    let task_action = raw
+        .get("task_action")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty());
+    if task_action.is_none() {
+        return Some("evidence is missing a non-empty task_action".to_string());
+    }
+
+    let runner_path = raw
+        .get("runner_path")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.trim().is_empty());
+    if runner_path.is_none() {
+        return Some("evidence is missing a non-empty runner_path".to_string());
+    }
+
+    if let Some(action) = task_action {
+        if !action.contains("Run-KrakenOhlcSync.ps1") {
+            return Some(
+                "evidence task_action does not reference Run-KrakenOhlcSync.ps1".to_string(),
+            );
+        }
+    }
+
+    if raw
+        .get("task_started")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return Some("evidence claims the task was started".to_string());
+    }
+    if raw
+        .get("daemon_job_added")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
+        return Some("evidence claims a daemon job was added".to_string());
+    }
+    for trading_flag in [
+        "trading_enabled",
+        "paper_trading_enabled",
+        "live_trading_enabled",
+    ] {
+        if raw
+            .get(trading_flag)
+            .and_then(|v| v.as_bool())
+            .unwrap_or(false)
+        {
+            return Some(format!("evidence claims {trading_flag}=true"));
+        }
+    }
+
+    if let Some(obj) = raw.as_object() {
+        for forbidden in KRAKEN_SCHEDULER_TASK_STATUS_FORBIDDEN_FIELDS {
+            if obj.contains_key(forbidden) {
+                return Some(format!(
+                    "evidence contains forbidden broker/order/risk/runtime field '{forbidden}'"
+                ));
+            }
+        }
+    }
+
+    None
+}
+
+fn kraken_scheduler_task_status_str_vec(raw: &serde_json::Value, key: &str) -> Vec<String> {
+    raw.get(key)
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|x| x.as_str().map(|s| s.to_string()))
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// `GET /api/v1/market-data/kraken-scheduler/task-status`
+///
+/// Read-only. Reads the fixed `kraken_ohlc_task_registration.json` evidence
+/// file (written by `Register-KrakenOhlcSyncTask.ps1`,
+/// `CRYPTO-DATA-03B-KRAKEN-SCHEDULER-TASK-SCRIPTS-01`) from
+/// `st.md_refresh_evidence_dir` (env var `MQK_MD_REFRESH_EVIDENCE_DIR`,
+/// default `exports/market_data` -- the same directory
+/// `kraken-ohlc/status`/`latest-marks/status`/`intraday-refresh/status`
+/// read, here filtered to this one fixed filename so it never collides with
+/// the runner's own `kraken_ohlc_scheduled_runner_<epoch>.json` evidence).
+///
+/// This route is task-**registration** evidence visibility only, distinct
+/// from `Run-KrakenOhlcSync.ps1`'s own runner evidence.
+///
+/// Safety:
+/// - Never calls Windows Task Scheduler APIs.
+/// - Never shells out to PowerShell or runs any script.
+/// - Never calls Kraken or any provider/network endpoint.
+/// - Never opens a DB connection.
+/// - Never registers, unregisters, or starts a scheduled task.
+/// - Never mutates scheduler or trading state.
+/// - Missing or malformed evidence never panics; surfaces truth_state honestly.
+/// - Evidence failing any check in `kraken_scheduler_task_status_unsafe_reason`
+///   is surfaced as `"unsafe_evidence"`, never `"active"`.
+pub(crate) async fn kraken_scheduler_task_status(
+    State(st): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let evidence_dir = st.md_refresh_evidence_dir.clone();
+    let dir_path = std::path::Path::new(&evidence_dir);
+
+    if let Err(e) = std::fs::read_dir(dir_path) {
+        return (
+            StatusCode::OK,
+            Json(kraken_scheduler_task_status_response_for_non_active(
+                "backend_unavailable",
+                None,
+                Some(format!("evidence directory unreadable: {e}")),
+            )),
+        )
+            .into_response();
+    }
+
+    let evidence_path = dir_path.join(KRAKEN_SCHEDULER_TASK_STATUS_EVIDENCE_FILENAME);
+    if !evidence_path.exists() {
+        return (
+            StatusCode::OK,
+            Json(kraken_scheduler_task_status_response_for_non_active(
+                "no_evidence",
+                None,
+                None,
+            )),
+        )
+            .into_response();
+    }
+    let evidence_path_str = evidence_path.to_string_lossy().to_string();
+
+    let content = match std::fs::read_to_string(&evidence_path) {
+        Err(e) => {
+            return (
+                StatusCode::OK,
+                Json(kraken_scheduler_task_status_response_for_non_active(
+                    "backend_unavailable",
+                    Some(evidence_path_str),
+                    Some(format!("evidence file unreadable: {e}")),
+                )),
+            )
+                .into_response();
+        }
+        Ok(c) => c,
+    };
+
+    let raw: serde_json::Value = match serde_json::from_str(&content) {
+        Err(e) => {
+            return (
+                StatusCode::OK,
+                Json(kraken_scheduler_task_status_response_for_non_active(
+                    "parse_error",
+                    Some(evidence_path_str),
+                    Some(format!("evidence JSON parse failed: {e}")),
+                )),
+            )
+                .into_response();
+        }
+        Ok(v) => v,
+    };
+
+    let schema_version = raw
+        .get("schema_version")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    if schema_version.as_deref() != Some(KRAKEN_SCHEDULER_TASK_STATUS_SCHEMA_VERSION) {
+        return (
+            StatusCode::OK,
+            Json(kraken_scheduler_task_status_response_for_non_active(
+                "parse_error",
+                Some(evidence_path_str),
+                Some(format!(
+                    "unsupported schema_version (expected '{KRAKEN_SCHEDULER_TASK_STATUS_SCHEMA_VERSION}', got {schema_version:?})"
+                )),
+            )),
+        )
+            .into_response();
+    }
+
+    let (truth_state, error) = match kraken_scheduler_task_status_unsafe_reason(&raw) {
+        Some(reason) => ("unsafe_evidence", Some(reason)),
+        None => ("active", None),
+    };
+
+    let safety = raw
+        .get("safety")
+        .map(|s| KrakenSchedulerTaskStatusEvidenceSafety {
+            calls_runner_script_only: s.get("calls_runner_script_only").and_then(|v| v.as_bool()),
+            no_daemon_runtime_broker_provider_order_references: s
+                .get("no_daemon_runtime_broker_provider_order_references")
+                .and_then(|v| v.as_bool()),
+            no_env_vars_embedded_in_task_action: s
+                .get("no_env_vars_embedded_in_task_action")
+                .and_then(|v| v.as_bool()),
+            no_env_local_read: s.get("no_env_local_read").and_then(|v| v.as_bool()),
+            task_never_started_by_this_script: s
+                .get("task_never_started_by_this_script")
+                .and_then(|v| v.as_bool()),
+        });
+
+    let response = KrakenSchedulerTaskStatusResponse {
+        canonical_route: KRAKEN_SCHEDULER_TASK_STATUS_ROUTE.to_string(),
+        truth_state: truth_state.to_string(),
+        schema_version,
+        produced_at_utc: raw
+            .get("produced_at_utc")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        mode: raw.get("mode").and_then(|v| v.as_str()).map(|s| s.to_string()),
+        task_name: raw
+            .get("task_name")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        task_exists_before: raw.get("task_exists_before").and_then(|v| v.as_bool()),
+        task_exists_after: raw.get("task_exists_after").and_then(|v| v.as_bool()),
+        registered: raw.get("registered").and_then(|v| v.as_bool()),
+        unregistered: raw.get("unregistered").and_then(|v| v.as_bool()),
+        check_only: raw.get("check_only").and_then(|v| v.as_bool()),
+        task_action: raw
+            .get("task_action")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        runner_path: raw
+            .get("runner_path")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        policy_path: raw
+            .get("policy_path")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        registry_path: raw
+            .get("registry_path")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        providers_path: raw
+            .get("providers_path")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        symbols: kraken_scheduler_task_status_str_vec(&raw, "symbols"),
+        timeframe: raw
+            .get("timeframe")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        at: raw.get("at").and_then(|v| v.as_str()).map(|s| s.to_string()),
+        scheduled_task_mutation: raw.get("scheduled_task_mutation").and_then(|v| v.as_bool()),
+        network_call_made: raw.get("network_call_made").and_then(|v| v.as_bool()),
+        db_write: raw.get("db_write").and_then(|v| v.as_bool()),
+        md_bars_write: raw.get("md_bars_write").and_then(|v| v.as_bool()),
+        env_vars_embedded: kraken_scheduler_task_status_str_vec(&raw, "env_vars_embedded"),
+        env_vars_required: kraken_scheduler_task_status_str_vec(&raw, "env_vars_required"),
+        all_passed: raw.get("all_passed").and_then(|v| v.as_bool()),
+        reason_code: raw
+            .get("reason_code")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
+        fail_reasons: kraken_scheduler_task_status_str_vec(&raw, "fail_reasons"),
+        warnings: kraken_scheduler_task_status_str_vec(&raw, "warnings"),
+        safety,
+        evidence_path: Some(evidence_path_str),
+        error,
     };
 
     (StatusCode::OK, Json(response)).into_response()

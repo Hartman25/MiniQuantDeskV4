@@ -55,8 +55,13 @@ import {
   isKrakenSchedulerReadinessUnsafe,
   krakenSchedulerReadinessTruthLabel,
   KRAKEN_SCHEDULER_READINESS_WARNING_TEXT,
+  fetchKrakenSchedulerTaskStatus,
+  isKrakenSchedulerTaskEvidenceUnsafe,
+  isKrakenSchedulerTaskStatusActive,
+  krakenSchedulerTaskStatusTruthLabel,
+  KRAKEN_SCHEDULER_TASK_STATUS_WARNING_TEXT,
 } from "../api.ts";
-import type { CryptoRegistryReadinessResponse, IngestJobStatusResponse, IntradayRefreshStatusResponse, KrakenOhlcStatusResponse, KrakenSchedulerReadinessResponse, LatestMarkStatusResponse, MdBarsCoverageResponse, MdBarsCoverageRow, TrackedEquitiesResponse } from "../types.ts";
+import type { CryptoRegistryReadinessResponse, IngestJobStatusResponse, IntradayRefreshStatusResponse, KrakenOhlcStatusResponse, KrakenSchedulerReadinessResponse, KrakenSchedulerTaskStatusResponse, LatestMarkStatusResponse, MdBarsCoverageResponse, MdBarsCoverageRow, TrackedEquitiesResponse } from "../types.ts";
 
 // ---------------------------------------------------------------------------
 // normalizeIngestJobStatus
@@ -2905,6 +2910,293 @@ test("fetchKrakenSchedulerReadiness maps a network/transport failure to ok:false
 
   try {
     const result = await fetchKrakenSchedulerReadiness();
+    assert.equal(result.ok, false);
+    assert.ok(result.error);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+// ---------------------------------------------------------------------------
+// CRYPTO-DATA-03C-KRAKEN-SCHEDULER-TASK-STATUS-SURFACE-01:
+// Kraken scheduled task status helpers
+// ---------------------------------------------------------------------------
+
+function makeActiveKrakenSchedulerTaskStatusResponse(
+  overrides: Partial<KrakenSchedulerTaskStatusResponse> = {},
+): KrakenSchedulerTaskStatusResponse {
+  return {
+    canonical_route: "/api/v1/market-data/kraken-scheduler/task-status",
+    truth_state: "active",
+    schema_version: "kraken-ohlc-task-registration-v1",
+    produced_at_utc: "2026-07-04T14:00:00.000Z",
+    mode: "check_only",
+    task_name: "MiniQuantDesk-KrakenOhlcSync",
+    task_exists_before: false,
+    task_exists_after: false,
+    registered: false,
+    unregistered: false,
+    check_only: true,
+    task_action:
+      "-ExecutionPolicy Bypass -NonInteractive -WindowStyle Hidden -Command \"& Run-KrakenOhlcSync.ps1 -CheckOnly:$false\"",
+    runner_path: "C:\\repo\\scripts\\windows\\Run-KrakenOhlcSync.ps1",
+    policy_path: "docs/specs/crypto_data_02a_kraken_scheduler_rate_limit_decision.json",
+    registry_path: "config/instruments/instruments_v2.crypto_local_marks.example.json",
+    providers_path: "config/providers/providers.json",
+    symbols: ["BTC/USD", "ETH/USD"],
+    timeframe: "1D",
+    at: "07:45",
+    scheduled_task_mutation: false,
+    network_call_made: false,
+    db_write: false,
+    md_bars_write: false,
+    env_vars_embedded: [],
+    env_vars_required: ["MQK_DATABASE_URL", "MQK_ALLOW_KRAKEN_SCHEDULED_SYNC"],
+    all_passed: true,
+    reason_code: "task_registration_preview_generated",
+    fail_reasons: [],
+    warnings: [],
+    safety: {
+      calls_runner_script_only: true,
+      no_daemon_runtime_broker_provider_order_references: true,
+      no_env_vars_embedded_in_task_action: true,
+      no_env_local_read: true,
+      task_never_started_by_this_script: true,
+    },
+    evidence_path: "exports/market_data/kraken_ohlc_task_registration.json",
+    error: null,
+    ...overrides,
+  };
+}
+
+// isKrakenSchedulerTaskStatusActive
+
+test("isKrakenSchedulerTaskStatusActive returns true for active", () => {
+  assert.ok(isKrakenSchedulerTaskStatusActive("active"));
+});
+
+for (const truthState of [
+  "no_evidence",
+  "parse_error",
+  "unsafe_evidence",
+  "backend_unavailable",
+]) {
+  test(`isKrakenSchedulerTaskStatusActive returns false for ${truthState}`, () => {
+    assert.ok(!isKrakenSchedulerTaskStatusActive(truthState));
+  });
+}
+
+// krakenSchedulerTaskStatusTruthLabel
+
+test("krakenSchedulerTaskStatusTruthLabel active -> active", () => {
+  assert.equal(krakenSchedulerTaskStatusTruthLabel("active"), "active");
+});
+
+test("krakenSchedulerTaskStatusTruthLabel no_evidence -> no evidence", () => {
+  assert.equal(krakenSchedulerTaskStatusTruthLabel("no_evidence"), "no evidence");
+});
+
+test("krakenSchedulerTaskStatusTruthLabel parse_error -> parse error", () => {
+  assert.equal(krakenSchedulerTaskStatusTruthLabel("parse_error"), "parse error");
+});
+
+test("krakenSchedulerTaskStatusTruthLabel unsafe_evidence is worded as a severe fail-closed state", () => {
+  assert.ok(krakenSchedulerTaskStatusTruthLabel("unsafe_evidence").includes("UNSAFE"));
+});
+
+test("krakenSchedulerTaskStatusTruthLabel backend_unavailable -> backend unavailable", () => {
+  assert.equal(krakenSchedulerTaskStatusTruthLabel("backend_unavailable"), "backend unavailable");
+});
+
+// isKrakenSchedulerTaskEvidenceUnsafe
+
+test("isKrakenSchedulerTaskEvidenceUnsafe is false for a genuinely safe, active response", () => {
+  assert.ok(!isKrakenSchedulerTaskEvidenceUnsafe(makeActiveKrakenSchedulerTaskStatusResponse()));
+});
+
+test("isKrakenSchedulerTaskEvidenceUnsafe is true when truth_state is unsafe_evidence", () => {
+  const resp = makeActiveKrakenSchedulerTaskStatusResponse({ truth_state: "unsafe_evidence" });
+  assert.ok(isKrakenSchedulerTaskEvidenceUnsafe(resp));
+});
+
+test("isKrakenSchedulerTaskEvidenceUnsafe catches network_call_made=true", () => {
+  const resp = makeActiveKrakenSchedulerTaskStatusResponse({ network_call_made: true });
+  assert.ok(isKrakenSchedulerTaskEvidenceUnsafe(resp));
+});
+
+test("isKrakenSchedulerTaskEvidenceUnsafe catches db_write=true", () => {
+  const resp = makeActiveKrakenSchedulerTaskStatusResponse({ db_write: true });
+  assert.ok(isKrakenSchedulerTaskEvidenceUnsafe(resp));
+});
+
+test("isKrakenSchedulerTaskEvidenceUnsafe catches md_bars_write=true", () => {
+  const resp = makeActiveKrakenSchedulerTaskStatusResponse({ md_bars_write: true });
+  assert.ok(isKrakenSchedulerTaskEvidenceUnsafe(resp));
+});
+
+test("isKrakenSchedulerTaskEvidenceUnsafe catches env_vars_embedded non-empty", () => {
+  const resp = makeActiveKrakenSchedulerTaskStatusResponse({
+    env_vars_embedded: ["MQK_DATABASE_URL"],
+  });
+  assert.ok(isKrakenSchedulerTaskEvidenceUnsafe(resp));
+});
+
+test("isKrakenSchedulerTaskEvidenceUnsafe catches check_only claiming scheduled_task_mutation=true", () => {
+  const resp = makeActiveKrakenSchedulerTaskStatusResponse({
+    mode: "check_only",
+    scheduled_task_mutation: true,
+  });
+  assert.ok(isKrakenSchedulerTaskEvidenceUnsafe(resp));
+});
+
+test("isKrakenSchedulerTaskEvidenceUnsafe catches check_only claiming registered=true", () => {
+  const resp = makeActiveKrakenSchedulerTaskStatusResponse({
+    mode: "check_only",
+    registered: true,
+  });
+  assert.ok(isKrakenSchedulerTaskEvidenceUnsafe(resp));
+});
+
+test("isKrakenSchedulerTaskEvidenceUnsafe preserves registered=true for a genuine register-mode response", () => {
+  const resp = makeActiveKrakenSchedulerTaskStatusResponse({
+    mode: "register",
+    check_only: false,
+    registered: true,
+    task_exists_after: true,
+    scheduled_task_mutation: true,
+  });
+  assert.ok(!isKrakenSchedulerTaskEvidenceUnsafe(resp));
+  assert.equal(resp.registered, true);
+});
+
+// KRAKEN_SCHEDULER_TASK_STATUS_WARNING_TEXT
+
+test("KRAKEN_SCHEDULER_TASK_STATUS_WARNING_TEXT states evidence-visibility-only scope", () => {
+  assert.ok(KRAKEN_SCHEDULER_TASK_STATUS_WARNING_TEXT.includes("evidence visibility only"));
+  assert.ok(KRAKEN_SCHEDULER_TASK_STATUS_WARNING_TEXT.includes("cannot register"));
+  assert.ok(KRAKEN_SCHEDULER_TASK_STATUS_WARNING_TEXT.includes("enable crypto trading"));
+});
+
+// fetchKrakenSchedulerTaskStatus
+
+test("fetchKrakenSchedulerTaskStatus GETs the canonical task-status route", async () => {
+  const calls: Array<{ url: string; init?: RequestInit }> = [];
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+    calls.push({ url: String(url), init });
+    return new Response(
+      JSON.stringify(makeActiveKrakenSchedulerTaskStatusResponse()),
+      { status: 200, headers: { "content-type": "application/json" } },
+    );
+  }) as typeof fetch;
+
+  try {
+    const result = await fetchKrakenSchedulerTaskStatus();
+    assert.equal(result.ok, true);
+    assert.equal(calls.length, 1);
+    assert.equal(
+      calls[0].url,
+      "http://127.0.0.1:8899/api/v1/market-data/kraken-scheduler/task-status",
+    );
+    assert.equal(calls[0].init?.method ?? "GET", "GET");
+    assert.equal(result.data?.truth_state, "active");
+    assert.equal(result.data?.task_name, "MiniQuantDesk-KrakenOhlcSync");
+    assert.equal(result.data?.registered, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("fetchKrakenSchedulerTaskStatus preserves registered=true from a register-mode response", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () =>
+    new Response(
+      JSON.stringify(
+        makeActiveKrakenSchedulerTaskStatusResponse({
+          mode: "register",
+          check_only: false,
+          registered: true,
+          task_exists_before: false,
+          task_exists_after: true,
+          scheduled_task_mutation: true,
+          reason_code: "task_registered",
+        }),
+      ),
+      { status: 200, headers: { "content-type": "application/json" } },
+    )) as typeof fetch;
+
+  try {
+    const result = await fetchKrakenSchedulerTaskStatus();
+    assert.equal(result.ok, true);
+    assert.equal(result.data?.truth_state, "active");
+    assert.equal(result.data?.registered, true);
+    assert.equal(result.data?.task_exists_after, true);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("fetchKrakenSchedulerTaskStatus surfaces no_evidence without throwing", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () =>
+    new Response(
+      JSON.stringify({
+        canonical_route: "/api/v1/market-data/kraken-scheduler/task-status",
+        truth_state: "no_evidence",
+        schema_version: null,
+        produced_at_utc: null,
+        mode: null,
+        task_name: null,
+        task_exists_before: null,
+        task_exists_after: null,
+        registered: null,
+        unregistered: null,
+        check_only: null,
+        task_action: null,
+        runner_path: null,
+        policy_path: null,
+        registry_path: null,
+        providers_path: null,
+        symbols: [],
+        timeframe: null,
+        at: null,
+        scheduled_task_mutation: null,
+        network_call_made: null,
+        db_write: null,
+        md_bars_write: null,
+        env_vars_embedded: [],
+        env_vars_required: [],
+        all_passed: null,
+        reason_code: null,
+        fail_reasons: [],
+        warnings: [],
+        safety: null,
+        evidence_path: null,
+        error: null,
+      }),
+      { status: 200, headers: { "content-type": "application/json" } },
+    )) as typeof fetch;
+
+  try {
+    const result = await fetchKrakenSchedulerTaskStatus();
+    assert.equal(result.ok, true);
+    assert.equal(result.data?.truth_state, "no_evidence");
+    assert.ok(!isKrakenSchedulerTaskStatusActive(result.data!.truth_state));
+    assert.deepEqual(result.data?.fail_reasons, []);
+    assert.deepEqual(result.data?.warnings, []);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("fetchKrakenSchedulerTaskStatus maps a network/transport failure to ok:false", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => {
+    throw new Error("network unreachable");
+  }) as typeof fetch;
+
+  try {
+    const result = await fetchKrakenSchedulerTaskStatus();
     assert.equal(result.ok, false);
     assert.ok(result.error);
   } finally {

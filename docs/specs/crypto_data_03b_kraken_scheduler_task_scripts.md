@@ -152,6 +152,8 @@ validation.
 - No crypto risk policy activation.
 - No crypto paper or live execution.
 - No crypto strategy.
-- No read-only status route/GUI panel for task-registration evidence yet —
-  see `CRYPTO-DATA-03C-KRAKEN-SCHEDULER-TASK-STATUS-SURFACE-01` (conditional
-  next step) for that.
+- ~~No read-only status route/GUI panel for task-registration evidence yet~~
+  — closed by `CRYPTO-DATA-03C-KRAKEN-SCHEDULER-TASK-STATUS-SURFACE-01`: see
+  `docs/runbooks/local_crypto_marks_ingest.md` for the route/panel detail.
+  Task registration itself (`-Register`) is still never invoked by any
+  patch or route.

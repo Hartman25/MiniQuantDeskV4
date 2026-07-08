@@ -936,6 +936,63 @@ invoked during this patch's own validation — see
 `scripts/guards/validate_crypto_data_03b_kraken_scheduler_task_scripts.ps1`
 for the full contract and proof.
 
+## Kraken Scheduled Task Status Route + GUI Panel (CRYPTO-DATA-03C-KRAKEN-SCHEDULER-TASK-STATUS-SURFACE-01)
+
+Read-only status surface for the `CRYPTO-DATA-03B` task-**registration**
+evidence contract (distinct from the runner's own execution evidence,
+`kraken_ohlc_scheduled_runner_<epoch>.json`, already covered by the
+`kraken-ohlc/status` route above):
+
+```
+GET /api/v1/market-data/kraken-scheduler/task-status
+```
+
+Reads the fixed `kraken_ohlc_task_registration.json` file (written by
+`Register-KrakenOhlcSyncTask.ps1`) from the same evidence directory as
+`kraken-ohlc/status`/`latest-marks/status`/`intraday-refresh/status`
+(`MQK_MD_REFRESH_EVIDENCE_DIR`, default `exports/market_data`). Never calls
+Windows Task Scheduler APIs, never shells out to PowerShell, never runs the
+registration/runner scripts, never calls Kraken, never opens a DB
+connection, never mutates scheduler or trading state — evidence-file
+visibility only.
+
+`truth_state`: `active`, `no_evidence`, `parse_error`, `unsafe_evidence`,
+`backend_unavailable`. `active` never means a task is registered — the
+response's own `registered`/`task_exists_after` fields carry that fact
+truthfully (a genuine `mode="register"` evidence file with `registered=true`
+is surfaced as `active`, not `unsafe_evidence`, since registration is the
+evidence contract's own documented outcome; a `mode="check_only"` file
+claiming `registered=true` or `scheduled_task_mutation=true` is fail-closed
+to `unsafe_evidence` instead, since check-only must never mutate).
+`unsafe_evidence` also fires on `network_call_made`/`db_write`/
+`md_bars_write=true`, a non-empty `env_vars_embedded`, a missing
+`task_name`/`task_action`/`runner_path`, a `task_action` that does not
+reference `Run-KrakenOhlcSync.ps1`, or any broker/order/risk field the
+evidence contract never carries.
+
+A read-only "Kraken scheduled task status" GUI panel on the Ingest screen
+(directly below the Kraken scheduler readiness panel) displays truth state,
+task name/mode/exists-before/exists-after/registered/unregistered/
+check-only, task action, runner path, schedule time, env vars required vs.
+embedded, the `scheduled_task_mutation`/`network_call_made`/`db_write`/
+`md_bars_write` flags, `all_passed`/`reason_code`/`fail_reasons`/`warnings`,
+and the evidence path. Fixed warning: *"Scheduled task status is evidence
+visibility only. This panel cannot register, unregister, start a task, call
+Kraken, write market data, or enable crypto trading."* No button mutates
+anything — "Refresh" only re-issues the same read-only GET.
+
+Implemented in
+`core-rs/crates/mqk-daemon/src/routes/transport_quality.rs::kraken_scheduler_task_status`,
+`core-rs/crates/mqk-daemon/src/api_types.rs::KrakenSchedulerTaskStatusResponse`,
+`core-rs/mqk-gui/src/features/ingest/{types.ts,api.ts,IngestScreen.tsx}`.
+Tested in
+`core-rs/crates/mqk-daemon/tests/scenario_kraken_scheduler_task_status_route_03c.rs`
+and `core-rs/mqk-gui/src/features/ingest/__tests__/api.test.ts`.
+
+**Remaining gap unchanged by this patch:** no Windows Scheduled Task is
+actually registered by any patch or route — `Register-KrakenOhlcSyncTask.ps1
+-Register` still requires an explicit, separate operator invocation.
+
 ## Remaining Gaps
 
 - `sync-provider` (incremental backfill) still has no Kraken path — an

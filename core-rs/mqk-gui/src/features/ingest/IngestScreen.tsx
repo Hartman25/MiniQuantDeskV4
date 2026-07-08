@@ -40,6 +40,8 @@ import {
   isKrakenOhlcStatusActive,
   isKrakenSchedulerReadinessActive,
   isKrakenSchedulerReadinessUnsafe,
+  isKrakenSchedulerTaskEvidenceUnsafe,
+  isKrakenSchedulerTaskStatusActive,
   isLatestMarkEvidenceUnsafe,
   isLatestMarkStatusActive,
   isMarketDataFeedRealActionAllowed,
@@ -48,10 +50,13 @@ import {
   isTerminalIngestStatus,
   intradayRefreshTruthLabel,
   fetchKrakenSchedulerReadiness,
+  fetchKrakenSchedulerTaskStatus,
   krakenOhlcStatusTruthLabel,
   krakenSchedulerReadinessTruthLabel,
+  krakenSchedulerTaskStatusTruthLabel,
   KRAKEN_OHLC_STATUS_WARNING_TEXT,
   KRAKEN_SCHEDULER_READINESS_WARNING_TEXT,
+  KRAKEN_SCHEDULER_TASK_STATUS_WARNING_TEXT,
   latestMarkStatusTruthLabel,
   normalizeIngestJobStatus,
   parseMarketDataFeedSymbols,
@@ -67,7 +72,7 @@ import {
 import { buildRepoRelativePath, buildMd1DSymbolPath, MD_BACKUP_1D_SEGMENTS, MD_INGEST_SEGMENTS } from "../backtests/pathHelpers.ts";
 import { getDesktopRepoRoot } from "../../desktop/bootstrap.ts";
 import type { CoverageSortMode } from "./api.ts";
-import type { ActiveIngestJob, ActiveProviderJob, CryptoRegistryReadinessResponse, IngestJobStatusKind, IntradayRefreshStatusResponse, KrakenOhlcStatusResponse, KrakenSchedulerReadinessResponse, LatestMarkStatusResponse, MarketDataFeedPollOnceResponse, MarketDataFeedSchedulerStatusResponse, MarketDataFeedStatusResponse, MdBarsCoverageResponse, MdBarsCoverageRow, TrackedEquitiesResponse } from "./types.ts";
+import type { ActiveIngestJob, ActiveProviderJob, CryptoRegistryReadinessResponse, IngestJobStatusKind, IntradayRefreshStatusResponse, KrakenOhlcStatusResponse, KrakenSchedulerReadinessResponse, KrakenSchedulerTaskStatusResponse, LatestMarkStatusResponse, MarketDataFeedPollOnceResponse, MarketDataFeedSchedulerStatusResponse, MarketDataFeedStatusResponse, MdBarsCoverageResponse, MdBarsCoverageRow, TrackedEquitiesResponse } from "./types.ts";
 
 // ---------------------------------------------------------------------------
 // Status badge
@@ -255,6 +260,11 @@ export function IngestScreen() {
   const [krakenSchedulerReadinessLoading, setKrakenSchedulerReadinessLoading] = useState(false);
   const [krakenSchedulerReadinessError, setKrakenSchedulerReadinessError] = useState<string | null>(null);
 
+  // CRYPTO-DATA-03C-KRAKEN-SCHEDULER-TASK-STATUS-SURFACE-01: Kraken scheduled task status state
+  const [krakenSchedulerTaskStatus, setKrakenSchedulerTaskStatus] = useState<KrakenSchedulerTaskStatusResponse | null>(null);
+  const [krakenSchedulerTaskStatusLoading, setKrakenSchedulerTaskStatusLoading] = useState(false);
+  const [krakenSchedulerTaskStatusError, setKrakenSchedulerTaskStatusError] = useState<string | null>(null);
+
   // DATA-PROVIDER-GUI-FEED-SCHEDULER-01: Latest closed-bar feed scheduler state
   const [latestFeedProviderId, setLatestFeedProviderId] = useState("alpaca");
   const [latestFeedTimeframe, setLatestFeedTimeframe] = useState("5m");
@@ -411,6 +421,24 @@ export function IngestScreen() {
   // Auto-load Kraken scheduler readiness on mount
   useEffect(() => {
     void loadKrakenSchedulerReadiness();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  const loadKrakenSchedulerTaskStatus = useCallback(async () => {
+    setKrakenSchedulerTaskStatusLoading(true);
+    setKrakenSchedulerTaskStatusError(null);
+    const result = await fetchKrakenSchedulerTaskStatus();
+    setKrakenSchedulerTaskStatusLoading(false);
+    if (!result.ok) {
+      setKrakenSchedulerTaskStatusError(result.error ?? "Kraken scheduled task status fetch failed.");
+      return;
+    }
+    setKrakenSchedulerTaskStatus(result.data ?? null);
+  }, []);
+
+  // Auto-load Kraken scheduled task status on mount
+  useEffect(() => {
+    void loadKrakenSchedulerTaskStatus();
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
@@ -2808,6 +2836,188 @@ export function IngestScreen() {
         {krakenSchedulerReadinessLoading && (
           <div className="bt-job-meta" style={{ color: "var(--accent)" }}>
             Loading Kraken scheduler readiness…
+          </div>
+        )}
+      </Panel>
+
+      {/* CRYPTO-DATA-03C-KRAKEN-SCHEDULER-TASK-STATUS-SURFACE-01: Kraken scheduled task status */}
+      <Panel
+        title="Kraken scheduled task status"
+        subtitle="Read-only evidence visibility for the CRYPTO-DATA-03B kraken_ohlc_task_registration.json task-registration evidence file. No task registration. No Kraken calls. No trading enablement."
+      >
+        <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+          <button
+            type="button"
+            className="action-button"
+            onClick={() => void loadKrakenSchedulerTaskStatus()}
+            disabled={krakenSchedulerTaskStatusLoading}
+            style={{ padding: "2px 12px" }}
+          >
+            {krakenSchedulerTaskStatusLoading ? "Loading…" : "Refresh"}
+          </button>
+        </div>
+
+        <div className="unavailable-notice" style={{ marginBottom: 10, color: "var(--text-muted, #888)" }}>
+          <strong>{KRAKEN_SCHEDULER_TASK_STATUS_WARNING_TEXT}</strong>
+        </div>
+
+        {krakenSchedulerTaskStatusError && (
+          <div className="unavailable-notice unavailable-critical" style={{ marginBottom: 8 }}>
+            <strong>Fetch failed:</strong> {krakenSchedulerTaskStatusError}
+          </div>
+        )}
+
+        {krakenSchedulerTaskStatus === null && !krakenSchedulerTaskStatusLoading && !krakenSchedulerTaskStatusError && (
+          <div className="unavailable-notice" style={{ color: "var(--text-muted, #888)" }}>
+            Not loaded yet. Click Refresh or wait for auto-load.
+          </div>
+        )}
+
+        {krakenSchedulerTaskStatus !== null && (
+          <>
+            {krakenSchedulerTaskStatus.truth_state === "no_evidence" && (
+              <div className="unavailable-notice" style={{ marginBottom: 8, color: "var(--text-muted, #888)" }}>
+                No task-registration evidence file exists yet. Run <code>Register-KrakenOhlcSyncTask.ps1</code> (default <code>-CheckOnly</code>) to generate one.
+              </div>
+            )}
+
+            {krakenSchedulerTaskStatus.truth_state === "parse_error" && (
+              <div className="unavailable-notice unavailable-critical" style={{ marginBottom: 8 }}>
+                Task-registration evidence is malformed or carries an unsupported schema_version.
+              </div>
+            )}
+
+            {krakenSchedulerTaskStatus.truth_state === "backend_unavailable" && (
+              <div className="unavailable-notice unavailable-critical" style={{ marginBottom: 8 }}>
+                The evidence directory or file could not be read.
+              </div>
+            )}
+
+            {isKrakenSchedulerTaskEvidenceUnsafe(krakenSchedulerTaskStatus) && (
+              <div className="unavailable-notice unavailable-critical" style={{ marginBottom: 8 }}>
+                <strong>{krakenSchedulerTaskStatusTruthLabel(krakenSchedulerTaskStatus.truth_state)}</strong>
+              </div>
+            )}
+
+            <div className="bt-job-meta" style={{ marginBottom: 6 }}>
+              <span className="eyebrow">truth_state</span>{" "}
+              <strong>{krakenSchedulerTaskStatusTruthLabel(krakenSchedulerTaskStatus.truth_state)}</strong>{" "}
+              <span className="eyebrow">registered</span>{" "}
+              <strong>{krakenSchedulerTaskStatus.registered === null ? "—" : String(krakenSchedulerTaskStatus.registered)}</strong>{" "}
+              <span className="eyebrow">task_exists_after</span>{" "}
+              <strong>{krakenSchedulerTaskStatus.task_exists_after === null ? "—" : String(krakenSchedulerTaskStatus.task_exists_after)}</strong>
+            </div>
+
+            <div className="timeline-meta-grid" style={{ marginBottom: 8 }}>
+              <div>
+                <span>task_name</span>
+                <strong>{krakenSchedulerTaskStatus.task_name ?? "—"}</strong>
+              </div>
+              <div>
+                <span>mode</span>
+                <strong>{krakenSchedulerTaskStatus.mode ?? "—"}</strong>
+              </div>
+              <div>
+                <span>task_exists_before</span>
+                <strong>{krakenSchedulerTaskStatus.task_exists_before === null ? "—" : String(krakenSchedulerTaskStatus.task_exists_before)}</strong>
+              </div>
+              <div>
+                <span>unregistered</span>
+                <strong>{krakenSchedulerTaskStatus.unregistered === null ? "—" : String(krakenSchedulerTaskStatus.unregistered)}</strong>
+              </div>
+              <div>
+                <span>check_only</span>
+                <strong>{krakenSchedulerTaskStatus.check_only === null ? "—" : String(krakenSchedulerTaskStatus.check_only)}</strong>
+              </div>
+              <div>
+                <span>runner_path</span>
+                <strong>{krakenSchedulerTaskStatus.runner_path ?? "—"}</strong>
+              </div>
+              <div>
+                <span>timeframe</span>
+                <strong>{krakenSchedulerTaskStatus.timeframe ?? "—"}</strong>
+              </div>
+              <div>
+                <span>at (schedule time)</span>
+                <strong>{krakenSchedulerTaskStatus.at ?? "—"}</strong>
+              </div>
+              <div>
+                <span>env_vars_required</span>
+                <strong>{krakenSchedulerTaskStatus.env_vars_required.join(", ") || "—"}</strong>
+              </div>
+              <div>
+                <span>env_vars_embedded</span>
+                <strong>{krakenSchedulerTaskStatus.env_vars_embedded.join(", ") || "(none)"}</strong>
+              </div>
+              <div>
+                <span>scheduled_task_mutation</span>
+                <strong>{krakenSchedulerTaskStatus.scheduled_task_mutation === null ? "—" : String(krakenSchedulerTaskStatus.scheduled_task_mutation)}</strong>
+              </div>
+              <div>
+                <span>network_call_made</span>
+                <strong>{krakenSchedulerTaskStatus.network_call_made === null ? "—" : String(krakenSchedulerTaskStatus.network_call_made)}</strong>
+              </div>
+              <div>
+                <span>db_write</span>
+                <strong>{krakenSchedulerTaskStatus.db_write === null ? "—" : String(krakenSchedulerTaskStatus.db_write)}</strong>
+              </div>
+              <div>
+                <span>md_bars_write</span>
+                <strong>{krakenSchedulerTaskStatus.md_bars_write === null ? "—" : String(krakenSchedulerTaskStatus.md_bars_write)}</strong>
+              </div>
+              <div>
+                <span>all_passed</span>
+                <strong>{krakenSchedulerTaskStatus.all_passed === null ? "—" : String(krakenSchedulerTaskStatus.all_passed)}</strong>
+              </div>
+              <div>
+                <span>reason_code</span>
+                <strong>{krakenSchedulerTaskStatus.reason_code ?? "—"}</strong>
+              </div>
+            </div>
+
+            {krakenSchedulerTaskStatus.task_action && (
+              <div className="bt-job-meta" style={{ marginBottom: 8, wordBreak: "break-all" }}>
+                <span className="eyebrow">task_action</span>{" "}
+                <strong>{krakenSchedulerTaskStatus.task_action}</strong>
+              </div>
+            )}
+
+            {krakenSchedulerTaskStatus.evidence_path && (
+              <div className="bt-job-meta" style={{ marginBottom: 8, wordBreak: "break-all" }}>
+                <span className="eyebrow">evidence_path</span>{" "}
+                <strong>{krakenSchedulerTaskStatus.evidence_path}</strong>
+              </div>
+            )}
+
+            {krakenSchedulerTaskStatus.fail_reasons.length > 0 && (
+              <div className="unavailable-notice" style={{ marginBottom: 8 }}>
+                <strong>fail_reasons:</strong> {krakenSchedulerTaskStatus.fail_reasons.join(", ")}
+              </div>
+            )}
+
+            {krakenSchedulerTaskStatus.warnings.length > 0 && (
+              <div className="unavailable-notice" style={{ marginBottom: 8, color: "var(--text-muted, #888)" }}>
+                <strong>warnings:</strong> {krakenSchedulerTaskStatus.warnings.join(", ")}
+              </div>
+            )}
+
+            {krakenSchedulerTaskStatus.error && (
+              <div className="unavailable-notice unavailable-critical" style={{ marginBottom: 8 }}>
+                <strong>error:</strong> {krakenSchedulerTaskStatus.error}
+              </div>
+            )}
+
+            {!isKrakenSchedulerTaskStatusActive(krakenSchedulerTaskStatus.truth_state) && (
+              <div className="unavailable-notice" style={{ color: "var(--text-muted, #888)" }}>
+                <strong>truth_state:</strong> {krakenSchedulerTaskStatusTruthLabel(krakenSchedulerTaskStatus.truth_state)}
+              </div>
+            )}
+          </>
+        )}
+
+        {krakenSchedulerTaskStatusLoading && (
+          <div className="bt-job-meta" style={{ color: "var(--accent)" }}>
+            Loading Kraken scheduled task status…
           </div>
         )}
       </Panel>

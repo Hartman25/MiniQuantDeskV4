@@ -22,6 +22,7 @@ import type {
   IntradayRefreshStatusResponse,
   KrakenOhlcStatusResponse,
   KrakenSchedulerReadinessResponse,
+  KrakenSchedulerTaskStatusResponse,
   LatestMarkStatusResponse,
   MarketDataFeedPollOnceRequest,
   MarketDataFeedPollOnceResponse,
@@ -1343,6 +1344,99 @@ export async function fetchKrakenSchedulerReadiness(): Promise<FetchKrakenSchedu
 
   if (!result.ok) {
     return { ok: false, error: result.error ?? "Kraken scheduler readiness fetch failed." };
+  }
+
+  return { ok: true, data: result.data };
+}
+
+// ---------------------------------------------------------------------------
+// CRYPTO-DATA-03C-KRAKEN-SCHEDULER-TASK-STATUS-SURFACE-01: Kraken scheduled
+// task status (task-registration evidence visibility only)
+// ---------------------------------------------------------------------------
+
+export interface FetchKrakenSchedulerTaskStatusResult {
+  ok: boolean;
+  data?: KrakenSchedulerTaskStatusResponse;
+  error?: string;
+}
+
+/**
+ * Fixed warning text the GUI panel must display verbatim, so the operator
+ * cannot mistake this read-only task-registration evidence surface for an
+ * actual task registration/start, a Kraken call, a market-data write, or
+ * crypto trading enablement.
+ */
+export const KRAKEN_SCHEDULER_TASK_STATUS_WARNING_TEXT =
+  "Scheduled task status is evidence visibility only. This panel cannot register, unregister, start a task, call Kraken, write market data, or enable crypto trading.";
+
+/**
+ * Return true only for the truth_state that means "usable display data".
+ * `active` never means a task is registered -- see `registered` /
+ * `task_exists_after` for that distinct, truthfully-surfaced fact.
+ */
+export function isKrakenSchedulerTaskStatusActive(truthState: string): boolean {
+  return truthState === "active";
+}
+
+/**
+ * Human-readable label for a Kraken scheduled task status truth_state.
+ * `unsafe_evidence` is worded as a severe fail-closed condition, not a plain
+ * status label.
+ */
+export function krakenSchedulerTaskStatusTruthLabel(truthState: string): string {
+  switch (truthState) {
+    case "active":
+      return "active";
+    case "no_evidence":
+      return "no evidence";
+    case "parse_error":
+      return "parse error";
+    case "unsafe_evidence":
+      return "UNSAFE EVIDENCE — fail-closed, not displayed as active";
+    case "backend_unavailable":
+      return "backend unavailable";
+    default:
+      return truthState;
+  }
+}
+
+/**
+ * Defense-in-depth check independent of the backend's own truth_state
+ * classification: if the response's own fields look inconsistent or unsafe,
+ * treat it as unsafe even if truth_state were somehow not "unsafe_evidence".
+ * The backend already classifies these -- this is a second, GUI-side guard
+ * so a misclassified response is never rendered as trustworthy.
+ */
+export function isKrakenSchedulerTaskEvidenceUnsafe(
+  response: KrakenSchedulerTaskStatusResponse,
+): boolean {
+  return (
+    response.truth_state === "unsafe_evidence" ||
+    response.network_call_made === true ||
+    response.db_write === true ||
+    response.md_bars_write === true ||
+    response.env_vars_embedded.length > 0 ||
+    (response.mode === "check_only" &&
+      (response.scheduled_task_mutation === true || response.registered === true))
+  );
+}
+
+/**
+ * Fetch GET /api/v1/market-data/kraken-scheduler/task-status.
+ *
+ * Safety: Read-only. No DB connection. No provider/network call. No CLI or
+ * PowerShell execution. No Windows Task Scheduler API call. No scheduler
+ * mutation. No trading state. Evidence visibility only -- not a task
+ * registration/start, not a Kraken call, not a market-data write, and not
+ * crypto trading enablement.
+ */
+export async function fetchKrakenSchedulerTaskStatus(): Promise<FetchKrakenSchedulerTaskStatusResult> {
+  const result = await fetchJsonCandidate<KrakenSchedulerTaskStatusResponse>(
+    "/api/v1/market-data/kraken-scheduler/task-status",
+  );
+
+  if (!result.ok) {
+    return { ok: false, error: result.error ?? "Kraken scheduled task status fetch failed." };
   }
 
   return { ok: true, data: result.data };

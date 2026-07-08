@@ -5074,6 +5074,80 @@ pub struct KrakenSchedulerReadinessResponse {
 }
 
 // ---------------------------------------------------------------------------
+// CRYPTO-DATA-03C-KRAKEN-SCHEDULER-TASK-STATUS-SURFACE-01: read-only status
+// surface for the CRYPTO-DATA-03B `kraken_ohlc_task_registration.json`
+// evidence contract via `GET /api/v1/market-data/kraken-scheduler/task-status`.
+// ---------------------------------------------------------------------------
+
+/// The `safety` block embedded inside `kraken_ohlc_task_registration.json`
+/// itself (written by `Register-KrakenOhlcSyncTask.ps1`), passed through
+/// verbatim. These are the evidence producer's own claims about what it did
+/// -- not a route-authored safety assertion. All fields are `Option<bool>`
+/// because the route never fabricates a value the evidence file did not
+/// itself carry.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KrakenSchedulerTaskStatusEvidenceSafety {
+    pub calls_runner_script_only: Option<bool>,
+    pub no_daemon_runtime_broker_provider_order_references: Option<bool>,
+    pub no_env_vars_embedded_in_task_action: Option<bool>,
+    pub no_env_local_read: Option<bool>,
+    pub task_never_started_by_this_script: Option<bool>,
+}
+
+/// Response for `GET /api/v1/market-data/kraken-scheduler/task-status`.
+///
+/// Read-only re-exposure of the `kraken-ohlc-task-registration-v1` evidence
+/// file written by `Register-KrakenOhlcSyncTask.ps1`
+/// (`CRYPTO-DATA-03B-KRAKEN-SCHEDULER-TASK-SCRIPTS-01`). This route never
+/// registers, unregisters, or starts a Windows Scheduled Task; never calls
+/// Windows Task Scheduler APIs; never shells out to PowerShell; never calls
+/// Kraken or any provider network endpoint; never opens a DB connection.
+///
+/// `truth_state`: `"active"`, `"no_evidence"`, `"parse_error"`,
+/// `"unsafe_evidence"`, `"backend_unavailable"`. `"active"` never means a
+/// task is registered -- see `registered`/`task_exists_after` for that
+/// distinct, truthfully-surfaced fact. Every field except `canonical_route`,
+/// `truth_state`, `symbols`, `env_vars_embedded`, `env_vars_required`,
+/// `fail_reasons`, and `warnings` is `Option`/absent when the evidence file
+/// itself did not carry that field, or when no evidence could be safely
+/// read at all -- never fabricated or defaulted to a "safe-looking" value.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct KrakenSchedulerTaskStatusResponse {
+    pub canonical_route: String,
+    pub truth_state: String,
+    pub schema_version: Option<String>,
+    pub produced_at_utc: Option<String>,
+    pub mode: Option<String>,
+    pub task_name: Option<String>,
+    pub task_exists_before: Option<bool>,
+    pub task_exists_after: Option<bool>,
+    pub registered: Option<bool>,
+    pub unregistered: Option<bool>,
+    pub check_only: Option<bool>,
+    pub task_action: Option<String>,
+    pub runner_path: Option<String>,
+    pub policy_path: Option<String>,
+    pub registry_path: Option<String>,
+    pub providers_path: Option<String>,
+    pub symbols: Vec<String>,
+    pub timeframe: Option<String>,
+    pub at: Option<String>,
+    pub scheduled_task_mutation: Option<bool>,
+    pub network_call_made: Option<bool>,
+    pub db_write: Option<bool>,
+    pub md_bars_write: Option<bool>,
+    pub env_vars_embedded: Vec<String>,
+    pub env_vars_required: Vec<String>,
+    pub all_passed: Option<bool>,
+    pub reason_code: Option<String>,
+    pub fail_reasons: Vec<String>,
+    pub warnings: Vec<String>,
+    pub safety: Option<KrakenSchedulerTaskStatusEvidenceSafety>,
+    pub evidence_path: Option<String>,
+    pub error: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
 // DATA-INGEST-GUI-SYNC-ALL-01: Tracked-equities registry preview
 // ---------------------------------------------------------------------------
 

@@ -579,3 +579,71 @@ export interface KrakenSchedulerReadinessResponse {
   warnings: string[];
   safety: KrakenSchedulerReadinessSafety;
 }
+
+// ---------------------------------------------------------------------------
+// CRYPTO-DATA-03C-KRAKEN-SCHEDULER-TASK-STATUS-SURFACE-01:
+// Kraken scheduled task status (read-only)
+// ---------------------------------------------------------------------------
+
+/**
+ * The `safety` block embedded inside `kraken_ohlc_task_registration.json`
+ * itself (written by Register-KrakenOhlcSyncTask.ps1), mirrored field-for-
+ * field. These are the evidence producer's own claims, passed through
+ * verbatim -- not a route-authored assertion.
+ */
+export interface KrakenSchedulerTaskStatusEvidenceSafety {
+  calls_runner_script_only: boolean | null;
+  no_daemon_runtime_broker_provider_order_references: boolean | null;
+  no_env_vars_embedded_in_task_action: boolean | null;
+  no_env_local_read: boolean | null;
+  task_never_started_by_this_script: boolean | null;
+}
+
+/**
+ * Response for GET /api/v1/market-data/kraken-scheduler/task-status. Mirrors
+ * KrakenSchedulerTaskStatusResponse in api_types.rs.
+ *
+ * truth_state: "active" | "no_evidence" | "parse_error" | "unsafe_evidence" |
+ * "backend_unavailable".
+ *
+ * "active" never means a task is registered -- see `registered` /
+ * `task_exists_after` for that distinct, truthfully-surfaced fact. Every
+ * field except canonical_route/truth_state/symbols/env_vars_embedded/
+ * env_vars_required/fail_reasons/warnings is `null` when the evidence file
+ * did not carry that field, or when no evidence could be safely read at
+ * all -- never fabricated or defaulted to a "safe-looking" value.
+ */
+export interface KrakenSchedulerTaskStatusResponse {
+  canonical_route: string;
+  truth_state: string;
+  schema_version: string | null;
+  produced_at_utc: string | null;
+  mode: string | null;
+  task_name: string | null;
+  task_exists_before: boolean | null;
+  task_exists_after: boolean | null;
+  registered: boolean | null;
+  unregistered: boolean | null;
+  check_only: boolean | null;
+  task_action: string | null;
+  runner_path: string | null;
+  policy_path: string | null;
+  registry_path: string | null;
+  providers_path: string | null;
+  symbols: string[];
+  timeframe: string | null;
+  at: string | null;
+  scheduled_task_mutation: boolean | null;
+  network_call_made: boolean | null;
+  db_write: boolean | null;
+  md_bars_write: boolean | null;
+  env_vars_embedded: string[];
+  env_vars_required: string[];
+  all_passed: boolean | null;
+  reason_code: string | null;
+  fail_reasons: string[];
+  warnings: string[];
+  safety: KrakenSchedulerTaskStatusEvidenceSafety | null;
+  evidence_path: string | null;
+  error: string | null;
+}

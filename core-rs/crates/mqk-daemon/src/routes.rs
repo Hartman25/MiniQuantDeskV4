@@ -308,8 +308,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     };
     use transport_quality::{
         crypto_registry_readiness, execution_transport, intraday_refresh_status,
-        kraken_ohlc_status, kraken_scheduler_readiness, latest_mark_status, market_data_coverage,
-        market_data_quality,
+        kraken_ohlc_status, kraken_scheduler_readiness, kraken_scheduler_task_status,
+        latest_mark_status, market_data_coverage, market_data_quality,
     };
     use watchlist::{watchlist_admission_check, watchlist_status};
 
@@ -537,6 +537,19 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/v1/market-data/kraken-scheduler/readiness",
             get(kraken_scheduler_readiness),
+        )
+        // CRYPTO-DATA-03C-KRAKEN-SCHEDULER-TASK-STATUS-SURFACE-01: read-only
+        // status surface for the CRYPTO-DATA-03B task-registration evidence
+        // file (public, no auth). Reads the same evidence dir as the routes
+        // above, filtered to the fixed kraken_ohlc_task_registration.json
+        // filename. No DB, no provider/network call, no PowerShell/CLI
+        // subprocess, no Windows Task Scheduler API call, no scheduler
+        // mutation, no trading state. "active" never means a task is
+        // registered -- see the response's own registered/task_exists_after
+        // fields for that distinct, truthfully-surfaced fact.
+        .route(
+            "/api/v1/market-data/kraken-scheduler/task-status",
+            get(kraken_scheduler_task_status),
         )
         .route(
             "/api/v1/market-data/feed/status",

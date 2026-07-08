@@ -1487,3 +1487,48 @@ no daemon job added; no daemon runtime started;
 no broker/risk/execution/OMS/runtime/strategy file touched; no live or
 paper order submitted; no crypto trading enabled; only the files in this
 bundle's stated scope changed.
+
+## 72. CRYPTO-DATA-03C-KRAKEN-SCHEDULER-TASK-STATUS-SURFACE-01 Closure Note (maintenance)
+
+Continuing after `§71` (`CRYPTO-DATA-03B`, scheduler task scripts), this
+patch adds the deferred read-only status surface for the
+`kraken_ohlc_task_registration.json` task-registration evidence contract:
+`GET /api/v1/market-data/kraken-scheduler/task-status` plus a "Kraken
+scheduled task status" GUI panel on the Ingest screen. Recorded here per
+`audit_repo_truth_rules.md` rather than left only in commit history.
+
+**Built:** `core-rs/crates/mqk-daemon/src/api_types.rs`
+(`KrakenSchedulerTaskStatusResponse`), `core-rs/crates/mqk-daemon/src/routes/transport_quality.rs`
+(`kraken_scheduler_task_status` handler), `core-rs/crates/mqk-daemon/src/routes.rs`
+(route registration), `core-rs/crates/mqk-daemon/tests/scenario_kraken_scheduler_task_status_route_03c.rs`
+(13 tests), `core-rs/mqk-gui/src/features/ingest/{types.ts,api.ts,IngestScreen.tsx}`,
+`core-rs/mqk-gui/src/features/ingest/__tests__/api.test.ts` (24 new tests).
+
+**Test proof:** `cargo test -p mqk-daemon --test scenario_kraken_scheduler_task_status_route_03c`
+— 13/13 pass, covering missing/absent evidence, valid check-only and
+register-mode evidence round-trips, malformed JSON, wrong schema_version,
+and every fail-closed unsafe-evidence condition. Sibling routes
+(`kraken-scheduler/readiness`, `kraken-ohlc/status`) re-verified unaffected
+(8/8 and 11/11 pass). `cargo clippy -p mqk-daemon --lib -- -D warnings` —
+clean. `npm test -- --run` (mqk-gui) — 711/711 pass. `npm run build`
+(mqk-gui) — clean.
+
+**Not resolved (`ASSET-CORE-04`/`CRYPTO-REGISTRY-01`/`CRYPTO-DATA-01` remain
+`PARTIAL`, not `CLOSED`):** no Windows Scheduled Task registered by this or
+any prior patch; no daemon recurring job; no production registry-v2
+cutover; no crypto session/calendar runtime enforcement; no crypto risk; no
+crypto paper/live execution; no crypto strategy.
+
+**Full detail, exact evidence citations, and validation commands:**
+`MiniQuantDesk_Master_Patch_Ledger_v2.md`'s
+`CRYPTO-DATA-03C-KRAKEN-SCHEDULER-TASK-STATUS-SURFACE-01` entry.
+
+**Safety confirmation:** no config flag changed; no config file mutated; no
+Kraken API call; no provider/network call of any kind; no DB
+connection/mutation; no scheduled task registered, unregistered, or
+started; no daemon job added; no daemon runtime started except isolated
+Axum route tests; no PowerShell subprocess or CLI execution from the new
+route; no broker/risk/execution/OMS/runtime/strategy file touched; no live
+or paper order submitted; no crypto trading enabled; no generated
+evidence/log/export file staged; only the files in this patch's stated
+scope changed.
