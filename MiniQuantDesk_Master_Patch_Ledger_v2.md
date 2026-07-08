@@ -4936,3 +4936,53 @@ evidence staged.
 — a pure, fail-closed translation/lookup index in
 `core-rs/crates/mqk-md/src/instrument_registry_v2.rs`, implementing exactly
 the contract named above.
+
+### REGISTRY-V2-TRANSLATION-01B-PURE-LOOKUP-LAYER-01 — CLOSED_LOCAL / MODEL-ONLY
+
+**Mission:** implement the translation contract named by
+`REGISTRY-V2-TRANSLATION-01A`'s audit — a pure, fail-closed lookup index
+between `InstrumentRegistryV2` identity and the legacy symbol-string key
+every current production consumer reads. Not wired into any consumer; no
+production path reads this index.
+
+**Built:** `core-rs/crates/mqk-md/src/instrument_registry_v2.rs` —
+`RegistryV2SymbolTranslationRecord` (instrument_id, symbol, asset_class,
+instrument_kind, enabled), `RegistryV2SymbolTranslationError` (plain enum:
+`EmptyInstrumentId`/`EmptySymbol`/`DuplicateInstrumentId`/
+`DuplicateCanonicalSymbol`), and `RegistryV2SymbolTranslationIndex` with
+`build()` (fail-closed on the first violation, in registry order) and four
+lookup methods: `instrument_id_to_legacy_symbol`,
+`legacy_symbol_to_instrument_id` (case-insensitive),
+`canonical_symbol_to_instrument_id`, `canonical_symbol_to_legacy_symbol`.
+Today's schema has one `symbol` field serving both canonical and legacy
+roles — documented explicitly in the module so a future schema split
+doesn't silently break the contract. 11 new tests (`trans01`-`trans11`):
+collision-free build over the full 88-row converted v1 equity universe,
+AAPL round-trip, SPY/TLT ETF metadata preservation, duplicate
+instrument_id/canonical-symbol (incl. case-normalized) failures, empty
+symbol/instrument_id failures, BTC/USD fixture slash-symbol preservation +
+non-tradable status, typed-miss (`None`, no panic) lookups for unknown
+symbol/instrument_id, and deterministic sorted-order rebuild proof.
+
+**Deliberately not done:** no consumer wired to this index (`mqk-runtime`,
+`mqk-execution`, `mqk-risk`, `mqk-broker-alpaca`, `mqk-db` migrations,
+`mqk-portfolio/src/accounting.rs` all untouched); no provider-alias
+(`provider_symbols` value) -> canonical-symbol lookup (out of scope per the
+01A audit); no DB/network call; no config flag changed; no trading enabled.
+
+**Validation:** `cargo check -p mqk-md` clean. `cargo test -p mqk-md
+instrument_registry_v2` — 60 passed (49 pre-existing + 11 new), 0 failed.
+`cargo clippy -p mqk-md --all-targets -- -D warnings` — clean, 0 warnings.
+`powershell -ExecutionPolicy Bypass -File
+scripts\guards\validate_registry_v2_translation_01a_audit.ps1` — all 8
+checks still pass (audit doc unchanged by this phase). `git diff --check`
+— clean.
+
+**Safety confirmation:** zero network calls; zero DB access/mutation; zero
+config flag changes; no crypto/futures/options/forex/rates trading enabled;
+no broker/order/risk/runtime/strategy/portfolio code touched; no generated
+evidence staged.
+
+**Recommended next slice:** `REGISTRY-V2-TRANSLATION-01C-VALIDATOR-CLI-AND-REPORT-01`
+— a read-only CLI/report command proving this index against the current
+v1 registry (and, separately, the disabled v2 crypto fixture) end-to-end.

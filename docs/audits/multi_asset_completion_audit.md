@@ -1733,3 +1733,18 @@ positions/snapshots, backtest/bar lookup CLI surfaces), confirms the current
 the next phase (`REGISTRY-V2-TRANSLATION-01B`) must implement. Docs-only —
 no code touched, no trading enabled, no DB/network call made. Full detail:
 `docs/specs/registry_v2_translation_01a_symbol_keyed_consumer_audit.md`.
+
+## 80. REGISTRY-V2-TRANSLATION-01B-PURE-LOOKUP-LAYER-01 Closure Note (maintenance)
+
+`CLOSED_LOCAL / MODEL-ONLY`. Adds `RegistryV2SymbolTranslationIndex` to
+`core-rs/crates/mqk-md/src/instrument_registry_v2.rs`: a pure, fail-closed,
+bidirectional lookup between `InstrumentRegistryV2` identity
+(`instrument_id`/`symbol`) and the legacy symbol-string key `md_bars`/
+outbox/portfolio-positions read. Proven collision-free across the full
+88-row converted v1 equity universe, round-trip-correct for AAPL, metadata-
+preserving for ETF symbols (SPY/TLT), fail-closed on duplicate/empty
+identity fields, slash-symbol-preserving and non-tradable-flagged for the
+BTC/USD crypto fixture, typed-miss (not panicking) for unknown lookups, and
+deterministic in rebuild ordering — 11 new tests, 60/60 passing, clippy
+clean. Not wired into any consumer; no production path reads this index.
+Full detail: ledger entry for `REGISTRY-V2-TRANSLATION-01B-PURE-LOOKUP-LAYER-01`.

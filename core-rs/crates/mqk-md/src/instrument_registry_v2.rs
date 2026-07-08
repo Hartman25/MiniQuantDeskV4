@@ -762,6 +762,221 @@ pub fn convert_v1_registry_to_v2(input: &[TrackedInstrument]) -> InstrumentRegis
     }
 }
 
+// ---------------------------------------------------------------------------
+// REGISTRY-V2-TRANSLATION-01B: pure, fail-closed symbol/instrument_id
+// translation index.
+//
+// Prerequisite #2 of `ASSET-CORE-01H`'s production-cutover checklist
+// (`docs/specs/asset_core_01h_instrument_registry_v2_consumption_boundary_decision.md`
+// §5) is "an explicit instrument_id/symbol translation or lookup path
+// between InstrumentRegistryV2 and every existing symbol-string-keyed
+// table". This section is that lookup path -- pure, in-memory, no IO, no DB,
+// no network, not called by any production path. See
+// `docs/specs/registry_v2_translation_01a_symbol_keyed_consumer_audit.md`
+// for the current-repo evidence this contract is scoped from.
+//
+// Today's `InstrumentDefinitionV2` has exactly one symbol field (`symbol`),
+// which this module's docs already call the "primary human-facing symbol".
+// For every instrument converted from v1 (the entire current production
+// equity universe), that field's value is byte-identical to the legacy
+// bare-ticker key `md_bars`/outbox/portfolio-positions already use. This
+// index therefore treats `symbol` as serving both the "canonical symbol"
+// and "legacy symbol" roles for today's schema, and exposes both pairs of
+// accessor names (`canonical_symbol_*` / `*_legacy_symbol`) as distinct
+// methods so the contract keeps holding unchanged if a future registry
+// schema splits them into two different fields.
+// ---------------------------------------------------------------------------
+
+/// One resolved translation entry: everything needed to go from a v2
+/// instrument identity to the legacy symbol-string key a current production
+/// consumer (`md_bars`, outbox order payloads, portfolio positions) reads.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegistryV2SymbolTranslationRecord {
+    pub instrument_id: String,
+    /// Serves as both the v2 "canonical symbol" and the legacy symbol-string
+    /// key today (see module-section docs above).
+    pub symbol: String,
+    pub asset_class: String,
+    pub instrument_kind: Option<String>,
+    pub enabled: bool,
+}
+
+/// Fail-closed construction errors for [`RegistryV2SymbolTranslationIndex::build`].
+/// Deliberately a plain enum (not `anyhow::Error`) so callers can match on
+/// the exact violation rather than string-matching a message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RegistryV2SymbolTranslationError {
+    /// `instrument_id` is empty/whitespace-only for the named `symbol`.
+    EmptyInstrumentId { symbol: String },
+    /// `symbol` is empty/whitespace-only for the named `instrument_id`.
+    EmptySymbol { instrument_id: String },
+    /// Two instruments in the same registry share one `instrument_id`.
+    DuplicateInstrumentId { instrument_id: String },
+    /// Two instruments in the same registry share one canonical symbol after
+    /// case-insensitive normalization (e.g. `"AAPL"` and `"aapl"`).
+    DuplicateCanonicalSymbol { symbol: String },
+}
+
+impl std::fmt::Display for RegistryV2SymbolTranslationError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EmptyInstrumentId { symbol } => write!(
+                f,
+                "registry_v2_symbol_translation: empty instrument_id for symbol={symbol}"
+            ),
+            Self::EmptySymbol { instrument_id } => write!(
+                f,
+                "registry_v2_symbol_translation: empty symbol for instrument_id={instrument_id}"
+            ),
+            Self::DuplicateInstrumentId { instrument_id } => write!(
+                f,
+                "registry_v2_symbol_translation: duplicate instrument_id={instrument_id}"
+            ),
+            Self::DuplicateCanonicalSymbol { symbol } => write!(
+                f,
+                "registry_v2_symbol_translation: duplicate canonical symbol={symbol} (case-normalized)"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for RegistryV2SymbolTranslationError {}
+
+/// Case-insensitive normalization used only for the *duplicate-detection*
+/// and *lookup* key -- the original-case `symbol` string is always what is
+/// returned to callers (pair symbols like `"BTC/USD"` are preserved exactly;
+/// only case is folded, the slash is untouched).
+fn normalize_symbol_for_translation(symbol: &str) -> String {
+    symbol.trim().to_ascii_uppercase()
+}
+
+/// Pure, fail-closed, bidirectional translation index between
+/// `InstrumentRegistryV2` identity (`instrument_id`/`symbol`) and the legacy
+/// symbol-string key every current production consumer reads. Built once
+/// from an [`InstrumentRegistryV2`] via [`Self::build`]; never mutated in
+/// place; never consults the DB, a provider, or a broker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegistryV2SymbolTranslationIndex {
+    records_by_instrument_id: BTreeMap<String, RegistryV2SymbolTranslationRecord>,
+    instrument_id_by_normalized_symbol: BTreeMap<String, String>,
+}
+
+impl RegistryV2SymbolTranslationIndex {
+    /// Build the index from `registry`. Fails closed (returns `Err`, builds
+    /// nothing partial) on the first violation found in registry order:
+    /// empty `instrument_id`, empty `symbol`, duplicate `instrument_id`, or
+    /// duplicate canonical symbol after case normalization. Does not read
+    /// `enabled`/`paper_trading_enabled`/`live_trading_enabled` to decide
+    /// whether to include an instrument -- every instrument in the registry,
+    /// disabled or not, gets a translation record; enablement is preserved
+    /// only as descriptive data on the record itself.
+    pub fn build(
+        registry: &InstrumentRegistryV2,
+    ) -> Result<Self, RegistryV2SymbolTranslationError> {
+        let mut records_by_instrument_id = BTreeMap::new();
+        let mut instrument_id_by_normalized_symbol: BTreeMap<String, String> = BTreeMap::new();
+
+        for inst in &registry.instruments {
+            if inst.instrument_id.trim().is_empty() {
+                return Err(RegistryV2SymbolTranslationError::EmptyInstrumentId {
+                    symbol: inst.symbol.clone(),
+                });
+            }
+            if inst.symbol.trim().is_empty() {
+                return Err(RegistryV2SymbolTranslationError::EmptySymbol {
+                    instrument_id: inst.instrument_id.clone(),
+                });
+            }
+            if records_by_instrument_id.contains_key(&inst.instrument_id) {
+                return Err(RegistryV2SymbolTranslationError::DuplicateInstrumentId {
+                    instrument_id: inst.instrument_id.clone(),
+                });
+            }
+
+            let normalized_symbol = normalize_symbol_for_translation(&inst.symbol);
+            if instrument_id_by_normalized_symbol.contains_key(&normalized_symbol) {
+                return Err(RegistryV2SymbolTranslationError::DuplicateCanonicalSymbol {
+                    symbol: inst.symbol.clone(),
+                });
+            }
+
+            instrument_id_by_normalized_symbol
+                .insert(normalized_symbol, inst.instrument_id.clone());
+            records_by_instrument_id.insert(
+                inst.instrument_id.clone(),
+                RegistryV2SymbolTranslationRecord {
+                    instrument_id: inst.instrument_id.clone(),
+                    symbol: inst.symbol.clone(),
+                    asset_class: inst.asset_class.clone(),
+                    instrument_kind: inst.instrument_kind.clone(),
+                    enabled: inst.enabled,
+                },
+            );
+        }
+
+        Ok(Self {
+            records_by_instrument_id,
+            instrument_id_by_normalized_symbol,
+        })
+    }
+
+    /// `instrument_id -> legacy symbol` (the `md_bars`/outbox/positions key).
+    /// Typed miss: returns `None`, never panics, for an unknown `instrument_id`.
+    pub fn instrument_id_to_legacy_symbol(&self, instrument_id: &str) -> Option<&str> {
+        self.records_by_instrument_id
+            .get(instrument_id)
+            .map(|r| r.symbol.as_str())
+    }
+
+    /// `legacy symbol -> instrument_id`. Case-insensitive lookup (matches
+    /// the same normalization [`Self::build`] used for collision detection).
+    /// Typed miss: returns `None`, never panics, for an unknown symbol.
+    pub fn legacy_symbol_to_instrument_id(&self, legacy_symbol: &str) -> Option<&str> {
+        let normalized = normalize_symbol_for_translation(legacy_symbol);
+        self.instrument_id_by_normalized_symbol
+            .get(&normalized)
+            .map(|s| s.as_str())
+    }
+
+    /// `canonical symbol -> instrument_id`. Identical lookup to
+    /// [`Self::legacy_symbol_to_instrument_id`] under today's one-symbol-field
+    /// schema (see module-section docs above); kept as a separate method name
+    /// so the contract survives a future schema where canonical and legacy
+    /// symbols diverge.
+    pub fn canonical_symbol_to_instrument_id(&self, canonical_symbol: &str) -> Option<&str> {
+        self.legacy_symbol_to_instrument_id(canonical_symbol)
+    }
+
+    /// `canonical symbol -> legacy symbol`, composed from the two lookups
+    /// above. Typed miss: returns `None`, never panics, for an unresolvable
+    /// canonical symbol.
+    pub fn canonical_symbol_to_legacy_symbol(&self, canonical_symbol: &str) -> Option<&str> {
+        let instrument_id = self.canonical_symbol_to_instrument_id(canonical_symbol)?;
+        self.instrument_id_to_legacy_symbol(instrument_id)
+    }
+
+    /// Full translation record for `instrument_id`, or `None` if unknown.
+    pub fn record_for_instrument_id(
+        &self,
+        instrument_id: &str,
+    ) -> Option<&RegistryV2SymbolTranslationRecord> {
+        self.records_by_instrument_id.get(instrument_id)
+    }
+
+    /// Every `instrument_id` in this index, in deterministic (sorted) order.
+    pub fn instrument_ids(&self) -> impl Iterator<Item = &str> {
+        self.records_by_instrument_id.keys().map(|s| s.as_str())
+    }
+
+    pub fn len(&self) -> usize {
+        self.records_by_instrument_id.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.records_by_instrument_id.is_empty()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1937,5 +2152,202 @@ mod tests {
                 "BTCUSD_TEST".to_string(),
             ]
         );
+    }
+
+    // ── REGISTRY-V2-TRANSLATION-01B: RegistryV2SymbolTranslationIndex ──────
+
+    fn crypto_local_marks_fixture_path() -> PathBuf {
+        let manifest_dir = env!("CARGO_MANIFEST_DIR");
+        PathBuf::from(manifest_dir)
+            .join("../../../config/instruments/instruments_v2.crypto_local_marks.example.json")
+    }
+
+    // TRANS-01: the current converted v1 equity universe (88 rows, per
+    // compat_01) builds a translation index collision-free -- the concrete
+    // precondition named by the 01A audit doc.
+    #[test]
+    fn trans01_converted_v1_universe_builds_collision_free() {
+        let v1 = load_instrument_registry(&v1_registry_path()).unwrap();
+        let v2 = convert_v1_registry_to_v2(&v1);
+        let index = RegistryV2SymbolTranslationIndex::build(&v2)
+            .expect("converted production equity universe must build collision-free");
+        assert_eq!(index.len(), 88);
+    }
+
+    // TRANS-02: AAPL legacy symbol -> v2 instrument_id -> legacy symbol
+    // round-trips to the exact original string.
+    #[test]
+    fn trans02_aapl_legacy_symbol_round_trips_through_instrument_id() {
+        let v1 = load_instrument_registry(&v1_registry_path()).unwrap();
+        let v2 = convert_v1_registry_to_v2(&v1);
+        let index = RegistryV2SymbolTranslationIndex::build(&v2).unwrap();
+
+        let instrument_id = index
+            .legacy_symbol_to_instrument_id("AAPL")
+            .expect("AAPL must resolve to an instrument_id");
+        assert_eq!(instrument_id, "equity:US:AAPL");
+
+        let round_tripped = index
+            .instrument_id_to_legacy_symbol(instrument_id)
+            .expect("instrument_id must resolve back to a legacy symbol");
+        assert_eq!(round_tripped, "AAPL");
+    }
+
+    // TRANS-03: ETF symbols (SPY, TLT) preserve their legacy symbol and map
+    // to equity asset_class + etf instrument_kind metadata.
+    #[test]
+    fn trans03_etf_symbols_preserve_legacy_symbol_and_equity_etf_metadata() {
+        let v1 = load_instrument_registry(&v1_registry_path()).unwrap();
+        let v2 = convert_v1_registry_to_v2(&v1);
+        let index = RegistryV2SymbolTranslationIndex::build(&v2).unwrap();
+
+        for symbol in ["SPY", "TLT"] {
+            let instrument_id = index
+                .legacy_symbol_to_instrument_id(symbol)
+                .unwrap_or_else(|| panic!("{symbol} must resolve to an instrument_id"));
+            let record = index
+                .record_for_instrument_id(instrument_id)
+                .unwrap_or_else(|| panic!("{symbol} instrument_id must resolve to a record"));
+            assert_eq!(record.symbol, symbol);
+            assert_eq!(record.asset_class, "equity");
+            assert_eq!(record.instrument_kind.as_deref(), Some("etf"));
+        }
+    }
+
+    // TRANS-04: duplicate instrument_id fails closed.
+    #[test]
+    fn trans04_duplicate_instrument_id_fails() {
+        let mut spy = base_equity("SPY");
+        spy.instrument_id = "equity:US:AAPL".to_string();
+        let aapl = base_equity("AAPL");
+        let err = RegistryV2SymbolTranslationIndex::build(&registry_of(vec![aapl, spy]))
+            .unwrap_err();
+        assert_eq!(
+            err,
+            RegistryV2SymbolTranslationError::DuplicateInstrumentId {
+                instrument_id: "equity:US:AAPL".to_string()
+            }
+        );
+    }
+
+    // TRANS-05: duplicate canonical symbol fails closed, including a
+    // case-normalized duplicate (different instrument_id, same symbol modulo
+    // case).
+    #[test]
+    fn trans05_duplicate_canonical_symbol_fails_including_case_normalized() {
+        let mut dup = base_equity("AAPL");
+        dup.instrument_id = "equity:US:AAPL2".to_string();
+        let original = base_equity("AAPL");
+        let err = RegistryV2SymbolTranslationIndex::build(&registry_of(vec![original, dup]))
+            .unwrap_err();
+        assert_eq!(
+            err,
+            RegistryV2SymbolTranslationError::DuplicateCanonicalSymbol {
+                symbol: "AAPL".to_string()
+            }
+        );
+
+        let mut lower = base_equity("aapl");
+        lower.instrument_id = "equity:US:AAPL3".to_string();
+        let original = base_equity("AAPL");
+        let err = RegistryV2SymbolTranslationIndex::build(&registry_of(vec![original, lower]))
+            .unwrap_err();
+        assert_eq!(
+            err,
+            RegistryV2SymbolTranslationError::DuplicateCanonicalSymbol {
+                symbol: "aapl".to_string()
+            }
+        );
+    }
+
+    // TRANS-06: empty symbol fails closed.
+    #[test]
+    fn trans06_empty_symbol_fails() {
+        let mut inst = base_equity("AAPL");
+        inst.symbol = "  ".to_string();
+        let err =
+            RegistryV2SymbolTranslationIndex::build(&registry_of(vec![inst])).unwrap_err();
+        assert_eq!(
+            err,
+            RegistryV2SymbolTranslationError::EmptySymbol {
+                instrument_id: "equity:US:AAPL".to_string()
+            }
+        );
+    }
+
+    // TRANS-07: empty instrument_id fails closed.
+    #[test]
+    fn trans07_empty_instrument_id_fails() {
+        let mut inst = base_equity("AAPL");
+        inst.instrument_id = "".to_string();
+        let err =
+            RegistryV2SymbolTranslationIndex::build(&registry_of(vec![inst])).unwrap_err();
+        assert_eq!(
+            err,
+            RegistryV2SymbolTranslationError::EmptyInstrumentId {
+                symbol: "AAPL".to_string()
+            }
+        );
+    }
+
+    // TRANS-08: the committed BTC/USD crypto fixture preserves its slash
+    // symbol exactly and stays disabled/non-tradable through the index.
+    #[test]
+    fn trans08_btc_usd_fixture_preserves_slash_symbol_and_stays_disabled() {
+        let registry = load_instrument_registry_v2(&crypto_local_marks_fixture_path())
+            .expect("committed crypto local-marks fixture must load");
+        let index = RegistryV2SymbolTranslationIndex::build(&registry)
+            .expect("crypto fixture must build collision-free");
+
+        let instrument_id = index
+            .legacy_symbol_to_instrument_id("BTC/USD")
+            .expect("BTC/USD must resolve to an instrument_id");
+        assert_eq!(instrument_id, "crypto:GLOBAL:BTCUSD");
+
+        let record = index.record_for_instrument_id(instrument_id).unwrap();
+        assert_eq!(record.symbol, "BTC/USD");
+        assert_eq!(record.asset_class, "crypto");
+        assert!(!record.enabled, "BTC/USD fixture must stay non-tradable");
+    }
+
+    // TRANS-09: an unknown symbol lookup returns a typed miss (`None`), not a panic.
+    #[test]
+    fn trans09_unknown_symbol_lookup_returns_typed_miss() {
+        let v1 = load_instrument_registry(&v1_registry_path()).unwrap();
+        let v2 = convert_v1_registry_to_v2(&v1);
+        let index = RegistryV2SymbolTranslationIndex::build(&v2).unwrap();
+        assert_eq!(index.legacy_symbol_to_instrument_id("NOSUCHSYMBOL"), None);
+        assert_eq!(index.canonical_symbol_to_instrument_id("NOSUCHSYMBOL"), None);
+        assert_eq!(index.canonical_symbol_to_legacy_symbol("NOSUCHSYMBOL"), None);
+    }
+
+    // TRANS-10: an unknown instrument_id lookup returns a typed miss (`None`), not a panic.
+    #[test]
+    fn trans10_unknown_instrument_id_lookup_returns_typed_miss() {
+        let v1 = load_instrument_registry(&v1_registry_path()).unwrap();
+        let v2 = convert_v1_registry_to_v2(&v1);
+        let index = RegistryV2SymbolTranslationIndex::build(&v2).unwrap();
+        assert_eq!(index.instrument_id_to_legacy_symbol("equity:US:NOSUCH"), None);
+        assert_eq!(index.record_for_instrument_id("equity:US:NOSUCH"), None);
+    }
+
+    // TRANS-11: building the index twice from the same registry yields the
+    // exact same deterministic instrument_id ordering (BTreeMap-backed, no
+    // hash-order or wall-clock dependency).
+    #[test]
+    fn trans11_deterministic_ordering_across_rebuilds() {
+        let v1 = load_instrument_registry(&v1_registry_path()).unwrap();
+        let v2 = convert_v1_registry_to_v2(&v1);
+
+        let index_a = RegistryV2SymbolTranslationIndex::build(&v2).unwrap();
+        let index_b = RegistryV2SymbolTranslationIndex::build(&v2).unwrap();
+
+        let ids_a: Vec<&str> = index_a.instrument_ids().collect();
+        let ids_b: Vec<&str> = index_b.instrument_ids().collect();
+        assert_eq!(ids_a, ids_b);
+
+        let mut sorted_ids = ids_a.clone();
+        sorted_ids.sort();
+        assert_eq!(ids_a, sorted_ids, "instrument_ids() must be in sorted order");
     }
 }
