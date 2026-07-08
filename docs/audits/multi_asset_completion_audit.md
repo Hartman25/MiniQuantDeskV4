@@ -1868,3 +1868,28 @@ decision is `CLOSED_LOCAL` while prerequisite #4 itself remains `OPEN`, and
 updates the production-cutover checklist accordingly. No network call, DB
 access, or trading enablement occurred in any of `01B`-`01D`. Full detail:
 `docs/specs/registry_v2_live_provider_01d_boundary_closure_decision.md`.
+
+## 87. REGISTRY-V2-KRAKEN-LIVE-PROVIDER-PROOF-01 Closure Note (maintenance)
+
+`CLOSED_LOCAL / LIVE-PROOF-COMPLETE`. Closes `ASSET-CORE-01H` prerequisite
+#4. After the operator gave the exact authorization phrase required by
+`REGISTRY-V2-LIVE-PROVIDER-01B`/`01D`, this patch ran the exact command
+those docs named — `mqk-cli md kraken-ohlc-ingest --timeframe 1D`, once
+each for `BTC/USD` and `ETH/USD`, with `MQK_ALLOW_KRAKEN_NETWORK_SMOKE=1`
+and `MQK_DATABASE_URL` pointed at the isolated local `mqk_test` database
+(port 5434, confirmed distinct from the paper database at port 5440) — no
+code changes, since the command and its network/DB gates already existed.
+Both runs made exactly one live HTTP GET each to Kraken's public,
+credential-free OHLC endpoint and wrote 720 real completed bars each to
+`md_bars` via the unmodified provider-ingest write path, with truthful
+`provider_id="kraken"` metadata, confirmed independently via direct `psql`
+query. Post-proof checks confirmed the paper database has zero rows for
+either symbol, `config/providers/providers.json` and the crypto
+registry-v2 fixture are byte-identical to their pre-proof state (both
+remain fully disabled), and no Kraken scheduled task exists. Evidence JSON
+written to git-ignored `exports/live_provider_proof/`, not staged.
+Prerequisite #4 is now `CLOSED`; prerequisite #5 (explicit operator
+enablement) remains explicitly `OPEN` and was not inferred from this
+proof's success. `REGISTRY-V2-PRODUCTION-CUTOVER-DECISION-01` remains
+blocked on prerequisite #5 alone. Full detail:
+`docs/specs/registry_v2_kraken_live_provider_proof_01_closure_decision.md`.

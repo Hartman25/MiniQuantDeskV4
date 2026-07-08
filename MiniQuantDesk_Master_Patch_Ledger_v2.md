@@ -5445,3 +5445,72 @@ generated evidence staged; no production cutover.
 **Recommended next slice:** `REGISTRY-V2-KRAKEN-LIVE-PROVIDER-PROOF-01`
 — **only** once the operator has given the exact authorization phrase
 named in this bundle's `01B`/`01D` docs. Otherwise, stop.
+
+### REGISTRY-V2-KRAKEN-LIVE-PROVIDER-PROOF-01 — CLOSED_LOCAL / LIVE-PROOF-COMPLETE
+
+**Mission:** execute exactly the bounded live proof named by `01B`/`01D`
+after the operator gave the exact required authorization phrase verbatim.
+Closes `ASSET-CORE-01H` prerequisite #4.
+
+**Run:** `mqk-cli md kraken-ohlc-ingest` (no code changes — the command
+already existed), once for `BTC/USD` and once for `ETH/USD`, both
+`--timeframe 1D`, with `MQK_ALLOW_KRAKEN_NETWORK_SMOKE=1` set, no
+`--input-file`, and `MQK_DATABASE_URL` pointed at the local isolated
+`mqk_test` database (port 5434) — confirmed via `psql
+SELECT current_database()` to be `mqk_test`, distinct from the paper
+database (`miniquantdesk_paper`, port 5440). Both invocations made exactly
+one live HTTP GET each to Kraken's public `/0/public/OHLC` endpoint (no
+credentials sent or required) and wrote 720 real completed bars each to
+`md_bars` via the unmodified `ingest_provider_bars_to_md_bars_with_provider_metadata`
+path, stamped with truthful `provider_id="kraken"`/`provider_source="kraken"`.
+Evidence JSON for both runs
+(`network_call_made=true`, `db_write=true`, `md_bars_write=true`,
+`bars_completed=720` each) written to git-ignored
+`exports/live_provider_proof/`, not staged. Independently confirmed via
+direct `psql` query against `mqk_test`. Post-proof check confirmed the
+paper database's `md_bars` shows zero rows for either symbol, and
+`config/providers/providers.json`/the crypto registry-v2 fixture are
+byte-identical to their pre-proof state (`git diff` clean on both), and no
+Kraken scheduled task exists (`Get-ScheduledTask` empty).
+
+**Built:** `docs/specs/registry_v2_kraken_live_provider_proof_01_closure_decision.md`
+— documents the full proof, evidence, and post-proof no-cutover check, and
+decides prerequisite #4 is now `CLOSED`. Prerequisite #5 (explicit operator
+enablement) is explicitly left open and not inferred from this proof's
+success — `kraken.enabled` and both crypto fixture rows' enablement flags
+remain `false`.
+
+**Updated:** `docs/specs/roadmap_completion_reconcile_01.md` §2's
+`REGISTRY-V2-PRODUCTION-CUTOVER-DECISION-01` row (prerequisite #4 now
+satisfied; only #5 remains) and §3's next-best-patch recommendation;
+`docs/audits/multi_asset_completion_audit.md` §87 closure note.
+
+**Deliberately not done:** no credentials used or provisioned; `.env.local`
+not read or modified; no config flag changed (`kraken.enabled`,
+`BTC/USD`/`ETH/USD` enablement flags all remain `false`); no trading
+enabled (paper or live); no scheduler/task registration; no broker/
+execution/risk/OMS/runtime/strategy/portfolio code touched; no evidence or
+DB rows staged/committed; prerequisite #5 not attempted, decided, or
+inferred; `REGISTRY-V2-PRODUCTION-CUTOVER-DECISION-01` not written (still
+blocked on #5 alone).
+
+**Validation:** two `mqk-cli md kraken-ohlc-ingest` runs, both
+`all_passed=true` in their evidence JSON, `rows_inserted=720`/
+`rows_updated=0` each. Direct `psql` query against `mqk_test` confirms 720
+rows each for `BTC/USD`/`ETH/USD` with `provider_id=kraken`. Direct `psql`
+query against `miniquantdesk_paper` (port 5440) confirms zero rows for
+either symbol. `Get-ScheduledTask -TaskName "*Kraken*"` — zero results.
+`git diff --name-only` — only this closure decision doc added; no
+config/source file touched.
+
+**Safety confirmation:** exactly two live network calls (both to Kraken's
+public, credential-free OHLC endpoint, both explicitly authorized); DB
+writes confined to the isolated `mqk_test` proof database only, zero
+writes to paper/live; zero config flag changes; no crypto/futures/options/
+forex/rates trading enabled; no broker/order/risk/runtime/strategy/
+portfolio code touched; no generated evidence staged; no production
+cutover.
+
+**Recommended next slice:** an explicit operator-enablement decision for
+prerequisite #5 — only if and when the operator makes that decision
+explicitly. No further registry-v2 boundary work is otherwise recommended.
