@@ -37,35 +37,42 @@ items outside this session's scope.
 | `CRYPTO-RISK-01` | `MISSING` (0%, unchanged) | Missing execution/risk/strategy | No spread-gate, no counterparty-risk model. Not touched — `mqk-risk/*` forbidden this session. |
 | `CRYPTO-EXEC-01` | `MISSING` (0%, unchanged) | Missing execution/risk/strategy | Alpaca adapter never calls `/v2/crypto/*` (confirmed by direct source read, `mqk-broker-alpaca/src/lib.rs`). Not touched — `mqk-broker-*` forbidden this session. |
 | `CRYPTO-STRAT-01` | `MISSING` (0%, unchanged) | Missing execution/risk/strategy | Depends on `CRYPTO-EXEC-01`; no strategy code exists. Not touched this session. |
-| `REGISTRY-V2-PRODUCTION-CUTOVER-DECISION-01` | Not started (decision-only patch, not yet written) | Production-consumption-open (this *is* the boundary-crossing decision point) | Blocked on all five `ASSET-CORE-01H` §5 prerequisites: (1) `BACKTEST-MULTIPLIER-MARGIN-01` closed — **now satisfied by this session**; (2) symbol/`instrument_id` translation layer — open; (3) Gate 0 / broker-submit routing-guard parity re-verification against `InstrumentRegistryV2::asset_class` — open; (4) a live-network-verified non-equity market-data provider end-to-end into `md_bars` — open (requires live network calls, forbidden this session); (5) an explicit operator enablement decision for a named non-equity instrument — open. |
+| `REGISTRY-V2-PRODUCTION-CUTOVER-DECISION-01` | Not started (decision-only patch, not yet written) | Production-consumption-open (this *is* the boundary-crossing decision point) | Blocked on three of five `ASSET-CORE-01H` §5 prerequisites: (1) `BACKTEST-MULTIPLIER-MARGIN-01` closed — **satisfied**; (2) symbol/`instrument_id` translation layer — **now satisfied** by `REGISTRY-V2-TRANSLATION-01A`-`01D` (pure fail-closed `RegistryV2SymbolTranslationIndex`, proven collision-free and round-trippable across the full 88-row equity universe, zero production callers); (3) Gate 0 / broker-submit routing-guard parity re-verification against `InstrumentRegistryV2::asset_class` — open; (4) a live-network-verified non-equity market-data provider end-to-end into `md_bars` — open (requires live network calls, forbidden this session); (5) an explicit operator enablement decision for a named non-equity instrument — open. |
 
 ## 3. Next best patch
 
-**`REGISTRY-V2-PRODUCTION-CUTOVER-DECISION-01`'s prerequisite #2** —
-**a symbol/`instrument_id` translation layer** between `InstrumentRegistryV2`
-and the existing symbol-string-keyed tables (`md_bars`, outbox rows,
-portfolio positions) — is the next best value-per-risk patch:
+**Update (`REGISTRY-V2-TRANSLATION-01A`-`01D`, this session's later work):**
+prerequisite #2 — the symbol/`instrument_id` translation layer between
+`InstrumentRegistryV2` and the existing symbol-string-keyed tables
+(`md_bars`, outbox rows, portfolio positions) — is now **satisfied**. A
+pure, fail-closed `RegistryV2SymbolTranslationIndex` was built
+(`core-rs/crates/mqk-md/src/instrument_registry_v2.rs`) and proven
+collision-free and round-trippable across the full 88-row production
+equity universe via a read-only CLI (`mqk md registry-v2-translation-check`);
+see `docs/specs/registry_v2_translation_01d_closure_decision.md` for the
+full closure decision. Zero production paths consume it.
 
-- It is a **pure, additive, backtest/tooling-adjacent** translation/lookup
-  concern (v1 bare-ticker ↔ v2 `instrument_id`/pair-style `symbol`), provably
-  scopeable without touching broker/risk/OMS/runtime behavior, matching the
-  pattern every closed sub-slice in this roadmap has already followed.
-- It directly satisfies prerequisite #2 named by `ASSET-CORE-01H` §5, moving
+**`REGISTRY-V2-GATE-PARITY-01`** — prerequisite #3, **Gate 0 / broker-submit
+routing-guard parity re-verification** against `InstrumentRegistryV2::asset_class`
+— is now the next best value-per-risk patch:
+
+- It is a **regression-test-only** patch against code that already exists
+  (`mqk_schemas::AssetClass` gates), requiring no new runtime behavior, only
+  a parity proof that Gate 0 and the routing guard reject the same set of
+  asset classes whether keyed off `mqk_schemas::AssetClass` or
+  `InstrumentRegistryV2::asset_class`.
+- It directly satisfies prerequisite #3 named by `ASSET-CORE-01H` §5, moving
   `REGISTRY-V2-PRODUCTION-CUTOVER-DECISION-01` one item closer without
   crossing the production-consumption boundary itself.
-- Prerequisite #3 (Gate 0 / routing-guard parity) is the next cheapest after
-  that — it is a **regression-test-only** patch against code that already
-  exists (`mqk_schemas::AssetClass` gates), requiring no new runtime
-  behavior, only a parity proof.
 - Prerequisites #4 (live non-equity provider verification) and #5 (explicit
   operator enablement) are **not** recommended next — #4 requires a live
   network call (forbidden under this session's hard safety rules and
   arguably every prior session's, since no prior patch in this entire
   roadmap has made one), and #5 is an operator decision that should not
-  precede #2-#4 being settled.
+  precede #3-#4 being settled.
 
 **Do not** recommend `REGISTRY-V2-PRODUCTION-CUTOVER-DECISION-01` itself
-next — four of its five prerequisites remain open; recommending it now
+next — three of its five prerequisites remain open; recommending it now
 would be the exact "stale recommendation pointing to already-closed work"
 pattern this document is required to avoid the opposite of (recommending
 unready work as if it were ready).

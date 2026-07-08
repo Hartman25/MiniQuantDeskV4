@@ -5040,3 +5040,52 @@ evidence staged.
 **Recommended next slice:** `REGISTRY-V2-TRANSLATION-01D-CLOSURE-AND-ROADMAP-RECONCILE-01`
 — decide whether `ASSET-CORE-01H` prerequisite #2 is closed and reconcile
 the roadmap accordingly.
+
+### REGISTRY-V2-TRANSLATION-01D-CLOSURE-AND-ROADMAP-RECONCILE-01 — CLOSED_LOCAL / DOCS-ONLY
+
+**Mission:** decide whether `ASSET-CORE-01H` prerequisite #2 (an explicit
+`instrument_id`/symbol translation layer) is closed given `01A`-`01C`'s
+work, and reconcile the roadmap/production-cutover checklist accordingly.
+Docs-only.
+
+**Built:** `docs/specs/registry_v2_translation_01d_closure_decision.md` —
+answers all 9 required questions from current repo evidence (`01A`-`01C`'s
+own audit/tests): prerequisite #2 is `CLOSED_LOCAL` for the additive
+translation-layer foundation; names the four translation paths that now
+exist; names the symbol-string-keyed surfaces that remain unchanged;
+confirms zero production paths consume v2 (the index has exactly two
+callers: its own unit tests and the read-only CLI); names what was proven
+collision-free (full 88-row equity universe) and round-trippable (all 88
+instruments, both directions); explains the disabled crypto v2 fixture is
+translated via a fully independent index, never merged with the equity
+lane, and fails closed if its trading flags were ever flipped true; updates
+the production-cutover checklist status (prerequisite #2 now satisfied,
+#3-#5 still open); and recommends `REGISTRY-V2-GATE-PARITY-01` next
+(prerequisite #3 — a regression-test-only Gate 0/routing-guard parity
+proof, the next cheapest prerequisite, requiring no new runtime behavior).
+
+**Updated:** `docs/specs/roadmap_completion_reconcile_01.md` §2's
+`REGISTRY-V2-PRODUCTION-CUTOVER-DECISION-01` row (prerequisite #2 marked
+satisfied) and §3's next-best-patch recommendation (now
+`REGISTRY-V2-GATE-PARITY-01`); `docs/audits/multi_asset_completion_audit.md`
+§82 closure note.
+
+**Deliberately not done:** no code touched; no config flag changed; no
+trading enabled; no network or DB call made; no production registry-v2
+cutover attempted or implied; `REGISTRY-V2-PRODUCTION-CUTOVER-DECISION-01`
+itself not recommended next (three of its five prerequisites remain open).
+
+**Validation:** `powershell -ExecutionPolicy Bypass -File
+scripts\guards\validate_registry_v2_translation_01a_audit.ps1` — all 8
+checks passed, including the closure-decision-doc status-label check
+(newly satisfied by this phase's doc). `git diff --check` — clean.
+
+**Safety confirmation:** zero network calls; zero DB access/mutation; zero
+config flag changes; no crypto/futures/options/forex/rates trading enabled;
+no broker/order/risk/runtime/strategy/portfolio code touched; no generated
+evidence staged.
+
+**Recommended next slice:** `REGISTRY-V2-GATE-PARITY-01` — prerequisite #3
+of `ASSET-CORE-01H`'s production-cutover checklist (Gate 0 / broker-submit
+routing-guard parity re-verification against `InstrumentRegistryV2::asset_class`,
+regression-test-only, no new runtime behavior).

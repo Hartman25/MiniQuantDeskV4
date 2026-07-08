@@ -1761,3 +1761,18 @@ last case reported as `truth_state=unsafe_trading_enabled`, distinct from a
 plain collision. 8 new subprocess-driven scenario tests, all passing;
 clippy clean; no DB/network call; no consumer wired. Full detail: ledger
 entry for `REGISTRY-V2-TRANSLATION-01C-VALIDATOR-CLI-AND-REPORT-01`.
+
+## 82. REGISTRY-V2-TRANSLATION-01D-CLOSURE-AND-ROADMAP-RECONCILE-01 Closure Note (maintenance)
+
+`CLOSED_LOCAL / DOCS-ONLY`. Decides `ASSET-CORE-01H` prerequisite #2 (an
+explicit `instrument_id`/symbol translation layer) is now `CLOSED_LOCAL`
+for its additive foundation scope, given `01A`'s audit, `01B`'s pure
+translation index, and `01C`'s CLI/report proof. Confirms zero production
+paths consume `InstrumentRegistryV2` (the translation index has exactly two
+callers: its own unit tests and the read-only CLI). Updates the
+production-cutover checklist: prerequisites #1-#2 now satisfied; #3 (Gate
+0/routing-guard parity), #4 (live-network non-equity provider proof), and
+#5 (explicit operator enablement) remain open.
+`REGISTRY-V2-PRODUCTION-CUTOVER-DECISION-01` itself remains explicitly not
+recommended. Docs-only — no code touched, no trading enabled, no DB/network
+call made. Full detail: `docs/specs/registry_v2_translation_01d_closure_decision.md`.
