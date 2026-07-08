@@ -21,6 +21,12 @@ mqk-schemas = { path = "../mqk-schemas" }
 # harnesses; not permitted in prod crates.
 mqk-db = { path = "../mqk-db", features = ["testkit"] }
 
+# REGISTRY-V2-GATE-PARITY-01C: test-only dependency so the routing-guard
+# parity test can call mqk_md::instrument_registry_v2::registry_v2_gate_asset_class.
+# Dev-dependency only — mqk-execution's [dependencies] gain no new edge, and
+# no production path in this crate reads mqk-md or InstrumentRegistryV2.
+mqk-md = { path = "../mqk-md" }
+
 # RT-2: integration tests that call BrokerGateway::for_test or
 # OutboxClaimToken::for_test must activate the testkit feature.
 # Without it the lib is compiled without cfg(test) so for_test is absent.
@@ -42,4 +48,8 @@ required-features = ["testkit"]
 
 [[test]]
 name = "scenario_asset_class_guard_multi_asset_routing_guard_01"
+required-features = ["testkit"]
+
+[[test]]
+name = "scenario_registry_v2_routing_guard_parity_01c"
 required-features = ["testkit"]
