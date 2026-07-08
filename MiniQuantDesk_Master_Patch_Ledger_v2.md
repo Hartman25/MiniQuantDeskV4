@@ -4464,3 +4464,83 @@ cutover decision) outside this patch's and this session's scope.
 
 **Recommended next slice:** none required to keep the registry-v2 schema
 itself complete. Full detail: `docs/specs/asset_core_01e_registry_v2_rates_schema_gap.md`.
+
+### ASSET-CORE-01F-INSTRUMENT-REGISTRY-V2-COMPLETION-AUDIT-01 — CLOSED_LOCAL / FOUNDATION-COMPLETE
+
+**Mission:** an audit-first session asked whether `ASSET-CORE-01` (Unified
+Instrument Registry v2) is now complete as a unified foundation, and, if
+incomplete only because of a safe schema/model/docs/validator gap, to close
+that gap — without crossing into production trading/execution/risk/
+ingestion consumption.
+
+**Repo evidence found:** direct re-inspection at `HEAD` (`e2680ac1`)
+confirmed `01A` (`7322b280`), `01B` (`696b56fe`), `01C` (`83f8a89e`), `01D`
+(`e951b0ef`), and `01E` (`e2680ac1`) are all `CLOSED_LOCAL` and committed.
+`CANONICAL_ASSET_CLASSES_V2` and `ContractDefinitionV2`
+(`mqk-md/src/instrument_registry_v2.rs`) cover all seven asset categories a
+unified registry is expected to model — equity, ETF (via
+`instrument_kind="etf"`), crypto spot, future, option, forex, and
+rate/fixed income (`01E`) — each with a fail-closed `validate_contract_v2`
+match arm and an `enabled=true` + non-equity rejection unless
+`allow_enabled_non_equity_for_testing=true` (test-only escape hatch).
+Validator/status surfaces exist at three levels: CLI (`mqk md
+registry-v2-status`), daemon routes (`GET
+/api/v1/system/instrument-registry-v2/status`, `GET
+/api/v1/system/instrument-registry-v2-source/status`, `GET
+/api/v1/system/instrument-economics/status`), and GUI (registry-v2 source
+status + static asset-capability matrix, both on the operator System/Status
+screen per the `01D`-combined follow-up). Direct grep of
+`mqk-runtime`/`mqk-execution`/`mqk-risk`/`mqk-broker-alpaca` for
+`instrument_registry_v2` returned zero matches — confirming
+`InstrumentRegistryV2` is read only by `mqk-md`/`mqk-daemon`/`mqk-cli`
+read-only surfaces, never by a production trading path.
+`config/instruments/equities.json` (v1) remains the sole production
+trading-instrument source; no production registry-v2 file exists (only
+disabled example/fixture JSON).
+
+**Built:** `docs/specs/asset_core_01f_instrument_registry_v2_completion_audit.md`
+(full sub-slice table, seven-category schema-coverage table, validator/
+operator-surface inventory, production-consumption truth, classified
+remaining-gap table, closure decision, recommended next patch) and
+`scripts/guards/validate_asset_core_01f_instrument_registry_v2_completion.ps1`
+(text-only validator: audit doc exists; mentions all five sub-slices
+`01A`-`01E`; mentions `InstrumentRegistryV2`; mentions all seven schema
+categories; states registry-v2 is not consumed by any trading path; does
+not claim non-equity trading is enabled; does not claim a production
+cutover happened; names a recommended next patch). Also appended §74 to
+`docs/audits/multi_asset_completion_audit.md` (maintenance closure note,
+same append-only pattern as §18-20/§34/§73) recording the
+`FOUNDATION-COMPLETE` verdict without rewriting the audit's original §3/§5
+snapshot tables.
+
+**Closure decision:** `CLOSED_LOCAL / FOUNDATION-COMPLETE`. No
+`foundation_gap` (schema/model/docs/validator) remains — `01E` already
+closed the last one (rates/fixed income). The only remaining gaps are
+`production_consumption_gap` (no trading/execution/risk/OMS/ingestion path
+reads `InstrumentRegistryV2`; no production cutover decision made; no live
+non-equity provider network-verified beyond existing read-only checks) and
+items that belong to other patch IDs entirely (`future_asset_class_gap` for
+`FUTURES-*`/`OPTIONS-*`/`FX-*`/`RATES-*`; `not_ASSET_CORE_01` for the
+`CRYPTO-*` lane). Per this session's own hard constraint, production
+consumption is not crossed here — see
+`ASSET-CORE-01H-INSTRUMENT-REGISTRY-V2-CONSUMPTION-BOUNDARY-DECISION-01`
+below for the explicit boundary record.
+
+**Deliberately not done:** no `foundation_gap` closure patch (`01G`) was
+needed or attempted — Phase A found the foundation already complete, so
+Phase B (`ASSET-CORE-01G`) was skipped per this session's own conditional
+gating; no code file touched (no `mqk-md`, `mqk-daemon`, `mqk-cli`, or GUI
+source edited); no config flag changed; no trading enabled; no network or
+DB call made; no broker/execution/risk/OMS/runtime/strategy file touched.
+
+**Validation:** `powershell -ExecutionPolicy Bypass -File
+scripts\guards\validate_asset_core_01f_instrument_registry_v2_completion.ps1`
+— all checks passed. `git diff --check` — clean.
+
+**Safety confirmation:** zero network calls; zero DB access/mutation; zero
+config flag changes; no crypto/futures/options/forex/rates trading enabled;
+no broker/order/risk/runtime/strategy code touched; no generated evidence
+staged.
+
+**Recommended next slice:** `REGISTRY-V2-PRODUCTION-CUTOVER-DECISION-01` —
+see `docs/specs/asset_core_01h_instrument_registry_v2_consumption_boundary_decision.md`.

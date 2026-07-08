@@ -1579,3 +1579,28 @@ route; no broker/risk/execution/OMS/runtime/strategy file touched; no live
 or paper order submitted; no crypto trading enabled; no generated
 evidence/log/export file staged; only the files in this patch's stated
 scope changed.
+
+## 74. ASSET-CORE-01F Closure Note (maintenance)
+
+A follow-up session was asked to audit whether `ASSET-CORE-01` (Unified
+Instrument Registry v2) was complete as a foundation, and close it if a
+safe schema/model/docs/validator gap remained. Direct re-inspection at
+`HEAD` (`e2680ac1`) confirmed `01A`-`01E` (§18-20, §34, §73 above) are all
+`CLOSED_LOCAL` and, per §3 of
+`docs/specs/asset_core_01f_instrument_registry_v2_completion_audit.md`, the
+registry-v2 schema now models all seven asset categories (equity, ETF,
+crypto spot, future, option, forex, rate/fixed income) with fail-closed
+validation on every non-equity variant. No foundation gap (schema, model,
+loader, validator, docs, or test-coverage) was found remaining — `01E`
+already closed the last one (rates/fixed income).
+
+**Verdict: `CLOSED_LOCAL / FOUNDATION-COMPLETE`.** `ASSET-CORE-01`'s own
+scope — the instrument-registry v2 foundation itself — is done. Production
+consumption (any trading/execution/risk/OMS/ingestion path reading
+`InstrumentRegistryV2` as truth) was never part of that scope and remains
+a separate, explicitly-named boundary; see
+`docs/specs/asset_core_01h_instrument_registry_v2_consumption_boundary_decision.md`.
+This audit changed no config flag, enabled no trading, made no network or
+DB call, and touched no broker/execution/risk/OMS/runtime/strategy code.
+
+**Full detail:** `docs/specs/asset_core_01f_instrument_registry_v2_completion_audit.md`.
