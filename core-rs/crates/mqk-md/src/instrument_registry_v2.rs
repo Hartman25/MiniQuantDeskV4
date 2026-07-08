@@ -977,6 +977,115 @@ impl RegistryV2SymbolTranslationIndex {
     }
 }
 
+// ---------------------------------------------------------------------------
+// REGISTRY-V2-GATE-PARITY-01B: pure, fail-closed v2 asset-class -> gate
+// decision helper.
+//
+// Prerequisite #3 of `ASSET-CORE-01H`'s production-cutover checklist
+// (`docs/specs/asset_core_01h_instrument_registry_v2_consumption_boundary_decision.md`
+// §5) requires Gate 0 (`mqk-daemon::routes::strategy::validate_strategy_signal`)
+// and the broker-submit routing guard
+// (`mqk_execution::gateway::BrokerGateway::enforce_gates`,
+// `MULTI-ASSET-ROUTING-GUARD-01`) to be re-verified against
+// `InstrumentRegistryV2::asset_class` parity. Both existing gates already
+// enforce an equity-only allowlist keyed off a *different* type
+// (`StrategySignalRequest.asset_class: Option<String>` for Gate 0,
+// `mqk_schemas::AssetClass` for the routing guard) -- see
+// `docs/specs/registry_v2_gate_parity_01a_current_gate_audit.md` §2-§6 for
+// the full audit and parity contract this helper implements.
+//
+// This function classifies any string against exactly that contract: equity
+// allowed, every other `CANONICAL_ASSET_CLASSES_V2` member rejected as
+// non-equity, and empty/unknown input fails closed. It is pure (no IO, no
+// DB, no network) and is not called by Gate 0, the routing guard, or any
+// other production path in this patch -- see `01A`'s audit doc §5 for why
+// plural aliases (`"futures"`/`"options"`) are deliberately **not** accepted
+// here (matching `CANONICAL_ASSET_CLASSES_V2`'s own strictness).
+// ---------------------------------------------------------------------------
+
+/// Result of classifying an `InstrumentRegistryV2.asset_class` string
+/// against the same allow/reject decision the existing Gate 0 and
+/// broker-submit routing guard already enforce.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RegistryV2GateAssetClass {
+    /// Normalizes to `"equity"` -- the only class either existing gate
+    /// allows through to production routing.
+    Equity,
+    /// Normalizes to a valid, non-`"equity"` member of
+    /// [`CANONICAL_ASSET_CLASSES_V2`]. Carries the normalized (lower-cased,
+    /// trimmed) class string.
+    NonEquity { asset_class: String },
+}
+
+/// Fail-closed classification errors for [`registry_v2_gate_asset_class`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RegistryV2GateAssetClassError {
+    /// Input was empty or whitespace-only.
+    EmptyAssetClass,
+    /// Input, once normalized, is not a member of
+    /// [`CANONICAL_ASSET_CLASSES_V2`]. Carries the original (non-normalized)
+    /// input string for diagnostics. This includes plural aliases
+    /// (`"futures"`, `"options"`) and `"etf"` (ETF is `instrument_kind`, not
+    /// `asset_class` -- see module docs).
+    UnknownAssetClass(String),
+}
+
+impl std::fmt::Display for RegistryV2GateAssetClassError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EmptyAssetClass => {
+                write!(f, "registry_v2_gate_asset_class: empty asset_class")
+            }
+            Self::UnknownAssetClass(s) => write!(
+                f,
+                "registry_v2_gate_asset_class: unknown asset_class={s} (expected one of {CANONICAL_ASSET_CLASSES_V2:?})"
+            ),
+        }
+    }
+}
+
+impl std::error::Error for RegistryV2GateAssetClassError {}
+
+/// Classify `asset_class` against the Gate 0 / broker-submit routing-guard
+/// parity contract (see module-section docs above and `01A`'s audit doc).
+/// Normalizes via `trim().to_ascii_lowercase()` -- the same normalization
+/// Gate 0 (`validate_strategy_signal`) already applies -- before matching
+/// against [`CANONICAL_ASSET_CLASSES_V2`]. Fails closed: empty input and
+/// any string not in [`CANONICAL_ASSET_CLASSES_V2`] (including plural
+/// aliases and `"etf"`) return `Err`, never a default `Equity` or
+/// `NonEquity` classification.
+pub fn registry_v2_gate_asset_class(
+    asset_class: &str,
+) -> Result<RegistryV2GateAssetClass, RegistryV2GateAssetClassError> {
+    let normalized = asset_class.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return Err(RegistryV2GateAssetClassError::EmptyAssetClass);
+    }
+    if !CANONICAL_ASSET_CLASSES_V2.contains(&normalized.as_str()) {
+        return Err(RegistryV2GateAssetClassError::UnknownAssetClass(
+            asset_class.to_string(),
+        ));
+    }
+    if normalized == "equity" {
+        Ok(RegistryV2GateAssetClass::Equity)
+    } else {
+        Ok(RegistryV2GateAssetClass::NonEquity {
+            asset_class: normalized,
+        })
+    }
+}
+
+/// Convenience boolean form of [`registry_v2_gate_asset_class`]: `true` only
+/// for a successful `Equity` classification. Fails closed -- `Err` and
+/// `NonEquity` both return `false` -- so callers cannot mistake "unknown"
+/// for "allowed".
+pub fn registry_v2_gate_allows_asset_class(asset_class: &str) -> bool {
+    matches!(
+        registry_v2_gate_asset_class(asset_class),
+        Ok(RegistryV2GateAssetClass::Equity)
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2349,5 +2458,193 @@ mod tests {
         let mut sorted_ids = ids_a.clone();
         sorted_ids.sort();
         assert_eq!(ids_a, sorted_ids, "instrument_ids() must be in sorted order");
+    }
+
+    // ── REGISTRY-V2-GATE-PARITY-01B: registry_v2_gate_asset_class ──────────
+
+    // GP-01: "equity" is allowed.
+    #[test]
+    fn gp01_equity_is_allowed() {
+        assert_eq!(
+            registry_v2_gate_asset_class("equity"),
+            Ok(RegistryV2GateAssetClass::Equity)
+        );
+        assert!(registry_v2_gate_allows_asset_class("equity"));
+    }
+
+    // GP-02: "EQUITY" / whitespace normalization is allowed.
+    #[test]
+    fn gp02_equity_case_and_whitespace_normalization_is_allowed() {
+        for s in ["EQUITY", " equity ", "Equity", "\tequity\n"] {
+            assert_eq!(
+                registry_v2_gate_asset_class(s),
+                Ok(RegistryV2GateAssetClass::Equity),
+                "expected {s:?} to normalize to Equity"
+            );
+            assert!(
+                registry_v2_gate_allows_asset_class(s),
+                "expected {s:?} to be allowed"
+            );
+        }
+    }
+
+    // GP-03: "crypto" is non-equity.
+    #[test]
+    fn gp03_crypto_is_non_equity() {
+        assert_eq!(
+            registry_v2_gate_asset_class("crypto"),
+            Ok(RegistryV2GateAssetClass::NonEquity {
+                asset_class: "crypto".to_string()
+            })
+        );
+        assert!(!registry_v2_gate_allows_asset_class("crypto"));
+    }
+
+    // GP-04: "future" is non-equity; "futures" (plural alias) is unknown, not
+    // silently treated as "future" -- see 01A's audit doc §5 for why plural
+    // aliases are deliberately not accepted (CANONICAL_ASSET_CLASSES_V2 has
+    // no plural forms).
+    #[test]
+    fn gp04_future_is_non_equity_futures_alias_is_unknown() {
+        assert_eq!(
+            registry_v2_gate_asset_class("future"),
+            Ok(RegistryV2GateAssetClass::NonEquity {
+                asset_class: "future".to_string()
+            })
+        );
+        assert!(!registry_v2_gate_allows_asset_class("future"));
+
+        assert_eq!(
+            registry_v2_gate_asset_class("futures"),
+            Err(RegistryV2GateAssetClassError::UnknownAssetClass(
+                "futures".to_string()
+            ))
+        );
+        assert!(!registry_v2_gate_allows_asset_class("futures"));
+    }
+
+    // GP-05: "option" is non-equity; "options" (plural alias) is unknown.
+    #[test]
+    fn gp05_option_is_non_equity_options_alias_is_unknown() {
+        assert_eq!(
+            registry_v2_gate_asset_class("option"),
+            Ok(RegistryV2GateAssetClass::NonEquity {
+                asset_class: "option".to_string()
+            })
+        );
+        assert!(!registry_v2_gate_allows_asset_class("option"));
+
+        assert_eq!(
+            registry_v2_gate_asset_class("options"),
+            Err(RegistryV2GateAssetClassError::UnknownAssetClass(
+                "options".to_string()
+            ))
+        );
+        assert!(!registry_v2_gate_allows_asset_class("options"));
+    }
+
+    // GP-06: "forex" is non-equity.
+    #[test]
+    fn gp06_forex_is_non_equity() {
+        assert_eq!(
+            registry_v2_gate_asset_class("forex"),
+            Ok(RegistryV2GateAssetClass::NonEquity {
+                asset_class: "forex".to_string()
+            })
+        );
+        assert!(!registry_v2_gate_allows_asset_class("forex"));
+    }
+
+    // GP-07: "rate" is non-equity (no mqk_schemas::AssetClass counterpart,
+    // but still fails closed by the same allowlist-of-one-value structure).
+    #[test]
+    fn gp07_rate_is_non_equity() {
+        assert_eq!(
+            registry_v2_gate_asset_class("rate"),
+            Ok(RegistryV2GateAssetClass::NonEquity {
+                asset_class: "rate".to_string()
+            })
+        );
+        assert!(!registry_v2_gate_allows_asset_class("rate"));
+    }
+
+    // GP-08: "etf" is rejected as unknown -- ETF is instrument_kind, not
+    // asset_class (see module docs and 01A's audit doc §4).
+    #[test]
+    fn gp08_etf_is_unknown_not_a_distinct_asset_class() {
+        assert_eq!(
+            registry_v2_gate_asset_class("etf"),
+            Err(RegistryV2GateAssetClassError::UnknownAssetClass(
+                "etf".to_string()
+            ))
+        );
+        assert!(!registry_v2_gate_allows_asset_class("etf"));
+    }
+
+    // GP-09: empty/whitespace-only class fails closed.
+    #[test]
+    fn gp09_empty_asset_class_fails_closed() {
+        for s in ["", "   ", "\t"] {
+            assert_eq!(
+                registry_v2_gate_asset_class(s),
+                Err(RegistryV2GateAssetClassError::EmptyAssetClass),
+                "expected {s:?} to fail as EmptyAssetClass"
+            );
+            assert!(!registry_v2_gate_allows_asset_class(s));
+        }
+    }
+
+    // GP-10: unknown/misspelled class fails closed, never defaults to equity.
+    #[test]
+    fn gp10_unknown_asset_class_fails_closed() {
+        for s in ["stock", "perpetual_swap", "us_equities", "fx"] {
+            assert_eq!(
+                registry_v2_gate_asset_class(s),
+                Err(RegistryV2GateAssetClassError::UnknownAssetClass(
+                    s.to_string()
+                )),
+                "expected {s:?} to be UnknownAssetClass"
+            );
+            assert!(!registry_v2_gate_allows_asset_class(s));
+        }
+    }
+
+    // GP-11: every CANONICAL_ASSET_CLASSES_V2 value is covered explicitly --
+    // proves the helper has no silent gap versus the v2 schema's own
+    // vocabulary. Exactly one (`"equity"`) must classify Equity; the rest
+    // must classify NonEquity.
+    #[test]
+    fn gp11_all_canonical_asset_classes_v2_are_covered_explicitly() {
+        let mut equity_count = 0;
+        let mut non_equity_count = 0;
+        for class in CANONICAL_ASSET_CLASSES_V2 {
+            match registry_v2_gate_asset_class(class) {
+                Ok(RegistryV2GateAssetClass::Equity) => equity_count += 1,
+                Ok(RegistryV2GateAssetClass::NonEquity { .. }) => non_equity_count += 1,
+                Err(e) => panic!(
+                    "canonical asset_class={class} must classify, not error: {e}"
+                ),
+            }
+        }
+        assert_eq!(equity_count, 1, "exactly one canonical class must be Equity");
+        assert_eq!(
+            non_equity_count,
+            CANONICAL_ASSET_CLASSES_V2.len() - 1,
+            "every other canonical class must be NonEquity"
+        );
+    }
+
+    // GP-12: no non-equity canonical class ever maps to allowed=true.
+    #[test]
+    fn gp12_no_non_equity_class_maps_to_allowed() {
+        for class in CANONICAL_ASSET_CLASSES_V2 {
+            if *class == "equity" {
+                continue;
+            }
+            assert!(
+                !registry_v2_gate_allows_asset_class(class),
+                "non-equity canonical class={class} must not be allowed"
+            );
+        }
     }
 }
