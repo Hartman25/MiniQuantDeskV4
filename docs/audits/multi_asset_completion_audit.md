@@ -1776,3 +1776,21 @@ production-cutover checklist: prerequisites #1-#2 now satisfied; #3 (Gate
 `REGISTRY-V2-PRODUCTION-CUTOVER-DECISION-01` itself remains explicitly not
 recommended. Docs-only — no code touched, no trading enabled, no DB/network
 call made. Full detail: `docs/specs/registry_v2_translation_01d_closure_decision.md`.
+
+## 83. REGISTRY-V2-GATE-PARITY-01A-CURRENT-GATE-AUDIT-01 Closure Note (maintenance)
+
+`CLOSED_LOCAL / AUDIT-ONLY`. Audits Gate 0's current location/behavior
+(`mqk-daemon/src/routes/strategy.rs::validate_strategy_signal`, `AS-01`
+through `AS-12`) and the broker-submit routing guard's current
+location/behavior (`mqk-execution/src/gateway.rs::enforce_gates`, `G01`
+through `G08`) against direct repo evidence. Confirms neither gate reads
+`InstrumentRegistryV2` today. Names both asset-class vocabularies
+(`mqk_schemas::AssetClass`'s five variants vs. `CANONICAL_ASSET_CLASSES_V2`'s
+six strings, the extra being `"rate"`), and defines the exact parity
+contract `REGISTRY-V2-GATE-PARITY-01B`/`01C` must prove: equity allowed,
+every other `CANONICAL_ASSET_CLASSES_V2` value rejected, empty/unknown/`etf`
+fail closed. Decides plural aliases (`"futures"`/`"options"`) are **not**
+accepted by the parity helper, matching `CANONICAL_ASSET_CLASSES_V2`'s own
+strictness (`validate_registry_v2` already rejects them). Docs-only — no
+code touched, no trading enabled, no DB/network call made. Full detail:
+`docs/specs/registry_v2_gate_parity_01a_current_gate_audit.md`.
