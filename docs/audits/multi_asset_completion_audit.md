@@ -1635,3 +1635,31 @@ DB call, and touched no broker/execution/risk/OMS/runtime/strategy/
 portfolio code.
 
 **Full detail:** `docs/specs/backtest_multiplier_margin_01_completion_audit.md`.
+
+## 76. BACKTEST-MULTIPLIER-MARGIN-01-SAFE-GAP-CLOSURE-01 Closure Note (maintenance)
+
+The one safe gap §75 identified — `mqk backtest csv-sweep` silently forcing
+every sweep run to default equity economics — is now closed. `csv-sweep`
+carries the same opt-in `--contract-multiplier`/`--initial-margin-micros`/
+`--maintenance-margin-micros` flags as `csv`/`db`, applied identically to
+every sweep combination's `BacktestEngine` via the same
+`build_backtest_economics_from_cli_flags` → `.with_economics(...)` pattern.
+Because `mqk_artifacts::write_backtest_report`'s manifest-economics merge is
+already generic to every caller (not per-call-site special-cased), every
+sweep point's `manifest.json`/`metrics.json` now carries truthful economics
+with zero `mqk-artifacts` change required. Proven by
+`mqk-cli/tests/scenario_cli_backtest_csv_sweep_economics.rs` (4/4 passing:
+default-preserves-equity, multiplier-50-reaches-every-point,
+margin-metadata-not-enforced, zero-multiplier-fails-closed), with zero
+regressions across the full `mqk-cli`/`mqk-backtest`/`mqk-artifacts` test
+suites and clean clippy on every touched crate. No daemon route or GUI
+change was needed — neither a sweep job route nor a sweep GUI feature
+exists anywhere in this repo. No margin enforcement, no `mqk-portfolio`/
+broker/risk/runtime/DB/config change.
+
+This closes the last backtest-only gap named in §75. See
+`docs/specs/backtest_multiplier_margin_01_closure_decision.md` for the
+resulting final parent-label status.
+
+**Full detail:** `MiniQuantDesk_Master_Patch_Ledger_v2.md`'s
+`BACKTEST-MULTIPLIER-MARGIN-01-SAFE-GAP-CLOSURE-01` entry.

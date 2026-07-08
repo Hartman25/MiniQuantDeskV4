@@ -4675,3 +4675,104 @@ consumption boundary. Until then, `ASSET-CORE-05` (market-calendar/session
 generalization, already `PARTIAL`, closest to done) or
 `BACKTEST-MULTIPLIER-MARGIN-01` (backtest P&L multiplier support) are
 independent, lower-risk next patches that do not require crossing it.
+
+### BACKTEST-MULTIPLIER-MARGIN-01-SAFE-GAP-CLOSURE-01 — CLOSED_LOCAL
+
+**Mission:** close the exact safe gap
+`BACKTEST-MULTIPLIER-MARGIN-01-COMPLETION-AUDIT-01` identified: `mqk backtest
+csv-sweep` has no economics flags and silently forces every sweep run to
+default equity economics regardless of operator intent. Wire the same
+opt-in `--contract-multiplier`/`--initial-margin-micros`/
+`--maintenance-margin-micros` flags already proven on `csv`/`db` onto
+`csv-sweep`, applied identically to every sweep combination. Backtest-CLI
+only; no daemon, GUI, runtime, broker, DB, or non-equity path touched (no
+daemon sweep route or GUI sweep feature exists in this repo, confirmed by
+direct grep, so there is no daemon/GUI sweep gap to close).
+
+**Repo evidence found before writing any code:** `BacktestCmd::CsvSweep`
+(`mqk-cli/src/main.rs`) had no `contract_multiplier`/`initial_margin_micros`/
+`maintenance_margin_micros` fields; `run_sweep_csv`
+(`mqk-cli/src/commands/bkt.rs`) constructed `BacktestEngine::new(cfg)` per
+sweep point and never called `.with_economics(...)`. `mqk_artifacts::
+write_backtest_report` already does a generic read-parse-merge-write of
+`manifest.json`'s `economics` key from whatever `report.economics` value the
+caller passes — every sweep point already calls `write_backtest_report`, so
+no `mqk-artifacts` change was needed to make per-point manifests truthful
+once the engine received real economics.
+
+**Built:** three flags mirroring `csv`/`db` added to `BacktestCmd::CsvSweep`;
+`run_sweep_csv` validates them once via the existing shared
+`build_backtest_economics_from_cli_flags` helper (before loading bars or
+touching disk) and applies `.with_economics(economics.clone())` to every
+per-point `BacktestEngine`, so all sweep combinations share one
+caller-supplied economics value. A new `sweep_economics_contract_multiplier=<n>`
+stdout line was added for parity with `csv`/`db`'s `economics_contract_multiplier=`
+line. No `SweepGrid`/`SweepPoint`/`SweepRowResult` field was added — economics
+is not swept per-combination, matching this patch's own scope (one value for
+the whole sweep, not a new grid dimension).
+
+**Tests added:** `mqk-cli/tests/scenario_cli_backtest_csv_sweep_economics.rs`
+— `backtest_csv_sweep_economics_default_preserves_equity` (no flags -> every
+per-point `manifest.json`/`metrics.json` shows `contract_multiplier=1`/
+`source=default_equity`), `backtest_csv_sweep_economics_multiplier_50_reaches_every_point`
+(2-point sweep, both points' manifests/metrics show `contract_multiplier=50`/
+`source=explicit_request`), `backtest_csv_sweep_economics_margin_metadata_not_enforced`
+(margin fields round-trip into manifest.json, `margin_enforced` stays
+`false`), `backtest_csv_sweep_economics_zero_multiplier_fails_closed`
+(`--contract-multiplier 0` fails before bars load or any artifact directory
+is created).
+
+**Validation:** `cargo check -p mqk-cli -p mqk-backtest -p mqk-artifacts -p
+mqk-daemon` — clean. `cargo test -p mqk-cli --test
+scenario_cli_backtest_csv_sweep_economics` — 4/4 new tests pass. `cargo test
+-p mqk-cli --test scenario_cli_backtest_economics` — 9/9 pass (unchanged
+`csv` regression). `cargo test -p mqk-cli --test
+scenario_cli_backtest_db_economics` — 6/6 pass (unchanged `db` regression;
+DB-backed cases skip cleanly with no `MQK_DATABASE_URL` set, matching this
+session's no-DB-mutation default). `cargo test -p mqk-backtest` — full
+crate suite, 33+ lib tests plus every scenario/integration binary, 0
+failures/regressions. `cargo test -p mqk-artifacts` — full crate suite, 0
+failures/regressions. `cargo clippy -p mqk-cli --all-targets -- -D
+warnings` / `cargo clippy -p mqk-backtest --all-targets -- -D warnings` /
+`cargo clippy -p mqk-artifacts --all-targets -- -D warnings` — all clean.
+`cargo clippy -p mqk-daemon --lib -- -D warnings` — clean (this patch did
+not touch `mqk-daemon`; `--all-targets` on `mqk-daemon` currently fails on a
+pre-existing, unrelated `clippy::await_holding_lock` lint in
+`mqk-daemon/tests/scenario_runtime_session_v2_active_cutover_hook_asset_core_05e.rs`
+and `mqk-daemon/src/state/session_controller.rs`, confirmed present at
+`HEAD` before this patch via `git stash`/re-run — not caused by, and out of
+scope for, this patch). No `cargo test -p mqk-daemon backtest_economics`
+substitution was needed since `mqk-daemon` was not touched.
+`cargo test -p mqk-daemon --test scenario_backtest_jobs_01` was not re-run
+for the same reason. `git diff --check` — clean.
+
+**Substitutions from the prompt's suggested test commands:** `cargo test -p
+mqk-backtest economics` and `cargo test -p mqk-artifacts economics` (exact
+prompt wording) do not match any test name in either crate (both crates'
+economics tests are unnamed/inline `#[cfg(test)] mod tests` functions, not a
+`economics`-prefixed integration-test binary); the full-crate `cargo test -p
+mqk-backtest` / `cargo test -p mqk-artifacts` runs above are the closest
+equivalent and were used instead, per this session's own instruction to
+substitute the closest current-repo targeted test and report the exact
+substitution.
+
+**Deliberately not done:** no daemon route touched (none exists for sweep);
+no GUI file touched (no sweep feature exists in the GUI); no
+`mqk-backtest/src/economics.rs` or `engine.rs` change (the existing
+`with_economics` builder was sufficient); no `SweepRowResult`/summary-file
+(`sweep_summary.csv`/`.json`/`.md`) field added — those remain
+economics-silent by design, since the per-point `manifest.json`/`metrics.json`
+already carry the truthful value and this patch's own scope note says to
+close the two named safe gaps (per-point artifacts), not widen the
+aggregate summary format; no margin enforcement; no
+`mqk-portfolio`/broker/risk/runtime/DB/config file touched.
+
+**Safety confirmation:** zero network calls; zero DB access/mutation (DB
+tests skip cleanly with no `MQK_DATABASE_URL`); zero config flag changes; no
+crypto/futures/options/forex/rates trading enabled; no broker/order/risk/
+runtime/strategy/portfolio code touched; no generated evidence staged.
+
+**Recommended next slice:**
+`BACKTEST-MULTIPLIER-MARGIN-01-CLOSURE-OR-BOUNDARY-DECISION-01` — decide the
+parent label's final status now that the last known backtest-only gap is
+closed.

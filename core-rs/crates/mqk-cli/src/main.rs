@@ -214,6 +214,24 @@ enum BacktestCmd {
         #[arg(long, default_value = "")]
         volatility_mult_bps: String,
 
+        /// Contract multiplier for multiplier-bearing instruments (futures/options-style
+        /// metadata; e.g. ES futures = 50, standard equity options = 100). Omitted = equity
+        /// default (multiplier=1), identical to current behavior. Metadata only -- does
+        /// not enable non-equity execution or change order routing. Must be > 0 if supplied.
+        /// Applied identically to every sweep combination.
+        #[arg(long)]
+        contract_multiplier: Option<i64>,
+
+        /// Optional initial margin metadata in micros, carried into report/artifact
+        /// economics for every sweep combination. Metadata only -- never enforced.
+        #[arg(long)]
+        initial_margin_micros: Option<i64>,
+
+        /// Optional maintenance margin metadata in micros, carried into report/artifact
+        /// economics for every sweep combination. Metadata only -- never enforced.
+        #[arg(long)]
+        maintenance_margin_micros: Option<i64>,
+
         /// Output directory for individual run artifacts and sweep summary.
         #[arg(long)]
         out_dir: Option<String>,
@@ -1096,6 +1114,9 @@ async fn main() -> Result<()> {
                 target_qty,
                 slippage_bps,
                 volatility_mult_bps,
+                contract_multiplier,
+                initial_margin_micros,
+                maintenance_margin_micros,
                 out_dir,
                 max_combinations,
             } => {
@@ -1111,6 +1132,9 @@ async fn main() -> Result<()> {
                     target_qty,
                     slippage_bps,
                     volatility_mult_bps,
+                    contract_multiplier,
+                    initial_margin_micros,
+                    maintenance_margin_micros,
                     out_dir,
                     max_combinations,
                 )

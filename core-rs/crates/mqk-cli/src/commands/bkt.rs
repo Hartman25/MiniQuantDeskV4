@@ -638,6 +638,9 @@ pub async fn run_sweep_csv(
     target_qty_list: String,
     slippage_bps_list: String,
     volatility_mult_bps_list: String,
+    contract_multiplier: Option<i64>,
+    initial_margin_micros: Option<i64>,
+    maintenance_margin_micros: Option<i64>,
     out_dir: Option<String>,
     max_combinations_override: Option<usize>,
 ) -> Result<()> {
@@ -647,6 +650,17 @@ pub async fn run_sweep_csv(
     if initial_cash_micros <= 0 {
         anyhow::bail!("--initial-cash-micros must be > 0");
     }
+
+    // BACKTEST-MULTIPLIER-MARGIN-01-SAFE-GAP-CLOSURE-01: validate economics
+    // flags before loading bars, so an invalid --contract-multiplier fails
+    // closed without any file I/O. Same opt-in helper already proven on
+    // `mqk backtest csv`/`mqk backtest db`; applied identically to every
+    // sweep combination.
+    let economics = build_backtest_economics_from_cli_flags(
+        contract_multiplier,
+        initial_margin_micros,
+        maintenance_margin_micros,
+    )?;
 
     let bars = mqk_backtest::load_csv_file(&bars_path)
         .with_context(|| format!("load bars csv failed: {}", bars_path))?;
@@ -726,6 +740,9 @@ pub async fn run_sweep_csv(
         };
 
         let mut engine = BacktestEngine::new(cfg);
+        if let Some(ref econ) = economics {
+            engine = engine.with_economics(econ.clone());
+        }
         engine
             .add_strategy(strategy_instance)
             .with_context(|| format!("add_strategy failed for '{}'", strategy))?;
@@ -789,8 +806,13 @@ pub async fn run_sweep_csv(
         println!("sweep_dir={}", dir);
     }
 
+    let effective_economics = economics.unwrap_or_else(BacktestInstrumentEconomics::equity);
     println!("sweep_ok=true");
     println!("sweep_total_runs={}", results.len());
+    println!(
+        "sweep_economics_contract_multiplier={}",
+        effective_economics.contract_multiplier
+    );
     if let Some(best) = results.first() {
         println!(
             "sweep_best_run_id={} tq={} slip={} vol={} return={:.2}% alpha={:.2}% dd={:.2}%",
