@@ -218,7 +218,7 @@ Difficulty: S (days) / M (1-2 weeks) / L (3-6 weeks) / XL (6+ weeks, likely mult
 
 | Patch ID | Status | Completion | Difficulty | Dependencies | Evidence | Order | Notes |
 |---|---|---|---|---|---|---|---|
-| `BACKTEST-MULTIPLIER-MARGIN-01` | PARTIAL (as of §75; see follow-on closure notes for final status) | see §75+ | L | `ASSET-CORE-01` | Eleven `CLOSED_LOCAL` sub-slices deliver a pure multiplier-aware economics model, engine wiring, economics-sensitive `run_id`, `metrics.json`/`report.md`/`manifest.json` economics, CLI (`csv`/`db`) flags, daemon job request economics, GUI controls, and a registry-v2 economics-suggestion seam; `mqk-portfolio/src/accounting.rs` (live/paper fill math) remains untouched by design. See `docs/specs/backtest_multiplier_margin_01_completion_audit.md`. | 6 | Hard prerequisite — no futures/options backtest result can be trusted without this. This row was stale (`MISSING/0%`) prior to §75; corrected from direct repo re-inspection. |
+| `BACKTEST-MULTIPLIER-MARGIN-01` | `CLOSED_LOCAL / BACKTEST-COMPLETE` (backtest economics only; see §77) | 100% (backtest economics scope); margin enforcement and production registry-v2 data source explicitly out of scope | L | `ASSET-CORE-01` | Twelve `CLOSED_LOCAL` sub-slices deliver a pure multiplier-aware economics model, engine wiring, economics-sensitive `run_id`, `metrics.json`/`report.md`/`manifest.json` economics (all entry points including `csv-sweep`), CLI (`csv`/`db`/`csv-sweep`) flags, daemon job request economics, GUI controls, and a registry-v2 economics-suggestion seam; `mqk-portfolio/src/accounting.rs` (live/paper fill math) remains untouched by design — `mqk-backtest` is not a dependency of `mqk-runtime`. See `docs/specs/backtest_multiplier_margin_01_closure_decision.md`. | 6 | Prerequisite #1 for `REGISTRY-V2-PRODUCTION-CUTOVER-DECISION-01` is now satisfied; the other four prerequisites remain open. |
 | `MULTI-ASSET-ALLOCATOR-01` | PARTIAL | 50% (as a generic allocator) / 0% (as multi-asset) | M | `ASSET-CORE-01` | `mqk-portfolio/src/allocator.rs` is a complete, tested, deterministic weight-normalization allocator — but has zero callers in `mqk-runtime`/`mqk-daemon` and zero asset-class awareness in its candidate type | 9 | Wiring + extending, not building from scratch. |
 | `MULTI-STRATEGY-CONFLICT-POLICY-01` | MISSING | 0% | M | none | Today symbol→strategy is a structural 1:1 mapping, so conflicts are avoided by construction rather than resolved; zero conflict-detection code exists | 12 | Required before any "rank strategies per instrument" capability. |
 | `PROVIDER-SWAP-CONTRACT-01` | PARTIAL | 40% | M | none | Already substantially covered by the prior `DATA-INGESTION-COVERAGE-AUDIT-01` audit: `MarketDataProvider` trait is capability-aware and asset-class-tagged (`ProviderAssetClass`), but the factory (`build_market_data_provider_from_config`) hardcodes match arms per provider — declaring a provider "crypto-capable" in JSON does not make it usable | 13 | Lower marginal audit value — already characterized; mainly needs the enum-unification work from `ASSET-CORE-01`. |
@@ -1663,3 +1663,27 @@ resulting final parent-label status.
 
 **Full detail:** `MiniQuantDesk_Master_Patch_Ledger_v2.md`'s
 `BACKTEST-MULTIPLIER-MARGIN-01-SAFE-GAP-CLOSURE-01` entry.
+
+## 77. BACKTEST-MULTIPLIER-MARGIN-01-CLOSURE-OR-BOUNDARY-DECISION-01 Closure Note (maintenance)
+
+With the last known backtest-only gap closed (§76), this session decided
+the parent label's final status: **`CLOSED_LOCAL / BACKTEST-COMPLETE`** for
+multiplier-aware backtest economics. Every backtest entry point in this
+repo (`csv`, `db`, `csv-sweep`, the daemon job route, the GUI submit form)
+supports explicit economics; every artifact surface
+(`BacktestReport`/`metrics.json`/`report.md`/`manifest.json`) carries it
+truthfully. Margin remains metadata-only (`margin_enforced` hardcoded
+`false`, enforced by nothing) — this was never claimed otherwise and is not
+claimed otherwise now. `mqk-portfolio` (live/paper accounting) is untouched
+by every sub-slice in this lineage; `mqk-backtest` is not a dependency of
+`mqk-runtime`, so there is no path for this economics seam to reach
+live/paper P&L.
+
+This closes **prerequisite #1** of `ASSET-CORE-01H`'s five-item
+production-cutover checklist. It does **not** authorize
+`REGISTRY-V2-PRODUCTION-CUTOVER-DECISION-01` — the other four prerequisites
+(symbol/instrument-id translation, Gate 0/routing-guard parity, a
+live-network-verified non-equity provider, and an explicit operator
+enablement decision) remain entirely open.
+
+**Full detail:** `docs/specs/backtest_multiplier_margin_01_closure_decision.md`.

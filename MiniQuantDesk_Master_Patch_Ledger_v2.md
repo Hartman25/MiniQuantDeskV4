@@ -4776,3 +4776,64 @@ runtime/strategy/portfolio code touched; no generated evidence staged.
 `BACKTEST-MULTIPLIER-MARGIN-01-CLOSURE-OR-BOUNDARY-DECISION-01` — decide the
 parent label's final status now that the last known backtest-only gap is
 closed.
+
+### BACKTEST-MULTIPLIER-MARGIN-01-CLOSURE-OR-BOUNDARY-DECISION-01 — CLOSED_LOCAL / BACKTEST-COMPLETE
+
+**Mission:** decide the final status of the `BACKTEST-MULTIPLIER-MARGIN-01`
+parent label now that Phase A (audit) and Phase B (sweep-flags safe-gap
+closure) are both done. Decision-only — no code touched.
+
+**Answers (full detail in `docs/specs/backtest_multiplier_margin_01_closure_decision.md`):**
+every backtest entry point that exists in this repo (`csv`, `db`,
+`csv-sweep`, daemon job route, GUI submit form) supports explicit economics;
+`BacktestReport`/`metrics.json`/`report.md`/`manifest.json` all carry it;
+margin remains metadata-only (`margin_enforced` hardcoded `false`, read by
+nothing — never claimed otherwise); `mqk-portfolio` (live/paper accounting)
+is untouched by every sub-slice in this lineage and `mqk-backtest` is not a
+dependency of `mqk-runtime`, so there is no path for this economics seam to
+reach live/paper P&L. Remaining open items — margin enforcement, a real
+non-equity production registry-v2 data source, aggregate `sweep_summary.*`
+economics columns — are either explicitly out of this patch's own scope
+(margin enforcement) or are production/consumption boundaries belonging to
+`REGISTRY-V2-PRODUCTION-CUTOVER-DECISION-01` (registry-v2 production data
+source), not backtest gaps.
+
+**Closure decision:**
+
+```text
+BACKTEST-MULTIPLIER-MARGIN-01 is CLOSED_LOCAL / BACKTEST-COMPLETE for
+multiplier-aware backtest economics. Margin remains metadata-only unless a
+separate enforcement patch is created. Live/shared portfolio accounting
+remains outside this lane. This unblocks REGISTRY-V2-PRODUCTION-CUTOVER-
+DECISION-01 from prerequisite #1, but does not itself authorize production
+cutover.
+```
+
+**Built:** `docs/specs/backtest_multiplier_margin_01_closure_decision.md`
+(the eight required questions answered from current repo evidence, plus the
+closure verdict above); updated
+`docs/specs/backtest_multiplier_margin_01_completion_audit.md`'s §7 to
+point at this final verdict.
+
+**Deliberately not done:** no code file touched by this decision patch; no
+config flag changed; no trading enabled; no network or DB call made; no
+production registry-v2 cutover attempted or implied.
+
+**Validation:** `powershell -ExecutionPolicy Bypass -File
+scripts\guards\validate_backtest_multiplier_margin_01_completion.ps1` — all
+8 checks passed, including the closure-decision-doc status-label check.
+`git diff --check` — clean.
+
+**Safety confirmation:** zero network calls; zero DB access/mutation; zero
+config flag changes; no crypto/futures/options/forex/rates trading enabled;
+no broker/order/risk/runtime/strategy/portfolio code touched; no generated
+evidence staged.
+
+**Recommended next slice:** `REGISTRY-V2-PRODUCTION-CUTOVER-DECISION-01`
+remains blocked on its other four prerequisites (symbol/instrument-id
+translation, Gate 0/routing-guard parity, live non-equity provider
+verification, explicit operator enablement) — none of which this patch
+touches. Independently, `ASSET-CORE-05` (market-calendar/session
+generalization, already `PARTIAL`, closest to done) remains available as a
+lower-risk next patch that does not cross the production-consumption
+boundary.

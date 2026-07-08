@@ -104,10 +104,11 @@ economics flags (§3, §6). `BACKTEST-MULTIPLIER-MARGIN-01-SAFE-GAP-CLOSURE-01`
 flags as `csv`/`db`, tested end-to-end (`scenario_cli_backtest_csv_sweep_economics.rs`,
 4/4 passing) with zero regressions across `mqk-cli`/`mqk-backtest`/`mqk-artifacts`.
 No further backtest-only entry-point gap is known. The final parent-label
-status (final because margin enforcement and a real non-equity registry-v2
-data source remain explicitly out of this session's scope, not because
-anything here is incomplete) is recorded in
-[`backtest_multiplier_margin_01_closure_decision.md`](backtest_multiplier_margin_01_closure_decision.md).
+status is `CLOSED_LOCAL / BACKTEST-COMPLETE`, recorded in
+[`backtest_multiplier_margin_01_closure_decision.md`](backtest_multiplier_margin_01_closure_decision.md)
+(final for backtest economics because margin enforcement and a real
+non-equity registry-v2 data source remain explicitly out of this session's
+scope, not because anything within scope is incomplete).
 
 ---
 
