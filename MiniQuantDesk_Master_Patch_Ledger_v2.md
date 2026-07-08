@@ -4545,6 +4545,89 @@ staged.
 **Recommended next slice:** `REGISTRY-V2-PRODUCTION-CUTOVER-DECISION-01` —
 see `docs/specs/asset_core_01h_instrument_registry_v2_consumption_boundary_decision.md`.
 
+### BACKTEST-MULTIPLIER-MARGIN-01-COMPLETION-AUDIT-01 — CLOSED_LOCAL / AUDIT-ONLY
+
+**Mission:** a completion-sweep session asked whether
+`BACKTEST-MULTIPLIER-MARGIN-01` (backtest multiplier-aware P&L, prerequisite
+#1 named by `ASSET-CORE-01H`) is now complete, and, if not, whether a safe
+backtest-only gap remains that can be closed without touching live/paper
+trading, broker, risk, runtime, OMS, or `mqk-portfolio` accounting.
+
+**Repo evidence found:** direct re-inspection at `HEAD` (`6e6f69df`) of
+`mqk-backtest/src/economics.rs`, `engine.rs`, `mqk-cli/src/commands/bkt.rs`,
+`mqk-cli/src/main.rs`, `mqk-daemon/src/routes/backtests.rs`,
+`mqk-artifacts/src/lib.rs`, and `mqk-md/src/instrument_registry_v2.rs`
+confirmed eleven prior sub-slices (`BACKTEST-MULTIPLIER-MARGIN-01-COMBINED`
+through `INSTRUMENT-REGISTRY-V2-SOURCE-01-COMBINED`) are all `CLOSED_LOCAL`
+and together deliver: a pure multiplier-aware economics model; an
+engine-parallel shadow ledger wired via opt-in `BacktestEngine::with_economics`;
+an economics-sensitive `run_id`; `metrics.json`/`report.md`/`manifest.json`
+economics surfaces (the manifest merge is generic to every
+`write_backtest_report` caller, not per-call-site special-cased); CLI flags
+on `mqk backtest csv` and `mqk backtest db`; a daemon
+`POST /api/v1/backtests/jobs` economics request object (both CSV-backed and
+`md_bars`-backed workers); GUI submit-form economics controls; a read-only
+registry-v2 economics-suggestion route with a separate, explicitly-configured
+`MQK_INSTRUMENT_REGISTRY_V2_PATH` source. Direct code read of
+`mqk-cli/src/commands/bkt.rs::run_sweep_csv` and the `BacktestCmd::CsvSweep`
+clap variant in `mqk-cli/src/main.rs` confirmed **zero** economics flags or
+`.with_economics(...)` call on `csv-sweep` — every sweep run is silently
+forced to default equity economics regardless of operator intent. Confirmed
+no daemon sweep route or GUI sweep feature exists at all (sweep is CLI-only
+in this repo), so there is no daemon/GUI sweep gap to close. Confirmed
+`margin_enforced` is hardcoded `false` everywhere and no code path in the
+repo reads a margin field to gate/block/alter behavior — metadata-only, as
+every prior sub-slice's closing paragraph already stated. Confirmed
+`mqk-portfolio` (the same accounting engine `mqk-runtime::orchestrator` uses
+for live/paper fills) was not modified by any sub-slice in this lineage and
+`mqk-backtest` is not a dependency of `mqk-runtime` — there is no code path
+by which this economics seam reaches live/paper P&L.
+
+**Built:** `docs/specs/backtest_multiplier_margin_01_completion_audit.md`
+(full eleven-sub-slice table, entry-point matrix, artifact matrix, source
+matrix, limitations, closure decision, recommended next patch) and
+`scripts/guards/validate_backtest_multiplier_margin_01_completion.ps1`
+(text-only validator: audit doc exists; mentions all eleven sub-slices;
+mentions every entry-point/artifact surface; distinguishes margin metadata
+from margin enforcement; contains no forbidden trading-enabled/margin-
+enforced/live-trading-uses-this-economics/production-cutover-complete claim;
+and, once written, checks the closure decision doc for a recognized honest
+status label). Also appended §75 to
+`docs/audits/multi_asset_completion_audit.md` (maintenance closure note,
+same append-only pattern as §18-20/§34/§73/§74) and corrected that doc's
+stale `BACKTEST-MULTIPLIER-MARGIN-01` roadmap-table row (§5, "Additional
+foundation patches"), which still read `MISSING / 0%` despite the eleven
+closed sub-slices above — without rewriting the table's original evidence
+column wholesale.
+
+**Closure decision:** `PARTIAL / SAFE-GAPS-REMAIN`. The exact remaining safe
+gap is `mqk backtest csv-sweep`'s missing economics flags — a genuinely
+backtest-only, additive, opt-in gap, closable without touching any forbidden
+file. See `docs/specs/backtest_multiplier_margin_01_completion_audit.md` §6-§9
+for the full limitations/closure-decision writeup, and the follow-on
+`BACKTEST-MULTIPLIER-MARGIN-01-SAFE-GAP-CLOSURE-01` /
+`BACKTEST-MULTIPLIER-MARGIN-01-CLOSURE-OR-BOUNDARY-DECISION-01` entries below
+for how it was closed.
+
+**Deliberately not done:** no code file touched by this audit patch itself
+(no `mqk-backtest`, `mqk-cli`, `mqk-daemon`, `mqk-artifacts`, `mqk-md`, or
+GUI source edited); no config flag changed; no trading enabled; no network
+or DB call made; no broker/execution/risk/OMS/runtime/strategy/portfolio
+file touched.
+
+**Validation:** `powershell -ExecutionPolicy Bypass -File
+scripts\guards\validate_backtest_multiplier_margin_01_completion.ps1` — all
+checks passed. `git diff --check` — clean.
+
+**Safety confirmation:** zero network calls; zero DB access/mutation; zero
+config flag changes; no crypto/futures/options/forex/rates trading enabled;
+no broker/order/risk/runtime/strategy/portfolio code touched; no generated
+evidence staged.
+
+**Recommended next slice:** `BACKTEST-MULTIPLIER-MARGIN-01-SAFE-GAP-CLOSURE-01`
+— wire the same opt-in economics flags already proven on `csv`/`db` onto
+`csv-sweep`.
+
 ### ASSET-CORE-01H-INSTRUMENT-REGISTRY-V2-CONSUMPTION-BOUNDARY-DECISION-01 — CLOSED_LOCAL / DECISION-ONLY
 
 **Mission:** `ASSET-CORE-01F` proved the only remaining gap keeping

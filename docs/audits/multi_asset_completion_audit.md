@@ -218,7 +218,7 @@ Difficulty: S (days) / M (1-2 weeks) / L (3-6 weeks) / XL (6+ weeks, likely mult
 
 | Patch ID | Status | Completion | Difficulty | Dependencies | Evidence | Order | Notes |
 |---|---|---|---|---|---|---|---|
-| `BACKTEST-MULTIPLIER-MARGIN-01` | MISSING | 0% | L | `ASSET-CORE-01` | `mqk-portfolio/src/accounting.rs` fill math is always `qty * price_delta`; backtest engine never reads `ContractSpec` multiplier fields | 6 | Hard prerequisite — no futures/options backtest result can be trusted without this. |
+| `BACKTEST-MULTIPLIER-MARGIN-01` | PARTIAL (as of §75; see follow-on closure notes for final status) | see §75+ | L | `ASSET-CORE-01` | Eleven `CLOSED_LOCAL` sub-slices deliver a pure multiplier-aware economics model, engine wiring, economics-sensitive `run_id`, `metrics.json`/`report.md`/`manifest.json` economics, CLI (`csv`/`db`) flags, daemon job request economics, GUI controls, and a registry-v2 economics-suggestion seam; `mqk-portfolio/src/accounting.rs` (live/paper fill math) remains untouched by design. See `docs/specs/backtest_multiplier_margin_01_completion_audit.md`. | 6 | Hard prerequisite — no futures/options backtest result can be trusted without this. This row was stale (`MISSING/0%`) prior to §75; corrected from direct repo re-inspection. |
 | `MULTI-ASSET-ALLOCATOR-01` | PARTIAL | 50% (as a generic allocator) / 0% (as multi-asset) | M | `ASSET-CORE-01` | `mqk-portfolio/src/allocator.rs` is a complete, tested, deterministic weight-normalization allocator — but has zero callers in `mqk-runtime`/`mqk-daemon` and zero asset-class awareness in its candidate type | 9 | Wiring + extending, not building from scratch. |
 | `MULTI-STRATEGY-CONFLICT-POLICY-01` | MISSING | 0% | M | none | Today symbol→strategy is a structural 1:1 mapping, so conflicts are avoided by construction rather than resolved; zero conflict-detection code exists | 12 | Required before any "rank strategies per instrument" capability. |
 | `PROVIDER-SWAP-CONTRACT-01` | PARTIAL | 40% | M | none | Already substantially covered by the prior `DATA-INGESTION-COVERAGE-AUDIT-01` audit: `MarketDataProvider` trait is capability-aware and asset-class-tagged (`ProviderAssetClass`), but the factory (`build_market_data_provider_from_config`) hardcodes match arms per provider — declaring a provider "crypto-capable" in JSON does not make it usable | 13 | Lower marginal audit value — already characterized; mainly needs the enum-unification work from `ASSET-CORE-01`. |
@@ -1604,3 +1604,34 @@ This audit changed no config flag, enabled no trading, made no network or
 DB call, and touched no broker/execution/risk/OMS/runtime/strategy code.
 
 **Full detail:** `docs/specs/asset_core_01f_instrument_registry_v2_completion_audit.md`.
+
+## 75. BACKTEST-MULTIPLIER-MARGIN-01-COMPLETION-AUDIT-01 Closure Note (maintenance)
+
+A completion-sweep session asked whether `BACKTEST-MULTIPLIER-MARGIN-01`
+(prerequisite #1 named by `ASSET-CORE-01H`) is complete, and whether a safe
+backtest-only gap remains. Direct re-inspection at `HEAD` (`6e6f69df`)
+confirmed eleven sub-slices — `BACKTEST-MULTIPLIER-MARGIN-01-COMBINED`,
+`BACKTEST-MULTIPLIER-RUN-WIRE-01-COMBINED`, `BACKTEST-ECONOMICS-CONFIG-READY-01`,
+`BACKTEST-REPORT-FIXTURE-READY-01-COMBINED`, `BACKTEST-REPORT-ECONOMICS-ARTIFACT-01-COMBINED`,
+`BACKTEST-ECONOMICS-CLI-ENTRY-01-COMBINED`, `BACKTEST-ECONOMICS-DB-CLI-ENTRY-01-COMBINED`,
+`BACKTEST-ECONOMICS-DAEMON-JOB-REQUEST-01-COMBINED`, `BACKTEST-ECONOMICS-GUI-REGISTRY-01-COMBINED`,
+`BACKTEST-ECONOMICS-REGISTRY-MANIFEST-01-COMBINED`, and `INSTRUMENT-REGISTRY-V2-SOURCE-01-COMBINED`
+— are all `CLOSED_LOCAL`. `mqk backtest csv` and `mqk backtest db` both
+support explicit economics flags reaching `metrics.json`/`report.md`/
+`manifest.json`; the daemon job route and GUI submit form do too. Direct
+code read confirmed `mqk backtest csv-sweep` has **no** economics flags at
+all and silently forces every sweep run to default equity economics — the
+one concrete, safe, backtest-only gap remaining. No daemon or GUI sweep
+feature exists, so there is no gap there. Margin fields remain metadata-only
+(`margin_enforced` hardcoded `false` everywhere, read by nothing) and
+`mqk-portfolio` (live/paper accounting) was never modified by any sub-slice.
+
+**Verdict: `PARTIAL / SAFE-GAPS-REMAIN`** as of this audit. This session's
+follow-on entries (`BACKTEST-MULTIPLIER-MARGIN-01-SAFE-GAP-CLOSURE-01` and
+`BACKTEST-MULTIPLIER-MARGIN-01-CLOSURE-OR-BOUNDARY-DECISION-01`, if present
+below) record whether that gap was closed and the resulting final status.
+This audit changed no config flag, enabled no trading, made no network or
+DB call, and touched no broker/execution/risk/OMS/runtime/strategy/
+portfolio code.
+
+**Full detail:** `docs/specs/backtest_multiplier_margin_01_completion_audit.md`.
