@@ -1069,6 +1069,45 @@ pub(crate) async fn autonomous_readiness(State(st): State<Arc<AppState>>) -> imp
             }
         });
 
+    // AUTON-NO-TRADE-OFFHOURS-01B: durably snapshot this readiness verdict
+    // so the dominant no-trade reason survives a daemon restart. Best-effort
+    // and non-fatal — a write failure never affects the response below.
+    let (diag_reason_code, diag_stage) = classify_no_trade_diagnostic(
+        overall_ready,
+        ws_continuity_ready,
+        reconcile_ready,
+        &arm_state,
+        arm_ready,
+        signal_ingestion_configured,
+        session_in_window,
+        runtime_start_allowed,
+        strategy_fleet_empty,
+        md_readiness.start_allowed,
+        &bar_ticker_gate,
+        st.bar_tick_dispatch_count(),
+        last_bar_signal_qty,
+    );
+    let diag_reason = blockers.first().cloned().unwrap_or_else(|| {
+        "no blockers; runtime ready to start on next session-controller tick".to_string()
+    });
+    let diag_run_id = st
+        .current_status_snapshot()
+        .await
+        .ok()
+        .and_then(|s| s.active_run_id);
+    st.record_no_trade_diagnostic(crate::state::NoTradeDiagnosticSnapshot {
+        run_id: diag_run_id,
+        mode: st.deployment_mode().as_api_label(),
+        session_window_state: &session_window_state,
+        runtime_start_allowed,
+        arm_state: &arm_state,
+        overall_ready,
+        reason_code: diag_reason_code,
+        reason: &diag_reason,
+        stage: diag_stage,
+    })
+    .await;
+
     (
         StatusCode::OK,
         Json(AutonomousPaperReadinessResponse {
@@ -1118,6 +1157,71 @@ fn bar_ticker_gate_from_session(nyse_session: &str) -> &'static str {
     } else {
         "closed_outside_session"
     }
+}
+
+/// AUTON-NO-TRADE-OFFHOURS-01B: Classify the dominant no-trade reason from
+/// the same gate booleans `autonomous_readiness` already computes, walked in
+/// the same priority order its `blockers` vec is built in. Pure and
+/// deterministic — no I/O, no env reads. Returns `(reason_code, stage)`.
+#[allow(clippy::too_many_arguments)]
+fn classify_no_trade_diagnostic(
+    overall_ready: bool,
+    ws_continuity_ready: bool,
+    reconcile_ready: bool,
+    arm_state: &str,
+    arm_ready: bool,
+    signal_ingestion_configured: bool,
+    session_in_window: bool,
+    runtime_start_allowed: bool,
+    strategy_fleet_empty: bool,
+    md_start_allowed: bool,
+    bar_ticker_gate: &str,
+    bar_tick_dispatch_count: u64,
+    last_bar_signal_qty: Option<i64>,
+) -> (&'static str, &'static str) {
+    if !ws_continuity_ready {
+        return ("WS_CONTINUITY_NOT_READY", "pre_session_window");
+    }
+    if !reconcile_ready {
+        return ("RECONCILE_NOT_READY", "pre_session_window");
+    }
+    if !arm_ready {
+        return if arm_state == "halted" {
+            ("INTEGRITY_HALTED", "pre_arm")
+        } else {
+            ("ARM_NOT_READY", "pre_arm")
+        };
+    }
+    if !signal_ingestion_configured {
+        return ("SIGNAL_INGESTION_NOT_CONFIGURED", "pre_session_window");
+    }
+    if !session_in_window {
+        return ("OUTSIDE_SESSION_WINDOW", "pre_session_window");
+    }
+    if !runtime_start_allowed {
+        // A locally-owned run is already active; no order attempt this poll
+        // is explained by the bar-ticker/strategy-tick/signal path instead.
+        if bar_ticker_gate != "open" {
+            return ("BAR_TICKER_GATE_CLOSED", "pre_dispatch");
+        }
+        if bar_tick_dispatch_count == 0 {
+            return ("STRATEGY_NOT_TICKED", "pre_dispatch");
+        }
+        if last_bar_signal_qty == Some(0) {
+            return ("NO_SIGNAL_GENERATED", "pre_dispatch");
+        }
+        return ("RUNTIME_ALREADY_ACTIVE", "pre_dispatch");
+    }
+    if strategy_fleet_empty {
+        return ("STRATEGY_FLEET_EMPTY", "pre_runtime_start");
+    }
+    if !md_start_allowed {
+        return ("MARKET_DATA_NOT_READY", "pre_runtime_start");
+    }
+    if overall_ready {
+        return ("NO_ACTIVE_RUN_PENDING_START", "pre_runtime_start");
+    }
+    ("UNKNOWN", "unclassified")
 }
 
 // ---------------------------------------------------------------------------
@@ -2719,5 +2823,157 @@ mod tests {
             assert_eq!(state, expected_state);
             assert!(seen.insert(state), "duplicate API state string detected");
         }
+    }
+
+    // -------------------------------------------------------------------
+    // AUTON-NO-TRADE-OFFHOURS-01B: classify_no_trade_diagnostic tests.
+    // Pure function, no I/O — exercises the priority order directly.
+    // -------------------------------------------------------------------
+
+    /// Baseline "everything green" args for classify_no_trade_diagnostic,
+    /// overridden per-test via struct-update-like helper calls below.
+    #[allow(clippy::too_many_arguments)]
+    fn classify_args(
+        overall_ready: bool,
+        ws_continuity_ready: bool,
+        reconcile_ready: bool,
+        arm_state: &str,
+        arm_ready: bool,
+        signal_ingestion_configured: bool,
+        session_in_window: bool,
+        runtime_start_allowed: bool,
+        strategy_fleet_empty: bool,
+        md_start_allowed: bool,
+        bar_ticker_gate: &str,
+        bar_tick_dispatch_count: u64,
+        last_bar_signal_qty: Option<i64>,
+    ) -> (&'static str, &'static str) {
+        classify_no_trade_diagnostic(
+            overall_ready,
+            ws_continuity_ready,
+            reconcile_ready,
+            arm_state,
+            arm_ready,
+            signal_ingestion_configured,
+            session_in_window,
+            runtime_start_allowed,
+            strategy_fleet_empty,
+            md_start_allowed,
+            bar_ticker_gate,
+            bar_tick_dispatch_count,
+            last_bar_signal_qty,
+        )
+    }
+
+    #[test]
+    fn cntd01_ws_continuity_not_ready_takes_priority() {
+        let (code, stage) = classify_args(
+            false, false, true, "armed", true, true, true, true, false, true, "open", 0, None,
+        );
+        assert_eq!(code, "WS_CONTINUITY_NOT_READY");
+        assert_eq!(stage, "pre_session_window");
+    }
+
+    #[test]
+    fn cntd02_reconcile_not_ready() {
+        let (code, _) = classify_args(
+            false, true, false, "armed", true, true, true, true, false, true, "open", 0, None,
+        );
+        assert_eq!(code, "RECONCILE_NOT_READY");
+    }
+
+    #[test]
+    fn cntd03_integrity_halted() {
+        let (code, stage) = classify_args(
+            false, true, true, "halted", false, true, true, true, false, true, "open", 0, None,
+        );
+        assert_eq!(code, "INTEGRITY_HALTED");
+        assert_eq!(stage, "pre_arm");
+    }
+
+    #[test]
+    fn cntd04_arm_not_ready_non_halted() {
+        let (code, _) = classify_args(
+            false, true, true, "arm_pending", false, true, true, true, false, true, "open", 0,
+            None,
+        );
+        assert_eq!(code, "ARM_NOT_READY");
+    }
+
+    #[test]
+    fn cntd05_signal_ingestion_not_configured() {
+        let (code, _) = classify_args(
+            false, true, true, "armed", true, false, true, true, false, true, "open", 0, None,
+        );
+        assert_eq!(code, "SIGNAL_INGESTION_NOT_CONFIGURED");
+    }
+
+    #[test]
+    fn cntd06_outside_session_window() {
+        let (code, stage) = classify_args(
+            false, true, true, "armed", true, true, false, true, false, true, "open", 0, None,
+        );
+        assert_eq!(code, "OUTSIDE_SESSION_WINDOW");
+        assert_eq!(stage, "pre_session_window");
+    }
+
+    #[test]
+    fn cntd07_bar_ticker_gate_closed_when_run_active_outside_regular_session() {
+        let (code, stage) = classify_args(
+            false, true, true, "armed", true, true, true, false, false, true,
+            "closed_outside_session", 0, None,
+        );
+        assert_eq!(code, "BAR_TICKER_GATE_CLOSED");
+        assert_eq!(stage, "pre_dispatch");
+    }
+
+    #[test]
+    fn cntd08_strategy_not_ticked_when_run_active_and_gate_open() {
+        let (code, _) = classify_args(
+            false, true, true, "armed", true, true, true, false, false, true, "open", 0, None,
+        );
+        assert_eq!(code, "STRATEGY_NOT_TICKED");
+    }
+
+    #[test]
+    fn cntd09_no_signal_generated_when_ticked_with_zero_qty() {
+        let (code, _) = classify_args(
+            false, true, true, "armed", true, true, true, false, false, true, "open", 3, Some(0),
+        );
+        assert_eq!(code, "NO_SIGNAL_GENERATED");
+    }
+
+    #[test]
+    fn cntd10_runtime_already_active_fallback() {
+        let (code, _) = classify_args(
+            false, true, true, "armed", true, true, true, false, false, true, "open", 3, Some(5),
+        );
+        assert_eq!(code, "RUNTIME_ALREADY_ACTIVE");
+    }
+
+    #[test]
+    fn cntd11_strategy_fleet_empty() {
+        let (code, stage) = classify_args(
+            false, true, true, "armed", true, true, true, true, true, true, "open", 0, None,
+        );
+        assert_eq!(code, "STRATEGY_FLEET_EMPTY");
+        assert_eq!(stage, "pre_runtime_start");
+    }
+
+    #[test]
+    fn cntd12_market_data_not_ready() {
+        let (code, _) = classify_args(
+            false, true, true, "armed", true, true, true, true, false, false, "open", 0, None,
+        );
+        assert_eq!(code, "MARKET_DATA_NOT_READY");
+    }
+
+    #[test]
+    fn cntd13_no_active_run_pending_start_when_everything_green() {
+        let (code, stage) = classify_args(
+            true, true, true, "armed", true, true, true, true, false, true, "open", 0, None,
+        );
+        assert_eq!(code, "NO_ACTIVE_RUN_PENDING_START");
+        assert_eq!(stage, "pre_runtime_start");
     }
 }

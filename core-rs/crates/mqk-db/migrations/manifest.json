@@ -272,6 +272,12 @@
       "path": "0043_strategy_signal_evaluations.sql",
       "status": "applied",
       "intent": "AUTON-NO-SIGNAL-OBS-01: add strategy_signal_evaluations durable journal table so a market-hours autonomous run that evaluates real bars but produces no order leaves durable evidence after daemon restart. Nullable run_id, no FK; observability only, not part of the outbox/inbox/run lifecycle chain."
+    },
+    {
+      "id": "0044",
+      "path": "0044_autonomous_no_trade_diagnostics.sql",
+      "status": "applied",
+      "intent": "AUTON-NO-TRADE-OFFHOURS-01B: add autonomous_no_trade_diagnostics durable snapshot table so the GET /api/v1/autonomous/readiness verdict (session window, arm/runtime-start state, overall_ready, dominant reason) survives a daemon restart instead of existing only as an in-memory/live-DB-read computation. Deterministic minute-bucketed UUIDv5 id bounds duplicate rows from frequent polling. Nullable run_id, no FK; observability only, not part of the outbox/inbox/run lifecycle chain. paper_order_attempted and live_order_attempted are always false."
     }
   ]
 }

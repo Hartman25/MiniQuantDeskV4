@@ -482,3 +482,144 @@ pub async fn fetch_recent_strategy_signal_evaluations(
     }
     Ok(out)
 }
+
+// ---------------------------------------------------------------------------
+// AUTON-NO-TRADE-OFFHOURS-01B: Durable autonomous no-trade diagnostic
+// snapshot (autonomous_no_trade_diagnostics)
+// ---------------------------------------------------------------------------
+
+/// One row from `autonomous_no_trade_diagnostics`.
+#[derive(Debug, Clone)]
+pub struct AutonomousNoTradeDiagnosticRecord {
+    /// Deterministic, minute-bucketed UUIDv5; caller-derived, never
+    /// `Uuid::new_v4()`.
+    pub diagnostic_id: Uuid,
+    pub observed_at_utc: DateTime<Utc>,
+    /// `None` when no run was active at observation time (the common
+    /// off-hours case) — observability only, not part of the
+    /// outbox/inbox/run lifecycle chain.
+    pub run_id: Option<Uuid>,
+    pub mode: String,
+    /// `"in_window"` or `"outside_window"`.
+    pub session_window_state: String,
+    pub runtime_start_allowed: bool,
+    pub arm_state: String,
+    pub overall_ready: bool,
+    pub reason_code: String,
+    pub reason: String,
+    pub stage: String,
+    /// Always `false` for every row this patch writes.
+    pub paper_order_attempted: bool,
+    /// Always `false` for every row this patch writes.
+    pub live_order_attempted: bool,
+    pub source: String,
+}
+
+/// Arguments for inserting a new autonomous no-trade diagnostic row.
+#[derive(Debug, Clone)]
+pub struct InsertAutonomousNoTradeDiagnosticArgs {
+    pub diagnostic_id: Uuid,
+    pub observed_at_utc: DateTime<Utc>,
+    pub run_id: Option<Uuid>,
+    pub mode: String,
+    pub session_window_state: String,
+    pub runtime_start_allowed: bool,
+    pub arm_state: String,
+    pub overall_ready: bool,
+    pub reason_code: String,
+    pub reason: String,
+    pub stage: String,
+    pub paper_order_attempted: bool,
+    pub live_order_attempted: bool,
+    pub source: String,
+}
+
+/// Persist a single autonomous no-trade diagnostic row.
+///
+/// Idempotent via `ON CONFLICT (diagnostic_id) DO NOTHING` — a duplicate
+/// write attempt for the same logical (reason_code, stage, observing minute)
+/// can never produce a second row, bounding row growth under frequent
+/// readiness polling. Never writes to, reads from, or otherwise touches
+/// `oms_outbox`/`oms_inbox`/`runs`.
+pub async fn insert_autonomous_no_trade_diagnostic(
+    pool: &PgPool,
+    args: &InsertAutonomousNoTradeDiagnosticArgs,
+) -> Result<()> {
+    sqlx::query(
+        r#"
+        insert into autonomous_no_trade_diagnostics (
+            diagnostic_id, observed_at_utc, run_id, mode,
+            session_window_state, runtime_start_allowed, arm_state,
+            overall_ready, reason_code, reason, stage,
+            paper_order_attempted, live_order_attempted, source
+        )
+        values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+        on conflict (diagnostic_id) do nothing
+        "#,
+    )
+    .bind(args.diagnostic_id)
+    .bind(args.observed_at_utc)
+    .bind(args.run_id)
+    .bind(&args.mode)
+    .bind(&args.session_window_state)
+    .bind(args.runtime_start_allowed)
+    .bind(&args.arm_state)
+    .bind(args.overall_ready)
+    .bind(&args.reason_code)
+    .bind(&args.reason)
+    .bind(&args.stage)
+    .bind(args.paper_order_attempted)
+    .bind(args.live_order_attempted)
+    .bind(&args.source)
+    .execute(pool)
+    .await
+    .context("insert_autonomous_no_trade_diagnostic failed")?;
+    Ok(())
+}
+
+/// Fetch the most recent `limit` autonomous no-trade diagnostic rows, newest
+/// first.
+///
+/// An empty `Vec` is authoritative: it means no diagnostic has been recorded
+/// yet, not that the journal is unavailable.
+pub async fn fetch_recent_autonomous_no_trade_diagnostics(
+    pool: &PgPool,
+    limit: i64,
+) -> Result<Vec<AutonomousNoTradeDiagnosticRecord>> {
+    let rows = sqlx::query(
+        r#"
+        select diagnostic_id, observed_at_utc, run_id, mode,
+               session_window_state, runtime_start_allowed, arm_state,
+               overall_ready, reason_code, reason, stage,
+               paper_order_attempted, live_order_attempted, source
+        from autonomous_no_trade_diagnostics
+        order by observed_at_utc desc
+        limit $1
+        "#,
+    )
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .context("fetch_recent_autonomous_no_trade_diagnostics failed")?;
+
+    let mut out = Vec::with_capacity(rows.len());
+    for r in rows {
+        out.push(AutonomousNoTradeDiagnosticRecord {
+            diagnostic_id: r.try_get("diagnostic_id")?,
+            observed_at_utc: r.try_get("observed_at_utc")?,
+            run_id: r.try_get("run_id")?,
+            mode: r.try_get("mode")?,
+            session_window_state: r.try_get("session_window_state")?,
+            runtime_start_allowed: r.try_get("runtime_start_allowed")?,
+            arm_state: r.try_get("arm_state")?,
+            overall_ready: r.try_get("overall_ready")?,
+            reason_code: r.try_get("reason_code")?,
+            reason: r.try_get("reason")?,
+            stage: r.try_get("stage")?,
+            paper_order_attempted: r.try_get("paper_order_attempted")?,
+            live_order_attempted: r.try_get("live_order_attempted")?,
+            source: r.try_get("source")?,
+        });
+    }
+    Ok(out)
+}

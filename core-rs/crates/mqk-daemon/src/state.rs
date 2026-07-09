@@ -748,6 +748,28 @@ struct SignalEvaluationAttempt<'a> {
     decision_stage: &'static str,
 }
 
+/// AUTON-NO-TRADE-OFFHOURS-01B: one durable no-trade diagnostic write
+/// attempt, scoped to a single `GET /api/v1/autonomous/readiness` poll.
+///
+/// Plain data carrier for [`AppState::record_no_trade_diagnostic`] — bundles
+/// the caller's already-locally-known gate truth so the helper itself takes
+/// one argument instead of a long positional list. Borrowed `&str` fields
+/// are only used for the duration of the call.
+pub struct NoTradeDiagnosticSnapshot<'a> {
+    /// `None` when no active run exists at observation time — the common
+    /// off-hours case, never a fabricated default.
+    pub run_id: Option<Uuid>,
+    pub mode: &'a str,
+    /// `"in_window"` or `"outside_window"`.
+    pub session_window_state: &'a str,
+    pub runtime_start_allowed: bool,
+    pub arm_state: &'a str,
+    pub overall_ready: bool,
+    pub reason_code: &'a str,
+    pub reason: &'a str,
+    pub stage: &'a str,
+}
+
 /// AUTON-CALENDAR-01: Derive the authoritative CalendarSpec for a (mode, broker_kind) pair.
 ///
 /// Paper+Alpaca uses `NyseWeekdays` — the broker is NYSE-backed via Alpaca and the
@@ -2221,6 +2243,61 @@ operator_reconcile_or_repair_required"
                 timeframe = %attempt.timeframe,
                 error = %e,
                 "auton_no_signal_obs_01: strategy_signal_evaluations write failed (non-fatal)"
+            );
+        }
+    }
+
+    /// AUTON-NO-TRADE-OFFHOURS-01B: best-effort, non-fatal durable snapshot
+    /// of one `GET /api/v1/autonomous/readiness` verdict.
+    ///
+    /// Mirrors [`Self::record_signal_evaluation`]'s pattern exactly: a
+    /// telemetry write failure must never panic or affect the readiness
+    /// response already being returned to the caller. `diagnostic_id` is
+    /// deterministic (`Uuid::new_v5`, minute-bucketed on `observed_at_utc`)
+    /// so repeated polls while the same reason holds are a DB no-op rather
+    /// than unbounded row growth. `run_id` is honest — `None` means no
+    /// active run, never a fabricated default. `paper_order_attempted` and
+    /// `live_order_attempted` are always `false`: this method only ever
+    /// records why an order was NOT attempted.
+    pub async fn record_no_trade_diagnostic(&self, snapshot: NoTradeDiagnosticSnapshot<'_>) {
+        let Some(ref pool) = self.db else {
+            return;
+        };
+        let observed_at_utc = Utc::now();
+        let minute_bucket = observed_at_utc.format("%Y%m%d%H%M").to_string();
+        // AUDIT-EVENT-DETERMINISM: deterministic UUIDv5, never
+        // `Uuid::new_v4()`, so a duplicate write attempt for the same
+        // logical (reason_code, stage, observing minute) is a no-op
+        // (ON CONFLICT DO NOTHING) rather than a second row.
+        let diagnostic_id = Uuid::new_v5(
+            &Uuid::NAMESPACE_DNS,
+            format!(
+                "mqk.no-trade-diagnostic.v1|{}|{}|{minute_bucket}",
+                snapshot.reason_code, snapshot.stage
+            )
+            .as_bytes(),
+        );
+        let args = mqk_db::InsertAutonomousNoTradeDiagnosticArgs {
+            diagnostic_id,
+            observed_at_utc,
+            run_id: snapshot.run_id,
+            mode: snapshot.mode.to_string(),
+            session_window_state: snapshot.session_window_state.to_string(),
+            runtime_start_allowed: snapshot.runtime_start_allowed,
+            arm_state: snapshot.arm_state.to_string(),
+            overall_ready: snapshot.overall_ready,
+            reason_code: snapshot.reason_code.to_string(),
+            reason: snapshot.reason.to_string(),
+            stage: snapshot.stage.to_string(),
+            paper_order_attempted: false,
+            live_order_attempted: false,
+            source: "mqk-daemon.autonomous_readiness_route".to_string(),
+        };
+        if let Err(e) = mqk_db::insert_autonomous_no_trade_diagnostic(pool, &args).await {
+            tracing::warn!(
+                reason_code = %snapshot.reason_code,
+                error = %e,
+                "auton_no_trade_offhours_01b: autonomous_no_trade_diagnostics write failed (non-fatal)"
             );
         }
     }
