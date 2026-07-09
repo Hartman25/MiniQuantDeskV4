@@ -191,3 +191,22 @@ not an authoritative non-equity calendar, and not per-instrument admission
 logic — the row's `PARTIAL (~38%)` / production-consumption-open verdict
 stands unchanged. See
 `docs/specs/asset_core_05k_v2_equity_active_market_hours_proof.md`.
+
+## 6. Later session: `ASSET-CORE-04-LIVE-LEDGER-SECTION-CLOSURE-01-COMBINED`
+
+A later session ran the `ASSET-CORE-04` live-ledger boundary bundle
+(Phase A audit, Phase B cross-module test proof, Phase C/D both skipped as
+duplicative of already-committed surfaces, Phase E closure decision — see
+`docs/specs/asset_core_04_live_ledger_boundary_audit.md` and
+`docs/specs/asset_core_04_live_ledger_closure_decision.md`). This *does*
+touch the `ASSET-CORE-04` row above (§2, row 32) but does not change its
+status, percentage, or dual-axis characterization: the live ledger remains
+~20%/unchanged, and the `04A`-`04F` economics scaffold remains additive
+with zero production callers — this bundle only deepened the evidence for
+both halves of that existing verdict (a workspace-wide caller-map grep in
+place of trusting module doc comments, and a numeric cross-module
+equivalence test in place of the scaffold's isolated unit tests alone).
+The row's earlier "Not touched this session — `mqk-portfolio/*` was
+forbidden" note refers specifically to the session that wrote §2/§4 above,
+not to this later session, which was authorized to add exactly one
+test-only file under `mqk-portfolio/tests/`.

@@ -2009,3 +2009,41 @@ and `ASSET-CORE-05K-V2-EQUITY-ACTIVE-MARKET-HOURS-PROOF-01` entries;
 closure decisions: `docs/specs/auton_no_trade_02c_market_hours_closure_decision.md`,
 `docs/specs/asset_core_05k_v2_equity_active_market_hours_proof.md`,
 `docs/specs/market_hours_proof_sweep_01e_closure_decision.md`.
+
+## 92. ASSET-CORE-04-LIVE-LEDGER-SECTION-CLOSURE-01-COMBINED Closure Note (maintenance)
+
+`ASSET-CORE-04-LIVE-LEDGER-SECTION-CLOSURE-01-COMBINED` audited and
+deepened the evidence behind row 142's existing `PARTIAL` / dual-axis
+verdict — it did not move the percentage or status. Phase A
+(`ASSET-CORE-04A-CURRENT-LIVE-LEDGER-BOUNDARY-AUDIT-01`) re-derived the
+live-accounting/economics-scaffold boundary from a workspace-wide
+caller-map grep (not from trusting the `04A`-`04F` modules' own doc
+comments), confirming zero production callers of the economics scaffold
+anywhere in `mqk-execution`, `mqk-risk`, `mqk-runtime`, or the GUI, and
+that `OrderIntentV2`'s fractional-capable `QtyMicros` type is never
+referenced by the broker-submit gateway. Phase B
+(`ASSET-CORE-04B-LIVE-ACCOUNTING-INVARIANT-PROOF-01`) added the one
+cross-module numeric proof that did not already exist: a new test file
+(`scenario_asset_core_04_live_ledger_invariants.rs`) drives real fills
+through the live FIFO ledger and independently recomputes the same
+position through the economics scaffold, asserting exact agreement —
+closing the gap between the scaffold's doc-comment claim of equivalence
+and an actual assertion of it, without modifying any production file.
+Phase C and Phase D were both skipped as duplicative: the honesty fields
+Phase C would have added already exist on `PortfolioEconomicsStatusResponse`
+(`04D`/`04F`), and the readiness classifier Phase D would have added
+already exists as `GET /api/v1/system/asset-risk-policy/status`
+(`ASSET-CORE-03B`) — see the closure decision doc for the full reasoning.
+
+**Not resolved (row 142's `PARTIAL` verdict stands unchanged):** live
+accounting is still whole-unit/single-currency/multiplier-naive/no-margin;
+the economics scaffold still has zero production callers; wiring either
+into live accounting, risk enforcement, or order routing remains a
+distinct, production-behavior-changing patch, explicitly not started here.
+
+**Full detail, exact evidence, and validation commands:**
+`MiniQuantDesk_Master_Patch_Ledger_v2.md`'s
+`ASSET-CORE-04A-CURRENT-LIVE-LEDGER-BOUNDARY-AUDIT-01` and
+`ASSET-CORE-04B-LIVE-ACCOUNTING-INVARIANT-PROOF-01` entries; closure
+decision: `docs/specs/asset_core_04_live_ledger_closure_decision.md`;
+boundary audit: `docs/specs/asset_core_04_live_ledger_boundary_audit.md`.

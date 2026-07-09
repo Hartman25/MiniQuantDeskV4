@@ -6528,3 +6528,72 @@ pre-existing, unrelated `sqlx-postgres` future-incompatibility warning).
 or mutation; zero config flag changes; no broker/order/risk/runtime/OMS/
 gateway file touched; no non-equity trading enabled; no production
 cutover; no generated evidence staged.
+
+### ASSET-CORE-04C/D — SKIPPED (duplicative of already-committed surfaces)
+
+**Phase C** (`ASSET-CORE-04C-READONLY-ACCOUNTING-BOUNDARY-SURFACE-IF-SAFE-01`)
+and **Phase D** (`ASSET-CORE-04D-RISK-ENFORCEMENT-READINESS-CLASSIFIER-IF-SAFE-01`)
+were both skipped. No files were changed for either phase; no commit
+exists for either. Phase A's audit found the exact surfaces both phases
+would have built already exist and already report live truth:
+`PortfolioEconomicsStatusResponse` (`04D`/`04F`) already carries
+`model_only`/`trading_uses_portfolio_economics`/
+`runtime_uses_portfolio_economics`/`risk_uses_portfolio_economics`/
+`order_path_uses_portfolio_economics`, and
+`GET /api/v1/system/asset-risk-policy/status` (`ASSET-CORE-03B`) already
+reports `requires_margin_model`/`requires_contract_multiplier`/
+`requires_currency_conversion`/`requires_session_profile` per asset class,
+live from `mqk_execution::default_asset_risk_policies()`. Full reasoning:
+`docs/specs/asset_core_04_live_ledger_boundary_audit.md` §8,
+`docs/specs/asset_core_04_live_ledger_closure_decision.md` §11.
+
+### ASSET-CORE-04E-CLOSURE-AND-LEDGER-RECONCILE-01 — CLOSED_LOCAL / DOCS-ONLY
+
+**Mission:** close `ASSET-CORE-04-LIVE-LEDGER-SECTION-CLOSURE-01-COMBINED`
+(`04A` → `04B` → C/D skipped → this phase) with an honest closure verdict
+and reconcile the roadmap docs.
+
+**Built:** `docs/specs/asset_core_04_live_ledger_closure_decision.md` —
+answers all 12 required closure questions plus the Phase C/D disposition
+detail. Verdict:
+
+```text
+ASSET-CORE-04: PARTIAL / LIVE-ACCOUNTING-PRODUCTION-CONSUMPTION-OPEN
+```
+
+Unchanged from before this bundle — this bundle deepened the *evidence*
+behind that verdict (workspace caller-map grep + cross-module numeric
+proof) without moving the live ledger's ~20% or the scaffold's
+zero-production-caller status. Live accounting still does not consume
+`InstrumentEconomics`; does not apply multipliers, margin, or currency
+conversion; does not support fractional position quantities. Risk
+enforcement still does not consume live NAV/margin/multiplier economics.
+No live/paper trading behavior changed. No non-equity class was enabled.
+No broker/provider/network was contacted. No live/paper order was
+attempted.
+
+**Updated:** `docs/audits/multi_asset_completion_audit.md` (new §92
+closure note; row 142's `ASSET-CORE-04` percentage/status left unchanged
+— this bundle is audit/test-proof scope only). `docs/specs/roadmap_completion_reconcile_01.md`
+(new §6 — same "deepened evidence, unchanged verdict" note, explicitly
+scoped as a *later* session than the one that wrote §2/§4's row 32 and its
+now-historical "not touched this session" caveat).
+
+**Validation:** `powershell -File
+scripts\guards\validate_asset_core_04_live_ledger_audit.ps1` — all 13
+checks pass, including the closure-doc-specific check [13]. `git diff
+--check` clean.
+
+**Safety confirmation:** docs-only; zero network calls; zero DB mutation;
+zero config flag changes; no broker/order/risk/runtime/strategy/live
+accounting behavior changed; no non-equity trading enabled; no production
+cutover; no generated evidence staged.
+
+**Recommended next patch:** `ASSET-CORE-04-PRODUCTION-CUTOVER-DESIGN-ONLY-01-COMBINED`
+— a design/decision-only patch specifying exactly what a real production
+cutover of the `04A`-`04F` economics scaffold into live accounting would
+require, since wiring it in is production-behavior-changing and out of
+scope for any further safe-closure sweep. Independent alternative:
+`CRYPTO-REGISTRY-DATA-COMPLETION-SWEEP-01-COMBINED` (cheaper, non-margin,
+non-multiplier non-equity path, per `docs/audits/multi_asset_completion_audit.md`'s
+own row-level difficulty notes).
