@@ -6438,3 +6438,55 @@ asset-class/patch-completion percentage.
 provider calls in tests, no gate weakened, no strategy threshold changes,
 no fabricated data, no generated evidence staged, `.env.local` never
 edited, no secrets printed, daemon returned to a fully stopped clean state.
+
+### ASSET-CORE-04A-CURRENT-LIVE-LEDGER-BOUNDARY-AUDIT-01 — CLOSED_LOCAL / AUDIT-ONLY
+
+**Mission:** ground `ASSET-CORE-04`'s current live-ledger boundary in
+current-repo evidence (Phase A of
+`ASSET-CORE-04-LIVE-LEDGER-SECTION-CLOSURE-01-COMBINED`), and identify the
+exact safe gap (if any) the rest of the bundle can close without changing
+production accounting, risk, or order-routing behavior.
+
+**Built:** `docs/specs/asset_core_04_live_ledger_boundary_audit.md`.
+Confirms by direct source read and cross-crate caller-map grep (not by
+trusting prior comments or memory):
+
+- The live accounting path (`mqk-portfolio::{accounting,metrics,valuation}`,
+  `mqk-runtime::observability`, `mqk-daemon` broker-snapshot routes) is
+  whole-unit `i64` quantity, single (implicit USD) currency,
+  multiplier-implicitly-1, no margin model, no FX conversion — unchanged
+  from every prior audit's assumption.
+- The `ASSET-CORE-04A`-`04D`/`04F` economics scaffold
+  (`instrument_economics.rs`, `portfolio_economics.rs`,
+  `instrument_economics_bridge.rs`, `GET /api/v1/portfolio/economics/status`)
+  already exists, is already tested, and has **zero production callers**
+  anywhere in `mqk-execution`, `mqk-risk`, `mqk-runtime`, or the GUI —
+  confirmed by grep, not by the modules' own doc comments.
+- `OrderIntentV2`'s fractional-capable `QtyMicros` quantity type is never
+  referenced by `mqk-execution::gateway` — the only order representation
+  ever submitted is the legacy whole-unit type. No DB quantity column is
+  anything but `bigint`.
+- `mqk_execution::asset_risk_policy` (`ASSET-CORE-03B`) already reports
+  `requires_margin_model`/`requires_contract_multiplier`/`requires_currency_conversion`
+  per asset class, live from `default_asset_risk_policies()`, via
+  `GET /api/v1/system/asset-risk-policy/status`.
+
+**Safe closure target identified:** Phase B may add one cross-module
+regression test (live accounting vs. the `04A` economics model's equity
+special case) not currently in the suite. **Phase C and Phase D are both
+pre-empted:** the honesty fields Phase C's mission describes are already
+on `PortfolioEconomicsStatusResponse` (`04D`/`04F`), and the readiness
+classifier Phase D's mission describes already exists as
+`GET /api/v1/system/asset-risk-policy/status` (`03B`). Building either
+would create a second, driftable source of the same truth — see the audit
+doc §8 for the full reasoning, which mirrors the precedent
+`ASSET-CORE-02-03E` already set for skipping a duplicative Phase D.
+
+**Validation:** `powershell -File
+scripts\guards\validate_asset_core_04_live_ledger_audit.ps1` — all 13
+checks pass. `git diff --check` clean.
+
+**Safety confirmation:** docs-only; zero network calls; zero DB mutation;
+zero config flag changes; no broker/order/risk/runtime/strategy/live
+accounting behavior changed; no non-equity trading enabled; no production
+cutover; no generated evidence staged.
