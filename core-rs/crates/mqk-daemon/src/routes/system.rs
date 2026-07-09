@@ -44,15 +44,13 @@ use crate::market_data_freshness::{
 use crate::parity_evidence::{evaluate_parity_evidence_guarded, ParityEvidenceOutcome};
 use crate::state::{
     autonomous_session_schedule_from_env, bridge_instrument_registry_v2_to_economics,
-    classify_crypto_continuous_session, classify_equity_us_regular_session,
-    classify_forex_weekday_continuous_session, classify_futures_globex_session,
-    resolve_session_profile_for_instrument_metadata, runtime_session_source_summary,
-    session_window_from_env, supported_session_profiles, AppState, AutonomousSessionTruth,
-    BrokerSnapshotTruthSource, DeploymentMode, FuturesSessionWindows,
+    instrument_session_state_for_profile, resolve_session_profile_for_instrument_metadata,
+    runtime_session_source_summary, session_window_from_env, supported_session_profiles, AppState,
+    AutonomousSessionTruth, BrokerSnapshotTruthSource, DeploymentMode,
     InstrumentEconomicsBridgeResult, MarketCalendarProvider, MarketSessionProfile,
-    MarketSessionState, MarketVenueSessionKind, NyseWeekdaysProvider, SessionAuthority,
-    SessionProfileResolutionTruth, SessionProfileStatus, SessionWindow, StrategyMarketDataSource,
-    SESSION_START_HH_MM_ENV, SESSION_STOP_HH_MM_ENV, STRATEGY_MD_TIMEFRAME_ENV,
+    MarketSessionState, NyseWeekdaysProvider, SessionAuthority, SessionProfileResolutionTruth,
+    SessionProfileStatus, StrategyMarketDataSource, SESSION_START_HH_MM_ENV,
+    SESSION_STOP_HH_MM_ENV, STRATEGY_MD_TIMEFRAME_ENV,
 };
 
 use super::helpers::{
@@ -1451,45 +1449,11 @@ fn parse_instrument_sessions_as_of(
     }
 }
 
-fn instrument_session_state_for_profile(
-    profile: Option<MarketSessionProfile>,
-    now_utc: DateTime<Utc>,
-) -> (&'static str, &'static str) {
-    match profile {
-        Some(MarketSessionProfile::EquityUsRegular) => {
-            let equity_truth = NyseWeekdaysProvider.session_for(now_utc);
-            let _venue_kind = classify_equity_us_regular_session(equity_truth.state);
-            (
-                equity_truth.state.as_str(),
-                "classified_by_market_calendar_provider",
-            )
-        }
-        Some(MarketSessionProfile::CryptoContinuous) => (
-            classify_crypto_continuous_session(now_utc).as_str(),
-            "classified_by_model_only_crypto_continuous",
-        ),
-        Some(MarketSessionProfile::FuturesGlobex) => {
-            let windows = FuturesSessionWindows {
-                regular: SessionWindow::parse("14:30", "21:00")
-                    .expect("static futures regular window must parse"),
-                extended: SessionWindow::parse("12:00", "23:00")
-                    .expect("static futures extended window must parse"),
-            };
-            (
-                classify_futures_globex_session(now_utc, &windows).as_str(),
-                "classified_by_model_only_futures_fixture_windows",
-            )
-        }
-        Some(MarketSessionProfile::ForexWeekdayContinuous) => (
-            classify_forex_weekday_continuous_session(now_utc).as_str(),
-            "classified_by_model_only_forex_weekday_continuous",
-        ),
-        None => (
-            MarketVenueSessionKind::Unknown.as_str(),
-            "session_profile_unavailable",
-        ),
-    }
-}
+// ASSET-CORE-05H: `instrument_session_state_for_profile` relocated to
+// `mqk-daemon/src/state/market_calendar.rs` (now `pub fn`, reused by
+// `route_instrument_session_for_metadata`) so this route module and any
+// future caller share one definition instead of duplicating it. Imported
+// above via `crate::state::instrument_session_state_for_profile`.
 
 fn instrument_kind_profile_label(profile_id: &str, kind: Option<&str>) -> String {
     if profile_id == MarketSessionProfile::EquityUsRegular.as_str() {

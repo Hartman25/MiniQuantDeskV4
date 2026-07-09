@@ -873,10 +873,141 @@ pub fn resolve_session_profile_for_instrument_metadata(
             profile: None,
             reason: "options have no modeled session profile in this seam; likely to inherit the underlying equity session in a future patch",
         },
+        // ASSET-CORE-05H: "rate" is a recognized, schema-valid asset class
+        // (mqk_md::instrument_registry_v2::CANONICAL_ASSET_CLASSES_V2), not a
+        // truly unrecognized string — it must not fall through to the
+        // `Unknown` catch-all below. No session-profile shape is modeled for
+        // fixed-income/rates instruments in this seam (no `MarketSessionProfile`
+        // variant exists for them), so this reports the same honest
+        // `UnsupportedAssetClass` + `profile: None` shape as `"option"`/`"options"`
+        // rather than inventing a new profile.
+        "rate" => SessionProfileResolution {
+            truth_state: SessionProfileResolutionTruth::UnsupportedAssetClass,
+            profile: None,
+            reason: "rate/fixed-income instruments have no modeled session profile in this seam",
+        },
         _ => SessionProfileResolution {
             truth_state: SessionProfileResolutionTruth::Unknown,
             profile: None,
             reason: "unrecognized asset_class",
         },
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ASSET-CORE-05H: pure, composed per-instrument session router
+// ---------------------------------------------------------------------------
+//
+// Composes the ASSET-CORE-05B profile resolver above with the per-profile
+// session-state classification ASSET-CORE-05B/05C already perform inline at
+// each call site (`mqk-daemon/src/routes/system.rs`), so callers get one
+// pure, reusable, independently-testable entry point instead of duplicating
+// the two-step resolve-then-classify sequence. Not called by any trading,
+// admission, risk, broker, or runtime path — read-only diagnostic composition
+// only, same honesty contract as `resolve_session_profile_for_instrument_metadata`.
+
+/// Session-state classification for a resolved [`MarketSessionProfile`] at a
+/// given instant — ASSET-CORE-05B, relocated here (was a private fn in
+/// `routes/system.rs`) so [`route_instrument_session_for_metadata`] can reuse
+/// it without duplicating its match arms. Equity/ETF is classified via the
+/// real, production-wired [`NyseWeekdaysProvider`]; crypto/futures/forex use
+/// the model-only classifiers above (futures against a static illustrative
+/// [`FuturesSessionWindows`] fixture — no real CME calendar is consulted).
+/// Returns `(session_state, reason_code)`.
+pub fn instrument_session_state_for_profile(
+    profile: Option<MarketSessionProfile>,
+    now_utc: DateTime<Utc>,
+) -> (&'static str, &'static str) {
+    match profile {
+        Some(MarketSessionProfile::EquityUsRegular) => {
+            let equity_truth = NyseWeekdaysProvider.session_for(now_utc);
+            let _venue_kind = classify_equity_us_regular_session(equity_truth.state);
+            (
+                equity_truth.state.as_str(),
+                "classified_by_market_calendar_provider",
+            )
+        }
+        Some(MarketSessionProfile::CryptoContinuous) => (
+            classify_crypto_continuous_session(now_utc).as_str(),
+            "classified_by_model_only_crypto_continuous",
+        ),
+        Some(MarketSessionProfile::FuturesGlobex) => {
+            let windows = FuturesSessionWindows {
+                regular: SessionWindow::parse("14:30", "21:00")
+                    .expect("static futures regular window must parse"),
+                extended: SessionWindow::parse("12:00", "23:00")
+                    .expect("static futures extended window must parse"),
+            };
+            (
+                classify_futures_globex_session(now_utc, &windows).as_str(),
+                "classified_by_model_only_futures_fixture_windows",
+            )
+        }
+        Some(MarketSessionProfile::ForexWeekdayContinuous) => (
+            classify_forex_weekday_continuous_session(now_utc).as_str(),
+            "classified_by_model_only_forex_weekday_continuous",
+        ),
+        None => (
+            MarketVenueSessionKind::Unknown.as_str(),
+            "session_profile_unavailable",
+        ),
+    }
+}
+
+/// Result of routing one instrument's `(asset_class, instrument_kind)`
+/// metadata through the full ASSET-CORE-05B/05H session-routing pipeline at
+/// `now_utc` — ASSET-CORE-05H.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct InstrumentSessionRoute {
+    /// The profile-resolution step (ASSET-CORE-05B).
+    pub profile_resolution: SessionProfileResolution,
+    /// The classified session state for the resolved profile at `now_utc`
+    /// (e.g. `"regular_open"`, `"continuous"`, `"closed"`, `"unknown"`).
+    pub session_state: &'static str,
+    /// Reason code for the session-state classification step.
+    pub session_reason_code: &'static str,
+}
+
+impl InstrumentSessionRoute {
+    /// `true` only when the resolved profile is the real, currently-wired
+    /// equity session authority (mirrors the `production_backed` flag each
+    /// route handler in `routes/system.rs` computes independently today).
+    pub fn is_production_backed(&self) -> bool {
+        self.profile_resolution.truth_state == SessionProfileResolutionTruth::Active
+            && self.profile_resolution.profile == Some(MarketSessionProfile::EquityUsRegular)
+    }
+
+    /// `true` when the resolved profile is a recognized-but-unwired
+    /// non-equity model (crypto/futures/forex). `false` for equity, `false`
+    /// for `Unknown`/unsupported-with-no-profile (e.g. options, rate).
+    pub fn is_model_only(&self) -> bool {
+        self.profile_resolution.truth_state == SessionProfileResolutionTruth::UnsupportedAssetClass
+            && self.profile_resolution.profile.is_some()
+    }
+}
+
+/// Route one instrument's metadata to its full session decision — pure,
+/// deterministic, composed from [`resolve_session_profile_for_instrument_metadata`]
+/// and [`instrument_session_state_for_profile`] — ASSET-CORE-05H.
+///
+/// No DB, config, env, network, provider, broker, runtime, OMS, or risk
+/// access. `enabled`/`paper_trading_enabled`/`live_trading_enabled` are not
+/// parameters — this seam has no enablement concept and never changes
+/// classification based on them (callers must not read "unsupported"/
+/// "unknown" here as any comment on whether an instrument is or should be
+/// tradable).
+pub fn route_instrument_session_for_metadata(
+    asset_class: &str,
+    instrument_kind: Option<&str>,
+    now_utc: DateTime<Utc>,
+) -> InstrumentSessionRoute {
+    let profile_resolution =
+        resolve_session_profile_for_instrument_metadata(asset_class, instrument_kind);
+    let (session_state, session_reason_code) =
+        instrument_session_state_for_profile(profile_resolution.profile, now_utc);
+    InstrumentSessionRoute {
+        profile_resolution,
+        session_state,
+        session_reason_code,
     }
 }

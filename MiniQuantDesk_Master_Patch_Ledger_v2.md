@@ -5641,3 +5641,79 @@ changed; no production cutover.
 **Recommended next slice:** `ASSET-CORE-05H-PURE-INSTRUMENT-SESSION-ROUTER-01`
 — close the `"rate"` gap and add one composed, reusable pure
 per-instrument session-routing helper, per §7 of the audit doc.
+
+### ASSET-CORE-05H-PURE-INSTRUMENT-SESSION-ROUTER-01 — CLOSED_LOCAL / MODEL-ONLY
+
+**Mission:** implement `ASSET-CORE-05G`'s §7 safe closure target — close
+the `"rate"` gap in the existing per-instrument session-profile resolver
+and add one composed, reusable pure per-instrument session-routing
+helper — without wiring it into any trading, admission, risk, broker, or
+runtime path.
+
+**Built:** `mqk-daemon/src/state/market_calendar.rs`:
+
+- `resolve_session_profile_for_instrument_metadata` gained an explicit
+  `"rate"` match arm — `SessionProfileResolutionTruth::UnsupportedAssetClass`,
+  `profile: None`, reason `"rate/fixed-income instruments have no modeled
+  session profile in this seam"` — so this schema-valid
+  (`CANONICAL_ASSET_CLASSES_V2`) asset class is no longer misreported as
+  `Unknown`/"unrecognized asset_class" alongside truly garbage strings.
+  No new `MarketSessionProfile` variant was added — current repo defines
+  no rate/fixed-income session shape, and inventing one was out of this
+  patch's scope.
+- `instrument_session_state_for_profile(profile, now_utc) -> (&str, &str)`
+  relocated here verbatim (was a private fn in `routes/system.rs`,
+  `ASSET-CORE-05B`) and made `pub fn`, so it can be reused instead of
+  duplicated. `routes/system.rs`'s two existing call sites
+  (`build_instrument_sessions_status_response`,
+  `classify_instrument_session_parity_row`) now import it from
+  `crate::state` instead of a local private copy — pure relocation, zero
+  behavior change.
+- New `route_instrument_session_for_metadata(asset_class,
+  instrument_kind, now_utc) -> InstrumentSessionRoute` composes
+  `resolve_session_profile_for_instrument_metadata` +
+  `instrument_session_state_for_profile` into one pure, reusable,
+  independently-testable entry point. `InstrumentSessionRoute` carries
+  `profile_resolution`, `session_state`, `session_reason_code`, plus
+  `is_production_backed()`/`is_model_only()` convenience methods mirroring
+  the flags each route handler already computes inline. No DB, config,
+  env, network, provider, broker, runtime, OMS, or risk access; no
+  `enabled`/`paper_trading_enabled`/`live_trading_enabled` parameter —
+  this seam has no enablement concept and the classification never reads
+  or implies one. Not called by any route or production path in this
+  patch (test-only consumer arrives in `ASSET-CORE-05I`).
+
+**Deliberately not done:** existing route handlers'
+(`system_instrument_sessions_status`, `system_instrument_sessions_parity`)
+internal logic was left untouched beyond the mechanical import swap for
+the relocated function — they were not rewired to call the new composed
+`route_instrument_session_for_metadata` in this patch, to avoid risking a
+JSON-shape regression in well-tested production diagnostic routes for a
+purely stylistic reuse win. No new `MarketSessionProfile` variant for
+rate/fixed-income was added. No `mqk-execution`/`mqk-runtime`/`mqk-risk`/
+`mqk-portfolio`/`mqk-broker-*`/config/DB-migration/strategy file touched.
+No non-equity trading enabled; no enablement flag changed.
+
+**Validation:** `cargo check -p mqk-daemon` clean. `cargo test -p
+mqk-daemon --lib session` — 59/59 passed (unchanged). `cargo test -p
+mqk-daemon --test scenario_instrument_session_status_asset_core_05b` —
+11/11 passed (unchanged — proves the relocated function is behaviorally
+identical). `cargo test -p mqk-daemon --test
+scenario_instrument_session_parity_status_shadow_asset_core_05c` — 15/15
+passed (unchanged). `cargo clippy -p mqk-daemon --lib -- -D warnings`
+clean. `cargo fmt -p mqk-daemon -- --check` — the three files this patch
+touched are clean; the crate-wide check still reports pre-existing drift
+in unrelated files this patch did not touch (`transport_quality.rs` and
+several `crypto`/`kraken` scenario test files), consistent with this
+repo's known periodic-drift-cleanup pattern.
+
+**Safety confirmation:** zero network calls; zero DB access/mutation;
+zero config flag changes; no crypto/futures/options/forex/rates trading
+enabled; no broker/order/risk/runtime/strategy/portfolio behavior
+changed; no production cutover; `BTC/USD` and every other non-equity
+enablement flag unchanged.
+
+**Recommended next slice:** `ASSET-CORE-05I-SESSION-ROUTING-PARITY-TESTS-01`
+— prove `route_instrument_session_for_metadata` routes every canonical
+v2 asset class correctly, including the newly-explicit `"rate"` case,
+and that it matches real production equity truth at fixed timestamps.

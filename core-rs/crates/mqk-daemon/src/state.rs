@@ -68,10 +68,11 @@ pub use loop_runner::spawn_reconcile_tick;
 pub use market_calendar::{
     classify_crypto_continuous_session, classify_equity_us_regular_session,
     classify_forex_weekday_continuous_session, classify_futures_globex_session,
-    resolve_session_profile_for_instrument_metadata, supported_session_profiles,
-    ExchangeCalendarDay, ExchangeCalendarMeta, ExchangeDayStatus, ExchangeSourceState,
-    ExchangeSourcedCalendarProvider, ExchangeUnavailablePolicy, FixedWindowOverrideProvider,
-    FuturesSessionWindows, MarketCalendarProvider, MarketSessionProfile, MarketSessionState,
+    instrument_session_state_for_profile, resolve_session_profile_for_instrument_metadata,
+    route_instrument_session_for_metadata, supported_session_profiles, ExchangeCalendarDay,
+    ExchangeCalendarMeta, ExchangeDayStatus, ExchangeSourceState, ExchangeSourcedCalendarProvider,
+    ExchangeUnavailablePolicy, FixedWindowOverrideProvider, FuturesSessionWindows,
+    InstrumentSessionRoute, MarketCalendarProvider, MarketSessionProfile, MarketSessionState,
     MarketSessionTruth, MarketVenueSessionKind, NyseWeekdaysProvider, SessionAuthority,
     SessionProfileResolution, SessionProfileResolutionTruth, SessionProfileStatus,
 };
