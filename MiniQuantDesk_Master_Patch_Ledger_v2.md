@@ -5886,3 +5886,55 @@ and explicitly out of scope for a safe-closure bundle. See
 `docs/specs/asset_core_05j_session_routing_closure_decision.md` §8-§9
 for the full gap list. Until then, `ASSET-CORE-05` should remain
 `PARTIAL / PRODUCTION-CONSUMPTION-OPEN` on the roadmap.
+
+### ASSET-CORE-02-03A-CURRENT-COMPLETION-AUDIT-01 — CLOSED_LOCAL / AUDIT-ONLY
+
+**Mission:** ground `ASSET-CORE-02` and `ASSET-CORE-03` in current repo
+evidence before any further work in the
+`ASSET-CORE-02-03-COMPLETION-SWEEP-01-COMBINED` bundle, since the prompt's
+assumed starting state ("no bracket/OCO anywhere", "zero graduated per-class
+policy") turned out to be only half true against current `HEAD`.
+
+**Repo evidence found:** both `ASSET-CORE-02-ORDER-INTENT-V2-FOUNDATION-01-COMBINED`
+and `ASSET-CORE-03-RISK-ROUTER-FOUNDATION-01-COMBINED` had already landed
+(this ledger, above). `OrderIntentV2`/`ExecutionIntentV2`
+(`mqk-execution/src/types.rs`) carry a real validated model with
+`IntentV2Routability`; `mqk_execution::asset_risk_policy` already defines a
+graduated static per-asset-class policy (`Enabled`/`Disabled`/`ResearchOnly`/
+`Unsupported`, with `requires_margin_model`/`requires_contract_multiplier`/
+`requires_session_profile`/`requires_currency_conversion` per class) —
+`docs/specs/roadmap_completion_reconcile_01.md`'s "zero graduated per-class
+policy behind them" line was stale and is corrected by this audit. Confirmed
+by grep: zero production callers of any v2/policy type outside
+`mqk-execution`'s own `src`/`tests`; zero bracket/OCO/take-profit/stop-loss/
+multi-leg representation anywhere in `mqk-execution`, `mqk-schemas`, or
+`mqk-risk`; the existing `/api/v1/system/metadata` `asset_capability_matrix`
+is a separate, older, hand-maintained scaffold that does not read from
+`asset_risk_policy.rs`.
+
+**Built:** `docs/specs/asset_core_02_03a_current_completion_audit.md`
+answers all twelve required audit questions plus explicit safe/unsafe gap
+lists and safety boundary. `scripts/guards/validate_asset_core_02_03a_completion_audit.ps1`
+(pure docs/text validator, no network/DB/build).
+
+**Updated:** `docs/specs/roadmap_completion_reconcile_01.md` (`ASSET-CORE-02`
+and `ASSET-CORE-03` rows corrected to cite this re-audit and the true
+current state instead of the stale prior summary).
+
+**Identified safe gaps for this bundle:** (1) `ASSET-CORE-02` — a pure,
+unwired bracket/OCO model representation on `OrderIntentV2` is the one
+concrete missing model piece; (2) `ASSET-CORE-03` — the existing graduated
+policy model is not yet operator-surfaced by any daemon route or GUI panel.
+
+**Deliberately not done:** no code touched; no `mqk-execution`, `mqk-risk`,
+`mqk-daemon`, `mqk-cli`, or GUI file changed; no closure verdict asserted
+for `ASSET-CORE-02`/`ASSET-CORE-03` overall (deferred to Phase E of this
+bundle).
+
+**Validation:** `powershell -File scripts\guards\validate_asset_core_02_03a_completion_audit.ps1`
+— all 11 checks passed. `git diff --check` — clean.
+
+**Safety confirmation:** docs-only; zero network calls; zero DB access;
+zero config flag changes; no crypto/futures/options/forex/rates trading
+enabled; no broker/order/risk/runtime/strategy/portfolio behavior changed;
+no production cutover; no generated evidence staged.
