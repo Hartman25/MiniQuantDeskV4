@@ -1981,3 +1981,31 @@ the `ASSET-CORE-03B` route above. True graduated live risk enforcement
 `ASSET-CORE-02B-ORDER-INTENT-V2-SAFE-GAP-CLOSURE-01`, and
 `ASSET-CORE-03B-ASSET-RISK-POLICY-SAFE-GAP-CLOSURE-01` entries; closure
 decision: `docs/specs/asset_core_02_03e_closure_decision.md`.
+
+## 91. MARKET-HOURS-PROOF-SWEEP-01 Closure Note (maintenance)
+
+A real NYSE regular-session market-hours sweep (2026-07-09) closed two
+previously-observation-blocked items via live, non-fixture-timestamp
+wall-clock proof. Lane 1: `AUTON-NO-TRADE-02` (and parent
+`AUTON-NO-TRADE-01`) — the autonomous paper daemon's own session
+controller started a real run under its normal default (legacy) session
+source, and the strategy engine genuinely evaluated a no-signal condition
+(`flat_below_threshold`, move_bps=-19 vs threshold_bps=20) against live
+Alpaca-synced bars; zero orders were attempted, DB-and-route-confirmed.
+Both `AUTON-NO-TRADE-02` and parent `AUTON-NO-TRADE-01` are now
+`CLOSED_LOCAL`. Lane 2 (non-interleaved, separate daemon process, later
+in the same session): `ASSET-CORE-05K` — confirmed
+`MQK_RUNTIME_SESSION_SOURCE=v2_equity_active` (temporary, process-scoped,
+never persisted) produces `candidate_v2_parity_state=matched` against
+legacy at real market-open wall-clock time. `ASSET-CORE-05K` is
+`CLOSED_LOCAL / WALL-CLOCK-PARITY-ONLY`; parent `ASSET-CORE-05` remains
+`PARTIAL / PRODUCTION-CONSUMPTION-OPEN` — this proof is wall-clock parity
+only, not a production cutover, and does not change the §143 row's ~38%
+estimate.
+
+**Full detail, exact evidence, and validation commands:**
+`MiniQuantDesk_Master_Patch_Ledger_v2.md`'s `AUTON-NO-TRADE-02`/`02B`/`02C`
+and `ASSET-CORE-05K-V2-EQUITY-ACTIVE-MARKET-HOURS-PROOF-01` entries;
+closure decisions: `docs/specs/auton_no_trade_02c_market_hours_closure_decision.md`,
+`docs/specs/asset_core_05k_v2_equity_active_market_hours_proof.md`,
+`docs/specs/market_hours_proof_sweep_01e_closure_decision.md`.

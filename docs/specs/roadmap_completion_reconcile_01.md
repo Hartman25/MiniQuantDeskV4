@@ -178,5 +178,16 @@ bundle's own closure record.
 A further, later market-hours session (`MARKET-HOURS-PROOF-SWEEP-01`) closed
 the remaining market-hours half via `AUTON-NO-TRADE-02B`/`02C` — see
 `docs/specs/auton_no_trade_02c_market_hours_closure_decision.md`. Parent
-`AUTON-NO-TRADE-01` is now `CLOSED_LOCAL`. This also does not touch any
+`AUTON-NO-TRADE-01` is now `CLOSED_LOCAL`. This does not touch any
 `ASSET-CORE-*`/`CRYPTO-*`/`REGISTRY-V2-*` item or percentage in this table.
+
+That same session also ran `ASSET-CORE-05K-V2-EQUITY-ACTIVE-MARKET-HOURS-PROOF-01`
+— a real market-hours wall-clock confirmation that
+`MQK_RUNTIME_SESSION_SOURCE=v2_equity_active` matches legacy session-open
+behavior (`candidate_v2_parity_state=matched`). This *does* touch
+`ASSET-CORE-05` (row above) but does not change its status or percentage:
+`05K` proves wall-clock behavioral parity only, not a production cutover,
+not an authoritative non-equity calendar, and not per-instrument admission
+logic — the row's `PARTIAL (~38%)` / production-consumption-open verdict
+stands unchanged. See
+`docs/specs/asset_core_05k_v2_equity_active_market_hours_proof.md`.
