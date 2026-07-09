@@ -1131,6 +1131,12 @@ Do not define until `AUTON-NO-TRADE-01` returns evidence.
 
 **Safety confirmation:** read-only route, no DB writes, no runtime start, no broker/provider calls; response schema is honest about order-attempt state on every row.
 
+**Phase D (`AUTON-NO-TRADE-OFFHOURS-01D-GUI-OR-CLI-SURFACE-IF-SAFE-01`):** Chose CLI over GUI. Audit: `core-rs/mqk-gui/src` has zero consumers of either sibling diagnostic-journal route (`execution/fill-quality`, `execution/signal-evaluations`) — no existing Autonomous/Execution/Alerts screen to extend with a read-only panel, so a first-of-its-kind GUI feature module (routing, TS API client, tests, npm build) would be materially larger scope than every prior phase in this bundle. `mqk-cli` already has a clean read-only DB-report pattern (`Db::Status`, `Db::Migrate`) to mirror. Added `mqk autonomous no-trade-diagnostics [--limit N]` (`mqk-cli/src/main.rs`, new `Commands::Autonomous`/`AutonomousCmd::NoTradeDiagnostics`): connects via `mqk_db::connect_from_env` (read-only) and calls the same `fetch_recent_autonomous_no_trade_diagnostics` the HTTP route uses, printing `truth_state=active`/`no_rows` plus one line per row including honest `paper_order_attempted=false`/`live_order_attempted=false`. No DB write, no runtime start, no broker/provider call.
+
+**Tests:** new `mqk-cli/tests/scenario_cli_auton_no_trade_diagnostics_01.rs` (CLI-01, CLI-02), following the existing `scenario_cli_db_migrate_requires_yes_when_live_active.rs` graceful-skip-without-`MQK_DATABASE_URL` pattern. CLI-01 proves the command prints a seeded row's `reason_code` and both order-attempt flags as `false`; CLI-02 proves the command creates zero new `oms_outbox` rows. Both pass against the local paper DB. `cargo clippy -p mqk-cli -p mqk-db --all-targets -- -D warnings` clean.
+
+**Safety confirmation:** read-only CLI report, no DB write, no runtime start, no broker/provider call, no config flag changes.
+
 ### BROKER-HTTP-TIMEOUT-01 — QUEUED / PARKED
 
 **Purpose:** Add broker HTTP timeout / independent heartbeat hardening.

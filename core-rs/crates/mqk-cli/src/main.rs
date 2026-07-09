@@ -78,6 +78,25 @@ enum Commands {
         #[command(subcommand)]
         cmd: BacktestCmd,
     },
+
+    /// Read-only autonomous-paper operator reports.
+    Autonomous {
+        #[command(subcommand)]
+        cmd: AutonomousCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum AutonomousCmd {
+    /// AUTON-NO-TRADE-OFFHOURS-01D: print the most recent durable
+    /// autonomous no-trade diagnostic rows (`autonomous_no_trade_diagnostics`).
+    /// Read-only: no DB write, no runtime start, no broker/provider call.
+    /// Mirrors `GET /api/v1/autonomous/no-trade-diagnostics`.
+    NoTradeDiagnostics {
+        /// Maximum rows to print, newest first.
+        #[arg(long, default_value_t = 20)]
+        limit: i64,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1332,6 +1351,38 @@ async fn main() -> Result<()> {
                 println!("event_id={}", db_ev.event_id);
                 if let Some(h) = db_ev.hash_self {
                     println!("hash_self={}", h);
+                }
+            }
+        },
+
+        Commands::Autonomous { cmd } => match cmd {
+            AutonomousCmd::NoTradeDiagnostics { limit } => {
+                let pool = mqk_db::connect_from_env().await?;
+                let rows = mqk_db::fetch_recent_autonomous_no_trade_diagnostics(&pool, limit).await?;
+                if rows.is_empty() {
+                    println!("truth_state=no_rows");
+                } else {
+                    println!("truth_state=active");
+                    for r in &rows {
+                        println!(
+                            "diagnostic_id={} observed_at_utc={} run_id={} mode={} session_window_state={} runtime_start_allowed={} arm_state={} overall_ready={} reason_code={} stage={} paper_order_attempted={} live_order_attempted={} reason=\"{}\"",
+                            r.diagnostic_id,
+                            r.observed_at_utc.to_rfc3339(),
+                            r.run_id
+                                .map(|u: uuid::Uuid| u.to_string())
+                                .unwrap_or_else(|| "none".to_string()),
+                            r.mode,
+                            r.session_window_state,
+                            r.runtime_start_allowed,
+                            r.arm_state,
+                            r.overall_ready,
+                            r.reason_code,
+                            r.stage,
+                            r.paper_order_attempted,
+                            r.live_order_attempted,
+                            r.reason,
+                        );
+                    }
                 }
             }
         },
