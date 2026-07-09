@@ -5717,3 +5717,74 @@ enablement flag unchanged.
 — prove `route_instrument_session_for_metadata` routes every canonical
 v2 asset class correctly, including the newly-explicit `"rate"` case,
 and that it matches real production equity truth at fixed timestamps.
+
+### ASSET-CORE-05I-SESSION-ROUTING-PARITY-TESTS-01 — CLOSED_LOCAL / MODEL-ONLY
+
+**Mission:** prove `ASSET-CORE-05H`'s
+`route_instrument_session_for_metadata` is truthful and does not change
+production behavior — every canonical v2 asset class routes to its
+documented profile, non-equity profiles are always model-only and never
+reported as production-matching, `"rate"` is honestly distinguished from
+a truly unrecognized asset class, and equity/ETF routing matches real
+production `NyseWeekdaysProvider` truth at fixed timestamps.
+
+**Built:** `mqk-daemon/tests/scenario_asset_core_05_session_routing_parity_01.rs`
+— 11 pure `#[test]` functions (`ac05i_01`-`ac05i_11`), no DB pool, no
+provider/broker call, no daemon/HTTP route, no runtime start:
+
+- `ac05i_01`/`ac05i_02`/`ac05i_03`: equity and ETF route to
+  `equity_us_regular`, `is_production_backed()`, and match real
+  `NyseWeekdaysProvider::session_for` state exactly at regular-open,
+  holiday, and both sides of an early-close timestamp (reusing the exact
+  fixed timestamps `scenario_instrument_session_parity_status_shadow_asset_core_05c.rs`
+  already proved against the real production calendar).
+- `ac05i_04`-`ac05i_06`: crypto/future/futures/forex all route to their
+  documented model-only profile, `is_model_only()` true,
+  `is_production_backed()` false, at multiple timestamps (including a
+  Saturday, proving forex's weekday/weekend split and crypto's
+  always-continuous claim are exercised, not assumed).
+- `ac05i_07`: option/options alias both resolve `profile: None`,
+  `UnsupportedAssetClass`, and correctly report `is_model_only() ==
+  false` (no profile to be model-only about).
+- `ac05i_08`: `"rate"` resolves `UnsupportedAssetClass` (not `Unknown`),
+  proving `ASSET-CORE-05H`'s fix.
+- `ac05i_09`: truly unrecognized strings (`"stock"`, `"bond"`,
+  `"warrant"`, blank) fail closed to `Unknown`, explicitly contrasted
+  against `"rate"`'s non-`Unknown` result in the same test.
+- `ac05i_10`: iterates
+  `mqk_md::instrument_registry_v2::CANONICAL_ASSET_CLASSES_V2` directly
+  (not a hardcoded copy) and asserts none resolve to `Unknown` — a
+  regression guard against a future canonical class silently falling
+  through unrouted.
+- `ac05i_11`: determinism proof (`Eq`-derived `InstrumentSessionRoute`,
+  identical inputs -> identical output) plus a structural note that the
+  function signature carries no `enabled`/`paper_trading_enabled`/
+  `live_trading_enabled` parameter at all.
+
+**Sibling regression proof:** `scenario_instrument_session_status_asset_core_05b`
+(11/11), `scenario_instrument_session_parity_status_shadow_asset_core_05c`
+(15/15), `scenario_asset_class_scope_b8` (12/12), and
+`scenario_gui_daemon_contract_gate` (23/23) all pass unchanged —
+confirming `ASSET-CORE-05H`'s relocation of
+`instrument_session_state_for_profile` and the new `"rate"` arm did not
+alter any existing route's behavior.
+
+**Validation:** `cargo check -p mqk-daemon` clean. `cargo test -p
+mqk-daemon --test scenario_asset_core_05_session_routing_parity_01` —
+11/11 passed. `cargo test -p mqk-daemon --test scenario_asset_class_scope_b8`
+— 12/12 passed (unchanged). `cargo clippy -p mqk-daemon --lib -- -D
+warnings` clean. `cargo clippy -p mqk-daemon --test
+scenario_asset_core_05_session_routing_parity_01 -- -D warnings` clean.
+`cargo fmt -p mqk-daemon -- --check` — the new test file is clean; the
+crate-wide check still reports the same pre-existing drift in unrelated
+files noted in `ASSET-CORE-05H`'s entry, untouched by this patch.
+
+**Safety confirmation:** zero network calls; zero DB access/mutation;
+zero config flag changes; no crypto/futures/options/forex/rates trading
+enabled; no broker/order/risk/runtime/strategy/portfolio behavior
+changed; no production cutover; `BTC/USD` and every other non-equity
+enablement flag unchanged.
+
+**Recommended next slice:** `ASSET-CORE-05J-CLOSURE-AND-ROADMAP-RECONCILE-01`
+— reconcile the ledger and roadmap docs with an honest final
+`ASSET-CORE-05` status.
