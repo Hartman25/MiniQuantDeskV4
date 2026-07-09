@@ -5788,3 +5788,43 @@ enablement flag unchanged.
 **Recommended next slice:** `ASSET-CORE-05J-CLOSURE-AND-ROADMAP-RECONCILE-01`
 — reconcile the ledger and roadmap docs with an honest final
 `ASSET-CORE-05` status.
+
+### ASSET-CORE-05J-CLOSURE-AND-ROADMAP-RECONCILE-01 — CLOSED_LOCAL / DOCS-ONLY
+
+**Mission:** close out
+`ASSET-CORE-05-PER-INSTRUMENT-SESSION-ROUTING-01-COMBINED` (`05G`-`05J`)
+with an honest closure verdict and reconcile the two roadmap docs.
+
+**Built:** `docs/specs/asset_core_05j_session_routing_closure_decision.md`
+— answers all nine required closure questions. Verdict:
+`ASSET-CORE-05-PER-INSTRUMENT-SESSION-ROUTING-01-COMBINED` is
+`CLOSED_LOCAL / MODEL-AND-PARITY-COMPLETE` for its own scope (the "rate"
+gap, composed router, and parity tests identified as safely closable by
+the `05G` audit are done); `ASSET-CORE-05` overall remains `PARTIAL /
+PRODUCTION-CONSUMPTION-OPEN` — no production per-instrument admission
+decision point exists, no authoritative non-equity calendar exists, and
+no non-equity trading/enablement changed.
+
+**Updated:** `docs/audits/multi_asset_completion_audit.md` (§143 row:
+~35%→~38%, cites new §89 closure note; new §89 section) and
+`docs/specs/roadmap_completion_reconcile_01.md` (`ASSET-CORE-05` row
+updated to cite this bundle and its remaining gap, per closure doc §8).
+
+**Validation:** `powershell -File scripts\guards\validate_asset_core_05g_session_routing_audit.ps1`
+— all 9 checks passed, including check [9] (closure decision doc now
+present, carries a recognized `CLOSED_LOCAL` label). `git diff --check`
+— clean.
+
+**Safety confirmation:** docs-only; zero network calls; zero DB
+mutation; zero config flag changes; no crypto/futures/options/forex/rates
+trading enabled; no broker/order/risk/runtime/strategy/portfolio
+behavior changed; no production cutover; no generated evidence staged.
+
+**Recommended next patch:** a new, separately-scoped and
+separately-authorized item covering a production per-instrument
+admission architecture decision paired with at least one authoritative
+non-equity calendar source — both production/runtime-behavior-changing
+and explicitly out of scope for a safe-closure bundle. See
+`docs/specs/asset_core_05j_session_routing_closure_decision.md` §8-§9
+for the full gap list. Until then, `ASSET-CORE-05` should remain
+`PARTIAL / PRODUCTION-CONSUMPTION-OPEN` on the roadmap.

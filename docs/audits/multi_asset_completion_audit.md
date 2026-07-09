@@ -140,7 +140,7 @@ Difficulty: S (days) / M (1-2 weeks) / L (3-6 weeks) / XL (6+ weeks, likely mult
 | `ASSET-CORE-02` Multi-Asset Order Intent Model | PARTIAL | 25% | L | `ASSET-CORE-01` | `OrderIntentV2`/`ExecutionIntentV2` exist, explicitly unwired (`RESEARCH-NON-EQ-01`); no bracket/OCO anywhere | 7 | Wiring this is itself a scope-reviewed patch per its own code comment. |
 | `ASSET-CORE-03` Asset-Aware Risk Router | PARTIAL | 35% | L | `ASSET-CORE-01`, `ASSET-CORE-04` | Two tested fail-closed gates exist (Gate 0, routing guard); zero graduated per-class policy behind them | 8 | Most mature of the five — finish what's started. |
 | `ASSET-CORE-04` Multi-Asset Portfolio Ledger | MISSING (effectively, live path) / PARTIAL (read-only economics scaffold) | 20% (live ledger, unchanged) — see §78 for the separate `04A`-`04F` scaffold | XL | none | `cash_micros` single-currency; FIFO P&L multiplier-naive; `PositionSnapshot.net_qty` whole-unit `i64` (no fractional crypto qty); no margin/NAV-by-asset-class in the live path. A parallel, zero-live-caller economics model+bridge+aggregation+status chain (`04A`-`04F`) exists and is tested but does not touch `mqk-portfolio::accounting.rs` | 14 | Highest-risk patch in this entire roadmap — touches live capital accounting invariants. Needs its own scenario-test proof standard per `audit_repo_truth_rules.md`. |
-| `ASSET-CORE-05` Market Calendar & Session Provider | PARTIAL | ~35% (up from 30%; see §78) | M | none | `MarketCalendarProvider` trait + 3 providers exist and are fail-closed/pluggable; `MarketSessionState` enum is NYSE-vocabulary-coupled (no 24/7, no Globex RTH/ETH, no FX session windows); `ASSET-CORE-05-MARKET-CALENDAR-GENERALIZE-01-COMBINED` since added read-only session-profile diagnostics (4 profiles, daemon route + GUI panel), still model-only/unwired into trading | 5 | Cheaper than it looks — the hard part (trait, fail-closed contract, fallback) is already built. |
+| `ASSET-CORE-05` Market Calendar & Session Provider | PARTIAL | ~38% (up from 35%; see §89) | M | none | `MarketCalendarProvider` trait + 3 providers exist and are fail-closed/pluggable; `MarketSessionState` enum is NYSE-vocabulary-coupled (no 24/7, no Globex RTH/ETH, no FX session windows); `ASSET-CORE-05-MARKET-CALENDAR-GENERALIZE-01-COMBINED` added read-only session-profile diagnostics (4 profiles, daemon route + GUI panel); `ASSET-CORE-05-PER-INSTRUMENT-SESSION-ROUTING-01-COMBINED` since closed the composed-router/"rate"-gap/parity-test model-and-parity scope, still model-only/unwired into trading | 5 | Cheaper than it looks — the hard part (trait, fail-closed contract, fallback) is already built. |
 
 ### Phase 1 — Futures Trading Engine
 
@@ -1917,3 +1917,31 @@ remains byte-identical to its pre-review state — `BTC/USD.enabled`,
 trading enabled, no orders routed, no broker/risk/runtime code touched.
 Full detail:
 `docs/specs/registry_v2_instrument_enablement_01_btc_usd_decision.md`.
+
+## 89. ASSET-CORE-05-PER-INSTRUMENT-SESSION-ROUTING-01-COMBINED Closure Note (maintenance)
+
+`CLOSED_LOCAL / MODEL-AND-PARITY-COMPLETE` for this bundle's own scope
+(phases `05G`-`05J`; `ASSET-CORE-05` overall remains `PARTIAL /
+PRODUCTION-CONSUMPTION-OPEN`). Audited the existing `ASSET-CORE-05A`-`05C`
+session-profile surfaces and found a pure per-instrument router
+(`resolve_session_profile_for_instrument_metadata`) and classifier
+(`instrument_session_state_for_profile`) already existed, composed
+inline at each route call site; the one honest gap was that `"rate"` (a
+schema-valid `InstrumentRegistryV2` asset class) silently fell through
+to the generic `Unknown`/"unrecognized asset_class" catch-all alongside
+truly garbage strings. Closed that gap, relocated the duplicated
+classifier into one canonical `pub fn`, and added a new composed
+`route_instrument_session_for_metadata` pure helper — none of it called
+by any route, trading, admission, risk, broker, or runtime path. Added
+11 focused tests proving every canonical v2 asset class routes
+correctly, equity/ETF matches real production `NyseWeekdaysProvider`
+truth at four fixed timestamps, and non-equity always reports
+model-only/never-production-matching. All pre-existing sibling
+regression suites (`ASSET-CORE-05B`/`05C` route tests, `scenario_asset_class_scope_b8`,
+GUI/daemon contract gate) pass unchanged. Production trading/admission
+behavior, config flags, and non-equity enablement are all unchanged.
+
+**Full detail, exact test names, and validation commands:**
+`MiniQuantDesk_Master_Patch_Ledger_v2.md`'s `ASSET-CORE-05G`/`05H`/`05I`/`05J`
+entries; closure decision:
+`docs/specs/asset_core_05j_session_routing_closure_decision.md`.
