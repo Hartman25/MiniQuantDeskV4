@@ -6376,3 +6376,65 @@ no network/provider call added unconditionally; no `.env.local` mutation;
 `DATA-FRESHNESS-READINESS-GATE-01` unweakened; no daemon safety/readiness/
 risk/reconcile/arm gate touched; no live routing; no orders submitted or
 forced; no generated evidence staged.
+
+### PAPER-SMOKE-FOLLOWUP-01E-CLOSURE-AND-LEDGER-RECONCILE-01 — CLOSED_LOCAL / DOCS-ONLY + LIVE-VALIDATED
+
+**Mission:** close `PAPER-SMOKE-FOLLOWUP-01A`..`01D`, reconcile the ledger,
+and record the operator-authorized optional live validation run.
+
+**Built:** `docs/specs/paper_smoke_followup_01e_closure_decision.md` —
+answers all 10 required closure questions plus a dedicated live-validation
+section. Verdict: `PAPER-SMOKE-FOLLOWUP-01A/B/C/D` and the bundle overall
+all `CLOSED_LOCAL`. Confirms `MARKET-HOURS-PROOF-SWEEP-01`,
+`AUTON-NO-TRADE-02`, `AUTON-NO-TRADE-01`, and `ASSET-CORE-05K` remain
+unreopened.
+
+**Live validation performed (operator-authorized, ~2h13m of NYSE session
+time remaining after Phase D committed):** ran
+`Start-PaperTradingSmoke.ps1 -StartIntradayRefreshLoop
+-IntradayRefreshIntervalSeconds 300 -IntradayRefreshDurationSeconds 650
+-WatchSeconds 300 -SkipGui` (no `-MultiSymbolSmoke`, proving the
+single-symbol path). The daemon ran a full real session
+(2026-07-09T17:52:57Z → auto-stopped cleanly at the 20:00 UTC session
+boundary, 2h08m), connected to live Alpaca paper WS and TwelveData.
+`GET /api/v1/watchlist/status` post-run confirmed `status="not_configured"`
+— the real STEP 9B input — and the daemon reaching a full session run
+proves STEP 9B's single-symbol fallback fired instead of the old false
+`exit 1`. `GET /api/v1/market-data/intraday-refresh/status` post-run
+confirmed `truth_state="active"`, `mode="interval"` (STEP 8C's loop
+genuinely ran multiple iterations, not just the pre-seed), `all_passed=false`,
+`reason_code="provider_returned_stale_intraday_data"` — real, honest
+evidence proving STEP 14C's `INTRADAY_REFRESH_BLOCKED_NOT_ALL_PASSED` logic
+is wired to a genuine condition (this sandbox's system clock runs materially
+ahead of TwelveData's real-world data), not fabricated. Zero orders were
+attempted the entire session — `DATA-FRESHNESS-READINESS-GATE-01` correctly
+fired `bar_data_stale`/`intraday_bar_stale` on every 5-minute dispatch tick,
+confirmed in the daemon's own log. `live_routing_enabled=false` held
+throughout and post-shutdown. A scratchpad-only orchestration wrapper
+(never part of this repo) that was meant to auto-query status and shut the
+daemon down immediately after the watcher ended did not complete on its own
+(background-task pausing across a long real-world gap in this sandbox, not
+a defect in any repo script or daemon code — the daemon and the
+self-bounded refresh-loop process both behaved exactly as designed
+independently of the wrapper). Once noticed, the intended verification and
+shutdown were completed manually: `disarm-execution` (HTTP 200) →
+`stop-system` (HTTP 200) → confirmed `runtime_status=idle`,
+`strategy_armed=false`, `execution_armed=false`,
+`live_routing_enabled=false` → process terminated → port 8899 unreachable.
+
+**Validation:** `powershell -File
+scripts\guards\validate_paper_smoke_followup_01a_audit.ps1`,
+`validate_market_hours_proof_sweep_01.ps1`,
+`validate_paper_smoke_followup_01c_watchlist_gate.ps1`,
+`validate_paper_smoke_followup_01d_intraday_refresh.ps1` — all pass.
+`git diff --check` clean.
+
+**Deliberately not done:** `docs/audits/multi_asset_completion_audit.md`
+and `docs/specs/roadmap_completion_reconcile_01.md` not updated — this
+bundle is operator-workflow/script/runbook scope only and moves no
+asset-class/patch-completion percentage.
+
+**Safety confirmation:** no live orders, no forced paper orders, no
+provider calls in tests, no gate weakened, no strategy threshold changes,
+no fabricated data, no generated evidence staged, `.env.local` never
+edited, no secrets printed, daemon returned to a fully stopped clean state.
