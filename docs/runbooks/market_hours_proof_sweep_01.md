@@ -56,15 +56,47 @@ GET /api/v1/execution/orders
 GET /api/v1/alerts/active
 ```
 
-### DB tables (verified current schema — do not assume prior-generation
-column names)
+### DB tables (schema-discovery-first — do not assume a fixed column list)
 
-- `runs` — columns: `run_id`, `engine_id`, `mode`, `started_at_utc`,
-  `git_hash`, `config_hash`, `config_json`, `host_fingerprint`. This table
-  carries only session-start metadata — it has no per-lifecycle-stage
-  wall-clock timestamp columns beyond `started_at_utc`. Do not write SQL
-  against this table assuming additional lifecycle timestamp columns exist;
-  re-verify via `information_schema.columns` first.
+Column lists shift as migrations land, and a runbook that hardcodes "this
+table does/doesn't have column X" goes stale the moment a new migration
+lands. **Before writing any ad-hoc SQL against any of these tables, always
+run schema discovery first:**
+
+```sql
+SELECT column_name, data_type
+FROM information_schema.columns
+WHERE table_name = '<table>'
+ORDER BY ordinal_position;
+```
+
+Only reference a column in a follow-up query once that discovery query has
+confirmed it exists on the live target DB. If a column you expect is absent,
+treat the DB as behind the migrations at HEAD (run migrations) rather than
+assuming the column was never added — and if a column appears that isn't
+listed below, treat this list as incomplete and update it, not the DB as
+wrong.
+
+The columns below are what this runbook's proof routes/queries currently
+rely on, cross-checked against migrations committed at HEAD. This is a
+known floor, not an exhaustive/authoritative ceiling — schema discovery
+above is the actual source of truth for any given target DB at query time.
+
+- `runs` — `run_id`, `engine_id`, `mode`, `started_at_utc`, `git_hash`,
+  `config_hash`, `config_json`, `host_fingerprint`, `status`, plus the
+  lifecycle-stage timestamp columns added by
+  `core-rs/crates/mqk-db/migrations/0002_run_lifecycle.sql`:
+  `armed_at_utc`, `running_at_utc`, `stopped_at_utc`, `halted_at_utc`,
+  `last_heartbeat_utc`. Example schema-conditional check before relying on
+  a lifecycle column:
+
+  ```sql
+  SELECT EXISTS (
+    SELECT 1 FROM information_schema.columns
+    WHERE table_name = 'runs' AND column_name = 'armed_at_utc'
+  );
+  ```
+
 - `strategy_signal_evaluations` — `evaluation_id`, `ts_utc`, `run_id`,
   `strategy_id`, `symbol`, `timeframe`, `bar_context_source`,
   `bars_loaded`, `latest_bar_ts_utc`, `signal_generated`, `signal_qty`,
@@ -74,21 +106,21 @@ column names)
   `arm_state`, `overall_ready`, `reason_code`, `reason`, `stage`,
   `paper_order_attempted`, `live_order_attempted`, `source`.
 - `oms_outbox` — `outbox_id`, `run_id`, `idempotency_key`, `order_json`,
-  `status`, `created_at_utc`, `sent_at_utc`, plus retry-state columns
+  `status`, `created_at_utc`, `sent_at_utc`, retry-state columns
   (`dispatch_attempt_count`, `next_dispatch_after_utc`,
-  `last_dispatch_error`). This table has no separate per-outcome wall-clock
-  timestamp column for each lifecycle stage — outcome truth lives in
-  `status` plus `order_json`. Do not write SQL against this table assuming
-  additional per-stage timestamp columns exist; re-verify via
-  `information_schema.columns` first.
+  `last_dispatch_error`), plus `claimed_at_utc` added by
+  `core-rs/crates/mqk-db/migrations/0005_outbox_claim.sql`. Confirm
+  presence via `information_schema.columns` before relying on
+  `claimed_at_utc` or any other column, the same as for `runs` above.
 - `oms_inbox` — `inbox_id`, `run_id`, `broker_message_id`, `message_json`,
   `received_at_utc`.
 - `sys_arm_state` — singleton row (`sentinel_id=1`), `state`, `reason`,
   `updated_at_utc`.
 
 Always re-confirm live via `information_schema.columns` before writing any
-ad-hoc SQL beyond what's listed above — this table is a snapshot, not a
-substitute for a schema check.
+ad-hoc SQL beyond what's listed above — this list is a snapshot cross-checked
+against migrations at HEAD at the time this runbook was last updated, not a
+substitute for a schema check on the actual target DB.
 
 ### Evidence folder
 

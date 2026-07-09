@@ -6220,3 +6220,41 @@ No trading behavior change.
 
 **Safety confirmation:** docs-only; zero network/DB/broker calls; no live
 routing; no orders; no gate weakened; no generated evidence staged.
+
+### PAPER-SMOKE-FOLLOWUP-01B-RUNBOOK-SCHEMA-GUARD-CORRECTION-01 — CLOSED_LOCAL / DOCS-ONLY
+
+**Mission:** correct the stale schema assumptions in
+`docs/runbooks/market_hours_proof_sweep_01.md` and its validator, identified
+by Phase A: the runbook claimed `runs` and `oms_outbox` lack certain
+lifecycle/stage timestamp columns that, per committed migrations, actually
+exist.
+
+**Built:** rewrote the runbook's "DB tables" section as
+"DB tables (schema-discovery-first — do not assume a fixed column list)" —
+instructs querying `information_schema.columns` before any ad-hoc SQL,
+lists `runs`' lifecycle columns (`armed_at_utc`, `running_at_utc`,
+`stopped_at_utc`, `halted_at_utc`, `last_heartbeat_utc`, added by
+`0002_run_lifecycle.sql`) and `oms_outbox.claimed_at_utc` (added by
+`0005_outbox_claim.sql`) as a floor cross-checked against migrations at
+HEAD, not a ceiling, and adds a schema-conditional example query.
+`scripts/guards/validate_market_hours_proof_sweep_01.ps1` check [9] replaced
+the `$ForbiddenColumns` allowlist-of-absence (which failed the runbook for
+mentioning real column names) with `$ForbiddenCategoricalClaims` — it now
+fails only if the runbook re-asserts a blanket "this table has no X column"
+claim, and separately requires the runbook to mention
+`information_schema.columns`.
+
+**Validation:** `powershell -File
+scripts\guards\validate_market_hours_proof_sweep_01.ps1` — all checks
+(including new [9a]/[9b]) passed. `powershell -File
+scripts\guards\validate_paper_smoke_followup_01a_audit.ps1` — unaffected,
+still passes. `git diff --check` clean.
+
+**Deliberately not done:** no code changes to daemon/DB. No migration
+added. No forbidden-column list simply flipped to a new hardcoded
+allowlist — replaced with a discovery-first instruction so this doesn't go
+stale again.
+
+**Safety confirmation:** docs/validator-only; zero network/DB/broker calls;
+no live routing; no orders; no gate weakened; no generated evidence staged;
+`.env.local` untouched.

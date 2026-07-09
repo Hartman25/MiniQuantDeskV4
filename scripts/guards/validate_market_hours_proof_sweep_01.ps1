@@ -14,7 +14,9 @@
 #   [6]  Runbook states no forced paper orders.
 #   [7]  Runbook states no strategy threshold changes.
 #   [8]  Runbook states generated evidence must not be staged.
-#   [9]  Runbook does not contain forbidden stale column names.
+#   [9]  Runbook instructs schema-discovery-first (information_schema.columns)
+#        rather than hardcoding a fixed column list, and does not claim any
+#        column categorically does not exist.
 #   [10] Lane closure docs (if present) carry an honest status label.
 #
 # Usage:
@@ -37,15 +39,18 @@ $PathClosureDocs = @(
     (Join-Path $RepoRoot "docs\specs\market_hours_proof_sweep_01e_closure_decision.md")
 )
 
-$ForbiddenColumns = @(
-    "armed_at_utc",
-    "running_at_utc",
-    "stopped_at_utc",
-    "halted_at_utc",
-    "last_heartbeat_utc",
-    "claimed_at_utc",
-    "acked_at_utc",
-    "rejected_at_utc"
+# Categorical non-existence claims that would re-introduce the stale-schema
+# bug this guard was corrected for (PAPER-SMOKE-FOLLOWUP-01B): the runbook
+# must never assert a table lacks a lifecycle/stage timestamp column as a
+# blanket fact, since migrations can add columns after the runbook was
+# written. Schema-discovery-first (information_schema.columns) is the fix;
+# this list catches the old wording pattern if it creeps back in.
+$ForbiddenCategoricalClaims = @(
+    "has no per-lifecycle-stage wall-clock timestamp columns",
+    "has no separate per-outcome wall-clock timestamp column",
+    "it has no per-lifecycle-stage",
+    "no additional lifecycle timestamp columns exist",
+    "no additional per-stage timestamp columns exist"
 )
 
 $Violations = 0
@@ -130,9 +135,13 @@ Show-Info "--- [8] Runbook states generated evidence must not be staged ---"
 Test-ContentContains "runbook states generated evidence must not be staged" $RunbookContent "Do not stage generated evidence" | Out-Null
 
 Write-Host ""
-Show-Info "--- [9] Runbook does not contain forbidden stale column names ---"
-foreach ($Col in $ForbiddenColumns) {
-    Test-ContentDoesNotContain "runbook column check ($Col)" $RunbookContent $Col | Out-Null
+Show-Info "--- [9a] Runbook instructs schema-discovery-first (information_schema.columns) ---"
+Test-ContentContains "runbook instructs information_schema.columns discovery" $RunbookContent "information_schema.columns" | Out-Null
+
+Write-Host ""
+Show-Info "--- [9b] Runbook does not contain categorical column-non-existence claims ---"
+foreach ($Claim in $ForbiddenCategoricalClaims) {
+    Test-ContentDoesNotContain "runbook categorical-claim check" $RunbookContent $Claim | Out-Null
 }
 
 Write-Host ""
