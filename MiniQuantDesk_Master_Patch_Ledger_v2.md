@@ -6184,3 +6184,39 @@ no production cutover; no generated evidence staged.
 on `ASSET-CORE-03` (wiring live portfolio/margin/NAV into an actual
 risk-enforcement path is production-behavior-changing, not a safe-closure
 sweep, and out of scope here).
+
+### PAPER-SMOKE-FOLLOWUP-01A-CURRENT-SMOKE-FINDINGS-AUDIT-01 — CLOSED_LOCAL / DOCS-ONLY
+
+**Mission:** ground the three non-blocking follow-ups surfaced by
+`MARKET-HOURS-PROOF-SWEEP-01E`'s closure doc against current repo evidence
+before patching anything.
+
+**Repo evidence found:** all three findings confirmed directly against
+current HEAD, not just the prior closure doc's claim. (1) Migrations
+`0002_run_lifecycle.sql` and `0005_outbox_claim.sql` prove `runs.armed_at_utc`
+/ `running_at_utc` / `stopped_at_utc` / `halted_at_utc` / `last_heartbeat_utc`
+and `oms_outbox.claimed_at_utc` exist, contradicting
+`docs/runbooks/market_hours_proof_sweep_01.md` and its validator's
+`$ForbiddenColumns` list. (2) `Start-PaperTradingSmoke.ps1` STEP 9B hard-fails
+for any non-multi-symbol setup with no single-symbol-valid branch, even
+though the daemon's own `watchlist_intake.rs`/`watchlist/status` route
+already truthfully distinguishes `not_configured` from `invalid`. (3)
+`Refresh-IntradayMarketData.ps1` and
+`GET /api/v1/market-data/intraday-refresh/status` already exist and work,
+but no smoke-script step invokes or verifies a continuous loop — explaining
+why `DATA-FRESHNESS-READINESS-GATE-01` correctly went stale ~15 minutes into
+both market-hours proof sweep windows.
+
+**Built:** `docs/specs/paper_smoke_followup_01a_current_findings_audit.md`
+(all 10 required answers) and
+`scripts/guards/validate_paper_smoke_followup_01a_audit.ps1` (10 checks).
+
+**Validation:** `powershell -File
+scripts\guards\validate_paper_smoke_followup_01a_audit.ps1` — all checks
+passed. `git diff --check` clean.
+
+**Deliberately not done:** no code changes. No daemon safety gate touched.
+No trading behavior change.
+
+**Safety confirmation:** docs-only; zero network/DB/broker calls; no live
+routing; no orders; no gate weakened; no generated evidence staged.
