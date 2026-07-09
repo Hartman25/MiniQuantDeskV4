@@ -6314,3 +6314,65 @@ flags, or strategy thresholds.
 `.env.local` mutation; `approved_for_live` hard invariant unchanged; no
 daemon safety/readiness/risk/reconcile/arm gate touched; no live routing;
 no orders submitted or forced; no generated evidence staged.
+
+### PAPER-SMOKE-FOLLOWUP-01D-INTRADAY-REFRESH-LOOP-SMOKE-SUPPORT-01 — CLOSED_LOCAL / SCRIPT+DOCS-ONLY
+
+**Mission:** close the operator-workflow gap where no continuous intraday
+refresh loop ran or was verified during the market-hours proof sweep,
+causing `DATA-FRESHNESS-READINESS-GATE-01` to correctly fail closed
+~15 minutes into both observation windows. The gate's behavior was correct
+— the gap was that no smoke-script step started or checked a refresh loop.
+
+**Built:** two new explicit opt-in switches on `Start-PaperTradingSmoke.ps1`,
+both off by default (default smoke behavior unchanged, no new network
+activity added unconditionally): `-StartIntradayRefreshLoop` and
+`-RequireIntradayRefresh`. New **STEP 8C** (after GUI observation, before
+WS-continuity wait) launches the existing
+`scripts/windows/Refresh-IntradayMarketData.ps1` as a separate hidden
+process in interval-loop mode only when `-StartIntradayRefreshLoop` is
+passed — prints the exact command either way. New **STEP 14C** (after
+autonomous paper-status triage, before STEP 15 runtime start) polls the
+existing `GET /api/v1/market-data/intraday-refresh/status` route only when
+`-RequireIntradayRefresh` is passed, and fails closed with an actionable
+`INTRADAY_REFRESH_BLOCKED_TRUTH_STATE` / `_STALE_EVIDENCE` /
+`_NOT_ALL_PASSED` code and exact remediation command unless
+`truth_state=active`, `stale_or_missing_evidence=false`, and
+`all_passed=true`. Neither step widens the freshness threshold, marks stale
+data fresh, forces dispatch from stale bars, or touches
+`DATA-FRESHNESS-READINESS-GATE-01` itself, which still evaluates every
+strategy-dispatch tick independently.
+
+**Built:** `docs/runbooks/intraday_market_data_refresh.md` (new) — operator
+guidance for both the standalone and smoke-integrated refresh paths, plus a
+one-paragraph cross-reference added to
+`docs/runbooks/market_hours_proof_sweep_01.md` Section 1 preconditions.
+`scripts/guards/validate_paper_smoke_followup_01d_intraday_refresh.ps1`
+(new, 12 checks, including a regression re-run of
+`validate_market_hours_proof_sweep_01.ps1`).
+
+**Validation:** `powershell -File
+scripts\guards\validate_paper_smoke_followup_01d_intraday_refresh.ps1` —
+all 12 checks passed. `powershell -File
+tests\script_guards\test_multi_symbol_smoke_runner_gate.ps1` — all 18
+invariants still pass (STEP 9B untouched by this phase). `powershell -File
+scripts\guards\validate_paper_smoke_followup_01c_watchlist_gate.ps1` and
+`validate_paper_smoke_followup_01a_audit.ps1` — unaffected, still pass.
+`Start-PaperTradingSmoke.ps1 -CheckOnly` — unaffected (STEP 8C/14C are past
+CheckOnly's early exit point), still passes. PowerShell AST parse of the
+full script — no syntax errors. `git diff --check` clean.
+
+**Deliberately not done:** no live daemon smoke was run to exercise STEP 8C/
+14C end-to-end this phase (no market session was active during this patch's
+authoring window) — both steps were proven only by static/text validation
+and CheckOnly-mode regression, per this bundle's network rule (tests must
+not call providers/brokers). `DATA-FRESHNESS-READINESS-GATE-01` itself was
+not touched. No change to `Refresh-IntradayMarketData.ps1` — it already had
+everything needed (`-CheckOnly`, `-Once`, interval-loop mode, fail-closed
+evidence). No `.env.local` change, no config flag change, no strategy
+threshold change.
+
+**Safety confirmation:** script+docs-only; both new switches default off;
+no network/provider call added unconditionally; no `.env.local` mutation;
+`DATA-FRESHNESS-READINESS-GATE-01` unweakened; no daemon safety/readiness/
+risk/reconcile/arm gate touched; no live routing; no orders submitted or
+forced; no generated evidence staged.

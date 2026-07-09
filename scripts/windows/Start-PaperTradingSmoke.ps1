@@ -27,6 +27,24 @@
 #                      STEP 9B then treats an absent watchlist-v2 artifact as this repo's normal
 #                      single-symbol smoke path, not a failure. A watchlist-v2 artifact that IS
 #                      configured but invalid/unapproved still fails closed in either mode.
+#   -StartIntradayRefreshLoop
+#                      Start scripts\windows\Refresh-IntradayMarketData.ps1 as a separate,
+#                      explicitly-requested background process so intraday bars stay fresh for
+#                      the duration of a market-hours smoke session. Default: off -- this script
+#                      never starts provider refresh network activity unless this flag is passed.
+#   -RequireIntradayRefresh
+#                      Before STEP 15 (runtime start), poll
+#                      GET /api/v1/market-data/intraday-refresh/status and fail closed with
+#                      actionable guidance unless truth_state=active, stale_or_missing_evidence=
+#                      false, and all_passed=true. Default: off -- default smoke behavior remains
+#                      observe-only for data freshness beyond STEP 5B's one-shot prep; the
+#                      per-tick DATA-FRESHNESS-READINESS-GATE-01 gate still applies either way.
+#   -IntradayRefreshIntervalSeconds
+#                      Refresh interval passed to Refresh-IntradayMarketData.ps1 when
+#                      -StartIntradayRefreshLoop is set. Default: 300.
+#   -IntradayRefreshDurationSeconds
+#                      Total refresh-loop duration passed to Refresh-IntradayMarketData.ps1 when
+#                      -StartIntradayRefreshLoop is set. Default: 1800.
 #
 # Hard rules enforced by this script:
 #   - Paper+Alpaca path only. Fails if daemon_mode != paper.
@@ -47,7 +65,11 @@ param(
     [switch]$SkipGui,
     [switch]$NoStartRuntime,
     [switch]$CheckOnly,
-    [switch]$MultiSymbolSmoke
+    [switch]$MultiSymbolSmoke,
+    [switch]$StartIntradayRefreshLoop,
+    [switch]$RequireIntradayRefresh,
+    [int]   $IntradayRefreshIntervalSeconds = 300,
+    [int]   $IntradayRefreshDurationSeconds = 1800
 )
 
 Set-StrictMode -Version Latest
@@ -969,6 +991,61 @@ if ($guiStatus.launched) {
 }
 
 # ---------------------------------------------------------------------------
+# STEP 8C: Intraday refresh loop (optional, -StartIntradayRefreshLoop)
+# PAPER-SMOKE-FOLLOWUP-01D-INTRADAY-REFRESH-LOOP-SMOKE-SUPPORT-01
+# Default behavior is unchanged: this script never starts provider refresh
+# network activity on its own. Only when -StartIntradayRefreshLoop is
+# explicitly passed does it launch the existing
+# scripts\windows\Refresh-IntradayMarketData.ps1 as a separate process, in
+# its own interval-loop mode, so intraday bars stay fresh for the rest of
+# this smoke session instead of aging out ~15 minutes after STEP 5B's
+# one-shot top-off (this is the root cause DATA-FRESHNESS-READINESS-GATE-01
+# correctly caught during the market-hours proof sweep). Does not touch
+# oms_outbox/oms_inbox/broker_order_map/runs/arm_state (same guarantee
+# Refresh-IntradayMarketData.ps1 documents for itself). Never edits
+# .env.local, never persists secrets, never stages evidence -- the child
+# process writes its own untracked exports\market_data\intraday_refresh_*.json
+# evidence exactly as it does when run standalone.
+# ---------------------------------------------------------------------------
+Write-Section "STEP 8C: Intraday refresh loop (optional, -StartIntradayRefreshLoop)"
+
+if ($StartIntradayRefreshLoop) {
+    $intradayRefreshScript = Join-Path $RepoRoot 'scripts\windows\Refresh-IntradayMarketData.ps1'
+    if (-not (Test-Path $intradayRefreshScript)) {
+        Write-Warn "Refresh-IntradayMarketData.ps1 not found at $intradayRefreshScript. Cannot start refresh loop (non-fatal)."
+    } else {
+        $intradaySymbol = $env:MQK_STRATEGY_SYMBOL
+        if ([string]::IsNullOrWhiteSpace($intradaySymbol)) { $intradaySymbol = 'AAPL' }
+        $intradayTimeframe = $env:MQK_STRATEGY_MD_TIMEFRAME
+        if ([string]::IsNullOrWhiteSpace($intradayTimeframe) -or $intradayTimeframe -eq '1D') { $intradayTimeframe = '5m' }
+
+        $intradayArgs = @(
+            '-NoProfile', '-ExecutionPolicy', 'Bypass', '-NonInteractive',
+            '-File', $intradayRefreshScript,
+            '-Symbols', $intradaySymbol,
+            '-Timeframe', $intradayTimeframe,
+            '-IntervalSeconds', $IntradayRefreshIntervalSeconds,
+            '-DurationSeconds', $IntradayRefreshDurationSeconds,
+            '-PaperDbUrl', $PaperDbUrl
+        )
+        Write-Step "Starting intraday refresh loop as a separate process:"
+        Write-Step "  powershell.exe $($intradayArgs -join ' ')"
+        try {
+            $intradayRefreshProc = Start-Process -FilePath 'powershell.exe' -ArgumentList $intradayArgs `
+                -WorkingDirectory $RepoRoot -WindowStyle Hidden -PassThru
+            Write-Ok "Intraday refresh loop started (PID $($intradayRefreshProc.Id)); symbol=$intradaySymbol timeframe=$intradayTimeframe interval=${IntradayRefreshIntervalSeconds}s duration=${IntradayRefreshDurationSeconds}s."
+        } catch {
+            Write-Warn "Failed to start intraday refresh loop (non-fatal): $_"
+        }
+    }
+} else {
+    Write-Step "Intraday refresh loop not requested (-StartIntradayRefreshLoop not set)."
+    Write-Step "  STEP 5B's one-shot market-data prep does not stay fresh for a full market-hours session."
+    Write-Step "  To keep intraday bars fresh yourself, run in a separate terminal:"
+    Write-Step "  powershell -ExecutionPolicy Bypass -File scripts\windows\Refresh-IntradayMarketData.ps1 -IntervalSeconds 300 -DurationSeconds 1800"
+}
+
+# ---------------------------------------------------------------------------
 # STEP 9: Verify Alpaca WS live (wait for continuity=live)
 # ---------------------------------------------------------------------------
 Write-Section "STEP 9: Verify Alpaca WS continuity"
@@ -1384,6 +1461,76 @@ if ($null -ne $paperStatus14b) {
     }
 } else {
     Write-Warn "autonomous/paper-status endpoint unavailable (older daemon build or daemon not yet ready). Continuing with existing readiness checks."
+}
+
+# ---------------------------------------------------------------------------
+# STEP 14C: Intraday refresh readiness (optional, -RequireIntradayRefresh)
+# PAPER-SMOKE-FOLLOWUP-01D-INTRADAY-REFRESH-LOOP-SMOKE-SUPPORT-01
+# Read-only. Does NOT weaken DATA-FRESHNESS-READINESS-GATE-01 -- that gate
+# still evaluates every strategy-dispatch tick independently of this check.
+# This step only adds an earlier, more actionable preflight: when
+# -RequireIntradayRefresh is passed, refuse to proceed to STEP 15 unless
+# GET /api/v1/market-data/intraday-refresh/status proves fresh, verified
+# evidence exists. Default (-RequireIntradayRefresh not set): unchanged
+# observe-only behavior, no gate added here.
+# ---------------------------------------------------------------------------
+Write-Section "STEP 14C: Intraday refresh readiness (optional, -RequireIntradayRefresh)"
+
+if ($RequireIntradayRefresh) {
+    $intradayStatus = $null
+    try {
+        $intradayStatus = Invoke-DaemonGet -Path '/api/v1/market-data/intraday-refresh/status'
+    } catch {
+        Write-Fail "INTRADAY_REFRESH_BLOCKED_STATUS_UNAVAILABLE: GET /api/v1/market-data/intraday-refresh/status failed: $_"
+        Write-EvidenceCapture "STEP 14C: intraday refresh status unavailable -- $_"
+        exit 1
+    }
+
+    if ($null -eq $intradayStatus) {
+        Write-Fail "INTRADAY_REFRESH_BLOCKED_STATUS_UNAVAILABLE: intraday-refresh status response was null/empty."
+        Write-EvidenceCapture "STEP 14C: intraday refresh status response null"
+        exit 1
+    }
+
+    $irTruthState = $intradayStatus.truth_state
+    $irAllPassed  = $intradayStatus.all_passed
+    $irStale      = $intradayStatus.stale_or_missing_evidence
+    Write-Step "intraday-refresh/status: truth_state=$irTruthState  all_passed=$irAllPassed  stale_or_missing_evidence=$irStale"
+
+    if ($irTruthState -ne 'active') {
+        Write-Fail "INTRADAY_REFRESH_BLOCKED_TRUTH_STATE: truth_state='$irTruthState' (expected 'active'). No verified refresh evidence found."
+        Write-Fail "  Resolve: powershell -ExecutionPolicy Bypass -File scripts\windows\Refresh-IntradayMarketData.ps1 -Once"
+        Write-Fail "  Or re-run this script with -StartIntradayRefreshLoop."
+        Write-EvidenceCapture "STEP 14C: truth_state != active (got '$irTruthState')"
+        exit 1
+    }
+
+    if ($irStale -eq $true) {
+        Write-Fail "INTRADAY_REFRESH_BLOCKED_STALE_EVIDENCE: stale_or_missing_evidence=true. Refresh evidence is too old to trust."
+        Write-Fail "  Resolve: powershell -ExecutionPolicy Bypass -File scripts\windows\Refresh-IntradayMarketData.ps1 -Once"
+        Write-Fail "  Or re-run this script with -StartIntradayRefreshLoop."
+        Write-EvidenceCapture "STEP 14C: stale_or_missing_evidence=true"
+        exit 1
+    }
+
+    if ($irAllPassed -ne $true) {
+        Write-Fail "INTRADAY_REFRESH_BLOCKED_NOT_ALL_PASSED: all_passed=$irAllPassed. One or more symbols failed the fail-closed freshness gate on the last refresh."
+        $irSymbols = if ($null -ne $intradayStatus.PSObject.Properties['symbols']) { @($intradayStatus.symbols) } else { @() }
+        foreach ($irSym in $irSymbols) {
+            if ($irSym.passed -ne $true) {
+                Write-Fail "  symbol=$($irSym.symbol) passed=$($irSym.passed) reason_code=$($irSym.reason_code)"
+            }
+        }
+        Write-Fail "  Resolve: powershell -ExecutionPolicy Bypass -File scripts\windows\Refresh-IntradayMarketData.ps1 -Once"
+        Write-Fail "  Or re-run this script with -StartIntradayRefreshLoop."
+        Write-EvidenceCapture "STEP 14C: all_passed != true"
+        exit 1
+    }
+
+    Write-Ok "Intraday refresh readiness confirmed: truth_state=active  all_passed=true  stale_or_missing_evidence=false"
+} else {
+    Write-Step "Intraday refresh verification not requested (-RequireIntradayRefresh not set)."
+    Write-Step "  DATA-FRESHNESS-READINESS-GATE-01 still evaluates freshness on every strategy-dispatch tick regardless of this flag."
 }
 
 # ---------------------------------------------------------------------------

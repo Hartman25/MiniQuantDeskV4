@@ -41,6 +41,13 @@ gap, not a code gap.
 - Actual NYSE regular session in progress (9:30am–4:00pm ET, non-holiday).
 - No `.env.local` edits. No new provider/broker network calls beyond the
   daemon's existing configured startup.
+- For observation windows longer than the intraday freshness-gate window
+  (default ~15 minutes), run an intraday refresh loop alongside this
+  window — see `docs/runbooks/intraday_market_data_refresh.md`. Without one,
+  `DATA-FRESHNESS-READINESS-GATE-01` correctly fails closed once STEP 5B's
+  one-shot market-data prep ages out; that is expected fail-closed behavior,
+  not a bug, but it does end useful observation early unless a refresh loop
+  is running.
 
 ### Live routes to poll
 
