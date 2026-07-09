@@ -6597,3 +6597,36 @@ scope for any further safe-closure sweep. Independent alternative:
 `CRYPTO-REGISTRY-DATA-COMPLETION-SWEEP-01-COMBINED` (cheaper, non-margin,
 non-multiplier non-equity path, per `docs/audits/multi_asset_completion_audit.md`'s
 own row-level difficulty notes).
+
+### ASSET-CORE-04L-PRODUCTION-CUTOVER-CALLSITE-AUDIT-01 — CLOSED_LOCAL / AUDIT-ONLY
+
+**Mission:** Phase A of `ASSET-CORE-04-PRODUCTION-CUTOVER-DESIGN-ONLY-01-COMBINED`
+— build a grounded callsite audit for a future `ASSET-CORE-04` production
+cutover, re-deriving every fact from current-repo source rather than
+trusting the prior `ASSET-CORE-04A`/`04_live_ledger_boundary_audit.md`
+audit's claims without re-verification.
+
+**Built:** `docs/specs/asset_core_04l_production_cutover_callsite_audit.md`.
+Re-confirms at HEAD `87f49a19`: exact live-accounting callsites
+(`mqk-portfolio::{types,accounting,metrics,valuation}`) that would need to
+change for multiplier/currency/fractional-quantity support; exact runtime
+snapshot callsites (`mqk-runtime::observability`, `mqk-daemon`'s portfolio
+routes); that `mqk-risk` has zero economics-scaffold references and
+`asset_risk_policy.rs` remains a static, model-only per-class readiness
+table; that `mqk-execution::gateway` still has zero references to
+`OrderIntentV2`/`QtyMicros` (must not change until accounting/risk are
+ready); that every quantity column across all 44 migrations is `bigint`
+with no fixed-point column; that currency conversion and margin both
+require new source-of-truth decisions (no `currency` or `margin` field
+exists in live accounting today); and a safe/non-safe cutover
+classification table separating docs-only, behavior-preserving-model, and
+behavior-changing-cutover work.
+
+**Validation:** `powershell -File
+scripts\guards\validate_asset_core_04l_cutover_callsite_audit.ps1` — all 15
+checks pass. `git diff --check` clean.
+
+**Safety confirmation:** docs-only; zero network calls; zero DB mutation
+or migration; zero config flag changes; no broker/order/risk/runtime/
+strategy/live accounting behavior changed; no non-equity trading enabled;
+no code cutover; no generated evidence staged.
