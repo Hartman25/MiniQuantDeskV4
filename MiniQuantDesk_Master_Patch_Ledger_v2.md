@@ -1107,7 +1107,7 @@ Do not define until `AUTON-NO-TRADE-01` returns evidence.
 
 **Recommended next patch:** `AUTON-NO-TRADE-02` can now be defined for real — the durable evidence this patch added is the missing input it was blocked on.
 
-### AUTON-NO-TRADE-OFFHOURS-01 — IN PROGRESS
+### AUTON-NO-TRADE-OFFHOURS-01 — CLOSED_LOCAL
 
 **Purpose:** Close the non-market-hours portion of `AUTON-NO-TRADE-01`: a durable, restart-surviving explanation for why the autonomous paper system did not attempt an order, for reasons provable without market open (outside session window, no active run, arm/session/blocker truth, stale/missing bars). Does not attempt the market-hours paper-order-attempt side of `AUTON-NO-TRADE-01`.
 
@@ -1136,6 +1136,19 @@ Do not define until `AUTON-NO-TRADE-01` returns evidence.
 **Tests:** new `mqk-cli/tests/scenario_cli_auton_no_trade_diagnostics_01.rs` (CLI-01, CLI-02), following the existing `scenario_cli_db_migrate_requires_yes_when_live_active.rs` graceful-skip-without-`MQK_DATABASE_URL` pattern. CLI-01 proves the command prints a seeded row's `reason_code` and both order-attempt flags as `false`; CLI-02 proves the command creates zero new `oms_outbox` rows. Both pass against the local paper DB. `cargo clippy -p mqk-cli -p mqk-db --all-targets -- -D warnings` clean.
 
 **Safety confirmation:** read-only CLI report, no DB write, no runtime start, no broker/provider call, no config flag changes.
+
+**Phase E (`AUTON-NO-TRADE-OFFHOURS-01E-CLOSURE-AND-ROADMAP-RECONCILE-01`):** Closed. See `docs/specs/auton_no_trade_offhours_01e_closure_decision.md` for the full closure record. `docs/specs/roadmap_completion_reconcile_01.md` §5 adds a pointer note (this workstream is unrelated to the multi-asset roadmap it reconciles; no percentage/status changed there).
+
+**Final status:**
+
+```text
+AUTON-NO-TRADE-OFFHOURS-01: CLOSED_LOCAL
+AUTON-NO-TRADE-01 parent: PARTIAL / MARKET-HOURS-PROOF-REMAINS
+```
+
+**Commits:** `d5f8c47b` (Phase A) → `d785dffc` (Phase B) → `f41fe694` (Phase C) → `39b5c7db` (Phase D).
+
+**Recommended next patch:** `AUTON-NO-TRADE-02` (market-hours canonical paper order / no-trade proof) — the exact named continuation that keeps `AUTON-NO-TRADE-01` `PARTIAL` until closed. Independent of this workstream, the registry-v2/session-routing lineage's own next recommendation is unchanged (see `docs/specs/roadmap_completion_reconcile_01.md` §3).
 
 ### BROKER-HTTP-TIMEOUT-01 — QUEUED / PARKED
 

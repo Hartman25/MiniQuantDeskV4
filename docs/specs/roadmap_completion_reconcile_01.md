@@ -165,3 +165,13 @@ not touch the registry-v2 boundary at all.
 No config flag was changed, no trading was enabled, no network or DB call
 was made, and no broker/execution/risk/OMS/runtime/strategy/portfolio file
 was touched by this reconciliation or by any patch in this session.
+
+## 5. Unrelated session work (not part of this multi-asset roadmap)
+
+A separate, later session closed `AUTON-NO-TRADE-OFFHOURS-01` (non-market-
+hours durable no-trade explanation observability — ledger §13). It does not
+touch any `ASSET-CORE-*`/`CRYPTO-*`/`REGISTRY-V2-*` item above and does not
+change any percentage or status in this table. See
+`docs/specs/auton_no_trade_offhours_01e_closure_decision.md` for that
+bundle's own closure record; parent `AUTON-NO-TRADE-01` remains `PARTIAL`
+pending a market-hours proof.
