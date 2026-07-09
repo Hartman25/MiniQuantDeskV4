@@ -137,8 +137,8 @@ Difficulty: S (days) / M (1-2 weeks) / L (3-6 weeks) / XL (6+ weeks, likely mult
 | Patch ID | Status | Completion | Difficulty | Dependencies | Evidence | Order | Notes |
 |---|---|---|---|---|---|---|---|
 | `ASSET-CORE-01` Unified Instrument Registry v2 | PARTIAL | 25% | L | none | `mqk-schemas::Instrument`/`ContractSpec` isolated; `equities.json` single-asset-class, no sector/lot/margin fields | 4 | Should also resolve the two-enum split (§2). |
-| `ASSET-CORE-02` Multi-Asset Order Intent Model | PARTIAL | 25% | L | `ASSET-CORE-01` | `OrderIntentV2`/`ExecutionIntentV2` exist, explicitly unwired (`RESEARCH-NON-EQ-01`); no bracket/OCO anywhere | 7 | Wiring this is itself a scope-reviewed patch per its own code comment. |
-| `ASSET-CORE-03` Asset-Aware Risk Router | PARTIAL | 35% | L | `ASSET-CORE-01`, `ASSET-CORE-04` | Two tested fail-closed gates exist (Gate 0, routing guard); zero graduated per-class policy behind them | 8 | Most mature of the five — finish what's started. |
+| `ASSET-CORE-02` Multi-Asset Order Intent Model | `CLOSED_LOCAL / MODEL-COMPLETE` (own model scope only; see §90) | ~35% (up from 25%) | L | `ASSET-CORE-01` | `OrderIntentV2`/`ExecutionIntentV2` exist, explicitly unwired (`RESEARCH-NON-EQ-01`); bracket/OCO is now structurally modeled (`BracketLegs`) as always-non-routable (`ASSET-CORE-02-03-COMPLETION-SWEEP-01-COMBINED`) | 7 | Wiring this is itself a scope-reviewed patch per its own code comment. |
+| `ASSET-CORE-03` Asset-Aware Risk Router | `CLOSED_LOCAL / POLICY-BOUNDARY-COMPLETE` (own policy-boundary scope only; see §90) | ~45% (up from 35%) | L | `ASSET-CORE-01`, `ASSET-CORE-04` | Two tested fail-closed gates exist (Gate 0, routing guard) plus a graduated per-class static policy model (`mqk_execution::asset_risk_policy`, corrects prior "zero graduated per-class policy" note), now operator-surfaced read-only via `GET /api/v1/system/asset-risk-policy` | 8 | Most mature of the five — true live enforcement still needs `ASSET-CORE-04`. |
 | `ASSET-CORE-04` Multi-Asset Portfolio Ledger | MISSING (effectively, live path) / PARTIAL (read-only economics scaffold) | 20% (live ledger, unchanged) — see §78 for the separate `04A`-`04F` scaffold | XL | none | `cash_micros` single-currency; FIFO P&L multiplier-naive; `PositionSnapshot.net_qty` whole-unit `i64` (no fractional crypto qty); no margin/NAV-by-asset-class in the live path. A parallel, zero-live-caller economics model+bridge+aggregation+status chain (`04A`-`04F`) exists and is tested but does not touch `mqk-portfolio::accounting.rs` | 14 | Highest-risk patch in this entire roadmap — touches live capital accounting invariants. Needs its own scenario-test proof standard per `audit_repo_truth_rules.md`. |
 | `ASSET-CORE-05` Market Calendar & Session Provider | PARTIAL | ~38% (up from 35%; see §89) | M | none | `MarketCalendarProvider` trait + 3 providers exist and are fail-closed/pluggable; `MarketSessionState` enum is NYSE-vocabulary-coupled (no 24/7, no Globex RTH/ETH, no FX session windows); `ASSET-CORE-05-MARKET-CALENDAR-GENERALIZE-01-COMBINED` added read-only session-profile diagnostics (4 profiles, daemon route + GUI panel); `ASSET-CORE-05-PER-INSTRUMENT-SESSION-ROUTING-01-COMBINED` since closed the composed-router/"rate"-gap/parity-test model-and-parity scope, still model-only/unwired into trading | 5 | Cheaper than it looks — the hard part (trait, fail-closed contract, fallback) is already built. |
 
@@ -1945,3 +1945,39 @@ behavior, config flags, and non-equity enablement are all unchanged.
 `MiniQuantDesk_Master_Patch_Ledger_v2.md`'s `ASSET-CORE-05G`/`05H`/`05I`/`05J`
 entries; closure decision:
 `docs/specs/asset_core_05j_session_routing_closure_decision.md`.
+
+## 90. ASSET-CORE-02-03-COMPLETION-SWEEP-01-COMBINED Closure Note (maintenance)
+
+Re-audited `ASSET-CORE-02` and `ASSET-CORE-03` (§36/§37 above already
+recorded their respective foundation patches) and found the prompt's assumed
+starting state was half-stale: `OrderIntentV2`/`ExecutionIntentV2` were
+already hardened and validated, and — contrary to this doc's own §141 note —
+a graduated per-asset-class static policy model
+(`mqk_execution::asset_risk_policy`) already existed. The two genuinely
+closable gaps were: (1) `ASSET-CORE-02` had zero bracket/OCO representation
+anywhere; (2) `ASSET-CORE-03`'s policy model was not operator-surfaced by any
+daemon route. Closed both: `BracketLegs` models a parent take-profit/
+stop-loss pair on `OrderIntentV2`, validated and always reported as
+`DisabledAssetClass`/`bracket_oco_model_only_not_executable` regardless of
+asset class (no execution path anywhere supports multi-leg submission);
+`GET /api/v1/system/asset-risk-policy` exposes the existing policy table
+read-only, requiring no DB/broker/provider. `ASSET-CORE-02` is
+`CLOSED_LOCAL / MODEL-COMPLETE` and `ASSET-CORE-03` is `CLOSED_LOCAL /
+POLICY-BOUNDARY-COMPLETE`, both for their own stated scope only — zero
+production callers were added, Gate 0 and the broker-submit routing guard
+are unchanged and regression-proven, and no non-equity trading was enabled.
+A combined `ASSET-CORE-02-03` daemon status route (this bundle's conditional
+Phase D) was deliberately skipped: the one candidate route would have had to
+hardcode roadmap-label strings (e.g. "MODEL-COMPLETE") into daemon code,
+which is a stale-snapshot risk rather than a live-truth surface, and the
+one genuine operator-facing need (policy visibility) was already served by
+the `ASSET-CORE-03B` route above. True graduated live risk enforcement
+(margin/multiplier/NAV actually blocking orders) still requires
+`ASSET-CORE-04` live accounting, not yet wired into any enforcement path.
+
+**Full detail, exact test names, and validation commands:**
+`MiniQuantDesk_Master_Patch_Ledger_v2.md`'s
+`ASSET-CORE-02-03A-CURRENT-COMPLETION-AUDIT-01`,
+`ASSET-CORE-02B-ORDER-INTENT-V2-SAFE-GAP-CLOSURE-01`, and
+`ASSET-CORE-03B-ASSET-RISK-POLICY-SAFE-GAP-CLOSURE-01` entries; closure
+decision: `docs/specs/asset_core_02_03e_closure_decision.md`.

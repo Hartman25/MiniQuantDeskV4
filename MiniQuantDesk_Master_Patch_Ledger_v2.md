@@ -6058,3 +6058,55 @@ mutated; no broker/provider/network calls; no non-equity trading enabled; no
 live routing; no paper/live orders; Gate 0 and the broker-submit routing
 guard are unchanged and regression-proven; smoke logs and the untracked
 ledger draft were untouched.
+
+### ASSET-CORE-02-03E-CLOSURE-AND-ROADMAP-RECONCILE-01 — CLOSED_LOCAL / DOCS-ONLY
+
+**Mission:** close out `ASSET-CORE-02-03-COMPLETION-SWEEP-01-COMBINED`
+(`02-03A` → `02B` → `03B`) with an honest closure verdict, reconcile the
+roadmap docs, and record why the conditional Phase D (combined operator
+status route) was skipped.
+
+**Built:** `docs/specs/asset_core_02_03e_closure_decision.md` — answers all
+ten required closure questions. Verdict:
+
+```text
+ASSET-CORE-02: CLOSED_LOCAL / MODEL-COMPLETE
+ASSET-CORE-03: CLOSED_LOCAL / POLICY-BOUNDARY-COMPLETE
+```
+
+Both scoped to each item's own model/policy-boundary work only; production
+consumption of either remains explicitly separate and not started. True
+graduated live risk enforcement remains blocked on `ASSET-CORE-04` live
+portfolio/margin/NAV accounting, not yet wired into any enforcement path.
+
+**Phase D disposition:** skipped. The one candidate combined-status route
+would have had to hardcode roadmap-label strings (e.g.
+"MODEL-COMPLETE"/"POLICY-BOUNDARY-COMPLETE") into daemon code — a
+stale-snapshot risk (`audit_repo_truth_rules.md`'s "no stale snapshots in
+living docs" principle applies equally to code) rather than a live-truth
+surface, and duplicative of this closure doc and the ledger. The one
+genuine operator-facing need identified by the Phase A audit — visibility
+into the per-asset-class policy model — was already served by Phase C's
+`GET /api/v1/system/asset-risk-policy` route. No files were changed for
+Phase D.
+
+**Updated:** `docs/audits/multi_asset_completion_audit.md` (§140/§141 rows
+updated: `ASSET-CORE-02` ~25%→~35%, `ASSET-CORE-03` ~35%→~45%, both now
+`CLOSED_LOCAL` labels citing the new closure decision; new §90 closure note).
+`docs/specs/roadmap_completion_reconcile_01.md` (`ASSET-CORE-03` row updated
+in Phase C already covered the operator-surface correction; this phase adds
+no further edit to that file beyond what Phase C recorded).
+
+**Validation:** `powershell -File scripts\guards\validate_asset_core_02_03a_completion_audit.ps1`
+— all 11 checks passed. `git diff --check` — clean.
+
+**Safety confirmation:** docs-only; zero network calls; zero DB mutation;
+zero config flag changes; no crypto/futures/options/forex/rates trading
+enabled; no broker/order/risk/runtime/strategy/portfolio behavior changed;
+no production cutover; no generated evidence staged.
+
+**Recommended next patch:** `ASSET-CORE-04-LIVE-LEDGER-BOUNDARY-AUDIT-AND-SAFE-GAP-CLOSURE-01-COMBINED`
+— `ASSET-CORE-04` is now the blocker for any further *enforcement* progress
+on `ASSET-CORE-03` (wiring live portfolio/margin/NAV into an actual
+risk-enforcement path is production-behavior-changing, not a safe-closure
+sweep, and out of scope here).
