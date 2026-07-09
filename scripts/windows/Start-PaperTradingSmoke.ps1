@@ -22,6 +22,11 @@
 #   -SkipGui          Skip GUI launch step.
 #   -NoStartRuntime   Set env and verify daemon readiness but do not call start-system.
 #   -CheckOnly        Check prerequisites only (docker, .env.local). No daemon or runtime start.
+#   -MultiSymbolSmoke Require and enforce a valid watchlist-v2 multi-symbol artifact in STEP 9B
+#                      (docs/design/native_multi_symbol_dispatch.md Section 9.1). Default: off --
+#                      STEP 9B then treats an absent watchlist-v2 artifact as this repo's normal
+#                      single-symbol smoke path, not a failure. A watchlist-v2 artifact that IS
+#                      configured but invalid/unapproved still fails closed in either mode.
 #
 # Hard rules enforced by this script:
 #   - Paper+Alpaca path only. Fails if daemon_mode != paper.
@@ -41,7 +46,8 @@ param(
     [int]   $WatchSeconds  = 420,
     [switch]$SkipGui,
     [switch]$NoStartRuntime,
-    [switch]$CheckOnly
+    [switch]$CheckOnly,
+    [switch]$MultiSymbolSmoke
 )
 
 Set-StrictMode -Version Latest
@@ -993,10 +999,24 @@ if ($wsContinuity -eq 'live') {
 # ---------------------------------------------------------------------------
 # STEP 9B: Multi-symbol smoke preflight gate (watchlist-v2)
 # MULTI-SYMBOL-SMOKE-RUNNER-PREFLIGHT-GATE-01
-# Read-only. GET /api/v1/watchlist/status and verify the multi-symbol smoke
-# preconditions from docs/design/native_multi_symbol_dispatch.md Section 9.1
-# before any mutating operator action (STEP 10+) runs. Fails closed with a
-# stable MULTI_SYMBOL_SMOKE_BLOCKED_* code on any unmet condition.
+# PAPER-SMOKE-FOLLOWUP-01C-WATCHLIST-V2-GATE-SINGLE-SYMBOL-FIX-01: this gate
+# enforces the *multi-symbol smoke runner* preconditions from
+# docs/design/native_multi_symbol_dispatch.md Section 9.1, which states
+# explicitly: "a single-symbol artifact should use the existing single-symbol
+# smoke path unchanged." Read-only. GET /api/v1/watchlist/status.
+#   - If -MultiSymbolSmoke is passed, the full watchlist-v2 preflight is
+#     enforced (schema_version=watchlist-v2, >1 symbols, approved for paper)
+#     before any mutating operator action (STEP 10+) runs -- unchanged from
+#     the original gate behavior.
+#   - If -MultiSymbolSmoke is not passed (default), an absent watchlist-v2
+#     artifact (status=not_configured) is the expected, valid state for this
+#     repo's canonical single-symbol smoke path and does not block the run.
+#     A watchlist-v2 artifact that IS configured but invalid/unapproved still
+#     fails closed in either mode -- that is a real misconfiguration, not an
+#     absent-artifact single-symbol setup.
+#   - approved_for_live=true is a hard invariant violation in both modes.
+# Fails closed with a stable MULTI_SYMBOL_SMOKE_BLOCKED_* code on any unmet
+# condition.
 # ---------------------------------------------------------------------------
 Write-Section "STEP 9B: Multi-symbol smoke preflight gate (watchlist-v2)"
 
@@ -1015,39 +1035,59 @@ if ($null -eq $watchlistStatus) {
     exit 1
 }
 
+$wlStatusLabel   = if ($null -ne $watchlistStatus.PSObject.Properties['status']) { $watchlistStatus.status } else { $null }
 $wlSchemaVersion = if ($null -ne $watchlistStatus.PSObject.Properties['schema_version']) { $watchlistStatus.schema_version } else { $null }
 $wlSymbols       = if ($null -ne $watchlistStatus.PSObject.Properties['symbols']) { $watchlistStatus.symbols } else { @() }
 $wlSymbolCount   = @($wlSymbols).Count
 $wlApprovedPaper = ($null -ne $watchlistStatus.PSObject.Properties['approved_for_autonomous_paper']) -and ($watchlistStatus.approved_for_autonomous_paper -eq $true)
 $wlApprovedLive  = ($null -ne $watchlistStatus.PSObject.Properties['approved_for_live']) -and ($watchlistStatus.approved_for_live -eq $true)
 
-Write-Step "watchlist/status: schema_version=$wlSchemaVersion  symbols_count=$wlSymbolCount  approved_for_autonomous_paper=$wlApprovedPaper  approved_for_live=$wlApprovedLive"
+Write-Step "watchlist/status: status=$wlStatusLabel  schema_version=$wlSchemaVersion  symbols_count=$wlSymbolCount  approved_for_autonomous_paper=$wlApprovedPaper  approved_for_live=$wlApprovedLive"
 
-if ($wlSchemaVersion -ne 'watchlist-v2') {
-    Write-Fail "MULTI_SYMBOL_SMOKE_BLOCKED_SCHEMA_NOT_V2: schema_version='$wlSchemaVersion' (expected 'watchlist-v2')."
-    Write-EvidenceCapture "STEP 9B: schema_version != watchlist-v2 (got '$wlSchemaVersion')"
-    exit 1
-}
-
-if ($wlSymbolCount -le 1) {
-    Write-Fail "MULTI_SYMBOL_SMOKE_BLOCKED_NOT_MULTI_SYMBOL: symbols count=$wlSymbolCount (need > 1)."
-    Write-EvidenceCapture "STEP 9B: symbols count <= 1 (got $wlSymbolCount)"
-    exit 1
-}
-
-if (-not $wlApprovedPaper) {
-    Write-Fail "MULTI_SYMBOL_SMOKE_BLOCKED_NOT_APPROVED_FOR_AUTONOMOUS_PAPER: approved_for_autonomous_paper=$wlApprovedPaper."
-    Write-EvidenceCapture "STEP 9B: approved_for_autonomous_paper=false"
-    exit 1
-}
-
+# Hard invariant in both modes: approved_for_live must never be true.
 if ($wlApprovedLive) {
     Write-Fail "MULTI_SYMBOL_SMOKE_BLOCKED_APPROVED_FOR_LIVE_TRUE: approved_for_live=$wlApprovedLive (hard invariant violation)."
     Write-EvidenceCapture "STEP 9B: approved_for_live=true"
     exit 1
 }
 
-Write-Ok "Multi-symbol smoke preflight gate passed: schema_version=watchlist-v2  symbols_count=$wlSymbolCount  approved_for_autonomous_paper=true  approved_for_live=false"
+$smokeSymbol = $env:MQK_STRATEGY_SYMBOL
+if ([string]::IsNullOrWhiteSpace($smokeSymbol)) { $smokeSymbol = 'AAPL' }
+
+if ($MultiSymbolSmoke) {
+    Write-Step "Multi-symbol smoke explicitly requested (-MultiSymbolSmoke). Enforcing full watchlist-v2 preflight."
+
+    if ($wlSchemaVersion -ne 'watchlist-v2') {
+        Write-Fail "MULTI_SYMBOL_SMOKE_BLOCKED_SCHEMA_NOT_V2: schema_version='$wlSchemaVersion' (expected 'watchlist-v2')."
+        Write-EvidenceCapture "STEP 9B: schema_version != watchlist-v2 (got '$wlSchemaVersion')"
+        exit 1
+    }
+
+    if ($wlSymbolCount -le 1) {
+        Write-Fail "MULTI_SYMBOL_SMOKE_BLOCKED_NOT_MULTI_SYMBOL: symbols count=$wlSymbolCount (need > 1)."
+        Write-EvidenceCapture "STEP 9B: symbols count <= 1 (got $wlSymbolCount)"
+        exit 1
+    }
+
+    if (-not $wlApprovedPaper) {
+        Write-Fail "MULTI_SYMBOL_SMOKE_BLOCKED_NOT_APPROVED_FOR_AUTONOMOUS_PAPER: approved_for_autonomous_paper=$wlApprovedPaper."
+        Write-EvidenceCapture "STEP 9B: approved_for_autonomous_paper=false"
+        exit 1
+    }
+
+    Write-Ok "Multi-symbol smoke preflight gate passed: schema_version=watchlist-v2  symbols_count=$wlSymbolCount  approved_for_autonomous_paper=true  approved_for_live=false"
+} elseif ($wlStatusLabel -eq 'not_configured') {
+    Write-Ok "watchlist_v2_status=not_configured_single_symbol_mode  watchlist_v2_required=false  single_symbol_smoke_symbol=$smokeSymbol"
+    Write-Ok "No watchlist-v2 artifact configured -- this repo's single-symbol smoke path (MQK_STRATEGY_SYMBOL=$smokeSymbol) does not require one. Pass -MultiSymbolSmoke to require and enforce a watchlist-v2 artifact instead."
+} elseif ($wlSchemaVersion -eq 'watchlist-v2' -and $wlSymbolCount -gt 1 -and $wlApprovedPaper) {
+    Write-Ok "watchlist_v2_status=configured_and_valid  watchlist_v2_required=false  single_symbol_smoke_symbol=$smokeSymbol"
+    Write-Ok "A valid multi-symbol watchlist-v2 artifact is configured even though -MultiSymbolSmoke was not passed; proceeding with the single-symbol smoke path (MQK_STRATEGY_SYMBOL=$smokeSymbol) unchanged."
+} else {
+    Write-Fail "MULTI_SYMBOL_SMOKE_BLOCKED_WATCHLIST_V2_CONFIGURED_BUT_INVALID: a watchlist-v2 artifact is configured (status=$wlStatusLabel) but is not valid/approved, and -MultiSymbolSmoke was not requested to bypass it."
+    Write-Fail "  This indicates a real watchlist-v2 misconfiguration, not an absent-artifact single-symbol setup. Fix the artifact or unset MQK_PAPER_WATCHLIST_PATH to run the single-symbol smoke path."
+    Write-EvidenceCapture "STEP 9B: watchlist-v2 configured but invalid/not-approved in single-symbol mode (status=$wlStatusLabel)"
+    exit 1
+}
 
 # ---------------------------------------------------------------------------
 # STEP 10: Clear halted lifecycle if needed (via operator route only)

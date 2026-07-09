@@ -6258,3 +6258,59 @@ stale again.
 **Safety confirmation:** docs/validator-only; zero network/DB/broker calls;
 no live routing; no orders; no gate weakened; no generated evidence staged;
 `.env.local` untouched.
+
+### PAPER-SMOKE-FOLLOWUP-01C-WATCHLIST-V2-GATE-SINGLE-SYMBOL-FIX-01 — CLOSED_LOCAL / SCRIPT-ONLY
+
+**Mission:** fix `scripts/windows/Start-PaperTradingSmoke.ps1` STEP 9B so it
+classifies this repo's valid single-symbol `AAPL` paper setup truthfully
+instead of falsely failing because no `watchlist-v2` artifact is configured.
+Per `docs/design/native_multi_symbol_dispatch.md` Section 9.1's own stated
+intent: "a single-symbol artifact should use the existing single-symbol
+smoke path unchanged" — STEP 9B had drifted from that design by gating
+*every* invocation unconditionally.
+
+**Built:** added `[switch]$MultiSymbolSmoke` (default off) to
+`Start-PaperTradingSmoke.ps1`. STEP 9B now: (1) always fails closed on
+`approved_for_live=true` (hard invariant, both modes); (2) when
+`-MultiSymbolSmoke` is passed, enforces the original full watchlist-v2
+preflight unchanged (`MULTI_SYMBOL_SMOKE_BLOCKED_SCHEMA_NOT_V2` /
+`_NOT_MULTI_SYMBOL` / `_NOT_APPROVED_FOR_AUTONOMOUS_PAPER`); (3) when not
+passed (default) and `watchlist/status.status == 'not_configured'`, reports
+honest status (`watchlist_v2_status=not_configured_single_symbol_mode`,
+`watchlist_v2_required=false`, `single_symbol_smoke_symbol=<symbol>`) and
+proceeds; (4) when not passed and a watchlist-v2 artifact happens to be
+configured and valid, proceeds with the single-symbol path unchanged and
+says so; (5) when not passed and a watchlist-v2 artifact is configured but
+invalid/unapproved, still fails closed
+(`MULTI_SYMBOL_SMOKE_BLOCKED_WATCHLIST_V2_CONFIGURED_BUT_INVALID`) — a
+broken artifact is a real misconfiguration regardless of mode, not silently
+ignored. STEP 9B remains entirely read-only (no `Invoke-DaemonPost`); no
+daemon readiness/session/risk/staleness/arm gate downstream is touched; no
+`.env.local` write added.
+
+**Built:** `scripts/guards/validate_paper_smoke_followup_01c_watchlist_gate.ps1`
+(11 checks; complements, does not replace, the pre-existing
+`tests/script_guards/test_multi_symbol_smoke_runner_gate.ps1`).
+
+**Validation:** `powershell -File
+tests\script_guards\test_multi_symbol_smoke_runner_gate.ps1` — all 18
+pre-existing MSG-01..MSG-14 invariants still pass unchanged (verifies this
+patch did not regress the original multi-symbol gate proof).
+`powershell -File
+scripts\guards\validate_paper_smoke_followup_01c_watchlist_gate.ps1` — all
+11 checks passed. `Start-PaperTradingSmoke.ps1 -CheckOnly` — STEP 9B static
+self-check still passes (no daemon required). PowerShell AST parse of the
+full script — no syntax errors. `git diff --check` clean.
+
+**Deliberately not done:** no change to `tests/script_guards/test_multi_symbol_smoke_runner_gate.ps1`
+(out of this patch's allowed-file scope; its invariants were preserved,
+not weakened, by keeping every literal code/text pattern it asserts on).
+No change to the daemon's `watchlist_intake.rs` or `watchlist/status` route
+— both already reported truthful state; only the smoke script's
+interpretation of that state was wrong. No change to `.env.local`, config
+flags, or strategy thresholds.
+
+**Safety confirmation:** script-only; STEP 9B remains read-only; no
+`.env.local` mutation; `approved_for_live` hard invariant unchanged; no
+daemon safety/readiness/risk/reconcile/arm gate touched; no live routing;
+no orders submitted or forced; no generated evidence staged.
