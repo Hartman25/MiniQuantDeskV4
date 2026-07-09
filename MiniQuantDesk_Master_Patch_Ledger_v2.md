@@ -5909,6 +5909,56 @@ and explicitly out of scope for a safe-closure bundle. See
 for the full gap list. Until then, `ASSET-CORE-05` should remain
 `PARTIAL / PRODUCTION-CONSUMPTION-OPEN` on the roadmap.
 
+### ASSET-CORE-05K-V2-EQUITY-ACTIVE-MARKET-HOURS-PROOF-01 — CLOSED_LOCAL / WALL-CLOCK-PARITY-ONLY
+
+**Mission:** confirm, via a real NYSE regular-session wall-clock
+observation (not injected fixed timestamps), that
+`MQK_RUNTIME_SESSION_SOURCE=v2_equity_active` drives the daemon's session
+truth to the v2 candidate and that it matches legacy behavior. Not a
+production cutover decision; not non-equity enablement; equity-only,
+single isolated observation window.
+
+**Ran as Phase D of `MARKET-HOURS-PROOF-SWEEP-01`, immediately after the
+non-interleaved `AUTON-NO-TRADE-02` lane closed.** Stopped the
+`AUTON-NO-TRADE-02` daemon cleanly (`stop-system` → `disarm-execution` →
+process termination, port confirmed free), started a fresh daemon process
+with `MQK_RUNTIME_SESSION_SOURCE=v2_equity_active` set only in that
+launching PowerShell process (never written to `.env.local`, never
+persisted), then captured evidence with the existing read-only collector
+`scripts\windows\Collect-V2EquitySessionActiveProof.ps1 -IncludeDb`.
+
+**Result:** `session_source_mode=v2_equity_active`,
+`production_cutover_enabled=true` (expected — this is exactly what the
+temporary override activates for this isolated window),
+`runtime_uses_session_v2=true`, `trading_uses_session_v2=true`,
+`legacy_session_state=regular_open`, `candidate_v2_session_state=regular_open`,
+`candidate_v2_parity_state=matched`, `active_source_used=true`,
+`session_window_state=in_window` (consistent with real wall clock),
+`live_routing_enabled=false`, `asset_class_scope=equity_only` throughout.
+Legacy and v2-candidate session state matched at every point observed.
+Full detail: `docs/specs/asset_core_05k_v2_equity_active_market_hours_proof.md`.
+
+The collector's own `safe_to_continue_to_manual_paper_proof` verdict was
+`BLOCKED` on `intraday_bar_stale` (no continuous intraday ingest loop
+running in this window — same known gap noted in `AUTON-NO-TRADE-02B`).
+This blocker governs a manual paper-order attempt, which `05K`'s scope
+(session-source parity) does not require; no order was submitted or
+forced in this window.
+
+**Status:**
+
+```text
+ASSET-CORE-05K: CLOSED_LOCAL
+ASSET-CORE-05 parent: PARTIAL / PRODUCTION-CONSUMPTION-OPEN (unchanged —
+  05K adds wall-clock parity proof only; no production cutover, no
+  authoritative non-equity calendar, no per-instrument admission decision)
+```
+
+**Safety confirmation:** no live orders, no forced paper orders, no
+strategy threshold changes, no non-equity trading enabled, temporary env
+override not persisted, no `.env.local` edit, no generated evidence
+staged.
+
 ### ASSET-CORE-02-03A-CURRENT-COMPLETION-AUDIT-01 — CLOSED_LOCAL / AUDIT-ONLY
 
 **Mission:** ground `ASSET-CORE-02` and `ASSET-CORE-03` in current repo
