@@ -1123,6 +1123,14 @@ Do not define until `AUTON-NO-TRADE-01` returns evidence.
 
 **Safety confirmation:** no broker/Alpaca submit code touched; no live routing changes; no paper/live orders submitted by tests; no strategy threshold/entry logic changed; no gate bypassed (every existing gate boolean in `autonomous_readiness` is read-only input to the new classifier, never written to); no fabricated data (`reason` is always the route's own real `blockers.first()` text, never invented; `run_id` is honestly `None` with no active run); `paper_order_attempted`/`live_order_attempted` are hardcoded `false` for every row this patch writes; `.env.local` not read or modified; no provider/broker calls; smoke logs and the untracked ledger draft untouched.
 
+**Phase C (`AUTON-NO-TRADE-OFFHOURS-01C-READONLY-OPERATOR-SURFACE-01`):** Added `GET /api/v1/autonomous/no-trade-diagnostics` (`mqk-daemon/src/routes/system.rs::autonomous_no_trade_diagnostics`, registered in `routes.rs` alongside `execution/signal-evaluations` and `autonomous/readiness` in the same unauthenticated public-telemetry router block). Mirrors `execution_signal_evaluations` exactly: read-only, not scoped to the active run (an off-hours diagnostic recorded before a restart stays visible with no run active), `truth_state` in `active`/`no_rows`/`db_unavailable`/`query_failed`. `api_types.rs` adds `NoTradeDiagnosticRow`/`NoTradeDiagnosticsResponse`. Every row response includes `paper_order_attempted`/`live_order_attempted`, both hardcoded `false`.
+
+**Tests:** appended NT-08..NT-11 to `scenario_auton_no_trade_offhours_01.rs` (11 tests total in the file now). NT-08 proves `db_unavailable` truth with no DB pool (needs no DB, always runs); NT-09 proves `active` truth with a seeded row, exact field round-trip, newest-first, and explicitly no active run present; NT-10 proves a never-written `reason_code` is authoritatively absent (not "unavailable"); NT-11 proves every response row honestly carries `paper_order_attempted=false`/`live_order_attempted=false`. All pass against the local paper DB.
+
+**Regression:** `scenario_daemon_routes` (73/73, 11 ignored pre-existing DB-gated), `scenario_route_contract_rt01` (2/2, GUI route-contract gate) — pass unchanged. `cargo check -p mqk-db -p mqk-daemon` and `cargo clippy -p mqk-db -p mqk-daemon --lib -- -D warnings` both clean.
+
+**Safety confirmation:** read-only route, no DB writes, no runtime start, no broker/provider calls; response schema is honest about order-attempt state on every row.
+
 ### BROKER-HTTP-TIMEOUT-01 — QUEUED / PARKED
 
 **Purpose:** Add broker HTTP timeout / independent heartbeat hardening.

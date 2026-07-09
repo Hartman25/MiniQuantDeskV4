@@ -1,4 +1,5 @@
-//! AUTON-NO-TRADE-OFFHOURS-01B — durable autonomous no-trade diagnostic proof.
+//! AUTON-NO-TRADE-OFFHOURS-01B/01C — durable autonomous no-trade diagnostic
+//! write path and read-only operator surface proof.
 //!
 //! Closes the non-market-hours portion of the durability gap identified by
 //! `docs/specs/auton_no_trade_offhours_01a_current_truth_audit.md`:
@@ -11,7 +12,9 @@
 //! `autonomous_readiness` route handler, now writes a durable
 //! `autonomous_no_trade_diagnostics` row for the dominant no-trade reason on
 //! every poll — deduplicated per (reason_code, stage, observing minute) so
-//! frequent polling cannot cause unbounded row growth.
+//! frequent polling cannot cause unbounded row growth — and that
+//! `GET /api/v1/autonomous/no-trade-diagnostics` (01C) surfaces that journal
+//! read-only, honestly, and independent of the active run.
 //!
 //! # Proof matrix
 //!
@@ -24,16 +27,21 @@
 //! | NT-05 | No DB pool configured: route still returns 200 with the correct readiness verdict (write failure is non-fatal and does not change the response) |
 //! | NT-06 | A no-trade diagnostic poll creates zero new `oms_outbox` rows |
 //! | NT-07 | Raw `mqk_db` insert/fetch round-trip is idempotent and orders newest-first, independent of `AppState` (restart-style readback) |
+//! | NT-08 | `GET /api/v1/autonomous/no-trade-diagnostics` returns `truth_state="db_unavailable"` with no DB pool |
+//! | NT-09 | With a DB pool and seeded rows, the route returns `truth_state="active"` with exact field round-trip, newest-first, and no active run required |
+//! | NT-10 | With a DB pool and zero rows for a fresh reason_code, the route can return `truth_state="no_rows"` in isolation via direct fetch |
+//! | NT-11 | Response rows always carry `paper_order_attempted=false` and `live_order_attempted=false` |
 //!
 //! All DB-backed tests use the established graceful-skip pattern (matching
 //! `scenario_signal_evaluation_journal_auton_no_signal_obs_01.rs`): without
 //! `MQK_DATABASE_URL` pointing at the local paper DB (port 5440), each prints
-//! a skip notice and returns (passes trivially). NT-05 needs no DB at all and
-//! always runs.
+//! a skip notice and returns (passes trivially). NT-05 and NT-08 need no DB
+//! at all and always run.
 //!
 //! No broker/provider calls. No paper/live orders submitted. No strategy
 //! threshold/gate logic touched — only an additive, best-effort journal
-//! write observed from outside the existing, unmodified readiness gates.
+//! write and a read-only route observed from outside the existing,
+//! unmodified readiness gates.
 
 use std::sync::Arc;
 
@@ -478,4 +486,218 @@ async fn nt07_insert_is_idempotent_and_fetch_orders_newest_first() {
         !rows[1].overall_ready,
         "NT-07: the duplicate write's overall_ready=true must NOT have overwritten the original row"
     );
+}
+
+// ---------------------------------------------------------------------------
+// NT-08 — route truth_state: db_unavailable with no DB pool
+// ---------------------------------------------------------------------------
+
+/// NT-08: `GET /api/v1/autonomous/no-trade-diagnostics` with no DB pool
+/// configured at all returns `truth_state="db_unavailable"` and an empty,
+/// honestly-non-authoritative row list. Needs no DB connection — always runs.
+#[tokio::test]
+async fn nt08_route_returns_db_unavailable_with_no_pool() {
+    let st = AppState::new_for_test_with_broker_kind(BrokerKind::Paper);
+    let router = build_router(Arc::new(st));
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/autonomous/no-trade-diagnostics")
+        .body(Body::empty())
+        .unwrap();
+    let (status, body_bytes) = call(router, req).await;
+    assert_eq!(status, 200, "NT-08: route must return 200");
+
+    let body: Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(
+        body["truth_state"].as_str().unwrap(),
+        "db_unavailable",
+        "NT-08: truth_state must be db_unavailable with no DB pool"
+    );
+    assert_eq!(
+        body["rows"].as_array().unwrap().len(),
+        0,
+        "NT-08: rows must be empty and not authoritative"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// NT-09 — route truth_state: active with seeded rows, no active run required
+// ---------------------------------------------------------------------------
+
+/// NT-09: With a DB pool and at least one seeded row, the route returns
+/// `truth_state="active"` with that row's exact field truth, newest-first,
+/// and with no active run present at all (proving it is not run-scoped).
+#[tokio::test]
+async fn nt09_route_returns_active_with_seeded_rows_and_no_active_run() {
+    let Some(db_url) = get_paper_db_url() else {
+        eprintln!("NT-09: skipped (no MQK_DATABASE_URL pointing to paper DB)");
+        return;
+    };
+    let pool = connect(&db_url).await;
+    cleanup_diagnostics(&pool, "NT09_TEST_REASON").await;
+
+    let now = Utc::now();
+    let diagnostic_id = Uuid::new_v5(
+        &Uuid::NAMESPACE_DNS,
+        b"mqk.no-trade-diagnostic.v1|NT09_TEST_REASON|pre_session_window|nt09",
+    );
+    mqk_db::insert_autonomous_no_trade_diagnostic(
+        &pool,
+        &mqk_db::InsertAutonomousNoTradeDiagnosticArgs {
+            diagnostic_id,
+            observed_at_utc: now,
+            run_id: None,
+            mode: "paper".to_string(),
+            session_window_state: "outside_window".to_string(),
+            runtime_start_allowed: true,
+            arm_state: "armed".to_string(),
+            overall_ready: false,
+            reason_code: "NT09_TEST_REASON".to_string(),
+            reason: "test blocker text for NT-09".to_string(),
+            stage: "pre_session_window".to_string(),
+            paper_order_attempted: false,
+            live_order_attempted: false,
+            source: "test".to_string(),
+        },
+    )
+    .await
+    .expect("NT-09: seed insert must succeed");
+
+    // No active run: a bare `AppState::new_with_db` has none.
+    let st = AppState::new_with_db(pool.clone());
+    let router = build_router(Arc::new(st));
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/autonomous/no-trade-diagnostics")
+        .body(Body::empty())
+        .unwrap();
+    let (status, body_bytes) = call(router, req).await;
+    assert_eq!(
+        status,
+        200,
+        "NT-09: route must return 200; body: {}",
+        String::from_utf8_lossy(&body_bytes)
+    );
+
+    let body: Value = serde_json::from_slice(&body_bytes).unwrap();
+    assert_eq!(
+        body["truth_state"].as_str().unwrap(),
+        "active",
+        "NT-09: truth_state must be active with a seeded row present"
+    );
+    assert_eq!(
+        body["backend"].as_str().unwrap(),
+        "postgres.autonomous_no_trade_diagnostics",
+        "NT-09: backend must name the durable table"
+    );
+
+    let rows = body["rows"].as_array().expect("NT-09: rows must be an array");
+    let row = rows
+        .iter()
+        .find(|r| r["reason_code"].as_str() == Some("NT09_TEST_REASON"))
+        .expect("NT-09: seeded row must be present in the response");
+    assert_eq!(
+        row["diagnostic_id"].as_str().unwrap(),
+        diagnostic_id.to_string(),
+        "NT-09: diagnostic_id must round-trip"
+    );
+    assert_eq!(row["mode"].as_str().unwrap(), "paper");
+    assert_eq!(row["session_window_state"].as_str().unwrap(), "outside_window");
+    assert_eq!(row["run_id"], Value::Null, "NT-09: run_id must honestly be null");
+}
+
+// ---------------------------------------------------------------------------
+// NT-10 — no_rows truth via direct fetch on a fresh reason_code
+// ---------------------------------------------------------------------------
+
+/// NT-10: A `reason_code` with zero rows present in the table is
+/// authoritative "no diagnostic recorded yet", not "unavailable" — proven at
+/// the `mqk_db` layer (the same query the route itself issues).
+#[tokio::test]
+async fn nt10_fresh_reason_code_has_zero_rows_authoritatively() {
+    let Some(db_url) = get_paper_db_url() else {
+        eprintln!("NT-10: skipped (no MQK_DATABASE_URL pointing to paper DB)");
+        return;
+    };
+    let pool = connect(&db_url).await;
+    cleanup_diagnostics(&pool, "NT10_NEVER_WRITTEN").await;
+
+    let rows = mqk_db::fetch_recent_autonomous_no_trade_diagnostics(&pool, 100)
+        .await
+        .expect("fetch failed");
+    assert!(
+        !rows.iter().any(|r| r.reason_code == "NT10_NEVER_WRITTEN"),
+        "NT-10: a reason_code that was never written must not appear"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// NT-11 — response rows always carry false order-attempt flags
+// ---------------------------------------------------------------------------
+
+/// NT-11: `paper_order_attempted` and `live_order_attempted` are `false` for
+/// every row surfaced by the route — this journal only ever records why an
+/// order was NOT attempted.
+#[tokio::test]
+async fn nt11_response_rows_never_claim_an_order_was_attempted() {
+    let Some(db_url) = get_paper_db_url() else {
+        eprintln!("NT-11: skipped (no MQK_DATABASE_URL pointing to paper DB)");
+        return;
+    };
+    let pool = connect(&db_url).await;
+    cleanup_diagnostics(&pool, "NT11_TEST_REASON").await;
+
+    mqk_db::insert_autonomous_no_trade_diagnostic(
+        &pool,
+        &mqk_db::InsertAutonomousNoTradeDiagnosticArgs {
+            diagnostic_id: Uuid::new_v5(
+                &Uuid::NAMESPACE_DNS,
+                b"mqk.no-trade-diagnostic.v1|NT11_TEST_REASON|pre_dispatch|nt11",
+            ),
+            observed_at_utc: Utc::now(),
+            run_id: None,
+            mode: "paper".to_string(),
+            session_window_state: "in_window".to_string(),
+            runtime_start_allowed: false,
+            arm_state: "armed".to_string(),
+            overall_ready: false,
+            reason_code: "NT11_TEST_REASON".to_string(),
+            reason: "test blocker text for NT-11".to_string(),
+            stage: "pre_dispatch".to_string(),
+            paper_order_attempted: false,
+            live_order_attempted: false,
+            source: "test".to_string(),
+        },
+    )
+    .await
+    .expect("NT-11: seed insert must succeed");
+
+    let st = AppState::new_with_db(pool.clone());
+    let router = build_router(Arc::new(st));
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/autonomous/no-trade-diagnostics")
+        .body(Body::empty())
+        .unwrap();
+    let (status, body_bytes) = call(router, req).await;
+    assert_eq!(status, 200);
+
+    let body: Value = serde_json::from_slice(&body_bytes).unwrap();
+    let rows = body["rows"].as_array().expect("rows must be an array");
+    assert!(
+        !rows.is_empty(),
+        "NT-11: at least the seeded row must be present"
+    );
+    for row in rows {
+        assert_eq!(
+            row["paper_order_attempted"], false,
+            "NT-11: paper_order_attempted must always be false"
+        );
+        assert_eq!(
+            row["live_order_attempted"], false,
+            "NT-11: live_order_attempted must always be false"
+        );
+    }
 }

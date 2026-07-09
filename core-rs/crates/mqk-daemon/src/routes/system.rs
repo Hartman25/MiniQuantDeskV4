@@ -1150,6 +1150,89 @@ pub(crate) async fn autonomous_readiness(State(st): State<Arc<AppState>>) -> imp
         .into_response()
 }
 
+// ---------------------------------------------------------------------------
+// GET /api/v1/autonomous/no-trade-diagnostics
+// ---------------------------------------------------------------------------
+
+/// AUTON-NO-TRADE-OFFHOURS-01C: read-only recent autonomous no-trade
+/// diagnostic journal.
+///
+/// Unlike `execution_fill_quality`, this is deliberately NOT scoped to the
+/// active run — the operator must be able to inspect an off-hours no-trade
+/// explanation that was recorded before a daemon restart, even if no run is
+/// currently active. Read-only: never submits an order, never starts
+/// runtime, never calls a broker or provider.
+pub(crate) async fn autonomous_no_trade_diagnostics(
+    State(st): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    const CANONICAL: &str = "/api/v1/autonomous/no-trade-diagnostics";
+
+    let Some(db) = st.db.as_ref() else {
+        return (
+            StatusCode::OK,
+            Json(crate::api_types::NoTradeDiagnosticsResponse {
+                canonical_route: CANONICAL.to_string(),
+                truth_state: "db_unavailable".to_string(),
+                backend: "unavailable".to_string(),
+                rows: vec![],
+            }),
+        )
+            .into_response();
+    };
+
+    let rows = match mqk_db::fetch_recent_autonomous_no_trade_diagnostics(db, 100).await {
+        Ok(rows) => rows,
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "auton_no_trade_offhours_01c: autonomous_no_trade_diagnostics_fetch_failed"
+            );
+            return (
+                StatusCode::OK,
+                Json(crate::api_types::NoTradeDiagnosticsResponse {
+                    canonical_route: CANONICAL.to_string(),
+                    truth_state: "query_failed".to_string(),
+                    backend: "postgres.autonomous_no_trade_diagnostics".to_string(),
+                    rows: vec![],
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    let truth_state = if rows.is_empty() { "no_rows" } else { "active" };
+    let api_rows: Vec<crate::api_types::NoTradeDiagnosticRow> = rows
+        .into_iter()
+        .map(|r| crate::api_types::NoTradeDiagnosticRow {
+            diagnostic_id: r.diagnostic_id,
+            observed_at_utc: r.observed_at_utc.to_rfc3339(),
+            run_id: r.run_id,
+            mode: r.mode,
+            session_window_state: r.session_window_state,
+            runtime_start_allowed: r.runtime_start_allowed,
+            arm_state: r.arm_state,
+            overall_ready: r.overall_ready,
+            reason_code: r.reason_code,
+            reason: r.reason,
+            stage: r.stage,
+            paper_order_attempted: r.paper_order_attempted,
+            live_order_attempted: r.live_order_attempted,
+            source: r.source,
+        })
+        .collect();
+
+    (
+        StatusCode::OK,
+        Json(crate::api_types::NoTradeDiagnosticsResponse {
+            canonical_route: CANONICAL.to_string(),
+            truth_state: truth_state.to_string(),
+            backend: "postgres.autonomous_no_trade_diagnostics".to_string(),
+            rows: api_rows,
+        }),
+    )
+        .into_response()
+}
+
 // AUTON-NO-TRADE-01: Bar ticker Gate 2 derivation — pure helper for testability.
 fn bar_ticker_gate_from_session(nyse_session: &str) -> &'static str {
     if nyse_session == "regular" {

@@ -3473,6 +3473,60 @@ pub struct SignalEvaluationsResponse {
 }
 
 // ---------------------------------------------------------------------------
+// AUTON-NO-TRADE-OFFHOURS-01C: autonomous no-trade diagnostic response types
+// ---------------------------------------------------------------------------
+
+/// One row in the autonomous no-trade diagnostic journal response.
+///
+/// A snapshot of one `GET /api/v1/autonomous/readiness` verdict. Recording a
+/// row never implies an order was attempted — `paper_order_attempted` and
+/// `live_order_attempted` are always `false` for every row this patch writes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NoTradeDiagnosticRow {
+    pub diagnostic_id: Uuid,
+    pub observed_at_utc: String,
+    /// `None` when no active run existed at observation time — the common
+    /// off-hours case, never a fabricated default.
+    pub run_id: Option<Uuid>,
+    pub mode: String,
+    /// `"in_window"` or `"outside_window"`.
+    pub session_window_state: String,
+    pub runtime_start_allowed: bool,
+    pub arm_state: String,
+    pub overall_ready: bool,
+    pub reason_code: String,
+    pub reason: String,
+    pub stage: String,
+    /// Always `false` for every row this patch writes.
+    pub paper_order_attempted: bool,
+    /// Always `false` for every row this patch writes.
+    pub live_order_attempted: bool,
+    pub source: String,
+}
+
+/// Response wrapper for `GET /api/v1/autonomous/no-trade-diagnostics`.
+///
+/// Deliberately not scoped to the active run (unlike `execution_fill_quality`):
+/// the operator must be able to inspect an off-hours no-trade explanation
+/// recorded before a daemon restart, even when no run is currently active.
+///
+/// `truth_state`:
+/// - `"active"` — DB pool present and at least one row exists; `rows` is authoritative.
+/// - `"no_rows"` — DB pool present but no diagnostic has been recorded yet.
+/// - `"db_unavailable"` — no DB pool configured; `rows` is empty and not authoritative.
+/// - `"query_failed"` — DB pool present but the query itself failed; `rows` is empty.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NoTradeDiagnosticsResponse {
+    pub canonical_route: String,
+    /// See truth_state variants above.
+    pub truth_state: String,
+    /// `"postgres.autonomous_no_trade_diagnostics"` when DB-backed; `"unavailable"` otherwise.
+    pub backend: String,
+    /// Most recent diagnostics across all runs, newest first. At most 100 rows.
+    pub rows: Vec<NoTradeDiagnosticRow>,
+}
+
+// ---------------------------------------------------------------------------
 // TV-01B: Runtime artifact intake contract
 // ---------------------------------------------------------------------------
 

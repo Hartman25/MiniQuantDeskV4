@@ -293,8 +293,8 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         strategy_suppressions,
     };
     use system::{
-        autonomous_readiness, health, status_handler, system_config_diffs,
-        system_config_fingerprint, system_instrument_economics_status,
+        autonomous_no_trade_diagnostics, autonomous_readiness, health, status_handler,
+        system_config_diffs, system_config_fingerprint, system_instrument_economics_status,
         system_instrument_registry_v2_source_status, system_instrument_registry_v2_status,
         system_instrument_sessions_parity, system_instrument_sessions_status, system_metadata,
         system_preflight, system_runtime_leadership, system_session, system_status,
@@ -470,6 +470,13 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             get(system_parity_evidence),
         )
         .route("/api/v1/autonomous/readiness", get(autonomous_readiness))
+        // AUTON-NO-TRADE-OFFHOURS-01C: read-only durable no-trade diagnostic
+        // journal. Not scoped to the active run. No broker/provider calls,
+        // no runtime start, no DB writes.
+        .route(
+            "/api/v1/autonomous/no-trade-diagnostics",
+            get(autonomous_no_trade_diagnostics),
+        )
         // PAPER-AUTONOMOUS-COMPLETION-BUNDLE-01: read-only paper status summary.
         // No broker calls, no DB mutations, no orders. fail-soft on missing subsystems.
         .route(
