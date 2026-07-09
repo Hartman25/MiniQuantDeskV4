@@ -173,5 +173,10 @@ hours durable no-trade explanation observability — ledger §13). It does not
 touch any `ASSET-CORE-*`/`CRYPTO-*`/`REGISTRY-V2-*` item above and does not
 change any percentage or status in this table. See
 `docs/specs/auton_no_trade_offhours_01e_closure_decision.md` for that
-bundle's own closure record; parent `AUTON-NO-TRADE-01` remains `PARTIAL`
-pending a market-hours proof.
+bundle's own closure record.
+
+A further, later market-hours session (`MARKET-HOURS-PROOF-SWEEP-01`) closed
+the remaining market-hours half via `AUTON-NO-TRADE-02B`/`02C` — see
+`docs/specs/auton_no_trade_02c_market_hours_closure_decision.md`. Parent
+`AUTON-NO-TRADE-01` is now `CLOSED_LOCAL`. This also does not touch any
+`ASSET-CORE-*`/`CRYPTO-*`/`REGISTRY-V2-*` item or percentage in this table.

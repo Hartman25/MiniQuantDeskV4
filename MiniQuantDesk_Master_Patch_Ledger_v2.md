@@ -1044,7 +1044,7 @@ Reason: Prevent another “screen exists but not visible” issue like the Inges
 
 ## 13. Autonomous Paper / Backend No-Trade Workstream
 
-### AUTON-NO-TRADE-01 — QUEUED / HIGH PRIORITY
+### AUTON-NO-TRADE-01 — CLOSED_LOCAL (see `AUTON-NO-TRADE-OFFHOURS-01` §13 and `AUTON-NO-TRADE-02`/`02C` below for the two closing halves)
 
 **Purpose:** Diagnose why autonomous paper runtime can be running but no trades/orders occur and no durable explanation is visible.
 
@@ -1150,7 +1150,7 @@ AUTON-NO-TRADE-01 parent: PARTIAL / MARKET-HOURS-PROOF-REMAINS
 
 **Recommended next patch:** `AUTON-NO-TRADE-02` (market-hours canonical paper order / no-trade proof) — the exact named continuation that keeps `AUTON-NO-TRADE-01` `PARTIAL` until closed. Independent of this workstream, the registry-v2/session-routing lineage's own next recommendation is unchanged (see `docs/specs/roadmap_completion_reconcile_01.md` §3).
 
-### AUTON-NO-TRADE-02 — IN PROGRESS / MARKET-HOURS-OBSERVATION-PENDING
+### AUTON-NO-TRADE-02 — CLOSED_LOCAL
 
 **Purpose:** Close the remaining market-hours half of `AUTON-NO-TRADE-01`: either a real canonical paper order attempt through the normal path, or a durable market-hours-specific no-trade explanation. Must not force a trade, change strategy thresholds, fabricate data, or bypass any gate.
 
@@ -1176,6 +1176,15 @@ AUTON-NO-TRADE-01 parent: PARTIAL / MARKET-HOURS-PROOF-REMAINS (unchanged)
 ```text
 AUTON-NO-TRADE-02: IN PROGRESS / MARKET-HOURS-OBSERVATION-CAPTURED-PENDING-CLOSURE-DECISION
 AUTON-NO-TRADE-01 parent: PARTIAL / MARKET-HOURS-PROOF-REMAINS (pending Phase C closure decision)
+```
+
+**`AUTON-NO-TRADE-02C` (market-hours proof and closure decision, this turn):** Composed the Phase A audit, the `02B` live observation, and the already-closed `AUTON-NO-TRADE-OFFHOURS-01` into a closure decision. Both halves of parent `AUTON-NO-TRADE-01` are now proven: off-hours (prior turn) and market-hours (this turn, run `1d005ad4-...`, real strategy evaluation `flat_below_threshold` at move_bps=-19 vs threshold_bps=20, zero orders, DB-readback-confirmed). Full detail: `docs/specs/auton_no_trade_02c_market_hours_closure_decision.md`.
+
+**Status after Phase C:**
+
+```text
+AUTON-NO-TRADE-02: CLOSED_LOCAL
+AUTON-NO-TRADE-01 parent: CLOSED_LOCAL
 ```
 
 ### BROKER-HTTP-TIMEOUT-01 — QUEUED / PARKED
