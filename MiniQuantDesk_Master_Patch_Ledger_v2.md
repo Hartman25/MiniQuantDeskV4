@@ -6490,3 +6490,41 @@ checks pass. `git diff --check` clean.
 zero config flag changes; no broker/order/risk/runtime/strategy/live
 accounting behavior changed; no non-equity trading enabled; no production
 cutover; no generated evidence staged.
+
+### ASSET-CORE-04B-LIVE-ACCOUNTING-INVARIANT-PROOF-01 — CLOSED_LOCAL / TEST-ONLY
+
+**Mission:** close the one gap `04A`'s audit identified — a cross-module
+numeric proof, not just a doc-comment claim, that live equity accounting
+and the `ASSET-CORE-04A`/`04C` economics scaffold agree on equity-shaped
+input — without changing any production behavior.
+
+**Built:** `core-rs/crates/mqk-portfolio/tests/scenario_asset_core_04_live_ledger_invariants.rs`
+(8 new tests, `EQ-01`..`EQ-06`/`SEP-01`..`SEP-02`). Drives real fills
+through the live FIFO ledger (`apply_entry`/`accounting.rs`) and
+independently recomputes the same position through
+`value_position_economics`/`aggregate_portfolio_economics`, asserting
+exact agreement for: a single long position, a single short position, a
+multi-fill FIFO partial-close sequence, a multi-symbol book's NAV
+(`compute_equity_micros` vs. `aggregate_portfolio_economics`),
+`compute_portfolio_weights`' NAV vs. `aggregate_portfolio_economics`'s NAV,
+a flat position (zero on both paths, no mark required on either), and a
+`recompute_from_ledger` replay. Does not modify `accounting.rs`,
+`metrics.rs`, `valuation.rs`, `instrument_economics.rs`, or
+`portfolio_economics.rs` — every number the test asserts already existed;
+this only adds the assertion connecting the two paths' outputs.
+
+**Validation:** `cargo check -p mqk-portfolio -p mqk-runtime -p mqk-daemon`;
+`cargo test -p mqk-portfolio --test scenario_asset_core_04_live_ledger_invariants`
+(8/8 pass); `cargo test -p mqk-portfolio --test scenario_portfolio_live_weights_01`
+(11/11 pass, unchanged); `cargo test -p mqk-portfolio --test scenario_portfolio_instrument_economics_asset_core_04a`
+(31/31 pass, unchanged); `cargo clippy -p mqk-portfolio --all-targets -- -D warnings`,
+`cargo clippy -p mqk-runtime --lib -- -D warnings`,
+`cargo clippy -p mqk-daemon --lib -- -D warnings` — all clean (only a
+pre-existing, unrelated `sqlx-postgres` future-incompatibility warning).
+`powershell -File scripts\guards\validate_asset_core_04_live_ledger_audit.ps1`
+— all 13 checks still pass. `git diff --check` clean.
+
+**Safety confirmation:** test-only; zero network calls; zero DB connection
+or mutation; zero config flag changes; no broker/order/risk/runtime/OMS/
+gateway file touched; no non-equity trading enabled; no production
+cutover; no generated evidence staged.
