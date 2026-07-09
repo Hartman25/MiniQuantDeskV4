@@ -1165,6 +1165,8 @@ AUTON-NO-TRADE-01 parent: PARTIAL / MARKET-HOURS-PROOF-REMAINS (unchanged)
 
 **Recommended next step:** Re-run Phases B–D of this same bundle during an active NYSE regular-session window to perform the live observation and, if it naturally produces a paper order attempt or confirms a durable market-hours no-trade reason, close both `AUTON-NO-TRADE-02` and parent `AUTON-NO-TRADE-01`.
 
+**`MARKET-HOURS-PROOF-SWEEP-01` Phase A (preflight + runbook correction, this turn):** Confirmed HEAD (`57a669b3`) is a clean descendant of the Phase A audit's verified commit; no schema drift on `runs`/`strategy_signal_evaluations`/`autonomous_no_trade_diagnostics`/`oms_outbox`/`oms_inbox`/`sys_arm_state` since the prior audit (latest migration remains `0044_autonomous_no_trade_diagnostics.sql`). Added `docs/runbooks/market_hours_proof_sweep_01.md` (two separated lanes: `AUTON-NO-TRADE-02` legacy-session observation, and conditional `ASSET-CORE-05` v2-equity-active observation) and `scripts/guards/validate_market_hours_proof_sweep_01.ps1`. This turn is running during an actual NYSE regular session (confirmed 2026-07-09 ~14:28 UTC / 10:28am ET wall clock) — Phases B onward proceed in this same turn.
+
 ### BROKER-HTTP-TIMEOUT-01 — QUEUED / PARKED
 
 **Purpose:** Add broker HTTP timeout / independent heartbeat hardening.
