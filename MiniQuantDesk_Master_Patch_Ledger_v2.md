@@ -5995,3 +5995,66 @@ mutated; no broker/provider/network calls; no non-equity trading enabled; no
 live routing; no paper/live orders; Gate 0 and the broker-submit routing
 guard are unchanged and regression-proven; smoke logs and the untracked
 ledger draft were untouched.
+
+### ASSET-CORE-03B-ASSET-RISK-POLICY-SAFE-GAP-CLOSURE-01 — CLOSED_LOCAL / POLICY-BOUNDARY-COMPLETE
+
+**Mission:** close the `ASSET-CORE-03` operator-visibility gap identified by
+`ASSET-CORE-02-03A-CURRENT-COMPLETION-AUDIT-01` — the existing graduated
+`mqk_execution::asset_risk_policy` model was not exposed by any daemon route
+or GUI panel — as a read-only status surface, without touching `mqk-risk`,
+Gate 0, the broker-submit routing guard, or any live/paper execution path.
+
+**Repo evidence found:** the policy model itself already existed and needed
+no code changes (`ASSET-CORE-03-RISK-ROUTER-FOUNDATION-01-COMBINED`, this
+ledger, above); the only genuine gap was the operator surface. The prompt's
+assumed target file (`mqk-risk/src/lib.rs`) was not where the model lives —
+confirmed by the Phase A audit — so `mqk-risk` and `mqk-md` were left
+untouched; this closure is scoped entirely to `mqk-daemon`.
+
+**Built:** `mqk-daemon/src/api_types.rs` gained `AssetRiskPolicyEntry` and
+`AssetRiskPolicyStatusResponse`. `mqk-daemon/src/routes/system.rs` gained
+`system_asset_risk_policy_status()`, a pure read-only handler (no
+`State<AppState>`, no DB, no broker/provider call) that calls
+`mqk_execution::default_asset_risk_policies()` and mirrors the static
+constants `ASSET_RISK_POLICY_SOURCE`, `ASSET_RISK_PRODUCTION_ENFORCEMENT_ENABLED`,
+`ASSET_RISK_NON_EQUITY_ROUTING_ENABLED` verbatim into the response.
+`mqk-daemon/src/routes.rs` mounts it at `GET /api/v1/system/asset-risk-policy`
+on the existing public (unauthenticated, read-only telemetry) router, next to
+`/api/v1/system/metadata`.
+
+**Tests added:** `core-rs/crates/mqk-daemon/tests/scenario_asset_core_03_asset_risk_policy_status.rs`
+(7 tests) covers: 200 with no DB pool or broker configured; top-level fields
+prove model-only (`production_enforcement_enabled=false`,
+`non_equity_routing_enabled=false`, schema_version); equity and
+ETF-as-equity report `enabled`/paper-only/never-live; crypto/future/option/
+forex all report `disabled`/never-paper/never-live; rates/fixed-income
+reports `research_only`; every entry carries a non-empty `reason_code` and
+`message`.
+
+**Validation:** `cargo check -p mqk-risk -p mqk-md -p mqk-daemon` clean.
+`cargo test -p mqk-daemon --test scenario_asset_core_03_asset_risk_policy_status`
+— 7/7 passed. `cargo test -p mqk-daemon --test scenario_asset_class_scope_b8`
+— 12/12 passed (Gate 0 unaffected). `cargo test -p mqk-execution --test
+scenario_asset_class_guard_multi_asset_routing_guard_01 --features testkit`
+— 8/8 passed (routing guard unaffected). `cargo test -p mqk-daemon --test
+scenario_gui_daemon_contract_gate` — 23/23 passed. `cargo test -p mqk-daemon
+--test scenario_route_contract_rt01` — 2/2 passed (new route did not break
+the mounted-route contract). `cargo clippy -p mqk-risk -p mqk-md -p
+mqk-daemon --lib -- -D warnings` clean. The recurring `sqlx-postgres`
+future-incompatibility warning is pre-existing and unrelated.
+
+**Updated:** `docs/specs/roadmap_completion_reconcile_01.md` (`ASSET-CORE-03`
+row updated: `CLOSED_LOCAL / POLICY-BOUNDARY-COMPLETE` for its own
+policy-boundary scope, still `PRODUCTION-CONSUMPTION-OPEN` /
+`ASSET-CORE-04`-dependent for graduated live enforcement overall).
+
+**Deliberately not done:** no changes to `mqk-risk`, `mqk-md`, Gate 0
+(`routes/strategy.rs`), the broker-submit routing guard (`gateway.rs`),
+`mqk-portfolio`, DB migrations, or `.env.local`. No enforcement behavior
+added — the route is purely descriptive of existing static truth.
+
+**Safety confirmation:** no daemon live/paper runtime was started; no DB
+mutated; no broker/provider/network calls; no non-equity trading enabled; no
+live routing; no paper/live orders; Gate 0 and the broker-submit routing
+guard are unchanged and regression-proven; smoke logs and the untracked
+ledger draft were untouched.

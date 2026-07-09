@@ -27,7 +27,8 @@ use chrono::{DateTime, Utc};
 use serde::Deserialize;
 
 use crate::api_types::{
-    AssetCapabilityEntry, AssetCapabilityMatrix, AutonomousPaperReadinessResponse, HealthResponse,
+    AssetCapabilityEntry, AssetCapabilityMatrix, AssetRiskPolicyEntry,
+    AssetRiskPolicyStatusResponse, AutonomousPaperReadinessResponse, HealthResponse,
     InstrumentEconomicsStatusResponse, InstrumentEconomicsStatusRow,
     InstrumentRegistryV2EnabledCounts, InstrumentRegistryV2SourceStatusResponse,
     InstrumentRegistryV2StatusResponse, InstrumentSessionParityResponse,
@@ -1403,6 +1404,56 @@ pub(crate) async fn system_metadata(State(st): State<Arc<AppState>>) -> impl Int
             daemon_mode: st.deployment_mode().as_api_label().to_string(),
             adapter_id: st.adapter_id().to_string(),
             asset_capability_matrix: static_asset_capability_matrix(),
+        }),
+    )
+        .into_response()
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/system/asset-risk-policy — ASSET-CORE-03B
+// ---------------------------------------------------------------------------
+
+/// Pure label for `mqk_execution::asset_risk_policy::AssetRiskPolicyState`.
+/// No IO; never drives any decision.
+fn asset_risk_policy_state_label(state: mqk_execution::AssetRiskPolicyState) -> &'static str {
+    use mqk_execution::AssetRiskPolicyState;
+    match state {
+        AssetRiskPolicyState::Enabled => "enabled",
+        AssetRiskPolicyState::Disabled => "disabled",
+        AssetRiskPolicyState::ResearchOnly => "research_only",
+        AssetRiskPolicyState::Unsupported => "unsupported",
+    }
+}
+
+/// Read-only asset-risk-policy status surface (`ASSET-CORE-03B`). Reports
+/// the existing static `mqk_execution::asset_risk_policy` model as-is; does
+/// not require DB, broker, or provider access, and does not change Gate 0 or
+/// the broker-submit routing guard.
+pub(crate) async fn system_asset_risk_policy_status() -> impl IntoResponse {
+    let entries: Vec<AssetRiskPolicyEntry> = mqk_execution::default_asset_risk_policies()
+        .into_iter()
+        .map(|policy| AssetRiskPolicyEntry {
+            asset_class: policy.asset_class.to_string(),
+            state: asset_risk_policy_state_label(policy.state).to_string(),
+            paper_trading_enabled: policy.paper_trading_enabled,
+            live_trading_enabled: policy.live_trading_enabled,
+            requires_margin_model: policy.requires_margin_model,
+            requires_contract_multiplier: policy.requires_contract_multiplier,
+            requires_session_profile: policy.requires_session_profile,
+            requires_currency_conversion: policy.requires_currency_conversion,
+            reason_code: policy.reason_code.to_string(),
+            message: policy.message.to_string(),
+        })
+        .collect();
+
+    (
+        StatusCode::OK,
+        Json(AssetRiskPolicyStatusResponse {
+            schema_version: "asset-risk-policy-v1".to_string(),
+            policy_source: mqk_execution::ASSET_RISK_POLICY_SOURCE.to_string(),
+            production_enforcement_enabled: mqk_execution::ASSET_RISK_PRODUCTION_ENFORCEMENT_ENABLED,
+            non_equity_routing_enabled: mqk_execution::ASSET_RISK_NON_EQUITY_ROUTING_ENABLED,
+            entries,
         }),
     )
         .into_response()

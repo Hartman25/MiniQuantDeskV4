@@ -1572,6 +1572,57 @@ pub struct SystemMetadataResponse {
 }
 
 // ---------------------------------------------------------------------------
+// /api/v1/system/asset-risk-policy — ASSET-CORE-03B
+// ---------------------------------------------------------------------------
+
+/// Read-only per-asset-class policy record, mirrored from
+/// `mqk_execution::asset_risk_policy::AssetRiskPolicy`. This surface exists
+/// purely to give operators visibility into the existing static policy
+/// model — it does not enforce anything itself, is not consulted by any
+/// order/risk/routing path, and does not require DB, broker, or provider
+/// access to compute.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssetRiskPolicyEntry {
+    /// Asset class identifier (e.g. "equity", "etf_as_equity", "crypto").
+    pub asset_class: String,
+    /// One of "enabled", "disabled", "research_only", "unsupported".
+    pub state: String,
+    pub paper_trading_enabled: bool,
+    pub live_trading_enabled: bool,
+    pub requires_margin_model: bool,
+    pub requires_contract_multiplier: bool,
+    pub requires_session_profile: bool,
+    pub requires_currency_conversion: bool,
+    pub reason_code: String,
+    pub message: String,
+}
+
+/// Read-only asset-risk-policy status surface (`ASSET-CORE-03B`).
+///
+/// This reports the existing `mqk_execution::asset_risk_policy` model
+/// as-is. It does not change, weaken, or bypass Gate 0 (signal admission,
+/// `routes/strategy.rs`) or the broker-submit routing guard
+/// (`mqk_execution::gateway::BrokerGateway::submit_with_context`), which
+/// remain the only active enforcement boundaries. `production_enforcement_enabled`
+/// and `non_equity_routing_enabled` mirror the static constants
+/// `ASSET_RISK_PRODUCTION_ENFORCEMENT_ENABLED` /
+/// `ASSET_RISK_NON_EQUITY_ROUTING_ENABLED` from that model.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AssetRiskPolicyStatusResponse {
+    pub schema_version: String,
+    /// Mirrors `mqk_execution::asset_risk_policy::ASSET_RISK_POLICY_SOURCE`.
+    pub policy_source: String,
+    /// Mirrors `ASSET_RISK_PRODUCTION_ENFORCEMENT_ENABLED`. Always `false`
+    /// until a separate, scope-reviewed production-wiring patch changes it.
+    pub production_enforcement_enabled: bool,
+    /// Mirrors `ASSET_RISK_NON_EQUITY_ROUTING_ENABLED`. Always `false` until
+    /// a separate, scope-reviewed production-wiring patch changes it.
+    pub non_equity_routing_enabled: bool,
+    /// Per-class policy records, one per `mqk_execution::asset_risk_policy::default_asset_risk_policies()` entry.
+    pub entries: Vec<AssetRiskPolicyEntry>,
+}
+
+// ---------------------------------------------------------------------------
 // /api/v1/system/instrument-registry-v2/status — ASSET-CORE-01C
 // ---------------------------------------------------------------------------
 
