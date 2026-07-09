@@ -6630,3 +6630,38 @@ checks pass. `git diff --check` clean.
 or migration; zero config flag changes; no broker/order/risk/runtime/
 strategy/live accounting behavior changed; no non-equity trading enabled;
 no code cutover; no generated evidence staged.
+
+### ASSET-CORE-04M-PRODUCTION-CUTOVER-DESIGN-SPEC-01 — CLOSED_LOCAL / DESIGN-ONLY
+
+**Mission:** Phase B of `ASSET-CORE-04-PRODUCTION-CUTOVER-DESIGN-ONLY-01-COMBINED`
+— specify the target architecture for a future `ASSET-CORE-04` production
+cutover, building on `04L`'s callsite audit, and explicitly separate
+docs-only, behavior-preserving-model, and behavior-changing-cutover future
+slices.
+
+**Built:** `docs/specs/asset_core_04m_production_cutover_design.md`.
+Specifies: an additive (not replacing) economics-aware valuation layer
+reusing the existing `ASSET-CORE-04A` `InstrumentEconomics`/
+`value_position_economics` model; equity keeps `i64`, non-equity/fractional
+positions reuse the already-existing but production-unreferenced
+`mqk_schemas::QtyMicros` rather than a new type; multiplier/currency load
+from `InstrumentEconomics` via the existing `04B` registry-v2 bridge and
+apply only at the valuation boundary, never inside `accounting.rs`'s FIFO
+cash/lot bookkeeping; margin and FX-source decisions explicitly deferred to
+their own future patches; NAV design promotes the existing
+`aggregate_portfolio_economics` (`04C`) rather than a rewrite; risk and
+order-routing design both fail closed on missing economics input and both
+require a new, explicit, default-off config guard (mirroring
+`ASSET_RISK_PRODUCTION_ENFORCEMENT_ENABLED`); a 6-step rollout (shadow-mode
+→ paper-only → broker-specific) and a 6-step proposed future patch
+sequence, none of which are started or authorized by this patch.
+
+**Validation:** `powershell -File
+scripts\guards\validate_asset_core_04l_cutover_callsite_audit.ps1` — all 15
+checks still pass (design doc does not affect the `04L` audit-doc
+validator's target file). `git diff --check` clean.
+
+**Safety confirmation:** docs-only; zero network calls; zero DB mutation
+or migration; zero config flag changes; no broker/order/risk/runtime/
+strategy/live accounting behavior changed; no non-equity trading enabled;
+no code cutover; no generated evidence staged.
