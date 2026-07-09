@@ -33,7 +33,7 @@ pub use types::{
 // enforcement surfaces.  Do not wire V2 types into MAIN paths without a
 // dedicated scope-reviewed patch.
 pub use types::{
-    equity_instrument, ExecutionIntentV2, IntentV2Contract, IntentV2Routability,
+    equity_instrument, BracketLegs, ExecutionIntentV2, IntentV2Contract, IntentV2Routability,
     IntentV2Validation, OrderIntentV2,
 };
 

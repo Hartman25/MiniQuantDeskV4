@@ -132,6 +132,10 @@ pub struct OrderIntentV2 {
     pub strategy_id: Option<String>,
     pub source: Option<String>,
     pub research_only: bool,
+    /// Optional protective bracket/OCO legs. See [`BracketLegs`] — this is a
+    /// pure model-level representation only; no execution path anywhere in
+    /// the repo constructs, submits, or acts on bracket/OCO orders today.
+    pub bracket: Option<BracketLegs>,
 }
 
 impl OrderIntentV2 {
@@ -151,6 +155,7 @@ impl OrderIntentV2 {
             strategy_id: None,
             source: None,
             research_only: false,
+            bracket: None,
         }
     }
 
@@ -196,6 +201,16 @@ impl OrderIntentV2 {
 
     pub fn as_research_only(mut self) -> Self {
         self.research_only = true;
+        self
+    }
+
+    /// Attach protective bracket/OCO legs. Model-only: attaching this never
+    /// makes the intent routable — see [`validate_order_intent_v2`], which
+    /// always reports `DisabledAssetClass` for any intent carrying valid
+    /// bracket legs, regardless of asset class, because no execution path
+    /// anywhere supports multi-leg/bracket/OCO submission today.
+    pub fn with_bracket_legs(mut self, bracket: BracketLegs) -> Self {
+        self.bracket = Some(bracket);
         self
     }
 
@@ -300,6 +315,39 @@ impl IntentV2Contract {
     }
 }
 
+/// Protective bracket/OCO legs attached to a parent [`OrderIntentV2`].
+///
+/// This models the common "bracket order" shape (a parent fill triggers a
+/// one-cancels-other pair of a take-profit limit and a stop-loss stop) as
+/// pure data. It deliberately stays local to the v2 scaffold: it is not a
+/// broker adapter contract, it is not consumed by `ExecutionIntentV2` /
+/// `OrderSpec`, and no execution, OMS, or broker path constructs child
+/// orders from it. At least one of `take_profit_limit_price_micros` /
+/// `stop_loss_stop_price_micros` must be set for the parent intent to
+/// validate structurally.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BracketLegs {
+    pub take_profit_limit_price_micros: Option<i64>,
+    pub stop_loss_stop_price_micros: Option<i64>,
+    /// True when the two legs are linked one-cancels-other. Documentary
+    /// only today — both legs are always non-routable regardless of this
+    /// flag, since no OCO submission path exists.
+    pub oco: bool,
+}
+
+impl BracketLegs {
+    pub fn new(
+        take_profit_limit_price_micros: Option<i64>,
+        stop_loss_stop_price_micros: Option<i64>,
+    ) -> Self {
+        Self {
+            take_profit_limit_price_micros,
+            stop_loss_stop_price_micros,
+            oco: true,
+        }
+    }
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum IntentV2Routability {
     ResearchOnly,
@@ -366,6 +414,19 @@ fn validate_order_intent_v2(intent: &OrderIntentV2) -> IntentV2Validation {
         return invalid;
     }
 
+    if let Some(invalid) = validate_bracket_legs(intent.bracket.as_ref()) {
+        return invalid;
+    }
+    if intent.bracket.is_some() {
+        // Bracket/OCO submission has no execution path anywhere in the repo
+        // today, regardless of asset class — the parent equity/ETF path
+        // included. See `BracketLegs` doc comment.
+        return IntentV2Validation::valid(
+            IntentV2Routability::DisabledAssetClass,
+            "bracket_oco_model_only_not_executable",
+        );
+    }
+
     if intent.instrument.asset_class != AssetClass::Equity {
         return IntentV2Validation::valid(
             IntentV2Routability::DisabledAssetClass,
@@ -379,6 +440,35 @@ fn validate_order_intent_v2(intent: &OrderIntentV2) -> IntentV2Validation {
         IntentV2Routability::EquityRoutableCandidate,
         "equity_model_candidate",
     )
+}
+
+fn validate_bracket_legs(bracket: Option<&BracketLegs>) -> Option<IntentV2Validation> {
+    let bracket = bracket?;
+    if bracket.take_profit_limit_price_micros.is_none()
+        && bracket.stop_loss_stop_price_micros.is_none()
+    {
+        return Some(IntentV2Validation::invalid(
+            "bracket_requires_at_least_one_leg",
+            "OrderIntentV2 bracket legs require at least one of take-profit or stop-loss.",
+        ));
+    }
+    if let Some(price) = bracket.take_profit_limit_price_micros {
+        if price <= 0 {
+            return Some(IntentV2Validation::invalid(
+                "invalid_bracket_take_profit_price",
+                "OrderIntentV2 bracket take-profit price must be positive.",
+            ));
+        }
+    }
+    if let Some(price) = bracket.stop_loss_stop_price_micros {
+        if price <= 0 {
+            return Some(IntentV2Validation::invalid(
+                "invalid_bracket_stop_loss_price",
+                "OrderIntentV2 bracket stop-loss price must be positive.",
+            ));
+        }
+    }
+    None
 }
 
 fn validate_order_spec_v2(spec: &OrderSpec) -> IntentV2Validation {

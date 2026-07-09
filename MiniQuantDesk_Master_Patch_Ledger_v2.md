@@ -5938,3 +5938,60 @@ bundle).
 zero config flag changes; no crypto/futures/options/forex/rates trading
 enabled; no broker/order/risk/runtime/strategy/portfolio behavior changed;
 no production cutover; no generated evidence staged.
+
+### ASSET-CORE-02B-ORDER-INTENT-V2-SAFE-GAP-CLOSURE-01 — CLOSED_LOCAL / MODEL-COMPLETE
+
+**Mission:** close the one concrete `ASSET-CORE-02` model gap identified by
+`ASSET-CORE-02-03A-CURRENT-COMPLETION-AUDIT-01` — bracket/OCO representation
+— as a pure, unwired model extension, without wiring `OrderIntentV2` into
+live/paper trading or touching any broker/runtime/risk/OMS file.
+
+**Built:** `core-rs/crates/mqk-execution/src/types.rs` gained
+`BracketLegs { take_profit_limit_price_micros, stop_loss_stop_price_micros,
+oco }`, a pure model of the common "bracket order" shape (parent fill
+triggers a one-cancels-other take-profit/stop-loss pair). `OrderIntentV2`
+gained an additive `bracket: Option<BracketLegs>` field defaulting to `None`
+and a `with_bracket_legs()` builder. `validate_order_intent_v2()` now
+validates bracket legs when present (requires at least one leg, requires
+positive prices) and, when structurally valid, **always** reports
+`IntentV2Routability::DisabledAssetClass` with reason code
+`bracket_oco_model_only_not_executable` — regardless of asset class,
+including equity — because no execution, OMS, or broker path in the repo
+constructs or submits multi-leg/bracket/OCO orders today. `BracketLegs` is
+re-exported from `mqk-execution/src/lib.rs`.
+
+**Tests added:** `core-rs/crates/mqk-execution/tests/scenario_asset_core_02_order_intent_v2.rs`
+(10 tests) covers: equity-without-bracket regression unchanged; equity with
+both/only-take-profit/only-stop-loss valid legs all report
+`DisabledAssetClass`/`bracket_oco_model_only_not_executable`; neither-leg-set
+fails closed (`bracket_requires_at_least_one_leg`); non-positive take-profit
+and negative stop-loss prices fail closed; crypto+bracket reports the
+bracket-specific reason (proving bracket precedence over the generic
+asset-class-disabled reason); invalid qty still fails closed first even with
+valid bracket legs present; and the `BracketLegs`/builder field round-trip.
+
+**Validation:** `cargo check -p mqk-schemas -p mqk-execution` clean.
+`cargo test -p mqk-execution --test scenario_asset_core_02_order_intent_v2`
+— 10/10 passed. `cargo test -p mqk-execution --test scenario_order_intent_v2_foundation_01`
+— 11/11 passed (unaffected regression). `cargo test -p mqk-execution --test
+scenario_asset_class_guard_multi_asset_routing_guard_01 --features testkit`
+— 8/8 passed (routing guard unaffected). `cargo clippy -p mqk-schemas -p
+mqk-execution --all-targets -- -D warnings` clean. `cargo test -p mqk-daemon
+--test scenario_asset_class_scope_b8` — 12/12 passed (Gate 0 unaffected). CLI
+was not touched (no CLI consumer of `OrderIntentV2` existed to extend). The
+recurring `sqlx-postgres` future-incompatibility warning is pre-existing and
+unrelated.
+
+**Deliberately not done:** `ExecutionIntentV2`/`OrderSpec` (the
+broker-adapter-facing canonical schema in `mqk-schemas`) were **not** given
+bracket fields — that type is shared with real broker adapters and runtime,
+so extending it would be a step toward production wiring, not a pure model
+gap closure. No daemon/CLI/GUI surface was added in this slice (see Phase C/D
+for the operator-visibility gap). No broker adapters, runtime, OMS,
+`mqk-risk`, DB migrations, or `.env.local` touched.
+
+**Safety confirmation:** no daemon live/paper runtime was started; no DB
+mutated; no broker/provider/network calls; no non-equity trading enabled; no
+live routing; no paper/live orders; Gate 0 and the broker-submit routing
+guard are unchanged and regression-proven; smoke logs and the untracked
+ledger draft were untouched.
