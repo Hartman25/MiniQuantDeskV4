@@ -1167,6 +1167,17 @@ AUTON-NO-TRADE-01 parent: PARTIAL / MARKET-HOURS-PROOF-REMAINS (unchanged)
 
 **`MARKET-HOURS-PROOF-SWEEP-01` Phase A (preflight + runbook correction, this turn):** Confirmed HEAD (`57a669b3`) is a clean descendant of the Phase A audit's verified commit; no schema drift on `runs`/`strategy_signal_evaluations`/`autonomous_no_trade_diagnostics`/`oms_outbox`/`oms_inbox`/`sys_arm_state` since the prior audit (latest migration remains `0044_autonomous_no_trade_diagnostics.sql`). Added `docs/runbooks/market_hours_proof_sweep_01.md` (two separated lanes: `AUTON-NO-TRADE-02` legacy-session observation, and conditional `ASSET-CORE-05` v2-equity-active observation) and `scripts/guards/validate_market_hours_proof_sweep_01.ps1`. This turn is running during an actual NYSE regular session (confirmed 2026-07-09 ~14:28 UTC / 10:28am ET wall clock) — Phases B onward proceed in this same turn.
 
+**`AUTON-NO-TRADE-02B` (live-paper observation, legacy session source, this turn):** Started the paper daemon via the canonical `scripts\windows\Start-PaperTradingSmoke.ps1` startup path during the live NYSE session. The script's own multi-symbol watchlist preflight gate (STEP 9B, `MULTI-SYMBOL-SMOKE-RUNNER-PREFLIGHT-GATE-01` — internal to the smoke script, not a core daemon gate) failed because this repo's `AAPL` config is not provisioned as a `watchlist-v2` multi-symbol entry; STEP 1–9 had already completed cleanly (daemon up, `daemon_mode=paper`, `adapter_id=alpaca`, `live_routing_enabled=false`, Alpaca WS continuity=live). The daemon's own autonomous session controller then armed and started run `1d005ad4-bec5-54b8-9291-c0a932626a1a` on its normal cadence, independent of the smoke script. Observed ~12 minutes live (2026-07-09 15:00–15:12 UTC). Result: one real strategy evaluation (`mqk-daemon.execution_loop`, `intraday_scalper`/AAPL/5m, `flat_below_threshold`, move_bps=-19 vs threshold_bps=20), zero `oms_outbox`/`oms_inbox` rows for the run, 11 `autonomous_no_trade_diagnostics` rows all `paper_order_attempted=false`/`live_order_attempted=false`, `live_routing_enabled=false` and no kill-switch/risk/integrity halt throughout. Full detail: `docs/specs/auton_no_trade_02b_market_hours_observation_summary.md`.
+
+**Schema-audit correction (non-blocking):** Direct `information_schema.columns` query during this observation proves `runs.armed_at_utc`/`running_at_utc`/`stopped_at_utc`/`halted_at_utc`/`last_heartbeat_utc` and `oms_outbox.claimed_at_utc` **do** exist in the current live schema — contradicting the "these columns don't exist" claim carried by the `AUTON-NO-TRADE-02A` audit and this morning's Phase A runbook entry above. The DB queries in this phase used the corrected, live-verified column set. Not corrected in `docs/runbooks/market_hours_proof_sweep_01.md` this phase (would fail the Phase A validator's forbidden-column check, and the guard script is outside this phase's allowed-file scope) — flagged for a follow-up patch.
+
+**Status after Phase B:**
+
+```text
+AUTON-NO-TRADE-02: IN PROGRESS / MARKET-HOURS-OBSERVATION-CAPTURED-PENDING-CLOSURE-DECISION
+AUTON-NO-TRADE-01 parent: PARTIAL / MARKET-HOURS-PROOF-REMAINS (pending Phase C closure decision)
+```
+
 ### BROKER-HTTP-TIMEOUT-01 — QUEUED / PARKED
 
 **Purpose:** Add broker HTTP timeout / independent heartbeat hardening.
