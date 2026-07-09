@@ -6698,3 +6698,57 @@ both pass. `git diff --check` clean.
 or migration; zero config flag changes; no broker/order/risk/runtime/
 strategy/live accounting behavior changed; no non-equity trading enabled;
 no code cutover; no generated evidence staged.
+
+### ASSET-CORE-04O-CUTOVER-GO-NOGO-DECISION-AND-LEDGER-RECONCILE-01 — CLOSED_LOCAL / DOCS-ONLY
+
+**Mission:** Phase D of `ASSET-CORE-04-PRODUCTION-CUTOVER-DESIGN-ONLY-01-COMBINED`
+— close the design-only cutover decision with an honest go/no-go verdict
+and reconcile the roadmap docs.
+
+**Built:** `docs/specs/asset_core_04o_cutover_go_nogo_decision.md` —
+answers all 11 required closure questions. Verdict: production cutover is
+**not** authorized; `ASSET-CORE-04` is **not** fully closed; a DB migration
+and a fixed-point quantity model are both required before production
+consumption; risk enforcement and broker/order-routing may **not** consume
+or change yet; a shadow-mode route/status is required before paper
+cutover; each future patch in the sequence requires its own separate,
+explicit operator authorization phrase (named in the decision doc §10),
+not a blanket approval.
+
+**Updated:** `docs/audits/multi_asset_completion_audit.md` (new §93
+closure note; row 142's `ASSET-CORE-04` percentage/status left unchanged —
+this bundle is design/decision scope only and moves no live-accounting
+percentage). `docs/specs/roadmap_completion_reconcile_01.md` (new §7 — same
+"designed, not authorized" note).
+
+**Validation:** `powershell -File
+scripts\guards\validate_asset_core_04l_cutover_callsite_audit.ps1` (15
+checks) and `powershell -File
+scripts\guards\validate_asset_core_04n_cutover_plan.ps1` (13 checks) —
+both pass. `git diff --check` clean.
+
+**Safety confirmation:** docs-only; zero network calls; zero DB mutation
+or migration; zero config flag changes; no broker/order/risk/runtime/
+strategy/live accounting behavior changed; no non-equity trading enabled;
+no code cutover; no generated evidence staged.
+
+### ASSET-CORE-04-PRODUCTION-CUTOVER-DESIGN-ONLY-01-COMBINED — CLOSED_LOCAL / DESIGN-ONLY (bundle closure)
+
+**Bundle:** `04L` (`eca81772`) → `04M` (`77129dd2`) → `04N` (`68294bd4`) →
+`04O` (this phase's commit).
+
+**Final verdict:**
+
+```text
+ASSET-CORE-04: PARTIAL / LIVE-ACCOUNTING-PRODUCTION-CONSUMPTION-OPEN
+ASSET-CORE-04-PRODUCTION-CUTOVER-DESIGN-ONLY-01: CLOSED_LOCAL
+ASSET-CORE-04 parent: PARTIAL / PRODUCTION-CUTOVER-DESIGNED-NOT-AUTHORIZED
+```
+
+No production cutover is authorized by this bundle. First recommended
+future patch: `ASSET-CORE-04P-FIXED-POINT-LIVE-QUANTITY-SHADOW-MODE-01-COMBINED`
+(a DB/schema design patch), gated on an explicit operator authorization
+phrase named in `docs/specs/asset_core_04o_cutover_go_nogo_decision.md`
+§10. Independent alternative:
+`CRYPTO-REGISTRY-DATA-COMPLETION-SWEEP-01-COMBINED`. Full detail:
+`docs/specs/asset_core_04o_cutover_go_nogo_decision.md`.

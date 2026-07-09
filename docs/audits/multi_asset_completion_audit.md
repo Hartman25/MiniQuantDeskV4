@@ -2047,3 +2047,42 @@ distinct, production-behavior-changing patch, explicitly not started here.
 `ASSET-CORE-04B-LIVE-ACCOUNTING-INVARIANT-PROOF-01` entries; closure
 decision: `docs/specs/asset_core_04_live_ledger_closure_decision.md`;
 boundary audit: `docs/specs/asset_core_04_live_ledger_boundary_audit.md`.
+
+## 93. ASSET-CORE-04-PRODUCTION-CUTOVER-DESIGN-ONLY-01-COMBINED Closure Note (maintenance)
+
+`ASSET-CORE-04-PRODUCTION-CUTOVER-DESIGN-ONLY-01-COMBINED` is a
+design/decision-only bundle (no code, no DB migration, no config change)
+answering exactly what row 142's `ASSET-CORE-04` production cutover would
+require. Phase A (`ASSET-CORE-04L`) re-derived every live-accounting,
+runtime-snapshot, risk-enforcement, and broker/order-routing callsite from
+current-repo source at HEAD `87f49a19`, confirming row 142's assumptions
+(whole-unit `bigint` quantity across all 44 migrations, zero economics-
+scaffold callers, static-only asset-risk-policy table) still hold. Phase B
+(`ASSET-CORE-04M`) specified a target architecture that is additive to,
+not a replacement of, the existing live ledger — reusing the already-built
+`04A`-`04C` economics scaffold and the already-existing but
+production-unreferenced `QtyMicros` fixed-point type rather than inventing
+new ones, and requiring a new default-off config guard before any future
+patch may even shadow-compute the new path in production. Phase C
+(`ASSET-CORE-04N`) specified the mandatory DB migration shape (new,
+additive-only column/table per `db_rules.md`, `NULL` for pre-existing
+equity rows, no backfill) and the full pre-cutover test list. Phase D
+(`ASSET-CORE-04O`) closed with an explicit non-authorization: production
+cutover is not authorized, and each future patch in the proposed sequence
+requires its own separate operator authorization phrase, not a blanket
+approval.
+
+**Not resolved (row 142's `PARTIAL` verdict stands unchanged, percentage
+unchanged at 20% for the live path):** no DB migration was added; no
+fixed-point quantity type was wired into any production path; no risk or
+order-routing callsite was changed; the economics scaffold still has zero
+production callers. This bundle only produced the design/decision package
+a future, separately-authorized implementation patch would need.
+
+**Full detail, exact evidence, and validation commands:**
+`MiniQuantDesk_Master_Patch_Ledger_v2.md`'s `ASSET-CORE-04L`/`04M`/`04N`/
+`04O` entries and the bundle closure note; callsite audit:
+`docs/specs/asset_core_04l_production_cutover_callsite_audit.md`; design:
+`docs/specs/asset_core_04m_production_cutover_design.md`; test/migration
+plan: `docs/specs/asset_core_04n_cutover_test_and_migration_plan.md`;
+go/no-go decision: `docs/specs/asset_core_04o_cutover_go_nogo_decision.md`.

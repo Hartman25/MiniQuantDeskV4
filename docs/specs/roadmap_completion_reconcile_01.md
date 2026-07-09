@@ -210,3 +210,33 @@ The row's earlier "Not touched this session — `mqk-portfolio/*` was
 forbidden" note refers specifically to the session that wrote §2/§4 above,
 not to this later session, which was authorized to add exactly one
 test-only file under `mqk-portfolio/tests/`.
+
+## 7. Later session: `ASSET-CORE-04-PRODUCTION-CUTOVER-DESIGN-ONLY-01-COMBINED`
+
+A later session ran the `ASSET-CORE-04` production-cutover design bundle
+(Phase A `04L` callsite audit, Phase B `04M` design spec, Phase C `04N`
+test/migration plan, Phase D `04O` go/no-go decision — see
+`docs/specs/asset_core_04l_production_cutover_callsite_audit.md` through
+`docs/specs/asset_core_04o_cutover_go_nogo_decision.md`). This bundle is
+design/decision-only: no code, no DB migration, no config flag change. It
+*does* touch the `ASSET-CORE-04` row above (§2, row 32) in the sense that
+it specifies exactly what a future implementation patch would need, but it
+does not change the row's status, percentage, or dual-axis
+characterization — the live ledger remains ~20%/unchanged, and the
+`04A`-`04F` economics scaffold remains additive with zero production
+callers.
+
+**Final verdict from this bundle:**
+
+```text
+ASSET-CORE-04: PARTIAL / LIVE-ACCOUNTING-PRODUCTION-CONSUMPTION-OPEN
+ASSET-CORE-04-PRODUCTION-CUTOVER-DESIGN-ONLY-01: CLOSED_LOCAL
+ASSET-CORE-04 parent: PARTIAL / PRODUCTION-CUTOVER-DESIGNED-NOT-AUTHORIZED
+```
+
+No production cutover is authorized. The first recommended future patch is
+`ASSET-CORE-04P-FIXED-POINT-LIVE-QUANTITY-SHADOW-MODE-01-COMBINED` (a
+DB/schema design patch), gated on an explicit, per-slice operator
+authorization phrase — not a blanket approval for the whole proposed
+sequence. Independent alternative:
+`CRYPTO-REGISTRY-DATA-COMPLETION-SWEEP-01-COMBINED`.
