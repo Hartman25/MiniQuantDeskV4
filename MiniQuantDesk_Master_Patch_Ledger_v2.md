@@ -1150,6 +1150,21 @@ AUTON-NO-TRADE-01 parent: PARTIAL / MARKET-HOURS-PROOF-REMAINS
 
 **Recommended next patch:** `AUTON-NO-TRADE-02` (market-hours canonical paper order / no-trade proof) — the exact named continuation that keeps `AUTON-NO-TRADE-01` `PARTIAL` until closed. Independent of this workstream, the registry-v2/session-routing lineage's own next recommendation is unchanged (see `docs/specs/roadmap_completion_reconcile_01.md` §3).
 
+### AUTON-NO-TRADE-02 — IN PROGRESS / MARKET-HOURS-OBSERVATION-PENDING
+
+**Purpose:** Close the remaining market-hours half of `AUTON-NO-TRADE-01`: either a real canonical paper order attempt through the normal path, or a durable market-hours-specific no-trade explanation. Must not force a trade, change strategy thresholds, fabricate data, or bypass any gate.
+
+**Phase A (`AUTON-NO-TRADE-02A-MARKET-HOURS-PREFLIGHT-AUDIT-01`):** Audited current market-hours no-trade proof surfaces (`docs/specs/auton_no_trade_02a_market_hours_preflight_audit.md`) against current HEAD (`5cde6f68`). Finding: all six routes needed for market-hours proof (`autonomous/readiness`, `autonomous/no-trade-diagnostics`, `execution/signal-evaluations`, `execution/summary`, `execution/flow`, `execution/orders`) and all six DB tables (`runs`, `strategy_signal_evaluations`, `autonomous_no_trade_diagnostics`, `oms_outbox`, `oms_inbox`, `sys_arm_state`) already exist and are already wired — `AUTON-NO-SIGNAL-OBS-01` and `AUTON-NO-TRADE-OFFHOURS-01` together already closed every durable-explanation code path a market-hours session could exercise. The remaining gap is a **live observation gap, not a code gap**: nobody has yet polled these routes/tables during an actual NYSE regular session. Also corrected two schema assumptions for the future runbook: `runs` has no `armed_at_utc`/`running_at_utc`/`stopped_at_utc`/`halted_at_utc`/`last_heartbeat_utc` columns (only `run_id`, `engine_id`, `mode`, `started_at_utc`, `git_hash`, `config_hash`, `config_json`, `host_fingerprint`), and `oms_outbox` has no `claimed_at_utc`/`acked_at_utc`/`rejected_at_utc` columns (only `status` PENDING/SENT/ACKED/FAILED plus `created_at_utc`/`sent_at_utc`). This turn ran outside market hours (2026-07-08 ~21:56 CDT), so per this bundle's own gating rule only Phase A (audit/no-op) was performed; Phases B–D (live observation runbook, conditional code closure, final closure/reconcile) are deferred to a future turn run during an actual paper-trading session window.
+
+**Status after Phase A:**
+
+```text
+AUTON-NO-TRADE-02: IN PROGRESS / MARKET-HOURS-OBSERVATION-PENDING
+AUTON-NO-TRADE-01 parent: PARTIAL / MARKET-HOURS-PROOF-REMAINS (unchanged)
+```
+
+**Recommended next step:** Re-run Phases B–D of this same bundle during an active NYSE regular-session window to perform the live observation and, if it naturally produces a paper order attempt or confirms a durable market-hours no-trade reason, close both `AUTON-NO-TRADE-02` and parent `AUTON-NO-TRADE-01`.
+
 ### BROKER-HTTP-TIMEOUT-01 — QUEUED / PARKED
 
 **Purpose:** Add broker HTTP timeout / independent heartbeat hardening.
