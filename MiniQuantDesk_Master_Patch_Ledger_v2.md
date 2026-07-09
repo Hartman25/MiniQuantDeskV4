@@ -6665,3 +6665,36 @@ validator's target file). `git diff --check` clean.
 or migration; zero config flag changes; no broker/order/risk/runtime/
 strategy/live accounting behavior changed; no non-equity trading enabled;
 no code cutover; no generated evidence staged.
+
+### ASSET-CORE-04N-PRODUCTION-CUTOVER-TEST-PLAN-AND-MIGRATION-PLAN-01 — CLOSED_LOCAL / PLAN-ONLY
+
+**Mission:** Phase C of `ASSET-CORE-04-PRODUCTION-CUTOVER-DESIGN-ONLY-01-COMBINED`
+— specify the mandatory future test suite and DB migration/decision package
+that must exist before any behavior-changing `ASSET-CORE-04` cutover patch
+may start.
+
+**Built:** `docs/specs/asset_core_04n_cutover_test_and_migration_plan.md`.
+Specifies: which tables need new (never-altered) columns/tables per
+`db_rules.md`'s append-only rule, with `NULL` (not a fabricated default)
+for pre-existing equity rows and no backfill needed; a single fixed-point
+convention (`mqk_schemas::QtyMicros`) rather than a second one; the full
+mandatory pre-code-cutover test list (equity parity, equity regression,
+fractional/multiplier-disabled-by-default, missing-economics/margin/stale-
+mark fail-closed, no-broker-side-effects-in-shadow-mode); the mandatory
+pre-paper-cutover scenario test list (shadow-mode comparison, paper-only
+equity unchanged, paper-only non-equity still independently blocked by
+`ASSET_RISK_NON_EQUITY_ROUTING_ENABLED`, status-route honesty); required
+operator evidence and rollback (config-flip-only, no destructive DB
+rollback); and an explicit Go/No-Go checklist gating any future cutover
+patch on all of the above plus a per-slice operator authorization phrase.
+
+**Validation:** `powershell -File
+scripts\guards\validate_asset_core_04l_cutover_callsite_audit.ps1` (15
+checks) and `powershell -File
+scripts\guards\validate_asset_core_04n_cutover_plan.ps1` (13 checks) —
+both pass. `git diff --check` clean.
+
+**Safety confirmation:** docs-only; zero network calls; zero DB mutation
+or migration; zero config flag changes; no broker/order/risk/runtime/
+strategy/live accounting behavior changed; no non-equity trading enabled;
+no code cutover; no generated evidence staged.
