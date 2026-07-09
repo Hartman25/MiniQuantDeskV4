@@ -1107,6 +1107,12 @@ Do not define until `AUTON-NO-TRADE-01` returns evidence.
 
 **Recommended next patch:** `AUTON-NO-TRADE-02` can now be defined for real — the durable evidence this patch added is the missing input it was blocked on.
 
+### AUTON-NO-TRADE-OFFHOURS-01 — IN PROGRESS
+
+**Purpose:** Close the non-market-hours portion of `AUTON-NO-TRADE-01`: a durable, restart-surviving explanation for why the autonomous paper system did not attempt an order, for reasons provable without market open (outside session window, no active run, arm/session/blocker truth, stale/missing bars). Does not attempt the market-hours paper-order-attempt side of `AUTON-NO-TRADE-01`.
+
+**Phase A (`AUTON-NO-TRADE-OFFHOURS-01A-CURRENT-TRUTH-AUDIT-01`):** Audited current no-trade explanation surfaces (`docs/specs/auton_no_trade_offhours_01a_current_truth_audit.md`). Finding: `GET /api/v1/autonomous/readiness` (`mqk-daemon/src/routes/system.rs::autonomous_readiness`) already computes every off-hours gate (session window, arm state, runtime-start-allowed, market-data readiness, bar-tick counts) correctly, but purely in-memory/live-DB-read on every request — the verdict itself is never journaled, so it does not survive a daemon restart and is invisible if no operator happened to be polling. `AUTON-NO-SIGNAL-OBS-01`'s `strategy_signal_evaluations` table only covers one reason (post-tick no-signal) and is the wrong shape for off-hours reasons (requires non-null `symbol`/`timeframe`/`strategy_id`). Decision: add a new small additive table (`autonomous_no_trade_diagnostics`) mirroring the `0043` idiom (deterministic UUIDv5 id, `ON CONFLICT DO NOTHING`, nullable `run_id`, no FK, observability only). Reasons requiring a live dispatch/broker cycle (outbox/dispatcher/broker-not-reached, broker reject, cross-route mismatch) are explicitly out of this prompt's scope.
+
 ### BROKER-HTTP-TIMEOUT-01 — QUEUED / PARKED
 
 **Purpose:** Add broker HTTP timeout / independent heartbeat hardening.
