@@ -5568,3 +5568,76 @@ routed; no broker/risk/runtime/strategy/portfolio code touched.
 naming exactly which flags to flip, if the operator wants the config
 change actually implemented — distinct from this decision-only review.
 Otherwise, no further action recommended.
+
+### ASSET-CORE-05G-CURRENT-SESSION-ROUTING-AUDIT-01 — CLOSED_LOCAL / AUDIT-ONLY
+
+**Mission:** audit the current state of per-instrument session routing
+under `ASSET-CORE-05` before attempting any safe closure, without
+enabling non-equity trading, replacing the production session gate, or
+changing broker/risk/runtime/order behavior.
+
+**Patch-ID collision found and corrected:** the originating planning
+document proposed phase IDs `ASSET-CORE-05D`/`05E`/`05F`/`05G` for this
+bundle's four phases. Current-repo evidence shows those exact letters are
+already assigned to the unrelated, already-closed
+`ASSET-CORE-05D-EQUITY-SESSION-V2-CUTOVER-SCAFFOLD-01-COMBINED` /
+`ASSET-CORE-05E-EQUITY-SESSION-V2-ACTIVE-CUTOVER-HOOK-01-COMBINED` /
+`ASSET-CORE-05F-V2-EQUITY-ACTIVE-PROOF-RUNBOOK-COLLECTOR-01-COMBINED`
+sub-lineage (equity-only production runtime session-source cutover).
+Reusing those letters would have created two different meanings under
+one ID in the ledger. This bundle renumbers to the next free letters
+instead — `05G`/`05H`/`05I`/`05J` — confirmed free via `rg -n "^### ASSET-CORE-05"`
+before use. Full rationale: `docs/specs/asset_core_05g_current_session_routing_audit.md` §0.
+
+**Repo evidence found:** a pure per-instrument session-profile router
+(`resolve_session_profile_for_instrument_metadata`,
+`mqk-daemon/src/state/market_calendar.rs`, `ASSET-CORE-05B`) and a pure
+per-instrument session-state classifier
+(`instrument_session_state_for_profile`,
+`mqk-daemon/src/routes/system.rs`, private) already exist and are already
+composed into two read-only diagnostic routes
+(`GET /api/v1/system/instrument-sessions/status`,
+`GET /api/v1/system/instrument-sessions/parity`, `ASSET-CORE-05B`/`05C`)
+plus a compact shadow summary embedded on `/api/v1/system/status` and
+`/api/v1/system/preflight`. These are not new capabilities this bundle
+needs to invent. The one concrete, honest gap found: the router's match
+statement has no explicit `"rate"` arm, so a schema-valid
+(`CANONICAL_ASSET_CLASSES_V2`) `"rate"` instrument currently falls into
+the generic `Unknown`/"unrecognized asset_class" catch-all alongside
+truly garbage strings — misleading, since `"rate"` is a recognized,
+just-unsupported class. Separately, the two routing functions are not
+composed into one reusable pure helper; each route handler calls both
+inline. The daemon's actual production session gate
+(`AutonomousSessionSchedule::is_in_session`,
+`mqk-daemon/src/state/session_controller.rs`) is a single global,
+non-instrument-parameterized schedule — true per-instrument production
+routing would require new architecture in the execution/orchestrator
+path, which is out of this bundle's safe scope.
+
+**Built:** `docs/specs/asset_core_05g_current_session_routing_audit.md`
+(full audit: HEAD/prerequisite commits, existing session model surfaces,
+existing read-only diagnostics, production session gate source,
+per-instrument/session-v2 model source, exact gap, safe closure target,
+explicit non-goals) and
+`scripts/guards/validate_asset_core_05g_session_routing_audit.ps1` (docs/text-only
+validator: doc exists, mentions `ASSET-CORE-05`/`MarketCalendarProvider`/
+per-instrument session routing, states admission behavior unchanged and
+non-equity profiles remain model-only, contains no forbidden cutover/
+enablement claims).
+
+**Deliberately not done:** no code touched; no `mqk-execution`/
+`mqk-runtime`/`mqk-risk`/`mqk-portfolio`/`mqk-broker-*`/config/DB-migration
+file touched; no non-equity trading enabled; no `BTC/USD` or other
+enablement flag changed; no network/DB/provider call.
+
+**Validation:** `powershell -File scripts\guards\validate_asset_core_05g_session_routing_audit.ps1`
+— all 9 checks passed. `git diff --check` — clean.
+
+**Safety confirmation:** zero network calls; zero DB mutation; zero
+config flag changes; no crypto/futures/options/forex/rates trading
+enabled; no broker/order/risk/runtime/strategy/portfolio behavior
+changed; no production cutover.
+
+**Recommended next slice:** `ASSET-CORE-05H-PURE-INSTRUMENT-SESSION-ROUTER-01`
+— close the `"rate"` gap and add one composed, reusable pure
+per-instrument session-routing helper, per §7 of the audit doc.
