@@ -6996,3 +6996,38 @@ gate, or config change. No live routing. No manual order-endpoint calls.
 threshold changed; no config flag changes; no generated evidence staged.
 
 **Status:** CLOSED_LOCAL
+
+### PAPER-TRADE-LIFECYCLE-PROOF-01C-ORDER-FILL-POSITION-PNL-CLASSIFICATION-01 — CLOSED_LOCAL / DOCS-ONLY
+
+**Mission:** classify the 11-row lifecycle result from `01B` using only
+its already-captured evidence.
+
+**Built:** `docs/specs/paper_trade_lifecycle_proof_01c_lifecycle_classification.md`.
+
+**Verdict:** rows 1-4 (market data → signal generation) classified
+`BLOCKED_BY_DATA_FRESHNESS`; rows 5-10 (risk → P&L) classified `MISSING`
+(never reached, transitively blocked by row 1); row 11 (operator
+visibility) classified `PARTIAL` — every diagnostic route returned an
+accurate, non-fabricated result, but the pre-existing primary-route P&L
+surfacing gap (named in `01B`/`paper_trading_shortest_path_01c_minimum_blocker_chain.md`)
+remains unchanged. No paper order occurred. Blocker 1 (data-freshness)
+is the sole remaining blocker, reproduced live with a more specific
+mechanism than previously documented: the freshness gate passed once at
+runtime start, then failed by a 13-second margin 33 seconds later, and
+TwelveData never delivered a fresher completed bar for the rest of the
+30-minute window. **Final classification:**
+`PAPER-TRADE-LIFECYCLE-PROOF-01: PARTIAL / DATA-FRESHNESS-BLOCKED`.
+**Next patch recommended:** `INTRADAY-PROVIDER-CLOCK-SKEW-OPERATOR-
+GUARD-01-COMBINED` (or another bounded market-hours observation as a
+lower-cost fallback).
+
+**Validation:** `git diff --check` clean.
+
+**Deliberately not done:** no code changes. No strategy threshold change.
+No new evidence gathered — classification derived entirely from `01B`.
+
+**Safety confirmation:** docs-only; zero network/DB/broker calls; no live
+routing; no orders; no gate weakened; no strategy threshold changed; no
+generated evidence staged.
+
+**Status:** CLOSED_LOCAL
