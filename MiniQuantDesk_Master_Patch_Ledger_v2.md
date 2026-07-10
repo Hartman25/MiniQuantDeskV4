@@ -7101,3 +7101,33 @@ gate/config changes, `live_routing_enabled=false` throughout. Full
 DB/route evidence: `01B` §15; full lifecycle classification: `01C` §1.
 Recommended next patch: `INTRADAY-PROVIDER-CLOCK-SKEW-OPERATOR-GUARD-01-COMBINED`.
 Full detail: `docs/specs/paper_trade_lifecycle_proof_01d_closure_decision.md`.
+
+## INTRADAY-PROVIDER-CLOCK-SKEW-OPERATOR-GUARD-01-COMBINED
+
+### INTRADAY-PROVIDER-CLOCK-SKEW-01A-CURRENT-TRUTH-AUDIT-01 — CLOSED_LOCAL / DOCS-ONLY
+
+**Mission:** grounded audit of the provider freshness/publish-lag gap exposed
+by `PAPER-SMOKE-FOLLOWUP-01E` and `PAPER-TRADE-LIFECYCLE-PROOF-01B`, and a
+safe patch plan for Phases B–D. Diagnostics/operator-guard only — no gate
+weakening, no threshold changes, no forced orders, no live routing.
+
+**Key finding:** `Refresh-IntradayMarketData.ps1`'s per-symbol
+`latest_completed_bar_age_secs` is a snapshot computed once at
+`produced_at_utc`, while `DATA-FRESHNESS-READINESS-GATE-01`'s dispatch-tick
+check (`market_data_freshness.rs`) computes bar age live against wall-clock
+`now()`. True bar age grows by the elapsed time between evidence production
+and any later read — the exact mechanism behind the 2026-07-10 run's
+900s-cap pass followed by a 913s-age fail 33 seconds later. Neither the
+`GET /api/v1/market-data/intraday-refresh/status` route nor
+`Start-PaperTradingSmoke.ps1 -RequireIntradayRefresh`'s `STEP 14C` currently
+account for this: both report/accept `all_passed=true` at read time with no
+visibility into how close the evidence already was to expiry.
+
+**Built:** `docs/specs/intraday_provider_clock_skew_01a_current_truth_audit.md`
+(full grounding: exact 913/900/2152 observed values, current evidence/route/
+script field inventory, safe Phase B–D plan, non-goals) and
+`scripts/guards/validate_intraday_provider_clock_skew_01a_audit.ps1` (static
+text-presence validator, no network/DB/daemon calls).
+
+**Validation:** validator PASS (all 10 required facts present). `git diff
+--check` clean.
