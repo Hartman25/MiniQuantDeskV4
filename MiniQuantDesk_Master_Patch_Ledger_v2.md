@@ -7452,3 +7452,38 @@ change; `live_routing_enabled=false` throughout.
 
 **Validation:** `git diff --check` clean. HEAD unchanged at `c093299a`
 throughout (docs-only bundle).
+
+---
+
+## PAPER-PNL-OPERATOR-VISIBILITY-CLOSURE-01A-CURRENT-TRUTH-AUDIT-01
+
+**Status:** `CLOSED_LOCAL` (docs-only, read-only audit).
+
+Audited the P&L null gap `PAPER-TRADE-LIFECYCLE-PROOF-02` exposed.
+Confirmed from current repo evidence: `/api/v1/portfolio/positions`
+(`portfolio_positions()`) and `/api/v1/portfolio/summary`
+(`portfolio_summary()`) are both sourced from `st.broker_snapshot`
+(`mqk_schemas::BrokerSnapshot`) and set `mark_price`/`unrealized_pnl`/
+`daily_pnl` to `None` unconditionally — never computed from any input.
+`/api/v1/portfolio/live-weights` and `/api/v1/portfolio/economics/status`
+already have the mark-source pattern this seam needs: latest completed
+`md_bars` close per non-flat symbol via
+`mqk_db::fetch_recent_completed_bars_for_strategy`, default
+`timeframe="1D"`. No existing pure helper computes unrealized P&L from
+`(signed_qty, avg_price, mark_price)` — `compute_portfolio_weights` has
+no cost-basis concept, and `accounting.rs`'s FIFO P&L is realized-only.
+Grepped the full repo for `day_start`/`previous_close`/`prev_close`/
+`opening_equity`/`start_of_day` — zero matches; no day-start/previous-
+close baseline exists anywhere, so `daily_pnl` cannot be truthfully
+computed and must stay unavailable with an explicit reason field.
+
+**Built:**
+`docs/specs/paper_pnl_operator_visibility_01a_current_truth_audit.md`,
+`scripts/guards/validate_paper_pnl_operator_visibility_01a_audit.ps1`.
+
+**Next:** `PAPER-PNL-01B-MARK-SOURCE-AND-PNL-MODEL-01` — add the pure
+unrealized-P&L helper to `mqk-portfolio`.
+
+**Safety confirmation:** read-only audit; no source file outside
+`docs/specs/` and `scripts/guards/` touched; no provider/broker/network
+call; no DB connection; no trading behavior change.
