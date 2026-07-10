@@ -25,14 +25,24 @@
 //! | IRS-09    | Latest file selected from multiple candidates (alphabetical last)             |
 //! | IRS-10    | Provider success + stale intraday bar forces all_passed=false                 |
 //! | IRS-11    | Provider success + zero provider rows forces all_passed=false                 |
-//! | IRS-12    | Overage (age 913 > max 900): staleness_overage_secs=13, risk=high, not near_expiry |
-//! | IRS-13    | Near expiry (age 850, max 900): headroom=50, near_expiry=true, risk=high     |
-//! | IRS-14    | Ample headroom (age 300, max 900): headroom=600, near_expiry=false, risk=low |
+//! | IRS-12    | Overage snapshot (age 913>max 900), ~0s elapsed: staleness_overage_secs>=13, risk=high |
+//! | IRS-13    | Near-expiry-after-elapsed (age 850, max 900), ~60s elapsed: effective age crosses cap, proof_window_ready=false |
+//! | IRS-14    | Ample headroom (age 300, max 900), ~60s elapsed: still low risk, headroom shrinks by elapsed |
 //! | IRS-15    | Missing age/max fields: risk=unknown, proof_window_ready=false (fail-safe)   |
+//! | IRS-16    | effective_latest_completed_bar_age_secs field explicitly proven >= snapshot+elapsed for a near-cap symbol |
+//! | IRS-17    | Ample-headroom symbol: effective age field present, proof_window_ready=true despite nonzero elapsed |
+//! | IRS-18    | Near-expiry-from-elapsed: still-passing snapshot (age 780/max 900) becomes near_expiry after ~60s elapsed |
+//! | IRS-19    | Already-stale snapshot (age 913/max 900) stays proof_window_ready=false after elapsed grows the overage further |
+//! | IRS-20    | Missing/malformed produced_at_utc: evidence_elapsed_secs and effective age both None, risk=unknown |
 //!
 //! IRS-12..15 are INTRADAY-PROVIDER-CLOCK-SKEW-01B: pure evidence-field
-//! classification of freshness headroom/overage risk. No new provider/DB/
-//! broker calls -- same synthetic temp-dir evidence fixtures as IRS-01..11.
+//! classification of freshness headroom/overage risk. IRS-16..20 are
+//! INTRADAY-PROVIDER-CLOCK-SKEW-01F: proof-window fields are recomputed from
+//! *effective* (elapsed-time-adjusted) bar age, not the evidence snapshot
+//! age alone -- IRS-12..15's assertions are also updated to honestly reflect
+//! that `recent_ts()`-based fixtures now flow through the effective-age
+//! recompute. No new provider/DB/broker calls -- same synthetic temp-dir
+//! evidence fixtures as IRS-01..11.
 //!
 //! All tests use synthetic temp-dir evidence files.
 //! No real providers called. No DB writes. No orders. No broker calls.
@@ -134,6 +144,13 @@ fn success_evidence(produced_at: &str, symbol: &str, all_passed: bool) -> String
 fn recent_ts() -> String {
     let ts = chrono::Utc::now() - chrono::Duration::minutes(1);
     ts.to_rfc3339()
+}
+
+/// Effectively "now" -- produced_at_utc with ~0s elapsed by the time the
+/// route evaluates it. Used where a test wants to isolate the pure
+/// headroom/overage math from the elapsed-time recompute.
+fn now_ts() -> String {
+    chrono::Utc::now().to_rfc3339()
 }
 
 /// Old timestamp (48 h ago).
@@ -624,7 +641,7 @@ fn headroom_evidence(produced_at: &str, age_secs: Option<i64>, max_age_secs: Opt
 }
 
 // ---------------------------------------------------------------------------
-// IRS-12: age 913 > max 900 -> staleness_overage_secs=13, risk=high, not near_expiry
+// IRS-12: age 913 > max 900, ~0s elapsed -> staleness_overage_secs>=13, risk=high, not near_expiry
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -633,7 +650,7 @@ async fn irs_12_overage_reports_staleness_overage_and_high_risk() {
     write_evidence(
         &dir,
         "intraday_refresh_20260710_090000.json",
-        &headroom_evidence(&recent_ts(), Some(913), Some(900)),
+        &headroom_evidence(&now_ts(), Some(913), Some(900)),
     );
 
     let router = make_router_with_evidence_dir(dir.path().to_str().unwrap());
@@ -643,7 +660,13 @@ async fn irs_12_overage_reports_staleness_overage_and_high_risk() {
     let sym = &v["symbols"].as_array().expect("symbols array")[0];
     assert_eq!(sym["passed"].as_bool(), Some(false));
     assert_eq!(sym["freshness_headroom_secs"].as_i64(), None);
-    assert_eq!(sym["staleness_overage_secs"].as_i64(), Some(13));
+    let overage = sym["staleness_overage_secs"]
+        .as_i64()
+        .expect("staleness_overage_secs must be present");
+    assert!(
+        (13..20).contains(&overage),
+        "expected overage in [13,20) (13 baseline + tiny test-runtime elapsed), got {overage}"
+    );
     assert_eq!(sym["near_expiry"].as_bool(), Some(false));
     assert_eq!(sym["proof_window_risk"].as_str(), Some("high"));
     assert!(
@@ -655,7 +678,9 @@ async fn irs_12_overage_reports_staleness_overage_and_high_risk() {
 }
 
 // ---------------------------------------------------------------------------
-// IRS-13: age 850, max 900 -> headroom=50, near_expiry=true, risk=high
+// IRS-13: age 850, max 900, ~60s elapsed -> effective age crosses the cap,
+// proof_window_ready=false even though the symbol's own snapshot-based
+// `passed` verdict stays true. INTRADAY-PROVIDER-CLOCK-SKEW-01F.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -672,24 +697,37 @@ async fn irs_13_near_expiry_reports_headroom_and_high_risk() {
 
     assert_eq!(status, StatusCode::OK);
     let sym = &v["symbols"].as_array().expect("symbols array")[0];
-    assert_eq!(sym["passed"].as_bool(), Some(true));
-    assert_eq!(sym["freshness_headroom_secs"].as_i64(), Some(50));
-    assert_eq!(sym["staleness_overage_secs"].as_i64(), None);
-    assert_eq!(sym["near_expiry"].as_bool(), Some(true));
+    assert_eq!(
+        sym["passed"].as_bool(),
+        Some(true),
+        "snapshot-based passed verdict is unaffected by effective-age recompute"
+    );
+    // 850 snapshot + ~60s elapsed pushes effective age past the 900s cap:
+    // headroom is now None and staleness_overage_secs is now Some.
+    assert!(sym["freshness_headroom_secs"].is_null());
+    let overage = sym["staleness_overage_secs"]
+        .as_i64()
+        .expect("staleness_overage_secs must be present once effective age crosses the cap");
+    assert!(
+        (5..20).contains(&overage),
+        "expected overage in [5,20) (~10 baseline + tiny test-runtime elapsed), got {overage}"
+    );
+    assert_eq!(sym["near_expiry"].as_bool(), Some(false));
     assert_eq!(sym["proof_window_risk"].as_str(), Some("high"));
     assert!(
         sym["operator_action"].as_str().is_some(),
-        "operator_action must be present when near expiry"
+        "operator_action must be present once effective age is past cap"
     );
     assert_eq!(
         v["proof_window_ready"].as_bool(),
         Some(false),
-        "near_expiry must block proof_window_ready even though the symbol currently passes"
+        "effective-age overage must block proof_window_ready even though the symbol currently passes"
     );
 }
 
 // ---------------------------------------------------------------------------
-// IRS-14: age 300, max 900 -> headroom=600, near_expiry=false, risk=low
+// IRS-14: age 300, max 900, ~60s elapsed -> still ample headroom, low risk;
+// headroom shrinks by roughly the elapsed amount. INTRADAY-PROVIDER-CLOCK-SKEW-01F.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -707,7 +745,13 @@ async fn irs_14_ample_headroom_reports_low_risk() {
     assert_eq!(status, StatusCode::OK);
     let sym = &v["symbols"].as_array().expect("symbols array")[0];
     assert_eq!(sym["passed"].as_bool(), Some(true));
-    assert_eq!(sym["freshness_headroom_secs"].as_i64(), Some(600));
+    let headroom = sym["freshness_headroom_secs"]
+        .as_i64()
+        .expect("freshness_headroom_secs must be present");
+    assert!(
+        (530..=600).contains(&headroom),
+        "expected headroom in [530,600] (600 baseline minus ~60s elapsed), got {headroom}"
+    );
     assert_eq!(sym["near_expiry"].as_bool(), Some(false));
     assert_eq!(sym["proof_window_risk"].as_str(), Some("low"));
     assert!(sym["operator_action"].is_null());
@@ -747,4 +791,199 @@ async fn irs_15_missing_age_fields_fails_safe_as_unknown() {
         "missing freshness fields must never be read as proof-window-ready"
     );
     assert_eq!(v["proof_window_risk"].as_str(), Some("unknown"));
+}
+
+// ---------------------------------------------------------------------------
+// IRS-16..20: INTRADAY-PROVIDER-CLOCK-SKEW-01F -- proof-window fields are
+// recomputed from *effective* (elapsed-time-adjusted) bar age, explicitly
+// proving the new `evidence_elapsed_secs` / `effective_latest_completed_bar_age_secs`
+// fields, not just the downstream headroom/overage/risk numbers IRS-12..15
+// already cover. Same synthetic temp-dir evidence fixtures; no provider/DB/
+// broker calls.
+// ---------------------------------------------------------------------------
+
+// IRS-16: age 850/max 900, ~60s elapsed -> effective_latest_completed_bar_age_secs
+// explicitly proven >= snapshot age + elapsed, and >= the 900s cap.
+#[tokio::test]
+async fn irs_16_effective_age_field_reflects_snapshot_plus_elapsed() {
+    let dir = tempfile::tempdir().expect("create temp dir");
+    write_evidence(
+        &dir,
+        "intraday_refresh_20260710_090400.json",
+        &headroom_evidence(&recent_ts(), Some(850), Some(900)),
+    );
+
+    let router = make_router_with_evidence_dir(dir.path().to_str().unwrap());
+    let (status, v) = call(router, get_refresh_status()).await;
+
+    assert_eq!(status, StatusCode::OK);
+    let sym = &v["symbols"].as_array().expect("symbols array")[0];
+    let elapsed = sym["evidence_elapsed_secs"]
+        .as_i64()
+        .expect("evidence_elapsed_secs must be present");
+    assert!(
+        elapsed >= 60,
+        "expected evidence_elapsed_secs >= 60 (recent_ts is 60s ago), got {elapsed}"
+    );
+    let effective_age = sym["effective_latest_completed_bar_age_secs"]
+        .as_i64()
+        .expect("effective_latest_completed_bar_age_secs must be present");
+    assert_eq!(
+        effective_age,
+        850 + elapsed,
+        "effective age must equal snapshot age (850) plus evidence_elapsed_secs"
+    );
+    assert!(
+        effective_age >= 910,
+        "effective age must have crossed the 900s cap, got {effective_age}"
+    );
+    // Snapshot value is preserved unchanged for backward compatibility.
+    assert_eq!(sym["latest_completed_bar_age_secs"].as_i64(), Some(850));
+}
+
+// IRS-17: age 300/max 900, ~60s elapsed -> effective age field present,
+// proof_window_ready=true despite nonzero elapsed (ample headroom survives).
+#[tokio::test]
+async fn irs_17_effective_age_ample_headroom_stays_ready() {
+    let dir = tempfile::tempdir().expect("create temp dir");
+    write_evidence(
+        &dir,
+        "intraday_refresh_20260710_090500.json",
+        &headroom_evidence(&recent_ts(), Some(300), Some(900)),
+    );
+
+    let router = make_router_with_evidence_dir(dir.path().to_str().unwrap());
+    let (status, v) = call(router, get_refresh_status()).await;
+
+    assert_eq!(status, StatusCode::OK);
+    let sym = &v["symbols"].as_array().expect("symbols array")[0];
+    let elapsed = sym["evidence_elapsed_secs"]
+        .as_i64()
+        .expect("evidence_elapsed_secs must be present");
+    let effective_age = sym["effective_latest_completed_bar_age_secs"]
+        .as_i64()
+        .expect("effective_latest_completed_bar_age_secs must be present");
+    assert_eq!(effective_age, 300 + elapsed);
+    assert!(
+        (355..=370).contains(&effective_age),
+        "expected effective age around 360 (300 + ~60s elapsed), got {effective_age}"
+    );
+    assert_eq!(sym["proof_window_risk"].as_str(), Some("low"));
+    assert_eq!(v["proof_window_ready"].as_bool(), Some(true));
+}
+
+// IRS-18: age 780/max 900, ~60s elapsed -> still-passing snapshot becomes
+// near_expiry once effective age is considered.
+#[tokio::test]
+async fn irs_18_still_passing_snapshot_becomes_near_expiry_via_elapsed() {
+    let dir = tempfile::tempdir().expect("create temp dir");
+    write_evidence(
+        &dir,
+        "intraday_refresh_20260710_090600.json",
+        &headroom_evidence(&recent_ts(), Some(780), Some(900)),
+    );
+
+    let router = make_router_with_evidence_dir(dir.path().to_str().unwrap());
+    let (status, v) = call(router, get_refresh_status()).await;
+
+    assert_eq!(status, StatusCode::OK);
+    let sym = &v["symbols"].as_array().expect("symbols array")[0];
+    assert_eq!(
+        sym["passed"].as_bool(),
+        Some(true),
+        "snapshot age 780 < max 900 -- the snapshot-based passed verdict stays true"
+    );
+    let effective_age = sym["effective_latest_completed_bar_age_secs"]
+        .as_i64()
+        .expect("effective_latest_completed_bar_age_secs must be present");
+    assert!(
+        (835..=850).contains(&effective_age),
+        "expected effective age around 840 (780 + ~60s elapsed), got {effective_age}"
+    );
+    assert_eq!(sym["near_expiry"].as_bool(), Some(true));
+    assert_eq!(sym["proof_window_risk"].as_str(), Some("high"));
+    assert_eq!(
+        v["proof_window_ready"].as_bool(),
+        Some(false),
+        "near_expiry via effective age must block proof_window_ready"
+    );
+}
+
+// IRS-19: age 913/max 900 (already stale at production time), ~60s elapsed
+// -> proof_window_ready stays false; effective-age recompute only grows the
+// overage further, proving the repair does not regress the already-stale case.
+#[tokio::test]
+async fn irs_19_already_stale_snapshot_stays_not_ready_after_elapsed() {
+    let dir = tempfile::tempdir().expect("create temp dir");
+    write_evidence(
+        &dir,
+        "intraday_refresh_20260710_090700.json",
+        &headroom_evidence(&recent_ts(), Some(913), Some(900)),
+    );
+
+    let router = make_router_with_evidence_dir(dir.path().to_str().unwrap());
+    let (status, v) = call(router, get_refresh_status()).await;
+
+    assert_eq!(status, StatusCode::OK);
+    let sym = &v["symbols"].as_array().expect("symbols array")[0];
+    assert_eq!(sym["passed"].as_bool(), Some(false));
+    let effective_age = sym["effective_latest_completed_bar_age_secs"]
+        .as_i64()
+        .expect("effective_latest_completed_bar_age_secs must be present");
+    assert!(
+        effective_age >= 913 + 60,
+        "elapsed time must only grow the already-present overage, got effective_age={effective_age}"
+    );
+    let overage = sym["staleness_overage_secs"]
+        .as_i64()
+        .expect("staleness_overage_secs must be present");
+    assert!(overage >= 13 + 60);
+    assert_eq!(v["proof_window_ready"].as_bool(), Some(false));
+    assert_eq!(v["proof_window_risk"].as_str(), Some("high"));
+}
+
+// IRS-20: missing/malformed produced_at_utc -> evidence_elapsed_secs and
+// effective_latest_completed_bar_age_secs both None; proof-window risk fails
+// safe to "unknown" exactly like a missing age/max field would.
+#[tokio::test]
+async fn irs_20_malformed_produced_at_utc_fails_safe_as_unknown() {
+    let dir = tempfile::tempdir().expect("create temp dir");
+    write_evidence(
+        &dir,
+        "intraday_refresh_20260710_090800.json",
+        &headroom_evidence("not-a-real-timestamp", Some(300), Some(900)),
+    );
+
+    let router = make_router_with_evidence_dir(dir.path().to_str().unwrap());
+    let (status, v) = call(router, get_refresh_status()).await;
+
+    assert_eq!(status, StatusCode::OK);
+    let sym = &v["symbols"].as_array().expect("symbols array")[0];
+    assert!(
+        sym["evidence_elapsed_secs"].is_null(),
+        "evidence_elapsed_secs must be None when produced_at_utc cannot be parsed"
+    );
+    assert!(
+        sym["effective_latest_completed_bar_age_secs"].is_null(),
+        "effective_latest_completed_bar_age_secs must be None when produced_at_utc cannot be parsed"
+    );
+    // Snapshot value is still surfaced unchanged even though the effective
+    // recompute is unavailable.
+    assert_eq!(sym["latest_completed_bar_age_secs"].as_i64(), Some(300));
+    assert_eq!(sym["proof_window_risk"].as_str(), Some("unknown"));
+    assert!(
+        sym["operator_action"].as_str().is_some(),
+        "operator_action must explain the missing effective-age input"
+    );
+    assert_eq!(
+        v["proof_window_ready"].as_bool(),
+        Some(false),
+        "unknown effective-age risk must never be read as proof-window-ready"
+    );
+    assert!(
+        v["stale_or_missing_evidence"]
+            .as_bool()
+            .expect("stale_or_missing_evidence must be a bool"),
+        "malformed produced_at_utc must also mark the evidence itself as stale/missing"
+    );
 }

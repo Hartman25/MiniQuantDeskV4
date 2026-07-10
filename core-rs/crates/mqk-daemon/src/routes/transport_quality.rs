@@ -19,7 +19,7 @@ use axum::{
     response::IntoResponse,
     Json,
 };
-use chrono::Utc;
+use chrono::{DateTime, Utc};
 
 use crate::api_types::{
     CryptoRegistryReadinessResponse, CryptoRegistryReadinessSafety, CryptoRegistrySymbolReadiness,
@@ -382,18 +382,47 @@ const REASON_REFRESH_FAILED: &str = "refresh_failed";
 /// tick. INTRADAY-PROVIDER-CLOCK-SKEW-01B.
 const NEAR_EXPIRY_THRESHOLD_SECS: i64 = 120;
 
-/// Pure classification of freshness headroom/overage risk from already-parsed
-/// evidence fields. Takes no clock/DB/network input -- operates only on the
-/// numbers the evidence file (or its derivation fallbacks) already produced.
+/// Computes the wall-clock-adjusted "effective" age of the latest completed
+/// bar, accounting for time elapsed since the evidence snapshot was
+/// produced. `Refresh-IntradayMarketData.ps1` records
+/// `latest_completed_bar_age_secs` as of `produced_at_utc`; by the time this
+/// route is polled, real time has moved on, so the true age the dispatch
+/// gate would see is the snapshot age plus that gap.
+/// INTRADAY-PROVIDER-CLOCK-SKEW-01F.
+///
+/// Returns `(evidence_elapsed_secs, effective_latest_completed_bar_age_secs)`.
+/// `None` propagates when either input is unavailable -- an unknown elapsed
+/// time must never be treated as zero elapsed time.
+fn effective_bar_age_secs(
+    snapshot_age_secs: Option<i64>,
+    produced_at_utc: Option<DateTime<Utc>>,
+    now_utc: DateTime<Utc>,
+) -> (Option<i64>, Option<i64>) {
+    match (snapshot_age_secs, produced_at_utc) {
+        (Some(age), Some(produced_at)) => {
+            // Clamp at 0: a clock-skewed or future produced_at_utc must
+            // never subtract from the snapshot age.
+            let elapsed = (now_utc - produced_at).num_seconds().max(0);
+            (Some(elapsed), Some(age + elapsed))
+        }
+        _ => (None, None),
+    }
+}
+
+/// Pure classification of freshness headroom/overage risk from an
+/// already-computed effective bar age. Takes no clock/DB/network input --
+/// operates only on the numbers the caller already produced (including, as
+/// of INTRADAY-PROVIDER-CLOCK-SKEW-01F, the effective age from
+/// `effective_bar_age_secs`, not the raw evidence snapshot age).
 ///
 /// Returns `(freshness_headroom_secs, staleness_overage_secs, near_expiry,
 /// proof_window_risk, operator_action)`.
 fn classify_proof_window_risk(
-    latest_completed_bar_age_secs: Option<i64>,
+    effective_latest_completed_bar_age_secs: Option<i64>,
     max_allowed_age_secs: Option<i64>,
     passed: bool,
 ) -> (Option<i64>, Option<i64>, bool, String, Option<String>) {
-    match (latest_completed_bar_age_secs, max_allowed_age_secs) {
+    match (effective_latest_completed_bar_age_secs, max_allowed_age_secs) {
         (Some(age), Some(max_age)) => {
             let delta = max_age - age;
             if delta >= 0 {
@@ -453,9 +482,16 @@ fn evidence_string(v: &serde_json::Value, key: &str) -> Option<String> {
 /// route-level post-refresh verdict from durable evidence fields.
 ///
 /// All fields are optional — evidence files may omit provider fields (check_only mode).
+///
+/// `produced_at_utc` and `now_utc` (INTRADAY-PROVIDER-CLOCK-SKEW-01F) are the
+/// evidence file's single top-level production timestamp and the one instant
+/// captured for the whole request, used to recompute the bar's effective
+/// (live) age rather than trusting the evidence snapshot age alone.
 fn parse_refresh_symbol(
     v: &serde_json::Value,
     evidence_timeframe: Option<&str>,
+    produced_at_utc: Option<DateTime<Utc>>,
+    now_utc: DateTime<Utc>,
 ) -> IntradayRefreshSymbolStatus {
     let mut fail_reasons: Vec<String> = v
         .get("fail_reasons")
@@ -541,8 +577,15 @@ fn parse_refresh_symbol(
         }
     }
 
+    let (evidence_elapsed_secs, effective_latest_completed_bar_age_secs) =
+        effective_bar_age_secs(latest_completed_bar_age_secs, produced_at_utc, now_utc);
+
     let (freshness_headroom_secs, staleness_overage_secs, near_expiry, proof_window_risk, operator_action) =
-        classify_proof_window_risk(latest_completed_bar_age_secs, max_allowed_age_secs, passed);
+        classify_proof_window_risk(
+            effective_latest_completed_bar_age_secs,
+            max_allowed_age_secs,
+            passed,
+        );
 
     IntradayRefreshSymbolStatus {
         symbol: v
@@ -582,6 +625,8 @@ fn parse_refresh_symbol(
         reason_code,
         passed,
         fail_reasons,
+        evidence_elapsed_secs,
+        effective_latest_completed_bar_age_secs,
         freshness_headroom_secs,
         staleness_overage_secs,
         near_expiry,
@@ -594,8 +639,15 @@ fn parse_refresh_symbol(
 ///
 /// `proof_window_ready` is fail-closed: `None` when `all_passed` itself is
 /// `None` (evidence didn't have a truth-bearing verdict), and `false` when
-/// any symbol is `near_expiry` or has `proof_window_risk == "unknown"` (an
-/// evidence gap must never be read as "ready").
+/// any symbol's `proof_window_risk` (INTRADAY-PROVIDER-CLOCK-SKEW-01F: now
+/// derived from *effective*, elapsed-time-adjusted bar age, not the
+/// evidence snapshot age) is `"high"` or `"unknown"`. Checking risk directly
+/// -- not just `near_expiry` -- is required because effective age can push a
+/// symbol into overage (risk `"high"`, `near_expiry=false` by
+/// `classify_proof_window_risk`'s own overage branch) even though the
+/// evidence snapshot itself, and therefore `passed`, still reported success
+/// at `produced_at_utc`. An evidence gap (`"unknown"`) must never be read as
+/// "ready" either.
 fn aggregate_proof_window_fields(
     symbols: &[IntradayRefreshSymbolStatus],
     all_passed: Option<bool>,
@@ -619,9 +671,9 @@ fn aggregate_proof_window_fields(
 
     let proof_window_ready = all_passed.map(|passed| {
         passed
-            && !symbols
+            && symbols
                 .iter()
-                .any(|s| s.near_expiry || s.proof_window_risk == "unknown")
+                .all(|s| matches!(s.proof_window_risk.as_str(), "low" | "medium"))
     });
 
     let operator_action = symbols.iter().find_map(|s| s.operator_action.clone());
@@ -829,13 +881,24 @@ pub(crate) async fn intraday_refresh_status(State(st): State<Arc<AppState>>) -> 
         .map(|s| s.to_string());
     let stale_or_missing_evidence = is_evidence_stale(produced_at_utc.as_deref());
 
+    // INTRADAY-PROVIDER-CLOCK-SKEW-01F: one now_utc/produced_at_utc pair
+    // captured for the whole request, so every symbol's effective-age
+    // recompute uses the same consistent instant.
+    let now_utc = Utc::now();
+    let produced_at_dt: Option<DateTime<Utc>> = produced_at_utc
+        .as_deref()
+        .and_then(|ts| chrono::DateTime::parse_from_rfc3339(ts).ok())
+        .map(|dt| dt.with_timezone(&Utc));
+
     let evidence_timeframe = raw.get("timeframe").and_then(|v| v.as_str());
     let symbols: Vec<IntradayRefreshSymbolStatus> = raw
         .get("symbols")
         .and_then(|v| v.as_array())
         .map(|arr| {
             arr.iter()
-                .map(|symbol| parse_refresh_symbol(symbol, evidence_timeframe))
+                .map(|symbol| {
+                    parse_refresh_symbol(symbol, evidence_timeframe, produced_at_dt, now_utc)
+                })
                 .collect()
         })
         .unwrap_or_default();

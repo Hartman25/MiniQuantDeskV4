@@ -4788,9 +4788,25 @@ pub struct IntradayRefreshSymbolStatus {
     /// Rows dropped because the bar was still in-progress (current bar).
     pub rows_filtered_in_progress: Option<i64>,
     /// Age of the latest completed bar in seconds, from refresh evidence or route derivation.
+    /// This is the evidence **snapshot** value as of `produced_at_utc` --
+    /// preserved unchanged for backward compatibility. Proof-window fields
+    /// below derive from `effective_latest_completed_bar_age_secs`, not this
+    /// field. INTRADAY-PROVIDER-CLOCK-SKEW-01F.
     pub latest_completed_bar_age_secs: Option<i64>,
     /// Maximum allowed completed-bar age in seconds for this symbol/timeframe.
     pub max_allowed_age_secs: Option<i64>,
+    /// Seconds elapsed between the evidence file's `produced_at_utc` and the
+    /// instant this route evaluated the request. `None` when `produced_at_utc`
+    /// is missing or unparseable. Clamped at 0 (never negative).
+    /// INTRADAY-PROVIDER-CLOCK-SKEW-01F.
+    pub evidence_elapsed_secs: Option<i64>,
+    /// `latest_completed_bar_age_secs + evidence_elapsed_secs` -- the bar's
+    /// age as of *now*, matching the live-age semantics the dispatch-tick
+    /// freshness gate uses. This is the value `freshness_headroom_secs`,
+    /// `staleness_overage_secs`, `near_expiry`, and `proof_window_risk` are
+    /// derived from. `None` when either input is unavailable.
+    /// INTRADAY-PROVIDER-CLOCK-SKEW-01F.
+    pub effective_latest_completed_bar_age_secs: Option<i64>,
     /// Machine-readable post-refresh freshness state.
     pub freshness_truth_state: Option<String>,
     /// Machine-readable post-refresh verdict reason.
@@ -4799,13 +4815,17 @@ pub struct IntradayRefreshSymbolStatus {
     pub passed: bool,
     /// Fail reasons for this symbol, empty on PASS.
     pub fail_reasons: Vec<String>,
-    /// `max_allowed_age_secs - latest_completed_bar_age_secs` when still within
-    /// cap (`None` when already past cap or either input field is missing).
-    /// INTRADAY-PROVIDER-CLOCK-SKEW-01B.
+    /// `max_allowed_age_secs - effective_latest_completed_bar_age_secs` when
+    /// still within cap (`None` when already past cap or either input field
+    /// is missing). Derived from *effective* (elapsed-time-adjusted) age,
+    /// not the raw evidence snapshot age. INTRADAY-PROVIDER-CLOCK-SKEW-01B,
+    /// 01F.
     pub freshness_headroom_secs: Option<i64>,
-    /// `latest_completed_bar_age_secs - max_allowed_age_secs` when already past
-    /// cap (`None` when still within cap or either input field is missing).
-    /// INTRADAY-PROVIDER-CLOCK-SKEW-01B.
+    /// `effective_latest_completed_bar_age_secs - max_allowed_age_secs` when
+    /// already past cap (`None` when still within cap or either input field
+    /// is missing). Derived from *effective* (elapsed-time-adjusted) age,
+    /// not the raw evidence snapshot age. INTRADAY-PROVIDER-CLOCK-SKEW-01B,
+    /// 01F.
     pub staleness_overage_secs: Option<i64>,
     /// `true` when the symbol is currently within cap but has 120s or less of
     /// headroom remaining -- likely to fail on the very next dispatch tick
@@ -4861,10 +4881,13 @@ pub struct IntradayRefreshStatusResponse {
     pub symbols: Vec<IntradayRefreshSymbolStatus>,
     /// Error description when `truth_state` is `"parse_error"` or `"backend_unavailable"`.
     pub error: Option<String>,
-    /// `true` only when `all_passed == Some(true)` and no symbol is
-    /// `near_expiry` -- i.e. safe to start a proof window right now without an
-    /// imminent freshness-gate failure. `None` when `truth_state != "active"`
-    /// or there are no symbols to evaluate. INTRADAY-PROVIDER-CLOCK-SKEW-01B.
+    /// `true` only when `all_passed == Some(true)` and every symbol's
+    /// `proof_window_risk` (effective-age-derived, INTRADAY-PROVIDER-CLOCK-SKEW-01F)
+    /// is `"low"` or `"medium"` -- i.e. safe to start a proof window right
+    /// now without an imminent freshness-gate failure, accounting for time
+    /// already elapsed since the evidence was produced. `None` when
+    /// `truth_state != "active"` or there are no symbols to evaluate.
+    /// INTRADAY-PROVIDER-CLOCK-SKEW-01B, 01F.
     pub proof_window_ready: Option<bool>,
     /// Worst-case `proof_window_risk` across all symbols, ranked
     /// high, unknown, medium, low. `None` when there are no symbols.

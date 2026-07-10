@@ -7293,3 +7293,51 @@ in later phases to also confirm the route repair once it lands (skipped,
 not failed, before Phase B).
 
 **Validation:** new validator PASSES. `git diff --check` clean.
+
+#### INTRADAY-PROVIDER-CLOCK-SKEW-01F-EFFECTIVE-AGE-ROUTE-REPAIR-01 — CLOSED_LOCAL
+
+**Built:** `transport_quality.rs` — new pure `effective_bar_age_secs(snapshot_age_secs,
+produced_at_utc, now_utc)` helper returning
+`(evidence_elapsed_secs, effective_latest_completed_bar_age_secs)`, clamping
+elapsed at 0 and propagating `None` when either input is unavailable. The
+route now captures one `now_utc = Utc::now()` and one parsed
+`produced_at_utc: Option<DateTime<Utc>>` per request and threads both into
+`parse_refresh_symbol`, which calls `classify_proof_window_risk` with the
+*effective* age instead of the raw evidence-snapshot age. The original
+`latest_completed_bar_age_secs` snapshot field is preserved unchanged for
+backward compatibility; two new additive per-symbol fields
+(`evidence_elapsed_secs`, `effective_latest_completed_bar_age_secs`) are
+added to `IntradayRefreshSymbolStatus` in `api_types.rs`.
+`aggregate_proof_window_fields` is repaired so `proof_window_ready` is keyed
+off each symbol's effective-age-derived `proof_window_risk` (`"low"`/
+`"medium"` required, not just the absence of `near_expiry`/`"unknown"`) —
+closing a gap where an effective-age overage that started from a
+still-technically-passing snapshot would previously have slipped through as
+`proof_window_ready=true`. `passed`/`all_passed` (the refresh run's own
+gate verdict at `produced_at_utc`) are deliberately left untouched — out of
+this patch's stated scope, and a route can be more conservative on
+`proof_window_ready` without also having to redefine what "the refresh
+itself passed" means.
+
+**Tests:** `IRS-12`..`IRS-15` updated to assert tolerant (`>=`/range) bounds
+reflecting that their `recent_ts()`/`headroom_evidence` fixtures (~60s-ago
+`produced_at_utc`) now flow through the effective-age recompute — no
+assertion was weakened, exact-equality assertions on wall-clock-dependent
+numbers became range checks. New `IRS-16`..`IRS-20` explicitly prove: the
+`effective_latest_completed_bar_age_secs` field equals snapshot age plus
+`evidence_elapsed_secs` (`IRS-16`); ample headroom survives elapsed time
+(`IRS-17`); a still-passing snapshot becomes `near_expiry`/not-ready purely
+from elapsed time (`IRS-18`); an already-stale snapshot's overage only grows
+and stays not-ready (`IRS-19`, regression proof); and a missing/malformed
+`produced_at_utc` fails safe to `proof_window_risk="unknown"` /
+`proof_window_ready=false` with both new fields `None` (`IRS-20`).
+
+**Validation:** `cargo check -p mqk-daemon` clean.
+`cargo test -p mqk-daemon --test scenario_intraday_md_refresher_operator_surface_01`
+— 20/20 pass. `cargo test -p mqk-daemon --test scenario_route_contract_rt01`
+— 2/2 pass. `cargo test -p mqk-daemon --test scenario_gui_daemon_contract_gate`
+— 23/23 pass. `cargo clippy -p mqk-daemon --lib -- -D warnings` — 0 warnings.
+`validate_intraday_provider_clock_skew_01f_effective_age.ps1` PASSES
+(route-repair branch now active). `git diff --check` clean. No provider/DB/
+broker call in any test; no order submitted; no daemon freshness gate,
+threshold, or config flag touched.
