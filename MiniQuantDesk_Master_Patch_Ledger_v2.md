@@ -6866,3 +6866,61 @@ routing; no orders; no gate weakened; no strategy threshold changed; no
 generated evidence staged.
 
 **Status:** CLOSED_LOCAL
+
+### PAPER-TRADING-SHORTEST-PATH-01D-BACKLOG-SCOPE-CONTROL-AND-LEDGER-RECONCILE-01 — CLOSED_LOCAL / DOCS-ONLY
+
+**Mission:** close the `PAPER-TRADING-SHORTEST-PATH-AUDIT-01-COMBINED`
+bundle and reconcile backlog/scope-control items without adding active
+implementation scope.
+
+**Built:** `docs/specs/paper_trading_shortest_path_01d_closure_decision.md`
+— answers all 10 required closure questions.
+
+**Verdict:**
+
+```text
+PAPER-TRADING-SHORTEST-PATH-01A: CLOSED_LOCAL
+PAPER-TRADING-SHORTEST-PATH-01B: CLOSED_LOCAL
+PAPER-TRADING-SHORTEST-PATH-01C: CLOSED_LOCAL
+PAPER-TRADING-SHORTEST-PATH-01D: CLOSED_LOCAL
+PAPER-TRADING-SHORTEST-PATH-AUDIT-01-COMBINED: CLOSED_LOCAL
+```
+
+No trading behavior changed. No paper/live orders attempted. No provider/
+broker/network contacted. **Exact next patch:**
+`PAPER-TRADE-LIFECYCLE-PROOF-01-COMBINED` (bounded, market-hours-gated
+live-observation patch — see `01C`/`01D` for full justification).
+
+**Not updated:** `docs/audits/multi_asset_completion_audit.md` and
+`docs/specs/roadmap_completion_reconcile_01.md` — this bundle is
+equity-only scope and moves no asset-class/patch-completion percentage.
+
+**Validation:** `powershell -File
+scripts\guards\validate_paper_trading_shortest_path_01a_reconcile.ps1` —
+unaffected, still passes. `git diff --check` clean.
+
+**Deliberately not done:** no code changes. No AI/Vertus/new-strategy/
+multi-asset scope started. No implementation of
+`PAPER-TRADE-LIFECYCLE-PROOF-01-COMBINED` — recommended only, not begun.
+
+**Safety confirmation:** docs-only; zero network/DB/broker calls; no live
+routing; no orders; no gate weakened; no strategy threshold changed; no
+config flag changes; no generated evidence staged.
+
+**Status:** CLOSED_LOCAL
+
+### PAPER-TRADING-SHORTEST-PATH-AUDIT-01-COMBINED — CLOSED_LOCAL (bundle closure)
+
+**Bundle:** `01A` (`1a42e9af`) → `01B` (`19f93a66`) → `01C` (`751ea20f`) →
+`01D` (this phase's commit).
+
+**Final verdict:** the strategic turnover is reconciled against current
+ledger/repo truth; the full paper-trading lifecycle is classified from
+current evidence (11-row matrix, `01B`); the minimum blocker chain to one
+visible paper trade is named as three observation-only conditions, none
+requiring new code (`01C`); six research/feature-backlog items are parked
+without implementation scope (`01A`/`01D`). No trading behavior changed
+by any phase. First recommended future patch:
+`PAPER-TRADE-LIFECYCLE-PROOF-01-COMBINED`, a bounded market-hours-gated
+live-observation patch. Full detail:
+`docs/specs/paper_trading_shortest_path_01d_closure_decision.md`.
