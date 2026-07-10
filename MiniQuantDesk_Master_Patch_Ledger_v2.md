@@ -7522,3 +7522,69 @@ into `/api/v1/portfolio/positions` and `/api/v1/portfolio/summary`.
 **Safety confirmation:** pure math only, no IO, no DB, no provider/broker
 call in any test; no route/order/risk/strategy code touched; no trading
 behavior change.
+
+---
+
+## PAPER-PNL-01C-PORTFOLIO-ROUTE-VISIBILITY-01
+
+**Status:** `CLOSED_LOCAL`.
+
+Wired the Phase B `unrealized_pnl_micros` helper into
+`/api/v1/portfolio/positions` and `/api/v1/portfolio/summary`. Both routes
+add a shared `compute_broker_positions_pnl()` that, per broker-snapshot
+position: skips the mark lookup entirely for `qty == 0` (`pnl_truth_state =
+"flat"`, `unrealized_pnl = 0.0`); returns `"db_unavailable"` when no DB pool
+is configured; otherwise looks up the latest completed `md_bars` close at
+`timeframe="1D"` (same source/function `/api/v1/portfolio/live-weights`
+uses) and returns `"mark_unavailable"` if no completed bar exists, or
+`"active"` with `mark_price`/`unrealized_pnl`/`mark_source` populated.
+`avg_price` is parsed to micros via a new `parse_decimal_micros` (no float
+round-trip) so the P&L math stays in integer micros end to end;
+`unrealized_pnl` is only converted to `f64` once, at the response boundary,
+matching this route's pre-existing float-dollar contract. `portfolio/summary`
+aggregates the per-position P&L into `unrealized_pnl` only when every
+position's own P&L is computable (same all-or-nothing discipline
+`compute_portfolio_weights` uses for NAV); `daily_pnl` stays permanently
+`null` with an explicit `daily_pnl_unavailable_reason` (no day-start
+baseline exists — Phase A finding). All new fields are additive; existing
+fields (`symbol`, `qty`, `avg_price`, `strategy_id`, `broker_qty`, `drift`,
+`realized_pnl_today`, `truth_state`, `has_snapshot`) are unchanged.
+
+Caught and fixed one bug during testing: the first implementation checked
+DB availability before checking `qty == 0`, so a flat position on a daemon
+with no DB pool incorrectly reported `"db_unavailable"` instead of `"flat"`
+— fixed by resolving flat positions first, regardless of DB presence.
+
+**Built:**
+`core-rs/crates/mqk-daemon/src/api_types/portfolio_snapshot.rs` (new
+`pnl_truth_state`/`pnl_unavailable_reason`/`mark_source` fields on
+`PortfolioPositionRow`), `core-rs/crates/mqk-daemon/src/api_types.rs` (new
+`unrealized_pnl`/`pnl_truth_state`/`pnl_unavailable_reason`/
+`daily_pnl_unavailable_reason` fields on `PortfolioSummaryResponse`),
+`core-rs/crates/mqk-daemon/src/routes/helpers.rs` (`parse_decimal_micros` +
+6 unit tests), `core-rs/crates/mqk-daemon/src/routes/portfolio.rs`
+(`compute_broker_positions_pnl`, `aggregate_positions_pnl`, wired into both
+routes), `core-rs/crates/mqk-daemon/tests/scenario_paper_pnl_operator_visibility_01.rs`
+(9 scenario tests: no-snapshot, db-unavailable, flat, backward-compat field
+check, and 5 DB-backed tests against the local paper Postgres — positive
+P&L, negative P&L, mark-unavailable, summary aggregation, zero
+`oms_outbox` writes).
+
+**Validation:** `cargo check -p mqk-daemon` clean;
+`cargo test -p mqk-daemon --test scenario_paper_pnl_operator_visibility_01 -- --test-threads=1`
+9/9 passed (DB-backed tests ran for real against the local paper Postgres,
+not skipped); `cargo test -p mqk-daemon --test scenario_route_contract_rt01`
+2/2 passed; `cargo test -p mqk-daemon --test scenario_gui_daemon_contract_gate`
+23/23 passed; `cargo test -p mqk-daemon --lib` 252/252 passed;
+`cargo clippy -p mqk-daemon --lib -- -D warnings` clean.
+
+**Next:** `PAPER-PNL-01D` — real DB readback proof against the actual
+proof-02 `AAPL` position, if it and a completed mark still exist in the
+local paper DB; otherwise route-level DB-backed proof (already captured
+above) stands in for it.
+
+**Safety confirmation:** zero order/outbox writes from either route
+(proven by PPV-09); no strategy/risk/OMS/broker code touched; no
+provider/broker/network call in any test (DB-backed tests hit only the
+local paper Postgres via `MQK_DATABASE_URL`, no provider/broker); no
+`.env.local` or config flag change; no trading behavior change.

@@ -954,6 +954,25 @@ pub struct PortfolioSummaryResponse {
     pub long_market_value: Option<f64>,
     pub short_market_value: Option<f64>,
     pub daily_pnl: Option<f64>,
+    /// PAPER-PNL-OPERATOR-VISIBILITY-CLOSURE-01: always `null` — no
+    /// day-start / previous-session-close equity baseline exists anywhere in
+    /// this repo's schema (confirmed by repo-wide grep in
+    /// `paper_pnl_operator_visibility_01a_current_truth_audit.md`), so
+    /// `daily_pnl` cannot be truthfully computed. This field states why
+    /// rather than leaving an unexplained `null`.
+    pub daily_pnl_unavailable_reason: Option<String>,
+    /// PAPER-PNL-OPERATOR-VISIBILITY-CLOSURE-01: sum of each position's
+    /// `(mark_price - avg_price) * qty` (see
+    /// `/api/v1/portfolio/positions`), only when every position's own P&L is
+    /// computable. `null` otherwise — see `pnl_truth_state`.
+    pub unrealized_pnl: Option<f64>,
+    /// `"active"` — every position's P&L is computable; `unrealized_pnl` is populated.
+    /// `"no_snapshot"` — no broker snapshot; mirrors `truth_state`.
+    /// `"mark_unavailable"` — at least one non-flat position has no completed `md_bars` row.
+    /// `"db_unavailable"` — no DB pool configured.
+    pub pnl_truth_state: String,
+    /// Human-readable reason, present whenever `pnl_truth_state` is not `"active"`.
+    pub pnl_unavailable_reason: Option<String>,
     pub buying_power: Option<f64>,
 }
 

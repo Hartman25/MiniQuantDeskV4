@@ -25,7 +25,207 @@ use crate::state::{
     bridge_instrument_registry_v2_to_economics, AppState, InstrumentEconomicsBridgeResult,
 };
 
-use super::helpers::{exposure_breakdown, parse_decimal, position_market_value};
+use super::helpers::{exposure_breakdown, parse_decimal, parse_decimal_micros, position_market_value};
+
+// ---------------------------------------------------------------------------
+// PAPER-PNL-OPERATOR-VISIBILITY-CLOSURE-01C: broker-position mark/P&L seam
+// ---------------------------------------------------------------------------
+
+/// PAPER-PNL-OPERATOR-VISIBILITY-CLOSURE-01: always-unavailable reason for
+/// `/api/v1/portfolio/summary.daily_pnl` — no day-start / previous-close
+/// equity baseline exists anywhere in this repo's schema (Phase A audit:
+/// `paper_pnl_operator_visibility_01a_current_truth_audit.md` §Q7).
+const DAILY_PNL_REASON_NO_BASELINE: &str = "no_day_start_equity_baseline_in_schema";
+const DAILY_PNL_REASON_NO_SNAPSHOT: &str = "no_broker_snapshot";
+
+/// Default mark timeframe for broker-position P&L, matching
+/// `DEFAULT_LIVE_WEIGHTS_TIMEFRAME` used by `/api/v1/portfolio/live-weights`.
+const DEFAULT_POSITIONS_PNL_TIMEFRAME: &str = "1D";
+
+#[derive(Clone)]
+struct PositionPnlResult {
+    mark_price: Option<f64>,
+    mark_source: Option<String>,
+    unrealized_pnl: Option<f64>,
+    /// Exact micros form of `unrealized_pnl`, used for lossless aggregation
+    /// in `portfolio_summary`. Not exposed on the wire.
+    unrealized_pnl_micros: Option<i128>,
+    pnl_truth_state: String,
+    pnl_unavailable_reason: Option<String>,
+}
+
+impl PositionPnlResult {
+    fn unavailable(truth_state: &str, reason: &str) -> Self {
+        Self {
+            mark_price: None,
+            mark_source: None,
+            unrealized_pnl: None,
+            unrealized_pnl_micros: None,
+            pnl_truth_state: truth_state.to_string(),
+            pnl_unavailable_reason: Some(reason.to_string()),
+        }
+    }
+
+    fn flat() -> Self {
+        Self {
+            mark_price: None,
+            mark_source: None,
+            unrealized_pnl: Some(0.0),
+            unrealized_pnl_micros: Some(0),
+            pnl_truth_state: "flat".to_string(),
+            pnl_unavailable_reason: None,
+        }
+    }
+}
+
+/// Resolve mark + unrealized P&L for each broker-snapshot position, using
+/// the same latest-completed-`md_bars`-close mark source
+/// `/api/v1/portfolio/live-weights` already uses (`timeframe = "1D"`).
+///
+/// Never fabricates a mark: a missing DB pool or a missing completed bar
+/// surfaces an explicit `pnl_truth_state` + `pnl_unavailable_reason` rather
+/// than a silent `null`. `qty == 0` positions never require a mark — their
+/// P&L is always exactly `0`.
+async fn compute_broker_positions_pnl(
+    st: &AppState,
+    positions: &[mqk_schemas::BrokerPosition],
+) -> BTreeMap<String, PositionPnlResult> {
+    let mut results = BTreeMap::new();
+
+    // A flat position never needs a mark, so it is resolved before the DB
+    // check — a missing DB pool must not turn a flat position's known-zero
+    // P&L into a false "unavailable" (matches the `live-weights` precedent).
+    let mut non_flat: Vec<&mqk_schemas::BrokerPosition> = Vec::with_capacity(positions.len());
+    for p in positions {
+        let qty = p.qty.parse::<i64>().unwrap_or(0);
+        if qty == 0 {
+            results.insert(p.symbol.clone(), PositionPnlResult::flat());
+        } else {
+            non_flat.push(p);
+        }
+    }
+
+    let Some(pool) = st.db.as_ref() else {
+        for p in &non_flat {
+            results.insert(
+                p.symbol.clone(),
+                PositionPnlResult::unavailable("db_unavailable", "no_db_pool_configured"),
+            );
+        }
+        return results;
+    };
+
+    for p in non_flat {
+        let qty = p.qty.parse::<i64>().unwrap_or(0);
+        let Some(avg_price_micros) = parse_decimal_micros(&p.avg_price) else {
+            results.insert(
+                p.symbol.clone(),
+                PositionPnlResult::unavailable("mark_unavailable", "avg_price_unparseable"),
+            );
+            continue;
+        };
+
+        match mqk_db::fetch_recent_completed_bars_for_strategy(
+            pool,
+            &p.symbol,
+            DEFAULT_POSITIONS_PNL_TIMEFRAME,
+            1,
+        )
+        .await
+        {
+            Ok(bars) => match bars.last() {
+                Some(bar) => {
+                    let pnl_micros = mqk_portfolio::unrealized_pnl_micros(
+                        qty,
+                        avg_price_micros,
+                        bar.close_micros,
+                    );
+                    results.insert(
+                        p.symbol.clone(),
+                        PositionPnlResult {
+                            mark_price: Some(
+                                bar.close_micros as f64 / mqk_portfolio::MICROS_SCALE as f64,
+                            ),
+                            mark_source: Some(format!(
+                                "md_bars:{DEFAULT_POSITIONS_PNL_TIMEFRAME}:close"
+                            )),
+                            unrealized_pnl: Some(
+                                pnl_micros as f64 / mqk_portfolio::MICROS_SCALE as f64,
+                            ),
+                            unrealized_pnl_micros: Some(pnl_micros),
+                            pnl_truth_state: "active".to_string(),
+                            pnl_unavailable_reason: None,
+                        },
+                    );
+                }
+                None => {
+                    results.insert(
+                        p.symbol.clone(),
+                        PositionPnlResult::unavailable(
+                            "mark_unavailable",
+                            "no_completed_md_bars_row_for_symbol",
+                        ),
+                    );
+                }
+            },
+            Err(err) => {
+                tracing::warn!(
+                    "compute_broker_positions_pnl: md_bars lookup failed for {}: {err}",
+                    p.symbol
+                );
+                results.insert(
+                    p.symbol.clone(),
+                    PositionPnlResult::unavailable(
+                        "mark_unavailable",
+                        "no_completed_md_bars_row_for_symbol",
+                    ),
+                );
+            }
+        }
+    }
+
+    results
+}
+
+/// Aggregate per-position P&L into a single portfolio-level figure, only
+/// when every position's own P&L is computable (`"active"` or `"flat"`) —
+/// same all-or-nothing truth-state discipline `compute_portfolio_weights`
+/// already uses for NAV. Returns `(unrealized_pnl, pnl_truth_state,
+/// pnl_unavailable_reason)`.
+fn aggregate_positions_pnl(
+    pnl_by_symbol: &BTreeMap<String, PositionPnlResult>,
+) -> (Option<f64>, String, Option<String>) {
+    if pnl_by_symbol.is_empty() {
+        return (Some(0.0), "active".to_string(), None);
+    }
+
+    let mut total_micros: i128 = 0;
+    let mut blockers: Vec<String> = Vec::new();
+    for (symbol, r) in pnl_by_symbol {
+        match r.unrealized_pnl_micros {
+            Some(v) => total_micros = total_micros.saturating_add(v),
+            None => blockers.push(format!("{symbol}: {}", r.pnl_truth_state)),
+        }
+    }
+
+    if blockers.is_empty() {
+        (
+            Some(total_micros as f64 / mqk_portfolio::MICROS_SCALE as f64),
+            "active".to_string(),
+            None,
+        )
+    } else {
+        let truth_state = if pnl_by_symbol
+            .values()
+            .any(|r| r.pnl_truth_state == "db_unavailable")
+        {
+            "db_unavailable"
+        } else {
+            "mark_unavailable"
+        };
+        (None, truth_state.to_string(), Some(blockers.join("; ")))
+    }
+}
 
 // ---------------------------------------------------------------------------
 // GET /api/v1/portfolio/summary
@@ -38,6 +238,9 @@ pub(crate) async fn portfolio_summary(State(st): State<Arc<AppState>>) -> impl I
         let account_equity = parse_decimal(&snapshot.account.equity);
         let cash = parse_decimal(&snapshot.account.cash);
         let (long_market_value, short_market_value, _, _) = exposure_breakdown(&snapshot.positions);
+        let pnl_by_symbol = compute_broker_positions_pnl(&st, &snapshot.positions).await;
+        let (unrealized_pnl, pnl_truth_state, pnl_unavailable_reason) =
+            aggregate_positions_pnl(&pnl_by_symbol);
 
         PortfolioSummaryResponse {
             has_snapshot: true,
@@ -47,6 +250,10 @@ pub(crate) async fn portfolio_summary(State(st): State<Arc<AppState>>) -> impl I
             long_market_value: Some(long_market_value),
             short_market_value: Some(short_market_value),
             daily_pnl: None,
+            daily_pnl_unavailable_reason: Some(DAILY_PNL_REASON_NO_BASELINE.to_string()),
+            unrealized_pnl,
+            pnl_truth_state,
+            pnl_unavailable_reason,
             buying_power: Some(cash),
         }
     } else {
@@ -58,6 +265,10 @@ pub(crate) async fn portfolio_summary(State(st): State<Arc<AppState>>) -> impl I
             long_market_value: None,
             short_market_value: None,
             daily_pnl: None,
+            daily_pnl_unavailable_reason: Some(DAILY_PNL_REASON_NO_SNAPSHOT.to_string()),
+            unrealized_pnl: None,
+            pnl_truth_state: "no_snapshot".to_string(),
+            pnl_unavailable_reason: None,
             buying_power: None,
         }
     };
@@ -88,22 +299,32 @@ pub(crate) async fn portfolio_positions(State(st): State<Arc<AppState>>) -> impl
             .into_response(),
         Some(snapshot) => {
             let captured_at_utc = snapshot.captured_at_utc.to_rfc3339();
+            let pnl_by_symbol = compute_broker_positions_pnl(&st, &snapshot.positions).await;
             let rows = snapshot
                 .positions
                 .iter()
                 .map(|p| {
                     let qty = p.qty.parse::<i64>().unwrap_or(0);
                     let avg_price = parse_decimal(&p.avg_price);
+                    let pnl = pnl_by_symbol.get(&p.symbol).cloned().unwrap_or_else(|| {
+                        PositionPnlResult::unavailable(
+                            "mark_unavailable",
+                            "internal_pnl_lookup_missing",
+                        )
+                    });
                     PortfolioPositionRow {
                         symbol: p.symbol.clone(),
                         strategy_id: None,
                         qty,
                         avg_price,
-                        mark_price: None,
-                        unrealized_pnl: None,
+                        mark_price: pnl.mark_price,
+                        unrealized_pnl: pnl.unrealized_pnl,
                         realized_pnl_today: None,
                         broker_qty: qty,
                         drift: None,
+                        pnl_truth_state: pnl.pnl_truth_state,
+                        pnl_unavailable_reason: pnl.pnl_unavailable_reason,
+                        mark_source: pnl.mark_source,
                     }
                 })
                 .collect();

@@ -16,11 +16,18 @@ use serde::{Deserialize, Serialize};
 /// Fields with no broker-snapshot equivalent are emitted as `null`:
 /// - `strategy_id`: `null` — positions are not attributed to a strategy at
 ///   the broker snapshot level.
-/// - `mark_price`, `unrealized_pnl`, `realized_pnl_today`: `null` — mark-to-
-///   market data is not present in the broker snapshot.
+/// - `realized_pnl_today`: `null` — broker snapshot has no today-only
+///   realized P&L.
 /// - `drift`: `null` — reconcile-level position drift is not assessed at the
 ///   broker snapshot layer.
 /// - `broker_qty`: same as `qty` — the row IS the broker view.
+///
+/// `mark_price` / `unrealized_pnl` (PAPER-PNL-OPERATOR-VISIBILITY-CLOSURE-01):
+/// populated from the latest *completed* `md_bars` close for this symbol —
+/// the same mark source `/api/v1/portfolio/live-weights` uses — combined
+/// with this row's own `avg_price` via `mqk_portfolio::unrealized_pnl_micros`.
+/// `null` whenever no completed mark exists or no DB is configured; see
+/// `pnl_truth_state` / `pnl_unavailable_reason` for why. Never fabricated.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PortfolioPositionRow {
     pub symbol: String,
@@ -28,9 +35,11 @@ pub struct PortfolioPositionRow {
     pub strategy_id: Option<String>,
     pub qty: i64,
     pub avg_price: f64,
-    /// `null` — mark prices are not present in the broker snapshot.
+    /// Latest completed `md_bars` close for this symbol, or `null` if
+    /// unavailable — see `pnl_truth_state`.
     pub mark_price: Option<f64>,
-    /// `null` — broker snapshot has no unrealized PnL.
+    /// `(mark_price - avg_price) * qty`, or `null` if `mark_price` is
+    /// unavailable — see `pnl_truth_state`.
     pub unrealized_pnl: Option<f64>,
     /// `null` — broker snapshot has no today-only realized PnL.
     pub realized_pnl_today: Option<f64>,
@@ -38,6 +47,17 @@ pub struct PortfolioPositionRow {
     pub broker_qty: i64,
     /// `null` — reconcile-level drift is not assessed at broker snapshot layer.
     pub drift: Option<bool>,
+    /// `"active"` — mark found, `mark_price`/`unrealized_pnl` are populated.
+    /// `"flat"` — `qty == 0`; `unrealized_pnl` is `0.0` by definition, no mark needed.
+    /// `"mark_unavailable"` — DB present but no completed `md_bars` row for this symbol.
+    /// `"db_unavailable"` — no DB pool configured; no mark could be looked up.
+    pub pnl_truth_state: String,
+    /// Human-readable reason code, present whenever `pnl_truth_state` is not
+    /// `"active"` or `"flat"`.
+    pub pnl_unavailable_reason: Option<String>,
+    /// Provenance of `mark_price`, e.g. `"md_bars:1D:close"`. `null` unless
+    /// `pnl_truth_state == "active"`.
+    pub mark_source: Option<String>,
 }
 
 /// Response wrapper for `/api/v1/portfolio/positions`.

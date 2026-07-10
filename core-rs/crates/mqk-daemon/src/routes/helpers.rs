@@ -226,6 +226,46 @@ pub(crate) fn parse_decimal(value: &str) -> f64 {
     value.parse::<f64>().unwrap_or(0.0)
 }
 
+/// PAPER-PNL-OPERATOR-VISIBILITY-CLOSURE-01B: parse a broker-supplied
+/// decimal string (e.g. `"314.81"`) into fixed-point micros (1e-6) without a
+/// lossy float round-trip, so P&L math can stay in integer micros end to end
+/// (matching the `md_bars.close_micros` mark this is combined with).
+///
+/// Returns `None` for any string that is not a valid signed decimal number
+/// (fail-closed rather than defaulting to `0`, unlike `parse_decimal`, since
+/// callers use this specifically to decide whether P&L is computable).
+pub(crate) fn parse_decimal_micros(value: &str) -> Option<i64> {
+    let value = value.trim();
+    let (sign, digits) = match value.strip_prefix('-') {
+        Some(rest) => (-1i64, rest),
+        None => (1i64, value),
+    };
+    let (int_part, frac_part) = digits.split_once('.').unwrap_or((digits, ""));
+    if int_part.is_empty() && frac_part.is_empty() {
+        return None;
+    }
+    let int_val: i64 = if int_part.is_empty() {
+        0
+    } else {
+        int_part.parse().ok()?
+    };
+    let mut frac_digits = frac_part.to_string();
+    if frac_digits.len() > 6 {
+        frac_digits.truncate(6);
+    } else {
+        while frac_digits.len() < 6 {
+            frac_digits.push('0');
+        }
+    }
+    let frac_val: i64 = if frac_digits.is_empty() {
+        0
+    } else {
+        frac_digits.parse().ok()?
+    };
+    let micros = int_val.checked_mul(1_000_000)?.checked_add(frac_val)?;
+    Some(sign * micros)
+}
+
 /// Map an OMS canonical state name to a display-friendly lifecycle stage label.
 pub(crate) fn oms_stage_label(status: &str) -> &'static str {
     match status {
@@ -613,6 +653,37 @@ mod tests {
             unmatched_broker_events: 0,
             note: None,
         }
+    }
+
+    #[test]
+    fn pdm01_parses_typical_broker_avg_price() {
+        assert_eq!(parse_decimal_micros("314.81"), Some(314_810_000));
+    }
+
+    #[test]
+    fn pdm02_parses_integer_with_no_fraction() {
+        assert_eq!(parse_decimal_micros("100"), Some(100_000_000));
+    }
+
+    #[test]
+    fn pdm03_parses_negative_value() {
+        assert_eq!(parse_decimal_micros("-50.25"), Some(-50_250_000));
+    }
+
+    #[test]
+    fn pdm04_truncates_beyond_six_fractional_digits() {
+        assert_eq!(parse_decimal_micros("1.1234567"), Some(1_123_456));
+    }
+
+    #[test]
+    fn pdm05_pads_short_fractional_digits() {
+        assert_eq!(parse_decimal_micros("2.5"), Some(2_500_000));
+    }
+
+    #[test]
+    fn pdm06_rejects_non_numeric_input() {
+        assert_eq!(parse_decimal_micros("not_a_number"), None);
+        assert_eq!(parse_decimal_micros(""), None);
     }
 
     #[test]
