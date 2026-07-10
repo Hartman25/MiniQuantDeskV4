@@ -7192,3 +7192,42 @@ this phase's Rust-only changes).
 directly in this phase (same files Phase C would have touched) —
 `INTRADAY-PROVIDER-CLOCK-SKEW-01C-OPERATOR-STATUS-SURFACE-01` is a no-op per
 the mission's own conditional-skip instruction.
+
+### INTRADAY-PROVIDER-CLOCK-SKEW-01D-SMOKE-RUNNER-PREFLIGHT-GUARD-01 — CLOSED_LOCAL
+
+**Mission:** teach `Start-PaperTradingSmoke.ps1 -RequireIntradayRefresh` to
+reject (not just accept) evidence that is fresh but too close to its
+freshness cap to survive startup + first dispatch tick — a script-preflight
+guard only, never a daemon gate change.
+
+**Built:** new `-MinFreshnessHeadroomSeconds` parameter (default `120`).
+`STEP 14C` gained a new block, after the existing `truth_state`/
+`stale_or_missing_evidence`/`all_passed` checks (all unchanged): it prefers
+the `01B` route's `proof_window_ready`/`proof_window_risk` fields when
+present (fails closed unless `proof_window_ready == true`, printing each
+symbol's `latest_completed_bar_ts`/`latest_completed_bar_age_secs`/
+`max_allowed_age_secs`/`freshness_headroom_secs`/`near_expiry`/
+`proof_window_risk` via a new `Format-HeadroomSymbolDetail` helper); when an
+older daemon build lacks those fields it falls back to a manual per-symbol
+`freshness_headroom_secs < $MinFreshnessHeadroomSeconds` comparison instead
+of silently skipping the check. Both failure paths print the same
+actionable resolve/re-check guidance the existing checks already use and
+exit `1` before STEP 15 (runtime start). Default script behavior
+(`-RequireIntradayRefresh` not set) is completely unchanged.
+
+**Validator:** new
+`scripts/guards/validate_intraday_provider_clock_skew_01d_smoke_guard.ps1`
+— PowerShell parser check, `-MinFreshnessHeadroomSeconds = 120` declaration
+present, `freshness_headroom_secs`/`proof_window_ready` field reference
+present, no `.env.local` writes, no `MQK_INTRADAY_BAR_MAX_AGE_SECS`
+assignment, `-RequireIntradayRefresh` parameter/gate still present and not
+disabled, and — scoped specifically to the new guard block (not the whole
+1700+-line script, which legitimately calls `/api/v1/ops/action` elsewhere
+for pre-existing arm/disarm/stop actions) — no `/api/v1/ops/action`,
+`/api/v1/strategy/signal`, or `Submit-Order` reference.
+
+**Validation:** PowerShell parser: 0 errors. Both guard validators
+(`01a`/`01d`) PASS. `git diff --check` clean. No `-Once`/live daemon smoke
+run — this phase adds a preflight guard on top of the already-proven `01B`
+route and the pre-existing `STEP 14C` checks; no new network/DB/broker
+behavior was introduced to exercise live.

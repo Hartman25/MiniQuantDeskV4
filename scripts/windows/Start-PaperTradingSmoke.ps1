@@ -39,12 +39,23 @@
 #                      false, and all_passed=true. Default: off -- default smoke behavior remains
 #                      observe-only for data freshness beyond STEP 5B's one-shot prep; the
 #                      per-tick DATA-FRESHNESS-READINESS-GATE-01 gate still applies either way.
+#                      Also fails closed (INTRADAY-PROVIDER-CLOCK-SKEW-01D) when the response's
+#                      proof_window_ready field is not true, or -- as a fallback when an older
+#                      daemon build has no such field -- when any symbol's freshness_headroom_secs
+#                      is below -MinFreshnessHeadroomSeconds. This is a script-preflight-only
+#                      guard: it never changes daemon dispatch-tick freshness gate behavior.
 #   -IntradayRefreshIntervalSeconds
 #                      Refresh interval passed to Refresh-IntradayMarketData.ps1 when
 #                      -StartIntradayRefreshLoop is set. Default: 300.
 #   -IntradayRefreshDurationSeconds
 #                      Total refresh-loop duration passed to Refresh-IntradayMarketData.ps1 when
 #                      -StartIntradayRefreshLoop is set. Default: 1800.
+#   -MinFreshnessHeadroomSeconds
+#                      Minimum seconds of freshness headroom (max_allowed_age_secs minus
+#                      latest_completed_bar_age_secs) required, per symbol, before STEP 14C
+#                      (-RequireIntradayRefresh) will let the script proceed to STEP 15. Controls
+#                      only this script's preflight quality bar -- it does not change
+#                      MQK_INTRADAY_BAR_MAX_AGE_SECS or any daemon gate. Default: 120.
 #
 # Hard rules enforced by this script:
 #   - Paper+Alpaca path only. Fails if daemon_mode != paper.
@@ -69,7 +80,8 @@ param(
     [switch]$StartIntradayRefreshLoop,
     [switch]$RequireIntradayRefresh,
     [int]   $IntradayRefreshIntervalSeconds = 300,
-    [int]   $IntradayRefreshDurationSeconds = 1800
+    [int]   $IntradayRefreshDurationSeconds = 1800,
+    [int]   $MinFreshnessHeadroomSeconds = 120
 )
 
 Set-StrictMode -Version Latest
@@ -1527,7 +1539,67 @@ if ($RequireIntradayRefresh) {
         exit 1
     }
 
-    Write-Ok "Intraday refresh readiness confirmed: truth_state=active  all_passed=true  stale_or_missing_evidence=false"
+    # -------------------------------------------------------------------------
+    # INTRADAY-PROVIDER-CLOCK-SKEW-01D: freshness-headroom guard.
+    # Script-preflight-only -- never changes DATA-FRESHNESS-READINESS-GATE-01
+    # or any daemon dispatch-tick behavior. Evidence can report all_passed=true
+    # while still having only seconds of headroom before the freshness cap;
+    # this is exactly the condition that let the 2026-07-10 market-hours proof
+    # pass STEP 14C and then fail 33 seconds into the run. Prefers the route's
+    # own proof_window_ready/proof_window_risk fields when present; falls back
+    # to a manual per-symbol freshness_headroom_secs comparison against
+    # -MinFreshnessHeadroomSeconds when an older daemon build lacks those
+    # fields, so this guard degrades gracefully instead of silently no-op'ing.
+    # -------------------------------------------------------------------------
+    $irSymbolsForHeadroom = if ($null -ne $intradayStatus.PSObject.Properties['symbols']) { @($intradayStatus.symbols) } else { @() }
+    $hasProofWindowReadyField = $null -ne $intradayStatus.PSObject.Properties['proof_window_ready']
+    $headroomFailures = @()
+
+    function Format-HeadroomSymbolDetail {
+        param($Sym)
+        $latestTs  = if ($null -ne $Sym.PSObject.Properties['latest_completed_bar_ts']) { $Sym.latest_completed_bar_ts } else { $null }
+        $age       = if ($null -ne $Sym.PSObject.Properties['latest_completed_bar_age_secs']) { $Sym.latest_completed_bar_age_secs } else { $null }
+        $maxAge    = if ($null -ne $Sym.PSObject.Properties['max_allowed_age_secs']) { $Sym.max_allowed_age_secs } else { $null }
+        $headroom  = if ($null -ne $Sym.PSObject.Properties['freshness_headroom_secs']) { $Sym.freshness_headroom_secs } else { $null }
+        $nearExp   = if ($null -ne $Sym.PSObject.Properties['near_expiry']) { $Sym.near_expiry } else { $null }
+        $risk      = if ($null -ne $Sym.PSObject.Properties['proof_window_risk']) { $Sym.proof_window_risk } else { 'unknown' }
+        "symbol=$($Sym.symbol) latest_completed_bar_ts=$latestTs latest_completed_bar_age_secs=$age max_allowed_age_secs=$maxAge freshness_headroom_secs=$headroom near_expiry=$nearExp proof_window_risk=$risk"
+    }
+
+    if ($hasProofWindowReadyField) {
+        if ($intradayStatus.proof_window_ready -ne $true) {
+            foreach ($irSym in $irSymbolsForHeadroom) {
+                $headroomFailures += (Format-HeadroomSymbolDetail -Sym $irSym)
+            }
+            Write-Fail "INTRADAY_REFRESH_BLOCKED_PROOF_WINDOW_NOT_READY: proof_window_ready=$($intradayStatus.proof_window_ready) proof_window_risk=$($intradayStatus.proof_window_risk). Evidence currently passes but is too close to its freshness cap (or has an evidence gap) to safely start a proof run."
+            foreach ($f in $headroomFailures) { Write-Fail "  $f" }
+            Write-Fail "  Recommended action: wait for a fresher provider bar, then re-run: powershell -ExecutionPolicy Bypass -File scripts\windows\Refresh-IntradayMarketData.ps1 -Once"
+            Write-Fail "  Then re-check: GET /api/v1/market-data/intraday-refresh/status (look for proof_window_ready=true)."
+            Write-Fail "  Or re-run this script with -StartIntradayRefreshLoop."
+            Write-EvidenceCapture "STEP 14C: proof_window_ready != true"
+            exit 1
+        }
+        Write-Ok "proof_window_ready=true  proof_window_risk=$($intradayStatus.proof_window_risk)"
+    } else {
+        Write-Step "proof_window_ready field not present on this daemon build -- falling back to a per-symbol freshness_headroom_secs >= ${MinFreshnessHeadroomSeconds}s check."
+        foreach ($irSym in $irSymbolsForHeadroom) {
+            $hasHeadroomField = $null -ne $irSym.PSObject.Properties['freshness_headroom_secs']
+            if ($hasHeadroomField -and $null -ne $irSym.freshness_headroom_secs -and $irSym.freshness_headroom_secs -lt $MinFreshnessHeadroomSeconds) {
+                $headroomFailures += (Format-HeadroomSymbolDetail -Sym $irSym)
+            }
+        }
+        if ($headroomFailures.Count -gt 0) {
+            Write-Fail "INTRADAY_REFRESH_BLOCKED_INSUFFICIENT_HEADROOM: one or more symbols have less than ${MinFreshnessHeadroomSeconds}s of freshness headroom remaining (-MinFreshnessHeadroomSeconds=$MinFreshnessHeadroomSeconds)."
+            foreach ($f in $headroomFailures) { Write-Fail "  $f" }
+            Write-Fail "  Recommended action: wait for a fresher provider bar, then re-run: powershell -ExecutionPolicy Bypass -File scripts\windows\Refresh-IntradayMarketData.ps1 -Once"
+            Write-Fail "  Then re-check: GET /api/v1/market-data/intraday-refresh/status."
+            Write-Fail "  Or re-run this script with -StartIntradayRefreshLoop."
+            Write-EvidenceCapture "STEP 14C: insufficient freshness headroom (fallback path, no proof_window_ready field)"
+            exit 1
+        }
+    }
+
+    Write-Ok "Intraday refresh readiness confirmed: truth_state=active  all_passed=true  stale_or_missing_evidence=false  headroom>=${MinFreshnessHeadroomSeconds}s"
 } else {
     Write-Step "Intraday refresh verification not requested (-RequireIntradayRefresh not set)."
     Write-Step "  DATA-FRESHNESS-READINESS-GATE-01 still evaluates freshness on every strategy-dispatch tick regardless of this flag."
