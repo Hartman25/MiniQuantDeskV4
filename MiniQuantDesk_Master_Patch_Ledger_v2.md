@@ -7031,3 +7031,73 @@ routing; no orders; no gate weakened; no strategy threshold changed; no
 generated evidence staged.
 
 **Status:** CLOSED_LOCAL
+
+### PAPER-TRADE-LIFECYCLE-PROOF-01D-CLOSURE-AND-LEDGER-RECONCILE-01 — CLOSED_LOCAL / DOCS-ONLY
+
+**Mission:** close the `PAPER-TRADE-LIFECYCLE-PROOF-01-COMBINED` bundle
+and reconcile ledger/roadmap docs.
+
+**Built:** `docs/specs/paper_trade_lifecycle_proof_01d_closure_decision.md`
+— answers all 16 required closure questions.
+
+**Verdict:**
+
+```text
+PAPER-TRADE-LIFECYCLE-PROOF-01A: CLOSED_LOCAL
+PAPER-TRADE-LIFECYCLE-PROOF-01B: CLOSED_LOCAL / DURABLE-NO-TRADE
+PAPER-TRADE-LIFECYCLE-PROOF-01C: CLOSED_LOCAL
+PAPER-TRADE-LIFECYCLE-PROOF-01D: CLOSED_LOCAL
+PAPER-TRADE-LIFECYCLE-PROOF-01-COMBINED: CLOSED_LOCAL / PARTIAL / DATA-FRESHNESS-BLOCKED
+```
+
+No paper order occurred naturally; none was forced. `live_routing_enabled`
+stayed false across all four phases; zero live orders attempted; no
+threshold/gate/config changed. **Next patch recommended:**
+`INTRADAY-PROVIDER-CLOCK-SKEW-OPERATOR-GUARD-01-COMBINED` (or another
+bounded market-hours observation as a lower-cost fallback) — see `01C`/
+`01D` for full justification.
+
+**Not updated:** `docs/specs/roadmap_completion_reconcile_01.md` and
+`docs/audits/multi_asset_completion_audit.md` — this bundle is
+single-symbol equity-only observation and moves no asset-class/
+patch-completion percentage, same rationale already applied by
+`PAPER-TRADING-SHORTEST-PATH-01D`.
+
+**Validation:** `git diff --check` clean.
+
+**Deliberately not done:** no code changes.
+`INTRADAY-PROVIDER-CLOCK-SKEW-OPERATOR-GUARD-01-COMBINED` recommended
+only, not begun.
+
+**Safety confirmation:** docs-only; zero network/DB/broker calls (this
+phase); no live routing; no orders; no gate weakened; no strategy
+threshold changed; no config flag changes; no generated evidence staged
+(`exports/paper_trade_lifecycle_proof_01/*.json` and
+`smoke_logs/paper_trade_lifecycle_proof_01b_run_20260710.log` both
+`.gitignore`-covered, verified untracked after every commit in this
+bundle).
+
+**Status:** CLOSED_LOCAL
+
+### PAPER-TRADE-LIFECYCLE-PROOF-01-COMBINED — CLOSED_LOCAL / PARTIAL / DATA-FRESHNESS-BLOCKED (bundle closure)
+
+**Bundle:** `01A` (`876e6c72`) → `01B` (`c71c600b`) → `01C` (`dd4c771c`) →
+`01D` (this phase's commit).
+
+**Final verdict:** a bounded, market-hours-gated live-observation run of
+the canonical paper-trading path (`Start-PaperTradingSmoke.ps1
+-StartIntradayRefreshLoop -RequireIntradayRefresh -WatchSeconds 1800`,
+2026-07-10, active NYSE regular session) reproduced Blocker 1
+(data-freshness reliability window, first named in
+`PAPER-TRADING-SHORTEST-PATH-01C`) live: the freshness gate passed once
+immediately before runtime start, then failed by a 13-second margin 33
+seconds into the run, and TwelveData never delivered a fresher completed
+AAPL/5m bar for the remaining ~27 minutes of the 30-minute window. No
+paper order occurred; none was forced. Market-data ingestion, WS
+continuity, reconcile, and arm state all worked correctly throughout; the
+freshness gate did exactly its job (fail-closed on stale data) rather
+than allowing a stale-data dispatch. Zero live orders, zero threshold/
+gate/config changes, `live_routing_enabled=false` throughout. Full
+DB/route evidence: `01B` §15; full lifecycle classification: `01C` §1.
+Recommended next patch: `INTRADAY-PROVIDER-CLOCK-SKEW-OPERATOR-GUARD-01-COMBINED`.
+Full detail: `docs/specs/paper_trade_lifecycle_proof_01d_closure_decision.md`.
