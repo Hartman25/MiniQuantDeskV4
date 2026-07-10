@@ -7632,3 +7632,43 @@ for at least `AAPL`.
 
 **Safety confirmation:** no DB mutation; no order submitted; no daemon
 restart; no code change in this phase; no live routing.
+
+---
+
+## PAPER-PNL-01E-CLOSURE-AND-LEDGER-RECONCILE-01
+
+**Status:** `CLOSED_LOCAL` (docs-only).
+
+```text
+PAPER-PNL-OPERATOR-VISIBILITY-CLOSURE-01-COMBINED: PARTIAL / DAILY-PNL-BASELINE-OPEN
+PAPER-TRADE-LIFECYCLE-PROOF-02: PNL-SEAM-CLOSED-BY-PAPER-PNL-01 (mark_price / unrealized_pnl); DAILY-PNL-BASELINE-OPEN
+```
+
+`mark_price`/`unrealized_pnl` on both `/api/v1/portfolio/positions` and
+`/api/v1/portfolio/summary` are closed: code committed (`44b79e89`), tests
+committed and passing for real against the local paper DB. `daily_pnl`
+stays open — no day-start/previous-close equity baseline exists anywhere
+in this repo's schema (Phase A repo-wide grep, zero matches), and
+fabricating one would violate `CLAUDE.md`'s no-fabricated-truth invariant.
+Closing it requires a new patch to design a baseline-capture mechanism, not
+a wiring fix.
+
+**Built:**
+`docs/specs/paper_pnl_operator_visibility_01e_closure_decision.md`,
+`docs/specs/roadmap_completion_reconcile_01.md` §9 (this bundle touches no
+multi-asset roadmap row — equities-only operator-visibility concern; `docs/audits/multi_asset_completion_audit.md` correspondingly not updated).
+
+**Full patch-group commit chain:** Phase A `bb8f8552` (audit) → Phase B
+`99729e6b` (pure pnl helper) → Phase C `44b79e89` (route wiring) → Phase D
+`0404c6bc` (DB/route readback) → Phase E (this entry, closure).
+
+**Next:** `PAPER-PNL-01F-TIMEFRAME-SELECTION-01` (optional) — add
+`timeframe` query-param support to `/positions`/`/summary` or reconsider
+the `"1D"` default, since Phase D found this paper account's real `AAPL`
+data is `5m`-only. Independently, a day-start-equity-baseline design patch
+if `daily_pnl` is wanted.
+
+**Safety confirmation:** no live orders; no forced paper orders; no
+strategy/threshold changes; no gate weakened; no fabricated marks or P&L
+at any phase; no generated evidence staged; no `.env.local` edit; no
+config flag change; no DB migration added.

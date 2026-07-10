@@ -265,3 +265,25 @@ fixed a gap in the Phase B classifier (it used the evidence snapshot bar age
 only, not wall-clock-elapsed effective age). Same scope classification
 applies: not an asset-class completion item, no §2 row changes, no
 multi-asset audit update.
+
+## 9. Later session: `PAPER-PNL-OPERATOR-VISIBILITY-CLOSURE-01-COMBINED`
+
+A later session closed the P&L operator-visibility seam
+`PAPER-TRADE-LIFECYCLE-PROOF-02` exposed (a real filled paper position,
+`AAPL qty=3 avg_price=314.81`, had `mark_price`/`unrealized_pnl`/
+`daily_pnl` all `null` on the primary operator routes). See
+`docs/specs/paper_pnl_operator_visibility_01a_current_truth_audit.md`
+through `..._01e_closure_decision.md`. `mqk_portfolio::unrealized_pnl_micros`
+(Phase B) was wired into `/api/v1/portfolio/positions` and
+`/api/v1/portfolio/summary` (Phase C) against the same latest-completed-
+`md_bars`-close mark source `/api/v1/portfolio/live-weights` already uses.
+`daily_pnl` remains permanently unavailable — no day-start/previous-close
+equity baseline exists anywhere in this repo's schema (confirmed by
+repo-wide grep in the Phase A audit).
+
+This bundle does **not** touch any row in §2 above: it is a paper-trade
+operator-visibility/accounting-display concern (equities-only, existing
+broker-snapshot layer), not an asset-class completion or production-cutover
+item. No row's status, percentage, or category changes.
+`docs/audits/multi_asset_completion_audit.md` is correspondingly not
+updated by this bundle.
