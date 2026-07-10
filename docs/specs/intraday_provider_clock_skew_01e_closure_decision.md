@@ -121,3 +121,16 @@ Recommended next patch: `PAPER-PNL-OPERATOR-VISIBILITY-CLOSURE-01-COMBINED`.
 INTRADAY-PROVIDER-CLOCK-SKEW-OPERATOR-GUARD-01-COMBINED: CLOSED_LOCAL
 PAPER-TRADE-LIFECYCLE-PROOF-01: remains PARTIAL / DATA-FRESHNESS-BLOCKED until next market-hours proof
 ```
+
+## Update: repaired by `INTRADAY-PROVIDER-CLOCK-SKEW-01F`
+
+This closure was found, by a subsequent audit, to have shipped a proof-window
+classifier that used the evidence file's **snapshot** bar age only, never
+accounting for wall-clock time elapsed between evidence production and route
+poll — exactly the mechanism that let the 2026-07-10 run pass STEP 14C
+preflight and then fail 33s later. `INTRADAY-PROVIDER-CLOCK-SKEW-01F` (see
+`docs/specs/intraday_provider_clock_skew_01f_effective_age_recompute_audit.md`
+and `docs/specs/intraday_provider_clock_skew_01f_effective_age_closure_decision.md`)
+repaired this additively: the route now recomputes `effective_latest_completed_bar_age_secs`
+from snapshot age plus elapsed time and derives all proof-window fields from
+that effective age. `01-COMBINED` is now `CLOSED_LOCAL / REPAIRED-BY-01F`.

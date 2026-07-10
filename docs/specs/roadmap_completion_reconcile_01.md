@@ -257,3 +257,11 @@ lifecycle / market-data-operations concern, not multi-asset roadmap scope).
 No row's status, percentage, or category changes as a result of this
 bundle. `docs/audits/multi_asset_completion_audit.md` is correspondingly
 not updated by this bundle.
+
+A subsequent repair patch, `INTRADAY-PROVIDER-CLOCK-SKEW-01F-LIVE-EFFECTIVE-AGE-RECOMPUTE-01`
+(see `docs/specs/intraday_provider_clock_skew_01f_effective_age_recompute_audit.md`
+and `docs/specs/intraday_provider_clock_skew_01f_effective_age_closure_decision.md`),
+fixed a gap in the Phase B classifier (it used the evidence snapshot bar age
+only, not wall-clock-elapsed effective age). Same scope classification
+applies: not an asset-class completion item, no §2 row changes, no
+multi-asset audit update.

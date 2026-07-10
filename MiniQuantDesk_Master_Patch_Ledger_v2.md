@@ -7341,3 +7341,39 @@ and stays not-ready (`IRS-19`, regression proof); and a missing/malformed
 (route-repair branch now active). `git diff --check` clean. No provider/DB/
 broker call in any test; no order submitted; no daemon freshness gate,
 threshold, or config flag touched.
+
+#### INTRADAY-PROVIDER-CLOCK-SKEW-01F-SMOKE-GUARD-COMPATIBILITY-AND-CLOSURE-01 — CLOSED_LOCAL / DOCS-ONLY
+
+**Mission:** verify `Start-PaperTradingSmoke.ps1` STEP 14C consumes the
+repaired route correctly, then close `01F`.
+
+**Found:** no script change required. STEP 14C already prefers the route's
+top-level `proof_window_ready` field (falling back, only on older daemon
+builds lacking that field, to a manual per-symbol `freshness_headroom_secs`
+comparison) — both fields are now effective-age-derived after the Phase B
+repair, so the script inherits correct behavior automatically.
+
+**Built:** `docs/specs/intraday_provider_clock_skew_01f_effective_age_closure_decision.md`
+(full 11-question closure answer set, exact next market-hours retry
+command). `docs/specs/intraday_provider_clock_skew_01e_closure_decision.md`
+appended with an "Update: repaired by 01F" note (no prior content removed).
+`docs/specs/roadmap_completion_reconcile_01.md` §8 appended with the same
+no-roadmap-impact classification extended to `01F`.
+
+**Verdict:**
+
+```text
+INTRADAY-PROVIDER-CLOCK-SKEW-01F-LIVE-EFFECTIVE-AGE-RECOMPUTE-01: CLOSED_LOCAL
+INTRADAY-PROVIDER-CLOCK-SKEW-OPERATOR-GUARD-01-COMBINED: CLOSED_LOCAL / REPAIRED-BY-01F
+PAPER-TRADE-LIFECYCLE-PROOF-01: remains PARTIAL / DATA-FRESHNESS-BLOCKED until next market-hours proof
+```
+
+Safety confirmation for the whole `01F` bundle (Phases A-C): no live orders,
+no forced/manual paper orders, no strategy/threshold changes, no
+`DATA-FRESHNESS-READINESS-GATE-01`/`MQK_INTRADAY_BAR_MAX_AGE_SECS` change,
+no fabricated data, no provider/broker/network call in any test, no
+generated evidence staged, no `.env.local` edit, no DB migration or
+mutation, no config flag change, `live_routing_enabled` untouched throughout.
+
+**Validation:** `validate_intraday_provider_clock_skew_01f_effective_age.ps1`
+PASSES. `git diff --check` clean.
