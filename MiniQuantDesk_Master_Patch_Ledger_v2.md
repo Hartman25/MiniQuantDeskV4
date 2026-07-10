@@ -7260,3 +7260,36 @@ generated evidence staged, `live_routing_enabled` untouched throughout.
 
 **Validation:** both guard validators (`01a`/`01d`) PASS. `git diff --check`
 clean.
+
+### INTRADAY-PROVIDER-CLOCK-SKEW-01F-LIVE-EFFECTIVE-AGE-RECOMPUTE-01
+
+**Mission:** repair a gap in the `01-COMBINED` closure: the proof-window
+classifier shipped by `01B` derives `freshness_headroom_secs`,
+`staleness_overage_secs`, `near_expiry`, `proof_window_risk`, and
+`proof_window_ready` entirely from the evidence file's **snapshot**
+`latest_completed_bar_age_secs` (as of `produced_at_utc`), never accounting
+for wall-clock time elapsed between evidence production and route poll —
+which is exactly the mechanism that let the 2026-07-10 run pass STEP 14C
+preflight and then fail `DATA-FRESHNESS-READINESS-GATE-01` 33s later.
+
+#### INTRADAY-PROVIDER-CLOCK-SKEW-01F-AUDIT-EFFECTIVE-AGE-GAP-01 — CLOSED_LOCAL / DOCS-ONLY
+
+**Built:** `docs/specs/intraday_provider_clock_skew_01f_effective_age_recompute_audit.md`
+— grounded, line-cited confirmation that `classify_proof_window_risk` and
+its only caller (`parse_refresh_symbol`) take snapshot age only, that
+`produced_at_utc` is parsed at route level but never threaded into the
+classifier, and that no existing test proves an effective-age recompute.
+Documents the exact repair plan (parse `produced_at_utc` once, capture one
+`now_utc` per request, compute `evidence_elapsed_secs` +
+`effective_latest_completed_bar_age_secs`, feed the latter into
+`classify_proof_window_risk`, repair `aggregate_proof_window_fields` to key
+`proof_window_ready` off effective-age-derived risk) and the required
+`IRS-16`..`IRS-20` test set.
+
+**Validator:** new
+`scripts/guards/validate_intraday_provider_clock_skew_01f_effective_age.ps1`
+— confirms the audit doc exists and covers the required phrases; reusable
+in later phases to also confirm the route repair once it lands (skipped,
+not failed, before Phase B).
+
+**Validation:** new validator PASSES. `git diff --check` clean.
