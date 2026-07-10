@@ -238,3 +238,97 @@ pub fn compute_portfolio_weights(
         missing_mark_symbols,
     }
 }
+
+/// PAPER-PNL-OPERATOR-VISIBILITY-CLOSURE-01B: unrealized P&L in micros for
+/// one position, given its signed quantity, a single blended average cost
+/// basis, and a mark price — all already in micros.
+///
+/// Formula: `(mark_price_micros - avg_price_micros) * signed_qty`. This one
+/// formula is correct for both long (`signed_qty > 0`) and short
+/// (`signed_qty < 0`) positions without branching — a short position's
+/// negative qty naturally flips the sign to match the equivalent
+/// `(avg_price_micros - mark_price_micros) * abs(signed_qty)` form. A flat
+/// position (`signed_qty == 0`) always returns `0`, regardless of the mark
+/// or avg price supplied.
+///
+/// Exact whenever `avg_price_micros` is the quantity-weighted average entry
+/// price across lots — algebraically identical to summing
+/// `(mark - entry_i) * qty_i` per lot (see
+/// [`crate::compute_unrealized_pnl_micros`] in `metrics.rs`, which computes
+/// the same quantity from full per-lot `PositionState`). This function
+/// exists separately because the broker-snapshot route layer it serves
+/// (`/api/v1/portfolio/positions`) only has a single blended `avg_price` per
+/// position, not per-lot entry prices — `metrics::compute_unrealized_pnl_micros`
+/// is not reusable there without exposing full lot state through that
+/// layer, which this patch does not do.
+///
+/// Computed in `i128`: two `i64` factors multiplied can never overflow
+/// `i128` (max magnitude `2^126 < 2^127`).
+pub fn unrealized_pnl_micros(signed_qty: i64, avg_price_micros: i64, mark_price_micros: i64) -> i128 {
+    (mark_price_micros as i128 - avg_price_micros as i128) * (signed_qty as i128)
+}
+
+#[cfg(test)]
+mod pnl_tests {
+    use super::unrealized_pnl_micros;
+
+    #[test]
+    fn long_position_mark_above_avg_is_positive_pnl() {
+        // 10 long shares, avg 100.00, mark 110.00 -> +100.00 (in micros)
+        let pnl = unrealized_pnl_micros(10, 100_000_000, 110_000_000);
+        assert_eq!(pnl, 100_000_000);
+    }
+
+    #[test]
+    fn long_position_mark_below_avg_is_negative_pnl() {
+        // 10 long shares, avg 100.00, mark 90.00 -> -100.00
+        let pnl = unrealized_pnl_micros(10, 100_000_000, 90_000_000);
+        assert_eq!(pnl, -100_000_000);
+    }
+
+    #[test]
+    fn short_position_mark_above_avg_is_negative_pnl() {
+        // 10 short shares (signed_qty = -10), avg 100.00, mark 110.00 ->
+        // loss for the short: -100.00
+        let pnl = unrealized_pnl_micros(-10, 100_000_000, 110_000_000);
+        assert_eq!(pnl, -100_000_000);
+    }
+
+    #[test]
+    fn short_position_mark_below_avg_is_positive_pnl() {
+        // 10 short shares, avg 100.00, mark 90.00 -> gain for the short: +100.00
+        let pnl = unrealized_pnl_micros(-10, 100_000_000, 90_000_000);
+        assert_eq!(pnl, 100_000_000);
+    }
+
+    #[test]
+    fn flat_position_is_always_zero_regardless_of_prices() {
+        assert_eq!(unrealized_pnl_micros(0, 100_000_000, 999_000_000), 0);
+        assert_eq!(unrealized_pnl_micros(0, 0, 0), 0);
+    }
+
+    #[test]
+    fn mark_equal_avg_is_zero_pnl() {
+        assert_eq!(unrealized_pnl_micros(5, 314_810_000, 314_810_000), 0);
+    }
+
+    #[test]
+    fn extreme_magnitudes_do_not_overflow_i128() {
+        // Largest i64 qty and price factors -- must not panic, and the
+        // widened i128 product must exactly equal the mathematical value.
+        let pnl = unrealized_pnl_micros(i64::MAX, 0, i64::MAX);
+        let expected = (i64::MAX as i128) * (i64::MAX as i128);
+        assert_eq!(pnl, expected);
+    }
+
+    #[test]
+    fn proof_02_real_fill_scenario_positive_when_mark_above_avg() {
+        // AAPL qty=3 avg_price=314.81 (PAPER-TRADE-LIFECYCLE-PROOF-02 §12).
+        // A mark of 320.00 must show a positive unrealized gain.
+        let avg_price_micros = 314_810_000i64;
+        let mark_price_micros = 320_000_000i64;
+        let pnl = unrealized_pnl_micros(3, avg_price_micros, mark_price_micros);
+        assert_eq!(pnl, (320_000_000 - 314_810_000) * 3);
+        assert!(pnl > 0);
+    }
+}

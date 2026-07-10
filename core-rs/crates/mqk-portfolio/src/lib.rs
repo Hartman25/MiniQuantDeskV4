@@ -52,6 +52,10 @@ pub use valuation::{
     PortfolioWeightsSnapshot,
 };
 
+// PAPER-PNL-OPERATOR-VISIBILITY-CLOSURE-01B: per-position unrealized P&L
+// from a single blended avg cost basis + mark (broker-snapshot route layer).
+pub use valuation::unrealized_pnl_micros;
+
 // ASSET-CORE-04A: pure, default-unused instrument economics model
 // (multiplier/currency/quantity-scale-aware single-position valuation).
 pub use instrument_economics::{

@@ -7487,3 +7487,38 @@ unrealized-P&L helper to `mqk-portfolio`.
 **Safety confirmation:** read-only audit; no source file outside
 `docs/specs/` and `scripts/guards/` touched; no provider/broker/network
 call; no DB connection; no trading behavior change.
+
+---
+
+## PAPER-PNL-01B-MARK-SOURCE-AND-PNL-MODEL-01
+
+**Status:** `CLOSED_LOCAL` (pure math + tests only, no route wiring yet).
+
+Added `mqk_portfolio::unrealized_pnl_micros(signed_qty, avg_price_micros,
+mark_price_micros) -> i128` to `mqk-portfolio/src/valuation.rs`, exported
+from the crate root. Single formula `(mark - avg) * signed_qty` handles
+long and short uniformly; flat (`signed_qty == 0`) always returns `0`;
+`i128` widening makes the multiplication overflow-proof. Phase A's audit
+found `metrics::compute_unrealized_pnl_micros` already exists but requires
+full per-lot `PositionState`, which the `/api/v1/portfolio/positions`
+broker-snapshot route layer does not have (only a single blended
+`avg_price`) — the two helpers serve different layers and are both kept
+rather than forcing a lot-exposing wiring change into this patch's scope.
+
+**Built:** `core-rs/crates/mqk-portfolio/src/valuation.rs` (new function +
+9 inline unit tests), `core-rs/crates/mqk-portfolio/src/lib.rs` (export),
+`core-rs/crates/mqk-portfolio/tests/scenario_paper_pnl_operator_visibility_01.rs`
+(9 scenario tests, includes the real `AAPL qty=3 avg_price=314.81` proof-02
+fixture).
+
+**Validation:** `cargo check -p mqk-portfolio` clean;
+`cargo test -p mqk-portfolio --test scenario_paper_pnl_operator_visibility_01`
+9/9 passed; `cargo test -p mqk-portfolio --lib` 85/85 passed;
+`cargo clippy -p mqk-portfolio --all-targets -- -D warnings` clean.
+
+**Next:** `PAPER-PNL-01C-PORTFOLIO-ROUTE-VISIBILITY-01` — wire this helper
+into `/api/v1/portfolio/positions` and `/api/v1/portfolio/summary`.
+
+**Safety confirmation:** pure math only, no IO, no DB, no provider/broker
+call in any test; no route/order/risk/strategy code touched; no trading
+behavior change.
