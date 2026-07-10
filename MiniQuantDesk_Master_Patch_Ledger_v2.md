@@ -6834,3 +6834,35 @@ routing; no orders; no gate weakened; no strategy threshold changed; no
 generated evidence staged.
 
 **Status:** CLOSED_LOCAL
+
+### PAPER-TRADING-SHORTEST-PATH-01C-MINIMUM-BLOCKER-CHAIN-01 — CLOSED_LOCAL / DOCS-ONLY
+
+**Mission:** derive the exact minimum blocker chain from current HEAD to
+one trustworthy visible paper trade, using only `01B`'s already-grounded
+lifecycle matrix (no new evidence gathered).
+
+**Built:** `docs/specs/paper_trading_shortest_path_01c_minimum_blocker_chain.md`.
+
+**Verdict:** three blockers, none of them code gaps — (1) data-freshness
+reliability window (sandbox-clock-vs-provider-clock skew, intermittent),
+(2) market-move-vs-20bps-threshold coincidence (proven near-miss at
+`move_bps=-19`), (3) live proof of the order→ack→fill→position→P&L chain,
+which resolves automatically once (1) and (2) clear in the same session.
+No strategy-research patch, new asset class, or AI/Vertus work is
+required. **Exact next patch:** `PAPER-TRADE-LIFECYCLE-PROOF-01-COMBINED`
+— a bounded, market-hours-gated live-observation patch using the already-
+proven `Start-PaperTradingSmoke.ps1 -RequireIntradayRefresh` invocation,
+recording whatever the daemon naturally does.
+
+**Validation:** `powershell -File
+scripts\guards\validate_paper_trading_shortest_path_01a_reconcile.ps1` —
+unaffected, still passes. `git diff --check` clean.
+
+**Deliberately not done:** no code changes. No strategy threshold change.
+No new patch started ahead of the recommendation.
+
+**Safety confirmation:** docs-only; zero network/DB/broker calls; no live
+routing; no orders; no gate weakened; no strategy threshold changed; no
+generated evidence staged.
+
+**Status:** CLOSED_LOCAL
