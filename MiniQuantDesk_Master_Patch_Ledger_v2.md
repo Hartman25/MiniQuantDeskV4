@@ -6794,3 +6794,43 @@ routing; no orders; no gate weakened; no strategy threshold changed; no
 generated evidence staged.
 
 **Status:** CLOSED_LOCAL
+
+### PAPER-TRADING-SHORTEST-PATH-01B-CURRENT-LIFECYCLE-TRUTH-AUDIT-01 — CLOSED_LOCAL / DOCS-ONLY
+
+**Mission:** produce a repo-grounded, 11-row lifecycle matrix (market data
+→ feature → strategy → signal → risk → order → ack/fill → position → P&L →
+operator visibility) classifying each stage `CLOSED`/`PARTIAL`/`MISSING`/
+`MARKET-HOURS-PROOF-REQUIRED`/`UNKNOWN` against current HEAD.
+
+**Built:** `docs/specs/paper_trading_shortest_path_01b_current_lifecycle_truth_audit.md`.
+
+**Key findings (direct source read, not re-trusted from prior docs):**
+- Rows 1–5 (data through risk evaluation) are proven live at least once
+  (`AUTON-NO-TRADE-02B`, 2026-07-09) or are pure/tested code paths.
+- Rows 6–9 (paper order submitted through position update) are durable,
+  tested code paths with **zero live proof** for this repo's current
+  single-symbol AAPL config — the first genuinely unproven-live seam.
+- Row 10 (P&L updated) is `PARTIAL`: `realized_pnl_micros` is computed and
+  invariant-tested at the ledger level but is only surfaced through the
+  diagnostic `routes/repair.rs` path, not the primary operator
+  `portfolio/summary`/`portfolio/positions` routes, which honestly return
+  `unrealized_pnl: None`/`daily_pnl: None` (intentional, not fabricated,
+  per `gui_rules.md`) rather than a computed value.
+- The strategy no-signal state observed live (`move_bps=-19` vs
+  `threshold_bps=20`) is a legitimate near-miss on real market data, not a
+  code or threshold defect — confirming "strategy did not generate a
+  signal" is a stale framing of the current blocker.
+
+**Validation:** `powershell -File
+scripts\guards\validate_paper_trading_shortest_path_01a_reconcile.ps1` —
+unaffected, still passes. `git diff --check` clean.
+
+**Deliberately not done:** no code changes. No strategy threshold
+inspected value changed. No daemon safety gate touched. No trading
+behavior change.
+
+**Safety confirmation:** docs-only; zero network/DB/broker calls; no live
+routing; no orders; no gate weakened; no strategy threshold changed; no
+generated evidence staged.
+
+**Status:** CLOSED_LOCAL
