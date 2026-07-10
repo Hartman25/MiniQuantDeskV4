@@ -7377,3 +7377,78 @@ mutation, no config flag change, `live_routing_enabled` untouched throughout.
 
 **Validation:** `validate_intraday_provider_clock_skew_01f_effective_age.ps1`
 PASSES. `git diff --check` clean.
+
+## PAPER-TRADE-LIFECYCLE-PROOF-02-FAST-MARKET-HOURS-RETRY-COMBINED
+
+### PAPER-TRADE-LIFECYCLE-PROOF-02-FAST-MARKET-HOURS-RETRY-COMBINED — CLOSED_LOCAL / PARTIAL / ORDER-FILL-POSITION-PNL-SEAM-FOUND
+
+**Mission:** one last bounded market-hours paper-trade lifecycle proof
+before close, using the repaired `INTRADAY-PROVIDER-CLOCK-SKEW-01F`
+freshness guard. Live observation/proof — no forced trade, no threshold
+change, no gate bypass.
+
+**Result — a real fill closed the full lifecycle for the first time in
+this proof series.** First attempt hit STEP 14C's fail-closed refresh
+gate on a transient timing race (refresh loop's first cycle hadn't
+landed yet) and correctly `exit 1`'d without bypass, per mission rule.
+Retry (~7 min later, ~95 min before close) found
+`proof_window_ready=true proof_window_risk=low`, started clean, and the
+autonomous session controller naturally generated a `signal_long`
+(`intraday_scalper`, `move_bps=23 >= threshold_bps=20`, `qty=3`,
+`18:35:32Z`) that flowed through outbox → broker ack → fill
+(`18:35:33Z`-`18:35:34Z`, all inside regular session) → position update
+(`AAPL qty=3 avg_price=314.81`, `broker_qty=3` matches, no drift). Zero
+manual/forced order calls at any point. Two informational,
+non-blocking events occurred well after the trade had already settled:
+a deadman-expiry halt at `+1092s` that the smoke script's own
+documented repair path cleared automatically, and a WS `gap_detected`
+state from `+1402s` onward that correctly kept the runtime idle for the
+rest of the window per `broker_rules.md` (terminal-state, no bypass
+attempted). The one gap found: `portfolio/positions.mark_price`/
+`.unrealized_pnl` and `portfolio/summary.daily_pnl` are all `null`
+against this real filled position — P&L is not surfaced on either
+primary operator route.
+
+**Lifecycle classification (full 11-row table in the spec doc):**
+stages 1-9 (data → features → strategy → signal → risk → paper order →
+broker ack → fill → position/accounting) all `CLOSED_LIVE`; stage 10
+(realized/unrealized P&L) and stage 11 (full operator visibility) both
+`PARTIAL` on the P&L-null gap above.
+
+**Verdict:**
+
+```text
+PAPER-TRADE-LIFECYCLE-PROOF-02: PARTIAL / ORDER-FILL-POSITION-PNL-SEAM-FOUND
+```
+
+**Built:**
+`docs/specs/paper_trade_lifecycle_proof_02_fast_market_hours_retry.md`
+(full 21-question evidence record: HEAD, wall-clock window, exact
+commands, before/after intraday-refresh-status field table, DB row
+citations for every lifecycle stage, safety confirmation).
+
+**Not updated:** `docs/specs/roadmap_completion_reconcile_01.md` and
+`docs/audits/multi_asset_completion_audit.md` — single-symbol
+equity-only observation, moves no asset-class/production-cutover
+status, same rationale as `PAPER-TRADE-LIFECYCLE-PROOF-01D` and
+`PAPER-TRADING-SHORTEST-PATH-01D`.
+
+**Recommended next patch:** `PAPER-PNL-OPERATOR-VISIBILITY-CLOSURE-01-COMBINED`
+— a real filled position (`avg_price=314.81`, `qty=3`) now exists to
+compute unrealized P&L against, making this the natural next seam to
+close.
+
+**Safety confirmation:** zero live orders; zero forced/manual paper
+orders (the one order was dispatched naturally by the autonomous
+session controller); no strategy/threshold change
+(`threshold_bps=20`, `MinFreshnessHeadroomSeconds=120` unchanged); no
+gate weakened (`DATA-FRESHNESS-READINESS-GATE-01` and the WS
+gap-detection terminal state both fired correctly and were left
+un-bypassed); no fabricated data (every fact traces to a route response
+or a direct read-only `psql SELECT` this session); no generated
+evidence staged (`exports/paper_trade_lifecycle_proof_02_20260710_151534/`
+confirmed `.gitignore`-covered); no `.env.local` edit; no config flag
+change; `live_routing_enabled=false` throughout.
+
+**Validation:** `git diff --check` clean. HEAD unchanged at `c093299a`
+throughout (docs-only bundle).
