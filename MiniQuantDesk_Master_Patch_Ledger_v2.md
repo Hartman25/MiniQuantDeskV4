@@ -6955,3 +6955,44 @@ routing; no orders; no gate weakened; no strategy threshold changed; no
 config flag changes; no generated evidence staged.
 
 **Status:** CLOSED_LOCAL
+
+### PAPER-TRADE-LIFECYCLE-PROOF-01B-BOUNDED-LIVE-SMOKE-OBSERVATION-01 — CLOSED_LOCAL / DURABLE-NO-TRADE
+
+**Mission:** run the `01A`-selected bounded live-observation smoke during
+the active NYSE session and record whatever the daemon naturally does.
+
+**Built:** `docs/specs/paper_trade_lifecycle_proof_01b_bounded_live_observation.md`.
+
+**Run:** `Start-PaperTradingSmoke.ps1 -StartIntradayRefreshLoop
+-IntradayRefreshIntervalSeconds 300 -RequireIntradayRefresh
+-WatchSeconds 1800` ran to completion (`=== Startup complete ===`, no
+`exit 1`). Run `2f5e0619-df6b-5907-a0f1-ad019b2dfb57` armed and running
+`2026-07-10 16:10:42` UTC; watcher completed the full 1800s window;
+`live_routing_enabled=false` on every one of 120 watcher ticks and at
+evidence-capture time.
+
+**Verdict:** durable no-trade — Blocker 1 (data-freshness reliability
+window) reproduced live. `DATA-FRESHNESS-READINESS-GATE-01` passed once
+at STEP 14C, but the first per-tick strategy evaluation 33s into the run
+already found the latest completed AAPL/5m bar 913s old (13s past the
+900s threshold); the 300s-interval refresh loop then ran ~27 more minutes
+without ever ingesting a bar newer than `16:00:00` UTC, growing staleness
+to 2152s by capture time. `strategy_signal_evaluations` shows exactly one
+row for this run: `decision_stage=pre_dispatch_gate
+reason_code=intraday_bar_stale signal_generated=false`. `oms_outbox` and
+`oms_inbox` both show 0 rows for this run — no paper order, no ack, no
+fill, no position/accounting change, no P&L. `portfolio/summary` cash/
+equity unchanged at `$1,000,055.81`. Full DB/route evidence in the built
+doc §15.
+
+**Validation:** `git diff --check` clean. Evidence JSON captured to
+`exports/paper_trade_lifecycle_proof_01/*.json` (untracked, not staged).
+
+**Deliberately not done:** no order forced or simulated. No threshold,
+gate, or config change. No live routing. No manual order-endpoint calls.
+
+**Safety confirmation:** zero live orders; zero forced paper orders;
+`live_routing_enabled=false` throughout; no gate weakened; no strategy
+threshold changed; no config flag changes; no generated evidence staged.
+
+**Status:** CLOSED_LOCAL
