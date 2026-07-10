@@ -7588,3 +7588,47 @@ above) stands in for it.
 provider/broker/network call in any test (DB-backed tests hit only the
 local paper Postgres via `MQK_DATABASE_URL`, no provider/broker); no
 `.env.local` or config flag change; no trading behavior change.
+
+---
+
+## PAPER-PNL-01D-REAL-PROOF-REPLAY-OR-DB-READBACK-01
+
+**Status:** `CLOSED_LOCAL` (read-only proof; no code change).
+
+Confirmed via read-only `docker exec mqk-paper-postgres psql` and read-only
+`GET` calls against the daemon already running on this machine:
+`runs.run_id=15cf4309-...` (proof-02's run) is present, `status=STOPPED`,
+matching the proof doc exactly. The real `AAPL qty=3 avg_price=314.81`
+position is still present in the live broker snapshot. `md_bars` has 6,111
+completed `AAPL` rows at `timeframe='5m'` (latest: `end_ts=2026-07-10T18:25:00Z
+close_micros=314860000`) but **zero** rows at `timeframe='1D'` — the
+timeframe Phase C's routes hardcode as their default, matching
+`/api/v1/portfolio/live-weights`'s own default.
+
+**Finding:** against this real position, the patched route would truthfully
+report `pnl_truth_state="mark_unavailable"` (no completed `1D` bar exists),
+not `"active"` — correct and non-fabricated, but less useful than it could
+be, since a mark **does** exist at `"5m"`. Hand-computed (no code path
+touched) what the route would return at `"5m"`: `unrealized_pnl = (314.86 -
+314.81) * 3 = $0.15` — the same formula Phase C's DB-backed PPV-05/PPV-06
+tests already proved correct against a seeded bar.
+
+The live daemon process on this machine predates this patch group and was
+**not** rebuilt or restarted (out of this phase's code+tests-only scope,
+and restarting live daemon infrastructure was not authorized) — so its
+`GET /api/v1/portfolio/positions`/`summary` responses captured here are
+"before" evidence only (`mark_price`/`unrealized_pnl`/`daily_pnl` still
+`null`, unchanged from proof-02), not a test of the new code. Code
+correctness stands on Phase C's DB-backed scenario tests, which ran for
+real against this same `mqk-paper-postgres` instance.
+
+**Built:** `docs/specs/paper_pnl_operator_visibility_01d_readback_proof.md`.
+
+**Next:** follow-up patch (not part of this closure) could add optional
+`timeframe` query-param support to `/api/v1/portfolio/positions` and
+`/summary` (mirroring `live-weights`), or reconsider the hardcoded `"1D"`
+default given this paper account's actual ingestion cadence is `5m`-only
+for at least `AAPL`.
+
+**Safety confirmation:** no DB mutation; no order submitted; no daemon
+restart; no code change in this phase; no live routing.
