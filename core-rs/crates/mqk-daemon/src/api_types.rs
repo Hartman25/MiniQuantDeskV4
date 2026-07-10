@@ -4799,6 +4799,28 @@ pub struct IntradayRefreshSymbolStatus {
     pub passed: bool,
     /// Fail reasons for this symbol, empty on PASS.
     pub fail_reasons: Vec<String>,
+    /// `max_allowed_age_secs - latest_completed_bar_age_secs` when still within
+    /// cap (`None` when already past cap or either input field is missing).
+    /// INTRADAY-PROVIDER-CLOCK-SKEW-01B.
+    pub freshness_headroom_secs: Option<i64>,
+    /// `latest_completed_bar_age_secs - max_allowed_age_secs` when already past
+    /// cap (`None` when still within cap or either input field is missing).
+    /// INTRADAY-PROVIDER-CLOCK-SKEW-01B.
+    pub staleness_overage_secs: Option<i64>,
+    /// `true` when the symbol is currently within cap but has 120s or less of
+    /// headroom remaining -- likely to fail on the very next dispatch tick
+    /// even though this evidence read reports it as passing.
+    /// INTRADAY-PROVIDER-CLOCK-SKEW-01B.
+    pub near_expiry: bool,
+    /// Conservative risk classification for starting a proof window right now:
+    /// `"low"` (ample headroom), `"medium"`, `"high"` (already stale, or fresh
+    /// but near expiry), or `"unknown"` (age/cap fields missing from evidence).
+    /// INTRADAY-PROVIDER-CLOCK-SKEW-01B.
+    pub proof_window_risk: String,
+    /// Human-readable operator guidance, present only when risk is elevated
+    /// (`near_expiry`, already stale, or evidence fields missing).
+    /// INTRADAY-PROVIDER-CLOCK-SKEW-01B.
+    pub operator_action: Option<String>,
 }
 
 /// Response for `GET /api/v1/market-data/intraday-refresh/status`.
@@ -4839,6 +4861,18 @@ pub struct IntradayRefreshStatusResponse {
     pub symbols: Vec<IntradayRefreshSymbolStatus>,
     /// Error description when `truth_state` is `"parse_error"` or `"backend_unavailable"`.
     pub error: Option<String>,
+    /// `true` only when `all_passed == Some(true)` and no symbol is
+    /// `near_expiry` -- i.e. safe to start a proof window right now without an
+    /// imminent freshness-gate failure. `None` when `truth_state != "active"`
+    /// or there are no symbols to evaluate. INTRADAY-PROVIDER-CLOCK-SKEW-01B.
+    pub proof_window_ready: Option<bool>,
+    /// Worst-case `proof_window_risk` across all symbols, ranked
+    /// high, unknown, medium, low. `None` when there are no symbols.
+    /// INTRADAY-PROVIDER-CLOCK-SKEW-01B.
+    pub proof_window_risk: Option<String>,
+    /// First non-empty per-symbol `operator_action`, if any symbol has one.
+    /// INTRADAY-PROVIDER-CLOCK-SKEW-01B.
+    pub operator_action: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

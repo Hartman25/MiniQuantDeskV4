@@ -25,6 +25,14 @@
 //! | IRS-09    | Latest file selected from multiple candidates (alphabetical last)             |
 //! | IRS-10    | Provider success + stale intraday bar forces all_passed=false                 |
 //! | IRS-11    | Provider success + zero provider rows forces all_passed=false                 |
+//! | IRS-12    | Overage (age 913 > max 900): staleness_overage_secs=13, risk=high, not near_expiry |
+//! | IRS-13    | Near expiry (age 850, max 900): headroom=50, near_expiry=true, risk=high     |
+//! | IRS-14    | Ample headroom (age 300, max 900): headroom=600, near_expiry=false, risk=low |
+//! | IRS-15    | Missing age/max fields: risk=unknown, proof_window_ready=false (fail-safe)   |
+//!
+//! IRS-12..15 are INTRADAY-PROVIDER-CLOCK-SKEW-01B: pure evidence-field
+//! classification of freshness headroom/overage risk. No new provider/DB/
+//! broker calls -- same synthetic temp-dir evidence fixtures as IRS-01..11.
 //!
 //! All tests use synthetic temp-dir evidence files.
 //! No real providers called. No DB writes. No orders. No broker calls.
@@ -570,4 +578,173 @@ async fn irs_09_latest_candidate_selected_from_multiple_files() {
         Some(true),
         "must pick latest file (090000) which has all_passed=true"
     );
+}
+
+// ---------------------------------------------------------------------------
+// Shared helper for IRS-12..15: evidence with explicit age/max_age fields.
+// ---------------------------------------------------------------------------
+
+fn headroom_evidence(produced_at: &str, age_secs: Option<i64>, max_age_secs: Option<i64>) -> String {
+    let age_field = match age_secs {
+        Some(a) => format!(r#""latest_completed_bar_age_secs": {a},"#),
+        None => String::new(),
+    };
+    let max_field = match max_age_secs {
+        Some(m) => format!(r#""max_allowed_age_secs": {m},"#),
+        None => String::new(),
+    };
+    format!(
+        r#"{{
+  "schema_version": "intraday-refresh-v1",
+  "produced_at_utc": "{produced_at}",
+  "mode": "once",
+  "source": "twelvedata",
+  "timeframe": "5m",
+  "all_passed": true,
+  "reason": "provider sync complete",
+  "symbols": [
+    {{
+      "symbol": "AAPL",
+      "timeframe": "5m",
+      "provider_source": "twelvedata",
+      "provider_attempted": true,
+      "provider_success": true,
+      {age_field}
+      {max_field}
+      "gate": "PASS",
+      "completed_count": 5761,
+      "fail_reasons": []
+    }}
+  ]
+}}"#,
+        produced_at = produced_at,
+        age_field = age_field,
+        max_field = max_field,
+    )
+}
+
+// ---------------------------------------------------------------------------
+// IRS-12: age 913 > max 900 -> staleness_overage_secs=13, risk=high, not near_expiry
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn irs_12_overage_reports_staleness_overage_and_high_risk() {
+    let dir = tempfile::tempdir().expect("create temp dir");
+    write_evidence(
+        &dir,
+        "intraday_refresh_20260710_090000.json",
+        &headroom_evidence(&recent_ts(), Some(913), Some(900)),
+    );
+
+    let router = make_router_with_evidence_dir(dir.path().to_str().unwrap());
+    let (status, v) = call(router, get_refresh_status()).await;
+
+    assert_eq!(status, StatusCode::OK);
+    let sym = &v["symbols"].as_array().expect("symbols array")[0];
+    assert_eq!(sym["passed"].as_bool(), Some(false));
+    assert_eq!(sym["freshness_headroom_secs"].as_i64(), None);
+    assert_eq!(sym["staleness_overage_secs"].as_i64(), Some(13));
+    assert_eq!(sym["near_expiry"].as_bool(), Some(false));
+    assert_eq!(sym["proof_window_risk"].as_str(), Some("high"));
+    assert!(
+        sym["operator_action"].as_str().is_some(),
+        "operator_action must be present when already stale"
+    );
+    assert_eq!(v["proof_window_ready"].as_bool(), Some(false));
+    assert_eq!(v["proof_window_risk"].as_str(), Some("high"));
+}
+
+// ---------------------------------------------------------------------------
+// IRS-13: age 850, max 900 -> headroom=50, near_expiry=true, risk=high
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn irs_13_near_expiry_reports_headroom_and_high_risk() {
+    let dir = tempfile::tempdir().expect("create temp dir");
+    write_evidence(
+        &dir,
+        "intraday_refresh_20260710_090100.json",
+        &headroom_evidence(&recent_ts(), Some(850), Some(900)),
+    );
+
+    let router = make_router_with_evidence_dir(dir.path().to_str().unwrap());
+    let (status, v) = call(router, get_refresh_status()).await;
+
+    assert_eq!(status, StatusCode::OK);
+    let sym = &v["symbols"].as_array().expect("symbols array")[0];
+    assert_eq!(sym["passed"].as_bool(), Some(true));
+    assert_eq!(sym["freshness_headroom_secs"].as_i64(), Some(50));
+    assert_eq!(sym["staleness_overage_secs"].as_i64(), None);
+    assert_eq!(sym["near_expiry"].as_bool(), Some(true));
+    assert_eq!(sym["proof_window_risk"].as_str(), Some("high"));
+    assert!(
+        sym["operator_action"].as_str().is_some(),
+        "operator_action must be present when near expiry"
+    );
+    assert_eq!(
+        v["proof_window_ready"].as_bool(),
+        Some(false),
+        "near_expiry must block proof_window_ready even though the symbol currently passes"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// IRS-14: age 300, max 900 -> headroom=600, near_expiry=false, risk=low
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn irs_14_ample_headroom_reports_low_risk() {
+    let dir = tempfile::tempdir().expect("create temp dir");
+    write_evidence(
+        &dir,
+        "intraday_refresh_20260710_090200.json",
+        &headroom_evidence(&recent_ts(), Some(300), Some(900)),
+    );
+
+    let router = make_router_with_evidence_dir(dir.path().to_str().unwrap());
+    let (status, v) = call(router, get_refresh_status()).await;
+
+    assert_eq!(status, StatusCode::OK);
+    let sym = &v["symbols"].as_array().expect("symbols array")[0];
+    assert_eq!(sym["passed"].as_bool(), Some(true));
+    assert_eq!(sym["freshness_headroom_secs"].as_i64(), Some(600));
+    assert_eq!(sym["near_expiry"].as_bool(), Some(false));
+    assert_eq!(sym["proof_window_risk"].as_str(), Some("low"));
+    assert!(sym["operator_action"].is_null());
+    assert_eq!(v["proof_window_ready"].as_bool(), Some(true));
+    assert_eq!(v["proof_window_risk"].as_str(), Some("low"));
+}
+
+// ---------------------------------------------------------------------------
+// IRS-15: missing age/max fields -> risk=unknown, proof_window_ready fails safe
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn irs_15_missing_age_fields_fails_safe_as_unknown() {
+    let dir = tempfile::tempdir().expect("create temp dir");
+    write_evidence(
+        &dir,
+        "intraday_refresh_20260710_090300.json",
+        &headroom_evidence(&recent_ts(), None, None),
+    );
+
+    let router = make_router_with_evidence_dir(dir.path().to_str().unwrap());
+    let (status, v) = call(router, get_refresh_status()).await;
+
+    assert_eq!(status, StatusCode::OK);
+    let sym = &v["symbols"].as_array().expect("symbols array")[0];
+    assert_eq!(sym["freshness_headroom_secs"].as_i64(), None);
+    assert_eq!(sym["staleness_overage_secs"].as_i64(), None);
+    assert_eq!(sym["near_expiry"].as_bool(), Some(false));
+    assert_eq!(sym["proof_window_risk"].as_str(), Some("unknown"));
+    assert!(
+        sym["operator_action"].as_str().is_some(),
+        "operator_action must explain the evidence gap"
+    );
+    assert_eq!(
+        v["proof_window_ready"].as_bool(),
+        Some(false),
+        "missing freshness fields must never be read as proof-window-ready"
+    );
+    assert_eq!(v["proof_window_risk"].as_str(), Some("unknown"));
 }

@@ -7131,3 +7131,64 @@ text-presence validator, no network/DB/daemon calls).
 
 **Validation:** validator PASS (all 10 required facts present). `git diff
 --check` clean.
+
+### INTRADAY-PROVIDER-CLOCK-SKEW-01B-REFRESH-EVIDENCE-LAG-CLASSIFIER-01 — CLOSED_LOCAL
+
+**Mission:** add a pure, evidence-only freshness-headroom/overage classifier
+to `GET /api/v1/market-data/intraday-refresh/status`, additive only, no gate
+weakening, no provider/DB/network calls.
+
+**Built:** `classify_proof_window_risk` (pure function, `transport_quality.rs`)
+computes, from each symbol's already-parsed `latest_completed_bar_age_secs`/
+`max_allowed_age_secs`/`passed` fields: `freshness_headroom_secs` (`Some`
+only while still within cap), `staleness_overage_secs` (`Some` only once
+past cap), `near_expiry` (`true` when still passing but within 120s of the
+cap — `NEAR_EXPIRY_THRESHOLD_SECS`), `proof_window_risk`
+(`"low"`/`"medium"`/`"high"`/`"unknown"`), and `operator_action` (present
+whenever risk is elevated or evidence fields are missing). Wired additively
+into `IntradayRefreshSymbolStatus` (6 new fields; all pre-existing fields
+unchanged) via `parse_refresh_symbol`. A new `aggregate_proof_window_fields`
+rolls the per-symbol classification up into three new top-level
+`IntradayRefreshStatusResponse` fields: `proof_window_ready` (fail-closed —
+`false` whenever any symbol is `near_expiry` or `proof_window_risk ==
+"unknown"`, `None` only when `all_passed` itself has no truth-bearing
+value), `proof_window_risk` (worst across symbols, ranked
+high/unknown/medium/low), and `operator_action` (first non-empty per-symbol
+message). Every one of the 5 pre-existing early-return response
+constructions (`backend_unavailable` × 2, `no_evidence`, `parse_error` × 2)
+sets the 3 new top-level fields to `None` — no change to their existing
+truth_state/error semantics.
+
+**Design decision (documented, not implemented as elapsed-time
+adjustment):** the classifier operates only on the evidence's own
+`latest_completed_bar_age_secs`/`max_allowed_age_secs` snapshot fields, not
+an elapsed-time-since-`produced_at_utc` adjustment — matching the exact
+headroom/overage numeric behavior specified for this patch (age 913/max 900
+→ overage 13; age 850/max 900 → headroom 50, near_expiry; age 300/max 900 →
+headroom 600, low risk). The `01A` audit's finding about evidence-snapshot
+vs. live dispatch-tick age drift remains the documented rationale for why
+Phase D's script-level `-MinFreshnessHeadroomSeconds` safety margin exists.
+
+**Tests:** extended
+`scenario_intraday_md_refresher_operator_surface_01.rs` with IRS-12
+(overage → `staleness_overage_secs=13`, `risk=high`, `proof_window_ready=
+false`), IRS-13 (headroom 50 within the 120s near-expiry threshold →
+`near_expiry=true`, `risk=high`, `proof_window_ready=false` even though the
+symbol itself still `passed=true`), IRS-14 (headroom 600 → `risk=low`,
+`proof_window_ready=true`), IRS-15 (missing age/max fields →
+`risk=unknown`, `operator_action` explains the gap, `proof_window_ready=
+false` — fail-safe on missing evidence). All fixture-file-only, same
+synthetic temp-dir pattern as IRS-01..11; no provider/DB/broker calls. 15/15
+pass (11 pre-existing + 4 new).
+
+**Validation:** `cargo check -p mqk-daemon` clean. `cargo test -p mqk-daemon
+--test scenario_intraday_md_refresher_operator_surface_01`: 15/15 pass.
+`cargo clippy -p mqk-daemon --lib -- -D warnings` clean (one doc-comment
+lazy-continuation lint fixed during development). `git diff --check` clean.
+`validate_intraday_provider_clock_skew_01a_audit.ps1` PASS (unaffected by
+this phase's Rust-only changes).
+
+**Phase C skipped:** the route-visible fields and their tests were added
+directly in this phase (same files Phase C would have touched) —
+`INTRADAY-PROVIDER-CLOCK-SKEW-01C-OPERATOR-STATUS-SURFACE-01` is a no-op per
+the mission's own conditional-skip instruction.

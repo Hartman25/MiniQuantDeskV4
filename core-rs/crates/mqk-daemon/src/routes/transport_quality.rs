@@ -377,6 +377,67 @@ const REASON_PROVIDER_ERROR: &str = "provider_error";
 const REASON_FRESH_AFTER_REFRESH: &str = "fresh_after_refresh";
 const REASON_REFRESH_FAILED: &str = "refresh_failed";
 
+/// A symbol within this many seconds of its freshness cap is "near expiry":
+/// still passing right now, but likely to fail on the very next dispatch
+/// tick. INTRADAY-PROVIDER-CLOCK-SKEW-01B.
+const NEAR_EXPIRY_THRESHOLD_SECS: i64 = 120;
+
+/// Pure classification of freshness headroom/overage risk from already-parsed
+/// evidence fields. Takes no clock/DB/network input -- operates only on the
+/// numbers the evidence file (or its derivation fallbacks) already produced.
+///
+/// Returns `(freshness_headroom_secs, staleness_overage_secs, near_expiry,
+/// proof_window_risk, operator_action)`.
+fn classify_proof_window_risk(
+    latest_completed_bar_age_secs: Option<i64>,
+    max_allowed_age_secs: Option<i64>,
+    passed: bool,
+) -> (Option<i64>, Option<i64>, bool, String, Option<String>) {
+    match (latest_completed_bar_age_secs, max_allowed_age_secs) {
+        (Some(age), Some(max_age)) => {
+            let delta = max_age - age;
+            if delta >= 0 {
+                let near_expiry = delta <= NEAR_EXPIRY_THRESHOLD_SECS;
+                let risk = if !passed || near_expiry {
+                    "high"
+                } else if delta <= NEAR_EXPIRY_THRESHOLD_SECS * 3 {
+                    "medium"
+                } else {
+                    "low"
+                };
+                let operator_action = near_expiry.then(|| {
+                    format!(
+                        "Only {delta}s of freshness headroom remains before the {max_age}s cap -- \
+                         re-check GET /api/v1/market-data/intraday-refresh/status immediately before \
+                         starting a proof run, or wait for a fresher provider bar."
+                    )
+                });
+                (Some(delta), None, near_expiry, risk.to_string(), operator_action)
+            } else {
+                let overage = -delta;
+                let operator_action = Some(format!(
+                    "Latest completed bar is {overage}s past the {max_age}s freshness cap -- wait \
+                     for a fresher provider bar and re-run the intraday refresh before starting a \
+                     proof run."
+                ));
+                (None, Some(overage), false, "high".to_string(), operator_action)
+            }
+        }
+        _ => (
+            None,
+            None,
+            false,
+            "unknown".to_string(),
+            Some(
+                "Freshness age/cap fields are missing from evidence -- proof-window risk cannot \
+                 be assessed; treat as unsafe to start a proof run until fresh evidence with \
+                 complete fields is available."
+                    .to_string(),
+            ),
+        ),
+    }
+}
+
 fn evidence_i64(v: &serde_json::Value, key: &str) -> Option<i64> {
     v.get(key).and_then(|n| n.as_i64())
 }
@@ -480,6 +541,9 @@ fn parse_refresh_symbol(
         }
     }
 
+    let (freshness_headroom_secs, staleness_overage_secs, near_expiry, proof_window_risk, operator_action) =
+        classify_proof_window_risk(latest_completed_bar_age_secs, max_allowed_age_secs, passed);
+
     IntradayRefreshSymbolStatus {
         symbol: v
             .get("symbol")
@@ -518,7 +582,51 @@ fn parse_refresh_symbol(
         reason_code,
         passed,
         fail_reasons,
+        freshness_headroom_secs,
+        staleness_overage_secs,
+        near_expiry,
+        proof_window_risk,
+        operator_action,
     }
+}
+
+/// Aggregate per-symbol proof-window fields into the route-level summary.
+///
+/// `proof_window_ready` is fail-closed: `None` when `all_passed` itself is
+/// `None` (evidence didn't have a truth-bearing verdict), and `false` when
+/// any symbol is `near_expiry` or has `proof_window_risk == "unknown"` (an
+/// evidence gap must never be read as "ready").
+fn aggregate_proof_window_fields(
+    symbols: &[IntradayRefreshSymbolStatus],
+    all_passed: Option<bool>,
+) -> (Option<bool>, Option<String>, Option<String>) {
+    if symbols.is_empty() {
+        return (None, None, None);
+    }
+
+    let risk_rank = |r: &str| match r {
+        "high" => 3,
+        "unknown" => 2,
+        "medium" => 1,
+        _ => 0, // "low"
+    };
+    let worst_risk = symbols
+        .iter()
+        .map(|s| s.proof_window_risk.as_str())
+        .max_by_key(|r| risk_rank(r))
+        .unwrap_or("unknown")
+        .to_string();
+
+    let proof_window_ready = all_passed.map(|passed| {
+        passed
+            && !symbols
+                .iter()
+                .any(|s| s.near_expiry || s.proof_window_risk == "unknown")
+    });
+
+    let operator_action = symbols.iter().find_map(|s| s.operator_action.clone());
+
+    (proof_window_ready, Some(worst_risk), operator_action)
 }
 
 /// Determine whether evidence produced at `produced_at_utc` is stale.
@@ -572,6 +680,9 @@ pub(crate) async fn intraday_refresh_status(State(st): State<Arc<AppState>>) -> 
                     reason: None,
                     symbols: vec![],
                     error: Some(format!("evidence directory unreadable: {}", e)),
+                    proof_window_ready: None,
+                    proof_window_risk: None,
+                    operator_action: None,
                 }),
             )
                 .into_response();
@@ -610,6 +721,9 @@ pub(crate) async fn intraday_refresh_status(State(st): State<Arc<AppState>>) -> 
                 reason: None,
                 symbols: vec![],
                 error: None,
+                proof_window_ready: None,
+                proof_window_risk: None,
+                operator_action: None,
             }),
         )
             .into_response();
@@ -639,6 +753,9 @@ pub(crate) async fn intraday_refresh_status(State(st): State<Arc<AppState>>) -> 
                     reason: None,
                     symbols: vec![],
                     error: Some(format!("evidence file unreadable: {}", e)),
+                    proof_window_ready: None,
+                    proof_window_risk: None,
+                    operator_action: None,
                 }),
             )
                 .into_response();
@@ -664,6 +781,9 @@ pub(crate) async fn intraday_refresh_status(State(st): State<Arc<AppState>>) -> 
                     reason: None,
                     symbols: vec![],
                     error: Some(format!("evidence JSON parse failed: {}", e)),
+                    proof_window_ready: None,
+                    proof_window_risk: None,
+                    operator_action: None,
                 }),
             )
                 .into_response();
@@ -695,6 +815,9 @@ pub(crate) async fn intraday_refresh_status(State(st): State<Arc<AppState>>) -> 
                     "unsupported schema_version (expected '{}')",
                     INTRADAY_EVIDENCE_SCHEMA_VERSION
                 )),
+                proof_window_ready: None,
+                proof_window_risk: None,
+                operator_action: None,
             }),
         )
             .into_response();
@@ -719,6 +842,8 @@ pub(crate) async fn intraday_refresh_status(State(st): State<Arc<AppState>>) -> 
     let evidence_all_passed = raw.get("all_passed").and_then(|v| v.as_bool());
     let all_passed =
         evidence_all_passed.map(|passed| passed && symbols.iter().all(|symbol| symbol.passed));
+    let (proof_window_ready, proof_window_risk, operator_action) =
+        aggregate_proof_window_fields(&symbols, all_passed);
 
     (
         StatusCode::OK,
@@ -749,6 +874,9 @@ pub(crate) async fn intraday_refresh_status(State(st): State<Arc<AppState>>) -> 
                 .map(|s| s.to_string()),
             symbols,
             error: None,
+            proof_window_ready,
+            proof_window_risk,
+            operator_action,
         }),
     )
         .into_response()
