@@ -6924,3 +6924,34 @@ by any phase. First recommended future patch:
 `PAPER-TRADE-LIFECYCLE-PROOF-01-COMBINED`, a bounded market-hours-gated
 live-observation patch. Full detail:
 `docs/specs/paper_trading_shortest_path_01d_closure_decision.md`.
+
+### PAPER-TRADE-LIFECYCLE-PROOF-01A-MARKET-HOURS-PREFLIGHT-01 — CLOSED_LOCAL / DOCS-ONLY
+
+**Mission:** verify current repo state and prepare a bounded market-hours
+live-observation run without changing any trading behavior.
+
+**Built:** `docs/specs/paper_trade_lifecycle_proof_01a_market_hours_preflight.md`.
+
+**Verdict:** HEAD confirmed at `a1d0e6a1` on `main`, tracked tree clean,
+no staged files, only prior bundles' allowed untracked entries present
+(`MiniQuantDesk_Master_Patch_Ledger_v2_updated.md`, `smoke_logs/*`).
+Wall-clock check (2026-07-10, ~11:54 AM ET) confirmed the NYSE regular
+session was active with ~4 hours remaining, satisfying the market-hours
+precondition. Selected invocation: `Start-PaperTradingSmoke.ps1
+-StartIntradayRefreshLoop -IntradayRefreshIntervalSeconds 300
+-RequireIntradayRefresh -WatchSeconds 1800` — the same shape already
+validated by `PAPER-SMOKE-FOLLOWUP-01D`/`01E`. Evidence folder selected:
+`exports/paper_trade_lifecycle_proof_01/` (untracked). Five possible
+outcomes enumerated per the mission brief, from stale-data fail-closed
+through full ack/fill/position/P&L proof.
+
+**Validation:** `git diff --check` clean.
+
+**Deliberately not done:** no daemon start, no network call, no DB
+mutation, no code change. Phase A is inspection and doc-drafting only.
+
+**Safety confirmation:** docs-only; zero network/DB/broker calls; no live
+routing; no orders; no gate weakened; no strategy threshold changed; no
+config flag changes; no generated evidence staged.
+
+**Status:** CLOSED_LOCAL
