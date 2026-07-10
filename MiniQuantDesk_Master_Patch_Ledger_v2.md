@@ -6752,3 +6752,45 @@ phrase named in `docs/specs/asset_core_04o_cutover_go_nogo_decision.md`
 §10. Independent alternative:
 `CRYPTO-REGISTRY-DATA-COMPLETION-SWEEP-01-COMBINED`. Full detail:
 `docs/specs/asset_core_04o_cutover_go_nogo_decision.md`.
+
+## 21. Paper Trading Shortest Path Audit
+
+### PAPER-TRADING-SHORTEST-PATH-01A-TURNOVER-LEDGER-RECONCILE-01 — CLOSED_LOCAL / DOCS-ONLY
+
+**Mission:** reconcile the operator's strategic turnover (finish visible
+paper-trading machinery first; do not integrate Vertus, an AI research
+analyst, or new strategies now; preserve expectancy/random-baseline/
+MAE-MFE/exit-policy/cost-gate concepts for later) against current ledger
+and repo truth at HEAD `0162beed`.
+
+**Built:** `docs/specs/paper_trading_shortest_path_01a_turnover_ledger_reconcile.md`
+— classifies turnover concepts as required/research-backlog/feature-backlog/
+watchlist-only, confirms `AUTON-NO-TRADE-01`/`02`, `MARKET-HOURS-PROOF-SWEEP-01`,
+and `PAPER-SMOKE-FOLLOWUP-01A`-`01E` remain `CLOSED_LOCAL` and
+`ASSET-CORE-04` remains `PARTIAL / PRODUCTION-CUTOVER-DESIGNED-NOT-AUTHORIZED`,
+and confirms no duplicate backlog items exist for the six candidate IDs
+named in the mission prompt. `scripts/guards/validate_paper_trading_shortest_path_01a_reconcile.ps1`
+(11 checks).
+
+**Backlog additions (parked, no implementation scope):**
+
+- `AI-RESEARCH-ANALYST-BOUNDARY-DESIGN-ONLY-01` — QUEUED / PARKED. Future-only design work defining the boundary of any AI/LLM research-analyst role. Not authorized. See `paper_trading_shortest_path_01a_turnover_ledger_reconcile.md` §6.
+- `RANDOM-BASELINE-GATE-01` — QUEUED / PARKED. Future research-backlog item: a null-hypothesis/random-baseline comparison gate for strategy evaluation. Not authorized. See same doc §6.
+- `MAE-MFE-TRADE-STATS-01` — QUEUED / PARKED. Future research-backlog item: maximum-adverse/favorable-excursion trade statistics. Not authorized. See same doc §6.
+- `EXIT-POLICY-LAB-01` — QUEUED / PARKED. Future research-backlog item: a dedicated exit-policy research lab, separate from individual strategy engines' inline exit logic. Not authorized. See same doc §6.
+- `POSITION-SIZING-STRESS-01` — QUEUED / PARKED. Future research-backlog item: stress-testing position sizing under adverse conditions, distinct from the already-closed `STRATEGY-POSITION-SIZING-01` and the still-`OPEN` `STRATEGY-EQUITY-PERCENT-SIZING-01`. Not authorized. See same doc §6.
+- `NO-EDGE-COST-GATE-01` — QUEUED / PARKED. Future research-backlog item: a cost/slippage-aware no-edge gate. Not authorized. See same doc §6.
+
+**Validation:** `powershell -File
+scripts\guards\validate_paper_trading_shortest_path_01a_reconcile.ps1` —
+all 11 checks passed. `git diff --check` clean.
+
+**Deliberately not done:** no code changes. No daemon safety gate touched.
+No trading behavior change. No AI/Vertus/new-strategy/multi-asset scope
+started.
+
+**Safety confirmation:** docs-only; zero network/DB/broker calls; no live
+routing; no orders; no gate weakened; no strategy threshold changed; no
+generated evidence staged.
+
+**Status:** CLOSED_LOCAL
