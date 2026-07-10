@@ -240,3 +240,20 @@ DB/schema design patch), gated on an explicit, per-slice operator
 authorization phrase — not a blanket approval for the whole proposed
 sequence. Independent alternative:
 `CRYPTO-REGISTRY-DATA-COMPLETION-SWEEP-01-COMBINED`.
+
+## 8. Later session: `INTRADAY-PROVIDER-CLOCK-SKEW-OPERATOR-GUARD-01-COMBINED`
+
+A later session ran the intraday provider freshness-headroom operator-guard
+bundle (Phase A audit, Phase B pure headroom classifier wired into
+`GET /api/v1/market-data/intraday-refresh/status`, Phase C skipped as
+duplicative of Phase B, Phase D `Start-PaperTradingSmoke.ps1` preflight
+guard, Phase E this closure — see
+`docs/specs/intraday_provider_clock_skew_01a_current_truth_audit.md` and
+`docs/specs/intraday_provider_clock_skew_01e_closure_decision.md`). This
+bundle does **not** touch any row in §2 above: it is not an asset-class
+completion item at all, but a diagnostic/operator-visibility layer on top
+of the already-existing `DATA-FRESHNESS-READINESS-GATE-01` (a paper-trade
+lifecycle / market-data-operations concern, not multi-asset roadmap scope).
+No row's status, percentage, or category changes as a result of this
+bundle. `docs/audits/multi_asset_completion_audit.md` is correspondingly
+not updated by this bundle.

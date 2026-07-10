@@ -7231,3 +7231,32 @@ for pre-existing arm/disarm/stop actions) — no `/api/v1/ops/action`,
 run — this phase adds a preflight guard on top of the already-proven `01B`
 route and the pre-existing `STEP 14C` checks; no new network/DB/broker
 behavior was introduced to exercise live.
+
+### INTRADAY-PROVIDER-CLOCK-SKEW-01E-CLOSURE-AND-LEDGER-RECONCILE-01 — CLOSED_LOCAL / DOCS-ONLY
+
+**Mission:** close `INTRADAY-PROVIDER-CLOCK-SKEW-OPERATOR-GUARD-01-COMBINED`
+and reconcile the roadmap docs.
+
+**Built:** `docs/specs/intraday_provider_clock_skew_01e_closure_decision.md`
+(full 12-question closure answer set, exact next market-hours retry
+command, exact status route to check first, next-patch recommendations for
+both the "still blocks" and "P&L visibility partial" branches).
+`docs/specs/roadmap_completion_reconcile_01.md` §8 confirms this bundle
+touches no multi-asset roadmap row — `docs/audits/multi_asset_completion_audit.md`
+is correspondingly not updated.
+
+**Verdict:**
+
+```text
+INTRADAY-PROVIDER-CLOCK-SKEW-OPERATOR-GUARD-01-COMBINED: CLOSED_LOCAL
+PAPER-TRADE-LIFECYCLE-PROOF-01: remains PARTIAL / DATA-FRESHNESS-BLOCKED until next market-hours proof
+```
+
+Safety confirmation for the whole bundle (Phases A–E): no live orders, no
+forced paper orders, no strategy/threshold changes, no
+`DATA-FRESHNESS-READINESS-GATE-01`/`MQK_INTRADAY_BAR_MAX_AGE_SECS` change,
+no fabricated data, no provider/broker/network call in any test, no
+generated evidence staged, `live_routing_enabled` untouched throughout.
+
+**Validation:** both guard validators (`01a`/`01d`) PASS. `git diff --check`
+clean.
