@@ -7862,3 +7862,33 @@ strategy/threshold changes; no gate weakened; no fabricated marks or P&L
 at any phase; no generated evidence staged; no `.env.local` edit; no
 config flag change; no DB migration added; no daemon started or
 restarted.
+
+---
+
+## PAPER-DAILY-PNL-BASELINE-01-COMBINED
+
+### PAPER-DAILY-PNL-01A-CURRENT-TRUTH-AND-DESIGN-RECONCILE-01 — CLOSED_LOCAL / DOCS-ONLY
+
+**Status:** `CLOSED_LOCAL` (docs-only).
+
+Reconciled `paper_daily_pnl_baseline_design_only_01.md` against current
+repo truth at HEAD `8ae16b3c`: confirmed no account-equity baseline table
+or DB helper exists anywhere in `mqk-db`; confirmed `daily_pnl` is always
+`None` on `PortfolioSummaryResponse` (`portfolio.rs:271,286`); locked the
+previous-session-close design, the `sys_account_equity_baseline` schema
+(mirroring `sys_broker_position_baseline`'s caller-supplied-timestamp/UUID
+pattern but keyed by `trading_date` instead of a singleton), the new
+`account_equity_baseline.rs` DB helper shape, and five additive
+`PortfolioSummaryResponse` fields
+(`daily_pnl_truth_state`/`daily_pnl_baseline_trading_date`/
+`daily_pnl_baseline_equity`/`daily_pnl_baseline_source`/
+`daily_pnl_baseline_captured_at_utc`). **Decision: capture mechanism
+deferred** to a future patch (`PAPER-DAILY-PNL-BASELINE-CAPTURE-01-COMBINED`)
+— this bundle implements schema + DB helpers + route read-side only,
+per the design doc's own §10 conclusion and CLAUDE.md's
+one-patch-per-turn/minimal-scope discipline. Zero code changed; zero
+trading behavior changed; zero provider/broker/network calls.
+
+**Built:**
+`docs/specs/paper_daily_pnl_baseline_01a_current_truth_reconcile.md`,
+`scripts/guards/validate_paper_daily_pnl_baseline_01a_reconcile.ps1`.
