@@ -8069,3 +8069,57 @@ evidence, smoke log, export, or untracked ledger draft staged at any
 phase; no daemon started or restarted during code phases (B/C used only
 `cargo test`; the read-only DB proof in this phase used `docker exec
 psql`, not the daemon).
+
+---
+
+## PAPER-DAILY-PNL-BASELINE-CAPTURE-AND-OPERATOR-CLOSURE-01-COMBINED — Phase A
+
+Patch: `PAPER-DAILY-PNL-CAPTURE-01A-CURRENT-TRUTH-AND-ACTION-DESIGN-01`.
+Status: `CLOSED_LOCAL` (design-only, no code touched).
+
+Re-verified current repo truth against the prior bundle's closure claims:
+`sys_account_equity_baseline` (migration `0045`) and
+`upsert_account_equity_baseline` / `fetch_account_equity_baseline_for_date`
+exist exactly as documented; `GET /api/v1/portfolio/summary` computes
+`daily_pnl` only when a baseline row exists; **zero** capture mechanism
+exists anywhere in the repo (`rg "capture-account"` across `mqk-daemon`,
+`mqk-db`, `mqk-cli` — 0 matches before this phase). Confirmed
+`/api/v1/ops/action` (handler `ops_action`,
+`core-rs/crates/mqk-daemon/src/routes/control_plane.rs`) is registered on
+the daemon's authenticated `operator` sub-router
+(`core-rs/crates/mqk-daemon/src/routes.rs`, wrapped in
+`token_auth_middleware`) and already has a precedent for gate-checked DB
+writes with a deterministic `Uuid::new_v5(&Uuid::NAMESPACE_DNS, ...)`
+audit ID (`request-mode-change`'s `intent_id`). Selected extending
+`/api/v1/ops/action` with a new `action_key:
+"capture-account-equity-baseline"` over a dedicated route, since the
+dispatcher already provides authentication, response shape, and audit
+plumbing other arms reuse.
+
+**Locked design:** extend `OpsActionRequest` with an optional
+`trading_date: Option<String>` field (same pattern as existing
+`target_mode`/`symbol` action-specific fields); extend
+`OperatorActionResponse` with an optional `captured_baseline:
+Option<CapturedAccountEquityBaselineSnapshot>` field (same pattern as the
+existing `pending_restart_intent` field); validate `trading_date` against
+`NyseWeekdaysProvider` using the identical 18:00-UTC-probe convention
+`resolve_daily_pnl`'s `most_recent_trading_day_before` already uses;
+require DB pool, broker snapshot, non-blank `reason`, and a real trading
+day, all fail-closed with distinct `disposition` strings (503/400/403 per
+condition, matching the dispatcher's existing status-code conventions);
+write via the already-existing `upsert_account_equity_baseline` helper
+with `captured_by = "operator:capture-account-equity-baseline"` (a fixed
+constant, not free-text operator input, to keep the audit-ID seed
+reproducible) and `broker_snapshot_source` read from the daemon's real
+`BrokerSnapshotTruthSource`. No DB migration needed — `0045` already
+provides every required column.
+
+**Built:**
+`docs/specs/paper_daily_pnl_capture_01a_current_truth_action_design.md`,
+`scripts/guards/validate_paper_daily_pnl_capture_01a_design.ps1`.
+
+**Validation:** `validate_paper_daily_pnl_capture_01a_design.ps1` — 12/12
+checks passed. `git diff --check` clean.
+
+**Safety confirmation:** no code touched (docs/validator only); no
+trading, orders, broker/provider calls, or DB migration in this phase.
