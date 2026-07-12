@@ -8181,3 +8181,39 @@ value traces to a real caller-supplied `trading_date` and the daemon's
 real in-memory `broker_snapshot`); no historical backfill (exactly one
 `trading_date` per call); no provider/broker/network call in any test; no
 DB migration (`0045` already sufficient).
+
+---
+
+## PAPER-DAILY-PNL-BASELINE-CAPTURE-AND-OPERATOR-CLOSURE-01-COMBINED — Phase C
+
+Patch: `PAPER-DAILY-PNL-CAPTURE-01C-CAPTURE-READSIDE-INTEGRATION-PROOF-01`.
+Status: `CLOSED_LOCAL`.
+
+Proved the full capture -> `GET /api/v1/portfolio/summary` read-side loop
+by appending six more tests (PDBC-12 through PDBC-17) to
+`core-rs/crates/mqk-daemon/tests/scenario_paper_daily_pnl_baseline_capture_01.rs`:
+capture for the required prior trading day followed by a summary read
+that reports `daily_pnl_truth_state == "active"` with the correct
+positive, negative, and zero `daily_pnl` (three separate equity deltas
+around the same captured baseline), a summary call with no prior capture
+staying `"baseline_unavailable"` exactly as before this bundle (proving
+this new write path did not change the read-side's own honest-unavailable
+behavior), a proof that the summary route itself never writes a baseline
+row across repeated calls, and a proof that `?timeframe=5m` does not
+change `daily_pnl`/baseline fields (matching `daily_pnl`'s existing
+timeframe-independence, `scenario_paper_daily_pnl_baseline_01.rs` PDB-10).
+No code outside the test file changed in this phase.
+
+**Validation:** `scenario_paper_daily_pnl_baseline_capture_01` 17/17
+passed (real local `mqk-paper-postgres` port 5440);
+`scenario_paper_daily_pnl_baseline_01` 11/11 unaffected;
+`scenario_paper_pnl_operator_visibility_01` 13/13 unaffected; `cargo check
+-p mqk-daemon` clean; `cargo clippy -p mqk-daemon --lib -- -D warnings`
+clean. `git diff --check` clean; only the test file changed in this
+phase's diff.
+
+**Safety confirmation:** no code outside the test file touched; no
+trading, orders, or broker/provider calls in any test; no fabricated
+baseline or P&L (every asserted `daily_pnl` value is `current_equity -
+captured_baseline_equity`, both of which the test itself seeds
+explicitly); no DB migration.

@@ -1,11 +1,8 @@
-//! PAPER-DAILY-PNL-CAPTURE-01B: `POST /api/v1/ops/action
+//! PAPER-DAILY-PNL-CAPTURE-01B/01C: `POST /api/v1/ops/action
 //! {"action_key":"capture-account-equity-baseline"}` — explicit,
 //! operator-controlled capture of a `sys_account_equity_baseline` row from
-//! the daemon's real `broker_snapshot`.
-//!
-//! The capture -> `GET /api/v1/portfolio/summary` read-side loop proof is
-//! added in PAPER-DAILY-PNL-CAPTURE-01C (a later phase of this same patch
-//! group), appended to this file.
+//! the daemon's real `broker_snapshot`, plus the capture -> `GET
+//! /api/v1/portfolio/summary` read-side loop proof (PAPER-DAILY-PNL-CAPTURE-01C).
 //!
 //! # Proof matrix
 //!
@@ -22,12 +19,19 @@
 //! | PDBC-09  | Repeated capture, same `trading_date` -> still exactly one row       |
 //! | PDBC-10  | A successful capture call writes zero `oms_outbox`/`oms_inbox` rows   |
 //! | PDBC-11  | Same inputs twice -> identical deterministic `audit_event_id`        |
+//! | PDBC-12  | Capture then `GET /api/v1/portfolio/summary` -> `daily_pnl_truth_state`|
+//! |          |   becomes `"active"` for the captured `trading_date`                 |
+//! | PDBC-13  | Capture then summary: negative daily P&L computed correctly          |
+//! | PDBC-14  | Capture then summary: zero daily P&L computed correctly              |
+//! | PDBC-15  | Summary without a capture stays `"baseline_unavailable"` (unaffected) |
+//! | PDBC-16  | `GET /api/v1/portfolio/summary` never writes a baseline row           |
+//! | PDBC-17  | `?timeframe=5m` on summary does not affect `daily_pnl`/baseline fields|
 //!
 //! All DB-backed tests skip gracefully without `MQK_DATABASE_URL` pointing
 //! at the local paper DB (port 5440 / miniquantdesk_paper), matching every
 //! prior test file in this patch lineage. No provider, broker, or network
 //! call in any test. No order/outbox/inbox row is ever written by this
-//! action.
+//! action or by the summary route.
 
 use std::sync::Arc;
 
@@ -501,6 +505,258 @@ async fn pdbc11_deterministic_audit_event_id_reproducible() {
         .to_string();
 
     assert_eq!(id1, id2, "PDBC-11: identical inputs must reproduce the same audit_event_id");
+
+    delete_baseline(&pool, trading_date).await;
+}
+
+// ---------------------------------------------------------------------------
+// PDBC-12..17: capture -> portfolio_summary read-side integration proof
+// ---------------------------------------------------------------------------
+
+/// PDBC-12: capture for the required prior trading day, then
+/// `GET /api/v1/portfolio/summary` reports `daily_pnl_truth_state ==
+/// "active"` with the correct positive `daily_pnl`.
+#[tokio::test]
+async fn pdbc12_capture_then_summary_active_positive_daily_pnl() {
+    let Some(db_url) = get_paper_db_url() else {
+        eprintln!("PDBC-12: skipped (no MQK_DATABASE_URL pointing to paper DB)");
+        return;
+    };
+    let pool = connected_pool(&db_url).await;
+    let trading_date = expected_required_trading_day(Utc::now());
+    delete_baseline(&pool, trading_date).await;
+
+    let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
+        pool.clone(),
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
+    *st.broker_snapshot.write().await = Some(make_snapshot(
+        "100000.00",
+        "50000.00",
+        vec![position("ZZPDBC12", "0", "0.00")],
+    ));
+    let router = routes::build_router(Arc::clone(&st));
+
+    let body = format!(
+        r#"{{"action_key":"capture-account-equity-baseline","reason":"PDBC-12","trading_date":"{trading_date}"}}"#
+    );
+    let (status, _) = call(router.clone(), post_json("/api/v1/ops/action", &body)).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Current equity rises above the just-captured baseline.
+    *st.broker_snapshot.write().await = Some(make_snapshot(
+        "101500.00",
+        "50000.00",
+        vec![position("ZZPDBC12", "0", "0.00")],
+    ));
+
+    let (status, resp_body) = call(router, get("/api/v1/portfolio/summary")).await;
+    assert_eq!(status, StatusCode::OK);
+    let v = parse_json(resp_body);
+    assert_eq!(v["daily_pnl_truth_state"], "active");
+    let daily_pnl = v["daily_pnl"].as_f64().expect("daily_pnl present");
+    assert!((daily_pnl - 1500.0).abs() < 0.001, "expected 1500.0, got {daily_pnl}");
+    assert_eq!(v["daily_pnl_baseline_trading_date"], trading_date.to_string());
+
+    delete_baseline(&pool, trading_date).await;
+}
+
+/// PDBC-13: current equity below the captured baseline -> negative
+/// `daily_pnl`, still `"active"`.
+#[tokio::test]
+async fn pdbc13_capture_then_summary_active_negative_daily_pnl() {
+    let Some(db_url) = get_paper_db_url() else {
+        eprintln!("PDBC-13: skipped (no MQK_DATABASE_URL pointing to paper DB)");
+        return;
+    };
+    let pool = connected_pool(&db_url).await;
+    let trading_date = expected_required_trading_day(Utc::now());
+    delete_baseline(&pool, trading_date).await;
+
+    let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
+        pool.clone(),
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
+    *st.broker_snapshot.write().await = Some(make_snapshot(
+        "98000.00",
+        "50000.00",
+        vec![position("ZZPDBC13", "0", "0.00")],
+    ));
+    let router = routes::build_router(Arc::clone(&st));
+
+    let body = format!(
+        r#"{{"action_key":"capture-account-equity-baseline","reason":"PDBC-13a","trading_date":"{trading_date}"}}"#
+    );
+    let (status, _) = call(router.clone(), post_json("/api/v1/ops/action", &body)).await;
+    assert_eq!(status, StatusCode::OK);
+
+    // Current equity drops below the just-captured baseline.
+    *st.broker_snapshot.write().await = Some(make_snapshot(
+        "96500.00",
+        "50000.00",
+        vec![position("ZZPDBC13", "0", "0.00")],
+    ));
+
+    let (status, resp_body) = call(router, get("/api/v1/portfolio/summary")).await;
+    assert_eq!(status, StatusCode::OK);
+    let v = parse_json(resp_body);
+    assert_eq!(v["daily_pnl_truth_state"], "active");
+    let daily_pnl = v["daily_pnl"].as_f64().expect("daily_pnl present");
+    assert!((daily_pnl - (-1500.0)).abs() < 0.001, "expected -1500.0, got {daily_pnl}");
+
+    delete_baseline(&pool, trading_date).await;
+}
+
+/// PDBC-14: current equity equal to the captured baseline -> `daily_pnl ==
+/// 0.0`, still `"active"`.
+#[tokio::test]
+async fn pdbc14_capture_then_summary_active_zero_daily_pnl() {
+    let Some(db_url) = get_paper_db_url() else {
+        eprintln!("PDBC-14: skipped (no MQK_DATABASE_URL pointing to paper DB)");
+        return;
+    };
+    let pool = connected_pool(&db_url).await;
+    let trading_date = expected_required_trading_day(Utc::now());
+    delete_baseline(&pool, trading_date).await;
+
+    let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
+        pool.clone(),
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
+    *st.broker_snapshot.write().await = Some(make_snapshot(
+        "100000.00",
+        "50000.00",
+        vec![position("ZZPDBC14", "0", "0.00")],
+    ));
+    let router = routes::build_router(Arc::clone(&st));
+
+    let body = format!(
+        r#"{{"action_key":"capture-account-equity-baseline","reason":"PDBC-14","trading_date":"{trading_date}"}}"#
+    );
+    let (status, _) = call(router.clone(), post_json("/api/v1/ops/action", &body)).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status, resp_body) = call(router, get("/api/v1/portfolio/summary")).await;
+    assert_eq!(status, StatusCode::OK);
+    let v = parse_json(resp_body);
+    assert_eq!(v["daily_pnl_truth_state"], "active");
+    let daily_pnl = v["daily_pnl"].as_f64().expect("daily_pnl present");
+    assert!(daily_pnl.abs() < 0.001, "expected 0.0, got {daily_pnl}");
+
+    delete_baseline(&pool, trading_date).await;
+}
+
+/// PDBC-15: without any capture, summary stays `"baseline_unavailable"` --
+/// unaffected by this bundle's new write path.
+#[tokio::test]
+async fn pdbc15_summary_without_capture_stays_baseline_unavailable() {
+    let Some(db_url) = get_paper_db_url() else {
+        eprintln!("PDBC-15: skipped (no MQK_DATABASE_URL pointing to paper DB)");
+        return;
+    };
+    let pool = connected_pool(&db_url).await;
+    let trading_date = expected_required_trading_day(Utc::now());
+    // Make sure no residual row exists in the lookback window.
+    let mut probe = trading_date;
+    for _ in 0..31 {
+        delete_baseline(&pool, probe).await;
+        let Some(p) = probe.pred_opt() else { break };
+        probe = p;
+    }
+
+    let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
+        pool.clone(),
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
+    *st.broker_snapshot.write().await = Some(make_snapshot(
+        "100000.00",
+        "50000.00",
+        vec![position("ZZPDBC15", "0", "0.00")],
+    ));
+    let router = routes::build_router(Arc::clone(&st));
+
+    let (status, resp_body) = call(router, get("/api/v1/portfolio/summary")).await;
+    assert_eq!(status, StatusCode::OK);
+    let v = parse_json(resp_body);
+    assert_eq!(v["daily_pnl_truth_state"], "baseline_unavailable");
+    assert!(v["daily_pnl"].is_null());
+}
+
+/// PDBC-16: `GET /api/v1/portfolio/summary` never writes a baseline row --
+/// row count for the required date is unchanged across repeated calls.
+#[tokio::test]
+async fn pdbc16_summary_route_never_writes_baseline_row() {
+    let Some(db_url) = get_paper_db_url() else {
+        eprintln!("PDBC-16: skipped (no MQK_DATABASE_URL pointing to paper DB)");
+        return;
+    };
+    let pool = connected_pool(&db_url).await;
+    let trading_date = expected_required_trading_day(Utc::now());
+    delete_baseline(&pool, trading_date).await;
+
+    let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
+        pool.clone(),
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
+    *st.broker_snapshot.write().await = Some(make_snapshot(
+        "100000.00",
+        "50000.00",
+        vec![position("ZZPDBC16", "0", "0.00")],
+    ));
+    let router = routes::build_router(Arc::clone(&st));
+
+    for _ in 0..3 {
+        let (status, _) = call(router.clone(), get("/api/v1/portfolio/summary")).await;
+        assert_eq!(status, StatusCode::OK);
+    }
+
+    let row_count = fetch_baseline_row_count(&pool, trading_date).await;
+    assert_eq!(row_count, 0, "PDBC-16: summary route must never write a baseline row");
+}
+
+/// PDBC-17: `?timeframe=5m` on `/api/v1/portfolio/summary` does not affect
+/// `daily_pnl`/baseline fields -- `daily_pnl` only depends on account
+/// equity + captured baseline, never on position marks.
+#[tokio::test]
+async fn pdbc17_timeframe_query_param_does_not_affect_daily_pnl() {
+    let Some(db_url) = get_paper_db_url() else {
+        eprintln!("PDBC-17: skipped (no MQK_DATABASE_URL pointing to paper DB)");
+        return;
+    };
+    let pool = connected_pool(&db_url).await;
+    let trading_date = expected_required_trading_day(Utc::now());
+    delete_baseline(&pool, trading_date).await;
+
+    let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
+        pool.clone(),
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
+    *st.broker_snapshot.write().await = Some(make_snapshot(
+        "101500.00",
+        "50000.00",
+        vec![position("ZZPDBC17", "0", "0.00")],
+    ));
+    let router = routes::build_router(Arc::clone(&st));
+
+    let body = format!(
+        r#"{{"action_key":"capture-account-equity-baseline","reason":"PDBC-17","trading_date":"{trading_date}"}}"#
+    );
+    let (status, _) = call(router.clone(), post_json("/api/v1/ops/action", &body)).await;
+    assert_eq!(status, StatusCode::OK);
+
+    let (status_default, body_default) = call(router.clone(), get("/api/v1/portfolio/summary")).await;
+    let (status_5m, body_5m) = call(router, get("/api/v1/portfolio/summary?timeframe=5m")).await;
+    assert_eq!(status_default, StatusCode::OK);
+    assert_eq!(status_5m, StatusCode::OK);
+
+    let v_default = parse_json(body_default);
+    let v_5m = parse_json(body_5m);
+    assert_eq!(v_default["daily_pnl"], v_5m["daily_pnl"]);
+    assert_eq!(v_default["daily_pnl_truth_state"], v_5m["daily_pnl_truth_state"]);
+    assert_eq!(
+        v_default["daily_pnl_baseline_trading_date"],
+        v_5m["daily_pnl_baseline_trading_date"]
+    );
 
     delete_baseline(&pool, trading_date).await;
 }
