@@ -66,6 +66,7 @@ pub use md::{
 // Domain modules
 // ---------------------------------------------------------------------------
 
+pub mod account_equity_baseline;
 pub mod alert_acks;
 pub mod arm_state;
 pub mod audit;
@@ -83,6 +84,7 @@ pub mod strategy;
 
 // Re-export all public items to preserve pre-refactor public API.
 // Callers continue to use `mqk_db::insert_run`, `mqk_db::RunStatus`, etc.
+pub use account_equity_baseline::*;
 pub use alert_acks::*;
 pub use arm_state::*;
 pub use audit::*;

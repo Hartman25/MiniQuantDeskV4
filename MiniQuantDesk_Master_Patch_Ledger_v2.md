@@ -7892,3 +7892,41 @@ trading behavior changed; zero provider/broker/network calls.
 **Built:**
 `docs/specs/paper_daily_pnl_baseline_01a_current_truth_reconcile.md`,
 `scripts/guards/validate_paper_daily_pnl_baseline_01a_reconcile.ps1`.
+
+### PAPER-DAILY-PNL-01B-BASELINE-SCHEMA-AND-DB-HELPERS-01 — CLOSED_LOCAL
+
+**Status:** `CLOSED_LOCAL`.
+
+Added migration `0045_account_equity_baseline.sql` creating
+`sys_account_equity_baseline` (`trading_date date primary key,
+equity_micros, cash_micros, currency, captured_at_utc, captured_by,
+broker_snapshot_source, audit_event_id` — `create table if not exists`,
+no `DEFAULT now()`/`DEFAULT gen_random_uuid()`), appended to
+`manifest.json` as id `0045` (manifest now carries 46 entries — 45
+top-level `.sql` files + 1 pre-existing `hold/` entry, cross-checked by
+diffing `ls migrations/*.sql` against manifest paths). Added
+`core-rs/crates/mqk-db/src/account_equity_baseline.rs`
+(`AccountEquityBaselineRecord`, `UpsertAccountEquityBaselineArgs`,
+`upsert_account_equity_baseline` — idempotent upsert-by-`trading_date`,
+last-write-wins per date, never duplicates — `fetch_account_equity_baseline_for_date`
+— returns `None` when absent, never fabricated), registered in
+`mqk-db/src/lib.rs` alongside `broker_baseline`. New DB-backed scenario
+test `scenario_account_equity_baseline_01.rs` (3 tests, `#[ignore]`
+requiring `MQK_DATABASE_URL`, matching repo convention) proven passing
+against the real local `mqk-test-postgres` (port 5434): insert/fetch round
+trip, upsert-same-date replaces-not-duplicates (exactly 1 row after 2
+upserts), fetch-missing-date returns `None`. `cargo check -p mqk-db`,
+targeted test run, and `cargo clippy -p mqk-db --all-targets -- -D
+warnings` all clean. Migration-governance script (`check_migration_governance.sh`)
+hit its pre-existing, unrelated "Python was not found" Windows issue;
+manifest/migration-file parity verified manually instead (diff of file
+list vs. manifest paths — exact match). No route code, no daemon code, no
+capture mechanism — read/write DB helpers only, per Phase A's locked
+scope.
+
+**Built:**
+`core-rs/crates/mqk-db/migrations/0045_account_equity_baseline.sql`,
+`core-rs/crates/mqk-db/migrations/manifest.json` (updated),
+`core-rs/crates/mqk-db/src/account_equity_baseline.rs`,
+`core-rs/crates/mqk-db/src/lib.rs` (updated),
+`core-rs/crates/mqk-db/tests/scenario_account_equity_baseline_01.rs`.

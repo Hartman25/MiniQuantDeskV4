@@ -278,6 +278,12 @@
       "path": "0044_autonomous_no_trade_diagnostics.sql",
       "status": "applied",
       "intent": "AUTON-NO-TRADE-OFFHOURS-01B: add autonomous_no_trade_diagnostics durable snapshot table so the GET /api/v1/autonomous/readiness verdict (session window, arm/runtime-start state, overall_ready, dominant reason) survives a daemon restart instead of existing only as an in-memory/live-DB-read computation. Deterministic minute-bucketed UUIDv5 id bounds duplicate rows from frequent polling. Nullable run_id, no FK; observability only, not part of the outbox/inbox/run lifecycle chain. paper_order_attempted and live_order_attempted are always false."
+    },
+    {
+      "id": "0045",
+      "path": "0045_account_equity_baseline.sql",
+      "status": "applied",
+      "intent": "PAPER-DAILY-PNL-BASELINE-01-COMBINED: add sys_account_equity_baseline table storing a provenance-tagged account-equity snapshot per trading_date (primary key), so GET /api/v1/portfolio/summary.daily_pnl can compare current equity against a real previous-session-close baseline instead of always returning null. No DEFAULT now() or DEFAULT gen_random_uuid() — callers supply captured_at_utc and audit_event_id. No automatic capture mechanism is added by this migration or this patch group's Phase B/C — capture is explicitly deferred to a future patch."
     }
   ]
 }
