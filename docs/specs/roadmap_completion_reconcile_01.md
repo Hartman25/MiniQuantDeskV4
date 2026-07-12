@@ -287,3 +287,34 @@ broker-snapshot layer), not an asset-class completion or production-cutover
 item. No row's status, percentage, or category changes.
 `docs/audits/multi_asset_completion_audit.md` is correspondingly not
 updated by this bundle.
+
+## 10. Later session: `PAPER-PNL-OFFMARKET-COMPLETION-01-COMBINED`
+
+A follow-up off-market session closed the timeframe gap Phase D of
+`PAPER-PNL-OPERATOR-VISIBILITY-CLOSURE-01-COMBINED` (§9 above) identified:
+the real proof-02 `AAPL qty=3 avg_price=314.81` position's completed
+`md_bars` only exist at `timeframe="5m"` (6111 rows), never `"1D"`, so the
+hardcoded `"1D"` default made `mark_price`/`unrealized_pnl` truthfully but
+unhelpfully report `mark_unavailable`. Added an optional `timeframe` query
+param to `/api/v1/portfolio/positions` and `/api/v1/portfolio/summary`,
+mirroring the existing `/api/v1/portfolio/live-weights` pattern; default
+`"1D"` behavior is unchanged. Proved via DB-backed route tests
+(`PPV-10`..`PPV-14`) that `?timeframe=5m` resolves the real position shape
+to `mark_price=$314.86`, `unrealized_pnl≈$0.15`. See
+`docs/specs/paper_pnl_offmarket_01a_timeframe_gap_audit.md` through
+`..._01e_closure_decision.md`.
+
+`daily_pnl` remains permanently unavailable, unchanged from §9 — this
+bundle's Phase D
+(`docs/specs/paper_daily_pnl_baseline_design_only_01.md`) is a
+**design-only** proposal for a future day-start/previous-close equity
+baseline mechanism (recommended next patch:
+`PAPER-DAILY-PNL-BASELINE-01-COMBINED`); no schema migration or
+baseline-capture code was implemented in this bundle.
+
+This bundle does **not** touch any row in §2 above, for the same reason
+§9 does not: paper-trade operator-visibility/accounting-display concern
+only, equities-only, existing broker-snapshot layer. No row's status,
+percentage, or category changes.
+`docs/audits/multi_asset_completion_audit.md` is correspondingly not
+updated by this bundle.

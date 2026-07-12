@@ -7777,3 +7777,38 @@ migration, no baseline-capture code).
 
 **Safety confirmation:** no DB mutation; no order submitted; no daemon
 start/restart; no code change in this phase; no live routing.
+
+---
+
+## PAPER-PNL-OFFMARKET-01D-DAILY-PNL-BASELINE-DESIGN-ONLY-01
+
+**Status:** `CLOSED_LOCAL` (design-only; no code, no migration).
+
+Designed (without implementing) a future day-start/previous-session-close
+equity baseline mechanism for `daily_pnl`. Evaluated four candidate
+sources (day-start snapshot, previous-session close, broker-native
+last-equity field, computed prior-day mark-to-market) and recommends
+**previous-session close**, captured opportunistically via the existing
+`market_calendar.rs` session/trading-day seam (`MarketSessionState`,
+`ExchangeSourcedCalendarProvider`, `NyseWeekdaysProvider`) rather than a
+naive wall-clock guess — tolerates daemon restarts mid-day, matching this
+repo's existing `session_boundary = "in_memory_only"` reality. Proposed
+(not implemented) a new `sys_account_equity_baseline` table keyed by
+`trading_date`, modeled on the existing `sys_broker_position_baseline`
+provenance-tagging precedent, plus new route truth-state vocabulary
+(`active`/`baseline_unavailable`/`stale_baseline`/`no_snapshot`/
+`db_unavailable`) mirroring the existing `pnl_truth_state` pattern. No
+migration, no route change, no baseline-capture code in this phase.
+
+**Built:**
+`docs/specs/paper_daily_pnl_baseline_design_only_01.md`,
+`docs/specs/roadmap_completion_reconcile_01.md` §10 (this bundle touches
+no multi-asset roadmap row; `docs/audits/multi_asset_completion_audit.md`
+correspondingly not updated).
+
+**Recommended future patch:** `PAPER-DAILY-PNL-BASELINE-01-COMBINED`.
+
+**Next:** Phase E — closure and ledger reconcile.
+
+**Safety confirmation:** no code change; no migration; no DB mutation; no
+order submitted; no daemon start/restart; no live routing.
