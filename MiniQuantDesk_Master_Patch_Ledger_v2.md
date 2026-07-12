@@ -7812,3 +7812,53 @@ correspondingly not updated).
 
 **Safety confirmation:** no code change; no migration; no DB mutation; no
 order submitted; no daemon start/restart; no live routing.
+
+---
+
+## PAPER-PNL-OFFMARKET-01E-CLOSURE-AND-LEDGER-RECONCILE-01
+
+**Status:** `CLOSED_LOCAL` (docs-only).
+
+```text
+PAPER-PNL-OFFMARKET-COMPLETION-01-COMBINED: CLOSED_LOCAL
+PAPER-PNL-01F-TIMEFRAME-SELECTION-01: CLOSED_LOCAL
+PAPER-PNL-OPERATOR-VISIBILITY-CLOSURE-01-COMBINED: MARK-AND-UNREALIZED-PNL-PRACTICALLY-USABLE-WITH-TIMEFRAME-SELECTION / DAILY-PNL-BASELINE-OPEN
+PAPER-TRADE-LIFECYCLE-PROOF-02: PNL-SEAM-CLOSED-FOR-MARK-AND-UNREALIZED-PNL / DAILY-PNL-BASELINE-OPEN
+```
+
+`?timeframe=5m` on `/api/v1/portfolio/positions` and
+`/api/v1/portfolio/summary` now resolves the real proof-02 `AAPL qty=3
+avg_price=314.81` position to `mark_price=$314.86`,
+`mark_source="md_bars:5m:close"`, `unrealized_pnl≈$0.15` — proven by
+DB-backed route tests against the real `mqk-paper-postgres` instance and
+independently re-confirmed by read-only DB readback. Default `"1D"`
+behavior is unchanged and proven so (PPV-10/12/14). `daily_pnl` stays
+open — Phase D produced a design-only baseline plan
+(`PAPER-DAILY-PNL-BASELINE-01-COMBINED` recommended as the implementation
+patch), no schema migration or capture code added. Zero trading behavior,
+threshold, gate, or config changed at any phase; zero provider/broker/
+network calls in any test; zero orders submitted; zero DB migration; no
+daemon started or restarted.
+
+**Full patch-group commit chain:** Phase A `a069fff4` (timeframe gap
+audit) → Phase B `6c3f976d` (query-param + tests) → Phase C `f99dc5f9`
+(DB readback / test proof) → Phase D `a91e495d` (daily-P&L baseline
+design-only) → Phase E (this entry, closure).
+
+**Built:**
+`docs/specs/paper_pnl_offmarket_01e_closure_decision.md`.
+
+**Next market-hours proof:**
+`PAPER-TRADE-LIFECYCLE-PROOF-03-PNL-VISIBILITY-VERIFY-COMBINED` — rebuild
++ restart the daemon with this bundle's binary and call
+`?timeframe=5m` against a real live paper position during market hours.
+
+**Next off-market patch:** `PAPER-DAILY-PNL-BASELINE-01-COMBINED` —
+implement the Phase D design (day-start/previous-close equity baseline
+table + capture mechanism + route truth-state vocabulary).
+
+**Safety confirmation:** no live orders; no forced paper orders; no
+strategy/threshold changes; no gate weakened; no fabricated marks or P&L
+at any phase; no generated evidence staged; no `.env.local` edit; no
+config flag change; no DB migration added; no daemon started or
+restarted.
