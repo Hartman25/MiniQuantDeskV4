@@ -20,9 +20,10 @@ use chrono::Utc;
 use tracing::info;
 
 use crate::api_types::{
-    ActionCatalogEntry, ActionCatalogResponse, IntegrityResponse, ModeChangeGuidanceResponse,
-    ModeChangeRestartTruth, ModeTransitionEntry, OperatorActionAuditFields, OperatorActionResponse,
-    OpsActionRequest, PendingRestartIntentSnapshot, RestartWorkflowTruth,
+    ActionCatalogEntry, ActionCatalogResponse, CapturedAccountEquityBaselineSnapshot,
+    IntegrityResponse, ModeChangeGuidanceResponse, ModeChangeRestartTruth, ModeTransitionEntry,
+    OperatorActionAuditFields, OperatorActionResponse, OpsActionRequest,
+    PendingRestartIntentSnapshot, RestartWorkflowTruth,
 };
 use crate::mode_transition::{evaluate_mode_transition, ModeTransitionVerdict};
 use crate::notify::{
@@ -31,9 +32,14 @@ use crate::notify::{
 };
 use crate::parity_evidence::{evaluate_parity_evidence_guarded, ParityEvidenceOutcome};
 use crate::state::DeploymentMode;
-use crate::state::{AppState, BusMsg, RuntimeLifecycleError, DAEMON_ENGINE_ID};
+use crate::state::{
+    AppState, BusMsg, MarketCalendarProvider, NyseWeekdaysProvider, RuntimeLifecycleError,
+    DAEMON_ENGINE_ID,
+};
 
-use super::helpers::{check_arm_safety, runtime_error_response, write_operator_audit_event};
+use super::helpers::{
+    check_arm_safety, parse_decimal_micros, runtime_error_response, write_operator_audit_event,
+};
 
 // ---------------------------------------------------------------------------
 // POST /v1/integrity/arm
@@ -245,6 +251,7 @@ pub(crate) async fn ops_action(
                             audit_event_id: None,
                         },
                         pending_restart_intent: None,
+                        captured_baseline: None,
                     }),
                 )
                     .into_response();
@@ -301,6 +308,7 @@ pub(crate) async fn ops_action(
                     audit_event_id: arm_audit_uuid.map(|id| id.to_string()),
                 },
                 pending_restart_intent: None,
+                captured_baseline: None,
             };
             st.discord_notifier
                 .notify_operator_action(&OperatorNotifyPayload {
@@ -379,6 +387,7 @@ pub(crate) async fn ops_action(
                     audit_event_id: disarm_audit_uuid.map(|id| id.to_string()),
                 },
                 pending_restart_intent: None,
+                captured_baseline: None,
             };
             st.discord_notifier
                 .notify_operator_action(&OperatorNotifyPayload {
@@ -432,6 +441,7 @@ pub(crate) async fn ops_action(
                         audit_event_id: audit_uuid.map(|id| id.to_string()),
                     },
                     pending_restart_intent: None,
+                    captured_baseline: None,
                 };
                 let ts = Utc::now().to_rfc3339();
                 let run_id_str = snapshot.active_run_id.map(|id| id.to_string());
@@ -488,6 +498,7 @@ pub(crate) async fn ops_action(
                         audit_event_id: audit_uuid.map(|id| id.to_string()),
                     },
                     pending_restart_intent: None,
+                    captured_baseline: None,
                 };
                 let ts = Utc::now().to_rfc3339();
                 let run_id_str = snapshot.active_run_id.map(|id| id.to_string());
@@ -544,6 +555,7 @@ pub(crate) async fn ops_action(
                         audit_event_id: audit_uuid.map(|id| id.to_string()),
                     },
                     pending_restart_intent: None,
+                    captured_baseline: None,
                 };
                 let ts = Utc::now().to_rfc3339();
                 let run_id_str = snapshot.active_run_id.map(|id| id.to_string());
@@ -614,6 +626,7 @@ pub(crate) async fn ops_action(
                             audit_event_id: None,
                         },
                         pending_restart_intent: None,
+                        captured_baseline: None,
                     }),
                 )
                     .into_response();
@@ -642,6 +655,7 @@ pub(crate) async fn ops_action(
                             audit_event_id: None,
                         },
                         pending_restart_intent: None,
+                        captured_baseline: None,
                     }),
                 )
                     .into_response();
@@ -672,6 +686,7 @@ pub(crate) async fn ops_action(
                             audit_event_id: None,
                         },
                         pending_restart_intent: None,
+                        captured_baseline: None,
                     }),
                 )
                     .into_response(),
@@ -759,6 +774,7 @@ pub(crate) async fn ops_action(
                                 audit_event_id: Some(intent_id.to_string()),
                             },
                             pending_restart_intent: Some(intent_snapshot),
+                            captured_baseline: None,
                         }),
                     )
                         .into_response()
@@ -783,6 +799,7 @@ pub(crate) async fn ops_action(
                             audit_event_id: None,
                         },
                         pending_restart_intent: None,
+                        captured_baseline: None,
                     }),
                 )
                     .into_response(),
@@ -831,6 +848,7 @@ pub(crate) async fn ops_action(
                             audit_event_id: None,
                         },
                         pending_restart_intent: None,
+                        captured_baseline: None,
                     }),
                 )
                     .into_response(),
@@ -875,6 +893,7 @@ pub(crate) async fn ops_action(
                                         audit_event_id: None,
                                     },
                                     pending_restart_intent: None,
+                                    captured_baseline: None,
                                 }),
                             )
                                 .into_response()
@@ -942,6 +961,7 @@ pub(crate) async fn ops_action(
                                 audit_event_id: None,
                             },
                             pending_restart_intent: None,
+                            captured_baseline: None,
                         }),
                     )
                         .into_response();
@@ -978,6 +998,7 @@ pub(crate) async fn ops_action(
                             audit_event_id: None,
                         },
                         pending_restart_intent: None,
+                        captured_baseline: None,
                     }),
                 )
                     .into_response();
@@ -1028,6 +1049,7 @@ pub(crate) async fn ops_action(
                                 audit_event_id: audit_uuid.map(|id| id.to_string()),
                             },
                             pending_restart_intent: None,
+                            captured_baseline: None,
                         }),
                     )
                         .into_response()
@@ -1110,6 +1132,7 @@ pub(crate) async fn ops_action(
                         audit_event_id: None,
                     },
                     pending_restart_intent: None,
+                    captured_baseline: None,
                 }),
             )
                 .into_response()
@@ -1157,6 +1180,7 @@ pub(crate) async fn ops_action(
                             audit_event_id: None,
                         },
                         pending_restart_intent: None,
+                        captured_baseline: None,
                     }),
                 )
                     .into_response();
@@ -1184,6 +1208,7 @@ pub(crate) async fn ops_action(
                             audit_event_id: None,
                         },
                         pending_restart_intent: None,
+                        captured_baseline: None,
                     }),
                 )
                     .into_response();
@@ -1214,6 +1239,7 @@ pub(crate) async fn ops_action(
                             audit_event_id: None,
                         },
                         pending_restart_intent: None,
+                        captured_baseline: None,
                     }),
                 )
                     .into_response();
@@ -1245,6 +1271,7 @@ pub(crate) async fn ops_action(
                                 audit_event_id: None,
                             },
                             pending_restart_intent: None,
+                            captured_baseline: None,
                         }),
                     )
                         .into_response();
@@ -1279,6 +1306,7 @@ pub(crate) async fn ops_action(
                             audit_event_id: None,
                         },
                         pending_restart_intent: None,
+                        captured_baseline: None,
                     }),
                 )
                     .into_response();
@@ -1310,6 +1338,7 @@ pub(crate) async fn ops_action(
                             audit_event_id: None,
                         },
                         pending_restart_intent: None,
+                        captured_baseline: None,
                     }),
                 )
                     .into_response();
@@ -1337,6 +1366,7 @@ pub(crate) async fn ops_action(
                             audit_event_id: None,
                         },
                         pending_restart_intent: None,
+                        captured_baseline: None,
                     }),
                 )
                     .into_response();
@@ -1366,6 +1396,7 @@ pub(crate) async fn ops_action(
                             audit_event_id: None,
                         },
                         pending_restart_intent: None,
+                        captured_baseline: None,
                     }),
                 )
                     .into_response();
@@ -1439,6 +1470,7 @@ pub(crate) async fn ops_action(
                             audit_event_id: None,
                         },
                         pending_restart_intent: None,
+                        captured_baseline: None,
                     }),
                 )
                     .into_response();
@@ -1469,6 +1501,7 @@ pub(crate) async fn ops_action(
                             audit_event_id: None,
                         },
                         pending_restart_intent: None,
+                        captured_baseline: None,
                     }),
                 )
                     .into_response();
@@ -1629,6 +1662,311 @@ pub(crate) async fn ops_action(
                         audit_event_id: flatten_audit_uuid.map(|id| id.to_string()),
                     },
                     pending_restart_intent: None,
+                    captured_baseline: None,
+                }),
+            )
+                .into_response()
+        }
+
+        // ---------------------------------------------------------------
+        // PAPER-DAILY-PNL-CAPTURE-01B: explicit, operator-controlled
+        // capture of one `sys_account_equity_baseline` row for a single
+        // `trading_date`, read from the daemon's real `broker_snapshot`.
+        // Never auto-triggered, never calls a broker/provider, never
+        // touches `oms_outbox`/`oms_inbox`. See
+        // docs/specs/paper_daily_pnl_capture_01a_current_truth_action_design.md.
+        // ---------------------------------------------------------------
+        "capture-account-equity-baseline" => {
+            let env_label = st.deployment_mode().as_api_label().to_string();
+
+            // Gate 1: DB required for the durable baseline write.
+            let Some(db) = st.db.as_ref() else {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(OperatorActionResponse {
+                        requested_action: "capture-account-equity-baseline".to_string(),
+                        accepted: false,
+                        disposition: "db_unavailable".to_string(),
+                        resulting_integrity_state: None,
+                        resulting_desired_armed: None,
+                        blockers: vec!["capture-account-equity-baseline requires a DB \
+                             connection for a durable baseline write"
+                            .to_string()],
+                        warnings: vec![],
+                        environment: Some(env_label),
+                        scope: Some("daemon_instance".to_string()),
+                        audit: OperatorActionAuditFields {
+                            durable_db_write: false,
+                            durable_targets: vec![],
+                            audit_event_id: None,
+                        },
+                        pending_restart_intent: None,
+                        captured_baseline: None,
+                    }),
+                )
+                    .into_response();
+            };
+
+            // Gate 2: a current broker snapshot is required as the source
+            // of truth for equity/cash -- this action never calls a
+            // broker or provider itself.
+            let snap = st.broker_snapshot.read().await.clone();
+            let Some(snapshot) = snap else {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(OperatorActionResponse {
+                        requested_action: "capture-account-equity-baseline".to_string(),
+                        accepted: false,
+                        disposition: "no_broker_snapshot".to_string(),
+                        resulting_integrity_state: None,
+                        resulting_desired_armed: None,
+                        blockers: vec!["capture-account-equity-baseline requires a current \
+                             broker account snapshot; none is present"
+                            .to_string()],
+                        warnings: vec![],
+                        environment: Some(env_label),
+                        scope: Some("daemon_instance".to_string()),
+                        audit: OperatorActionAuditFields {
+                            durable_db_write: false,
+                            durable_targets: vec![],
+                            audit_event_id: None,
+                        },
+                        pending_restart_intent: None,
+                        captured_baseline: None,
+                    }),
+                )
+                    .into_response();
+            };
+
+            // Gate 3: reason required -- this action writes durable
+            // financial-truth data, unlike most other ops/action arms.
+            let reason = body.reason.clone().unwrap_or_default();
+            if reason.trim().is_empty() {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(OperatorActionResponse {
+                        requested_action: "capture-account-equity-baseline".to_string(),
+                        accepted: false,
+                        disposition: "missing_reason".to_string(),
+                        resulting_integrity_state: None,
+                        resulting_desired_armed: None,
+                        blockers: vec!["capture-account-equity-baseline requires a non-blank \
+                             'reason' acknowledging this is a baseline capture"
+                            .to_string()],
+                        warnings: vec![],
+                        environment: Some(env_label),
+                        scope: Some("daemon_instance".to_string()),
+                        audit: OperatorActionAuditFields {
+                            durable_db_write: false,
+                            durable_targets: vec![],
+                            audit_event_id: None,
+                        },
+                        pending_restart_intent: None,
+                        captured_baseline: None,
+                    }),
+                )
+                    .into_response();
+            }
+
+            // Gate 4: trading_date required.
+            let Some(trading_date_str) = body.trading_date.as_deref() else {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(OperatorActionResponse {
+                        requested_action: "capture-account-equity-baseline".to_string(),
+                        accepted: false,
+                        disposition: "missing_trading_date".to_string(),
+                        resulting_integrity_state: None,
+                        resulting_desired_armed: None,
+                        blockers: vec!["capture-account-equity-baseline requires \
+                             'trading_date' (\"YYYY-MM-DD\")"
+                            .to_string()],
+                        warnings: vec![],
+                        environment: Some(env_label),
+                        scope: Some("daemon_instance".to_string()),
+                        audit: OperatorActionAuditFields {
+                            durable_db_write: false,
+                            durable_targets: vec![],
+                            audit_event_id: None,
+                        },
+                        pending_restart_intent: None,
+                        captured_baseline: None,
+                    }),
+                )
+                    .into_response();
+            };
+
+            // Gate 5: trading_date must parse as a strict YYYY-MM-DD date.
+            let Ok(trading_date) =
+                chrono::NaiveDate::parse_from_str(trading_date_str.trim(), "%Y-%m-%d")
+            else {
+                return (
+                    StatusCode::BAD_REQUEST,
+                    Json(OperatorActionResponse {
+                        requested_action: "capture-account-equity-baseline".to_string(),
+                        accepted: false,
+                        disposition: "invalid_trading_date".to_string(),
+                        resulting_integrity_state: None,
+                        resulting_desired_armed: None,
+                        blockers: vec![format!(
+                            "trading_date '{trading_date_str}' is not a valid YYYY-MM-DD date"
+                        )],
+                        warnings: vec![],
+                        environment: Some(env_label),
+                        scope: Some("daemon_instance".to_string()),
+                        audit: OperatorActionAuditFields {
+                            durable_db_write: false,
+                            durable_targets: vec![],
+                            audit_event_id: None,
+                        },
+                        pending_restart_intent: None,
+                        captured_baseline: None,
+                    }),
+                )
+                    .into_response();
+            };
+
+            // Gate 6: trading_date must be a real NYSE trading day. Probed
+            // at 18:00 UTC -- safely within NYSE regular hours under both
+            // EST and EDT -- matching `resolve_daily_pnl`'s
+            // `most_recent_trading_day_before` convention exactly
+            // (core-rs/crates/mqk-daemon/src/routes/portfolio.rs).
+            let probe = trading_date
+                .and_hms_opt(18, 0, 0)
+                .expect("18:00:00 is always a valid time")
+                .and_utc();
+            if !NyseWeekdaysProvider.session_for(probe).is_trading_day {
+                return (
+                    StatusCode::FORBIDDEN,
+                    Json(OperatorActionResponse {
+                        requested_action: "capture-account-equity-baseline".to_string(),
+                        accepted: false,
+                        disposition: "non_trading_day".to_string(),
+                        resulting_integrity_state: None,
+                        resulting_desired_armed: None,
+                        blockers: vec![format!(
+                            "trading_date '{trading_date}' is not a real NYSE trading day"
+                        )],
+                        warnings: vec![],
+                        environment: Some(env_label),
+                        scope: Some("daemon_instance".to_string()),
+                        audit: OperatorActionAuditFields {
+                            durable_db_write: false,
+                            durable_targets: vec![],
+                            audit_event_id: None,
+                        },
+                        pending_restart_intent: None,
+                        captured_baseline: None,
+                    }),
+                )
+                    .into_response();
+            }
+
+            // Gate 7: broker-reported equity/cash must parse as decimals.
+            // Never fabricates a value on a parse failure.
+            let (Some(equity_micros), Some(cash_micros)) = (
+                parse_decimal_micros(&snapshot.account.equity),
+                parse_decimal_micros(&snapshot.account.cash),
+            ) else {
+                return (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    Json(OperatorActionResponse {
+                        requested_action: "capture-account-equity-baseline".to_string(),
+                        accepted: false,
+                        disposition: "unparseable_account_values".to_string(),
+                        resulting_integrity_state: None,
+                        resulting_desired_armed: None,
+                        blockers: vec!["broker_snapshot account equity/cash could not be \
+                             parsed as a decimal value"
+                            .to_string()],
+                        warnings: vec![],
+                        environment: Some(env_label),
+                        scope: Some("daemon_instance".to_string()),
+                        audit: OperatorActionAuditFields {
+                            durable_db_write: false,
+                            durable_targets: vec![],
+                            audit_event_id: None,
+                        },
+                        pending_restart_intent: None,
+                        captured_baseline: None,
+                    }),
+                )
+                    .into_response();
+            };
+
+            let currency = snapshot.account.currency.clone();
+            let captured_by = "operator:capture-account-equity-baseline".to_string();
+            let broker_snapshot_source = st.broker_snapshot_source().as_str().to_string();
+            let captured_at_utc = Utc::now();
+
+            // Deterministic audit ID: identical inputs (including equity/
+            // cash) reproduce the same UUID, matching
+            // `.claude/rules/audit_repo_truth_rules.md`'s "re-run of the
+            // same logical event -> same audit ID" rule.
+            let audit_event_id = uuid::Uuid::new_v5(
+                &uuid::Uuid::NAMESPACE_DNS,
+                format!(
+                    "mqk.account-equity-baseline.v1|{trading_date}|{equity_micros}|\
+                     {cash_micros}|{currency}|{captured_by}|{broker_snapshot_source}"
+                )
+                .as_bytes(),
+            );
+
+            if let Err(err) = mqk_db::upsert_account_equity_baseline(
+                db,
+                mqk_db::UpsertAccountEquityBaselineArgs {
+                    trading_date,
+                    equity_micros,
+                    cash_micros,
+                    currency: currency.clone(),
+                    captured_at_utc,
+                    captured_by: captured_by.clone(),
+                    broker_snapshot_source: broker_snapshot_source.clone(),
+                    audit_event_id,
+                },
+            )
+            .await
+            {
+                return runtime_error_response(RuntimeLifecycleError::Internal {
+                    fault_class: "ops.action.capture_account_equity_baseline.upsert",
+                    message: format!("Failed to persist account equity baseline: {err}"),
+                });
+            }
+
+            info!(
+                trading_date = %trading_date,
+                audit_event_id = %audit_event_id,
+                "ops/action capture-account-equity-baseline: baseline row persisted"
+            );
+
+            (
+                StatusCode::OK,
+                Json(OperatorActionResponse {
+                    requested_action: "capture-account-equity-baseline".to_string(),
+                    accepted: true,
+                    disposition: "applied".to_string(),
+                    resulting_integrity_state: None,
+                    resulting_desired_armed: None,
+                    blockers: vec![],
+                    warnings: vec![],
+                    environment: Some(env_label),
+                    scope: Some("daemon_instance".to_string()),
+                    audit: OperatorActionAuditFields {
+                        durable_db_write: true,
+                        durable_targets: vec!["sys_account_equity_baseline".to_string()],
+                        audit_event_id: Some(audit_event_id.to_string()),
+                    },
+                    pending_restart_intent: None,
+                    captured_baseline: Some(CapturedAccountEquityBaselineSnapshot {
+                        trading_date: trading_date.to_string(),
+                        equity: equity_micros as f64 / mqk_portfolio::MICROS_SCALE as f64,
+                        cash: cash_micros as f64 / mqk_portfolio::MICROS_SCALE as f64,
+                        currency,
+                        captured_at_utc: captured_at_utc.to_rfc3339(),
+                        captured_by,
+                        broker_snapshot_source,
+                        audit_event_id: audit_event_id.to_string(),
+                    }),
                 }),
             )
                 .into_response()
@@ -1646,7 +1984,8 @@ pub(crate) async fn ops_action(
                     "Unknown action_key '{}'; accepted keys: arm-execution, arm-strategy, \
                      disarm-execution, disarm-strategy, start-system, stop-system, kill-switch, \
                      request-mode-change, cancel-mode-transition, clear-halted-run, \
-                     test-discord-alert, flatten-paper-positions",
+                     test-discord-alert, flatten-paper-positions, \
+                     capture-account-equity-baseline",
                     body.action_key
                 )],
                 warnings: vec![],
@@ -1658,6 +1997,7 @@ pub(crate) async fn ops_action(
                     audit_event_id: None,
                 },
                 pending_restart_intent: None,
+                captured_baseline: None,
             }),
         )
             .into_response(),

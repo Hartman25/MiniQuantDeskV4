@@ -79,6 +79,7 @@ fn operator_action_response(
             audit_event_id: audit_event_id.map(|id| id.to_string()),
         },
         pending_restart_intent: None,
+        captured_baseline: None,
     }
 }
 

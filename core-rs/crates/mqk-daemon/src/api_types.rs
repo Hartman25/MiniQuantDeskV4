@@ -88,6 +88,31 @@ pub struct OperatorActionResponse {
     /// "request-mode-change" and the transition is `admissible_with_restart`
     /// (disposition = "pending_restart").  Null in all other cases.
     pub pending_restart_intent: Option<PendingRestartIntentSnapshot>,
+    /// PAPER-DAILY-PNL-CAPTURE-01B: captured baseline provenance.  Present
+    /// only when `action_key == "capture-account-equity-baseline"` and
+    /// `accepted == true`.  Null in every other case.
+    pub captured_baseline: Option<CapturedAccountEquityBaselineSnapshot>,
+}
+
+/// PAPER-DAILY-PNL-CAPTURE-01B: provenance snapshot of a durably-written
+/// `sys_account_equity_baseline` row, returned by the
+/// `"capture-account-equity-baseline"` `ops/action` on success.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CapturedAccountEquityBaselineSnapshot {
+    /// Trading date the baseline row was captured for, "YYYY-MM-DD".
+    pub trading_date: String,
+    pub equity: f64,
+    pub cash: f64,
+    pub currency: String,
+    /// RFC3339 UTC timestamp when this capture call ran.
+    pub captured_at_utc: String,
+    /// Fixed provenance tag: `"operator:capture-account-equity-baseline"`.
+    pub captured_by: String,
+    /// Real `BrokerSnapshotTruthSource` label at the time of capture.
+    pub broker_snapshot_source: String,
+    /// Deterministic `Uuid::new_v5` audit event ID (see route doc comment
+    /// for the exact seed format).
+    pub audit_event_id: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -2348,6 +2373,10 @@ pub struct OpsActionRequest {
     /// When present, only that symbol is flattened.
     /// When absent, all non-flat positions are flattened.
     pub symbol: Option<String>,
+    /// Required for "capture-account-equity-baseline": target trading date
+    /// in "YYYY-MM-DD" form. Must be a real NYSE trading day per
+    /// `NyseWeekdaysProvider` (PAPER-DAILY-PNL-CAPTURE-01B).
+    pub trading_date: Option<String>,
 }
 
 // ---------------------------------------------------------------------------

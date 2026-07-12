@@ -8123,3 +8123,61 @@ checks passed. `git diff --check` clean.
 
 **Safety confirmation:** no code touched (docs/validator only); no
 trading, orders, broker/provider calls, or DB migration in this phase.
+
+---
+
+## PAPER-DAILY-PNL-BASELINE-CAPTURE-AND-OPERATOR-CLOSURE-01-COMBINED — Phase B
+
+Patch: `PAPER-DAILY-PNL-CAPTURE-01B-OPERATOR-CAPTURE-ACTION-01`.
+Status: `CLOSED_LOCAL`.
+
+Implemented the Phase A design exactly: extended `OpsActionRequest`
+(`core-rs/crates/mqk-daemon/src/api_types.rs`) with an optional
+`trading_date: Option<String>` field, and `OperatorActionResponse` with an
+optional `captured_baseline: Option<CapturedAccountEquityBaselineSnapshot>`
+field (new struct, same file). Added a new
+`"capture-account-equity-baseline"` arm to `ops_action`
+(`core-rs/crates/mqk-daemon/src/routes/control_plane.rs`), gated in order:
+DB pool present -> broker snapshot present -> non-blank `reason` ->
+`trading_date` present -> parses as `YYYY-MM-DD` -> is a real NYSE trading
+day (`NyseWeekdaysProvider`, identical 18:00-UTC probe convention
+`resolve_daily_pnl` already uses) -> broker-reported equity/cash parse as
+decimals (`parse_decimal_micros`, fail-closed, never fabricates). On
+success, writes exactly one row via the existing
+`mqk_db::upsert_account_equity_baseline`, with `captured_by =
+"operator:capture-account-equity-baseline"` (a fixed constant, not free
+text) and `broker_snapshot_source` read from the daemon's real
+`BrokerSnapshotTruthSource`. `audit_event_id` is a deterministic
+`Uuid::new_v5(&Uuid::NAMESPACE_DNS, seed)`, mirroring the
+`request-mode-change` arm's `intent_id` precedent exactly. Every other
+`OperatorActionResponse` construction site in `control_plane.rs` and
+`control.rs` (30 call sites) was mechanically updated to set
+`captured_baseline: None` alongside the existing `pending_restart_intent`
+field, since the struct gained a new required field.
+
+**Tests added:**
+`core-rs/crates/mqk-daemon/tests/scenario_paper_daily_pnl_baseline_capture_01.rs`
+(PDBC-01 through PDBC-11): unauthorized refusal (`TokenRequired`, missing
+and wrong bearer), no-DB refusal, no-broker-snapshot refusal, blank-reason
+refusal, missing/malformed `trading_date` refusal, a real-Saturday
+`non_trading_day` refusal, a successful capture with full provenance
+assertions, idempotent re-capture (same `trading_date` twice -> still
+exactly one row, even with different equity), a zero-row-change proof for
+both `oms_outbox` and `oms_inbox` across a successful capture, and a
+deterministic `audit_event_id` reproducibility check.
+
+**Validation:** `cargo check -p mqk-daemon` clean;
+`scenario_paper_daily_pnl_baseline_capture_01` 11/11 passed (real local
+`mqk-paper-postgres` port 5440); `scenario_paper_daily_pnl_baseline_01`
+11/11 passed unaffected; `scenario_route_contract_rt01` 2/2;
+`scenario_gui_daemon_contract_gate` 23/23; `cargo clippy -p mqk-daemon
+--lib -- -D warnings` clean. `validate_paper_daily_pnl_capture_01a_design.ps1`
+still 12/12 (docs unaffected by this phase). `git diff --check` clean.
+
+**Safety confirmation:** no trading; no order/outbox/inbox writes (proven
+by PDBC-10); no live/paper order submitted; no execution armed; no
+strategy/gate/threshold change; no fabricated baseline (every written
+value traces to a real caller-supplied `trading_date` and the daemon's
+real in-memory `broker_snapshot`); no historical backfill (exactly one
+`trading_date` per call); no provider/broker/network call in any test; no
+DB migration (`0045` already sufficient).
