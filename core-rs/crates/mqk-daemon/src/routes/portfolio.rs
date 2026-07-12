@@ -42,6 +42,28 @@ const DAILY_PNL_REASON_NO_SNAPSHOT: &str = "no_broker_snapshot";
 /// `DEFAULT_LIVE_WEIGHTS_TIMEFRAME` used by `/api/v1/portfolio/live-weights`.
 const DEFAULT_POSITIONS_PNL_TIMEFRAME: &str = "1D";
 
+/// PAPER-PNL-OFFMARKET-01B: optional `timeframe` query param for
+/// `/api/v1/portfolio/positions` and `/api/v1/portfolio/summary`, mirroring
+/// `LiveWeightsParams` on `/api/v1/portfolio/live-weights`.
+#[derive(serde::Deserialize)]
+pub(crate) struct PortfolioPnlQuery {
+    pub timeframe: Option<String>,
+}
+
+/// Resolve the effective mark timeframe for positions/summary P&L: trims the
+/// query value and falls back to `DEFAULT_POSITIONS_PNL_TIMEFRAME` when
+/// absent or blank — same rule `portfolio_live_weights` already applies to
+/// `LiveWeightsParams`.
+fn selected_positions_pnl_timeframe(query: &PortfolioPnlQuery) -> String {
+    query
+        .timeframe
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string)
+        .unwrap_or_else(|| DEFAULT_POSITIONS_PNL_TIMEFRAME.to_string())
+}
+
 #[derive(Clone)]
 struct PositionPnlResult {
     mark_price: Option<f64>,
@@ -89,6 +111,7 @@ impl PositionPnlResult {
 async fn compute_broker_positions_pnl(
     st: &AppState,
     positions: &[mqk_schemas::BrokerPosition],
+    timeframe: &str,
 ) -> BTreeMap<String, PositionPnlResult> {
     let mut results = BTreeMap::new();
 
@@ -125,13 +148,7 @@ async fn compute_broker_positions_pnl(
             continue;
         };
 
-        match mqk_db::fetch_recent_completed_bars_for_strategy(
-            pool,
-            &p.symbol,
-            DEFAULT_POSITIONS_PNL_TIMEFRAME,
-            1,
-        )
-        .await
+        match mqk_db::fetch_recent_completed_bars_for_strategy(pool, &p.symbol, timeframe, 1).await
         {
             Ok(bars) => match bars.last() {
                 Some(bar) => {
@@ -146,9 +163,7 @@ async fn compute_broker_positions_pnl(
                             mark_price: Some(
                                 bar.close_micros as f64 / mqk_portfolio::MICROS_SCALE as f64,
                             ),
-                            mark_source: Some(format!(
-                                "md_bars:{DEFAULT_POSITIONS_PNL_TIMEFRAME}:close"
-                            )),
+                            mark_source: Some(format!("md_bars:{timeframe}:close")),
                             unrealized_pnl: Some(
                                 pnl_micros as f64 / mqk_portfolio::MICROS_SCALE as f64,
                             ),
@@ -231,14 +246,18 @@ fn aggregate_positions_pnl(
 // GET /api/v1/portfolio/summary
 // ---------------------------------------------------------------------------
 
-pub(crate) async fn portfolio_summary(State(st): State<Arc<AppState>>) -> impl IntoResponse {
+pub(crate) async fn portfolio_summary(
+    Query(query): Query<PortfolioPnlQuery>,
+    State(st): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let timeframe = selected_positions_pnl_timeframe(&query);
     let snap = st.broker_snapshot.read().await.clone();
 
     let summary = if let Some(snapshot) = snap {
         let account_equity = parse_decimal(&snapshot.account.equity);
         let cash = parse_decimal(&snapshot.account.cash);
         let (long_market_value, short_market_value, _, _) = exposure_breakdown(&snapshot.positions);
-        let pnl_by_symbol = compute_broker_positions_pnl(&st, &snapshot.positions).await;
+        let pnl_by_symbol = compute_broker_positions_pnl(&st, &snapshot.positions, &timeframe).await;
         let (unrealized_pnl, pnl_truth_state, pnl_unavailable_reason) =
             aggregate_positions_pnl(&pnl_by_symbol);
 
@@ -280,7 +299,11 @@ pub(crate) async fn portfolio_summary(State(st): State<Arc<AppState>>) -> impl I
 // GET /api/v1/portfolio/positions
 // ---------------------------------------------------------------------------
 
-pub(crate) async fn portfolio_positions(State(st): State<Arc<AppState>>) -> impl IntoResponse {
+pub(crate) async fn portfolio_positions(
+    Query(query): Query<PortfolioPnlQuery>,
+    State(st): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let timeframe = selected_positions_pnl_timeframe(&query);
     let snap = st.broker_snapshot.read().await.clone();
     // PORT-05: session_boundary is always "in_memory_only" — broker_snapshot is
     // held in-memory and lost on daemon restart regardless of broker kind.
@@ -299,7 +322,8 @@ pub(crate) async fn portfolio_positions(State(st): State<Arc<AppState>>) -> impl
             .into_response(),
         Some(snapshot) => {
             let captured_at_utc = snapshot.captured_at_utc.to_rfc3339();
-            let pnl_by_symbol = compute_broker_positions_pnl(&st, &snapshot.positions).await;
+            let pnl_by_symbol =
+                compute_broker_positions_pnl(&st, &snapshot.positions, &timeframe).await;
             let rows = snapshot
                 .positions
                 .iter()

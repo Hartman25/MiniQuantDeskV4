@@ -7705,3 +7705,45 @@ bundle designs it, without implementing it).
 
 **Safety confirmation:** no DB mutation; no order submitted; no daemon
 restart; no code change in this phase; no live routing.
+
+---
+
+## PAPER-PNL-OFFMARKET-01B-TIMEFRAME-QUERY-PARAM-01
+
+**Status:** `CLOSED_LOCAL`.
+
+Added an optional `timeframe` query param to `GET
+/api/v1/portfolio/positions` and `GET /api/v1/portfolio/summary`,
+mirroring `LiveWeightsParams`/`DEFAULT_LIVE_WEIGHTS_TIMEFRAME` on
+`/api/v1/portfolio/live-weights` exactly: new `PortfolioPnlQuery {
+timeframe: Option<String> }` + `selected_positions_pnl_timeframe` helper
+(trim, blank/absent -> `DEFAULT_POSITIONS_PNL_TIMEFRAME = "1D"`, unchanged).
+`compute_broker_positions_pnl` now takes `timeframe: &str` and threads it
+into `fetch_recent_completed_bars_for_strategy` and the `mark_source`
+format string (`md_bars:{timeframe}:close`) instead of the hardcoded
+constant. No API response type changed — no new field was needed since
+`mark_source` already carries the resolved timeframe per-position.
+
+Five new DB-backed scenario tests (PPV-10..PPV-14) proved: default
+no-query still resolves `"1D"` (PPV-10); `?timeframe=5m` resolves mark and
+`unrealized_pnl` on both routes against a `5m`-only bar, matching the
+proof-02 hand-calculation of `$0.15` (PPV-11); the same symbol's default
+`1D` query still reports `mark_unavailable` when only a `5m` bar exists,
+proving the default did not silently change (PPV-12); `mark_source ==
+"md_bars:5m:close"` when queried with `5m` (asserted inside PPV-11); blank
+`?timeframe=` defaults to `1D` with no DB required for a flat position
+(PPV-14). All 13 tests in the file (existing PPV-01..09 plus the 5 new)
+pass. `cargo check -p mqk-daemon`, `scenario_route_contract_rt01` (2/2),
+`scenario_gui_daemon_contract_gate` (23/23), and `cargo clippy -p
+mqk-daemon --lib -- -D warnings` all clean.
+
+**Built:**
+`core-rs/crates/mqk-daemon/src/routes/portfolio.rs`,
+`core-rs/crates/mqk-daemon/tests/scenario_paper_pnl_operator_visibility_01.rs`.
+
+**Next:** Phase C — DB readback / route-or-test proof doc.
+
+**Safety confirmation:** no order submitted; no forced paper order; no
+strategy/threshold change; no gate weakened; no DB migration; no
+provider/broker/network call in tests; no daemon restart; no live
+routing.

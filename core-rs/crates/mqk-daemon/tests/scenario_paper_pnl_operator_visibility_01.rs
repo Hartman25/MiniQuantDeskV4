@@ -25,6 +25,11 @@
 //! | PPV-08  | DB-backed: summary.unrealized_pnl aggregates position-level P&L,         |
 //! |         | daily_pnl stays null with an explicit unavailable reason                 |
 //! | PPV-09  | DB-backed: route calls make zero writes to `oms_outbox`                  |
+//! | PPV-10  | DB-backed: default (no query) positions/summary still resolve `1D`       |
+//! | PPV-11  | DB-backed: `?timeframe=5m` resolves mark/P&L when only a `5m` bar exists |
+//! | PPV-12  | DB-backed: same symbol, default `1D` -> `mark_unavailable` (5m-only bar) |
+//! | PPV-13  | DB-backed: `mark_source == "md_bars:5m:close"` when queried with `5m`    |
+//! | PPV-14  | Blank `?timeframe=` defaults to `1D` (no DB needed — flat position)      |
 //!
 //! Non-DB tests are fully in-process (no DB, no disk I/O, no network). DB
 //! tests skip gracefully without `MQK_DATABASE_URL` pointing at the local
@@ -457,4 +462,169 @@ async fn ppv09_routes_make_no_outbox_writes() {
     );
 
     delete_test_bars(&pool, symbol).await;
+}
+
+// ---------------------------------------------------------------------------
+// PAPER-PNL-OFFMARKET-01B: `timeframe` query-param proof (PPV-10..PPV-14)
+// ---------------------------------------------------------------------------
+
+/// PPV-10: default (no `?timeframe=`) positions/summary still resolve `1D`
+/// exactly as before — backward compatible.
+#[tokio::test]
+async fn ppv10_default_no_query_still_resolves_1d() {
+    let Some(db_url) = get_paper_db_url() else {
+        eprintln!("PPV-10: skipped (no MQK_DATABASE_URL pointing to paper DB)");
+        return;
+    };
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&db_url)
+        .await
+        .expect("PPV-10: pool connect failed");
+    mqk_db::migrate(&pool).await.expect("migrate failed");
+
+    let symbol = "ZZPPV10DEF";
+    delete_test_bars(&pool, symbol).await;
+    insert_test_bar(&pool, symbol, "1D", 1_790_000_000, 320_000_000).await;
+
+    let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
+        pool.clone(),
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
+    *st.broker_snapshot.write().await =
+        Some(make_snapshot(vec![position(symbol, "3", "314.81")]));
+    let router = routes::build_router(Arc::clone(&st));
+
+    let (status, body) = call(router.clone(), get("/api/v1/portfolio/positions")).await;
+    assert_eq!(status, StatusCode::OK);
+    let v = parse_json(body);
+    let row = &v["rows"].as_array().expect("rows array")[0];
+    assert_eq!(row["pnl_truth_state"], "active");
+    assert_eq!(row["mark_source"], "md_bars:1D:close");
+
+    let (status, body) = call(router, get("/api/v1/portfolio/summary")).await;
+    assert_eq!(status, StatusCode::OK);
+    let v = parse_json(body);
+    assert_eq!(v["pnl_truth_state"], "active");
+    assert!(v["unrealized_pnl"].as_f64().is_some());
+
+    delete_test_bars(&pool, symbol).await;
+}
+
+/// PPV-11 / PPV-13: `?timeframe=5m` resolves mark/P&L on both routes when
+/// only a `5m` bar exists, and `mark_source == "md_bars:5m:close"`.
+#[tokio::test]
+async fn ppv11_timeframe_5m_resolves_mark_and_pnl_when_only_5m_bar_exists() {
+    let Some(db_url) = get_paper_db_url() else {
+        eprintln!("PPV-11: skipped (no MQK_DATABASE_URL pointing to paper DB)");
+        return;
+    };
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&db_url)
+        .await
+        .expect("PPV-11: pool connect failed");
+    mqk_db::migrate(&pool).await.expect("migrate failed");
+
+    let symbol = "ZZPPV11FIV";
+    delete_test_bars(&pool, symbol).await;
+    // Only a 5m bar exists — matches the real proof-02 AAPL DB shape.
+    // avg_price=314.81, mark=314.86 -> unrealized_pnl = (314.86-314.81)*3 = 0.15
+    insert_test_bar(&pool, symbol, "5m", 1_790_000_000, 314_860_000).await;
+
+    let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
+        pool.clone(),
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
+    *st.broker_snapshot.write().await =
+        Some(make_snapshot(vec![position(symbol, "3", "314.81")]));
+    let router = routes::build_router(Arc::clone(&st));
+
+    let (status, body) = call(
+        router.clone(),
+        get("/api/v1/portfolio/positions?timeframe=5m"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let v = parse_json(body);
+    let row = &v["rows"].as_array().expect("rows array")[0];
+    assert_eq!(row["pnl_truth_state"], "active");
+    assert_eq!(row["mark_price"], 314.86);
+    assert_eq!(row["mark_source"], "md_bars:5m:close");
+    let pnl = row["unrealized_pnl"].as_f64().expect("unrealized_pnl present");
+    assert!((pnl - 0.15).abs() < 0.001, "expected ~0.15, got {pnl}");
+
+    let (status, body) = call(router, get("/api/v1/portfolio/summary?timeframe=5m")).await;
+    assert_eq!(status, StatusCode::OK);
+    let v = parse_json(body);
+    assert_eq!(v["pnl_truth_state"], "active");
+    let pnl = v["unrealized_pnl"]
+        .as_f64()
+        .expect("summary unrealized_pnl present");
+    assert!((pnl - 0.15).abs() < 0.001, "expected ~0.15, got {pnl}");
+
+    delete_test_bars(&pool, symbol).await;
+}
+
+/// PPV-12: same symbol with only a `5m` bar seeded -> default (`1D`) query
+/// still reports `mark_unavailable`, proving the default is unchanged and
+/// the `5m` mark is only used when explicitly requested.
+#[tokio::test]
+async fn ppv12_same_symbol_default_1d_is_mark_unavailable_when_only_5m_bar_exists() {
+    let Some(db_url) = get_paper_db_url() else {
+        eprintln!("PPV-12: skipped (no MQK_DATABASE_URL pointing to paper DB)");
+        return;
+    };
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&db_url)
+        .await
+        .expect("PPV-12: pool connect failed");
+    mqk_db::migrate(&pool).await.expect("migrate failed");
+
+    let symbol = "ZZPPV12ONL";
+    delete_test_bars(&pool, symbol).await;
+    insert_test_bar(&pool, symbol, "5m", 1_790_000_000, 314_860_000).await;
+
+    let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
+        pool.clone(),
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
+    *st.broker_snapshot.write().await =
+        Some(make_snapshot(vec![position(symbol, "3", "314.81")]));
+    let router = routes::build_router(Arc::clone(&st));
+
+    let (status, body) = call(router, get("/api/v1/portfolio/positions")).await;
+    assert_eq!(status, StatusCode::OK);
+    let v = parse_json(body);
+    let row = &v["rows"].as_array().expect("rows array")[0];
+    assert_eq!(row["pnl_truth_state"], "mark_unavailable");
+    assert_eq!(
+        row["pnl_unavailable_reason"],
+        "no_completed_md_bars_row_for_symbol"
+    );
+    assert!(row["mark_price"].is_null());
+
+    delete_test_bars(&pool, symbol).await;
+}
+
+/// PPV-14: blank `?timeframe=` defaults to `1D` — no DB needed (flat
+/// position never requires a mark lookup).
+#[tokio::test]
+async fn ppv14_blank_timeframe_query_param_defaults_to_1d() {
+    let (st, router) = make_router_with_state();
+    *st.broker_snapshot.write().await = Some(make_snapshot(vec![position("AAPL", "0", "0.00")]));
+
+    let (status, body) = call(router.clone(), get("/api/v1/portfolio/positions?timeframe=")).await;
+    assert_eq!(status, StatusCode::OK);
+    let v = parse_json(body);
+    let rows = v["rows"].as_array().expect("rows array");
+    assert_eq!(rows[0]["pnl_truth_state"], "flat");
+    assert_eq!(rows[0]["unrealized_pnl"], 0.0);
+
+    let (status, body) = call(router, get("/api/v1/portfolio/summary?timeframe=")).await;
+    assert_eq!(status, StatusCode::OK);
+    let v = parse_json(body);
+    assert_eq!(v["unrealized_pnl"], 0.0);
+    assert_eq!(v["pnl_truth_state"], "active");
 }
