@@ -5691,3 +5691,29 @@ pub struct WatchlistAdmissionCheckResponse {
     /// UTC timestamp when the check was performed.
     pub checked_at_utc: String,
 }
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/portfolio/account-equity-baseline (PAPER-DAILY-PNL-CAPTURE-01D)
+// ---------------------------------------------------------------------------
+
+/// Read-only operator visibility into one captured
+/// `sys_account_equity_baseline` row, by `trading_date`.
+///
+/// `truth_state` distinguishes `"active"` (a real row exists),
+/// `"not_found"` (DB queried successfully, no row for that date),
+/// `"db_unavailable"` (no DB pool configured), `"invalid_request"` (bad or
+/// missing `trading_date`), and `"query_failed"` (DB present but the query
+/// itself errored) -- never collapses these into a bare empty payload.
+#[derive(Debug, Clone, Serialize)]
+pub struct AccountEquityBaselineStatusResponse {
+    pub truth_state: String,
+    pub trading_date: Option<String>,
+    pub equity: Option<f64>,
+    pub cash: Option<f64>,
+    pub currency: Option<String>,
+    pub captured_at_utc: Option<String>,
+    pub captured_by: Option<String>,
+    pub broker_snapshot_source: Option<String>,
+    pub audit_event_id: Option<String>,
+    pub message: String,
+}

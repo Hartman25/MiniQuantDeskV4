@@ -26,6 +26,11 @@
 //! | PDBC-15  | Summary without a capture stays `"baseline_unavailable"` (unaffected) |
 //! | PDBC-16  | `GET /api/v1/portfolio/summary` never writes a baseline row           |
 //! | PDBC-17  | `?timeframe=5m` on summary does not affect `daily_pnl`/baseline fields|
+//! | PDBC-18  | `GET account-equity-baseline` missing `trading_date` -> `invalid_request`|
+//! | PDBC-19  | `GET account-equity-baseline` malformed `trading_date` -> `invalid_request`|
+//! | PDBC-20  | `GET account-equity-baseline` no DB -> `db_unavailable`, 503          |
+//! | PDBC-21  | `GET account-equity-baseline` DB present, no row -> `not_found`, 200  |
+//! | PDBC-22  | Capture then `GET account-equity-baseline` -> `active` + provenance  |
 //!
 //! All DB-backed tests skip gracefully without `MQK_DATABASE_URL` pointing
 //! at the local paper DB (port 5440 / miniquantdesk_paper), matching every
@@ -757,6 +762,130 @@ async fn pdbc17_timeframe_query_param_does_not_affect_daily_pnl() {
         v_default["daily_pnl_baseline_trading_date"],
         v_5m["daily_pnl_baseline_trading_date"]
     );
+
+    delete_baseline(&pool, trading_date).await;
+}
+
+// ---------------------------------------------------------------------------
+// PDBC-18..22: GET /api/v1/portfolio/account-equity-baseline read-only surface
+// ---------------------------------------------------------------------------
+
+/// PDBC-18: missing `trading_date` query param -> `invalid_request`, 400
+/// (no DB connection required).
+#[tokio::test]
+async fn pdbc18_missing_trading_date_query_is_invalid_request() {
+    let (_st, router) = make_router_with_state();
+    let (status, body) = call(router, get("/api/v1/portfolio/account-equity-baseline")).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let v = parse_json(body);
+    assert_eq!(v["truth_state"], "invalid_request");
+    assert!(v["trading_date"].is_null());
+}
+
+/// PDBC-19: malformed `trading_date` query param -> `invalid_request`, 400.
+#[tokio::test]
+async fn pdbc19_malformed_trading_date_query_is_invalid_request() {
+    let (_st, router) = make_router_with_state();
+    let (status, body) = call(
+        router,
+        get("/api/v1/portfolio/account-equity-baseline?trading_date=not-a-date"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(parse_json(body)["truth_state"], "invalid_request");
+}
+
+/// PDBC-20: no DB pool configured -> `db_unavailable`, 503.
+#[tokio::test]
+async fn pdbc20_no_db_query_is_db_unavailable() {
+    let (_st, router) = make_router_with_state();
+    let (status, body) = call(
+        router,
+        get("/api/v1/portfolio/account-equity-baseline?trading_date=2026-07-10"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    let v = parse_json(body);
+    assert_eq!(v["truth_state"], "db_unavailable");
+    assert_eq!(v["trading_date"], "2026-07-10");
+}
+
+/// PDBC-21: DB present, no row for the requested date -> `not_found`, 200.
+#[tokio::test]
+async fn pdbc21_db_present_no_row_is_not_found() {
+    let Some(db_url) = get_paper_db_url() else {
+        eprintln!("PDBC-21: skipped (no MQK_DATABASE_URL pointing to paper DB)");
+        return;
+    };
+    let pool = connected_pool(&db_url).await;
+    let trading_date = expected_required_trading_day(Utc::now());
+    delete_baseline(&pool, trading_date).await;
+
+    let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
+        pool.clone(),
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
+    let router = routes::build_router(Arc::clone(&st));
+
+    let (status, body) = call(
+        router,
+        get(&format!(
+            "/api/v1/portfolio/account-equity-baseline?trading_date={trading_date}"
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let v = parse_json(body);
+    assert_eq!(v["truth_state"], "not_found");
+    assert_eq!(v["trading_date"], trading_date.to_string());
+    assert!(v["equity"].is_null());
+}
+
+/// PDBC-22: capture a baseline, then `GET account-equity-baseline` for the
+/// same `trading_date` reports `"active"` with full provenance matching
+/// what was captured.
+#[tokio::test]
+async fn pdbc22_capture_then_get_baseline_is_active_with_provenance() {
+    let Some(db_url) = get_paper_db_url() else {
+        eprintln!("PDBC-22: skipped (no MQK_DATABASE_URL pointing to paper DB)");
+        return;
+    };
+    let pool = connected_pool(&db_url).await;
+    let trading_date = expected_required_trading_day(Utc::now());
+    delete_baseline(&pool, trading_date).await;
+
+    let st = make_db_state_with_snapshot(pool.clone()).await;
+    let router = routes::build_router(Arc::clone(&st));
+
+    let capture_body = format!(
+        r#"{{"action_key":"capture-account-equity-baseline","reason":"PDBC-22","trading_date":"{trading_date}"}}"#
+    );
+    let (status, capture_resp) =
+        call(router.clone(), post_json("/api/v1/ops/action", &capture_body)).await;
+    assert_eq!(status, StatusCode::OK);
+    let captured = parse_json(capture_resp);
+    let expected_audit_id = captured["captured_baseline"]["audit_event_id"]
+        .as_str()
+        .expect("audit_event_id present")
+        .to_string();
+
+    let (status, body) = call(
+        router,
+        get(&format!(
+            "/api/v1/portfolio/account-equity-baseline?trading_date={trading_date}"
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let v = parse_json(body);
+    assert_eq!(v["truth_state"], "active");
+    assert_eq!(v["trading_date"], trading_date.to_string());
+    assert_eq!(v["equity"].as_f64().expect("equity present"), 101_500.0);
+    assert_eq!(v["cash"].as_f64().expect("cash present"), 50_000.0);
+    assert_eq!(v["currency"], "USD");
+    assert_eq!(v["captured_by"], "operator:capture-account-equity-baseline");
+    assert!(v["broker_snapshot_source"].is_string());
+    assert_eq!(v["audit_event_id"], expected_audit_id);
 
     delete_baseline(&pool, trading_date).await;
 }

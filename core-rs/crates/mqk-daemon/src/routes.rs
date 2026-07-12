@@ -279,8 +279,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     use oms_metrics::{metrics_dashboards, oms_overview};
     use paper_journal::paper_journal;
     use portfolio::{
-        portfolio_economics_status, portfolio_fills, portfolio_live_weights, portfolio_open_orders,
-        portfolio_positions, portfolio_summary, risk_denials, risk_summary,
+        portfolio_account_equity_baseline_status, portfolio_economics_status, portfolio_fills,
+        portfolio_live_weights, portfolio_open_orders, portfolio_positions, portfolio_summary,
+        risk_denials, risk_summary,
     };
     use reconcile::{reconcile_mismatches, reconcile_status};
     use repair::{
@@ -413,6 +414,13 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/v1/portfolio/live-weights",
             get(portfolio_live_weights),
+        )
+        // PAPER-DAILY-PNL-CAPTURE-01D: read-only baseline provenance lookup
+        // by trading_date (public, no auth). No DB writes, no broker/provider
+        // calls, no order/risk/runtime path touched.
+        .route(
+            "/api/v1/portfolio/account-equity-baseline",
+            get(portfolio_account_equity_baseline_status),
         )
         // ASSET-CORE-04D: read-only composition of the ASSET-CORE-04B registry-v2
         // bridge with the ASSET-CORE-04A/04C economics model against the live

@@ -8217,3 +8217,52 @@ trading, orders, or broker/provider calls in any test; no fabricated
 baseline or P&L (every asserted `daily_pnl` value is `current_equity -
 captured_baseline_equity`, both of which the test itself seeds
 explicitly); no DB migration.
+
+---
+
+## PAPER-DAILY-PNL-BASELINE-CAPTURE-AND-OPERATOR-CLOSURE-01-COMBINED — Phase D
+
+Patch: `PAPER-DAILY-PNL-CAPTURE-01D-READONLY-CLI-OR-ROUTE-SURFACE-01`.
+Status: `CLOSED_LOCAL`.
+
+Added a small read-only route so an operator can confirm a captured
+baseline's exact provenance without going through
+`/api/v1/portfolio/summary`'s daily-P&L math: `GET
+/api/v1/portfolio/account-equity-baseline?trading_date=YYYY-MM-DD`
+(public, no auth — matches every other read-only `/api/v1/portfolio/*`
+route; performs no write, no broker/provider call, no order/risk/runtime
+path touch). New response type
+`AccountEquityBaselineStatusResponse` (`core-rs/crates/mqk-daemon/src/api_types.rs`)
+and handler `portfolio_account_equity_baseline_status`
+(`core-rs/crates/mqk-daemon/src/routes/portfolio.rs`), registered on the
+public sub-router in `core-rs/crates/mqk-daemon/src/routes.rs`.
+`truth_state` distinguishes `"invalid_request"` (missing/malformed
+`trading_date`, 400), `"db_unavailable"` (no DB pool, 503), `"not_found"`
+(DB queried successfully, no row, 200 — an empty result is not an error),
+`"query_failed"` (DB present but the query itself errored, 503), and
+`"active"` (a real row exists, 200, with full provenance:
+equity/cash/currency/captured_at_utc/captured_by/broker_snapshot_source/
+audit_event_id) — reusing the existing
+`mqk_db::fetch_account_equity_baseline_for_date` helper, no new DB
+function.
+
+**Tests added (same file as Phases B/C,**
+`scenario_paper_daily_pnl_baseline_capture_01.rs`**, PDBC-18 through
+PDBC-22):** missing `trading_date` -> `invalid_request`; malformed
+`trading_date` -> `invalid_request`; no DB -> `db_unavailable`; DB
+present, no row -> `not_found`; and the full loop — capture via
+`ops/action`, then `GET account-equity-baseline` for the same
+`trading_date` returns `"active"` with provenance (including
+`audit_event_id`) matching exactly what the capture call itself returned.
+
+**Validation:**
+`scenario_paper_daily_pnl_baseline_capture_01` 22/22 passed (real local
+`mqk-paper-postgres` port 5440); `cargo check -p mqk-daemon` clean;
+`scenario_route_contract_rt01` 2/2; `scenario_gui_daemon_contract_gate`
+23/23; `cargo clippy -p mqk-daemon --lib -- -D warnings` clean. `git diff
+--check` clean.
+
+**Safety confirmation:** read-only route, zero DB writes (proven: no new
+write helper is called, only the pre-existing fetch helper); no
+broker/provider/network call; no order/risk/runtime path touched; no
+trading behavior changed; no DB migration.

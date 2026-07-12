@@ -1708,3 +1708,123 @@ pub(crate) async fn portfolio_economics_status(
     )
         .into_response()
 }
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/portfolio/account-equity-baseline (PAPER-DAILY-PNL-CAPTURE-01D)
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Deserialize)]
+pub(crate) struct AccountEquityBaselineQuery {
+    pub trading_date: Option<String>,
+}
+
+/// Read-only operator visibility into a captured `sys_account_equity_baseline`
+/// row for one `trading_date` -- PAPER-DAILY-PNL-CAPTURE-01D.
+///
+/// No DB write, no broker/provider call, no order/risk/runtime path
+/// touched. Distinguishes "no DB configured" (`db_unavailable`), "a real
+/// query ran and found nothing" (`not_found`), and "a real row exists"
+/// (`active`) per CLAUDE.md's unavailable/empty/present discipline --
+/// never returns an empty-looking payload as though it were authoritative.
+pub(crate) async fn portfolio_account_equity_baseline_status(
+    Query(params): Query<AccountEquityBaselineQuery>,
+    State(st): State<Arc<AppState>>,
+) -> impl IntoResponse {
+    let empty_response = |truth_state: &str, trading_date: Option<String>, message: String| {
+        crate::api_types::AccountEquityBaselineStatusResponse {
+            truth_state: truth_state.to_string(),
+            trading_date,
+            equity: None,
+            cash: None,
+            currency: None,
+            captured_at_utc: None,
+            captured_by: None,
+            broker_snapshot_source: None,
+            audit_event_id: None,
+            message,
+        }
+    };
+
+    let Some(trading_date_str) = params
+        .trading_date
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(empty_response(
+                "invalid_request",
+                None,
+                "trading_date query parameter is required (\"YYYY-MM-DD\")".to_string(),
+            )),
+        )
+            .into_response();
+    };
+
+    let Ok(trading_date) = NaiveDate::parse_from_str(trading_date_str, "%Y-%m-%d") else {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(empty_response(
+                "invalid_request",
+                None,
+                format!("trading_date '{trading_date_str}' is not a valid YYYY-MM-DD date"),
+            )),
+        )
+            .into_response();
+    };
+
+    let Some(pool) = st.db.as_ref() else {
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(empty_response(
+                "db_unavailable",
+                Some(trading_date.to_string()),
+                "no DB pool configured; no baseline lookup could be performed".to_string(),
+            )),
+        )
+            .into_response();
+    };
+
+    match mqk_db::fetch_account_equity_baseline_for_date(pool, trading_date).await {
+        Ok(Some(row)) => (
+            StatusCode::OK,
+            Json(crate::api_types::AccountEquityBaselineStatusResponse {
+                truth_state: "active".to_string(),
+                trading_date: Some(row.trading_date.to_string()),
+                equity: Some(row.equity_micros as f64 / mqk_portfolio::MICROS_SCALE as f64),
+                cash: Some(row.cash_micros as f64 / mqk_portfolio::MICROS_SCALE as f64),
+                currency: Some(row.currency),
+                captured_at_utc: Some(row.captured_at_utc.to_rfc3339()),
+                captured_by: Some(row.captured_by),
+                broker_snapshot_source: Some(row.broker_snapshot_source),
+                audit_event_id: Some(row.audit_event_id.to_string()),
+                message: "a captured baseline row exists for this trading_date".to_string(),
+            }),
+        )
+            .into_response(),
+        Ok(None) => (
+            StatusCode::OK,
+            Json(empty_response(
+                "not_found",
+                Some(trading_date.to_string()),
+                "no baseline row exists for this trading_date".to_string(),
+            )),
+        )
+            .into_response(),
+        Err(err) => {
+            tracing::warn!(
+                "portfolio_account_equity_baseline_status: query failed for {trading_date}: {err}"
+            );
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Json(empty_response(
+                    "query_failed",
+                    Some(trading_date.to_string()),
+                    "the baseline lookup query failed".to_string(),
+                )),
+            )
+                .into_response()
+        }
+    }
+}
