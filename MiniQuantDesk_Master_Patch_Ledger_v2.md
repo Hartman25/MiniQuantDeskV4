@@ -7672,3 +7672,36 @@ if `daily_pnl` is wanted.
 strategy/threshold changes; no gate weakened; no fabricated marks or P&L
 at any phase; no generated evidence staged; no `.env.local` edit; no
 config flag change; no DB migration added.
+
+---
+
+## PAPER-PNL-OFFMARKET-01A-TIMEFRAME-GAP-AUDIT-01
+
+**Status:** `CLOSED_LOCAL` (docs-only).
+
+Patch group: `PAPER-PNL-OFFMARKET-COMPLETION-01-COMBINED`, Phase A.
+Documents the exact repair plan for the `PAPER-PNL-01F` gap Phase D of the
+prior bundle identified: `/api/v1/portfolio/positions` and
+`/api/v1/portfolio/summary` hardcode `DEFAULT_POSITIONS_PNL_TIMEFRAME =
+"1D"`, but the real `PAPER-TRADE-LIFECYCLE-PROOF-02` `AAPL qty=3
+avg_price=314.81` position only has completed `md_bars` at `timeframe=5m`
+(6111 rows) and zero at `1D` — so the route truthfully reports
+`mark_unavailable` even though a real `5m` mark exists
+(`close_micros=314860000` / `$314.86`, hand-computed unrealized P&L ≈
+`$0.15`). Proposed fix: an optional `timeframe` query param on both
+routes, mirroring the existing `/api/v1/portfolio/live-weights` pattern
+(`LiveWeightsParams`), default remains `"1D"` for backward compatibility.
+`daily_pnl` stays out of scope — that requires a day-start equity
+baseline, a different and still-nonexistent data source (Phase D of this
+bundle designs it, without implementing it).
+
+**Built:**
+`docs/specs/paper_pnl_offmarket_01a_timeframe_gap_audit.md`,
+`scripts/guards/validate_paper_pnl_offmarket_01a_timeframe_gap.ps1`.
+
+**Next:** Phase B — add the `timeframe` query param to
+`portfolio_positions`/`portfolio_summary` and prove default `"1D"` +
+`?timeframe=5m` behavior with route tests.
+
+**Safety confirmation:** no DB mutation; no order submitted; no daemon
+restart; no code change in this phase; no live routing.
