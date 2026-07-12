@@ -7985,3 +7985,22 @@ strategy/gate/config changes.
 `core-rs/crates/mqk-daemon/tests/scenario_paper_daily_pnl_baseline_01.rs`,
 `core-rs/crates/mqk-daemon/tests/scenario_paper_pnl_operator_visibility_01.rs`
 (updated).
+
+### PAPER-DAILY-PNL-01D-BASELINE-CAPTURE-SAFE-SEAM-01 — CLOSED_LOCAL / DOCS-ONLY / CAPTURE-DEFERRED
+
+**Status:** `CLOSED_LOCAL` (docs-only; no code touched).
+
+Confirmed and recorded the capture-boundary decision Phase A already
+locked: no automatic, CLI, or route-level baseline-capture mechanism is
+built by this patch group. After Phases B/C, `sys_account_equity_baseline`
+has zero production writers — the only writes proven anywhere in this
+bundle are the test suite calling `upsert_account_equity_baseline`
+directly. `daily_pnl` will read `"baseline_unavailable"` on a real running
+daemon until a future patch adds a real capture path. Reaffirmed the
+rationale: the design doc's own §10 conclusion, `mqk-cli`'s real (not
+small) wiring cost for a correct capture command, and CLAUDE.md's
+one-patch-per-turn/minimal-scope discipline. Future patch:
+`PAPER-DAILY-PNL-BASELINE-CAPTURE-01-COMBINED`.
+
+**Built:**
+`docs/specs/paper_daily_pnl_baseline_01d_capture_boundary_decision.md`.
