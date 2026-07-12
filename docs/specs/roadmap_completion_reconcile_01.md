@@ -352,3 +352,36 @@ only, equities-only, existing broker-snapshot layer. No row's status,
 percentage, or category changes.
 `docs/audits/multi_asset_completion_audit.md` is correspondingly not
 updated by this bundle.
+
+## 12. Later session: `PAPER-DAILY-PNL-BASELINE-CAPTURE-AND-OPERATOR-CLOSURE-01-COMBINED`
+
+A follow-up off-market session closed the capture seam §11 left open: a
+new authenticated `POST /api/v1/ops/action
+{"action_key":"capture-account-equity-baseline"}` arm
+(`core-rs/crates/mqk-daemon/src/routes/control_plane.rs`) reads the
+daemon's real in-memory `broker_snapshot`, validates a caller-supplied
+`trading_date` against the existing `NyseWeekdaysProvider` calendar seam,
+and writes exactly one `sys_account_equity_baseline` row via the
+already-existing `upsert_account_equity_baseline` helper, with a
+deterministic `Uuid::new_v5` audit ID. A companion read-only route (`GET
+/api/v1/portfolio/account-equity-baseline?trading_date=...`) lets an
+operator confirm captured provenance directly. Proven end-to-end by 22
+DB-backed scenario tests
+(`core-rs/crates/mqk-daemon/tests/scenario_paper_daily_pnl_baseline_capture_01.rs`):
+`GET /api/v1/portfolio/summary.daily_pnl` now reaches
+`daily_pnl_truth_state = "active"` once a real capture has run, and stays
+honestly `"baseline_unavailable"` without one. See
+`docs/specs/paper_daily_pnl_capture_01a_current_truth_action_design.md`
+through `..._01e_closure_decision.md`. Final status:
+
+```text
+PAPER-DAILY-PNL-BASELINE-CAPTURE-AND-OPERATOR-CLOSURE-01-COMBINED: CLOSED_LOCAL
+PAPER-DAILY-PNL-BASELINE-01-COMBINED: CAPTURE-SEAM-CLOSED-BY-CAPTURE-01
+```
+
+This bundle does **not** touch any row in §2 above, for the same reason
+§9/§10/§11 do not: paper-trade operator-visibility/accounting-display
+concern only, equities-only, existing broker-snapshot layer. No row's
+status, percentage, or category changes.
+`docs/audits/multi_asset_completion_audit.md` is correspondingly not
+updated by this bundle.

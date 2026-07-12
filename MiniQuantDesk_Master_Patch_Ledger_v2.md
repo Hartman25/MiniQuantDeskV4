@@ -8266,3 +8266,62 @@ present, no row -> `not_found`; and the full loop — capture via
 write helper is called, only the pre-existing fetch helper); no
 broker/provider/network call; no order/risk/runtime path touched; no
 trading behavior changed; no DB migration.
+
+---
+
+## PAPER-DAILY-PNL-BASELINE-CAPTURE-AND-OPERATOR-CLOSURE-01-COMBINED — Phase E (closure)
+
+Patch: `PAPER-DAILY-PNL-CAPTURE-01E-CLOSURE-AND-ROADMAP-RECONCILE-01`.
+
+```text
+PAPER-DAILY-PNL-BASELINE-CAPTURE-AND-OPERATOR-CLOSURE-01-COMBINED: CLOSED_LOCAL
+PAPER-DAILY-PNL-BASELINE-01-COMBINED: CAPTURE-SEAM-CLOSED-BY-CAPTURE-01
+PAPER-PNL-OPERATOR-VISIBILITY-CLOSURE-01-COMBINED: DAILY-PNL-CAPTURE-AND-READ-SIDE-CLOSED
+PAPER-PNL-OFFMARKET-COMPLETION-01-COMBINED: CLOSED_LOCAL (unchanged)
+PAPER-TRADE-LIFECYCLE-PROOF-02: PNL-SEAM-CLOSED-FOR-MARK-UNREALIZED-AND-DAILY-PNL-READINESS
+```
+
+An explicit, authenticated, operator-controlled capture path
+(`POST /api/v1/ops/action {"action_key":"capture-account-equity-baseline"}`)
+now writes a real `sys_account_equity_baseline` row from the daemon's real
+`broker_snapshot`, with market-calendar-validated `trading_date`,
+fail-closed gates (DB/snapshot/reason/date-format/date-validity/parseable
+account values), idempotent-by-`trading_date` upsert, and a deterministic
+`Uuid::new_v5` audit ID. `GET /api/v1/portfolio/summary.daily_pnl` reaches
+`"active"` once that row exists and stays honestly
+`"baseline_unavailable"` without one — both directions proven by real
+DB-backed route tests, not by session claim. A companion read-only route
+(`GET /api/v1/portfolio/account-equity-baseline`) lets an operator inspect
+captured provenance directly.
+
+**Full patch-group commit chain:** Phase A `298c57a9` (design) → Phase B
+`6aef1cda` (operator capture action + tests, 11 tests) → Phase C
+`5e727013` (capture -> summary read-side integration proof, +6 tests, 17
+total) → Phase D `c3ddab5d` (read-only baseline surface, +5 tests, 22
+total) → Phase E (this entry, closure).
+
+**Built:**
+`docs/specs/paper_daily_pnl_capture_01e_closure_decision.md`,
+`docs/specs/roadmap_completion_reconcile_01.md` (updated, new §12).
+
+**Next market-hours proof:**
+`PAPER-TRADE-LIFECYCLE-PROOF-03-PNL-VISIBILITY-VERIFY-COMBINED` — rebuild
++ restart the daemon with this bundle's binary; during market hours with
+a real paper position, capture a real prior trading day's baseline via
+`ops/action`, confirm `GET /api/v1/portfolio/summary` reaches
+`daily_pnl_truth_state = "active"` with a sane value, and confirm the
+read-only baseline route reads the same provenance back.
+
+**Next off-market patch:**
+`PAPER-ORDER-LIFECYCLE-PERSISTENT-VISIBILITY-AUDIT-AND-CLOSURE-01-COMBINED`
+
+**Safety confirmation:** no live orders; no forced paper orders; no
+manually submitted paper orders; no autonomous smoke script run; no
+execution armed; no strategy/threshold/gate change; no fabricated
+baseline, mark, price, P&L, fill, order, or position at any phase; no
+historical baseline backfill; no `.env.local` edit; no config flag
+change; zero new DB migrations (the one migration this whole line of work
+ever required, `0045`, predates this bundle); no provider/broker/network
+call in any test; no generated evidence, smoke log, export, or untracked
+ledger draft staged at any phase; no daemon started or restarted during
+any phase.
