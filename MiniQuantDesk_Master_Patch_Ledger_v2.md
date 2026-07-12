@@ -8325,3 +8325,46 @@ ever required, `0045`, predates this bundle); no provider/broker/network
 call in any test; no generated evidence, smoke log, export, or untracked
 ledger draft staged at any phase; no daemon started or restarted during
 any phase.
+
+---
+
+## PAPER-ORDER-LIFECYCLE-PERSISTENT-VISIBILITY-AUDIT-AND-CLOSURE-01-COMBINED — Phase A (audit)
+
+Patch: `PAPER-ORDER-LIFECYCLE-VIS-01A-CURRENT-TRUTH-AUDIT-01`.
+
+Audited every existing lifecycle-visibility route against current source
+and live read-only DB inspection of `mqk-paper-postgres`. Confirmed two
+closable gaps, both without a migration: (1) every existing run-scoped
+route (`execution/flow`, `execution/outbox`, `execution/replace-cancel-chains`)
+resolves "no explicit `run_id`" via `current_status_snapshot().active_run_id`,
+which is durable but restricted to ARMED/RUNNING runs
+(`fetch_active_run_for_engine`) — a STOPPED run (the common completed-run
+case) yields `no_active_run` even though its rows are fully present;
+`fetch_latest_run_for_engine` already exists and is unused by any route.
+(2) No route joins `strategy_signal_evaluations` +
+`autonomous_no_trade_diagnostics` with the outbox/inbox chain for one run
+— `execution/flow` covers only outbox+lifecycle-events+fills, and neither
+signal-evaluation nor no-trade-diagnostic fetch helpers accept a `run_id`
+filter today. Live-verified against real DB rows: latest PAPER run
+`15cf4309-210b-5406-8ed8-46377e093195` is `STOPPED`
+(`started_at_utc = 2026-07-10 18:31:01`), reproducing gap (1) exactly.
+Portfolio/accounting/P&L visibility is confirmed **not** restart-surviving
+anywhere in the repo (`broker_snapshot`/`execution_snapshot` are
+in-memory only, already self-labeled `"in_memory_only"` by every existing
+portfolio route) — this bundle will report that stage honestly rather
+than attempt a reconstruction, which is out of scope.
+
+Chosen route contract: `GET /api/v1/execution/paper-lifecycle?run_id=<uuid>`
+(single route, optional param, matching `execution/flow`'s existing
+convention), backed by two new run-scoped DB read helpers
+(`fetch_strategy_signal_evaluations_for_run`,
+`fetch_autonomous_no_trade_diagnostics_for_run`) plus full reuse of
+existing `runs`/`oms_outbox`/`oms_inbox` helpers. No migration.
+
+**Built:**
+`docs/specs/paper_order_lifecycle_visibility_01a_current_truth_audit.md`,
+`scripts/guards/validate_paper_order_lifecycle_visibility_01a_audit.ps1`.
+
+**Safety confirmation:** read-only audit; no code changed; no order
+submitted; no broker/provider/network call; no DB row mutated (all DB
+inspection was `select`-only); no daemon started.
