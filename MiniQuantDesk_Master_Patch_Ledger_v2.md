@@ -7747,3 +7747,33 @@ mqk-daemon --lib -- -D warnings` all clean.
 strategy/threshold change; no gate weakened; no DB migration; no
 provider/broker/network call in tests; no daemon restart; no live
 routing.
+
+---
+
+## PAPER-PNL-OFFMARKET-01C-PATCHED-ROUTE-READBACK-OR-TEST-PROOF-01
+
+**Status:** `CLOSED_LOCAL` (docs-only, read-only DB queries).
+
+Re-confirmed via read-only `docker exec mqk-paper-postgres psql`: AAPL has
+6111 completed `5m` `md_bars` rows and zero `1D` rows; latest completed
+`5m` close is `$314.86` (`end_ts=1783707900`); proof-02's run
+(`15cf4309-210b-5406-8ed8-46377e093195`) is still present, unchanged. No
+daemon process is currently running on this machine (port 8899 has no
+listener), so live patched-route readback was not performed — starting new
+daemon infrastructure is out of this off-market phase's authorized scope.
+Proof standard is instead the Phase B DB-backed scenario tests
+(PPV-10..PPV-14), which ran for real against this same DB and proved
+`?timeframe=5m` resolves `mark_price=314.86` /
+`mark_source="md_bars:5m:close"` / `unrealized_pnl≈$0.15` for a `qty=3
+avg_price=314.81` position — the exact real proof-02 shape — while the
+default `1D` behavior stays unchanged. No DB mutation, no order, no
+daemon restart, no code change in this phase.
+
+**Built:**
+`docs/specs/paper_pnl_offmarket_01c_route_readback_or_test_proof.md`.
+
+**Next:** Phase D — design-only daily-P&L baseline plan (no schema
+migration, no baseline-capture code).
+
+**Safety confirmation:** no DB mutation; no order submitted; no daemon
+start/restart; no code change in this phase; no live routing.
