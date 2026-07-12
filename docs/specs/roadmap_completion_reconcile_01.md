@@ -318,3 +318,37 @@ only, equities-only, existing broker-snapshot layer. No row's status,
 percentage, or category changes.
 `docs/audits/multi_asset_completion_audit.md` is correspondingly not
 updated by this bundle.
+
+## 11. Later session: `PAPER-DAILY-PNL-BASELINE-01-COMBINED`
+
+A follow-up off-market session implemented the design §10 above proposed
+(design-only doc `docs/specs/paper_daily_pnl_baseline_design_only_01.md`):
+a new `sys_account_equity_baseline` table (migration `0045`, one
+provenance-tagged row per `trading_date`), DB helpers
+(`upsert_account_equity_baseline`/`fetch_account_equity_baseline_for_date`
+in `mqk-db`), and read-side wiring on
+`GET /api/v1/portfolio/summary` so `daily_pnl` becomes computable
+(`daily_pnl_truth_state = "active"`) whenever a real baseline row exists
+for the required prior NYSE trading day (found via the existing
+`NyseWeekdaysProvider` seam), and stays honestly unavailable
+(`"no_snapshot"` / `"db_unavailable"` / `"baseline_unavailable"` /
+`"stale_baseline"`) otherwise. See
+`docs/specs/paper_daily_pnl_baseline_01a_current_truth_reconcile.md`
+through `..._01e_closure_decision.md`.
+
+**Baseline capture was explicitly deferred** — no automatic, CLI, or route
+write-path populates `sys_account_equity_baseline` in production; the
+table is confirmed empty (0 rows) in the real local paper Postgres as of
+this session. Recommended next patch:
+`PAPER-DAILY-PNL-BASELINE-CAPTURE-01-COMBINED`. Final status:
+
+```text
+PAPER-DAILY-PNL-BASELINE-01-COMBINED: PARTIAL / BASELINE-SCHEMA-AND-READ-SIDE-CLOSED-CAPTURE-SEAM-OPEN
+```
+
+This bundle does **not** touch any row in §2 above, for the same reason
+§9/§10 do not: paper-trade operator-visibility/accounting-display concern
+only, equities-only, existing broker-snapshot layer. No row's status,
+percentage, or category changes.
+`docs/audits/multi_asset_completion_audit.md` is correspondingly not
+updated by this bundle.

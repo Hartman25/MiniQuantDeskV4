@@ -8004,3 +8004,68 @@ one-patch-per-turn/minimal-scope discipline. Future patch:
 
 **Built:**
 `docs/specs/paper_daily_pnl_baseline_01d_capture_boundary_decision.md`.
+
+### PAPER-DAILY-PNL-01E-READBACK-TESTS-AND-CLOSURE-01 — CLOSED_LOCAL / DOCS-ONLY (bundle closure)
+
+**Status:** `CLOSED_LOCAL` (docs-only closure phase; no code touched).
+
+```text
+PAPER-DAILY-PNL-BASELINE-01-COMBINED: PARTIAL / BASELINE-SCHEMA-AND-READ-SIDE-CLOSED-CAPTURE-SEAM-OPEN
+PAPER-PNL-OPERATOR-VISIBILITY-CLOSURE-01-COMBINED: MARK-AND-UNREALIZED-PNL-PRACTICALLY-USABLE-WITH-TIMEFRAME-SELECTION / DAILY-PNL-BASELINE-SCHEMA-AND-READ-SIDE-CLOSED
+PAPER-PNL-OFFMARKET-COMPLETION-01-COMBINED: CLOSED_LOCAL (unchanged)
+PAPER-TRADE-LIFECYCLE-PROOF-02: PNL-SEAM-CLOSED-FOR-MARK-AND-UNREALIZED-PNL / DAILY-PNL-BASELINE-READ-SIDE-CLOSED-CAPTURE-OPEN
+```
+
+Re-ran the full targeted validation suite from all four prior phases in
+one pass: `cargo check -p mqk-db`/`-p mqk-daemon` (clean),
+`scenario_account_equity_baseline_01` (3/3, real local `mqk-test-postgres`
+port 5434), `scenario_paper_daily_pnl_baseline_01` (11/11) +
+`scenario_paper_pnl_operator_visibility_01` (13/13, unaffected) against
+the real local `mqk-paper-postgres` port 5440,
+`scenario_route_contract_rt01` (2/2), `scenario_gui_daemon_contract_gate`
+(23/23), `cargo clippy -p mqk-db --all-targets -- -D warnings` and
+`cargo clippy -p mqk-daemon --lib -- -D warnings` (both clean) — 49/49
+tests green, zero regressions. Read-only DB proof against the real paper
+Postgres: `sys_account_equity_baseline`'s 8-column schema confirmed live
+via `information_schema.columns`; `select *` returned **0 rows** —
+confirms no capture mechanism has ever written to this table and no
+fabricated/leftover seed data exists. Working tree confirmed clean before
+and after this phase (`git diff --check`, untracked-file list unchanged
+from the bundle's pre-flight baseline). Updated
+`docs/specs/roadmap_completion_reconcile_01.md` §11 with the same
+non-multi-asset-audit-touching scope classification §9/§10 already
+established for this P&L visibility line of work.
+
+**Full patch-group commit chain:** Phase A `e1ef6628` (current-truth
+reconcile) → Phase B `453a22cc` (schema + DB helpers) → Phase C
+`e851d4a4` (route read-side) → Phase D `e6f1a5d6` (capture-seam deferral
+decision) → Phase E (this entry, closure).
+
+**Built:**
+`docs/specs/paper_daily_pnl_baseline_01e_closure_decision.md`,
+`docs/specs/roadmap_completion_reconcile_01.md` (updated).
+
+**Next market-hours proof:**
+`PAPER-TRADE-LIFECYCLE-PROOF-03-PNL-VISIBILITY-VERIFY-COMBINED` — rebuild
++ restart the daemon with this bundle's binary and call
+`/api/v1/portfolio/summary` against a real live paper position during
+market hours; expect `unrealized_pnl` unchanged and
+`daily_pnl_truth_state = "baseline_unavailable"` (no capture mechanism
+exists yet — expected, not a defect).
+
+**Next off-market patch:** `PAPER-DAILY-PNL-BASELINE-CAPTURE-01-COMBINED`
+— implement the actual capture mechanism (CLI-first,
+market-calendar-gated, idempotent-by-`trading_date`, provenance-tagged)
+so `daily_pnl` can reach `"active"` on a real running daemon.
+
+**Safety confirmation:** no live orders; no forced paper orders; no
+manually submitted paper orders; no autonomous smoke script run; no
+execution armed; no strategy/threshold/gate changes; no fabricated
+baselines, marks, prices, P&L, fills, orders, or positions at any phase;
+no historical baseline backfill; no `.env.local` edit; no config flag
+change; one DB migration added (`0045`, additive only, no existing table
+touched); no provider/broker/network call in any test; no generated
+evidence, smoke log, export, or untracked ledger draft staged at any
+phase; no daemon started or restarted during code phases (B/C used only
+`cargo test`; the read-only DB proof in this phase used `docker exec
+psql`, not the daemon).
