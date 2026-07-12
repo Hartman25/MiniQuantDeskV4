@@ -13,6 +13,7 @@ use axum::{
     response::IntoResponse,
     Json,
 };
+use chrono::{DateTime, NaiveDate, Utc};
 
 use crate::api_types::{
     PortfolioEconomicsStatusExposureRow, PortfolioEconomicsStatusPositionRow,
@@ -23,6 +24,7 @@ use crate::api_types::{
 };
 use crate::state::{
     bridge_instrument_registry_v2_to_economics, AppState, InstrumentEconomicsBridgeResult,
+    MarketCalendarProvider, NyseWeekdaysProvider,
 };
 
 use super::helpers::{exposure_breakdown, parse_decimal, parse_decimal_micros, position_market_value};
@@ -31,12 +33,16 @@ use super::helpers::{exposure_breakdown, parse_decimal, parse_decimal_micros, po
 // PAPER-PNL-OPERATOR-VISIBILITY-CLOSURE-01C: broker-position mark/P&L seam
 // ---------------------------------------------------------------------------
 
-/// PAPER-PNL-OPERATOR-VISIBILITY-CLOSURE-01: always-unavailable reason for
-/// `/api/v1/portfolio/summary.daily_pnl` — no day-start / previous-close
-/// equity baseline exists anywhere in this repo's schema (Phase A audit:
-/// `paper_pnl_operator_visibility_01a_current_truth_audit.md` §Q7).
-const DAILY_PNL_REASON_NO_BASELINE: &str = "no_day_start_equity_baseline_in_schema";
+/// PAPER-PNL-OPERATOR-VISIBILITY-CLOSURE-01: reason when there is no
+/// current broker snapshot at all.
 const DAILY_PNL_REASON_NO_SNAPSHOT: &str = "no_broker_snapshot";
+
+/// PAPER-DAILY-PNL-BASELINE-01-COMBINED: bounded walk-back limits for the
+/// daily-P&L baseline lookup. Both are calendar-day counts, not trading-day
+/// counts, so they comfortably cover any real holiday/weekend cluster
+/// without an unbounded loop.
+const DAILY_PNL_MAX_TRADING_DAY_WALKBACK_DAYS: i64 = 10;
+const DAILY_PNL_MAX_STALE_BASELINE_LOOKBACK_DAYS: i64 = 30;
 
 /// Default mark timeframe for broker-position P&L, matching
 /// `DEFAULT_LIVE_WEIGHTS_TIMEFRAME` used by `/api/v1/portfolio/live-weights`.
@@ -243,6 +249,160 @@ fn aggregate_positions_pnl(
 }
 
 // ---------------------------------------------------------------------------
+// PAPER-DAILY-PNL-BASELINE-01C: daily P&L from a previous-session-close
+// equity baseline
+// ---------------------------------------------------------------------------
+
+/// Result of resolving `daily_pnl` for the current instant. Mirrors
+/// `PositionPnlResult`'s never-fabricate discipline: `daily_pnl` is `Some`
+/// only in the `"active"` truth state.
+struct DailyPnlResult {
+    daily_pnl: Option<f64>,
+    truth_state: String,
+    unavailable_reason: Option<String>,
+    baseline_trading_date: Option<String>,
+    baseline_equity: Option<f64>,
+    baseline_source: Option<String>,
+    baseline_captured_at_utc: Option<String>,
+}
+
+impl DailyPnlResult {
+    fn unavailable(truth_state: &str, reason: String) -> Self {
+        Self {
+            daily_pnl: None,
+            truth_state: truth_state.to_string(),
+            unavailable_reason: Some(reason),
+            baseline_trading_date: None,
+            baseline_equity: None,
+            baseline_source: None,
+            baseline_captured_at_utc: None,
+        }
+    }
+}
+
+/// Find the most recent actual NYSE trading day strictly before `now_utc`'s
+/// UTC calendar date, using the existing `NyseWeekdaysProvider` seam
+/// (`core-rs/crates/mqk-daemon/src/state/market_calendar.rs`) rather than a
+/// naive `today - 1 day` — this is what correctly skips weekends/holidays
+/// (design doc §9). Each candidate date is probed at 18:00 UTC (safely
+/// within NYSE regular hours under both EST and EDT), so the ET calendar
+/// date the provider derives always matches `candidate`.
+///
+/// Bounded to `DAILY_PNL_MAX_TRADING_DAY_WALKBACK_DAYS` calendar days back;
+/// returns `None` only if no trading day is found in that window (would
+/// indicate a provider/calendar defect, not a real market condition).
+///
+/// Honesty note: `NyseWeekdaysProvider` is a heuristic bounded to the
+/// 2023-2028 holiday/early-close table (see its doc comment) and this
+/// helper uses UTC calendar-day boundaries rather than ET calendar-day
+/// boundaries — this is not a fully general, all-years-correct exchange
+/// calendar.
+fn most_recent_trading_day_before(now_utc: DateTime<Utc>) -> Option<NaiveDate> {
+    let mut candidate = now_utc.date_naive().pred_opt()?;
+    for _ in 0..DAILY_PNL_MAX_TRADING_DAY_WALKBACK_DAYS {
+        let probe = candidate.and_hms_opt(18, 0, 0)?.and_utc();
+        if NyseWeekdaysProvider.session_for(probe).is_trading_day {
+            return Some(candidate);
+        }
+        candidate = candidate.pred_opt()?;
+    }
+    None
+}
+
+/// Resolve `daily_pnl` for the current instant: `current_equity` minus the
+/// previous-session-close baseline for the required prior trading day.
+///
+/// Never fabricates: a missing DB pool, an undeterminable prior trading
+/// day, a missing baseline row, or a stale (older-than-required) baseline
+/// row all report an explicit truth state and reason rather than a
+/// silently-approximated `daily_pnl`. Route-call reads only — never
+/// inserts, updates, or deletes a baseline row.
+async fn resolve_daily_pnl(
+    st: &AppState,
+    current_equity: f64,
+    now_utc: DateTime<Utc>,
+) -> DailyPnlResult {
+    let Some(pool) = st.db.as_ref() else {
+        return DailyPnlResult::unavailable(
+            "db_unavailable",
+            "no_db_pool_configured".to_string(),
+        );
+    };
+
+    let Some(required_date) = most_recent_trading_day_before(now_utc) else {
+        return DailyPnlResult::unavailable(
+            "baseline_unavailable",
+            "unable_to_determine_prior_trading_day".to_string(),
+        );
+    };
+
+    match mqk_db::fetch_account_equity_baseline_for_date(pool, required_date).await {
+        Ok(Some(row)) => {
+            let baseline_equity = row.equity_micros as f64 / mqk_portfolio::MICROS_SCALE as f64;
+            DailyPnlResult {
+                daily_pnl: Some(current_equity - baseline_equity),
+                truth_state: "active".to_string(),
+                unavailable_reason: None,
+                baseline_trading_date: Some(required_date.to_string()),
+                baseline_equity: Some(baseline_equity),
+                baseline_source: Some(row.captured_by),
+                baseline_captured_at_utc: Some(row.captured_at_utc.to_rfc3339()),
+            }
+        }
+        Ok(None) => {
+            // No row for the exact required date — walk further back looking
+            // for an older baseline row to report as stale rather than
+            // conflating "never captured" with "captured, but late."
+            let mut candidate = required_date;
+            for _ in 0..DAILY_PNL_MAX_STALE_BASELINE_LOOKBACK_DAYS {
+                let Some(prev) = candidate.pred_opt() else {
+                    break;
+                };
+                candidate = prev;
+                match mqk_db::fetch_account_equity_baseline_for_date(pool, candidate).await {
+                    Ok(Some(row)) => {
+                        let baseline_equity =
+                            row.equity_micros as f64 / mqk_portfolio::MICROS_SCALE as f64;
+                        return DailyPnlResult {
+                            daily_pnl: None,
+                            truth_state: "stale_baseline".to_string(),
+                            unavailable_reason: Some(format!(
+                                "latest captured baseline trading_date {candidate} is \
+                                 older than the required prior trading day {required_date}"
+                            )),
+                            baseline_trading_date: Some(candidate.to_string()),
+                            baseline_equity: Some(baseline_equity),
+                            baseline_source: Some(row.captured_by),
+                            baseline_captured_at_utc: Some(row.captured_at_utc.to_rfc3339()),
+                        };
+                    }
+                    Ok(None) => continue,
+                    Err(err) => {
+                        tracing::warn!(
+                            "resolve_daily_pnl: stale-baseline lookup failed for {candidate}: {err}"
+                        );
+                        continue;
+                    }
+                }
+            }
+            DailyPnlResult::unavailable(
+                "baseline_unavailable",
+                format!(
+                    "no_account_equity_baseline_for_required_trading_day:{required_date}"
+                ),
+            )
+        }
+        Err(err) => {
+            tracing::warn!("resolve_daily_pnl: baseline lookup failed for {required_date}: {err}");
+            DailyPnlResult::unavailable(
+                "baseline_unavailable",
+                format!("baseline_lookup_failed_for_required_trading_day:{required_date}"),
+            )
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // GET /api/v1/portfolio/summary
 // ---------------------------------------------------------------------------
 
@@ -260,6 +420,7 @@ pub(crate) async fn portfolio_summary(
         let pnl_by_symbol = compute_broker_positions_pnl(&st, &snapshot.positions, &timeframe).await;
         let (unrealized_pnl, pnl_truth_state, pnl_unavailable_reason) =
             aggregate_positions_pnl(&pnl_by_symbol);
+        let daily = resolve_daily_pnl(&st, account_equity, Utc::now()).await;
 
         PortfolioSummaryResponse {
             has_snapshot: true,
@@ -268,8 +429,13 @@ pub(crate) async fn portfolio_summary(
             cash: Some(cash),
             long_market_value: Some(long_market_value),
             short_market_value: Some(short_market_value),
-            daily_pnl: None,
-            daily_pnl_unavailable_reason: Some(DAILY_PNL_REASON_NO_BASELINE.to_string()),
+            daily_pnl: daily.daily_pnl,
+            daily_pnl_unavailable_reason: daily.unavailable_reason,
+            daily_pnl_truth_state: daily.truth_state,
+            daily_pnl_baseline_trading_date: daily.baseline_trading_date,
+            daily_pnl_baseline_equity: daily.baseline_equity,
+            daily_pnl_baseline_source: daily.baseline_source,
+            daily_pnl_baseline_captured_at_utc: daily.baseline_captured_at_utc,
             unrealized_pnl,
             pnl_truth_state,
             pnl_unavailable_reason,
@@ -285,6 +451,11 @@ pub(crate) async fn portfolio_summary(
             short_market_value: None,
             daily_pnl: None,
             daily_pnl_unavailable_reason: Some(DAILY_PNL_REASON_NO_SNAPSHOT.to_string()),
+            daily_pnl_truth_state: "no_snapshot".to_string(),
+            daily_pnl_baseline_trading_date: None,
+            daily_pnl_baseline_equity: None,
+            daily_pnl_baseline_source: None,
+            daily_pnl_baseline_captured_at_utc: None,
             unrealized_pnl: None,
             pnl_truth_state: "no_snapshot".to_string(),
             pnl_unavailable_reason: None,

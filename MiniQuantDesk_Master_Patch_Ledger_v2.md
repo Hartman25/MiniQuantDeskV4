@@ -7930,3 +7930,58 @@ scope.
 `core-rs/crates/mqk-db/src/account_equity_baseline.rs`,
 `core-rs/crates/mqk-db/src/lib.rs` (updated),
 `core-rs/crates/mqk-db/tests/scenario_account_equity_baseline_01.rs`.
+
+### PAPER-DAILY-PNL-01C-SUMMARY-ROUTE-DAILY-PNL-READ-SIDE-01 — CLOSED_LOCAL
+
+**Status:** `CLOSED_LOCAL`.
+
+Wired `GET /api/v1/portfolio/summary.daily_pnl` to the Phase B baseline
+helpers. Added `resolve_daily_pnl` + `most_recent_trading_day_before` to
+`core-rs/crates/mqk-daemon/src/routes/portfolio.rs`: the latter uses the
+existing `NyseWeekdaysProvider` market-calendar seam (probed at 18:00 UTC
+per candidate date, safely within NYSE regular hours under both EST/EDT)
+to find the most recent actual trading day before now, bounded to a
+10-calendar-day walk-back; the former looks up
+`fetch_account_equity_baseline_for_date` for that exact date
+(`"active"`, `daily_pnl = current_equity - baseline.equity_micros`) and,
+if absent, walks up to 30 further calendar days back for an older row to
+report as `"stale_baseline"` (never silently used) before falling back to
+`"baseline_unavailable"`. `"db_unavailable"` short-circuits before any
+lookup when `st.db` is `None`; `"no_snapshot"` mirrors the existing
+`truth_state` when there is no broker snapshot. Five additive fields on
+`PortfolioSummaryResponse` (`daily_pnl_truth_state`,
+`daily_pnl_baseline_trading_date`, `daily_pnl_baseline_equity`,
+`daily_pnl_baseline_source`, `daily_pnl_baseline_captured_at_utc`) carry
+baseline provenance; existing `daily_pnl`/`daily_pnl_unavailable_reason`
+fields are reused, not duplicated. New DB-backed scenario test
+`scenario_paper_daily_pnl_baseline_01.rs` (11 tests, real current-date
+`Utc::now()`, seeded via `upsert_account_equity_baseline` and independent
+reimplementation of the trading-day walk-back for date selection — no
+dependency on the route's private helper) proven passing against the real
+local `mqk-paper-postgres` (port 5440): no-snapshot, no-DB, no-baseline,
+positive/negative/zero `daily_pnl`, stale-baseline, zero baseline-row
+writes from route calls, `unrealized_pnl` independence, and
+`?timeframe=5m` invariance. A pure unit test proves the weekend-skip walk
+(Monday → preceding Friday, Tuesday → Monday) without any DB. Updated the
+pre-existing `PPV-08` test in
+`scenario_paper_pnl_operator_visibility_01.rs` (its
+`daily_pnl_unavailable_reason` assertion was tied to the old
+always-unavailable string, now replaced by the dynamic
+`"baseline_unavailable"` truth state). Full regression proof: `cargo check
+-p mqk-daemon`, `scenario_paper_daily_pnl_baseline_01` (11/11),
+`scenario_paper_pnl_operator_visibility_01` (13/13, unaffected),
+`scenario_route_contract_rt01` (2/2), `scenario_gui_daemon_contract_gate`
+(23/23), `cargo clippy -p mqk-daemon --lib -- -D warnings` — all clean.
+Honesty note carried into the route doc comment: the trading-day helper
+uses UTC calendar-day boundaries (not ET) and the 2023-2028-bounded
+`NyseWeekdaysProvider` heuristic — not a fully general all-years exchange
+calendar. Zero writes to `sys_account_equity_baseline` from any route
+call (proven). Zero orders, zero broker/provider/network calls, zero
+strategy/gate/config changes.
+
+**Built:**
+`core-rs/crates/mqk-daemon/src/routes/portfolio.rs` (updated),
+`core-rs/crates/mqk-daemon/src/api_types.rs` (updated),
+`core-rs/crates/mqk-daemon/tests/scenario_paper_daily_pnl_baseline_01.rs`,
+`core-rs/crates/mqk-daemon/tests/scenario_paper_pnl_operator_visibility_01.rs`
+(updated).

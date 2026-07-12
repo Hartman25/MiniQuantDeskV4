@@ -953,14 +953,43 @@ pub struct PortfolioSummaryResponse {
     pub cash: Option<f64>,
     pub long_market_value: Option<f64>,
     pub short_market_value: Option<f64>,
+    /// PAPER-DAILY-PNL-BASELINE-01-COMBINED: `current_account_equity -
+    /// daily_pnl_baseline_equity` when `daily_pnl_truth_state == "active"`.
+    /// `null` in every other truth state — never fabricated or
+    /// approximated from marks alone.
     pub daily_pnl: Option<f64>,
-    /// PAPER-PNL-OPERATOR-VISIBILITY-CLOSURE-01: always `null` — no
-    /// day-start / previous-session-close equity baseline exists anywhere in
-    /// this repo's schema (confirmed by repo-wide grep in
-    /// `paper_pnl_operator_visibility_01a_current_truth_audit.md`), so
-    /// `daily_pnl` cannot be truthfully computed. This field states why
-    /// rather than leaving an unexplained `null`.
+    /// Reason `daily_pnl` is unavailable, populated whenever
+    /// `daily_pnl_truth_state != "active"`.
     pub daily_pnl_unavailable_reason: Option<String>,
+    /// Machine-readable truth state for `daily_pnl`, mirroring the
+    /// `pnl_truth_state` pattern already proven for unrealized P&L:
+    ///
+    /// - `"active"` — a previous-session-close baseline row exists for the
+    ///   required prior trading day; `daily_pnl` is computed and populated.
+    /// - `"baseline_unavailable"` — no baseline row exists for the required
+    ///   prior trading day, and no older baseline row was found either
+    ///   (e.g. first day this capture mechanism has ever run).
+    /// - `"stale_baseline"` — a baseline row exists, but for a trading day
+    ///   further in the past than the immediately preceding trading day
+    ///   (e.g. a multi-day daemon outage skipped a capture); reported
+    ///   rather than silently used.
+    /// - `"no_snapshot"` — no broker snapshot; mirrors `truth_state`.
+    /// - `"db_unavailable"` — no DB pool configured; baseline lookup was
+    ///   never attempted.
+    pub daily_pnl_truth_state: String,
+    /// `YYYY-MM-DD` trading date of the baseline row actually used (the
+    /// required prior trading day if `"active"`, or the stale row's date if
+    /// `"stale_baseline"`). `None` otherwise.
+    pub daily_pnl_baseline_trading_date: Option<String>,
+    /// The baseline row's captured equity value, in dollars. `None` unless
+    /// a baseline row was found (`"active"` or `"stale_baseline"`).
+    pub daily_pnl_baseline_equity: Option<f64>,
+    /// The baseline row's `captured_by` provenance string. `None` unless a
+    /// baseline row was found.
+    pub daily_pnl_baseline_source: Option<String>,
+    /// The baseline row's `captured_at_utc`, RFC3339. `None` unless a
+    /// baseline row was found.
+    pub daily_pnl_baseline_captured_at_utc: Option<String>,
     /// PAPER-PNL-OPERATOR-VISIBILITY-CLOSURE-01: sum of each position's
     /// `(mark_price - avg_price) * qty` (see
     /// `/api/v1/portfolio/positions`), only when every position's own P&L is

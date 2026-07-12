@@ -408,9 +408,13 @@ async fn ppv08_db_summary_aggregates_unrealized_pnl_daily_pnl_stays_unavailable(
         .expect("summary unrealized_pnl present");
     assert!((pnl - 15.57).abs() < 0.001, "expected ~15.57, got {pnl}");
     assert!(v["daily_pnl"].is_null(), "daily_pnl must stay unavailable");
-    assert_eq!(
-        v["daily_pnl_unavailable_reason"],
-        "no_day_start_equity_baseline_in_schema"
+    assert_eq!(v["daily_pnl_truth_state"], "baseline_unavailable");
+    let reason = v["daily_pnl_unavailable_reason"]
+        .as_str()
+        .expect("daily_pnl_unavailable_reason present");
+    assert!(
+        reason.starts_with("no_account_equity_baseline_for_required_trading_day:"),
+        "unexpected reason: {reason}"
     );
 
     delete_test_bars(&pool, symbol).await;
