@@ -222,6 +222,111 @@ export interface StrategyScanReviewArtifactResponse {
   error: string | null;
 }
 
+// ---------------------------------------------------------------------------
+// STRATEGY-PROMOTION-REGISTRY-01E: promotion control-surface types. Mirrors
+// daemon api_types.rs StrategyPromotionRow / StrategyPromotionsResponse /
+// StrategyPromotionHistoryResponse / StrategyPromotionCheckResponse /
+// StrategyPromotionTransitionRequest / StrategyPromotionTransitionResponse.
+//
+// `registered + enabled` is never promotion approval. `tradable_live` is
+// always `false` on every response shape below -- a paper promotion state
+// never authorizes a LIVE run or live-routing path. See
+// StrategyScannerScreen.tsx's PromotionControlPanel for the operator-facing
+// surface; this module carries no order/broker/run-start/arm route.
+// ---------------------------------------------------------------------------
+
+export type PromotionStateKind =
+  | "shadow_approved"
+  | "paper_approved"
+  | "active_paper"
+  | "demoted"
+  | "retired"
+  | "rejected";
+
+export interface StrategyPromotionRow {
+  transition_id: string;
+  strategy_id: string;
+  symbol: string;
+  timeframe_secs: number;
+  config_fingerprint: string | null;
+  config_identity_status: string;
+  previous_state: string | null;
+  new_state: string;
+  evidence_review_id: string | null;
+  evidence_scanner_scan_id: string | null;
+  evidence_git_hash: string | null;
+  evidence_artifact_path: string | null;
+  evidence_fingerprint: string | null;
+  effective_at_utc: string;
+  expires_at_utc: string | null;
+  initiated_by: string;
+  reason: string;
+  created_at_utc: string;
+  tradable_paper: boolean;
+  /** Always `false`. No GUI action can ever make this `true`. */
+  tradable_live: boolean;
+  reason_code: string;
+  blockers: string[];
+}
+
+export interface StrategyPromotionsResponse {
+  canonical_route: string;
+  backend: string;
+  truth_state: string;
+  rows: StrategyPromotionRow[];
+}
+
+export interface StrategyPromotionHistoryResponse {
+  canonical_route: string;
+  backend: string;
+  truth_state: string;
+  strategy_id: string;
+  symbol: string;
+  timeframe_secs: number;
+  rows: StrategyPromotionRow[];
+  blockers: string[];
+}
+
+export interface StrategyPromotionCheckResponse {
+  canonical_route: string;
+  backend: string;
+  truth_state: string;
+  strategy_id: string;
+  symbol: string;
+  timeframe_secs: number;
+  current_state: string | null;
+  config_identity_status: string | null;
+  tradable_paper: boolean;
+  /** Always `false`. */
+  tradable_live: boolean;
+  reason_code: string;
+  blockers: string[];
+}
+
+export interface StrategyPromotionTransitionRequest {
+  strategy_id: string;
+  symbol: string;
+  timeframe_secs: number;
+  target_state: PromotionStateKind;
+  review_dir: string | null;
+  effective_at_utc: string;
+  expires_at_utc: string | null;
+  initiated_by: string;
+  reason: string;
+}
+
+export interface StrategyPromotionTransitionResponse {
+  accepted: boolean;
+  disposition: string;
+  strategy_id: string;
+  symbol: string;
+  timeframe_secs: number;
+  previous_state: string | null;
+  target_state: string;
+  transition_id: string | null;
+  blockers: string[];
+}
+
 export type StrategyScanJobStatusKind = "queued" | "running" | "completed" | "failed" | "unknown";
 
 export interface ActiveStrategyScanJob {

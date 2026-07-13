@@ -17,6 +17,11 @@ import type {
   StrategyScanJobSubmitRequest,
   StrategyScanJobsListResponse,
   StrategyScanReviewArtifactResponse,
+  StrategyPromotionCheckResponse,
+  StrategyPromotionHistoryResponse,
+  StrategyPromotionTransitionRequest,
+  StrategyPromotionTransitionResponse,
+  StrategyPromotionsResponse,
 } from "./types";
 
 // ---------------------------------------------------------------------------
@@ -264,4 +269,114 @@ export async function getStrategyScanReviewArtifact(
     };
   }
   return { ok: true, data: result.data };
+}
+
+// ---------------------------------------------------------------------------
+// STRATEGY-PROMOTION-REGISTRY-01E: promotion control-surface HTTP helpers.
+//
+// Safety invariants:
+// - Read routes (/api/v1/strategy/promotions*) are public, no auth header.
+// - The single mutation route (POST .../transition) uses privileged:true
+//   (operator auth token) -- same convention as submitStrategyScanJob.
+// - No route in this section is an order/broker/run-start/arm route.
+// ---------------------------------------------------------------------------
+
+export interface GetStrategyPromotionsResult {
+  ok: boolean;
+  status?: number;
+  data?: StrategyPromotionsResponse;
+  error?: string;
+}
+
+export async function getStrategyPromotions(): Promise<GetStrategyPromotionsResult> {
+  const result = await fetchJsonCandidate<StrategyPromotionsResponse>("/api/v1/strategy/promotions");
+  if (!result.ok) {
+    return { ok: false, error: result.error ?? "Promotions list fetch failed." };
+  }
+  return { ok: true, data: result.data };
+}
+
+export interface GetStrategyPromotionHistoryResult {
+  ok: boolean;
+  status?: number;
+  data?: StrategyPromotionHistoryResponse;
+  error?: string;
+}
+
+export async function getStrategyPromotionHistory(
+  strategyId: string,
+  symbol: string,
+  timeframeSecs: number,
+): Promise<GetStrategyPromotionHistoryResult> {
+  const params = new URLSearchParams({
+    strategy_id: strategyId.trim(),
+    symbol: symbol.trim(),
+    timeframe_secs: String(timeframeSecs),
+  });
+  const result = await fetchJsonCandidate<StrategyPromotionHistoryResponse>(
+    `/api/v1/strategy/promotions/history?${params.toString()}`,
+  );
+  if (!result.ok) {
+    return { ok: false, error: result.error ?? "Promotion history fetch failed." };
+  }
+  return { ok: true, data: result.data };
+}
+
+export interface GetStrategyPromotionCheckResult {
+  ok: boolean;
+  status?: number;
+  data?: StrategyPromotionCheckResponse;
+  error?: string;
+}
+
+export async function getStrategyPromotionCheck(
+  strategyId: string,
+  symbol: string,
+  timeframeSecs: number,
+): Promise<GetStrategyPromotionCheckResult> {
+  const params = new URLSearchParams({
+    strategy_id: strategyId.trim(),
+    symbol: symbol.trim(),
+    timeframe_secs: String(timeframeSecs),
+  });
+  const result = await fetchJsonCandidate<StrategyPromotionCheckResponse>(
+    `/api/v1/strategy/promotions/check?${params.toString()}`,
+  );
+  if (!result.ok) {
+    return { ok: false, error: result.error ?? "Promotion check fetch failed." };
+  }
+  return { ok: true, data: result.data };
+}
+
+export interface SubmitStrategyPromotionTransitionResult {
+  ok: boolean;
+  status?: number;
+  data?: StrategyPromotionTransitionResponse;
+  error?: string;
+}
+
+export async function submitStrategyPromotionTransition(
+  req: StrategyPromotionTransitionRequest,
+): Promise<SubmitStrategyPromotionTransitionResult> {
+  const result = await postJson<StrategyPromotionTransitionResponse>(
+    ["/api/v1/strategy/promotions/transition"],
+    req as unknown as Record<string, unknown>,
+    { privileged: true },
+  );
+
+  if (result.error === "desktop operator token missing") {
+    return {
+      ok: false,
+      error: "Operator token missing — desktop auth required to submit a promotion transition.",
+    };
+  }
+
+  if (!result.ok) {
+    if (result.status === 404) {
+      return { ok: false, status: 404, error: "Strategy promotion transition API unavailable (route not found)." };
+    }
+    return { ok: false, status: result.status, error: result.error ?? "Transition request failed." };
+  }
+
+  return { ok: true, status: result.status, data: result.data };
 }
