@@ -483,6 +483,61 @@ pub async fn fetch_recent_strategy_signal_evaluations(
     Ok(out)
 }
 
+/// Fetch the most recent `limit` strategy signal-evaluation rows for a
+/// single durable run, newest first.
+///
+/// PAPER-ORDER-LIFECYCLE-VIS-01B: run-scoped sibling of
+/// `fetch_recent_strategy_signal_evaluations`, used to reconstruct one
+/// run's lifecycle after a daemon restart. An empty `Vec` is authoritative:
+/// it means no evaluation was recorded for this run, not that the journal
+/// is unavailable. Read-only — never writes.
+pub async fn fetch_strategy_signal_evaluations_for_run(
+    pool: &PgPool,
+    run_id: Uuid,
+    limit: i64,
+) -> Result<Vec<StrategySignalEvaluationRecord>> {
+    let rows = sqlx::query(
+        r#"
+        select evaluation_id, ts_utc, run_id, strategy_id, symbol, timeframe,
+               bar_context_source, bars_loaded, latest_bar_ts_utc,
+               signal_generated, signal_qty, signal_side,
+               reason_code, reason, decision_stage, source
+        from strategy_signal_evaluations
+        where run_id = $1
+        order by ts_utc desc
+        limit $2
+        "#,
+    )
+    .bind(run_id)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .context("fetch_strategy_signal_evaluations_for_run failed")?;
+
+    let mut out = Vec::with_capacity(rows.len());
+    for r in rows {
+        out.push(StrategySignalEvaluationRecord {
+            evaluation_id: r.try_get("evaluation_id")?,
+            ts_utc: r.try_get("ts_utc")?,
+            run_id: r.try_get("run_id")?,
+            strategy_id: r.try_get("strategy_id")?,
+            symbol: r.try_get("symbol")?,
+            timeframe: r.try_get("timeframe")?,
+            bar_context_source: r.try_get("bar_context_source")?,
+            bars_loaded: r.try_get("bars_loaded")?,
+            latest_bar_ts_utc: r.try_get("latest_bar_ts_utc")?,
+            signal_generated: r.try_get("signal_generated")?,
+            signal_qty: r.try_get("signal_qty")?,
+            signal_side: r.try_get("signal_side")?,
+            reason_code: r.try_get("reason_code")?,
+            reason: r.try_get("reason")?,
+            decision_stage: r.try_get("decision_stage")?,
+            source: r.try_get("source")?,
+        });
+    }
+    Ok(out)
+}
+
 // ---------------------------------------------------------------------------
 // AUTON-NO-TRADE-OFFHOURS-01B: Durable autonomous no-trade diagnostic
 // snapshot (autonomous_no_trade_diagnostics)
@@ -601,6 +656,61 @@ pub async fn fetch_recent_autonomous_no_trade_diagnostics(
     .fetch_all(pool)
     .await
     .context("fetch_recent_autonomous_no_trade_diagnostics failed")?;
+
+    let mut out = Vec::with_capacity(rows.len());
+    for r in rows {
+        out.push(AutonomousNoTradeDiagnosticRecord {
+            diagnostic_id: r.try_get("diagnostic_id")?,
+            observed_at_utc: r.try_get("observed_at_utc")?,
+            run_id: r.try_get("run_id")?,
+            mode: r.try_get("mode")?,
+            session_window_state: r.try_get("session_window_state")?,
+            runtime_start_allowed: r.try_get("runtime_start_allowed")?,
+            arm_state: r.try_get("arm_state")?,
+            overall_ready: r.try_get("overall_ready")?,
+            reason_code: r.try_get("reason_code")?,
+            reason: r.try_get("reason")?,
+            stage: r.try_get("stage")?,
+            paper_order_attempted: r.try_get("paper_order_attempted")?,
+            live_order_attempted: r.try_get("live_order_attempted")?,
+            source: r.try_get("source")?,
+        });
+    }
+    Ok(out)
+}
+
+/// Fetch the most recent `limit` autonomous no-trade diagnostic rows for a
+/// single durable run, newest first.
+///
+/// PAPER-ORDER-LIFECYCLE-VIS-01B: run-scoped sibling of
+/// `fetch_recent_autonomous_no_trade_diagnostics`, used to reconstruct one
+/// run's lifecycle after a daemon restart. `run_id` is nullable in the
+/// source table (a diagnostic can fire off-hours with no active run), so
+/// rows with `run_id IS NULL` never match this filter — by design, since
+/// they cannot belong to any specific run's lifecycle. An empty `Vec` is
+/// authoritative. Read-only — never writes.
+pub async fn fetch_autonomous_no_trade_diagnostics_for_run(
+    pool: &PgPool,
+    run_id: Uuid,
+    limit: i64,
+) -> Result<Vec<AutonomousNoTradeDiagnosticRecord>> {
+    let rows = sqlx::query(
+        r#"
+        select diagnostic_id, observed_at_utc, run_id, mode,
+               session_window_state, runtime_start_allowed, arm_state,
+               overall_ready, reason_code, reason, stage,
+               paper_order_attempted, live_order_attempted, source
+        from autonomous_no_trade_diagnostics
+        where run_id = $1
+        order by observed_at_utc desc
+        limit $2
+        "#,
+    )
+    .bind(run_id)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .context("fetch_autonomous_no_trade_diagnostics_for_run failed")?;
 
     let mut out = Vec::with_capacity(rows.len());
     for r in rows {

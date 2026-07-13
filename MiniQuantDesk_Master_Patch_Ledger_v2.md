@@ -8368,3 +8368,39 @@ existing `runs`/`oms_outbox`/`oms_inbox` helpers. No migration.
 **Safety confirmation:** read-only audit; no code changed; no order
 submitted; no broker/provider/network call; no DB row mutated (all DB
 inspection was `select`-only); no daemon started.
+
+---
+
+## PAPER-ORDER-LIFECYCLE-PERSISTENT-VISIBILITY-AUDIT-AND-CLOSURE-01-COMBINED — Phase B (DB model)
+
+Patch: `PAPER-ORDER-LIFECYCLE-VIS-01B-PERSISTENT-DB-MODEL-AND-ROUTE-CONTRACT-01`.
+
+Added two new run-scoped DB read helpers to
+`core-rs/crates/mqk-db/src/strategy.rs`:
+`fetch_strategy_signal_evaluations_for_run(pool, run_id, limit)` and
+`fetch_autonomous_no_trade_diagnostics_for_run(pool, run_id, limit)` —
+exact run-scoped siblings of the existing global-fetch helpers, closing
+gap (2) identified in Phase A. No migration: both new queries read
+existing columns on `strategy_signal_evaluations` /
+`autonomous_no_trade_diagnostics`. Gap (1) (durable "latest run"
+resolution) needs no new DB code — `mqk_db::fetch_latest_run_for_engine`
+and `mqk_db::fetch_run` already exist and will be called directly by the
+Phase C route handler.
+
+New test file
+`core-rs/crates/mqk-db/tests/scenario_paper_order_lifecycle_visibility_01.rs`
+(5 tests, `#[ignore]`/`MQK_DATABASE_URL`-gated, run against local
+`mqk-test-postgres` port 5434): run-scoping proof for both new helpers
+(two runs' rows never cross-contaminate), authoritative-empty proof for
+both (a run with zero rows returns `Vec::new()`, not an error), and a
+before/after row-count proof that neither helper writes to `oms_outbox`,
+`oms_inbox`, or `runs`. All 5 pass. `cargo check -p mqk-db -p mqk-daemon`
+and `cargo clippy -p mqk-db --all-targets -- -D warnings` both clean.
+
+**Built:** `core-rs/crates/mqk-db/src/strategy.rs` (additive),
+`core-rs/crates/mqk-db/tests/scenario_paper_order_lifecycle_visibility_01.rs`.
+
+**Safety confirmation:** no migration; no order submitted; no
+broker/provider/network call in tests; no write path added (both new
+functions are pure `select` queries); test fixture rows cleaned up by
+each test; no trading/strategy/risk logic touched.
