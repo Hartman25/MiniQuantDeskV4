@@ -8996,3 +8996,58 @@ one privileged POST already added in Phase B; no provider/broker call
 from the GUI; no change to any existing screen's behavior beyond the new
 `CORE_PANEL_KEYS`/`sourceAuthority` entries required for `strategyScanner`
 itself to type-check.
+
+---
+
+## STRATEGY-SCANNER-DAEMON-JOBS-AND-GUI-REVIEW-01-COMBINED — Phase E (closure)
+
+Patch: `STRATEGY-SCANNER-JOBS-GUI-01E-END-TO-END-PROOF-AND-CLOSURE-01`.
+
+```text
+STRATEGY-SCANNER-DAEMON-JOBS-AND-GUI-REVIEW-01-COMBINED: CLOSED_LOCAL
+```
+
+An operator can now submit a bounded local-data strategy scan through
+the daemon, poll job status, and load/review the generated artifact
+through the GUI review screen — every surface carrying the fixed
+research-only warning set, with no trade/promote/approve control
+anywhere. End-to-end proof ran as: (1) 14 daemon scenario tests
+exercising the real Axum router in-process (submit → poll → completed
+→ artifact readback, including `path_rejected`/`missing_artifact`/
+`invalid_artifact` truth states); (2) manual browser verification of the
+GUI screen against a real Vite dev build, including the submit-with-
+unreachable-daemon failure path degrading honestly. A live HTTP replay
+against a *running daemon process* did not happen — the mission's own
+hard safety rule ("do not start the daemon runtime") took precedence,
+and the mission's own Phase E fallback text explicitly anticipates and
+accepts scenario-test proof as the closure standard in that case. See
+`docs/specs/strategy_scanner_jobs_gui_01e_closure_decision.md` for full
+reasoning (§15/§16) and the remaining-open-work list (§17).
+
+**Full patch-group commit chain:** Phase A `688f3bf0` (audit + design)
+-> Phase B+C `217cf39c` (daemon scan jobs + artifact readback, scanner
+core extracted to `mqk-backtest`, 14 daemon tests) -> Phase D
+`497cf787` (GUI review screen, 18 new GUI tests) -> Phase E (this
+entry, closure).
+
+**Built:**
+`docs/specs/strategy_scanner_jobs_gui_01e_closure_decision.md`,
+`docs/specs/roadmap_completion_reconcile_01.md` (updated, new §15).
+
+**Next market-hours proof:**
+`PAPER-TRADE-LIFECYCLE-PROOF-03-PNL-VISIBILITY-VERIFY-COMBINED`
+(unchanged — this bundle is off-market operator tooling).
+
+**Next off-market bundle:**
+`STRATEGY-SCANNER-PROMOTION-GATES-AND-RESEARCH-QUEUE-01-COMBINED` —
+defines promotion gates and a research review workflow; does **not**
+promote scanner output to trading.
+
+**Safety confirmation:** no live orders; no forced or manually submitted
+paper orders; no autonomous smoke script run; no execution armed; no
+daemon runtime started at any phase; no strategy/threshold/gate change
+to any existing code path; no fabricated candidate, score, bar, order,
+fill, or position at any phase; no DB migration; no `.env.local` edit;
+no provider/broker/network call in any test or manual verification; no
+generated scan artifact, smoke log, export, or untracked ledger draft
+staged at any phase.

@@ -459,3 +459,38 @@ This bundle does **not** touch any row in §2 above, for the same reason
 equities-only, existing strategy-engine layer. No row's status,
 percentage, or category changes. `docs/audits/multi_asset_completion_audit.md`
 is correspondingly not updated by this bundle.
+
+## 15. Later session: `STRATEGY-SCANNER-DAEMON-JOBS-AND-GUI-REVIEW-01-COMBINED`
+
+A follow-up off-market session turned the CLI-only scanner (§14) into an
+operator-reviewable workflow: a daemon job API
+(`POST`/`GET /api/v1/strategy-scans/jobs`,
+`GET /api/v1/strategy-scans/jobs/:job_id`) that runs the identical
+scanner core the CLI uses (the scan-execution and artifact-writing logic
+was moved out of `mqk-cli` into `mqk_backtest::{execute_strategy_scan,
+write_scan_artifacts}` so both callers share one implementation), a
+read-only artifact readback route
+(`GET /api/v1/strategy-scans/artifact`) with root-confinement path
+validation, and a new `strategyScanner` GUI screen that submits a
+bounded scan, polls job status, and reviews the resulting artifact —
+every surface carrying a fixed "research evidence only, not autonomous
+trading approval" warning and no trade/promote/approve control anywhere.
+Jobs are in-memory (process-lifetime), matching the existing
+`backtest_jobs` daemon-job precedent; no DB migration. Proven via 14
+daemon scenario tests (submit/list/status/artifact, including path-
+escape rejection) and a manual browser verification of the GUI screen
+against a real dev build; a live HTTP replay against a running daemon
+*process* did not happen, per the mission's own hard "do not start the
+daemon runtime" rule — see
+`docs/specs/strategy_scanner_jobs_gui_01e_closure_decision.md` §15/§16
+for the full reasoning. Final status:
+
+```text
+STRATEGY-SCANNER-DAEMON-JOBS-AND-GUI-REVIEW-01-COMBINED: CLOSED_LOCAL
+```
+
+This bundle does **not** touch any row in §2 above, for the same reason
+§9–§14 do not: off-market operator-tooling concern only, equities-only,
+existing strategy-engine/scanner layer. No row's status, percentage, or
+category changes. `docs/audits/multi_asset_completion_audit.md` is
+correspondingly not updated by this bundle.
