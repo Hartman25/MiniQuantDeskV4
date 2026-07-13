@@ -424,3 +424,38 @@ This bundle does **not** touch any row in §2 above, for the same reason
 equities-only, existing OMS/DB layer. No row's status, percentage, or
 category changes. `docs/audits/multi_asset_completion_audit.md` is
 correspondingly not updated by this bundle.
+
+## 14. Later session: `STRATEGY-LAB-COMPLETION-AND-SCANNER-FOUNDATION-01-COMBINED`
+
+A follow-up off-market session built the first local-data-only strategy/
+symbol scanner: a pure scanner core
+(`core-rs/crates/mqk-backtest/src/strategy_scanner.rs`,
+`evaluate_scan_candidate` + `rank_scan_candidates`, no IO) plus a CLI
+runner (`mqk backtest scan-strategies`,
+`core-rs/crates/mqk-cli/src/commands/bkt.rs::run_strategy_scan`) that
+resolves the enabled-equity registry universe, reads local
+`exports/md_backup/{timeframe}/{symbol}_{timeframe}.csv` bar files,
+reuses the existing `BacktestEngine`/`sweep_row_from_report` to score
+each `(symbol, strategy_id)` candidate, and writes a deterministic
+`manifest.json`/`candidates.json`/`candidates.csv`/`summary.json`
+artifact tree under `exports/strategy_scans/{scan_id}/` (`scan_id` a
+UUIDv5, never `Uuid::new_v4()`). Proven against real local data: the
+full 88-symbol registry scanned with `swing_momentum` on `1D` ranked
+88/88 candidates; the same universe scanned with `intraday_scalper` on
+the real (empty) `5m/` directory honestly reported 10/10 as
+`data_missing` with zero crashes. This is a **research-ranking**
+foundation only — it does not feed any promotion/admission gate, does
+not touch `oms_outbox`/`oms_inbox`, and made no provider/broker/network
+call at any phase. See
+`docs/specs/strategy_lab_scanner_01a_current_truth_audit.md` through
+`..._01e_closure_decision.md`. Final status:
+
+```text
+STRATEGY-LAB-COMPLETION-AND-SCANNER-FOUNDATION-01-COMBINED: CLOSED_LOCAL
+```
+
+This bundle does **not** touch any row in §2 above, for the same reason
+§9–§13 do not: off-market research/backtest-tooling concern only,
+equities-only, existing strategy-engine layer. No row's status,
+percentage, or category changes. `docs/audits/multi_asset_completion_audit.md`
+is correspondingly not updated by this bundle.

@@ -8727,3 +8727,54 @@ over-claiming from this run.
 provider/broker/network call; no DB connection opened; no order
 submitted; no strategy threshold changed; no artifact staged; no smoke
 log or untracked ledger draft staged.
+
+---
+
+## STRATEGY-LAB-COMPLETION-AND-SCANNER-FOUNDATION-01-COMBINED — Phase E (closure)
+
+Patch: `STRATEGY-LAB-SCANNER-01E-CLOSURE-AND-NEXT-ROADMAP-01`.
+
+```text
+STRATEGY-LAB-COMPLETION-AND-SCANNER-FOUNDATION-01-COMBINED: CLOSED_LOCAL
+```
+
+The repo can now scan a local-data equity universe off-market, produce
+deterministic ranked-candidate artifacts, honestly explain
+skipped/missing-data symbols, and this was proven with zero
+provider/broker/order-path activity. A pure scanner core
+(`mqk-backtest::strategy_scanner`) plus a CLI runner (`mqk backtest
+scan-strategies`) resolve the enabled-equity registry (88 symbols),
+evaluate each candidate against local `exports/md_backup` bar files via
+the existing `BacktestEngine`, and write a deterministic
+`manifest.json`/`candidates.json`/`candidates.csv`/`summary.json`
+artifact tree. Real-data proof: 88/88 candidates ranked on `1D`/
+`swing_momentum`; 10/10 candidates honestly reported `data_missing` on
+`5m`/`intraday_scalper` (the real `5m/` directory is empty). This is a
+research-ranking foundation only — no promotion/admission gate consumes
+its output, and every top-ranked 1D candidate in the proof run carried a
+*negative* absolute return, so no trading-signal claim is made.
+
+**Full patch-group commit chain:** Phase A `e29a664c` (audit + design)
+-> Phase B `2d5da087` (scanner core model, 11 pure tests) -> Phase C
+`2d4fbb38` (CLI runner + artifact writer, 9 CLI tests) -> Phase D
+`80ac8ecd` (real local-data proof) -> Phase E (this entry, closure).
+
+**Built:**
+`docs/specs/strategy_lab_scanner_01e_closure_decision.md`,
+`docs/specs/roadmap_completion_reconcile_01.md` (updated, new §14).
+
+**Next market-hours proof:**
+`PAPER-TRADE-LIFECYCLE-PROOF-03-PNL-VISIBILITY-VERIFY-COMBINED`
+(unchanged — this bundle is off-market research tooling).
+
+**Next off-market patch:**
+`STRATEGY-SCANNER-DAEMON-JOBS-AND-GUI-REVIEW-01-COMBINED`
+
+**Safety confirmation:** no live orders; no forced or manually submitted
+paper orders; no autonomous smoke script run; no execution armed; no
+strategy/threshold/gate change to any existing code path; no fabricated
+candidate, score, bar, order, fill, or position at any phase; no DB
+migration; no `.env.local` edit; no provider/broker/network call in any
+test or real run; no generated evidence, smoke log, export, or
+untracked ledger draft staged at any phase; no daemon started or
+restarted at any phase.
