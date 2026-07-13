@@ -8637,3 +8637,60 @@ flag change; no existing strategy threshold changed; no existing risk/
 session/integrity/OMS gate changed (the scanner's own internal engine
 config is new, isolated code, not a change to any existing path); no
 generated evidence, smoke log, export, or untracked ledger draft staged.
+
+---
+
+## STRATEGY-LAB-COMPLETION-AND-SCANNER-FOUNDATION-01-COMBINED — Phase C (CLI runner + artifact writer)
+
+Patch: `STRATEGY-LAB-SCANNER-01C-CLI-ARTIFACT-RUNNER-01`.
+
+Added `mqk backtest scan-strategies` (`core-rs/crates/mqk-cli/src/
+commands/bkt.rs::run_strategy_scan`, wired in `main.rs`), the only layer
+that touches the filesystem. Resolves the enabled-equity universe from
+`mqk_md::instrument_registry::{load_instrument_registry,
+enabled_equity_symbols}` (existing, pure, read-only), reads
+`{bars_root}/{timeframe}/{symbol}_{timeframe}.csv` per symbol via the
+existing `load_csv_file`, builds a fresh per-symbol `PluginRegistry` via
+the existing `register_builtin_strategies_with_sizing`, calls the Phase B
+pure core per `(symbol, strategy_id)` pair, ranks, and writes
+`manifest.json` + `candidates.json` + `candidates.csv` + `summary.json`
+under `--out-dir` (default `exports/strategy_scans/{scan_id}/`).
+`scan_id` is a deterministic UUIDv5 over
+`(registry_path, bars_root, timeframe, strategies, universe)` — never
+`Uuid::new_v4()`; a `--dry-run` flag skips writing while still printing
+the same summary. `--json` mode emits exactly one JSON value on stdout
+(fixed after the first CLI test run caught it also emitting
+`artifacts_written=`/`artifacts_dir=` key=value lines ahead of the JSON
+blob). No DB connection, no provider/broker call, no
+`oms_outbox`/`oms_inbox` write — the command never imports `mqk-db`'s
+write helpers or any broker/provider crate.
+
+**Built:**
+`core-rs/crates/mqk-cli/src/commands/bkt.rs` (`run_strategy_scan` +
+manifest/summary/CSV-writer helpers),
+`core-rs/crates/mqk-cli/src/main.rs` (`BacktestCmd::ScanStrategies` +
+match arm + import),
+`core-rs/crates/mqk-cli/tests/scenario_strategy_lab_scanner_cli_01.rs`
+(9 tests against tiny temp-dir fixtures: help text, end-to-end fixture
+scan with honest `data_missing` for a no-bars symbol, honest empty-`5m`
+skip, artifact-file presence + stable CSV header + stable JSON candidate
+schema, `--top` truncation, `--dry-run` writes nothing,
+`--limit-symbols` deterministic alphabetical truncation, repeated
+invocations produce an identical `scan_id`, unknown `--strategy` value
+fails closed without crashing the whole scan). `MQK_DATABASE_URL` and
+`TWELVEDATA_API_KEY` are explicitly removed from every test's child
+process environment.
+
+**Validation:** `cargo check -p mqk-cli -p mqk-backtest --all-targets`,
+`cargo test -p mqk-backtest -p mqk-cli` (full suite, no regressions —
+counted every `test result: ok` line, zero `FAILED`),
+`cargo clippy -p mqk-cli -p mqk-backtest --all-targets -- -D warnings` —
+all clean.
+
+**Safety confirmation:** no live/paper order submitted; no broker/
+provider/network call in any test (env vars explicitly removed); no DB
+connection opened; no DB migration; no `.env.local` edit; no config flag
+change; no existing strategy threshold changed; no existing risk/
+session/integrity/OMS gate changed; no generated evidence, smoke log,
+export, or untracked ledger draft staged (`exports/` remains
+`.gitignore`d and untouched by `git add`).

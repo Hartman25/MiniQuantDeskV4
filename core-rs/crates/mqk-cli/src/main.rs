@@ -9,7 +9,7 @@ mod commands;
 use commands::{
     bkt::{
         run_backtest_csv, run_backtest_db, run_regime_detect, run_strategy_lab_evaluate,
-        run_strategy_lab_rank, run_sweep_csv, IntegrityCalendarArg,
+        run_strategy_lab_rank, run_strategy_scan, run_sweep_csv, IntegrityCalendarArg,
     },
     load_payload,
     md::{
@@ -386,6 +386,51 @@ enum BacktestCmd {
         timeframe: String,
 
         /// Print deterministic JSON instead of key=value lines.
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+
+    /// STRATEGY-LAB-SCANNER-01C: local-data-only strategy/symbol/timeframe
+    /// scanner. Resolves the enabled-equity universe from the instrument
+    /// registry, evaluates each `(symbol, strategy)` pair against local
+    /// bar CSVs only (no provider/broker/network call, no live/paper
+    /// order), and writes a ranked-candidate artifact directory.
+    ScanStrategies {
+        /// Instrument registry JSON path.
+        #[arg(long, default_value = "config/instruments/equities.json")]
+        registry: String,
+
+        /// Root directory containing `{timeframe}/{symbol}_{timeframe}.csv` bar files.
+        #[arg(long, default_value = "exports/md_backup")]
+        bars_root: String,
+
+        /// Timeframe label to scan (e.g. "1D", "1H", "5m", "15m", "1m").
+        #[arg(long, default_value = "1D")]
+        timeframe: String,
+
+        /// Comma-separated strategy_id list (see `mqk backtest csv --help` for
+        /// available strategies). Default: swing_momentum.
+        #[arg(long, default_value = "swing_momentum")]
+        strategy: String,
+
+        /// Limit the printed/artifact top-ranked rows.
+        #[arg(long, default_value_t = 20)]
+        top: usize,
+
+        /// Optional cap on the number of universe symbols scanned
+        /// (deterministic: takes the first N in alphabetical order).
+        #[arg(long)]
+        limit_symbols: Option<usize>,
+
+        /// Output directory for the scan artifact tree.
+        #[arg(long, default_value = "exports/strategy_scans")]
+        out_dir: String,
+
+        /// Evaluate and print results but do not write the artifact directory.
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
+
+        /// Print a deterministic JSON report instead of key=value lines.
         #[arg(long, default_value_t = false)]
         json: bool,
     },
@@ -1256,6 +1301,29 @@ async fn main() -> Result<()> {
                 json,
             } => {
                 run_regime_detect(csv, symbol, timeframe, json)?;
+            }
+            BacktestCmd::ScanStrategies {
+                registry,
+                bars_root,
+                timeframe,
+                strategy,
+                top,
+                limit_symbols,
+                out_dir,
+                dry_run,
+                json,
+            } => {
+                run_strategy_scan(
+                    registry,
+                    bars_root,
+                    timeframe,
+                    strategy,
+                    top,
+                    limit_symbols,
+                    out_dir,
+                    dry_run,
+                    json,
+                )?;
             }
         },
 

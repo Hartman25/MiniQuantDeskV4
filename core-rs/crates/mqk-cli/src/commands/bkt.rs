@@ -1,14 +1,17 @@
 use anyhow::{Context, Result};
 use chrono::Utc;
 use clap::ValueEnum;
-use std::path::Path;
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
 
 use mqk_backtest::{
-    BacktestBar, BacktestConfig, BacktestEngine, BacktestInstrumentEconomics,
-    MarketRegimeClassification, MarketRegimeFeatures, MarketRegimePolicy, StrategySizingConfig,
-    SweepGrid, SweepRowResult, SWEEP_MAX_COMBINATIONS,
+    evaluate_scan_candidate, rank_scan_candidates, BacktestBar, BacktestConfig, BacktestEngine,
+    BacktestInstrumentEconomics, MarketRegimeClassification, MarketRegimeFeatures,
+    MarketRegimePolicy, StrategyScanCandidate, StrategyScanPolicy, StrategyScanTruthState,
+    StrategySizingConfig, SweepGrid, SweepRowResult, SWEEP_MAX_COMBINATIONS,
 };
 use mqk_integrity::CalendarSpec;
+use mqk_md::instrument_registry::{enabled_equity_symbols, load_instrument_registry};
 use mqk_strategy::{engines::register_builtin_strategies_with_sizing, PluginRegistry};
 
 /// CLI-facing integrity calendar selector for CSV backtests.
@@ -950,6 +953,340 @@ fn write_sweep_artifacts(sweep_dir: &Path, rows: &[SweepRowResult]) -> Result<()
     md.push_str("Use sweeps to compare hypotheses, not to blindly select a configuration.\n");
     std::fs::write(&md_path, &md)
         .with_context(|| format!("write sweep_report.md failed: {}", md_path.display()))?;
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// STRATEGY-LAB-SCANNER-01C: local-data-only strategy/symbol scanner runner
+// ---------------------------------------------------------------------------
+
+#[derive(serde::Serialize)]
+struct ScanManifest {
+    schema_version: u32,
+    scan_id: String,
+    created_at_utc: String,
+    git_hash: String,
+    registry_path: String,
+    bars_root: String,
+    timeframe: String,
+    strategies: Vec<String>,
+    universe_count: usize,
+    ranked_count: usize,
+    skipped_count: usize,
+    blockers: Vec<String>,
+    warnings: Vec<String>,
+}
+
+#[derive(serde::Serialize)]
+struct ScanSkipReasonCount {
+    reason_code: String,
+    count: usize,
+}
+
+#[derive(serde::Serialize)]
+struct ScanSummary<'a> {
+    scan_id: String,
+    universe_count: usize,
+    ranked_count: usize,
+    skipped_count: usize,
+    top_ranked: Vec<&'a StrategyScanCandidate>,
+    top_skip_reasons: Vec<ScanSkipReasonCount>,
+}
+
+/// Deterministic UUIDv5 scan identity: re-running with identical inputs
+/// (registry path, bars root, timeframe, strategies, resolved universe)
+/// always produces the same `scan_id`. Never `Uuid::new_v4()`.
+fn derive_scan_id(
+    registry_path: &str,
+    bars_root: &str,
+    timeframe: &str,
+    strategies: &[String],
+    universe: &[String],
+) -> uuid::Uuid {
+    let canonical = format!(
+        "mqk-scan.v1|registry={registry_path}|bars_root={bars_root}|timeframe={timeframe}|strategies={}|universe={}",
+        strategies.join(","),
+        universe.join(","),
+    );
+    uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, canonical.as_bytes())
+}
+
+fn csv_field(value: &str) -> String {
+    if value.contains(',') || value.contains('"') || value.contains('\n') {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    } else {
+        value.to_string()
+    }
+}
+
+fn candidates_to_csv(candidates: &[StrategyScanCandidate]) -> String {
+    let mut out = String::from(
+        "rank,symbol,timeframe,strategy_id,bars_available,truth_state,reason_code,score,total_return_pct,alpha_pct,max_drawdown_pct,trade_count,win_rate_pct,profit_factor,warnings,blockers\n",
+    );
+    for c in candidates {
+        let row = [
+            c.rank.map(|r| r.to_string()).unwrap_or_default(),
+            csv_field(&c.symbol),
+            csv_field(&c.timeframe),
+            csv_field(&c.strategy_id),
+            c.bars_available.to_string(),
+            c.truth_state.code().to_string(),
+            c.reason_code.code().to_string(),
+            c.score.map(|v| format!("{v:.4}")).unwrap_or_default(),
+            c.metrics
+                .total_return_pct
+                .map(|v| format!("{v:.4}"))
+                .unwrap_or_default(),
+            c.metrics
+                .alpha_pct
+                .map(|v| format!("{v:.4}"))
+                .unwrap_or_default(),
+            c.metrics
+                .max_drawdown_pct
+                .map(|v| format!("{v:.4}"))
+                .unwrap_or_default(),
+            c.metrics
+                .trade_count
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+            c.metrics
+                .win_rate_pct
+                .map(|v| format!("{v:.2}"))
+                .unwrap_or_default(),
+            c.metrics
+                .profit_factor
+                .map(|v| format!("{v:.4}"))
+                .unwrap_or_default(),
+            csv_field(&c.warnings.join(";")),
+            csv_field(&c.blockers.join(";")),
+        ];
+        out.push_str(&row.join(","));
+        out.push('\n');
+    }
+    out
+}
+
+/// Scan the enabled-equity registry universe against local bar CSVs only.
+///
+/// No provider call, no broker call, no live/paper order, no DB
+/// connection. The only IO is: read `registry`, read `{bars_root}/
+/// {timeframe}/{symbol}_{timeframe}.csv` files, and (unless `dry_run`)
+/// write the artifact directory under `out_dir`.
+#[allow(clippy::too_many_arguments)]
+pub fn run_strategy_scan(
+    registry_path: String,
+    bars_root: String,
+    timeframe: String,
+    strategy_ids: String,
+    top: usize,
+    limit_symbols: Option<usize>,
+    out_dir: String,
+    dry_run: bool,
+    json: bool,
+) -> Result<()> {
+    let strategies: Vec<String> = strategy_ids
+        .split(',')
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .collect();
+    if strategies.is_empty() {
+        anyhow::bail!("--strategy must name at least one strategy_id");
+    }
+    if top == 0 {
+        anyhow::bail!("--top must be > 0");
+    }
+
+    let instruments = load_instrument_registry(Path::new(&registry_path))
+        .with_context(|| format!("load instrument registry failed: {}", registry_path))?;
+    let mut universe = enabled_equity_symbols(&instruments);
+    if let Some(limit) = limit_symbols {
+        universe.truncate(limit);
+    }
+
+    let policy = StrategyScanPolicy::default();
+    let bars_root_path = Path::new(&bars_root);
+    let timeframe_dir = bars_root_path.join(&timeframe);
+
+    let mut candidates: Vec<StrategyScanCandidate> = Vec::new();
+    for symbol in &universe {
+        // Fresh per-symbol registry: register_builtin_strategies_with_sizing
+        // binds each strategy factory to this symbol via closure capture.
+        let mut reg = PluginRegistry::new();
+        register_builtin_strategies_with_sizing(&mut reg, symbol.as_str(), 1, None, None)
+            .with_context(|| format!("register_builtin_strategies failed for symbol={symbol}"))?;
+
+        let bars_path = timeframe_dir.join(format!("{symbol}_{timeframe}.csv"));
+        let bars: Option<Vec<BacktestBar>> = if bars_path.is_file() {
+            match mqk_backtest::load_csv_file(&bars_path) {
+                Ok(b) => Some(b),
+                Err(e) => {
+                    // A malformed local bars file is reported the same as a
+                    // missing one (data_missing) -- honest limitation, not a
+                    // crash. Surfaced on stderr for operator visibility.
+                    eprintln!(
+                        "warn: failed to parse bars file {}: {}",
+                        bars_path.display(),
+                        e
+                    );
+                    None
+                }
+            }
+        } else {
+            None
+        };
+
+        for strategy_id in &strategies {
+            let strategy_timeframe_secs = reg.lookup(strategy_id).ok().map(|m| m.timeframe_secs);
+            let strategy_instance = if strategy_timeframe_secs.is_some() {
+                reg.instantiate(strategy_id).ok()
+            } else {
+                None
+            };
+            candidates.push(evaluate_scan_candidate(
+                symbol,
+                &timeframe,
+                strategy_id,
+                strategy_timeframe_secs,
+                strategy_instance,
+                bars.as_deref(),
+                &policy,
+            ));
+        }
+    }
+
+    rank_scan_candidates(&mut candidates);
+
+    let ranked_count = candidates
+        .iter()
+        .filter(|c| c.truth_state == StrategyScanTruthState::CandidateRanked)
+        .count();
+    let skipped_count = candidates.len() - ranked_count;
+
+    let mut warnings = Vec::new();
+    if !timeframe_dir.is_dir() {
+        warnings.push(format!(
+            "bars timeframe directory not found: {}",
+            timeframe_dir.display()
+        ));
+    }
+
+    let scan_id = derive_scan_id(&registry_path, &bars_root, &timeframe, &strategies, &universe);
+    let manifest = ScanManifest {
+        schema_version: 1,
+        scan_id: scan_id.to_string(),
+        created_at_utc: Utc::now().to_rfc3339(), // allow: operational manifest timestamp
+        git_hash: bkt_git_hash(),
+        registry_path: registry_path.clone(),
+        bars_root: bars_root.clone(),
+        timeframe: timeframe.clone(),
+        strategies: strategies.clone(),
+        universe_count: universe.len(),
+        ranked_count,
+        skipped_count,
+        blockers: Vec::new(),
+        warnings,
+    };
+
+    let top_ranked: Vec<&StrategyScanCandidate> = candidates
+        .iter()
+        .filter(|c| c.rank.is_some())
+        .take(top)
+        .collect();
+
+    let mut reason_counts: BTreeMap<&str, usize> = BTreeMap::new();
+    for c in candidates
+        .iter()
+        .filter(|c| c.truth_state != StrategyScanTruthState::CandidateRanked)
+    {
+        *reason_counts.entry(c.reason_code.code()).or_insert(0) += 1;
+    }
+    let top_skip_reasons: Vec<ScanSkipReasonCount> = reason_counts
+        .into_iter()
+        .map(|(reason_code, count)| ScanSkipReasonCount {
+            reason_code: reason_code.to_string(),
+            count,
+        })
+        .collect();
+
+    let summary = ScanSummary {
+        scan_id: scan_id.to_string(),
+        universe_count: universe.len(),
+        ranked_count,
+        skipped_count,
+        top_ranked,
+        top_skip_reasons,
+    };
+
+    let mut artifacts_written = false;
+    let mut artifacts_dir: Option<PathBuf> = None;
+    if !dry_run {
+        let run_dir = Path::new(&out_dir).join(scan_id.to_string());
+        std::fs::create_dir_all(&run_dir)
+            .with_context(|| format!("create scan artifact dir failed: {}", run_dir.display()))?;
+        std::fs::write(
+            run_dir.join("manifest.json"),
+            serde_json::to_string_pretty(&manifest).context("serialize scan manifest failed")?,
+        )
+        .with_context(|| format!("write manifest.json failed: {}", run_dir.display()))?;
+        std::fs::write(
+            run_dir.join("candidates.json"),
+            serde_json::to_string_pretty(&candidates)
+                .context("serialize scan candidates failed")?,
+        )
+        .with_context(|| format!("write candidates.json failed: {}", run_dir.display()))?;
+        std::fs::write(run_dir.join("candidates.csv"), candidates_to_csv(&candidates))
+            .with_context(|| format!("write candidates.csv failed: {}", run_dir.display()))?;
+        std::fs::write(
+            run_dir.join("summary.json"),
+            serde_json::to_string_pretty(&summary).context("serialize scan summary failed")?,
+        )
+        .with_context(|| format!("write summary.json failed: {}", run_dir.display()))?;
+
+        artifacts_written = true;
+        artifacts_dir = Some(run_dir);
+    }
+
+    if json {
+        // JSON mode: stdout carries exactly one JSON value (the summary),
+        // nothing else -- callers can pipe stdout straight into a parser.
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&summary).context("serialize scan summary failed")?
+        );
+    } else {
+        println!("scan_id={}", manifest.scan_id);
+        println!("registry_path={}", manifest.registry_path);
+        println!("bars_root={}", manifest.bars_root);
+        println!("timeframe={}", manifest.timeframe);
+        println!("strategies={}", manifest.strategies.join(","));
+        println!("universe_count={}", manifest.universe_count);
+        println!("ranked_count={}", manifest.ranked_count);
+        println!("skipped_count={}", manifest.skipped_count);
+        println!("artifacts_written={artifacts_written}");
+        if let Some(dir) = &artifacts_dir {
+            println!("artifacts_dir={}", dir.display());
+        }
+        for w in &manifest.warnings {
+            println!("warning={w}");
+        }
+        for c in candidates.iter().filter(|c| c.rank.is_some()).take(top) {
+            println!(
+                "rank={} symbol={} timeframe={} strategy_id={} score={} total_return_pct={} truth_state={} reason_code={}",
+                c.rank.unwrap_or(0),
+                c.symbol,
+                c.timeframe,
+                c.strategy_id,
+                c.score.map(|v| format!("{v:.4}")).unwrap_or_else(|| "n/a".to_string()),
+                c.metrics.total_return_pct.map(|v| format!("{v:.4}")).unwrap_or_else(|| "n/a".to_string()),
+                c.truth_state.code(),
+                c.reason_code.code(),
+            );
+        }
+        for skip in &summary.top_skip_reasons {
+            println!("skip_reason={} count={}", skip.reason_code, skip.count);
+        }
+    }
 
     Ok(())
 }
