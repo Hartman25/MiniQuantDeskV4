@@ -9259,3 +9259,56 @@ only new daemon route is the one read-only
 `GET /api/v1/strategy-scans/review-artifact`; no provider/broker call
 from the daemon or the GUI; no DB migration; no change to any existing
 screen's behavior beyond the additive panel on `StrategyScannerScreen.tsx`.
+
+---
+
+## STRATEGY-SCANNER-PROMOTION-GATES-AND-RESEARCH-QUEUE-01-COMBINED — Phase E (closure)
+
+Patch: `STRATEGY-SCANNER-PROMOTION-01E-REAL-ARTIFACT-PROOF-AND-CLOSURE-01`.
+
+```text
+STRATEGY-SCANNER-PROMOTION-GATES-AND-RESEARCH-QUEUE-01-COMBINED: CLOSED_LOCAL
+```
+
+Ran the real (non-fixture) local-data proof: `mqk backtest
+scan-strategies` against the repo's existing real 1D bar data
+(`exports/md_backup/1D/`, 88 symbols) followed by `mqk backtest
+review-scan` against the resulting scanner artifact. Result: all 88
+real candidates reached `candidate_ranked` with a **negative** absolute
+`total_return_pct` (including the top-ranked `LCID` at
+`score=95.9469`, `total_return_pct=-1.1609`), and the review classifier
+correctly rejected all 88 (`reason_codes=negative_total_return`) —
+**zero** reached `paper_candidate`. This is the strongest possible
+real-data proof of this patch group's core safety rule: rank/alpha
+alone can never promote a money-losing candidate. Generated artifacts
+(`exports/strategy_scans/83b56e5d-…`, `exports/strategy_reviews/a1b3bd4c-…`)
+were not staged — confirmed via `git status --short exports/` (empty)
+and `git check-ignore -v` (both match the existing blanket `exports/`
+`.gitignore` rule).
+
+Added `docs/specs/strategy_scanner_promotion_01e_closure_decision.md`
+(full 20-question closure record) and §16 of
+`docs/specs/roadmap_completion_reconcile_01.md` (no roadmap row
+changes — off-market research-governance tooling only, same
+classification as every prior scanner-bundle entry).
+
+**Full patch-group commit chain:** Phase A `1b297b8d` → Phase B
+`fd34afb3` → Phase C `a6c45196` + `5eeb82dc` → Phase D `a8de5121` →
+Phase E (this entry).
+
+**Safety confirmation (whole bundle):** no live orders; no forced or
+manually submitted paper orders; no autonomous smoke script run; no
+execution armed; no daemon runtime started at any phase; no strategy/
+threshold/gate change to any existing code path; no fabricated
+candidate, score, bar, decision, or promotion evidence at any phase; no
+DB migration; no `.env.local` edit; no provider/broker/network call at
+any phase, including the real-data proof run (local files only); no
+generated scan/review artifact, smoke log, or untracked ledger draft
+staged at any phase.
+
+**Recommended next market-hours prompt:**
+`PAPER-TRADE-LIFECYCLE-PROOF-03-PNL-VISIBILITY-VERIFY-COMBINED`
+
+**Recommended next off-market prompt:**
+`STRATEGY-ROUTER-RESEARCH-ONLY-SELECTION-01-COMBINED` (must remain
+research-only — selects candidates for analysis, not trading).

@@ -494,3 +494,37 @@ This bundle does **not** touch any row in §2 above, for the same reason
 existing strategy-engine/scanner layer. No row's status, percentage, or
 category changes. `docs/audits/multi_asset_completion_audit.md` is
 correspondingly not updated by this bundle.
+
+## 16. Later session: `STRATEGY-SCANNER-PROMOTION-GATES-AND-RESEARCH-QUEUE-01-COMBINED`
+
+A follow-up off-market session added a research-review/promotion-gate
+layer over the scanner's output (§14/§15): a pure classifier
+(`mqk_backtest::strategy_scan_review`) that sorts already-ranked scanner
+candidates into `blocked` / `needs_review` / `watchlist_candidate` /
+`paper_candidate` / `rejected`, gating on absolute `total_return_pct`
+(not rank or alpha alone) so a candidate can never reach
+`paper_candidate` while it is losing money in absolute terms; a CLI
+command (`mqk backtest review-scan`) that reads a scanner artifact and
+writes a review artifact (`manifest.json`/`review_decisions.json`/
+`review_decisions.csv`/`summary.json`); a read-only daemon route
+(`GET /api/v1/strategy-scans/review-artifact`) with the same root-
+confinement path validation as the scanner artifact route; and a
+display-only review panel added to the existing `strategyScanner` GUI
+screen. File-artifact only — no DB migration. Proven against the real
+1D bar data already in this repo: all 88 real candidates in this
+session's scan had negative absolute returns and all 88 were correctly
+classified `rejected`, zero reaching `paper_candidate` — see
+`docs/specs/strategy_scanner_promotion_01e_closure_decision.md` §12 for
+the full evidence. `paper_candidate` carries no trading meaning; nothing
+in this repo consumes it to submit, route, or admit an order. Final
+status:
+
+```text
+STRATEGY-SCANNER-PROMOTION-GATES-AND-RESEARCH-QUEUE-01-COMBINED: CLOSED_LOCAL
+```
+
+This bundle does **not** touch any row in §2 above, for the same reason
+§9–§15 do not: off-market research-governance tooling concern only,
+equities-only, existing strategy-engine/scanner layer. No row's status,
+percentage, or category changes. `docs/audits/multi_asset_completion_audit.md`
+is correspondingly not updated by this bundle.
