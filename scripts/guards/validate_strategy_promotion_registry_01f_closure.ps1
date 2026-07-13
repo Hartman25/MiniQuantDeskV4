@@ -46,7 +46,14 @@ $text = [System.IO.File]::ReadAllText($ClosureDoc)
 Show-Green "Closure doc found"
 
 $requiredTerms = @(
-    'STRATEGY-PROMOTION-REGISTRY-AND-RUNTIME-ENFORCEMENT-01-COMBINED: CLOSED_LOCAL',
+    # STRATEGY-PROMOTION-REGISTRY-CLOSURE-REPAIR-01: corrected from
+    # "...COMBINED: CLOSED_LOCAL" -- the closure doc claimed CLOSED_LOCAL
+    # for the whole bundle while its own §5/§9 admitted configuration-
+    # fingerprint identity binding was PARTIAL, an internally
+    # inconsistent closure claim. The doc's own "Final status" banner now
+    # honestly reads PARTIAL; this guard must check for the corrected
+    # value, not re-assert the defect it exists to catch.
+    'STRATEGY-PROMOTION-REGISTRY-AND-RUNTIME-ENFORCEMENT-01-COMBINED: PARTIAL',
     '0046_strategy_promotion_registry.sql',
     'Gate 3b',
     'Gate 2b',
