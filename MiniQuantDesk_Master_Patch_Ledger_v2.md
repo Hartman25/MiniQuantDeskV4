@@ -8471,3 +8471,32 @@ insert/update/delete anywhere in the handler); no broker/provider/network
 call; no order submitted/cancelled/replaced; no execution armed; no
 strategy/risk/gate logic touched; portfolio/P&L truth_state never
 fabricated as `"active"`.
+
+---
+
+## PAPER-ORDER-LIFECYCLE-PERSISTENT-VISIBILITY-AUDIT-AND-CLOSURE-01-COMBINED — Phase D (DB-backed proof)
+
+Patch: `PAPER-ORDER-LIFECYCLE-VIS-01D-DB-BACKED-PROOF-AND-REGRESSION-01`.
+
+Read-only inspection (zero rows mutated — every query a plain `select`)
+of the real `mqk-paper-postgres` DB found the exact real-world case this
+bundle exists to close: the latest PAPER run
+(`15cf4309-210b-5406-8ed8-46377e093195`, `STOPPED` at 2026-07-10
+18:49:18) has a complete, self-consistent durable lifecycle — a real
+generated signal (`signal_long`, qty 3, AAPL) -> one `ACKED` outbox row
+-> two broker `ack` inbox events -> one `fill` inbox event, all within a
+two-second window. Hand-tracing `classify_overall_lifecycle_state`
+against these exact real rows yields `order_filled_pnl_pending`,
+matching the DB-backed test suite's synthetic-fixture proof for the
+identical shape — independent confirmation the route's logic matches
+real production data. Live-daemon route readback was deliberately
+skipped (no daemon restart authorized in this off-market bundle); the DB
+test suite plus this hand-traced real-row proof are the closure evidence
+for this phase.
+
+**Built:**
+`docs/specs/paper_order_lifecycle_visibility_01d_db_backed_proof.md`.
+
+**Safety confirmation:** read-only DB inspection only; no rows mutated;
+no orders submitted; no daemon started or restarted; no
+broker/provider/network call.
