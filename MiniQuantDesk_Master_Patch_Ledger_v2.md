@@ -8778,3 +8778,131 @@ migration; no `.env.local` edit; no provider/broker/network call in any
 test or real run; no generated evidence, smoke log, export, or
 untracked ledger draft staged at any phase; no daemon started or
 restarted at any phase.
+
+---
+
+## STRATEGY-SCANNER-DAEMON-JOBS-AND-GUI-REVIEW-01-COMBINED — Phase A (audit + design)
+
+Patch: `STRATEGY-SCANNER-JOBS-GUI-01A-CURRENT-TRUTH-AUDIT-AND-DESIGN-01`.
+
+Audited current daemon job conventions (`backtest_jobs`/`ingest_jobs`,
+both in-memory `Arc<Mutex<HashMap<Uuid, Record>>>`), current GUI review
+conventions (`IngestScreen`'s submit+poll+status pattern is the closer
+template than the CLI-artifact-only `BacktestResultsScreen`), and
+current artifact conventions (no existing generic daemon
+arbitrary-directory read route). Locked the design: in-memory job store
+modeled on `backtest_jobs` (no DB migration), a new read-only artifact
+route with root-confinement path validation, and a new
+`strategyScanner` GUI screen alongside `backtests` in the diagnostics
+monitor group. Locked the fixed research-only warning text and the
+API/GUI contract.
+
+**Built:**
+`docs/specs/strategy_scanner_jobs_gui_01a_current_truth_audit.md`,
+`scripts/guards/validate_strategy_scanner_jobs_gui_01a_audit.ps1`.
+
+**Safety confirmation:** docs/validator-script only; no code changed; no
+provider/broker/network call; no DB migration.
+
+---
+
+## STRATEGY-SCANNER-DAEMON-JOBS-AND-GUI-REVIEW-01-COMBINED — Phase B+C (daemon jobs + artifact readback)
+
+Patches: `STRATEGY-SCANNER-JOBS-GUI-01B-DAEMON-SCAN-JOBS-01` and
+`STRATEGY-SCANNER-JOBS-GUI-01C-ARTIFACT-READBACK-ROUTE-01`, implemented
+together in one commit — both live in the same new
+`routes/strategy_scans.rs` module, share the same job-record type, and
+the artifact route's response shape is defined by the job route's
+output, so splitting them into two diffs would have meant re-touching
+the same few lines twice for no isolation benefit.
+
+Moved the scanner's scan-execution and artifact-writing logic out of
+`mqk-cli/src/commands/bkt.rs` and into `mqk-backtest::strategy_scanner`
+(`execute_strategy_scan` / `write_scan_artifacts` / `ScanManifest` /
+`ScanSummary` / `ScanSkipReasonCount`) — the CLI's `run_strategy_scan`
+is now a thin wrapper over the same shared functions the daemon calls,
+so the daemon never shells out to the CLI binary. All 9 pre-existing CLI
+scenario tests and all 11 pre-existing pure scanner tests pass unchanged
+after the extraction (byte-identical artifact schema).
+
+Added the in-memory `StrategyScanJobStore`
+(`mqk-daemon/src/strategy_scan_jobs.rs`, modeled on `backtest_jobs.rs` —
+`Arc<Mutex<HashMap<Uuid, StrategyScanJobRecord>>>`, process-lifetime
+only, no DB persistence) and
+`mqk-daemon/src/routes/strategy_scans.rs`:
+
+- `POST /api/v1/strategy-scans/jobs` (operator auth) — validates
+  `timeframe`/`strategy` non-blank, `top` bounded 1..=100, `limit_symbols`
+  bounded 1..=200 when supplied; resolves default
+  `registry_path`/`bars_root`/`out_dir`; runs the scan via
+  `tokio::spawn` + `tokio::task::spawn_blocking` (same pattern as the
+  existing CSV backtest job).
+- `GET /api/v1/strategy-scans/jobs` / `GET
+  /api/v1/strategy-scans/jobs/:job_id` (public) — list/status, newest
+  first, full `mqk_backtest::ScanSummary` echoed on completion.
+- `GET /api/v1/strategy-scans/artifact?artifact_dir=<path>` (public) —
+  reads `manifest.json`/`summary.json`/`candidates.json` from a
+  directory that must canonicalize inside the configured
+  `MQK_STRATEGY_SCAN_ARTIFACT_ROOT` (default `exports/strategy_scans`);
+  `truth_state` one of `active`/`missing_artifact`/`invalid_artifact`/
+  `path_rejected`; candidate rows capped at 200.
+
+Every completed job and every artifact response carries the fixed
+research-only warning set ("Scanner ranking is research evidence only.",
+"Scanner output is not autonomous trading approval.", "Candidates can
+rank well while still having negative absolute returns."). No route
+writes to `oms_outbox`/`oms_inbox`/broker maps/order tables; no route
+requires `arm_state`; no provider/broker/network import anywhere in the
+new code (proven by `mqk-cli`/`mqk-backtest` scenario tests already
+asserting no broker/OMS-write type import, and by the new daemon tests'
+`st.db.is_none()` assertion that jobs complete with no DB pool
+configured).
+
+14 new scenario tests in
+`mqk-daemon/tests/scenario_strategy_scanner_jobs_01.rs` prove: valid scan
+completes with all 4 artifact files and honest ranked/skipped counts;
+job list/status surface the submitted job; unknown job_id 404s;
+blank/out-of-bounds requests refused with 400; no DB pool required;
+artifact route returns `active`/`missing_artifact`/`invalid_artifact`/
+`path_rejected` correctly (including a real path-escape attempt against
+a directory that exists but sits outside the configured root); the
+fixed warning set is present on every artifact response regardless of
+truth_state.
+
+**Built:**
+`core-rs/crates/mqk-backtest/Cargo.toml` (added `mqk-md`, `serde_json`,
+`chrono` deps),
+`core-rs/crates/mqk-backtest/src/strategy_scanner.rs` (shared scan-run +
+artifact-writer functions),
+`core-rs/crates/mqk-backtest/src/lib.rs` (new exports),
+`core-rs/crates/mqk-cli/src/commands/bkt.rs` (thin wrapper),
+`core-rs/crates/mqk-daemon/src/strategy_scan_jobs.rs` (new),
+`core-rs/crates/mqk-daemon/src/routes/strategy_scans.rs` (new),
+`core-rs/crates/mqk-daemon/src/api_types.rs` (new request/response
+types),
+`core-rs/crates/mqk-daemon/src/state.rs` (new `strategy_scan_jobs` +
+`strategy_scan_artifact_root` fields),
+`core-rs/crates/mqk-daemon/src/lib.rs`,
+`core-rs/crates/mqk-daemon/src/routes.rs` (module + route registration),
+`core-rs/crates/mqk-daemon/tests/scenario_strategy_scanner_jobs_01.rs`
+(new, 14 tests).
+
+**Validation:** `cargo check -p mqk-daemon -p mqk-backtest`; `cargo test
+-p mqk-daemon --test scenario_strategy_scanner_jobs_01 --
+--test-threads=1` (14/14 pass); `cargo test -p mqk-backtest --test
+scenario_strategy_lab_scanner_01` (11/11 pass, unchanged); `cargo test -p
+mqk-cli --test scenario_strategy_lab_scanner_cli_01` (9/9 pass,
+unchanged); `cargo test -p mqk-daemon --test scenario_route_contract_rt01`
+(2/2 pass); `cargo test -p mqk-daemon --test
+scenario_gui_daemon_contract_gate` (23/23 pass); `cargo clippy -p
+mqk-daemon -p mqk-backtest --all-targets -- -D warnings` clean for every
+file this patch touched (28 pre-existing clippy failures in unrelated
+`state/session_controller.rs` / `state/runtime_session_source.rs` were
+confirmed present on a clean HEAD via `git stash` before this patch —
+not introduced by this patch, out of scope to fix here).
+
+**Safety confirmation:** no live orders; no forced or manually submitted
+paper orders; no order/OMS/broker/provider path touched by any new
+route; no strategy threshold changed; no risk/session/OMS gate changed;
+no DB migration; no generated scan artifacts, smoke logs, or
+`.env.local` staged.

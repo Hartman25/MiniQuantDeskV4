@@ -469,3 +469,349 @@ pub fn rank_scan_candidates(candidates: &mut [StrategyScanCandidate]) {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// STRATEGY-SCANNER-JOBS-GUI-01B: shared scan-run + artifact schema.
+//
+// Moved here from `mqk-cli/src/commands/bkt.rs::run_strategy_scan` so both
+// the CLI (`mqk backtest scan-strategies`) and the daemon
+// (`POST /api/v1/strategy-scans/jobs`) run the identical local-data-only
+// scan and write the identical artifact schema, without the daemon shelling
+// out to the CLI binary. No provider, broker, or DB import here — the only
+// IO is: read `registry_path`, read `{bars_root}/{timeframe}/
+// {symbol}_{timeframe}.csv` files, and (via `write_scan_artifacts`) write
+// the artifact directory.
+// ---------------------------------------------------------------------------
+
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+use mqk_md::instrument_registry::{enabled_equity_symbols, load_instrument_registry};
+use mqk_strategy::{engines::register_builtin_strategies_with_sizing, PluginRegistry};
+
+/// Deterministic scan-run manifest. Field-identical to the CLI's prior
+/// private `ScanManifest`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ScanManifest {
+    pub schema_version: u32,
+    pub scan_id: String,
+    pub created_at_utc: String,
+    pub git_hash: String,
+    pub registry_path: String,
+    pub bars_root: String,
+    pub timeframe: String,
+    pub strategies: Vec<String>,
+    pub universe_count: usize,
+    pub ranked_count: usize,
+    pub skipped_count: usize,
+    pub blockers: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
+/// Count of skipped candidates sharing one `reason_code`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ScanSkipReasonCount {
+    pub reason_code: String,
+    pub count: usize,
+}
+
+/// Deterministic scan-run summary. `top_ranked` is owned (not borrowed) so
+/// this type can be constructed by either the CLI (single-process, one
+/// `Vec<StrategyScanCandidate>` in scope) or the daemon (candidates stored
+/// in a job record, summary computed once and cloned into the response).
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ScanSummary {
+    pub scan_id: String,
+    pub universe_count: usize,
+    pub ranked_count: usize,
+    pub skipped_count: usize,
+    pub top_ranked: Vec<StrategyScanCandidate>,
+    pub top_skip_reasons: Vec<ScanSkipReasonCount>,
+}
+
+/// Bounded request describing one local-data scan run. Every path is
+/// caller-resolved (relative to the caller's working directory); this
+/// function performs no path-escape validation of its own — callers that
+/// accept `out_dir`/`registry_path`/`bars_root` from an untrusted operator
+/// surface (e.g. the daemon's `POST /api/v1/strategy-scans/jobs`) must apply
+/// their own bounds/validation before calling `execute_strategy_scan`.
+#[derive(Clone, Debug)]
+pub struct ScanRunRequest {
+    pub registry_path: String,
+    pub bars_root: String,
+    pub timeframe: String,
+    pub strategies: Vec<String>,
+    pub top: usize,
+    pub limit_symbols: Option<usize>,
+    /// Caller-resolved short git hash (e.g. via `git rev-parse --short HEAD`,
+    /// falling back to `"UNKNOWN"`). Kept caller-supplied rather than
+    /// re-invoked here so this pure-computation module never spawns a
+    /// subprocess itself.
+    pub git_hash: String,
+    /// Caller-resolved RFC3339 creation timestamp (e.g. `Utc::now()`). Kept
+    /// caller-supplied so this function remains deterministic given a fixed
+    /// clock reading, matching the existing CLI's own inline `Utc::now()`
+    /// call pattern (see `mqk-cli/src/commands/bkt.rs`).
+    pub created_at_utc: String,
+}
+
+/// Result of running a scan (before any artifact file is written).
+#[derive(Clone, Debug)]
+pub struct ScanRunOutput {
+    pub scan_id: uuid::Uuid,
+    pub manifest: ScanManifest,
+    pub candidates: Vec<StrategyScanCandidate>,
+    pub summary: ScanSummary,
+}
+
+/// Deterministic UUIDv5 scan identity: re-running with identical inputs
+/// (registry path, bars root, timeframe, strategies, resolved universe)
+/// always produces the same `scan_id`. Never `Uuid::new_v4()`.
+pub fn derive_scan_id(
+    registry_path: &str,
+    bars_root: &str,
+    timeframe: &str,
+    strategies: &[String],
+    universe: &[String],
+) -> uuid::Uuid {
+    let canonical = format!(
+        "mqk-scan.v1|registry={registry_path}|bars_root={bars_root}|timeframe={timeframe}|strategies={}|universe={}",
+        strategies.join(","),
+        universe.join(","),
+    );
+    uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, canonical.as_bytes())
+}
+
+fn csv_field(value: &str) -> String {
+    if value.contains(',') || value.contains('"') || value.contains('\n') {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    } else {
+        value.to_string()
+    }
+}
+
+/// Render the full candidate set as CSV. Identical schema to the CLI's
+/// prior private `candidates_to_csv`.
+pub fn candidates_to_csv(candidates: &[StrategyScanCandidate]) -> String {
+    let mut out = String::from(
+        "rank,symbol,timeframe,strategy_id,bars_available,truth_state,reason_code,score,total_return_pct,alpha_pct,max_drawdown_pct,trade_count,win_rate_pct,profit_factor,warnings,blockers\n",
+    );
+    for c in candidates {
+        let row = [
+            c.rank.map(|r| r.to_string()).unwrap_or_default(),
+            csv_field(&c.symbol),
+            csv_field(&c.timeframe),
+            csv_field(&c.strategy_id),
+            c.bars_available.to_string(),
+            c.truth_state.code().to_string(),
+            c.reason_code.code().to_string(),
+            c.score.map(|v| format!("{v:.4}")).unwrap_or_default(),
+            c.metrics
+                .total_return_pct
+                .map(|v| format!("{v:.4}"))
+                .unwrap_or_default(),
+            c.metrics
+                .alpha_pct
+                .map(|v| format!("{v:.4}"))
+                .unwrap_or_default(),
+            c.metrics
+                .max_drawdown_pct
+                .map(|v| format!("{v:.4}"))
+                .unwrap_or_default(),
+            c.metrics
+                .trade_count
+                .map(|v| v.to_string())
+                .unwrap_or_default(),
+            c.metrics
+                .win_rate_pct
+                .map(|v| format!("{v:.2}"))
+                .unwrap_or_default(),
+            c.metrics
+                .profit_factor
+                .map(|v| format!("{v:.4}"))
+                .unwrap_or_default(),
+            csv_field(&c.warnings.join(";")),
+            csv_field(&c.blockers.join(";")),
+        ];
+        out.push_str(&row.join(","));
+        out.push('\n');
+    }
+    out
+}
+
+/// Run a local-data-only scan: load the instrument registry, resolve the
+/// enabled-equity universe (optionally truncated by `limit_symbols`), read
+/// each symbol's local bars CSV under `{bars_root}/{timeframe}/`, evaluate
+/// every `(symbol, strategy)` candidate via [`evaluate_scan_candidate`], and
+/// rank the results via [`rank_scan_candidates`].
+///
+/// No provider call, no broker call, no live/paper order, no DB connection.
+/// The only IO is: read `req.registry_path`, read
+/// `{req.bars_root}/{req.timeframe}/{symbol}_{req.timeframe}.csv` files.
+/// Does not write any artifact file — see [`write_scan_artifacts`].
+pub fn execute_strategy_scan(req: &ScanRunRequest) -> Result<ScanRunOutput, String> {
+    if req.strategies.is_empty() {
+        return Err("strategies must name at least one strategy_id".to_string());
+    }
+    if req.top == 0 {
+        return Err("top must be > 0".to_string());
+    }
+
+    let instruments = load_instrument_registry(Path::new(&req.registry_path))
+        .map_err(|e| format!("load instrument registry failed: {}: {}", req.registry_path, e))?;
+    let mut universe = enabled_equity_symbols(&instruments);
+    if let Some(limit) = req.limit_symbols {
+        universe.truncate(limit);
+    }
+
+    let policy = StrategyScanPolicy::default();
+    let bars_root_path = Path::new(&req.bars_root);
+    let timeframe_dir = bars_root_path.join(&req.timeframe);
+
+    let mut candidates: Vec<StrategyScanCandidate> = Vec::new();
+    for symbol in &universe {
+        // Fresh per-symbol registry: register_builtin_strategies_with_sizing
+        // binds each strategy factory to this symbol via closure capture.
+        let mut reg = PluginRegistry::new();
+        register_builtin_strategies_with_sizing(&mut reg, symbol.as_str(), 1, None, None)
+            .map_err(|e| format!("register_builtin_strategies failed for symbol={symbol}: {e}"))?;
+
+        let bars_path = timeframe_dir.join(format!("{symbol}_{}.csv", req.timeframe));
+        // A malformed local bars file is reported the same as a missing one
+        // (data_missing) -- honest limitation, not a crash.
+        let bars: Option<Vec<BacktestBar>> = if bars_path.is_file() {
+            crate::loader::load_csv_file(&bars_path).ok()
+        } else {
+            None
+        };
+
+        for strategy_id in &req.strategies {
+            let strategy_timeframe_secs = reg.lookup(strategy_id).ok().map(|m| m.timeframe_secs);
+            let strategy_instance = if strategy_timeframe_secs.is_some() {
+                reg.instantiate(strategy_id).ok()
+            } else {
+                None
+            };
+            candidates.push(evaluate_scan_candidate(
+                symbol,
+                &req.timeframe,
+                strategy_id,
+                strategy_timeframe_secs,
+                strategy_instance,
+                bars.as_deref(),
+                &policy,
+            ));
+        }
+    }
+
+    rank_scan_candidates(&mut candidates);
+
+    let ranked_count = candidates
+        .iter()
+        .filter(|c| c.truth_state == StrategyScanTruthState::CandidateRanked)
+        .count();
+    let skipped_count = candidates.len() - ranked_count;
+
+    let mut warnings = Vec::new();
+    if !timeframe_dir.is_dir() {
+        warnings.push(format!(
+            "bars timeframe directory not found: {}",
+            timeframe_dir.display()
+        ));
+    }
+
+    let scan_id = derive_scan_id(
+        &req.registry_path,
+        &req.bars_root,
+        &req.timeframe,
+        &req.strategies,
+        &universe,
+    );
+    let manifest = ScanManifest {
+        schema_version: 1,
+        scan_id: scan_id.to_string(),
+        created_at_utc: req.created_at_utc.clone(),
+        git_hash: req.git_hash.clone(),
+        registry_path: req.registry_path.clone(),
+        bars_root: req.bars_root.clone(),
+        timeframe: req.timeframe.clone(),
+        strategies: req.strategies.clone(),
+        universe_count: universe.len(),
+        ranked_count,
+        skipped_count,
+        blockers: Vec::new(),
+        warnings,
+    };
+
+    let top_ranked: Vec<StrategyScanCandidate> = candidates
+        .iter()
+        .filter(|c| c.rank.is_some())
+        .take(req.top)
+        .cloned()
+        .collect();
+
+    let mut reason_counts: BTreeMap<&str, usize> = BTreeMap::new();
+    for c in candidates
+        .iter()
+        .filter(|c| c.truth_state != StrategyScanTruthState::CandidateRanked)
+    {
+        *reason_counts.entry(c.reason_code.code()).or_insert(0) += 1;
+    }
+    let top_skip_reasons: Vec<ScanSkipReasonCount> = reason_counts
+        .into_iter()
+        .map(|(reason_code, count)| ScanSkipReasonCount {
+            reason_code: reason_code.to_string(),
+            count,
+        })
+        .collect();
+
+    let summary = ScanSummary {
+        scan_id: scan_id.to_string(),
+        universe_count: universe.len(),
+        ranked_count,
+        skipped_count,
+        top_ranked,
+        top_skip_reasons,
+    };
+
+    Ok(ScanRunOutput {
+        scan_id,
+        manifest,
+        candidates,
+        summary,
+    })
+}
+
+/// Write `manifest.json` / `candidates.json` / `candidates.csv` /
+/// `summary.json` for a completed [`ScanRunOutput`] into
+/// `{out_dir}/{scan_id}/`. Returns the created run directory.
+pub fn write_scan_artifacts(out_dir: &Path, output: &ScanRunOutput) -> Result<PathBuf, String> {
+    let run_dir = out_dir.join(output.scan_id.to_string());
+    std::fs::create_dir_all(&run_dir)
+        .map_err(|e| format!("create scan artifact dir failed: {}: {e}", run_dir.display()))?;
+    std::fs::write(
+        run_dir.join("manifest.json"),
+        serde_json::to_string_pretty(&output.manifest)
+            .map_err(|e| format!("serialize scan manifest failed: {e}"))?,
+    )
+    .map_err(|e| format!("write manifest.json failed: {}: {e}", run_dir.display()))?;
+    std::fs::write(
+        run_dir.join("candidates.json"),
+        serde_json::to_string_pretty(&output.candidates)
+            .map_err(|e| format!("serialize scan candidates failed: {e}"))?,
+    )
+    .map_err(|e| format!("write candidates.json failed: {}: {e}", run_dir.display()))?;
+    std::fs::write(
+        run_dir.join("candidates.csv"),
+        candidates_to_csv(&output.candidates),
+    )
+    .map_err(|e| format!("write candidates.csv failed: {}: {e}", run_dir.display()))?;
+    std::fs::write(
+        run_dir.join("summary.json"),
+        serde_json::to_string_pretty(&output.summary)
+            .map_err(|e| format!("serialize scan summary failed: {e}"))?,
+    )
+    .map_err(|e| format!("write summary.json failed: {}: {e}", run_dir.display()))?;
+
+    Ok(run_dir)
+}

@@ -31,6 +31,7 @@ use std::time::Duration;
 
 use crate::backtest_jobs::{new_job_store, BacktestJobStore};
 use crate::ingest_jobs::{new_ingest_job_store, IngestJobStore};
+use crate::strategy_scan_jobs::{new_strategy_scan_job_store, StrategyScanJobStore};
 
 use chrono::{DateTime, Utc};
 use mqk_broker_alpaca::types::AlpacaFetchCursor;
@@ -476,6 +477,23 @@ pub struct AppState {
     /// history is used by ingest routes when `db` is present.
     /// Isolated from live/paper execution: no broker adapters, no OMS tables.
     pub ingest_jobs: IngestJobStore,
+    /// STRATEGY-SCANNER-JOBS-GUI-01B: In-memory strategy scanner job registry.
+    ///
+    /// Process-lifetime only. No DB persistence. Isolated from live/paper
+    /// execution: no broker adapters, no OMS tables, no arm_state dependency.
+    /// Runs the same local-data-only scanner core as `mqk backtest
+    /// scan-strategies` (`mqk_backtest::execute_strategy_scan` /
+    /// `write_scan_artifacts`).
+    pub strategy_scan_jobs: StrategyScanJobStore,
+    /// STRATEGY-SCANNER-JOBS-GUI-01C: Root directory the read-only artifact
+    /// route (`GET /api/v1/strategy-scans/artifact`) will serve from.
+    ///
+    /// Default: "exports/strategy_scans" (relative to daemon CWD). Override:
+    /// MQK_STRATEGY_SCAN_ARTIFACT_ROOT env var. A requested `artifact_dir`
+    /// that does not resolve inside this root is refused
+    /// (`truth_state="path_rejected"`) — this route never reads an arbitrary
+    /// file path.
+    pub strategy_scan_artifact_root: String,
     /// DATA-INGEST-GUI-SYNC-ALL-01: Filesystem path to the canonical instrument registry.
     ///
     /// Read at route-time (not cached) by GET /api/v1/ingest/tracked-equities.
@@ -1244,6 +1262,9 @@ impl AppState {
             execution_last_tick_at: Arc::new(AtomicI64::new(0)),
             backtest_jobs: new_job_store(),
             ingest_jobs: new_ingest_job_store(),
+            strategy_scan_jobs: new_strategy_scan_job_store(),
+            strategy_scan_artifact_root: std::env::var("MQK_STRATEGY_SCAN_ARTIFACT_ROOT")
+                .unwrap_or_else(|_| "exports/strategy_scans".to_string()),
             instrument_registry_path: std::env::var("MQK_INSTRUMENT_REGISTRY_PATH")
                 .unwrap_or_else(|_| "config/instruments/equities.json".to_string()),
             instrument_registry_v2_path: std::env::var("MQK_INSTRUMENT_REGISTRY_V2_PATH").ok(),

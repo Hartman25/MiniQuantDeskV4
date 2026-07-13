@@ -1753,9 +1753,11 @@ dependencies = [
 name = "mqk-backtest"
 version = "0.1.0"
 dependencies = [
+ "chrono",
  "mqk-execution",
  "mqk-integrity",
  "mqk-isolation",
+ "mqk-md",
  "mqk-portfolio",
  "mqk-risk",
  "mqk-strategy",

@@ -10,8 +10,10 @@ mqk-risk = { path = "../mqk-risk" }
 mqk-strategy = { path = "../mqk-strategy" }
 mqk-integrity = { path = "../mqk-integrity" }
 mqk-isolation = { path = "../mqk-isolation" }
+mqk-md = { path = "../mqk-md" }
 uuid = { version = "1", features = ["v5"] }
 serde.workspace = true
+serde_json.workspace = true
+chrono.workspace = true
 
 [dev-dependencies]
-serde_json.workspace = true

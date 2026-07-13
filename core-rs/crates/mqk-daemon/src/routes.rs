@@ -46,6 +46,7 @@ pub(crate) mod portfolio;
 pub(crate) mod reconcile;
 pub(crate) mod repair;
 pub(crate) mod strategy;
+pub(crate) mod strategy_scans;
 pub(crate) mod system;
 pub(crate) mod system_artifact;
 pub(crate) mod trading;
@@ -294,6 +295,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     use strategy::{
         multi_symbol_dispatch_summary, strategy_dry_run_status, strategy_signal, strategy_summary,
         strategy_suppressions,
+    };
+    use strategy_scans::{
+        strategy_scan_artifact, strategy_scan_job_status, strategy_scan_job_submit,
+        strategy_scan_jobs_list,
     };
     use system::{
         autonomous_no_trade_diagnostics, autonomous_readiness, health, status_handler,
@@ -608,6 +613,19 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/api/v1/backtests/economics-suggestion",
             get(backtest_economics_suggestion),
         )
+        // STRATEGY-SCANNER-JOBS-GUI-01B/01C: read-only strategy scan job
+        // status and artifact readback (public, no auth). Research/review
+        // only — no order/OMS/broker/provider path is touched by these
+        // routes; see routes/strategy_scans.rs module doc.
+        .route("/api/v1/strategy-scans/jobs", get(strategy_scan_jobs_list))
+        .route(
+            "/api/v1/strategy-scans/jobs/:job_id",
+            get(strategy_scan_job_status),
+        )
+        .route(
+            "/api/v1/strategy-scans/artifact",
+            get(strategy_scan_artifact),
+        )
         // DATA-INGEST-DAEMON-JOBS-01: read-only ingest job status (public, no auth)
         .route("/api/v1/ingest/jobs", get(ingest_jobs_list))
         .route("/api/v1/ingest/jobs/:job_id", get(ingest_job_status))
@@ -681,6 +699,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         )
         // BACKTEST-DAEMON-JOBS-01: submit backtest job (operator, requires auth)
         .route("/api/v1/backtests/jobs", post(backtest_job_submit))
+        // STRATEGY-SCANNER-JOBS-GUI-01B: submit strategy scan job (operator,
+        // requires auth). Research/review only — no order submission, no
+        // broker/provider call, does not require arm_state.
+        .route("/api/v1/strategy-scans/jobs", post(strategy_scan_job_submit))
         // DATA-INGEST-DAEMON-JOBS-01: submit ingest job (operator, requires auth)
         // Route identity: market-data ingestion / research-data-control.
         // Not trading execution. Does not require arm_state.

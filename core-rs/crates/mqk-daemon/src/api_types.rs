@@ -4700,6 +4700,133 @@ pub struct BacktestJobStatusResponse {
 }
 
 // ---------------------------------------------------------------------------
+// STRATEGY-SCANNER-JOBS-GUI-01B: Strategy scanner job API
+//
+// Research/review only. Does not write to oms_outbox, oms_inbox, broker
+// maps, or any order/execution table. Does not require arm_state. Does not
+// start/stop the trading runtime. No provider/broker/network call. Jobs
+// are in-memory only (process-lifetime); no DB persistence.
+// ---------------------------------------------------------------------------
+
+fn default_scan_top() -> usize {
+    20
+}
+
+/// POST /api/v1/strategy-scans/jobs — submit a bounded local-data strategy
+/// scan job. Runs the same scanner core as `mqk backtest scan-strategies`
+/// (`mqk_backtest::execute_strategy_scan` / `write_scan_artifacts`).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StrategyScanJobSubmitRequest {
+    /// Defaults to `config/instruments/equities.json` when omitted.
+    pub registry_path: Option<String>,
+    /// Defaults to `exports/md_backup` when omitted.
+    pub bars_root: Option<String>,
+    /// Scanner timeframe label (e.g. `"1D"`, `"5m"`). Required, must not be blank.
+    pub timeframe: String,
+    /// Single strategy_id to scan (e.g. `"swing_momentum"`). Required, must not be blank.
+    pub strategy: String,
+    /// Number of top-ranked candidates to include in the summary. Bounded
+    /// `1..=100`. Defaults to 20 when omitted.
+    #[serde(default = "default_scan_top")]
+    pub top: usize,
+    /// Optional cap on the number of registry symbols scanned. Bounded
+    /// `1..=200` when supplied.
+    pub limit_symbols: Option<usize>,
+    /// Defaults to `exports/strategy_scans` when omitted.
+    pub out_dir: Option<String>,
+}
+
+/// Response to POST /api/v1/strategy-scans/jobs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StrategyScanJobAcceptedResponse {
+    pub accepted: bool,
+    pub job_id: Uuid,
+    /// "queued" immediately after acceptance, "refused" on validation failure.
+    pub status: String,
+    /// Populated only if the job already completed synchronously (not expected).
+    pub artifact_dir: Option<String>,
+    /// Populated if the request was refused before queuing.
+    pub error: Option<String>,
+}
+
+/// Single job summary row in GET /api/v1/strategy-scans/jobs list.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StrategyScanJobSummary {
+    pub job_id: Uuid,
+    pub status: String,
+    pub timeframe: String,
+    pub strategy: String,
+    pub created_at_utc: String,
+    pub started_at_utc: Option<String>,
+    pub completed_at_utc: Option<String>,
+    pub artifact_dir: Option<String>,
+    pub ranked_count: Option<usize>,
+    pub skipped_count: Option<usize>,
+    pub error: Option<String>,
+}
+
+/// Response to GET /api/v1/strategy-scans/jobs.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StrategyScanJobsListResponse {
+    pub truth_state: String,
+    pub jobs: Vec<StrategyScanJobSummary>,
+}
+
+/// Response to GET /api/v1/strategy-scans/jobs/:job_id.
+///
+/// `summary` reuses `mqk_backtest::ScanSummary` verbatim (ranked/skipped
+/// counts, top-ranked candidates, top skip reasons) — the daemon does not
+/// re-derive or re-summarize scanner output. `warnings` always carries the
+/// fixed research-only disclosure text once a job reaches `completed`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StrategyScanJobStatusResponse {
+    pub truth_state: String,
+    pub job_id: Uuid,
+    pub status: String,
+    pub submitted_at_utc: String,
+    pub completed_at_utc: Option<String>,
+    pub request: StrategyScanJobSubmitRequest,
+    pub artifact_dir: Option<String>,
+    pub summary: Option<mqk_backtest::ScanSummary>,
+    pub blockers: Vec<String>,
+    pub warnings: Vec<String>,
+    pub error: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
+// STRATEGY-SCANNER-JOBS-GUI-01C: Strategy scanner artifact readback API
+// ---------------------------------------------------------------------------
+
+/// GET /api/v1/strategy-scans/artifact?artifact_dir=<path>
+///
+/// Read-only. Reads only `manifest.json` / `summary.json` / `candidates.json`
+/// inside a directory that must resolve inside the configured scan artifact
+/// root (default `exports/strategy_scans`). Never reads an arbitrary file
+/// path. `truth_state`:
+/// - `active` — all three files read and parsed successfully.
+/// - `missing_artifact` — the directory (or one of the three files) does not exist.
+/// - `invalid_artifact` — a file exists but failed to parse as JSON / did not
+///   match the expected schema.
+/// - `path_rejected` — `artifact_dir` did not resolve inside the configured
+///   scan artifact root.
+/// - `read_failed` — an unexpected filesystem error occurred while reading.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StrategyScanArtifactResponse {
+    pub truth_state: String,
+    pub artifact_dir: String,
+    pub manifest: Option<mqk_backtest::ScanManifest>,
+    pub summary: Option<mqk_backtest::ScanSummary>,
+    /// Candidate rows, capped at 200 (see `MAX_ARTIFACT_CANDIDATE_ROWS` in
+    /// `routes/strategy_scans.rs`). `None` when the artifact could not be read.
+    pub candidates: Option<Vec<mqk_backtest::StrategyScanCandidate>>,
+    pub top_candidates: Vec<mqk_backtest::StrategyScanCandidate>,
+    pub skip_reasons: Vec<mqk_backtest::ScanSkipReasonCount>,
+    pub warnings: Vec<String>,
+    pub blockers: Vec<String>,
+    pub error: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
 // DATA-INGEST-DAEMON-JOBS-01: Market-data ingest job API
 // ---------------------------------------------------------------------------
 
