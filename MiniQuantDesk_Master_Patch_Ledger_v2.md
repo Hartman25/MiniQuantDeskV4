@@ -9120,3 +9120,68 @@ warnings` clean.
 **Safety confirmation:** no file/network/DB IO in the new module; no
 broker/provider/OMS/admission/order import; no existing strategy,
 scanner, or Strategy Lab logic touched; no DB migration.
+
+---
+
+## STRATEGY-SCANNER-PROMOTION-GATES-AND-RESEARCH-QUEUE-01-COMBINED — Phase C (CLI review-scan + review artifact IO)
+
+Patch: `STRATEGY-SCANNER-PROMOTION-01C-REVIEW-ARTIFACT-AND-CLI-01`.
+
+Extended `core-rs/crates/mqk-backtest/src/strategy_scan_review.rs` with
+review-artifact schema + IO (mirroring `strategy_scanner.rs`'s own
+`execute_strategy_scan`/`write_scan_artifacts` split): `ReviewManifest`
+(carries every policy threshold plus per-state counts),
+`ReviewSummary` (counts, `top_paper_candidates`,
+`top_watchlist_candidates`), `derive_review_id` (deterministic UUIDv5
+from scanner `scan_id` + policy field values, never `Uuid::new_v4()`),
+`execute_strategy_scan_review` (reads `manifest.json`/`summary.json`/
+`candidates.json` from an existing scanner artifact dir, classifies
+every candidate via Phase B's `build_review_decisions`), and
+`write_review_artifacts` (writes `manifest.json`/
+`review_decisions.json`/`review_decisions.csv`/`summary.json` under
+`{out_dir}/{review_id}/`). Fixed warning set baked into every manifest/
+summary: research-evidence-only, not-autonomous-trading-approval,
+promotion-ready-is-not-trading-approved, paper-candidate-requires-a-
+separate-patch, no-autonomous-approval-granted.
+
+Added CLI command `mqk backtest review-scan --artifact-dir <scanner
+artifact dir> --out-dir exports/strategy_reviews --top 50`
+(`core-rs/crates/mqk-cli/src/commands/bkt.rs::run_review_scan`, wired
+in `main.rs`'s `BacktestCmd::ReviewScan`) — thin wrapper over the shared
+`mqk-backtest` functions, same style as the existing `scan-strategies`
+command. No provider/broker/network call, no live/paper order, no DB
+connection.
+
+Added `core-rs/crates/mqk-cli/tests/scenario_strategy_scan_review_cli_01.rs`:
+8 tests via `assert_cmd` subprocess invocation of the real `mqk-cli`
+binary against a synthetic 2-candidate scanner artifact fixture
+(AAPL: clean positive candidate; MSFT: positive alpha but **negative**
+absolute total return). Confirms: AAPL becomes `paper_candidate`, MSFT
+is `rejected` and never `paper_candidate`; all four review artifact
+files are written; missing/invalid scanner artifact files fail
+truthfully (non-zero exit); CSV header is stable; `review_id` is
+deterministic across repeated runs (including the on-disk directory
+name); every invocation explicitly strips `DATABASE_URL`/`ALPACA_*`/
+`TWELVEDATA_*`/`KRAKEN_*` from its environment and still succeeds.
+
+**Validation:** `cargo check -p mqk-cli -p mqk-backtest` clean;
+`cargo test -p mqk-backtest --test scenario_strategy_scan_review_01` —
+13/13 pass; `cargo test -p mqk-cli --test scenario_strategy_scan_review_cli_01`
+— 8/8 pass; `cargo test -p mqk-cli --test scenario_strategy_lab_scanner_cli_01`
+— 9/9 pass (unchanged, confirming no regression to the existing
+`scan-strategies` CLI); `cargo clippy -p mqk-cli -p mqk-backtest
+--all-targets -- -D warnings` clean.
+
+Note: mid-phase, the local `C:` drive was found completely full (0
+bytes free), blocking compilation. With operator confirmation, ~128GB
+of leftover `C:\tmp\mqk-target-*` cargo build caches from prior,
+already-closed patch sessions were deleted (regenerable compiler
+output only, not source or data) — unrelated to this patch's scope but
+recorded here for traceability.
+
+**Safety confirmation:** no provider/broker/network call in the new CLI
+command or its tests; no live or paper order submitted; no DB
+connection opened; no strategy threshold or existing scanner logic
+changed; no admission/routing wiring; no DB migration; no generated
+scan/review artifact staged (CLI tests write only to OS temp
+directories).

@@ -8,8 +8,9 @@ mod commands;
 
 use commands::{
     bkt::{
-        run_backtest_csv, run_backtest_db, run_regime_detect, run_strategy_lab_evaluate,
-        run_strategy_lab_rank, run_strategy_scan, run_sweep_csv, IntegrityCalendarArg,
+        run_backtest_csv, run_backtest_db, run_regime_detect, run_review_scan,
+        run_strategy_lab_evaluate, run_strategy_lab_rank, run_strategy_scan, run_sweep_csv,
+        IntegrityCalendarArg,
     },
     load_payload,
     md::{
@@ -429,6 +430,31 @@ enum BacktestCmd {
         /// Evaluate and print results but do not write the artifact directory.
         #[arg(long, default_value_t = false)]
         dry_run: bool,
+
+        /// Print a deterministic JSON report instead of key=value lines.
+        #[arg(long, default_value_t = false)]
+        json: bool,
+    },
+
+    /// STRATEGY-SCANNER-PROMOTION-01C: research-review classification over
+    /// an existing `scan-strategies` artifact directory. Reads the scanner
+    /// artifact, classifies every candidate into a deterministic research
+    /// review state (never a trading approval), and writes a review
+    /// artifact directory. No provider/broker/network call, no live/paper
+    /// order, no DB connection.
+    ReviewScan {
+        /// Path to an existing scanner artifact directory (the
+        /// `{scan_id}` directory written by `scan-strategies`).
+        #[arg(long)]
+        artifact_dir: String,
+
+        /// Output directory for the review artifact tree.
+        #[arg(long, default_value = "exports/strategy_reviews")]
+        out_dir: String,
+
+        /// Limit the printed/artifact top paper/watchlist candidate rows.
+        #[arg(long, default_value_t = 50)]
+        top: usize,
 
         /// Print a deterministic JSON report instead of key=value lines.
         #[arg(long, default_value_t = false)]
@@ -1324,6 +1350,14 @@ async fn main() -> Result<()> {
                     dry_run,
                     json,
                 )?;
+            }
+            BacktestCmd::ReviewScan {
+                artifact_dir,
+                out_dir,
+                top,
+                json,
+            } => {
+                run_review_scan(artifact_dir, out_dir, top, json)?;
             }
         },
 

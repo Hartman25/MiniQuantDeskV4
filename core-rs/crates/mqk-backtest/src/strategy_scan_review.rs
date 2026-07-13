@@ -1,14 +1,17 @@
-//! STRATEGY-SCANNER-PROMOTION-01B — pure scanner-candidate research-review
-//! classifier.
+//! STRATEGY-SCANNER-PROMOTION-01B/01C — scanner-candidate research-review
+//! classifier and review-artifact IO.
 //!
 //! Given an already-evaluated [`crate::strategy_scanner::StrategyScanCandidate`]
 //! (itself already pure and deterministic), classifies it into a
-//! deterministic [`StrategyScanReviewState`] research state. This module
-//! performs **no file IO, no network IO, no DB access**, and imports no
-//! broker, provider, OMS, outbox/inbox, admission, or strategy-router type
-//! from anywhere in this repo — it consumes only
-//! [`crate::strategy_scanner::StrategyScanCandidate`] values already held in
-//! memory by the caller.
+//! deterministic [`StrategyScanReviewState`] research state via
+//! [`evaluate_scan_review_decision`]/[`build_review_decisions`] — pure, **no
+//! file IO, no network IO, no DB access**, and no broker, provider, OMS,
+//! outbox/inbox, admission, or strategy-router import anywhere in this repo.
+//! The bottom half of this file (from [`ReviewRunRequest`] onward, mirroring
+//! `strategy_scanner.rs`'s own `execute_strategy_scan`/`write_scan_artifacts`
+//! split) reads an existing scanner artifact directory and writes a review
+//! artifact directory — the only IO in this module, and still no provider,
+//! broker, or DB call.
 //!
 //! `PaperCandidate` is **not** trading approval of any kind. It only means
 //! "eligible for a later, separately authorized paper-promotion patch to
@@ -23,7 +26,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::strategy_scanner::{StrategyScanCandidate, StrategyScanTruthState};
+use crate::strategy_scanner::{ScanManifest, StrategyScanCandidate, StrategyScanTruthState};
 
 // ---------------------------------------------------------------------------
 // Review state
@@ -329,4 +332,304 @@ pub fn build_review_decisions(
         .iter()
         .map(|c| evaluate_scan_review_decision(c, policy))
         .collect()
+}
+
+// ---------------------------------------------------------------------------
+// STRATEGY-SCANNER-PROMOTION-01C: review-artifact schema + IO.
+//
+// Reads an existing scanner artifact directory (manifest.json/summary.json/
+// candidates.json, written by `crate::strategy_scanner::write_scan_artifacts`)
+// and writes a review artifact directory (manifest.json/
+// review_decisions.json/review_decisions.csv/summary.json). No provider,
+// broker, or DB call -- the only IO is reading the three named scanner
+// artifact files and writing the four named review artifact files.
+// ---------------------------------------------------------------------------
+
+use std::path::{Path, PathBuf};
+
+const RESEARCH_ONLY_WARNING: &str = "Scanner ranking is research evidence only.";
+const NOT_TRADING_APPROVAL_WARNING: &str = "Scanner output is not autonomous trading approval.";
+const PROMOTION_NOT_APPROVAL_WARNING: &str = "promotion-ready is not trading-approved.";
+const PAPER_CANDIDATE_WARNING: &str = "paper_candidate requires a later, separately authorized \
+     paper-promotion patch before any paper trading.";
+const NO_AUTONOMOUS_APPROVAL_WARNING: &str =
+    "No autonomous trading approval is granted by this review.";
+
+fn fixed_review_warnings() -> Vec<String> {
+    vec![
+        RESEARCH_ONLY_WARNING.to_string(),
+        NOT_TRADING_APPROVAL_WARNING.to_string(),
+        PROMOTION_NOT_APPROVAL_WARNING.to_string(),
+        PAPER_CANDIDATE_WARNING.to_string(),
+        NO_AUTONOMOUS_APPROVAL_WARNING.to_string(),
+    ]
+}
+
+/// Deterministic review-run manifest. Carries every policy threshold used
+/// for this review so a reader can judge the classification without
+/// re-deriving it.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ReviewManifest {
+    pub schema_version: u32,
+    pub review_id: String,
+    pub scanner_scan_id: String,
+    pub source_artifact_dir: String,
+    pub created_at_utc: String,
+    pub git_hash: String,
+    pub policy_min_bars_used: usize,
+    pub policy_min_trade_count: usize,
+    pub policy_min_total_return_pct: f64,
+    pub policy_min_alpha_pct: f64,
+    pub policy_max_drawdown_pct: f64,
+    pub policy_min_profit_factor: f64,
+    pub candidate_count: usize,
+    pub blocked_count: usize,
+    pub needs_review_count: usize,
+    pub watchlist_candidate_count: usize,
+    pub paper_candidate_count: usize,
+    pub rejected_count: usize,
+    pub blockers: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
+/// Deterministic review-run summary.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ReviewSummary {
+    pub scanner_scan_id: String,
+    pub review_id: String,
+    pub candidate_count: usize,
+    pub blocked_count: usize,
+    pub needs_review_count: usize,
+    pub watchlist_candidate_count: usize,
+    pub paper_candidate_count: usize,
+    pub rejected_count: usize,
+    pub top_paper_candidates: Vec<StrategyScanReviewDecision>,
+    pub top_watchlist_candidates: Vec<StrategyScanReviewDecision>,
+    pub blockers: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
+/// Bounded request describing one review run. Every path is caller-resolved
+/// (relative to the caller's working directory); this function performs no
+/// path-escape validation of its own -- callers that accept `artifact_dir`/
+/// `out_dir` from an untrusted operator surface (e.g. a future daemon route)
+/// must apply their own bounds/validation before calling
+/// `execute_strategy_scan_review`, mirroring the existing
+/// `GET /api/v1/strategy-scans/artifact` route's canonicalize+root-prefix
+/// pattern.
+#[derive(Clone, Debug)]
+pub struct ReviewRunRequest {
+    pub artifact_dir: String,
+    pub top: usize,
+    pub policy: StrategyScanReviewPolicy,
+    /// Caller-resolved short git hash, kept caller-supplied for the same
+    /// reason as `ScanRunRequest::git_hash`.
+    pub git_hash: String,
+    /// Caller-resolved RFC3339 creation timestamp, kept caller-supplied for
+    /// the same reason as `ScanRunRequest::created_at_utc`.
+    pub created_at_utc: String,
+}
+
+/// Result of running a review (before any artifact file is written).
+#[derive(Clone, Debug)]
+pub struct ReviewRunOutput {
+    pub review_id: uuid::Uuid,
+    pub manifest: ReviewManifest,
+    pub decisions: Vec<StrategyScanReviewDecision>,
+    pub summary: ReviewSummary,
+}
+
+/// Deterministic UUIDv5 review identity: re-running review over the same
+/// scanner `scan_id` with an identical policy always produces the same
+/// `review_id`. Never `Uuid::new_v4()`.
+pub fn derive_review_id(scan_id: &str, policy: &StrategyScanReviewPolicy) -> uuid::Uuid {
+    let canonical = format!(
+        "mqk-scan-review.v1|scan_id={scan_id}|min_bars_used={}|min_trade_count={}|\
+         min_total_return_pct={}|min_alpha_pct={}|max_drawdown_pct={}|min_profit_factor={}",
+        policy.min_bars_used,
+        policy.min_trade_count,
+        policy.min_total_return_pct,
+        policy.min_alpha_pct,
+        policy.max_drawdown_pct,
+        policy.min_profit_factor,
+    );
+    uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, canonical.as_bytes())
+}
+
+fn csv_field(value: &str) -> String {
+    if value.contains(',') || value.contains('"') || value.contains('\n') {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    } else {
+        value.to_string()
+    }
+}
+
+/// Render the full review-decision set as CSV.
+pub fn review_decisions_to_csv(decisions: &[StrategyScanReviewDecision]) -> String {
+    let mut out = String::from(
+        "symbol,timeframe,strategy_id,scanner_rank,scanner_score,review_state,reason_codes,blockers,warnings\n",
+    );
+    for d in decisions {
+        let row = [
+            csv_field(&d.symbol),
+            csv_field(&d.timeframe),
+            csv_field(&d.strategy_id),
+            d.scanner_rank.map(|r| r.to_string()).unwrap_or_default(),
+            d.scanner_score.map(|v| format!("{v:.4}")).unwrap_or_default(),
+            d.review_state.code().to_string(),
+            csv_field(&d.reason_codes.join(";")),
+            csv_field(&d.blockers.join(";")),
+            csv_field(&d.warnings.join(";")),
+        ];
+        out.push_str(&row.join(","));
+        out.push('\n');
+    }
+    out
+}
+
+/// Read an existing scanner artifact directory
+/// (`manifest.json`/`summary.json`/`candidates.json`, as written by
+/// [`crate::strategy_scanner::write_scan_artifacts`]), classify every
+/// candidate via [`build_review_decisions`], and return the review result
+/// (not yet written to disk -- see [`write_review_artifacts`]).
+///
+/// No provider call, no broker call, no live/paper order, no DB connection.
+/// The only IO is reading `{req.artifact_dir}/manifest.json`,
+/// `{req.artifact_dir}/summary.json`, and `{req.artifact_dir}/candidates.json`
+/// (all three required to exist and parse).
+pub fn execute_strategy_scan_review(req: &ReviewRunRequest) -> Result<ReviewRunOutput, String> {
+    if req.top == 0 {
+        return Err("top must be > 0".to_string());
+    }
+
+    let artifact_dir = Path::new(&req.artifact_dir);
+    let manifest_path = artifact_dir.join("manifest.json");
+    let summary_path = artifact_dir.join("summary.json");
+    let candidates_path = artifact_dir.join("candidates.json");
+
+    let scanner_manifest: ScanManifest = read_scanner_artifact_json(&manifest_path)?;
+    // summary.json is required to exist and parse (proves the scanner
+    // artifact directory is complete) but its content is not otherwise
+    // consumed here -- candidates.json already carries every field needed.
+    let _scanner_summary: crate::strategy_scanner::ScanSummary =
+        read_scanner_artifact_json(&summary_path)?;
+    let candidates: Vec<StrategyScanCandidate> = read_scanner_artifact_json(&candidates_path)?;
+
+    let decisions = build_review_decisions(&candidates, &req.policy);
+
+    let mut blocked_count = 0usize;
+    let mut needs_review_count = 0usize;
+    let mut watchlist_candidate_count = 0usize;
+    let mut paper_candidate_count = 0usize;
+    let mut rejected_count = 0usize;
+    for d in &decisions {
+        match d.review_state {
+            StrategyScanReviewState::Blocked => blocked_count += 1,
+            StrategyScanReviewState::NeedsReview => needs_review_count += 1,
+            StrategyScanReviewState::WatchlistCandidate => watchlist_candidate_count += 1,
+            StrategyScanReviewState::PaperCandidate => paper_candidate_count += 1,
+            StrategyScanReviewState::Rejected => rejected_count += 1,
+        }
+    }
+
+    let review_id = derive_review_id(&scanner_manifest.scan_id, &req.policy);
+    let warnings = fixed_review_warnings();
+
+    let manifest = ReviewManifest {
+        schema_version: 1,
+        review_id: review_id.to_string(),
+        scanner_scan_id: scanner_manifest.scan_id.clone(),
+        source_artifact_dir: req.artifact_dir.clone(),
+        created_at_utc: req.created_at_utc.clone(),
+        git_hash: req.git_hash.clone(),
+        policy_min_bars_used: req.policy.min_bars_used,
+        policy_min_trade_count: req.policy.min_trade_count,
+        policy_min_total_return_pct: req.policy.min_total_return_pct,
+        policy_min_alpha_pct: req.policy.min_alpha_pct,
+        policy_max_drawdown_pct: req.policy.max_drawdown_pct,
+        policy_min_profit_factor: req.policy.min_profit_factor,
+        candidate_count: decisions.len(),
+        blocked_count,
+        needs_review_count,
+        watchlist_candidate_count,
+        paper_candidate_count,
+        rejected_count,
+        blockers: Vec::new(),
+        warnings: warnings.clone(),
+    };
+
+    let top_paper_candidates: Vec<StrategyScanReviewDecision> = decisions
+        .iter()
+        .filter(|d| d.review_state == StrategyScanReviewState::PaperCandidate)
+        .take(req.top)
+        .cloned()
+        .collect();
+    let top_watchlist_candidates: Vec<StrategyScanReviewDecision> = decisions
+        .iter()
+        .filter(|d| d.review_state == StrategyScanReviewState::WatchlistCandidate)
+        .take(req.top)
+        .cloned()
+        .collect();
+
+    let summary = ReviewSummary {
+        scanner_scan_id: scanner_manifest.scan_id.clone(),
+        review_id: review_id.to_string(),
+        candidate_count: decisions.len(),
+        blocked_count,
+        needs_review_count,
+        watchlist_candidate_count,
+        paper_candidate_count,
+        rejected_count,
+        top_paper_candidates,
+        top_watchlist_candidates,
+        blockers: Vec::new(),
+        warnings,
+    };
+
+    Ok(ReviewRunOutput {
+        review_id,
+        manifest,
+        decisions,
+        summary,
+    })
+}
+
+fn read_scanner_artifact_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, String> {
+    let raw = std::fs::read_to_string(path)
+        .map_err(|e| format!("read failed: {}: {e}", path.display()))?;
+    serde_json::from_str(&raw).map_err(|e| format!("parse failed: {}: {e}", path.display()))
+}
+
+/// Write `manifest.json` / `review_decisions.json` / `review_decisions.csv`
+/// / `summary.json` for a completed [`ReviewRunOutput`] into
+/// `{out_dir}/{review_id}/`. Returns the created run directory.
+pub fn write_review_artifacts(out_dir: &Path, output: &ReviewRunOutput) -> Result<PathBuf, String> {
+    let run_dir = out_dir.join(output.review_id.to_string());
+    std::fs::create_dir_all(&run_dir)
+        .map_err(|e| format!("create review artifact dir failed: {}: {e}", run_dir.display()))?;
+    std::fs::write(
+        run_dir.join("manifest.json"),
+        serde_json::to_string_pretty(&output.manifest)
+            .map_err(|e| format!("serialize review manifest failed: {e}"))?,
+    )
+    .map_err(|e| format!("write manifest.json failed: {}: {e}", run_dir.display()))?;
+    std::fs::write(
+        run_dir.join("review_decisions.json"),
+        serde_json::to_string_pretty(&output.decisions)
+            .map_err(|e| format!("serialize review decisions failed: {e}"))?,
+    )
+    .map_err(|e| format!("write review_decisions.json failed: {}: {e}", run_dir.display()))?;
+    std::fs::write(
+        run_dir.join("review_decisions.csv"),
+        review_decisions_to_csv(&output.decisions),
+    )
+    .map_err(|e| format!("write review_decisions.csv failed: {}: {e}", run_dir.display()))?;
+    std::fs::write(
+        run_dir.join("summary.json"),
+        serde_json::to_string_pretty(&output.summary)
+            .map_err(|e| format!("serialize review summary failed: {e}"))?,
+    )
+    .map_err(|e| format!("write summary.json failed: {}: {e}", run_dir.display()))?;
+
+    Ok(run_dir)
 }

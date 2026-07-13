@@ -1067,6 +1067,82 @@ pub fn run_strategy_scan(
 }
 
 // ---------------------------------------------------------------------------
+// STRATEGY-SCANNER-PROMOTION-01C: research-review classification over an
+// existing scanner artifact. Thin CLI wrapper: parse/validate flags, call
+// the shared `mqk_backtest::{execute_strategy_scan_review,
+// write_review_artifacts}` functions, print CLI-formatted output. No
+// provider call, no broker call, no live/paper order, no DB connection --
+// the only IO is reading the named scanner artifact files and (always)
+// writing the review artifact directory.
+// ---------------------------------------------------------------------------
+
+/// Classify every candidate in an existing `mqk backtest scan-strategies`
+/// artifact directory into a research-review state, and write a review
+/// artifact directory alongside it.
+pub fn run_review_scan(artifact_dir: String, out_dir: String, top: usize, json: bool) -> Result<()> {
+    if top == 0 {
+        anyhow::bail!("--top must be > 0");
+    }
+
+    let req = mqk_backtest::ReviewRunRequest {
+        artifact_dir: artifact_dir.clone(),
+        top,
+        policy: mqk_backtest::StrategyScanReviewPolicy::default(),
+        git_hash: bkt_git_hash(),
+        created_at_utc: Utc::now().to_rfc3339(), // allow: operational manifest timestamp
+    };
+    let output = mqk_backtest::execute_strategy_scan_review(&req)
+        .map_err(|e| anyhow::anyhow!("strategy scan review failed: {e}"))?;
+
+    let run_dir = mqk_backtest::write_review_artifacts(Path::new(&out_dir), &output)
+        .map_err(|e| anyhow::anyhow!("write review artifacts failed: {e}"))?;
+
+    let manifest = &output.manifest;
+    let summary = &output.summary;
+
+    if json {
+        // JSON mode: stdout carries exactly one JSON value (the summary),
+        // nothing else -- callers can pipe stdout straight into a parser.
+        println!(
+            "{}",
+            serde_json::to_string_pretty(summary).context("serialize review summary failed")?
+        );
+    } else {
+        println!("review_id={}", manifest.review_id);
+        println!("scanner_scan_id={}", manifest.scanner_scan_id);
+        println!("source_artifact_dir={}", manifest.source_artifact_dir);
+        println!("review_artifact_dir={}", run_dir.display());
+        println!("candidate_count={}", manifest.candidate_count);
+        println!("blocked_count={}", manifest.blocked_count);
+        println!("needs_review_count={}", manifest.needs_review_count);
+        println!("watchlist_candidate_count={}", manifest.watchlist_candidate_count);
+        println!("paper_candidate_count={}", manifest.paper_candidate_count);
+        println!("rejected_count={}", manifest.rejected_count);
+        for w in &manifest.warnings {
+            println!("warning={w}");
+        }
+        for d in &summary.top_paper_candidates {
+            println!(
+                "paper_candidate symbol={} timeframe={} strategy_id={} scanner_rank={} scanner_score={}",
+                d.symbol,
+                d.timeframe,
+                d.strategy_id,
+                d.scanner_rank.map(|r| r.to_string()).unwrap_or_else(|| "n/a".to_string()),
+                d.scanner_score.map(|v| format!("{v:.4}")).unwrap_or_else(|| "n/a".to_string()),
+            );
+        }
+        for d in &summary.top_watchlist_candidates {
+            println!(
+                "watchlist_candidate symbol={} timeframe={} strategy_id={}",
+                d.symbol, d.timeframe, d.strategy_id,
+            );
+        }
+    }
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
