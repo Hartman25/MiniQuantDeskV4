@@ -18,6 +18,9 @@
 #   [10] Doc states applicability is not keyed solely to BrokerKind::Alpaca.
 #   [11] Doc does not claim any runtime/gate/GUI code was implemented in Phase A.
 #   [12] Doc does not claim a live/broker/provider action occurred.
+#   [13] Doc does not contain any of the corrected pass's stale current-truth claims.
+#   [14] Doc contains every corrected-pass concept
+#        (DAILY-DATA-READINESS-01A-CONTRACT-CORRECTION-01).
 #
 # Usage:
 #   powershell -ExecutionPolicy Bypass -File scripts\guards\validate_daily_data_readiness_01a_audit.ps1
@@ -62,6 +65,18 @@ function Test-ContentContains {
     }
 }
 
+function Test-ContentDoesNotContain {
+    param([string]$Label, [string]$Content, [string]$Needle)
+    if ($null -eq $Content -or $Content.IndexOf($Needle, [System.StringComparison]::OrdinalIgnoreCase) -lt 0) {
+        Show-Green "  OK -- $Label"
+        return $true
+    } else {
+        $script:Violations++
+        Show-Red "  FAIL -- $Label (forbidden stale needle found: '$Needle')"
+        return $false
+    }
+}
+
 Write-Host "============================================================"
 Write-Host " DAILY-DATA-READINESS-01A Current-Truth Audit Validator"
 Write-Host "============================================================"
@@ -92,7 +107,7 @@ Test-ContentContains "doc mentions volatility_breakout 21-bar requirement" $Cont
 
 Write-Host ""
 Show-Info "--- [6] Doc states end_ts-is-bar-start finding ---"
-Test-ContentContains "doc states end_ts is bar START timestamp" $Content "bar START timestamp" | Out-Null
+Test-ContentContains "doc states end_ts is the bar-start timestamp" $Content "is bar-start" | Out-Null
 
 Write-Host ""
 Show-Info "--- [7] Doc names the reused durable evidence table ---"
@@ -100,7 +115,7 @@ Test-ContentContains "doc names sys_autonomous_session_events" $Content "sys_aut
 
 Write-Host ""
 Show-Info "--- [8] Doc states no new migration required ---"
-Test-ContentContains "doc states no new migration required" $Content "No new migration is required" | Out-Null
+Test-ContentContains "doc states no new migration required" $Content "no new migration required" | Out-Null
 
 Write-Host ""
 Show-Info "--- [9] Doc names the new read-only route ---"
@@ -136,6 +151,60 @@ foreach ($Phrase in $ForbiddenPhrases) {
 }
 if ($PhraseViolations -eq 0) {
     Show-Green "  OK -- no forbidden implementation/action claim found"
+}
+
+Write-Host ""
+Show-Info "--- [13] No stale current-truth claims (DAILY-DATA-READINESS-01A-CONTRACT-CORRECTION-01) ---"
+
+# Each needle below is deliberately a specific, unquoted assertion-style
+# fragment from the pre-correction (242de234) doc's own wording, not the
+# corrected doc's citation-style references to what was wrong. The corrected
+# doc is allowed to quote/describe the old claims when explaining the
+# correction; it must never restate them as current, asserted truth.
+Test-ContentDoesNotContain `
+    "doc does not assert multi_symbol_config is unwired scaffolding" `
+    $Content `
+    "is inert scaffolding for a future" | Out-Null
+
+Test-ContentDoesNotContain `
+    "doc does not assert one global strategy is the only runtime assignment mapping" `
+    $Content `
+    "is currently no per-symbol strategy assignment wired" | Out-Null
+
+Test-ContentDoesNotContain `
+    "doc does not assert daily completion universally equals end_ts + 86400" `
+    $Content `
+    "can never be tested as ``end_ts" | Out-Null
+
+Test-ContentDoesNotContain `
+    "doc does not accept intraday continuity as PARTIAL-ready" `
+    $Content `
+    "is therefore **PARTIAL**" | Out-Null
+
+Test-ContentDoesNotContain `
+    "doc does not place the strict gate only after db_pool" `
+    $Content `
+    "is inserted immediately after the existing legacy freshness gate (after line" | Out-Null
+
+Write-Host ""
+Show-Info "--- [14] Corrected concepts are present ---"
+
+$RequiredConcepts = @(
+    "tick_strategy_dispatch_multi_symbol",
+    "configured_strategy_id",
+    "effective_runtime_strategy_id",
+    "runtime_strategy_assignment_mismatch",
+    "session-open-anchored",
+    "CalendarCoverageState",
+    "timeframe-aware",
+    "pre-start-evidence",
+    "StrategyMeta",
+    "StrategyDataRequirements",
+    "provider_capability_mismatch",
+    "Asset-class resolution"
+)
+foreach ($Concept in $RequiredConcepts) {
+    Test-ContentContains "doc contains corrected concept '$Concept'" $Content $Concept | Out-Null
 }
 
 # =============================================================================
