@@ -9051,3 +9051,29 @@ fill, or position at any phase; no DB migration; no `.env.local` edit;
 no provider/broker/network call in any test or manual verification; no
 generated scan artifact, smoke log, export, or untracked ledger draft
 staged at any phase.
+
+---
+
+## STRATEGY-SCANNER-PROMOTION-GATES-AND-RESEARCH-QUEUE-01-COMBINED — Phase A (audit + guardrail design)
+
+Patch: `STRATEGY-SCANNER-PROMOTION-01A-CURRENT-TRUTH-AUDIT-AND-GUARDRAIL-DESIGN-01`.
+
+Audited current scanner/Strategy Lab/daemon/GUI surfaces at HEAD
+`f6f21392`: no promotion or research-review queue exists anywhere;
+`StrategyLabEvaluation` (a separate, already-closed pure evaluator over
+sweep rows, not scanner candidates) is the closest existing precedent
+but is not reused directly. Confirmed the scanner's own known caveat —
+`score = alpha_pct.or(total_return_pct)`, so a candidate can rank well
+while its absolute `total_return_pct` is negative — is the load-bearing
+safety requirement for the review model added in Phase B: gates on
+absolute total return, not rank or alpha alone. Locked a file-artifact
+(no DB) design: pure `mqk-backtest::strategy_scan_review` classifier,
+`mqk backtest review-scan` CLI, read-only daemon
+`GET /api/v1/strategy-scans/review-artifact` route (same
+canonicalize+root-prefix path validation as the existing scanner
+artifact route), and a GUI display-only panel. No trading/admission
+wiring anywhere in the design.
+
+Added: `docs/specs/strategy_scanner_promotion_01a_current_truth_audit.md`,
+`scripts/guards/validate_strategy_scanner_promotion_01a_audit.ps1`.
+Validator passes; no code compiled or changed.
