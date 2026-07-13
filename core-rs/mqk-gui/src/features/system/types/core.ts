@@ -45,6 +45,7 @@ export const CORE_PANEL_KEYS = [
   "artifacts",
   "operatorTimeline",
   "backtests",
+  "strategyScanner",
 ] as const;
 
 export type CorePanelKey = (typeof CORE_PANEL_KEYS)[number];

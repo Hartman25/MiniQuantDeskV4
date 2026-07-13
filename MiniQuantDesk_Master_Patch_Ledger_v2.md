@@ -8906,3 +8906,93 @@ paper orders; no order/OMS/broker/provider path touched by any new
 route; no strategy threshold changed; no risk/session/OMS gate changed;
 no DB migration; no generated scan artifacts, smoke logs, or
 `.env.local` staged.
+
+---
+
+## STRATEGY-SCANNER-DAEMON-JOBS-AND-GUI-REVIEW-01-COMBINED — Phase D (GUI review surface)
+
+Patch: `STRATEGY-SCANNER-JOBS-GUI-01D-GUI-REVIEW-SURFACE-01`.
+
+Added a new `strategyScanner` GUI screen (`core-rs/mqk-gui/src/features/
+strategyScanner/`) alongside the existing `backtests` diagnostics screen,
+following the `IngestScreen`'s submit-and-poll pattern (the closer
+template than the CLI-artifact-only `BacktestResultsScreen`):
+
+- `types.ts` — mirrors the daemon's `StrategyScanJob*`/
+  `StrategyScanArtifactResponse`/`mqk_backtest::Scan*` shapes.
+- `api.ts` — `submitStrategyScanJob` (privileged POST), `getStrategyScanJob`
+  / `getStrategyScanJobsList` (public GET), `getStrategyScanArtifact`
+  (public GET), plus pure helpers (`buildStrategyScanJobRequest` — client-
+  side mirror of the daemon's bounds validation; `normalizeStrategyScanJobStatus`;
+  `buildActiveStrategyScanJob`; `artifactTruthLabel`).
+- `StrategyScannerScreen.tsx` — submit form (registry path/bars root/
+  timeframe/strategy/top/limit symbols/out dir, all pre-filled with the
+  same defaults the daemon applies), job-status panel (2s poll, same
+  cadence as `IngestScreen`), and an artifact-review panel (top-candidates
+  table with rank/symbol/strategy/timeframe/score/total_return_pct/
+  alpha_pct/max_drawdown_pct/trade_count/truth_state/reason_code, plus a
+  skip-reason list). The fixed research-only warning banner ("Scanner
+  ranking is research evidence only.", "Scanner output is not autonomous
+  trading approval.", "Candidates can rank well while still having
+  negative absolute returns.") renders unconditionally above both the
+  submit form and any artifact result. **No trade/promote/approve control
+  exists anywhere on this screen** — proven by a static source-text test
+  (`screenSource.test.ts`) asserting the absence of any such control text
+  and of any order/execution/strategy-signal route reference.
+
+Registered `strategyScanner` in `screenRegistry.tsx` (`diagnostics`
+monitor group, next to `backtests`), `leftRailNav.ts`
+(`LEFT_RAIL_SECONDARY`, adjacent to `backtests`),
+`system/types/core.ts`'s `CORE_PANEL_KEYS` (required for
+`PanelSourceMap`/`WorkspaceFrame` source-authority typing — every
+`ScreenKey` must have a corresponding `CorePanelKey` entry), and
+`sourceAuthority.ts`'s per-panel evidence-hint map (same empty-hints shape
+already used for `ingest`/`backtests`, since this screen has no db/
+runtime/broker-backed field).
+
+18 new pure/static-text tests across `strategyScanner/__tests__/
+api.test.ts` (request-building/validation, status normalization, truth
+labels, active-job mapping) and `strategyScanner/__tests__/
+screenSource.test.ts` (required warnings present; no trade/promote/
+approve text; no forbidden route reference); 2 new
+`screenRegistry.test.ts` assertions (registered + reachable via left
+rail, adjacent to `backtests`). Both new test files were added to
+`package.json`'s `test` script (this repo's `tsx --test` harness lists
+every test file explicitly — a file not listed there never runs).
+
+**Manual browser verification** (dev server via `npm run dev`, daemon not
+running): the screen renders with the disconnected banner, the research-
+only warning banner, and the full submit form with correct pre-filled
+defaults (`timeframe=1D`, `strategy=swing_momentum`, `top=20`; registry/
+bars-root/out-dir empty because no desktop repo-root is available in a
+plain browser tab — expected browser-only behavior, unrelated to the
+Tauri desktop path). Clicking "Submit scan job" with the daemon
+unreachable produced a clean, non-crashing `Submit failed: Failed to
+fetch` error and the button correctly reverted from "Submitting…" back to
+its idle label — proving the failure path degrades honestly rather than
+hanging or silently swallowing the error.
+
+**Built:**
+`core-rs/mqk-gui/src/features/strategyScanner/types.ts`,
+`core-rs/mqk-gui/src/features/strategyScanner/api.ts`,
+`core-rs/mqk-gui/src/features/strategyScanner/StrategyScannerScreen.tsx`,
+`core-rs/mqk-gui/src/features/strategyScanner/__tests__/api.test.ts`,
+`core-rs/mqk-gui/src/features/strategyScanner/__tests__/screenSource.test.ts`,
+`core-rs/mqk-gui/src/features/screens/screenRegistry.tsx`,
+`core-rs/mqk-gui/src/features/screens/__tests__/screenRegistry.test.ts`,
+`core-rs/mqk-gui/src/components/layout/leftRailNav.ts`,
+`core-rs/mqk-gui/src/features/system/types/core.ts`,
+`core-rs/mqk-gui/src/features/system/sourceAuthority.ts`,
+`core-rs/mqk-gui/package.json`.
+
+**Validation:** `npm test` (727/727 pass, including 18 new tests); `npm
+run build` (clean; `tsc` + `vite build` succeed; two pre-existing
+`@tauri-apps` dynamic/static-import chunking warnings unrelated to this
+patch); manual browser verification above.
+
+**Safety confirmation:** no order/promote/approve control added; no new
+route beyond the three read-only `/api/v1/strategy-scans/*` GETs and the
+one privileged POST already added in Phase B; no provider/broker call
+from the GUI; no change to any existing screen's behavior beyond the new
+`CORE_PANEL_KEYS`/`sourceAuthority` entries required for `strategyScanner`
+itself to type-check.

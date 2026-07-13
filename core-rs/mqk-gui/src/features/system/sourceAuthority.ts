@@ -248,6 +248,14 @@ const PANEL_EVIDENCE_HINTS: Record<CorePanelKey, PanelEvidenceHints> = {
     broker: [],
     placeholder: [],
   },
+  // Strategy scanner runner: job list/status/artifact are public daemon
+  // endpoints; submit is privileged. Research/review only, no order path.
+  strategyScanner: {
+    db: [],
+    runtime: [],
+    broker: [],
+    placeholder: [],
+  },
 };
 
 function hasEndpoint(realEndpoints: string[], hints: string[]) {

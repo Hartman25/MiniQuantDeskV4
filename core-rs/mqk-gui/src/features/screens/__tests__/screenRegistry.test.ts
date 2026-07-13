@@ -54,3 +54,28 @@ test("Settings / Operations is registered as the operator System/Status surface"
   assert.ok(MONITOR_GROUPS.operator.includes("settings"), "settings is not reachable in the operator monitor group");
   assert.ok(ALL_LEFT_RAIL.includes("settings"), "settings was removed from the left rail");
 });
+
+// STRATEGY-SCANNER-JOBS-GUI-01D: strategyScanner screen is reachable.
+test("strategyScanner is registered and reachable from the left rail", () => {
+  assert.equal(SCREEN_REGISTRY.strategyScanner.title, "Strategy Scanner");
+  assert.equal(SCREEN_REGISTRY.strategyScanner.monitorGroup, "diagnostics");
+  assert.ok(
+    MONITOR_GROUPS.diagnostics.includes("strategyScanner"),
+    "strategyScanner is not reachable in the diagnostics monitor group",
+  );
+  assert.ok(
+    ALL_LEFT_RAIL.includes("strategyScanner"),
+    "strategyScanner was not added to the left rail — screen is unreachable",
+  );
+});
+
+test("strategyScanner is adjacent to backtests in LEFT_RAIL_SECONDARY", () => {
+  const bIdx = LEFT_RAIL_SECONDARY.indexOf("backtests");
+  const sIdx = LEFT_RAIL_SECONDARY.indexOf("strategyScanner");
+  assert.ok(bIdx !== -1, "LEFT_RAIL_SECONDARY missing 'backtests'");
+  assert.ok(sIdx !== -1, "LEFT_RAIL_SECONDARY missing 'strategyScanner'");
+  assert.ok(
+    Math.abs(bIdx - sIdx) <= 2,
+    `strategyScanner (index ${sIdx}) should be within 2 positions of backtests (index ${bIdx})`,
+  );
+});

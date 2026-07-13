@@ -1,6 +1,7 @@
 import type { ReactElement } from "react";
 import { AuditScreen } from "../audit/AuditScreen";
 import { BacktestResultsScreen } from "../backtests/BacktestResultsScreen";
+import { StrategyScannerScreen } from "../strategyScanner/StrategyScannerScreen";
 import { DashboardScreen } from "../dashboard/DashboardScreen";
 import { ExecutionScreen } from "../execution/ExecutionScreen";
 import { AlertsScreen } from "../alerts/AlertsScreen";
@@ -45,7 +46,8 @@ export type ScreenKey =
   | "runtime"
   | "artifacts"
   | "operatorTimeline"
-  | "backtests";
+  | "backtests"
+  | "strategyScanner";
 
 /**
  * Which monitor this screen is designed to occupy.
@@ -82,7 +84,7 @@ export interface ScreenDefinition {
 export const MONITOR_GROUPS: Record<MonitorGroup, readonly ScreenKey[]> = {
   operator:    ["dashboard", "ops", "portfolio", "reconcile", "strategy", "session", "config", "marketData", "ingest", "settings"],
   execution:   ["execution"],
-  diagnostics: ["audit", "incidents", "alerts", "operatorTimeline", "runtime", "metrics", "topology", "transport", "artifacts", "backtests", "risk"],
+  diagnostics: ["audit", "incidents", "alerts", "operatorTimeline", "runtime", "metrics", "topology", "transport", "artifacts", "backtests", "strategyScanner", "risk"],
 };
 
 /**
@@ -231,5 +233,11 @@ export const SCREEN_REGISTRY: Record<ScreenKey, ScreenDefinition> = {
     description: "View performance artifacts from completed CLI backtest runs.",
     monitorGroup: "diagnostics",
     render: () => <BacktestResultsScreen />,
+  },
+  strategyScanner: {
+    title: "Strategy Scanner",
+    description: "Submit and review bounded local-data strategy scans. Research evidence only — not autonomous trading approval.",
+    monitorGroup: "diagnostics",
+    render: () => <StrategyScannerScreen />,
   },
 };
