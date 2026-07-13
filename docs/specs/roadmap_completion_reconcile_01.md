@@ -528,3 +528,41 @@ This bundle does **not** touch any row in §2 above, for the same reason
 equities-only, existing strategy-engine/scanner layer. No row's status,
 percentage, or category changes. `docs/audits/multi_asset_completion_audit.md`
 is correspondingly not updated by this bundle.
+
+## 17. Later session: `STRATEGY-PROMOTION-REGISTRY-AND-RUNTIME-ENFORCEMENT-01-COMBINED`
+
+A follow-up off-market session closed the gap §16 explicitly left open:
+`paper_candidate` carried no trading meaning, and nothing consumed it to
+submit, route, or admit an order. This bundle adds the durable
+promotion registry §16 anticipated — `sys_strategy_promotion_transitions`
+(migration `0046`, append-only, six states
+`shadow_approved`/`paper_approved`/`active_paper`/`demoted`/`retired`/
+`rejected`), an operator-authenticated transition surface
+(`POST /api/v1/strategy/promotions/transition`) that independently
+validates `paper_candidate` evidence from a review artifact (never
+trusting a caller's claim), and — the load-bearing difference from
+§16 — a hard **runtime enforcement gate** wired into both
+strategy-originated outbox write paths (`decision.rs` Gate 3b,
+`routes/strategy.rs` Gate 2b via one shared evaluator,
+`promotion_gate::evaluate_paper_promotion_gate`). `registered +
+enabled` in `sys_strategy_registry` is now proven — by DB-backed test,
+including a real end-to-end proof through the actual daemon router — to
+never be sufficient for paper trading; only an exact-identity,
+unexpired `active_paper` promotion is. No live authorization exists
+anywhere in this patch. Configuration-fingerprint identity binding
+remains `PARTIAL` (`config_identity_status =
+"unavailable_in_current_runtime"`, truthfully surfaced, never
+defaulted) — see
+`docs/specs/strategy_promotion_registry_01f_closure_decision.md` §5/§9
+for the full identity-boundary record. Final status:
+
+```text
+STRATEGY-PROMOTION-REGISTRY-AND-RUNTIME-ENFORCEMENT-01-COMBINED: CLOSED_LOCAL
+```
+
+This bundle does **not** touch any row in §2 above, for the same reason
+§9–§16 do not: off-market strategy-admission-governance tooling
+concern only, equities-only, existing strategy-engine/scanner layer. No
+row's status, percentage, or category changes.
+`docs/audits/multi_asset_completion_audit.md` is correspondingly not
+updated by this bundle.

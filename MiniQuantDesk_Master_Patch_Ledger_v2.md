@@ -9312,3 +9312,97 @@ staged at any phase.
 **Recommended next off-market prompt:**
 `STRATEGY-ROUTER-RESEARCH-ONLY-SELECTION-01-COMBINED` (must remain
 research-only — selects candidates for analysis, not trading).
+
+---
+
+## STRATEGY-PROMOTION-REGISTRY-AND-RUNTIME-ENFORCEMENT-01-COMBINED
+
+Patch: `STRATEGY-PROMOTION-REGISTRY-01F-CLOSURE-AND-LEDGER-RECONCILE-01`.
+
+```text
+STRATEGY-PROMOTION-REGISTRY-AND-RUNTIME-ENFORCEMENT-01-COMBINED: CLOSED_LOCAL
+```
+
+Closes the gap the prior scanner-promotion bundle explicitly left open:
+`paper_candidate` carried no trading meaning, and nothing consumed it to
+submit, route, or admit an order. Added a durable, append-only
+paper-promotion registry (`sys_strategy_promotion_transitions`,
+migration `0046`; six states `shadow_approved`/`paper_approved`/
+`active_paper`/`demoted`/`retired`/`rejected`; identity =
+`strategy_id + symbol + timeframe_secs`), an operator-authenticated
+transition surface (`POST /api/v1/strategy/promotions/transition`) that
+independently validates `paper_candidate` evidence from a review
+artifact rather than trusting caller claims, and — the load-bearing
+change — a hard runtime enforcement gate wired identically into both
+strategy-originated outbox write paths via one shared evaluator
+(`decision.rs` Gate 3b, `routes/strategy.rs` Gate 2b,
+`promotion_gate::evaluate_paper_promotion_gate`). `registered + enabled`
+in `sys_strategy_registry` is now proven — by DB-backed test, including
+a real end-to-end proof through the actual daemon router
+(`scenario_strategy_promotion_closure_proof_01f.rs`) — to never be
+sufficient for paper trading; only an exact-identity, unexpired
+`active_paper` promotion is. No live authorization exists anywhere in
+this patch.
+
+Real DB-backed testing (isolated local test DB, port 5434) caught and
+fixed three genuine bugs during implementation, not just claimed fixed:
+a SQL three-valued-logic gap in the legal-transition `CHECK` constraint
+that let `no-state -> active_paper` silently pass; a `transition_id`
+seed that included server-computed state and broke idempotency on an
+exact request replay; and a test-fixture "expired" seeding bug plus
+cross-test `sys_arm_state` pollution in the shared test DB. Adding the
+new gates required seeding an `active_paper` promotion into 16
+pre-existing DB-backed tests across 9 files that had previously relied
+on `registered + enabled` alone reaching acceptance.
+
+Configuration-fingerprint identity binding remains `PARTIAL`
+(`config_identity_status = "unavailable_in_current_runtime"`, truthfully
+surfaced on every read route, never defaulted) — no runtime code path
+carries a reproducible config hash yet. Exact
+strategy/symbol/timeframe enforcement is fully closed and DB-proven.
+
+**Full patch-group commit chain:** Phase A `6ff1f39c` (design) → Phase B
+`ea57f098` (durable DB foundation) → Phase C `e3758bae` (daemon control
+surface) → Phase D `436ae2b4` (runtime enforcement) → Phase E `6f3233fd`
+(GUI) → Phase F (this entry).
+
+**Validation:** `cargo check`/`cargo clippy -p mqk-db -p mqk-daemon
+--lib` clean (only the pre-existing, unrelated `manual_range_contains`
+finding at `routes/strategy_scans.rs:87` remains, confirmed via `git
+diff --stat` showing zero changes to that file across this patch group);
+`cargo fmt --check` clean on every file this patch touched;
+`scenario_strategy_promotion_registry_01` (mqk-db) 11/11,
+`scenario_strategy_promotion_routes_01` 17/17,
+`scenario_strategy_promotion_runtime_gate_01` 25/25,
+`scenario_strategy_promotion_closure_proof_01f` 1/1, plus all 9
+regression-affected test files (141 tests) — all pass against the
+isolated local test DB with `--include-ignored --test-threads=1`; `npm
+run build` (mqk-gui) clean; `npm test` 732/732 pass. Full-suite
+`cargo test -p mqk-daemon --no-fail-fast --include-ignored` surfaced 13
+failing targets unrelated to strategy signals/decisions (missing Alpaca
+credentials/deployment-mode config, one pre-existing `sys_incidents`
+assertion) — verified via `git stash` (identical failures reproduce at
+pre-Phase-D HEAD, same DB) and by grep (none reference
+`submit_internal_strategy_decision`/`StrategySignalRequest`) to be
+pre-existing and unrelated.
+
+**Safety confirmation:** no real or forced paper/live orders at any
+phase; no broker/provider/network call from any promotion-gate, route,
+or GUI code path; no daemon runtime process started at any phase (every
+proof uses in-process `axum::Router` + `tower::ServiceExt::oneshot()`);
+no execution armed; paper DB (port 5440) never migrated or mutated —
+all DB-backed proof used the isolated local test DB (port 5434) only;
+no strategy/risk/session/reconcile logic weakened; no
+`mqk-broker-alpaca/`, `mqk-broker-paper/`, `mqk-risk/`,
+`mqk-reconcile/`, `mqk-portfolio/`, or `mqk-execution/src/gateway.rs`
+file touched; no generated artifact/evidence/export/smoke-log staged at
+any phase; no secret touched.
+
+Full closure record:
+`docs/specs/strategy_promotion_registry_01f_closure_decision.md`.
+
+**Recommended next market-hours prompt:** unchanged — this bundle adds
+no new market-hours-dependent surface.
+
+**Recommended next off-market prompt:**
+`DAILY-DATA-READINESS-AND-FRESHNESS-01-COMBINED`.
