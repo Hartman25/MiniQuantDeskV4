@@ -25,6 +25,21 @@ against. It intentionally does not modify any Rust/TS source.
 > provider-capability check was unspecified (§11a). Sections not called out
 > below are unchanged from the original audit and remain verified.
 
+> **Second correction notice
+> (`DAILY-DATA-READINESS-01A-RUNTIME-BINDING-CORRECTION-02`):** the
+> correction above fixed `configured_strategy_id` vs.
+> `effective_runtime_strategy_id`, but still did not bind readiness to the
+> active bootstrap's fixed target symbol or actual strategy timeframe — an
+> assignment could report data-ready while the runtime's shared bootstrap
+> would silently drop its targets (wrong symbol) or feed it bars built for
+> the wrong interval (wrong timeframe). §3a/§3b/§3c below add
+> `effective_runtime_target_symbol` and `effective_runtime_timeframe_secs`
+> to the readiness identity, a required per-assignment evaluation order, and
+> an honest statement of the current multi-symbol architecture's real
+> limitation (§3d), verified directly against `loop_runner.rs`,
+> `native_strategy.rs`, and `docs/design/native_multi_symbol_dispatch.md` in
+> this pass.
+
 ---
 
 ## 0. Correction to the mission brief
@@ -167,6 +182,149 @@ readiness fact instead of a silent one.
 (the strategy that will *actually* run), not `configured_strategy_id` —
 using the configured-but-not-running id's requirement would be dishonest
 about which engine's warmup actually matters for the bars that get loaded.
+
+## 3a. Effective runtime target-symbol identity — NEW REQUIREMENT
+
+**Corrected gap: strategy-id agreement alone does not prove an assignment
+is actually executable, because the shared bootstrap also has a symbol
+baked into it.** Verified directly in this correction pass:
+
+- `build_daemon_plugin_registry()` (`mqk-runtime/src/native_strategy.rs:305`)
+  reads `MQK_STRATEGY_SYMBOL` **once** and passes it into
+  `register_builtin_strategies(&mut registry, symbol)` — every registered
+  strategy factory closes over that single symbol at registration time.
+- `tick_strategy_dispatch_multi_symbol` (`state.rs:2564-2585`) evaluates
+  every assignment through the same bootstrap regardless of
+  `assignment.symbol`.
+- `retain_targets_matching_symbol` (`state.rs:2602+`, doc: "case-insensitive,
+  trimmed") drops any `TargetPosition` whose symbol does not match the
+  dispatched assignment's symbol, precisely because the bootstrap's emitted
+  `TargetPosition.symbol` is fixed to `MQK_STRATEGY_SYMBOL`, not to
+  whichever assignment is currently being dispatched.
+
+**Contract decision:** the readiness identity gains
+`effective_runtime_target_symbol` — the single active bootstrap's baked-in
+symbol, read from the exact same `MQK_STRATEGY_SYMBOL` source
+`build_daemon_plugin_registry()` uses, normalized with the **same
+trim/case rule** `retain_targets_matching_symbol` already applies
+(case-insensitive, trimmed) so the comparison can never disagree with what
+the runtime guard itself does. New stable blocking reason:
+```text
+assignment_symbol != effective_runtime_target_symbol
+→ runtime_strategy_symbol_binding_mismatch
+→ start_allowed=false
+```
+A missing or empty `effective_runtime_target_symbol` (e.g.
+`MQK_STRATEGY_SYMBOL` unset) also blocks under the same reason — there is
+no bootstrap target to bind to.
+
+**Practical consequence, confirmed by
+`docs/design/native_multi_symbol_dispatch.md`'s own honest-gap language:**
+"for `MultiSymbolConfigSource::WatchlistArtifactV2` configs with more than
+one symbol, only the symbol matching `MQK_STRATEGY_SYMBOL` (if any) can
+currently produce a non-empty target list — every other configured symbol's
+dispatch will have all of its targets dropped by this guard." Under this
+corrected contract, a watchlist-v2 assignment set with more than one
+distinct symbol will normally have at most one assignment (the one
+matching `MQK_STRATEGY_SYMBOL`) reach `ready`; every other symbol blocks on
+`runtime_strategy_symbol_binding_mismatch` — honestly reflecting that the
+runtime cannot yet execute them independently, not a defect in this
+contract. This bundle does **not** implement per-symbol bootstrapping to
+fix that (see §3d).
+
+## 3b. Effective runtime timeframe identity — NEW REQUIREMENT
+
+**Corrected gap: nothing today proves an assignment's timeframe matches the
+timeframe the active strategy's bar-window construction actually uses.**
+Verified directly: `dispatch_native_strategy_for_symbol_with_bar`/
+`..._with_loaded_bars` load DB bars using `assignment.timeframe`, but
+`NativeStrategyBootstrap::invoke_on_bar_from_window`
+(`mqk-runtime/src/native_strategy.rs:206-219`) builds the
+`StrategyContext` from `host.spec().ok()?.timeframe_secs` — **the active
+host's own `StrategySpec.timeframe_secs`**, read independently of whatever
+timeframe the loaded bars actually came from. No comparison between the two
+exists in the current runtime.
+
+**Contract decision:** the readiness identity gains
+`effective_runtime_timeframe_secs` — the single active bootstrap's
+`StrategySpec.timeframe_secs`. `assignment.timeframe` must be normalized
+through the canonical `mqk_md::Timeframe::parse` path (§19's timeframe
+authority) to seconds before comparison — never a raw string compare. New
+stable blocking reason:
+```text
+canonical_seconds(assignment.timeframe) != effective_runtime_timeframe_secs
+→ runtime_strategy_timeframe_mismatch
+→ start_allowed=false
+```
+An assignment timeframe that fails to parse remains fail-closed under the
+pre-existing `unsupported_timeframe`/parse-failure reason (§19), evaluated
+before this comparison is even attempted.
+
+## 3c. Complete readiness identity and required evaluation order — CORRECTED
+
+The readiness identity (superseding §3's original tuple) is:
+```text
+assignment_symbol
+assignment_timeframe
+configured_strategy_id
+effective_runtime_strategy_id
+effective_runtime_target_symbol
+effective_runtime_timeframe_secs
+required_history_bars
+asset_class
+```
+
+**Required per-assignment evaluation order** (a runtime-binding mismatch
+must never be reported merely as stale/missing data — it is evaluated, and
+must block, before any bar-history question is even asked):
+```text
+1. assignment resolution                         (§3)
+2. effective bootstrap binding resolution         (single shared bootstrap: strategy id, target symbol, timeframe_secs)
+3. strategy-id match      (configured_strategy_id == effective_runtime_strategy_id, else runtime_strategy_assignment_mismatch)
+4. target-symbol match    (assignment_symbol == effective_runtime_target_symbol, else runtime_strategy_symbol_binding_mismatch)
+5. timeframe match        (canonical assignment timeframe == effective_runtime_timeframe_secs, else runtime_strategy_timeframe_mismatch)
+6. strategy history requirement                   (§5, StrategyDataRequirements)
+7. provider/calendar/bar readiness                 (§6-§13)
+```
+Steps 3-5 are runtime-binding checks and are independent of each other —
+implementations must evaluate and report all three (not short-circuit after
+the first failure) so an operator sees every binding problem at once,
+consistent with the mission's per-assignment `blockers[]` model.
+
+**Phase B binding-source requirement:** `effective_runtime_strategy_id`,
+`effective_runtime_target_symbol`, and `effective_runtime_timeframe_secs`
+must be derived from the same sources the runtime itself uses at start —
+the active `NativeStrategyBootstrap` (or its pre-store local bootstrap
+state before it is moved into `AppState`), its resolved `StrategySpec`, the
+literal `MQK_STRATEGY_SYMBOL` env value `build_daemon_plugin_registry()`
+reads, and the canonical `build_multi_symbol_runtime_config_from_env()`
+assignment list (§3) — never a second, independently-guessed symbol or
+timeframe value invented inside the readiness evaluator itself.
+
+## 3d. Current multi-symbol limitation — honest statement
+
+Documented plainly, not softened: the execution loop iterates multiple
+symbol assignments per tick, but the runtime still has exactly **one**
+shared `native_strategy_bootstrap`, which has exactly one baked-in target
+symbol (`MQK_STRATEGY_SYMBOL`) and one strategy timeframe
+(`StrategySpec.timeframe_secs`, from the one active `StrategyHost`).
+**Current multi-symbol dispatch is therefore not equivalent to fully
+independent per-symbol strategy execution** — it is one strategy's decision
+logic, evaluated repeatedly across symbols, with a mitigating guard
+(`retain_targets_matching_symbol`) that drops misattributed output rather
+than a real per-symbol bootstrap. This bundle's job is to **expose and
+block** incompatible configurations (§3a/§3b) so they are visible,
+honest readiness facts — it does not repair the underlying architecture.
+
+No canonical ledger patch id for this future repair exists today (checked:
+no `PER-SYMBOL-STRATEGY-BOOTSTRAP*` or equivalent entry in
+`MiniQuantDesk_Master_Patch_Ledger_v2.md`; the only prior references are
+descriptive, e.g. `docs/design/native_multi_symbol_dispatch.md`'s "true
+per-symbol strategy bootstrap remains open... a distinct bootstrap per
+configured symbol... is a dependency for a future patch"). This document
+therefore introduces **`PER-SYMBOL-STRATEGY-BOOTSTRAP-01`** as the
+recommended forward-reference name for that future work — it is not opened
+by this bundle, and this bundle does not implement it.
 
 ## 4. Can ingest plan and runtime assignment ever disagree? — CORRECTED
 
@@ -587,6 +745,29 @@ ingest-plan/preflight/autonomous-readiness extension (§4) agrees with the
 loop's actual `multi_symbol_assignments` on `configured_strategy_id`, not
 only symbol/timeframe.
 
+**Corrected addition (runtime-binding, §3a/§3b/§3c):** Phase B/C's tests
+must additionally prove:
+- a `configured_strategy_id` mismatch (vs. `effective_runtime_strategy_id`)
+  blocks (`runtime_strategy_assignment_mismatch`) — already required above,
+  restated here as part of the full binding suite;
+- an `effective_runtime_target_symbol` mismatch (assignment symbol differs
+  from `MQK_STRATEGY_SYMBOL`, normalized case-insensitive/trimmed) blocks
+  (`runtime_strategy_symbol_binding_mismatch`);
+- an `effective_runtime_timeframe_secs` mismatch (canonical assignment
+  timeframe seconds differ from the active `StrategySpec.timeframe_secs`)
+  blocks (`runtime_strategy_timeframe_mismatch`);
+- an empty/missing `effective_runtime_target_symbol` blocks under the same
+  reason as a mismatch, not a different one;
+- a fixture where `configured_strategy_id`, `effective_runtime_target_symbol`,
+  and canonical timeframe all agree with the single active bootstrap
+  proceeds past the binding checks into data evaluation (§6-§13), proving
+  the corrected identity does not over-block the legacy single-symbol case;
+- a multi-symbol, same-strategy-id, different-symbol watchlist-v2 fixture
+  (the `docs/design/native_multi_symbol_dispatch.md`-documented case) blocks
+  every non-`MQK_STRATEGY_SYMBOL` assignment honestly via
+  `runtime_strategy_symbol_binding_mismatch`, rather than reporting them as
+  merely stale/missing data.
+
 ## 16. Which exact start function must consume the strict report? — CORRECTED (insertion point and signature)
 
 `AppState::start_execution_runtime`, `core-rs/crates/mqk-daemon/src/state/lifecycle.rs:42`.
@@ -649,21 +830,25 @@ adapters, scheduler persistence, provider retry/backoff, automatic
 ingestion, backtest GUI data-source repair, strategy selection/allocation,
 portfolio/P&L durability, broad GUI redesign, the per-tick staleness gate
 (`INTRADAY-MD-FRESHNESS-AUTONOMOUS-01`, left untouched), and **per-symbol
-strategy bootstrapping** — this bundle surfaces the
-`configured_strategy_id`/`effective_runtime_strategy_id` mismatch (§3) as a
-blocking readiness fact but does not implement per-symbol bootstrap
-selection to resolve it. Also newly out of scope per §13: any provider/
+strategy bootstrapping** (recommended future name
+`PER-SYMBOL-STRATEGY-BOOTSTRAP-01`, §3d) — this bundle surfaces the
+`configured_strategy_id`/`effective_runtime_target_symbol`/
+`effective_runtime_timeframe_secs` mismatches (§3a/§3b/§3c) as blocking
+readiness facts but does not implement independent per-symbol bootstrap
+instances to resolve them. Also newly out of scope per §13: any provider/
 timeframe-support patch needed to make `1h` assignments passable — that is
 future work, not this bundle's job to build.
 
 ---
 
-## Final contract summary (binding for Phases B–E) — CORRECTED
+## Final contract summary (binding for Phases B–E) — CORRECTED (twice)
 
 - **Evaluator module**: `core-rs/crates/mqk-daemon/src/daily_data_readiness.rs`, pure + DB-bounded (`Option<&PgPool>`), additive alongside `market_data_freshness.rs`.
 - **Strategy metadata seam**: `StrategyMeta` (or equivalent plugin-owned metadata) gains `StrategyDataRequirements { minimum_completed_bars }`, populated per §5 table, bound in `mqk-strategy` itself — no daemon-side hardcoded lookup. Unknown → `strategy_requirement_unknown`.
 - **Assignment source**: `build_multi_symbol_runtime_config_from_env()` (the same call the execution loop makes), not the symbols-only resolver. Legacy single-symbol fallback preserved. Empty/`Err` → `required_assignments_missing`.
-- **Identity**: `(symbol, timeframe, configured_strategy_id, effective_runtime_strategy_id, required_history_bars)`. Mismatch between configured/effective strategy id → `runtime_strategy_assignment_mismatch`, blocked.
+- **Identity (§3c)**: `(assignment_symbol, assignment_timeframe, configured_strategy_id, effective_runtime_strategy_id, effective_runtime_target_symbol, effective_runtime_timeframe_secs, required_history_bars, asset_class)`, evaluated in the required order: assignment resolution → bootstrap binding resolution → strategy-id match → target-symbol match → timeframe match → history requirement → provider/calendar/bar readiness.
+- **Runtime-binding mismatches (§3a/§3b)**: `configured_strategy_id != effective_runtime_strategy_id` → `runtime_strategy_assignment_mismatch`; `assignment_symbol != effective_runtime_target_symbol` (or empty) → `runtime_strategy_symbol_binding_mismatch`; canonical `assignment_timeframe` seconds `!= effective_runtime_timeframe_secs` → `runtime_strategy_timeframe_mismatch`. All three block, evaluated independently, never reported as stale/missing data. Effective values sourced only from the real active bootstrap/`StrategySpec`/`MQK_STRATEGY_SYMBOL`/canonical assignment list — never guessed.
+- **Honest multi-symbol limitation (§3d)**: one shared bootstrap, one baked-in target symbol, one strategy timeframe — a watchlist-v2 set with more than one distinct symbol will normally have only the `MQK_STRATEGY_SYMBOL`-matching assignment reach `ready`. Future repair recommended as `PER-SYMBOL-STRATEGY-BOOTSTRAP-01` (not opened, not built by this bundle).
 - **Calendar**: new typed `MarketSessionSchedule` seam (§6a) composed over `MarketCalendarProvider`, with its own coverage-window fail-closed check (provider itself does not fail closed out-of-range). `Unknown`/`OutOfRange` → `calendar_unavailable`, blocked.
 - **Timestamps**: `end_ts` is bar-start; daily expectation keyed by calendar trading date + proven provider daily label (verify, don't assume); intraday expectation from a session-open-anchored (09:30 ET) grid, not epoch-hour alignment.
 - **Grace**: `effective_grace_seconds = min(configured_grace_seconds[default 900], timeframe.duration_secs())`, both surfaced.

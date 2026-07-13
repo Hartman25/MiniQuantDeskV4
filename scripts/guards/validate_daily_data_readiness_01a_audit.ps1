@@ -21,6 +21,12 @@
 #   [13] Doc does not contain any of the corrected pass's stale current-truth claims.
 #   [14] Doc contains every corrected-pass concept
 #        (DAILY-DATA-READINESS-01A-CONTRACT-CORRECTION-01).
+#   [15] Doc contains every runtime-binding concept
+#        (DAILY-DATA-READINESS-01A-RUNTIME-BINDING-CORRECTION-02).
+#   [16] Doc does not imply strategy-id match alone proves compatibility,
+#        that different symbols are independently executable through the
+#        shared bootstrap, or that assignment timeframe automatically
+#        matches StrategySpec timeframe.
 #
 # Usage:
 #   powershell -ExecutionPolicy Bypass -File scripts\guards\validate_daily_data_readiness_01a_audit.ps1
@@ -206,6 +212,43 @@ $RequiredConcepts = @(
 foreach ($Concept in $RequiredConcepts) {
     Test-ContentContains "doc contains corrected concept '$Concept'" $Content $Concept | Out-Null
 }
+
+Write-Host ""
+Show-Info "--- [15] Runtime-binding concepts are present (CORRECTION-02) ---"
+
+$RuntimeBindingConcepts = @(
+    "effective_runtime_target_symbol",
+    "effective_runtime_timeframe_secs",
+    "runtime_strategy_symbol_binding_mismatch",
+    "runtime_strategy_timeframe_mismatch",
+    "PER-SYMBOL-STRATEGY-BOOTSTRAP"
+)
+foreach ($Concept in $RuntimeBindingConcepts) {
+    Test-ContentContains "doc contains runtime-binding concept '$Concept'" $Content $Concept | Out-Null
+}
+
+Write-Host ""
+Show-Info "--- [16] No forbidden runtime-binding-compatibility implications ---"
+
+# These needles are deliberately phrased as the forbidden ASSERTION, not the
+# corrected doc's negated/explanatory wording -- verified absent from the
+# corrected doc content itself (grep-checked at authoring time), so a true
+# regression (someone re-asserting one of these as fact) is what would trip
+# this check, not the doc's own correction language.
+Test-ContentDoesNotContain `
+    "doc does not claim strategy-id match alone proves runtime compatibility" `
+    $Content `
+    "matching strategy IDs alone proves runtime assignment compatibility" | Out-Null
+
+Test-ContentDoesNotContain `
+    "doc does not claim different symbols are independently executable through the shared bootstrap" `
+    $Content `
+    "different symbols are independently executable through the current shared bootstrap" | Out-Null
+
+Test-ContentDoesNotContain `
+    "doc does not claim assignment timeframe automatically matches StrategySpec timeframe" `
+    $Content `
+    "assignment timeframe is automatically identical to StrategySpec timeframe" | Out-Null
 
 # =============================================================================
 # Summary
