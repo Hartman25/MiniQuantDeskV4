@@ -41,6 +41,7 @@ pub(crate) mod helpers;
 pub(crate) mod ingest;
 pub(crate) mod oms_metrics;
 pub(crate) mod paper_journal;
+pub(crate) mod paper_lifecycle;
 pub(crate) mod portfolio;
 pub(crate) mod reconcile;
 pub(crate) mod repair;
@@ -278,6 +279,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     };
     use oms_metrics::{metrics_dashboards, oms_overview};
     use paper_journal::paper_journal;
+    use paper_lifecycle::execution_paper_lifecycle;
     use portfolio::{
         portfolio_account_equity_baseline_status, portfolio_economics_status, portfolio_fills,
         portfolio_live_weights, portfolio_open_orders, portfolio_positions, portfolio_summary,
@@ -379,6 +381,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/v1/execution/orders", get(execution_orders))
         .route("/api/v1/execution/outbox", get(execution_outbox))
         .route("/api/v1/execution/flow", get(execution_flow))
+        .route(
+            "/api/v1/execution/paper-lifecycle",
+            get(execution_paper_lifecycle),
+        )
         .route(
             "/api/v1/execution/fill-quality",
             get(execution_fill_quality),

@@ -8404,3 +8404,70 @@ and `cargo clippy -p mqk-db --all-targets -- -D warnings` both clean.
 broker/provider/network call in tests; no write path added (both new
 functions are pure `select` queries); test fixture rows cleaned up by
 each test; no trading/strategy/risk logic touched.
+
+---
+
+## PAPER-ORDER-LIFECYCLE-PERSISTENT-VISIBILITY-AUDIT-AND-CLOSURE-01-COMBINED — Phase C (route)
+
+Patch: `PAPER-ORDER-LIFECYCLE-VIS-01C-ROUTE-IMPLEMENTATION-01`.
+
+Added `GET /api/v1/execution/paper-lifecycle?run_id=<uuid>`
+(`core-rs/crates/mqk-daemon/src/routes/paper_lifecycle.rs`, registered in
+`routes.rs`). Read-only, DB-backed reconstruction of one paper run's full
+lifecycle: resolves the run via `mqk_db::fetch_run` (explicit `run_id`)
+or `mqk_db::fetch_latest_run_for_engine(engine="mqk-daemon", mode="PAPER")`
+(no `run_id` — durable latest-run resolution, independent of ARMED/RUNNING
+status, closing gap (1) from the Phase A audit), then joins
+`strategy_signal_evaluations` + `autonomous_no_trade_diagnostics` (Phase
+B's new run-scoped helpers) + `oms_outbox`
+(`outbox_fetch_for_supervisor`) + `oms_inbox`
+(`inbox_load_all_applied_for_run` + `inbox_load_unapplied_for_run`),
+closing gap (2). A pure `classify_overall_lifecycle_state` function
+(6 unit tests) deterministically maps the assembled counts/flags to
+`full_lifecycle_visible` / `order_filled_pnl_pending` /
+`order_rejected_or_failed` / `order_submitted_fill_pending` /
+`no_signal_durably_explained` / `partial_visibility`.
+`portfolio_truth_state` / `pnl_truth_state` are always the honest
+`"in_memory_only_not_restart_surviving"` label — this route does not
+reconstruct positions or P&L from `oms_inbox` fills (per Phase A's
+documented capability boundary). Never writes; never calls a
+broker/provider.
+
+New test file
+`core-rs/crates/mqk-daemon/tests/scenario_paper_order_lifecycle_visibility_01.rs`:
+5 in-process tests (no DB required: `db_unavailable`, route mounted,
+invalid `run_id` -> 400, canonical_route, no fabricated summary) + 8
+DB-backed tests (`#[ignore]`, run against local `mqk-test-postgres` port
+5434): explicit nonexistent `run_id` -> `not_found`; no-`run_id` ->
+resolves the latest durable PAPER run; signal-only and
+no-trade-diagnostic-only lifecycles both classify as
+`no_signal_durably_explained`; outbox-only classifies as
+`order_submitted_fill_pending`; outbox+inbox-fill classifies as
+`order_filled_pnl_pending` with honest in-memory-only portfolio/P&L
+labels; zero DB writes across repeated calls; an empty run classifies as
+`partial_visibility` (authoritative empty, not fabricated). All 13 pass.
+Also re-ran `scenario_route_contract_rt01` (2 tests) and
+`scenario_gui_daemon_contract_gate` (23 tests) — both pass unaffected.
+`cargo clippy -p mqk-daemon --lib -- -D warnings` clean; `cargo fmt
+--check` clean on both new files (pre-existing drift in unrelated files
+`portfolio.rs`/`system.rs` left untouched — out of this patch's scope).
+
+Known, documented limitation: the DB-backed "zero runs at all"
+(`no_rows`) branch is not exercised by an isolated test — the route's
+engine/mode filter is a fixed constant shared with every other
+durable-run route in this crate, so truly isolating "zero rows" in the
+shared `mqk_test` database (populated by many sibling test files using
+the same `engine_id`) would require a destructive truncate. The
+`not_found` test exercises the structurally identical "no row resolved"
+code branch via an explicit nonexistent `run_id` instead.
+
+**Built:** `core-rs/crates/mqk-daemon/src/routes/paper_lifecycle.rs`,
+`core-rs/crates/mqk-daemon/src/routes.rs` (registration),
+`core-rs/crates/mqk-daemon/src/api_types.rs` (response structs),
+`core-rs/crates/mqk-daemon/tests/scenario_paper_order_lifecycle_visibility_01.rs`.
+
+**Safety confirmation:** no migration; read-only route (no
+insert/update/delete anywhere in the handler); no broker/provider/network
+call; no order submitted/cancelled/replaced; no execution armed; no
+strategy/risk/gate logic touched; portfolio/P&L truth_state never
+fabricated as `"active"`.

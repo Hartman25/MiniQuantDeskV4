@@ -4368,6 +4368,154 @@ pub struct ExecutionFlowResponse {
     pub rows: Vec<ExecutionFlowApiRow>,
 }
 
+// ---------------------------------------------------------------------------
+// PAPER-ORDER-LIFECYCLE-VIS-01C: GET /api/v1/execution/paper-lifecycle
+// ---------------------------------------------------------------------------
+
+/// One `runs` row, as surfaced by the paper-lifecycle route.
+#[derive(Debug, Clone, Serialize)]
+pub struct PaperLifecycleRunRow {
+    pub run_id: String,
+    pub engine_id: String,
+    pub mode: String,
+    pub status: String,
+    pub started_at_utc: String,
+    pub armed_at_utc: Option<String>,
+    pub running_at_utc: Option<String>,
+    pub stopped_at_utc: Option<String>,
+    pub halted_at_utc: Option<String>,
+}
+
+/// One `strategy_signal_evaluations` row, as surfaced by the paper-lifecycle route.
+#[derive(Debug, Clone, Serialize)]
+pub struct PaperLifecycleSignalEvaluationRow {
+    pub evaluation_id: String,
+    pub ts_utc: String,
+    pub strategy_id: String,
+    pub symbol: String,
+    pub timeframe: String,
+    pub signal_generated: bool,
+    pub signal_qty: Option<i64>,
+    pub signal_side: Option<String>,
+    pub reason_code: String,
+    pub reason: String,
+    pub decision_stage: String,
+}
+
+/// One `autonomous_no_trade_diagnostics` row, as surfaced by the paper-lifecycle route.
+#[derive(Debug, Clone, Serialize)]
+pub struct PaperLifecycleNoTradeDiagnosticRow {
+    pub diagnostic_id: String,
+    pub observed_at_utc: String,
+    pub mode: String,
+    pub session_window_state: String,
+    pub arm_state: String,
+    pub overall_ready: bool,
+    pub reason_code: String,
+    pub reason: String,
+    pub stage: String,
+    pub paper_order_attempted: bool,
+    pub live_order_attempted: bool,
+}
+
+/// One `oms_outbox` row, as surfaced by the paper-lifecycle route.
+#[derive(Debug, Clone, Serialize)]
+pub struct PaperLifecycleOutboxRow {
+    pub idempotency_key: String,
+    pub status: String,
+    pub symbol: Option<String>,
+    pub side: Option<String>,
+    pub qty: Option<i64>,
+    pub created_at_utc: String,
+    pub claimed_at_utc: Option<String>,
+    pub dispatching_at_utc: Option<String>,
+    pub sent_at_utc: Option<String>,
+}
+
+/// One `oms_inbox` row, as surfaced by the paper-lifecycle route.
+#[derive(Debug, Clone, Serialize)]
+pub struct PaperLifecycleInboxRow {
+    pub inbox_id: i64,
+    pub broker_message_id: String,
+    pub internal_order_id: Option<String>,
+    pub broker_order_id: Option<String>,
+    /// `"ack"` | `"fill"` | `"partial_fill"` | `"cancel_ack"` | `"cancel_reject"` |
+    /// `"replace_ack"` | `"replace_reject"` | `"reject"`.
+    pub event_kind: String,
+    pub received_at_utc: String,
+    /// `None` until the fill/event has been applied to the portfolio.
+    pub applied_at_utc: Option<String>,
+}
+
+/// Deterministic classification of the assembled lifecycle rows for one run.
+#[derive(Debug, Clone, Serialize)]
+pub struct PaperLifecycleSummary {
+    /// See `PaperLifecycleResponse::truth_state` doc for the full vocabulary.
+    pub overall_lifecycle_state: String,
+    pub signal_count: usize,
+    pub generated_signal_count: usize,
+    pub no_trade_diagnostic_count: usize,
+    pub outbox_count: usize,
+    pub inbox_count: usize,
+    pub paper_order_attempted: bool,
+    pub live_order_attempted: bool,
+    pub broker_ack_seen: bool,
+    pub fill_seen: bool,
+    pub order_failed_or_rejected: bool,
+    /// `true` only when every non-portfolio/non-P&L stage below is
+    /// durably resolved for this run. Portfolio/P&L visibility is never
+    /// counted toward this flag — see `portfolio_truth_state` doc.
+    pub full_lifecycle_visible: bool,
+}
+
+/// `GET /api/v1/execution/paper-lifecycle` response.
+///
+/// Read-only, DB-backed reconstruction of one paper run's lifecycle chain:
+/// run -> strategy signal evaluation -> no-trade diagnostics (if any) ->
+/// oms_outbox order intent/submission -> oms_inbox broker ack/fill ->
+/// portfolio/accounting visibility status -> P&L visibility readiness.
+///
+/// Restart-surviving: every field is sourced from a durable DB row via an
+/// explicit `run_id` or the durably-resolved latest PAPER run
+/// (`mqk_db::fetch_latest_run_for_engine`), never from in-memory
+/// active-run state. Never calls a broker/provider. Never writes.
+#[derive(Debug, Clone, Serialize)]
+pub struct PaperLifecycleResponse {
+    pub canonical_route: String,
+    /// Route-level resolution truth_state: `"db_unavailable"` |
+    /// `"invalid_request"` | `"not_found"` | `"no_rows"` | `"active"`.
+    pub truth_state: String,
+    /// `"resolved"` | `"not_found"` | `"unavailable"`.
+    pub run_truth_state: String,
+    /// `"present"` | `"empty"` | `"unavailable"`.
+    pub signal_truth_state: String,
+    /// `"present"` | `"empty"` | `"unavailable"`.
+    pub no_trade_truth_state: String,
+    /// `"present"` | `"empty"` | `"unavailable"`.
+    pub outbox_truth_state: String,
+    /// `"present"` | `"empty"` | `"unavailable"`.
+    pub inbox_truth_state: String,
+    /// Always `"in_memory_only_not_restart_surviving"` when a run is
+    /// resolved: this route never reads `AppState.broker_snapshot` /
+    /// `AppState.execution_snapshot` (in-memory, lost on restart) and no
+    /// durable portfolio/position table exists in the repo today (see
+    /// Phase A audit doc). This is an honest capability boundary, not a
+    /// fabricated "active" claim.
+    pub portfolio_truth_state: String,
+    /// Mirrors `portfolio_truth_state` for the same reason.
+    pub pnl_truth_state: String,
+    pub run_id: Option<String>,
+    pub run: Option<PaperLifecycleRunRow>,
+    pub signal_evaluations: Vec<PaperLifecycleSignalEvaluationRow>,
+    pub no_trade_diagnostics: Vec<PaperLifecycleNoTradeDiagnosticRow>,
+    pub outbox_orders: Vec<PaperLifecycleOutboxRow>,
+    pub inbox_events: Vec<PaperLifecycleInboxRow>,
+    /// `None` only when `truth_state != "active"`.
+    pub lifecycle_summary: Option<PaperLifecycleSummary>,
+    pub blockers: Vec<String>,
+    pub warnings: Vec<String>,
+}
+
 /// Response for POST /api/v1/alerts/triage/ack.
 ///
 /// **Advisory semantics — not authoritative fault resolution.**
