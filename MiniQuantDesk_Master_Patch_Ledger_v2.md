@@ -9320,8 +9320,27 @@ research-only — selects candidates for analysis, not trading).
 Patch: `STRATEGY-PROMOTION-REGISTRY-01F-CLOSURE-AND-LEDGER-RECONCILE-01`.
 
 ```text
-STRATEGY-PROMOTION-REGISTRY-AND-RUNTIME-ENFORCEMENT-01-COMBINED: CLOSED_LOCAL
+STRATEGY-PROMOTION-REGISTRY-AND-RUNTIME-ENFORCEMENT-01-COMBINED: PARTIAL
 ```
+
+**Disposition corrected by `STRATEGY-PROMOTION-REGISTRY-CLOSURE-REPAIR-01-COMBINED`
+(see entry below).** This entry originally recorded the bundle-level
+disposition as `CLOSED_LOCAL` while its own §5/§9 (and the paragraph
+below beginning "Configuration-fingerprint identity binding remains
+`PARTIAL`") already honestly reported that the contract's own required
+identity-boundary element was incomplete. Per this repo's audit rules
+(`.claude/rules/audit_repo_truth_rules.md`), a patch group cannot be
+`CLOSED_LOCAL` while a required contract element is `PARTIAL` in the
+same breath — this was a real closure-honesty defect, not a stale
+snapshot. The corrected disposition is `PARTIAL`, unchanged since: the
+five runtime/data correctness defects the repair patch below fixed
+(future-effective activation, concurrent-transition branching, evidence
+lineage loss, missing paper-only mode boundary) are now closed, but
+configuration-fingerprint identity binding remains the same honestly-
+reported `PARTIAL` it always was — see `STRATEGY-PROMOTION-CONFIG-IDENTITY-BINDING-01`
+below. The narrative below is preserved unedited as the historical
+record of what Phases A–F of the original patch group actually did; only
+this disposition banner and this note are corrections.
 
 Closes the gap the prior scanner-promotion bundle explicitly left open:
 `paper_candidate` carried no trading meaning, and nothing consumed it to
@@ -9406,3 +9425,161 @@ no new market-hours-dependent surface.
 
 **Recommended next off-market prompt:**
 `DAILY-DATA-READINESS-AND-FRESHNESS-01-COMBINED`.
+
+---
+
+## STRATEGY-PROMOTION-REGISTRY-CLOSURE-REPAIR-01-COMBINED
+
+```text
+STRATEGY-PROMOTION-REGISTRY-CLOSURE-REPAIR-01-COMBINED: CLOSED_LOCAL
+```
+
+Repairs five defects found in
+`STRATEGY-PROMOTION-REGISTRY-AND-RUNTIME-ENFORCEMENT-01-COMBINED`
+(disposition corrected above, from `CLOSED_LOCAL` to `PARTIAL`):
+
+1. **Future-effective activation.** `evaluate_promotion_tradability`
+   never checked `effective_at_utc` at all — an `active_paper` row
+   dated an hour or a year in the future became tradable the instant it
+   was inserted. Fixed: the evaluator now checks
+   `effective_at_utc <= now_utc` (new `PromotionNotYetEffective` reason
+   code), and the route additionally rejects any `effective_at_utc`
+   submitted more than 5 minutes ahead of the daemon's own clock —
+   scheduled future promotions are not a supported feature, only
+   ordinary clock-skew tolerance. Expiry now uses `<=`, not `<`.
+2. **Concurrent-transition branching.** The route read current state,
+   then wrote, as two separate uncoordinated operations — two
+   concurrent requests could both read the same `previous_state` and
+   both insert, branching history with no operator-visible signal.
+   Fixed: `insert_strategy_promotion_transition_serialized`
+   (`mqk-db`) opens one transaction, takes a
+   `pg_advisory_xact_lock` keyed on the exact identity, re-reads the
+   true current transition inside that lock, and rejects a stale
+   parent with a new stable `transition_conflict` disposition (409).
+   `parent_transition_id` records the resulting linear chain.
+3. **Evidence-lineage loss.** Only the initial (or re-approved)
+   evidence-bearing transition carried `evidence_*` columns; every
+   later transition (`paper_approved -> active_paper`, any `-> demoted`)
+   had them `NULL`, so the current `active_paper` record for any
+   identity that had advanced past its first row showed no review id,
+   scanner scan id, git hash, fingerprint, or artifact path. Fixed:
+   `evidence_transition_id` durably points to the exact evidence-bearing
+   ancestor (self, or inherited); `resolve_evidence_lineage` resolves it
+   on every read route (`GET .../promotions`, `.../history`,
+   `.../check`) instead of surfacing the current row's own frequently-
+   null columns. A `demoted -> shadow_approved` re-approval establishes
+   fresh lineage; a demoted record still resolves its original evidence.
+4. **No explicit paper-only runtime boundary.** The shared promotion
+   gate took no run-mode parameter at all — its safety rested entirely
+   on "no LIVE call site happens to exist today," documented as such in
+   the original design doc §14. Fixed: `evaluate_paper_promotion_gate`
+   now requires an explicit `PromotionRunMode` (`Paper` | `Live` |
+   `Unknown`); anything but `Paper` is denied unconditionally with
+   `PromotionReasonCode::PromotionLiveNotAuthorized` before the DB is
+   even queried. Both call sites pass
+   `PromotionRunMode::from(state.deployment_mode())`.
+5. **Incorrect `CLOSED_LOCAL` disposition.** See the correction recorded
+   on the entry above and the new open item below.
+
+New additive migration `0047_strategy_promotion_transition_lineage.sql`
+(`parent_transition_id`, `evidence_transition_id`, both nullable
+self-referential FKs — no existing column, row, or constraint from
+migration `0046` altered). No `.env.local`/paper-DB (port 5440) touch;
+no broker/provider call; no daemon runtime started; no order submitted;
+no strategy/risk/session/reconcile/OMS logic touched; no live enablement
+added.
+
+**Phase commits:** `9a7480cf` (audit) → `e35c547c` (DB-layer atomicity +
+temporal-eval fix + evidence-lineage resolution, migration `0047`) →
+`2099055d` (route-layer wiring: clock-skew/expiry validation, atomic
+insert, evidence surfacing on read routes) → `b47c68bc` (paper-only
+mode boundary) → this entry (disposition reconciliation). Note: the
+mission's suggested phase-commit boundaries for the DB-layer temporal
+fix ("fix: enforce promotion effective time") and the evidence-lineage
+fix ("fix: preserve promotion evidence lineage") landed together in
+`e35c547c`/`2099055d` rather than as fully separate commits — both
+defects required the same new migration and touched the same functions
+in the same files, and splitting them further risked an
+intermediate commit that did not build. Reported here rather than
+silently reshaped to match the suggested message list.
+
+**Validation:** `cargo check`/`cargo clippy -p mqk-db -p mqk-daemon
+--lib -- -D warnings` clean except the pre-existing, explicitly
+out-of-scope `manual_range_contains` finding at
+`routes/strategy_scans.rs:87` (confirmed untouched by this patch);
+`cargo fmt --check` clean on every file this patch touched (pre-existing
+unrelated drift elsewhere in `mqk-daemon`/`mqk-db` left as found, per
+the same convention as the original bundle). Targeted tests only, one
+binary at a time, isolated local test DB (port 5434),
+`--include-ignored --test-threads=1`:
+`scenario_strategy_promotion_registry_01` (mqk-db) 18/18,
+`scenario_strategy_promotion_routes_01` 17/17,
+`scenario_strategy_promotion_runtime_gate_01` 28/28,
+`scenario_strategy_promotion_closure_proof_01f` 1/1. Full `mqk-daemon`
+test suite deliberately not run, per mission boundary; `cargo check
+--tests -p mqk-daemon` confirmed the whole test tree (including the 6
+other pre-existing test files whose direct `InsertStrategyPromotionTransitionArgs`
+construction needed the two new struct fields) still compiles.
+
+**Safety confirmation:** no real or forced paper/live orders; no
+broker/provider/network call; no daemon runtime process started (every
+proof uses in-process `axum::Router` + `tower::ServiceExt::oneshot()`
+or direct `mqk-db` calls against the isolated test DB); no execution
+armed; paper DB (port 5440) never touched; no strategy/risk/session/
+reconcile/OMS logic weakened; no `.env.local` edited; no push.
+
+**Recommended next market-hours prompt:** unchanged.
+
+**Recommended next off-market prompt:**
+`DAILY-DATA-READINESS-AND-FRESHNESS-01-COMBINED` (per this patch's own
+mission — do not begin in this session).
+
+---
+
+## STRATEGY-PROMOTION-CONFIG-IDENTITY-BINDING-01
+
+```text
+STRATEGY-PROMOTION-CONFIG-IDENTITY-BINDING-01: OPEN
+```
+
+Explicit open item, split out of the corrected
+`STRATEGY-PROMOTION-REGISTRY-AND-RUNTIME-ENFORCEMENT-01-COMBINED` /
+`STRATEGY-PROMOTION-REGISTRY-CLOSURE-REPAIR-01-COMBINED` disposition
+rather than left implicit in prose.
+
+**What's open:** no code path anywhere in the current strategy runtime
+(`InternalStrategyDecision`, `StrategySignalRequest`, `StrategySpec`,
+`SymbolStrategyAssignment`) carries a config hash or parameter
+fingerprint that both an approval-creation caller and a runtime-check
+caller could compute identically. `sys_strategy_promotion_transitions.config_fingerprint`
+is a nullable column, always `NULL`; `config_identity_status` is always
+`"unavailable_in_current_runtime"`, truthfully surfaced on every read
+route. Promotion identity today is **identity-v1**:
+`strategy_id + symbol + timeframe_secs` only — fully enforced and
+DB-proven, but blind to a same-`strategy_id` configuration/parameter
+change.
+
+**Re-audited during the closure-repair patch** (per its Phase F
+instruction): still no reproducible fingerprint can be added without a
+broad configuration-system refactor across `mqk-strategy`, `decision.rs`,
+and `routes/strategy.rs` — out of scope for a closure-repair patch.
+Identity-v1 is retained honestly rather than fabricating a fingerprint.
+
+**Does this block the autonomous paper soak?** **No.** The paper-trading
+gate itself (`active_paper`, exact `strategy_id + symbol +
+timeframe_secs` match, unexpired, paper-only mode) is fully closed and
+DB-proven — that is what actually authorizes a new paper outbox row.
+This item only matters if a strategy's *internal parameters* change
+while its `strategy_id` stays the same: today, an existing
+`active_paper` approval would silently continue to apply to the new
+parameter set, since there is no fingerprint to detect the drift.
+
+**Does this block later strategy-configuration hot-swapping?** **Yes.**
+Any future work that lets an operator change a registered strategy's
+parameters in place (without registering a new `strategy_id`) must not
+ship until this item closes — otherwise a parameter change could
+silently inherit a promotion that was only ever evidence-validated
+against the old parameters.
+
+**Recommended next prompt:** none scheduled; revisit only if/when
+strategy-configuration hot-swapping is proposed.

@@ -3,9 +3,26 @@
 Patch group: `STRATEGY-PROMOTION-REGISTRY-AND-RUNTIME-ENFORCEMENT-01-COMBINED`
 Patch: `STRATEGY-PROMOTION-REGISTRY-01F-CLOSURE-AND-LEDGER-RECONCILE-01`
 
+> **Disposition corrected by `STRATEGY-PROMOTION-REGISTRY-CLOSURE-REPAIR-01-COMBINED`.**
+> §1 below originally reported `CLOSED_LOCAL` while §5/§9 of this same
+> document already honestly reported configuration-fingerprint identity
+> binding as `PARTIAL` — a patch group cannot be `CLOSED_LOCAL` while one
+> of its own binding contract elements is `PARTIAL` in the same breath
+> (see `docs/specs/strategy_promotion_registry_closure_repair_01a_audit.md`
+> item 5). The corrected bundle disposition is **`PARTIAL`**. Everything
+> else in this document is preserved unedited as the historical record of
+> what Phases A–F actually built and proved; the repair patch separately
+> fixed five runtime/data-correctness defects found in that work
+> (future-effective activation, concurrent-transition branching, evidence
+> lineage loss, missing paper-only mode boundary, and this disposition
+> itself) — see that patch's own audit and the ledger entries
+> `STRATEGY-PROMOTION-REGISTRY-CLOSURE-REPAIR-01-COMBINED` and
+> `STRATEGY-PROMOTION-CONFIG-IDENTITY-BINDING-01`.
+
 ## 1. Is `STRATEGY-PROMOTION-REGISTRY-AND-RUNTIME-ENFORCEMENT-01-COMBINED` closed?
 
-**Yes — `CLOSED_LOCAL`.** A durable, append-only strategy paper-promotion
+**Corrected: `PARTIAL`, not `CLOSED_LOCAL`** (see notice above). At the
+time this section was originally written: A durable, append-only strategy paper-promotion
 registry now exists, is independently evidence-validated at approval
 time, exposes an operator-authenticated transition surface plus
 read-only truth routes, and is enforced as a hard runtime gate on both
@@ -353,13 +370,19 @@ patch group's own mission.
 ## Final status
 
 ```text
-STRATEGY-PROMOTION-REGISTRY-AND-RUNTIME-ENFORCEMENT-01-COMBINED: CLOSED_LOCAL
+STRATEGY-PROMOTION-REGISTRY-AND-RUNTIME-ENFORCEMENT-01-COMBINED: PARTIAL
 ```
+
+**Corrected by `STRATEGY-PROMOTION-REGISTRY-CLOSURE-REPAIR-01-COMBINED`**:
+this line originally read `CLOSED_LOCAL`, which was inconsistent with
+this same document's own §5/§9 `PARTIAL` identity-boundary finding
+directly below. See the notice at the top of this document.
 
 **Identity boundary:** `strategy_id + symbol + timeframe_secs` fully
 enforced and DB-proven; configuration fingerprint `PARTIAL`
 (`config_identity_status = "unavailable_in_current_runtime"`, truthfully
-surfaced everywhere, never defaulted).
+surfaced everywhere, never defaulted) — tracked as open ledger item
+`STRATEGY-PROMOTION-CONFIG-IDENTITY-BINDING-01`.
 
 **Safety confirmation (whole bundle):** no real or forced paper/live
 orders; no broker/provider/network call from any promotion-gate, route,
