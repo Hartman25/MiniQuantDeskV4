@@ -20,6 +20,7 @@ mod engine;
 pub mod loader;
 pub mod regime;
 pub mod strategy_lab;
+pub mod strategy_scan_review;
 pub mod strategy_scanner;
 pub mod sweep;
 pub mod types;
@@ -40,6 +41,10 @@ pub use strategy_lab::{
     strategy_lab_input_from_sweep_row, StrategyLabDecision, StrategyLabEvaluation,
     StrategyLabGrade, StrategyLabInput, StrategyLabMetrics, StrategyLabPolicy,
     StrategyLabReasonCode,
+};
+pub use strategy_scan_review::{
+    build_review_decisions, evaluate_scan_review_decision, StrategyScanReviewDecision,
+    StrategyScanReviewPolicy, StrategyScanReviewState,
 };
 pub use strategy_scanner::{
     candidates_to_csv, derive_scan_id, evaluate_scan_candidate, execute_strategy_scan,

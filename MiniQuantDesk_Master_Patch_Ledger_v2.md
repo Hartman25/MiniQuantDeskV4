@@ -9077,3 +9077,46 @@ wiring anywhere in the design.
 Added: `docs/specs/strategy_scanner_promotion_01a_current_truth_audit.md`,
 `scripts/guards/validate_strategy_scanner_promotion_01a_audit.ps1`.
 Validator passes; no code compiled or changed.
+
+---
+
+## STRATEGY-SCANNER-PROMOTION-GATES-AND-RESEARCH-QUEUE-01-COMBINED — Phase B (pure review model)
+
+Patch: `STRATEGY-SCANNER-PROMOTION-01B-PURE-REVIEW-MODEL-01`.
+
+Added `core-rs/crates/mqk-backtest/src/strategy_scan_review.rs`: a pure,
+no-IO classifier consuming already-evaluated
+`mqk_backtest::StrategyScanCandidate` rows and a
+`StrategyScanReviewPolicy` (`min_bars_used=252`, `min_trade_count=5`,
+`min_total_return_pct=0.0`, `min_alpha_pct=0.0`, `max_drawdown_pct=25.0`,
+`min_profit_factor=1.05`), producing a `StrategyScanReviewDecision` with
+`StrategyScanReviewState` (`Blocked` / `NeedsReview` /
+`WatchlistCandidate` / `PaperCandidate` / `Rejected`). A candidate whose
+scanner `truth_state` never reached `candidate_ranked` is always
+`Blocked`. Missing required evidence (score/return/alpha/drawdown/trade
+count) or too-few-bars is `Blocked`; halted, excess-drawdown, or
+**negative absolute `total_return_pct`** (even with positive `alpha_pct`
+— the scanner's own known rank-vs-absolute-return caveat) is `Rejected`;
+too-few-trades is `NeedsReview`; a present-but-weak or missing profit
+factor is `WatchlistCandidate`; everything else is `PaperCandidate`.
+`PaperCandidate` carries no trading meaning — nothing in this module or
+elsewhere consumes it to submit, route, or admit an order.
+
+Wired into `mqk-backtest::lib.rs` (`pub mod strategy_scan_review;` +
+re-exports). Added
+`core-rs/crates/mqk-backtest/tests/scenario_strategy_scan_review_01.rs`:
+13 tests covering all 5 states, the negative-return-blocks-promotion
+rule explicitly, deterministic ordering, stable JSON round-trip, and a
+source-level import-line check proving no broker/execution/OMS/outbox/
+inbox/admission/strategy-router reference exists in the module.
+
+**Validation:** `cargo check -p mqk-backtest` clean;
+`cargo test -p mqk-backtest --test scenario_strategy_scan_review_01` —
+13/13 pass; `cargo test -p mqk-backtest --test scenario_strategy_lab_scanner_01`
+— 11/11 pass (unchanged, confirming no regression to the existing
+scanner core); `cargo clippy -p mqk-backtest --all-targets -- -D
+warnings` clean.
+
+**Safety confirmation:** no file/network/DB IO in the new module; no
+broker/provider/OMS/admission/order import; no existing strategy,
+scanner, or Strategy Lab logic touched; no DB migration.
