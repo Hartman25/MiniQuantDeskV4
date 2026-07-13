@@ -29,6 +29,14 @@ test("screen source contains every required research-only warning string", () =>
   assert.ok(screenSource.includes("Candidates can rank well while still having negative absolute returns."));
 });
 
+// STRATEGY-SCANNER-PROMOTION-01D: review-queue warnings, required whenever
+// the review-artifact panel displays a result.
+test("screen source contains every required promotion-review warning string", () => {
+  assert.ok(screenSource.includes("promotion-ready is not trading-approved."));
+  assert.ok(screenSource.includes("paper_candidate is not autonomous trading approval."));
+  assert.ok(screenSource.includes("A separate paper-promotion patch is required before any paper trading."));
+});
+
 test("screen source has no trade/promote/approve control", () => {
   const forbidden = [
     "Promote",
@@ -65,4 +73,5 @@ test("screen/api source only calls strategy-scans routes, never order/execution/
   }
   assert.ok(apiSource.includes("/api/v1/strategy-scans/jobs"));
   assert.ok(apiSource.includes("/api/v1/strategy-scans/artifact"));
+  assert.ok(apiSource.includes("/api/v1/strategy-scans/review-artifact"));
 });

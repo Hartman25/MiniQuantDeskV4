@@ -16,10 +16,16 @@ import {
   buildStrategyScanJobRequest,
   getStrategyScanArtifact,
   getStrategyScanJob,
+  getStrategyScanReviewArtifact,
   isTerminalStrategyScanJobStatus,
   submitStrategyScanJob,
 } from "./api.ts";
-import type { ActiveStrategyScanJob, StrategyScanArtifactResponse, StrategyScanJobStatusKind } from "./types.ts";
+import type {
+  ActiveStrategyScanJob,
+  StrategyScanArtifactResponse,
+  StrategyScanJobStatusKind,
+  StrategyScanReviewArtifactResponse,
+} from "./types.ts";
 
 const REGISTRY_SEGMENTS = ["config", "instruments", "equities.json"];
 const BARS_ROOT_SEGMENTS = ["exports", "md_backup"];
@@ -44,6 +50,30 @@ function ResearchOnlyWarningBanner() {
     >
       <strong>Research review only.</strong>{" "}
       {RESEARCH_WARNINGS.join(" ")}
+    </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// STRATEGY-SCANNER-PROMOTION-01D: review-artifact warnings — always shown
+// when any review artifact result is displayed. `paper_candidate` is a
+// research-review label only, never trading approval.
+// ---------------------------------------------------------------------------
+
+const REVIEW_WARNINGS: string[] = [
+  "promotion-ready is not trading-approved.",
+  "paper_candidate is not autonomous trading approval.",
+  "A separate paper-promotion patch is required before any paper trading.",
+];
+
+function ReviewOnlyWarningBanner() {
+  return (
+    <div
+      className="unavailable-notice"
+      style={{ margin: "0 0 4px", borderColor: "var(--accent, #c8a84b)", color: "var(--text)" }}
+    >
+      <strong>Review queue only.</strong>{" "}
+      {REVIEW_WARNINGS.join(" ")}
     </div>
   );
 }
@@ -171,6 +201,134 @@ function ArtifactReviewPanel({ artifact }: { artifact: StrategyScanArtifactRespo
 }
 
 // ---------------------------------------------------------------------------
+// STRATEGY-SCANNER-PROMOTION-01D: review-artifact display panel.
+//
+// Display only -- no button on this panel submits, promotes, or approves
+// anything. `paper_candidate` means "eligible for a later, separately
+// authorized paper-promotion patch to consider", not trading approval.
+// ---------------------------------------------------------------------------
+
+function ReviewArtifactPanel({ artifact }: { artifact: StrategyScanReviewArtifactResponse }) {
+  if (artifact.truth_state !== "active") {
+    const label =
+      artifact.truth_state === "missing_artifact" ? "Review artifact directory not found." :
+      artifact.truth_state === "invalid_artifact" ? "Review artifact files could not be parsed." :
+      artifact.truth_state === "path_rejected" ? "Review artifact path was rejected (outside the configured review artifact root)." :
+      "Review artifact could not be read.";
+    return (
+      <div className="unavailable-notice unavailable-critical">
+        <strong>truth_state: {artifact.truth_state}.</strong> {label}
+        {artifact.error ? ` (${artifact.error})` : ""}
+      </div>
+    );
+  }
+
+  return (
+    <>
+      <div className="timeline-meta-grid" style={{ marginBottom: 8 }}>
+        <div>
+          <span>Candidates</span>
+          <strong>{artifact.summary?.candidate_count ?? "—"}</strong>
+        </div>
+        <div>
+          <span>Paper candidate</span>
+          <strong>{artifact.summary?.paper_candidate_count ?? "—"}</strong>
+        </div>
+        <div>
+          <span>Watchlist</span>
+          <strong>{artifact.summary?.watchlist_candidate_count ?? "—"}</strong>
+        </div>
+        <div>
+          <span>Needs review</span>
+          <strong>{artifact.summary?.needs_review_count ?? "—"}</strong>
+        </div>
+        <div>
+          <span>Blocked</span>
+          <strong>{artifact.summary?.blocked_count ?? "—"}</strong>
+        </div>
+        <div>
+          <span>Rejected</span>
+          <strong>{artifact.summary?.rejected_count ?? "—"}</strong>
+        </div>
+      </div>
+
+      <h4 style={{ margin: "8px 0 4px" }}>Paper candidates (research review only)</h4>
+      {artifact.top_paper_candidates.length === 0 ? (
+        <div className="unavailable-notice">No paper_candidate rows in this review.</div>
+      ) : (
+        <table className="bt-table" style={{ width: "100%", tableLayout: "auto" }}>
+          <thead>
+            <tr>
+              <th>Symbol</th>
+              <th>Strategy</th>
+              <th>Timeframe</th>
+              <th style={{ textAlign: "right" }}>Scanner rank</th>
+              <th style={{ textAlign: "right" }}>Scanner score</th>
+              <th>Review state</th>
+              <th>Reason codes</th>
+            </tr>
+          </thead>
+          <tbody>
+            {artifact.top_paper_candidates.map((d) => (
+              <tr key={`${d.symbol}|${d.timeframe}|${d.strategy_id}`}>
+                <td><strong>{d.symbol}</strong></td>
+                <td>{d.strategy_id}</td>
+                <td>{d.timeframe}</td>
+                <td style={{ textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
+                  {d.scanner_rank ?? "—"}
+                </td>
+                <td style={{ textAlign: "right", fontVariantNumeric: "tabular-nums" }}>
+                  {d.scanner_score !== null ? d.scanner_score.toFixed(2) : "—"}
+                </td>
+                <td>{d.review_state}</td>
+                <td>{d.reason_codes.join(", ")}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+
+      <h4 style={{ margin: "12px 0 4px" }}>Watchlist candidates</h4>
+      {artifact.top_watchlist_candidates.length === 0 ? (
+        <div className="unavailable-notice">No watchlist_candidate rows in this review.</div>
+      ) : (
+        <table className="bt-table" style={{ width: "100%", tableLayout: "auto" }}>
+          <thead>
+            <tr>
+              <th>Symbol</th>
+              <th>Strategy</th>
+              <th>Timeframe</th>
+              <th>Reason codes</th>
+            </tr>
+          </thead>
+          <tbody>
+            {artifact.top_watchlist_candidates.map((d) => (
+              <tr key={`${d.symbol}|${d.timeframe}|${d.strategy_id}`}>
+                <td><strong>{d.symbol}</strong></td>
+                <td>{d.strategy_id}</td>
+                <td>{d.timeframe}</td>
+                <td>{d.reason_codes.join(", ")}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+
+      {artifact.blockers.length > 0 && (
+        <>
+          <h4 style={{ margin: "12px 0 4px" }}>Blockers</h4>
+          <ul style={{ margin: 0, paddingLeft: 20 }}>
+            {artifact.blockers.map((b, i) => (
+              <li key={i}>{b}</li>
+            ))}
+          </ul>
+        </>
+      )}
+    </>
+  );
+}
+
+// ---------------------------------------------------------------------------
 // Main screen component
 // ---------------------------------------------------------------------------
 
@@ -198,6 +356,29 @@ export function StrategyScannerScreen() {
   const [artifact, setArtifact] = useState<StrategyScanArtifactResponse | null>(null);
   const [artifactLoading, setArtifactLoading] = useState(false);
   const [artifactError, setArtifactError] = useState<string | null>(null);
+
+  const [reviewDir, setReviewDir] = useState("");
+  const [reviewArtifact, setReviewArtifact] = useState<StrategyScanReviewArtifactResponse | null>(null);
+  const [reviewArtifactLoading, setReviewArtifactLoading] = useState(false);
+  const [reviewArtifactError, setReviewArtifactError] = useState<string | null>(null);
+
+  const handleLoadReviewArtifact = useCallback(async () => {
+    const trimmed = reviewDir.trim();
+    if (!trimmed) {
+      setReviewArtifactError("review_dir is required.");
+      return;
+    }
+    setReviewArtifactLoading(true);
+    setReviewArtifactError(null);
+    const result = await getStrategyScanReviewArtifact(trimmed);
+    setReviewArtifactLoading(false);
+    if (!result.ok) {
+      setReviewArtifactError(result.error ?? "Review artifact fetch failed.");
+      setReviewArtifact(null);
+      return;
+    }
+    setReviewArtifact(result.data ?? null);
+  }, [reviewDir]);
 
   const pollingRef = useRef<{ cancelled: boolean }>({ cancelled: false });
 
@@ -496,6 +677,48 @@ export function StrategyScannerScreen() {
           {artifact && <ArtifactReviewPanel artifact={artifact} />}
         </Panel>
       )}
+
+      <Panel
+        title="Research-review queue (promotion evidence)"
+        subtitle="Loads a review artifact written by 'mqk backtest review-scan'. Display only -- no promote/approve/trade action anywhere on this panel."
+      >
+        <ReviewOnlyWarningBanner />
+        <div className="bt-job-form-grid">
+          <div className="bt-job-field" style={{ gridColumn: "1 / -1" }}>
+            <label htmlFor="review-dir">Review artifact directory</label>
+            <input
+              id="review-dir"
+              type="text"
+              value={reviewDir}
+              onChange={(e) => setReviewDir(e.target.value)}
+              spellCheck={false}
+              autoComplete="off"
+              placeholder="exports/strategy_reviews/<review_id>"
+            />
+          </div>
+        </div>
+        <div className="bt-path-row" style={{ marginTop: 8 }}>
+          <button
+            type="button"
+            className="action-button"
+            onClick={() => void handleLoadReviewArtifact()}
+            disabled={reviewArtifactLoading}
+          >
+            {reviewArtifactLoading ? "Loading…" : "Load review artifact"}
+          </button>
+        </div>
+
+        {reviewArtifactError && (
+          <div className="unavailable-notice unavailable-critical" style={{ marginTop: 10 }}>
+            <strong>Review artifact load failed:</strong> {reviewArtifactError}
+          </div>
+        )}
+        {reviewArtifact && (
+          <div style={{ marginTop: 10 }}>
+            <ReviewArtifactPanel artifact={reviewArtifact} />
+          </div>
+        )}
+      </Panel>
     </div>
   );
 }

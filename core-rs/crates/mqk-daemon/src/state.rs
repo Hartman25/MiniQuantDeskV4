@@ -494,6 +494,16 @@ pub struct AppState {
     /// (`truth_state="path_rejected"`) — this route never reads an arbitrary
     /// file path.
     pub strategy_scan_artifact_root: String,
+    /// STRATEGY-SCANNER-PROMOTION-01D: Root directory the read-only review
+    /// artifact route (`GET /api/v1/strategy-scans/review-artifact`) will
+    /// serve from.
+    ///
+    /// Default: "exports/strategy_reviews" (relative to daemon CWD).
+    /// Override: MQK_STRATEGY_REVIEW_ARTIFACT_ROOT env var. A requested
+    /// `review_dir` that does not resolve inside this root is refused
+    /// (`truth_state="path_rejected"`) — this route never reads an
+    /// arbitrary file path.
+    pub strategy_review_artifact_root: String,
     /// DATA-INGEST-GUI-SYNC-ALL-01: Filesystem path to the canonical instrument registry.
     ///
     /// Read at route-time (not cached) by GET /api/v1/ingest/tracked-equities.
@@ -1265,6 +1275,8 @@ impl AppState {
             strategy_scan_jobs: new_strategy_scan_job_store(),
             strategy_scan_artifact_root: std::env::var("MQK_STRATEGY_SCAN_ARTIFACT_ROOT")
                 .unwrap_or_else(|_| "exports/strategy_scans".to_string()),
+            strategy_review_artifact_root: std::env::var("MQK_STRATEGY_REVIEW_ARTIFACT_ROOT")
+                .unwrap_or_else(|_| "exports/strategy_reviews".to_string()),
             instrument_registry_path: std::env::var("MQK_INSTRUMENT_REGISTRY_PATH")
                 .unwrap_or_else(|_| "config/instruments/equities.json".to_string()),
             instrument_registry_v2_path: std::env::var("MQK_INSTRUMENT_REGISTRY_V2_PATH").ok(),

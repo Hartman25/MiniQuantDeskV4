@@ -137,6 +137,91 @@ export interface StrategyScanArtifactResponse {
   error: string | null;
 }
 
+// ---------------------------------------------------------------------------
+// STRATEGY-SCANNER-PROMOTION-01D: review-artifact types. Mirrors
+// mqk_backtest::{ReviewManifest, ReviewSummary, StrategyScanReviewDecision,
+// StrategyScanReviewState} and daemon api_types.rs
+// StrategyScanReviewArtifactResponse.
+//
+// Research/review only. `paper_candidate` is NOT trading approval -- see
+// StrategyScannerScreen.tsx's required warning banner.
+// ---------------------------------------------------------------------------
+
+export type StrategyScanReviewStateKind =
+  | "blocked"
+  | "needs_review"
+  | "watchlist_candidate"
+  | "paper_candidate"
+  | "rejected";
+
+export interface StrategyScanReviewDecision {
+  symbol: string;
+  timeframe: string;
+  strategy_id: string;
+  scanner_rank: number | null;
+  scanner_score: number | null;
+  review_state: StrategyScanReviewStateKind;
+  reason_codes: string[];
+  blockers: string[];
+  warnings: string[];
+}
+
+export interface ReviewManifest {
+  schema_version: number;
+  review_id: string;
+  scanner_scan_id: string;
+  source_artifact_dir: string;
+  created_at_utc: string;
+  git_hash: string;
+  policy_min_bars_used: number;
+  policy_min_trade_count: number;
+  policy_min_total_return_pct: number;
+  policy_min_alpha_pct: number;
+  policy_max_drawdown_pct: number;
+  policy_min_profit_factor: number;
+  candidate_count: number;
+  blocked_count: number;
+  needs_review_count: number;
+  watchlist_candidate_count: number;
+  paper_candidate_count: number;
+  rejected_count: number;
+  blockers: string[];
+  warnings: string[];
+}
+
+export interface ReviewSummary {
+  scanner_scan_id: string;
+  review_id: string;
+  candidate_count: number;
+  blocked_count: number;
+  needs_review_count: number;
+  watchlist_candidate_count: number;
+  paper_candidate_count: number;
+  rejected_count: number;
+  top_paper_candidates: StrategyScanReviewDecision[];
+  top_watchlist_candidates: StrategyScanReviewDecision[];
+  blockers: string[];
+  warnings: string[];
+}
+
+/**
+ * `truth_state`: "active" | "missing_artifact" | "invalid_artifact" |
+ * "path_rejected" | "read_failed". "active" is the only state where
+ * manifest/summary/decisions are populated.
+ */
+export interface StrategyScanReviewArtifactResponse {
+  truth_state: string;
+  review_dir: string;
+  manifest: ReviewManifest | null;
+  summary: ReviewSummary | null;
+  decisions: StrategyScanReviewDecision[] | null;
+  top_paper_candidates: StrategyScanReviewDecision[];
+  top_watchlist_candidates: StrategyScanReviewDecision[];
+  warnings: string[];
+  blockers: string[];
+  error: string | null;
+}
+
 export type StrategyScanJobStatusKind = "queued" | "running" | "completed" | "failed" | "unknown";
 
 export interface ActiveStrategyScanJob {

@@ -37,7 +37,7 @@ use crate::{
     api_types::{
         StrategyScanArtifactResponse, StrategyScanJobAcceptedResponse,
         StrategyScanJobStatusResponse, StrategyScanJobSubmitRequest, StrategyScanJobSummary,
-        StrategyScanJobsListResponse,
+        StrategyScanJobsListResponse, StrategyScanReviewArtifactResponse,
     },
     state::AppState,
     strategy_scan_jobs::{StrategyScanJobRecord, StrategyScanJobStatus},
@@ -47,6 +47,7 @@ const MIN_TOP: usize = 1;
 const MAX_TOP: usize = 100;
 const MAX_LIMIT_SYMBOLS: usize = 200;
 const MAX_ARTIFACT_CANDIDATE_ROWS: usize = 200;
+const MAX_REVIEW_ARTIFACT_DECISION_ROWS: usize = 200;
 
 const RESEARCH_ONLY_WARNING: &str = "Scanner ranking is research evidence only.";
 const NOT_TRADING_APPROVAL_WARNING: &str =
@@ -472,6 +473,185 @@ fn read_artifact_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, 
     let raw =
         std::fs::read_to_string(path).map_err(|e| format!("read failed: {}: {e}", path.display()))?;
     serde_json::from_str(&raw).map_err(|e| format!("parse failed: {}: {e}", path.display()))
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/strategy-scans/review-artifact?review_dir=<path>
+//
+// STRATEGY-SCANNER-PROMOTION-01D: read-only readback of a review artifact
+// directory written by `mqk backtest review-scan`
+// (`mqk_backtest::write_review_artifacts`). Same canonicalize+root-prefix
+// path validation pattern as the sibling scanner artifact route above. No
+// provider/broker/network call. Does not touch orders/outbox/inbox/
+// admission/OMS state.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct StrategyScanReviewArtifactQuery {
+    review_dir: Option<String>,
+}
+
+pub(crate) async fn strategy_scan_review_artifact(
+    State(st): State<Arc<AppState>>,
+    Query(query): Query<StrategyScanReviewArtifactQuery>,
+) -> Response {
+    let requested = query.review_dir.unwrap_or_default();
+    let requested = requested.trim().to_string();
+    let warnings = fixed_research_warnings();
+
+    if requested.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(review_artifact_error_response(
+                "path_rejected",
+                &requested,
+                warnings,
+                "review_dir query parameter is required".to_string(),
+            )),
+        )
+            .into_response();
+    }
+
+    let candidate_path = Path::new(&requested);
+    let root = Path::new(&st.strategy_review_artifact_root);
+
+    // Fail-closed: only serve directories that resolve inside the configured
+    // review artifact root. A directory that does not exist at all is
+    // reported as `missing_artifact`, not `path_rejected`.
+    let candidate_canon = match std::fs::canonicalize(candidate_path) {
+        Ok(p) => p,
+        Err(_) => {
+            return Json(review_artifact_error_response(
+                "missing_artifact",
+                &requested,
+                warnings,
+                format!("review_dir not found: {requested}"),
+            ))
+            .into_response();
+        }
+    };
+    let root_canon = match std::fs::canonicalize(root) {
+        Ok(p) => p,
+        Err(_) => {
+            return Json(review_artifact_error_response(
+                "path_rejected",
+                &requested,
+                warnings,
+                format!(
+                    "configured review artifact root is unavailable: {}",
+                    root.display()
+                ),
+            ))
+            .into_response();
+        }
+    };
+    if !candidate_canon.starts_with(&root_canon) {
+        return Json(review_artifact_error_response(
+            "path_rejected",
+            &requested,
+            warnings,
+            "review_dir does not resolve inside the configured review artifact root".to_string(),
+        ))
+        .into_response();
+    }
+
+    let manifest_path = candidate_canon.join("manifest.json");
+    let summary_path = candidate_canon.join("summary.json");
+    let decisions_path = candidate_canon.join("review_decisions.json");
+
+    for p in [&manifest_path, &summary_path, &decisions_path] {
+        if !p.is_file() {
+            return Json(review_artifact_error_response(
+                "missing_artifact",
+                &requested,
+                warnings,
+                format!("expected artifact file not found: {}", p.display()),
+            ))
+            .into_response();
+        }
+    }
+
+    let manifest: mqk_backtest::ReviewManifest = match read_artifact_json(&manifest_path) {
+        Ok(m) => m,
+        Err(e) => {
+            return Json(review_artifact_error_response(
+                "invalid_artifact",
+                &requested,
+                warnings,
+                e,
+            ))
+            .into_response();
+        }
+    };
+    let summary: mqk_backtest::ReviewSummary = match read_artifact_json(&summary_path) {
+        Ok(s) => s,
+        Err(e) => {
+            return Json(review_artifact_error_response(
+                "invalid_artifact",
+                &requested,
+                warnings,
+                e,
+            ))
+            .into_response();
+        }
+    };
+    let decisions: Vec<mqk_backtest::StrategyScanReviewDecision> =
+        match read_artifact_json(&decisions_path) {
+            Ok(d) => d,
+            Err(e) => {
+                return Json(review_artifact_error_response(
+                    "invalid_artifact",
+                    &requested,
+                    warnings,
+                    e,
+                ))
+                .into_response();
+            }
+        };
+
+    let capped_decisions: Vec<_> = decisions
+        .into_iter()
+        .take(MAX_REVIEW_ARTIFACT_DECISION_ROWS)
+        .collect();
+    let top_paper_candidates = summary.top_paper_candidates.clone();
+    let top_watchlist_candidates = summary.top_watchlist_candidates.clone();
+
+    (
+        StatusCode::OK,
+        Json(StrategyScanReviewArtifactResponse {
+            truth_state: "active".to_string(),
+            review_dir: candidate_canon.display().to_string(),
+            manifest: Some(manifest),
+            summary: Some(summary),
+            decisions: Some(capped_decisions),
+            top_paper_candidates,
+            top_watchlist_candidates,
+            warnings,
+            blockers: Vec::new(),
+            error: None,
+        }),
+    )
+        .into_response()
+}
+
+fn review_artifact_error_response(
+    truth_state: &str,
+    review_dir: &str,
+    warnings: Vec<String>,
+    error: String,
+) -> StrategyScanReviewArtifactResponse {
+    StrategyScanReviewArtifactResponse {
+        truth_state: truth_state.to_string(),
+        review_dir: review_dir.to_string(),
+        manifest: None,
+        summary: None,
+        decisions: None,
+        top_paper_candidates: Vec::new(),
+        top_watchlist_candidates: Vec::new(),
+        warnings,
+        blockers: Vec::new(),
+        error: Some(error),
+    }
 }
 
 // ---------------------------------------------------------------------------

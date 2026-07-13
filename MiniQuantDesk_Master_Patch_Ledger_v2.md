@@ -9185,3 +9185,77 @@ connection opened; no strategy threshold or existing scanner logic
 changed; no admission/routing wiring; no DB migration; no generated
 scan/review artifact staged (CLI tests write only to OS temp
 directories).
+
+---
+
+## STRATEGY-SCANNER-PROMOTION-GATES-AND-RESEARCH-QUEUE-01-COMBINED — Phase D (daemon readback + GUI review)
+
+Patch: `STRATEGY-SCANNER-PROMOTION-01D-DAEMON-READBACK-AND-GUI-REVIEW-01`.
+
+Added `GET /api/v1/strategy-scans/review-artifact?review_dir=<path>`
+(public, no auth) in
+`core-rs/crates/mqk-daemon/src/routes/strategy_scans.rs`, same
+canonicalize+root-prefix path-validation pattern as the existing
+`GET /api/v1/strategy-scans/artifact` route: reads only `manifest.json`/
+`summary.json`/`review_decisions.json` from a directory that must
+resolve inside `state.strategy_review_artifact_root` (new `AppState`
+field, default `exports/strategy_reviews`, override
+`MQK_STRATEGY_REVIEW_ARTIFACT_ROOT`). `truth_state`: `active` /
+`missing_artifact` / `invalid_artifact` / `path_rejected` /
+`read_failed`. Decision rows capped at 200
+(`MAX_REVIEW_ARTIFACT_DECISION_ROWS`). Added
+`StrategyScanReviewArtifactResponse` to `api_types.rs`, wired the route
+into `routes.rs`'s public router.
+
+GUI: extended the existing `StrategyScannerScreen.tsx` (no new screen)
+with a "Research-review queue" panel — a `review_dir` input, a load
+button, and a display-only `ReviewArtifactPanel` (counts by review
+state, paper-candidate table, watchlist-candidate table, blockers).
+Added `getStrategyScanReviewArtifact` to `api.ts` (reuses the existing
+`isArtifactActive`/`artifactTruthLabel` helpers — identical
+`truth_state` vocabulary) and the matching types to `types.ts`
+(`ReviewManifest`, `ReviewSummary`, `StrategyScanReviewDecision`,
+`StrategyScanReviewArtifactResponse`). No button on the new panel
+submits, promotes, or approves anything. Every result carries the
+required warning set: "promotion-ready is not trading-approved.",
+"paper_candidate is not autonomous trading approval.", "A separate
+paper-promotion patch is required before any paper trading."
+(`ReviewOnlyWarningBanner`), in addition to the existing scanner
+warnings already on the screen.
+
+Added `core-rs/crates/mqk-daemon/tests/scenario_strategy_scan_review_artifact_01.rs`:
+7 tests, fixtures built directly via `mqk_backtest::write_review_artifacts`
+(no dependency on running a real scan). Covers `active`/
+`missing_artifact`/`invalid_artifact`/`path_rejected` truth states, the
+200-row cap (proven with a 300-decision fixture), the required
+query-param check, and the fixed warning set. Extended
+`screenSource.test.ts` with assertions for the three new required
+warning strings and the new route reference — the existing
+no-trade/promote/approve and forbidden-route assertions are unchanged
+and still pass against the extended screen.
+
+**Validation:** `cargo check -p mqk-daemon -p mqk-backtest` clean;
+`cargo test -p mqk-daemon --test scenario_strategy_scan_review_artifact_01 -- --test-threads=1`
+— 7/7 pass; `cargo test -p mqk-daemon --test scenario_strategy_scanner_jobs_01 -- --test-threads=1`
+— 14/14 pass (unchanged); `cargo test -p mqk-daemon --test
+scenario_route_contract_rt01` — 2/2 pass; `cargo test -p mqk-daemon
+--test scenario_gui_daemon_contract_gate` — 23/23 pass; `npm test --
+--run` (mqk-gui) — 728/728 pass; `npm run build` (mqk-gui) succeeds
+(only pre-existing `@tauri-apps` chunking warnings, unrelated).
+
+`cargo clippy -p mqk-daemon -p mqk-backtest --all-targets -- -D
+warnings` surfaces two **pre-existing, unrelated** failures not touched
+by this patch: one `clippy::manual_range_contains` at
+`routes/strategy_scans.rs:87` (from commit `217cf39c`, the prior
+scanner-jobs bundle) and 29 `await_holding_lock` findings in
+`state/session_controller.rs` (from commit `1b5d7233`). Confirmed via
+`git blame` that neither line was touched by this patch; `cargo clippy
+-p mqk-daemon --lib` and `--tests` scoped runs show no clippy issues in
+any file this patch actually added or modified beyond that one
+pre-existing line. Not fixed — out of this patch's stated scope.
+
+**Safety confirmation:** no order/promote/approve control added; the
+only new daemon route is the one read-only
+`GET /api/v1/strategy-scans/review-artifact`; no provider/broker call
+from the daemon or the GUI; no DB migration; no change to any existing
+screen's behavior beyond the additive panel on `StrategyScannerScreen.tsx`.

@@ -4827,6 +4827,44 @@ pub struct StrategyScanArtifactResponse {
 }
 
 // ---------------------------------------------------------------------------
+// STRATEGY-SCANNER-PROMOTION-01D: Strategy scan review-artifact readback API
+//
+// Research/review only. Read-only. Does not write to oms_outbox, oms_inbox,
+// broker maps, or any order/execution/admission table. No provider/broker/
+// network call.
+// ---------------------------------------------------------------------------
+
+/// GET /api/v1/strategy-scans/review-artifact?review_dir=<path>
+///
+/// Read-only. Reads only `manifest.json` / `summary.json` /
+/// `review_decisions.json` inside a directory that must resolve inside the
+/// configured review artifact root (default `exports/strategy_reviews`).
+/// Never reads an arbitrary file path. `truth_state`:
+/// - `active` — all three files read and parsed successfully.
+/// - `missing_artifact` — the directory (or one of the three files) does not exist.
+/// - `invalid_artifact` — a file exists but failed to parse as JSON / did not
+///   match the expected schema.
+/// - `path_rejected` — `review_dir` did not resolve inside the configured
+///   review artifact root.
+/// - `read_failed` — an unexpected filesystem error occurred while reading.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StrategyScanReviewArtifactResponse {
+    pub truth_state: String,
+    pub review_dir: String,
+    pub manifest: Option<mqk_backtest::ReviewManifest>,
+    pub summary: Option<mqk_backtest::ReviewSummary>,
+    /// Decision rows, capped at 200 (see `MAX_REVIEW_ARTIFACT_DECISION_ROWS`
+    /// in `routes/strategy_scans.rs`). `None` when the artifact could not be
+    /// read.
+    pub decisions: Option<Vec<mqk_backtest::StrategyScanReviewDecision>>,
+    pub top_paper_candidates: Vec<mqk_backtest::StrategyScanReviewDecision>,
+    pub top_watchlist_candidates: Vec<mqk_backtest::StrategyScanReviewDecision>,
+    pub warnings: Vec<String>,
+    pub blockers: Vec<String>,
+    pub error: Option<String>,
+}
+
+// ---------------------------------------------------------------------------
 // DATA-INGEST-DAEMON-JOBS-01: Market-data ingest job API
 // ---------------------------------------------------------------------------
 

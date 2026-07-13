@@ -16,6 +16,7 @@ import type {
   StrategyScanJobStatusResponse,
   StrategyScanJobSubmitRequest,
   StrategyScanJobsListResponse,
+  StrategyScanReviewArtifactResponse,
 } from "./types";
 
 // ---------------------------------------------------------------------------
@@ -226,6 +227,40 @@ export async function getStrategyScanArtifact(artifactDir: string): Promise<GetS
       error: result.error === "HTTP 404"
         ? "Strategy scan artifact API unavailable (route not found)."
         : (result.error ?? "Artifact fetch failed."),
+    };
+  }
+  return { ok: true, data: result.data };
+}
+
+// ---------------------------------------------------------------------------
+// STRATEGY-SCANNER-PROMOTION-01D: review-artifact readback (GET, public).
+// Same truth_state vocabulary as the scanner artifact route above --
+// isArtifactActive / artifactTruthLabel apply unchanged.
+// ---------------------------------------------------------------------------
+
+export interface GetStrategyScanReviewArtifactResult {
+  ok: boolean;
+  status?: number;
+  data?: StrategyScanReviewArtifactResponse;
+  error?: string;
+}
+
+export async function getStrategyScanReviewArtifact(
+  reviewDir: string,
+): Promise<GetStrategyScanReviewArtifactResult> {
+  const trimmed = reviewDir.trim();
+  if (!trimmed) {
+    return { ok: false, error: "review_dir is required." };
+  }
+  const result = await fetchJsonCandidate<StrategyScanReviewArtifactResponse>(
+    `/api/v1/strategy-scans/review-artifact?review_dir=${encodeURIComponent(trimmed)}`,
+  );
+  if (!result.ok) {
+    return {
+      ok: false,
+      error: result.error === "HTTP 404"
+        ? "Strategy scan review artifact API unavailable (route not found)."
+        : (result.error ?? "Review artifact fetch failed."),
     };
   }
   return { ok: true, data: result.data };

@@ -298,7 +298,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     };
     use strategy_scans::{
         strategy_scan_artifact, strategy_scan_job_status, strategy_scan_job_submit,
-        strategy_scan_jobs_list,
+        strategy_scan_jobs_list, strategy_scan_review_artifact,
     };
     use system::{
         autonomous_no_trade_diagnostics, autonomous_readiness, health, status_handler,
@@ -625,6 +625,14 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/v1/strategy-scans/artifact",
             get(strategy_scan_artifact),
+        )
+        // STRATEGY-SCANNER-PROMOTION-01D: read-only strategy scan review
+        // artifact readback (public, no auth). Research/review only -- no
+        // order/OMS/broker/provider/admission path is touched by this
+        // route; see routes/strategy_scans.rs module doc.
+        .route(
+            "/api/v1/strategy-scans/review-artifact",
+            get(strategy_scan_review_artifact),
         )
         // DATA-INGEST-DAEMON-JOBS-01: read-only ingest job status (public, no auth)
         .route("/api/v1/ingest/jobs", get(ingest_jobs_list))
