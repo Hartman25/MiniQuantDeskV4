@@ -111,6 +111,8 @@ async fn insert_transition(
             config_identity_status: "unavailable_in_current_runtime".to_string(),
             previous_state: previous_state.map(|s| s.to_string()),
             new_state: new_state.to_string(),
+            parent_transition_id: None,
+            evidence_transition_id: None,
             evidence_review_id: None,
             evidence_scanner_scan_id: None,
             evidence_git_hash: None,
@@ -201,6 +203,8 @@ async fn seed_promotion_state(
                 config_identity_status: "unavailable_in_current_runtime".to_string(),
                 previous_state: Some("paper_approved".to_string()),
                 new_state: "active_paper".to_string(),
+                parent_transition_id: None,
+                evidence_transition_id: None,
                 evidence_review_id: None,
                 evidence_scanner_scan_id: None,
                 evidence_git_hash: None,
@@ -977,6 +981,7 @@ async fn paper_promotion_gate_never_authorizes_live() {
 
     let outcome = mqk_daemon::promotion_gate::evaluate_paper_promotion_gate(
         &pool,
+        mqk_daemon::promotion_gate::PromotionRunMode::Paper,
         &sid,
         SYMBOL,
         TIMEFRAME_SECS,
@@ -993,4 +998,99 @@ async fn paper_promotion_gate_never_authorizes_live() {
     );
     // No field on PromotionGateOutcome can express live authorization — the
     // outcome only ever answers the paper-tradability question.
+}
+
+/// STRATEGY-PROMOTION-REGISTRY-CLOSURE-REPAIR-01 (Phase E): the exact same
+/// `active_paper` identity is denied when evaluated from a LIVE or
+/// unknown runtime mode — the gate now requires an explicit mode input
+/// and fails closed for anything but `Paper`, rather than relying solely
+/// on "no LIVE call site exists today."
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn active_paper_denied_in_live_mode() {
+    let pool = make_db_pool().await;
+    let sid = unique_id("rtg01_live_denied");
+    seed_registry(&pool, &sid, true).await;
+    seed_promotion_state(&pool, &sid, SYMBOL, TIMEFRAME_SECS, "active_paper").await;
+
+    let outcome = mqk_daemon::promotion_gate::evaluate_paper_promotion_gate(
+        &pool,
+        mqk_daemon::promotion_gate::PromotionRunMode::Live,
+        &sid,
+        SYMBOL,
+        TIMEFRAME_SECS,
+    )
+    .await;
+    assert!(
+        !outcome.paper_tradable,
+        "active_paper must never be tradable when evaluated from a LIVE runtime mode"
+    );
+    assert_eq!(outcome.reason_code.code(), "promotion_live_not_authorized");
+}
+
+/// Same identity, evaluated from an `Unknown` runtime mode (e.g.
+/// `Backtest`, or any future mode this gate has not been explicitly
+/// taught about) — must also fail closed, not default to paper-tradable.
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn active_paper_denied_in_unknown_mode() {
+    let pool = make_db_pool().await;
+    let sid = unique_id("rtg01_unknown_denied");
+    seed_registry(&pool, &sid, true).await;
+    seed_promotion_state(&pool, &sid, SYMBOL, TIMEFRAME_SECS, "active_paper").await;
+
+    let outcome = mqk_daemon::promotion_gate::evaluate_paper_promotion_gate(
+        &pool,
+        mqk_daemon::promotion_gate::PromotionRunMode::Unknown,
+        &sid,
+        SYMBOL,
+        TIMEFRAME_SECS,
+    )
+    .await;
+    assert!(
+        !outcome.paper_tradable,
+        "active_paper must never be tradable when evaluated from an unknown runtime mode"
+    );
+    assert_eq!(outcome.reason_code.code(), "promotion_live_not_authorized");
+}
+
+/// End-to-end proof on the internal decision path: the exact same
+/// `active_paper`+armed+active-run fixture that is accepted in PAPER mode
+/// (see `internal_active_paper_exact_identity_accepted_one_outbox_row`)
+/// must be refused with zero outbox rows when the daemon's own
+/// deployment mode is LIVE-shadow/LIVE-capital.
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn internal_active_paper_denied_when_daemon_mode_is_live() {
+    let pool = make_db_pool().await;
+    let sid = unique_id("rtg01i_live_denied");
+    seed_registry(&pool, &sid, true).await;
+    seed_promotion_state(&pool, &sid, SYMBOL, TIMEFRAME_SECS, "active_paper").await;
+    mqk_db::persist_arm_state(&pool, "ARMED", None)
+        .await
+        .expect("persist ARMED");
+
+    let st = Arc::new(state::AppState::new_for_test_with_db_mode_and_broker(
+        pool.clone(),
+        state::DeploymentMode::LiveShadow,
+        state::BrokerKind::Alpaca,
+    ));
+    let _run_id = seed_active_run(&st).await;
+
+    let dec_id = unique_id("dec");
+    let out = submit_internal_strategy_decision(
+        &st,
+        make_decision(&dec_id, &sid, SYMBOL, TIMEFRAME_SECS),
+    )
+    .await;
+    assert!(
+        !out.accepted,
+        "active_paper must not authorize an internal decision when daemon mode is LIVE-shadow"
+    );
+    assert_eq!(out.disposition, "promotion_live_not_authorized");
+    assert_eq!(
+        outbox_row_count(&pool, &dec_id).await,
+        0,
+        "a mode-denied decision must never create an outbox row"
+    );
 }

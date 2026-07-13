@@ -966,6 +966,7 @@ pub(crate) async fn strategy_signal(
         };
         let promotion = crate::promotion_gate::evaluate_paper_promotion_gate(
             db,
+            crate::promotion_gate::PromotionRunMode::from(st.deployment_mode()),
             &validated.strategy_id,
             &validated.symbol,
             timeframe_secs,

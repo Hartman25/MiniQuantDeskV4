@@ -689,6 +689,7 @@ pub async fn submit_internal_strategy_decision(
     {
         let promotion = crate::promotion_gate::evaluate_paper_promotion_gate(
             db,
+            crate::promotion_gate::PromotionRunMode::from(state.deployment_mode()),
             &sid,
             decision.symbol.trim(),
             decision.timeframe_secs,
