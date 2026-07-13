@@ -8694,3 +8694,36 @@ change; no existing strategy threshold changed; no existing risk/
 session/integrity/OMS gate changed; no generated evidence, smoke log,
 export, or untracked ledger draft staged (`exports/` remains
 `.gitignore`d and untouched by `git add`).
+
+---
+
+## STRATEGY-LAB-COMPLETION-AND-SCANNER-FOUNDATION-01-COMBINED — Phase D (real local-data proof)
+
+Patch: `STRATEGY-LAB-SCANNER-01D-REAL-LOCAL-DATA-PROOF-01`.
+
+Ran `mqk backtest scan-strategies` against the repo's real, already-
+committed local data (not fixtures). Positive path: `--timeframe 1D
+--strategy swing_momentum` over the full 88-symbol enabled-equity
+universe — `universe_count=88`, `ranked_count=88`, `skipped_count=0`;
+every symbol had enough local 1D bars to produce a scoreable result.
+Honest-skip path: `--timeframe 5m --strategy intraday_scalper
+--limit-symbols 10` — `ranked_count=0`, `skipped_count=10`,
+`skip_reason=missing_bars_file count=10` (the real `exports/md_backup/
+5m/` directory is empty, exactly as the Phase A audit found). Both runs
+wrote full artifact trees under `exports/strategy_scans/{scan_id}/`;
+neither was staged (`exports/` is already `.gitignore`d, confirmed via
+`git status --short exports/` returning nothing for either run
+directory). No provider/broker/network call, no DB connection, no order
+of any kind. The top-ranked 1D candidates all carry a **negative**
+absolute `total_return_pct` — the proof doc explicitly calls out that a
+positive `score` (alpha vs. buy-and-hold benchmark) is not itself
+evidence of a profitable or promotable strategy, closing the risk of
+over-claiming from this run.
+
+**Built:**
+`docs/specs/strategy_lab_scanner_01d_real_local_data_proof.md`.
+
+**Safety confirmation:** two real local-data scan runs only; no
+provider/broker/network call; no DB connection opened; no order
+submitted; no strategy threshold changed; no artifact staged; no smoke
+log or untracked ledger draft staged.
