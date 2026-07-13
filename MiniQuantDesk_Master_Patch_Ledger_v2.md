@@ -8500,3 +8500,55 @@ for this phase.
 **Safety confirmation:** read-only DB inspection only; no rows mutated;
 no orders submitted; no daemon started or restarted; no
 broker/provider/network call.
+
+---
+
+## PAPER-ORDER-LIFECYCLE-PERSISTENT-VISIBILITY-AUDIT-AND-CLOSURE-01-COMBINED — Phase E (closure)
+
+Patch: `PAPER-ORDER-LIFECYCLE-VIS-01E-CLOSURE-ROADMAP-AND-NEXT-PROOF-01`.
+
+```text
+PAPER-ORDER-LIFECYCLE-PERSISTENT-VISIBILITY-AUDIT-AND-CLOSURE-01-COMBINED: CLOSED_LOCAL
+PAPER-TRADE-LIFECYCLE-PROOF-02: LIFECYCLE-PERSISTENT-VISIBILITY-CLOSED
+PAPER-DAILY-PNL-BASELINE-CAPTURE-AND-OPERATOR-CLOSURE-01-COMBINED: CLOSED_LOCAL (unchanged)
+PAPER-PNL-OPERATOR-VISIBILITY-CLOSURE-01-COMBINED: DAILY-PNL-CAPTURE-AND-READ-SIDE-CLOSED (unchanged)
+```
+
+A durable, restart-surviving read-only lens onto a paper run's full OMS
+lifecycle chain (`GET /api/v1/execution/paper-lifecycle?run_id=<uuid>`)
+now exists, closing the gap Phase A proved: no route could reconstruct a
+`STOPPED` run's signal/no-trade/outbox/inbox chain without already
+knowing its `run_id`, since every existing route's "no run_id" fallback
+resolved only ARMED/RUNNING runs. Proven against both a synthetic
+DB-backed test suite (26 tests) and a real hand-traced production run
+(`15cf4309-210b-5406-8ed8-46377e093195`) whose real signal->outbox->fill
+rows independently confirm the classifier's output. Portfolio/P&L
+visibility remains honestly reported as in-memory-only — this bundle
+does not claim to have solved that, since no durable portfolio/position
+table exists in the repo.
+
+**Full patch-group commit chain:** Phase A `e0a49f9f` (audit) -> Phase B
+`16de927e` (DB model, 5 tests) -> Phase C `bfcd8b4a` (route, 13 tests +
+6 pure unit tests, 19 total) -> Phase D `3333d6ab` (real-DB proof) ->
+Phase E (this entry, closure).
+
+**Built:**
+`docs/specs/paper_order_lifecycle_visibility_01e_closure_decision.md`,
+`docs/specs/roadmap_completion_reconcile_01.md` (updated, new §13).
+
+**Next market-hours proof:**
+`PAPER-TRADE-LIFECYCLE-PROOF-03-PNL-VISIBILITY-VERIFY-COMBINED` (unchanged
+from the prior bundle — this bundle adds a durable OMS-side lens, not a
+new market-hours dependency).
+
+**Next off-market patch:**
+`STRATEGY-LAB-COMPLETION-AND-SCANNER-FOUNDATION-01-COMBINED`
+
+**Safety confirmation:** no live orders; no forced or manually submitted
+paper orders; no autonomous smoke script run; no execution armed; no
+strategy/threshold/gate change; no fabricated lifecycle row, signal,
+order, fill, or position at any phase; no DB migration; no
+`.env.local` edit; no config flag change; no provider/broker/network call
+in any test; no generated evidence, smoke log, export, or untracked
+ledger draft staged at any phase; no daemon started or restarted at any
+phase.

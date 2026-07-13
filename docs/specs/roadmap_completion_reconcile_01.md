@@ -385,3 +385,42 @@ concern only, equities-only, existing broker-snapshot layer. No row's
 status, percentage, or category changes.
 `docs/audits/multi_asset_completion_audit.md` is correspondingly not
 updated by this bundle.
+
+## 13. Later session: `PAPER-ORDER-LIFECYCLE-PERSISTENT-VISIBILITY-AUDIT-AND-CLOSURE-01-COMBINED`
+
+A follow-up off-market session closed the remaining durable-visibility
+gap in the OMS lifecycle chain: no existing route could reconstruct a
+completed paper run's `signal evaluation -> no-trade diagnostics ->
+outbox -> inbox` chain after the run stopped, without already knowing its
+`run_id` — `GET /api/v1/execution/flow` covers only
+outbox+lifecycle-events+fills and resolves "no `run_id`" via in-memory
+active-run state (`ARMED`/`RUNNING` only). New route
+`GET /api/v1/execution/paper-lifecycle?run_id=<uuid>`
+(`core-rs/crates/mqk-daemon/src/routes/paper_lifecycle.rs`) resolves the
+target run via `mqk_db::fetch_run` (explicit) or
+`mqk_db::fetch_latest_run_for_engine` (durable latest-PAPER-run
+resolution, independent of ARMED/RUNNING status) and joins two new
+run-scoped DB helpers
+(`fetch_strategy_signal_evaluations_for_run`,
+`fetch_autonomous_no_trade_diagnostics_for_run`,
+`core-rs/crates/mqk-db/src/strategy.rs`) with the existing
+outbox/inbox run-scoped helpers. No migration. 26 new tests (5 mqk-db, 13
+mqk-daemon DB-backed/in-process, 6 pure classifier unit tests) plus a
+Phase D real-paper-DB hand-trace confirming the classifier's output
+matches a real, complete AAPL signal->outbox->fill chain for the latest
+(`STOPPED`) PAPER run. Portfolio/P&L visibility is explicitly reported as
+`"in_memory_only_not_restart_surviving"` rather than reconstructed — no
+durable portfolio/position table exists anywhere in the repo today. See
+`docs/specs/paper_order_lifecycle_visibility_01a_current_truth_audit.md`
+through `..._01e_closure_decision.md`. Final status:
+
+```text
+PAPER-ORDER-LIFECYCLE-PERSISTENT-VISIBILITY-AUDIT-AND-CLOSURE-01-COMBINED: CLOSED_LOCAL
+PAPER-TRADE-LIFECYCLE-PROOF-02: LIFECYCLE-PERSISTENT-VISIBILITY-CLOSED
+```
+
+This bundle does **not** touch any row in §2 above, for the same reason
+§9–§12 do not: paper-trade operator-visibility concern only,
+equities-only, existing OMS/DB layer. No row's status, percentage, or
+category changes. `docs/audits/multi_asset_completion_audit.md` is
+correspondingly not updated by this bundle.
