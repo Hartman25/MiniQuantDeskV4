@@ -6069,6 +6069,14 @@ pub struct StrategyPromotionRow {
     pub config_identity_status: String,
     pub previous_state: Option<String>,
     pub new_state: String,
+    /// STRATEGY-PROMOTION-REGISTRY-CLOSURE-REPAIR-01 (Phase D): the exact
+    /// transition that established the evidence currently authorizing
+    /// this identity's state -- resolved via `mqk_db::resolve_evidence_lineage`,
+    /// never trusted from a caller. The `evidence_*` fields below are
+    /// always the *resolved* evidence (this row's own, if it is itself
+    /// evidence-bearing; otherwise the ancestor's), not merely this row's
+    /// own possibly-`null` columns.
+    pub evidence_transition_id: Option<String>,
     pub evidence_review_id: Option<String>,
     pub evidence_scanner_scan_id: Option<String>,
     pub evidence_git_hash: Option<String>,
@@ -6079,8 +6087,8 @@ pub struct StrategyPromotionRow {
     pub initiated_by: String,
     pub reason: String,
     pub created_at_utc: String,
-    /// `true` only when `new_state == "active_paper"` and not expired as of
-    /// the read time.
+    /// `true` only when `new_state == "active_paper"`, already effective,
+    /// and not expired as of the read time.
     pub tradable_paper: bool,
     /// Always `false`. No code path in this patch can set this `true`.
     pub tradable_live: bool,
@@ -6146,6 +6154,13 @@ pub struct StrategyPromotionCheckResponse {
     pub timeframe_secs: i64,
     pub current_state: Option<String>,
     pub config_identity_status: Option<String>,
+    /// See [`StrategyPromotionRow::evidence_transition_id`].
+    pub evidence_transition_id: Option<String>,
+    pub evidence_review_id: Option<String>,
+    pub evidence_scanner_scan_id: Option<String>,
+    pub evidence_git_hash: Option<String>,
+    pub evidence_artifact_path: Option<String>,
+    pub evidence_fingerprint: Option<String>,
     pub tradable_paper: bool,
     pub tradable_live: bool,
     pub reason_code: String,
@@ -6188,6 +6203,9 @@ pub struct StrategyPromotionTransitionRequest {
 /// `disposition`: `"transitioned"` (new row inserted) | `"duplicate"`
 /// (identical request replayed; idempotent no-op) | `"illegal_transition"`
 /// | `"evidence_invalid"` | `"rejected"` (field validation) |
+/// `"transition_conflict"` (STRATEGY-PROMOTION-REGISTRY-CLOSURE-REPAIR-01:
+/// a concurrent transition already advanced this identity past the
+/// expected parent state -- retry by re-reading current state) |
 /// `"unavailable"` (no DB / query failed).
 #[derive(Debug, Clone, Serialize)]
 pub struct StrategyPromotionTransitionResponse {

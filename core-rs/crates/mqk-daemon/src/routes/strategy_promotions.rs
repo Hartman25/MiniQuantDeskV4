@@ -43,9 +43,11 @@ use crate::api_types::{
 use crate::state::AppState;
 use mqk_db::{
     evaluate_promotion_tradability, fetch_all_current_promotions, fetch_current_promotion_state,
-    fetch_promotion_history, insert_strategy_promotion_transition, is_known_promotion_state,
-    is_legal_transition, scanner_timeframe_label_to_secs, transition_requires_evidence,
+    fetch_promotion_history, insert_strategy_promotion_transition_serialized,
+    is_known_promotion_state, is_legal_transition, resolve_evidence_lineage,
+    scanner_timeframe_label_to_secs, transition_requires_evidence,
     InsertStrategyPromotionTransitionArgs, StrategyPromotionTransitionRecord,
+    TransitionInsertOutcome,
 };
 
 const CANONICAL_ROUTE_PROMOTIONS: &str = "/api/v1/strategy/promotions";
@@ -54,11 +56,39 @@ const CANONICAL_ROUTE_CHECK: &str = "/api/v1/strategy/promotions/check";
 const BACKEND: &str = "postgres.sys_strategy_promotion_transitions";
 const HISTORY_LIMIT: i64 = 200;
 
-fn to_row(
+/// STRATEGY-PROMOTION-REGISTRY-CLOSURE-REPAIR-01 (Phase C): the maximum
+/// amount `effective_at_utc` may be ahead of the daemon's own clock at
+/// transition-creation time. Scheduled future promotions are not a
+/// supported feature of this registry -- this tolerance exists only to
+/// absorb ordinary clock skew/request latency between an operator's
+/// client and this daemon, not to let an operator queue a promotion for
+/// a future date. `evaluate_promotion_tradability` independently
+/// re-checks `effective_at_utc <= now` at every read/gate evaluation as
+/// defense-in-depth.
+const EFFECTIVE_AT_CLOCK_SKEW_TOLERANCE: chrono::Duration = chrono::Duration::minutes(5);
+
+async fn to_row(
+    db: &sqlx::PgPool,
     record: &StrategyPromotionTransitionRecord,
     now_utc: DateTime<Utc>,
 ) -> StrategyPromotionRow {
     let (tradable_paper, reason_code) = evaluate_promotion_tradability(Some(record), now_utc);
+    // STRATEGY-PROMOTION-REGISTRY-CLOSURE-REPAIR-01 (Phase D): resolve the
+    // exact evidence-bearing transition durably rather than surfacing
+    // this row's own possibly-null evidence_* columns directly -- a
+    // record reached via a non-evidence-bearing transition (e.g.
+    // `active_paper` via `paper_approved`) must still expose the
+    // evidence that originally authorized it.
+    let evidence = match resolve_evidence_lineage(db, record).await {
+        Ok(ev) => ev,
+        Err(err) => {
+            tracing::warn!(
+                "resolve_evidence_lineage failed for transition_id={}: {err}",
+                record.transition_id
+            );
+            None
+        }
+    };
     StrategyPromotionRow {
         transition_id: record.transition_id.to_string(),
         strategy_id: record.strategy_id.clone(),
@@ -68,11 +98,18 @@ fn to_row(
         config_identity_status: record.config_identity_status.clone(),
         previous_state: record.previous_state.clone(),
         new_state: record.new_state.clone(),
-        evidence_review_id: record.evidence_review_id.clone(),
-        evidence_scanner_scan_id: record.evidence_scanner_scan_id.clone(),
-        evidence_git_hash: record.evidence_git_hash.clone(),
-        evidence_artifact_path: record.evidence_artifact_path.clone(),
-        evidence_fingerprint: record.evidence_fingerprint.clone(),
+        evidence_transition_id: evidence.as_ref().map(|e| e.transition_id.to_string()),
+        evidence_review_id: evidence.as_ref().and_then(|e| e.evidence_review_id.clone()),
+        evidence_scanner_scan_id: evidence
+            .as_ref()
+            .and_then(|e| e.evidence_scanner_scan_id.clone()),
+        evidence_git_hash: evidence.as_ref().and_then(|e| e.evidence_git_hash.clone()),
+        evidence_artifact_path: evidence
+            .as_ref()
+            .and_then(|e| e.evidence_artifact_path.clone()),
+        evidence_fingerprint: evidence
+            .as_ref()
+            .and_then(|e| e.evidence_fingerprint.clone()),
         effective_at_utc: record.effective_at_utc.to_rfc3339(),
         expires_at_utc: record.expires_at_utc.map(|t| t.to_rfc3339()),
         initiated_by: record.initiated_by.clone(),
@@ -84,6 +121,18 @@ fn to_row(
         reason_code: reason_code.code().to_string(),
         blockers: Vec::new(),
     }
+}
+
+async fn to_rows(
+    db: &sqlx::PgPool,
+    records: &[StrategyPromotionTransitionRecord],
+    now_utc: DateTime<Utc>,
+) -> Vec<StrategyPromotionRow> {
+    let mut rows = Vec::with_capacity(records.len());
+    for record in records {
+        rows.push(to_row(db, record, now_utc).await);
+    }
+    rows
 }
 
 fn normalize_strategy_id(raw: &str) -> String {
@@ -113,15 +162,18 @@ pub(crate) async fn strategy_promotions(State(st): State<Arc<AppState>>) -> impl
 
     let now_utc = Utc::now();
     match fetch_all_current_promotions(db).await {
-        Ok(records) => (
-            StatusCode::OK,
-            Json(StrategyPromotionsResponse {
-                canonical_route: CANONICAL_ROUTE_PROMOTIONS.to_string(),
-                backend: BACKEND.to_string(),
-                truth_state: "active".to_string(),
-                rows: records.iter().map(|r| to_row(r, now_utc)).collect(),
-            }),
-        ),
+        Ok(records) => {
+            let rows = to_rows(db, &records, now_utc).await;
+            (
+                StatusCode::OK,
+                Json(StrategyPromotionsResponse {
+                    canonical_route: CANONICAL_ROUTE_PROMOTIONS.to_string(),
+                    backend: BACKEND.to_string(),
+                    truth_state: "active".to_string(),
+                    rows,
+                }),
+            )
+        }
         Err(err) => {
             tracing::warn!("fetch_all_current_promotions failed: {err}");
             (
@@ -230,20 +282,23 @@ pub(crate) async fn strategy_promotion_history(
     )
     .await
     {
-        Ok(records) => (
-            StatusCode::OK,
-            Json(StrategyPromotionHistoryResponse {
-                canonical_route: CANONICAL_ROUTE_HISTORY.to_string(),
-                backend: BACKEND.to_string(),
-                truth_state: "active".to_string(),
-                strategy_id: identity.strategy_id,
-                symbol: identity.symbol,
-                timeframe_secs: identity.timeframe_secs,
-                rows: records.iter().map(|r| to_row(r, now_utc)).collect(),
-                blockers: Vec::new(),
-            }),
-        )
-            .into_response(),
+        Ok(records) => {
+            let rows = to_rows(db, &records, now_utc).await;
+            (
+                StatusCode::OK,
+                Json(StrategyPromotionHistoryResponse {
+                    canonical_route: CANONICAL_ROUTE_HISTORY.to_string(),
+                    backend: BACKEND.to_string(),
+                    truth_state: "active".to_string(),
+                    strategy_id: identity.strategy_id,
+                    symbol: identity.symbol,
+                    timeframe_secs: identity.timeframe_secs,
+                    rows,
+                    blockers: Vec::new(),
+                }),
+            )
+                .into_response()
+        }
         Err(err) => {
             tracing::warn!("fetch_promotion_history failed: {err}");
             (
@@ -286,6 +341,12 @@ pub(crate) async fn strategy_promotion_check(
                     timeframe_secs: query.timeframe_secs.unwrap_or(0),
                     current_state: None,
                     config_identity_status: None,
+                    evidence_transition_id: None,
+                    evidence_review_id: None,
+                    evidence_scanner_scan_id: None,
+                    evidence_git_hash: None,
+                    evidence_artifact_path: None,
+                    evidence_fingerprint: None,
                     tradable_paper: false,
                     tradable_live: false,
                     reason_code: "promotion_identity_mismatch".to_string(),
@@ -308,6 +369,12 @@ pub(crate) async fn strategy_promotion_check(
                 timeframe_secs: identity.timeframe_secs,
                 current_state: None,
                 config_identity_status: None,
+                evidence_transition_id: None,
+                evidence_review_id: None,
+                evidence_scanner_scan_id: None,
+                evidence_git_hash: None,
+                evidence_artifact_path: None,
+                evidence_fingerprint: None,
                 tradable_paper: false,
                 tradable_live: false,
                 reason_code: "promotion_db_unavailable".to_string(),
@@ -331,6 +398,16 @@ pub(crate) async fn strategy_promotion_check(
             let now_utc = Utc::now();
             let (tradable_paper, reason_code) =
                 evaluate_promotion_tradability(record.as_ref(), now_utc);
+            let evidence = match record.as_ref() {
+                Some(r) => resolve_evidence_lineage(db, r).await.unwrap_or_else(|err| {
+                    tracing::warn!(
+                        "resolve_evidence_lineage failed for transition_id={}: {err}",
+                        r.transition_id
+                    );
+                    None
+                }),
+                None => None,
+            };
             (
                 StatusCode::OK,
                 Json(StrategyPromotionCheckResponse {
@@ -344,6 +421,20 @@ pub(crate) async fn strategy_promotion_check(
                     config_identity_status: record
                         .as_ref()
                         .map(|r| r.config_identity_status.clone()),
+                    evidence_transition_id: evidence.as_ref().map(|e| e.transition_id.to_string()),
+                    evidence_review_id: evidence
+                        .as_ref()
+                        .and_then(|e| e.evidence_review_id.clone()),
+                    evidence_scanner_scan_id: evidence
+                        .as_ref()
+                        .and_then(|e| e.evidence_scanner_scan_id.clone()),
+                    evidence_git_hash: evidence.as_ref().and_then(|e| e.evidence_git_hash.clone()),
+                    evidence_artifact_path: evidence
+                        .as_ref()
+                        .and_then(|e| e.evidence_artifact_path.clone()),
+                    evidence_fingerprint: evidence
+                        .as_ref()
+                        .and_then(|e| e.evidence_fingerprint.clone()),
                     tradable_paper,
                     tradable_live: false,
                     reason_code: reason_code.code().to_string(),
@@ -365,6 +456,12 @@ pub(crate) async fn strategy_promotion_check(
                     timeframe_secs: identity.timeframe_secs,
                     current_state: None,
                     config_identity_status: None,
+                    evidence_transition_id: None,
+                    evidence_review_id: None,
+                    evidence_scanner_scan_id: None,
+                    evidence_git_hash: None,
+                    evidence_artifact_path: None,
+                    evidence_fingerprint: None,
                     tradable_paper: false,
                     tradable_live: false,
                     reason_code: "promotion_query_failed".to_string(),
@@ -576,6 +673,34 @@ pub(crate) async fn strategy_promotion_transition(
         },
     };
 
+    // STRATEGY-PROMOTION-REGISTRY-CLOSURE-REPAIR-01 (Phase C): temporal
+    // sanity checks, only meaningful once both timestamps parsed cleanly
+    // above (a parse failure already pushed its own blocker and left the
+    // corresponding `Option` as `None`, so these checks are skipped for a
+    // malformed timestamp rather than double-reporting the same field).
+    if let Some(effective_at) = effective_at_utc {
+        let now = Utc::now();
+        if effective_at - now > EFFECTIVE_AT_CLOCK_SKEW_TOLERANCE {
+            blockers.push(format!(
+                "effective_at_utc ({}) is more than {} minutes ahead of the daemon's current \
+                 time ({}); scheduled future promotions are not supported -- this tolerance \
+                 exists only to absorb ordinary clock skew",
+                effective_at.to_rfc3339(),
+                EFFECTIVE_AT_CLOCK_SKEW_TOLERANCE.num_minutes(),
+                now.to_rfc3339(),
+            ));
+        }
+        if let Some(Some(expires_at)) = expires_at_utc {
+            if expires_at <= effective_at {
+                blockers.push(format!(
+                    "expires_at_utc ({}) must be later than effective_at_utc ({})",
+                    expires_at.to_rfc3339(),
+                    effective_at.to_rfc3339(),
+                ));
+            }
+        }
+    }
+
     if !blockers.is_empty() {
         return transition_response(TransitionResponseArgs {
             status: StatusCode::BAD_REQUEST,
@@ -631,31 +756,23 @@ pub(crate) async fn strategy_promotion_transition(
     };
 
     // Gate 1b: idempotency pre-check. If a transition with this exact
-    // deterministic id already exists in history, this is a replay of an
+    // deterministic id already exists, this is a replay of an
     // already-accepted request — report "duplicate" using the already-
-    // recorded row's own previous_state, without re-deriving current state
-    // or re-running legality/evidence checks against whatever the state has
-    // since become (which may now legitimately differ, e.g. after a later,
-    // unrelated transition).
-    match fetch_promotion_history(db, &strategy_id, &symbol, timeframe_secs, HISTORY_LIMIT).await {
-        Ok(history) => {
-            if let Some(existing) = history.iter().find(|r| r.transition_id == transition_id) {
-                return transition_response(TransitionResponseArgs {
-                    status: StatusCode::OK,
-                    accepted: true,
-                    disposition: "duplicate",
-                    strategy_id,
-                    symbol,
-                    timeframe_secs,
-                    previous_state: existing.previous_state.clone(),
-                    target_state,
-                    transition_id: Some(transition_id),
-                    blockers: vec![
-                        "identical transition already recorded; no new row was created".to_string(),
-                    ],
-                });
-            }
-        }
+    // recorded row's own previous_state, without ever reaching Gate 3
+    // (legality). This is required, not merely an optimization: by the
+    // time a replay arrives, the identity's *actual* current state has
+    // already moved past what it was when the original request was
+    // accepted, so re-deriving previous_state fresh (Gate 2 below) and
+    // running legality against it would spuriously reject an exact replay
+    // as `illegal_transition` (e.g. a replayed `shadow_approved` request
+    // arriving after the identity has already advanced to
+    // `shadow_approved` would look like a `shadow_approved -> shadow_approved`
+    // self-loop, which is never legal). This exact failure mode is why
+    // this pre-check exists — see
+    // docs/specs/strategy_promotion_registry_01f_closure_decision.md §7's
+    // "Phase C" bug note for the original occurrence of this same defect.
+    let existing = match mqk_db::fetch_promotion_transition_by_id(db, transition_id).await {
+        Ok(row) => row,
         Err(err) => {
             return transition_response(TransitionResponseArgs {
                 status: StatusCode::SERVICE_UNAVAILABLE,
@@ -670,10 +787,34 @@ pub(crate) async fn strategy_promotion_transition(
                 blockers: vec![format!("idempotency pre-check query failed: {err}")],
             });
         }
+    };
+    if let Some(existing) = existing {
+        return transition_response(TransitionResponseArgs {
+            status: StatusCode::OK,
+            accepted: true,
+            disposition: "duplicate",
+            strategy_id,
+            symbol,
+            timeframe_secs,
+            previous_state: existing.previous_state.clone(),
+            target_state,
+            transition_id: Some(transition_id),
+            blockers: vec![
+                "identical transition already recorded; no new row was created".to_string(),
+            ],
+        });
     }
 
     // Gate 2: compute actual current state (never trust a caller-supplied
     // previous_state — there is none in the request schema by design).
+    // This is an optimistic, pre-lock read used only to decide legality
+    // (Gate 3) and evidence requirements (Gate 4) below; it is never
+    // trusted as the final word on the identity's parent transition --
+    // `insert_strategy_promotion_transition_serialized` (Gate 5)
+    // re-reads the true current state itself, inside a transaction-scoped
+    // advisory lock, and rejects the insert with `transition_conflict` if
+    // this optimistic read has gone stale by the time the lock is
+    // acquired (STRATEGY-PROMOTION-REGISTRY-CLOSURE-REPAIR-01 Phase B).
     let current =
         match fetch_current_promotion_state(db, &strategy_id, &symbol, timeframe_secs).await {
             Ok(c) => c,
@@ -760,6 +901,19 @@ pub(crate) async fn strategy_promotion_transition(
         None
     };
 
+    // STRATEGY-PROMOTION-REGISTRY-CLOSURE-REPAIR-01 (Phase D): derive
+    // evidence lineage server-side, never from the request. A
+    // freshly-validated evidence-bearing transition (Gate 4 above)
+    // establishes itself as the new evidence root (`evidence_transition_id
+    // == transition_id`); every other transition carries forward the
+    // current record's own resolved evidence lineage unchanged.
+    let evidence_transition_id = if evidence.is_some() {
+        Some(transition_id)
+    } else {
+        current.as_ref().and_then(|c| c.evidence_transition_id)
+    };
+    let parent_transition_id = current.as_ref().map(|c| c.transition_id);
+
     let args = InsertStrategyPromotionTransitionArgs {
         transition_id,
         strategy_id: strategy_id.clone(),
@@ -769,6 +923,8 @@ pub(crate) async fn strategy_promotion_transition(
         config_identity_status: "unavailable_in_current_runtime".to_string(),
         previous_state: previous_state.clone(),
         new_state: target_state.clone(),
+        parent_transition_id,
+        evidence_transition_id,
         evidence_review_id: evidence.as_ref().map(|e| e.review_id.clone()),
         evidence_scanner_scan_id: evidence.as_ref().map(|e| e.scanner_scan_id.clone()),
         evidence_git_hash: evidence.as_ref().map(|e| e.git_hash.clone()),
@@ -781,8 +937,10 @@ pub(crate) async fn strategy_promotion_transition(
         created_at_utc: Utc::now(), // allow: ops-metadata write timestamp, not lifecycle truth
     };
 
-    match insert_strategy_promotion_transition(db, &args).await {
-        Ok(true) => transition_response(TransitionResponseArgs {
+    // Gate 5: atomic, serialized insert (STRATEGY-PROMOTION-REGISTRY-
+    // CLOSURE-REPAIR-01 Phase B) -- the only insert path this route uses.
+    match insert_strategy_promotion_transition_serialized(db, &args).await {
+        Ok(TransitionInsertOutcome::Inserted(_)) => transition_response(TransitionResponseArgs {
             status: StatusCode::OK,
             accepted: true,
             disposition: "transitioned",
@@ -794,20 +952,42 @@ pub(crate) async fn strategy_promotion_transition(
             transition_id: Some(transition_id),
             blockers: Vec::new(),
         }),
-        Ok(false) => transition_response(TransitionResponseArgs {
-            status: StatusCode::OK,
-            accepted: true,
-            disposition: "duplicate",
-            strategy_id,
-            symbol,
-            timeframe_secs,
-            previous_state,
-            target_state,
-            transition_id: Some(transition_id),
-            blockers: vec![
-                "identical transition already recorded; no new row was created".to_string(),
-            ],
-        }),
+        Ok(TransitionInsertOutcome::Duplicate(existing)) => {
+            transition_response(TransitionResponseArgs {
+                status: StatusCode::OK,
+                accepted: true,
+                disposition: "duplicate",
+                strategy_id,
+                symbol,
+                timeframe_secs,
+                previous_state: existing.previous_state.clone(),
+                target_state,
+                transition_id: Some(transition_id),
+                blockers: vec![
+                    "identical transition already recorded; no new row was created".to_string(),
+                ],
+            })
+        }
+        Ok(TransitionInsertOutcome::Conflict { current: actual }) => {
+            let actual_state = actual.as_ref().map(|a| a.new_state.clone());
+            transition_response(TransitionResponseArgs {
+                status: StatusCode::CONFLICT,
+                accepted: false,
+                disposition: "transition_conflict",
+                strategy_id,
+                symbol,
+                timeframe_secs,
+                previous_state: actual_state.clone(),
+                target_state,
+                transition_id: None,
+                blockers: vec![format!(
+                    "a concurrent transition already advanced this identity past the expected \
+                     parent state; expected previous_state={:?}, actual current state={:?} -- \
+                     re-read current state and retry",
+                    previous_state, actual_state
+                )],
+            })
+        }
         Err(err) => transition_response(TransitionResponseArgs {
             status: StatusCode::INTERNAL_SERVER_ERROR,
             accepted: false,
