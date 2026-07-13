@@ -81,6 +81,7 @@ pub mod reconcile_state;
 pub mod restart_intent;
 pub mod runs;
 pub mod strategy;
+pub mod strategy_promotion;
 
 // Re-export all public items to preserve pre-refactor public API.
 // Callers continue to use `mqk_db::insert_run`, `mqk_db::RunStatus`, etc.
@@ -99,6 +100,7 @@ pub use reconcile_state::*;
 pub use restart_intent::*;
 pub use runs::*;
 pub use strategy::*;
+pub use strategy_promotion::*;
 
 // ---------------------------------------------------------------------------
 // Connection / migration / status — crate-level infrastructure

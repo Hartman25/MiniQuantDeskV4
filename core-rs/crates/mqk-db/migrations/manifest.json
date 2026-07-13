@@ -284,6 +284,12 @@
       "path": "0045_account_equity_baseline.sql",
       "status": "applied",
       "intent": "PAPER-DAILY-PNL-BASELINE-01-COMBINED: add sys_account_equity_baseline table storing a provenance-tagged account-equity snapshot per trading_date (primary key), so GET /api/v1/portfolio/summary.daily_pnl can compare current equity against a real previous-session-close baseline instead of always returning null. No DEFAULT now() or DEFAULT gen_random_uuid() — callers supply captured_at_utc and audit_event_id. No automatic capture mechanism is added by this migration or this patch group's Phase B/C — capture is explicitly deferred to a future patch."
+    },
+    {
+      "id": "0046",
+      "path": "0046_strategy_promotion_registry.sql",
+      "status": "applied",
+      "intent": "STRATEGY-PROMOTION-REGISTRY-01B: add sys_strategy_promotion_transitions durable, append-only strategy paper-promotion registry (strategy_id + symbol + timeframe_secs identity; states shadow_approved/paper_approved/active_paper/demoted/retired/rejected; CHECK-constrained legal transition graph; evidence provenance columns; caller-injected transition_id/timestamps, no DEFAULT now() or DEFAULT gen_random_uuid()). No mutable current-state row — current state is always a deterministic query over history. No backfill from sys_strategy_registry.enabled; table is empty after migration, meaning zero approved strategies."
     }
   ]
 }
