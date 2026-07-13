@@ -11,3 +11,7 @@ mqk-strategy = { path = "../mqk-strategy" }
 mqk-integrity = { path = "../mqk-integrity" }
 mqk-isolation = { path = "../mqk-isolation" }
 uuid = { version = "1", features = ["v5"] }
+serde.workspace = true
+
+[dev-dependencies]
+serde_json.workspace = true

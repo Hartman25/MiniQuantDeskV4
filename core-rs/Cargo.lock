@@ -1759,6 +1759,8 @@ dependencies = [
  "mqk-portfolio",
  "mqk-risk",
  "mqk-strategy",
+ "serde",
+ "serde_json",
  "uuid",
 ]
 

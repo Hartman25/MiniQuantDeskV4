@@ -8587,3 +8587,53 @@ live/paper order submitted; no broker/provider/network call; no DB
 migration; no `.env.local` edit; no config flag change; no strategy
 threshold change; no generated evidence, smoke log, export, or untracked
 ledger draft staged.
+
+---
+
+## STRATEGY-LAB-COMPLETION-AND-SCANNER-FOUNDATION-01-COMBINED — Phase B (scanner core model)
+
+Patch: `STRATEGY-LAB-SCANNER-01B-SCANNER-CORE-MODEL-01`.
+
+Added the pure scanner core
+(`core-rs/crates/mqk-backtest/src/strategy_scanner.rs`): given
+already-loaded bars (or `None`) and an already-instantiated strategy (or
+`None`) from its caller, `evaluate_scan_candidate` deterministically
+decides `truth_state`/`reason_code`
+(`candidate_ranked`/`insufficient_data`/`backtest_failed`/
+`unsupported_strategy`/`unsupported_timeframe`/`data_missing`/
+`metrics_unavailable`) for one `(symbol, timeframe, strategy_id)`
+candidate, and — only once every precondition passes — runs the bars
+through the existing `BacktestEngine` and reduces the report via the
+existing, already-tested `sweep_row_from_report` into
+`StrategyScanMetrics` (score = `alpha_pct` else `total_return_pct`).
+`rank_scan_candidates` performs a deterministic stable sort (ranked
+before skipped, higher score first, then symbol/timeframe/strategy_id
+ascending). The module performs no file IO, no network IO, and no DB
+access — every side effect happens in the Phase C CLI caller. The scan
+policy disables the integrity gate for its own internal engine runs only
+(documented rationale: one scan invocation may span multiple timeframes,
+and `conservative_defaults()`'s fixed 120-tick stale threshold is only
+correct for intraday bars) — this does not touch any live, paper, or
+existing single-timeframe backtest CLI path.
+
+**Built:**
+`core-rs/crates/mqk-backtest/src/strategy_scanner.rs`,
+`core-rs/crates/mqk-backtest/src/lib.rs` (module wiring),
+`core-rs/crates/mqk-backtest/Cargo.toml` (added `serde`/`serde_json`),
+`core-rs/crates/mqk-backtest/tests/scenario_strategy_lab_scanner_01.rs`
+(11 pure tests: missing-data, insufficient-data, unsupported-strategy,
+unsupported-timeframe (unknown label + mismatched timeframe),
+successful-ranking, deterministic-ranking/tie-break, ranked-before-
+skipped/score-ordering, explicit score-ordering, JSON schema round-trip,
+source-level no-broker/no-OMS-write-import check).
+
+**Validation:** `cargo check -p mqk-backtest --all-targets`,
+`cargo test -p mqk-backtest` (full suite, no regressions),
+`cargo clippy -p mqk-backtest --all-targets -- -D warnings` — all clean.
+
+**Safety confirmation:** no live/paper order submitted; no broker/
+provider/network call; no DB migration; no `.env.local` edit; no config
+flag change; no existing strategy threshold changed; no existing risk/
+session/integrity/OMS gate changed (the scanner's own internal engine
+config is new, isolated code, not a change to any existing path); no
+generated evidence, smoke log, export, or untracked ledger draft staged.
