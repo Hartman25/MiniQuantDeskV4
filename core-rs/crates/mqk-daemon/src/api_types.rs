@@ -6030,3 +6030,163 @@ pub struct AccountEquityBaselineStatusResponse {
     pub audit_event_id: Option<String>,
     pub message: String,
 }
+
+// ---------------------------------------------------------------------------
+// STRATEGY-PROMOTION-REGISTRY-01C: strategy paper-promotion control surface
+// ---------------------------------------------------------------------------
+//
+// `registered + enabled` (`sys_strategy_registry.enabled`) is NOT promotion
+// approval. Only `current_state == "active_paper"` (and `tradable_paper ==
+// true`) means a new paper outbox row is currently allowed for this exact
+// identity. `tradable_live` is always `false` on every route in this
+// module -- a paper promotion state never authorizes a LIVE run or
+// live-routing path.
+
+/// One promotion identity's current (latest) transition, with a computed
+/// tradability verdict. Used by both `GET .../promotions` (one row per
+/// known identity) and `GET .../promotions/history` (one row per
+/// historical transition for one identity).
+#[derive(Debug, Clone, Serialize)]
+pub struct StrategyPromotionRow {
+    pub transition_id: String,
+    pub strategy_id: String,
+    pub symbol: String,
+    pub timeframe_secs: i64,
+    /// Identity-v1 bounded fallback: always `null` in this patch.
+    pub config_fingerprint: Option<String>,
+    /// Always `"unavailable_in_current_runtime"` in this patch.
+    pub config_identity_status: String,
+    pub previous_state: Option<String>,
+    pub new_state: String,
+    pub evidence_review_id: Option<String>,
+    pub evidence_scanner_scan_id: Option<String>,
+    pub evidence_git_hash: Option<String>,
+    pub evidence_artifact_path: Option<String>,
+    pub evidence_fingerprint: Option<String>,
+    pub effective_at_utc: String,
+    pub expires_at_utc: Option<String>,
+    pub initiated_by: String,
+    pub reason: String,
+    pub created_at_utc: String,
+    /// `true` only when `new_state == "active_paper"` and not expired as of
+    /// the read time.
+    pub tradable_paper: bool,
+    /// Always `false`. No code path in this patch can set this `true`.
+    pub tradable_live: bool,
+    /// Stable machine-readable reason code (see
+    /// `mqk_db::PromotionReasonCode`), e.g. `"promotion_active"`,
+    /// `"promotion_shadow_only"`, `"promotion_expired"`.
+    pub reason_code: String,
+    pub blockers: Vec<String>,
+}
+
+/// `GET /api/v1/strategy/promotions` -- current (latest) promotion state
+/// for every identity that has ever had a transition. Public, read-only.
+///
+/// `truth_state`:
+/// - `"active"` -- DB present and query succeeded; `rows` is authoritative
+///   (an empty `rows` means zero identities have ever had a transition,
+///   i.e. zero approved strategies -- not "unavailable").
+/// - `"no_db"` -- no DB pool configured on this daemon.
+/// - `"query_failed"` -- DB present but the query itself errored.
+#[derive(Debug, Clone, Serialize)]
+pub struct StrategyPromotionsResponse {
+    pub canonical_route: String,
+    pub backend: String,
+    pub truth_state: String,
+    pub rows: Vec<StrategyPromotionRow>,
+}
+
+/// `GET /api/v1/strategy/promotions/history?strategy_id=&symbol=&timeframe_secs=`
+/// -- full transition history for one exact identity, newest first. Public,
+/// read-only. Append-only: a later transition never removes or rewrites an
+/// earlier row.
+///
+/// `truth_state`: same vocabulary as [`StrategyPromotionsResponse`], plus
+/// `"invalid_request"` when `strategy_id`/`symbol`/`timeframe_secs` are
+/// missing or malformed.
+#[derive(Debug, Clone, Serialize)]
+pub struct StrategyPromotionHistoryResponse {
+    pub canonical_route: String,
+    pub backend: String,
+    pub truth_state: String,
+    pub strategy_id: String,
+    pub symbol: String,
+    pub timeframe_secs: i64,
+    pub rows: Vec<StrategyPromotionRow>,
+    /// Non-empty only when `truth_state == "invalid_request"`.
+    pub blockers: Vec<String>,
+}
+
+/// `GET /api/v1/strategy/promotions/check?strategy_id=&symbol=&timeframe_secs=`
+/// -- convenience route mirroring exactly what the runtime promotion gate
+/// itself would decide for this identity right now (same shared evaluator).
+/// Public, read-only.
+///
+/// `truth_state`: same vocabulary as [`StrategyPromotionsResponse`], plus
+/// `"invalid_request"`.
+#[derive(Debug, Clone, Serialize)]
+pub struct StrategyPromotionCheckResponse {
+    pub canonical_route: String,
+    pub backend: String,
+    pub truth_state: String,
+    pub strategy_id: String,
+    pub symbol: String,
+    pub timeframe_secs: i64,
+    pub current_state: Option<String>,
+    pub config_identity_status: Option<String>,
+    pub tradable_paper: bool,
+    pub tradable_live: bool,
+    pub reason_code: String,
+    pub blockers: Vec<String>,
+}
+
+/// `POST /api/v1/strategy/promotions/transition` -- operator-authenticated
+/// promotion state transition. Requires a valid Bearer token (existing
+/// `token_auth_middleware`).
+///
+/// For `target_state` values that require fresh evidence (`shadow_approved`
+/// reached from no prior state, or re-approval from `demoted`),
+/// `review_dir` is required and is independently canonicalized,
+/// root-bounded inside `MQK_STRATEGY_REVIEW_ARTIFACT_ROOT`, and validated
+/// against the actual review artifact content -- this route never trusts a
+/// caller's claim that a candidate is `paper_candidate`.
+///
+/// `effective_at_utc` (and `expires_at_utc` when present) are caller-
+/// injected RFC3339 timestamps -- no `now()` is read on this route.
+#[derive(Debug, Clone, Deserialize)]
+pub struct StrategyPromotionTransitionRequest {
+    pub strategy_id: String,
+    pub symbol: String,
+    pub timeframe_secs: i64,
+    /// One of: `shadow_approved`, `paper_approved`, `active_paper`,
+    /// `demoted`, `retired`, `rejected`.
+    pub target_state: String,
+    /// Required when the requested transition needs fresh evidence.
+    /// Must resolve inside `MQK_STRATEGY_REVIEW_ARTIFACT_ROOT`.
+    pub review_dir: Option<String>,
+    pub effective_at_utc: String,
+    pub expires_at_utc: Option<String>,
+    pub initiated_by: String,
+    #[serde(default)]
+    pub reason: String,
+}
+
+/// Response for `POST /api/v1/strategy/promotions/transition`.
+///
+/// `disposition`: `"transitioned"` (new row inserted) | `"duplicate"`
+/// (identical request replayed; idempotent no-op) | `"illegal_transition"`
+/// | `"evidence_invalid"` | `"rejected"` (field validation) |
+/// `"unavailable"` (no DB / query failed).
+#[derive(Debug, Clone, Serialize)]
+pub struct StrategyPromotionTransitionResponse {
+    pub accepted: bool,
+    pub disposition: String,
+    pub strategy_id: String,
+    pub symbol: String,
+    pub timeframe_secs: i64,
+    pub previous_state: Option<String>,
+    pub target_state: String,
+    pub transition_id: Option<String>,
+    pub blockers: Vec<String>,
+}

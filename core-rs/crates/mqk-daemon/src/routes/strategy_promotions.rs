@@ -1,0 +1,824 @@
+//! STRATEGY-PROMOTION-REGISTRY-01C: strategy paper-promotion control
+//! surface.
+//!
+//! Routes:
+//!   GET  /api/v1/strategy/promotions           — current state, all identities (public)
+//!   GET  /api/v1/strategy/promotions/history   — full history, one identity (public)
+//!   GET  /api/v1/strategy/promotions/check     — tradability check, one identity (public)
+//!   POST /api/v1/strategy/promotions/transition — operator transition mutation (operator auth)
+//!
+//! Safety invariants:
+//! - `registered + enabled` (`sys_strategy_registry.enabled`) is never
+//!   treated as promotion approval anywhere in this module.
+//! - The mutation route never trusts a caller's claim that a candidate is
+//!   `paper_candidate`: evidence-requiring transitions independently read,
+//!   canonicalize, root-bound, and validate the actual review artifact
+//!   content (same canonicalize+root-prefix pattern as the sibling
+//!   `GET /api/v1/strategy-scans/review-artifact` route in
+//!   `routes/strategy_scans.rs`).
+//! - `tradable_live` is hard-coded `false` everywhere in this module. No
+//!   code path here can set it `true`.
+//! - No order, outbox, broker, run-start, or arm route is called or
+//!   referenced anywhere in this module.
+
+use std::path::Path;
+use std::sync::Arc;
+
+use axum::{
+    extract::{Query, State},
+    http::StatusCode,
+    response::{IntoResponse, Response},
+    Json,
+};
+use chrono::{DateTime, Utc};
+use serde::Deserialize;
+use sha2::{Digest, Sha256};
+use uuid::Uuid;
+
+use crate::api_types::{
+    StrategyPromotionCheckResponse, StrategyPromotionHistoryResponse, StrategyPromotionRow,
+    StrategyPromotionTransitionRequest, StrategyPromotionTransitionResponse,
+    StrategyPromotionsResponse,
+};
+use crate::state::AppState;
+use mqk_db::{
+    evaluate_promotion_tradability, fetch_all_current_promotions, fetch_current_promotion_state,
+    fetch_promotion_history, insert_strategy_promotion_transition, is_known_promotion_state,
+    is_legal_transition, scanner_timeframe_label_to_secs, transition_requires_evidence,
+    InsertStrategyPromotionTransitionArgs, StrategyPromotionTransitionRecord,
+};
+
+const CANONICAL_ROUTE_PROMOTIONS: &str = "/api/v1/strategy/promotions";
+const CANONICAL_ROUTE_HISTORY: &str = "/api/v1/strategy/promotions/history";
+const CANONICAL_ROUTE_CHECK: &str = "/api/v1/strategy/promotions/check";
+const BACKEND: &str = "postgres.sys_strategy_promotion_transitions";
+const HISTORY_LIMIT: i64 = 200;
+
+fn to_row(
+    record: &StrategyPromotionTransitionRecord,
+    now_utc: DateTime<Utc>,
+) -> StrategyPromotionRow {
+    let (tradable_paper, reason_code) = evaluate_promotion_tradability(Some(record), now_utc);
+    StrategyPromotionRow {
+        transition_id: record.transition_id.to_string(),
+        strategy_id: record.strategy_id.clone(),
+        symbol: record.symbol.clone(),
+        timeframe_secs: record.timeframe_secs,
+        config_fingerprint: record.config_fingerprint.clone(),
+        config_identity_status: record.config_identity_status.clone(),
+        previous_state: record.previous_state.clone(),
+        new_state: record.new_state.clone(),
+        evidence_review_id: record.evidence_review_id.clone(),
+        evidence_scanner_scan_id: record.evidence_scanner_scan_id.clone(),
+        evidence_git_hash: record.evidence_git_hash.clone(),
+        evidence_artifact_path: record.evidence_artifact_path.clone(),
+        evidence_fingerprint: record.evidence_fingerprint.clone(),
+        effective_at_utc: record.effective_at_utc.to_rfc3339(),
+        expires_at_utc: record.expires_at_utc.map(|t| t.to_rfc3339()),
+        initiated_by: record.initiated_by.clone(),
+        reason: record.reason.clone(),
+        created_at_utc: record.created_at_utc.to_rfc3339(),
+        tradable_paper,
+        // Hard-coded: no code path in this module can produce `true`.
+        tradable_live: false,
+        reason_code: reason_code.code().to_string(),
+        blockers: Vec::new(),
+    }
+}
+
+fn normalize_strategy_id(raw: &str) -> String {
+    raw.trim().to_string()
+}
+
+fn normalize_symbol(raw: &str) -> String {
+    raw.trim().to_ascii_uppercase()
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/strategy/promotions
+// ---------------------------------------------------------------------------
+
+pub(crate) async fn strategy_promotions(State(st): State<Arc<AppState>>) -> impl IntoResponse {
+    let Some(db) = st.db.as_ref() else {
+        return (
+            StatusCode::OK,
+            Json(StrategyPromotionsResponse {
+                canonical_route: CANONICAL_ROUTE_PROMOTIONS.to_string(),
+                backend: BACKEND.to_string(),
+                truth_state: "no_db".to_string(),
+                rows: Vec::new(),
+            }),
+        );
+    };
+
+    let now_utc = Utc::now();
+    match fetch_all_current_promotions(db).await {
+        Ok(records) => (
+            StatusCode::OK,
+            Json(StrategyPromotionsResponse {
+                canonical_route: CANONICAL_ROUTE_PROMOTIONS.to_string(),
+                backend: BACKEND.to_string(),
+                truth_state: "active".to_string(),
+                rows: records.iter().map(|r| to_row(r, now_utc)).collect(),
+            }),
+        ),
+        Err(err) => {
+            tracing::warn!("fetch_all_current_promotions failed: {err}");
+            (
+                StatusCode::OK,
+                Json(StrategyPromotionsResponse {
+                    canonical_route: CANONICAL_ROUTE_PROMOTIONS.to_string(),
+                    backend: BACKEND.to_string(),
+                    truth_state: "query_failed".to_string(),
+                    rows: Vec::new(),
+                }),
+            )
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/strategy/promotions/history
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct PromotionIdentityQuery {
+    strategy_id: Option<String>,
+    symbol: Option<String>,
+    timeframe_secs: Option<i64>,
+}
+
+struct ParsedIdentity {
+    strategy_id: String,
+    symbol: String,
+    timeframe_secs: i64,
+}
+
+fn parse_identity_query(q: &PromotionIdentityQuery) -> Result<ParsedIdentity, String> {
+    let strategy_id = q
+        .strategy_id
+        .as_deref()
+        .map(normalize_strategy_id)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "strategy_id query parameter is required".to_string())?;
+    let symbol = q
+        .symbol
+        .as_deref()
+        .map(normalize_symbol)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| "symbol query parameter is required".to_string())?;
+    let timeframe_secs = q.timeframe_secs.filter(|v| *v > 0).ok_or_else(|| {
+        "timeframe_secs query parameter is required and must be positive".to_string()
+    })?;
+    Ok(ParsedIdentity {
+        strategy_id,
+        symbol,
+        timeframe_secs,
+    })
+}
+
+pub(crate) async fn strategy_promotion_history(
+    State(st): State<Arc<AppState>>,
+    Query(query): Query<PromotionIdentityQuery>,
+) -> Response {
+    let identity = match parse_identity_query(&query) {
+        Ok(i) => i,
+        Err(msg) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(StrategyPromotionHistoryResponse {
+                    canonical_route: CANONICAL_ROUTE_HISTORY.to_string(),
+                    backend: BACKEND.to_string(),
+                    truth_state: "invalid_request".to_string(),
+                    strategy_id: query.strategy_id.unwrap_or_default(),
+                    symbol: query.symbol.unwrap_or_default(),
+                    timeframe_secs: query.timeframe_secs.unwrap_or(0),
+                    rows: Vec::new(),
+                    blockers: vec![msg],
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    let Some(db) = st.db.as_ref() else {
+        return (
+            StatusCode::OK,
+            Json(StrategyPromotionHistoryResponse {
+                canonical_route: CANONICAL_ROUTE_HISTORY.to_string(),
+                backend: BACKEND.to_string(),
+                truth_state: "no_db".to_string(),
+                strategy_id: identity.strategy_id,
+                symbol: identity.symbol,
+                timeframe_secs: identity.timeframe_secs,
+                rows: Vec::new(),
+                blockers: vec![
+                    "durable execution DB truth is unavailable on this daemon".to_string()
+                ],
+            }),
+        )
+            .into_response();
+    };
+
+    let now_utc = Utc::now();
+    match fetch_promotion_history(
+        db,
+        &identity.strategy_id,
+        &identity.symbol,
+        identity.timeframe_secs,
+        HISTORY_LIMIT,
+    )
+    .await
+    {
+        Ok(records) => (
+            StatusCode::OK,
+            Json(StrategyPromotionHistoryResponse {
+                canonical_route: CANONICAL_ROUTE_HISTORY.to_string(),
+                backend: BACKEND.to_string(),
+                truth_state: "active".to_string(),
+                strategy_id: identity.strategy_id,
+                symbol: identity.symbol,
+                timeframe_secs: identity.timeframe_secs,
+                rows: records.iter().map(|r| to_row(r, now_utc)).collect(),
+                blockers: Vec::new(),
+            }),
+        )
+            .into_response(),
+        Err(err) => {
+            tracing::warn!("fetch_promotion_history failed: {err}");
+            (
+                StatusCode::OK,
+                Json(StrategyPromotionHistoryResponse {
+                    canonical_route: CANONICAL_ROUTE_HISTORY.to_string(),
+                    backend: BACKEND.to_string(),
+                    truth_state: "query_failed".to_string(),
+                    strategy_id: identity.strategy_id,
+                    symbol: identity.symbol,
+                    timeframe_secs: identity.timeframe_secs,
+                    rows: Vec::new(),
+                    blockers: vec![format!("promotion history query failed: {err}")],
+                }),
+            )
+                .into_response()
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// GET /api/v1/strategy/promotions/check
+// ---------------------------------------------------------------------------
+
+pub(crate) async fn strategy_promotion_check(
+    State(st): State<Arc<AppState>>,
+    Query(query): Query<PromotionIdentityQuery>,
+) -> Response {
+    let identity = match parse_identity_query(&query) {
+        Ok(i) => i,
+        Err(msg) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(StrategyPromotionCheckResponse {
+                    canonical_route: CANONICAL_ROUTE_CHECK.to_string(),
+                    backend: BACKEND.to_string(),
+                    truth_state: "invalid_request".to_string(),
+                    strategy_id: query.strategy_id.unwrap_or_default(),
+                    symbol: query.symbol.unwrap_or_default(),
+                    timeframe_secs: query.timeframe_secs.unwrap_or(0),
+                    current_state: None,
+                    config_identity_status: None,
+                    tradable_paper: false,
+                    tradable_live: false,
+                    reason_code: "promotion_identity_mismatch".to_string(),
+                    blockers: vec![msg],
+                }),
+            )
+                .into_response();
+        }
+    };
+
+    let Some(db) = st.db.as_ref() else {
+        return (
+            StatusCode::OK,
+            Json(StrategyPromotionCheckResponse {
+                canonical_route: CANONICAL_ROUTE_CHECK.to_string(),
+                backend: BACKEND.to_string(),
+                truth_state: "no_db".to_string(),
+                strategy_id: identity.strategy_id,
+                symbol: identity.symbol,
+                timeframe_secs: identity.timeframe_secs,
+                current_state: None,
+                config_identity_status: None,
+                tradable_paper: false,
+                tradable_live: false,
+                reason_code: "promotion_db_unavailable".to_string(),
+                blockers: vec![
+                    "durable execution DB truth is unavailable on this daemon".to_string()
+                ],
+            }),
+        )
+            .into_response();
+    };
+
+    match fetch_current_promotion_state(
+        db,
+        &identity.strategy_id,
+        &identity.symbol,
+        identity.timeframe_secs,
+    )
+    .await
+    {
+        Ok(record) => {
+            let now_utc = Utc::now();
+            let (tradable_paper, reason_code) =
+                evaluate_promotion_tradability(record.as_ref(), now_utc);
+            (
+                StatusCode::OK,
+                Json(StrategyPromotionCheckResponse {
+                    canonical_route: CANONICAL_ROUTE_CHECK.to_string(),
+                    backend: BACKEND.to_string(),
+                    truth_state: "active".to_string(),
+                    strategy_id: identity.strategy_id,
+                    symbol: identity.symbol,
+                    timeframe_secs: identity.timeframe_secs,
+                    current_state: record.as_ref().map(|r| r.new_state.clone()),
+                    config_identity_status: record
+                        .as_ref()
+                        .map(|r| r.config_identity_status.clone()),
+                    tradable_paper,
+                    tradable_live: false,
+                    reason_code: reason_code.code().to_string(),
+                    blockers: Vec::new(),
+                }),
+            )
+                .into_response()
+        }
+        Err(err) => {
+            tracing::warn!("fetch_current_promotion_state failed: {err}");
+            (
+                StatusCode::OK,
+                Json(StrategyPromotionCheckResponse {
+                    canonical_route: CANONICAL_ROUTE_CHECK.to_string(),
+                    backend: BACKEND.to_string(),
+                    truth_state: "query_failed".to_string(),
+                    strategy_id: identity.strategy_id,
+                    symbol: identity.symbol,
+                    timeframe_secs: identity.timeframe_secs,
+                    current_state: None,
+                    config_identity_status: None,
+                    tradable_paper: false,
+                    tradable_live: false,
+                    reason_code: "promotion_query_failed".to_string(),
+                    blockers: vec![format!("promotion query failed: {err}")],
+                }),
+            )
+                .into_response()
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// POST /api/v1/strategy/promotions/transition (operator auth)
+// ---------------------------------------------------------------------------
+
+/// Bundled arguments for [`transition_response`] — avoids an
+/// unwieldy positional-argument function signature.
+struct TransitionResponseArgs {
+    status: StatusCode,
+    accepted: bool,
+    disposition: &'static str,
+    strategy_id: String,
+    symbol: String,
+    timeframe_secs: i64,
+    previous_state: Option<String>,
+    target_state: String,
+    transition_id: Option<Uuid>,
+    blockers: Vec<String>,
+}
+
+fn transition_response(args: TransitionResponseArgs) -> Response {
+    (
+        args.status,
+        Json(StrategyPromotionTransitionResponse {
+            accepted: args.accepted,
+            disposition: args.disposition.to_string(),
+            strategy_id: args.strategy_id,
+            symbol: args.symbol,
+            timeframe_secs: args.timeframe_secs,
+            previous_state: args.previous_state,
+            target_state: args.target_state,
+            transition_id: args.transition_id.map(|t| t.to_string()),
+            blockers: args.blockers,
+        }),
+    )
+        .into_response()
+}
+
+/// Evidence independently read and validated from a review artifact
+/// directory, ready to attach to a transition insert.
+struct ValidatedEvidence {
+    review_id: String,
+    scanner_scan_id: String,
+    git_hash: String,
+    artifact_path: String,
+    fingerprint: String,
+}
+
+/// Root-bounded, content-validated read of a review artifact directory,
+/// mirroring the exact canonicalize+root-prefix pattern used by
+/// `GET /api/v1/strategy-scans/review-artifact`
+/// (`routes/strategy_scans.rs`). Never trusts caller-supplied claims about
+/// the evidence — always re-derives the fingerprint from the matched
+/// decision row's own serialized content.
+fn validate_paper_candidate_evidence(
+    st: &AppState,
+    review_dir: &str,
+    strategy_id: &str,
+    symbol: &str,
+    timeframe_secs: i64,
+) -> Result<ValidatedEvidence, String> {
+    let requested = review_dir.trim();
+    if requested.is_empty() {
+        return Err("review_dir is required for this transition".to_string());
+    }
+
+    let candidate_path = Path::new(requested);
+    let root = Path::new(&st.strategy_review_artifact_root);
+
+    let candidate_canon = std::fs::canonicalize(candidate_path)
+        .map_err(|_| format!("review_dir not found: {requested}"))?;
+    let root_canon = std::fs::canonicalize(root).map_err(|_| {
+        format!(
+            "configured review artifact root is unavailable: {}",
+            root.display()
+        )
+    })?;
+    if !candidate_canon.starts_with(&root_canon) {
+        return Err(
+            "review_dir does not resolve inside the configured review artifact root".to_string(),
+        );
+    }
+
+    let manifest_path = candidate_canon.join("manifest.json");
+    let decisions_path = candidate_canon.join("review_decisions.json");
+    for p in [&manifest_path, &decisions_path] {
+        if !p.is_file() {
+            return Err(format!("expected artifact file not found: {}", p.display()));
+        }
+    }
+
+    let manifest: mqk_backtest::ReviewManifest = read_json(&manifest_path)?;
+    let decisions: Vec<mqk_backtest::StrategyScanReviewDecision> = read_json(&decisions_path)?;
+
+    let matches: Vec<&mqk_backtest::StrategyScanReviewDecision> = decisions
+        .iter()
+        .filter(|d| {
+            d.strategy_id.trim() == strategy_id
+                && d.symbol.trim().to_ascii_uppercase() == symbol
+                && scanner_timeframe_label_to_secs(&d.timeframe) == Some(timeframe_secs)
+        })
+        .collect();
+
+    if matches.is_empty() {
+        return Err(format!(
+            "no matching evidence row found for strategy_id='{strategy_id}' symbol='{symbol}' \
+             timeframe_secs={timeframe_secs} in review artifact"
+        ));
+    }
+    if matches.len() > 1 {
+        return Err(format!(
+            "review artifact contains {} ambiguous matching rows for this exact identity; \
+             evidence must be unambiguous",
+            matches.len()
+        ));
+    }
+    let matched = matches[0];
+
+    if matched.review_state != mqk_backtest::StrategyScanReviewState::PaperCandidate {
+        return Err(format!(
+            "matched evidence row has review_state='{}', not 'paper_candidate'",
+            matched.review_state.code()
+        ));
+    }
+
+    let canonical_json = serde_json::to_string(matched)
+        .map_err(|e| format!("failed to serialize matched evidence row: {e}"))?;
+    let mut hasher = Sha256::new();
+    hasher.update(canonical_json.as_bytes());
+    let fingerprint = hex::encode(hasher.finalize());
+
+    Ok(ValidatedEvidence {
+        review_id: manifest.review_id,
+        scanner_scan_id: manifest.scanner_scan_id,
+        git_hash: manifest.git_hash,
+        artifact_path: candidate_canon.display().to_string(),
+        fingerprint,
+    })
+}
+
+fn read_json<T: serde::de::DeserializeOwned>(path: &std::path::Path) -> Result<T, String> {
+    let raw = std::fs::read_to_string(path)
+        .map_err(|e| format!("read failed: {}: {e}", path.display()))?;
+    serde_json::from_str(&raw).map_err(|e| format!("parse failed: {}: {e}", path.display()))
+}
+
+pub(crate) async fn strategy_promotion_transition(
+    State(st): State<Arc<AppState>>,
+    Json(body): Json<StrategyPromotionTransitionRequest>,
+) -> Response {
+    let strategy_id = normalize_strategy_id(&body.strategy_id);
+    let symbol = normalize_symbol(&body.symbol);
+    let timeframe_secs = body.timeframe_secs;
+    let target_state = body.target_state.trim().to_string();
+    let initiated_by = body.initiated_by.trim().to_string();
+
+    // Gate 0: field validation.
+    let mut blockers = Vec::new();
+    if strategy_id.is_empty() {
+        blockers.push("strategy_id must not be blank".to_string());
+    }
+    if symbol.is_empty() {
+        blockers.push("symbol must not be blank".to_string());
+    }
+    if symbol == "*" {
+        blockers.push("wildcard symbol '*' is forbidden".to_string());
+    }
+    if timeframe_secs <= 0 {
+        blockers.push("timeframe_secs must be positive".to_string());
+    }
+    if initiated_by.is_empty() {
+        blockers.push("initiated_by must not be blank".to_string());
+    }
+    if !is_known_promotion_state(&target_state) {
+        blockers.push(format!(
+            "target_state '{target_state}' is not a known promotion state"
+        ));
+    }
+    let effective_at_utc = match DateTime::parse_from_rfc3339(body.effective_at_utc.trim()) {
+        Ok(dt) => Some(dt.with_timezone(&Utc)),
+        Err(e) => {
+            blockers.push(format!("effective_at_utc must be RFC3339: {e}"));
+            None
+        }
+    };
+    let expires_at_utc = match body
+        .expires_at_utc
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        None => Some(None),
+        Some(raw) => match DateTime::parse_from_rfc3339(raw) {
+            Ok(dt) => Some(Some(dt.with_timezone(&Utc))),
+            Err(e) => {
+                blockers.push(format!("expires_at_utc must be RFC3339: {e}"));
+                None
+            }
+        },
+    };
+
+    if !blockers.is_empty() {
+        return transition_response(TransitionResponseArgs {
+            status: StatusCode::BAD_REQUEST,
+            accepted: false,
+            disposition: "rejected",
+            strategy_id,
+            symbol,
+            timeframe_secs,
+            previous_state: None,
+            target_state,
+            transition_id: None,
+            blockers,
+        });
+    }
+    let effective_at_utc = effective_at_utc.expect("validated above");
+    let expires_at_utc = expires_at_utc.expect("validated above");
+
+    // Deterministic transition_id: UUIDv5 over exactly the client-supplied,
+    // replay-stable request content — strategy_id/symbol/timeframe_secs/
+    // target_state/review_dir (raw, as supplied)/effective_at_utc/
+    // expires_at_utc/initiated_by/reason. Deliberately EXCLUDES any
+    // server-computed value (previous_state, evidence_fingerprint): those
+    // can differ between the original call and an exact replay of the same
+    // request (the first call already advanced current state, and re-
+    // reading the same evidence file recomputes an identical fingerprint
+    // anyway), which would silently break idempotency by minting a
+    // different id for what the client considers "the same request".
+    let review_dir_raw = body.review_dir.as_deref().unwrap_or("").trim().to_string();
+    let seed = format!(
+        "mqk-strategy-promotion-transition.v1|strategy_id={strategy_id}|symbol={symbol}|\
+         timeframe_secs={timeframe_secs}|target_state={target_state}|review_dir={review_dir_raw}|\
+         effective_at_utc={}|expires_at_utc={:?}|initiated_by={initiated_by}|reason={}",
+        effective_at_utc.to_rfc3339(),
+        expires_at_utc.map(|t| t.to_rfc3339()),
+        body.reason.trim(),
+    );
+    let transition_id = Uuid::new_v5(&Uuid::NAMESPACE_URL, seed.as_bytes());
+
+    // Gate 1: DB must be present.
+    let Some(db) = st.db.as_ref() else {
+        return transition_response(TransitionResponseArgs {
+            status: StatusCode::SERVICE_UNAVAILABLE,
+            accepted: false,
+            disposition: "unavailable",
+            strategy_id,
+            symbol,
+            timeframe_secs,
+            previous_state: None,
+            target_state,
+            transition_id: None,
+            blockers: vec!["durable execution DB truth is unavailable on this daemon".to_string()],
+        });
+    };
+
+    // Gate 1b: idempotency pre-check. If a transition with this exact
+    // deterministic id already exists in history, this is a replay of an
+    // already-accepted request — report "duplicate" using the already-
+    // recorded row's own previous_state, without re-deriving current state
+    // or re-running legality/evidence checks against whatever the state has
+    // since become (which may now legitimately differ, e.g. after a later,
+    // unrelated transition).
+    match fetch_promotion_history(db, &strategy_id, &symbol, timeframe_secs, HISTORY_LIMIT).await {
+        Ok(history) => {
+            if let Some(existing) = history.iter().find(|r| r.transition_id == transition_id) {
+                return transition_response(TransitionResponseArgs {
+                    status: StatusCode::OK,
+                    accepted: true,
+                    disposition: "duplicate",
+                    strategy_id,
+                    symbol,
+                    timeframe_secs,
+                    previous_state: existing.previous_state.clone(),
+                    target_state,
+                    transition_id: Some(transition_id),
+                    blockers: vec![
+                        "identical transition already recorded; no new row was created".to_string(),
+                    ],
+                });
+            }
+        }
+        Err(err) => {
+            return transition_response(TransitionResponseArgs {
+                status: StatusCode::SERVICE_UNAVAILABLE,
+                accepted: false,
+                disposition: "unavailable",
+                strategy_id,
+                symbol,
+                timeframe_secs,
+                previous_state: None,
+                target_state,
+                transition_id: None,
+                blockers: vec![format!("idempotency pre-check query failed: {err}")],
+            });
+        }
+    }
+
+    // Gate 2: compute actual current state (never trust a caller-supplied
+    // previous_state — there is none in the request schema by design).
+    let current =
+        match fetch_current_promotion_state(db, &strategy_id, &symbol, timeframe_secs).await {
+            Ok(c) => c,
+            Err(err) => {
+                return transition_response(TransitionResponseArgs {
+                    status: StatusCode::SERVICE_UNAVAILABLE,
+                    accepted: false,
+                    disposition: "unavailable",
+                    strategy_id,
+                    symbol,
+                    timeframe_secs,
+                    previous_state: None,
+                    target_state,
+                    transition_id: None,
+                    blockers: vec![format!("current promotion state query failed: {err}")],
+                });
+            }
+        };
+    let previous_state = current.as_ref().map(|c| c.new_state.clone());
+
+    // Gate 3: transition legality.
+    if !is_legal_transition(previous_state.as_deref(), &target_state) {
+        let blocker = format!(
+            "illegal transition: {} -> {target_state}",
+            previous_state.as_deref().unwrap_or("no_state")
+        );
+        return transition_response(TransitionResponseArgs {
+            status: StatusCode::CONFLICT,
+            accepted: false,
+            disposition: "illegal_transition",
+            strategy_id,
+            symbol,
+            timeframe_secs,
+            previous_state,
+            target_state,
+            transition_id: None,
+            blockers: vec![blocker],
+        });
+    }
+
+    // Gate 4: evidence validation, only when this transition requires it.
+    let evidence = if transition_requires_evidence(previous_state.as_deref(), &target_state) {
+        let review_dir = match body.review_dir.as_deref() {
+            Some(d) if !d.trim().is_empty() => d,
+            _ => {
+                return transition_response(TransitionResponseArgs {
+                    status: StatusCode::BAD_REQUEST,
+                    accepted: false,
+                    disposition: "evidence_invalid",
+                    strategy_id,
+                    symbol,
+                    timeframe_secs,
+                    previous_state,
+                    target_state,
+                    transition_id: None,
+                    blockers: vec!["review_dir is required for this transition".to_string()],
+                });
+            }
+        };
+        match validate_paper_candidate_evidence(
+            &st,
+            review_dir,
+            &strategy_id,
+            &symbol,
+            timeframe_secs,
+        ) {
+            Ok(ev) => Some(ev),
+            Err(msg) => {
+                return transition_response(TransitionResponseArgs {
+                    status: StatusCode::BAD_REQUEST,
+                    accepted: false,
+                    disposition: "evidence_invalid",
+                    strategy_id,
+                    symbol,
+                    timeframe_secs,
+                    previous_state,
+                    target_state,
+                    transition_id: None,
+                    blockers: vec![msg],
+                });
+            }
+        }
+    } else {
+        None
+    };
+
+    let args = InsertStrategyPromotionTransitionArgs {
+        transition_id,
+        strategy_id: strategy_id.clone(),
+        symbol: symbol.clone(),
+        timeframe_secs,
+        config_fingerprint: None,
+        config_identity_status: "unavailable_in_current_runtime".to_string(),
+        previous_state: previous_state.clone(),
+        new_state: target_state.clone(),
+        evidence_review_id: evidence.as_ref().map(|e| e.review_id.clone()),
+        evidence_scanner_scan_id: evidence.as_ref().map(|e| e.scanner_scan_id.clone()),
+        evidence_git_hash: evidence.as_ref().map(|e| e.git_hash.clone()),
+        evidence_artifact_path: evidence.as_ref().map(|e| e.artifact_path.clone()),
+        evidence_fingerprint: evidence.as_ref().map(|e| e.fingerprint.clone()),
+        effective_at_utc,
+        expires_at_utc,
+        initiated_by,
+        reason: body.reason.trim().to_string(),
+        created_at_utc: Utc::now(), // allow: ops-metadata write timestamp, not lifecycle truth
+    };
+
+    match insert_strategy_promotion_transition(db, &args).await {
+        Ok(true) => transition_response(TransitionResponseArgs {
+            status: StatusCode::OK,
+            accepted: true,
+            disposition: "transitioned",
+            strategy_id,
+            symbol,
+            timeframe_secs,
+            previous_state,
+            target_state,
+            transition_id: Some(transition_id),
+            blockers: Vec::new(),
+        }),
+        Ok(false) => transition_response(TransitionResponseArgs {
+            status: StatusCode::OK,
+            accepted: true,
+            disposition: "duplicate",
+            strategy_id,
+            symbol,
+            timeframe_secs,
+            previous_state,
+            target_state,
+            transition_id: Some(transition_id),
+            blockers: vec![
+                "identical transition already recorded; no new row was created".to_string(),
+            ],
+        }),
+        Err(err) => transition_response(TransitionResponseArgs {
+            status: StatusCode::INTERNAL_SERVER_ERROR,
+            accepted: false,
+            disposition: "unavailable",
+            strategy_id,
+            symbol,
+            timeframe_secs,
+            previous_state,
+            target_state,
+            transition_id: None,
+            blockers: vec![format!("transition insert failed: {err}")],
+        }),
+    }
+}

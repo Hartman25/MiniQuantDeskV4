@@ -46,6 +46,7 @@ pub(crate) mod portfolio;
 pub(crate) mod reconcile;
 pub(crate) mod repair;
 pub(crate) mod strategy;
+pub(crate) mod strategy_promotions;
 pub(crate) mod strategy_scans;
 pub(crate) mod system;
 pub(crate) mod system_artifact;
@@ -296,6 +297,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         multi_symbol_dispatch_summary, strategy_dry_run_status, strategy_signal, strategy_summary,
         strategy_suppressions,
     };
+    use strategy_promotions::{
+        strategy_promotion_check, strategy_promotion_history, strategy_promotion_transition,
+        strategy_promotions,
+    };
     use strategy_scans::{
         strategy_scan_artifact, strategy_scan_job_status, strategy_scan_job_submit,
         strategy_scan_jobs_list, strategy_scan_review_artifact,
@@ -469,6 +474,19 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/v1/strategy/dry-run/status",
             get(strategy_dry_run_status),
+        )
+        // STRATEGY-PROMOTION-REGISTRY-01C: read-only promotion truth (public,
+        // no auth). registered+enabled is never sufficient for paper trading;
+        // only active_paper (tradable_paper=true) is. tradable_live is always
+        // false on every row.
+        .route("/api/v1/strategy/promotions", get(strategy_promotions))
+        .route(
+            "/api/v1/strategy/promotions/history",
+            get(strategy_promotion_history),
+        )
+        .route(
+            "/api/v1/strategy/promotions/check",
+            get(strategy_promotion_check),
         )
         .route(
             "/api/v1/audit/operator-actions",
@@ -700,6 +718,14 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route("/api/v1/incidents", post(create_incident))
         .route("/api/v1/incidents/:id/resolve", post(resolve_incident))
         .route("/api/v1/strategy/signal", post(strategy_signal))
+        // STRATEGY-PROMOTION-REGISTRY-01C: operator-authenticated promotion
+        // transition. Never accepts a caller-supplied evidence-state claim —
+        // evidence-requiring transitions independently read and validate the
+        // actual review artifact. No order/broker/run-start/arm call.
+        .route(
+            "/api/v1/strategy/promotions/transition",
+            post(strategy_promotion_transition),
+        )
         .route("/v1/trading/snapshot", post(trading_snapshot_set))
         .route(
             "/v1/trading/snapshot",
@@ -710,7 +736,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         // STRATEGY-SCANNER-JOBS-GUI-01B: submit strategy scan job (operator,
         // requires auth). Research/review only — no order submission, no
         // broker/provider call, does not require arm_state.
-        .route("/api/v1/strategy-scans/jobs", post(strategy_scan_job_submit))
+        .route(
+            "/api/v1/strategy-scans/jobs",
+            post(strategy_scan_job_submit),
+        )
         // DATA-INGEST-DAEMON-JOBS-01: submit ingest job (operator, requires auth)
         // Route identity: market-data ingestion / research-data-control.
         // Not trading execution. Does not require arm_state.

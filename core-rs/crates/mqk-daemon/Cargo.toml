@@ -57,6 +57,12 @@ mqk-md = { path = "../mqk-md" }
 reqwest.workspace = true
 # BRK-00R-05: Alpaca paper WebSocket transport.
 tokio-tungstenite.workspace = true
+# STRATEGY-PROMOTION-REGISTRY-01C: evidence-fingerprint digest for promotion
+# approval evidence. Reuses the same crate+version pairing already vetted
+# elsewhere in the workspace (mqk-audit, mqk-config) — not a new hashing
+# dependency.
+sha2 = "0.10"
+hex = "0.4"
 
 [dev-dependencies]
 # Required for in-process Axum router testing via tower::ServiceExt::oneshot()
