@@ -43,7 +43,9 @@ pub use strategy_lab::{
     StrategyLabReasonCode,
 };
 pub use strategy_scan_review::{
-    build_review_decisions, evaluate_scan_review_decision, StrategyScanReviewDecision,
+    build_review_decisions, derive_review_id, evaluate_scan_review_decision,
+    execute_strategy_scan_review, review_decisions_to_csv, write_review_artifacts,
+    ReviewManifest, ReviewRunOutput, ReviewRunRequest, ReviewSummary, StrategyScanReviewDecision,
     StrategyScanReviewPolicy, StrategyScanReviewState,
 };
 pub use strategy_scanner::{
