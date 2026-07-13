@@ -16,6 +16,7 @@
 //! 1h. sector_risk          — ETF-RISK-CLOSURE-01: optional per-sector live gross exposure cap (`MQK_SECTOR_EXPOSURE_LIMITS_BPS`); uses real live weights/marks, fail-closed when enabled and unverifiable, risk-reducing orders always allowed; shared with the external signal path via `capital_policy::sector_risk_gate` (ETF-RISK-EXTERNAL-SIGNAL-GATE-01)
 //! 2.  db_present           — no DB → unavailable
 //! 3.  registry_check       — strategy must be registered AND enabled
+//! 3b. paper_promotion      — STRATEGY-PROMOTION-REGISTRY-01D: exact (strategy_id, symbol, timeframe_secs) identity must be `active_paper`; registered+enabled is necessary but not sufficient; shared with the external signal path via `promotion_gate::evaluate_paper_promotion_gate`
 //! 4.  suppression_check    — strategy must not be actively suppressed (per-strategy targeted query)
 //! 5.  arm_state            — durable arm state must be ARMED
 //! 6.  active_run           — active run must exist and be in "running" state
@@ -54,6 +55,11 @@ pub struct InternalStrategyDecision {
     pub strategy_id: String,
     /// Ticker symbol (e.g. "AAPL").
     pub symbol: String,
+    /// Canonical strategy timeframe in seconds (matches
+    /// `StrategySpec::timeframe_secs`).  STRATEGY-PROMOTION-REGISTRY-01D:
+    /// part of the exact `(strategy_id, symbol, timeframe_secs)` identity
+    /// the paper-promotion gate (Gate 3b) checks — must be positive.
+    pub timeframe_secs: i64,
     /// Order side: "buy" or "sell" (case-insensitive; normalised internally).
     pub side: String,
     /// Share quantity.  Must be positive.
@@ -89,6 +95,10 @@ pub struct InternalDecisionOutcome {
     /// | `"sector_weights_missing"` | ETF-RISK-CLOSURE-01: sector risk is enabled for this symbol's sector but live weights/marks could not be established (Gate 1h) |
     /// | `"sector_nav_unavailable"` | ETF-RISK-CLOSURE-01: sector risk is enabled but portfolio NAV is not positive (Gate 1h) |
     /// | `"sector_limit_exceeded"`  | ETF-RISK-CLOSURE-01: candidate order would exceed a configured per-sector gross exposure cap and is not risk-reducing (Gate 1h) |
+    /// | `"promotion_missing"` | STRATEGY-PROMOTION-REGISTRY-01D: no promotion record exists for this exact identity (Gate 3b) |
+    /// | `"promotion_shadow_only"` | Gate 3b: current state is `shadow_approved` (research/shadow only, never paper-tradable) |
+    /// | `"promotion_not_active"` | Gate 3b: current state is `paper_approved` (evidence accepted, activation still required) |
+    /// | `"promotion_demoted"` / `"promotion_retired"` / `"promotion_rejected"` / `"promotion_expired"` | Gate 3b: current state blocks trading |
     pub disposition: String,
     /// Echoed from [`InternalStrategyDecision::decision_id`].
     pub decision_id: String,
@@ -138,6 +148,9 @@ fn validate_fields(d: &InternalStrategyDecision) -> Result<(), Vec<String>> {
     }
     if d.symbol.trim().is_empty() {
         blockers.push("symbol must not be blank".to_string());
+    }
+    if d.timeframe_secs <= 0 {
+        blockers.push("timeframe_secs must be positive".to_string());
     }
 
     let side = d.side.trim().to_ascii_lowercase();
@@ -315,6 +328,7 @@ pub fn bar_result_to_decisions(
                 decision_id,
                 strategy_id: strategy_id.clone(),
                 symbol: t.symbol.clone(),
+                timeframe_secs: result.spec.timeframe_secs,
                 side,
                 qty,
                 order_type: "market".to_string(),
@@ -656,6 +670,43 @@ pub async fn submit_internal_strategy_decision(
                 vec![format!(
                     "internal decision unavailable: registry lookup failed: {err}"
                 )],
+            );
+        }
+    }
+
+    // Gate 3b: STRATEGY-PROMOTION-REGISTRY-01D — strategy must be
+    // paper-promoted (active_paper) for this exact
+    // (strategy_id, symbol, timeframe_secs) identity.
+    //
+    // Registered + enabled (Gate 3 above) is necessary but never
+    // sufficient for paper trading: a strategy can be registered and
+    // enabled yet have no promotion record at all, or a shadow/demoted/
+    // retired/rejected/expired one, and must still be refused here.
+    // Shared with the external signal path (routes/strategy.rs) via
+    // `promotion_gate::evaluate_paper_promotion_gate` — one mechanism, two
+    // callers, so promotion enforcement cannot drift between an
+    // internally-generated order and an externally-submitted signal.
+    {
+        let promotion = crate::promotion_gate::evaluate_paper_promotion_gate(
+            db,
+            &sid,
+            decision.symbol.trim(),
+            decision.timeframe_secs,
+        )
+        .await;
+        if !promotion.paper_tradable {
+            let disposition = match promotion.reason_code {
+                mqk_db::PromotionReasonCode::PromotionDbUnavailable
+                | mqk_db::PromotionReasonCode::PromotionQueryFailed => "unavailable",
+                other => other.code(),
+            };
+            return outcome(
+                false,
+                disposition,
+                &did,
+                &sid,
+                None,
+                vec![format!("internal decision refused: {}", promotion.blocker)],
             );
         }
     }

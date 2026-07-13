@@ -25,7 +25,7 @@
 use std::sync::Arc;
 
 use axum::http::{Request, StatusCode};
-use chrono::Utc;
+use chrono::{Duration, Utc};
 use http_body_util::BodyExt;
 use mqk_daemon::{
     decision::{submit_internal_strategy_decision, InternalStrategyDecision},
@@ -579,6 +579,78 @@ async fn seed_registry_lo02(pool: &sqlx::PgPool, strategy_id: &str) {
     .expect("seed_registry_lo02 failed");
 }
 
+/// STRATEGY-PROMOTION-REGISTRY-01D: seed a durable `active_paper` promotion
+/// for the exact `(strategy_id, symbol, timeframe_secs)` identity, walking
+/// the full legal transition graph (no state -> shadow_approved ->
+/// paper_approved -> active_paper) so the Gate 3b promotion gate passes.
+async fn seed_active_paper_promotion_lo02(
+    pool: &sqlx::PgPool,
+    strategy_id: &str,
+    symbol: &str,
+    timeframe_secs: i64,
+) {
+    let now = Utc::now();
+    let seed = |suffix: &str| {
+        Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            format!("test-promo-seed:{strategy_id}:{symbol}:{timeframe_secs}:{suffix}").as_bytes(),
+        )
+    };
+    let step = |transition_id: Uuid,
+                previous_state: Option<&str>,
+                new_state: &str,
+                effective_at: chrono::DateTime<Utc>| {
+        mqk_db::InsertStrategyPromotionTransitionArgs {
+            transition_id,
+            strategy_id: strategy_id.to_string(),
+            symbol: symbol.to_string(),
+            timeframe_secs,
+            config_fingerprint: None,
+            config_identity_status: "unavailable_in_current_runtime".to_string(),
+            previous_state: previous_state.map(|s| s.to_string()),
+            new_state: new_state.to_string(),
+            evidence_review_id: None,
+            evidence_scanner_scan_id: None,
+            evidence_git_hash: None,
+            evidence_artifact_path: None,
+            evidence_fingerprint: None,
+            effective_at_utc: effective_at,
+            expires_at_utc: None,
+            initiated_by: "test-seed".to_string(),
+            reason: "test seed".to_string(),
+            created_at_utc: effective_at,
+        }
+    };
+    mqk_db::insert_strategy_promotion_transition(
+        pool,
+        &step(seed("1"), None, "shadow_approved", now),
+    )
+    .await
+    .expect("seed shadow_approved");
+    mqk_db::insert_strategy_promotion_transition(
+        pool,
+        &step(
+            seed("2"),
+            Some("shadow_approved"),
+            "paper_approved",
+            now + Duration::milliseconds(1),
+        ),
+    )
+    .await
+    .expect("seed paper_approved");
+    mqk_db::insert_strategy_promotion_transition(
+        pool,
+        &step(
+            seed("3"),
+            Some("paper_approved"),
+            "active_paper",
+            now + Duration::milliseconds(2),
+        ),
+    )
+    .await
+    .expect("seed active_paper");
+}
+
 // ---------------------------------------------------------------------------
 // SR-09 — Clean stop + restart → status = "idle"
 //
@@ -759,6 +831,7 @@ async fn lo02_sr11_active_suppression_survives_restart_and_blocks_decision_seam(
     let pool = lo02_pool().await;
     let sid = unique_id("sr11");
     seed_registry_lo02(&pool, &sid).await;
+    seed_active_paper_promotion_lo02(&pool, &sid, "AAPL", 86400).await;
 
     // Session 1: suppress the strategy.
     let st1 = Arc::new(state::AppState::new_with_db_and_operator_auth(
@@ -798,6 +871,7 @@ async fn lo02_sr11_active_suppression_survives_restart_and_blocks_decision_seam(
             decision_id: unique_id("d"),
             strategy_id: sid.clone(),
             symbol: "AAPL".to_string(),
+            timeframe_secs: 86400,
             side: "buy".to_string(),
             qty: 1,
             order_type: "market".to_string(),

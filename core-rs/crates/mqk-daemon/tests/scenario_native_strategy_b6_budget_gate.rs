@@ -72,6 +72,7 @@ fn decision(sid: &str) -> InternalStrategyDecision {
         decision_id: format!("b6-test-decision-{sid}"),
         strategy_id: sid.to_string(),
         symbol: "AAPL".to_string(),
+        timeframe_secs: 86400,
         side: "buy".to_string(),
         qty: 10,
         order_type: "market".to_string(),

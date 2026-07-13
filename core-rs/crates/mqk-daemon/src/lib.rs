@@ -19,6 +19,7 @@ pub mod mode_transition;
 pub mod notify;
 pub mod parity_evidence;
 pub mod pre_event_flatten;
+pub mod promotion_gate;
 pub mod routes;
 pub mod state;
 pub mod strategy_scan_jobs;

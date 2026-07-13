@@ -2905,6 +2905,17 @@ pub struct StrategySignalRequest {
     /// accidentally reach the outbox.
     #[serde(default)]
     pub asset_class: Option<String>,
+    /// STRATEGY-PROMOTION-REGISTRY-01D: canonical strategy timeframe in
+    /// seconds — part of the exact `(strategy_id, symbol, timeframe_secs)`
+    /// identity the paper-promotion gate checks.
+    ///
+    /// Required once the promotion gate applies (i.e. always, in this
+    /// patch): a missing or non-positive value fails closed with
+    /// `"promotion_timeframe_unknown"` — this route never silently assumes
+    /// a default timeframe, since guessing wrong could approve trading
+    /// under the wrong strategy configuration's promotion record.
+    #[serde(default)]
+    pub timeframe_secs: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

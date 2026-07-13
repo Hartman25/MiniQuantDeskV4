@@ -191,6 +191,7 @@ pub(crate) async fn build_dispatch_summary_response(
 //   1c. nyse_session                — must be regular session (PT-DAY-03)
 //   1d. day_signal_limit            — per-run intake bound not exceeded (PT-AUTO-02)
 //   2.  db_present                  — no DB → 503
+//   2b. paper_promotion             — STRATEGY-PROMOTION-REGISTRY-01D: exact (strategy_id, symbol, timeframe_secs) identity must be `active_paper`; shared with internal Gate 3b (decision.rs) via promotion_gate::evaluate_paper_promotion_gate
 //   3.  arm_state == ARMED          — not armed → 403
 //   4.  active_run                  — no active run → 409
 //   5.  runtime_state == running    — not running → 409
@@ -929,6 +930,70 @@ pub(crate) async fn strategy_signal(
         );
     };
 
+    // Gate 2b: STRATEGY-PROMOTION-REGISTRY-01D — strategy must be
+    // paper-promoted (active_paper) for this exact
+    // (strategy_id, symbol, timeframe_secs) identity.
+    //
+    // Placed immediately after Gate 2 (DB present), before any further
+    // durable-state gate, so a promotion refusal never consumes arm-state/
+    // run/suppression checks below it. Shared with the internal decision
+    // seam (`decision.rs` Gate 3b) via
+    // `promotion_gate::evaluate_paper_promotion_gate` — one mechanism, two
+    // callers, so promotion enforcement cannot drift between an
+    // internally-generated order and an externally-submitted signal.
+    {
+        let timeframe_secs = match validated.timeframe_secs {
+            Some(v) if v > 0 => v,
+            _ => {
+                return refused_signal_response(
+                    StatusCode::FORBIDDEN,
+                    "gate_2b_paper_promotion",
+                    "promotion_timeframe_unknown",
+                    RefusedSignalArgs {
+                        signal_id: validated.signal_id,
+                        strategy_id: validated.strategy_id,
+                        symbol: validated.symbol.clone(),
+                        active_run_id: None,
+                        blockers: vec![
+                            "strategy signal refused: timeframe_secs is required and must be \
+                             positive to evaluate paper-promotion identity; this route never \
+                             assumes a default timeframe"
+                                .to_string(),
+                        ],
+                    },
+                );
+            }
+        };
+        let promotion = crate::promotion_gate::evaluate_paper_promotion_gate(
+            db,
+            &validated.strategy_id,
+            &validated.symbol,
+            timeframe_secs,
+        )
+        .await;
+        if !promotion.paper_tradable {
+            let status = match promotion.reason_code {
+                mqk_db::PromotionReasonCode::PromotionDbUnavailable
+                | mqk_db::PromotionReasonCode::PromotionQueryFailed => {
+                    StatusCode::SERVICE_UNAVAILABLE
+                }
+                _ => StatusCode::FORBIDDEN,
+            };
+            return refused_signal_response(
+                status,
+                "gate_2b_paper_promotion",
+                promotion.reason_code.code(),
+                RefusedSignalArgs {
+                    signal_id: validated.signal_id,
+                    strategy_id: validated.strategy_id,
+                    symbol: validated.symbol.clone(),
+                    active_run_id: None,
+                    blockers: vec![format!("strategy signal refused: {}", promotion.blocker)],
+                },
+            );
+        }
+    }
+
     // Gate 3: arm state must be ARMED.
     let (durable_arm_state, durable_arm_reason) = match mqk_db::load_arm_state(db).await {
         Ok(Some((state, reason))) => (state, reason),
@@ -1282,6 +1347,12 @@ struct ValidatedStrategySignal {
     signal_id: String,
     strategy_id: String,
     symbol: String,
+    /// STRATEGY-PROMOTION-REGISTRY-01D: intentionally NOT validated at
+    /// Gate 0 (field validation runs before every other gate, including
+    /// gates that existing tests exercise independently of promotion).
+    /// Presence/positivity is checked at Gate 2b, immediately before it is
+    /// used — see the module's gate-sequence doc comment.
+    timeframe_secs: Option<i64>,
     side: String,
     qty: i64,
     order_type: String,
@@ -1421,6 +1492,7 @@ fn validate_strategy_signal(
         signal_id,
         strategy_id,
         symbol,
+        timeframe_secs: body.timeframe_secs,
         side,
         qty: qty.expect("validated qty"),
         order_type,

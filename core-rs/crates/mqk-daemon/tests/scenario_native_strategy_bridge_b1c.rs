@@ -56,6 +56,78 @@ fn live_result(targets: Vec<TargetPosition>) -> StrategyBarResult {
     }
 }
 
+/// STRATEGY-PROMOTION-REGISTRY-01D: seed a durable `active_paper` promotion
+/// for the exact `(strategy_id, symbol, timeframe_secs)` identity, walking
+/// the full legal transition graph (no state -> shadow_approved ->
+/// paper_approved -> active_paper) so the Gate 3b promotion gate passes.
+async fn seed_active_paper_promotion(
+    pool: &sqlx::PgPool,
+    strategy_id: &str,
+    symbol: &str,
+    timeframe_secs: i64,
+) {
+    let now = chrono::Utc::now();
+    let seed = |suffix: &str| {
+        Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            format!("test-promo-seed:{strategy_id}:{symbol}:{timeframe_secs}:{suffix}").as_bytes(),
+        )
+    };
+    let step = |transition_id: Uuid,
+                previous_state: Option<&str>,
+                new_state: &str,
+                effective_at: chrono::DateTime<chrono::Utc>| {
+        mqk_db::InsertStrategyPromotionTransitionArgs {
+            transition_id,
+            strategy_id: strategy_id.to_string(),
+            symbol: symbol.to_string(),
+            timeframe_secs,
+            config_fingerprint: None,
+            config_identity_status: "unavailable_in_current_runtime".to_string(),
+            previous_state: previous_state.map(|s| s.to_string()),
+            new_state: new_state.to_string(),
+            evidence_review_id: None,
+            evidence_scanner_scan_id: None,
+            evidence_git_hash: None,
+            evidence_artifact_path: None,
+            evidence_fingerprint: None,
+            effective_at_utc: effective_at,
+            expires_at_utc: None,
+            initiated_by: "test-seed".to_string(),
+            reason: "test seed".to_string(),
+            created_at_utc: effective_at,
+        }
+    };
+    mqk_db::insert_strategy_promotion_transition(
+        pool,
+        &step(seed("1"), None, "shadow_approved", now),
+    )
+    .await
+    .expect("seed shadow_approved");
+    mqk_db::insert_strategy_promotion_transition(
+        pool,
+        &step(
+            seed("2"),
+            Some("shadow_approved"),
+            "paper_approved",
+            now + chrono::Duration::milliseconds(1),
+        ),
+    )
+    .await
+    .expect("seed paper_approved");
+    mqk_db::insert_strategy_promotion_transition(
+        pool,
+        &step(
+            seed("3"),
+            Some("paper_approved"),
+            "active_paper",
+            now + chrono::Duration::milliseconds(2),
+        ),
+    )
+    .await
+    .expect("seed active_paper");
+}
+
 fn shadow_result(targets: Vec<TargetPosition>) -> StrategyBarResult {
     StrategyBarResult {
         spec: StrategySpec::new("test_strategy", 300),
@@ -519,6 +591,7 @@ async fn b1c_c14_loop_path_creates_durable_outbox_row() {
     )
     .await
     .expect("C14: seed strategy registry");
+    seed_active_paper_promotion(&pool, strategy_id, "AAPL", 300).await;
 
     // Build AppState with DB and arm state.
     let st = Arc::new(state::AppState::new_with_db(pool.clone()));

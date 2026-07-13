@@ -22,7 +22,7 @@
 
 use std::sync::Arc;
 
-use chrono::Utc;
+use chrono::{Duration, Utc};
 use mqk_daemon::{
     decision::{submit_internal_strategy_decision, InternalStrategyDecision},
     state,
@@ -38,6 +38,7 @@ fn make_decision(decision_id: &str, strategy_id: &str) -> InternalStrategyDecisi
         decision_id: decision_id.to_string(),
         strategy_id: strategy_id.to_string(),
         symbol: "AAPL".to_string(),
+        timeframe_secs: 86400,
         side: "buy".to_string(),
         qty: 10,
         order_type: "market".to_string(),
@@ -88,6 +89,78 @@ async fn seed_registry(pool: &sqlx::PgPool, strategy_id: &str, enabled: bool) {
     )
     .await
     .expect("seed_registry: upsert failed");
+}
+
+/// STRATEGY-PROMOTION-REGISTRY-01D: seed a durable `active_paper` promotion
+/// for the exact `(strategy_id, symbol, timeframe_secs)` identity, walking
+/// the full legal transition graph (no state -> shadow_approved ->
+/// paper_approved -> active_paper) so the Gate 3b promotion gate passes.
+async fn seed_active_paper_promotion(
+    pool: &sqlx::PgPool,
+    strategy_id: &str,
+    symbol: &str,
+    timeframe_secs: i64,
+) {
+    let now = Utc::now();
+    let seed = |suffix: &str| {
+        Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            format!("test-promo-seed:{strategy_id}:{symbol}:{timeframe_secs}:{suffix}").as_bytes(),
+        )
+    };
+    let step = |transition_id: Uuid,
+                previous_state: Option<&str>,
+                new_state: &str,
+                effective_at: chrono::DateTime<Utc>| {
+        mqk_db::InsertStrategyPromotionTransitionArgs {
+            transition_id,
+            strategy_id: strategy_id.to_string(),
+            symbol: symbol.to_string(),
+            timeframe_secs,
+            config_fingerprint: None,
+            config_identity_status: "unavailable_in_current_runtime".to_string(),
+            previous_state: previous_state.map(|s| s.to_string()),
+            new_state: new_state.to_string(),
+            evidence_review_id: None,
+            evidence_scanner_scan_id: None,
+            evidence_git_hash: None,
+            evidence_artifact_path: None,
+            evidence_fingerprint: None,
+            effective_at_utc: effective_at,
+            expires_at_utc: None,
+            initiated_by: "test-seed".to_string(),
+            reason: "test seed".to_string(),
+            created_at_utc: effective_at,
+        }
+    };
+    mqk_db::insert_strategy_promotion_transition(
+        pool,
+        &step(seed("1"), None, "shadow_approved", now),
+    )
+    .await
+    .expect("seed shadow_approved");
+    mqk_db::insert_strategy_promotion_transition(
+        pool,
+        &step(
+            seed("2"),
+            Some("shadow_approved"),
+            "paper_approved",
+            now + Duration::milliseconds(1),
+        ),
+    )
+    .await
+    .expect("seed paper_approved");
+    mqk_db::insert_strategy_promotion_transition(
+        pool,
+        &step(
+            seed("3"),
+            Some("paper_approved"),
+            "active_paper",
+            now + Duration::milliseconds(2),
+        ),
+    )
+    .await
+    .expect("seed active_paper");
 }
 
 /// Seed a RUNNING run in the DB and wire up the local loop handle.
@@ -401,6 +474,7 @@ async fn decision_active_suppression_refuses_entry() {
     let pool = make_db_pool().await;
     let sid = unique_id("sup_active");
     seed_registry(&pool, &sid, true).await;
+    seed_active_paper_promotion(&pool, &sid, "AAPL", 86400).await;
 
     // Insert an active suppression for this strategy.
     mqk_db::insert_strategy_suppression(
@@ -453,6 +527,7 @@ async fn decision_cleared_suppression_does_not_block() {
     let pool = make_db_pool().await;
     let sid = unique_id("sup_cleared");
     seed_registry(&pool, &sid, true).await;
+    seed_active_paper_promotion(&pool, &sid, "AAPL", 86400).await;
 
     let sup_id = Uuid::new_v4();
     mqk_db::insert_strategy_suppression(
@@ -507,6 +582,8 @@ async fn decision_suppression_does_not_bleed_across_strategies() {
     let sid_b = unique_id("sup_b");
     seed_registry(&pool, &sid_a, true).await;
     seed_registry(&pool, &sid_b, true).await;
+    seed_active_paper_promotion(&pool, &sid_a, "AAPL", 86400).await;
+    seed_active_paper_promotion(&pool, &sid_b, "AAPL", 86400).await;
 
     // Suppress only strategy A.
     mqk_db::insert_strategy_suppression(
@@ -557,6 +634,7 @@ async fn decision_suppression_blocks_before_outbox_enqueue() {
     let pool = make_db_pool().await;
     let sid = unique_id("sup_outbox");
     seed_registry(&pool, &sid, true).await;
+    seed_active_paper_promotion(&pool, &sid, "AAPL", 86400).await;
 
     let sup_id = Uuid::new_v4();
     mqk_db::insert_strategy_suppression(
@@ -617,6 +695,7 @@ async fn decision_passes_registry_but_no_arm_state_rejected() {
 
     let sid = unique_id("disarmed");
     seed_registry(&pool, &sid, true).await;
+    seed_active_paper_promotion(&pool, &sid, "AAPL", 86400).await;
 
     let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
         pool,
@@ -662,6 +741,7 @@ async fn decision_full_enqueue_path_accepted() {
 
     let sid = unique_id("fullpath");
     seed_registry(&pool, &sid, true).await;
+    seed_active_paper_promotion(&pool, &sid, "AAPL", 86400).await;
     mqk_db::persist_arm_state(&pool, "ARMED", None)
         .await
         .expect("persist arm state");
@@ -729,6 +809,7 @@ async fn decision_duplicate_decision_id_returns_duplicate() {
 
     let sid = unique_id("dup");
     seed_registry(&pool, &sid, true).await;
+    seed_active_paper_promotion(&pool, &sid, "AAPL", 86400).await;
     mqk_db::persist_arm_state(&pool, "ARMED", None)
         .await
         .expect("persist arm state");

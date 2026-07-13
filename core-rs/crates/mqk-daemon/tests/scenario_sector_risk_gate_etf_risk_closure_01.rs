@@ -161,6 +161,7 @@ fn make_decision(
         decision_id: decision_id.to_string(),
         strategy_id: strategy_id.to_string(),
         symbol: FAKE_SYMBOL.to_string(),
+        timeframe_secs: 86400,
         side: side.to_string(),
         qty,
         order_type: "market".to_string(),
