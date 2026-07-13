@@ -8552,3 +8552,38 @@ order, fill, or position at any phase; no DB migration; no
 in any test; no generated evidence, smoke log, export, or untracked
 ledger draft staged at any phase; no daemon started or restarted at any
 phase.
+
+---
+
+## STRATEGY-LAB-COMPLETION-AND-SCANNER-FOUNDATION-01-COMBINED — Phase A (audit + design)
+
+Patch: `STRATEGY-LAB-SCANNER-01A-CURRENT-TRUTH-AUDIT-AND-DESIGN-01`.
+
+Audited the current repo's research/backtest/scanner surfaces before
+building a local-data-only strategy/symbol scanner foundation. Confirmed:
+`mqk-backtest` already has a deterministic single-symbol `BacktestEngine`,
+CSV loader, and parameter-sweep engine (`run_sweep` /
+`sweep_row_from_report`), and `mqk-artifacts`/`strategy_lab.rs` already
+rank *completed backtest artifact folders* — but nothing today resolves
+the instrument registry (`config/instruments/equities.json`, 88 enabled
+equities) against local bar files
+(`exports/md_backup/1D/*.csv`, 88/88 present; `exports/md_backup/5m/`
+present but empty) and produces a fresh ranked-candidate scan. Selected
+design: a pure Phase B scanner core in `mqk-backtest::strategy_scanner`
+(no IO — receives already-loaded bars and an already-instantiated
+strategy from its caller) plus a Phase C CLI runner (`mqk backtest
+scan-strategies`, matching the existing `mqk backtest <subcmd>`
+convention — there is no `mqk research` namespace in this repo) that
+does the file IO and writes a `manifest.json` +
+`candidates.json`/`.csv` + `summary.json` artifact tree under
+`exports/strategy_scans/`. No DB migration. No GUI. No daemon route.
+
+**Built:**
+`docs/specs/strategy_lab_scanner_01a_current_truth_audit.md`,
+`scripts/guards/validate_strategy_lab_scanner_01a_audit.ps1`.
+
+**Safety confirmation:** docs/validator-script only; no code changed; no
+live/paper order submitted; no broker/provider/network call; no DB
+migration; no `.env.local` edit; no config flag change; no strategy
+threshold change; no generated evidence, smoke log, export, or untracked
+ledger draft staged.
