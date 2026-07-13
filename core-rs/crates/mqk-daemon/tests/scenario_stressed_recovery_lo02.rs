@@ -609,6 +609,8 @@ async fn seed_active_paper_promotion_lo02(
             config_identity_status: "unavailable_in_current_runtime".to_string(),
             previous_state: previous_state.map(|s| s.to_string()),
             new_state: new_state.to_string(),
+            parent_transition_id: None,
+            evidence_transition_id: None,
             evidence_review_id: None,
             evidence_scanner_scan_id: None,
             evidence_git_hash: None,
