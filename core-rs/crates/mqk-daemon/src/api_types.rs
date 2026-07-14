@@ -5019,6 +5019,9 @@ pub struct MarketDataFeedPollOnceRequest {
     pub now_utc: Option<String>,
     /// Override provider registry path; omitted uses AppState default.
     pub provider_registry_path: Option<String>,
+    /// Override instrument registry path; omitted uses AppState default
+    /// (DAILY-DATA-READINESS-01B-PROVIDER-CONTRACT-INTEGRATION-01 §B2.4).
+    pub instrument_registry_path: Option<String>,
 }
 
 /// Per-symbol result for one latest closed-bar poll.

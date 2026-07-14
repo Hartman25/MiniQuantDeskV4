@@ -16,12 +16,14 @@ use chrono::{DateTime, TimeZone, Utc};
 
 use mqk_daemon::daily_data_readiness::{
     self, evaluate_assignment, evaluate_assignments, evaluate_bar_readiness,
-    expected_daily_end_ts_window, expected_intraday_end_ts_window, REASON_ASSET_CLASS_UNKNOWN,
-    REASON_CALENDAR_UNAVAILABLE, REASON_DUPLICATE_TIMESTAMP, REASON_EXPECTED_LATEST_BAR_MISSING,
-    REASON_INSUFFICIENT_HISTORY, REASON_INTERIOR_GAP, REASON_LATEST_BAR_FUTURE,
-    REASON_PROVIDER_CAPABILITY_MISMATCH, REASON_PROVIDER_DISABLED,
-    REASON_PROVIDER_INGEST_TIME_FUTURE, REASON_PROVIDER_PROVENANCE_INVALID,
-    REASON_PROVIDER_SYMBOL_MISMATCH, REASON_PROVIDER_TIMESTAMP_CONVENTION_UNVERIFIED,
+    expected_daily_end_ts_window, expected_intraday_end_ts_window,
+    resolve_daily_bar_timestamp_convention, DailyBarTimestampConvention,
+    REASON_ASSET_CLASS_UNKNOWN, REASON_CALENDAR_UNAVAILABLE, REASON_DUPLICATE_TIMESTAMP,
+    REASON_EXPECTED_LATEST_BAR_MISSING, REASON_INSUFFICIENT_HISTORY, REASON_INTERIOR_GAP,
+    REASON_LATEST_BAR_FUTURE, REASON_PROVIDER_CAPABILITY_MISMATCH, REASON_PROVIDER_DISABLED,
+    REASON_PROVIDER_ID_MISMATCH, REASON_PROVIDER_INGEST_TIME_FUTURE,
+    REASON_PROVIDER_PROVENANCE_INVALID, REASON_PROVIDER_SYMBOL_MISMATCH,
+    REASON_PROVIDER_TIMESTAMP_CONVENTION_UNVERIFIED, REASON_PROVIDER_UNKNOWN,
     REASON_RUNTIME_STRATEGY_ASSIGNMENT_MISMATCH, REASON_RUNTIME_STRATEGY_SYMBOL_BINDING_MISMATCH,
     REASON_RUNTIME_STRATEGY_TIMEFRAME_MISMATCH, REASON_STRATEGY_REQUIREMENT_UNKNOWN,
 };
@@ -70,6 +72,33 @@ fn alpaca_provider_config() -> ProviderConfig {
     }
 }
 
+/// B2.2: the one canonical enabled equity/ETF daily provider with real,
+/// committed parser proof of its `1D` timestamp convention (see
+/// `resolve_daily_bar_timestamp_convention`'s doc comment in
+/// `mqk-daemon/src/daily_data_readiness.rs` and
+/// `mqk-md/src/lib.rs::tests::rate_limit_retry_succeeds_after_one_body_429`).
+/// Also the real canonical provider assigned to every enabled equity in
+/// `config/instruments/equities.json` today.
+fn twelvedata_provider_config() -> ProviderConfig {
+    ProviderConfig {
+        provider_id: "twelvedata".to_string(),
+        display_name: "TwelveData".to_string(),
+        asset_classes: vec!["equity".to_string()],
+        free_tier_available: true,
+        api_key_required: true,
+        credential_env_vars: vec![],
+        rate_limit_notes: String::new(),
+        supported_timeframes: vec!["1D".to_string(), "1m".to_string(), "5m".to_string()],
+        historical_depth_notes: String::new(),
+        realtime_support_notes: String::new(),
+        licensing_notes: String::new(),
+        implementation_status: "implemented_equity_provider".to_string(),
+        enabled: true,
+        verification_status: "test".to_string(),
+        docs_url: String::new(),
+    }
+}
+
 fn kraken_disabled_provider_config() -> ProviderConfig {
     ProviderConfig {
         provider_id: "kraken".to_string(),
@@ -91,7 +120,32 @@ fn kraken_disabled_provider_config() -> ProviderConfig {
 }
 
 fn provider_configs() -> Vec<ProviderConfig> {
-    vec![alpaca_provider_config(), kraken_disabled_provider_config()]
+    vec![
+        alpaca_provider_config(),
+        twelvedata_provider_config(),
+        kraken_disabled_provider_config(),
+    ]
+}
+
+/// A `TrackedInstrument` assigned to `"twelvedata"` (mirrors the real
+/// `config/instruments/equities.json` provider assignment), for B2.2's
+/// verified-daily-convention proofs.
+fn twelvedata_instrument(symbol: &str) -> TrackedInstrument {
+    TrackedInstrument {
+        instrument_id: format!("equity:US:{symbol}"),
+        symbol: symbol.to_string(),
+        asset_class: "equity".to_string(),
+        provider: "twelvedata".to_string(),
+        provider_symbol: symbol.to_string(),
+        venue: "NASDAQ".to_string(),
+        currency: "USD".to_string(),
+        enabled: true,
+        timeframes: vec!["1D".to_string()],
+        notes: String::new(),
+        instrument_kind: None,
+        sector: None,
+        category: None,
+    }
 }
 
 fn aapl_instrument() -> TrackedInstrument {
@@ -957,6 +1011,7 @@ fn ddr_22_future_row_blocks() {
         300,
         &provider_configs(),
         "equity",
+        "alpaca",
         "AAPL",
     );
     assert!(blockers.contains(&REASON_LATEST_BAR_FUTURE));
@@ -986,6 +1041,7 @@ fn ddr_23_insufficient_history_blocks() {
         300,
         &provider_configs(),
         "equity",
+        "alpaca",
         "AAPL",
     );
     assert!(blockers.contains(&REASON_INSUFFICIENT_HISTORY));
@@ -1013,6 +1069,7 @@ fn ddr_24_duplicate_timestamp_blocks() {
         300,
         &provider_configs(),
         "equity",
+        "alpaca",
         "AAPL",
     );
     assert!(blockers.contains(&REASON_DUPLICATE_TIMESTAMP));
@@ -1043,6 +1100,7 @@ fn ddr_25_interior_gap_blocks() {
         300,
         &provider_configs(),
         "equity",
+        "alpaca",
         "AAPL",
     );
     assert!(
@@ -1074,6 +1132,7 @@ fn ddr_26_unknown_provider_blocks() {
         300,
         &provider_configs(),
         "equity",
+        "alpaca",
         "AAPL",
     );
     assert!(blockers.contains(&REASON_PROVIDER_PROVENANCE_INVALID));
@@ -1098,6 +1157,7 @@ fn ddr_27_disabled_provider_blocks() {
         300,
         &provider_configs(),
         "equity",
+        "alpaca",
         "AAPL",
     );
     assert!(blockers.contains(&REASON_PROVIDER_DISABLED));
@@ -1152,6 +1212,7 @@ fn ddr_39_blank_provider_source_blocks() {
         300,
         &provider_configs(),
         "equity",
+        "alpaca",
         "AAPL",
     );
     assert!(
@@ -1180,6 +1241,7 @@ fn ddr_40_blank_provider_symbol_blocks() {
         300,
         &provider_configs(),
         "equity",
+        "alpaca",
         "AAPL",
     );
     assert!(
@@ -1209,6 +1271,7 @@ fn ddr_41_wrong_provider_symbol_blocks() {
         300,
         &provider_configs(),
         "equity",
+        "alpaca",
         "AAPL",
     );
     assert!(
@@ -1237,6 +1300,7 @@ fn ddr_42_blank_ingest_mode_blocks() {
         300,
         &provider_configs(),
         "equity",
+        "alpaca",
         "AAPL",
     );
     assert!(
@@ -1265,6 +1329,7 @@ fn ddr_43_future_ingest_time_blocks() {
         300,
         &provider_configs(),
         "equity",
+        "alpaca",
         "AAPL",
     );
     assert!(
@@ -1294,6 +1359,7 @@ fn ddr_44_absent_provider_updated_at_passes() {
         300,
         &provider_configs(),
         "equity",
+        "alpaca",
         "AAPL",
     );
     assert!(
@@ -1328,6 +1394,7 @@ fn ddr_45_fully_valid_provenance_passes() {
         60,
         &provider_configs(),
         "equity",
+        "alpaca",
         "AAPL",
     );
     assert!(
@@ -1647,6 +1714,295 @@ async fn ddr_46_daily_always_blocks_on_unverified_timestamp_convention() {
         vec![REASON_PROVIDER_TIMESTAMP_CONVENTION_UNVERIFIED],
         "DDR-46: fully valid/continuous 1D data must block on exactly this one reason: {:?}",
         result.blockers
+    );
+
+    sqlx::query("delete from md_bars where symbol = $1")
+        .bind(symbol)
+        .execute(&pool)
+        .await
+        .ok();
+}
+
+// ---------------------------------------------------------------------------
+// Provider contract (§B2.1/§B2.2,
+// DAILY-DATA-READINESS-01B-PROVIDER-CONTRACT-INTEGRATION-01)
+// ---------------------------------------------------------------------------
+
+/// `resolve_daily_bar_timestamp_convention` is provider-specific and pure.
+#[test]
+fn ddr_48_daily_timestamp_convention_is_provider_specific() {
+    assert_eq!(
+        resolve_daily_bar_timestamp_convention("twelvedata"),
+        DailyBarTimestampConvention::MidnightUtcMarketDate,
+        "DDR-48: twelvedata's daily convention is proven (mqk-md parser test)"
+    );
+    assert_eq!(
+        resolve_daily_bar_timestamp_convention("alpaca"),
+        DailyBarTimestampConvention::Unverified,
+        "DDR-48: alpaca's daily convention remains unproven"
+    );
+    assert_eq!(
+        resolve_daily_bar_timestamp_convention("some_other_provider"),
+        DailyBarTimestampConvention::Unverified,
+        "DDR-48: an unrecognized provider fails closed to Unverified"
+    );
+}
+
+/// The canonical provider id/symbol are exposed on `AssignmentReadiness`,
+/// populated even when the DB stage is never reached.
+#[tokio::test]
+async fn ddr_49_canonical_provider_identity_is_exposed() {
+    let a = assignment("AAPL", "swing_momentum", "1D");
+    let binding = matching_binding("swing_momentum", "AAPL", 86_400);
+    let result = evaluate_assignment(
+        None,
+        &a,
+        &binding,
+        &NyseWeekdaysProvider,
+        &provider_configs(),
+        &instruments(),
+        &strategy_registry(),
+        ts(MON_2024_01_08_10AM_ET),
+    )
+    .await;
+    assert_eq!(
+        result.expected_provider_id,
+        Some("alpaca".to_string()),
+        "DDR-49: canonical provider id must be exposed"
+    );
+    assert_eq!(
+        result.expected_provider_symbol,
+        Some("AAPL".to_string()),
+        "DDR-49: canonical provider symbol must be exposed"
+    );
+}
+
+/// An assignment for a symbol absent from the instrument registry exposes no
+/// canonical provider identity (already blocked separately via
+/// `asset_class_unknown`) rather than a fabricated guess.
+#[tokio::test]
+async fn ddr_50_unregistered_symbol_exposes_no_provider_identity() {
+    let a = assignment("ZZUNREGISTERED", "swing_momentum", "1D");
+    let binding = matching_binding("swing_momentum", "ZZUNREGISTERED", 86_400);
+    let result = evaluate_assignment(
+        None,
+        &a,
+        &binding,
+        &NyseWeekdaysProvider,
+        &provider_configs(),
+        &instruments(),
+        &strategy_registry(),
+        ts(MON_2024_01_08_10AM_ET),
+    )
+    .await;
+    assert_eq!(result.expected_provider_id, None);
+    assert_eq!(result.expected_provider_symbol, None);
+    assert!(result.blockers.contains(&REASON_ASSET_CLASS_UNKNOWN));
+}
+
+/// Exact provider ID match passes; a materially different registered,
+/// enabled, capable provider still blocks under its own reason.
+#[test]
+fn ddr_51_exact_provider_id_match_passes() {
+    let provider = NyseWeekdaysProvider;
+    let now = ts(MON_2024_01_08_10AM_ET);
+    let schedule = resolve_market_session_schedule(&provider, now);
+    let d = market_calendar::midnight_utc_ts_for_date(schedule.previous_trading_date);
+    let rows = vec![bar("AAPL", "1D", d, true, "alpaca")];
+    let blockers = evaluate_bar_readiness(
+        &rows,
+        mqk_md::Timeframe::D1,
+        &schedule,
+        &provider,
+        1,
+        now.timestamp(),
+        900,
+        300,
+        &provider_configs(),
+        "equity",
+        "alpaca",
+        "AAPL",
+    );
+    assert!(
+        !blockers.contains(&REASON_PROVIDER_ID_MISMATCH),
+        "DDR-51: matching provider id must not block: {blockers:?}"
+    );
+}
+
+/// A row from a different, registered/enabled/capable provider than the
+/// instrument's own configured provider blocks as `provider_id_mismatch`.
+#[test]
+fn ddr_52_wrong_provider_id_blocks() {
+    let provider = NyseWeekdaysProvider;
+    let now = ts(MON_2024_01_08_10AM_ET);
+    let schedule = resolve_market_session_schedule(&provider, now);
+    let d = market_calendar::midnight_utc_ts_for_date(schedule.previous_trading_date);
+    let rows = vec![bar("AAPL", "1D", d, true, "twelvedata")];
+    let blockers = evaluate_bar_readiness(
+        &rows,
+        mqk_md::Timeframe::D1,
+        &schedule,
+        &provider,
+        1,
+        now.timestamp(),
+        900,
+        300,
+        &provider_configs(),
+        "equity",
+        "alpaca",
+        "AAPL",
+    );
+    assert!(
+        blockers.contains(&REASON_PROVIDER_ID_MISMATCH),
+        "DDR-52: a row from a different (even valid) provider must block: {blockers:?}"
+    );
+}
+
+/// A row whose `provider_id` is a real, non-blank, non-"unknown" string that
+/// simply is not registered blocks as `provider_unknown` — distinguished
+/// from the legacy blank/"unknown" `provider_provenance_invalid` bucket.
+#[test]
+fn ddr_53_unregistered_provider_id_blocks_as_provider_unknown() {
+    let provider = NyseWeekdaysProvider;
+    let now = ts(MON_2024_01_08_10AM_ET);
+    let schedule = resolve_market_session_schedule(&provider, now);
+    let d = market_calendar::midnight_utc_ts_for_date(schedule.previous_trading_date);
+    let rows = vec![bar("AAPL", "1D", d, true, "not_a_registered_provider")];
+    let blockers = evaluate_bar_readiness(
+        &rows,
+        mqk_md::Timeframe::D1,
+        &schedule,
+        &provider,
+        1,
+        now.timestamp(),
+        900,
+        300,
+        &provider_configs(),
+        "equity",
+        "alpaca",
+        "AAPL",
+    );
+    assert!(
+        blockers.contains(&REASON_PROVIDER_UNKNOWN),
+        "DDR-53: an unregistered provider_id must block as provider_unknown: {blockers:?}"
+    );
+    assert!(
+        !blockers.contains(&REASON_PROVIDER_PROVENANCE_INVALID),
+        "DDR-53: must not also fold into the generic legacy-unknown bucket: {blockers:?}"
+    );
+}
+
+/// The capability pre-check now evaluates the instrument's *exact configured
+/// provider*, not merely "any" enabled provider that happens to support the
+/// same asset class/timeframe. An instrument configured for a provider that
+/// is not registered at all blocks as `provider_unknown`, even though a
+/// different, capable, enabled provider genuinely exists in the registry.
+#[tokio::test]
+async fn ddr_54_capability_precheck_uses_instruments_exact_provider() {
+    let mut instruments = instruments();
+    instruments.push(TrackedInstrument {
+        symbol: "ZZNOTREGPROV".to_string(),
+        instrument_id: "equity:US:ZZNOTREGPROV".to_string(),
+        provider: "not_a_registered_provider".to_string(),
+        provider_symbol: "ZZNOTREGPROV".to_string(),
+        ..aapl_instrument()
+    });
+    let a = assignment("ZZNOTREGPROV", "swing_momentum", "1D");
+    let binding = matching_binding("swing_momentum", "ZZNOTREGPROV", 86_400);
+    let result = evaluate_assignment(
+        None,
+        &a,
+        &binding,
+        &NyseWeekdaysProvider,
+        &provider_configs(),
+        &instruments,
+        &strategy_registry(),
+        ts(MON_2024_01_08_10AM_ET),
+    )
+    .await;
+    assert!(
+        result.blockers.contains(&REASON_PROVIDER_UNKNOWN),
+        "DDR-54: instrument's own unregistered provider must block, even though \
+         alpaca/twelvedata are registered and capable: {:?}",
+        result.blockers
+    );
+    assert_eq!(result.readiness_state, "blocked");
+}
+
+/// A verified provider-specific `1D` convention (twelvedata) is not blocked
+/// by `provider_timestamp_convention_unverified` — the corrected contract
+/// blocks only the specific unverified `(provider, timeframe)` pair, never
+/// every `1D` evaluation universally.
+#[tokio::test]
+async fn ddr_55_verified_twelvedata_1d_convention_not_blocked() {
+    let Some(db_url) = get_test_db_url() else {
+        eprintln!("DDR-55: skipped (no MQK_DATABASE_URL)");
+        return;
+    };
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&db_url)
+        .await
+        .expect("DDR-55: pool connect failed");
+
+    let symbol = "ZZDDRTEST55";
+    let provider = NyseWeekdaysProvider;
+    let now = ts(MON_2024_01_08_10AM_ET);
+    let schedule = resolve_market_session_schedule(&provider, now);
+    let expected = expected_daily_end_ts_window(&provider, &schedule, now.timestamp(), 900, 20)
+        .expect("resolves");
+
+    sqlx::query("delete from md_bars where symbol = $1 and timeframe = '1D'")
+        .bind(symbol)
+        .execute(&pool)
+        .await
+        .expect("cleanup failed");
+    for &end_ts in &expected {
+        sqlx::query(
+            r#"
+            insert into md_bars (
+              symbol, timeframe, end_ts, open_micros, high_micros, low_micros,
+              close_micros, volume, is_complete, provider_id, provider_source,
+              provider_symbol, ingest_mode, ingested_at
+            ) values ($1,'1D',$2,100000000,101000000,99000000,100500000,1000000,true,
+                      'twelvedata','twelvedata',$1,'historical_backfill',$3)
+            "#,
+        )
+        .bind(symbol)
+        .bind(end_ts)
+        .bind(ts(end_ts + 60))
+        .execute(&pool)
+        .await
+        .expect("seed insert failed");
+    }
+
+    let mut instruments = instruments();
+    instruments.push(twelvedata_instrument(symbol));
+
+    let a = assignment(symbol, "swing_momentum", "1D");
+    let binding = matching_binding("swing_momentum", symbol, 86_400);
+    let result = evaluate_assignment(
+        Some(&pool),
+        &a,
+        &binding,
+        &provider,
+        &provider_configs(),
+        &instruments,
+        &strategy_registry(),
+        now,
+    )
+    .await;
+
+    assert!(
+        !result
+            .blockers
+            .contains(&REASON_PROVIDER_TIMESTAMP_CONVENTION_UNVERIFIED),
+        "DDR-55: a verified provider's 1D convention must not block on this reason: {:?}",
+        result.blockers
+    );
+    assert_eq!(
+        result.readiness_state, "ready",
+        "DDR-55: fully valid twelvedata-provenanced 1D warmup must reach ready: {result:?}"
     );
 
     sqlx::query("delete from md_bars where symbol = $1")

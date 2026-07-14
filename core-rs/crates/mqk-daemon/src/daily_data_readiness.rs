@@ -54,6 +54,8 @@ pub const REASON_STRATEGY_REQUIREMENT_UNKNOWN: &str = "strategy_requirement_unkn
 pub const REASON_ASSET_CLASS_UNKNOWN: &str = "asset_class_unknown";
 pub const REASON_PROVIDER_PROVENANCE_INVALID: &str = "provider_provenance_invalid";
 pub const REASON_PROVIDER_SYMBOL_MISMATCH: &str = "provider_symbol_mismatch";
+pub const REASON_PROVIDER_ID_MISMATCH: &str = "provider_id_mismatch";
+pub const REASON_PROVIDER_UNKNOWN: &str = "provider_unknown";
 pub const REASON_PROVIDER_INGEST_TIME_FUTURE: &str = "provider_ingest_time_future";
 pub const REASON_PROVIDER_DISABLED: &str = "provider_disabled";
 pub const REASON_PROVIDER_CAPABILITY_MISMATCH: &str = "provider_capability_mismatch";
@@ -121,6 +123,68 @@ pub fn effective_future_skew_seconds(
 }
 
 // ---------------------------------------------------------------------------
+// Provider-specific daily timestamp convention (§B2.2,
+// DAILY-DATA-READINESS-01B-PROVIDER-CONTRACT-INTEGRATION-01)
+// ---------------------------------------------------------------------------
+
+/// How a provider labels the `end_ts` of a `1D` bar. Resolved per
+/// `(provider_id, timeframe)` — never assumed uniform across providers (§6 of
+/// the binding contract explicitly rejects a single universal `1D` rule).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DailyBarTimestampConvention {
+    /// The provider's `1D` bar `end_ts` is proven (by a committed, non-network
+    /// parser test against the provider's actual response shape) to land on
+    /// midnight UTC of the trading date — i.e. exactly
+    /// `market_calendar::midnight_utc_ts_for_date`.
+    MidnightUtcMarketDate,
+    /// Reserved for a future provider proven to echo an exact provider-side
+    /// timestamp label distinct from `MidnightUtcMarketDate`. No currently
+    /// enabled provider is bound to this variant.
+    ExactProviderTimestamp,
+    /// No trustworthy in-repo parser evidence proves this provider/timeframe's
+    /// daily label convention. Fails closed — never treated as
+    /// `MidnightUtcMarketDate` by default.
+    Unverified,
+}
+
+/// Resolve the daily timestamp convention for `provider_id` — pure, no I/O.
+///
+/// Only meaningful for `Timeframe::D1`; callers must gate on that themselves
+/// (this function does not take a timeframe parameter because every binding
+/// here is `1D`-specific by construction).
+///
+/// # Verified bindings
+/// - `"twelvedata"`: proven by
+///   [`mqk_md`]'s own committed, non-network parser test
+///   (`date_only_string_parses_to_midnight_utc_epoch` and the httpmock-backed
+///   `rate_limit_retry_succeeds_after_one_body_429`/`fetch_bars` integration,
+///   both in `mqk-md/src/lib.rs`) that a TwelveData `1D` response's
+///   date-only `datetime` field (e.g. `"2024-01-02"`, the exact shape
+///   TwelveData's real API returns for daily bars — see
+///   `TwelveDataHistoricalProvider::fetch_bars`'s date-only parse branch)
+///   is parsed to `00:00:00 UTC` of that date — exactly
+///   `market_calendar::midnight_utc_ts_for_date`. TwelveData is also the
+///   canonical `provider` assigned to every currently enabled equity in
+///   `config/instruments/equities.json`, making this the one real,
+///   production-relevant verified daily convention this bundle establishes.
+/// - `"alpaca"`: **not verified.** No committed fixture or parser test in
+///   this repo proves what `t` value Alpaca's `1Day` bars actually use as
+///   their label — every existing Alpaca httpmock fixture
+///   (`mqk-md/src/alpaca_provider.rs`) uses an intraday (`5Min`) timeframe
+///   with a non-midnight time-of-day (e.g. `"...T13:30:00Z"`); none exercises
+///   a `1Day` request. Fabricating a `1Day` fixture to manufacture "proof"
+///   is explicitly forbidden by the binding contract. Alpaca `1D` therefore
+///   remains `Unverified` — blocking only `(alpaca, 1D)`, never any other
+///   provider's `1D` evaluation.
+/// - Every other/unknown `provider_id`: `Unverified` (fail-closed default).
+pub fn resolve_daily_bar_timestamp_convention(provider_id: &str) -> DailyBarTimestampConvention {
+    match provider_id.trim().to_ascii_lowercase().as_str() {
+        "twelvedata" => DailyBarTimestampConvention::MidnightUtcMarketDate,
+        _ => DailyBarTimestampConvention::Unverified,
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Report types
 // ---------------------------------------------------------------------------
 
@@ -135,6 +199,20 @@ pub struct AssignmentReadiness {
     pub effective_runtime_timeframe_secs: Option<i64>,
     pub required_history_bars: Option<usize>,
     pub asset_class: Option<String>,
+    /// The instrument registry's configured provider id for this assignment's
+    /// symbol (§B2.1). `None` when the symbol has no matching registry entry
+    /// (already surfaced separately via `REASON_ASSET_CLASS_UNKNOWN`).
+    pub expected_provider_id: Option<String>,
+    /// The instrument registry's configured provider symbol (§B2.1).
+    pub expected_provider_symbol: Option<String>,
+    /// Distinct `provider_id` values actually found on bars in the bounded
+    /// query window, deduplicated, in first-seen order. Empty when no bars
+    /// were queried (db unavailable/query failed/blocked before the bar
+    /// stage).
+    pub actual_provider_ids: Vec<String>,
+    /// Distinct `provider_symbol` values actually found on bars in the
+    /// bounded query window, deduplicated, in first-seen order.
+    pub actual_provider_symbols: Vec<String>,
     /// `"ready"` | `"blocked"` | `"db_unavailable"` | `"query_failed"`.
     pub readiness_state: &'static str,
     pub blockers: Vec<&'static str>,
@@ -254,22 +332,35 @@ pub async fn evaluate_assignment(
     if asset_class.is_none() {
         push_unique(&mut blockers, REASON_ASSET_CLASS_UNKNOWN);
     }
-    // REPAIR 3: canonical provider-symbol mapping for provenance validation —
+    // REPAIR 3 / B2.1: canonical provider identity for provenance validation —
     // sourced from the same registry entry asset_class came from, never a
     // second lookup or a guessed value.
-    let expected_provider_symbol = matched_instrument
-        .map(|i| i.provider_symbol.as_str())
-        .unwrap_or("");
+    let expected_provider_id: Option<String> = matched_instrument.map(|i| i.provider.clone());
+    let expected_provider_symbol_owned: Option<String> =
+        matched_instrument.map(|i| i.provider_symbol.clone());
+    let expected_provider_symbol = expected_provider_symbol_owned.as_deref().unwrap_or("");
 
-    // --- Provider capability pre-check (§11/§13) — config-only, no DB: does
-    // any enabled provider support this (asset_class, timeframe) at all?
+    // --- Provider capability pre-check (§11/§13, B2.1) — config-only, no DB:
+    // does the instrument's *exact configured provider* (never merely "any"
+    // enabled provider) exist, is it enabled, and does it support this
+    // (asset_class, timeframe)?
     let mut provider_capability_ok = false;
     if let (Ok(tf), Some(ac)) = (&parsed_timeframe, &asset_class) {
-        provider_capability_ok = provider_configs
-            .iter()
-            .any(|p| p.enabled && p.supports_asset_class(ac) && p.supports_timeframe(tf.as_str()));
-        if !provider_capability_ok {
-            push_unique(&mut blockers, REASON_PROVIDER_CAPABILITY_MISMATCH);
+        match &expected_provider_id {
+            None => {
+                // No matched instrument at all — REASON_ASSET_CLASS_UNKNOWN
+                // already covers this; nothing further to add here.
+            }
+            Some(pid) => match mqk_md::provider_registry::find_provider(provider_configs, pid) {
+                None => push_unique(&mut blockers, REASON_PROVIDER_UNKNOWN),
+                Some(cfg) if !cfg.enabled => push_unique(&mut blockers, REASON_PROVIDER_DISABLED),
+                Some(cfg)
+                    if !cfg.supports_asset_class(ac) || !cfg.supports_timeframe(tf.as_str()) =>
+                {
+                    push_unique(&mut blockers, REASON_PROVIDER_CAPABILITY_MISMATCH)
+                }
+                Some(_) => provider_capability_ok = true,
+            },
         }
     }
 
@@ -300,6 +391,9 @@ pub async fn evaluate_assignment(
         && provider_capability_ok
         && schedule.coverage_state == CalendarCoverageState::Active;
 
+    let mut actual_provider_ids: Vec<String> = Vec::new();
+    let mut actual_provider_symbols: Vec<String> = Vec::new();
+
     let readiness_state: &'static str = if !can_proceed_to_bar_stage {
         "blocked"
     } else {
@@ -320,6 +414,16 @@ pub async fn evaluate_assignment(
                 {
                     Err(_) => "query_failed",
                     Ok(rows) => {
+                        for row in &rows {
+                            if !actual_provider_ids.contains(&row.provider_id) {
+                                actual_provider_ids.push(row.provider_id.clone());
+                            }
+                            if let Some(ps) = row.provider_symbol.as_ref() {
+                                if !actual_provider_symbols.contains(ps) {
+                                    actual_provider_symbols.push(ps.clone());
+                                }
+                            }
+                        }
                         let bar_blockers = evaluate_bar_readiness(
                             &rows,
                             tf,
@@ -331,6 +435,7 @@ pub async fn evaluate_assignment(
                             eff_skew,
                             provider_configs,
                             asset_class.as_deref().unwrap_or(""),
+                            expected_provider_id.as_deref().unwrap_or(""),
                             expected_provider_symbol,
                         );
                         for b in bar_blockers {
@@ -356,6 +461,10 @@ pub async fn evaluate_assignment(
         effective_runtime_timeframe_secs: binding.effective_runtime_timeframe_secs,
         required_history_bars,
         asset_class,
+        expected_provider_id,
+        expected_provider_symbol: expected_provider_symbol_owned,
+        actual_provider_ids,
+        actual_provider_symbols,
         readiness_state,
         blockers,
         configured_grace_seconds: configured_grace,
@@ -384,6 +493,7 @@ pub fn evaluate_bar_readiness(
     effective_future_skew_seconds: i64,
     provider_configs: &[ProviderConfig],
     asset_class: &str,
+    expected_provider_id: &str,
     expected_provider_symbol: &str,
 ) -> Vec<&'static str> {
     let mut blockers: Vec<&'static str> = Vec::new();
@@ -414,10 +524,14 @@ pub fn evaluate_bar_readiness(
     // `routes/ingest.rs` and `mqk-cli::commands::md`).
     for row in rows {
         if row.provider_id.trim().is_empty() || row.provider_id.eq_ignore_ascii_case("unknown") {
+            // Legacy/pre-migration-0042 rows (§12) — blank or the literal
+            // "unknown" sentinel. Distinguished from B2.1's provider_unknown
+            // (a real, non-blank provider_id string that just isn't
+            // registered), which is a different, more specific defect.
             push_unique(&mut blockers, REASON_PROVIDER_PROVENANCE_INVALID);
         } else {
             match mqk_md::provider_registry::find_provider(provider_configs, &row.provider_id) {
-                None => push_unique(&mut blockers, REASON_PROVIDER_PROVENANCE_INVALID),
+                None => push_unique(&mut blockers, REASON_PROVIDER_UNKNOWN),
                 Some(cfg) if !cfg.enabled => push_unique(&mut blockers, REASON_PROVIDER_DISABLED),
                 Some(cfg)
                     if !cfg.supports_asset_class(asset_class)
@@ -426,6 +540,18 @@ pub fn evaluate_bar_readiness(
                     push_unique(&mut blockers, REASON_PROVIDER_CAPABILITY_MISMATCH)
                 }
                 Some(_) => {}
+            }
+
+            // B2.1: the row's actual provider_id must match the instrument
+            // registry's exact configured provider for this symbol — an
+            // enabled, capable, but *wrong* provider must not silently pass.
+            if !expected_provider_id.trim().is_empty()
+                && !row
+                    .provider_id
+                    .trim()
+                    .eq_ignore_ascii_case(expected_provider_id.trim())
+            {
+                push_unique(&mut blockers, REASON_PROVIDER_ID_MISMATCH);
             }
         }
 
@@ -500,17 +626,22 @@ pub fn evaluate_bar_readiness(
     // count/order/duplicate/future-only proof.
     let expected = match timeframe {
         Timeframe::D1 => {
-            // REPAIR 4: no trustworthy in-repo evidence proves Alpaca's daily
-            // label convention (see the constant's doc comment) — fail
-            // closed unconditionally rather than certify readiness on an
-            // unproven end_ts mapping. Continuity is still computed and
-            // reported below so other genuine defects remain visible
-            // alongside this one, exactly like the H1/M15
-            // unsupported-continuity arms.
-            push_unique(
-                &mut blockers,
-                REASON_PROVIDER_TIMESTAMP_CONVENTION_UNVERIFIED,
-            );
+            // B2.2: the unverified-timestamp-convention blocker is now
+            // provider-specific (§6/§B2.2) — it must not fire for a provider
+            // whose daily label convention has real, committed parser proof
+            // (currently only "twelvedata"; see
+            // `resolve_daily_bar_timestamp_convention`'s doc comment).
+            // Continuity is still computed and reported below regardless, so
+            // other genuine defects remain visible alongside this one,
+            // exactly like the H1/M15 unsupported-continuity arms.
+            if resolve_daily_bar_timestamp_convention(expected_provider_id)
+                == DailyBarTimestampConvention::Unverified
+            {
+                push_unique(
+                    &mut blockers,
+                    REASON_PROVIDER_TIMESTAMP_CONVENTION_UNVERIFIED,
+                );
+            }
             expected_daily_end_ts_window(
                 calendar_provider,
                 schedule,

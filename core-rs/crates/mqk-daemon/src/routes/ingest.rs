@@ -120,6 +120,14 @@ fn provider_registry_path_for_poll(st: &AppState, req: &MarketDataFeedPollOnceRe
         .to_string()
 }
 
+fn instrument_registry_path_for_poll(st: &AppState, req: &MarketDataFeedPollOnceRequest) -> String {
+    req.instrument_registry_path
+        .as_deref()
+        .filter(|path| !path.trim().is_empty())
+        .unwrap_or(&st.instrument_registry_path)
+        .to_string()
+}
+
 fn load_poll_provider_config(
     provider_id: &str,
     provider_registry_path: &str,
@@ -684,6 +692,18 @@ pub(crate) async fn market_data_feed_poll_once(
         );
     }
 
+    // B2.4: resolve the canonical instrument registry once, up front, so
+    // per-symbol provenance can be stamped from the registry's own
+    // provider_symbol mapping rather than blindly reusing whatever symbol
+    // string the provider echoes back. Load failure fails closed (empty
+    // list — no instrument found for any symbol, no acceptance of unproven
+    // provenance) rather than optimistically skipping the check.
+    let instrument_registry_path = instrument_registry_path_for_poll(&st, &req);
+    let instruments = mqk_md::instrument_registry::load_instrument_registry(std::path::Path::new(
+        &instrument_registry_path,
+    ))
+    .unwrap_or_default();
+
     let mut per_symbol = Vec::with_capacity(symbols.len());
     let mut api_calls_made = 0_u64;
 
@@ -743,6 +763,54 @@ pub(crate) async fn market_data_feed_poll_once(
             continue;
         }
 
+        // B2.4: resolve the canonical instrument for this symbol and require
+        // its configured provider to match the poll's selected provider —
+        // never stamp `provider_symbol` from the returned local symbol
+        // (unproven) when a canonical registry mapping is available.
+        let matched_instrument = instruments
+            .iter()
+            .find(|i| i.symbol.trim().eq_ignore_ascii_case(symbol.trim()));
+        let instrument = match matched_instrument {
+            Some(i) => i,
+            None => {
+                per_symbol.push(MarketDataFeedPollSymbolResult {
+                    symbol: symbol.clone(),
+                    status: "skipped_instrument_not_in_registry".to_string(),
+                    expected_latest_closed_bar_ts: latest_expected_closed_bar_ts,
+                    returned_bar_ts: Some(latest_bar.end_ts),
+                    rows_inserted: 0,
+                    rows_updated: 0,
+                    rows_skipped: 1,
+                    error: Some(format!(
+                        "symbol '{symbol}' not found in instrument registry; \
+                         cannot resolve canonical provider_symbol"
+                    )),
+                });
+                continue;
+            }
+        };
+        if !instrument
+            .provider
+            .trim()
+            .eq_ignore_ascii_case(provider_config.provider_id.trim())
+        {
+            per_symbol.push(MarketDataFeedPollSymbolResult {
+                symbol: symbol.clone(),
+                status: "skipped_provider_mismatch".to_string(),
+                expected_latest_closed_bar_ts: latest_expected_closed_bar_ts,
+                returned_bar_ts: Some(latest_bar.end_ts),
+                rows_inserted: 0,
+                rows_updated: 0,
+                rows_skipped: 1,
+                error: Some(format!(
+                    "instrument '{symbol}' is configured for provider '{}', not the requested \
+                     poll provider '{}'",
+                    instrument.provider, provider_config.provider_id
+                )),
+            });
+            continue;
+        }
+
         let ingest_id = Uuid::new_v5(
             &Uuid::NAMESPACE_DNS,
             format!(
@@ -754,7 +822,7 @@ pub(crate) async fn market_data_feed_poll_once(
             )
             .as_bytes(),
         );
-        let provider_symbol = latest_bar.symbol.clone();
+        let provider_symbol = instrument.provider_symbol.clone();
         let db_bar = mqk_db::md::ProviderBar {
             symbol: latest_bar.symbol,
             timeframe: latest_bar.timeframe,
@@ -961,6 +1029,7 @@ async fn execute_scheduler_poll_once(
             allow_provider_api_calls: config.allow_provider_api_calls,
             now_utc: Some(poll_time.to_rfc3339()),
             provider_registry_path: config.provider_registry_path,
+            instrument_registry_path: None,
         }),
     )
     .await;
@@ -2189,6 +2258,7 @@ async fn handle_provider_dry_run(
     // Background task: resolve symbols from registry (pure fs read, no network).
     let jobs = Arc::clone(&st.ingest_jobs);
     let db_pool = st.db.clone();
+    let source_for_task = source.clone();
     tokio::spawn(async move {
         if ingest_job_is_cancelled(&jobs, job_id) {
             return;
@@ -2205,11 +2275,11 @@ async fn handle_provider_dry_run(
             return;
         }
 
-        // Resolve symbols — pure filesystem read; zero network calls.
-        let path = std::path::Path::new(&registry_path);
+        // Resolve symbols — pure filesystem read; zero network calls. Scoped
+        // to instruments actually assigned to `source_for_task` (§B2.3) so a
+        // dry-run preview agrees with what the real sync path would fetch.
         let result =
-            mqk_md::instrument_registry::load_instrument_registry(path).map(|instruments| {
-                let equities = mqk_md::instrument_registry::enabled_equities(&instruments);
+            resolve_provider_scoped_equities(&registry_path, &source_for_task).map(|equities| {
                 let count = equities.len();
                 let first = equities.first().map(|e| e.symbol.clone());
                 let last = equities.last().map(|e| e.symbol.clone());
@@ -2257,6 +2327,38 @@ async fn handle_provider_dry_run(
 // ---------------------------------------------------------------------------
 // Real provider sync background task
 // ---------------------------------------------------------------------------
+
+/// Resolve enabled equity instruments assigned to `source`'s exact configured
+/// provider (case-insensitive, trimmed) from the registry at `registry_path`
+/// (§B2.3, DAILY-DATA-READINESS-01B-PROVIDER-CONTRACT-INTEGRATION-01).
+///
+/// The prior behavior (`enabled_equities()` with no provider filter) resolved
+/// *every* enabled equity regardless of which provider the registry actually
+/// assigns it to — meaning a `source="alpaca"` sync job would request every
+/// registry symbol from Alpaca even though today's registry assigns every
+/// enabled equity to `"twelvedata"`. This filters to only instruments whose
+/// own `provider` field matches the requested job's provider, so a sync job
+/// never claims provenance for an instrument it was never configured to
+/// fetch. Deterministic ordering (sorted by symbol) mirrors
+/// `enabled_equities()`.
+fn resolve_provider_scoped_equities(
+    registry_path: &str,
+    source: &str,
+) -> Result<Vec<mqk_md::instrument_registry::TrackedInstrument>, String> {
+    let instruments =
+        mqk_md::instrument_registry::load_instrument_registry(std::path::Path::new(registry_path))
+            .map_err(|e| e.to_string())?;
+    let mut filtered: Vec<mqk_md::instrument_registry::TrackedInstrument> = instruments
+        .into_iter()
+        .filter(|i| {
+            i.enabled
+                && i.asset_class == "equity"
+                && i.provider.trim().eq_ignore_ascii_case(source.trim())
+        })
+        .collect();
+    filtered.sort_by(|a, b| a.symbol.cmp(&b.symbol));
+    Ok(filtered)
+}
 
 enum ProviderSyncClient {
     Historical(std::sync::Arc<dyn mqk_md::HistoricalProvider>),
@@ -2352,53 +2454,64 @@ async fn run_real_provider_sync(
         }
     };
 
-    // Resolve symbols from registry.
-    let symbols: Vec<String> = match mqk_md::instrument_registry::load_instrument_registry(
-        std::path::Path::new(&registry_path),
-    ) {
-        Ok(instruments) => {
-            let equities = mqk_md::instrument_registry::enabled_equities(&instruments);
-            if equities.is_empty() {
+    // Resolve symbols from registry — scoped to instruments actually
+    // assigned to `source`'s exact configured provider (§B2.3). Never claim
+    // provenance for an instrument this job was never configured to fetch.
+    let instruments: Vec<mqk_md::instrument_registry::TrackedInstrument> =
+        match resolve_provider_scoped_equities(&registry_path, &source) {
+            Ok(instruments) => {
+                if instruments.is_empty() {
+                    persist_job_update(&jobs, db_pool.as_ref(), job_id, |r| {
+                        r.status = IngestJobStatus::Failed;
+                        r.completed_at_utc = Some(Utc::now()); // allow: operational
+                        r.error = Some(format!(
+                            "registry contains no enabled equity symbols assigned to provider '{}'",
+                            source
+                        ));
+                    })
+                    .await;
+                    return;
+                }
+                let first = instruments.first().map(|e| e.symbol.clone());
+                let last = instruments.last().map(|e| e.symbol.clone());
+                let count = instruments.len();
+                persist_job_update(&jobs, db_pool.as_ref(), job_id, |r| {
+                    r.symbols_count = Some(count);
+                    r.planned_first_symbol = first;
+                    r.planned_last_symbol = last;
+                    r.symbols_completed = Some(0);
+                    r.symbols_failed = Some(0);
+                })
+                .await;
+                instruments
+            }
+            Err(e) => {
                 persist_job_update(&jobs, db_pool.as_ref(), job_id, |r| {
                     r.status = IngestJobStatus::Failed;
                     r.completed_at_utc = Some(Utc::now()); // allow: operational
-                    r.error = Some("registry contains no enabled equity symbols".to_string());
+                    r.error = Some(format!("registry load failed: {}", e));
                 })
                 .await;
                 return;
             }
-            let syms: Vec<String> = equities.iter().map(|e| e.symbol.clone()).collect();
-            let first = equities.first().map(|e| e.symbol.clone());
-            let last = equities.last().map(|e| e.symbol.clone());
-            persist_job_update(&jobs, db_pool.as_ref(), job_id, |r| {
-                r.symbols_count = Some(syms.len());
-                r.planned_first_symbol = first;
-                r.planned_last_symbol = last;
-                r.symbols_completed = Some(0);
-                r.symbols_failed = Some(0);
-            })
-            .await;
-            syms
-        }
-        Err(e) => {
-            persist_job_update(&jobs, db_pool.as_ref(), job_id, |r| {
-                r.status = IngestJobStatus::Failed;
-                r.completed_at_utc = Some(Utc::now()); // allow: operational
-                r.error = Some(format!("registry load failed: {}", e));
-            })
-            .await;
-            return;
-        }
-    };
+        };
 
-    // Per-symbol fetch loop.
-    let mut all_raw: Vec<mqk_md::ProviderBar> = Vec::new();
+    // Per-instrument fetch + insert loop. Each instrument is fetched and
+    // inserted independently (rather than batched into one aggregate insert)
+    // so `MdBarProviderMetadata.provider_symbol` can carry that instrument's
+    // own canonical provider symbol (§B2.3) — the DB metadata API applies one
+    // `MdBarProviderMetadata` per `IngestProviderBarsArgs` call, so per-
+    // instrument insertion is required to avoid stamping one symbol's
+    // provenance onto another's bars.
     let mut api_calls_made: i64 = 0;
     let mut symbols_completed: usize = 0;
     let mut symbols_failed: usize = 0;
+    let mut total_rows_inserted: i64 = 0;
+    let mut total_rows_rejected: i64 = 0;
     let mut guardrail_msg: Option<String> = None;
+    let mut db_error: Option<String> = None;
 
-    for sym in &symbols {
+    for instrument in &instruments {
         if ingest_job_is_cancelled(&jobs, job_id) {
             return;
         }
@@ -2411,7 +2524,7 @@ async fn run_real_provider_sync(
                      remaining {} symbols skipped",
                     api_calls_made,
                     max_day,
-                    symbols.len() - symbols_completed - symbols_failed
+                    instruments.len() - symbols_completed - symbols_failed
                 ));
                 break;
             }
@@ -2424,14 +2537,16 @@ async fn run_real_provider_sync(
                      remaining {} symbols skipped",
                     api_calls_made,
                     max_min,
-                    symbols.len() - symbols_completed - symbols_failed
+                    instruments.len() - symbols_completed - symbols_failed
                 ));
                 break;
             }
         }
 
+        // B2.3: request via the provider's own symbol contract, not the
+        // local canonical symbol — they are not guaranteed identical.
         let req = mqk_md::FetchBarsRequest {
-            symbols: vec![sym.clone()],
+            symbols: vec![instrument.provider_symbol.clone()],
             timeframe,
             start: start_d,
             end: end_d,
@@ -2446,13 +2561,99 @@ async fn run_real_provider_sync(
                     timeframe,
                     Utc::now().timestamp(), // allow: operational completion filter
                 );
-                all_raw.extend(completed);
-                symbols_completed += 1;
+
+                // Validate returned bars actually belong to the requested
+                // instrument/provider mapping (§B2.3) — never stamp one
+                // symbol's provider metadata onto another symbol's bars.
+                // Remap the accepted bars' `symbol` to the canonical local
+                // symbol before storage; `md_bars.symbol` is always the
+                // local symbol, never the provider symbol.
+                let mut matched_bars: Vec<mqk_db::md::ProviderBar> =
+                    Vec::with_capacity(completed.len());
+                let mut mismatched = 0usize;
+                for b in completed {
+                    if b.symbol
+                        .trim()
+                        .eq_ignore_ascii_case(instrument.provider_symbol.trim())
+                    {
+                        matched_bars.push(mqk_db::md::ProviderBar {
+                            symbol: instrument.symbol.clone(),
+                            timeframe: b.timeframe,
+                            end_ts: b.end_ts,
+                            open: b.open,
+                            high: b.high,
+                            low: b.low,
+                            close: b.close,
+                            volume: b.volume,
+                            is_complete: b.is_complete,
+                        });
+                    } else {
+                        mismatched += 1;
+                    }
+                }
+                if mismatched > 0 {
+                    tracing::warn!(
+                        job_id = %job_id,
+                        symbol = %instrument.symbol,
+                        provider_symbol = %instrument.provider_symbol,
+                        mismatched,
+                        "provider returned bars for an unmapped symbol; rejected"
+                    );
+                }
+
+                if matched_bars.is_empty() {
+                    symbols_completed += 1;
+                } else {
+                    match &db_pool {
+                        None => {
+                            db_error = Some("no_db: database pool is not configured".to_string());
+                            symbols_failed += 1;
+                        }
+                        Some(pool) => {
+                            let symbol_ingest_id = Uuid::new_v5(
+                                &Uuid::NAMESPACE_DNS,
+                                format!("{}|{}", ingest_id, instrument.symbol).as_bytes(),
+                            );
+                            match mqk_db::md::ingest_provider_bars_to_md_bars_with_provider_metadata(
+                                pool,
+                                mqk_db::md::IngestProviderBarsArgs {
+                                    source: source.clone(),
+                                    timeframe: timeframe.as_str().to_string(),
+                                    ingest_id: symbol_ingest_id,
+                                    bars: matched_bars,
+                                },
+                                mqk_db::md::MdBarProviderMetadata {
+                                    provider_id: source.clone(),
+                                    provider_source: Some(source.clone()),
+                                    provider_symbol: Some(instrument.provider_symbol.clone()),
+                                    ingest_mode: Some("historical_backfill".to_string()),
+                                    provider_bar_id: None,
+                                    provider_updated_at_utc: None,
+                                },
+                            )
+                            .await
+                            {
+                                Ok(res) => {
+                                    total_rows_inserted += res.report.coverage.rows_inserted as i64;
+                                    total_rows_rejected += res.report.coverage.rows_rejected as i64;
+                                    symbols_completed += 1;
+                                }
+                                Err(e) => {
+                                    db_error = Some(format!(
+                                        "db ingest failed for {}: {}",
+                                        instrument.symbol, e
+                                    ));
+                                    symbols_failed += 1;
+                                }
+                            }
+                        }
+                    }
+                }
             }
             Err(e) => {
                 tracing::warn!(
                     job_id = %job_id,
-                    symbol = %sym,
+                    symbol = %instrument.symbol,
                     error = %e,
                     "provider fetch failed for symbol; continuing batch"
                 );
@@ -2471,73 +2672,17 @@ async fn run_real_provider_sync(
         if ingest_job_is_cancelled(&jobs, job_id) {
             return;
         }
+        if db_error.is_some() {
+            break;
+        }
     }
 
     if ingest_job_is_cancelled(&jobs, job_id) {
         return;
     }
 
-    // Sort bars deterministically before DB insert.
-    all_raw.sort_by(|a, b| {
-        a.symbol
-            .cmp(&b.symbol)
-            .then_with(|| a.end_ts.cmp(&b.end_ts))
-    });
-
-    // Convert mqk_md::ProviderBar → mqk_db::md::ProviderBar.
-    let db_bars: Vec<mqk_db::md::ProviderBar> = all_raw
-        .into_iter()
-        .map(|b| mqk_db::md::ProviderBar {
-            symbol: b.symbol,
-            timeframe: b.timeframe,
-            end_ts: b.end_ts,
-            open: b.open,
-            high: b.high,
-            low: b.low,
-            close: b.close,
-            volume: b.volume,
-            is_complete: b.is_complete,
-        })
-        .collect();
-
-    // DB insert (through canonical ingest path).
-    let (rows_inserted, rows_rejected, db_error) = if db_bars.is_empty() {
-        (Some(0i64), Some(0i64), None)
-    } else {
-        match &db_pool {
-            None => (
-                None,
-                None,
-                Some("no_db: database pool is not configured".to_string()),
-            ),
-            Some(pool) => match mqk_db::md::ingest_provider_bars_to_md_bars_with_provider_metadata(
-                pool,
-                mqk_db::md::IngestProviderBarsArgs {
-                    source: source.clone(),
-                    timeframe: timeframe.as_str().to_string(),
-                    ingest_id,
-                    bars: db_bars,
-                },
-                mqk_db::md::MdBarProviderMetadata {
-                    provider_id: source.clone(),
-                    provider_source: Some(source.clone()),
-                    provider_symbol: None,
-                    ingest_mode: Some("historical_backfill".to_string()),
-                    provider_bar_id: None,
-                    provider_updated_at_utc: None,
-                },
-            )
-            .await
-            {
-                Ok(res) => (
-                    Some(res.report.coverage.rows_inserted as i64),
-                    Some(res.report.coverage.rows_rejected as i64),
-                    None,
-                ),
-                Err(e) => (None, None, Some(format!("db ingest failed: {}", e))),
-            },
-        }
-    };
+    let rows_inserted = Some(total_rows_inserted);
+    let rows_rejected = Some(total_rows_rejected);
 
     // Determine terminal status.
     let final_status = if db_error.is_some() {

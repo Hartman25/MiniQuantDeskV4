@@ -2052,9 +2052,37 @@ async fn pd_10_real_provider_job_runs_with_fake_provider() {
 }
 
 // DATA-PROVIDER-REGISTRY-FACTORY-01: non-TwelveData real path can use fake provider seam.
+//
+// DAILY-DATA-READINESS-01B-PROVIDER-CONTRACT-INTEGRATION-01 (§B2.3): the real
+// canonical registry (`config/instruments/equities.json`) assigns every
+// enabled equity to provider "twelvedata" — none to "alpaca". Historical
+// provider-sync now correctly scopes symbol resolution to instruments
+// actually assigned to the requested provider (never claims provenance for
+// an instrument it was never configured to fetch), so this test must use its
+// own registry fixture carrying an "alpaca"-assigned instrument to keep
+// proving the real path with a non-TwelveData provider.
 #[tokio::test]
 async fn provider_registry_alpaca_real_provider_job_runs_with_fake_provider() {
+    let registry = tempfile::NamedTempFile::new().expect("create fake instrument registry");
+    std::fs::write(
+        registry.path(),
+        br#"[{
+          "instrument_id": "equity:US:ZZALPACAFAKE",
+          "symbol": "ZZALPACAFAKE",
+          "asset_class": "equity",
+          "provider": "alpaca",
+          "provider_symbol": "ZZALPACAFAKE",
+          "venue": "TEST",
+          "currency": "USD",
+          "enabled": true,
+          "timeframes": ["5m"],
+          "notes": "test fixture: alpaca-assigned instrument"
+        }]"#,
+    )
+    .expect("write fake instrument registry");
+
     let (mut st_raw, _) = make_provider_router_with_registry_raw();
+    st_raw.instrument_registry_path = registry.path().to_string_lossy().to_string();
     st_raw.set_provider_client_for_test(Arc::new(FakeProvider::empty()));
     let st = Arc::new(st_raw);
 

@@ -1335,6 +1335,21 @@ mod tests {
             "must return bar from successful retry attempt"
         );
         assert_eq!(bars[0].symbol, "AAPL");
+        // DAILY-DATA-READINESS-01B-PROVIDER-CONTRACT-INTEGRATION-01 (§B2.2):
+        // this mock response's `"datetime": "2024-01-02"` is TwelveData's real
+        // date-only `1D` response shape (not a fabricated fixture — the same
+        // shape already used above and by production `fetch_bars`). Proves,
+        // through the actual `fetch_bars` pipeline (not just the isolated
+        // parse-arithmetic unit test below), that a TwelveData `1D` bar's
+        // `end_ts` lands on midnight UTC of the trading date — i.e. exactly
+        // `DailyBarTimestampConvention::MidnightUtcMarketDate` in
+        // `mqk-daemon`'s strict readiness evaluator. 2024-01-02 00:00:00 UTC
+        // = 1_704_153_600 (independently verifiable: days_from_civil(2024,1,2)
+        // = 19724; 19724 * 86_400 = 1_704_153_600).
+        assert_eq!(
+            bars[0].end_ts, 1_704_153_600,
+            "TwelveData 1D date-only datetime must parse to midnight UTC of that date"
+        );
     }
 
     /// Every attempt returns body-level 429.

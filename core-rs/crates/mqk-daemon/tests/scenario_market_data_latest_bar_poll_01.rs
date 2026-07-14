@@ -140,6 +140,30 @@ fn fake_registry_file() -> NamedTempFile {
     file
 }
 
+/// Fixture instrument registry carrying one entry so B2.4's canonical
+/// provider-symbol resolution has a real mapping to resolve against (never
+/// a fabricated/unregistered symbol accepted implicitly).
+fn fake_instrument_registry_file(symbol: &str, provider: &str) -> NamedTempFile {
+    let mut file = NamedTempFile::new().expect("create fake instrument registry");
+    let json = format!(
+        r#"[{{
+          "instrument_id": "equity:US:{symbol}",
+          "symbol": "{symbol}",
+          "asset_class": "equity",
+          "provider": "{provider}",
+          "provider_symbol": "{symbol}",
+          "venue": "TEST",
+          "currency": "USD",
+          "enabled": true,
+          "timeframes": ["5m"],
+          "notes": "test fixture"
+        }}]"#
+    );
+    file.write_all(json.as_bytes())
+        .expect("write fake instrument registry");
+    file
+}
+
 async fn call_json(
     app: axum::Router,
     method: &str,
@@ -256,6 +280,7 @@ async fn market_data_fake_provider_poll_once_inserts_and_second_poll_is_idempote
         return;
     };
     let registry = fake_registry_file();
+    let instrument_registry = fake_instrument_registry_file("ZZPOLLINS", "fake");
     let mut outcomes = HashMap::new();
     outcomes.insert(
         "ZZPOLLINS".to_string(),
@@ -275,7 +300,8 @@ async fn market_data_fake_provider_poll_once_inserts_and_second_poll_is_idempote
         "dry_run": false,
         "allow_provider_api_calls": true,
         "now_utc": "2024-01-01T00:10:30Z",
-        "provider_registry_path": registry.path().to_string_lossy()
+        "provider_registry_path": registry.path().to_string_lossy(),
+        "instrument_registry_path": instrument_registry.path().to_string_lossy()
     });
 
     let (first_status, first_body) = call_json(
@@ -339,6 +365,7 @@ async fn market_data_provider_error_reports_partial_failure_without_hiding_succe
         return;
     };
     let registry = fake_registry_file();
+    let instrument_registry = fake_instrument_registry_file("ZZPOLLOK", "fake");
     let mut outcomes = HashMap::new();
     outcomes.insert(
         "ZZPOLLOK".to_string(),
@@ -368,7 +395,8 @@ async fn market_data_provider_error_reports_partial_failure_without_hiding_succe
             "dry_run": false,
             "allow_provider_api_calls": true,
             "now_utc": "2024-01-01T00:10:30Z",
-            "provider_registry_path": registry.path().to_string_lossy()
+            "provider_registry_path": registry.path().to_string_lossy(),
+            "instrument_registry_path": instrument_registry.path().to_string_lossy()
         })),
     )
     .await;
