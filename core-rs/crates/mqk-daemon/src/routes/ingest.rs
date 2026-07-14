@@ -623,6 +623,39 @@ pub(crate) async fn market_data_feed_poll_once(
         );
     };
 
+    // DAILY-DATA-READINESS-01B2-INGEST-TRUTHFULNESS-REPAIR-01 (Repair 2): the
+    // canonical instrument registry must be loaded and validated *before* any
+    // provider is constructed or called. A registry that cannot be read or
+    // parsed fails the whole request closed — never `unwrap_or_default()`
+    // into an empty list that would then silently skip every symbol
+    // individually while still burning provider calls for other, unrelated
+    // symbols.
+    let instrument_registry_path = instrument_registry_path_for_poll(&st, &req);
+    let instruments = match mqk_md::instrument_registry::load_instrument_registry(
+        std::path::Path::new(&instrument_registry_path),
+    ) {
+        Ok(instruments) => instruments,
+        Err(error) => {
+            return refused_poll_response(
+                StatusCode::SERVICE_UNAVAILABLE,
+                PollContext {
+                    provider_id: provider_config.provider_id,
+                    timeframe: timeframe_str,
+                    dry_run: false,
+                    provider_api_calls_allowed: true,
+                    symbols_count: symbols.len(),
+                    poll_time,
+                    latest_expected_closed_bar_ts,
+                    next_poll_ts,
+                },
+                format!(
+                    "instrument_registry_unavailable: failed to load instrument registry at \
+                     '{instrument_registry_path}': {error}"
+                ),
+            );
+        }
+    };
+
     let provider = if let Some(provider) = st.latest_bar_provider_client.clone() {
         LatestBarProviderClient::Injected(provider)
     } else {
@@ -692,25 +725,95 @@ pub(crate) async fn market_data_feed_poll_once(
         );
     }
 
-    // B2.4: resolve the canonical instrument registry once, up front, so
-    // per-symbol provenance can be stamped from the registry's own
-    // provider_symbol mapping rather than blindly reusing whatever symbol
-    // string the provider echoes back. Load failure fails closed (empty
-    // list — no instrument found for any symbol, no acceptance of unproven
-    // provenance) rather than optimistically skipping the check.
-    let instrument_registry_path = instrument_registry_path_for_poll(&st, &req);
-    let instruments = mqk_md::instrument_registry::load_instrument_registry(std::path::Path::new(
-        &instrument_registry_path,
-    ))
-    .unwrap_or_default();
-
     let mut per_symbol = Vec::with_capacity(symbols.len());
     let mut api_calls_made = 0_u64;
 
     for symbol in &symbols {
+        // Repair 2: prove the canonical instrument/provider mapping *before*
+        // calling the provider at all. None of these admission checks may
+        // consume an API call — `api_calls_made` only increments once
+        // admission has fully passed, immediately before the real call.
+        let matched_instrument = instruments
+            .iter()
+            .find(|i| i.symbol.trim().eq_ignore_ascii_case(symbol.trim()));
+        let instrument = match matched_instrument {
+            Some(i) => i,
+            None => {
+                per_symbol.push(MarketDataFeedPollSymbolResult {
+                    symbol: symbol.clone(),
+                    status: "skipped_instrument_not_in_registry".to_string(),
+                    expected_latest_closed_bar_ts: latest_expected_closed_bar_ts,
+                    returned_bar_ts: None,
+                    rows_inserted: 0,
+                    rows_updated: 0,
+                    rows_skipped: 1,
+                    error: Some(format!(
+                        "symbol '{symbol}' not found in instrument registry; \
+                         cannot resolve canonical provider mapping"
+                    )),
+                });
+                continue;
+            }
+        };
+        if !instrument.enabled {
+            per_symbol.push(MarketDataFeedPollSymbolResult {
+                symbol: symbol.clone(),
+                status: "skipped_instrument_disabled".to_string(),
+                expected_latest_closed_bar_ts: latest_expected_closed_bar_ts,
+                returned_bar_ts: None,
+                rows_inserted: 0,
+                rows_updated: 0,
+                rows_skipped: 1,
+                error: Some(format!(
+                    "instrument '{symbol}' is disabled in the instrument registry"
+                )),
+            });
+            continue;
+        }
+        if !instrument
+            .provider
+            .trim()
+            .eq_ignore_ascii_case(provider_config.provider_id.trim())
+        {
+            per_symbol.push(MarketDataFeedPollSymbolResult {
+                symbol: symbol.clone(),
+                status: "skipped_provider_mismatch".to_string(),
+                expected_latest_closed_bar_ts: latest_expected_closed_bar_ts,
+                returned_bar_ts: None,
+                rows_inserted: 0,
+                rows_updated: 0,
+                rows_skipped: 1,
+                error: Some(format!(
+                    "instrument '{symbol}' is configured for provider '{}', not the requested \
+                     poll provider '{}'",
+                    instrument.provider, provider_config.provider_id
+                )),
+            });
+            continue;
+        }
+        let canonical_provider_symbol = instrument.provider_symbol.trim();
+        if canonical_provider_symbol.is_empty() {
+            per_symbol.push(MarketDataFeedPollSymbolResult {
+                symbol: symbol.clone(),
+                status: "skipped_blank_provider_symbol".to_string(),
+                expected_latest_closed_bar_ts: latest_expected_closed_bar_ts,
+                returned_bar_ts: None,
+                rows_inserted: 0,
+                rows_updated: 0,
+                rows_skipped: 1,
+                error: Some(format!(
+                    "instrument '{symbol}' has a blank canonical provider_symbol"
+                )),
+            });
+            continue;
+        }
+
+        // Admission passed — request via the provider's own symbol contract,
+        // never the local canonical symbol (they are not guaranteed
+        // identical). Only now does this symbol consume an API call.
         api_calls_made += 1;
         let request = mqk_md::LatestClosedBarRequest {
-            symbol: symbol.clone(),
+            symbol: instrument.provider_symbol.clone(),
             timeframe,
             reference_ts: poll_time.timestamp(),
         };
@@ -745,7 +848,13 @@ pub(crate) async fn market_data_feed_poll_once(
             }
         };
 
-        if latest_bar.symbol != *symbol
+        // Repair 2: validate the returned bar against the *requested
+        // provider symbol* — never the local canonical symbol, which was
+        // never sent to the provider.
+        if !latest_bar
+            .symbol
+            .trim()
+            .eq_ignore_ascii_case(instrument.provider_symbol.trim())
             || latest_bar.timeframe != timeframe.as_str()
             || !latest_bar.is_complete
             || latest_bar.end_ts > latest_expected_closed_bar_ts
@@ -763,54 +872,6 @@ pub(crate) async fn market_data_feed_poll_once(
             continue;
         }
 
-        // B2.4: resolve the canonical instrument for this symbol and require
-        // its configured provider to match the poll's selected provider —
-        // never stamp `provider_symbol` from the returned local symbol
-        // (unproven) when a canonical registry mapping is available.
-        let matched_instrument = instruments
-            .iter()
-            .find(|i| i.symbol.trim().eq_ignore_ascii_case(symbol.trim()));
-        let instrument = match matched_instrument {
-            Some(i) => i,
-            None => {
-                per_symbol.push(MarketDataFeedPollSymbolResult {
-                    symbol: symbol.clone(),
-                    status: "skipped_instrument_not_in_registry".to_string(),
-                    expected_latest_closed_bar_ts: latest_expected_closed_bar_ts,
-                    returned_bar_ts: Some(latest_bar.end_ts),
-                    rows_inserted: 0,
-                    rows_updated: 0,
-                    rows_skipped: 1,
-                    error: Some(format!(
-                        "symbol '{symbol}' not found in instrument registry; \
-                         cannot resolve canonical provider_symbol"
-                    )),
-                });
-                continue;
-            }
-        };
-        if !instrument
-            .provider
-            .trim()
-            .eq_ignore_ascii_case(provider_config.provider_id.trim())
-        {
-            per_symbol.push(MarketDataFeedPollSymbolResult {
-                symbol: symbol.clone(),
-                status: "skipped_provider_mismatch".to_string(),
-                expected_latest_closed_bar_ts: latest_expected_closed_bar_ts,
-                returned_bar_ts: Some(latest_bar.end_ts),
-                rows_inserted: 0,
-                rows_updated: 0,
-                rows_skipped: 1,
-                error: Some(format!(
-                    "instrument '{symbol}' is configured for provider '{}', not the requested \
-                     poll provider '{}'",
-                    instrument.provider, provider_config.provider_id
-                )),
-            });
-            continue;
-        }
-
         let ingest_id = Uuid::new_v5(
             &Uuid::NAMESPACE_DNS,
             format!(
@@ -823,8 +884,10 @@ pub(crate) async fn market_data_feed_poll_once(
             .as_bytes(),
         );
         let provider_symbol = instrument.provider_symbol.clone();
+        // Repair 2: `md_bars.symbol` is always the canonical local symbol —
+        // never the provider symbol that was actually sent/echoed back.
         let db_bar = mqk_db::md::ProviderBar {
-            symbol: latest_bar.symbol,
+            symbol: instrument.symbol.clone(),
             timeframe: latest_bar.timeframe,
             end_ts: latest_bar.end_ts,
             open: latest_bar.open,
@@ -2510,6 +2573,16 @@ async fn run_real_provider_sync(
     let mut total_rows_rejected: i64 = 0;
     let mut guardrail_msg: Option<String> = None;
     let mut db_error: Option<String> = None;
+    // DAILY-DATA-READINESS-01B2-INGEST-TRUTHFULNESS-REPAIR-01 (Repair 1): a
+    // provider response for the wrong instrument is a rejection, never a
+    // silent success. Tracked separately from `db_error`/`guardrail_msg` so a
+    // job that inserted some genuinely valid rows but also saw mismatched
+    // bars is downgraded to `partial` rather than reported `completed`.
+    let mut any_symbol_mismatch = false;
+    let mut total_mismatched_bars: i64 = 0;
+    let mut mismatched_symbol_count: usize = 0;
+    const MAX_MISMATCH_SYMBOLS_REPORTED: usize = 20;
+    let mut mismatched_symbols: Vec<String> = Vec::new();
 
     for instrument in &instruments {
         if ingest_job_is_cancelled(&jobs, job_id) {
@@ -2599,10 +2672,26 @@ async fn run_real_provider_sync(
                         mismatched,
                         "provider returned bars for an unmapped symbol; rejected"
                     );
+                    any_symbol_mismatch = true;
+                    total_mismatched_bars += mismatched as i64;
+                    mismatched_symbol_count += 1;
+                    if mismatched_symbols.len() < MAX_MISMATCH_SYMBOLS_REPORTED {
+                        mismatched_symbols.push(instrument.symbol.clone());
+                    }
                 }
 
                 if matched_bars.is_empty() {
-                    symbols_completed += 1;
+                    if mismatched > 0 {
+                        // Repair 1: a response that returned bars, but *only*
+                        // for the wrong symbol, is not a legitimate zero-data
+                        // completion — it is a rejected, failed fetch for
+                        // this instrument. A genuinely empty response
+                        // (`mismatched == 0`) remains a legitimate zero-row
+                        // completion, unchanged.
+                        symbols_failed += 1;
+                    } else {
+                        symbols_completed += 1;
+                    }
                 } else {
                     match &db_pool {
                         None => {
@@ -2636,6 +2725,13 @@ async fn run_real_provider_sync(
                                 Ok(res) => {
                                     total_rows_inserted += res.report.coverage.rows_inserted as i64;
                                     total_rows_rejected += res.report.coverage.rows_rejected as i64;
+                                    // Repair 1: valid matched rows are still
+                                    // inserted and this instrument still
+                                    // counts as completed — but a mismatch
+                                    // was also present, so the *job* must
+                                    // not report `completed` (see
+                                    // `any_symbol_mismatch` in final_status
+                                    // below). Do not discard the valid rows.
                                     symbols_completed += 1;
                                 }
                                 Err(e) => {
@@ -2681,13 +2777,20 @@ async fn run_real_provider_sync(
         return;
     }
 
+    // Repair 1: rows rejected for symbol mismatch are real rejections, not a
+    // silent drop — they must be visible in the same accounting as any other
+    // DB-level rejection.
+    total_rows_rejected += total_mismatched_bars;
     let rows_inserted = Some(total_rows_inserted);
     let rows_rejected = Some(total_rows_rejected);
 
-    // Determine terminal status.
+    // Determine terminal status. A symbol mismatch (even alongside otherwise
+    // valid inserted rows) must never allow the job to report `completed` —
+    // it downgrades an otherwise-clean run to `partial`, and a run with no
+    // successful symbols at all remains `failed`.
     let final_status = if db_error.is_some() {
         IngestJobStatus::Failed
-    } else if symbols_failed == 0 && guardrail_msg.is_none() {
+    } else if symbols_failed == 0 && guardrail_msg.is_none() && !any_symbol_mismatch {
         IngestJobStatus::Completed
     } else if symbols_completed > 0 {
         IngestJobStatus::Partial
@@ -2695,7 +2798,26 @@ async fn run_real_provider_sync(
         IngestJobStatus::Failed
     };
 
-    let final_error = db_error.or(guardrail_msg);
+    let mismatch_msg = if total_mismatched_bars > 0 {
+        Some(format!(
+            "{} bar(s) rejected across {} symbol(s) due to provider/instrument symbol \
+             mismatch (e.g. {})",
+            total_mismatched_bars,
+            mismatched_symbol_count,
+            mismatched_symbols.join(", ")
+        ))
+    } else {
+        None
+    };
+    let final_error = [db_error, guardrail_msg, mismatch_msg]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>();
+    let final_error = if final_error.is_empty() {
+        None
+    } else {
+        Some(final_error.join("; "))
+    };
 
     persist_job_update(&jobs, db_pool.as_ref(), job_id, |r| {
         r.completed_at_utc = Some(Utc::now()); // allow: operational

@@ -50,6 +50,7 @@ use mqk_daemon::{
     ingest_jobs::{IngestJobRecord, IngestJobStatus},
     routes, state,
 };
+use sqlx::Row;
 use tower::ServiceExt;
 
 // ---------------------------------------------------------------------------
@@ -2520,5 +2521,241 @@ async fn db_04_cancel_persists_cancelled_status_and_reason() {
         "cancelled persisted job must have completed_at_utc"
     );
 
+    cleanup_ingest_job(&pool, job_id).await;
+}
+
+// ---------------------------------------------------------------------------
+// DAILY-DATA-READINESS-01B2-INGEST-TRUTHFULNESS-REPAIR-01 (Repair 1):
+// historical-sync symbol-mismatch truthfulness.
+// ---------------------------------------------------------------------------
+
+/// Build an `AppState` (not Arc-wrapped) pointing at a single-instrument
+/// custom instrument registry (real `config/providers/providers.json`
+/// unchanged), for isolating one instrument's mismatch behavior instead of
+/// the real 88-symbol registry.
+fn make_provider_router_with_single_instrument(
+    symbol: &str,
+    provider: &str,
+    timeframe: &str,
+) -> (state::AppState, tempfile::NamedTempFile) {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let provider_registry_path = std::path::PathBuf::from(manifest_dir)
+        .join("../../../config/providers/providers.json")
+        .canonicalize()
+        .expect("provider registry must resolve")
+        .to_string_lossy()
+        .to_string();
+
+    let registry = tempfile::NamedTempFile::new().expect("create fake instrument registry");
+    let json = format!(
+        r#"[{{
+          "instrument_id": "equity:US:{symbol}",
+          "symbol": "{symbol}",
+          "asset_class": "equity",
+          "provider": "{provider}",
+          "provider_symbol": "{symbol}",
+          "venue": "TEST",
+          "currency": "USD",
+          "enabled": true,
+          "timeframes": ["{timeframe}"],
+          "notes": "test fixture"
+        }}]"#
+    );
+    std::fs::write(registry.path(), json).expect("write fake instrument registry");
+
+    let mut st =
+        state::AppState::new_with_operator_auth(state::OperatorAuthMode::ExplicitDevNoToken);
+    st.instrument_registry_path = registry.path().to_string_lossy().to_string();
+    st.provider_registry_path = provider_registry_path;
+    (st, registry)
+}
+
+fn provider_bar(symbol: &str, timeframe: &str, end_ts: i64) -> mqk_md::ProviderBar {
+    mqk_md::ProviderBar {
+        symbol: symbol.to_string(),
+        timeframe: timeframe.to_string(),
+        end_ts,
+        open: "100".to_string(),
+        high: "101".to_string(),
+        low: "99".to_string(),
+        close: "100.5".to_string(),
+        volume: 1000,
+        is_complete: true,
+    }
+}
+
+/// A provider response containing *only* wrong-symbol bars is a rejection,
+/// never a silent success: it must not count as completed, must count as
+/// failed, must not increase `rows_inserted`, and must increase
+/// `rows_rejected` by the mismatched-bar count.
+#[tokio::test]
+async fn hist_sync_only_mismatched_bars_are_rejected_not_completed() {
+    let Some(pool) = ingest_job_db_pool_or_skip("HIST-MISMATCH-01").await else {
+        return;
+    };
+
+    let (mut st_raw, _registry) =
+        make_provider_router_with_single_instrument("ZZHISTMISMATCH", "twelvedata", "1D");
+    st_raw.db = Some(pool.clone());
+    st_raw.set_provider_client_for_test(Arc::new(FakeProvider::with_bars(vec![provider_bar(
+        "SOME_OTHER_SYMBOL",
+        "1D",
+        1_704_153_600,
+    )])));
+    let st = Arc::new(st_raw);
+
+    let router_post = routes::build_router(Arc::clone(&st));
+    let (status, body) = post_provider_job(
+        router_post,
+        serde_json::json!({
+            "source": "twelvedata",
+            "mode": "sync_provider",
+            "timeframe": "1D",
+            "symbols_source": "registry",
+            "dry_run": false,
+            "allow_provider_api_calls": true,
+            "start": "2023-01-01",
+            "end": "2023-01-05"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "job must queue: {body}");
+    let job_id: uuid::Uuid = json_str(&body, "job_id")
+        .parse()
+        .expect("job_id must parse");
+
+    let persisted =
+        wait_for_persisted_status(&pool, job_id, &["completed", "partial", "failed"]).await;
+    assert_eq!(
+        persisted.status.as_str(),
+        "failed",
+        "a response containing ONLY wrong-symbol bars must never report success: {persisted:?}"
+    );
+    assert_eq!(
+        persisted.symbols_completed,
+        Some(0),
+        "must not count as completed"
+    );
+    assert_eq!(persisted.symbols_failed, Some(1), "must count as failed");
+    assert_eq!(persisted.rows_inserted, Some(0));
+    assert_eq!(
+        persisted.rows_rejected,
+        Some(1),
+        "the mismatched bar must be counted as rejected"
+    );
+    let err = persisted.error.as_deref().unwrap_or("");
+    assert!(
+        err.contains("mismatch") || err.contains("symbol"),
+        "a bounded, operator-visible mismatch reason must be recorded: {err}"
+    );
+
+    let count: i64 = sqlx::query_scalar("select count(*) from md_bars where symbol like 'ZZHISTMISMATCH%' or symbol = 'SOME_OTHER_SYMBOL'")
+        .fetch_one(&pool)
+        .await
+        .expect("count rows for mismatched response");
+    assert_eq!(
+        count, 0,
+        "a wrong-symbol-only response must write zero rows"
+    );
+
+    cleanup_ingest_job(&pool, job_id).await;
+}
+
+/// A provider response mixing valid matched bars with wrong-symbol bars
+/// still inserts the valid rows (never discarded), still counts the
+/// mismatched bars as rejected, and reports the job `partial` rather than
+/// `completed`. Stored valid rows retain canonical local symbol, exact
+/// provider ID, canonical provider symbol, and `historical_backfill`
+/// ingest mode.
+#[tokio::test]
+async fn hist_sync_mixed_bars_insert_valid_rows_and_report_partial() {
+    let Some(pool) = ingest_job_db_pool_or_skip("HIST-MISMATCH-02").await else {
+        return;
+    };
+
+    let (mut st_raw, _registry) =
+        make_provider_router_with_single_instrument("ZZHISTMIXED", "twelvedata", "1D");
+    st_raw.db = Some(pool.clone());
+    st_raw.set_provider_client_for_test(Arc::new(FakeProvider::with_bars(vec![
+        provider_bar("ZZHISTMIXED", "1D", 1_704_153_600), // matches provider_symbol
+        provider_bar("SOME_OTHER_SYMBOL", "1D", 1_704_240_000), // mismatched
+    ])));
+    let st = Arc::new(st_raw);
+
+    let router_post = routes::build_router(Arc::clone(&st));
+    let (status, body) = post_provider_job(
+        router_post,
+        serde_json::json!({
+            "source": "twelvedata",
+            "mode": "sync_provider",
+            "timeframe": "1D",
+            "symbols_source": "registry",
+            "dry_run": false,
+            "allow_provider_api_calls": true,
+            "start": "2023-01-01",
+            "end": "2023-01-05"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "job must queue: {body}");
+    let job_id: uuid::Uuid = json_str(&body, "job_id")
+        .parse()
+        .expect("job_id must parse");
+
+    let persisted =
+        wait_for_persisted_status(&pool, job_id, &["completed", "partial", "failed"]).await;
+    assert_eq!(
+        persisted.status.as_str(),
+        "partial",
+        "valid + mismatched bars together must report partial, never completed: {persisted:?}"
+    );
+    assert_eq!(
+        persisted.rows_inserted,
+        Some(1),
+        "the valid matched row must not be discarded"
+    );
+    assert_eq!(
+        persisted.rows_rejected,
+        Some(1),
+        "the mismatched bar must be counted as rejected"
+    );
+
+    let row = sqlx::query(
+        "select symbol, provider_id, provider_symbol, ingest_mode from md_bars \
+         where symbol = 'ZZHISTMIXED' and timeframe = '1D' and end_ts = $1",
+    )
+    .bind(1_704_153_600_i64)
+    .fetch_one(&pool)
+    .await
+    .expect("fetch inserted valid row");
+    assert_eq!(row.try_get::<String, _>("symbol").unwrap(), "ZZHISTMIXED");
+    assert_eq!(
+        row.try_get::<String, _>("provider_id").unwrap(),
+        "twelvedata"
+    );
+    assert_eq!(
+        row.try_get::<Option<String>, _>("provider_symbol").unwrap(),
+        Some("ZZHISTMIXED".to_string()),
+        "provenance must retain the canonical provider symbol"
+    );
+    assert_eq!(
+        row.try_get::<Option<String>, _>("ingest_mode").unwrap(),
+        Some("historical_backfill".to_string())
+    );
+
+    let mismatched_count: i64 =
+        sqlx::query_scalar("select count(*) from md_bars where symbol = 'SOME_OTHER_SYMBOL'")
+            .fetch_one(&pool)
+            .await
+            .expect("count mismatched rows");
+    assert_eq!(
+        mismatched_count, 0,
+        "the mismatched bar must never be written to md_bars"
+    );
+
+    sqlx::query("delete from md_bars where symbol = 'ZZHISTMIXED'")
+        .execute(&pool)
+        .await
+        .ok();
     cleanup_ingest_job(&pool, job_id).await;
 }

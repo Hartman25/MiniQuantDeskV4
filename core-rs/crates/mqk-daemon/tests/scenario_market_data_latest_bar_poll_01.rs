@@ -164,6 +164,35 @@ fn fake_instrument_registry_file(symbol: &str, provider: &str) -> NamedTempFile 
     file
 }
 
+/// General form of [`fake_instrument_registry_file`] — lets tests set a
+/// `provider_symbol` distinct from the local `symbol`, a blank
+/// `provider_symbol`, a different `provider`, or `enabled: false`.
+fn fake_instrument_registry_file_ex(
+    symbol: &str,
+    provider: &str,
+    provider_symbol: &str,
+    enabled: bool,
+) -> NamedTempFile {
+    let mut file = NamedTempFile::new().expect("create fake instrument registry");
+    let json = format!(
+        r#"[{{
+          "instrument_id": "equity:US:{symbol}",
+          "symbol": "{symbol}",
+          "asset_class": "equity",
+          "provider": "{provider}",
+          "provider_symbol": "{provider_symbol}",
+          "venue": "TEST",
+          "currency": "USD",
+          "enabled": {enabled},
+          "timeframes": ["5m"],
+          "notes": "test fixture"
+        }}]"#
+    );
+    file.write_all(json.as_bytes())
+        .expect("write fake instrument registry");
+    file
+}
+
 async fn call_json(
     app: axum::Router,
     method: &str,
@@ -365,7 +394,43 @@ async fn market_data_provider_error_reports_partial_failure_without_hiding_succe
         return;
     };
     let registry = fake_registry_file();
-    let instrument_registry = fake_instrument_registry_file("ZZPOLLOK", "fake");
+    // Repair 2: admission now happens before any provider call, so ZZPOLLERR
+    // must also be a real, enabled, "fake"-provider instrument to reach the
+    // provider at all — otherwise this test would stop proving a genuine
+    // provider-error outcome and would instead (coincidentally, with the
+    // same aggregate JSON shape) prove an admission rejection.
+    let instrument_registry =
+        tempfile::NamedTempFile::new().expect("create fake instrument registry");
+    std::fs::write(
+        instrument_registry.path(),
+        br#"[
+          {
+            "instrument_id": "equity:US:ZZPOLLOK",
+            "symbol": "ZZPOLLOK",
+            "asset_class": "equity",
+            "provider": "fake",
+            "provider_symbol": "ZZPOLLOK",
+            "venue": "TEST",
+            "currency": "USD",
+            "enabled": true,
+            "timeframes": ["5m"],
+            "notes": "test fixture"
+          },
+          {
+            "instrument_id": "equity:US:ZZPOLLERR",
+            "symbol": "ZZPOLLERR",
+            "asset_class": "equity",
+            "provider": "fake",
+            "provider_symbol": "ZZPOLLERR",
+            "venue": "TEST",
+            "currency": "USD",
+            "enabled": true,
+            "timeframes": ["5m"],
+            "notes": "test fixture"
+          }
+        ]"#,
+    )
+    .expect("write fake instrument registry");
     let mut outcomes = HashMap::new();
     outcomes.insert(
         "ZZPOLLOK".to_string(),
@@ -414,6 +479,7 @@ async fn market_data_returned_forming_or_future_bar_is_skipped() {
         return;
     };
     let registry = fake_registry_file();
+    let instrument_registry = fake_instrument_registry_file("ZZPOLLFUT", "fake");
     let mut outcomes = HashMap::new();
     outcomes.insert(
         "ZZPOLLFUT".to_string(),
@@ -438,7 +504,8 @@ async fn market_data_returned_forming_or_future_bar_is_skipped() {
             "dry_run": false,
             "allow_provider_api_calls": true,
             "now_utc": "2024-01-01T00:10:30Z",
-            "provider_registry_path": registry.path().to_string_lossy()
+            "provider_registry_path": registry.path().to_string_lossy(),
+            "instrument_registry_path": instrument_registry.path().to_string_lossy()
         })),
     )
     .await;
@@ -454,6 +521,380 @@ async fn market_data_returned_forming_or_future_bar_is_skipped() {
         .await
         .expect("count skipped future row");
     assert_eq!(count, 0);
+}
+
+// ---------------------------------------------------------------------------
+// DAILY-DATA-READINESS-01B2-INGEST-TRUTHFULNESS-REPAIR-01 (Repair 2):
+// pre-call admission — the canonical instrument/provider mapping must be
+// proven before any provider call is made.
+// ---------------------------------------------------------------------------
+
+/// An invalid/nonexistent instrument registry path refuses the whole
+/// request before any provider call — never `unwrap_or_default()` into an
+/// empty registry that silently skips every symbol individually.
+#[tokio::test]
+async fn market_data_invalid_instrument_registry_path_makes_zero_provider_calls() {
+    let Some(pool) = maybe_db("market_data_invalid_instrument_registry_path").await else {
+        return;
+    };
+    let registry = fake_registry_file();
+    let provider = Arc::new(FakeLatestProvider::new(HashMap::new()));
+    let mut st =
+        state::AppState::new_with_db_and_operator_auth(pool, OperatorAuthMode::ExplicitDevNoToken);
+    st.set_latest_bar_provider_client_for_test(provider.clone());
+    let app = routes::build_router(Arc::new(st));
+
+    let (status, body) = call_json(
+        app,
+        "POST",
+        "/api/v1/market-data/feed/poll-once",
+        Some(serde_json::json!({
+            "provider_id": "fake",
+            "symbols": ["ZZPOLLBADREG"],
+            "timeframe": "5m",
+            "dry_run": false,
+            "allow_provider_api_calls": true,
+            "now_utc": "2024-01-01T00:10:30Z",
+            "provider_registry_path": registry.path().to_string_lossy(),
+            "instrument_registry_path": "/nonexistent/path/that/cannot/exist/equities.json"
+        })),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body["truth_state"], "refused");
+    assert!(body["error"]
+        .as_str()
+        .unwrap()
+        .contains("instrument_registry_unavailable"));
+    assert_eq!(
+        provider.calls(),
+        0,
+        "an unreadable instrument registry must make zero provider calls"
+    );
+}
+
+/// A local symbol absent from the instrument registry blocks before any
+/// provider call.
+#[tokio::test]
+async fn market_data_unknown_local_symbol_makes_zero_provider_calls() {
+    let Some(pool) = maybe_db("market_data_unknown_local_symbol").await else {
+        return;
+    };
+    let registry = fake_registry_file();
+    // Registry has an entry, but not for the symbol requested below.
+    let instrument_registry = fake_instrument_registry_file("ZZPOLLSOMEOTHER", "fake");
+    let provider = Arc::new(FakeLatestProvider::new(HashMap::new()));
+    let mut st =
+        state::AppState::new_with_db_and_operator_auth(pool, OperatorAuthMode::ExplicitDevNoToken);
+    st.set_latest_bar_provider_client_for_test(provider.clone());
+    let app = routes::build_router(Arc::new(st));
+
+    let (status, body) = call_json(
+        app,
+        "POST",
+        "/api/v1/market-data/feed/poll-once",
+        Some(serde_json::json!({
+            "provider_id": "fake",
+            "symbols": ["ZZPOLLUNKNOWN"],
+            "timeframe": "5m",
+            "dry_run": false,
+            "allow_provider_api_calls": true,
+            "now_utc": "2024-01-01T00:10:30Z",
+            "provider_registry_path": registry.path().to_string_lossy(),
+            "instrument_registry_path": instrument_registry.path().to_string_lossy()
+        })),
+    )
+    .await;
+
+    // The sole requested symbol fails admission, so the aggregate response
+    // truthfully reports `failed` (mirrors the existing `provider_error`
+    // single-symbol-failure precedent elsewhere in this file).
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(body["truth_state"], "failed");
+    assert_eq!(
+        body["symbols"][0]["status"],
+        "skipped_instrument_not_in_registry"
+    );
+    assert_eq!(
+        provider.calls(),
+        0,
+        "an unregistered local symbol must make zero provider calls"
+    );
+}
+
+/// A disabled instrument blocks before any provider call.
+#[tokio::test]
+async fn market_data_disabled_instrument_makes_zero_provider_calls() {
+    let Some(pool) = maybe_db("market_data_disabled_instrument").await else {
+        return;
+    };
+    let registry = fake_registry_file();
+    let instrument_registry =
+        fake_instrument_registry_file_ex("ZZPOLLDISABLED", "fake", "ZZPOLLDISABLED", false);
+    let provider = Arc::new(FakeLatestProvider::new(HashMap::new()));
+    let mut st =
+        state::AppState::new_with_db_and_operator_auth(pool, OperatorAuthMode::ExplicitDevNoToken);
+    st.set_latest_bar_provider_client_for_test(provider.clone());
+    let app = routes::build_router(Arc::new(st));
+
+    let (status, body) = call_json(
+        app,
+        "POST",
+        "/api/v1/market-data/feed/poll-once",
+        Some(serde_json::json!({
+            "provider_id": "fake",
+            "symbols": ["ZZPOLLDISABLED"],
+            "timeframe": "5m",
+            "dry_run": false,
+            "allow_provider_api_calls": true,
+            "now_utc": "2024-01-01T00:10:30Z",
+            "provider_registry_path": registry.path().to_string_lossy(),
+            "instrument_registry_path": instrument_registry.path().to_string_lossy()
+        })),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(body["truth_state"], "failed");
+    assert_eq!(body["symbols"][0]["status"], "skipped_instrument_disabled");
+    assert_eq!(
+        provider.calls(),
+        0,
+        "a disabled instrument must make zero provider calls"
+    );
+}
+
+/// A canonical provider mismatch (instrument configured for a different
+/// provider than the poll's selected provider) blocks before any provider
+/// call.
+#[tokio::test]
+async fn market_data_provider_id_mismatch_makes_zero_provider_calls() {
+    let Some(pool) = maybe_db("market_data_provider_id_mismatch").await else {
+        return;
+    };
+    let registry = fake_registry_file();
+    let instrument_registry =
+        fake_instrument_registry_file("ZZPOLLWRONGPROV", "some_other_provider");
+    let provider = Arc::new(FakeLatestProvider::new(HashMap::new()));
+    let mut st =
+        state::AppState::new_with_db_and_operator_auth(pool, OperatorAuthMode::ExplicitDevNoToken);
+    st.set_latest_bar_provider_client_for_test(provider.clone());
+    let app = routes::build_router(Arc::new(st));
+
+    let (status, body) = call_json(
+        app,
+        "POST",
+        "/api/v1/market-data/feed/poll-once",
+        Some(serde_json::json!({
+            "provider_id": "fake",
+            "symbols": ["ZZPOLLWRONGPROV"],
+            "timeframe": "5m",
+            "dry_run": false,
+            "allow_provider_api_calls": true,
+            "now_utc": "2024-01-01T00:10:30Z",
+            "provider_registry_path": registry.path().to_string_lossy(),
+            "instrument_registry_path": instrument_registry.path().to_string_lossy()
+        })),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(body["truth_state"], "failed");
+    assert_eq!(body["symbols"][0]["status"], "skipped_provider_mismatch");
+    assert_eq!(
+        provider.calls(),
+        0,
+        "a provider-id mismatch must make zero provider calls"
+    );
+}
+
+/// A blank canonical `provider_symbol` blocks before any provider call.
+#[tokio::test]
+async fn market_data_blank_provider_symbol_makes_zero_provider_calls() {
+    let Some(pool) = maybe_db("market_data_blank_provider_symbol").await else {
+        return;
+    };
+    let registry = fake_registry_file();
+    let instrument_registry = fake_instrument_registry_file_ex("ZZPOLLBLANKPS", "fake", "", true);
+    let provider = Arc::new(FakeLatestProvider::new(HashMap::new()));
+    let mut st =
+        state::AppState::new_with_db_and_operator_auth(pool, OperatorAuthMode::ExplicitDevNoToken);
+    st.set_latest_bar_provider_client_for_test(provider.clone());
+    let app = routes::build_router(Arc::new(st));
+
+    let (status, body) = call_json(
+        app,
+        "POST",
+        "/api/v1/market-data/feed/poll-once",
+        Some(serde_json::json!({
+            "provider_id": "fake",
+            "symbols": ["ZZPOLLBLANKPS"],
+            "timeframe": "5m",
+            "dry_run": false,
+            "allow_provider_api_calls": true,
+            "now_utc": "2024-01-01T00:10:30Z",
+            "provider_registry_path": registry.path().to_string_lossy(),
+            "instrument_registry_path": instrument_registry.path().to_string_lossy()
+        })),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(body["truth_state"], "failed");
+    assert_eq!(
+        body["symbols"][0]["status"],
+        "skipped_blank_provider_symbol"
+    );
+    assert_eq!(
+        provider.calls(),
+        0,
+        "a blank canonical provider_symbol must make zero provider calls"
+    );
+}
+
+/// When the canonical `provider_symbol` differs from the local symbol, the
+/// request sent to the provider uses the provider symbol — never the local
+/// symbol — and the accepted bar is stored under the local symbol with the
+/// provider symbol preserved as provenance.
+#[tokio::test]
+async fn market_data_distinct_provider_symbol_is_sent_and_local_symbol_is_stored() {
+    let Some(pool) = maybe_db("market_data_distinct_provider_symbol").await else {
+        return;
+    };
+    let registry = fake_registry_file();
+    let instrument_registry =
+        fake_instrument_registry_file_ex("ZZPOLLLOCAL", "fake", "PROVIDERSIDE-ZZPOLLLOCAL", true);
+    let mut outcomes = HashMap::new();
+    // Keyed by the *provider* symbol — proves the request was sent using
+    // `instrument.provider_symbol`, not the local canonical symbol.
+    outcomes.insert(
+        "PROVIDERSIDE-ZZPOLLLOCAL".to_string(),
+        FakeLatestOutcome::Bar(bar("PROVIDERSIDE-ZZPOLLLOCAL", 1_704_067_200, true)),
+    );
+    let provider = Arc::new(FakeLatestProvider::new(outcomes));
+    let mut st = state::AppState::new_with_db_and_operator_auth(
+        pool.clone(),
+        OperatorAuthMode::ExplicitDevNoToken,
+    );
+    st.set_latest_bar_provider_client_for_test(provider.clone());
+    let app = routes::build_router(Arc::new(st));
+
+    let (status, body) = call_json(
+        app,
+        "POST",
+        "/api/v1/market-data/feed/poll-once",
+        Some(serde_json::json!({
+            "provider_id": "fake",
+            "symbols": ["ZZPOLLLOCAL"],
+            "timeframe": "5m",
+            "dry_run": false,
+            "allow_provider_api_calls": true,
+            "now_utc": "2024-01-01T00:10:30Z",
+            "provider_registry_path": registry.path().to_string_lossy(),
+            "instrument_registry_path": instrument_registry.path().to_string_lossy()
+        })),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["truth_state"], "completed");
+    assert_eq!(body["inserted_count"], 1);
+    assert_eq!(
+        provider.calls(),
+        1,
+        "exactly one real provider call must have been made"
+    );
+
+    let row = sqlx::query(
+        "select symbol, provider_id, provider_symbol from md_bars \
+         where symbol = 'ZZPOLLLOCAL' and timeframe = '5m' and end_ts = $1",
+    )
+    .bind(1_704_067_200_i64)
+    .fetch_one(&pool)
+    .await
+    .expect("fetch stored bar");
+    assert_eq!(
+        row.try_get::<String, _>("symbol").unwrap(),
+        "ZZPOLLLOCAL",
+        "md_bars.symbol must be the canonical LOCAL symbol, never the provider symbol"
+    );
+    assert_eq!(row.try_get::<String, _>("provider_id").unwrap(), "fake");
+    assert_eq!(
+        row.try_get::<Option<String>, _>("provider_symbol").unwrap(),
+        Some("PROVIDERSIDE-ZZPOLLLOCAL".to_string()),
+        "provenance must retain the canonical provider symbol"
+    );
+
+    sqlx::query("delete from md_bars where symbol = 'ZZPOLLLOCAL'")
+        .execute(&pool)
+        .await
+        .ok();
+}
+
+/// A bar returned under a symbol other than the one actually requested
+/// (the canonical provider symbol) is rejected — never accepted under a
+/// mismatched label, and never written to the DB.
+#[tokio::test]
+async fn market_data_wrong_returned_provider_symbol_is_rejected_and_writes_nothing() {
+    let Some(pool) = maybe_db("market_data_wrong_returned_provider_symbol").await else {
+        return;
+    };
+    let registry = fake_registry_file();
+    let instrument_registry =
+        fake_instrument_registry_file_ex("ZZPOLLMISMATCH", "fake", "ZZPOLLMISMATCH", true);
+    let mut outcomes = HashMap::new();
+    // The fake provider is queried with "ZZPOLLMISMATCH" but returns a bar
+    // labeled under a completely different symbol.
+    outcomes.insert(
+        "ZZPOLLMISMATCH".to_string(),
+        FakeLatestOutcome::Bar(bar("SOME_OTHER_SYMBOL", 1_704_067_200, true)),
+    );
+    let provider = Arc::new(FakeLatestProvider::new(outcomes));
+    let mut st = state::AppState::new_with_db_and_operator_auth(
+        pool.clone(),
+        OperatorAuthMode::ExplicitDevNoToken,
+    );
+    st.set_latest_bar_provider_client_for_test(provider.clone());
+    let app = routes::build_router(Arc::new(st));
+
+    let (status, body) = call_json(
+        app,
+        "POST",
+        "/api/v1/market-data/feed/poll-once",
+        Some(serde_json::json!({
+            "provider_id": "fake",
+            "symbols": ["ZZPOLLMISMATCH"],
+            "timeframe": "5m",
+            "dry_run": false,
+            "allow_provider_api_calls": true,
+            "now_utc": "2024-01-01T00:10:30Z",
+            "provider_registry_path": registry.path().to_string_lossy(),
+            "instrument_registry_path": instrument_registry.path().to_string_lossy()
+        })),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["inserted_count"], 0);
+    assert_eq!(
+        body["symbols"][0]["status"],
+        "skipped_unclosed_or_unexpected_bar"
+    );
+    assert_eq!(
+        provider.calls(),
+        1,
+        "the provider is called once (admission passed); the mismatch is caught on the response"
+    );
+
+    let count: i64 = sqlx::query_scalar(
+        "select count(*) from md_bars where symbol = $1 or symbol = 'SOME_OTHER_SYMBOL'",
+    )
+    .bind("ZZPOLLMISMATCH")
+    .fetch_one(&pool)
+    .await
+    .expect("count rows for mismatched response");
+    assert_eq!(count, 0, "a wrong-symbol response must write zero DB bars");
 }
 
 #[tokio::test]
