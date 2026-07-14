@@ -1622,6 +1622,114 @@ pub fn provider_bar_matches_existing(
         && existing.ingest_mode.as_deref() == metadata.ingest_mode.as_deref())
 }
 
+// ---------------------------------------------------------------------------
+// DAILY-DATA-READINESS-AND-FRESHNESS-01-COMBINED Phase B: bounded read with
+// provenance, for the strict daily readiness evaluator.
+// ---------------------------------------------------------------------------
+
+/// One `md_bars` row with full provenance, for strict readiness continuity
+/// checking. Superset of [`MdBarRow`]'s OHLCV fields plus every provenance
+/// column §11 of the readiness contract requires.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MdBarRowWithProvenance {
+    pub symbol: String,
+    pub timeframe: String,
+    pub end_ts: i64,
+    pub open_micros: i64,
+    pub high_micros: i64,
+    pub low_micros: i64,
+    pub close_micros: i64,
+    pub volume: i64,
+    pub is_complete: bool,
+    pub provider_id: String,
+    pub provider_source: Option<String>,
+    pub provider_symbol: Option<String>,
+    pub ingest_mode: Option<String>,
+    pub provider_updated_at_utc: Option<DateTime<Utc>>,
+    pub ingested_at: DateTime<Utc>,
+}
+
+/// Read the most recent `limit` `md_bars` rows (any completeness) for a
+/// `(symbol, timeframe)` pair, with full provenance, ordered oldest-to-newest
+/// (ascending `end_ts`).
+///
+/// Bounded: `limit` must be the caller's `required_history_bars + 2` (or an
+/// equally bounded, explicitly justified amount) — this function does not
+/// enforce a maximum itself, callers own the bound. Read-only: no inserts,
+/// updates, or deletes.
+pub async fn fetch_bounded_bars_with_provenance(
+    pool: &PgPool,
+    symbol: &str,
+    timeframe: &str,
+    limit: i64,
+) -> Result<Vec<MdBarRowWithProvenance>> {
+    let rows = sqlx::query(
+        r#"
+        select
+            symbol,
+            timeframe,
+            end_ts,
+            open_micros,
+            high_micros,
+            low_micros,
+            close_micros,
+            volume,
+            is_complete,
+            provider_id,
+            provider_source,
+            provider_symbol,
+            ingest_mode,
+            provider_updated_at_utc,
+            ingested_at
+        from md_bars
+        where symbol = $1
+          and timeframe = $2
+        order by end_ts desc
+        limit $3
+        "#,
+    )
+    .bind(symbol)
+    .bind(timeframe)
+    .bind(limit)
+    .fetch_all(pool)
+    .await
+    .context("fetch_bounded_bars_with_provenance query failed")?;
+
+    let mut out: Vec<MdBarRowWithProvenance> = rows
+        .iter()
+        .map(|r| -> Result<MdBarRowWithProvenance> {
+            Ok(MdBarRowWithProvenance {
+                symbol: r.try_get("symbol").context("md_bars.symbol")?,
+                timeframe: r.try_get("timeframe").context("md_bars.timeframe")?,
+                end_ts: r.try_get("end_ts").context("md_bars.end_ts")?,
+                open_micros: r.try_get("open_micros").context("md_bars.open_micros")?,
+                high_micros: r.try_get("high_micros").context("md_bars.high_micros")?,
+                low_micros: r.try_get("low_micros").context("md_bars.low_micros")?,
+                close_micros: r.try_get("close_micros").context("md_bars.close_micros")?,
+                volume: r.try_get("volume").context("md_bars.volume")?,
+                is_complete: r.try_get("is_complete").context("md_bars.is_complete")?,
+                provider_id: r.try_get("provider_id").context("md_bars.provider_id")?,
+                provider_source: r
+                    .try_get("provider_source")
+                    .context("md_bars.provider_source")?,
+                provider_symbol: r
+                    .try_get("provider_symbol")
+                    .context("md_bars.provider_symbol")?,
+                ingest_mode: r.try_get("ingest_mode").context("md_bars.ingest_mode")?,
+                provider_updated_at_utc: r
+                    .try_get("provider_updated_at_utc")
+                    .context("md_bars.provider_updated_at_utc")?,
+                ingested_at: r.try_get("ingested_at").context("md_bars.ingested_at")?,
+            })
+        })
+        .collect::<Result<Vec<_>>>()?;
+
+    // Reverse to oldest-first so callers get a natural ascending window
+    // without re-sorting (mirrors fetch_recent_completed_bars_for_strategy).
+    out.reverse();
+    Ok(out)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1683,32 +1791,40 @@ mod tests {
     fn provider_bar_matches_existing_false_when_close_differs() {
         let mut existing = sample_existing_matching();
         existing.close_micros = 60_000_000_000;
-        assert!(!provider_bar_matches_existing(&sample_candidate(), &sample_metadata(), &existing)
-            .unwrap());
+        assert!(
+            !provider_bar_matches_existing(&sample_candidate(), &sample_metadata(), &existing)
+                .unwrap()
+        );
     }
 
     #[test]
     fn provider_bar_matches_existing_false_when_volume_differs() {
         let mut existing = sample_existing_matching();
         existing.volume = 1_000_000_000;
-        assert!(!provider_bar_matches_existing(&sample_candidate(), &sample_metadata(), &existing)
-            .unwrap());
+        assert!(
+            !provider_bar_matches_existing(&sample_candidate(), &sample_metadata(), &existing)
+                .unwrap()
+        );
     }
 
     #[test]
     fn provider_bar_matches_existing_false_when_provider_symbol_differs() {
         let mut existing = sample_existing_matching();
         existing.provider_symbol = Some("seed_stale".to_string());
-        assert!(!provider_bar_matches_existing(&sample_candidate(), &sample_metadata(), &existing)
-            .unwrap());
+        assert!(
+            !provider_bar_matches_existing(&sample_candidate(), &sample_metadata(), &existing)
+                .unwrap()
+        );
     }
 
     #[test]
     fn provider_bar_matches_existing_false_when_ingest_mode_differs() {
         let mut existing = sample_existing_matching();
         existing.ingest_mode = Some("provider_ingest".to_string());
-        assert!(!provider_bar_matches_existing(&sample_candidate(), &sample_metadata(), &existing)
-            .unwrap());
+        assert!(
+            !provider_bar_matches_existing(&sample_candidate(), &sample_metadata(), &existing)
+                .unwrap()
+        );
     }
 
     #[test]

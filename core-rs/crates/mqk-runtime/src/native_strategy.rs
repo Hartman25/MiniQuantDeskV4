@@ -309,6 +309,60 @@ pub fn build_daemon_plugin_registry() -> PluginRegistry {
 }
 
 // ---------------------------------------------------------------------------
+// DAILY-DATA-READINESS-AND-FRESHNESS-01-COMBINED Phase B: immutable effective
+// runtime binding snapshot.
+// ---------------------------------------------------------------------------
+
+/// Immutable snapshot of what the active native-strategy bootstrap actually
+/// resolved to, captured at the same moment the bootstrap itself is
+/// constructed — never re-derived later by re-reading mutable environment
+/// state. `None` fields mean the bootstrap is not `Active` (or, for
+/// `effective_runtime_target_symbol`, that `MQK_STRATEGY_SYMBOL` was unset or
+/// blank) — callers must treat `None` as "no bootstrap target to bind to",
+/// not as a wildcard match.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EffectiveRuntimeBinding {
+    pub effective_runtime_strategy_id: Option<String>,
+    pub effective_runtime_target_symbol: Option<String>,
+    pub effective_runtime_timeframe_secs: Option<i64>,
+}
+
+/// Bootstrap a native strategy host (identical construction to
+/// [`build_daemon_plugin_registry`] + [`NativeStrategyBootstrap::bootstrap`])
+/// and capture the [`EffectiveRuntimeBinding`] snapshot from the exact same
+/// `MQK_STRATEGY_SYMBOL` read and resulting bootstrap outcome — one read, one
+/// derivation, so the binding can never disagree with what the bootstrap
+/// itself resolved to.
+///
+/// `effective_runtime_target_symbol` is trimmed; empty-after-trim is reported
+/// as `None` (no bootstrap target to bind to), matching the fail-closed
+/// convention `retain_targets_matching_symbol` (`mqk-daemon`) already uses
+/// for symbol comparison.
+pub fn bootstrap_with_effective_binding(
+    fleet_ids: Option<&[String]>,
+) -> (NativeStrategyBootstrap, EffectiveRuntimeBinding) {
+    let symbol = std::env::var("MQK_STRATEGY_SYMBOL").unwrap_or_default();
+    let mut registry = PluginRegistry::new();
+    mqk_strategy::engines::register_builtin_strategies(&mut registry, symbol.clone())
+        .expect("daemon built-in strategy registration must not fail: duplicate names are a programming error");
+    let bootstrap = NativeStrategyBootstrap::bootstrap(fleet_ids, &registry);
+
+    let effective_runtime_target_symbol = {
+        let trimmed = symbol.trim();
+        (!trimmed.is_empty()).then(|| trimmed.to_string())
+    };
+    let effective_runtime_strategy_id = bootstrap.active_strategy_id().map(|s| s.to_string());
+    let effective_runtime_timeframe_secs = bootstrap.strategy_timeframe_secs();
+
+    let binding = EffectiveRuntimeBinding {
+        effective_runtime_strategy_id,
+        effective_runtime_target_symbol,
+        effective_runtime_timeframe_secs,
+    };
+    (bootstrap, binding)
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 

@@ -1,5 +1,6 @@
 use crate::{
-    BarStub, Strategy, StrategyContext, StrategyMeta, StrategyOutput, StrategySpec, TargetPosition,
+    BarStub, Strategy, StrategyContext, StrategyDataRequirements, StrategyMeta, StrategyOutput,
+    StrategySpec, TargetPosition,
 };
 
 const NAME: &str = "mean_reversion";
@@ -15,6 +16,9 @@ pub fn meta() -> StrategyMeta {
         TIMEFRAME_SECS,
         "Deterministic mean reversion engine using close deviation from trailing average.",
     )
+    .with_data_requirements(StrategyDataRequirements {
+        minimum_completed_bars: LOOKBACK,
+    })
 }
 
 #[derive(Clone, Debug)]

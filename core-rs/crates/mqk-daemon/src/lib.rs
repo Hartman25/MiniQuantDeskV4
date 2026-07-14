@@ -9,6 +9,7 @@ pub mod backtest_jobs;
 pub mod bind;
 pub mod capital_policy;
 pub mod cors;
+pub mod daily_data_readiness;
 pub mod decision;
 pub mod dev_gate;
 pub mod earnings_calendar;

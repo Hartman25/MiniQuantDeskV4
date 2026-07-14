@@ -1,5 +1,6 @@
 use crate::{
-    BarStub, Strategy, StrategyContext, StrategyMeta, StrategyOutput, StrategySpec, TargetPosition,
+    BarStub, Strategy, StrategyContext, StrategyDataRequirements, StrategyMeta, StrategyOutput,
+    StrategySpec, TargetPosition,
 };
 
 const NAME: &str = "volatility_breakout";
@@ -14,6 +15,13 @@ pub fn meta() -> StrategyMeta {
         TIMEFRAME_SECS,
         "Deterministic breakout engine using prior-window min/max closes.",
     )
+    // signal_from_recent requires recent.len() >= LOOKBACK + 1 (a separate
+    // current-bar comparison beyond the LOOKBACK-bar prior window; see
+    // signal_from_recent below) — the declared requirement must reflect the
+    // real minimum, not just the prior-window constant.
+    .with_data_requirements(StrategyDataRequirements {
+        minimum_completed_bars: LOOKBACK + 1,
+    })
 }
 
 #[derive(Clone, Debug)]

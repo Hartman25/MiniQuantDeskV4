@@ -48,6 +48,17 @@ pub type StrategyFactory = Box<dyn Fn() -> Box<dyn Strategy> + Send + Sync>;
 // Metadata
 // ---------------------------------------------------------------------------
 
+/// Strategy-owned minimum completed-bar history requirement
+/// (DAILY-DATA-READINESS-AND-FRESHNESS-01-COMBINED §5).
+///
+/// Bound to [`StrategyMeta`] rather than a daemon-side lookup table so the
+/// requirement can only change together with the engine's own lookback
+/// constant, in the same file, in the same review.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct StrategyDataRequirements {
+    pub minimum_completed_bars: usize,
+}
+
 /// Static metadata for a registered strategy.
 ///
 /// Metadata is stored separately from the strategy instance so it can be
@@ -68,10 +79,19 @@ pub struct StrategyMeta {
 
     /// Human-readable description of the strategy.
     pub description: String,
+
+    /// Minimum completed-bar history this strategy needs before it can
+    /// produce a meaningful decision. `None` means the requirement is
+    /// unknown/undeclared — callers must fail closed
+    /// (`strategy_requirement_unknown`), never assume a default.
+    pub data_requirements: Option<StrategyDataRequirements>,
 }
 
 impl StrategyMeta {
     /// Construct metadata, validating the name and timeframe.
+    ///
+    /// `data_requirements` starts `None`; use [`Self::with_data_requirements`]
+    /// to declare it.
     pub fn new(
         name: impl Into<String>,
         version: impl Into<String>,
@@ -92,6 +112,7 @@ impl StrategyMeta {
             version: version.into(),
             timeframe_secs,
             description: description.into(),
+            data_requirements: None,
         }
     }
 
@@ -108,7 +129,14 @@ impl StrategyMeta {
             version: version.into(),
             timeframe_secs: spec.timeframe_secs,
             description: description.into(),
+            data_requirements: None,
         }
+    }
+
+    /// Declare this strategy's minimum completed-bar history requirement.
+    pub fn with_data_requirements(mut self, requirements: StrategyDataRequirements) -> Self {
+        self.data_requirements = Some(requirements);
+        self
     }
 }
 
@@ -406,6 +434,7 @@ mod tests {
             version: "1.0.0".to_string(),
             timeframe_secs: 60,
             description: "bad".to_string(),
+            data_requirements: None,
         };
         let err = reg.register(meta, make_factory("x", 60, 1));
         assert_eq!(err, Err(RegistryError::EmptyName));

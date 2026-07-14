@@ -1011,3 +1011,260 @@ pub fn route_instrument_session_for_metadata(
         session_reason_code,
     }
 }
+
+// ---------------------------------------------------------------------------
+// DAILY-DATA-READINESS-AND-FRESHNESS-01-COMBINED §6a: typed market-session
+// schedule seam.
+// ---------------------------------------------------------------------------
+//
+// `MarketCalendarProvider::session_for()` answers "what state is `now_utc`
+// in" — it does not say what today's session open/close/previous-trading-date
+// are. `MarketSessionSchedule` composes over the existing provider (walking
+// day-by-day via its own `is_trading_day` classification — not a second
+// calendar implementation) to answer those questions, plus imposes its own
+// explicit coverage-window fail-closed check on top of whatever the
+// underlying provider returns (the static `NyseWeekdaysProvider` heuristic
+// does not itself fail closed outside its hardcoded 2023-2028 table).
+
+/// Coverage/authority state for a resolved [`MarketSessionSchedule`].
+///
+/// `Active` is the only state callers may treat as authoritative for
+/// continuity/expected-bar computation. Every other state is fail-closed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CalendarCoverageState {
+    /// Date is within this seam's declared coverage window and the
+    /// underlying provider produced a determinate (non-`Unknown`) session
+    /// state for it.
+    Active,
+    /// Reserved for a future provider that can report staleness explicitly;
+    /// no current provider composed by this seam produces this state.
+    Stale,
+    /// Reserved for a future provider that can report structural invalidity;
+    /// no current provider composed by this seam produces this state.
+    Invalid,
+    /// Date falls outside this seam's declared coverage window.
+    OutOfRange,
+    /// The underlying provider could not determine session truth for this
+    /// instant, or is a non-calendar-backed override
+    /// ([`FixedWindowOverrideProvider`]) that cannot honestly answer
+    /// holiday/previous-trading-date questions.
+    Unknown,
+}
+
+/// This seam's own declared coverage window (ET calendar dates, inclusive),
+/// independent of whatever the underlying [`MarketCalendarProvider`] claims.
+/// Mirrors `NyseWeekdaysProvider`'s documented 2023-2028 holiday/early-close
+/// table bound (`mqk-integrity::calendar`) — the same real bound the static
+/// heuristic provider can honestly claim, imposed explicitly here because the
+/// provider itself does not fail closed outside it.
+pub const SCHEDULE_COVERAGE_START: (i64, i64, i64) = (2023, 1, 1);
+pub const SCHEDULE_COVERAGE_END: (i64, i64, i64) = (2028, 12, 31);
+
+/// Typed market-session schedule for one ET calendar date — §6a.
+#[derive(Debug, Clone)]
+pub struct MarketSessionSchedule {
+    /// `(year, month, day)` in Eastern Time — the date `now_utc` classified into.
+    pub market_date: (i64, i64, i64),
+    /// 09:30 ET, DST-correct, converted to UTC.
+    pub session_open_utc: DateTime<Utc>,
+    /// 16:00 ET (or the early-close time), DST-correct, converted to UTC.
+    pub session_close_utc: DateTime<Utc>,
+    /// The most recent prior trading date, found by walking backward through
+    /// the provider's own `is_trading_day` classification (real calendar
+    /// walk, not a fixed day-count).
+    pub previous_trading_date: (i64, i64, i64),
+    pub is_early_close: bool,
+    /// Mirrors [`MarketSessionTruth::source`] for the instant classified.
+    pub calendar_source: &'static str,
+    pub coverage_state: CalendarCoverageState,
+}
+
+fn within_schedule_coverage(date: (i64, i64, i64)) -> bool {
+    date >= SCHEDULE_COVERAGE_START && date <= SCHEDULE_COVERAGE_END
+}
+
+/// Days since the Unix epoch for a civil `(year, month, day)` date.
+/// Howard Hinnant's `days_from_civil` algorithm — deterministic, no stdlib
+/// date dependency, exact inverse of `mqk_integrity::epoch_secs_to_ymd`.
+pub fn days_from_civil(year: i64, month: i64, day: i64) -> i64 {
+    let y = if month <= 2 { year - 1 } else { year };
+    let era = if y >= 0 { y } else { y - 399 } / 400;
+    let yoe = y - era * 400; // [0, 399]
+    let mp = (month + 9) % 12; // [0, 11]
+    let doy = (153 * mp + 2) / 5 + day - 1; // [0, 365]
+    let doe = yoe * 365 + yoe / 4 - yoe / 100 + doy; // [0, 146096]
+    era * 146_097 + doe - 719_468
+}
+
+/// Midnight UTC (00:00:00Z) epoch-seconds for a civil `(year, month, day)`
+/// date — the expected daily `md_bars.end_ts` label (Alpaca stores the
+/// bar-start `t` directly as `end_ts`; daily bars are requested with a
+/// `T00:00:00Z` start boundary — see `mqk-md::alpaca_provider`).
+pub fn midnight_utc_ts_for_date(date: (i64, i64, i64)) -> i64 {
+    days_from_civil(date.0, date.1, date.2) * 86_400
+}
+
+/// A stable mid-day UTC anchor (17:00 UTC) for a civil date — comfortably
+/// inside any DST offset's daytime hours, so `is_trading_day`/holiday
+/// classification for that date is never ambiguous near a UTC-day boundary.
+/// Used only for calendar-classification purposes, never as a bar-timestamp
+/// label.
+fn midday_utc_anchor_ts_for_date(date: (i64, i64, i64)) -> i64 {
+    midnight_utc_ts_for_date(date) + 17 * 3600
+}
+
+/// Walk backward from (and including) `start_date`, day-by-day, through
+/// `provider`'s own `is_trading_day` classification, collecting `count`
+/// trading dates. Returns them in ascending order (oldest first,
+/// `start_date`-or-earlier last... no: most recent last).
+///
+/// Bounded to `count * 3 + 30` calendar-day steps — comfortably covers any
+/// real NYSE holiday/long-weekend cluster for the small `count` values this
+/// evaluator uses (at most 21).
+///
+/// Returns `None` if `count` trading dates are not found within the bound —
+/// callers must treat this as calendar-unavailable, never a silent partial
+/// window.
+pub fn walk_back_trading_dates(
+    provider: &dyn MarketCalendarProvider,
+    start_date: (i64, i64, i64),
+    count: usize,
+) -> Option<Vec<(i64, i64, i64)>> {
+    if count == 0 {
+        return Some(Vec::new());
+    }
+    let mut found: Vec<(i64, i64, i64)> = Vec::with_capacity(count);
+    let mut candidate = start_date;
+    let max_steps = count * 3 + 30;
+    for _ in 0..max_steps {
+        let ts = midday_utc_anchor_ts_for_date(candidate);
+        let dt = DateTime::<Utc>::from_timestamp(ts, 0)?;
+        let truth = provider.session_for(dt);
+        if truth.is_trading_day {
+            found.push(candidate);
+            if found.len() == count {
+                found.reverse(); // ascending: oldest first
+                return Some(found);
+            }
+        }
+        let prev_ts = ts - 86_400;
+        let (year, month, day, _, _) = utc_to_et_components(prev_ts)?;
+        candidate = (year, month, day);
+    }
+    None
+}
+
+/// Walk backward from `now_utc` (day-by-day, UTC-day steps) through
+/// `provider`'s own `is_trading_day` classification to find the most recent
+/// prior trading date (strictly before `now_utc`'s own ET date).
+///
+/// Returns `None` if no trading day is found within the bound — callers must
+/// treat `None` as calendar-unavailable, not silently fall back to `market_date`.
+fn find_previous_trading_date(
+    provider: &dyn MarketCalendarProvider,
+    now_utc: DateTime<Utc>,
+) -> Option<(i64, i64, i64)> {
+    let (year, month, day, _, _) = utc_to_et_components(now_utc.timestamp())?;
+    let day_before_ts = midnight_utc_ts_for_date((year, month, day)) - 1;
+    let (py, pm, pd, _, _) = utc_to_et_components(day_before_ts)?;
+    walk_back_trading_dates(provider, (py, pm, pd), 1).map(|dates| dates[0])
+}
+
+/// [`resolve_market_session_schedule`] for an explicit civil date rather than
+/// a `now_utc` instant — used to resolve a *prior* session's own
+/// open/close/grid without needing the wall clock to land inside it.
+/// Anchors the underlying provider evaluation at [`midday_utc_anchor_ts_for_date`]
+/// so calendar classification is never ambiguous near a UTC-day boundary.
+pub fn resolve_market_session_schedule_for_date(
+    provider: &dyn MarketCalendarProvider,
+    date: (i64, i64, i64),
+) -> Option<MarketSessionSchedule> {
+    let ts = midday_utc_anchor_ts_for_date(date);
+    let dt = DateTime::<Utc>::from_timestamp(ts, 0)?;
+    Some(resolve_market_session_schedule(provider, dt))
+}
+
+/// Resolve the [`MarketSessionSchedule`] for `now_utc` against `provider`.
+///
+/// Pure composition: no DB, network, or broker access. `provider` is
+/// evaluated at `now_utc` for `market_date`'s classification, and at up to
+/// 10 prior UTC-day steps for [`MarketSessionSchedule::previous_trading_date`].
+///
+/// `session_open_utc`/`session_close_utc` are derived from `now_utc`'s own
+/// ET offset (`now_utc.timestamp() - et_secs` gives the UTC instant of ET
+/// midnight under the offset in effect at `now_utc`), which is exact for
+/// every instant except the ~1-hour DST-transition window itself (transition
+/// occurs at 02:00 ET; any evaluation during ordinary trading hours is
+/// unaffected).
+pub fn resolve_market_session_schedule(
+    provider: &dyn MarketCalendarProvider,
+    now_utc: DateTime<Utc>,
+) -> MarketSessionSchedule {
+    let et_components = utc_to_et_components(now_utc.timestamp());
+    let Some((year, month, day, et_secs, _is_weekday)) = et_components else {
+        return MarketSessionSchedule {
+            market_date: (0, 0, 0),
+            session_open_utc: now_utc,
+            session_close_utc: now_utc,
+            previous_trading_date: (0, 0, 0),
+            is_early_close: false,
+            calendar_source: "unknown",
+            coverage_state: CalendarCoverageState::Unknown,
+        };
+    };
+    let market_date = (year, month, day);
+    let truth = provider.session_for(now_utc);
+
+    let midnight_et_utc_ts = now_utc.timestamp() - et_secs;
+    let open_secs = 9 * 3600 + 30 * 60; // 09:30 ET
+    let close_secs = if truth.is_early_close {
+        13 * 3600 // 13:00 ET early close
+    } else {
+        16 * 3600 // 16:00 ET regular close
+    };
+    let session_open_utc =
+        DateTime::<Utc>::from_timestamp(midnight_et_utc_ts + open_secs, 0).unwrap_or(now_utc);
+    let session_close_utc =
+        DateTime::<Utc>::from_timestamp(midnight_et_utc_ts + close_secs, 0).unwrap_or(now_utc);
+
+    let previous_trading_date = find_previous_trading_date(provider, now_utc);
+
+    // FixedWindowOverrideProvider consults no exchange calendar at all — it
+    // cannot honestly answer holiday/previous-trading-date questions, so
+    // this seam must not treat it as calendar truth for those purposes
+    // (contract §6a), regardless of what state it reports for `now_utc`.
+    let is_fixed_window_override = truth.source == "fixed_window_override";
+
+    let coverage_state = if is_fixed_window_override || truth.state == MarketSessionState::Unknown {
+        CalendarCoverageState::Unknown
+    } else if !within_schedule_coverage(market_date) {
+        CalendarCoverageState::OutOfRange
+    } else if previous_trading_date.is_none() {
+        CalendarCoverageState::Unknown
+    } else {
+        CalendarCoverageState::Active
+    };
+
+    MarketSessionSchedule {
+        market_date,
+        session_open_utc,
+        session_close_utc,
+        previous_trading_date: previous_trading_date.unwrap_or(market_date),
+        is_early_close: truth.is_early_close,
+        calendar_source: truth.source,
+        coverage_state,
+    }
+}
+
+/// Select the same active calendar provider the autonomous session
+/// controller uses (`session_controller::autonomous_session_schedule_from_env`'s
+/// selection order): a configured [`FixedWindowOverrideProvider`]
+/// (`MQK_SESSION_START_HH_MM`/`MQK_SESSION_STOP_HH_MM`) if both are set and
+/// valid, else [`NyseWeekdaysProvider`]. Composition, not a second selection
+/// policy — reuses `super::session_controller::session_window_from_env`.
+pub fn active_calendar_provider_from_env() -> Box<dyn MarketCalendarProvider> {
+    match super::session_controller::session_window_from_env() {
+        Some(window) => Box::new(FixedWindowOverrideProvider { window }),
+        None => Box::new(NyseWeekdaysProvider),
+    }
+}

@@ -54,7 +54,8 @@
 //! Default target_qty=1 with no caps set preserves the prior conservative behavior.
 
 use crate::{
-    BarStub, Strategy, StrategyContext, StrategyMeta, StrategyOutput, StrategySpec, TargetPosition,
+    BarStub, Strategy, StrategyContext, StrategyDataRequirements, StrategyMeta, StrategyOutput,
+    StrategySpec, TargetPosition,
 };
 
 // ── Decision vocabulary (STRATEGY-DECISION-OBSERVABILITY-01) ─────────────────
@@ -270,6 +271,9 @@ pub fn meta() -> StrategyMeta {
         TIMEFRAME_SECS,
         "Deterministic intraday scalp engine using short-horizon close displacement.",
     )
+    .with_data_requirements(StrategyDataRequirements {
+        minimum_completed_bars: LOOKBACK,
+    })
 }
 
 /// Return strategy metadata for the short-only variant.
@@ -285,6 +289,9 @@ pub fn meta_short() -> StrategyMeta {
          Bearish displacement produces a negative target qty; \
          bullish displacement maps to flat (long direction suppressed).",
     )
+    .with_data_requirements(StrategyDataRequirements {
+        minimum_completed_bars: LOOKBACK,
+    })
 }
 
 #[derive(Clone, Debug)]
