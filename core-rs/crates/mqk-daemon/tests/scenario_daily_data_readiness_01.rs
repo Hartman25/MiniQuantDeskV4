@@ -20,12 +20,14 @@ use mqk_daemon::daily_data_readiness::{
     REASON_CALENDAR_UNAVAILABLE, REASON_DUPLICATE_TIMESTAMP, REASON_EXPECTED_LATEST_BAR_MISSING,
     REASON_INSUFFICIENT_HISTORY, REASON_INTERIOR_GAP, REASON_LATEST_BAR_FUTURE,
     REASON_PROVIDER_CAPABILITY_MISMATCH, REASON_PROVIDER_DISABLED,
-    REASON_PROVIDER_PROVENANCE_INVALID, REASON_RUNTIME_STRATEGY_ASSIGNMENT_MISMATCH,
-    REASON_RUNTIME_STRATEGY_SYMBOL_BINDING_MISMATCH, REASON_RUNTIME_STRATEGY_TIMEFRAME_MISMATCH,
-    REASON_STRATEGY_REQUIREMENT_UNKNOWN,
+    REASON_PROVIDER_INGEST_TIME_FUTURE, REASON_PROVIDER_PROVENANCE_INVALID,
+    REASON_PROVIDER_SYMBOL_MISMATCH, REASON_PROVIDER_TIMESTAMP_CONVENTION_UNVERIFIED,
+    REASON_RUNTIME_STRATEGY_ASSIGNMENT_MISMATCH, REASON_RUNTIME_STRATEGY_SYMBOL_BINDING_MISMATCH,
+    REASON_RUNTIME_STRATEGY_TIMEFRAME_MISMATCH, REASON_STRATEGY_REQUIREMENT_UNKNOWN,
 };
 use mqk_daemon::state::market_calendar::{
-    self, resolve_market_session_schedule, FixedWindowOverrideProvider, NyseWeekdaysProvider,
+    self, resolve_market_session_schedule, CalendarCoverageState, FixedWindowOverrideProvider,
+    MarketSessionSchedule, NyseWeekdaysProvider,
 };
 use mqk_daemon::state::{
     MultiSymbolConfigSource, MultiSymbolRuntimeConfig, SessionWindow, SymbolStrategyAssignment,
@@ -177,7 +179,11 @@ fn bar(
         provider_symbol: Some(symbol.to_string()),
         ingest_mode: Some("historical_sync".to_string()),
         provider_updated_at_utc: None,
-        ingested_at: Utc::now(),
+        // REPAIR 3: fixed relative to the bar's own end_ts, not real wall-clock
+        // `Utc::now()` — every fixture `now` used across this file is a fixed
+        // historical instant (2024), so an actual current timestamp would
+        // always appear materially "in the future" against it.
+        ingested_at: ts(end_ts + 60),
     }
 }
 
@@ -195,7 +201,9 @@ fn ts(secs: i64) -> DateTime<Utc> {
 // never surfaced there. `SAT_2024_01_06_10AM_ET` below is computed fresh.
 const MON_2024_01_08_10AM_ET: i64 = 1_704_726_000; // 2024-01-08 15:00 UTC = 10:00 EST, Mon
 const SAT_2024_01_06_10AM_ET: i64 = 1_704_553_200; // 2024-01-06 15:00 UTC = 10:00 EST, Sat
+const SAT_2024_01_06_3PM_ET: i64 = 1_704_571_200; // 2024-01-06 20:00 UTC = 15:00 EST, Sat
 const NEW_YEARS_2024_01_01_8AM_ET: i64 = 1_704_114_000; // 2024-01-01 13:00 UTC = 08:00 EST, Mon (holiday)
+const NEW_YEARS_2024_01_01_1PM_ET: i64 = 1_704_132_000; // 2024-01-01 18:00 UTC = 13:00 EST, Mon (holiday)
 const MON_2024_04_15_935AM_EDT: i64 = 1_713_188_100; // 2024-04-15 13:35 UTC = 09:35 EDT, Mon
 const BLACK_FRIDAY_2024_11_29_1PM_EST: i64 = 1_732_903_200; // 2024-11-29 18:00 UTC = 13:00 EST, Fri (early close)
 
@@ -734,6 +742,203 @@ fn ddr_21_after_intraday_close_plus_grace_behavior() {
     assert!(expected.windows(2).all(|w| w[0] < w[1]));
 }
 
+// ---------------------------------------------------------------------------
+// Non-trading-day intraday expectation (REPAIR 1,
+// DAILY-DATA-READINESS-01B-CLOSURE-REPAIR-01)
+// ---------------------------------------------------------------------------
+
+/// Saturday morning: the entire expected intraday window must come from
+/// Friday's session tail, never a same-day Saturday grid.
+#[test]
+fn ddr_31_saturday_morning_uses_friday_tail() {
+    let provider = NyseWeekdaysProvider;
+    let schedule = resolve_market_session_schedule(&provider, ts(SAT_2024_01_06_10AM_ET));
+    assert!(
+        !schedule.is_trading_day,
+        "DDR-31: Saturday must not be a trading day"
+    );
+    let friday_schedule =
+        market_calendar::resolve_market_session_schedule_for_date(&provider, (2024, 1, 5))
+            .expect("DDR-31: Friday's schedule must resolve");
+    let expected =
+        expected_intraday_end_ts_window(&provider, &schedule, SAT_2024_01_06_10AM_ET, 300, 0, 5)
+            .expect("DDR-31: must resolve via Friday's tail");
+    assert_eq!(expected.len(), 5);
+    assert!(
+        expected
+            .iter()
+            .all(|&t| t < friday_schedule.session_close_utc.timestamp()
+                && t >= friday_schedule.session_open_utc.timestamp()),
+        "DDR-31: every expected slot must come from Friday's own session: {expected:?}"
+    );
+}
+
+/// Saturday afternoon: the same requirement holds regardless of the later
+/// wall-clock hour — a Saturday afternoon must never require Saturday bars.
+#[test]
+fn ddr_32_saturday_afternoon_still_uses_friday_tail() {
+    let provider = NyseWeekdaysProvider;
+    let schedule = resolve_market_session_schedule(&provider, ts(SAT_2024_01_06_3PM_ET));
+    assert!(
+        !schedule.is_trading_day,
+        "DDR-32: Saturday afternoon must not be a trading day"
+    );
+    let friday_schedule =
+        market_calendar::resolve_market_session_schedule_for_date(&provider, (2024, 1, 5))
+            .expect("DDR-32: Friday's schedule must resolve");
+    let expected =
+        expected_intraday_end_ts_window(&provider, &schedule, SAT_2024_01_06_3PM_ET, 300, 0, 5)
+            .expect("DDR-32: must resolve via Friday's tail");
+    assert!(
+        expected
+            .iter()
+            .all(|&t| t < friday_schedule.session_close_utc.timestamp()),
+        "DDR-32: Saturday afternoon must never require Saturday bars: {expected:?}"
+    );
+}
+
+/// Full-day exchange holiday morning: uses the prior trading session's tail.
+#[test]
+fn ddr_33_holiday_morning_uses_prior_session() {
+    let provider = NyseWeekdaysProvider;
+    let schedule = resolve_market_session_schedule(&provider, ts(NEW_YEARS_2024_01_01_8AM_ET));
+    assert!(
+        !schedule.is_trading_day,
+        "DDR-33: New Year's Day must not be a trading day"
+    );
+    let expected = expected_intraday_end_ts_window(
+        &provider,
+        &schedule,
+        NEW_YEARS_2024_01_01_8AM_ET,
+        300,
+        0,
+        5,
+    )
+    .expect("DDR-33: must resolve via the prior session's tail");
+    assert_eq!(expected.len(), 5);
+    assert!(
+        expected
+            .iter()
+            .all(|&t| t < schedule.session_open_utc.timestamp()),
+        "DDR-33: a holiday morning must never require the holiday's own bars: {expected:?}"
+    );
+}
+
+/// Full-day exchange holiday afternoon: the same requirement holds
+/// regardless of the later wall-clock hour.
+#[test]
+fn ddr_34_holiday_afternoon_still_uses_prior_session() {
+    let provider = NyseWeekdaysProvider;
+    let schedule = resolve_market_session_schedule(&provider, ts(NEW_YEARS_2024_01_01_1PM_ET));
+    assert!(
+        !schedule.is_trading_day,
+        "DDR-34: New Year's Day afternoon must not be a trading day"
+    );
+    let expected = expected_intraday_end_ts_window(
+        &provider,
+        &schedule,
+        NEW_YEARS_2024_01_01_1PM_ET,
+        300,
+        0,
+        5,
+    )
+    .expect("DDR-34: must resolve via the prior session's tail");
+    assert!(
+        expected
+            .iter()
+            .all(|&t| t < schedule.session_open_utc.timestamp()),
+        "DDR-34: a holiday afternoon must never require the holiday's own bars: {expected:?}"
+    );
+}
+
+/// Monday after the first interval closes: correctly begins requiring
+/// Monday's own bars — a real trading day underway must not falsely spill
+/// into the previous session.
+#[test]
+fn ddr_35_monday_after_first_interval_requires_monday_bars() {
+    let provider = NyseWeekdaysProvider;
+    let schedule = resolve_market_session_schedule(&provider, ts(MON_2024_01_08_10AM_ET));
+    assert!(
+        schedule.is_trading_day,
+        "DDR-35: Monday must be a trading day"
+    );
+    let expected =
+        expected_intraday_end_ts_window(&provider, &schedule, MON_2024_01_08_10AM_ET, 300, 0, 5)
+            .expect("DDR-35: must resolve on Monday's own grid");
+    assert_eq!(expected.len(), 5);
+    let session_open_ts = schedule.session_open_utc.timestamp();
+    assert!(
+        expected.iter().all(|&t| t >= session_open_ts),
+        "DDR-35: once the first interval has closed, Monday's own bars must be required: {expected:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Full-window calendar coverage (REPAIR 2,
+// DAILY-DATA-READINESS-01B-CLOSURE-REPAIR-01)
+// ---------------------------------------------------------------------------
+
+/// Intraday previous-session spillover whose own resolved coverage is
+/// `OutOfRange` must fail closed, even when the current evaluation date's
+/// own schedule reports `Active`.
+#[test]
+fn ddr_36_intraday_previous_session_out_of_coverage_blocks() {
+    let provider = NyseWeekdaysProvider;
+    // (2023,1,3) is inside SCHEDULE_COVERAGE_START..=END; (2022,12,30) is
+    // deliberately placed before it — the point of this fixture is to
+    // isolate the fail-closed mechanism itself, not to assert real NYSE
+    // calendar accuracy for either date.
+    let midnight = market_calendar::midnight_utc_ts_for_date((2023, 1, 3));
+    let schedule = MarketSessionSchedule {
+        market_date: (2023, 1, 3),
+        session_open_utc: ts(midnight + 9 * 3600 + 30 * 60),
+        session_close_utc: ts(midnight + 16 * 3600),
+        previous_trading_date: (2022, 12, 30),
+        is_early_close: false,
+        is_trading_day: true,
+        calendar_source: "test_fixture",
+        coverage_state: CalendarCoverageState::Active,
+    };
+    let now_ts = schedule.session_open_utc.timestamp() + 60; // before the first 5m interval closes
+    let expected = expected_intraday_end_ts_window(&provider, &schedule, now_ts, 300, 0, 5);
+    assert!(
+        expected.is_none(),
+        "DDR-36: previous-session spillover outside coverage must fail closed, got {expected:?}"
+    );
+}
+
+/// A 20-day daily warmup whose walk-back crosses before the coverage start
+/// must fail closed (`None`), never a silent partial window built from the
+/// static provider's non-fail-closed out-of-range fallback.
+#[test]
+fn ddr_37_daily_20day_warmup_crossing_coverage_start_blocks() {
+    let provider = NyseWeekdaysProvider;
+    let result = market_calendar::walk_back_trading_dates(&provider, (2023, 1, 25), 20);
+    assert!(
+        result.is_none(),
+        "DDR-37: a 20-day warmup crossing 2023-01-01 must fail closed, got {result:?}"
+    );
+}
+
+/// A fully in-range 2024 20-day warmup must still resolve normally — the
+/// coverage fix must not regress ordinary in-range evaluation.
+#[test]
+fn ddr_38_in_range_2024_window_remains_valid() {
+    let provider = NyseWeekdaysProvider;
+    let now = ts(MON_2024_01_08_10AM_ET);
+    let schedule = resolve_market_session_schedule(&provider, now);
+    let expected = expected_daily_end_ts_window(&provider, &schedule, now.timestamp(), 900, 20);
+    assert!(
+        expected.is_some(),
+        "DDR-38: an in-range 2024 20-day warmup must still resolve"
+    );
+    assert_eq!(expected.unwrap().len(), 20);
+}
+
+// ---------------------------------------------------------------------------
+// Bar-level provenance and continuity (§9/§10/§11)
+// ---------------------------------------------------------------------------
+
 /// Materially future row blocks.
 #[test]
 fn ddr_22_future_row_blocks() {
@@ -752,6 +957,7 @@ fn ddr_22_future_row_blocks() {
         300,
         &provider_configs(),
         "equity",
+        "AAPL",
     );
     assert!(blockers.contains(&REASON_LATEST_BAR_FUTURE));
 }
@@ -780,6 +986,7 @@ fn ddr_23_insufficient_history_blocks() {
         300,
         &provider_configs(),
         "equity",
+        "AAPL",
     );
     assert!(blockers.contains(&REASON_INSUFFICIENT_HISTORY));
 }
@@ -806,6 +1013,7 @@ fn ddr_24_duplicate_timestamp_blocks() {
         300,
         &provider_configs(),
         "equity",
+        "AAPL",
     );
     assert!(blockers.contains(&REASON_DUPLICATE_TIMESTAMP));
 }
@@ -835,6 +1043,7 @@ fn ddr_25_interior_gap_blocks() {
         300,
         &provider_configs(),
         "equity",
+        "AAPL",
     );
     assert!(
         blockers.contains(&REASON_INTERIOR_GAP),
@@ -865,6 +1074,7 @@ fn ddr_26_unknown_provider_blocks() {
         300,
         &provider_configs(),
         "equity",
+        "AAPL",
     );
     assert!(blockers.contains(&REASON_PROVIDER_PROVENANCE_INVALID));
 }
@@ -888,6 +1098,7 @@ fn ddr_27_disabled_provider_blocks() {
         300,
         &provider_configs(),
         "equity",
+        "AAPL",
     );
     assert!(blockers.contains(&REASON_PROVIDER_DISABLED));
 }
@@ -917,6 +1128,219 @@ async fn ddr_28_calendar_unavailable_via_fixed_window_override_blocks() {
 }
 
 // ---------------------------------------------------------------------------
+// Complete provider provenance (REPAIR 3,
+// DAILY-DATA-READINESS-01B-CLOSURE-REPAIR-01)
+// ---------------------------------------------------------------------------
+
+/// Blank `provider_source` blocks as invalid provenance.
+#[test]
+fn ddr_39_blank_provider_source_blocks() {
+    let provider = NyseWeekdaysProvider;
+    let now = ts(MON_2024_01_08_10AM_ET);
+    let schedule = resolve_market_session_schedule(&provider, now);
+    let d = market_calendar::midnight_utc_ts_for_date(schedule.previous_trading_date);
+    let mut row = bar("AAPL", "1D", d, true, "alpaca");
+    row.provider_source = None;
+    let blockers = evaluate_bar_readiness(
+        &[row],
+        mqk_md::Timeframe::D1,
+        &schedule,
+        &provider,
+        1,
+        now.timestamp(),
+        900,
+        300,
+        &provider_configs(),
+        "equity",
+        "AAPL",
+    );
+    assert!(
+        blockers.contains(&REASON_PROVIDER_PROVENANCE_INVALID),
+        "DDR-39: blank provider_source must block as invalid provenance: {blockers:?}"
+    );
+}
+
+/// Blank `provider_symbol` blocks as invalid provenance.
+#[test]
+fn ddr_40_blank_provider_symbol_blocks() {
+    let provider = NyseWeekdaysProvider;
+    let now = ts(MON_2024_01_08_10AM_ET);
+    let schedule = resolve_market_session_schedule(&provider, now);
+    let d = market_calendar::midnight_utc_ts_for_date(schedule.previous_trading_date);
+    let mut row = bar("AAPL", "1D", d, true, "alpaca");
+    row.provider_symbol = None;
+    let blockers = evaluate_bar_readiness(
+        &[row],
+        mqk_md::Timeframe::D1,
+        &schedule,
+        &provider,
+        1,
+        now.timestamp(),
+        900,
+        300,
+        &provider_configs(),
+        "equity",
+        "AAPL",
+    );
+    assert!(
+        blockers.contains(&REASON_PROVIDER_PROVENANCE_INVALID),
+        "DDR-40: blank provider_symbol must block as invalid provenance: {blockers:?}"
+    );
+}
+
+/// A present-but-wrong `provider_symbol` blocks under its own distinguishable
+/// reason, never folded into the generic invalid-provenance bucket.
+#[test]
+fn ddr_41_wrong_provider_symbol_blocks() {
+    let provider = NyseWeekdaysProvider;
+    let now = ts(MON_2024_01_08_10AM_ET);
+    let schedule = resolve_market_session_schedule(&provider, now);
+    let d = market_calendar::midnight_utc_ts_for_date(schedule.previous_trading_date);
+    let mut row = bar("AAPL", "1D", d, true, "alpaca");
+    row.provider_symbol = Some("MSFT".to_string());
+    let blockers = evaluate_bar_readiness(
+        &[row],
+        mqk_md::Timeframe::D1,
+        &schedule,
+        &provider,
+        1,
+        now.timestamp(),
+        900,
+        300,
+        &provider_configs(),
+        "equity",
+        "AAPL",
+    );
+    assert!(
+        blockers.contains(&REASON_PROVIDER_SYMBOL_MISMATCH),
+        "DDR-41: wrong provider_symbol must block as provider_symbol_mismatch: {blockers:?}"
+    );
+}
+
+/// Blank `ingest_mode` blocks as invalid provenance.
+#[test]
+fn ddr_42_blank_ingest_mode_blocks() {
+    let provider = NyseWeekdaysProvider;
+    let now = ts(MON_2024_01_08_10AM_ET);
+    let schedule = resolve_market_session_schedule(&provider, now);
+    let d = market_calendar::midnight_utc_ts_for_date(schedule.previous_trading_date);
+    let mut row = bar("AAPL", "1D", d, true, "alpaca");
+    row.ingest_mode = None;
+    let blockers = evaluate_bar_readiness(
+        &[row],
+        mqk_md::Timeframe::D1,
+        &schedule,
+        &provider,
+        1,
+        now.timestamp(),
+        900,
+        300,
+        &provider_configs(),
+        "equity",
+        "AAPL",
+    );
+    assert!(
+        blockers.contains(&REASON_PROVIDER_PROVENANCE_INVALID),
+        "DDR-42: blank ingest_mode must block as invalid provenance: {blockers:?}"
+    );
+}
+
+/// A materially future `ingested_at` blocks as `provider_ingest_time_future`.
+#[test]
+fn ddr_43_future_ingest_time_blocks() {
+    let provider = NyseWeekdaysProvider;
+    let now = ts(MON_2024_01_08_10AM_ET);
+    let schedule = resolve_market_session_schedule(&provider, now);
+    let d = market_calendar::midnight_utc_ts_for_date(schedule.previous_trading_date);
+    let mut row = bar("AAPL", "1D", d, true, "alpaca");
+    row.ingested_at = ts(now.timestamp() + 10_000);
+    let blockers = evaluate_bar_readiness(
+        &[row],
+        mqk_md::Timeframe::D1,
+        &schedule,
+        &provider,
+        1,
+        now.timestamp(),
+        900,
+        300,
+        &provider_configs(),
+        "equity",
+        "AAPL",
+    );
+    assert!(
+        blockers.contains(&REASON_PROVIDER_INGEST_TIME_FUTURE),
+        "DDR-43: materially future ingested_at must block: {blockers:?}"
+    );
+}
+
+/// A legitimately absent `provider_updated_at_utc` (the audited Alpaca/
+/// current-provider contract never supplies it) must pass, not block.
+#[test]
+fn ddr_44_absent_provider_updated_at_passes() {
+    let provider = NyseWeekdaysProvider;
+    let now = ts(MON_2024_01_08_10AM_ET);
+    let schedule = resolve_market_session_schedule(&provider, now);
+    let d = market_calendar::midnight_utc_ts_for_date(schedule.previous_trading_date);
+    let mut row = bar("AAPL", "1D", d, true, "alpaca");
+    row.provider_updated_at_utc = None; // matches every current write path
+    let blockers = evaluate_bar_readiness(
+        &[row],
+        mqk_md::Timeframe::D1,
+        &schedule,
+        &provider,
+        1,
+        now.timestamp(),
+        900,
+        300,
+        &provider_configs(),
+        "equity",
+        "AAPL",
+    );
+    assert!(
+        !blockers.contains(&REASON_PROVIDER_PROVENANCE_INVALID),
+        "DDR-44: absent provider_updated_at_utc must not itself block: {blockers:?}"
+    );
+}
+
+/// Fully valid provenance on a supported timeframe passes every provenance
+/// check (the D1-only unverified-timestamp-convention blocker is asserted
+/// separately and does not indicate a provenance defect).
+#[test]
+fn ddr_45_fully_valid_provenance_passes() {
+    let provider = NyseWeekdaysProvider;
+    let now = ts(MON_2024_04_15_935AM_EDT + 5 * 300);
+    let schedule = resolve_market_session_schedule(&provider, now);
+    let row = bar(
+        "AAPL",
+        "5m",
+        schedule.session_open_utc.timestamp(),
+        true,
+        "alpaca",
+    );
+    let blockers = evaluate_bar_readiness(
+        &[row],
+        mqk_md::Timeframe::M5,
+        &schedule,
+        &provider,
+        1,
+        now.timestamp(),
+        0,
+        60,
+        &provider_configs(),
+        "equity",
+        "AAPL",
+    );
+    assert!(
+        !blockers.contains(&REASON_PROVIDER_PROVENANCE_INVALID)
+            && !blockers.contains(&REASON_PROVIDER_SYMBOL_MISMATCH)
+            && !blockers.contains(&REASON_PROVIDER_INGEST_TIME_FUTURE)
+            && !blockers.contains(&REASON_PROVIDER_DISABLED)
+            && !blockers.contains(&REASON_PROVIDER_CAPABILITY_MISMATCH),
+        "DDR-45: fully valid provenance must not raise any provenance blocker: {blockers:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // Aggregate + full end-to-end (DB-backed; skip without MQK_DATABASE_URL)
 // ---------------------------------------------------------------------------
 
@@ -936,13 +1360,50 @@ async fn seed_daily_bars(pool: &sqlx::PgPool, symbol: &str, expected_ts: &[i64])
             insert into md_bars (
               symbol, timeframe, end_ts, open_micros, high_micros, low_micros,
               close_micros, volume, is_complete, provider_id, provider_source,
-              provider_symbol, ingest_mode
+              provider_symbol, ingest_mode, ingested_at
             ) values ($1,'1D',$2,100000000,101000000,99000000,100500000,1000000,true,
-                      'alpaca','alpaca',$1,'historical_sync')
+                      'alpaca','alpaca',$1,'historical_sync',$3)
             "#,
         )
         .bind(symbol)
         .bind(end_ts)
+        // REPAIR 3: fixed relative to end_ts, never real wall-clock — see the
+        // `bar()` fixture helper's comment for why this matters against the
+        // fixed 2024 `now` every test in this file evaluates against.
+        .bind(ts(end_ts + 60))
+        .execute(pool)
+        .await
+        .expect("seed insert failed");
+    }
+}
+
+async fn seed_intraday_bars(
+    pool: &sqlx::PgPool,
+    symbol: &str,
+    timeframe: &str,
+    expected_ts: &[i64],
+) {
+    sqlx::query("delete from md_bars where symbol = $1 and timeframe = $2")
+        .bind(symbol)
+        .bind(timeframe)
+        .execute(pool)
+        .await
+        .expect("cleanup failed");
+    for &end_ts in expected_ts {
+        sqlx::query(
+            r#"
+            insert into md_bars (
+              symbol, timeframe, end_ts, open_micros, high_micros, low_micros,
+              close_micros, volume, is_complete, provider_id, provider_source,
+              provider_symbol, ingest_mode, ingested_at
+            ) values ($1,$2,$3,100000000,101000000,99000000,100500000,1000000,true,
+                      'alpaca','alpaca',$1,'historical_sync',$4)
+            "#,
+        )
+        .bind(symbol)
+        .bind(timeframe)
+        .bind(end_ts)
+        .bind(ts(end_ts + 60))
         .execute(pool)
         .await
         .expect("seed insert failed");
@@ -951,6 +1412,13 @@ async fn seed_daily_bars(pool: &sqlx::PgPool, symbol: &str, expected_ts: &[i64])
 
 /// Supported exact assignment can become ready, and all-ready assignments
 /// produce aggregate ready.
+///
+/// Uses `5m`/`intraday_scalper` rather than the original `1D`/`swing_momentum`
+/// fixture: REPAIR 4 makes every `1D` evaluation fail closed under
+/// `provider_timestamp_convention_unverified`, so `5m` (a continuity-complete,
+/// currently-supported intraday timeframe) is now the only fixture that can
+/// prove the full ready/aggregate-ready path end to end. See DDR-46 below for
+/// the dedicated proof that `1D` itself blocks as designed.
 #[tokio::test]
 async fn ddr_29_ready_assignment_and_all_ready_aggregate() {
     let Some(db_url) = get_test_db_url() else {
@@ -963,23 +1431,29 @@ async fn ddr_29_ready_assignment_and_all_ready_aggregate() {
         .await
         .expect("DDR-29: pool connect failed");
 
+    // SAFETY: --test-threads=1 per the mission's required validation command.
+    std::env::set_var("MQK_DATA_READINESS_GRACE_SECS", "0");
+    std::env::set_var("MQK_DATA_READINESS_FUTURE_SKEW_SECS", "60");
+
     let symbol = "ZZDDRTEST29";
     let provider = NyseWeekdaysProvider;
-    let now = ts(MON_2024_01_08_10AM_ET);
+    let now = ts(MON_2024_04_15_935AM_EDT + 10 * 300);
     let schedule = resolve_market_session_schedule(&provider, now);
-    let expected = expected_daily_end_ts_window(&provider, &schedule, now.timestamp(), 900, 20)
-        .expect("resolves");
-    seed_daily_bars(&pool, symbol, &expected).await;
+    let expected =
+        expected_intraday_end_ts_window(&provider, &schedule, now.timestamp(), 300, 0, 5)
+            .expect("resolves");
+    seed_intraday_bars(&pool, symbol, "5m", &expected).await;
 
     let mut instruments = instruments();
     instruments.push(TrackedInstrument {
         symbol: symbol.to_string(),
         instrument_id: format!("equity:US:{symbol}"),
+        provider_symbol: symbol.to_string(),
         ..aapl_instrument()
     });
 
-    let a = assignment(symbol, "swing_momentum", "1D");
-    let binding = matching_binding("swing_momentum", symbol, 86_400);
+    let a = assignment(symbol, "intraday_scalper", "5m");
+    let binding = matching_binding("intraday_scalper", symbol, 300);
     let result = evaluate_assignment(
         Some(&pool),
         &a,
@@ -1019,9 +1493,13 @@ async fn ddr_29_ready_assignment_and_all_ready_aggregate() {
         .execute(&pool)
         .await
         .ok();
+    std::env::remove_var("MQK_DATA_READINESS_GRACE_SECS");
+    std::env::remove_var("MQK_DATA_READINESS_FUTURE_SKEW_SECS");
 }
 
 /// One blocked assignment blocks the aggregate, even when the other is ready.
+/// (Same `5m`/`intraday_scalper` fixture substitution as DDR-29, for the same
+/// reason.)
 #[tokio::test]
 async fn ddr_30_one_blocked_assignment_blocks_aggregate() {
     let Some(db_url) = get_test_db_url() else {
@@ -1034,14 +1512,18 @@ async fn ddr_30_one_blocked_assignment_blocks_aggregate() {
         .await
         .expect("DDR-30: pool connect failed");
 
+    std::env::set_var("MQK_DATA_READINESS_GRACE_SECS", "0");
+    std::env::set_var("MQK_DATA_READINESS_FUTURE_SKEW_SECS", "60");
+
     let ready_symbol = "ZZDDRTEST30READY";
     let blocked_symbol = "ZZDDRTEST30BLOCKED";
     let provider = NyseWeekdaysProvider;
-    let now = ts(MON_2024_01_08_10AM_ET);
+    let now = ts(MON_2024_04_15_935AM_EDT + 10 * 300);
     let schedule = resolve_market_session_schedule(&provider, now);
-    let expected = expected_daily_end_ts_window(&provider, &schedule, now.timestamp(), 900, 20)
-        .expect("resolves");
-    seed_daily_bars(&pool, ready_symbol, &expected).await;
+    let expected =
+        expected_intraday_end_ts_window(&provider, &schedule, now.timestamp(), 300, 0, 5)
+            .expect("resolves");
+    seed_intraday_bars(&pool, ready_symbol, "5m", &expected).await;
     // blocked_symbol: no bars seeded at all -> market_data_missing.
     sqlx::query("delete from md_bars where symbol = $1")
         .bind(blocked_symbol)
@@ -1054,6 +1536,7 @@ async fn ddr_30_one_blocked_assignment_blocks_aggregate() {
         instruments.push(TrackedInstrument {
             symbol: sym.to_string(),
             instrument_id: format!("equity:US:{sym}"),
+            provider_symbol: sym.to_string(),
             ..aapl_instrument()
         });
     }
@@ -1064,8 +1547,8 @@ async fn ddr_30_one_blocked_assignment_blocks_aggregate() {
     // fails at the symbol-binding step instead — to isolate a pure
     // data-availability block, evaluate blocked_symbol independently below
     // with its own matching binding.)
-    let binding = matching_binding("swing_momentum", ready_symbol, 86_400);
-    let config = single_symbol_config(assignment(ready_symbol, "swing_momentum", "1D"));
+    let binding = matching_binding("intraday_scalper", ready_symbol, 300);
+    let config = single_symbol_config(assignment(ready_symbol, "intraday_scalper", "5m"));
     let ready_report = evaluate_assignments(
         Some(&pool),
         &config,
@@ -1079,10 +1562,10 @@ async fn ddr_30_one_blocked_assignment_blocks_aggregate() {
     .await;
     assert!(ready_report.start_allowed);
 
-    let blocked_binding = matching_binding("swing_momentum", blocked_symbol, 86_400);
+    let blocked_binding = matching_binding("intraday_scalper", blocked_symbol, 300);
     let blocked_result = evaluate_assignment(
         Some(&pool),
-        &assignment(blocked_symbol, "swing_momentum", "1D"),
+        &assignment(blocked_symbol, "intraday_scalper", "5m"),
         &blocked_binding,
         &provider,
         &provider_configs(),
@@ -1101,4 +1584,131 @@ async fn ddr_30_one_blocked_assignment_blocks_aggregate() {
         .execute(&pool)
         .await
         .ok();
+    std::env::remove_var("MQK_DATA_READINESS_GRACE_SECS");
+    std::env::remove_var("MQK_DATA_READINESS_FUTURE_SKEW_SECS");
+}
+
+// ---------------------------------------------------------------------------
+// Daily provider timestamp convention (REPAIR 4,
+// DAILY-DATA-READINESS-01B-CLOSURE-REPAIR-01)
+// ---------------------------------------------------------------------------
+
+/// A `1D` assignment with otherwise fully valid, fully seeded, fully
+/// continuous data must still block — solely under
+/// `provider_timestamp_convention_unverified` — because no trustworthy
+/// existing evidence proves Alpaca's daily `end_ts` label convention.
+#[tokio::test]
+async fn ddr_46_daily_always_blocks_on_unverified_timestamp_convention() {
+    let Some(db_url) = get_test_db_url() else {
+        eprintln!("DDR-46: skipped (no MQK_DATABASE_URL)");
+        return;
+    };
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&db_url)
+        .await
+        .expect("DDR-46: pool connect failed");
+
+    let symbol = "ZZDDRTEST46";
+    let provider = NyseWeekdaysProvider;
+    let now = ts(MON_2024_01_08_10AM_ET);
+    let schedule = resolve_market_session_schedule(&provider, now);
+    let expected = expected_daily_end_ts_window(&provider, &schedule, now.timestamp(), 900, 20)
+        .expect("resolves");
+    seed_daily_bars(&pool, symbol, &expected).await;
+
+    let mut instruments = instruments();
+    instruments.push(TrackedInstrument {
+        symbol: symbol.to_string(),
+        instrument_id: format!("equity:US:{symbol}"),
+        provider_symbol: symbol.to_string(),
+        ..aapl_instrument()
+    });
+
+    let a = assignment(symbol, "swing_momentum", "1D");
+    let binding = matching_binding("swing_momentum", symbol, 86_400);
+    let result = evaluate_assignment(
+        Some(&pool),
+        &a,
+        &binding,
+        &provider,
+        &provider_configs(),
+        &instruments,
+        &strategy_registry(),
+        now,
+    )
+    .await;
+    assert_eq!(
+        result.readiness_state, "blocked",
+        "DDR-46: 1D must never reach ready regardless of otherwise-valid data: {result:?}"
+    );
+    assert_eq!(
+        result.blockers,
+        vec![REASON_PROVIDER_TIMESTAMP_CONVENTION_UNVERIFIED],
+        "DDR-46: fully valid/continuous 1D data must block on exactly this one reason: {:?}",
+        result.blockers
+    );
+
+    sqlx::query("delete from md_bars where symbol = $1")
+        .bind(symbol)
+        .execute(&pool)
+        .await
+        .ok();
+}
+
+// ---------------------------------------------------------------------------
+// Lifecycle-binding safety (REPAIR 5,
+// DAILY-DATA-READINESS-01B-CLOSURE-REPAIR-01)
+// ---------------------------------------------------------------------------
+
+/// The evaluator must consume the `EffectiveRuntimeBinding` exactly as
+/// injected by the caller — never re-derive its own binding from the
+/// environment. Proven by deliberately setting `MQK_STRATEGY_SYMBOL`/
+/// `MQK_STRATEGY_IDS` to values that conflict with an explicitly injected,
+/// fully matching binding: if `evaluate_assignment` ever silently re-read
+/// the environment (e.g. by calling `bootstrap_with_effective_binding`
+/// itself, as `evaluate_daily_data_readiness_from_env` does), the conflicting
+/// env values would spuriously produce a binding-mismatch blocker even
+/// though the injected binding matches perfectly.
+#[tokio::test]
+async fn ddr_47_evaluator_uses_injected_binding_not_environment() {
+    // SAFETY: --test-threads=1 per the mission's required validation command.
+    std::env::set_var("MQK_STRATEGY_SYMBOL", "ZZZENVCONFLICTSYMBOL");
+    std::env::set_var("MQK_STRATEGY_IDS", "mean_reversion");
+
+    let a = assignment("AAPL", "swing_momentum", "1D");
+    let binding = matching_binding("swing_momentum", "AAPL", 86_400);
+    let result = evaluate_assignment(
+        None,
+        &a,
+        &binding,
+        &NyseWeekdaysProvider,
+        &provider_configs(),
+        &instruments(),
+        &strategy_registry(),
+        ts(MON_2024_01_08_10AM_ET),
+    )
+    .await;
+
+    std::env::remove_var("MQK_STRATEGY_SYMBOL");
+    std::env::remove_var("MQK_STRATEGY_IDS");
+
+    assert!(
+        !result
+            .blockers
+            .contains(&REASON_RUNTIME_STRATEGY_ASSIGNMENT_MISMATCH)
+            && !result
+                .blockers
+                .contains(&REASON_RUNTIME_STRATEGY_SYMBOL_BINDING_MISMATCH)
+            && !result
+                .blockers
+                .contains(&REASON_RUNTIME_STRATEGY_TIMEFRAME_MISMATCH),
+        "DDR-47: injected binding must be used as-is, never re-derived from \
+         conflicting environment state: {:?}",
+        result.blockers
+    );
+    assert_eq!(
+        result.readiness_state, "db_unavailable",
+        "DDR-47: the injected binding must let evaluation progress past binding checks: {result:?}"
+    );
 }

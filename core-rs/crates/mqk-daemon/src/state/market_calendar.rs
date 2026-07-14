@@ -1074,6 +1074,16 @@ pub struct MarketSessionSchedule {
     /// walk, not a fixed day-count).
     pub previous_trading_date: (i64, i64, i64),
     pub is_early_close: bool,
+    /// `true` when `market_date` itself is a trading day (mirrors
+    /// [`MarketSessionTruth::is_trading_day`]) — `false` for a weekend or
+    /// full-day exchange holiday, regardless of the wall-clock time on that
+    /// date (DAILY-DATA-READINESS-01B-CLOSURE-REPAIR-01, REPAIR 1). Callers
+    /// computing an intraday expected-bar grid must check this before
+    /// treating `session_open_utc`/`session_close_utc` as a real session —
+    /// those fields are still populated with the ordinary-hours arithmetic
+    /// even on a non-trading day, since they are only meaningful once this
+    /// flag is checked.
+    pub is_trading_day: bool,
     /// Mirrors [`MarketSessionTruth::source`] for the instant classified.
     pub calendar_source: &'static str,
     pub coverage_state: CalendarCoverageState,
@@ -1124,7 +1134,14 @@ fn midday_utc_anchor_ts_for_date(date: (i64, i64, i64)) -> i64 {
 ///
 /// Returns `None` if `count` trading dates are not found within the bound —
 /// callers must treat this as calendar-unavailable, never a silent partial
-/// window.
+/// window. Also returns `None` the moment the walk steps outside this seam's
+/// declared `SCHEDULE_COVERAGE_START..=SCHEDULE_COVERAGE_END` window
+/// (DAILY-DATA-READINESS-01B-CLOSURE-REPAIR-01, REPAIR 2): the underlying
+/// static `NyseWeekdaysProvider` does not itself fail closed outside its
+/// 2023-2028 table (module doc above) — it silently falls through to
+/// ordinary weekday classification — so this walk must not trust that
+/// fallback for any date in a bounded warmup window, not merely the
+/// evaluation instant's own date.
 pub fn walk_back_trading_dates(
     provider: &dyn MarketCalendarProvider,
     start_date: (i64, i64, i64),
@@ -1137,6 +1154,9 @@ pub fn walk_back_trading_dates(
     let mut candidate = start_date;
     let max_steps = count * 3 + 30;
     for _ in 0..max_steps {
+        if !within_schedule_coverage(candidate) {
+            return None;
+        }
         let ts = midday_utc_anchor_ts_for_date(candidate);
         let dt = DateTime::<Utc>::from_timestamp(ts, 0)?;
         let truth = provider.session_for(dt);
@@ -1208,6 +1228,7 @@ pub fn resolve_market_session_schedule(
             session_close_utc: now_utc,
             previous_trading_date: (0, 0, 0),
             is_early_close: false,
+            is_trading_day: false,
             calendar_source: "unknown",
             coverage_state: CalendarCoverageState::Unknown,
         };
@@ -1251,6 +1272,7 @@ pub fn resolve_market_session_schedule(
         session_close_utc,
         previous_trading_date: previous_trading_date.unwrap_or(market_date),
         is_early_close: truth.is_early_close,
+        is_trading_day: truth.is_trading_day,
         calendar_source: truth.source,
         coverage_state,
     }

@@ -53,8 +53,21 @@ pub const REASON_RUNTIME_STRATEGY_TIMEFRAME_MISMATCH: &str = "runtime_strategy_t
 pub const REASON_STRATEGY_REQUIREMENT_UNKNOWN: &str = "strategy_requirement_unknown";
 pub const REASON_ASSET_CLASS_UNKNOWN: &str = "asset_class_unknown";
 pub const REASON_PROVIDER_PROVENANCE_INVALID: &str = "provider_provenance_invalid";
+pub const REASON_PROVIDER_SYMBOL_MISMATCH: &str = "provider_symbol_mismatch";
+pub const REASON_PROVIDER_INGEST_TIME_FUTURE: &str = "provider_ingest_time_future";
 pub const REASON_PROVIDER_DISABLED: &str = "provider_disabled";
 pub const REASON_PROVIDER_CAPABILITY_MISMATCH: &str = "provider_capability_mismatch";
+/// REPAIR 4 (DAILY-DATA-READINESS-01B-CLOSURE-REPAIR-01): no trustworthy
+/// existing evidence in this repo (fixture, parser test, smoke artifact, or
+/// genuinely-provenanced test-DB row) proves what `end_ts` value Alpaca's
+/// `1D` bars actually use as their label. The existing
+/// `market_calendar::midnight_utc_ts_for_date` mapping is retained for its
+/// continuity-diffing arithmetic but is NOT certified against real/fixture
+/// Alpaca daily data — every `1D` evaluation fails closed under this reason
+/// until a separate, authorized fixture-based or network-verified proof
+/// lands (out of scope for this patch: no network calls, no paper DB).
+pub const REASON_PROVIDER_TIMESTAMP_CONVENTION_UNVERIFIED: &str =
+    "provider_timestamp_convention_unverified";
 pub const REASON_CALENDAR_UNAVAILABLE: &str = "calendar_unavailable";
 pub const REASON_UNSUPPORTED_TIMEFRAME: &str = "unsupported_timeframe";
 pub const REASON_UNSUPPORTED_INTRADAY_CONTINUITY: &str = "unsupported_intraday_continuity";
@@ -230,18 +243,23 @@ pub async fn evaluate_assignment(
     };
 
     // --- Asset class (§11a) — canonical v1 instrument registry only.
-    let asset_class = instruments
-        .iter()
-        .find(|i| {
-            i.symbol
-                .trim()
-                .eq_ignore_ascii_case(assignment.symbol.trim())
-        })
+    let matched_instrument = instruments.iter().find(|i| {
+        i.symbol
+            .trim()
+            .eq_ignore_ascii_case(assignment.symbol.trim())
+    });
+    let asset_class = matched_instrument
         .map(|i| i.trading_asset_class().to_string())
         .filter(|ac| !ac.trim().is_empty());
     if asset_class.is_none() {
         push_unique(&mut blockers, REASON_ASSET_CLASS_UNKNOWN);
     }
+    // REPAIR 3: canonical provider-symbol mapping for provenance validation —
+    // sourced from the same registry entry asset_class came from, never a
+    // second lookup or a guessed value.
+    let expected_provider_symbol = matched_instrument
+        .map(|i| i.provider_symbol.as_str())
+        .unwrap_or("");
 
     // --- Provider capability pre-check (§11/§13) — config-only, no DB: does
     // any enabled provider support this (asset_class, timeframe) at all?
@@ -313,6 +331,7 @@ pub async fn evaluate_assignment(
                             eff_skew,
                             provider_configs,
                             asset_class.as_deref().unwrap_or(""),
+                            expected_provider_symbol,
                         );
                         for b in bar_blockers {
                             push_unique(&mut blockers, b);
@@ -365,6 +384,7 @@ pub fn evaluate_bar_readiness(
     effective_future_skew_seconds: i64,
     provider_configs: &[ProviderConfig],
     asset_class: &str,
+    expected_provider_symbol: &str,
 ) -> Vec<&'static str> {
     let mut blockers: Vec<&'static str> = Vec::new();
 
@@ -386,23 +406,87 @@ pub fn evaluate_bar_readiness(
         push_unique(&mut blockers, REASON_LATEST_BAR_FUTURE);
     }
 
-    // Provider provenance (§11) — every bar in the bounded window, not just the latest.
+    // Provider provenance (§11) — every bar in the bounded window, not just
+    // the latest. REPAIR 3 completes this beyond provider_id/enabled/
+    // capability to cover provider_source, provider_symbol, ingest_mode, and
+    // ingest-time skew, per the audited provider-ingest write contract
+    // (`mqk-db::md`'s `MdBarProviderMetadata`/write paths in
+    // `routes/ingest.rs` and `mqk-cli::commands::md`).
     for row in rows {
         if row.provider_id.trim().is_empty() || row.provider_id.eq_ignore_ascii_case("unknown") {
             push_unique(&mut blockers, REASON_PROVIDER_PROVENANCE_INVALID);
-            continue;
-        }
-        match mqk_md::provider_registry::find_provider(provider_configs, &row.provider_id) {
-            None => push_unique(&mut blockers, REASON_PROVIDER_PROVENANCE_INVALID),
-            Some(cfg) if !cfg.enabled => push_unique(&mut blockers, REASON_PROVIDER_DISABLED),
-            Some(cfg)
-                if !cfg.supports_asset_class(asset_class)
-                    || !cfg.supports_timeframe(timeframe.as_str()) =>
-            {
-                push_unique(&mut blockers, REASON_PROVIDER_CAPABILITY_MISMATCH)
+        } else {
+            match mqk_md::provider_registry::find_provider(provider_configs, &row.provider_id) {
+                None => push_unique(&mut blockers, REASON_PROVIDER_PROVENANCE_INVALID),
+                Some(cfg) if !cfg.enabled => push_unique(&mut blockers, REASON_PROVIDER_DISABLED),
+                Some(cfg)
+                    if !cfg.supports_asset_class(asset_class)
+                        || !cfg.supports_timeframe(timeframe.as_str()) =>
+                {
+                    push_unique(&mut blockers, REASON_PROVIDER_CAPABILITY_MISMATCH)
+                }
+                Some(_) => {}
             }
-            Some(_) => {}
         }
+
+        // provider_source: audited against every current write path
+        // (`ingest_csv_to_md_bars`, `routes/ingest.rs`, `mqk-cli::commands::md`)
+        // — every one of them stamps a real value; only the metadata-less
+        // `MdBarProviderMetadata::unknown()` default (already caught above
+        // via provider_id == "unknown") leaves it blank. No legitimately-
+        // optional case was found, so blank always blocks.
+        let source_blank = row
+            .provider_source
+            .as_deref()
+            .map(str::trim)
+            .map(str::is_empty)
+            .unwrap_or(true);
+        if source_blank {
+            push_unique(&mut blockers, REASON_PROVIDER_PROVENANCE_INVALID);
+        }
+
+        // ingest_mode: every current write path stamps a real value
+        // (e.g. "csv_import", "historical_backfill", "provider_ingest").
+        let ingest_mode_blank = row
+            .ingest_mode
+            .as_deref()
+            .map(str::trim)
+            .map(str::is_empty)
+            .unwrap_or(true);
+        if ingest_mode_blank {
+            push_unique(&mut blockers, REASON_PROVIDER_PROVENANCE_INVALID);
+        }
+
+        // provider_symbol: must match the canonical instrument-registry
+        // mapping, normalized the same trim/case-insensitive way every other
+        // symbol comparison in this evaluator already applies (§3a). Blank
+        // blocks as invalid provenance; a present-but-wrong value blocks
+        // under its own distinguishable reason.
+        match row.provider_symbol.as_deref().map(str::trim) {
+            None | Some("") => push_unique(&mut blockers, REASON_PROVIDER_PROVENANCE_INVALID),
+            Some(actual) => {
+                if !actual.eq_ignore_ascii_case(expected_provider_symbol.trim()) {
+                    push_unique(&mut blockers, REASON_PROVIDER_SYMBOL_MISMATCH);
+                }
+            }
+        }
+
+        // ingested_at: structurally valid by construction (typed `DateTime<Utc>`
+        // from a `timestamptz` column) — the remaining honest check is that it
+        // is not materially in the future, using the same effective skew
+        // ceiling already computed for bar timestamps.
+        if row.ingested_at.timestamp() > now_ts + effective_future_skew_seconds {
+            push_unique(&mut blockers, REASON_PROVIDER_INGEST_TIME_FUTURE);
+        }
+
+        // provider_updated_at_utc: audited against every current write path
+        // (`routes/ingest.rs`, `mqk-cli::commands::md`, `mqk-db::md`'s CSV/
+        // provider ingestion) and the Alpaca provider's own `ProviderBar`
+        // shape (`mqk-md::alpaca_provider`, whose parsed `AlpacaRawBar` has
+        // no update-timestamp field at all) — every call site sets this
+        // field to `None` and no enabled provider supplies it. This is a
+        // proven, documented optional field, not an unaudited gap; it is
+        // intentionally never checked here.
     }
 
     let completed: Vec<&mqk_db::md::MdBarRowWithProvenance> =
@@ -415,13 +499,26 @@ pub fn evaluate_bar_readiness(
     // every other timeframe blocks honestly rather than passing on a weaker
     // count/order/duplicate/future-only proof.
     let expected = match timeframe {
-        Timeframe::D1 => expected_daily_end_ts_window(
-            calendar_provider,
-            schedule,
-            now_ts,
-            effective_grace_seconds,
-            required_history_bars,
-        ),
+        Timeframe::D1 => {
+            // REPAIR 4: no trustworthy in-repo evidence proves Alpaca's daily
+            // label convention (see the constant's doc comment) — fail
+            // closed unconditionally rather than certify readiness on an
+            // unproven end_ts mapping. Continuity is still computed and
+            // reported below so other genuine defects remain visible
+            // alongside this one, exactly like the H1/M15
+            // unsupported-continuity arms.
+            push_unique(
+                &mut blockers,
+                REASON_PROVIDER_TIMESTAMP_CONVENTION_UNVERIFIED,
+            );
+            expected_daily_end_ts_window(
+                calendar_provider,
+                schedule,
+                now_ts,
+                effective_grace_seconds,
+                required_history_bars,
+            )
+        }
         Timeframe::M1 | Timeframe::M5 => expected_intraday_end_ts_window(
             calendar_provider,
             schedule,
@@ -514,6 +611,12 @@ pub fn intraday_grid_starts(
 /// session-anchored grid slots whose interval has closed plus grace, spilling
 /// into the previous trading session's tail when the current session does not
 /// yet have enough (before the first interval closes, or early in the day).
+///
+/// REPAIR 1 (DAILY-DATA-READINESS-01B-CLOSURE-REPAIR-01): when `schedule`'s
+/// own date is not a trading day (weekend or full-day exchange holiday),
+/// there is no current-day grid at all — regardless of the wall-clock time
+/// on that date — so the entire window comes from the previous trading
+/// session's tail unconditionally.
 pub fn expected_intraday_end_ts_window(
     provider: &dyn MarketCalendarProvider,
     schedule: &MarketSessionSchedule,
@@ -522,6 +625,15 @@ pub fn expected_intraday_end_ts_window(
     effective_grace_seconds: i64,
     required_history_bars: usize,
 ) -> Option<Vec<i64>> {
+    if !schedule.is_trading_day {
+        return previous_session_grid_tail(
+            provider,
+            schedule,
+            interval_secs,
+            required_history_bars,
+        );
+    }
+
     let current_grid = intraday_grid_starts(
         schedule.session_open_utc,
         schedule.session_close_utc,
@@ -542,22 +654,48 @@ pub fn expected_intraday_end_ts_window(
     }
 
     let remaining = required_history_bars - window.len();
+    let prev_tail = previous_session_grid_tail(provider, schedule, interval_secs, remaining)?;
+    let mut combined = prev_tail;
+    combined.extend(window);
+    Some(combined)
+}
+
+/// Resolves `schedule.previous_trading_date`'s own session schedule and
+/// returns its final `count` session-open-anchored grid slots — shared by
+/// both the non-trading-day branch and the too-early-in-the-session
+/// spillover branch of [`expected_intraday_end_ts_window`].
+///
+/// REPAIR 2 (DAILY-DATA-READINESS-01B-CLOSURE-REPAIR-01): fails closed
+/// (`None`) if that prior session's own resolved coverage is not `Active` —
+/// the previous session used for spillover is itself part of the bounded
+/// warmup window and must not be trusted merely because the *current*
+/// evaluation date is in coverage.
+fn previous_session_grid_tail(
+    provider: &dyn MarketCalendarProvider,
+    schedule: &MarketSessionSchedule,
+    interval_secs: i64,
+    count: usize,
+) -> Option<Vec<i64>> {
+    if count == 0 {
+        return Some(Vec::new());
+    }
     let prev_schedule = market_calendar::resolve_market_session_schedule_for_date(
         provider,
         schedule.previous_trading_date,
     )?;
+    if prev_schedule.coverage_state != CalendarCoverageState::Active {
+        return None;
+    }
     let prev_grid = intraday_grid_starts(
         prev_schedule.session_open_utc,
         prev_schedule.session_close_utc,
         interval_secs,
     );
-    if prev_grid.len() < remaining {
+    if prev_grid.len() < count {
         return None;
     }
-    let tail_start = prev_grid.len() - remaining;
-    let mut combined = prev_grid[tail_start..].to_vec();
-    combined.extend(window);
-    Some(combined)
+    let tail_start = prev_grid.len() - count;
+    Some(prev_grid[tail_start..].to_vec())
 }
 
 // ---------------------------------------------------------------------------
@@ -630,6 +768,26 @@ fn fleet_ids_from_env() -> Option<Vec<String>> {
 /// **Not called by any route, lifecycle gate, or scheduler in this phase.**
 /// Exists so a future phase can wire it in without re-deriving this
 /// composition — Phase B is foundation/evaluator only.
+///
+/// # Lifecycle-safety contract (REPAIR 5, DAILY-DATA-READINESS-01B-CLOSURE-REPAIR-01)
+///
+/// This function constructs its **own** `NativeStrategyBootstrap` +
+/// [`EffectiveRuntimeBinding`] internally (one call to
+/// [`mqk_runtime::native_strategy::bootstrap_with_effective_binding`]) and
+/// discards the bootstrap. **The future runtime start gate must NOT call this
+/// function for its own start-attempt evaluation.** A start gate already
+/// constructs its own bootstrap + binding for the actual run; calling this
+/// convenience wrapper afterward would silently construct and discard a
+/// *second*, independently-derived bootstrap — a start attempt must be
+/// evaluated using the exact bootstrap/binding pair created for that attempt,
+/// never a second env-driven reconstruction that could disagree with it if
+/// env state or evaluation ordering ever diverges. The start gate must
+/// instead call [`evaluate_assignments`] (or [`evaluate_assignment`])
+/// directly, passing the binding it already holds. This function remains
+/// safe for a read-only route to call (a fresh preview, not the active run's
+/// stored binding) as long as the response honestly labels it as
+/// preview/current-config truth rather than the active run's binding — this
+/// phase adds no such route.
 pub async fn evaluate_daily_data_readiness_from_env(
     db: Option<&PgPool>,
     now_utc: DateTime<Utc>,
