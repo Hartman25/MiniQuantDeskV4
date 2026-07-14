@@ -716,6 +716,11 @@ async fn market_data_blank_provider_symbol_makes_zero_provider_calls() {
         return;
     };
     let registry = fake_registry_file();
+    // DAILY-DATA-READINESS-01B2: a blank `provider_symbol` is now a
+    // registry-level `validate_registry` violation (Repair 1), so the whole
+    // registry is refused before any per-symbol admission check ever runs —
+    // this instrument no longer reaches the (now unreachable for this case)
+    // `skipped_blank_provider_symbol` per-symbol outcome.
     let instrument_registry = fake_instrument_registry_file_ex("ZZPOLLBLANKPS", "fake", "", true);
     let provider = Arc::new(FakeLatestProvider::new(HashMap::new()));
     let mut st =
@@ -740,11 +745,12 @@ async fn market_data_blank_provider_symbol_makes_zero_provider_calls() {
     )
     .await;
 
-    assert_eq!(status, StatusCode::BAD_GATEWAY);
-    assert_eq!(body["truth_state"], "failed");
-    assert_eq!(
-        body["symbols"][0]["status"],
-        "skipped_blank_provider_symbol"
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body["truth_state"], "refused");
+    let err = body["error"].as_str().unwrap_or("");
+    assert!(
+        err.contains("empty provider_symbol") || err.contains("instrument_registry_invalid"),
+        "error must describe the registry validation failure: {body}"
     );
     assert_eq!(
         provider.calls(),
@@ -895,6 +901,329 @@ async fn market_data_wrong_returned_provider_symbol_is_rejected_and_writes_nothi
     .await
     .expect("count rows for mismatched response");
     assert_eq!(count, 0, "a wrong-symbol response must write zero DB bars");
+}
+
+// ---------------------------------------------------------------------------
+// DAILY-DATA-READINESS-01B2-REGISTRY-ADMISSION-CLOSURE-01:
+// registry validation + per-instrument timeframe admission for latest-bar
+// polling.
+// ---------------------------------------------------------------------------
+
+/// A registry with two entries sharing the same local `symbol` — parseable
+/// JSON, but rejected by `validate_registry` (duplicate symbol).
+fn duplicate_symbol_instrument_registry_json(symbol: &str, provider: &str) -> String {
+    format!(
+        r#"[
+          {{
+            "instrument_id": "equity:US:{symbol}A",
+            "symbol": "{symbol}",
+            "asset_class": "equity",
+            "provider": "{provider}",
+            "provider_symbol": "{symbol}",
+            "venue": "TEST",
+            "currency": "USD",
+            "enabled": true,
+            "timeframes": ["5m"],
+            "notes": "duplicate local symbol fixture 1"
+          }},
+          {{
+            "instrument_id": "equity:US:{symbol}B",
+            "symbol": "{symbol}",
+            "asset_class": "equity",
+            "provider": "{provider}",
+            "provider_symbol": "{symbol}B",
+            "venue": "TEST",
+            "currency": "USD",
+            "enabled": true,
+            "timeframes": ["5m"],
+            "notes": "duplicate local symbol fixture 2"
+          }}
+        ]"#
+    )
+}
+
+/// A registry with two distinct local symbols that share the same enabled
+/// `provider_symbol` for the same `provider` — parseable JSON, but rejected
+/// by `validate_registry` (duplicate enabled provider_symbol).
+fn duplicate_provider_symbol_instrument_registry_json(
+    provider: &str,
+    provider_symbol: &str,
+) -> String {
+    format!(
+        r#"[
+          {{
+            "instrument_id": "equity:US:{provider_symbol}LOCALA",
+            "symbol": "{provider_symbol}LOCALA",
+            "asset_class": "equity",
+            "provider": "{provider}",
+            "provider_symbol": "{provider_symbol}",
+            "venue": "TEST",
+            "currency": "USD",
+            "enabled": true,
+            "timeframes": ["5m"],
+            "notes": "duplicate provider_symbol fixture 1"
+          }},
+          {{
+            "instrument_id": "equity:US:{provider_symbol}LOCALB",
+            "symbol": "{provider_symbol}LOCALB",
+            "asset_class": "equity",
+            "provider": "{provider}",
+            "provider_symbol": "{provider_symbol}",
+            "venue": "TEST",
+            "currency": "USD",
+            "enabled": true,
+            "timeframes": ["5m"],
+            "notes": "duplicate provider_symbol fixture 2"
+          }}
+        ]"#
+    )
+}
+
+/// Like [`fake_instrument_registry_file_ex`] but lets tests set an explicit
+/// `timeframes` list, for proving per-instrument timeframe admission.
+fn fake_instrument_registry_file_with_timeframes(
+    symbol: &str,
+    provider: &str,
+    timeframes: &[&str],
+) -> NamedTempFile {
+    let mut file = NamedTempFile::new().expect("create fake instrument registry");
+    let timeframes_json = serde_json::to_string(timeframes).expect("serialize timeframes");
+    let json = format!(
+        r#"[{{
+          "instrument_id": "equity:US:{symbol}",
+          "symbol": "{symbol}",
+          "asset_class": "equity",
+          "provider": "{provider}",
+          "provider_symbol": "{symbol}",
+          "venue": "TEST",
+          "currency": "USD",
+          "enabled": true,
+          "timeframes": {timeframes_json},
+          "notes": "test fixture"
+        }}]"#
+    );
+    file.write_all(json.as_bytes())
+        .expect("write fake instrument registry");
+    file
+}
+
+/// A parseable-but-invalid (duplicate local symbol) instrument registry
+/// refuses the poll before any provider call.
+#[tokio::test]
+async fn market_data_duplicate_local_symbols_refuse_poll_before_any_provider_call() {
+    let Some(pool) = maybe_db("market_data_duplicate_local_symbols").await else {
+        return;
+    };
+    let registry = fake_registry_file();
+    let instrument_registry =
+        tempfile::NamedTempFile::new().expect("create fake instrument registry");
+    std::fs::write(
+        instrument_registry.path(),
+        duplicate_symbol_instrument_registry_json("ZZPOLLDUPSYM", "fake").as_bytes(),
+    )
+    .expect("write fake instrument registry");
+    let provider = Arc::new(FakeLatestProvider::new(HashMap::new()));
+    let mut st =
+        state::AppState::new_with_db_and_operator_auth(pool, OperatorAuthMode::ExplicitDevNoToken);
+    st.set_latest_bar_provider_client_for_test(provider.clone());
+    let app = routes::build_router(Arc::new(st));
+
+    let (status, body) = call_json(
+        app,
+        "POST",
+        "/api/v1/market-data/feed/poll-once",
+        Some(serde_json::json!({
+            "provider_id": "fake",
+            "symbols": ["ZZPOLLDUPSYM"],
+            "timeframe": "5m",
+            "dry_run": false,
+            "allow_provider_api_calls": true,
+            "now_utc": "2024-01-01T00:10:30Z",
+            "provider_registry_path": registry.path().to_string_lossy(),
+            "instrument_registry_path": instrument_registry.path().to_string_lossy()
+        })),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body["truth_state"], "refused");
+    let err = body["error"].as_str().unwrap_or("");
+    assert!(
+        err.contains("duplicate") || err.contains("instrument_registry_invalid"),
+        "error must describe the registry validation failure: {body}"
+    );
+    assert_eq!(
+        provider.calls(),
+        0,
+        "a duplicate-symbol registry must make zero provider calls"
+    );
+}
+
+/// A parseable-but-invalid (duplicate enabled provider_symbol) instrument
+/// registry refuses the poll before any provider call.
+#[tokio::test]
+async fn market_data_duplicate_provider_symbols_refuse_poll_before_any_provider_call() {
+    let Some(pool) = maybe_db("market_data_duplicate_provider_symbols").await else {
+        return;
+    };
+    let registry = fake_registry_file();
+    let instrument_registry =
+        tempfile::NamedTempFile::new().expect("create fake instrument registry");
+    std::fs::write(
+        instrument_registry.path(),
+        duplicate_provider_symbol_instrument_registry_json("fake", "ZZPOLLDUPPS").as_bytes(),
+    )
+    .expect("write fake instrument registry");
+    let provider = Arc::new(FakeLatestProvider::new(HashMap::new()));
+    let mut st =
+        state::AppState::new_with_db_and_operator_auth(pool, OperatorAuthMode::ExplicitDevNoToken);
+    st.set_latest_bar_provider_client_for_test(provider.clone());
+    let app = routes::build_router(Arc::new(st));
+
+    let (status, body) = call_json(
+        app,
+        "POST",
+        "/api/v1/market-data/feed/poll-once",
+        Some(serde_json::json!({
+            "provider_id": "fake",
+            "symbols": ["ZZPOLLDUPPSLOCALA"],
+            "timeframe": "5m",
+            "dry_run": false,
+            "allow_provider_api_calls": true,
+            "now_utc": "2024-01-01T00:10:30Z",
+            "provider_registry_path": registry.path().to_string_lossy(),
+            "instrument_registry_path": instrument_registry.path().to_string_lossy()
+        })),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(body["truth_state"], "refused");
+    let err = body["error"].as_str().unwrap_or("");
+    assert!(
+        err.contains("duplicate") || err.contains("instrument_registry_invalid"),
+        "error must describe the registry validation failure: {body}"
+    );
+    assert_eq!(
+        provider.calls(),
+        0,
+        "a duplicate-provider_symbol registry must make zero provider calls"
+    );
+}
+
+/// An instrument whose `timeframes` list does not include the requested
+/// timeframe blocks admission before any provider call, makes zero API
+/// calls, and writes zero DB bars.
+#[tokio::test]
+async fn market_data_instrument_timeframe_not_authorized_blocks_poll_before_provider_call() {
+    let Some(pool) = maybe_db("market_data_instrument_timeframe_not_authorized").await else {
+        return;
+    };
+    let registry = fake_registry_file();
+    let instrument_registry =
+        fake_instrument_registry_file_with_timeframes("ZZPOLLTFNO", "fake", &["1D"]);
+    let provider = Arc::new(FakeLatestProvider::new(HashMap::new()));
+    let mut st = state::AppState::new_with_db_and_operator_auth(
+        pool.clone(),
+        OperatorAuthMode::ExplicitDevNoToken,
+    );
+    st.set_latest_bar_provider_client_for_test(provider.clone());
+    let app = routes::build_router(Arc::new(st));
+
+    let (status, body) = call_json(
+        app,
+        "POST",
+        "/api/v1/market-data/feed/poll-once",
+        Some(serde_json::json!({
+            "provider_id": "fake",
+            "symbols": ["ZZPOLLTFNO"],
+            "timeframe": "5m",
+            "dry_run": false,
+            "allow_provider_api_calls": true,
+            "now_utc": "2024-01-01T00:10:30Z",
+            "provider_registry_path": registry.path().to_string_lossy(),
+            "instrument_registry_path": instrument_registry.path().to_string_lossy()
+        })),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_GATEWAY);
+    assert_eq!(body["truth_state"], "failed");
+    assert_eq!(
+        body["symbols"][0]["status"],
+        "skipped_instrument_timeframe_unsupported"
+    );
+    assert_eq!(
+        body["api_calls_made"], 0,
+        "api_calls_made must remain zero on instrument-timeframe rejection: {body}"
+    );
+    assert_eq!(
+        provider.calls(),
+        0,
+        "an instrument not authorized for the requested timeframe must make zero provider calls"
+    );
+
+    let count: i64 = sqlx::query_scalar("select count(*) from md_bars where symbol = $1")
+        .bind("ZZPOLLTFNO")
+        .fetch_one(&pool)
+        .await
+        .expect("count rows for timeframe-rejected symbol");
+    assert_eq!(count, 0, "no DB bar must be written on rejection");
+}
+
+/// An instrument whose `timeframes` list includes the requested timeframe
+/// (alongside another timeframe) is admitted and polled normally.
+#[tokio::test]
+async fn market_data_instrument_timeframe_authorized_permits_poll() {
+    let Some(pool) = maybe_db("market_data_instrument_timeframe_authorized").await else {
+        return;
+    };
+    let registry = fake_registry_file();
+    let instrument_registry =
+        fake_instrument_registry_file_with_timeframes("ZZPOLLTFYES", "fake", &["1D", "5m"]);
+    let mut outcomes = HashMap::new();
+    outcomes.insert(
+        "ZZPOLLTFYES".to_string(),
+        FakeLatestOutcome::Bar(bar("ZZPOLLTFYES", 1_704_067_200, true)),
+    );
+    let provider = Arc::new(FakeLatestProvider::new(outcomes));
+    let mut st = state::AppState::new_with_db_and_operator_auth(
+        pool.clone(),
+        OperatorAuthMode::ExplicitDevNoToken,
+    );
+    st.set_latest_bar_provider_client_for_test(provider.clone());
+    let app = routes::build_router(Arc::new(st));
+
+    let (status, body) = call_json(
+        app,
+        "POST",
+        "/api/v1/market-data/feed/poll-once",
+        Some(serde_json::json!({
+            "provider_id": "fake",
+            "symbols": ["ZZPOLLTFYES"],
+            "timeframe": "5m",
+            "dry_run": false,
+            "allow_provider_api_calls": true,
+            "now_utc": "2024-01-01T00:10:30Z",
+            "provider_registry_path": registry.path().to_string_lossy(),
+            "instrument_registry_path": instrument_registry.path().to_string_lossy()
+        })),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["truth_state"], "completed");
+    assert_eq!(body["inserted_count"], 1);
+    assert_eq!(
+        provider.calls(),
+        1,
+        "an instrument whose timeframes list authorizes the requested timeframe must be polled"
+    );
+
+    sqlx::query("delete from md_bars where symbol = 'ZZPOLLTFYES'")
+        .execute(&pool)
+        .await
+        .ok();
 }
 
 #[tokio::test]

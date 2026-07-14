@@ -103,6 +103,57 @@ fn normalize_poll_symbols(symbols: &[String]) -> Result<Vec<String>, String> {
     Ok(out)
 }
 
+// ---------------------------------------------------------------------------
+// DAILY-DATA-READINESS-01B2-REGISTRY-ADMISSION-CLOSURE-01: shared registry
+// load+validate and per-instrument timeframe admission, used by both the
+// latest-bar poll path and the historical provider-sync/dry-run path so a
+// parseable-but-invalid registry (duplicate symbols, duplicate
+// instrument_ids, blank provider_symbol, duplicate enabled provider_symbol
+// per provider) is refused as a single fail-closed unit before any provider
+// call, rather than trusted after deserialization alone.
+// ---------------------------------------------------------------------------
+
+/// Load the canonical instrument registry at `path` and validate it via
+/// `mqk_md::instrument_registry::validate_registry`. A registry that is
+/// unreadable/unparseable, or that parses but fails a validation invariant,
+/// is refused as a single `Err` — callers must never treat deserialization
+/// alone as proof of a trustworthy registry.
+fn load_validated_instrument_registry(
+    path: &str,
+) -> Result<Vec<mqk_md::instrument_registry::TrackedInstrument>, String> {
+    let instruments = mqk_md::instrument_registry::load_instrument_registry(std::path::Path::new(
+        path,
+    ))
+    .map_err(|error| {
+        format!(
+            "instrument_registry_unavailable: failed to load instrument registry at \
+                     '{path}': {error}"
+        )
+    })?;
+    mqk_md::instrument_registry::validate_registry(&instruments).map_err(|error| {
+        format!(
+            "instrument_registry_invalid: instrument registry at '{path}' failed validation: \
+             {error}"
+        )
+    })?;
+    Ok(instruments)
+}
+
+/// `true` iff `instrument.timeframes` authorizes `timeframe`, comparing
+/// through the canonical `mqk_md::Timeframe` parser rather than raw
+/// case-sensitive string equality — a stored `"1d"` or `"1min"` entry must
+/// match the same way an operator-supplied request timeframe does.
+fn instrument_authorizes_timeframe(
+    instrument: &mqk_md::instrument_registry::TrackedInstrument,
+    timeframe: mqk_md::Timeframe,
+) -> bool {
+    instrument.timeframes.iter().any(|tf| {
+        mqk_md::Timeframe::parse(tf)
+            .map(|parsed| parsed == timeframe)
+            .unwrap_or(false)
+    })
+}
+
 fn parse_poll_now(now_utc: Option<&str>) -> Result<DateTime<Utc>, String> {
     match now_utc {
         Some(value) => DateTime::parse_from_rfc3339(value)
@@ -623,17 +674,17 @@ pub(crate) async fn market_data_feed_poll_once(
         );
     };
 
-    // DAILY-DATA-READINESS-01B2-INGEST-TRUTHFULNESS-REPAIR-01 (Repair 2): the
-    // canonical instrument registry must be loaded and validated *before* any
-    // provider is constructed or called. A registry that cannot be read or
-    // parsed fails the whole request closed — never `unwrap_or_default()`
-    // into an empty list that would then silently skip every symbol
-    // individually while still burning provider calls for other, unrelated
-    // symbols.
+    // DAILY-DATA-READINESS-01B2: the canonical instrument registry must be
+    // loaded AND validated (`load_validated_instrument_registry`) *before*
+    // any provider is constructed or called. A registry that cannot be read
+    // or parsed, or that parses but fails a `validate_registry` invariant
+    // (duplicate symbols, duplicate instrument_ids, blank provider_symbol,
+    // duplicate enabled provider_symbol per provider), fails the whole
+    // request closed — never `unwrap_or_default()` into an empty/unproven
+    // list that would then silently skip every symbol individually while
+    // still burning provider calls for other, unrelated symbols.
     let instrument_registry_path = instrument_registry_path_for_poll(&st, &req);
-    let instruments = match mqk_md::instrument_registry::load_instrument_registry(
-        std::path::Path::new(&instrument_registry_path),
-    ) {
+    let instruments = match load_validated_instrument_registry(&instrument_registry_path) {
         Ok(instruments) => instruments,
         Err(error) => {
             return refused_poll_response(
@@ -648,10 +699,7 @@ pub(crate) async fn market_data_feed_poll_once(
                     latest_expected_closed_bar_ts,
                     next_poll_ts,
                 },
-                format!(
-                    "instrument_registry_unavailable: failed to load instrument registry at \
-                     '{instrument_registry_path}': {error}"
-                ),
+                error,
             );
         }
     };
@@ -803,6 +851,28 @@ pub(crate) async fn market_data_feed_poll_once(
                 rows_skipped: 1,
                 error: Some(format!(
                     "instrument '{symbol}' has a blank canonical provider_symbol"
+                )),
+            });
+            continue;
+        }
+        // Repair 2 (registry admission): a poll provider that globally
+        // supports this timeframe does not imply this *instrument* is
+        // configured to be ingested at it. Both must hold — provider
+        // capability was already checked above; this proves the instrument's
+        // own `timeframes` list authorizes it, via the canonical parser.
+        if !instrument_authorizes_timeframe(instrument, timeframe) {
+            per_symbol.push(MarketDataFeedPollSymbolResult {
+                symbol: symbol.clone(),
+                status: "skipped_instrument_timeframe_unsupported".to_string(),
+                expected_latest_closed_bar_ts: latest_expected_closed_bar_ts,
+                returned_bar_ts: None,
+                rows_inserted: 0,
+                rows_updated: 0,
+                rows_skipped: 1,
+                error: Some(format!(
+                    "instrument '{symbol}' does not authorize timeframe '{}' (configured: {:?})",
+                    timeframe.as_str(),
+                    instrument.timeframes
                 )),
             });
             continue;
@@ -2092,6 +2162,7 @@ async fn handle_provider_sync_job(
             provider_registry_path,
             out_dir,
             timeframe,
+            parsed_timeframe,
             provider_enabled_val,
             provider_verification_status_val,
         )
@@ -2226,6 +2297,7 @@ async fn handle_provider_sync_job(
     let source_for_task = source.clone();
     let registry_path_for_task = registry_path.clone();
     let provider_registry_path_for_task = provider_registry_path.clone();
+    let asset_class_for_task = asset_class.clone();
 
     tokio::spawn(async move {
         run_real_provider_sync(
@@ -2236,6 +2308,7 @@ async fn handle_provider_sync_job(
             source_for_task,
             registry_path_for_task,
             provider_registry_path_for_task,
+            asset_class_for_task,
             tf,
             start_d,
             end_d,
@@ -2275,6 +2348,7 @@ async fn handle_provider_dry_run(
     provider_registry_path: String,
     out_dir: String,
     timeframe: String,
+    parsed_timeframe: mqk_md::Timeframe,
     provider_enabled_val: Option<bool>,
     provider_verification_status_val: Option<String>,
 ) -> Response {
@@ -2322,6 +2396,7 @@ async fn handle_provider_dry_run(
     let jobs = Arc::clone(&st.ingest_jobs);
     let db_pool = st.db.clone();
     let source_for_task = source.clone();
+    let asset_class_for_task = asset_class.clone();
     tokio::spawn(async move {
         if ingest_job_is_cancelled(&jobs, job_id) {
             return;
@@ -2339,15 +2414,22 @@ async fn handle_provider_dry_run(
         }
 
         // Resolve symbols — pure filesystem read; zero network calls. Scoped
-        // to instruments actually assigned to `source_for_task` (§B2.3) so a
-        // dry-run preview agrees with what the real sync path would fetch.
-        let result =
-            resolve_provider_scoped_equities(&registry_path, &source_for_task).map(|equities| {
-                let count = equities.len();
-                let first = equities.first().map(|e| e.symbol.clone());
-                let last = equities.last().map(|e| e.symbol.clone());
-                (count, first, last)
-            });
+        // to instruments actually assigned to `source_for_task` and
+        // authorizing `parsed_timeframe` (§B2.3, DAILY-DATA-READINESS-01B2)
+        // so a dry-run preview agrees with what the real sync path would
+        // fetch.
+        let result = resolve_provider_scoped_equities(
+            &registry_path,
+            &source_for_task,
+            &asset_class_for_task,
+            parsed_timeframe,
+        )
+        .map(|equities| {
+            let count = equities.len();
+            let first = equities.first().map(|e| e.symbol.clone());
+            let last = equities.last().map(|e| e.symbol.clone());
+            (count, first, last)
+        });
 
         // Mark terminal.
         persist_job_update(&jobs, db_pool.as_ref(), job_id, |r| {
@@ -2391,32 +2473,41 @@ async fn handle_provider_dry_run(
 // Real provider sync background task
 // ---------------------------------------------------------------------------
 
-/// Resolve enabled equity instruments assigned to `source`'s exact configured
+/// Resolve enabled instruments assigned to `source`'s exact configured
 /// provider (case-insensitive, trimmed) from the registry at `registry_path`
-/// (§B2.3, DAILY-DATA-READINESS-01B-PROVIDER-CONTRACT-INTEGRATION-01).
+/// (§B2.3, DAILY-DATA-READINESS-01B-PROVIDER-CONTRACT-INTEGRATION-01),
+/// scoped further to `asset_class` and to instruments whose own
+/// `timeframes` list authorizes `timeframe` (DAILY-DATA-READINESS-01B2).
 ///
-/// The prior behavior (`enabled_equities()` with no provider filter) resolved
-/// *every* enabled equity regardless of which provider the registry actually
-/// assigns it to — meaning a `source="alpaca"` sync job would request every
-/// registry symbol from Alpaca even though today's registry assigns every
-/// enabled equity to `"twelvedata"`. This filters to only instruments whose
-/// own `provider` field matches the requested job's provider, so a sync job
-/// never claims provenance for an instrument it was never configured to
-/// fetch. Deterministic ordering (sorted by symbol) mirrors
-/// `enabled_equities()`.
+/// The registry is loaded through [`load_validated_instrument_registry`], so
+/// a parseable-but-invalid registry (duplicate symbols, duplicate
+/// instrument_ids, blank provider_symbol, duplicate enabled provider_symbol
+/// per provider) is refused before any admission filtering — never silently
+/// resolved against unvalidated data.
+///
+/// An instrument is included only when it is `enabled`, its `asset_class`
+/// matches the requested asset class, its `provider` matches the requested
+/// job's provider, and its `timeframes` (normalized through the canonical
+/// timeframe parser) authorizes the requested `timeframe`. This never claims
+/// provenance for an instrument that was never configured to be fetched at
+/// this provider/timeframe combination. Deterministic ordering (sorted by
+/// symbol) mirrors `enabled_equities()`.
 fn resolve_provider_scoped_equities(
     registry_path: &str,
     source: &str,
+    asset_class: &str,
+    timeframe: mqk_md::Timeframe,
 ) -> Result<Vec<mqk_md::instrument_registry::TrackedInstrument>, String> {
-    let instruments =
-        mqk_md::instrument_registry::load_instrument_registry(std::path::Path::new(registry_path))
-            .map_err(|e| e.to_string())?;
+    let instruments = load_validated_instrument_registry(registry_path)?;
     let mut filtered: Vec<mqk_md::instrument_registry::TrackedInstrument> = instruments
         .into_iter()
         .filter(|i| {
             i.enabled
-                && i.asset_class == "equity"
+                && i.asset_class
+                    .trim()
+                    .eq_ignore_ascii_case(asset_class.trim())
                 && i.provider.trim().eq_ignore_ascii_case(source.trim())
+                && instrument_authorizes_timeframe(i, timeframe)
         })
         .collect();
     filtered.sort_by(|a, b| a.symbol.cmp(&b.symbol));
@@ -2466,6 +2557,7 @@ async fn run_real_provider_sync(
     source: String,
     registry_path: String,
     provider_registry_path: String,
+    asset_class: String,
     timeframe: mqk_md::Timeframe,
     start_d: NaiveDate,
     end_d: NaiveDate,
@@ -2518,18 +2610,22 @@ async fn run_real_provider_sync(
     };
 
     // Resolve symbols from registry — scoped to instruments actually
-    // assigned to `source`'s exact configured provider (§B2.3). Never claim
+    // assigned to `source`'s exact configured provider, asset_class, and
+    // requested timeframe (§B2.3, DAILY-DATA-READINESS-01B2). Never claim
     // provenance for an instrument this job was never configured to fetch.
     let instruments: Vec<mqk_md::instrument_registry::TrackedInstrument> =
-        match resolve_provider_scoped_equities(&registry_path, &source) {
+        match resolve_provider_scoped_equities(&registry_path, &source, &asset_class, timeframe) {
             Ok(instruments) => {
                 if instruments.is_empty() {
                     persist_job_update(&jobs, db_pool.as_ref(), job_id, |r| {
                         r.status = IngestJobStatus::Failed;
                         r.completed_at_utc = Some(Utc::now()); // allow: operational
                         r.error = Some(format!(
-                            "registry contains no enabled equity symbols assigned to provider '{}'",
-                            source
+                            "no enabled registry instruments authorize provider '{}' for \
+                             asset_class '{}' and timeframe '{}'",
+                            source,
+                            asset_class,
+                            timeframe.as_str()
                         ));
                     })
                     .await;

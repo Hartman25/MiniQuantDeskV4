@@ -2759,3 +2759,461 @@ async fn hist_sync_mixed_bars_insert_valid_rows_and_report_partial() {
         .ok();
     cleanup_ingest_job(&pool, job_id).await;
 }
+
+// ---------------------------------------------------------------------------
+// DAILY-DATA-READINESS-01B2-REGISTRY-ADMISSION-CLOSURE-01:
+// registry validation + per-instrument timeframe admission for historical
+// sync and dry run.
+// ---------------------------------------------------------------------------
+
+/// Build an `AppState` (not Arc-wrapped) pointing at an arbitrary instrument
+/// registry JSON body (real `config/providers/providers.json` unchanged),
+/// for constructing invalid or multi-instrument registry fixtures.
+fn make_provider_router_with_registry_json(
+    json: &str,
+) -> (state::AppState, tempfile::NamedTempFile) {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let provider_registry_path = std::path::PathBuf::from(manifest_dir)
+        .join("../../../config/providers/providers.json")
+        .canonicalize()
+        .expect("provider registry must resolve")
+        .to_string_lossy()
+        .to_string();
+
+    let registry = tempfile::NamedTempFile::new().expect("create fake instrument registry");
+    std::fs::write(registry.path(), json).expect("write fake instrument registry");
+
+    let mut st =
+        state::AppState::new_with_operator_auth(state::OperatorAuthMode::ExplicitDevNoToken);
+    st.instrument_registry_path = registry.path().to_string_lossy().to_string();
+    st.provider_registry_path = provider_registry_path;
+    (st, registry)
+}
+
+/// A registry with a duplicate `symbol` across two entries — parseable JSON,
+/// but rejected by `validate_registry`.
+fn duplicate_symbol_registry_json(symbol: &str) -> String {
+    format!(
+        r#"[
+          {{
+            "instrument_id": "equity:US:{symbol}A",
+            "symbol": "{symbol}",
+            "asset_class": "equity",
+            "provider": "twelvedata",
+            "provider_symbol": "{symbol}",
+            "venue": "TEST",
+            "currency": "USD",
+            "enabled": true,
+            "timeframes": ["1D"],
+            "notes": "duplicate symbol fixture 1"
+          }},
+          {{
+            "instrument_id": "equity:US:{symbol}B",
+            "symbol": "{symbol}",
+            "asset_class": "equity",
+            "provider": "twelvedata",
+            "provider_symbol": "{symbol}B",
+            "venue": "TEST",
+            "currency": "USD",
+            "enabled": true,
+            "timeframes": ["1D"],
+            "notes": "duplicate symbol fixture 2"
+          }}
+        ]"#
+    )
+}
+
+/// A registry with one `"1D"`-only instrument and one `"5m"`-only
+/// instrument, both assigned to provider `"twelvedata"` — proves timeframe
+/// admission actually discriminates between instruments rather than
+/// resolving the whole enabled/provider-scoped set.
+fn mixed_timeframe_registry_json() -> String {
+    r#"[
+      {
+        "instrument_id": "equity:US:ZZTFDAILY",
+        "symbol": "ZZTFDAILY",
+        "asset_class": "equity",
+        "provider": "twelvedata",
+        "provider_symbol": "ZZTFDAILY",
+        "venue": "TEST",
+        "currency": "USD",
+        "enabled": true,
+        "timeframes": ["1D"],
+        "notes": "daily-only fixture"
+      },
+      {
+        "instrument_id": "equity:US:ZZTFFIVEMIN",
+        "symbol": "ZZTFFIVEMIN",
+        "asset_class": "equity",
+        "provider": "twelvedata",
+        "provider_symbol": "ZZTFFIVEMIN",
+        "venue": "TEST",
+        "currency": "USD",
+        "enabled": true,
+        "timeframes": ["5m"],
+        "notes": "5m-only fixture"
+      }
+    ]"#
+    .to_string()
+}
+
+// REG-ADM-01: a parseable-but-invalid (duplicate symbol) registry fails a
+// real historical sync job truthfully before any provider call.
+#[tokio::test]
+async fn reg_adm_01_duplicate_symbols_fail_historical_sync_before_provider_call() {
+    let (mut st_raw, _registry) =
+        make_provider_router_with_registry_json(&duplicate_symbol_registry_json("ZZREGADMDUP"));
+    st_raw.set_provider_client_for_test(Arc::new(FakeProvider::empty()));
+    let st = Arc::new(st_raw);
+
+    let router_post = routes::build_router(Arc::clone(&st));
+    let (status, body) = post_provider_job(
+        router_post,
+        serde_json::json!({
+            "source": "twelvedata",
+            "mode": "sync_provider",
+            "timeframe": "1D",
+            "symbols_source": "registry",
+            "dry_run": false,
+            "allow_provider_api_calls": true,
+            "start": "2026-01-01",
+            "end": "2026-01-05"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "job must queue: {body}");
+    let job_id = json_str(&body, "job_id").to_string();
+
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let router_get = routes::build_router(Arc::clone(&st));
+    let (_, body) = get_job_status(router_get, &job_id).await;
+
+    assert_eq!(
+        json_str(&body, "status"),
+        "failed",
+        "a duplicate-symbol registry must fail the sync job: {body}"
+    );
+    let err = body["error"].as_str().unwrap_or("");
+    assert!(
+        err.contains("duplicate") || err.contains("registry"),
+        "error must describe the registry validation failure: {err}"
+    );
+    assert_eq!(
+        body["api_calls_made"].as_i64().unwrap_or(999),
+        0,
+        "api_calls_made must be 0 on invalid registry: {body}"
+    );
+}
+
+// REG-ADM-02: the same parseable-but-invalid registry fails provider-sync
+// dry run truthfully, never reporting a planned admissible symbol count.
+#[tokio::test]
+async fn reg_adm_02_duplicate_symbols_fail_dry_run_truthfully() {
+    let (st_raw, _registry) =
+        make_provider_router_with_registry_json(&duplicate_symbol_registry_json("ZZREGADMDUP2"));
+    let st = Arc::new(st_raw);
+
+    let router_post = routes::build_router(Arc::clone(&st));
+    let (status, body) = post_provider_job(
+        router_post,
+        serde_json::json!({
+            "source": "twelvedata",
+            "mode": "sync_provider",
+            "timeframe": "1D",
+            "symbols_source": "registry",
+            "dry_run": true,
+            "allow_provider_api_calls": false
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "job must queue: {body}");
+    let job_id = json_str(&body, "job_id").to_string();
+
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let router_get = routes::build_router(Arc::clone(&st));
+    let (_, body) = get_job_status(router_get, &job_id).await;
+
+    assert_eq!(
+        json_str(&body, "status"),
+        "failed",
+        "a duplicate-symbol registry must fail the dry-run job: {body}"
+    );
+    let err = body["error"].as_str().unwrap_or("");
+    assert!(
+        err.contains("duplicate") || err.contains("registry"),
+        "error must describe the registry validation failure: {err}"
+    );
+    assert_eq!(
+        body["api_calls_made"].as_i64().unwrap_or(999),
+        0,
+        "api_calls_made must be 0 on invalid registry dry run: {body}"
+    );
+    assert_eq!(
+        body["symbols_count"],
+        serde_json::Value::Null,
+        "symbols_count must not be populated when the registry itself is invalid: {body}"
+    );
+}
+
+// REG-ADM-03: an instrument authorized only for "1D" is admitted by a "1D"
+// sync, and the mixed registry resolves only the timeframe-authorized
+// instrument (never the whole enabled/provider-scoped set).
+#[tokio::test]
+async fn reg_adm_03_timeframe_admission_1d_sync_includes_daily_instrument_only() {
+    let (st_raw, _registry) =
+        make_provider_router_with_registry_json(&mixed_timeframe_registry_json());
+    let st = Arc::new(st_raw);
+
+    let router_post = routes::build_router(Arc::clone(&st));
+    let (status, body) = post_provider_job(
+        router_post,
+        serde_json::json!({
+            "source": "twelvedata",
+            "mode": "sync_provider",
+            "timeframe": "1D",
+            "symbols_source": "registry",
+            "dry_run": true,
+            "allow_provider_api_calls": false
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "job must queue: {body}");
+    let job_id = json_str(&body, "job_id").to_string();
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let router_get = routes::build_router(Arc::clone(&st));
+    let (_, body) = get_job_status(router_get, &job_id).await;
+    assert_eq!(
+        json_str(&body, "status"),
+        "dry_run_completed",
+        "body: {body}"
+    );
+    assert_eq!(
+        body["symbols_count"].as_u64(),
+        Some(1),
+        "only the 1D-authorized instrument must be admitted: {body}"
+    );
+    assert_eq!(body["planned_first_symbol"], "ZZTFDAILY");
+    assert_eq!(body["planned_last_symbol"], "ZZTFDAILY");
+}
+
+// REG-ADM-04: the same mixed registry, requested at "5m", excludes the
+// "1D"-only instrument and admits only the "5m"-authorized instrument.
+#[tokio::test]
+async fn reg_adm_04_timeframe_admission_5m_sync_excludes_daily_instrument() {
+    let (st_raw, _registry) =
+        make_provider_router_with_registry_json(&mixed_timeframe_registry_json());
+    let st = Arc::new(st_raw);
+
+    let router_post = routes::build_router(Arc::clone(&st));
+    let (status, body) = post_provider_job(
+        router_post,
+        serde_json::json!({
+            "source": "twelvedata",
+            "mode": "sync_provider",
+            "timeframe": "5m",
+            "symbols_source": "registry",
+            "dry_run": true,
+            "allow_provider_api_calls": false
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "job must queue: {body}");
+    let job_id = json_str(&body, "job_id").to_string();
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let router_get = routes::build_router(Arc::clone(&st));
+    let (_, body) = get_job_status(router_get, &job_id).await;
+    assert_eq!(
+        json_str(&body, "status"),
+        "dry_run_completed",
+        "body: {body}"
+    );
+    assert_eq!(
+        body["symbols_count"].as_u64(),
+        Some(1),
+        "only the 5m-authorized instrument must be admitted, never the 1D-only one: {body}"
+    );
+    assert_eq!(body["planned_first_symbol"], "ZZTFFIVEMIN");
+    assert_eq!(body["planned_last_symbol"], "ZZTFFIVEMIN");
+}
+
+// REG-ADM-05: dry-run and real-sync planned symbol counts agree for the same
+// provider/asset_class/timeframe admission set.
+#[tokio::test]
+async fn reg_adm_05_dry_run_and_real_sync_planned_sets_agree() {
+    let (mut st_raw, _registry) =
+        make_provider_router_with_registry_json(&mixed_timeframe_registry_json());
+    st_raw.set_provider_client_for_test(Arc::new(FakeProvider::empty()));
+    let st = Arc::new(st_raw);
+
+    let router_dry = routes::build_router(Arc::clone(&st));
+    let (status, body) = post_provider_job(
+        router_dry,
+        serde_json::json!({
+            "source": "twelvedata",
+            "mode": "sync_provider",
+            "timeframe": "1D",
+            "symbols_source": "registry",
+            "dry_run": true,
+            "allow_provider_api_calls": false
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::ACCEPTED,
+        "dry-run job must queue: {body}"
+    );
+    let dry_job_id = json_str(&body, "job_id").to_string();
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let router_get = routes::build_router(Arc::clone(&st));
+    let (_, dry_body) = get_job_status(router_get, &dry_job_id).await;
+    assert_eq!(json_str(&dry_body, "status"), "dry_run_completed");
+    let dry_count = dry_body["symbols_count"].as_u64();
+
+    let router_real = routes::build_router(Arc::clone(&st));
+    let (status, body) = post_provider_job(
+        router_real,
+        serde_json::json!({
+            "source": "twelvedata",
+            "mode": "sync_provider",
+            "timeframe": "1D",
+            "symbols_source": "registry",
+            "dry_run": false,
+            "allow_provider_api_calls": true,
+            "start": "2026-01-01",
+            "end": "2026-01-05"
+        }),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::ACCEPTED,
+        "real sync job must queue: {body}"
+    );
+    let real_job_id = json_str(&body, "job_id").to_string();
+    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+    let router_get2 = routes::build_router(Arc::clone(&st));
+    let (_, real_body) = get_job_status(router_get2, &real_job_id).await;
+    let real_count = real_body["symbols_count"].as_u64();
+
+    assert_eq!(dry_count, Some(1), "dry-run body: {dry_body}");
+    assert_eq!(
+        dry_count, real_count,
+        "dry-run and real-sync planned symbol counts must agree: dry={dry_body}, real={real_body}"
+    );
+}
+
+// REG-ADM-06: when no registry instrument authorizes the requested
+// provider/timeframe combination, the real sync job fails truthfully and
+// makes zero fake-provider calls.
+#[tokio::test]
+async fn reg_adm_06_no_admissible_instrument_makes_zero_provider_calls() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let (mut st_raw, _registry) =
+        make_provider_router_with_single_instrument("ZZTFNOADMIT", "twelvedata", "1D");
+    st_raw.set_provider_client_for_test(Arc::new(SlowCountingProvider {
+        calls: Arc::clone(&calls),
+        delay: std::time::Duration::from_millis(1),
+    }));
+    let st = Arc::new(st_raw);
+
+    let router_post = routes::build_router(Arc::clone(&st));
+    // The fixture instrument only authorizes "1D"; request "5m" instead so
+    // no instrument is admitted, even though twelvedata itself supports 5m.
+    let (status, body) = post_provider_job(
+        router_post,
+        serde_json::json!({
+            "source": "twelvedata",
+            "mode": "sync_provider",
+            "timeframe": "5m",
+            "symbols_source": "registry",
+            "dry_run": false,
+            "allow_provider_api_calls": true,
+            "start": "2026-01-01",
+            "end": "2026-01-05"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "job must queue: {body}");
+    let job_id = json_str(&body, "job_id").to_string();
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+
+    let router_get = routes::build_router(Arc::clone(&st));
+    let (_, body) = get_job_status(router_get, &job_id).await;
+    assert_eq!(
+        json_str(&body, "status"),
+        "failed",
+        "a no-admissible-instrument result must fail truthfully: {body}"
+    );
+    let err = body["error"].as_str().unwrap_or("");
+    assert!(
+        err.contains("no enabled registry instruments") || err.contains("timeframe"),
+        "error must explain the provider/timeframe admission gap: {err}"
+    );
+    assert_eq!(
+        body["api_calls_made"].as_i64().unwrap_or(999),
+        0,
+        "api_calls_made must be 0: {body}"
+    );
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        0,
+        "the fake provider must never be called: {body}"
+    );
+}
+
+// REG-ADM-07: no invalid-registry case writes an md_bars row. Skips
+// truthfully when no DB is configured.
+#[tokio::test]
+async fn reg_adm_07_invalid_registry_writes_zero_md_bars_rows() {
+    let Some(pool) = ingest_job_db_pool_or_skip("REG-ADM-07").await else {
+        return;
+    };
+
+    let (mut st_raw, _registry) =
+        make_provider_router_with_registry_json(&duplicate_symbol_registry_json("ZZREGADMDUP3"));
+    st_raw.db = Some(pool.clone());
+    st_raw.set_provider_client_for_test(Arc::new(FakeProvider::empty()));
+    let st = Arc::new(st_raw);
+
+    let router_post = routes::build_router(Arc::clone(&st));
+    let (status, body) = post_provider_job(
+        router_post,
+        serde_json::json!({
+            "source": "twelvedata",
+            "mode": "sync_provider",
+            "timeframe": "1D",
+            "symbols_source": "registry",
+            "dry_run": false,
+            "allow_provider_api_calls": true,
+            "start": "2026-01-01",
+            "end": "2026-01-05"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "job must queue: {body}");
+    let job_id: uuid::Uuid = json_str(&body, "job_id")
+        .parse()
+        .expect("job_id must parse");
+
+    let persisted =
+        wait_for_persisted_status(&pool, job_id, &["completed", "partial", "failed"]).await;
+    assert_eq!(
+        persisted.status.as_str(),
+        "failed",
+        "invalid registry must fail: {persisted:?}"
+    );
+
+    let count: i64 =
+        sqlx::query_scalar("select count(*) from md_bars where symbol like 'ZZREGADMDUP3%'")
+            .fetch_one(&pool)
+            .await
+            .expect("count rows for invalid-registry job");
+    assert_eq!(count, 0, "an invalid registry must write zero md_bars rows");
+
+    cleanup_ingest_job(&pool, job_id).await;
+}
