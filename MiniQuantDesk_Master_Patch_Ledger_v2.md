@@ -9583,3 +9583,121 @@ against the old parameters.
 
 **Recommended next prompt:** none scheduled; revisit only if/when
 strategy-configuration hot-swapping is proposed.
+
+---
+
+## DAILY-DATA-READINESS-AND-FRESHNESS-01-COMBINED
+
+```text
+DAILY-DATA-READINESS-AND-FRESHNESS-01-COMBINED: CLOSED_LOCAL
+```
+
+**Ledger discrepancy note:** no ledger entry existed for this bundle prior
+to this entry, despite Phases A–D already being committed (14 commits,
+`242de234`..`45e3c44d`) before this Phase E session began. This entry is the
+**first** canonical ledger record for the bundle, consolidating its full
+history — not a duplicate of a prior entry, since none existed. The only
+prior ledger references were forward-pointers ("recommended next off-market
+prompt: `DAILY-DATA-READINESS-AND-FRESHNESS-01-COMBINED`") on the two
+preceding `STRATEGY-PROMOTION-*` entries.
+
+Adds a strict, additive daily/intraday market-data readiness evaluator, a
+dedicated read-only route, runtime start-gate enforcement with durable
+pre-start/run-linked evidence, provider-ingest/latest-poll identity
+tightening, and a read-only GUI panel — alongside (not replacing) the
+pre-existing legacy advisory evaluator (`market_data_freshness.rs`) and the
+multi-symbol premarket aggregate gate (`PREMARKET-DATA-READINESS-GATE-01`).
+
+**Full commit chain:** `242de234` (design) → `64306c39` (contract
+correction) → `0920de5d` (runtime binding contract) → `395e5ee6` (evaluator
+added) → `579b422e` (evaluator repair) → `09f0a919` (provider ingest aligned)
+→ `304a4fd0` (provider ingest mapping fail-closed) → `574f5cc6` (provider
+registry admission) → `f5fc1e80` (daemon enforcement / start gate) →
+`23425d4a` (start evidence closed) → `53ad2454` (unresolved-attempt
+evidence persisted) → `81932229` (GUI panel) → `500bb174` (display-truth
+fix) → `45e3c44d` (numeric-evidence fix) → this entry (Phase E closure).
+
+**Canonical route:** `GET /api/v1/market-data/readiness`
+(`core-rs/crates/mqk-daemon/src/routes/market_data_readiness.rs`), public
+(no auth), read-only, always `binding_scope="configuration_preview"`.
+Shared by `system/preflight`, `autonomous/readiness`, and
+`market-data/ingest-plan` via the single canonical
+`compute_daily_data_readiness_response` composition path.
+
+**Start-gate placement:** `AppState::start_execution_runtime`
+(`core-rs/crates/mqk-daemon/src/state/lifecycle.rs:577-701`), after
+native-strategy bootstrap/assignment resolution, before the hard
+`db_pool()?` acquisition — the evaluator itself produces the canonical
+`db_unavailable` verdict.
+
+**Durable event types:** `daily_data_readiness_evaluated` (pre-start,
+always attempted, gates a would-be-`ready` verdict on persistence success),
+`daily_data_readiness_run_linked` (post-run-creation, gates loop spawn on
+persistence success) — both in `sys_autonomous_session_events`, no new
+migration.
+
+**GUI location:** `core-rs/mqk-gui/src/features/ingest/DailyDataReadinessPanel.tsx`,
+mounted read-only in `IngestScreen.tsx`.
+
+**Focused proof files (all run in Phase E, one binary at a time, isolated
+local test DB port `5434`, never the paper DB port `5440`):**
+`scenario_daily_data_readiness_01.rs` (61/61), `scenario_daily_data_readiness_api_01.rs`
+(7/7), `scenario_daily_data_readiness_start_gate_01.rs` (19/19),
+`scenario_ingest_jobs_data_ingest_daemon_01.rs` (53/53, `db_04_cancel_persists_cancelled_status_and_reason`
+excluded as a known pre-existing unrelated defect), `scenario_market_data_latest_bar_poll_01.rs`
+(17/17), `scenario_ingest_plan_01.rs` (12/12), `scenario_data_freshness_readiness_gate_01.rs`
+(11/11), `scenario_premarket_data_readiness_gate_01.rs` (25/25),
+`scenario_intraday_md_freshness_autonomous_01.rs` (6/6); GUI
+`api.test.ts` (342/342) and `dailyDataReadinessScreenSource.test.ts`
+(13/13); GUI `npm run build` clean; `cargo check -p mqk-md -p mqk-db -p
+mqk-strategy -p mqk-runtime -p mqk-daemon` clean.
+
+**Explicitly unsupported combinations:** Alpaca `1D` timestamp convention
+unverified (blocks Alpaca `1D` only); `1h` provider/ingest support
+unsupported (blocks `mean_reversion`/`volatility_breakout` at `1h`); `15m`
+strict continuity unsupported; per-symbol strategy bootstrapping not
+implemented (a watchlist-v2 set with more than one distinct symbol only
+reaches `ready` on the symbol matching `MQK_STRATEGY_SYMBOL`); existing
+invalid historical rows are not silently provenance-backfilled.
+
+**Carry-forward items:** `PER-SYMBOL-STRATEGY-BOOTSTRAP-01` (recommended
+name, not opened by this bundle); a future provider/timeframe-support patch
+is required for `1h`; Alpaca `1D` timestamp-convention verification is
+required before Alpaca can serve `1D` readiness; `15m` strict continuity is
+unimplemented.
+
+**Known unrelated defect:** `db_04_cancel_persists_cancelled_status_and_reason`
+(`scenario_ingest_jobs_data_ingest_daemon_01.rs:2487`) — pre-existing,
+unrelated to daily-readiness behavior, intentionally excluded from the
+Phase E provider-sync closure run, remains open for separate triage. Does
+not authorize ignoring any other failure; every other test in every run
+listed above passed with zero exclusions.
+
+**Safety confirmation:**
+
+```text
+PROVIDER CALLS: no
+BROKER CALLS: no
+NETWORK CALLS: no
+REAL DAEMON STARTED: no
+REAL RUNTIME STARTED: no
+SCHEDULER STARTED: no
+EXECUTION ARMED: no
+PAPER ORDERS: no
+LIVE ORDERS: no
+PAPER DB TOUCHED: no
+```
+
+No market-hours readiness observation, no paper soak, no profitability
+demonstration, at any phase of this bundle.
+
+Full closure record:
+`docs/specs/daily_data_readiness_01e_closure_decision.md`.
+
+**Recommended next market-hours prompt:** live observation of this
+evaluator's `1D`/`1m`/`5m` supported paths under real market hours (out of
+scope for this session; no daemon/runtime/broker was started here).
+
+**Recommended next off-market prompt:** operator's choice between
+`PER-SYMBOL-STRATEGY-BOOTSTRAP-01` (design) and a provider/timeframe-support
+patch for `1h` — do not begin either in this session.
