@@ -697,6 +697,11 @@ export interface DailyDataReadinessAssignmentResponse {
  * `binding_scope` is always "configuration_preview" — never proof of an
  * active runtime's start-attempt binding. `applicability` is "applicable" |
  * "not_applicable".
+ *
+ * `start_allowed` is `null` only when the HTTP response body omitted the
+ * field or sent a non-boolean value — the daemon route itself always
+ * returns a required boolean. `null` must never be treated as `false`; it
+ * means the GUI could not prove either verdict from this response.
  */
 export interface DailyDataReadinessResponse {
   canonical_route: string;
@@ -705,7 +710,7 @@ export interface DailyDataReadinessResponse {
   binding_scope: string;
   assignment_source: string;
   applicability: string;
-  start_allowed: boolean;
+  start_allowed: boolean | null;
   top_level_blocker: string | null;
   configured_grace_seconds: number;
   configured_future_skew_seconds: number;

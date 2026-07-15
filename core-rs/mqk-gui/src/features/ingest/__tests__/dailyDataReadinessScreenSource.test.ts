@@ -113,3 +113,29 @@ test("IngestScreen mounts DailyDataReadinessPanel with a read-only onRefresh pro
 test("no automatic mutation is tied to readiness state: panel has no useEffect", () => {
   assert.ok(!panelSource.includes("useEffect"));
 });
+
+test("panel does not directly concatenate a nullable numeric field with a bare 's' suffix", () => {
+  const forbiddenPatterns = [
+    /\{response\.configured_grace_seconds\}s/,
+    /\{response\.configured_future_skew_seconds\}s/,
+    /\{assignment\.effective_grace_seconds\}s/,
+    /\{assignment\.effective_future_skew_seconds\}s/,
+    /\{assignment\.effective_runtime_timeframe_secs\s*\?\?\s*"unknown"\}/,
+    /\{assignment\.required_history_bars\s*\?\?\s*"unknown"\}/,
+    /\{assignment\.loaded_completed_bars\s*\?\?\s*"unknown"\}/,
+  ];
+  for (const pattern of forbiddenPatterns) {
+    assert.ok(
+      !pattern.test(panelSource),
+      `DailyDataReadinessPanel.tsx must not render a nullable numeric field with pattern: ${pattern}`,
+    );
+  }
+});
+
+test("panel renders nullable numeric readiness fields through the shared formatter", () => {
+  assert.ok(
+    panelSource.includes("formatReadinessNumber"),
+    "DailyDataReadinessPanel.tsx must import and use formatReadinessNumber for nullable numeric display",
+  );
+  assert.ok(panelSource.includes('import {') && /formatReadinessNumber/.test(panelSource));
+});

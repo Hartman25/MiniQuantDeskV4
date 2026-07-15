@@ -14,6 +14,7 @@ import { Panel } from "../../components/common/Panel";
 import {
   buildDailyDataReadinessDiagnosticText,
   classifyDailyDataReadinessDisplay,
+  formatReadinessNumber,
   formatUnixSecondsDateTime,
   type DailyDataReadinessDisplayState,
 } from "./api.ts";
@@ -103,15 +104,15 @@ function AssignmentBlock({ assignment }: { assignment: DailyDataReadinessAssignm
         </div>
         <div>
           <span>Effective timeframe secs</span>
-          <strong>{assignment.effective_runtime_timeframe_secs ?? "unknown"}</strong>
+          <strong>{formatReadinessNumber(assignment.effective_runtime_timeframe_secs, "s")}</strong>
         </div>
         <div>
           <span>Required history bars</span>
-          <strong>{assignment.required_history_bars ?? "unknown"}</strong>
+          <strong>{formatReadinessNumber(assignment.required_history_bars)}</strong>
         </div>
         <div>
           <span>Loaded completed bars</span>
-          <strong>{assignment.loaded_completed_bars ?? "unknown"}</strong>
+          <strong>{formatReadinessNumber(assignment.loaded_completed_bars)}</strong>
         </div>
         <div>
           <span>Asset class</span>
@@ -135,11 +136,11 @@ function AssignmentBlock({ assignment }: { assignment: DailyDataReadinessAssignm
         </div>
         <div>
           <span>Effective grace secs</span>
-          <strong>{assignment.effective_grace_seconds}</strong>
+          <strong>{formatReadinessNumber(assignment.effective_grace_seconds, "s")}</strong>
         </div>
         <div>
           <span>Effective future skew secs</span>
-          <strong>{assignment.effective_future_skew_seconds}</strong>
+          <strong>{formatReadinessNumber(assignment.effective_future_skew_seconds, "s")}</strong>
         </div>
       </div>
 
@@ -319,11 +320,11 @@ export function DailyDataReadinessPanel({
             </div>
             <div>
               <span>Configured grace ceiling</span>
-              <strong>{response.configured_grace_seconds}s</strong>
+              <strong>{formatReadinessNumber(response.configured_grace_seconds, "s")}</strong>
             </div>
             <div>
               <span>Configured future-skew ceiling</span>
-              <strong>{response.configured_future_skew_seconds}s</strong>
+              <strong>{formatReadinessNumber(response.configured_future_skew_seconds, "s")}</strong>
             </div>
           </div>
 

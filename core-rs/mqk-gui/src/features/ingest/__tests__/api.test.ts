@@ -64,6 +64,7 @@ import {
   classifyDailyDataReadinessDisplay,
   DAILY_DATA_READINESS_ROUTE,
   fetchDailyDataReadiness,
+  formatReadinessNumber,
   normalizeDailyDataReadinessResponse,
 } from "../api.ts";
 import type { CryptoRegistryReadinessResponse, DailyDataReadinessAssignmentResponse, DailyDataReadinessResponse, IngestJobStatusResponse, IntradayRefreshStatusResponse, KrakenOhlcStatusResponse, KrakenSchedulerReadinessResponse, KrakenSchedulerTaskStatusResponse, LatestMarkStatusResponse, MdBarsCoverageResponse, MdBarsCoverageRow, TrackedEquitiesResponse } from "../types.ts";
@@ -3323,16 +3324,43 @@ test("normalizeDailyDataReadinessResponse: missing numbers do not become zero", 
   assert.equal(a.required_history_bars, null);
 });
 
-test("normalizeDailyDataReadinessResponse: missing start_allowed does not become true", () => {
+test("normalizeDailyDataReadinessResponse: missing start_allowed normalizes to null", () => {
   const raw = { applicability: "applicable", assignments: [] };
+  const normalized = normalizeDailyDataReadinessResponse(raw as unknown);
+  assert.equal(normalized.start_allowed, null);
+  assert.notEqual(normalized.start_allowed, false);
+});
+
+test("normalizeDailyDataReadinessResponse: string 'true' start_allowed normalizes to null, not false or true", () => {
+  const raw = { applicability: "applicable", start_allowed: "true", assignments: [] };
+  const normalized = normalizeDailyDataReadinessResponse(raw as unknown);
+  assert.equal(normalized.start_allowed, null);
+});
+
+test("normalizeDailyDataReadinessResponse: string 'false' start_allowed normalizes to null, not false", () => {
+  const raw = { applicability: "applicable", start_allowed: "false", assignments: [] };
+  const normalized = normalizeDailyDataReadinessResponse(raw as unknown);
+  assert.equal(normalized.start_allowed, null);
+  assert.notEqual(normalized.start_allowed, false);
+});
+
+test("normalizeDailyDataReadinessResponse: numeric 0 start_allowed normalizes to null, not false", () => {
+  const raw = { applicability: "applicable", start_allowed: 0, assignments: [] };
+  const normalized = normalizeDailyDataReadinessResponse(raw as unknown);
+  assert.equal(normalized.start_allowed, null);
+  assert.notEqual(normalized.start_allowed, false);
+});
+
+test("normalizeDailyDataReadinessResponse: explicit boolean false start_allowed remains false", () => {
+  const raw = { applicability: "applicable", start_allowed: false, assignments: [] };
   const normalized = normalizeDailyDataReadinessResponse(raw as unknown);
   assert.equal(normalized.start_allowed, false);
 });
 
-test("normalizeDailyDataReadinessResponse: non-boolean start_allowed does not become true", () => {
-  const raw = { applicability: "applicable", start_allowed: "true", assignments: [] };
+test("normalizeDailyDataReadinessResponse: explicit boolean true start_allowed remains true", () => {
+  const raw = { applicability: "applicable", start_allowed: true, assignments: [] };
   const normalized = normalizeDailyDataReadinessResponse(raw as unknown);
-  assert.equal(normalized.start_allowed, false);
+  assert.equal(normalized.start_allowed, true);
 });
 
 test("normalizeDailyDataReadinessResponse: missing applicability becomes unknown", () => {
@@ -3386,7 +3414,7 @@ test("normalizeDailyDataReadinessResponse: entirely malformed top-level input do
   assert.doesNotThrow(() => normalizeDailyDataReadinessResponse(undefined as unknown));
   const normalized = normalizeDailyDataReadinessResponse(null as unknown);
   assert.equal(normalized.applicability, "unknown");
-  assert.equal(normalized.start_allowed, false);
+  assert.equal(normalized.start_allowed, null);
   assert.deepEqual(normalized.assignments, []);
 });
 
@@ -3498,6 +3526,36 @@ test("classifyDailyDataReadinessDisplay: one blocked assignment prevents ready",
   assert.notEqual(classifyDailyDataReadinessDisplay(resp, null), "ready");
 });
 
+test("classifyDailyDataReadinessDisplay: applicable response with start_allowed=null classifies unknown, never blocked", () => {
+  const resp = makeDailyDataReadinessResponse({
+    applicability: "applicable",
+    start_allowed: null,
+  });
+  const result = classifyDailyDataReadinessDisplay(resp, null);
+  assert.equal(result, "unknown");
+  assert.notEqual(result, "blocked");
+});
+
+test("classifyDailyDataReadinessDisplay: fully valid explicit false response remains blocked", () => {
+  const resp = makeDailyDataReadinessResponse({
+    applicability: "applicable",
+    start_allowed: false,
+    assignments: [],
+  });
+  assert.equal(classifyDailyDataReadinessDisplay(resp, null), "blocked");
+});
+
+test("classifyDailyDataReadinessDisplay: fully valid explicit true/all-ready response remains ready", () => {
+  const resp = makeDailyDataReadinessResponse({
+    applicability: "applicable",
+    start_allowed: true,
+    assignments: [
+      makeDailyDataReadinessAssignment({ readiness_state: "ready", blockers: [] }),
+    ],
+  });
+  assert.equal(classifyDailyDataReadinessDisplay(resp, null), "ready");
+});
+
 // --- buildDailyDataReadinessDiagnosticText ---
 
 test("buildDailyDataReadinessDiagnosticText: includes assignment identity", () => {
@@ -3585,6 +3643,54 @@ test("buildDailyDataReadinessDiagnosticText: does not contain operator tokens or
   assert.ok(!lower.includes("password"));
   assert.ok(!lower.includes("api_key"));
   assert.ok(!lower.includes("secret"));
+});
+
+test("buildDailyDataReadinessDiagnosticText: null start_allowed prints unknown, not false", () => {
+  const resp = makeDailyDataReadinessResponse({ start_allowed: null });
+  const text = buildDailyDataReadinessDiagnosticText(resp);
+  assert.ok(text.includes("start_allowed: unknown"));
+  assert.ok(!text.includes("start_allowed: false"));
+  assert.ok(!text.includes("start_allowed: null"));
+});
+
+// --- formatReadinessNumber ---
+
+test("formatReadinessNumber: null renders unknown", () => {
+  assert.equal(formatReadinessNumber(null), "unknown");
+});
+
+test("formatReadinessNumber: undefined renders unknown", () => {
+  assert.equal(formatReadinessNumber(undefined), "unknown");
+});
+
+test("formatReadinessNumber: NaN renders unknown", () => {
+  assert.equal(formatReadinessNumber(NaN), "unknown");
+});
+
+test("formatReadinessNumber: Infinity renders unknown", () => {
+  assert.equal(formatReadinessNumber(Infinity), "unknown");
+  assert.equal(formatReadinessNumber(-Infinity), "unknown");
+});
+
+test("formatReadinessNumber: zero renders 0, not unknown", () => {
+  assert.equal(formatReadinessNumber(0), "0");
+});
+
+test("formatReadinessNumber: seconds zero renders 0s", () => {
+  assert.equal(formatReadinessNumber(0, "s"), "0s");
+});
+
+test("formatReadinessNumber: seconds null renders unknown, not a bare suffix", () => {
+  assert.equal(formatReadinessNumber(null, "s"), "unknown");
+  assert.notEqual(formatReadinessNumber(null, "s"), "s");
+});
+
+test("formatReadinessNumber: valid positive number renders with suffix", () => {
+  assert.equal(formatReadinessNumber(300, "s"), "300s");
+});
+
+test("formatReadinessNumber: valid positive number renders without suffix when omitted", () => {
+  assert.equal(formatReadinessNumber(250), "250");
 });
 
 // --- fetchDailyDataReadiness ---

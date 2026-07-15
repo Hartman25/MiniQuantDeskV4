@@ -1503,7 +1503,11 @@ function normalizeDailyDataReadinessAssignment(raw: unknown): DailyDataReadiness
  * response shape. Pure — no HTTP, no throw.
  *
  * Fail-closed rules (D.2):
- * - `start_allowed` missing/non-boolean becomes `false`, never `true`.
+ * - `start_allowed` missing/non-boolean becomes `null` — never `true` and
+ *   never `false`. Only a literal boolean `true`/`false` in the response
+ *   body is preserved; the malformed/missing case is left for the display
+ *   classifier to render as `unknown`, never fabricated as a proven
+ *   `blocked` verdict.
  * - `applicability` missing/non-string becomes `"unknown"`, never
  *   `"applicable"`.
  * - Malformed `assignments` entries are normalized individually and never
@@ -1519,7 +1523,7 @@ export function normalizeDailyDataReadinessResponse(raw: unknown): DailyDataRead
     binding_scope: normalizeString(record.binding_scope, "unknown"),
     assignment_source: normalizeString(record.assignment_source, "unknown"),
     applicability: normalizeString(record.applicability, "unknown"),
-    start_allowed: record.start_allowed === true,
+    start_allowed: normalizeNullableBoolean(record.start_allowed),
     top_level_blocker: normalizeNullableString(record.top_level_blocker),
     configured_grace_seconds: normalizeNullableNumber(record.configured_grace_seconds) ?? 0,
     configured_future_skew_seconds: normalizeNullableNumber(record.configured_future_skew_seconds) ?? 0,
@@ -1548,6 +1552,21 @@ export async function fetchDailyDataReadiness(): Promise<FetchDailyDataReadiness
   return { ok: true, data: normalizeDailyDataReadinessResponse(result.data) };
 }
 
+/**
+ * Format a nullable/possibly-malformed numeric readiness value for display.
+ * Only a finite `number` renders as a value (with the optional suffix);
+ * `null`, `undefined`, `NaN`, and `Infinity` all render as `"unknown"` —
+ * never a bare suffix, blank content, or a fabricated `0`.
+ */
+export function formatReadinessNumber(
+  value: number | null | undefined,
+  suffix = "",
+): string {
+  return typeof value === "number" && Number.isFinite(value)
+    ? `${value}${suffix}`
+    : "unknown";
+}
+
 export type DailyDataReadinessDisplayState = "ready" | "blocked" | "unknown" | "not_applicable";
 
 /**
@@ -1559,6 +1578,10 @@ export type DailyDataReadinessDisplayState = "ready" | "blocked" | "unknown" | "
  * `start_allowed=true` response containing a blocked or unknown assignment
  * is "unknown", never "ready" and never "blocked" (the response is
  * internally contradictory, not proven either way).
+ *
+ * `start_allowed === null` (missing/malformed transport data) is always
+ * "unknown" — it must never be inferred as a proven "blocked" verdict.
+ * Only an explicit `start_allowed === false` proves "blocked".
  */
 export function classifyDailyDataReadinessDisplay(
   response: DailyDataReadinessResponse | null,
@@ -1570,6 +1593,7 @@ export function classifyDailyDataReadinessDisplay(
   if (response.applicability === "not_applicable") return "not_applicable";
   if (response.applicability !== "applicable") return "unknown";
 
+  if (response.start_allowed === null) return "unknown";
   if (response.start_allowed === false) return "blocked";
 
   if (response.assignments.length === 0) return "unknown";
@@ -1597,7 +1621,9 @@ export function buildDailyDataReadinessDiagnosticText(response: DailyDataReadine
   lines.push(`binding_scope: ${response.binding_scope}`);
   lines.push(`applicability: ${response.applicability}`);
   lines.push(`overall_state: ${overall}`);
-  lines.push(`start_allowed: ${String(response.start_allowed)}`);
+  lines.push(
+    `start_allowed: ${response.start_allowed === null ? "unknown" : String(response.start_allowed)}`,
+  );
   lines.push(`top_level_blocker: ${response.top_level_blocker ?? "none"}`);
   lines.push(`assignment_source: ${response.assignment_source}`);
   lines.push(`calendar_source: ${response.calendar_source ?? "unknown"}`);
