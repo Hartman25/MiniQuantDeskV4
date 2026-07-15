@@ -9,6 +9,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Panel } from "../../components/common/Panel";
 import { formatDateTime } from "../../lib/format";
+import { DailyDataReadinessPanel } from "./DailyDataReadinessPanel.tsx";
 import {
   buildActiveProviderJob,
   buildProviderJobRequest,
@@ -20,6 +21,7 @@ import {
   CRYPTO_REGISTRY_READINESS_WARNING_TEXT,
   cryptoRegistryReadinessTruthLabel,
   fetchCryptoRegistryReadiness,
+  fetchDailyDataReadiness,
   fetchIntradayRefreshStatus,
   fetchKrakenOhlcStatus,
   fetchLatestMarkStatus,
@@ -72,7 +74,7 @@ import {
 import { buildRepoRelativePath, buildMd1DSymbolPath, MD_BACKUP_1D_SEGMENTS, MD_INGEST_SEGMENTS } from "../backtests/pathHelpers.ts";
 import { getDesktopRepoRoot } from "../../desktop/bootstrap.ts";
 import type { CoverageSortMode } from "./api.ts";
-import type { ActiveIngestJob, ActiveProviderJob, CryptoRegistryReadinessResponse, IngestJobStatusKind, IntradayRefreshStatusResponse, KrakenOhlcStatusResponse, KrakenSchedulerReadinessResponse, KrakenSchedulerTaskStatusResponse, LatestMarkStatusResponse, MarketDataFeedPollOnceResponse, MarketDataFeedSchedulerStatusResponse, MarketDataFeedStatusResponse, MdBarsCoverageResponse, MdBarsCoverageRow, TrackedEquitiesResponse } from "./types.ts";
+import type { ActiveIngestJob, ActiveProviderJob, CryptoRegistryReadinessResponse, DailyDataReadinessResponse, IngestJobStatusKind, IntradayRefreshStatusResponse, KrakenOhlcStatusResponse, KrakenSchedulerReadinessResponse, KrakenSchedulerTaskStatusResponse, LatestMarkStatusResponse, MarketDataFeedPollOnceResponse, MarketDataFeedSchedulerStatusResponse, MarketDataFeedStatusResponse, MdBarsCoverageResponse, MdBarsCoverageRow, TrackedEquitiesResponse } from "./types.ts";
 
 // ---------------------------------------------------------------------------
 // Status badge
@@ -222,6 +224,11 @@ export function IngestScreen() {
   const [csvCancelError, setCsvCancelError] = useState<string | null>(null);
   const [csvCancelNotice, setCsvCancelNotice] = useState<string | null>(null);
 
+  // DAILY-DATA-READINESS-01D-GUI-01: Daily data readiness state
+  const [dailyDataReadiness, setDailyDataReadiness] = useState<DailyDataReadinessResponse | null>(null);
+  const [dailyDataReadinessLoading, setDailyDataReadinessLoading] = useState(false);
+  const [dailyDataReadinessError, setDailyDataReadinessError] = useState<string | null>(null);
+
   // Coverage state — read-only view of what's in md_bars
   const [coverageFilter, setCoverageFilter] = useState("1D");
   const [coverage, setCoverage] = useState<MdBarsCoverageResponse | null>(null);
@@ -296,6 +303,25 @@ export function IngestScreen() {
   const [providerCancelling, setProviderCancelling] = useState(false);
   const [providerCancelError, setProviderCancelError] = useState<string | null>(null);
   const [providerCancelNotice, setProviderCancelNotice] = useState<string | null>(null);
+
+  const loadDailyDataReadiness = useCallback(async () => {
+    setDailyDataReadinessLoading(true);
+    setDailyDataReadinessError(null);
+    const result = await fetchDailyDataReadiness();
+    setDailyDataReadinessLoading(false);
+    if (!result.ok) {
+      setDailyDataReadinessError(result.error ?? "Daily data readiness fetch failed.");
+      return;
+    }
+    setDailyDataReadiness(result.data ?? null);
+  }, []);
+
+  // Auto-load daily data readiness on mount. GET only — no ingest, no
+  // provider poll, no scheduler, no runtime start.
+  useEffect(() => {
+    void loadDailyDataReadiness();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const loadCoverage = useCallback(async () => {
     setCoverageLoading(true);
@@ -1391,6 +1417,14 @@ export function IngestScreen() {
           </div>
         )}
       </Panel>
+
+      {/* DAILY-DATA-READINESS-01D-GUI-01: Daily data readiness (read-only) */}
+      <DailyDataReadinessPanel
+        response={dailyDataReadiness}
+        loading={dailyDataReadinessLoading}
+        error={dailyDataReadinessError}
+        onRefresh={() => void loadDailyDataReadiness()}
+      />
 
       {/* DATA-INGEST-GUI-SYNC-ALL-01: Tracked equities registry preview */}
       <Panel

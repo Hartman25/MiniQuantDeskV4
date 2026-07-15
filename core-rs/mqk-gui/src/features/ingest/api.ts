@@ -14,6 +14,8 @@ import type {
   ActiveProviderJob,
   CancelIngestJobResponse,
   CryptoRegistryReadinessResponse,
+  DailyDataReadinessAssignmentResponse,
+  DailyDataReadinessResponse,
   IngestJobAcceptedResponse,
   IngestJobRequest,
   IngestJobStatusKind,
@@ -1440,4 +1442,205 @@ export async function fetchKrakenSchedulerTaskStatus(): Promise<FetchKrakenSched
   }
 
   return { ok: true, data: result.data };
+}
+
+// ---------------------------------------------------------------------------
+// DAILY-DATA-READINESS-01D-GUI-01: Daily data readiness (read-only,
+// configuration-preview projection of the strict readiness evaluator)
+// ---------------------------------------------------------------------------
+
+export const DAILY_DATA_READINESS_ROUTE = "/api/v1/market-data/readiness";
+
+export interface FetchDailyDataReadinessResult {
+  ok: boolean;
+  data?: DailyDataReadinessResponse;
+  error?: string;
+}
+
+/**
+ * Normalize one assignment entry from an unknown/malformed raw value.
+ *
+ * - readiness/continuity/provenance states missing or non-string become
+ *   "unknown", never a value that could be mistaken for "ready"/"ok".
+ * - Numeric evidence (bar counts, timestamps) missing or non-finite becomes
+ *   `null`, never `0`.
+ * - `actual_provider_ids` / `actual_provider_symbols` / `blockers` /
+ *   `remediation` default to `[]` on malformed input; unknown string
+ *   entries are preserved verbatim.
+ */
+function normalizeDailyDataReadinessAssignment(raw: unknown): DailyDataReadinessAssignmentResponse {
+  const record = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  return {
+    assignment_symbol: normalizeString(record.assignment_symbol, "unknown"),
+    assignment_timeframe: normalizeString(record.assignment_timeframe, "unknown"),
+    configured_strategy_id: normalizeString(record.configured_strategy_id, "unknown"),
+    effective_runtime_strategy_id: normalizeNullableString(record.effective_runtime_strategy_id),
+    effective_runtime_target_symbol: normalizeNullableString(record.effective_runtime_target_symbol),
+    effective_runtime_timeframe_secs: normalizeNullableNumber(record.effective_runtime_timeframe_secs),
+    required_history_bars: normalizeNullableNumber(record.required_history_bars),
+    asset_class: normalizeNullableString(record.asset_class),
+    expected_provider_id: normalizeNullableString(record.expected_provider_id),
+    expected_provider_symbol: normalizeNullableString(record.expected_provider_symbol),
+    actual_provider_ids: normalizeStringArray(record.actual_provider_ids),
+    actual_provider_symbols: normalizeStringArray(record.actual_provider_symbols),
+    loaded_completed_bars: normalizeNullableNumber(record.loaded_completed_bars),
+    expected_latest_bar_ts: normalizeNullableNumber(record.expected_latest_bar_ts),
+    actual_latest_bar_ts: normalizeNullableNumber(record.actual_latest_bar_ts),
+    continuity_state: normalizeString(record.continuity_state, "unknown"),
+    provenance_state: normalizeString(record.provenance_state, "unknown"),
+    readiness_state: normalizeString(record.readiness_state, "unknown"),
+    blockers: normalizeStringArray(record.blockers),
+    remediation: normalizeStringArray(record.remediation),
+    configured_grace_seconds: normalizeNullableNumber(record.configured_grace_seconds) ?? 0,
+    effective_grace_seconds: normalizeNullableNumber(record.effective_grace_seconds) ?? 0,
+    configured_future_skew_seconds: normalizeNullableNumber(record.configured_future_skew_seconds) ?? 0,
+    effective_future_skew_seconds: normalizeNullableNumber(record.effective_future_skew_seconds) ?? 0,
+  };
+}
+
+/**
+ * Normalize a raw `GET /api/v1/market-data/readiness` body into the typed
+ * response shape. Pure — no HTTP, no throw.
+ *
+ * Fail-closed rules (D.2):
+ * - `start_allowed` missing/non-boolean becomes `false`, never `true`.
+ * - `applicability` missing/non-string becomes `"unknown"`, never
+ *   `"applicable"`.
+ * - Malformed `assignments` entries are normalized individually and never
+ *   throw or drop the rest of the array.
+ */
+export function normalizeDailyDataReadinessResponse(raw: unknown): DailyDataReadinessResponse {
+  const record = raw && typeof raw === "object" ? (raw as Record<string, unknown>) : {};
+  const assignmentsRaw = Array.isArray(record.assignments) ? record.assignments : [];
+  return {
+    canonical_route: normalizeString(record.canonical_route, DAILY_DATA_READINESS_ROUTE),
+    schema_version: normalizeString(record.schema_version, "unknown"),
+    evaluated_at_utc: normalizeString(record.evaluated_at_utc, "unknown"),
+    binding_scope: normalizeString(record.binding_scope, "unknown"),
+    assignment_source: normalizeString(record.assignment_source, "unknown"),
+    applicability: normalizeString(record.applicability, "unknown"),
+    start_allowed: record.start_allowed === true,
+    top_level_blocker: normalizeNullableString(record.top_level_blocker),
+    configured_grace_seconds: normalizeNullableNumber(record.configured_grace_seconds) ?? 0,
+    configured_future_skew_seconds: normalizeNullableNumber(record.configured_future_skew_seconds) ?? 0,
+    calendar_source: normalizeNullableString(record.calendar_source),
+    calendar_coverage_state: normalizeString(record.calendar_coverage_state, "unknown"),
+    market_date: normalizeNullableString(record.market_date),
+    session_open_utc: normalizeNullableString(record.session_open_utc),
+    session_close_utc: normalizeNullableString(record.session_close_utc),
+    assignments: assignmentsRaw.map(normalizeDailyDataReadinessAssignment),
+  };
+}
+
+/**
+ * Fetch GET /api/v1/market-data/readiness.
+ *
+ * Safety: Read-only GET only. No ingest job submitted. No provider polled.
+ * No scheduler started. No runtime started. No readiness truth mutated.
+ */
+export async function fetchDailyDataReadiness(): Promise<FetchDailyDataReadinessResult> {
+  const result = await fetchJsonCandidate<unknown>(DAILY_DATA_READINESS_ROUTE);
+
+  if (!result.ok) {
+    return { ok: false, error: result.error ?? "Daily data readiness fetch failed." };
+  }
+
+  return { ok: true, data: normalizeDailyDataReadinessResponse(result.data) };
+}
+
+export type DailyDataReadinessDisplayState = "ready" | "blocked" | "unknown" | "not_applicable";
+
+/**
+ * Classify the overall display state for the readiness panel.
+ *
+ * "ready" requires proof at every level (applicable, start_allowed=true,
+ * at least one assignment, every assignment readiness_state=="ready" with
+ * no blockers) — `start_allowed=true` alone is never sufficient. A
+ * `start_allowed=true` response containing a blocked or unknown assignment
+ * is "unknown", never "ready" and never "blocked" (the response is
+ * internally contradictory, not proven either way).
+ */
+export function classifyDailyDataReadinessDisplay(
+  response: DailyDataReadinessResponse | null,
+  fetchError?: string | null,
+): DailyDataReadinessDisplayState {
+  if (fetchError) return "unknown";
+  if (response === null) return "unknown";
+
+  if (response.applicability === "not_applicable") return "not_applicable";
+  if (response.applicability !== "applicable") return "unknown";
+
+  if (response.start_allowed === false) return "blocked";
+
+  if (response.assignments.length === 0) return "unknown";
+
+  const allReady = response.assignments.every(
+    (a) => a.readiness_state === "ready" && a.blockers.length === 0,
+  );
+
+  return allReady ? "ready" : "unknown";
+}
+
+/**
+ * Build a bounded, plain-text diagnostic summary for clipboard copy.
+ * Includes schema/evaluation identity, calendar truth, per-assignment
+ * identity/provider/continuity truth, and every blocker and remediation
+ * entry. Never includes credentials, tokens, or environment dumps.
+ */
+export function buildDailyDataReadinessDiagnosticText(response: DailyDataReadinessResponse): string {
+  const overall = classifyDailyDataReadinessDisplay(response, null);
+  const lines: string[] = [];
+
+  lines.push("Daily Data Readiness Diagnostics");
+  lines.push(`schema_version: ${response.schema_version}`);
+  lines.push(`evaluated_at_utc: ${response.evaluated_at_utc}`);
+  lines.push(`binding_scope: ${response.binding_scope}`);
+  lines.push(`applicability: ${response.applicability}`);
+  lines.push(`overall_state: ${overall}`);
+  lines.push(`start_allowed: ${String(response.start_allowed)}`);
+  lines.push(`top_level_blocker: ${response.top_level_blocker ?? "none"}`);
+  lines.push(`assignment_source: ${response.assignment_source}`);
+  lines.push(`calendar_source: ${response.calendar_source ?? "unknown"}`);
+  lines.push(`calendar_coverage_state: ${response.calendar_coverage_state}`);
+  lines.push(`market_date: ${response.market_date ?? "unknown"}`);
+  lines.push(`session_open_utc: ${response.session_open_utc ?? "unknown"}`);
+  lines.push(`session_close_utc: ${response.session_close_utc ?? "unknown"}`);
+
+  if (response.binding_scope === "configuration_preview") {
+    lines.push(
+      "NOTE: This is a configuration preview. Runtime start re-evaluates readiness using the exact start-attempt binding.",
+    );
+  }
+
+  if (response.assignments.length === 0) {
+    lines.push("assignments: none");
+  } else {
+    response.assignments.forEach((a, idx) => {
+      lines.push(`--- assignment ${idx + 1} ---`);
+      lines.push(`symbol: ${a.assignment_symbol}`);
+      lines.push(`timeframe: ${a.assignment_timeframe}`);
+      lines.push(`configured_strategy_id: ${a.configured_strategy_id}`);
+      lines.push(`effective_runtime_strategy_id: ${a.effective_runtime_strategy_id ?? "unknown"}`);
+      lines.push(`effective_runtime_target_symbol: ${a.effective_runtime_target_symbol ?? "unknown"}`);
+      lines.push(`expected_provider_id: ${a.expected_provider_id ?? "unknown"}`);
+      lines.push(
+        `actual_provider_ids: ${a.actual_provider_ids.length > 0 ? a.actual_provider_ids.join(", ") : "none observed"}`,
+      );
+      lines.push(`expected_provider_symbol: ${a.expected_provider_symbol ?? "unknown"}`);
+      lines.push(
+        `actual_provider_symbols: ${a.actual_provider_symbols.length > 0 ? a.actual_provider_symbols.join(", ") : "none observed"}`,
+      );
+      lines.push(`continuity_state: ${a.continuity_state}`);
+      lines.push(`provenance_state: ${a.provenance_state}`);
+      lines.push(`readiness_state: ${a.readiness_state}`);
+      lines.push(
+        `blockers: ${a.blockers.length > 0 ? a.blockers.join(", ") : "none"}`,
+      );
+      lines.push(
+        `remediation: ${a.remediation.length > 0 ? a.remediation.join(" | ") : "none"}`,
+      );
+    });
+  }
+
+  return lines.join("\n");
 }

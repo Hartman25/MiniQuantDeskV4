@@ -60,8 +60,13 @@ import {
   isKrakenSchedulerTaskStatusActive,
   krakenSchedulerTaskStatusTruthLabel,
   KRAKEN_SCHEDULER_TASK_STATUS_WARNING_TEXT,
+  buildDailyDataReadinessDiagnosticText,
+  classifyDailyDataReadinessDisplay,
+  DAILY_DATA_READINESS_ROUTE,
+  fetchDailyDataReadiness,
+  normalizeDailyDataReadinessResponse,
 } from "../api.ts";
-import type { CryptoRegistryReadinessResponse, IngestJobStatusResponse, IntradayRefreshStatusResponse, KrakenOhlcStatusResponse, KrakenSchedulerReadinessResponse, KrakenSchedulerTaskStatusResponse, LatestMarkStatusResponse, MdBarsCoverageResponse, MdBarsCoverageRow, TrackedEquitiesResponse } from "../types.ts";
+import type { CryptoRegistryReadinessResponse, DailyDataReadinessAssignmentResponse, DailyDataReadinessResponse, IngestJobStatusResponse, IntradayRefreshStatusResponse, KrakenOhlcStatusResponse, KrakenSchedulerReadinessResponse, KrakenSchedulerTaskStatusResponse, LatestMarkStatusResponse, MdBarsCoverageResponse, MdBarsCoverageRow, TrackedEquitiesResponse } from "../types.ts";
 
 // ---------------------------------------------------------------------------
 // normalizeIngestJobStatus
@@ -3197,6 +3202,425 @@ test("fetchKrakenSchedulerTaskStatus maps a network/transport failure to ok:fals
 
   try {
     const result = await fetchKrakenSchedulerTaskStatus();
+    assert.equal(result.ok, false);
+    assert.ok(result.error);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+// ---------------------------------------------------------------------------
+// DAILY-DATA-READINESS-01D-GUI-01: Daily data readiness helpers
+// ---------------------------------------------------------------------------
+
+function makeDailyDataReadinessAssignment(
+  overrides: Partial<DailyDataReadinessAssignmentResponse> = {},
+): DailyDataReadinessAssignmentResponse {
+  return {
+    assignment_symbol: "AAPL",
+    assignment_timeframe: "1D",
+    configured_strategy_id: "strat-1",
+    effective_runtime_strategy_id: "strat-1",
+    effective_runtime_target_symbol: "AAPL",
+    effective_runtime_timeframe_secs: 86400,
+    required_history_bars: 200,
+    asset_class: "equity",
+    expected_provider_id: "alpaca",
+    expected_provider_symbol: "AAPL",
+    actual_provider_ids: ["alpaca"],
+    actual_provider_symbols: ["AAPL"],
+    loaded_completed_bars: 250,
+    expected_latest_bar_ts: 1718000000,
+    actual_latest_bar_ts: 1718000000,
+    continuity_state: "ok",
+    provenance_state: "ok",
+    readiness_state: "ready",
+    blockers: [],
+    remediation: [],
+    configured_grace_seconds: 60,
+    effective_grace_seconds: 60,
+    configured_future_skew_seconds: 5,
+    effective_future_skew_seconds: 5,
+    ...overrides,
+  };
+}
+
+function makeDailyDataReadinessResponse(
+  overrides: Partial<DailyDataReadinessResponse> = {},
+): DailyDataReadinessResponse {
+  return {
+    canonical_route: DAILY_DATA_READINESS_ROUTE,
+    schema_version: "daily-data-readiness-v1",
+    evaluated_at_utc: "2026-07-15T09:30:00Z",
+    binding_scope: "configuration_preview",
+    assignment_source: "watchlist_v2",
+    applicability: "applicable",
+    start_allowed: true,
+    top_level_blocker: null,
+    configured_grace_seconds: 60,
+    configured_future_skew_seconds: 5,
+    calendar_source: "exchange_calendar",
+    calendar_coverage_state: "active",
+    market_date: "2026-07-15",
+    session_open_utc: "2026-07-15T13:30:00Z",
+    session_close_utc: "2026-07-15T20:00:00Z",
+    assignments: [makeDailyDataReadinessAssignment()],
+    ...overrides,
+  };
+}
+
+// --- normalizeDailyDataReadinessResponse ---
+
+test("normalizeDailyDataReadinessResponse: complete ready response normalizes correctly", () => {
+  const resp = makeDailyDataReadinessResponse();
+  const normalized = normalizeDailyDataReadinessResponse(resp as unknown);
+  assert.deepEqual(normalized, resp);
+});
+
+test("normalizeDailyDataReadinessResponse: complete blocked response preserves all blockers", () => {
+  const blocked = makeDailyDataReadinessAssignment({
+    readiness_state: "blocked",
+    blockers: ["insufficient_history", "market_data_missing", "duplicate_timestamp"],
+    remediation: ["backfill history", "run ingest", "dedupe rows"],
+  });
+  const resp = makeDailyDataReadinessResponse({ start_allowed: false, assignments: [blocked] });
+  const normalized = normalizeDailyDataReadinessResponse(resp as unknown);
+  assert.deepEqual(normalized.assignments[0].blockers, [
+    "insufficient_history",
+    "market_data_missing",
+    "duplicate_timestamp",
+  ]);
+  assert.equal(normalized.assignments[0].blockers.length, 3);
+});
+
+test("normalizeDailyDataReadinessResponse: null numeric evidence remains null", () => {
+  const raw = makeDailyDataReadinessAssignment({
+    loaded_completed_bars: null,
+    expected_latest_bar_ts: null,
+    actual_latest_bar_ts: null,
+    required_history_bars: null,
+    effective_runtime_timeframe_secs: null,
+  });
+  const resp = makeDailyDataReadinessResponse({ assignments: [raw] });
+  const normalized = normalizeDailyDataReadinessResponse(resp as unknown);
+  const a = normalized.assignments[0];
+  assert.equal(a.loaded_completed_bars, null);
+  assert.equal(a.expected_latest_bar_ts, null);
+  assert.equal(a.actual_latest_bar_ts, null);
+  assert.equal(a.required_history_bars, null);
+  assert.equal(a.effective_runtime_timeframe_secs, null);
+});
+
+test("normalizeDailyDataReadinessResponse: missing numbers do not become zero", () => {
+  const raw = { assignment_symbol: "AAPL", assignment_timeframe: "1D" }; // no numeric fields at all
+  const resp = { applicability: "applicable", assignments: [raw] };
+  const normalized = normalizeDailyDataReadinessResponse(resp as unknown);
+  const a = normalized.assignments[0];
+  assert.equal(a.loaded_completed_bars, null);
+  assert.notEqual(a.loaded_completed_bars, 0);
+  assert.equal(a.expected_latest_bar_ts, null);
+  assert.equal(a.actual_latest_bar_ts, null);
+  assert.equal(a.required_history_bars, null);
+});
+
+test("normalizeDailyDataReadinessResponse: missing start_allowed does not become true", () => {
+  const raw = { applicability: "applicable", assignments: [] };
+  const normalized = normalizeDailyDataReadinessResponse(raw as unknown);
+  assert.equal(normalized.start_allowed, false);
+});
+
+test("normalizeDailyDataReadinessResponse: non-boolean start_allowed does not become true", () => {
+  const raw = { applicability: "applicable", start_allowed: "true", assignments: [] };
+  const normalized = normalizeDailyDataReadinessResponse(raw as unknown);
+  assert.equal(normalized.start_allowed, false);
+});
+
+test("normalizeDailyDataReadinessResponse: missing applicability becomes unknown", () => {
+  const raw = { start_allowed: true, assignments: [] };
+  const normalized = normalizeDailyDataReadinessResponse(raw as unknown);
+  assert.equal(normalized.applicability, "unknown");
+});
+
+test("normalizeDailyDataReadinessResponse: malformed arrays become empty arrays", () => {
+  const raw = makeDailyDataReadinessAssignment();
+  const malformed = {
+    ...raw,
+    actual_provider_ids: "not-an-array",
+    actual_provider_symbols: 42,
+    blockers: null,
+    remediation: { not: "an array" },
+  };
+  const resp = { applicability: "applicable", assignments: [malformed] };
+  const normalized = normalizeDailyDataReadinessResponse(resp as unknown);
+  const a = normalized.assignments[0];
+  assert.deepEqual(a.actual_provider_ids, []);
+  assert.deepEqual(a.actual_provider_symbols, []);
+  assert.deepEqual(a.blockers, []);
+  assert.deepEqual(a.remediation, []);
+});
+
+test("normalizeDailyDataReadinessResponse: top-level assignments non-array becomes empty array", () => {
+  const raw = { applicability: "applicable", assignments: "not-an-array" };
+  const normalized = normalizeDailyDataReadinessResponse(raw as unknown);
+  assert.deepEqual(normalized.assignments, []);
+});
+
+test("normalizeDailyDataReadinessResponse: malformed assignment entries do not throw", () => {
+  const raw = {
+    applicability: "applicable",
+    assignments: [null, undefined, "a string entry", 42, [], {}],
+  };
+  assert.doesNotThrow(() => normalizeDailyDataReadinessResponse(raw as unknown));
+  const normalized = normalizeDailyDataReadinessResponse(raw as unknown);
+  assert.equal(normalized.assignments.length, 6);
+  for (const a of normalized.assignments) {
+    assert.equal(a.assignment_symbol, "unknown");
+    assert.equal(a.readiness_state, "unknown");
+    assert.deepEqual(a.blockers, []);
+  }
+});
+
+test("normalizeDailyDataReadinessResponse: entirely malformed top-level input does not throw", () => {
+  assert.doesNotThrow(() => normalizeDailyDataReadinessResponse("not an object" as unknown));
+  assert.doesNotThrow(() => normalizeDailyDataReadinessResponse(null as unknown));
+  assert.doesNotThrow(() => normalizeDailyDataReadinessResponse(undefined as unknown));
+  const normalized = normalizeDailyDataReadinessResponse(null as unknown);
+  assert.equal(normalized.applicability, "unknown");
+  assert.equal(normalized.start_allowed, false);
+  assert.deepEqual(normalized.assignments, []);
+});
+
+test("normalizeDailyDataReadinessResponse: unknown blocker codes are preserved", () => {
+  const raw = makeDailyDataReadinessAssignment({
+    blockers: ["totally_new_blocker_code_v7", "provider_timestamp_convention_unverified"],
+  });
+  const resp = makeDailyDataReadinessResponse({ assignments: [raw] });
+  const normalized = normalizeDailyDataReadinessResponse(resp as unknown);
+  assert.deepEqual(normalized.assignments[0].blockers, [
+    "totally_new_blocker_code_v7",
+    "provider_timestamp_convention_unverified",
+  ]);
+});
+
+test("normalizeDailyDataReadinessResponse: expected and actual provider arrays remain distinct", () => {
+  const raw = makeDailyDataReadinessAssignment({
+    expected_provider_id: "alpaca",
+    expected_provider_symbol: "AAPL",
+    actual_provider_ids: ["twelvedata"],
+    actual_provider_symbols: ["AAPL.US"],
+  });
+  const resp = makeDailyDataReadinessResponse({ assignments: [raw] });
+  const normalized = normalizeDailyDataReadinessResponse(resp as unknown);
+  const a = normalized.assignments[0];
+  assert.equal(a.expected_provider_id, "alpaca");
+  assert.deepEqual(a.actual_provider_ids, ["twelvedata"]);
+  assert.notDeepEqual(a.actual_provider_ids, [a.expected_provider_id]);
+  assert.equal(a.expected_provider_symbol, "AAPL");
+  assert.deepEqual(a.actual_provider_symbols, ["AAPL.US"]);
+});
+
+// --- classifyDailyDataReadinessDisplay ---
+
+test("classifyDailyDataReadinessDisplay: fully proven applicable response becomes ready", () => {
+  const resp = makeDailyDataReadinessResponse({
+    applicability: "applicable",
+    start_allowed: true,
+    assignments: [makeDailyDataReadinessAssignment({ readiness_state: "ready", blockers: [] })],
+  });
+  assert.equal(classifyDailyDataReadinessDisplay(resp, null), "ready");
+});
+
+test("classifyDailyDataReadinessDisplay: start_allowed=false becomes blocked", () => {
+  const resp = makeDailyDataReadinessResponse({ applicability: "applicable", start_allowed: false });
+  assert.equal(classifyDailyDataReadinessDisplay(resp, null), "blocked");
+});
+
+test("classifyDailyDataReadinessDisplay: not-applicable response becomes not_applicable", () => {
+  const resp = makeDailyDataReadinessResponse({ applicability: "not_applicable", start_allowed: false, assignments: [] });
+  assert.equal(classifyDailyDataReadinessDisplay(resp, null), "not_applicable");
+});
+
+test("classifyDailyDataReadinessDisplay: fetch failure becomes unknown", () => {
+  const resp = makeDailyDataReadinessResponse();
+  assert.equal(classifyDailyDataReadinessDisplay(resp, "network error"), "unknown");
+});
+
+test("classifyDailyDataReadinessDisplay: missing response becomes unknown", () => {
+  assert.equal(classifyDailyDataReadinessDisplay(null, null), "unknown");
+});
+
+test("classifyDailyDataReadinessDisplay: applicable response with no assignments becomes unknown", () => {
+  const resp = makeDailyDataReadinessResponse({ applicability: "applicable", start_allowed: true, assignments: [] });
+  assert.equal(classifyDailyDataReadinessDisplay(resp, null), "unknown");
+});
+
+test("classifyDailyDataReadinessDisplay: start_allowed=true plus blocked assignment becomes unknown, never ready", () => {
+  const resp = makeDailyDataReadinessResponse({
+    applicability: "applicable",
+    start_allowed: true,
+    assignments: [makeDailyDataReadinessAssignment({ readiness_state: "blocked", blockers: ["interior_gap"] })],
+  });
+  const result = classifyDailyDataReadinessDisplay(resp, null);
+  assert.equal(result, "unknown");
+  assert.notEqual(result, "ready");
+});
+
+test("classifyDailyDataReadinessDisplay: unknown assignment readiness becomes unknown", () => {
+  const resp = makeDailyDataReadinessResponse({
+    applicability: "applicable",
+    start_allowed: true,
+    assignments: [makeDailyDataReadinessAssignment({ readiness_state: "unknown" })],
+  });
+  assert.equal(classifyDailyDataReadinessDisplay(resp, null), "unknown");
+});
+
+test("classifyDailyDataReadinessDisplay: multiple all-ready assignments can become ready", () => {
+  const resp = makeDailyDataReadinessResponse({
+    applicability: "applicable",
+    start_allowed: true,
+    assignments: [
+      makeDailyDataReadinessAssignment({ assignment_symbol: "AAPL", readiness_state: "ready", blockers: [] }),
+      makeDailyDataReadinessAssignment({ assignment_symbol: "MSFT", readiness_state: "ready", blockers: [] }),
+    ],
+  });
+  assert.equal(classifyDailyDataReadinessDisplay(resp, null), "ready");
+});
+
+test("classifyDailyDataReadinessDisplay: one blocked assignment prevents ready", () => {
+  const resp = makeDailyDataReadinessResponse({
+    applicability: "applicable",
+    start_allowed: true,
+    assignments: [
+      makeDailyDataReadinessAssignment({ assignment_symbol: "AAPL", readiness_state: "ready", blockers: [] }),
+      makeDailyDataReadinessAssignment({ assignment_symbol: "MSFT", readiness_state: "blocked", blockers: ["gap_detected"] }),
+    ],
+  });
+  assert.notEqual(classifyDailyDataReadinessDisplay(resp, null), "ready");
+});
+
+// --- buildDailyDataReadinessDiagnosticText ---
+
+test("buildDailyDataReadinessDiagnosticText: includes assignment identity", () => {
+  const resp = makeDailyDataReadinessResponse({
+    assignments: [makeDailyDataReadinessAssignment({ assignment_symbol: "TSLA", assignment_timeframe: "5m" })],
+  });
+  const text = buildDailyDataReadinessDiagnosticText(resp);
+  assert.ok(text.includes("TSLA"));
+  assert.ok(text.includes("5m"));
+});
+
+test("buildDailyDataReadinessDiagnosticText: includes provider expected/actual identity", () => {
+  const resp = makeDailyDataReadinessResponse({
+    assignments: [
+      makeDailyDataReadinessAssignment({
+        expected_provider_id: "alpaca",
+        actual_provider_ids: ["twelvedata"],
+      }),
+    ],
+  });
+  const text = buildDailyDataReadinessDiagnosticText(resp);
+  assert.ok(text.includes("alpaca"));
+  assert.ok(text.includes("twelvedata"));
+});
+
+test("buildDailyDataReadinessDiagnosticText: includes every blocker", () => {
+  const resp = makeDailyDataReadinessResponse({
+    assignments: [
+      makeDailyDataReadinessAssignment({
+        blockers: ["insufficient_history", "duplicate_timestamp", "gap_detected"],
+      }),
+    ],
+  });
+  const text = buildDailyDataReadinessDiagnosticText(resp);
+  assert.ok(text.includes("insufficient_history"));
+  assert.ok(text.includes("duplicate_timestamp"));
+  assert.ok(text.includes("gap_detected"));
+});
+
+test("buildDailyDataReadinessDiagnosticText: includes remediation", () => {
+  const resp = makeDailyDataReadinessResponse({
+    assignments: [makeDailyDataReadinessAssignment({ remediation: ["backfill 200 bars via CSV ingest"] })],
+  });
+  const text = buildDailyDataReadinessDiagnosticText(resp);
+  assert.ok(text.includes("backfill 200 bars via CSV ingest"));
+});
+
+test("buildDailyDataReadinessDiagnosticText: includes binding-scope warning", () => {
+  const resp = makeDailyDataReadinessResponse({ binding_scope: "configuration_preview" });
+  const text = buildDailyDataReadinessDiagnosticText(resp);
+  assert.ok(text.toLowerCase().includes("configuration preview"));
+  assert.ok(text.toLowerCase().includes("start-attempt binding"));
+});
+
+test("buildDailyDataReadinessDiagnosticText: does not output 'undefined'", () => {
+  const resp = makeDailyDataReadinessResponse({
+    top_level_blocker: null,
+    calendar_source: null,
+    market_date: null,
+    session_open_utc: null,
+    session_close_utc: null,
+    assignments: [
+      makeDailyDataReadinessAssignment({
+        effective_runtime_strategy_id: null,
+        effective_runtime_target_symbol: null,
+        expected_provider_id: null,
+        expected_provider_symbol: null,
+        actual_provider_ids: [],
+        actual_provider_symbols: [],
+        blockers: [],
+        remediation: [],
+      }),
+    ],
+  });
+  const text = buildDailyDataReadinessDiagnosticText(resp);
+  assert.ok(!text.includes("undefined"));
+});
+
+test("buildDailyDataReadinessDiagnosticText: does not contain operator tokens or credential names", () => {
+  const resp = makeDailyDataReadinessResponse();
+  const text = buildDailyDataReadinessDiagnosticText(resp);
+  const lower = text.toLowerCase();
+  assert.ok(!lower.includes("mqk_operator_token"));
+  assert.ok(!lower.includes("bearer "));
+  assert.ok(!lower.includes("password"));
+  assert.ok(!lower.includes("api_key"));
+  assert.ok(!lower.includes("secret"));
+});
+
+// --- fetchDailyDataReadiness ---
+
+test("fetchDailyDataReadiness GETs the canonical route and normalizes the body", async () => {
+  const calls: Array<{ url: string; init?: RequestInit }> = [];
+  const originalFetch = globalThis.fetch;
+  const body = makeDailyDataReadinessResponse();
+  globalThis.fetch = (async (url: RequestInfo | URL, init?: RequestInit) => {
+    calls.push({ url: String(url), init });
+    return new Response(JSON.stringify(body), {
+      status: 200,
+      headers: { "content-type": "application/json" },
+    });
+  }) as typeof fetch;
+
+  try {
+    const result = await fetchDailyDataReadiness();
+    assert.equal(result.ok, true);
+    assert.deepEqual(result.data, body);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].url, `http://127.0.0.1:8899${DAILY_DATA_READINESS_ROUTE}`);
+    assert.equal(calls[0].init?.method, "GET");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("fetchDailyDataReadiness maps a network/transport failure to ok:false", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => {
+    throw new Error("network unreachable");
+  }) as typeof fetch;
+
+  try {
+    const result = await fetchDailyDataReadiness();
     assert.equal(result.ok, false);
     assert.ok(result.error);
   } finally {

@@ -647,3 +647,72 @@ export interface KrakenSchedulerTaskStatusResponse {
   evidence_path: string | null;
   error: string | null;
 }
+
+// ---------------------------------------------------------------------------
+// DAILY-DATA-READINESS-01D-GUI-01: Daily data readiness (read-only,
+// configuration-preview projection of the strict readiness evaluator)
+// ---------------------------------------------------------------------------
+
+/**
+ * One assignment's readiness projection. Mirrors
+ * DailyDataReadinessAssignmentResponse in api_types.rs.
+ *
+ * `continuity_state`: "ok" | "insufficient" | "duplicate_detected" |
+ * "gap_detected" | "unsupported" | "unknown". Never "ok" when a continuity
+ * or history blocker is present.
+ * `provenance_state`: "ok" | "invalid" | "unknown".
+ * `readiness_state`: "ready" | "blocked" | "db_unavailable" | "query_failed".
+ */
+export interface DailyDataReadinessAssignmentResponse {
+  assignment_symbol: string;
+  assignment_timeframe: string;
+  configured_strategy_id: string;
+  effective_runtime_strategy_id: string | null;
+  effective_runtime_target_symbol: string | null;
+  effective_runtime_timeframe_secs: number | null;
+  required_history_bars: number | null;
+  asset_class: string | null;
+  expected_provider_id: string | null;
+  expected_provider_symbol: string | null;
+  actual_provider_ids: string[];
+  actual_provider_symbols: string[];
+  loaded_completed_bars: number | null;
+  expected_latest_bar_ts: number | null;
+  actual_latest_bar_ts: number | null;
+  continuity_state: string;
+  provenance_state: string;
+  readiness_state: string;
+  blockers: string[];
+  remediation: string[];
+  configured_grace_seconds: number;
+  effective_grace_seconds: number;
+  configured_future_skew_seconds: number;
+  effective_future_skew_seconds: number;
+}
+
+/**
+ * Response for GET /api/v1/market-data/readiness. Mirrors
+ * DailyDataReadinessResponse in api_types.rs.
+ *
+ * `binding_scope` is always "configuration_preview" — never proof of an
+ * active runtime's start-attempt binding. `applicability` is "applicable" |
+ * "not_applicable".
+ */
+export interface DailyDataReadinessResponse {
+  canonical_route: string;
+  schema_version: string;
+  evaluated_at_utc: string;
+  binding_scope: string;
+  assignment_source: string;
+  applicability: string;
+  start_allowed: boolean;
+  top_level_blocker: string | null;
+  configured_grace_seconds: number;
+  configured_future_skew_seconds: number;
+  calendar_source: string | null;
+  calendar_coverage_state: string;
+  market_date: string | null;
+  session_open_utc: string | null;
+  session_close_utc: string | null;
+  assignments: DailyDataReadinessAssignmentResponse[];
+}
