@@ -220,6 +220,31 @@ pub struct AssignmentReadiness {
     pub effective_grace_seconds: i64,
     pub configured_future_skew_seconds: i64,
     pub effective_future_skew_seconds: i64,
+    /// Phase C (route/response surface, §C.2): count of `is_complete` rows in
+    /// the bounded query window. `None` when the bar stage was never reached
+    /// (binding mismatch, unknown requirement/asset-class/provider capability,
+    /// calendar unavailable) or the DB was unavailable/the query failed.
+    pub loaded_completed_bars: Option<usize>,
+    /// The last entry of the same expected-`end_ts` window
+    /// [`evaluate_bar_readiness`] computes internally (§6/§7/§10), recomputed
+    /// here from the identical inputs for response-surface exposure — never a
+    /// second, independently-derived expectation. `None` under the same
+    /// conditions as `loaded_completed_bars`, or when the window itself could
+    /// not be produced (unsupported continuity / calendar walk exhausted).
+    pub expected_latest_bar_ts: Option<i64>,
+    /// `max(end_ts)` across every row in the bounded query window. `None`
+    /// under the same conditions as `loaded_completed_bars`.
+    pub actual_latest_bar_ts: Option<i64>,
+    /// `"ok"` | `"gap_detected"` | `"unsupported"` | `"unknown"` — derived
+    /// from `blockers` (§C.2), never a second continuity computation.
+    pub continuity_state: &'static str,
+    /// `"ok"` | `"invalid"` | `"unknown"` — derived from `blockers` (§C.2),
+    /// never a second provenance computation.
+    pub provenance_state: &'static str,
+    /// Operator-readable remediation, one entry per `blockers` entry, in the
+    /// same order. Never suggests an ingest-job route for a timeframe the
+    /// provider registry does not support (§13/§C.11).
+    pub remediation: Vec<String>,
 }
 
 impl AssignmentReadiness {
@@ -393,6 +418,12 @@ pub async fn evaluate_assignment(
 
     let mut actual_provider_ids: Vec<String> = Vec::new();
     let mut actual_provider_symbols: Vec<String> = Vec::new();
+    // Phase C (§C.2 response fields) — populated only when the bar stage is
+    // actually reached and the query succeeds; `None` otherwise (fail-closed,
+    // never fabricated).
+    let mut loaded_completed_bars: Option<usize> = None;
+    let mut expected_latest_bar_ts: Option<i64> = None;
+    let mut actual_latest_bar_ts: Option<i64> = None;
 
     let readiness_state: &'static str = if !can_proceed_to_bar_stage {
         "blocked"
@@ -441,6 +472,35 @@ pub async fn evaluate_assignment(
                         for b in bar_blockers {
                             push_unique(&mut blockers, b);
                         }
+                        // Phase C (§C.2): expose loaded/expected/actual bar
+                        // facts on the response surface. Recomputes the same
+                        // expected-window call `evaluate_bar_readiness` makes
+                        // internally (identical inputs: calendar_provider,
+                        // schedule, now_ts, eff_grace, required) rather than
+                        // changing that function's signature, which is
+                        // exercised directly (positional args) by the Phase B
+                        // proof binary.
+                        loaded_completed_bars = Some(rows.iter().filter(|r| r.is_complete).count());
+                        actual_latest_bar_ts = rows.iter().map(|r| r.end_ts).max();
+                        let expected_window = match tf {
+                            Timeframe::D1 => expected_daily_end_ts_window(
+                                calendar_provider,
+                                &schedule,
+                                now_utc.timestamp(),
+                                eff_grace,
+                                required,
+                            ),
+                            Timeframe::M1 | Timeframe::M5 => expected_intraday_end_ts_window(
+                                calendar_provider,
+                                &schedule,
+                                now_utc.timestamp(),
+                                tf.duration_secs(),
+                                eff_grace,
+                                required,
+                            ),
+                            Timeframe::H1 | Timeframe::M15 => None,
+                        };
+                        expected_latest_bar_ts = expected_window.and_then(|v| v.last().copied());
                         if blockers.is_empty() {
                             "ready"
                         } else {
@@ -451,6 +511,46 @@ pub async fn evaluate_assignment(
             }
         }
     };
+
+    // Phase C (§C.2): derive continuity/provenance summary states and
+    // per-blocker remediation from the final `blockers` list — never a
+    // second continuity/provenance computation.
+    let continuity_state: &'static str =
+        if blockers.contains(&REASON_UNSUPPORTED_INTRADAY_CONTINUITY) {
+            "unsupported"
+        } else if blockers.contains(&REASON_INTERIOR_GAP)
+            || blockers.contains(&REASON_EXPECTED_LATEST_BAR_MISSING)
+        {
+            "gap_detected"
+        } else if blockers.contains(&REASON_CALENDAR_UNAVAILABLE)
+            || blockers.contains(&REASON_MARKET_DATA_MISSING)
+        {
+            "unknown"
+        } else if loaded_completed_bars.is_some() {
+            "ok"
+        } else {
+            "unknown"
+        };
+    let provenance_state: &'static str = if blockers.iter().any(|b| {
+        matches!(
+            *b,
+            REASON_PROVIDER_PROVENANCE_INVALID
+                | REASON_PROVIDER_SYMBOL_MISMATCH
+                | REASON_PROVIDER_ID_MISMATCH
+                | REASON_PROVIDER_UNKNOWN
+                | REASON_PROVIDER_DISABLED
+                | REASON_PROVIDER_CAPABILITY_MISMATCH
+                | REASON_PROVIDER_TIMESTAMP_CONVENTION_UNVERIFIED
+                | REASON_PROVIDER_INGEST_TIME_FUTURE
+        )
+    }) {
+        "invalid"
+    } else if loaded_completed_bars.is_some() {
+        "ok"
+    } else {
+        "unknown"
+    };
+    let remediation: Vec<String> = blockers.iter().map(|b| remediation_for_reason(b)).collect();
 
     AssignmentReadiness {
         assignment_symbol: assignment.symbol.clone(),
@@ -471,6 +571,111 @@ pub async fn evaluate_assignment(
         effective_grace_seconds: eff_grace,
         configured_future_skew_seconds: configured_skew,
         effective_future_skew_seconds: eff_skew,
+        loaded_completed_bars,
+        expected_latest_bar_ts,
+        actual_latest_bar_ts,
+        continuity_state,
+        provenance_state,
+        remediation,
+    }
+}
+
+/// Operator-readable remediation text for one blocking reason code (§C.2/§C.4).
+/// Never suggests `POST /api/v1/ingest/jobs` for a timeframe the current
+/// provider registry does not support (§13/§C.11) — `provider_capability_mismatch`
+/// and `unsupported_intraday_continuity` explicitly say so instead.
+fn remediation_for_reason(reason: &str) -> String {
+    match reason {
+        REASON_REQUIRED_ASSIGNMENTS_MISSING => {
+            "configure a valid multi-symbol runtime assignment (approved watchlist-v2 artifact, \
+             or MQK_STRATEGY_SYMBOL/MQK_STRATEGY_IDS/MQK_STRATEGY_MD_TIMEFRAME)"
+                .to_string()
+        }
+        REASON_RUNTIME_STRATEGY_ASSIGNMENT_MISMATCH => {
+            "align configured_strategy_id with the active runtime strategy (MQK_STRATEGY_IDS[0]) \
+             or correct the watchlist-v2 strategy assignment"
+                .to_string()
+        }
+        REASON_RUNTIME_STRATEGY_SYMBOL_BINDING_MISMATCH => {
+            "align MQK_STRATEGY_SYMBOL with this assignment's symbol; the shared bootstrap can \
+             only bind to one target symbol today (PER-SYMBOL-STRATEGY-BOOTSTRAP-01 is not yet built)"
+                .to_string()
+        }
+        REASON_RUNTIME_STRATEGY_TIMEFRAME_MISMATCH => {
+            "align this assignment's timeframe with the active strategy's StrategySpec.timeframe_secs"
+                .to_string()
+        }
+        REASON_STRATEGY_REQUIREMENT_UNKNOWN => {
+            "register StrategyDataRequirements for the active strategy in mqk-strategy".to_string()
+        }
+        REASON_ASSET_CLASS_UNKNOWN => {
+            "add or correct this symbol's entry (asset_class) in the instrument registry"
+                .to_string()
+        }
+        REASON_PROVIDER_PROVENANCE_INVALID => "re-ingest the bounded required window through a \
+             registered, enabled provider via POST /api/v1/ingest/jobs (mode=sync_provider)"
+            .to_string(),
+        REASON_PROVIDER_SYMBOL_MISMATCH => {
+            "correct provider_symbol in the instrument registry, then re-ingest with the \
+             canonical provider symbol"
+                .to_string()
+        }
+        REASON_PROVIDER_ID_MISMATCH => "re-ingest through the instrument registry's configured \
+             provider, or correct the instrument registry's provider field"
+            .to_string(),
+        REASON_PROVIDER_UNKNOWN => {
+            "register the provider in the provider registry (config/providers/providers.json)"
+                .to_string()
+        }
+        REASON_PROVIDER_INGEST_TIME_FUTURE => {
+            "investigate provider/system clock skew on ingested_at".to_string()
+        }
+        REASON_PROVIDER_DISABLED => "enable the provider in the provider registry".to_string(),
+        REASON_PROVIDER_CAPABILITY_MISMATCH => {
+            "this (provider, timeframe) combination is not supported by the current provider \
+             registry; a separate provider/timeframe-support patch is required (out of scope) — \
+             do not submit an ingest job for this timeframe"
+                .to_string()
+        }
+        REASON_PROVIDER_TIMESTAMP_CONVENTION_UNVERIFIED => {
+            "this provider's daily bar timestamp convention is unverified; a committed parser \
+             proof is required before this provider can serve 1D readiness"
+                .to_string()
+        }
+        REASON_CALENDAR_UNAVAILABLE => {
+            "verify the active market calendar provider's coverage window and configuration"
+                .to_string()
+        }
+        REASON_UNSUPPORTED_TIMEFRAME => {
+            "use a timeframe supported by mqk_md::Timeframe::parse".to_string()
+        }
+        REASON_UNSUPPORTED_INTRADAY_CONTINUITY => {
+            "this timeframe has no full session-anchored continuity proof yet; not remediable \
+             via ingest alone (out of scope for this patch)"
+                .to_string()
+        }
+        REASON_MARKET_DATA_MISSING => "run historical provider sync via POST \
+             /api/v1/ingest/jobs (mode=sync_provider) for this symbol/timeframe"
+            .to_string(),
+        REASON_INSUFFICIENT_HISTORY => {
+            "ingest additional history to satisfy required_history_bars".to_string()
+        }
+        REASON_DUPLICATE_TIMESTAMP => {
+            "investigate duplicate end_ts rows in md_bars for this symbol/timeframe".to_string()
+        }
+        REASON_INTERIOR_GAP => {
+            "run historical provider sync to fill the interior gap in the bounded window"
+                .to_string()
+        }
+        REASON_LATEST_BAR_FUTURE => {
+            "investigate a future-dated bar; check provider/system clock skew".to_string()
+        }
+        REASON_EXPECTED_LATEST_BAR_MISSING => {
+            "refresh the latest closed bar via POST /api/v1/market-data/feed/poll-once, or wait \
+             for publication grace"
+                .to_string()
+        }
+        other => format!("investigate blocker '{other}'"),
     }
 }
 
@@ -882,7 +1087,7 @@ pub async fn evaluate_assignments(
 
 /// `MQK_STRATEGY_IDS`, split/trimmed/filtered — mirrors the `strategy_fleet`
 /// derivation in `state.rs` and `multi_symbol_config::first_strategy_id_from_env`.
-fn fleet_ids_from_env() -> Option<Vec<String>> {
+pub fn fleet_ids_from_env() -> Option<Vec<String>> {
     std::env::var("MQK_STRATEGY_IDS").ok().map(|ids| {
         ids.split(',')
             .map(str::trim)
@@ -932,6 +1137,53 @@ pub async fn evaluate_daily_data_readiness_from_env(
     let (_bootstrap, binding) =
         mqk_runtime::native_strategy::bootstrap_with_effective_binding(fleet_ids.as_deref());
 
+    let context = load_readiness_context_from_env();
+    evaluate_readiness_with_binding(db, &config, &binding, &context, now_utc).await
+}
+
+// ---------------------------------------------------------------------------
+// DAILY-DATA-READINESS-01C-ENFORCEMENT-01 (Phase C): canonical evaluation
+// context shared by every readiness surface (routes + the runtime start
+// gate), plus durable start-attempt evidence.
+//
+// Binding scopes (§C.1):
+//   - `configuration_preview` — a fresh preview built from current env/DB
+//     state, used by GET routes. Never proof of an active runtime.
+//   - `start_attempt_binding` — the exact bootstrap/binding pair the runtime
+//     start gate already constructed for its own attempt. Never a second,
+//     independently-derived bootstrap (see the lifecycle-safety contract on
+//     `evaluate_daily_data_readiness_from_env` above).
+// ---------------------------------------------------------------------------
+
+pub const BINDING_SCOPE_CONFIGURATION_PREVIEW: &str = "configuration_preview";
+pub const BINDING_SCOPE_START_ATTEMPT_BINDING: &str = "start_attempt_binding";
+
+pub const READINESS_RESPONSE_SCHEMA_VERSION: &str = "daily-data-readiness-response-v1";
+pub const READINESS_EVIDENCE_SCHEMA_VERSION: &str = "daily-data-readiness-evidence-v1";
+
+pub const EVENT_TYPE_READINESS_EVALUATED: &str = "daily_data_readiness_evaluated";
+pub const EVENT_TYPE_READINESS_RUN_LINKED: &str = "daily_data_readiness_run_linked";
+
+/// Start-gate-only reason (§C.9): a ready verdict whose durable pre-start
+/// evidence could not be persisted is refused, never silently allowed
+/// through.
+pub const REASON_READINESS_EVIDENCE_PERSIST_FAILED: &str = "readiness_evidence_persist_failed";
+
+/// Registries/calendar/strategy-registry composition shared by every
+/// readiness evaluation surface — loaded once per call from the same
+/// env-driven sources Phase B's `evaluate_daily_data_readiness_from_env`
+/// always used, factored out so the start gate can build this composition
+/// without re-deriving the assignment/binding resolution it already owns.
+pub struct DailyDataReadinessContext {
+    pub calendar_provider: Box<dyn MarketCalendarProvider>,
+    pub provider_configs: Vec<ProviderConfig>,
+    pub instruments: Vec<TrackedInstrument>,
+    pub strategy_registry: PluginRegistry,
+}
+
+/// Load the shared [`DailyDataReadinessContext`] from env/config-file state.
+/// Pure I/O composition (file reads only) — no DB, no provider/broker calls.
+pub fn load_readiness_context_from_env() -> DailyDataReadinessContext {
     let mut strategy_registry = PluginRegistry::new();
     let _ =
         mqk_strategy::engines::register_builtin_strategies(&mut strategy_registry, String::new());
@@ -952,15 +1204,183 @@ pub async fn evaluate_daily_data_readiness_from_env(
 
     let calendar_provider = market_calendar::active_calendar_provider_from_env();
 
+    DailyDataReadinessContext {
+        calendar_provider,
+        provider_configs,
+        instruments,
+        strategy_registry,
+    }
+}
+
+/// Evaluate `config`/`binding` against `context` — the single production
+/// evaluation path shared by every configuration-preview (route) and
+/// start-attempt-binding (lifecycle gate) caller. Never re-derives `config`
+/// or `binding`; callers own that per their own binding scope (§C.1).
+pub async fn evaluate_readiness_with_binding(
+    db: Option<&PgPool>,
+    config: &MultiSymbolRuntimeConfig,
+    binding: &EffectiveRuntimeBinding,
+    context: &DailyDataReadinessContext,
+    now_utc: DateTime<Utc>,
+) -> DailyDataReadinessReport {
     evaluate_assignments(
         db,
-        &config,
-        &binding,
-        calendar_provider.as_ref(),
-        &provider_configs,
-        &instruments,
-        &strategy_registry,
+        config,
+        binding,
+        context.calendar_provider.as_ref(),
+        &context.provider_configs,
+        &context.instruments,
+        &context.strategy_registry,
         now_utc,
     )
     .await
+}
+
+// ---------------------------------------------------------------------------
+// Phase C: deterministic evaluation identity + durable evidence (§C.8-§C.10)
+// ---------------------------------------------------------------------------
+
+/// Deterministic `evaluation_id` for one start attempt (§C.8): UUIDv5 over
+/// stable attempt inputs (evaluated-minute bucket, effective runtime binding
+/// identity, canonical assignment identity) — never `Uuid::new_v4()`
+/// (`.claude/rules/audit_repo_truth_rules.md`). Minute-bucketing means a
+/// genuine retry of the same logical attempt within the same minute produces
+/// the same id (and therefore the same durable event row, via
+/// `sys_autonomous_session_events`'s `on conflict (id) do nothing`), while
+/// distinct attempts (different minute, different binding, or a changed
+/// assignment set) always produce a distinct id.
+pub fn compute_evaluation_id(
+    now_utc: DateTime<Utc>,
+    binding: &EffectiveRuntimeBinding,
+    config: &MultiSymbolRuntimeConfig,
+) -> uuid::Uuid {
+    let minute_bucket = now_utc.timestamp().div_euclid(60);
+    let assignment_identity: Vec<String> = config
+        .symbols
+        .iter()
+        .map(|a| {
+            format!(
+                "{}|{}|{}",
+                a.symbol.trim().to_ascii_uppercase(),
+                a.strategy_id.trim(),
+                a.timeframe.trim()
+            )
+        })
+        .collect();
+    let seed = format!(
+        "daily_data_readiness.v1|{}|{}|{}|{}|{}",
+        minute_bucket,
+        binding
+            .effective_runtime_strategy_id
+            .as_deref()
+            .unwrap_or(""),
+        binding
+            .effective_runtime_target_symbol
+            .as_deref()
+            .unwrap_or(""),
+        binding
+            .effective_runtime_timeframe_secs
+            .map(|s| s.to_string())
+            .unwrap_or_default(),
+        assignment_identity.join(","),
+    );
+    uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_DNS, seed.as_bytes())
+}
+
+/// Bounded, schema-versioned JSON detail for the `daily_data_readiness_evaluated`
+/// pre-start evidence event (§C.8). Never carries full bar histories, secrets,
+/// credentials, environment dumps, or unbounded error chains — only bounded
+/// per-assignment summaries (symbol, timeframe, readiness_state, blockers).
+pub fn build_pre_start_evidence_detail(
+    evaluation_id: uuid::Uuid,
+    evaluated_at_utc: DateTime<Utc>,
+    applicability: &str,
+    report: &DailyDataReadinessReport,
+) -> serde_json::Value {
+    let assignments: Vec<serde_json::Value> = report
+        .assignments
+        .iter()
+        .map(|a| {
+            serde_json::json!({
+                "assignment_symbol": a.assignment_symbol,
+                "assignment_timeframe": a.assignment_timeframe,
+                "readiness_state": a.readiness_state,
+                "blockers": a.blockers,
+            })
+        })
+        .collect();
+    serde_json::json!({
+        "schema_version": READINESS_EVIDENCE_SCHEMA_VERSION,
+        "evaluation_id": evaluation_id.to_string(),
+        "evaluated_at_utc": evaluated_at_utc.to_rfc3339(),
+        "binding_scope": BINDING_SCOPE_START_ATTEMPT_BINDING,
+        "applicability": applicability,
+        "start_allowed": report.start_allowed,
+        "top_level_blocker": report.top_level_blocker,
+        "assignment_count": report.assignments.len(),
+        "assignments": assignments,
+        // Trivially true: this field only exists inside a JSON blob that was
+        // in fact handed to the persistence call. A write failure produces no
+        // row at all (never a row with this field set to false) — the API
+        // response's own `evidence_persisted` field (derived from whether the
+        // write actually succeeded) is the authoritative signal for callers.
+        "evidence_persisted": true,
+    })
+}
+
+/// Persist the pre-start `daily_data_readiness_evaluated` evidence event
+/// (§C.8/§C.9). Returns `true` iff the write succeeded. The event `id` is
+/// derived solely from `evaluation_id`, so a genuine retry of the same
+/// logical attempt is idempotent (`on conflict (id) do nothing`).
+pub async fn persist_pre_start_readiness_evidence(
+    db: &PgPool,
+    evaluation_id: uuid::Uuid,
+    evaluated_at_utc: DateTime<Utc>,
+    applicability: &str,
+    report: &DailyDataReadinessReport,
+) -> bool {
+    let detail =
+        build_pre_start_evidence_detail(evaluation_id, evaluated_at_utc, applicability, report);
+    let row = mqk_db::AutonomousSessionEventRow {
+        id: format!("daily_data_readiness_evaluated:{evaluation_id}"),
+        ts_utc: evaluated_at_utc,
+        event_type: EVENT_TYPE_READINESS_EVALUATED.to_string(),
+        resume_source: None,
+        detail: detail.to_string(),
+        run_id: None,
+        source: "mqk-daemon.daily_data_readiness".to_string(),
+    };
+    mqk_db::persist_autonomous_session_event(db, &row)
+        .await
+        .is_ok()
+}
+
+/// Persist the `daily_data_readiness_run_linked` evidence event (§C.10),
+/// correlating a successful start's `run_id` back to `evaluation_id`. A
+/// second row, never an update — `sys_autonomous_session_events` has no
+/// `UPDATE` path. Returns `true` iff the write succeeded.
+pub async fn persist_run_linked_readiness_evidence(
+    db: &PgPool,
+    evaluation_id: uuid::Uuid,
+    run_id: uuid::Uuid,
+    linked_at_utc: DateTime<Utc>,
+) -> bool {
+    let detail = serde_json::json!({
+        "schema_version": READINESS_EVIDENCE_SCHEMA_VERSION,
+        "evaluation_id": evaluation_id.to_string(),
+        "run_id": run_id.to_string(),
+        "linked_at_utc": linked_at_utc.to_rfc3339(),
+    });
+    let row = mqk_db::AutonomousSessionEventRow {
+        id: format!("daily_data_readiness_run_linked:{evaluation_id}:{run_id}"),
+        ts_utc: linked_at_utc,
+        event_type: EVENT_TYPE_READINESS_RUN_LINKED.to_string(),
+        resume_source: None,
+        detail: detail.to_string(),
+        run_id: Some(run_id),
+        source: "mqk-daemon.daily_data_readiness".to_string(),
+    };
+    mqk_db::persist_autonomous_session_event(db, &row)
+        .await
+        .is_ok()
 }

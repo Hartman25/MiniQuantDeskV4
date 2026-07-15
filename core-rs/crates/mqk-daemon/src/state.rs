@@ -298,6 +298,22 @@ pub struct AppState {
     /// `None` in production — route reads `Utc::now().timestamp()` directly.
     /// Set to a fixed timestamp in tests to make session-gate proof hermetic.
     session_clock_override: Arc<RwLock<Option<i64>>>,
+    /// DAILY-DATA-READINESS-01C-ENFORCEMENT-01: Injectable wall-clock
+    /// override for the strict daily-data readiness start gate.
+    ///
+    /// `None` in production — the gate reads `Utc::now()` directly. Set to a
+    /// fixed instant in tests so a start-gate `ready` verdict can be proven
+    /// deterministically against seeded `md_bars` fixtures, without racing
+    /// the real wall clock (§C.12: injected clocks are a required test seam).
+    daily_data_readiness_clock_override: Arc<RwLock<Option<DateTime<Utc>>>>,
+    /// DAILY-DATA-READINESS-01C-ENFORCEMENT-01 test seam (§C.12 "injected
+    /// event writers"): forces the strict readiness start gate's pre-start
+    /// evidence persist outcome regardless of the real DB write result.
+    /// `None` in production — the gate uses the real
+    /// `persist_pre_start_readiness_evidence` outcome. Set in tests to prove
+    /// the evidence-failure policy (§C.9) deterministically, without needing
+    /// to actually break a live DB connection mid-test.
+    daily_data_readiness_evidence_override: Arc<RwLock<Option<bool>>>,
     /// PT-DAY-04: Deduplication flag for WS continuity-gap operator escalation.
     ///
     /// `false` at boot and after each Live transition.  Set to `true` on the
@@ -1239,6 +1255,8 @@ impl AppState {
             strategy_market_data_source,
             alpaca_ws_continuity: Arc::new(RwLock::new(initial_ws_continuity)),
             session_clock_override: Arc::new(RwLock::new(None)),
+            daily_data_readiness_clock_override: Arc::new(RwLock::new(None)),
+            daily_data_readiness_evidence_override: Arc::new(RwLock::new(None)),
             gap_escalation_pending: Arc::new(AtomicBool::new(false)),
             strategy_fleet: Arc::new(RwLock::new(strategy_fleet)),
             discord_notifier: DiscordNotifier::from_env(),
@@ -1800,6 +1818,44 @@ operator_reconcile_or_repair_required"
     /// Follows the same pattern as `set_strategy_fleet_for_test`.
     pub async fn set_session_clock_ts_for_test(&self, ts: i64) {
         *self.session_clock_override.write().await = Some(ts);
+    }
+
+    /// DAILY-DATA-READINESS-01C-ENFORCEMENT-01 test seam: read the current
+    /// clock the strict readiness start gate will use — the override if set,
+    /// else `Utc::now()`. Named `_for_test`-adjacent (read-only) so
+    /// production code can share the exact same resolution logic as tests
+    /// that set the override.
+    pub async fn daily_data_readiness_now(&self) -> DateTime<Utc> {
+        match *self.daily_data_readiness_clock_override.read().await {
+            Some(ts) => ts,
+            None => Utc::now(),
+        }
+    }
+
+    /// Test seam: inject a fixed instant for the strict daily-data readiness
+    /// start gate, so a `ready` verdict can be proven deterministically
+    /// against seeded `md_bars` fixtures without racing the real wall clock.
+    /// `None` restores the production `Utc::now()` behavior. Never called in
+    /// production code.
+    pub async fn set_daily_data_readiness_clock_override_for_test(
+        &self,
+        ts: Option<DateTime<Utc>>,
+    ) {
+        *self.daily_data_readiness_clock_override.write().await = ts;
+    }
+
+    /// Test seam: read the current forced evidence-persist override, if any.
+    pub async fn daily_data_readiness_evidence_override(&self) -> Option<bool> {
+        *self.daily_data_readiness_evidence_override.read().await
+    }
+
+    /// Test seam: force the strict readiness start gate's pre-start evidence
+    /// persist outcome to `Some(true)`/`Some(false)` regardless of the real
+    /// DB write result — proves the §C.9 evidence-failure policy without
+    /// needing to break a live DB connection mid-test. `None` restores the
+    /// real write-result behavior. Never called in production code.
+    pub async fn set_daily_data_readiness_evidence_override_for_test(&self, forced: Option<bool>) {
+        *self.daily_data_readiness_evidence_override.write().await = forced;
     }
 
     pub async fn strategy_fleet_snapshot(&self) -> Option<Vec<StrategyFleetEntry>> {

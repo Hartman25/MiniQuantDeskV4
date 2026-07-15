@@ -300,12 +300,25 @@ pub fn build_signal_context(
 /// engine names.  Unknown names still produce a fail-closed start refusal via
 /// the native strategy bootstrap gate.
 pub fn build_daemon_plugin_registry() -> PluginRegistry {
+    build_daemon_plugin_registry_and_symbol().0
+}
+
+/// Identical construction to [`build_daemon_plugin_registry`], additionally
+/// returning the trimmed `MQK_STRATEGY_SYMBOL` value read to build it
+/// (`None` when unset/blank) — the single env read both the registry and any
+/// [`EffectiveRuntimeBinding`] derived from the same bootstrap attempt must
+/// share, so a caller building both never risks a second, independently-read
+/// symbol value disagreeing with the one baked into the registry's strategy
+/// factories (DAILY-DATA-READINESS-AND-FRESHNESS-01-COMBINED Phase C).
+pub fn build_daemon_plugin_registry_and_symbol() -> (PluginRegistry, Option<String>) {
     let mut registry = PluginRegistry::new();
     // Symbol captured in closures; provided to strategy engines via on_bar context.
     let symbol = std::env::var("MQK_STRATEGY_SYMBOL").unwrap_or_default();
-    mqk_strategy::engines::register_builtin_strategies(&mut registry, symbol)
+    mqk_strategy::engines::register_builtin_strategies(&mut registry, symbol.clone())
         .expect("daemon built-in strategy registration must not fail: duplicate names are a programming error");
-    registry
+    let trimmed = symbol.trim();
+    let effective_symbol = (!trimmed.is_empty()).then(|| trimmed.to_string());
+    (registry, effective_symbol)
 }
 
 // ---------------------------------------------------------------------------
@@ -341,25 +354,31 @@ pub struct EffectiveRuntimeBinding {
 pub fn bootstrap_with_effective_binding(
     fleet_ids: Option<&[String]>,
 ) -> (NativeStrategyBootstrap, EffectiveRuntimeBinding) {
-    let symbol = std::env::var("MQK_STRATEGY_SYMBOL").unwrap_or_default();
-    let mut registry = PluginRegistry::new();
-    mqk_strategy::engines::register_builtin_strategies(&mut registry, symbol.clone())
-        .expect("daemon built-in strategy registration must not fail: duplicate names are a programming error");
+    let (registry, effective_runtime_target_symbol) = build_daemon_plugin_registry_and_symbol();
     let bootstrap = NativeStrategyBootstrap::bootstrap(fleet_ids, &registry);
-
-    let effective_runtime_target_symbol = {
-        let trimmed = symbol.trim();
-        (!trimmed.is_empty()).then(|| trimmed.to_string())
-    };
-    let effective_runtime_strategy_id = bootstrap.active_strategy_id().map(|s| s.to_string());
-    let effective_runtime_timeframe_secs = bootstrap.strategy_timeframe_secs();
-
-    let binding = EffectiveRuntimeBinding {
-        effective_runtime_strategy_id,
-        effective_runtime_target_symbol,
-        effective_runtime_timeframe_secs,
-    };
+    let binding = effective_binding_from_bootstrap(&bootstrap, effective_runtime_target_symbol);
     (bootstrap, binding)
+}
+
+/// Derive an [`EffectiveRuntimeBinding`] from an already-constructed
+/// `bootstrap` and the `effective_runtime_target_symbol` captured from the
+/// same [`build_daemon_plugin_registry_and_symbol`] call that produced the
+/// registry `bootstrap` was built from.
+///
+/// Exists so a caller that must not construct a second bootstrap (e.g. the
+/// runtime start gate, which already builds its own bootstrap via B1A) can
+/// still derive the binding from the exact bootstrap it holds, instead of
+/// calling [`bootstrap_with_effective_binding`] again and discarding a
+/// second, independently-constructed bootstrap.
+pub fn effective_binding_from_bootstrap(
+    bootstrap: &NativeStrategyBootstrap,
+    effective_runtime_target_symbol: Option<String>,
+) -> EffectiveRuntimeBinding {
+    EffectiveRuntimeBinding {
+        effective_runtime_strategy_id: bootstrap.active_strategy_id().map(|s| s.to_string()),
+        effective_runtime_target_symbol,
+        effective_runtime_timeframe_secs: bootstrap.strategy_timeframe_secs(),
+    }
 }
 
 // ---------------------------------------------------------------------------

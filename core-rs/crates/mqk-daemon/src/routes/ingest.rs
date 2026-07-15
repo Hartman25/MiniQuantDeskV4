@@ -3130,6 +3130,7 @@ fn build_ingest_plan_response(
     resolution: RequiredSymbolsResolution,
     timeframe_configured: Option<String>,
     checked_at_utc: String,
+    daily_data_readiness: crate::api_types::DailyDataReadinessResponse,
 ) -> IngestPlanResponse {
     let normalized = normalize_required_symbols(&resolution.required);
     let required_symbols: Vec<String> = normalized.iter().map(|r| r.symbol.clone()).collect();
@@ -3191,6 +3192,7 @@ fn build_ingest_plan_response(
         },
         warnings,
         checked_at_utc,
+        daily_data_readiness,
     }
 }
 
@@ -3204,18 +3206,26 @@ fn build_ingest_plan_response(
 /// - Read-only. No DB, no provider/broker calls, no network access.
 /// - Does not touch live/paper execution state. No arm_state required.
 /// - Never uses the full instrument registry as the required-symbol source.
-pub(crate) async fn market_data_ingest_plan() -> impl IntoResponse {
+pub(crate) async fn market_data_ingest_plan(State(st): State<Arc<AppState>>) -> impl IntoResponse {
     let resolution = required_symbols_with_source_from_env();
     let timeframe_configured = std::env::var(STRATEGY_MD_TIMEFRAME_ENV)
         .ok()
         .map(|v| v.trim().to_string())
         .filter(|v| !v.is_empty());
-    let checked_at_utc = Utc::now().to_rfc3339();
+    let now_utc = Utc::now();
+    let checked_at_utc = now_utc.to_rfc3339();
+
+    // DAILY-DATA-READINESS-01C-ENFORCEMENT-01: canonical readiness report,
+    // shared with the dedicated route/preflight/autonomous-readiness (§C.4).
+    let daily_data_readiness =
+        crate::routes::market_data_readiness::compute_daily_data_readiness_response(&st, now_utc)
+            .await;
 
     Json(build_ingest_plan_response(
         resolution,
         timeframe_configured,
         checked_at_utc,
+        daily_data_readiness,
     ))
 }
 

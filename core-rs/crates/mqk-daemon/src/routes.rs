@@ -39,6 +39,7 @@ pub(crate) mod execution_flow;
 pub(crate) mod execution_order_analysis;
 pub(crate) mod helpers;
 pub(crate) mod ingest;
+pub(crate) mod market_data_readiness;
 pub(crate) mod oms_metrics;
 pub(crate) mod paper_journal;
 pub(crate) mod paper_lifecycle;
@@ -279,6 +280,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         market_data_feed_scheduler_status, market_data_feed_scheduler_stop,
         market_data_feed_status, market_data_ingest_plan, tracked_equities_list,
     };
+    use market_data_readiness::market_data_readiness_status;
     use oms_metrics::{metrics_dashboards, oms_overview};
     use paper_journal::paper_journal;
     use paper_lifecycle::execution_paper_lifecycle;
@@ -617,6 +619,14 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/v1/market-data/ingest-plan",
             get(market_data_ingest_plan),
+        )
+        // DAILY-DATA-READINESS-01C-ENFORCEMENT-01: read-only strict daily
+        // data readiness (public, no auth). Read-only: no provider/broker
+        // call, no DB write, no run/outbox/event creation, no scheduler or
+        // runtime start. Always binding_scope="configuration_preview".
+        .route(
+            "/api/v1/market-data/readiness",
+            get(market_data_readiness_status),
         )
         .route("/v1/trading/account", get(trading_account))
         .route("/v1/trading/positions", get(trading_positions))

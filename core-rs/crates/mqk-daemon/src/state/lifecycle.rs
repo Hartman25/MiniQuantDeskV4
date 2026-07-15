@@ -36,7 +36,10 @@ use super::{
 };
 use super::{AppState, DAEMON_ENGINE_ID, RECONCILE_TICK_INTERVAL};
 
-use mqk_runtime::native_strategy::{build_daemon_plugin_registry, NativeStrategyBootstrap};
+use mqk_runtime::native_strategy::{
+    build_daemon_plugin_registry_and_symbol, effective_binding_from_bootstrap,
+    NativeStrategyBootstrap,
+};
 
 impl AppState {
     pub async fn start_execution_runtime(
@@ -471,14 +474,21 @@ impl AppState {
         // The bootstrap is kept as a local binding and stored in AppState only
         // after a fully successful run start so the field is never left populated
         // by a failed start attempt.
-        let native_strategy_bootstrap = {
+        let (native_strategy_bootstrap, effective_runtime_binding) = {
             let fleet_ids = self.strategy_fleet_snapshot().await.map(|entries| {
                 entries
                     .into_iter()
                     .map(|e| e.strategy_id)
                     .collect::<Vec<_>>()
             });
-            let registry = build_daemon_plugin_registry();
+            // DAILY-DATA-READINESS-01C-ENFORCEMENT-01: capture the exact
+            // MQK_STRATEGY_SYMBOL read used to build `registry` alongside the
+            // registry itself, so the EffectiveRuntimeBinding derived below
+            // can never disagree with a second, independently-read symbol
+            // value (contract §16 / Phase B's `bootstrap_with_effective_binding`
+            // doc: "never a second, independently-guessed symbol").
+            let (registry, effective_runtime_target_symbol) =
+                build_daemon_plugin_registry_and_symbol();
             let bootstrap = NativeStrategyBootstrap::bootstrap(fleet_ids.as_deref(), &registry);
             if bootstrap.is_failed() {
                 return Err(RuntimeLifecycleError::forbidden(
@@ -527,8 +537,125 @@ impl AppState {
                      (STRATEGY-DORMANCY-01)",
                 ));
             }
-            bootstrap
+            let binding =
+                effective_binding_from_bootstrap(&bootstrap, effective_runtime_target_symbol);
+            (bootstrap, binding)
         };
+
+        // DAILY-DATA-READINESS-01C-ENFORCEMENT-01: strict daily data
+        // readiness start gate.
+        //
+        // Applicable only to Paper+ExternalSignalIngestion — the same
+        // predicate the PREMARKET-DATA-READINESS-GATE-01 legacy gate below
+        // uses, never hardcoded to BrokerKind::Alpaca (contract §C.5).
+        //
+        // Uses the exact `native_strategy_bootstrap`/`effective_runtime_binding`
+        // pair constructed above (B1A) — never a second, independently
+        // constructed bootstrap (Phase B's `evaluate_daily_data_readiness_from_env`
+        // lifecycle-safety contract).
+        //
+        // Placed after B1A (bootstrap/binding resolution) and before
+        // db_pool()? so this evaluator — not a generic db_pool() error —
+        // produces the canonical db_unavailable verdict when the DB is
+        // absent (contract §16), and so a blocked verdict denies before any
+        // DB resource, run row, or broker/provider call.
+        let mut daily_data_readiness_evaluation_id: Option<uuid::Uuid> = None;
+        if self.deployment_mode() == DeploymentMode::Paper
+            && self.strategy_market_data_source()
+                == StrategyMarketDataSource::ExternalSignalIngestion
+        {
+            let evaluated_at_utc = self.daily_data_readiness_now().await;
+            let config = crate::state::build_multi_symbol_runtime_config_from_env();
+            let config = match config {
+                Ok(cfg) => cfg,
+                Err(_) => {
+                    return Err(RuntimeLifecycleError::forbidden(
+                        "runtime.start_refused.daily_data_readiness_blocked",
+                        "daily_data_readiness",
+                        format!(
+                            "strict daily data readiness gate refused start: top_level_blocker='{}'; \
+                             evidence_persisted=false (DAILY-DATA-READINESS-01C-ENFORCEMENT-01)",
+                            crate::daily_data_readiness::REASON_REQUIRED_ASSIGNMENTS_MISSING
+                        ),
+                    ));
+                }
+            };
+
+            let readiness_context = crate::daily_data_readiness::load_readiness_context_from_env();
+            let report = crate::daily_data_readiness::evaluate_readiness_with_binding(
+                self.db.as_ref(),
+                &config,
+                &effective_runtime_binding,
+                &readiness_context,
+                evaluated_at_utc,
+            )
+            .await;
+            let evaluation_id = crate::daily_data_readiness::compute_evaluation_id(
+                evaluated_at_utc,
+                &effective_runtime_binding,
+                &config,
+            );
+
+            // The real write is always attempted (regardless of any test
+            // override) — the pre-start event must be attempted before run
+            // creation for every applicable evaluation (§C.8). The override
+            // (test-only) only substitutes what gets *reported*/gated on
+            // afterward, so tests can prove the §C.9 failure policy without
+            // needing the real write to actually fail.
+            let real_evidence_persisted = match self.db.as_ref() {
+                Some(db) => {
+                    crate::daily_data_readiness::persist_pre_start_readiness_evidence(
+                        db,
+                        evaluation_id,
+                        evaluated_at_utc,
+                        "applicable",
+                        &report,
+                    )
+                    .await
+                }
+                None => false,
+            };
+            let evidence_persisted = self
+                .daily_data_readiness_evidence_override()
+                .await
+                .unwrap_or(real_evidence_persisted);
+
+            if report.start_allowed {
+                if !evidence_persisted {
+                    return Err(RuntimeLifecycleError::service_unavailable(
+                        "runtime.start_refused.readiness_evidence_persist_failed",
+                        format!(
+                            "strict daily data readiness evaluation_id={evaluation_id} was ready \
+                             but durable pre-start evidence could not be persisted; refusing \
+                             start ({})",
+                            crate::daily_data_readiness::REASON_READINESS_EVIDENCE_PERSIST_FAILED
+                        ),
+                    ));
+                }
+                daily_data_readiness_evaluation_id = Some(evaluation_id);
+            } else {
+                let assignment_blockers: Vec<String> = report
+                    .assignments
+                    .iter()
+                    .map(|a| {
+                        format!(
+                            "{}/{}: {:?}",
+                            a.assignment_symbol, a.assignment_timeframe, a.blockers
+                        )
+                    })
+                    .collect();
+                return Err(RuntimeLifecycleError::forbidden(
+                    "runtime.start_refused.daily_data_readiness_blocked",
+                    "daily_data_readiness",
+                    format!(
+                        "strict daily data readiness gate refused start: evaluation_id={evaluation_id}; \
+                         start_allowed=false; top_level_blocker={:?}; assignment_blockers={assignment_blockers:?}; \
+                         evidence_persisted={evidence_persisted} (DAILY-DATA-READINESS-01C-ENFORCEMENT-01)",
+                        report.top_level_blocker,
+                    ),
+                ));
+            }
+        }
 
         let db = self.db_pool()?;
 
@@ -724,6 +851,42 @@ impl AppState {
                 run_id
             }
         };
+
+        // DAILY-DATA-READINESS-01C-ENFORCEMENT-01: run-linked readiness
+        // evidence (§C.10). `run_id` now exists (a run row was created or
+        // reused above) — link it to the pre-start evaluation_id captured by
+        // the strict readiness gate, before the loop is spawned further
+        // below. Only applicable starts persisted a pre-start evaluation;
+        // non-applicable deployments have no evaluation_id to link.
+        //
+        // Failure here follows the same non-fatal, sticky-degraded policy
+        // `persist_autonomous_session_truth_event` already uses for this
+        // exact table: it does not fail the start (the run row already
+        // exists), but it must not be silently swallowed either.
+        if let Some(evaluation_id) = daily_data_readiness_evaluation_id {
+            if let Some(ref db_ref) = self.db {
+                let linked = crate::daily_data_readiness::persist_run_linked_readiness_evidence(
+                    db_ref,
+                    evaluation_id,
+                    run_id,
+                    Utc::now(),
+                )
+                .await;
+                if !linked {
+                    self.autonomous_history_degraded
+                        .store(true, Ordering::SeqCst);
+                    tracing::warn!(
+                        %evaluation_id,
+                        %run_id,
+                        "daily_data_readiness_run_linked evidence persist failed; \
+                         autonomous_history_degraded=true"
+                    );
+                }
+            } else {
+                self.autonomous_history_degraded
+                    .store(true, Ordering::SeqCst);
+            }
+        }
 
         let mut orchestrator = self
             .build_execution_orchestrator(db.clone(), run_id)

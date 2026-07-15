@@ -509,6 +509,15 @@ pub(crate) async fn system_preflight(State(st): State<Arc<AppState>>) -> impl In
         warnings.push("Daemon status contains notes; verify runtime state.".to_string());
     }
 
+    // DAILY-DATA-READINESS-01C-ENFORCEMENT-01: canonical readiness report,
+    // shared with the dedicated route/autonomous-readiness/ingest-plan (§C.4).
+    let daily_data_readiness_report =
+        crate::routes::market_data_readiness::compute_daily_data_readiness_response(
+            &st,
+            Utc::now(),
+        )
+        .await;
+
     let mut blockers = Vec::new();
     if db_reachable == Some(false) {
         blockers.push("Database is not reachable.".to_string());
@@ -565,6 +574,7 @@ pub(crate) async fn system_preflight(State(st): State<Arc<AppState>>) -> impl In
             // ASSET-CORE-05D: compact runtime session-source scaffold
             // summary. Default-off; observability only.
             runtime_session_source: runtime_session_source_summary_now(&st),
+            daily_data_readiness: daily_data_readiness_report,
         }),
     )
         .into_response()
@@ -676,6 +686,13 @@ pub(crate) async fn autonomous_readiness(State(st): State<Arc<AppState>>) -> imp
     let is_paper_alpaca = st.deployment_mode() == DeploymentMode::Paper
         && st.strategy_market_data_source() == StrategyMarketDataSource::ExternalSignalIngestion;
 
+    // DAILY-DATA-READINESS-01C-ENFORCEMENT-01: canonical readiness report,
+    // shared with the dedicated route/preflight/ingest-plan (§C.4). Computed
+    // once with the same `now` snapshot as every other diagnostic field on
+    // this response.
+    let daily_data_readiness_report =
+        crate::routes::market_data_readiness::compute_daily_data_readiness_response(&st, now).await;
+
     if !is_paper_alpaca {
         return (
             StatusCode::OK,
@@ -718,6 +735,7 @@ pub(crate) async fn autonomous_readiness(State(st): State<Arc<AppState>>) -> imp
                 market_data_freshness: None,
                 market_data_readiness: None,
                 strategy_decision_diagnostics: None,
+                daily_data_readiness: daily_data_readiness_report,
             }),
         )
             .into_response();
@@ -1146,6 +1164,7 @@ pub(crate) async fn autonomous_readiness(State(st): State<Arc<AppState>>) -> imp
             market_data_freshness: Some(md_freshness),
             market_data_readiness: Some(md_readiness),
             strategy_decision_diagnostics,
+            daily_data_readiness: daily_data_readiness_report,
         }),
     )
         .into_response()

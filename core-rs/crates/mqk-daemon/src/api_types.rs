@@ -535,6 +535,16 @@ pub struct IngestPlanResponse {
     /// resolution is unambiguous.
     pub warnings: Vec<String>,
     pub checked_at_utc: String,
+
+    // DAILY-DATA-READINESS-01C-ENFORCEMENT-01: the same canonical strict
+    // daily-data readiness report `GET /api/v1/market-data/readiness`
+    // returns, projected here so the ingest plan cannot disagree with the
+    // dedicated route on symbols, timeframes, configured strategy IDs,
+    // expected provider identity, or blocking reason codes. A zero-admissible-
+    // instrument dry-run sync report (§C.11) remains blocked remediation
+    // truth here via `daily_data_readiness.assignments[].blockers`, never
+    // data-ready.
+    pub daily_data_readiness: DailyDataReadinessResponse,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -646,6 +656,16 @@ pub struct PreflightStatusResponse {
     /// Observability only — never added to `blockers`/`warnings` and never
     /// alters `deployment_start_allowed`.
     pub runtime_session_source: RuntimeSessionSourceSummaryResponse,
+
+    // DAILY-DATA-READINESS-01C-ENFORCEMENT-01: the same canonical strict
+    // daily-data readiness report `GET /api/v1/market-data/readiness`
+    // returns, projected here so preflight cannot disagree with the
+    // dedicated route on symbols, timeframes, configured strategy IDs,
+    // effective runtime binding, expected provider identity, start_allowed,
+    // or blocking reason codes. `applicability == "not_applicable"` for
+    // non-Paper+ExternalSignalIngestion deployments (not a readiness gate on
+    // this surface — see `daily_data_readiness.start_allowed` for that).
+    pub daily_data_readiness: DailyDataReadinessResponse,
 }
 
 // ---------------------------------------------------------------------------
@@ -850,6 +870,14 @@ pub struct AutonomousPaperReadinessResponse {
     /// not paper+alpaca.  Non-null exposes the exact decision path: move_bps,
     /// threshold_bps, gap_to_threshold_bps, and decision reason.
     pub strategy_decision_diagnostics: Option<StrategyDecisionDiagnostics>,
+
+    // DAILY-DATA-READINESS-01C-ENFORCEMENT-01: the same canonical strict
+    // daily-data readiness report `GET /api/v1/market-data/readiness`
+    // returns, projected here so autonomous readiness cannot disagree with
+    // the dedicated route. Factored into `blockers`/`overall_ready` above
+    // (a blocked assignment already contributes to `blockers`); this field
+    // exposes the full per-assignment identity/verdict for operator review.
+    pub daily_data_readiness: DailyDataReadinessResponse,
 }
 
 // ---------------------------------------------------------------------------
@@ -6221,4 +6249,101 @@ pub struct StrategyPromotionTransitionResponse {
     pub target_state: String,
     pub transition_id: Option<String>,
     pub blockers: Vec<String>,
+}
+
+// ---------------------------------------------------------------------------
+// DAILY-DATA-READINESS-01C-ENFORCEMENT-01: GET /api/v1/market-data/readiness
+// ---------------------------------------------------------------------------
+
+/// One resolved assignment's readiness identity + verdict, projected from
+/// `mqk_daemon::daily_data_readiness::AssignmentReadiness` for the API
+/// surface. See the binding contract
+/// `docs/specs/daily_data_readiness_01a_current_truth_and_contract.md` §3c
+/// for the identity tuple and evaluation order this mirrors.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DailyDataReadinessAssignmentResponse {
+    pub assignment_symbol: String,
+    pub assignment_timeframe: String,
+    pub configured_strategy_id: String,
+    pub effective_runtime_strategy_id: Option<String>,
+    pub effective_runtime_target_symbol: Option<String>,
+    pub effective_runtime_timeframe_secs: Option<i64>,
+    pub required_history_bars: Option<usize>,
+    pub asset_class: Option<String>,
+    pub expected_provider_id: Option<String>,
+    pub expected_provider_symbol: Option<String>,
+    pub actual_provider_ids: Vec<String>,
+    pub actual_provider_symbols: Vec<String>,
+    /// Count of `is_complete` rows in the bounded query window. `null` when
+    /// the bar stage was never reached or the DB was unavailable/the query
+    /// failed — never fabricated as `0`.
+    pub loaded_completed_bars: Option<usize>,
+    pub expected_latest_bar_ts: Option<i64>,
+    pub actual_latest_bar_ts: Option<i64>,
+    /// `"ok"` | `"gap_detected"` | `"unsupported"` | `"unknown"`.
+    pub continuity_state: String,
+    /// `"ok"` | `"invalid"` | `"unknown"`.
+    pub provenance_state: String,
+    /// `"ready"` | `"blocked"` | `"db_unavailable"` | `"query_failed"`.
+    pub readiness_state: String,
+    pub blockers: Vec<String>,
+    /// One remediation string per `blockers` entry, same order. Never
+    /// suggests an ingest-job route for a timeframe the provider registry
+    /// does not support.
+    pub remediation: Vec<String>,
+    pub configured_grace_seconds: i64,
+    pub effective_grace_seconds: i64,
+    pub configured_future_skew_seconds: i64,
+    pub effective_future_skew_seconds: i64,
+}
+
+/// Canonical response for `GET /api/v1/market-data/readiness`.
+///
+/// `system/preflight`, `autonomous/readiness`, and `market-data/ingest-plan`
+/// each project an additive summary sourced from this same canonical
+/// evaluation (never a separate assignment parser or a simplified readiness
+/// evaluator) — all four surfaces must agree on symbols, timeframes,
+/// configured strategy IDs, effective runtime binding, expected provider
+/// identity, `start_allowed`, and blocking reason codes.
+///
+/// `binding_scope`:
+/// - `"configuration_preview"` — a fresh, current-configuration preview
+///   built for this request. Not proof of an active runtime.
+/// - `"start_attempt_binding"` — the exact bootstrap/binding pair an actual
+///   runtime start attempt evaluated. This route always returns
+///   `"configuration_preview"`; `"start_attempt_binding"` only appears in the
+///   durable pre-start evidence JSON persisted by the runtime start gate.
+///
+/// # Safety invariants
+/// - Read-only. No DB write, no provider/broker call, no run/outbox/event
+///   creation, no scheduler start. Only bounded `md_bars` reads via the
+///   shared evaluator.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DailyDataReadinessResponse {
+    pub canonical_route: String,
+    pub schema_version: String,
+    pub evaluated_at_utc: String,
+    pub binding_scope: String,
+    /// `"watchlist_v2"` | `"env_single_symbol_fallback"` | `"none"`.
+    pub assignment_source: String,
+    /// `"applicable"` | `"not_applicable"` — applicable autonomous US
+    /// equity/ETF PAPER operation is
+    /// `deployment_mode()==Paper && strategy_market_data_source()==ExternalSignalIngestion`,
+    /// never hardcoded to `BrokerKind::Alpaca`.
+    pub applicability: String,
+    pub start_allowed: bool,
+    pub top_level_blocker: Option<String>,
+    /// Env-configured grace/skew ceilings (§8/§9). Effective (timeframe-aware)
+    /// values are surfaced per assignment, since they can differ by timeframe.
+    pub configured_grace_seconds: i64,
+    pub configured_future_skew_seconds: i64,
+    pub calendar_source: Option<String>,
+    /// `"active"` | `"stale"` | `"invalid"` | `"out_of_range"` | `"unknown"` |
+    /// `"not_applicable"` (non-applicable deployments; no schedule resolved).
+    pub calendar_coverage_state: String,
+    /// `"YYYY-MM-DD"` (ET), or `null` when not applicable.
+    pub market_date: Option<String>,
+    pub session_open_utc: Option<String>,
+    pub session_close_utc: Option<String>,
+    pub assignments: Vec<DailyDataReadinessAssignmentResponse>,
 }
