@@ -24,8 +24,10 @@ use crate::market_data_freshness::{
 };
 use crate::parity_evidence::{evaluate_parity_evidence_from_env, ParityEvidenceOutcome};
 
+use sqlx::PgPool;
+
 use super::loop_runner::spawn_execution_loop;
-use super::types::ExecutionLoopCommand;
+use super::types::{DaemonOrchestrator, ExecutionLoopCommand};
 use super::{
     reconcile_broker_snapshot_from_schema, reconcile_local_snapshot_from_runtime_with_sides,
     spawn_reconcile_tick, uptime_secs,
@@ -590,8 +592,14 @@ impl AppState {
                 evaluated_at_utc,
             )
             .await;
+            // REPAIR 1 (DAILY-DATA-READINESS-01C-CLOSURE-REPAIR-01): allocate
+            // a fresh attempt sequence number for this actual start-gate
+            // evaluation (never for a GET/preview evaluation) so two
+            // otherwise-identical attempts never collide on `evaluation_id`.
+            let attempt_seq = self.next_daily_data_readiness_attempt_seq();
             let evaluation_id = crate::daily_data_readiness::compute_evaluation_id(
                 evaluated_at_utc,
+                attempt_seq,
                 &effective_runtime_binding,
                 &config,
             );
@@ -760,261 +768,72 @@ impl AppState {
             }
         }
 
-        if let Some(active) = mqk_db::fetch_active_run_for_engine(
-            &db,
-            DAEMON_ENGINE_ID,
-            self.deployment_mode().as_db_mode(),
-        )
-        .await
-        .map_err(|err| RuntimeLifecycleError::internal("start active-run lookup failed", err))?
-        {
-            return Err(RuntimeLifecycleError::conflict(
-                "runtime.truth_mismatch.durable_active_without_local_owner",
-                format!(
-                    "durable active run exists without local ownership: {}",
-                    active.run_id
-                ),
-            ));
-        }
+        let run_id = self.create_or_reuse_run_for_start(&db).await?;
 
-        let latest = mqk_db::fetch_latest_run_for_engine(
-            &db,
-            DAEMON_ENGINE_ID,
-            self.deployment_mode().as_db_mode(),
-        )
-        .await
-        .map_err(|err| RuntimeLifecycleError::internal("start latest-run lookup failed", err))?;
-
-        let run_id = match latest.as_ref() {
-            Some(run) => match run.status {
-                mqk_db::RunStatus::Created => run.run_id,
-                mqk_db::RunStatus::Stopped => {
-                    let run_id = self.next_daemon_run_id(&db).await?;
-                    mqk_db::insert_run(
-                        &db,
-                        &mqk_db::NewRun {
-                            run_id,
-                            engine_id: DAEMON_ENGINE_ID.to_string(),
-                            mode: self.deployment_mode().as_db_mode().to_string(),
-                            started_at_utc: Utc::now(),
-                            git_hash: "UNKNOWN".to_string(),
-                            config_hash: self.run_config_hash().to_string(),
-                            config_json: serde_json::json!({
-                                "runtime": "mqk-daemon",
-                                "adapter": self.adapter_id(),
-                                "mode": self.deployment_mode().as_db_mode(),
-                            }),
-                            host_fingerprint: self.node_id.clone(),
-                        },
-                    )
-                    .await
-                    .map_err(|err| RuntimeLifecycleError::internal("start insert_run failed", err))?;
-                    run_id
-                }
-                mqk_db::RunStatus::Halted => {
-                    return Err(RuntimeLifecycleError::conflict(
-                        "runtime.start_refused.halted_lifecycle",
-                        format!(
-                            "durable run {} is halted; operator must clear the halted lifecycle before starting again",
-                            run.run_id
-                        ),
-                    ))
-                }
-                mqk_db::RunStatus::Armed | mqk_db::RunStatus::Running => {
-                    return Err(RuntimeLifecycleError::conflict(
-                        "runtime.start_refused.durable_run_active",
-                        format!("durable run {} is already active", run.run_id),
-                    ))
-                }
-            },
-            None => {
-                let run_id = self.next_daemon_run_id(&db).await?;
-                mqk_db::insert_run(
-                    &db,
-                    &mqk_db::NewRun {
-                        run_id,
-                        engine_id: DAEMON_ENGINE_ID.to_string(),
-                        mode: self.deployment_mode().as_db_mode().to_string(),
-                        started_at_utc: Utc::now(),
-                        git_hash: "UNKNOWN".to_string(),
-                        config_hash: self.run_config_hash().to_string(),
-                        config_json: serde_json::json!({
-                            "runtime": "mqk-daemon",
-                            "adapter": self.adapter_id(),
-                            "mode": self.deployment_mode().as_db_mode(),
-                        }),
-                        host_fingerprint: self.node_id.clone(),
-                    },
-                )
-                .await
-                .map_err(|err| RuntimeLifecycleError::internal("start insert_run failed", err))?;
-                run_id
-            }
+        // DAILY-DATA-READINESS-01C-ENFORCEMENT-01 / REPAIR 3-4
+        // (DAILY-DATA-READINESS-01C-CLOSURE-REPAIR-01): advance the
+        // created/reused run to an active execution loop. `run_id` now
+        // exists — link it to the pre-start evaluation_id captured by the
+        // strict readiness gate (fail-closed on a link-persist failure: no
+        // arm/begin/tick/spawn — REPAIR 4 replaces the prior non-fatal
+        // sticky-degraded policy for this specific evidence boundary), then
+        // perform runtime construction/safety-setup and spawn the execution
+        // loop, in this exact order. Non-applicable deployments have no
+        // evaluation_id to link and proceed straight to runtime effects,
+        // exactly as before this patch.
+        //
+        // The production start path and the synthetic lifecycle proof test
+        // (`scenario_daily_data_readiness_start_gate_01.rs`) both drive this
+        // exact sequencing function against `RuntimeStartEffects` — never
+        // two independently-ordered implementations.
+        let readiness_link = daily_data_readiness_evaluation_id.map(|id| (id, Utc::now()));
+        let effects = ProductionRuntimeStartEffects {
+            state: self,
+            db: db.clone(),
+            artifact_intake: std::sync::Mutex::new(Some(artifact_intake)),
+            native_strategy_bootstrap: std::sync::Mutex::new(Some(native_strategy_bootstrap)),
+            orchestrator: std::sync::Mutex::new(None),
         };
-
-        // DAILY-DATA-READINESS-01C-ENFORCEMENT-01: run-linked readiness
-        // evidence (§C.10). `run_id` now exists (a run row was created or
-        // reused above) — link it to the pre-start evaluation_id captured by
-        // the strict readiness gate, before the loop is spawned further
-        // below. Only applicable starts persisted a pre-start evaluation;
-        // non-applicable deployments have no evaluation_id to link.
-        //
-        // Failure here follows the same non-fatal, sticky-degraded policy
-        // `persist_autonomous_session_truth_event` already uses for this
-        // exact table: it does not fail the start (the run row already
-        // exists), but it must not be silently swallowed either.
-        if let Some(evaluation_id) = daily_data_readiness_evaluation_id {
-            if let Some(ref db_ref) = self.db {
-                let linked = crate::daily_data_readiness::persist_run_linked_readiness_evidence(
-                    db_ref,
-                    evaluation_id,
-                    run_id,
-                    Utc::now(),
-                )
-                .await;
-                if !linked {
-                    self.autonomous_history_degraded
-                        .store(true, Ordering::SeqCst);
-                    tracing::warn!(
-                        %evaluation_id,
-                        %run_id,
-                        "daily_data_readiness_run_linked evidence persist failed; \
-                         autonomous_history_degraded=true"
-                    );
+        let mut lifecycle_trace: Vec<&'static str> = Vec::new();
+        crate::daily_data_readiness::advance_run_to_active(
+            &db,
+            &effects,
+            run_id,
+            readiness_link,
+            &mut lifecycle_trace,
+        )
+        .await
+        .map_err(|err| match err {
+            crate::daily_data_readiness::RuntimeStartSequenceError::RunLinkPersistFailed {
+                evaluation_id,
+                run_id,
+            } => RuntimeLifecycleError::service_unavailable(
+                "runtime.start_refused.readiness_run_link_persist_failed",
+                format!(
+                    "strict daily data readiness run-linked evidence persist failed for \
+                     evaluation_id={evaluation_id} run_id={run_id}; refusing to arm, begin, \
+                     tick, or spawn the execution loop — the run row exists but must not be \
+                     presented as an actively started runtime ({})",
+                    crate::daily_data_readiness::REASON_READINESS_RUN_LINK_PERSIST_FAILED,
+                ),
+            ),
+            crate::daily_data_readiness::RuntimeStartSequenceError::Effects(effects_err) => {
+                match effects_err.kind {
+                    crate::daily_data_readiness::RuntimeStartEffectsErrorKind::Internal => {
+                        RuntimeLifecycleError::internal(
+                            effects_err.fault_class,
+                            effects_err.message,
+                        )
+                    }
+                    crate::daily_data_readiness::RuntimeStartEffectsErrorKind::Conflict => {
+                        RuntimeLifecycleError::conflict(
+                            effects_err.fault_class,
+                            effects_err.message,
+                        )
+                    }
                 }
-            } else {
-                self.autonomous_history_degraded
-                    .store(true, Ordering::SeqCst);
             }
-        }
-
-        let mut orchestrator = self
-            .build_execution_orchestrator(db.clone(), run_id)
-            .await?;
-
-        if let Err(err) = mqk_db::arm_run(&db, run_id).await {
-            if let Err(rel_err) = orchestrator.release_runtime_leadership().await {
-                tracing::warn!("runtime_lease_release_failed_on_arm_rollback error={rel_err}");
-            }
-            return Err(RuntimeLifecycleError::internal("start arm_run failed", err));
-        }
-        if let Err(err) = mqk_db::begin_run(&db, run_id).await {
-            if let Err(rel_err) = orchestrator.release_runtime_leadership().await {
-                tracing::warn!("runtime_lease_release_failed_on_begin_rollback error={rel_err}");
-            }
-            return Err(RuntimeLifecycleError::internal(
-                "start begin_run failed",
-                err,
-            ));
-        }
-        if let Err(err) = mqk_db::heartbeat_run(&db, run_id, Utc::now()).await {
-            if let Err(rel_err) = orchestrator.release_runtime_leadership().await {
-                tracing::warn!(
-                    "runtime_lease_release_failed_on_heartbeat_rollback error={rel_err}"
-                );
-            }
-            return Err(RuntimeLifecycleError::internal(
-                "start initial heartbeat failed",
-                err,
-            ));
-        }
-        if let Err(err) = orchestrator.tick().await {
-            let message = err.to_string();
-            if let Err(rel_err) = orchestrator.release_runtime_leadership().await {
-                tracing::warn!("runtime_lease_release_failed_on_tick_rollback error={rel_err}");
-            }
-            if message.contains("RUNTIME_LEASE") {
-                return Err(RuntimeLifecycleError::conflict(
-                    "runtime.start_refused.service_unavailable",
-                    format!("runtime leader lease unavailable: {message}"),
-                ));
-            }
-            return Err(RuntimeLifecycleError::internal(
-                "start initial tick failed",
-                err,
-            ));
-        }
-
-        // DEADMAN-EXPIRED-AFTER-START-01: refresh heartbeat after the initial
-        // tick.  orchestrator.tick() may block for tens of seconds (Alpaca
-        // fetch_events has no HTTP timeout).  The heartbeat written above can
-        // be stale by the time tick() returns; the execution loop's first
-        // pre-tick deadman check would then fire immediately.  A fresh
-        // heartbeat here ensures the loop starts with a current timestamp.
-        if let Err(err) = mqk_db::heartbeat_run(&db, run_id, Utc::now()).await {
-            if let Err(rel_err) = orchestrator.release_runtime_leadership().await {
-                tracing::warn!(
-                    "runtime_lease_release_failed_on_post_tick_heartbeat error={rel_err}"
-                );
-            }
-            return Err(RuntimeLifecycleError::internal(
-                "post-initial-tick heartbeat refresh failed",
-                err,
-            ));
-        }
-
-        if let Ok(initial_snapshot) = orchestrator.snapshot().await {
-            *self.execution_snapshot.write().await = Some(initial_snapshot);
-        }
-
-        // PT-AUTO-02: reset per-run signal intake counter at each new start so
-        // the bound applies per execution run, not per daemon process lifetime.
-        self.day_signal_count.store(0, Ordering::SeqCst);
-        // MULTI-SYMBOL-DAY-ORDER-CAP-01: reset per-symbol order intake counters
-        // (cap #4) at the same run-start boundary as day_signal_count.
-        self.reset_symbol_day_order_counts().await;
-        // DISCORD-SIGNAL-BLOCKED-GATE-ALERTS-01: reset dedup state so each new
-        // run gets fresh B5 and day-limit alert windows.
-        self.reset_signal_blocked_alert_state();
-        // AUTON-NO-TRADE-01: reset bar-tick counters alongside signal counter.
-        self.reset_bar_tick_counters();
-        // PER-SYMBOL-TARGET-STATE-01: clear observability-only target state at
-        // the same run-start boundary as other in-memory per-run tracking.
-        self.clear_per_symbol_target_states().await;
-
-        // TV-01C: capture artifact provenance at run start.
-        //
-        // Uses the artifact intake result evaluated once above (TV-01 hoist) —
-        // the same identity that passed all pre-DB gates is the identity recorded
-        // as this run's provenance.  No second evaluation; TOCTOU gap closed.
-        //
-        // Only `Accepted` carries positive provenance; all other outcomes leave
-        // `accepted_artifact` as `None` (fail-closed: absent/invalid/unavailable
-        // artifacts are not recorded as consumed).
-        {
-            let provenance = match artifact_intake {
-                ArtifactIntakeOutcome::Accepted {
-                    artifact_id,
-                    artifact_type,
-                    stage,
-                    produced_by,
-                } => Some(AcceptedArtifactProvenance {
-                    artifact_id,
-                    artifact_type,
-                    stage,
-                    produced_by,
-                }),
-                _ => None,
-            };
-            *self.accepted_artifact.write().await = provenance;
-        }
-
-        // B1A: store native strategy bootstrap for the active run.
-        // Placed after all DB operations and the initial tick succeed so the
-        // field is only populated when the run is fully live.
-        *self.native_strategy_bootstrap.lock().await = Some(native_strategy_bootstrap);
-
-        let handle = spawn_execution_loop(Arc::clone(self), orchestrator, run_id);
-        {
-            let mut lock = self.execution_loop.lock().await;
-            if lock.is_some() {
-                return Err(RuntimeLifecycleError::conflict(
-                    "runtime.start_refused.local_ownership_conflict",
-                    "runtime ownership changed while starting; refusing duplicate loop",
-                ));
-            }
-            *lock = Some(handle);
-        }
+        })?;
 
         {
             let snap_arc = Arc::clone(&self.execution_snapshot);
@@ -1083,6 +902,109 @@ impl AppState {
         };
         self.publish_status(snapshot.clone()).await;
         Ok(snapshot)
+    }
+
+    /// Look up any existing durable run for this engine/mode and either
+    /// reuse a `Created` run or create a fresh one.
+    ///
+    /// REPAIR 3 (DAILY-DATA-READINESS-01C-CLOSURE-REPAIR-01): extracted from
+    /// `start_execution_runtime`'s previously-inline lookup/creation logic
+    /// (unchanged) so the production start path and the synthetic lifecycle
+    /// proof test both create a run through the exact same code — never a
+    /// separate test-only reimplementation of this identity resolution.
+    pub async fn create_or_reuse_run_for_start(
+        self: &Arc<Self>,
+        db: &PgPool,
+    ) -> Result<uuid::Uuid, RuntimeLifecycleError> {
+        if let Some(active) = mqk_db::fetch_active_run_for_engine(
+            db,
+            DAEMON_ENGINE_ID,
+            self.deployment_mode().as_db_mode(),
+        )
+        .await
+        .map_err(|err| RuntimeLifecycleError::internal("start active-run lookup failed", err))?
+        {
+            return Err(RuntimeLifecycleError::conflict(
+                "runtime.truth_mismatch.durable_active_without_local_owner",
+                format!(
+                    "durable active run exists without local ownership: {}",
+                    active.run_id
+                ),
+            ));
+        }
+
+        let latest = mqk_db::fetch_latest_run_for_engine(
+            db,
+            DAEMON_ENGINE_ID,
+            self.deployment_mode().as_db_mode(),
+        )
+        .await
+        .map_err(|err| RuntimeLifecycleError::internal("start latest-run lookup failed", err))?;
+
+        match latest.as_ref() {
+            Some(run) => match run.status {
+                mqk_db::RunStatus::Created => Ok(run.run_id),
+                mqk_db::RunStatus::Stopped => {
+                    let run_id = self.next_daemon_run_id(db).await?;
+                    mqk_db::insert_run(
+                        db,
+                        &mqk_db::NewRun {
+                            run_id,
+                            engine_id: DAEMON_ENGINE_ID.to_string(),
+                            mode: self.deployment_mode().as_db_mode().to_string(),
+                            started_at_utc: Utc::now(),
+                            git_hash: "UNKNOWN".to_string(),
+                            config_hash: self.run_config_hash().to_string(),
+                            config_json: serde_json::json!({
+                                "runtime": "mqk-daemon",
+                                "adapter": self.adapter_id(),
+                                "mode": self.deployment_mode().as_db_mode(),
+                            }),
+                            host_fingerprint: self.node_id.clone(),
+                        },
+                    )
+                    .await
+                    .map_err(|err| RuntimeLifecycleError::internal("start insert_run failed", err))?;
+                    Ok(run_id)
+                }
+                mqk_db::RunStatus::Halted => Err(RuntimeLifecycleError::conflict(
+                    "runtime.start_refused.halted_lifecycle",
+                    format!(
+                        "durable run {} is halted; operator must clear the halted lifecycle before starting again",
+                        run.run_id
+                    ),
+                )),
+                mqk_db::RunStatus::Armed | mqk_db::RunStatus::Running => {
+                    Err(RuntimeLifecycleError::conflict(
+                        "runtime.start_refused.durable_run_active",
+                        format!("durable run {} is already active", run.run_id),
+                    ))
+                }
+            },
+            None => {
+                let run_id = self.next_daemon_run_id(db).await?;
+                mqk_db::insert_run(
+                    db,
+                    &mqk_db::NewRun {
+                        run_id,
+                        engine_id: DAEMON_ENGINE_ID.to_string(),
+                        mode: self.deployment_mode().as_db_mode().to_string(),
+                        started_at_utc: Utc::now(),
+                        git_hash: "UNKNOWN".to_string(),
+                        config_hash: self.run_config_hash().to_string(),
+                        config_json: serde_json::json!({
+                            "runtime": "mqk-daemon",
+                            "adapter": self.adapter_id(),
+                            "mode": self.deployment_mode().as_db_mode(),
+                        }),
+                        host_fingerprint: self.node_id.clone(),
+                    },
+                )
+                .await
+                .map_err(|err| RuntimeLifecycleError::internal("start insert_run failed", err))?;
+                Ok(run_id)
+            }
+        }
     }
 
     pub async fn stop_execution_runtime(
@@ -1341,5 +1263,221 @@ impl AppState {
                 }
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// REPAIR 3 (DAILY-DATA-READINESS-01C-CLOSURE-REPAIR-01): production
+// implementation of `daily_data_readiness::RuntimeStartEffects`.
+//
+// Wraps the exact runtime-construction/arm/begin/tick/heartbeat/snapshot/
+// counter-reset/provenance-capture/bootstrap-storage/spawn sequence
+// `start_execution_runtime` previously performed inline, unchanged in
+// substance — only relocated so the identical trait the synthetic lifecycle
+// proof test implements can be driven by `daily_data_readiness::
+// advance_run_to_active` in production too.
+// ---------------------------------------------------------------------------
+
+struct ProductionRuntimeStartEffects<'a> {
+    state: &'a Arc<AppState>,
+    db: PgPool,
+    /// Consumed exactly once by `start_runtime_effects` (TV-01C provenance
+    /// capture) — `std::sync::Mutex` for interior mutability behind `&self`;
+    /// never held across an `.await`.
+    artifact_intake: std::sync::Mutex<Option<ArtifactIntakeOutcome>>,
+    /// Consumed exactly once by `start_runtime_effects` (B1A bootstrap
+    /// storage).
+    native_strategy_bootstrap: std::sync::Mutex<Option<NativeStrategyBootstrap>>,
+    /// Populated by `start_runtime_effects`, consumed by `spawn_loop`.
+    orchestrator: std::sync::Mutex<Option<DaemonOrchestrator>>,
+}
+
+#[async_trait::async_trait]
+impl crate::daily_data_readiness::RuntimeStartEffects for ProductionRuntimeStartEffects<'_> {
+    async fn start_runtime_effects(
+        &self,
+        run_id: uuid::Uuid,
+    ) -> Result<(), crate::daily_data_readiness::RuntimeStartEffectsError> {
+        use crate::daily_data_readiness::RuntimeStartEffectsError;
+
+        let mut orchestrator = self
+            .state
+            .build_execution_orchestrator(self.db.clone(), run_id)
+            .await
+            .map_err(|err| {
+                let fault_class = err.fault_class();
+                let message = err.to_string();
+                match err {
+                    RuntimeLifecycleError::Conflict { .. } => {
+                        RuntimeStartEffectsError::conflict(fault_class, message)
+                    }
+                    _ => RuntimeStartEffectsError::internal(fault_class, message),
+                }
+            })?;
+
+        if let Err(err) = mqk_db::arm_run(&self.db, run_id).await {
+            if let Err(rel_err) = orchestrator.release_runtime_leadership().await {
+                tracing::warn!("runtime_lease_release_failed_on_arm_rollback error={rel_err}");
+            }
+            return Err(RuntimeStartEffectsError::internal(
+                "start arm_run failed",
+                err.to_string(),
+            ));
+        }
+        if let Err(err) = mqk_db::begin_run(&self.db, run_id).await {
+            if let Err(rel_err) = orchestrator.release_runtime_leadership().await {
+                tracing::warn!("runtime_lease_release_failed_on_begin_rollback error={rel_err}");
+            }
+            return Err(RuntimeStartEffectsError::internal(
+                "start begin_run failed",
+                err.to_string(),
+            ));
+        }
+        if let Err(err) = mqk_db::heartbeat_run(&self.db, run_id, Utc::now()).await {
+            if let Err(rel_err) = orchestrator.release_runtime_leadership().await {
+                tracing::warn!(
+                    "runtime_lease_release_failed_on_heartbeat_rollback error={rel_err}"
+                );
+            }
+            return Err(RuntimeStartEffectsError::internal(
+                "start initial heartbeat failed",
+                err.to_string(),
+            ));
+        }
+        if let Err(err) = orchestrator.tick().await {
+            let message = err.to_string();
+            if let Err(rel_err) = orchestrator.release_runtime_leadership().await {
+                tracing::warn!("runtime_lease_release_failed_on_tick_rollback error={rel_err}");
+            }
+            if message.contains("RUNTIME_LEASE") {
+                return Err(RuntimeStartEffectsError::conflict(
+                    "runtime.start_refused.service_unavailable",
+                    format!("runtime leader lease unavailable: {message}"),
+                ));
+            }
+            return Err(RuntimeStartEffectsError::internal(
+                "start initial tick failed",
+                message,
+            ));
+        }
+
+        // DEADMAN-EXPIRED-AFTER-START-01: refresh heartbeat after the initial
+        // tick.  orchestrator.tick() may block for tens of seconds (Alpaca
+        // fetch_events has no HTTP timeout).  The heartbeat written above can
+        // be stale by the time tick() returns; the execution loop's first
+        // pre-tick deadman check would then fire immediately.  A fresh
+        // heartbeat here ensures the loop starts with a current timestamp.
+        if let Err(err) = mqk_db::heartbeat_run(&self.db, run_id, Utc::now()).await {
+            if let Err(rel_err) = orchestrator.release_runtime_leadership().await {
+                tracing::warn!(
+                    "runtime_lease_release_failed_on_post_tick_heartbeat error={rel_err}"
+                );
+            }
+            return Err(RuntimeStartEffectsError::internal(
+                "post-initial-tick heartbeat refresh failed",
+                err.to_string(),
+            ));
+        }
+
+        if let Ok(initial_snapshot) = orchestrator.snapshot().await {
+            *self.state.execution_snapshot.write().await = Some(initial_snapshot);
+        }
+
+        // PT-AUTO-02: reset per-run signal intake counter at each new start so
+        // the bound applies per execution run, not per daemon process lifetime.
+        self.state.day_signal_count.store(0, Ordering::SeqCst);
+        // MULTI-SYMBOL-DAY-ORDER-CAP-01: reset per-symbol order intake counters
+        // (cap #4) at the same run-start boundary as day_signal_count.
+        self.state.reset_symbol_day_order_counts().await;
+        // DISCORD-SIGNAL-BLOCKED-GATE-ALERTS-01: reset dedup state so each new
+        // run gets fresh B5 and day-limit alert windows.
+        self.state.reset_signal_blocked_alert_state();
+        // AUTON-NO-TRADE-01: reset bar-tick counters alongside signal counter.
+        self.state.reset_bar_tick_counters();
+        // PER-SYMBOL-TARGET-STATE-01: clear observability-only target state at
+        // the same run-start boundary as other in-memory per-run tracking.
+        self.state.clear_per_symbol_target_states().await;
+
+        // TV-01C: capture artifact provenance at run start.
+        //
+        // Uses the artifact intake result evaluated once above (TV-01 hoist) —
+        // the same identity that passed all pre-DB gates is the identity recorded
+        // as this run's provenance.  No second evaluation; TOCTOU gap closed.
+        //
+        // Only `Accepted` carries positive provenance; all other outcomes leave
+        // `accepted_artifact` as `None` (fail-closed: absent/invalid/unavailable
+        // artifacts are not recorded as consumed).
+        {
+            let artifact_intake = self
+                .artifact_intake
+                .lock()
+                .expect("artifact_intake mutex poisoned")
+                .take()
+                .expect("start_runtime_effects must be called at most once");
+            let provenance = match artifact_intake {
+                ArtifactIntakeOutcome::Accepted {
+                    artifact_id,
+                    artifact_type,
+                    stage,
+                    produced_by,
+                } => Some(AcceptedArtifactProvenance {
+                    artifact_id,
+                    artifact_type,
+                    stage,
+                    produced_by,
+                }),
+                _ => None,
+            };
+            *self.state.accepted_artifact.write().await = provenance;
+        }
+
+        // B1A: store native strategy bootstrap for the active run.
+        // Placed after all DB operations and the initial tick succeed so the
+        // field is only populated when the run is fully live.
+        //
+        // The `.take()` is hoisted into its own statement (rather than
+        // inline in the `if let` scrutinee) so the `std::sync::MutexGuard`
+        // temporary is dropped before the `.await` below — a guard alive
+        // across an `if let` scrutinee is kept alive for the whole block by
+        // Rust's temporary-lifetime rules, which would make this function's
+        // returned future `!Send`.
+        let bootstrap_to_store = self
+            .native_strategy_bootstrap
+            .lock()
+            .expect("native_strategy_bootstrap mutex poisoned")
+            .take();
+        if let Some(bootstrap) = bootstrap_to_store {
+            *self.state.native_strategy_bootstrap.lock().await = Some(bootstrap);
+        }
+
+        *self
+            .orchestrator
+            .lock()
+            .expect("orchestrator mutex poisoned") = Some(orchestrator);
+        Ok(())
+    }
+
+    async fn spawn_loop(
+        &self,
+        run_id: uuid::Uuid,
+    ) -> Result<(), crate::daily_data_readiness::RuntimeStartEffectsError> {
+        use crate::daily_data_readiness::RuntimeStartEffectsError;
+
+        let orchestrator = self
+            .orchestrator
+            .lock()
+            .expect("orchestrator mutex poisoned")
+            .take()
+            .expect("spawn_loop must be called only after start_runtime_effects succeeds");
+        let handle = spawn_execution_loop(Arc::clone(self.state), orchestrator, run_id);
+        let mut lock = self.state.execution_loop.lock().await;
+        if lock.is_some() {
+            return Err(RuntimeStartEffectsError::conflict(
+                "runtime.start_refused.local_ownership_conflict",
+                "runtime ownership changed while starting; refusing duplicate loop",
+            ));
+        }
+        *lock = Some(handle);
+        Ok(())
     }
 }

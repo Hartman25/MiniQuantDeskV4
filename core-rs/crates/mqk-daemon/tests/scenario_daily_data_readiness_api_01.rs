@@ -69,6 +69,14 @@ const FAKE_PROVIDER: &str = "zzddrapi01_provider";
 /// dir and points `MQK_INSTRUMENT_REGISTRY_PATH` / `MQK_PROVIDER_REGISTRY_PATH`
 /// at them. Returns the dir so the caller can clean it up.
 fn write_registries() -> std::path::PathBuf {
+    write_registries_for(FAKE_SYMBOL, FAKE_PROVIDER)
+}
+
+/// Parameterized variant of [`write_registries`] (matches the pattern in
+/// `scenario_daily_data_readiness_start_gate_01.rs`): DB-backed tests that
+/// persist real `md_bars` rows use a distinct symbol/provider per test so
+/// they never collide with another test's seeded fixtures.
+fn write_registries_for(symbol: &str, provider: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!(
         "mqk_ddr_api01_registry_{}_{}",
         std::process::id(),
@@ -82,11 +90,11 @@ fn write_registries() -> std::path::PathBuf {
         format!(
             r#"[
   {{
-    "instrument_id": "equity:US:{FAKE_SYMBOL}",
-    "symbol": "{FAKE_SYMBOL}",
+    "instrument_id": "equity:US:{symbol}",
+    "symbol": "{symbol}",
     "asset_class": "equity",
-    "provider": "{FAKE_PROVIDER}",
-    "provider_symbol": "{FAKE_SYMBOL}",
+    "provider": "{provider}",
+    "provider_symbol": "{symbol}",
     "venue": "TEST",
     "currency": "USD",
     "enabled": true,
@@ -104,8 +112,8 @@ fn write_registries() -> std::path::PathBuf {
         format!(
             r#"[
   {{
-    "provider_id": "{FAKE_PROVIDER}",
-    "display_name": "ZZDDRAPI01 Test Provider",
+    "provider_id": "{provider}",
+    "display_name": "{symbol} Test Provider",
     "asset_classes": ["equity"],
     "free_tier_available": true,
     "api_key_required": false,
@@ -521,4 +529,119 @@ async fn api_13_14_15_16_surfaces_agree_on_daily_data_readiness() {
 
     clear_env();
     cleanup_registries(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// REPAIR 2 (DAILY-DATA-READINESS-01C-CLOSURE-REPAIR-01): continuity_state
+// truth, proven end-to-end through the live HTTP route (not only the pure
+// `derive_continuity_state` unit tests in
+// `scenario_daily_data_readiness_01.rs`). `md_bars`'s
+// `primary key (symbol, timeframe, end_ts)` makes a genuine duplicate row
+// impossible to seed through a real DB write, and a history shortfall always
+// co-occurs with a gap here too — so this file covers the one continuity
+// defect that IS independently reproducible via real seeded rows: a missing
+// interior date.
+// ---------------------------------------------------------------------------
+
+async fn seed_1d_bars(pool: &sqlx::PgPool, symbol: &str, provider: &str, end_ts_list: &[i64]) {
+    sqlx::query("delete from md_bars where symbol = $1 and timeframe = '1D'")
+        .bind(symbol)
+        .execute(pool)
+        .await
+        .expect("cleanup failed");
+    for &end_ts in end_ts_list {
+        sqlx::query(
+            r#"
+            insert into md_bars (
+              symbol, timeframe, end_ts, open_micros, high_micros, low_micros,
+              close_micros, volume, is_complete, provider_id, provider_source,
+              provider_symbol, ingest_mode, ingested_at
+            ) values ($1,'1D',$2,100000000,101000000,99000000,100500000,1000000,true,
+                      $3,$3,$1,'historical_sync',now())
+            "#,
+        )
+        .bind(symbol)
+        .bind(end_ts)
+        .bind(provider)
+        .execute(pool)
+        .await
+        .expect("seed insert failed");
+    }
+}
+
+async fn cleanup_bars(pool: &sqlx::PgPool, symbol: &str) {
+    let _ = sqlx::query("delete from md_bars where symbol = $1")
+        .bind(symbol)
+        .execute(pool)
+        .await;
+}
+
+#[tokio::test]
+async fn api_19_interior_gap_reports_continuity_state_gap_detected() {
+    let _g = env_lock().lock().await;
+    let Some(pool) = db_pool_or_skip("API-19").await else {
+        return;
+    };
+    clear_env();
+    let symbol = "ZZDDRAPI19";
+    let provider = "zzddrapi19_provider";
+    let dir = write_registries_for(symbol, provider);
+    unsafe {
+        std::env::set_var("MQK_STRATEGY_SYMBOL", symbol);
+        std::env::set_var("MQK_STRATEGY_IDS", "swing_momentum");
+        std::env::set_var("MQK_STRATEGY_MD_TIMEFRAME", "1D");
+    }
+
+    let calendar_provider = mqk_daemon::state::market_calendar::NyseWeekdaysProvider;
+    let now = chrono::Utc::now();
+    let schedule = mqk_daemon::state::market_calendar::resolve_market_session_schedule(
+        &calendar_provider,
+        now,
+    );
+    let expected = mqk_daemon::daily_data_readiness::expected_daily_end_ts_window(
+        &calendar_provider,
+        &schedule,
+        now.timestamp(),
+        900,
+        20,
+    )
+    .expect("expected window resolves");
+    assert_eq!(expected.len(), 20);
+    // Seed every expected date except one interior (non-latest) date, so the
+    // window is otherwise fully covered — isolates the gap finding from an
+    // insufficient-history finding (19 of 20 bars present).
+    let with_interior_gap: Vec<i64> = expected
+        .iter()
+        .enumerate()
+        .filter(|(i, _)| *i != 5)
+        .map(|(_, ts)| *ts)
+        .collect();
+    assert_eq!(with_interior_gap.len(), 19);
+    seed_1d_bars(&pool, symbol, provider, &with_interior_gap).await;
+
+    let mut st_raw = state::AppState::new_for_test_with_broker_kind(BrokerKind::Alpaca);
+    st_raw.db = Some(pool.clone());
+    let st = Arc::new(st_raw);
+    let router = routes::build_router(st);
+    let (status, v) = call(router, "/api/v1/market-data/readiness").await;
+    assert_eq!(status, StatusCode::OK);
+
+    let a = &v["assignments"][0];
+    assert!(
+        a["blockers"]
+            .as_array()
+            .expect("blockers array")
+            .iter()
+            .any(|b| b == "interior_gap"),
+        "API-19: interior_gap must be a named blocker: {a}"
+    );
+    assert_eq!(
+        a["continuity_state"], "gap_detected",
+        "REPAIR 2: interior gap -> continuity_state == gap_detected: {a}"
+    );
+    assert_ne!(a["continuity_state"], "ok");
+
+    clear_env();
+    cleanup_registries(&dir);
+    cleanup_bars(&pool, symbol).await;
 }

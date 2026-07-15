@@ -15,17 +15,18 @@
 use chrono::{DateTime, TimeZone, Utc};
 
 use mqk_daemon::daily_data_readiness::{
-    self, evaluate_assignment, evaluate_assignments, evaluate_bar_readiness,
-    expected_daily_end_ts_window, expected_intraday_end_ts_window,
+    self, derive_continuity_state, evaluate_assignment, evaluate_assignments,
+    evaluate_bar_readiness, expected_daily_end_ts_window, expected_intraday_end_ts_window,
     resolve_daily_bar_timestamp_convention, DailyBarTimestampConvention,
     REASON_ASSET_CLASS_UNKNOWN, REASON_CALENDAR_UNAVAILABLE, REASON_DUPLICATE_TIMESTAMP,
     REASON_EXPECTED_LATEST_BAR_MISSING, REASON_INSUFFICIENT_HISTORY, REASON_INTERIOR_GAP,
-    REASON_LATEST_BAR_FUTURE, REASON_PROVIDER_CAPABILITY_MISMATCH, REASON_PROVIDER_DISABLED,
-    REASON_PROVIDER_ID_MISMATCH, REASON_PROVIDER_INGEST_TIME_FUTURE,
+    REASON_LATEST_BAR_FUTURE, REASON_MARKET_DATA_MISSING, REASON_PROVIDER_CAPABILITY_MISMATCH,
+    REASON_PROVIDER_DISABLED, REASON_PROVIDER_ID_MISMATCH, REASON_PROVIDER_INGEST_TIME_FUTURE,
     REASON_PROVIDER_PROVENANCE_INVALID, REASON_PROVIDER_SYMBOL_MISMATCH,
     REASON_PROVIDER_TIMESTAMP_CONVENTION_UNVERIFIED, REASON_PROVIDER_UNKNOWN,
     REASON_RUNTIME_STRATEGY_ASSIGNMENT_MISMATCH, REASON_RUNTIME_STRATEGY_SYMBOL_BINDING_MISMATCH,
     REASON_RUNTIME_STRATEGY_TIMEFRAME_MISMATCH, REASON_STRATEGY_REQUIREMENT_UNKNOWN,
+    REASON_UNSUPPORTED_INTRADAY_CONTINUITY,
 };
 use mqk_daemon::state::market_calendar::{
     self, resolve_market_session_schedule, CalendarCoverageState, FixedWindowOverrideProvider,
@@ -2067,4 +2068,88 @@ async fn ddr_47_evaluator_uses_injected_binding_not_environment() {
         result.readiness_state, "db_unavailable",
         "DDR-47: the injected binding must let evaluation progress past binding checks: {result:?}"
     );
+}
+
+// ---------------------------------------------------------------------------
+// REPAIR 2 (DAILY-DATA-READINESS-01C-CLOSURE-REPAIR-01): continuity_state
+// summary truth. `derive_continuity_state` is a pure function, tested
+// directly against every continuity/history blocker in isolation — this
+// proves the "never ok" invariant holds for each blocker regardless of
+// which combinations the live bar-window evaluator can currently produce
+// (e.g. `md_bars`'s primary key makes a genuine duplicate `end_ts` row
+// impossible to ingest, so `REASON_DUPLICATE_TIMESTAMP` can only be
+// exercised this way or via `evaluate_bar_readiness` directly, as DDR-24
+// above already does).
+// ---------------------------------------------------------------------------
+
+#[test]
+fn ddr_56_history_insufficient_continuity_state_never_ok() {
+    // Required example: history_insufficient -> continuity_state != "ok".
+    let state = derive_continuity_state(&[REASON_INSUFFICIENT_HISTORY], Some(3));
+    assert_ne!(
+        state, "ok",
+        "REPAIR 2: insufficient_history must never report continuity_state=ok"
+    );
+    assert_eq!(state, "insufficient");
+
+    // Realistic co-occurrence: under the live evaluator, insufficient
+    // history always ships alongside a gap-type blocker too (a
+    // fixed-length expected window can never be fully covered by fewer
+    // completed bars than it requires) — gap_detected takes priority, and
+    // that combination must still never be "ok".
+    let state_with_gap =
+        derive_continuity_state(&[REASON_INSUFFICIENT_HISTORY, REASON_INTERIOR_GAP], Some(3));
+    assert_ne!(state_with_gap, "ok");
+    assert_eq!(state_with_gap, "gap_detected");
+}
+
+#[test]
+fn ddr_57_duplicate_timestamp_continuity_state_never_ok() {
+    // Required example: duplicate timestamp -> continuity_state != "ok".
+    let state = derive_continuity_state(&[REASON_DUPLICATE_TIMESTAMP], Some(21));
+    assert_ne!(
+        state, "ok",
+        "REPAIR 2: duplicate_timestamp must never report continuity_state=ok"
+    );
+    assert_eq!(state, "duplicate_detected");
+}
+
+#[test]
+fn ddr_58_interior_gap_continuity_state_is_gap_detected() {
+    // Required example: interior gap -> gap_detected.
+    assert_eq!(
+        derive_continuity_state(&[REASON_INTERIOR_GAP], Some(19)),
+        "gap_detected"
+    );
+    assert_eq!(
+        derive_continuity_state(&[REASON_EXPECTED_LATEST_BAR_MISSING], Some(19)),
+        "gap_detected"
+    );
+}
+
+#[test]
+fn ddr_59_unsupported_intraday_continuity_state_is_unsupported() {
+    // Required example: unsupported continuity -> unsupported.
+    assert_eq!(
+        derive_continuity_state(&[REASON_UNSUPPORTED_INTRADAY_CONTINUITY], None),
+        "unsupported"
+    );
+}
+
+#[test]
+fn ddr_60_calendar_and_market_data_blockers_are_unknown_never_ok() {
+    assert_eq!(
+        derive_continuity_state(&[REASON_CALENDAR_UNAVAILABLE], None),
+        "unknown"
+    );
+    assert_eq!(
+        derive_continuity_state(&[REASON_MARKET_DATA_MISSING], None),
+        "unknown"
+    );
+}
+
+#[test]
+fn ddr_61_no_blockers_and_loaded_bars_is_ok_absent_bars_is_unknown() {
+    assert_eq!(derive_continuity_state(&[], Some(20)), "ok");
+    assert_eq!(derive_continuity_state(&[], None), "unknown");
 }

@@ -6280,7 +6280,12 @@ pub struct DailyDataReadinessAssignmentResponse {
     pub loaded_completed_bars: Option<usize>,
     pub expected_latest_bar_ts: Option<i64>,
     pub actual_latest_bar_ts: Option<i64>,
-    /// `"ok"` | `"gap_detected"` | `"unsupported"` | `"unknown"`.
+    /// `"ok"` | `"insufficient"` | `"duplicate_detected"` | `"gap_detected"`
+    /// | `"unsupported"` | `"unknown"`. Never `"ok"` when a continuity or
+    /// history blocker (`insufficient_history`, `duplicate_timestamp`,
+    /// `interior_gap`, `expected_latest_bar_missing`,
+    /// `unsupported_intraday_continuity`, `calendar_unavailable`,
+    /// `market_data_missing`) is present.
     pub continuity_state: String,
     /// `"ok"` | `"invalid"` | `"unknown"`.
     pub provenance_state: String,

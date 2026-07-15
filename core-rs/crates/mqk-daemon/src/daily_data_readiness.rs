@@ -235,8 +235,12 @@ pub struct AssignmentReadiness {
     /// `max(end_ts)` across every row in the bounded query window. `None`
     /// under the same conditions as `loaded_completed_bars`.
     pub actual_latest_bar_ts: Option<i64>,
-    /// `"ok"` | `"gap_detected"` | `"unsupported"` | `"unknown"` — derived
-    /// from `blockers` (§C.2), never a second continuity computation.
+    /// `"ok"` | `"insufficient"` | `"duplicate_detected"` | `"gap_detected"`
+    /// | `"unsupported"` | `"unknown"` — derived from `blockers` (§C.2),
+    /// never a second continuity computation. REPAIR 2
+    /// (DAILY-DATA-READINESS-01C-CLOSURE-REPAIR-01): `"ok"` is never
+    /// returned when `REASON_INSUFFICIENT_HISTORY` or
+    /// `REASON_DUPLICATE_TIMESTAMP` is present.
     pub continuity_state: &'static str,
     /// `"ok"` | `"invalid"` | `"unknown"` — derived from `blockers` (§C.2),
     /// never a second provenance computation.
@@ -268,6 +272,69 @@ pub struct DailyDataReadinessReport {
 fn push_unique(blockers: &mut Vec<&'static str>, reason: &'static str) {
     if !blockers.contains(&reason) {
         blockers.push(reason);
+    }
+}
+
+/// REPAIR 2 (DAILY-DATA-READINESS-01C-CLOSURE-REPAIR-01): derive the
+/// `continuity_state` summary from a finished evaluation's `blockers` list —
+/// a pure function, directly unit-testable without a DB, so the "never
+/// `ok` when a continuity/history blocker is present" invariant can be
+/// proven for every blocker in isolation, not only combinations the live
+/// evaluator happens to be able to produce today.
+///
+/// Every continuity/history blocker this evaluator can produce
+/// (`REASON_INSUFFICIENT_HISTORY`, `REASON_INTERIOR_GAP`,
+/// `REASON_EXPECTED_LATEST_BAR_MISSING`, `REASON_DUPLICATE_TIMESTAMP`,
+/// `REASON_UNSUPPORTED_INTRADAY_CONTINUITY`, `REASON_CALENDAR_UNAVAILABLE`,
+/// `REASON_MARKET_DATA_MISSING`) is checked explicitly below — none may fall
+/// through to `"ok"`. `duplicate_bar_timestamp` does not exist as a distinct
+/// reason code in this evaluator (only `duplicate_timestamp` does); auditing
+/// the full blocker set confirmed this.
+///
+/// Ordered most-specific-first: unsupported-continuity and
+/// calendar/market-data-missing (blockers that mean continuity could not
+/// even be evaluated) take priority over a duplicate/insufficient/gap
+/// finding computed from a window that was itself compromised.
+///
+/// Note: under the live bar-window evaluator, `md_bars`'s
+/// `primary key (symbol, timeframe, end_ts)` makes a genuine duplicate
+/// `end_ts` row structurally impossible to ingest, and a fixed-length
+/// expected window makes `REASON_INSUFFICIENT_HISTORY` always co-occur with
+/// an interior-gap/latest-bar-missing blocker (fewer completed bars than the
+/// window length can never cover every expected slot). Both branches below
+/// remain load-bearing regardless — they are the honest fallback the moment
+/// either invariant does not hold (e.g. `evaluate_bar_readiness` exercised
+/// directly, as this evaluator's own regression tests already do), and they
+/// are what proves `"insufficient_history" -> continuity_state != "ok"` and
+/// `"duplicate_timestamp" -> continuity_state != "ok"` in isolation.
+pub fn derive_continuity_state(
+    blockers: &[&'static str],
+    loaded_completed_bars: Option<usize>,
+) -> &'static str {
+    if blockers.contains(&REASON_UNSUPPORTED_INTRADAY_CONTINUITY) {
+        "unsupported"
+    } else if blockers.contains(&REASON_CALENDAR_UNAVAILABLE)
+        || blockers.contains(&REASON_MARKET_DATA_MISSING)
+    {
+        "unknown"
+    } else if blockers.contains(&REASON_DUPLICATE_TIMESTAMP) {
+        // A duplicate end_ts makes the bounded window structurally invalid —
+        // never presentable as "ok", and distinguishable from an honest gap
+        // or an honest shortfall.
+        "duplicate_detected"
+    } else if blockers.contains(&REASON_INTERIOR_GAP)
+        || blockers.contains(&REASON_EXPECTED_LATEST_BAR_MISSING)
+    {
+        "gap_detected"
+    } else if blockers.contains(&REASON_INSUFFICIENT_HISTORY) {
+        // Fewer completed bars than required is a continuity shortfall, not
+        // an "ok" continuity state, even though every bar actually present
+        // is contiguous and duplicate-free.
+        "insufficient"
+    } else if loaded_completed_bars.is_some() {
+        "ok"
+    } else {
+        "unknown"
     }
 }
 
@@ -512,25 +579,10 @@ pub async fn evaluate_assignment(
         }
     };
 
-    // Phase C (§C.2): derive continuity/provenance summary states and
-    // per-blocker remediation from the final `blockers` list — never a
-    // second continuity/provenance computation.
-    let continuity_state: &'static str =
-        if blockers.contains(&REASON_UNSUPPORTED_INTRADAY_CONTINUITY) {
-            "unsupported"
-        } else if blockers.contains(&REASON_INTERIOR_GAP)
-            || blockers.contains(&REASON_EXPECTED_LATEST_BAR_MISSING)
-        {
-            "gap_detected"
-        } else if blockers.contains(&REASON_CALENDAR_UNAVAILABLE)
-            || blockers.contains(&REASON_MARKET_DATA_MISSING)
-        {
-            "unknown"
-        } else if loaded_completed_bars.is_some() {
-            "ok"
-        } else {
-            "unknown"
-        };
+    // Phase C (§C.2) / REPAIR 2 (DAILY-DATA-READINESS-01C-CLOSURE-REPAIR-01):
+    // derive the continuity summary state from the final `blockers` list —
+    // never a second continuity computation.
+    let continuity_state: &'static str = derive_continuity_state(&blockers, loaded_completed_bars);
     let provenance_state: &'static str = if blockers.iter().any(|b| {
         matches!(
             *b,
@@ -1169,6 +1221,14 @@ pub const EVENT_TYPE_READINESS_RUN_LINKED: &str = "daily_data_readiness_run_link
 /// through.
 pub const REASON_READINESS_EVIDENCE_PERSIST_FAILED: &str = "readiness_evidence_persist_failed";
 
+/// Start-gate-only reason (REPAIR 4, DAILY-DATA-READINESS-01C-CLOSURE-REPAIR-01):
+/// a `run_id` now exists for this start attempt, but the
+/// `daily_data_readiness_run_linked` evidence event could not be persisted.
+/// Fail-closed: the run row is never armed/begun/ticked and the execution
+/// loop is never spawned — the run row must not be presented as an actively
+/// started runtime merely because it exists.
+pub const REASON_READINESS_RUN_LINK_PERSIST_FAILED: &str = "readiness_run_link_persist_failed";
+
 /// Registries/calendar/strategy-registry composition shared by every
 /// readiness evaluation surface — loaded once per call from the same
 /// env-driven sources Phase B's `evaluate_daily_data_readiness_from_env`
@@ -1240,21 +1300,35 @@ pub async fn evaluate_readiness_with_binding(
 // Phase C: deterministic evaluation identity + durable evidence (§C.8-§C.10)
 // ---------------------------------------------------------------------------
 
-/// Deterministic `evaluation_id` for one start attempt (§C.8): UUIDv5 over
-/// stable attempt inputs (evaluated-minute bucket, effective runtime binding
-/// identity, canonical assignment identity) — never `Uuid::new_v4()`
-/// (`.claude/rules/audit_repo_truth_rules.md`). Minute-bucketing means a
-/// genuine retry of the same logical attempt within the same minute produces
-/// the same id (and therefore the same durable event row, via
-/// `sys_autonomous_session_events`'s `on conflict (id) do nothing`), while
-/// distinct attempts (different minute, different binding, or a changed
-/// assignment set) always produce a distinct id.
+/// Deterministic `evaluation_id` for one start attempt (§C.8, REPAIR 1
+/// DAILY-DATA-READINESS-01C-CLOSURE-REPAIR-01): UUIDv5 over the
+/// full-nanosecond-precision evaluation instant, a process-local monotonic
+/// start-attempt sequence number (`AppState::next_daily_data_readiness_attempt_seq`),
+/// the effective runtime binding identity, and the canonical assignment
+/// identity — never `Uuid::new_v4()` (`.claude/rules/audit_repo_truth_rules.md`).
+///
+/// `attempt_seq` is the load-bearing collision-breaker: two start attempts
+/// with otherwise-identical inputs (same wall-clock second/minute, same
+/// binding, same assignment set — e.g. an operator retrying immediately
+/// after a transient refusal) always receive distinct sequence numbers
+/// (`AppState::lifecycle_op` serializes concurrent start attempts within one
+/// process, so the counter is race-free), and therefore always produce
+/// distinct `evaluation_id`s and distinct durable event rows — no prior
+/// attempt's evidence is ever silently shadowed by
+/// `sys_autonomous_session_events`'s `on conflict (id) do nothing`.
+///
+/// Never called for a configuration-preview GET evaluation (§C.1) — those
+/// never persist durable evidence and never allocate an attempt sequence
+/// number.
 pub fn compute_evaluation_id(
     now_utc: DateTime<Utc>,
+    attempt_seq: u64,
     binding: &EffectiveRuntimeBinding,
     config: &MultiSymbolRuntimeConfig,
 ) -> uuid::Uuid {
-    let minute_bucket = now_utc.timestamp().div_euclid(60);
+    let evaluated_at_nanos = now_utc
+        .timestamp_nanos_opt()
+        .unwrap_or_else(|| now_utc.timestamp().saturating_mul(1_000_000_000));
     let assignment_identity: Vec<String> = config
         .symbols
         .iter()
@@ -1268,8 +1342,9 @@ pub fn compute_evaluation_id(
         })
         .collect();
     let seed = format!(
-        "daily_data_readiness.v1|{}|{}|{}|{}|{}",
-        minute_bucket,
+        "daily_data_readiness.v2|{}|{}|{}|{}|{}|{}",
+        evaluated_at_nanos,
+        attempt_seq,
         binding
             .effective_runtime_strategy_id
             .as_deref()
@@ -1383,4 +1458,144 @@ pub async fn persist_run_linked_readiness_evidence(
     mqk_db::persist_autonomous_session_event(db, &row)
         .await
         .is_ok()
+}
+
+// ---------------------------------------------------------------------------
+// REPAIR 3/4 (DAILY-DATA-READINESS-01C-CLOSURE-REPAIR-01): the narrow,
+// production-used sequencing that advances an already-created run row to an
+// active execution loop after a `start_allowed` readiness verdict's
+// pre-start evidence has been persisted.
+//
+// `AppState::start_execution_runtime` (production) and the synthetic
+// lifecycle proof test both call [`advance_run_to_active`] against
+// [`RuntimeStartEffects`] — never two independently-ordered
+// implementations. The trait abstracts only the two steps that would
+// otherwise force a test to construct a real broker adapter: runtime
+// construction/safety-setup and execution-loop spawn. Run creation and
+// pre-start evidence persistence are NOT abstracted here — both the
+// production path and the proof test call the exact same real, DB-only
+// functions for those (`AppState::create_or_reuse_run_for_start`,
+// `evaluate_readiness_with_binding`, `compute_evaluation_id`,
+// `persist_pre_start_readiness_evidence`), so no separate test-only
+// reimplementation of that ordering exists either.
+// ---------------------------------------------------------------------------
+
+/// Ordered trace tag pushed after a successful run-linked evidence persist.
+pub const TRACE_RUN_LINK_EVENT_PERSISTED: &str = "run_link_event_persisted";
+/// Ordered trace tag pushed after the execution loop has been spawned.
+pub const TRACE_LOOP_SPAWNED: &str = "loop_spawned";
+
+/// Which `RuntimeLifecycleError` constructor a [`RuntimeStartEffectsError`]
+/// must be converted through, so [`advance_run_to_active`] can report a
+/// failure without depending on `crate::state`'s `pub(crate)` error
+/// constructors itself.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RuntimeStartEffectsErrorKind {
+    Internal,
+    Conflict,
+}
+
+/// Opaque failure from a [`RuntimeStartEffects`] method. `fault_class` and
+/// `message` are combined by the caller exactly as
+/// `RuntimeLifecycleError::internal`/`::conflict` would combine them
+/// (`"{fault_class}: {message}"` for `Internal`, `message` alone for
+/// `Conflict`), so production callers reproduce their pre-existing error
+/// text exactly.
+#[derive(Debug)]
+pub struct RuntimeStartEffectsError {
+    pub kind: RuntimeStartEffectsErrorKind,
+    pub fault_class: &'static str,
+    pub message: String,
+}
+
+impl RuntimeStartEffectsError {
+    pub fn internal(fault_class: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            kind: RuntimeStartEffectsErrorKind::Internal,
+            fault_class,
+            message: message.into(),
+        }
+    }
+
+    pub fn conflict(fault_class: &'static str, message: impl Into<String>) -> Self {
+        Self {
+            kind: RuntimeStartEffectsErrorKind::Conflict,
+            fault_class,
+            message: message.into(),
+        }
+    }
+}
+
+/// The two production effects that follow run creation and (when
+/// applicable) run-linked evidence persistence. Implemented once for
+/// production (`state::lifecycle::ProductionRuntimeStartEffects`, wrapping
+/// the exact existing orchestrator-build/arm/begin/tick/spawn sequence) and
+/// once for the synthetic lifecycle proof test (a no-op/counter-based fake
+/// that never constructs a broker, provider, or scheduler).
+#[async_trait::async_trait]
+pub trait RuntimeStartEffects: Send + Sync {
+    /// Construct/arm/begin the runtime for `run_id` and perform every other
+    /// one-time run-activation side effect the production path performs
+    /// between run creation and loop spawn. Must not spawn the execution
+    /// loop itself (see [`RuntimeStartEffects::spawn_loop`]).
+    async fn start_runtime_effects(
+        &self,
+        run_id: uuid::Uuid,
+    ) -> Result<(), RuntimeStartEffectsError>;
+
+    /// Spawn the execution loop for `run_id`. Only called after
+    /// [`RuntimeStartEffects::start_runtime_effects`] has returned `Ok`.
+    async fn spawn_loop(&self, run_id: uuid::Uuid) -> Result<(), RuntimeStartEffectsError>;
+}
+
+/// Failure from [`advance_run_to_active`]. `RunLinkPersistFailed` is
+/// REPAIR 4's fail-closed policy: the run row already exists but is never
+/// armed/begun/ticked and the loop is never spawned.
+#[derive(Debug)]
+pub enum RuntimeStartSequenceError {
+    RunLinkPersistFailed {
+        evaluation_id: uuid::Uuid,
+        run_id: uuid::Uuid,
+    },
+    Effects(RuntimeStartEffectsError),
+}
+
+/// Run-linked-evidence (if `readiness_link` is `Some`, fail-closed per
+/// REPAIR 4) → runtime effects → loop spawn, in this exact order (REPAIR 3).
+/// `run_id` must already be durably created by the caller
+/// (`AppState::create_or_reuse_run_for_start`) before calling this function.
+/// `readiness_link` is `None` for deployments where the strict daily-data
+/// readiness gate is not applicable (no `evaluation_id` was ever computed
+/// for this start attempt) — such attempts proceed straight to runtime
+/// effects, exactly as before this patch.
+pub async fn advance_run_to_active<E: RuntimeStartEffects>(
+    db: &PgPool,
+    effects: &E,
+    run_id: uuid::Uuid,
+    readiness_link: Option<(uuid::Uuid, DateTime<Utc>)>,
+    trace: &mut Vec<&'static str>,
+) -> Result<(), RuntimeStartSequenceError> {
+    if let Some((evaluation_id, linked_at_utc)) = readiness_link {
+        let linked =
+            persist_run_linked_readiness_evidence(db, evaluation_id, run_id, linked_at_utc).await;
+        if !linked {
+            return Err(RuntimeStartSequenceError::RunLinkPersistFailed {
+                evaluation_id,
+                run_id,
+            });
+        }
+        trace.push(TRACE_RUN_LINK_EVENT_PERSISTED);
+    }
+
+    effects
+        .start_runtime_effects(run_id)
+        .await
+        .map_err(RuntimeStartSequenceError::Effects)?;
+
+    effects
+        .spawn_loop(run_id)
+        .await
+        .map_err(RuntimeStartSequenceError::Effects)?;
+    trace.push(TRACE_LOOP_SPAWNED);
+    Ok(())
 }

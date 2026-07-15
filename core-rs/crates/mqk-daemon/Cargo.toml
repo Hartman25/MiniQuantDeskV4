@@ -63,6 +63,12 @@ tokio-tungstenite.workspace = true
 # dependency.
 sha2 = "0.10"
 hex = "0.4"
+# DAILY-DATA-READINESS-01C-CLOSURE-REPAIR-01 (REPAIR 3): RuntimeStartEffects
+# seam in daily_data_readiness.rs / state/lifecycle.rs is production code, so
+# this must be a normal dependency, not dev-only. Previously only used by
+# test fakes (dev-dependencies); now also used by
+# `ProductionRuntimeStartEffects`.
+async-trait = "0.1"
 
 [dev-dependencies]
 # Required for in-process Axum router testing via tower::ServiceExt::oneshot()
@@ -71,5 +77,3 @@ http-body-util = "0.1"
 bytes = "1"
 # B6: temp policy files for capital budget gate proof tests
 tempfile = "3"
-# DATA-INGEST-DAEMON-PROVIDER-JOBS-01: implement HistoricalProvider in test fakes
-async-trait = "0.1"

@@ -314,6 +314,14 @@ pub struct AppState {
     /// the evidence-failure policy (§C.9) deterministically, without needing
     /// to actually break a live DB connection mid-test.
     daily_data_readiness_evidence_override: Arc<RwLock<Option<bool>>>,
+    /// REPAIR 1 (DAILY-DATA-READINESS-01C-CLOSURE-REPAIR-01): process-local
+    /// monotonic sequence number, incremented once per actual strict
+    /// daily-data-readiness start-gate evaluation. Combined with the
+    /// full-precision evaluation timestamp in `compute_evaluation_id` so two
+    /// start attempts with otherwise-identical inputs (same wall-clock
+    /// second/minute, same binding, same assignment set) always receive
+    /// distinct `evaluation_id`s — never a minute-bucket collision.
+    daily_data_readiness_attempt_seq: Arc<AtomicU64>,
     /// PT-DAY-04: Deduplication flag for WS continuity-gap operator escalation.
     ///
     /// `false` at boot and after each Live transition.  Set to `true` on the
@@ -1257,6 +1265,7 @@ impl AppState {
             session_clock_override: Arc::new(RwLock::new(None)),
             daily_data_readiness_clock_override: Arc::new(RwLock::new(None)),
             daily_data_readiness_evidence_override: Arc::new(RwLock::new(None)),
+            daily_data_readiness_attempt_seq: Arc::new(AtomicU64::new(0)),
             gap_escalation_pending: Arc::new(AtomicBool::new(false)),
             strategy_fleet: Arc::new(RwLock::new(strategy_fleet)),
             discord_notifier: DiscordNotifier::from_env(),
@@ -1856,6 +1865,16 @@ operator_reconcile_or_repair_required"
     /// real write-result behavior. Never called in production code.
     pub async fn set_daily_data_readiness_evidence_override_for_test(&self, forced: Option<bool>) {
         *self.daily_data_readiness_evidence_override.write().await = forced;
+    }
+
+    /// REPAIR 1 (DAILY-DATA-READINESS-01C-CLOSURE-REPAIR-01): allocate the
+    /// next process-local monotonic start-attempt sequence number. Called
+    /// exactly once per actual strict daily-data-readiness start-gate
+    /// evaluation (never for a configuration-preview GET evaluation) so
+    /// `compute_evaluation_id` can distinguish otherwise-identical attempts.
+    pub(crate) fn next_daily_data_readiness_attempt_seq(&self) -> u64 {
+        self.daily_data_readiness_attempt_seq
+            .fetch_add(1, Ordering::SeqCst)
     }
 
     pub async fn strategy_fleet_snapshot(&self) -> Option<Vec<StrategyFleetEntry>> {

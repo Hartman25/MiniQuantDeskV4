@@ -818,6 +818,10 @@ async fn sg_10_ready_start_creates_run_and_links_evidence_but_later_gate_still_e
     // "intraday_scalper" — B2A (the DB strategy-registry gate, positioned
     // after db_pool()?, i.e. strictly after this Phase C gate) must still
     // fire (req #22: existing later lifecycle safety gates remain present).
+    // Defensively remove any row a differently-ordered or previously-panicked
+    // run of this file's own REPAIR 3/4 tests (SG-16/SG-17) may have left
+    // behind, rather than assuming this shared local Postgres starts pristine.
+    remove_strategy_registry_entry(&pool, "intraday_scalper").await;
     let mut st_raw = AppState::new_for_test_with_broker_kind(BrokerKind::Alpaca);
     st_raw.db = Some(pool.clone());
     let st = std::sync::Arc::new(st_raw);
@@ -841,6 +845,19 @@ async fn sg_10_ready_start_creates_run_and_links_evidence_but_later_gate_still_e
         .bind(format!("%\"{symbol}\"%"))
         .execute(&pool)
         .await;
+
+    // Baseline (before/after delta), not an assumed-pristine global count:
+    // other tests in this file (SG-16/SG-17, REPAIR 3/4) legitimately create
+    // their own run_linked evidence for their own runs, so a global
+    // zero-count assumption would be a false positive/negative depending on
+    // test execution order. This test only asserts that ITS OWN attempt
+    // creates no new run_linked row.
+    let linked_count_before: (i64,) =
+        sqlx::query_as("select count(*) from sys_autonomous_session_events where event_type = $1")
+            .bind(mqk_daemon::daily_data_readiness::EVENT_TYPE_READINESS_RUN_LINKED)
+            .fetch_one(&pool)
+            .await
+            .expect("count run_linked events before");
 
     let result = st.start_execution_runtime().await;
     let err = result.expect_err(
@@ -886,18 +903,19 @@ async fn sg_10_ready_start_creates_run_and_links_evidence_but_later_gate_still_e
         detail["start_allowed"], true,
         "SG-10: the daily-data readiness verdict itself must have been ready: {detail}"
     );
-    // No run_linked event: B2A refused before run creation, so req #17/#18's
-    // linkage never had a run_id to attach to — proving the linked event is
-    // strictly conditional on actual run creation, never fabricated.
-    let linked_count: (i64,) =
+    // No NEW run_linked event: B2A refused before run creation, so req
+    // #17/#18's linkage never had a run_id to attach to — proving the linked
+    // event is strictly conditional on actual run creation, never
+    // fabricated.
+    let linked_count_after: (i64,) =
         sqlx::query_as("select count(*) from sys_autonomous_session_events where event_type = $1")
             .bind(mqk_daemon::daily_data_readiness::EVENT_TYPE_READINESS_RUN_LINKED)
             .fetch_one(&pool)
             .await
-            .expect("count run_linked events");
+            .expect("count run_linked events after");
     assert_eq!(
-        linked_count.0, 0,
-        "no run was created, so no run_linked evidence row may exist"
+        linked_count_after.0, linked_count_before.0,
+        "no run was created, so no new run_linked evidence row may exist"
     );
 
     clear_env();
@@ -931,4 +949,675 @@ async fn sg_11_non_applicable_mode_preserves_prior_deployment_gate_behavior() {
     );
 
     clear_env();
+}
+
+// ---------------------------------------------------------------------------
+// DAILY-DATA-READINESS-01C-CLOSURE-REPAIR-01
+//
+// SG-12/13 — REPAIR 1: distinct start-attempt identity. SG-16/17 — REPAIR
+// 3/4: synthetic lifecycle proof + fail-closed run-linked evidence policy.
+// ---------------------------------------------------------------------------
+
+/// Distinct evidence rows persisted for `symbol`, newest-last.
+async fn fetch_evidence_details(pool: &sqlx::PgPool, symbol: &str) -> Vec<serde_json::Value> {
+    let rows: Vec<(String,)> = sqlx::query_as(
+        "select detail from sys_autonomous_session_events \
+         where event_type = 'daily_data_readiness_evaluated' and detail like $1 \
+         order by ts_utc asc",
+    )
+    .bind(format!("%\"{symbol}\"%"))
+    .fetch_all(pool)
+    .await
+    .expect("fetch evidence rows");
+    rows.into_iter()
+        .map(|(d,)| serde_json::from_str(&d).expect("evidence JSON"))
+        .collect()
+}
+
+async fn delete_evidence_for(pool: &sqlx::PgPool, symbol: &str) {
+    let _ = sqlx::query("delete from sys_autonomous_session_events where detail like $1")
+        .bind(format!("%\"{symbol}\"%"))
+        .execute(pool)
+        .await;
+}
+
+/// Stops any pre-existing ARMED/RUNNING run for the daemon-paper engine/mode
+/// left over from an unrelated earlier test run against this shared local
+/// Postgres — `AppState::create_or_reuse_run_for_start`'s
+/// `durable_active_without_local_owner` conflict check would otherwise
+/// refuse every subsequent test in this file that needs to actually create a
+/// run (SG-16/SG-17). Mirrors the `delete from runs where run_id = $1`
+/// cleanup convention already used across this test suite.
+async fn clear_any_preexisting_active_daemon_run(pool: &sqlx::PgPool) {
+    // Loop rather than a single stop: this shared local Postgres can carry
+    // more than one leftover ARMED/RUNNING row from unrelated earlier test
+    // runs; `fetch_active_run_for_engine` only ever returns one at a time.
+    for _ in 0..16 {
+        match mqk_db::fetch_active_run_for_engine(pool, "mqk-daemon", "PAPER").await {
+            Ok(Some(active)) => {
+                let _ = mqk_db::stop_run(pool, active.run_id).await;
+            }
+            _ => break,
+        }
+    }
+}
+
+/// Restores `sys_strategy_registry` for `strategy_id` to "not registered" so
+/// other tests in this file (e.g. SG-10, which asserts
+/// `strategy_registry_missing`) are not polluted by a row this file's own
+/// synthetic-lifecycle tests (SG-16/SG-17) had to insert to progress past
+/// B2A.
+async fn remove_strategy_registry_entry(pool: &sqlx::PgPool, strategy_id: &str) {
+    let _ = sqlx::query("delete from sys_strategy_registry where strategy_id = $1")
+        .bind(strategy_id)
+        .execute(pool)
+        .await;
+}
+
+/// Removes a synthetic-lifecycle test's own run row AND its
+/// `sys_autonomous_session_events` rows. `AppState::next_daemon_run_id` is
+/// deterministic (`UUIDv5(node_id, engine_id, mode, count(*)+1)`,
+/// `orchestrator_build.rs`) — deleting only the `runs` row resets the count
+/// so a *later* test can deterministically regenerate this exact same
+/// run_id, which would then collide with an orphaned `run_linked` evidence
+/// row left behind from this run if that row were not also removed here.
+async fn delete_run_and_its_events(pool: &sqlx::PgPool, run_id: uuid::Uuid) {
+    let _ = sqlx::query("delete from sys_autonomous_session_events where run_id = $1")
+        .bind(run_id)
+        .execute(pool)
+        .await;
+    let _ = sqlx::query("delete from runs where run_id = $1")
+        .bind(run_id)
+        .execute(pool)
+        .await;
+}
+
+// ---------------------------------------------------------------------------
+// SG-12 — REPAIR 1: two sequential identical attempts against an identical
+// (fixed, overridden) clock must receive distinct evaluation_ids and persist
+// two distinct evidence rows — the minute-bucket scheme this repair replaces
+// would collide here (req #1, #3, #4).
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn sg_12_sequential_identical_attempts_produce_distinct_evaluation_ids() {
+    let _g = env_lock().lock().await;
+    let Some(pool) = db_pool_or_skip("SG-12").await else {
+        return;
+    };
+    clear_env();
+    let symbol = "ZZSG12";
+    let dir = write_registries_for(symbol, "zzsg12_provider");
+    unsafe {
+        std::env::set_var("MQK_STRATEGY_SYMBOL", symbol);
+        std::env::set_var("MQK_STRATEGY_IDS", "intraday_scalper");
+        std::env::set_var("MQK_STRATEGY_MD_TIMEFRAME", "5m");
+    }
+    // No bars seeded -> market_data_missing (blocked), but the pre-start
+    // event is still attempted for every applicable evaluation regardless
+    // of verdict (§C.8/§C.9) — exactly what this test needs.
+    cleanup_bars(&pool, symbol).await;
+    delete_evidence_for(&pool, symbol).await;
+
+    let mut st_raw = AppState::new_for_test_with_broker_kind(BrokerKind::Alpaca);
+    st_raw.db = Some(pool.clone());
+    let st = std::sync::Arc::new(st_raw);
+    st.update_ws_continuity(AlpacaWsContinuityState::Live {
+        last_message_id: "sg12-test-msg".to_string(),
+        last_event_at: "2026-04-14T15:00:00Z".to_string(),
+    })
+    .await;
+    st.integrity.write().await.disarmed = false;
+    st.set_strategy_fleet_for_test(Some(vec![StrategyFleetEntry {
+        strategy_id: "intraday_scalper".to_string(),
+    }]))
+    .await;
+    // Fixed clock: both attempts see the IDENTICAL now_utc.
+    st.set_daily_data_readiness_clock_override_for_test(Some(fixed_now()))
+        .await;
+
+    let err1 = st
+        .start_execution_runtime()
+        .await
+        .expect_err("SG-12 attempt 1: market_data_missing must block");
+    assert_eq!(
+        err1.fault_class(),
+        "runtime.start_refused.daily_data_readiness_blocked"
+    );
+    let err2 = st
+        .start_execution_runtime()
+        .await
+        .expect_err("SG-12 attempt 2: market_data_missing must block");
+    assert_eq!(
+        err2.fault_class(),
+        "runtime.start_refused.daily_data_readiness_blocked"
+    );
+
+    let details = fetch_evidence_details(&pool, symbol).await;
+    assert_eq!(
+        details.len(),
+        2,
+        "REPAIR 1 req #3/#4: two distinct attempts must persist two distinct evidence rows \
+         — never overwritten via `on conflict (id) do nothing`: {details:?}"
+    );
+    let eval_ids: std::collections::HashSet<String> = details
+        .iter()
+        .map(|d| {
+            d["evaluation_id"]
+                .as_str()
+                .expect("evaluation_id")
+                .to_string()
+        })
+        .collect();
+    assert_eq!(
+        eval_ids.len(),
+        2,
+        "REPAIR 1 req #1: two identical attempts against an identical clock must receive \
+         distinct evaluation_ids: {details:?}"
+    );
+
+    clear_env();
+    cleanup(&dir);
+    cleanup_bars(&pool, symbol).await;
+}
+
+// ---------------------------------------------------------------------------
+// SG-13 — REPAIR 1: two concurrent identical attempts must also receive
+// distinct evaluation_ids (req #2).
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn sg_13_concurrent_identical_attempts_produce_distinct_evaluation_ids() {
+    let _g = env_lock().lock().await;
+    let Some(pool) = db_pool_or_skip("SG-13").await else {
+        return;
+    };
+    clear_env();
+    let symbol = "ZZSG13";
+    let dir = write_registries_for(symbol, "zzsg13_provider");
+    unsafe {
+        std::env::set_var("MQK_STRATEGY_SYMBOL", symbol);
+        std::env::set_var("MQK_STRATEGY_IDS", "intraday_scalper");
+        std::env::set_var("MQK_STRATEGY_MD_TIMEFRAME", "5m");
+    }
+    cleanup_bars(&pool, symbol).await;
+    delete_evidence_for(&pool, symbol).await;
+
+    let mut st_raw = AppState::new_for_test_with_broker_kind(BrokerKind::Alpaca);
+    st_raw.db = Some(pool.clone());
+    let st = std::sync::Arc::new(st_raw);
+    st.update_ws_continuity(AlpacaWsContinuityState::Live {
+        last_message_id: "sg13-test-msg".to_string(),
+        last_event_at: "2026-04-14T15:00:00Z".to_string(),
+    })
+    .await;
+    st.integrity.write().await.disarmed = false;
+    st.set_strategy_fleet_for_test(Some(vec![StrategyFleetEntry {
+        strategy_id: "intraday_scalper".to_string(),
+    }]))
+    .await;
+    st.set_daily_data_readiness_clock_override_for_test(Some(fixed_now()))
+        .await;
+
+    // `AppState::lifecycle_op` serializes `start_execution_runtime` calls
+    // internally (the same mutex it has always taken as its first action) —
+    // that serialization is exactly what makes the process-local monotonic
+    // attempt counter race-free. This test proves the OUTCOME two genuinely
+    // concurrent callers observe (never colliding on evaluation_id), not the
+    // internal serialization mechanism itself.
+    let st_a = std::sync::Arc::clone(&st);
+    let st_b = std::sync::Arc::clone(&st);
+    let (res_a, res_b) = tokio::join!(
+        async move { st_a.start_execution_runtime().await },
+        async move { st_b.start_execution_runtime().await },
+    );
+    assert!(
+        res_a.is_err() && res_b.is_err(),
+        "SG-13: both concurrent attempts must be blocked (market_data_missing)"
+    );
+
+    let details = fetch_evidence_details(&pool, symbol).await;
+    assert_eq!(
+        details.len(),
+        2,
+        "REPAIR 1 req #2: two concurrent attempts must persist two distinct evidence rows: \
+         {details:?}"
+    );
+    let eval_ids: std::collections::HashSet<String> = details
+        .iter()
+        .map(|d| {
+            d["evaluation_id"]
+                .as_str()
+                .expect("evaluation_id")
+                .to_string()
+        })
+        .collect();
+    assert_eq!(
+        eval_ids.len(),
+        2,
+        "REPAIR 1 req #2: concurrent attempts must never collide on evaluation_id: {details:?}"
+    );
+
+    clear_env();
+    cleanup(&dir);
+    cleanup_bars(&pool, symbol).await;
+}
+
+// ---------------------------------------------------------------------------
+// REPAIR 3: synthetic `RuntimeStartEffects` fake — never constructs a
+// broker, provider, or scheduler. `spawn_loop` genuinely spawns a no-op
+// counter-based task (proving "loop spawned" is a real async task, not
+// merely a log line) rather than a bar-driven/broker-driven execution loop.
+// ---------------------------------------------------------------------------
+
+#[derive(Default)]
+struct FakeRuntimeStartEffects {
+    start_runtime_effects_calls: std::sync::atomic::AtomicU32,
+    spawn_loop_calls: std::sync::atomic::AtomicU32,
+}
+
+#[async_trait::async_trait]
+impl mqk_daemon::daily_data_readiness::RuntimeStartEffects for FakeRuntimeStartEffects {
+    async fn start_runtime_effects(
+        &self,
+        _run_id: uuid::Uuid,
+    ) -> Result<(), mqk_daemon::daily_data_readiness::RuntimeStartEffectsError> {
+        self.start_runtime_effects_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        Ok(())
+    }
+
+    async fn spawn_loop(
+        &self,
+        _run_id: uuid::Uuid,
+    ) -> Result<(), mqk_daemon::daily_data_readiness::RuntimeStartEffectsError> {
+        self.spawn_loop_calls
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        let counter = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let counter_clone = std::sync::Arc::clone(&counter);
+        let handle = tokio::spawn(async move {
+            counter_clone.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        });
+        handle.await.expect("synthetic loop task join");
+        assert_eq!(
+            counter.load(std::sync::atomic::Ordering::SeqCst),
+            1,
+            "synthetic loop task must actually run"
+        );
+        Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// SG-16 — REPAIR 3: synthetic lifecycle proof. Drives run creation, pre-start
+// evidence, run-linked evidence, and loop spawn through the exact production
+// sequencing (`AppState::create_or_reuse_run_for_start` +
+// `daily_data_readiness::advance_run_to_active`) that
+// `start_execution_runtime` itself now calls — never a separate test-only
+// reimplementation of this ordering. Proves the required ordering trace, a
+// shared evaluation_id across pre-start and run-linked evidence, and zero
+// broker/provider/network activity (the fake is structurally incapable of
+// either).
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn sg_16_synthetic_ready_start_proves_ordering_and_shared_evaluation_id() {
+    let _g = env_lock().lock().await;
+    let Some(pool) = db_pool_or_skip("SG-16").await else {
+        return;
+    };
+    clear_env();
+    let symbol = "ZZSG16";
+    let provider_id = "zzsg16_provider";
+    let dir = write_registries_for(symbol, provider_id);
+    unsafe {
+        std::env::set_var("MQK_STRATEGY_SYMBOL", symbol);
+        std::env::set_var("MQK_STRATEGY_IDS", "intraday_scalper");
+        std::env::set_var("MQK_STRATEGY_MD_TIMEFRAME", "5m");
+        std::env::set_var("MQK_DATA_READINESS_GRACE_SECS", "0");
+        std::env::set_var("MQK_DATA_READINESS_FUTURE_SKEW_SECS", "60");
+    }
+
+    let calendar_provider = mqk_daemon::state::market_calendar::NyseWeekdaysProvider;
+    let now = fixed_now();
+    let schedule = mqk_daemon::state::market_calendar::resolve_market_session_schedule(
+        &calendar_provider,
+        now,
+    );
+    let expected = mqk_daemon::daily_data_readiness::expected_intraday_end_ts_window(
+        &calendar_provider,
+        &schedule,
+        now.timestamp(),
+        300,
+        0,
+        5,
+    )
+    .expect("expected window resolves");
+    seed_5m_bars(&pool, symbol, provider_id, &expected).await;
+
+    // A plain DB upsert (no broker/provider involved) so this attempt can
+    // progress past B2A — unlike SG-10, which deliberately stopped there.
+    mqk_db::upsert_strategy_registry_entry(
+        &pool,
+        &mqk_db::UpsertStrategyRegistryArgs {
+            strategy_id: "intraday_scalper".to_string(),
+            display_name: "intraday_scalper".to_string(),
+            enabled: true,
+            kind: "test".to_string(),
+            registered_at_utc: now,
+            updated_at_utc: now,
+            note: "SG-16 synthetic fixture".to_string(),
+        },
+    )
+    .await
+    .expect("seed strategy registry");
+
+    delete_evidence_for(&pool, symbol).await;
+
+    // --- readiness_evaluated: the exact production composition every
+    // readiness surface (routes + the runtime start gate) shares.
+    let config =
+        mqk_daemon::state::build_multi_symbol_runtime_config_from_env().expect("config resolves");
+    let fleet_ids = Some(vec!["intraday_scalper".to_string()]);
+    let (_bootstrap, binding) =
+        mqk_runtime::native_strategy::bootstrap_with_effective_binding(fleet_ids.as_deref());
+    let context = mqk_daemon::daily_data_readiness::load_readiness_context_from_env();
+    let report = mqk_daemon::daily_data_readiness::evaluate_readiness_with_binding(
+        Some(&pool),
+        &config,
+        &binding,
+        &context,
+        now,
+    )
+    .await;
+    assert!(
+        report.start_allowed,
+        "SG-16 precondition: readiness must be ready: {report:?}"
+    );
+    let mut trace: Vec<&'static str> = Vec::new();
+    trace.push("readiness_evaluated");
+
+    // --- pre_start_event_persisted: the exact production evidence-write
+    // call the start gate makes.
+    let evaluation_id =
+        mqk_daemon::daily_data_readiness::compute_evaluation_id(now, 0, &binding, &config);
+    let persisted = mqk_daemon::daily_data_readiness::persist_pre_start_readiness_evidence(
+        &pool,
+        evaluation_id,
+        now,
+        "applicable",
+        &report,
+    )
+    .await;
+    assert!(persisted, "SG-16: pre-start evidence must persist");
+    trace.push("pre_start_event_persisted");
+
+    // --- run_created: the exact production run lookup/creation method.
+    clear_any_preexisting_active_daemon_run(&pool).await;
+    let st = std::sync::Arc::new(AppState::new_for_test_with_broker_kind(BrokerKind::Alpaca));
+    let run_id = st
+        .create_or_reuse_run_for_start(&pool)
+        .await
+        .expect("SG-16: run creation must succeed");
+    trace.push("run_created");
+
+    // --- run_link_event_persisted -> loop_spawned: the exact shared
+    // sequencing function production now calls, against a synthetic fake
+    // that never constructs a broker/provider/scheduler.
+    let fake = FakeRuntimeStartEffects::default();
+    let result = mqk_daemon::daily_data_readiness::advance_run_to_active(
+        &pool,
+        &fake,
+        run_id,
+        Some((evaluation_id, chrono::Utc::now())),
+        &mut trace,
+    )
+    .await;
+    assert!(
+        result.is_ok(),
+        "SG-16: advance_run_to_active must succeed: {result:?}"
+    );
+
+    assert_eq!(
+        trace,
+        vec![
+            "readiness_evaluated",
+            "pre_start_event_persisted",
+            "run_created",
+            "run_link_event_persisted",
+            "loop_spawned",
+        ],
+        "REPAIR 3: required ordering trace"
+    );
+    assert_eq!(
+        fake.start_runtime_effects_calls
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "REPAIR 3: runtime effects must be invoked exactly once"
+    );
+    assert_eq!(
+        fake.spawn_loop_calls
+            .load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "REPAIR 3: the loop must be spawned exactly once"
+    );
+
+    // req #17/#18/#19: shared evaluation_id + link-before-spawn ordering —
+    // the run_linked row's evaluation_id must match the pre-start row's.
+    let linked_row: (String,) = sqlx::query_as(
+        "select detail from sys_autonomous_session_events \
+         where event_type = $1 and run_id = $2",
+    )
+    .bind(mqk_daemon::daily_data_readiness::EVENT_TYPE_READINESS_RUN_LINKED)
+    .bind(run_id)
+    .fetch_one(&pool)
+    .await
+    .expect("fetch run_linked row");
+    let linked_detail: serde_json::Value =
+        serde_json::from_str(&linked_row.0).expect("run_linked JSON");
+    assert_eq!(
+        linked_detail["evaluation_id"],
+        evaluation_id.to_string(),
+        "req #17: run-linked evidence must carry the same evaluation_id as the pre-start event"
+    );
+    assert_eq!(linked_detail["run_id"], run_id.to_string());
+
+    let pre_start_details = fetch_evidence_details(&pool, symbol).await;
+    assert_eq!(pre_start_details.len(), 1);
+    assert_eq!(
+        pre_start_details[0]["evaluation_id"],
+        evaluation_id.to_string(),
+        "req #17: pre-start evidence must carry the same evaluation_id"
+    );
+
+    // The fake never arms this run (it stays `Created` forever), so it must
+    // be removed rather than left for a later test's `fetch_latest_run_for_engine`
+    // to silently reuse (a `Created` run is eligible for reuse).
+    delete_run_and_its_events(&pool, run_id).await;
+    remove_strategy_registry_entry(&pool, "intraday_scalper").await;
+    clear_env();
+    cleanup(&dir);
+    cleanup_bars(&pool, symbol).await;
+}
+
+// ---------------------------------------------------------------------------
+// SG-17 — REPAIR 4: run-linked evidence write failure fails closed. No
+// runtime effects, no loop spawn; the error carries the evaluation_id and
+// run_id; pre-start evidence remains durable; no false run_linked record.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn sg_17_run_link_persist_failure_fails_closed_no_effects_invoked() {
+    let _g = env_lock().lock().await;
+    let Some(pool) = db_pool_or_skip("SG-17").await else {
+        return;
+    };
+    clear_env();
+    let symbol = "ZZSG17";
+    let provider_id = "zzsg17_provider";
+    let dir = write_registries_for(symbol, provider_id);
+    unsafe {
+        std::env::set_var("MQK_STRATEGY_SYMBOL", symbol);
+        std::env::set_var("MQK_STRATEGY_IDS", "intraday_scalper");
+        std::env::set_var("MQK_STRATEGY_MD_TIMEFRAME", "5m");
+        std::env::set_var("MQK_DATA_READINESS_GRACE_SECS", "0");
+        std::env::set_var("MQK_DATA_READINESS_FUTURE_SKEW_SECS", "60");
+    }
+
+    let calendar_provider = mqk_daemon::state::market_calendar::NyseWeekdaysProvider;
+    let now = fixed_now();
+    let schedule = mqk_daemon::state::market_calendar::resolve_market_session_schedule(
+        &calendar_provider,
+        now,
+    );
+    let expected = mqk_daemon::daily_data_readiness::expected_intraday_end_ts_window(
+        &calendar_provider,
+        &schedule,
+        now.timestamp(),
+        300,
+        0,
+        5,
+    )
+    .expect("expected window resolves");
+    seed_5m_bars(&pool, symbol, provider_id, &expected).await;
+
+    mqk_db::upsert_strategy_registry_entry(
+        &pool,
+        &mqk_db::UpsertStrategyRegistryArgs {
+            strategy_id: "intraday_scalper".to_string(),
+            display_name: "intraday_scalper".to_string(),
+            enabled: true,
+            kind: "test".to_string(),
+            registered_at_utc: now,
+            updated_at_utc: now,
+            note: "SG-17 synthetic fixture".to_string(),
+        },
+    )
+    .await
+    .expect("seed strategy registry");
+
+    delete_evidence_for(&pool, symbol).await;
+
+    let config =
+        mqk_daemon::state::build_multi_symbol_runtime_config_from_env().expect("config resolves");
+    let fleet_ids = Some(vec!["intraday_scalper".to_string()]);
+    let (_bootstrap, binding) =
+        mqk_runtime::native_strategy::bootstrap_with_effective_binding(fleet_ids.as_deref());
+    let context = mqk_daemon::daily_data_readiness::load_readiness_context_from_env();
+    let report = mqk_daemon::daily_data_readiness::evaluate_readiness_with_binding(
+        Some(&pool),
+        &config,
+        &binding,
+        &context,
+        now,
+    )
+    .await;
+    assert!(
+        report.start_allowed,
+        "SG-17 precondition: readiness must be ready: {report:?}"
+    );
+    let evaluation_id =
+        mqk_daemon::daily_data_readiness::compute_evaluation_id(now, 0, &binding, &config);
+    let persisted = mqk_daemon::daily_data_readiness::persist_pre_start_readiness_evidence(
+        &pool,
+        evaluation_id,
+        now,
+        "applicable",
+        &report,
+    )
+    .await;
+    assert!(persisted, "SG-17: pre-start evidence must persist");
+
+    clear_any_preexisting_active_daemon_run(&pool).await;
+    let st = std::sync::Arc::new(AppState::new_for_test_with_broker_kind(BrokerKind::Alpaca));
+    let run_id = st
+        .create_or_reuse_run_for_start(&pool)
+        .await
+        .expect("SG-17: run creation must succeed");
+
+    // A genuinely separate pool, closed immediately — forces ONLY the
+    // run-linked evidence write to fail, without touching the healthy
+    // `pool` already used above for run creation / pre-start evidence.
+    let db_url = std::env::var("MQK_DATABASE_URL").expect("MQK_DATABASE_URL");
+    let bad_pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&db_url)
+        .await
+        .expect("connect bad_pool");
+    bad_pool.close().await;
+
+    let fake = FakeRuntimeStartEffects::default();
+    let mut trace: Vec<&'static str> = Vec::new();
+    let result = mqk_daemon::daily_data_readiness::advance_run_to_active(
+        &bad_pool,
+        &fake,
+        run_id,
+        Some((evaluation_id, chrono::Utc::now())),
+        &mut trace,
+    )
+    .await;
+
+    match result {
+        Err(
+            mqk_daemon::daily_data_readiness::RuntimeStartSequenceError::RunLinkPersistFailed {
+                evaluation_id: got_eval,
+                run_id: got_run,
+            },
+        ) => {
+            assert_eq!(
+                got_eval, evaluation_id,
+                "req #4: error must carry the evaluation_id"
+            );
+            assert_eq!(got_run, run_id, "req #4: error must carry the run_id");
+        }
+        other => panic!("SG-17 (REPAIR 4): expected RunLinkPersistFailed, got {other:?}"),
+    }
+
+    assert_eq!(
+        fake.start_runtime_effects_calls
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "req #3: a run-linked evidence failure must never invoke runtime effects \
+         (no arm/begin/tick)"
+    );
+    assert_eq!(
+        fake.spawn_loop_calls
+            .load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "req #3: a run-linked evidence failure must never spawn the execution loop"
+    );
+    assert!(
+        trace.is_empty(),
+        "req #3: no ordered-trace tag may fire past the failed link: {trace:?}"
+    );
+
+    // req #6: no false run_linked record exists for this run.
+    let linked_count: (i64,) = sqlx::query_as(
+        "select count(*) from sys_autonomous_session_events where event_type = $1 and run_id = $2",
+    )
+    .bind(mqk_daemon::daily_data_readiness::EVENT_TYPE_READINESS_RUN_LINKED)
+    .bind(run_id)
+    .fetch_one(&pool)
+    .await
+    .expect("count run_linked events");
+    assert_eq!(
+        linked_count.0, 0,
+        "req #6: no run_linked evidence may be claimed on a failed write"
+    );
+
+    // req #5: pre-start evidence remains durable and references the same
+    // evaluation_id, unaffected by the later run-link failure.
+    let pre_start_details = fetch_evidence_details(&pool, symbol).await;
+    assert_eq!(pre_start_details.len(), 1);
+    assert_eq!(
+        pre_start_details[0]["evaluation_id"],
+        evaluation_id.to_string(),
+        "req #5: pre-start evidence must remain durable and reference the same evaluation_id"
+    );
+
+    delete_run_and_its_events(&pool, run_id).await;
+    remove_strategy_registry_entry(&pool, "intraday_scalper").await;
+    clear_env();
+    cleanup(&dir);
+    cleanup_bars(&pool, symbol).await;
 }
