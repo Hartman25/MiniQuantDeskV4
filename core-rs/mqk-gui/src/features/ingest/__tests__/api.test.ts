@@ -3324,6 +3324,93 @@ test("normalizeDailyDataReadinessResponse: missing numbers do not become zero", 
   assert.equal(a.required_history_bars, null);
 });
 
+// --- DAILY-DATA-READINESS-01D-NUMERIC-NORMALIZATION-CLOSURE-01: grace/skew numeric truth ---
+
+test("normalizeDailyDataReadinessResponse: missing top-level configured_grace_seconds normalizes to null", () => {
+  const raw = { applicability: "applicable", assignments: [] };
+  const normalized = normalizeDailyDataReadinessResponse(raw as unknown);
+  assert.equal(normalized.configured_grace_seconds, null);
+  assert.notEqual(normalized.configured_grace_seconds, 0);
+});
+
+test("normalizeDailyDataReadinessResponse: missing top-level configured_future_skew_seconds normalizes to null", () => {
+  const raw = { applicability: "applicable", assignments: [] };
+  const normalized = normalizeDailyDataReadinessResponse(raw as unknown);
+  assert.equal(normalized.configured_future_skew_seconds, null);
+  assert.notEqual(normalized.configured_future_skew_seconds, 0);
+});
+
+test("normalizeDailyDataReadinessResponse: explicit top-level zero grace/skew remains zero", () => {
+  const resp = makeDailyDataReadinessResponse({
+    configured_grace_seconds: 0,
+    configured_future_skew_seconds: 0,
+  });
+  const normalized = normalizeDailyDataReadinessResponse(resp as unknown);
+  assert.equal(normalized.configured_grace_seconds, 0);
+  assert.equal(normalized.configured_future_skew_seconds, 0);
+});
+
+test("normalizeDailyDataReadinessResponse: valid positive top-level grace/skew remain unchanged", () => {
+  const resp = makeDailyDataReadinessResponse({
+    configured_grace_seconds: 120,
+    configured_future_skew_seconds: 10,
+  });
+  const normalized = normalizeDailyDataReadinessResponse(resp as unknown);
+  assert.equal(normalized.configured_grace_seconds, 120);
+  assert.equal(normalized.configured_future_skew_seconds, 10);
+});
+
+test("normalizeDailyDataReadinessResponse: string '0' top-level grace/skew normalizes to null", () => {
+  const raw = {
+    applicability: "applicable",
+    assignments: [],
+    configured_grace_seconds: "0",
+    configured_future_skew_seconds: "0",
+  };
+  const normalized = normalizeDailyDataReadinessResponse(raw as unknown);
+  assert.equal(normalized.configured_grace_seconds, null);
+  assert.equal(normalized.configured_future_skew_seconds, null);
+});
+
+test("normalizeDailyDataReadinessResponse: malformed top-level grace/skew objects normalize to null", () => {
+  const raw = {
+    applicability: "applicable",
+    assignments: [],
+    configured_grace_seconds: { not: "a number" },
+    configured_future_skew_seconds: [1, 2, 3],
+  };
+  const normalized = normalizeDailyDataReadinessResponse(raw as unknown);
+  assert.equal(normalized.configured_grace_seconds, null);
+  assert.equal(normalized.configured_future_skew_seconds, null);
+});
+
+test("normalizeDailyDataReadinessResponse: missing assignment grace/skew fields normalize to null", () => {
+  const raw = { assignment_symbol: "AAPL", assignment_timeframe: "1D" };
+  const resp = { applicability: "applicable", assignments: [raw] };
+  const normalized = normalizeDailyDataReadinessResponse(resp as unknown);
+  const a = normalized.assignments[0];
+  assert.equal(a.configured_grace_seconds, null);
+  assert.equal(a.effective_grace_seconds, null);
+  assert.equal(a.configured_future_skew_seconds, null);
+  assert.equal(a.effective_future_skew_seconds, null);
+  assert.notEqual(a.configured_grace_seconds, 0);
+  assert.notEqual(a.effective_grace_seconds, 0);
+  assert.notEqual(a.configured_future_skew_seconds, 0);
+  assert.notEqual(a.effective_future_skew_seconds, 0);
+});
+
+test("normalizeDailyDataReadinessResponse: explicit zero assignment grace/loaded-bars remain zero", () => {
+  const raw = makeDailyDataReadinessAssignment({
+    effective_grace_seconds: 0,
+    loaded_completed_bars: 0,
+  });
+  const resp = makeDailyDataReadinessResponse({ assignments: [raw] });
+  const normalized = normalizeDailyDataReadinessResponse(resp as unknown);
+  const a = normalized.assignments[0];
+  assert.equal(a.effective_grace_seconds, 0);
+  assert.equal(a.loaded_completed_bars, 0);
+});
+
 test("normalizeDailyDataReadinessResponse: missing start_allowed normalizes to null", () => {
   const raw = { applicability: "applicable", assignments: [] };
   const normalized = normalizeDailyDataReadinessResponse(raw as unknown);
@@ -3651,6 +3738,79 @@ test("buildDailyDataReadinessDiagnosticText: null start_allowed prints unknown, 
   assert.ok(text.includes("start_allowed: unknown"));
   assert.ok(!text.includes("start_allowed: false"));
   assert.ok(!text.includes("start_allowed: null"));
+});
+
+test("buildDailyDataReadinessDiagnosticText: missing top-level configured_grace_seconds prints unknown", () => {
+  const resp = makeDailyDataReadinessResponse({ configured_grace_seconds: null, configured_future_skew_seconds: null });
+  const text = buildDailyDataReadinessDiagnosticText(resp);
+  assert.ok(text.includes("configured_grace_seconds: unknown"));
+  assert.ok(text.includes("configured_future_skew_seconds: unknown"));
+});
+
+test("buildDailyDataReadinessDiagnosticText: explicit top-level zero grace/skew prints 0, not unknown", () => {
+  const resp = makeDailyDataReadinessResponse({ configured_grace_seconds: 0, configured_future_skew_seconds: 0 });
+  const text = buildDailyDataReadinessDiagnosticText(resp);
+  assert.ok(text.includes("configured_grace_seconds: 0"));
+  assert.ok(text.includes("configured_future_skew_seconds: 0"));
+  assert.ok(!text.includes("configured_grace_seconds: unknown"));
+});
+
+test("buildDailyDataReadinessDiagnosticText: missing assignment grace/skew fields print unknown", () => {
+  const resp = makeDailyDataReadinessResponse({
+    assignments: [
+      makeDailyDataReadinessAssignment({
+        configured_grace_seconds: null,
+        effective_grace_seconds: null,
+        configured_future_skew_seconds: null,
+        effective_future_skew_seconds: null,
+      }),
+    ],
+  });
+  const text = buildDailyDataReadinessDiagnosticText(resp);
+  assert.ok(text.includes("configured_grace_seconds: unknown"));
+  assert.ok(text.includes("effective_grace_seconds: unknown"));
+  assert.ok(text.includes("configured_future_skew_seconds: unknown"));
+  assert.ok(text.includes("effective_future_skew_seconds: unknown"));
+});
+
+test("buildDailyDataReadinessDiagnosticText: grace/skew diagnostics never contain undefined, null, NaN, or Infinity", () => {
+  const resp = makeDailyDataReadinessResponse({
+    configured_grace_seconds: null,
+    configured_future_skew_seconds: null,
+    assignments: [
+      makeDailyDataReadinessAssignment({
+        configured_grace_seconds: null,
+        effective_grace_seconds: null,
+        configured_future_skew_seconds: null,
+        effective_future_skew_seconds: null,
+      }),
+    ],
+  });
+  const text = buildDailyDataReadinessDiagnosticText(resp);
+  assert.ok(!text.includes("undefined"));
+  assert.ok(!text.includes("null"));
+  assert.ok(!text.includes("NaN"));
+  assert.ok(!text.includes("Infinity"));
+});
+
+test("buildDailyDataReadinessDiagnosticText: missing grace/skew evidence is never fabricated as zero", () => {
+  const resp = makeDailyDataReadinessResponse({
+    configured_grace_seconds: null,
+    configured_future_skew_seconds: null,
+    assignments: [
+      makeDailyDataReadinessAssignment({
+        configured_grace_seconds: null,
+        effective_grace_seconds: null,
+        configured_future_skew_seconds: null,
+        effective_future_skew_seconds: null,
+      }),
+    ],
+  });
+  const text = buildDailyDataReadinessDiagnosticText(resp);
+  assert.ok(!text.includes("configured_grace_seconds: 0"));
+  assert.ok(!text.includes("effective_grace_seconds: 0"));
+  assert.ok(!text.includes("configured_future_skew_seconds: 0"));
+  assert.ok(!text.includes("effective_future_skew_seconds: 0"));
 });
 
 // --- formatReadinessNumber ---

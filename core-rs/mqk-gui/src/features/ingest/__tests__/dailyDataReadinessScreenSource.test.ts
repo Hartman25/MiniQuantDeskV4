@@ -132,6 +132,24 @@ test("panel does not directly concatenate a nullable numeric field with a bare '
   }
 });
 
+test("Daily Data Readiness normalizer never fabricates a zero for missing/malformed numeric evidence", () => {
+  const sectionStart = apiSource.indexOf(
+    "// DAILY-DATA-READINESS-01D-GUI-01: Daily data readiness (read-only,",
+  );
+  assert.ok(sectionStart >= 0, "Daily Data Readiness normalization section must exist in api.ts");
+  const sectionEnd = apiSource.indexOf(
+    "export function formatReadinessNumber",
+    sectionStart,
+  );
+  assert.ok(sectionEnd >= 0, "formatReadinessNumber must exist after the Daily Data Readiness normalization functions");
+  const section = apiSource.slice(sectionStart, sectionEnd);
+  const fabricatedZeroPattern = /normalizeNullableNumber\([^)]*\)\s*\?\?\s*0/;
+  assert.ok(
+    !fabricatedZeroPattern.test(section),
+    "Daily Data Readiness normalization must not fall back missing/malformed numeric evidence to 0",
+  );
+});
+
 test("panel renders nullable numeric readiness fields through the shared formatter", () => {
   assert.ok(
     panelSource.includes("formatReadinessNumber"),

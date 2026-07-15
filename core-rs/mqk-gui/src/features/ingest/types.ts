@@ -684,10 +684,10 @@ export interface DailyDataReadinessAssignmentResponse {
   readiness_state: string;
   blockers: string[];
   remediation: string[];
-  configured_grace_seconds: number;
-  effective_grace_seconds: number;
-  configured_future_skew_seconds: number;
-  effective_future_skew_seconds: number;
+  configured_grace_seconds: number | null;
+  effective_grace_seconds: number | null;
+  configured_future_skew_seconds: number | null;
+  effective_future_skew_seconds: number | null;
 }
 
 /**
@@ -712,8 +712,8 @@ export interface DailyDataReadinessResponse {
   applicability: string;
   start_allowed: boolean | null;
   top_level_blocker: string | null;
-  configured_grace_seconds: number;
-  configured_future_skew_seconds: number;
+  configured_grace_seconds: number | null;
+  configured_future_skew_seconds: number | null;
   calendar_source: string | null;
   calendar_coverage_state: string;
   market_date: string | null;

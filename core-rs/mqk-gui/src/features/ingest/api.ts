@@ -1491,10 +1491,10 @@ function normalizeDailyDataReadinessAssignment(raw: unknown): DailyDataReadiness
     readiness_state: normalizeString(record.readiness_state, "unknown"),
     blockers: normalizeStringArray(record.blockers),
     remediation: normalizeStringArray(record.remediation),
-    configured_grace_seconds: normalizeNullableNumber(record.configured_grace_seconds) ?? 0,
-    effective_grace_seconds: normalizeNullableNumber(record.effective_grace_seconds) ?? 0,
-    configured_future_skew_seconds: normalizeNullableNumber(record.configured_future_skew_seconds) ?? 0,
-    effective_future_skew_seconds: normalizeNullableNumber(record.effective_future_skew_seconds) ?? 0,
+    configured_grace_seconds: normalizeNullableNumber(record.configured_grace_seconds),
+    effective_grace_seconds: normalizeNullableNumber(record.effective_grace_seconds),
+    configured_future_skew_seconds: normalizeNullableNumber(record.configured_future_skew_seconds),
+    effective_future_skew_seconds: normalizeNullableNumber(record.effective_future_skew_seconds),
   };
 }
 
@@ -1525,8 +1525,8 @@ export function normalizeDailyDataReadinessResponse(raw: unknown): DailyDataRead
     applicability: normalizeString(record.applicability, "unknown"),
     start_allowed: normalizeNullableBoolean(record.start_allowed),
     top_level_blocker: normalizeNullableString(record.top_level_blocker),
-    configured_grace_seconds: normalizeNullableNumber(record.configured_grace_seconds) ?? 0,
-    configured_future_skew_seconds: normalizeNullableNumber(record.configured_future_skew_seconds) ?? 0,
+    configured_grace_seconds: normalizeNullableNumber(record.configured_grace_seconds),
+    configured_future_skew_seconds: normalizeNullableNumber(record.configured_future_skew_seconds),
     calendar_source: normalizeNullableString(record.calendar_source),
     calendar_coverage_state: normalizeString(record.calendar_coverage_state, "unknown"),
     market_date: normalizeNullableString(record.market_date),
@@ -1625,6 +1625,8 @@ export function buildDailyDataReadinessDiagnosticText(response: DailyDataReadine
     `start_allowed: ${response.start_allowed === null ? "unknown" : String(response.start_allowed)}`,
   );
   lines.push(`top_level_blocker: ${response.top_level_blocker ?? "none"}`);
+  lines.push(`configured_grace_seconds: ${formatReadinessNumber(response.configured_grace_seconds)}`);
+  lines.push(`configured_future_skew_seconds: ${formatReadinessNumber(response.configured_future_skew_seconds)}`);
   lines.push(`assignment_source: ${response.assignment_source}`);
   lines.push(`calendar_source: ${response.calendar_source ?? "unknown"}`);
   lines.push(`calendar_coverage_state: ${response.calendar_coverage_state}`);
@@ -1659,6 +1661,10 @@ export function buildDailyDataReadinessDiagnosticText(response: DailyDataReadine
       lines.push(`continuity_state: ${a.continuity_state}`);
       lines.push(`provenance_state: ${a.provenance_state}`);
       lines.push(`readiness_state: ${a.readiness_state}`);
+      lines.push(`configured_grace_seconds: ${formatReadinessNumber(a.configured_grace_seconds)}`);
+      lines.push(`effective_grace_seconds: ${formatReadinessNumber(a.effective_grace_seconds)}`);
+      lines.push(`configured_future_skew_seconds: ${formatReadinessNumber(a.configured_future_skew_seconds)}`);
+      lines.push(`effective_future_skew_seconds: ${formatReadinessNumber(a.effective_future_skew_seconds)}`);
       lines.push(
         `blockers: ${a.blockers.length > 0 ? a.blockers.join(", ") : "none"}`,
       );
