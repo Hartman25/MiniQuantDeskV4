@@ -38,13 +38,23 @@ use crate::state::market_calendar::{
     self, resolve_market_session_schedule, CalendarCoverageState, MarketCalendarProvider,
     MarketSessionSchedule,
 };
-use crate::state::{MultiSymbolRuntimeConfig, SymbolStrategyAssignment};
+use crate::state::{MultiSymbolConfigError, MultiSymbolRuntimeConfig, SymbolStrategyAssignment};
 
 // ---------------------------------------------------------------------------
 // Stable blocking reason codes
 // ---------------------------------------------------------------------------
 
 pub const REASON_REQUIRED_ASSIGNMENTS_MISSING: &str = "required_assignments_missing";
+/// DAILY-DATA-READINESS-01C-MISSING-ASSIGNMENT-EVIDENCE-REPAIR-01 (REPAIR 3):
+/// a non-missing-input assignment-resolution failure — reserved for
+/// `MultiSymbolConfigError` variants that are not one of the three
+/// missing-input variants (`MissingSymbol`/`MissingStrategyId`/
+/// `MissingTimeframe`). See [`top_level_blocker_for_config_error`]'s doc
+/// comment: this branch is currently unreachable through
+/// `build_multi_symbol_runtime_config_from_env()`'s actual call graph, kept
+/// for exhaustiveness and any future direct caller of the lower-level
+/// watchlist-side builders.
+pub const REASON_ASSIGNMENT_RESOLUTION_FAILED: &str = "assignment_resolution_failed";
 pub const REASON_RUNTIME_STRATEGY_ASSIGNMENT_MISMATCH: &str =
     "runtime_strategy_assignment_mismatch";
 pub const REASON_RUNTIME_STRATEGY_SYMBOL_BINDING_MISMATCH: &str =
@@ -338,12 +348,52 @@ pub fn derive_continuity_state(
     }
 }
 
-fn blocked_report(reason: &'static str) -> DailyDataReadinessReport {
+/// `pub(crate)`, not private: DAILY-DATA-READINESS-01C-MISSING-ASSIGNMENT-EVIDENCE-REPAIR-01
+/// reuses this exact shape from `state::lifecycle`'s start gate to construct
+/// a truthful blocked report for an assignment-resolution failure — never a
+/// second, hand-rolled `DailyDataReadinessReport` literal.
+pub(crate) fn blocked_report(reason: &'static str) -> DailyDataReadinessReport {
     DailyDataReadinessReport {
         start_allowed: false,
         aggregate_state: "blocked",
         top_level_blocker: Some(reason),
         assignments: Vec::new(),
+    }
+}
+
+/// DAILY-DATA-READINESS-01C-MISSING-ASSIGNMENT-EVIDENCE-REPAIR-01 (REPAIR 3):
+/// map a [`MultiSymbolConfigError`] to the stable top-level readiness
+/// blocker reason for an applicable strict start-gate attempt whose
+/// assignment resolution failed.
+///
+/// Verified directly against `build_multi_symbol_runtime_config_from_env`'s
+/// actual call graph
+/// (`state::multi_symbol_config::build_multi_symbol_runtime_config_from_env_and_watchlist`):
+/// an invalid/unbuildable watchlist-v2 artifact never returns `Err` from
+/// that function — it falls through to `build_legacy_single_symbol_config`
+/// instead ("Fall through: invalid/unbuildable watchlist-v2 -> legacy, not
+/// an error."). The only `Err` that can ever reach the start gate is
+/// therefore one of `build_legacy_single_symbol_config`'s three
+/// missing-input variants (`MissingSymbol`/`MissingStrategyId`/
+/// `MissingTimeframe`) — all true "required assignment inputs missing"
+/// facts, mapped to [`REASON_REQUIRED_ASSIGNMENTS_MISSING`]. The remaining
+/// watchlist-side variants are matched here for exhaustiveness (so a future
+/// direct caller of the lower-level watchlist builders gets a distinct,
+/// honest reason instead of being silently folded into
+/// `required_assignments_missing`), mapped to
+/// [`REASON_ASSIGNMENT_RESOLUTION_FAILED`] — this arm is unreachable
+/// through the current start-gate call site, not a speculative future
+/// branch invented without source proof.
+pub fn top_level_blocker_for_config_error(err: &MultiSymbolConfigError) -> &'static str {
+    match err {
+        MultiSymbolConfigError::MissingSymbol
+        | MultiSymbolConfigError::MissingStrategyId
+        | MultiSymbolConfigError::MissingTimeframe => REASON_REQUIRED_ASSIGNMENTS_MISSING,
+        MultiSymbolConfigError::WatchlistNotV2
+        | MultiSymbolConfigError::WatchlistNotApproved
+        | MultiSymbolConfigError::MissingAssignment { .. }
+        | MultiSymbolConfigError::ConcurrentLimitExceeded { .. }
+        | MultiSymbolConfigError::HardCeilingExceeded { .. } => REASON_ASSIGNMENT_RESOLUTION_FAILED,
     }
 }
 
@@ -1326,9 +1376,6 @@ pub fn compute_evaluation_id(
     binding: &EffectiveRuntimeBinding,
     config: &MultiSymbolRuntimeConfig,
 ) -> uuid::Uuid {
-    let evaluated_at_nanos = now_utc
-        .timestamp_nanos_opt()
-        .unwrap_or_else(|| now_utc.timestamp().saturating_mul(1_000_000_000));
     let assignment_identity: Vec<String> = config
         .symbols
         .iter()
@@ -1341,6 +1388,38 @@ pub fn compute_evaluation_id(
             )
         })
         .collect();
+    compute_evaluation_id_from_assignment_identity(
+        now_utc,
+        attempt_seq,
+        binding,
+        &assignment_identity,
+    )
+}
+
+/// DAILY-DATA-READINESS-01C-MISSING-ASSIGNMENT-EVIDENCE-REPAIR-01 (REPAIR 2):
+/// [`compute_evaluation_id`]'s seam, generalized to accept an already-derived
+/// assignment identity rather than requiring a valid [`MultiSymbolRuntimeConfig`].
+/// [`compute_evaluation_id`] is now a thin wrapper deriving its
+/// `assignment_identity` from `config.symbols` and delegating here — the seed
+/// construction (and therefore every `evaluation_id` value) is byte-for-byte
+/// unchanged for every existing caller.
+///
+/// Exists so an applicable strict start-gate attempt whose assignment
+/// resolution itself failed can still receive a real, stable, distinct
+/// `evaluation_id` — built from a bounded assignment-resolution-failure
+/// identity (see the start gate's own
+/// `"assignment_resolution_error:{MultiSymbolConfigError::as_str()}"`
+/// construction) instead of fabricating a valid config. `attempt_seq` remains
+/// the load-bearing collision-breaker described on [`compute_evaluation_id`].
+pub fn compute_evaluation_id_from_assignment_identity(
+    now_utc: DateTime<Utc>,
+    attempt_seq: u64,
+    binding: &EffectiveRuntimeBinding,
+    assignment_identity: &[String],
+) -> uuid::Uuid {
+    let evaluated_at_nanos = now_utc
+        .timestamp_nanos_opt()
+        .unwrap_or_else(|| now_utc.timestamp().saturating_mul(1_000_000_000));
     let seed = format!(
         "daily_data_readiness.v2|{}|{}|{}|{}|{}|{}",
         evaluated_at_nanos,

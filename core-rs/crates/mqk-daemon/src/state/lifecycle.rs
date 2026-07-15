@@ -561,55 +561,88 @@ impl AppState {
         // produces the canonical db_unavailable verdict when the DB is
         // absent (contract §16), and so a blocked verdict denies before any
         // DB resource, run row, or broker/provider call.
+        //
+        // DAILY-DATA-READINESS-01C-MISSING-ASSIGNMENT-EVIDENCE-REPAIR-01:
+        // required ordering is bootstrap/binding resolution (B1A, above) ->
+        // capture evaluated_at_utc -> allocate attempt_seq -> attempt
+        // assignment resolution -> construct resolved-or-blocked assignment
+        // identity -> compute evaluation_id -> construct readiness report ->
+        // attempt pre-start evidence persistence -> return blocked verdict or
+        // continue. An applicable attempt whose assignment resolution itself
+        // fails (`build_multi_symbol_runtime_config_from_env()` returns
+        // `Err`) still receives a distinct `attempt_seq`, a real
+        // `evaluation_id`, a truthful bounded blocked report, and a genuine
+        // pre-start evidence persist attempt — never an early return before
+        // any of that exists.
         let mut daily_data_readiness_evaluation_id: Option<uuid::Uuid> = None;
         if self.deployment_mode() == DeploymentMode::Paper
             && self.strategy_market_data_source()
                 == StrategyMarketDataSource::ExternalSignalIngestion
         {
             let evaluated_at_utc = self.daily_data_readiness_now().await;
-            let config = crate::state::build_multi_symbol_runtime_config_from_env();
-            let config = match config {
-                Ok(cfg) => cfg,
-                Err(_) => {
-                    return Err(RuntimeLifecycleError::forbidden(
-                        "runtime.start_refused.daily_data_readiness_blocked",
-                        "daily_data_readiness",
-                        format!(
-                            "strict daily data readiness gate refused start: top_level_blocker='{}'; \
-                             evidence_persisted=false (DAILY-DATA-READINESS-01C-ENFORCEMENT-01)",
-                            crate::daily_data_readiness::REASON_REQUIRED_ASSIGNMENTS_MISSING
-                        ),
-                    ));
+            // REPAIR 1 (...MISSING-ASSIGNMENT-EVIDENCE-REPAIR-01): allocate a
+            // fresh attempt sequence number for this actual start-gate
+            // evaluation (never for a GET/preview evaluation) BEFORE
+            // assignment resolution is even attempted, so two
+            // otherwise-identical attempts — including two that both fail
+            // assignment resolution — never collide on `evaluation_id`.
+            let attempt_seq = self.next_daily_data_readiness_attempt_seq();
+
+            let config_result = crate::state::build_multi_symbol_runtime_config_from_env();
+
+            // REPAIR 2/3: construct the resolved-or-blocked assignment
+            // identity, `evaluation_id`, and readiness report from whichever
+            // branch actually happened — never a fabricated
+            // `MultiSymbolRuntimeConfig` for the failure branch.
+            let (report, evaluation_id, assignment_resolution_error) = match &config_result {
+                Ok(config) => {
+                    let readiness_context =
+                        crate::daily_data_readiness::load_readiness_context_from_env();
+                    let report = crate::daily_data_readiness::evaluate_readiness_with_binding(
+                        self.db.as_ref(),
+                        config,
+                        &effective_runtime_binding,
+                        &readiness_context,
+                        evaluated_at_utc,
+                    )
+                    .await;
+                    let evaluation_id = crate::daily_data_readiness::compute_evaluation_id(
+                        evaluated_at_utc,
+                        attempt_seq,
+                        &effective_runtime_binding,
+                        config,
+                    );
+                    (report, evaluation_id, None::<&'static str>)
+                }
+                Err(err) => {
+                    let top_level_blocker =
+                        crate::daily_data_readiness::top_level_blocker_for_config_error(err);
+                    let report = crate::daily_data_readiness::blocked_report(top_level_blocker);
+                    // Bounded, stable failure identity (REPAIR 2) — never
+                    // secrets, full environment dumps, or unbounded
+                    // filesystem errors; `MultiSymbolConfigError::as_str()`
+                    // is itself already a fixed, small set of literal
+                    // strings.
+                    let assignment_identity =
+                        vec![format!("assignment_resolution_error:{}", err.as_str())];
+                    let evaluation_id =
+                        crate::daily_data_readiness::compute_evaluation_id_from_assignment_identity(
+                            evaluated_at_utc,
+                            attempt_seq,
+                            &effective_runtime_binding,
+                            &assignment_identity,
+                        );
+                    (report, evaluation_id, Some(err.as_str()))
                 }
             };
 
-            let readiness_context = crate::daily_data_readiness::load_readiness_context_from_env();
-            let report = crate::daily_data_readiness::evaluate_readiness_with_binding(
-                self.db.as_ref(),
-                &config,
-                &effective_runtime_binding,
-                &readiness_context,
-                evaluated_at_utc,
-            )
-            .await;
-            // REPAIR 1 (DAILY-DATA-READINESS-01C-CLOSURE-REPAIR-01): allocate
-            // a fresh attempt sequence number for this actual start-gate
-            // evaluation (never for a GET/preview evaluation) so two
-            // otherwise-identical attempts never collide on `evaluation_id`.
-            let attempt_seq = self.next_daily_data_readiness_attempt_seq();
-            let evaluation_id = crate::daily_data_readiness::compute_evaluation_id(
-                evaluated_at_utc,
-                attempt_seq,
-                &effective_runtime_binding,
-                &config,
-            );
-
             // The real write is always attempted (regardless of any test
             // override) — the pre-start event must be attempted before run
-            // creation for every applicable evaluation (§C.8). The override
-            // (test-only) only substitutes what gets *reported*/gated on
-            // afterward, so tests can prove the §C.9 failure policy without
-            // needing the real write to actually fail.
+            // creation for every applicable evaluation (§C.8), including an
+            // assignment-resolution failure. The override (test-only) only
+            // substitutes what gets *reported*/gated on afterward, so tests
+            // can prove the §C.9 failure policy without needing the real
+            // write to actually fail.
             let real_evidence_persisted = match self.db.as_ref() {
                 Some(db) => {
                     crate::daily_data_readiness::persist_pre_start_readiness_evidence(
@@ -657,7 +690,9 @@ impl AppState {
                     "daily_data_readiness",
                     format!(
                         "strict daily data readiness gate refused start: evaluation_id={evaluation_id}; \
-                         start_allowed=false; top_level_blocker={:?}; assignment_blockers={assignment_blockers:?}; \
+                         start_allowed=false; top_level_blocker={:?}; \
+                         assignment_resolution_error={assignment_resolution_error:?}; \
+                         assignment_blockers={assignment_blockers:?}; \
                          evidence_persisted={evidence_persisted} (DAILY-DATA-READINESS-01C-ENFORCEMENT-01)",
                         report.top_level_blocker,
                     ),

@@ -85,10 +85,12 @@ const PROVIDER: &str = "zzsg01_provider";
 /// `SYMBOL`/`PROVIDER` consts) so DB-backed tests that persist a real
 /// deterministic `evaluation_id` (§C.8) never collide with each other's
 /// already-inserted `sys_autonomous_session_events` row within the same
-/// test-binary process (the id is a pure function of
-/// (minute_bucket, binding, assignment) — two tests sharing an identical
-/// symbol/strategy/timeframe/clock would otherwise deterministically compute
-/// the same id and silently no-op on `on conflict (id) do nothing`).
+/// test-binary process by relying on the assignment identity alone (the id
+/// is a pure function of evaluated-at-nanos, attempt_seq, binding, and
+/// assignment identity — REPAIR 1's `attempt_seq` already prevents same-id
+/// collisions across separate start attempts, but tests in this file filter
+/// evidence rows by symbol substring match, so a distinct symbol per test
+/// keeps each test's own row query unambiguous).
 fn write_registries_for(symbol: &str, provider: &str) -> std::path::PathBuf {
     let dir = std::env::temp_dir().join(format!(
         "mqk_ddr_sg01_registry_{}_{}",
@@ -604,10 +606,12 @@ async fn sg_08_pre_start_evidence_attempted_even_when_blocked_and_keeps_original
     }
     cleanup_bars(&pool, symbol).await;
     // Reset this test's own evidence identity (evaluation_id is a pure
-    // function of (minute_bucket, binding, assignment); the fixed clock used
-    // across this whole file means a rerun of this exact test binary would
-    // otherwise collide with its own prior run's already-persisted row via
-    // `on conflict (id) do nothing`, silently no-op'ing the insert this run).
+    // function of evaluated-at-nanos, attempt_seq, binding, and assignment;
+    // the fixed clock used across this whole file plus the process-local
+    // `attempt_seq` counter restarting at 0 on a fresh process means a rerun
+    // of this exact test binary would otherwise collide with its own prior
+    // run's already-persisted row via `on conflict (id) do nothing`,
+    // silently no-op'ing the insert this run).
     let _ = sqlx::query("delete from sys_autonomous_session_events where detail like $1")
         .bind(format!("%\"{symbol}\"%"))
         .execute(&pool)
@@ -1620,4 +1624,312 @@ async fn sg_17_run_link_persist_failure_fails_closed_no_effects_invoked() {
     clear_env();
     cleanup(&dir);
     cleanup_bars(&pool, symbol).await;
+}
+
+// ---------------------------------------------------------------------------
+// DAILY-DATA-READINESS-01C-MISSING-ASSIGNMENT-EVIDENCE-REPAIR-01
+//
+// SG-18..SG-21 — an applicable strict start-gate attempt whose assignment
+// resolution itself fails (`build_multi_symbol_runtime_config_from_env()`
+// returns `Err`) must still receive a distinct start-attempt sequence, a
+// real `evaluation_id`, a truthful bounded blocked report, and a genuine
+// pre-start evidence persist attempt — never an early return before any of
+// that exists (the exact defect this repair closes).
+// ---------------------------------------------------------------------------
+
+/// Parses `evaluation_id=<uuid>;` out of a `RuntimeLifecycleError`'s display
+/// string. This is the only channel available to this integration-test
+/// binary for observing the real `evaluation_id` the production start gate
+/// computed — `AppState::next_daily_data_readiness_attempt_seq` is
+/// `pub(crate)`, not visible outside the `mqk-daemon` library crate.
+fn extract_evaluation_id(err_display: &str) -> uuid::Uuid {
+    let marker = "evaluation_id=";
+    let start = err_display
+        .find(marker)
+        .unwrap_or_else(|| panic!("evaluation_id= not found in: {err_display}"))
+        + marker.len();
+    let rest = &err_display[start..];
+    let end = rest.find(';').unwrap_or(rest.len());
+    uuid::Uuid::parse_str(rest[..end].trim())
+        .unwrap_or_else(|e| panic!("evaluation_id not a valid uuid in '{}': {e}", &rest[..end]))
+}
+
+async fn delete_evidence_row(pool: &sqlx::PgPool, evaluation_id: uuid::Uuid) {
+    let _ = sqlx::query("delete from sys_autonomous_session_events where id = $1")
+        .bind(format!("daily_data_readiness_evaluated:{evaluation_id}"))
+        .execute(pool)
+        .await;
+}
+
+/// Fresh AppState with a working DB, WS continuity live, integrity armed,
+/// and an active (non-dormant) strategy fleet — every gate up to and
+/// including B1A passes, but deliberately NO
+/// `MQK_STRATEGY_SYMBOL`/`MQK_STRATEGY_IDS`/`MQK_STRATEGY_MD_TIMEFRAME`/
+/// watchlist artifact is configured, so
+/// `build_multi_symbol_runtime_config_from_env()` fails closed
+/// (`MissingSymbol` -> `required_assignments_missing`) at the Phase C gate.
+async fn db_backed_state_with_no_assignment_source(
+    pool: &sqlx::PgPool,
+) -> std::sync::Arc<AppState> {
+    let mut st_raw = AppState::new_for_test_with_broker_kind(BrokerKind::Alpaca);
+    st_raw.db = Some(pool.clone());
+    let st = std::sync::Arc::new(st_raw);
+    st.update_ws_continuity(AlpacaWsContinuityState::Live {
+        last_message_id: "ddr-missing-assignment-test-msg".to_string(),
+        last_event_at: "2026-04-14T15:00:00Z".to_string(),
+    })
+    .await;
+    st.integrity.write().await.disarmed = false;
+    st.set_strategy_fleet_for_test(Some(vec![StrategyFleetEntry {
+        strategy_id: "intraday_scalper".to_string(),
+    }]))
+    .await;
+    st.set_daily_data_readiness_clock_override_for_test(Some(fixed_now()))
+        .await;
+    st
+}
+
+// ---------------------------------------------------------------------------
+// SG-18 — missing assignments with a working DB: `required_assignments_missing`,
+// a nonempty `evaluation_id`, `evidence_persisted=true`; the persisted event
+// has the right event type/id/start_allowed/run_id/assignment-count; and no
+// run/outbox/run-linked-event/loop is created (req #1, #2, #6, #7, #8, #9).
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn sg_18_missing_assignments_with_db_persists_evidence_identity_and_creates_no_run_or_outbox()
+{
+    let _g = env_lock().lock().await;
+    let Some(pool) = db_pool_or_skip("SG-18").await else {
+        return;
+    };
+    clear_env();
+
+    let runs_before = count(&pool, "runs").await;
+    let outbox_before = count(&pool, "oms_outbox").await;
+
+    let st = db_backed_state_with_no_assignment_source(&pool).await;
+
+    let err = st
+        .start_execution_runtime()
+        .await
+        .expect_err("SG-18: missing assignments must refuse start");
+    assert_eq!(
+        err.fault_class(),
+        "runtime.start_refused.daily_data_readiness_blocked"
+    );
+    let msg = err.to_string();
+    assert!(
+        msg.contains("required_assignments_missing"),
+        "SG-18 req #1: error must name the top-level blocker: {msg}"
+    );
+    assert!(
+        msg.contains("evidence_persisted=true"),
+        "SG-18 req #1: a working DB must honestly report evidence_persisted=true: {msg}"
+    );
+    let evaluation_id = extract_evaluation_id(&msg);
+
+    let row: (String, Option<uuid::Uuid>) = sqlx::query_as(
+        "select detail, run_id from sys_autonomous_session_events \
+         where event_type = 'daily_data_readiness_evaluated' and id = $1",
+    )
+    .bind(format!("daily_data_readiness_evaluated:{evaluation_id}"))
+    .fetch_one(&pool)
+    .await
+    .expect("SG-18 req #2: pre-start evidence row must exist for this evaluation_id");
+    let detail: serde_json::Value = serde_json::from_str(&row.0).expect("evidence JSON");
+    assert_eq!(detail["evaluation_id"], evaluation_id.to_string());
+    assert_eq!(detail["binding_scope"], "start_attempt_binding");
+    assert_eq!(detail["start_allowed"], false, "SG-18 req #2: {detail}");
+    assert_eq!(
+        detail["assignment_count"], 0,
+        "SG-18 req #2: zero assignment summaries: {detail}"
+    );
+    assert_eq!(
+        detail["assignments"].as_array().map(Vec::len),
+        Some(0),
+        "SG-18 req #2: zero assignment summaries: {detail}"
+    );
+    assert!(
+        row.1.is_none(),
+        "SG-18 req #2: run_id must be NULL for a pre-start event"
+    );
+
+    assert_eq!(
+        runs_before,
+        count(&pool, "runs").await,
+        "SG-18 req #6: no run row"
+    );
+    assert_eq!(
+        outbox_before,
+        count(&pool, "oms_outbox").await,
+        "SG-18 req #9: no outbox row"
+    );
+    assert!(
+        st.native_strategy_bootstrap_truth_state_for_test()
+            .await
+            .is_none(),
+        "SG-18 req #8: bootstrap is only stored after a fully successful start — \
+         its absence proves no execution loop was spawned"
+    );
+    let linked_count: (i64,) = sqlx::query_as(
+        "select count(*) from sys_autonomous_session_events where event_type = $1 and detail like $2",
+    )
+    .bind(mqk_daemon::daily_data_readiness::EVENT_TYPE_READINESS_RUN_LINKED)
+    .bind(format!("%{evaluation_id}%"))
+    .fetch_one(&pool)
+    .await
+    .expect("count run_linked events");
+    assert_eq!(
+        linked_count.0, 0,
+        "SG-18 req #7: no run-linked evidence may exist for this evaluation_id"
+    );
+
+    delete_evidence_row(&pool, evaluation_id).await;
+    clear_env();
+}
+
+// ---------------------------------------------------------------------------
+// SG-19 — two sequential identical missing-assignment attempts under the
+// same injected clock produce two different evaluation_ids and two distinct
+// event rows (req #3).
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn sg_19_sequential_identical_missing_assignment_attempts_produce_distinct_evaluation_ids() {
+    let _g = env_lock().lock().await;
+    let Some(pool) = db_pool_or_skip("SG-19").await else {
+        return;
+    };
+    clear_env();
+
+    let st = db_backed_state_with_no_assignment_source(&pool).await;
+
+    let err1 = st
+        .start_execution_runtime()
+        .await
+        .expect_err("SG-19 attempt 1: missing assignments must block");
+    let err2 = st
+        .start_execution_runtime()
+        .await
+        .expect_err("SG-19 attempt 2: missing assignments must block");
+
+    let id1 = extract_evaluation_id(&err1.to_string());
+    let id2 = extract_evaluation_id(&err2.to_string());
+    assert_ne!(
+        id1, id2,
+        "SG-19 req #3: two identical attempts against an identical clock must receive \
+         distinct evaluation_ids"
+    );
+
+    for id in [id1, id2] {
+        let exists: (i64,) =
+            sqlx::query_as("select count(*) from sys_autonomous_session_events where id = $1")
+                .bind(format!("daily_data_readiness_evaluated:{id}"))
+                .fetch_one(&pool)
+                .await
+                .expect("count evidence row");
+        assert_eq!(
+            exists.0, 1,
+            "SG-19 req #3: each attempt must persist its own distinct evidence row: {id}"
+        );
+    }
+
+    delete_evidence_row(&pool, id1).await;
+    delete_evidence_row(&pool, id2).await;
+    clear_env();
+}
+
+// ---------------------------------------------------------------------------
+// SG-20 — two concurrent identical missing-assignment attempts must also
+// receive distinct evaluation_ids (req #4).
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn sg_20_concurrent_identical_missing_assignment_attempts_produce_distinct_evaluation_ids() {
+    let _g = env_lock().lock().await;
+    let Some(pool) = db_pool_or_skip("SG-20").await else {
+        return;
+    };
+    clear_env();
+
+    let st = db_backed_state_with_no_assignment_source(&pool).await;
+
+    // `AppState::lifecycle_op` serializes `start_execution_runtime` calls
+    // internally (SG-13's same reasoning applies here) — this test proves
+    // the OUTCOME two genuinely concurrent callers observe.
+    let st_a = std::sync::Arc::clone(&st);
+    let st_b = std::sync::Arc::clone(&st);
+    let (res_a, res_b) = tokio::join!(
+        async move { st_a.start_execution_runtime().await },
+        async move { st_b.start_execution_runtime().await },
+    );
+    let err_a = res_a.expect_err("SG-20: attempt A must block");
+    let err_b = res_b.expect_err("SG-20: attempt B must block");
+
+    let id_a = extract_evaluation_id(&err_a.to_string());
+    let id_b = extract_evaluation_id(&err_b.to_string());
+    assert_ne!(
+        id_a, id_b,
+        "SG-20 req #4: concurrent attempts must never collide on evaluation_id"
+    );
+
+    for id in [id_a, id_b] {
+        let exists: (i64,) =
+            sqlx::query_as("select count(*) from sys_autonomous_session_events where id = $1")
+                .bind(format!("daily_data_readiness_evaluated:{id}"))
+                .fetch_one(&pool)
+                .await
+                .expect("count evidence row");
+        assert_eq!(
+            exists.0, 1,
+            "SG-20 req #4: each concurrent attempt must persist its own distinct evidence row: {id}"
+        );
+    }
+
+    delete_evidence_row(&pool, id_a).await;
+    delete_evidence_row(&pool, id_b).await;
+    clear_env();
+}
+
+// ---------------------------------------------------------------------------
+// SG-21 — missing assignments with no DB configured must still return the
+// original blocker and a real evaluation_id, honestly reporting
+// `evidence_persisted=false` (req #5).
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn sg_21_missing_assignments_no_db_returns_original_blocker_with_evaluation_id_and_evidence_not_persisted(
+) {
+    let _g = env_lock().lock().await;
+    clear_env();
+    let dir = write_registries();
+    // Same fixture shape as SG-01/SG-05: no assignment source configured,
+    // and no DB attached to this AppState at all.
+    let st = ready_state_with_fleet(Some("intraday_scalper")).await;
+    assert!(st.db.is_none(), "SG-21: precondition — no DB configured");
+
+    let err = st
+        .start_execution_runtime()
+        .await
+        .expect_err("SG-21: missing assignments with no DB must refuse start");
+    assert_eq!(
+        err.fault_class(),
+        "runtime.start_refused.daily_data_readiness_blocked"
+    );
+    let msg = err.to_string();
+    assert!(
+        msg.contains("required_assignments_missing"),
+        "SG-21 req #5: error must name the original blocker: {msg}"
+    );
+    assert!(
+        msg.contains("evidence_persisted=false"),
+        "SG-21 req #5: no DB means evidence_persisted must honestly be false: {msg}"
+    );
+    // req #5: a real, well-formed evaluation_id must still be present —
+    // `extract_evaluation_id` panics if it is missing or malformed.
+    let _evaluation_id = extract_evaluation_id(&msg);
+
+    clear_env();
+    cleanup(&dir);
 }
