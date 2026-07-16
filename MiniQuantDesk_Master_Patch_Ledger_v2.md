@@ -9709,7 +9709,10 @@ AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-COMBINED: OPEN
 ```
 
 **Starting HEAD:** `ee026f5f31511304d9b226d464f3df0e6526ddad` ("docs: close
-daily data readiness"). **Phase A commit:** pending (this session).
+daily data readiness").
+**Phase A audit commit:** `c8dd3605ba870ca3cf126b30423514b4d70c022d` ("docs:
+design autonomous daily paper operations").
+**Phase A contract correction:** pending (this session).
 
 **Bundle objective:** after this bundle, an operator who has completed
 one-time PAPER configuration and one-time arm setup should be able to leave
@@ -9772,6 +9775,52 @@ relevant routes, mqk-db schema/migrations, and all 17 named scenario test
 files) and confirmed true — no correction to the audit leads was required.
 Full findings, gap table, and frozen Phase B–G binding contract:
 `docs/specs/autonomous_daily_paper_operations_01a_current_truth_and_contract.md`.
+
+**Phase A contract correction
+(`AUTONOMOUS-DAILY-PAPER-OPERATIONS-01A-CONTRACT-CORRECTION-01`):** eight
+binding-contract defects in the Phase A doc corrected without redoing the
+current-source audit — docs and the Phase A guard script only, no
+production code, test code, or migration:
+
+- Exact Bundle 2 session-resolver reuse frozen (`load_readiness_context_from_env`
+  + `resolve_market_session_schedule`, not a paraphrase) as the sole
+  authority behind the new `AutonomousDailySessionPlan`, with the fixed
+  UTC-window override explicitly barred from turning a weekend/holiday into
+  an applicable operation or bypassing unavailable/out-of-range calendar
+  truth.
+- Daily slot (`UNIQUE (market_date, deployment_mode, adapter_id)`) separated
+  from the full six-component deterministic `operation_id`; same-day
+  identity mismatch (changed config + same-day restart) now fails closed
+  under `operation_identity_conflict` / `manual_intervention_required`
+  instead of silently creating or rewriting an operation.
+- Durable current-state model (`sys_autonomous_daily_operations`) plus a
+  dedicated `sys_autonomous_daily_operation_events` transition-event model,
+  with an explicit CAS/transaction contract (`state_version`-guarded update
+  + matching transition insert, single transaction, GET routes never write).
+- Fabricated `not null default 0` counter default removed from the proposed
+  schema; every required initial value is caller-supplied at insert, per
+  `db_rules.md`.
+- Typed `AutonomousRetryClass` (`WaitForCondition` /
+  `RetryableTransient` / `ManualInterventionRequired` / `SessionTerminal`)
+  frozen in place of string-matched reason classification, including an
+  explicit `GapDetected`-is-never-transient rule and a
+  `database_not_configured_or_invalid` vs.
+  `temporary_database_operation_failure` split.
+- No-trade evidence-source overclaim corrected: the decision/order/fill
+  half of the evidence hierarchy needs no new table, but Bundle 3 bar-driver
+  facts (provider polls, bars observed/dispatched, last completed/dispatched
+  bar identity) are confirmed net-new and required in Phase C for
+  restart-safe exactly-once dispatch and honest no-trade classification;
+  insufficient evidence now yields `unknown_insufficient_evidence`, never a
+  fabricated reason.
+- Explicit two-part provider-call authorization frozen
+  (`autonomous_data_refresh_enabled == true AND allow_provider_api_calls ==
+  true`) — both required before any Phase C provider call.
+- Phase A guard strengthened (19 checks, up from 15): the calendar and
+  provider-authorization checks now require the exact needles above rather
+  than a loose mention, plus new checks for identity/transition-history
+  needles, typed-blocker distinctions, and a schema-scoped negative check
+  rejecting `not null default 0`.
 
 **Safety confirmation (Phase A):**
 

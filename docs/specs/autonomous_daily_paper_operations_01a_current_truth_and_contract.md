@@ -5,6 +5,15 @@ Bundle: `AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-COMBINED`
 Starting HEAD: `ee026f5f31511304d9b226d464f3df0e6526ddad` ("docs: close daily data readiness")
 Scope: audit only. No production code, test code, or migration is changed by this patch.
 
+Correction patch: `AUTONOMOUS-DAILY-PAPER-OPERATIONS-01A-CONTRACT-CORRECTION-01`, applied on top
+of Phase A audit commit `c8dd3605ba870ca3cf126b30423514b4d70c022d` ("docs: design autonomous daily
+paper operations"). This correction resolves eight binding-contract defects in §13–§16 below
+(exact session authority, daily-slot/operation-identity split, SQL default fabrication, transition
+durability, typed retry classification, no-trade evidence-source overclaim, provider-call
+authorization, and guard strength) without redoing the current-source audit in §1–§12. Scope
+remains unchanged: docs and the Phase A guard script only — no production code, test code, or
+migration is added or modified by this correction.
+
 ---
 
 ## 1. Executive disposition
@@ -458,14 +467,124 @@ against the audit above with no corrections required:
   simplified start gate.
 - **Canonical stop path**: `stop_execution_runtime` / `halt_execution_runtime` remain the only
   stop entry points (`lifecycle.rs:1049,1109`).
-- **Canonical session/calendar authority**: Phase B/D must converge `session_controller.rs` and
-  `autonomous_bar_ticker.rs` onto one authoritative session-plan composition (reusing Bundle 2's
-  `daily_data_readiness.rs` calendar fields and/or `market_calendar.rs`'s
-  `MarketCalendarProvider`), eliminating the three-call-site duplication in §4/§12#6. It must not
-  introduce a *fourth* calculation.
+- **Canonical session/calendar authority (corrected — Correction 1)**: Phase B/D must converge
+  `session_controller.rs` and `autonomous_bar_ticker.rs` onto the exact same calendar context and
+  resolver already used by the Bundle 2 readiness composition
+  (`routes/market_data_readiness.rs:168-169`) — not a paraphrase, the same two calls:
+
+  ```rust
+  let context = daily_data_readiness::load_readiness_context_from_env();
+  let schedule = resolve_market_session_schedule(context.calendar_provider.as_ref(), now_utc);
+  ```
+
+  Phase B may extract this pair into a deeper shared helper (e.g.
+  `daily_data_readiness::resolve_canonical_session_schedule(now_utc)`), but that helper must call
+  through to this same `load_readiness_context_from_env` + `resolve_market_session_schedule` pair
+  — it must not perform a fourth independent market-date/open/close calculation, and it must not
+  re-derive `CalendarSpec::NyseWeekdays` directly the way `session_controller.rs:87-88` and
+  `autonomous_bar_ticker.rs:114-115` do today. This eliminates the three-call-site duplication in
+  §4/§12#6 (the third being `state.rs:3761,3861`).
+
+  The resulting `AutonomousDailySessionPlan` is one immutable snapshot per session, carrying at
+  least:
+
+  ```text
+  market_date
+  session_open_utc
+  session_close_utc
+  calendar_source
+  calendar_coverage_state
+  schedule_source
+  preopen_start_utc
+  postclose_finalize_utc
+  session_plan_identity
+  ```
+
+  `calendar_source`/`calendar_coverage_state` are populated from `MarketSessionSchedule::calendar_source`/
+  `coverage_state` (`market_calendar.rs:1088-1089`); `schedule_source` is a new plan-level field
+  distinguishing which calendar authority produced the schedule (e.g.
+  `"nyse_weekdays_heuristic"`) from the fixed-window override below; `preopen_start_utc`/
+  `postclose_finalize_utc` are derived offsets from `session_open_utc`/`session_close_utc` (exact
+  offsets a Phase B implementation detail, not fixed here); `session_plan_identity` is a stable
+  identity value derived from the immutable fields above, consumed as one input to the
+  `operation_id` derivation below — it is not a second, independent UUID scheme.
+
+  Required behavior, derived entirely from `CalendarCoverageState`/`MarketSessionState` as already
+  defined in `market_calendar.rs`, introducing no new calendar math:
+  - weekend or holiday (`is_trading_day == false`): no applicable trading operation for that
+    `market_date`.
+  - early close (`is_early_close == true`): the authoritative early `session_close_utc` already
+    produced by `MarketSessionSchedule` is retained as-is — no separate early-close override table.
+  - calendar unavailable (provider cannot classify, i.e. `MarketSessionState::Unknown` with
+    `coverage_state != Active`): blocked, never defaulted to an assumed session.
+  - stale, invalid, or out-of-range coverage (`CalendarCoverageState::Stale | Invalid |
+    OutOfRange`): blocked.
+  - no hardcoded DST conversion — DST correctness is exactly what
+    `MarketSessionSchedule::session_open_utc`/`session_close_utc` already provide
+    (`market_calendar.rs:1069-1071`); the plan must not re-implement ET→UTC conversion.
+  - no raw `CalendarSpec::NyseWeekdays` calculation outside this one shared plan.
+  - the session controller, the completed-bar driver (Phase C), the daily-operation projection
+    (Phase B/E), and the GUI panel (Phase F) all consume the same `AutonomousDailySessionPlan` —
+    none re-derives session boundaries independently.
+
+  **Fixed-window override policy (corrected)**: the existing
+  `MQK_AUTONOMOUS_SESSION_START_HH_MM`/`_STOP_HH_MM`-driven
+  `AutonomousSessionSchedule::FixedUtcWindow`/`SessionWindow` (`session_controller.rs:60-141`) may
+  remain as an operator override, but under this contract:
+  - it is labeled `schedule_source="fixed_window_override"` on the plan, never conflated with an
+    exchange-calendar-sourced value;
+  - it cannot turn a weekend or holiday into an applicable operation — `SessionWindow::is_in_session`
+    today is a pure HH:MM-of-day check with no weekday/holiday awareness at all
+    (`session_controller.rs:135-140`); Phase B/D must gate it behind the same
+    `is_trading_day`/`coverage_state` applicability check the exchange-calendar path uses, rather
+    than let it bypass that check as it implicitly does today;
+  - it cannot bypass an unavailable or out-of-range exchange-calendar truth — if the underlying
+    calendar cannot establish `market_date` applicability, the override does not substitute its
+    own opinion for that;
+  - malformed or incomplete override configuration (e.g. `SessionWindow::parse` returning `None`
+    per `session_controller.rs:119-126`, or one of the two env vars set without the other) fails
+    closed to the authoritative default (`AutonomousSessionSchedule::NyseRegularSession`) policy,
+    with the configuration defect surfaced rather than silently substituted;
+  - it changes session boundaries (start/stop wall-clock) only after authoritative
+    market-date/calendar applicability is established for that date — applicability decides
+    *whether* a session applies; the override only ever narrows or shifts *when* within an
+    applicable day it runs.
 - **Deterministic operation identity**: `operation_id` must be `Uuid::new_v5(NAMESPACE_DNS,
   "mqk.autonomous-daily-operation.v1|{market_date}|{deployment_mode}|{adapter_id}|{session_plan_identity}|{assignment_identity}|{runtime_binding_identity}")`
   or equivalent, following the established convention in §8 — not `Uuid::new_v4()`.
+
+  **Daily slot vs. operation identity (corrected — Correction 2)**: these are two separate
+  concepts, not one four-column unique constraint as §14 originally conflated them:
+  - **Daily slot** — exactly one applicable autonomous PAPER operation may occupy
+    `(market_date, deployment_mode, adapter_id)`, enforced by
+    `UNIQUE (market_date, deployment_mode, adapter_id)` on `sys_autonomous_daily_operations`. This
+    is the concurrency/idempotency anchor and prevents two operations from ever existing for the
+    same broker/deployment/day, independent of how many fields feed `operation_id`.
+  - **Operation identity** — the full `operation_id` above, computed over all six identity
+    components. `session_plan_identity` comes from the `AutonomousDailySessionPlan` (Correction 1);
+    `assignment_identity` is the existing per-symbol/strategy assignment identity; `runtime_binding_identity`
+    is the strategy/runtime binding identity already produced by the existing B1A native-strategy
+    bootstrap gate (`lifecycle.rs:461-545`) — not a new binding computation. The durable row must
+    store all three (`session_plan_identity`, `assignment_identity`, `runtime_binding_identity`) as
+    inspectable columns, not merely folded into the `operation_id` hash where they could never
+    later be recovered or compared.
+
+  **Same-day identity conflict**: when the daily slot `(market_date, deployment_mode, adapter_id)`
+  already has a row and a tick recomputes the expected `operation_id`:
+  - recompute the expected `operation_id` and compare every stored immutable identity field
+    (`session_plan_identity`, `assignment_identity`, `runtime_binding_identity`) against the freshly
+    computed values;
+  - if all agree, recover (reuse) the existing operation — the ordinary same-day daemon-restart
+    case;
+  - if any differ (e.g. an operator changed strategy/symbol/timeframe config and restarted the
+    daemon mid-day), do not create a second row for the same slot and do not silently rewrite the
+    existing row's identity fields;
+  - fail closed under the stable reason code `operation_identity_conflict`, and transition or
+    surface the slot as `manual_intervention_required`;
+  - this handles a same-day daemon restart with changed configuration safely without implementing
+    hot-swap — the existing assumption that configuration is static for one process lifetime is
+    unchanged; this only prevents that assumption's violation from producing a second silent
+    operation or a silently rewritten one.
 - **Durable daily operation record**: required net-new (§14) since neither `runs` nor
   `sys_autonomous_session_events` can support idempotent daily identity, restart-safe
   current-state projection, or CAS-safe concurrent transitions as they exist today (§8, §12#7/#14).
@@ -488,96 +607,323 @@ against the audit above with no corrections required:
 
 ---
 
-## 14. Proposed durability model
+## 14. Proposed durability model (corrected — Correction 3)
 
 Neither `runs` (no natural daily key, LIVE-only uniqueness index, non-atomic check-then-update
 for PAPER) nor `sys_autonomous_session_events` (append-only log, no CAS, no per-day identity) can
 trustworthily provide race-safe daily coordination (§8, §12#7/#14). A new additive table is
-required, matching the bundle prompt's proposed shape:
+required. The schema below corrects the original draft: it removes the fabricated numeric SQL
+default, separates the daily-slot unique constraint from the full operation-identity fields
+(§13 Correction 2), and adds the immutable session-plan and bar-driver-evidence columns the
+original draft omitted. Names below may be adjusted in the Phase B implementation; what is frozen
+is where each required durable fact lives.
 
 ```
 sys_autonomous_daily_operations (new, migration 0048_...)
-  operation_id            uuid        primary key   -- UUIDv5 per §13
-  market_date             date        not null
-  deployment_mode         text        not null
-  adapter_id              text        not null
-  assignment_identity     text        not null
-  session_open_utc        timestamptz not null
-  session_close_utc       timestamptz not null
-  state                   text        not null       -- typed state machine, see bundle prompt's list
-  state_reason_code       text
-  run_id                  uuid                        -- nullable, no FK per sys_autonomous_session_events precedent (0043:15-19 style)
-  start_attempt_count     bigint      not null default 0   -- caller-managed, no DB default per DB rules
-  last_start_attempt_utc  timestamptz
-  next_retry_utc          timestamptz
-  started_at_utc          timestamptz
-  stopped_at_utc          timestamptz
-  finalized_at_utc        timestamptz
-  outcome                 text
-  no_trade_reason         text
-  last_error              text
-  created_at_utc          timestamptz not null   -- caller-injected, no DEFAULT now() per db_rules.md
-  updated_at_utc          timestamptz not null   -- caller-injected
-  unique (market_date, deployment_mode, adapter_id, assignment_identity)  -- idempotent daily identity + CAS anchor
+  operation_id             uuid        primary key   -- UUIDv5 per §13, over all six identity components
+  market_date              date        not null
+  deployment_mode          text        not null
+  adapter_id               text        not null
+
+  session_plan_identity    text        not null       -- from AutonomousDailySessionPlan, §13 Correction 1
+  assignment_identity      text        not null
+  runtime_binding_identity text        not null       -- from the existing B1A native-strategy bootstrap binding
+
+  calendar_source          text        not null
+  calendar_coverage_state  text        not null
+  schedule_source          text        not null       -- "nyse_weekdays_heuristic" | "fixed_window_override" | ...
+  session_open_utc         timestamptz not null
+  session_close_utc        timestamptz not null
+  preopen_start_utc        timestamptz not null
+  postclose_finalize_utc   timestamptz not null
+
+  state                    text        not null       -- typed state machine, see bundle prompt's list
+  state_reason_code        text
+  state_version            bigint      not null       -- caller-supplied initial value; incremented by every CAS transition, §14a
+
+  run_id                   uuid                        -- nullable, no FK, per sys_autonomous_session_events precedent (0032/0043 style)
+  start_attempt_count      bigint      not null       -- caller-supplied explicit value at insert; no SQL DEFAULT (see below)
+  last_start_attempt_utc   timestamptz
+  next_retry_utc           timestamptz
+
+  data_refresh_state       text        not null       -- corrected, §16a two-part provider authorization
+  last_provider_poll_utc   timestamptz
+  last_completed_bar_ts    timestamptz
+  last_dispatched_bar_ts   timestamptz
+  bars_observed            bigint      not null       -- caller-supplied explicit value at insert; no SQL DEFAULT
+  bars_dispatched          bigint      not null       -- caller-supplied explicit value at insert; no SQL DEFAULT
+
+  started_at_utc           timestamptz
+  stopped_at_utc           timestamptz
+  finalized_at_utc         timestamptz
+
+  outcome                  text
+  no_trade_reason          text
+  last_error               text
+
+  created_at_utc           timestamptz not null       -- caller-injected, no DEFAULT now() per db_rules.md
+  updated_at_utc           timestamptz not null       -- caller-injected
+
+  unique (market_date, deployment_mode, adapter_id)   -- daily slot, §13 Correction 2 (not assignment_identity-qualified)
 ```
 
-Uniqueness on `(market_date, deployment_mode, adapter_id, assignment_identity)` gives the
-"repeated ticks / restart / concurrent create" idempotency the bundle requires: `INSERT ... ON
-CONFLICT (market_date, deployment_mode, adapter_id, assignment_identity) DO NOTHING` followed by
-a `SELECT` gives exactly-once creation; transitions use a `WHERE state = $expected` compare-and-set
-`UPDATE`, matching the pattern already partially present in `runs.arm_run`'s check-then-update
-(`runs.rs:424-452`) but made atomic via the `WHERE` clause instead of read-then-write. This is a
-Phase B implementation task, not performed in this Phase A patch. No production code or migration
-is added by Phase A.
+**No fabricated SQL defaults (corrected)**: the original draft's `start_attempt_count bigint not
+null default 0` is removed. All required non-null initial values (`start_attempt_count`,
+`bars_observed`, `bars_dispatched`, `state_version`, `created_at_utc`, `updated_at_utc`, and every
+other `not null` column above) must be supplied explicitly by the caller at INSERT time. No new
+Phase B column uses `DEFAULT now()`, `DEFAULT gen_random_uuid()`, or a numeric `DEFAULT` to
+fabricate caller-owned operational truth. A caller explicitly writing `0` for
+`start_attempt_count`/`bars_observed`/`bars_dispatched` during initial operation creation remains
+valid — the correction forbids the database silently supplying that value, not the value zero
+itself.
+
+`INSERT ... ON CONFLICT (market_date, deployment_mode, adapter_id) DO NOTHING` followed by a
+`SELECT` gives exactly-once daily-slot creation; the same-day identity-conflict comparison in §13
+Correction 2 runs against that `SELECT` result. Transitions use the CAS contract in §14a below,
+not a bare `WHERE state = $expected` update alone. This is a Phase B implementation task, not
+performed in this Phase A patch. No production code or migration is added by Phase A or by this
+correction.
 
 ---
 
-## 15. Retry classification and policy
+## 14a. Durable transition history (new — Correction 4)
 
-Confirmed from source that today's retry behavior has **no typed classification at all** — every
-refusal reason is treated identically (§3, §12#3/#4): retried every 30s, alerted every 30s. The
-bundle prompt's proposed transient/terminal split maps cleanly onto reason strings already
-produced by the existing gate chain (§7) and readiness surfaces (§6, §9, §11):
+A current-state row in `sys_autonomous_daily_operations` alone does not satisfy the
+transition-evidence contract (§12#14: "no single row answers what happened on 2026-07-16" needs a
+transition trail, not just a final/current snapshot). A dedicated, append-style transition table is
+required, additive in the same Phase B migration as §14's table:
 
-- Transient (already-observed reason strings/equivalents in current code):
-  `service_unavailable` (DB, `scenario_autonomous_paper_day_lifecycle_auton12.rs` AL-02),
-  WS `ColdStartUnproven`/`GapDetected` (`scenario_autonomous_gate_parity_auton11.rs` AP-01/AP-02),
-  arm-pending (`scenario_auton_no_trade_diagnosis_01.rs` ND-01), session-window-not-open
-  (`autonomous_paper_status.rs` blockers).
-- Terminal/manual (already-observed): integrity halted (AP-03), reconcile dirty (AP-04, BRK-09R),
-  durable disarm with no DB path to auto-clear (AP-05, ND-02/03) — matching the bundle's binding
-  safety contract ("autonomous re-arm only when DB arm state == ARMED AND not halted AND no kill
-  switch active").
+```
+sys_autonomous_daily_operation_events (new, same migration 0048_... as sys_autonomous_daily_operations)
+  operation_id      uuid        not null   -- no FK, matching the 0032/0043 precedent
+  transition_seq    bigint      not null   -- caller-assigned, monotonic per operation_id, no DB default
+  from_state        text        not null   -- literal "none" for the initial transition
+  to_state          text        not null
+  reason_code       text
+  occurred_at_utc   timestamptz not null   -- caller-injected, no DEFAULT now()
+  run_id            uuid
+  bounded_detail    text        not null   -- length-capped free text, not a fabricated summary
 
-No correction to the bundle's proposed backoff schedule (30s → 60s → 120s → 300s cap) is
-required; nothing in current source contradicts it. This is a Phase D implementation task.
+  primary key (operation_id, transition_seq)
+```
+
+`PRIMARY KEY (operation_id, transition_seq)` or an equivalent deterministic event identity plus a
+unique operation sequence satisfies the durable-identity requirement; a plain surrogate key alone
+would not.
+
+Required transactional behavior for every state transition:
+1. Lock or compare-and-swap the current `sys_autonomous_daily_operations` row using its
+   `state_version` column (e.g. `UPDATE ... WHERE operation_id = $1 AND state_version = $2`).
+2. Verify the expected `from_state` as part of that same guarded update (or an equivalent
+   application-level check inside the same transaction) — a transition whose actual current state
+   does not match the expected `from_state` is refused, never silently forced.
+3. On success, update `state`/`state_reason_code` and increment `state_version` by exactly one.
+4. Insert the matching `sys_autonomous_daily_operation_events` row using the same incremented
+   sequence for `transition_seq`.
+5. Commit the current-state update and the transition-event insert together in one DB
+   transaction, per `db_rules.md`'s atomic-write requirement — if either write fails, the whole
+   transaction rolls back and neither the state change nor the event becomes authoritative.
+6. Initial operation creation records an initial transition row equivalent to `none → <initial
+   state>` in the same transaction as the row's insert — an operation never exists without at
+   least one transition event explaining how it got its first state.
+
+`GET /api/v1/autonomous/daily-operation[s]` (Phase E) must never create a
+`sys_autonomous_daily_operation_events` row — the "GET routes must stay strictly read-only"
+principle already stated in §13 for new daily-operation routes applies to transition writes too;
+the one carried-forward `AUTON-NO-TRADE-OFFHOURS-01B` GET-write exception does not extend to it.
+
+Idempotent replay: if a transition is re-applied with a `transition_seq`/`from_state` that has
+already been committed (e.g. a retried coordinator tick), the write must be idempotent (detect the
+already-applied sequence and no-op) or return an explicit stale-transition/CAS-conflict result —
+it must never silently double-apply or silently succeed against no-longer-current state.
 
 ---
 
-## 16. No-trade evidence hierarchy
+## 15. Retry classification and policy (corrected — Correction 5)
 
-`strategy_signal_evaluations` (§9) already durably records, per dispatch attempt: `bars_loaded`,
-`signal_generated`, `signal_qty`, `signal_side`, `reason_code`, `decision_stage` — this is real
-evidence that can distinguish "bar observed, no signal" from "no bar observed" today. What is
-missing is the aggregation layer: nothing rolls these rows, plus `oms_outbox`/`oms_inbox`/fill
-evidence, into a single per-day outcome. The bundle's proposed evidence hierarchy (bars observed
-→ bars dispatched → strategy evaluations → nonzero target decisions → accepted decisions →
-outbox enqueues → broker submissions → acknowledgements → fills → position changes) is directly
-constructible from existing tables (`strategy_signal_evaluations`, `oms_outbox`, `oms_inbox`,
-`fill_quality_telemetry`) with no new evidence source needed — only a new aggregation/finalization
-step (Phase E). No correction to the bundle's proposed reason-code list is required.
+The original draft of this section characterized transient/terminal classification in terms of
+observed reason **strings** (`"service_unavailable"`, `"arm-pending"`, etc.). That is exactly the
+string-matching approach the bundle's binding contract forbids for Phase D. A typed model is
+frozen instead, so the coordinator never has to parse or substring-match an `error.to_string()` to
+decide whether to retry:
+
+```rust
+enum AutonomousRetryClass {
+    WaitForCondition,
+    RetryableTransient,
+    ManualInterventionRequired,
+    SessionTerminal,
+}
+```
+
+paired with a stable typed blocker/reason enum (or an equivalent closed set of reason-code
+constants already emitted by the existing gate chain/readiness surfaces, made typed rather than
+free-string at the classification boundary). The classifier receives typed reason values produced
+by the gate chain/readiness evaluator — never `error.to_string()` or any other stringly-typed
+error rendering.
+
+**Wait for condition** — re-evaluated on the next tick; the coordinator must not call
+`AppState::start_execution_runtime` while the condition is known false, but it does not count as a
+retry attempt:
+- `awaiting_session_open`
+- `publication_grace_active`
+- `latest_completed_bar_pending`
+- `arm_pending` (DB arm state not yet `ARMED`)
+
+**Retryable transient** — only these receive bounded retry/backoff (unchanged 30s → 60s → 120s →
+300s cap schedule from the original draft; no correction required there):
+- `ws_reconnecting`
+- `provider_temporarily_unavailable`
+- `temporary_db_operation_failure`
+- `runtime_ended_without_halt`
+
+**Manual intervention required** — these cause zero repeated `AppState::start_execution_runtime`
+calls until the typed blocker signature itself changes:
+- `integrity_halted`
+- `kill_switch_active`
+- `durable_arm_disarmed`
+- `reconcile_dirty`
+- `reconcile_stale`
+- `assignment_missing`
+- `strategy_binding_mismatch`
+- `symbol_binding_mismatch`
+- `timeframe_binding_mismatch`
+- `promotion_not_active`
+- `provider_registry_invalid`
+- `instrument_registry_invalid`
+- `provider_identity_mismatch`
+- `provider_timestamp_convention_unverified`
+- `unsupported_timeframe`
+- `readiness_evidence_persist_failed`
+- `readiness_run_link_persist_failed`
+- `risk_configuration_invalid`
+- `operation_identity_conflict` (§13 Correction 2)
+
+**WS gap distinction (corrected)**: the original draft's blanket grouping of "WS
+`ColdStartUnproven`/`GapDetected`" into the same transient bucket as arm-pending/session-window
+conditions is corrected. Per `broker_rules.md`, `GapDetected` is a terminal state for the current
+session that must block start and must not be recovered from by inference. The typed rule:
+- a distinct typed `ws_reconnecting` (or an equivalent `RecoveryRetrying`-style) condition may be
+  classified `RetryableTransient`;
+- a persisted or unresolved `GapDetected` is never classified as an ordinary transient start
+  blocker — it suppresses runtime-start attempts entirely;
+- restart of autonomous starts remains blocked until an explicit existing recovery path (the
+  operator-action gap-recovery contract already required by `broker_rules.md`) changes the typed
+  continuity truth away from `GapDetected`;
+- halt/disarm always overrides retry, regardless of any concurrently-true transient condition.
+
+**DB failure distinction (corrected)**: the original draft's single `service_unavailable` string
+is split into two typed conditions that must not share a classification:
+- `database_not_configured_or_invalid` → `ManualInterventionRequired` (a configuration/connectivity
+  defect, not something that self-resolves by waiting);
+- `temporary_database_operation_failure` → `RetryableTransient` (a transient operation failure
+  against an otherwise-configured, otherwise-reachable database).
+
+Unchanged manual blockers must cause zero repeated `AppState::start_execution_runtime` calls until
+the typed blocker signature changes. The coordinator may continue read-only condition evaluation
+(polling readiness/arm/halt state to detect when a blocker has actually cleared) at any time — only
+the canonical start call itself is gated. This is a Phase D implementation task.
+
+---
+
+## 16. No-trade evidence hierarchy (corrected — Correction 6)
+
+The original draft of this section overclaimed that the complete evidence hierarchy is "directly
+constructible from existing tables ... with no new evidence source needed." That overclaim is
+corrected below: it is true only for the decision/order/fill half of the hierarchy, not the
+data-driver half.
+
+**What already exists and is sufficient**: `strategy_signal_evaluations` (§9) durably records, per
+dispatch attempt, `bars_loaded`, `signal_generated`, `signal_qty`, `signal_side`, `reason_code`,
+`decision_stage` — real evidence distinguishing "bar observed, no signal" from "no bar observed"
+today. Together with `oms_outbox` enqueues, `oms_inbox` acknowledgements/fills, and
+`fill_quality_telemetry`, this durably covers: strategy evaluations → nonzero target decisions →
+accepted decisions → outbox enqueues → broker submissions → acknowledgements → fills. No new
+durable evidence source is required for that portion; only a new aggregation/finalization step
+(Phase E).
+
+**What is missing (corrected finding)**: the current repo does not durably preserve the Bundle 3
+data-driver facts needed for restart-safe operation at the front of the hierarchy — before any
+strategy evaluation happens:
+- provider polls (attempted/succeeded/failed)
+- completed bars observed
+- completed bars dispatched
+- last completed bar identity
+- last dispatched bar identity
+
+Without these durably persisted, a restart cannot distinguish "no bar closed yet today" from "a bar
+closed but the daemon crashed before dispatching it" from "the bar was already dispatched" — both
+the exactly-once-dispatch requirement (§6/§12#10) and the durable no-trade classification
+requirement (§9/§12#15) depend on this evidence existing durably, not merely in the bar-ticker's
+in-memory timer state.
+
+**Correction**: Phase C persists these facts in `sys_autonomous_daily_operations` (the
+`data_refresh_state`, `last_provider_poll_utc`, `last_completed_bar_ts`, `last_dispatched_bar_ts`,
+`bars_observed`, `bars_dispatched` columns in the corrected §14 schema) or in a dedicated
+operation/bar-driver table transactionally linked to `operation_id` — not built as a Phase A
+deliverable, but the Phase A contract now states plainly that this evidence is net-new, not already
+covered by existing tables. This evidence is required both for exact-once dispatch after daemon
+restart and for truthful end-of-day no-trade classification.
+
+**Outcome limitations (corrected, explicit)**:
+- `already_at_target` may be classified only when a durable decision/evaluation reason (a
+  `strategy_signal_evaluations` row or equivalent) actually proves the strategy evaluated and
+  concluded no position change was needed — never inferred from current process-local target state
+  alone.
+- Position changes are never claimed as a daily-outcome fact unless durable order/fill evidence
+  (`oms_outbox`/`oms_inbox`/`fill_quality_telemetry`) proves them.
+- Portfolio valuation and P&L remain out of scope for this bundle
+  (`DURABLE-PAPER-PORTFOLIO-AND-PNL-01-COMBINED`) — the daily-operation outcome never computes or
+  claims a P&L figure.
+- When the durable evidence needed to classify an outcome is itself incomplete or unavailable, the
+  outcome is `unknown_insufficient_evidence` — never a fabricated no-trade reason invented to fill
+  the gap, per `CLAUDE.md`'s "no fabricated truth, no optimistic defaults."
+
+No correction to the bundle's proposed reason-code list is otherwise required.
+
+---
+
+## 16a. Provider-call authorization (new — Correction 7)
+
+The two-part authorization contract required before the autonomous coordinator (Phase C) may make
+any provider call is frozen now:
+
+```text
+autonomous_data_refresh_enabled == true
+AND
+allow_provider_api_calls == true
+```
+
+Both flags must independently be true; either false or unknown blocks all provider calls. The
+exact storage/config representation (env var, DB-backed operator toggle, or a combination) is a
+Phase C implementation decision, not fixed by this Phase A contract — but the logical AND gate
+itself is frozen now and must not be loosened in Phase C to an OR or a single flag.
+
+When either flag is false or unknown:
+- zero provider calls of any kind;
+- zero automatic historical-sync jobs;
+- no fabricated latest bars — the existing `market_data_feed_poll_once`/`fetch_latest_closed_bar`
+  path (§5) is the only real data path; nothing substitutes a synthetic bar when this gate is
+  closed;
+- `data_refresh_state` remains disabled or blocked, never silently reported as active;
+- the blocking condition is operator-visible through the daily-operation state/reason code, never
+  swallowed.
 
 ---
 
 ## 17. Phase B–G implementation map
 
-- **Phase B** — `sys_autonomous_daily_operations` table (§14) + deterministic `operation_id` +
-  typed state machine + restart-safe create/load + CAS transitions + shared read-only projection.
-  No provider-call or controller-behavior changes.
+- **Phase B** — `sys_autonomous_daily_operations` (§14) and `sys_autonomous_daily_operation_events`
+  (§14a) tables + the `AutonomousDailySessionPlan` (§13 Correction 1) + deterministic `operation_id`
+  and daily-slot uniqueness (§13 Correction 2) + same-day identity-conflict handling + typed state
+  machine + restart-safe create/load + CAS transitions (§14a) + shared read-only projection. No
+  provider-call or controller-behavior changes.
 - **Phase C** — Extract a reusable internal provider-poll coordinator seam out of
-  `market_data_feed_poll_once` (§5, §12#9); wire it to preopen-start/postclose-stop; make
+  `market_data_feed_poll_once` (§5, §12#9), gated by the two-part `autonomous_data_refresh_enabled`
+  / `allow_provider_api_calls` authorization (§16a); wire it to preopen-start/postclose-stop; make
   `autonomous_bar_ticker.rs` (or its replacement) dispatch exactly-once per genuinely-new
-  completed `end_ts` instead of blind-timer (§6, §12#10/#11).
+  completed `end_ts` instead of blind-timer (§6, §12#10/#11), persisting the bar-driver evidence
+  named in §16.
 - **Phase D** — Migrate `session_controller.rs` off the process-local `locally_started` bool onto
   the Phase B durable operation record; add typed retry/backoff (§15); converge the
   three-call-site calendar duplication (§4, §12#6) onto one authority; add liveness watchdogs for

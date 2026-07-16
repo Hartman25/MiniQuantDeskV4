@@ -5,15 +5,23 @@
 # network call, no provider/broker call, no DB connection, no daemon start,
 # no cargo/npm build or test.
 #
+# Strengthened by AUTONOMOUS-DAILY-PAPER-OPERATIONS-01A-CONTRACT-CORRECTION-01
+# (checks [16]-[19] below are net-new for that correction patch; checks [4]
+# and [8] were strengthened in place).
+#
 # Checks:
 #   [1]  Audit/contract doc exists.
 #   [2]  Doc mentions the bundle id and starting HEAD baseline.
 #   [3]  Doc references the session controller source (session_controller.rs).
-#   [4]  Doc documents an authoritative session/calendar contract.
+#   [4]  Doc documents an authoritative session/calendar contract (strengthened:
+#        requires the exact resolver call pair, not just a MarketCalendarProvider
+#        mention).
 #   [5]  Doc documents a deterministic durable daily-operation identity.
 #   [6]  Doc documents typed retry/backoff classification.
 #   [7]  Doc documents an exactly-once completed-bar dispatch contract.
-#   [8]  Doc documents explicit provider-call authorization.
+#   [8]  Doc documents explicit provider-call authorization (strengthened:
+#        requires the two-part authorization flags, not just a mention of
+#        market_data_feed_poll_once).
 #   [9]  Doc documents a no-trade evidence hierarchy.
 #   [10] Doc documents task supervision / liveness watchdogs.
 #   [11] Doc documents the PAPER-only boundary.
@@ -24,6 +32,15 @@
 #   [15] Doc does not claim any runtime/gate/GUI code was implemented in
 #        Phase A, and does not claim a live/broker/provider/DB action
 #        occurred as part of this patch.
+#   [16] Doc documents daily-slot/operation-identity reconciliation and
+#        CAS-safe durable transition history.
+#   [17] Doc documents typed blocker distinctions (WS gap vs. transient,
+#        DB configuration defect vs. transient DB failure, durable disarm vs.
+#        arm-pending).
+#   [18] Doc documents the corrected no-trade evidence-source limit
+#        (unknown_insufficient_evidence, not a fabricated reason).
+#   [19] Proposed Phase B schema section does not contain a fabricated
+#        "not null default 0" numeric SQL default.
 #
 # Usage:
 #   powershell -ExecutionPolicy Bypass -File scripts\guards\validate_autonomous_daily_paper_operations_01a_audit.ps1
@@ -80,6 +97,34 @@ function Test-ContentDoesNotContain {
     }
 }
 
+function Test-ContentContainsAll {
+    param([string]$Label, [string]$Content, [string[]]$Needles)
+    $missing = @()
+    foreach ($Needle in $Needles) {
+        if ($null -eq $Content -or $Content.IndexOf($Needle, [System.StringComparison]::OrdinalIgnoreCase) -lt 0) {
+            $missing += $Needle
+        }
+    }
+    if ($missing.Count -eq 0) {
+        Show-Green "  OK -- $Label"
+        return $true
+    } else {
+        $script:Violations++
+        Show-Red "  FAIL -- $Label (missing needle(s): $($missing -join ', '))"
+        return $false
+    }
+}
+
+function Get-ContentBetween {
+    param([string]$Content, [string]$StartNeedle, [string]$EndNeedle)
+    if ($null -eq $Content) { return $null }
+    $startIdx = $Content.IndexOf($StartNeedle, [System.StringComparison]::OrdinalIgnoreCase)
+    if ($startIdx -lt 0) { return $null }
+    $endIdx = $Content.IndexOf($EndNeedle, $startIdx + $StartNeedle.Length, [System.StringComparison]::OrdinalIgnoreCase)
+    if ($endIdx -lt 0) { $endIdx = $Content.Length }
+    return $Content.Substring($startIdx, $endIdx - $startIdx)
+}
+
 Write-Host "============================================================"
 Write-Host " AUTONOMOUS-DAILY-PAPER-OPERATIONS-01A Current-Truth Audit Validator"
 Write-Host "============================================================"
@@ -104,6 +149,10 @@ Write-Host ""
 Show-Info "--- [4] Doc documents authoritative session/calendar contract ---"
 Test-ContentContains "doc documents MarketCalendarProvider authority" $Content "MarketCalendarProvider" | Out-Null
 Test-ContentContains "doc documents the calendar duplication gap" $Content "three independent call sites" | Out-Null
+Test-ContentContainsAll "doc freezes the exact Bundle 2 resolver call pair (not just a MarketCalendarProvider mention)" $Content @(
+    "load_readiness_context_from_env",
+    "resolve_market_session_schedule"
+) | Out-Null
 
 Write-Host ""
 Show-Info "--- [5] Doc documents deterministic durable daily-operation identity ---"
@@ -124,6 +173,10 @@ Test-ContentContains "doc documents exactly-once dispatch requirement" $Content 
 Write-Host ""
 Show-Info "--- [8] Doc documents explicit provider-call authorization ---"
 Test-ContentContains "doc documents provider-call coordinator seam gap" $Content "market_data_feed_poll_once" | Out-Null
+Test-ContentContainsAll "doc freezes the two-part provider-call authorization (not just market_data_feed_poll_once)" $Content @(
+    "autonomous_data_refresh_enabled",
+    "allow_provider_api_calls"
+) | Out-Null
 
 Write-Host ""
 Show-Info "--- [9] Doc documents no-trade evidence hierarchy ---"
@@ -192,6 +245,50 @@ if ($PhraseViolations -eq 0) {
 
 Test-ContentContains "doc states Phase A makes no production-code change" $Content "makes no production-code" | Out-Null
 Test-ContentContains "doc states Phase A makes no migration change" $Content "or migration change" | Out-Null
+
+Write-Host ""
+Show-Info "--- [16] Doc documents daily-slot/identity reconciliation and CAS-safe transition history (Correction 01) ---"
+Test-ContentContainsAll "doc documents full identity fields and same-day conflict handling" $Content @(
+    "session_plan_identity",
+    "runtime_binding_identity",
+    "operation_identity_conflict"
+) | Out-Null
+Test-ContentContainsAll "doc documents CAS-safe durable transition-event model" $Content @(
+    "state_version",
+    "sys_autonomous_daily_operation_events",
+    "from_state",
+    "to_state",
+    "transition_seq"
+) | Out-Null
+
+Write-Host ""
+Show-Info "--- [17] Doc documents typed blocker distinctions (Correction 01) ---"
+Test-ContentContainsAll "doc distinguishes WS gap from ordinary transient retry" $Content @(
+    "ws_reconnecting",
+    "GapDetected"
+) | Out-Null
+Test-ContentContainsAll "doc distinguishes durable disarm from arm-pending" $Content @(
+    "durable_arm_disarmed",
+    "arm_pending"
+) | Out-Null
+Test-ContentContainsAll "doc distinguishes DB configuration defect from transient DB failure" $Content @(
+    "database_not_configured_or_invalid",
+    "temporary_database_operation_failure"
+) | Out-Null
+
+Write-Host ""
+Show-Info "--- [18] Doc documents corrected no-trade evidence-source limit (Correction 01) ---"
+Test-ContentContains "doc requires unknown_insufficient_evidence rather than a fabricated no-trade reason" $Content "unknown_insufficient_evidence" | Out-Null
+
+Write-Host ""
+Show-Info "--- [19] Proposed Phase B schema contains no fabricated numeric SQL default (Correction 01) ---"
+$SchemaSection = Get-ContentBetween -Content $Content -StartNeedle "## 14. Proposed durability model" -EndNeedle "## 15. Retry classification"
+if ($null -eq $SchemaSection) {
+    $script:Violations++
+    Show-Red "  FAIL -- could not locate the proposed Phase B schema section (§14/§14a) to scope this check"
+} else {
+    Test-ContentDoesNotContain "proposed schema section contains no 'not null default 0' fabricated default" $SchemaSection "not null default 0" | Out-Null
+}
 
 # =============================================================================
 # Summary
