@@ -296,6 +296,12 @@
       "path": "0047_strategy_promotion_transition_lineage.sql",
       "status": "applied",
       "intent": "STRATEGY-PROMOTION-REGISTRY-CLOSURE-REPAIR-01: add nullable parent_transition_id (self-referential FK) and evidence_transition_id (self-referential FK) columns to sys_strategy_promotion_transitions. parent_transition_id supports transactional concurrency serialization (mqk_db::insert_strategy_promotion_transition_serialized: pg_advisory_xact_lock keyed on identity, re-read-then-compare inside one transaction, stable transition_conflict rejection on a stale parent) so two concurrent transitions can never both be accepted as children of the same parent. evidence_transition_id supports durable evidence-lineage resolution (mqk_db::resolve_evidence_lineage) so any current state derived from a non-evidence-bearing transition (e.g. active_paper reached via paper_approved) can still be traced back to the exact evidence-bearing transition that authorized it. Both columns nullable (schema-safety only, no backfill decision required); the daemon route always populates both going forward. No existing column, row, or constraint altered."
+    },
+    {
+      "id": "0048",
+      "path": "0048_autonomous_daily_operations.sql",
+      "status": "applied",
+      "intent": "AUTONOMOUS-DAILY-PAPER-OPERATIONS-01B-DURABLE-COORDINATION: add sys_autonomous_daily_operations (mutable current-state row, one per (market_date, deployment_mode, adapter_id) daily slot, CAS via state_version) and sys_autonomous_daily_operation_events (append-only transition history keyed (operation_id, transition_seq)). operation_id (UUIDv5 over six identity components, derived in mqk-daemon) is the primary key; the daily slot is a separate unique constraint, so a same-day identity mismatch is a typed conflict, never a second row or a silently rewritten identity field. No DEFAULT now()/gen_random_uuid()/fabricated numeric default on any not-null column -- every initial value (including state_version=1, start_attempt_count=0, bars_observed=0, bars_dispatched=0) is caller-supplied. Foundation only: no wiring into session_controller.rs, autonomous_bar_ticker.rs, the market-data scheduler, start_execution_runtime, any HTTP route, or any GUI component."
     }
   ]
 }

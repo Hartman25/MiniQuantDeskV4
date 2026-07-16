@@ -6,6 +6,7 @@
 
 mod alpaca_ws_transport;
 mod autonomous_bar_ticker;
+pub mod autonomous_daily_operation;
 mod broker;
 mod deadman;
 mod dry_run_strategy;
@@ -50,6 +51,15 @@ pub use alpaca_ws_transport::{
 };
 pub use autonomous_bar_ticker::{
     spawn_autonomous_bar_ticker, BAR_INTERVAL_SECS_ENV, DEFAULT_QTY_ENV,
+};
+pub use autonomous_daily_operation::{
+    derive_assignment_identity, derive_autonomous_daily_operation_id,
+    derive_runtime_binding_identity, project_autonomous_daily_operation_read_model,
+    resolve_autonomous_daily_session_plan, resolve_autonomous_daily_session_plan_from_env,
+    resolve_fixed_window_override_config_from_env, AutonomousDailyOperationEventReadModel,
+    AutonomousDailyOperationReadModel, AutonomousDailyPlanReason, AutonomousDailyPlanTiming,
+    AutonomousDailyScheduleSource, AutonomousDailySessionPlan,
+    AutonomousDailySessionPlanResolution, FixedWindowOverrideConfig,
 };
 use broker::{
     build_asset_shortable_preflight_fetcher_from_env, build_fill_activity_fetcher_from_env,

@@ -9712,7 +9712,8 @@ AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-COMBINED: OPEN
 daily data readiness").
 **Phase A audit commit:** `c8dd3605ba870ca3cf126b30423514b4d70c022d` ("docs:
 design autonomous daily paper operations").
-**Phase A contract correction:** pending (this session).
+**Phase A contract correction:** `f7247d01eceadce05e89d07b839f691f9b21bf34`
+("docs: correct autonomous daily operations contract").
 
 **Bundle objective:** after this bundle, an operator who has completed
 one-time PAPER configuration and one-time arm setup should be able to leave
@@ -9838,7 +9839,105 @@ PRODUCTION CODE CHANGED: no
 MIGRATION ADDED: no
 ```
 
+**Phase B (`AUTONOMOUS-DAILY-PAPER-OPERATIONS-01B-DURABLE-COORDINATION`):**
+canonical session-plan resolver, deterministic durable daily-operation
+identity/state machine, race-safe create/recover, CAS transitions, and a
+pure shared read-model — foundation only, no controller/provider/runtime/
+route/GUI wiring.
+
+**Phase B commit:** pending (this session — recorded together with this
+ledger update; see `git log` for the exact hash once committed).
+
+- **Migration:** `core-rs/crates/mqk-db/migrations/0048_autonomous_daily_operations.sql`
+  (additive; manifest entry added). Two new tables:
+  `sys_autonomous_daily_operations` (mutable current-state row, one per
+  `(market_date, deployment_mode, adapter_id)` daily slot, `state_version`-CAS)
+  and `sys_autonomous_daily_operation_events` (append-only transition history,
+  `primary key (operation_id, transition_seq)`, no FK to the current-state
+  table — matches the `0032`/`0043` observability-table precedent). No
+  `DEFAULT now()`, `DEFAULT gen_random_uuid()`, or fabricated numeric
+  default on any not-null column; every initial value (including
+  `state_version=1`, `start_attempt_count=0`, `bars_observed=0`,
+  `bars_dispatched=0`) is caller-supplied at insert.
+- **Daily-slot vs. operation identity:** `unique (market_date,
+  deployment_mode, adapter_id)` is the daily-slot anchor; `operation_id`
+  (`Uuid::new_v5` over `market_date|deployment_mode|adapter_id|
+  session_plan_identity|assignment_identity|runtime_binding_identity`) is
+  the primary key. A same-day identity mismatch returns a typed
+  `IdentityConflict { existing_operation_id, expected_operation_id,
+  differing_fields }` — no second row, no rewritten identity field, no
+  event inserted.
+- **Session-plan resolver:** `mqk-daemon/src/state/autonomous_daily_operation.rs`.
+  Composes strictly over the existing Bundle 2 authority
+  (`market_calendar::resolve_market_session_schedule`); the production
+  wrapper (`resolve_autonomous_daily_session_plan_from_env`) uses
+  `NyseWeekdaysProvider` directly — the same provider
+  `daily_data_readiness::active_calendar_provider_from_env` falls back to
+  when no fixed-window override is configured — so no-override behavior is
+  identical to the Bundle 2 schedule. Neither
+  `daily_data_readiness.rs`/`market_calendar.rs` production functions nor
+  `active_calendar_provider_from_env`/`load_readiness_context_from_env`
+  were modified, so the existing Bundle 2 GET-route composition is
+  byte-for-byte unchanged; the Bundle 2 regression suite was not required
+  and was not run (contract §13: only required "when this seam changes").
+  A new three-way `FixedWindowOverrideConfig` (`Absent`/`Valid`/`Invalid`)
+  reads `MQK_SESSION_START_HH_MM`/`_STOP_HH_MM` directly, distinguishing
+  "operator did not configure an override" from "operator configured one,
+  but it is invalid" — the existing `session_controller::session_window_from_env`
+  conflates both into a bare `None`; `session_controller.rs` itself was not
+  modified. `session_plan_identity` is a lowercase SHA-256 hex digest over a
+  versioned, pipe-delimited, RFC3339-timestamped canonical string.
+- **Typed state machine:** 16 states (`awaiting_preopen` → … →
+  `completed`/`completed_no_trade`/`completed_with_activity`, plus
+  `manual_intervention_required`/`controller_degraded`/
+  `calendar_unavailable`/`evidence_degraded`); pure legal-transition graph in
+  `mqk-db/src/autonomous_daily_operation.rs` proves every representative
+  path in the bundle brief and rejects all four named illegal edges
+  (`completed* → running`, `completed* → start_retrying`,
+  `running → awaiting_preopen`, `stopping → preparing_data`).
+- **Store API:** `create_or_recover_autonomous_daily_operation` (advisory-lock
+  serialized, mirrors `insert_strategy_promotion_transition_serialized`) and
+  `transition_autonomous_daily_operation` (state+version-guarded `UPDATE …
+  RETURNING`, event insert in the same transaction, `AlreadyApplied` replay
+  detection via the recorded event's `from_state`/`to_state`) plus four
+  bounded read-only functions (`fetch_…_by_id`, `fetch_…_for_slot`,
+  `list_recent_…` , `list_…_events`; limits clamped to `[1, 100]`).
+- **Focused proof files (all passing):**
+  `core-rs/crates/mqk-db/tests/scenario_autonomous_daily_operation_store_01.rs`
+  (23 tests: schema/constraints, create/recover incl. concurrent race and
+  same-day identity conflicts, CAS transitions incl. a forced
+  `PRIMARY KEY`-violation rollback proof and a genuine concurrent-CAS race,
+  bounded reads) and
+  `core-rs/crates/mqk-daemon/tests/scenario_autonomous_daily_operation_identity_01.rs`
+  (33 tests: calendar classification incl. real DST/holiday/early-close
+  dates and out-of-range coverage, fixed-window override three-way truth,
+  all four identity derivations, pure read-model projection).
+- **No production integration:** `session_controller.rs`, `autonomous_bar_ticker.rs`,
+  `lifecycle.rs`, `loop_runner.rs`, `routes.rs`, `api_types.rs`, every
+  `routes/*`, and every GUI file are untouched. No operation is created at
+  daemon boot or from any GET. No provider/broker/network call, no real
+  daemon/runtime start, no paper DB touched (only the isolated port-5434
+  test DB).
+
+**Safety confirmation (Phase B):**
+
+```text
+PROVIDER CALLS: no
+BROKER CALLS: no
+NETWORK CALLS: no
+REAL DAEMON STARTED: no
+REAL RUNTIME STARTED: no
+EXECUTION ARMED: no
+PAPER ORDERS: no
+LIVE ORDERS: no
+PAPER DB TOUCHED: no
+PRODUCTION CODE CHANGED: yes (additive only — new module + new store; no
+  existing controller/provider/runtime/route/GUI behavior altered)
+MIGRATION ADDED: yes (0048_autonomous_daily_operations.sql, additive)
+```
+
 **Expected next bundle after closure:** `DURABLE-PAPER-PORTFOLIO-AND-PNL-01-COMBINED`.
 
-**Next authorized step:** Phase B, only on explicit operator instruction
-("Continue with Phase B only.").
+**Next authorized step:** Phase C — autonomous completed-bar data driver —
+only after independent review of this Phase B foundation, and only on
+explicit operator instruction.
