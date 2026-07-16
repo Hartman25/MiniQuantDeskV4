@@ -9701,3 +9701,95 @@ scope for this session; no daemon/runtime/broker was started here).
 **Recommended next off-market prompt:** operator's choice between
 `PER-SYMBOL-STRATEGY-BOOTSTRAP-01` (design) and a provider/timeframe-support
 patch for `1h` — do not begin either in this session.
+
+## AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-COMBINED
+
+```text
+AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-COMBINED: OPEN
+```
+
+**Starting HEAD:** `ee026f5f31511304d9b226d464f3df0e6526ddad` ("docs: close
+daily data readiness"). **Phase A commit:** pending (this session).
+
+**Bundle objective:** after this bundle, an operator who has completed
+one-time PAPER configuration and one-time arm setup should be able to leave
+the daemon running across supported NYSE sessions, with the program
+resolving one authoritative session plan per day, creating/recovering one
+durable daily-operation identity, preparing canonical market data,
+auto-arming only from an already-`ARMED` durable DB state, starting exactly
+one applicable PAPER runtime through the unmodified canonical
+`AppState::start_execution_runtime` gate chain, dispatching native strategy
+evaluation exactly once per newly completed canonical bar, retrying
+transient blockers with bounded backoff while refusing to retry
+terminal/manual blockers, detecting and safely recovering from unexpected
+runtime/task exit, stopping at authoritative session close, persisting an
+evidence-based daily result (including honest no-trade classification), and
+exposing that truth through a read-only API and GUI panel — preparing, but
+not performing, a later 10–20-session PAPER soak.
+
+**Repo priority ordering this bundle serves:** Bundle 1 (strategy promotion
+gates, closed) → Bundle 2 (`DAILY-DATA-READINESS-AND-FRESHNESS-01-COMBINED`,
+closed above) → **Bundle 3 (this bundle)** → Bundle 4
+(`DURABLE-PAPER-PORTFOLIO-AND-PNL-01-COMBINED`) → 10–20-session autonomous
+PAPER soak.
+
+**Phase map (one phase per session, explicit operator authorization required
+between each):**
+
+- **Phase A — audit + binding contract** (this entry). No production code
+  change. Audit doc:
+  `docs/specs/autonomous_daily_paper_operations_01a_current_truth_and_contract.md`.
+  Guard: `scripts/guards/validate_autonomous_daily_paper_operations_01a_audit.ps1`.
+- **Phase B** — canonical session plan + deterministic durable daily-operation
+  identity/state machine (new `sys_autonomous_daily_operations` table,
+  migration `0048_...`, additive).
+- **Phase C** — coordinate the existing latest-closed-bar provider scheduler
+  with the daily operation; replace the bar ticker's blind-timer trigger with
+  exactly-once canonical completed-bar dispatch.
+- **Phase D** — migrate `session_controller.rs` off its process-local
+  `locally_started` bool onto the Phase B durable record; typed
+  transient/terminal retry classification with bounded backoff; converge the
+  three-call-site calendar-check duplication onto one authority; add liveness
+  watchdogs/bounded restart for WS/bar-ticker/reconcile tasks.
+- **Phase E** — durable daily-outcome finalization from the evidence
+  hierarchy; new `GET /api/v1/autonomous/daily-operation` and
+  `GET /api/v1/autonomous/daily-operations?limit=` read-only routes.
+- **Phase F** — read-only GUI panel, runbook corrections, Windows read-only
+  evidence-capture script for the future soak.
+- **Phase G** — closure audit, focused proof matrix, ledger reconciliation.
+
+**Explicit deferrals (this bundle does not do):** per-symbol strategy
+bootstrap, broader multi-symbol expansion, `1h` provider support, Alpaca
+`1D` timestamp research, futures, options, forex, crypto expansion,
+live-capital operation, strategy research/new strategies/optimization, repo
+lean-out, broad GUI redesign, automatic historical backfill, realized/
+unrealized P&L calculation, the 10–20-session soak itself, and Bundle 4.
+
+**Phase A audit finding:** all 16 "current source truths" named in the
+bundle brief were checked directly against source (session_controller.rs,
+autonomous_bar_ticker.rs, lifecycle.rs, market_calendar.rs, main.rs,
+relevant routes, mqk-db schema/migrations, and all 17 named scenario test
+files) and confirmed true — no correction to the audit leads was required.
+Full findings, gap table, and frozen Phase B–G binding contract:
+`docs/specs/autonomous_daily_paper_operations_01a_current_truth_and_contract.md`.
+
+**Safety confirmation (Phase A):**
+
+```text
+PROVIDER CALLS: no
+BROKER CALLS: no
+NETWORK CALLS: no
+REAL DAEMON STARTED: no
+REAL RUNTIME STARTED: no
+EXECUTION ARMED: no
+PAPER ORDERS: no
+LIVE ORDERS: no
+PAPER DB TOUCHED: no
+PRODUCTION CODE CHANGED: no
+MIGRATION ADDED: no
+```
+
+**Expected next bundle after closure:** `DURABLE-PAPER-PORTFOLIO-AND-PNL-01-COMBINED`.
+
+**Next authorized step:** Phase B, only on explicit operator instruction
+("Continue with Phase B only.").
