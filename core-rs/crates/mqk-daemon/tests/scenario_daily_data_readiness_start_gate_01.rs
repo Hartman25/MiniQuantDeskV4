@@ -469,11 +469,17 @@ async fn sg_05_db_unavailable_blocks_and_reports_evidence_not_persisted() {
 }
 
 // ---------------------------------------------------------------------------
-// SG-06 — calendar unavailable blocks before run creation (req #6)
+// SG-06 — a valid fixed-window override no longer causes a false
+// calendar-unavailable refusal (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01B-
+// CANONICAL-CALENDAR-REPAIR-01, req #6 repair). Bundle 2's shared calendar
+// context must never receive a `FixedWindowOverrideProvider` as its
+// authoritative calendar, so a valid override alone must not surface
+// `calendar_unavailable` — the refusal below comes only from no DB being
+// attached (matches SG-05's precondition), never from calendar truth.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn sg_06_calendar_unavailable_blocks_before_run_creation() {
+async fn sg_06_valid_fixed_window_override_does_not_cause_false_calendar_unavailable_refusal() {
     let _g = env_lock().lock().await;
     clear_env();
     let dir = write_registries();
@@ -481,9 +487,6 @@ async fn sg_06_calendar_unavailable_blocks_before_run_creation() {
         std::env::set_var("MQK_STRATEGY_SYMBOL", SYMBOL);
         std::env::set_var("MQK_STRATEGY_IDS", "intraday_scalper");
         std::env::set_var("MQK_STRATEGY_MD_TIMEFRAME", "5m");
-        // FixedWindowOverrideProvider consults no exchange calendar at all —
-        // resolve_market_session_schedule always reports coverage_state=Unknown
-        // for it (§6a).
         std::env::set_var("MQK_SESSION_START_HH_MM", "09:30");
         std::env::set_var("MQK_SESSION_STOP_HH_MM", "16:00");
     }
@@ -492,18 +495,92 @@ async fn sg_06_calendar_unavailable_blocks_before_run_creation() {
     let err = st
         .start_execution_runtime()
         .await
-        .expect_err("SG-06: calendar-unavailable assignment must refuse start");
+        .expect_err("SG-06: precondition — start still refused (no DB attached)");
     assert_eq!(
         err.fault_class(),
         "runtime.start_refused.daily_data_readiness_blocked"
     );
     assert!(
-        err.to_string().contains("calendar_unavailable"),
-        "SG-06: error must name calendar_unavailable: {err}"
+        !err.to_string().contains("calendar_unavailable"),
+        "SG-06: a valid runtime-window override must never cause a false \
+         calendar_unavailable refusal: {err}"
     );
 
     clear_env();
     cleanup(&dir);
+}
+
+// ---------------------------------------------------------------------------
+// SG-06B — an invalid fixed-window override is a narrow shared-calendar
+// blocker input: it prevents an applicable autonomous start outright, before
+// any readiness evaluation, run creation, or provider/broker call
+// (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01B-CANONICAL-CALENDAR-REPAIR-01).
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn sg_06b_invalid_fixed_window_override_blocks_before_run_creation() {
+    let _g = env_lock().lock().await;
+    let Some(pool) = db_pool_or_skip("SG-06B").await else {
+        return;
+    };
+    clear_env();
+    let symbol = "ZZSG06B";
+    let dir = write_registries_for(symbol, "zzsg06b_provider");
+    unsafe {
+        std::env::set_var("MQK_STRATEGY_SYMBOL", symbol);
+        std::env::set_var("MQK_STRATEGY_IDS", "intraday_scalper");
+        std::env::set_var("MQK_STRATEGY_MD_TIMEFRAME", "5m");
+        // Only one of the two required override variables set — invalid.
+        std::env::set_var("MQK_SESSION_START_HH_MM", "09:30");
+    }
+    cleanup_bars(&pool, symbol).await;
+
+    let runs_before = count(&pool, "runs").await;
+    let outbox_before = count(&pool, "oms_outbox").await;
+
+    let mut st_raw = AppState::new_for_test_with_broker_kind(BrokerKind::Alpaca);
+    st_raw.db = Some(pool.clone());
+    let st = std::sync::Arc::new(st_raw);
+    st.update_ws_continuity(AlpacaWsContinuityState::Live {
+        last_message_id: "sg06b-test-msg".to_string(),
+        last_event_at: "2026-04-14T15:00:00Z".to_string(),
+    })
+    .await;
+    st.integrity.write().await.disarmed = false;
+    st.set_strategy_fleet_for_test(Some(vec![StrategyFleetEntry {
+        strategy_id: "intraday_scalper".to_string(),
+    }]))
+    .await;
+    st.set_daily_data_readiness_clock_override_for_test(Some(fixed_now()))
+        .await;
+
+    let err = st
+        .start_execution_runtime()
+        .await
+        .expect_err("SG-06B: invalid fixed-window override must refuse start");
+    assert_eq!(
+        err.fault_class(),
+        "runtime.start_refused.fixed_window_override_invalid"
+    );
+    assert!(
+        err.to_string().contains("fixed_window_override_invalid"),
+        "SG-06B: error must name fixed_window_override_invalid: {err}"
+    );
+
+    assert_eq!(
+        runs_before,
+        count(&pool, "runs").await,
+        "SG-06B: invalid override must create no run row"
+    );
+    assert_eq!(
+        outbox_before,
+        count(&pool, "oms_outbox").await,
+        "SG-06B: invalid override must create no outbox row"
+    );
+
+    clear_env();
+    cleanup(&dir);
+    cleanup_bars(&pool, symbol).await;
 }
 
 // ---------------------------------------------------------------------------

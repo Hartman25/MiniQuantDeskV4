@@ -11,12 +11,13 @@ use chrono::{DateTime, TimeZone, Utc};
 use mqk_daemon::state::autonomous_daily_operation::{
     derive_assignment_identity, derive_autonomous_daily_operation_id,
     derive_runtime_binding_identity, project_autonomous_daily_operation_read_model,
-    resolve_autonomous_daily_session_plan, AutonomousDailyPlanReason, AutonomousDailyPlanTiming,
-    AutonomousDailyScheduleSource, AutonomousDailySessionPlan,
-    AutonomousDailySessionPlanResolution, FixedWindowOverrideConfig,
+    resolve_autonomous_daily_session_plan, resolve_autonomous_daily_session_plan_from_env,
+    AutonomousDailyPlanReason, AutonomousDailyPlanTiming, AutonomousDailyScheduleSource,
+    AutonomousDailySessionPlan, AutonomousDailySessionPlanResolution, FixedWindowOverrideConfig,
 };
 use mqk_daemon::state::market_calendar::{
-    MarketCalendarProvider, MarketSessionTruth, NyseWeekdaysProvider,
+    resolve_market_session_schedule, CalendarCoverageState, MarketCalendarProvider,
+    MarketSessionTruth, NyseWeekdaysProvider,
 };
 use mqk_daemon::state::{
     MultiSymbolConfigSource, MultiSymbolRuntimeConfig, SessionWindow, SymbolStrategyAssignment,
@@ -367,6 +368,28 @@ fn out_of_range_plus_valid_override_remains_blocked() {
     }
 }
 
+/// A calendar provider that cannot classify the instant at all, plus a valid
+/// override, remains blocked — the override cannot establish calendar
+/// authority the underlying provider itself could not establish.
+#[test]
+fn unknown_calendar_plus_valid_override_remains_blocked() {
+    let provider = AlwaysUnknownProvider;
+    let now = instant(2025, 1, 6, 17, 0);
+    let window = SessionWindow::parse("14:00", "20:00").expect("valid window");
+    let res = resolve_autonomous_daily_session_plan(
+        &provider,
+        now,
+        &default_timing(),
+        &FixedWindowOverrideConfig::Valid(window),
+    );
+    match res {
+        AutonomousDailySessionPlanResolution::Blocked { reason_code, .. } => {
+            assert_eq!(reason_code, AutonomousDailyPlanReason::CalendarUnavailable);
+        }
+        other => panic!("expected Blocked(CalendarUnavailable), got {other:?}"),
+    }
+}
+
 /// One missing override env var blocks with a visible configuration reason
 /// (never silently falls back to the authoritative schedule).
 #[test]
@@ -688,4 +711,99 @@ fn projection_is_pure_and_deterministic() {
     let model_b = project_autonomous_daily_operation_read_model(&record, Some(&events));
     assert_eq!(model_a, model_b);
     assert_eq!(model_a.recent_events.as_ref().unwrap().len(), 1);
+}
+
+// ---------------------------------------------------------------------------
+// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01B-CANONICAL-CALENDAR-REPAIR-01:
+// shared canonical calendar context
+// ---------------------------------------------------------------------------
+
+/// The production wrapper must resolve its authoritative calendar provider
+/// through the exact same shared canonical context Bundle 2's readiness
+/// composition uses (`daily_data_readiness::load_readiness_context_from_env`),
+/// never a second, independently-constructed `NyseWeekdaysProvider`. With no
+/// override configured, the two compositions must therefore agree
+/// byte-for-byte on every authoritative field for the same instant — proving
+/// consumption of the shared context rather than a fourth independent
+/// market-date/open/close calculation.
+#[test]
+fn production_wrapper_consumes_shared_calendar_context() {
+    unsafe {
+        std::env::remove_var("MQK_SESSION_START_HH_MM");
+        std::env::remove_var("MQK_SESSION_STOP_HH_MM");
+    }
+    let now = instant(2025, 1, 6, 17, 0); // Monday, trading day, in-coverage
+
+    let plan = assert_applicable(resolve_autonomous_daily_session_plan_from_env(
+        now,
+        &default_timing(),
+    ));
+
+    // The exact shared context every Bundle 2 readiness surface consumes.
+    let context = mqk_daemon::daily_data_readiness::load_readiness_context_from_env();
+    let exchange_schedule =
+        resolve_market_session_schedule(context.calendar_provider.as_ref(), now);
+
+    assert_eq!(
+        exchange_schedule.coverage_state,
+        CalendarCoverageState::Active
+    );
+    assert_eq!(
+        plan.market_date,
+        format!(
+            "{:04}-{:02}-{:02}",
+            exchange_schedule.market_date.0,
+            exchange_schedule.market_date.1,
+            exchange_schedule.market_date.2
+        )
+    );
+    assert_eq!(plan.session_open_utc, exchange_schedule.session_open_utc);
+    assert_eq!(plan.session_close_utc, exchange_schedule.session_close_utc);
+    assert_eq!(plan.calendar_source, exchange_schedule.calendar_source);
+    assert_eq!(plan.calendar_coverage_state, "active");
+    assert_eq!(
+        plan.schedule_source,
+        AutonomousDailyScheduleSource::NyseWeekdaysHeuristic
+    );
+}
+
+/// Static source proof: the production wrapper
+/// (`resolve_autonomous_daily_session_plan_from_env`) must never directly
+/// construct or name `NyseWeekdaysProvider` in its own body — it must obtain
+/// its calendar provider through the shared canonical context loader
+/// (`daily_data_readiness::load_readiness_context_from_env`) instead.
+/// Scoped narrowly to this one function's body text (from its `pub fn`
+/// signature to the next top-level section marker) — never a broad
+/// repository-wide grep prone to unrelated false failures.
+#[test]
+fn production_wrapper_never_constructs_nyse_weekdays_provider_directly() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src")
+        .join("state")
+        .join("autonomous_daily_operation.rs");
+    let source = std::fs::read_to_string(&path).expect("read autonomous_daily_operation.rs");
+
+    let start_marker = "pub fn resolve_autonomous_daily_session_plan_from_env(";
+    let start = source
+        .find(start_marker)
+        .expect("resolve_autonomous_daily_session_plan_from_env must exist in source");
+    let end_marker =
+        "\n// ---------------------------------------------------------------------------\n// B.3";
+    let end = source[start..]
+        .find(end_marker)
+        .map(|i| start + i)
+        .expect("expected the B.3 section marker to follow this function");
+    let body = &source[start..end];
+
+    assert!(
+        !body.contains("NyseWeekdaysProvider"),
+        "resolve_autonomous_daily_session_plan_from_env must not directly construct or name \
+         NyseWeekdaysProvider; it must obtain its provider from the shared canonical context \
+         loader instead. Body:\n{body}"
+    );
+    assert!(
+        body.contains("load_readiness_context_from_env"),
+        "resolve_autonomous_daily_session_plan_from_env must obtain its calendar provider via \
+         daily_data_readiness::load_readiness_context_from_env(). Body:\n{body}"
+    );
 }

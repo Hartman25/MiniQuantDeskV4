@@ -6,11 +6,25 @@
 //!
 //! Foundation only. Nothing in this module is called from
 //! `session_controller.rs`'s runtime tick, `autonomous_bar_ticker.rs`, the
-//! market-data scheduler, `AppState::start_execution_runtime`, any HTTP
-//! route, or any GUI component in this patch. No operation identity helper
-//! here reads env directly for strategy-binding purposes, calls
-//! `bootstrap_with_effective_binding()`, or creates a preview binding — every
-//! identity helper accepts an already-resolved value supplied by its caller.
+//! market-data scheduler, any HTTP route, or any GUI component in this
+//! patch. No operation identity helper here reads env directly for
+//! strategy-binding purposes, calls `bootstrap_with_effective_binding()`, or
+//! creates a preview binding — every identity helper accepts an
+//! already-resolved value supplied by its caller.
+//!
+//! AUTONOMOUS-DAILY-PAPER-OPERATIONS-01B-CANONICAL-CALENDAR-REPAIR-01: the
+//! production session-plan resolver
+//! ([`resolve_autonomous_daily_session_plan_from_env`]) obtains its
+//! authoritative exchange-calendar provider through the same shared
+//! canonical context every Bundle 2 readiness surface uses
+//! (`crate::daily_data_readiness::load_readiness_context_from_env`) — it
+//! never constructs a calendar provider of its own. `lifecycle.rs`'s
+//! `start_execution_runtime` now also consults this module's
+//! [`FixedWindowOverrideConfig`] (via
+//! [`resolve_fixed_window_override_config_from_env`]) as a narrow
+//! shared-calendar blocker input: an invalid override configuration refuses
+//! the start before any readiness evaluation, run creation, or
+//! provider/broker call — it is never silently treated as absent.
 
 use chrono::{DateTime, Duration, Utc};
 use sha2::{Digest, Sha256};
@@ -365,22 +379,30 @@ pub fn resolve_autonomous_daily_session_plan(
     })
 }
 
-/// Production entry point: selects the authoritative exchange calendar
-/// provider (`market_calendar::NyseWeekdaysProvider` — the same provider
-/// `daily_data_readiness::load_readiness_context_from_env` falls back to
-/// when no fixed-window override is configured) and the current
-/// [`FixedWindowOverrideConfig`] from env, then delegates to
-/// [`resolve_autonomous_daily_session_plan`]. No-override behavior is
-/// therefore byte-for-byte identical to the Bundle 2 authoritative schedule
-/// (`daily_data_readiness::load_readiness_context_from_env` +
-/// `resolve_market_session_schedule`) for the same `now_utc`.
+/// Production entry point: obtains the authoritative exchange-calendar
+/// provider through the exact shared canonical context every Bundle 2
+/// readiness surface already uses
+/// (`crate::daily_data_readiness::load_readiness_context_from_env`) and the
+/// current [`FixedWindowOverrideConfig`] from env, then delegates to
+/// [`resolve_autonomous_daily_session_plan`]. This wrapper must never
+/// construct its own calendar provider — doing so would create a second,
+/// independent provider-selection policy that could silently disagree with
+/// Bundle 2's readiness composition under the same configuration
+/// (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01B-CANONICAL-CALENDAR-REPAIR-01).
+/// No-override behavior is therefore byte-for-byte identical to the Bundle 2
+/// authoritative schedule for the same `now_utc`.
 pub fn resolve_autonomous_daily_session_plan_from_env(
     now_utc: DateTime<Utc>,
     timing: &AutonomousDailyPlanTiming,
 ) -> AutonomousDailySessionPlanResolution {
-    let provider = market_calendar::NyseWeekdaysProvider;
+    let context = crate::daily_data_readiness::load_readiness_context_from_env();
     let override_config = resolve_fixed_window_override_config_from_env();
-    resolve_autonomous_daily_session_plan(&provider, now_utc, timing, &override_config)
+    resolve_autonomous_daily_session_plan(
+        context.calendar_provider.as_ref(),
+        now_utc,
+        timing,
+        &override_config,
+    )
 }
 
 // ---------------------------------------------------------------------------

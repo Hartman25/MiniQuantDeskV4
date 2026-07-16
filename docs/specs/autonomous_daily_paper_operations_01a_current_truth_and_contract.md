@@ -990,3 +990,49 @@ live-capital enablement; no synthetic broker lifecycle events; no fabricated bar
 orders, fills, positions, or daily outcomes; zero real network/provider/broker calls from any
 test or from this Phase A patch itself. This Phase A patch makes no production-code, test-code,
 or migration change — it is documentation and a guard script only.
+
+---
+
+## 21. Phase B calendar-authority repair clarification
+(`AUTONOMOUS-DAILY-PAPER-OPERATIONS-01B-CANONICAL-CALENDAR-REPAIR-01`)
+
+Added after Phase B landed (`f4efc071a4563abfad1a6df22a5249d01d589ce7`, "daemon: add durable
+autonomous day coordination") to close a residual defect Phase B's own production wrapper
+introduced: `autonomous_daily_operation::resolve_autonomous_daily_session_plan_from_env` selected
+`market_calendar::NyseWeekdaysProvider` directly instead of obtaining its calendar provider
+through the shared canonical context (`daily_data_readiness::load_readiness_context_from_env`),
+while that same shared context's own provider-selection helper
+(`market_calendar::active_calendar_provider_from_env`) separately mirrored the session
+controller's fixed-window-override selection and could return `FixedWindowOverrideProvider` —
+which `resolve_market_session_schedule` always reports as `CalendarCoverageState::Unknown` (it
+consults no exchange calendar at all). Under the same configuration this let Bundle 2 readiness
+and the Bundle 3 autonomous daily-operation plan disagree, and let a configured runtime-window
+override silently corrupt Bundle 2's authoritative calendar truth. This section states the
+corrected, permanent contract; it does not redo the Phase A audit in §1-§20 above.
+
+**Exchange schedule vs. effective autonomous operation window: not a second calendar authority.**
+There is exactly one authoritative exchange-calendar composition
+(`daily_data_readiness::load_readiness_context_from_env().calendar_provider`, always exchange-
+calendar-backed — `market_calendar::NyseWeekdaysProvider` today, never
+`FixedWindowOverrideProvider`), consumed identically by:
+
+- **Bundle 2** (`daily_data_readiness`/`market_data_readiness.rs`), which uses the exchange
+  session boundaries (`session_open_utc`/`session_close_utc`), market date, holiday/weekend
+  classification, coverage state, and previous-trading-date for market-data continuity proof —
+  the exchange-session bar grid.
+- **Bundle 3** (`autonomous_daily_operation::resolve_autonomous_daily_session_plan_from_env`),
+  which consumes the exact same exchange applicability and coverage truth, and may additionally
+  apply a separately-labeled, operator-configured fixed runtime-window override
+  (`schedule_source = "fixed_window_override"`) to the *effective operation* open/close boundaries
+  only, strictly after that exchange applicability is already established.
+
+A runtime-window override is effective-operation-window truth, not calendar truth. It can never
+alter — and is never consulted for — holiday classification, weekend classification, calendar
+coverage state, early-close truth, or previous-trading-date truth; all of those remain exclusively
+exchange-calendar-sourced for both Bundle 2 and Bundle 3, regardless of whether an override is
+absent, valid, or invalid. A weekend/holiday date has no applicable autonomous operation
+regardless of a configured override; an invalid override configuration (partial, malformed, or
+`start >= stop`) blocks the applicable autonomous start outright
+(`fixed_window_override_invalid`) rather than being silently treated as absent.
+
+---

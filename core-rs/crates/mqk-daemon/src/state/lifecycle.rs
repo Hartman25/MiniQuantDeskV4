@@ -574,6 +574,36 @@ impl AppState {
         // `evaluation_id`, a truthful bounded blocked report, and a genuine
         // pre-start evidence persist attempt — never an early return before
         // any of that exists.
+        // AUTONOMOUS-DAILY-PAPER-OPERATIONS-01B-CANONICAL-CALENDAR-REPAIR-01:
+        // narrow shared-calendar blocker input. A configured-but-invalid
+        // fixed session-window override (MQK_SESSION_START_HH_MM/
+        // _STOP_HH_MM) must never be silently treated as absent by an
+        // applicable autonomous start attempt — refuse before any readiness
+        // evaluation, run creation, or provider/broker call. Absent or Valid
+        // configuration is the ordinary case and falls through unchanged,
+        // so this never disturbs the existing readiness evidence ordering
+        // below.
+        if self.deployment_mode() == DeploymentMode::Paper
+            && self.strategy_market_data_source()
+                == StrategyMarketDataSource::ExternalSignalIngestion
+        {
+            if let super::autonomous_daily_operation::FixedWindowOverrideConfig::Invalid {
+                detail,
+            } =
+                super::autonomous_daily_operation::resolve_fixed_window_override_config_from_env()
+            {
+                return Err(RuntimeLifecycleError::forbidden(
+                    "runtime.start_refused.fixed_window_override_invalid",
+                    "fixed_window_override",
+                    format!(
+                        "fixed session-window override configuration is invalid: {detail} ({})",
+                        super::autonomous_daily_operation::AutonomousDailyPlanReason::FixedWindowOverrideInvalid
+                            .as_str()
+                    ),
+                ));
+            }
+        }
+
         let mut daily_data_readiness_evaluation_id: Option<uuid::Uuid> = None;
         if self.deployment_mode() == DeploymentMode::Paper
             && self.strategy_market_data_source()

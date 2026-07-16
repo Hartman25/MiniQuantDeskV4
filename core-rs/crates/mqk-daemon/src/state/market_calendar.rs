@@ -1278,15 +1278,29 @@ pub fn resolve_market_session_schedule(
     }
 }
 
-/// Select the same active calendar provider the autonomous session
-/// controller uses (`session_controller::autonomous_session_schedule_from_env`'s
-/// selection order): a configured [`FixedWindowOverrideProvider`]
-/// (`MQK_SESSION_START_HH_MM`/`MQK_SESSION_STOP_HH_MM`) if both are set and
-/// valid, else [`NyseWeekdaysProvider`]. Composition, not a second selection
-/// policy — reuses `super::session_controller::session_window_from_env`.
+/// Select the authoritative exchange-calendar provider — the single
+/// calendar-provider-selection policy shared by every readiness/session-plan
+/// surface (`daily_data_readiness::load_readiness_context_from_env`, in turn
+/// consumed by `autonomous_daily_operation::resolve_autonomous_daily_session_plan_from_env`).
+///
+/// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01B-CANONICAL-CALENDAR-REPAIR-01: this
+/// seam must never select [`FixedWindowOverrideProvider`] here — that
+/// provider consults no exchange calendar at all and forces
+/// `CalendarCoverageState::Unknown` for every date
+/// (`resolve_market_session_schedule`'s `is_fixed_window_override` check),
+/// which would silently corrupt authoritative market-date/holiday/coverage
+/// truth for every caller of this context merely because an operator
+/// configured a runtime-window override. Previously this function mirrored
+/// the session controller's fixed-window-override selection, which is
+/// exactly the defect this repair closes. The fixed-window override remains
+/// available, but only as a separate, explicitly-labeled effective-operation
+/// overlay applied after authoritative trading-day applicability is already
+/// established (see `autonomous_daily_operation::FixedWindowOverrideConfig`)
+/// — never as a substitute calendar authority.
+///
+/// Always returns [`NyseWeekdaysProvider`] today; a future
+/// `ExchangeSourcedCalendarProvider`-backed selection would replace this
+/// implementation without changing this function's contract.
 pub fn active_calendar_provider_from_env() -> Box<dyn MarketCalendarProvider> {
-    match super::session_controller::session_window_from_env() {
-        Some(window) => Box::new(FixedWindowOverrideProvider { window }),
-        None => Box::new(NyseWeekdaysProvider),
-    }
+    Box::new(NyseWeekdaysProvider)
 }

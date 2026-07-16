@@ -42,6 +42,18 @@
 #   [19] Proposed Phase B schema section does not contain a fabricated
 #        "not null default 0" numeric SQL default.
 #
+# Strengthened again by AUTONOMOUS-DAILY-PAPER-OPERATIONS-01B-CANONICAL-
+# CALENDAR-REPAIR-01 (checks [20]-[21] below are net-new for that repair):
+#   [20] Doc documents the corrected exchange-schedule-vs-effective-operation-
+#        window distinction (§21) and states it is not a second calendar
+#        authority.
+#   [21] The production session-plan resolver
+#        (`resolve_autonomous_daily_session_plan_from_env` in
+#        autonomous_daily_operation.rs) does not directly construct or name
+#        `NyseWeekdaysProvider` in its own body, and does obtain its
+#        calendar provider via `load_readiness_context_from_env`. Scoped
+#        narrowly to that one function's body text, not a broad grep.
+#
 # Usage:
 #   powershell -ExecutionPolicy Bypass -File scripts\guards\validate_autonomous_daily_paper_operations_01a_audit.ps1
 #
@@ -54,6 +66,7 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $RepoRoot  = (Resolve-Path (Join-Path $ScriptDir "../../")).Path.TrimEnd('\')
 
 $PathAuditSpec = Join-Path $RepoRoot "docs\specs\autonomous_daily_paper_operations_01a_current_truth_and_contract.md"
+$PathAutonomousDailyOperationRs = Join-Path $RepoRoot "core-rs\crates\mqk-daemon\src\state\autonomous_daily_operation.rs"
 
 $Violations = 0
 
@@ -288,6 +301,31 @@ if ($null -eq $SchemaSection) {
     Show-Red "  FAIL -- could not locate the proposed Phase B schema section (§14/§14a) to scope this check"
 } else {
     Test-ContentDoesNotContain "proposed schema section contains no 'not null default 0' fabricated default" $SchemaSection "not null default 0" | Out-Null
+}
+
+Write-Host ""
+Show-Info "--- [20] Doc documents the exchange-schedule vs. effective-operation-window distinction (Repair 01) ---"
+Test-ContentContainsAll "doc documents the corrected distinction is not a second calendar authority" $Content @(
+    "not a second calendar authority",
+    "effective autonomous operation window",
+    "fixed_window_override_invalid"
+) | Out-Null
+
+Write-Host ""
+Show-Info "--- [21] Production wrapper does not directly construct NyseWeekdaysProvider (Repair 01) ---"
+$SourceContent = $null
+if (Test-FileExists "autonomous_daily_operation.rs" $PathAutonomousDailyOperationRs) {
+    $SourceContent = Get-Content -Raw -Path $PathAutonomousDailyOperationRs
+}
+$WrapperBody = Get-ContentBetween -Content $SourceContent `
+    -StartNeedle "pub fn resolve_autonomous_daily_session_plan_from_env(" `
+    -EndNeedle "// B.3"
+if ($null -eq $WrapperBody) {
+    $script:Violations++
+    Show-Red "  FAIL -- could not locate resolve_autonomous_daily_session_plan_from_env's body to scope this check"
+} else {
+    Test-ContentDoesNotContain "production wrapper body does not directly construct/name NyseWeekdaysProvider" $WrapperBody "NyseWeekdaysProvider" | Out-Null
+    Test-ContentContains "production wrapper body obtains its provider via load_readiness_context_from_env" $WrapperBody "load_readiness_context_from_env" | Out-Null
 }
 
 # =============================================================================

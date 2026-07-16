@@ -9845,8 +9845,8 @@ identity/state machine, race-safe create/recover, CAS transitions, and a
 pure shared read-model — foundation only, no controller/provider/runtime/
 route/GUI wiring.
 
-**Phase B commit:** pending (this session — recorded together with this
-ledger update; see `git log` for the exact hash once committed).
+**Phase B commit:** `f4efc071a4563abfad1a6df22a5249d01d589ce7` ("daemon: add
+durable autonomous day coordination").
 
 - **Migration:** `core-rs/crates/mqk-db/migrations/0048_autonomous_daily_operations.sql`
   (additive; manifest entry added). Two new tables:
@@ -9870,17 +9870,14 @@ ledger update; see `git log` for the exact hash once committed).
 - **Session-plan resolver:** `mqk-daemon/src/state/autonomous_daily_operation.rs`.
   Composes strictly over the existing Bundle 2 authority
   (`market_calendar::resolve_market_session_schedule`); the production
-  wrapper (`resolve_autonomous_daily_session_plan_from_env`) uses
-  `NyseWeekdaysProvider` directly — the same provider
-  `daily_data_readiness::active_calendar_provider_from_env` falls back to
-  when no fixed-window override is configured — so no-override behavior is
-  identical to the Bundle 2 schedule. Neither
-  `daily_data_readiness.rs`/`market_calendar.rs` production functions nor
-  `active_calendar_provider_from_env`/`load_readiness_context_from_env`
-  were modified, so the existing Bundle 2 GET-route composition is
-  byte-for-byte unchanged; the Bundle 2 regression suite was not required
-  and was not run (contract §13: only required "when this seam changes").
-  A new three-way `FixedWindowOverrideConfig` (`Absent`/`Valid`/`Invalid`)
+  wrapper (`resolve_autonomous_daily_session_plan_from_env`) originally
+  constructed `NyseWeekdaysProvider` directly rather than obtaining it
+  through the shared `daily_data_readiness::load_readiness_context_from_env`
+  context — this defect (and a related defect in
+  `active_calendar_provider_from_env` itself, which could select
+  `FixedWindowOverrideProvider` as Bundle 2's authoritative calendar) is
+  corrected by the `01B-CANONICAL-CALENDAR-REPAIR-01` entry below. A new
+  three-way `FixedWindowOverrideConfig` (`Absent`/`Valid`/`Invalid`)
   reads `MQK_SESSION_START_HH_MM`/`_STOP_HH_MM` directly, distinguishing
   "operator did not configure an override" from "operator configured one,
   but it is invalid" — the existing `session_controller::session_window_from_env`
@@ -9936,8 +9933,97 @@ PRODUCTION CODE CHANGED: yes (additive only — new module + new store; no
 MIGRATION ADDED: yes (0048_autonomous_daily_operations.sql, additive)
 ```
 
+**Phase B calendar-authority repair
+(`AUTONOMOUS-DAILY-PAPER-OPERATIONS-01B-CANONICAL-CALENDAR-REPAIR-01`):**
+closes the residual defect above where Bundle 2 readiness and the Bundle 3
+autonomous daily-operation plan could resolve calendar truth from two
+different provider-selection policies under the same configuration.
+
+**Repair commit:** pending (this session — recorded together with this
+ledger update; see `git log` for the exact hash once committed).
+
+- **Shared authoritative exchange-calendar context:**
+  `market_calendar::active_calendar_provider_from_env` no longer mirrors the
+  session controller's fixed-window-override selection — it always returns
+  `NyseWeekdaysProvider` (the authoritative exchange-calendar heuristic),
+  never `FixedWindowOverrideProvider`. `autonomous_daily_operation::resolve_autonomous_daily_session_plan_from_env`
+  now obtains its calendar provider through
+  `daily_data_readiness::load_readiness_context_from_env().calendar_provider`
+  instead of constructing `NyseWeekdaysProvider` itself — one shared
+  provider-selection policy, consumed identically by Bundle 2 and Bundle 3.
+- **Separate fixed operation-window override:** `FixedWindowOverrideConfig`
+  (`Absent`/`Valid`/`Invalid`, unchanged from Phase B) remains the sole
+  override-parsing policy, applied only to the *effective operation*
+  open/close boundaries after authoritative trading-day applicability is
+  established — never substituted for calendar truth.
+- **Bundle 2 exchange-bar-grid preservation:** a valid fixed-window override
+  configured in env no longer corrupts Bundle 2's shared calendar context to
+  `CalendarCoverageState::Unknown`; the exchange-session-anchored intraday
+  bar grid Bundle 2 proves continuity against is unchanged by the override
+  (proven identical with/without the override configured).
+- **Invalid-override start-gate blocker (narrow shared-calendar input):**
+  `lifecycle.rs`'s `start_execution_runtime` now refuses an applicable Paper
+  + ExternalSignalIngestion start outright
+  (`runtime.start_refused.fixed_window_override_invalid`) when
+  `resolve_fixed_window_override_config_from_env()` is `Invalid` — before any
+  readiness evaluation, run creation, or provider/broker call. Absent/Valid
+  configuration falls through unchanged; existing readiness evidence
+  ordering and B1A runtime-binding behavior are unaffected. No other
+  lifecycle sequencing changed.
+- **No controller integration, no provider scheduling, no Phase C work:**
+  `session_controller.rs`, `autonomous_bar_ticker.rs`, `loop_runner.rs`,
+  `routes.rs`, `api_types.rs`, every `routes/*`, the migration, the DB store
+  (`mqk-db/src/autonomous_daily_operation.rs`), and every GUI file remain
+  untouched.
+- **Tests:** extended
+  `core-rs/crates/mqk-daemon/tests/scenario_autonomous_daily_operation_identity_01.rs`
+  (+3: shared-context consumption proof, unknown-calendar-plus-override
+  case, static source proof rejecting direct `NyseWeekdaysProvider`
+  construction in the production wrapper — 36 total, all passing);
+  `core-rs/crates/mqk-daemon/tests/scenario_daily_data_readiness_01.rs` (+3:
+  valid/invalid override leaves shared context coverage `Active`, override
+  leaves the exchange bar grid unchanged — 64 total, all passing);
+  `core-rs/crates/mqk-daemon/tests/scenario_daily_data_readiness_start_gate_01.rs`
+  (SG-06 rewritten to prove a valid override no longer causes a false
+  `calendar_unavailable` refusal; new SG-06B proves an invalid override
+  blocks with no run/outbox row created — 20 total, all passing).
+  `scenario_daily_data_readiness_api_01.rs` re-run unmodified as regression
+  (7/7 passing) — the GET route composition is unaffected other than by the
+  corrected provider selection.
+- **Guards:** `validate_autonomous_daily_paper_operations_01a_audit.ps1`
+  strengthened to 21 checks (new [20]/[21]: doc documents the
+  exchange-schedule-vs-effective-operation-window distinction and that it is
+  not a second calendar authority; production wrapper source scoped and
+  proven to never directly construct `NyseWeekdaysProvider`).
+  `validate_daily_data_readiness_01e_closure.ps1` and
+  `check_unsafe_patterns.ps1` re-run clean (no migration/manifest changed, so
+  migration governance was not re-run).
+- **Known pre-existing environment issue (unrelated to this repair):**
+  `cargo clippy -p mqk-daemon --lib -- -D warnings` fails on this machine's
+  toolchain (rustc 1.93) due to a pre-existing `clippy::manual_range_contains`
+  lint in `routes/strategy_scans.rs:87` — confirmed via `git stash` that this
+  error is present identically with none of this repair's changes applied.
+  Every file this repair actually touched is clippy-clean.
+
+**Safety confirmation (Phase B calendar-authority repair):**
+
+```text
+PROVIDER CALLS: no
+BROKER CALLS: no
+NETWORK CALLS: no
+REAL DAEMON STARTED: no
+REAL RUNTIME STARTED: no
+EXECUTION ARMED: no
+PAPER ORDERS: no
+LIVE ORDERS: no
+PAPER DB TOUCHED: no
+PRODUCTION CODE CHANGED: yes (market_calendar.rs, autonomous_daily_operation.rs,
+  lifecycle.rs — no migration, no DB store, no controller/scheduler/GUI change)
+MIGRATION ADDED: no
+```
+
 **Expected next bundle after closure:** `DURABLE-PAPER-PORTFOLIO-AND-PNL-01-COMBINED`.
 
 **Next authorized step:** Phase C — autonomous completed-bar data driver —
-only after independent review of this Phase B foundation, and only on
-explicit operator instruction.
+only after independent review of this Phase B foundation (including this
+calendar-authority repair), and only on explicit operator instruction.

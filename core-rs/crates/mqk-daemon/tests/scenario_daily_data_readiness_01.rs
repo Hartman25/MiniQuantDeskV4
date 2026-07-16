@@ -1409,6 +1409,124 @@ fn ddr_45_fully_valid_provenance_passes() {
 }
 
 // ---------------------------------------------------------------------------
+// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01B-CANONICAL-CALENDAR-REPAIR-01:
+// shared calendar context must not be corrupted by the autonomous runtime
+// window override (MQK_SESSION_START_HH_MM/MQK_SESSION_STOP_HH_MM). Bundle
+// 2's readiness composition (`load_readiness_context_from_env`) must never
+// receive a `FixedWindowOverrideProvider` as its authoritative calendar —
+// so it must be entirely unaffected by whether that override is absent,
+// valid, or invalid.
+// ---------------------------------------------------------------------------
+
+fn clear_session_window_env() {
+    unsafe {
+        std::env::remove_var("MQK_SESSION_START_HH_MM");
+        std::env::remove_var("MQK_SESSION_STOP_HH_MM");
+    }
+}
+
+/// A valid fixed-window override configured in env must not turn the shared
+/// Bundle 2 calendar context's coverage state `Unknown` — the readiness
+/// evaluator must never receive a `FixedWindowOverrideProvider` as its
+/// authoritative calendar.
+#[test]
+fn ddr_46_valid_fixed_window_override_does_not_corrupt_context_coverage() {
+    clear_session_window_env();
+    unsafe {
+        std::env::set_var("MQK_SESSION_START_HH_MM", "09:30");
+        std::env::set_var("MQK_SESSION_STOP_HH_MM", "16:00");
+    }
+    let context = daily_data_readiness::load_readiness_context_from_env();
+    let now = ts(MON_2024_04_15_935AM_EDT + 5 * 300);
+    let schedule = resolve_market_session_schedule(context.calendar_provider.as_ref(), now);
+    assert_eq!(
+        schedule.coverage_state,
+        CalendarCoverageState::Active,
+        "DDR-46: a valid runtime-window override must not corrupt the shared calendar \
+         context's coverage state"
+    );
+    assert_eq!(
+        schedule.calendar_source, "nyse_weekdays_heuristic",
+        "DDR-46: the shared context's calendar authority must remain exchange-sourced \
+         regardless of a configured runtime-window override"
+    );
+    clear_session_window_env();
+}
+
+/// An invalid (partially-configured) fixed-window override must likewise
+/// leave the shared Bundle 2 calendar context unaffected — Bundle 2 has no
+/// concept of override validity at all; it simply never looks at these
+/// env vars for calendar-authority purposes, so it must behave identically
+/// whether the override is absent, valid, or invalid.
+#[test]
+fn ddr_47_invalid_fixed_window_override_does_not_corrupt_context_coverage() {
+    clear_session_window_env();
+    unsafe {
+        // Only one of the two required variables set — an invalid
+        // configuration per `FixedWindowOverrideConfig`.
+        std::env::set_var("MQK_SESSION_START_HH_MM", "09:30");
+    }
+    let context = daily_data_readiness::load_readiness_context_from_env();
+    let now = ts(MON_2024_04_15_935AM_EDT + 5 * 300);
+    let schedule = resolve_market_session_schedule(context.calendar_provider.as_ref(), now);
+    assert_eq!(
+        schedule.coverage_state,
+        CalendarCoverageState::Active,
+        "DDR-47: an invalid runtime-window override must not corrupt the shared calendar \
+         context's coverage state — Bundle 2 never silently adopts override truth"
+    );
+    clear_session_window_env();
+}
+
+/// The exchange-session-anchored intraday bar grid computed against the
+/// shared context's calendar provider must be identical whether or not a
+/// valid runtime-window override is configured in env — the override must
+/// never substitute for, or perturb, the exchange bar grid Bundle 2 proves
+/// continuity against.
+#[test]
+fn ddr_48_valid_fixed_window_override_leaves_exchange_bar_grid_unchanged() {
+    let now = ts(MON_2024_04_15_935AM_EDT + 5 * 300);
+
+    clear_session_window_env();
+    let context_no_override = daily_data_readiness::load_readiness_context_from_env();
+    let schedule_no_override =
+        resolve_market_session_schedule(context_no_override.calendar_provider.as_ref(), now);
+    let grid_no_override = expected_intraday_end_ts_window(
+        context_no_override.calendar_provider.as_ref(),
+        &schedule_no_override,
+        now.timestamp(),
+        300,
+        0,
+        5,
+    )
+    .expect("no-override grid resolves");
+
+    unsafe {
+        std::env::set_var("MQK_SESSION_START_HH_MM", "09:30");
+        std::env::set_var("MQK_SESSION_STOP_HH_MM", "16:00");
+    }
+    let context_with_override = daily_data_readiness::load_readiness_context_from_env();
+    let schedule_with_override =
+        resolve_market_session_schedule(context_with_override.calendar_provider.as_ref(), now);
+    let grid_with_override = expected_intraday_end_ts_window(
+        context_with_override.calendar_provider.as_ref(),
+        &schedule_with_override,
+        now.timestamp(),
+        300,
+        0,
+        5,
+    )
+    .expect("with-override grid resolves");
+
+    assert_eq!(
+        grid_no_override, grid_with_override,
+        "DDR-48: a configured runtime-window override must never change the exchange-session \
+         bar grid Bundle 2 proves continuity against"
+    );
+    clear_session_window_env();
+}
+
+// ---------------------------------------------------------------------------
 // Aggregate + full end-to-end (DB-backed; skip without MQK_DATABASE_URL)
 // ---------------------------------------------------------------------------
 
