@@ -11042,3 +11042,209 @@ Next authorized patch: Phase D2 — durable daily session-controller
   lifecycle integration — only after independent review of D1, and only
   on explicit operator instruction
 ```
+
+---
+
+**Phase D1 policy closure repair
+(`AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D1-POLICY-CLOSURE-REPAIR-01`):**
+starting HEAD `607d2e1179468d85e6d57333f184617333881f1b`, parent
+implementation commit `2349ca487867f3ff611b73e05d3c983e740b5c7b` ("daemon:
+add typed autonomous coordinator policy"). Closes four defects found in the
+D1 typed coordinator policy foundation (`state/autonomous_retry_policy.rs`)
+by direct source re-audit; behavior-preserving in the same sense as D1 —
+still nothing in this module is called by `session_controller.rs`,
+`attempt_auto_start`, `attempt_auto_stop`, any task-wiring, or any durable
+operation transition.
+
+**Repair 1 — variant-sensitive lifecycle-error mapping:**
+`coordinator_reason_from_runtime_lifecycle_error` previously matched
+`ServiceUnavailable | Forbidden | Conflict` in one combined arm before
+switching on `fault_class()`. Source re-audit found the exact static string
+`"runtime.start_refused.service_unavailable"` is produced by two distinct
+sites with two distinct meanings: `db_pool()` (no runtime DB configured at
+all, surfaced as `ServiceUnavailable`) and
+`ProductionRuntimeStartEffects::start_runtime_effects`'s
+`orchestrator.tick()` runtime-leadership-lease-unavailable branch (an
+operational condition against an already-configured DB, surfaced as
+`Conflict` via `RuntimeStartEffectsErrorKind::Conflict` — never as a string
+this module parses; the `"RUNTIME_LEASE"` substring check already happens
+exactly once, upstream, in `start_runtime_effects` itself).
+`coordinator_reason_from_runtime_lifecycle_error` now matches on the
+`RuntimeLifecycleError` variant *first*: `ServiceUnavailable` +
+that fault class → `DatabaseNotConfiguredOrInvalid` (Manual, unchanged
+from D1); `Conflict` + that same fault class → newly
+`TemporaryDatabaseOperationFailure` (Transient); `Forbidden` + that same
+fault class is not reachable from any audited source site today, so it
+conservatively fails closed to `UnclassifiedFailClosed` (Manual) rather
+than reusing either other mapping. The distinction is exclusively the
+`RuntimeLifecycleError` variant plus exact `fault_class` string equality —
+no message rendering, no `.contains(`/`.starts_with(`/regex — proven by the
+`no_string_authority_guard_scope_contains_no_forbidden_parsing_patterns`
+guard test, which still passes unmodified over the now-larger guarded
+scope.
+
+**Repair 2 — complete DB-operation transient mapping:** the `Internal`-variant
+transient list grew from three exact context labels to the complete
+source-audited set of eight: `"start active-run lookup failed"`, `"start
+latest-run lookup failed"`, `"start insert_run failed"` (unchanged from D1,
+all from `create_or_reuse_run_for_start`), plus four new labels from
+`ProductionRuntimeStartEffects::start_runtime_effects` (`"start
+strategy_registry lookup failed"`, `"start arm_run failed"`, `"start
+begin_run failed"`, `"start initial heartbeat failed"`) and one from its
+post-tick refresh (`"post-initial-tick heartbeat refresh failed"`).
+`"start initial tick failed"` is deliberately *not* included — it can wrap
+an orchestrator, broker, continuity, risk, or other non-DB runtime failure
+and is not provably a temporary DB operation from the static label alone,
+so it stays `UnclassifiedFailClosed`/Manual, same as any unrecognized
+`Internal` label or a near-match string (e.g. `"start arm_run failed
+extra"`).
+
+**Repair 3 — runtime-dispatch-truth adapter:** added
+`coordinator_reason_from_strategy_dispatch_runtime_truth(truth:
+&AutonomousStrategyDispatchRuntimeTruth, expected_run_id: Uuid) ->
+Option<AutonomousCoordinatorReason>`, a pure typed match (no debug-string
+rendering, no reason-string parsing) over the existing
+`AutonomousStrategyDispatchRuntimeTruth` fact reported by
+`AppState::autonomous_strategy_dispatch_runtime_truth`: `Active` with a
+matching `run_id` → `None`; `Active` with a mismatched `run_id` →
+`RuntimeRunIdMismatch`; `NoLocallyOwnedRun` →
+`DurableActiveRunWithoutLocalOwner`; the three
+`NativeStrategyBootstrap{Missing,Dormant,Failed}` variants → their exact
+same-named coordinator reasons. Documented as intended only for a caller
+that already holds a durable `running` operation with a known `run_id` —
+the same precondition `prove_running_dispatch_eligibility` in
+`autonomous_completed_bar_driver.rs` establishes before calling
+`autonomous_strategy_dispatch_runtime_truth` at all; a pre-runtime caller
+must not invoke it. Not wired to any caller in this patch.
+
+**Repair 4 — collision-resistant blocker signature (v2):** replaced the D1
+design (`|`-joined raw identity values, truncated at a fixed 512-char cap)
+with a versioned, tagged, length-delimited canonical byte encoding —
+`mqk.autonomous-blocker-signature.v2` followed by one
+`field_name=<byte-length>:<value>\n` line per *present* identity field, in
+fixed field order (`operation_id`, `assignment_identity`,
+`runtime_binding_identity`, `provider_id`, `symbol`, `timeframe`) — hashed
+with SHA-256 (the crate's existing `sha2`/`hex` dependencies, the same ones
+`autonomous_daily_operation.rs`'s session-plan/operation identities already
+use; no new hash crate added). `stable_context` renders as
+`sha256:<64 lowercase hex chars>` when any field is present, `None`
+otherwise — a fixed length regardless of input size, so a pathologically
+long field can no longer silently absorb or mask a changed adjacent field
+(the old truncate-at-512 design's failure mode). The length-delimited
+encoding also makes field boundaries unambiguous:
+`assignment="ab", binding="c"` and `assignment="a", binding="bc"` produce
+different canonical bytes and therefore different signatures. Raw identity
+text never appears in the rendered signature. `reason_code` remains a
+separate field on `AutonomousBlockerSignature`, so a changed reason still
+changes the overall signature even with identical identity context.
+
+**Updated module documentation:** the source-grounded fault-class
+classification table at the top of `autonomous_retry_policy.rs` now lists
+all three `runtime.start_refused.service_unavailable` variant rows and all
+eight transient `Internal` DB-operation labels, superseding the D1 version
+of that table (not duplicated here — see the module doc itself).
+
+**Tests added (all in the two files this patch touches, no other file
+changed):** `state::autonomous_retry_policy::tests` grew from 45 to **69**
+(20 new: 3 variant-sensitivity + 1 message-wording-robustness, 3
+DB-operation-completeness (`start initial tick failed` stays manual,
+unknown internal label stays manual, near-match label stays manual), 6
+runtime-dispatch-truth-adapter, 7 signature-resistance (per-field-changed
+×5, long-prefix-then-different-suffix ×2, field-boundary-unambiguity,
+raw-text-absent, fixed-length ×2, `None`-when-absent, `sha256:`-prefix
+form)). `tests/scenario_autonomous_daily_coordinator_policy_01.rs` grew
+from 28 to **35** (new Group I: 4 runtime-dispatch-truth-adapter tests over
+the fully public `AutonomousStrategyDispatchRuntimeTruth` type; new Group
+J: 3 long-input blocker-signature-resistance tests over the fully public
+`AutonomousBlockerIdentity`/`blocker_signature` API). The scope note at the
+top of that file records why the variant-sensitive `RuntimeLifecycleError`
+proof itself is not further constructible from this external crate beyond
+what `b01` already exercises (`RuntimeLifecycleError`'s constructors remain
+`pub(crate)`, unchanged from D1) — the full three-variant proof lives in
+`autonomous_retry_policy.rs`'s crate-internal tests.
+
+**Test results:** `state::autonomous_retry_policy::tests` (`--lib`) 69/69.
+`scenario_autonomous_daily_coordinator_policy_01` 35/35. Regressions, each
+run as its own binary against the reachable test DB at port 5434:
+`scenario_native_strategy_bootstrap_daemon_b1b` 5/5,
+`scenario_daily_data_readiness_start_gate_01` 20/20,
+`scenario_autonomous_completed_bar_driver_01` 56/56,
+`scenario_autonomous_daily_operation_identity_01` 44/44,
+`scenario_autonomous_gate_parity_auton11` 5/5. All identical pass counts to
+their prior D1/pre-D1 baselines — no regression.
+
+**Lifecycle fixture defect — not touched, not fixed by this patch:**
+`scenario_daemon_runtime_lifecycle` was not re-run in this patch (per the
+patch's explicit prohibition on beginning that repair or rerunning that
+binary here). It remains recorded from D1 as pre-existing at 10 passed / 14
+failed on baseline `62ca89b2` and unchanged through D1, with root cause
+already diagnosed as a stale test fixture (Paper+Alpaca strategy IDs
+configured without the newer canonical symbol/timeframe/readiness
+fixture), wholly unrelated to this patch's policy-module changes. Requires
+a separate, independently-authorized repair
+(`AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D1-LIFECYCLE-TEST-FIXTURE-REPAIR-01`)
+before D2.
+
+**Guards:** `validate_autonomous_daily_paper_operations_01a_audit.ps1` all
+checks pass, `validate_daily_data_readiness_01e_closure.ps1` all checks
+pass (Phase A guard re-run clean inside it), `check_unsafe_patterns.ps1`
+all guards pass. Migration governance not re-run (no migration change).
+
+**Format/lint:** `rustfmt --check` clean on both touched files (one
+`rustfmt` pass was applied to bring newly-added test code into the
+project's formatting style before the final check). `cargo check -p
+mqk-runtime -p mqk-daemon` clean (only the pre-existing, unrelated
+`sqlx-postgres` future-incompat warning, identical to D1). Clippy: zero
+warnings attributable to `autonomous_retry_policy.rs` or
+`scenario_autonomous_daily_coordinator_policy_01.rs` in either `cargo
+clippy -p mqk-daemon --lib` or `cargo clippy -p mqk-daemon --test
+scenario_autonomous_daily_coordinator_policy_01` (the one warning present
+in both runs is the same pre-existing, unrelated
+`routes/strategy_scans.rs:87` `manual !RangeInclusive::contains` lint D1
+already noted). `git diff --check` clean.
+
+**Safety confirmation (D1 policy closure repair):**
+
+```text
+PROVIDER CALLS: no (real network)
+BROKER CALLS: no
+NETWORK CALLS: no
+REAL DAEMON STARTED: no
+REAL RUNTIME STARTED: no
+SESSION CONTROLLER BEHAVIOR CHANGED: no
+PRODUCTION CONTROLLER BEHAVIOR CHANGED: no
+LIFECYCLE FAULT CLASSES CHANGED: no (lifecycle.rs untouched; only the
+  policy module's own classification of already-existing fault classes
+  changed)
+RUNTIME-CONTEXT RESOLVER CHANGED: no (autonomous_runtime_context.rs
+  untouched)
+RETRY POLICY WIRED INTO PRODUCTION: no
+DAILY-OPERATION TRANSITIONS CREATED: no
+RETRY COUNTERS WRITTEN: no
+NOTIFICATIONS CHANGED: no
+COMPLETED-BAR TASK STARTED: no
+LEGACY TICKER DISABLED: no
+WATCHDOGS ADDED: no
+EXECUTION ARMED OUTSIDE TEST: no
+PAPER ORDERS: no
+LIVE ORDERS: no
+MIGRATION ADDED: no
+PAPER DB TOUCHED: no
+FILES CHANGED: MiniQuantDesk_Master_Patch_Ledger_v2.md,
+  state/autonomous_retry_policy.rs (modified, no new file),
+  tests/scenario_autonomous_daily_coordinator_policy_01.rs (modified, no
+  new file)
+ADDED FILES: none
+```
+
+```text
+D1 POLICY CLOSURE REPAIR: COMPLETE (pending commit)
+Phase D: OPEN
+Bundle 3 (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-COMBINED): OPEN
+Next authorized patch: AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D1-LIFECYCLE-TEST-FIXTURE-REPAIR-01
+  — repair the pre-existing scenario_daemon_runtime_lifecycle fixture
+  defect (10 passed / 14 failed baseline) — only after independent review
+  of this repair, and only on explicit operator instruction. D2 remains
+  unauthorized until both this policy closure repair and the lifecycle-test
+  fixture repair are accepted.
+```

@@ -18,6 +18,18 @@
 //! `#[cfg(test)] mod tests` (crate-internal, `pub(crate)` access), and are
 //! summarized/re-exercised here wherever the public API allows.
 //!
+//! D1D1-POLICY-CLOSURE-REPAIR-01: the same `pub(crate)` constructor
+//! constraint means the variant-sensitive `RuntimeLifecycleError` mapping
+//! (`ServiceUnavailable` vs. `Forbidden` vs. `Conflict` carrying the exact
+//! same static `fault_class` string) is not independently constructible
+//! from this external crate beyond what `b01` below already exercises (one
+//! real `Forbidden`-variant gate). The full variant-sensitive proof (all
+//! three variants against the identical fault-class string) lives in
+//! `autonomous_retry_policy.rs`'s crate-internal tests. What *is*
+//! constructible here from fully public types — the runtime-dispatch-truth
+//! adapter (Group I) and blocker-signature collision resistance on
+//! pathologically long inputs (Group J) — is added below.
+//!
 //! Run alone:
 //! `cargo test -p mqk-daemon --test scenario_autonomous_daily_coordinator_policy_01`
 
@@ -27,7 +39,9 @@ use std::sync::OnceLock;
 use chrono::{TimeZone, Utc};
 use tokio::sync::Mutex;
 
-use mqk_daemon::state::autonomous_completed_bar_driver::AutonomousCompletedBarDriverOutcome;
+use mqk_daemon::state::autonomous_completed_bar_driver::{
+    AutonomousCompletedBarDriverOutcome, AutonomousStrategyDispatchRuntimeTruth,
+};
 use mqk_daemon::state::autonomous_daily_operation::{
     AutonomousDailyPlanReason, AutonomousDailySessionPlanResolution,
 };
@@ -36,7 +50,8 @@ use mqk_daemon::state::autonomous_retry_policy::{
     coordinator_reason_from_completed_bar_driver_outcome,
     coordinator_reason_from_create_or_recover_outcome,
     coordinator_reason_from_runtime_lifecycle_error,
-    coordinator_reason_from_session_plan_resolution, coordinator_reason_from_ws_continuity,
+    coordinator_reason_from_session_plan_resolution,
+    coordinator_reason_from_strategy_dispatch_runtime_truth, coordinator_reason_from_ws_continuity,
     next_retry_at, retry_delay_for_attempt, AutonomousBlockerIdentity, AutonomousCoordinatorReason,
     AutonomousRetryClass,
 };
@@ -635,4 +650,135 @@ async fn h02_group_a_resolver_calls_never_created_a_run_or_touched_a_provider_or
     let state =
         AppState::new_for_test_with_mode_and_broker(DeploymentMode::LiveShadow, BrokerKind::Alpaca);
     assert!(state.db.is_none());
+}
+
+// ===========================================================================
+// Group I — Runtime-dispatch-truth adapter (D1D1-POLICY-CLOSURE-REPAIR-01
+// REPAIR 3), fully constructible from public types.
+// ===========================================================================
+
+#[test]
+fn i01_dispatch_truth_active_matching_run_returns_none() {
+    let run_id = uuid::Uuid::from_u128(1);
+    let truth = AutonomousStrategyDispatchRuntimeTruth::Active { run_id };
+    assert_eq!(
+        coordinator_reason_from_strategy_dispatch_runtime_truth(&truth, run_id),
+        None
+    );
+}
+
+#[test]
+fn i02_dispatch_truth_active_mismatched_run_maps_run_id_mismatch() {
+    let truth = AutonomousStrategyDispatchRuntimeTruth::Active {
+        run_id: uuid::Uuid::from_u128(1),
+    };
+    let reason =
+        coordinator_reason_from_strategy_dispatch_runtime_truth(&truth, uuid::Uuid::from_u128(2))
+            .expect("mismatch is a blocker");
+    assert_eq!(reason, AutonomousCoordinatorReason::RuntimeRunIdMismatch);
+    assert_eq!(
+        classify_autonomous_reason(&reason),
+        AutonomousRetryClass::ManualInterventionRequired
+    );
+}
+
+#[test]
+fn i03_dispatch_truth_no_locally_owned_run_maps_durable_active_without_local_owner() {
+    let reason = coordinator_reason_from_strategy_dispatch_runtime_truth(
+        &AutonomousStrategyDispatchRuntimeTruth::NoLocallyOwnedRun,
+        uuid::Uuid::from_u128(1),
+    )
+    .expect("no locally owned run is a blocker");
+    assert_eq!(
+        reason,
+        AutonomousCoordinatorReason::DurableActiveRunWithoutLocalOwner
+    );
+}
+
+#[test]
+fn i04_dispatch_truth_bootstrap_missing_dormant_failed_map_exact_reasons() {
+    let cases = [
+        (
+            AutonomousStrategyDispatchRuntimeTruth::NativeStrategyBootstrapMissing,
+            AutonomousCoordinatorReason::NativeStrategyBootstrapMissing,
+        ),
+        (
+            AutonomousStrategyDispatchRuntimeTruth::NativeStrategyBootstrapDormant,
+            AutonomousCoordinatorReason::NativeStrategyBootstrapDormant,
+        ),
+        (
+            AutonomousStrategyDispatchRuntimeTruth::NativeStrategyBootstrapFailed,
+            AutonomousCoordinatorReason::NativeStrategyBootstrapFailed,
+        ),
+    ];
+    for (truth, expected) in cases {
+        let reason = coordinator_reason_from_strategy_dispatch_runtime_truth(
+            &truth,
+            uuid::Uuid::from_u128(1),
+        )
+        .unwrap_or_else(|| panic!("{truth:?} must map to a coordinator reason"));
+        assert_eq!(reason, expected);
+    }
+}
+
+// ===========================================================================
+// Group J — Blocker-signature collision resistance on long inputs
+// (D1D1-POLICY-CLOSURE-REPAIR-01 REPAIR 4), fully constructible from public
+// types.
+// ===========================================================================
+
+#[test]
+fn j01_long_assignment_identity_followed_by_different_binding_identity_still_differs() {
+    let reason = AutonomousCoordinatorReason::AssignmentMissing;
+    let long = "q".repeat(10_000);
+    let identity_a = AutonomousBlockerIdentity {
+        assignment_identity: Some(&long),
+        runtime_binding_identity: Some("binding-a"),
+        ..Default::default()
+    };
+    let identity_b = AutonomousBlockerIdentity {
+        assignment_identity: Some(&long),
+        runtime_binding_identity: Some("binding-b"),
+        ..Default::default()
+    };
+    assert_ne!(
+        blocker_signature(&reason, &identity_a),
+        blocker_signature(&reason, &identity_b)
+    );
+}
+
+#[test]
+fn j02_field_boundaries_are_unambiguous() {
+    let reason = AutonomousCoordinatorReason::AssignmentMissing;
+    let identity_a = AutonomousBlockerIdentity {
+        assignment_identity: Some("ab"),
+        runtime_binding_identity: Some("c"),
+        ..Default::default()
+    };
+    let identity_b = AutonomousBlockerIdentity {
+        assignment_identity: Some("a"),
+        runtime_binding_identity: Some("bc"),
+        ..Default::default()
+    };
+    assert_ne!(
+        blocker_signature(&reason, &identity_a),
+        blocker_signature(&reason, &identity_b)
+    );
+}
+
+#[test]
+fn j03_long_input_signature_is_bounded_and_raw_text_free() {
+    let reason = AutonomousCoordinatorReason::AssignmentMissing;
+    let marker = "public-api-raw-marker-9f3e".repeat(400);
+    let identity = AutonomousBlockerIdentity {
+        assignment_identity: Some(&marker),
+        ..Default::default()
+    };
+    let sig = blocker_signature(&reason, &identity);
+    let rendered = format!("{sig:?}");
+    assert!(
+        rendered.len() < 300,
+        "rendered signature must stay bounded regardless of input size"
+    );
+    assert!(!rendered.contains("public-api-raw-marker"));
 }

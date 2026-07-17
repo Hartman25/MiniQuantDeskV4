@@ -10,19 +10,33 @@
 //! §15 (`AutonomousRetryClass`) and the 30s/60s/120s/300s-cap backoff
 //! schedule.
 //!
-//! ## Source-grounded fault-class classification table (D1.4)
+//! ## Source-grounded fault-class classification table (D1.4, D1D1-POLICY-CLOSURE-REPAIR-01)
 //!
 //! Every `RuntimeLifecycleError::fault_class()` string reachable from
 //! `AppState::start_execution_runtime` (`state/lifecycle.rs`, including
-//! `create_or_reuse_run_for_start` and `db_pool`), as audited for this
-//! patch:
+//! `create_or_reuse_run_for_start`, `db_pool`, and
+//! `ProductionRuntimeStartEffects::start_runtime_effects`), as audited for
+//! this patch. The conversion below matches on `RuntimeLifecycleError`'s
+//! *variant first*, then on `fault_class()` — the same static fault-class
+//! string can carry a different meaning depending on the variant that
+//! produced it (see the `runtime.start_refused.service_unavailable` rows
+//! below), so a combined `ServiceUnavailable | Forbidden | Conflict` match
+//! arm would silently conflate two distinct facts:
 //!
 //! | fault_class (or `Internal` context label) | source variant | coordinator reason | retry class |
 //! |---|---|---|---|
 //! | `runtime.start_refused.service_unavailable` (`db_pool`, DB absent) | `ServiceUnavailable` | `DatabaseNotConfiguredOrInvalid` | Manual |
+//! | `runtime.start_refused.service_unavailable` (`start_runtime_effects`'s `orchestrator.tick()`, DB-backed runtime leadership lease temporarily unavailable — `"RUNTIME_LEASE"` in the effects error is converted to `RuntimeStartEffectsErrorKind::Conflict` by `start_runtime_effects`, never surfaced as a string here) | `Conflict` | `TemporaryDatabaseOperationFailure` | Transient |
+//! | `runtime.start_refused.service_unavailable` (not currently reachable as `Forbidden`) | `Forbidden` | `UnclassifiedFailClosed` (conservative fail-closed; no source site produces this combination today) | Manual |
 //! | `start active-run lookup failed` | `Internal` | `TemporaryDatabaseOperationFailure` | Transient |
 //! | `start latest-run lookup failed` | `Internal` | `TemporaryDatabaseOperationFailure` | Transient |
 //! | `start insert_run failed` | `Internal` | `TemporaryDatabaseOperationFailure` | Transient |
+//! | `start strategy_registry lookup failed` | `Internal` | `TemporaryDatabaseOperationFailure` | Transient |
+//! | `start arm_run failed` | `Internal` | `TemporaryDatabaseOperationFailure` | Transient |
+//! | `start begin_run failed` | `Internal` | `TemporaryDatabaseOperationFailure` | Transient |
+//! | `start initial heartbeat failed` | `Internal` | `TemporaryDatabaseOperationFailure` | Transient |
+//! | `post-initial-tick heartbeat refresh failed` | `Internal` | `TemporaryDatabaseOperationFailure` | Transient |
+//! | `start initial tick failed` (never transient — may wrap orchestrator, broker, continuity, risk, or other runtime failure, not proven to be a temporary DB operation from the static label alone) | `Internal` | `UnclassifiedFailClosed` | Manual |
 //! | `runtime.control_refusal.integrity_disarmed` | `Forbidden` | `IntegrityHalted` | Manual |
 //! | `runtime.start_refused.reconcile_dirty` (covers both `"dirty"`/`"stale"` source status strings) | `Forbidden` | `ReconcileDirty` | Manual |
 //! | `runtime.start_refused.native_strategy_bootstrap_failed` | `Forbidden` | `NativeStrategyBootstrapFailed` | Manual |
@@ -30,7 +44,7 @@
 //! | `runtime.start_refused.readiness_evidence_persist_failed` | `ServiceUnavailable` | `ReadinessEvidencePersistFailed` | Manual |
 //! | `runtime.start_refused.readiness_run_link_persist_failed` | `ServiceUnavailable` | `ReadinessRunLinkPersistFailed` | Manual |
 //! | `runtime.truth_mismatch.durable_active_without_local_owner` | `Conflict` | `DurableActiveRunWithoutLocalOwner` | Manual |
-//! | every other fault class (deployment-mode, capital/artifact/parity/economics gates, WS-continuity-unproven, `daily_data_readiness_blocked`, `strategy_registry_missing`/`disabled`, `market_data_not_fresh`, `fixed_window_override_invalid`, `already_owned`, `halted_lifecycle`, `durable_run_active`, any other `Internal` context) | any | `UnclassifiedFailClosed { fault_class }` | Manual |
+//! | every other fault class (deployment-mode, capital/artifact/parity/economics gates, WS-continuity-unproven, `daily_data_readiness_blocked`, `strategy_registry_missing`/`disabled`, `market_data_not_fresh`, `fixed_window_override_invalid`, `already_owned`, `halted_lifecycle`, `durable_run_active`, any other `Internal` context, and any unrecognized label on a known variant) | any | `UnclassifiedFailClosed { fault_class }` | Manual |
 //!
 //! Notes on the conservative fallback (never a guess in the transient or
 //! wait-for-condition direction):
@@ -61,18 +75,22 @@
 //!   the completed-bar driver). Conservatively fails closed rather than
 //!   conflating the two.
 //! - No fault class audited on this path is reachable as
-//!   `RetryableTransient` or `WaitForCondition` today except the three
-//!   `Internal` DB-lookup/insert labels above — the `WaitForCondition`
-//!   reasons and `WsReconnecting` are reserved for the daily coordinator's
-//!   own typed facts (see the typed-fact adapters below), not yet emitted
-//!   by any gate on the `start_execution_runtime` path.
+//!   `RetryableTransient` or `WaitForCondition` today except the eight
+//!   `Internal` DB-operation labels above and the `Conflict`-variant
+//!   `runtime.start_refused.service_unavailable` (runtime-lease-unavailable)
+//!   case — the `WaitForCondition` reasons and `WsReconnecting` are reserved
+//!   for the daily coordinator's own typed facts (see the typed-fact
+//!   adapters below), not yet emitted by any gate on the
+//!   `start_execution_runtime` path.
 
 use chrono::{DateTime, Duration as ChronoDuration, Utc};
+use sha2::{Digest, Sha256};
 
 use super::autonomous_completed_bar_driver::{
-    AutonomousCompletedBarDriverOutcome, REASON_LOCAL_RUNTIME_NOT_ACTIVE,
-    REASON_LOCAL_RUNTIME_RUN_ID_MISMATCH, REASON_NATIVE_STRATEGY_BOOTSTRAP_DORMANT,
-    REASON_NATIVE_STRATEGY_BOOTSTRAP_FAILED, REASON_NATIVE_STRATEGY_BOOTSTRAP_MISSING,
+    AutonomousCompletedBarDriverOutcome, AutonomousStrategyDispatchRuntimeTruth,
+    REASON_LOCAL_RUNTIME_NOT_ACTIVE, REASON_LOCAL_RUNTIME_RUN_ID_MISMATCH,
+    REASON_NATIVE_STRATEGY_BOOTSTRAP_DORMANT, REASON_NATIVE_STRATEGY_BOOTSTRAP_FAILED,
+    REASON_NATIVE_STRATEGY_BOOTSTRAP_MISSING,
 };
 use super::autonomous_daily_operation::{
     AutonomousDailyPlanReason, AutonomousDailySessionPlanResolution,
@@ -228,30 +246,65 @@ pub fn classify_autonomous_reason(reason: &AutonomousCoordinatorReason) -> Auton
 /// `AppState::start_execution_runtime` gate chain into a typed coordinator
 /// reason.
 ///
-/// Matches on the `RuntimeLifecycleError` variant, then on `fault_class()`
-/// by exact string equality against the source-audited constants documented
-/// in this module's classification table. Never renders `error` through a
-/// stringifying format macro, never relies on substring/prefix/regex
-/// matching. Every fault class not explicitly listed fails closed to
+/// Matches on the `RuntimeLifecycleError` variant *first*, then on
+/// `fault_class()` by exact string equality against the source-audited
+/// constants documented in this module's classification table. Never
+/// renders `error` through a stringifying format macro, never relies on
+/// substring/prefix/regex matching. Every fault class not explicitly listed
+/// for its variant fails closed to
 /// [`AutonomousCoordinatorReason::UnclassifiedFailClosed`].
+///
+/// D1D1-POLICY-CLOSURE-REPAIR-01: variant-sensitive by design. The exact
+/// static string `"runtime.start_refused.service_unavailable"` is produced
+/// by two source sites with different meanings — `db_pool()` (no runtime DB
+/// configured at all, surfaced as `ServiceUnavailable`) and
+/// `start_runtime_effects`'s `orchestrator.tick()` (a DB-backed runtime
+/// leadership lease temporarily unavailable against an already-configured
+/// DB, surfaced as `Conflict` via `RuntimeStartEffectsErrorKind::Conflict`).
+/// A combined match arm across `ServiceUnavailable | Forbidden | Conflict`
+/// would have classified both identically; matching per-variant first keeps
+/// them distinct without ever parsing the rendered message for
+/// `"RUNTIME_LEASE"` (that parsing already happens once, upstream, in
+/// `start_runtime_effects` itself — this function only ever inspects the
+/// already-typed variant and the static `fault_class` string).
 pub fn coordinator_reason_from_runtime_lifecycle_error(
     error: &RuntimeLifecycleError,
 ) -> AutonomousCoordinatorReason {
     match error {
         RuntimeLifecycleError::Internal { fault_class, .. } => match *fault_class {
+            // D1D1-POLICY-CLOSURE-REPAIR-01: every exact `Internal` context
+            // label proven, by source audit, to represent a DB operation
+            // that failed after a valid DB handle already existed (never a
+            // missing-configuration case, which is `ServiceUnavailable`
+            // from `db_pool()` instead). `"start initial tick failed"` is
+            // deliberately excluded — it can wrap orchestrator, broker,
+            // continuity, risk, or other runtime failure and is not proven
+            // transient from the static label alone.
             "start active-run lookup failed"
             | "start latest-run lookup failed"
-            | "start insert_run failed" => {
+            | "start insert_run failed"
+            | "start strategy_registry lookup failed"
+            | "start arm_run failed"
+            | "start begin_run failed"
+            | "start initial heartbeat failed"
+            | "post-initial-tick heartbeat refresh failed" => {
                 AutonomousCoordinatorReason::TemporaryDatabaseOperationFailure
             }
             other => AutonomousCoordinatorReason::UnclassifiedFailClosed { fault_class: other },
         },
-        RuntimeLifecycleError::ServiceUnavailable { fault_class, .. }
-        | RuntimeLifecycleError::Forbidden { fault_class, .. }
-        | RuntimeLifecycleError::Conflict { fault_class, .. } => match *fault_class {
+        RuntimeLifecycleError::ServiceUnavailable { fault_class, .. } => match *fault_class {
             "runtime.start_refused.service_unavailable" => {
                 AutonomousCoordinatorReason::DatabaseNotConfiguredOrInvalid
             }
+            "runtime.start_refused.readiness_evidence_persist_failed" => {
+                AutonomousCoordinatorReason::ReadinessEvidencePersistFailed
+            }
+            "runtime.start_refused.readiness_run_link_persist_failed" => {
+                AutonomousCoordinatorReason::ReadinessRunLinkPersistFailed
+            }
+            other => AutonomousCoordinatorReason::UnclassifiedFailClosed { fault_class: other },
+        },
+        RuntimeLifecycleError::Forbidden { fault_class, .. } => match *fault_class {
             "runtime.control_refusal.integrity_disarmed" => {
                 AutonomousCoordinatorReason::IntegrityHalted
             }
@@ -262,14 +315,27 @@ pub fn coordinator_reason_from_runtime_lifecycle_error(
             "runtime.start_refused.strategy_bootstrap_dormant" => {
                 AutonomousCoordinatorReason::NativeStrategyBootstrapDormant
             }
-            "runtime.start_refused.readiness_evidence_persist_failed" => {
-                AutonomousCoordinatorReason::ReadinessEvidencePersistFailed
-            }
-            "runtime.start_refused.readiness_run_link_persist_failed" => {
-                AutonomousCoordinatorReason::ReadinessRunLinkPersistFailed
-            }
+            // D1D1-POLICY-CLOSURE-REPAIR-01: `"runtime.start_refused.service_unavailable"`
+            // is not currently produced as `Forbidden` by any audited source
+            // site. No case for it here — the catchall below fails closed
+            // to `UnclassifiedFailClosed` rather than guessing it means the
+            // same thing as the `ServiceUnavailable` or `Conflict` cases.
+            other => AutonomousCoordinatorReason::UnclassifiedFailClosed { fault_class: other },
+        },
+        RuntimeLifecycleError::Conflict { fault_class, .. } => match *fault_class {
             "runtime.truth_mismatch.durable_active_without_local_owner" => {
                 AutonomousCoordinatorReason::DurableActiveRunWithoutLocalOwner
+            }
+            // D1D1-POLICY-CLOSURE-REPAIR-01: this exact fault class, when
+            // surfaced as `Conflict`, is produced only by
+            // `start_runtime_effects`'s `orchestrator.tick()` runtime-lease
+            // branch — an operational condition against an already-
+            // configured DB, not missing DB configuration. Accepted as
+            // transient because the distinction comes exclusively from the
+            // `RuntimeLifecycleError` variant, never from parsing the
+            // message for `"RUNTIME_LEASE"`.
+            "runtime.start_refused.service_unavailable" => {
+                AutonomousCoordinatorReason::TemporaryDatabaseOperationFailure
             }
             other => AutonomousCoordinatorReason::UnclassifiedFailClosed { fault_class: other },
         },
@@ -398,6 +464,51 @@ pub fn coordinator_reason_from_create_or_recover_outcome(
     }
 }
 
+/// D1D1-POLICY-CLOSURE-REPAIR-01 REPAIR 3: map an already-typed
+/// runtime-dispatch eligibility fact
+/// ([`AutonomousStrategyDispatchRuntimeTruth`], reported by
+/// `AppState::autonomous_strategy_dispatch_runtime_truth`) to a coordinator
+/// reason, or `None` when the truth proves the expected run is actively and
+/// correctly owned.
+///
+/// This adapter is intended only for a caller that already holds a durable
+/// `running` operation with a known, required `run_id` — the same
+/// precondition `prove_running_dispatch_eligibility` in
+/// `autonomous_completed_bar_driver.rs` establishes before calling
+/// `autonomous_strategy_dispatch_runtime_truth` at all. A pre-runtime caller
+/// (no operation yet, or an operation not yet `running`) must not invoke
+/// this adapter — `AutonomousStrategyDispatchRuntimeTruth` carries no
+/// operation-state fact of its own, so this function never infers or
+/// re-derives operation state; it only classifies the already-resolved
+/// runtime-ownership truth against the caller-supplied `expected_run_id`.
+///
+/// Typed match only: no debug-string rendering, no reason-string parsing.
+pub fn coordinator_reason_from_strategy_dispatch_runtime_truth(
+    truth: &AutonomousStrategyDispatchRuntimeTruth,
+    expected_run_id: uuid::Uuid,
+) -> Option<AutonomousCoordinatorReason> {
+    match truth {
+        AutonomousStrategyDispatchRuntimeTruth::Active { run_id } if *run_id == expected_run_id => {
+            None
+        }
+        AutonomousStrategyDispatchRuntimeTruth::Active { .. } => {
+            Some(AutonomousCoordinatorReason::RuntimeRunIdMismatch)
+        }
+        AutonomousStrategyDispatchRuntimeTruth::NoLocallyOwnedRun => {
+            Some(AutonomousCoordinatorReason::DurableActiveRunWithoutLocalOwner)
+        }
+        AutonomousStrategyDispatchRuntimeTruth::NativeStrategyBootstrapMissing => {
+            Some(AutonomousCoordinatorReason::NativeStrategyBootstrapMissing)
+        }
+        AutonomousStrategyDispatchRuntimeTruth::NativeStrategyBootstrapDormant => {
+            Some(AutonomousCoordinatorReason::NativeStrategyBootstrapDormant)
+        }
+        AutonomousStrategyDispatchRuntimeTruth::NativeStrategyBootstrapFailed => {
+            Some(AutonomousCoordinatorReason::NativeStrategyBootstrapFailed)
+        }
+    }
+}
+
 // NO-STRING-AUTHORITY-GUARD-SCOPE-END
 
 // ---------------------------------------------------------------------------
@@ -409,6 +520,15 @@ pub fn coordinator_reason_from_create_or_recover_outcome(
 /// or a changed stable identity input -> a different signature. Free-form
 /// error detail, timestamps, secrets, and full environment/filesystem error
 /// text never enter the signature.
+///
+/// D1D1-POLICY-CLOSURE-REPAIR-01 REPAIR 4: `stable_context`, when present,
+/// is always exactly [`BLOCKER_SIGNATURE_RENDERED_LEN`] ASCII bytes
+/// (`"sha256:"` plus 64 lowercase hex chars) — a SHA-256 digest over a
+/// versioned, tagged, length-delimited canonical encoding of every present
+/// identity field (see [`blocker_signature`]), never the raw concatenated
+/// identity strings. This replaces the prior design (`|`-joined raw values,
+/// truncated at a fixed character cap), which could let a long earlier
+/// field silently absorb or mask a changed later field.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct AutonomousBlockerSignature {
     pub reason_code: &'static str,
@@ -429,50 +549,92 @@ pub struct AutonomousBlockerIdentity<'a> {
     pub timeframe: Option<&'a str>,
 }
 
-/// Bounded cap on `stable_context` length (chars) so a pathologically long
-/// identity value cannot grow the signature unboundedly.
-const MAX_BLOCKER_SIGNATURE_STABLE_CONTEXT_CHARS: usize = 512;
+/// Canonical-encoding version tag. Bumping this (e.g. to `v3`) on any future
+/// change to field order, field set, or encoding scheme guarantees old and
+/// new signatures never collide by construction.
+const BLOCKER_SIGNATURE_CANONICAL_VERSION: &str = "mqk.autonomous-blocker-signature.v2";
 
-/// D1.6: compute a deterministic, bounded blocker signature for one typed
-/// reason plus its stable identity inputs.
+/// Fixed rendered length of a present `stable_context`: `"sha256:"` (7
+/// bytes) plus 64 lowercase hex digits.
+pub const BLOCKER_SIGNATURE_RENDERED_LEN: usize = 7 + 64;
+
+/// Append one length-delimited canonical field to `canonical`. The
+/// `<byte-length>:` prefix makes field boundaries unambiguous — a value
+/// containing the field separator, another field's name, or any other
+/// adversarial content cannot be confused with a boundary, and a changed
+/// value that happens to be a prefix/suffix of another cannot produce the
+/// same canonical bytes (proven by the differing length prefix or the
+/// differing byte immediately following the declared length).
+fn append_canonical_field(canonical: &mut String, field_name: &str, value: &str) {
+    canonical.push_str(field_name);
+    canonical.push('=');
+    canonical.push_str(&value.len().to_string());
+    canonical.push(':');
+    canonical.push_str(value);
+    canonical.push('\n');
+}
+
+/// D1.6 (D1D1-POLICY-CLOSURE-REPAIR-01 REPAIR 4): compute a deterministic,
+/// bounded, collision-resistant blocker signature for one typed reason plus
+/// its stable identity inputs.
+///
+/// Every supplied identity field contributes its full value (never
+/// truncated) to a versioned, tagged, length-delimited canonical byte
+/// string, which is then hashed with SHA-256. The rendered
+/// `stable_context` — `sha256:<64 lowercase hex chars>` — never exposes the
+/// raw identity text, carries no timestamp, no random UUID, no free-form
+/// error detail, no environment dump, and no secret-bearing field (the
+/// bounded [`AutonomousBlockerIdentity`] struct has no field for any of
+/// those). `reason_code` remains a separate field on
+/// [`AutonomousBlockerSignature`], so a changed reason still changes the
+/// overall signature even when the identity context is identical.
 pub fn blocker_signature(
     reason: &AutonomousCoordinatorReason,
     identity: &AutonomousBlockerIdentity<'_>,
 ) -> AutonomousBlockerSignature {
     let reason_code = reason_code_str(reason);
 
-    let mut parts: Vec<String> = Vec::new();
+    let mut canonical = String::new();
+    canonical.push_str(BLOCKER_SIGNATURE_CANONICAL_VERSION);
+    canonical.push('\n');
+
+    let mut any_field_present = false;
     if let Some(operation_id) = identity.operation_id {
-        parts.push(format!("op={operation_id}"));
+        append_canonical_field(&mut canonical, "operation_id", &operation_id.to_string());
+        any_field_present = true;
     }
     if let Some(v) = identity.assignment_identity {
-        parts.push(format!("assign={v}"));
+        append_canonical_field(&mut canonical, "assignment_identity", v);
+        any_field_present = true;
     }
     if let Some(v) = identity.runtime_binding_identity {
-        parts.push(format!("bind={v}"));
+        append_canonical_field(&mut canonical, "runtime_binding_identity", v);
+        any_field_present = true;
     }
     if let Some(v) = identity.provider_id {
-        parts.push(format!("provider={v}"));
+        append_canonical_field(&mut canonical, "provider_id", v);
+        any_field_present = true;
     }
     if let Some(v) = identity.symbol {
-        parts.push(format!("symbol={v}"));
+        append_canonical_field(&mut canonical, "symbol", v);
+        any_field_present = true;
     }
     if let Some(v) = identity.timeframe {
-        parts.push(format!("timeframe={v}"));
+        append_canonical_field(&mut canonical, "timeframe", v);
+        any_field_present = true;
     }
-    let joined = parts.join("|");
-    let bounded: String = joined
-        .chars()
-        .take(MAX_BLOCKER_SIGNATURE_STABLE_CONTEXT_CHARS)
-        .collect();
+
+    let stable_context = if any_field_present {
+        let mut hasher = Sha256::new();
+        hasher.update(canonical.as_bytes());
+        Some(format!("sha256:{}", hex::encode(hasher.finalize())))
+    } else {
+        None
+    };
 
     AutonomousBlockerSignature {
         reason_code,
-        stable_context: if bounded.is_empty() {
-            None
-        } else {
-            Some(bounded)
-        },
+        stable_context,
     }
 }
 
@@ -908,12 +1070,18 @@ mod tests {
     fn temporary_db_operation_fault_maps_transient_only_for_operational_not_configuration_failure()
     {
         // Operational: a DB query/insert failed after the DB was already
-        // configured and reachable (Internal variant, audited context
-        // labels from create_or_reuse_run_for_start).
+        // configured and reachable (Internal variant, all eight audited
+        // context labels reachable from create_or_reuse_run_for_start and
+        // ProductionRuntimeStartEffects::start_runtime_effects).
         for context in [
             "start active-run lookup failed",
             "start latest-run lookup failed",
             "start insert_run failed",
+            "start strategy_registry lookup failed",
+            "start arm_run failed",
+            "start begin_run failed",
+            "start initial heartbeat failed",
+            "post-initial-tick heartbeat refresh failed",
         ] {
             let err = RuntimeLifecycleError::internal(context, "sqlx error: connection reset");
             assert_eq!(
@@ -947,6 +1115,231 @@ mod tests {
                 &AutonomousCoordinatorReason::TemporaryDatabaseOperationFailure
             ),
             AutonomousRetryClass::RetryableTransient
+        );
+    }
+
+    #[test]
+    fn start_initial_tick_failed_remains_manual() {
+        // REPAIR 2: unlike the eight DB-operation labels above, this
+        // Internal context can wrap orchestrator, broker, continuity, risk,
+        // or other runtime failure — never proven transient from the static
+        // label alone.
+        let err = RuntimeLifecycleError::internal(
+            "start initial tick failed",
+            "orchestrator error: some non-DB failure",
+        );
+        let reason = coordinator_reason_from_runtime_lifecycle_error(&err);
+        assert!(matches!(
+            reason,
+            AutonomousCoordinatorReason::UnclassifiedFailClosed { .. }
+        ));
+        assert_eq!(
+            classify_autonomous_reason(&reason),
+            AutonomousRetryClass::ManualInterventionRequired
+        );
+    }
+
+    #[test]
+    fn unknown_internal_label_remains_manual() {
+        let err =
+            RuntimeLifecycleError::internal("some future internal context never audited", "detail");
+        let reason = coordinator_reason_from_runtime_lifecycle_error(&err);
+        assert!(matches!(
+            reason,
+            AutonomousCoordinatorReason::UnclassifiedFailClosed { .. }
+        ));
+        assert_eq!(
+            classify_autonomous_reason(&reason),
+            AutonomousRetryClass::ManualInterventionRequired
+        );
+    }
+
+    #[test]
+    fn near_match_internal_label_remains_manual() {
+        // Exact-string equality only — a near-match to an audited transient
+        // label must never be treated as that label.
+        let err = RuntimeLifecycleError::internal("start arm_run failed extra", "detail");
+        let reason = coordinator_reason_from_runtime_lifecycle_error(&err);
+        assert!(matches!(
+            reason,
+            AutonomousCoordinatorReason::UnclassifiedFailClosed { .. }
+        ));
+        assert_eq!(
+            classify_autonomous_reason(&reason),
+            AutonomousRetryClass::ManualInterventionRequired
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // D1D1-POLICY-CLOSURE-REPAIR-01 REPAIR 1: variant-sensitive mapping of
+    // the exact same static fault_class string
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn service_unavailable_variant_service_unavailable_fault_class_maps_db_not_configured() {
+        let err = RuntimeLifecycleError::service_unavailable(
+            "runtime.start_refused.service_unavailable",
+            "runtime DB is not configured on this daemon",
+        );
+        assert_eq!(
+            coordinator_reason_from_runtime_lifecycle_error(&err),
+            AutonomousCoordinatorReason::DatabaseNotConfiguredOrInvalid
+        );
+    }
+
+    #[test]
+    fn conflict_variant_service_unavailable_fault_class_maps_temporary_db_operation_failure() {
+        let err = RuntimeLifecycleError::conflict(
+            "runtime.start_refused.service_unavailable",
+            "runtime leader lease unavailable: RUNTIME_LEASE could not be acquired",
+        );
+        let reason = coordinator_reason_from_runtime_lifecycle_error(&err);
+        assert_eq!(
+            reason,
+            AutonomousCoordinatorReason::TemporaryDatabaseOperationFailure
+        );
+        assert_eq!(
+            classify_autonomous_reason(&reason),
+            AutonomousRetryClass::RetryableTransient
+        );
+    }
+
+    #[test]
+    fn forbidden_variant_service_unavailable_fault_class_fails_closed_to_manual() {
+        // Not currently reachable as Forbidden by any audited source site —
+        // must fail closed, never reuse the ServiceUnavailable or Conflict
+        // mapping for the same string.
+        let err = RuntimeLifecycleError::forbidden(
+            "runtime.start_refused.service_unavailable",
+            "some_gate",
+            "message",
+        );
+        let reason = coordinator_reason_from_runtime_lifecycle_error(&err);
+        assert!(matches!(
+            reason,
+            AutonomousCoordinatorReason::UnclassifiedFailClosed { .. }
+        ));
+        assert_eq!(
+            classify_autonomous_reason(&reason),
+            AutonomousRetryClass::ManualInterventionRequired
+        );
+    }
+
+    #[test]
+    fn variant_sensitive_mapping_is_not_confused_by_message_wording() {
+        let service_unavailable = RuntimeLifecycleError::service_unavailable(
+            "runtime.start_refused.service_unavailable",
+            "message A, completely different wording",
+        );
+        let conflict = RuntimeLifecycleError::conflict(
+            "runtime.start_refused.service_unavailable",
+            "an entirely different message B with different length and content",
+        );
+        let forbidden = RuntimeLifecycleError::forbidden(
+            "runtime.start_refused.service_unavailable",
+            "gate",
+            "yet another wording C",
+        );
+        let a = coordinator_reason_from_runtime_lifecycle_error(&service_unavailable);
+        let b = coordinator_reason_from_runtime_lifecycle_error(&conflict);
+        let c = coordinator_reason_from_runtime_lifecycle_error(&forbidden);
+        assert_eq!(
+            a,
+            AutonomousCoordinatorReason::DatabaseNotConfiguredOrInvalid
+        );
+        assert_eq!(
+            b,
+            AutonomousCoordinatorReason::TemporaryDatabaseOperationFailure
+        );
+        assert!(matches!(
+            c,
+            AutonomousCoordinatorReason::UnclassifiedFailClosed { .. }
+        ));
+        assert_ne!(a, b);
+        assert_ne!(b, c);
+        assert_ne!(a, c);
+    }
+
+    // -----------------------------------------------------------------
+    // D1D1-POLICY-CLOSURE-REPAIR-01 REPAIR 3: runtime-dispatch-truth adapter
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn dispatch_truth_active_matching_run_returns_none() {
+        let run_id = uuid::Uuid::from_u128(100);
+        let truth = AutonomousStrategyDispatchRuntimeTruth::Active { run_id };
+        assert_eq!(
+            coordinator_reason_from_strategy_dispatch_runtime_truth(&truth, run_id),
+            None
+        );
+    }
+
+    #[test]
+    fn dispatch_truth_active_mismatched_run_maps_run_id_mismatch() {
+        let truth = AutonomousStrategyDispatchRuntimeTruth::Active {
+            run_id: uuid::Uuid::from_u128(1),
+        };
+        let reason = coordinator_reason_from_strategy_dispatch_runtime_truth(
+            &truth,
+            uuid::Uuid::from_u128(2),
+        )
+        .expect("mismatch is a blocker");
+        assert_eq!(reason, AutonomousCoordinatorReason::RuntimeRunIdMismatch);
+        assert_eq!(
+            classify_autonomous_reason(&reason),
+            AutonomousRetryClass::ManualInterventionRequired
+        );
+    }
+
+    #[test]
+    fn dispatch_truth_no_locally_owned_run_maps_durable_active_run_without_local_owner() {
+        let reason = coordinator_reason_from_strategy_dispatch_runtime_truth(
+            &AutonomousStrategyDispatchRuntimeTruth::NoLocallyOwnedRun,
+            uuid::Uuid::from_u128(1),
+        )
+        .expect("no locally owned run is a blocker");
+        assert_eq!(
+            reason,
+            AutonomousCoordinatorReason::DurableActiveRunWithoutLocalOwner
+        );
+    }
+
+    #[test]
+    fn dispatch_truth_bootstrap_missing_maps_exact_reason() {
+        let reason = coordinator_reason_from_strategy_dispatch_runtime_truth(
+            &AutonomousStrategyDispatchRuntimeTruth::NativeStrategyBootstrapMissing,
+            uuid::Uuid::from_u128(1),
+        )
+        .expect("missing bootstrap is a blocker");
+        assert_eq!(
+            reason,
+            AutonomousCoordinatorReason::NativeStrategyBootstrapMissing
+        );
+    }
+
+    #[test]
+    fn dispatch_truth_bootstrap_dormant_maps_exact_reason() {
+        let reason = coordinator_reason_from_strategy_dispatch_runtime_truth(
+            &AutonomousStrategyDispatchRuntimeTruth::NativeStrategyBootstrapDormant,
+            uuid::Uuid::from_u128(1),
+        )
+        .expect("dormant bootstrap is a blocker");
+        assert_eq!(
+            reason,
+            AutonomousCoordinatorReason::NativeStrategyBootstrapDormant
+        );
+    }
+
+    #[test]
+    fn dispatch_truth_bootstrap_failed_maps_exact_reason() {
+        let reason = coordinator_reason_from_strategy_dispatch_runtime_truth(
+            &AutonomousStrategyDispatchRuntimeTruth::NativeStrategyBootstrapFailed,
+            uuid::Uuid::from_u128(1),
+        )
+        .expect("failed bootstrap is a blocker");
+        assert_eq!(
+            reason,
+            AutonomousCoordinatorReason::NativeStrategyBootstrapFailed
         );
     }
 
@@ -1235,6 +1628,157 @@ mod tests {
     }
 
     #[test]
+    fn changed_assignment_identity_changes_signature() {
+        let reason = AutonomousCoordinatorReason::AssignmentMissing;
+        let identity_a = AutonomousBlockerIdentity {
+            assignment_identity: Some("assign-a"),
+            ..Default::default()
+        };
+        let identity_b = AutonomousBlockerIdentity {
+            assignment_identity: Some("assign-b"),
+            ..Default::default()
+        };
+        assert_ne!(
+            blocker_signature(&reason, &identity_a),
+            blocker_signature(&reason, &identity_b)
+        );
+    }
+
+    #[test]
+    fn changed_provider_id_changes_signature() {
+        let reason = AutonomousCoordinatorReason::ProviderRegistryInvalid;
+        let identity_a = AutonomousBlockerIdentity {
+            provider_id: Some("twelvedata"),
+            ..Default::default()
+        };
+        let identity_b = AutonomousBlockerIdentity {
+            provider_id: Some("alpaca"),
+            ..Default::default()
+        };
+        assert_ne!(
+            blocker_signature(&reason, &identity_a),
+            blocker_signature(&reason, &identity_b)
+        );
+    }
+
+    #[test]
+    fn changed_symbol_changes_signature() {
+        let reason = AutonomousCoordinatorReason::SymbolBindingMismatch;
+        let identity_a = AutonomousBlockerIdentity {
+            symbol: Some("ZZSG01"),
+            ..Default::default()
+        };
+        let identity_b = AutonomousBlockerIdentity {
+            symbol: Some("ZZSG02"),
+            ..Default::default()
+        };
+        assert_ne!(
+            blocker_signature(&reason, &identity_a),
+            blocker_signature(&reason, &identity_b)
+        );
+    }
+
+    #[test]
+    fn changed_timeframe_changes_signature() {
+        let reason = AutonomousCoordinatorReason::TimeframeBindingMismatch;
+        let identity_a = AutonomousBlockerIdentity {
+            timeframe: Some("1Min"),
+            ..Default::default()
+        };
+        let identity_b = AutonomousBlockerIdentity {
+            timeframe: Some("5Min"),
+            ..Default::default()
+        };
+        assert_ne!(
+            blocker_signature(&reason, &identity_a),
+            blocker_signature(&reason, &identity_b)
+        );
+    }
+
+    #[test]
+    fn long_assignment_identity_followed_by_different_binding_identity_still_differs() {
+        // A pathologically long earlier field must never absorb or mask a
+        // changed later field — the length-delimited encoding (not the
+        // old truncate-at-512-chars design) proves this.
+        let reason = AutonomousCoordinatorReason::AssignmentMissing;
+        let long = "a".repeat(10_000);
+        let identity_a = AutonomousBlockerIdentity {
+            assignment_identity: Some(&long),
+            runtime_binding_identity: Some("binding-a"),
+            ..Default::default()
+        };
+        let identity_b = AutonomousBlockerIdentity {
+            assignment_identity: Some(&long),
+            runtime_binding_identity: Some("binding-b"),
+            ..Default::default()
+        };
+        assert_ne!(
+            blocker_signature(&reason, &identity_a),
+            blocker_signature(&reason, &identity_b)
+        );
+    }
+
+    #[test]
+    fn long_assignment_identity_followed_by_different_provider_id_still_differs() {
+        let reason = AutonomousCoordinatorReason::AssignmentMissing;
+        let long = "b".repeat(10_000);
+        let identity_a = AutonomousBlockerIdentity {
+            assignment_identity: Some(&long),
+            provider_id: Some("twelvedata"),
+            ..Default::default()
+        };
+        let identity_b = AutonomousBlockerIdentity {
+            assignment_identity: Some(&long),
+            provider_id: Some("alpaca"),
+            ..Default::default()
+        };
+        assert_ne!(
+            blocker_signature(&reason, &identity_a),
+            blocker_signature(&reason, &identity_b)
+        );
+    }
+
+    #[test]
+    fn canonical_field_boundaries_are_unambiguous() {
+        // assignment="ab", binding="c" must differ from assignment="a",
+        // binding="bc" — the length-delimited encoding makes the field
+        // boundary explicit rather than inferring it from a plain
+        // delimiter, which a raw "ab|c" vs "a|bc" concatenation would not
+        // have distinguished if either value could itself contain "|".
+        let reason = AutonomousCoordinatorReason::AssignmentMissing;
+        let identity_a = AutonomousBlockerIdentity {
+            assignment_identity: Some("ab"),
+            runtime_binding_identity: Some("c"),
+            ..Default::default()
+        };
+        let identity_b = AutonomousBlockerIdentity {
+            assignment_identity: Some("a"),
+            runtime_binding_identity: Some("bc"),
+            ..Default::default()
+        };
+        assert_ne!(
+            blocker_signature(&reason, &identity_a),
+            blocker_signature(&reason, &identity_b)
+        );
+    }
+
+    #[test]
+    fn raw_long_identity_text_is_absent_from_rendered_signature() {
+        let reason = AutonomousCoordinatorReason::AssignmentMissing;
+        let long = "unmistakable-raw-identity-marker-zzsg-9f3e".repeat(50);
+        let identity = AutonomousBlockerIdentity {
+            assignment_identity: Some(&long),
+            ..Default::default()
+        };
+        let sig = blocker_signature(&reason, &identity);
+        let rendered = format!("{sig:?}");
+        assert!(
+            !rendered.contains("unmistakable-raw-identity-marker"),
+            "rendered signature must never contain raw identity text"
+        );
+    }
+
+    #[test]
     fn free_form_detail_changes_do_not_change_signature() {
         // The signature type carries no free-form detail field at all — the
         // constructor accepts only the bounded AutonomousBlockerIdentity, so
@@ -1270,6 +1814,10 @@ mod tests {
 
     #[test]
     fn signature_length_is_bounded() {
+        // D1D1-POLICY-CLOSURE-REPAIR-01: stable_context is now a SHA-256
+        // digest render, so its length is always exactly
+        // BLOCKER_SIGNATURE_RENDERED_LEN regardless of input size — bounded
+        // by construction, not by truncation.
         let reason = AutonomousCoordinatorReason::AssignmentMissing;
         let pathological = "x".repeat(10_000);
         let identity = AutonomousBlockerIdentity {
@@ -1278,10 +1826,47 @@ mod tests {
         };
         let sig = blocker_signature(&reason, &identity);
         let len = sig.stable_context.map(|s| s.chars().count()).unwrap_or(0);
-        assert!(
-            len <= MAX_BLOCKER_SIGNATURE_STABLE_CONTEXT_CHARS,
-            "stable_context must never exceed the documented bound, got {len}"
+        assert_eq!(
+            len, BLOCKER_SIGNATURE_RENDERED_LEN,
+            "stable_context must always render at the fixed documented length, got {len}"
         );
+    }
+
+    #[test]
+    fn signature_length_is_fixed_for_short_identity_too() {
+        let reason = AutonomousCoordinatorReason::AssignmentMissing;
+        let identity = AutonomousBlockerIdentity {
+            assignment_identity: Some("x"),
+            ..Default::default()
+        };
+        let sig = blocker_signature(&reason, &identity);
+        let len = sig.stable_context.map(|s| s.chars().count()).unwrap_or(0);
+        assert_eq!(len, BLOCKER_SIGNATURE_RENDERED_LEN);
+    }
+
+    #[test]
+    fn stable_context_none_when_no_identity_fields_present() {
+        let reason = AutonomousCoordinatorReason::NonTradingDay;
+        let identity = AutonomousBlockerIdentity::default();
+        let sig = blocker_signature(&reason, &identity);
+        assert_eq!(sig.stable_context, None);
+    }
+
+    #[test]
+    fn signature_rendered_form_matches_sha256_prefix_convention() {
+        let reason = AutonomousCoordinatorReason::AssignmentMissing;
+        let identity = AutonomousBlockerIdentity {
+            assignment_identity: Some("assign-1"),
+            ..Default::default()
+        };
+        let sig = blocker_signature(&reason, &identity);
+        let rendered = sig.stable_context.expect("identity present");
+        assert!(rendered.starts_with("sha256:"));
+        let hex_part = &rendered["sha256:".len()..];
+        assert_eq!(hex_part.len(), 64);
+        assert!(hex_part
+            .chars()
+            .all(|c| c.is_ascii_hexdigit() && !c.is_ascii_uppercase()));
     }
 
     // -----------------------------------------------------------------
