@@ -14,9 +14,10 @@ use chrono::{DateTime, NaiveDate, Utc};
 use mqk_daemon::daily_data_readiness::AssignmentReadiness;
 use mqk_daemon::state::autonomous_completed_bar_driver::{
     resolve_autonomous_provider_call_authorization, resolve_single_effective_binding,
-    tick_autonomous_completed_bar_driver, AutonomousBindingRejection,
-    AutonomousCompletedBarDriverInput, AutonomousCompletedBarDriverOutcome,
-    AutonomousProviderCallAuthorization,
+    tick_autonomous_completed_bar_driver, AutonomousAssignmentReadinessEvaluator,
+    AutonomousBindingRejection, AutonomousCompletedBarDriverInput,
+    AutonomousCompletedBarDriverOutcome, AutonomousProviderCallAuthorization,
+    ResolvedSingleBinding,
 };
 use mqk_daemon::state::market_data_latest_bar::LatestBarRegistryAdmissionRejection;
 use mqk_daemon::state::{self, OperatorAuthMode};
@@ -127,6 +128,65 @@ fn blocked_readiness(
     r.readiness_state = "blocked";
     r.blockers = blockers;
     r
+}
+
+/// REPAIR 1 (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01C-POLL-REEVALUATE-AND-PROVIDER-CLOSURE-01):
+/// injected fake readiness evaluator. Each call to `.evaluate()` pops one
+/// `AssignmentReadiness` from the front of a queue; `always(r)` builds an
+/// infinite queue of one repeated value (for tests that only care about a
+/// single readiness snapshot governing both the pre-poll and post-poll
+/// evaluations — a mechanical, behavior-preserving stand-in for the old
+/// single injected `&AssignmentReadiness` field), while `queue(vec![...])`
+/// lets a test prove the driver's two-stage evaluation explicitly (e.g.
+/// "first evaluation -> missing expected bar, second evaluation -> ready").
+struct FakeReadinessEvaluator {
+    items: Mutex<VecDeque<AssignmentReadiness>>,
+    repeat_last: bool,
+    calls: AtomicUsize,
+}
+
+impl FakeReadinessEvaluator {
+    fn always(readiness: AssignmentReadiness) -> Self {
+        Self {
+            items: Mutex::new(VecDeque::from([readiness])),
+            repeat_last: true,
+            calls: AtomicUsize::new(0),
+        }
+    }
+
+    fn queue(items: Vec<AssignmentReadiness>) -> Self {
+        Self {
+            items: Mutex::new(VecDeque::from(items)),
+            repeat_last: false,
+            calls: AtomicUsize::new(0),
+        }
+    }
+
+    fn calls(&self) -> usize {
+        self.calls.load(Ordering::SeqCst)
+    }
+}
+
+#[async_trait::async_trait]
+impl AutonomousAssignmentReadinessEvaluator for FakeReadinessEvaluator {
+    async fn evaluate(
+        &self,
+        _operation: &mqk_db::AutonomousDailyOperationRecord,
+        _binding: &ResolvedSingleBinding,
+        _now_utc: DateTime<Utc>,
+    ) -> anyhow::Result<AssignmentReadiness> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let mut items = self.items.lock().unwrap();
+        match items.pop_front() {
+            Some(readiness) => {
+                if self.repeat_last {
+                    items.push_back(readiness.clone());
+                }
+                Ok(readiness)
+            }
+            None => panic!("FakeReadinessEvaluator queue exhausted — test supplied too few readiness snapshots for the number of evaluate() calls the driver actually made"),
+        }
+    }
 }
 
 type FakeLatestBarOutcome = Result<Option<mqk_md::CanonicalBar>, mqk_md::MarketDataProviderError>;
@@ -532,7 +592,7 @@ async fn admission_07_disabled_provider_zero_calls() {
         instruments: &instruments,
         provider_id: "fake",
         provider: &provider,
-        readiness: &readiness,
+        readiness_evaluator: &FakeReadinessEvaluator::always(readiness.clone()),
     })
     .await
     .expect("tick ok");
@@ -589,7 +649,7 @@ async fn admission_08_blank_provider_symbol_zero_calls() {
         instruments: &instruments,
         provider_id: "fake",
         provider: &provider,
-        readiness: &readiness,
+        readiness_evaluator: &FakeReadinessEvaluator::always(readiness.clone()),
     })
     .await
     .expect("tick ok");
@@ -793,7 +853,7 @@ async fn cadence_11_not_repeated_for_same_expected_bar_after_success() {
         instruments: &instruments,
         provider_id: "fake",
         provider: &provider,
-        readiness: &readiness,
+        readiness_evaluator: &FakeReadinessEvaluator::always(readiness.clone()),
     })
     .await
     .expect("tick ok");
@@ -852,7 +912,7 @@ async fn cadence_12_13_no_poll_before_interval_close_plus_grace() {
         instruments: &instruments,
         provider_id: "fake",
         provider: &provider,
-        readiness: &readiness,
+        readiness_evaluator: &FakeReadinessEvaluator::always(readiness.clone()),
     })
     .await
     .expect("tick ok");
@@ -912,7 +972,7 @@ async fn cadence_14_15_new_due_interval_polls_again_after_success() {
         instruments: &instruments,
         provider_id: "fake",
         provider: &provider,
-        readiness: &readiness1,
+        readiness_evaluator: &FakeReadinessEvaluator::always(readiness1.clone()),
     })
     .await
     .expect("tick ok");
@@ -948,7 +1008,7 @@ async fn cadence_14_15_new_due_interval_polls_again_after_success() {
         instruments: &instruments,
         provider_id: "fake",
         provider: &provider,
-        readiness: &readiness_same,
+        readiness_evaluator: &FakeReadinessEvaluator::always(readiness_same.clone()),
     })
     .await
     .expect("tick ok");
@@ -983,7 +1043,7 @@ async fn cadence_14_15_new_due_interval_polls_again_after_success() {
         instruments: &instruments,
         provider_id: "fake",
         provider: &provider,
-        readiness: &readiness2,
+        readiness_evaluator: &FakeReadinessEvaluator::always(readiness2.clone()),
     })
     .await
     .expect("tick ok");
@@ -1039,7 +1099,7 @@ async fn cadence_16_no_poll_after_effective_operation_close() {
         instruments: &instruments,
         provider_id: "fake",
         provider: &provider,
-        readiness: &readiness,
+        readiness_evaluator: &FakeReadinessEvaluator::always(readiness.clone()),
     })
     .await
     .expect("tick ok");
@@ -1096,7 +1156,7 @@ async fn window_before_preopen_not_applicable() {
         instruments: &instruments,
         provider_id: "fake",
         provider: &provider,
-        readiness: &readiness,
+        readiness_evaluator: &FakeReadinessEvaluator::always(readiness.clone()),
     })
     .await
     .expect("tick ok");
@@ -1163,7 +1223,7 @@ async fn mapping_17_21_canonical_symbol_and_provenance_stored() {
         instruments: &instruments,
         provider_id: "fake",
         provider: &provider,
-        readiness: &readiness,
+        readiness_evaluator: &FakeReadinessEvaluator::always(readiness.clone()),
     })
     .await
     .expect("tick ok");
@@ -1261,7 +1321,7 @@ async fn readiness_22_30_not_ready_blocks_regardless_of_reason() {
         instruments: &instruments,
         provider_id: "alpaca",
         provider: &provider,
-        readiness: &readiness,
+        readiness_evaluator: &FakeReadinessEvaluator::always(readiness.clone()),
     })
     .await
     .expect("tick ok");
@@ -1331,7 +1391,7 @@ async fn readiness_29_verified_provider_may_proceed_to_poll() {
         instruments: &instruments,
         provider_id: "twelvedata",
         provider: &provider,
-        readiness: &readiness,
+        readiness_evaluator: &FakeReadinessEvaluator::always(readiness.clone()),
     })
     .await
     .expect("tick ok");
@@ -1477,7 +1537,7 @@ async fn observation_34_db_evidence_failure_prevents_dispatch() {
         instruments: &instruments,
         provider_id: "fake",
         provider: &provider,
-        readiness: &readiness,
+        readiness_evaluator: &FakeReadinessEvaluator::always(readiness.clone()),
     })
     .await
     .expect("tick ok");
@@ -1555,7 +1615,7 @@ async fn dispatch_35_36_37_39_41_new_bar_dispatches_once_new_bar_dispatches_agai
         instruments: &instruments,
         provider_id: "fake",
         provider: &provider,
-        readiness: &readiness1,
+        readiness_evaluator: &FakeReadinessEvaluator::always(readiness1.clone()),
     })
     .await
     .expect("tick ok");
@@ -1622,7 +1682,7 @@ async fn dispatch_35_36_37_39_41_new_bar_dispatches_once_new_bar_dispatches_agai
         instruments: &instruments,
         provider_id: "fake",
         provider: &provider,
-        readiness: &readiness2,
+        readiness_evaluator: &FakeReadinessEvaluator::always(readiness2.clone()),
     })
     .await
     .expect("tick ok");
@@ -1773,7 +1833,7 @@ async fn dispatch_40_42_staleness_gate_remains_active_and_failure_not_falsely_co
         instruments: &instruments,
         provider_id: "fake",
         provider: &provider,
-        readiness: &readiness1,
+        readiness_evaluator: &FakeReadinessEvaluator::always(readiness1.clone()),
     })
     .await
     .expect("tick ok");
@@ -1900,7 +1960,7 @@ async fn session_45_early_close_operation_still_pollable() {
         instruments: &instruments,
         provider_id: "fake",
         provider: &provider,
-        readiness: &readiness,
+        readiness_evaluator: &FakeReadinessEvaluator::always(readiness.clone()),
     })
     .await
     .expect("tick ok");
@@ -1983,7 +2043,7 @@ async fn session_46_effective_override_controls_operation_timing_only() {
         instruments: &instruments,
         provider_id: "fake",
         provider: &provider,
-        readiness: &readiness,
+        readiness_evaluator: &FakeReadinessEvaluator::always(readiness.clone()),
     })
     .await
     .expect("tick ok");
@@ -2058,7 +2118,7 @@ async fn session_47_legacy_null_exchange_truth_blocks() {
         instruments: &instruments,
         provider_id: "fake",
         provider: &provider,
-        readiness: &readiness,
+        readiness_evaluator: &FakeReadinessEvaluator::always(readiness.clone()),
     })
     .await
     .expect("tick ok");
@@ -2144,7 +2204,7 @@ async fn history_49_insufficient_history_blocker_remains_a_hard_block() {
         instruments: &instruments,
         provider_id: "fake",
         provider: &provider,
-        readiness: &readiness,
+        readiness_evaluator: &FakeReadinessEvaluator::always(readiness.clone()),
     })
     .await
     .expect("tick ok");
@@ -2180,5 +2240,875 @@ fn guard_main_rs_does_not_start_new_driver_and_still_spawns_legacy_ticker() {
     assert!(
         main_source.contains("spawn_autonomous_bar_ticker"),
         "main.rs must still spawn only the legacy ticker in Phase C"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01C-POLL-REEVALUATE-AND-PROVIDER-CLOSURE-01
+// REPAIR 10 — two-stage readiness, exact expected-bar enforcement, and
+// TwelveData capability closure proofs.
+// ---------------------------------------------------------------------------
+
+/// A missing expected bar alone is poll-remediable: pre-poll readiness may
+/// be `"blocked"` on exactly `expected_latest_bar_missing` and still
+/// authorize one provider call (REPAIR 10 points 1-4, 11).
+#[tokio::test]
+async fn repair10_01_04_11_missing_expected_bar_pre_poll_blocked_still_polls_and_dispatches_when_post_poll_ready(
+) {
+    let Some(pool) = maybe_db("repair10_01_04_11").await else {
+        return;
+    };
+    let timing = standard_timing();
+    let operation = create_test_operation(
+        &pool,
+        "zzdrv-r10a",
+        "ZZDRVR10A",
+        "swing_momentum",
+        "5m",
+        &timing,
+        mqk_db::STATE_AWAITING_OPEN,
+    )
+    .await;
+    let instruments = vec![fixture_instrument("ZZDRVR10A", "fake", "ZZDRVR10A", "5m")];
+    let assignment_config = fixture_assignment_config("ZZDRVR10A", "swing_momentum", "5m");
+    let assignment_identity =
+        mqk_daemon::state::autonomous_daily_operation::derive_assignment_identity(
+            &assignment_config,
+        );
+    let binding = fixture_binding("ZZDRVR10A", "swing_momentum", 300);
+    let runtime_binding_identity =
+        mqk_daemon::state::autonomous_daily_operation::derive_runtime_binding_identity(&binding);
+    let provider = FakeQueueProvider::new();
+    let state = active_bootstrap_state(pool.clone()).await;
+
+    let expected_ts = timing.effective_open.timestamp() + 300;
+    provider.push_outcome(
+        "ZZDRVR10A",
+        Ok(Some(bar("ZZDRVR10A", "5m", expected_ts, true))),
+    );
+
+    // First (pre-poll) evaluation: blocked on exactly the missing-bar
+    // reason — poll-remediable, not a hard block. Second (post-poll)
+    // evaluation: ready, agreeing the ingested bar is the expected/actual
+    // latest bar — this alone authorizes dispatch.
+    let pre_poll = AssignmentReadiness {
+        readiness_state: "blocked",
+        blockers: vec![mqk_daemon::daily_data_readiness::REASON_EXPECTED_LATEST_BAR_MISSING],
+        expected_latest_bar_ts: Some(expected_ts),
+        actual_latest_bar_ts: None,
+        ..ready_readiness("ZZDRVR10A", "5m", Some(expected_ts))
+    };
+    let post_poll = ready_readiness("ZZDRVR10A", "5m", Some(expected_ts));
+    let evaluator = FakeReadinessEvaluator::queue(vec![pre_poll, post_poll]);
+
+    let outcome = tick_autonomous_completed_bar_driver(AutonomousCompletedBarDriverInput {
+        state: &state,
+        pool: &pool,
+        operation: &operation,
+        assignment_config: &assignment_config,
+        assignment_identity: &assignment_identity,
+        runtime_binding: &binding,
+        runtime_binding_identity: &runtime_binding_identity,
+        now_utc: timing.effective_open + chrono::Duration::minutes(6),
+        authorization: AutonomousProviderCallAuthorization::Authorized,
+        instruments: &instruments,
+        provider_id: "fake",
+        provider: &provider,
+        readiness_evaluator: &evaluator,
+    })
+    .await
+    .expect("tick ok");
+
+    assert_eq!(
+        outcome,
+        AutonomousCompletedBarDriverOutcome::DispatchCompleted {
+            bar_end_ts: expected_ts
+        },
+        "a missing-expected-bar pre-poll blocker must not prevent polling or dispatch \
+         once the post-poll evaluation is ready"
+    );
+    assert_eq!(
+        provider.calls(),
+        1,
+        "exactly one authorized provider call despite the pre-poll blocker"
+    );
+    assert_eq!(evaluator.calls(), 2, "pre-poll and post-poll evaluations");
+
+    let refreshed = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation.operation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(refreshed.bars_observed, 1);
+    assert_eq!(refreshed.bars_dispatched, 1);
+    assert_eq!(refreshed.last_completed_bar_ts, Some(expected_ts));
+}
+
+/// A post-poll readiness re-evaluation that is not ready creates no dispatch
+/// claim and calls the strategy path zero times, even though the exact
+/// expected bar was successfully polled and ingested (REPAIR 10 point 5).
+#[tokio::test]
+async fn repair10_05_post_poll_blocked_readiness_creates_no_claim_and_no_dispatch() {
+    let Some(pool) = maybe_db("repair10_05").await else {
+        return;
+    };
+    let timing = standard_timing();
+    let operation = create_test_operation(
+        &pool,
+        "zzdrv-r10b",
+        "ZZDRVR10B",
+        "swing_momentum",
+        "5m",
+        &timing,
+        mqk_db::STATE_AWAITING_OPEN,
+    )
+    .await;
+    let instruments = vec![fixture_instrument("ZZDRVR10B", "fake", "ZZDRVR10B", "5m")];
+    let assignment_config = fixture_assignment_config("ZZDRVR10B", "swing_momentum", "5m");
+    let assignment_identity =
+        mqk_daemon::state::autonomous_daily_operation::derive_assignment_identity(
+            &assignment_config,
+        );
+    let binding = fixture_binding("ZZDRVR10B", "swing_momentum", 300);
+    let runtime_binding_identity =
+        mqk_daemon::state::autonomous_daily_operation::derive_runtime_binding_identity(&binding);
+    let provider = FakeQueueProvider::new();
+    let state = active_bootstrap_state(pool.clone()).await;
+
+    let expected_ts = timing.effective_open.timestamp() + 300;
+    provider.push_outcome(
+        "ZZDRVR10B",
+        Ok(Some(bar("ZZDRVR10B", "5m", expected_ts, true))),
+    );
+
+    let pre_poll = ready_readiness("ZZDRVR10B", "5m", Some(expected_ts));
+    let post_poll_blocked = AssignmentReadiness {
+        readiness_state: "blocked",
+        blockers: vec![
+            mqk_daemon::daily_data_readiness::REASON_PROVIDER_TIMESTAMP_CONVENTION_UNVERIFIED,
+        ],
+        ..ready_readiness("ZZDRVR10B", "5m", Some(expected_ts))
+    };
+    let evaluator = FakeReadinessEvaluator::queue(vec![pre_poll, post_poll_blocked]);
+
+    let outcome = tick_autonomous_completed_bar_driver(AutonomousCompletedBarDriverInput {
+        state: &state,
+        pool: &pool,
+        operation: &operation,
+        assignment_config: &assignment_config,
+        assignment_identity: &assignment_identity,
+        runtime_binding: &binding,
+        runtime_binding_identity: &runtime_binding_identity,
+        now_utc: timing.effective_open + chrono::Duration::minutes(6),
+        authorization: AutonomousProviderCallAuthorization::Authorized,
+        instruments: &instruments,
+        provider_id: "fake",
+        provider: &provider,
+        readiness_evaluator: &evaluator,
+    })
+    .await
+    .expect("tick ok");
+
+    match outcome {
+        AutonomousCompletedBarDriverOutcome::ReadinessBlockedAfterPoll { blockers } => {
+            assert_eq!(blockers, vec!["provider_timestamp_convention_unverified"]);
+        }
+        other => panic!("expected ReadinessBlockedAfterPoll, got {other:?}"),
+    }
+
+    let claim = mqk_db::fetch_autonomous_daily_bar_dispatch(
+        &pool,
+        operation.operation_id,
+        "ZZDRVR10B",
+        "5m",
+        expected_ts,
+    )
+    .await
+    .unwrap();
+    assert!(claim.is_none(), "no dispatch claim must be created");
+
+    let refreshed = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation.operation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        refreshed.bars_dispatched, 0,
+        "post-poll blocked readiness must never increment bars_dispatched"
+    );
+    assert_eq!(
+        refreshed.bars_observed, 1,
+        "the bar itself was genuinely observed — only dispatch is refused"
+    );
+}
+
+/// The exact expected bar already present in `md_bars` produces zero
+/// provider calls, and is observed and dispatched exactly once (REPAIR 10
+/// points 6, 7).
+#[tokio::test]
+async fn repair10_06_07_exact_bar_already_in_db_zero_provider_calls_dispatches_once() {
+    let Some(pool) = maybe_db("repair10_06_07").await else {
+        return;
+    };
+    let timing = standard_timing();
+    let operation = create_test_operation(
+        &pool,
+        "zzdrv-r10c",
+        "ZZDRVR10C",
+        "swing_momentum",
+        "5m",
+        &timing,
+        mqk_db::STATE_AWAITING_OPEN,
+    )
+    .await;
+    let instruments = vec![fixture_instrument("ZZDRVR10C", "fake", "ZZDRVR10C", "5m")];
+    let assignment_config = fixture_assignment_config("ZZDRVR10C", "swing_momentum", "5m");
+    let assignment_identity =
+        mqk_daemon::state::autonomous_daily_operation::derive_assignment_identity(
+            &assignment_config,
+        );
+    let binding = fixture_binding("ZZDRVR10C", "swing_momentum", 300);
+    let runtime_binding_identity =
+        mqk_daemon::state::autonomous_daily_operation::derive_runtime_binding_identity(&binding);
+    let provider = FakeQueueProvider::new(); // no outcome ever queued -> zero calls expected
+    let state = active_bootstrap_state(pool.clone()).await;
+
+    let expected_ts = timing.effective_open.timestamp() + 300;
+
+    // Seed the exact expected bar directly into md_bars, with the same
+    // canonical provider identity `resolve_latest_bar_poll_target` would
+    // produce for this fixture instrument.
+    mqk_db::md::ingest_provider_bars_to_md_bars_with_provider_metadata(
+        &pool,
+        mqk_db::md::IngestProviderBarsArgs {
+            source: "fake".to_string(),
+            timeframe: "5m".to_string(),
+            ingest_id: Uuid::new_v4(),
+            bars: vec![mqk_db::md::ProviderBar {
+                symbol: "ZZDRVR10C".to_string(),
+                timeframe: "5m".to_string(),
+                end_ts: expected_ts,
+                open: "100".to_string(),
+                high: "101".to_string(),
+                low: "99".to_string(),
+                close: "100.5".to_string(),
+                volume: 1000,
+                is_complete: true,
+            }],
+        },
+        mqk_db::md::MdBarProviderMetadata {
+            provider_id: "fake".to_string(),
+            provider_source: Some("fake".to_string()),
+            provider_symbol: Some("ZZDRVR10C".to_string()),
+            ingest_mode: Some("test_seed_exact_bar".to_string()),
+            provider_bar_id: None,
+            provider_updated_at_utc: None,
+        },
+    )
+    .await
+    .expect("seed exact bar");
+
+    let readiness = ready_readiness("ZZDRVR10C", "5m", Some(expected_ts));
+    // Called twice: pre-poll eligibility, then the mandatory post-poll
+    // re-evaluation before dispatch — even though no provider call occurred.
+    let evaluator = FakeReadinessEvaluator::queue(vec![readiness.clone(), readiness]);
+
+    let outcome = tick_autonomous_completed_bar_driver(AutonomousCompletedBarDriverInput {
+        state: &state,
+        pool: &pool,
+        operation: &operation,
+        assignment_config: &assignment_config,
+        assignment_identity: &assignment_identity,
+        runtime_binding: &binding,
+        runtime_binding_identity: &runtime_binding_identity,
+        now_utc: timing.effective_open + chrono::Duration::minutes(6),
+        authorization: AutonomousProviderCallAuthorization::Authorized,
+        instruments: &instruments,
+        provider_id: "fake",
+        provider: &provider,
+        readiness_evaluator: &evaluator,
+    })
+    .await
+    .expect("tick ok");
+
+    assert_eq!(
+        outcome,
+        AutonomousCompletedBarDriverOutcome::DispatchCompleted {
+            bar_end_ts: expected_ts
+        }
+    );
+    assert_eq!(
+        provider.calls(),
+        0,
+        "the exact expected bar was already in md_bars — zero provider calls"
+    );
+    assert_eq!(evaluator.calls(), 2);
+
+    let refreshed = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation.operation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(refreshed.bars_observed, 1);
+    assert_eq!(refreshed.bars_dispatched, 1, "dispatched exactly once");
+    // REPAIR 6: provider poll counters are untouched on this path.
+    assert_eq!(refreshed.provider_poll_attempt_count, 0);
+    assert_eq!(refreshed.provider_poll_success_count, 0);
+    assert_eq!(refreshed.provider_poll_failure_count, 0);
+}
+
+/// A provider result older than the exact expected bar is never observed or
+/// dispatched, even though the provider call itself succeeded and the bar
+/// was durably stored (REPAIR 10 points 8, 9; REPAIR 6 counter semantics).
+#[tokio::test]
+async fn repair10_08_09_older_provider_bar_not_observed_not_dispatched() {
+    let Some(pool) = maybe_db("repair10_08_09").await else {
+        return;
+    };
+    let timing = standard_timing();
+    let operation = create_test_operation(
+        &pool,
+        "zzdrv-r10d",
+        "ZZDRVR10D",
+        "swing_momentum",
+        "5m",
+        &timing,
+        mqk_db::STATE_AWAITING_OPEN,
+    )
+    .await;
+    let instruments = vec![fixture_instrument("ZZDRVR10D", "fake", "ZZDRVR10D", "5m")];
+    let assignment_config = fixture_assignment_config("ZZDRVR10D", "swing_momentum", "5m");
+    let assignment_identity =
+        mqk_daemon::state::autonomous_daily_operation::derive_assignment_identity(
+            &assignment_config,
+        );
+    let binding = fixture_binding("ZZDRVR10D", "swing_momentum", 300);
+    let runtime_binding_identity =
+        mqk_daemon::state::autonomous_daily_operation::derive_runtime_binding_identity(&binding);
+    let provider = FakeQueueProvider::new();
+    let state = active_bootstrap_state(pool.clone()).await;
+
+    let expected_ts = timing.effective_open.timestamp() + 300;
+    let older_ts = expected_ts - 300;
+    provider.push_outcome(
+        "ZZDRVR10D",
+        Ok(Some(bar("ZZDRVR10D", "5m", older_ts, true))),
+    );
+    let readiness = ready_readiness("ZZDRVR10D", "5m", Some(expected_ts));
+    let evaluator = FakeReadinessEvaluator::always(readiness);
+
+    let outcome = tick_autonomous_completed_bar_driver(AutonomousCompletedBarDriverInput {
+        state: &state,
+        pool: &pool,
+        operation: &operation,
+        assignment_config: &assignment_config,
+        assignment_identity: &assignment_identity,
+        runtime_binding: &binding,
+        runtime_binding_identity: &runtime_binding_identity,
+        now_utc: timing.effective_open + chrono::Duration::minutes(6),
+        authorization: AutonomousProviderCallAuthorization::Authorized,
+        instruments: &instruments,
+        provider_id: "fake",
+        provider: &provider,
+        readiness_evaluator: &evaluator,
+    })
+    .await
+    .expect("tick ok");
+
+    assert_eq!(
+        outcome,
+        AutonomousCompletedBarDriverOutcome::ProviderLaggingExpectedBar {
+            returned_bar_ts: older_ts,
+            expected_end_ts: expected_ts,
+        }
+    );
+    assert_eq!(provider.calls(), 1, "the provider call itself succeeded");
+    assert_eq!(
+        evaluator.calls(),
+        1,
+        "no post-poll (second) evaluation for a rejected bar identity"
+    );
+
+    let refreshed = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation.operation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(refreshed.bars_observed, 0, "point 8: never observed");
+    assert_eq!(refreshed.last_completed_bar_ts, None);
+    assert_eq!(
+        refreshed.data_refresh_state,
+        "provider_lagging_expected_bar"
+    );
+    assert_eq!(refreshed.provider_poll_attempt_count, 1);
+    assert_eq!(
+        refreshed.provider_poll_success_count, 1,
+        "REPAIR 6: the provider request itself succeeded"
+    );
+    assert_eq!(refreshed.provider_poll_failure_count, 0);
+
+    let claim = mqk_db::fetch_autonomous_daily_bar_dispatch(
+        &pool,
+        operation.operation_id,
+        "ZZDRVR10D",
+        "5m",
+        older_ts,
+    )
+    .await
+    .unwrap();
+    assert!(claim.is_none(), "point 9: never dispatched");
+
+    // The bar itself is still genuine, valid data and remains stored.
+    let stored: (i64,) = sqlx::query_as(
+        "select end_ts from md_bars where symbol = $1 and timeframe = '5m' and end_ts = $2",
+    )
+    .bind("ZZDRVR10D")
+    .bind(older_ts)
+    .fetch_one(&pool)
+    .await
+    .expect("older bar is still stored in md_bars");
+    assert_eq!(stored.0, older_ts);
+}
+
+/// A provider result newer than the exact expected bar is rejected — never
+/// observed or dispatched (REPAIR 10 point 10).
+#[tokio::test]
+async fn repair10_10_newer_than_expected_provider_bar_rejected() {
+    let Some(pool) = maybe_db("repair10_10").await else {
+        return;
+    };
+    let timing = standard_timing();
+    let operation = create_test_operation(
+        &pool,
+        "zzdrv-r10e",
+        "ZZDRVR10E",
+        "swing_momentum",
+        "5m",
+        &timing,
+        mqk_db::STATE_AWAITING_OPEN,
+    )
+    .await;
+    let instruments = vec![fixture_instrument("ZZDRVR10E", "fake", "ZZDRVR10E", "5m")];
+    let assignment_config = fixture_assignment_config("ZZDRVR10E", "swing_momentum", "5m");
+    let assignment_identity =
+        mqk_daemon::state::autonomous_daily_operation::derive_assignment_identity(
+            &assignment_config,
+        );
+    let binding = fixture_binding("ZZDRVR10E", "swing_momentum", 300);
+    let runtime_binding_identity =
+        mqk_daemon::state::autonomous_daily_operation::derive_runtime_binding_identity(&binding);
+    let provider = FakeQueueProvider::new();
+    let state = active_bootstrap_state(pool.clone()).await;
+
+    let expected_ts = timing.effective_open.timestamp() + 300;
+    let newer_ts = expected_ts + 300;
+    provider.push_outcome(
+        "ZZDRVR10E",
+        Ok(Some(bar("ZZDRVR10E", "5m", newer_ts, true))),
+    );
+    let readiness = ready_readiness("ZZDRVR10E", "5m", Some(expected_ts));
+    let evaluator = FakeReadinessEvaluator::always(readiness);
+
+    // now_utc must be far enough past newer_ts for the provider's own
+    // future-skew provenance check (independent of this driver's exact-bar
+    // constraint) to admit the bar at all.
+    let now_utc = DateTime::<Utc>::from_timestamp(newer_ts + 300, 0).unwrap();
+
+    let outcome = tick_autonomous_completed_bar_driver(AutonomousCompletedBarDriverInput {
+        state: &state,
+        pool: &pool,
+        operation: &operation,
+        assignment_config: &assignment_config,
+        assignment_identity: &assignment_identity,
+        runtime_binding: &binding,
+        runtime_binding_identity: &runtime_binding_identity,
+        now_utc,
+        authorization: AutonomousProviderCallAuthorization::Authorized,
+        instruments: &instruments,
+        provider_id: "fake",
+        provider: &provider,
+        readiness_evaluator: &evaluator,
+    })
+    .await
+    .expect("tick ok");
+
+    assert_eq!(
+        outcome,
+        AutonomousCompletedBarDriverOutcome::UnexpectedOrFutureBar {
+            returned_bar_ts: newer_ts,
+            expected_end_ts: expected_ts,
+        }
+    );
+    assert_eq!(provider.calls(), 1);
+
+    let refreshed = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation.operation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(refreshed.bars_observed, 0);
+    assert_eq!(refreshed.data_refresh_state, "unexpected_or_future_bar");
+
+    let claim = mqk_db::fetch_autonomous_daily_bar_dispatch(
+        &pool,
+        operation.operation_id,
+        "ZZDRVR10E",
+        "5m",
+        newer_ts,
+    )
+    .await
+    .unwrap();
+    assert!(claim.is_none());
+}
+
+/// A terminal (non-remediable) pre-poll blocker unrelated to the missing
+/// tail bar still causes zero provider calls (REPAIR 10 point 12) — reusing
+/// `readiness_22_30`'s exact scenario is not enough on its own since that
+/// test predates the two-stage split; this proves the *new* classifier
+/// still treats an unrelated blocker as non-remediable even when an expected
+/// timestamp is present.
+#[tokio::test]
+async fn repair10_12_non_remediable_blocker_with_known_expected_ts_zero_calls() {
+    let Some(pool) = maybe_db("repair10_12").await else {
+        return;
+    };
+    let timing = standard_timing();
+    let operation = create_test_operation(
+        &pool,
+        "zzdrv-r10f",
+        "ZZDRVR10F",
+        "swing_momentum",
+        "5m",
+        &timing,
+        mqk_db::STATE_AWAITING_OPEN,
+    )
+    .await;
+    let instruments = vec![fixture_instrument("ZZDRVR10F", "fake", "ZZDRVR10F", "5m")];
+    let assignment_config = fixture_assignment_config("ZZDRVR10F", "swing_momentum", "5m");
+    let assignment_identity =
+        mqk_daemon::state::autonomous_daily_operation::derive_assignment_identity(
+            &assignment_config,
+        );
+    let binding = fixture_binding("ZZDRVR10F", "swing_momentum", 300);
+    let runtime_binding_identity =
+        mqk_daemon::state::autonomous_daily_operation::derive_runtime_binding_identity(&binding);
+    let provider = FakeQueueProvider::new();
+    let state = active_bootstrap_state(pool.clone()).await;
+
+    let expected_ts = timing.effective_open.timestamp() + 300;
+    let readiness = AssignmentReadiness {
+        readiness_state: "blocked",
+        blockers: vec!["interior_gap"],
+        expected_latest_bar_ts: Some(expected_ts),
+        ..ready_readiness("ZZDRVR10F", "5m", Some(expected_ts))
+    };
+    let evaluator = FakeReadinessEvaluator::always(readiness);
+
+    let outcome = tick_autonomous_completed_bar_driver(AutonomousCompletedBarDriverInput {
+        state: &state,
+        pool: &pool,
+        operation: &operation,
+        assignment_config: &assignment_config,
+        assignment_identity: &assignment_identity,
+        runtime_binding: &binding,
+        runtime_binding_identity: &runtime_binding_identity,
+        now_utc: timing.effective_open + chrono::Duration::minutes(6),
+        authorization: AutonomousProviderCallAuthorization::Authorized,
+        instruments: &instruments,
+        provider_id: "fake",
+        provider: &provider,
+        readiness_evaluator: &evaluator,
+    })
+    .await
+    .expect("tick ok");
+
+    match outcome {
+        AutonomousCompletedBarDriverOutcome::ReadinessBlocked { blockers } => {
+            assert_eq!(blockers, vec!["interior_gap"]);
+        }
+        other => panic!("expected ReadinessBlocked, got {other:?}"),
+    }
+    assert_eq!(provider.calls(), 0);
+}
+
+/// A configured instrument's provider mismatch causes zero provider calls
+/// (REPAIR 10 point 13).
+#[tokio::test]
+async fn repair10_13_provider_mismatch_zero_calls() {
+    let Some(pool) = maybe_db("repair10_13").await else {
+        return;
+    };
+    let timing = standard_timing();
+    let operation = create_test_operation(
+        &pool,
+        "zzdrv-r10g",
+        "ZZDRVR10G",
+        "swing_momentum",
+        "5m",
+        &timing,
+        mqk_db::STATE_AWAITING_OPEN,
+    )
+    .await;
+    // Instrument is configured for "alpaca", but the driver is asked to poll "fake".
+    let instruments = vec![fixture_instrument("ZZDRVR10G", "alpaca", "ZZDRVR10G", "5m")];
+    let assignment_config = fixture_assignment_config("ZZDRVR10G", "swing_momentum", "5m");
+    let assignment_identity =
+        mqk_daemon::state::autonomous_daily_operation::derive_assignment_identity(
+            &assignment_config,
+        );
+    let binding = fixture_binding("ZZDRVR10G", "swing_momentum", 300);
+    let runtime_binding_identity =
+        mqk_daemon::state::autonomous_daily_operation::derive_runtime_binding_identity(&binding);
+    let provider = FakeQueueProvider::new();
+    let readiness = ready_readiness(
+        "ZZDRVR10G",
+        "5m",
+        Some(timing.effective_open.timestamp() + 300),
+    );
+    let evaluator = FakeReadinessEvaluator::always(readiness);
+    let state = state::AppState::new_with_db_and_operator_auth(
+        pool.clone(),
+        OperatorAuthMode::ExplicitDevNoToken,
+    );
+
+    let outcome = tick_autonomous_completed_bar_driver(AutonomousCompletedBarDriverInput {
+        state: &state,
+        pool: &pool,
+        operation: &operation,
+        assignment_config: &assignment_config,
+        assignment_identity: &assignment_identity,
+        runtime_binding: &binding,
+        runtime_binding_identity: &runtime_binding_identity,
+        now_utc: timing.effective_open + chrono::Duration::minutes(5),
+        authorization: AutonomousProviderCallAuthorization::Authorized,
+        instruments: &instruments,
+        provider_id: "fake",
+        provider: &provider,
+        readiness_evaluator: &evaluator,
+    })
+    .await
+    .expect("tick ok");
+
+    assert!(matches!(
+        outcome,
+        AutonomousCompletedBarDriverOutcome::RegistryBlocked {
+            rejection: LatestBarRegistryAdmissionRejection::ProviderMismatch { .. }
+        }
+    ));
+    assert_eq!(provider.calls(), 0);
+}
+
+/// TwelveData's `1D` timestamp convention is verified (Bundle 2), and the
+/// newly-enabled TwelveData `latest_closed_bar` capability (REPAIR 7) can
+/// reach the poll seam end-to-end with a fake adapter mirroring that
+/// capability (REPAIR 10 point 15).
+#[tokio::test]
+async fn repair10_15_twelvedata_1d_capability_reaches_poll_seam_and_dispatches() {
+    let Some(pool) = maybe_db("repair10_15").await else {
+        return;
+    };
+    assert_eq!(
+        mqk_daemon::daily_data_readiness::resolve_daily_bar_timestamp_convention("twelvedata"),
+        mqk_daemon::daily_data_readiness::DailyBarTimestampConvention::MidnightUtcMarketDate
+    );
+
+    let timing = standard_timing();
+    let operation = create_test_operation(
+        &pool,
+        "zzdrv-r10h",
+        "ZZDRVR10H",
+        "swing_momentum",
+        "1D",
+        &timing,
+        mqk_db::STATE_AWAITING_OPEN,
+    )
+    .await;
+    let instruments = vec![fixture_instrument(
+        "ZZDRVR10H",
+        "twelvedata",
+        "ZZDRVR10H",
+        "1D",
+    )];
+    let assignment_config = fixture_assignment_config("ZZDRVR10H", "swing_momentum", "1D");
+    let assignment_identity =
+        mqk_daemon::state::autonomous_daily_operation::derive_assignment_identity(
+            &assignment_config,
+        );
+    let binding = fixture_binding("ZZDRVR10H", "swing_momentum", 86_400);
+    let runtime_binding_identity =
+        mqk_daemon::state::autonomous_daily_operation::derive_runtime_binding_identity(&binding);
+    let provider = FakeQueueProvider::new();
+    // Mirrors the capability the real TwelveData factory-built adapter now
+    // reports after REPAIR 7 (`capabilities_from_provider_config`).
+    provider.set_capabilities(mqk_md::MarketDataProviderCapabilities {
+        historical_bars: true,
+        latest_closed_bar: true,
+        completed_bar_stream: false,
+        supported_asset_classes: vec![mqk_md::ProviderAssetClass::Equity],
+        supported_timeframes: vec![mqk_md::Timeframe::D1],
+    });
+    // A D1 bar's canonical end_ts is a UTC midnight boundary — using an
+    // intraday timestamp here would fail the poll seam's own future-skew
+    // provenance check against `now_utc` (unrelated to this driver's exact-
+    // bar constraint).
+    let expected_ts = timing
+        .market_date
+        .and_hms_opt(0, 0, 0)
+        .unwrap()
+        .and_utc()
+        .timestamp();
+    provider.push_outcome(
+        "ZZDRVR10H",
+        Ok(Some(bar("ZZDRVR10H", "1D", expected_ts, true))),
+    );
+    let readiness = ready_readiness("ZZDRVR10H", "1D", Some(expected_ts));
+    let evaluator = FakeReadinessEvaluator::always(readiness);
+    let state = active_bootstrap_state(pool.clone()).await;
+
+    let outcome = tick_autonomous_completed_bar_driver(AutonomousCompletedBarDriverInput {
+        state: &state,
+        pool: &pool,
+        operation: &operation,
+        assignment_config: &assignment_config,
+        assignment_identity: &assignment_identity,
+        runtime_binding: &binding,
+        runtime_binding_identity: &runtime_binding_identity,
+        now_utc: timing.effective_open + chrono::Duration::hours(1),
+        authorization: AutonomousProviderCallAuthorization::Authorized,
+        instruments: &instruments,
+        provider_id: "twelvedata",
+        provider: &provider,
+        readiness_evaluator: &evaluator,
+    })
+    .await
+    .expect("tick ok");
+
+    assert_eq!(
+        outcome,
+        AutonomousCompletedBarDriverOutcome::DispatchCompleted {
+            bar_end_ts: expected_ts
+        }
+    );
+    assert_eq!(provider.calls(), 1);
+}
+
+/// Alpaca's `1D` timestamp convention remains unverified — strict readiness
+/// keeps it blocked; capability enablement never implies verification
+/// (REPAIR 10 point 16; re-proves `readiness_22_30`'s scenario against the
+/// new two-stage classifier).
+#[test]
+fn repair10_16_alpaca_1d_timestamp_convention_remains_unverified() {
+    assert_eq!(
+        mqk_daemon::daily_data_readiness::resolve_daily_bar_timestamp_convention("alpaca"),
+        mqk_daemon::daily_data_readiness::DailyBarTimestampConvention::Unverified
+    );
+}
+
+/// Restart does not redispatch a completed exact bar: a fresh driver
+/// invocation (new `AppState`/evaluator, same durable operation row) sees
+/// `last_completed_bar_ts` already equal to the expected bar and refuses to
+/// poll or dispatch again (REPAIR 10 point 17).
+#[tokio::test]
+async fn repair10_17_restart_does_not_redispatch_completed_exact_bar() {
+    let Some(pool) = maybe_db("repair10_17").await else {
+        return;
+    };
+    let timing = standard_timing();
+    let mut operation = create_test_operation(
+        &pool,
+        "zzdrv-r10i",
+        "ZZDRVR10I",
+        "swing_momentum",
+        "5m",
+        &timing,
+        mqk_db::STATE_AWAITING_OPEN,
+    )
+    .await;
+    let instruments = vec![fixture_instrument("ZZDRVR10I", "fake", "ZZDRVR10I", "5m")];
+    let assignment_config = fixture_assignment_config("ZZDRVR10I", "swing_momentum", "5m");
+    let assignment_identity =
+        mqk_daemon::state::autonomous_daily_operation::derive_assignment_identity(
+            &assignment_config,
+        );
+    let binding = fixture_binding("ZZDRVR10I", "swing_momentum", 300);
+    let runtime_binding_identity =
+        mqk_daemon::state::autonomous_daily_operation::derive_runtime_binding_identity(&binding);
+    let expected_ts = timing.effective_open.timestamp() + 300;
+    let now1 = timing.effective_open + chrono::Duration::minutes(6);
+
+    {
+        let provider = FakeQueueProvider::new();
+        provider.push_outcome(
+            "ZZDRVR10I",
+            Ok(Some(bar("ZZDRVR10I", "5m", expected_ts, true))),
+        );
+        let readiness = ready_readiness("ZZDRVR10I", "5m", Some(expected_ts));
+        let evaluator = FakeReadinessEvaluator::always(readiness);
+        let state = active_bootstrap_state(pool.clone()).await;
+
+        let outcome = tick_autonomous_completed_bar_driver(AutonomousCompletedBarDriverInput {
+            state: &state,
+            pool: &pool,
+            operation: &operation,
+            assignment_config: &assignment_config,
+            assignment_identity: &assignment_identity,
+            runtime_binding: &binding,
+            runtime_binding_identity: &runtime_binding_identity,
+            now_utc: now1,
+            authorization: AutonomousProviderCallAuthorization::Authorized,
+            instruments: &instruments,
+            provider_id: "fake",
+            provider: &provider,
+            readiness_evaluator: &evaluator,
+        })
+        .await
+        .expect("tick ok");
+        assert_eq!(
+            outcome,
+            AutonomousCompletedBarDriverOutcome::DispatchCompleted {
+                bar_end_ts: expected_ts
+            }
+        );
+    }
+
+    // "Restart": brand-new AppState and evaluator, same durable row.
+    operation = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation.operation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(operation.last_completed_bar_ts, Some(expected_ts));
+
+    let provider2 = FakeQueueProvider::new();
+    let readiness2 = ready_readiness("ZZDRVR10I", "5m", Some(expected_ts));
+    let evaluator2 = FakeReadinessEvaluator::always(readiness2);
+    let state2 = active_bootstrap_state(pool.clone()).await;
+
+    let outcome2 = tick_autonomous_completed_bar_driver(AutonomousCompletedBarDriverInput {
+        state: &state2,
+        pool: &pool,
+        operation: &operation,
+        assignment_config: &assignment_config,
+        assignment_identity: &assignment_identity,
+        runtime_binding: &binding,
+        runtime_binding_identity: &runtime_binding_identity,
+        now_utc: now1 + chrono::Duration::seconds(30),
+        authorization: AutonomousProviderCallAuthorization::Authorized,
+        instruments: &instruments,
+        provider_id: "fake",
+        provider: &provider2,
+        readiness_evaluator: &evaluator2,
+    })
+    .await
+    .expect("tick ok");
+
+    assert_eq!(outcome2, AutonomousCompletedBarDriverOutcome::PollNotDue);
+    assert_eq!(
+        provider2.calls(),
+        0,
+        "restart must not redispatch or repoll"
+    );
+
+    let final_row = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation.operation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        final_row.bars_dispatched, 1,
+        "still dispatched exactly once across the simulated restart"
     );
 }

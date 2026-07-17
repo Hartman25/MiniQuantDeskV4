@@ -800,6 +800,9 @@ pub(crate) async fn market_data_feed_poll_once(
                 target: &target,
                 now_utc: poll_time,
                 ingest_mode: "latest_poll",
+                // The manual poll-once route has no autonomous expected-bar
+                // identity to enforce; behavior is unchanged (REPAIR 4).
+                expected_bar_constraint: None,
             },
         )
         .await
@@ -884,6 +887,27 @@ pub(crate) async fn market_data_feed_poll_once(
                 rows_updated: 0,
                 rows_skipped: 0,
                 error: Some(detail),
+            }),
+            // REPAIR 4: this manual route never supplies
+            // `expected_bar_constraint`, so these two variants are
+            // unreachable here — handled only for match exhaustiveness. The
+            // bar was still ingested (matching "inserted"/"updated" would be
+            // misleading without a constraint), so this is reported the same
+            // way an unconstrained successful poll always has been.
+            LatestBarPollOutcome::ProviderLaggingExpectedBar {
+                returned_bar_ts, ..
+            }
+            | LatestBarPollOutcome::UnexpectedOrFutureBar {
+                returned_bar_ts, ..
+            } => per_symbol.push(MarketDataFeedPollSymbolResult {
+                symbol: symbol.clone(),
+                status: "updated".to_string(),
+                expected_latest_closed_bar_ts: latest_expected_closed_bar_ts,
+                returned_bar_ts: Some(returned_bar_ts),
+                rows_inserted: 0,
+                rows_updated: 1,
+                rows_skipped: 0,
+                error: None,
             }),
         }
     }

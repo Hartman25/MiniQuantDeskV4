@@ -1217,6 +1217,25 @@ mod tests {
         .with_latest_closed_bar_enabled()
     }
 
+    /// REPAIR 7/8 (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01C): same bounded
+    /// historical-window adapter, labeled "test-twelvedata" — proves the
+    /// selection logic (newest complete bar at/before reference_ts, no
+    /// incomplete/future bar) is identical for the newly-enabled TwelveData
+    /// capability path, not a second implementation. No network call: the
+    /// underlying `FixedBarsProvider` is the same in-memory fake used by the
+    /// Alpaca proofs above.
+    fn make_twelvedata_adapter_with_latest(
+        provider: FixedBarsProvider,
+    ) -> HistoricalProviderMarketDataAdapter<FixedBarsProvider> {
+        HistoricalProviderMarketDataAdapter::new(
+            provider,
+            "test-twelvedata",
+            "Test TwelveData",
+            vec![crate::Timeframe::D1],
+        )
+        .with_latest_closed_bar_enabled()
+    }
+
     fn closed_bar(symbol: &str, timeframe: &str, end_ts: i64) -> CanonicalBar {
         CanonicalBar {
             symbol: symbol.to_string(),
@@ -1381,6 +1400,89 @@ mod tests {
             "adapter without explicit enablement must return UnsupportedCapability"
         );
         assert!(!adapter.capabilities().latest_closed_bar);
+    }
+
+    // -----------------------------------------------------------------------
+    // TWELVEDATA-LATEST-01/02/03 — REPAIR 7/8
+    // (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01C-POLL-REEVALUATE-AND-PROVIDER-CLOSURE-01):
+    // the newly-enabled TwelveData latest_closed_bar capability reuses the
+    // exact same bounded-window selection logic already proven for Alpaca
+    // above — no second implementation, no network call.
+    // -----------------------------------------------------------------------
+
+    // TWELVEDATA-LATEST-01: selects the newest complete bar at or before
+    // reference_ts, excluding a future bar.
+    #[tokio::test]
+    async fn twelvedata_adapter_selects_newest_complete_bar_at_or_before_reference_ts() {
+        let reference_ts = 1_700_000_100_i64;
+        let bars = vec![
+            closed_bar("AAPL", "1D", 1_699_999_000),
+            closed_bar("AAPL", "1D", 1_700_000_000),
+            closed_bar("AAPL", "1D", 1_700_000_200), // after reference_ts → must be excluded
+        ];
+        let adapter = make_twelvedata_adapter_with_latest(FixedBarsProvider::returning(bars));
+
+        let result = adapter
+            .fetch_latest_closed_bar(LatestClosedBarRequest {
+                symbol: "AAPL".to_string(),
+                timeframe: crate::Timeframe::D1,
+                reference_ts,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(result.unwrap().end_ts, 1_700_000_000);
+    }
+
+    // TWELVEDATA-LATEST-02: excludes an incomplete (forming) bar.
+    #[tokio::test]
+    async fn twelvedata_adapter_excludes_incomplete_forming_bar() {
+        let forming = CanonicalBar {
+            symbol: "AAPL".to_string(),
+            timeframe: "1D".to_string(),
+            end_ts: 1_700_000_000,
+            open: "100".to_string(),
+            high: "105".to_string(),
+            low: "99".to_string(),
+            close: "102".to_string(),
+            volume: 1_000,
+            is_complete: false,
+        };
+        let adapter =
+            make_twelvedata_adapter_with_latest(FixedBarsProvider::returning(vec![forming]));
+
+        let result = adapter
+            .fetch_latest_closed_bar(LatestClosedBarRequest {
+                symbol: "AAPL".to_string(),
+                timeframe: crate::Timeframe::D1,
+                reference_ts: 1_700_000_100,
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(result, None, "a forming bar must be excluded");
+    }
+
+    // TWELVEDATA-LATEST-03: no network call is made — the underlying
+    // provider is the same in-memory `FixedBarsProvider` fake, and a
+    // provider-level error surfaces as `MarketDataProviderError::Other`
+    // exactly as the Alpaca-labeled adapter proves.
+    #[tokio::test]
+    async fn twelvedata_adapter_surfaces_provider_error_without_network_call() {
+        let adapter = make_twelvedata_adapter_with_latest(FixedBarsProvider::erroring(
+            "provider-fetch-failed",
+        ));
+
+        let err = adapter
+            .fetch_latest_closed_bar(LatestClosedBarRequest {
+                symbol: "AAPL".to_string(),
+                timeframe: crate::Timeframe::D1,
+                reference_ts: 1_700_000_100,
+            })
+            .await
+            .unwrap_err();
+
+        assert!(matches!(err, MarketDataProviderError::Other { .. }));
     }
 
     // -----------------------------------------------------------------------

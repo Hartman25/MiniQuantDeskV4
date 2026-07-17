@@ -182,9 +182,16 @@ pub fn capabilities_from_provider_config(
     let supported_timeframes = timeframes_from_config(provider_id, config)?;
     Ok(MarketDataProviderCapabilities {
         historical_bars: !supported_timeframes.is_empty(),
-        // Alpaca supports latest_closed_bar via a bounded historical window fetch.
-        // Other providers are not advertised as capable until their implementation exists.
-        latest_closed_bar: provider_id.eq_ignore_ascii_case("alpaca"),
+        // Alpaca and TwelveData both support latest_closed_bar via a bounded
+        // historical window fetch (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01C:
+        // TwelveData's `1D` timestamp convention is verified by Bundle 2's
+        // `resolve_daily_bar_timestamp_convention`; Alpaca `1D` remains
+        // readiness-blocked pending its own verification — capability
+        // enablement here is independent of that readiness gate). Other
+        // providers are not advertised as capable until their implementation
+        // exists.
+        latest_closed_bar: provider_id.eq_ignore_ascii_case("alpaca")
+            || provider_id.eq_ignore_ascii_case("twelvedata"),
         completed_bar_stream: false,
         supported_asset_classes: config
             .asset_classes
@@ -260,6 +267,7 @@ where
                     config.display_name.clone(),
                     capabilities.supported_timeframes,
                 )
+                .with_latest_closed_bar_enabled()
                 .with_health(MarketDataProviderHealth::unknown())
                 .with_rate_limits(rate_limits),
             ))
@@ -734,10 +742,13 @@ mod tests {
         assert!(capabilities.historical_bars);
     }
 
-    // ALPACA-CAP-02: Non-Alpaca provider configs do not advertise latest_closed_bar.
+    // ALPACA-CAP-02: providers other than Alpaca/TwelveData do not advertise
+    // latest_closed_bar. REPAIR 7 (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01C):
+    // twelvedata moved out of this list into TWELVEDATA-CAP-01 below, since
+    // it now legitimately advertises the capability.
     #[test]
     fn non_alpaca_provider_configs_do_not_report_latest_closed_bar() {
-        for id in &["twelvedata", "fake", "polygon", "candidate_xyz"] {
+        for id in &["fake", "polygon", "candidate_xyz", "kraken"] {
             let config = provider_config(id, true, vec![], vec!["1D"]);
             let capabilities = capabilities_from_provider_config(&config)
                 .expect("capabilities must derive from config");
@@ -746,6 +757,105 @@ mod tests {
                 "provider '{id}' must not advertise latest_closed_bar"
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // TwelveData latest_closed_bar capability enablement — REPAIR 7/8
+    // (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01C-POLL-REEVALUATE-AND-PROVIDER-CLOSURE-01)
+    // -----------------------------------------------------------------------
+
+    // TWELVEDATA-CAP-01: TwelveData provider config reports latest_closed_bar=true.
+    #[test]
+    fn twelvedata_provider_config_reports_latest_closed_bar_true() {
+        let config = provider_config("twelvedata", true, vec!["TWELVEDATA_API_KEY"], vec!["1D"]);
+
+        let capabilities = capabilities_from_provider_config(&config)
+            .expect("twelvedata capabilities must derive from config");
+
+        assert!(
+            capabilities.latest_closed_bar,
+            "twelvedata must advertise latest_closed_bar=true"
+        );
+        assert!(capabilities.historical_bars);
+    }
+
+    // TWELVEDATA-CAP-02: Alpaca still advertises latest_closed_bar after the
+    // TwelveData capability change (no regression to the existing provider).
+    #[test]
+    fn alpaca_still_reports_latest_closed_bar_after_twelvedata_enablement() {
+        let config = provider_config("alpaca", true, vec!["A", "B"], vec!["1D"]);
+        let capabilities = capabilities_from_provider_config(&config)
+            .expect("alpaca capabilities must derive from config");
+        assert!(capabilities.latest_closed_bar);
+    }
+
+    // TWELVEDATA-CAP-03: TwelveData factory builds a provider that reports
+    // latest_closed_bar=true. No network call is made — construction only
+    // wraps a client, it never calls fetch_latest_closed_bar.
+    #[test]
+    fn twelvedata_factory_provider_reports_latest_closed_bar_capability() {
+        let providers = vec![provider_config(
+            "twelvedata",
+            true,
+            vec!["TWELVEDATA_API_KEY"],
+            vec!["1D"],
+        )];
+
+        let provider = build_market_data_provider("twelvedata", &providers, |name| {
+            (name == "TWELVEDATA_API_KEY").then(|| "test-key".to_string())
+        })
+        .expect("twelvedata provider must build with injected credential");
+
+        assert!(
+            provider.capabilities().latest_closed_bar,
+            "twelvedata factory provider must report latest_closed_bar=true"
+        );
+        assert_eq!(provider.provider_id(), "twelvedata");
+    }
+
+    // TWELVEDATA-CAP-04: missing TwelveData credentials still fail before
+    // construction, even under the latest_closed_bar-enabled factory path —
+    // capability enabling does not relax the existing credential gate.
+    #[test]
+    fn twelvedata_factory_missing_credential_fails_before_construction() {
+        let providers = vec![provider_config(
+            "twelvedata",
+            true,
+            vec!["TWELVEDATA_API_KEY"],
+            vec!["1D"],
+        )];
+
+        let err = match build_market_data_provider("twelvedata", &providers, |_| None) {
+            Ok(_) => panic!("twelvedata provider must fail without credential"),
+            Err(err) => err,
+        };
+
+        assert_eq!(
+            err,
+            ProviderFactoryError::MissingCredential {
+                provider_id: "twelvedata".into(),
+                credential: "TWELVEDATA_API_KEY".into()
+            }
+        );
+    }
+
+    // TWELVEDATA-LATEST-01/02/03: the shared
+    // HistoricalProviderMarketDataAdapter::fetch_latest_closed_bar bounded-
+    // window selection logic (newest complete bar at/before reference_ts;
+    // excludes incomplete/future bars) behaves identically when the adapter
+    // is labeled "twelvedata" and built with `.with_latest_closed_bar_enabled()`,
+    // reusing the exact same fake historical provider pattern as the Alpaca
+    // proof in `provider.rs` — no network call, no real TwelveData client.
+    #[test]
+    fn twelvedata_cap_05_provider_registry_entry_is_enabled_and_supports_1d() {
+        let providers = load_provider_registry(&registry_path()).unwrap();
+        let td = find_provider(&providers, "twelvedata").unwrap();
+        let capabilities = capabilities_from_provider_config(td)
+            .expect("twelvedata capabilities must derive from the canonical registry file");
+        assert!(
+            capabilities.latest_closed_bar,
+            "the canonical registry's twelvedata entry must advertise latest_closed_bar=true"
+        );
     }
 
     // ALPACA-CAP-03: Alpaca factory builds a provider that reports latest_closed_bar=true.

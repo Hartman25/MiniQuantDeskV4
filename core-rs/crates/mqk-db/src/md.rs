@@ -1730,6 +1730,86 @@ pub async fn fetch_bounded_bars_with_provenance(
     Ok(out)
 }
 
+// ---------------------------------------------------------------------------
+// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01C-POLL-REEVALUATE-AND-PROVIDER-CLOSURE-01
+// REPAIR 3: exact expected-bar lookup, so the autonomous completed-bar driver
+// can avoid a provider call whenever the exact expected canonical bar
+// already exists in `md_bars` — a single-row equality query, not a window
+// scan of `fetch_bounded_bars_with_provenance`.
+// ---------------------------------------------------------------------------
+
+/// Read the single `md_bars` row for `(symbol, timeframe, end_ts)`, with full
+/// provenance, or `None` if no such row exists. Read-only: no inserts,
+/// updates, or deletes. Unlike [`fetch_bounded_bars_with_provenance`], this
+/// is an exact-identity lookup, not a bounded recent-window scan — callers
+/// that need to know whether one specific canonical bar identity is already
+/// present (rather than the shape of a recent window) should use this
+/// function.
+pub async fn fetch_exact_bar_with_provenance(
+    pool: &PgPool,
+    symbol: &str,
+    timeframe: &str,
+    end_ts: i64,
+) -> Result<Option<MdBarRowWithProvenance>> {
+    let row = sqlx::query(
+        r#"
+        select
+            symbol,
+            timeframe,
+            end_ts,
+            open_micros,
+            high_micros,
+            low_micros,
+            close_micros,
+            volume,
+            is_complete,
+            provider_id,
+            provider_source,
+            provider_symbol,
+            ingest_mode,
+            provider_updated_at_utc,
+            ingested_at
+        from md_bars
+        where symbol = $1
+          and timeframe = $2
+          and end_ts = $3
+        "#,
+    )
+    .bind(symbol)
+    .bind(timeframe)
+    .bind(end_ts)
+    .fetch_optional(pool)
+    .await
+    .context("fetch_exact_bar_with_provenance query failed")?;
+
+    row.map(|r| -> Result<MdBarRowWithProvenance> {
+        Ok(MdBarRowWithProvenance {
+            symbol: r.try_get("symbol").context("md_bars.symbol")?,
+            timeframe: r.try_get("timeframe").context("md_bars.timeframe")?,
+            end_ts: r.try_get("end_ts").context("md_bars.end_ts")?,
+            open_micros: r.try_get("open_micros").context("md_bars.open_micros")?,
+            high_micros: r.try_get("high_micros").context("md_bars.high_micros")?,
+            low_micros: r.try_get("low_micros").context("md_bars.low_micros")?,
+            close_micros: r.try_get("close_micros").context("md_bars.close_micros")?,
+            volume: r.try_get("volume").context("md_bars.volume")?,
+            is_complete: r.try_get("is_complete").context("md_bars.is_complete")?,
+            provider_id: r.try_get("provider_id").context("md_bars.provider_id")?,
+            provider_source: r
+                .try_get("provider_source")
+                .context("md_bars.provider_source")?,
+            provider_symbol: r
+                .try_get("provider_symbol")
+                .context("md_bars.provider_symbol")?,
+            ingest_mode: r.try_get("ingest_mode").context("md_bars.ingest_mode")?,
+            provider_updated_at_utc: r
+                .try_get("provider_updated_at_utc")
+                .context("md_bars.provider_updated_at_utc")?,
+            ingested_at: r.try_get("ingested_at").context("md_bars.ingested_at")?,
+        })
+    })
+    .transpose()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

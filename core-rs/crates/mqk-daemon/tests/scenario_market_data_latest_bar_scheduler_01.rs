@@ -118,6 +118,37 @@ fn bar(symbol: &str, timeframe: &str, end_ts: i64) -> mqk_md::CanonicalBar {
     }
 }
 
+/// REPAIR 9 (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01C-POLL-REEVALUATE-AND-PROVIDER-CLOSURE-01):
+/// an explicit, deterministic instrument-registry fixture for tests that
+/// require successful provider-symbol admission. Before this repair, the
+/// scheduler's internal poll-once path fell back to
+/// `AppState::instrument_registry_path`'s CWD-relative default
+/// (`config/instruments/equities.json`), which only resolves when the test
+/// process's working directory happens to be the repo root — making
+/// `scheduler_fake_provider_poll_immediately_invokes_poll_once_once` pass or
+/// fail depending on how `cargo test` was invoked, not on production
+/// behavior. Setting `AppState::instrument_registry_path` directly (a public
+/// field) is entirely test-fixture scoped: it changes no production
+/// scheduler code and no request/response schema.
+fn fake_instrument_registry_file(local_symbol: &str, timeframe: &str) -> NamedTempFile {
+    let mut file = NamedTempFile::new().expect("create fake instrument registry");
+    let json = serde_json::json!([{
+        "instrument_id": format!("equity:US:{local_symbol}"),
+        "symbol": local_symbol,
+        "asset_class": "equity",
+        "provider": "fake",
+        "provider_symbol": local_symbol,
+        "venue": "TEST",
+        "currency": "USD",
+        "enabled": true,
+        "timeframes": [timeframe],
+        "notes": "scheduler test fixture"
+    }]);
+    file.write_all(json.to_string().as_bytes())
+        .expect("write fake instrument registry");
+    file
+}
+
 fn fake_registry_file() -> NamedTempFile {
     let mut file = NamedTempFile::new().expect("create fake provider registry");
     file.write_all(
@@ -278,9 +309,12 @@ async fn scheduler_fake_provider_poll_immediately_invokes_poll_once_once() {
         FakeLatestOutcome::Bar(bar("ZZSCHEDPOLL", "5m", 1_704_067_200)),
     );
     let provider = Arc::new(FakeLatestProvider::new(outcomes));
+    let instruments = fake_instrument_registry_file("ZZSCHEDPOLL", "5m");
     let mut st =
         state::AppState::new_with_db_and_operator_auth(pool, OperatorAuthMode::ExplicitDevNoToken);
     st.set_latest_bar_provider_client_for_test(provider.clone());
+    // REPAIR 9: deterministic instrument registry, independent of test CWD.
+    st.instrument_registry_path = instruments.path().to_string_lossy().into_owned();
     let app = routes::build_router(Arc::new(st));
 
     let (status, body) = call_json(

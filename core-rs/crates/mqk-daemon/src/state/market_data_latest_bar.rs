@@ -159,6 +159,18 @@ pub fn resolve_latest_bar_poll_target(
     })
 }
 
+/// REPAIR 4 (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01C-POLL-REEVALUATE-AND-PROVIDER-CLOSURE-01):
+/// an optional exact-identity constraint the autonomous driver attaches to a
+/// poll request so the shared ingest seam can distinguish "the provider
+/// returned exactly the bar we expected" from "the provider returned some
+/// other, still-valid, completed bar" (typically because the provider is
+/// lagging behind the exchange). The manual poll-once route never supplies
+/// this — its behavior is unchanged.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ExpectedLatestBarConstraint {
+    pub exact_end_ts: i64,
+}
+
 /// Outcome of one attempt to poll a provider's latest closed bar for one
 /// already-admitted target and ingest it into `md_bars`.
 #[derive(Debug, Clone)]
@@ -177,6 +189,24 @@ pub enum LatestBarPollOutcome {
         rows_inserted: u64,
         rows_updated: u64,
         rows_skipped: u64,
+    },
+    /// REPAIR 4: an [`ExpectedLatestBarConstraint`] was supplied, the
+    /// returned bar was ingested successfully, but its `end_ts` is older
+    /// than the exact expected timestamp — the provider is lagging behind
+    /// the exchange. The bar itself was still stored in `md_bars` (it is
+    /// genuine, valid historical data), but it must never be treated as the
+    /// caller's expected/observed bar.
+    ProviderLaggingExpectedBar {
+        returned_bar_ts: i64,
+        expected_end_ts: i64,
+    },
+    /// REPAIR 4: an [`ExpectedLatestBarConstraint`] was supplied, the
+    /// returned bar was ingested successfully, but its `end_ts` is newer
+    /// than the exact expected timestamp — unexpected relative to the
+    /// caller's own expected-bar computation. The bar was still stored.
+    UnexpectedOrFutureBar {
+        returned_bar_ts: i64,
+        expected_end_ts: i64,
     },
     /// The provider had no bar to return for this reference time.
     NoCompletedBarAvailable,
@@ -208,6 +238,13 @@ pub struct LatestBarPollSeamInput<'a> {
     pub target: &'a ResolvedLatestBarPollTarget,
     pub now_utc: DateTime<Utc>,
     pub ingest_mode: &'a str,
+    /// REPAIR 4: when `Some`, the returned bar's `end_ts` is checked against
+    /// the exact expected timestamp after ingest (see
+    /// [`LatestBarPollOutcome::ProviderLaggingExpectedBar`] /
+    /// [`LatestBarPollOutcome::UnexpectedOrFutureBar`]). The manual
+    /// poll-once route always supplies `None`, preserving its current
+    /// behavior exactly.
+    pub expected_bar_constraint: Option<ExpectedLatestBarConstraint>,
 }
 
 /// Poll one provider for its latest closed bar for `input.target`, validate
@@ -333,6 +370,28 @@ pub async fn poll_and_ingest_latest_closed_bar(
             let rows_inserted = result.report.coverage.rows_inserted;
             let rows_updated = result.report.coverage.rows_updated;
             let rows_skipped = result.report.coverage.rows_rejected;
+
+            // REPAIR 4: an exact autonomous constraint, when supplied,
+            // reclassifies an otherwise-successful ingest as lagging/
+            // unexpected relative to the caller's expected bar. The row was
+            // already durably ingested above either way — this only affects
+            // what the caller does with the outcome (never observed/
+            // dispatched unless end_ts matches exactly).
+            if let Some(constraint) = input.expected_bar_constraint {
+                if returned_bar_ts < constraint.exact_end_ts {
+                    return LatestBarPollOutcome::ProviderLaggingExpectedBar {
+                        returned_bar_ts,
+                        expected_end_ts: constraint.exact_end_ts,
+                    };
+                }
+                if returned_bar_ts > constraint.exact_end_ts {
+                    return LatestBarPollOutcome::UnexpectedOrFutureBar {
+                        returned_bar_ts,
+                        expected_end_ts: constraint.exact_end_ts,
+                    };
+                }
+            }
+
             if rows_inserted > 0 {
                 LatestBarPollOutcome::InsertedNewBar {
                     end_ts: returned_bar_ts,

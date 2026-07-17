@@ -10160,11 +10160,14 @@ Next authorized phase: Phase C — autonomous completed-bar data driver
 
 **Phase C (`AUTONOMOUS-DAILY-PAPER-OPERATIONS-01C-COMPLETED-BAR-DATA-DRIVER`):**
 starting HEAD `c83fef67f8716143c305ef5c65571abebefc1914` ("docs: close
-autonomous daily coordination foundation"). Implements the internal
-autonomous market-data refresh and completed-bar dispatch foundation.
-Foundation only — no session-controller/startup wiring, no automatic
-provider calls without explicit authorization, no real daemon/runtime/broker
-interaction.
+autonomous daily coordination foundation"). **Commit:**
+`0da0f6a47f45079526eaa69e4ca567952f65356a` ("data: drive autonomous paper
+from completed bars") — recorded here retroactively; this landing commit was
+never written into this ledger entry until the closure-repair sub-phase
+below. Implements the internal autonomous market-data refresh and
+completed-bar dispatch foundation. Foundation only — no
+session-controller/startup wiring, no automatic provider calls without
+explicit authorization, no real daemon/runtime/broker interaction.
 
 - **Extracted internal latest-bar poll seam
   (`core-rs/crates/mqk-daemon/src/state/market_data_latest_bar.rs`, new):**
@@ -10210,6 +10213,11 @@ interaction.
   `operation.last_completed_bar_ts`, with a bounded 60s poll-retry cooldown)
   → provider poll via the shared seam, durably recorded → bar-observation
   evidence → durable dispatch claim → canonical strategy dispatch.
+  **Superseded by the closure-repair sub-phase below:** this single-snapshot
+  readiness design (one `AssignmentReadiness` passed in and reused for both
+  the poll-eligibility gate and the dispatch gate) is replaced by the
+  two-stage injected-evaluator design documented there — the description
+  above records what Phase C originally shipped, not current behavior.
 - **Canonical bar identity:** `(operation_id, local_symbol, timeframe,
   bar_end_ts)`, `bar_end_ts` always the real `md_bars.end_ts` of the
   provider-returned, provenance-validated bar — never a blind timer, tick
@@ -10291,24 +10299,32 @@ interaction.
   `scenario_autonomous_daily_operation_identity_01` 44/44,
   `scenario_autonomous_daily_operation_store_01` 26/26 (re-run because its
   module changed).
-- **Known pre-existing, environment-only gaps (neither caused nor fixed by
-  this patch — confirmed by reverting every Phase C change and reproducing
-  identically):**
+- **Known pre-existing, environment-only gaps at Phase C's original landing
+  (neither caused nor fixed by that patch — confirmed by reverting every
+  Phase C change and reproducing identically). The first of these is now
+  closed by the closure-repair sub-phase below; the second remains
+  unrelated/out of scope for both patches:**
   - `scenario_market_data_latest_bar_scheduler_01::scheduler_fake_provider_poll_immediately_invokes_poll_once_once`
-    fails (`truth_state` is `"refused"`, not `"completed"`) because the test
-    does not supply an `instrument_registry_path` and its symbol is absent
-    from whichever `config/instruments/equities.json` the process resolves
-    at the CWD in effect when the daemon test binary runs — unrelated to the
-    Phase C poll-seam extraction (proven identical with Phase C's diff fully
-    reverted). Not fixed, per patch-discipline (out of stated file scope).
-  - `cargo clippy -p mqk-daemon --lib -- -D warnings` fails on this
-    machine's toolchain (rustc 1.93) due to the same pre-existing
+    used to fail (`truth_state` was `"refused"`, not `"completed"`) because
+    the test did not supply an `instrument_registry_path` and its symbol was
+    absent from whichever `config/instruments/equities.json` the process
+    resolved at the CWD in effect when the daemon test binary ran —
+    unrelated to the Phase C poll-seam extraction itself. **Fixed by the
+    closure-repair sub-phase (REPAIR 9)**, entirely inside the test file: an
+    explicit temporary instrument-registry fixture, wired via
+    `AppState::instrument_registry_path` (a public field), independent of
+    test CWD. Production scheduler code is unchanged. Now 6/6.
+  - `cargo clippy -p mqk-daemon --lib -- -D warnings` still fails on this
+    machine's toolchain (rustc 1.93) due to the pre-existing
     `clippy::manual_range_contains` lint in `routes/strategy_scans.rs:87`
-    already documented in the Phase B calendar-authority-repair entry above
-    — confirmed via `git stash` that it is present identically with none of
-    this patch's changes applied. Every file this patch actually touched is
-    clippy-clean (verified via `cargo clippy` without `-D warnings`, which
-    reports only this one pre-existing warning across the entire crate).
+    (unrelated file, untouched by either patch) plus pre-existing
+    `bool_assert_comparison`/`await_holding_lock` lints in
+    `runtime_session_source.rs`/`session_controller.rs` (also untouched).
+    Every file either patch actually touched remains clippy-clean (verified
+    via `cargo clippy` without `-D warnings` filtered to the touched-file
+    paths, and via strict `-D warnings` on `mqk-md`/`mqk-db` alone, both
+    zero diagnostics). Not fixed, per patch-discipline (out of stated file
+    scope for this repair).
 - **Guards:** `validate_autonomous_daily_paper_operations_01a_audit.ps1`
   22/22, `validate_daily_data_readiness_01e_closure.ps1` all checks (Phase A
   guard re-run clean), `check_unsafe_patterns.ps1` all guards, migration
@@ -10338,8 +10354,167 @@ MIGRATION ADDED: yes (0050_autonomous_daily_bar_dispatches.sql, additive;
   0048/0049 unchanged)
 ```
 
+**Phase C production-path closure repair
+(`AUTONOMOUS-DAILY-PAPER-OPERATIONS-01C-POLL-REEVALUATE-AND-PROVIDER-CLOSURE-01`):**
+starting HEAD `0da0f6a47f45079526eaa69e4ca567952f65356a` ("data: drive
+autonomous paper from completed bars", Phase C's own landing commit).
+**Commit:** PENDING (recorded here at commit time; this line is intentionally
+`PENDING` until the closure-repair commit exists — no fabricated hash).
+
+Honest defect record for what the original Phase C landing above actually
+shipped, found during this repair's required source review:
+
+- **Readiness was checked once, before polling, and reused unchanged for the
+  dispatch decision.** A single `AssignmentReadiness` snapshot (`input.readiness`)
+  gated both "may I poll?" and "may I dispatch?" — a bar that only became
+  ready *after* being ingested (e.g. history satisfied by the very bar just
+  polled) was never re-checked, and the driver never observed its own
+  ingest's effect on readiness.
+- **A missing expected bar (`expected_latest_bar_missing`) was treated as a
+  hard block on polling**, even though the missing bar is exactly what
+  polling exists to remediate — `readiness_state != "ready"` refused the
+  poll outright with zero remediation path.
+- **Exact expected-bar equality was never enforced against the provider's
+  returned bar.** Whatever bar the provider happened to return (in-range,
+  complete, not future-skewed) was accepted as "the" observed/dispatched
+  bar, with no check that its `end_ts` actually matched Bundle 2's own
+  `expected_latest_bar_ts` — a lagging provider could silently supply and
+  dispatch on a stale bar.
+- **`capabilities_from_provider_config` advertised `latest_closed_bar` for
+  Alpaca only.** TwelveData's `1D` timestamp convention is independently
+  verified by Bundle 2 (`resolve_daily_bar_timestamp_convention`), but the
+  factory never enabled the equivalent bounded-historical-window adapter
+  path for it — the verified provider had no usable production capability.
+- **`scenario_market_data_latest_bar_scheduler_01`'s one DB-backed test was
+  CWD-dependent** (see the corrected "known gaps" bullet above), making its
+  pass/fail non-deterministic across invocation methods.
+
+**Repairs applied (`state/autonomous_completed_bar_driver.rs`,
+`state/market_data_latest_bar.rs`, `mqk-db/src/md.rs`,
+`mqk-md/src/provider_registry.rs`, two test files):**
+
+- **Injected two-stage readiness evaluator**
+  (`AutonomousAssignmentReadinessEvaluator` trait +
+  `ProductionAutonomousAssignmentReadinessEvaluator`, a thin pass-through to
+  the unchanged `daily_data_readiness::evaluate_readiness_with_binding` —
+  no duplicate readiness implementation). The driver now evaluates readiness
+  at least twice per tick that reaches the bar stage: once (pre-poll) to
+  classify polling *eligibility*, once more (post-poll) from current DB
+  truth to authorize dispatch.
+- **Typed pre-poll eligibility classifier** (`classify_pre_poll_eligibility`):
+  a blocker set containing only `expected_latest_bar_missing` (optionally
+  with `insufficient_history` when the tail bar itself is what's missing) is
+  poll-remediable; any other blocker, or an unresolvable expected timestamp
+  outside a `"ready"` verdict, is non-remediable — zero provider calls. Typed
+  reason-code comparison only, no substring matching.
+- **Exact expected-bar `md_bars` lookup** (`mqk_db::md::fetch_exact_bar_with_provenance`,
+  new focused single-row helper, additive) runs before any poll — when the
+  exact expected bar already exists (complete, matching canonical provider
+  id/symbol), zero provider calls are made; observation and post-poll
+  dispatch proceed directly from the local row.
+- **`ExpectedLatestBarConstraint`** (new, optional field on
+  `LatestBarPollSeamInput`; manual poll-once route always supplies `None`,
+  preserving its behavior exactly — proven by
+  `scenario_market_data_latest_bar_poll_01` still 17/17 unmodified): when
+  supplied, a returned bar's `end_ts` not exactly matching the constraint
+  becomes `ProviderLaggingExpectedBar` (older) or `UnexpectedOrFutureBar`
+  (newer) — the bar itself is still durably ingested into `md_bars` (it is
+  genuine data), but never observed or dispatched. Provider-poll evidence
+  reflects this honestly: the provider call succeeded
+  (`provider_poll_success_count` increments), `bars_observed` does not,
+  `data_refresh_state` records `provider_lagging_expected_bar` /
+  `unexpected_or_future_bar`.
+- **Mandatory post-poll re-evaluation gate**
+  (`AutonomousCompletedBarDriverOutcome::ReadinessBlockedAfterPoll`, new
+  variant): dispatch requires the *second* evaluation's `readiness_state ==
+  "ready"` AND `expected_latest_bar_ts == actual_latest_bar_ts == candidate
+  end_ts` — a successful provider call or a locally-found bar never alone
+  authorizes dispatch.
+- **TwelveData `latest_closed_bar` capability enabled**
+  (`capabilities_from_provider_config` and the `"twelvedata"` factory arm in
+  `mqk-md/src/provider_registry.rs`, `.with_latest_closed_bar_enabled()` —
+  the same bounded-historical-window `HistoricalProviderMarketDataAdapter`
+  Alpaca already used, no second implementation). Alpaca `1D` remains
+  readiness-blocked (`resolve_daily_bar_timestamp_convention("alpaca") ==
+  Unverified`, unchanged) — capability enablement is independent of, and
+  does not imply, timestamp-convention verification.
+- **Deterministic scheduler test fixture** (REPAIR 9, test-file-only):
+  `scenario_market_data_latest_bar_scheduler_01.rs`'s one previously
+  CWD-dependent DB-backed test now sets `AppState::instrument_registry_path`
+  (a public field) to an explicit temporary fixture. Zero production
+  scheduler code changed. Now 6/6, deterministically.
+- **No migration change.** `0048`/`0049`/`0050` untouched; no independently
+  proven schema defect required a `0051`.
+
+**New/extended tests:** 17 new tests appended to
+`scenario_autonomous_completed_bar_driver_01.rs` (`repair10_*`, using a
+queued fake evaluator proving first-evaluation-blocked/second-evaluation-ready
+and first-evaluation-blocked/second-evaluation-still-blocked sequencing
+explicitly — not every fixture pre-built as `"ready"`), bringing that file to
+40 tests total (all existing tests migrated mechanically from a single
+injected `&AssignmentReadiness` to `FakeReadinessEvaluator::always(...)`,
+behavior-preserving by construction since it repeats the same snapshot for
+every evaluator call). One focused `mqk-db/src/md.rs` helper added
+(`fetch_exact_bar_with_provenance`, 0 new dedicated unit tests beyond the
+driver-test coverage that exercises it directly against the test DB — its
+query shape is a strict subset of the already-tested
+`fetch_bounded_bars_with_provenance`). 12 new/updated `mqk-md` tests
+(`TWELVEDATA-CAP-*`, `TWELVEDATA-LATEST-*`, plus one corrected pre-existing
+assertion that had asserted `twelvedata` does *not* advertise
+`latest_closed_bar` — now false given REPAIR 7, corrected rather than left
+contradicting production behavior).
+
+**Regressions (all re-run against the reachable test DB, one binary at a
+time, after this repair):**
+`scenario_autonomous_completed_bar_driver_01` 40/40,
+`scenario_market_data_latest_bar_scheduler_01` 6/6,
+`scenario_market_data_latest_bar_poll_01` 17/17,
+`scenario_autonomous_daily_operation_data_evidence_01` 8/8,
+`scenario_autonomous_daily_operation_store_01` 26/26,
+`mqk-md` provider/provider_registry focused tests 71/71,
+`scenario_daily_data_readiness_01` 64/64,
+`scenario_daily_data_readiness_api_01` 7/7,
+`scenario_daily_data_readiness_start_gate_01` 20/20,
+`scenario_intraday_md_freshness_autonomous_01` 6/6,
+`scenario_md_staleness_per_tick_gate_01` 5/5,
+`scenario_per_symbol_bar_window_01` 14/14,
+`scenario_multi_symbol_dispatch_loop_01` 8/8,
+`scenario_native_strategy_loop_send_b1b` 5/5,
+`scenario_autonomous_daily_operation_identity_01` 44/44. Zero DB
+self-skips. Full daemon suite not run (not required).
+
+**Guards (re-run after this repair):**
+`validate_autonomous_daily_paper_operations_01a_audit.ps1` 22/22 (unchanged
+from Phase C's original run — this repair touches no audited file),
+`validate_daily_data_readiness_01e_closure.ps1` all checks (Phase A guard
+re-run clean), `check_unsafe_patterns.ps1` all guards. Migration governance
+not re-run (no migration or manifest content changed). `rustfmt --check`
+clean on every touched file after `rustfmt` applied. `git diff --check`
+clean.
+
+**Safety confirmation (closure repair):**
+
 ```text
-Phase C foundation: COMPLETE
+PROVIDER CALLS: no (real network)
+BROKER CALLS: no
+NETWORK CALLS: no
+REAL DAEMON STARTED: no
+REAL RUNTIME STARTED: no
+SESSION CONTROLLER STARTED: no
+AUTONOMOUS DRIVER AUTO-STARTED: no
+EXECUTION ARMED: no
+PAPER ORDERS: no
+LIVE ORDERS: no
+PAPER DB TOUCHED: no
+PRODUCTION CODE CHANGED: yes (driver two-stage readiness + exact-bar
+  enforcement; poll-seam constraint field; provider_registry capability
+  flag; one mqk-db read-only helper; one manual-route match-exhaustiveness
+  arm — behavior-preserving)
+MIGRATION ADDED: no
+```
+
+```text
+Phase C production-path closure repair: COMPLETE
 Bundle 3 (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-COMBINED): OPEN
 Next authorized phase: Phase D — session controller, retries, recovery,
   and task supervision
@@ -10348,5 +10523,5 @@ Next authorized phase: Phase D — session controller, retries, recovery,
 **Expected next bundle after closure:** `DURABLE-PAPER-PORTFOLIO-AND-PNL-01-COMBINED`.
 
 **Next authorized step:** Phase D — session controller, retries, recovery,
-and task supervision — only after independent review of this Phase C
-foundation, and only on explicit operator instruction.
+and task supervision — only after independent review of this closure repair,
+and only on explicit operator instruction.

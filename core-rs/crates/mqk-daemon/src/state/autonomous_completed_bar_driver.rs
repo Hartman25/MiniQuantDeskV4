@@ -18,18 +18,34 @@
 //! only ever calls the latest-closed-bar poll seam
 //! (`super::market_data_latest_bar`). No provider call is made unless
 //! [`AutonomousProviderCallAuthorization::Authorized`] holds.
+//!
+//! AUTONOMOUS-DAILY-PAPER-OPERATIONS-01C-POLL-REEVALUATE-AND-PROVIDER-CLOSURE-01
+//! (Phase C production-path closure repair): the original Phase C
+//! implementation checked strict readiness once, before polling, and reused
+//! that same pre-poll snapshot to authorize dispatch after ingest — so a bar
+//! that only became ready *after* being ingested was never re-checked, and a
+//! provider call was refused outright whenever the missing expected bar was
+//! itself the only blocker. This repair splits evaluation into two stages
+//! (see [`AutonomousAssignmentReadinessEvaluator`]): a pre-poll evaluation
+//! that only gates *whether polling is eligible* (a missing expected bar is
+//! poll-remediable, not a hard block), and a mandatory post-poll
+//! re-evaluation from current DB truth that alone authorizes dispatch.
 
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
 
 use super::market_data_latest_bar::{
-    poll_and_ingest_latest_closed_bar, resolve_latest_bar_poll_target, LatestBarPollOutcome,
-    LatestBarPollSeamInput, LatestBarRegistryAdmissionRejection, ResolvedLatestBarPollTarget,
+    poll_and_ingest_latest_closed_bar, resolve_latest_bar_poll_target, ExpectedLatestBarConstraint,
+    LatestBarPollOutcome, LatestBarPollSeamInput, LatestBarRegistryAdmissionRejection,
+    ResolvedLatestBarPollTarget,
 };
 use super::multi_symbol_config::MultiSymbolRuntimeConfig;
 use super::{AppState, StrategyBarInput};
-use crate::daily_data_readiness::AssignmentReadiness;
+use crate::daily_data_readiness::{
+    self, AssignmentReadiness, DailyDataReadinessContext, REASON_EXPECTED_LATEST_BAR_MISSING,
+    REASON_INSUFFICIENT_HISTORY,
+};
 use mqk_md::instrument_registry::TrackedInstrument;
 use mqk_runtime::native_strategy::EffectiveRuntimeBinding;
 
@@ -250,6 +266,151 @@ pub fn resolve_single_effective_binding(
 }
 
 // ---------------------------------------------------------------------------
+// REPAIR 1 (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01C-POLL-REEVALUATE-AND-PROVIDER-CLOSURE-01)
+// — injected strict-readiness evaluator seam, so the driver never has to be
+// handed a stale, pre-computed `AssignmentReadiness` snapshot for both the
+// pre-poll and post-poll checks. The production adapter reuses the exact
+// same Bundle 2 evaluator (`daily_data_readiness::evaluate_readiness_with_binding`)
+// every route and the runtime start gate already share — never a second,
+// independently-derived readiness computation.
+// ---------------------------------------------------------------------------
+
+/// Evaluate strict Bundle 2 daily-data readiness for one resolved binding, at
+/// a caller-supplied instant. Implementations must not read the wall clock,
+/// must not call a provider or broker, and must not re-derive a runtime
+/// bootstrap/binding of their own — `now_utc` and `binding` are always
+/// supplied by the caller.
+#[async_trait::async_trait]
+pub trait AutonomousAssignmentReadinessEvaluator: Send + Sync {
+    async fn evaluate(
+        &self,
+        operation: &mqk_db::AutonomousDailyOperationRecord,
+        binding: &ResolvedSingleBinding,
+        now_utc: DateTime<Utc>,
+    ) -> anyhow::Result<AssignmentReadiness>;
+}
+
+/// Production adapter: delegates to
+/// [`daily_data_readiness::evaluate_readiness_with_binding`] — the identical
+/// evaluation path every readiness route and the runtime start gate already
+/// use — using an assignment config and runtime binding the caller resolved
+/// once for this driver invocation (never a second env-driven bootstrap; see
+/// the lifecycle-safety contract on
+/// [`daily_data_readiness::evaluate_daily_data_readiness_from_env`]).
+pub struct ProductionAutonomousAssignmentReadinessEvaluator {
+    pool: PgPool,
+    assignment_config: MultiSymbolRuntimeConfig,
+    runtime_binding: EffectiveRuntimeBinding,
+    context: DailyDataReadinessContext,
+}
+
+impl ProductionAutonomousAssignmentReadinessEvaluator {
+    pub fn new(
+        pool: PgPool,
+        assignment_config: MultiSymbolRuntimeConfig,
+        runtime_binding: EffectiveRuntimeBinding,
+        context: DailyDataReadinessContext,
+    ) -> Self {
+        Self {
+            pool,
+            assignment_config,
+            runtime_binding,
+            context,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl AutonomousAssignmentReadinessEvaluator for ProductionAutonomousAssignmentReadinessEvaluator {
+    async fn evaluate(
+        &self,
+        _operation: &mqk_db::AutonomousDailyOperationRecord,
+        binding: &ResolvedSingleBinding,
+        now_utc: DateTime<Utc>,
+    ) -> anyhow::Result<AssignmentReadiness> {
+        let report = daily_data_readiness::evaluate_readiness_with_binding(
+            Some(&self.pool),
+            &self.assignment_config,
+            &self.runtime_binding,
+            &self.context,
+            now_utc,
+        )
+        .await;
+
+        report
+            .assignments
+            .into_iter()
+            .find(|a| {
+                a.assignment_symbol
+                    .trim()
+                    .eq_ignore_ascii_case(&binding.symbol)
+                    && a.assignment_timeframe.trim() == binding.timeframe.as_str()
+            })
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "no readiness assignment found matching resolved binding {}/{}",
+                    binding.symbol,
+                    binding.timeframe.as_str()
+                )
+            })
+    }
+}
+
+/// REPAIR 2: pre-poll eligibility, derived from typed reason codes only —
+/// never substring matching. A missing expected bar (optionally alongside
+/// `insufficient_history`, when that blocker is present *because* the
+/// expected tail bar itself has not arrived) is poll-remediable; any other
+/// blocker, or the absence of a computable expected timestamp outside a
+/// `"ready"` verdict, is not.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PrePollEligibility {
+    /// Bundle 2 already reports `"ready"` with no expected-bar concept for
+    /// this timeframe (e.g. H1/M15, which never compute an expected window) —
+    /// not blocked, but there is nothing to poll for this tick.
+    NoExpectedBarConcept,
+    /// The exact expected bar identity is known and every other precondition
+    /// already holds; the only remaining question is whether it is present.
+    Known { expected_end_ts: i64 },
+    /// A non-remediable blocker (or a db_unavailable/query_failed readiness
+    /// state) makes polling ineligible this tick — zero provider calls.
+    NonRemediable { reason_code: &'static str },
+}
+
+fn classify_pre_poll_eligibility(readiness: &AssignmentReadiness) -> PrePollEligibility {
+    let Some(expected_end_ts) = readiness.expected_latest_bar_ts else {
+        if readiness.is_ready() {
+            return PrePollEligibility::NoExpectedBarConcept;
+        }
+        let reason_code = match readiness.readiness_state {
+            "db_unavailable" => "database_unavailable",
+            "query_failed" => "query_failed",
+            _ => readiness
+                .blockers
+                .first()
+                .copied()
+                .unwrap_or("expected_latest_bar_not_loaded"),
+        };
+        return PrePollEligibility::NonRemediable { reason_code };
+    };
+
+    for &blocker in &readiness.blockers {
+        let remediable = blocker == REASON_EXPECTED_LATEST_BAR_MISSING
+            || (blocker == REASON_INSUFFICIENT_HISTORY
+                && readiness
+                    .actual_latest_bar_ts
+                    .map(|actual| actual < expected_end_ts)
+                    .unwrap_or(true));
+        if !remediable {
+            return PrePollEligibility::NonRemediable {
+                reason_code: blocker,
+            };
+        }
+    }
+
+    PrePollEligibility::Known { expected_end_ts }
+}
+
+// ---------------------------------------------------------------------------
 // C.14 — Driver outcome
 // ---------------------------------------------------------------------------
 
@@ -333,6 +494,28 @@ pub enum AutonomousCompletedBarDriverOutcome {
     EvidencePersistenceFailed {
         detail: String,
     },
+    /// REPAIR 4: the provider call succeeded and the returned bar was
+    /// ingested, but its `end_ts` is older than the exact expected
+    /// timestamp — the provider is lagging behind the exchange. No
+    /// observation, no dispatch claim.
+    ProviderLaggingExpectedBar {
+        returned_bar_ts: i64,
+        expected_end_ts: i64,
+    },
+    /// REPAIR 4: the provider call succeeded and the returned bar was
+    /// ingested, but its `end_ts` is newer than the exact expected
+    /// timestamp. No observation, no dispatch claim.
+    UnexpectedOrFutureBar {
+        returned_bar_ts: i64,
+        expected_end_ts: i64,
+    },
+    /// REPAIR 5: the exact expected bar was located or ingested, but the
+    /// mandatory post-poll strict-readiness re-evaluation is not ready (or
+    /// no longer agrees the candidate bar is the expected/actual latest
+    /// bar). No dispatch claim, no strategy call, no outbox work.
+    ReadinessBlockedAfterPoll {
+        blockers: Vec<&'static str>,
+    },
 }
 
 /// Fixed, bounded poll-retry cooldown. Phase D owns full typed
@@ -357,10 +540,12 @@ pub struct AutonomousCompletedBarDriverInput<'a> {
     pub instruments: &'a [TrackedInstrument],
     pub provider_id: &'a str,
     pub provider: &'a dyn mqk_md::MarketDataProvider,
-    /// Pre-computed strict Bundle 2 daily-data-readiness evaluation for the
-    /// resolved single binding — this driver never re-derives readiness
-    /// itself, only enforces it (C.9).
-    pub readiness: &'a AssignmentReadiness,
+    /// REPAIR 1: an injected evaluator seam, called at least twice per tick
+    /// that reaches the bar stage — once (pre-poll) to determine polling
+    /// eligibility, and once more (post-poll) from current DB truth to
+    /// authorize dispatch. Never a single stale snapshot reused for both
+    /// decisions.
+    pub readiness_evaluator: &'a dyn AutonomousAssignmentReadinessEvaluator,
 }
 
 /// Perform one autonomous completed-bar driver tick. Returns a stable typed
@@ -439,21 +624,56 @@ pub async fn tick_autonomous_completed_bar_driver(
         }
     };
 
-    if input.readiness.readiness_state != "ready" {
-        return Ok(AutonomousCompletedBarDriverOutcome::ReadinessBlocked {
-            blockers: input.readiness.blockers.clone(),
-        });
-    }
+    // REPAIR 1/2 — first (pre-poll) strict-readiness evaluation: gates
+    // *eligibility to poll*, not dispatch. A missing expected bar alone
+    // never blocks polling.
+    let pre_poll_readiness = input
+        .readiness_evaluator
+        .evaluate(operation, &binding, input.now_utc)
+        .await?;
 
-    // C.7 — poll cadence: due iff Bundle 2's own expected-bar computation
-    // names a bar we have not already observed, and (if a prior attempt for
-    // this exact expected bar exists) a bounded cooldown has elapsed.
-    let Some(expected_ts) = input.readiness.expected_latest_bar_ts else {
-        return Ok(AutonomousCompletedBarDriverOutcome::PollNotDue);
+    let expected_ts = match classify_pre_poll_eligibility(&pre_poll_readiness) {
+        PrePollEligibility::NoExpectedBarConcept => {
+            return Ok(AutonomousCompletedBarDriverOutcome::PollNotDue);
+        }
+        PrePollEligibility::NonRemediable { .. } => {
+            return Ok(AutonomousCompletedBarDriverOutcome::ReadinessBlocked {
+                blockers: pre_poll_readiness.blockers.clone(),
+            });
+        }
+        PrePollEligibility::Known { expected_end_ts } => expected_end_ts,
     };
+
+    // C.7 — poll cadence: due iff the exact expected bar has not already
+    // been observed, and (if a prior attempt for this exact expected bar
+    // exists) a bounded cooldown has elapsed.
     if operation.last_completed_bar_ts == Some(expected_ts) {
         return Ok(AutonomousCompletedBarDriverOutcome::PollNotDue);
     }
+
+    // REPAIR 3 — exact expected-bar lookup: avoid a provider call entirely
+    // when the exact expected canonical bar already exists in `md_bars`.
+    // Zero provider-poll counters are touched on this path (REPAIR 6).
+    let exact_local = mqk_db::md::fetch_exact_bar_with_provenance(
+        input.pool,
+        &binding.symbol,
+        binding.timeframe.as_str(),
+        expected_ts,
+    )
+    .await?;
+    if let Some(row) = exact_local {
+        if row.is_complete
+            && row.provider_id.eq_ignore_ascii_case(&target.provider_id)
+            && row
+                .provider_symbol
+                .as_deref()
+                .map(|s| s.eq_ignore_ascii_case(&target.provider_symbol))
+                .unwrap_or(false)
+        {
+            return observe_and_dispatch_if_ready(&input, &binding, expected_ts).await;
+        }
+    }
+
     if let Some(last_poll) = operation.last_provider_poll_utc {
         if (input.now_utc - last_poll).num_seconds() < POLL_RETRY_COOLDOWN_SECS {
             return Ok(AutonomousCompletedBarDriverOutcome::PollNotDue);
@@ -480,6 +700,8 @@ pub async fn tick_autonomous_completed_bar_driver(
         }
     }
 
+    // REPAIR 4 — the provider's result must equal the exact expected bar to
+    // be treated as observed/dispatchable.
     let poll_outcome = poll_and_ingest_latest_closed_bar(
         input.pool,
         LatestBarPollSeamInput {
@@ -487,6 +709,9 @@ pub async fn tick_autonomous_completed_bar_driver(
             target: &target,
             now_utc: input.now_utc,
             ingest_mode: "autonomous_daily_operation_driver",
+            expected_bar_constraint: Some(ExpectedLatestBarConstraint {
+                exact_end_ts: expected_ts,
+            }),
         },
     )
     .await;
@@ -557,6 +782,43 @@ pub async fn tick_autonomous_completed_bar_driver(
             .await?;
             Ok(AutonomousCompletedBarDriverOutcome::EvidencePersistenceFailed { detail })
         }
+        // REPAIR 6: the provider call itself succeeded — success count
+        // increments — but the returned bar does not match the exact
+        // expected identity, so it is never treated as observed/dispatched.
+        LatestBarPollOutcome::ProviderLaggingExpectedBar {
+            returned_bar_ts,
+            expected_end_ts,
+        } => {
+            mqk_db::record_provider_poll_succeeded(
+                input.pool,
+                operation.operation_id,
+                input.now_utc,
+                "provider_lagging_expected_bar",
+            )
+            .await?;
+            Ok(
+                AutonomousCompletedBarDriverOutcome::ProviderLaggingExpectedBar {
+                    returned_bar_ts,
+                    expected_end_ts,
+                },
+            )
+        }
+        LatestBarPollOutcome::UnexpectedOrFutureBar {
+            returned_bar_ts,
+            expected_end_ts,
+        } => {
+            mqk_db::record_provider_poll_succeeded(
+                input.pool,
+                operation.operation_id,
+                input.now_utc,
+                "unexpected_or_future_bar",
+            )
+            .await?;
+            Ok(AutonomousCompletedBarDriverOutcome::UnexpectedOrFutureBar {
+                returned_bar_ts,
+                expected_end_ts,
+            })
+        }
         LatestBarPollOutcome::InsertedNewBar { end_ts, .. }
         | LatestBarPollOutcome::AlreadyStored { end_ts, .. } => {
             mqk_db::record_provider_poll_succeeded(
@@ -566,29 +828,66 @@ pub async fn tick_autonomous_completed_bar_driver(
                 "bar_received",
             )
             .await?;
+            debug_assert_eq!(
+                end_ts, expected_ts,
+                "poll_and_ingest_latest_closed_bar must enforce the exact expected-bar constraint"
+            );
+            observe_and_dispatch_if_ready(&input, &binding, end_ts).await
+        }
+    }
+}
 
-            match mqk_db::record_completed_bar_observed(
-                input.pool,
-                operation.operation_id,
-                end_ts,
-                input.now_utc,
-            )
-            .await?
-            {
-                mqk_db::RecordCompletedBarObservedOutcome::NotFound => Ok(
-                    AutonomousCompletedBarDriverOutcome::EvidencePersistenceFailed {
-                        detail: "operation row not found while recording bar observation"
-                            .to_string(),
+/// REPAIR 3/5: record the exact expected bar as observed (idempotent), then
+/// re-evaluate strict readiness (the mandatory *second* evaluation) from
+/// current DB truth before authorizing dispatch. Reached both when the exact
+/// bar was already present locally (no poll) and when a poll just ingested
+/// it.
+async fn observe_and_dispatch_if_ready(
+    input: &AutonomousCompletedBarDriverInput<'_>,
+    binding: &ResolvedSingleBinding,
+    bar_end_ts: i64,
+) -> anyhow::Result<AutonomousCompletedBarDriverOutcome> {
+    let operation = input.operation;
+
+    match mqk_db::record_completed_bar_observed(
+        input.pool,
+        operation.operation_id,
+        bar_end_ts,
+        input.now_utc,
+    )
+    .await?
+    {
+        mqk_db::RecordCompletedBarObservedOutcome::NotFound => Ok(
+            AutonomousCompletedBarDriverOutcome::EvidencePersistenceFailed {
+                detail: "operation row not found while recording bar observation".to_string(),
+            },
+        ),
+        mqk_db::RecordCompletedBarObservedOutcome::AlreadyObserved { .. }
+        | mqk_db::RecordCompletedBarObservedOutcome::StaleBarIgnored { .. } => {
+            Ok(AutonomousCompletedBarDriverOutcome::PollSucceededNoNewBar)
+        }
+        mqk_db::RecordCompletedBarObservedOutcome::Recorded { .. } => {
+            // REPAIR 5 — mandatory post-poll (second) strict-readiness
+            // re-evaluation from current DB truth. A successful ingest alone
+            // never authorizes dispatch.
+            let post_poll_readiness = input
+                .readiness_evaluator
+                .evaluate(operation, binding, input.now_utc)
+                .await?;
+
+            let ready_for_this_bar = post_poll_readiness.is_ready()
+                && post_poll_readiness.expected_latest_bar_ts == Some(bar_end_ts)
+                && post_poll_readiness.actual_latest_bar_ts == Some(bar_end_ts);
+
+            if !ready_for_this_bar {
+                return Ok(
+                    AutonomousCompletedBarDriverOutcome::ReadinessBlockedAfterPoll {
+                        blockers: post_poll_readiness.blockers.clone(),
                     },
-                ),
-                mqk_db::RecordCompletedBarObservedOutcome::AlreadyObserved { .. }
-                | mqk_db::RecordCompletedBarObservedOutcome::StaleBarIgnored { .. } => {
-                    Ok(AutonomousCompletedBarDriverOutcome::PollSucceededNoNewBar)
-                }
-                mqk_db::RecordCompletedBarObservedOutcome::Recorded { .. } => {
-                    claim_and_dispatch_observed_bar(&input, &binding, end_ts).await
-                }
+                );
             }
+
+            claim_and_dispatch_observed_bar(input, binding, bar_end_ts).await
         }
     }
 }
