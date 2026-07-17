@@ -41,9 +41,9 @@ manifest_path = pathlib.Path(sys.argv[1])
 root = pathlib.Path(sys.argv[2])
 
 manifest = json.loads(manifest_path.read_text())
-manifest_paths = sorted(m["path"].replace("\\\\", "/") for m in manifest["migrations"])
+manifest_paths = sorted(m["path"].replace("\\", "/") for m in manifest["migrations"])
 sql_paths = sorted(
-    str(p.relative_to(root)).replace("\\\\", "/")
+    p.relative_to(root).as_posix()
     for p in root.rglob("*.sql")
 )
 
