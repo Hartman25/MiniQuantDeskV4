@@ -1030,3 +1030,552 @@ pub async fn list_autonomous_daily_operation_events(
         .collect::<Result<Vec<_>, _>>()
         .map_err(Into::into)
 }
+
+// ---------------------------------------------------------------------------
+// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01C-COMPLETED-BAR-DATA-DRIVER
+// Durable provider-poll and bar-observation evidence
+// ---------------------------------------------------------------------------
+//
+// These recorders update bookkeeping counters/evidence columns on an
+// existing `sys_autonomous_daily_operations` row only. They never touch
+// `state_version` and never insert a `sys_autonomous_daily_operation_events`
+// row -- evidence accumulation is not itself a lifecycle transition. All
+// timestamps are caller-supplied; nothing here reads the wall clock.
+
+fn validate_data_refresh_state(data_refresh_state: &str) -> Result<()> {
+    if data_refresh_state.trim().is_empty() {
+        anyhow::bail!("data_refresh_state must not be empty");
+    }
+    if data_refresh_state.len() > 64 {
+        anyhow::bail!("data_refresh_state exceeds 64 chars");
+    }
+    Ok(())
+}
+
+/// Outcome of a provider-poll evidence recorder. `NotFound` is authoritative
+/// "no such operation" -- never silently a no-op.
+#[derive(Debug, Clone)]
+pub enum RecordProviderPollOutcome {
+    Recorded {
+        provider_poll_attempt_count: i64,
+        provider_poll_success_count: i64,
+        provider_poll_failure_count: i64,
+    },
+    NotFound,
+}
+
+fn provider_poll_counts_from_row(
+    r: sqlx::postgres::PgRow,
+) -> Result<RecordProviderPollOutcome, sqlx::Error> {
+    Ok(RecordProviderPollOutcome::Recorded {
+        provider_poll_attempt_count: r.try_get("provider_poll_attempt_count")?,
+        provider_poll_success_count: r.try_get("provider_poll_success_count")?,
+        provider_poll_failure_count: r.try_get("provider_poll_failure_count")?,
+    })
+}
+
+/// Record that a provider-poll attempt began: increments
+/// `provider_poll_attempt_count` by exactly one, and advances
+/// `last_provider_poll_utc`/`data_refresh_state`.
+pub async fn record_provider_poll_started(
+    pool: &PgPool,
+    operation_id: Uuid,
+    occurred_at_utc: DateTime<Utc>,
+    data_refresh_state: &str,
+) -> Result<RecordProviderPollOutcome> {
+    validate_data_refresh_state(data_refresh_state)?;
+    let row = sqlx::query(
+        r#"
+        update sys_autonomous_daily_operations
+        set provider_poll_attempt_count = provider_poll_attempt_count + 1,
+            last_provider_poll_utc = $2,
+            data_refresh_state = $3,
+            updated_at_utc = $2
+        where operation_id = $1
+        returning provider_poll_attempt_count, provider_poll_success_count, provider_poll_failure_count
+        "#,
+    )
+    .bind(operation_id)
+    .bind(occurred_at_utc)
+    .bind(data_refresh_state)
+    .fetch_optional(pool)
+    .await
+    .context("record_provider_poll_started failed")?;
+
+    match row {
+        Some(r) => provider_poll_counts_from_row(r).map_err(Into::into),
+        None => Ok(RecordProviderPollOutcome::NotFound),
+    }
+}
+
+/// Record that a provider-poll attempt succeeded: increments
+/// `provider_poll_success_count` by exactly one, and advances
+/// `last_provider_poll_utc`/`data_refresh_state`.
+pub async fn record_provider_poll_succeeded(
+    pool: &PgPool,
+    operation_id: Uuid,
+    occurred_at_utc: DateTime<Utc>,
+    data_refresh_state: &str,
+) -> Result<RecordProviderPollOutcome> {
+    validate_data_refresh_state(data_refresh_state)?;
+    let row = sqlx::query(
+        r#"
+        update sys_autonomous_daily_operations
+        set provider_poll_success_count = provider_poll_success_count + 1,
+            last_provider_poll_utc = $2,
+            data_refresh_state = $3,
+            updated_at_utc = $2
+        where operation_id = $1
+        returning provider_poll_attempt_count, provider_poll_success_count, provider_poll_failure_count
+        "#,
+    )
+    .bind(operation_id)
+    .bind(occurred_at_utc)
+    .bind(data_refresh_state)
+    .fetch_optional(pool)
+    .await
+    .context("record_provider_poll_succeeded failed")?;
+
+    match row {
+        Some(r) => provider_poll_counts_from_row(r).map_err(Into::into),
+        None => Ok(RecordProviderPollOutcome::NotFound),
+    }
+}
+
+/// Record that a provider-poll attempt failed: increments
+/// `provider_poll_failure_count` by exactly one, advances
+/// `last_provider_poll_utc`/`data_refresh_state`, and records a bounded
+/// `last_error`.
+pub async fn record_provider_poll_failed(
+    pool: &PgPool,
+    operation_id: Uuid,
+    occurred_at_utc: DateTime<Utc>,
+    data_refresh_state: &str,
+    last_error: &str,
+) -> Result<RecordProviderPollOutcome> {
+    validate_data_refresh_state(data_refresh_state)?;
+    if last_error.len() > 4000 {
+        anyhow::bail!("record_provider_poll_failed: last_error exceeds 4000 chars");
+    }
+    let row = sqlx::query(
+        r#"
+        update sys_autonomous_daily_operations
+        set provider_poll_failure_count = provider_poll_failure_count + 1,
+            last_provider_poll_utc = $2,
+            data_refresh_state = $3,
+            last_error = $4,
+            updated_at_utc = $2
+        where operation_id = $1
+        returning provider_poll_attempt_count, provider_poll_success_count, provider_poll_failure_count
+        "#,
+    )
+    .bind(operation_id)
+    .bind(occurred_at_utc)
+    .bind(data_refresh_state)
+    .bind(last_error)
+    .fetch_optional(pool)
+    .await
+    .context("record_provider_poll_failed failed")?;
+
+    match row {
+        Some(r) => provider_poll_counts_from_row(r).map_err(Into::into),
+        None => Ok(RecordProviderPollOutcome::NotFound),
+    }
+}
+
+/// Outcome of [`record_completed_bar_observed`].
+#[derive(Debug, Clone)]
+pub enum RecordCompletedBarObservedOutcome {
+    /// `bar_end_ts` is newer than the previously recorded value (or none was
+    /// recorded yet): `bars_observed` incremented by exactly one,
+    /// `last_completed_bar_ts` advanced to `bar_end_ts`.
+    Recorded { bars_observed: i64 },
+    /// `bar_end_ts` exactly matches the already-recorded
+    /// `last_completed_bar_ts` — idempotent replay, no counter change.
+    AlreadyObserved { bars_observed: i64 },
+    /// `bar_end_ts` is older than the already-recorded
+    /// `last_completed_bar_ts` — refused as a no-op; evidence never rewinds.
+    StaleBarIgnored {
+        current_last_completed_bar_ts: Option<i64>,
+    },
+    /// No row exists for `operation_id`.
+    NotFound,
+}
+
+/// Record that a genuinely new completed bar was observed for one
+/// operation. Idempotent on an exact replay of the same `bar_end_ts`;
+/// refuses (as a no-op) an older `bar_end_ts` than what is already
+/// recorded. Does not touch `state_version` and inserts no transition
+/// event.
+pub async fn record_completed_bar_observed(
+    pool: &PgPool,
+    operation_id: Uuid,
+    bar_end_ts: i64,
+    occurred_at_utc: DateTime<Utc>,
+) -> Result<RecordCompletedBarObservedOutcome> {
+    if bar_end_ts <= 0 {
+        anyhow::bail!("record_completed_bar_observed: bar_end_ts must be positive");
+    }
+
+    let advanced = sqlx::query(
+        r#"
+        update sys_autonomous_daily_operations
+        set bars_observed = bars_observed + 1,
+            last_completed_bar_ts = $2,
+            updated_at_utc = $3
+        where operation_id = $1
+          and (last_completed_bar_ts is null or last_completed_bar_ts < $2)
+        returning bars_observed
+        "#,
+    )
+    .bind(operation_id)
+    .bind(bar_end_ts)
+    .bind(occurred_at_utc)
+    .fetch_optional(pool)
+    .await
+    .context("record_completed_bar_observed: guarded advance failed")?;
+
+    if let Some(r) = advanced {
+        return Ok(RecordCompletedBarObservedOutcome::Recorded {
+            bars_observed: r.try_get("bars_observed")?,
+        });
+    }
+
+    let current = sqlx::query(
+        "select bars_observed, last_completed_bar_ts from sys_autonomous_daily_operations \
+         where operation_id = $1",
+    )
+    .bind(operation_id)
+    .fetch_optional(pool)
+    .await
+    .context("record_completed_bar_observed: current-row read failed")?;
+
+    Ok(match current {
+        None => RecordCompletedBarObservedOutcome::NotFound,
+        Some(r) => {
+            let bars_observed: i64 = r.try_get("bars_observed")?;
+            let last_completed_bar_ts: Option<i64> = r.try_get("last_completed_bar_ts")?;
+            if last_completed_bar_ts == Some(bar_end_ts) {
+                RecordCompletedBarObservedOutcome::AlreadyObserved { bars_observed }
+            } else {
+                RecordCompletedBarObservedOutcome::StaleBarIgnored {
+                    current_last_completed_bar_ts: last_completed_bar_ts,
+                }
+            }
+        }
+    })
+}
+
+// ---------------------------------------------------------------------------
+// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01C-COMPLETED-BAR-DATA-DRIVER
+// Durable bar-identity-keyed dispatch claims (migration 0050)
+// ---------------------------------------------------------------------------
+//
+// Audit conclusion: no existing seam (`strategy_signal_evaluations`'
+// `evaluation_id`, keyed on an arbitrary tick counter; `oms_outbox`'s
+// `decision_id`, keyed on wall-clock `now_micros`) provides durable
+// idempotency keyed on bar identity (local_symbol, timeframe, bar_end_ts).
+// `sys_autonomous_daily_bar_dispatches` closes that gap: claim before
+// dispatch, complete only after confirmed success, and any non-`completed`
+// outcome permanently blocks automatic redispatch of that exact bar
+// identity (Phase D owns manual recovery).
+
+pub const DISPATCH_STATUS_CLAIMED: &str = "claimed";
+pub const DISPATCH_STATUS_COMPLETED: &str = "completed";
+pub const DISPATCH_STATUS_UNCERTAIN: &str = "uncertain";
+pub const DISPATCH_STATUS_FAILED: &str = "failed";
+
+/// One row from `sys_autonomous_daily_bar_dispatches`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct AutonomousDailyBarDispatchRecord {
+    pub operation_id: Uuid,
+    pub local_symbol: String,
+    pub timeframe: String,
+    pub bar_end_ts: i64,
+    pub status: String,
+    pub claimed_at_utc: DateTime<Utc>,
+    pub completed_at_utc: Option<DateTime<Utc>>,
+    pub evaluation_id: Option<Uuid>,
+    pub last_error: Option<String>,
+}
+
+const BAR_DISPATCH_COLUMNS: &str = r#"
+    operation_id, local_symbol, timeframe, bar_end_ts, status,
+    claimed_at_utc, completed_at_utc, evaluation_id, last_error
+"#;
+
+fn row_to_bar_dispatch_record(
+    r: sqlx::postgres::PgRow,
+) -> Result<AutonomousDailyBarDispatchRecord, sqlx::Error> {
+    Ok(AutonomousDailyBarDispatchRecord {
+        operation_id: r.try_get("operation_id")?,
+        local_symbol: r.try_get("local_symbol")?,
+        timeframe: r.try_get("timeframe")?,
+        bar_end_ts: r.try_get("bar_end_ts")?,
+        status: r.try_get("status")?,
+        claimed_at_utc: r.try_get("claimed_at_utc")?,
+        completed_at_utc: r.try_get("completed_at_utc")?,
+        evaluation_id: r.try_get("evaluation_id")?,
+        last_error: r.try_get("last_error")?,
+    })
+}
+
+fn validate_bar_identity(local_symbol: &str, timeframe: &str, bar_end_ts: i64) -> Result<()> {
+    if local_symbol.trim().is_empty() {
+        anyhow::bail!("local_symbol must not be empty");
+    }
+    if timeframe.trim().is_empty() {
+        anyhow::bail!("timeframe must not be empty");
+    }
+    if bar_end_ts <= 0 {
+        anyhow::bail!("bar_end_ts must be positive");
+    }
+    Ok(())
+}
+
+/// Outcome of [`claim_autonomous_daily_bar_dispatch`].
+#[derive(Debug, Clone)]
+pub enum BarDispatchClaimOutcome {
+    /// A new claim row was inserted — the caller may proceed to dispatch.
+    Claimed,
+    /// The bar identity was already durably dispatched to completion.
+    AlreadyCompleted { evaluation_id: Option<Uuid> },
+    /// A prior claim exists but is not provably complete. Never dispatch
+    /// automatically. `status` reflects the (possibly just-reclassified)
+    /// current status.
+    Unresolved { status: String },
+}
+
+/// Race-safe claim of one bar identity within one operation.
+///
+/// `INSERT ... ON CONFLICT DO NOTHING` gives exactly-once claim creation.
+/// When the row already exists: a `completed` row yields `AlreadyCompleted`
+/// unchanged; a `claimed` row is reclassified to `uncertain` in the same
+/// transaction (a second claim attempt against a still-`claimed` row is
+/// exactly the observable signature of a prior attempt whose outcome was
+/// never confirmed — including across a daemon restart, since no other
+/// signal distinguishes "still in flight" from "the process that claimed it
+/// is gone") and returned as `Unresolved`; an already-`uncertain` or
+/// `failed` row is returned as `Unresolved` unchanged.
+pub async fn claim_autonomous_daily_bar_dispatch(
+    pool: &PgPool,
+    operation_id: Uuid,
+    local_symbol: &str,
+    timeframe: &str,
+    bar_end_ts: i64,
+    claimed_at_utc: DateTime<Utc>,
+) -> Result<BarDispatchClaimOutcome> {
+    validate_bar_identity(local_symbol, timeframe, bar_end_ts)?;
+
+    let mut tx = pool
+        .begin()
+        .await
+        .context("claim_autonomous_daily_bar_dispatch: begin transaction failed")?;
+
+    let inserted = sqlx::query(&format!(
+        r#"
+        insert into sys_autonomous_daily_bar_dispatches ({BAR_DISPATCH_COLUMNS})
+        values ($1,$2,$3,$4,$5,$6,$7,$8,$9)
+        on conflict (operation_id, local_symbol, timeframe, bar_end_ts) do nothing
+        "#
+    ))
+    .bind(operation_id)
+    .bind(local_symbol)
+    .bind(timeframe)
+    .bind(bar_end_ts)
+    .bind(DISPATCH_STATUS_CLAIMED)
+    .bind(claimed_at_utc)
+    .bind(None::<DateTime<Utc>>)
+    .bind(None::<Uuid>)
+    .bind(None::<String>)
+    .execute(&mut *tx)
+    .await
+    .context("claim_autonomous_daily_bar_dispatch: insert failed")?;
+
+    if inserted.rows_affected() == 1 {
+        tx.commit()
+            .await
+            .context("claim_autonomous_daily_bar_dispatch: commit (claimed) failed")?;
+        return Ok(BarDispatchClaimOutcome::Claimed);
+    }
+
+    let existing = sqlx::query(&format!(
+        "select {BAR_DISPATCH_COLUMNS} from sys_autonomous_daily_bar_dispatches \
+         where operation_id = $1 and local_symbol = $2 and timeframe = $3 and bar_end_ts = $4 \
+         for update"
+    ))
+    .bind(operation_id)
+    .bind(local_symbol)
+    .bind(timeframe)
+    .bind(bar_end_ts)
+    .fetch_one(&mut *tx)
+    .await
+    .context("claim_autonomous_daily_bar_dispatch: existing-row read failed")?;
+
+    let record = row_to_bar_dispatch_record(existing)?;
+
+    let outcome = if record.status == DISPATCH_STATUS_COMPLETED {
+        BarDispatchClaimOutcome::AlreadyCompleted {
+            evaluation_id: record.evaluation_id,
+        }
+    } else if record.status == DISPATCH_STATUS_CLAIMED {
+        sqlx::query(
+            "update sys_autonomous_daily_bar_dispatches set status = $5 \
+             where operation_id = $1 and local_symbol = $2 and timeframe = $3 and bar_end_ts = $4",
+        )
+        .bind(operation_id)
+        .bind(local_symbol)
+        .bind(timeframe)
+        .bind(bar_end_ts)
+        .bind(DISPATCH_STATUS_UNCERTAIN)
+        .execute(&mut *tx)
+        .await
+        .context("claim_autonomous_daily_bar_dispatch: reclassify to uncertain failed")?;
+        BarDispatchClaimOutcome::Unresolved {
+            status: DISPATCH_STATUS_UNCERTAIN.to_string(),
+        }
+    } else {
+        BarDispatchClaimOutcome::Unresolved {
+            status: record.status,
+        }
+    };
+
+    tx.commit()
+        .await
+        .context("claim_autonomous_daily_bar_dispatch: commit (existing) failed")?;
+
+    Ok(outcome)
+}
+
+/// Mark a previously-`claimed` bar identity as durably completed, and
+/// advance the parent operation's `bars_dispatched`/`last_dispatched_bar_ts`
+/// evidence in the same transaction. Returns `true` iff the claim row was
+/// actually transitioned by this call (guarded on `status = 'claimed'`, so a
+/// second call is a safe no-op rather than a double-increment). The
+/// operation-row advance mirrors [`record_completed_bar_observed`]'s
+/// idempotent, never-rewinds guard.
+pub async fn complete_autonomous_daily_bar_dispatch(
+    pool: &PgPool,
+    operation_id: Uuid,
+    local_symbol: &str,
+    timeframe: &str,
+    bar_end_ts: i64,
+    completed_at_utc: DateTime<Utc>,
+    evaluation_id: Option<Uuid>,
+) -> Result<bool> {
+    validate_bar_identity(local_symbol, timeframe, bar_end_ts)?;
+
+    let mut tx = pool
+        .begin()
+        .await
+        .context("complete_autonomous_daily_bar_dispatch: begin transaction failed")?;
+
+    let updated = sqlx::query(
+        "update sys_autonomous_daily_bar_dispatches \
+         set status = $5, completed_at_utc = $6, evaluation_id = $7 \
+         where operation_id = $1 and local_symbol = $2 and timeframe = $3 and bar_end_ts = $4 \
+           and status = $8",
+    )
+    .bind(operation_id)
+    .bind(local_symbol)
+    .bind(timeframe)
+    .bind(bar_end_ts)
+    .bind(DISPATCH_STATUS_COMPLETED)
+    .bind(completed_at_utc)
+    .bind(evaluation_id)
+    .bind(DISPATCH_STATUS_CLAIMED)
+    .execute(&mut *tx)
+    .await
+    .context("complete_autonomous_daily_bar_dispatch: update claim failed")?;
+
+    let claim_updated = updated.rows_affected() == 1;
+
+    if claim_updated {
+        sqlx::query(
+            r#"
+            update sys_autonomous_daily_operations
+            set bars_dispatched = bars_dispatched + 1,
+                last_dispatched_bar_ts = $2,
+                updated_at_utc = $3
+            where operation_id = $1
+              and (last_dispatched_bar_ts is null or last_dispatched_bar_ts < $2)
+            "#,
+        )
+        .bind(operation_id)
+        .bind(bar_end_ts)
+        .bind(completed_at_utc)
+        .execute(&mut *tx)
+        .await
+        .context("complete_autonomous_daily_bar_dispatch: operation evidence advance failed")?;
+    }
+
+    tx.commit()
+        .await
+        .context("complete_autonomous_daily_bar_dispatch: commit failed")?;
+
+    Ok(claim_updated)
+}
+
+/// Mark a previously-`claimed` bar identity as a known, non-crash dispatch
+/// failure (`failed`) — distinct from `uncertain` (reserved for the
+/// cannot-tell-what-happened case a second claim attempt detects in
+/// [`claim_autonomous_daily_bar_dispatch`]). Both statuses block automatic
+/// redispatch identically; the distinction is diagnostic only. Returns
+/// `true` iff the row was actually transitioned (guarded on
+/// `status = 'claimed'`).
+pub async fn fail_autonomous_daily_bar_dispatch(
+    pool: &PgPool,
+    operation_id: Uuid,
+    local_symbol: &str,
+    timeframe: &str,
+    bar_end_ts: i64,
+    last_error: &str,
+) -> Result<bool> {
+    validate_bar_identity(local_symbol, timeframe, bar_end_ts)?;
+    if last_error.len() > 4000 {
+        anyhow::bail!("fail_autonomous_daily_bar_dispatch: last_error exceeds 4000 chars");
+    }
+    let updated = sqlx::query(
+        "update sys_autonomous_daily_bar_dispatches \
+         set status = $5, last_error = $6 \
+         where operation_id = $1 and local_symbol = $2 and timeframe = $3 and bar_end_ts = $4 \
+           and status = $7",
+    )
+    .bind(operation_id)
+    .bind(local_symbol)
+    .bind(timeframe)
+    .bind(bar_end_ts)
+    .bind(DISPATCH_STATUS_FAILED)
+    .bind(last_error)
+    .bind(DISPATCH_STATUS_CLAIMED)
+    .execute(pool)
+    .await
+    .context("fail_autonomous_daily_bar_dispatch: update failed")?;
+    Ok(updated.rows_affected() == 1)
+}
+
+/// Fetch one bar-dispatch claim row, if any. `Ok(None)` is authoritative "no
+/// claim has ever been made for this bar identity" — never a synthesized
+/// row. Read-only.
+pub async fn fetch_autonomous_daily_bar_dispatch(
+    pool: &PgPool,
+    operation_id: Uuid,
+    local_symbol: &str,
+    timeframe: &str,
+    bar_end_ts: i64,
+) -> Result<Option<AutonomousDailyBarDispatchRecord>> {
+    let row = sqlx::query(&format!(
+        "select {BAR_DISPATCH_COLUMNS} from sys_autonomous_daily_bar_dispatches \
+         where operation_id = $1 and local_symbol = $2 and timeframe = $3 and bar_end_ts = $4"
+    ))
+    .bind(operation_id)
+    .bind(local_symbol)
+    .bind(timeframe)
+    .bind(bar_end_ts)
+    .fetch_optional(pool)
+    .await
+    .context("fetch_autonomous_daily_bar_dispatch failed")?;
+    row.map(row_to_bar_dispatch_record)
+        .transpose()
+        .map_err(Into::into)
+}

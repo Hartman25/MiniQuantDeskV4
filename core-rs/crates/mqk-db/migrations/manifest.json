@@ -308,6 +308,12 @@
       "path": "0049_autonomous_daily_operation_boundaries.sql",
       "status": "applied",
       "intent": "AUTONOMOUS-DAILY-PAPER-OPERATIONS-01B-BOUNDARY-MODEL-REPAIR-01: separate exchange-schedule truth from effective-autonomous-operation-window truth on sys_autonomous_daily_operations. Does not modify 0048. The pre-existing session_open_utc/session_close_utc columns remain physically present and are now explicitly documented (via COMMENT ON COLUMN) as the effective operation boundaries (mapped in Rust as effective_operation_open_utc/effective_operation_close_utc), never conflated with exchange truth. Adds nullable exchange_session_open_utc, exchange_session_close_utc, exchange_is_early_close, previous_trading_date columns carrying authoritative exchange-calendar facts, with a CHECK requiring all four present together or all four null (legacy-row compatibility only, no backfill), an exchange open-before-close CHECK, and a previous-trading-date-before-market-date CHECK. Every new row created through the current mqk_db::autonomous_daily_operation store API supplies all four exchange fields as non-null."
+    },
+    {
+      "id": "0050",
+      "path": "0050_autonomous_daily_bar_dispatches.sql",
+      "status": "applied",
+      "intent": "AUTONOMOUS-DAILY-PAPER-OPERATIONS-01C-COMPLETED-BAR-DATA-DRIVER: add sys_autonomous_daily_bar_dispatches durable bar-identity-keyed dispatch claim table, additive, does not modify 0048/0049. Audit found no existing durable idempotency keyed on bar identity (symbol, timeframe, end_ts) anywhere in the native strategy dispatch/outbox path -- strategy_signal_evaluations dedupes on an arbitrary tick counter and oms_outbox dedupes on wall-clock now_micros, neither of which prevents re-dispatch of the same completed bar across a restart or retry. Primary key (operation_id, local_symbol, timeframe, bar_end_ts); status in ('claimed','completed','uncertain','failed'); foreign key to sys_autonomous_daily_operations with no destructive cascade (default NO ACTION). No DEFAULT now()/gen_random_uuid()/fabricated default on any not-null column -- every value including claimed_at_utc is caller-supplied."
     }
   ]
 }

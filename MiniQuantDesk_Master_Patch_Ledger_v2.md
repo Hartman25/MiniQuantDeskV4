@@ -10158,9 +10158,195 @@ Bundle 3 (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-COMBINED): OPEN
 Next authorized phase: Phase C — autonomous completed-bar data driver
 ```
 
+**Phase C (`AUTONOMOUS-DAILY-PAPER-OPERATIONS-01C-COMPLETED-BAR-DATA-DRIVER`):**
+starting HEAD `c83fef67f8716143c305ef5c65571abebefc1914` ("docs: close
+autonomous daily coordination foundation"). Implements the internal
+autonomous market-data refresh and completed-bar dispatch foundation.
+Foundation only — no session-controller/startup wiring, no automatic
+provider calls without explicit authorization, no real daemon/runtime/broker
+interaction.
+
+- **Extracted internal latest-bar poll seam
+  (`core-rs/crates/mqk-daemon/src/state/market_data_latest_bar.rs`, new):**
+  `resolve_latest_bar_poll_target` (registry admission — instrument
+  membership, enabled, provider match, non-blank provider_symbol, timeframe
+  authorization) and `poll_and_ingest_latest_closed_bar` (fetch, provenance
+  validation, ingest) factored out of `routes/ingest.rs::market_data_feed_poll_once`,
+  which previously inlined this logic only inside the HTTP handler. The
+  manual `POST /api/v1/market-data/feed/poll-once` route now calls these
+  same two functions per admitted symbol — status strings, row counts, and
+  error wording are unchanged (proven by the full existing
+  `scenario_market_data_latest_bar_poll_01.rs` suite, 17/17, still passing
+  unmodified). `execute_scheduler_poll_once`'s JSON-serialize/re-deserialize
+  round-trip through the handler is untouched in this patch (identified as a
+  seam smell, not fixed here — out of Phase C's stated scope).
+- **Two-part autonomous provider-call authorization
+  (`state/autonomous_completed_bar_driver.rs`):** `AutonomousProviderCallAuthorization`
+  (`Authorized` / `Disabled` / `Invalid{reason_code, detail}`) requires both
+  `MQK_AUTONOMOUS_DATA_REFRESH_ENABLED=true` and
+  `MQK_ALLOW_PROVIDER_API_CALLS=true`; either absent or `false` is
+  `Disabled`; a malformed value is `Invalid`. PAPER mode alone is never
+  sufficient. No automatic historical sync/backfill/ingest-job creation
+  anywhere in the driver (source-guard test proves this).
+- **Autonomous completed-bar driver
+  (`state/autonomous_completed_bar_driver.rs`, new):**
+  `tick_autonomous_completed_bar_driver` — one fully-injected tick: operation
+  state/window gate (`effective_operation_open/close_utc` govern polling
+  lifecycle; `preopen_start_utc` opens the preparation window) →
+  exchange-truth-present gate (a legacy operation with null `exchange_*`
+  columns fails closed as `ExchangeSessionTruthMissing`, never substituting
+  effective-window values) → authorization gate → single effective-binding
+  resolution (`resolve_single_effective_binding`: operation row's
+  `assignment_identity`/`runtime_binding_identity` must agree with the
+  freshly computed identities; non-blank symbol/strategy/timeframe; exactly
+  one configured assignment matching the resolved binding — a
+  same-strategy/different-symbol or any other multi-symbol assignment is
+  `MultiSymbolAssignmentNotExactlyBound`, never silently narrowed) →
+  registry admission → strict Bundle 2 daily-data-readiness enforcement
+  (pre-computed `AssignmentReadiness`, passed in by the caller — the driver
+  enforces `readiness_state == "ready"`, it never re-derives or weakens
+  Bundle 2's own evaluation) → poll-cadence decision (due iff Bundle 2's own
+  `expected_latest_bar_ts` names a bar not yet in
+  `operation.last_completed_bar_ts`, with a bounded 60s poll-retry cooldown)
+  → provider poll via the shared seam, durably recorded → bar-observation
+  evidence → durable dispatch claim → canonical strategy dispatch.
+- **Canonical bar identity:** `(operation_id, local_symbol, timeframe,
+  bar_end_ts)`, `bar_end_ts` always the real `md_bars.end_ts` of the
+  provider-returned, provenance-validated bar — never a blind timer, tick
+  counter, or current timestamp.
+- **Canonical strategy dispatch reuse:** the driver deposits a
+  `StrategyBarInput { end_ts: bar_end_ts, limit_price: None, .. }` and
+  consumes it via the existing `AppState::tick_strategy_dispatch_for_symbol`
+  — the exact same production path the autonomous bar ticker and manual
+  signal route already use. No parallel strategy implementation. The
+  existing per-tick MD-staleness gate inside
+  `dispatch_native_strategy_for_symbol_with_bar` remains active and un-bypassed
+  (proven: a bar whose `end_ts` is stale relative to the real wall clock is
+  refused by that gate even after every driver-level gate passes).
+- **Durable provider-poll and bar-observation evidence
+  (`core-rs/crates/mqk-db/src/autonomous_daily_operation.rs`):**
+  `record_provider_poll_started/succeeded/failed` and
+  `record_completed_bar_observed` — atomic counter increments, caller-supplied
+  timestamps only, no `state_version` bump, no transition event inserted.
+  Bar observation is idempotent on exact replay and refuses (as a no-op) an
+  older `bar_end_ts` than already recorded.
+- **Durable bar-identity-keyed dispatch-claim model
+  (migration `0050_autonomous_daily_bar_dispatches.sql`, additive; does not
+  modify `0048`/`0049`):** audit found no existing seam provides this —
+  `strategy_signal_evaluations.evaluation_id` dedupes on an arbitrary tick
+  counter (`now_tick`), and `oms_outbox`'s `decision_id` dedupes on wall-clock
+  `now_micros` at the moment of dispatch, so replaying the same completed
+  bar across a restart or retry was not previously guaranteed to avoid a
+  duplicate dispatch. `sys_autonomous_daily_bar_dispatches`
+  (`primary key (operation_id, local_symbol, timeframe, bar_end_ts)`,
+  status in `claimed`/`completed`/`uncertain`/`failed`, FK to
+  `sys_autonomous_daily_operations` with no destructive cascade) closes this
+  gap: `claim_autonomous_daily_bar_dispatch` is race-safe
+  (`INSERT ... ON CONFLICT DO NOTHING`; a second claim attempt against a
+  still-`claimed` row — the observable signature of a prior attempt whose
+  outcome was never confirmed, including across a daemon restart —
+  reclassifies it to `uncertain` in the same transaction);
+  `complete_autonomous_daily_bar_dispatch` only transitions a `claimed` row
+  and atomically advances `bars_dispatched`/`last_dispatched_bar_ts` on the
+  parent operation; `fail_autonomous_daily_bar_dispatch` marks a known,
+  non-crash dispatch failure `failed` (distinct from `uncertain`, both block
+  automatic redispatch identically). No automatic redispatch of any
+  non-`completed` claim, proven directly and via a simulated restart
+  (a second claim attempt on the same bar identity from a fresh
+  connection).
+- **Legacy autonomous bar ticker
+  (`state/autonomous_bar_ticker.rs`):** doc-comment banner only — marked
+  legacy/deferred from production replacement, explains why Phase C
+  deliberately does not disable it or wire the new driver into `main.rs` in
+  this patch (Phase D owns that cutover decision). No behavior change; a
+  source-level guard test proves `main.rs` still spawns only the legacy
+  ticker and never references the new driver module or its task-runner
+  scaffold.
+- **Bounded task/liveness scaffold, not started:** `run_bounded_cadence_task`
+  and `AutonomousCompletedBarDriverTaskLiveness` provide cancellation-respecting
+  cadence plumbing for Phase D to adopt; nothing in this patch spawns it.
+- **New tests:**
+  `core-rs/crates/mqk-daemon/tests/scenario_autonomous_completed_bar_driver_01.rs`
+  (30 tests covering authorization, registry admission, poll cadence,
+  canonical-symbol/provenance mapping, Bundle-2-readiness enforcement,
+  bar-observation counters, dispatch exactly-once/restart/staleness/failure
+  behavior, session-truth boundary handling, no-automatic-history proof, and
+  the main.rs source guard) and
+  `core-rs/crates/mqk-db/tests/scenario_autonomous_daily_operation_data_evidence_01.rs`
+  (8 tests covering provider-poll counter atomicity, bar-observation
+  idempotency/monotonicity/null-vs-zero, dispatch-claim uniqueness and
+  completed-claim immutability, durability across a fresh DB connection,
+  dispatch/operation-counter agreement, concurrent-claim race safety, and
+  read-only proof for every fetch function) — all passing against the
+  isolated port-5434 test DB.
+- **Regressions (all re-run against the reachable test DB, one binary at a
+  time):** `scenario_market_data_latest_bar_poll_01` 17/17,
+  `scenario_daily_data_readiness_01` 64/64,
+  `scenario_intraday_md_freshness_autonomous_01` 6/6,
+  `scenario_md_staleness_per_tick_gate_01` 5/5 (self-skips intentionally —
+  requires a *paper*-DB env var this proof correctly never supplies),
+  `scenario_per_symbol_bar_window_01` 14/14,
+  `scenario_multi_symbol_dispatch_loop_01` 8/8,
+  `scenario_native_strategy_loop_send_b1b` 5/5,
+  `scenario_autonomous_daily_operation_identity_01` 44/44,
+  `scenario_autonomous_daily_operation_store_01` 26/26 (re-run because its
+  module changed).
+- **Known pre-existing, environment-only gaps (neither caused nor fixed by
+  this patch — confirmed by reverting every Phase C change and reproducing
+  identically):**
+  - `scenario_market_data_latest_bar_scheduler_01::scheduler_fake_provider_poll_immediately_invokes_poll_once_once`
+    fails (`truth_state` is `"refused"`, not `"completed"`) because the test
+    does not supply an `instrument_registry_path` and its symbol is absent
+    from whichever `config/instruments/equities.json` the process resolves
+    at the CWD in effect when the daemon test binary runs — unrelated to the
+    Phase C poll-seam extraction (proven identical with Phase C's diff fully
+    reverted). Not fixed, per patch-discipline (out of stated file scope).
+  - `cargo clippy -p mqk-daemon --lib -- -D warnings` fails on this
+    machine's toolchain (rustc 1.93) due to the same pre-existing
+    `clippy::manual_range_contains` lint in `routes/strategy_scans.rs:87`
+    already documented in the Phase B calendar-authority-repair entry above
+    — confirmed via `git stash` that it is present identically with none of
+    this patch's changes applied. Every file this patch actually touched is
+    clippy-clean (verified via `cargo clippy` without `-D warnings`, which
+    reports only this one pre-existing warning across the entire crate).
+- **Guards:** `validate_autonomous_daily_paper_operations_01a_audit.ps1`
+  22/22, `validate_daily_data_readiness_01e_closure.ps1` all checks (Phase A
+  guard re-run clean), `check_unsafe_patterns.ps1` all guards, migration
+  governance (`check_migration_governance.sh` + `scenario_migration_manifest_matches_files`)
+  both confirm `0048`/`0049` unchanged and `0050` present/registered exactly
+  once. `git diff --check` clean.
+
+**Safety confirmation (Phase C):**
+
+```text
+PROVIDER CALLS: no (real network)
+BROKER CALLS: no
+NETWORK CALLS: no
+REAL DAEMON STARTED: no
+REAL RUNTIME STARTED: no
+SESSION CONTROLLER STARTED: no
+AUTONOMOUS DRIVER AUTO-STARTED: no
+EXECUTION ARMED: no
+PAPER ORDERS: no
+LIVE ORDERS: no
+PAPER DB TOUCHED: no
+PRODUCTION CODE CHANGED: yes (routes/ingest.rs seam extraction — behavior
+  preserved; state.rs module registration; autonomous_bar_ticker.rs doc
+  comment only; mqk-db autonomous_daily_operation.rs evidence/claim store
+  additions — additive only)
+MIGRATION ADDED: yes (0050_autonomous_daily_bar_dispatches.sql, additive;
+  0048/0049 unchanged)
+```
+
+```text
+Phase C foundation: COMPLETE
+Bundle 3 (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-COMBINED): OPEN
+Next authorized phase: Phase D — session controller, retries, recovery,
+  and task supervision
+```
+
 **Expected next bundle after closure:** `DURABLE-PAPER-PORTFOLIO-AND-PNL-01-COMBINED`.
 
-**Next authorized step:** Phase C — autonomous completed-bar data driver —
-only after independent review of this Phase B foundation (including both the
-calendar-authority repair and this boundary-model repair), and only on
-explicit operator instruction.
+**Next authorized step:** Phase D — session controller, retries, recovery,
+and task supervision — only after independent review of this Phase C
+foundation, and only on explicit operator instruction.

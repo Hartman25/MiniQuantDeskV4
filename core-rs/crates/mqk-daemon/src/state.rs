@@ -6,6 +6,7 @@
 
 mod alpaca_ws_transport;
 mod autonomous_bar_ticker;
+pub mod autonomous_completed_bar_driver;
 pub mod autonomous_daily_operation;
 mod broker;
 mod deadman;
@@ -15,6 +16,7 @@ pub mod instrument_economics_bridge;
 mod lifecycle;
 mod loop_runner;
 pub mod market_calendar;
+pub mod market_data_latest_bar;
 mod multi_symbol_config;
 mod orchestrator_build;
 mod per_symbol_bar_window;

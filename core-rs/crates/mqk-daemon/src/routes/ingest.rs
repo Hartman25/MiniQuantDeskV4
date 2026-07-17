@@ -58,7 +58,10 @@ use crate::{
         normalize_required_symbols, required_symbols_with_source_from_env,
         RequiredSymbolsResolution, SYMBOL_SOURCE_WATCHLIST_V2,
     },
-    state::{AppState, STRATEGY_MD_TIMEFRAME_ENV},
+    state::{
+        market_data_latest_bar::instrument_authorizes_timeframe, AppState,
+        STRATEGY_MD_TIMEFRAME_ENV,
+    },
     watchlist_intake::WatchlistIntakeOutcome,
 };
 
@@ -139,21 +142,6 @@ fn load_validated_instrument_registry(
     Ok(instruments)
 }
 
-/// `true` iff `instrument.timeframes` authorizes `timeframe`, comparing
-/// through the canonical `mqk_md::Timeframe` parser rather than raw
-/// case-sensitive string equality — a stored `"1d"` or `"1min"` entry must
-/// match the same way an operator-supplied request timeframe does.
-fn instrument_authorizes_timeframe(
-    instrument: &mqk_md::instrument_registry::TrackedInstrument,
-    timeframe: mqk_md::Timeframe,
-) -> bool {
-    instrument.timeframes.iter().any(|tf| {
-        mqk_md::Timeframe::parse(tf)
-            .map(|parsed| parsed == timeframe)
-            .unwrap_or(false)
-    })
-}
-
 fn parse_poll_now(now_utc: Option<&str>) -> Result<DateTime<Utc>, String> {
     match now_utc {
         Some(value) => DateTime::parse_from_rfc3339(value)
@@ -211,17 +199,14 @@ impl LatestBarProviderClient {
         }
     }
 
-    async fn fetch_latest_closed_bar(
-        &self,
-        request: mqk_md::LatestClosedBarRequest,
-    ) -> Result<Option<mqk_md::CanonicalBar>, mqk_md::MarketDataProviderError> {
+    /// Borrow the underlying provider as a trait object — the shared seam
+    /// (`state::market_data_latest_bar::poll_and_ingest_latest_closed_bar`)
+    /// takes `&dyn MarketDataProvider` so both the injected-for-test and
+    /// registry-built cases pass through identically.
+    fn as_dyn(&self) -> &dyn mqk_md::MarketDataProvider {
         match self {
-            LatestBarProviderClient::Injected(provider) => {
-                provider.fetch_latest_closed_bar(request).await
-            }
-            LatestBarProviderClient::Built(provider) => {
-                provider.fetch_latest_closed_bar(request).await
-            }
+            LatestBarProviderClient::Injected(provider) => provider.as_ref(),
+            LatestBarProviderClient::Built(provider) => provider.as_ref(),
         }
     }
 }
@@ -777,120 +762,79 @@ pub(crate) async fn market_data_feed_poll_once(
     let mut api_calls_made = 0_u64;
 
     for symbol in &symbols {
-        // Repair 2: prove the canonical instrument/provider mapping *before*
-        // calling the provider at all. None of these admission checks may
-        // consume an API call — `api_calls_made` only increments once
-        // admission has fully passed, immediately before the real call.
-        let matched_instrument = instruments
-            .iter()
-            .find(|i| i.symbol.trim().eq_ignore_ascii_case(symbol.trim()));
-        let instrument = match matched_instrument {
-            Some(i) => i,
-            None => {
+        // AUTONOMOUS-DAILY-PAPER-OPERATIONS-01C: registry admission and the
+        // fetch/validate/ingest sequence are now one shared internal seam
+        // (`state::market_data_latest_bar`), reused by the Phase C
+        // autonomous driver — status strings, row counts, and error wording
+        // are unchanged from the inline logic this replaced.
+        let target = match crate::state::market_data_latest_bar::resolve_latest_bar_poll_target(
+            &instruments,
+            &provider_config.provider_id,
+            symbol,
+            timeframe,
+        ) {
+            Ok(target) => target,
+            Err(rejection) => {
                 per_symbol.push(MarketDataFeedPollSymbolResult {
                     symbol: symbol.clone(),
-                    status: "skipped_instrument_not_in_registry".to_string(),
+                    status: rejection.status_label().to_string(),
                     expected_latest_closed_bar_ts: latest_expected_closed_bar_ts,
                     returned_bar_ts: None,
                     rows_inserted: 0,
                     rows_updated: 0,
                     rows_skipped: 1,
-                    error: Some(format!(
-                        "symbol '{symbol}' not found in instrument registry; \
-                         cannot resolve canonical provider mapping"
-                    )),
+                    error: Some(rejection.detail(symbol, &provider_config.provider_id, timeframe)),
                 });
                 continue;
             }
         };
-        if !instrument.enabled {
-            per_symbol.push(MarketDataFeedPollSymbolResult {
-                symbol: symbol.clone(),
-                status: "skipped_instrument_disabled".to_string(),
-                expected_latest_closed_bar_ts: latest_expected_closed_bar_ts,
-                returned_bar_ts: None,
-                rows_inserted: 0,
-                rows_updated: 0,
-                rows_skipped: 1,
-                error: Some(format!(
-                    "instrument '{symbol}' is disabled in the instrument registry"
-                )),
-            });
-            continue;
-        }
-        if !instrument
-            .provider
-            .trim()
-            .eq_ignore_ascii_case(provider_config.provider_id.trim())
-        {
-            per_symbol.push(MarketDataFeedPollSymbolResult {
-                symbol: symbol.clone(),
-                status: "skipped_provider_mismatch".to_string(),
-                expected_latest_closed_bar_ts: latest_expected_closed_bar_ts,
-                returned_bar_ts: None,
-                rows_inserted: 0,
-                rows_updated: 0,
-                rows_skipped: 1,
-                error: Some(format!(
-                    "instrument '{symbol}' is configured for provider '{}', not the requested \
-                     poll provider '{}'",
-                    instrument.provider, provider_config.provider_id
-                )),
-            });
-            continue;
-        }
-        let canonical_provider_symbol = instrument.provider_symbol.trim();
-        if canonical_provider_symbol.is_empty() {
-            per_symbol.push(MarketDataFeedPollSymbolResult {
-                symbol: symbol.clone(),
-                status: "skipped_blank_provider_symbol".to_string(),
-                expected_latest_closed_bar_ts: latest_expected_closed_bar_ts,
-                returned_bar_ts: None,
-                rows_inserted: 0,
-                rows_updated: 0,
-                rows_skipped: 1,
-                error: Some(format!(
-                    "instrument '{symbol}' has a blank canonical provider_symbol"
-                )),
-            });
-            continue;
-        }
-        // Repair 2 (registry admission): a poll provider that globally
-        // supports this timeframe does not imply this *instrument* is
-        // configured to be ingested at it. Both must hold — provider
-        // capability was already checked above; this proves the instrument's
-        // own `timeframes` list authorizes it, via the canonical parser.
-        if !instrument_authorizes_timeframe(instrument, timeframe) {
-            per_symbol.push(MarketDataFeedPollSymbolResult {
-                symbol: symbol.clone(),
-                status: "skipped_instrument_timeframe_unsupported".to_string(),
-                expected_latest_closed_bar_ts: latest_expected_closed_bar_ts,
-                returned_bar_ts: None,
-                rows_inserted: 0,
-                rows_updated: 0,
-                rows_skipped: 1,
-                error: Some(format!(
-                    "instrument '{symbol}' does not authorize timeframe '{}' (configured: {:?})",
-                    timeframe.as_str(),
-                    instrument.timeframes
-                )),
-            });
-            continue;
-        }
 
-        // Admission passed — request via the provider's own symbol contract,
-        // never the local canonical symbol (they are not guaranteed
-        // identical). Only now does this symbol consume an API call.
+        // Admission passed — only now does this symbol consume an API call.
         api_calls_made += 1;
-        let request = mqk_md::LatestClosedBarRequest {
-            symbol: instrument.provider_symbol.clone(),
-            timeframe,
-            reference_ts: poll_time.timestamp(),
-        };
 
-        let latest_bar = match provider.fetch_latest_closed_bar(request).await {
-            Ok(Some(bar)) => bar,
-            Ok(None) => {
+        use crate::state::market_data_latest_bar::{LatestBarPollOutcome, LatestBarPollSeamInput};
+        match crate::state::market_data_latest_bar::poll_and_ingest_latest_closed_bar(
+            &pool,
+            LatestBarPollSeamInput {
+                provider: provider.as_dyn(),
+                target: &target,
+                now_utc: poll_time,
+                ingest_mode: "latest_poll",
+            },
+        )
+        .await
+        {
+            LatestBarPollOutcome::InsertedNewBar {
+                end_ts,
+                rows_inserted,
+                rows_updated,
+                rows_skipped,
+            } => per_symbol.push(MarketDataFeedPollSymbolResult {
+                symbol: symbol.clone(),
+                status: "inserted".to_string(),
+                expected_latest_closed_bar_ts: latest_expected_closed_bar_ts,
+                returned_bar_ts: Some(end_ts),
+                rows_inserted,
+                rows_updated,
+                rows_skipped,
+                error: None,
+            }),
+            LatestBarPollOutcome::AlreadyStored {
+                end_ts,
+                rows_inserted,
+                rows_updated,
+                rows_skipped,
+            } => per_symbol.push(MarketDataFeedPollSymbolResult {
+                symbol: symbol.clone(),
+                status: "updated".to_string(),
+                expected_latest_closed_bar_ts: latest_expected_closed_bar_ts,
+                returned_bar_ts: Some(end_ts),
+                rows_inserted,
+                rows_updated,
+                rows_skipped,
+                error: None,
+            }),
+            LatestBarPollOutcome::NoCompletedBarAvailable => {
                 per_symbol.push(MarketDataFeedPollSymbolResult {
                     symbol: symbol.clone(),
                     status: "skipped_no_bar".to_string(),
@@ -900,10 +844,11 @@ pub(crate) async fn market_data_feed_poll_once(
                     rows_updated: 0,
                     rows_skipped: 1,
                     error: None,
-                });
-                continue;
+                })
             }
-            Err(error) => {
+            LatestBarPollOutcome::Unsupported { detail }
+            | LatestBarPollOutcome::ProviderRejected { detail }
+            | LatestBarPollOutcome::ProviderTemporarilyUnavailable { detail } => {
                 per_symbol.push(MarketDataFeedPollSymbolResult {
                     symbol: symbol.clone(),
                     status: "provider_error".to_string(),
@@ -912,97 +857,25 @@ pub(crate) async fn market_data_feed_poll_once(
                     rows_inserted: 0,
                     rows_updated: 0,
                     rows_skipped: 0,
-                    error: Some(error.to_string()),
-                });
-                continue;
+                    error: Some(detail),
+                })
             }
-        };
-
-        // Repair 2: validate the returned bar against the *requested
-        // provider symbol* — never the local canonical symbol, which was
-        // never sent to the provider.
-        if !latest_bar
-            .symbol
-            .trim()
-            .eq_ignore_ascii_case(instrument.provider_symbol.trim())
-            || latest_bar.timeframe != timeframe.as_str()
-            || !latest_bar.is_complete
-            || latest_bar.end_ts > latest_expected_closed_bar_ts
-        {
-            per_symbol.push(MarketDataFeedPollSymbolResult {
+            LatestBarPollOutcome::ProvenanceRejected {
+                returned_bar_ts, ..
+            } => per_symbol.push(MarketDataFeedPollSymbolResult {
                 symbol: symbol.clone(),
                 status: "skipped_unclosed_or_unexpected_bar".to_string(),
                 expected_latest_closed_bar_ts: latest_expected_closed_bar_ts,
-                returned_bar_ts: Some(latest_bar.end_ts),
+                returned_bar_ts,
                 rows_inserted: 0,
                 rows_updated: 0,
                 rows_skipped: 1,
                 error: None,
-            });
-            continue;
-        }
-
-        let ingest_id = Uuid::new_v5(
-            &Uuid::NAMESPACE_DNS,
-            format!(
-                "mqk-md-latest-poll.v1|{}|{}|{}|{}",
-                provider_config.provider_id,
-                timeframe.as_str(),
-                symbol,
-                latest_bar.end_ts
-            )
-            .as_bytes(),
-        );
-        let provider_symbol = instrument.provider_symbol.clone();
-        // Repair 2: `md_bars.symbol` is always the canonical local symbol —
-        // never the provider symbol that was actually sent/echoed back.
-        let db_bar = mqk_db::md::ProviderBar {
-            symbol: instrument.symbol.clone(),
-            timeframe: latest_bar.timeframe,
-            end_ts: latest_bar.end_ts,
-            open: latest_bar.open,
-            high: latest_bar.high,
-            low: latest_bar.low,
-            close: latest_bar.close,
-            volume: latest_bar.volume,
-            is_complete: latest_bar.is_complete,
-        };
-        let returned_bar_ts = db_bar.end_ts;
-
-        match mqk_db::md::ingest_provider_bars_to_md_bars_with_provider_metadata(
-            &pool,
-            mqk_db::md::IngestProviderBarsArgs {
-                source: provider_config.provider_id.clone(),
-                timeframe: timeframe.as_str().to_string(),
-                ingest_id,
-                bars: vec![db_bar],
-            },
-            mqk_db::md::MdBarProviderMetadata {
-                provider_id: provider_config.provider_id.clone(),
-                provider_source: Some(provider_config.provider_id.clone()),
-                provider_symbol: Some(provider_symbol),
-                ingest_mode: Some("latest_poll".to_string()),
-                provider_bar_id: None,
-                provider_updated_at_utc: None,
-            },
-        )
-        .await
-        {
-            Ok(result) => per_symbol.push(MarketDataFeedPollSymbolResult {
-                symbol: symbol.clone(),
-                status: if result.report.coverage.rows_inserted > 0 {
-                    "inserted".to_string()
-                } else {
-                    "updated".to_string()
-                },
-                expected_latest_closed_bar_ts: latest_expected_closed_bar_ts,
-                returned_bar_ts: Some(returned_bar_ts),
-                rows_inserted: result.report.coverage.rows_inserted,
-                rows_updated: result.report.coverage.rows_updated,
-                rows_skipped: result.report.coverage.rows_rejected,
-                error: None,
             }),
-            Err(error) => per_symbol.push(MarketDataFeedPollSymbolResult {
+            LatestBarPollOutcome::DatabaseFailure {
+                detail,
+                returned_bar_ts,
+            } => per_symbol.push(MarketDataFeedPollSymbolResult {
                 symbol: symbol.clone(),
                 status: "db_error".to_string(),
                 expected_latest_closed_bar_ts: latest_expected_closed_bar_ts,
@@ -1010,7 +883,7 @@ pub(crate) async fn market_data_feed_poll_once(
                 rows_inserted: 0,
                 rows_updated: 0,
                 rows_skipped: 0,
-                error: Some(format!("db ingest failed: {error}")),
+                error: Some(detail),
             }),
         }
     }
