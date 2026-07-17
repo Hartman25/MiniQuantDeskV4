@@ -30,6 +30,31 @@
 //! that only gates *whether polling is eligible* (a missing expected bar is
 //! poll-remediable, not a hard block), and a mandatory post-poll
 //! re-evaluation from current DB truth that alone authorizes dispatch.
+//!
+//! AUTONOMOUS-DAILY-PAPER-OPERATIONS-01C-OBSERVED-BAR-RECOVERY-01 (Phase C
+//! observed-bar recovery and provider-dependency closure): the prior repair
+//! still left two gaps. First, `operation.last_completed_bar_ts ==
+//! expected_ts` was treated as a terminal "nothing to do" signal
+//! (`PollNotDue`), even though that field proves only that the bar was
+//! *observed* at some point — never that readiness later passed, that a
+//! dispatch claim exists, or that the claim completed. A crash between
+//! observing a bar and claiming its dispatch left the operation permanently
+//! stuck: every subsequent tick saw `last_completed_bar_ts == expected_ts`
+//! and refused to do anything further. Second, the driver required a
+//! provider-call authorization and an already-constructed provider object
+//! before it would even look at canonical data already sitting in
+//! `md_bars` — so a disabled/invalid authorization blocked recovery of a
+//! bar the driver did not need to fetch at all. This repair removes the
+//! short-circuit (every tick with a known expected timestamp reconciles
+//! canonical bar presence, observation evidence, post-observation
+//! readiness, and dispatch-claim status via
+//! [`reconcile_observed_expected_bar`]), replaces the mandatory
+//! already-built provider with a lazy [`AutonomousLatestBarProviderResolver`]
+//! seam invoked only once a provider call is genuinely about to happen, and
+//! adds [`AutonomousCompletedBarDriverOutcome::ObservedBarEvidenceInconsistent`]
+//! / [`AutonomousCompletedBarDriverOutcome::ObservedBarSequenceInconsistent`]
+//! as typed fail-closed truth for durable-evidence corruption that must
+//! never be silently re-polled away. Phase D integration is out of scope.
 
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
@@ -54,17 +79,18 @@ use mqk_runtime::native_strategy::EffectiveRuntimeBinding;
 // ---------------------------------------------------------------------------
 //
 // The tick function itself takes an already-loaded instrument registry and
-// an already-built provider trait object (so tests can inject fakes without
-// touching the filesystem or a provider factory). This wrapper is the thin
-// production seam that loads and validates both from disk before the tick
-// function ever runs — reusing the exact same `mqk_md::instrument_registry`
-// / `mqk_md::provider_registry` functions the manual poll-once route and
+// a lazily-resolved provider seam (so tests can inject fakes without
+// touching the filesystem or a provider factory). `load_driver_instruments`
+// and `load_driver_instruments_and_provider` are the thin production seams
+// that load and validate registries from disk before the tick function ever
+// runs — reusing the exact same `mqk_md::instrument_registry` /
+// `mqk_md::provider_registry` functions the manual poll-once route and
 // historical provider sync already use (C.8), never ad hoc parsing. A
 // rejection here happens strictly before any provider call.
 
 /// Why the driver's registry/provider setup could not be resolved. Every
 /// variant is reached before any provider network call.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum AutonomousDriverSetupRejection {
     InstrumentRegistryUnavailable(String),
     InstrumentRegistryInvalid(String),
@@ -73,39 +99,106 @@ pub enum AutonomousDriverSetupRejection {
     ProviderConstructionFailed(String),
 }
 
-/// Load and validate the instrument registry, and resolve/build the market
-/// data provider, from paths and an already-resolved `provider_id`. Zero
-/// provider calls are made by this function itself — provider construction
-/// only prepares a client, it never calls `fetch_latest_closed_bar`.
-pub fn load_driver_instruments_and_provider(
+/// Load and validate the instrument registry only. Zero provider-registry
+/// reads and zero credential reads — this is the half of
+/// [`load_driver_instruments_and_provider`] that
+/// [`AutonomousCompletedBarDriverInput::instruments`] production callers
+/// need unconditionally (canonical provider/local-symbol mapping is
+/// required for both the exact local-bar provenance check and provider
+/// polling), independent of whether a provider call ever happens this tick.
+pub fn load_driver_instruments(
     instrument_registry_path: &str,
-    provider_registry_path: &str,
-    provider_id: &str,
-) -> Result<(Vec<TrackedInstrument>, mqk_md::MarketDataProviderBox), AutonomousDriverSetupRejection>
-{
+) -> Result<Vec<TrackedInstrument>, AutonomousDriverSetupRejection> {
     let instruments = mqk_md::instrument_registry::load_instrument_registry(std::path::Path::new(
         instrument_registry_path,
     ))
     .map_err(|e| AutonomousDriverSetupRejection::InstrumentRegistryUnavailable(e.to_string()))?;
     mqk_md::instrument_registry::validate_registry(&instruments)
         .map_err(|e| AutonomousDriverSetupRejection::InstrumentRegistryInvalid(e.to_string()))?;
+    Ok(instruments)
+}
 
-    let providers = mqk_md::provider_registry::load_provider_registry(std::path::Path::new(
-        provider_registry_path,
-    ))
-    .map_err(|e| AutonomousDriverSetupRejection::ProviderRegistryUnavailable(e.to_string()))?;
-    let config = mqk_md::provider_registry::find_provider(&providers, provider_id)
-        .filter(|c| c.enabled)
-        .ok_or_else(|| {
-            AutonomousDriverSetupRejection::ProviderUnknownOrDisabled(provider_id.to_string())
-        })?;
-    let provider =
-        mqk_md::build_market_data_provider_from_config(config, |name| std::env::var(name).ok())
-            .map_err(|e| {
-                AutonomousDriverSetupRejection::ProviderConstructionFailed(e.to_string())
-            })?;
-
+/// Load and validate the instrument registry, and resolve/build the market
+/// data provider, from paths and an already-resolved `provider_id`. Zero
+/// provider calls are made by this function itself — provider construction
+/// only prepares a client, it never calls `fetch_latest_closed_bar`.
+///
+/// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01C-OBSERVED-BAR-RECOVERY-01: retained
+/// unchanged for the two admission tests that call it directly, and for any
+/// caller that genuinely wants eager (non-lazy) construction. Production
+/// driver wiring should prefer [`load_driver_instruments`] together with
+/// [`ProductionAutonomousLatestBarProviderResolver`], which defers the
+/// provider-registry read and credential lookup this function performs
+/// eagerly until a provider call is actually about to happen.
+pub fn load_driver_instruments_and_provider(
+    instrument_registry_path: &str,
+    provider_registry_path: &str,
+    provider_id: &str,
+) -> Result<(Vec<TrackedInstrument>, mqk_md::MarketDataProviderBox), AutonomousDriverSetupRejection>
+{
+    let instruments = load_driver_instruments(instrument_registry_path)?;
+    let resolver = ProductionAutonomousLatestBarProviderResolver::new(provider_registry_path);
+    let provider = resolver.resolve(provider_id)?;
     Ok((instruments, provider))
+}
+
+// ---------------------------------------------------------------------------
+// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01C-OBSERVED-BAR-RECOVERY-01
+// Lazy provider resolution seam
+// ---------------------------------------------------------------------------
+//
+// `AutonomousCompletedBarDriverInput` no longer carries an already-built
+// `&dyn mqk_md::MarketDataProvider` on every tick — that forced
+// provider-registry construction and credential loading even when no
+// provider call was required this tick (e.g. the exact expected bar is
+// already canonical in `md_bars`, or authorization is disabled/invalid).
+// This seam resolves a provider only once every non-provider precondition
+// has passed and a poll is genuinely about to happen.
+
+/// Resolve a market-data provider by id, lazily. Implementations must not
+/// perform any provider network call themselves — only construction
+/// (registry lookup, credential loading, client setup).
+pub trait AutonomousLatestBarProviderResolver: Send + Sync {
+    fn resolve(
+        &self,
+        provider_id: &str,
+    ) -> Result<mqk_md::MarketDataProviderBox, AutonomousDriverSetupRejection>;
+}
+
+/// Production resolver: reads the provider registry from disk and builds
+/// the provider (including any environment-variable credential lookup)
+/// only inside `resolve()` — never while merely loading instruments, and
+/// never on the local exact-bar path (`resolve()` is not called at all in
+/// that case; see [`reconcile_observed_expected_bar`]).
+pub struct ProductionAutonomousLatestBarProviderResolver {
+    provider_registry_path: String,
+}
+
+impl ProductionAutonomousLatestBarProviderResolver {
+    pub fn new(provider_registry_path: impl Into<String>) -> Self {
+        Self {
+            provider_registry_path: provider_registry_path.into(),
+        }
+    }
+}
+
+impl AutonomousLatestBarProviderResolver for ProductionAutonomousLatestBarProviderResolver {
+    fn resolve(
+        &self,
+        provider_id: &str,
+    ) -> Result<mqk_md::MarketDataProviderBox, AutonomousDriverSetupRejection> {
+        let providers = mqk_md::provider_registry::load_provider_registry(std::path::Path::new(
+            &self.provider_registry_path,
+        ))
+        .map_err(|e| AutonomousDriverSetupRejection::ProviderRegistryUnavailable(e.to_string()))?;
+        let config = mqk_md::provider_registry::find_provider(&providers, provider_id)
+            .filter(|c| c.enabled)
+            .ok_or_else(|| {
+                AutonomousDriverSetupRejection::ProviderUnknownOrDisabled(provider_id.to_string())
+            })?;
+        mqk_md::build_market_data_provider_from_config(config, |name| std::env::var(name).ok())
+            .map_err(|e| AutonomousDriverSetupRejection::ProviderConstructionFailed(e.to_string()))
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -118,6 +211,11 @@ pub const ALLOW_PROVIDER_API_CALLS_ENV: &str = "MQK_ALLOW_PROVIDER_API_CALLS";
 /// Frozen logical gate: `autonomous_data_refresh_enabled == true AND
 /// allow_provider_api_calls == true`. PAPER mode alone is never sufficient
 /// authorization to make a provider call.
+///
+/// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01C-OBSERVED-BAR-RECOVERY-01: this
+/// authorization gates provider *calls* only — it must never prohibit use of
+/// trusted canonical data already stored in `md_bars`. See
+/// [`reconcile_observed_expected_bar`] for the exact boundary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AutonomousProviderCallAuthorization {
     Authorized,
@@ -411,6 +509,24 @@ fn classify_pre_poll_eligibility(readiness: &AssignmentReadiness) -> PrePollElig
 }
 
 // ---------------------------------------------------------------------------
+// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01C-OBSERVED-BAR-RECOVERY-01
+// Durable-evidence-inconsistency reason codes
+// ---------------------------------------------------------------------------
+
+/// `operation.last_completed_bar_ts == expected_ts`, but no `md_bars` row
+/// exists for the exact expected bar identity.
+pub const REASON_OBSERVED_BAR_MISSING_FROM_MD_BARS: &str = "observed_bar_missing_from_md_bars";
+/// The exact expected bar row exists but `is_complete` is `false`.
+pub const REASON_OBSERVED_BAR_INCOMPLETE: &str = "observed_bar_incomplete";
+/// The exact expected bar row exists but its `provider_id` does not match
+/// the canonical registry-resolved provider for this binding.
+pub const REASON_OBSERVED_BAR_PROVIDER_MISMATCH: &str = "observed_bar_provider_mismatch";
+/// The exact expected bar row exists but its `provider_symbol` does not
+/// match the canonical registry-resolved provider symbol for this binding.
+pub const REASON_OBSERVED_BAR_PROVIDER_SYMBOL_MISMATCH: &str =
+    "observed_bar_provider_symbol_mismatch";
+
+// ---------------------------------------------------------------------------
 // C.14 — Driver outcome
 // ---------------------------------------------------------------------------
 
@@ -516,6 +632,35 @@ pub enum AutonomousCompletedBarDriverOutcome {
     ReadinessBlockedAfterPoll {
         blockers: Vec<&'static str>,
     },
+    /// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01C-OBSERVED-BAR-RECOVERY-01: the
+    /// durable operation row already records `last_completed_bar_ts ==
+    /// expected_ts`, but the exact canonical `md_bars` row backing that
+    /// observation is missing, incomplete, or carries mismatched provider
+    /// provenance. This is durable-evidence corruption (or external
+    /// deletion), not a normal missing-tail-bar condition: zero provider
+    /// calls, zero provider resolution, no dispatch claim, no strategy
+    /// call.
+    ObservedBarEvidenceInconsistent {
+        expected_end_ts: i64,
+        reason_code: &'static str,
+    },
+    /// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01C-OBSERVED-BAR-RECOVERY-01: an
+    /// attempt to record `expected_ts` as observed was refused because the
+    /// operation's durable evidence already records a *later* bar. The
+    /// older expected bar is never observed or dispatched.
+    ObservedBarSequenceInconsistent {
+        expected_end_ts: i64,
+        current_last_completed_bar_ts: Option<i64>,
+    },
+    /// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01C-OBSERVED-BAR-RECOVERY-01: a
+    /// provider call was genuinely due (the exact expected bar is absent
+    /// locally and authorization permits a poll), but lazily resolving the
+    /// provider (registry lookup, credential loading, client construction)
+    /// failed. No provider network call was made; no provider-poll
+    /// attempt counter was incremented.
+    ProviderSetupBlocked {
+        rejection: AutonomousDriverSetupRejection,
+    },
 }
 
 /// Fixed, bounded poll-retry cooldown. Phase D owns full typed
@@ -539,7 +684,15 @@ pub struct AutonomousCompletedBarDriverInput<'a> {
     pub authorization: AutonomousProviderCallAuthorization,
     pub instruments: &'a [TrackedInstrument],
     pub provider_id: &'a str,
-    pub provider: &'a dyn mqk_md::MarketDataProvider,
+    /// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01C-OBSERVED-BAR-RECOVERY-01: a
+    /// lazy provider-resolution seam, invoked at most once per tick and
+    /// only once every non-provider precondition has passed and a poll is
+    /// genuinely about to happen — never on the local exact-bar path, and
+    /// never when `authorization` is `Disabled`/`Invalid`. Replaces the
+    /// previously mandatory already-built `&dyn MarketDataProvider`, which
+    /// forced provider-registry construction and credential loading on
+    /// every tick regardless of whether a provider call was needed.
+    pub provider_resolver: &'a dyn AutonomousLatestBarProviderResolver,
     /// REPAIR 1: an injected evaluator seam, called at least twice per tick
     /// that reaches the bar stage — once (pre-poll) to determine polling
     /// eligibility, and once more (post-poll) from current DB truth to
@@ -583,21 +736,12 @@ pub async fn tick_autonomous_completed_bar_driver(
                                              // exact values are the readiness/session-plan layers,
                                              // not this gate.
 
-    match &input.authorization {
-        AutonomousProviderCallAuthorization::Disabled => {
-            return Ok(AutonomousCompletedBarDriverOutcome::AuthorizationDisabled);
-        }
-        AutonomousProviderCallAuthorization::Invalid {
-            reason_code,
-            detail,
-        } => {
-            return Ok(AutonomousCompletedBarDriverOutcome::AuthorizationInvalid {
-                reason_code,
-                detail: detail.clone(),
-            });
-        }
-        AutonomousProviderCallAuthorization::Authorized => {}
-    }
+    // AUTONOMOUS-DAILY-PAPER-OPERATIONS-01C-OBSERVED-BAR-RECOVERY-01:
+    // `authorization` is no longer checked here. It authorizes provider
+    // *calls* only, and must never block resolving a binding, reading the
+    // instrument registry, evaluating readiness, or using canonical data
+    // already stored in `md_bars`. See `reconcile_observed_expected_bar`
+    // and `poll_missing_expected_bar` for exactly where it is enforced.
 
     let binding = match resolve_single_effective_binding(
         operation,
@@ -644,12 +788,36 @@ pub async fn tick_autonomous_completed_bar_driver(
         PrePollEligibility::Known { expected_end_ts } => expected_end_ts,
     };
 
-    // C.7 — poll cadence: due iff the exact expected bar has not already
-    // been observed, and (if a prior attempt for this exact expected bar
-    // exists) a bounded cooldown has elapsed.
-    if operation.last_completed_bar_ts == Some(expected_ts) {
-        return Ok(AutonomousCompletedBarDriverOutcome::PollNotDue);
-    }
+    reconcile_observed_expected_bar(&input, &binding, &target, expected_ts).await
+}
+
+/// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01C-OBSERVED-BAR-RECOVERY-01: the
+/// single helper responsible for the entire observed-bar section of one
+/// driver tick once the exact expected bar identity (`expected_ts`) is
+/// known. Required order:
+///
+/// 1. Look up the exact canonical bar already in `md_bars` (REPAIR 3,
+///    kept) — a single-row equality query, zero provider calls.
+/// 2. If it exists with matching provenance (complete, matching
+///    `provider_id`/`provider_symbol`): use it. Zero provider calls, zero
+///    provider resolution, zero credential reads — regardless of whether
+///    `authorization` is `Authorized`, `Disabled`, or `Invalid`.
+/// 3. Otherwise (absent, or present with mismatched provenance): if the
+///    operation's own durable evidence (`last_completed_bar_ts`) already
+///    claims this exact bar was observed, that is durable-evidence
+///    corruption, not a normal missing-tail-bar condition — fail closed
+///    ([`AutonomousCompletedBarDriverOutcome::ObservedBarEvidenceInconsistent`]),
+///    zero provider calls.
+/// 4. Otherwise this is a normal missing-bar tick — delegate to
+///    [`poll_missing_expected_bar`], where `authorization` gates whether a
+///    provider may be resolved and polled at all.
+async fn reconcile_observed_expected_bar(
+    input: &AutonomousCompletedBarDriverInput<'_>,
+    binding: &ResolvedSingleBinding,
+    target: &ResolvedLatestBarPollTarget,
+    expected_ts: i64,
+) -> anyhow::Result<AutonomousCompletedBarDriverOutcome> {
+    let operation = input.operation;
 
     // REPAIR 3 — exact expected-bar lookup: avoid a provider call entirely
     // when the exact expected canonical bar already exists in `md_bars`.
@@ -661,7 +829,8 @@ pub async fn tick_autonomous_completed_bar_driver(
         expected_ts,
     )
     .await?;
-    if let Some(row) = exact_local {
+
+    if let Some(row) = &exact_local {
         if row.is_complete
             && row.provider_id.eq_ignore_ascii_case(&target.provider_id)
             && row
@@ -670,15 +839,85 @@ pub async fn tick_autonomous_completed_bar_driver(
                 .map(|s| s.eq_ignore_ascii_case(&target.provider_symbol))
                 .unwrap_or(false)
         {
-            return observe_and_dispatch_if_ready(&input, &binding, expected_ts).await;
+            // Local path: the exact expected bar is already trusted
+            // canonical data. Zero provider calls regardless of
+            // `authorization`.
+            return observe_and_dispatch_if_ready(input, binding, expected_ts).await;
         }
     }
 
+    // The exact expected bar is not usable locally (absent, or present with
+    // mismatched provenance). If durable evidence already claims it was
+    // observed, this is evidence corruption — never automatically re-poll
+    // and pretend the prior observation never happened.
+    if operation.last_completed_bar_ts == Some(expected_ts) {
+        let reason_code = match &exact_local {
+            None => REASON_OBSERVED_BAR_MISSING_FROM_MD_BARS,
+            Some(row) if !row.is_complete => REASON_OBSERVED_BAR_INCOMPLETE,
+            Some(row) if !row.provider_id.eq_ignore_ascii_case(&target.provider_id) => {
+                REASON_OBSERVED_BAR_PROVIDER_MISMATCH
+            }
+            Some(_) => REASON_OBSERVED_BAR_PROVIDER_SYMBOL_MISMATCH,
+        };
+        return Ok(
+            AutonomousCompletedBarDriverOutcome::ObservedBarEvidenceInconsistent {
+                expected_end_ts: expected_ts,
+                reason_code,
+            },
+        );
+    }
+
+    poll_missing_expected_bar(input, binding, target, expected_ts).await
+}
+
+/// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01C-OBSERVED-BAR-RECOVERY-01: the
+/// missing-bar path — reached only when the exact expected bar is not
+/// already trusted canonical data. `authorization` and the lazy provider
+/// resolver are consulted here, and only here.
+async fn poll_missing_expected_bar(
+    input: &AutonomousCompletedBarDriverInput<'_>,
+    binding: &ResolvedSingleBinding,
+    target: &ResolvedLatestBarPollTarget,
+    expected_ts: i64,
+) -> anyhow::Result<AutonomousCompletedBarDriverOutcome> {
+    let operation = input.operation;
+
+    match &input.authorization {
+        AutonomousProviderCallAuthorization::Disabled => {
+            return Ok(AutonomousCompletedBarDriverOutcome::AuthorizationDisabled);
+        }
+        AutonomousProviderCallAuthorization::Invalid {
+            reason_code,
+            detail,
+        } => {
+            return Ok(AutonomousCompletedBarDriverOutcome::AuthorizationInvalid {
+                reason_code,
+                detail: detail.clone(),
+            });
+        }
+        AutonomousProviderCallAuthorization::Authorized => {}
+    }
+
+    // C.7 — poll cadence: a bounded cooldown must elapse since the last
+    // provider-poll attempt for this operation before trying again.
     if let Some(last_poll) = operation.last_provider_poll_utc {
         if (input.now_utc - last_poll).num_seconds() < POLL_RETRY_COOLDOWN_SECS {
             return Ok(AutonomousCompletedBarDriverOutcome::PollNotDue);
         }
     }
+
+    // AUTONOMOUS-DAILY-PAPER-OPERATIONS-01C-OBSERVED-BAR-RECOVERY-01: the
+    // provider is resolved (registry lookup, credential reads, client
+    // construction) only here — every non-provider precondition has
+    // passed and a poll is genuinely about to happen. A construction
+    // failure never increments any provider-poll counter: no provider
+    // request was ever made.
+    let provider = match input.provider_resolver.resolve(input.provider_id) {
+        Ok(provider) => provider,
+        Err(rejection) => {
+            return Ok(AutonomousCompletedBarDriverOutcome::ProviderSetupBlocked { rejection });
+        }
+    };
 
     let data_refresh_state_polling = "polling";
     match mqk_db::record_provider_poll_started(
@@ -705,8 +944,8 @@ pub async fn tick_autonomous_completed_bar_driver(
     let poll_outcome = poll_and_ingest_latest_closed_bar(
         input.pool,
         LatestBarPollSeamInput {
-            provider: input.provider,
-            target: &target,
+            provider: provider.as_ref(),
+            target,
             now_utc: input.now_utc,
             ingest_mode: "autonomous_daily_operation_driver",
             expected_bar_constraint: Some(ExpectedLatestBarConstraint {
@@ -832,16 +1071,29 @@ pub async fn tick_autonomous_completed_bar_driver(
                 end_ts, expected_ts,
                 "poll_and_ingest_latest_closed_bar must enforce the exact expected-bar constraint"
             );
-            observe_and_dispatch_if_ready(&input, &binding, end_ts).await
+            observe_and_dispatch_if_ready(input, binding, end_ts).await
         }
     }
 }
 
-/// REPAIR 3/5: record the exact expected bar as observed (idempotent), then
+/// REPAIR 3/5 (and AUTONOMOUS-DAILY-PAPER-OPERATIONS-01C-OBSERVED-BAR-RECOVERY-01
+/// DEFECT 2): record the exact expected bar as observed (idempotent), then
 /// re-evaluate strict readiness (the mandatory *second* evaluation) from
 /// current DB truth before authorizing dispatch. Reached both when the exact
 /// bar was already present locally (no poll) and when a poll just ingested
 /// it.
+///
+/// `AlreadyObserved` is no longer treated as terminal: it proves only that
+/// the bar was observed at some point, never that readiness later passed or
+/// that a dispatch claim exists/completed. Both `Recorded` (first
+/// observation — including the crash-recovery case where a prior process
+/// observed the bar but crashed before claiming its dispatch, so a fresh
+/// `AppState`/evaluator/operation snapshot reaches this function fresh) and
+/// `AlreadyObserved` (readiness may have been blocked on an earlier tick, or
+/// the claim was never reached) continue identically into the mandatory
+/// readiness re-evaluation and claim reconciliation below. `StaleBarIgnored`
+/// means the operation's durable evidence already records a strictly newer
+/// bar than `bar_end_ts` — the older bar is never observed or dispatched.
 async fn observe_and_dispatch_if_ready(
     input: &AutonomousCompletedBarDriverInput<'_>,
     binding: &ResolvedSingleBinding,
@@ -862,14 +1114,22 @@ async fn observe_and_dispatch_if_ready(
                 detail: "operation row not found while recording bar observation".to_string(),
             },
         ),
-        mqk_db::RecordCompletedBarObservedOutcome::AlreadyObserved { .. }
-        | mqk_db::RecordCompletedBarObservedOutcome::StaleBarIgnored { .. } => {
-            Ok(AutonomousCompletedBarDriverOutcome::PollSucceededNoNewBar)
-        }
-        mqk_db::RecordCompletedBarObservedOutcome::Recorded { .. } => {
+        mqk_db::RecordCompletedBarObservedOutcome::StaleBarIgnored {
+            current_last_completed_bar_ts,
+        } => Ok(
+            AutonomousCompletedBarDriverOutcome::ObservedBarSequenceInconsistent {
+                expected_end_ts: bar_end_ts,
+                current_last_completed_bar_ts,
+            },
+        ),
+        mqk_db::RecordCompletedBarObservedOutcome::Recorded { .. }
+        | mqk_db::RecordCompletedBarObservedOutcome::AlreadyObserved { .. } => {
             // REPAIR 5 — mandatory post-poll (second) strict-readiness
-            // re-evaluation from current DB truth. A successful ingest alone
-            // never authorizes dispatch.
+            // re-evaluation from current DB truth. A successful ingest (or
+            // an already-observed exact local bar) alone never authorizes
+            // dispatch — this re-evaluation runs on every eligible tick,
+            // including a tick where it was blocked before and only now
+            // becomes ready.
             let post_poll_readiness = input
                 .readiness_evaluator
                 .evaluate(operation, binding, input.now_utc)

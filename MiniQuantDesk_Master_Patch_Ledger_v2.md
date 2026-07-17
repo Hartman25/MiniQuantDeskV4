@@ -10358,8 +10358,8 @@ MIGRATION ADDED: yes (0050_autonomous_daily_bar_dispatches.sql, additive;
 (`AUTONOMOUS-DAILY-PAPER-OPERATIONS-01C-POLL-REEVALUATE-AND-PROVIDER-CLOSURE-01`):**
 starting HEAD `0da0f6a47f45079526eaa69e4ca567952f65356a` ("data: drive
 autonomous paper from completed bars", Phase C's own landing commit).
-**Commit:** PENDING (recorded here at commit time; this line is intentionally
-`PENDING` until the closure-repair commit exists — no fabricated hash).
+**Commit:** `a898060bd6dc5df3554dac8cda950c2f3d2d642e` ("fix: close autonomous
+completed-bar production path").
 
 Honest defect record for what the original Phase C landing above actually
 shipped, found during this repair's required source review:
@@ -10520,8 +10520,182 @@ Next authorized phase: Phase D — session controller, retries, recovery,
   and task supervision
 ```
 
+**Phase C observed-bar recovery and provider-dependency closure
+(`AUTONOMOUS-DAILY-PAPER-OPERATIONS-01C-OBSERVED-BAR-RECOVERY-01`):** starting
+HEAD `a898060bd6dc5df3554dac8cda950c2f3d2d642e` ("fix: close autonomous
+completed-bar production path", the poll-reevaluate-and-provider-closure
+repair's own landing commit). **Commit:** PENDING (recorded here at commit
+time; this line is intentionally `PENDING` until the observed-bar-recovery
+commit exists — no fabricated hash).
+
+Honest defect record for what `a898060b` actually left unresolved, found
+during this repair's required source review:
+
+- **`a898060b` correctly fixed poll/re-evaluate sequencing** (the two-stage
+  pre-poll/post-poll readiness split, exact-bar equality enforcement, and
+  TwelveData capability enablement described above all still hold and are
+  unmodified by this repair) — but it **still short-circuited on
+  `operation.last_completed_bar_ts == expected_ts` alone**
+  (`AutonomousCompletedBarDriverOutcome::PollNotDue`, returned before any
+  reconciliation of canonical bar presence, post-observation readiness, or
+  dispatch-claim status). That field proves only that the bar was *observed*
+  at some point — never that readiness later passed, that a dispatch claim
+  exists, or that the claim completed. A crash between observing a bar and
+  claiming its dispatch left the operation permanently stuck: every
+  subsequent tick saw the same short-circuit and refused to do anything
+  further, with no recovery path short of manual DB surgery.
+- **It required a provider-call authorization and an already-constructed
+  provider object before ever consulting local canonical `md_bars` data.**
+  The exact expected-bar `md_bars` lookup (REPAIR 3) ran, but only *after*
+  `AutonomousProviderCallAuthorization::Disabled`/`Invalid` had already
+  short-circuited the tick, and the driver's input required an
+  already-built `&dyn MarketDataProvider` unconditionally on every tick —
+  forcing provider-registry construction and credential loading even when
+  the exact expected bar was already trusted-canonical data that needed no
+  provider call at all.
+
+**Repairs applied (`state/autonomous_completed_bar_driver.rs`, one test
+file; no other file touched):**
+
+- **Removed the observed-bar short-circuit.** Every tick with a known
+  expected timestamp now reconciles canonical bar presence, observation
+  evidence, post-observation readiness, and dispatch-claim status via one
+  new helper, `reconcile_observed_expected_bar`, before deciding no work is
+  due.
+- **Split `AlreadyObserved` from `StaleBarIgnored` handling.**
+  `AlreadyObserved` is no longer terminal (`PollSucceededNoNewBar`) — it
+  continues into the mandatory post-observation readiness re-evaluation and
+  dispatch-claim reconciliation identically to a first-time `Recorded`
+  observation. `StaleBarIgnored` (durable evidence already records a
+  strictly newer bar) now returns a new typed outcome,
+  `ObservedBarSequenceInconsistent`, instead of being silently folded into
+  `PollSucceededNoNewBar`.
+- **Reordered the provider-authorization boundary.** `authorization` no
+  longer gates binding resolution, instrument-registry lookup, readiness
+  evaluation, or the exact-bar `md_bars` lookup — the local exact-bar path
+  (bar present, complete, matching canonical provider id/symbol) dispatches
+  identically whether `authorization` is `Authorized`, `Disabled`, or
+  `Invalid`, with zero provider calls and zero provider resolution in all
+  three cases. `authorization` is now checked only inside the missing-bar
+  path (`poll_missing_expected_bar`), immediately before a provider call
+  would otherwise happen.
+- **New typed outcome for durable-evidence corruption,
+  `ObservedBarEvidenceInconsistent { expected_end_ts, reason_code }`:**
+  reached when `last_completed_bar_ts == expected_ts` but the exact
+  canonical row is missing, incomplete, or carries mismatched provider
+  provenance (`REASON_OBSERVED_BAR_MISSING_FROM_MD_BARS`,
+  `REASON_OBSERVED_BAR_INCOMPLETE`, `REASON_OBSERVED_BAR_PROVIDER_MISMATCH`,
+  `REASON_OBSERVED_BAR_PROVIDER_SYMBOL_MISMATCH`). Zero provider calls, zero
+  provider resolution, no dispatch claim — this is treated as external
+  deletion/corruption, never automatically re-polled away.
+- **Lazy provider-resolution seam.** `AutonomousCompletedBarDriverInput` no
+  longer carries a mandatory already-built `&dyn MarketDataProvider`; it
+  now carries `provider_resolver: &dyn AutonomousLatestBarProviderResolver`
+  (new trait, sync `resolve(provider_id) -> Result<MarketDataProviderBox,
+  AutonomousDriverSetupRejection>`), invoked at most once per tick and only
+  once every non-provider precondition has passed (exact bar absent,
+  authorization `Authorized`, cooldown elapsed) — never on the local
+  exact-bar path, never when authorization is disabled/invalid. Production
+  adapter: `ProductionAutonomousLatestBarProviderResolver` (registry lookup
+  + `mqk_md::build_market_data_provider_from_config`, unchanged provider
+  construction logic, just deferred). `load_driver_instruments` (new,
+  registry-only, zero credential reads) split out of the pre-existing
+  `load_driver_instruments_and_provider`, which is retained unchanged and
+  now delegates to the new resolver internally — both admission tests that
+  call it directly still pass unmodified. A resolver construction failure
+  returns a new typed outcome, `ProviderSetupBlocked { rejection }`, and
+  never increments `provider_poll_attempt_count` (no provider request ever
+  occurred).
+- **No migration change.** `0048`/`0049`/`0050` untouched; the current
+  schema (including migration `0050`'s dispatch-claim table) is sufficient
+  for every recovery path this repair adds.
+
+**New/extended tests:** 11 new tests appended to
+`scenario_autonomous_completed_bar_driver_01.rs` — crash-before-claim
+recovery (`recovery_01_10_*`), readiness-blocked-then-ready recovery across
+two ticks (`recovery_11_17_*`), completed-claim replay
+(`claim_18_21_*`), unresolved-claim (`claimed`→`uncertain` and `failed`)
+non-redispatch (`claim_22_24_*`), the authorization boundary for both the
+local-bar-present and missing-bar-absent cases plus exactly-once resolver
+construction (`authz_25_28_*`, `authz_29_31_*`, `authz_32_*`), all three
+durable-evidence-inconsistency reason codes (`evidence_33_*`,
+`evidence_34_*`, `evidence_35_*`), and resolver-construction-failure
+counter safety (`resolver_failure_*`) — bringing that file to 51 tests
+total. Three pre-existing assertions were corrected to match the repaired
+semantics rather than left asserting the now-fixed defect: `cadence_11`
+(the test's own fixture never seeds a backing `md_bars` row, so
+`last_completed_bar_ts == expected_ts` there is exactly the
+evidence-inconsistency condition — corrected from `PollNotDue` to
+`ObservedBarEvidenceInconsistent`); `cadence_14_15`'s second-tick assertion
+and `repair10_17`'s restart assertion (both corrected from the
+undifferentiated `PollNotDue` to the specific claim-reconciliation outcome
+the local exact-bar path now actually reaches — `DispatchClaimUnresolved`
+and `AlreadyDispatched` respectively, depending on each fixture's own
+strategy-bootstrap state). No test was deleted; every one of the 40
+pre-existing tests still asserts a real, still-true property after these
+three corrections.
+
+**Regressions (all re-run against the reachable test DB, one binary at a
+time, after this repair):**
+`scenario_autonomous_completed_bar_driver_01` 51/51,
+`scenario_autonomous_daily_operation_data_evidence_01` 8/8,
+`scenario_autonomous_daily_operation_store_01` 26/26,
+`scenario_market_data_latest_bar_poll_01` 17/17,
+`scenario_market_data_latest_bar_scheduler_01` 6/6,
+`mqk-md` focused TwelveData/provider-registry tests 12/12,
+`scenario_daily_data_readiness_01` 64/64,
+`scenario_daily_data_readiness_api_01` 7/7,
+`scenario_daily_data_readiness_start_gate_01` 20/20,
+`scenario_intraday_md_freshness_autonomous_01` 6/6,
+`scenario_md_staleness_per_tick_gate_01` 5/5,
+`scenario_per_symbol_bar_window_01` 14/14,
+`scenario_multi_symbol_dispatch_loop_01` 8/8,
+`scenario_native_strategy_loop_send_b1b` 5/5,
+`scenario_autonomous_daily_operation_identity_01` 44/44. Zero DB
+self-skips. Full daemon suite not run (not required).
+
+**Guards (re-run after this repair):**
+`validate_autonomous_daily_paper_operations_01a_audit.ps1` all checks pass,
+`validate_daily_data_readiness_01e_closure.ps1` all checks pass (Phase A
+guard re-run clean), `check_unsafe_patterns.ps1` all guards pass. Migration
+governance not re-run (no migration or manifest content changed).
+`rustfmt --check` clean on both touched files. `cargo check` clean for
+`mqk-md`/`mqk-db`/`mqk-strategy`/`mqk-runtime`/`mqk-daemon`. Clippy: zero
+warnings attributable to either touched file (one pre-existing,
+unrelated `mqk-daemon` lib warning in `routes/strategy_scans.rs` — a file
+this repair does not touch — was left unrepaired per this bundle's
+minimal-scope rule). `git diff --check` clean.
+
+**Safety confirmation (observed-bar-recovery repair):**
+
+```text
+PROVIDER CALLS: no (real network)
+BROKER CALLS: no
+NETWORK CALLS: no
+REAL DAEMON STARTED: no
+REAL RUNTIME STARTED: no
+SESSION CONTROLLER STARTED: no
+AUTONOMOUS DRIVER AUTO-STARTED: no
+EXECUTION ARMED: no
+PAPER ORDERS: no
+LIVE ORDERS: no
+PAPER DB TOUCHED: no
+PRODUCTION CODE CHANGED: yes (state/autonomous_completed_bar_driver.rs only —
+  observed-bar reconciliation, lazy provider resolver, authorization
+  reordering, three new typed outcomes; behavior-preserving for every
+  already-proven path)
+MIGRATION ADDED: no
+```
+
+```text
+Phase C observed-bar recovery and provider-dependency closure: COMPLETE
+Bundle 3 (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-COMBINED): OPEN
+Next authorized phase: Phase D — session controller, retries, recovery,
+  and task supervision
+```
+
 **Expected next bundle after closure:** `DURABLE-PAPER-PORTFOLIO-AND-PNL-01-COMBINED`.
 
 **Next authorized step:** Phase D — session controller, retries, recovery,
-and task supervision — only after independent review of this closure repair,
-and only on explicit operator instruction.
+and task supervision — only after independent review of this repair, and
+only on explicit operator instruction.
