@@ -302,6 +302,12 @@
       "path": "0048_autonomous_daily_operations.sql",
       "status": "applied",
       "intent": "AUTONOMOUS-DAILY-PAPER-OPERATIONS-01B-DURABLE-COORDINATION: add sys_autonomous_daily_operations (mutable current-state row, one per (market_date, deployment_mode, adapter_id) daily slot, CAS via state_version) and sys_autonomous_daily_operation_events (append-only transition history keyed (operation_id, transition_seq)). operation_id (UUIDv5 over six identity components, derived in mqk-daemon) is the primary key; the daily slot is a separate unique constraint, so a same-day identity mismatch is a typed conflict, never a second row or a silently rewritten identity field. No DEFAULT now()/gen_random_uuid()/fabricated numeric default on any not-null column -- every initial value (including state_version=1, start_attempt_count=0, bars_observed=0, bars_dispatched=0) is caller-supplied. Foundation only: no wiring into session_controller.rs, autonomous_bar_ticker.rs, the market-data scheduler, start_execution_runtime, any HTTP route, or any GUI component."
+    },
+    {
+      "id": "0049",
+      "path": "0049_autonomous_daily_operation_boundaries.sql",
+      "status": "applied",
+      "intent": "AUTONOMOUS-DAILY-PAPER-OPERATIONS-01B-BOUNDARY-MODEL-REPAIR-01: separate exchange-schedule truth from effective-autonomous-operation-window truth on sys_autonomous_daily_operations. Does not modify 0048. The pre-existing session_open_utc/session_close_utc columns remain physically present and are now explicitly documented (via COMMENT ON COLUMN) as the effective operation boundaries (mapped in Rust as effective_operation_open_utc/effective_operation_close_utc), never conflated with exchange truth. Adds nullable exchange_session_open_utc, exchange_session_close_utc, exchange_is_early_close, previous_trading_date columns carrying authoritative exchange-calendar facts, with a CHECK requiring all four present together or all four null (legacy-row compatibility only, no backfill), an exchange open-before-close CHECK, and a previous-trading-date-before-market-date CHECK. Every new row created through the current mqk_db::autonomous_daily_operation store API supplies all four exchange fields as non-null."
     }
   ]
 }

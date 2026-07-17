@@ -119,11 +119,26 @@ impl AutonomousDailyPlanTiming {
 /// plus, optionally, a validated fixed-UTC-window override layered on top of
 /// established trading-day applicability. Never a fourth independent
 /// market-date/open/close calculation.
+///
+/// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01B-BOUNDARY-MODEL-REPAIR-01: the
+/// exchange schedule and the effective autonomous operation window are two
+/// distinct, simultaneously-visible fact sets, never overloaded onto one
+/// ambiguous `session_open_utc`/`session_close_utc` pair. `exchange_*` fields
+/// are always exchange-calendar-sourced truth (holiday/early-close/previous-
+/// trading-date proof), untouched by any operator override.
+/// `effective_operation_*` fields are the operation-coordination boundaries a
+/// runtime start/stop/preopen/postclose decision actually uses — equal to the
+/// exchange boundaries when no override is configured, or the validated
+/// fixed-window override's boundaries when one is.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AutonomousDailySessionPlan {
     pub market_date: String,
-    pub session_open_utc: DateTime<Utc>,
-    pub session_close_utc: DateTime<Utc>,
+    pub previous_trading_date: String,
+    pub exchange_session_open_utc: DateTime<Utc>,
+    pub exchange_session_close_utc: DateTime<Utc>,
+    pub exchange_is_early_close: bool,
+    pub effective_operation_open_utc: DateTime<Utc>,
+    pub effective_operation_close_utc: DateTime<Utc>,
     pub calendar_source: String,
     pub calendar_coverage_state: String,
     pub schedule_source: AutonomousDailyScheduleSource,
@@ -297,52 +312,63 @@ pub fn resolve_autonomous_daily_session_plan(
         };
     }
 
-    let (session_open_utc, session_close_utc, schedule_source) = match override_config {
-        FixedWindowOverrideConfig::Invalid { detail } => {
-            return AutonomousDailySessionPlanResolution::Blocked {
-                market_date: Some(market_date_str),
-                reason_code: AutonomousDailyPlanReason::FixedWindowOverrideInvalid,
-                detail: detail.clone(),
-            };
-        }
-        FixedWindowOverrideConfig::Absent => (
-            schedule.session_open_utc,
-            schedule.session_close_utc,
-            AutonomousDailyScheduleSource::NyseWeekdaysHeuristic,
-        ),
-        FixedWindowOverrideConfig::Valid(window) => {
-            let midnight_ts = market_calendar::midnight_utc_ts_for_date(schedule.market_date);
-            let open_ts =
-                midnight_ts + (window.start_hh as i64) * 3600 + (window.start_mm as i64) * 60;
-            let close_ts =
-                midnight_ts + (window.stop_hh as i64) * 3600 + (window.stop_mm as i64) * 60;
-            match (
-                DateTime::<Utc>::from_timestamp(open_ts, 0),
-                DateTime::<Utc>::from_timestamp(close_ts, 0),
-            ) {
-                (Some(open), Some(close)) if open < close => (
-                    open,
-                    close,
-                    AutonomousDailyScheduleSource::FixedWindowOverride,
-                ),
-                _ => {
-                    return AutonomousDailySessionPlanResolution::Blocked {
-                        market_date: Some(market_date_str),
-                        reason_code: AutonomousDailyPlanReason::FixedWindowOverrideInvalid,
-                        detail: "fixed window override produced an invalid open/close instant"
-                            .to_string(),
-                    };
+    // Exchange truth is fixed the moment trading-day applicability is
+    // established above — never touched by the fixed-window override below.
+    let exchange_session_open_utc = schedule.session_open_utc;
+    let exchange_session_close_utc = schedule.session_close_utc;
+    let exchange_is_early_close = schedule.is_early_close;
+    let previous_trading_date_str = format_market_date(schedule.previous_trading_date);
+
+    let (effective_operation_open_utc, effective_operation_close_utc, schedule_source) =
+        match override_config {
+            FixedWindowOverrideConfig::Invalid { detail } => {
+                return AutonomousDailySessionPlanResolution::Blocked {
+                    market_date: Some(market_date_str),
+                    reason_code: AutonomousDailyPlanReason::FixedWindowOverrideInvalid,
+                    detail: detail.clone(),
+                };
+            }
+            FixedWindowOverrideConfig::Absent => (
+                exchange_session_open_utc,
+                exchange_session_close_utc,
+                AutonomousDailyScheduleSource::NyseWeekdaysHeuristic,
+            ),
+            FixedWindowOverrideConfig::Valid(window) => {
+                let midnight_ts = market_calendar::midnight_utc_ts_for_date(schedule.market_date);
+                let open_ts =
+                    midnight_ts + (window.start_hh as i64) * 3600 + (window.start_mm as i64) * 60;
+                let close_ts =
+                    midnight_ts + (window.stop_hh as i64) * 3600 + (window.stop_mm as i64) * 60;
+                match (
+                    DateTime::<Utc>::from_timestamp(open_ts, 0),
+                    DateTime::<Utc>::from_timestamp(close_ts, 0),
+                ) {
+                    (Some(open), Some(close)) if open < close => (
+                        open,
+                        close,
+                        AutonomousDailyScheduleSource::FixedWindowOverride,
+                    ),
+                    _ => {
+                        return AutonomousDailySessionPlanResolution::Blocked {
+                            market_date: Some(market_date_str),
+                            reason_code: AutonomousDailyPlanReason::FixedWindowOverrideInvalid,
+                            detail: "fixed window override produced an invalid open/close instant"
+                                .to_string(),
+                        };
+                    }
                 }
             }
-        }
-    };
+        };
 
-    let preopen_start_utc = session_open_utc - timing.preopen_lead;
-    let postclose_finalize_utc = session_close_utc + timing.postclose_finalize_delay;
+    // Preopen/postclose are operation-coordination times: they derive from
+    // the effective operation window, never from the exchange boundaries.
+    let preopen_start_utc = effective_operation_open_utc - timing.preopen_lead;
+    let postclose_finalize_utc = effective_operation_close_utc + timing.postclose_finalize_delay;
 
-    if session_open_utc >= session_close_utc
-        || preopen_start_utc > session_open_utc
-        || postclose_finalize_utc < session_close_utc
+    if exchange_session_open_utc >= exchange_session_close_utc
+        || effective_operation_open_utc >= effective_operation_close_utc
+        || preopen_start_utc > effective_operation_open_utc
+        || postclose_finalize_utc < effective_operation_close_utc
     {
         return AutonomousDailySessionPlanResolution::Blocked {
             market_date: Some(market_date_str),
@@ -357,8 +383,12 @@ pub fn resolve_autonomous_daily_session_plan(
 
     let session_plan_identity = compute_session_plan_identity(
         &market_date_str,
-        session_open_utc,
-        session_close_utc,
+        &previous_trading_date_str,
+        exchange_session_open_utc,
+        exchange_session_close_utc,
+        exchange_is_early_close,
+        effective_operation_open_utc,
+        effective_operation_close_utc,
         &calendar_source,
         &calendar_coverage_state,
         schedule_source.as_str(),
@@ -368,8 +398,12 @@ pub fn resolve_autonomous_daily_session_plan(
 
     AutonomousDailySessionPlanResolution::Applicable(AutonomousDailySessionPlan {
         market_date: market_date_str,
-        session_open_utc,
-        session_close_utc,
+        previous_trading_date: previous_trading_date_str,
+        exchange_session_open_utc,
+        exchange_session_close_utc,
+        exchange_is_early_close,
+        effective_operation_open_utc,
+        effective_operation_close_utc,
         calendar_source,
         calendar_coverage_state,
         schedule_source,
@@ -415,11 +449,23 @@ pub fn resolve_autonomous_daily_session_plan_from_env(
 /// any field change produces a different one. No random UUID, no
 /// locale-dependent date formatting (RFC3339 throughout), no debug-format
 /// identity, no environment dump.
+///
+/// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01B-BOUNDARY-MODEL-REPAIR-01: version
+/// bumped to `v2` — the exchange schedule (`previous_trading_date`,
+/// `exchange_session_open_utc`/`exchange_session_close_utc`,
+/// `exchange_is_early_close`) and the effective operation window
+/// (`effective_operation_open_utc`/`effective_operation_close_utc`) are now
+/// bound as separate, simultaneously-present inputs instead of one ambiguous
+/// open/close pair, so a change to either fact set changes the identity.
 #[allow(clippy::too_many_arguments)]
 fn compute_session_plan_identity(
     market_date: &str,
-    session_open_utc: DateTime<Utc>,
-    session_close_utc: DateTime<Utc>,
+    previous_trading_date: &str,
+    exchange_session_open_utc: DateTime<Utc>,
+    exchange_session_close_utc: DateTime<Utc>,
+    exchange_is_early_close: bool,
+    effective_operation_open_utc: DateTime<Utc>,
+    effective_operation_close_utc: DateTime<Utc>,
     calendar_source: &str,
     calendar_coverage_state: &str,
     schedule_source: &str,
@@ -427,10 +473,14 @@ fn compute_session_plan_identity(
     postclose_finalize_utc: DateTime<Utc>,
 ) -> String {
     let canonical = format!(
-        "mqk.autonomous-daily-session-plan.v1|{}|{}|{}|{}|{}|{}|{}|{}",
+        "mqk.autonomous-daily-session-plan.v2|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}|{}",
         market_date,
-        session_open_utc.to_rfc3339(),
-        session_close_utc.to_rfc3339(),
+        previous_trading_date,
+        exchange_session_open_utc.to_rfc3339(),
+        exchange_session_close_utc.to_rfc3339(),
+        exchange_is_early_close,
+        effective_operation_open_utc.to_rfc3339(),
+        effective_operation_close_utc.to_rfc3339(),
         calendar_source,
         calendar_coverage_state,
         schedule_source,
@@ -566,8 +616,15 @@ pub struct AutonomousDailyOperationReadModel {
     pub calendar_source: String,
     pub calendar_coverage_state: String,
     pub schedule_source: String,
-    pub session_open_utc: DateTime<Utc>,
-    pub session_close_utc: DateTime<Utc>,
+    pub effective_operation_open_utc: DateTime<Utc>,
+    pub effective_operation_close_utc: DateTime<Utc>,
+    /// `None` only for a legacy row created before
+    /// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01B-BOUNDARY-MODEL-REPAIR-01 — never
+    /// fabricated from `effective_operation_open_utc`.
+    pub exchange_session_open_utc: Option<DateTime<Utc>>,
+    pub exchange_session_close_utc: Option<DateTime<Utc>>,
+    pub exchange_is_early_close: Option<bool>,
+    pub previous_trading_date: Option<chrono::NaiveDate>,
     pub preopen_start_utc: DateTime<Utc>,
     pub postclose_finalize_utc: DateTime<Utc>,
     pub state: String,
@@ -618,8 +675,12 @@ pub fn project_autonomous_daily_operation_read_model(
         calendar_source: record.calendar_source.clone(),
         calendar_coverage_state: record.calendar_coverage_state.clone(),
         schedule_source: record.schedule_source.clone(),
-        session_open_utc: record.session_open_utc,
-        session_close_utc: record.session_close_utc,
+        effective_operation_open_utc: record.effective_operation_open_utc,
+        effective_operation_close_utc: record.effective_operation_close_utc,
+        exchange_session_open_utc: record.exchange_session_open_utc,
+        exchange_session_close_utc: record.exchange_session_close_utc,
+        exchange_is_early_close: record.exchange_is_early_close,
+        previous_trading_date: record.previous_trading_date,
         preopen_start_utc: record.preopen_start_utc,
         postclose_finalize_utc: record.postclose_finalize_utc,
         state: record.state.clone(),

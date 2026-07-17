@@ -75,6 +75,7 @@ fn make_create_args(
     occurred_at_utc: DateTime<Utc>,
 ) -> CreateAutonomousDailyOperationArgs {
     let (open, close, preopen, postclose) = session_bounds(market_date);
+    let previous_trading_date = market_date - ChronoDuration::days(3);
     let operation_id = test_operation_id(&format!(
         "{market_date}|{deployment_mode}|{adapter_id}|{session_plan_identity}|{assignment_identity}|{runtime_binding_identity}"
     ));
@@ -89,8 +90,12 @@ fn make_create_args(
         calendar_source: "nyse_weekdays_heuristic".to_string(),
         calendar_coverage_state: "active".to_string(),
         schedule_source: "nyse_weekdays_heuristic".to_string(),
-        session_open_utc: open,
-        session_close_utc: close,
+        effective_operation_open_utc: open,
+        effective_operation_close_utc: close,
+        exchange_session_open_utc: open,
+        exchange_session_close_utc: close,
+        exchange_is_early_close: false,
+        previous_trading_date,
         preopen_start_utc: preopen,
         postclose_finalize_utc: postclose,
         initial_state: STATE_AWAITING_PREOPEN.to_string(),
@@ -98,6 +103,35 @@ fn make_create_args(
         occurred_at_utc,
         bounded_detail: "scenario test creation".to_string(),
     }
+}
+
+/// Like [`make_create_args`], but with an effective operation window that
+/// differs from the exchange boundaries (simulating a valid fixed-window
+/// override) — proves the store persists the two fact sets distinctly.
+#[allow(clippy::too_many_arguments)]
+fn make_create_args_with_override_shaped_boundaries(
+    market_date: NaiveDate,
+    deployment_mode: &str,
+    adapter_id: &str,
+    session_plan_identity: &str,
+    assignment_identity: &str,
+    runtime_binding_identity: &str,
+    occurred_at_utc: DateTime<Utc>,
+) -> CreateAutonomousDailyOperationArgs {
+    let mut args = make_create_args(
+        market_date,
+        deployment_mode,
+        adapter_id,
+        session_plan_identity,
+        assignment_identity,
+        runtime_binding_identity,
+        occurred_at_utc,
+    );
+    // Narrow the effective operation window relative to the exchange
+    // session, matching what a valid fixed-window override would produce.
+    args.effective_operation_open_utc = args.exchange_session_open_utc + ChronoDuration::hours(1);
+    args.effective_operation_close_utc = args.exchange_session_close_utc - ChronoDuration::hours(1);
+    args
 }
 
 async fn cleanup_operation(pool: &sqlx::PgPool, operation_id: Uuid) {
@@ -156,6 +190,68 @@ async fn schema_tables_and_constraints_exist() -> anyhow::Result<()> {
     assert!(
         slot_unique_exists,
         "daily-slot unique constraint must exist"
+    );
+
+    Ok(())
+}
+
+/// Migration 0049 is registered in the manifest exactly once, immediately
+/// after 0048, and the new exchange-truth columns/constraints it adds exist.
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn migration_0049_registered_and_exchange_columns_exist() -> anyhow::Result<()> {
+    let manifest_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("migrations")
+        .join("manifest.json");
+    let manifest_raw = std::fs::read_to_string(&manifest_path).expect("read manifest.json");
+    let manifest: serde_json::Value =
+        serde_json::from_str(&manifest_raw).expect("parse manifest.json");
+    let ids: Vec<String> = manifest["migrations"]
+        .as_array()
+        .expect("migrations array")
+        .iter()
+        .map(|m| m["id"].as_str().expect("id").to_string())
+        .collect();
+    let idx_0048 = ids
+        .iter()
+        .position(|id| id == "0048")
+        .expect("0048 must be registered");
+    let idx_0049 = ids
+        .iter()
+        .position(|id| id == "0049")
+        .expect("0049 must be registered");
+    assert_eq!(idx_0049, idx_0048 + 1, "0049 must immediately follow 0048");
+    assert_eq!(
+        ids.iter().filter(|id| id.as_str() == "0049").count(),
+        1,
+        "0049 must be registered exactly once"
+    );
+
+    let pool = test_pool().await?;
+    for column in [
+        "exchange_session_open_utc",
+        "exchange_session_close_utc",
+        "exchange_is_early_close",
+        "previous_trading_date",
+    ] {
+        let exists: bool = sqlx::query_scalar(
+            "select exists (select 1 from information_schema.columns \
+             where table_name = 'sys_autonomous_daily_operations' and column_name = $1)",
+        )
+        .bind(column)
+        .fetch_one(&pool)
+        .await?;
+        assert!(exists, "column {column} must exist");
+    }
+
+    let coherency_check_exists: bool = sqlx::query_scalar(
+        "select exists (select 1 from pg_constraint where conname = 'sys_autonomous_daily_operations_exchange_fields_together')",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert!(
+        coherency_check_exists,
+        "exchange-fields-together coherency constraint must exist"
     );
 
     Ok(())
@@ -439,7 +535,146 @@ async fn new_operation_creates_one_row_and_one_initial_event() -> anyhow::Result
     assert_eq!(events[0].from_state, "none");
     assert_eq!(events[0].to_state, STATE_AWAITING_PREOPEN);
 
+    // Every new create through the current store API supplies all four
+    // exchange-truth fields as non-null.
+    assert!(record.exchange_session_open_utc.is_some());
+    assert!(record.exchange_session_close_utc.is_some());
+    assert!(record.exchange_is_early_close.is_some());
+    assert!(record.previous_trading_date.is_some());
+
     cleanup_operation(&pool, record.operation_id).await;
+    Ok(())
+}
+
+/// Override-shaped data (exchange boundaries wider than the effective
+/// operation window) stores and round-trips the two fact sets distinctly —
+/// neither is fabricated from the other.
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn override_shaped_boundaries_store_exchange_and_effective_distinctly() -> anyhow::Result<()>
+{
+    let pool = test_pool().await?;
+    let market_date = NaiveDate::from_ymd_opt(2099, 3, 9).unwrap(); // Monday
+    let adapter = format!("adapter_boundaries_{}", unique_suffix());
+    let now = Utc::now();
+    let args = make_create_args_with_override_shaped_boundaries(
+        market_date,
+        "paper",
+        &adapter,
+        "splan-bounds",
+        "asgn-bounds",
+        "bind-bounds",
+        now,
+    );
+
+    let record = unwrap_created(create_or_recover_autonomous_daily_operation(&pool, &args).await?);
+    assert_ne!(
+        record.exchange_session_open_utc,
+        Some(record.effective_operation_open_utc)
+    );
+    assert_ne!(
+        record.exchange_session_close_utc,
+        Some(record.effective_operation_close_utc)
+    );
+    assert_eq!(
+        record.exchange_session_open_utc,
+        Some(args.exchange_session_open_utc)
+    );
+    assert_eq!(
+        record.exchange_session_close_utc,
+        Some(args.exchange_session_close_utc)
+    );
+    assert_eq!(
+        record.effective_operation_open_utc,
+        args.effective_operation_open_utc
+    );
+    assert_eq!(
+        record.effective_operation_close_utc,
+        args.effective_operation_close_utc
+    );
+
+    let by_id = fetch_autonomous_daily_operation_by_id(&pool, record.operation_id)
+        .await?
+        .expect("row must exist");
+    assert_eq!(
+        by_id.exchange_session_open_utc,
+        Some(args.exchange_session_open_utc)
+    );
+    assert_eq!(
+        by_id.effective_operation_open_utc,
+        args.effective_operation_open_utc
+    );
+
+    cleanup_operation(&pool, record.operation_id).await;
+    Ok(())
+}
+
+/// A legacy row (created by directly inserting a row that leaves every new
+/// exchange-truth column null, simulating a row from before migration 0049)
+/// round-trips those fields as `None` — never fabricated from the effective
+/// operation boundaries.
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn legacy_row_with_null_exchange_fields_is_not_fabricated() -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    let market_date = NaiveDate::from_ymd_opt(2099, 3, 9).unwrap();
+    let (open, close, preopen, postclose) = session_bounds(market_date);
+    let operation_id = test_operation_id("legacy-null-exchange-test");
+    let now = Utc::now();
+
+    sqlx::query(
+        r#"
+        insert into sys_autonomous_daily_operations (
+            operation_id, market_date, deployment_mode, adapter_id,
+            session_plan_identity, assignment_identity, runtime_binding_identity,
+            calendar_source, calendar_coverage_state, schedule_source,
+            session_open_utc, session_close_utc, preopen_start_utc, postclose_finalize_utc,
+            state, state_reason_code, state_version,
+            run_id, start_attempt_count, last_start_attempt_utc, next_retry_utc,
+            data_refresh_state, last_provider_poll_utc,
+            provider_poll_attempt_count, provider_poll_success_count, provider_poll_failure_count,
+            last_completed_bar_ts, last_dispatched_bar_ts, bars_observed, bars_dispatched,
+            started_at_utc, stopped_at_utc, finalized_at_utc,
+            outcome, no_trade_reason, last_error,
+            created_at_utc, updated_at_utc
+        ) values (
+            $1,$2,'paper','legacy_null_test',
+            'splan-legacy','asgn-legacy','bind-legacy',
+            'nyse_weekdays_heuristic','active','nyse_weekdays_heuristic',
+            $3,$4,$5,$6,
+            'awaiting_preopen',null,1,
+            null,0,null,null,
+            'not_started',null,
+            0,0,0,
+            null,null,0,0,
+            null,null,null,
+            null,null,null,
+            $7,$7
+        )
+        "#,
+    )
+    .bind(operation_id)
+    .bind(market_date)
+    .bind(open)
+    .bind(close)
+    .bind(preopen)
+    .bind(postclose)
+    .bind(now)
+    .execute(&pool)
+    .await?;
+
+    let record = fetch_autonomous_daily_operation_by_id(&pool, operation_id)
+        .await?
+        .expect("legacy row must exist");
+    assert!(record.exchange_session_open_utc.is_none());
+    assert!(record.exchange_session_close_utc.is_none());
+    assert!(record.exchange_is_early_close.is_none());
+    assert!(record.previous_trading_date.is_none());
+    // The effective-operation boundaries remain present and unaffected.
+    assert_eq!(record.effective_operation_open_utc, open);
+    assert_eq!(record.effective_operation_close_utc, close);
+
+    cleanup_operation(&pool, operation_id).await;
     Ok(())
 }
 
@@ -1282,15 +1517,36 @@ async fn reads_are_pure_deterministic_and_preserve_null_vs_zero() -> anyhow::Res
     assert_eq!(rec_a.bars_observed, 0);
     assert_eq!(rec_a.bars_dispatched, 0);
 
-    // fetch_by_id / fetch_for_slot are read-only.
+    // fetch_by_id / fetch_for_slot are read-only and preserve both boundary
+    // sets (effective operation and exchange truth) distinctly.
     let by_id = fetch_autonomous_daily_operation_by_id(&pool, rec_a.operation_id)
         .await?
         .unwrap();
     assert_eq!(by_id.operation_id, rec_a.operation_id);
+    assert_eq!(
+        by_id.effective_operation_open_utc,
+        args_a.effective_operation_open_utc
+    );
+    assert_eq!(
+        by_id.exchange_session_open_utc,
+        Some(args_a.exchange_session_open_utc)
+    );
+    assert_eq!(
+        by_id.exchange_is_early_close,
+        Some(args_a.exchange_is_early_close)
+    );
+    assert_eq!(
+        by_id.previous_trading_date,
+        Some(args_a.previous_trading_date)
+    );
     let by_slot = fetch_autonomous_daily_operation_for_slot(&pool, day_a, "paper", &adapter)
         .await?
         .unwrap();
     assert_eq!(by_slot.operation_id, rec_a.operation_id);
+    assert_eq!(
+        by_slot.exchange_session_close_utc,
+        Some(args_a.exchange_session_close_utc)
+    );
 
     // Deterministic ordering: market_date desc first.
     let recent = list_recent_autonomous_daily_operations(&pool, 50).await?;
@@ -1302,6 +1558,17 @@ async fn reads_are_pure_deterministic_and_preserve_null_vs_zero() -> anyhow::Res
         .position(|r| r.operation_id == rec_b.operation_id);
     if let (Some(ia), Some(ib)) = (idx_a, idx_b) {
         assert!(ib < ia, "day_b (later market_date) must sort before day_a");
+    }
+    if let Some(ia) = idx_a {
+        // list_recent_* preserves both boundary sets too.
+        assert_eq!(
+            recent[ia].exchange_session_open_utc,
+            Some(args_a.exchange_session_open_utc)
+        );
+        assert_eq!(
+            recent[ia].effective_operation_open_utc,
+            args_a.effective_operation_open_utc
+        );
     }
 
     // Event ordering ascending by transition_seq.

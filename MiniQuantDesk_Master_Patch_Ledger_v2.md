@@ -10022,8 +10022,124 @@ PRODUCTION CODE CHANGED: yes (market_calendar.rs, autonomous_daily_operation.rs,
 MIGRATION ADDED: no
 ```
 
+**Phase B boundary-model repair
+(`AUTONOMOUS-DAILY-PAPER-OPERATIONS-01B-BOUNDARY-MODEL-REPAIR-01`):** closes
+the residual defect where the calendar-authority repair above
+(`64afa43714d162c41471e1420399b2ac3918155d`) unified provider-selection but
+left `AutonomousDailySessionPlan` and the durable store exposing only one
+ambiguous `session_open_utc`/`session_close_utc` boundary pair — a valid
+fixed-window override silently replaced the authoritative exchange
+open/close, so no persisted fact remained distinguishing "the exchange
+session boundaries" from "the effective autonomous operation window."
+
+**Repair commit:** pending (this session — recorded together with this
+ledger update; see `git log` for the exact hash once committed).
+
+- **Explicit session-plan fields:** `AutonomousDailySessionPlan` no longer
+  declares `session_open_utc`/`session_close_utc`. It now declares both fact
+  sets simultaneously: `exchange_session_open_utc`,
+  `exchange_session_close_utc`, `exchange_is_early_close`,
+  `previous_trading_date` (always exchange-calendar-sourced, never touched by
+  an override) and `effective_operation_open_utc`,
+  `effective_operation_close_utc` (equal to the exchange boundaries absent an
+  override; equal to the validated override boundaries otherwise).
+  `preopen_start_utc`/`postclose_finalize_utc` now derive from the effective
+  operation window, not the exchange boundaries, per the binding contract.
+- **Session-plan identity v2:** `session_plan_identity` canonical seed
+  advanced to `mqk.autonomous-daily-session-plan.v2` binding all twelve
+  immutable fields (both boundary sets, early-close truth, previous trading
+  date, calendar/schedule provenance, preopen/postclose). A change to either
+  fact set alone changes the identity; identical complete inputs remain
+  deterministic. `derive_autonomous_daily_operation_id` is unchanged (it
+  already consumed `session_plan_identity` opaquely).
+- **Durable store (migration `0049_autonomous_daily_operation_boundaries.sql`,
+  additive; does not modify `0048`):** the pre-existing
+  `session_open_utc`/`session_close_utc` columns remain physically present,
+  now documented via `COMMENT ON COLUMN` as the effective operation boundaries
+  and mapped in Rust as `effective_operation_open_utc`/
+  `effective_operation_close_utc`. Four new nullable columns
+  (`exchange_session_open_utc`, `exchange_session_close_utc`,
+  `exchange_is_early_close`, `previous_trading_date`) carry exchange truth,
+  guarded by a coherency `CHECK` (all four null or all four present
+  together), an exchange open-before-close `CHECK`, and a
+  previous-trading-date-before-market-date `CHECK`. Every new row created
+  through the current `mqk_db::autonomous_daily_operation` store API supplies
+  all four as non-null; a legacy row (simulated in tests via direct SQL
+  insert, since no such row has ever existed outside the isolated test DB)
+  round-trips them as `None`, never fabricated from the effective operation
+  fields.
+- **Store/read-model types:** `AutonomousDailyOperationRecord`,
+  `CreateAutonomousDailyOperationArgs`, and the daemon-side
+  `AutonomousDailyOperationReadModel`/`project_autonomous_daily_operation_read_model`
+  updated to the same explicit field names; new create-time validation
+  (`exchange_session_open_utc < exchange_session_close_utc`,
+  `previous_trading_date < market_date`, plus the pre-existing effective-window
+  and preopen/postclose ordering checks renamed to match).
+- **No Phase C work:** `session_controller.rs`, `autonomous_bar_ticker.rs`,
+  `lifecycle.rs`, `loop_runner.rs`, `routes.rs`, `api_types.rs`, every
+  `routes/*`, and every GUI file remain untouched. No provider/broker/network
+  call, no real daemon/runtime start, no paper DB touched (only the isolated
+  port-5434 test DB).
+- **Tests:** extended
+  `core-rs/crates/mqk-daemon/tests/scenario_autonomous_daily_operation_identity_01.rs`
+  (no-override equality, valid-override on a regular and an early-close day,
+  previous-trading-date provenance, exchange-only/effective-only/early-close-only
+  identity isolation via an injected fixed-truth provider, legacy-null
+  read-model passthrough, and a static source proof rejecting the ambiguous
+  field pair) and
+  `core-rs/crates/mqk-db/tests/scenario_autonomous_daily_operation_store_01.rs`
+  (migration 0049 registration/ordering and column existence, override-shaped
+  distinct-boundary storage, a directly-inserted legacy-null row, plus every
+  pre-existing create/recover, CAS, rollback, and bounded-read proof re-run
+  unmodified).
+- **Guard strengthened:** `validate_autonomous_daily_paper_operations_01a_audit.ps1`
+  gains check [22], scoped to `AutonomousDailySessionPlan`'s struct body,
+  rejecting the ambiguous `session_open_utc`/`session_close_utc` pair and
+  requiring both explicit boundary sets to be declared.
+- **Environment limitation (honest disclosure, not a code defect):** the
+  local test Postgres (port 5434) was unreachable for the entire session —
+  Docker Desktop's WSL2 backend (`docker-desktop` distro) reported `Stopped`
+  and did not come up despite launching Docker Desktop and waiting several
+  minutes across repeated checks. Consequently
+  `scenario_autonomous_daily_operation_store_01.rs` (26 tests, all newly
+  added/extended by this repair) could not be executed and is `OPEN/UNPROVEN`
+  pending a reachable test DB — not `CLOSED`. This is confirmed
+  environment-only, not a defect in this repair's code: the pre-existing,
+  untouched `scenario_daily_data_readiness_01.rs` failed its 4 DB-backed
+  sub-tests (`ddr_29`, `ddr_30`, `ddr_46`, `ddr_55`) with the identical
+  `PoolTimedOut` error, while its other 60 pure-logic tests passed; the
+  `scenario_daily_data_readiness_api_01.rs` (7/7) and
+  `scenario_daily_data_readiness_start_gate_01.rs` (20/20) regressions passed
+  in full (their DB-touching cases self-skip gracefully rather than hard-fail
+  when the DB is absent). `cargo check` across all five required crates and
+  all 44 daemon-side identity/read-model tests (which require no DB) passed
+  cleanly, proving the session-plan/identity/read-model logic itself. This
+  gap must be closed by re-running
+  `scenario_autonomous_daily_operation_store_01` against a reachable
+  port-5434 test Postgres before this repair is asserted `CLOSED`, per
+  `audit_repo_truth_rules.md`'s closure-evidence standard.
+
+**Safety confirmation (Phase B boundary-model repair):**
+
+```text
+PROVIDER CALLS: no
+BROKER CALLS: no
+NETWORK CALLS: no
+REAL DAEMON STARTED: no
+REAL RUNTIME STARTED: no
+EXECUTION ARMED: no
+PAPER ORDERS: no
+LIVE ORDERS: no
+PAPER DB TOUCHED: no
+PRODUCTION CODE CHANGED: yes (autonomous_daily_operation.rs in mqk-daemon and
+  mqk-db — no controller/scheduler/route/GUI change)
+MIGRATION ADDED: yes (0049_autonomous_daily_operation_boundaries.sql, additive;
+  0048 unchanged)
+```
+
 **Expected next bundle after closure:** `DURABLE-PAPER-PORTFOLIO-AND-PNL-01-COMBINED`.
 
 **Next authorized step:** Phase C — autonomous completed-bar data driver —
-only after independent review of this Phase B foundation (including this
-calendar-authority repair), and only on explicit operator instruction.
+only after independent review of this Phase B foundation (including both the
+calendar-authority repair and this boundary-model repair), and only on
+explicit operator instruction.

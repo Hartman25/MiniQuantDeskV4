@@ -54,6 +54,18 @@
 #        calendar provider via `load_readiness_context_from_env`. Scoped
 #        narrowly to that one function's body text, not a broad grep.
 #
+# Strengthened again by AUTONOMOUS-DAILY-PAPER-OPERATIONS-01B-BOUNDARY-MODEL-
+# REPAIR-01 (check [22] below is net-new for that repair):
+#   [22] `AutonomousDailySessionPlan`'s struct body (in
+#        autonomous_daily_operation.rs) does not declare the ambiguous
+#        `session_open_utc`/`session_close_utc` field pair, and does declare
+#        both the exchange-truth boundary set
+#        (`exchange_session_open_utc`/`exchange_session_close_utc`/
+#        `exchange_is_early_close`/`previous_trading_date`) and the
+#        effective-operation boundary set
+#        (`effective_operation_open_utc`/`effective_operation_close_utc`).
+#        Scoped narrowly to that one struct's body text, not a broad grep.
+#
 # Usage:
 #   powershell -ExecutionPolicy Bypass -File scripts\guards\validate_autonomous_daily_paper_operations_01a_audit.ps1
 #
@@ -326,6 +338,27 @@ if ($null -eq $WrapperBody) {
 } else {
     Test-ContentDoesNotContain "production wrapper body does not directly construct/name NyseWeekdaysProvider" $WrapperBody "NyseWeekdaysProvider" | Out-Null
     Test-ContentContains "production wrapper body obtains its provider via load_readiness_context_from_env" $WrapperBody "load_readiness_context_from_env" | Out-Null
+}
+
+Write-Host ""
+Show-Info "--- [22] AutonomousDailySessionPlan declares both explicit boundary sets, not the ambiguous pair (Boundary-Model Repair 01) ---"
+$StructBody = Get-ContentBetween -Content $SourceContent `
+    -StartNeedle "pub struct AutonomousDailySessionPlan {" `
+    -EndNeedle "`n}"
+if ($null -eq $StructBody) {
+    $script:Violations++
+    Show-Red "  FAIL -- could not locate AutonomousDailySessionPlan's struct body to scope this check"
+} else {
+    Test-ContentDoesNotContain "AutonomousDailySessionPlan does not declare the ambiguous session_open_utc field" $StructBody "pub session_open_utc" | Out-Null
+    Test-ContentDoesNotContain "AutonomousDailySessionPlan does not declare the ambiguous session_close_utc field" $StructBody "pub session_close_utc" | Out-Null
+    Test-ContentContainsAll "AutonomousDailySessionPlan declares both explicit boundary sets" $StructBody @(
+        "pub exchange_session_open_utc",
+        "pub exchange_session_close_utc",
+        "pub exchange_is_early_close",
+        "pub effective_operation_open_utc",
+        "pub effective_operation_close_utc",
+        "pub previous_trading_date"
+    ) | Out-Null
 }
 
 # =============================================================================

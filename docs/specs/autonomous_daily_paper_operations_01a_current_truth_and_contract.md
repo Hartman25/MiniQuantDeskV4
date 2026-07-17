@@ -1036,3 +1036,65 @@ regardless of a configured override; an invalid override configuration (partial,
 (`fixed_window_override_invalid`) rather than being silently treated as absent.
 
 ---
+
+## 22. Phase B boundary-model repair clarification
+(`AUTONOMOUS-DAILY-PAPER-OPERATIONS-01B-BOUNDARY-MODEL-REPAIR-01`)
+
+Added after the calendar-authority repair in §21 landed (`64afa43714d162c41471e1420399b2ac3918155d`,
+"fix: unify autonomous daily calendar authority") to close a residual modeling defect that repair
+did not address: §21 established that the exchange schedule and the effective autonomous
+operation window are two distinct facts, but `AutonomousDailySessionPlan` and the durable
+`sys_autonomous_daily_operations` row still persisted only one overloaded
+`session_open_utc`/`session_close_utc` pair — a valid fixed-window override *replaced* the
+authoritative exchange open/close in that pair rather than existing alongside it. No persisted
+fact survived a restart distinguishing "the exchange session boundaries" from "the effective
+operation boundaries actually used to start/stop the runtime." This section states the corrected,
+permanent persisted-model contract; it does not redo the Phase A audit in §1-§20 or the
+calendar-authority contract in §21 above.
+
+**Both fact sets are now explicit, simultaneously present, and identity-bound.**
+`AutonomousDailySessionPlan` (daemon) and `sys_autonomous_daily_operations` (durable store, via
+migration `0049_autonomous_daily_operation_boundaries.sql`) each carry two boundary pairs plus
+the exchange-only facts that give them meaning:
+
+```text
+exchange_session_open_utc / exchange_session_close_utc   -- authoritative exchange truth
+exchange_is_early_close                                  -- authoritative exchange truth
+previous_trading_date                                    -- authoritative exchange truth
+effective_operation_open_utc / effective_operation_close_utc -- operation-coordination truth
+```
+
+No override (`schedule_source = "nyse_weekdays_heuristic"`): `effective_operation_open_utc` /
+`effective_operation_close_utc` equal `exchange_session_open_utc` / `exchange_session_close_utc`
+exactly. Valid override (`schedule_source = "fixed_window_override"`): the exchange fields remain
+the authoritative exchange open/close/early-close/previous-trading-date; only the effective
+operation fields follow the override. `preopen_start_utc`/`postclose_finalize_utc` derive from the
+effective operation window, never from the exchange boundaries — they are operation-coordination
+times, not exchange-session facts. Invalid override and weekend/holiday/unavailable-calendar
+behavior are unchanged from §13/§21.
+
+**Identity.** `session_plan_identity`'s canonical seed version advanced to
+`mqk.autonomous-daily-session-plan.v2`, binding all of: `market_date`, `previous_trading_date`,
+both exchange fields, `exchange_is_early_close`, both effective-operation fields,
+`calendar_source`, `calendar_coverage_state`, `schedule_source`, `preopen_start_utc`, and
+`postclose_finalize_utc`. A change to either fact set alone — exchange-only or effective-only —
+changes the identity; identical complete inputs remain deterministic. `operation_id`'s own
+derivation is unchanged, since it already consumed `session_plan_identity` as one opaque input.
+
+**Durable store.** Migration `0048_autonomous_daily_operations.sql` is not modified. The
+pre-existing `session_open_utc`/`session_close_utc` columns remain physically present and are now
+explicitly documented (via `COMMENT ON COLUMN`, added by migration `0049`) as the effective
+operation boundaries — never renamed, never conflated with exchange truth. Four new nullable
+columns (`exchange_session_open_utc`, `exchange_session_close_utc`, `exchange_is_early_close`,
+`previous_trading_date`) carry the exchange facts, guarded by a coherency constraint (all four
+null together, or all four present together) so a row can never assert partial exchange truth.
+Every row created through the current store API supplies all four as non-null; a hypothetical
+legacy row predating migration `0049` would round-trip them as `None` — never fabricated from the
+effective operation fields, per `CLAUDE.md`'s "no fabricated truth" invariant.
+
+**No Phase C scope.** This repair is foundation-only, matching §13/§21/§17's Phase B boundary: no
+change to `session_controller.rs`, `autonomous_bar_ticker.rs`, `lifecycle.rs`'s dispatch sequencing
+beyond the already-landed override-invalid start-gate check, the market-data scheduler, any HTTP
+route, or any GUI component.
+
+---

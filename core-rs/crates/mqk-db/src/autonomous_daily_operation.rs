@@ -186,6 +186,16 @@ pub fn is_legal_operation_transition(previous: Option<&str>, new_state: &str) ->
 // ---------------------------------------------------------------------------
 
 /// One row from `sys_autonomous_daily_operations`.
+///
+/// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01B-BOUNDARY-MODEL-REPAIR-01:
+/// `effective_operation_open_utc`/`effective_operation_close_utc` map the
+/// pre-existing, physically-unrenamed `session_open_utc`/`session_close_utc`
+/// columns (migration 0048) -- the effective autonomous-operation window.
+/// `exchange_session_open_utc`/`exchange_session_close_utc`/
+/// `exchange_is_early_close`/`previous_trading_date` are the separate,
+/// nullable exchange-calendar-truth columns added by migration 0049; `None`
+/// only for a legacy row created before that migration, never fabricated
+/// from the effective operation fields.
 #[derive(Debug, Clone, PartialEq)]
 pub struct AutonomousDailyOperationRecord {
     pub operation_id: Uuid,
@@ -198,8 +208,12 @@ pub struct AutonomousDailyOperationRecord {
     pub calendar_source: String,
     pub calendar_coverage_state: String,
     pub schedule_source: String,
-    pub session_open_utc: DateTime<Utc>,
-    pub session_close_utc: DateTime<Utc>,
+    pub effective_operation_open_utc: DateTime<Utc>,
+    pub effective_operation_close_utc: DateTime<Utc>,
+    pub exchange_session_open_utc: Option<DateTime<Utc>>,
+    pub exchange_session_close_utc: Option<DateTime<Utc>>,
+    pub exchange_is_early_close: Option<bool>,
+    pub previous_trading_date: Option<NaiveDate>,
     pub preopen_start_utc: DateTime<Utc>,
     pub postclose_finalize_utc: DateTime<Utc>,
     pub state: String,
@@ -253,7 +267,9 @@ const OPERATION_COLUMNS: &str = r#"
     last_completed_bar_ts, last_dispatched_bar_ts, bars_observed, bars_dispatched,
     started_at_utc, stopped_at_utc, finalized_at_utc,
     outcome, no_trade_reason, last_error,
-    created_at_utc, updated_at_utc
+    created_at_utc, updated_at_utc,
+    exchange_session_open_utc, exchange_session_close_utc, exchange_is_early_close,
+    previous_trading_date
 "#;
 
 const EVENT_COLUMNS: &str = r#"
@@ -275,8 +291,12 @@ fn row_to_operation_record(
         calendar_source: r.try_get("calendar_source")?,
         calendar_coverage_state: r.try_get("calendar_coverage_state")?,
         schedule_source: r.try_get("schedule_source")?,
-        session_open_utc: r.try_get("session_open_utc")?,
-        session_close_utc: r.try_get("session_close_utc")?,
+        effective_operation_open_utc: r.try_get("session_open_utc")?,
+        effective_operation_close_utc: r.try_get("session_close_utc")?,
+        exchange_session_open_utc: r.try_get("exchange_session_open_utc")?,
+        exchange_session_close_utc: r.try_get("exchange_session_close_utc")?,
+        exchange_is_early_close: r.try_get("exchange_is_early_close")?,
+        previous_trading_date: r.try_get("previous_trading_date")?,
         preopen_start_utc: r.try_get("preopen_start_utc")?,
         postclose_finalize_utc: r.try_get("postclose_finalize_utc")?,
         state: r.try_get("state")?,
@@ -344,8 +364,16 @@ pub struct CreateAutonomousDailyOperationArgs {
     pub calendar_source: String,
     pub calendar_coverage_state: String,
     pub schedule_source: String,
-    pub session_open_utc: DateTime<Utc>,
-    pub session_close_utc: DateTime<Utc>,
+    pub effective_operation_open_utc: DateTime<Utc>,
+    pub effective_operation_close_utc: DateTime<Utc>,
+    /// Authoritative exchange-calendar session open. Every caller through
+    /// this API must supply real exchange truth -- never a copy of
+    /// `effective_operation_open_utc` (that would fabricate calendar truth
+    /// for a fixed-window-override operation).
+    pub exchange_session_open_utc: DateTime<Utc>,
+    pub exchange_session_close_utc: DateTime<Utc>,
+    pub exchange_is_early_close: bool,
+    pub previous_trading_date: NaiveDate,
     pub preopen_start_utc: DateTime<Utc>,
     pub postclose_finalize_utc: DateTime<Utc>,
     pub initial_state: String,
@@ -418,19 +446,29 @@ fn validate_create_args(args: &CreateAutonomousDailyOperationArgs) -> Result<()>
             "create_or_recover_autonomous_daily_operation: runtime_binding_identity must not be empty"
         );
     }
-    if args.session_open_utc >= args.session_close_utc {
+    if args.exchange_session_open_utc >= args.exchange_session_close_utc {
         anyhow::bail!(
-            "create_or_recover_autonomous_daily_operation: session_open_utc must precede session_close_utc"
+            "create_or_recover_autonomous_daily_operation: exchange_session_open_utc must precede exchange_session_close_utc"
         );
     }
-    if args.preopen_start_utc > args.session_open_utc {
+    if args.effective_operation_open_utc >= args.effective_operation_close_utc {
         anyhow::bail!(
-            "create_or_recover_autonomous_daily_operation: preopen_start_utc must not be after session_open_utc"
+            "create_or_recover_autonomous_daily_operation: effective_operation_open_utc must precede effective_operation_close_utc"
         );
     }
-    if args.postclose_finalize_utc < args.session_close_utc {
+    if args.preopen_start_utc > args.effective_operation_open_utc {
         anyhow::bail!(
-            "create_or_recover_autonomous_daily_operation: postclose_finalize_utc must not be before session_close_utc"
+            "create_or_recover_autonomous_daily_operation: preopen_start_utc must not be after effective_operation_open_utc"
+        );
+    }
+    if args.postclose_finalize_utc < args.effective_operation_close_utc {
+        anyhow::bail!(
+            "create_or_recover_autonomous_daily_operation: postclose_finalize_utc must not be before effective_operation_close_utc"
+        );
+    }
+    if args.previous_trading_date >= args.market_date {
+        anyhow::bail!(
+            "create_or_recover_autonomous_daily_operation: previous_trading_date must precede market_date"
         );
     }
     if !is_known_operation_state(&args.initial_state) {
@@ -514,7 +552,8 @@ pub async fn create_or_recover_autonomous_daily_operation(
                     $27,$28,$29,$30,
                     $31,$32,$33,
                     $34,$35,$36,
-                    $37,$38
+                    $37,$38,
+                    $39,$40,$41,$42
                 )
                 "#
             ))
@@ -528,8 +567,8 @@ pub async fn create_or_recover_autonomous_daily_operation(
             .bind(&args.calendar_source)
             .bind(&args.calendar_coverage_state)
             .bind(&args.schedule_source)
-            .bind(args.session_open_utc)
-            .bind(args.session_close_utc)
+            .bind(args.effective_operation_open_utc)
+            .bind(args.effective_operation_close_utc)
             .bind(args.preopen_start_utc)
             .bind(args.postclose_finalize_utc)
             .bind(&args.initial_state)
@@ -556,6 +595,10 @@ pub async fn create_or_recover_autonomous_daily_operation(
             .bind(None::<String>) // last_error
             .bind(args.occurred_at_utc) // created_at_utc
             .bind(args.occurred_at_utc) // updated_at_utc
+            .bind(args.exchange_session_open_utc)
+            .bind(args.exchange_session_close_utc)
+            .bind(args.exchange_is_early_close)
+            .bind(args.previous_trading_date)
             .execute(&mut *tx)
             .await
             .context("create_or_recover_autonomous_daily_operation: insert operation row failed")?;
@@ -594,8 +637,12 @@ pub async fn create_or_recover_autonomous_daily_operation(
                     calendar_source: args.calendar_source.clone(),
                     calendar_coverage_state: args.calendar_coverage_state.clone(),
                     schedule_source: args.schedule_source.clone(),
-                    session_open_utc: args.session_open_utc,
-                    session_close_utc: args.session_close_utc,
+                    effective_operation_open_utc: args.effective_operation_open_utc,
+                    effective_operation_close_utc: args.effective_operation_close_utc,
+                    exchange_session_open_utc: Some(args.exchange_session_open_utc),
+                    exchange_session_close_utc: Some(args.exchange_session_close_utc),
+                    exchange_is_early_close: Some(args.exchange_is_early_close),
+                    previous_trading_date: Some(args.previous_trading_date),
                     preopen_start_utc: args.preopen_start_utc,
                     postclose_finalize_utc: args.postclose_finalize_utc,
                     state: args.initial_state.clone(),

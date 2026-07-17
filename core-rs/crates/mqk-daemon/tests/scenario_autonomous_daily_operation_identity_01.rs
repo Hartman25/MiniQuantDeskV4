@@ -17,7 +17,7 @@ use mqk_daemon::state::autonomous_daily_operation::{
 };
 use mqk_daemon::state::market_calendar::{
     resolve_market_session_schedule, CalendarCoverageState, MarketCalendarProvider,
-    MarketSessionTruth, NyseWeekdaysProvider,
+    MarketSessionState, MarketSessionTruth, NyseWeekdaysProvider,
 };
 use mqk_daemon::state::{
     MultiSymbolConfigSource, MultiSymbolRuntimeConfig, SessionWindow, SymbolStrategyAssignment,
@@ -45,6 +45,27 @@ struct AlwaysUnknownProvider;
 impl MarketCalendarProvider for AlwaysUnknownProvider {
     fn session_for(&self, _now_utc: DateTime<Utc>) -> MarketSessionTruth {
         MarketSessionTruth::unknown()
+    }
+}
+
+/// A calendar provider that always classifies as an applicable, in-coverage
+/// trading day with an injectable early-close flag — used to isolate
+/// exchange-boundary/early-close identity effects from the real
+/// `NyseWeekdaysProvider` heuristic's own date-dependent behavior.
+struct FixedTruthProvider {
+    is_early_close: bool,
+}
+
+impl MarketCalendarProvider for FixedTruthProvider {
+    fn session_for(&self, _now_utc: DateTime<Utc>) -> MarketSessionTruth {
+        MarketSessionTruth {
+            state: MarketSessionState::RegularOpen,
+            source: "test_fixed_provider",
+            exchange: "test",
+            is_trading_day: true,
+            is_early_close: self.is_early_close,
+            session_close_note: None,
+        }
     }
 }
 
@@ -138,7 +159,17 @@ fn early_close_retains_authoritative_close() {
         &FixedWindowOverrideConfig::Absent,
     );
     let plan = assert_applicable(res);
-    assert_eq!(plan.session_close_utc, instant(2025, 11, 28, 18, 0));
+    assert!(plan.exchange_is_early_close);
+    assert_eq!(
+        plan.exchange_session_close_utc,
+        instant(2025, 11, 28, 18, 0)
+    );
+    // No override: effective operation close mirrors the authoritative
+    // exchange early close exactly.
+    assert_eq!(
+        plan.effective_operation_close_utc,
+        plan.exchange_session_close_utc
+    );
 }
 
 /// A date outside the declared calendar coverage window (2023-2028) blocks.
@@ -191,8 +222,8 @@ fn dst_winter_open_close_correct() {
         &default_timing(),
         &FixedWindowOverrideConfig::Absent,
     ));
-    assert_eq!(plan.session_open_utc, instant(2025, 1, 6, 14, 30));
-    assert_eq!(plan.session_close_utc, instant(2025, 1, 6, 21, 0));
+    assert_eq!(plan.exchange_session_open_utc, instant(2025, 1, 6, 14, 30));
+    assert_eq!(plan.exchange_session_close_utc, instant(2025, 1, 6, 21, 0));
 }
 
 /// DST summer (EDT, UTC-4): 09:30 ET == 13:30 UTC, 16:00 ET == 20:00 UTC.
@@ -206,8 +237,8 @@ fn dst_summer_open_close_correct() {
         &default_timing(),
         &FixedWindowOverrideConfig::Absent,
     ));
-    assert_eq!(plan.session_open_utc, instant(2025, 7, 7, 13, 30));
-    assert_eq!(plan.session_close_utc, instant(2025, 7, 7, 20, 0));
+    assert_eq!(plan.exchange_session_open_utc, instant(2025, 7, 7, 13, 30));
+    assert_eq!(plan.exchange_session_close_utc, instant(2025, 7, 7, 20, 0));
 }
 
 /// Preopen/postclose timing derives strictly from the injected timing
@@ -228,11 +259,11 @@ fn preopen_postclose_derive_from_injected_timing() {
     ));
     assert_eq!(
         plan.preopen_start_utc,
-        plan.session_open_utc - chrono::Duration::minutes(10)
+        plan.effective_operation_open_utc - chrono::Duration::minutes(10)
     );
     assert_eq!(
         plan.postclose_finalize_utc,
-        plan.session_close_utc + chrono::Duration::minutes(5)
+        plan.effective_operation_close_utc + chrono::Duration::minutes(5)
     );
 }
 
@@ -302,8 +333,58 @@ fn valid_override_applies_after_trading_day_proof_and_is_labeled() {
         plan.schedule_source,
         AutonomousDailyScheduleSource::FixedWindowOverride
     );
-    assert_eq!(plan.session_open_utc, instant(2025, 1, 6, 14, 0));
-    assert_eq!(plan.session_close_utc, instant(2025, 1, 6, 20, 0));
+    // Exchange truth remains the authoritative regular-day boundaries,
+    // untouched by the override.
+    assert_eq!(plan.exchange_session_open_utc, instant(2025, 1, 6, 14, 30));
+    assert_eq!(plan.exchange_session_close_utc, instant(2025, 1, 6, 21, 0));
+    // Effective operation boundaries equal the override.
+    assert_eq!(
+        plan.effective_operation_open_utc,
+        instant(2025, 1, 6, 14, 0)
+    );
+    assert_eq!(
+        plan.effective_operation_close_utc,
+        instant(2025, 1, 6, 20, 0)
+    );
+}
+
+/// A valid override on an exchange early-close date retains the
+/// authoritative early close as exchange truth while the effective
+/// operation close follows the override — both remain simultaneously
+/// visible on the plan.
+#[test]
+fn valid_override_on_early_close_date_keeps_both_truths_visible() {
+    let provider = NyseWeekdaysProvider;
+    // 2025-11-28 (day after Thanksgiving) is an NYSE early-close day.
+    let now = instant(2025, 11, 28, 15, 0);
+    let window = SessionWindow::parse("15:00", "19:00").expect("valid window");
+    let plan = assert_applicable(resolve_autonomous_daily_session_plan(
+        &provider,
+        now,
+        &default_timing(),
+        &FixedWindowOverrideConfig::Valid(window),
+    ));
+    assert!(plan.exchange_is_early_close);
+    assert_eq!(
+        plan.exchange_session_close_utc,
+        instant(2025, 11, 28, 18, 0)
+    );
+    assert_eq!(
+        plan.effective_operation_open_utc,
+        instant(2025, 11, 28, 15, 0)
+    );
+    assert_eq!(
+        plan.effective_operation_close_utc,
+        instant(2025, 11, 28, 19, 0)
+    );
+    assert_ne!(
+        plan.effective_operation_close_utc,
+        plan.exchange_session_close_utc
+    );
+    assert_eq!(
+        plan.schedule_source,
+        AutonomousDailyScheduleSource::FixedWindowOverride
+    );
 }
 
 /// Weekend plus a valid override remains not-applicable — the override
@@ -431,7 +512,8 @@ fn start_ge_stop_blocks() {
     assert!(SessionWindow::parse("14:00", "14:00").is_none());
 }
 
-/// No override preserves the authoritative exchange boundaries exactly.
+/// No override preserves the authoritative exchange boundaries exactly, and
+/// the effective operation window equals the exchange window exactly.
 #[test]
 fn no_override_preserves_authoritative_boundaries() {
     let provider = NyseWeekdaysProvider;
@@ -446,8 +528,195 @@ fn no_override_preserves_authoritative_boundaries() {
         plan.schedule_source,
         AutonomousDailyScheduleSource::NyseWeekdaysHeuristic
     );
-    assert_eq!(plan.session_open_utc, instant(2025, 1, 6, 14, 30));
-    assert_eq!(plan.session_close_utc, instant(2025, 1, 6, 21, 0));
+    assert_eq!(plan.exchange_session_open_utc, instant(2025, 1, 6, 14, 30));
+    assert_eq!(plan.exchange_session_close_utc, instant(2025, 1, 6, 21, 0));
+    assert_eq!(
+        plan.effective_operation_open_utc,
+        plan.exchange_session_open_utc
+    );
+    assert_eq!(
+        plan.effective_operation_close_utc,
+        plan.exchange_session_close_utc
+    );
+}
+
+/// `previous_trading_date` on the plan matches
+/// `MarketSessionSchedule::previous_trading_date` for the same instant —
+/// never a fourth independent calendar-walk calculation.
+#[test]
+fn previous_trading_date_matches_market_session_schedule() {
+    let provider = NyseWeekdaysProvider;
+    // Monday 2025-01-06; the previous trading date is Friday 2025-01-03.
+    let now = instant(2025, 1, 6, 17, 0);
+    let plan = assert_applicable(resolve_autonomous_daily_session_plan(
+        &provider,
+        now,
+        &default_timing(),
+        &FixedWindowOverrideConfig::Absent,
+    ));
+    let schedule = resolve_market_session_schedule(&provider, now);
+    assert_eq!(
+        plan.previous_trading_date,
+        format!(
+            "{:04}-{:02}-{:02}",
+            schedule.previous_trading_date.0,
+            schedule.previous_trading_date.1,
+            schedule.previous_trading_date.2
+        )
+    );
+    assert_eq!(plan.previous_trading_date, "2025-01-03");
+}
+
+// ---------------------------------------------------------------------------
+// Exchange vs. effective boundary identity isolation
+// ---------------------------------------------------------------------------
+
+/// Changing only the effective operation boundaries (via a valid override on
+/// the same exchange day) changes the session-plan identity while the
+/// exchange boundaries stay identical.
+#[test]
+fn effective_only_boundary_change_changes_session_plan_identity() {
+    let provider = NyseWeekdaysProvider;
+    let now = instant(2025, 1, 6, 17, 0);
+    let plan_a = assert_applicable(resolve_autonomous_daily_session_plan(
+        &provider,
+        now,
+        &default_timing(),
+        &FixedWindowOverrideConfig::Absent,
+    ));
+    let window = SessionWindow::parse("14:00", "20:00").expect("valid window");
+    let plan_b = assert_applicable(resolve_autonomous_daily_session_plan(
+        &provider,
+        now,
+        &default_timing(),
+        &FixedWindowOverrideConfig::Valid(window),
+    ));
+    assert_eq!(
+        plan_a.exchange_session_open_utc,
+        plan_b.exchange_session_open_utc
+    );
+    assert_eq!(
+        plan_a.exchange_session_close_utc,
+        plan_b.exchange_session_close_utc
+    );
+    assert_ne!(
+        plan_a.effective_operation_open_utc,
+        plan_b.effective_operation_open_utc
+    );
+    assert_ne!(plan_a.session_plan_identity, plan_b.session_plan_identity);
+}
+
+/// Changing only the exchange boundaries (via an injected fake provider that
+/// differs only in early-close truth) changes the session-plan identity
+/// while a valid override pins the effective operation boundaries identical
+/// across both.
+#[test]
+fn exchange_only_boundary_change_changes_session_plan_identity_via_fake_provider() {
+    let provider_a = FixedTruthProvider {
+        is_early_close: false,
+    };
+    let provider_b = FixedTruthProvider {
+        is_early_close: true,
+    };
+    let now = instant(2025, 1, 6, 17, 0);
+    let window = SessionWindow::parse("14:00", "20:00").expect("valid window");
+    let plan_a = assert_applicable(resolve_autonomous_daily_session_plan(
+        &provider_a,
+        now,
+        &default_timing(),
+        &FixedWindowOverrideConfig::Valid(window),
+    ));
+    let plan_b = assert_applicable(resolve_autonomous_daily_session_plan(
+        &provider_b,
+        now,
+        &default_timing(),
+        &FixedWindowOverrideConfig::Valid(window),
+    ));
+    assert_eq!(
+        plan_a.effective_operation_open_utc,
+        plan_b.effective_operation_open_utc
+    );
+    assert_eq!(
+        plan_a.effective_operation_close_utc,
+        plan_b.effective_operation_close_utc
+    );
+    assert_ne!(
+        plan_a.exchange_session_close_utc,
+        plan_b.exchange_session_close_utc
+    );
+    assert_ne!(plan_a.session_plan_identity, plan_b.session_plan_identity);
+}
+
+/// Changing only early-close truth (holding market date, effective operation
+/// window, and every other input equal) changes the session-plan identity.
+#[test]
+fn early_close_truth_change_changes_session_plan_identity() {
+    let provider_a = FixedTruthProvider {
+        is_early_close: false,
+    };
+    let provider_b = FixedTruthProvider {
+        is_early_close: true,
+    };
+    let now = instant(2025, 1, 6, 17, 0);
+    let plan_a = assert_applicable(resolve_autonomous_daily_session_plan(
+        &provider_a,
+        now,
+        &default_timing(),
+        &FixedWindowOverrideConfig::Absent,
+    ));
+    let plan_b = assert_applicable(resolve_autonomous_daily_session_plan(
+        &provider_b,
+        now,
+        &default_timing(),
+        &FixedWindowOverrideConfig::Absent,
+    ));
+    assert!(!plan_a.exchange_is_early_close);
+    assert!(plan_b.exchange_is_early_close);
+    assert_ne!(plan_a.session_plan_identity, plan_b.session_plan_identity);
+}
+
+/// Static source proof: `AutonomousDailySessionPlan` no longer declares the
+/// ambiguous `session_open_utc`/`session_close_utc` pair, and declares both
+/// the exchange and effective-operation boundary sets explicitly.
+#[test]
+fn session_plan_struct_declares_explicit_boundary_fields_not_ambiguous_ones() {
+    let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src")
+        .join("state")
+        .join("autonomous_daily_operation.rs");
+    let source = std::fs::read_to_string(&path).expect("read autonomous_daily_operation.rs");
+
+    let start_marker = "pub struct AutonomousDailySessionPlan {";
+    let start = source
+        .find(start_marker)
+        .expect("AutonomousDailySessionPlan must exist in source");
+    let end = source[start..]
+        .find("\n}")
+        .map(|i| start + i)
+        .expect("expected the struct body to close with a closing brace");
+    let body = &source[start..end];
+
+    assert!(
+        !body.contains("pub session_open_utc"),
+        "AutonomousDailySessionPlan must not declare the ambiguous session_open_utc field. Body:\n{body}"
+    );
+    assert!(
+        !body.contains("pub session_close_utc"),
+        "AutonomousDailySessionPlan must not declare the ambiguous session_close_utc field. Body:\n{body}"
+    );
+    for expected in [
+        "pub exchange_session_open_utc",
+        "pub exchange_session_close_utc",
+        "pub exchange_is_early_close",
+        "pub effective_operation_open_utc",
+        "pub effective_operation_close_utc",
+        "pub previous_trading_date",
+    ] {
+        assert!(
+            body.contains(expected),
+            "AutonomousDailySessionPlan must declare {expected}. Body:\n{body}"
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -545,8 +814,12 @@ fn sample_plan(market_date: &str) -> AutonomousDailySessionPlan {
     let now = Utc::now();
     AutonomousDailySessionPlan {
         market_date: market_date.to_string(),
-        session_open_utc: now,
-        session_close_utc: now + chrono::Duration::hours(6),
+        previous_trading_date: "2025-01-03".to_string(),
+        exchange_session_open_utc: now,
+        exchange_session_close_utc: now + chrono::Duration::hours(6),
+        exchange_is_early_close: false,
+        effective_operation_open_utc: now,
+        effective_operation_close_utc: now + chrono::Duration::hours(6),
         calendar_source: "nyse_weekdays_heuristic".to_string(),
         calendar_coverage_state: "active".to_string(),
         schedule_source: AutonomousDailyScheduleSource::NyseWeekdaysHeuristic,
@@ -636,8 +909,12 @@ fn sample_operation_record(operation_id: Uuid) -> mqk_db::AutonomousDailyOperati
         calendar_source: "nyse_weekdays_heuristic".to_string(),
         calendar_coverage_state: "active".to_string(),
         schedule_source: "nyse_weekdays_heuristic".to_string(),
-        session_open_utc: now,
-        session_close_utc: now + chrono::Duration::hours(6),
+        effective_operation_open_utc: now,
+        effective_operation_close_utc: now + chrono::Duration::hours(6),
+        exchange_session_open_utc: Some(now),
+        exchange_session_close_utc: Some(now + chrono::Duration::hours(6)),
+        exchange_is_early_close: Some(false),
+        previous_trading_date: Some(chrono::NaiveDate::from_ymd_opt(2025, 1, 3).unwrap()),
         preopen_start_utc: now - chrono::Duration::minutes(30),
         postclose_finalize_utc: now + chrono::Duration::hours(6) + chrono::Duration::minutes(15),
         state: "awaiting_preopen".to_string(),
@@ -676,6 +953,53 @@ fn projection_preserves_null_values() {
     assert!(model.run_id.is_none());
     assert!(model.last_completed_bar_ts.is_none());
     assert!(model.recent_events.is_none());
+}
+
+/// A legacy row's `None` exchange-truth fields remain `None` through the
+/// projection — never substituted with the effective-operation values.
+#[test]
+fn projection_preserves_legacy_null_exchange_fields() {
+    let mut record = sample_operation_record(Uuid::new_v4());
+    record.exchange_session_open_utc = None;
+    record.exchange_session_close_utc = None;
+    record.exchange_is_early_close = None;
+    record.previous_trading_date = None;
+
+    let model = project_autonomous_daily_operation_read_model(&record, None);
+    assert!(model.exchange_session_open_utc.is_none());
+    assert!(model.exchange_session_close_utc.is_none());
+    assert!(model.exchange_is_early_close.is_none());
+    assert!(model.previous_trading_date.is_none());
+    // The effective-operation boundaries remain present and untouched.
+    assert_eq!(
+        model.effective_operation_open_utc,
+        record.effective_operation_open_utc
+    );
+    assert_eq!(
+        model.effective_operation_close_utc,
+        record.effective_operation_close_utc
+    );
+}
+
+/// A fresh row's non-null exchange-truth fields pass through the projection
+/// unmodified.
+#[test]
+fn projection_preserves_present_exchange_fields() {
+    let record = sample_operation_record(Uuid::new_v4());
+    let model = project_autonomous_daily_operation_read_model(&record, None);
+    assert_eq!(
+        model.exchange_session_open_utc,
+        record.exchange_session_open_utc
+    );
+    assert_eq!(
+        model.exchange_session_close_utc,
+        record.exchange_session_close_utc
+    );
+    assert_eq!(
+        model.exchange_is_early_close,
+        record.exchange_is_early_close
+    );
+    assert_eq!(model.previous_trading_date, record.previous_trading_date);
 }
 
 /// Explicit stored zero counters remain zero through the projection.
@@ -757,8 +1081,35 @@ fn production_wrapper_consumes_shared_calendar_context() {
             exchange_schedule.market_date.2
         )
     );
-    assert_eq!(plan.session_open_utc, exchange_schedule.session_open_utc);
-    assert_eq!(plan.session_close_utc, exchange_schedule.session_close_utc);
+    assert_eq!(
+        plan.exchange_session_open_utc,
+        exchange_schedule.session_open_utc
+    );
+    assert_eq!(
+        plan.exchange_session_close_utc,
+        exchange_schedule.session_close_utc
+    );
+    assert_eq!(
+        plan.effective_operation_open_utc,
+        exchange_schedule.session_open_utc
+    );
+    assert_eq!(
+        plan.effective_operation_close_utc,
+        exchange_schedule.session_close_utc
+    );
+    assert_eq!(
+        plan.previous_trading_date,
+        format!(
+            "{:04}-{:02}-{:02}",
+            exchange_schedule.previous_trading_date.0,
+            exchange_schedule.previous_trading_date.1,
+            exchange_schedule.previous_trading_date.2
+        )
+    );
+    assert_eq!(
+        plan.exchange_is_early_close,
+        exchange_schedule.is_early_close
+    );
     assert_eq!(plan.calendar_source, exchange_schedule.calendar_source);
     assert_eq!(plan.calendar_coverage_state, "active");
     assert_eq!(
