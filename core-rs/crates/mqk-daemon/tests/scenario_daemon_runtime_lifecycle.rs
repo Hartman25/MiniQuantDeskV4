@@ -8,6 +8,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use axum::http::{Request, StatusCode};
+use chrono::{TimeZone, Utc};
 use http_body_util::BodyExt;
 use mqk_broker_alpaca::{encode_fetch_cursor, types::AlpacaFetchCursor};
 use mqk_daemon::{artifact_intake::ENV_ARTIFACT_PATH, routes, state};
@@ -16,6 +17,186 @@ use tower::ServiceExt;
 use uuid::Uuid;
 
 const TEST_OPERATOR_TOKEN: &str = "test-operator-token";
+
+// ---------------------------------------------------------------------------
+// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D1-LIFECYCLE-TEST-FIXTURE-REPAIR-01
+//
+// The runtime-start path now requires a canonical (symbol, strategy_id,
+// timeframe) assignment plus strict Bundle 2 daily-data readiness evidence
+// (DAILY-DATA-READINESS-01C-ENFORCEMENT-01) before it will create or start a
+// run — always applicable on paper+alpaca
+// (`StrategyMarketDataSource::ExternalSignalIngestion` is "always true for
+// paper+alpaca", `api_types.rs`). This synthetic, ZZ-prefixed fixture
+// identity satisfies that gate for every DB-backed lifecycle test in this
+// file without touching production gate behavior. `intraday_scalper`/5m
+// (`TIMEFRAME_SECS=300`, `LOOKBACK=5`,
+// `mqk-strategy/src/engines/intraday_scalper.rs`) is used because it is the
+// only built-in strategy whose canonical timeframe matches a synthetic 5m
+// bar window; Alpaca `1D` is deliberately not used — its daily timestamp
+// convention remains unverified
+// (`daily_data_readiness::resolve_daily_bar_timestamp_convention`).
+// ---------------------------------------------------------------------------
+
+const LIFECYCLE_SYMBOL: &str = "ZZLIFE01";
+const LIFECYCLE_PROVIDER: &str = "zz_lifecycle_provider";
+const LIFECYCLE_STRATEGY: &str = "intraday_scalper";
+const LIFECYCLE_TIMEFRAME: &str = "5m";
+const LIFECYCLE_TIMEFRAME_SECS: i64 = 300;
+const LIFECYCLE_REQUIRED_BARS: usize = 5;
+
+/// Same verified NYSE-regular-session instant Phase B/C's own DB-backed
+/// readiness tests use
+/// (`scenario_daily_data_readiness_start_gate_01.rs`'s
+/// `MON_2024_04_15_935AM_EDT`, offset ten bars into the session): a Monday,
+/// well inside NYSE regular session, well inside the calendar seam's
+/// 2023-2028 coverage window.
+const LIFECYCLE_READINESS_FIXED_TS: i64 = 1_713_188_100 + 10 * 300;
+
+fn lifecycle_readiness_now() -> chrono::DateTime<Utc> {
+    Utc.timestamp_opt(LIFECYCLE_READINESS_FIXED_TS, 0)
+        .single()
+        .expect("valid fixed readiness timestamp")
+}
+
+/// Write a temporary, process-specific synthetic provider/instrument
+/// registry pair and point `MQK_PROVIDER_REGISTRY_PATH`/
+/// `MQK_INSTRUMENT_REGISTRY_PATH` at them (absolute paths, `std::env::temp_dir()`).
+/// Never staged in the repo; never a real ticker or provider.
+fn write_lifecycle_registries() {
+    let dir = std::env::temp_dir().join(format!(
+        "mqk_lifecycle_registry_{}_{}",
+        std::process::id(),
+        Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&dir).expect("create lifecycle registry dir");
+
+    let instruments_path = dir.join("instruments.json");
+    std::fs::write(
+        &instruments_path,
+        format!(
+            r#"[
+  {{
+    "instrument_id": "equity:US:{sym}",
+    "symbol": "{sym}",
+    "asset_class": "equity",
+    "provider": "{prov}",
+    "provider_symbol": "{sym}",
+    "venue": "TEST",
+    "currency": "USD",
+    "enabled": true,
+    "timeframes": ["5m"],
+    "notes": "AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D1 lifecycle-test synthetic fixture"
+  }}
+]"#,
+            sym = LIFECYCLE_SYMBOL,
+            prov = LIFECYCLE_PROVIDER,
+        ),
+    )
+    .expect("write lifecycle instruments fixture");
+
+    let providers_path = dir.join("providers.json");
+    std::fs::write(
+        &providers_path,
+        format!(
+            r#"[
+  {{
+    "provider_id": "{prov}",
+    "display_name": "Lifecycle Test Provider",
+    "asset_classes": ["equity"],
+    "free_tier_available": true,
+    "api_key_required": false,
+    "credential_env_vars": [],
+    "rate_limit_notes": "",
+    "supported_timeframes": ["5m"],
+    "historical_depth_notes": "",
+    "realtime_support_notes": "",
+    "licensing_notes": "",
+    "implementation_status": "test",
+    "enabled": true,
+    "verification_status": "test",
+    "docs_url": ""
+  }}
+]"#,
+            prov = LIFECYCLE_PROVIDER,
+        ),
+    )
+    .expect("write lifecycle providers fixture");
+
+    #[allow(deprecated)]
+    unsafe {
+        std::env::set_var("MQK_INSTRUMENT_REGISTRY_PATH", &instruments_path);
+        std::env::set_var("MQK_PROVIDER_REGISTRY_PATH", &providers_path);
+    }
+}
+
+/// The exact five completed 5m `end_ts` values the strict Bundle 2 readiness
+/// gate expects for `LIFECYCLE_SYMBOL`, computed against the fixed readiness
+/// clock via the same production calendar-walk function the gate itself
+/// calls (`daily_data_readiness::expected_intraday_end_ts_window`) — never a
+/// second, hand-derived window.
+fn lifecycle_expected_bar_window() -> Vec<i64> {
+    let calendar_provider = state::market_calendar::NyseWeekdaysProvider;
+    let now = lifecycle_readiness_now();
+    let schedule = state::market_calendar::resolve_market_session_schedule(&calendar_provider, now);
+    mqk_daemon::daily_data_readiness::expected_intraday_end_ts_window(
+        &calendar_provider,
+        &schedule,
+        now.timestamp(),
+        LIFECYCLE_TIMEFRAME_SECS,
+        0,
+        LIFECYCLE_REQUIRED_BARS,
+    )
+    .expect("lifecycle expected 5m window resolves")
+}
+
+/// Seed exactly the given completed 5m bar rows for `LIFECYCLE_SYMBOL`,
+/// clearing any prior rows first (REPAIR 7: rerun safety). Flat prices so a
+/// completed bar, if ever consumed, cannot accidentally generate a real
+/// trading signal.
+async fn seed_lifecycle_bars(pool: &sqlx::PgPool, expected_ts: &[i64]) {
+    sqlx::query("delete from md_bars where symbol = $1 and timeframe = $2")
+        .bind(LIFECYCLE_SYMBOL)
+        .bind(LIFECYCLE_TIMEFRAME)
+        .execute(pool)
+        .await
+        .expect("cleanup lifecycle bars failed");
+    for &end_ts in expected_ts {
+        sqlx::query(
+            r#"
+            insert into md_bars (
+              symbol, timeframe, end_ts, open_micros, high_micros, low_micros,
+              close_micros, volume, is_complete, provider_id, provider_source,
+              provider_symbol, ingest_mode, ingested_at
+            ) values ($1,$2,$3,100000000,100000000,100000000,100000000,1000000,true,
+                      $4,$4,$1,'historical_sync',$5)
+            "#,
+        )
+        .bind(LIFECYCLE_SYMBOL)
+        .bind(LIFECYCLE_TIMEFRAME)
+        .bind(end_ts)
+        .bind(LIFECYCLE_PROVIDER)
+        .bind(
+            Utc.timestamp_opt(end_ts + 60, 0)
+                .single()
+                .expect("valid ingested_at ts"),
+        )
+        .execute(pool)
+        .await
+        .expect("seed lifecycle bar insert failed");
+    }
+}
+
+/// REPAIR 6: the strict readiness clock above is fixed at a historical
+/// instant, but the legacy `market_data_freshness` gate still evaluates bar
+/// age against the real wall clock (`Utc::now()`). Raise
+/// `MQK_INTRADAY_BAR_MAX_AGE_SECS` just enough for the fixed synthetic
+/// latest bar to clear that older gate during this test run — bounded,
+/// never unbounded/negative. This fixture does not test freshness policy
+/// itself; the dedicated readiness/freshness scenarios already do.
+fn lifecycle_legacy_freshness_max_age_secs(latest_bar_end_ts: i64) -> i64 {
+    let real_now = Utc::now().timestamp();
+    (real_now - latest_bar_end_ts).max(0) + 3600
+}
 
 /// Spawn a minimal in-process HTTP server that satisfies the Alpaca paper REST
 /// surface needed by lifecycle tests.  Returns the `http://127.0.0.1:{port}`
@@ -99,17 +280,37 @@ async fn lifecycle_pool() -> sqlx::PgPool {
         .execute(&pool)
         .await
         .expect("cleanup broker_event_cursor");
-    // STRATEGY-DORMANCY-01: ensure swing_momentum is registered and enabled so
-    // daemon_state() Paper+Alpaca start clears the native_strategy_bootstrap gate.
+    // AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D1-LIFECYCLE-TEST-FIXTURE-REPAIR-01
+    // (REPAIR 7): clear any prior synthetic lifecycle bar/evidence rows so a
+    // rerun of this binary never collides with its own previous invocation.
+    sqlx::query("DELETE FROM md_bars WHERE symbol = $1 AND timeframe = $2")
+        .bind(LIFECYCLE_SYMBOL)
+        .bind(LIFECYCLE_TIMEFRAME)
+        .execute(&pool)
+        .await
+        .expect("cleanup lifecycle md_bars");
+    sqlx::query("DELETE FROM sys_autonomous_session_events WHERE detail LIKE $1")
+        .bind(format!("%\"{LIFECYCLE_SYMBOL}\"%"))
+        .execute(&pool)
+        .await
+        .expect("cleanup lifecycle readiness evidence");
+    // STRATEGY-DORMANCY-01 / DAILY-DATA-READINESS-01C-ENFORCEMENT-01: ensure
+    // intraday_scalper (this fixture's canonical strategy — see the fixture
+    // block above) is registered and enabled so daemon_state() Paper+Alpaca
+    // start clears both the native_strategy_bootstrap gate (B1A) and the DB
+    // strategy-registry gate (B2A). swing_momentum has no 5m canonical
+    // timeframe match, so it cannot satisfy the strict Bundle 2 readiness
+    // gate this repair fixes the fixture against.
     sqlx::query(
         "INSERT INTO sys_strategy_registry \
          (strategy_id, display_name, enabled, kind, registered_at_utc, updated_at_utc, note) \
-         VALUES ('swing_momentum', 'Swing Momentum', true, 'bar_driven', NOW(), NOW(), 'lifecycle-test-fixture') \
+         VALUES ($1, 'Intraday Scalper', true, 'bar_driven', NOW(), NOW(), 'lifecycle-test-fixture') \
          ON CONFLICT (strategy_id) DO UPDATE SET enabled = true, updated_at_utc = NOW()",
     )
+    .bind(LIFECYCLE_STRATEGY)
     .execute(&pool)
     .await
-    .expect("upsert swing_momentum for lifecycle tests");
+    .expect("upsert intraday_scalper for lifecycle tests");
 
     pool
 }
@@ -237,6 +438,7 @@ async fn daemon_state() -> Arc<state::AppState> {
     // so tests do not require real Alpaca credentials. ALPACA_PAPER_BASE_URL
     // overrides the paper endpoint URL used by build_daemon_broker.
     let mock_url = start_mock_alpaca_server().await;
+    write_lifecycle_registries();
     #[allow(deprecated)]
     unsafe {
         std::env::set_var("MQK_DAEMON_DEPLOYMENT_MODE", "paper");
@@ -244,16 +446,75 @@ async fn daemon_state() -> Arc<state::AppState> {
         std::env::set_var("ALPACA_API_KEY_PAPER", "test-paper-key");
         std::env::set_var("ALPACA_API_SECRET_PAPER", "test-paper-secret");
         std::env::set_var("ALPACA_PAPER_BASE_URL", &mock_url);
+
         // STRATEGY-DORMANCY-01: Paper+Alpaca requires a non-dormant bootstrap.
-        // swing_momentum is a registered built-in; lifecycle_pool() upserts it
-        // as enabled in sys_strategy_registry before any test calls start().
-        std::env::set_var("MQK_STRATEGY_IDS", "swing_momentum");
+        // intraday_scalper is a registered built-in; lifecycle_pool() upserts
+        // it as enabled in sys_strategy_registry before any test calls
+        // start(). DAILY-DATA-READINESS-01C-ENFORCEMENT-01's strict Bundle 2
+        // start gate additionally requires a canonical (symbol, strategy_id,
+        // timeframe) assignment — set below — plus the synthetic registries
+        // written above.
+        std::env::set_var("MQK_STRATEGY_IDS", LIFECYCLE_STRATEGY);
+        std::env::set_var("MQK_STRATEGY_SYMBOL", LIFECYCLE_SYMBOL);
+        std::env::set_var("MQK_STRATEGY_MD_TIMEFRAME", LIFECYCLE_TIMEFRAME);
+        std::env::set_var("MQK_DATA_READINESS_GRACE_SECS", "0");
+        std::env::set_var("MQK_DATA_READINESS_FUTURE_SKEW_SECS", "60");
+
+        // Remove ambient configuration capable of changing assignment or
+        // session selection out from under this fixture's canonical
+        // single-symbol env-var assignment.
+        std::env::remove_var("MQK_PAPER_WATCHLIST_PATH");
+        std::env::remove_var("MQK_SESSION_START_HH_MM");
+        std::env::remove_var("MQK_SESSION_STOP_HH_MM");
+    }
+
+    let pool = lifecycle_pool().await;
+    let expected_bars = lifecycle_expected_bar_window();
+    seed_lifecycle_bars(&pool, &expected_bars).await;
+    let latest_bar_end_ts = *expected_bars
+        .last()
+        .expect("lifecycle expected window is non-empty");
+    let legacy_max_age_secs = lifecycle_legacy_freshness_max_age_secs(latest_bar_end_ts);
+    #[allow(deprecated)]
+    unsafe {
+        // REPAIR 6: bridges the fixed strict-readiness clock above against
+        // the legacy market_data_freshness gate's real-wall-clock age check
+        // (see lifecycle_legacy_freshness_max_age_secs's doc comment).
+        std::env::set_var(
+            "MQK_INTRADAY_BAR_MAX_AGE_SECS",
+            legacy_max_age_secs.to_string(),
+        );
     }
 
     let state = Arc::new(state::AppState::new_with_db_and_operator_auth(
-        lifecycle_pool().await,
+        pool,
         state::OperatorAuthMode::TokenRequired(TEST_OPERATOR_TOKEN.to_string()),
     ));
+    state
+        .set_daily_data_readiness_clock_override_for_test(Some(lifecycle_readiness_now()))
+        .await;
+
+    // Fixture sanity assertions: confirm the configured fixture resolves to
+    // exactly the intended canonical single-symbol assignment before any
+    // test uses this state. Never calls start_execution_runtime merely for
+    // fixture validation.
+    let resolved_config = state::build_multi_symbol_runtime_config_from_env()
+        .expect("lifecycle fixture assignment must resolve");
+    assert_eq!(
+        resolved_config.symbols.len(),
+        1,
+        "lifecycle fixture must resolve to exactly one assignment"
+    );
+    assert_eq!(resolved_config.symbols[0].symbol, LIFECYCLE_SYMBOL);
+    assert_eq!(resolved_config.symbols[0].strategy_id, LIFECYCLE_STRATEGY);
+    assert_eq!(resolved_config.symbols[0].timeframe, LIFECYCLE_TIMEFRAME);
+    assert_eq!(resolved_config.max_concurrent_symbols, 1);
+    assert_eq!(
+        expected_bars.len(),
+        LIFECYCLE_REQUIRED_BARS,
+        "lifecycle fixture must seed exactly five expected 5m bars"
+    );
+
     // Persist a Live broker cursor to the DB so that build_execution_orchestrator
     // loads Live continuity state from the cursor (not ColdStartUnproven from None).
     // Without this, the cursor load in state.rs line ~1490 overwrites the in-memory

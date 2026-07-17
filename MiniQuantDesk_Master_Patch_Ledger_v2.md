@@ -11248,3 +11248,129 @@ Next authorized patch: AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D1-LIFECYCLE-TEST-FIX
   unauthorized until both this policy closure repair and the lifecycle-test
   fixture repair are accepted.
 ```
+
+---
+
+**Phase D1 lifecycle-test fixture repair
+(`AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D1-LIFECYCLE-TEST-FIXTURE-REPAIR-01`):**
+starting HEAD `f5fcb1d77e663605186d89575a4a04277172b42d` ("fix: close
+autonomous coordinator policy gaps"). Test-fixture repair only — no
+production Rust file changed, no migration, no GUI change. Repairs the
+stale fixture in `tests/scenario_daemon_runtime_lifecycle.rs` so the
+existing DB-backed daemon lifecycle scenario passes against the current
+canonical runtime-start gates.
+
+**Baseline (confirmed before editing):** `cargo test -p mqk-daemon --test
+scenario_daemon_runtime_lifecycle -- --include-ignored --test-threads=1`
+→ **10 passed; 14 failed**, first canonical blocker
+`multi_symbol_config_missing_symbol` (surfaced as
+`runtime.start_refused.daily_data_readiness_blocked`,
+`top_level_blocker=required_assignments_missing`) — matches the fingerprint
+recorded from D1/D1-policy-closure-repair exactly.
+
+**Root cause:** the fixture's shared `daemon_state()` helper configured
+`MQK_STRATEGY_IDS=swing_momentum` but never configured
+`MQK_STRATEGY_SYMBOL`/`MQK_STRATEGY_MD_TIMEFRAME`/
+`MQK_PROVIDER_REGISTRY_PATH`/`MQK_INSTRUMENT_REGISTRY_PATH`, and seeded no
+`md_bars` evidence. `AppState::start_execution_runtime` now requires (for
+every paper+alpaca start, `StrategyMarketDataSource::ExternalSignalIngestion`
+being "always true for paper+alpaca") a canonical
+`(symbol, strategy_id, timeframe)` assignment plus a passing strict
+Bundle 2 daily-data-readiness evaluation
+(`DAILY-DATA-READINESS-01C-ENFORCEMENT-01`) before it will create or start a
+run — the fixture predates that gate.
+
+**Fixture repair:** `daemon_state()`/`lifecycle_pool()` now configure a
+synthetic, `ZZ`-prefixed canonical assignment:
+`ZZLIFE01` / `intraday_scalper` / `5m` (`intraday_scalper` is the only
+built-in strategy whose `StrategySpec.timeframe_secs=300`/`LOOKBACK=5`
+matches a synthetic 5m bar window; Alpaca `1D` is deliberately not used —
+its daily timestamp convention remains unverified). A temporary
+process-specific provider/instrument registry pair
+(`zz_lifecycle_provider` / one enabled synthetic equity instrument, written
+under `std::env::temp_dir()`, never staged) satisfies the provider/
+provenance checks. The strict readiness clock is pinned via
+`set_daily_data_readiness_clock_override_for_test` to the same verified
+NYSE-regular-session instant `scenario_daily_data_readiness_start_gate_01.rs`
+already uses (`MON_2024_04_15_935AM_EDT + 10*300`). Exactly five completed
+5m bars — the exact window returned by
+`daily_data_readiness::expected_intraday_end_ts_window` for that fixed
+clock — are seeded into `md_bars` with flat prices and full provenance
+(`provider_id`/`provider_source`/`provider_symbol`/`ingest_mode=
+historical_sync`) before every test that calls `start()`. Because the
+strict-readiness clock is fixed in the past while the legacy
+`market_data_freshness` gate still evaluates bar age against the real wall
+clock, `MQK_INTRADAY_BAR_MAX_AGE_SECS` is computed fresh each call as
+`max(real_now - latest_seeded_bar_end_ts, 0) + 3600` (a bounded, non-negative
+bridge value — never unbounded) so the legacy gate does not reject the
+same fixed-clock-valid bars; this fixture does not test freshness policy
+itself. `lifecycle_pool()` now upserts `intraday_scalper` (not
+`swing_momentum`) into `sys_strategy_registry` as enabled/`bar_driven`, and
+clears prior `md_bars`/`sys_autonomous_session_events` rows for
+`ZZLIFE01` before every invocation (rerun-safety, REPAIR 7). `daemon_state()`
+asserts the resolved fixture (one assignment, `ZZLIFE01`/`intraday_scalper`/
+`5m`, `max_concurrent_symbols=1`, exactly five expected bar timestamps)
+before returning, without ever calling `start_execution_runtime` merely for
+that validation. No gate was bypassed, weakened, or mocked out — the fixture
+now legitimately satisfies every canonical start gate with synthetic,
+clearly-fake data.
+
+**Test results:** `scenario_daemon_runtime_lifecycle` — **24 passed; 0
+failed; 0 ignored** on both of two consecutive back-to-back invocations of
+the exact same command (no collision, no stale-state failure, no
+`PoolTimedOut`). Regressions, each run as its own binary against the
+reachable test DB at port 5434:
+`scenario_daily_data_readiness_start_gate_01` 20/20,
+`scenario_native_strategy_bootstrap_daemon_b1b` 5/5,
+`scenario_autonomous_daily_coordinator_policy_01` 35/35,
+`scenario_autonomous_completed_bar_driver_01` 56/56,
+`scenario_autonomous_daily_operation_identity_01` 44/44,
+`scenario_autonomous_gate_parity_auton11` 5/5.
+`state::autonomous_retry_policy::tests` (`--lib`) 69/69. All identical to
+their prior baselines — no regression.
+
+**Guards:** `validate_autonomous_daily_paper_operations_01a_audit.ps1` all
+checks pass, `validate_daily_data_readiness_01e_closure.ps1` all checks
+pass (Phase A guard re-run clean inside it), `check_unsafe_patterns.ps1` all
+guards pass. Migration governance not run (no migration change authorized
+or made).
+
+**Format/lint:** `rustfmt --check` clean on
+`tests/scenario_daemon_runtime_lifecycle.rs`. `cargo check -p mqk-runtime -p
+mqk-daemon` clean (only the pre-existing, unrelated `sqlx-postgres`
+future-incompat warning). Clippy (`cargo clippy -p mqk-daemon --test
+scenario_daemon_runtime_lifecycle`): zero warnings attributable to the
+touched test file — the one warning present in the build is the same
+pre-existing, unrelated `routes/strategy_scans.rs:87` `manual
+!RangeInclusive::contains` lint already noted in the prior D1 policy
+closure repair entry. `git diff --check` clean.
+
+**Safety confirmation:**
+
+```text
+PRODUCTION CODE CHANGED: no
+MIGRATION CHANGED: no
+GUI CHANGED: no
+GATE BYPASSED OR WEAKENED: no
+READINESS/FRESHNESS/PROVENANCE/RUNTIME-BINDING GATE WEAKENED: no
+REAL DAEMON STARTED: no
+REAL PROVIDER CALLS: no
+REAL BROKER ENDPOINT CALLS: no (loopback Alpaca mock only)
+EXTERNAL NETWORK CALLS: no
+PAPER ORDERS: no
+LIVE ORDERS: no
+PAPER DB TOUCHED: no (isolated test Postgres, port 5434, only)
+TEMPORARY REGISTRIES STAGED: no (std::env::temp_dir() only)
+FILES CHANGED: MiniQuantDesk_Master_Patch_Ledger_v2.md,
+  tests/scenario_daemon_runtime_lifecycle.rs (modified, no new file)
+ADDED FILES: none
+```
+
+```text
+D1 LIFECYCLE-TEST FIXTURE REPAIR: COMPLETE (pending commit)
+Phase D: OPEN
+Bundle 3 (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-COMBINED): OPEN
+Next authorized patch: Phase D2 — durable daily session-controller
+  lifecycle integration — only after independent acceptance of this
+  repair, and only on explicit operator instruction.
+```
