@@ -8,6 +8,8 @@ mod alpaca_ws_transport;
 mod autonomous_bar_ticker;
 pub mod autonomous_completed_bar_driver;
 pub mod autonomous_daily_operation;
+pub mod autonomous_retry_policy;
+pub mod autonomous_runtime_context;
 mod broker;
 mod deadman;
 mod dry_run_strategy;

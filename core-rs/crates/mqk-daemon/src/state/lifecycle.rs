@@ -38,10 +38,7 @@ use super::{
 };
 use super::{AppState, DAEMON_ENGINE_ID, RECONCILE_TICK_INTERVAL};
 
-use mqk_runtime::native_strategy::{
-    build_daemon_plugin_registry_and_symbol, effective_binding_from_bootstrap,
-    NativeStrategyBootstrap,
-};
+use mqk_runtime::native_strategy::NativeStrategyBootstrap;
 
 impl AppState {
     pub async fn start_execution_runtime(
@@ -476,73 +473,18 @@ impl AppState {
         // The bootstrap is kept as a local binding and stored in AppState only
         // after a fully successful run start so the field is never left populated
         // by a failed start attempt.
-        let (native_strategy_bootstrap, effective_runtime_binding) = {
-            let fleet_ids = self.strategy_fleet_snapshot().await.map(|entries| {
-                entries
-                    .into_iter()
-                    .map(|e| e.strategy_id)
-                    .collect::<Vec<_>>()
-            });
-            // DAILY-DATA-READINESS-01C-ENFORCEMENT-01: capture the exact
-            // MQK_STRATEGY_SYMBOL read used to build `registry` alongside the
-            // registry itself, so the EffectiveRuntimeBinding derived below
-            // can never disagree with a second, independently-read symbol
-            // value (contract §16 / Phase B's `bootstrap_with_effective_binding`
-            // doc: "never a second, independently-guessed symbol").
-            let (registry, effective_runtime_target_symbol) =
-                build_daemon_plugin_registry_and_symbol();
-            let bootstrap = NativeStrategyBootstrap::bootstrap(fleet_ids.as_deref(), &registry);
-            if bootstrap.is_failed() {
-                return Err(RuntimeLifecycleError::forbidden(
-                    "runtime.start_refused.native_strategy_bootstrap_failed",
-                    "native_strategy_bootstrap",
-                    format!(
-                        "native strategy bootstrap failed (truth_state='{}'): {}; \
-                         ensure the strategy named in MQK_STRATEGY_IDS is registered \
-                         in the daemon plugin registry before starting; \
-                         operators must not set MQK_STRATEGY_IDS until the target \
-                         strategy engine is wired into the registry",
-                        bootstrap.truth_state(),
-                        bootstrap.failure_reason().unwrap_or("unknown"),
-                    ),
-                ));
-            }
-            // STRATEGY-DORMANCY-01: Paper+Alpaca autonomous path requires an active
-            // strategy bootstrap.
-            //
-            // For Paper+Alpaca (the canonical autonomous paper path) a Dormant bootstrap
-            // means no strategy engine will generate decisions.  The execution loop
-            // would run — consuming WS events, issuing heartbeats, ticking the
-            // orchestrator — while producing zero orders.  This is structurally
-            // indistinguishable from active execution at every operator surface and
-            // constitutes a silent no-op risk.
-            //
-            // Dormant is allowed for non-paper deployments (e.g. LiveShadow running
-            // in monitor-only mode) where the operator may legitimately operate without
-            // a strategy engine.  This block is scoped to Paper+Alpaca only.
-            //
-            // Gate ordering: fires immediately after the is_failed() check so both
-            // bootstrap failure modes (Failed and paper+alpaca Dormant) surface before
-            // any DB resources are acquired.
-            if bootstrap.is_dormant()
-                && self.deployment_mode() == DeploymentMode::Paper
-                && self.runtime_selection.broker_kind == Some(BrokerKind::Alpaca)
-            {
-                return Err(RuntimeLifecycleError::forbidden(
-                    "runtime.start_refused.strategy_bootstrap_dormant",
-                    "native_strategy_bootstrap",
-                    "paper+alpaca autonomous path requires an active strategy bootstrap; \
-                     MQK_STRATEGY_IDS is absent or empty — no strategy engine will generate \
-                     decisions; set MQK_STRATEGY_IDS to a registered strategy name \
-                     (e.g. 'swing_momentum') and ensure it is enabled in \
-                     sys_strategy_registry before starting the autonomous paper path \
-                     (STRATEGY-DORMANCY-01)",
-                ));
-            }
-            let binding =
-                effective_binding_from_bootstrap(&bootstrap, effective_runtime_target_symbol);
-            (bootstrap, binding)
-        };
+        //
+        // AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D1-TYPED-COORDINATOR-POLICY:
+        // this resolution is extracted into the shared, side-effect-free
+        // `autonomous_runtime_context::resolve_autonomous_runtime_context`
+        // seam so a future daily coordinator can resolve the identical
+        // bootstrap/binding without a second, independently-derived
+        // resolution. Gate order, fault classes, and messages are unchanged
+        // — this call site behaves identically to the former inline block.
+        let super::autonomous_runtime_context::ResolvedAutonomousRuntimeContext {
+            native_strategy_bootstrap,
+            effective_runtime_binding,
+        } = super::autonomous_runtime_context::resolve_autonomous_runtime_context(self).await?;
 
         // DAILY-DATA-READINESS-01C-ENFORCEMENT-01: strict daily data
         // readiness start gate.

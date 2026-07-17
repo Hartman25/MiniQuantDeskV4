@@ -10698,9 +10698,8 @@ Next authorized phase: Phase D — session controller, retries, recovery,
 (`AUTONOMOUS-DAILY-PAPER-OPERATIONS-01C-PREPARE-VS-DISPATCH-MODE-01`):**
 starting HEAD `1d4b2674c3660ccade37629f9520713d7cd59712` ("fix: recover
 observed autonomous bars safely", the observed-bar-recovery repair's own
-landing commit). **Commit:** PENDING (recorded here at commit time; this
-line is intentionally `PENDING` until this repair's own commit exists — no
-fabricated hash).
+landing commit). **Commit:** `62ca89b2737b3f9c758c43cbbeddce4c2b72a517`
+("fix: separate autonomous data prep from dispatch").
 
 Honest defect record for what `1d4b2674` actually left unresolved, found
 during this repair's required source review:
@@ -10871,3 +10870,176 @@ Next authorized phase: Phase D — session controller, retries, recovery,
 **Next authorized step:** Phase D — session controller, retries, recovery,
 and task supervision — only after independent review of this repair, and
 only on explicit operator instruction.
+
+---
+
+**Phase D1 — shared runtime-context resolver and typed coordinator policy
+(`AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D1-TYPED-COORDINATOR-POLICY`):**
+starting HEAD `62ca89b2737b3f9c758c43cbbeddce4c2b72a517` ("fix: separate
+autonomous data prep from dispatch", Phase C's own landing commit).
+**Commit:** PENDING (recorded here at commit time; this line is
+intentionally `PENDING` until this patch's own commit exists — no
+fabricated hash).
+
+D1 is intentionally behavior-preserving. Production session-controller
+behavior is unchanged by this patch; `session_controller.rs`,
+`attempt_auto_start`, `attempt_auto_stop`, `main.rs`, the legacy
+autonomous bar ticker, and the completed-bar task startup are all
+untouched.
+
+**D1.1 — shared runtime-context resolver
+(`state/autonomous_runtime_context.rs`, new file):** extracts the B1A
+native-strategy bootstrap / effective-binding resolution block previously
+inlined in `AppState::start_execution_runtime` (`state/lifecycle.rs`) into
+one production-safe, side-effect-free function,
+`resolve_autonomous_runtime_context(state: &AppState)`. It reuses the
+existing `mqk_runtime::native_strategy::bootstrap_with_effective_binding`
+helper — the same one-registry-construction-call seam
+`effective_binding_from_bootstrap` already depended on — so the target
+symbol is read exactly once and never independently re-derived.
+`lifecycle.rs`'s inline block was replaced with a single call to this
+resolver; the fault classes (`runtime.start_refused.native_strategy_bootstrap_failed`,
+`runtime.start_refused.strategy_bootstrap_dormant`), messages, and gate
+order are byte-for-byte unchanged. No DB access, no provider/broker call,
+no `AppState` mutation, no run creation, no wall-clock read. Proven
+identical end-to-end against the real DB-backed gate chain: all 20 cases
+in `scenario_daily_data_readiness_start_gate_01` still pass unmodified.
+
+**D1.2–D1.8 — typed coordinator policy
+(`state/autonomous_retry_policy.rs`, new file):** a closed
+`AutonomousCoordinatorReason` enum (39 named variants plus one bounded
+`UnclassifiedFailClosed { fault_class }` conservative fallback — never a
+free-text `Other(String)`), an exhaustive `AutonomousRetryClass`
+classifier (`WaitForCondition` | `RetryableTransient` |
+`ManualInterventionRequired` | `SessionTerminal`, compiler-enforced
+total match, no wildcard arm), a source-grounded
+`coordinator_reason_from_runtime_lifecycle_error` conversion that matches
+only on `RuntimeLifecycleError`'s variant and `fault_class()` by exact
+string equality (never `.to_string()`/`format!` on the error, never
+`.contains(`/`.starts_with(`/regex), typed fact adapters for
+`AlpacaWsContinuityState`, `AutonomousDailySessionPlanResolution`,
+`AutonomousCompletedBarDriverOutcome`, and
+`CreateOrRecoverAutonomousDailyOperationOutcome`, a deterministic bounded
+`AutonomousBlockerSignature` (reason + optional stable identity — no
+free-form detail, no secrets, no timestamps, no random UUID, capped at
+512 chars), and pure `retry_delay_for_attempt`/`next_retry_at` bounded
+backoff (30s / 60s / 120s / 300s-cap, one-based, zero normalized to
+attempt 1 — never zero-delay). The complete fault-class classification
+table (every `RuntimeLifecycleError::fault_class()` string reachable from
+`AppState::start_execution_runtime`, mapped or conservatively
+fail-closed) lives as module documentation in
+`autonomous_retry_policy.rs` itself, not duplicated here.
+
+Notable non-obvious findings from the source audit, documented in that
+module:
+- `runtime.start_refused.daily_data_readiness_blocked` folds many
+  distinct sub-reasons (assignment/strategy/symbol/timeframe mismatch,
+  `db_unavailable`, `query_failed`, calendar/provider/instrument
+  identity, ...) into one static `fault_class` — the specific sub-reason
+  lives only in the free-form `message` string. Per the no-string-
+  authority rule this fault class conservatively fails closed to
+  `UnclassifiedFailClosed` rather than guessed; disambiguating it
+  precisely requires a future adapter over the typed
+  `daily_data_readiness` report directly, not `RuntimeLifecycleError`.
+- The DB-configuration-vs-operational distinction required by the
+  binding contract (§15) is real and provable: `db_pool()`'s
+  `runtime.start_refused.service_unavailable` (DB not configured) maps
+  to `DatabaseNotConfiguredOrInvalid` (Manual); the three `Internal`
+  DB-lookup/insert fault labels from `create_or_reuse_run_for_start`
+  (`"start active-run lookup failed"`, `"start latest-run lookup
+  failed"`, `"start insert_run failed"`) map to
+  `TemporaryDatabaseOperationFailure` (Transient) — the only fault
+  classes reachable on this path as transient today.
+- `ColdStartUnproven` never masquerades as `WsReconnecting`: no fact in
+  the current `AlpacaWsContinuityState` enum proves an active reconnect
+  is underway, so an unproven cold start conservatively fails closed.
+  `WsReconnecting` is reserved for a future typed fact this bundle does
+  not yet emit.
+- `strategy_registry_missing`/`strategy_registry_disabled` (a DB-registry
+  check) are conservatively kept distinct from `NativeStrategyBootstrapMissing`
+  (a different fact — the in-memory bootstrap field being absent, read
+  by the completed-bar driver) rather than conflated.
+
+**No controller integration, no task wiring, no production retry
+behavior change:** `AutonomousCoordinatorReason`,
+`AutonomousRetryClass`, `blocker_signature`, and the backoff functions are
+not called from `session_controller.rs` or any task in this patch —
+proven structurally by
+`scenario_autonomous_daily_coordinator_policy_01.rs`'s negative-boundary
+tests (no `session_controller::`, `attempt_auto_start(`,
+`attempt_auto_stop(`, or `run_session_controller(` call in either new
+production file).
+
+**New test file:**
+`tests/scenario_autonomous_daily_coordinator_policy_01.rs`, 28 tests,
+DB-less and network-less. `RuntimeLifecycleError`'s constructors remain
+`pub(crate)` (not widened by this patch — out of D1's stated scope), so
+this external crate obtains one real instance via an actual production
+gate (`start_execution_runtime()` refusing at the default-disarmed
+integrity gate) rather than constructing one synthetically; the
+exhaustive fault-class/WS-distinction/signature/backoff/no-string-
+authority-guard proofs requiring direct construction of arbitrary fault
+classes live in `autonomous_retry_policy.rs`'s own crate-internal
+`#[cfg(test)] mod tests` (45 tests) instead, and are re-exercised here
+wherever the fully public API allows.
+
+**Regressions (all re-run against the reachable test DB at port 5434,
+one binary at a time):** `scenario_autonomous_daily_coordinator_policy_01`
+28/28, `scenario_native_strategy_bootstrap_daemon_b1b` 5/5,
+`scenario_daily_data_readiness_start_gate_01` 20/20,
+`scenario_autonomous_completed_bar_driver_01` 56/56,
+`scenario_autonomous_daily_operation_identity_01` 44/44,
+`scenario_autonomous_gate_parity_auton11` 5/5. `mqk-daemon`'s internal
+`--lib` unit suite for `state::autonomous_retry_policy` 45/45.
+`scenario_daemon_runtime_lifecycle --include-ignored --test-threads=1`:
+10 passed / 14 failed — confirmed via a stash-and-rerun of the same
+command against unmodified `62ca89b2` that this exact 10-pass/14-fail
+fingerprint (same failing test names, same
+`multi_symbol_config_missing_symbol` assignment-resolution error, wholly
+unrelated to B1A bootstrap/binding resolution) is pre-existing on HEAD,
+not introduced by this patch. `scenario_autonomous_daily_operation_store_01`
+not re-run (no `mqk-db` change in D1, as expected).
+
+**Guards:** `validate_autonomous_daily_paper_operations_01a_audit.ps1`
+all checks pass, `validate_daily_data_readiness_01e_closure.ps1` all
+checks pass (Phase A guard re-run clean), `check_unsafe_patterns.ps1` all
+guards pass. Migration governance not re-run (no migration change).
+`rustfmt --check` clean on all four touched/added Rust files.
+`cargo check -p mqk-runtime -p mqk-daemon` clean (only the pre-existing,
+unrelated `sqlx-postgres` future-incompat warning). Clippy: zero warnings
+attributable to either new file (one pre-existing, unrelated
+`mqk-daemon` lib warning in `routes/strategy_scans.rs`, confirmed
+present identically on unmodified HEAD). `git diff --check` clean.
+
+**Safety confirmation (D1):**
+
+```text
+PROVIDER CALLS: no (real network)
+BROKER CALLS: no
+NETWORK CALLS: no
+REAL DAEMON STARTED: no
+REAL RUNTIME STARTED: no
+SESSION CONTROLLER BEHAVIOR CHANGED: no
+COMPLETED-BAR TASK STARTED: no
+EXECUTION ARMED OUTSIDE TEST: no
+PAPER ORDERS: no
+LIVE ORDERS: no
+PAPER DB TOUCHED: no
+PRODUCTION CODE CHANGED: yes (state/lifecycle.rs: B1A block replaced by
+  one call to the new shared resolver, gate order/fault classes/messages
+  unchanged; state.rs: two new module declarations)
+ADDED FILES: state/autonomous_runtime_context.rs,
+  state/autonomous_retry_policy.rs,
+  tests/scenario_autonomous_daily_coordinator_policy_01.rs
+MIGRATION ADDED: no
+DB STORE CHANGED: no
+```
+
+```text
+D1: COMPLETE
+Phase D: OPEN
+Bundle 3 (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-COMBINED): OPEN
+Next authorized patch: Phase D2 — durable daily session-controller
+  lifecycle integration — only after independent review of D1, and only
+  on explicit operator instruction
+```
