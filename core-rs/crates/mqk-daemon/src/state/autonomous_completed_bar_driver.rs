@@ -55,6 +55,23 @@
 //! / [`AutonomousCompletedBarDriverOutcome::ObservedBarSequenceInconsistent`]
 //! as typed fail-closed truth for durable-evidence corruption that must
 //! never be silently re-polled away. Phase D integration is out of scope.
+//!
+//! AUTONOMOUS-DAILY-PAPER-OPERATIONS-01C-PREPARE-VS-DISPATCH-MODE-01 (Phase C
+//! preparation-versus-dispatch repair): `1d4b2674` closed observed-bar
+//! recovery, but the driver still accepted every nonterminal operation state
+//! (the top-level gate here only excludes terminal states and
+//! `manual_intervention_required`) all the way through to dispatch-claim
+//! creation — including every state that exists *before* runtime start, when
+//! no native-strategy bootstrap can possibly be active. This repair adds an
+//! explicit, caller-chosen [`AutonomousCompletedBarDriverMode`]:
+//! `PrepareDataOnly` performs the identical observation/poll/readiness
+//! pipeline but never creates a dispatch claim, deposits a pending strategy
+//! bar, or invokes native strategy code; `RunningDispatch` proves runtime-
+//! dispatch eligibility ([`AutonomousStrategyDispatchRuntimeTruth`], via
+//! `AppState::autonomous_strategy_dispatch_runtime_truth`) before ever
+//! calling `claim_autonomous_daily_bar_dispatch`. No Phase D controller
+//! integration, no task auto-start, and no real provider/broker/network call
+//! are introduced by this repair.
 
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
@@ -527,6 +544,142 @@ pub const REASON_OBSERVED_BAR_PROVIDER_SYMBOL_MISMATCH: &str =
     "observed_bar_provider_symbol_mismatch";
 
 // ---------------------------------------------------------------------------
+// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01C-PREPARE-VS-DISPATCH-MODE-01
+// Explicit driver mode — the coordinator must choose; never inferred.
+// ---------------------------------------------------------------------------
+
+/// Explicit driver mode for one tick. Never inferred from the wall clock,
+/// operation state, provider presence, pending-bar presence, or whether a
+/// native-strategy bootstrap happens to be present — the caller (Phase D's
+/// coordinator, or a test) must choose explicitly.
+///
+/// `PrepareDataOnly` owns binding/registry validation, readiness evaluation,
+/// provider polling, and durable bar observation only. It never creates a
+/// dispatch claim, deposits a pending strategy bar, or invokes native
+/// strategy code. `BarObserved` in this mode proves only that the exact
+/// expected bar is durably observed and ready — never that strategy dispatch
+/// occurred.
+///
+/// `RunningDispatch` may perform the same observation reconciliation, but
+/// additionally proves runtime-dispatch eligibility
+/// ([`AutonomousStrategyDispatchRuntimeTruth`]) before creating a dispatch
+/// claim or invoking native strategy code.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutonomousCompletedBarDriverMode {
+    PrepareDataOnly,
+    RunningDispatch,
+}
+
+/// REPAIR 8: `PrepareDataOnly` may operate only in these nonterminal
+/// pre-runtime operation states. It must never operate while the operation
+/// is actually `running`, winding down (`stopping`/`stop_retrying`),
+/// manually blocked, degraded, or terminal (`completed*`) — those states are
+/// either running-runtime's domain or not pollable at all. Conservative by
+/// design: only the states the binding contract names are allowed; anything
+/// else (including recovery/degraded states not named in the contract) is
+/// refused rather than assumed safe.
+fn prepare_data_only_state_eligible(state: &str) -> bool {
+    matches!(
+        state,
+        mqk_db::STATE_AWAITING_PREOPEN
+            | mqk_db::STATE_PREPARING_DATA
+            | mqk_db::STATE_AWAITING_OPEN
+            | mqk_db::STATE_PREFLIGHT_BLOCKED
+            | mqk_db::STATE_START_RETRYING
+    )
+}
+
+// ---------------------------------------------------------------------------
+// REPAIR 4 — runtime-dispatch eligibility seam
+// ---------------------------------------------------------------------------
+
+/// Read-only runtime-dispatch eligibility truth for `RunningDispatch` mode,
+/// reported by `AppState::autonomous_strategy_dispatch_runtime_truth`.
+/// Production implementations must perform no runtime start/stop, no
+/// bootstrap creation, no mutation of pending bars, no re-bootstrap, and no
+/// provider/broker call — a pure read of already-established state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutonomousStrategyDispatchRuntimeTruth {
+    Active { run_id: Uuid },
+    NoLocallyOwnedRun,
+    NativeStrategyBootstrapMissing,
+    NativeStrategyBootstrapDormant,
+    NativeStrategyBootstrapFailed,
+}
+
+/// REPAIR 5: stable reason codes for [`AutonomousCompletedBarDriverOutcome::RuntimeDispatchNotReady`].
+pub const REASON_OPERATION_NOT_RUNNING: &str = "operation_not_running";
+pub const REASON_OPERATION_RUN_ID_MISSING: &str = "operation_run_id_missing";
+pub const REASON_LOCAL_RUNTIME_NOT_ACTIVE: &str = "local_runtime_not_active";
+pub const REASON_LOCAL_RUNTIME_RUN_ID_MISMATCH: &str = "local_runtime_run_id_mismatch";
+pub const REASON_NATIVE_STRATEGY_BOOTSTRAP_MISSING: &str = "native_strategy_bootstrap_missing";
+pub const REASON_NATIVE_STRATEGY_BOOTSTRAP_DORMANT: &str = "native_strategy_bootstrap_dormant";
+pub const REASON_NATIVE_STRATEGY_BOOTSTRAP_FAILED: &str = "native_strategy_bootstrap_failed";
+
+/// REPAIR 3/4: prove every runtime-dispatch eligibility precondition before a
+/// `RunningDispatch`-mode caller may create a dispatch claim. Typed checks
+/// only — never a debug-string parse. `operation.state == running` alone
+/// already excludes every state REPAIR 8 names as disallowed for dispatch
+/// (awaiting_preopen, preparing_data, awaiting_open, preflight_blocked,
+/// start_retrying, recovery_retrying, stopping, stop_retrying,
+/// controller_degraded, evidence_degraded, calendar_unavailable,
+/// manual_intervention_required, completed*) — none of them equal
+/// `mqk_db::STATE_RUNNING`.
+async fn prove_running_dispatch_eligibility(
+    input: &AutonomousCompletedBarDriverInput<'_>,
+) -> Result<(), AutonomousCompletedBarDriverOutcome> {
+    let operation = input.operation;
+    if operation.state != mqk_db::STATE_RUNNING {
+        return Err(
+            AutonomousCompletedBarDriverOutcome::RuntimeDispatchNotReady {
+                reason_code: REASON_OPERATION_NOT_RUNNING,
+            },
+        );
+    }
+    let Some(operation_run_id) = operation.run_id else {
+        return Err(
+            AutonomousCompletedBarDriverOutcome::RuntimeDispatchNotReady {
+                reason_code: REASON_OPERATION_RUN_ID_MISSING,
+            },
+        );
+    };
+    match input
+        .state
+        .autonomous_strategy_dispatch_runtime_truth()
+        .await
+    {
+        AutonomousStrategyDispatchRuntimeTruth::Active { run_id } if run_id == operation_run_id => {
+            Ok(())
+        }
+        AutonomousStrategyDispatchRuntimeTruth::Active { .. } => Err(
+            AutonomousCompletedBarDriverOutcome::RuntimeDispatchNotReady {
+                reason_code: REASON_LOCAL_RUNTIME_RUN_ID_MISMATCH,
+            },
+        ),
+        AutonomousStrategyDispatchRuntimeTruth::NoLocallyOwnedRun => Err(
+            AutonomousCompletedBarDriverOutcome::RuntimeDispatchNotReady {
+                reason_code: REASON_LOCAL_RUNTIME_NOT_ACTIVE,
+            },
+        ),
+        AutonomousStrategyDispatchRuntimeTruth::NativeStrategyBootstrapMissing => Err(
+            AutonomousCompletedBarDriverOutcome::RuntimeDispatchNotReady {
+                reason_code: REASON_NATIVE_STRATEGY_BOOTSTRAP_MISSING,
+            },
+        ),
+        AutonomousStrategyDispatchRuntimeTruth::NativeStrategyBootstrapDormant => Err(
+            AutonomousCompletedBarDriverOutcome::RuntimeDispatchNotReady {
+                reason_code: REASON_NATIVE_STRATEGY_BOOTSTRAP_DORMANT,
+            },
+        ),
+        AutonomousStrategyDispatchRuntimeTruth::NativeStrategyBootstrapFailed => Err(
+            AutonomousCompletedBarDriverOutcome::RuntimeDispatchNotReady {
+                reason_code: REASON_NATIVE_STRATEGY_BOOTSTRAP_FAILED,
+            },
+        ),
+    }
+}
+
+// ---------------------------------------------------------------------------
 // C.14 — Driver outcome
 // ---------------------------------------------------------------------------
 
@@ -661,6 +814,15 @@ pub enum AutonomousCompletedBarDriverOutcome {
     ProviderSetupBlocked {
         rejection: AutonomousDriverSetupRejection,
     },
+    /// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01C-PREPARE-VS-DISPATCH-MODE-01
+    /// REPAIR 5: `RunningDispatch` mode could not prove runtime-dispatch
+    /// eligibility before a dispatch claim would have been created. Zero
+    /// dispatch claims, zero pending-bar deposits, zero strategy calls, zero
+    /// OMS work. Never classified as a provider failure and never counted
+    /// toward any provider-poll counter.
+    RuntimeDispatchNotReady {
+        reason_code: &'static str,
+    },
 }
 
 /// Fixed, bounded poll-retry cooldown. Phase D owns full typed
@@ -699,6 +861,9 @@ pub struct AutonomousCompletedBarDriverInput<'a> {
     /// authorize dispatch. Never a single stale snapshot reused for both
     /// decisions.
     pub readiness_evaluator: &'a dyn AutonomousAssignmentReadinessEvaluator,
+    /// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01C-PREPARE-VS-DISPATCH-MODE-01:
+    /// explicit, caller-chosen driver mode. Never defaulted, never inferred.
+    pub mode: AutonomousCompletedBarDriverMode,
 }
 
 /// Perform one autonomous completed-bar driver tick. Returns a stable typed
@@ -722,6 +887,19 @@ pub async fn tick_autonomous_completed_bar_driver(
         || input.now_utc >= operation.effective_operation_close_utc
     {
         return Ok(AutonomousCompletedBarDriverOutcome::OutsideOperationWindow);
+    }
+
+    // REPAIR 8: `PrepareDataOnly` is a pre-runtime concern only. Once the
+    // operation has left the states the binding contract names for
+    // preparation (e.g. it is actually `running`, winding down, manually
+    // blocked, or terminal), preparation-mode ticks must refuse rather than
+    // silently continue polling/observing on the coordinator's behalf.
+    if input.mode == AutonomousCompletedBarDriverMode::PrepareDataOnly
+        && !prepare_data_only_state_eligible(&operation.state)
+    {
+        return Ok(AutonomousCompletedBarDriverOutcome::NotApplicable {
+            reason_code: "operation_not_in_preparation_state",
+        });
     }
 
     let (Some(exchange_open), Some(exchange_close), Some(_early_close), Some(_prev_date)) = (
@@ -1147,7 +1325,22 @@ async fn observe_and_dispatch_if_ready(
                 );
             }
 
-            claim_and_dispatch_observed_bar(input, binding, bar_end_ts).await
+            // REPAIR 6: branch by explicit mode. `PrepareDataOnly` stops
+            // here — the exact bar is durably observed and ready, but that
+            // is not the same thing as strategy dispatch having occurred.
+            // `RunningDispatch` must additionally prove runtime-dispatch
+            // eligibility before a claim is ever created.
+            match input.mode {
+                AutonomousCompletedBarDriverMode::PrepareDataOnly => {
+                    Ok(AutonomousCompletedBarDriverOutcome::BarObserved { bar_end_ts })
+                }
+                AutonomousCompletedBarDriverMode::RunningDispatch => {
+                    if let Err(not_ready) = prove_running_dispatch_eligibility(input).await {
+                        return Ok(not_ready);
+                    }
+                    claim_and_dispatch_observed_bar(input, binding, bar_end_ts).await
+                }
+            }
         }
     }
 }

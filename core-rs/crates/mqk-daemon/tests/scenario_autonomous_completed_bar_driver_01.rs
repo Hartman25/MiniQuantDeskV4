@@ -16,9 +16,12 @@ use mqk_daemon::state::autonomous_completed_bar_driver::{
     resolve_autonomous_provider_call_authorization, resolve_single_effective_binding,
     tick_autonomous_completed_bar_driver, AutonomousAssignmentReadinessEvaluator,
     AutonomousBindingRejection, AutonomousCompletedBarDriverInput,
-    AutonomousCompletedBarDriverOutcome, AutonomousDriverSetupRejection,
-    AutonomousLatestBarProviderResolver, AutonomousProviderCallAuthorization,
-    ResolvedSingleBinding,
+    AutonomousCompletedBarDriverMode, AutonomousCompletedBarDriverOutcome,
+    AutonomousDriverSetupRejection, AutonomousLatestBarProviderResolver,
+    AutonomousProviderCallAuthorization, ResolvedSingleBinding, REASON_LOCAL_RUNTIME_NOT_ACTIVE,
+    REASON_LOCAL_RUNTIME_RUN_ID_MISMATCH, REASON_NATIVE_STRATEGY_BOOTSTRAP_DORMANT,
+    REASON_NATIVE_STRATEGY_BOOTSTRAP_FAILED, REASON_NATIVE_STRATEGY_BOOTSTRAP_MISSING,
+    REASON_OPERATION_NOT_RUNNING, REASON_OPERATION_RUN_ID_MISSING,
 };
 use mqk_daemon::state::market_data_latest_bar::LatestBarRegistryAdmissionRejection;
 use mqk_daemon::state::{self, OperatorAuthMode};
@@ -687,6 +690,7 @@ async fn admission_07_disabled_provider_zero_calls() {
         provider_id: "fake",
         provider_resolver: &resolver,
         readiness_evaluator: &FakeReadinessEvaluator::always(readiness.clone()),
+        mode: AutonomousCompletedBarDriverMode::PrepareDataOnly,
     })
     .await
     .expect("tick ok");
@@ -745,6 +749,7 @@ async fn admission_08_blank_provider_symbol_zero_calls() {
         provider_id: "fake",
         provider_resolver: &resolver,
         readiness_evaluator: &FakeReadinessEvaluator::always(readiness.clone()),
+        mode: AutonomousCompletedBarDriverMode::PrepareDataOnly,
     })
     .await
     .expect("tick ok");
@@ -950,6 +955,7 @@ async fn cadence_11_not_repeated_for_same_expected_bar_after_success() {
         provider_id: "fake",
         provider_resolver: &resolver,
         readiness_evaluator: &FakeReadinessEvaluator::always(readiness.clone()),
+        mode: AutonomousCompletedBarDriverMode::PrepareDataOnly,
     })
     .await
     .expect("tick ok");
@@ -1030,6 +1036,7 @@ async fn cadence_12_13_no_poll_before_interval_close_plus_grace() {
         provider_id: "fake",
         provider_resolver: &resolver,
         readiness_evaluator: &FakeReadinessEvaluator::always(readiness.clone()),
+        mode: AutonomousCompletedBarDriverMode::PrepareDataOnly,
     })
     .await
     .expect("tick ok");
@@ -1091,17 +1098,20 @@ async fn cadence_14_15_new_due_interval_polls_again_after_success() {
         provider_id: "fake",
         provider_resolver: &resolver,
         readiness_evaluator: &FakeReadinessEvaluator::always(readiness1.clone()),
+        mode: AutonomousCompletedBarDriverMode::PrepareDataOnly,
     })
     .await
     .expect("tick ok");
-    assert!(
-        matches!(
-            outcome1,
-            AutonomousCompletedBarDriverOutcome::AlreadyDispatched { .. }
-                | AutonomousCompletedBarDriverOutcome::DispatchClaimUnresolved { .. }
-                | AutonomousCompletedBarDriverOutcome::DispatchCompleted { .. }
-        ),
-        "expected a dispatch-path outcome for a freshly observed bar, got {outcome1:?}"
+    // AUTONOMOUS-DAILY-PAPER-OPERATIONS-01C-PREPARE-VS-DISPATCH-MODE-01:
+    // this test proves poll cadence, not dispatch-claim mechanics — it now
+    // runs in `PrepareDataOnly` mode, so a freshly observed+ready bar
+    // reports `BarObserved`, never a dispatch-path outcome (`PrepareDataOnly`
+    // never creates a claim regardless of any bootstrap/runtime state).
+    assert_eq!(
+        outcome1,
+        AutonomousCompletedBarDriverOutcome::BarObserved {
+            bar_end_ts: first_expected_ts
+        }
     );
     assert_eq!(provider.calls(), 1);
 
@@ -1127,22 +1137,21 @@ async fn cadence_14_15_new_due_interval_polls_again_after_success() {
         provider_id: "fake",
         provider_resolver: &resolver,
         readiness_evaluator: &FakeReadinessEvaluator::always(readiness_same.clone()),
+        mode: AutonomousCompletedBarDriverMode::PrepareDataOnly,
     })
     .await
     .expect("tick ok");
     // AUTONOMOUS-DAILY-PAPER-OPERATIONS-01C-OBSERVED-BAR-RECOVERY-01: the
     // exact bar is now genuinely canonical in `md_bars` (ingested by tick
     // 1), so the driver reconciles it via the local path and reaches the
-    // exact same terminal claim outcome tick 1 left behind (this test's
-    // `state` carries no strategy bootstrap, so `outcome1` above
-    // deterministically lands on `DispatchClaimUnresolved{"failed"}`, never
-    // `DispatchCompleted`) — not the old undifferentiated `PollNotDue`. The
-    // no-re-poll guarantee is proven by the unchanged `provider.calls()`
-    // count below, not by the outcome variant.
+    // same `BarObserved` outcome, idempotently — not the old
+    // undifferentiated `PollNotDue`. The no-re-poll guarantee is proven by
+    // the unchanged `provider.calls()` count below, not by the outcome
+    // variant.
     assert_eq!(
         outcome_same,
-        AutonomousCompletedBarDriverOutcome::DispatchClaimUnresolved {
-            status: mqk_db::DISPATCH_STATUS_FAILED.to_string()
+        AutonomousCompletedBarDriverOutcome::BarObserved {
+            bar_end_ts: first_expected_ts
         }
     );
     assert_eq!(
@@ -1173,13 +1182,16 @@ async fn cadence_14_15_new_due_interval_polls_again_after_success() {
         provider_id: "fake",
         provider_resolver: &resolver,
         readiness_evaluator: &FakeReadinessEvaluator::always(readiness2.clone()),
+        mode: AutonomousCompletedBarDriverMode::PrepareDataOnly,
     })
     .await
     .expect("tick ok");
-    assert!(!matches!(
+    assert_eq!(
         outcome2,
-        AutonomousCompletedBarDriverOutcome::PollNotDue
-    ));
+        AutonomousCompletedBarDriverOutcome::BarObserved {
+            bar_end_ts: second_expected_ts
+        }
+    );
     assert_eq!(provider.calls(), 2, "a new due interval must poll again");
 }
 
@@ -1230,6 +1242,7 @@ async fn cadence_16_no_poll_after_effective_operation_close() {
         provider_id: "fake",
         provider_resolver: &resolver,
         readiness_evaluator: &FakeReadinessEvaluator::always(readiness.clone()),
+        mode: AutonomousCompletedBarDriverMode::PrepareDataOnly,
     })
     .await
     .expect("tick ok");
@@ -1288,6 +1301,7 @@ async fn window_before_preopen_not_applicable() {
         provider_id: "fake",
         provider_resolver: &resolver,
         readiness_evaluator: &FakeReadinessEvaluator::always(readiness.clone()),
+        mode: AutonomousCompletedBarDriverMode::PrepareDataOnly,
     })
     .await
     .expect("tick ok");
@@ -1356,6 +1370,7 @@ async fn mapping_17_21_canonical_symbol_and_provenance_stored() {
         provider_id: "fake",
         provider_resolver: &resolver,
         readiness_evaluator: &FakeReadinessEvaluator::always(readiness.clone()),
+        mode: AutonomousCompletedBarDriverMode::PrepareDataOnly,
     })
     .await
     .expect("tick ok");
@@ -1455,6 +1470,7 @@ async fn readiness_22_30_not_ready_blocks_regardless_of_reason() {
         provider_id: "alpaca",
         provider_resolver: &resolver,
         readiness_evaluator: &FakeReadinessEvaluator::always(readiness.clone()),
+        mode: AutonomousCompletedBarDriverMode::PrepareDataOnly,
     })
     .await
     .expect("tick ok");
@@ -1526,6 +1542,7 @@ async fn readiness_29_verified_provider_may_proceed_to_poll() {
         provider_id: "twelvedata",
         provider_resolver: &resolver,
         readiness_evaluator: &FakeReadinessEvaluator::always(readiness.clone()),
+        mode: AutonomousCompletedBarDriverMode::PrepareDataOnly,
     })
     .await
     .expect("tick ok");
@@ -1673,6 +1690,7 @@ async fn observation_34_db_evidence_failure_prevents_dispatch() {
         provider_id: "fake",
         provider_resolver: &resolver,
         readiness_evaluator: &FakeReadinessEvaluator::always(readiness.clone()),
+        mode: AutonomousCompletedBarDriverMode::PrepareDataOnly,
     })
     .await
     .expect("tick ok");
@@ -1704,6 +1722,17 @@ async fn active_bootstrap_state(pool: sqlx::PgPool) -> state::AppState {
     state
 }
 
+/// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01C-PREPARE-VS-DISPATCH-MODE-01: an
+/// [`active_bootstrap_state`] that additionally owns a locally-injected
+/// running loop for `run_id` (via `AppState::inject_running_loop_for_test`),
+/// so `RunningDispatch`-mode tests can prove runtime-dispatch eligibility
+/// without starting a real execution loop, provider, or broker.
+async fn running_dispatch_eligible_state(pool: sqlx::PgPool, run_id: Uuid) -> state::AppState {
+    let state = active_bootstrap_state(pool).await;
+    state.inject_running_loop_for_test(run_id).await;
+    state
+}
+
 #[tokio::test]
 async fn dispatch_35_36_37_39_41_new_bar_dispatches_once_new_bar_dispatches_again() {
     let Some(pool) = maybe_db("dispatch_35_36_37").await else {
@@ -1720,6 +1749,9 @@ async fn dispatch_35_36_37_39_41_new_bar_dispatches_once_new_bar_dispatches_agai
         mqk_db::STATE_AWAITING_OPEN,
     )
     .await;
+    let run_id = Uuid::new_v4();
+    operation.state = mqk_db::STATE_RUNNING.to_string();
+    operation.run_id = Some(run_id);
     let instruments = vec![fixture_instrument("ZZDRVDISP", "fake", "ZZDRVDISP", "5m")];
     let assignment_config = fixture_assignment_config("ZZDRVDISP", "swing_momentum", "5m");
     let assignment_identity =
@@ -1731,7 +1763,7 @@ async fn dispatch_35_36_37_39_41_new_bar_dispatches_once_new_bar_dispatches_agai
         mqk_daemon::state::autonomous_daily_operation::derive_runtime_binding_identity(&binding);
     let provider = Arc::new(FakeQueueProvider::new());
     let resolver = FakeProviderResolver::new(provider.clone());
-    let state = active_bootstrap_state(pool.clone()).await;
+    let state = running_dispatch_eligible_state(pool.clone(), run_id).await;
 
     let ts1 = timing.effective_open.timestamp() + 300;
     provider.push_outcome("ZZDRVDISP", Ok(Some(bar("ZZDRVDISP", "5m", ts1, true))));
@@ -1752,6 +1784,7 @@ async fn dispatch_35_36_37_39_41_new_bar_dispatches_once_new_bar_dispatches_agai
         provider_id: "fake",
         provider_resolver: &resolver,
         readiness_evaluator: &FakeReadinessEvaluator::always(readiness1.clone()),
+        mode: AutonomousCompletedBarDriverMode::RunningDispatch,
     })
     .await
     .expect("tick ok");
@@ -1765,6 +1798,8 @@ async fn dispatch_35_36_37_39_41_new_bar_dispatches_once_new_bar_dispatches_agai
         .await
         .unwrap()
         .unwrap();
+    operation.state = mqk_db::STATE_RUNNING.to_string();
+    operation.run_id = Some(run_id);
     assert_eq!(operation.bars_dispatched, 1);
     assert_eq!(operation.last_dispatched_bar_ts, Some(ts1));
 
@@ -1819,6 +1854,7 @@ async fn dispatch_35_36_37_39_41_new_bar_dispatches_once_new_bar_dispatches_agai
         provider_id: "fake",
         provider_resolver: &resolver,
         readiness_evaluator: &FakeReadinessEvaluator::always(readiness2.clone()),
+        mode: AutonomousCompletedBarDriverMode::RunningDispatch,
     })
     .await
     .expect("tick ok");
@@ -1920,7 +1956,7 @@ async fn dispatch_40_42_staleness_gate_remains_active_and_failure_not_falsely_co
         return;
     };
     let timing = past_timing();
-    let operation = create_test_operation(
+    let mut operation = create_test_operation(
         &pool,
         "zzdrv-stale",
         "ZZDRVSTALE",
@@ -1930,6 +1966,9 @@ async fn dispatch_40_42_staleness_gate_remains_active_and_failure_not_falsely_co
         mqk_db::STATE_AWAITING_OPEN,
     )
     .await;
+    let run_id = Uuid::new_v4();
+    operation.state = mqk_db::STATE_RUNNING.to_string();
+    operation.run_id = Some(run_id);
     let instruments = vec![fixture_instrument("ZZDRVSTALE", "fake", "ZZDRVSTALE", "5m")];
     let assignment_config = fixture_assignment_config("ZZDRVSTALE", "swing_momentum", "5m");
     let assignment_identity =
@@ -1941,7 +1980,7 @@ async fn dispatch_40_42_staleness_gate_remains_active_and_failure_not_falsely_co
         mqk_daemon::state::autonomous_daily_operation::derive_runtime_binding_identity(&binding);
     let provider = Arc::new(FakeQueueProvider::new());
     let resolver = FakeProviderResolver::new(provider.clone());
-    let state = active_bootstrap_state(pool.clone()).await;
+    let state = running_dispatch_eligible_state(pool.clone(), run_id).await;
 
     let ts1 = timing.effective_open.timestamp() + 300;
     provider.push_outcome("ZZDRVSTALE", Ok(Some(bar("ZZDRVSTALE", "5m", ts1, true))));
@@ -1971,6 +2010,7 @@ async fn dispatch_40_42_staleness_gate_remains_active_and_failure_not_falsely_co
         provider_id: "fake",
         provider_resolver: &resolver,
         readiness_evaluator: &FakeReadinessEvaluator::always(readiness1.clone()),
+        mode: AutonomousCompletedBarDriverMode::RunningDispatch,
     })
     .await
     .expect("tick ok");
@@ -2099,6 +2139,7 @@ async fn session_45_early_close_operation_still_pollable() {
         provider_id: "fake",
         provider_resolver: &resolver,
         readiness_evaluator: &FakeReadinessEvaluator::always(readiness.clone()),
+        mode: AutonomousCompletedBarDriverMode::PrepareDataOnly,
     })
     .await
     .expect("tick ok");
@@ -2183,6 +2224,7 @@ async fn session_46_effective_override_controls_operation_timing_only() {
         provider_id: "fake",
         provider_resolver: &resolver,
         readiness_evaluator: &FakeReadinessEvaluator::always(readiness.clone()),
+        mode: AutonomousCompletedBarDriverMode::PrepareDataOnly,
     })
     .await
     .expect("tick ok");
@@ -2259,6 +2301,7 @@ async fn session_47_legacy_null_exchange_truth_blocks() {
         provider_id: "fake",
         provider_resolver: &resolver,
         readiness_evaluator: &FakeReadinessEvaluator::always(readiness.clone()),
+        mode: AutonomousCompletedBarDriverMode::PrepareDataOnly,
     })
     .await
     .expect("tick ok");
@@ -2346,6 +2389,7 @@ async fn history_49_insufficient_history_blocker_remains_a_hard_block() {
         provider_id: "fake",
         provider_resolver: &resolver,
         readiness_evaluator: &FakeReadinessEvaluator::always(readiness.clone()),
+        mode: AutonomousCompletedBarDriverMode::PrepareDataOnly,
     })
     .await
     .expect("tick ok");
@@ -2400,7 +2444,7 @@ async fn repair10_01_04_11_missing_expected_bar_pre_poll_blocked_still_polls_and
         return;
     };
     let timing = standard_timing();
-    let operation = create_test_operation(
+    let mut operation = create_test_operation(
         &pool,
         "zzdrv-r10a",
         "ZZDRVR10A",
@@ -2410,6 +2454,9 @@ async fn repair10_01_04_11_missing_expected_bar_pre_poll_blocked_still_polls_and
         mqk_db::STATE_AWAITING_OPEN,
     )
     .await;
+    let run_id = Uuid::new_v4();
+    operation.state = mqk_db::STATE_RUNNING.to_string();
+    operation.run_id = Some(run_id);
     let instruments = vec![fixture_instrument("ZZDRVR10A", "fake", "ZZDRVR10A", "5m")];
     let assignment_config = fixture_assignment_config("ZZDRVR10A", "swing_momentum", "5m");
     let assignment_identity =
@@ -2421,7 +2468,7 @@ async fn repair10_01_04_11_missing_expected_bar_pre_poll_blocked_still_polls_and
         mqk_daemon::state::autonomous_daily_operation::derive_runtime_binding_identity(&binding);
     let provider = Arc::new(FakeQueueProvider::new());
     let resolver = FakeProviderResolver::new(provider.clone());
-    let state = active_bootstrap_state(pool.clone()).await;
+    let state = running_dispatch_eligible_state(pool.clone(), run_id).await;
 
     let expected_ts = timing.effective_open.timestamp() + 300;
     provider.push_outcome(
@@ -2457,6 +2504,7 @@ async fn repair10_01_04_11_missing_expected_bar_pre_poll_blocked_still_polls_and
         provider_id: "fake",
         provider_resolver: &resolver,
         readiness_evaluator: &evaluator,
+        mode: AutonomousCompletedBarDriverMode::RunningDispatch,
     })
     .await
     .expect("tick ok");
@@ -2547,6 +2595,7 @@ async fn repair10_05_post_poll_blocked_readiness_creates_no_claim_and_no_dispatc
         provider_id: "fake",
         provider_resolver: &resolver,
         readiness_evaluator: &evaluator,
+        mode: AutonomousCompletedBarDriverMode::PrepareDataOnly,
     })
     .await
     .expect("tick ok");
@@ -2592,7 +2641,7 @@ async fn repair10_06_07_exact_bar_already_in_db_zero_provider_calls_dispatches_o
         return;
     };
     let timing = standard_timing();
-    let operation = create_test_operation(
+    let mut operation = create_test_operation(
         &pool,
         "zzdrv-r10c",
         "ZZDRVR10C",
@@ -2602,6 +2651,9 @@ async fn repair10_06_07_exact_bar_already_in_db_zero_provider_calls_dispatches_o
         mqk_db::STATE_AWAITING_OPEN,
     )
     .await;
+    let run_id = Uuid::new_v4();
+    operation.state = mqk_db::STATE_RUNNING.to_string();
+    operation.run_id = Some(run_id);
     let instruments = vec![fixture_instrument("ZZDRVR10C", "fake", "ZZDRVR10C", "5m")];
     let assignment_config = fixture_assignment_config("ZZDRVR10C", "swing_momentum", "5m");
     let assignment_identity =
@@ -2613,7 +2665,7 @@ async fn repair10_06_07_exact_bar_already_in_db_zero_provider_calls_dispatches_o
         mqk_daemon::state::autonomous_daily_operation::derive_runtime_binding_identity(&binding);
     let provider = Arc::new(FakeQueueProvider::new()); // no outcome ever queued -> zero calls expected
     let resolver = FakeProviderResolver::new(provider.clone());
-    let state = active_bootstrap_state(pool.clone()).await;
+    let state = running_dispatch_eligible_state(pool.clone(), run_id).await;
 
     let expected_ts = timing.effective_open.timestamp() + 300;
 
@@ -2669,6 +2721,7 @@ async fn repair10_06_07_exact_bar_already_in_db_zero_provider_calls_dispatches_o
         provider_id: "fake",
         provider_resolver: &resolver,
         readiness_evaluator: &evaluator,
+        mode: AutonomousCompletedBarDriverMode::RunningDispatch,
     })
     .await
     .expect("tick ok");
@@ -2753,6 +2806,7 @@ async fn repair10_08_09_older_provider_bar_not_observed_not_dispatched() {
         provider_id: "fake",
         provider_resolver: &resolver,
         readiness_evaluator: &evaluator,
+        mode: AutonomousCompletedBarDriverMode::PrepareDataOnly,
     })
     .await
     .expect("tick ok");
@@ -2870,6 +2924,7 @@ async fn repair10_10_newer_than_expected_provider_bar_rejected() {
         provider_id: "fake",
         provider_resolver: &resolver,
         readiness_evaluator: &evaluator,
+        mode: AutonomousCompletedBarDriverMode::PrepareDataOnly,
     })
     .await
     .expect("tick ok");
@@ -2960,6 +3015,7 @@ async fn repair10_12_non_remediable_blocker_with_known_expected_ts_zero_calls() 
         provider_id: "fake",
         provider_resolver: &resolver,
         readiness_evaluator: &evaluator,
+        mode: AutonomousCompletedBarDriverMode::PrepareDataOnly,
     })
     .await
     .expect("tick ok");
@@ -3028,6 +3084,7 @@ async fn repair10_13_provider_mismatch_zero_calls() {
         provider_id: "fake",
         provider_resolver: &resolver,
         readiness_evaluator: &evaluator,
+        mode: AutonomousCompletedBarDriverMode::PrepareDataOnly,
     })
     .await
     .expect("tick ok");
@@ -3056,7 +3113,7 @@ async fn repair10_15_twelvedata_1d_capability_reaches_poll_seam_and_dispatches()
     );
 
     let timing = standard_timing();
-    let operation = create_test_operation(
+    let mut operation = create_test_operation(
         &pool,
         "zzdrv-r10h",
         "ZZDRVR10H",
@@ -3066,6 +3123,9 @@ async fn repair10_15_twelvedata_1d_capability_reaches_poll_seam_and_dispatches()
         mqk_db::STATE_AWAITING_OPEN,
     )
     .await;
+    let run_id = Uuid::new_v4();
+    operation.state = mqk_db::STATE_RUNNING.to_string();
+    operation.run_id = Some(run_id);
     let instruments = vec![fixture_instrument(
         "ZZDRVR10H",
         "twelvedata",
@@ -3107,7 +3167,7 @@ async fn repair10_15_twelvedata_1d_capability_reaches_poll_seam_and_dispatches()
     );
     let readiness = ready_readiness("ZZDRVR10H", "1D", Some(expected_ts));
     let evaluator = FakeReadinessEvaluator::always(readiness);
-    let state = active_bootstrap_state(pool.clone()).await;
+    let state = running_dispatch_eligible_state(pool.clone(), run_id).await;
 
     let outcome = tick_autonomous_completed_bar_driver(AutonomousCompletedBarDriverInput {
         state: &state,
@@ -3123,6 +3183,7 @@ async fn repair10_15_twelvedata_1d_capability_reaches_poll_seam_and_dispatches()
         provider_id: "twelvedata",
         provider_resolver: &resolver,
         readiness_evaluator: &evaluator,
+        mode: AutonomousCompletedBarDriverMode::RunningDispatch,
     })
     .await
     .expect("tick ok");
@@ -3168,6 +3229,9 @@ async fn repair10_17_restart_does_not_redispatch_completed_exact_bar() {
         mqk_db::STATE_AWAITING_OPEN,
     )
     .await;
+    let run_id = Uuid::new_v4();
+    operation.state = mqk_db::STATE_RUNNING.to_string();
+    operation.run_id = Some(run_id);
     let instruments = vec![fixture_instrument("ZZDRVR10I", "fake", "ZZDRVR10I", "5m")];
     let assignment_config = fixture_assignment_config("ZZDRVR10I", "swing_momentum", "5m");
     let assignment_identity =
@@ -3189,7 +3253,7 @@ async fn repair10_17_restart_does_not_redispatch_completed_exact_bar() {
         );
         let readiness = ready_readiness("ZZDRVR10I", "5m", Some(expected_ts));
         let evaluator = FakeReadinessEvaluator::always(readiness);
-        let state = active_bootstrap_state(pool.clone()).await;
+        let state = running_dispatch_eligible_state(pool.clone(), run_id).await;
 
         let outcome = tick_autonomous_completed_bar_driver(AutonomousCompletedBarDriverInput {
             state: &state,
@@ -3205,6 +3269,7 @@ async fn repair10_17_restart_does_not_redispatch_completed_exact_bar() {
             provider_id: "fake",
             provider_resolver: &resolver,
             readiness_evaluator: &evaluator,
+            mode: AutonomousCompletedBarDriverMode::RunningDispatch,
         })
         .await
         .expect("tick ok");
@@ -3216,18 +3281,23 @@ async fn repair10_17_restart_does_not_redispatch_completed_exact_bar() {
         );
     }
 
-    // "Restart": brand-new AppState and evaluator, same durable row.
+    // "Restart": brand-new AppState and evaluator, same durable row. A real
+    // restart re-establishes local ownership of the same durable `run_id`
+    // (never a fresh one) — simulated here via a second
+    // `running_dispatch_eligible_state` call with the identical `run_id`.
     operation = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation.operation_id)
         .await
         .unwrap()
         .unwrap();
+    operation.state = mqk_db::STATE_RUNNING.to_string();
+    operation.run_id = Some(run_id);
     assert_eq!(operation.last_completed_bar_ts, Some(expected_ts));
 
     let provider2 = Arc::new(FakeQueueProvider::new());
     let resolver2 = FakeProviderResolver::new(provider2.clone());
     let readiness2 = ready_readiness("ZZDRVR10I", "5m", Some(expected_ts));
     let evaluator2 = FakeReadinessEvaluator::always(readiness2);
-    let state2 = active_bootstrap_state(pool.clone()).await;
+    let state2 = running_dispatch_eligible_state(pool.clone(), run_id).await;
 
     let outcome2 = tick_autonomous_completed_bar_driver(AutonomousCompletedBarDriverInput {
         state: &state2,
@@ -3243,6 +3313,7 @@ async fn repair10_17_restart_does_not_redispatch_completed_exact_bar() {
         provider_id: "fake",
         provider_resolver: &resolver2,
         readiness_evaluator: &evaluator2,
+        mode: AutonomousCompletedBarDriverMode::RunningDispatch,
     })
     .await
     .expect("tick ok");
@@ -3388,10 +3459,14 @@ async fn recovery_01_10_crash_before_claim_restarts_cleanly() {
 
     // "Restart": a new AppState, a new evaluator, and a freshly re-fetched
     // operation row (point 3).
-    let operation = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation.operation_id)
-        .await
-        .unwrap()
-        .unwrap();
+    let mut operation =
+        mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation.operation_id)
+            .await
+            .unwrap()
+            .unwrap();
+    let run_id = Uuid::new_v4();
+    operation.state = mqk_db::STATE_RUNNING.to_string();
+    operation.run_id = Some(run_id);
     assert_eq!(operation.last_completed_bar_ts, Some(expected_ts));
     assert_eq!(operation.bars_observed, 1);
 
@@ -3399,7 +3474,7 @@ async fn recovery_01_10_crash_before_claim_restarts_cleanly() {
     let resolver = FakeProviderResolver::new(provider.clone());
     let readiness = ready_readiness("ZZDRVREC01", "5m", Some(expected_ts));
     let evaluator = FakeReadinessEvaluator::queue(vec![readiness.clone(), readiness]);
-    let state = active_bootstrap_state(pool.clone()).await;
+    let state = running_dispatch_eligible_state(pool.clone(), run_id).await;
 
     let outcome = tick_autonomous_completed_bar_driver(AutonomousCompletedBarDriverInput {
         state: &state,
@@ -3415,6 +3490,7 @@ async fn recovery_01_10_crash_before_claim_restarts_cleanly() {
         provider_id: "fake",
         provider_resolver: &resolver,
         readiness_evaluator: &evaluator,
+        mode: AutonomousCompletedBarDriverMode::RunningDispatch,
     })
     .await
     .expect("tick ok");
@@ -3480,7 +3556,7 @@ async fn recovery_11_17_readiness_blocked_then_ready_dispatches_on_second_tick()
         return;
     };
     let timing = standard_timing();
-    let operation = create_test_operation(
+    let mut operation = create_test_operation(
         &pool,
         "zzdrv-rec02",
         "ZZDRVREC02",
@@ -3490,6 +3566,9 @@ async fn recovery_11_17_readiness_blocked_then_ready_dispatches_on_second_tick()
         mqk_db::STATE_AWAITING_OPEN,
     )
     .await;
+    let run_id = Uuid::new_v4();
+    operation.state = mqk_db::STATE_RUNNING.to_string();
+    operation.run_id = Some(run_id);
     let instruments = vec![fixture_instrument("ZZDRVREC02", "fake", "ZZDRVREC02", "5m")];
     let assignment_config = fixture_assignment_config("ZZDRVREC02", "swing_momentum", "5m");
     let assignment_identity =
@@ -3499,7 +3578,7 @@ async fn recovery_11_17_readiness_blocked_then_ready_dispatches_on_second_tick()
     let binding = fixture_binding("ZZDRVREC02", "swing_momentum", 300);
     let runtime_binding_identity =
         mqk_daemon::state::autonomous_daily_operation::derive_runtime_binding_identity(&binding);
-    let state = active_bootstrap_state(pool.clone()).await;
+    let state = running_dispatch_eligible_state(pool.clone(), run_id).await;
     let expected_ts = timing.effective_open.timestamp() + 300;
 
     // Point 11: tick 1 finds/ingests the exact bar via an authorized poll.
@@ -3534,6 +3613,7 @@ async fn recovery_11_17_readiness_blocked_then_ready_dispatches_on_second_tick()
         provider_id: "fake",
         provider_resolver: &resolver1,
         readiness_evaluator: &evaluator1,
+        mode: AutonomousCompletedBarDriverMode::RunningDispatch,
     })
     .await
     .expect("tick ok");
@@ -3557,10 +3637,13 @@ async fn recovery_11_17_readiness_blocked_then_ready_dispatches_on_second_tick()
     .unwrap();
     assert!(claim_after_tick1.is_none());
 
-    let operation = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation.operation_id)
-        .await
-        .unwrap()
-        .unwrap();
+    let mut operation =
+        mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation.operation_id)
+            .await
+            .unwrap()
+            .unwrap();
+    operation.state = mqk_db::STATE_RUNNING.to_string();
+    operation.run_id = Some(run_id);
     assert_eq!(
         operation.bars_observed, 1,
         "the bar itself was genuinely observed"
@@ -3590,6 +3673,7 @@ async fn recovery_11_17_readiness_blocked_then_ready_dispatches_on_second_tick()
         provider_id: "fake",
         provider_resolver: &resolver2,
         readiness_evaluator: &evaluator2,
+        mode: AutonomousCompletedBarDriverMode::RunningDispatch,
     })
     .await
     .expect("tick ok");
@@ -3683,17 +3767,21 @@ async fn claim_18_21_completed_claim_returns_already_dispatched_zero_calls() {
     .await
     .unwrap();
 
-    let operation = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation.operation_id)
-        .await
-        .unwrap()
-        .unwrap();
+    let mut operation =
+        mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation.operation_id)
+            .await
+            .unwrap()
+            .unwrap();
+    let run_id = Uuid::new_v4();
+    operation.state = mqk_db::STATE_RUNNING.to_string();
+    operation.run_id = Some(run_id);
     assert_eq!(operation.bars_dispatched, 1);
 
     let provider = Arc::new(FakeQueueProvider::new());
     let resolver = FakeProviderResolver::new(provider.clone());
     let readiness = ready_readiness("ZZDRVCLM18", "5m", Some(expected_ts));
     let evaluator = FakeReadinessEvaluator::queue(vec![readiness.clone(), readiness]);
-    let state = active_bootstrap_state(pool.clone()).await;
+    let state = running_dispatch_eligible_state(pool.clone(), run_id).await;
 
     let outcome = tick_autonomous_completed_bar_driver(AutonomousCompletedBarDriverInput {
         state: &state,
@@ -3709,6 +3797,7 @@ async fn claim_18_21_completed_claim_returns_already_dispatched_zero_calls() {
         provider_id: "fake",
         provider_resolver: &resolver,
         readiness_evaluator: &evaluator,
+        mode: AutonomousCompletedBarDriverMode::RunningDispatch,
     })
     .await
     .expect("tick ok");
@@ -3754,6 +3843,7 @@ async fn claim_22_24_unresolved_claim_never_auto_redispatched() {
         mqk_db::STATE_AWAITING_OPEN,
     )
     .await;
+    let run_id = Uuid::new_v4();
     let instruments = vec![fixture_instrument("ZZDRVCLM22", "fake", "ZZDRVCLM22", "5m")];
     let assignment_config = fixture_assignment_config("ZZDRVCLM22", "swing_momentum", "5m");
     let assignment_identity =
@@ -3763,7 +3853,7 @@ async fn claim_22_24_unresolved_claim_never_auto_redispatched() {
     let binding = fixture_binding("ZZDRVCLM22", "swing_momentum", 300);
     let runtime_binding_identity =
         mqk_daemon::state::autonomous_daily_operation::derive_runtime_binding_identity(&binding);
-    let state = active_bootstrap_state(pool.clone()).await;
+    let state = running_dispatch_eligible_state(pool.clone(), run_id).await;
     let expected_ts_a = timing.effective_open.timestamp() + 300;
 
     // A prior process claimed but never completed or failed the identity —
@@ -3798,10 +3888,13 @@ async fn claim_22_24_unresolved_claim_never_auto_redispatched() {
     .unwrap();
     assert!(matches!(claim1, mqk_db::BarDispatchClaimOutcome::Claimed));
 
-    let operation_a = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation.operation_id)
-        .await
-        .unwrap()
-        .unwrap();
+    let mut operation_a =
+        mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation.operation_id)
+            .await
+            .unwrap()
+            .unwrap();
+    operation_a.state = mqk_db::STATE_RUNNING.to_string();
+    operation_a.run_id = Some(run_id);
     let provider_a = Arc::new(FakeQueueProvider::new());
     let resolver_a = FakeProviderResolver::new(provider_a.clone());
     let readiness_a = ready_readiness("ZZDRVCLM22", "5m", Some(expected_ts_a));
@@ -3821,6 +3914,7 @@ async fn claim_22_24_unresolved_claim_never_auto_redispatched() {
         provider_id: "fake",
         provider_resolver: &resolver_a,
         readiness_evaluator: &evaluator_a,
+        mode: AutonomousCompletedBarDriverMode::RunningDispatch,
     })
     .await
     .expect("tick ok");
@@ -3880,10 +3974,13 @@ async fn claim_22_24_unresolved_claim_never_auto_redispatched() {
     .unwrap();
     assert!(failed);
 
-    let operation_b = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation.operation_id)
-        .await
-        .unwrap()
-        .unwrap();
+    let mut operation_b =
+        mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation.operation_id)
+            .await
+            .unwrap()
+            .unwrap();
+    operation_b.state = mqk_db::STATE_RUNNING.to_string();
+    operation_b.run_id = Some(run_id);
     let provider_b = Arc::new(FakeQueueProvider::new());
     let resolver_b = FakeProviderResolver::new(provider_b.clone());
     let readiness_b = ready_readiness("ZZDRVCLM22", "5m", Some(expected_ts_b));
@@ -3903,6 +4000,7 @@ async fn claim_22_24_unresolved_claim_never_auto_redispatched() {
         provider_id: "fake",
         provider_resolver: &resolver_b,
         readiness_evaluator: &evaluator_b,
+        mode: AutonomousCompletedBarDriverMode::RunningDispatch,
     })
     .await
     .expect("tick ok");
@@ -3945,7 +4043,7 @@ async fn authz_25_28_local_bar_present_ignores_authorization_disabled_and_invali
         ),
     ];
     for (adapter_suffix, symbol, authorization) in cases {
-        let operation = create_test_operation(
+        let mut operation = create_test_operation(
             &pool,
             &format!("zzdrv-auth25-{adapter_suffix}"),
             symbol,
@@ -3955,6 +4053,9 @@ async fn authz_25_28_local_bar_present_ignores_authorization_disabled_and_invali
             mqk_db::STATE_AWAITING_OPEN,
         )
         .await;
+        let run_id = Uuid::new_v4();
+        operation.state = mqk_db::STATE_RUNNING.to_string();
+        operation.run_id = Some(run_id);
         let instruments = vec![fixture_instrument(symbol, "fake", symbol, "5m")];
         let assignment_config = fixture_assignment_config(symbol, "swing_momentum", "5m");
         let assignment_identity =
@@ -3973,7 +4074,7 @@ async fn authz_25_28_local_bar_present_ignores_authorization_disabled_and_invali
         let resolver = FakeProviderResolver::new(provider.clone());
         let readiness = ready_readiness(symbol, "5m", Some(expected_ts));
         let evaluator = FakeReadinessEvaluator::queue(vec![readiness.clone(), readiness]);
-        let state = active_bootstrap_state(pool.clone()).await;
+        let state = running_dispatch_eligible_state(pool.clone(), run_id).await;
 
         let outcome = tick_autonomous_completed_bar_driver(AutonomousCompletedBarDriverInput {
             state: &state,
@@ -3989,6 +4090,7 @@ async fn authz_25_28_local_bar_present_ignores_authorization_disabled_and_invali
             provider_id: "fake",
             provider_resolver: &resolver,
             readiness_evaluator: &evaluator,
+            mode: AutonomousCompletedBarDriverMode::RunningDispatch,
         })
         .await
         .expect("tick ok");
@@ -4087,6 +4189,7 @@ async fn authz_29_31_missing_bar_absent_authorization_blocks_zero_resolver_calls
             provider_id: "fake",
             provider_resolver: &resolver,
             readiness_evaluator: &evaluator,
+            mode: AutonomousCompletedBarDriverMode::PrepareDataOnly,
         })
         .await
         .expect("tick ok");
@@ -4119,7 +4222,7 @@ async fn authz_32_authorized_missing_bar_resolves_provider_exactly_once() {
         return;
     };
     let timing = standard_timing();
-    let operation = create_test_operation(
+    let mut operation = create_test_operation(
         &pool,
         "zzdrv-auth32",
         "ZZDRVAUTH32",
@@ -4129,6 +4232,9 @@ async fn authz_32_authorized_missing_bar_resolves_provider_exactly_once() {
         mqk_db::STATE_AWAITING_OPEN,
     )
     .await;
+    let run_id = Uuid::new_v4();
+    operation.state = mqk_db::STATE_RUNNING.to_string();
+    operation.run_id = Some(run_id);
     let instruments = vec![fixture_instrument(
         "ZZDRVAUTH32",
         "fake",
@@ -4153,7 +4259,7 @@ async fn authz_32_authorized_missing_bar_resolves_provider_exactly_once() {
     let resolver = FakeProviderResolver::new(provider.clone());
     let readiness = ready_readiness("ZZDRVAUTH32", "5m", Some(expected_ts));
     let evaluator = FakeReadinessEvaluator::queue(vec![readiness.clone(), readiness]);
-    let state = active_bootstrap_state(pool.clone()).await;
+    let state = running_dispatch_eligible_state(pool.clone(), run_id).await;
 
     let outcome = tick_autonomous_completed_bar_driver(AutonomousCompletedBarDriverInput {
         state: &state,
@@ -4169,6 +4275,7 @@ async fn authz_32_authorized_missing_bar_resolves_provider_exactly_once() {
         provider_id: "fake",
         provider_resolver: &resolver,
         readiness_evaluator: &evaluator,
+        mode: AutonomousCompletedBarDriverMode::RunningDispatch,
     })
     .await
     .expect("tick ok");
@@ -4259,6 +4366,7 @@ async fn evidence_33_missing_row_returns_typed_inconsistency_zero_calls() {
         provider_id: "fake",
         provider_resolver: &resolver,
         readiness_evaluator: &evaluator,
+        mode: AutonomousCompletedBarDriverMode::PrepareDataOnly,
     })
     .await
     .expect("tick ok");
@@ -4363,6 +4471,7 @@ async fn evidence_34_provider_mismatch_returns_typed_inconsistency() {
         provider_id: "fake",
         provider_resolver: &resolver,
         readiness_evaluator: &evaluator,
+        mode: AutonomousCompletedBarDriverMode::PrepareDataOnly,
     })
     .await
     .expect("tick ok");
@@ -4456,6 +4565,7 @@ async fn evidence_35_provider_symbol_mismatch_returns_typed_inconsistency() {
         provider_id: "fake",
         provider_resolver: &resolver,
         readiness_evaluator: &evaluator,
+        mode: AutonomousCompletedBarDriverMode::PrepareDataOnly,
     })
     .await
     .expect("tick ok");
@@ -4537,6 +4647,7 @@ async fn resolver_failure_provider_setup_blocked_zero_poll_attempt_increment() {
         provider_id: "fake",
         provider_resolver: &resolver,
         readiness_evaluator: &evaluator,
+        mode: AutonomousCompletedBarDriverMode::PrepareDataOnly,
     })
     .await
     .expect("tick ok");
@@ -4561,4 +4672,1078 @@ async fn resolver_failure_provider_setup_blocked_zero_poll_attempt_increment() {
         "a resolver failure must never increment the provider-poll attempt counter — \
          no provider request occurred"
     );
+}
+
+// ---------------------------------------------------------------------------
+// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01C-PREPARE-VS-DISPATCH-MODE-01
+// Preparation-versus-dispatch mode separation proofs.
+// ---------------------------------------------------------------------------
+
+/// Preparation-mode points 1-11: a missing exact bar is polled, ingested, and
+/// observed by `PrepareDataOnly` with no active runtime and no native
+/// strategy bootstrap at all — proving preparation never depends on either.
+/// Zero dispatch claims, zero pending strategy bar deposits, and
+/// `bars_dispatched` stays zero throughout.
+#[tokio::test]
+async fn prepare_only_01_11_missing_bar_observed_no_claim_no_bootstrap_needed() {
+    let Some(pool) = maybe_db("prepare_only_01_11").await else {
+        return;
+    };
+    let timing = standard_timing();
+    let operation = create_test_operation(
+        &pool,
+        "zzdrv-prep01",
+        "ZZDRVPREP01",
+        "swing_momentum",
+        "5m",
+        &timing,
+        mqk_db::STATE_PREPARING_DATA,
+    )
+    .await;
+    let instruments = vec![fixture_instrument(
+        "ZZDRVPREP01",
+        "fake",
+        "ZZDRVPREP01",
+        "5m",
+    )];
+    let assignment_config = fixture_assignment_config("ZZDRVPREP01", "swing_momentum", "5m");
+    let assignment_identity =
+        mqk_daemon::state::autonomous_daily_operation::derive_assignment_identity(
+            &assignment_config,
+        );
+    let binding = fixture_binding("ZZDRVPREP01", "swing_momentum", 300);
+    let runtime_binding_identity =
+        mqk_daemon::state::autonomous_daily_operation::derive_runtime_binding_identity(&binding);
+    let expected_ts = timing.effective_open.timestamp() + 300;
+
+    let provider = Arc::new(FakeQueueProvider::new());
+    provider.push_outcome(
+        "ZZDRVPREP01",
+        Ok(Some(bar("ZZDRVPREP01", "5m", expected_ts, true))),
+    );
+    let resolver = FakeProviderResolver::new(provider.clone());
+    let readiness = ready_readiness("ZZDRVPREP01", "5m", Some(expected_ts));
+    let evaluator = FakeReadinessEvaluator::queue(vec![readiness.clone(), readiness]);
+    // Point 10/11: no active runtime, no native-strategy bootstrap — plain
+    // `AppState` with a DB pool and nothing else.
+    let state = state::AppState::new_with_db_and_operator_auth(
+        pool.clone(),
+        OperatorAuthMode::ExplicitDevNoToken,
+    );
+
+    let outcome = tick_autonomous_completed_bar_driver(AutonomousCompletedBarDriverInput {
+        state: &state,
+        pool: &pool,
+        operation: &operation,
+        assignment_config: &assignment_config,
+        assignment_identity: &assignment_identity,
+        runtime_binding: &binding,
+        runtime_binding_identity: &runtime_binding_identity,
+        now_utc: timing.effective_open + chrono::Duration::minutes(6),
+        authorization: AutonomousProviderCallAuthorization::Authorized,
+        instruments: &instruments,
+        provider_id: "fake",
+        provider_resolver: &resolver,
+        readiness_evaluator: &evaluator,
+        mode: AutonomousCompletedBarDriverMode::PrepareDataOnly,
+    })
+    .await
+    .expect("tick ok");
+
+    // Points 1-5: poll once, ingest, observe, readiness ready, BarObserved.
+    assert_eq!(
+        outcome,
+        AutonomousCompletedBarDriverOutcome::BarObserved {
+            bar_end_ts: expected_ts
+        }
+    );
+    assert_eq!(provider.calls(), 1, "point 1: exactly one authorized poll");
+
+    // Points 6-9: no dispatch row, no pending strategy bar, no strategy
+    // callback (the fixture provider/host never records a callback; absence
+    // of a claim row is the durable proof).
+    let claim = mqk_db::fetch_autonomous_daily_bar_dispatch(
+        &pool,
+        operation.operation_id,
+        "ZZDRVPREP01",
+        "5m",
+        expected_ts,
+    )
+    .await
+    .unwrap();
+    assert!(claim.is_none(), "point 6: no dispatch claim exists");
+    assert!(
+        state.pending_strategy_bar_input_is_none_for_test().await,
+        "point 8: no pending strategy bar was deposited"
+    );
+
+    let refreshed = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation.operation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(refreshed.bars_observed, 1, "point 3: observed exactly once");
+    assert_eq!(
+        refreshed.bars_dispatched, 0,
+        "point 7: bars_dispatched remains zero"
+    );
+}
+
+/// Preparation-mode points 12-16: the exact expected bar already canonical in
+/// `md_bars` is reconciled by `PrepareDataOnly` idempotently, with zero
+/// provider resolutions, and authorization state (disabled/invalid) never
+/// blocks this local path — mirroring [`authz_25_28_local_bar_present_ignores_authorization_disabled_and_invalid`]
+/// but asserting the preparation-mode outcome (`BarObserved`, never a
+/// dispatch claim) instead of a dispatch-path outcome.
+#[tokio::test]
+async fn prepare_only_12_16_exact_local_bar_zero_provider_authorization_irrelevant() {
+    let Some(pool) = maybe_db("prepare_only_12_16").await else {
+        return;
+    };
+    let timing = standard_timing();
+    let cases: Vec<(&str, &str, AutonomousProviderCallAuthorization)> = vec![
+        (
+            "dis",
+            "ZZDRVPREPDIS",
+            AutonomousProviderCallAuthorization::Disabled,
+        ),
+        (
+            "inv",
+            "ZZDRVPREPINV",
+            AutonomousProviderCallAuthorization::Invalid {
+                reason_code: "test_invalid",
+                detail: "test".to_string(),
+            },
+        ),
+    ];
+    for (adapter_suffix, symbol, authorization) in cases {
+        let operation = create_test_operation(
+            &pool,
+            &format!("zzdrv-prep12-{adapter_suffix}"),
+            symbol,
+            "swing_momentum",
+            "5m",
+            &timing,
+            mqk_db::STATE_AWAITING_OPEN,
+        )
+        .await;
+        let instruments = vec![fixture_instrument(symbol, "fake", symbol, "5m")];
+        let assignment_config = fixture_assignment_config(symbol, "swing_momentum", "5m");
+        let assignment_identity =
+            mqk_daemon::state::autonomous_daily_operation::derive_assignment_identity(
+                &assignment_config,
+            );
+        let binding = fixture_binding(symbol, "swing_momentum", 300);
+        let runtime_binding_identity =
+            mqk_daemon::state::autonomous_daily_operation::derive_runtime_binding_identity(
+                &binding,
+            );
+        let expected_ts = timing.effective_open.timestamp() + 300;
+        seed_exact_bar(&pool, symbol, "5m", expected_ts, "fake", symbol).await;
+
+        let provider = Arc::new(FakeQueueProvider::new());
+        let resolver = FakeProviderResolver::new(provider.clone());
+        let readiness = ready_readiness(symbol, "5m", Some(expected_ts));
+        // Called twice: the driver ticks twice below to prove idempotency
+        // (point 13), so the evaluator must supply pre-poll/post-poll pairs
+        // for both ticks.
+        let evaluator = FakeReadinessEvaluator::queue(vec![
+            readiness.clone(),
+            readiness.clone(),
+            readiness.clone(),
+            readiness,
+        ]);
+        let state = state::AppState::new_with_db_and_operator_auth(
+            pool.clone(),
+            OperatorAuthMode::ExplicitDevNoToken,
+        );
+
+        let outcome1 = tick_autonomous_completed_bar_driver(AutonomousCompletedBarDriverInput {
+            state: &state,
+            pool: &pool,
+            operation: &operation,
+            assignment_config: &assignment_config,
+            assignment_identity: &assignment_identity,
+            runtime_binding: &binding,
+            runtime_binding_identity: &runtime_binding_identity,
+            now_utc: timing.effective_open + chrono::Duration::minutes(6),
+            authorization: authorization.clone(),
+            instruments: &instruments,
+            provider_id: "fake",
+            provider_resolver: &resolver,
+            readiness_evaluator: &evaluator,
+            mode: AutonomousCompletedBarDriverMode::PrepareDataOnly,
+        })
+        .await
+        .expect("tick ok");
+
+        // Points 12, 15, 16: local exact-bar path reconciles regardless of
+        // authorization disabled/invalid.
+        assert_eq!(
+            outcome1,
+            AutonomousCompletedBarDriverOutcome::BarObserved {
+                bar_end_ts: expected_ts
+            },
+            "local exact-bar preparation must succeed regardless of authorization state ({adapter_suffix})"
+        );
+        assert_eq!(
+            provider.calls(),
+            0,
+            "zero provider calls ({adapter_suffix})"
+        );
+        assert_eq!(
+            resolver.resolve_calls(),
+            0,
+            "zero provider construction/credential reads ({adapter_suffix})"
+        );
+
+        // Point 13: idempotent on a second tick — zero additional provider
+        // resolutions, same outcome.
+        let operation2 =
+            mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation.operation_id)
+                .await
+                .unwrap()
+                .unwrap();
+        let outcome2 = tick_autonomous_completed_bar_driver(AutonomousCompletedBarDriverInput {
+            state: &state,
+            pool: &pool,
+            operation: &operation2,
+            assignment_config: &assignment_config,
+            assignment_identity: &assignment_identity,
+            runtime_binding: &binding,
+            runtime_binding_identity: &runtime_binding_identity,
+            now_utc: timing.effective_open
+                + chrono::Duration::minutes(6)
+                + chrono::Duration::seconds(5),
+            authorization,
+            instruments: &instruments,
+            provider_id: "fake",
+            provider_resolver: &resolver,
+            readiness_evaluator: &evaluator,
+            mode: AutonomousCompletedBarDriverMode::PrepareDataOnly,
+        })
+        .await
+        .expect("tick ok");
+        assert_eq!(
+            outcome2,
+            AutonomousCompletedBarDriverOutcome::BarObserved {
+                bar_end_ts: expected_ts
+            },
+            "point 13: idempotent re-observation ({adapter_suffix})"
+        );
+        assert_eq!(resolver.resolve_calls(), 0);
+
+        // No dispatch claim was ever created by preparation mode.
+        let claim = mqk_db::fetch_autonomous_daily_bar_dispatch(
+            &pool,
+            operation.operation_id,
+            symbol,
+            "5m",
+            expected_ts,
+        )
+        .await
+        .unwrap();
+        assert!(
+            claim.is_none(),
+            "preparation mode must never create a dispatch claim ({adapter_suffix})"
+        );
+    }
+}
+
+/// Running-dispatch eligibility points 17-25: every one of the six typed
+/// eligibility preconditions blocks claim creation independently, before
+/// `claim_autonomous_daily_bar_dispatch` is ever called. Every case leaves
+/// zero dispatch claims and zero pending strategy bar deposits.
+#[tokio::test]
+async fn running_dispatch_eligibility_17_25_blocks_before_claim() {
+    let Some(pool) = maybe_db("running_dispatch_eligibility_17_25").await else {
+        return;
+    };
+    let timing = standard_timing();
+
+    #[allow(clippy::too_many_arguments)]
+    async fn assert_blocked(
+        pool: &sqlx::PgPool,
+        state: &state::AppState,
+        operation: &mqk_db::AutonomousDailyOperationRecord,
+        assignment_config: &MultiSymbolRuntimeConfig,
+        assignment_identity: &str,
+        binding: &EffectiveRuntimeBinding,
+        runtime_binding_identity: &str,
+        instruments: &[TrackedInstrument],
+        symbol: &str,
+        expected_ts: i64,
+        now_utc: DateTime<Utc>,
+        expected_reason: &'static str,
+        case_label: &str,
+    ) {
+        let provider = Arc::new(FakeQueueProvider::new());
+        let resolver = FakeProviderResolver::new(provider.clone());
+        let readiness = ready_readiness(symbol, "5m", Some(expected_ts));
+        let evaluator = FakeReadinessEvaluator::always(readiness);
+
+        let outcome = tick_autonomous_completed_bar_driver(AutonomousCompletedBarDriverInput {
+            state,
+            pool,
+            operation,
+            assignment_config,
+            assignment_identity,
+            runtime_binding: binding,
+            runtime_binding_identity,
+            now_utc,
+            authorization: AutonomousProviderCallAuthorization::Authorized,
+            instruments,
+            provider_id: "fake",
+            provider_resolver: &resolver,
+            readiness_evaluator: &evaluator,
+            mode: AutonomousCompletedBarDriverMode::RunningDispatch,
+        })
+        .await
+        .expect("tick ok");
+
+        assert_eq!(
+            outcome,
+            AutonomousCompletedBarDriverOutcome::RuntimeDispatchNotReady {
+                reason_code: expected_reason
+            },
+            "case {case_label}: expected RuntimeDispatchNotReady({expected_reason})"
+        );
+        let claim = mqk_db::fetch_autonomous_daily_bar_dispatch(
+            pool,
+            operation.operation_id,
+            symbol,
+            "5m",
+            expected_ts,
+        )
+        .await
+        .unwrap();
+        assert!(claim.is_none(), "case {case_label}: zero dispatch claims");
+        assert!(
+            state.pending_strategy_bar_input_is_none_for_test().await,
+            "case {case_label}: zero pending strategy bar deposits"
+        );
+    }
+
+    // Case: operation.state != running (point 17).
+    {
+        let symbol = "ZZDRVELIG17";
+        let mut operation = create_test_operation(
+            &pool,
+            "zzdrv-elig17",
+            symbol,
+            "swing_momentum",
+            "5m",
+            &timing,
+            mqk_db::STATE_AWAITING_OPEN,
+        )
+        .await;
+        let run_id = Uuid::new_v4();
+        operation.run_id = Some(run_id);
+        let instruments = vec![fixture_instrument(symbol, "fake", symbol, "5m")];
+        let assignment_config = fixture_assignment_config(symbol, "swing_momentum", "5m");
+        let assignment_identity =
+            mqk_daemon::state::autonomous_daily_operation::derive_assignment_identity(
+                &assignment_config,
+            );
+        let binding = fixture_binding(symbol, "swing_momentum", 300);
+        let runtime_binding_identity =
+            mqk_daemon::state::autonomous_daily_operation::derive_runtime_binding_identity(
+                &binding,
+            );
+        let expected_ts = timing.effective_open.timestamp() + 300;
+        seed_exact_bar(&pool, symbol, "5m", expected_ts, "fake", symbol).await;
+        let state = running_dispatch_eligible_state(pool.clone(), run_id).await;
+        assert_blocked(
+            &pool,
+            &state,
+            &operation,
+            &assignment_config,
+            &assignment_identity,
+            &binding,
+            &runtime_binding_identity,
+            &instruments,
+            symbol,
+            expected_ts,
+            timing.effective_open + chrono::Duration::minutes(6),
+            REASON_OPERATION_NOT_RUNNING,
+            "17_operation_not_running",
+        )
+        .await;
+    }
+
+    // Case: operation.run_id is None (point 18).
+    {
+        let symbol = "ZZDRVELIG18";
+        let mut operation = create_test_operation(
+            &pool,
+            "zzdrv-elig18",
+            symbol,
+            "swing_momentum",
+            "5m",
+            &timing,
+            mqk_db::STATE_AWAITING_OPEN,
+        )
+        .await;
+        operation.state = mqk_db::STATE_RUNNING.to_string();
+        operation.run_id = None;
+        let instruments = vec![fixture_instrument(symbol, "fake", symbol, "5m")];
+        let assignment_config = fixture_assignment_config(symbol, "swing_momentum", "5m");
+        let assignment_identity =
+            mqk_daemon::state::autonomous_daily_operation::derive_assignment_identity(
+                &assignment_config,
+            );
+        let binding = fixture_binding(symbol, "swing_momentum", 300);
+        let runtime_binding_identity =
+            mqk_daemon::state::autonomous_daily_operation::derive_runtime_binding_identity(
+                &binding,
+            );
+        let expected_ts = timing.effective_open.timestamp() + 300;
+        seed_exact_bar(&pool, symbol, "5m", expected_ts, "fake", symbol).await;
+        let state = running_dispatch_eligible_state(pool.clone(), Uuid::new_v4()).await;
+        assert_blocked(
+            &pool,
+            &state,
+            &operation,
+            &assignment_config,
+            &assignment_identity,
+            &binding,
+            &runtime_binding_identity,
+            &instruments,
+            symbol,
+            expected_ts,
+            timing.effective_open + chrono::Duration::minutes(6),
+            REASON_OPERATION_RUN_ID_MISSING,
+            "18_run_id_missing",
+        )
+        .await;
+    }
+
+    // Case: no locally owned runtime at all (point 19).
+    {
+        let symbol = "ZZDRVELIG19";
+        let mut operation = create_test_operation(
+            &pool,
+            "zzdrv-elig19",
+            symbol,
+            "swing_momentum",
+            "5m",
+            &timing,
+            mqk_db::STATE_AWAITING_OPEN,
+        )
+        .await;
+        operation.state = mqk_db::STATE_RUNNING.to_string();
+        operation.run_id = Some(Uuid::new_v4());
+        let instruments = vec![fixture_instrument(symbol, "fake", symbol, "5m")];
+        let assignment_config = fixture_assignment_config(symbol, "swing_momentum", "5m");
+        let assignment_identity =
+            mqk_daemon::state::autonomous_daily_operation::derive_assignment_identity(
+                &assignment_config,
+            );
+        let binding = fixture_binding(symbol, "swing_momentum", 300);
+        let runtime_binding_identity =
+            mqk_daemon::state::autonomous_daily_operation::derive_runtime_binding_identity(
+                &binding,
+            );
+        let expected_ts = timing.effective_open.timestamp() + 300;
+        seed_exact_bar(&pool, symbol, "5m", expected_ts, "fake", symbol).await;
+        // Active bootstrap present, but no locally injected running loop.
+        let state = active_bootstrap_state(pool.clone()).await;
+        assert_blocked(
+            &pool,
+            &state,
+            &operation,
+            &assignment_config,
+            &assignment_identity,
+            &binding,
+            &runtime_binding_identity,
+            &instruments,
+            symbol,
+            expected_ts,
+            timing.effective_open + chrono::Duration::minutes(6),
+            REASON_LOCAL_RUNTIME_NOT_ACTIVE,
+            "19_no_locally_owned_run",
+        )
+        .await;
+    }
+
+    // Case: locally owned run_id mismatches operation.run_id (point 20).
+    {
+        let symbol = "ZZDRVELIG20";
+        let mut operation = create_test_operation(
+            &pool,
+            "zzdrv-elig20",
+            symbol,
+            "swing_momentum",
+            "5m",
+            &timing,
+            mqk_db::STATE_AWAITING_OPEN,
+        )
+        .await;
+        operation.state = mqk_db::STATE_RUNNING.to_string();
+        operation.run_id = Some(Uuid::new_v4());
+        let instruments = vec![fixture_instrument(symbol, "fake", symbol, "5m")];
+        let assignment_config = fixture_assignment_config(symbol, "swing_momentum", "5m");
+        let assignment_identity =
+            mqk_daemon::state::autonomous_daily_operation::derive_assignment_identity(
+                &assignment_config,
+            );
+        let binding = fixture_binding(symbol, "swing_momentum", 300);
+        let runtime_binding_identity =
+            mqk_daemon::state::autonomous_daily_operation::derive_runtime_binding_identity(
+                &binding,
+            );
+        let expected_ts = timing.effective_open.timestamp() + 300;
+        seed_exact_bar(&pool, symbol, "5m", expected_ts, "fake", symbol).await;
+        // Owns a DIFFERENT run_id than the operation's.
+        let state = running_dispatch_eligible_state(pool.clone(), Uuid::new_v4()).await;
+        assert_blocked(
+            &pool,
+            &state,
+            &operation,
+            &assignment_config,
+            &assignment_identity,
+            &binding,
+            &runtime_binding_identity,
+            &instruments,
+            symbol,
+            expected_ts,
+            timing.effective_open + chrono::Duration::minutes(6),
+            REASON_LOCAL_RUNTIME_RUN_ID_MISMATCH,
+            "20_run_id_mismatch",
+        )
+        .await;
+    }
+
+    // Case: missing native-strategy bootstrap (point 21).
+    {
+        let symbol = "ZZDRVELIG21";
+        let mut operation = create_test_operation(
+            &pool,
+            "zzdrv-elig21",
+            symbol,
+            "swing_momentum",
+            "5m",
+            &timing,
+            mqk_db::STATE_AWAITING_OPEN,
+        )
+        .await;
+        let run_id = Uuid::new_v4();
+        operation.state = mqk_db::STATE_RUNNING.to_string();
+        operation.run_id = Some(run_id);
+        let instruments = vec![fixture_instrument(symbol, "fake", symbol, "5m")];
+        let assignment_config = fixture_assignment_config(symbol, "swing_momentum", "5m");
+        let assignment_identity =
+            mqk_daemon::state::autonomous_daily_operation::derive_assignment_identity(
+                &assignment_config,
+            );
+        let binding = fixture_binding(symbol, "swing_momentum", 300);
+        let runtime_binding_identity =
+            mqk_daemon::state::autonomous_daily_operation::derive_runtime_binding_identity(
+                &binding,
+            );
+        let expected_ts = timing.effective_open.timestamp() + 300;
+        seed_exact_bar(&pool, symbol, "5m", expected_ts, "fake", symbol).await;
+        // Runtime owned, matching run_id, but no bootstrap stored at all.
+        let state = state::AppState::new_with_db_and_operator_auth(
+            pool.clone(),
+            OperatorAuthMode::ExplicitDevNoToken,
+        );
+        state.inject_running_loop_for_test(run_id).await;
+        assert_blocked(
+            &pool,
+            &state,
+            &operation,
+            &assignment_config,
+            &assignment_identity,
+            &binding,
+            &runtime_binding_identity,
+            &instruments,
+            symbol,
+            expected_ts,
+            timing.effective_open + chrono::Duration::minutes(6),
+            REASON_NATIVE_STRATEGY_BOOTSTRAP_MISSING,
+            "21_bootstrap_missing",
+        )
+        .await;
+    }
+
+    // Case: dormant native-strategy bootstrap (point 22).
+    {
+        let symbol = "ZZDRVELIG22";
+        let mut operation = create_test_operation(
+            &pool,
+            "zzdrv-elig22",
+            symbol,
+            "swing_momentum",
+            "5m",
+            &timing,
+            mqk_db::STATE_AWAITING_OPEN,
+        )
+        .await;
+        let run_id = Uuid::new_v4();
+        operation.state = mqk_db::STATE_RUNNING.to_string();
+        operation.run_id = Some(run_id);
+        let instruments = vec![fixture_instrument(symbol, "fake", symbol, "5m")];
+        let assignment_config = fixture_assignment_config(symbol, "swing_momentum", "5m");
+        let assignment_identity =
+            mqk_daemon::state::autonomous_daily_operation::derive_assignment_identity(
+                &assignment_config,
+            );
+        let binding = fixture_binding(symbol, "swing_momentum", 300);
+        let runtime_binding_identity =
+            mqk_daemon::state::autonomous_daily_operation::derive_runtime_binding_identity(
+                &binding,
+            );
+        let expected_ts = timing.effective_open.timestamp() + 300;
+        seed_exact_bar(&pool, symbol, "5m", expected_ts, "fake", symbol).await;
+        let state = state::AppState::new_with_db_and_operator_auth(
+            pool.clone(),
+            OperatorAuthMode::ExplicitDevNoToken,
+        );
+        state.inject_running_loop_for_test(run_id).await;
+        // Dormant: bootstrap from an empty fleet.
+        let dormant = NativeStrategyBootstrap::bootstrap(None, &build_daemon_plugin_registry());
+        state
+            .set_native_strategy_bootstrap_for_test(Some(dormant))
+            .await;
+        assert_blocked(
+            &pool,
+            &state,
+            &operation,
+            &assignment_config,
+            &assignment_identity,
+            &binding,
+            &runtime_binding_identity,
+            &instruments,
+            symbol,
+            expected_ts,
+            timing.effective_open + chrono::Duration::minutes(6),
+            REASON_NATIVE_STRATEGY_BOOTSTRAP_DORMANT,
+            "22_bootstrap_dormant",
+        )
+        .await;
+    }
+
+    // Case: failed native-strategy bootstrap (point 23).
+    {
+        let symbol = "ZZDRVELIG23";
+        let mut operation = create_test_operation(
+            &pool,
+            "zzdrv-elig23",
+            symbol,
+            "swing_momentum",
+            "5m",
+            &timing,
+            mqk_db::STATE_AWAITING_OPEN,
+        )
+        .await;
+        let run_id = Uuid::new_v4();
+        operation.state = mqk_db::STATE_RUNNING.to_string();
+        operation.run_id = Some(run_id);
+        let instruments = vec![fixture_instrument(symbol, "fake", symbol, "5m")];
+        let assignment_config = fixture_assignment_config(symbol, "swing_momentum", "5m");
+        let assignment_identity =
+            mqk_daemon::state::autonomous_daily_operation::derive_assignment_identity(
+                &assignment_config,
+            );
+        let binding = fixture_binding(symbol, "swing_momentum", 300);
+        let runtime_binding_identity =
+            mqk_daemon::state::autonomous_daily_operation::derive_runtime_binding_identity(
+                &binding,
+            );
+        let expected_ts = timing.effective_open.timestamp() + 300;
+        seed_exact_bar(&pool, symbol, "5m", expected_ts, "fake", symbol).await;
+        let state = state::AppState::new_with_db_and_operator_auth(
+            pool.clone(),
+            OperatorAuthMode::ExplicitDevNoToken,
+        );
+        state.inject_running_loop_for_test(run_id).await;
+        // Failed: fleet names a strategy id that is not in the registry.
+        let failed = NativeStrategyBootstrap::bootstrap(
+            Some(&["not_a_registered_strategy".to_string()]),
+            &build_daemon_plugin_registry(),
+        );
+        state
+            .set_native_strategy_bootstrap_for_test(Some(failed))
+            .await;
+        assert_blocked(
+            &pool,
+            &state,
+            &operation,
+            &assignment_config,
+            &assignment_identity,
+            &binding,
+            &runtime_binding_identity,
+            &instruments,
+            symbol,
+            expected_ts,
+            timing.effective_open + chrono::Duration::minutes(6),
+            REASON_NATIVE_STRATEGY_BOOTSTRAP_FAILED,
+            "23_bootstrap_failed",
+        )
+        .await;
+    }
+}
+
+/// Preopen-to-running lifecycle points 26-35: a bar observed by
+/// `PrepareDataOnly` before any runtime exists is dispatched exactly once
+/// after a simulated canonical runtime start, and a third tick reports
+/// `AlreadyDispatched` — never a duplicate claim or strategy evaluation.
+#[tokio::test]
+async fn preopen_to_running_lifecycle_26_35_exactly_once_dispatch() {
+    let Some(pool) = maybe_db("preopen_to_running_lifecycle_26_35").await else {
+        return;
+    };
+    let timing = standard_timing();
+    let symbol = "ZZDRVLIFE01";
+    let mut operation = create_test_operation(
+        &pool,
+        "zzdrv-life01",
+        symbol,
+        "swing_momentum",
+        "5m",
+        &timing,
+        mqk_db::STATE_PREPARING_DATA,
+    )
+    .await;
+    let instruments = vec![fixture_instrument(symbol, "fake", symbol, "5m")];
+    let assignment_config = fixture_assignment_config(symbol, "swing_momentum", "5m");
+    let assignment_identity =
+        mqk_daemon::state::autonomous_daily_operation::derive_assignment_identity(
+            &assignment_config,
+        );
+    let binding = fixture_binding(symbol, "swing_momentum", 300);
+    let runtime_binding_identity =
+        mqk_daemon::state::autonomous_daily_operation::derive_runtime_binding_identity(&binding);
+    let expected_ts = timing.effective_open.timestamp() + 300;
+
+    // Tick 1 (preopen, point 26): PrepareDataOnly, no active runtime.
+    let provider1 = Arc::new(FakeQueueProvider::new());
+    provider1.push_outcome(
+        "ZZDRVLIFE01",
+        Ok(Some(bar(symbol, "5m", expected_ts, true))),
+    );
+    let resolver1 = FakeProviderResolver::new(provider1.clone());
+    let readiness1 = ready_readiness(symbol, "5m", Some(expected_ts));
+    let evaluator1 = FakeReadinessEvaluator::queue(vec![readiness1.clone(), readiness1]);
+    let prep_state = state::AppState::new_with_db_and_operator_auth(
+        pool.clone(),
+        OperatorAuthMode::ExplicitDevNoToken,
+    );
+    let now1 = timing.effective_open + chrono::Duration::minutes(6);
+
+    let outcome1 = tick_autonomous_completed_bar_driver(AutonomousCompletedBarDriverInput {
+        state: &prep_state,
+        pool: &pool,
+        operation: &operation,
+        assignment_config: &assignment_config,
+        assignment_identity: &assignment_identity,
+        runtime_binding: &binding,
+        runtime_binding_identity: &runtime_binding_identity,
+        now_utc: now1,
+        authorization: AutonomousProviderCallAuthorization::Authorized,
+        instruments: &instruments,
+        provider_id: "fake",
+        provider_resolver: &resolver1,
+        readiness_evaluator: &evaluator1,
+        mode: AutonomousCompletedBarDriverMode::PrepareDataOnly,
+    })
+    .await
+    .expect("tick ok");
+    assert_eq!(
+        outcome1,
+        AutonomousCompletedBarDriverOutcome::BarObserved {
+            bar_end_ts: expected_ts
+        }
+    );
+    let claim_after_prep = mqk_db::fetch_autonomous_daily_bar_dispatch(
+        &pool,
+        operation.operation_id,
+        symbol,
+        "5m",
+        expected_ts,
+    )
+    .await
+    .unwrap();
+    assert!(
+        claim_after_prep.is_none(),
+        "point 26: preparation must not create a claim"
+    );
+    let after_prep = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation.operation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(after_prep.bars_dispatched, 0);
+
+    // Simulated canonical runtime start (points 27): durable operation
+    // transitions to `running` with a real run_id, local ownership is
+    // established, and the native-strategy bootstrap becomes active.
+    operation.state = mqk_db::STATE_RUNNING.to_string();
+    let run_id = Uuid::new_v4();
+    operation.run_id = Some(run_id);
+    let running_state = running_dispatch_eligible_state(pool.clone(), run_id).await;
+
+    // Tick 2 (running, points 28-33): the exact bar is already canonical, so
+    // zero provider calls this tick; a fresh claim is created and dispatch
+    // completes exactly once.
+    let provider2 = Arc::new(FakeQueueProvider::new());
+    let resolver2 = FakeProviderResolver::new(provider2.clone());
+    let readiness2 = ready_readiness(symbol, "5m", Some(expected_ts));
+    let evaluator2 = FakeReadinessEvaluator::queue(vec![readiness2.clone(), readiness2]);
+    let now2 = now1 + chrono::Duration::seconds(30);
+
+    let outcome2 = tick_autonomous_completed_bar_driver(AutonomousCompletedBarDriverInput {
+        state: &running_state,
+        pool: &pool,
+        operation: &operation,
+        assignment_config: &assignment_config,
+        assignment_identity: &assignment_identity,
+        runtime_binding: &binding,
+        runtime_binding_identity: &runtime_binding_identity,
+        now_utc: now2,
+        authorization: AutonomousProviderCallAuthorization::Authorized,
+        instruments: &instruments,
+        provider_id: "fake",
+        provider_resolver: &resolver2,
+        readiness_evaluator: &evaluator2,
+        mode: AutonomousCompletedBarDriverMode::RunningDispatch,
+    })
+    .await
+    .expect("tick ok");
+    assert_eq!(
+        outcome2,
+        AutonomousCompletedBarDriverOutcome::DispatchCompleted {
+            bar_end_ts: expected_ts
+        },
+        "point 29/30: exactly-once claim and dispatch after runtime start"
+    );
+    assert_eq!(
+        provider2.calls(),
+        0,
+        "point 28: zero provider calls on the running tick (bar already observed)"
+    );
+    let after_run = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation.operation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        after_run.bars_observed, 1,
+        "point 32: observation unchanged"
+    );
+    assert_eq!(
+        after_run.bars_dispatched, 1,
+        "point 33: dispatch counter increments exactly once"
+    );
+
+    // Tick 3 (points 34-35): completed claim detected, no redispatch.
+    let provider3 = Arc::new(FakeQueueProvider::new());
+    let resolver3 = FakeProviderResolver::new(provider3.clone());
+    let readiness3 = ready_readiness(symbol, "5m", Some(expected_ts));
+    let evaluator3 = FakeReadinessEvaluator::queue(vec![readiness3.clone(), readiness3]);
+    let outcome3 = tick_autonomous_completed_bar_driver(AutonomousCompletedBarDriverInput {
+        state: &running_state,
+        pool: &pool,
+        operation: &operation,
+        assignment_config: &assignment_config,
+        assignment_identity: &assignment_identity,
+        runtime_binding: &binding,
+        runtime_binding_identity: &runtime_binding_identity,
+        now_utc: now2 + chrono::Duration::seconds(30),
+        authorization: AutonomousProviderCallAuthorization::Authorized,
+        instruments: &instruments,
+        provider_id: "fake",
+        provider_resolver: &resolver3,
+        readiness_evaluator: &evaluator3,
+        mode: AutonomousCompletedBarDriverMode::RunningDispatch,
+    })
+    .await
+    .expect("tick ok");
+    assert!(matches!(
+        outcome3,
+        AutonomousCompletedBarDriverOutcome::AlreadyDispatched { .. }
+    ));
+    assert_eq!(provider3.calls(), 0);
+    let final_row = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation.operation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        final_row.bars_dispatched, 1,
+        "no duplicate claim or strategy evaluation across the third tick"
+    );
+}
+
+/// Race/failure-safety points 36-38: if the runtime or the native-strategy
+/// bootstrap disappears between preparation and the running-dispatch
+/// eligibility check, no claim is ever created — `RuntimeDispatchNotReady`,
+/// fail-closed. The narrower race (disappearing strictly *after* a claim was
+/// already created but before dispatch completes) is not newly introduced by
+/// this repair: it is the existing failed/unresolved claim safety net proven
+/// by [`claim_22_24_unresolved_claim_never_auto_redispatched`] and
+/// [`dispatch_40_42_staleness_gate_remains_active_and_failure_not_falsely_completed`]
+/// (no automatic replay of an unresolved claim) — this repair does not
+/// change that narrower post-claim behavior.
+#[tokio::test]
+async fn race_36_38_runtime_or_bootstrap_disappears_before_claim_blocks() {
+    let Some(pool) = maybe_db("race_36_38").await else {
+        return;
+    };
+    let timing = standard_timing();
+
+    // Point 36: runtime ownership disappears (e.g. the execution loop
+    // exited) before the eligibility check — no claim, RuntimeDispatchNotReady.
+    {
+        let symbol = "ZZDRVRACE36";
+        let mut operation = create_test_operation(
+            &pool,
+            "zzdrv-race36",
+            symbol,
+            "swing_momentum",
+            "5m",
+            &timing,
+            mqk_db::STATE_AWAITING_OPEN,
+        )
+        .await;
+        operation.state = mqk_db::STATE_RUNNING.to_string();
+        operation.run_id = Some(Uuid::new_v4());
+        let instruments = vec![fixture_instrument(symbol, "fake", symbol, "5m")];
+        let assignment_config = fixture_assignment_config(symbol, "swing_momentum", "5m");
+        let assignment_identity =
+            mqk_daemon::state::autonomous_daily_operation::derive_assignment_identity(
+                &assignment_config,
+            );
+        let binding = fixture_binding(symbol, "swing_momentum", 300);
+        let runtime_binding_identity =
+            mqk_daemon::state::autonomous_daily_operation::derive_runtime_binding_identity(
+                &binding,
+            );
+        let expected_ts = timing.effective_open.timestamp() + 300;
+        seed_exact_bar(&pool, symbol, "5m", expected_ts, "fake", symbol).await;
+        // Bootstrap active, but no locally owned run at all — as if the
+        // execution loop had already exited.
+        let state = active_bootstrap_state(pool.clone()).await;
+
+        let provider = Arc::new(FakeQueueProvider::new());
+        let resolver = FakeProviderResolver::new(provider.clone());
+        let readiness = ready_readiness(symbol, "5m", Some(expected_ts));
+        let evaluator = FakeReadinessEvaluator::always(readiness);
+        let outcome = tick_autonomous_completed_bar_driver(AutonomousCompletedBarDriverInput {
+            state: &state,
+            pool: &pool,
+            operation: &operation,
+            assignment_config: &assignment_config,
+            assignment_identity: &assignment_identity,
+            runtime_binding: &binding,
+            runtime_binding_identity: &runtime_binding_identity,
+            now_utc: timing.effective_open + chrono::Duration::minutes(6),
+            authorization: AutonomousProviderCallAuthorization::Authorized,
+            instruments: &instruments,
+            provider_id: "fake",
+            provider_resolver: &resolver,
+            readiness_evaluator: &evaluator,
+            mode: AutonomousCompletedBarDriverMode::RunningDispatch,
+        })
+        .await
+        .expect("tick ok");
+        assert_eq!(
+            outcome,
+            AutonomousCompletedBarDriverOutcome::RuntimeDispatchNotReady {
+                reason_code: REASON_LOCAL_RUNTIME_NOT_ACTIVE
+            }
+        );
+        let claim = mqk_db::fetch_autonomous_daily_bar_dispatch(
+            &pool,
+            operation.operation_id,
+            symbol,
+            "5m",
+            expected_ts,
+        )
+        .await
+        .unwrap();
+        assert!(claim.is_none(), "point 36: no claim created");
+    }
+
+    // Point 37: the native-strategy bootstrap disappears (e.g. stop/halt
+    // cleared it) before the eligibility check — no claim,
+    // RuntimeDispatchNotReady.
+    {
+        let symbol = "ZZDRVRACE37";
+        let mut operation = create_test_operation(
+            &pool,
+            "zzdrv-race37",
+            symbol,
+            "swing_momentum",
+            "5m",
+            &timing,
+            mqk_db::STATE_AWAITING_OPEN,
+        )
+        .await;
+        let run_id = Uuid::new_v4();
+        operation.state = mqk_db::STATE_RUNNING.to_string();
+        operation.run_id = Some(run_id);
+        let instruments = vec![fixture_instrument(symbol, "fake", symbol, "5m")];
+        let assignment_config = fixture_assignment_config(symbol, "swing_momentum", "5m");
+        let assignment_identity =
+            mqk_daemon::state::autonomous_daily_operation::derive_assignment_identity(
+                &assignment_config,
+            );
+        let binding = fixture_binding(symbol, "swing_momentum", 300);
+        let runtime_binding_identity =
+            mqk_daemon::state::autonomous_daily_operation::derive_runtime_binding_identity(
+                &binding,
+            );
+        let expected_ts = timing.effective_open.timestamp() + 300;
+        seed_exact_bar(&pool, symbol, "5m", expected_ts, "fake", symbol).await;
+        // Runtime still locally owned, but the bootstrap was cleared (e.g.
+        // by `stop_execution_runtime`/`halt_execution_runtime`, which zero
+        // `native_strategy_bootstrap` even if a stale loop handle lingered).
+        let state = state::AppState::new_with_db_and_operator_auth(
+            pool.clone(),
+            OperatorAuthMode::ExplicitDevNoToken,
+        );
+        state.inject_running_loop_for_test(run_id).await;
+        state.set_native_strategy_bootstrap_for_test(None).await;
+
+        let provider = Arc::new(FakeQueueProvider::new());
+        let resolver = FakeProviderResolver::new(provider.clone());
+        let readiness = ready_readiness(symbol, "5m", Some(expected_ts));
+        let evaluator = FakeReadinessEvaluator::always(readiness);
+        let outcome = tick_autonomous_completed_bar_driver(AutonomousCompletedBarDriverInput {
+            state: &state,
+            pool: &pool,
+            operation: &operation,
+            assignment_config: &assignment_config,
+            assignment_identity: &assignment_identity,
+            runtime_binding: &binding,
+            runtime_binding_identity: &runtime_binding_identity,
+            now_utc: timing.effective_open + chrono::Duration::minutes(6),
+            authorization: AutonomousProviderCallAuthorization::Authorized,
+            instruments: &instruments,
+            provider_id: "fake",
+            provider_resolver: &resolver,
+            readiness_evaluator: &evaluator,
+            mode: AutonomousCompletedBarDriverMode::RunningDispatch,
+        })
+        .await
+        .expect("tick ok");
+        assert_eq!(
+            outcome,
+            AutonomousCompletedBarDriverOutcome::RuntimeDispatchNotReady {
+                reason_code: REASON_NATIVE_STRATEGY_BOOTSTRAP_MISSING
+            }
+        );
+        let claim = mqk_db::fetch_autonomous_daily_bar_dispatch(
+            &pool,
+            operation.operation_id,
+            symbol,
+            "5m",
+            expected_ts,
+        )
+        .await
+        .unwrap();
+        assert!(claim.is_none(), "point 37: no claim created");
+    }
+
+    // Point 38 is documented above (doc comment), not re-proven here — see
+    // claim_22_24 and dispatch_40_42 for the existing post-claim fail-closed
+    // guarantee this repair leaves unchanged.
 }

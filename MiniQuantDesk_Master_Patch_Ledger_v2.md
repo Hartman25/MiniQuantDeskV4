@@ -10524,9 +10524,9 @@ Next authorized phase: Phase D — session controller, retries, recovery,
 (`AUTONOMOUS-DAILY-PAPER-OPERATIONS-01C-OBSERVED-BAR-RECOVERY-01`):** starting
 HEAD `a898060bd6dc5df3554dac8cda950c2f3d2d642e` ("fix: close autonomous
 completed-bar production path", the poll-reevaluate-and-provider-closure
-repair's own landing commit). **Commit:** PENDING (recorded here at commit
-time; this line is intentionally `PENDING` until the observed-bar-recovery
-commit exists — no fabricated hash).
+repair's own landing commit). **Commit:**
+`1d4b2674c3660ccade37629f9520713d7cd59712` ("fix: recover observed
+autonomous bars safely").
 
 Honest defect record for what `a898060b` actually left unresolved, found
 during this repair's required source review:
@@ -10692,6 +10692,178 @@ Phase C observed-bar recovery and provider-dependency closure: COMPLETE
 Bundle 3 (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-COMBINED): OPEN
 Next authorized phase: Phase D — session controller, retries, recovery,
   and task supervision
+```
+
+**Phase C data-preparation and running-dispatch separation
+(`AUTONOMOUS-DAILY-PAPER-OPERATIONS-01C-PREPARE-VS-DISPATCH-MODE-01`):**
+starting HEAD `1d4b2674c3660ccade37629f9520713d7cd59712` ("fix: recover
+observed autonomous bars safely", the observed-bar-recovery repair's own
+landing commit). **Commit:** PENDING (recorded here at commit time; this
+line is intentionally `PENDING` until this repair's own commit exists — no
+fabricated hash).
+
+Honest defect record for what `1d4b2674` actually left unresolved, found
+during this repair's required source review:
+
+- **`1d4b2674` correctly closed observed-bar recovery and lazy provider
+  resolution** (every recovery/authorization/evidence-inconsistency
+  guarantee documented above still holds and is unmodified by this repair)
+  — but the driver still accepted **every nonterminal operation state**
+  (the top-level gate excluded only terminal states and
+  `manual_intervention_required`) all the way through to dispatch-claim
+  creation, including every state that exists *before* runtime start.
+- **Native strategy dispatch requires an active bootstrap**
+  (`AppState::tick_strategy_dispatch_for_symbol` returns `None` when the
+  bootstrap is absent, dormant, or failed). Before runtime start, no active
+  bootstrap can exist. A preopen poll could therefore observe a genuinely
+  new completed bar, create a durable dispatch claim for it, attempt the
+  canonical strategy-dispatch call, get `None` back, and mark that claim
+  `failed` — permanently consuming the dispatch identity for a bar the
+  runtime was never actually eligible to act on.
+
+**Repair applied (`state/autonomous_completed_bar_driver.rs`,
+`state.rs`, one test file; no other file touched):**
+
+- **Explicit `AutonomousCompletedBarDriverMode` (`PrepareDataOnly` |
+  `RunningDispatch`)**, added as a required field on
+  `AutonomousCompletedBarDriverInput`. Never inferred from the wall clock,
+  operation state, provider presence, pending-bar presence, or bootstrap
+  presence — the caller must choose explicitly.
+- **`PrepareDataOnly`** performs the identical binding/registry
+  validation, two-stage readiness evaluation, provider polling, and durable
+  bar-observation pipeline as before, but stops at `BarObserved` — it never
+  calls `claim_autonomous_daily_bar_dispatch`,
+  `deposit_strategy_bar_input`, or `tick_strategy_dispatch_for_symbol`. A
+  new state-eligibility gate (`prepare_data_only_state_eligible`) refuses
+  this mode outside the pre-runtime states the binding contract names
+  (`awaiting_preopen`, `preparing_data`, `awaiting_open`,
+  `preflight_blocked`, `start_retrying`), returning `NotApplicable
+  { reason_code: "operation_not_in_preparation_state" }` otherwise.
+- **`RunningDispatch`** performs the same observation reconciliation, but
+  proves runtime-dispatch eligibility
+  (`prove_running_dispatch_eligibility`) before ever calling
+  `claim_autonomous_daily_bar_dispatch`: `operation.state == running`,
+  `operation.run_id` is `Some`, and a new read-only production seam,
+  `AppState::autonomous_strategy_dispatch_runtime_truth`
+  (`AutonomousStrategyDispatchRuntimeTruth`: `Active { run_id }` |
+  `NoLocallyOwnedRun` | `NativeStrategyBootstrapMissing` |
+  `NativeStrategyBootstrapDormant` | `NativeStrategyBootstrapFailed`),
+  reports a locally owned run whose `run_id` matches and an active
+  bootstrap. `operation.state == running` alone already excludes every
+  state the binding contract names as disallowed for dispatch — none of
+  them equal `mqk_db::STATE_RUNNING`. A new typed outcome,
+  `RuntimeDispatchNotReady { reason_code }` (stable reason codes:
+  `operation_not_running`, `operation_run_id_missing`,
+  `local_runtime_not_active`, `local_runtime_run_id_mismatch`,
+  `native_strategy_bootstrap_missing`, `..._dormant`, `..._failed`), is
+  returned on any eligibility failure — zero dispatch claims, zero pending
+  strategy-bar deposits, zero strategy calls, never classified as a
+  provider failure or counted toward any provider-poll counter.
+- **The existing `native_strategy_bootstrap_truth_state_for_test` method
+  was not repurposed.** It remains test-only; the new seam is a distinct,
+  production-safe, read-only method.
+- **No migration change.** `0048`/`0049`/`0050` untouched; no new
+  migration added.
+
+**Test changes:** every one of the 51 pre-existing driver-test fixtures now
+passes an explicit `mode`. Fixtures whose asserted outcome is unaffected by
+the mode split (resolved before the observation/claim branch point —
+authorization gates, binding/registry rejections, pre-poll readiness
+blocks, provider-lagging/future-bar rejections, evidence-inconsistency,
+resolver-construction failure) were assigned `PrepareDataOnly` with no
+outcome change. Fixtures proving the dispatch-claim mechanics themselves
+(`dispatch_35_*`, `dispatch_40_42_*`, `repair10_01_04_11`,
+`repair10_06_07`, `repair10_15`, `repair10_17`, `recovery_01_10`,
+`recovery_11_17`, `claim_18_21`, `claim_22_24`, `authz_25_28`, `authz_32`)
+were switched to `RunningDispatch` and wired with a real eligibility proof
+(`operation.state = running`, `operation.run_id` set, a locally injected
+running loop via the existing `AppState::inject_running_loop_for_test` test
+seam, and an active bootstrap) — their asserted terminal outcomes are
+unchanged. `cadence_14_15` and `cadence_11`'s sibling fixtures that
+previously asserted a dispatch-path outcome under `PrepareDataOnly`'s
+observation-only scope were corrected to assert `BarObserved` instead,
+since dispatch is no longer reachable in that mode — this is exactly the
+distinction this repair introduces, not a regression. No test was deleted.
+
+**New tests:** 5 new bundled test functions added — preparation-mode
+observation with no runtime or bootstrap at all
+(`prepare_only_01_11_missing_bar_observed_no_claim_no_bootstrap_needed`);
+existing-local-bar preparation ignoring authorization state, proven
+idempotent across two ticks
+(`prepare_only_12_16_exact_local_bar_zero_provider_authorization_irrelevant`);
+all six typed running-dispatch eligibility blockers, each proven to create
+zero claims and zero pending-bar deposits
+(`running_dispatch_eligibility_17_25_blocks_before_claim`); the full
+preopen-observation-to-post-start-exactly-once-dispatch lifecycle across
+three ticks, including third-tick `AlreadyDispatched`
+(`preopen_to_running_lifecycle_26_35_exactly_once_dispatch`); and the
+runtime/bootstrap-disappears-before-claim race, both fail-closed to
+`RuntimeDispatchNotReady` with zero claims
+(`race_36_38_runtime_or_bootstrap_disappears_before_claim_blocks`) — the
+narrower post-claim race is documented in that test's doc comment as
+already covered by the existing unresolved-claim no-replay guarantee
+(`claim_22_24`, `dispatch_40_42`), unchanged by this repair. Total:
+56 tests in `scenario_autonomous_completed_bar_driver_01.rs`.
+
+**Regressions (all re-run against the reachable test DB at port 5434, one
+binary at a time, after this repair):**
+`scenario_autonomous_completed_bar_driver_01` 56/56,
+`scenario_market_data_latest_bar_poll_01` 17/17,
+`scenario_market_data_latest_bar_scheduler_01` 6/6,
+`scenario_daily_data_readiness_01` 64/64,
+`scenario_daily_data_readiness_api_01` 7/7,
+`scenario_daily_data_readiness_start_gate_01` 20/20,
+`scenario_intraday_md_freshness_autonomous_01` 6/6,
+`scenario_md_staleness_per_tick_gate_01` 5/5,
+`scenario_per_symbol_bar_window_01` 14/14,
+`scenario_multi_symbol_dispatch_loop_01` 8/8,
+`scenario_native_strategy_loop_send_b1b` 5/5,
+`scenario_autonomous_daily_operation_identity_01` 44/44,
+`scenario_autonomous_daily_operation_data_evidence_01` 8/8 (`--ignored`),
+`scenario_autonomous_daily_operation_store_01` 26/26 (`--ignored`). Zero DB
+self-skips. Full daemon suite not run (not required).
+
+**Guards (re-run after this repair):**
+`validate_autonomous_daily_paper_operations_01a_audit.ps1` all checks pass,
+`validate_daily_data_readiness_01e_closure.ps1` all checks pass (Phase A
+guard re-run clean), `check_unsafe_patterns.ps1` all guards pass. Migration
+governance not re-run (no migration or manifest content changed).
+`rustfmt --check` clean on all three touched files. `cargo check` clean for
+`mqk-md`/`mqk-db`/`mqk-strategy`/`mqk-runtime`/`mqk-daemon`. Clippy: zero
+warnings attributable to any touched file (one pre-existing, unrelated
+`mqk-daemon` lib warning in `routes/strategy_scans.rs`, and one
+`too_many_arguments` warning on a new test-only helper resolved with a
+scoped `#[allow(clippy::too_many_arguments)]`, matching this file's
+existing convention for its own multi-field fixture constructors).
+`git diff --check` clean.
+
+**Safety confirmation (preparation-versus-dispatch repair):**
+
+```text
+PROVIDER CALLS: no (real network)
+BROKER CALLS: no
+NETWORK CALLS: no
+REAL DAEMON STARTED: no
+REAL RUNTIME STARTED: no
+SESSION CONTROLLER STARTED: no
+AUTONOMOUS DRIVER AUTO-STARTED: no
+EXECUTION ARMED: no
+PAPER ORDERS: no
+LIVE ORDERS: no
+PAPER DB TOUCHED: no
+PRODUCTION CODE CHANGED: yes (state/autonomous_completed_bar_driver.rs:
+  explicit driver mode, prepare-mode state-eligibility gate, running-
+  dispatch eligibility proof, one new typed outcome; state.rs: one new
+  read-only production seam, AppState::autonomous_strategy_dispatch_runtime_truth)
+MIGRATION ADDED: no
+```
+
+```text
+Phase C data-preparation and running-dispatch separation: COMPLETE
+Bundle 3 (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-COMBINED): OPEN
+Next authorized phase: Phase D — session controller, retries, recovery,
+  and task supervision — only after independent review of this repair,
+  and only on explicit operator instruction
 ```
 
 **Expected next bundle after closure:** `DURABLE-PAPER-PORTFOLIO-AND-PNL-01-COMBINED`.

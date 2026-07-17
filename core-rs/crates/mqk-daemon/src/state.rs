@@ -1897,6 +1897,34 @@ operator_reconcile_or_repair_required"
         *self.strategy_fleet.write().await = fleet;
     }
 
+    /// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01C-PREPARE-VS-DISPATCH-MODE-01
+    /// REPAIR 4: production-safe, read-only runtime-dispatch eligibility
+    /// seam for `RunningDispatch`-mode driver ticks. Performs no runtime
+    /// start/stop, no bootstrap creation, no mutation of pending bars, no
+    /// re-bootstrap, and no provider/broker call — it only reports the
+    /// actual locally owned run ID (via [`Self::locally_owned_run_id`]) and
+    /// the current native-strategy bootstrap state, without exposing or
+    /// cloning plugin internals.
+    ///
+    /// Distinct from [`Self::native_strategy_bootstrap_truth_state_for_test`],
+    /// which remains test-only and is never called from this seam or from
+    /// any other production path.
+    pub async fn autonomous_strategy_dispatch_runtime_truth(
+        &self,
+    ) -> autonomous_completed_bar_driver::AutonomousStrategyDispatchRuntimeTruth {
+        use autonomous_completed_bar_driver::AutonomousStrategyDispatchRuntimeTruth as Truth;
+        let Some(run_id) = self.locally_owned_run_id().await else {
+            return Truth::NoLocallyOwnedRun;
+        };
+        let bootstrap = self.native_strategy_bootstrap.lock().await;
+        match bootstrap.as_ref() {
+            None => Truth::NativeStrategyBootstrapMissing,
+            Some(b) if b.is_dormant() => Truth::NativeStrategyBootstrapDormant,
+            Some(b) if b.is_failed() => Truth::NativeStrategyBootstrapFailed,
+            Some(_) => Truth::Active { run_id },
+        }
+    }
+
     /// B1A test seam: read the current native strategy bootstrap truth state.
     ///
     /// Returns `None` if no bootstrap is stored (no active run).
