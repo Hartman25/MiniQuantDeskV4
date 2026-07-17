@@ -10877,9 +10877,8 @@ only on explicit operator instruction.
 (`AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D1-TYPED-COORDINATOR-POLICY`):**
 starting HEAD `62ca89b2737b3f9c758c43cbbeddce4c2b72a517` ("fix: separate
 autonomous data prep from dispatch", Phase C's own landing commit).
-**Commit:** PENDING (recorded here at commit time; this line is
-intentionally `PENDING` until this patch's own commit exists — no
-fabricated hash).
+**Commit:** `2349ca487867f3ff611b73e05d3c983e740b5c7b`
+("daemon: add typed autonomous coordinator policy").
 
 D1 is intentionally behavior-preserving. Production session-controller
 behavior is unchanged by this patch; `session_controller.rs`,
