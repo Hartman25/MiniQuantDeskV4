@@ -941,6 +941,8 @@ fn sample_operation_record(operation_id: Uuid) -> mqk_db::AutonomousDailyOperati
         last_error: None,
         created_at_utc: now,
         updated_at_utc: now,
+        stop_attempt_count: Some(0),
+        last_stop_attempt_utc: None,
     }
 }
 

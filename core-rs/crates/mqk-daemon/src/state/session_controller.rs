@@ -5,7 +5,28 @@
 //! remains in `start_execution_runtime` — this controller calls that function
 //! and responds to refusals; it does not bypass any gate.
 //!
-//! # Scheduling contract
+//! # AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D2-DURABLE-SESSION-COORDINATOR
+//!
+//! `spawn_autonomous_session_controller` remains the production startup
+//! seam (called from `main.rs`, unchanged signature/gating). Its spawned
+//! loop (`run_session_controller`) no longer makes lifecycle decisions
+//! itself: every tick calls [`run_durable_session_controller_tick`], which
+//! delegates entirely to
+//! `autonomous_daily_coordinator::tick_autonomous_daily_coordinator`. There
+//! is no process-local `locally_started: bool` on the production path —
+//! durable operation state (`sys_autonomous_daily_operations` plus its
+//! append-only transition events) is the sole lifecycle authority,
+//! re-proven against the database every tick.
+//!
+//! The `AutonomousSessionSchedule` / `SessionWindow` types,
+//! `run_session_controller_tick`, `attempt_auto_start`, and
+//! `attempt_auto_stop` below remain for existing read surfaces (e.g.
+//! `/api/v1/system/preflight`, `/api/v1/autonomous/paper-status`) and their
+//! compatibility test coverage — they are no longer called from the
+//! production controller loop.
+//!
+//! # Scheduling contract (legacy `is_in_session` read surface, and the
+//! functions above)
 //!
 //! Default: `AutonomousSessionSchedule::NyseRegularSession`
 //! - Uses `CalendarSpec::NyseWeekdays` with the daemon's session-clock seam.
@@ -20,9 +41,12 @@
 //! When both override env vars are present and valid, the controller uses a
 //! fixed UTC window instead of the NYSE regular-session seam. This preserves
 //! backward compatibility for operator-driven overrides without forcing the
-//! autonomous paper path to stay tied to raw UTC windows.
+//! autonomous paper path to stay tied to raw UTC windows. The production
+//! coordinator consults the equivalent (but D2.5-corrected) override via
+//! `autonomous_daily_operation::resolve_fixed_window_override_config_from_env`,
+//! not this module's `session_window_from_env`.
 //!
-//! # Session logic
+//! # Session logic (legacy functions below, preserved for compatibility)
 //!
 //! - **Auto-start**: on every poll tick while in-session and no active run,
 //!   calls `start_execution_runtime`. Refused starts (gate failures) are
@@ -189,13 +213,127 @@ pub fn spawn_autonomous_session_controller(
     Some(tokio::spawn(run_session_controller(state, schedule)))
 }
 
-async fn run_session_controller(state: Arc<AppState>, schedule: AutonomousSessionSchedule) {
+/// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D2-DURABLE-SESSION-COORDINATOR: the
+/// production controller loop. `schedule` is accepted for signature
+/// stability (`spawn_autonomous_session_controller`'s existing gating logs
+/// which schedule source is configured) but is no longer consulted for
+/// lifecycle decisions — the durable coordinator resolves its own canonical
+/// session plan via `resolve_autonomous_daily_session_plan_from_env` on
+/// every tick. There is no process-local `locally_started` here: durable
+/// operation state (`sys_autonomous_daily_operations` plus its append-only
+/// transition events) is the sole lifecycle authority, re-proven against
+/// the database every tick.
+async fn run_session_controller(state: Arc<AppState>, _schedule: AutonomousSessionSchedule) {
     let mut ticker = tokio::time::interval(SESSION_POLL_INTERVAL);
-    let mut locally_started = false;
 
     loop {
         ticker.tick().await;
-        run_session_controller_tick(&state, schedule, &mut locally_started, Utc::now()).await;
+        run_durable_session_controller_tick(&state, Utc::now()).await;
+    }
+}
+
+/// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D2: one production tick — ticker tick
+/// -> injected `now` -> durable coordinator tick -> bounded
+/// logging/notification of the result. This is the sole production seam
+/// that drives `AppState::start_execution_runtime` /
+/// `AppState::stop_execution_runtime` for autonomous paper operation; it
+/// never bypasses the durable coordinator's own gates.
+pub async fn run_durable_session_controller_tick(
+    state: &Arc<AppState>,
+    now: chrono::DateTime<Utc>,
+) {
+    use super::autonomous_daily_coordinator::{
+        tick_autonomous_daily_coordinator, AutonomousDailyCoordinatorTickInput,
+    };
+
+    match tick_autonomous_daily_coordinator(AutonomousDailyCoordinatorTickInput {
+        state,
+        now_utc: now,
+    })
+    .await
+    {
+        Ok(outcome) => log_coordinator_outcome(state, &outcome, now).await,
+        Err(err) => {
+            warn!(error = %err, "autonomous_daily_coordinator: tick failed");
+        }
+    }
+}
+
+/// Bounded logging/notification of one coordinator tick outcome. A
+/// `Started` outcome is inherently non-repeating (the very next tick that
+/// still owns the same run observes `Running`, not a second `Started`), so
+/// no additional process-local dedup state is needed here to satisfy
+/// "zero repeated critical notifications" for the start-applied case.
+/// Blocked/manual outcomes are logged (not Discord-alerted) every tick they
+/// persist — durable dedup of the underlying DB transition/start-call
+/// already happens inside the coordinator; this function only bounds the
+/// noisiest external notification channel, not internal log volume.
+async fn log_coordinator_outcome(
+    state: &Arc<AppState>,
+    outcome: &super::autonomous_daily_coordinator::AutonomousDailyCoordinatorTickOutcome,
+    now: chrono::DateTime<Utc>,
+) {
+    use super::autonomous_daily_coordinator::AutonomousDailyCoordinatorTickOutcome as Outcome;
+    let env = env_label(state);
+    match outcome {
+        Outcome::Started { run_id } => {
+            info!(run_id = %run_id, "autonomous_daily_coordinator: auto-started execution run");
+            state
+                .discord_notifier
+                .notify_operator_action(&OperatorNotifyPayload {
+                    action_key: "autonomous.run.start".to_string(),
+                    disposition: "applied".to_string(),
+                    environment: env,
+                    ts_utc: now.to_rfc3339(),
+                    provenance_ref: Some(run_id.to_string()),
+                    run_id: Some(run_id.to_string()),
+                })
+                .await;
+        }
+        Outcome::Recovered { run_id } => {
+            info!(run_id = %run_id, "autonomous_daily_coordinator: recovered execution run after unexpected termination");
+        }
+        Outcome::RuntimeStopped => {
+            info!("autonomous_daily_coordinator: runtime stopped at session boundary");
+            state
+                .discord_notifier
+                .notify_run_status(&RunStatusPayload {
+                    event: "autonomous.run.stop".to_string(),
+                    run_id: None,
+                    environment: env,
+                    note: Some("session boundary reached".to_string()),
+                    ts_utc: now.to_rfc3339(),
+                })
+                .await;
+        }
+        Outcome::ManualInterventionRequired { reason_code } => {
+            warn!(
+                reason_code = *reason_code,
+                "autonomous_daily_coordinator: manual intervention required"
+            );
+        }
+        Outcome::StartAttempted | Outcome::StopAttempted => {
+            info!(
+                "autonomous_daily_coordinator: canonical attempt did not complete this tick; \
+                 will retry per bounded backoff"
+            );
+        }
+        Outcome::PreflightBlocked { reason_code } => {
+            info!(
+                reason_code = *reason_code,
+                "autonomous_daily_coordinator: preflight blocked"
+            );
+        }
+        Outcome::NotApplicable { .. }
+        | Outcome::CalendarBlocked { .. }
+        | Outcome::IdentityBlocked { .. }
+        | Outcome::WaitingForPreopen
+        | Outcome::PreparingData
+        | Outcome::AwaitingOpen
+        | Outcome::RetryNotDue
+        | Outcome::Running { .. }
+        | Outcome::RecoveryScheduled
+        | Outcome::AwaitingOutcomeFinalization => {}
     }
 }
 

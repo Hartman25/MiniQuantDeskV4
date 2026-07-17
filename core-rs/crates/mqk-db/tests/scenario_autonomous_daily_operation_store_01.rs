@@ -102,6 +102,7 @@ fn make_create_args(
         data_refresh_state: "not_started".to_string(),
         occurred_at_utc,
         bounded_detail: "scenario test creation".to_string(),
+        stop_attempt_count: 0,
     }
 }
 

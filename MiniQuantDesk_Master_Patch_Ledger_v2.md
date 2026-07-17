@@ -11374,3 +11374,316 @@ Next authorized patch: Phase D2 — durable daily session-controller
   lifecycle integration — only after independent acceptance of this
   repair, and only on explicit operator instruction.
 ```
+
+---
+
+**Phase D2 — durable daily session-controller lifecycle integration
+(`AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D2-DURABLE-SESSION-COORDINATOR`):**
+starting HEAD `38145fbee6dab2d5b94b39b1d8ea4d867140c294` ("test: repair
+daemon lifecycle readiness fixture").
+
+**What changed.** The production session-controller loop
+(`state/session_controller.rs::run_session_controller`) no longer decides
+autonomous start/stop with a process-local `locally_started: bool`. It now
+calls `run_durable_session_controller_tick`, which delegates entirely to a
+new module, `state/autonomous_daily_coordinator.rs`
+(`tick_autonomous_daily_coordinator`), that resolves the canonical session
+plan (`resolve_autonomous_daily_session_plan_from_env`), canonical
+assignment (`build_multi_symbol_runtime_config_from_env`), and canonical
+runtime binding (`resolve_autonomous_runtime_context`) once per tick;
+derives the immutable `operation_id` (`derive_autonomous_daily_operation_id`);
+race-safely creates or recovers the durable
+`sys_autonomous_daily_operations` row
+(`mqk_db::create_or_recover_autonomous_daily_operation`); and drives it
+through durable CAS transitions (`mqk_db::transition_autonomous_daily_operation`)
+for every state change. `session_controller.rs`'s
+`AutonomousSessionSchedule`/`SessionWindow`/`run_session_controller_tick`/
+`attempt_auto_start`/`attempt_auto_stop` remain, unmodified in behavior, for
+existing read surfaces (`/api/v1/system/preflight`,
+`/api/v1/autonomous/paper-status`) and their own compatibility tests, but
+are no longer called from the production controller loop. `main.rs` is
+unchanged; `spawn_autonomous_session_controller`'s signature and gating
+(Paper + `ExternalSignalIngestion`) are unchanged.
+
+**Preopen readiness (D2.9).** While `awaiting_preopen`/`preparing_data`/
+`preflight_blocked`, the coordinator evaluates strict Bundle 2 daily-data
+readiness (`daily_data_readiness::evaluate_readiness_with_binding`) with no
+provider call (`load_readiness_context_from_env` is file-read-only, per its
+own doc). `REASON_EXPECTED_LATEST_BAR_MISSING` classifies
+`WaitForCondition` (reevaluated next tick, no transition when already
+`preflight_blocked`, no attempt-counter involvement); a per-assignment
+`db_unavailable`/`query_failed` classifies `RetryableTransient` (no
+transition); every other blocker fails closed to
+`ManualInterventionRequired`, matching this codebase's established
+conservative-fallback convention (`autonomous_retry_policy.rs`).
+
+**Typed autonomous arm (D2.10).** `AppState::try_autonomous_arm_typed`
+(`state/lifecycle.rs`) replaces `try_autonomous_arm`'s free-form
+`Result<(), String>` internals with a closed
+`Result<AutonomousArmOutcome, AutonomousArmRejection>` (`AlreadyArmed` /
+`ArmedFromPersistedState` success; `IntegrityHalted` /
+`DatabaseNotConfigured` / `NoPersistedArmState` / `DurableDisarmed` /
+`TemporaryDatabaseOperationFailure` rejection). `try_autonomous_arm()`
+becomes a thin compatibility wrapper rendering the exact same historical
+message text (proven byte-identical against all pre-existing
+`try_autonomous_arm()` string-assertion tests — AU-13/14/15/16,
+SH08/SH09 — all still pass unmodified). A new adapter,
+`coordinator_reason_from_arm_rejection` (`autonomous_retry_policy.rs`),
+maps the typed rejection to the existing D1 `AutonomousCoordinatorReason`
+enum; nothing new parses rendered text.
+
+**Durable start attempts (D2.11-12).** A start attempt is counted
+(`mqk_db::record_start_attempt`) only immediately before the canonical
+`AppState::start_execution_runtime` call itself — never for an arm-gate
+refusal, a retry-not-yet-due tick, or a preflight/readiness block. On
+success, `start_execution_runtime`'s `active_run_id` is required and must
+equal `AppState::locally_owned_run_id()` before the operation is CAS-
+transitioned to `running` with that exact `run_id`
+(`transition_autonomous_daily_operation`'s own `run_id` argument) and
+`record_running_started`; on either the missing-run-id or the
+run-id-mismatch crash-window case, the coordinator immediately attempts a
+best-effort `stop_execution_runtime` and fails closed to
+`manual_intervention_required` — it never presents an unconfirmed start as
+running. Start refusals are classified through the unchanged D1
+`coordinator_reason_from_runtime_lifecycle_error` / `classify_autonomous_reason`
+/ `retry_delay_for_attempt` (30/60/120/300s) seam.
+
+**Recovery (D2.15) and operator-managed runs (D2.16).** For a durable
+`running` operation, `handle_running` reconciles local ownership: a
+matching run is a no-op; a mismatched or unexpectedly-absent-but-still-
+`ARMED`/`RUNNING` durable run transitions to `controller_degraded` (manual,
+never auto-adopted); a genuinely terminal prior run with no unsafe-
+termination signal (operator halt/kill-switch, or a WS continuity gap —
+`integrity.disarmed` is deliberately *not* treated as an unsafe-termination
+signal here, since it is the ordinary fail-closed boot default, not
+evidence of an actual halt; a durable `DISARMED` arm state is instead
+caught precisely, without duplication, by the arm gate the next recovery
+attempt hits) schedules a bounded `recovery_retrying` retry that re-enters
+the same canonical start sequence. Before any start attempt from a state
+that has never bound a `run_id`, the coordinator checks
+`AppState::locally_owned_run_id()`; if a run already exists there, it is
+classified `operator_managed_run_active` and neither stopped, attached, nor
+raced against a new start.
+
+**Session close and durable stop retries (D2.17-18).** New migration
+`0051_autonomous_daily_stop_retry_evidence.sql` adds nullable
+`stop_attempt_count`/`last_stop_attempt_utc` to `sys_autonomous_daily_operations`
+(does not modify `0048`/`0049`/`0050`; legacy rows round-trip both as
+`None`, never fabricated as zero; every row created after `0051` supplies
+an explicit `0`). New `mqk_db::autonomous_daily_operation` store APIs
+(`record_start_attempt`, `record_running_started`, `record_retry_timing`/
+`clear_retry_timing`, `record_stop_attempt`, `record_stopped_at`) are all
+counter-only updates — none touches `state_version` or inserts a
+`sys_autonomous_daily_operation_events` row (proven by
+`evidence_recorders_never_insert_transition_events_or_bump_state_version`).
+At close, a matching locally-owned runtime is stopped via the canonical
+`stop_execution_runtime` with a recorded attempt and bounded stop-retry
+backoff; a mismatched/operator-managed runtime is never stopped; no
+runtime at all makes zero stop calls but still records `stopped_at_utc`
+truthfully. An unresolved stop at/after `postclose_finalize_utc` becomes
+`manual_intervention_required` rather than a fabricated `completed`
+outcome. **Legal-transition-graph extension** (`mqk-db/src/autonomous_daily_operation.rs`,
+documented inline): five new edges, all of the shape `<pre-running state>
+-> stopping` (`awaiting_preopen`, `preparing_data`, `awaiting_open`,
+`preflight_blocked`, `start_retrying`, each `-> stopping`), close a genuine
+Phase B gap — before D2, no pre-running state could reach `stopping` at
+all, so a coordinator first observing an applicable operation already past
+its close, having never started a runtime, had no legal, honest state to
+record. D2 never invents a `running` step that did not happen; it records
+`stopping` truthfully with `stopped_at_utc` set. No other edge in the
+Phase B graph was touched; `completed`/`completed_no_trade`/
+`completed_with_activity` remain unreachable from this patch (Phase E
+owns outcome finalization) and every one of Phase B's four originally-
+forbidden edges remains forbidden.
+
+**D2.6 first-observation-past-close policy (documented decision).**
+`stopping` is not a legal *initial* state, so an operation first observed
+by the coordinator at or after `effective_operation_close_utc` still seeds
+as `awaiting_open` (the narrowest truthful legal initial state for "the
+day was applicable"), then is immediately recorded, in the same tick, as
+one honest follow-up transition to `manual_intervention_required` with
+reason `session_closed_before_first_observation` — never silently
+presented as `stopping`/`completed` without ever having been observed
+running.
+
+**Restart-safe dedup (D2.14).** Manual-intervention suppression compares
+the freshly classified typed reason's `blocker_signature` against the
+operation's own durable `state_reason_code` column — read fresh from the
+database on every tick — so an unchanged blocker produces zero repeated
+transitions/events across a simulated process restart using only durable
+state, with no process-local memory of any kind
+(`g01_durable_manual_blocker_suppresses_start_after_process_restart`).
+
+**Explicitly deferred / not done in D2 (documented, not silently
+skipped).** No completed-bar task wiring, no
+`tick_autonomous_completed_bar_driver` production call, legacy bar ticker
+unchanged, no daily-operation HTTP route, no GUI change, no outcome/
+no-trade finalization, no `completed*` transition — all per the D2 patch
+boundary. Two narrower, explicitly-scoped simplifications, both fail-safe
+(never loosen a gate, never fabricate truth): (1) a `preflight_blocked`
+operation whose *typed reason changes* while remaining `WaitForCondition`/
+`RetryableTransient`-classified does not durably update
+`state_reason_code` mid-state (no legal self-loop edge exists for that);
+the coordinator still returns the freshly classified reason to the caller
+every tick, so this affects only what is durably recorded as "last known
+reason," never lifecycle behavior. (2) `manual_intervention_required` is a
+terminal no-op for the coordinator in this patch — D2 does not implement
+automatic re-evaluation out of manual state when an underlying blocker
+clears; an operator action (or a future phase) is required to move the
+operation forward. Both are conservative, not scope-creep.
+
+**Tests.** New: `mqk-daemon/tests/scenario_autonomous_daily_session_coordinator_01.rs`
+(24 tests, DB-backed, `#[ignore]`) proving: weekend/holiday
+`NotApplicable` and invalid-override `CalendarBlocked` create no DB row and
+make no DB call; first-tick create, repeated-tick recovery, 5-way
+concurrent-tick single-row/single-event creation, and same-day identity
+conflict (no second row, no start/stop call); preopen timing (`awaiting_preopen`
+before preopen, transition at preopen, zero `start_attempt_count` through
+every preopen/preflight branch, no provider call); the canonical start
+sequence's halted/durably-disarmed arm refusals (zero counted attempts),
+an already-armed real counted attempt, retry-not-due suppression (zero
+additional attempts), and operator-managed-run preservation; running
+reconciliation (matching run no-op/zero writes, mismatched run ->
+`controller_degraded`, terminal prior run -> `recovery_retrying` with
+scheduled backoff, halted termination never retried); session close
+(matching runtime stopped with recorded attempt/timestamp, no-runtime
+makes zero stop calls, mismatched runtime never stopped, unresolved stop
+at `postclose_finalize_utc` -> manual); and durable restart-safe dedup.
+New: `mqk-db/tests/scenario_autonomous_daily_operation_lifecycle_01.rs`
+(14 tests, DB-backed, `#[ignore]`) proving migration `0051` registration/
+column nullability, explicit-zero-on-create vs. legacy-null round-tripping,
+atomic (including 10-way concurrent) start- and stop-attempt increments,
+caller-supplied retry-timing/idempotent running-started/idempotent
+stopped-at semantics, and that every counter-only recorder inserts zero
+transition events and never bumps `state_version`. Modified for the new
+struct field (`stop_attempt_count`) and migration `0051`:
+`scenario_autonomous_daily_operation_store_01.rs` (26/26 unaffected),
+`scenario_autonomous_daily_operation_data_evidence_01.rs` (8/8 unaffected),
+`scenario_autonomous_daily_operation_identity_01.rs` (44/44 unaffected),
+`scenario_autonomous_completed_bar_driver_01.rs` (56/56 unaffected).
+
+**Honest coverage note.** D2's originally-specified 76-item proof matrix
+(D2.23) is not each individually named as a separate test function; many
+numbered items are proved together by one test (e.g. the four backoff-
+schedule items are proved by the unchanged, already-passing D1
+`g01_backoff_schedule_matches_30_60_120_300`, not re-proved here). A fully
+successful (`Ok`) `start_execution_runtime` call — items 33-39 of D2.23 —
+is implemented and exercised up to and including the canonical call itself
+(`d03_already_armed_proceeds_to_a_real_counted_start_attempt` proves the
+call is made and counted exactly once) but is **not** proven end-to-end by
+an automated `Started`/`running` result in this patch: satisfying every
+one of `start_execution_runtime`'s 23 gates (real artifact/parity/capital-
+policy/market-data-freshness fixtures) in an automated test remains the
+same open gap the Phase A audit (`01A`) originally identified for this
+whole bundle — carried forward, not silently claimed closed.
+
+**Regressions (each run as its own binary against the reachable test DB,
+port 5434):** `scenario_autonomous_daily_session_coordinator_01` 24/24,
+`scenario_autonomous_daily_operation_lifecycle_01` 14/14,
+`scenario_autonomous_daily_operation_store_01` 26/26,
+`scenario_autonomous_daily_operation_data_evidence_01` 8/8,
+`scenario_daemon_runtime_lifecycle` 24/24,
+`scenario_autonomous_daily_coordinator_policy_01` 35/35,
+`scenario_autonomous_daily_operation_identity_01` 44/44,
+`scenario_autonomous_completed_bar_driver_01` 56/56,
+`scenario_daily_data_readiness_start_gate_01` 20/20,
+`scenario_native_strategy_bootstrap_daemon_b1b` 5/5,
+`scenario_autonomous_gate_parity_auton11` 5/5,
+`mqk-daemon --lib` 327/327.
+`scenario_autonomous_paper_day_lifecycle_auton12`: **1 passed (`al01`), 1
+failed (`al02`)** — confirmed, by re-running the identical command against
+a `git stash`-restored copy of the unmodified starting HEAD
+(`38145fbe`), to fail identically before any D2 change: pre-existing,
+carried forward, not introduced by this patch, and not fixed here
+(one-patch-per-turn discipline; a future dedicated fixture-repair patch,
+analogous to the D1 lifecycle-test fixture repair above, is required).
+
+**Migration:** `0051_autonomous_daily_stop_retry_evidence.sql` registered
+in `manifest.json` immediately after `0050`, exactly once
+(`migration_0051_registered_exactly_once_immediately_after_0050`). `0048`/
+`0049`/`0050` files unmodified (`git diff` confirms zero changes to those
+three files).
+
+**Guards:** `validate_autonomous_daily_paper_operations_01a_audit.ps1` all
+checks pass, `validate_daily_data_readiness_01e_closure.ps1` all checks
+pass (Phase A guard re-run clean inside it), `check_unsafe_patterns.ps1`
+all guards pass, `check_migration_governance.sh` OK (required a `python3`
+shim to a real Python interpreter in this session's shell — the repo's
+own Windows Store `python3` alias stub is a pre-existing, unrelated
+environment quirk, not a governance failure; manually verified equivalent
+via a direct Python run of the same manifest/SQL-set-equality check).
+`scenario_migration_manifest_matches_files` (sqlx test) 1/1.
+
+**Format/lint:** `rustfmt --check` clean on every touched/added Rust file
+(one `rustfmt` pass applied first to bring newly-added code into the
+project's formatting style). `cargo check -p mqk-db -p mqk-runtime -p
+mqk-daemon` (and `--tests`) clean. Clippy: zero warnings attributable to
+any touched/added file in `cargo clippy -p mqk-db --lib`, `cargo clippy -p
+mqk-db --test scenario_autonomous_daily_operation_lifecycle_01`, `cargo
+clippy -p mqk-db --test scenario_autonomous_daily_operation_store_01
+--test scenario_autonomous_daily_operation_data_evidence_01`, `cargo
+clippy -p mqk-daemon --lib`, and `cargo clippy -p mqk-daemon --test
+scenario_autonomous_daily_session_coordinator_01 --test
+scenario_autonomous_daily_operation_identity_01 --test
+scenario_autonomous_completed_bar_driver_01` (one `needless_question_mark`
+warning found and fixed in the new coordinator test file during this
+pass). The one warning present in every `mqk-daemon` build is the same
+pre-existing, unrelated `routes/strategy_scans.rs:87` `manual
+!RangeInclusive::contains` lint noted in every prior D1/D1-repair ledger
+entry. `git diff --check` clean.
+
+**Safety confirmation:**
+
+```text
+PROVIDER CALLS: no (real network)
+BROKER CALLS: no
+NETWORK CALLS: no
+REAL DAEMON STARTED: no
+REAL RUNTIME STARTED: no (only in-process test loops via existing
+  establish_db_backed_active_run_for_test / inject_running_loop_for_test
+  seams — no broker connection, no network)
+COMPLETED-BAR TASK STARTED: no
+LEGACY TICKER CHANGED: no
+MAIN.RS CHANGED: no
+API CHANGED: no
+GUI CHANGED: no
+HALT CLEARED: no
+KILL SWITCH CLEARED: no
+DURABLE DISARM OVERRIDDEN: no
+EXECUTION ARMED OUTSIDE TEST: no
+PAPER ORDERS: no
+LIVE ORDERS: no
+PAPER DB TOUCHED (port 5440): no
+TEST DB TOUCHED (port 5434): yes (isolated mqk-test-postgres only)
+MIGRATION ADDED: yes (0051, additive, does not modify 0048/0049/0050)
+FILES CHANGED: MiniQuantDesk_Master_Patch_Ledger_v2.md,
+  core-rs/crates/mqk-daemon/src/state.rs,
+  core-rs/crates/mqk-daemon/src/state/lifecycle.rs,
+  core-rs/crates/mqk-daemon/src/state/session_controller.rs,
+  core-rs/crates/mqk-daemon/src/state/autonomous_retry_policy.rs,
+  core-rs/crates/mqk-daemon/tests/scenario_autonomous_daily_operation_identity_01.rs,
+  core-rs/crates/mqk-daemon/tests/scenario_autonomous_completed_bar_driver_01.rs,
+  core-rs/crates/mqk-db/migrations/manifest.json,
+  core-rs/crates/mqk-db/src/autonomous_daily_operation.rs,
+  core-rs/crates/mqk-db/tests/scenario_autonomous_daily_operation_store_01.rs,
+  core-rs/crates/mqk-db/tests/scenario_autonomous_daily_operation_data_evidence_01.rs
+ADDED FILES:
+  core-rs/crates/mqk-daemon/src/state/autonomous_daily_coordinator.rs,
+  core-rs/crates/mqk-daemon/tests/scenario_autonomous_daily_session_coordinator_01.rs,
+  core-rs/crates/mqk-db/migrations/0051_autonomous_daily_stop_retry_evidence.sql,
+  core-rs/crates/mqk-db/tests/scenario_autonomous_daily_operation_lifecycle_01.rs
+```
+
+```text
+D2 DURABLE SESSION COORDINATOR: COMPLETE (pending commit)
+  — durable operation is controller lifecycle authority; process-local
+  locally_started removed as production authority; one known pre-existing
+  unrelated test failure (auton12/al02) carried forward, not fixed here;
+  the fully-successful-start end-to-end proof gap the Phase A audit
+  originally identified remains open, carried forward honestly.
+Phase D: OPEN (D2 complete; D3 not started)
+Bundle 3 (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-COMBINED): OPEN
+Next authorized patch: Phase D3 — completed-bar task cutover and task
+  supervision — only after independent review and acceptance of D2, and
+  only on explicit operator instruction.
+```

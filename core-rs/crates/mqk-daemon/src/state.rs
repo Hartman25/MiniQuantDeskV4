@@ -7,6 +7,7 @@
 mod alpaca_ws_transport;
 mod autonomous_bar_ticker;
 pub mod autonomous_completed_bar_driver;
+pub mod autonomous_daily_coordinator;
 pub mod autonomous_daily_operation;
 pub mod autonomous_retry_policy;
 pub mod autonomous_runtime_context;
@@ -79,6 +80,7 @@ pub use instrument_economics_bridge::{
     bridge_instrument_registry_v2_to_economics, instrument_v2_to_economics,
     InstrumentEconomicsBridgeResult, InstrumentEconomicsBridgeSummary,
 };
+pub use lifecycle::{AutonomousArmOutcome, AutonomousArmRejection};
 pub use loop_runner::spawn_reconcile_tick;
 pub use market_calendar::{
     classify_crypto_continuous_session, classify_equity_us_regular_session,

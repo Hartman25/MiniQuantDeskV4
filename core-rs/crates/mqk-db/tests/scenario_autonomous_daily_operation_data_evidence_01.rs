@@ -92,6 +92,7 @@ async fn create_test_operation(
         data_refresh_state: "not_started".to_string(),
         occurred_at_utc,
         bounded_detail: "evidence test creation".to_string(),
+        stop_attempt_count: 0,
     };
     match create_or_recover_autonomous_daily_operation(pool, &args)
         .await

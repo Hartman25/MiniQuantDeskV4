@@ -509,6 +509,35 @@ pub fn coordinator_reason_from_strategy_dispatch_runtime_truth(
     }
 }
 
+/// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D2: map a typed
+/// [`AutonomousArmRejection`] (from `AppState::try_autonomous_arm_typed`) to
+/// a coordinator reason. `NoPersistedArmState` has no precise counterpart in
+/// the closed reason set and fails closed to `UnclassifiedFailClosed`, per
+/// this module's conservative-fallback rule. Typed match only: no
+/// debug-string rendering, no reason-string parsing.
+pub fn coordinator_reason_from_arm_rejection(
+    rejection: &super::lifecycle::AutonomousArmRejection,
+) -> AutonomousCoordinatorReason {
+    use super::lifecycle::AutonomousArmRejection;
+    match rejection {
+        AutonomousArmRejection::IntegrityHalted => AutonomousCoordinatorReason::IntegrityHalted,
+        AutonomousArmRejection::DatabaseNotConfigured => {
+            AutonomousCoordinatorReason::DatabaseNotConfiguredOrInvalid
+        }
+        AutonomousArmRejection::DurableDisarmed { .. } => {
+            AutonomousCoordinatorReason::DurableArmDisarmed
+        }
+        AutonomousArmRejection::NoPersistedArmState => {
+            AutonomousCoordinatorReason::UnclassifiedFailClosed {
+                fault_class: "no_persisted_arm_state",
+            }
+        }
+        AutonomousArmRejection::TemporaryDatabaseOperationFailure { .. } => {
+            AutonomousCoordinatorReason::TemporaryDatabaseOperationFailure
+        }
+    }
+}
+
 // NO-STRING-AUTHORITY-GUARD-SCOPE-END
 
 // ---------------------------------------------------------------------------

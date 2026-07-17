@@ -543,6 +543,7 @@ async fn create_test_operation(
         data_refresh_state: "awaiting_preopen".to_string(),
         occurred_at_utc: now,
         bounded_detail: "test fixture".to_string(),
+        stop_attempt_count: 0,
     };
 
     match mqk_db::create_or_recover_autonomous_daily_operation(pool, &args)
@@ -885,6 +886,8 @@ fn stub_operation(
         last_error: None,
         created_at_utc: now,
         updated_at_utc: now,
+        stop_attempt_count: Some(0),
+        last_stop_attempt_utc: None,
     }
 }
 
@@ -2105,6 +2108,7 @@ async fn session_45_early_close_operation_still_pollable() {
         data_refresh_state: "awaiting_preopen".to_string(),
         occurred_at_utc: timing.preopen_start_utc,
         bounded_detail: "early close fixture".to_string(),
+        stop_attempt_count: 0,
     };
     let operation = match mqk_db::create_or_recover_autonomous_daily_operation(&pool, &args)
         .await

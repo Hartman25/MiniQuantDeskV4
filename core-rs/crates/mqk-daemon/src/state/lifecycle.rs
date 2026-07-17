@@ -40,6 +40,71 @@ use super::{AppState, DAEMON_ENGINE_ID, RECONCILE_TICK_INTERVAL};
 
 use mqk_runtime::native_strategy::NativeStrategyBootstrap;
 
+// ---------------------------------------------------------------------------
+// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D2: typed autonomous arm outcome
+// ---------------------------------------------------------------------------
+
+/// Typed success outcome of [`AppState::try_autonomous_arm_typed`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutonomousArmOutcome {
+    /// Integrity was already armed (`integrity.disarmed == false`) —
+    /// idempotent success, no DB access performed.
+    AlreadyArmed,
+    /// Integrity was disarmed but the persisted arm-state row was `ARMED`
+    /// (the ordinary clean-stop-then-restart daily cycle); in-memory
+    /// integrity was advanced to armed and re-persisted.
+    ArmedFromPersistedState,
+}
+
+/// Typed failure outcome of [`AppState::try_autonomous_arm_typed`]. Never a
+/// broad free-text variant -- the durable daily coordinator classifies this
+/// value exclusively by variant, never by parsing rendered text.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AutonomousArmRejection {
+    /// `integrity.halted == true`. Operator halt wins unconditionally and is
+    /// never reversible by the autonomous arm seam.
+    IntegrityHalted,
+    /// No DB is configured on this daemon; autonomous arm cannot verify
+    /// prior session state.
+    DatabaseNotConfigured,
+    /// A DB is configured, but no arm-state row exists yet (first-time
+    /// install, or the DB was wiped). Requires one manual operator arm.
+    NoPersistedArmState,
+    /// The persisted arm-state row is `DISARMED`, with an optional stored
+    /// reason.
+    DurableDisarmed { reason: Option<String> },
+    /// A DB operation (`load_arm_state` or `persist_arm_state_canonical`)
+    /// failed against an otherwise-configured, otherwise-reachable
+    /// database. `operation` names the specific call that failed.
+    TemporaryDatabaseOperationFailure { operation: &'static str },
+}
+
+impl AutonomousArmRejection {
+    /// Render the exact historical `try_autonomous_arm()` message text for
+    /// each rejection, so the `Result<(), String>` compatibility wrapper
+    /// remains byte-for-byte unchanged for every existing caller/test.
+    fn legacy_message(&self) -> String {
+        match self {
+            Self::IntegrityHalted => {
+                "operator halt asserted; autonomous arm refused (integrity.halted=true)".to_string()
+            }
+            Self::DatabaseNotConfigured => {
+                "no DB configured; autonomous arm requires persisted arm state".to_string()
+            }
+            Self::NoPersistedArmState => "no prior arm state in DB; operator must arm manually \
+                 at least once (first-time install or DB was wiped)"
+                .to_string(),
+            Self::DurableDisarmed { reason } => {
+                let reason_str = reason.as_deref().unwrap_or("unknown");
+                format!("DB arm state is DISARMED (reason={reason_str}); autonomous arm refused")
+            }
+            Self::TemporaryDatabaseOperationFailure { operation } => {
+                format!("autonomous arm: {operation} failed")
+            }
+        }
+    }
+}
+
 impl AppState {
     pub async fn start_execution_runtime(
         self: &Arc<Self>,
@@ -1177,43 +1242,45 @@ impl AppState {
     /// Only `halt_execution_runtime` writes `DISARMED` to the DB.  A halted
     /// daemon therefore requires manual operator arm before the controller can
     /// restart, which is the correct safety posture.
-    pub async fn try_autonomous_arm(&self) -> Result<(), String> {
+    /// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D2: typed autonomous arm seam.
+    ///
+    /// Same gate order/rules as [`Self::try_autonomous_arm`]'s doc comment
+    /// above, but returns a closed [`AutonomousArmOutcome`]/
+    /// [`AutonomousArmRejection`] pair instead of a free-form
+    /// `Result<(), String>`, so the durable daily coordinator (D2) can
+    /// classify the result exclusively by typed variant -- never by parsing
+    /// rendered text. [`Self::try_autonomous_arm`] becomes a thin
+    /// compatibility wrapper over this method.
+    pub async fn try_autonomous_arm_typed(
+        &self,
+    ) -> Result<AutonomousArmOutcome, AutonomousArmRejection> {
         // Gate 1: operator halt wins unconditionally.
         // Gate 2: already armed is idempotent success.
         {
             let ig = self.integrity.read().await;
             if ig.halted {
-                return Err(
-                    "operator halt asserted; autonomous arm refused (integrity.halted=true)"
-                        .to_string(),
-                );
+                return Err(AutonomousArmRejection::IntegrityHalted);
             }
             if !ig.disarmed {
-                return Ok(());
+                return Ok(AutonomousArmOutcome::AlreadyArmed);
             }
         }
 
         // Gate 3: DB required to verify prior session state.
         let db = match self.db.as_ref() {
             Some(db) => db,
-            None => {
-                return Err(
-                    "no DB configured; autonomous arm requires persisted arm state".to_string(),
-                )
-            }
+            None => return Err(AutonomousArmRejection::DatabaseNotConfigured),
         };
 
         // Gate 4/5/6: load prior arm state from the singleton row.
-        let row = mqk_db::load_arm_state(db)
-            .await
-            .map_err(|err| format!("autonomous arm: load_arm_state failed: {err}"))?;
+        let row = mqk_db::load_arm_state(db).await.map_err(|_err| {
+            AutonomousArmRejection::TemporaryDatabaseOperationFailure {
+                operation: "load_arm_state",
+            }
+        })?;
 
         match row {
-            None => Err(
-                "no prior arm state in DB; operator must arm manually at least once \
-                 (first-time install or DB was wiped)"
-                    .to_string(),
-            ),
+            None => Err(AutonomousArmRejection::NoPersistedArmState),
             Some((ref state_str, _)) if state_str == "ARMED" => {
                 // Prior session ended cleanly (stop does not write DISARMED).
                 // Advance in-memory integrity to armed.
@@ -1225,18 +1292,22 @@ impl AppState {
                 // Re-persist Armed so another daemon restart also sees ARMED.
                 mqk_db::persist_arm_state_canonical(db, mqk_db::ArmState::Armed, None)
                     .await
-                    .map_err(|err| {
-                        format!("autonomous arm: persist_arm_state_canonical failed: {err}")
-                    })?;
-                Ok(())
+                    .map_err(
+                        |_err| AutonomousArmRejection::TemporaryDatabaseOperationFailure {
+                            operation: "persist_arm_state_canonical",
+                        },
+                    )?;
+                Ok(AutonomousArmOutcome::ArmedFromPersistedState)
             }
-            Some((_, reason)) => {
-                let reason_str = reason.as_deref().unwrap_or("unknown");
-                Err(format!(
-                    "DB arm state is DISARMED (reason={reason_str}); autonomous arm refused"
-                ))
-            }
+            Some((_, reason)) => Err(AutonomousArmRejection::DurableDisarmed { reason }),
         }
+    }
+
+    pub async fn try_autonomous_arm(&self) -> Result<(), String> {
+        self.try_autonomous_arm_typed()
+            .await
+            .map(|_| ())
+            .map_err(|rejection| rejection.legacy_message())
     }
 
     pub async fn stop_for_shutdown(self: &Arc<Self>) {

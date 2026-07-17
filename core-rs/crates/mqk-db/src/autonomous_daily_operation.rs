@@ -89,6 +89,21 @@ pub fn is_terminal_operation_state(state: &str) -> bool {
 /// `stopping -> preparing_data`). Phase C-E may extend this graph with new
 /// edges between these same 16 states without a migration; this patch does
 /// not attempt to anticipate every future edge.
+///
+/// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D2-DURABLE-SESSION-COORDINATOR: D2
+/// extends five edges the Phase B graph did not need, all of the same
+/// shape (`<pre-running state> -> stopping`): `awaiting_preopen`,
+/// `preparing_data`, `awaiting_open`, `preflight_blocked`, and
+/// `start_retrying` may each transition directly to `stopping`. This closes
+/// a genuine gap the original graph left open: before D2, no pre-running
+/// state could reach `stopping` at all (only `running` /
+/// `recovery_retrying` / `controller_degraded` / `evidence_degraded`
+/// could), so a coordinator that first observes an applicable operation
+/// already past its `effective_operation_close_utc` -- having never
+/// started a runtime -- had no legal, honest state to record. D2 records
+/// this truthfully as `stopping` with `stopped_at_utc` set and detail `no
+/// autonomous runtime existed at session close` (per the binding contract's
+/// D2.17), never by inventing a `running` step that never happened.
 pub fn is_legal_operation_transition(previous: Option<&str>, new_state: &str) -> bool {
     if !is_known_operation_state(new_state) {
         return false;
@@ -103,7 +118,10 @@ pub fn is_legal_operation_transition(previous: Option<&str>, new_state: &str) ->
         ),
         Some(STATE_AWAITING_PREOPEN) => matches!(
             new_state,
-            STATE_PREPARING_DATA | STATE_CALENDAR_UNAVAILABLE | STATE_MANUAL_INTERVENTION_REQUIRED
+            STATE_PREPARING_DATA
+                | STATE_CALENDAR_UNAVAILABLE
+                | STATE_MANUAL_INTERVENTION_REQUIRED
+                | STATE_STOPPING
         ),
         Some(STATE_PREPARING_DATA) => matches!(
             new_state,
@@ -111,6 +129,7 @@ pub fn is_legal_operation_transition(previous: Option<&str>, new_state: &str) ->
                 | STATE_PREFLIGHT_BLOCKED
                 | STATE_CALENDAR_UNAVAILABLE
                 | STATE_MANUAL_INTERVENTION_REQUIRED
+                | STATE_STOPPING
         ),
         Some(STATE_AWAITING_OPEN) => matches!(
             new_state,
@@ -118,14 +137,18 @@ pub fn is_legal_operation_transition(previous: Option<&str>, new_state: &str) ->
                 | STATE_START_RETRYING
                 | STATE_CALENDAR_UNAVAILABLE
                 | STATE_MANUAL_INTERVENTION_REQUIRED
+                | STATE_STOPPING
         ),
         Some(STATE_PREFLIGHT_BLOCKED) => matches!(
             new_state,
-            STATE_START_RETRYING | STATE_MANUAL_INTERVENTION_REQUIRED
+            STATE_START_RETRYING | STATE_MANUAL_INTERVENTION_REQUIRED | STATE_STOPPING
         ),
         Some(STATE_START_RETRYING) => matches!(
             new_state,
-            STATE_RUNNING | STATE_PREFLIGHT_BLOCKED | STATE_MANUAL_INTERVENTION_REQUIRED
+            STATE_RUNNING
+                | STATE_PREFLIGHT_BLOCKED
+                | STATE_MANUAL_INTERVENTION_REQUIRED
+                | STATE_STOPPING
         ),
         Some(STATE_RUNNING) => matches!(
             new_state,
@@ -240,6 +263,13 @@ pub struct AutonomousDailyOperationRecord {
     pub last_error: Option<String>,
     pub created_at_utc: DateTime<Utc>,
     pub updated_at_utc: DateTime<Utc>,
+    /// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D2: count of canonical
+    /// `stop_execution_runtime` call attempts. `None` only for a legacy row
+    /// created before migration `0051` -- never fabricated as zero. Every
+    /// row created through this store's create API after `0051` supplies an
+    /// explicit `0`.
+    pub stop_attempt_count: Option<i64>,
+    pub last_stop_attempt_utc: Option<DateTime<Utc>>,
 }
 
 /// One row from `sys_autonomous_daily_operation_events`.
@@ -269,7 +299,8 @@ const OPERATION_COLUMNS: &str = r#"
     outcome, no_trade_reason, last_error,
     created_at_utc, updated_at_utc,
     exchange_session_open_utc, exchange_session_close_utc, exchange_is_early_close,
-    previous_trading_date
+    previous_trading_date,
+    stop_attempt_count, last_stop_attempt_utc
 "#;
 
 const EVENT_COLUMNS: &str = r#"
@@ -323,6 +354,8 @@ fn row_to_operation_record(
         last_error: r.try_get("last_error")?,
         created_at_utc: r.try_get("created_at_utc")?,
         updated_at_utc: r.try_get("updated_at_utc")?,
+        stop_attempt_count: r.try_get("stop_attempt_count")?,
+        last_stop_attempt_utc: r.try_get("last_stop_attempt_utc")?,
     })
 }
 
@@ -384,6 +417,10 @@ pub struct CreateAutonomousDailyOperationArgs {
     pub occurred_at_utc: DateTime<Utc>,
     /// Bounded free text for the initial `none -> initial_state` event.
     pub bounded_detail: String,
+    /// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D2: explicit `0` for every new
+    /// row -- no SQL `DEFAULT` fabricates it. Legacy rows created before
+    /// migration `0051` remain `None`/null, never backfilled.
+    pub stop_attempt_count: i64,
 }
 
 /// Outcome of [`create_or_recover_autonomous_daily_operation`].
@@ -553,7 +590,8 @@ pub async fn create_or_recover_autonomous_daily_operation(
                     $31,$32,$33,
                     $34,$35,$36,
                     $37,$38,
-                    $39,$40,$41,$42
+                    $39,$40,$41,$42,
+                    $43,$44
                 )
                 "#
             ))
@@ -599,6 +637,8 @@ pub async fn create_or_recover_autonomous_daily_operation(
             .bind(args.exchange_session_close_utc)
             .bind(args.exchange_is_early_close)
             .bind(args.previous_trading_date)
+            .bind(args.stop_attempt_count)
+            .bind(None::<DateTime<Utc>>) // last_stop_attempt_utc
             .execute(&mut *tx)
             .await
             .context("create_or_recover_autonomous_daily_operation: insert operation row failed")?;
@@ -669,6 +709,8 @@ pub async fn create_or_recover_autonomous_daily_operation(
                     last_error: None,
                     created_at_utc: args.occurred_at_utc,
                     updated_at_utc: args.occurred_at_utc,
+                    stop_attempt_count: Some(args.stop_attempt_count),
+                    last_stop_attempt_utc: None,
                 },
             ))
         }
@@ -1578,4 +1620,242 @@ pub async fn fetch_autonomous_daily_bar_dispatch(
     row.map(row_to_bar_dispatch_record)
         .transpose()
         .map_err(Into::into)
+}
+
+// ---------------------------------------------------------------------------
+// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D2-DURABLE-SESSION-COORDINATOR
+// Start/running/stop attempt evidence recorders
+// ---------------------------------------------------------------------------
+//
+// Counter-only updates over an existing sys_autonomous_daily_operations row.
+// None of these touch state_version and none inserts a
+// sys_autonomous_daily_operation_events row -- attempt/evidence bookkeeping
+// is not itself a lifecycle transition (mirrors the provider-poll/bar
+// recorders above). All timestamps are caller-supplied; nothing here reads
+// the wall clock. `NotFound` is authoritative "no such operation" -- never a
+// silent no-op.
+
+/// Outcome of [`record_start_attempt`].
+#[derive(Debug, Clone)]
+pub enum RecordStartAttemptOutcome {
+    Recorded { start_attempt_count: i64 },
+    NotFound,
+}
+
+/// Record one canonical `start_execution_runtime` call attempt: increments
+/// `start_attempt_count` by exactly one, advances `last_start_attempt_utc`,
+/// clears any stale `last_error`, and sets `next_retry_utc` to the
+/// caller-supplied value (`None` clears it).
+pub async fn record_start_attempt(
+    pool: &PgPool,
+    operation_id: Uuid,
+    occurred_at_utc: DateTime<Utc>,
+    next_retry_utc: Option<DateTime<Utc>>,
+) -> Result<RecordStartAttemptOutcome> {
+    let row = sqlx::query(
+        r#"
+        update sys_autonomous_daily_operations
+        set start_attempt_count = start_attempt_count + 1,
+            last_start_attempt_utc = $2,
+            next_retry_utc = $3,
+            last_error = null,
+            updated_at_utc = $2
+        where operation_id = $1
+        returning start_attempt_count
+        "#,
+    )
+    .bind(operation_id)
+    .bind(occurred_at_utc)
+    .bind(next_retry_utc)
+    .fetch_optional(pool)
+    .await
+    .context("record_start_attempt failed")?;
+
+    Ok(match row {
+        Some(r) => RecordStartAttemptOutcome::Recorded {
+            start_attempt_count: r.try_get("start_attempt_count")?,
+        },
+        None => RecordStartAttemptOutcome::NotFound,
+    })
+}
+
+/// Outcome of [`record_running_started`].
+#[derive(Debug, Clone)]
+pub enum RecordRunningStartedOutcome {
+    Recorded { started_at_utc: DateTime<Utc> },
+    NotFound,
+}
+
+/// Record the durable operation's successful start: sets `started_at_utc`
+/// (idempotent -- `coalesce` never rewinds an already-recorded value),
+/// clears `next_retry_utc`, and clears any stale `last_error`. Does not set
+/// `run_id` -- callers bind `run_id` atomically as part of the CAS
+/// transition to `running` via [`transition_autonomous_daily_operation`]'s
+/// own `run_id` argument, in the same tick, so `run_id` and `state` are
+/// never observed out of sync.
+pub async fn record_running_started(
+    pool: &PgPool,
+    operation_id: Uuid,
+    started_at_utc: DateTime<Utc>,
+) -> Result<RecordRunningStartedOutcome> {
+    let row = sqlx::query(
+        r#"
+        update sys_autonomous_daily_operations
+        set started_at_utc = coalesce(started_at_utc, $2),
+            next_retry_utc = null,
+            last_error = null,
+            updated_at_utc = $2
+        where operation_id = $1
+        returning started_at_utc
+        "#,
+    )
+    .bind(operation_id)
+    .bind(started_at_utc)
+    .fetch_optional(pool)
+    .await
+    .context("record_running_started failed")?;
+
+    Ok(match row {
+        Some(r) => RecordRunningStartedOutcome::Recorded {
+            started_at_utc: r.try_get("started_at_utc")?,
+        },
+        None => RecordRunningStartedOutcome::NotFound,
+    })
+}
+
+/// Outcome of [`record_retry_timing`] / [`clear_retry_timing`].
+#[derive(Debug, Clone)]
+pub enum RecordRetryTimingOutcome {
+    Recorded,
+    NotFound,
+}
+
+/// Record transient-retry timing/error without a state transition: sets
+/// `next_retry_utc` (`None` clears it) and `last_error` (bounded to 4000
+/// chars; `None` clears it).
+pub async fn record_retry_timing(
+    pool: &PgPool,
+    operation_id: Uuid,
+    next_retry_utc: Option<DateTime<Utc>>,
+    last_error: Option<&str>,
+    occurred_at_utc: DateTime<Utc>,
+) -> Result<RecordRetryTimingOutcome> {
+    if let Some(err) = last_error {
+        if err.len() > 4000 {
+            anyhow::bail!("record_retry_timing: last_error exceeds 4000 chars");
+        }
+    }
+    let result = sqlx::query(
+        r#"
+        update sys_autonomous_daily_operations
+        set next_retry_utc = $2,
+            last_error = $3,
+            updated_at_utc = $4
+        where operation_id = $1
+        "#,
+    )
+    .bind(operation_id)
+    .bind(next_retry_utc)
+    .bind(last_error)
+    .bind(occurred_at_utc)
+    .execute(pool)
+    .await
+    .context("record_retry_timing failed")?;
+
+    Ok(if result.rows_affected() == 1 {
+        RecordRetryTimingOutcome::Recorded
+    } else {
+        RecordRetryTimingOutcome::NotFound
+    })
+}
+
+/// Clear retry timing/error without a state transition. Equivalent to
+/// [`record_retry_timing`] with both fields `None`.
+pub async fn clear_retry_timing(
+    pool: &PgPool,
+    operation_id: Uuid,
+    occurred_at_utc: DateTime<Utc>,
+) -> Result<RecordRetryTimingOutcome> {
+    record_retry_timing(pool, operation_id, None, None, occurred_at_utc).await
+}
+
+/// Outcome of [`record_stop_attempt`].
+#[derive(Debug, Clone)]
+pub enum RecordStopAttemptOutcome {
+    Recorded { stop_attempt_count: i64 },
+    NotFound,
+}
+
+/// Record one canonical `stop_execution_runtime` call attempt: increments
+/// `stop_attempt_count` by exactly one from `coalesce(stop_attempt_count,
+/// 0)` (a legacy-null row starts counting from zero on its first recorded
+/// attempt, never fabricating prior history) and advances
+/// `last_stop_attempt_utc`.
+pub async fn record_stop_attempt(
+    pool: &PgPool,
+    operation_id: Uuid,
+    occurred_at_utc: DateTime<Utc>,
+) -> Result<RecordStopAttemptOutcome> {
+    let row = sqlx::query(
+        r#"
+        update sys_autonomous_daily_operations
+        set stop_attempt_count = coalesce(stop_attempt_count, 0) + 1,
+            last_stop_attempt_utc = $2,
+            updated_at_utc = $2
+        where operation_id = $1
+        returning stop_attempt_count
+        "#,
+    )
+    .bind(operation_id)
+    .bind(occurred_at_utc)
+    .fetch_optional(pool)
+    .await
+    .context("record_stop_attempt failed")?;
+
+    Ok(match row {
+        Some(r) => RecordStopAttemptOutcome::Recorded {
+            stop_attempt_count: r.try_get("stop_attempt_count")?,
+        },
+        None => RecordStopAttemptOutcome::NotFound,
+    })
+}
+
+/// Outcome of [`record_stopped_at`].
+#[derive(Debug, Clone)]
+pub enum RecordStoppedAtOutcome {
+    Recorded { stopped_at_utc: DateTime<Utc> },
+    NotFound,
+}
+
+/// Record a successful canonical stop: sets `stopped_at_utc` (idempotent --
+/// `coalesce` never rewinds an already-recorded value). The operation's
+/// `state` transition to `stopping`/`stop_retrying`/`completed*` remains a
+/// separate CAS call via [`transition_autonomous_daily_operation`] -- this
+/// recorder only advances the evidence timestamp.
+pub async fn record_stopped_at(
+    pool: &PgPool,
+    operation_id: Uuid,
+    stopped_at_utc: DateTime<Utc>,
+) -> Result<RecordStoppedAtOutcome> {
+    let row = sqlx::query(
+        r#"
+        update sys_autonomous_daily_operations
+        set stopped_at_utc = coalesce(stopped_at_utc, $2),
+            updated_at_utc = $2
+        where operation_id = $1
+        returning stopped_at_utc
+        "#,
+    )
+    .bind(operation_id)
+    .bind(stopped_at_utc)
+    .fetch_optional(pool)
+    .await
+    .context("record_stopped_at failed")?;
+
+    Ok(match row {
+        Some(r) => RecordStoppedAtOutcome::Recorded {
+            stopped_at_utc: r.try_get("stopped_at_utc")?,
+        },
+        None => RecordStoppedAtOutcome::NotFound,
+    })
 }
