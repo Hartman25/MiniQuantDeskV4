@@ -9939,8 +9939,8 @@ closes the residual defect above where Bundle 2 readiness and the Bundle 3
 autonomous daily-operation plan could resolve calendar truth from two
 different provider-selection policies under the same configuration.
 
-**Repair commit:** pending (this session — recorded together with this
-ledger update; see `git log` for the exact hash once committed).
+**Repair commit:** `64afa43714d162c41471e1420399b2ac3918155d` ("fix: unify
+autonomous daily calendar authority").
 
 - **Shared authoritative exchange-calendar context:**
   `market_calendar::active_calendar_provider_from_env` no longer mirrors the
@@ -10032,8 +10032,8 @@ fixed-window override silently replaced the authoritative exchange
 open/close, so no persisted fact remained distinguishing "the exchange
 session boundaries" from "the effective autonomous operation window."
 
-**Repair commit:** pending (this session — recorded together with this
-ledger update; see `git log` for the exact hash once committed).
+**Repair commit:** `1a390e46adb9383c4b7f9d21abe7aab9edfbf6c6` ("fix: separate
+exchange and operation boundaries").
 
 - **Explicit session-plan fields:** `AutonomousDailySessionPlan` no longer
   declares `session_open_utc`/`session_close_utc`. It now declares both fact
@@ -10096,28 +10096,31 @@ ledger update; see `git log` for the exact hash once committed).
   gains check [22], scoped to `AutonomousDailySessionPlan`'s struct body,
   rejecting the ambiguous `session_open_utc`/`session_close_utc` pair and
   requiring both explicit boundary sets to be declared.
-- **Environment limitation (honest disclosure, not a code defect):** the
-  local test Postgres (port 5434) was unreachable for the entire session —
-  Docker Desktop's WSL2 backend (`docker-desktop` distro) reported `Stopped`
-  and did not come up despite launching Docker Desktop and waiting several
-  minutes across repeated checks. Consequently
-  `scenario_autonomous_daily_operation_store_01.rs` (26 tests, all newly
-  added/extended by this repair) could not be executed and is `OPEN/UNPROVEN`
-  pending a reachable test DB — not `CLOSED`. This is confirmed
-  environment-only, not a defect in this repair's code: the pre-existing,
-  untouched `scenario_daily_data_readiness_01.rs` failed its 4 DB-backed
-  sub-tests (`ddr_29`, `ddr_30`, `ddr_46`, `ddr_55`) with the identical
-  `PoolTimedOut` error, while its other 60 pure-logic tests passed; the
-  `scenario_daily_data_readiness_api_01.rs` (7/7) and
-  `scenario_daily_data_readiness_start_gate_01.rs` (20/20) regressions passed
-  in full (their DB-touching cases self-skip gracefully rather than hard-fail
-  when the DB is absent). `cargo check` across all five required crates and
-  all 44 daemon-side identity/read-model tests (which require no DB) passed
-  cleanly, proving the session-plan/identity/read-model logic itself. This
-  gap must be closed by re-running
-  `scenario_autonomous_daily_operation_store_01` against a reachable
-  port-5434 test Postgres before this repair is asserted `CLOSED`, per
-  `audit_repo_truth_rules.md`'s closure-evidence standard.
+- **DB-backed proof closure
+  (`AUTONOMOUS-DAILY-PAPER-OPERATIONS-01B-DB-PROOF-CLOSURE-01`):** the
+  environment gap above is now closed. `mqk-test-postgres` (host port 5434 →
+  container 5432, `POSTGRES_DB=mqk_test`, `POSTGRES_USER=postgres`,
+  confirmed distinct from `mqk-paper-postgres`/5440 and `mqk-live-postgres`/5432)
+  was reachable and `pg_isready`-confirmed.
+  `scenario_autonomous_daily_operation_store_01.rs` ran to **26 passed; 0
+  failed; 0 ignored**, zero `PoolTimedOut`. Regression re-runs against the
+  same reachable DB: `scenario_daily_data_readiness_01.rs` **64/64** (the
+  previously-`PoolTimedOut` `ddr_29`/`ddr_30`/`ddr_46`/`ddr_55` all passed,
+  zero self-skips), `scenario_daily_data_readiness_api_01.rs` **7/7**,
+  `scenario_daily_data_readiness_start_gate_01.rs` **20/20** (zero
+  self-skips), `scenario_autonomous_daily_operation_identity_01.rs`
+  **44/44**. Migration governance
+  (`scripts/guards/check_migration_governance.sh`) and the Rust-side
+  equivalent (`scenario_migration_manifest_matches_files`) both confirm
+  `0048` unchanged, `0049` present and registered exactly once, correct
+  manifest order, and `hold/0017` path normalization intact. Full command
+  transcript and per-suite breakdown:
+  `docs/specs/autonomous_daily_paper_operations_01b_db_proof.md`. This patch
+  is proof/documentation only — no production code, test code, migration, or
+  guard was modified. Per `audit_repo_truth_rules.md`'s closure-evidence
+  standard, this repair (and the Phase B boundary-model repair above) is now
+  `CLOSED` on committed HEAD with passing DB-backed tests, not merely a
+  session claim.
 
 **Safety confirmation (Phase B boundary-model repair):**
 
@@ -10135,6 +10138,24 @@ PRODUCTION CODE CHANGED: yes (autonomous_daily_operation.rs in mqk-daemon and
   mqk-db — no controller/scheduler/route/GUI change)
 MIGRATION ADDED: yes (0049_autonomous_daily_operation_boundaries.sql, additive;
   0048 unchanged)
+```
+
+**Migration guard fix commit:** `efb85fc7afbe52c13c32324c49897c9634936081`
+("fix: correct Windows path-separator normalization in migration guard") —
+corrects `hold/0017` path handling in
+`scripts/guards/check_migration_governance.sh` so the guard runs correctly
+on this Windows checkout; no migration content changed.
+
+**Phase B DB-backed proof closure
+(`AUTONOMOUS-DAILY-PAPER-OPERATIONS-01B-DB-PROOF-CLOSURE-01`):** see the DB
+proof entry above (§ Phase B boundary-model repair) and
+`docs/specs/autonomous_daily_paper_operations_01b_db_proof.md` for the full
+proof transcript.
+
+```text
+Phase B durable coordination foundation: COMPLETE
+Bundle 3 (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-COMBINED): OPEN
+Next authorized phase: Phase C — autonomous completed-bar data driver
 ```
 
 **Expected next bundle after closure:** `DURABLE-PAPER-PORTFOLIO-AND-PNL-01-COMBINED`.
