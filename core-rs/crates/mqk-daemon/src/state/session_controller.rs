@@ -71,7 +71,10 @@ use super::runtime_session_source::{
     evaluate_runtime_session_source_active_decision, runtime_session_source_mode_from_env,
     RuntimeSessionSourceMode,
 };
-use super::types::{AutonomousSessionTruth, DeploymentMode, StrategyMarketDataSource};
+use super::types::{
+    AutonomousRecoveryResumeSource, AutonomousSessionTruth, DeploymentMode,
+    StrategyMarketDataSource,
+};
 use super::AppState;
 use crate::notify::{CriticalAlertPayload, OperatorNotifyPayload, RunStatusPayload};
 
@@ -259,15 +262,20 @@ pub async fn run_durable_session_controller_tick(
     }
 }
 
-/// Bounded logging/notification of one coordinator tick outcome. A
-/// `Started` outcome is inherently non-repeating (the very next tick that
-/// still owns the same run observes `Running`, not a second `Started`), so
-/// no additional process-local dedup state is needed here to satisfy
-/// "zero repeated critical notifications" for the start-applied case.
-/// Blocked/manual outcomes are logged (not Discord-alerted) every tick they
-/// persist — durable dedup of the underlying DB transition/start-call
-/// already happens inside the coordinator; this function only bounds the
-/// noisiest external notification channel, not internal log volume.
+/// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D2-LIFECYCLE-CLOSURE-REPAIR-01
+/// REPAIR 10/11: bounded logging, `AutonomousSessionTruth` projection, and
+/// notification of one coordinator tick outcome.
+///
+/// `AutonomousSessionTruth` is never lifecycle authority here — it remains a
+/// compatibility/operator read surface (`/api/v1/system/preflight`,
+/// `/api/v1/autonomous/paper-status`) derived from the durable coordinator's
+/// own outcome, one-way. `newly_applied` on `ManualInterventionRequired` is
+/// the sole, durable-DB-derived authority for whether to send one critical
+/// notification (REPAIR 11) — never process-local memory. A `Started`
+/// outcome is inherently non-repeating (the very next tick that still owns
+/// the same run observes `Running`, not a second `Started`), so no
+/// additional dedup state is needed for the start-applied Discord
+/// notification either.
 async fn log_coordinator_outcome(
     state: &Arc<AppState>,
     outcome: &super::autonomous_daily_coordinator::AutonomousDailyCoordinatorTickOutcome,
@@ -275,9 +283,24 @@ async fn log_coordinator_outcome(
 ) {
     use super::autonomous_daily_coordinator::AutonomousDailyCoordinatorTickOutcome as Outcome;
     let env = env_label(state);
+
+    // BRK-GAP-01: preserve WsGapPartialRecovery so the operator surface
+    // continues to show that non-fill lifecycle events from a prior gap
+    // window remain permanently unrecoverable, even after a fresh
+    // successful start/running observation.
+    async fn clear_truth_preserving_gap_recovery(state: &Arc<AppState>) {
+        if !matches!(
+            state.autonomous_session_truth().await,
+            AutonomousSessionTruth::WsGapPartialRecovery { .. }
+        ) {
+            state.clear_autonomous_session_truth().await;
+        }
+    }
+
     match outcome {
         Outcome::Started { run_id } => {
             info!(run_id = %run_id, "autonomous_daily_coordinator: auto-started execution run");
+            clear_truth_preserving_gap_recovery(state).await;
             state
                 .discord_notifier
                 .notify_operator_action(&OperatorNotifyPayload {
@@ -290,11 +313,37 @@ async fn log_coordinator_outcome(
                 })
                 .await;
         }
+        Outcome::Running { .. } => {
+            clear_truth_preserving_gap_recovery(state).await;
+        }
         Outcome::Recovered { run_id } => {
             info!(run_id = %run_id, "autonomous_daily_coordinator: recovered execution run after unexpected termination");
+            state
+                .set_autonomous_session_truth(AutonomousSessionTruth::RecoverySucceeded {
+                    resume_source: AutonomousRecoveryResumeSource::PersistedCursor,
+                    detail: "recovered via the durable daily coordinator's recovery_retrying path"
+                        .to_string(),
+                })
+                .await;
+        }
+        Outcome::RecoveryScheduled => {
+            state
+                .set_autonomous_session_truth(AutonomousSessionTruth::RecoveryRetrying {
+                    resume_source: AutonomousRecoveryResumeSource::PersistedCursor,
+                    detail: "the durable daily coordinator scheduled a bounded recovery retry \
+                             after an unexpected run end"
+                        .to_string(),
+                })
+                .await;
         }
         Outcome::RuntimeStopped => {
             info!("autonomous_daily_coordinator: runtime stopped at session boundary");
+            state
+                .set_autonomous_session_truth(AutonomousSessionTruth::StoppedAtBoundary {
+                    detail: "autonomous paper run stopped at the configured session boundary"
+                        .to_string(),
+                })
+                .await;
             state
                 .discord_notifier
                 .notify_run_status(&RunStatusPayload {
@@ -306,16 +355,63 @@ async fn log_coordinator_outcome(
                 })
                 .await;
         }
-        Outcome::ManualInterventionRequired { reason_code } => {
+        Outcome::AwaitingOutcomeFinalization => {
+            state
+                .set_autonomous_session_truth(AutonomousSessionTruth::StoppedAtBoundary {
+                    detail: "operation stopped and is awaiting end-of-day outcome finalization"
+                        .to_string(),
+                })
+                .await;
+        }
+        Outcome::ManualInterventionRequired {
+            reason_code,
+            newly_applied,
+        } => {
             warn!(
                 reason_code = *reason_code,
+                newly_applied = *newly_applied,
                 "autonomous_daily_coordinator: manual intervention required"
             );
+            state
+                .set_autonomous_session_truth(AutonomousSessionTruth::StartRefused {
+                    detail: format!("reason_code={reason_code}"),
+                })
+                .await;
+            // REPAIR 11: exactly one critical notification per
+            // newly-applied manual blocker; zero for an unchanged one.
+            if *newly_applied {
+                state
+                    .discord_notifier
+                    .notify_critical_alert(&CriticalAlertPayload {
+                        alert_class: "autonomous.daily_operation.manual_intervention_required"
+                            .to_string(),
+                        severity: "critical".to_string(),
+                        summary: "Autonomous paper daily operation requires manual intervention."
+                            .to_string(),
+                        detail: Some(format!("reason_code={reason_code}")),
+                        environment: env,
+                        run_id: None,
+                        ts_utc: now.to_rfc3339(),
+                    })
+                    .await;
+            }
         }
-        Outcome::StartAttempted | Outcome::StopAttempted => {
+        Outcome::StopAttempted => {
+            state
+                .set_autonomous_session_truth(AutonomousSessionTruth::StopFailed {
+                    detail: "canonical stop attempt failed; will retry per bounded backoff"
+                        .to_string(),
+                })
+                .await;
             info!(
-                "autonomous_daily_coordinator: canonical attempt did not complete this tick; \
-                 will retry per bounded backoff"
+                "autonomous_daily_coordinator: canonical stop attempt did not complete this \
+                 tick; will retry per bounded backoff"
+            );
+        }
+        Outcome::StartAttempted => {
+            info!(
+                "autonomous_daily_coordinator: canonical start attempt did not complete this \
+                 tick; will retry per bounded backoff"
             );
         }
         Outcome::PreflightBlocked { reason_code } => {
@@ -323,17 +419,24 @@ async fn log_coordinator_outcome(
                 reason_code = *reason_code,
                 "autonomous_daily_coordinator: preflight blocked"
             );
+            state
+                .set_autonomous_session_truth(AutonomousSessionTruth::StartRefused {
+                    detail: format!("reason_code={reason_code}"),
+                })
+                .await;
+        }
+        Outcome::CalendarBlocked { reason_code } | Outcome::IdentityBlocked { reason_code } => {
+            state
+                .set_autonomous_session_truth(AutonomousSessionTruth::StartRefused {
+                    detail: format!("reason_code={reason_code}"),
+                })
+                .await;
         }
         Outcome::NotApplicable { .. }
-        | Outcome::CalendarBlocked { .. }
-        | Outcome::IdentityBlocked { .. }
         | Outcome::WaitingForPreopen
         | Outcome::PreparingData
         | Outcome::AwaitingOpen
-        | Outcome::RetryNotDue
-        | Outcome::Running { .. }
-        | Outcome::RecoveryScheduled
-        | Outcome::AwaitingOutcomeFinalization => {}
+        | Outcome::RetryNotDue => {}
     }
 }
 

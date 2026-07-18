@@ -919,6 +919,7 @@ fn sample_operation_record(operation_id: Uuid) -> mqk_db::AutonomousDailyOperati
         postclose_finalize_utc: now + chrono::Duration::hours(6) + chrono::Duration::minutes(15),
         state: "awaiting_preopen".to_string(),
         state_reason_code: None,
+        state_blocker_signature: None,
         state_version: 1,
         run_id: None,
         start_attempt_count: 0,

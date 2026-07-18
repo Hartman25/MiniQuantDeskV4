@@ -15,9 +15,13 @@ use mqk_db::{
     clear_retry_timing, create_or_recover_autonomous_daily_operation,
     list_autonomous_daily_operation_events, record_retry_timing, record_running_started,
     record_start_attempt, record_stop_attempt, record_stopped_at,
-    CreateAutonomousDailyOperationArgs, CreateOrRecoverAutonomousDailyOperationOutcome,
-    RecordRetryTimingOutcome, RecordRunningStartedOutcome, RecordStartAttemptOutcome,
-    RecordStopAttemptOutcome, RecordStoppedAtOutcome, ENV_DB_URL, STATE_AWAITING_PREOPEN,
+    transition_autonomous_daily_operation, AutonomousDailyOperationRecord,
+    AutonomousDailyTransitionOutcome, CreateAutonomousDailyOperationArgs,
+    CreateOrRecoverAutonomousDailyOperationOutcome, RecordRetryTimingOutcome,
+    RecordRunningStartedOutcome, RecordStartAttemptOutcome, RecordStopAttemptOutcome,
+    RecordStoppedAtOutcome, TransitionAutonomousDailyOperationArgs, ENV_DB_URL,
+    STATE_AWAITING_OPEN, STATE_AWAITING_PREOPEN, STATE_MANUAL_INTERVENTION_REQUIRED,
+    STATE_PREPARING_DATA, STATE_RUNNING, STATE_START_RETRYING,
 };
 use uuid::Uuid;
 
@@ -544,6 +548,477 @@ async fn evidence_recorders_never_insert_transition_events_or_bump_state_version
         events_after.len(),
         "counter-only evidence recorders must never insert a transition event"
     );
+
+    cleanup_operation(&pool, operation_id).await;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D2-LIFECYCLE-CLOSURE-REPAIR-01
+// Migration 0052 / durable blocker signature
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn migration_0052_registered_exactly_once_immediately_after_0051() -> anyhow::Result<()> {
+    let manifest_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("migrations")
+        .join("manifest.json");
+    let manifest_raw = std::fs::read_to_string(&manifest_path).expect("read manifest.json");
+    let manifest: serde_json::Value =
+        serde_json::from_str(&manifest_raw).expect("parse manifest.json");
+    let ids: Vec<String> = manifest["migrations"]
+        .as_array()
+        .expect("migrations array")
+        .iter()
+        .map(|m| m["id"].as_str().expect("id").to_string())
+        .collect();
+    let idx_0051 = ids
+        .iter()
+        .position(|id| id == "0051")
+        .expect("0051 must be registered");
+    let idx_0052 = ids
+        .iter()
+        .position(|id| id == "0052")
+        .expect("0052 must be registered");
+    assert_eq!(idx_0052, idx_0051 + 1, "0052 must immediately follow 0051");
+    assert_eq!(
+        ids.iter().filter(|id| id.as_str() == "0052").count(),
+        1,
+        "0052 must be registered exactly once"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn state_blocker_signature_column_exists_and_is_nullable() -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    let row: (String,) = sqlx::query_as(
+        "select is_nullable from information_schema.columns \
+         where table_name = 'sys_autonomous_daily_operations' and column_name = 'state_blocker_signature'",
+    )
+    .fetch_one(&pool)
+    .await?;
+    assert_eq!(row.0, "YES");
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn new_row_stores_explicit_null_blocker_signature() -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    let operation_id = seed_operation(&pool, "blocker-sig-new-null").await;
+
+    let row = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation_id)
+        .await?
+        .expect("row must exist");
+    assert_eq!(
+        row.state_blocker_signature, None,
+        "a freshly created row must store an explicit null blocker signature"
+    );
+
+    cleanup_operation(&pool, operation_id).await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn legacy_row_round_trips_null_blocker_signature() -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    let operation_id = seed_operation(&pool, "blocker-sig-legacy").await;
+    sqlx::query(
+        "update sys_autonomous_daily_operations set state_blocker_signature = null \
+         where operation_id = $1",
+    )
+    .bind(operation_id)
+    .execute(&pool)
+    .await?;
+
+    let row = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation_id)
+        .await?
+        .expect("row must exist");
+    assert_eq!(
+        row.state_blocker_signature, None,
+        "a legacy-shaped row must round-trip state_blocker_signature as None, never fabricated"
+    );
+
+    cleanup_operation(&pool, operation_id).await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn manual_transition_stores_reason_and_signature_atomically() -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    let operation_id = seed_operation(&pool, "blocker-sig-manual").await;
+    let ts = Utc.with_ymd_and_hms(2026, 7, 20, 13, 31, 0).unwrap();
+
+    let args = TransitionAutonomousDailyOperationArgs {
+        operation_id,
+        expected_state: STATE_AWAITING_PREOPEN.to_string(),
+        expected_state_version: 1,
+        new_state: STATE_MANUAL_INTERVENTION_REQUIRED.to_string(),
+        reason_code: Some("assignment_missing".to_string()),
+        blocker_signature: Some("sha256:deadbeef".to_string()),
+        occurred_at_utc: ts,
+        run_id: None,
+        bounded_detail: "manual blocker with signature".to_string(),
+    };
+    match transition_autonomous_daily_operation(&pool, &args).await? {
+        AutonomousDailyTransitionOutcome::Applied(r) => {
+            assert_eq!(r.state_reason_code.as_deref(), Some("assignment_missing"));
+            assert_eq!(
+                r.state_blocker_signature.as_deref(),
+                Some("sha256:deadbeef")
+            );
+        }
+        other => panic!("expected Applied, got {other:?}"),
+    }
+
+    let row = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation_id)
+        .await?
+        .expect("row must exist");
+    assert_eq!(row.state_reason_code.as_deref(), Some("assignment_missing"));
+    assert_eq!(
+        row.state_blocker_signature.as_deref(),
+        Some("sha256:deadbeef")
+    );
+
+    cleanup_operation(&pool, operation_id).await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn nonblocked_transition_clears_stale_blocker_signature() -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    let operation_id = seed_operation(&pool, "blocker-sig-clear").await;
+    let ts = Utc.with_ymd_and_hms(2026, 7, 20, 13, 31, 0).unwrap();
+
+    let blocked_args = TransitionAutonomousDailyOperationArgs {
+        operation_id,
+        expected_state: STATE_AWAITING_PREOPEN.to_string(),
+        expected_state_version: 1,
+        new_state: STATE_MANUAL_INTERVENTION_REQUIRED.to_string(),
+        reason_code: Some("assignment_missing".to_string()),
+        blocker_signature: Some("sha256:deadbeef".to_string()),
+        occurred_at_utc: ts,
+        run_id: None,
+        bounded_detail: "manual blocker with signature".to_string(),
+    };
+    let blocked = match transition_autonomous_daily_operation(&pool, &blocked_args).await? {
+        AutonomousDailyTransitionOutcome::Applied(r) => r,
+        other => panic!("expected Applied, got {other:?}"),
+    };
+    assert!(blocked.state_blocker_signature.is_some());
+
+    // A legal forward edge out of manual_intervention_required (back into
+    // awaiting_preopen) that carries no reason/signature must clear the
+    // stale blocker signature, never leave it dangling.
+    let recovery_args = TransitionAutonomousDailyOperationArgs {
+        operation_id,
+        expected_state: STATE_MANUAL_INTERVENTION_REQUIRED.to_string(),
+        expected_state_version: blocked.state_version,
+        new_state: STATE_AWAITING_PREOPEN.to_string(),
+        reason_code: None,
+        blocker_signature: None,
+        occurred_at_utc: ts,
+        run_id: None,
+        bounded_detail: "condition cleared".to_string(),
+    };
+    match transition_autonomous_daily_operation(&pool, &recovery_args).await? {
+        AutonomousDailyTransitionOutcome::Applied(r) => {
+            assert_eq!(r.state_reason_code, None);
+            assert_eq!(
+                r.state_blocker_signature, None,
+                "a non-blocked forward transition must clear a stale blocker signature"
+            );
+        }
+        other => panic!("expected Applied, got {other:?}"),
+    }
+
+    cleanup_operation(&pool, operation_id).await;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D2-LIFECYCLE-CLOSURE-REPAIR-01
+// Atomic running transition (transition_autonomous_daily_operation_to_running)
+// ---------------------------------------------------------------------------
+
+/// Advance a freshly seeded (`awaiting_preopen`) operation to
+/// `start_retrying` via the exact real legal edges
+/// (`awaiting_preopen -> preparing_data -> awaiting_open -> start_retrying`),
+/// proving the fixture used by the running-transition tests below is a
+/// durably legal prior state, not a fabricated one.
+async fn advance_operation_to_start_retrying(
+    pool: &sqlx::PgPool,
+    operation_id: Uuid,
+    ts: DateTime<Utc>,
+) -> anyhow::Result<AutonomousDailyOperationRecord> {
+    async fn step(
+        pool: &sqlx::PgPool,
+        operation_id: Uuid,
+        expected_state: &str,
+        expected_state_version: i64,
+        new_state: &str,
+        ts: DateTime<Utc>,
+    ) -> anyhow::Result<AutonomousDailyOperationRecord> {
+        let args = TransitionAutonomousDailyOperationArgs {
+            operation_id,
+            expected_state: expected_state.to_string(),
+            expected_state_version,
+            new_state: new_state.to_string(),
+            reason_code: None,
+            blocker_signature: None,
+            occurred_at_utc: ts,
+            run_id: None,
+            bounded_detail: "advance to start_retrying".to_string(),
+        };
+        match transition_autonomous_daily_operation(pool, &args).await? {
+            AutonomousDailyTransitionOutcome::Applied(r) => Ok(r),
+            other => anyhow::bail!("expected Applied, got {other:?}"),
+        }
+    }
+    let r1 = step(
+        pool,
+        operation_id,
+        STATE_AWAITING_PREOPEN,
+        1,
+        STATE_PREPARING_DATA,
+        ts,
+    )
+    .await?;
+    let r2 = step(
+        pool,
+        operation_id,
+        STATE_PREPARING_DATA,
+        r1.state_version,
+        STATE_AWAITING_OPEN,
+        ts,
+    )
+    .await?;
+    step(
+        pool,
+        operation_id,
+        STATE_AWAITING_OPEN,
+        r2.state_version,
+        STATE_START_RETRYING,
+        ts,
+    )
+    .await
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn transition_to_running_is_atomic_state_runid_started_and_retry_clear() -> anyhow::Result<()>
+{
+    let pool = test_pool().await?;
+    let operation_id = seed_operation(&pool, "to-running-atomic").await;
+    let ts = Utc.with_ymd_and_hms(2026, 7, 20, 13, 31, 0).unwrap();
+    let current = advance_operation_to_start_retrying(&pool, operation_id, ts).await?;
+    record_retry_timing(
+        &pool,
+        operation_id,
+        Some(ts + ChronoDuration::seconds(30)),
+        Some("prior transient failure"),
+        ts,
+    )
+    .await?;
+
+    let run_id = Uuid::new_v4();
+    let to_running_args = mqk_db::TransitionAutonomousDailyOperationToRunningArgs {
+        operation_id,
+        expected_state: current.state.clone(),
+        expected_state_version: current.state_version,
+        run_id,
+        started_at_utc: ts,
+        occurred_at_utc: ts,
+        bounded_detail: "atomic running proof".to_string(),
+    };
+    match mqk_db::transition_autonomous_daily_operation_to_running(&pool, &to_running_args).await? {
+        AutonomousDailyTransitionOutcome::Applied(r) => {
+            assert_eq!(r.state, STATE_RUNNING);
+            assert_eq!(r.run_id, Some(run_id));
+            assert_eq!(r.started_at_utc, Some(ts));
+            assert_eq!(r.next_retry_utc, None, "next_retry_utc must be cleared");
+            assert_eq!(r.last_error, None, "last_error must be cleared");
+            assert_eq!(r.state_reason_code, None);
+            assert_eq!(r.state_blocker_signature, None);
+            assert_eq!(r.state_version, current.state_version + 1);
+        }
+        other => panic!("expected Applied, got {other:?}"),
+    }
+
+    let events = list_autonomous_daily_operation_events(&pool, operation_id, 100).await?;
+    let last = events.last().expect("at least one event must exist");
+    assert_eq!(last.to_state, STATE_RUNNING);
+    assert_eq!(last.run_id, Some(run_id));
+    assert_eq!(
+        last.transition_seq,
+        current.state_version + 1,
+        "exactly one matching event must be inserted at the new state_version"
+    );
+
+    cleanup_operation(&pool, operation_id).await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn transition_to_running_forced_event_insert_failure_rolls_back_everything(
+) -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    let operation_id = seed_operation(&pool, "to-running-rollback").await;
+    let ts = Utc.with_ymd_and_hms(2026, 7, 20, 13, 31, 0).unwrap();
+    let current = advance_operation_to_start_retrying(&pool, operation_id, ts).await?;
+
+    // Pre-seed a conflicting event row at the exact transition_seq the
+    // running transition would use, forcing its INSERT to violate the
+    // primary key and the whole transaction to roll back.
+    sqlx::query(
+        "insert into sys_autonomous_daily_operation_events \
+         (operation_id, transition_seq, from_state, to_state, reason_code, occurred_at_utc, \
+          run_id, bounded_detail) \
+         values ($1, $2, $3, $4, null, $5, null, 'pre-seeded conflict')",
+    )
+    .bind(operation_id)
+    .bind(current.state_version + 1)
+    .bind(&current.state)
+    .bind(STATE_RUNNING)
+    .bind(ts)
+    .execute(&pool)
+    .await?;
+
+    let run_id = Uuid::new_v4();
+    let to_running_args = mqk_db::TransitionAutonomousDailyOperationToRunningArgs {
+        operation_id,
+        expected_state: current.state.clone(),
+        expected_state_version: current.state_version,
+        run_id,
+        started_at_utc: ts,
+        occurred_at_utc: ts,
+        bounded_detail: "forced rollback proof".to_string(),
+    };
+    let result =
+        mqk_db::transition_autonomous_daily_operation_to_running(&pool, &to_running_args).await;
+    assert!(
+        result.is_err(),
+        "the conflicting event insert must fail the whole transaction"
+    );
+
+    let row = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation_id)
+        .await?
+        .expect("row must exist");
+    assert_eq!(
+        row.state, current.state,
+        "state must roll back to its pre-attempt value"
+    );
+    assert_eq!(
+        row.state_version, current.state_version,
+        "state_version must not be incremented on a rolled-back transaction"
+    );
+    assert_eq!(
+        row.run_id, None,
+        "run_id must never be adopted on a rolled-back transaction"
+    );
+    assert_eq!(
+        row.started_at_utc, None,
+        "started_at_utc must never be set on a rolled-back transaction"
+    );
+
+    cleanup_operation(&pool, operation_id).await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn concurrent_transitions_to_running_produce_exactly_one_applied() -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    let operation_id = seed_operation(&pool, "to-running-concurrent").await;
+    let ts = Utc.with_ymd_and_hms(2026, 7, 20, 13, 31, 0).unwrap();
+    let current = advance_operation_to_start_retrying(&pool, operation_id, ts).await?;
+
+    let mut handles = Vec::new();
+    for _ in 0..5 {
+        let pool = pool.clone();
+        let expected_state = current.state.clone();
+        let expected_state_version = current.state_version;
+        handles.push(tokio::spawn(async move {
+            let args = mqk_db::TransitionAutonomousDailyOperationToRunningArgs {
+                operation_id,
+                expected_state,
+                expected_state_version,
+                run_id: Uuid::new_v4(),
+                started_at_utc: ts,
+                occurred_at_utc: ts,
+                bounded_detail: "race".to_string(),
+            };
+            mqk_db::transition_autonomous_daily_operation_to_running(&pool, &args).await
+        }));
+    }
+    let mut applied_count = 0;
+    for h in handles {
+        if let Ok(Ok(AutonomousDailyTransitionOutcome::Applied(_))) = h.await {
+            applied_count += 1;
+        }
+    }
+    assert_eq!(
+        applied_count, 1,
+        "exactly one concurrent running transition must be applied"
+    );
+
+    cleanup_operation(&pool, operation_id).await;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D2-LIFECYCLE-CLOSURE-REPAIR-01
+// record_autonomous_runtime_stopped
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn record_autonomous_runtime_stopped_clears_retry_state_atomically_and_is_idempotent(
+) -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    let operation_id = seed_operation(&pool, "runtime-stopped").await;
+    let ts = Utc.with_ymd_and_hms(2026, 7, 20, 20, 1, 0).unwrap();
+    record_retry_timing(
+        &pool,
+        operation_id,
+        Some(ts + ChronoDuration::seconds(30)),
+        Some("stop attempt failed"),
+        ts,
+    )
+    .await?;
+
+    match mqk_db::record_autonomous_runtime_stopped(&pool, operation_id, ts).await? {
+        mqk_db::RecordAutonomousRuntimeStoppedOutcome::Recorded { stopped_at_utc } => {
+            assert_eq!(stopped_at_utc, ts)
+        }
+        other => panic!("expected Recorded, got {other:?}"),
+    }
+    let row = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation_id)
+        .await?
+        .expect("row must exist");
+    assert_eq!(row.stopped_at_utc, Some(ts));
+    assert_eq!(row.next_retry_utc, None, "next_retry_utc must be cleared");
+    assert_eq!(row.last_error, None, "last_error must be cleared");
+
+    // Idempotent: a second call with a later timestamp must never rewind
+    // the already-recorded stopped_at_utc.
+    let later = ts + ChronoDuration::minutes(2);
+    match mqk_db::record_autonomous_runtime_stopped(&pool, operation_id, later).await? {
+        mqk_db::RecordAutonomousRuntimeStoppedOutcome::Recorded { stopped_at_utc } => {
+            assert_eq!(
+                stopped_at_utc, ts,
+                "a second call must never rewind the already-recorded stopped_at_utc"
+            )
+        }
+        other => panic!("expected Recorded, got {other:?}"),
+    }
 
     cleanup_operation(&pool, operation_id).await;
     Ok(())

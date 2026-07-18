@@ -320,6 +320,12 @@
       "path": "0051_autonomous_daily_stop_retry_evidence.sql",
       "status": "applied",
       "intent": "AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D2-DURABLE-SESSION-COORDINATOR: add nullable stop_attempt_count/last_stop_attempt_utc columns to sys_autonomous_daily_operations, additive, does not modify 0048/0049/0050. Closes the durable stop-retry evidence gap: the existing schema had durable start-attempt evidence but nothing equivalent for the canonical stop_execution_runtime path. Legacy rows round-trip both columns as null (unknown history, never fabricated as zero); every row created through the current mqk_db::autonomous_daily_operation store API supplies an explicit stop_attempt_count of 0 at insert time -- no SQL DEFAULT."
+    },
+    {
+      "id": "0052",
+      "path": "0052_autonomous_daily_blocker_signature.sql",
+      "status": "applied",
+      "intent": "AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D2-LIFECYCLE-CLOSURE-REPAIR-01: add nullable state_blocker_signature column to sys_autonomous_daily_operations, additive, does not modify 0048/0049/0050/0051. Closes a dedup-authority gap: state_reason_code alone cannot distinguish two distinct blocker occurrences sharing the same reason code. state_blocker_signature carries the D1 typed bounded blocker signature (sha256:<64 hex chars>) so dedup requires (state, state_reason_code, state_blocker_signature) together. Legacy rows round-trip as null (never fabricated); every new row created through the current mqk_db::autonomous_daily_operation store API supplies an explicit null at insert time -- no SQL DEFAULT."
     }
   ]
 }

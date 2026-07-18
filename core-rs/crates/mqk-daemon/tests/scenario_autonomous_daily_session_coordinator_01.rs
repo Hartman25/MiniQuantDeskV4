@@ -23,7 +23,7 @@ use std::sync::Arc;
 use chrono::{DateTime, Duration as ChronoDuration, NaiveDate, TimeZone, Utc};
 use mqk_daemon::state::autonomous_daily_coordinator::{
     apply_transition, attempt_canonical_start, dispatch_by_state, handle_running,
-    handle_session_close, handle_stopping, tick_autonomous_daily_coordinator,
+    handle_session_close, handle_stopping, retry_stop, tick_autonomous_daily_coordinator,
     AutonomousDailyCoordinatorTickInput, AutonomousDailyCoordinatorTickOutcome,
 };
 use mqk_daemon::state::{
@@ -457,7 +457,8 @@ async fn b04_identity_conflict_creates_no_second_row_and_calls_neither_start_nor
         matches!(
             outcome,
             AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
-                reason_code: "operation_identity_conflict"
+                reason_code: "operation_identity_conflict",
+                ..
             }
         ),
         "identity conflict must classify as manual intervention, got {outcome:?}"
@@ -479,6 +480,54 @@ async fn b04_identity_conflict_creates_no_second_row_and_calls_neither_start_nor
     assert!(
         st.locally_owned_run_id().await.is_none(),
         "identity conflict must never call the canonical start path"
+    );
+
+    // REPAIR 8: the existing (conflicting) operation must be durably
+    // CAS-transitioned to manual_intervention_required exactly once, with a
+    // full typed blocker signature persisted alongside the reason code.
+    let existing_after_conflict =
+        mqk_db::fetch_autonomous_daily_operation_by_id(&pool, other_operation_id)
+            .await?
+            .expect("the existing (conflicting) row must still exist");
+    assert_eq!(
+        existing_after_conflict.state,
+        mqk_db::STATE_MANUAL_INTERVENTION_REQUIRED,
+        "the existing operation must be durably transitioned to manual intervention"
+    );
+    assert_eq!(
+        existing_after_conflict.state_reason_code.as_deref(),
+        Some("operation_identity_conflict")
+    );
+    assert!(
+        existing_after_conflict.state_blocker_signature.is_some(),
+        "a full typed blocker signature must be persisted, not just the reason code"
+    );
+    let version_after_first_conflict = existing_after_conflict.state_version;
+
+    // REPAIR 8 restart dedup: a second identical tick (simulating a fresh
+    // process observing the same unchanged conflict) must not re-transition
+    // the existing row and must report newly_applied = false.
+    let outcome2 = tick_autonomous_daily_coordinator(AutonomousDailyCoordinatorTickInput {
+        state: &st,
+        now_utc: now + ChronoDuration::seconds(30),
+    })
+    .await?;
+    assert_eq!(
+        outcome2,
+        AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
+            reason_code: "operation_identity_conflict",
+            newly_applied: false,
+        },
+        "an unchanged identity conflict must survive a process restart without a repeated \
+         transition or notification"
+    );
+    let existing_after_second_tick =
+        mqk_db::fetch_autonomous_daily_operation_by_id(&pool, other_operation_id)
+            .await?
+            .expect("row must still exist");
+    assert_eq!(
+        existing_after_second_tick.state_version, version_after_first_conflict,
+        "an unchanged identity conflict must never re-transition the existing row"
     );
 
     cleanup_operation(&pool, other_operation_id).await;
@@ -637,6 +686,7 @@ fn stub_operation_awaiting_open(
         postclose_finalize_utc: now + ChronoDuration::hours(6) + ChronoDuration::minutes(15),
         state: mqk_db::STATE_AWAITING_OPEN.to_string(),
         state_reason_code: None,
+        state_blocker_signature: None,
         state_version: 1,
         run_id: None,
         start_attempt_count: 0,
@@ -721,7 +771,8 @@ async fn d01_halted_integrity_blocks_start_with_zero_attempts() -> anyhow::Resul
         matches!(
             outcome,
             AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
-                reason_code: "integrity_halted"
+                reason_code: "integrity_halted",
+                ..
             }
         ),
         "halted integrity must classify manual/integrity_halted, got {outcome:?}"
@@ -767,7 +818,8 @@ async fn d02_durable_disarm_blocks_start_with_zero_attempts() -> anyhow::Result<
         matches!(
             outcome,
             AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
-                reason_code: "durable_arm_disarmed"
+                reason_code: "durable_arm_disarmed",
+                ..
             }
         ),
         "durable DISARMED must classify manual/durable_arm_disarmed, got {outcome:?}"
@@ -871,7 +923,8 @@ async fn d05_operator_managed_run_is_never_stopped_attached_or_started_over() ->
         matches!(
             outcome,
             AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
-                reason_code: "operator_managed_run_active"
+                reason_code: "operator_managed_run_active",
+                ..
             }
         ),
         "an operator-managed run must block with a distinct typed reason, got {outcome:?}"
@@ -921,26 +974,29 @@ async fn seed_running_operation(
     let current = mqk_db::fetch_autonomous_daily_operation_by_id(pool, operation_id)
         .await?
         .expect("seeded row must exist");
-    let current = apply_transition(
+    let (current, _) = apply_transition(
         pool,
         &current,
         mqk_db::STATE_START_RETRYING,
+        None,
         None,
         now,
         None,
         "test setup",
     )
     .await?;
-    apply_transition(
+    let (record, _) = apply_transition(
         pool,
         &current,
         mqk_db::STATE_RUNNING,
+        None,
         None,
         now,
         Some(run_id),
         "test setup",
     )
-    .await
+    .await?;
+    Ok(record)
 }
 
 #[tokio::test]
@@ -1000,7 +1056,8 @@ async fn e02_mismatched_local_run_becomes_controller_degraded_manual() -> anyhow
         matches!(
             outcome,
             AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
-                reason_code: "runtime_run_id_mismatch"
+                reason_code: "runtime_run_id_mismatch",
+                ..
             }
         ),
         "a mismatched local run must classify manual/runtime_run_id_mismatch, got {outcome:?}"
@@ -1030,6 +1087,15 @@ async fn e03_terminal_prior_run_without_halt_enters_recovery_retrying() -> anyho
     let run_id = Uuid::new_v4();
     let operation_id = Uuid::new_v4();
     let operation = seed_running_operation(&pool, operation_id, &adapter_id, run_id, now).await?;
+    // REPAIR 9: handle_running now reads durable arm state before scheduling
+    // recovery. `sys_arm_state` is a process-wide singleton shared by every
+    // test in this binary (e.g. d02 durably persists DISARMED) — explicitly
+    // re-persist ARMED here so this test proves the "terminal run, session
+    // still open, durably ARMED" recovery path, matching the real
+    // production invariant that reaching `running` always implies a prior
+    // successful arm was persisted, rather than depending on leftover state
+    // from test execution order.
+    mqk_db::persist_arm_state_canonical(&pool, mqk_db::ArmState::Armed, None).await?;
 
     let st = paper_state_with_db(pool.clone(), &adapter_id);
     // A terminal run row exists (stopped), but no local runtime owns it —
@@ -1082,6 +1148,10 @@ async fn e04_halted_termination_is_never_retried() -> anyhow::Result<()> {
     let run_id = Uuid::new_v4();
     let operation_id = Uuid::new_v4();
     let operation = seed_running_operation(&pool, operation_id, &adapter_id, run_id, now).await?;
+    // REPAIR 9: see e03's comment — re-persist ARMED so this test proves
+    // the halted-integrity override specifically, not incidental leftover
+    // DISARMED state from another test sharing the same singleton row.
+    mqk_db::persist_arm_state_canonical(&pool, mqk_db::ArmState::Armed, None).await?;
 
     let st = paper_state_with_db(pool.clone(), &adapter_id);
     mqk_db::insert_run(
@@ -1112,7 +1182,8 @@ async fn e04_halted_termination_is_never_retried() -> anyhow::Result<()> {
         matches!(
             outcome,
             AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
-                reason_code: "runtime_ended_unsafely"
+                reason_code: "runtime_ended_unsafely",
+                ..
             }
         ),
         "a halted termination must never be scheduled for recovery, got {outcome:?}"
@@ -1121,6 +1192,70 @@ async fn e04_halted_termination_is_never_retried() -> anyhow::Result<()> {
         .await?
         .expect("row must exist");
     assert_ne!(row.state, mqk_db::STATE_RECOVERY_RETRYING);
+
+    cleanup_operation(&pool, operation_id).await;
+    cleanup_run(&pool, run_id).await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn e05_durable_disarm_schedules_no_recovery() -> anyhow::Result<()> {
+    reset_env();
+    let pool = test_pool().await?;
+    let adapter_id = format!("coord-e05-{}", unique_suffix());
+    let now = weekday_at(14, 0);
+    let run_id = Uuid::new_v4();
+    let operation_id = Uuid::new_v4();
+    let operation = seed_running_operation(&pool, operation_id, &adapter_id, run_id, now).await?;
+    // REPAIR 9: a durable DISARMED arm state must block recovery scheduling
+    // before any retry timestamp is persisted — never postponed until the
+    // next canonical start attempt.
+    mqk_db::persist_arm_state_canonical(
+        &pool,
+        mqk_db::ArmState::Disarmed,
+        Some(mqk_db::DisarmReason::OperatorHalt),
+    )
+    .await?;
+
+    let st = paper_state_with_db(pool.clone(), &adapter_id);
+    mqk_db::insert_run(
+        &pool,
+        &mqk_db::NewRun {
+            run_id,
+            engine_id: "mqk-daemon".to_string(),
+            mode: "PAPER".to_string(),
+            started_at_utc: now,
+            git_hash: "TEST".to_string(),
+            config_hash: "test".to_string(),
+            config_json: serde_json::json!({}),
+            host_fingerprint: "test-node".to_string(),
+        },
+    )
+    .await?;
+    mqk_db::arm_run(&pool, run_id).await?;
+    mqk_db::begin_run(&pool, run_id).await?;
+    mqk_db::stop_run(&pool, run_id).await?;
+
+    let outcome = handle_running(&st, &pool, operation, now).await?;
+    assert!(
+        matches!(
+            outcome,
+            AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
+                reason_code: "durable_arm_disarmed",
+                ..
+            }
+        ),
+        "a durable DISARMED arm state must block recovery scheduling, got {outcome:?}"
+    );
+    let row = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation_id)
+        .await?
+        .expect("row must exist");
+    assert_ne!(row.state, mqk_db::STATE_RECOVERY_RETRYING);
+    assert!(
+        row.next_retry_utc.is_none(),
+        "no retry timestamp may be persisted for a durably disarmed operation"
+    );
 
     cleanup_operation(&pool, operation_id).await;
     cleanup_run(&pool, run_id).await;
@@ -1249,20 +1384,22 @@ async fn f04_unresolved_stop_at_postclose_finalize_becomes_manual() -> anyhow::R
     let current = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation_id)
         .await?
         .unwrap();
-    let current = apply_transition(
+    let (current, _) = apply_transition(
         &pool,
         &current,
         mqk_db::STATE_STOPPING,
+        None,
         None,
         now,
         None,
         "test setup",
     )
     .await?;
-    let current = apply_transition(
+    let (current, _) = apply_transition(
         &pool,
         &current,
         mqk_db::STATE_STOP_RETRYING,
+        None,
         None,
         now,
         None,
@@ -1289,13 +1426,190 @@ async fn f04_unresolved_stop_at_postclose_finalize_becomes_manual() -> anyhow::R
         matches!(
             outcome,
             AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
-                reason_code: "unresolved_stop_failure_at_postclose_finalize"
+                reason_code: "unresolved_stop_failure_at_postclose_finalize",
+                ..
             }
         ),
         "an unresolved stop at postclose_finalize_utc must become manual, got {outcome:?}"
     );
 
     cleanup_operation(&pool, operation_id).await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn f05_active_durable_run_without_local_owner_is_never_marked_stopped() -> anyhow::Result<()>
+{
+    reset_env();
+    let pool = test_pool().await?;
+    let adapter_id = format!("coord-f05-{}", unique_suffix());
+    let now = weekday_at(14, 0);
+    let run_id = Uuid::new_v4();
+    let operation_id = Uuid::new_v4();
+    let operation = seed_running_operation(&pool, operation_id, &adapter_id, run_id, now).await?;
+
+    // REPAIR 3: the durable run row is left ARMED/RUNNING; no local runtime
+    // is ever established for this AppState — the ordinary "daemon crashed
+    // mid-session, restarted, but the run row was never terminated" case.
+    let st = paper_state_with_db(pool.clone(), &adapter_id);
+    mqk_db::insert_run(
+        &pool,
+        &mqk_db::NewRun {
+            run_id,
+            engine_id: "mqk-daemon".to_string(),
+            mode: "PAPER".to_string(),
+            started_at_utc: now,
+            git_hash: "TEST".to_string(),
+            config_hash: "test".to_string(),
+            config_json: serde_json::json!({}),
+            host_fingerprint: "test-node".to_string(),
+        },
+    )
+    .await?;
+    mqk_db::arm_run(&pool, run_id).await?;
+    mqk_db::begin_run(&pool, run_id).await?;
+
+    let outcome = handle_session_close(&st, &pool, operation, now).await?;
+    assert!(
+        matches!(
+            outcome,
+            AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
+                reason_code: "durable_active_run_without_local_owner",
+                ..
+            }
+        ),
+        "an active orphaned durable run must never be presented as stopped, got {outcome:?}"
+    );
+    let row = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation_id)
+        .await?
+        .expect("row must exist");
+    assert!(
+        row.stopped_at_utc.is_none(),
+        "an active orphaned run must never be recorded as stopped"
+    );
+    assert_eq!(
+        row.stop_attempt_count,
+        Some(0),
+        "no stop call may be made against an active orphaned run"
+    );
+
+    cleanup_operation(&pool, operation_id).await;
+    cleanup_run(&pool, run_id).await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn f06_terminal_durable_run_without_local_owner_records_stopped_with_no_stop_call(
+) -> anyhow::Result<()> {
+    reset_env();
+    let pool = test_pool().await?;
+    let adapter_id = format!("coord-f06-{}", unique_suffix());
+    let now = weekday_at(14, 0);
+    let run_id = Uuid::new_v4();
+    let operation_id = Uuid::new_v4();
+    let operation = seed_running_operation(&pool, operation_id, &adapter_id, run_id, now).await?;
+
+    let st = paper_state_with_db(pool.clone(), &adapter_id);
+    mqk_db::insert_run(
+        &pool,
+        &mqk_db::NewRun {
+            run_id,
+            engine_id: "mqk-daemon".to_string(),
+            mode: "PAPER".to_string(),
+            started_at_utc: now,
+            git_hash: "TEST".to_string(),
+            config_hash: "test".to_string(),
+            config_json: serde_json::json!({}),
+            host_fingerprint: "test-node".to_string(),
+        },
+    )
+    .await?;
+    mqk_db::arm_run(&pool, run_id).await?;
+    mqk_db::begin_run(&pool, run_id).await?;
+    mqk_db::stop_run(&pool, run_id).await?; // durably terminal
+
+    let outcome = handle_session_close(&st, &pool, operation, now).await?;
+    assert_eq!(
+        outcome,
+        AutonomousDailyCoordinatorTickOutcome::RuntimeStopped
+    );
+    let row = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation_id)
+        .await?
+        .expect("row must exist");
+    assert_eq!(row.state, mqk_db::STATE_STOPPING);
+    assert!(row.stopped_at_utc.is_some());
+    assert_eq!(
+        row.stop_attempt_count,
+        Some(0),
+        "a durably terminal orphaned run must be recorded stopped without any canonical stop call"
+    );
+
+    cleanup_operation(&pool, operation_id).await;
+    cleanup_run(&pool, run_id).await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn f07_stop_retry_with_mismatched_local_run_makes_zero_stop_calls() -> anyhow::Result<()> {
+    reset_env();
+    let pool = test_pool().await?;
+    let adapter_id = format!("coord-f07-{}", unique_suffix());
+    let now = weekday_at(14, 0);
+    let expected_run_id = Uuid::new_v4();
+    let mismatched_run_id = Uuid::new_v4();
+    let operation_id = Uuid::new_v4();
+    let operation =
+        seed_running_operation(&pool, operation_id, &adapter_id, expected_run_id, now).await?;
+    let (operation, _) = apply_transition(
+        &pool,
+        &operation,
+        mqk_db::STATE_STOPPING,
+        None,
+        None,
+        now,
+        None,
+        "test setup",
+    )
+    .await?;
+
+    // REPAIR 4: a runtime that appeared since routing decided to retry the
+    // stop must be re-proven as owned immediately before the stop call —
+    // never stopped merely because the operation remains stop_retrying.
+    let st = paper_state_with_db(pool.clone(), &adapter_id);
+    st.establish_db_backed_active_run_for_test(mismatched_run_id)
+        .await?;
+
+    let outcome = retry_stop(&st, &pool, operation, now).await?;
+    assert!(
+        matches!(
+            outcome,
+            AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
+                reason_code: "mismatched_runtime_at_close",
+                ..
+            }
+        ),
+        "a mismatched local run must never be stopped, got {outcome:?}"
+    );
+    let row = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation_id)
+        .await?
+        .expect("row must exist");
+    assert_eq!(
+        row.stop_attempt_count,
+        Some(0),
+        "no stop call may be made against a mismatched runtime"
+    );
+    assert_eq!(
+        st.locally_owned_run_id().await,
+        Some(mismatched_run_id),
+        "the mismatched runtime must remain untouched"
+    );
+
+    cleanup_operation(&pool, operation_id).await;
+    cleanup_run(&pool, expected_run_id).await;
+    cleanup_run(&pool, mismatched_run_id).await;
     Ok(())
 }
 
@@ -1388,6 +1702,169 @@ async fn g01_durable_manual_blocker_suppresses_start_after_process_restart() -> 
         after_second.state_version, version_after_first,
         "an unchanged durable manual blocker must suppress a repeated transition/event across a \
          simulated process restart, using only durable DB state — no process-local memory"
+    );
+
+    cleanup_operation(&pool, operation_id).await;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// H — Recovery retry sequencing (DB-backed)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn h01_recovery_retry_due_calls_start_without_illegal_start_retrying_edge(
+) -> anyhow::Result<()> {
+    reset_env();
+    let pool = test_pool().await?;
+    let adapter_id = format!("coord-h01-{}", unique_suffix());
+    let now = weekday_at(14, 0);
+    let operation_id = Uuid::new_v4();
+    let stub = stub_operation_awaiting_open(operation_id, &adapter_id, now);
+    seed_stub_row(&pool, &stub).await?;
+    let current = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation_id)
+        .await?
+        .unwrap();
+    // Drive the row to recovery_retrying via the exact legal edges
+    // handle_running itself uses (awaiting_open -> start_retrying -> running
+    // -> recovery_retrying), proving this test exercises a durably legal
+    // prior state, not a fabricated in-memory-only one.
+    let (current, _) = apply_transition(
+        &pool,
+        &current,
+        mqk_db::STATE_START_RETRYING,
+        None,
+        None,
+        now,
+        None,
+        "test setup",
+    )
+    .await?;
+    let (current, _) = apply_transition(
+        &pool,
+        &current,
+        mqk_db::STATE_RUNNING,
+        None,
+        None,
+        now,
+        Some(Uuid::new_v4()),
+        "test setup",
+    )
+    .await?;
+    let (current, _) = apply_transition(
+        &pool,
+        &current,
+        mqk_db::STATE_RECOVERY_RETRYING,
+        Some("runtime_ended_without_halt"),
+        None,
+        now,
+        None,
+        "test setup",
+    )
+    .await?;
+    assert_eq!(current.state, mqk_db::STATE_RECOVERY_RETRYING);
+
+    mqk_db::persist_arm_state_canonical(&pool, mqk_db::ArmState::Armed, None).await?;
+    let st = paper_state_with_db(pool.clone(), &adapter_id);
+    {
+        let mut ig = st.integrity.write().await;
+        ig.disarmed = false;
+        ig.halted = false;
+    }
+
+    // REPAIR 1: before this repair, `attempt_canonical_start` durably
+    // attempted the illegal `recovery_retrying -> start_retrying` edge here
+    // and the whole tick errored out (the DB-level CAS+legality check
+    // rejects that edge). It must now succeed and never persist
+    // start_retrying for a recovery attempt.
+    let outcome =
+        attempt_canonical_start(&st, &pool, current, now, mqk_db::STATE_RECOVERY_RETRYING).await?;
+    assert!(
+        !matches!(outcome, AutonomousDailyCoordinatorTickOutcome::RetryNotDue),
+        "the retry must be due at `now`, got {outcome:?}"
+    );
+
+    let row = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation_id)
+        .await?
+        .expect("row must exist");
+    assert_ne!(
+        row.state,
+        mqk_db::STATE_START_RETRYING,
+        "recovery_retrying must never durably transition through start_retrying"
+    );
+    assert_eq!(
+        row.start_attempt_count, 1,
+        "the canonical start call must still be attempted and counted exactly once"
+    );
+
+    cleanup_operation(&pool, operation_id).await;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// I — Manual notification dedup (DB-backed)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn i01_newly_applied_is_true_once_then_false_for_an_unchanged_blocker() -> anyhow::Result<()>
+{
+    reset_env();
+    let pool = test_pool().await?;
+    let adapter_id = format!("coord-i01-{}", unique_suffix());
+    let now = weekday_at(13, 30);
+    let operation_id = Uuid::new_v4();
+    let stub = stub_operation_awaiting_open(operation_id, &adapter_id, now);
+    seed_stub_row(&pool, &stub).await?;
+
+    let st = paper_state_with_db(pool.clone(), &adapter_id);
+    let operator_run_id = Uuid::new_v4();
+    st.establish_db_backed_active_run_for_test(operator_run_id)
+        .await
+        .expect("establish operator run");
+
+    // First observation of the operator-managed-run blocker: newly applied.
+    let outcome1 =
+        attempt_canonical_start(&st, &pool, stub.clone(), now, mqk_db::STATE_AWAITING_OPEN).await?;
+    assert_eq!(
+        outcome1,
+        AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
+            reason_code: "operator_managed_run_active",
+            newly_applied: true,
+        },
+        "REPAIR 11: the first observation of a new blocker must report newly_applied = true"
+    );
+
+    let updated = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation_id)
+        .await?
+        .expect("row must exist");
+
+    // Second tick, exact same unchanged blocker: never re-transitioned, and
+    // newly_applied must be false — session_controller.rs's sole authority
+    // for suppressing a repeated critical notification.
+    let outcome2 = attempt_canonical_start(
+        &st,
+        &pool,
+        updated.clone(),
+        now + ChronoDuration::seconds(30),
+        mqk_db::STATE_AWAITING_OPEN,
+    )
+    .await?;
+    assert_eq!(
+        outcome2,
+        AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
+            reason_code: "operator_managed_run_active",
+            newly_applied: false,
+        },
+        "REPAIR 11: an unchanged blocker must report newly_applied = false"
+    );
+    let after_second = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation_id)
+        .await?
+        .expect("row must exist");
+    assert_eq!(
+        after_second.state_version, updated.state_version,
+        "an unchanged blocker must never write a second transition"
     );
 
     cleanup_operation(&pool, operation_id).await;

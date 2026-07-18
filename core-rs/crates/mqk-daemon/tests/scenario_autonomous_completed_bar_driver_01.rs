@@ -864,6 +864,7 @@ fn stub_operation(
         postclose_finalize_utc: now + chrono::Duration::hours(6) + chrono::Duration::minutes(15),
         state: mqk_db::STATE_AWAITING_OPEN.to_string(),
         state_reason_code: None,
+        state_blocker_signature: None,
         state_version: 1,
         run_id: None,
         start_attempt_count: 0,

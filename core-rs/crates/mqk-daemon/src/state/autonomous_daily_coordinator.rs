@@ -29,6 +29,48 @@
 //! finalization). It does not read the wall clock: every caller supplies
 //! `now_utc`.
 //!
+//! # AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D2-LIFECYCLE-CLOSURE-REPAIR-01
+//!
+//! This closure repair fixes twelve D2 lifecycle defects without beginning
+//! Phase D3 (completed-bar task cutover):
+//!
+//! 1. Recovery retries no longer take the illegal `recovery_retrying ->
+//!    start_retrying` edge — only `awaiting_open` transitions to
+//!    `start_retrying` before the canonical start call
+//!    ([`attempt_canonical_start`]).
+//! 2. Start success, running state, run binding, `started_at_utc`, retry
+//!    clearing, and the transition event are one atomic DB transaction
+//!    (`mqk_db::transition_autonomous_daily_operation_to_running`), never a
+//!    split `transition` + `record_running_started` sequence.
+//! 3. Session-close reconciliation ([`handle_session_close`]) never
+//!    represents a durably active orphaned run as stopped — it fetches the
+//!    durable run row before ever recording `stopped_at_utc`.
+//! 4. Every stop retry ([`retry_stop`]) re-proves run-ownership
+//!    immediately before the canonical stop call, not once at routing time.
+//! 5. Stop completion is restart-safe and idempotent
+//!    (`mqk_db::record_autonomous_runtime_stopped`).
+//! 6. The first observation of an operation created already past close
+//!    reaches `stopping` via the legal `awaiting_open -> stopping` edge,
+//!    never a fabricated `manual_intervention_required` jump.
+//! 7. A durable, bounded blocker signature
+//!    (`state_blocker_signature`, migration `0052`) makes manual/blocked
+//!    dedup depend on `(state, state_reason_code, state_blocker_signature)`
+//!    together, never `state_reason_code` alone.
+//! 8. A same-day identity conflict durably transitions the *existing*
+//!    operation to `manual_intervention_required` exactly once
+//!    ([`handle_identity_conflict`]).
+//! 9. A durable `DISARMED` arm state blocks recovery scheduling before any
+//!    retry timestamp is persisted ([`handle_running`]).
+//! 10. `run_durable_session_controller_tick` (`session_controller.rs`)
+//!     projects every coordinator outcome onto `AutonomousSessionTruth`.
+//! 11. A manual-intervention transition reports whether it was newly
+//!     applied this tick (`ManualInterventionRequired.newly_applied`), so
+//!     `session_controller.rs` can send exactly one critical notification
+//!     per newly-applied blocker and zero for an unchanged one.
+//! 12. An isolated end-to-end fixture proves a full coordinator-driven
+//!     start and stop through the real production path
+//!     (`scenario_autonomous_paper_day_lifecycle_auton12.rs`).
+//!
 //! # Testability
 //!
 //! Unlike a fully effect-injected design, this coordinator drives the real
@@ -76,6 +118,7 @@ use mqk_db::{
 
 const MAX_BOUNDED_DETAIL: usize = 4000;
 const MAX_REASON_CODE: usize = 128;
+const MAX_BLOCKER_SIGNATURE: usize = 128;
 
 fn bounded_detail(s: impl Into<String>) -> String {
     let mut s = s.into();
@@ -90,6 +133,14 @@ fn bounded_reason(s: &str) -> String {
         s[..MAX_REASON_CODE].to_string()
     } else {
         s.to_string()
+    }
+}
+
+fn bounded_signature(s: String) -> String {
+    if s.len() > MAX_BLOCKER_SIGNATURE {
+        s[..MAX_BLOCKER_SIGNATURE].to_string()
+    } else {
+        s
     }
 }
 
@@ -148,8 +199,16 @@ pub enum AutonomousDailyCoordinatorTickOutcome {
     Recovered {
         run_id: Uuid,
     },
+    /// REPAIR 11: `newly_applied` is `true` only when this exact tick
+    /// durably applied a new (or changed) manual/controller-degraded
+    /// transition — `false` for an unchanged blocker still being reported
+    /// (a passthrough of already-persisted truth, or a same-blocker replay
+    /// this tick chose not to re-write). `log_coordinator_outcome`
+    /// (`session_controller.rs`) uses this — never process-local memory —
+    /// as the sole authority for whether to send one critical notification.
     ManualInterventionRequired {
         reason_code: &'static str,
+        newly_applied: bool,
     },
     StopAttempted,
     RuntimeStopped,
@@ -188,9 +247,13 @@ pub async fn tick_autonomous_daily_coordinator(
     };
 
     let Some(pool) = state.db.clone() else {
+        // No operation can exist without a DB, so there is nothing to dedup
+        // against here. A total DB outage is deliberately never
+        // deduplicated to silence — the operator must keep hearing about it.
         return Ok(
             AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
                 reason_code: "database_not_configured_or_invalid",
+                newly_applied: true,
             },
         );
     };
@@ -242,30 +305,27 @@ pub async fn tick_autonomous_daily_coordinator(
         Err(outcome) => return Ok(outcome),
     };
 
-    // D2.6: an operation first observed already past close never fabricates
-    // a running/stopping history it never had. `create_or_recover` always
-    // seeds a fresh row with the narrowest truthful legal initial state
-    // (`awaiting_open`, see `initial_state_for_plan`); if that first
-    // observation is already past `effective_operation_close_utc`, record
-    // this truthfully as one immediate, honest transition rather than
-    // silently inventing a `running` step that never happened.
+    // REPAIR 6: an operation first observed already past close never
+    // fabricates a running/stopping history it never had, but it also
+    // never invents a manual-intervention jump when the honest legal edge
+    // (`awaiting_open -> stopping`, added by D2) already exists. Zero start
+    // calls, zero stop calls: the operation never had a run_id, so no local
+    // runtime could possibly be attributed to it.
     if created && now_utc >= plan.effective_operation_close_utc {
-        apply_transition(
+        let (updated, _) = apply_transition(
             &pool,
             &operation,
-            STATE_MANUAL_INTERVENTION_REQUIRED,
-            Some("session_closed_before_first_observation"),
+            STATE_STOPPING,
+            None,
+            None,
             now_utc,
             None,
             "operation first observed at or after effective_operation_close_utc; \
              no runtime was ever started by this coordinator for this operation",
         )
         .await?;
-        return Ok(
-            AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
-                reason_code: "session_closed_before_first_observation",
-            },
-        );
+        mqk_db::record_autonomous_runtime_stopped(&pool, updated.operation_id, now_utc).await?;
+        return Ok(AutonomousDailyCoordinatorTickOutcome::AwaitingOutcomeFinalization);
     }
 
     dispatch_by_state(state, &pool, operation, &plan, now_utc).await
@@ -316,12 +376,91 @@ async fn create_or_recover(
         CreateOrRecoverAutonomousDailyOperationOutcome::Recovered(record) => {
             Ok(Ok((record, false)))
         }
-        CreateOrRecoverAutonomousDailyOperationOutcome::IdentityConflict { .. } => Ok(Err(
-            AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
-                reason_code: "operation_identity_conflict",
-            },
-        )),
+        CreateOrRecoverAutonomousDailyOperationOutcome::IdentityConflict {
+            existing_operation_id,
+            ..
+        } => {
+            let newly_applied = handle_identity_conflict(
+                pool,
+                existing_operation_id,
+                assignment_identity,
+                runtime_binding_identity,
+                now_utc,
+            )
+            .await?;
+            Ok(Err(
+                AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
+                    reason_code: "operation_identity_conflict",
+                    newly_applied,
+                },
+            ))
+        }
     }
+}
+
+/// REPAIR 8: durable identity-conflict truth. The daily slot already holds
+/// a row whose immutable identity fields differ from the freshly computed
+/// expected values (e.g. an operator changed strategy/symbol/timeframe
+/// config and restarted mid-day). This never creates a second row and
+/// never rewrites the existing row's immutable identity fields; it durably
+/// CAS-transitions the *existing* operation to `manual_intervention_required`
+/// exactly once, deduplicated by `(state, state_reason_code,
+/// state_blocker_signature)`, and survives a process restart because that
+/// dedup is entirely DB-driven.
+async fn handle_identity_conflict(
+    pool: &PgPool,
+    existing_operation_id: Uuid,
+    assignment_identity: &str,
+    runtime_binding_identity: &str,
+    now_utc: DateTime<Utc>,
+) -> anyhow::Result<bool> {
+    let Some(existing) =
+        mqk_db::fetch_autonomous_daily_operation_by_id(pool, existing_operation_id).await?
+    else {
+        // Nothing durable to reconcile against; report the conflict without
+        // fabricating a transition against a row that does not exist.
+        return Ok(false);
+    };
+
+    if mqk_db::is_terminal_operation_state(&existing.state) {
+        // Terminal: no lifecycle mutation, nothing started.
+        return Ok(false);
+    }
+
+    let reason = AutonomousCoordinatorReason::OperationIdentityConflict;
+    let signature = blocker_signature(
+        &reason,
+        &AutonomousBlockerIdentity {
+            operation_id: Some(existing_operation_id),
+            assignment_identity: Some(assignment_identity),
+            runtime_binding_identity: Some(runtime_binding_identity),
+            ..Default::default()
+        },
+    );
+
+    if !mqk_db::is_legal_operation_transition(
+        Some(&existing.state),
+        STATE_MANUAL_INTERVENTION_REQUIRED,
+    ) {
+        // No legal edge from the existing operation's current state (e.g.
+        // `running`) directly to manual intervention this tick. Report the
+        // conflict without forcing an illegal transition; a later tick
+        // (once the existing operation reaches a state with a legal edge)
+        // will durably record it.
+        return Ok(false);
+    }
+
+    apply_manual_if_changed(
+        pool,
+        &existing,
+        signature.reason_code,
+        signature.stable_context.clone(),
+        now_utc,
+        "a same-day operation identity conflict was detected: the daily slot already holds a \
+         row whose immutable identity fields differ from the freshly computed expected values",
+        STATE_MANUAL_INTERVENTION_REQUIRED,
+    )
+    .await
 }
 
 /// D2.6: the narrowest truthful legal initial state for `now_utc` against
@@ -329,8 +468,8 @@ async fn create_or_recover(
 /// so an operation first observed at or after
 /// `effective_operation_close_utc` still seeds as `awaiting_open` — the
 /// caller (`tick_autonomous_daily_coordinator`) immediately records the one
-/// honest follow-up transition to `manual_intervention_required` for that
-/// specific case.
+/// honest follow-up transition to `stopping` (REPAIR 6) for that specific
+/// case.
 fn initial_state_for_plan(
     plan: &AutonomousDailySessionPlan,
     now_utc: DateTime<Utc>,
@@ -355,29 +494,35 @@ fn initial_state_for_plan(
 /// operation's lifecycle state) or a coordinator logic defect, never a
 /// condition to paper over silently. `Applied` and `AlreadyApplied` both
 /// return the resulting record — an idempotent replay is a legitimate
-/// success, not an error.
+/// success, not an error. The returned `bool` is `true` only for `Applied`
+/// (a genuinely new write this call), `false` for `AlreadyApplied` (an
+/// idempotent replay that wrote nothing new) — REPAIR 11's sole source of
+/// "was this newly applied" truth.
+#[allow(clippy::too_many_arguments)]
 pub async fn apply_transition(
     pool: &PgPool,
     operation: &AutonomousDailyOperationRecord,
     new_state: &str,
     reason_code: Option<&str>,
+    blocker_signature: Option<String>,
     occurred_at_utc: DateTime<Utc>,
     run_id: Option<Uuid>,
     detail: &str,
-) -> anyhow::Result<AutonomousDailyOperationRecord> {
+) -> anyhow::Result<(AutonomousDailyOperationRecord, bool)> {
     let args = TransitionAutonomousDailyOperationArgs {
         operation_id: operation.operation_id,
         expected_state: operation.state.clone(),
         expected_state_version: operation.state_version,
         new_state: new_state.to_string(),
         reason_code: reason_code.map(bounded_reason),
+        blocker_signature: blocker_signature.map(bounded_signature),
         occurred_at_utc,
         run_id,
         bounded_detail: bounded_detail(detail),
     };
     match mqk_db::transition_autonomous_daily_operation(pool, &args).await? {
-        AutonomousDailyTransitionOutcome::Applied(record)
-        | AutonomousDailyTransitionOutcome::AlreadyApplied(record) => Ok(record),
+        AutonomousDailyTransitionOutcome::Applied(record) => Ok((record, true)),
+        AutonomousDailyTransitionOutcome::AlreadyApplied(record) => Ok((record, false)),
         AutonomousDailyTransitionOutcome::StaleState {
             actual_state,
             actual_state_version,
@@ -406,6 +551,43 @@ pub async fn apply_transition(
             )
         }
     }
+}
+
+/// REPAIR 11: apply a manual-intervention/controller-degraded transition
+/// only if `(target_state, reason_code, blocker_signature)` differs from
+/// what the operation already durably carries — the sole guard against
+/// both an illegal same-state CAS re-attempt (e.g. `controller_degraded ->
+/// controller_degraded` is not a legal edge) and a repeated critical
+/// notification for an unchanged blocker. Returns whether the transition
+/// was newly applied this tick.
+#[allow(clippy::too_many_arguments)]
+async fn apply_manual_if_changed(
+    pool: &PgPool,
+    operation: &AutonomousDailyOperationRecord,
+    reason_code: &'static str,
+    blocker_signature: Option<String>,
+    now_utc: DateTime<Utc>,
+    detail: &str,
+    target_state: &'static str,
+) -> anyhow::Result<bool> {
+    if operation.state.as_str() == target_state
+        && operation.state_reason_code.as_deref() == Some(reason_code)
+        && operation.state_blocker_signature.as_deref() == blocker_signature.as_deref()
+    {
+        return Ok(false);
+    }
+    let (_, newly_applied) = apply_transition(
+        pool,
+        operation,
+        target_state,
+        Some(reason_code),
+        blocker_signature,
+        now_utc,
+        None,
+        detail,
+    )
+    .await?;
+    Ok(newly_applied)
 }
 
 fn blocker_signature_for(
@@ -460,6 +642,7 @@ pub async fn dispatch_by_state(
                     &operation,
                     STATE_PREPARING_DATA,
                     None,
+                    None,
                     now_utc,
                     None,
                     "preopen window reached",
@@ -495,6 +678,7 @@ pub async fn dispatch_by_state(
             Ok(
                 AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
                     reason_code: bounded_static_reason(reason_code),
+                    newly_applied: false,
                 },
             )
         }
@@ -511,6 +695,7 @@ pub async fn dispatch_by_state(
         mqk_db::STATE_CONTROLLER_DEGRADED | mqk_db::STATE_EVIDENCE_DEGRADED => Ok(
             AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
                 reason_code: "controller_degraded",
+                newly_applied: false,
             },
         ),
         other => {
@@ -547,6 +732,7 @@ fn bounded_static_reason(reason_code: &str) -> &'static str {
         "durable_arm_disarmed" => "durable_arm_disarmed",
         "run_row_fetch_failed" => "run_row_fetch_failed",
         "running_operation_missing_run_id" => "running_operation_missing_run_id",
+        "arm_state_read_failed" => "arm_state_read_failed",
         _ => "manual_intervention_required",
     }
 }
@@ -599,6 +785,7 @@ async fn handle_preparing_data(
                 operation,
                 STATE_AWAITING_OPEN,
                 None,
+                None,
                 now_utc,
                 None,
                 "strict daily data readiness ready at effective operation open",
@@ -649,10 +836,11 @@ async fn handle_preflight_blocked(
     if report.start_allowed && now_utc >= plan.effective_operation_open_utc {
         // preflight_blocked's only legal forward edge is start_retrying —
         // there is no legal edge back to awaiting_open.
-        let updated = apply_transition(
+        let (updated, _) = apply_transition(
             pool,
             operation,
             STATE_START_RETRYING,
+            None,
             None,
             now_utc,
             None,
@@ -732,6 +920,7 @@ async fn classify_and_apply_preopen_blocker(
                     operation,
                     STATE_PREFLIGHT_BLOCKED,
                     Some(signature.reason_code),
+                    signature.stable_context.clone(),
                     now_utc,
                     None,
                     "preopen readiness not yet satisfied",
@@ -752,21 +941,20 @@ async fn classify_and_apply_preopen_blocker(
         }
         AutonomousRetryClass::ManualInterventionRequired
         | AutonomousRetryClass::SessionTerminal => {
-            if operation.state_reason_code.as_deref() != Some(signature.reason_code) {
-                apply_transition(
-                    pool,
-                    operation,
-                    STATE_MANUAL_INTERVENTION_REQUIRED,
-                    Some(signature.reason_code),
-                    now_utc,
-                    None,
-                    "preopen readiness blocked by a manual-intervention condition",
-                )
-                .await?;
-            }
+            let newly_applied = apply_manual_if_changed(
+                pool,
+                operation,
+                signature.reason_code,
+                signature.stable_context.clone(),
+                now_utc,
+                "preopen readiness blocked by a manual-intervention condition",
+                STATE_MANUAL_INTERVENTION_REQUIRED,
+            )
+            .await?;
             Ok(
                 AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
                     reason_code: signature.reason_code,
+                    newly_applied,
                 },
             )
         }
@@ -793,20 +981,21 @@ pub async fn attempt_canonical_start(
     // function only after `handle_running` has already ruled out the
     // operator-managed case.
     if operation.run_id.is_none() && state.locally_owned_run_id().await.is_some() {
-        apply_transition(
+        let newly_applied = apply_manual_if_changed(
             pool,
             &operation,
-            STATE_MANUAL_INTERVENTION_REQUIRED,
-            Some("operator_managed_run_active"),
-            now_utc,
+            "operator_managed_run_active",
             None,
+            now_utc,
             "a locally-owned execution run already exists that this operation never started; \
              the coordinator will not stop it, attach it, or attempt a new start",
+            STATE_MANUAL_INTERVENTION_REQUIRED,
         )
         .await?;
         return Ok(
             AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
                 reason_code: "operator_managed_run_active",
+                newly_applied,
             },
         );
     }
@@ -819,17 +1008,25 @@ pub async fn attempt_canonical_start(
         }
     }
 
-    let operation = if operation.state.as_str() != STATE_START_RETRYING {
+    // REPAIR 1: only `awaiting_open` transitions to `start_retrying` before
+    // the canonical start call below. `start_retrying` stays put by
+    // construction (it is already the current state); `recovery_retrying`
+    // must also stay put — `recovery_retrying -> start_retrying` is not a
+    // legal edge in the durable state graph and must never be taken merely
+    // to share this one call site.
+    let operation = if from_state == STATE_AWAITING_OPEN {
         apply_transition(
             pool,
             &operation,
             STATE_START_RETRYING,
+            None,
             None,
             now_utc,
             None,
             "entering canonical start sequence",
         )
         .await?
+        .0
     } else {
         operation
     };
@@ -871,19 +1068,20 @@ pub async fn attempt_canonical_start(
         Ok(snapshot) => {
             let Some(run_id) = snapshot.active_run_id else {
                 let _ = state.stop_execution_runtime().await;
-                apply_transition(
+                let newly_applied = apply_manual_if_changed(
                     pool,
                     &operation,
-                    STATE_MANUAL_INTERVENTION_REQUIRED,
-                    Some("start_succeeded_without_run_id"),
-                    now_utc,
+                    "start_succeeded_without_run_id",
                     None,
+                    now_utc,
                     "start_execution_runtime returned Ok without an active_run_id",
+                    STATE_MANUAL_INTERVENTION_REQUIRED,
                 )
                 .await?;
                 return Ok(
                     AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
                         reason_code: "start_succeeded_without_run_id",
+                        newly_applied,
                     },
                 );
             };
@@ -892,38 +1090,74 @@ pub async fn attempt_canonical_start(
                 // durable operation binding cannot be confirmed must never
                 // be presented as running.
                 let _ = state.stop_execution_runtime().await;
-                apply_transition(
+                let newly_applied = apply_manual_if_changed(
                     pool,
                     &operation,
-                    STATE_MANUAL_INTERVENTION_REQUIRED,
-                    Some("durable_transition_unconfirmed_after_start"),
-                    now_utc,
+                    "durable_transition_unconfirmed_after_start",
                     None,
+                    now_utc,
                     "start_execution_runtime succeeded but local ownership does not match the \
                      returned run_id; refusing to present the operation as running",
+                    STATE_MANUAL_INTERVENTION_REQUIRED,
                 )
                 .await?;
                 return Ok(
                     AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
                         reason_code: "durable_transition_unconfirmed_after_start",
+                        newly_applied,
                     },
                 );
             }
-            apply_transition(
-                pool,
-                &operation,
-                STATE_RUNNING,
-                None,
-                now_utc,
-                Some(run_id),
-                "canonical start succeeded",
-            )
-            .await?;
-            mqk_db::record_running_started(pool, operation.operation_id, now_utc).await?;
-            if from_state == STATE_RECOVERY_RETRYING {
-                Ok(AutonomousDailyCoordinatorTickOutcome::Recovered { run_id })
-            } else {
-                Ok(AutonomousDailyCoordinatorTickOutcome::Started { run_id })
+
+            // REPAIR 2: state, run_id, started_at_utc, retry-clear, and the
+            // transition event all commit atomically in one DB transaction.
+            let to_running_args = mqk_db::TransitionAutonomousDailyOperationToRunningArgs {
+                operation_id: operation.operation_id,
+                expected_state: operation.state.clone(),
+                expected_state_version: operation.state_version,
+                run_id,
+                started_at_utc: now_utc,
+                occurred_at_utc: now_utc,
+                bounded_detail: bounded_detail("canonical start succeeded"),
+            };
+            match mqk_db::transition_autonomous_daily_operation_to_running(pool, &to_running_args)
+                .await?
+            {
+                AutonomousDailyTransitionOutcome::Applied(_)
+                | AutonomousDailyTransitionOutcome::AlreadyApplied(_) => {
+                    if from_state == STATE_RECOVERY_RETRYING {
+                        Ok(AutonomousDailyCoordinatorTickOutcome::Recovered { run_id })
+                    } else {
+                        Ok(AutonomousDailyCoordinatorTickOutcome::Started { run_id })
+                    }
+                }
+                AutonomousDailyTransitionOutcome::StaleState { .. }
+                | AutonomousDailyTransitionOutcome::NotFound
+                | AutonomousDailyTransitionOutcome::IllegalTransition => {
+                    // The runtime started, but the atomic durable running
+                    // transition could not be confirmed. Best-effort stop;
+                    // the operation is never presented as running and the
+                    // run is never silently adopted.
+                    let _ = state.stop_execution_runtime().await;
+                    let newly_applied = apply_manual_if_changed(
+                        pool,
+                        &operation,
+                        "durable_transition_unconfirmed_after_start",
+                        None,
+                        now_utc,
+                        "start_execution_runtime succeeded but the atomic durable running \
+                         transition could not be confirmed; best-effort stop issued, the \
+                         operation is never presented as running",
+                        STATE_MANUAL_INTERVENTION_REQUIRED,
+                    )
+                    .await?;
+                    Ok(
+                        AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
+                            reason_code: "durable_transition_unconfirmed_after_start",
+                            newly_applied,
+                        },
+                    )
+                }
             }
         }
         Err(err) => {
@@ -948,6 +1182,7 @@ async fn classify_start_sequence_failure(
                 operation,
                 STATE_PREFLIGHT_BLOCKED,
                 Some(signature.reason_code),
+                signature.stable_context.clone(),
                 now_utc,
                 None,
                 "canonical start call returned a wait-for-condition truth",
@@ -971,21 +1206,20 @@ async fn classify_start_sequence_failure(
         }
         AutonomousRetryClass::ManualInterventionRequired
         | AutonomousRetryClass::SessionTerminal => {
-            if operation.state_reason_code.as_deref() != Some(signature.reason_code) {
-                apply_transition(
-                    pool,
-                    operation,
-                    STATE_MANUAL_INTERVENTION_REQUIRED,
-                    Some(signature.reason_code),
-                    now_utc,
-                    None,
-                    "canonical start call returned a manual-intervention truth",
-                )
-                .await?;
-            }
+            let newly_applied = apply_manual_if_changed(
+                pool,
+                operation,
+                signature.reason_code,
+                signature.stable_context.clone(),
+                now_utc,
+                "canonical start call returned a manual-intervention truth",
+                STATE_MANUAL_INTERVENTION_REQUIRED,
+            )
+            .await?;
             Ok(
                 AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
                     reason_code: signature.reason_code,
+                    newly_applied,
                 },
             )
         }
@@ -1003,19 +1237,20 @@ pub async fn handle_running(
     now_utc: DateTime<Utc>,
 ) -> anyhow::Result<AutonomousDailyCoordinatorTickOutcome> {
     let Some(expected_run_id) = operation.run_id else {
-        apply_transition(
+        let newly_applied = apply_manual_if_changed(
             pool,
             &operation,
-            mqk_db::STATE_CONTROLLER_DEGRADED,
-            Some("running_operation_missing_run_id"),
-            now_utc,
+            "running_operation_missing_run_id",
             None,
+            now_utc,
             "operation is running but carries no run_id",
+            mqk_db::STATE_CONTROLLER_DEGRADED,
         )
         .await?;
         return Ok(
             AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
                 reason_code: "running_operation_missing_run_id",
+                newly_applied,
             },
         );
     };
@@ -1027,43 +1262,44 @@ pub async fn handle_running(
         });
     }
     if local_run_id.is_some() {
-        apply_transition(
+        let newly_applied = apply_manual_if_changed(
             pool,
             &operation,
-            mqk_db::STATE_CONTROLLER_DEGRADED,
-            Some("runtime_run_id_mismatch"),
-            now_utc,
+            "runtime_run_id_mismatch",
             None,
+            now_utc,
             "the locally-owned run does not match this operation's durable run_id",
+            mqk_db::STATE_CONTROLLER_DEGRADED,
         )
         .await?;
         return Ok(
             AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
                 reason_code: "runtime_run_id_mismatch",
+                newly_applied,
             },
         );
     }
 
     // No local runtime. Determine whether the durable run row is still
     // active (a crash-window inconsistency: manual) or genuinely terminal
-    // (eligible for recovery), and whether termination was unsafe (halt /
-    // kill switch / durable disarm / WS gap — never retried).
+    // (eligible for recovery).
     let run_row = match mqk_db::fetch_run(pool, expected_run_id).await {
         Ok(row) => row,
         Err(_err) => {
-            apply_transition(
+            let newly_applied = apply_manual_if_changed(
                 pool,
                 &operation,
-                mqk_db::STATE_CONTROLLER_DEGRADED,
-                Some("run_row_fetch_failed"),
-                now_utc,
+                "run_row_fetch_failed",
                 None,
+                now_utc,
                 "failed to fetch the durable run row while reconciling running-state ownership",
+                mqk_db::STATE_CONTROLLER_DEGRADED,
             )
             .await?;
             return Ok(
                 AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
                     reason_code: "run_row_fetch_failed",
+                    newly_applied,
                 },
             );
         }
@@ -1073,64 +1309,102 @@ pub async fn handle_running(
         mqk_db::RunStatus::Armed | mqk_db::RunStatus::Running
     );
     if run_is_active {
-        apply_transition(
+        let newly_applied = apply_manual_if_changed(
             pool,
             &operation,
-            mqk_db::STATE_CONTROLLER_DEGRADED,
-            Some("durable_active_run_without_local_owner"),
-            now_utc,
+            "durable_active_run_without_local_owner",
             None,
+            now_utc,
             "the durable run row is still armed/running but no local runtime owns it",
+            mqk_db::STATE_CONTROLLER_DEGRADED,
         )
         .await?;
         return Ok(
             AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
                 reason_code: "durable_active_run_without_local_owner",
+                newly_applied,
             },
         );
     }
 
-    // `integrity.disarmed` is deliberately not consulted here: it is the
-    // fail-closed default at every daemon boot (per
-    // `AppState::try_autonomous_arm_typed`'s own doc), not evidence of an
-    // unsafe termination on its own -- a durable DISARMED arm state is
-    // instead caught precisely by the arm gate the very next time recovery
-    // attempts a canonical start (`attempt_canonical_start` ->
-    // `try_autonomous_arm_typed` -> `AutonomousArmRejection::DurableDisarmed`),
-    // without duplicating that classification here.
-    let unsafe_termination = {
-        let ig = state.integrity.read().await;
-        ig.halted
-    } || matches!(
-        state.alpaca_ws_continuity().await,
-        super::AlpacaWsContinuityState::GapDetected { .. }
-    );
+    // REPAIR 9: resolve durable DISARMED truth before scheduling any
+    // recovery retry — never postponed until the next canonical start
+    // attempt, and never auto-armed merely to perform this read.
+    // Reaching `running` at all guarantees a prior successful
+    // `try_autonomous_arm_typed` call, which always re-persists `ARMED` on
+    // success -- so a missing arm-state row here is not real evidence of a
+    // durable DISARMED transition (that would conflate "never armed" with
+    // "explicitly disarmed"); only an explicit non-`ARMED` row counts.
+    let durable_disarmed = match mqk_db::load_arm_state(pool).await {
+        Ok(Some((ref state_str, _))) => state_str != "ARMED",
+        Ok(None) => false,
+        Err(_err) => {
+            let newly_applied = apply_manual_if_changed(
+                pool,
+                &operation,
+                "arm_state_read_failed",
+                None,
+                now_utc,
+                "failed to read durable arm state while reconciling an ended run; failing \
+                 closed rather than scheduling an unsafe recovery",
+                mqk_db::STATE_CONTROLLER_DEGRADED,
+            )
+            .await?;
+            return Ok(
+                AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
+                    reason_code: "arm_state_read_failed",
+                    newly_applied,
+                },
+            );
+        }
+    };
+
+    // `integrity.disarmed` (in-memory) is deliberately not consulted here:
+    // it is the fail-closed default at every daemon boot, not evidence of
+    // an unsafe termination on its own. The durable DB arm-state row
+    // (`durable_disarmed` above) is the authoritative truth for this check.
+    let unsafe_termination = durable_disarmed
+        || {
+            let ig = state.integrity.read().await;
+            ig.halted
+        }
+        || matches!(
+            state.alpaca_ws_continuity().await,
+            super::AlpacaWsContinuityState::GapDetected { .. }
+        );
     if unsafe_termination {
-        apply_transition(
+        let reason_code: &'static str = if durable_disarmed {
+            "durable_arm_disarmed"
+        } else {
+            "runtime_ended_unsafely"
+        };
+        let newly_applied = apply_manual_if_changed(
             pool,
             &operation,
-            mqk_db::STATE_CONTROLLER_DEGRADED,
-            Some("runtime_ended_unsafely"),
-            now_utc,
+            reason_code,
             None,
-            "the local runtime ended via an operator halt/kill-switch or a WS continuity gap; \
-             this is never automatically retried",
+            now_utc,
+            "the local runtime ended via an operator halt/kill-switch, a durable DISARMED arm \
+             state, or a WS continuity gap; this is never automatically retried",
+            mqk_db::STATE_CONTROLLER_DEGRADED,
         )
         .await?;
         return Ok(
             AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
-                reason_code: "runtime_ended_unsafely",
+                reason_code,
+                newly_applied,
             },
         );
     }
 
     // Terminal run, no unsafe-termination truth, session still open:
     // schedule a bounded recovery retry.
-    let updated = apply_transition(
+    let (updated, _) = apply_transition(
         pool,
         &operation,
         STATE_RECOVERY_RETRYING,
         Some("runtime_ended_without_halt"),
+        None,
         now_utc,
         None,
         "local runtime ended without an unsafe-termination signal; scheduling recovery retry",
@@ -1152,6 +1426,100 @@ pub async fn handle_running(
 // D2.17-D2.18 — Session close and durable stop retries
 // ---------------------------------------------------------------------------
 
+/// REPAIR 3/4 shared helper: reconcile truth for an operation that durably
+/// bound `expected_run_id` but currently has no matching local runtime.
+/// Never records `stopped_at_utc` and never presents the operation as
+/// stopped without first confirming the durable run row is actually
+/// terminal — an active orphaned run (or an unreadable run row) always
+/// fails closed to a manual/controller-degraded truth instead.
+async fn reconcile_durable_run_without_local_owner(
+    pool: &PgPool,
+    operation: &AutonomousDailyOperationRecord,
+    expected_run_id: Uuid,
+    now_utc: DateTime<Utc>,
+) -> anyhow::Result<AutonomousDailyCoordinatorTickOutcome> {
+    // `running` has a legal edge straight to `controller_degraded`; every
+    // other state this helper can be entered from (`stopping`,
+    // `stop_retrying`, or an already-`controller_degraded` retry) does not,
+    // but does have a legal edge to `manual_intervention_required`.
+    let target: &'static str = if operation.state.as_str() == STATE_RUNNING {
+        mqk_db::STATE_CONTROLLER_DEGRADED
+    } else {
+        STATE_MANUAL_INTERVENTION_REQUIRED
+    };
+
+    let run_row = match mqk_db::fetch_run(pool, expected_run_id).await {
+        Ok(row) => row,
+        Err(_err) => {
+            let newly_applied = apply_manual_if_changed(
+                pool,
+                operation,
+                "run_row_fetch_failed",
+                None,
+                now_utc,
+                "failed to fetch the durable run row while reconciling stop-time ownership; \
+                 failing closed rather than assuming stopped",
+                target,
+            )
+            .await?;
+            return Ok(
+                AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
+                    reason_code: "run_row_fetch_failed",
+                    newly_applied,
+                },
+            );
+        }
+    };
+
+    let run_is_active = matches!(
+        run_row.status,
+        mqk_db::RunStatus::Armed | mqk_db::RunStatus::Running
+    );
+    if run_is_active {
+        let newly_applied = apply_manual_if_changed(
+            pool,
+            operation,
+            "durable_active_run_without_local_owner",
+            None,
+            now_utc,
+            "the durable run row is still armed/running but no local runtime owns it; never \
+             presented as stopped",
+            target,
+        )
+        .await?;
+        return Ok(
+            AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
+                reason_code: "durable_active_run_without_local_owner",
+                newly_applied,
+            },
+        );
+    }
+
+    // Terminal durable run: safe to record stopped without ever calling
+    // the canonical stop path.
+    let updated = if matches!(
+        operation.state.as_str(),
+        STATE_STOPPING | STATE_STOP_RETRYING
+    ) {
+        operation.clone()
+    } else {
+        apply_transition(
+            pool,
+            operation,
+            STATE_STOPPING,
+            None,
+            None,
+            now_utc,
+            None,
+            "durable run already terminal at reconciliation time; no local runtime to stop",
+        )
+        .await?
+        .0
+    };
+    mqk_db::record_autonomous_runtime_stopped(pool, updated.operation_id, now_utc).await?;
+    Ok(AutonomousDailyCoordinatorTickOutcome::RuntimeStopped)
+}
+
 pub async fn handle_session_close(
     state: &Arc<AppState>,
     pool: &PgPool,
@@ -1162,10 +1530,11 @@ pub async fn handle_session_close(
 
     match (operation.run_id, local_run_id) {
         (Some(expected), Some(actual)) if expected == actual => {
-            let updated = apply_transition(
+            let (updated, _) = apply_transition(
                 pool,
                 &operation,
                 STATE_STOPPING,
+                None,
                 None,
                 now_utc,
                 None,
@@ -1176,65 +1545,72 @@ pub async fn handle_session_close(
         }
         (Some(_), Some(_)) => {
             // Mismatched runtime: never stopped by the coordinator.
-            let target = if operation.state.as_str() == STATE_RUNNING {
+            let target: &'static str = if operation.state.as_str() == STATE_RUNNING {
                 mqk_db::STATE_CONTROLLER_DEGRADED
             } else {
                 STATE_MANUAL_INTERVENTION_REQUIRED
             };
-            apply_transition(
+            let newly_applied = apply_manual_if_changed(
                 pool,
                 &operation,
-                target,
-                Some("mismatched_runtime_at_close"),
-                now_utc,
+                "mismatched_runtime_at_close",
                 None,
+                now_utc,
                 "session closed with a locally-owned runtime that does not match this \
                  operation's run_id; the coordinator will not stop it",
+                target,
             )
             .await?;
             Ok(
                 AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
                     reason_code: "mismatched_runtime_at_close",
+                    newly_applied,
                 },
             )
         }
         (None, Some(_)) => {
             // D2.16: an operator-managed run is preserved, never stopped,
             // never attached.
-            apply_transition(
+            let newly_applied = apply_manual_if_changed(
                 pool,
                 &operation,
-                STATE_MANUAL_INTERVENTION_REQUIRED,
-                Some("operator_managed_run_active"),
-                now_utc,
+                "operator_managed_run_active",
                 None,
+                now_utc,
                 "session closed with a locally-owned run this operation never started; the \
                  coordinator will not stop it",
+                STATE_MANUAL_INTERVENTION_REQUIRED,
             )
             .await?;
             Ok(
                 AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
                     reason_code: "operator_managed_run_active",
+                    newly_applied,
                 },
             )
         }
-        (_, None) => {
-            // No matching local runtime — either this operation's runtime
-            // never started, or it already ended. Never call
-            // stop_execution_runtime for a runtime that does not exist
-            // locally; record stopped_at_utc directly.
-            let updated = apply_transition(
+        (None, None) => {
+            // This operation never bound a run_id and none exists locally:
+            // no ambiguity, no run row to reconcile against.
+            let (updated, _) = apply_transition(
                 pool,
                 &operation,
                 STATE_STOPPING,
+                None,
                 None,
                 now_utc,
                 None,
                 "no autonomous runtime existed at session close",
             )
             .await?;
-            mqk_db::record_stopped_at(pool, updated.operation_id, now_utc).await?;
+            mqk_db::record_autonomous_runtime_stopped(pool, updated.operation_id, now_utc).await?;
             Ok(AutonomousDailyCoordinatorTickOutcome::RuntimeStopped)
+        }
+        (Some(expected), None) => {
+            // REPAIR 3: a durable run_id is bound but no local runtime
+            // exists — never assume stopped without confirming the durable
+            // run row is actually terminal.
+            reconcile_durable_run_without_local_owner(pool, &operation, expected, now_utc).await
         }
     }
 }
@@ -1250,19 +1626,20 @@ pub async fn handle_stopping(
         return Ok(AutonomousDailyCoordinatorTickOutcome::AwaitingOutcomeFinalization);
     }
     if now_utc >= plan.postclose_finalize_utc {
-        apply_transition(
+        let newly_applied = apply_manual_if_changed(
             pool,
             &operation,
-            STATE_MANUAL_INTERVENTION_REQUIRED,
-            Some("unresolved_stop_failure_at_postclose_finalize"),
-            now_utc,
+            "unresolved_stop_failure_at_postclose_finalize",
             None,
+            now_utc,
             "the operation's runtime stop remained unresolved at postclose_finalize_utc",
+            STATE_MANUAL_INTERVENTION_REQUIRED,
         )
         .await?;
         return Ok(
             AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
                 reason_code: "unresolved_stop_failure_at_postclose_finalize",
+                newly_applied,
             },
         );
     }
@@ -1280,6 +1657,71 @@ pub async fn retry_stop(
     operation: AutonomousDailyOperationRecord,
     now_utc: DateTime<Utc>,
 ) -> anyhow::Result<AutonomousDailyCoordinatorTickOutcome> {
+    // REPAIR 4: re-read ownership immediately before every stop call —
+    // never rely on a routing decision made on an earlier tick. A runtime
+    // that appeared, disappeared, or changed identity since the last tick
+    // must never be stopped (or left un-reconciled) merely because the
+    // operation remains `stop_retrying`.
+    let local_run_id = state.locally_owned_run_id().await;
+
+    match (operation.run_id, local_run_id) {
+        (Some(expected), Some(actual)) if expected == actual => {
+            // Ownership confirmed: fall through to the canonical stop call.
+        }
+        (Some(_), Some(_)) => {
+            let newly_applied = apply_manual_if_changed(
+                pool,
+                &operation,
+                "mismatched_runtime_at_close",
+                None,
+                now_utc,
+                "a locally-owned runtime that does not match this operation's run_id appeared \
+                 before a stop retry; the coordinator will not stop it",
+                STATE_MANUAL_INTERVENTION_REQUIRED,
+            )
+            .await?;
+            return Ok(
+                AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
+                    reason_code: "mismatched_runtime_at_close",
+                    newly_applied,
+                },
+            );
+        }
+        (None, Some(_)) => {
+            let newly_applied = apply_manual_if_changed(
+                pool,
+                &operation,
+                "operator_managed_run_active",
+                None,
+                now_utc,
+                "a locally-owned run this operation never started appeared before a stop \
+                 retry; the coordinator will not stop it",
+                STATE_MANUAL_INTERVENTION_REQUIRED,
+            )
+            .await?;
+            return Ok(
+                AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
+                    reason_code: "operator_managed_run_active",
+                    newly_applied,
+                },
+            );
+        }
+        (Some(expected), None) => {
+            // The local runtime disappeared between ticks (e.g. reaped by
+            // an earlier failed stop). Reconcile against the durable run
+            // row rather than assuming stopped or calling stop again.
+            return reconcile_durable_run_without_local_owner(pool, &operation, expected, now_utc)
+                .await;
+        }
+        (None, None) => {
+            // No run was ever bound and none exists locally: already
+            // effectively stopped, without a second stop call.
+            mqk_db::record_autonomous_runtime_stopped(pool, operation.operation_id, now_utc)
+                .await?;
+            return Ok(AutonomousDailyCoordinatorTickOutcome::RuntimeStopped);
+        }
+    }
+
     let attempt_number =
         match mqk_db::record_stop_attempt(pool, operation.operation_id, now_utc).await? {
             mqk_db::RecordStopAttemptOutcome::Recorded { stop_attempt_count } => {
@@ -1295,7 +1737,11 @@ pub async fn retry_stop(
 
     match state.stop_execution_runtime().await {
         Ok(_) => {
-            mqk_db::record_stopped_at(pool, operation.operation_id, now_utc).await?;
+            // REPAIR 5: restart-safe, idempotent stop completion — never
+            // rewinds an already-recorded stopped_at_utc, and clears stale
+            // retry/error/blocker evidence atomically.
+            mqk_db::record_autonomous_runtime_stopped(pool, operation.operation_id, now_utc)
+                .await?;
             Ok(AutonomousDailyCoordinatorTickOutcome::RuntimeStopped)
         }
         Err(err) => {
@@ -1304,6 +1750,7 @@ pub async fn retry_stop(
                     pool,
                     &operation,
                     STATE_STOP_RETRYING,
+                    None,
                     None,
                     now_utc,
                     None,

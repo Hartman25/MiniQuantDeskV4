@@ -241,6 +241,15 @@ pub struct AutonomousDailyOperationRecord {
     pub postclose_finalize_utc: DateTime<Utc>,
     pub state: String,
     pub state_reason_code: Option<String>,
+    /// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D2-LIFECYCLE-CLOSURE-REPAIR-01:
+    /// bounded D1 typed blocker signature (`"sha256:<64 hex>"`) for
+    /// `state_reason_code`, present only when the current state was reached
+    /// via a blocked/manual transition. `None` for a legacy row created
+    /// before migration `0052`, for a row never blocked, and cleared by any
+    /// non-blocked forward transition. Dedup authority for manual/blocked
+    /// truth is `(state, state_reason_code, state_blocker_signature)`
+    /// together -- never `state_reason_code` alone.
+    pub state_blocker_signature: Option<String>,
     pub state_version: i64,
     pub run_id: Option<Uuid>,
     pub start_attempt_count: i64,
@@ -300,7 +309,8 @@ const OPERATION_COLUMNS: &str = r#"
     created_at_utc, updated_at_utc,
     exchange_session_open_utc, exchange_session_close_utc, exchange_is_early_close,
     previous_trading_date,
-    stop_attempt_count, last_stop_attempt_utc
+    stop_attempt_count, last_stop_attempt_utc,
+    state_blocker_signature
 "#;
 
 const EVENT_COLUMNS: &str = r#"
@@ -332,6 +342,7 @@ fn row_to_operation_record(
         postclose_finalize_utc: r.try_get("postclose_finalize_utc")?,
         state: r.try_get("state")?,
         state_reason_code: r.try_get("state_reason_code")?,
+        state_blocker_signature: r.try_get("state_blocker_signature")?,
         state_version: r.try_get("state_version")?,
         run_id: r.try_get("run_id")?,
         start_attempt_count: r.try_get("start_attempt_count")?,
@@ -591,7 +602,8 @@ pub async fn create_or_recover_autonomous_daily_operation(
                     $34,$35,$36,
                     $37,$38,
                     $39,$40,$41,$42,
-                    $43,$44
+                    $43,$44,
+                    $45
                 )
                 "#
             ))
@@ -639,6 +651,7 @@ pub async fn create_or_recover_autonomous_daily_operation(
             .bind(args.previous_trading_date)
             .bind(args.stop_attempt_count)
             .bind(None::<DateTime<Utc>>) // last_stop_attempt_utc
+            .bind(None::<String>) // state_blocker_signature
             .execute(&mut *tx)
             .await
             .context("create_or_recover_autonomous_daily_operation: insert operation row failed")?;
@@ -687,6 +700,7 @@ pub async fn create_or_recover_autonomous_daily_operation(
                     postclose_finalize_utc: args.postclose_finalize_utc,
                     state: args.initial_state.clone(),
                     state_reason_code: None,
+                    state_blocker_signature: None,
                     state_version: 1,
                     run_id: None,
                     start_attempt_count: 0,
@@ -763,6 +777,13 @@ pub struct TransitionAutonomousDailyOperationArgs {
     pub expected_state_version: i64,
     pub new_state: String,
     pub reason_code: Option<String>,
+    /// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D2-LIFECYCLE-CLOSURE-REPAIR-01:
+    /// the D1 typed blocker signature paired with `reason_code`, or `None`
+    /// for a non-blocked transition. Always overwrites the row's
+    /// `state_blocker_signature` (never `coalesce`d) so a non-blocked
+    /// forward transition truthfully clears a stale signature from a prior
+    /// blocked state.
+    pub blocker_signature: Option<String>,
     pub occurred_at_utc: DateTime<Utc>,
     pub run_id: Option<Uuid>,
     pub bounded_detail: String,
@@ -818,6 +839,13 @@ fn validate_transition_args(args: &TransitionAutonomousDailyOperationArgs) -> Re
             anyhow::bail!("transition_autonomous_daily_operation: reason_code exceeds 128 chars");
         }
     }
+    if let Some(sig) = &args.blocker_signature {
+        if sig.len() > 128 {
+            anyhow::bail!(
+                "transition_autonomous_daily_operation: blocker_signature exceeds 128 chars"
+            );
+        }
+    }
     Ok(())
 }
 
@@ -859,15 +887,17 @@ pub async fn transition_autonomous_daily_operation(
         update sys_autonomous_daily_operations
         set state = $1,
             state_reason_code = $2,
-            state_version = $3,
-            run_id = coalesce($4, run_id),
-            updated_at_utc = $5
-        where operation_id = $6 and state = $7 and state_version = $8
+            state_blocker_signature = $3,
+            state_version = $4,
+            run_id = coalesce($5, run_id),
+            updated_at_utc = $6
+        where operation_id = $7 and state = $8 and state_version = $9
         returning {OPERATION_COLUMNS}
         "#
     ))
     .bind(&args.new_state)
     .bind(&args.reason_code)
+    .bind(&args.blocker_signature)
     .bind(new_version)
     .bind(args.run_id)
     .bind(args.occurred_at_utc)
@@ -959,6 +989,206 @@ pub async fn transition_autonomous_daily_operation(
     tx.rollback()
         .await
         .context("transition_autonomous_daily_operation: rollback (no-op read) failed")?;
+
+    Ok(outcome)
+}
+
+// ---------------------------------------------------------------------------
+// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D2-LIFECYCLE-CLOSURE-REPAIR-01
+// Atomic running transition
+// ---------------------------------------------------------------------------
+
+/// Arguments for [`transition_autonomous_daily_operation_to_running`].
+#[derive(Debug, Clone)]
+pub struct TransitionAutonomousDailyOperationToRunningArgs {
+    pub operation_id: Uuid,
+    pub expected_state: String,
+    pub expected_state_version: i64,
+    /// The exact new run_id bound atomically with the running transition —
+    /// never `coalesce`d, always overwrites (a running transition always
+    /// carries the run the canonical start call just confirmed).
+    pub run_id: Uuid,
+    pub started_at_utc: DateTime<Utc>,
+    pub occurred_at_utc: DateTime<Utc>,
+    pub bounded_detail: String,
+}
+
+fn validate_transition_to_running_args(
+    args: &TransitionAutonomousDailyOperationToRunningArgs,
+) -> Result<()> {
+    if !is_known_operation_state(&args.expected_state) {
+        anyhow::bail!(
+            "transition_autonomous_daily_operation_to_running: unknown expected_state '{}'",
+            args.expected_state
+        );
+    }
+    if args.expected_state_version < 1 {
+        anyhow::bail!(
+            "transition_autonomous_daily_operation_to_running: expected_state_version must be >= 1"
+        );
+    }
+    if args.bounded_detail.len() > 4000 {
+        anyhow::bail!(
+            "transition_autonomous_daily_operation_to_running: bounded_detail exceeds 4000 chars"
+        );
+    }
+    Ok(())
+}
+
+/// Atomically transition one operation directly into `running`, binding the
+/// exact new `run_id` and `started_at_utc` in the same CAS update as the
+/// state/version/retry-clear/event write.
+///
+/// Closes the D2 split-sequence defect: the coordinator previously called
+/// [`transition_autonomous_daily_operation`] (state -> running, run_id) and
+/// then separately called [`record_running_started`] (started_at_utc) as two
+/// independent writes — a crash between them could leave a `running`
+/// operation with no `started_at_utc`, or (in principle) diverge the two
+/// writes' outcomes. This function performs, in one transaction:
+///
+/// 1. CAS-guard on `(operation_id, expected_state, expected_state_version)`,
+///    exactly like [`transition_autonomous_daily_operation`].
+/// 2. `is_legal_operation_transition(Some(expected_state), STATE_RUNNING)`
+///    check before touching SQL — only `start_retrying`,
+///    `recovery_retrying`, `controller_degraded`, and `evidence_degraded`
+///    are legal sources into `running` today.
+/// 3. On match: set `state = running`, clear `state_reason_code` and
+///    `state_blocker_signature`, increment `state_version` by exactly one,
+///    set `run_id` to the caller-supplied value (never `coalesce`d), advance
+///    `started_at_utc` only if it was previously null (idempotent, never
+///    rewinds), clear `next_retry_utc` and `last_error`, and insert exactly
+///    one matching transition event — all in the same transaction.
+/// 4. On no match: re-read and classify `NotFound` / `AlreadyApplied` /
+///    `StaleState`, exactly like [`transition_autonomous_daily_operation`].
+pub async fn transition_autonomous_daily_operation_to_running(
+    pool: &PgPool,
+    args: &TransitionAutonomousDailyOperationToRunningArgs,
+) -> Result<AutonomousDailyTransitionOutcome> {
+    validate_transition_to_running_args(args)?;
+
+    if !is_legal_operation_transition(Some(&args.expected_state), STATE_RUNNING) {
+        return Ok(AutonomousDailyTransitionOutcome::IllegalTransition);
+    }
+
+    let mut tx = pool
+        .begin()
+        .await
+        .context("transition_autonomous_daily_operation_to_running: begin transaction failed")?;
+
+    let new_version = args.expected_state_version + 1;
+
+    let updated_row = sqlx::query(&format!(
+        r#"
+        update sys_autonomous_daily_operations
+        set state = $1,
+            state_reason_code = null,
+            state_blocker_signature = null,
+            state_version = $2,
+            run_id = $3,
+            started_at_utc = coalesce(started_at_utc, $4),
+            next_retry_utc = null,
+            last_error = null,
+            updated_at_utc = $5
+        where operation_id = $6 and state = $7 and state_version = $8
+        returning {OPERATION_COLUMNS}
+        "#
+    ))
+    .bind(STATE_RUNNING)
+    .bind(new_version)
+    .bind(args.run_id)
+    .bind(args.started_at_utc)
+    .bind(args.occurred_at_utc)
+    .bind(args.operation_id)
+    .bind(&args.expected_state)
+    .bind(args.expected_state_version)
+    .fetch_optional(&mut *tx)
+    .await
+    .context("transition_autonomous_daily_operation_to_running: CAS update failed")?;
+
+    if let Some(row) = updated_row {
+        let record = row_to_operation_record(row)?;
+
+        sqlx::query(&format!(
+            r#"
+            insert into sys_autonomous_daily_operation_events ({EVENT_COLUMNS})
+            values ($1,$2,$3,$4,$5,$6,$7,$8)
+            "#
+        ))
+        .bind(args.operation_id)
+        .bind(new_version)
+        .bind(&args.expected_state)
+        .bind(STATE_RUNNING)
+        .bind(None::<String>)
+        .bind(args.occurred_at_utc)
+        .bind(Some(args.run_id))
+        .bind(&args.bounded_detail)
+        .execute(&mut *tx)
+        .await
+        .context("transition_autonomous_daily_operation_to_running: insert event failed")?;
+
+        tx.commit()
+            .await
+            .context("transition_autonomous_daily_operation_to_running: commit (applied) failed")?;
+
+        return Ok(AutonomousDailyTransitionOutcome::Applied(record));
+    }
+
+    let current_row = sqlx::query(&format!(
+        "select {OPERATION_COLUMNS} from sys_autonomous_daily_operations where operation_id = $1"
+    ))
+    .bind(args.operation_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .context("transition_autonomous_daily_operation_to_running: current-row re-read failed")?;
+
+    let outcome = match current_row {
+        None => AutonomousDailyTransitionOutcome::NotFound,
+        Some(row) => {
+            let current = row_to_operation_record(row)?;
+            if current.state == STATE_RUNNING
+                && current.state_version == new_version
+                && current.run_id == Some(args.run_id)
+            {
+                let event_row = sqlx::query(
+                    "select from_state, to_state from sys_autonomous_daily_operation_events \
+                     where operation_id = $1 and transition_seq = $2",
+                )
+                .bind(args.operation_id)
+                .bind(new_version)
+                .fetch_optional(&mut *tx)
+                .await
+                .context(
+                    "transition_autonomous_daily_operation_to_running: replay event lookup failed",
+                )?;
+
+                let is_exact_replay = event_row
+                    .map(|r| {
+                        let from_state: String = r.try_get("from_state").unwrap_or_default();
+                        let to_state: String = r.try_get("to_state").unwrap_or_default();
+                        from_state == args.expected_state && to_state == STATE_RUNNING
+                    })
+                    .unwrap_or(false);
+
+                if is_exact_replay {
+                    AutonomousDailyTransitionOutcome::AlreadyApplied(current)
+                } else {
+                    AutonomousDailyTransitionOutcome::StaleState {
+                        actual_state: current.state,
+                        actual_state_version: current.state_version,
+                    }
+                }
+            } else {
+                AutonomousDailyTransitionOutcome::StaleState {
+                    actual_state: current.state,
+                    actual_state_version: current.state_version,
+                }
+            }
+        }
+    };
+
+    tx.rollback().await.context(
+        "transition_autonomous_daily_operation_to_running: rollback (no-op read) failed",
+    )?;
 
     Ok(outcome)
 }
@@ -1857,5 +2087,60 @@ pub async fn record_stopped_at(
             stopped_at_utc: r.try_get("stopped_at_utc")?,
         },
         None => RecordStoppedAtOutcome::NotFound,
+    })
+}
+
+/// Outcome of [`record_autonomous_runtime_stopped`].
+#[derive(Debug, Clone)]
+pub enum RecordAutonomousRuntimeStoppedOutcome {
+    Recorded { stopped_at_utc: DateTime<Utc> },
+    NotFound,
+}
+
+/// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D2-LIFECYCLE-CLOSURE-REPAIR-01:
+/// restart-safe canonical stop completion. Atomically:
+///
+/// - sets `stopped_at_utc` only when currently null (`coalesce`, never
+///   rewinds an already-recorded value — mirrors [`record_stopped_at`]);
+/// - clears `next_retry_utc`, `last_error`, and `state_blocker_signature`,
+///   so a resolved stop leaves no stale retry/blocker evidence behind;
+/// - advances `updated_at_utc`.
+///
+/// The operation's `state` transition to `stopping`/`stop_retrying`/
+/// `completed*` remains a separate CAS call via
+/// [`transition_autonomous_daily_operation`] — this recorder only advances
+/// evidence. Idempotent by construction: if a stop succeeds but this write
+/// fails, the next tick observing no local runtime plus a terminal durable
+/// run can safely call this again with no risk of rewinding
+/// `stopped_at_utc` or issuing a second canonical stop call (callers decide
+/// the latter; this function performs no stop call itself).
+pub async fn record_autonomous_runtime_stopped(
+    pool: &PgPool,
+    operation_id: Uuid,
+    stopped_at_utc: DateTime<Utc>,
+) -> Result<RecordAutonomousRuntimeStoppedOutcome> {
+    let row = sqlx::query(
+        r#"
+        update sys_autonomous_daily_operations
+        set stopped_at_utc = coalesce(stopped_at_utc, $2),
+            next_retry_utc = null,
+            last_error = null,
+            state_blocker_signature = null,
+            updated_at_utc = $2
+        where operation_id = $1
+        returning stopped_at_utc
+        "#,
+    )
+    .bind(operation_id)
+    .bind(stopped_at_utc)
+    .fetch_optional(pool)
+    .await
+    .context("record_autonomous_runtime_stopped failed")?;
+
+    Ok(match row {
+        Some(r) => RecordAutonomousRuntimeStoppedOutcome::Recorded {
+            stopped_at_utc: r.try_get("stopped_at_utc")?,
+        },
+        None => RecordAutonomousRuntimeStoppedOutcome::NotFound,
     })
 }
