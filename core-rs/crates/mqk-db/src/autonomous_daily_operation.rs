@@ -1304,6 +1304,337 @@ pub async fn list_autonomous_daily_operation_events(
 }
 
 // ---------------------------------------------------------------------------
+// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D2-FAILSAFE-RECOVERY-CLOSURE-01
+// REPAIR 1: bounded lookup of the one relevant open operation for a slot
+// family, used to preserve lifecycle control over an already-created
+// operation when current calendar/assignment/registry/runtime-context
+// resolution fails this tick.
+// ---------------------------------------------------------------------------
+
+/// States this lookup treats as an active lifecycle in progress -- relevant
+/// regardless of whether `now_utc` falls inside the operation's persisted
+/// window (e.g. a `stopping` operation past its own close is still
+/// relevant).
+pub const RELEVANT_ACTIVE_LIFECYCLE_STATES: [&str; 6] = [
+    STATE_RUNNING,
+    STATE_RECOVERY_RETRYING,
+    STATE_STOPPING,
+    STATE_STOP_RETRYING,
+    STATE_CONTROLLER_DEGRADED,
+    STATE_EVIDENCE_DEGRADED,
+];
+
+/// Bounded row cap for [`fetch_relevant_open_autonomous_daily_operation`].
+/// Generous relative to the at-most-one-row-per-market-date invariant this
+/// slot family observes in practice; exists only so a data-integrity defect
+/// (many concurrently "relevant" rows) cannot make this lookup scan an
+/// unbounded table.
+const RELEVANT_OPERATION_LOOKUP_LIMIT: i64 = 25;
+
+/// Read-only, bounded lookup for the one operation that should keep
+/// receiving lifecycle authority for `(deployment_mode, adapter_id)` even
+/// when a fresh calendar/assignment/registry/runtime-context resolution
+/// cannot be proven this tick.
+///
+/// A row is relevant when it is not terminal (`completed*` excluded) and
+/// either:
+/// - its `state` is one of [`RELEVANT_ACTIVE_LIFECYCLE_STATES`] (an active,
+///   recovering, or stopping lifecycle in progress), or
+/// - `now_utc` falls within its persisted
+///   `preopen_start_utc ..= postclose_finalize_utc` window.
+///
+/// Ordering is deterministic (`preopen_start_utc desc, operation_id asc`),
+/// but this function never silently picks a "most recent" row among
+/// multiple equally-relevant candidates: if more than one row matches, it
+/// fails closed with an `Err` rather than guessing, because
+/// `Ok(None)` would be indistinguishable from "no relevant operation
+/// exists" to every caller and could let a fresh-create path fabricate a
+/// second operation while another is still authoritative. Never reads the
+/// wall clock -- `now_utc` is caller-supplied.
+pub async fn fetch_relevant_open_autonomous_daily_operation(
+    pool: &PgPool,
+    deployment_mode: &str,
+    adapter_id: &str,
+    now_utc: DateTime<Utc>,
+) -> Result<Option<AutonomousDailyOperationRecord>> {
+    let rows = sqlx::query(&format!(
+        r#"
+        select {OPERATION_COLUMNS}
+        from sys_autonomous_daily_operations
+        where deployment_mode = $1
+          and adapter_id = $2
+          and state not in ($3, $4, $5)
+          and (
+            state in ($6, $7, $8, $9, $10, $11)
+            or ($12 >= preopen_start_utc and $12 <= postclose_finalize_utc)
+          )
+        order by preopen_start_utc desc, operation_id asc
+        limit $13
+        "#
+    ))
+    .bind(deployment_mode)
+    .bind(adapter_id)
+    .bind(STATE_COMPLETED)
+    .bind(STATE_COMPLETED_NO_TRADE)
+    .bind(STATE_COMPLETED_WITH_ACTIVITY)
+    .bind(STATE_RUNNING)
+    .bind(STATE_RECOVERY_RETRYING)
+    .bind(STATE_STOPPING)
+    .bind(STATE_STOP_RETRYING)
+    .bind(STATE_CONTROLLER_DEGRADED)
+    .bind(STATE_EVIDENCE_DEGRADED)
+    .bind(now_utc)
+    .bind(RELEVANT_OPERATION_LOOKUP_LIMIT)
+    .fetch_all(pool)
+    .await
+    .context("fetch_relevant_open_autonomous_daily_operation: query failed")?;
+
+    let mut records = rows
+        .into_iter()
+        .map(row_to_operation_record)
+        .collect::<Result<Vec<_>, _>>()?;
+
+    if records.len() > 1 {
+        anyhow::bail!(
+            "fetch_relevant_open_autonomous_daily_operation: {} equally authoritative active \
+             operations found for deployment_mode='{deployment_mode}' adapter_id='{adapter_id}'; \
+             failing closed rather than guessing which one is authoritative",
+            records.len()
+        );
+    }
+
+    Ok(records.pop())
+}
+
+// ---------------------------------------------------------------------------
+// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D2-FAILSAFE-RECOVERY-CLOSURE-01
+// REPAIR 4: dedicated atomic same-state blocker refresh.
+// ---------------------------------------------------------------------------
+
+/// States eligible for a same-state blocker refresh: a durable blocked/
+/// degraded state that may need its `state_reason_code`/
+/// `state_blocker_signature` updated without leaving the state itself --
+/// the pure [`is_legal_operation_transition`] graph deliberately has no
+/// self-loop edges (a self-loop is not a lifecycle transition), so this is
+/// a dedicated CAS operation rather than a broadened transition graph.
+const BLOCKER_REFRESH_ELIGIBLE_STATES: [&str; 4] = [
+    STATE_PREFLIGHT_BLOCKED,
+    STATE_MANUAL_INTERVENTION_REQUIRED,
+    STATE_CONTROLLER_DEGRADED,
+    STATE_EVIDENCE_DEGRADED,
+];
+
+/// `true` iff `state` may durably refresh its own blocker reason/signature
+/// in place via [`refresh_autonomous_daily_operation_blocker`].
+pub fn is_blocker_refresh_eligible_state(state: &str) -> bool {
+    BLOCKER_REFRESH_ELIGIBLE_STATES.contains(&state)
+}
+
+/// Arguments for [`refresh_autonomous_daily_operation_blocker`].
+#[derive(Debug, Clone)]
+pub struct RefreshAutonomousDailyOperationBlockerArgs {
+    pub operation_id: Uuid,
+    /// Must be one of [`BLOCKER_REFRESH_ELIGIBLE_STATES`] -- the state the
+    /// operation remains in after this call.
+    pub expected_state: String,
+    pub expected_state_version: i64,
+    pub reason_code: String,
+    pub blocker_signature: Option<String>,
+    pub occurred_at_utc: DateTime<Utc>,
+    pub bounded_detail: String,
+}
+
+/// Outcome of [`refresh_autonomous_daily_operation_blocker`].
+#[derive(Debug, Clone)]
+pub enum RefreshAutonomousDailyOperationBlockerOutcome {
+    /// The reason/signature differed from the durable row and was updated:
+    /// `state_version` incremented by exactly one, and one self-loop event
+    /// (`from_state == to_state == expected_state`) was inserted.
+    Applied(AutonomousDailyOperationRecord),
+    /// No write occurred: either the durable row already carries the exact
+    /// `(reason_code, blocker_signature)` requested (a genuine no-op), or
+    /// this is an idempotent replay of a refresh that already committed at
+    /// `expected_state_version + 1`. Either way, calling this repeatedly
+    /// with the same arguments is always safe.
+    AlreadyApplied(AutonomousDailyOperationRecord),
+    /// `operation_id` exists but its actual `(state, state_version)` does
+    /// not match `(expected_state, expected_state_version)` and this is not
+    /// an exact replay of an already-applied refresh. Nothing was written.
+    StaleState {
+        actual_state: String,
+        actual_state_version: i64,
+    },
+    /// No row exists for `operation_id`.
+    NotFound,
+    /// `expected_state` is not one of [`BLOCKER_REFRESH_ELIGIBLE_STATES`].
+    /// Checked before any DB write -- arbitrary same-state loops remain
+    /// illegal.
+    IllegalTarget,
+}
+
+fn validate_refresh_blocker_args(args: &RefreshAutonomousDailyOperationBlockerArgs) -> Result<()> {
+    if args.expected_state_version < 1 {
+        anyhow::bail!(
+            "refresh_autonomous_daily_operation_blocker: expected_state_version must be >= 1"
+        );
+    }
+    if args.reason_code.is_empty() || args.reason_code.len() > 128 {
+        anyhow::bail!(
+            "refresh_autonomous_daily_operation_blocker: reason_code must be 1..=128 chars"
+        );
+    }
+    if let Some(sig) = &args.blocker_signature {
+        if sig.len() > 128 {
+            anyhow::bail!(
+                "refresh_autonomous_daily_operation_blocker: blocker_signature exceeds 128 chars"
+            );
+        }
+    }
+    if args.bounded_detail.len() > 4000 {
+        anyhow::bail!(
+            "refresh_autonomous_daily_operation_blocker: bounded_detail exceeds 4000 chars"
+        );
+    }
+    Ok(())
+}
+
+/// Atomically refresh a durably blocked/degraded operation's
+/// `state_reason_code`/`state_blocker_signature` in place, without leaving
+/// `expected_state` -- REPAIR 4's dedicated same-state CAS operation.
+///
+/// 1. Validates `expected_state` is blocker-refresh-eligible before
+///    touching SQL -- an arbitrary state can never self-loop through this
+///    function.
+/// 2. Guards the `UPDATE` by `(operation_id, expected_state,
+///    expected_state_version)` (exactly like
+///    [`transition_autonomous_daily_operation`]) *and* by `(state_reason_code,
+///    state_blocker_signature) IS DISTINCT FROM (new values)`, so a call
+///    whose requested values already match the durable row writes nothing
+///    and bumps nothing.
+/// 3. On a match: `state` is unchanged, `state_reason_code` and
+///    `state_blocker_signature` are overwritten, `state_version` increments
+///    by exactly one, and one self-loop event
+///    (`from_state == to_state == expected_state`) is inserted at the new
+///    version -- all in one transaction.
+/// 4. On no match, re-reads the actual current row (read-only) to
+///    distinguish `NotFound`, `AlreadyApplied` (either the values already
+///    matched at the expected version, or this is an exact replay of an
+///    already-applied refresh), and `StaleState`.
+pub async fn refresh_autonomous_daily_operation_blocker(
+    pool: &PgPool,
+    args: &RefreshAutonomousDailyOperationBlockerArgs,
+) -> Result<RefreshAutonomousDailyOperationBlockerOutcome> {
+    validate_refresh_blocker_args(args)?;
+
+    if !is_blocker_refresh_eligible_state(&args.expected_state) {
+        return Ok(RefreshAutonomousDailyOperationBlockerOutcome::IllegalTarget);
+    }
+
+    let mut tx = pool
+        .begin()
+        .await
+        .context("refresh_autonomous_daily_operation_blocker: begin transaction failed")?;
+
+    let new_version = args.expected_state_version + 1;
+    let reason_code = Some(args.reason_code.clone());
+
+    let updated_row = sqlx::query(&format!(
+        r#"
+        update sys_autonomous_daily_operations
+        set state_reason_code = $1,
+            state_blocker_signature = $2,
+            state_version = $3,
+            updated_at_utc = $4
+        where operation_id = $5 and state = $6 and state_version = $7
+          and (state_reason_code is distinct from $1 or state_blocker_signature is distinct from $2)
+        returning {OPERATION_COLUMNS}
+        "#
+    ))
+    .bind(&reason_code)
+    .bind(&args.blocker_signature)
+    .bind(new_version)
+    .bind(args.occurred_at_utc)
+    .bind(args.operation_id)
+    .bind(&args.expected_state)
+    .bind(args.expected_state_version)
+    .fetch_optional(&mut *tx)
+    .await
+    .context("refresh_autonomous_daily_operation_blocker: CAS update failed")?;
+
+    if let Some(row) = updated_row {
+        let record = row_to_operation_record(row)?;
+
+        sqlx::query(&format!(
+            r#"
+            insert into sys_autonomous_daily_operation_events ({EVENT_COLUMNS})
+            values ($1,$2,$3,$4,$5,$6,$7,$8)
+            "#
+        ))
+        .bind(args.operation_id)
+        .bind(new_version)
+        .bind(&args.expected_state)
+        .bind(&args.expected_state)
+        .bind(&reason_code)
+        .bind(args.occurred_at_utc)
+        .bind(None::<Uuid>)
+        .bind(&args.bounded_detail)
+        .execute(&mut *tx)
+        .await
+        .context("refresh_autonomous_daily_operation_blocker: insert event failed")?;
+
+        tx.commit()
+            .await
+            .context("refresh_autonomous_daily_operation_blocker: commit (applied) failed")?;
+
+        return Ok(RefreshAutonomousDailyOperationBlockerOutcome::Applied(
+            record,
+        ));
+    }
+
+    let current_row = sqlx::query(&format!(
+        "select {OPERATION_COLUMNS} from sys_autonomous_daily_operations where operation_id = $1"
+    ))
+    .bind(args.operation_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .context("refresh_autonomous_daily_operation_blocker: current-row re-read failed")?;
+
+    let outcome = match current_row {
+        None => RefreshAutonomousDailyOperationBlockerOutcome::NotFound,
+        Some(row) => {
+            let current = row_to_operation_record(row)?;
+            let values_already_match = current.state_reason_code == reason_code
+                && current.state_blocker_signature == args.blocker_signature;
+            if current.state == args.expected_state
+                && current.state_version == args.expected_state_version
+                && values_already_match
+            {
+                // The CAS guard's own `IS DISTINCT FROM` clause is what
+                // blocked the write: the requested values already match.
+                RefreshAutonomousDailyOperationBlockerOutcome::AlreadyApplied(current)
+            } else if current.state == args.expected_state
+                && current.state_version == new_version
+                && values_already_match
+            {
+                // Exact replay of a refresh that already committed.
+                RefreshAutonomousDailyOperationBlockerOutcome::AlreadyApplied(current)
+            } else {
+                RefreshAutonomousDailyOperationBlockerOutcome::StaleState {
+                    actual_state: current.state,
+                    actual_state_version: current.state_version,
+                }
+            }
+        }
+    };
+
+    tx.rollback()
+        .await
+        .context("refresh_autonomous_daily_operation_blocker: rollback (no-op read) failed")?;
+
+    Ok(outcome)
+}
+
+// ---------------------------------------------------------------------------
 // AUTONOMOUS-DAILY-PAPER-OPERATIONS-01C-COMPLETED-BAR-DATA-DRIVER
 // Durable provider-poll and bar-observation evidence
 // ---------------------------------------------------------------------------

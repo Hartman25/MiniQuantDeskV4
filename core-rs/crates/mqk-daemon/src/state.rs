@@ -113,9 +113,9 @@ pub use runtime_session_source::{
     RuntimeSessionSourceModeParse, RuntimeSessionSourceSummary, RUNTIME_SESSION_SOURCE_ENV,
 };
 pub use session_controller::{
-    autonomous_session_schedule_from_env, run_session_controller_tick, session_window_from_env,
-    spawn_autonomous_session_controller, AutonomousSessionSchedule, SessionWindow,
-    SESSION_START_HH_MM_ENV, SESSION_STOP_HH_MM_ENV,
+    autonomous_session_schedule_from_env, run_durable_session_controller_tick,
+    run_session_controller_tick, session_window_from_env, spawn_autonomous_session_controller,
+    AutonomousSessionSchedule, SessionWindow, SESSION_START_HH_MM_ENV, SESSION_STOP_HH_MM_ENV,
 };
 pub(crate) use snapshot::{
     reconcile_broker_snapshot_from_schema, reconcile_local_snapshot_from_runtime_with_sides,

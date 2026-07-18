@@ -12010,3 +12010,263 @@ Next authorized patch: Phase D3 — completed-bar task cutover and task
   supervision — only after independent review and acceptance of this D2
   closure repair, and only on explicit operator instruction.
 ```
+
+---
+
+**Phase D2 final fail-safe recovery closure
+(`AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D2-FAILSAFE-RECOVERY-CLOSURE-01`):**
+starting HEAD `5c77af58397f83ac0c18fa07ac7ef6d5e0464056` ("fix: use
+RangeInclusive::contains for limit_symbols bounds check"), direct
+descendant of `8e79c55b072a4213355ef481a9ca282c0f3eb235` ("fix: close
+durable autonomous coordinator lifecycle").
+
+**Mission.** Close the remaining D2 fail-safe paths the prior
+lifecycle-closure repair did not reach: preserving lifecycle control over
+an existing durable operation when *current* (this-tick) calendar/
+assignment/registry/runtime-context resolution fails, degrading a running
+identity conflict without stranding it, allowing a durably blocked/
+degraded operation's reason to change without leaving its state, atomic
+running-transition error containment, and preflight assignment-loss
+repair. Still without beginning D3.
+
+**Existing-operation fallback (REPAIR 1/2).** New `mqk_db`
+`fetch_relevant_open_autonomous_daily_operation(pool, deployment_mode,
+adapter_id, now_utc)`: read-only, bounded (limit 25), deterministic
+ordering, excludes terminal (`completed*`) states, matches a row whose
+state is `running`/`recovery_retrying`/`stopping`/`stop_retrying`/
+`controller_degraded`/`evidence_degraded` *or* whose persisted
+`preopen_start_utc..=postclose_finalize_utc` window contains `now_utc`;
+fails closed (`Err`, never a silent `None`) if more than one row matches.
+`tick_autonomous_daily_coordinator` now resolves calendar *before*
+requiring a DB handle (preserving the pre-existing zero-DB-call guarantee
+for a weekend/holiday/no-DB tick — a regression caught and fixed by `a01`-
+`a03` failing during this repair's own verification pass), and on a
+calendar/assignment/runtime-context resolution failure with a DB
+available, calls the new `resolve_or_degrade_on_resolution_failure` /
+`degrade_existing_operation_on_resolution_failure` pair: no relevant
+operation → the ordinary typed blocked outcome, unchanged, nothing
+created; a relevant `running` operation before its own persisted close →
+degrades to `controller_degraded` (no runtime interaction at all); already
+`stopping`/`stop_retrying` → continues restart-safe stop via
+`handle_stopping` (refactored to take `postclose_finalize_utc` directly
+instead of a full session plan, so it no longer requires freshly-resolved
+configuration to run); at or after the operation's own persisted
+`effective_operation_close_utc` → `handle_session_close` (uses only the
+durable operation and current local-runtime ownership); already blocked/
+degraded → same-state refresh (REPAIR 4). New regressions: `l01`
+(assignment-resolution failure degrades a running operation, zero new
+start, matching runtime stopped at persisted close), `l02` (no relevant
+operation plus invalid config creates and starts nothing), `l03` (invalid
+fixed-window override does not strand an existing running operation at
+close).
+
+**Running identity-conflict degradation (REPAIR 3).**
+`handle_identity_conflict` previously always targeted
+`manual_intervention_required`, which has no legal edge from `running` —
+a running conflict was silently dropped (reported, never persisted). It
+now selects `running -> controller_degraded` (the graph's only legal
+running-degraded edge) for a running existing operation, a same-state
+refresh (REPAIR 4) for an already blocked/degraded existing operation
+(remaining in its current state rather than escalating), and the
+unchanged real transition to `manual_intervention_required` for every
+other pre-running/closing state with a legal edge. A second, independent
+gap closed in the same repair: an identity conflict that recurs on every
+tick (the freshly computed identity never reverts) previously could never
+reach `dispatch_by_state`'s close-time handling at all, because
+`create_or_recover`'s `IdentityConflict` arm always short-circuits before
+`dispatch_by_state` runs — `handle_identity_conflict` now carries its own
+close-time check (`now_utc >= existing.effective_operation_close_utc`)
+that routes straight to `handle_session_close` once reached, so a
+recurring conflict still stops the matching runtime at persisted close.
+`create_or_recover` and `handle_identity_conflict` both gained a `state:
+&Arc<AppState>` parameter for this. New regressions: `j01` (full blocker
+signature persisted, `controller_degraded`, run untouched), `j02`
+(repeated identical conflict, zero new event), `j03` (changed conflicting
+assignment refreshes the signature once, remains degraded), `j04`
+(recurring conflict still reaches canonical stop at persisted close).
+
+**Same-state blocker refresh (REPAIR 4).** New `mqk_db`
+`refresh_autonomous_daily_operation_blocker` (+
+`RefreshAutonomousDailyOperationBlockerArgs`/`Outcome`): a dedicated
+atomic CAS restricted to the four blocker-refresh-eligible states
+(`preflight_blocked`, `manual_intervention_required`,
+`controller_degraded`, `evidence_degraded`) that updates
+`state_reason_code`/`state_blocker_signature` in place — `state` itself
+never changes — guarded by `(state_reason_code, state_blocker_signature)
+IS DISTINCT FROM` the requested values so an identical replay is a true
+no-op, and rejects any other state as `IllegalTarget` before touching SQL.
+Chosen over broadening the pure `is_legal_operation_transition` graph with
+self-loop edges (which would have made same-state CAS legal
+*unconditionally*, not only when the blocker actually changed).
+`apply_manual_if_changed` now detects a same-state target and dispatches
+to this new function instead of `apply_transition` (which has no
+self-loop edges and would `bail!` on `IllegalTransition`) — this single
+change fixes every existing call site that could reach a same-state
+degrade (`classify_and_apply_preopen_blocker`'s `preflight_blocked` wait-
+path included). New DB-level regressions:
+`blocker_self_refresh_stores_same_state_with_new_reason_and_one_event`,
+`blocker_self_refresh_identical_values_are_idempotent`,
+`blocker_self_refresh_arbitrary_state_self_loops_remain_illegal`. New
+coordinator-level regressions: `k01` (a changed blocker while already
+`manual_intervention_required` refreshes in place, exactly one event),
+`k02` (repeating the refreshed blocker inserts no further event).
+
+**Atomic running-transition error containment (REPAIR 5).** The
+`mqk_db::transition_autonomous_daily_operation_to_running(...).await?` in
+`attempt_canonical_start` propagated a bare DB/transaction/connection
+`Err` with an uncontained `?` while the canonical start call may already
+have a real, locally-owned run active — never stopped, never reconciled.
+The `?` is removed; the store call's own `Err` is now routed to a new
+`handle_running_transition_store_error`, which first re-reads the
+operation by ID: if the re-read proves the exact running transition
+committed (matching `state`, `run_id`, a present `started_at_utc`, and a
+matching `-> running` transition event at the current `state_version`,
+via new `running_transition_event_matches`), the durable truth is
+accepted (`Started`/`Recovered`) with **no** best-effort stop — the run is
+genuinely active and correctly bound; otherwise, best-effort stops the run
+and fails closed to `manual_intervention_required`, never presenting the
+operation as running. If the operation row itself has vanished, that is a
+data-integrity defect (best-effort stop, then `bail!`, matching this
+codebase's existing "vanished operation" convention elsewhere in this
+file). If the re-read itself also fails, best-effort stops the run and
+still returns a typed `ManualInterventionRequired` outcome (so REPAIR 7's
+session-controller projection still fires) rather than propagating a bare
+error — the one narrow, documented window this coordinator cannot make
+fully durable is DB confirmation *and* DB degradation-persistence both
+unavailable at once. New regressions (calling the now-`pub`
+`handle_running_transition_store_error` directly with a synthetic
+`anyhow::Error`, the narrow injectable seam this parameter already
+provided — no DB fault injection needed): `m01` (unconfirmed re-read stops
+the local runtime, fails closed, run never adopted), `m02` (a re-read that
+proves a real, independently-committed transition is accepted
+idempotently with no best-effort stop).
+
+**Preflight assignment loss (REPAIR 6).** `handle_preflight_blocked`'s
+assignment-resolution-failure branch previously returned an unpersisted
+`PreflightBlocked { reason_code: "assignment_missing" }` directly — no
+transition, no signature, no notification. It now routes through
+`classify_and_apply_preopen_blocker(AssignmentMissing)`, the same path
+`handle_preparing_data` already used for the identical failure, producing
+one real `preflight_blocked -> manual_intervention_required` transition
+with a full typed signature and one notification. New regression: `n01`.
+
+**Coordinator tick-error operator truth (REPAIR 7).**
+`run_durable_session_controller_tick`'s `Err` branch previously only
+logged (`warn!`) an unexpected `tick_autonomous_daily_coordinator` error —
+the compatibility read surface kept showing stale prior truth as if still
+current. It now also calls `AppState::set_autonomous_session_truth` with
+`AutonomousSessionTruth::StartRefused { detail:
+"reason_code=coordinator_tick_failed" }` — a fixed, bounded label that
+never renders the underlying error (no SQL/filesystem/credential/
+environment text can leak through this read surface). Remains a read
+surface only: no new route, no lifecycle authority. `run_
+durable_session_controller_tick` and (already-existing)
+`AutonomousSessionTruth` are now re-exported from `mqk_daemon::state` (the
+narrow export this test needed). New regression: `o01` (two `running`
+operations for the same slot family on different market dates forces
+REPAIR 1's fail-closed multi-row guard, the one legitimate, deterministic
+way — short of DB fault injection — to make
+`tick_autonomous_daily_coordinator` itself return `Err`; confirms the
+bounded `StartRefused` truth is projected).
+
+**Accepted foundation preserved, unmodified in substance:** canonical
+session-plan provider, canonical assignment resolver, shared runtime-
+context resolver, race-safe daily-slot create/recover, migration `0051`
+stop retry evidence, migration `0052` blocker signatures, typed autonomous
+arm, typed retry policy, the atomic transition-to-running API (extended,
+not altered), the restart-safe stopped recorder, the successful AL-03
+start/stop fixture (still 3/3), the completed-bar driver (still unwired),
+the legacy ticker (unchanged), and "no automatic outcome finalization"
+(no `completed*` transition reachable from this repair). No migration
+added or modified (`0048`-`0052` unchanged).
+
+**Tests.** New DB-backed regressions, all `#[ignore]`, all proven against
+`mqk-test-postgres` port 5434:
+`mqk-daemon/tests/scenario_autonomous_daily_session_coordinator_01.rs`
+gained sections J (`j01`-`j04`), K (`k01`-`k02`), L (`l01`-`l03`), M
+(`m01`-`m02`), N (`n01`), O (`o01`) — 21 → 43 tests, all passing;
+`mqk-db/tests/scenario_autonomous_daily_operation_lifecycle_01.rs` gained
+the REPAIR 1 relevant-lookup group (4 tests) and the REPAIR 4 blocker-
+refresh group (3 tests) — 24 → 31 tests, all passing.
+
+**Regressions (each run as its own binary against the reachable test DB,
+port 5434, `--include-ignored --test-threads=1`):**
+`scenario_autonomous_daily_session_coordinator_01` 43/43,
+`scenario_autonomous_daily_operation_lifecycle_01` 31/31,
+`scenario_autonomous_daily_operation_store_01` 26/26,
+`scenario_autonomous_daily_operation_data_evidence_01` 8/8,
+`scenario_daemon_runtime_lifecycle` 24/24,
+`scenario_autonomous_paper_day_lifecycle_auton12` 3/3,
+`scenario_autonomous_daily_coordinator_policy_01` 35/35,
+`scenario_autonomous_daily_operation_identity_01` 44/44,
+`scenario_autonomous_completed_bar_driver_01` 56/56,
+`scenario_daily_data_readiness_start_gate_01` 20/20,
+`scenario_native_strategy_bootstrap_daemon_b1b` 5/5,
+`scenario_autonomous_gate_parity_auton11` 5/5. Zero DB self-skips across
+all twelve. The complete `mqk-daemon`/`mqk-db` integration-test suites
+were deliberately not run (out of scope per the patch instructions).
+
+**Migration governance:** not run — `0048`-`0052` and `manifest.json` are
+unchanged by this patch (mission explicitly waives migration governance
+in this case).
+
+**Guards:** `validate_autonomous_daily_paper_operations_01a_audit.ps1` all
+checks pass. `validate_daily_data_readiness_01e_closure.ps1` all checks
+pass. `check_unsafe_patterns.ps1` all guards pass.
+
+**Format/lint:** `rustfmt --check` clean on every touched/added Rust file
+(one `rustfmt` pass applied to bring newly-added code into the project's
+formatting style — 3 files reformatted, then reverified clean). `cargo
+check -p mqk-db -p mqk-runtime -p mqk-daemon` (and `--tests`) clean.
+Clippy (`-D warnings`) clean on `-p mqk-db --lib`, `-p mqk-db --test
+scenario_autonomous_daily_operation_lifecycle_01`, `-p mqk-daemon --lib`,
+`-p mqk-daemon --test scenario_autonomous_daily_session_coordinator_01`,
+`-p mqk-daemon --test scenario_autonomous_paper_day_lifecycle_auton12`.
+`git diff --check` clean.
+
+**Safety confirmation:**
+
+```text
+PROVIDER CALLS: no (real network)
+BROKER CALLS: no
+NETWORK CALLS: no
+REAL DAEMON STARTED: no
+COMPLETED-BAR TASK STARTED: no
+REAL PROVIDER CALLS: no
+REAL BROKER ENDPOINT CALLS: no
+EXTERNAL NETWORK CALLS: no
+PAPER ORDERS: no
+LIVE ORDERS: no
+PAPER DB TOUCHED (port 5440): no
+TEST DB TOUCHED (port 5434): yes (isolated mqk-test-postgres only)
+MIGRATION ADDED: no
+MAIN.RS CHANGED: no
+LEGACY TICKER CHANGED: no
+API ROUTES CHANGED: no
+GUI CHANGED: no
+HALT CLEARED: no
+KILL SWITCH CLEARED: no
+DURABLE DISARM OVERRIDDEN: no
+FILES CHANGED: MiniQuantDesk_Master_Patch_Ledger_v2.md,
+  core-rs/crates/mqk-daemon/src/state.rs,
+  core-rs/crates/mqk-daemon/src/state/autonomous_daily_coordinator.rs,
+  core-rs/crates/mqk-daemon/src/state/session_controller.rs,
+  core-rs/crates/mqk-daemon/tests/scenario_autonomous_daily_session_coordinator_01.rs,
+  core-rs/crates/mqk-db/src/autonomous_daily_operation.rs,
+  core-rs/crates/mqk-db/tests/scenario_autonomous_daily_operation_lifecycle_01.rs
+ADDED FILES: none
+```
+
+```text
+D2: COMPLETE (pending commit)
+  — all seven fail-safe repairs implemented and proven; existing-operation
+  fallback, running identity-conflict degradation, same-state blocker
+  refresh, atomic running-transition error containment, preflight
+  assignment loss, and coordinator tick-error operator truth all closed;
+  D3 not started.
+Phase D: OPEN (D2 complete; D3 not started)
+Bundle 3 (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-COMBINED): OPEN
+Next authorized patch: Phase D3 — completed-bar task cutover and task
+  supervision — only after independent review and acceptance of this D2
+  closure repair, and only on explicit operator instruction.
+```

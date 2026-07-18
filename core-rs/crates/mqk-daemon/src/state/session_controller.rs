@@ -257,7 +257,22 @@ pub async fn run_durable_session_controller_tick(
     {
         Ok(outcome) => log_coordinator_outcome(state, &outcome, now).await,
         Err(err) => {
+            // REPAIR 7 (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D2-FAILSAFE-
+            // RECOVERY-CLOSURE-01): an unexpected tick error must not only
+            // be logged — the compatibility read surface
+            // (`/api/v1/system/preflight`, `/api/v1/autonomous/paper-status`)
+            // must reflect that lifecycle authority could not be re-proven
+            // this tick, not silently keep showing stale prior truth as if
+            // it were still current. `err` is never rendered into the
+            // bounded detail here — only a fixed reason code — so no SQL,
+            // filesystem, credential, or environment text can leak through
+            // this read surface.
             warn!(error = %err, "autonomous_daily_coordinator: tick failed");
+            state
+                .set_autonomous_session_truth(AutonomousSessionTruth::StartRefused {
+                    detail: "reason_code=coordinator_tick_failed".to_string(),
+                })
+                .await;
         }
     }
 }

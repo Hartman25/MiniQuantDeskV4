@@ -13,15 +13,18 @@
 use chrono::{DateTime, Datelike, Duration as ChronoDuration, NaiveDate, TimeZone, Utc};
 use mqk_db::{
     clear_retry_timing, create_or_recover_autonomous_daily_operation,
-    list_autonomous_daily_operation_events, record_retry_timing, record_running_started,
-    record_start_attempt, record_stop_attempt, record_stopped_at,
+    fetch_relevant_open_autonomous_daily_operation, list_autonomous_daily_operation_events,
+    record_retry_timing, record_running_started, record_start_attempt, record_stop_attempt,
+    record_stopped_at, refresh_autonomous_daily_operation_blocker,
     transition_autonomous_daily_operation, AutonomousDailyOperationRecord,
     AutonomousDailyTransitionOutcome, CreateAutonomousDailyOperationArgs,
     CreateOrRecoverAutonomousDailyOperationOutcome, RecordRetryTimingOutcome,
     RecordRunningStartedOutcome, RecordStartAttemptOutcome, RecordStopAttemptOutcome,
-    RecordStoppedAtOutcome, TransitionAutonomousDailyOperationArgs, ENV_DB_URL,
-    STATE_AWAITING_OPEN, STATE_AWAITING_PREOPEN, STATE_MANUAL_INTERVENTION_REQUIRED,
-    STATE_PREPARING_DATA, STATE_RUNNING, STATE_START_RETRYING,
+    RecordStoppedAtOutcome, RefreshAutonomousDailyOperationBlockerArgs,
+    RefreshAutonomousDailyOperationBlockerOutcome, TransitionAutonomousDailyOperationArgs,
+    ENV_DB_URL, STATE_AWAITING_OPEN, STATE_AWAITING_PREOPEN, STATE_CONTROLLER_DEGRADED,
+    STATE_MANUAL_INTERVENTION_REQUIRED, STATE_PREPARING_DATA, STATE_RUNNING, STATE_START_RETRYING,
+    STATE_STOPPING,
 };
 use uuid::Uuid;
 
@@ -109,6 +112,104 @@ async fn seed_operation(pool: &sqlx::PgPool, seed: &str) -> Uuid {
         CreateOrRecoverAutonomousDailyOperationOutcome::Created(r) => r.operation_id,
         CreateOrRecoverAutonomousDailyOperationOutcome::Recovered(r) => r.operation_id,
         other => panic!("expected Created or Recovered, got {other:?}"),
+    }
+}
+
+/// Create one fresh operation row for `seed` on an arbitrary `market_date`
+/// (all sharing the same `adapter_id` suffix per `seed`), returning its
+/// `operation_id`. Used only by the REPAIR 1 relevant-lookup tests, which
+/// need multiple distinct daily slots for the same adapter.
+async fn seed_operation_for_date(pool: &sqlx::PgPool, seed: &str, market_date: NaiveDate) -> Uuid {
+    let (open, close, preopen, postclose) = session_bounds(market_date);
+    let previous_trading_date = market_date - ChronoDuration::days(3);
+    let operation_id = test_operation_id(&format!("{seed}|{market_date}"));
+    let args = CreateAutonomousDailyOperationArgs {
+        operation_id,
+        market_date,
+        deployment_mode: "paper".to_string(),
+        adapter_id: format!("lifecycle-test-{seed}"),
+        session_plan_identity: format!("lifecycle-plan|{seed}|{market_date}"),
+        assignment_identity: "lifecycle-assignment".to_string(),
+        runtime_binding_identity: "lifecycle-binding".to_string(),
+        calendar_source: "nyse_weekdays_heuristic".to_string(),
+        calendar_coverage_state: "active".to_string(),
+        schedule_source: "nyse_weekdays_heuristic".to_string(),
+        effective_operation_open_utc: open,
+        effective_operation_close_utc: close,
+        exchange_session_open_utc: open,
+        exchange_session_close_utc: close,
+        exchange_is_early_close: false,
+        previous_trading_date,
+        preopen_start_utc: preopen,
+        postclose_finalize_utc: postclose,
+        initial_state: STATE_AWAITING_PREOPEN.to_string(),
+        data_refresh_state: "not_started".to_string(),
+        occurred_at_utc: preopen,
+        bounded_detail: "lifecycle test creation".to_string(),
+        stop_attempt_count: 0,
+    };
+    match create_or_recover_autonomous_daily_operation(pool, &args)
+        .await
+        .expect("create operation")
+    {
+        CreateOrRecoverAutonomousDailyOperationOutcome::Created(r) => r.operation_id,
+        CreateOrRecoverAutonomousDailyOperationOutcome::Recovered(r) => r.operation_id,
+        other => panic!("expected Created or Recovered, got {other:?}"),
+    }
+}
+
+/// Advance a freshly seeded (`awaiting_preopen`) operation through the real
+/// legal CAS chain to `running`, binding `run_id`. Returns the resulting
+/// record (correct `state_version`).
+async fn advance_to_running(
+    pool: &sqlx::PgPool,
+    operation_id: Uuid,
+    run_id: Uuid,
+    ts: DateTime<Utc>,
+) -> anyhow::Result<AutonomousDailyOperationRecord> {
+    let row = mqk_db::fetch_autonomous_daily_operation_by_id(pool, operation_id)
+        .await?
+        .expect("row must exist");
+    let row = advance_one(pool, &row, STATE_PREPARING_DATA, ts).await?;
+    let row = advance_one(pool, &row, STATE_AWAITING_OPEN, ts).await?;
+    let row = advance_one(pool, &row, STATE_START_RETRYING, ts).await?;
+    let args = TransitionAutonomousDailyOperationArgs {
+        operation_id: row.operation_id,
+        expected_state: row.state.clone(),
+        expected_state_version: row.state_version,
+        new_state: STATE_RUNNING.to_string(),
+        reason_code: None,
+        blocker_signature: None,
+        occurred_at_utc: ts,
+        run_id: Some(run_id),
+        bounded_detail: "test setup: -> running".to_string(),
+    };
+    match transition_autonomous_daily_operation(pool, &args).await? {
+        AutonomousDailyTransitionOutcome::Applied(r) => Ok(r),
+        other => panic!("expected Applied, got {other:?}"),
+    }
+}
+
+async fn advance_one(
+    pool: &sqlx::PgPool,
+    row: &AutonomousDailyOperationRecord,
+    new_state: &str,
+    ts: DateTime<Utc>,
+) -> anyhow::Result<AutonomousDailyOperationRecord> {
+    let args = TransitionAutonomousDailyOperationArgs {
+        operation_id: row.operation_id,
+        expected_state: row.state.clone(),
+        expected_state_version: row.state_version,
+        new_state: new_state.to_string(),
+        reason_code: None,
+        blocker_signature: None,
+        occurred_at_utc: ts,
+        run_id: None,
+        bounded_detail: format!("test setup: -> {new_state}"),
+    };
+    match transition_autonomous_daily_operation(pool, &args).await? {
+        AutonomousDailyTransitionOutcome::Applied(r) => Ok(r),
+        other => panic!("expected Applied transitioning to {new_state}, got {other:?}"),
     }
 }
 
@@ -1019,6 +1120,329 @@ async fn record_autonomous_runtime_stopped_clears_retry_state_atomically_and_is_
         }
         other => panic!("expected Recorded, got {other:?}"),
     }
+
+    cleanup_operation(&pool, operation_id).await;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D2-FAILSAFE-RECOVERY-CLOSURE-01
+// REPAIR 1: fetch_relevant_open_autonomous_daily_operation
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn relevant_open_lookup_selects_the_authoritative_current_operation() -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    let market_date = NaiveDate::from_ymd_opt(2026, 7, 20).unwrap();
+    let operation_id = seed_operation_for_date(&pool, "relopen-a", market_date).await;
+    let run_id = Uuid::new_v4();
+    let ts = session_bounds(market_date).0;
+    let running = advance_to_running(&pool, operation_id, run_id, ts).await?;
+    assert_eq!(running.state, STATE_RUNNING);
+
+    // `running` is in the active-lifecycle-state set, so any `now_utc` --
+    // even far outside the operation's own window -- must still find it.
+    let far_future = ts + ChronoDuration::days(30);
+    let found = fetch_relevant_open_autonomous_daily_operation(
+        &pool,
+        "paper",
+        "lifecycle-test-relopen-a",
+        far_future,
+    )
+    .await?
+    .expect("the running operation must be found");
+    assert_eq!(found.operation_id, operation_id);
+
+    cleanup_operation(&pool, operation_id).await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn relevant_open_lookup_ignores_terminal_historical_rows() -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    let market_date = NaiveDate::from_ymd_opt(2026, 7, 20).unwrap();
+    let operation_id = seed_operation_for_date(&pool, "relopen-terminal", market_date).await;
+    let ts = session_bounds(market_date).0;
+    let row = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation_id)
+        .await?
+        .expect("row must exist");
+    let row = advance_one(&pool, &row, STATE_STOPPING, ts).await?;
+    let stopped = advance_one(&pool, &row, mqk_db::STATE_COMPLETED_NO_TRADE, ts).await?;
+    assert_eq!(stopped.state, mqk_db::STATE_COMPLETED_NO_TRADE);
+
+    // Even `now_utc` squarely inside the operation's own persisted window
+    // must not resurrect a terminal row.
+    let inside_window = ts + ChronoDuration::hours(1);
+    let found = fetch_relevant_open_autonomous_daily_operation(
+        &pool,
+        "paper",
+        "lifecycle-test-relopen-terminal",
+        inside_window,
+    )
+    .await?;
+    assert!(found.is_none(), "a terminal row must never be relevant");
+
+    cleanup_operation(&pool, operation_id).await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn relevant_open_lookup_stale_manual_row_cannot_shadow_running_current_row(
+) -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    let yesterday = NaiveDate::from_ymd_opt(2026, 7, 19).unwrap();
+    let today = NaiveDate::from_ymd_opt(2026, 7, 20).unwrap();
+
+    // A stale historical row: manual_intervention_required (not an active-
+    // lifecycle state) from a prior day, whose own window does not include
+    // `now_utc` used below.
+    let stale_id = seed_operation_for_date(&pool, "relopen-stale", yesterday).await;
+    let stale_ts = session_bounds(yesterday).0;
+    let stale_row = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, stale_id)
+        .await?
+        .expect("row must exist");
+    advance_one(
+        &pool,
+        &stale_row,
+        STATE_MANUAL_INTERVENTION_REQUIRED,
+        stale_ts,
+    )
+    .await?;
+
+    // Today's current row: running.
+    let current_id = seed_operation_for_date(&pool, "relopen-stale", today).await;
+    let current_run_id = Uuid::new_v4();
+    let current_ts = session_bounds(today).0;
+    advance_to_running(&pool, current_id, current_run_id, current_ts).await?;
+
+    let found = fetch_relevant_open_autonomous_daily_operation(
+        &pool,
+        "paper",
+        "lifecycle-test-relopen-stale",
+        current_ts,
+    )
+    .await?
+    .expect("the running current row must be found");
+    assert_eq!(
+        found.operation_id, current_id,
+        "a stale historical manual row must never shadow the running current row"
+    );
+
+    cleanup_operation(&pool, stale_id).await;
+    cleanup_operation(&pool, current_id).await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn relevant_open_lookup_multiple_active_rows_fail_closed() -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    let date_a = NaiveDate::from_ymd_opt(2026, 7, 20).unwrap();
+    let date_b = NaiveDate::from_ymd_opt(2026, 7, 21).unwrap();
+
+    let id_a = seed_operation_for_date(&pool, "relopen-multi", date_a).await;
+    let id_b = seed_operation_for_date(&pool, "relopen-multi", date_b).await;
+    let ts_a = session_bounds(date_a).0;
+    let ts_b = session_bounds(date_b).0;
+    advance_to_running(&pool, id_a, Uuid::new_v4(), ts_a).await?;
+    advance_to_running(&pool, id_b, Uuid::new_v4(), ts_b).await?;
+
+    let result = fetch_relevant_open_autonomous_daily_operation(
+        &pool,
+        "paper",
+        "lifecycle-test-relopen-multi",
+        ts_a,
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "multiple equally authoritative active rows must fail closed, never guess"
+    );
+
+    cleanup_operation(&pool, id_a).await;
+    cleanup_operation(&pool, id_b).await;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// REPAIR 4: refresh_autonomous_daily_operation_blocker
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn blocker_self_refresh_stores_same_state_with_new_reason_and_one_event() -> anyhow::Result<()>
+{
+    let pool = test_pool().await?;
+    let operation_id = seed_operation(&pool, "refresh-a").await;
+    let market_date = NaiveDate::from_ymd_opt(2026, 7, 20).unwrap();
+    let ts = session_bounds(market_date).0;
+    let row = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation_id)
+        .await?
+        .expect("row must exist");
+    let blocked_args = TransitionAutonomousDailyOperationArgs {
+        operation_id: row.operation_id,
+        expected_state: row.state.clone(),
+        expected_state_version: row.state_version,
+        new_state: STATE_MANUAL_INTERVENTION_REQUIRED.to_string(),
+        reason_code: Some("reason_a".to_string()),
+        blocker_signature: Some("sha256:aaaa".to_string()),
+        occurred_at_utc: ts,
+        run_id: None,
+        bounded_detail: "test setup: -> manual (reason_a)".to_string(),
+    };
+    let blocked = match transition_autonomous_daily_operation(&pool, &blocked_args).await? {
+        AutonomousDailyTransitionOutcome::Applied(r) => r,
+        other => panic!("expected Applied, got {other:?}"),
+    };
+    let events_before = list_autonomous_daily_operation_events(&pool, operation_id, 100).await?;
+
+    let refresh_args = RefreshAutonomousDailyOperationBlockerArgs {
+        operation_id,
+        expected_state: STATE_MANUAL_INTERVENTION_REQUIRED.to_string(),
+        expected_state_version: blocked.state_version,
+        reason_code: "reason_b".to_string(),
+        blocker_signature: Some("sha256:bbbb".to_string()),
+        occurred_at_utc: ts + ChronoDuration::seconds(30),
+        bounded_detail: "test: self-refresh reason_a -> reason_b".to_string(),
+    };
+    let refreshed = match refresh_autonomous_daily_operation_blocker(&pool, &refresh_args).await? {
+        RefreshAutonomousDailyOperationBlockerOutcome::Applied(r) => r,
+        other => panic!("expected Applied, got {other:?}"),
+    };
+    assert_eq!(
+        refreshed.state, STATE_MANUAL_INTERVENTION_REQUIRED,
+        "the refresh must remain in the same state"
+    );
+    assert_eq!(refreshed.state_reason_code.as_deref(), Some("reason_b"));
+    assert_eq!(
+        refreshed.state_blocker_signature.as_deref(),
+        Some("sha256:bbbb")
+    );
+    assert_eq!(refreshed.state_version, blocked.state_version + 1);
+
+    let events_after = list_autonomous_daily_operation_events(&pool, operation_id, 100).await?;
+    assert_eq!(
+        events_after.len(),
+        events_before.len() + 1,
+        "the refresh must insert exactly one append-only event"
+    );
+    let last_event = events_after.last().expect("at least one event");
+    assert_eq!(last_event.from_state, STATE_MANUAL_INTERVENTION_REQUIRED);
+    assert_eq!(last_event.to_state, STATE_MANUAL_INTERVENTION_REQUIRED);
+    assert_eq!(last_event.reason_code.as_deref(), Some("reason_b"));
+
+    cleanup_operation(&pool, operation_id).await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn blocker_self_refresh_identical_values_are_idempotent() -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    let operation_id = seed_operation(&pool, "refresh-b").await;
+    let market_date = NaiveDate::from_ymd_opt(2026, 7, 20).unwrap();
+    let ts = session_bounds(market_date).0;
+    let _row = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation_id)
+        .await?
+        .expect("row must exist");
+    // `controller_degraded` has no legal edge directly from
+    // `awaiting_preopen` in the pure transition graph -- seed via `running`
+    // first, then use the CAS graph's real `running -> controller_degraded`
+    // edge.
+    let running = advance_to_running(&pool, operation_id, Uuid::new_v4(), ts).await?;
+    let degrade_args = TransitionAutonomousDailyOperationArgs {
+        operation_id: running.operation_id,
+        expected_state: running.state.clone(),
+        expected_state_version: running.state_version,
+        new_state: STATE_CONTROLLER_DEGRADED.to_string(),
+        reason_code: Some("reason_a".to_string()),
+        blocker_signature: Some("sha256:aaaa".to_string()),
+        occurred_at_utc: ts,
+        run_id: None,
+        bounded_detail: "test setup: running -> controller_degraded".to_string(),
+    };
+    let degraded = match transition_autonomous_daily_operation(&pool, &degrade_args).await? {
+        AutonomousDailyTransitionOutcome::Applied(r) => r,
+        other => panic!("expected Applied, got {other:?}"),
+    };
+
+    let refresh_args = RefreshAutonomousDailyOperationBlockerArgs {
+        operation_id,
+        expected_state: STATE_CONTROLLER_DEGRADED.to_string(),
+        expected_state_version: degraded.state_version,
+        reason_code: "reason_b".to_string(),
+        blocker_signature: Some("sha256:bbbb".to_string()),
+        occurred_at_utc: ts + ChronoDuration::seconds(30),
+        bounded_detail: "test: self-refresh".to_string(),
+    };
+    let refreshed = match refresh_autonomous_daily_operation_blocker(&pool, &refresh_args).await? {
+        RefreshAutonomousDailyOperationBlockerOutcome::Applied(r) => r,
+        other => panic!("expected Applied, got {other:?}"),
+    };
+    let events_after_first =
+        list_autonomous_daily_operation_events(&pool, operation_id, 100).await?;
+
+    // Repeating the exact same call (same stale expected_state_version,
+    // same target values) must be idempotent: no further write, no further
+    // event.
+    let repeat = refresh_autonomous_daily_operation_blocker(&pool, &refresh_args).await?;
+    match repeat {
+        RefreshAutonomousDailyOperationBlockerOutcome::AlreadyApplied(r) => {
+            assert_eq!(r.state_version, refreshed.state_version);
+        }
+        other => panic!("expected AlreadyApplied, got {other:?}"),
+    }
+    let events_after_repeat =
+        list_autonomous_daily_operation_events(&pool, operation_id, 100).await?;
+    assert_eq!(
+        events_after_repeat.len(),
+        events_after_first.len(),
+        "an idempotent replay must insert no further event"
+    );
+
+    cleanup_operation(&pool, operation_id).await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn blocker_self_refresh_arbitrary_state_self_loops_remain_illegal() -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    let operation_id = seed_operation(&pool, "refresh-illegal").await;
+    let row = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation_id)
+        .await?
+        .expect("row must exist");
+    assert_eq!(row.state, STATE_AWAITING_PREOPEN);
+
+    // `awaiting_preopen` is not blocker-refresh-eligible -- an arbitrary
+    // same-state loop must remain illegal, never silently accepted.
+    let refresh_args = RefreshAutonomousDailyOperationBlockerArgs {
+        operation_id,
+        expected_state: STATE_AWAITING_PREOPEN.to_string(),
+        expected_state_version: row.state_version,
+        reason_code: "anything".to_string(),
+        blocker_signature: None,
+        occurred_at_utc: row.created_at_utc,
+        bounded_detail: "test: illegal self-loop attempt".to_string(),
+    };
+    let outcome = refresh_autonomous_daily_operation_blocker(&pool, &refresh_args).await?;
+    assert!(
+        matches!(
+            outcome,
+            RefreshAutonomousDailyOperationBlockerOutcome::IllegalTarget
+        ),
+        "expected IllegalTarget, got {outcome:?}"
+    );
+    let after = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation_id)
+        .await?
+        .expect("row must exist");
+    assert_eq!(
+        after.state_version, row.state_version,
+        "an illegal target must never write anything"
+    );
 
     cleanup_operation(&pool, operation_id).await;
     Ok(())
