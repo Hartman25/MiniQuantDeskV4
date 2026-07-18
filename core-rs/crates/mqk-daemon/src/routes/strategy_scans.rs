@@ -84,7 +84,7 @@ pub(crate) async fn strategy_scan_job_submit(
         return refused(&format!("top must be between {MIN_TOP} and {MAX_TOP}"));
     }
     if let Some(limit) = req.limit_symbols {
-        if limit < 1 || limit > MAX_LIMIT_SYMBOLS {
+        if !(1..=MAX_LIMIT_SYMBOLS).contains(&limit) {
             return refused(&format!(
                 "limit_symbols must be between 1 and {MAX_LIMIT_SYMBOLS}"
             ));
