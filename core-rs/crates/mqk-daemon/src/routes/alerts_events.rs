@@ -250,6 +250,14 @@ are permanently unrecoverable; operator_reconcile_or_repair_required ({} truth).
             detail: Some(detail),
             source: "daemon.autonomous_session".to_string(),
         }),
+        AutonomousSessionTruth::CompletedBarDriverExited { detail } => rows.push(ActiveAlertRow {
+            alert_id: "autonomous.session.completed_bar_driver_exited".to_string(),
+            severity: "critical".to_string(),
+            class: "autonomous.session.completed_bar_driver_exited".to_string(),
+            summary: "Autonomous completed-bar driver task has permanently failed; unattended completed-bar dispatch is UNMANAGED. Operator intervention required.".to_string(),
+            detail: Some(detail),
+            source: "daemon.autonomous_session".to_string(),
+        }),
     }
 
     // AUTON-PAPER-01: Day signal limit alert.
@@ -964,6 +972,14 @@ are permanently unrecoverable; operator_reconcile_or_repair_required ({} truth).
             "system",
             format!(
                 "Autonomous session controller task has exited; unattended paper execution is UNMANAGED. {detail}"
+            ),
+        )),
+        AutonomousSessionTruth::CompletedBarDriverExited { detail } => extra_signals.push((
+            "autonomous.session.completed_bar_driver_exited",
+            "critical",
+            "system",
+            format!(
+                "Autonomous completed-bar driver task has permanently failed; unattended completed-bar dispatch is UNMANAGED. {detail}"
             ),
         )),
     }

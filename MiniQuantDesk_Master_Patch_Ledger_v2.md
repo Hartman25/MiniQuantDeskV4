@@ -12488,3 +12488,339 @@ Next authorized patch: Phase D3 — completed-bar task cutover and task
   supervision — only after independent review and acceptance of this D2
   closure repair, and only on explicit operator instruction.
 ```
+
+---
+
+**Phase D3 — completed-bar task production cutover and supervision
+(`AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D3-COMPLETED-BAR-TASK-CUTOVER-AND-SUPERVISION`,
+PENDING until committed).** Starting HEAD `c9cb524f0d9a2b9009fafc4753f181f6888346531`
+("fix: reconcile durable operations across nontrading days").
+
+**Mission.** Replace the production-active blind-timer legacy autonomous bar
+ticker with one supervised completed-bar-driver task. Mode selected
+exclusively from durable operation state; canonical Bundle 2/Bundle 3 inputs
+only; exactly one completed-bar task per daemon process; legacy ticker
+retained in source for compatibility/testing only, never production-spawned.
+No outcome/no-trade finalization, no API/GUI expansion — Phase D3 only.
+
+**New production module
+(`core-rs/crates/mqk-daemon/src/state/autonomous_completed_bar_task.rs`):**
+
+- **Production driver-tick adapter** (`tick_autonomous_completed_bar_driver_from_state`):
+  requires Paper+Alpaca/`ExternalSignalIngestion` and a configured runtime
+  DB; fetches the one relevant durable operation via the accepted bounded
+  lookup (`mqk_db::fetch_relevant_open_autonomous_daily_operation` — never
+  creates a row when none exists); resolves canonical assignment
+  (`build_multi_symbol_runtime_config_from_env`), canonical runtime context
+  (`resolve_autonomous_runtime_context`), and the canonical instrument
+  registry (`load_driver_instruments`); resolves `provider_id` from the
+  assignment's matching instrument's canonical `provider` field; reuses the
+  existing production readiness evaluator
+  (`ProductionAutonomousAssignmentReadinessEvaluator`), lazy provider
+  resolver (`ProductionAutonomousLatestBarProviderResolver`), and two-part
+  provider-call authorization
+  (`resolve_autonomous_provider_call_authorization_from_env`) unchanged;
+  calls the accepted Phase C driver (`tick_autonomous_completed_bar_driver`)
+  exactly once; returns a typed bounded
+  `AutonomousCompletedBarProductionTickOutcome`. Introduces no new
+  provider-selection environment variable, no parallel readiness evaluator,
+  no parallel expected-bar calculation, and no parallel strategy dispatch.
+- **Explicit durable-state mode selection** (`select_driver_mode_for_state`,
+  pure function): `awaiting_preopen` / `preparing_data` / `awaiting_open` /
+  `preflight_blocked` / `start_retrying` → `PrepareDataOnly`; `running` →
+  `RunningDispatch`; every other known or unknown state (recovery/stopping/
+  manual/degraded/terminal) → no driver invocation. Never inferred from
+  clock time, provider availability, runtime bootstrap presence, or
+  pending-bar state — a fresh durable-state read every tick, per operation
+  snapshot fetched fresh each call (no retained cross-tick state).
+- **Task cadence configuration**
+  (`MQK_AUTONOMOUS_COMPLETED_BAR_TICK_SECS`, default 15s, bounded `[1,
+  300]`): invalid, zero, negative, or out-of-range values fail closed to a
+  typed `CompletedBarTaskCadenceError` — never silently substituted.
+- **Task ownership and duplicate-spawn prevention**
+  (`AutonomousCompletedBarTaskRuntime`, a new `AppState` field): an atomic
+  `compare_exchange`-guarded claim (`completed_bar_task.claimed`) makes a
+  second `spawn_autonomous_completed_bar_driver_task` call while one task is
+  active return `AlreadyRunning` and spawn no second Tokio task; the claim
+  is released only when the supervised task permanently ends. Process-local
+  liveness/mode/operation/error-code truth
+  (`AutonomousCompletedBarTaskTruth`) is generation-stamped; every write
+  helper checks the current generation before writing, so a stale worker
+  generation can never overwrite newer liveness truth.
+- **Spawn seam** (`spawn_autonomous_completed_bar_driver_task`): requires
+  deployment mode = PAPER, strategy market-data source =
+  `ExternalSignalIngestion`, DB configured, and a valid task cadence.
+  Provider authorization is deliberately not a spawn requirement — trusted
+  local bars must remain usable when provider calls are disabled.
+- **Supervised worker loop** (`run_supervised_completed_bar_worker`, generic
+  over an injectable per-generation tick-closure factory so tests can
+  supervise a fake tick without touching the production driver at all):
+  reuses the accepted Phase C cancellation-aware bounded-cadence loop
+  (`autonomous_completed_bar_driver::run_bounded_cadence_task`) inside its
+  own `tokio::spawn`, awaits that worker's `JoinHandle`, and reacts.
+  Expected cancellation (`Stopped`) ends the task cleanly: no restart, no
+  failure alert. An unexpected exit or panic (`Err(JoinError)`, caught at
+  the Tokio task boundary — ordinary per-tick errors are contained inside
+  the tick closure itself and never panic the loop) increments a bounded
+  restart counter, sends one warning-level Discord notification, and
+  restarts after a bounded delay (30s / 60s / 120s, cancellable mid-delay).
+  After 3 restarts the task reports `Failed`, sends exactly one critical
+  Discord notification, durably surfaces
+  `AutonomousSessionTruth::CompletedBarDriverExited` (new variant, bounded
+  fixed detail text — never renders panic/SQL/filesystem/credential text),
+  and does not restart again.
+- **Graceful shutdown** (`AppState::cancel_completed_bar_task_for_shutdown`):
+  one authoritative `watch::Sender<bool>` cancellation signal, wired into
+  `main.rs`'s existing `with_graceful_shutdown` closure alongside (before)
+  `stop_for_shutdown()` — cancels only the completed-bar task, never touches
+  the execution runtime.
+- **D3.14 durable critical-outcome application**
+  (`apply_completed_bar_driver_outcome`, new `pub` function added to
+  `state/autonomous_daily_coordinator.rs` so it can reuse that module's
+  private `apply_manual_if_changed`/`blocker_signature_for` dedup
+  machinery — no direct SQL in the task module): a `running` operation with
+  evidence corruption or an unresolved dispatch claim
+  (`DispatchClaimUnresolved`, `ObservedBarEvidenceInconsistent`,
+  `ObservedBarSequenceInconsistent`, `EvidencePersistenceFailed`) degrades
+  `running -> evidence_degraded`; a `running` operation with a
+  runtime-ownership mismatch (`RuntimeDispatchNotReady`) degrades
+  `running -> controller_degraded`; any other (pre-runtime) operation
+  degrades to `manual_intervention_required` (the narrowest legal
+  fail-closed edge every `PrepareDataOnly`-eligible state has). Every
+  benign/waiting outcome (`PollNotDue`, `NoNewCompletedBar`,
+  `AuthorizationDisabled`, `BarObserved`, `AlreadyDispatched`,
+  `DispatchCompleted`, …) and every transient outcome
+  (`PollFailedTransient`) is a pure no-op — zero DB writes, zero lifecycle-
+  transition spam, no manual transition from a transient provider failure.
+  Full D1 typed blocker signature; one transition/event for a changed
+  blocker; zero duplicate event for an unchanged one — proven by a
+  same-tick-race regression (`g01`) that re-applies an identical outcome
+  against the *pre-degrade* snapshot. A defect found during this proof —
+  re-applying against an *already-degraded* snapshot recomputed a
+  different, wrong target (`manual_intervention_required`) because target
+  selection depended on `operation.state == running` alone — was repaired
+  in the same cycle: the function now recognizes when its own input
+  snapshot is already one of the three states it ever targets and refreshes
+  in place rather than re-targeting. Unreachable from the real per-tick
+  call site (mode selection never invokes the driver for an operation
+  already in one of those three states), but now provably safe if ever
+  called from a delayed/duplicate apply.
+- **Provider authorization boundary preserved unchanged:** the two-part
+  `MQK_AUTONOMOUS_DATA_REFRESH_ENABLED`/`MQK_ALLOW_PROVIDER_API_CALLS` gate
+  is read, never re-implemented; an exact canonical bar already local
+  dispatches with zero provider resolution regardless of authorization
+  state (Phase C behavior, unchanged); a missing bar with authorization
+  disabled or invalid makes zero provider calls and zero provider
+  resolution (Phase C behavior, unchanged) — proven still true through the
+  task adapter by `e01`.
+
+**Legacy ticker disposition:** `state/autonomous_bar_ticker.rs`'s module
+doc updated to state it is retained for compatibility/testing only and is
+not production-spawned; `run_bar_tick` remains `pub(super)`, called only
+from its own module's loop and its own unit tests (grep-confirmed zero
+other call sites) — its 5 focused unit tests are unchanged and still pass.
+`main.rs` no longer calls `spawn_autonomous_bar_ticker` anywhere.
+
+**`main.rs` cutover:** `spawn_autonomous_bar_ticker(...)` replaced with
+`spawn_autonomous_completed_bar_driver_task(...).await`; the BOOT-VALID-01
+startup-outcome log now names the completed-bar task instead of the bar
+ticker; the shutdown closure now calls
+`cancel_completed_bar_task_for_shutdown()` before `stop_for_shutdown()`.
+Session-controller startup wiring, the WS transport spawn, and the
+session-controller watchdog are all unchanged.
+
+**`AutonomousSessionTruth::CompletedBarDriverExited` (new variant):** added
+to `state/types.rs`; every exhaustive match site updated
+(`state.rs::autonomous_truth_event_parts`,
+`routes/system.rs::autonomous_session_truth_to_api` plus its own test data
+array, `routes/alerts_events.rs`'s two match sites for
+`GET /api/v1/alerts/active` and the triage surface). No new route, no new
+API field — an additive enum variant on an existing compatibility/operator
+read surface only.
+
+**Updated Phase C guard test:** `scenario_autonomous_completed_bar_driver_01.rs`'s
+`guard_main_rs_does_not_start_new_driver_and_still_spawns_legacy_ticker`
+asserted the exact pre-D3 state (`main.rs` must not reference the driver
+module; `main.rs` must still spawn only the legacy ticker) — the state D3
+was always designed to end. Updated in place to assert the post-cutover
+state (`main.rs` must not spawn the legacy ticker; `main.rs` must spawn the
+completed-bar task) rather than removed, so the file keeps proving a live
+invariant instead of a stale one.
+
+**New required test file
+(`core-rs/crates/mqk-daemon/tests/scenario_autonomous_completed_bar_task_01.rs`,
+34 tests, DB-backed where noted, all passing against the isolated test
+Postgres at port 5434):**
+
+- **Group A (9 tests)** — cadence configuration: default, blank, valid,
+  both boundaries, zero/negative/above-max fail closed, non-integer fails
+  closed distinctly (never silently substituted).
+- **Group B (3 tests)** — pure mode-selection classification covering all
+  16 known operation states plus an unknown state.
+- **Group C (5 tests, DB-backed)** — spawn gating: non-Paper+Alpaca,
+  missing DB, invalid cadence, a valid start (proven via real generation/
+  liveness truth then clean cancellation), duplicate-spawn prevention
+  (`AlreadyRunning`, generation never advances past 1), and provider
+  authorization not gating spawn.
+- **Group D (2 tests, DB-backed)** — fresh operation snapshot every tick:
+  a durable `start_retrying -> running` transition (with a newly bound
+  `run_id`) between two ticks against the same `AppState` changes the
+  selected mode on the very next tick; a durably `stopping` operation is
+  never processed from a stale cached snapshot.
+- **Group E (2 tests, DB-backed)** — local-bar/provider authorization
+  boundary through the production adapter (temp instrument/provider
+  registry fixtures, independent of process CWD): authorization disabled
+  with no local bar never reaches an observe/dispatch outcome; an invalid
+  instrument-registry path yields a typed `RegistryUnavailable` outcome,
+  zero panics.
+- **Group F (1 test, DB-backed)** — no relevant operation creates zero
+  rows (no automatic operation fabrication).
+- **Group G (4 tests, DB-backed)** — durable critical-outcome application
+  called directly: `running` + unresolved claim → `evidence_degraded`
+  (with the same-snapshot-replay dedup regression that caught the repair
+  above); `running` + runtime-ownership mismatch → `controller_degraded`;
+  pre-running + evidence inconsistency → `manual_intervention_required`;
+  every benign outcome is a provable no-op.
+- **Group H (4 tests)** — task lifecycle via
+  `run_supervised_completed_bar_worker` with an injected fake tick
+  closure (no DB, no production driver dependency): cancellation stops
+  the worker with zero ticks afterward and no failure truth; ordinary
+  per-tick errors are contained and never panic the loop; a genuine
+  worker panic is supervised, recorded as a bounded restart attempt, and
+  the task is provably not `Failed` before the 3-restart budget is
+  exhausted; a stale generation's own tick can never overwrite newer
+  liveness truth.
+- **Group I (3 tests)** — production cutover source guards: `main.rs`
+  does not spawn the legacy ticker; spawns the completed-bar task exactly
+  once; cancels it on shutdown.
+- **Group J (1 test)** — `CompletedBarDriverExited` round-trips through
+  `AppState::autonomous_session_truth`.
+
+**Explicitly not proven by new tests in this patch, honestly recorded:**
+end-to-end "observe a bar in `PrepareDataOnly`, then dispatch it exactly
+once in `RunningDispatch` after canonical runtime start" through the task
+adapter itself (proven at the driver level by the existing 56-test
+`scenario_autonomous_completed_bar_driver_01.rs` suite and at the
+coordinator/runtime level by `scenario_autonomous_paper_day_lifecycle_auton12.rs`'s
+AL-03 fixture, neither of which D3 modifies in substance) is not
+separately re-proven end-to-end through the new task-level production
+adapter with a full active native-strategy-dispatch fixture in this patch
+— a real, narrower proof gap than a literal reading of every one of the
+60 numbered assertions in isolation would suggest, carried forward
+honestly rather than claimed closed. Bounded restart *delay* (30s/60s/120s
+wall-clock) and the exact moment the 3-restart budget is exhausted are
+proven by direct inspection of the bounded restart-count/liveness truth
+and by code/constant review, not by waiting out the real delays in an
+automated test.
+
+**Regressions (each run as its own binary against the reachable test DB,
+port 5434):**
+`scenario_autonomous_completed_bar_task_01` 34/34 (new),
+`scenario_autonomous_completed_bar_driver_01` 56/56 (1 guard test updated
+in place for the cutover, all still passing),
+`scenario_autonomous_daily_session_coordinator_01` 48/48,
+`scenario_autonomous_paper_day_lifecycle_auton12` 3/3,
+`scenario_daemon_runtime_lifecycle` 24/24,
+`scenario_autonomous_daily_coordinator_policy_01` 35/35,
+`scenario_autonomous_daily_operation_identity_01` 44/44,
+`scenario_daily_data_readiness_start_gate_01` 20/20,
+`scenario_native_strategy_bootstrap_daemon_b1b` 5/5,
+`scenario_autonomous_gate_parity_auton11` 5/5,
+`scenario_autonomous_daily_operation_lifecycle_01` (mqk-db) 36/36,
+`scenario_autonomous_daily_operation_store_01` (mqk-db) 26/26,
+`scenario_autonomous_daily_operation_data_evidence_01` (mqk-db) 8/8,
+`state::autonomous_bar_ticker::tests::` (`--lib`) 5/5. Zero DB self-skips,
+zero required failures. The complete `mqk-daemon`/`mqk-db` integration
+suites were deliberately not run (out of scope per the patch instructions).
+
+**Migration:** none. `0048`-`0052` untouched — no schema change was
+required or made.
+
+**Guards:** `validate_autonomous_daily_paper_operations_01a_audit.ps1`
+all 22 checks pass. `validate_daily_data_readiness_01e_closure.ps1` all
+checks pass (Phase A guard re-run clean inside it).
+`check_unsafe_patterns.ps1` all guards pass. Migration governance not run
+(no migration or manifest content changed).
+
+**Format/lint:** `rustfmt --check` clean on every touched/added Rust file
+(one `rustfmt` pass applied first). `cargo check -p mqk-db -p mqk-runtime
+-p mqk-daemon` clean (only the pre-existing, unrelated `sqlx-postgres`
+future-incompat warning). Clippy (`-D warnings`) clean on `-p mqk-daemon
+--lib` (zero warnings — the `routes/strategy_scans.rs:87`
+`manual_range_contains` lint every prior D1/D2 entry carried forward as
+pre-existing is now resolved on this HEAD, fixed by the unrelated prior
+commit `5c77af58` "fix: use RangeInclusive::contains for limit_symbols
+bounds check") and on `--test scenario_autonomous_completed_bar_task_01
+--test scenario_autonomous_completed_bar_driver_01`. `git diff --check`
+clean.
+
+**Internal review cycles:** one cycle (audit → implement → validate →
+independent correctness review → independent scope/safety review), with
+one repair applied within that cycle (the `apply_completed_bar_driver_outcome`
+already-degraded-snapshot re-target defect above, caught by the new `g01`
+regression before any commit). The subsequent correctness review pass
+found no further defects; the scope/safety review found no unauthorized
+file, no live path enabled, no real provider/broker/network call, no
+order submission, no gate weakening, no historical sync/ingest job, no
+new GUI/API surface, no generated artifact or secret staged, and no
+migration. Cycles 2-4 were not required.
+
+**Safety confirmation:**
+
+```text
+PROVIDER CALLS: no (real network)
+BROKER CALLS: no
+NETWORK CALLS: no
+REAL DAEMON STARTED: no
+REAL PROVIDER CALLS: no
+REAL BROKER ENDPOINT CALLS: no
+EXTERNAL NETWORK CALLS: no
+PAPER ORDERS: no
+LIVE ORDERS: no
+PAPER DB TOUCHED (port 5440): no
+TEST DB TOUCHED (port 5434): yes (isolated mqk-test-postgres only)
+MIGRATION ADDED: no
+MAIN.RS CHANGED: yes (legacy ticker spawn replaced with the supervised
+  completed-bar task spawn; shutdown closure cancels the completed-bar
+  task; startup diagnostics renamed)
+LEGACY TICKER CHANGED: doc-comment only; still spawned by nothing in
+  production; its 5 unit tests unchanged and passing
+API ROUTES CHANGED: no
+GUI CHANGED: no
+HALT CLEARED: no
+KILL SWITCH CLEARED: no
+DURABLE DISARM OVERRIDDEN: no
+SIMULTANEOUS AUTOMATED TRIGGER PATHS POSSIBLE: no (main.rs spawns exactly
+  one of {legacy ticker, completed-bar task} — the completed-bar task —
+  never both)
+DUPLICATE COMPLETED-BAR WORKERS POSSIBLE: no (atomic claim + sequential
+  await-then-restart supervisor loop)
+EXPECTED SHUTDOWN REPORTED AS FAILURE: no
+FILES CHANGED: MiniQuantDesk_Master_Patch_Ledger_v2.md,
+  core-rs/crates/mqk-daemon/src/main.rs,
+  core-rs/crates/mqk-daemon/src/state.rs,
+  core-rs/crates/mqk-daemon/src/state/types.rs,
+  core-rs/crates/mqk-daemon/src/state/autonomous_bar_ticker.rs,
+  core-rs/crates/mqk-daemon/src/state/autonomous_daily_coordinator.rs,
+  core-rs/crates/mqk-daemon/src/routes/system.rs,
+  core-rs/crates/mqk-daemon/src/routes/alerts_events.rs,
+  core-rs/crates/mqk-daemon/tests/scenario_autonomous_completed_bar_driver_01.rs
+ADDED FILES:
+  core-rs/crates/mqk-daemon/src/state/autonomous_completed_bar_task.rs,
+  core-rs/crates/mqk-daemon/tests/scenario_autonomous_completed_bar_task_01.rs
+```
+
+```text
+D3: IMPLEMENTATION COMPLETE — AWAITING CHATGPT AND OPERATOR ACCEPTANCE
+  — production cutover complete; legacy ticker no longer spawned; the
+  supervised completed-bar task is the sole automated strategy-bar
+  trigger path; one defect found and repaired within this cycle
+  (already-degraded-snapshot re-target in apply_completed_bar_driver_outcome);
+  full end-to-end task-level dispatch fixture not separately re-proven
+  (driver-level and coordinator-level proof unchanged and reused),
+  carried forward honestly.
+Phase D: OPEN (D3 pending independent acceptance)
+Bundle 3 (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-COMBINED): OPEN
+Next authorized patch after acceptance: Phase D4 — integrated autonomous
+  lifecycle and task proof.
+```

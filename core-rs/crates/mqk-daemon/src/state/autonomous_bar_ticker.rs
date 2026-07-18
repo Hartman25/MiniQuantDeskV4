@@ -1,27 +1,25 @@
 //! AUTON-PAPER-BLOCKER-02: Autonomous strategy bar ticker for paper+alpaca.
 //!
-//! # Legacy / deferred from production replacement (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01C)
+//! # Retained for compatibility/testing only — not production-spawned
+//! (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D3-COMPLETED-BAR-TASK-CUTOVER-AND-SUPERVISION)
 //!
 //! This is the blind 60-second-timer strategy trigger the bundle's Phase C
-//! completed-bar driver (`state::autonomous_completed_bar_driver`) is
-//! designed to replace: it deposits a bar input on a fixed cadence
+//! completed-bar driver (`state::autonomous_completed_bar_driver`) and
+//! Phase D3's supervised task (`state::autonomous_completed_bar_task`)
+//! replace in production: it deposits a bar input on a fixed cadence
 //! regardless of whether a new canonical bar has actually closed
 //! (`end_ts = session_ts`, i.e. "now", never a real `md_bars.end_ts`), with
-//! no durable dispatch-identity claim and no restart-safe dedup. The new
-//! driver instead polls for and durably claims dispatch of a genuine
-//! completed-bar identity (`operation_id`, `local_symbol`, `timeframe`,
-//! `bar_end_ts`).
+//! no durable dispatch-identity claim and no restart-safe dedup.
 //!
-//! Phase C intentionally does **not** wire the new driver into `main.rs` or
-//! disable this ticker — both remain source-compatible so Phase D can make
-//! the cutover decision deliberately (stop spawning this ticker, start
-//! supervising the new driver) rather than have two production-active
-//! strategy trigger paths simultaneously. `main.rs` still spawns only this
-//! ticker in this patch; the new driver's task-runner scaffold
-//! (`autonomous_completed_bar_driver::run_bounded_cadence_task`) is not
-//! spawned anywhere. See
-//! `scenario_autonomous_completed_bar_driver_01.rs`'s source-level guard
-//! test for the proof that both paths are not wired simultaneously.
+//! As of D3, `main.rs` no longer spawns [`spawn_autonomous_bar_ticker`] —
+//! it spawns exactly one supervised
+//! `state::autonomous_completed_bar_task::spawn_autonomous_completed_bar_driver_task`
+//! instead. This module and its focused unit tests remain in source for
+//! compatibility/regression coverage only; `run_bar_tick` is not invoked
+//! from any production task. See
+//! `tests/scenario_autonomous_completed_bar_task_01.rs`'s source-level
+//! guard tests for the proof that `main.rs` spawns the completed-bar task
+//! exactly once and never spawns this ticker.
 //!
 //! Periodically deposits a [`StrategyBarInput`] into
 //! `AppState::pending_strategy_bar_input` so the execution loop can drive

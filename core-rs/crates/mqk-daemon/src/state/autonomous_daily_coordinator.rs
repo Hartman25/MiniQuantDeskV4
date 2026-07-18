@@ -1089,6 +1089,128 @@ fn blocker_signature_for(
 }
 
 // ---------------------------------------------------------------------------
+// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D3-COMPLETED-BAR-TASK-CUTOVER-AND-SUPERVISION
+// D3.14 — durable critical completed-bar-driver outcome application
+// ---------------------------------------------------------------------------
+
+/// Durably degrade `operation` for a critical completed-bar-driver outcome
+/// (durable evidence/manual blocker, or runtime-ownership blocker). A
+/// benign/waiting or transient outcome is a no-op — this function never
+/// touches the DB for those. Never creates a completed-state transition,
+/// never starts/stops a runtime, never makes a provider/order call, and
+/// never duplicates the coordinator's own lifecycle-transition graph beyond
+/// the single fail-closed degrade edge each case requires:
+///
+/// - a `running` operation with evidence corruption or an unresolved
+///   dispatch claim degrades `running -> evidence_degraded`;
+/// - a `running` operation with a runtime-ownership mismatch degrades
+///   `running -> controller_degraded` (mirrors [`handle_running`]'s
+///   existing mismatched-run degrade target);
+/// - any other (pre-runtime) operation state degrades to the narrowest
+///   currently legal fail-closed state, `manual_intervention_required`
+///   (every `PrepareDataOnly`-eligible state has a legal edge to it).
+///
+/// Reuses the existing D1 typed blocker-signature machinery
+/// (`blocker_signature_for`) and the existing same-state-refresh-aware
+/// `apply_manual_if_changed` dedup helper — full blocker signature, one
+/// transition/event for a changed blocker, zero duplicate event for an
+/// unchanged one, no direct SQL in the caller (the completed-bar task
+/// module), and no completed-state transition reachable from this
+/// function. Returns `Ok(None)` for a benign/transient outcome, or
+/// `Ok(Some(newly_applied))` for a critical outcome.
+pub async fn apply_completed_bar_driver_outcome(
+    pool: &PgPool,
+    operation: &AutonomousDailyOperationRecord,
+    outcome: &super::autonomous_completed_bar_driver::AutonomousCompletedBarDriverOutcome,
+    now_utc: DateTime<Utc>,
+) -> anyhow::Result<Option<bool>> {
+    use super::autonomous_completed_bar_driver::AutonomousCompletedBarDriverOutcome as O;
+
+    let (reason_code, detail, is_runtime_ownership): (&'static str, String, bool) = match outcome {
+        O::DispatchClaimUnresolved { status } => (
+            "completed_bar_dispatch_claim_unresolved",
+            format!("dispatch claim status={status}"),
+            false,
+        ),
+        O::ObservedBarEvidenceInconsistent {
+            expected_end_ts,
+            reason_code,
+        } => (
+            "completed_bar_observed_evidence_inconsistent",
+            format!("expected_end_ts={expected_end_ts} reason_code={reason_code}"),
+            false,
+        ),
+        O::ObservedBarSequenceInconsistent {
+            expected_end_ts,
+            current_last_completed_bar_ts,
+        } => (
+            "completed_bar_observed_sequence_inconsistent",
+            format!(
+                "expected_end_ts={expected_end_ts} \
+                 current_last_completed_bar_ts={current_last_completed_bar_ts:?}"
+            ),
+            false,
+        ),
+        O::EvidencePersistenceFailed { detail } => (
+            "completed_bar_evidence_persistence_failed",
+            detail.clone(),
+            false,
+        ),
+        O::RuntimeDispatchNotReady { reason_code } => (
+            "completed_bar_runtime_dispatch_not_ready",
+            format!("reason_code={reason_code}"),
+            true,
+        ),
+        _ => return Ok(None),
+    };
+
+    // D3.14 "already blocked/degraded operation" case: if `operation` (the
+    // caller's snapshot) is already one of the three degraded states this
+    // function itself ever targets, refresh in place rather than
+    // recomputing a fresh (and, for a non-`running` snapshot, different —
+    // `manual_intervention_required`) target. Production mode selection
+    // (`select_driver_mode_for_state`) never invokes the driver for an
+    // operation already in one of these states, so this branch is
+    // unreachable from the real per-tick call site; it exists so a
+    // caller re-observing the same critical outcome from an
+    // already-degraded snapshot (e.g. a delayed/duplicate apply) can never
+    // escalate a `running`-degrade target onto a snapshot that is no
+    // longer `running`.
+    let target_state = if operation.state == STATE_RUNNING {
+        if is_runtime_ownership {
+            mqk_db::STATE_CONTROLLER_DEGRADED
+        } else {
+            mqk_db::STATE_EVIDENCE_DEGRADED
+        }
+    } else {
+        match operation.state.as_str() {
+            mqk_db::STATE_MANUAL_INTERVENTION_REQUIRED => {
+                mqk_db::STATE_MANUAL_INTERVENTION_REQUIRED
+            }
+            mqk_db::STATE_CONTROLLER_DEGRADED => mqk_db::STATE_CONTROLLER_DEGRADED,
+            mqk_db::STATE_EVIDENCE_DEGRADED => mqk_db::STATE_EVIDENCE_DEGRADED,
+            _ => STATE_MANUAL_INTERVENTION_REQUIRED,
+        }
+    };
+
+    let reason = AutonomousCoordinatorReason::UnclassifiedFailClosed {
+        fault_class: reason_code,
+    };
+    let signature = blocker_signature_for(operation, &reason);
+    let newly_applied = apply_manual_if_changed(
+        pool,
+        operation,
+        signature.reason_code,
+        signature.stable_context.clone(),
+        now_utc,
+        &detail,
+        target_state,
+    )
+    .await?;
+    Ok(Some(newly_applied))
+}
+
+// ---------------------------------------------------------------------------
 // D2 — Per-state dispatch
 // ---------------------------------------------------------------------------
 

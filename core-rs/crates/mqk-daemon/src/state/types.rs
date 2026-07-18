@@ -454,6 +454,13 @@ pub enum AutonomousSessionTruth {
     ControllerExited {
         detail: String,
     },
+    /// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D3: the supervised completed-bar
+    /// driver task permanently failed after exhausting its bounded restart
+    /// budget. Autonomous completed-bar dispatch is now UNMANAGED. The
+    /// daemon and the session controller are still up.
+    CompletedBarDriverExited {
+        detail: String,
+    },
 }
 
 impl AlpacaWsContinuityState {

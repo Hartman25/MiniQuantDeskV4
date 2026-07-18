@@ -2417,19 +2417,28 @@ async fn history_49_insufficient_history_blocker_remains_a_hard_block() {
 
 #[test]
 fn guard_main_rs_does_not_start_new_driver_and_still_spawns_legacy_ticker() {
+    // AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D3-COMPLETED-BAR-TASK-CUTOVER-AND-SUPERVISION:
+    // this guard's Phase C assertions ("main.rs must not reference the new
+    // driver module; main.rs must still spawn only the legacy ticker")
+    // described exactly the pre-cutover state Phase D3 was always designed
+    // to end. D3 performs that authorized cutover deliberately: main.rs now
+    // spawns the supervised completed-bar task
+    // (`state::autonomous_completed_bar_task::spawn_autonomous_completed_bar_driver_task`,
+    // which necessarily contains the substring "autonomous_completed_bar_driver"
+    // as part of its own name) and no longer spawns the legacy ticker. See
+    // `tests/scenario_autonomous_completed_bar_task_01.rs`'s `i01`-`i03` for
+    // the full current-state production-cutover proof this guard now only
+    // partially duplicates; kept here, updated, as the file's own
+    // regression baseline rather than removed.
     let main_source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/main.rs"))
         .expect("read main.rs source");
     assert!(
-        !main_source.contains("autonomous_completed_bar_driver"),
-        "main.rs must not reference the new Phase C driver module — Phase D owns startup wiring"
+        !main_source.contains("spawn_autonomous_bar_ticker"),
+        "main.rs must no longer spawn the legacy autonomous bar ticker (D3 cutover)"
     );
     assert!(
-        !main_source.contains("run_bounded_cadence_task"),
-        "main.rs must not start the new driver's task-runner scaffold"
-    );
-    assert!(
-        main_source.contains("spawn_autonomous_bar_ticker"),
-        "main.rs must still spawn only the legacy ticker in Phase C"
+        main_source.contains("spawn_autonomous_completed_bar_driver_task"),
+        "main.rs must spawn the supervised completed-bar driver task (D3 cutover)"
     );
 }
 

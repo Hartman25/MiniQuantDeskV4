@@ -618,6 +618,10 @@ pub(crate) fn autonomous_session_truth_to_api(
         AutonomousSessionTruth::ControllerExited { detail } => {
             ("controller_exited".to_string(), Some(detail.clone()))
         }
+        AutonomousSessionTruth::CompletedBarDriverExited { detail } => (
+            "completed_bar_driver_exited".to_string(),
+            Some(detail.clone()),
+        ),
     }
 }
 
@@ -1470,7 +1474,8 @@ pub(crate) async fn system_asset_risk_policy_status() -> impl IntoResponse {
         Json(AssetRiskPolicyStatusResponse {
             schema_version: "asset-risk-policy-v1".to_string(),
             policy_source: mqk_execution::ASSET_RISK_POLICY_SOURCE.to_string(),
-            production_enforcement_enabled: mqk_execution::ASSET_RISK_PRODUCTION_ENFORCEMENT_ENABLED,
+            production_enforcement_enabled:
+                mqk_execution::ASSET_RISK_PRODUCTION_ENFORCEMENT_ENABLED,
             non_equity_routing_enabled: mqk_execution::ASSET_RISK_NON_EQUITY_ROUTING_ENABLED,
             entries,
         }),
@@ -2969,6 +2974,10 @@ mod tests {
                 AutonomousSessionTruth::ControllerExited { detail: "x".into() },
                 "controller_exited",
             ),
+            (
+                AutonomousSessionTruth::CompletedBarDriverExited { detail: "x".into() },
+                "completed_bar_driver_exited",
+            ),
         ];
         let mut seen = std::collections::HashSet::new();
         for (truth, expected_state) in cases {
@@ -3047,7 +3056,18 @@ mod tests {
     #[test]
     fn cntd04_arm_not_ready_non_halted() {
         let (code, _) = classify_args(
-            false, true, true, "arm_pending", false, true, true, true, false, true, "open", 0,
+            false,
+            true,
+            true,
+            "arm_pending",
+            false,
+            true,
+            true,
+            true,
+            false,
+            true,
+            "open",
+            0,
             None,
         );
         assert_eq!(code, "ARM_NOT_READY");
@@ -3073,8 +3093,19 @@ mod tests {
     #[test]
     fn cntd07_bar_ticker_gate_closed_when_run_active_outside_regular_session() {
         let (code, stage) = classify_args(
-            false, true, true, "armed", true, true, true, false, false, true,
-            "closed_outside_session", 0, None,
+            false,
+            true,
+            true,
+            "armed",
+            true,
+            true,
+            true,
+            false,
+            false,
+            true,
+            "closed_outside_session",
+            0,
+            None,
         );
         assert_eq!(code, "BAR_TICKER_GATE_CLOSED");
         assert_eq!(stage, "pre_dispatch");
@@ -3091,7 +3122,19 @@ mod tests {
     #[test]
     fn cntd09_no_signal_generated_when_ticked_with_zero_qty() {
         let (code, _) = classify_args(
-            false, true, true, "armed", true, true, true, false, false, true, "open", 3, Some(0),
+            false,
+            true,
+            true,
+            "armed",
+            true,
+            true,
+            true,
+            false,
+            false,
+            true,
+            "open",
+            3,
+            Some(0),
         );
         assert_eq!(code, "NO_SIGNAL_GENERATED");
     }
@@ -3099,7 +3142,19 @@ mod tests {
     #[test]
     fn cntd10_runtime_already_active_fallback() {
         let (code, _) = classify_args(
-            false, true, true, "armed", true, true, true, false, false, true, "open", 3, Some(5),
+            false,
+            true,
+            true,
+            "armed",
+            true,
+            true,
+            true,
+            false,
+            false,
+            true,
+            "open",
+            3,
+            Some(5),
         );
         assert_eq!(code, "RUNTIME_ALREADY_ACTIVE");
     }

@@ -118,38 +118,45 @@ async fn main() -> anyhow::Result<()> {
     // No-op for non-paper-alpaca deployments or when session env vars are absent.
     let session_controller_handle = state::spawn_autonomous_session_controller(Arc::clone(&shared));
 
-    // AUTON-PAPER-BLOCKER-02: Spawn the autonomous bar ticker for Paper+Alpaca.
-    // Periodically deposits StrategyBarInput so native strategies can fire on_bar
-    // without requiring an external manual POST to /api/v1/strategy/signal.
-    // No-op for non-paper-alpaca deployments (ExternalSignalIngestion not wired).
-    let _bar_ticker_handle = state::spawn_autonomous_bar_ticker(Arc::clone(&shared));
+    // AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D3-COMPLETED-BAR-TASK-CUTOVER-AND-SUPERVISION:
+    // spawn the supervised completed-bar driver task for Paper+Alpaca in
+    // place of the legacy blind-timer autonomous bar ticker. Exactly one
+    // completed-bar task may be active per daemon process (D3.6/D3.7); the
+    // legacy ticker (`state::autonomous_bar_ticker`) remains in source for
+    // compatibility/testing only and is never spawned in production.
+    let completed_bar_task_outcome =
+        state::spawn_autonomous_completed_bar_driver_task(Arc::clone(&shared)).await;
 
     // BOOT-VALID-01: Explicit startup task outcome log.
     //
     // For paper+alpaca all three autonomous tasks must start.  If the WS
-    // transport started (credentials present) but the session controller or bar
-    // ticker did not, that is a configuration inconsistency: autonomous paper
-    // execution will not self-manage and the operator would otherwise see no
-    // indication of this from the startup logs.
+    // transport started (credentials present) but the session controller or
+    // the completed-bar task did not, that is a configuration inconsistency:
+    // autonomous paper execution will not self-manage and the operator would
+    // otherwise see no indication of this from the startup logs.
     {
         let ws_started = _alpaca_ws_handle.is_some();
         let ctrl_started = session_controller_handle.is_some();
-        let ticker_started = _bar_ticker_handle.is_some();
+        let completed_bar_task_started = matches!(
+            completed_bar_task_outcome,
+            state::AutonomousCompletedBarTaskSpawnOutcome::Started
+        );
 
-        if ws_started && (!ctrl_started || !ticker_started) {
+        if ws_started && (!ctrl_started || !completed_bar_task_started) {
             warn!(
                 alpaca_ws_started = ws_started,
                 session_controller_started = ctrl_started,
-                bar_ticker_started = ticker_started,
+                completed_bar_task_outcome = ?completed_bar_task_outcome,
                 "startup_truth: WS transport started but autonomous session controller \
-                 or bar ticker did NOT start — autonomous paper execution will not \
-                 self-manage; verify ExternalSignalIngestion config (BOOT-VALID-01)"
+                 or the completed-bar driver task did NOT start — autonomous paper \
+                 execution will not self-manage; verify ExternalSignalIngestion config \
+                 (BOOT-VALID-01)"
             );
         } else {
             info!(
                 alpaca_ws_started = ws_started,
                 session_controller_started = ctrl_started,
-                bar_ticker_started = ticker_started,
+                completed_bar_task_outcome = ?completed_bar_task_outcome,
                 "startup_truth: background task start outcomes (BOOT-VALID-01)"
             );
         }
@@ -207,6 +214,12 @@ async fn main() -> anyhow::Result<()> {
     axum::serve(tokio::net::TcpListener::bind(addr).await?, app)
         .with_graceful_shutdown(async move {
             let _ = tokio::signal::ctrl_c().await;
+            // D3.10: cancel the completed-bar task before/alongside the
+            // execution-runtime shutdown path — one authoritative
+            // cancellation sender, no detached worker left running.
+            shutdown_state
+                .cancel_completed_bar_task_for_shutdown()
+                .await;
             shutdown_state.stop_for_shutdown().await;
         })
         .await

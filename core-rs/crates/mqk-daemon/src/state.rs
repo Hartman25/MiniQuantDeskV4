@@ -7,6 +7,7 @@
 mod alpaca_ws_transport;
 mod autonomous_bar_ticker;
 pub mod autonomous_completed_bar_driver;
+pub mod autonomous_completed_bar_task;
 pub mod autonomous_daily_coordinator;
 pub mod autonomous_daily_operation;
 pub mod autonomous_retry_policy;
@@ -56,6 +57,13 @@ pub use alpaca_ws_transport::{
 };
 pub use autonomous_bar_ticker::{
     spawn_autonomous_bar_ticker, BAR_INTERVAL_SECS_ENV, DEFAULT_QTY_ENV,
+};
+pub use autonomous_completed_bar_task::{
+    resolve_completed_bar_tick_cadence, resolve_completed_bar_tick_cadence_from_env,
+    select_driver_mode_for_state, spawn_autonomous_completed_bar_driver_task,
+    tick_autonomous_completed_bar_driver_from_state, AutonomousCompletedBarProductionTickOutcome,
+    AutonomousCompletedBarTaskRuntime, AutonomousCompletedBarTaskSpawnOutcome,
+    AutonomousCompletedBarTaskTruth, CompletedBarTaskCadenceError, COMPLETED_BAR_TICK_SECS_ENV,
 };
 pub use autonomous_daily_operation::{
     derive_assignment_identity, derive_autonomous_daily_operation_id,
@@ -671,6 +679,10 @@ pub struct AppState {
     /// Dedup: at most one alert per (run, symbol). Reset at run start
     /// alongside `b5_alerted_symbols`.
     per_symbol_position_cap_alerted_symbols: Arc<RwLock<HashSet<String>>>,
+    /// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D3: process-local completed-bar
+    /// task ownership/liveness/cancellation handles. Constructed once per
+    /// `AppState` and never reconstructed for the process lifetime.
+    completed_bar_task: autonomous_completed_bar_task::AutonomousCompletedBarTaskRuntime,
 }
 
 /// BROKER-FILL-REST-RECOVERY-01: Injectable abstraction over Alpaca REST activity fetch.
@@ -1350,6 +1362,8 @@ impl AppState {
             b5_alerted_symbols: Arc::new(RwLock::new(HashSet::new())),
             day_limit_alert_fired: Arc::new(AtomicBool::new(false)),
             per_symbol_position_cap_alerted_symbols: Arc::new(RwLock::new(HashSet::new())),
+            completed_bar_task:
+                autonomous_completed_bar_task::AutonomousCompletedBarTaskRuntime::default(),
         }
     }
 
@@ -3369,6 +3383,9 @@ fn autonomous_truth_event_parts(
         }
         AutonomousSessionTruth::ControllerExited { detail } => {
             Some(("controller_exited", None, detail.clone()))
+        }
+        AutonomousSessionTruth::CompletedBarDriverExited { detail } => {
+            Some(("completed_bar_driver_exited", None, detail.clone()))
         }
     }
 }
