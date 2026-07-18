@@ -71,6 +71,31 @@
 //!     start and stop through the real production path
 //!     (`scenario_autonomous_paper_day_lifecycle_auton12.rs`).
 //!
+//! # AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D2-NONTRADING-RECOVERY-AND-RUNNING-CONFIRMATION-01
+//!
+//! Phase D2 final closure, without beginning Phase D3:
+//!
+//! 1. A nontrading-day calendar result (`NotApplicable`) routes through the
+//!    same relevant-existing-operation lookup the resolution-failure path
+//!    already used, rather than returning immediately
+//!    ([`resolve_or_reconcile_on_nontrading_day`]).
+//! 2. [`mqk_db::fetch_relevant_open_autonomous_daily_operation`] also treats
+//!    a bound-but-not-durably-stopped run (`run_id is not null and
+//!    stopped_at_utc is null`) as relevant regardless of current state or
+//!    window.
+//! 3. Running-transition commit confirmation
+//!    ([`running_transition_event_matches`]) queries the exact expected
+//!    `transition_seq` via
+//!    [`mqk_db::fetch_autonomous_daily_operation_event_at_sequence`], never
+//!    scanning an ascending, 100-event-capped list.
+//! 4. [`legal_degraded_target_after_uncertain_running_transition`] selects a
+//!    legal degraded target after an uncertain running-transition store
+//!    error, never attempting the illegal `running ->
+//!    manual_intervention_required` edge.
+//! 5. Every reason applied by
+//!    [`reconcile_existing_operation_against_relevant_lookup`] now carries a
+//!    full D1 typed blocker signature, never `None`.
+//!
 //! # Testability
 //!
 //! Unlike a fully effect-injected design, this coordinator drives the real
@@ -241,9 +266,28 @@ pub async fn tick_autonomous_daily_coordinator(
 
     let plan = match resolution {
         AutonomousDailySessionPlanResolution::NotApplicable { reason_code, .. } => {
-            return Ok(AutonomousDailyCoordinatorTickOutcome::NotApplicable {
-                reason_code: reason_code.as_str(),
-            });
+            // REPAIR 1/3 (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D2-NONTRADING-
+            // RECOVERY-AND-RUNNING-CONFIRMATION-01): a nontrading-day
+            // (weekend/exchange holiday) calendar result must not abandon an
+            // existing unresolved durable operation. Only when a DB is
+            // actually configured is there anything to look up a relevant
+            // existing operation against.
+            return match state.db.clone() {
+                None => Ok(AutonomousDailyCoordinatorTickOutcome::NotApplicable {
+                    reason_code: reason_code.as_str(),
+                }),
+                Some(pool) => {
+                    resolve_or_reconcile_on_nontrading_day(
+                        state,
+                        &pool,
+                        deployment_mode,
+                        &adapter_id,
+                        now_utc,
+                        reason_code.as_str(),
+                    )
+                    .await
+                }
+            };
         }
         AutonomousDailySessionPlanResolution::Blocked { reason_code, .. } => {
             // REPAIR 1/2 (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D2-FAILSAFE-
@@ -382,13 +426,28 @@ pub async fn tick_autonomous_daily_coordinator(
 // REPAIR 1/2 — existing-operation fallback under current resolution failure
 // ---------------------------------------------------------------------------
 
+/// Bounded detail text shared by
+/// [`reconcile_existing_operation_against_relevant_lookup`]'s two callers.
+const RESOLUTION_FAILURE_RECONCILE_DETAIL: &str =
+    "current calendar/assignment/registry/runtime-context resolution failed this \
+     tick; a relevant existing durable operation was found, so lifecycle control \
+     is preserved using persisted operation truth alone rather than erased";
+
+/// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D2-NONTRADING-RECOVERY-AND-RUNNING-
+/// CONFIRMATION-01 REPAIR 1/3: `now_utc` resolved to a nontrading day
+/// (weekend/exchange holiday) this tick.
+const NONTRADING_DAY_RECONCILE_DETAIL: &str =
+    "today resolved to a nontrading day (weekend or exchange holiday); a relevant \
+     existing durable operation was found, so lifecycle control is preserved using \
+     persisted operation truth alone rather than abandoned";
+
 /// REPAIR 2: when current calendar/assignment/registry/runtime-context
 /// resolution fails this tick, look up whether a relevant existing durable
 /// operation already exists for this exact slot family (REPAIR 1). If none
 /// exists, there is nothing to preserve lifecycle control over — return the
 /// ordinary typed blocked outcome unchanged (no row is created, no
 /// start/stop occurs). If one exists, hand off to
-/// [`degrade_existing_operation_on_resolution_failure`] rather than
+/// [`reconcile_existing_operation_against_relevant_lookup`] rather than
 /// reporting the blocked outcome directly: a current configuration failure
 /// must never erase lifecycle control over an already-created operation.
 async fn resolve_or_degrade_on_resolution_failure(
@@ -410,24 +469,69 @@ async fn resolve_or_degrade_on_resolution_failure(
     match existing {
         None => Ok(blocked_outcome),
         Some(operation) => {
-            degrade_existing_operation_on_resolution_failure(
+            reconcile_existing_operation_against_relevant_lookup(
                 state,
                 pool,
                 operation,
                 degrade_reason_code,
                 now_utc,
+                RESOLUTION_FAILURE_RECONCILE_DETAIL,
             )
             .await
         }
     }
 }
 
-/// REPAIR 2: given a relevant existing operation and a current
-/// calendar/assignment/registry/runtime-context resolution failure, never
-/// create another operation, never rewrite immutable identity, and never
-/// attempt a new runtime start or recovery start without freshly proven
-/// canonical configuration — use persisted operation truth alone to
-/// maintain safe lifecycle control.
+/// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D2-NONTRADING-RECOVERY-AND-RUNNING-
+/// CONFIRMATION-01 REPAIR 1/3: a nontrading-day calendar result (weekend or
+/// exchange holiday) must not abandon an existing unresolved durable
+/// operation. Looks up whether a relevant existing operation already exists
+/// for this exact slot family (REPAIR 2's extended
+/// `fetch_relevant_open_autonomous_daily_operation`). If none exists, the
+/// ordinary `NotApplicable` outcome is reported unchanged — no row is
+/// created, no arm/start/stop call occurs, and a normal weekend/holiday with
+/// no unresolved operation remains quiet. If one exists, hand off to
+/// [`reconcile_existing_operation_against_relevant_lookup`]: today being a
+/// nontrading day never derives a new operation identity and never requires
+/// current assignment/registry/runtime-context resolution merely to stop or
+/// reconcile the existing operation.
+async fn resolve_or_reconcile_on_nontrading_day(
+    state: &Arc<AppState>,
+    pool: &PgPool,
+    deployment_mode: &str,
+    adapter_id: &str,
+    now_utc: DateTime<Utc>,
+    reason_code: &'static str,
+) -> anyhow::Result<AutonomousDailyCoordinatorTickOutcome> {
+    let existing = mqk_db::fetch_relevant_open_autonomous_daily_operation(
+        pool,
+        deployment_mode,
+        adapter_id,
+        now_utc,
+    )
+    .await?;
+    match existing {
+        None => Ok(AutonomousDailyCoordinatorTickOutcome::NotApplicable { reason_code }),
+        Some(operation) => {
+            reconcile_existing_operation_against_relevant_lookup(
+                state,
+                pool,
+                operation,
+                reason_code,
+                now_utc,
+                NONTRADING_DAY_RECONCILE_DETAIL,
+            )
+            .await
+        }
+    }
+}
+
+/// REPAIR 1/2/3/6: given a relevant existing operation and a current
+/// calendar/assignment/registry/runtime-context resolution failure *or* a
+/// nontrading-day calendar result, never create another operation, never
+/// rewrite immutable identity, and never attempt a new runtime start or
+/// recovery start without freshly proven canonical configuration — use
+/// persisted operation truth alone to maintain safe lifecycle control.
 ///
 /// - At or after the operation's own persisted `effective_operation_close_utc`
 ///   (and not already stopping/terminal): canonical close/stop
@@ -441,24 +545,32 @@ async fn resolve_or_degrade_on_resolution_failure(
 ///   resolution required.
 /// - `running` (still before close): degrade to `controller_degraded` via
 ///   its one legal edge — no runtime interaction at all (never stops an
-///   unrelated runtime, never attaches an operator-managed one).
+///   unrelated runtime, never attaches an operator-managed one). This also
+///   covers the case where the existing operation is unexpectedly before
+///   its persisted effective close on a current nontrading day: it is never
+///   started or recovered, only degraded.
 /// - Already blocked/degraded (`manual_intervention_required` /
 ///   `controller_degraded` / `evidence_degraded`): refresh the reason in
 ///   place (REPAIR 4), remaining in the same state.
 /// - Any other pre-running state with a legal edge to
 ///   `manual_intervention_required`: take it. No legal edge: report the
 ///   failure without forcing an illegal transition.
-async fn degrade_existing_operation_on_resolution_failure(
+///
+/// REPAIR 6: the applied/refreshed reason always carries a full D1 typed
+/// blocker signature (never `None`) bound to the operation's own identity —
+/// the same operation + same failure reason always produces the same
+/// signature (no repeated event/notification for an unchanged blocker), and
+/// a changed reason produces a changed signature (exactly one refresh
+/// event). No free-form filesystem/registry/environment detail, timestamp,
+/// or secret ever enters the signature.
+async fn reconcile_existing_operation_against_relevant_lookup(
     state: &Arc<AppState>,
     pool: &PgPool,
     operation: AutonomousDailyOperationRecord,
     reason_code: &'static str,
     now_utc: DateTime<Utc>,
+    detail: &'static str,
 ) -> anyhow::Result<AutonomousDailyCoordinatorTickOutcome> {
-    let detail = "current calendar/assignment/registry/runtime-context resolution failed this \
-                  tick; a relevant existing durable operation was found, so lifecycle control \
-                  is preserved using persisted operation truth alone rather than erased";
-
     if now_utc >= operation.effective_operation_close_utc
         && !matches!(
             operation.state.as_str(),
@@ -474,6 +586,11 @@ async fn degrade_existing_operation_on_resolution_failure(
         return handle_session_close(state, pool, operation, now_utc).await;
     }
 
+    let reason = AutonomousCoordinatorReason::UnclassifiedFailClosed {
+        fault_class: reason_code,
+    };
+    let signature = blocker_signature_for(&operation, &reason);
+
     match operation.state.as_str() {
         STATE_STOPPING | STATE_STOP_RETRYING => {
             let postclose_finalize_utc = operation.postclose_finalize_utc;
@@ -483,8 +600,8 @@ async fn degrade_existing_operation_on_resolution_failure(
             let newly_applied = apply_manual_if_changed(
                 pool,
                 &operation,
-                reason_code,
-                None,
+                signature.reason_code,
+                signature.stable_context.clone(),
                 now_utc,
                 detail,
                 mqk_db::STATE_CONTROLLER_DEGRADED,
@@ -492,7 +609,7 @@ async fn degrade_existing_operation_on_resolution_failure(
             .await?;
             Ok(
                 AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
-                    reason_code,
+                    reason_code: signature.reason_code,
                     newly_applied,
                 },
             )
@@ -508,8 +625,8 @@ async fn degrade_existing_operation_on_resolution_failure(
             let newly_applied = apply_manual_if_changed(
                 pool,
                 &operation,
-                reason_code,
-                None,
+                signature.reason_code,
+                signature.stable_context.clone(),
                 now_utc,
                 detail,
                 target,
@@ -517,7 +634,7 @@ async fn degrade_existing_operation_on_resolution_failure(
             .await?;
             Ok(
                 AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
-                    reason_code,
+                    reason_code: signature.reason_code,
                     newly_applied,
                 },
             )
@@ -530,8 +647,8 @@ async fn degrade_existing_operation_on_resolution_failure(
                 let newly_applied = apply_manual_if_changed(
                     pool,
                     &operation,
-                    reason_code,
-                    None,
+                    signature.reason_code,
+                    signature.stable_context.clone(),
                     now_utc,
                     detail,
                     STATE_MANUAL_INTERVENTION_REQUIRED,
@@ -539,14 +656,14 @@ async fn degrade_existing_operation_on_resolution_failure(
                 .await?;
                 Ok(
                     AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
-                        reason_code,
+                        reason_code: signature.reason_code,
                         newly_applied,
                     },
                 )
             } else {
                 Ok(
                     AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
-                        reason_code,
+                        reason_code: signature.reason_code,
                         newly_applied: false,
                     },
                 )
@@ -1562,24 +1679,41 @@ pub async fn attempt_canonical_start(
 }
 
 /// REPAIR 5: does a matching `-> running` transition event exist at exactly
-/// `expected_transition_seq`, binding `expected_run_id`? Used only to
-/// corroborate an authoritative re-read after
+/// `expected_transition_seq`, binding `expected_run_id` and (where
+/// available) sourced from `expected_from_state`? Used only to corroborate
+/// an authoritative re-read after
 /// `transition_autonomous_daily_operation_to_running`'s store call itself
 /// returned `Err` — never treated as sufficient proof on its own without
 /// the accompanying `state`/`run_id`/`started_at_utc` checks on the
 /// re-read row.
+///
+/// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D2-NONTRADING-RECOVERY-AND-RUNNING-
+/// CONFIRMATION-01 REPAIR 4: queries the exact expected `transition_seq`
+/// directly via [`mqk_db::fetch_autonomous_daily_operation_event_at_sequence`]
+/// — never scans an ascending, `[1, 100]`-capped event list. A valid running
+/// transition committing after more than 100 earlier events on the same
+/// operation must still be confirmed; a wrong sequence or a wrong event
+/// `run_id`/`from_state` must be rejected.
 async fn running_transition_event_matches(
     pool: &PgPool,
     operation_id: Uuid,
     expected_run_id: Uuid,
     expected_transition_seq: i64,
+    expected_from_state: &str,
 ) -> anyhow::Result<bool> {
-    let events = mqk_db::list_autonomous_daily_operation_events(pool, operation_id, 100).await?;
-    Ok(events.iter().any(|e| {
-        e.transition_seq == expected_transition_seq
-            && e.to_state == STATE_RUNNING
-            && e.run_id == Some(expected_run_id)
-    }))
+    let event = mqk_db::fetch_autonomous_daily_operation_event_at_sequence(
+        pool,
+        operation_id,
+        expected_transition_seq,
+    )
+    .await?;
+    Ok(event
+        .map(|e| {
+            e.to_state == STATE_RUNNING
+                && e.run_id == Some(expected_run_id)
+                && e.from_state == expected_from_state
+        })
+        .unwrap_or(false))
 }
 
 /// REPAIR 5 (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D2-FAILSAFE-RECOVERY-
@@ -1631,6 +1765,7 @@ pub async fn handle_running_transition_store_error(
                     current.operation_id,
                     run_id,
                     current.state_version,
+                    operation.state.as_str(),
                 )
                 .await
                 .unwrap_or(false);
@@ -1643,24 +1778,39 @@ pub async fn handle_running_transition_store_error(
                 });
             }
 
-            // Re-read does not prove the exact running transition: never
-            // leave the run active and unmanaged.
+            // REPAIR 5 (NONTRADING-RECOVERY-AND-RUNNING-CONFIRMATION-01):
+            // re-read does not prove the exact running transition — never
+            // leave the run active and unmanaged, and never attempt an
+            // illegal degraded target (the re-read row may genuinely be
+            // `running`, whose only legal manual-adjacent edge is
+            // `controller_degraded`, never `manual_intervention_required`).
             let _ = state.stop_execution_runtime().await;
-            let newly_applied = apply_manual_if_changed(
-                pool,
-                &current,
-                "durable_transition_unconfirmed_after_start",
-                None,
-                now_utc,
-                "the atomic running-transition store call returned an error and a re-read did \
-                 not prove the exact transition committed; best-effort stop issued, the \
-                 operation is never presented as running",
-                STATE_MANUAL_INTERVENTION_REQUIRED,
-            )
-            .await?;
+            let reason = AutonomousCoordinatorReason::UnclassifiedFailClosed {
+                fault_class: "durable_transition_unconfirmed_after_start",
+            };
+            let signature = blocker_signature_for(&current, &reason);
+            let detail = "the atomic running-transition store call returned an error and a \
+                          re-read did not prove the exact transition committed; best-effort \
+                          stop issued, the operation is never presented as running";
+            let newly_applied =
+                match legal_degraded_target_after_uncertain_running_transition(&current) {
+                    Some(target_state) => {
+                        apply_manual_if_changed(
+                            pool,
+                            &current,
+                            signature.reason_code,
+                            signature.stable_context.clone(),
+                            now_utc,
+                            detail,
+                            target_state,
+                        )
+                        .await?
+                    }
+                    None => false,
+                };
             Ok(
                 AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
-                    reason_code: "durable_transition_unconfirmed_after_start",
+                    reason_code: signature.reason_code,
                     newly_applied,
                 },
             )
@@ -1678,13 +1828,20 @@ pub async fn handle_running_transition_store_error(
             // degradation-persistence is available. Best-effort stop the
             // runtime and still report a bounded typed outcome so the
             // session controller (REPAIR 7) projects degraded operator
-            // truth even if this persist attempt also fails.
+            // truth even if this persist attempt also fails. `operation` is
+            // the pre-attempt snapshot (always `start_retrying` or
+            // `recovery_retrying` here), which always has a legal edge to
+            // `manual_intervention_required`.
             let _ = state.stop_execution_runtime().await;
+            let reason = AutonomousCoordinatorReason::UnclassifiedFailClosed {
+                fault_class: "durable_transition_unconfirmed_after_start",
+            };
+            let signature = blocker_signature_for(operation, &reason);
             let newly_applied = apply_manual_if_changed(
                 pool,
                 operation,
-                "durable_transition_unconfirmed_after_start",
-                None,
+                signature.reason_code,
+                signature.stable_context.clone(),
                 now_utc,
                 "the atomic running-transition store call returned an error and the \
                  authoritative re-read also failed; best-effort stop issued, never claiming \
@@ -1695,12 +1852,46 @@ pub async fn handle_running_transition_store_error(
             .unwrap_or(true);
             Ok(
                 AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
-                    reason_code: "durable_transition_unconfirmed_after_start",
+                    reason_code: signature.reason_code,
                     newly_applied,
                 },
             )
         }
     }
+}
+
+/// REPAIR 5 (NONTRADING-RECOVERY-AND-RUNNING-CONFIRMATION-01): choose the
+/// one legal target state for degrading an operation whose running-transition
+/// commit could not be confirmed after a store error. `current` is the
+/// freshly re-read row — its `state` may genuinely be `running` (the CAS
+/// committed; only the confirming event lookup failed), a
+/// blocker-refresh-eligible degraded state (an earlier tick already degraded
+/// it), or a pre-running state (the CAS never committed). Returns `None`
+/// only when no legal edge exists at all — this function never attempts an
+/// illegal transition (in particular, `running -> manual_intervention_required`
+/// is not a legal edge; `running -> controller_degraded` is).
+fn legal_degraded_target_after_uncertain_running_transition(
+    current: &AutonomousDailyOperationRecord,
+) -> Option<&'static str> {
+    if current.state.as_str() == STATE_RUNNING {
+        return Some(mqk_db::STATE_CONTROLLER_DEGRADED);
+    }
+    if mqk_db::is_blocker_refresh_eligible_state(&current.state) {
+        return Some(match current.state.as_str() {
+            STATE_PREFLIGHT_BLOCKED => STATE_PREFLIGHT_BLOCKED,
+            STATE_MANUAL_INTERVENTION_REQUIRED => STATE_MANUAL_INTERVENTION_REQUIRED,
+            mqk_db::STATE_CONTROLLER_DEGRADED => mqk_db::STATE_CONTROLLER_DEGRADED,
+            mqk_db::STATE_EVIDENCE_DEGRADED => mqk_db::STATE_EVIDENCE_DEGRADED,
+            _ => unreachable!("is_blocker_refresh_eligible_state matched an unmapped state"),
+        });
+    }
+    if mqk_db::is_legal_operation_transition(
+        Some(&current.state),
+        STATE_MANUAL_INTERVENTION_REQUIRED,
+    ) {
+        return Some(STATE_MANUAL_INTERVENTION_REQUIRED);
+    }
+    None
 }
 
 async fn classify_start_sequence_failure(

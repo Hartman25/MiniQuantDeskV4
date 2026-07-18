@@ -13,6 +13,7 @@
 use chrono::{DateTime, Datelike, Duration as ChronoDuration, NaiveDate, TimeZone, Utc};
 use mqk_db::{
     clear_retry_timing, create_or_recover_autonomous_daily_operation,
+    fetch_autonomous_daily_operation_event_at_sequence,
     fetch_relevant_open_autonomous_daily_operation, list_autonomous_daily_operation_events,
     record_retry_timing, record_running_started, record_start_attempt, record_stop_attempt,
     record_stopped_at, refresh_autonomous_daily_operation_blocker,
@@ -23,8 +24,8 @@ use mqk_db::{
     RecordStoppedAtOutcome, RefreshAutonomousDailyOperationBlockerArgs,
     RefreshAutonomousDailyOperationBlockerOutcome, TransitionAutonomousDailyOperationArgs,
     ENV_DB_URL, STATE_AWAITING_OPEN, STATE_AWAITING_PREOPEN, STATE_CONTROLLER_DEGRADED,
-    STATE_MANUAL_INTERVENTION_REQUIRED, STATE_PREPARING_DATA, STATE_RUNNING, STATE_START_RETRYING,
-    STATE_STOPPING,
+    STATE_MANUAL_INTERVENTION_REQUIRED, STATE_PREPARING_DATA, STATE_RECOVERY_RETRYING,
+    STATE_RUNNING, STATE_START_RETRYING, STATE_STOPPING,
 };
 use uuid::Uuid;
 
@@ -1442,6 +1443,229 @@ async fn blocker_self_refresh_arbitrary_state_self_loops_remain_illegal() -> any
     assert_eq!(
         after.state_version, row.state_version,
         "an illegal target must never write anything"
+    );
+
+    cleanup_operation(&pool, operation_id).await;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D2-NONTRADING-RECOVERY-AND-RUNNING-
+// CONFIRMATION-01
+// REPAIR 2: fetch_relevant_open_autonomous_daily_operation's bound-but-
+// unstopped-run relevance clause
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn relevant_open_lookup_bound_run_without_stop_evidence_is_relevant_outside_window(
+) -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    let market_date = NaiveDate::from_ymd_opt(2026, 7, 20).unwrap();
+    let operation_id = seed_operation_for_date(&pool, "relopen-bound-unstopped", market_date).await;
+    let run_id = Uuid::new_v4();
+    let ts = session_bounds(market_date).0;
+    let running = advance_to_running(&pool, operation_id, run_id, ts).await?;
+
+    // recovery_retrying -> manual_intervention_required carries the bound
+    // run_id along (never cleared) into a state that is neither in the
+    // active-lifecycle set nor a terminal state -- exactly the gap REPAIR 2
+    // closes.
+    let recovering = advance_one(&pool, &running, STATE_RECOVERY_RETRYING, ts).await?;
+    let degraded = advance_one(&pool, &recovering, STATE_MANUAL_INTERVENTION_REQUIRED, ts).await?;
+    assert_eq!(degraded.run_id, Some(run_id));
+    assert!(degraded.stopped_at_utc.is_none());
+
+    let far_outside_window = ts + ChronoDuration::days(30);
+    let found = fetch_relevant_open_autonomous_daily_operation(
+        &pool,
+        "paper",
+        "lifecycle-test-relopen-bound-unstopped",
+        far_outside_window,
+    )
+    .await?
+    .expect(
+        "REPAIR 2: a bound run without durable stop evidence must remain relevant regardless of \
+         current state or window",
+    );
+    assert_eq!(found.operation_id, operation_id);
+
+    cleanup_operation(&pool, operation_id).await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn relevant_open_lookup_historical_manual_row_without_bound_run_is_ignored_outside_window(
+) -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    let market_date = NaiveDate::from_ymd_opt(2026, 7, 20).unwrap();
+    let operation_id = seed_operation_for_date(&pool, "relopen-manual-norun", market_date).await;
+    let ts = session_bounds(market_date).0;
+    let row = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation_id)
+        .await?
+        .expect("row must exist");
+    let manual = advance_one(&pool, &row, STATE_MANUAL_INTERVENTION_REQUIRED, ts).await?;
+    assert_eq!(manual.run_id, None);
+
+    let far_outside_window = ts + ChronoDuration::days(30);
+    let found = fetch_relevant_open_autonomous_daily_operation(
+        &pool,
+        "paper",
+        "lifecycle-test-relopen-manual-norun",
+        far_outside_window,
+    )
+    .await?;
+    assert!(
+        found.is_none(),
+        "an old manual row that never bound a run must not gain relevance merely because it is \
+         recent"
+    );
+
+    cleanup_operation(&pool, operation_id).await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn relevant_open_lookup_terminal_row_with_bound_run_and_no_stop_evidence_remains_excluded(
+) -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    let market_date = NaiveDate::from_ymd_opt(2026, 7, 20).unwrap();
+    let operation_id = seed_operation_for_date(&pool, "relopen-terminal-bound", market_date).await;
+    let run_id = Uuid::new_v4();
+    let ts = session_bounds(market_date).0;
+    let running = advance_to_running(&pool, operation_id, run_id, ts).await?;
+    let stopping = advance_one(&pool, &running, STATE_STOPPING, ts).await?;
+    let completed = advance_one(&pool, &stopping, mqk_db::STATE_COMPLETED_NO_TRADE, ts).await?;
+    // Deliberately never calling `record_autonomous_runtime_stopped`: the
+    // run_id remains bound and `stopped_at_utc` remains null even in this
+    // terminal state, to prove the top-level `state not in (completed*)`
+    // exclusion still wins over REPAIR 2's new bound-run clause.
+    assert_eq!(completed.run_id, Some(run_id));
+    assert!(completed.stopped_at_utc.is_none());
+
+    let far_outside_window = ts + ChronoDuration::days(30);
+    let found = fetch_relevant_open_autonomous_daily_operation(
+        &pool,
+        "paper",
+        "lifecycle-test-relopen-terminal-bound",
+        far_outside_window,
+    )
+    .await?;
+    assert!(
+        found.is_none(),
+        "a terminal row must remain excluded even when it still carries a bound run_id with no \
+         stop evidence"
+    );
+
+    cleanup_operation(&pool, operation_id).await;
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D2-NONTRADING-RECOVERY-AND-RUNNING-
+// CONFIRMATION-01
+// REPAIR 4: fetch_autonomous_daily_operation_event_at_sequence
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn event_at_sequence_returns_matching_event_and_rejects_wrong_sequence() -> anyhow::Result<()>
+{
+    let pool = test_pool().await?;
+    let operation_id = seed_operation(&pool, "event-seq-exact").await;
+    let row = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation_id)
+        .await?
+        .expect("row must exist");
+    let after = advance_one(&pool, &row, STATE_PREPARING_DATA, row.created_at_utc).await?;
+
+    let found = fetch_autonomous_daily_operation_event_at_sequence(
+        &pool,
+        operation_id,
+        after.state_version,
+    )
+    .await?
+    .expect("the exact transition event must be found");
+    assert_eq!(found.from_state, STATE_AWAITING_PREOPEN);
+    assert_eq!(found.to_state, STATE_PREPARING_DATA);
+    assert_eq!(found.transition_seq, after.state_version);
+
+    let wrong_sequence = fetch_autonomous_daily_operation_event_at_sequence(
+        &pool,
+        operation_id,
+        after.state_version + 1,
+    )
+    .await?;
+    assert!(
+        wrong_sequence.is_none(),
+        "a wrong transition_seq must return None, never the nearest event"
+    );
+
+    cleanup_operation(&pool, operation_id).await;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn event_at_sequence_correct_after_more_than_100_earlier_events() -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    let operation_id = seed_operation(&pool, "event-seq-100plus").await;
+    let row = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation_id)
+        .await?
+        .expect("row must exist");
+    let ts = row.created_at_utc;
+    let manual = advance_one(&pool, &row, STATE_MANUAL_INTERVENTION_REQUIRED, ts).await?;
+    let first_manual_seq = manual.state_version;
+
+    // Generate more than 100 additional append-only self-refresh events --
+    // `list_autonomous_daily_operation_events`'s bounded `[1, 100]` cap would
+    // never see the ones seeded below without raising `limit` far past its
+    // documented default.
+    let mut current = manual;
+    let mut last_seq = first_manual_seq;
+    for i in 0..110 {
+        let refresh_args = RefreshAutonomousDailyOperationBlockerArgs {
+            operation_id,
+            expected_state: current.state.clone(),
+            expected_state_version: current.state_version,
+            reason_code: format!("reason-{i}"),
+            blocker_signature: None,
+            occurred_at_utc: ts,
+            bounded_detail: "test: bulk self-refresh".to_string(),
+        };
+        current = match refresh_autonomous_daily_operation_blocker(&pool, &refresh_args).await? {
+            RefreshAutonomousDailyOperationBlockerOutcome::Applied(r) => r,
+            other => panic!("expected Applied, got {other:?}"),
+        };
+        last_seq = current.state_version;
+    }
+    assert!(
+        last_seq - first_manual_seq >= 100,
+        "test setup must generate at least 100 events after the first manual transition"
+    );
+
+    // The exact-sequence lookup must still find both the very first manual
+    // transition and the final self-refresh event, despite well over 100
+    // events existing on this operation.
+    let first_event =
+        fetch_autonomous_daily_operation_event_at_sequence(&pool, operation_id, first_manual_seq)
+            .await?
+            .expect("the first manual transition event must still be found");
+    assert_eq!(first_event.to_state, STATE_MANUAL_INTERVENTION_REQUIRED);
+
+    let last_event =
+        fetch_autonomous_daily_operation_event_at_sequence(&pool, operation_id, last_seq)
+            .await?
+            .expect("the final self-refresh event must still be found");
+    assert_eq!(last_event.from_state, STATE_MANUAL_INTERVENTION_REQUIRED);
+    assert_eq!(last_event.to_state, STATE_MANUAL_INTERVENTION_REQUIRED);
+
+    let events_via_bounded_list =
+        list_autonomous_daily_operation_events(&pool, operation_id, 100).await?;
+    assert!(
+        (events_via_bounded_list.len() as i64) < last_seq,
+        "the bounded list this exact lookup replaces must not itself see every event"
     );
 
     cleanup_operation(&pool, operation_id).await;

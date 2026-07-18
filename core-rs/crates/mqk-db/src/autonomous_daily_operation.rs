@@ -1303,6 +1303,33 @@ pub async fn list_autonomous_daily_operation_events(
         .map_err(Into::into)
 }
 
+/// Fetch the exact transition event at `transition_seq` for `operation_id`.
+/// `Ok(None)` is authoritative "no event at that exact sequence" -- never a
+/// synthesized row.
+///
+/// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D2-NONTRADING-RECOVERY-AND-RUNNING-
+/// CONFIRMATION-01 REPAIR 4: running-transition commit confirmation must
+/// query the exact expected `transition_seq` directly, never scan
+/// [`list_autonomous_daily_operation_events`]'s ascending, `[1, 100]`-capped
+/// list -- a genuine running transition committing after more than 100
+/// earlier events on the same operation must still be confirmable. Read-only.
+pub async fn fetch_autonomous_daily_operation_event_at_sequence(
+    pool: &PgPool,
+    operation_id: Uuid,
+    transition_seq: i64,
+) -> Result<Option<AutonomousDailyOperationEventRecord>> {
+    let row = sqlx::query(&format!(
+        "select {EVENT_COLUMNS} from sys_autonomous_daily_operation_events \
+         where operation_id = $1 and transition_seq = $2"
+    ))
+    .bind(operation_id)
+    .bind(transition_seq)
+    .fetch_optional(pool)
+    .await
+    .context("fetch_autonomous_daily_operation_event_at_sequence failed")?;
+    row.map(row_to_event_record).transpose().map_err(Into::into)
+}
+
 // ---------------------------------------------------------------------------
 // AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D2-FAILSAFE-RECOVERY-CLOSURE-01
 // REPAIR 1: bounded lookup of the one relevant open operation for a slot
@@ -1334,14 +1361,22 @@ const RELEVANT_OPERATION_LOOKUP_LIMIT: i64 = 25;
 /// Read-only, bounded lookup for the one operation that should keep
 /// receiving lifecycle authority for `(deployment_mode, adapter_id)` even
 /// when a fresh calendar/assignment/registry/runtime-context resolution
-/// cannot be proven this tick.
+/// cannot be proven this tick (including a nontrading-day calendar result).
 ///
 /// A row is relevant when it is not terminal (`completed*` excluded) and
-/// either:
+/// any of:
 /// - its `state` is one of [`RELEVANT_ACTIVE_LIFECYCLE_STATES`] (an active,
 ///   recovering, or stopping lifecycle in progress), or
 /// - `now_utc` falls within its persisted
-///   `preopen_start_utc ..= postclose_finalize_utc` window.
+///   `preopen_start_utc ..= postclose_finalize_utc` window, or
+/// - it durably bound a run (`run_id is not null`) that has no durable
+///   stopped evidence yet (`stopped_at_utc is null`) -- REPAIR 2
+///   (NONTRADING-RECOVERY-AND-RUNNING-CONFIRMATION-01): a bound run without
+///   durable stop evidence remains relevant regardless of its current
+///   lifecycle state or whether `now_utc` still falls inside its persisted
+///   window, so it can never silently disappear from lifecycle control. An
+///   old manual/blocked row that never bound a run (`run_id is null`) does
+///   not gain relevance from this clause merely because it is recent.
 ///
 /// Ordering is deterministic (`preopen_start_utc desc, operation_id asc`),
 /// but this function never silently picks a "most recent" row among
@@ -1367,6 +1402,7 @@ pub async fn fetch_relevant_open_autonomous_daily_operation(
           and (
             state in ($6, $7, $8, $9, $10, $11)
             or ($12 >= preopen_start_utc and $12 <= postclose_finalize_utc)
+            or (run_id is not null and stopped_at_utc is null)
           )
         order by preopen_start_utc desc, operation_id asc
         limit $13
