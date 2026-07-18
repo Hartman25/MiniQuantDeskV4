@@ -1445,7 +1445,50 @@ impl AppState {
         self.alpaca_ws_continuity.read().await.clone()
     }
 
+    /// The autonomous-session truth every operator read surface consumes.
+    ///
+    /// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D3-SUPERVISOR-AND-CRITICAL-OUTCOME-
+    /// CLOSURE-01 (REPAIR 5): a permanently failed completed-bar task must
+    /// remain operator-visible even while the still-running session
+    /// controller keeps projecting its own per-tick outcomes onto the
+    /// stored truth. When the task's process-local liveness is `Failed`,
+    /// this getter returns `CompletedBarDriverExited` regardless of what
+    /// the stored value currently says — `Running`/`Started`/
+    /// `WaitingForPreopen` projections cannot hide it. The overlay clears
+    /// itself only when a later explicitly successful spawn's worker is
+    /// actually running again (the supervisor core sets liveness `Running`
+    /// per generation); expected shutdown (`Stopped`) never triggers it.
+    /// Writers and dedup logic use the stored value directly
+    /// ([`Self::stored_autonomous_session_truth`]) — the overlay is
+    /// read-surface truth, never lifecycle authority.
     pub async fn autonomous_session_truth(&self) -> AutonomousSessionTruth {
+        let task_liveness = self.completed_bar_task.truth.read().await.liveness;
+        if task_liveness
+            == autonomous_completed_bar_driver::AutonomousCompletedBarDriverTaskLiveness::Failed
+        {
+            let stored = self.autonomous_session_truth.read().await.clone();
+            if matches!(
+                stored,
+                AutonomousSessionTruth::CompletedBarDriverExited { .. }
+            ) {
+                return stored;
+            }
+            return AutonomousSessionTruth::CompletedBarDriverExited {
+                detail: "completed-bar driver task permanently failed (restart budget \
+                         exhausted or supervisor panic); unattended completed-bar dispatch \
+                         is UNMANAGED"
+                    .to_string(),
+            };
+        }
+        self.autonomous_session_truth.read().await.clone()
+    }
+
+    /// The raw stored autonomous-session truth, without the REPAIR 5
+    /// failed-task overlay. For writers/dedup paths that must observe what
+    /// is actually stored (e.g. the session controller's
+    /// WsGapPartialRecovery-preserving clear), never for operator read
+    /// surfaces.
+    pub async fn stored_autonomous_session_truth(&self) -> AutonomousSessionTruth {
         self.autonomous_session_truth.read().await.clone()
     }
 

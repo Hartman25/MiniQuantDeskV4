@@ -605,6 +605,20 @@ async fn al03_pool() -> sqlx::PgPool {
     .execute(&pool)
     .await
     .expect("cleanup AL-03 operation events");
+    // AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D3-SUPERVISOR-AND-CRITICAL-OUTCOME-
+    // CLOSURE-01: the task-level exactly-once proof
+    // (scenario_autonomous_completed_bar_task_01::m01) shares this same
+    // PAPER/alpaca slot and durably records bar-dispatch claims for its
+    // operation — delete those before the operations row or this cleanup
+    // fails on the foreign key.
+    sqlx::query(
+        "DELETE FROM sys_autonomous_daily_bar_dispatches WHERE operation_id IN \
+         (SELECT operation_id FROM sys_autonomous_daily_operations WHERE adapter_id = $1)",
+    )
+    .bind(AL03_ADAPTER_ID)
+    .execute(&pool)
+    .await
+    .expect("cleanup AL-03 bar dispatches");
     sqlx::query("DELETE FROM sys_autonomous_daily_operations WHERE adapter_id = $1")
         .bind(AL03_ADAPTER_ID)
         .execute(&pool)

@@ -11,24 +11,28 @@
 //! provider capable of `latest_closed_bar` at all, so authorization being
 //! `Authorized` still never reaches a real network call here.
 
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, TimeZone, Utc};
 use mqk_daemon::state::autonomous_completed_bar_driver::{
     AutonomousCompletedBarDriverMode, AutonomousCompletedBarDriverOutcome,
-    AutonomousCompletedBarDriverTaskLiveness,
+    AutonomousCompletedBarDriverTaskLiveness, AutonomousDriverSetupRejection,
 };
 use mqk_daemon::state::autonomous_completed_bar_task::{
     resolve_completed_bar_tick_cadence, run_supervised_completed_bar_worker,
     select_driver_mode_for_state, spawn_autonomous_completed_bar_driver_task,
-    tick_autonomous_completed_bar_driver_from_state, AutonomousCompletedBarProductionTickOutcome,
+    spawn_supervised_completed_bar_task_for_test, tick_autonomous_completed_bar_driver_from_state,
+    AutonomousCompletedBarProductionTickOutcome, AutonomousCompletedBarRestartPolicy,
     AutonomousCompletedBarTaskSpawnOutcome, CompletedBarTaskCadenceError,
     COMPLETED_BAR_TICK_SECS_ENV,
 };
-use mqk_daemon::state::autonomous_daily_coordinator::apply_completed_bar_driver_outcome;
+use mqk_daemon::state::autonomous_daily_coordinator::{
+    apply_completed_bar_driver_outcome, apply_completed_bar_task_permanent_failure,
+};
 use mqk_daemon::state::{self, AppState, AutonomousSessionTruth, BrokerKind, DeploymentMode};
+use tokio::net::TcpListener;
 use uuid::Uuid;
 
 const STRATEGY_SYMBOL_ENV: &str = "MQK_STRATEGY_SYMBOL";
@@ -481,13 +485,16 @@ async fn c04_c07_valid_paper_alpaca_starts_one_task_regardless_of_provider_autho
         AutonomousCompletedBarDriverTaskLiveness::Running
     );
 
-    st.cancel_completed_bar_task_for_shutdown().await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    // AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D3-SUPERVISOR-AND-CRITICAL-OUTCOME-
+    // CLOSURE-01 REPAIR 6: shutdown now awaits actual task completion — no
+    // settling sleep needed before asserting terminal truth.
+    st.cancel_and_wait_completed_bar_task_for_shutdown().await;
     let truth = st.completed_bar_task_truth().await;
     assert_eq!(
         truth.liveness,
         AutonomousCompletedBarDriverTaskLiveness::Stopped
     );
+    assert!(!st.completed_bar_task_claimed_for_test());
 }
 
 #[tokio::test]
@@ -515,8 +522,7 @@ async fn c05_c06_second_spawn_returns_already_running_no_second_worker() {
         "a second spawn attempt must never start a second worker (no second generation bump)"
     );
 
-    st.cancel_completed_bar_task_for_shutdown().await;
-    tokio::time::sleep(Duration::from_millis(100)).await;
+    st.cancel_and_wait_completed_bar_task_for_shutdown().await;
 }
 
 // ---------------------------------------------------------------------------
@@ -524,7 +530,7 @@ async fn c05_c06_second_spawn_returns_already_running_no_second_worker() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn d01_d02_state_and_run_id_change_between_ticks_is_observed_fresh() {
+async fn d01_d02_state_change_between_ticks_is_observed_fresh() {
     let Some(pool) = maybe_db("d01_d02").await else {
         return;
     };
@@ -555,51 +561,63 @@ async fn d01_d02_state_and_run_id_change_between_ticks_is_observed_fresh() {
     .await;
     let now = timing.preopen_start_utc + chrono::Duration::minutes(5);
 
-    // First tick: durable state is start_retrying -> PrepareDataOnly.
+    // First tick: durable state is start_retrying -> PrepareDataOnly. This
+    // bare-fixture tick names a manual/configuration blocker (the fixture
+    // row's runtime-binding identity does not match the freshly resolved
+    // runtime context — the same outcome the pre-closure test produced),
+    // and (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D3-SUPERVISOR-AND-CRITICAL-
+    // OUTCOME-CLOSURE-01 REPAIR 7) that critical outcome now durably
+    // degrades the operation to manual_intervention_required in the same
+    // tick instead of remaining process-local.
     let outcome1 = tick_autonomous_completed_bar_driver_from_state(&st, now)
         .await
         .expect("tick ok");
     match outcome1 {
-        AutonomousCompletedBarProductionTickOutcome::DriverOutcome { mode, .. } => {
+        AutonomousCompletedBarProductionTickOutcome::DriverOutcome {
+            mode, ref outcome, ..
+        } => {
             assert_eq!(mode, AutonomousCompletedBarDriverMode::PrepareDataOnly);
+            assert!(
+                matches!(
+                    outcome,
+                    AutonomousCompletedBarDriverOutcome::BindingBlocked { .. }
+                        | AutonomousCompletedBarDriverOutcome::ReadinessBlocked { .. }
+                ),
+                "zero-evidence bare-fixture tick must name a manual/configuration blocker, \
+                 got {outcome:?}"
+            );
         }
         other => panic!("expected DriverOutcome for start_retrying, got {other:?}"),
     }
-
-    // Durably transition to running with a bound run_id, out of band.
-    let run_id = Uuid::new_v4();
-    let args = mqk_db::TransitionAutonomousDailyOperationToRunningArgs {
-        operation_id: operation.operation_id,
-        expected_state: mqk_db::STATE_START_RETRYING.to_string(),
-        expected_state_version: operation.state_version,
-        run_id,
-        started_at_utc: now,
-        occurred_at_utc: now,
-        bounded_detail: "test: force running for D3.3 proof".to_string(),
-    };
-    match mqk_db::transition_autonomous_daily_operation_to_running(&pool, &args)
+    let degraded = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation.operation_id)
         .await
-        .expect("transition ok")
-    {
-        mqk_db::AutonomousDailyTransitionOutcome::Applied(_) => {}
-        other => panic!("expected Applied, got {other:?}"),
-    }
+        .expect("fetch ok")
+        .expect("row exists");
+    assert_eq!(
+        degraded.state,
+        mqk_db::STATE_MANUAL_INTERVENTION_REQUIRED,
+        "REPAIR 7: a manual/configuration blocker must durably degrade a pre-runtime operation"
+    );
 
-    // Second tick, same operation, fresh fetch: mode must now be
-    // RunningDispatch — proving the coordinator/task never retained the
-    // first tick's operation snapshot.
+    // Second tick, same AppState, fresh fetch: the durably changed state is
+    // observed fresh — the task retains no cross-tick operation snapshot,
+    // so the now-degraded operation selects no driver mode at all.
     let outcome2 = tick_autonomous_completed_bar_driver_from_state(&st, now)
         .await
         .expect("tick ok");
     match outcome2 {
-        AutonomousCompletedBarProductionTickOutcome::DriverOutcome {
-            mode, operation_id, ..
+        AutonomousCompletedBarProductionTickOutcome::ModeNotApplicable {
+            operation_id,
+            ref state,
         } => {
-            assert_eq!(mode, AutonomousCompletedBarDriverMode::RunningDispatch);
             assert_eq!(operation_id, operation.operation_id);
+            assert_eq!(state, mqk_db::STATE_MANUAL_INTERVENTION_REQUIRED);
         }
-        other => panic!("expected DriverOutcome for running, got {other:?}"),
+        other => panic!("expected ModeNotApplicable(manual_intervention_required), got {other:?}"),
     }
+    // The PrepareDataOnly -> RunningDispatch fresh-mode transition through
+    // this same adapter is proven end-to-end (with a real canonical runtime
+    // start) by m01_task_level_prepare_to_running_exactly_once below.
     reset_env();
 }
 
@@ -1266,11 +1284,21 @@ fn i02_main_rs_spawns_the_completed_bar_task_exactly_once() {
 }
 
 #[test]
-fn i03_main_rs_cancels_the_completed_bar_task_on_shutdown() {
+fn i03_main_rs_cancels_and_waits_for_the_completed_bar_task_on_shutdown() {
     let source = read_main_rs_source();
     assert!(
-        source.contains("cancel_completed_bar_task_for_shutdown"),
-        "main.rs's shutdown path must cancel the completed-bar task"
+        source.contains("cancel_and_wait_completed_bar_task_for_shutdown"),
+        "main.rs's shutdown path must cancel AND await the completed-bar task"
+    );
+    let wait_pos = source
+        .find("cancel_and_wait_completed_bar_task_for_shutdown")
+        .unwrap();
+    let stop_pos = source
+        .find("stop_for_shutdown")
+        .expect("main.rs must still call stop_for_shutdown");
+    assert!(
+        wait_pos < stop_pos,
+        "the completed-bar task must be cancelled and awaited BEFORE stop_for_shutdown"
     );
 }
 
@@ -1290,4 +1318,1498 @@ async fn j01_completed_bar_driver_exited_round_trips_through_autonomous_session_
         truth,
         AutonomousSessionTruth::CompletedBarDriverExited { ref detail } if detail == "restart budget exhausted"
     ));
+}
+
+// ---------------------------------------------------------------------------
+// Group K — AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D3-SUPERVISOR-AND-CRITICAL-
+// OUTCOME-CLOSURE-01: retained supervisor handle, outer monitor, full
+// restart-budget exhaustion, claim release on every terminal path, sticky
+// operator failure truth, and shutdown-that-waits. All via the real
+// claim/install/supervise/monitor path
+// (`spawn_supervised_completed_bar_task_for_test`) with injected restart
+// policies and tick factories — never source-string assertions.
+// ---------------------------------------------------------------------------
+
+fn zero_delay_policy() -> AutonomousCompletedBarRestartPolicy {
+    AutonomousCompletedBarRestartPolicy {
+        max_restarts: 3,
+        delays: vec![Duration::ZERO, Duration::ZERO, Duration::ZERO],
+    }
+}
+
+async fn wait_until_liveness(
+    st: &Arc<AppState>,
+    liveness: AutonomousCompletedBarDriverTaskLiveness,
+) -> bool {
+    for _ in 0..200 {
+        if st.completed_bar_task_truth().await.liveness == liveness {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    false
+}
+
+async fn wait_until_claim_released(st: &Arc<AppState>) -> bool {
+    for _ in 0..200 {
+        if !st.completed_bar_task_claimed_for_test() {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    false
+}
+
+/// Loopback webhook that records every delivered alert body. Used as the
+/// injected notification observer for exactly-once critical-notification
+/// proofs (loopback only — no external network).
+async fn start_alert_counting_webhook() -> (String, Arc<tokio::sync::Mutex<Vec<serde_json::Value>>>)
+{
+    let received: Arc<tokio::sync::Mutex<Vec<serde_json::Value>>> =
+        Arc::new(tokio::sync::Mutex::new(Vec::new()));
+    let sink = Arc::clone(&received);
+    let app = axum::Router::new().route(
+        "/",
+        axum::routing::post(move |axum::Json(body): axum::Json<serde_json::Value>| {
+            let sink = Arc::clone(&sink);
+            async move {
+                sink.lock().await.push(body);
+                axum::http::StatusCode::NO_CONTENT
+            }
+        }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    (format!("http://127.0.0.1:{}/", addr.port()), received)
+}
+
+async fn count_alerts_with_class(
+    received: &Arc<tokio::sync::Mutex<Vec<serde_json::Value>>>,
+    alert_class: &str,
+) -> usize {
+    received
+        .lock()
+        .await
+        .iter()
+        .filter(|body| body.get("alert_class").and_then(|v| v.as_str()) == Some(alert_class))
+        .count()
+}
+
+#[tokio::test]
+async fn k01_full_restart_budget_exhaustion_four_generations_three_restarts_then_failed() {
+    let st = fake_state();
+    let attempts = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&attempts);
+
+    let outcome = spawn_supervised_completed_bar_task_for_test(
+        Arc::clone(&st),
+        Duration::from_millis(5),
+        zero_delay_policy(),
+        move |_st, _gen| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            move || async move {
+                panic!("k01: deliberate worker panic for restart-budget proof");
+            }
+        },
+    )
+    .await;
+    assert_eq!(outcome, AutonomousCompletedBarTaskSpawnOutcome::Started);
+
+    assert!(
+        wait_until_liveness(&st, AutonomousCompletedBarDriverTaskLiveness::Failed).await,
+        "the task must reach Failed once the restart budget is exhausted"
+    );
+    assert!(
+        wait_until_claim_released(&st).await,
+        "permanent failure must release the spawn claim"
+    );
+
+    let truth = st.completed_bar_task_truth().await;
+    assert_eq!(
+        truth.liveness,
+        AutonomousCompletedBarDriverTaskLiveness::Failed
+    );
+    assert_eq!(
+        truth.restart_count, 3,
+        "exactly three successful restarts; the final failing attempt is never counted as a \
+         fourth"
+    );
+    assert_eq!(truth.last_error_code, Some("restart_budget_exhausted"));
+    assert_eq!(
+        truth.generation, 4,
+        "exactly four worker generations were attempted"
+    );
+    assert_eq!(
+        attempts.load(Ordering::SeqCst),
+        4,
+        "exactly four worker attempts (initial + three restarts)"
+    );
+
+    assert!(!st.completed_bar_task_has_supervisor_handle_for_test().await);
+    assert!(!st.completed_bar_task_has_cancel_sender_for_test().await);
+
+    // No fifth worker is ever created after exhaustion.
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    assert_eq!(attempts.load(Ordering::SeqCst), 4, "no fifth worker");
+}
+
+#[tokio::test]
+async fn k02_subsequent_explicit_spawn_is_not_blocked_by_a_stale_claim_after_failure() {
+    let st = fake_state();
+    let outcome = spawn_supervised_completed_bar_task_for_test(
+        Arc::clone(&st),
+        Duration::from_millis(5),
+        AutonomousCompletedBarRestartPolicy {
+            max_restarts: 0,
+            delays: vec![],
+        },
+        |_st, _gen| {
+            move || async move {
+                panic!("k02: immediate permanent failure");
+            }
+        },
+    )
+    .await;
+    assert_eq!(outcome, AutonomousCompletedBarTaskSpawnOutcome::Started);
+    assert!(wait_until_liveness(&st, AutonomousCompletedBarDriverTaskLiveness::Failed).await);
+    assert!(wait_until_claim_released(&st).await);
+
+    // A later explicit spawn must start cleanly — no stale claim, no stale
+    // handle — and its actually-running worker clears the failed overlay.
+    let ticks = Arc::new(AtomicUsize::new(0));
+    let counter = Arc::clone(&ticks);
+    let second = spawn_supervised_completed_bar_task_for_test(
+        Arc::clone(&st),
+        Duration::from_millis(5),
+        zero_delay_policy(),
+        move |_st, _gen| {
+            let counter = Arc::clone(&counter);
+            move || {
+                let counter = Arc::clone(&counter);
+                async move {
+                    counter.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        },
+    )
+    .await;
+    assert_eq!(second, AutonomousCompletedBarTaskSpawnOutcome::Started);
+    assert!(wait_until_liveness(&st, AutonomousCompletedBarDriverTaskLiveness::Running).await);
+    // The failed-task overlay is gone once the replacement worker is
+    // actually running: a controller-style clear now takes effect on the
+    // read surface (while liveness was Failed, the same clear could not
+    // hide CompletedBarDriverExited — k06 proves that side).
+    st.clear_autonomous_session_truth().await;
+    assert_eq!(
+        st.autonomous_session_truth().await,
+        AutonomousSessionTruth::Clear,
+        "an actually-running replacement worker clears the failed overlay"
+    );
+
+    st.cancel_and_wait_completed_bar_task_for_shutdown().await;
+    assert_eq!(
+        st.completed_bar_task_truth().await.liveness,
+        AutonomousCompletedBarDriverTaskLiveness::Stopped
+    );
+}
+
+#[tokio::test]
+async fn k03_permanent_failure_durably_degrades_running_operation_once_no_duplicate_event() {
+    let Some(pool) = maybe_db("k03").await else {
+        return;
+    };
+    reset_env();
+    let adapter_id = format!("zztask-{}", unique_suffix());
+    let timing = standard_timing();
+    let operation = create_test_operation_in_start_retrying(
+        &pool,
+        &adapter_id,
+        "ZZTASKK03",
+        "swing_momentum",
+        "5m",
+        &timing,
+    )
+    .await;
+    let run_args = mqk_db::TransitionAutonomousDailyOperationToRunningArgs {
+        operation_id: operation.operation_id,
+        expected_state: mqk_db::STATE_START_RETRYING.to_string(),
+        expected_state_version: operation.state_version,
+        run_id: Uuid::new_v4(),
+        started_at_utc: timing.preopen_start_utc,
+        occurred_at_utc: timing.preopen_start_utc,
+        bounded_detail: "test: force running".to_string(),
+    };
+    match mqk_db::transition_autonomous_daily_operation_to_running(&pool, &run_args)
+        .await
+        .expect("transition ok")
+    {
+        mqk_db::AutonomousDailyTransitionOutcome::Applied(_) => {}
+        other => panic!("expected Applied, got {other:?}"),
+    }
+
+    // The running operation carries a bound, not-durably-stopped run, so the
+    // monitor's relevant-operation lookup (at real wall-clock now) finds it.
+    let st = paper_alpaca_state_with_db(pool.clone(), &adapter_id);
+    let spawn = spawn_supervised_completed_bar_task_for_test(
+        Arc::clone(&st),
+        Duration::from_millis(5),
+        AutonomousCompletedBarRestartPolicy {
+            max_restarts: 0,
+            delays: vec![],
+        },
+        |_st, _gen| {
+            move || async move {
+                panic!("k03: deliberate permanent failure");
+            }
+        },
+    )
+    .await;
+    assert_eq!(spawn, AutonomousCompletedBarTaskSpawnOutcome::Started);
+    assert!(wait_until_liveness(&st, AutonomousCompletedBarDriverTaskLiveness::Failed).await);
+    assert!(wait_until_claim_released(&st).await);
+
+    let degraded = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation.operation_id)
+        .await
+        .expect("fetch ok")
+        .expect("row exists");
+    assert_eq!(
+        degraded.state,
+        mqk_db::STATE_CONTROLLER_DEGRADED,
+        "permanent task failure must degrade a running operation to controller_degraded"
+    );
+    assert_eq!(
+        degraded.state_reason_code.as_deref(),
+        Some("completed_bar_task_permanently_failed")
+    );
+
+    let event_count: i64 = sqlx::query_scalar(
+        "select count(*) from sys_autonomous_daily_operation_events \
+         where operation_id = $1 and reason_code = 'completed_bar_task_permanently_failed'",
+    )
+    .bind(operation.operation_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(event_count, 1, "exactly one permanent-failure event");
+
+    // Repeating the identical permanent failure must not insert a duplicate
+    // event — the same-state refresh dedup applies.
+    let again = apply_completed_bar_task_permanent_failure(&st, &pool, Utc::now())
+        .await
+        .expect("apply ok");
+    assert_eq!(again, Some(false));
+    let event_count_after: i64 = sqlx::query_scalar(
+        "select count(*) from sys_autonomous_daily_operation_events \
+         where operation_id = $1 and reason_code = 'completed_bar_task_permanently_failed'",
+    )
+    .bind(operation.operation_id)
+    .fetch_one(&pool)
+    .await
+    .unwrap();
+    assert_eq!(event_count_after, 1, "no duplicate permanent-failure event");
+}
+
+#[tokio::test]
+async fn k04_permanent_failure_does_not_mutate_stopping_or_completed_operations() {
+    let Some(pool) = maybe_db("k04").await else {
+        return;
+    };
+    reset_env();
+    let adapter_id = format!("zztask-{}", unique_suffix());
+    let timing = standard_timing();
+    let operation = create_test_operation(
+        &pool,
+        &adapter_id,
+        "ZZTASKK04",
+        "swing_momentum",
+        "5m",
+        &timing,
+        mqk_db::STATE_AWAITING_OPEN,
+    )
+    .await;
+    // Bind a run so the relevant lookup finds the operation even in
+    // `stopping`, then durably move to stopping (awaiting_open -> stopping).
+    let stop_args = mqk_db::TransitionAutonomousDailyOperationArgs {
+        operation_id: operation.operation_id,
+        expected_state: operation.state.clone(),
+        expected_state_version: operation.state_version,
+        new_state: mqk_db::STATE_STOPPING.to_string(),
+        reason_code: None,
+        blocker_signature: None,
+        occurred_at_utc: timing.preopen_start_utc,
+        run_id: Some(Uuid::new_v4()),
+        bounded_detail: "test: force stopping".to_string(),
+    };
+    let stopping = match mqk_db::transition_autonomous_daily_operation(&pool, &stop_args)
+        .await
+        .expect("transition ok")
+    {
+        mqk_db::AutonomousDailyTransitionOutcome::Applied(record) => record,
+        other => panic!("expected Applied, got {other:?}"),
+    };
+
+    let st = paper_alpaca_state_with_db(pool.clone(), &adapter_id);
+    let applied = apply_completed_bar_task_permanent_failure(&st, &pool, Utc::now())
+        .await
+        .expect("apply ok");
+    assert_eq!(
+        applied, None,
+        "a stopping operation must not be mutated — stopping remains authoritative"
+    );
+    let fetched = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation.operation_id)
+        .await
+        .expect("fetch ok")
+        .expect("row exists");
+    assert_eq!(fetched.state, mqk_db::STATE_STOPPING);
+    assert_eq!(fetched.state_version, stopping.state_version);
+
+    // Completed snapshots take the same no-mutation guard in the shared
+    // applier: a critical outcome applied against a completed-state snapshot
+    // writes nothing.
+    let mut completed_snapshot = fetched.clone();
+    completed_snapshot.state = mqk_db::STATE_COMPLETED.to_string();
+    let outcome = AutonomousCompletedBarDriverOutcome::DispatchClaimUnresolved {
+        status: "uncertain".to_string(),
+    };
+    let applied_completed =
+        apply_completed_bar_driver_outcome(&pool, &completed_snapshot, &outcome, Utc::now())
+            .await
+            .expect("apply ok");
+    assert_eq!(
+        applied_completed, None,
+        "completed operations are never mutated"
+    );
+}
+
+#[tokio::test]
+async fn k05_supervisor_core_panic_is_caught_by_monitor_with_exactly_one_critical_notification() {
+    let (webhook_url, alerts) = start_alert_counting_webhook().await;
+    let mut st_inner =
+        AppState::new_for_test_with_mode_and_broker(DeploymentMode::Paper, BrokerKind::Alpaca);
+    st_inner.discord_notifier = mqk_daemon::notify::DiscordNotifier::from_url(webhook_url);
+    let st = Arc::new(st_inner);
+
+    // The factory itself panics — this is a panic in the supervisor core's
+    // own code path, not inside a tick closure, so only the outer monitor's
+    // JoinError classification can observe it.
+    let trigger = Arc::new(AtomicBool::new(true));
+    let trigger_for_factory = Arc::clone(&trigger);
+    let spawn = spawn_supervised_completed_bar_task_for_test(
+        Arc::clone(&st),
+        Duration::from_millis(5),
+        zero_delay_policy(),
+        move |_st, _gen| {
+            if trigger_for_factory.load(Ordering::SeqCst) {
+                panic!("k05: deliberate supervisor-core panic");
+            }
+            move || async move {}
+        },
+    )
+    .await;
+    assert_eq!(spawn, AutonomousCompletedBarTaskSpawnOutcome::Started);
+
+    assert!(
+        wait_until_liveness(&st, AutonomousCompletedBarDriverTaskLiveness::Failed).await,
+        "a supervisor-core panic must be classified as permanent failure by the monitor"
+    );
+    assert!(
+        wait_until_claim_released(&st).await,
+        "a supervisor-core panic must release the claim"
+    );
+
+    let truth = st.completed_bar_task_truth().await;
+    assert_eq!(truth.last_error_code, Some("supervisor_panicked"));
+    assert!(!st.completed_bar_task_has_supervisor_handle_for_test().await);
+    assert!(!st.completed_bar_task_has_cancel_sender_for_test().await);
+    assert!(matches!(
+        st.autonomous_session_truth().await,
+        AutonomousSessionTruth::CompletedBarDriverExited { .. }
+    ));
+
+    // Exactly-once terminal handling: one critical failure notification,
+    // zero restart notifications (the core died before any restart).
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    assert_eq!(
+        count_alerts_with_class(&alerts, "autonomous.completed_bar_task.failed").await,
+        1,
+        "exactly one permanent-failure critical notification"
+    );
+    assert_eq!(
+        count_alerts_with_class(&alerts, "autonomous.completed_bar_task.restarting").await,
+        0,
+        "a core panic before any restart sends zero restart notifications"
+    );
+}
+
+#[tokio::test]
+async fn k06_session_controller_projections_cannot_hide_failed_task_truth() {
+    let st = fake_state();
+    st.set_completed_bar_task_generation_for_test(
+        3,
+        AutonomousCompletedBarDriverTaskLiveness::Failed,
+    )
+    .await;
+
+    // A controller Started/Running tick clears (gap-preserving) the stored
+    // truth; the failed-task overlay must survive it.
+    st.clear_autonomous_session_truth().await;
+    assert!(matches!(
+        st.autonomous_session_truth().await,
+        AutonomousSessionTruth::CompletedBarDriverExited { .. }
+    ));
+
+    // A controller StartRefused/ManualIntervention projection overwrites the
+    // stored truth; the overlay must survive that too.
+    st.set_autonomous_session_truth(AutonomousSessionTruth::StartRefused {
+        detail: "reason_code=manual_intervention_required".to_string(),
+    })
+    .await;
+    assert!(matches!(
+        st.autonomous_session_truth().await,
+        AutonomousSessionTruth::CompletedBarDriverExited { .. }
+    ));
+
+    // Expected shutdown must not appear failed: Stopped liveness has no
+    // overlay, so the stored truth passes through.
+    st.set_completed_bar_task_generation_for_test(
+        3,
+        AutonomousCompletedBarDriverTaskLiveness::Stopped,
+    )
+    .await;
+    assert!(matches!(
+        st.autonomous_session_truth().await,
+        AutonomousSessionTruth::StartRefused { .. }
+    ));
+
+    // Only an actually-running later generation clears the overlay.
+    st.set_completed_bar_task_generation_for_test(
+        4,
+        AutonomousCompletedBarDriverTaskLiveness::Failed,
+    )
+    .await;
+    assert!(matches!(
+        st.autonomous_session_truth().await,
+        AutonomousSessionTruth::CompletedBarDriverExited { .. }
+    ));
+    st.set_completed_bar_task_generation_for_test(
+        5,
+        AutonomousCompletedBarDriverTaskLiveness::Running,
+    )
+    .await;
+    assert!(matches!(
+        st.autonomous_session_truth().await,
+        AutonomousSessionTruth::StartRefused { .. }
+    ));
+}
+
+#[tokio::test]
+async fn k07_expected_cancellation_remains_stopped_and_clears_all_ownership() {
+    let st = fake_state();
+    let spawn = spawn_supervised_completed_bar_task_for_test(
+        Arc::clone(&st),
+        Duration::from_millis(5),
+        zero_delay_policy(),
+        |_st, _gen| move || async move {},
+    )
+    .await;
+    assert_eq!(spawn, AutonomousCompletedBarTaskSpawnOutcome::Started);
+    assert!(wait_until_liveness(&st, AutonomousCompletedBarDriverTaskLiveness::Running).await);
+    assert!(st.completed_bar_task_has_supervisor_handle_for_test().await);
+    assert!(st.completed_bar_task_has_cancel_sender_for_test().await);
+
+    st.cancel_and_wait_completed_bar_task_for_shutdown().await;
+
+    let truth = st.completed_bar_task_truth().await;
+    assert_eq!(
+        truth.liveness,
+        AutonomousCompletedBarDriverTaskLiveness::Stopped,
+        "expected cancellation is Stopped, never Failed"
+    );
+    assert!(!matches!(
+        st.autonomous_session_truth().await,
+        AutonomousSessionTruth::CompletedBarDriverExited { .. }
+    ));
+    assert!(!st.completed_bar_task_claimed_for_test());
+    assert!(!st.completed_bar_task_has_supervisor_handle_for_test().await);
+    assert!(!st.completed_bar_task_has_cancel_sender_for_test().await);
+}
+
+#[tokio::test]
+async fn k08_shutdown_waits_for_the_inflight_tick_and_no_tick_after_return() {
+    let st = fake_state();
+    let in_progress = Arc::new(AtomicBool::new(false));
+    let started = Arc::new(AtomicUsize::new(0));
+    let finished = Arc::new(AtomicUsize::new(0));
+
+    let (p, s, f) = (
+        Arc::clone(&in_progress),
+        Arc::clone(&started),
+        Arc::clone(&finished),
+    );
+    let spawn = spawn_supervised_completed_bar_task_for_test(
+        Arc::clone(&st),
+        Duration::from_millis(10),
+        zero_delay_policy(),
+        move |_st, _gen| {
+            let (p, s, f) = (Arc::clone(&p), Arc::clone(&s), Arc::clone(&f));
+            move || {
+                let (p, s, f) = (Arc::clone(&p), Arc::clone(&s), Arc::clone(&f));
+                async move {
+                    s.fetch_add(1, Ordering::SeqCst);
+                    p.store(true, Ordering::SeqCst);
+                    tokio::time::sleep(Duration::from_millis(150)).await;
+                    p.store(false, Ordering::SeqCst);
+                    f.fetch_add(1, Ordering::SeqCst);
+                }
+            }
+        },
+    )
+    .await;
+    assert_eq!(spawn, AutonomousCompletedBarTaskSpawnOutcome::Started);
+
+    // Wait until a tick is genuinely in flight.
+    let mut observed_inflight = false;
+    for _ in 0..200 {
+        if in_progress.load(Ordering::SeqCst) {
+            observed_inflight = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    assert!(
+        observed_inflight,
+        "a tick must be in flight before shutdown"
+    );
+
+    st.cancel_and_wait_completed_bar_task_for_shutdown().await;
+
+    // The in-flight tick finished before the shutdown method returned.
+    assert!(
+        !in_progress.load(Ordering::SeqCst),
+        "no tick may remain in progress after shutdown returns"
+    );
+    assert_eq!(
+        started.load(Ordering::SeqCst),
+        finished.load(Ordering::SeqCst),
+        "every started tick completed before shutdown returned"
+    );
+
+    // No tick begins after shutdown returns.
+    let started_at_shutdown = started.load(Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_millis(80)).await;
+    assert_eq!(
+        started.load(Ordering::SeqCst),
+        started_at_shutdown,
+        "no tick may begin after shutdown returns"
+    );
+
+    let truth = st.completed_bar_task_truth().await;
+    assert_eq!(
+        truth.liveness,
+        AutonomousCompletedBarDriverTaskLiveness::Stopped
+    );
+    assert!(!st.completed_bar_task_claimed_for_test());
+    assert!(!st.completed_bar_task_has_supervisor_handle_for_test().await);
+    assert!(!st.completed_bar_task_has_cancel_sender_for_test().await);
+}
+
+// ---------------------------------------------------------------------------
+// Group L — REPAIR 7/8: durable degradation for manual/configuration
+// blockers, adapter-level identity/registry blockers, transient containment,
+// and bounded persisted detail.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn l01_terminal_provider_rejection_degrades_durably() {
+    let Some(pool) = maybe_db("l01").await else {
+        return;
+    };
+    reset_env();
+    let adapter_id = format!("zztask-{}", unique_suffix());
+    let timing = standard_timing();
+    let operation = create_test_operation(
+        &pool,
+        &adapter_id,
+        "ZZTASKL01",
+        "swing_momentum",
+        "5m",
+        &timing,
+        mqk_db::STATE_AWAITING_OPEN,
+    )
+    .await;
+
+    let outcome = AutonomousCompletedBarDriverOutcome::PollFailedTerminal {
+        detail: "provider-rejection-free-form-text-must-not-persist".to_string(),
+    };
+    let now = timing.preopen_start_utc + chrono::Duration::minutes(1);
+    let applied = apply_completed_bar_driver_outcome(&pool, &operation, &outcome, now)
+        .await
+        .expect("apply ok");
+    assert_eq!(applied, Some(true));
+
+    let fetched = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation.operation_id)
+        .await
+        .expect("fetch ok")
+        .expect("row exists");
+    assert_eq!(fetched.state, mqk_db::STATE_MANUAL_INTERVENTION_REQUIRED);
+    assert_eq!(
+        fetched.state_reason_code.as_deref(),
+        Some("completed_bar_poll_failed_terminal")
+    );
+
+    // REPAIR 8: the provider's free-form rejection text is never persisted.
+    let details: Vec<String> = sqlx::query_scalar(
+        "select bounded_detail from sys_autonomous_daily_operation_events where operation_id = $1",
+    )
+    .bind(operation.operation_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert!(
+        details
+            .iter()
+            .all(|d| !d.contains("provider-rejection-free-form-text-must-not-persist")),
+        "no persisted event may carry the provider's free-form detail"
+    );
+}
+
+#[tokio::test]
+async fn l02_provider_setup_blocker_degrades_durably_with_static_label_only() {
+    let Some(pool) = maybe_db("l02").await else {
+        return;
+    };
+    reset_env();
+    let adapter_id = format!("zztask-{}", unique_suffix());
+    let timing = standard_timing();
+    let operation = create_test_operation(
+        &pool,
+        &adapter_id,
+        "ZZTASKL02",
+        "swing_momentum",
+        "5m",
+        &timing,
+        mqk_db::STATE_AWAITING_OPEN,
+    )
+    .await;
+
+    let outcome = AutonomousCompletedBarDriverOutcome::ProviderSetupBlocked {
+        rejection: AutonomousDriverSetupRejection::ProviderConstructionFailed(
+            "secret-credential-path-xyz".to_string(),
+        ),
+    };
+    let now = timing.preopen_start_utc + chrono::Duration::minutes(1);
+    let applied = apply_completed_bar_driver_outcome(&pool, &operation, &outcome, now)
+        .await
+        .expect("apply ok");
+    assert_eq!(applied, Some(true));
+
+    let fetched = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation.operation_id)
+        .await
+        .expect("fetch ok")
+        .expect("row exists");
+    assert_eq!(fetched.state, mqk_db::STATE_MANUAL_INTERVENTION_REQUIRED);
+    assert_eq!(
+        fetched.state_reason_code.as_deref(),
+        Some("completed_bar_provider_setup_blocked")
+    );
+
+    let details: Vec<String> = sqlx::query_scalar(
+        "select bounded_detail from sys_autonomous_daily_operation_events where operation_id = $1",
+    )
+    .bind(operation.operation_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert!(
+        details
+            .iter()
+            .any(|d| d.contains("provider_construction_failed")),
+        "the static rejection label must be persisted"
+    );
+    assert!(
+        details
+            .iter()
+            .all(|d| !d.contains("secret-credential-path-xyz")),
+        "the rejection's free-form payload must never be persisted"
+    );
+}
+
+#[tokio::test]
+async fn l03_transient_and_wait_remediable_outcomes_do_not_degrade() {
+    let Some(pool) = maybe_db("l03").await else {
+        return;
+    };
+    reset_env();
+    let adapter_id = format!("zztask-{}", unique_suffix());
+    let timing = standard_timing();
+    let operation = create_test_operation(
+        &pool,
+        &adapter_id,
+        "ZZTASKL03",
+        "swing_momentum",
+        "5m",
+        &timing,
+        mqk_db::STATE_AWAITING_OPEN,
+    )
+    .await;
+
+    let now = timing.preopen_start_utc + chrono::Duration::minutes(1);
+    for outcome in [
+        AutonomousCompletedBarDriverOutcome::PollFailedTransient {
+            detail: "transient".to_string(),
+        },
+        AutonomousCompletedBarDriverOutcome::ReadinessBlocked {
+            blockers: vec![mqk_daemon::daily_data_readiness::REASON_EXPECTED_LATEST_BAR_MISSING],
+        },
+        AutonomousCompletedBarDriverOutcome::ReadinessBlockedAfterPoll { blockers: vec![] },
+    ] {
+        let applied = apply_completed_bar_driver_outcome(&pool, &operation, &outcome, now)
+            .await
+            .expect("apply ok");
+        assert_eq!(
+            applied, None,
+            "transient/wait-remediable outcome {outcome:?} must not degrade"
+        );
+    }
+
+    let fetched = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation.operation_id)
+        .await
+        .expect("fetch ok")
+        .expect("row exists");
+    assert_eq!(fetched.state, mqk_db::STATE_AWAITING_OPEN);
+    assert_eq!(fetched.state_version, operation.state_version);
+}
+
+#[tokio::test]
+async fn l04_identity_unresolved_degrades_durably_through_the_adapter() {
+    let Some(pool) = maybe_db("l04").await else {
+        return;
+    };
+    reset_env();
+    let adapter_id = format!("zztask-{}", unique_suffix());
+    let timing = standard_timing();
+    let operation = create_test_operation(
+        &pool,
+        &adapter_id,
+        "ZZTASKL04",
+        "swing_momentum",
+        "5m",
+        &timing,
+        mqk_db::STATE_AWAITING_OPEN,
+    )
+    .await;
+
+    // No strategy assignment env at all -> assignment resolution fails.
+    let st = paper_alpaca_state_with_db(pool.clone(), &adapter_id);
+    let now = timing.preopen_start_utc + chrono::Duration::minutes(5);
+    let outcome = tick_autonomous_completed_bar_driver_from_state(&st, now)
+        .await
+        .expect("tick ok");
+    assert!(matches!(
+        outcome,
+        AutonomousCompletedBarProductionTickOutcome::IdentityUnresolved { .. }
+    ));
+
+    let fetched = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation.operation_id)
+        .await
+        .expect("fetch ok")
+        .expect("row exists");
+    assert_eq!(
+        fetched.state,
+        mqk_db::STATE_MANUAL_INTERVENTION_REQUIRED,
+        "IdentityUnresolved must reach durable operation truth, not remain process-local"
+    );
+    assert_eq!(
+        fetched.state_reason_code.as_deref(),
+        Some("completed_bar_identity_unresolved")
+    );
+}
+
+#[tokio::test]
+async fn l05_registry_unavailable_degrades_durably_through_the_adapter() {
+    let Some(pool) = maybe_db("l05").await else {
+        return;
+    };
+    reset_env();
+    let adapter_id = format!("zztask-{}", unique_suffix());
+    let timing = standard_timing();
+    let operation = create_test_operation(
+        &pool,
+        &adapter_id,
+        "ZZTASKL05",
+        "swing_momentum",
+        "5m",
+        &timing,
+        mqk_db::STATE_AWAITING_OPEN,
+    )
+    .await;
+    std::env::set_var(STRATEGY_SYMBOL_ENV, "ZZTASKL05");
+    std::env::set_var(STRATEGY_IDS_ENV, "swing_momentum");
+    std::env::set_var(STRATEGY_TIMEFRAME_ENV, "5m");
+
+    let mut st = paper_alpaca_state_with_db(pool.clone(), &adapter_id);
+    Arc::get_mut(&mut st).unwrap().instrument_registry_path =
+        "C:/definitely/does/not/exist/instruments.json".to_string();
+    st.set_strategy_fleet_for_test(Some(vec![state::StrategyFleetEntry {
+        strategy_id: "swing_momentum".to_string(),
+    }]))
+    .await;
+
+    let now = timing.preopen_start_utc + chrono::Duration::minutes(5);
+    let outcome = tick_autonomous_completed_bar_driver_from_state(&st, now)
+        .await
+        .expect("tick ok");
+    reset_env();
+    assert!(matches!(
+        outcome,
+        AutonomousCompletedBarProductionTickOutcome::RegistryUnavailable { .. }
+    ));
+
+    let fetched = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation.operation_id)
+        .await
+        .expect("fetch ok")
+        .expect("row exists");
+    assert_eq!(
+        fetched.state,
+        mqk_db::STATE_MANUAL_INTERVENTION_REQUIRED,
+        "RegistryUnavailable must reach durable operation truth, not remain process-local"
+    );
+    assert_eq!(
+        fetched.state_reason_code.as_deref(),
+        Some("completed_bar_registry_unavailable")
+    );
+    let details: Vec<String> = sqlx::query_scalar(
+        "select bounded_detail from sys_autonomous_daily_operation_events where operation_id = $1",
+    )
+    .bind(operation.operation_id)
+    .fetch_all(&pool)
+    .await
+    .unwrap();
+    assert!(
+        details
+            .iter()
+            .all(|d| !d.contains("definitely/does/not/exist")),
+        "the registry path must never be persisted as operator authority"
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Group M — REPAIR 9: task-level end-to-end exactly-once proof through the
+// production adapter itself. Fixture pattern mirrors AL-03
+// (`scenario_autonomous_paper_day_lifecycle_auton12.rs`): synthetic
+// registries, seeded exact-ready `md_bars` evidence, a loopback mock Alpaca
+// REST server (only because the canonical lifecycle start requires it), a
+// registered `intraday_scalper` strategy, a Live broker cursor, and the real
+// durable coordinator driving the canonical runtime start. Provider
+// authorization stays disabled the whole time: the exact expected bar is
+// already local, so zero provider resolution and zero provider calls occur.
+// ---------------------------------------------------------------------------
+
+const M01_SYMBOL: &str = "ZZTASKE2E";
+const M01_PROVIDER: &str = "zztask_e2e_provider";
+const M01_STRATEGY: &str = "intraday_scalper";
+const M01_TIMEFRAME: &str = "5m";
+const M01_TIMEFRAME_SECS: i64 = 300;
+const M01_REQUIRED_BARS: usize = 5;
+const M01_ADAPTER_ID: &str = "alpaca";
+
+/// Monday 2024-04-15 (verified NYSE regular session inside the calendar
+/// seam's covered range; open 13:30 UTC). Every instant below sits inside
+/// the same 5m expected-bar slot [14:25, 14:30), so the bar observed in
+/// PrepareDataOnly is exactly the bar dispatched in RunningDispatch.
+fn m01_pre_preopen() -> DateTime<Utc> {
+    Utc.with_ymd_and_hms(2024, 4, 15, 12, 30, 0).unwrap()
+}
+fn m01_t1_prepare() -> DateTime<Utc> {
+    Utc.with_ymd_and_hms(2024, 4, 15, 14, 26, 0).unwrap()
+}
+fn m01_t_start() -> DateTime<Utc> {
+    Utc.with_ymd_and_hms(2024, 4, 15, 14, 26, 30).unwrap()
+}
+fn m01_t2_dispatch() -> DateTime<Utc> {
+    Utc.with_ymd_and_hms(2024, 4, 15, 14, 27, 0).unwrap()
+}
+fn m01_t3_repeat() -> DateTime<Utc> {
+    Utc.with_ymd_and_hms(2024, 4, 15, 14, 28, 0).unwrap()
+}
+
+fn m01_write_registries() {
+    let dir = std::env::temp_dir().join(format!(
+        "mqk_task_m01_registry_{}_{}",
+        std::process::id(),
+        Uuid::new_v4()
+    ));
+    std::fs::create_dir_all(&dir).expect("create m01 registry dir");
+
+    let instruments_path = dir.join("instruments.json");
+    std::fs::write(
+        &instruments_path,
+        format!(
+            r#"[
+  {{
+    "instrument_id": "equity:US:{sym}",
+    "symbol": "{sym}",
+    "asset_class": "equity",
+    "provider": "{prov}",
+    "provider_symbol": "{sym}",
+    "venue": "TEST",
+    "currency": "USD",
+    "enabled": true,
+    "timeframes": ["5m"],
+    "notes": "AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D3-SUPERVISOR-AND-CRITICAL-OUTCOME-CLOSURE-01 m01 fixture"
+  }}
+]"#,
+            sym = M01_SYMBOL,
+            prov = M01_PROVIDER,
+        ),
+    )
+    .expect("write m01 instruments fixture");
+
+    let providers_path = dir.join("providers.json");
+    std::fs::write(
+        &providers_path,
+        format!(
+            r#"[
+  {{
+    "provider_id": "{prov}",
+    "display_name": "M01 Test Provider",
+    "asset_classes": ["equity"],
+    "free_tier_available": true,
+    "api_key_required": false,
+    "credential_env_vars": [],
+    "rate_limit_notes": "",
+    "supported_timeframes": ["5m"],
+    "historical_depth_notes": "",
+    "realtime_support_notes": "",
+    "licensing_notes": "",
+    "implementation_status": "test",
+    "enabled": true,
+    "verification_status": "test",
+    "docs_url": ""
+  }}
+]"#,
+            prov = M01_PROVIDER,
+        ),
+    )
+    .expect("write m01 providers fixture");
+
+    std::env::set_var(INSTRUMENT_REGISTRY_PATH_ENV, &instruments_path);
+    std::env::set_var(PROVIDER_REGISTRY_PATH_ENV, &providers_path);
+}
+
+/// The exact five completed 5m end_ts values the strict readiness gate
+/// expects at the fixture instants — computed via the same production
+/// calendar-walk the gate itself uses, never hand-derived.
+fn m01_expected_bar_window() -> Vec<i64> {
+    let calendar_provider = state::market_calendar::NyseWeekdaysProvider;
+    let now = m01_t1_prepare();
+    let schedule = state::market_calendar::resolve_market_session_schedule(&calendar_provider, now);
+    mqk_daemon::daily_data_readiness::expected_intraday_end_ts_window(
+        &calendar_provider,
+        &schedule,
+        now.timestamp(),
+        M01_TIMEFRAME_SECS,
+        0,
+        M01_REQUIRED_BARS,
+    )
+    .expect("m01 expected 5m window resolves")
+}
+
+async fn m01_seed_bars(pool: &sqlx::PgPool, expected_ts: &[i64]) {
+    for &end_ts in expected_ts {
+        sqlx::query(
+            r#"
+            insert into md_bars (
+              symbol, timeframe, end_ts, open_micros, high_micros, low_micros,
+              close_micros, volume, is_complete, provider_id, provider_source,
+              provider_symbol, ingest_mode, ingested_at
+            ) values ($1,$2,$3,100000000,100000000,100000000,100000000,1000000,true,
+                      $4,$4,$1,'historical_sync',$5)
+            "#,
+        )
+        .bind(M01_SYMBOL)
+        .bind(M01_TIMEFRAME)
+        .bind(end_ts)
+        .bind(M01_PROVIDER)
+        .bind(
+            Utc.timestamp_opt(end_ts + 60, 0)
+                .single()
+                .expect("valid ingested_at ts"),
+        )
+        .execute(pool)
+        .await
+        .expect("seed m01 bar insert failed");
+    }
+}
+
+/// Loopback in-process HTTP server satisfying the Alpaca paper REST surface
+/// the canonical start requires (`GET /v2/account/activities/FILL` -> `[]`).
+/// No real network request ever leaves the machine.
+async fn m01_start_mock_alpaca_server() -> String {
+    let app = axum::Router::new().route(
+        "/v2/account/activities/FILL",
+        axum::routing::get(|| async { axum::Json(serde_json::json!([])) }),
+    );
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move {
+        let _ = axum::serve(listener, app).await;
+    });
+    format!("http://127.0.0.1:{}", addr.port())
+}
+
+fn m01_clear_env() {
+    reset_env();
+    for var in [
+        "MQK_DAEMON_DEPLOYMENT_MODE",
+        "MQK_DAEMON_ADAPTER_ID",
+        "ALPACA_API_KEY_PAPER",
+        "ALPACA_API_SECRET_PAPER",
+        "ALPACA_PAPER_BASE_URL",
+        "MQK_DATA_READINESS_GRACE_SECS",
+        "MQK_DATA_READINESS_FUTURE_SKEW_SECS",
+        "MQK_INTRADAY_BAR_MAX_AGE_SECS",
+        "MQK_PAPER_WATCHLIST_PATH",
+        "MQK_SESSION_START_HH_MM",
+        "MQK_SESSION_STOP_HH_MM",
+    ] {
+        std::env::remove_var(var);
+    }
+}
+
+async fn m01_pool() -> sqlx::PgPool {
+    let url = std::env::var(mqk_db::ENV_DB_URL).unwrap_or_else(|_| {
+        panic!(
+            "m01 requires MQK_DATABASE_URL; run with --include-ignored against the isolated \
+             test Postgres"
+        )
+    });
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&url)
+        .await
+        .expect("m01 connect failed");
+    mqk_db::migrate(&pool).await.expect("m01 migrate failed");
+
+    sqlx::query("DELETE FROM runtime_leader_lease WHERE id = 1")
+        .execute(&pool)
+        .await
+        .expect("cleanup runtime_leader_lease");
+    sqlx::query("DELETE FROM runtime_control_state WHERE id = 1")
+        .execute(&pool)
+        .await
+        .expect("cleanup runtime_control_state");
+    sqlx::query("DELETE FROM sys_arm_state WHERE sentinel_id = 1")
+        .execute(&pool)
+        .await
+        .expect("cleanup sys_arm_state");
+    sqlx::query("DELETE FROM runs WHERE engine_id = 'mqk-daemon'")
+        .execute(&pool)
+        .await
+        .expect("cleanup daemon runs");
+    sqlx::query("DELETE FROM sys_reconcile_status_state")
+        .execute(&pool)
+        .await
+        .expect("cleanup sys_reconcile_status_state");
+    sqlx::query("DELETE FROM broker_event_cursor WHERE adapter_id = 'alpaca'")
+        .execute(&pool)
+        .await
+        .expect("cleanup broker_event_cursor");
+    sqlx::query("DELETE FROM md_bars WHERE symbol = $1 AND timeframe = $2")
+        .bind(M01_SYMBOL)
+        .bind(M01_TIMEFRAME)
+        .execute(&pool)
+        .await
+        .expect("cleanup m01 md_bars");
+    sqlx::query("DELETE FROM strategy_signal_evaluations WHERE symbol = $1")
+        .bind(M01_SYMBOL)
+        .execute(&pool)
+        .await
+        .expect("cleanup m01 signal evaluations");
+    sqlx::query(
+        "DELETE FROM sys_autonomous_daily_operation_events WHERE operation_id IN \
+         (SELECT operation_id FROM sys_autonomous_daily_operations WHERE adapter_id = $1)",
+    )
+    .bind(M01_ADAPTER_ID)
+    .execute(&pool)
+    .await
+    .expect("cleanup m01 operation events");
+    sqlx::query(
+        "DELETE FROM sys_autonomous_daily_bar_dispatches WHERE operation_id IN \
+         (SELECT operation_id FROM sys_autonomous_daily_operations WHERE adapter_id = $1)",
+    )
+    .bind(M01_ADAPTER_ID)
+    .execute(&pool)
+    .await
+    .expect("cleanup m01 bar dispatches");
+    sqlx::query("DELETE FROM sys_autonomous_daily_operations WHERE adapter_id = $1")
+        .bind(M01_ADAPTER_ID)
+        .execute(&pool)
+        .await
+        .expect("cleanup m01 operations");
+    sqlx::query(
+        "INSERT INTO sys_strategy_registry \
+         (strategy_id, display_name, enabled, kind, registered_at_utc, updated_at_utc, note) \
+         VALUES ($1, 'Intraday Scalper', true, 'bar_driven', NOW(), NOW(), 'task-m01-fixture') \
+         ON CONFLICT (strategy_id) DO UPDATE SET enabled = true, updated_at_utc = NOW()",
+    )
+    .bind(M01_STRATEGY)
+    .execute(&pool)
+    .await
+    .expect("upsert intraday_scalper for m01");
+
+    pool
+}
+
+async fn m01_daemon_state() -> Arc<AppState> {
+    let mock_url = m01_start_mock_alpaca_server().await;
+    m01_write_registries();
+    std::env::set_var("MQK_DAEMON_DEPLOYMENT_MODE", "paper");
+    std::env::set_var("MQK_DAEMON_ADAPTER_ID", M01_ADAPTER_ID);
+    std::env::set_var("ALPACA_API_KEY_PAPER", "test-paper-key");
+    std::env::set_var("ALPACA_API_SECRET_PAPER", "test-paper-secret");
+    std::env::set_var("ALPACA_PAPER_BASE_URL", &mock_url);
+    std::env::set_var(STRATEGY_IDS_ENV, M01_STRATEGY);
+    std::env::set_var(STRATEGY_SYMBOL_ENV, M01_SYMBOL);
+    std::env::set_var(STRATEGY_TIMEFRAME_ENV, M01_TIMEFRAME);
+    std::env::set_var("MQK_DATA_READINESS_GRACE_SECS", "0");
+    std::env::set_var("MQK_DATA_READINESS_FUTURE_SKEW_SECS", "60");
+    std::env::remove_var("MQK_PAPER_WATCHLIST_PATH");
+    std::env::remove_var("MQK_SESSION_START_HH_MM");
+    std::env::remove_var("MQK_SESSION_STOP_HH_MM");
+    // Provider authorization deliberately absent -> Disabled: the exact
+    // expected bar is already local, so authorization must never matter.
+    std::env::remove_var(REFRESH_ENABLED_ENV);
+    std::env::remove_var(ALLOW_PROVIDER_CALLS_ENV);
+
+    let pool = m01_pool().await;
+    let expected_bars = m01_expected_bar_window();
+    assert_eq!(expected_bars.len(), M01_REQUIRED_BARS);
+    m01_seed_bars(&pool, &expected_bars).await;
+    let latest_bar_end_ts = *expected_bars.last().expect("non-empty window");
+    // The legacy market_data_freshness gate compares bar age against the
+    // real wall clock; raise its bound just enough for the fixed synthetic
+    // latest bar (bounded, never unbounded/negative).
+    let legacy_max_age_secs = (Utc::now().timestamp() - latest_bar_end_ts).max(0) + 3600;
+    std::env::set_var(
+        "MQK_INTRADAY_BAR_MAX_AGE_SECS",
+        legacy_max_age_secs.to_string(),
+    );
+
+    let st = Arc::new(AppState::new_with_db_and_operator_auth(
+        pool,
+        state::OperatorAuthMode::ExplicitDevNoToken,
+    ));
+    st.set_daily_data_readiness_clock_override_for_test(Some(m01_t_start()))
+        .await;
+
+    let live_cursor = mqk_broker_alpaca::types::AlpacaFetchCursor::live(
+        None,
+        "alpaca:task-m01:start",
+        "2026-01-01T00:00:00Z",
+    );
+    let cursor_json =
+        mqk_broker_alpaca::encode_fetch_cursor(&live_cursor).expect("encode live cursor");
+    mqk_db::advance_broker_cursor(
+        st.db.as_ref().expect("db must be set"),
+        "alpaca",
+        &cursor_json,
+        Utc::now(),
+    )
+    .await
+    .expect("persist live broker cursor for m01");
+    st.update_ws_continuity(state::AlpacaWsContinuityState::Live {
+        last_message_id: "alpaca:task-m01:start".to_string(),
+        last_event_at: "2026-01-01T00:00:00Z".to_string(),
+    })
+    .await;
+    {
+        let mut broker = st.broker_snapshot.write().await;
+        *broker = Some(mqk_schemas::BrokerSnapshot {
+            captured_at_utc: Utc::now(),
+            account: mqk_schemas::BrokerAccount {
+                equity: "100000".to_string(),
+                cash: "100000".to_string(),
+                currency: "USD".to_string(),
+            },
+            orders: vec![],
+            fills: vec![],
+            positions: vec![],
+        });
+    }
+    {
+        let mut execution = st.execution_snapshot.write().await;
+        *execution = Some(mqk_runtime::observability::ExecutionSnapshot {
+            run_id: None,
+            active_orders: vec![],
+            pending_outbox: vec![],
+            recent_inbox_events: vec![],
+            portfolio: mqk_runtime::observability::PortfolioSnapshot {
+                cash_micros: 0,
+                realized_pnl_micros: 0,
+                positions: vec![],
+            },
+            system_block_state: None,
+            recent_risk_denials: vec![],
+            snapshot_at_utc: Utc::now(),
+            has_recent_terminal_fill: false,
+            risk_engine_sticky_halt: mqk_execution::RiskEngineHaltStatus::Unavailable,
+        });
+    }
+    st
+}
+
+async fn m01_signal_evaluation_count(pool: &sqlx::PgPool) -> i64 {
+    sqlx::query_scalar("select count(*) from strategy_signal_evaluations where symbol = $1")
+        .bind(M01_SYMBOL)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+async fn m01_dispatch_claim_count(pool: &sqlx::PgPool, operation_id: Uuid) -> i64 {
+    sqlx::query_scalar(
+        "select count(*) from sys_autonomous_daily_bar_dispatches where operation_id = $1",
+    )
+    .bind(operation_id)
+    .fetch_one(pool)
+    .await
+    .unwrap()
+}
+
+async fn m01_md_bars_count(pool: &sqlx::PgPool) -> i64 {
+    sqlx::query_scalar("select count(*) from md_bars where symbol = $1 and timeframe = $2")
+        .bind(M01_SYMBOL)
+        .bind(M01_TIMEFRAME)
+        .fetch_one(pool)
+        .await
+        .unwrap()
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+async fn m01_task_level_prepare_to_running_exactly_once() {
+    use mqk_daemon::state::autonomous_completed_bar_driver::AutonomousStrategyDispatchRuntimeTruth;
+    use mqk_daemon::state::autonomous_daily_coordinator::{
+        tick_autonomous_daily_coordinator, AutonomousDailyCoordinatorTickInput,
+        AutonomousDailyCoordinatorTickOutcome,
+    };
+
+    let st = m01_daemon_state().await;
+    {
+        let mut ig = st.integrity.write().await;
+        ig.disarmed = false;
+        ig.halted = false;
+    }
+    let pool = st.db.clone().expect("m01: db must be configured");
+    mqk_db::persist_arm_state_canonical(&pool, mqk_db::ArmState::Armed, None)
+        .await
+        .expect("m01: persist ARMED failed");
+
+    let expected_bars = m01_expected_bar_window();
+    let expected_ts = *expected_bars.last().unwrap();
+    let market_date = chrono::NaiveDate::from_ymd_opt(2024, 4, 15).unwrap();
+
+    // ── Step 1: durable pre-runtime operation, created by the real
+    // coordinator at a pre-preopen instant (no readiness evaluation yet). ──
+    let pre_outcome = tick_autonomous_daily_coordinator(AutonomousDailyCoordinatorTickInput {
+        state: &st,
+        now_utc: m01_pre_preopen(),
+    })
+    .await
+    .expect("m01: pre-preopen tick must not error");
+    assert_eq!(
+        pre_outcome,
+        AutonomousDailyCoordinatorTickOutcome::WaitingForPreopen
+    );
+    let operation = mqk_db::fetch_autonomous_daily_operation_for_slot(
+        &pool,
+        market_date,
+        "PAPER",
+        M01_ADAPTER_ID,
+    )
+    .await
+    .expect("m01: fetch operation failed")
+    .expect("m01: operation row must exist");
+    assert_eq!(operation.state, mqk_db::STATE_AWAITING_PREOPEN);
+    assert!(m01_pre_preopen() < operation.preopen_start_utc);
+
+    // ── Step 2: PrepareDataOnly through the production adapter — the exact
+    // canonical local bar is observed; zero claims, zero strategy calls. ──
+    assert_eq!(m01_signal_evaluation_count(&pool).await, 0);
+    let outcome1 = tick_autonomous_completed_bar_driver_from_state(&st, m01_t1_prepare())
+        .await
+        .expect("m01: prepare tick ok");
+    match outcome1 {
+        AutonomousCompletedBarProductionTickOutcome::DriverOutcome {
+            operation_id,
+            mode,
+            outcome,
+        } => {
+            assert_eq!(operation_id, operation.operation_id);
+            assert_eq!(mode, AutonomousCompletedBarDriverMode::PrepareDataOnly);
+            assert_eq!(
+                outcome,
+                AutonomousCompletedBarDriverOutcome::BarObserved {
+                    bar_end_ts: expected_ts
+                },
+                "the exact canonical local bar must be observed in PrepareDataOnly"
+            );
+        }
+        other => panic!("m01: expected PrepareDataOnly DriverOutcome, got {other:?}"),
+    }
+    assert_eq!(
+        m01_dispatch_claim_count(&pool, operation.operation_id).await,
+        0,
+        "preparation must create zero dispatch claims"
+    );
+    assert_eq!(
+        m01_signal_evaluation_count(&pool).await,
+        0,
+        "preparation must invoke zero strategy evaluations"
+    );
+    let after_prepare =
+        mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation.operation_id)
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(after_prepare.last_completed_bar_ts, Some(expected_ts));
+    assert_eq!(after_prepare.bars_observed, 1);
+    assert_eq!(after_prepare.bars_dispatched, 0);
+
+    // ── Step 3: canonical runtime start via the real durable coordinator. ──
+    let mut started_run_id = None;
+    for _ in 0..6 {
+        let outcome = tick_autonomous_daily_coordinator(AutonomousDailyCoordinatorTickInput {
+            state: &st,
+            now_utc: m01_t_start(),
+        })
+        .await
+        .expect("m01: start-path tick must not error");
+        if let AutonomousDailyCoordinatorTickOutcome::Started { run_id } = outcome {
+            started_run_id = Some(run_id);
+            break;
+        }
+    }
+    let run_id = started_run_id.expect("m01: coordinator must reach Started");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    let running = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation.operation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(running.state, mqk_db::STATE_RUNNING);
+    assert_eq!(running.run_id, Some(run_id));
+    assert_eq!(
+        st.autonomous_strategy_dispatch_runtime_truth().await,
+        AutonomousStrategyDispatchRuntimeTruth::Active { run_id },
+        "the native bootstrap must be active after the canonical runtime start"
+    );
+
+    // ── Step 4: RunningDispatch through the production adapter — the same
+    // observed bar is dispatched exactly once. ──
+    let outcome2 = tick_autonomous_completed_bar_driver_from_state(&st, m01_t2_dispatch())
+        .await
+        .expect("m01: dispatch tick ok");
+    match outcome2 {
+        AutonomousCompletedBarProductionTickOutcome::DriverOutcome {
+            operation_id,
+            mode,
+            outcome,
+        } => {
+            assert_eq!(operation_id, operation.operation_id);
+            assert_eq!(mode, AutonomousCompletedBarDriverMode::RunningDispatch);
+            assert_eq!(
+                outcome,
+                AutonomousCompletedBarDriverOutcome::DispatchCompleted {
+                    bar_end_ts: expected_ts
+                },
+                "the exact observed bar must dispatch once after the canonical start"
+            );
+        }
+        other => panic!("m01: expected RunningDispatch DriverOutcome, got {other:?}"),
+    }
+    assert_eq!(
+        m01_dispatch_claim_count(&pool, operation.operation_id).await,
+        1,
+        "exactly one durable dispatch claim"
+    );
+    assert_eq!(
+        m01_signal_evaluation_count(&pool).await,
+        1,
+        "exactly one strategy dispatch invocation"
+    );
+    let claim = mqk_db::fetch_autonomous_daily_bar_dispatch(
+        &pool,
+        operation.operation_id,
+        M01_SYMBOL,
+        M01_TIMEFRAME,
+        expected_ts,
+    )
+    .await
+    .unwrap();
+    assert!(claim.is_some(), "the completed durable claim must exist");
+    let after_dispatch =
+        mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation.operation_id)
+            .await
+            .unwrap()
+            .unwrap();
+    assert_eq!(after_dispatch.bars_dispatched, 1);
+
+    // ── Step 5: the next production-adapter tick returns already-dispatched
+    // truth with zero second strategy invocation. ──
+    let outcome3 = tick_autonomous_completed_bar_driver_from_state(&st, m01_t3_repeat())
+        .await
+        .expect("m01: repeat tick ok");
+    match outcome3 {
+        AutonomousCompletedBarProductionTickOutcome::DriverOutcome { outcome, mode, .. } => {
+            assert_eq!(mode, AutonomousCompletedBarDriverMode::RunningDispatch);
+            assert!(
+                matches!(
+                    outcome,
+                    AutonomousCompletedBarDriverOutcome::AlreadyDispatched { .. }
+                ),
+                "a repeated tick must return already-dispatched truth, got {outcome:?}"
+            );
+        }
+        other => panic!("m01: expected repeat DriverOutcome, got {other:?}"),
+    }
+    assert_eq!(
+        m01_dispatch_claim_count(&pool, operation.operation_id).await,
+        1,
+        "no second dispatch claim"
+    );
+    assert_eq!(
+        m01_signal_evaluation_count(&pool).await,
+        1,
+        "no second strategy invocation"
+    );
+
+    // ── Step 6: zero side effects — no provider call, no historical sync or
+    // ingest (md_bars unchanged), no orders. ──
+    let final_op = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation.operation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        final_op.provider_poll_attempt_count, 0,
+        "zero provider poll attempts across the entire sequence"
+    );
+    assert_eq!(
+        m01_md_bars_count(&pool).await,
+        M01_REQUIRED_BARS as i64,
+        "no ingest/sync side effect: md_bars holds exactly the seeded evidence"
+    );
+    let outbox_count: i64 = sqlx::query_scalar("select count(*) from oms_outbox where run_id = $1")
+        .bind(run_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(outbox_count, 0, "zero paper/live orders");
+
+    st.stop_for_shutdown().await;
+    m01_clear_env();
 }

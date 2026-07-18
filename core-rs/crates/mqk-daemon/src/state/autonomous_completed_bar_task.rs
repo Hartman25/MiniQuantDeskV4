@@ -27,22 +27,30 @@
 //! # Task ownership
 //!
 //! At most one completed-bar task may be active per `AppState`
-//! (`AppState::completed_bar_task_claimed`, a `compare_exchange`-guarded
+//! (`AppState::completed_bar_task.claimed`, a `compare_exchange`-guarded
 //! atomic). A second `spawn_autonomous_completed_bar_driver_task` call while
 //! one is active returns `AlreadyRunning` and spawns no second Tokio task.
-//! The claim is released only when the supervised task permanently ends
-//! (expected cancellation, or restart-budget exhaustion).
+//! One retained ownership record (`CompletedBarSupervisorHandles`: the
+//! monitor `JoinHandle` plus the core `AbortHandle`) is installed as part of
+//! the same coherent spawn operation and cleared only on terminal teardown.
 //!
 //! # Supervision and restart
+//! (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D3-SUPERVISOR-AND-CRITICAL-OUTCOME-CLOSURE-01)
 //!
-//! `run_supervised_completed_bar_worker` awaits the inner cadence-loop
-//! worker's `JoinHandle`. An expected cancellation (the worker returns
-//! `Stopped`) ends the task cleanly with no restart and no failure alert. An
-//! unexpected exit or panic (`Err(JoinError)`, or any other returned
-//! liveness) increments a bounded restart counter, sends one warning-level
-//! notification, and restarts after a bounded delay (30s / 60s / 120s).
-//! After 3 restarts the task reports `Failed`, sends exactly one critical
-//! notification, and does not restart again.
+//! Monitor-wrapper architecture: the supervisor *core*
+//! (`run_supervised_completed_bar_worker_with_policy`) runs each worker
+//! attempt inline under `catch_unwind` and returns a typed
+//! `AutonomousCompletedBarSupervisorExit`; the outer *monitor*
+//! (`run_completed_bar_supervisor_monitor`) awaits the core's `JoinHandle`,
+//! classifies normal cancellation / restart-budget exhaustion / core panic
+//! at the task boundary, applies final truth exactly once (including the
+//! REPAIR 4 durable operation degrade and the single critical
+//! notification for a permanent failure), and releases the cancel sender,
+//! retained handle, and spawn claim on every terminal path. An unexpected
+//! worker exit or panic restarts after a bounded policy delay (production:
+//! 30s / 60s / 120s); the final failing attempt is never counted as a
+//! successful restart, so the production budget is exhausted at
+//! `restart_count == 3` after exactly 4 worker generations.
 //!
 //! # Legacy ticker disposition
 //!
@@ -52,12 +60,15 @@
 //! production-cutover source guards in
 //! `tests/scenario_autonomous_completed_bar_task_01.rs`.
 
+use std::panic::AssertUnwindSafe;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
+use futures_util::FutureExt;
 use tokio::sync::{watch, Mutex, RwLock};
+use tokio::task::{AbortHandle, JoinHandle};
 use tracing::warn;
 use uuid::Uuid;
 
@@ -70,7 +81,10 @@ use super::autonomous_completed_bar_driver::{
     ProductionAutonomousAssignmentReadinessEvaluator,
     ProductionAutonomousLatestBarProviderResolver,
 };
-use super::autonomous_daily_coordinator::apply_completed_bar_driver_outcome;
+use super::autonomous_daily_coordinator::{
+    apply_completed_bar_adapter_blocker, apply_completed_bar_driver_outcome,
+    apply_completed_bar_task_permanent_failure, driver_setup_rejection_label,
+};
 use super::autonomous_daily_operation::{
     derive_assignment_identity, derive_runtime_binding_identity,
 };
@@ -235,9 +249,24 @@ pub async fn tick_autonomous_completed_bar_driver_from_state(
         );
     };
 
+    // AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D3-SUPERVISOR-AND-CRITICAL-OUTCOME-
+    // CLOSURE-01 (REPAIR 7): `IdentityUnresolved` and `RegistryUnavailable`
+    // are non-recoverable manual/configuration blockers, not merely
+    // process-local task outcomes — each is durably applied to the relevant
+    // operation via the coordinator's shared critical-blocker edge before
+    // being returned. Details are bounded static codes only (REPAIR 8);
+    // registry/filesystem payload text is never persisted.
     let assignment_config = match crate::state::build_multi_symbol_runtime_config_from_env() {
         Ok(config) => config,
         Err(_err) => {
+            apply_completed_bar_adapter_blocker(
+                &pool,
+                &operation,
+                "completed_bar_identity_unresolved",
+                "reason_code=assignment_resolution_unavailable",
+                now_utc,
+            )
+            .await?;
             return Ok(
                 AutonomousCompletedBarProductionTickOutcome::IdentityUnresolved {
                     operation_id: operation.operation_id,
@@ -250,6 +279,14 @@ pub async fn tick_autonomous_completed_bar_driver_from_state(
     let runtime_context = match resolve_autonomous_runtime_context(state).await {
         Ok(ctx) => ctx,
         Err(_err) => {
+            apply_completed_bar_adapter_blocker(
+                &pool,
+                &operation,
+                "completed_bar_identity_unresolved",
+                "reason_code=runtime_binding_resolution_unavailable",
+                now_utc,
+            )
+            .await?;
             return Ok(
                 AutonomousCompletedBarProductionTickOutcome::IdentityUnresolved {
                     operation_id: operation.operation_id,
@@ -262,6 +299,14 @@ pub async fn tick_autonomous_completed_bar_driver_from_state(
     let instruments = match load_driver_instruments(&state.instrument_registry_path) {
         Ok(instruments) => instruments,
         Err(rejection) => {
+            apply_completed_bar_adapter_blocker(
+                &pool,
+                &operation,
+                "completed_bar_registry_unavailable",
+                &format!("rejection={}", driver_setup_rejection_label(&rejection)),
+                now_utc,
+            )
+            .await?;
             return Ok(
                 AutonomousCompletedBarProductionTickOutcome::RegistryUnavailable {
                     operation_id: operation.operation_id,
@@ -436,14 +481,32 @@ impl Default for AutonomousCompletedBarTaskTruth {
     }
 }
 
+/// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D3-SUPERVISOR-AND-CRITICAL-OUTCOME-
+/// CLOSURE-01 (REPAIR 1): the exactly-one retained ownership record for the
+/// live supervisor task. `monitor` is the outer monitor task's `JoinHandle`
+/// (the completion handle shutdown awaits); `core_abort` aborts the
+/// supervisor-core task — and, because each worker attempt runs inline
+/// inside that same core task under `catch_unwind`, aborting the core also
+/// aborts any in-flight tick. Installed atomically with the spawn claim
+/// (under the `supervisor_task` mutex) and cleared only by the monitor's
+/// own teardown or by the bounded shutdown path — a finished task can never
+/// leave a stale live handle, and a stale generation can never clear or
+/// replace a newer one (the claim is released strictly after the handle
+/// slot is cleared, so no newer handle can exist while an older owner is
+/// still tearing down).
+pub(super) struct CompletedBarSupervisorHandles {
+    pub(super) monitor: JoinHandle<()>,
+    pub(super) core_abort: AbortHandle,
+}
+
 /// Process-local, per-`AppState` task runtime handles. Constructed once by
-/// [`AppState::new_completed_bar_task_runtime_for_test`]/`new_inner` and
-/// never reconstructed for the lifetime of the process.
+/// `new_inner` and never reconstructed for the lifetime of the process.
 #[derive(Clone)]
 pub struct AutonomousCompletedBarTaskRuntime {
     pub(super) truth: Arc<RwLock<AutonomousCompletedBarTaskTruth>>,
     pub(super) claimed: Arc<AtomicBool>,
     pub(super) cancel: Arc<Mutex<Option<watch::Sender<bool>>>>,
+    pub(super) supervisor_task: Arc<Mutex<Option<CompletedBarSupervisorHandles>>>,
 }
 
 impl Default for AutonomousCompletedBarTaskRuntime {
@@ -452,6 +515,7 @@ impl Default for AutonomousCompletedBarTaskRuntime {
             truth: Arc::new(RwLock::new(AutonomousCompletedBarTaskTruth::default())),
             claimed: Arc::new(AtomicBool::new(false)),
             cancel: Arc::new(Mutex::new(None)),
+            supervisor_task: Arc::new(Mutex::new(None)),
         }
     }
 }
@@ -481,7 +545,8 @@ pub enum AutonomousCompletedBarTaskSpawnOutcome {
 /// - valid task cadence (`MQK_AUTONOMOUS_COMPLETED_BAR_TICK_SECS`)
 ///
 /// A second call while one task is already active returns `AlreadyRunning`
-/// and spawns no second Tokio task (atomic `compare_exchange` claim below).
+/// and spawns no second Tokio task (atomic `compare_exchange` claim inside
+/// [`spawn_supervised_completed_bar_task`]).
 pub async fn spawn_autonomous_completed_bar_driver_task(
     state: Arc<AppState>,
 ) -> AutonomousCompletedBarTaskSpawnOutcome {
@@ -498,6 +563,42 @@ pub async fn spawn_autonomous_completed_bar_driver_task(
         Err(_) => return AutonomousCompletedBarTaskSpawnOutcome::InvalidConfiguration,
     };
 
+    spawn_supervised_completed_bar_task(
+        state,
+        cadence,
+        AutonomousCompletedBarRestartPolicy::production(),
+        |state, generation| {
+            move || {
+                let state = Arc::clone(&state);
+                async move {
+                    run_one_production_tick(state, generation).await;
+                }
+            }
+        },
+    )
+    .await
+}
+
+/// REPAIR 1: the one coherent spawn operation shared by production and the
+/// test seam. Claims the single-task slot, installs the cancellation
+/// sender, spawns the supervisor core, and — under the `supervisor_task`
+/// mutex, so the monitor's own teardown can never observe a half-installed
+/// slot — spawns the outer monitor and installs the retained handles. The
+/// claim, cancel sender, and handle slot are released only by the monitor's
+/// terminal teardown (every exit path: expected cancellation, restart-
+/// budget exhaustion, supervisor panic, bounded shutdown abort) — never by
+/// this function after a successful spawn.
+async fn spawn_supervised_completed_bar_task<F, Tick, Fut>(
+    state: Arc<AppState>,
+    cadence: Duration,
+    policy: AutonomousCompletedBarRestartPolicy,
+    tick_factory: F,
+) -> AutonomousCompletedBarTaskSpawnOutcome
+where
+    F: Fn(Arc<AppState>, u64) -> Tick + Send + 'static,
+    Tick: Fn() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
     if state
         .completed_bar_task
         .claimed
@@ -510,25 +611,51 @@ pub async fn spawn_autonomous_completed_bar_driver_task(
     let (cancel_tx, cancel_rx) = watch::channel(false);
     *state.completed_bar_task.cancel.lock().await = Some(cancel_tx);
 
-    let worker_state = Arc::clone(&state);
-    tokio::spawn(async move {
-        run_supervised_completed_bar_worker(
-            worker_state,
+    let core_state = Arc::clone(&state);
+    let core_handle = tokio::spawn(async move {
+        run_supervised_completed_bar_worker_with_policy(
+            core_state,
             cadence,
             cancel_rx,
-            |state, generation| {
-                move || {
-                    let state = Arc::clone(&state);
-                    async move {
-                        run_one_production_tick(state, generation).await;
-                    }
-                }
-            },
+            policy,
+            tick_factory,
         )
-        .await;
+        .await
     });
+    let core_abort = core_handle.abort_handle();
+
+    {
+        let mut slot = state.completed_bar_task.supervisor_task.lock().await;
+        let monitor_state = Arc::clone(&state);
+        let monitor = tokio::spawn(run_completed_bar_supervisor_monitor(
+            monitor_state,
+            core_handle,
+        ));
+        *slot = Some(CompletedBarSupervisorHandles {
+            monitor,
+            core_abort,
+        });
+    }
 
     AutonomousCompletedBarTaskSpawnOutcome::Started
+}
+
+/// Test seam: the identical claim/install/supervise/monitor path production
+/// uses, with an injected cadence, restart policy, and tick factory. Named
+/// `_for_test` to signal intent; never called in production code (the
+/// production call site is [`spawn_autonomous_completed_bar_driver_task`]).
+pub async fn spawn_supervised_completed_bar_task_for_test<F, Tick, Fut>(
+    state: Arc<AppState>,
+    cadence: Duration,
+    policy: AutonomousCompletedBarRestartPolicy,
+    tick_factory: F,
+) -> AutonomousCompletedBarTaskSpawnOutcome
+where
+    F: Fn(Arc<AppState>, u64) -> Tick + Send + 'static,
+    Tick: Fn() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    spawn_supervised_completed_bar_task(state, cadence, policy, tick_factory).await
 }
 
 async fn run_one_production_tick(state: Arc<AppState>, generation: u64) {
@@ -604,31 +731,115 @@ async fn record_tick_error(
 }
 
 // ---------------------------------------------------------------------------
-// D3.8/D3.9 — supervised worker loop
+// D3.8/D3.9 — supervised worker loop (core), typed terminal result, and the
+// outer monitor (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D3-SUPERVISOR-AND-
+// CRITICAL-OUTCOME-CLOSURE-01 REPAIRS 1/2/3)
 // ---------------------------------------------------------------------------
 
-/// Bounded maximum worker restarts per daemon process.
-const MAX_WORKER_RESTARTS: u32 = 3;
-/// Bounded restart delay schedule, indexed by `restart_count - 1`.
-const RESTART_DELAYS_SECS: [u64; 3] = [30, 60, 120];
+/// REPAIR 3: bounded worker-restart policy. Production is fixed and
+/// immutable (`production()`: 3 restarts, 30s/60s/120s delays); tests
+/// inject zero/millisecond delays so the full budget-exhaustion path is
+/// behaviorally provable without waiting out 210 wall-clock seconds.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutonomousCompletedBarRestartPolicy {
+    pub max_restarts: u32,
+    pub delays: Vec<Duration>,
+}
+
+impl AutonomousCompletedBarRestartPolicy {
+    /// The bounded, immutable production policy.
+    pub fn production() -> Self {
+        Self {
+            max_restarts: 3,
+            delays: vec![
+                Duration::from_secs(30),
+                Duration::from_secs(60),
+                Duration::from_secs(120),
+            ],
+        }
+    }
+
+    /// Delay before restart number `restart_count` (1-based). Indexes the
+    /// schedule by `restart_count - 1`, clamping to the final entry.
+    pub fn delay_for_restart(&self, restart_count: u32) -> Duration {
+        let idx = restart_count.saturating_sub(1) as usize;
+        self.delays
+            .get(idx)
+            .or_else(|| self.delays.last())
+            .copied()
+            .unwrap_or(Duration::ZERO)
+    }
+}
+
+/// REPAIR 2: the supervisor core's typed terminal truth. The core itself
+/// never applies permanent-failure truth, sends the critical notification,
+/// or releases the claim — the outer monitor does exactly one of those
+/// per task lifetime, from this result (or from the core's own
+/// `JoinError`), so a panic inside the core can never skip terminal
+/// handling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AutonomousCompletedBarSupervisorExit {
+    /// Expected cancellation (shutdown signal, or the cancel sender was
+    /// dropped): liveness `Stopped`, no critical notification.
+    Cancelled,
+    /// The bounded restart budget is exhausted: the monitor applies
+    /// permanent failure exactly once.
+    RestartBudgetExhausted,
+}
 
 /// Cancellation-aware, bounded-cadence tick loop, supervised for unexpected
-/// worker exit or panic with a bounded restart budget. `tick_factory` builds
-/// a fresh per-tick closure for each restart attempt (given the attempt's
-/// generation number), so a test can inject deterministic panics/errors
-/// without touching `AppState`'s production tick adapter at all.
-///
-/// Required per-restart-attempt order: capture `Utc::now()` once inside the
-/// tick closure itself -> production adapter -> typed outcome handling ->
-/// task-truth update. Ordinary tick errors are contained inside the tick
-/// closure and never panic this loop; only a genuine worker panic or
-/// unexpected exit reaches this function's own supervision.
+/// worker exit or panic with the production restart policy. `tick_factory`
+/// builds a fresh per-tick closure for each restart attempt (given the
+/// attempt's generation number), so a test can inject deterministic
+/// panics/errors without touching `AppState`'s production tick adapter at
+/// all. See [`run_supervised_completed_bar_worker_with_policy`] for the
+/// injected-policy variant and the full contract.
 pub async fn run_supervised_completed_bar_worker<Tick, Fut>(
     state: Arc<AppState>,
     cadence: Duration,
-    mut cancel_rx: watch::Receiver<bool>,
+    cancel_rx: watch::Receiver<bool>,
     tick_factory: impl Fn(Arc<AppState>, u64) -> Tick,
-) where
+) -> AutonomousCompletedBarSupervisorExit
+where
+    Tick: Fn() -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = ()> + Send + 'static,
+{
+    run_supervised_completed_bar_worker_with_policy(
+        state,
+        cadence,
+        cancel_rx,
+        AutonomousCompletedBarRestartPolicy::production(),
+        tick_factory,
+    )
+    .await
+}
+
+/// REPAIR 1/2/3: the supervisor core. Each worker attempt runs *inline in
+/// this same task* under `catch_unwind` (never a detached `tokio::spawn`),
+/// so a tick panic is contained and classified here as an unexpected worker
+/// exit, and aborting this core task also aborts any in-flight tick — a
+/// bounded shutdown can never leave a detached worker running.
+///
+/// Restart accounting (REPAIR 3): the final failing attempt is never
+/// counted as a successful restart. With the production budget of 3, the
+/// sequence is: initial worker -> panic -> restart 1 -> panic -> restart 2
+/// -> panic -> restart 3 -> panic -> `RestartBudgetExhausted`, with
+/// `restart_count == 3` and exactly 4 worker generations attempted — never
+/// a fifth worker.
+///
+/// This core sets per-generation `Stopped` liveness on expected
+/// cancellation (kept for direct-call test compatibility; the monitor's
+/// terminal application is idempotent over it) but never applies `Failed`
+/// truth, never notifies permanent failure, and never releases the claim —
+/// REPAIR 2 assigns all of that to the outer monitor exactly once.
+pub async fn run_supervised_completed_bar_worker_with_policy<Tick, Fut>(
+    state: Arc<AppState>,
+    cadence: Duration,
+    mut cancel_rx: watch::Receiver<bool>,
+    policy: AutonomousCompletedBarRestartPolicy,
+    tick_factory: impl Fn(Arc<AppState>, u64) -> Tick,
+) -> AutonomousCompletedBarSupervisorExit
+where
     Tick: Fn() -> Fut + Send + 'static,
     Fut: std::future::Future<Output = ()> + Send + 'static,
 {
@@ -640,11 +851,12 @@ pub async fn run_supervised_completed_bar_worker<Tick, Fut>(
         let on_tick = tick_factory(Arc::clone(&state), generation);
         let config = AutonomousCompletedBarDriverTaskConfig::new(cadence);
         let worker_cancel_rx = cancel_rx.clone();
-        let handle = tokio::spawn(async move {
-            run_bounded_cadence_task(config, worker_cancel_rx, on_tick).await
-        });
 
-        match handle.await {
+        let attempt = AssertUnwindSafe(run_bounded_cadence_task(config, worker_cancel_rx, on_tick))
+            .catch_unwind()
+            .await;
+
+        match attempt {
             Ok(AutonomousCompletedBarDriverTaskLiveness::Stopped) => {
                 // Expected cancellation: no restart, no failure alert.
                 set_liveness_if_current_generation(
@@ -653,49 +865,152 @@ pub async fn run_supervised_completed_bar_worker<Tick, Fut>(
                     AutonomousCompletedBarDriverTaskLiveness::Stopped,
                 )
                 .await;
-                break;
+                return AutonomousCompletedBarSupervisorExit::Cancelled;
             }
             Ok(_) | Err(_) => {
+                // REPAIR 3: check the budget *before* counting, so the
+                // final failing attempt is never recorded as a fourth
+                // successful restart.
+                if restart_count >= policy.max_restarts {
+                    return AutonomousCompletedBarSupervisorExit::RestartBudgetExhausted;
+                }
                 restart_count += 1;
                 record_restart_attempt(&state.completed_bar_task.truth, generation, restart_count)
                     .await;
+                notify_worker_restart(
+                    &state,
+                    environment.clone(),
+                    restart_count,
+                    policy.max_restarts,
+                )
+                .await;
 
-                if restart_count > MAX_WORKER_RESTARTS {
+                let delay = policy.delay_for_restart(restart_count);
+                let sleep = tokio::time::sleep(delay);
+                tokio::pin!(sleep);
+                let cancelled_mid_delay = loop {
+                    tokio::select! {
+                        _ = &mut sleep => break false,
+                        changed = cancel_rx.changed() => {
+                            match changed {
+                                Ok(()) if *cancel_rx.borrow() => break true,
+                                // Spurious non-cancel change: keep waiting
+                                // out the remaining delay.
+                                Ok(()) => {}
+                                // Sender dropped: no cancellation signal
+                                // will ever arrive — stop, mirroring
+                                // run_bounded_cadence_task's own contract.
+                                Err(_) => break true,
+                            }
+                        }
+                    }
+                };
+                if cancelled_mid_delay {
                     set_liveness_if_current_generation(
                         &state.completed_bar_task.truth,
                         generation,
-                        AutonomousCompletedBarDriverTaskLiveness::Failed,
+                        AutonomousCompletedBarDriverTaskLiveness::Stopped,
                     )
                     .await;
-                    notify_permanent_task_failure(&state, environment.clone()).await;
-                    break;
-                }
-
-                notify_worker_restart(&state, environment.clone(), restart_count).await;
-
-                let delay = Duration::from_secs(RESTART_DELAYS_SECS[(restart_count - 1) as usize]);
-                tokio::select! {
-                    _ = tokio::time::sleep(delay) => {}
-                    changed = cancel_rx.changed() => {
-                        if changed.is_ok() && *cancel_rx.borrow() {
-                            set_liveness_if_current_generation(
-                                &state.completed_bar_task.truth,
-                                generation,
-                                AutonomousCompletedBarDriverTaskLiveness::Stopped,
-                            )
-                            .await;
-                            break;
-                        }
-                    }
+                    return AutonomousCompletedBarSupervisorExit::Cancelled;
                 }
             }
         }
     }
+}
 
+/// REPAIR 1/2: the outer monitor. Awaits the supervisor-core `JoinHandle`,
+/// classifies its terminal result at the task boundary (a panic inside the
+/// core itself surfaces as `Err(JoinError::panic)` here — terminal handling
+/// never depends on the panicking task running its own cleanup), applies
+/// final truth exactly once, then tears down ownership in the one safe
+/// order: cancel sender first, retained handle second, claim last — so a
+/// new spawn can only claim the slot after every prior ownership record is
+/// already cleared.
+async fn run_completed_bar_supervisor_monitor(
+    state: Arc<AppState>,
+    core_handle: JoinHandle<AutonomousCompletedBarSupervisorExit>,
+) {
+    let failure_code: Option<&'static str> = match core_handle.await {
+        Ok(AutonomousCompletedBarSupervisorExit::Cancelled) => None,
+        Ok(AutonomousCompletedBarSupervisorExit::RestartBudgetExhausted) => {
+            Some("restart_budget_exhausted")
+        }
+        // The core was aborted — only the bounded shutdown path does this.
+        // Expected daemon shutdown must never be reported as failure.
+        Err(join_err) if join_err.is_cancelled() => None,
+        // The supervisor core itself panicked.
+        Err(_) => Some("supervisor_panicked"),
+    };
+
+    match failure_code {
+        None => {
+            let mut guard = state.completed_bar_task.truth.write().await;
+            guard.liveness = AutonomousCompletedBarDriverTaskLiveness::Stopped;
+        }
+        Some(error_code) => {
+            {
+                let mut guard = state.completed_bar_task.truth.write().await;
+                guard.liveness = AutonomousCompletedBarDriverTaskLiveness::Failed;
+                guard.last_error_code = Some(error_code);
+            }
+            // REPAIR 4: durable degradation first attempts a DB write; a
+            // failure there retains the process-local Failed truth set
+            // above and is reported honestly, without a retry loop.
+            apply_permanent_task_failure_durably(&state).await;
+            notify_permanent_task_failure(
+                &state,
+                Some(state.deployment_mode().as_api_label().to_string()),
+            )
+            .await;
+        }
+    }
+
+    *state.completed_bar_task.cancel.lock().await = None;
+    *state.completed_bar_task.supervisor_task.lock().await = None;
     state
         .completed_bar_task
         .claimed
         .store(false, Ordering::SeqCst);
+}
+
+/// REPAIR 4: durably degrade the one relevant daily operation for a
+/// permanently-failed completed-bar task, via the coordinator-owned helper.
+/// No DB configured, no relevant operation, or a failed durable write all
+/// leave the process-local `Failed` truth in place and are reported once —
+/// never retried in a loop.
+async fn apply_permanent_task_failure_durably(state: &Arc<AppState>) {
+    let Some(pool) = state.db.clone() else {
+        warn!(
+            reason_code = "database_not_configured",
+            "autonomous_completed_bar_task: permanent task failure could not be durably \
+             recorded (no runtime DB); process-local Failed truth retained"
+        );
+        return;
+    };
+    match apply_completed_bar_task_permanent_failure(state, &pool, Utc::now()).await {
+        Ok(Some(newly_applied)) => {
+            warn!(
+                newly_applied,
+                "autonomous_completed_bar_task: permanent task failure durably applied to the \
+                 relevant daily operation"
+            );
+        }
+        Ok(None) => {
+            warn!(
+                "autonomous_completed_bar_task: permanent task failure had no relevant durable \
+                 operation to degrade (none open, or its state is authoritative over this \
+                 blocker); process-local Failed truth retained"
+            );
+        }
+        Err(err) => {
+            warn!(
+                error = %err,
+                "autonomous_completed_bar_task: durable permanent-failure write failed; \
+                 process-local Failed truth retained (no retry loop)"
+            );
+        }
+    }
 }
 
 async fn bump_generation_and_set_running(
@@ -758,6 +1073,7 @@ async fn notify_worker_restart(
     state: &Arc<AppState>,
     environment: Option<String>,
     restart_count: u32,
+    max_restarts: u32,
 ) {
     warn!(
         restart_count,
@@ -770,7 +1086,7 @@ async fn notify_worker_restart(
             severity: "warning".to_string(),
             summary: format!(
                 "Autonomous completed-bar driver task exited unexpectedly; restart attempt \
-                 {restart_count} of {MAX_WORKER_RESTARTS} scheduled."
+                 {restart_count} of {max_restarts} scheduled."
             ),
             detail: None,
             environment,
@@ -781,25 +1097,112 @@ async fn notify_worker_restart(
 }
 
 // ---------------------------------------------------------------------------
-// D3.10 — graceful shutdown
+// D3.10 — graceful shutdown (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D3-
+// SUPERVISOR-AND-CRITICAL-OUTCOME-CLOSURE-01 REPAIR 6: cancel AND wait)
 // ---------------------------------------------------------------------------
 
+/// Bounded wait for the supervisor/monitor to finish an expected
+/// cancellation (covers a tick already in flight, e.g. one blocked on a DB
+/// call) before escalating to an abort.
+const SHUTDOWN_GRACEFUL_WAIT: Duration = Duration::from_secs(20);
+/// Bounded wait for the monitor's own teardown after the core is aborted.
+const SHUTDOWN_ABORT_WAIT: Duration = Duration::from_secs(5);
+
 impl AppState {
-    /// Request cancellation of the completed-bar task, if one is active.
-    /// A no-op when no task has ever been spawned. Called from the
-    /// daemon's existing shutdown path (`main.rs`) alongside
-    /// `stop_for_shutdown()` — this cancels the completed-bar task only; it
-    /// never touches the execution runtime.
-    pub async fn cancel_completed_bar_task_for_shutdown(&self) {
+    /// REPAIR 6: signal cancellation of the completed-bar task and wait for
+    /// the supervised task to actually finish before returning. A no-op
+    /// when no task has ever been spawned (or the task already ended and
+    /// tore itself down). Called from the daemon's shutdown path
+    /// (`main.rs`) strictly *before* `stop_for_shutdown()` — this concerns
+    /// the completed-bar task only; it never touches the execution runtime.
+    ///
+    /// After this method returns: no completed-bar tick can begin, no tick
+    /// remains in progress, the spawn claim is released, and the retained
+    /// supervisor handle is cleared. On the normal path the monitor
+    /// classified the cancellation and liveness is `Stopped`; a task that
+    /// had already permanently `Failed` before shutdown keeps its sticky
+    /// `Failed` truth (there is no live task in that case, so nothing waits).
+    ///
+    /// Bounded escalation, used only when the graceful wait expires:
+    /// abort the supervisor core (which also aborts any in-flight tick —
+    /// worker attempts run inline in the core task), wait for the monitor's
+    /// teardown; if even that expires, abort the monitor, await the abort's
+    /// completion, perform the teardown here, and record bounded shutdown
+    /// truth (`shutdown_abort_timeout`). No permanent-failure notification
+    /// is ever sent for an expected daemon shutdown on any of these paths.
+    pub async fn cancel_and_wait_completed_bar_task_for_shutdown(&self) {
         if let Some(tx) = self.completed_bar_task.cancel.lock().await.as_ref() {
             let _ = tx.send(true);
         }
+
+        let taken = self.completed_bar_task.supervisor_task.lock().await.take();
+        let Some(mut handles) = taken else {
+            return;
+        };
+
+        if tokio::time::timeout(SHUTDOWN_GRACEFUL_WAIT, &mut handles.monitor)
+            .await
+            .is_ok()
+        {
+            // Monitor completed: it applied terminal truth and released the
+            // cancel sender and claim itself.
+            return;
+        }
+
+        warn!(
+            "autonomous_completed_bar_task: graceful shutdown wait expired; aborting the \
+             supervisor core (bounded shutdown)"
+        );
+        handles.core_abort.abort();
+
+        if tokio::time::timeout(SHUTDOWN_ABORT_WAIT, &mut handles.monitor)
+            .await
+            .is_ok()
+        {
+            // Monitor observed the abort (JoinError::cancelled), classified
+            // it as an expected stop, and tore ownership down itself.
+            return;
+        }
+
+        // The monitor itself is stuck: abort it, wait for the abort to
+        // land, and perform its teardown here.
+        handles.monitor.abort();
+        let _ = (&mut handles.monitor).await;
+        *self.completed_bar_task.cancel.lock().await = None;
+        {
+            let mut guard = self.completed_bar_task.truth.write().await;
+            guard.liveness = AutonomousCompletedBarDriverTaskLiveness::Stopped;
+            guard.last_error_code = Some("shutdown_abort_timeout");
+        }
+        self.completed_bar_task
+            .claimed
+            .store(false, Ordering::SeqCst);
     }
 
     /// Read-only production/test seam: the current process-local
     /// completed-bar task truth.
     pub async fn completed_bar_task_truth(&self) -> AutonomousCompletedBarTaskTruth {
         self.completed_bar_task.truth.read().await.clone()
+    }
+
+    /// Test seam: whether the single-task spawn claim is currently held.
+    pub fn completed_bar_task_claimed_for_test(&self) -> bool {
+        self.completed_bar_task.claimed.load(Ordering::SeqCst)
+    }
+
+    /// Test seam: whether a retained supervisor handle is currently
+    /// installed.
+    pub async fn completed_bar_task_has_supervisor_handle_for_test(&self) -> bool {
+        self.completed_bar_task
+            .supervisor_task
+            .lock()
+            .await
+            .is_some()
+    }
+
+    /// Test seam: whether a cancellation sender is currently installed.
+    pub async fn completed_bar_task_has_cancel_sender_for_test(&self) -> bool {
+        self.completed_bar_task.cancel.lock().await.is_some()
     }
 
     /// Test seam: force the process-local completed-bar task truth's

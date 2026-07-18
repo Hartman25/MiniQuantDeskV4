@@ -214,11 +214,14 @@ async fn main() -> anyhow::Result<()> {
     axum::serve(tokio::net::TcpListener::bind(addr).await?, app)
         .with_graceful_shutdown(async move {
             let _ = tokio::signal::ctrl_c().await;
-            // D3.10: cancel the completed-bar task before/alongside the
-            // execution-runtime shutdown path — one authoritative
-            // cancellation sender, no detached worker left running.
+            // D3.10 (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D3-SUPERVISOR-AND-
+            // CRITICAL-OUTCOME-CLOSURE-01 REPAIR 6): signal cancellation of
+            // the completed-bar task AND await the supervised task's
+            // completion (bounded) before the execution-runtime shutdown
+            // path runs — no tick can begin or remain in progress once this
+            // returns, and no detached worker survives shutdown.
             shutdown_state
-                .cancel_completed_bar_task_for_shutdown()
+                .cancel_and_wait_completed_bar_task_for_shutdown()
                 .await;
             shutdown_state.stop_for_shutdown().await;
         })

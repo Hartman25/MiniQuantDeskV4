@@ -12824,3 +12824,247 @@ Bundle 3 (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-COMBINED): OPEN
 Next authorized patch after acceptance: Phase D4 — integrated autonomous
   lifecycle and task proof.
 ```
+
+---
+
+**Phase D3 completed-bar task supervision and critical-outcome closure
+(`AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D3-SUPERVISOR-AND-CRITICAL-OUTCOME-CLOSURE-01`,
+PENDING until committed).** Starting HEAD
+`7cff45928147740172ba5daa7226f084e497cf32` ("daemon: cut over to supervised
+completed-bar driver").
+
+**Mission.** Close the D3 supervision and critical-outcome gaps the cutover
+entry above carried forward: retain and supervise the completed-bar
+supervisor task itself; make shutdown cancel *and await* the task; release
+the single-task claim on every terminal path including supervisor panic;
+behaviorally prove the full restart budget and permanent-failure path;
+durably degrade the relevant daily operation on permanent task failure;
+keep permanent-failure truth operator-visible despite later
+session-controller ticks; durably classify every non-recoverable
+production-adapter and driver outcome with bounded details; and prove the
+production adapter's PrepareDataOnly → RunningDispatch exactly-once
+sequence end-to-end. Legacy-ticker cutover and all Phase C/D2 behavior
+preserved. D4 not started.
+
+**Supervision defects found in the starting HEAD (truth audit):**
+
+1. The spawned supervisor task was detached — `tokio::spawn(...)`'s
+   `JoinHandle` was dropped; no retained ownership record existed.
+2. `cancel_completed_bar_task_for_shutdown` was send-only; `main.rs`
+   proceeded to `stop_for_shutdown()` while a completed-bar tick could
+   still be in flight.
+3. Claim release and permanent-failure truth lived *after awaits inside
+   the same supervisor task* — a panic in the supervisor loop's own code
+   leaked the claim forever and froze liveness at `Running`.
+4. Restart accounting recorded the final failing attempt as
+   `restart_count = 4` (a fourth "restart" that never existed).
+5. Restart delays were hard 30s/60s/120s constants; the budget-exhaustion
+   path was never behaviorally proven (`h03` aborted early).
+6. Permanent failure set process-local truth only — the relevant durable
+   daily operation was never degraded.
+7. `CompletedBarDriverExited` was stored truth that the still-running
+   session controller's next `Started`/`Running`/manual-blocker projection
+   silently overwrote.
+8. Only the evidence/runtime-ownership driver outcomes were durably
+   applied; every manual/configuration blocker (`AuthorizationInvalid`,
+   `BindingBlocked`, `RegistryBlocked`, `Unsupported`,
+   `PollFailedTerminal`, `ProviderSetupBlocked`, `UnexpectedOrFutureBar`,
+   `ExchangeSessionTruthMissing`, non-remediable readiness blockers) fell
+   through a benign `_ => None` arm, and the adapter-level
+   `IdentityUnresolved`/`RegistryUnavailable` outcomes stayed
+   process-local.
+9. `EvidencePersistenceFailed.detail` (free-form) was persisted into
+   durable event detail.
+10. The task-level exactly-once proof was explicitly deferred by the
+    cutover entry.
+
+**REPAIR 1/2/3 — monitor-wrapper supervision
+(`state/autonomous_completed_bar_task.rs`):**
+`CompletedBarSupervisorHandles` (monitor `JoinHandle` + supervisor-core
+`AbortHandle`) is the exactly-one retained ownership record, installed
+under the `supervisor_task` mutex as part of the same coherent spawn
+operation (`spawn_supervised_completed_bar_task`, shared verbatim by
+production and the `_for_test` seam). The supervisor *core*
+(`run_supervised_completed_bar_worker_with_policy`) now runs each worker
+attempt **inline under `catch_unwind`** (never a detached inner
+`tokio::spawn`) — a tick panic is contained and classified as an
+unexpected worker exit, and aborting the core also aborts any in-flight
+tick — and returns typed
+`AutonomousCompletedBarSupervisorExit::{Cancelled, RestartBudgetExhausted}`.
+The outer *monitor* (`run_completed_bar_supervisor_monitor`) awaits the
+core's `JoinHandle`, classifies Cancelled / RestartBudgetExhausted /
+`JoinError::cancelled` (bounded shutdown abort → Stopped, never failure) /
+`JoinError::panic` (→ `supervisor_panicked`), applies final truth exactly
+once (the core never applies `Failed` truth or notifies), and tears down
+in the one safe order: cancel sender → retained handle → claim last, so a
+stale owner can never clear a newer handle and a finished task can never
+leave a stale live one. `AutonomousCompletedBarRestartPolicy` (production:
+`max_restarts = 3`, delays 30s/60s/120s, immutable) is injectable; the
+budget check now precedes the increment, so the final failing attempt is
+never counted: initial worker + 3 restarts = exactly 4 generations,
+`restart_count == 3`, no fifth worker — proven behaviorally with a
+zero-delay policy (`k01`).
+
+**REPAIR 4 — durable permanent-task-failure truth
+(`state/autonomous_daily_coordinator.rs::apply_completed_bar_task_permanent_failure`):**
+fetches the one relevant operation via the accepted bounded lookup
+(creates none when none exists), reason
+`completed_bar_task_permanently_failed`, full D1 blocker signature, one
+legal fail-closed edge via the shared applier: `running ->
+controller_degraded`; pre-runtime pollable state ->
+`manual_intervention_required`; already-degraded -> same-state blocker
+refresh; `stopping`/`stop_retrying`/`completed*` -> no lifecycle mutation.
+First application = one event, identical re-application = zero new events
+(`k03`). No provider/broker call, no runtime start/stop, no order, no
+outcome finalization. DB-unavailable or write failure retains
+process-local `Failed` truth and is reported once — no retry loop, no SQL
+text on operator surfaces.
+
+**REPAIR 5 — sticky operator failure truth
+(`AppState::autonomous_session_truth`):** when the completed-bar task's
+process-local liveness is `Failed`, the getter every status/alert surface
+consumes (`/api/v1/autonomous/readiness`, `/api/v1/autonomous/paper-status`,
+`/api/v1/alerts/active`, triage) returns `CompletedBarDriverExited`
+regardless of stored truth — `Running`/`Started`/`WaitingForPreopen`
+projections cannot hide it. New `stored_autonomous_session_truth` seam for
+writers/dedup; the session controller's WsGapPartialRecovery-preserving
+clear now reads stored truth so the overlay cannot mask a stored gap
+record. Expected shutdown (`Stopped`) never appears failed; only a later
+spawn whose worker is actually `Running` clears the overlay (`k02`,
+`k06`). No new route, no new response field.
+
+**REPAIR 6 — shutdown cancels AND waits
+(`AppState::cancel_and_wait_completed_bar_task_for_shutdown`, wired in
+`main.rs` before `stop_for_shutdown()`):** signal → take retained handles
+→ await monitor (bounded 20s) → on timeout abort the core (which aborts
+any in-flight tick) and await the monitor's teardown (bounded 5s) → on
+even that expiring, abort the monitor, await the abort, perform teardown
+here and record `shutdown_abort_timeout` bounded truth. No
+permanent-failure notification on any expected-shutdown path. After
+return: no tick can begin, no tick in progress, claim false, handle None
+(`k07`, `k08`; `i03` updated to assert the awaited call precedes
+`stop_for_shutdown`).
+
+**REPAIR 7/8 — complete typed critical-outcome classification with bounded
+details (`classify_completed_bar_driver_outcome`,
+`apply_completed_bar_critical_blocker`,
+`apply_completed_bar_adapter_blocker`):** one closed, exhaustive-by-
+construction classification of every `AutonomousCompletedBarDriverOutcome`
+— benign/waiting (NotApplicable, OutsideOperationWindow,
+AuthorizationDisabled, PollNotDue, PollSucceededNoNewBar,
+NoNewCompletedBar, ProviderLaggingExpectedBar, BarObserved,
+AlreadyDispatched, DispatchCompleted), transient (PollFailedTransient;
+task tick DB errors remain contained by the task loop), evidence blockers
+(DispatchClaimUnresolved, ObservedBarEvidenceInconsistent,
+ObservedBarSequenceInconsistent, EvidencePersistenceFailed → a running
+operation reaches `evidence_degraded`), runtime-ownership
+(RuntimeDispatchNotReady → `controller_degraded`), and
+manual/configuration blockers (ExchangeSessionTruthMissing,
+AuthorizationInvalid, BindingBlocked, RegistryBlocked, Unsupported,
+PollFailedTerminal, ProviderSetupBlocked, UnexpectedOrFutureBar → durable
+fail-closed truth once). Readiness-blocker vectors are classified by exact
+stable reason-code equality only: `expected_latest_bar_missing` (and an
+empty vector — transient db_unavailable/query_failed evaluations or a
+ready-but-newer-bar mismatch) stays benign; the first non-remediable code
+fails closed durably under its own readiness reason code, mirroring the
+coordinator's existing `classify_readiness_report` convention. The
+production adapter now durably applies `completed_bar_identity_unresolved`
+/ `completed_bar_registry_unavailable` before returning
+`IdentityUnresolved`/`RegistryUnavailable` (`l04`, `l05`). Every persisted
+detail is a static reason code / static rejection label plus bounded
+bar/numeric identity; the free-form payloads of
+`EvidencePersistenceFailed`, `PollFailedTerminal`, `Unsupported`,
+`AuthorizationInvalid`, and `AutonomousDriverSetupRejection` are never
+persisted (`l01`, `l02` prove the negative). The D1 blocker signature
+never carries free-form detail.
+
+**REPAIR 9 — task-level exactly-once proof (`m01`, DB-backed, ignored
+without `MQK_DATABASE_URL`):** AL-03-pattern fixture (synthetic canonical
+registries, exact-ready seeded `md_bars` evidence computed via the
+production calendar-walk, loopback mock Alpaca REST server, registered
+`intraday_scalper`, Live cursor, real durable coordinator) drives the
+production adapter itself: durable pre-runtime operation (coordinator tick
+at a pre-preopen instant) → `PrepareDataOnly` observes the exact canonical
+local bar with zero dispatch claims and zero strategy invocations →
+canonical runtime start via the real coordinator (`Started{run_id}`,
+operation `running` with matching `run_id`, native bootstrap `Active`) →
+`RunningDispatch` dispatches the exact same observed bar once
+(`DispatchCompleted`, one durable claim, one
+`strategy_signal_evaluations` row) → the next adapter tick returns
+`AlreadyDispatched` with zero second invocation. Proven side-effect-free:
+`provider_poll_attempt_count == 0`, `md_bars` row count unchanged (no
+sync/ingest), `oms_outbox == 0` for the run, provider authorization
+disabled throughout, loopback only.
+
+**Test changes (`scenario_autonomous_completed_bar_task_01.rs`, now 48
+tests):** new groups K (`k01`-`k08`: restart-budget exhaustion, stale-claim
+release, durable permanent-failure degrade + dedup, stopping/completed
+non-mutation, monitor-caught core panic with exactly one critical
+notification via a loopback alert-counting webhook, sticky failure truth
+vs controller projections, expected cancellation, shutdown-that-waits), L
+(`l01`-`l05`: durable manual-blocker degrades, bounded-detail negatives,
+transient containment, adapter-level identity/registry durable blockers),
+and M (`m01` above). `c04`/`c05` cut over to the awaited shutdown method;
+`d01` updated for the REPAIR 7 behavior change (a manual/configuration
+blocker on a bare fixture now durably degrades in the same tick; the
+fresh-snapshot-per-tick claim is proven via the degraded state being
+observed fresh, and the PrepareDataOnly→RunningDispatch mode freshness is
+now proven end-to-end by `m01`); `i03` asserts the new awaited call and
+its ordering before `stop_for_shutdown`.
+`scenario_autonomous_paper_day_lifecycle_auton12.rs`: fixture-hygiene only
+— AL-03's cleanup now deletes `sys_autonomous_daily_bar_dispatches` rows
+before operations (m01 shares the PAPER/alpaca slot and legitimately
+leaves a durable claim), no behavioral assertion changed.
+
+**Regressions (each binary run alone, `--include-ignored
+--test-threads=1`, isolated test Postgres on port 5434):**
+`scenario_autonomous_completed_bar_task_01` 48/48,
+`scenario_autonomous_completed_bar_driver_01` 56/56,
+`scenario_autonomous_daily_session_coordinator_01` 48/48,
+`scenario_autonomous_paper_day_lifecycle_auton12` 3/3,
+`scenario_daemon_runtime_lifecycle` 24/24,
+`scenario_autonomous_daily_coordinator_policy_01` 35/35,
+`scenario_autonomous_daily_operation_identity_01` 44/44,
+`scenario_daily_data_readiness_start_gate_01` 20/20,
+`scenario_native_strategy_bootstrap_daemon_b1b` 5/5,
+`scenario_autonomous_gate_parity_auton11` 5/5,
+`scenario_autonomous_daily_operation_lifecycle_01` (mqk-db) 36/36,
+`scenario_autonomous_daily_operation_store_01` (mqk-db) 26/26,
+`scenario_autonomous_daily_operation_data_evidence_01` (mqk-db) 8/8,
+`state::autonomous_bar_ticker::tests::` (`--lib`) 5/5. Zero required
+failures. The complete daemon integration suite was deliberately not run.
+
+**Guards:** `validate_autonomous_daily_paper_operations_01a_audit.ps1`
+pass, `validate_daily_data_readiness_01e_closure.ps1` pass,
+`check_unsafe_patterns.ps1` pass. **Migration:** none (no schema change
+required). **Format/lint:** `rustfmt --check` clean on every touched file;
+Clippy `-D warnings` clean on `mqk-daemon --lib` and both changed test
+binaries; `cargo check -p mqk-db -p mqk-runtime -p mqk-daemon` clean (only
+the pre-existing `sqlx-postgres` future-incompat note); `git diff --check`
+clean.
+
+**Internal review cycles:** one full cycle (truth audit → implementation →
+targeted validation → independent correctness review → independent
+scope/safety review), with three intra-cycle repairs caught by the new
+tests before any commit: (a) `d01` had always been producing
+`BindingBlocked`, not `ReadinessBlocked` — assertion corrected to the
+manual-blocker class; (b) `k02` initially asserted on stored truth rather
+than the overlay (the stored `CompletedBarDriverExited` legitimately
+persists until a controller clear — the overlay is what lifts); (c) the
+AL-03 fixture cleanup FK conflict above. Cycles 2-4 not required.
+
+```text
+D3 (SUPERVISOR-AND-CRITICAL-OUTCOME-CLOSURE-01): IMPLEMENTATION COMPLETE —
+  AWAITING CHATGPT AND OPERATOR ACCEPTANCE
+  — retained supervisor handle + outer monitor; full restart-exhaustion
+  proof (4 generations, restart_count 3, no fifth worker); claim release
+  on every exit including supervisor panic; shutdown cancels and awaits;
+  durable permanent-task-failure blocker with dedup; sticky
+  operator-visible failure truth; complete typed critical-outcome
+  classification with bounded details; task-level
+  prepare-to-running exactly-once proof landed (m01). D4 not started.
+Phase D: OPEN
+Bundle 3 (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-COMBINED): OPEN
+Next authorized patch after acceptance: Phase D4 — integrated autonomous
+  lifecycle and task proof.
+```

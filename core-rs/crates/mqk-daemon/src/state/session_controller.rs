@@ -303,9 +303,17 @@ async fn log_coordinator_outcome(
     // continues to show that non-fill lifecycle events from a prior gap
     // window remain permanently unrecoverable, even after a fresh
     // successful start/running observation.
+    //
+    // AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D3-SUPERVISOR-AND-CRITICAL-
+    // OUTCOME-CLOSURE-01 (REPAIR 5): this dedup check must read the
+    // *stored* truth, not the operator getter — otherwise a failed
+    // completed-bar task's read-surface overlay would mask a stored
+    // WsGapPartialRecovery and let this clear erase it. The overlay itself
+    // is unaffected either way: while task liveness is Failed, the getter
+    // keeps returning CompletedBarDriverExited regardless of this write.
     async fn clear_truth_preserving_gap_recovery(state: &Arc<AppState>) {
         if !matches!(
-            state.autonomous_session_truth().await,
+            state.stored_autonomous_session_truth().await,
             AutonomousSessionTruth::WsGapPartialRecovery { .. }
         ) {
             state.clear_autonomous_session_truth().await;

@@ -1091,111 +1091,288 @@ fn blocker_signature_for(
 // ---------------------------------------------------------------------------
 // AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D3-COMPLETED-BAR-TASK-CUTOVER-AND-SUPERVISION
 // D3.14 — durable critical completed-bar-driver outcome application
+//
+// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D3-SUPERVISOR-AND-CRITICAL-OUTCOME-
+// CLOSURE-01 (REPAIR 4/7/8): the original D3.14 applier only recognized the
+// evidence/runtime-ownership outcomes; every manual/configuration blocker
+// (invalid authorization, binding/registry rejection, terminal provider
+// rejection, provider-setup failure, unexpected/future bar, missing
+// exchange-session truth, non-remediable readiness blocker) fell through
+// the benign `_ => None` arm and never reached durable operator truth. This
+// closure adds one closed classification over every typed outcome, a
+// coordinator-owned durable permanent-task-failure helper, and bounds every
+// persisted detail to static reason codes plus bar/numeric identity — no
+// free-form provider/SQL/panic text is ever persisted as operator authority.
 // ---------------------------------------------------------------------------
 
-/// Durably degrade `operation` for a critical completed-bar-driver outcome
-/// (durable evidence/manual blocker, or runtime-ownership blocker). A
-/// benign/waiting or transient outcome is a no-op — this function never
-/// touches the DB for those. Never creates a completed-state transition,
-/// never starts/stops a runtime, never makes a provider/order call, and
-/// never duplicates the coordinator's own lifecycle-transition graph beyond
-/// the single fail-closed degrade edge each case requires:
-///
-/// - a `running` operation with evidence corruption or an unresolved
-///   dispatch claim degrades `running -> evidence_degraded`;
-/// - a `running` operation with a runtime-ownership mismatch degrades
-///   `running -> controller_degraded` (mirrors [`handle_running`]'s
-///   existing mismatched-run degrade target);
-/// - any other (pre-runtime) operation state degrades to the narrowest
-///   currently legal fail-closed state, `manual_intervention_required`
-///   (every `PrepareDataOnly`-eligible state has a legal edge to it).
-///
-/// Reuses the existing D1 typed blocker-signature machinery
-/// (`blocker_signature_for`) and the existing same-state-refresh-aware
-/// `apply_manual_if_changed` dedup helper — full blocker signature, one
-/// transition/event for a changed blocker, zero duplicate event for an
-/// unchanged one, no direct SQL in the caller (the completed-bar task
-/// module), and no completed-state transition reachable from this
-/// function. Returns `Ok(None)` for a benign/transient outcome, or
-/// `Ok(Some(newly_applied))` for a critical outcome.
-pub async fn apply_completed_bar_driver_outcome(
-    pool: &PgPool,
-    operation: &AutonomousDailyOperationRecord,
-    outcome: &super::autonomous_completed_bar_driver::AutonomousCompletedBarDriverOutcome,
-    now_utc: DateTime<Utc>,
-) -> anyhow::Result<Option<bool>> {
-    use super::autonomous_completed_bar_driver::AutonomousCompletedBarDriverOutcome as O;
+/// Which degrade edge a critical completed-bar blocker takes from a
+/// `running` operation. Evidence corruption/unresolved-claim truth degrades
+/// `running -> evidence_degraded`; every control-side blocker
+/// (runtime-ownership, manual/configuration, permanent task failure)
+/// degrades `running -> controller_degraded` (mirrors [`handle_running`]'s
+/// existing mismatched-run degrade target — `running ->
+/// manual_intervention_required` is not a legal edge).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompletedBarCriticalClass {
+    Evidence,
+    Control,
+}
 
-    let (reason_code, detail, is_runtime_ownership): (&'static str, String, bool) = match outcome {
-        O::DispatchClaimUnresolved { status } => (
-            "completed_bar_dispatch_claim_unresolved",
-            format!("dispatch claim status={status}"),
-            false,
-        ),
+/// REPAIR 7 (closed classification): what one typed completed-bar driver
+/// outcome means for durable operation truth. Constructed only by
+/// [`classify_completed_bar_driver_outcome`]; never parsed from rendered
+/// text.
+enum CompletedBarOutcomeDisposition {
+    /// Benign/waiting or transient — zero DB writes, zero transitions.
+    NoDurableEffect,
+    /// A critical blocker that must reach durable operation truth once.
+    Critical {
+        class: CompletedBarCriticalClass,
+        fault_class: &'static str,
+        detail: String,
+    },
+}
+
+/// Static label for an [`AutonomousBindingRejection`] — never carries
+/// operator-config text.
+fn binding_rejection_label(
+    rejection: &super::autonomous_completed_bar_driver::AutonomousBindingRejection,
+) -> &'static str {
+    use super::autonomous_completed_bar_driver::AutonomousBindingRejection as R;
+    match rejection {
+        R::AssignmentIdentityMismatch => "assignment_identity_mismatch",
+        R::RuntimeBindingIdentityMismatch => "runtime_binding_identity_mismatch",
+        R::BlankTargetSymbol => "blank_target_symbol",
+        R::BlankStrategyId => "blank_strategy_id",
+        R::MissingTimeframeBinding => "missing_timeframe_binding",
+        R::UnsupportedTimeframe => "unsupported_timeframe",
+        R::MultiSymbolAssignmentNotExactlyBound => "multi_symbol_assignment_not_exactly_bound",
+    }
+}
+
+/// Static label for an [`AutonomousDriverSetupRejection`] — the free-form
+/// path/IO/registry payload each variant carries is deliberately dropped
+/// (REPAIR 8: no filesystem/registry text as operator authority).
+pub(super) fn driver_setup_rejection_label(
+    rejection: &super::autonomous_completed_bar_driver::AutonomousDriverSetupRejection,
+) -> &'static str {
+    use super::autonomous_completed_bar_driver::AutonomousDriverSetupRejection as R;
+    match rejection {
+        R::InstrumentRegistryUnavailable(_) => "instrument_registry_unavailable",
+        R::InstrumentRegistryInvalid(_) => "instrument_registry_invalid",
+        R::ProviderRegistryUnavailable(_) => "provider_registry_unavailable",
+        R::ProviderUnknownOrDisabled(_) => "provider_unknown_or_disabled",
+        R::ProviderConstructionFailed(_) => "provider_construction_failed",
+    }
+}
+
+/// REPAIR 7: classify a readiness-blocker vector by exact stable
+/// reason-code equality only (never substring/regex/display text).
+///
+/// `expected_latest_bar_missing` is the one wait-for-condition code the
+/// completed-bar path can legitimately remain in (the bar simply has not
+/// been published/ingested yet) — same convention as
+/// [`classify_readiness_report`]'s `LatestCompletedBarPending`. An empty
+/// vector means the evaluation itself could not name a blocker
+/// (`db_unavailable`/`query_failed` readiness states, or a ready-but-newer-
+/// bar mismatch after a poll) — transient, never a durable degrade. Any
+/// other code is non-remediable by waiting and fails closed durably; the
+/// first such code becomes the blocker's own fault class, mirroring
+/// [`classify_readiness_report`]'s use of the readiness module's closed
+/// reason-code set.
+fn first_non_remediable_readiness_blocker(blockers: &[&'static str]) -> Option<&'static str> {
+    blockers
+        .iter()
+        .copied()
+        .find(|b| *b != crate::daily_data_readiness::REASON_EXPECTED_LATEST_BAR_MISSING)
+}
+
+/// REPAIR 7: one closed, source-grounded classification of every
+/// [`AutonomousCompletedBarDriverOutcome`]. Exhaustive by construction — a
+/// new outcome variant fails compilation here rather than silently landing
+/// in a benign default.
+fn classify_completed_bar_driver_outcome(
+    outcome: &super::autonomous_completed_bar_driver::AutonomousCompletedBarDriverOutcome,
+) -> CompletedBarOutcomeDisposition {
+    use super::autonomous_completed_bar_driver::AutonomousCompletedBarDriverOutcome as O;
+    use CompletedBarCriticalClass as Class;
+    use CompletedBarOutcomeDisposition as D;
+
+    match outcome {
+        // Benign/waiting: no lifecycle transition.
+        O::NotApplicable { .. }
+        | O::OutsideOperationWindow
+        | O::AuthorizationDisabled
+        | O::PollNotDue
+        | O::PollSucceededNoNewBar
+        | O::NoNewCompletedBar
+        | O::ProviderLaggingExpectedBar { .. }
+        | O::BarObserved { .. }
+        | O::AlreadyDispatched { .. }
+        | O::DispatchCompleted { .. } => D::NoDurableEffect,
+
+        // Transient: retried on a later tick, no manual lifecycle transition.
+        O::PollFailedTransient { .. } => D::NoDurableEffect,
+
+        // Evidence blockers: a running operation reaches evidence_degraded.
+        O::DispatchClaimUnresolved { status } => D::Critical {
+            class: Class::Evidence,
+            fault_class: "completed_bar_dispatch_claim_unresolved",
+            detail: format!("dispatch claim status={status}"),
+        },
         O::ObservedBarEvidenceInconsistent {
             expected_end_ts,
             reason_code,
-        } => (
-            "completed_bar_observed_evidence_inconsistent",
-            format!("expected_end_ts={expected_end_ts} reason_code={reason_code}"),
-            false,
-        ),
+        } => D::Critical {
+            class: Class::Evidence,
+            fault_class: "completed_bar_observed_evidence_inconsistent",
+            detail: format!("expected_end_ts={expected_end_ts} reason_code={reason_code}"),
+        },
         O::ObservedBarSequenceInconsistent {
             expected_end_ts,
             current_last_completed_bar_ts,
-        } => (
-            "completed_bar_observed_sequence_inconsistent",
-            format!(
+        } => D::Critical {
+            class: Class::Evidence,
+            fault_class: "completed_bar_observed_sequence_inconsistent",
+            detail: format!(
                 "expected_end_ts={expected_end_ts} \
                  current_last_completed_bar_ts={current_last_completed_bar_ts:?}"
             ),
-            false,
-        ),
-        O::EvidencePersistenceFailed { detail } => (
-            "completed_bar_evidence_persistence_failed",
-            detail.clone(),
-            false,
-        ),
-        O::RuntimeDispatchNotReady { reason_code } => (
-            "completed_bar_runtime_dispatch_not_ready",
-            format!("reason_code={reason_code}"),
-            true,
-        ),
-        _ => return Ok(None),
-    };
+        },
+        // REPAIR 8: the outcome's free-form persistence-failure detail is
+        // deliberately not persisted as operator authority.
+        O::EvidencePersistenceFailed { .. } => D::Critical {
+            class: Class::Evidence,
+            fault_class: "completed_bar_evidence_persistence_failed",
+            detail: "reason_code=completed_bar_evidence_persistence_failed".to_string(),
+        },
 
-    // D3.14 "already blocked/degraded operation" case: if `operation` (the
-    // caller's snapshot) is already one of the three degraded states this
-    // function itself ever targets, refresh in place rather than
-    // recomputing a fresh (and, for a non-`running` snapshot, different —
-    // `manual_intervention_required`) target. Production mode selection
-    // (`select_driver_mode_for_state`) never invokes the driver for an
-    // operation already in one of these states, so this branch is
-    // unreachable from the real per-tick call site; it exists so a
-    // caller re-observing the same critical outcome from an
-    // already-degraded snapshot (e.g. a delayed/duplicate apply) can never
-    // escalate a `running`-degrade target onto a snapshot that is no
-    // longer `running`.
+        // Runtime-ownership blocker: a running operation reaches
+        // controller_degraded.
+        O::RuntimeDispatchNotReady { reason_code } => D::Critical {
+            class: Class::Control,
+            fault_class: "completed_bar_runtime_dispatch_not_ready",
+            detail: format!("reason_code={reason_code}"),
+        },
+
+        // Manual/configuration blockers: durably applied fail-closed truth
+        // once. Details are static labels plus bounded bar/numeric identity
+        // only (REPAIR 8) — the free-form payloads some variants carry are
+        // dropped, never persisted.
+        O::ExchangeSessionTruthMissing => D::Critical {
+            class: Class::Control,
+            fault_class: "completed_bar_exchange_session_truth_missing",
+            detail: "reason_code=completed_bar_exchange_session_truth_missing".to_string(),
+        },
+        O::AuthorizationInvalid { reason_code, .. } => D::Critical {
+            class: Class::Control,
+            fault_class: "completed_bar_authorization_invalid",
+            detail: format!("flag={reason_code}"),
+        },
+        O::BindingBlocked { rejection } => D::Critical {
+            class: Class::Control,
+            fault_class: "completed_bar_binding_blocked",
+            detail: format!("rejection={}", binding_rejection_label(rejection)),
+        },
+        O::RegistryBlocked { rejection } => D::Critical {
+            class: Class::Control,
+            fault_class: "completed_bar_registry_blocked",
+            detail: format!("rejection={}", rejection.status_label()),
+        },
+        O::Unsupported { .. } => D::Critical {
+            class: Class::Control,
+            fault_class: "completed_bar_provider_unsupported",
+            detail: "reason_code=completed_bar_provider_unsupported".to_string(),
+        },
+        O::PollFailedTerminal { .. } => D::Critical {
+            class: Class::Control,
+            fault_class: "completed_bar_poll_failed_terminal",
+            detail: "reason_code=completed_bar_poll_failed_terminal".to_string(),
+        },
+        O::ProviderSetupBlocked { rejection } => D::Critical {
+            class: Class::Control,
+            fault_class: "completed_bar_provider_setup_blocked",
+            detail: format!("rejection={}", driver_setup_rejection_label(rejection)),
+        },
+        O::UnexpectedOrFutureBar {
+            returned_bar_ts,
+            expected_end_ts,
+        } => D::Critical {
+            class: Class::Control,
+            fault_class: "completed_bar_unexpected_or_future_bar",
+            detail: format!("returned_bar_ts={returned_bar_ts} expected_end_ts={expected_end_ts}"),
+        },
+
+        // Readiness blockers: exact reason-code equality only. A vector
+        // whose every code is wait-remediable (or an empty vector — a
+        // transient db_unavailable/query_failed evaluation, or a ready-but-
+        // newer-bar mismatch) stays benign; the first non-remediable code
+        // fails closed durably under its own readiness reason code.
+        O::ReadinessBlocked { blockers } | O::ReadinessBlockedAfterPoll { blockers } => {
+            match first_non_remediable_readiness_blocker(blockers) {
+                Some(blocker) => D::Critical {
+                    class: Class::Control,
+                    fault_class: blocker,
+                    detail: format!("reason_code={blocker}"),
+                },
+                None => D::NoDurableEffect,
+            }
+        }
+    }
+}
+
+/// Shared durable applier for every critical completed-bar blocker
+/// (driver-outcome, production-adapter, and permanent-task-failure paths).
+/// One legal fail-closed edge per call, full D1 typed blocker signature,
+/// same-state-refresh dedup, zero duplicate events for an unchanged
+/// blocker:
+///
+/// - `running` -> `evidence_degraded` (Evidence class) or
+///   `controller_degraded` (Control class);
+/// - a pre-runtime pollable state (`awaiting_preopen` / `preparing_data` /
+///   `awaiting_open` / `preflight_blocked` / `start_retrying`) ->
+///   `manual_intervention_required`;
+/// - an already manual/controller/evidence-degraded snapshot -> same-state
+///   blocker refresh in place (never a re-target);
+/// - `stopping` / `stop_retrying` / `completed*` / any other state -> no
+///   lifecycle mutation at all (stopping and terminal truth remain
+///   authoritative), returned as `Ok(None)`.
+///
+/// Never creates a completed-state transition, never starts/stops a
+/// runtime, and never makes a provider/broker/order call.
+async fn apply_completed_bar_critical_blocker(
+    pool: &PgPool,
+    operation: &AutonomousDailyOperationRecord,
+    class: CompletedBarCriticalClass,
+    fault_class: &'static str,
+    detail: &str,
+    now_utc: DateTime<Utc>,
+) -> anyhow::Result<Option<bool>> {
     let target_state = if operation.state == STATE_RUNNING {
-        if is_runtime_ownership {
-            mqk_db::STATE_CONTROLLER_DEGRADED
-        } else {
-            mqk_db::STATE_EVIDENCE_DEGRADED
+        match class {
+            CompletedBarCriticalClass::Evidence => mqk_db::STATE_EVIDENCE_DEGRADED,
+            CompletedBarCriticalClass::Control => mqk_db::STATE_CONTROLLER_DEGRADED,
         }
     } else {
         match operation.state.as_str() {
+            STATE_AWAITING_PREOPEN
+            | STATE_PREPARING_DATA
+            | STATE_AWAITING_OPEN
+            | STATE_PREFLIGHT_BLOCKED
+            | STATE_START_RETRYING => STATE_MANUAL_INTERVENTION_REQUIRED,
             mqk_db::STATE_MANUAL_INTERVENTION_REQUIRED => {
                 mqk_db::STATE_MANUAL_INTERVENTION_REQUIRED
             }
             mqk_db::STATE_CONTROLLER_DEGRADED => mqk_db::STATE_CONTROLLER_DEGRADED,
             mqk_db::STATE_EVIDENCE_DEGRADED => mqk_db::STATE_EVIDENCE_DEGRADED,
-            _ => STATE_MANUAL_INTERVENTION_REQUIRED,
+            // stopping / stop_retrying / completed* / calendar_unavailable /
+            // recovery_retrying / unknown: no lifecycle mutation — those
+            // states' own truth stays authoritative over this blocker.
+            _ => return Ok(None),
         }
     };
 
-    let reason = AutonomousCoordinatorReason::UnclassifiedFailClosed {
-        fault_class: reason_code,
-    };
+    let reason = AutonomousCoordinatorReason::UnclassifiedFailClosed { fault_class };
     let signature = blocker_signature_for(operation, &reason);
     let newly_applied = apply_manual_if_changed(
         pool,
@@ -1203,11 +1380,121 @@ pub async fn apply_completed_bar_driver_outcome(
         signature.reason_code,
         signature.stable_context.clone(),
         now_utc,
-        &detail,
+        detail,
         target_state,
     )
     .await?;
     Ok(Some(newly_applied))
+}
+
+/// Durably degrade `operation` for a critical completed-bar-driver outcome.
+/// A benign/waiting or transient outcome is a no-op — this function never
+/// touches the DB for those. Classification is the closed typed
+/// [`classify_completed_bar_driver_outcome`] map; application is the shared
+/// [`apply_completed_bar_critical_blocker`] edge (one transition/event for
+/// a changed blocker, zero duplicate events for an unchanged one, no
+/// direct SQL in the caller). Returns `Ok(None)` when nothing was applied,
+/// or `Ok(Some(newly_applied))` for a critical outcome that reached (or
+/// idempotently matched) durable truth.
+pub async fn apply_completed_bar_driver_outcome(
+    pool: &PgPool,
+    operation: &AutonomousDailyOperationRecord,
+    outcome: &super::autonomous_completed_bar_driver::AutonomousCompletedBarDriverOutcome,
+    now_utc: DateTime<Utc>,
+) -> anyhow::Result<Option<bool>> {
+    match classify_completed_bar_driver_outcome(outcome) {
+        CompletedBarOutcomeDisposition::NoDurableEffect => Ok(None),
+        CompletedBarOutcomeDisposition::Critical {
+            class,
+            fault_class,
+            detail,
+        } => {
+            apply_completed_bar_critical_blocker(
+                pool,
+                operation,
+                class,
+                fault_class,
+                &detail,
+                now_utc,
+            )
+            .await
+        }
+    }
+}
+
+/// REPAIR 7 (adapter-level critical truth): durably apply a production-
+/// adapter blocker that occurs before the Phase C driver can even be
+/// invoked (`IdentityUnresolved` — canonical assignment/runtime-binding
+/// resolution failed; `RegistryUnavailable` — the canonical instrument
+/// registry could not be loaded/validated). Both are control-side
+/// manual/configuration blockers; `detail` must already be bounded
+/// static-code text (the task module passes `reason_code=`/`rejection=`
+/// labels only, never registry/filesystem payloads).
+pub async fn apply_completed_bar_adapter_blocker(
+    pool: &PgPool,
+    operation: &AutonomousDailyOperationRecord,
+    fault_class: &'static str,
+    detail: &str,
+    now_utc: DateTime<Utc>,
+) -> anyhow::Result<Option<bool>> {
+    apply_completed_bar_critical_blocker(
+        pool,
+        operation,
+        CompletedBarCriticalClass::Control,
+        fault_class,
+        detail,
+        now_utc,
+    )
+    .await
+}
+
+/// Stable reason code for a permanently-failed completed-bar task (REPAIR 4).
+pub const REASON_COMPLETED_BAR_TASK_PERMANENTLY_FAILED: &str =
+    "completed_bar_task_permanently_failed";
+
+/// REPAIR 4: durably record that the supervised completed-bar task has
+/// permanently failed (restart budget exhausted, or supervisor panic) on
+/// the one currently relevant durable operation.
+///
+/// - Fetches the one relevant operation via the accepted bounded lookup;
+///   creates no operation when none exists (`Ok(None)`).
+/// - Applies one legal fail-closed transition via the shared applier:
+///   `running -> controller_degraded`; a pre-runtime pollable state ->
+///   `manual_intervention_required`; an already-degraded state -> same-
+///   state blocker refresh; `stopping`/`stop_retrying`/`completed*` -> no
+///   lifecycle mutation (stopping remains authoritative).
+/// - Uses the full D1 typed blocker signature and the same dedup as every
+///   other blocker: first application produces one event, an identical
+///   re-application produces zero new events.
+/// - Makes no provider call, no broker call, starts/stops no runtime,
+///   submits no order, and performs no outcome finalization.
+pub async fn apply_completed_bar_task_permanent_failure(
+    state: &Arc<AppState>,
+    pool: &PgPool,
+    now_utc: DateTime<Utc>,
+) -> anyhow::Result<Option<bool>> {
+    let deployment_mode = state.deployment_mode().as_db_mode();
+    let adapter_id = state.adapter_id().to_string();
+    let Some(operation) = mqk_db::fetch_relevant_open_autonomous_daily_operation(
+        pool,
+        deployment_mode,
+        &adapter_id,
+        now_utc,
+    )
+    .await?
+    else {
+        return Ok(None);
+    };
+
+    apply_completed_bar_critical_blocker(
+        pool,
+        &operation,
+        CompletedBarCriticalClass::Control,
+        REASON_COMPLETED_BAR_TASK_PERMANENTLY_FAILED,
+        "reason_code=completed_bar_task_permanently_failed",
+        now_utc,
+    )
+    .await
 }
 
 // ---------------------------------------------------------------------------
