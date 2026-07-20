@@ -44,14 +44,18 @@ Safety is enforced architecturally, not socially.
 MiniQuantDeskV4 has real institutional bones and a materially stronger proof posture than scaffold-stage trading repos.
 
 **Repository snapshot used for this update (2026-07-19):** local `main` at
-`8b8d388c7e2fdca7c850ecb436c2ebce4f329382`
-(`fix: close autonomous phase D integration`), plus the
-AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D4-EVALUATION-LINEAGE-AND-AUTONOMOUS-PREOPEN-CLOSURE-01
-patch on top of it (evaluation-lineage binding for completed-bar dispatch
-claims, corrected concurrency-decoy fixture, a real autonomous preopen
-proof replacing a manual-unstick workaround, and a supervised-task proof
-under an injected clock — implementation complete, awaiting ChatGPT and
-operator acceptance; see below).
+`544ec628708d0b8a5381aaaaef6c220af2f98253`
+(`fix: bind autonomous claims to evaluation lineage`), plus independent
+ChatGPT/operator acceptance of D4
+(integrated preopen-to-shutdown lifecycle proof and completed-bar
+dispatch-ownership race closure) and its evaluation-lineage repair
+(durable claim-to-evaluation binding, corrected fixtures, injected-clock
+supervised-task proof) together — **Phase D is now accepted complete in
+full** — plus the
+AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E1-DURABLE-OUTCOME-AUTHORITY-AND-EVIDENCE-CONTRACT
+patch on top of it (Phase E1: a read-only architecture audit producing the
+binding durable-outcome/no-trade contract for Phase E — no Phase E runtime
+code; see below).
 
 The strongest current operational route is:
 
@@ -68,9 +72,10 @@ What that means in plain English:
 - durable daily-operation identity, retry, recovery, and stop authority are implemented
 - production `main.rs` starts the supervised completed-bar task instead of the legacy blind-timer ticker; the legacy ticker (`state::autonomous_bar_ticker`) remains in source for compatibility tests only and is never spawned in production
 - D3 (completed-bar task terminal supervision, durable critical-outcome handling, task-level exactly-once proof) is accepted complete
-- D4 (integrated preopen-to-shutdown lifecycle proof, plus closing a confirmed completed-bar dispatch-ownership race against the ordinary execution loop) is implementation complete, awaiting ChatGPT and operator acceptance
-- a follow-on D4 repair (evaluation-lineage binding: a completed dispatch claim now durably records and confirms the exact strategy-evaluation row that proves it ran, never `None`; the completion write's outcome is honored instead of ignored; the concurrency proof's decoy fixture and the full-day preopen fixture were both corrected; a supervised-task proof under an injected clock was added) is also implementation complete, awaiting ChatGPT and operator acceptance
-- Bundle 3 is still **open** — D4 acceptance (both layers above), Phase E durable outcome/no-trade truth, GUI/runbook/soak preparation, and closure audit all remain
+- D4 (integrated preopen-to-shutdown lifecycle proof, plus closing a confirmed completed-bar dispatch-ownership race against the ordinary execution loop) is **accepted complete**
+- a follow-on D4 repair (evaluation-lineage binding: a completed dispatch claim now durably records and confirms the exact strategy-evaluation row that proves it ran, never `None`; the completion write's outcome is honored instead of ignored; the concurrency proof's decoy fixture and the full-day preopen fixture were both corrected; a supervised-task proof under an injected clock was added) is **accepted complete** — **Phase D is accepted complete in full**
+- Phase E1 (a read-only architecture audit producing the binding durable daily outcome/no-trade contract for Phase E) is implementation complete, awaiting ChatGPT and operator acceptance; no Phase E runtime code exists yet
+- Bundle 3 is still **open** — Phase E runtime implementation (E2–E5, durable outcome/no-trade classification and read-only API), GUI/runbook/soak preparation, and closure audit all remain
 - paper+paper is not treated as an authoritative execution path
 - backtest deployment through the daemon is intentionally refused fail-closed
 - live-shadow and live-capital remain outside the current operational finish line
@@ -82,14 +87,14 @@ Use these labels precisely:
 | Mode | Current posture | Meaning |
 |---|---|---|
 | **Supervised Paper + Alpaca** | Available for controlled validation | Credible current path after a clean proof run, valid env, Alpaca paper auth, and active operator supervision. |
-| **Autonomous Paper + Alpaca** | Pre-soak hardening — Bundle 3 open | The durable daily controller, completed-bar production cutover, and the D4 integrated lifecycle/dispatch-ownership proof are implemented; Bundle 3 still requires independent D4 acceptance, durable daily outcome/no-trade truth, operator/runbook preparation, and final closure before it should begin an unattended autonomous soak. Controlled autonomous Paper + Alpaca operation under active operator supervision is the current Bundle 3 target — not unattended soak. |
+| **Autonomous Paper + Alpaca** | Pre-soak hardening — Bundle 3 open | The durable daily controller, completed-bar production cutover, and the D4 integrated lifecycle/dispatch-ownership proof are implemented and **accepted** (Phase D accepted complete in full); Bundle 3 still requires durable daily outcome/no-trade truth (Phase E — the E1 contract audit is complete and awaiting acceptance; E2–E5 runtime implementation has not started), operator/runbook preparation, and final closure before it should begin an unattended autonomous soak. Controlled autonomous Paper + Alpaca operation under active operator supervision is the current Bundle 3 target — not unattended soak. |
 | **Live / live-capital** | Not ready | Typed support and gates exist, but this repo must not be treated as safe for unattended live trading. |
 
 ### Current Bundle 3 position
 
 `AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-COMBINED` is the active bundle.
 
-Already implemented and accepted (D1–D3):
+Already implemented and **accepted** (D1–D4, Phase D accepted complete in full):
 
 - authoritative session planning and durable daily-operation identity
 - restart-safe current-state and append-only transition evidence
@@ -99,25 +104,18 @@ Already implemented and accepted (D1–D3):
 - safe recovery and nontrading-day reconciliation
 - durable blocker signatures and operator-facing lifecycle truth
 - the production cutover from the legacy bar ticker to the supervised completed-bar task, with bounded restart, durable permanent-failure degradation, and sticky operator-visible task-failure truth
+- closed a confirmed completed-bar dispatch-ownership race: the completed-bar driver's durable claim dispatches through the exact-input strategy-dispatch seam directly instead of round-tripping through the shared account-wide pending-bar mailbox the ordinary execution loop also drains every tick, so a concurrent execution-loop tick can no longer cause a real evaluation to be recorded as a failed claim, plus a deterministic concurrency proof for that fix (both interleaving orderings) and one integrated scenario test driving a synthetic Paper+Alpaca day through preopen, canonical start, running dispatch, runtime interruption/recovery, session close, and shutdown together
+- a completed dispatch claim durably stores and confirms the exact `strategy_signal_evaluations` row that proves it ran (a shared deterministic identity helper, never a second algorithm); the completion write's `Ok(false)`/`Err` outcomes are honored via one authoritative re-read instead of being silently treated as success; the full-day lifecycle test's preopen phase resolves through real production readiness truth instead of a manual unstick workaround; a supervised-task proof under an injected clock
 
-Implemented on the local `main` worktree (D4), but not yet independently accepted as complete:
+Implemented on the local `main` worktree (Phase E1), but not yet independently accepted:
 
-- closed a confirmed completed-bar dispatch-ownership race: the completed-bar driver's durable claim now dispatches through the exact-input strategy-dispatch seam directly instead of round-tripping through the shared account-wide pending-bar mailbox the ordinary execution loop also drains every tick, so a concurrent execution-loop tick can no longer cause a real evaluation to be recorded as a failed claim
-- a deterministic concurrency proof for that fix (both interleaving orderings)
-- one integrated scenario test driving a synthetic Paper+Alpaca day through preopen, canonical start, running dispatch, runtime interruption/recovery, session close, and shutdown together for the first time
-
-Layered on top of D4, also implemented but not yet independently accepted (D4 evaluation-lineage repair):
-
-- a completed dispatch claim now durably stores and confirms the exact `strategy_signal_evaluations` row that proves it ran (a shared deterministic identity helper, never a second algorithm); a strategy callback result alone can no longer complete a claim without that durable confirmation
-- the completion write's `Ok(false)`/`Err` outcomes are honored via one authoritative re-read instead of being silently treated as success
-- the concurrency proof's decoy fixture now uses a genuinely distinct bar identity, not merely a distinct tick counter
-- the full-day lifecycle test's preopen phase now resolves through real production readiness truth (the correct previous-session tail bar window, seeded before the tick) instead of a manual `apply_transition` unstick workaround
-- a new test proves the supervised completed-bar task itself — not a direct adapter call — invokes the real production adapter under a controlled clock across preopen and running dispatch, then proves shutdown cancels and awaits that same task
+- a read-only architecture audit producing the binding contract for Phase E's durable daily outcome/no-trade classification: outcome authority, finalization eligibility, terminal-state semantics, activity/no-trade evidence hierarchies, an `unknown_insufficient_evidence` representation that requires no schema migration, evidence-conflict precedence, a restart/idempotency contract reusing the existing CAS transition machinery, a bounded reason-code matrix, a read-only API contract, a notification contract, and the narrow E2–E5 implementation decomposition
+- **no Phase E runtime code was written** — the classifier, coordinator wiring, and API routes remain E2/E3/E4's job
 
 Still required before Bundle 3 closes:
 
-1. independent ChatGPT/operator acceptance of D4 and its evaluation-lineage repair
-2. add Phase E durable end-of-day activity/no-trade outcome and read-only API truth
+1. independent ChatGPT/operator acceptance of the Phase E1 contract audit
+2. implement Phase E runtime (E2 classifier/finalization seam, E3 coordinator integration, E4 read-only API, E5 integrated proof and closure) per the accepted E1 contract
 3. finish Phase F GUI, runbook, and soak-evidence preparation
 4. complete Phase G closure audit and ledger reconciliation
 
@@ -307,8 +305,8 @@ Operationally, `MAIN` is the canonical engine.
 
 Be honest about the open edges.
 
-- Bundle 3 remains open; D4 (integrated lifecycle proof and dispatch-ownership race closure) and its follow-on evaluation-lineage repair (durable claim-to-evaluation binding, corrected fixtures, injected-clock supervised-task proof) are both implementation complete and are the immediate items awaiting independent ChatGPT/operator acceptance
-- durable daily outcome/no-trade classification (Phase E), final GUI/runbook/soak preparation (Phase F), and closure audit (Phase G) remain
+- Bundle 3 remains open; Phase D (D1–D4, integrated lifecycle proof and dispatch-ownership race closure plus the evaluation-lineage repair) is accepted complete in full; the Phase E1 contract audit (the binding durable outcome/no-trade contract) is implementation complete and is the immediate item awaiting independent ChatGPT/operator acceptance
+- durable daily outcome/no-trade classification runtime (Phase E2–E5, per the accepted E1 contract), final GUI/runbook/soak preparation (Phase F), and closure audit (Phase G) remain
 - Bundle 4 durable paper cash/positions/lots/cost basis/P&L truth has not started — this is required before trusting the accounting of any extended autonomous soak, not merely a nice-to-have
 - the current autonomous lane is long-only and single-symbol; multi-symbol rollout is deferred until after the soak
 - real paper order/fill/reconcile/Discord evidence is still incomplete
@@ -327,7 +325,7 @@ should not be called closed until Bundle 3 and its market evidence gates are com
 
 | Item | Status |
 |---|---|
-| BUNDLE-3-AUTONOMOUS-DAILY-OPS | Open — D4 acceptance, outcome/API, GUI/runbook/soak prep, and closure remain |
+| BUNDLE-3-AUTONOMOUS-DAILY-OPS | Open — Phase D accepted complete; Phase E1 contract audit awaiting acceptance; E2–E5 outcome/API runtime, GUI/runbook/soak prep, and closure remain |
 | PAPER-TRADE-LIFECYCLE-01 | Open — market-hours paper smoke with real fills |
 | RECONCILE-AFTER-REAL-FILL-01 | Open — reconcile pass after a real paper fill |
 | DISCORD-TRADE-LIFECYCLE-REAL-01 | Open — Discord notification evidence from a real cycle |

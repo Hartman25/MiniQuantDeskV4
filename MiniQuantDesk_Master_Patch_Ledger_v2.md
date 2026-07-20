@@ -13407,3 +13407,127 @@ PHASE D: OPEN pending independent acceptance of D4 and this repair together
 BUNDLE 3 (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-COMBINED): OPEN
 NEXT AFTER ACCEPTANCE: Phase E durable outcome/no-trade and API work
 ```
+
+---
+
+## AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D4-ACCEPTANCE
+
+Independent ChatGPT/operator acceptance was granted for D4
+(`AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D4-INTEGRATED-LIFECYCLE-PROOF-AND-
+PHASE-D-CLOSURE`) and its evaluation-lineage repair
+(`AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D4-EVALUATION-LINEAGE-AND-AUTONOMOUS-
+PREOPEN-CLOSURE-01`) together, closing Phase D in full. No code, test, or
+migration change accompanies this ledger update — it records an acceptance
+decision made outside this repository's own commit history, ahead of the
+next authorized phase (Phase E1) beginning.
+
+```text
+D1: ACCEPTED — COMPLETE
+D2: ACCEPTED — COMPLETE
+D3: ACCEPTED — COMPLETE
+D4: ACCEPTED — COMPLETE
+PHASE D: ACCEPTED — COMPLETE
+BUNDLE 3 (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-COMBINED): OPEN
+NEXT AUTHORIZED PHASE: Phase E — durable daily outcome/no-trade truth and
+  read-only API work, beginning with Phase E1 (audit/contract only)
+```
+
+---
+
+## AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E1-DURABLE-OUTCOME-AUTHORITY-AND-EVIDENCE-CONTRACT
+
+Starting HEAD: `544ec628708d0b8a5381aaaaef6c220af2f98253` ("fix: bind
+autonomous claims to evaluation lineage"). Read-only architecture audit plus
+a documentation/guard patch only — no production Rust file, test file, or
+migration is added or modified by this patch.
+
+**Mission:** produce the authoritative Phase E contract — outcome authority,
+finalization eligibility, terminal-state semantics, activity and no-trade
+evidence hierarchies, `unknown_insufficient_evidence` representation,
+evidence-conflict precedence, restart/idempotency contract, bounded
+reason-code matrix, read-only API contract, notification contract, and the
+narrow E2–E5 implementation decomposition — before any Phase E runtime code
+is written.
+
+**Key findings from the source audit** (full detail in the deliverable
+below): the durable schema Phase B already built
+(`sys_autonomous_daily_operations`, migration `0048`, plus boundary/stop/
+blocker columns in `0049`–`0052`) already reserves everything Phase E needs
+— the 16-value `state` enum already includes `completed`, `completed_no_
+trade`, and `completed_with_activity` as legal terminal values with legal
+transition edges from `stopping`/`stop_retrying`; `outcome`, `no_trade_
+reason`, and `finalized_at_utc` columns already exist. Repo-wide grep
+confirms **zero production call sites** ever write any of those three
+columns or transition an operation into a `completed*` state — the entire
+gap Phase E must close is the missing classifier and finalization caller,
+not new schema. `postclose_finalize_utc` is confirmed, by direct source
+read, to be a stop-retry escalation deadline (`effective_operation_close_
+utc + 15 minutes`), not an earliest-finalization-instant — finalization
+eligibility is instead gated on `stopped_at_utc IS NOT NULL` together with
+process-local no-active-runtime/no-active-completed-bar-task checks.
+`unknown_insufficient_evidence` is designed as a `state_reason_code` on the
+existing nonterminal `evidence_degraded` state, not a fourth terminal DB
+state — avoiding any migration in this bundle while keeping terminal
+outcomes permanently correction-proof per the existing transition graph.
+`no_trade_reason` is retired (never written by E2+) in favor of a single
+reason-code authority, `outcome`, to avoid two competing classification
+fields.
+
+**Deliverable:**
+`docs/specs/autonomous_daily_paper_operations_01e_outcome_truth_contract.md`
+— full current-truth inventory (§1), authority decisions (§2), finalization
+eligibility (§3), terminal-state semantics (§4), activity evidence
+hierarchy (§5), no-trade evidence hierarchy (§6), unknown-insufficient-
+evidence representation (§7), evidence precedence (§8), restart/idempotency
+contract (§9), bounded reason-code matrix (§10), read-only API contract
+(§11), notification contract (§12), E2–E5 implementation decomposition
+(§13), known limitations (§14), and explicit Phase F/G/Bundle 4 boundaries
+(§15).
+
+**Guard:** new
+`scripts/guards/validate_autonomous_daily_paper_operations_01e_outcome_contract.ps1`
+— fails when the contract document is missing, Bundle 3 is marked closed,
+Phase E is falsely marked implemented, `completed_no_trade` is defined from
+absence of fills alone, process-local counters are named as final outcome
+authority, `unknown_insufficient_evidence` is omitted, unresolved dispatch
+claims are allowed to become no-trade, `stopped_at_utc` is not required
+before finalization, or README claims the unattended soak has begun or
+live-capital readiness.
+
+**Files changed:** `MiniQuantDesk_Master_Patch_Ledger_v2.md`, `README.md`,
+`README_TECHNICAL.md`,
+`docs/specs/autonomous_daily_paper_operations_01e_outcome_truth_contract.md`
+(new), `scripts/guards/validate_autonomous_daily_paper_operations_01e_outcome_contract.ps1`
+(new). No Rust file changed. No migration changed. No API route implemented.
+No GUI changed.
+
+**Safety confirmation (E1):**
+
+```text
+PROVIDER CALLS: no
+BROKER CALLS: no
+NETWORK CALLS: no
+REAL DAEMON STARTED: no
+PAPER ORDERS: no
+LIVE ORDERS: no
+PAPER DB TOUCHED: no
+PORT 5440 TOUCHED: no
+RUST FILES CHANGED: no
+MIGRATION CHANGED: no
+API IMPLEMENTED: no
+GUI CHANGED: no
+PHASE E RUNTIME IMPLEMENTATION STARTED: no
+```
+
+```text
+D4: ACCEPTED — COMPLETE
+PHASE D: ACCEPTED — COMPLETE
+Phase E1 contract audit: IMPLEMENTATION COMPLETE — AWAITING ACCEPTANCE
+Phase E runtime implementation: NOT STARTED
+BUNDLE 3 (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-COMBINED): OPEN
+NEXT AFTER E1 ACCEPTANCE: E2 — durable outcome classifier and finalization
+  store seam, only
+unattended 10-20-session soak: NOT STARTED
+Bundle 4 durable portfolio/P&L work: still required
+live capital: NOT READY
+```

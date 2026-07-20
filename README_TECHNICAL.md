@@ -20,12 +20,15 @@ Use the root `README.md` for the high-level system story.
 ## Current proved posture
 
 **Repository snapshot used for this update (2026-07-19):** local `main` at
-`8b8d388c7e2fdca7c850ecb436c2ebce4f329382`
-(`fix: close autonomous phase D integration` — D4, implementation complete
-awaiting acceptance), plus the
-AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D4-EVALUATION-LINEAGE-AND-AUTONOMOUS-PREOPEN-CLOSURE-01
-patch on top of it (implementation complete, awaiting ChatGPT and operator
-acceptance).
+`544ec628708d0b8a5381aaaaef6c220af2f98253`
+(`fix: bind autonomous claims to evaluation lineage`), plus independent
+ChatGPT/operator acceptance of D4 and its evaluation-lineage repair together
+— **Phase D is accepted complete in full** — plus the
+AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E1-DURABLE-OUTCOME-AUTHORITY-AND-EVIDENCE-CONTRACT
+patch on top of it (Phase E1: a read-only architecture audit producing the
+binding durable-outcome/no-trade contract for Phase E — implementation
+complete, awaiting ChatGPT and operator acceptance; no Phase E runtime code
+exists yet).
 
 The strongest current operational route is:
 
@@ -44,7 +47,7 @@ transcript as a fresh full-repo proof of the current commit.
 
 `AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-COMBINED` remains open.
 
-Current local `main` contains, accepted (D1–D3):
+Current local `main` contains, accepted (D1–D4, Phase D accepted complete in full):
 
 - durable daily-operation identity, state/version CAS, and append-only transitions
 - canonical session boundaries and nontrading-day reconciliation
@@ -58,10 +61,6 @@ Current local `main` contains, accepted (D1–D3):
 - sticky operator failure truth (survives session-controller's own Running-style projections)
 - complete typed classification of non-recoverable driver/setup outcomes
 - task-level PrepareDataOnly → RunningDispatch → exactly-once proof
-
-Present on the local `main` worktree (D4), implementation complete but awaiting independent
-ChatGPT/operator acceptance:
-
 - closure of a confirmed completed-bar dispatch-ownership race: the completed-bar driver's durable
   claim previously deposited into the same shared, account-wide `pending_strategy_bar_input`
   mailbox the ordinary execution loop drains every tick, then immediately re-took it — a concurrent
@@ -69,40 +68,42 @@ ChatGPT/operator acceptance:
   despite a real evaluation having occurred. The claim now dispatches directly through
   `AppState::dispatch_native_strategy_for_symbol_with_bar` (the same canonical exact-input dispatch
   implementation, just called with the claim's own bar value) and never touches the mailbox;
-  execution-loop and manual-signal-route dispatch are unchanged.
-- a deterministic concurrency proof (both interleaving orderings, via an explicit test-only
-  rendezvous hook that is a no-op in production)
-- one integrated scenario test driving a synthetic Paper+Alpaca day through preopen, canonical
-  start, running dispatch, runtime interruption/recovery (a real replacement `run_id`), session
-  close, and shutdown together for the first time
-
-Layered on top of D4, also present but not yet independently accepted (D4 evaluation-lineage
-repair, `AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D4-EVALUATION-LINEAGE-AND-AUTONOMOUS-PREOPEN-CLOSURE-01`):
-
+  execution-loop and manual-signal-route dispatch are unchanged. A deterministic concurrency proof
+  (both interleaving orderings) and one integrated scenario test driving a synthetic Paper+Alpaca
+  day through preopen, canonical start, running dispatch, runtime interruption/recovery, session
+  close, and shutdown together accompany this fix.
 - a shared deterministic identity helper (`AppState::derive_strategy_signal_evaluation_id`) used by
   both the signal-evaluation journal writer and the completed-bar claim path — never a second,
-  independently-derived algorithm
-- the claim path now durably confirms the exact `strategy_signal_evaluations` row
-  (run_id/strategy_id/symbol/timeframe/decision_stage) before completing a claim, and persists that
-  confirmed evaluation id (`complete_autonomous_daily_bar_dispatch` previously always passed `None`)
-- the completion write's `Result<bool>` is captured and matched explicitly; `Ok(false)`/`Err` both
-  route through one authoritative re-read before ever reporting `DispatchCompleted` — a strategy
-  callback result alone is no longer sufficient, and the strategy evaluation itself is never
-  automatically rerun
-- the concurrency proof's decoy bar previously reused the claimed bar's own `end_ts`; it now uses a
-  genuinely distinct prior bar
-- the full-day lifecycle test's preopen phase previously called `apply_transition` to manually clear
-  `manual_intervention_required`; it now seeds the correct previous-session tail bar window the
-  readiness gate actually expects at a genuine preopen instant, resolving cleanly through real
-  production readiness truth with zero manual unstick, and positively proves the real production
-  adapter selects `PrepareDataOnly` and durably observes the exact expected bar
-- a new test drives the real supervised completed-bar task (not a direct adapter call) under an
-  injected clock seam (`AppState::completed_bar_task_clock_override`, unused in production) through
-  `PrepareDataOnly` and `RunningDispatch`, then proves shutdown cancels and awaits that same task
+  independently-derived algorithm; the claim path durably confirms the exact
+  `strategy_signal_evaluations` row before completing a claim; the completion write's `Result<bool>`
+  is captured and matched explicitly, routing `Ok(false)`/`Err` through one authoritative re-read;
+  the full-day lifecycle test's preopen phase resolves through real production readiness truth with
+  zero manual unstick; a supervised-task proof under an injected clock
 
-After D4 and its evaluation-lineage repair are both accepted, Bundle 3 still requires Phase E
-durable daily outcome/no-trade truth and read-only API work, Phase F GUI/runbook/soak preparation,
-and Phase G final closure.
+Present on the local `main` worktree (Phase E1), implementation complete but awaiting independent
+ChatGPT/operator acceptance:
+
+- a read-only architecture audit
+  (`AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E1-DURABLE-OUTCOME-AUTHORITY-AND-EVIDENCE-CONTRACT`,
+  `docs/specs/autonomous_daily_paper_operations_01e_outcome_truth_contract.md`) producing the
+  binding contract for Phase E's durable daily outcome/no-trade classification: which durable store
+  is outcome authority (`sys_autonomous_daily_operations`, already Phase-B-built and unused by any
+  production writer today), exactly when an operation becomes finalization-eligible
+  (`stopped_at_utc IS NOT NULL` plus no locally-owned runtime/completed-bar-task activity remaining
+  — `postclose_finalize_utc` is a stop-retry escalation deadline, not a finalization gate), the
+  activity and no-trade evidence hierarchies, an `unknown_insufficient_evidence` representation that
+  reuses the existing nonterminal `evidence_degraded` state (no migration required), evidence-
+  conflict precedence, a restart/idempotency contract reusing the existing CAS transition machinery,
+  a bounded reason-code matrix, a read-only API contract for two net-new
+  `GET /api/v1/autonomous/daily-operation[s]` routes, a notification contract, and the narrow
+  E2–E5 implementation decomposition
+- **no Phase E runtime code was written by this patch** — no classifier, no coordinator wiring, no
+  API route, no migration; `outcome`/`no_trade_reason`/`finalized_at_utc` remain unwritten by any
+  production code path
+
+After D4 and its evaluation-lineage repair (Phase D, accepted complete in full) and the Phase E1
+contract audit are accepted, Bundle 3 still requires Phase E runtime implementation (E2–E5, per the
+accepted E1 contract), Phase F GUI/runbook/soak preparation, and Phase G final closure.
 
 ### Operational meaning
 
@@ -476,9 +477,10 @@ Its current source-grounded capabilities include:
   exact-input strategy-dispatch seam the execution loop uses (D4)
 - existing readiness, preflight, events, and alert surfaces
 
-The path is still in **pre-soak hardening** because Bundle 3 is open. Do not label the current
-`main` head as a finished autonomous-paper MVP until D4 and the later E/F/G phases are
-independently accepted.
+The path is still in **pre-soak hardening** because Bundle 3 is open. Phase D (D1–D4) is accepted
+complete in full; the Phase E1 contract audit is implementation complete, awaiting acceptance. Do
+not label the current `main` head as a finished autonomous-paper MVP until Phase E's runtime
+implementation (E2–E5) and the later F/G phases are independently accepted.
 
 ### What is expected after Bundle 3
 
@@ -954,8 +956,8 @@ Recommended discipline:
 
 Be honest about these:
 
-- Bundle 3 is not closed; D4 (integrated lifecycle proof and dispatch-ownership race closure) and its evaluation-lineage repair are both implementation complete but awaiting independent ChatGPT/operator acceptance
-- the current main branch should not begin an unattended soak until D4 (both layers) and the later Bundle 3 phases (E/F/G) are accepted; controlled, operator-supervised autonomous Paper + Alpaca operation is the current Bundle 3 target, not unattended soak
+- Bundle 3 is not closed; Phase D (D1–D4, integrated lifecycle proof, dispatch-ownership race closure, and the evaluation-lineage repair) is accepted complete in full; the Phase E1 contract audit (the binding durable outcome/no-trade contract) is implementation complete but awaiting independent ChatGPT/operator acceptance, and no Phase E runtime code exists yet
+- the current main branch should not begin an unattended soak until Phase E's runtime implementation (E2–E5, per the accepted E1 contract) and the later Bundle 3 phases (F/G) are accepted; controlled, operator-supervised autonomous Paper + Alpaca operation is the current Bundle 3 target, not unattended soak
 - Bundle 4 durable paper cash/positions/lots/cost basis/P&L truth is still open
 - real paper fill, reconcile-after-fill, Discord lifecycle, restart, and repeated-session evidence remain incomplete
 - the daemon/operator plane is materially stronger, but some deeper GUI detail surfaces remain intentionally deferred or unmounted rather than faked
