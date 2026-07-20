@@ -823,6 +823,30 @@ pub enum AutonomousCompletedBarDriverOutcome {
     RuntimeDispatchNotReady {
         reason_code: &'static str,
     },
+    /// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D4-EVALUATION-LINEAGE-AND-
+    /// AUTONOMOUS-PREOPEN-CLOSURE-01 REPAIR 2: the canonical strategy
+    /// dispatch call returned a result, but the exact durable
+    /// `strategy_signal_evaluations` row this claim's deterministic identity
+    /// expects (run_id/strategy_id/symbol/timeframe/now_tick, via
+    /// [`AppState::derive_strategy_signal_evaluation_id`]) is either absent
+    /// or present with a mismatched field. The claim is marked `failed`
+    /// (never left ambiguously `claimed`); zero automatic redispatch. A
+    /// strategy callback result alone is never sufficient to complete a
+    /// claim without this durable confirmation.
+    DispatchEvaluationEvidenceMissing {
+        bar_end_ts: i64,
+        reason_code: &'static str,
+    },
+    /// REPAIR 4: `complete_autonomous_daily_bar_dispatch` either returned
+    /// `false` or its own DB call failed, and the mandatory authoritative
+    /// re-read of the claim row could not confirm the exact expected
+    /// evaluation ID as durably `completed`. Never reported as
+    /// `DispatchCompleted`; the strategy evaluation itself is never
+    /// automatically rerun.
+    DispatchCompletionUnconfirmed {
+        bar_end_ts: i64,
+        reason_code: &'static str,
+    },
 }
 
 /// Fixed, bounded poll-retry cooldown. Phase D owns full typed
@@ -1379,6 +1403,18 @@ pub struct AutonomousCompletedBarPostClaimTestHook {
 /// both continue to read/write the mailbox exactly as before, unaffected.
 ///
 /// Never redispatches an already-completed or unresolved claim.
+///
+/// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D4-EVALUATION-LINEAGE-AND-
+/// AUTONOMOUS-PREOPEN-CLOSURE-01 REPAIRS 2/3/4: a strategy-dispatch callback
+/// result alone is no longer sufficient to complete a claim. This function
+/// additionally derives this claim's exact expected `strategy_signal_evaluations`
+/// identity (via [`AppState::derive_strategy_signal_evaluation_id`], the same
+/// helper the journal writer itself uses — never a second identity
+/// algorithm), durably confirms that exact row exists and agrees on
+/// run/strategy/symbol/timeframe/decision-stage, persists the confirmed
+/// evaluation id on the claim, and honors — rather than ignores — the
+/// boolean/`Result` outcome of the completion write via a bounded
+/// authoritative re-read. See `docs/specs/autonomous_daily_paper_operations_01d_phase_d_closure.md`.
 async fn claim_and_dispatch_observed_bar(
     input: &AutonomousCompletedBarDriverInput<'_>,
     binding: &ResolvedSingleBinding,
@@ -1406,6 +1442,28 @@ async fn claim_and_dispatch_observed_bar(
         mqk_db::BarDispatchClaimOutcome::Claimed => {}
     }
 
+    // REPAIR 2: `prove_running_dispatch_eligibility` (this function's only
+    // caller's precondition) already proved `operation.run_id` is `Some` and
+    // matches the locally active run. Re-checked here, fail-closed, rather
+    // than unwrapped — a claim must never complete on an assumed invariant.
+    let Some(operation_run_id) = operation.run_id else {
+        mqk_db::fail_autonomous_daily_bar_dispatch(
+            input.pool,
+            operation.operation_id,
+            &binding.symbol,
+            binding.timeframe.as_str(),
+            bar_end_ts,
+            "claim reached dispatch with no operation run_id despite proven \
+             running-dispatch eligibility",
+        )
+        .await?;
+        return Ok(
+            AutonomousCompletedBarDriverOutcome::DispatchClaimUnresolved {
+                status: mqk_db::DISPATCH_STATUS_FAILED.to_string(),
+            },
+        );
+    };
+
     let bar = StrategyBarInput {
         now_tick: operation.bars_observed.max(0) as u64,
         end_ts: bar_end_ts,
@@ -1430,6 +1488,19 @@ async fn claim_and_dispatch_observed_bar(
         hook.release.notified().await;
     }
 
+    // REPAIR 1: derive this claim's exact expected evaluation identity
+    // *before* dispatch, from the claim's own verified run id, bound
+    // strategy id, normalized symbol/timeframe, and exact `now_tick` — the
+    // same tuple the journal writer itself will independently derive when
+    // (if) the strategy actually evaluates.
+    let expected_evaluation_id = AppState::derive_strategy_signal_evaluation_id(
+        Some(operation_run_id),
+        &binding.strategy_id,
+        &binding.symbol,
+        binding.timeframe.as_str(),
+        bar.now_tick,
+    );
+
     let dispatch_result = input
         .state
         .dispatch_native_strategy_for_symbol_with_bar(
@@ -1439,37 +1510,157 @@ async fn claim_and_dispatch_observed_bar(
         )
         .await;
 
-    match dispatch_result {
-        Some(_result) => {
-            mqk_db::complete_autonomous_daily_bar_dispatch(
-                input.pool,
-                operation.operation_id,
-                &binding.symbol,
-                binding.timeframe.as_str(),
+    if dispatch_result.is_none() {
+        mqk_db::fail_autonomous_daily_bar_dispatch(
+            input.pool,
+            operation.operation_id,
+            &binding.symbol,
+            binding.timeframe.as_str(),
+            bar_end_ts,
+            "canonical strategy dispatch returned no result despite a fresh claim and \
+             passing pre-dispatch readiness gates",
+        )
+        .await?;
+        return Ok(
+            AutonomousCompletedBarDriverOutcome::DispatchClaimUnresolved {
+                status: mqk_db::DISPATCH_STATUS_FAILED.to_string(),
+            },
+        );
+    }
+
+    // REPAIR 2: a strategy callback result alone is not sufficient. Durably
+    // confirm the exact evaluation row this claim expects actually exists
+    // and agrees on every identity field before the claim may complete.
+    let evaluation_row =
+        mqk_db::fetch_strategy_signal_evaluation(input.pool, expected_evaluation_id).await?;
+    let confirmed = evaluation_row.as_ref().is_some_and(|row| {
+        row.run_id == Some(operation_run_id)
+            && row.strategy_id == binding.strategy_id
+            && row.symbol.eq_ignore_ascii_case(&binding.symbol)
+            && row.timeframe == binding.timeframe.as_str()
+            && row.decision_stage == "strategy_evaluated"
+    });
+
+    if !confirmed {
+        let reason_code = if evaluation_row.is_none() {
+            "evaluation_row_absent"
+        } else {
+            "evaluation_row_mismatch"
+        };
+        mqk_db::fail_autonomous_daily_bar_dispatch(
+            input.pool,
+            operation.operation_id,
+            &binding.symbol,
+            binding.timeframe.as_str(),
+            bar_end_ts,
+            &format!(
+                "strategy dispatch returned a result but no confirmed durable evaluation \
+                 row was found for this claim's identity: {reason_code}"
+            ),
+        )
+        .await?;
+        return Ok(
+            AutonomousCompletedBarDriverOutcome::DispatchEvaluationEvidenceMissing {
                 bar_end_ts,
-                input.now_utc,
-                None,
+                reason_code,
+            },
+        );
+    }
+
+    // REPAIR 3/4: persist the confirmed evaluation id, and honor — rather
+    // than ignore — the completion write's outcome. A test-only fault seam
+    // (never active in production) simulates a store error without
+    // performing the real write, so the re-read path below is provable
+    // deterministically.
+    let completion_result: anyhow::Result<bool> = if input
+        .state
+        .completed_bar_completion_fault_injected_for_test()
+    {
+        Err(anyhow::anyhow!(
+            "d4_repair4_test: simulated completion store error (no write performed)"
+        ))
+    } else {
+        mqk_db::complete_autonomous_daily_bar_dispatch(
+            input.pool,
+            operation.operation_id,
+            &binding.symbol,
+            binding.timeframe.as_str(),
+            bar_end_ts,
+            input.now_utc,
+            Some(expected_evaluation_id),
+        )
+        .await
+    };
+
+    match completion_result {
+        Ok(true) => Ok(AutonomousCompletedBarDriverOutcome::DispatchCompleted { bar_end_ts }),
+        Ok(false) => {
+            reconfirm_dispatch_completion_or_fail_closed(
+                input,
+                binding,
+                bar_end_ts,
+                expected_evaluation_id,
+                "completion_write_returned_false",
             )
-            .await?;
+            .await
+        }
+        Err(_store_err) => {
+            reconfirm_dispatch_completion_or_fail_closed(
+                input,
+                binding,
+                bar_end_ts,
+                expected_evaluation_id,
+                "completion_write_error",
+            )
+            .await
+        }
+    }
+}
+
+/// REPAIR 4: the mandatory authoritative re-read reached when
+/// `complete_autonomous_daily_bar_dispatch` returns `Ok(false)` or `Err`.
+/// Only an exact `completed` claim row carrying the exact same expected
+/// evaluation id is accepted as committed truth (a write that actually
+/// landed, whose success acknowledgement was merely lost). Anything else —
+/// still `claimed`, a different evaluation id, or the re-read itself
+/// failing — is bounded fail-closed truth; the strategy evaluation is never
+/// automatically rerun, and the claim is never reported completed on
+/// unconfirmed evidence.
+async fn reconfirm_dispatch_completion_or_fail_closed(
+    input: &AutonomousCompletedBarDriverInput<'_>,
+    binding: &ResolvedSingleBinding,
+    bar_end_ts: i64,
+    expected_evaluation_id: Uuid,
+    reason_code: &'static str,
+) -> anyhow::Result<AutonomousCompletedBarDriverOutcome> {
+    let operation = input.operation;
+    match mqk_db::fetch_autonomous_daily_bar_dispatch(
+        input.pool,
+        operation.operation_id,
+        &binding.symbol,
+        binding.timeframe.as_str(),
+        bar_end_ts,
+    )
+    .await
+    {
+        Ok(Some(record))
+            if record.status == mqk_db::DISPATCH_STATUS_COMPLETED
+                && record.evaluation_id == Some(expected_evaluation_id) =>
+        {
             Ok(AutonomousCompletedBarDriverOutcome::DispatchCompleted { bar_end_ts })
         }
-        None => {
-            mqk_db::fail_autonomous_daily_bar_dispatch(
-                input.pool,
-                operation.operation_id,
-                &binding.symbol,
-                binding.timeframe.as_str(),
+        Ok(_) => Ok(
+            AutonomousCompletedBarDriverOutcome::DispatchCompletionUnconfirmed {
                 bar_end_ts,
-                "canonical strategy dispatch returned no result despite a fresh claim and \
-                 passing pre-dispatch readiness gates",
-            )
-            .await?;
-            Ok(
-                AutonomousCompletedBarDriverOutcome::DispatchClaimUnresolved {
-                    status: mqk_db::DISPATCH_STATUS_FAILED.to_string(),
-                },
-            )
-        }
+                reason_code,
+            },
+        ),
+        Err(_re_read_err) => Ok(
+            AutonomousCompletedBarDriverOutcome::DispatchCompletionUnconfirmed {
+                bar_end_ts,
+                reason_code: "re_read_failed",
+            },
+        ),
     }
 }
 

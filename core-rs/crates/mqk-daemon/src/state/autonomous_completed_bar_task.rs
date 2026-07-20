@@ -420,6 +420,8 @@ fn driver_outcome_code(outcome: &AutonomousCompletedBarDriverOutcome) -> &'stati
         O::ObservedBarSequenceInconsistent { .. } => "observed_bar_sequence_inconsistent",
         O::ProviderSetupBlocked { .. } => "provider_setup_blocked",
         O::RuntimeDispatchNotReady { .. } => "runtime_dispatch_not_ready",
+        O::DispatchEvaluationEvidenceMissing { .. } => "dispatch_evaluation_evidence_missing",
+        O::DispatchCompletionUnconfirmed { .. } => "dispatch_completion_unconfirmed",
     }
 }
 
@@ -667,7 +669,10 @@ async fn run_one_production_tick(state: Arc<AppState>, generation: u64) {
         return;
     }
 
-    let now_utc = Utc::now();
+    // D4 REPAIR 7: production always captures `Utc::now()` here — the test
+    // seam (`AppState::completed_bar_task_tick_clock`) only ever returns a
+    // caller-supplied instant when a test has explicitly installed one.
+    let now_utc = state.completed_bar_task_tick_clock().await;
     match tick_autonomous_completed_bar_driver_from_state(&state, now_utc).await {
         Ok(outcome) => {
             let code = production_outcome_code(&outcome);

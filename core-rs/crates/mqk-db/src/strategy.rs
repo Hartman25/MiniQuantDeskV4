@@ -434,6 +434,56 @@ pub async fn insert_strategy_signal_evaluation(
     Ok(())
 }
 
+/// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D4-EVALUATION-LINEAGE-AND-AUTONOMOUS-
+/// PREOPEN-CLOSURE-01 REPAIR 2: fetch one exact strategy signal-evaluation
+/// row by its deterministic `evaluation_id`. `Ok(None)` is authoritative "no
+/// such evaluation row exists" — never a synthesized row. Read-only; used by
+/// the completed-bar dispatch-claim path to durably confirm that a canonical
+/// strategy evaluation actually occurred for this claim's exact identity
+/// before the claim may be reported completed.
+pub async fn fetch_strategy_signal_evaluation(
+    pool: &PgPool,
+    evaluation_id: Uuid,
+) -> Result<Option<StrategySignalEvaluationRecord>> {
+    let row = sqlx::query(
+        r#"
+        select evaluation_id, ts_utc, run_id, strategy_id, symbol, timeframe,
+               bar_context_source, bars_loaded, latest_bar_ts_utc,
+               signal_generated, signal_qty, signal_side,
+               reason_code, reason, decision_stage, source
+        from strategy_signal_evaluations
+        where evaluation_id = $1
+        "#,
+    )
+    .bind(evaluation_id)
+    .fetch_optional(pool)
+    .await
+    .context("fetch_strategy_signal_evaluation failed")?;
+
+    row.map(|r| {
+        Ok(StrategySignalEvaluationRecord {
+            evaluation_id: r.try_get("evaluation_id")?,
+            ts_utc: r.try_get("ts_utc")?,
+            run_id: r.try_get("run_id")?,
+            strategy_id: r.try_get("strategy_id")?,
+            symbol: r.try_get("symbol")?,
+            timeframe: r.try_get("timeframe")?,
+            bar_context_source: r.try_get("bar_context_source")?,
+            bars_loaded: r.try_get("bars_loaded")?,
+            latest_bar_ts_utc: r.try_get("latest_bar_ts_utc")?,
+            signal_generated: r.try_get("signal_generated")?,
+            signal_qty: r.try_get("signal_qty")?,
+            signal_side: r.try_get("signal_side")?,
+            reason_code: r.try_get("reason_code")?,
+            reason: r.try_get("reason")?,
+            decision_stage: r.try_get("decision_stage")?,
+            source: r.try_get("source")?,
+        })
+    })
+    .transpose()
+    .map_err(|e: sqlx::Error| anyhow::Error::from(e))
+}
+
 /// Fetch the most recent `limit` strategy signal-evaluation rows across all
 /// runs and symbols, newest first.
 ///

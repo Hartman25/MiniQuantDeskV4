@@ -14,11 +14,12 @@ use mqk_db::{
     claim_autonomous_daily_bar_dispatch, complete_autonomous_daily_bar_dispatch,
     create_or_recover_autonomous_daily_operation, fail_autonomous_daily_bar_dispatch,
     fetch_autonomous_daily_bar_dispatch, fetch_autonomous_daily_operation_by_id,
+    fetch_strategy_signal_evaluation, insert_strategy_signal_evaluation,
     record_completed_bar_observed, record_provider_poll_failed, record_provider_poll_started,
     record_provider_poll_succeeded, BarDispatchClaimOutcome, CreateAutonomousDailyOperationArgs,
-    CreateOrRecoverAutonomousDailyOperationOutcome, RecordCompletedBarObservedOutcome,
-    RecordProviderPollOutcome, DISPATCH_STATUS_COMPLETED, DISPATCH_STATUS_UNCERTAIN, ENV_DB_URL,
-    STATE_AWAITING_PREOPEN,
+    CreateOrRecoverAutonomousDailyOperationOutcome, InsertStrategySignalEvaluationArgs,
+    RecordCompletedBarObservedOutcome, RecordProviderPollOutcome, DISPATCH_STATUS_COMPLETED,
+    DISPATCH_STATUS_UNCERTAIN, ENV_DB_URL, STATE_AWAITING_PREOPEN,
 };
 use uuid::Uuid;
 
@@ -475,6 +476,113 @@ async fn dispatch_completion_and_operation_counters_agree() -> anyhow::Result<()
         refetched2.bars_dispatched, 1,
         "replayed completion must not double-increment"
     );
+
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D4-EVALUATION-LINEAGE-AND-AUTONOMOUS-
+// PREOPEN-CLOSURE-01 REPAIR 2: exact evaluation-row lookup by deterministic
+// id, and a completed claim durably storing that confirmed id.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn exact_evaluation_row_lookup_and_completed_claim_stores_evaluation_id() -> anyhow::Result<()>
+{
+    let pool = test_pool().await?;
+    let adapter_id = format!("evidence-eval-{}", unique_suffix());
+    let t0 = Utc.with_ymd_and_hms(2026, 7, 20, 13, 0, 0).unwrap();
+    let operation = create_test_operation(&pool, &adapter_id, t0).await;
+    let bar_end_ts = 1_800_002_100_i64;
+
+    // A wholly random id is authoritatively absent — never a synthesized row.
+    let absent = fetch_strategy_signal_evaluation(&pool, Uuid::new_v4()).await?;
+    assert!(absent.is_none());
+
+    let evaluation_id = Uuid::new_v5(
+        &Uuid::NAMESPACE_DNS,
+        b"mqk.signal-evaluation.v1|none|swing_momentum|ZZEVIDEVAL|5m|7",
+    );
+    insert_strategy_signal_evaluation(
+        &pool,
+        &InsertStrategySignalEvaluationArgs {
+            evaluation_id,
+            ts_utc: t0,
+            run_id: None,
+            strategy_id: "swing_momentum".to_string(),
+            symbol: "ZZEVIDEVAL".to_string(),
+            timeframe: "5m".to_string(),
+            bar_context_source: "db_loaded".to_string(),
+            bars_loaded: 5,
+            latest_bar_ts_utc: Some(t0),
+            signal_generated: false,
+            signal_qty: Some(0),
+            signal_side: None,
+            reason_code: "hold".to_string(),
+            reason: "no signal".to_string(),
+            decision_stage: "strategy_evaluated".to_string(),
+            source: "test".to_string(),
+        },
+    )
+    .await?;
+
+    // Exact lookup by the correct id finds the row with every field intact.
+    let found = fetch_strategy_signal_evaluation(&pool, evaluation_id)
+        .await?
+        .expect("row must be found by its exact evaluation_id");
+    assert_eq!(found.strategy_id, "swing_momentum");
+    assert_eq!(found.symbol, "ZZEVIDEVAL");
+    assert_eq!(found.timeframe, "5m");
+    assert_eq!(found.decision_stage, "strategy_evaluated");
+
+    // A different (wrong) deterministic id for the same tuple minus one field
+    // is distinguishable — never confused with the correct row.
+    let wrong_evaluation_id = Uuid::new_v5(
+        &Uuid::NAMESPACE_DNS,
+        b"mqk.signal-evaluation.v1|none|swing_momentum|ZZEVIDEVAL|5m|8",
+    );
+    assert_ne!(wrong_evaluation_id, evaluation_id);
+    let wrong = fetch_strategy_signal_evaluation(&pool, wrong_evaluation_id).await?;
+    assert!(
+        wrong.is_none(),
+        "a wrong evaluation id must never resolve to the correct row"
+    );
+
+    // A completed claim durably stores this exact confirmed evaluation id.
+    record_completed_bar_observed(&pool, operation.operation_id, bar_end_ts, t0).await?;
+    let claim = claim_autonomous_daily_bar_dispatch(
+        &pool,
+        operation.operation_id,
+        "ZZEVIDEVAL",
+        "5m",
+        bar_end_ts,
+        t0,
+    )
+    .await?;
+    assert!(matches!(claim, BarDispatchClaimOutcome::Claimed));
+    let completed = complete_autonomous_daily_bar_dispatch(
+        &pool,
+        operation.operation_id,
+        "ZZEVIDEVAL",
+        "5m",
+        bar_end_ts,
+        t0 + ChronoDuration::seconds(1),
+        Some(evaluation_id),
+    )
+    .await?;
+    assert!(completed);
+    let claim_row = fetch_autonomous_daily_bar_dispatch(
+        &pool,
+        operation.operation_id,
+        "ZZEVIDEVAL",
+        "5m",
+        bar_end_ts,
+    )
+    .await?
+    .expect("row exists");
+    assert_eq!(claim_row.status, DISPATCH_STATUS_COMPLETED);
+    assert_eq!(claim_row.evaluation_id, Some(evaluation_id));
 
     Ok(())
 }

@@ -60,8 +60,8 @@ use mqk_daemon::state::autonomous_completed_bar_task::{
     COMPLETED_BAR_TICK_SECS_ENV,
 };
 use mqk_daemon::state::autonomous_daily_coordinator::{
-    apply_transition, handle_running, tick_autonomous_daily_coordinator,
-    AutonomousDailyCoordinatorTickInput, AutonomousDailyCoordinatorTickOutcome,
+    handle_running, tick_autonomous_daily_coordinator, AutonomousDailyCoordinatorTickInput,
+    AutonomousDailyCoordinatorTickOutcome,
 };
 use mqk_daemon::state::{
     self as daemon_state, AppState, AutonomousDailyPlanTiming, AutonomousSessionTruth, BrokerKind,
@@ -385,7 +385,8 @@ fn bar(symbol: &str, timeframe: &str, end_ts: i64, is_complete: bool) -> mqk_md:
     }
 }
 
-/// Seed exactly one canonical completed bar into `md_bars` for `symbol`, so
+/// Seed one or more canonical completed bars into `md_bars` for `symbol` in
+/// one wipe-then-insert-all pass, so
 /// `AppState::dispatch_native_strategy_for_symbol_with_bar`'s DB-backed
 /// context load (used by *both* the completed-bar claim's exact-input
 /// dispatch and the ordinary execution-loop's mailbox-drain dispatch) finds
@@ -394,34 +395,41 @@ fn bar(symbol: &str, timeframe: &str, end_ts: i64, is_complete: bool) -> mqk_md:
 /// an unrelated reason (no history) cannot prove the claim-ownership
 /// concurrency contract, since both call sites would trivially return
 /// `None` regardless of ordering.
-async fn seed_light_bar(pool: &sqlx::PgPool, symbol: &str, timeframe: &str, end_ts: i64) {
+///
+/// D4 REPAIR 5: accepts a slice so the concurrency proofs can seed claim A's
+/// exact expected bar and the execution-loop decoy's own distinct bar
+/// identity (bar B) together — a single wipe that seeded only one of them
+/// would delete the other.
+async fn seed_light_bars(pool: &sqlx::PgPool, symbol: &str, timeframe: &str, end_ts_list: &[i64]) {
     sqlx::query("delete from md_bars where symbol = $1 and timeframe = $2")
         .bind(symbol)
         .bind(timeframe)
         .execute(pool)
         .await
-        .expect("cleanup light bar failed");
-    sqlx::query(
-        r#"
-        insert into md_bars (
-          symbol, timeframe, end_ts, open_micros, high_micros, low_micros,
-          close_micros, volume, is_complete, provider_id, provider_source,
-          provider_symbol, ingest_mode, ingested_at
-        ) values ($1,$2,$3,100000000,100000000,100000000,100000000,1000000,true,
-                  'fake','fake',$1,'historical_sync',$4)
-        "#,
-    )
-    .bind(symbol)
-    .bind(timeframe)
-    .bind(end_ts)
-    .bind(
-        Utc.timestamp_opt(end_ts + 60, 0)
-            .single()
-            .expect("valid ingested_at ts"),
-    )
-    .execute(pool)
-    .await
-    .expect("seed light bar insert failed");
+        .expect("cleanup light bars failed");
+    for &end_ts in end_ts_list {
+        sqlx::query(
+            r#"
+            insert into md_bars (
+              symbol, timeframe, end_ts, open_micros, high_micros, low_micros,
+              close_micros, volume, is_complete, provider_id, provider_source,
+              provider_symbol, ingest_mode, ingested_at
+            ) values ($1,$2,$3,100000000,100000000,100000000,100000000,1000000,true,
+                      'fake','fake',$1,'historical_sync',$4)
+            "#,
+        )
+        .bind(symbol)
+        .bind(timeframe)
+        .bind(end_ts)
+        .bind(
+            Utc.timestamp_opt(end_ts + 60, 0)
+                .single()
+                .expect("valid ingested_at ts"),
+        )
+        .execute(pool)
+        .await
+        .expect("seed light bars insert failed");
+    }
 }
 
 /// The legacy `market_data_freshness` staleness gate evaluates bar age
@@ -538,6 +546,14 @@ async fn active_bootstrap_state(pool: sqlx::PgPool) -> AppState {
 async fn running_dispatch_eligible_state(pool: sqlx::PgPool, run_id: Uuid) -> AppState {
     let state = active_bootstrap_state(pool).await;
     state.inject_running_loop_for_test(run_id).await;
+    // D4 REPAIR 2: `AppState::record_signal_evaluation` derives its
+    // evaluation identity from `status.active_run_id`, not from
+    // `execution_loop`'s injected ownership — production keeps both in sync
+    // via `publish_status` on every real start; this light fixture must do
+    // the same explicitly, or the durable evaluation row's run_id would
+    // silently diverge from the exact run_id this claim's own identity
+    // expects (an evaluation-lineage mismatch, not a real production gap).
+    state.status.write().await.active_run_id = Some(run_id);
     state
 }
 
@@ -589,7 +605,6 @@ async fn phase_d_concurrency_forward_ordering_execution_loop_cannot_steal_claime
 
     let expected_ts = timing.effective_open.timestamp() + 300;
     set_light_freshness_override_for(expected_ts);
-    seed_light_bar(&pool, symbol, timeframe, expected_ts).await;
     let provider = Arc::new(FakeQueueProvider::new());
     provider.push_outcome(symbol, Ok(Some(bar(symbol, timeframe, expected_ts, true))));
     let resolver = FakeProviderResolver::new(provider.clone());
@@ -597,13 +612,20 @@ async fn phase_d_concurrency_forward_ordering_execution_loop_cannot_steal_claime
     let evaluator = FakeReadinessEvaluator::queue(vec![readiness.clone(), readiness]);
     let now = DateTime::<Utc>::from_timestamp(expected_ts + 10, 0).unwrap();
 
+    // D4 REPAIR 5: bar B (the decoy) must carry a genuinely different bar
+    // identity from claim A's own expected bar — not merely a different
+    // `now_tick` — so this proof cannot be read as depending on `now_tick`
+    // alone to keep the two evaluations distinct. `decoy_ts` is a real,
+    // independently seeded, already-complete prior bar.
+    let decoy_ts = expected_ts - 300;
+    seed_light_bars(&pool, symbol, timeframe, &[decoy_ts, expected_ts]).await;
     // A decoy bar for the concurrent "execution loop" tick to drain from the
     // shared mailbox — proves the mailbox path is fully independent of the
     // completed-bar claim's exact-input dispatch after the D4.2 fix.
     state
         .deposit_strategy_bar_input(StrategyBarInput {
             now_tick: 999,
-            end_ts: expected_ts,
+            end_ts: decoy_ts,
             limit_price: Some(10025),
             qty: 1,
         })
@@ -680,6 +702,44 @@ async fn phase_d_concurrency_forward_ordering_execution_loop_cannot_steal_claime
         mqk_db::STATE_EVIDENCE_DEGRADED,
         "no operation degradation on a successful concurrent proof"
     );
+
+    // D4 REPAIR 3: the completed claim durably stores the confirmed
+    // evaluation id, and the exact evaluation row it points to exists
+    // exactly once with matching identity.
+    let claim_a = mqk_db::fetch_autonomous_daily_bar_dispatch(
+        &pool,
+        operation.operation_id,
+        symbol,
+        timeframe,
+        expected_ts,
+    )
+    .await
+    .expect("claim A fetch ok")
+    .expect("claim A row exists");
+    assert_eq!(claim_a.status, mqk_db::DISPATCH_STATUS_COMPLETED);
+    let claim_a_evaluation_id = claim_a
+        .evaluation_id
+        .expect("claim A must store a non-null evaluation_id");
+    let claim_a_eval = mqk_db::fetch_strategy_signal_evaluation(&pool, claim_a_evaluation_id)
+        .await
+        .expect("claim A evaluation fetch ok")
+        .expect("claim A's exact evaluation row must exist");
+    assert_eq!(claim_a_eval.run_id, Some(run_id));
+    assert_eq!(claim_a_eval.strategy_id, strategy_id);
+    assert_eq!(claim_a_eval.symbol, symbol);
+    assert_eq!(claim_a_eval.timeframe, timeframe);
+    assert_eq!(claim_a_eval.decision_stage, "strategy_evaluated");
+    let claim_a_eval_count: i64 = sqlx::query_scalar(
+        "select count(*) from strategy_signal_evaluations where evaluation_id = $1",
+    )
+    .bind(claim_a_evaluation_id)
+    .fetch_one(&pool)
+    .await
+    .expect("count ok");
+    assert_eq!(
+        claim_a_eval_count, 1,
+        "claim A's evaluation identity must exist exactly once"
+    );
     assert_ne!(after.state, mqk_db::STATE_CONTROLLER_DEGRADED);
 
     // Repeat tick: the claim is already completed, so no second evaluation.
@@ -707,12 +767,24 @@ async fn phase_d_concurrency_forward_ordering_execution_loop_cannot_steal_claime
     })
     .await
     .expect("second tick must not error");
-    assert!(
-        matches!(
-            outcome2,
-            AutonomousCompletedBarDriverOutcome::AlreadyDispatched { .. }
-        ),
-        "repeat tick must never produce a second evaluation, got {outcome2:?}"
+    assert_eq!(
+        outcome2,
+        AutonomousCompletedBarDriverOutcome::AlreadyDispatched {
+            evaluation_id: Some(claim_a_evaluation_id)
+        },
+        "repeat tick must never produce a second evaluation and must report the same \
+         durably stored evaluation id, got {outcome2:?}"
+    );
+    let claim_a_eval_count_after_repeat: i64 = sqlx::query_scalar(
+        "select count(*) from strategy_signal_evaluations where evaluation_id = $1",
+    )
+    .bind(claim_a_evaluation_id)
+    .fetch_one(&pool)
+    .await
+    .expect("count ok");
+    assert_eq!(
+        claim_a_eval_count_after_repeat, 1,
+        "repeat tick must never create a second evaluation row for claim A's identity"
     );
 
     cleanup_adapter_slot(&pool, &adapter_id).await;
@@ -753,7 +825,11 @@ async fn phase_d_concurrency_reverse_ordering_execution_loop_first_is_also_safe(
 
     let expected_ts = timing.effective_open.timestamp() + 300;
     set_light_freshness_override_for(expected_ts);
-    seed_light_bar(&pool, symbol, timeframe, expected_ts).await;
+    // D4 REPAIR 5: bar B (the decoy) must carry a genuinely different bar
+    // identity from claim A's own expected bar (see the forward-ordering
+    // test's comment for the full rationale).
+    let decoy_ts = expected_ts - 300;
+    seed_light_bars(&pool, symbol, timeframe, &[decoy_ts, expected_ts]).await;
     let provider = Arc::new(FakeQueueProvider::new());
     provider.push_outcome(symbol, Ok(Some(bar(symbol, timeframe, expected_ts, true))));
     let resolver = FakeProviderResolver::new(provider);
@@ -767,7 +843,7 @@ async fn phase_d_concurrency_reverse_ordering_execution_loop_first_is_also_safe(
     state
         .deposit_strategy_bar_input(StrategyBarInput {
             now_tick: 999,
-            end_ts: expected_ts,
+            end_ts: decoy_ts,
             limit_price: Some(10025),
             qty: 1,
         })
@@ -816,6 +892,302 @@ async fn phase_d_concurrency_reverse_ordering_execution_loop_first_is_also_safe(
         .expect("row exists");
     assert_eq!(after.bars_dispatched, 1);
     assert_ne!(after.state, mqk_db::STATE_EVIDENCE_DEGRADED);
+
+    cleanup_adapter_slot(&pool, &adapter_id).await;
+}
+
+// ---------------------------------------------------------------------------
+// D4 REPAIR 2 — missing evaluation evidence cannot complete a claim
+// ---------------------------------------------------------------------------
+//
+// Required assertion 13: a strategy callback result alone is never
+// sufficient. Here the bootstrap's actually-active strategy
+// ("intraday_scalper") diverges from the assignment's configured strategy
+// ("swing_momentum") — a real config-drift scenario — so the journal writer
+// durably records its evaluation under a different identity than the one the
+// claim expects. No fabricated fault injection is needed: this is the same
+// class of defect REPAIR 2 exists to catch.
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+async fn phase_d_missing_evaluation_evidence_fails_closed_never_completes_claim() {
+    let Some(pool) = maybe_db("pd_eval_missing").await else {
+        return;
+    };
+    let adapter_id = format!("zzpdem-{}", unique_suffix());
+    let timing = light_timing();
+    let symbol = "ZZPDEVMISS";
+    let configured_strategy_id = "swing_momentum";
+    let actually_active_strategy_id = "intraday_scalper";
+    let timeframe = "5m";
+
+    let mut operation = create_light_operation(
+        &pool,
+        &adapter_id,
+        symbol,
+        configured_strategy_id,
+        timeframe,
+        &timing,
+        mqk_db::STATE_AWAITING_OPEN,
+    )
+    .await;
+    let run_id = Uuid::new_v4();
+    operation.state = mqk_db::STATE_RUNNING.to_string();
+    operation.run_id = Some(run_id);
+
+    let assignment_config = fixture_assignment_config(symbol, configured_strategy_id, timeframe);
+    let assignment_identity = daemon_state::derive_assignment_identity(&assignment_config);
+    let binding = fixture_binding(symbol, configured_strategy_id, 300);
+    let runtime_binding_identity = daemon_state::derive_runtime_binding_identity(&binding);
+    let instruments = vec![fixture_instrument(symbol, "fake", symbol, timeframe)];
+
+    // Bootstrap a *different* strategy than the assignment configures.
+    // `autonomous_strategy_dispatch_runtime_truth` only checks bootstrap
+    // presence/liveness, never strategy-id equality against the binding, so
+    // runtime-dispatch eligibility still proves `Active` here — exactly the
+    // gap REPAIR 2 closes at the evaluation-confirmation step instead.
+    let state =
+        AppState::new_with_db_and_operator_auth(pool.clone(), OperatorAuthMode::ExplicitDevNoToken);
+    let reg = build_daemon_plugin_registry();
+    let ids = vec![actually_active_strategy_id.to_string()];
+    let bootstrap = NativeStrategyBootstrap::bootstrap(Some(&ids), &reg);
+    state
+        .set_native_strategy_bootstrap_for_test(Some(bootstrap))
+        .await;
+    state.inject_running_loop_for_test(run_id).await;
+    state.status.write().await.active_run_id = Some(run_id);
+
+    let expected_ts = timing.effective_open.timestamp() + 300;
+    set_light_freshness_override_for(expected_ts);
+    seed_light_bars(&pool, symbol, timeframe, &[expected_ts]).await;
+    let provider = Arc::new(FakeQueueProvider::new());
+    let resolver = FakeProviderResolver::new(provider);
+    let readiness = ready_readiness(symbol, timeframe, Some(expected_ts));
+    let evaluator = FakeReadinessEvaluator::queue(vec![readiness.clone(), readiness]);
+    let now = DateTime::<Utc>::from_timestamp(expected_ts + 10, 0).unwrap();
+
+    let outcome = tick_autonomous_completed_bar_driver(AutonomousCompletedBarDriverInput {
+        state: &state,
+        pool: &pool,
+        operation: &operation,
+        assignment_config: &assignment_config,
+        assignment_identity: &assignment_identity,
+        runtime_binding: &binding,
+        runtime_binding_identity: &runtime_binding_identity,
+        now_utc: now,
+        authorization: AutonomousProviderCallAuthorization::Authorized,
+        instruments: &instruments,
+        provider_id: "fake",
+        provider_resolver: &resolver,
+        readiness_evaluator: &evaluator,
+        mode: AutonomousCompletedBarDriverMode::RunningDispatch,
+    })
+    .await
+    .expect("driver tick must not error");
+    assert_eq!(
+        outcome,
+        AutonomousCompletedBarDriverOutcome::DispatchEvaluationEvidenceMissing {
+            bar_end_ts: expected_ts,
+            reason_code: "evaluation_row_absent",
+        },
+        "a strategy callback result under a diverged identity must never complete the claim"
+    );
+
+    let claim = mqk_db::fetch_autonomous_daily_bar_dispatch(
+        &pool,
+        operation.operation_id,
+        symbol,
+        timeframe,
+        expected_ts,
+    )
+    .await
+    .expect("claim fetch ok")
+    .expect("claim row exists");
+    assert_eq!(
+        claim.status,
+        mqk_db::DISPATCH_STATUS_FAILED,
+        "the claim must be marked failed, never left ambiguously claimed"
+    );
+    assert!(claim.evaluation_id.is_none());
+
+    let after = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation.operation_id)
+        .await
+        .expect("fetch ok")
+        .expect("row exists");
+    assert_eq!(
+        after.bars_dispatched, 0,
+        "a failed claim must never advance the dispatched-bar counter"
+    );
+
+    cleanup_adapter_slot(&pool, &adapter_id).await;
+}
+
+// ---------------------------------------------------------------------------
+// D4 REPAIR 4 — completion store-error/uncertainty is never silently
+// reported as success
+// ---------------------------------------------------------------------------
+//
+// Required assertion 12: a `complete_autonomous_daily_bar_dispatch` failure
+// must trigger one authoritative re-read; when that re-read cannot confirm
+// the exact expected evaluation id as durably `completed` (here: the real
+// write never happened at all, via the test-only fault seam), the claim must
+// never be reported `DispatchCompleted`, and the strategy evaluation itself
+// must never be automatically rerun.
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+async fn phase_d_completion_store_error_reconfirms_via_authoritative_re_read_and_fails_closed() {
+    let Some(pool) = maybe_db("pd_completion_fault").await else {
+        return;
+    };
+    let adapter_id = format!("zzpdcf-{}", unique_suffix());
+    let timing = light_timing();
+    let symbol = "ZZPDCFAULT";
+    let strategy_id = "swing_momentum";
+    let timeframe = "5m";
+
+    let mut operation = create_light_operation(
+        &pool,
+        &adapter_id,
+        symbol,
+        strategy_id,
+        timeframe,
+        &timing,
+        mqk_db::STATE_AWAITING_OPEN,
+    )
+    .await;
+    let run_id = Uuid::new_v4();
+    operation.state = mqk_db::STATE_RUNNING.to_string();
+    operation.run_id = Some(run_id);
+
+    let assignment_config = fixture_assignment_config(symbol, strategy_id, timeframe);
+    let assignment_identity = daemon_state::derive_assignment_identity(&assignment_config);
+    let binding = fixture_binding(symbol, strategy_id, 300);
+    let runtime_binding_identity = daemon_state::derive_runtime_binding_identity(&binding);
+    let instruments = vec![fixture_instrument(symbol, "fake", symbol, timeframe)];
+    let state = running_dispatch_eligible_state(pool.clone(), run_id).await;
+    state
+        .set_completed_bar_completion_fault_for_test(true)
+        .await;
+
+    // A hardcoded symbol is reused across runs of this test file; a prior
+    // interrupted run could leave a stray row that would otherwise pollute
+    // the by-symbol evaluation-count assertions below.
+    sqlx::query("delete from strategy_signal_evaluations where symbol = $1")
+        .bind(symbol)
+        .execute(&pool)
+        .await
+        .expect("cleanup stray evaluation rows failed");
+
+    let expected_ts = timing.effective_open.timestamp() + 300;
+    set_light_freshness_override_for(expected_ts);
+    seed_light_bars(&pool, symbol, timeframe, &[expected_ts]).await;
+    let provider = Arc::new(FakeQueueProvider::new());
+    let resolver = FakeProviderResolver::new(provider);
+    let readiness = ready_readiness(symbol, timeframe, Some(expected_ts));
+    let evaluator = FakeReadinessEvaluator::queue(vec![readiness.clone(), readiness]);
+    let now = DateTime::<Utc>::from_timestamp(expected_ts + 10, 0).unwrap();
+
+    let outcome = tick_autonomous_completed_bar_driver(AutonomousCompletedBarDriverInput {
+        state: &state,
+        pool: &pool,
+        operation: &operation,
+        assignment_config: &assignment_config,
+        assignment_identity: &assignment_identity,
+        runtime_binding: &binding,
+        runtime_binding_identity: &runtime_binding_identity,
+        now_utc: now,
+        authorization: AutonomousProviderCallAuthorization::Authorized,
+        instruments: &instruments,
+        provider_id: "fake",
+        provider_resolver: &resolver,
+        readiness_evaluator: &evaluator,
+        mode: AutonomousCompletedBarDriverMode::RunningDispatch,
+    })
+    .await
+    .expect("driver tick must not error");
+    assert_eq!(
+        outcome,
+        AutonomousCompletedBarDriverOutcome::DispatchCompletionUnconfirmed {
+            bar_end_ts: expected_ts,
+            reason_code: "completion_write_error",
+        },
+        "a simulated completion store error whose re-read shows the claim still \
+         unconfirmed must never be reported as DispatchCompleted"
+    );
+
+    let claim = mqk_db::fetch_autonomous_daily_bar_dispatch(
+        &pool,
+        operation.operation_id,
+        symbol,
+        timeframe,
+        expected_ts,
+    )
+    .await
+    .expect("claim fetch ok")
+    .expect("claim row exists");
+    assert_eq!(
+        claim.status,
+        mqk_db::DISPATCH_STATUS_CLAIMED,
+        "the real completion write never ran, so the claim remains claimed, not completed"
+    );
+
+    let evals: i64 =
+        sqlx::query_scalar("select count(*) from strategy_signal_evaluations where symbol = $1")
+            .bind(symbol)
+            .fetch_one(&pool)
+            .await
+            .expect("count ok");
+    assert_eq!(
+        evals, 1,
+        "the strategy evaluation itself already ran exactly once and is never rerun"
+    );
+
+    // Clear the fault seam and tick again: the still-`claimed` row must be
+    // reclassified to `uncertain` on the second claim attempt (never a
+    // second strategy invocation, never automatic redispatch).
+    state
+        .set_completed_bar_completion_fault_for_test(false)
+        .await;
+    let readiness2 = ready_readiness(symbol, timeframe, Some(expected_ts));
+    let evaluator2 = FakeReadinessEvaluator::queue(vec![readiness2.clone(), readiness2]);
+    let provider2 = Arc::new(FakeQueueProvider::new());
+    let resolver2 = FakeProviderResolver::new(provider2);
+    let outcome2 = tick_autonomous_completed_bar_driver(AutonomousCompletedBarDriverInput {
+        state: &state,
+        pool: &pool,
+        operation: &operation,
+        assignment_config: &assignment_config,
+        assignment_identity: &assignment_identity,
+        runtime_binding: &binding,
+        runtime_binding_identity: &runtime_binding_identity,
+        now_utc: now + chrono::Duration::seconds(5),
+        authorization: AutonomousProviderCallAuthorization::Authorized,
+        instruments: &instruments,
+        provider_id: "fake",
+        provider_resolver: &resolver2,
+        readiness_evaluator: &evaluator2,
+        mode: AutonomousCompletedBarDriverMode::RunningDispatch,
+    })
+    .await
+    .expect("second driver tick must not error");
+    assert!(
+        matches!(
+            outcome2,
+            AutonomousCompletedBarDriverOutcome::DispatchClaimUnresolved { .. }
+        ),
+        "no automatic redispatch of an unconfirmed claim, got {outcome2:?}"
+    );
+    let evals_after: i64 =
+        sqlx::query_scalar("select count(*) from strategy_signal_evaluations where symbol = $1")
+            .bind(symbol)
+            .fetch_one(&pool)
+            .await
+            .expect("count ok");
+    assert_eq!(
+        evals_after, 1,
+        "no second strategy invocation for the same claim identity"
+    );
 
     cleanup_adapter_slot(&pool, &adapter_id).await;
 }
@@ -1190,6 +1562,31 @@ fn pd_expected_bar_window() -> Vec<i64> {
     .expect("PD expected 5m window resolves")
 }
 
+/// D4 REPAIR 6: the exact completed-bar history expected at a genuine
+/// preopen instant (before the current session's own grid has produced any
+/// closed bar) — `expected_intraday_end_ts_window` spills entirely into the
+/// previous trading session's own tail grid in that case (see its own doc
+/// comment), never into `pd_expected_bar_window`'s today-dated window. Using
+/// the wrong window here would seed bars the preopen readiness evaluation
+/// (evaluated at `preopen_now`, not the later `pd_now()`) never actually
+/// expects, and the gate would still — correctly — refuse.
+fn pd_preopen_expected_bar_window(preopen_now: DateTime<Utc>) -> Vec<i64> {
+    let calendar_provider = daemon_state::market_calendar::NyseWeekdaysProvider;
+    let schedule = daemon_state::market_calendar::resolve_market_session_schedule(
+        &calendar_provider,
+        preopen_now,
+    );
+    mqk_daemon::daily_data_readiness::expected_intraday_end_ts_window(
+        &calendar_provider,
+        &schedule,
+        preopen_now.timestamp(),
+        PD_TIMEFRAME_SECS,
+        0,
+        PD_REQUIRED_BARS,
+    )
+    .expect("PD preopen expected 5m window resolves")
+}
+
 async fn pd_seed_bars(pool: &sqlx::PgPool, expected_ts: &[i64]) {
     sqlx::query("delete from md_bars where symbol = $1 and timeframe = $2")
         .bind(PD_SYMBOL)
@@ -1518,6 +1915,29 @@ async fn phase_d_full_day_lifecycle() {
     };
     let preopen_now = plan.preopen_start_utc + chrono::Duration::minutes(1);
 
+    // D4 REPAIR 6: the completed-bar driver's own readiness evaluation is
+    // keyed on whatever `now_utc` its caller passes — the preopen tick below
+    // passes `preopen_now`, not the later `pd_now()`. At a genuine preopen
+    // instant (before the current session's grid has closed any bar),
+    // `expected_intraday_end_ts_window` spills entirely into the *previous*
+    // trading session's own tail grid — a different, earlier bar window than
+    // `pd_expected_bar_window` (today's window, expected once running
+    // dispatch begins at `pd_now()`). Seeding only the preopen-relevant tail
+    // *now* — the later today-dated window is seeded further below,
+    // immediately before the "open and start" phase, exactly as real ingest
+    // timing would produce it — is what "the exact completed-bar history
+    // expected at the preopen instant" concretely means: seeding today's
+    // still-in-the-future bars this early would make the readiness gate see
+    // provenance it cannot yet honestly have (`latest_bar_future`), which is
+    // itself a real, correct block this patch must not paper over.
+    let preopen_expected_bars = pd_preopen_expected_bar_window(preopen_now);
+    let preopen_expected_ts = *preopen_expected_bars
+        .last()
+        .expect("non-empty preopen window");
+    let expected_bars = pd_expected_bar_window();
+    let last_expected_ts = *expected_bars.last().expect("non-empty window");
+    pd_seed_bars(&pool, &preopen_expected_bars).await;
+
     let preopen_outcome = tick_autonomous_daily_coordinator(AutonomousDailyCoordinatorTickInput {
         state: &st,
         now_utc: preopen_now,
@@ -1532,18 +1952,9 @@ async fn phase_d_full_day_lifecycle() {
         "PD: preopen must never itself reach a real start"
     );
 
-    // Real preopen ticks happen before any completed bar could genuinely
-    // exist yet — `md_bars` is intentionally left empty by `pd_daemon_state`
-    // until immediately before the "open and start" phase below (seeding
-    // the full window this early would make every bar look like it closed
-    // in the future relative to an authentic preopen `now_utc`). With zero
-    // bars, this fixture's strict daily-data-readiness gate durably records
-    // `manual_intervention_required`/`market_data_missing` rather than a
-    // softer "waiting" state — a genuine, pre-existing production nuance
-    // this patch does not change or weaken. What matters for Phase D is the
-    // safety invariant below: preopen must never create a claim, evaluate a
-    // strategy, or submit an order, regardless of which specific
-    // non-running state the row lands in.
+    // Zero claim, zero strategy evaluation, zero order regardless of which
+    // specific non-running state the row lands in — the safety invariant
+    // Phase D exists to prove, independent of readiness outcome.
     let preopen_operation = mqk_db::fetch_autonomous_daily_operation_for_slot(
         &pool,
         market_date,
@@ -1556,14 +1967,12 @@ async fn phase_d_full_day_lifecycle() {
     assert_ne!(preopen_operation.state, mqk_db::STATE_RUNNING);
     assert!(preopen_operation.run_id.is_none());
 
-    let expected_bars = pd_expected_bar_window();
-    let last_expected_ts = *expected_bars.last().expect("non-empty window");
     let claim_before_start = mqk_db::fetch_autonomous_daily_bar_dispatch(
         &pool,
         preopen_operation.operation_id,
         PD_SYMBOL,
         PD_TIMEFRAME,
-        last_expected_ts,
+        preopen_expected_ts,
     )
     .await
     .expect("PD: claim lookup ok");
@@ -1572,18 +1981,24 @@ async fn phase_d_full_day_lifecycle() {
         "preopen must create zero dispatch claim"
     );
 
+    // D4 REPAIR 6: the real production completed-bar adapter, ticked at the
+    // real preopen instant, must select `PrepareDataOnly` and durably
+    // observe the exact expected preopen bar — never a claim, never a
+    // strategy call, never a provider call (the exact bar is already local).
     let preopen_driver_tick = tick_autonomous_completed_bar_driver_from_state(&st, preopen_now)
         .await
         .expect("PD: preopen driver tick must not error");
-    assert!(
-        !matches!(
-            preopen_driver_tick,
-            AutonomousCompletedBarProductionTickOutcome::DriverOutcome {
-                mode: AutonomousCompletedBarDriverMode::RunningDispatch,
-                ..
-            }
-        ),
-        "PD: preopen must never select RunningDispatch, got {preopen_driver_tick:?}"
+    assert_eq!(
+        preopen_driver_tick,
+        AutonomousCompletedBarProductionTickOutcome::DriverOutcome {
+            operation_id: preopen_operation.operation_id,
+            mode: AutonomousCompletedBarDriverMode::PrepareDataOnly,
+            outcome: AutonomousCompletedBarDriverOutcome::BarObserved {
+                bar_end_ts: preopen_expected_ts
+            },
+        },
+        "PD: preopen must select PrepareDataOnly and durably observe the exact expected bar, \
+         got {preopen_driver_tick:?}"
     );
 
     // Mode selection itself (preparing_data/awaiting_open/... ->
@@ -1619,40 +2034,40 @@ async fn phase_d_full_day_lifecycle() {
         "zero strategy evaluation before runtime start"
     );
 
-    // The strict preopen readiness check durably degraded the row to
-    // `manual_intervention_required` (real, correct behavior for a
-    // genuinely bar-less preopen instant). `manual_intervention_required`
-    // is deliberately sticky and does not self-clear merely because data
-    // later appears — an explicit corrective transition (the same
-    // operator-style unstick edge the legal state-machine defines:
-    // `manual_intervention_required -> preparing_data`) is required before
-    // ordinary ticking can resume, exactly like a real operator clearing a
-    // preopen data-availability alert once feeds start flowing.
+    // D4 REPAIR 6: no manual unstick transition is used anywhere in this
+    // fixture. The row must never have entered `manual_intervention_required`
+    // at all, the exact preopen expected bar must be durably recorded as
+    // observed, and zero provider calls were made (the bar was already
+    // local).
     let preopen_row =
         mqk_db::fetch_autonomous_daily_operation_by_id(&pool, preopen_operation.operation_id)
             .await
             .expect("fetch ok")
             .expect("row exists");
-    if preopen_row.state == mqk_db::STATE_MANUAL_INTERVENTION_REQUIRED {
-        apply_transition(
-            &pool,
-            &preopen_row,
-            mqk_db::STATE_PREPARING_DATA,
-            None,
-            None,
-            preopen_now,
-            None,
-            "test: operator clears preopen data-availability block",
-        )
-        .await
-        .expect("PD: operator unstick transition must succeed");
-    }
+    assert_ne!(
+        preopen_row.state,
+        mqk_db::STATE_MANUAL_INTERVENTION_REQUIRED,
+        "PD: real autonomous preopen must never enter manual_intervention_required"
+    );
+    assert_eq!(
+        preopen_row.last_completed_bar_ts,
+        Some(preopen_expected_ts),
+        "PD: the exact preopen expected bar must become durably observed"
+    );
+    assert_eq!(
+        preopen_row.provider_poll_attempt_count, 0,
+        "PD: zero provider calls when the exact expected bar is already local"
+    );
 
     // ---------------------------------------------------------------------
     // Open and start: canonical coordinator start binds an exact run_id.
     // Bars are seeded now, immediately before the instant they are dated
     // for (`pd_now()`) — matching real ingest timing, where a bar exists
-    // only once its own close time has genuinely passed.
+    // only once its own close time has genuinely passed. This replaces the
+    // preopen tail window seeded above (`pd_seed_bars` wipes and reinserts);
+    // the earlier preopen bar's observation is already durably recorded on
+    // the operation row and does not depend on the row still being present
+    // in `md_bars`.
     // ---------------------------------------------------------------------
     pd_seed_bars(&pool, &expected_bars).await;
     // `dispatch_by_state` advances at most one durable state per tick (e.g.

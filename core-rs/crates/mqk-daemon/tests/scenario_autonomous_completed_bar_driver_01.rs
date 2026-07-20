@@ -1734,6 +1734,15 @@ async fn active_bootstrap_state(pool: sqlx::PgPool) -> state::AppState {
 async fn running_dispatch_eligible_state(pool: sqlx::PgPool, run_id: Uuid) -> state::AppState {
     let state = active_bootstrap_state(pool).await;
     state.inject_running_loop_for_test(run_id).await;
+    // D4 REPAIR 2: `AppState::record_signal_evaluation` derives its
+    // evaluation identity from `status.active_run_id`, not from
+    // `execution_loop`'s injected ownership — production keeps both in sync
+    // via `publish_status` on every real start; this light fixture must do
+    // the same explicitly, or the durable evaluation row's run_id would
+    // silently diverge from the exact run_id a completed-bar claim's own
+    // identity expects (an evaluation-lineage mismatch, not a real
+    // production gap).
+    state.status.write().await.active_run_id = Some(run_id);
     state
 }
 
@@ -3295,6 +3304,19 @@ async fn repair10_17_restart_does_not_redispatch_completed_exact_bar() {
         );
     }
 
+    let claim_evaluation_id = mqk_db::fetch_autonomous_daily_bar_dispatch(
+        &pool,
+        operation.operation_id,
+        "ZZDRVR10I",
+        "5m",
+        expected_ts,
+    )
+    .await
+    .expect("claim fetch ok")
+    .expect("claim row exists")
+    .evaluation_id
+    .expect("D4: completed claim must store a non-null evaluation_id");
+
     // "Restart": brand-new AppState and evaluator, same durable row. A real
     // restart re-establishes local ownership of the same durable `run_id`
     // (never a fresh one) — simulated here via a second
@@ -3337,10 +3359,14 @@ async fn repair10_17_restart_does_not_redispatch_completed_exact_bar() {
     // driver reconciles it via the local path and finds the completed
     // claim — `AlreadyDispatched`, not the old undifferentiated
     // `PollNotDue`. Zero re-poll is still proven by `provider2.calls()`.
+    //
+    // D4 REPAIR 3: the completed claim now durably stores its confirmed
+    // evaluation id (previously always `None` — the exact defect this patch
+    // closes), so the repeat tick's `AlreadyDispatched` carries it too.
     assert_eq!(
         outcome2,
         AutonomousCompletedBarDriverOutcome::AlreadyDispatched {
-            evaluation_id: None
+            evaluation_id: Some(claim_evaluation_id)
         }
     );
     assert_eq!(

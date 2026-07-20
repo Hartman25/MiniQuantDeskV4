@@ -2813,3 +2813,187 @@ async fn m01_task_level_prepare_to_running_exactly_once() {
     st.stop_for_shutdown().await;
     m01_clear_env();
 }
+
+// ---------------------------------------------------------------------------
+// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D4-EVALUATION-LINEAGE-AND-AUTONOMOUS-
+// PREOPEN-CLOSURE-01 REPAIR 7 — supervised task + real production adapter
+// under an injected caller-supplied clock
+// ---------------------------------------------------------------------------
+//
+// m01 above proves the production adapter's PrepareDataOnly ->
+// RunningDispatch transition thoroughly, but calls
+// `tick_autonomous_completed_bar_driver_from_state` directly — it never
+// exercises the supervised task (spawn/supervisor/cancellation) at all. This
+// test reuses m01's exact same real fixture (registries, seeded bars, mock
+// Alpaca server, real coordinator start) but drives every tick through the
+// real spawned supervised task (`spawn_autonomous_completed_bar_driver_task`
+// -> the unmodified production tick adapter) under the REPAIR 7 clock seam,
+// then proves shutdown cancels and awaits that same task.
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+async fn n01_supervised_task_drives_real_adapter_under_injected_clock() {
+    use mqk_daemon::state::autonomous_daily_coordinator::{
+        tick_autonomous_daily_coordinator, AutonomousDailyCoordinatorTickInput,
+        AutonomousDailyCoordinatorTickOutcome,
+    };
+
+    let st = m01_daemon_state().await;
+    {
+        let mut ig = st.integrity.write().await;
+        ig.disarmed = false;
+        ig.halted = false;
+    }
+    let pool = st.db.clone().expect("n01: db must be configured");
+    mqk_db::persist_arm_state_canonical(&pool, mqk_db::ArmState::Armed, None)
+        .await
+        .expect("n01: persist ARMED failed");
+    // Fast cadence so the second (RunningDispatch) tick does not require
+    // waiting out the 15s production default.
+    std::env::set_var(COMPLETED_BAR_TICK_SECS_ENV, "1");
+
+    let market_date = chrono::NaiveDate::from_ymd_opt(2024, 4, 15).unwrap();
+
+    // Durable pre-runtime operation, created by the real coordinator at a
+    // pre-preopen instant — identical to m01's step 1.
+    let pre_outcome = tick_autonomous_daily_coordinator(AutonomousDailyCoordinatorTickInput {
+        state: &st,
+        now_utc: m01_pre_preopen(),
+    })
+    .await
+    .expect("n01: pre-preopen tick must not error");
+    assert_eq!(
+        pre_outcome,
+        AutonomousDailyCoordinatorTickOutcome::WaitingForPreopen
+    );
+    let operation = mqk_db::fetch_autonomous_daily_operation_for_slot(
+        &pool,
+        market_date,
+        "PAPER",
+        M01_ADAPTER_ID,
+    )
+    .await
+    .expect("n01: fetch operation failed")
+    .expect("n01: operation row must exist");
+
+    // REPAIR 7: control the supervised task's own clock. Production never
+    // installs this — the seam defaults to `None`, and the task keeps
+    // capturing `Utc::now()` once per tick.
+    st.set_completed_bar_task_clock_override_for_test(Some(m01_t1_prepare()))
+        .await;
+
+    let spawn_outcome = spawn_autonomous_completed_bar_driver_task(Arc::clone(&st)).await;
+    assert_eq!(
+        spawn_outcome,
+        AutonomousCompletedBarTaskSpawnOutcome::Started
+    );
+
+    // Wait for the real supervised task's own tick (not a direct adapter
+    // call) to invoke the real production adapter in PrepareDataOnly.
+    let mut observed_prepare = false;
+    for _ in 0..500 {
+        let truth = st.completed_bar_task_truth().await;
+        if truth.mode == Some(AutonomousCompletedBarDriverMode::PrepareDataOnly) {
+            observed_prepare = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        observed_prepare,
+        "n01: the supervised task must invoke the real production adapter in PrepareDataOnly \
+         under the injected clock"
+    );
+    assert_eq!(
+        m01_dispatch_claim_count(&pool, operation.operation_id).await,
+        0,
+        "n01: PrepareDataOnly (via the supervised task) must create zero dispatch claims"
+    );
+    assert_eq!(
+        m01_signal_evaluation_count(&pool).await,
+        0,
+        "n01: PrepareDataOnly (via the supervised task) must invoke zero strategy evaluations"
+    );
+
+    // Canonical runtime start via the real durable coordinator — identical
+    // to m01's step 3, running concurrently with the live supervised task.
+    let mut started_run_id = None;
+    for _ in 0..6 {
+        let outcome = tick_autonomous_daily_coordinator(AutonomousDailyCoordinatorTickInput {
+            state: &st,
+            now_utc: m01_t_start(),
+        })
+        .await
+        .expect("n01: start-path tick must not error");
+        if let AutonomousDailyCoordinatorTickOutcome::Started { run_id } = outcome {
+            started_run_id = Some(run_id);
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let run_id = started_run_id.expect("n01: coordinator must reach Started");
+    tokio::time::sleep(Duration::from_millis(150)).await;
+
+    // Advance the supervised task's controlled clock into the dispatch
+    // window — the next real tick must invoke the adapter in RunningDispatch
+    // and complete the dispatch, all through the unmodified supervised task.
+    st.set_completed_bar_task_clock_override_for_test(Some(m01_t2_dispatch()))
+        .await;
+
+    let mut observed_dispatch = false;
+    for _ in 0..500 {
+        let truth = st.completed_bar_task_truth().await;
+        if truth.mode == Some(AutonomousCompletedBarDriverMode::RunningDispatch)
+            && truth.last_outcome_code == Some("dispatch_completed")
+        {
+            observed_dispatch = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        observed_dispatch,
+        "n01: the supervised task must invoke the real production adapter in RunningDispatch \
+         and complete the dispatch under the injected clock, got {:?}",
+        st.completed_bar_task_truth().await
+    );
+    assert_eq!(
+        m01_dispatch_claim_count(&pool, operation.operation_id).await,
+        1,
+        "n01: exactly one durable dispatch claim"
+    );
+    assert_eq!(
+        m01_signal_evaluation_count(&pool).await,
+        1,
+        "n01: exactly one strategy dispatch invocation"
+    );
+
+    // Shutdown cancels and awaits this same supervised task.
+    st.cancel_and_wait_completed_bar_task_for_shutdown().await;
+    assert!(
+        !st.completed_bar_task_claimed_for_test(),
+        "n01: spawn claim must be released after shutdown"
+    );
+    assert_eq!(
+        st.completed_bar_task_truth().await.liveness,
+        AutonomousCompletedBarDriverTaskLiveness::Stopped
+    );
+    let last_tick_at_shutdown = st.completed_bar_task_truth().await.last_tick_utc;
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    assert_eq!(
+        st.completed_bar_task_truth().await.last_tick_utc,
+        last_tick_at_shutdown,
+        "n01: no tick may occur after cancel_and_wait_completed_bar_task_for_shutdown returns"
+    );
+
+    let outbox_count: i64 = sqlx::query_scalar("select count(*) from oms_outbox where run_id = $1")
+        .bind(run_id)
+        .fetch_one(&pool)
+        .await
+        .unwrap();
+    assert_eq!(outbox_count, 0, "n01: zero paper/live orders");
+
+    st.stop_for_shutdown().await;
+    m01_clear_env();
+    std::env::remove_var(COMPLETED_BAR_TICK_SECS_ENV);
+}

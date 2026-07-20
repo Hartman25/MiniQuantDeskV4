@@ -20,10 +20,12 @@ Use the root `README.md` for the high-level system story.
 ## Current proved posture
 
 **Repository snapshot used for this update (2026-07-19):** local `main` at
-`98d6d1d82d7ddc0439498480b5d179eba2533d50`
-(`fix: close completed-bar task supervision gaps` — D3, accepted), plus the
-AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D4 patch on top of it (implementation
-complete, awaiting ChatGPT and operator acceptance).
+`8b8d388c7e2fdca7c850ecb436c2ebce4f329382`
+(`fix: close autonomous phase D integration` — D4, implementation complete
+awaiting acceptance), plus the
+AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D4-EVALUATION-LINEAGE-AND-AUTONOMOUS-PREOPEN-CLOSURE-01
+patch on top of it (implementation complete, awaiting ChatGPT and operator
+acceptance).
 
 The strongest current operational route is:
 
@@ -74,8 +76,33 @@ ChatGPT/operator acceptance:
   start, running dispatch, runtime interruption/recovery (a real replacement `run_id`), session
   close, and shutdown together for the first time
 
-After D4 acceptance, Bundle 3 still requires Phase E durable daily outcome/no-trade truth and
-read-only API work, Phase F GUI/runbook/soak preparation, and Phase G final closure.
+Layered on top of D4, also present but not yet independently accepted (D4 evaluation-lineage
+repair, `AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D4-EVALUATION-LINEAGE-AND-AUTONOMOUS-PREOPEN-CLOSURE-01`):
+
+- a shared deterministic identity helper (`AppState::derive_strategy_signal_evaluation_id`) used by
+  both the signal-evaluation journal writer and the completed-bar claim path — never a second,
+  independently-derived algorithm
+- the claim path now durably confirms the exact `strategy_signal_evaluations` row
+  (run_id/strategy_id/symbol/timeframe/decision_stage) before completing a claim, and persists that
+  confirmed evaluation id (`complete_autonomous_daily_bar_dispatch` previously always passed `None`)
+- the completion write's `Result<bool>` is captured and matched explicitly; `Ok(false)`/`Err` both
+  route through one authoritative re-read before ever reporting `DispatchCompleted` — a strategy
+  callback result alone is no longer sufficient, and the strategy evaluation itself is never
+  automatically rerun
+- the concurrency proof's decoy bar previously reused the claimed bar's own `end_ts`; it now uses a
+  genuinely distinct prior bar
+- the full-day lifecycle test's preopen phase previously called `apply_transition` to manually clear
+  `manual_intervention_required`; it now seeds the correct previous-session tail bar window the
+  readiness gate actually expects at a genuine preopen instant, resolving cleanly through real
+  production readiness truth with zero manual unstick, and positively proves the real production
+  adapter selects `PrepareDataOnly` and durably observes the exact expected bar
+- a new test drives the real supervised completed-bar task (not a direct adapter call) under an
+  injected clock seam (`AppState::completed_bar_task_clock_override`, unused in production) through
+  `PrepareDataOnly` and `RunningDispatch`, then proves shutdown cancels and awaits that same task
+
+After D4 and its evaluation-lineage repair are both accepted, Bundle 3 still requires Phase E
+durable daily outcome/no-trade truth and read-only API work, Phase F GUI/runbook/soak preparation,
+and Phase G final closure.
 
 ### Operational meaning
 
@@ -927,8 +954,8 @@ Recommended discipline:
 
 Be honest about these:
 
-- Bundle 3 is not closed; D4 (integrated lifecycle proof and dispatch-ownership race closure) is implementation complete but awaiting independent ChatGPT/operator acceptance
-- the current main branch should not begin an unattended soak until D4 and the later Bundle 3 phases (E/F/G) are accepted; controlled, operator-supervised autonomous Paper + Alpaca operation is the current Bundle 3 target, not unattended soak
+- Bundle 3 is not closed; D4 (integrated lifecycle proof and dispatch-ownership race closure) and its evaluation-lineage repair are both implementation complete but awaiting independent ChatGPT/operator acceptance
+- the current main branch should not begin an unattended soak until D4 (both layers) and the later Bundle 3 phases (E/F/G) are accepted; controlled, operator-supervised autonomous Paper + Alpaca operation is the current Bundle 3 target, not unattended soak
 - Bundle 4 durable paper cash/positions/lots/cost basis/P&L truth is still open
 - real paper fill, reconcile-after-fill, Discord lifecycle, restart, and repeated-session evidence remain incomplete
 - the daemon/operator plane is materially stronger, but some deeper GUI detail surfaces remain intentionally deferred or unmounted rather than faked

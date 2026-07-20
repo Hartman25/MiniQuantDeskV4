@@ -44,11 +44,14 @@ Safety is enforced architecturally, not socially.
 MiniQuantDeskV4 has real institutional bones and a materially stronger proof posture than scaffold-stage trading repos.
 
 **Repository snapshot used for this update (2026-07-19):** local `main` at
-`98d6d1d82d7ddc0439498480b5d179eba2533d50`
-(`fix: close completed-bar task supervision gaps`), plus the
-AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D4 patch on top of it (Phase D integrated
-lifecycle proof and dispatch-ownership race closure — implementation
-complete, awaiting ChatGPT and operator acceptance; see below).
+`8b8d388c7e2fdca7c850ecb436c2ebce4f329382`
+(`fix: close autonomous phase D integration`), plus the
+AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D4-EVALUATION-LINEAGE-AND-AUTONOMOUS-PREOPEN-CLOSURE-01
+patch on top of it (evaluation-lineage binding for completed-bar dispatch
+claims, corrected concurrency-decoy fixture, a real autonomous preopen
+proof replacing a manual-unstick workaround, and a supervised-task proof
+under an injected clock — implementation complete, awaiting ChatGPT and
+operator acceptance; see below).
 
 The strongest current operational route is:
 
@@ -66,7 +69,8 @@ What that means in plain English:
 - production `main.rs` starts the supervised completed-bar task instead of the legacy blind-timer ticker; the legacy ticker (`state::autonomous_bar_ticker`) remains in source for compatibility tests only and is never spawned in production
 - D3 (completed-bar task terminal supervision, durable critical-outcome handling, task-level exactly-once proof) is accepted complete
 - D4 (integrated preopen-to-shutdown lifecycle proof, plus closing a confirmed completed-bar dispatch-ownership race against the ordinary execution loop) is implementation complete, awaiting ChatGPT and operator acceptance
-- Bundle 3 is still **open** — D4 acceptance, Phase E durable outcome/no-trade truth, GUI/runbook/soak preparation, and closure audit all remain
+- a follow-on D4 repair (evaluation-lineage binding: a completed dispatch claim now durably records and confirms the exact strategy-evaluation row that proves it ran, never `None`; the completion write's outcome is honored instead of ignored; the concurrency proof's decoy fixture and the full-day preopen fixture were both corrected; a supervised-task proof under an injected clock was added) is also implementation complete, awaiting ChatGPT and operator acceptance
+- Bundle 3 is still **open** — D4 acceptance (both layers above), Phase E durable outcome/no-trade truth, GUI/runbook/soak preparation, and closure audit all remain
 - paper+paper is not treated as an authoritative execution path
 - backtest deployment through the daemon is intentionally refused fail-closed
 - live-shadow and live-capital remain outside the current operational finish line
@@ -102,9 +106,17 @@ Implemented on the local `main` worktree (D4), but not yet independently accepte
 - a deterministic concurrency proof for that fix (both interleaving orderings)
 - one integrated scenario test driving a synthetic Paper+Alpaca day through preopen, canonical start, running dispatch, runtime interruption/recovery, session close, and shutdown together for the first time
 
+Layered on top of D4, also implemented but not yet independently accepted (D4 evaluation-lineage repair):
+
+- a completed dispatch claim now durably stores and confirms the exact `strategy_signal_evaluations` row that proves it ran (a shared deterministic identity helper, never a second algorithm); a strategy callback result alone can no longer complete a claim without that durable confirmation
+- the completion write's `Ok(false)`/`Err` outcomes are honored via one authoritative re-read instead of being silently treated as success
+- the concurrency proof's decoy fixture now uses a genuinely distinct bar identity, not merely a distinct tick counter
+- the full-day lifecycle test's preopen phase now resolves through real production readiness truth (the correct previous-session tail bar window, seeded before the tick) instead of a manual `apply_transition` unstick workaround
+- a new test proves the supervised completed-bar task itself — not a direct adapter call — invokes the real production adapter under a controlled clock across preopen and running dispatch, then proves shutdown cancels and awaits that same task
+
 Still required before Bundle 3 closes:
 
-1. independent ChatGPT/operator acceptance of D4
+1. independent ChatGPT/operator acceptance of D4 and its evaluation-lineage repair
 2. add Phase E durable end-of-day activity/no-trade outcome and read-only API truth
 3. finish Phase F GUI, runbook, and soak-evidence preparation
 4. complete Phase G closure audit and ledger reconciliation
@@ -295,7 +307,7 @@ Operationally, `MAIN` is the canonical engine.
 
 Be honest about the open edges.
 
-- Bundle 3 remains open; D4 (integrated lifecycle proof and dispatch-ownership race closure) is implementation complete and is the immediate item awaiting independent ChatGPT/operator acceptance
+- Bundle 3 remains open; D4 (integrated lifecycle proof and dispatch-ownership race closure) and its follow-on evaluation-lineage repair (durable claim-to-evaluation binding, corrected fixtures, injected-clock supervised-task proof) are both implementation complete and are the immediate items awaiting independent ChatGPT/operator acceptance
 - durable daily outcome/no-trade classification (Phase E), final GUI/runbook/soak preparation (Phase F), and closure audit (Phase G) remain
 - Bundle 4 durable paper cash/positions/lots/cost basis/P&L truth has not started — this is required before trusting the accounting of any extended autonomous soak, not merely a nice-to-have
 - the current autonomous lane is long-only and single-symbol; multi-symbol rollout is deferred until after the soak

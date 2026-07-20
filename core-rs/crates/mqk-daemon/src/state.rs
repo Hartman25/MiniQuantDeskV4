@@ -454,6 +454,25 @@ pub struct AppState {
             Option<Arc<autonomous_completed_bar_driver::AutonomousCompletedBarPostClaimTestHook>>,
         >,
     >,
+    /// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D4-EVALUATION-LINEAGE-AND-
+    /// AUTONOMOUS-PREOPEN-CLOSURE-01 REPAIR 4 test seam: when `true`,
+    /// `claim_and_dispatch_observed_bar` simulates a
+    /// `complete_autonomous_daily_bar_dispatch` store error immediately
+    /// after a confirmed evaluation, instead of performing the real write —
+    /// so the mandatory authoritative re-read-on-store-error path can be
+    /// proven deterministically. `false` in production and for every test
+    /// that does not explicitly install it; the real completion write always
+    /// runs when this is `false`.
+    completed_bar_completion_fault_test_hook: Arc<AtomicBool>,
+    /// REPAIR 7: test-only clock seam for the supervised completed-bar
+    /// task's own production tick (`autonomous_completed_bar_task::run_one_production_tick`).
+    /// `None` in production and for every test that does not explicitly
+    /// install it — production always captures `Utc::now()` once per task
+    /// tick. When `Some`, the supervised task's tick uses this caller-
+    /// supplied instant instead, while still going through the identical
+    /// task ownership, supervisor, cancellation, production adapter, and
+    /// durable operation lookup real production ticks use.
+    completed_bar_task_clock_override: Arc<Mutex<Option<DateTime<Utc>>>>,
     /// B3: Unix-second timestamp of the last `deposit_strategy_bar_input` call.
     ///
     /// Set to `input.end_ts` on every deposit; never cleared on stop/restart.
@@ -1328,6 +1347,8 @@ impl AppState {
             native_strategy_bootstrap: Arc::new(Mutex::new(None)),
             pending_strategy_bar_input: Arc::new(Mutex::new(None)),
             completed_bar_post_claim_test_hook: Arc::new(Mutex::new(None)),
+            completed_bar_completion_fault_test_hook: Arc::new(AtomicBool::new(false)),
+            completed_bar_task_clock_override: Arc::new(Mutex::new(None)),
             last_bar_input_ts: Arc::new(AtomicI64::new(0)),
             last_bar_signal_qty: Arc::new(AtomicI64::new(i64::MIN)),
             bar_tick_dispatch_count: Arc::new(AtomicU64::new(0)),
@@ -2126,6 +2147,38 @@ operator_reconcile_or_repair_required"
         self.completed_bar_post_claim_test_hook.lock().await.clone()
     }
 
+    /// D4 REPAIR 4: install (or clear) the completion-store-fault test seam.
+    /// Test seam only; never called in production.
+    pub async fn set_completed_bar_completion_fault_for_test(&self, inject: bool) {
+        self.completed_bar_completion_fault_test_hook
+            .store(inject, Ordering::SeqCst);
+    }
+
+    /// D4 REPAIR 4: whether the completion-store-fault test seam is
+    /// currently installed. `false` in production.
+    pub(crate) fn completed_bar_completion_fault_injected_for_test(&self) -> bool {
+        self.completed_bar_completion_fault_test_hook
+            .load(Ordering::SeqCst)
+    }
+
+    /// D4 REPAIR 7: install (or clear) the supervised completed-bar task's
+    /// clock override. Test seam only; never called in production. `None`
+    /// restores the production behavior of capturing `Utc::now()` once per
+    /// task tick.
+    pub async fn set_completed_bar_task_clock_override_for_test(&self, ts: Option<DateTime<Utc>>) {
+        *self.completed_bar_task_clock_override.lock().await = ts;
+    }
+
+    /// D4 REPAIR 7: resolve the instant one supervised completed-bar task
+    /// tick should use — the installed test override if present, otherwise
+    /// `Utc::now()` captured here (production's unchanged behavior).
+    pub(crate) async fn completed_bar_task_tick_clock(&self) -> DateTime<Utc> {
+        match *self.completed_bar_task_clock_override.lock().await {
+            Some(ts) => ts,
+            None => Utc::now(),
+        }
+    }
+
     /// AUTON-NO-TRADE-01: Record the outcome of a bar tick dispatch.
     ///
     /// Called from the execution loop after `tick_strategy_dispatch` returns
@@ -2424,6 +2477,34 @@ operator_reconcile_or_repair_required"
         result
     }
 
+    /// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D4-EVALUATION-LINEAGE-AND-
+    /// AUTONOMOUS-PREOPEN-CLOSURE-01 REPAIR 1: the one canonical deterministic
+    /// strategy-evaluation identity derivation. Both the signal-evaluation
+    /// journal writer ([`Self::record_signal_evaluation`]) and the
+    /// completed-bar dispatch-claim path
+    /// (`autonomous_completed_bar_driver::claim_and_dispatch_observed_bar`)
+    /// must call this same helper — never a second, independently-derived
+    /// identity algorithm. Preserves the exact pre-existing seed format:
+    /// `mqk.signal-evaluation.v1|{run_id-or-none}|{strategy_id}|{symbol}|{timeframe}|{now_tick}`.
+    pub(crate) fn derive_strategy_signal_evaluation_id(
+        run_id: Option<Uuid>,
+        strategy_id: &str,
+        symbol: &str,
+        timeframe: &str,
+        now_tick: u64,
+    ) -> Uuid {
+        let run_id_key = run_id
+            .map(|u| u.to_string())
+            .unwrap_or_else(|| "none".to_string());
+        Uuid::new_v5(
+            &Uuid::NAMESPACE_DNS,
+            format!(
+                "mqk.signal-evaluation.v1|{run_id_key}|{strategy_id}|{symbol}|{timeframe}|{now_tick}"
+            )
+            .as_bytes(),
+        )
+    }
+
     /// AUTON-NO-SIGNAL-OBS-01: one durable signal-evaluation journal write
     /// attempt, scoped to a single symbol/timeframe/tick.
     ///
@@ -2451,19 +2532,17 @@ operator_reconcile_or_repair_required"
             Some(q) if q < 0 => Some("sell".to_string()),
             _ => None,
         };
-        let run_id_key = run_id
-            .map(|u| u.to_string())
-            .unwrap_or_else(|| "none".to_string());
         // AUDIT-EVENT-DETERMINISM: deterministic UUIDv5, never Uuid::new_v4(),
         // so a duplicate write attempt for the same logical tick is a no-op
-        // (ON CONFLICT DO NOTHING) rather than a second row.
-        let evaluation_id = Uuid::new_v5(
-            &Uuid::NAMESPACE_DNS,
-            format!(
-                "mqk.signal-evaluation.v1|{}|{}|{}|{}|{}",
-                run_id_key, strategy_id, attempt.symbol, attempt.timeframe, attempt.now_tick
-            )
-            .as_bytes(),
+        // (ON CONFLICT DO NOTHING) rather than a second row. D4 REPAIR 1: the
+        // one canonical identity helper, shared with the completed-bar
+        // dispatch-claim path.
+        let evaluation_id = Self::derive_strategy_signal_evaluation_id(
+            run_id,
+            &strategy_id,
+            attempt.symbol,
+            attempt.timeframe,
+            attempt.now_tick,
         );
         let args = mqk_db::InsertStrategySignalEvaluationArgs {
             evaluation_id,

@@ -1220,6 +1220,28 @@ fn classify_completed_bar_driver_outcome(
             fault_class: "completed_bar_dispatch_claim_unresolved",
             detail: format!("dispatch claim status={status}"),
         },
+        // D4 REPAIR 2/4: the strategy callback returned a result, but the
+        // exact durable evaluation-lineage evidence this claim's
+        // deterministic identity requires could not be confirmed, or the
+        // completion write itself could not be durably confirmed. Both fail
+        // closed identically to an unresolved dispatch claim — never
+        // reported as success, never automatically redispatched.
+        O::DispatchEvaluationEvidenceMissing {
+            bar_end_ts,
+            reason_code,
+        } => D::Critical {
+            class: Class::Evidence,
+            fault_class: "completed_bar_dispatch_evaluation_evidence_missing",
+            detail: format!("bar_end_ts={bar_end_ts} reason_code={reason_code}"),
+        },
+        O::DispatchCompletionUnconfirmed {
+            bar_end_ts,
+            reason_code,
+        } => D::Critical {
+            class: Class::Evidence,
+            fault_class: "completed_bar_dispatch_completion_unconfirmed",
+            detail: format!("bar_end_ts={bar_end_ts} reason_code={reason_code}"),
+        },
         O::ObservedBarEvidenceInconsistent {
             expected_end_ts,
             reason_code,

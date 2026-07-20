@@ -13265,3 +13265,145 @@ PHASE D: OPEN pending independent D4 acceptance
 BUNDLE 3 (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-COMBINED): OPEN
 NEXT AFTER ACCEPTANCE: Phase E durable outcome/no-trade and API work
 ```
+
+## AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D4-EVALUATION-LINEAGE-AND-AUTONOMOUS-PREOPEN-CLOSURE-01
+
+Starting HEAD: `8b8d388c7e2fdca7c850ecb436c2ebce4f329382` ("fix: close
+autonomous phase D integration"). A second repair layered on the D4 commit
+above, closing five confirmed gaps in D4's own dispatch-completion truth and
+preopen proof that a further audit found before independent acceptance of
+the D4 patch was granted.
+
+**Evaluation-lineage binding (REPAIRs 1–4):** `claim_and_dispatch_observed_bar`
+previously (a) always passed `None` as the completed claim's evaluation id,
+even though the journal writer computes a deterministic identity for every
+row it writes, and (b) never inspected the completion write's own
+`Result<bool>` — `Ok(false)` or `Err` were both silently treated as success
+via a trailing `?` and an unconditional `Ok(DispatchCompleted)`. A strategy
+callback result alone was therefore sufficient to report a claim completed,
+with no durable evidence requirement. Fixed: one shared identity helper
+(`AppState::derive_strategy_signal_evaluation_id`, extracted from the
+pre-existing journal-writer formula, used by both the writer and the claim
+path); an exact durable-row confirmation
+(`mqk_db::fetch_strategy_signal_evaluation`, new read-only helper) checking
+run_id/strategy_id/symbol/timeframe/decision_stage before a claim may
+complete, failing closed to a new `DispatchEvaluationEvidenceMissing`
+outcome otherwise; `complete_autonomous_daily_bar_dispatch` now always
+called with `Some(expected_evaluation_id)`; the completion `Result` captured
+and matched explicitly, with `Ok(false)`/`Err` both routed through one
+shared authoritative re-read (new `DispatchCompletionUnconfirmed` outcome
+when the re-read cannot confirm an exact completed row with the expected
+id) — the strategy evaluation itself is never automatically rerun on any
+path.
+
+**Concurrency decoy bar-identity correction (REPAIR 5):** the concurrency
+proof's "unrelated execution-loop" decoy bar previously reused the same
+`end_ts` as the completed-bar claim's own expected bar (only `now_tick`
+differed). Both ordering tests now seed a genuinely separate prior bar
+(`decoy_ts = expected_ts - 300`) via a new multi-bar `seed_light_bars`
+helper, and additionally assert the claimed bar's evaluation id is durably
+stored, its exact evaluation row exists exactly once, and the repeat tick
+reports that same stored id.
+
+**Real autonomous preopen proof (REPAIR 6):** the full-day lifecycle test
+previously called `apply_transition` to manually clear
+`manual_intervention_required` at preopen, working around a genuine
+readiness block rather than resolving it. Root cause: the completed-bar
+driver's readiness evaluation at a genuine preopen instant expects the
+*previous* trading session's tail bar window (`expected_intraday_end_ts_window`'s
+own documented spillover behavior), not the later running-window bars —
+seeding only the wrong (later, today-dated) window, or seeding it too early
+relative to `preopen_now` (which produces a real `latest_bar_future` block),
+both leave the gate genuinely unsatisfied. A new
+`pd_preopen_expected_bar_window(preopen_now)` helper computes the correct
+tail window, seeded before the preopen tick; the later today-dated window
+continues to be seeded immediately before the "open and start" phase as
+before. With the correct window seeded, preopen resolves to `preparing_data`
+with zero blocker, and `apply_transition` is no longer called anywhere in
+the happy path. The test now positively asserts the real production
+adapter selects `PrepareDataOnly` and returns exactly
+`BarObserved { bar_end_ts: preopen_expected_ts }`, the row never enters
+`manual_intervention_required`, the exact preopen bar is durably observed,
+and zero provider calls were made.
+
+**Supervised task under an injected clock (REPAIR 7):** the existing
+task-level test proved the production adapter's `PrepareDataOnly` →
+`RunningDispatch` transition by calling the adapter function directly,
+never exercising the supervised task (spawn/supervisor/cancellation) at
+all. A narrow test-only clock seam (`AppState::completed_bar_task_clock_override`,
+`None`/unused in production) lets `autonomous_completed_bar_task::run_one_production_tick`
+resolve its `now_utc` from an injected instant instead of `Utc::now()` when
+a test has explicitly installed one. A new test reuses the existing m01
+fixture but drives every tick through the real
+`spawn_autonomous_completed_bar_driver_task` under the injected clock,
+proving the live supervised task itself (not a direct adapter call) invokes
+the real production adapter in `PrepareDataOnly` then `RunningDispatch`
+across a real coordinator start, and that shutdown cancels and awaits that
+same task.
+
+**Files changed:** `core-rs/crates/mqk-daemon/src/state.rs`,
+`core-rs/crates/mqk-daemon/src/state/autonomous_completed_bar_driver.rs`,
+`core-rs/crates/mqk-daemon/src/state/autonomous_completed_bar_task.rs`
+(exhaustive-match update only), `core-rs/crates/mqk-daemon/src/state/autonomous_daily_coordinator.rs`
+(exhaustive-match update only), `core-rs/crates/mqk-daemon/tests/scenario_autonomous_daily_phase_d_integration_01.rs`,
+`core-rs/crates/mqk-daemon/tests/scenario_autonomous_completed_bar_driver_01.rs`
+(one pre-existing assertion updated — it had asserted the old
+`evaluation_id: None` bug as correct behavior),
+`core-rs/crates/mqk-daemon/tests/scenario_autonomous_completed_bar_task_01.rs`,
+`core-rs/crates/mqk-db/src/strategy.rs` (new `fetch_strategy_signal_evaluation`
+helper), `core-rs/crates/mqk-db/tests/scenario_autonomous_daily_operation_data_evidence_01.rs`.
+No migration.
+
+**Documentation:** `docs/specs/autonomous_daily_paper_operations_01d_phase_d_closure.md`
+§12 (new section, this repair). New dedicated guard
+`scripts/guards/validate_autonomous_daily_paper_operations_01d4_evaluation_lineage_and_autonomous_preopen_closure_01.ps1`
+— the original D3/D4 guard (`validate_autonomous_daily_paper_operations_01d_phase_d_closure.ps1`)
+is unmodified and still passes, since D4.2's dispatch-ownership fix it
+validates is untouched by this repair.
+
+**Regressions (each binary run alone, `--include-ignored --test-threads=1`,
+isolated test Postgres on port 5434):**
+`scenario_autonomous_daily_phase_d_integration_01` 8/8 (6 original + 2 new),
+`scenario_autonomous_completed_bar_task_01` 49/49 (48 original + 1 new),
+`scenario_autonomous_completed_bar_driver_01` 56/56,
+`scenario_autonomous_daily_session_coordinator_01` 48/48,
+`scenario_autonomous_paper_day_lifecycle_auton12` 3/3,
+`scenario_daemon_runtime_lifecycle` 24/24,
+`scenario_multi_symbol_dispatch_loop_01` 8/8,
+`scenario_per_symbol_bar_window_01` 14/14,
+`scenario_signal_evaluation_journal_auton_no_signal_obs_01` 7/7,
+`scenario_autonomous_daily_operation_lifecycle_01` (mqk-db) 36/36,
+`scenario_autonomous_daily_operation_store_01` (mqk-db) 26/26,
+`scenario_autonomous_daily_operation_data_evidence_01` (mqk-db) 9/9 (8
+original + 1 new), `state::autonomous_bar_ticker::tests::` (`--lib`) 5/5.
+Zero failures. The complete daemon integration suite was deliberately not
+run.
+
+**Guards:** `validate_autonomous_daily_paper_operations_01a_audit.ps1` pass,
+`validate_daily_data_readiness_01e_closure.ps1` pass,
+`validate_autonomous_daily_paper_operations_01d_phase_d_closure.ps1` pass
+(unmodified), `validate_autonomous_daily_paper_operations_01d4_evaluation_lineage_and_autonomous_preopen_closure_01.ps1`
+pass (new), `check_unsafe_patterns.ps1` pass. **Migration:** none.
+**Format/lint:** `rustfmt --check` clean on every touched file; Clippy
+(`--tests`, filtered to touched files — the crate-wide `-D warnings` run
+surfaces ~28 pre-existing violations in files this patch never touched)
+clean on every touched file; `cargo check -p mqk-db -p mqk-runtime -p
+mqk-daemon` clean (only the pre-existing `sqlx-postgres` future-incompat
+note); `git diff --check` and `git diff --cached --check` clean.
+
+```text
+D4 (INTEGRATED-LIFECYCLE-PROOF-AND-PHASE-D-CLOSURE): IMPLEMENTATION COMPLETE
+  — AWAITING CHATGPT AND OPERATOR ACCEPTANCE (unchanged by this repair)
+D4-EVALUATION-LINEAGE-AND-AUTONOMOUS-PREOPEN-CLOSURE-01: IMPLEMENTATION
+  COMPLETE — AWAITING CHATGPT AND OPERATOR ACCEPTANCE
+  — bound every completed autonomous bar-dispatch claim to its exact durable
+  evaluation-lineage row; a strategy callback result alone can no longer
+  complete a claim; completion Ok(false)/Err both re-read authoritatively
+  before ever reporting success; concurrency proof's decoy bar identity
+  corrected; full-day lifecycle preopen now resolves through real production
+  readiness truth with zero manual unstick; supervised task proven under an
+  injected clock for the first time.
+PHASE D: OPEN pending independent acceptance of D4 and this repair together
+BUNDLE 3 (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-COMBINED): OPEN
+NEXT AFTER ACCEPTANCE: Phase E durable outcome/no-trade and API work
+```

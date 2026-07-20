@@ -12,6 +12,16 @@ Status: D4 implementation complete, **awaiting ChatGPT and operator acceptance**
 This document records what D4 built and proved; it is not itself an acceptance
 record, and it does not close Phase D or Bundle 3 in the ledger.
 
+## D4 repair layer: AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D4-EVALUATION-LINEAGE-AND-AUTONOMOUS-PREOPEN-CLOSURE-01
+
+A second patch, layered on top of the D4 commit above (starting HEAD
+`8b8d388c7e2fdca7c850ecb436c2ebce4f329382`, "fix: close autonomous phase D
+integration"), closes the final gaps in D4's own dispatch-completion and
+preopen proofs. See §12 below for full detail. Status: **implementation
+complete, awaiting independent acceptance** — Phase D, Bundle 3, and this
+repair itself remain OPEN in the ledger; nothing here is closed or accepted
+by this document.
+
 ## 1. What Phase D covers
 
 Phase D (D1–D4) is the production wiring, task supervision, and integrated-proof
@@ -365,3 +375,181 @@ This patch does not begin, and its tests do not exercise, finalize, or assert:
 Phase E (durable daily outcome/no-trade classification and read-only API) is
 the next authorized phase, and only after independent ChatGPT/operator
 acceptance of this D4 patch.
+
+## 12. AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D4-EVALUATION-LINEAGE-AND-AUTONOMOUS-PREOPEN-CLOSURE-01
+
+Starting HEAD: `8b8d388c7e2fdca7c850ecb436c2ebce4f329382` ("fix: close
+autonomous phase D integration"). Status: implementation complete, awaiting
+independent acceptance. This repair closes five confirmed gaps in D4's own
+dispatch-completion truth and preopen proof; it does not close Phase D,
+Bundle 3, or itself.
+
+### 12.1 Evaluation-lineage binding (REPAIRs 1–4)
+
+Before this repair, `claim_and_dispatch_observed_bar`'s completion path had
+two defects, both silent:
+
+1. It called `complete_autonomous_daily_bar_dispatch(..., None)` on every
+   success — the durable claim never recorded which
+   `strategy_signal_evaluations` row actually proved the dispatch, even
+   though the journal writer (`AppState::record_signal_evaluation`) always
+   computes a deterministic identity for the row it writes.
+2. It never inspected the completion write's own `Result<bool>` — a
+   `Ok(false)` (guarded on `status = 'claimed'`, so it never should have
+   fired for a fresh claim, but a race or a store error meant it went
+   uninvestigated either way) or an `Err` was both treated as unconditional
+   success by the trailing `?` and `Ok(DispatchCompleted)`.
+
+A callback result from the canonical strategy dispatch call was therefore
+sufficient, by itself, to report `DispatchCompleted` — even when no durable
+evidence backed it (e.g. the strategy callback ran through the fallback
+stub path rather than the DB-backed path that writes the journal row, or a
+real config-drift between the assignment's configured strategy and the
+bootstrap's actually-active strategy).
+
+Fixes, all in `autonomous_completed_bar_driver.rs`:
+
+- **Identity helper** (`AppState::derive_strategy_signal_evaluation_id`,
+  `state.rs`): the exact pre-existing seed format
+  (`mqk.signal-evaluation.v1|{run_id-or-none}|{strategy_id}|{symbol}|{timeframe}|{now_tick}`)
+  extracted into one pure function. Both `record_signal_evaluation` and
+  `claim_and_dispatch_observed_bar` call it — never a second,
+  independently-derived algorithm.
+- **Exact evaluation confirmation**: after the strategy dispatch call
+  returns `Some(result)`, the claim path derives its own expected
+  evaluation id from the claim's verified `operation.run_id`, bound
+  `strategy_id`, normalized `symbol`/`timeframe`, and exact
+  `StrategyBarInput.now_tick`; fetches that row via the new
+  `mqk_db::fetch_strategy_signal_evaluation(pool, evaluation_id)` read-only
+  helper; and requires `run_id`/`strategy_id`/`symbol`/`timeframe`/
+  `decision_stage == "strategy_evaluated"` to all agree. A mismatch or
+  absence returns the new
+  `AutonomousCompletedBarDriverOutcome::DispatchEvaluationEvidenceMissing`
+  outcome and marks the claim `failed` — never completed on an unconfirmed
+  callback result alone.
+- **Persisted evaluation id**: `complete_autonomous_daily_bar_dispatch` is
+  now always called with `Some(expected_evaluation_id)`, never `None`.
+- **Completion outcome honored**: the completion call's `Result<bool>` is
+  captured (`let completion_result = ...`) and matched explicitly.
+  `Ok(true)` → `DispatchCompleted`. `Ok(false)` or `Err` both route through
+  one shared `reconfirm_dispatch_completion_or_fail_closed` re-read: only an
+  exact `completed` claim row carrying the exact expected evaluation id is
+  accepted as committed truth (a write that landed but whose acknowledgement
+  was lost); anything else — still `claimed`, a different evaluation id, or
+  the re-read itself failing — returns the new
+  `AutonomousCompletedBarDriverOutcome::DispatchCompletionUnconfirmed`
+  outcome. The strategy evaluation is never automatically rerun on any of
+  these paths (the claim's own `claimed`/`failed`/`uncertain` status
+  continues to block automatic redispatch exactly as before this repair).
+- **Test-only commit-uncertainty seam**: `AppState::completed_bar_completion_fault_test_hook`
+  (`false` in production) lets a test make `claim_and_dispatch_observed_bar`
+  skip the real completion write and take the `Err` branch, so the
+  re-read-on-store-error path is provable deterministically without a real
+  DB fault.
+
+Proof: `scenario_autonomous_daily_phase_d_integration_01.rs`'s
+`phase_d_missing_evaluation_evidence_fails_closed_never_completes_claim` and
+`phase_d_completion_store_error_reconfirms_via_authoritative_re_read_and_fails_closed`,
+plus `mqk-db`'s `scenario_autonomous_daily_operation_data_evidence_01.rs`'s
+`exact_evaluation_row_lookup_and_completed_claim_stores_evaluation_id`. One
+pre-existing test (`scenario_autonomous_completed_bar_driver_01.rs`'s
+`repair10_17_restart_does_not_redispatch_completed_exact_bar`) had asserted
+the old `evaluation_id: None` bug as correct behavior; its assertion is
+updated to expect the now-persisted id.
+
+### 12.2 Concurrency decoy bar-identity correction (REPAIR 5)
+
+`phase_d_concurrency_forward_ordering_execution_loop_cannot_steal_claimed_bar`
+and its reverse-ordering sibling previously deposited their "unrelated
+execution-loop" decoy bar with the *same* `end_ts` as the completed-bar
+claim's own expected bar — `now_tick` differed (`999` vs. the claim's own
+tick), which already kept the two evaluations' identities distinct, but the
+decoy's own bar identity was not actually distinct, weakening the proof's
+own narrative. Both tests now seed a genuinely separate, independently
+observable prior bar (`decoy_ts = expected_ts - 300`) via a new
+`seed_light_bars` helper (accepts a slice, unlike the single-bar
+`seed_light_bar` it replaces, which wiped on every call and so could not
+build up a multi-bar window). Both tests additionally now assert the
+claimed bar's evaluation id is durably stored, that its exact evaluation row
+exists exactly once, and that the repeat tick reports that same stored id.
+
+### 12.3 Real autonomous preopen proof (REPAIR 6)
+
+`phase_d_full_day_lifecycle` previously called `apply_transition` to
+manually clear `manual_intervention_required` at preopen — a genuine
+readiness block caused by the fixture leaving `md_bars` empty at that point,
+worked around rather than resolved. The fix seeds the *correct* preopen-
+relevant bar window before any tick, rather than skipping the block:
+
+- The completed-bar driver's own readiness evaluation is keyed on whatever
+  `now_utc` its caller passes — the preopen tick passes `preopen_now`, not
+  the later `pd_now()` used for the running/dispatch phase.
+- At a genuine preopen instant (before the current session's own grid has
+  closed any bar), `expected_intraday_end_ts_window` spills entirely into
+  the *previous* trading session's own tail grid (its own documented
+  behavior) — a different, earlier bar window than `pd_expected_bar_window`
+  (today's window).
+- A new `pd_preopen_expected_bar_window(preopen_now)` helper computes that
+  exact tail window; its bars are seeded *before* the preopen tick. The
+  later today-dated window continues to be seeded immediately before the
+  "open and start" phase, exactly as before — seeding it any earlier would
+  make the readiness gate see bars provenanced in the future relative to
+  `preopen_now` (a real `latest_bar_future` block, confirmed empirically
+  while building this fix), which is not a shortcut to avoid but a correct
+  gate this patch must not weaken.
+
+With the correct window seeded, the preopen tick resolves to `preparing_data`
+(no blocker) instead of `manual_intervention_required`, and
+`apply_transition` is no longer called anywhere in the happy path. The test
+now asserts, exactly: the coordinator preopen tick never reaches `Started`;
+zero dispatch claim and zero strategy evaluation exist before start; the
+real production completed-bar adapter (`tick_autonomous_completed_bar_driver_from_state`)
+selects `PrepareDataOnly` and returns exactly
+`BarObserved { bar_end_ts: preopen_expected_ts }`; the operation row never
+enters `manual_intervention_required`; the exact preopen bar is durably
+recorded as observed; and zero provider calls were made (the bar was
+already local).
+
+### 12.4 Supervised task under an injected clock (REPAIR 7)
+
+`m01_task_level_prepare_to_running_exactly_once` (in
+`scenario_autonomous_completed_bar_task_01.rs`) already proved the
+production adapter's `PrepareDataOnly` → `RunningDispatch` transition
+thoroughly, but by calling `tick_autonomous_completed_bar_driver_from_state`
+directly — it never exercised the supervised task (spawn/supervisor/
+cancellation) at all, which the mission's own review flagged as
+insufficient on its own.
+
+A narrow test-only clock seam was added around the existing production task
+tick: `AppState::completed_bar_task_clock_override` (`None` in production,
+never installed there) and its accessors
+`set_completed_bar_task_clock_override_for_test` /
+`completed_bar_task_tick_clock`. `autonomous_completed_bar_task::run_one_production_tick`
+now resolves `now_utc` via `state.completed_bar_task_tick_clock().await`
+instead of calling `Utc::now()` directly; that method returns the installed
+override if present, else `Utc::now()` — production behavior is unchanged
+because the seam is never installed in production code.
+
+The new test `n01_supervised_task_drives_real_adapter_under_injected_clock`
+reuses m01's exact real fixture (registries, seeded bars, mock Alpaca
+server, real coordinator start) but drives every tick through the real
+`spawn_autonomous_completed_bar_driver_task` (the same task ownership,
+supervisor, and cancellation production uses) under the injected clock, and
+proves: the live supervised task invokes the real production adapter in
+`PrepareDataOnly` under a controlled preopen instant with zero claims/
+evaluations; after a real coordinator start, advancing the injected clock
+into the dispatch window makes the same live task invoke the real adapter
+in `RunningDispatch` and complete the dispatch exactly once; and
+`cancel_and_wait_completed_bar_task_for_shutdown` cancels and awaits that
+same task, after which no further tick occurs.
+
+### 12.5 Scope boundary
+
+Not touched by this repair: strategy/risk mathematics, multi-symbol
+rollout, any API route or GUI surface, Phase E daily-outcome/no-trade
+classification, the legacy ticker, migrations, or any provider/broker/
+network/order path. `scripts/guards/validate_autonomous_daily_paper_operations_01d4_evaluation_lineage_and_autonomous_preopen_closure_01.ps1`
+is the source-aware static guard for this repair specifically; the original
+D3/D4 guard (`validate_autonomous_daily_paper_operations_01d_phase_d_closure.ps1`)
+remains unmodified and continues to pass, since D4.2's dispatch-ownership
+fix it validates is untouched by this repair.
