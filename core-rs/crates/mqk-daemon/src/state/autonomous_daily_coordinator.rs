@@ -118,6 +118,14 @@ use chrono::{DateTime, NaiveDate, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
 
+use super::autonomous_daily_coverage_authority::{
+    check_coverage_authority, check_operation_pristine, construct_coverage_bound_detail,
+    coverage_construction_inputs_from_operation, resolve_current_coverage_policy_inputs,
+    write_and_confirm_coverage_authority, CoverageAuthorityCheck, CoverageAuthorityEnsureResult,
+    PristineCheckOutcome, REASON_COVERAGE_AUTHORITY_CONFLICT,
+    REASON_COVERAGE_AUTHORITY_MISSING_AFTER_ACTIVITY, REASON_COVERAGE_AUTHORITY_UNREADABLE,
+    REASON_COVERAGE_POLICY_CONSTRUCTION_FAILED, REASON_COVERAGE_POLICY_RESOLUTION_UNAVAILABLE,
+};
 use super::autonomous_daily_operation::{
     derive_assignment_identity, derive_autonomous_daily_operation_id,
     derive_runtime_binding_identity, resolve_autonomous_daily_session_plan_from_env,
@@ -128,9 +136,11 @@ use super::autonomous_retry_policy::{
     coordinator_reason_from_runtime_lifecycle_error, next_retry_at, AutonomousBlockerIdentity,
     AutonomousCoordinatorReason, AutonomousRetryClass,
 };
-use super::autonomous_runtime_context::resolve_autonomous_runtime_context;
+use super::autonomous_runtime_context::{
+    resolve_autonomous_runtime_context, ResolvedAutonomousRuntimeContext,
+};
 use super::lifecycle::AutonomousArmOutcome;
-use super::AppState;
+use super::{AppState, MultiSymbolRuntimeConfig};
 
 use mqk_db::{
     AutonomousDailyOperationRecord, AutonomousDailyTransitionOutcome,
@@ -394,6 +404,26 @@ pub async fn tick_autonomous_daily_coordinator(
         Ok(pair) => pair,
         Err(outcome) => return Ok(outcome),
     };
+
+    // AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E2A-COVERAGE-ANCHOR-AND-RUN-
+    // LINEAGE-FOUNDATION (§6a): ensure the operation-scoped coverage anchor
+    // exists (or matches) before this tick may proceed to `dispatch_by_state`
+    // -- runs for both newly created and recovered operations, strictly
+    // after `create_or_recover` and strictly before any state-handler call.
+    if let Some(blocked_outcome) = ensure_coverage_authority(
+        state,
+        &pool,
+        &operation,
+        &config,
+        &runtime_context,
+        &assignment_identity,
+        &runtime_binding_identity,
+        now_utc,
+    )
+    .await?
+    {
+        return Ok(blocked_outcome);
+    }
 
     // REPAIR 6: an operation first observed already past close never
     // fabricates a running/stopping history it never had, but it also
@@ -734,6 +764,248 @@ async fn create_or_recover(
             Ok(Err(outcome))
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E2A-COVERAGE-ANCHOR-AND-RUN-LINEAGE-
+// FOUNDATION (§6a): coordinator ensure-authority seam.
+// ---------------------------------------------------------------------------
+
+/// Ensure the operation-scoped `autonomous_daily_coverage_bound` authority
+/// exists and matches this tick's freshly-resolved policy, before the
+/// coordinator may proceed to `dispatch_by_state`.
+///
+/// Returns `Ok(None)` when the tick may proceed (exact replay matched, or a
+/// pristine anchor was freshly bound). Returns `Ok(Some(outcome))` when the
+/// tick must stop here -- the returned outcome is already the durably
+/// applied (or refreshed) blocker disposition.
+#[allow(clippy::too_many_arguments)]
+async fn ensure_coverage_authority(
+    state: &Arc<AppState>,
+    pool: &PgPool,
+    operation: &AutonomousDailyOperationRecord,
+    config: &MultiSymbolRuntimeConfig,
+    runtime_context: &ResolvedAutonomousRuntimeContext,
+    assignment_identity: &str,
+    runtime_binding_identity: &str,
+    now_utc: DateTime<Utc>,
+) -> anyhow::Result<Option<AutonomousDailyCoordinatorTickOutcome>> {
+    let readiness_context = crate::daily_data_readiness::load_readiness_context_from_env();
+
+    let policy = match resolve_current_coverage_policy_inputs(
+        config,
+        &runtime_context.effective_runtime_binding,
+        &readiness_context.strategy_registry,
+    ) {
+        Ok(policy) => policy,
+        Err(_) => {
+            return Ok(Some(
+                apply_coverage_blocker(
+                    state,
+                    pool,
+                    operation,
+                    REASON_COVERAGE_POLICY_RESOLUTION_UNAVAILABLE,
+                    mqk_db::STATE_CONTROLLER_DEGRADED,
+                    now_utc,
+                )
+                .await?,
+            ));
+        }
+    };
+
+    let Some(inputs) = coverage_construction_inputs_from_operation(
+        operation,
+        assignment_identity,
+        runtime_binding_identity,
+        &policy,
+    ) else {
+        return Ok(Some(
+            apply_coverage_blocker(
+                state,
+                pool,
+                operation,
+                REASON_COVERAGE_POLICY_CONSTRUCTION_FAILED,
+                mqk_db::STATE_CONTROLLER_DEGRADED,
+                now_utc,
+            )
+            .await?,
+        ));
+    };
+
+    let fresh = match construct_coverage_bound_detail(
+        readiness_context.calendar_provider.as_ref(),
+        &inputs,
+    ) {
+        Ok(fresh) => fresh,
+        Err(_) => {
+            return Ok(Some(
+                apply_coverage_blocker(
+                    state,
+                    pool,
+                    operation,
+                    REASON_COVERAGE_POLICY_CONSTRUCTION_FAILED,
+                    mqk_db::STATE_CONTROLLER_DEGRADED,
+                    now_utc,
+                )
+                .await?,
+            ));
+        }
+    };
+
+    match check_coverage_authority(pool, operation.operation_id, &fresh).await? {
+        CoverageAuthorityCheck::Compatible(_) => Ok(None),
+        CoverageAuthorityCheck::NotBound => {
+            // Missing anchor: only a pristine (no prior activity) operation
+            // may bind one now -- an operation with any activity signal
+            // must never receive a retroactively fabricated anchor.
+            match check_operation_pristine(pool, operation).await {
+                Ok(PristineCheckOutcome::Pristine) => {
+                    match write_and_confirm_coverage_authority(pool, &fresh, now_utc).await? {
+                        CoverageAuthorityEnsureResult::Bound(_) => Ok(None),
+                        CoverageAuthorityEnsureResult::Conflict
+                        | CoverageAuthorityEnsureResult::Unreadable => Ok(Some(
+                            apply_coverage_blocker(
+                                state,
+                                pool,
+                                operation,
+                                REASON_COVERAGE_AUTHORITY_CONFLICT,
+                                mqk_db::STATE_CONTROLLER_DEGRADED,
+                                now_utc,
+                            )
+                            .await?,
+                        )),
+                    }
+                }
+                Ok(PristineCheckOutcome::HasActivity) | Err(_) => Ok(Some(
+                    apply_coverage_blocker(
+                        state,
+                        pool,
+                        operation,
+                        REASON_COVERAGE_AUTHORITY_MISSING_AFTER_ACTIVITY,
+                        mqk_db::STATE_EVIDENCE_DEGRADED,
+                        now_utc,
+                    )
+                    .await?,
+                )),
+            }
+        }
+        CoverageAuthorityCheck::Unreadable => Ok(Some(
+            apply_coverage_blocker(
+                state,
+                pool,
+                operation,
+                REASON_COVERAGE_AUTHORITY_UNREADABLE,
+                mqk_db::STATE_CONTROLLER_DEGRADED,
+                now_utc,
+            )
+            .await?,
+        )),
+        CoverageAuthorityCheck::Invalid | CoverageAuthorityCheck::Conflict => Ok(Some(
+            apply_coverage_blocker(
+                state,
+                pool,
+                operation,
+                REASON_COVERAGE_AUTHORITY_CONFLICT,
+                mqk_db::STATE_CONTROLLER_DEGRADED,
+                now_utc,
+            )
+            .await?,
+        )),
+    }
+}
+
+/// Apply the durable fail-closed disposition for a coverage-authority
+/// problem, reusing the exact D1 blocker-signature mechanism and the same
+/// source-aligned state-mapping shape [`handle_identity_conflict`] already
+/// uses for the identity-conflict class: `running` degrades to
+/// `running_target` (`controller_degraded` for an unreadable/invalid/
+/// conflicting anchor, `evidence_degraded` for missing-after-activity, per
+/// §6a); an already blocked/degraded operation refreshes its reason/
+/// signature in place; every other nonterminal state with a legal edge to
+/// `manual_intervention_required` takes it; a terminal state is never
+/// mutated. Close priority: at or after `effective_operation_close_utc`,
+/// canonical close/stop reconciliation always takes precedence over a fresh
+/// coverage blocker -- a coverage-authority problem must never strand a
+/// runtime past close.
+async fn apply_coverage_blocker(
+    state: &Arc<AppState>,
+    pool: &PgPool,
+    operation: &AutonomousDailyOperationRecord,
+    reason_code: &'static str,
+    running_target: &'static str,
+    now_utc: DateTime<Utc>,
+) -> anyhow::Result<AutonomousDailyCoordinatorTickOutcome> {
+    if mqk_db::is_terminal_operation_state(&operation.state) {
+        return Ok(
+            AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
+                reason_code,
+                newly_applied: false,
+            },
+        );
+    }
+
+    if now_utc >= operation.effective_operation_close_utc
+        && !matches!(
+            operation.state.as_str(),
+            STATE_STOPPING | STATE_STOP_RETRYING | STATE_MANUAL_INTERVENTION_REQUIRED
+        )
+    {
+        // Close priority: matching runtime stop/close authority always
+        // retains priority over a fresh coverage blocker -- never strand a
+        // runtime past close merely because coverage authority is missing
+        // or in conflict.
+        return handle_session_close(state, pool, operation.clone(), now_utc).await;
+    }
+
+    let reason = AutonomousCoordinatorReason::UnclassifiedFailClosed {
+        fault_class: reason_code,
+    };
+    let signature = blocker_signature(
+        &reason,
+        &AutonomousBlockerIdentity {
+            operation_id: Some(operation.operation_id),
+            ..Default::default()
+        },
+    );
+
+    let detail = "autonomous daily coordinator: coverage authority could not be ensured for this \
+                  operation this tick";
+
+    let target_state: &'static str = match operation.state.as_str() {
+        STATE_RUNNING => running_target,
+        STATE_MANUAL_INTERVENTION_REQUIRED => STATE_MANUAL_INTERVENTION_REQUIRED,
+        mqk_db::STATE_CONTROLLER_DEGRADED => mqk_db::STATE_CONTROLLER_DEGRADED,
+        mqk_db::STATE_EVIDENCE_DEGRADED => mqk_db::STATE_EVIDENCE_DEGRADED,
+        _ => STATE_MANUAL_INTERVENTION_REQUIRED,
+    };
+
+    if !mqk_db::is_legal_operation_transition(Some(&operation.state), target_state)
+        && operation.state.as_str() != target_state
+    {
+        return Ok(
+            AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
+                reason_code: signature.reason_code,
+                newly_applied: false,
+            },
+        );
+    }
+
+    let newly_applied = apply_manual_if_changed(
+        pool,
+        operation,
+        signature.reason_code,
+        signature.stable_context.clone(),
+        now_utc,
+        detail,
+        target_state,
+    )
+    .await?;
+    Ok(
+        AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
+            reason_code: signature.reason_code,
+            newly_applied,
+        },
+    )
 }
 
 /// REPAIR 8 / REPAIR 3 (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D2-FAILSAFE-

@@ -2219,6 +2219,156 @@ pub async fn fetch_autonomous_daily_bar_dispatch(
         .map_err(Into::into)
 }
 
+/// Count of `sys_autonomous_daily_bar_dispatches` rows (any status) for
+/// `operation_id` — read-only. AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E2A: the
+/// "zero autonomous bar-dispatch claims" leg of the pristine-operation
+/// evidence check (§6a). A nonzero count means at least one claim was ever
+/// attempted for this operation, regardless of its current status.
+pub async fn count_autonomous_daily_bar_dispatch_claims(
+    pool: &PgPool,
+    operation_id: Uuid,
+) -> Result<i64> {
+    let row = sqlx::query(
+        "select count(*) as claim_count from sys_autonomous_daily_bar_dispatches where operation_id = $1",
+    )
+    .bind(operation_id)
+    .fetch_one(pool)
+    .await
+    .context("count_autonomous_daily_bar_dispatch_claims failed")?;
+    row.try_get::<i64, _>("claim_count")
+        .context("count_autonomous_daily_bar_dispatch_claims: decode failed")
+}
+
+// ---------------------------------------------------------------------------
+// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E2A-COVERAGE-ANCHOR-AND-RUN-LINEAGE-
+// FOUNDATION: raw, undeduplicated full run-lineage read (§6b).
+//
+// `list_autonomous_daily_operation_events` is bounded by an explicit
+// operator-supplied `limit` (API-layer callers clamp to [1,100]) and returns
+// every transition, not merely `to_state='running'` ones -- unsuitable for a
+// full-day run-lineage proof. This is a dedicated, narrow, unbounded raw-row
+// read: never `SELECT DISTINCT` (§6b Correction pass 3, Repair 8 -- that
+// query is invalid PostgreSQL and would discard the duplicate-row evidence
+// contradiction detection needs), validated in Rust only.
+// ---------------------------------------------------------------------------
+
+/// One raw `(transition_seq, run_id)` row from a `to_state='running'`
+/// transition with a non-null `run_id`, in ascending `transition_seq` order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AutonomousDailyOperationRunningTransitionRow {
+    pub transition_seq: i64,
+    pub run_id: Uuid,
+}
+
+/// Read every raw `(transition_seq, run_id)` row for `operation_id` where
+/// `to_state = 'running'` and `run_id is not null`, ordered by
+/// `transition_seq asc`. No `DISTINCT`, no `LIMIT` -- every row is returned
+/// exactly as stored, including a duplicate `run_id` if one somehow exists,
+/// so [`validate_autonomous_daily_operation_run_lineage`] can detect it.
+/// Read-only.
+pub async fn fetch_autonomous_daily_operation_running_transitions_raw(
+    pool: &PgPool,
+    operation_id: Uuid,
+) -> Result<Vec<AutonomousDailyOperationRunningTransitionRow>> {
+    let rows = sqlx::query(
+        "select transition_seq, run_id \
+         from sys_autonomous_daily_operation_events \
+         where operation_id = $1 and to_state = $2 and run_id is not null \
+         order by transition_seq asc",
+    )
+    .bind(operation_id)
+    .bind(STATE_RUNNING)
+    .fetch_all(pool)
+    .await
+    .context("fetch_autonomous_daily_operation_running_transitions_raw failed")?;
+
+    rows.into_iter()
+        .map(|r| {
+            Ok(AutonomousDailyOperationRunningTransitionRow {
+                transition_seq: r.try_get("transition_seq")?,
+                run_id: r.try_get("run_id")?,
+            })
+        })
+        .collect::<std::result::Result<Vec<_>, sqlx::Error>>()
+        .map_err(Into::into)
+}
+
+/// Fail-closed reason a raw run-lineage read could not be validated into an
+/// ordered, contradiction-free lineage (§6b, §7 `unknown_run_lineage_unavailable`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunLineageValidationError {
+    /// A `run_id` appeared more than once across the raw rows.
+    DuplicateRunId(Uuid),
+    /// `transition_seq` did not strictly increase across the returned rows.
+    NonMonotonicSequence,
+    /// The operation's current `run_id` column is non-`NULL` but does not
+    /// equal the lineage's final entry (or the lineage is empty).
+    CurrentRunMismatch,
+}
+
+/// Validate a raw run-lineage row set (§6b) entirely in Rust -- never in
+/// SQL. Returns the full lineage (run IDs in bind order) on success.
+///
+/// - `transition_seq` must strictly increase.
+/// - Each `run_id` must appear exactly once.
+/// - `current_run_id` (the operation's own mutable `run_id` column) must
+///   equal the final lineage entry whenever it is `Some`; an empty lineage
+///   is legal only when `current_run_id` is `None`.
+pub fn validate_autonomous_daily_operation_run_lineage(
+    rows: &[AutonomousDailyOperationRunningTransitionRow],
+    current_run_id: Option<Uuid>,
+) -> std::result::Result<Vec<Uuid>, RunLineageValidationError> {
+    let mut seen = std::collections::HashSet::with_capacity(rows.len());
+    let mut last_seq: Option<i64> = None;
+    let mut lineage = Vec::with_capacity(rows.len());
+
+    for row in rows {
+        if let Some(prev) = last_seq {
+            if row.transition_seq <= prev {
+                return Err(RunLineageValidationError::NonMonotonicSequence);
+            }
+        }
+        last_seq = Some(row.transition_seq);
+
+        if !seen.insert(row.run_id) {
+            return Err(RunLineageValidationError::DuplicateRunId(row.run_id));
+        }
+        lineage.push(row.run_id);
+    }
+
+    match current_run_id {
+        Some(current) => {
+            if lineage.last() != Some(&current) {
+                return Err(RunLineageValidationError::CurrentRunMismatch);
+            }
+        }
+        None => {
+            if !lineage.is_empty() {
+                return Err(RunLineageValidationError::CurrentRunMismatch);
+            }
+        }
+    }
+
+    Ok(lineage)
+}
+
+/// Read-then-validate composition of the raw run-lineage query plus its
+/// Rust-side validation, against `operation`'s own current `run_id` column.
+/// The narrow, single call site E2A's coordinator/pristine-check and future
+/// E2B classifier both use.
+pub async fn fetch_and_validate_autonomous_daily_operation_run_lineage(
+    pool: &PgPool,
+    operation: &AutonomousDailyOperationRecord,
+) -> Result<std::result::Result<Vec<Uuid>, RunLineageValidationError>> {
+    let rows =
+        fetch_autonomous_daily_operation_running_transitions_raw(pool, operation.operation_id)
+            .await?;
+    Ok(validate_autonomous_daily_operation_run_lineage(
+        &rows,
+        operation.run_id,
+    ))
+}
+
 // ---------------------------------------------------------------------------
 // AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D2-DURABLE-SESSION-COORDINATOR
 // Start/running/stop attempt evidence recorders

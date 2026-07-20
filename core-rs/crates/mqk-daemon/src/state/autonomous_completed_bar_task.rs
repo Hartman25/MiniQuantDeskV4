@@ -196,6 +196,17 @@ pub enum AutonomousCompletedBarProductionTickOutcome {
         mode: AutonomousCompletedBarDriverMode,
         outcome: AutonomousCompletedBarDriverOutcome,
     },
+    /// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E2A-COVERAGE-ANCHOR-AND-RUN-
+    /// LINEAGE-FOUNDATION (§6a): the mandatory per-tick coverage-authority
+    /// prerequisite was not satisfied -- the driver was never invoked, no
+    /// provider client was constructed, no provider call was made, no bar
+    /// was observed, no claim was made, no strategy evaluation occurred.
+    /// The adapter never mutates operation lifecycle state for this
+    /// outcome -- durable fail-closed projection is coordinator-owned.
+    CoverageAuthorityUnavailable {
+        operation_id: Uuid,
+        reason_code: &'static str,
+    },
 }
 
 /// Production adapter: reads no wall clock internally (`now_utc` is
@@ -296,6 +307,135 @@ pub async fn tick_autonomous_completed_bar_driver_from_state(
         }
     };
 
+    let assignment_identity = derive_assignment_identity(&assignment_config);
+    let runtime_binding_identity =
+        derive_runtime_binding_identity(&runtime_context.effective_runtime_binding);
+
+    // AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E2A-COVERAGE-ANCHOR-AND-RUN-
+    // LINEAGE-FOUNDATION (§6a): mandatory per-tick coverage-authority
+    // prerequisite. Required ordering: fetch operation (above) -> state-only
+    // mode short-circuit (above, cheap, non-authority-bearing) -> resolve
+    // current policy/construct fresh payload -> exact coverage-event lookup
+    // and verification -> only then load/build any provider client or
+    // instrument/provider execution object (below). No driver invocation,
+    // no provider-client construction, no provider call, no bar
+    // observation, no dispatch claim, no strategy evaluation happens before
+    // this gate resolves clean. The adapter never mutates operation
+    // lifecycle state for any outcome here -- durable fail-closed
+    // projection is coordinator-owned.
+    let readiness_context = daily_data_readiness::load_readiness_context_from_env();
+
+    let policy =
+        match super::autonomous_daily_coverage_authority::resolve_current_coverage_policy_inputs(
+            &assignment_config,
+            &runtime_context.effective_runtime_binding,
+            &readiness_context.strategy_registry,
+        ) {
+            Ok(policy) => policy,
+            Err(_) => {
+                apply_completed_bar_adapter_blocker(
+                &pool,
+                &operation,
+                "completed_bar_identity_unresolved",
+                &format!(
+                    "reason_code={}",
+                    super::autonomous_daily_coverage_authority::REASON_COVERAGE_POLICY_RESOLUTION_UNAVAILABLE
+                ),
+                now_utc,
+            )
+            .await?;
+                return Ok(
+                AutonomousCompletedBarProductionTickOutcome::IdentityUnresolved {
+                    operation_id: operation.operation_id,
+                    reason_code:
+                        super::autonomous_daily_coverage_authority::REASON_COVERAGE_POLICY_RESOLUTION_UNAVAILABLE,
+                },
+            );
+            }
+        };
+
+    let fresh_coverage =
+        super::autonomous_daily_coverage_authority::coverage_construction_inputs_from_operation(
+            &operation,
+            &assignment_identity,
+            &runtime_binding_identity,
+            &policy,
+        )
+        .and_then(|inputs| {
+            super::autonomous_daily_coverage_authority::construct_coverage_bound_detail(
+                readiness_context.calendar_provider.as_ref(),
+                &inputs,
+            )
+            .ok()
+        });
+
+    let Some(fresh_coverage) = fresh_coverage else {
+        apply_completed_bar_adapter_blocker(
+            &pool,
+            &operation,
+            "completed_bar_identity_unresolved",
+            &format!(
+                "reason_code={}",
+                super::autonomous_daily_coverage_authority::REASON_COVERAGE_POLICY_CONSTRUCTION_FAILED
+            ),
+            now_utc,
+        )
+        .await?;
+        return Ok(
+            AutonomousCompletedBarProductionTickOutcome::IdentityUnresolved {
+                operation_id: operation.operation_id,
+                reason_code:
+                    super::autonomous_daily_coverage_authority::REASON_COVERAGE_POLICY_CONSTRUCTION_FAILED,
+            },
+        );
+    };
+
+    match super::autonomous_daily_coverage_authority::check_coverage_authority(
+        &pool,
+        operation.operation_id,
+        &fresh_coverage,
+    )
+    .await?
+    {
+        super::autonomous_daily_coverage_authority::CoverageAuthorityCheck::Compatible(_) => {}
+        super::autonomous_daily_coverage_authority::CoverageAuthorityCheck::NotBound => {
+            return Ok(
+                AutonomousCompletedBarProductionTickOutcome::CoverageAuthorityUnavailable {
+                    operation_id: operation.operation_id,
+                    reason_code:
+                        super::autonomous_daily_coverage_authority::REASON_COVERAGE_AUTHORITY_NOT_BOUND,
+                },
+            );
+        }
+        super::autonomous_daily_coverage_authority::CoverageAuthorityCheck::Unreadable => {
+            return Ok(
+                AutonomousCompletedBarProductionTickOutcome::CoverageAuthorityUnavailable {
+                    operation_id: operation.operation_id,
+                    reason_code:
+                        super::autonomous_daily_coverage_authority::REASON_COVERAGE_AUTHORITY_UNREADABLE,
+                },
+            );
+        }
+        super::autonomous_daily_coverage_authority::CoverageAuthorityCheck::Invalid => {
+            return Ok(
+                AutonomousCompletedBarProductionTickOutcome::CoverageAuthorityUnavailable {
+                    operation_id: operation.operation_id,
+                    reason_code:
+                        super::autonomous_daily_coverage_authority::REASON_COVERAGE_AUTHORITY_INVALID,
+                },
+            );
+        }
+        super::autonomous_daily_coverage_authority::CoverageAuthorityCheck::Conflict => {
+            return Ok(
+                AutonomousCompletedBarProductionTickOutcome::CoverageAuthorityUnavailable {
+                    operation_id: operation.operation_id,
+                    reason_code:
+                        super::autonomous_daily_coverage_authority::REASON_COVERAGE_AUTHORITY_CONFLICT,
+                },
+            );
+        }
+    }
+
     let instruments = match load_driver_instruments(&state.instrument_registry_path) {
         Ok(instruments) => instruments,
         Err(rejection) => {
@@ -331,11 +471,6 @@ pub async fn tick_autonomous_completed_bar_driver_from_state(
         _ => String::new(),
     };
 
-    let assignment_identity = derive_assignment_identity(&assignment_config);
-    let runtime_binding_identity =
-        derive_runtime_binding_identity(&runtime_context.effective_runtime_binding);
-
-    let readiness_context = daily_data_readiness::load_readiness_context_from_env();
     let readiness_evaluator = ProductionAutonomousAssignmentReadinessEvaluator::new(
         pool.clone(),
         assignment_config.clone(),
@@ -388,6 +523,7 @@ fn production_outcome_code(outcome: &AutonomousCompletedBarProductionTickOutcome
         P::IdentityUnresolved { .. } => "identity_unresolved",
         P::RegistryUnavailable { .. } => "registry_unavailable",
         P::DriverOutcome { outcome, .. } => driver_outcome_code(outcome),
+        P::CoverageAuthorityUnavailable { reason_code, .. } => reason_code,
     }
 }
 
@@ -434,7 +570,8 @@ fn production_outcome_operation_id(
         P::ModeNotApplicable { operation_id, .. }
         | P::IdentityUnresolved { operation_id, .. }
         | P::RegistryUnavailable { operation_id, .. }
-        | P::DriverOutcome { operation_id, .. } => Some(*operation_id),
+        | P::DriverOutcome { operation_id, .. }
+        | P::CoverageAuthorityUnavailable { operation_id, .. } => Some(*operation_id),
     }
 }
 

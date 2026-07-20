@@ -14164,3 +14164,164 @@ NEXT AFTER E1 ACCEPTANCE: E2A — durable coverage-anchor and run-lineage eviden
 unattended 10-20-session soak: NOT STARTED
 live capital: NOT READY
 ```
+
+## AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E2A-COVERAGE-ANCHOR-AND-RUN-LINEAGE-FOUNDATION
+
+Patch ID: `AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E2A-COVERAGE-ANCHOR-AND-RUN-LINEAGE-FOUNDATION`
+Bundle: `AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-COMBINED`, Phase E2A.
+
+Starting HEAD: `3591064a805efc82b3f6468e1de0fe06ea028471` (`docs: require coverage authority before
+bar processing`) — the accepted E1 contract commit. Accepted foundation preserved verbatim: D1–D4 and
+Phase D accepted complete in full; **E1 is accepted complete** (four-times-corrected durable
+outcome/no-trade contract audit, `docs/specs/autonomous_daily_paper_operations_01e_outcome_truth_contract.md`).
+This patch implements exactly E1's authorized E2A mission — the durable coverage-anchor and
+run-lineage evidence foundation — and nothing beyond it: no outcome classifier, no finalization CAS,
+no coordinator invocation of a classifier, no new API route, no GUI change, no migration.
+
+**Deliverable:** a new module,
+`core-rs/crates/mqk-daemon/src/state/autonomous_daily_coverage_authority.rs`, implementing:
+
+1. the typed, schema-versioned `CoverageBoundDetail` payload, a manual fail-closed parser (exact key
+   set; missing/wrong-type/unknown-schema-version fields rejected), and `#[derive(PartialEq)]`-based
+   semantic equality over every immutable field (`bound_at_utc` deliberately excluded — the bind
+   instant is the event row's own `ts_utc`, metadata only);
+2. `construct_coverage_bound_detail`, a pure constructor reusing only
+   `daily_data_readiness::expected_intraday_end_ts_window`/`intraday_grid_starts` — the first
+   dispatchable bar is the final element of the expected window evaluated at
+   `effective_operation_open_utc` (may spill into the previous session at an ordinary open); the final
+   dispatchable bar is the last current-session grid identity whose expectation instant is strictly
+   between the first bar's own expectation instant and `effective_operation_close_utc` (a
+   close-boundary bar is correctly excluded), or the first bar itself when none qualifies;
+3. `write_and_confirm_coverage_authority` / `check_coverage_authority`: the exact write/re-read/
+   idempotent-replay/conflict contract over the existing `sys_autonomous_session_events` store
+   (`ON CONFLICT (id) DO NOTHING`, id = `autonomous_daily_coverage_bound:{operation_id}`) — a write
+   error is never trusted without a confirming authoritative re-read; the store's own primary key is
+   the immutability mechanism;
+4. the coordinator's `ensure_coverage_authority` seam (`state/autonomous_daily_coordinator.rs`), run
+   immediately after `create_or_recover` and strictly before any state-handler dispatch, for both
+   newly created and recovered operations; close priority preserved (a coverage blocker never strands
+   a runtime past `effective_operation_close_utc`);
+5. the completed-bar production adapter's mandatory per-tick authority gate
+   (`state/autonomous_completed_bar_task.rs`): the exact coverage event is fetched, parsed, and
+   identity/policy-verified strictly before `load_driver_instruments` or any provider/registry object
+   is constructed. A new `CoverageAuthorityUnavailable { operation_id, reason_code }` outcome carries
+   the four closed reason codes; the adapter never mutates operation lifecycle state for any of them —
+   durable fail-closed projection remains coordinator-owned;
+6. `check_operation_pristine`: a durable evidence check (`run_id`/`started_at_utc`/bars/claims/full run
+   lineage all absent) gating whether the coordinator may bind a missing anchor — a DB read failure is
+   treated the same as `HasActivity`, never optimistically `Pristine`;
+7. the `coverage_authority_missing_after_activity` fail-closed disposition for any operation with prior
+   activity and no anchor — reuses the existing D1 typed blocker-signature mechanism verbatim (`running`
+   degrades to `evidence_degraded`; other nonterminal states degrade to `manual_intervention_required`;
+   already-blocked/degraded states refresh in place) — no new lifecycle state, no new transition edge;
+8. mid-day coverage-policy drift: `resolve_current_coverage_policy_inputs` resolves
+   `timeframe_secs`/`required_history_bars`/`effective_grace_seconds` from the assignment's own
+   configured timeframe and the strategy registry's data requirements on every tick — deliberately
+   never cross-checking `EffectiveRuntimeBinding::effective_runtime_timeframe_secs`, since that
+   specific fact is already `daily_data_readiness::evaluate_assignment`'s own
+   `runtime_strategy_timeframe_mismatch` readiness blocker, reported by the driver itself; any other
+   compared field disagreeing with the bound anchor is `coverage_authority_conflict`, proven for both
+   `PrepareDataOnly`- and `RunningDispatch`-eligible states;
+9. `mqk_db::fetch_autonomous_daily_operation_running_transitions_raw` /
+   `validate_autonomous_daily_operation_run_lineage` /
+   `fetch_and_validate_autonomous_daily_operation_run_lineage` — a raw, unbounded `(transition_seq,
+   run_id)` read (never `SELECT DISTINCT`, never the general 100-row API list cap) plus Rust-side
+   strict-monotonicity/uniqueness/current-run-match validation;
+10. two narrow `mqk-db` additions: `fetch_autonomous_session_event_by_id` (exact primary-key read) and
+    `count_autonomous_daily_bar_dispatch_claims` — no migration.
+
+New test file: `tests/scenario_autonomous_daily_coverage_anchor_and_run_lineage_01.rs` (34 tests,
+groups A–I) proving construction bounds, parse/serialize/tamper handling, semantic-equality field
+sensitivity, pure run-lineage validation, the durable write/replay/conflict contract, the
+coordinator's pristine-bind and prior-activity fail-closed paths (plus close priority), the adapter's
+authority gate — including a deterministic zero-side-effect proof for a newly-visible not-yet-anchored
+operation (a direct construction of the worst-case ordering, not a live `tokio::join!`/`Notify`
+interleaving of two concurrently-scheduled tasks — stated as a known limitation, not represented as a
+literal concurrency race proof) and a proceeds-once-bound proof — mid-day drift for both eligible
+driver modes, and the DB-backed run-lineage read/validate helper across a real two-run recovery cycle.
+
+**Internal review cycle:** one full cycle. The first implementation attempt surfaced four fixture-only
+defects during targeted validation, all repaired within the same cycle (no second cycle required): (a)
+`resolve_current_coverage_policy_inputs` originally cross-checked
+`EffectiveRuntimeBinding::effective_runtime_timeframe_secs` against the assignment's configured
+timeframe and failed closed on a mismatch — this duplicated, and preempted, the driver's own
+pre-existing `runtime_strategy_timeframe_mismatch` readiness blocker for the exact same fact, breaking
+four existing `scenario_autonomous_completed_bar_task_01` tests that legitimately exercise that
+mismatch; the cross-check was removed, since bound 4/5 construction only ever needs the assignment's
+own configured timeframe; (b) several new test fixtures constructed operation rows with a hand-rolled
+`assignment_identity`/`runtime_binding_identity`/`session_plan_identity` instead of the real
+coordinator resolution, producing spurious `operation_identity_conflict`s unrelated to coverage
+authority — corrected to resolve identity via the same real `resolve_autonomous_daily_session_plan_from_env`
++ `resolve_autonomous_runtime_context` calls the coordinator itself uses; (c) two new fixtures forced
+`awaiting_open -> running` directly, an illegal edge (only `start_retrying -> running` is legal) —
+corrected via a shared `create_test_operation_running` helper that transitions through
+`start_retrying` first; (d) the mid-day-drift env var name was guessed incorrectly
+(`MQK_AUTONOMOUS_DATA_STALENESS_GRACE_SECS` instead of the real `MQK_DATA_READINESS_GRACE_SECS`) —
+corrected to reference `daily_data_readiness::GRACE_SECS_ENV` directly rather than a second, guessed
+string literal. `scenario_autonomous_completed_bar_driver_01`'s 9 pre-existing failures were confirmed
+independent of this patch via a `git stash` baseline reproduction (identical 9 failures on the
+unmodified starting HEAD) — out of scope, not repaired.
+
+**Regressions (each binary run alone, `--include-ignored --test-threads=1`, isolated test Postgres on
+port 5434):** `scenario_autonomous_daily_coverage_anchor_and_run_lineage_01` 34/34 (new),
+`scenario_autonomous_completed_bar_task_01` 49/49, `scenario_autonomous_daily_session_coordinator_01`
+48/48, `scenario_autonomous_daily_phase_d_integration_01` 8/8, `scenario_daily_data_readiness_start_gate_01`
+20/20, `scenario_autonomous_daily_operation_store_01` (mqk-db) 26/26,
+`scenario_autonomous_daily_operation_lifecycle_01` (mqk-db) 36/36,
+`scenario_autonomous_daily_operation_data_evidence_01` (mqk-db) 9/9.
+`scenario_autonomous_completed_bar_driver_01` 47/56 — the 9 failures are pre-existing and unrelated
+(confirmed via baseline reproduction above). Zero required failures.
+
+**Guards:** `validate_autonomous_daily_paper_operations_01e2a_coverage_anchor_and_run_lineage.ps1`
+(new, all checks pass), `validate_autonomous_daily_paper_operations_01a_audit.ps1` pass,
+`validate_daily_data_readiness_01e_closure.ps1` pass,
+`validate_autonomous_daily_paper_operations_01d_phase_d_closure.ps1` pass (unmodified),
+`validate_autonomous_daily_paper_operations_01d4_evaluation_lineage_and_autonomous_preopen_closure_01.ps1`
+pass (unmodified), `validate_autonomous_daily_paper_operations_01e_outcome_contract.ps1` pass
+(unmodified), `check_unsafe_patterns.ps1` pass. **Migration:** none. **Format/lint:** `rustfmt --check`
+clean on every touched/new file; Clippy `-D warnings` clean on `mqk-db --lib`, `mqk-daemon --lib`, and
+the new/changed test binaries (two `#[allow(clippy::large_enum_variant)]` added with an inline
+justification — both enums are constructed at most once per tick, never in a hot loop); `cargo check
+-p mqk-db -p mqk-runtime -p mqk-daemon` clean (only the pre-existing `sqlx-postgres` future-incompat
+note); `git diff --check` / `git diff --cached --check` clean.
+
+**Files changed:** `MiniQuantDesk_Master_Patch_Ledger_v2.md`, `README.md`, `README_TECHNICAL.md`,
+`docs/specs/autonomous_daily_paper_operations_01e2a_coverage_anchor_and_run_lineage.md` (new),
+`scripts/guards/validate_autonomous_daily_paper_operations_01e2a_coverage_anchor_and_run_lineage.ps1`
+(new), `core-rs/crates/mqk-db/src/arm_state.rs`, `core-rs/crates/mqk-db/src/autonomous_daily_operation.rs`,
+`core-rs/crates/mqk-daemon/src/state.rs`,
+`core-rs/crates/mqk-daemon/src/state/autonomous_daily_coverage_authority.rs` (new),
+`core-rs/crates/mqk-daemon/src/state/autonomous_daily_coordinator.rs`,
+`core-rs/crates/mqk-daemon/src/state/autonomous_completed_bar_task.rs`,
+`core-rs/crates/mqk-daemon/tests/scenario_autonomous_daily_coverage_anchor_and_run_lineage_01.rs` (new),
+`core-rs/crates/mqk-daemon/tests/scenario_autonomous_completed_bar_task_01.rs` (four fixtures updated
+to bind a coverage anchor before invoking the production adapter, matching the new mandatory gate).
+No migration changed. No API route implemented. No GUI changed. No outcome classifier added.
+
+**Safety confirmation (E2A coverage-anchor and run-lineage foundation):**
+
+```text
+PROVIDER CALLS: no
+BROKER CALLS: no
+NETWORK CALLS: no
+REAL DAEMON STARTED: no
+PAPER ORDERS: no
+LIVE ORDERS: no
+PAPER DB TOUCHED: no
+PORT 5440 TOUCHED: no
+MIGRATION CHANGED: no
+API IMPLEMENTED: no
+GUI CHANGED: no
+OUTCOME CLASSIFIER ADDED: no
+FINALIZATION ADDED: no
+```
+
+```text
+E1: ACCEPTED — COMPLETE
+E2A: IMPLEMENTATION COMPLETE — AWAITING CHATGPT AND OPERATOR ACCEPTANCE
+PHASE E: OPEN
+BUNDLE 3 (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-COMBINED): OPEN
+NEXT AFTER E2A ACCEPTANCE: E2B — strict outcome classifier and finalization CAS, only
+unattended 10-20-session soak: NOT STARTED
+live capital: NOT READY
+```

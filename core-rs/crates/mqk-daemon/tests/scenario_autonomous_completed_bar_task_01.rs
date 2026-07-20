@@ -16,6 +16,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, TimeZone, Utc};
+use mqk_daemon::daily_data_readiness;
 use mqk_daemon::state::autonomous_completed_bar_driver::{
     AutonomousCompletedBarDriverMode, AutonomousCompletedBarDriverOutcome,
     AutonomousCompletedBarDriverTaskLiveness, AutonomousDriverSetupRejection,
@@ -247,6 +248,58 @@ async fn create_test_operation_in_start_retrying(
         mqk_db::AutonomousDailyTransitionOutcome::Applied(record) => record,
         other => panic!("expected Applied, got {other:?}"),
     }
+}
+
+/// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E2A-COVERAGE-ANCHOR-AND-RUN-LINEAGE-
+/// FOUNDATION: bind the coverage-bound authority a directly-constructed
+/// (coordinator-bypassing) test operation needs before the production
+/// adapter's mandatory per-tick authority gate will let it proceed. Uses the
+/// exact same real resolution (`resolve_autonomous_runtime_context`,
+/// `load_readiness_context_from_env`) the adapter itself uses at tick time,
+/// so the bound payload is guaranteed byte-identical to what the adapter
+/// freshly recomputes — never a second, independently-derived fixture path.
+/// Callers must have already configured `st`'s strategy fleet and the
+/// matching `MQK_STRATEGY_*` env vars before calling this.
+async fn bind_coverage_authority_for_test(
+    pool: &sqlx::PgPool,
+    st: &Arc<AppState>,
+    operation: &mqk_db::AutonomousDailyOperationRecord,
+    ts_utc: DateTime<Utc>,
+) {
+    let assignment_config =
+        state::build_multi_symbol_runtime_config_from_env().expect("assignment config resolves");
+    let runtime_context = state::autonomous_runtime_context::resolve_autonomous_runtime_context(st)
+        .await
+        .expect("runtime context resolves");
+    let assignment_identity = state::derive_assignment_identity(&assignment_config);
+    let runtime_binding_identity =
+        state::derive_runtime_binding_identity(&runtime_context.effective_runtime_binding);
+    let readiness_context = daily_data_readiness::load_readiness_context_from_env();
+    let policy =
+        state::autonomous_daily_coverage_authority::resolve_current_coverage_policy_inputs(
+            &assignment_config,
+            &runtime_context.effective_runtime_binding,
+            &readiness_context.strategy_registry,
+        )
+        .expect("policy resolves");
+    let inputs =
+        state::autonomous_daily_coverage_authority::coverage_construction_inputs_from_operation(
+            operation,
+            &assignment_identity,
+            &runtime_binding_identity,
+            &policy,
+        )
+        .expect("construction inputs resolve");
+    let fresh = state::autonomous_daily_coverage_authority::construct_coverage_bound_detail(
+        readiness_context.calendar_provider.as_ref(),
+        &inputs,
+    )
+    .expect("construct ok");
+    state::autonomous_daily_coverage_authority::write_and_confirm_coverage_authority(
+        pool, &fresh, ts_utc,
+    )
+    .await
+    .expect("bind ok");
 }
 
 /// Write a temporary instrument-registry JSON fixture admitting exactly one
@@ -560,6 +613,7 @@ async fn d01_d02_state_change_between_ticks_is_observed_fresh() {
     }]))
     .await;
     let now = timing.preopen_start_utc + chrono::Duration::minutes(5);
+    bind_coverage_authority_for_test(&pool, &st, &operation, now).await;
 
     // First tick: durable state is start_retrying -> PrepareDataOnly. This
     // bare-fixture tick names a manual/configuration blocker (the fixture
@@ -714,6 +768,7 @@ async fn e01_missing_bar_authorization_disabled_zero_provider_setup_still_reache
     .await;
 
     let now = timing.preopen_start_utc + chrono::Duration::minutes(5);
+    bind_coverage_authority_for_test(&pool, &st, &operation, now).await;
     let outcome = tick_autonomous_completed_bar_driver_from_state(&st, now)
         .await
         .expect("tick ok");
@@ -764,7 +819,7 @@ async fn e02_invalid_registry_path_yields_typed_registry_unavailable_zero_panics
     std::env::set_var(STRATEGY_IDS_ENV, "swing_momentum");
     std::env::set_var(STRATEGY_TIMEFRAME_ENV, "5m");
 
-    let mut st = paper_alpaca_state_with_db(pool, &adapter_id);
+    let mut st = paper_alpaca_state_with_db(pool.clone(), &adapter_id);
     Arc::get_mut(&mut st).unwrap().instrument_registry_path =
         "C:/definitely/does/not/exist/instruments.json".to_string();
     st.set_strategy_fleet_for_test(Some(vec![state::StrategyFleetEntry {
@@ -773,6 +828,7 @@ async fn e02_invalid_registry_path_yields_typed_registry_unavailable_zero_panics
     .await;
 
     let now = timing.preopen_start_utc + chrono::Duration::minutes(5);
+    bind_coverage_authority_for_test(&pool, &st, &operation, now).await;
     let outcome = tick_autonomous_completed_bar_driver_from_state(&st, now)
         .await
         .expect("tick ok");
@@ -2159,6 +2215,7 @@ async fn l05_registry_unavailable_degrades_durably_through_the_adapter() {
     .await;
 
     let now = timing.preopen_start_utc + chrono::Duration::minutes(5);
+    bind_coverage_authority_for_test(&pool, &st, &operation, now).await;
     let outcome = tick_autonomous_completed_bar_driver_from_state(&st, now)
         .await
         .expect("tick ok");

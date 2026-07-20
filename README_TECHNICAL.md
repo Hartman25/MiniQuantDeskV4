@@ -20,36 +20,24 @@ Use the root `README.md` for the high-level system story.
 ## Current proved posture
 
 **Repository snapshot used for this update (2026-07-20):** local `main` at
-`93cbff34f9bfe23ca51e18cd34e3e4e36d39015f`
-(`docs: bind outcome coverage to daily operation`), plus independent
+`3591064a805efc82b3f6468e1de0fe06ea028471`
+(`docs: require coverage authority before bar processing`), plus independent
 ChatGPT/operator acceptance of D4 and its evaluation-lineage repair together
-— **Phase D is accepted complete in full** — plus the
+— **Phase D is accepted complete in full** — plus independent acceptance of
+the four-times-corrected
 AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E1-DURABLE-OUTCOME-AUTHORITY-AND-EVIDENCE-CONTRACT
-patch on top of it (Phase E1: a read-only architecture audit producing the
-binding durable-outcome/no-trade contract for Phase E — implementation
-complete, awaiting ChatGPT and operator acceptance; no Phase E runtime code
-exists yet), plus four documentation/guard-only reconciliation passes
-(`AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E1-OUTCOME-CONTRACT-RECONCILIATION-01`,
-correcting eight source-proven defects;
-`AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E1-COVERAGE-ANCHOR-AND-RUN-LINEAGE-RECONCILIATION-02`,
-correcting ten further defects in the expected-bar-coverage bounds and the
-run-lineage/precedence/database-failure contract, replacing the original
-single-E2 authorization with an E2A/E2B split;
-`AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E1-OPERATION-SCOPED-COVERAGE-AUTHORITY-RECONCILIATION-03`,
-retiring the "extend `daily_data_readiness_evaluated`" coverage seam as a
-structural mismatch in favor of one dedicated, operation-scoped, immutable
-`autonomous_daily_coverage_bound` event, correcting an invalid run-lineage SQL
-query, and removing the last singular-current-`run_id` evidence rules; and
-`AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E1-PRE-DISPATCH-ANCHOR-GATE-AND-STABLE-REPLAY-04`,
-retiring the false claim that coordinator-local write ordering alone prevents
-an early `PrepareDataOnly` invocation, defining dual enforcement (coordinator
-ensure-authority seam plus a per-tick completed-bar-adapter authority gate
-with a new typed `CoverageAuthorityUnavailable` outcome), a pristine-vs-
-prior-activity rule for legacy/recovered operations, a mid-day
-coverage-policy-drift check, a stable replay identity dropping the caller-`now`
-`bound_at_utc` field, a write-atomicity decision, and a corrected
-failed-start-attempt wording) — still implementation complete, still
-awaiting acceptance, not yet accepted.
+(Phase E1: the read-only architecture audit producing the binding
+durable-outcome/no-trade contract for Phase E) — **E1 is accepted complete**
+— plus the
+AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E2A-COVERAGE-ANCHOR-AND-RUN-LINEAGE-FOUNDATION
+patch on top of it: the first Phase E runtime code. E2A implements the
+durable, operation-scoped `autonomous_daily_coverage_bound` evidence event
+(typed model, canonical construction, write/re-read/replay/conflict
+contract), the coordinator's ensure-authority seam, the completed-bar
+adapter's mandatory per-tick authority/mid-day-drift gate, and a raw
+full-run-lineage read/validate helper — **implementation complete, awaiting
+ChatGPT and operator acceptance.** No outcome classifier and no finalization
+behavior exist yet; that remains E2B.
 
 The strongest current operational route is:
 
@@ -101,10 +89,9 @@ Current local `main` contains, accepted (D1–D4, Phase D accepted complete in f
   the full-day lifecycle test's preopen phase resolves through real production readiness truth with
   zero manual unstick; a supervised-task proof under an injected clock
 
-Present on the local `main` worktree (Phase E1, four-times-corrected), implementation complete but
-awaiting independent ChatGPT/operator acceptance:
+Accepted (Phase E1, four-times-corrected):
 
-- a read-only architecture audit
+- the read-only architecture audit
   (`AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E1-DURABLE-OUTCOME-AUTHORITY-AND-EVIDENCE-CONTRACT`,
   `docs/specs/autonomous_daily_paper_operations_01e_outcome_truth_contract.md`) producing the
   binding contract for Phase E's durable daily outcome/no-trade classification: which durable store
@@ -116,98 +103,87 @@ awaiting independent ChatGPT/operator acceptance:
   reuses the existing nonterminal `evidence_degraded` state (no migration required), evidence-
   conflict precedence, a restart/idempotency contract reusing the existing CAS transition machinery,
   a bounded reason-code matrix, a read-only API contract for two net-new
-  `GET /api/v1/autonomous/daily-operation[s]` routes, a notification contract, and the narrow
-  implementation decomposition
-- **no Phase E runtime code was written by this patch** — no classifier, no coordinator wiring, no
-  API route, no migration; `outcome`/`no_trade_reason`/`finalized_at_utc` remain unwritten by any
-  production code path
-- a first reconciliation pass
-  (`AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E1-OUTCOME-CONTRACT-RECONCILIATION-01`) corrected eight
-  source-proven defects before acceptance is sought: `evidence_degraded` already has a confirmed
-  production writer (`apply_critical_completed_bar_blocker`) and its reuse for post-stop unresolved
-  evidence is now explicitly graph-authorized (two new edges, no migration); `outcome` and the
-  nonterminal `state_reason_code` are now exactly one authority each, never competing;
-  `sys_risk_denial_events` is documented as carrying no operation/run/evaluation correlation column
-  today, so `no_trade_all_signals_blocked` is deferred to a separately authorized future migration;
-  `completed_no_trade` now requires proving complete expected-bar coverage across the operation's
-  running interval, not merely that existing dispatch rows are `completed`; `no_trade_no_bar_expected`
-  was removed (its own example named a transition — `calendar_unavailable -> stopping` — that is not
-  legal in the existing transition graph)
-- a second reconciliation pass
-  (`AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E1-COVERAGE-ANCHOR-AND-RUN-LINEAGE-RECONCILIATION-02`)
-  corrected ten further defects: the expected-bar lower bound is no longer `started_at_utc` — the
-  accepted Phase D production scenario proves `PrepareDataOnly` durably observes a bar that closes
-  *before* the operation starts, which `RunningDispatch` later dispatches; the upper bound is no
-  longer the inclusive `bar_end_ts <= effective_operation_close_utc` rule — production refuses all
-  processing once `now_utc >= effective_operation_close_utc`; a confirmed durable-evidence-foundation
-  gap (the existing readiness-evidence event persists no coverage-policy identity, and no `mqk-db`
-  helper aggregates run lineage across recovery today) replaces the original single-E2 authorization
-  with a source-supported **E2A/E2B split** — E2A (durable coverage-anchor and run-lineage evidence
-  foundation) is the next authorized patch, E2B (strict classifier and finalization) is not
-  authorized until E2A is independently accepted; late-start and recovery-gap bars now fail closed to
-  `unknown_incomplete_bar_coverage` rather than silently narrowing the coverage window; the global
-  evidence-integrity precedence order is corrected (operation/DB authority → identity → run lineage →
-  coverage anchor → coverage completeness → zero unresolved claims → only then activity-vs-no-trade),
-  resolving the prior contradiction where a confirmed fill was said to override an unresolved claim
-  unconditionally; the database-failure contract now distinguishes a classifier-level
-  `unknown_database_unavailable` result from a guaranteed durable blocker write, forbidding any claim
-  of persistence without an authoritative re-read
-- a third reconciliation pass
-  (`AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E1-OPERATION-SCOPED-COVERAGE-AUTHORITY-RECONCILIATION-03`)
-  corrected the final operation-scoped coverage-authority defects: the first-dispatchable-bar
-  fallback to "the current session's first grid slot when no preopen slot qualifies" is retired as
-  under-inclusive (the production expected window can spill into the previous trading session even
-  at an ordinary, on-time open) and replaced with a single formula — the final element of
-  `expected_intraday_end_ts_window` evaluated at `effective_operation_open_utc`; extending the
-  generic `daily_data_readiness_evaluated` event as the durable coverage authority is retired as a
-  structural mismatch (that event carries no `operation_id`, is written for every attempt including
-  failures, and reseeds its `evaluation_id` key on every attempt) and replaced with one dedicated,
-  operation-scoped, immutable `autonomous_daily_coverage_bound` event in the existing
-  `sys_autonomous_session_events` store, with an exact write-order (after identity/plan/binding
-  resolution, before `PrepareDataOnly`/bar observation/canonical start/dispatch) and fail-closed
-  first-write/exact-replay/conflicting-replay contract; the run-lineage query's invalid `SELECT
-  DISTINCT run_id ... ORDER BY transition_seq` (not valid PostgreSQL, and self-defeating against the
-  contract's own duplicate-detection requirement) is replaced with a raw, undeduplicated row read
-  validated in Rust; the last four singular-current-`run_id` evidence rules (§5/§6) are corrected to
-  the full run lineage; the E2A decomposition is rewritten around the corrected coverage-bound event
-  and run-lineage query
-- a fourth reconciliation pass
-  (`AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E1-PRE-DISPATCH-ANCHOR-GATE-AND-STABLE-REPLAY-04`) corrected
-  the final pre-dispatch anchor-gate and stable-replay defects: retires the claim that
-  coordinator-local write ordering alone prevents an early `PrepareDataOnly` invocation — the
-  completed-bar production adapter (`tick_autonomous_completed_bar_driver_from_state`) is a separate,
-  independently-scheduled task that fetches the relevant operation and selects a driver mode purely
-  from durable state, so a concurrent tick can observe a newly-visible, not-yet-anchored operation and
-  invoke `PrepareDataOnly` before the coordinator has written its anchor; defines dual enforcement — a
-  coordinator-side write-then-authoritative-re-read "ensure authority" seam, plus a mandatory
-  per-tick, adapter-side authority/compatibility gate that never relies on task scheduling order,
-  coordinator-tick-first assumptions, sleep timing, or the single-process happy path; adds one typed
-  adapter outcome, `CoverageAuthorityUnavailable`, with four closed reason codes
-  (`coverage_authority_not_bound` / `_unreadable` / `_invalid` / `_conflict`) distinguishing a quiet,
-  no-mutation no-op for an unbound-but-brand-new operation from a refused-driver case for an
-  unreadable, identity-mismatched, or policy-conflicting anchor; distinguishes a pristine
-  pre-runtime operation (zero `run_id`/`started_at_utc`/bars/claims/running-lineage — safe for the
-  coordinator to bind after ordinary identity verification) from an operation with any prior activity
-  or evidence (anchor must never be fabricated retroactively; fails closed to
-  `coverage_authority_missing_after_activity`, reusing the existing D1 blocker-signature mechanism, no
-  new lifecycle state); requires the adapter to compare its independently-resolved
-  symbol/timeframe/timeframe_secs/required_history_bars/effective_grace_seconds/identity fields
-  against the immutable anchor on every tick, never assuming the coordinator has already observed a
-  mid-day drift; removes `bound_at_utc` from the coverage-bound event's JSON payload entirely — exact
-  replay recomputes the payload on every qualifying tick, so a caller-`now` timestamp cannot be part of
-  the semantic equality comparison, and the bind instant is instead sourced from the event row's own
-  `ts_utc` column, excluded from the comparison; explicitly decides operation-row creation and
-  coverage-event insertion do not require one combined SQL transaction, since the adapter-side gate
-  independently protects recovered legacy rows, corrupt/missing events, and mid-day drift regardless
-  of creation atomicity; and corrects the failed-start-attempt wording so a failed start is never read
-  as implying no coverage-bound event exists, since the coordinator's write point runs strictly before
-  the start-gate call. The E2A decomposition is rewritten into the exact ten-item breakdown these
-  repairs require.
+  `GET /api/v1/autonomous/daily-operation[s]` routes, a notification contract, the corrected
+  operation-scoped `autonomous_daily_coverage_bound` coverage-anchor seam, the raw full-run-lineage
+  read/validate contract, and the **E2A/E2B** implementation decomposition, across four correction
+  passes that closed source-proven defects found by fresh, targeted re-reads of the driver/coordinator
+  source
+- **no Phase E runtime code was written by E1 itself** — E1 is documentation/guard-only; the classifier,
+  coordinator wiring, API routes, and durable coverage-anchor/run-lineage foundation remained
+  E2A/E2B/E3/E4's job
+
+Implemented on the local `main` worktree (Phase E2A), implementation complete but awaiting independent
+ChatGPT/operator acceptance:
+
+- the typed, schema-versioned `CoverageBoundDetail` payload
+  (`core-rs/crates/mqk-daemon/src/state/autonomous_daily_coverage_authority.rs`), a manual
+  fail-closed parser (exact key set, rejects missing/wrong-type/unknown-schema-version payloads), and
+  `#[derive(PartialEq)]`-based semantic equality over every immutable field — the payload deliberately
+  excludes `bound_at_utc`; the bind instant is the event row's own `ts_utc` column, metadata only
+- `construct_coverage_bound_detail`, a pure, side-effect-free constructor reusing only
+  `daily_data_readiness::expected_intraday_end_ts_window`/`intraday_grid_starts` — no second
+  calendar, timeframe, grace, or completed-bar algorithm. The first dispatchable bar is the final
+  element of the expected window evaluated at `effective_operation_open_utc` (may spill into the
+  previous session at an ordinary open); the final dispatchable bar is the last current-session grid
+  identity whose expectation instant is strictly greater than the first bar's own and strictly less
+  than `effective_operation_close_utc` (a close-boundary bar is excluded), or the first bar itself
+  when none qualifies
+- `write_and_confirm_coverage_authority` / `check_coverage_authority`: the exact write/re-read/
+  idempotent-replay/conflict contract over the existing `sys_autonomous_session_events` store
+  (`ON CONFLICT (id) DO NOTHING`, id = `autonomous_daily_coverage_bound:{operation_id}`) — a write
+  error is never trusted without a confirming authoritative re-read
+- the coordinator's `ensure_coverage_authority` seam
+  (`state/autonomous_daily_coordinator.rs`), run immediately after `create_or_recover` and before any
+  state-handler dispatch, for both newly created and recovered operations: a pristine operation (zero
+  `run_id`/`started_at_utc`/bars/claims/running-lineage, via `check_operation_pristine`) may bind a
+  fresh anchor; any operation with prior activity and no anchor fails closed to
+  `coverage_authority_missing_after_activity` (`running` degrades to `evidence_degraded`; other
+  nonterminal states degrade to `manual_intervention_required`), reusing the existing D1
+  blocker-signature mechanism — never a retroactively fabricated anchor. Close priority is preserved:
+  at or after `effective_operation_close_utc`, canonical close/stop reconciliation always takes
+  precedence over a fresh coverage blocker
+- the completed-bar production adapter's mandatory per-tick authority gate
+  (`state/autonomous_completed_bar_task.rs`): after operation fetch and the cheap state-only mode
+  short-circuit, the adapter resolves its current policy, constructs the fresh payload, and checks it
+  against the exact coverage event — strictly before `load_driver_instruments` or any provider/registry
+  object is built. A new `CoverageAuthorityUnavailable { operation_id, reason_code }` outcome variant
+  carries the four closed reason codes (`coverage_authority_not_bound` / `_unreadable` / `_invalid` /
+  `_conflict`); a missing anchor is a quiet, no-mutation no-op, while every other case refuses the
+  driver without the adapter itself mutating lifecycle state — durable fail-closed projection remains
+  coordinator-owned
+- mid-day coverage-policy drift: the adapter's `resolve_current_coverage_policy_inputs` resolves
+  `timeframe_secs`/`required_history_bars`/`effective_grace_seconds` from the assignment's own
+  configured timeframe and the strategy registry's data requirements on every tick (deliberately
+  ignoring `EffectiveRuntimeBinding::effective_runtime_timeframe_secs` for this purpose, so this
+  resolver never preempts the driver's own separate `runtime_strategy_timeframe_mismatch` readiness
+  blocker with a competing check); any field disagreeing with the bound anchor is
+  `coverage_authority_conflict`, proven for both `PrepareDataOnly`- and `RunningDispatch`-eligible
+  states
+- `mqk_db::fetch_autonomous_daily_operation_running_transitions_raw` /
+  `validate_autonomous_daily_operation_run_lineage` /
+  `fetch_and_validate_autonomous_daily_operation_run_lineage`: a raw, unbounded `(transition_seq,
+  run_id)` read (`to_state = 'running'`, never `SELECT DISTINCT`, never the general-purpose 100-row
+  API list cap) plus Rust-side strict-monotonicity/uniqueness/current-run-match validation, proven
+  against a real two-run recovery cycle and a 150-row fixture
+- `mqk_db::fetch_autonomous_session_event_by_id` (exact primary-key read) and
+  `mqk_db::count_autonomous_daily_bar_dispatch_claims` — the two narrow `mqk-db` read helpers this
+  foundation needed; no migration
+- `tests/scenario_autonomous_daily_coverage_anchor_and_run_lineage_01.rs` (34 tests): construction
+  bounds (ordinary-open spillover, close-boundary exclusion, no-later-bar-qualifies), serialize/parse
+  round-trip and tamper cases, semantic-equality field sensitivity, pure run-lineage validation, the
+  durable write/replay/conflict contract, the coordinator's pristine-bind and prior-activity
+  fail-closed paths (plus close priority), the adapter's authority gate including a deterministic
+  zero-side-effect proof for a newly-visible not-yet-anchored operation and a proceeds-once-bound
+  proof, mid-day drift for both eligible modes, and the DB-backed run-lineage read/validate helper
+- **no outcome classifier and no finalization behavior were written** — `outcome`/`finalized_at_utc`
+  remain unwritten by any production code path; no new API route; no GUI change; no migration; no
+  `is_legal_operation_transition` graph change
 
 After D4 and its evaluation-lineage repair (Phase D, accepted complete in full) and the
-four-times-corrected Phase E1 contract are accepted, Bundle 3 still requires Phase E runtime implementation
-(E2A durable coverage-anchor/run-lineage evidence foundation, then E2B–E5, per the accepted E1
-contract), Phase F GUI/runbook/soak preparation, and Phase G final closure.
+four-times-corrected Phase E1 contract (accepted complete) are both accepted, Bundle 3 still requires
+Phase E2A's independent acceptance, then Phase E2B (strict classifier and finalization CAS, built on
+E2A's authorities), E3 coordinator integration, E4 read-only API, E5 integrated proof and closure, Phase
+F GUI/runbook/soak preparation, and Phase G final closure.
 
 ### Operational meaning
 
@@ -582,9 +558,10 @@ Its current source-grounded capabilities include:
 - existing readiness, preflight, events, and alert surfaces
 
 The path is still in **pre-soak hardening** because Bundle 3 is open. Phase D (D1–D4) is accepted
-complete in full; the Phase E1 contract audit (four-times-corrected) is implementation complete, awaiting
+complete in full; the Phase E1 contract audit (four-times-corrected) is **accepted complete**; Phase
+E2A (durable coverage-anchor/run-lineage evidence foundation) is implementation complete, awaiting
 acceptance. Do not label the current `main` head as a finished autonomous-paper MVP until Phase E's
-runtime implementation (E2A, then E2B–E5) and the later F/G phases are independently accepted.
+remaining runtime implementation (E2B–E5) and the later F/G phases are independently accepted.
 
 ### What is expected after Bundle 3
 
@@ -1060,8 +1037,8 @@ Recommended discipline:
 
 Be honest about these:
 
-- Bundle 3 is not closed; Phase D (D1–D4, integrated lifecycle proof, dispatch-ownership race closure, and the evaluation-lineage repair) is accepted complete in full; the Phase E1 contract audit (the binding durable outcome/no-trade contract, four-times-corrected) is implementation complete but awaiting independent ChatGPT/operator acceptance, and no Phase E runtime code exists yet
-- the current main branch should not begin an unattended soak until Phase E's runtime implementation (E2A durable coverage-anchor/run-lineage evidence foundation, then E2B–E5, per the accepted E1 contract) and the later Bundle 3 phases (F/G) are accepted; controlled, operator-supervised autonomous Paper + Alpaca operation is the current Bundle 3 target, not unattended soak
+- Bundle 3 is not closed; Phase D (D1–D4, integrated lifecycle proof, dispatch-ownership race closure, and the evaluation-lineage repair) is accepted complete in full; the Phase E1 contract audit (the binding durable outcome/no-trade contract, four-times-corrected) is **accepted complete**; Phase E2A (durable coverage-anchor/run-lineage evidence foundation) is implementation complete but awaiting independent ChatGPT/operator acceptance, and no outcome classifier or finalization behavior exists yet
+- the current main branch should not begin an unattended soak until Phase E's remaining runtime implementation (E2B strict classifier/finalization, then E3–E5, per the accepted E1 contract and built on E2A's authorities) and the later Bundle 3 phases (F/G) are accepted; controlled, operator-supervised autonomous Paper + Alpaca operation is the current Bundle 3 target, not unattended soak
 - Bundle 4 durable paper cash/positions/lots/cost basis/P&L truth is still open
 - real paper fill, reconcile-after-fill, Discord lifecycle, restart, and repeated-session evidence remain incomplete
 - the daemon/operator plane is materially stronger, but some deeper GUI detail surfaces remain intentionally deferred or unmounted rather than faked

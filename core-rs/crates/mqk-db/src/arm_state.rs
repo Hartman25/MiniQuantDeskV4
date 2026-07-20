@@ -296,6 +296,48 @@ pub async fn persist_autonomous_session_event(
     Ok(())
 }
 
+/// Fetch exactly one `sys_autonomous_session_events` row by its exact `id`.
+/// `Ok(None)` is authoritative "no event with this exact id exists" — never
+/// a synthesized row. Never uses [`load_recent_autonomous_session_events`]'s
+/// bounded/ordered list — this is a direct primary-key lookup, unaffected by
+/// how many other events exist or how old this one is.
+///
+/// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E2A-COVERAGE-ANCHOR-AND-RUN-LINEAGE-
+/// FOUNDATION: the exact-id read authority the coverage-bound event's
+/// write/re-read/replay/conflict contract requires.
+pub async fn fetch_autonomous_session_event_by_id(
+    pool: &PgPool,
+    id: &str,
+) -> Result<Option<AutonomousSessionEventRow>> {
+    let row = sqlx::query(
+        r#"
+        select id, ts_utc, event_type, resume_source, detail, run_id, source
+        from sys_autonomous_session_events
+        where id = $1
+        "#,
+    )
+    .bind(id)
+    .fetch_optional(pool)
+    .await
+    .context("fetch_autonomous_session_event_by_id failed")?;
+
+    row.map(
+        |r| -> std::result::Result<AutonomousSessionEventRow, sqlx::Error> {
+            Ok(AutonomousSessionEventRow {
+                id: r.try_get("id")?,
+                ts_utc: r.try_get("ts_utc")?,
+                event_type: r.try_get("event_type")?,
+                resume_source: r.try_get("resume_source")?,
+                detail: r.try_get("detail")?,
+                run_id: r.try_get("run_id")?,
+                source: r.try_get("source")?,
+            })
+        },
+    )
+    .transpose()
+    .map_err(Into::into)
+}
+
 pub async fn load_recent_autonomous_session_events(
     pool: &PgPool,
     limit: i64,
