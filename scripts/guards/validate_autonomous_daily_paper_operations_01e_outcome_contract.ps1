@@ -20,6 +20,21 @@
 #   [7]  Unresolved dispatch claims are never allowed to become no-trade --
 #        the contract explicitly blocks this.
 #   [8]  stopped_at_utc is required before finalization eligibility.
+#   [11] outcome is defined as the terminal-only authority (read-model once
+#        finalized); nonterminal unknown_* uses state_reason_code, never
+#        outcome.
+#   [12] unknown_* classification leaves outcome NULL.
+#   [13] unknown_* classification leaves finalized_at_utc NULL.
+#   [14] The stopping/stop_retrying -> evidence_degraded legal-transition
+#        graph extension is explicitly authorized by the contract.
+#   [15] The evidence_degraded -> stopping recovery path is defined.
+#   [16] sys_risk_denial_events is documented as not durably correlatable to
+#        an operation/run/evaluation.
+#   [17] no_trade_all_signals_blocked is deferred, not authorized for E2.
+#   [18] Partial/incomplete bar coverage blocks completed_no_trade.
+#   [19] unknown_incomplete_bar_coverage is defined.
+#   [20] calendar_unavailable is not treated as a clean finalized no-trade
+#        day (it cannot reach stopping and is never finalization-eligible).
 #   [9]  README.md / README_TECHNICAL.md do not claim the unattended soak has
 #        begun.
 #   [10] README.md / README_TECHNICAL.md do not claim live-capital readiness.
@@ -153,9 +168,9 @@ Test-ContentContainsAny "ledger states Phase E runtime implementation is not sta
 
 Write-Host ""
 Show-Info "--- [4] completed_no_trade is never defined from absence of fills alone ---"
-Test-ContentContains "contract states completed_no_trade must never be derived from zero fill rows alone" $ContractContent "Never" | Out-Null
+Test-ContentContains "contract requires complete expected-bar coverage for completed_no_trade, not merely absence of fills" $ContractContent "expected completed bar in the operation's actual running interval" | Out-Null
 Test-ContentContains "contract explicitly requires the full evidence hierarchy for completed_no_trade" $ContractContent "completed_no_trade" | Out-Null
-Test-ContentContains "contract states the necessary-but-not-sufficient rule for zero fills" $ContractContent "necessary but nowhere near sufficient" | Out-Null
+Test-ContentContains "contract states the necessary-but-not-sufficient rule for zero fills" $ContractContent "nowhere near sufficient" | Out-Null
 
 Write-Host ""
 Show-Info "--- [5] Process-local counters are never named as final outcome authority ---"
@@ -171,7 +186,7 @@ Test-ContentContains "contract states unknown_insufficient_evidence is never a f
 
 Write-Host ""
 Show-Info "--- [7] Unresolved dispatch claims never become no-trade ---"
-Test-ContentContains "contract requires zero unresolved dispatch claims for completed_no_trade" $ContractContent "zero" | Out-Null
+Test-ContentContains "contract blocks completed_no_trade outright on any unresolved dispatch claim" $ContractContent "blocks ``completed_no_trade`` outright" | Out-Null
 Test-ContentContains "contract names the unresolved-claim reason code" $ContractContent "unknown_unresolved_dispatch_claim" | Out-Null
 Test-ContentContains "contract states an unresolved claim blocks no-trade outright" $ContractContent "Any unresolved" | Out-Null
 
@@ -179,6 +194,51 @@ Write-Host ""
 Show-Info "--- [8] stopped_at_utc is required before finalization ---"
 Test-ContentContains "contract requires stopped_at_utc IS NOT NULL for eligibility" $ContractContent "stopped_at_utc IS NOT NULL" | Out-Null
 Test-ContentContains "contract names finalization eligibility section" $ContractContent "Finalization eligibility" | Out-Null
+
+Write-Host ""
+Show-Info "--- [11] outcome is the terminal-only authority; unknown_* uses state_reason_code ---"
+Test-ContentContains "contract states outcome is the read-model authority once finalized" $ContractContent "is the read-model authority once finalized" | Out-Null
+Test-ContentContains "contract routes nonterminal unknown_* codes through state_reason_code, not outcome" $ContractContent "carries the closed-set" | Out-Null
+Test-ContentContains "contract forbids writing an unknown_* value into outcome (part 1)" $ContractContent "E2+ must never write an" | Out-Null
+Test-ContentContains "contract forbids writing an unknown_* value into outcome (part 2)" $ContractContent "``unknown_*`` value into ``outcome``" | Out-Null
+
+Write-Host ""
+Show-Info "--- [12]-[13] unknown_* classification leaves outcome and finalized_at_utc NULL ---"
+Test-ContentContains "contract states outcome remains NULL for the evidence_degraded finalization path" $ContractContent "outcome remains NULL" | Out-Null
+Test-ContentContains "contract states finalized_at_utc remains NULL for the evidence_degraded finalization path" $ContractContent "finalized_at_utc remains NULL" | Out-Null
+
+Write-Host ""
+Show-Info "--- [14] stopping/stop_retrying -> evidence_degraded graph extension is explicitly authorized ---"
+Test-ContentContains "contract explicitly authorizes the Rust legal-transition graph extension" $ContractContent "explicitly authorizes E2 to extend the Rust" | Out-Null
+Test-ContentContains "contract names both new edges" $ContractContent "stopping -> evidence_degraded`` or" | Out-Null
+
+Write-Host ""
+Show-Info "--- [15] evidence_degraded -> stopping recovery path is defined ---"
+Test-ContentContains "contract defines the recovery path back through stopping" $ContractContent "evidence_degraded -> stopping`` edge, and the finalization CAS is retried" | Out-Null
+
+Write-Host ""
+Show-Info "--- [16] sys_risk_denial_events documented as not durably correlatable ---"
+Test-ContentContains "contract states risk-denial rows cannot be durably correlated to an operation/evaluation" $ContractContent "cannot be durably correlated" | Out-Null
+Test-ContentContains "contract names the missing correlation columns" $ContractContent "carries **no**" | Out-Null
+
+Write-Host ""
+Show-Info "--- [17] no_trade_all_signals_blocked is deferred, not authorized for E2 ---"
+Test-ContentContains "contract names no_trade_all_signals_blocked" $ContractContent "no_trade_all_signals_blocked" | Out-Null
+Test-ContentContains "contract states it is not authorized for E2 to implement from the current schema" $ContractContent "not** authorized" | Out-Null
+
+Write-Host ""
+Show-Info "--- [18] Partial/incomplete bar coverage blocks completed_no_trade ---"
+Test-ContentContains "contract requires zero missing expected bar identities" $ContractContent "**Zero** missing expected bar identities" | Out-Null
+Test-ContentContains "contract states any missing/unprovable/contradictory expected bar blocks no-trade" $ContractContent "Any missing, unprovable, or contradictory expected-bar identity" | Out-Null
+
+Write-Host ""
+Show-Info "--- [19] unknown_incomplete_bar_coverage is defined ---"
+Test-ContentContains "contract defines unknown_incomplete_bar_coverage" $ContractContent "unknown_incomplete_bar_coverage" | Out-Null
+
+Write-Host ""
+Show-Info "--- [20] calendar_unavailable is never a clean finalized no-trade day ---"
+Test-ContentContains "contract states calendar_unavailable has no legal edge to stopping" $ContractContent "calendar_unavailable`` has no legal" | Out-Null
+Test-ContentContains "contract states calendar_unavailable is never finalization-eligible" $ContractContent "never finalization-eligible under" | Out-Null
 
 Write-Host ""
 Show-Info "--- [9] README.md / README_TECHNICAL.md do not claim the unattended soak has begun ---"

@@ -13531,3 +13531,116 @@ unattended 10-20-session soak: NOT STARTED
 Bundle 4 durable portfolio/P&L work: still required
 live capital: NOT READY
 ```
+
+---
+
+## AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E1-OUTCOME-CONTRACT-RECONCILIATION-01
+
+Starting HEAD: `33639b735810e0c84707483835a0f0bf8c09c8b0` ("docs: define durable autonomous daily
+outcome contract"). Documentation/guard-only reconciliation of the Phase E1 contract above — no
+Rust file, migration, API route, or GUI file is added or modified by this patch.
+
+**Mission:** correct five source-proven defects the original E1 draft carried (a false "no writer"
+claim for `evidence_degraded`; an unauthorized legal-transition gap for post-stop unresolved
+evidence; competing reason-code authority between `outcome` and `state_reason_code`; an overclaim
+about `sys_risk_denial_events` correlation; an under-specified bar-coverage requirement for
+`completed_no_trade`) plus a `no_trade_no_bar_expected` example that named an illegal state
+transition, and reconcile the now-stale D4 acceptance-prohibition in
+`validate_autonomous_daily_paper_operations_01d4_evaluation_lineage_and_autonomous_preopen_closure_01.ps1`
+(that guard predated the independent D4/Phase D acceptance recorded above and still forbade the
+ledger from recording it).
+
+**Corrections made** (full detail in the reconciled contract document):
+
+1. **`evidence_degraded` writer (was: "no writer found")** — corrected to the source-confirmed
+   truth: `apply_critical_completed_bar_blocker` (`autonomous_daily_coordinator.rs:1367-1395`)
+   already takes `running -> evidence_degraded` for completed-bar evidence-critical outcomes
+   (unresolved dispatch claim, missing evaluation-lineage evidence, unconfirmed completion write).
+   Its existing meaning is confirmed compatible with a post-stop finalization evidence gap.
+2. **Legal unknown-evidence path** — the contract now explicitly authorizes E2 to extend the Rust
+   `is_legal_operation_transition` graph with two new edges, `stopping -> evidence_degraded` and
+   `stop_retrying -> evidence_degraded` (no migration required — `evidence_degraded` is already a
+   legal CHECK-constraint value), with `outcome`/`finalized_at_utc` remaining `NULL` while
+   nonterminal and recovery routing back through the existing `evidence_degraded -> stopping` edge.
+3. **One authority per reason type** — `outcome` is now defined as the terminal-only classification
+   authority; the nonterminal insufficient-evidence classification uses `state_reason_code` +
+   `state_blocker_signature` instead, never `outcome`.
+4. **Risk-denial correlation truth** — `sys_risk_denial_events` (migration `0026`) is confirmed to
+   carry no `operation_id`/`run_id`/`evaluation_id`/`strategy_id`/`timeframe`/`decision_id`/
+   `order_id` column, so it cannot be durably correlated to a specific operation today.
+   `no_trade_all_signals_blocked` is removed from the initial E2 reason set and deferred to a
+   separately authorized future migration; every nonzero uncovered signal now routes to
+   `unknown_order_evidence_conflict` unconditionally.
+5. **Complete expected-bar coverage** — `completed_no_trade` now requires proving zero missing,
+   unconfirmed, or contradictory expected bar identities across the operation's actual running
+   interval (not merely that existing dispatch rows are `completed`), reusing only already-existing
+   pure helpers (`daily_data_readiness::intraday_grid_starts`, the persisted session-boundary
+   columns, the existing assignment/runtime-binding identity helpers) — no new schema, no new
+   algorithm. New nonterminal codes `unknown_incomplete_bar_coverage` and
+   `unknown_assignment_identity_unavailable` cover the fail-closed paths. E2 vs. E2A/E2B decomposition
+   question resolved: **single E2 remains authorized** — every needed primitive already exists.
+6. **`no_trade_no_bar_expected`** — removed from the initial E2 reason set. Its own example named an
+   illegal transition (`calendar_unavailable` has no legal edge to `stopping`); no source-provable
+   path to this reason code was found for any state that does have a legal edge to `stopping`. The
+   empty-expected-bar-set case now routes through the (correspondingly widened)
+   `unknown_missing_evaluation_evidence`.
+7. **Stale D4 guard** — the obsolete "ledger does not mark D4 accepted" prohibition (predating the
+   independent D4/Phase D acceptance already recorded above) is removed from
+   `validate_autonomous_daily_paper_operations_01d4_evaluation_lineage_and_autonomous_preopen_closure_01.ps1`
+   and replaced with positive checks requiring the ledger to record D4/Phase D acceptance while
+   Bundle 3 stays open, Phase E is not marked complete, and the soak/live-capital claims remain absent.
+8. **E1 guard strengthened** — `validate_autonomous_daily_paper_operations_01e_outcome_contract.ps1`
+   gained specific semantic checks (outcome-vs-state_reason_code authority split, the graph-extension
+   authorization, the recovery path, the risk-denial non-correlation statement, the deferred
+   `no_trade_all_signals_blocked` disposition, the bar-coverage requirement, and the
+   `calendar_unavailable` non-finalization-eligible fact) and dropped the most generic anchors
+   (bare `Never`/`zero`) in favor of exact phrases that cannot pass accidentally.
+
+**Deliverable:** `docs/specs/autonomous_daily_paper_operations_01e_outcome_truth_contract.md`
+corrected in place (§2, §3.3 new, §4, §5, §6, §7, §8, §9, §10, §13, §14); a "Correction pass" note
+added at the top recording this reconciliation's scope. This document remains the binding contract
+for Phases E2–E5 — corrected, not re-audited from scratch, and still not itself an acceptance record.
+
+**Guards:** `validate_autonomous_daily_paper_operations_01e_outcome_contract.ps1` (strengthened, all
+checks pass), `validate_autonomous_daily_paper_operations_01d4_evaluation_lineage_and_autonomous_preopen_closure_01.ps1`
+(reconciled, all checks pass), `validate_autonomous_daily_paper_operations_01a_audit.ps1` pass,
+`validate_daily_data_readiness_01e_closure.ps1` pass,
+`validate_autonomous_daily_paper_operations_01d_phase_d_closure.ps1` pass (unmodified),
+`check_unsafe_patterns.ps1` pass. `git diff --check` / `git diff --cached --check` clean. No Cargo
+command run (no Rust file touched).
+
+**Files changed:** `MiniQuantDesk_Master_Patch_Ledger_v2.md`, `README.md`, `README_TECHNICAL.md`,
+`docs/specs/autonomous_daily_paper_operations_01e_outcome_truth_contract.md`,
+`scripts/guards/validate_autonomous_daily_paper_operations_01e_outcome_contract.ps1`,
+`scripts/guards/validate_autonomous_daily_paper_operations_01d4_evaluation_lineage_and_autonomous_preopen_closure_01.ps1`.
+No Rust file changed. No migration changed. No API route implemented. No GUI changed.
+
+**Safety confirmation (E1 reconciliation):**
+
+```text
+PROVIDER CALLS: no
+BROKER CALLS: no
+NETWORK CALLS: no
+REAL DAEMON STARTED: no
+PAPER ORDERS: no
+LIVE ORDERS: no
+PAPER DB TOUCHED: no
+PORT 5440 TOUCHED: no
+RUST FILES CHANGED: no
+MIGRATION CHANGED: no
+API IMPLEMENTED: no
+GUI CHANGED: no
+PHASE E RUNTIME IMPLEMENTATION STARTED: no
+```
+
+```text
+D4: ACCEPTED — COMPLETE
+PHASE D: ACCEPTED — COMPLETE
+E1 contract reconciliation: IMPLEMENTATION COMPLETE — AWAITING CHATGPT AND OPERATOR ACCEPTANCE
+PHASE E runtime implementation: NOT STARTED
+BUNDLE 3 (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-COMBINED): OPEN
+NEXT AFTER RECONCILIATION ACCEPTANCE: E2 — durable outcome classifier and finalization store seam,
+  per the corrected contract, only
+unattended 10-20-session soak: NOT STARTED
+live capital: NOT READY
+```

@@ -55,7 +55,10 @@ full** — plus the
 AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E1-DURABLE-OUTCOME-AUTHORITY-AND-EVIDENCE-CONTRACT
 patch on top of it (Phase E1: a read-only architecture audit producing the
 binding durable-outcome/no-trade contract for Phase E — no Phase E runtime
-code; see below).
+code), plus a documentation/guard-only reconciliation pass
+(`AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E1-OUTCOME-CONTRACT-RECONCILIATION-01`)
+that corrected five source-proven defects in that contract before E2 begins
+(see below).
 
 The strongest current operational route is:
 
@@ -107,14 +110,15 @@ Already implemented and **accepted** (D1–D4, Phase D accepted complete in full
 - closed a confirmed completed-bar dispatch-ownership race: the completed-bar driver's durable claim dispatches through the exact-input strategy-dispatch seam directly instead of round-tripping through the shared account-wide pending-bar mailbox the ordinary execution loop also drains every tick, so a concurrent execution-loop tick can no longer cause a real evaluation to be recorded as a failed claim, plus a deterministic concurrency proof for that fix (both interleaving orderings) and one integrated scenario test driving a synthetic Paper+Alpaca day through preopen, canonical start, running dispatch, runtime interruption/recovery, session close, and shutdown together
 - a completed dispatch claim durably stores and confirms the exact `strategy_signal_evaluations` row that proves it ran (a shared deterministic identity helper, never a second algorithm); the completion write's `Ok(false)`/`Err` outcomes are honored via one authoritative re-read instead of being silently treated as success; the full-day lifecycle test's preopen phase resolves through real production readiness truth instead of a manual unstick workaround; a supervised-task proof under an injected clock
 
-Implemented on the local `main` worktree (Phase E1), but not yet independently accepted:
+Implemented on the local `main` worktree (Phase E1, corrected), but not yet independently accepted:
 
 - a read-only architecture audit producing the binding contract for Phase E's durable daily outcome/no-trade classification: outcome authority, finalization eligibility, terminal-state semantics, activity/no-trade evidence hierarchies, an `unknown_insufficient_evidence` representation that requires no schema migration, evidence-conflict precedence, a restart/idempotency contract reusing the existing CAS transition machinery, a bounded reason-code matrix, a read-only API contract, a notification contract, and the narrow E2–E5 implementation decomposition
+- a reconciliation pass corrected five source-proven defects before acceptance: the `evidence_degraded` state already has a confirmed production writer and its reuse for post-stop unresolved evidence is now explicitly graph-authorized; `outcome` and the nonterminal `state_reason_code` are now one authority each, never competing; `sys_risk_denial_events` is documented as not durably correlatable to any operation today, so `no_trade_all_signals_blocked` is deferred; `completed_no_trade` now requires proving complete expected-bar coverage, not merely that existing dispatch rows are `completed`; `no_trade_no_bar_expected` was removed (its own example named an illegal state transition)
 - **no Phase E runtime code was written** — the classifier, coordinator wiring, and API routes remain E2/E3/E4's job
 
 Still required before Bundle 3 closes:
 
-1. independent ChatGPT/operator acceptance of the Phase E1 contract audit
+1. independent ChatGPT/operator acceptance of the corrected Phase E1 contract
 2. implement Phase E runtime (E2 classifier/finalization seam, E3 coordinator integration, E4 read-only API, E5 integrated proof and closure) per the accepted E1 contract
 3. finish Phase F GUI, runbook, and soak-evidence preparation
 4. complete Phase G closure audit and ledger reconciliation

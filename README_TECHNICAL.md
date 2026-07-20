@@ -28,7 +28,10 @@ AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E1-DURABLE-OUTCOME-AUTHORITY-AND-EVIDENCE-CO
 patch on top of it (Phase E1: a read-only architecture audit producing the
 binding durable-outcome/no-trade contract for Phase E — implementation
 complete, awaiting ChatGPT and operator acceptance; no Phase E runtime code
-exists yet).
+exists yet), plus a documentation/guard-only reconciliation pass
+(`AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E1-OUTCOME-CONTRACT-RECONCILIATION-01`)
+that corrected five source-proven defects in that contract — still
+implementation complete, still awaiting acceptance, not yet accepted.
 
 The strongest current operational route is:
 
@@ -100,10 +103,22 @@ ChatGPT/operator acceptance:
 - **no Phase E runtime code was written by this patch** — no classifier, no coordinator wiring, no
   API route, no migration; `outcome`/`no_trade_reason`/`finalized_at_utc` remain unwritten by any
   production code path
+- a reconciliation pass
+  (`AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E1-OUTCOME-CONTRACT-RECONCILIATION-01`) corrected five
+  source-proven defects before acceptance is sought: `evidence_degraded` already has a confirmed
+  production writer (`apply_critical_completed_bar_blocker`) and its reuse for post-stop unresolved
+  evidence is now explicitly graph-authorized (two new edges, no migration); `outcome` and the
+  nonterminal `state_reason_code` are now exactly one authority each, never competing;
+  `sys_risk_denial_events` is documented as carrying no operation/run/evaluation correlation column
+  today, so `no_trade_all_signals_blocked` is deferred to a separately authorized future migration;
+  `completed_no_trade` now requires proving complete expected-bar coverage across the operation's
+  running interval, not merely that existing dispatch rows are `completed`; `no_trade_no_bar_expected`
+  was removed (its own example named a transition — `calendar_unavailable -> stopping` — that is not
+  legal in the existing transition graph)
 
-After D4 and its evaluation-lineage repair (Phase D, accepted complete in full) and the Phase E1
-contract audit are accepted, Bundle 3 still requires Phase E runtime implementation (E2–E5, per the
-accepted E1 contract), Phase F GUI/runbook/soak preparation, and Phase G final closure.
+After D4 and its evaluation-lineage repair (Phase D, accepted complete in full) and the corrected
+Phase E1 contract are accepted, Bundle 3 still requires Phase E runtime implementation (E2–E5, per
+the accepted E1 contract), Phase F GUI/runbook/soak preparation, and Phase G final closure.
 
 ### Operational meaning
 

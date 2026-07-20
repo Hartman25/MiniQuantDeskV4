@@ -29,8 +29,9 @@
 #        PrepareDataOnly + BarObserved outcome at the preopen instant.
 #   [8]  A supervised-task test exists proving the real production adapter is
 #        invoked under an injected (non-`Utc::now()`) clock.
-#   [9]  The master patch ledger and Phase D closure spec do not mark D4,
-#        Phase D, or Bundle 3 closed/accepted.
+#   [9]  The master patch ledger records legitimate D4/Phase D acceptance
+#        while Bundle 3 remains open, Phase E is not marked complete, and the
+#        unattended soak / live-capital readiness claims remain absent.
 #
 # Usage:
 #   powershell -ExecutionPolicy Bypass -File scripts\guards\validate_autonomous_daily_paper_operations_01d4_evaluation_lineage_and_autonomous_preopen_closure_01.ps1
@@ -187,7 +188,7 @@ Test-ContentContains "that test spawns the real production task (not a fake tick
 Test-ContentContains "that test awaits shutdown of the same supervised task" $TaskTestsContent "cancel_and_wait_completed_bar_task_for_shutdown" | Out-Null
 
 Write-Host ""
-Show-Info "--- [9] Ledger and closure doc do not mark D4/Phase D/Bundle 3 closed ---"
+Show-Info "--- [9] Ledger records legitimate D4/Phase D acceptance; Bundle 3/Phase E/soak/live-capital truth is not overclaimed ---"
 $LedgerContent = $null
 if (Test-FileExists "Master patch ledger" $PathLedger) {
     $LedgerContent = Get-Content -Raw -Path $PathLedger
@@ -196,10 +197,42 @@ $ClosureDocContent = $null
 if (Test-FileExists "Phase D closure document" $PathClosureDoc) {
     $ClosureDocContent = Get-Content -Raw -Path $PathClosureDoc
 }
+# Obsolete prohibition removed (was: "ledger does not mark D4 accepted"/"closure doc does not mark
+# D4 accepted") -- D4 and Phase D acceptance were independently granted
+# (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D4-ACCEPTANCE) and recording that truthfully in the ledger is
+# legitimate, required content, not a violation. The closure doc itself
+# (docs/specs/autonomous_daily_paper_operations_01d_phase_d_closure.md) is out of this patch's file
+# scope and is not expected to be edited to add an acceptance claim -- it is left as the
+# implementation-complete record it always was.
+Test-ContentContains "ledger records D4 acceptance" $LedgerContent "D4: ACCEPTED" | Out-Null
+Test-ContentContains "ledger records Phase D acceptance" $LedgerContent "PHASE D: ACCEPTED" | Out-Null
 Test-ContentDoesNotContain "ledger does not contain 'Bundle 3 (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-COMBINED): CLOSED'" $LedgerContent "Bundle 3 (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-COMBINED): CLOSED" | Out-Null
 Test-ContentDoesNotContain "ledger does not contain 'Phase D: CLOSED'" $LedgerContent "Phase D: CLOSED" | Out-Null
-Test-ContentDoesNotContain "ledger does not mark D4 accepted" $LedgerContent "D4: ACCEPTED" | Out-Null
-Test-ContentDoesNotContain "closure doc does not mark D4 accepted" $ClosureDocContent "D4: ACCEPTED" | Out-Null
+$ForbiddenPhaseEClaimsD4Guard = @(
+    "PHASE E: CLOSED",
+    "PHASE E: COMPLETE",
+    "PHASE E: IMPLEMENTATION COMPLETE",
+    "phase e runtime implementation: complete",
+    "phase e outcome classifier implemented",
+    "phase e is wired",
+    "durable daily outcome classification is live"
+)
+foreach ($Phrase in $ForbiddenPhaseEClaimsD4Guard) {
+    Test-ContentDoesNotContain "ledger does not contain forbidden Phase E claim '$Phrase'" $LedgerContent $Phrase | Out-Null
+}
+Test-ContentContains "ledger states the unattended soak has not started" $LedgerContent "soak: NOT STARTED" | Out-Null
+Test-ContentContains "ledger states live capital is not ready" $LedgerContent "live capital: NOT READY" | Out-Null
+$ForbiddenLiveClaimsD4Guard = @(
+    "live capital is ready",
+    "live capital: ready",
+    "approved for live capital",
+    "live trading is approved",
+    "cleared for live capital",
+    "ready for live capital"
+)
+foreach ($Phrase in $ForbiddenLiveClaimsD4Guard) {
+    Test-ContentDoesNotContain "ledger does not contain forbidden live-capital-readiness claim '$Phrase'" $LedgerContent $Phrase | Out-Null
+}
 
 # =============================================================================
 # Summary

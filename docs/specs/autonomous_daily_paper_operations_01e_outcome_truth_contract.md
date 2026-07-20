@@ -10,6 +10,20 @@ Phases E2–E5; it does not implement any part of them.
 Starting HEAD: `544ec628708d0b8a5381aaaaef6c220af2f98253` ("fix: bind autonomous claims to
 evaluation lineage").
 
+**Correction pass** (`AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E1-OUTCOME-CONTRACT-RECONCILIATION-01`,
+applied on top of the original E1 audit commit, starting HEAD `33639b735810e0c84707483835a0f0bf8c09c8b0`
+("docs: define durable autonomous daily outcome contract")): corrects eight source-proven defects
+in the original E1 draft below — a false "no writer" claim for `evidence_degraded` (§7), an
+unauthorized legal-transition gap for post-stop unresolved evidence (§3, §7), competing reason-code
+authority between `outcome` and `state_reason_code` (§2), an overclaim about `sys_risk_denial_events`
+correlation (§4–§6, §10), an under-specified bar-coverage requirement for `completed_no_trade`
+(§6, §10, §13), a `no_trade_no_bar_expected` example that names an illegal state transition (§6),
+and reconciles the now-stale D4 acceptance-prohibition guard
+(`validate_autonomous_daily_paper_operations_01d4_evaluation_lineage_and_autonomous_preopen_closure_01.ps1`).
+This correction does not redo the current-source audit in §1 except where a repair required a fresh
+source read (recorded inline); it is not itself an acceptance record, and does not close E1, Phase
+E, or Bundle 3.
+
 ## 0. Accepted foundation (recorded, not re-litigated)
 
 ```text
@@ -172,10 +186,21 @@ populates `outcome`/`finalized_at_utc`.** This is precisely, and only, what Phas
 
 ## 2. Authority decisions
 
-- **Outcome authority**: `sys_autonomous_daily_operations` is the sole durable outcome authority.
-  `outcome` (bounded ≤128 chars, currently unconstrained) becomes the single reason-code field
-  written by the E2 classifier — one of the closed set in §9, regardless of whether the
-  classification is activity, no-trade, or (while nonterminal) an unresolved-evidence reason.
+- **Outcome authority (corrected — Correction 3)**: `sys_autonomous_daily_operations` is the sole
+  durable outcome authority, split by exactly one authority per reason type — never two competing
+  slots for the same fact:
+  - **Terminal classification** (`completed_no_trade` / `completed_with_activity`): `outcome`
+    (bounded ≤128 chars, currently unconstrained) is the single closed-set terminal reason code
+    (§9), written atomically with `finalized_at_utc` in the same CAS transition that reaches the
+    terminal state. The same code may also appear in that transition event's `reason_code` (§1.2)
+    for audit lineage, but `outcome` is the read-model authority once finalized.
+  - **Nonterminal insufficient-evidence classification** (the operation remains in, or transitions
+    to, `evidence_degraded`): `state_reason_code` (already the existing CAS-transition reason-code
+    field, §1.1) carries the closed-set `unknown_*` blocker code, paired with
+    `state_blocker_signature` for dedup exactly as every other blocker in this table already works.
+    `outcome` and `finalized_at_utc` both remain `NULL` while nonterminal — E2+ must never write an
+    `unknown_*` value into `outcome`.
+  - `no_trade_reason` remains retired per the rule below — unused by either authority.
 - **`no_trade_reason` is retired, not reused.** It is a second, competing reason-code slot left over
   from the original Phase A schema draft, with no CHECK constraint and no established semantics
   distinguishing it from `outcome`. Per the D4 precedent of collapsing to "one shared identity
@@ -265,14 +290,62 @@ existing `AwaitingOutcomeFinalization` outcome (`autonomous_daily_coordinator.rs
 418`) already fires at exactly the moment conditions 1–5 hold. E3's job is to make the coordinator,
 upon observing that outcome, call the E2 classifier instead of merely logging it.
 
+### 3.3 Finalization-time evidence gap → `evidence_degraded` (corrected — Correction 1/2)
+
+§7 resolves the E1 draft's open question: `evidence_degraded` already has a confirmed production
+writer (`apply_critical_completed_bar_blocker`, `autonomous_daily_coordinator.rs:1367-1395`, taking
+the `running -> evidence_degraded` edge for `CompletedBarCriticalClass::Evidence` outcomes), and its
+existing meaning — "durable evidence required for safe automatic operation is missing, contradictory,
+corrupt, or unresolved" — is semantically compatible with a post-stop finalization evidence gap. The
+existing legal-transition graph (`is_legal_operation_transition`,
+`core-rs/crates/mqk-db/src/autonomous_daily_operation.rs:107-205`) does **not** currently permit
+`stopping -> evidence_degraded` or `stop_retrying -> evidence_degraded` — only `running ->
+evidence_degraded` exists today. This contract explicitly authorizes E2 to extend the Rust
+`is_legal_operation_transition` graph with exactly those two new edges. **No migration is required**:
+`evidence_degraded` is already a legal value in both `sys_autonomous_daily_operations`'s `state`
+CHECK constraint and `sys_autonomous_daily_operation_events`'s `from_state`/`to_state` CHECK
+constraints (migration `0048`, `autonomous_daily_operation.rs:142-150,187-207`) — the DB schema
+places no restriction on which specific from→to pairs are legal; that is enforced entirely at the
+Rust application layer, exactly the same seam D2 already extended five times without a migration
+(§0 note; `autonomous_daily_operation.rs:93-106`).
+
+**Exact finalization-time behavior**:
+
+```text
+state IN (stopping, stop_retrying)
+  + stopped_at_utc IS NOT NULL
+  + classification evidence incomplete (any §7 nonterminal trigger fires)
+  -> evidence_degraded
+     state_reason_code    = the exact matching unknown_* code (§7, §10)
+     state_blocker_signature = canonical typed signature (same D1 blocker-signature
+                                 mechanism apply_critical_completed_bar_blocker already
+                                 uses today for the running -> evidence_degraded edge)
+     outcome remains NULL
+     finalized_at_utc remains NULL
+```
+
+**Recovery** (reuses the existing legal edge, adds nothing new): once evidence later becomes
+sufficient (a delayed journal write lands, an operator manually reconciles, or a retried read
+succeeds where a prior one failed), the classifier takes the already-legal
+`evidence_degraded -> stopping` edge, and the finalization CAS is retried on a later tick. **No
+new edge from `evidence_degraded` directly into any `completed*` state is added** — recovery must
+route back through `stopping` and re-attempt the ordinary terminal CAS from there, unless a future
+source review proves a direct edge is strictly safer and necessary (none was found by this audit).
+A mid-run `evidence_degraded` row with `stopped_at_utc IS NULL` (the pre-existing `running ->
+evidence_degraded` case) must never enter this finalization-recovery path — it is not
+finalization-eligible under §3.2 condition 3 regardless, so no additional guard is required beyond
+what §3.2 already establishes.
+
 ---
 
 ## 4. Terminal-state semantics (E1.3)
 
 - **`completed_no_trade`**: reserved for a durable, evidence-complete proof that the strategy ran
-  to conclusion for every applicable bar and chose not to trade, or that no bar was ever applicable.
-  **Never** derived from "zero rows in `oms_inbox` with `event_kind='fill'`" alone — that fact is
-  necessary but nowhere near sufficient (§6).
+  to conclusion for **every** expected completed bar in the operation's actual running interval and
+  chose not to trade (§6's strict complete-coverage requirement, corrected — Correction 5). **Never**
+  derived from "zero rows in `oms_inbox` with `event_kind='fill'`" alone — that fact is necessary
+  but nowhere near sufficient (§6). Partial or unprovable bar coverage is never silently treated as
+  no-trade — it routes to nonterminal `unknown_incomplete_bar_coverage` (§7, §10).
 - **`completed_with_activity`**: reserved for a durable, evidence-complete proof that the strategy
   or its downstream pipeline produced real, DB-observable order/fill/decision activity — never
   inferred from `AutonomousPaperReadinessResponse`'s process-local `bar_tick_dispatch_count` /
@@ -305,20 +378,28 @@ row proves a strategy evaluation was confirmed, nothing about whether an order r
    confirms it reached the broker. Classified `completed_with_activity` with reason
    `activity_decision_accepted` (a decision was made and durably recorded), distinct from the
    stronger `activity_order_submitted`/`activity_fill_confirmed` reasons.
-4. **Risk/promotion-gate denial** — a `sys_risk_denial_events` row exists for this operation window
-   with a nonzero requested quantity, but no matching `oms_outbox` row was ever created. This is
-   operational activity (the decision pipeline ran and made a real, evidenced choice) but it is
-   **not** trading activity and must not be classified `completed_with_activity`. It belongs to its
-   own reason code (`no_trade_all_signals_blocked`, §9) inside the no-trade family, because no order
-   was ever placed — but it is a *stronger*, more specific no-trade reason than "the strategy simply
-   never generated a signal."
-5. **Strategy evaluation with nonzero target, no accepted decision and no risk denial found** — a
-   `strategy_signal_evaluations` row exists with `decision_stage='strategy_evaluated'` and
-   `signal_generated=true`/`signal_qty != 0`, but neither an `oms_outbox` row nor a matching
-   `sys_risk_denial_events` row can be found. This is **not** classified as activity, and **not**
-   classified as no-trade either — it is a genuine evidence gap between "the strategy wanted to
-   trade" and "we can prove what happened next." Routed to `unknown_insufficient_evidence`
-   (§7) under reason `unknown_order_evidence_conflict`, never guessed in either direction.
+4. **Risk/promotion-gate denial evidence (corrected — Correction 4, downgraded)** —
+   `sys_risk_denial_events` (migration `0026`) is durable, but its columns are `id`,
+   `denied_at_utc`, `rule`, `message`, `symbol`, `requested_qty`, `limit_qty`, `severity` — it
+   carries **no** `operation_id`, `run_id`, `evaluation_id`, `strategy_id`, `timeframe`,
+   `decision_id`, or `order_id` column (confirmed by direct read of
+   `core-rs/crates/mqk-db/migrations/0026_risk_denial_events.sql:15-24`). A row in this table
+   therefore **cannot be durably correlated** to a specific operation or strategy evaluation today —
+   a nearby `symbol`/`requested_qty`/`denied_at_utc` match is coincidental proximity, not proof, and
+   this contract forbids treating it as proof. §5 tier 4 as originally drafted (promoting a
+   risk-denial match to no-trade evidence) is **removed**; a promotion denial for this operation's
+   symbol is not currently distinguishable, by any durable join, from an unrelated denial for the
+   same symbol on the same day.
+5. **Strategy evaluation with nonzero target, no accepted decision, and no durably correlated order
+   evidence** — a `strategy_signal_evaluations` row exists with `decision_stage='strategy_evaluated'`
+   and `signal_generated=true`/`signal_qty != 0`, but no `oms_outbox` row exists. This is **not**
+   classified as activity, and **not** classified as no-trade either — it is a genuine evidence gap
+   between "the strategy wanted to trade" and "we can prove what happened next." Per Correction 4,
+   this is now the **only** disposition for a nonzero uncovered signal (the risk-denial branch above
+   is removed, not an alternative path). Routed to nonterminal `evidence_degraded` (§7) under reason
+   `unknown_order_evidence_conflict`, never guessed in either direction. A nearby
+   `sys_risk_denial_events` row with the same symbol/quantity/timestamp is **not** sufficient
+   correlation to resolve this gap (§6, §9's deferred-work note).
 
 Ordered/exclusive rule: evaluate top-down; the first matching tier wins. A day may have both fills
 and unrelated no-signal evaluations for other bars — the presence of *any* tier-1 or tier-2 evidence
@@ -332,18 +413,73 @@ evaluation otherwise showed.
 `completed_no_trade` requires **all** of the following to hold, durably:
 
 1. `stopped_at_utc IS NOT NULL` (finalization-eligible, §3).
-2. Every `sys_autonomous_daily_bar_dispatches` row for this `operation_id` has `status='completed'`
-   — **zero** rows in `claimed`/`uncertain`/`failed`. Any unresolved claim blocks no-trade
-   classification outright (§7).
+2. **Complete expected-bar coverage (corrected — Correction 5, strengthened)**. The original draft's
+   "every existing dispatch row is `completed`" is necessary but not sufficient — it says nothing
+   about bars that were expected but for which **no** dispatch row exists at all. The classifier
+   must instead prove complete coverage using canonical session/timeframe truth, reusing only
+   already-existing pure helpers and persisted columns (no new algorithm, no new schema):
+   1. Resolve the canonical single-symbol assignment and effective runtime binding for this
+      operation (the same resolution `attempt_canonical_start`/`create_or_recover_autonomous_daily_
+      operation` already performs, `autonomous_daily_coordinator.rs:370-372`).
+   2. Derive `assignment_identity`/`runtime_binding_identity` from that resolution via the existing
+      `derive_assignment_identity`/`derive_runtime_binding_identity` helpers
+      (`state/autonomous_daily_operation.rs:506,537`) and require them to match the operation's own
+      persisted `assignment_identity`/`runtime_binding_identity` columns **exactly**. A mismatch (or
+      an inability to resolve the current assignment/binding at all) means the classifier cannot
+      safely know which symbol/timeframe this operation actually ran — fail closed to
+      `unknown_assignment_identity_unavailable` (§7), never guess which config applied.
+   3. Use the accepted canonical session/calendar authority already bound to this operation
+      (`session_open_utc`, `session_close_utc`, `effective_operation_close_utc` — all persisted
+      per-operation columns, migrations `0048`/`0049`) together with the existing pure
+      `daily_data_readiness::intraday_grid_starts(session_open_utc, session_close_utc,
+      interval_secs)` helper — **not** `expected_intraday_end_ts_window` (that helper is
+      `required_history_bars`-bounded for readiness-gate purposes, not a full-day coverage list).
+   4. Derive the exact expected completed-bar end-timestamps as the subset of that session's full
+      grid whose bar-close instant falls inside `[operation.started_at_utc,
+      min(operation.stopped_at_utc, operation.effective_operation_close_utc)]` — the operation's
+      actual running interval through effective close, per the mission's exact wording. If
+      `started_at_utc` is `NULL` (the operation legally reached `stopping` — e.g. via the D2
+      pre-running-state edges, `preflight_blocked -> stopping` and similar — without ever reaching
+      `running`), the expected-bar set is empty by construction and item 3 below cannot be
+      satisfied. This is **not** classified `completed_no_trade` under any reason code (Correction 6
+      removes `no_trade_no_bar_expected` — no durable evidence proves "zero bars were ever
+      applicable" as opposed to "the operation was blocked before it could find out"); it routes to
+      `unknown_missing_evaluation_evidence` (§7), extended by this correction to cover both "reached
+      `running` but zero evaluations exist" and "never reached `running` at all."
+   5. Require every expected bar identity `(local_symbol, timeframe, bar_end_ts)` to have: a
+      completed `sys_autonomous_daily_bar_dispatches` row; a non-null `evaluation_id` on that row;
+      and a matching durable `strategy_signal_evaluations` row confirmed by the same exact-lookup
+      pattern D4 already uses (`mqk_db::fetch_strategy_signal_evaluation`,
+      `autonomous_completed_bar_driver.rs`, §12.1 of the `01d` closure doc).
+   6. **Zero** missing expected bar identities.
+   7. **Zero** extra, future, or inconsistent claims for this `operation_id` outside the expected
+      set (a claim with a `bar_end_ts` the grid does not produce is itself a contradiction, not
+      evidence to ignore).
+   8. Aggregate counters must agree with the per-bar rows: `bars_observed`/`bars_dispatched` equal
+      the proven-covered count, and `last_completed_bar_ts`/`last_dispatched_bar_ts` equal the final
+      expected identity's `bar_end_ts`.
+
+   Any missing, unprovable, or contradictory expected-bar identity — including a `claimed`/
+   `uncertain`/`failed` dispatch row anywhere in the expected set — produces the nonterminal
+   `unknown_incomplete_bar_coverage` (§7, §10), never a silent no-trade classification. This
+   supersedes and retires the E1 draft's narrower `unknown_insufficient_bar_evidence` code (which
+   only checked `bars_observed=0`): a day with some, but not all, expected bars proven is exactly as
+   unproven as a day with zero, and both must use the same one authority — no free-form SQL join is
+   specified here beyond what is stated; the exact query shape remains an E2 implementation detail
+   (§14).
 3. At least one durable `strategy_signal_evaluations` row exists with `decision_stage=
    'strategy_evaluated'` for this operation's `run_id` (i.e., the strategy genuinely ran at least
-   once — a day with zero evaluations at all is a different reason, item 5 below, not "evaluated and
-   chose not to trade").
-4. Every `strategy_signal_evaluations` row with `decision_stage='strategy_evaluated'` for this
-   `run_id` has `signal_generated=false` or `signal_qty=0` — **or**, where a nonzero signal exists,
-   a matching `sys_risk_denial_events` row durably proves it was denied pre-submission (§5 tier 4;
-   this still yields `completed_no_trade`, with the more specific reason
-   `no_trade_all_signals_blocked`, because no order was ever placed).
+   once). Given item 2's complete-coverage proof, this is implied whenever the expected-bar set is
+   nonempty and fully covered — restated here because it remains the deciding fact when the expected
+   set is legitimately empty (item 2's `started_at_utc IS NULL` case): zero evaluations then means
+   zero proof of anything, routed to `unknown_missing_evaluation_evidence`, never assumed no-trade.
+4. **Every** `strategy_signal_evaluations` row with `decision_stage='strategy_evaluated'` for this
+   `run_id` has `signal_generated=false` or `signal_qty=0` (corrected — Correction 4: the original
+   draft's second branch, "or a matching risk-denial row proves denial," is removed — see §5 tier 4
+   and §9's deferred-work note. A nonzero signal with no matching `oms_outbox` row is **never**
+   `completed_no_trade` under any circumstance; it is always routed to nonterminal
+   `unknown_order_evidence_conflict`, regardless of any coincidentally nearby `sys_risk_denial_
+   events` row).
 5. Zero `oms_outbox` rows exist for this `run_id`.
 6. Zero `oms_inbox` rows with `event_kind IN ('fill','partial_fill','ack','reject','cancel_ack',
    'replace_ack')` exist for this `run_id`.
@@ -351,18 +487,28 @@ evaluation otherwise showed.
    — is only ever a sub-classification of item 4 above (a `strategy_signal_evaluations` row proving
    the evaluation ran and concluded flat), never inferred from process-local target state.
 
-**Reason families** (bounded, source-supported):
-- `no_trade_strategy_evaluated_no_signal` — items 1–6 hold, and every evaluated bar's signal was
+**Reason families** (bounded, source-supported; corrected — Corrections 4/6):
+- `no_trade_strategy_evaluated_no_signal` — items 1–7 hold, and every evaluated bar's signal was
   flat/zero.
-- `no_trade_all_signals_blocked` — items 1–6 hold, and at least one nonzero signal exists but is
-  fully accounted for by a matching risk/promotion denial (item 4's second branch).
-- `no_trade_no_bar_expected` — `bars_observed = 0` for the entire operation window, **and** the
-  durable transition-event trail (§1.2) shows the operation never legally reached `running` (e.g.
-  it was `preflight_blocked`/`calendar_unavailable` for the whole day, or the calendar genuinely had
-  no applicable session) — i.e. zero bars is *expected*, not suspicious. If `bars_observed = 0` but
-  the operation *did* reach `running`, that is not this reason — it routes to `unknown_
-  insufficient_bar_evidence` (§7), because an operation that ran but observed no bars is unexplained,
-  not proven no-trade.
+- ~~`no_trade_all_signals_blocked`~~ — **removed from the initial E2 reason set.** The original
+  draft's premise (a matching `sys_risk_denial_events` row proves a specific nonzero signal was
+  denied) is not currently provable — §5 tier 4 confirms the table has no durable correlation column
+  to any operation, run, evaluation, or strategy. Deferred per §9's binding disposition; not
+  authorized for E2/E2's classifier to implement from the current schema under any name.
+- `no_trade_no_bar_expected` — **removed from the initial E2 reason set (corrected — Correction 6).**
+  The E1 draft's own example named an illegal state transition: `calendar_unavailable` has no legal
+  edge to `stopping` in the existing transition graph (`is_legal_operation_transition`,
+  `autonomous_daily_operation.rs:195-198`: `calendar_unavailable` only transitions to
+  `awaiting_preopen` or `manual_intervention_required`) — an operation that is calendar-unavailable
+  for the whole day is therefore never finalization-eligible under §3.2 and never reaches this
+  classifier at all; it remains operator-blocked, which is the correct, already-existing disposition
+  and requires no new reason code. The only *other* pre-running states with a legal edge to
+  `stopping` (`awaiting_preopen`, `preparing_data`, `awaiting_open`, `preflight_blocked`,
+  `start_retrying`) each represent a real readiness/config blocker, not a durable proof that "zero
+  bars were ever applicable" for calendar reasons — using any of them as `no_trade_no_bar_expected`
+  evidence would be exactly the kind of guessed no-trade reason §7's frozen Phase A rule forbids. No
+  source-provable path to this reason code was found during this audit. If a future audit locates
+  one, it must be re-added by name with its exact evidence proof, not reused implicitly.
 
 Process-local values that **must never** be used as no-trade authority (per the mission's explicit
 prohibition, cross-checked against source): `AppState`'s in-memory `bar_tick_dispatch_count`,
@@ -392,27 +538,50 @@ is required for E2** to implement this.
   contract does not need to introduce.
 - Reusing `evidence_degraded` keeps the schema's three-terminal-state design frozen exactly as
   Phase B built it, minimizing blast radius per this repo's minimal-scope discipline.
-- **Open question for E2, not resolved by this audit**: no current production call site was found
-  during this audit that transitions any operation into `evidence_degraded` (the legal edge
-  `running -> evidence_degraded` exists in the transition graph, but no confirmed writer was located
-  in the coordinator or completed-bar driver source read for this patch). E2 must positively confirm,
-  before wiring this reuse, whether `evidence_degraded` already carries an established mid-run
-  meaning that would be diluted by also using it for post-stop unresolved-evidence at finalization
-  time. If a conflict is found, E2 must either (a) confirm the two meanings are compatible (both mean
-  "durable evidence needed for automatic processing is not trustworthy/complete, pending
-  resolution") and proceed, or (b) escalate this as a genuine contract defect requiring a fresh audit
-  cycle before implementation, per this document's own review-loop discipline. This is recorded as a
-  known limitation (§14), not silently assumed away.
+- **Resolved (corrected — Correction 1; was an open question in the original E1 draft)**: the E1
+  draft's claim that "no current production call site was found that transitions any operation into
+  `evidence_degraded`" was **false**, contradicted directly by source. A confirmed production writer
+  already exists: `apply_critical_completed_bar_blocker`
+  (`autonomous_daily_coordinator.rs:1367-1395`), reached from
+  `apply_completed_bar_driver_outcome`'s evidence-critical branch
+  (`autonomous_daily_coordinator.rs:1217-1230`, `CompletedBarCriticalClass::Evidence`), takes the
+  `running -> evidence_degraded` edge for exactly these evidence-critical completed-bar driver
+  outcomes: an unresolved dispatch claim (`DispatchClaimUnresolved`), missing evaluation-lineage
+  evidence (`DispatchEvaluationEvidenceMissing`), an unconfirmed completion write
+  (`DispatchCompletionUnconfirmed`), and any other outcome the driver classifies as
+  `CompletedBarCriticalClass::Evidence` rather than `Control`. Its existing, already-live meaning is
+  exactly: *"durable evidence required for safe automatic operation is missing, contradictory,
+  corrupt, or unresolved."* This is semantically identical to what §3.3/§7 need for a post-stop
+  finalization evidence gap — both describe the same underlying fact (durable evidence needed for
+  automatic processing is not trustworthy/complete, pending resolution), just observed at two
+  different lifecycle instants (mid-run vs. post-stop). **The state graph and retry behavior must
+  still be explicitly extended** (§3.3 authorizes the two new `stopping`/`stop_retrying ->
+  evidence_degraded` edges; the existing `evidence_degraded -> stopping` recovery edge already
+  covers the retry path) — reuse is safe, but is not a no-op; E2 must implement the graph extension,
+  not merely assume the existing edge already covers this case. This is no longer left as an open
+  question for E2 to resolve.
 
-**Mandatory triggers** (all fail closed to `evidence_degraded` + the matching reason code, never
-guessed toward no-trade or activity):
-- `stopped_at_utc` present but any `sys_autonomous_daily_bar_dispatches` row is still `claimed`/
-  `uncertain`/`failed` → `unknown_unresolved_dispatch_claim`.
-- Zero durable `strategy_signal_evaluations` rows exist for an operation that *did* reach `running`
-  → `unknown_missing_evaluation_evidence`.
-- A nonzero signal exists with no `oms_outbox` row and no matching risk-denial row (§5 tier 5) →
-  `unknown_order_evidence_conflict`.
-- `bars_observed = 0` for an operation that reached `running` → `unknown_insufficient_bar_evidence`.
+**Mandatory triggers** (all fail closed to `evidence_degraded` + the matching `state_reason_code`,
+never guessed toward no-trade or activity; corrected — Corrections 4/5/6 change which triggers apply
+and add two new ones):
+- `stopped_at_utc` present but any `sys_autonomous_daily_bar_dispatches` row in the expected-bar set
+  (§6 item 2) is still `claimed`/`uncertain`/`failed` → `unknown_unresolved_dispatch_claim`.
+- Zero durable `strategy_signal_evaluations` rows exist — whether the operation reached `running`
+  and observed nothing, or it legally reached `stopping` without ever reaching `running` at all
+  (extended by Correction 6, replacing the removed `no_trade_no_bar_expected`'s empty-expected-set
+  case, §6 item 2) → `unknown_missing_evaluation_evidence`.
+- A nonzero signal exists with no `oms_outbox` row (corrected — Correction 4: the risk-denial branch
+  is removed; this trigger now fires unconditionally on the nonzero-signal/no-outbox fact alone, per
+  §5 tier 4/5) → `unknown_order_evidence_conflict`.
+- **New (Correction 5)**: any expected bar identity in §6 item 2's derived grid is missing, has no
+  confirmed evaluation row, or the aggregate counters disagree with the per-bar rows →
+  `unknown_incomplete_bar_coverage`. This supersedes the original draft's narrower
+  `bars_observed = 0` check (`unknown_insufficient_bar_evidence`, retired — a partial-coverage day is
+  exactly as unproven as a zero-coverage day and must use the same one authority).
+- **New (Correction 5)**: the current process cannot resolve the operation's own assignment/runtime
+  binding, or the freshly-derived `assignment_identity`/`runtime_binding_identity` does not exactly
+  match the operation's persisted values (§6 item 2, step 2) → `unknown_assignment_identity_
+  unavailable` — the classifier must never assume "probably still the same config" and proceed.
 - Any DB read required to gather evidence fails →  `unknown_database_unavailable` — this check runs
   **first**, before any other evidence read, and short-circuits the entire classification (§8).
 - `stopped_at_utc` is present but the eligibility conditions of §3.2 cannot otherwise be fully
@@ -435,20 +604,29 @@ Deterministic, fail-closed order, evaluated top-to-bottom; the first matching ru
 1. **DB read failure anywhere in the evidence-gathering pass** → `unknown_database_unavailable`.
    Nothing else is evaluated once this fires — a partial evidence read must never be treated as a
    complete one.
-2. **Any unresolved `sys_autonomous_daily_bar_dispatches` claim** (`claimed`/`uncertain`/`failed`)
-   → blocks `completed_no_trade` outright, routes to `unknown_unresolved_dispatch_claim`, even if
-   every other bar for the day looks clean.
-3. **Any confirmed fill or durable order-reaching-broker evidence** (§5 tiers 1–2) → wins over
+2. **Assignment/runtime-binding identity cannot be resolved or does not match** (§6 item 2 steps
+   1–2, corrected — Correction 5) → `unknown_assignment_identity_unavailable`. Runs before any bar
+   evidence is gathered, because the expected-bar grid itself depends on knowing the correct
+   symbol/timeframe.
+3. **Any unresolved `sys_autonomous_daily_bar_dispatches` claim within the expected-bar set**
+   (`claimed`/`uncertain`/`failed`) → blocks `completed_no_trade` outright, routes to
+   `unknown_unresolved_dispatch_claim`, even if every other bar for the day looks clean.
+4. **Any confirmed fill or durable order-reaching-broker evidence** (§5 tiers 1–2) → wins over
    everything else, including any coexisting no-trade-shaped diagnostic evidence for other bars.
    `completed_with_activity` is decided and no further evidence-gap check downgrades it.
-4. **Missing journal evidence** (zero `strategy_signal_evaluations` rows for an operation that
+5. **Missing journal evidence** (zero `strategy_signal_evaluations` rows for an operation that
    reached `running`) → blocks `completed_no_trade`, routes to
    `unknown_missing_evaluation_evidence`.
-5. **Terminal broker/order activity cannot be erased by process-local zero counters** — this is
+6. **Incomplete expected-bar coverage** (§6 item 2, corrected — Correction 5: any expected bar
+   identity missing, unconfirmed, or aggregate-counter-inconsistent) → blocks `completed_no_trade`,
+   routes to `unknown_incomplete_bar_coverage`.
+7. **A nonzero signal with no `oms_outbox` row** (§5 tier 4/5, corrected — Correction 4: no
+   risk-denial branch) → blocks `completed_no_trade`, routes to `unknown_order_evidence_conflict`.
+8. **Terminal broker/order activity cannot be erased by process-local zero counters** — this is
    structural, not a runtime check: the classifier never reads `AppState`'s in-memory diagnostic
    fields at all (§6), so there is no code path by which a zero-valued process-local counter could
    ever override a durable `oms_outbox`/`oms_inbox` row.
-6. **Otherwise**, apply §5 (activity hierarchy) then §6 (no-trade hierarchy) in order; if neither
+9. **Otherwise**, apply §5 (activity hierarchy) then §6 (no-trade hierarchy) in order; if neither
    fully resolves, fall through to §7's residual `unknown_*` triggers.
 
 ---
@@ -490,6 +668,15 @@ Deterministic, fail-closed order, evaluated top-to-bottom; the first matching ru
   required — `outcome`/`finalized_at_utc` already exist (migration `0048`), and the transition-event
   table already durably records the `stopping`/`stop_retrying` → `completed*` transition once E2
   starts taking that edge.
+- **Deferred: durable risk-denial correlation (corrected — Correction 4, binding disposition)**.
+  `sys_risk_denial_events` (migration `0026`) cannot today be durably joined to an operation, run,
+  or strategy evaluation (§5 tier 4). `no_trade_all_signals_blocked` is therefore **not** authorized
+  for E2 to implement from the current schema, under this or any other name. A future, separately
+  authorized patch — out of scope for E1 and E2 alike — would need to add a durable correlation
+  column (e.g. `operation_id`/`run_id`/`evaluation_id` on `sys_risk_denial_events`, or an equivalent
+  join table) plus a migration, before this reason family could be safely implemented. Until then,
+  every nonzero uncovered signal routes to `unknown_order_evidence_conflict` (§6 item 4, §7), never
+  to a no-trade reason.
 
 ---
 
@@ -499,18 +686,23 @@ All codes below are ≤128 chars (matches the existing `outcome` column's bound)
 SQL/provider/credential/panic text may ever become part of a durable `outcome` value — only these
 closed codes.
 
+Corrected (Corrections 4/5/6): `no_trade_all_signals_blocked` and `no_trade_no_bar_expected` are
+removed from the initial reason set (§6, §9); `unknown_insufficient_bar_evidence` is retired in
+favor of the broader `unknown_incomplete_bar_coverage`; `unknown_assignment_identity_unavailable`
+is new (§6 item 2, §7); `unknown_order_evidence_conflict`'s required evidence no longer references
+a risk-denial check.
+
 | Reason code | Terminal state | Required evidence | Prohibited contradictory evidence | Bounded detail | Operator remediation |
 |---|---|---|---|---|---|
 | `activity_fill_confirmed` | `completed_with_activity` | ≥1 `oms_inbox` row, `event_kind IN ('fill','partial_fill')`, for a `run_id` bound to this operation | none — highest-precedence evidence, cannot be overridden | fill count, first/last fill `broker_message_id` (bounded) | none — this is a clean close |
 | `activity_order_submitted` | `completed_with_activity` | `oms_outbox.status IN ('SENT','ACKED')` or `dispatching_at_utc IS NOT NULL`, or `oms_inbox event_kind IN ('ack','cancel_ack','replace_ack','reject')`, zero fills | none | order count, statuses observed | none — clean close, no fill this session |
 | `activity_decision_accepted` | `completed_with_activity` | ≥1 `oms_outbox` row for this `run_id` that never advanced past `PENDING`/`CLAIMED`/`FAILED` | a fill or broker-reaching status exists (would upgrade to a stronger code) | outbox row count, last status | review why the enqueue never reached the broker |
-| `no_trade_strategy_evaluated_no_signal` | `completed_no_trade` | §6 items 1–6, every evaluated signal flat/zero | any nonzero signal without a matching risk denial | evaluation count | none — clean no-trade day |
-| `no_trade_all_signals_blocked` | `completed_no_trade` | §6 items 1–6, every nonzero signal matched by a `sys_risk_denial_events` row | a nonzero signal with no matching denial and no outbox row | denial count, rule codes | review whether the risk/promotion gate is over-conservative |
-| `no_trade_no_bar_expected` | `completed_no_trade` | `bars_observed=0` and the operation never legally reached `running` | operation reached `running` | last pre-running state, transition trail pointer | none — expected non-trading day |
-| `unknown_insufficient_bar_evidence` | nonterminal (`evidence_degraded`) | operation reached `running` but `bars_observed=0` | — | — | investigate completed-bar driver/provider health for this date |
-| `unknown_unresolved_dispatch_claim` | nonterminal (`evidence_degraded`) | ≥1 `sys_autonomous_daily_bar_dispatches` row in `claimed`/`uncertain`/`failed` | — | claim identity `(local_symbol, timeframe, bar_end_ts)` | manual dispatch-claim recovery per Phase C's documented "Phase D owns manual recovery" note |
-| `unknown_missing_evaluation_evidence` | nonterminal (`evidence_degraded`) | operation reached `running`, zero `strategy_signal_evaluations` rows exist | — | — | investigate signal-evaluation journal write path |
-| `unknown_order_evidence_conflict` | nonterminal (`evidence_degraded`) | nonzero signal, no outbox row, no matching risk denial | — | evaluation identity | investigate the decision→outbox seam for a silent drop |
+| `no_trade_strategy_evaluated_no_signal` | `completed_no_trade` | §6 items 1–7 (including complete expected-bar coverage), every evaluated signal flat/zero | any nonzero signal, any incomplete bar coverage | evaluation count, expected-bar count | none — clean no-trade day |
+| `unknown_assignment_identity_unavailable` | nonterminal (`evidence_degraded`) | current assignment/runtime-binding resolution fails, or its derived identity does not match the operation's persisted `assignment_identity`/`runtime_binding_identity` | — | which identity component mismatched | investigate config drift between the persisted operation and the process attempting finalization |
+| `unknown_incomplete_bar_coverage` | nonterminal (`evidence_degraded`) | any expected bar identity (§6 item 2) missing, unconfirmed, or aggregate-counter-inconsistent | — | expected vs. proven bar counts | investigate completed-bar driver/provider health for this date |
+| `unknown_unresolved_dispatch_claim` | nonterminal (`evidence_degraded`) | ≥1 `sys_autonomous_daily_bar_dispatches` row in `claimed`/`uncertain`/`failed` within the expected-bar set | — | claim identity `(local_symbol, timeframe, bar_end_ts)` | manual dispatch-claim recovery per Phase C's documented "Phase D owns manual recovery" note |
+| `unknown_missing_evaluation_evidence` | nonterminal (`evidence_degraded`) | zero `strategy_signal_evaluations` rows exist, whether or not the operation reached `running` (Correction 6: covers the removed `no_trade_no_bar_expected`'s never-ran case) | — | — | investigate signal-evaluation journal write path, or confirm the pre-running blocker that prevented `running` from ever being reached |
+| `unknown_order_evidence_conflict` | nonterminal (`evidence_degraded`) | nonzero signal, no outbox row (no risk-denial check — `sys_risk_denial_events` is not durably correlatable, §5 tier 4) | — | evaluation identity | investigate the decision→outbox seam for a silent drop |
 | `unknown_database_unavailable` | nonterminal (`evidence_degraded`) | any evidence-gathering DB read failed | — | none (never surface raw DB error text) | retry once DB is reachable; this code short-circuits all other checks |
 | `unknown_runtime_stop_unproven` | nonterminal (`evidence_degraded`) | `stopped_at_utc` present but eligibility (§3.2) cannot be otherwise fully confirmed | — | — | operator investigation of the specific contradictory facts found |
 
@@ -583,24 +775,57 @@ Authorized after independent acceptance of this E1 contract. **No patch beyond E
 this document alone** — each subsequent phase requires its own explicit go-ahead per this bundle's
 one-patch-per-turn discipline.
 
-### E2 — durable outcome classifier and finalization store seam
-- **Mission**: implement the pure evidence-gathering reads (§1, §5, §6) and the pure classification
-  function (§8's precedence, §9's code table) in isolation, plus the CAS finalization write path
-  (extends or sits beside `transition_autonomous_daily_operation` to also set `outcome`/
-  `finalized_at_utc` atomically in the same `UPDATE`). Not called from any production tick.
-- **Likely files**: `core-rs/crates/mqk-db/src/autonomous_daily_operation.rs` (finalization CAS
-  function), a new `core-rs/crates/mqk-daemon/src/state/autonomous_daily_outcome_classifier.rs`
-  (pure logic, DB-read-only).
-- **Schema impact**: none expected (all needed columns/states already exist per §1, §7) — **except**
-  the E2-only open question in §7 about `evidence_degraded`'s existing meaning, which must be
-  resolved (confirmed compatible, or escalated) before this patch proceeds.
+### E2 — durable outcome classifier and finalization store seam (decomposition decided — Correction 5)
+
+**E2 vs. E2A/E2B decision**: the mission requires this contract to state, based on actual source
+proof, whether bar-coverage evidence aggregation needs its own dedicated evidence-foundation patch
+before the classifier is authorized. Resolved: **a single E2 is authorized — no E2A/E2B split.**
+Every primitive §6 item 2's strict coverage proof needs already exists and composes without new
+schema or a newly-invented algorithm:
+- the pure session-grid helper (`daily_data_readiness::intraday_grid_starts`),
+- the per-operation persisted boundary columns (`session_open_utc`, `session_close_utc`,
+  `effective_operation_close_utc`, `started_at_utc`, `stopped_at_utc`, migrations `0048`/`0049`),
+- the existing assignment/runtime-binding derivation and identity-comparison helpers
+  (`derive_assignment_identity`, `derive_runtime_binding_identity`,
+  `state/autonomous_daily_operation.rs:506,537`), and
+- the durable per-bar dispatch-claim rows already keyed on exact bar identity
+  (`sys_autonomous_daily_bar_dispatches`, migration `0050`).
+
+No new persisted evidence and no new pure-calculation algorithm is required — only new *composition*
+of these existing pieces, which is ordinary classifier-implementation work, not a foundation gap.
+The `unknown_assignment_identity_unavailable`/`unknown_incomplete_bar_coverage` nonterminal codes
+(§7, §10) are the fail-closed escape hatch for the one genuine risk this composition carries (the
+process attempting finalization resolving a different assignment/binding than the one that actually
+ran) — E2 must implement that check before relying on any config-derived value, never assume
+current-process config still matches.
+
+- **Mission**: implement the pure evidence-gathering reads (§1, §5, §6, including the §6 item 2
+  bar-coverage composition above) and the pure classification function (§8's precedence, §9's code
+  table) in isolation, plus the CAS finalization write path (extends or sits beside
+  `transition_autonomous_daily_operation` to also set `outcome`/`finalized_at_utc` atomically in the
+  same `UPDATE`), plus the two new `stopping`/`stop_retrying -> evidence_degraded` legal-transition
+  edges authorized by §3.3. Not called from any production tick.
+- **Likely files**: `core-rs/crates/mqk-db/src/autonomous_daily_operation.rs` (the two new legal
+  transition edges, finalization CAS function), a new
+  `core-rs/crates/mqk-daemon/src/state/autonomous_daily_outcome_classifier.rs` (pure logic,
+  DB-read-only), reusing `daily_data_readiness::intraday_grid_starts` and the existing
+  identity-derivation helpers rather than duplicating them.
+- **Schema impact**: none — every column/state this patch needs already exists (§1, §3.3, §7); the
+  `evidence_degraded` open question that would have forced a possible schema decision is now
+  resolved (§7 Correction 1) with no migration required.
+- **Explicitly deferred, not part of E2**: `no_trade_all_signals_blocked` (§9's binding disposition
+  — requires a separately authorized `sys_risk_denial_events` correlation migration first);
+  `no_trade_no_bar_expected` (§6 Correction 6 — no source-provable path found).
 - **Test binaries**: new `scenario_autonomous_daily_outcome_01.rs` (already anticipated in the `01a`
-  spec's §18 test matrix) — pure classifier unit tests plus DB-backed CAS finalization tests
-  (idempotent replay, concurrent finalize race, terminal-state immutability).
+  spec's §18 test matrix) — pure classifier unit tests (including full/partial/zero bar-coverage
+  cases and an assignment-identity-mismatch case) plus DB-backed CAS finalization tests (idempotent
+  replay, concurrent finalize race, terminal-state immutability, the new
+  `stopping`/`stop_retrying -> evidence_degraded -> stopping` recovery round-trip).
 - **Hard exclusions**: no coordinator wiring, no API route, no GUI, no notification wiring, no
-  migration unless the `evidence_degraded` question in §7 forces a narrowly-scoped one.
-- **Acceptance boundary**: classifier + finalize CAS function proven correct and idempotent in
-  isolation against a real test DB; zero production call sites invoke it yet.
+  migration, no `sys_risk_denial_events` schema change.
+- **Acceptance boundary**: classifier + finalize CAS function + transition-graph extension proven
+  correct and idempotent in isolation against a real test DB; zero production call sites invoke it
+  yet.
 
 ### E3 — coordinator finalization integration and restart-safe reconciliation
 - **Mission**: wire E2's classifier into `autonomous_daily_coordinator.rs`'s handling of
@@ -644,10 +869,18 @@ one-patch-per-turn discipline.
 
 ## 14. Known limitations
 
-- **`evidence_degraded`'s pre-existing meaning was not conclusively resolved by this audit** (§7) —
-  the legal transition edge `running -> evidence_degraded` exists in source, but no confirmed
-  production writer was located during this read-only pass. E2 must resolve this before reusing the
-  state for finalization-time unresolved evidence.
+- **`sys_risk_denial_events` cannot be durably correlated to an operation/run/evaluation today**
+  (§5 tier 4, §9) — `no_trade_all_signals_blocked` is deferred, not authorized for E2, and requires a
+  separately authorized migration adding a correlation column before it can be implemented safely.
+- **No source-provable path to `no_trade_no_bar_expected` was found** (§6 Correction 6) — removed
+  from the initial E2 reason set; a genuinely calendar-unavailable-for-the-whole-day operation
+  remains operator-blocked (`manual_intervention_required`) rather than auto-classified, which is
+  already the correct existing behavior and needs no new code.
+- **The §6 item 2 bar-coverage composition is specified, not implemented or tested by this patch** —
+  it reuses only already-existing pure helpers and persisted columns (no new schema, no new
+  algorithm), but E2 must still write and prove the actual composition (full/partial/zero-coverage
+  cases, the assignment-identity-mismatch fail-closed path) against a real test DB; this document
+  does not itself constitute that proof.
 - **No dedicated Phase B or Phase C closure guard script exists** in `scripts/guards/` (only Phase
   A/D/D4 have dedicated `autonomous_daily_paper_operations_*` validators) — Phase B/C closure
   integrity currently rests on the general guards and the ledger's own safety-confirmation blocks.
