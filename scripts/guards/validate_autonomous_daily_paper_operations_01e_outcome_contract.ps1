@@ -38,6 +38,28 @@
 #   [9]  README.md / README_TECHNICAL.md do not claim the unattended soak has
 #        begun.
 #   [10] README.md / README_TECHNICAL.md do not claim live-capital readiness.
+#   [21] The contract does not use started_at_utc as the first expected-bar
+#        lower bound.
+#   [22] The contract does not include the close bar without reconciling the
+#        driver's exclusive close boundary (an inclusive bar_end_ts <=
+#        effective_operation_close_utc rule).
+#   [23] The contract does not claim no durable coverage-anchor gap exists
+#        without exact proof -- it names the exact evidence gap and the
+#        binding "no proof -> no completed_no_trade" rule.
+#   [24] The contract does not authorize one combined E2 despite a confirmed
+#        evidence-foundation gap -- it authorizes the E2A/E2B split.
+#   [25] The contract does not read only the current operation run_id -- it
+#        requires the full run lineage.
+#   [26] The contract does not omit replacement-run lineage (recovery binding
+#        a second/later run_id).
+#   [27] The contract does not allow activity from an earlier run to
+#        disappear.
+#   [28] The contract does not allow partial/recovery-gap coverage to become
+#        no-trade.
+#   [29] The contract does not contain contradictory precedence between
+#        unresolved claims and confirmed activity.
+#   [30] The contract does not guarantee a durable database-unavailable write
+#        during a complete DB outage.
 #
 # Usage:
 #   powershell -ExecutionPolicy Bypass -File scripts\guards\validate_autonomous_daily_paper_operations_01e_outcome_contract.ps1
@@ -56,6 +78,8 @@ $PathReadme       = Join-Path $RepoRoot "README.md"
 $PathReadmeTech   = Join-Path $RepoRoot "README_TECHNICAL.md"
 
 $Violations = 0
+$EmDash = [char]0x2014
+$Section10Sign = [char]0x00A7 + "10"
 
 function Show-Red   { param([string]$Msg) Write-Host $Msg -ForegroundColor Red    }
 function Show-Green { param([string]$Msg) Write-Host $Msg -ForegroundColor Green  }
@@ -73,9 +97,21 @@ function Test-FileExists {
     }
 }
 
+function Get-Normalized {
+    # Collapse all runs of whitespace (including markdown source line-wraps) to
+    # a single space before matching, so a needle that happens to straddle a
+    # line-wrap in the .md file still matches reliably. Applied to every
+    # content/needle comparison in this guard.
+    param([string]$Content)
+    if ($null -eq $Content) { return $null }
+    return ($Content -replace '\s+', ' ')
+}
+
 function Test-ContentContains {
     param([string]$Label, [string]$Content, [string]$Needle)
-    if ($null -ne $Content -and $Content.IndexOf($Needle, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+    $norm = Get-Normalized $Content
+    $needleNorm = $Needle -replace '\s+', ' '
+    if ($null -ne $norm -and $norm.IndexOf($needleNorm, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
         Show-Green "  OK -- $Label"
         return $true
     } else {
@@ -105,7 +141,9 @@ function Test-ContentContainsAny {
 
 function Test-ContentDoesNotContain {
     param([string]$Label, [string]$Content, [string]$Needle)
-    if ($null -eq $Content -or $Content.IndexOf($Needle, [System.StringComparison]::OrdinalIgnoreCase) -lt 0) {
+    $norm = Get-Normalized $Content
+    $needleNorm = $Needle -replace '\s+', ' '
+    if ($null -eq $norm -or $norm.IndexOf($needleNorm, [System.StringComparison]::OrdinalIgnoreCase) -lt 0) {
         Show-Green "  OK -- $Label"
         return $true
     } else {
@@ -113,6 +151,19 @@ function Test-ContentDoesNotContain {
         Show-Red "  FAIL -- $Label (forbidden needle found: '$Needle')"
         return $false
     }
+}
+
+# Test-Content{Contains,DoesNotContain}Normalized are aliases for the (now
+# whitespace-normalized-by-default) base functions above, kept as distinct
+# names for readability at the [21]-[30] Correction pass 2 call sites below.
+function Test-ContentContainsNormalized {
+    param([string]$Label, [string]$Content, [string]$Needle)
+    return Test-ContentContains -Label $Label -Content $Content -Needle $Needle
+}
+
+function Test-ContentDoesNotContainNormalized {
+    param([string]$Label, [string]$Content, [string]$Needle)
+    return Test-ContentDoesNotContain -Label $Label -Content $Content -Needle $Needle
 }
 
 Write-Host "============================================================"
@@ -123,17 +174,17 @@ Write-Host ""
 Show-Info "--- [1] E1 contract document exists ---"
 $ContractContent = $null
 if (Test-FileExists "Phase E1 outcome truth contract" $PathContractDoc) {
-    $ContractContent = Get-Content -Raw -Path $PathContractDoc
+    $ContractContent = Get-Content -Raw -Encoding UTF8 -Path $PathContractDoc
 }
 
 $LedgerContent = $null
 if (Test-FileExists "Master patch ledger" $PathLedger) {
-    $LedgerContent = Get-Content -Raw -Path $PathLedger
+    $LedgerContent = Get-Content -Raw -Encoding UTF8 -Path $PathLedger
 }
 $ReadmeContent = $null
-if (Test-Path $PathReadme) { $ReadmeContent = Get-Content -Raw -Path $PathReadme }
+if (Test-Path $PathReadme) { $ReadmeContent = Get-Content -Raw -Encoding UTF8 -Path $PathReadme }
 $ReadmeTechContent = $null
-if (Test-Path $PathReadmeTech) { $ReadmeTechContent = Get-Content -Raw -Path $PathReadmeTech }
+if (Test-Path $PathReadmeTech) { $ReadmeTechContent = Get-Content -Raw -Encoding UTF8 -Path $PathReadmeTech }
 
 Write-Host ""
 Show-Info "--- [2] Ledger does not mark Bundle 3 closed ---"
@@ -168,7 +219,7 @@ Test-ContentContainsAny "ledger states Phase E runtime implementation is not sta
 
 Write-Host ""
 Show-Info "--- [4] completed_no_trade is never defined from absence of fills alone ---"
-Test-ContentContains "contract requires complete expected-bar coverage for completed_no_trade, not merely absence of fills" $ContractContent "expected completed bar in the operation's actual running interval" | Out-Null
+Test-ContentContains "contract requires complete expected-bar coverage for completed_no_trade, not merely absence of fills" $ContractContent "durably-anchored coverage" | Out-Null
 Test-ContentContains "contract explicitly requires the full evidence hierarchy for completed_no_trade" $ContractContent "completed_no_trade" | Out-Null
 Test-ContentContains "contract states the necessary-but-not-sufficient rule for zero fills" $ContractContent "nowhere near sufficient" | Out-Null
 
@@ -291,6 +342,61 @@ Test-ContentContains "README.md states live capital is not ready" $ReadmeContent
 if ($null -ne $ReadmeContent -or $null -ne $ReadmeTechContent) {
     Show-Green "  OK -- no forbidden live-capital-readiness claim found in README.md / README_TECHNICAL.md"
 }
+
+Write-Host ""
+Show-Info "--- [21] First expected-bar lower bound is never started_at_utc ---"
+Test-ContentContainsNormalized "contract states the lower bound is never operation.started_at_utc" $ContractContent "never ``operation.started_at_utc``" | Out-Null
+Test-ContentContainsNormalized "contract cites the accepted PrepareDataOnly-observes-bar-before-start production scenario" $ContractContent "durably observes a bar via the preopen tail window" | Out-Null
+
+Write-Host ""
+Show-Info "--- [22] Close bar is never included via an inclusive bound without reconciling the exclusive close boundary ---"
+Test-ContentContainsNormalized "contract states the upper bound is never the inclusive bar_end_ts <= effective_operation_close_utc rule" $ContractContent "never the inclusive ``bar_end_ts <=" | Out-Null
+Test-ContentContainsNormalized "contract states the exact final-dispatchable-bar condition is a strict inequality" $ContractContent "strictly less than, never less-than-or-equal" | Out-Null
+Test-ContentContainsNormalized "contract cites the driver's own now_utc >= effective_operation_close_utc refusal" $ContractContent "refuses *all* processing" | Out-Null
+
+Write-Host ""
+Show-Info "--- [23] Contract does not claim the durable coverage-anchor gap is closed without exact proof ---"
+Test-ContentContainsNormalized "contract section 6a exists documenting the durable coverage-anchor audit" $ContractContent "## 6a. Durable coverage-anchor audit and future authority" | Out-Null
+Test-ContentContainsNormalized "contract states the binding no-proof-no-finalization rule" $ContractContent "No durable proof of the original coverage policy" | Out-Null
+Test-ContentContainsNormalized "contract confirms the readiness-evidence payload does not persist coverage fields today" $ContractContent "does **not** persist ``expected_latest_bar_ts``" | Out-Null
+
+Write-Host ""
+Show-Info "--- [24] Contract authorizes the E2A/E2B split, not one combined E2, given the confirmed evidence-foundation gap ---"
+Test-ContentContainsNormalized "contract authorizes the E2A/E2B split" $ContractContent "Resolved: E2A/E2B split is now authorized" | Out-Null
+Test-ContentContainsNormalized "contract defines E2A as the durable coverage-anchor and run-lineage evidence foundation" $ContractContent "E2A $EmDash durable coverage-anchor and run-lineage evidence foundation" | Out-Null
+Test-ContentDoesNotContainNormalized "contract does not still claim a single E2 is authorized with no E2A/E2B split" $ContractContent "a single E2 is authorized $EmDash no E2A/E2B split." | Out-Null
+
+Write-Host ""
+Show-Info "--- [25] Contract requires the full run lineage, never only the operation's current run_id ---"
+Test-ContentContainsNormalized "contract section 6b exists defining full run lineage" $ContractContent "## 6b. Full run lineage" | Out-Null
+Test-ContentContainsNormalized "contract names the unknown_run_lineage_unavailable reason code" $ContractContent "unknown_run_lineage_unavailable" | Out-Null
+Test-ContentContainsNormalized "contract requires evidence reads scoped to the full run lineage, not a single run_id" $ContractContent "not merely the operation's current ``run_id``" | Out-Null
+
+Write-Host ""
+Show-Info "--- [26] Contract does not omit replacement-run lineage across recovery ---"
+Test-ContentContainsNormalized "contract names a recovery cycle binding a replacement run_id" $ContractContent "run A -> terminal interruption -> recovery_retrying -> run B" | Out-Null
+
+Write-Host ""
+Show-Info "--- [27] Contract never allows an earlier run's activity to disappear ---"
+Test-ContentContainsNormalized "contract states an earlier run's activity must never disappear" $ContractContent "must never disappear" | Out-Null
+
+Write-Host ""
+Show-Info "--- [28] Contract never allows partial or recovery-gap coverage to become no-trade ---"
+Test-ContentContainsNormalized "contract defines coverage-across-recovery as a fail-closed requirement" $ContractContent "Coverage across recovery (corrected $EmDash Repair 7, new)" | Out-Null
+Test-ContentContainsNormalized "contract routes a recovery-gap bar to unknown_incomplete_bar_coverage, never no-trade" $ContractContent "genuine missing-coverage fact" | Out-Null
+Test-ContentContainsNormalized "contract defines late-start coverage as the same fail-closed requirement" $ContractContent "Late start (corrected $EmDash Repair 5, new)" | Out-Null
+
+Write-Host ""
+Show-Info "--- [29] Contract resolves the unresolved-claim vs. confirmed-activity precedence contradiction ---"
+Test-ContentContainsNormalized "contract's global precedence order states fill plus unresolved claim is not yet terminal" $ContractContent "confirmed fill + unresolved claim elsewhere" | Out-Null
+Test-ContentContainsNormalized "contract states this is not a terminal classification yet" $ContractContent "a terminal classification yet" | Out-Null
+Test-ContentContainsNormalized "contract states no reason code is unconditionally immune to an earlier global blocker" $ContractContent "No reason code in $Section10Sign is unconditionally immune to an earlier step above." | Out-Null
+
+Write-Host ""
+Show-Info "--- [30] Contract never guarantees a durable database-unavailable write during a complete outage ---"
+Test-ContentContainsNormalized "contract section 9 defines the database-failure contract" $ContractContent "Database-failure contract (new $EmDash Correction pass 2, Repair 9)" | Out-Null
+Test-ContentContainsNormalized "contract states a complete outage performs no durable write attempt" $ContractContent "performs **no** durable write attempt of any kind" | Out-Null
+Test-ContentContainsNormalized "contract forbids claiming a blocker was persisted without an authoritative re-read" $ContractContent "never claim the blocker was durably persisted without re-reading" | Out-Null
 
 # =============================================================================
 # Summary

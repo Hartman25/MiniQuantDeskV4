@@ -28,10 +28,14 @@ AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E1-DURABLE-OUTCOME-AUTHORITY-AND-EVIDENCE-CO
 patch on top of it (Phase E1: a read-only architecture audit producing the
 binding durable-outcome/no-trade contract for Phase E — implementation
 complete, awaiting ChatGPT and operator acceptance; no Phase E runtime code
-exists yet), plus a documentation/guard-only reconciliation pass
-(`AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E1-OUTCOME-CONTRACT-RECONCILIATION-01`)
-that corrected five source-proven defects in that contract — still
-implementation complete, still awaiting acceptance, not yet accepted.
+exists yet), plus two documentation/guard-only reconciliation passes
+(`AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E1-OUTCOME-CONTRACT-RECONCILIATION-01`,
+correcting eight source-proven defects, and
+`AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E1-COVERAGE-ANCHOR-AND-RUN-LINEAGE-RECONCILIATION-02`,
+correcting ten further defects in the expected-bar-coverage bounds and the
+run-lineage/precedence/database-failure contract, replacing the original
+single-E2 authorization with an E2A/E2B split) — still implementation
+complete, still awaiting acceptance, not yet accepted.
 
 The strongest current operational route is:
 
@@ -83,8 +87,8 @@ Current local `main` contains, accepted (D1–D4, Phase D accepted complete in f
   the full-day lifecycle test's preopen phase resolves through real production readiness truth with
   zero manual unstick; a supervised-task proof under an injected clock
 
-Present on the local `main` worktree (Phase E1), implementation complete but awaiting independent
-ChatGPT/operator acceptance:
+Present on the local `main` worktree (Phase E1, twice-corrected), implementation complete but
+awaiting independent ChatGPT/operator acceptance:
 
 - a read-only architecture audit
   (`AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E1-DURABLE-OUTCOME-AUTHORITY-AND-EVIDENCE-CONTRACT`,
@@ -99,12 +103,12 @@ ChatGPT/operator acceptance:
   conflict precedence, a restart/idempotency contract reusing the existing CAS transition machinery,
   a bounded reason-code matrix, a read-only API contract for two net-new
   `GET /api/v1/autonomous/daily-operation[s]` routes, a notification contract, and the narrow
-  E2–E5 implementation decomposition
+  implementation decomposition
 - **no Phase E runtime code was written by this patch** — no classifier, no coordinator wiring, no
   API route, no migration; `outcome`/`no_trade_reason`/`finalized_at_utc` remain unwritten by any
   production code path
-- a reconciliation pass
-  (`AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E1-OUTCOME-CONTRACT-RECONCILIATION-01`) corrected five
+- a first reconciliation pass
+  (`AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E1-OUTCOME-CONTRACT-RECONCILIATION-01`) corrected eight
   source-proven defects before acceptance is sought: `evidence_degraded` already has a confirmed
   production writer (`apply_critical_completed_bar_blocker`) and its reuse for post-stop unresolved
   evidence is now explicitly graph-authorized (two new edges, no migration); `outcome` and the
@@ -115,10 +119,30 @@ ChatGPT/operator acceptance:
   running interval, not merely that existing dispatch rows are `completed`; `no_trade_no_bar_expected`
   was removed (its own example named a transition — `calendar_unavailable -> stopping` — that is not
   legal in the existing transition graph)
+- a second reconciliation pass
+  (`AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E1-COVERAGE-ANCHOR-AND-RUN-LINEAGE-RECONCILIATION-02`)
+  corrected ten further defects: the expected-bar lower bound is no longer `started_at_utc` — the
+  accepted Phase D production scenario proves `PrepareDataOnly` durably observes a bar that closes
+  *before* the operation starts, which `RunningDispatch` later dispatches; the upper bound is no
+  longer the inclusive `bar_end_ts <= effective_operation_close_utc` rule — production refuses all
+  processing once `now_utc >= effective_operation_close_utc`; a confirmed durable-evidence-foundation
+  gap (the existing readiness-evidence event persists no coverage-policy identity, and no `mqk-db`
+  helper aggregates run lineage across recovery today) replaces the original single-E2 authorization
+  with a source-supported **E2A/E2B split** — E2A (durable coverage-anchor and run-lineage evidence
+  foundation) is the next authorized patch, E2B (strict classifier and finalization) is not
+  authorized until E2A is independently accepted; late-start and recovery-gap bars now fail closed to
+  `unknown_incomplete_bar_coverage` rather than silently narrowing the coverage window; the global
+  evidence-integrity precedence order is corrected (operation/DB authority → identity → run lineage →
+  coverage anchor → coverage completeness → zero unresolved claims → only then activity-vs-no-trade),
+  resolving the prior contradiction where a confirmed fill was said to override an unresolved claim
+  unconditionally; the database-failure contract now distinguishes a classifier-level
+  `unknown_database_unavailable` result from a guaranteed durable blocker write, forbidding any claim
+  of persistence without an authoritative re-read
 
-After D4 and its evaluation-lineage repair (Phase D, accepted complete in full) and the corrected
-Phase E1 contract are accepted, Bundle 3 still requires Phase E runtime implementation (E2–E5, per
-the accepted E1 contract), Phase F GUI/runbook/soak preparation, and Phase G final closure.
+After D4 and its evaluation-lineage repair (Phase D, accepted complete in full) and the twice-
+corrected Phase E1 contract are accepted, Bundle 3 still requires Phase E runtime implementation
+(E2A durable coverage-anchor/run-lineage evidence foundation, then E2B–E5, per the accepted E1
+contract), Phase F GUI/runbook/soak preparation, and Phase G final closure.
 
 ### Operational meaning
 
@@ -493,9 +517,9 @@ Its current source-grounded capabilities include:
 - existing readiness, preflight, events, and alert surfaces
 
 The path is still in **pre-soak hardening** because Bundle 3 is open. Phase D (D1–D4) is accepted
-complete in full; the Phase E1 contract audit is implementation complete, awaiting acceptance. Do
-not label the current `main` head as a finished autonomous-paper MVP until Phase E's runtime
-implementation (E2–E5) and the later F/G phases are independently accepted.
+complete in full; the Phase E1 contract audit (twice-corrected) is implementation complete, awaiting
+acceptance. Do not label the current `main` head as a finished autonomous-paper MVP until Phase E's
+runtime implementation (E2A, then E2B–E5) and the later F/G phases are independently accepted.
 
 ### What is expected after Bundle 3
 
@@ -971,8 +995,8 @@ Recommended discipline:
 
 Be honest about these:
 
-- Bundle 3 is not closed; Phase D (D1–D4, integrated lifecycle proof, dispatch-ownership race closure, and the evaluation-lineage repair) is accepted complete in full; the Phase E1 contract audit (the binding durable outcome/no-trade contract) is implementation complete but awaiting independent ChatGPT/operator acceptance, and no Phase E runtime code exists yet
-- the current main branch should not begin an unattended soak until Phase E's runtime implementation (E2–E5, per the accepted E1 contract) and the later Bundle 3 phases (F/G) are accepted; controlled, operator-supervised autonomous Paper + Alpaca operation is the current Bundle 3 target, not unattended soak
+- Bundle 3 is not closed; Phase D (D1–D4, integrated lifecycle proof, dispatch-ownership race closure, and the evaluation-lineage repair) is accepted complete in full; the Phase E1 contract audit (the binding durable outcome/no-trade contract, twice-corrected) is implementation complete but awaiting independent ChatGPT/operator acceptance, and no Phase E runtime code exists yet
+- the current main branch should not begin an unattended soak until Phase E's runtime implementation (E2A durable coverage-anchor/run-lineage evidence foundation, then E2B–E5, per the accepted E1 contract) and the later Bundle 3 phases (F/G) are accepted; controlled, operator-supervised autonomous Paper + Alpaca operation is the current Bundle 3 target, not unattended soak
 - Bundle 4 durable paper cash/positions/lots/cost basis/P&L truth is still open
 - real paper fill, reconcile-after-fill, Discord lifecycle, restart, and repeated-session evidence remain incomplete
 - the daemon/operator plane is materially stronger, but some deeper GUI detail surfaces remain intentionally deferred or unmounted rather than faked

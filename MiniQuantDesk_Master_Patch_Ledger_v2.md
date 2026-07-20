@@ -13644,3 +13644,180 @@ NEXT AFTER RECONCILIATION ACCEPTANCE: E2 — durable outcome classifier and fina
 unattended 10-20-session soak: NOT STARTED
 live capital: NOT READY
 ```
+
+---
+
+## AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E1-COVERAGE-ANCHOR-AND-RUN-LINEAGE-RECONCILIATION-02
+
+Starting HEAD: `0f87f521760b3a148c30263cc4decd24d2a48f7d` ("docs: reconcile autonomous outcome
+evidence contract"). Documentation/guard-only correction pass 2 of the Phase E1 contract above — no
+Rust file, migration, API route, or GUI file is added or modified by this patch.
+
+**Mission:** correct ten further source-proven defects a fresh, targeted re-read of
+`daily_data_readiness.rs`, `autonomous_completed_bar_driver.rs`, `state/autonomous_daily_operation.rs`,
+and the `mqk-db` autonomous-daily-operation read surface found in §6 item 2's expected-bar-coverage
+derivation and in the run-lineage/precedence/database-failure contract — none of which pass 1's audit
+caught.
+
+**Corrections made** (full detail in the corrected contract document):
+
+1. **First dispatchable bar (REPAIR 1)** — the expected-bar lower bound must never be
+   `operation.started_at_utc`. The accepted Phase D production scenario
+   (`phase_d_full_day_lifecycle`) proves `PrepareDataOnly` durably observes a bar via the preopen
+   tail window that closes *before* `started_at_utc` is ever set, and `RunningDispatch` later
+   dispatches that same already-observed bar — a `started_at_utc`-anchored lower bound would
+   silently exclude a bar production itself proves is expected. The corrected lower bound is derived
+   from the same production readiness/completed-bar authority (`intraday_grid_starts` combined with
+   the grid's own expectation rule at the earliest instant the operation's preopen tick could run),
+   never from "first dispatch row found," "current `last_completed_bar_ts`," or the retired
+   `started_at_utc` anchor.
+2. **Final dispatchable bar (REPAIR 2)** — the expected-bar upper bound must never be the inclusive
+   `bar_end_ts <= effective_operation_close_utc`. `tick_autonomous_completed_bar_driver`
+   (`autonomous_completed_bar_driver.rs:910-914`, confirmed by direct source read) refuses all
+   processing once `now_utc >= operation.effective_operation_close_utc`; the corrected exact
+   condition is the strict inequality `slot_start + interval_secs + effective_grace_seconds <
+   effective_operation_close_utc`.
+3. **Durable coverage-anchor audit (REPAIR 3)** — confirmed by direct source read that the existing
+   `daily_data_readiness_evaluated` evidence payload (`daily_data_readiness.rs:1444-1483`) persists
+   only `applicability`/`start_allowed`/`top_level_blocker`/a bounded per-assignment
+   `readiness_state`/`blockers` list — never `expected_latest_bar_ts`, `effective_grace_seconds`, the
+   exact first/final dispatchable bar, or a coverage-policy identity. The exact expected-bar set can
+   today only be *recomputed* from current mutable configuration, never *durably re-read* as what was
+   actually true when the operation ran. New binding rule: no durable proof of the original coverage
+   policy → no `completed_no_trade` finalization, full stop.
+4. **Expected coverage authority (REPAIR 4)** — names the preferred future durable seam: extend the
+   existing `daily_data_readiness_evaluated` event (not a new table) with
+   `first_dispatchable_bar_end_ts`/`final_dispatchable_bar_end_ts`/`local_symbol`/`timeframe`/
+   `timeframe_secs`/`effective_grace_seconds`/`session_plan_identity`/`assignment_identity`/
+   `runtime_binding_identity`/`coverage_schema_version`. A new migration is authorized only if E2A's
+   own audit finds the existing JSON payload cannot safely carry these fields.
+5. **Late start and missed bars (REPAIR 5)** — a runtime that starts after its intended effective open
+   is not excused from bars that should have closed during the intended window before the delayed
+   start; the intended window is anchored to the operation/session contract, never merely the actual
+   runtime's first tick.
+6. **Full run lineage (REPAIR 6)** — the operation's mutable `run_id` is not the whole-day run
+   authority. New §6b defines the lineage authority (`sys_autonomous_daily_operation_events` filtered
+   to `to_state = 'running' AND run_id IS NOT NULL`, ordered by `transition_seq`), confirms no
+   existing `mqk-db` read helper performs this aggregation today, and requires every run-scoped
+   evidence read in §5/§6 to aggregate across the full run-ID set — never only the operation's current
+   `run_id` — so an earlier run's activity can never disappear because a later recovery cycle
+   overwrote the mutable `run_id` column. New reason code: `unknown_run_lineage_unavailable`.
+7. **Coverage across recovery (REPAIR 7)** — a runtime interruption and recovery does not reset or
+   re-anchor the coverage window; it remains continuous from the durable first coverage anchor through
+   the durable final coverage anchor. A bar that closed during a recovery gap with no completed claim
+   or evaluation under any run in the lineage is a genuine missing-coverage fact
+   (`unknown_incomplete_bar_coverage`), never silently excluded or treated as no-trade.
+8. **Global evidence-integrity precedence (REPAIR 8)** — corrects the direct contradiction between
+   §4's "evidence-complete proof" requirement for `completed_with_activity` and pass 1's §8 rule 4
+   ("a confirmed fill wins over everything else … nothing below can override this"). §8 is rewritten
+   to the mission's binding order: operation/DB authority → assignment/runtime identity → full run
+   lineage → durable coverage anchor → complete expected-bar coverage → zero unresolved/contradictory
+   claims → only then classify activity versus no-trade. A confirmed fill plus an unresolved claim
+   elsewhere now routes to `evidence_degraded`, not an immediate terminal classification; once the
+   unresolved evidence is repaired, the same operation may finalize as `completed_with_activity`. No
+   reason code in §10 is documented as unconditionally immune to an earlier global blocker.
+9. **Database failure (REPAIR 9)** — new §9 bullet distinguishes a classifier-level
+   `unknown_database_unavailable` result from a guaranteed durable blocker write. Complete outage:
+   zero durable write attempts, retried on a later tick. Partial read failure (operation row loaded,
+   a later evidence query fails): a best-effort fail-closed blocker write may be attempted only when
+   the existing transition seam remains usable, and the finalizer must never claim the blocker was
+   durably persisted without an authoritative re-read. No raw SQL/connection/credential text ever
+   enters durable truth; no busy loop (the CAS guard already prevents duplicate transitions on
+   repeated failure).
+10. **E2 decomposition (REPAIR 10)** — pass 1's "a single E2 is authorized — no E2A/E2B split" finding
+    is retired: findings 3 and 6 above are exactly the durable-evidence-foundation gap that finding
+    claimed did not exist. Replaced with the source-supported split: **E2A** (durable coverage-anchor
+    and run-lineage evidence foundation — extends the existing readiness-evidence payload, adds the
+    narrow run-lineage read helper, proves restart reconstruction; no classifier, finalization,
+    coordinator invocation, API, GUI, or notification) is the next authorized patch. **E2B** (strict
+    outcome classifier and finalization CAS, built on E2A's accepted durable authorities) is not
+    authorized until E2A is independently accepted. E3/E4/E5 unchanged in shape, renumbered to depend
+    on E2A+E2B together.
+
+**E1 guard strengthened (REPAIR 11):** `validate_autonomous_daily_paper_operations_01e_outcome_contract.ps1`
+gained ten new checks ([21]-[30]) with specific semantic anchors (not bare words) for each repair
+above: the retired `started_at_utc` lower bound, the retired inclusive close-bound rule, the durable
+coverage-anchor gap and its binding rule, the E2A/E2B authorization (and a negative check that the
+retired single-E2 claim does not reappear), the full-run-lineage requirement, replacement-run lineage
+naming, earlier-run-activity preservation, recovery-gap/late-start-gap coverage handling, the
+unresolved-claim-vs-activity precedence resolution, and the database-failure write contract. The
+guard's own content-matching functions were also hardened: `Test-ContentContains`/
+`Test-ContentDoesNotContain` now normalize whitespace before matching (a needle that happens to
+straddle a markdown source line-wrap still matches reliably — three pass-1 checks broke on this
+exact class of bug when this pass's edits shifted surrounding line-wrap positions, caught and fixed
+during this patch's own internal-loop correctness review), and every `Get-Content -Raw` call now
+specifies `-Encoding UTF8` explicitly (Windows PowerShell 5.1's default `Get-Content` encoding is the
+system codepage, not UTF-8; it silently corrupted every em dash/section-sign character this
+correction's new checks depend on — confirmed by running the guard under both `powershell.exe`
+5.1 and `pwsh` 7 in this session, only the former failed before this fix, both pass after it).
+
+**Internal review cycles:** one full cycle (source audit → contract correction → guard correction →
+independent correctness review → independent scope/safety review). The correctness review caught two
+classes of self-inflicted defect before commit: (a) two pass-1 guard needles
+(`nowhere near sufficient`, `blocks `completed_no_trade` outright`) broke because this pass's own
+edits shifted markdown line-wrap positions elsewhere in the same bullets — fixed by the
+whitespace-normalization hardening above, not by re-flowing prose to dodge the next edit; (b) new
+guard needles using an em dash (`—`) or the section sign (`§`) failed only under `powershell.exe`
+(Windows PowerShell 5.1) due to its non-UTF-8 default `Get-Content` encoding — fixed by explicit
+`-Encoding UTF8`, verified passing under both engines. A third, correctly-rejected non-issue: a
+negative-check needle for the retired `[operation.started_at_utc, min(operation.stopped_at_utc, ...)]`
+formula was removed from the guard rather than kept, because the corrected contract legitimately
+quotes that retired formula once, prefixed by "not," to explain what changed — a blind
+does-not-contain check would have forbidden the corrected document from ever citing its own history.
+Cycles 2-4 not required.
+
+**Deliverable:** `docs/specs/autonomous_daily_paper_operations_01e_outcome_truth_contract.md`
+corrected in place — a "Correction pass 2" note added at the top (preserving pass 1's note verbatim);
+§4 (terminal-state semantics) cross-referenced to the corrected §8; §6 item 2 fully rewritten (13
+steps, up from 8); new §6a (durable coverage-anchor audit) and §6b (full run lineage); §7 (mandatory
+triggers) extended with the new reason codes and the coverage-anchor/database-failure clarifications;
+§8 (evidence precedence) fully rewritten to the corrected 7-step global order; §9 (restart/idempotency)
+extended with the database-failure contract; §10 (reason-code matrix) extended with
+`unknown_run_lineage_unavailable` and corrected activity-code "prohibited contradictory evidence"
+cells; §13 (implementation decomposition) rewritten for the E2A/E2B split; §14 (known limitations)
+updated. This document remains the binding contract for Phases E2A–E5 — corrected, not re-audited from
+scratch beyond what each repair required, and still not itself an acceptance record.
+
+**Guards:** `validate_autonomous_daily_paper_operations_01e_outcome_contract.ps1` (strengthened, all
+30 checks pass under both `powershell.exe` and `pwsh`),
+`validate_autonomous_daily_paper_operations_01a_audit.ps1` pass,
+`validate_daily_data_readiness_01e_closure.ps1` pass,
+`validate_autonomous_daily_paper_operations_01d_phase_d_closure.ps1` pass (unmodified),
+`validate_autonomous_daily_paper_operations_01d4_evaluation_lineage_and_autonomous_preopen_closure_01.ps1`
+pass (unmodified), `check_unsafe_patterns.ps1` pass. `git diff --check` / `git diff --cached --check`
+clean. No Cargo command run (no Rust file touched).
+
+**Files changed:** `MiniQuantDesk_Master_Patch_Ledger_v2.md`, `README.md`, `README_TECHNICAL.md`,
+`docs/specs/autonomous_daily_paper_operations_01e_outcome_truth_contract.md`,
+`scripts/guards/validate_autonomous_daily_paper_operations_01e_outcome_contract.ps1`.
+No Rust file changed. No migration changed. No API route implemented. No GUI changed.
+
+**Safety confirmation (E1 coverage-anchor and run-lineage reconciliation):**
+
+```text
+PROVIDER CALLS: no
+BROKER CALLS: no
+NETWORK CALLS: no
+REAL DAEMON STARTED: no
+PAPER ORDERS: no
+LIVE ORDERS: no
+PAPER DB TOUCHED: no
+PORT 5440 TOUCHED: no
+RUST FILES CHANGED: no
+MIGRATION CHANGED: no
+API IMPLEMENTED: no
+GUI CHANGED: no
+PHASE E RUNTIME IMPLEMENTATION STARTED: no
+```
+
+```text
+D4: ACCEPTED — COMPLETE
+PHASE D: ACCEPTED — COMPLETE
+E1 coverage/run-lineage reconciliation: IMPLEMENTATION COMPLETE — AWAITING CHATGPT AND OPERATOR
+  ACCEPTANCE
+PHASE E RUNTIME IMPLEMENTATION: NOT STARTED
+BUNDLE 3 (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-COMBINED): OPEN
+NEXT AFTER E1 ACCEPTANCE: E2A — durable coverage-anchor and run-lineage evidence foundation, only
+unattended 10-20-session soak: NOT STARTED
+live capital: NOT READY
+```
