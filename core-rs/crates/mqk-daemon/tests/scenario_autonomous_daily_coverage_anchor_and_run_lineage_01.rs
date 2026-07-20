@@ -10,28 +10,28 @@
 //!   -- --include-ignored --test-threads=1 --nocapture
 //!
 //! No real provider, broker, or network call is made anywhere in this file.
-//! `BrokerKind::Alpaca` + `MQK_STRATEGY_IDS=swing_momentum` is used for the
+//! `BrokerKind::Alpaca` + `MQK_STRATEGY_IDS=swing_momentum` is used for most
 //! adapter-facing tests (matching the production Paper+Alpaca/
 //! `ExternalSignalIngestion` gate); `BrokerKind::Paper` is used for the
 //! coordinator-only tests exactly as the accepted D2 coordinator suite does.
+//! `f04` alone uses `MQK_STRATEGY_IDS=intraday_scalper` instead of
+//! `swing_momentum` -- see its own fixture helper
+//! (`configured_alpaca_state_scalper`) doc comment for why.
 //!
 //! Scope boundary: this file proves the E2A durable evidence foundation
 //! only. It never calls an outcome classifier (none exists yet), never
 //! writes `outcome`/`finalized_at_utc`, never drives a `completed*`
 //! transition, and never touches a new API route or GUI surface.
 //!
-//! Concurrency-proof design note (item 9 of the mission): the inter-task
-//! race is proven by direct construction of the worst-case ordering (the
-//! operation row is made durable via a direct DB call with zero coverage
-//! anchor, then the real production adapter is ticked against it) rather
-//! than a live `tokio::join!`/`Notify` interleaving of two concurrently
-//! scheduled tasks. This proves the identical safety invariant the mission
-//! cares about — the adapter never invokes the driver, never constructs a
-//! provider client, and never observes/claims/evaluates a bar for an
-//! unanchored operation — without requiring a new pausable test hook on the
-//! coordinator's own tick (out of scope for this patch; no coordinator
-//! production code was changed to add one). This is stated here honestly,
-//! not represented as a literal concurrent-task race proof.
+//! Concurrency-proof design (`f04`, E2A final proof repair): the real
+//! coordinator and the real completed-bar adapter are ticked concurrently,
+//! at one shared logical `now_utc`, via a genuine `tokio::join!`/`Notify`
+//! interleaving of two independent futures -- synchronized by the accepted
+//! production test hook (`AutonomousCoverageAuthorityPreBindTestHook`,
+//! installed only when a test explicitly sets it; production never pays
+//! this cost). See `f04`'s own doc comment for the full ordering proof
+//! (why this cannot lose the hook's notification) and the zero-side-effect
+//! before/after evidence it captures.
 
 use std::sync::Arc;
 
@@ -1514,6 +1514,141 @@ async fn f03_adapter_refuses_on_unreadable_and_conflicting_authority() {
     reset_env();
 }
 
+/// Durable before/after evidence for the E2A concurrency proof (items 3-5).
+/// `lifecycle_event_count`/`coverage_event_count`/`claim_count`/
+/// `evaluation_count`/`decision_count` are the exact-count fields the
+/// mission's REPAIR 3/4 require; the remaining fields come straight off
+/// [`mqk_db::AutonomousDailyOperationRecord`]. `oms_outbox`/`oms_inbox` are
+/// deliberately not queried here: both tables carry `run_id uuid not null
+/// references runs`, so an operation that never bound a `run_id` (asserted
+/// separately, both snapshots) cannot structurally own a row in either --
+/// a raw `count(*)` over either table would only measure unrelated
+/// concurrently-running tests' shared-table state, not a real before/after
+/// delta for this operation.
+#[derive(Debug, Clone, PartialEq)]
+struct AuthorityConcurrencySnapshot {
+    state: String,
+    state_version: i64,
+    run_id: Option<Uuid>,
+    bars_observed: i64,
+    bars_dispatched: i64,
+    last_completed_bar_ts: Option<i64>,
+    last_dispatched_bar_ts: Option<i64>,
+    lifecycle_event_count: usize,
+    coverage_event_count: i64,
+    claim_count: i64,
+    evaluation_count: i64,
+    decision_count: i64,
+}
+
+async fn snapshot_authority_concurrency_evidence(
+    pool: &sqlx::PgPool,
+    operation_id: Uuid,
+    symbol: &str,
+) -> AuthorityConcurrencySnapshot {
+    let op = mqk_db::fetch_autonomous_daily_operation_by_id(pool, operation_id)
+        .await
+        .expect("fetch ok")
+        .expect("operation row exists");
+    let lifecycle_event_count =
+        mqk_db::list_autonomous_daily_operation_events(pool, operation_id, 100)
+            .await
+            .expect("list events ok")
+            .len();
+    let coverage_event_count: i64 =
+        sqlx::query_scalar("select count(*) from sys_autonomous_session_events where id = $1")
+            .bind(coverage_bound_event_id(operation_id))
+            .fetch_one(pool)
+            .await
+            .expect("count ok");
+    let claim_count = coverage_claim_count(pool, operation_id).await;
+    // strategy_signal_evaluations is the one durable journal of native-
+    // strategy evaluation attempts (AUTON-NO-SIGNAL-OBS-01); a "decision" is
+    // an evaluation whose own `signal_generated` is true -- there is no
+    // separate decisions table in this schema.
+    let evaluation_count: i64 =
+        sqlx::query_scalar("select count(*) from strategy_signal_evaluations where symbol = $1")
+            .bind(symbol)
+            .fetch_one(pool)
+            .await
+            .expect("count ok");
+    let decision_count: i64 = sqlx::query_scalar(
+        "select count(*) from strategy_signal_evaluations where symbol = $1 and signal_generated",
+    )
+    .bind(symbol)
+    .fetch_one(pool)
+    .await
+    .expect("count ok");
+
+    AuthorityConcurrencySnapshot {
+        state: op.state,
+        state_version: op.state_version,
+        run_id: op.run_id,
+        bars_observed: op.bars_observed,
+        bars_dispatched: op.bars_dispatched,
+        last_completed_bar_ts: op.last_completed_bar_ts,
+        last_dispatched_bar_ts: op.last_dispatched_bar_ts,
+        lifecycle_event_count,
+        coverage_event_count,
+        claim_count,
+        evaluation_count,
+        decision_count,
+    }
+}
+
+/// E2A final proof repair (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E2A-SAME-
+/// INSTANT-CONCURRENCY-AND-SIDE-EFFECT-PROOF-01).
+///
+/// Item 1 (one shared logical instant): `shared_now_utc` is `13:05Z`, inside
+/// `[preopen_start_utc=13:00Z, effective_operation_open_utc=13:30Z)`. This
+/// single instant is simultaneously (a) a valid `PrepareDataOnly` instant
+/// for the coordinator's own `initial_state_for_plan` -- the operation is
+/// created directly in `preparing_data`, never `awaiting_preopen` -- and (b)
+/// inside the completed-bar adapter's own relevant-operation lookup window
+/// (`preopen_start_utc <= now_utc <= postclose_finalize_utc`), so the
+/// adapter genuinely finds the exact same durable operation row the
+/// coordinator just created, at the exact same simulated instant -- never
+/// two independently-timestamped ticks.
+///
+/// Item 2 (distinct, genuinely synchronized tasks): task A (the real
+/// coordinator tick) and task B (the real completed-bar adapter tick) are
+/// two independent futures polled concurrently via `tokio::join!`,
+/// synchronized by the accepted production test hook
+/// (`AutonomousCoverageAuthorityPreBindTestHook`; production never installs
+/// it). `tokio::join!` -- not `tokio::spawn` -- is used deliberately:
+/// `Notify::notify_waiters` silently drops a notification with no
+/// registered waiter, so two independently OS-scheduled `tokio::spawn` tasks
+/// racing to register-vs-notify with no other ordering guarantee can
+/// deadlock (the exact lost-notification hazard the mission warns against).
+/// `join!` polls task A first, task B second, on every wake: task A's first
+/// poll cannot reach `operation_visible.notify_waiters()` without first
+/// suspending at a real internal DB `.await` inside `create_or_recover`, so
+/// task B's own first poll -- which does nothing but register on
+/// `operation_visible` -- is guaranteed to run and register strictly before
+/// task A could possibly notify it. The same argument applies symmetrically
+/// to task A's own `proceed.notified()` registration, issued immediately
+/// after `operation_visible.notify_waiters()` with no intervening await,
+/// which strictly precedes task B's later `proceed.notify_waiters()` call.
+/// This structurally excludes the lost-notification hazard rather than
+/// merely asserting it away.
+///
+/// Item 5 (provider/client/driver proof): task B runs its paused-window tick
+/// under a deliberately invalid/sentinel instrument-registry path. The
+/// production adapter's Stage A coverage-authority check
+/// (`check_coverage_authority_envelope`, `autonomous_completed_bar_task.rs`)
+/// runs strictly before any assignment/runtime-binding resolution or
+/// instrument-registry load, so an outcome of the quiet
+/// `coverage_authority_not_bound` path -- never `RegistryUnavailable` or
+/// `IdentityUnresolved` -- is itself the proof that the registry (and
+/// therefore any provider client construction it could gate) was never
+/// touched.
+///
+/// Item 6/7 (release and normal progression): once task A is released, the
+/// coverage authority is durably bound, then a later real adapter tick --
+/// under a freshly-constructed, validly-configured state ("restore valid
+/// local configuration") plus a real 5-bar prior-session readiness fixture
+/// (`seed_five_prior_session_readiness_bars`) -- proceeds through the
+/// ordinary eligible mode path instead of refusing.
 #[tokio::test]
 async fn f04_live_coordinator_and_adapter_interleaving_proves_zero_side_effects_while_paused() {
     let Some(pool) = maybe_db("f04").await else {
@@ -1522,121 +1657,184 @@ async fn f04_live_coordinator_and_adapter_interleaving_proves_zero_side_effects_
     reset_env();
     let adapter_id = format!("zze2a-f04-{}", unique_suffix());
     let symbol = "ZZE2AF04";
+    let provider_id = "zze2a_provider";
     let instruments = write_instrument_registry(symbol);
+    let providers = write_provider_registry(provider_id);
+    std::env::set_var("MQK_INSTRUMENT_REGISTRY_PATH", instruments.path());
+    std::env::set_var("MQK_PROVIDER_REGISTRY_PATH", providers.path());
+    seed_five_prior_session_readiness_bars(&pool, symbol, provider_id).await;
 
-    let mut coordinator_st = configured_alpaca_state(pool.clone(), &adapter_id, symbol).await;
+    // Item 1: one shared logical instant for both tasks (see doc comment).
+    let shared_now_utc = monday_at(13, 5, 0);
+
+    let mut coordinator_st =
+        configured_alpaca_state_scalper(pool.clone(), &adapter_id, symbol).await;
     Arc::get_mut(&mut coordinator_st)
         .unwrap()
         .instrument_registry_path = instruments.path().to_str().unwrap().to_string();
+    Arc::get_mut(&mut coordinator_st)
+        .unwrap()
+        .provider_registry_path = providers.path().to_str().unwrap().to_string();
 
     let hook = Arc::new(AutonomousCoverageAuthorityPreBindTestHook::default());
     coordinator_st
         .set_coverage_authority_pre_bind_test_hook_for_test(Some(hook.clone()))
         .await;
 
-    let coordinator_now = monday_at(12, 0, 0); // before preopen (13:00Z)
-                                               // The adapter's own relevant-operation lookup requires `now_utc` to fall
-                                               // within `[preopen_start_utc, postclose_finalize_utc]` (or a special-
-                                               // cased state) for a fresh `awaiting_preopen` row -- matching the same
-                                               // post-preopen instant `f01`/`f02`/`f03` already use for the adapter
-                                               // side. Passing this later instant to task B while task A's own tick
-                                               // still runs at `coordinator_now` is deterministic-logic testing, not a
-                                               // claim that both instants represent the same real moment.
-    let adapter_now = monday_at(13, 5, 0);
-
     // Task A: the real coordinator tick, paused (via the hook) immediately
     // after `create_or_recover` commits the operation row and before it
     // binds the coverage authority.
     let coordinator_fut = tick_autonomous_daily_coordinator(AutonomousDailyCoordinatorTickInput {
         state: &coordinator_st,
-        now_utc: coordinator_now,
+        now_utc: shared_now_utc,
     });
 
-    // Task B: the real production completed-bar adapter, ticked concurrently
-    // against the same durable operation row while task A is paused. This
-    // exercises the actual coordinator and adapter concurrently rather than
-    // manually emulating their ordering.
+    // Task B: the real production completed-bar adapter, under a
+    // deliberately invalid instrument-registry path (item 5), ticked
+    // concurrently against the same durable operation row at the same
+    // shared instant while task A is paused.
     let adapter_fut = async {
         hook.operation_visible.notified().await;
 
-        let mut adapter_st = configured_alpaca_state(pool.clone(), &adapter_id, symbol).await;
+        let mut adapter_st =
+            configured_alpaca_state_scalper(pool.clone(), &adapter_id, symbol).await;
         Arc::get_mut(&mut adapter_st)
             .unwrap()
-            .instrument_registry_path = instruments.path().to_str().unwrap().to_string();
-        let outcome = tick_autonomous_completed_bar_driver_from_state(&adapter_st, adapter_now)
+            .instrument_registry_path =
+            "C:/definitely/does/not/exist/zze2a_instruments.json".to_string();
+
+        let slot = mqk_db::fetch_autonomous_daily_operation_for_slot(
+            &pool,
+            chrono::NaiveDate::from_ymd_opt(2026, 7, 20).unwrap(),
+            "PAPER",
+            &adapter_id,
+        )
+        .await
+        .expect("fetch ok")
+        .expect("operation row must already be visible to task B");
+
+        // Item 3: before snapshot, taken while task A is paused and before
+        // task B's own tick.
+        let before =
+            snapshot_authority_concurrency_evidence(&pool, slot.operation_id, symbol).await;
+
+        let outcome = tick_autonomous_completed_bar_driver_from_state(&adapter_st, shared_now_utc)
             .await
             .expect("adapter tick ok");
 
+        // Item 4: after snapshot, taken after task B returns but before
+        // releasing task A.
+        let after = snapshot_authority_concurrency_evidence(&pool, slot.operation_id, symbol).await;
+
         hook.proceed.notify_waiters();
-        outcome
+        (slot.operation_id, outcome, before, after)
     };
 
-    let (coordinator_result, adapter_outcome) = tokio::join!(coordinator_fut, adapter_fut);
+    let (coordinator_result, (operation_id, adapter_outcome, before, after)) =
+        tokio::join!(coordinator_fut, adapter_fut);
     let coordinator_outcome = coordinator_result.expect("coordinator tick ok");
     assert_eq!(
         coordinator_outcome,
-        AutonomousDailyCoordinatorTickOutcome::WaitingForPreopen
+        AutonomousDailyCoordinatorTickOutcome::PreparingData,
+        "the real 5-bar readiness fixture must leave the operation in preparing_data \
+         (report.start_allowed=true, still before effective_operation_open_utc)"
     );
-
-    let slot = mqk_db::fetch_autonomous_daily_operation_for_slot(
-        &pool,
-        chrono::NaiveDate::from_ymd_opt(2026, 7, 20).unwrap(),
-        "PAPER",
-        &adapter_id,
-    )
-    .await
-    .expect("fetch ok")
-    .expect("row exists");
 
     // Task B, running while task A was paused before binding the authority,
-    // must have observed the quiet not-bound path and produced zero side
-    // effects.
+    // must have observed the quiet not-bound path -- not a registry/identity
+    // outcome, which would mean the invalid registry path was touched.
     match adapter_outcome {
         AutonomousCompletedBarProductionTickOutcome::CoverageAuthorityUnavailable {
-            operation_id,
+            operation_id: outcome_operation_id,
             reason_code,
         } => {
-            assert_eq!(operation_id, slot.operation_id);
+            assert_eq!(outcome_operation_id, operation_id);
             assert_eq!(reason_code, REASON_COVERAGE_AUTHORITY_NOT_BOUND);
         }
-        other => panic!("expected CoverageAuthorityUnavailable(not_bound), got {other:?}"),
+        other => panic!(
+            "expected CoverageAuthorityUnavailable(not_bound), got {other:?} -- a \
+             RegistryUnavailable/IdentityUnresolved outcome here would mean the invalid \
+             registry path was actually reached before Stage A"
+        ),
     }
 
-    let refreshed = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, slot.operation_id)
-        .await
-        .unwrap()
-        .unwrap();
+    // Items 3-5: zero durable side effects from task B while paused.
+    assert_eq!(before.state, after.state, "state unchanged");
     assert_eq!(
-        refreshed.state,
-        mqk_db::STATE_AWAITING_PREOPEN,
-        "task B must never have mutated lifecycle state while paused"
+        before.state_version, after.state_version,
+        "state_version unchanged"
+    );
+    assert!(
+        before.run_id.is_none() && after.run_id.is_none(),
+        "pristine operation never had a run, before or after task B"
     );
     assert_eq!(
-        refreshed.bars_observed, 0,
-        "zero bar observations from task B"
+        before.bars_observed, after.bars_observed,
+        "bars_observed unchanged"
     );
     assert_eq!(
-        coverage_claim_count(&pool, slot.operation_id).await,
-        0,
-        "zero dispatch claims from task B"
+        before.bars_dispatched, after.bars_dispatched,
+        "bars_dispatched unchanged"
+    );
+    assert_eq!(
+        before.last_completed_bar_ts, after.last_completed_bar_ts,
+        "last_completed_bar_ts unchanged"
+    );
+    assert_eq!(
+        before.last_dispatched_bar_ts, after.last_dispatched_bar_ts,
+        "last_dispatched_bar_ts unchanged"
+    );
+    assert_eq!(
+        before.lifecycle_event_count, after.lifecycle_event_count,
+        "zero new operation lifecycle events from task B"
+    );
+    assert_eq!(
+        before.coverage_event_count, 0,
+        "coverage authority still absent before task B"
+    );
+    assert_eq!(
+        after.coverage_event_count, 0,
+        "coverage authority still absent after task B (task A not yet released)"
+    );
+    assert_eq!(before.claim_count, 0, "zero dispatch claims before task B");
+    assert_eq!(after.claim_count, 0, "zero dispatch claims from task B");
+    assert_eq!(
+        before.evaluation_count, 0,
+        "zero strategy evaluations before task B"
+    );
+    assert_eq!(
+        after.evaluation_count, 0,
+        "zero strategy evaluations from task B"
+    );
+    assert_eq!(
+        before.decision_count, 0,
+        "zero accepted decisions before task B"
+    );
+    assert_eq!(
+        after.decision_count, 0,
+        "zero accepted decisions from task B"
     );
 
-    // Task A, once released, must have durably bound the authority.
+    // Item 6: task A, once released, must have durably bound the authority.
     assert!(
-        fetch_coverage_row(&pool, slot.operation_id).await.is_some(),
+        fetch_coverage_row(&pool, operation_id).await.is_some(),
         "task A must have bound the coverage authority after being released"
     );
 
-    // Post-release: a later real adapter tick now proceeds through the
-    // normal eligible path instead of refusing.
-    let adapter_now2 = monday_at(13, 5, 0);
-    let mut adapter_st2 = configured_alpaca_state(pool.clone(), &adapter_id, symbol).await;
-    Arc::get_mut(&mut adapter_st2)
+    // Item 7: a later real adapter tick, under restored valid local
+    // configuration, now proceeds to the ordinary eligible mode path.
+    let mut adapter_st_final =
+        configured_alpaca_state_scalper(pool.clone(), &adapter_id, symbol).await;
+    Arc::get_mut(&mut adapter_st_final)
         .unwrap()
         .instrument_registry_path = instruments.path().to_str().unwrap().to_string();
-    let outcome2 = tick_autonomous_completed_bar_driver_from_state(&adapter_st2, adapter_now2)
-        .await
-        .expect("tick ok");
+    Arc::get_mut(&mut adapter_st_final)
+        .unwrap()
+        .provider_registry_path = providers.path().to_str().unwrap().to_string();
+    let outcome2 =
+        tick_autonomous_completed_bar_driver_from_state(&adapter_st_final, shared_now_utc)
+            .await
+            .expect("tick ok");
     assert!(
         matches!(
             outcome2,
@@ -1947,4 +2145,109 @@ fn i01_policy_resolution_fails_closed_with_no_symbol_assignment() {
         result,
         Err(CoveragePolicyResolutionError::NoSymbolAssignment)
     );
+}
+
+/// `intraday_scalper` (not `swing_momentum`, used elsewhere in this file) is
+/// deliberately chosen here: its registered native timeframe is 300s (5m,
+/// see `mqk-strategy/src/engines/intraday_scalper.rs`), matching
+/// `MQK_STRATEGY_MD_TIMEFRAME=5m` below. `swing_momentum`'s native timeframe
+/// is 86_400s (1D), which disagrees with a `5m` assignment and fails closed
+/// on `REASON_RUNTIME_STRATEGY_TIMEFRAME_MISMATCH` the moment real daily
+/// readiness evaluation actually runs (`handle_preparing_data`) -- a real
+/// concurrency proof against one shared instant (item 1 below) requires
+/// exactly that evaluation to run cleanly, unlike this file's other
+/// coordinator-only fixtures, which stop before `preopen_start_utc` and
+/// never reach it.
+async fn configured_alpaca_state_scalper(
+    pool: sqlx::PgPool,
+    adapter_id: &str,
+    symbol: &str,
+) -> Arc<AppState> {
+    std::env::set_var(STRATEGY_SYMBOL_ENV, symbol);
+    std::env::set_var(STRATEGY_IDS_ENV, "intraday_scalper");
+    std::env::set_var(STRATEGY_TIMEFRAME_ENV, "5m");
+    let st = alpaca_state_with_db(pool, adapter_id);
+    st.set_strategy_fleet_for_test(Some(vec![state::StrategyFleetEntry {
+        strategy_id: "intraday_scalper".to_string(),
+    }]))
+    .await;
+    st
+}
+
+fn write_provider_registry(provider_id: &str) -> tempfile::NamedTempFile {
+    let file = tempfile::NamedTempFile::new().unwrap();
+    let json = serde_json::json!([{
+        "provider_id": provider_id,
+        "display_name": "ZZ Test Provider",
+        "asset_classes": ["equity"],
+        "free_tier_available": false,
+        "api_key_required": false,
+        "credential_env_vars": [],
+        "rate_limit_notes": "test fixture",
+        "supported_timeframes": ["5m"],
+        "historical_depth_notes": "test fixture",
+        "realtime_support_notes": "test fixture",
+        "licensing_notes": "test fixture",
+        "implementation_status": "test_fixture",
+        "enabled": true,
+        "verification_status": "test_fixture",
+        "docs_url": "",
+    }]);
+    std::fs::write(file.path(), serde_json::to_string(&json).unwrap()).unwrap();
+    file
+}
+
+/// Direct SQL, not `ingest_provider_bars_to_md_bars_with_provider_metadata`:
+/// that helper always stamps `ingested_at` as real wall-clock `now()` (a
+/// genuine DB-schema default, `md_bars.ingested_at timestamptz not null
+/// default now()`), which would otherwise race against this fixture's fixed
+/// simulated `now_utc` (REASON_PROVIDER_INGEST_TIME_FUTURE, since the
+/// production future-skew ceiling is hard-capped at 60s regardless of
+/// configuration). `ingested_at` is set explicitly, safely before the
+/// simulated session, so readiness evaluation is deterministic regardless of
+/// real wall-clock time.
+async fn seed_five_prior_session_readiness_bars(
+    pool: &sqlx::PgPool,
+    symbol: &str,
+    provider_id: &str,
+) {
+    let ingested_at = friday_at(20, 0, 0);
+    for i in 0..5i64 {
+        let end_ts = friday_at(19, 35, 0).timestamp() + i * 300;
+        sqlx::query(
+            r#"
+            insert into md_bars (
+              symbol, timeframe, end_ts, open_micros, high_micros, low_micros, close_micros,
+              volume, is_complete, ingested_at,
+              provider_id, provider_source, provider_symbol, ingest_mode,
+              provider_bar_id, provider_updated_at_utc
+            ) values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+            on conflict (symbol, timeframe, end_ts) do update set
+              ingested_at = excluded.ingested_at,
+              provider_id = excluded.provider_id,
+              provider_source = excluded.provider_source,
+              provider_symbol = excluded.provider_symbol,
+              ingest_mode = excluded.ingest_mode
+            "#,
+        )
+        .bind(symbol)
+        .bind("5m")
+        .bind(end_ts)
+        .bind(100_000_000i64)
+        .bind(101_000_000i64)
+        .bind(99_000_000i64)
+        .bind(100_500_000i64)
+        .bind(1000i64)
+        .bind(true)
+        .bind(ingested_at)
+        .bind(provider_id)
+        .bind(Some(provider_id))
+        .bind(Some(symbol))
+        .bind(Some("test_seed_readiness_bars"))
+        .bind(None::<String>)
+        .bind(None::<DateTime<Utc>>)
+        .execute(pool)
+        .await
+        .expect("seed readiness bar");
+    }
 }

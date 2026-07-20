@@ -42,9 +42,22 @@ repair: a complete durable event-envelope validator (id, event_type, source,
 typed parser, the adapter's authority gate reordered strictly before any
 assignment/identity resolution so a missing anchor stays a quiet no-op even
 under a locally malformed environment, and a live `tokio::join!`-driven
-coordinator/adapter concurrency proof — **E2A repair implementation
-complete, awaiting ChatGPT and operator acceptance.** No outcome classifier
-and no finalization behavior exist yet; that remains E2B.
+coordinator/adapter concurrency proof — plus, on top of that, the
+AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E2A-SAME-INSTANT-CONCURRENCY-AND-SIDE-EFFECT-PROOF-01
+final proof repair: the closure repair's concurrency test drove the
+coordinator and adapter at two independently timestamped ticks rather than
+one shared logical instant, so it never proved the adapter observes the
+coordinator's own newly-created operation as of the coordinator's own
+`now_utc`. The same test (`f04`, rewritten in place) now drives both tasks at
+one shared `now_utc`, captures a full durable before/after snapshot (state,
+`state_version`, `run_id`, bar/claim/lifecycle-event/coverage-event/
+evaluation/decision counts) proving zero side effects from the adapter while
+the coordinator remains paused, proves the adapter never touches a
+deliberately-invalid instrument-registry path before its authority gate
+resolves, and proves release-then-normal-progression to `DriverOutcome`. No
+production coordinator/state file was touched by this repair — **E2A repair
+implementation complete, awaiting ChatGPT and operator acceptance.** No
+outcome classifier and no finalization behavior exist yet; that remains E2B.
 
 The strongest current operational route is:
 

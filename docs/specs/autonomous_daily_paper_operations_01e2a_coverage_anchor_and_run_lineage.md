@@ -40,9 +40,36 @@ concurrent-task proof) is resolved and retracted below. This closure repair does
 E2A audit except where a repair above required a fresh source read (recorded inline); it is not itself
 an acceptance record, and it does not close Phase E or Bundle 3.
 
+**Final proof repair** (`AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E2A-SAME-INSTANT-CONCURRENCY-AND-SIDE-
+EFFECT-PROOF-01`, applied on top of the closure repair commit `98d6d1d8` / `6c77b6f1`): closes the one
+remaining proof gap the closure repair's own §12 left implicit but did not actually deliver —
+`f04_live_coordinator_and_adapter_interleaving_proves_zero_side_effects_while_paused` used two
+*independently timestamped* ticks (`coordinator_now=12:00Z`, `adapter_now=13:05Z`), not one shared
+logical instant, so it never proved the adapter observes the coordinator's *own* newly-created
+operation as of the *same* `now_utc` the coordinator itself just used. `f04` is rewritten in place
+(same test, not a new one) to: (1) tick both tasks at one shared `shared_now_utc=13:05Z`, inside
+`[preopen_start_utc, effective_operation_open_utc)` — simultaneously a valid `PrepareDataOnly` instant
+for the coordinator's own `initial_state_for_plan` and inside the adapter's own relevant-operation
+lookup window; (2) capture a full durable before/after snapshot (state, `state_version`, `run_id`,
+bar/claim/lifecycle-event/coverage-event/strategy-evaluation/decision counts) while task A is paused,
+strictly before and after task B's own tick, proving zero delta from task B; (3) run task B's
+paused-window tick under a deliberately invalid instrument-registry path, proving Stage A's
+`coverage_authority_not_bound` outcome — never `RegistryUnavailable`/`IdentityUnresolved` — is reached
+without the registry (or any provider client it could gate) ever being touched; (4) prove a later real
+adapter tick, under a freshly-constructed validly-configured state, proceeds through the ordinary
+eligible mode path (`DriverOutcome`) once released. Because a real coordinator dispatch through
+`handle_preparing_data`'s readiness evaluation is now unavoidable at a shared post-preopen instant
+(unlike this file's other coordinator-only fixtures, which stop before `preopen_start_utc`), `f04` also
+gained a real 5-bar prior-session readiness fixture (provider registry + instrument registry + explicit
+historical `ingested_at`, since `md_bars.ingested_at` is a real-wall-clock DB default the production
+future-skew ceiling caps at 60s) and switched its strategy fixture from `swing_momentum` (native
+timeframe 1D, silently mismatched against this file's `5m` assignment fixture) to `intraday_scalper`
+(native timeframe 5m) — the mismatch was latent in every other test in this file, which never actually
+reached the readiness evaluation that would have exposed it. §10/§11/§12 below are corrected in place.
+
 Status: implementation complete, **awaiting ChatGPT and operator acceptance**. This document records
-what E2A (and its closure repair) built and proved; it is not itself an acceptance record, and it does
-not close Phase E or Bundle 3.
+what E2A (both repairs) built and proved; it is not itself an acceptance record, and it does not close
+Phase E or Bundle 3.
 
 ## 1. Scope
 
@@ -334,26 +361,54 @@ made durable via a direct DB call with zero coverage anchor (exactly the row sha
 alone produces before the coordinator's own tick reaches its ensure-authority write point), then the
 real production adapter is ticked against it
 (`f01_adapter_returns_not_bound_with_zero_side_effects_for_a_newly_visible_unanchored_operation`).
-Second — **added by the closure repair, resolving the prior §12 known limitation** — by a live
-`tokio::sync::Notify`-based rendezvous hook (`AutonomousCoverageAuthorityPreBindTestHook`, mirroring
-the existing D4.4 `AutonomousCompletedBarPostClaimTestHook` pattern) installed on the coordinator's own
-tick, firing immediately after `create_or_recover` commits the operation row and before
-`ensure_coverage_authority` begins; a `tokio::join!`-driven test
-(`f04_live_coordinator_and_adapter_interleaving_proves_zero_side_effects_while_paused`) runs the real
-coordinator tick and the real production adapter tick concurrently, proving the adapter observes
-`coverage_authority_not_bound` with zero lifecycle mutation, zero dispatch claims, and zero bar
-observations while the coordinator is paused before binding, then proves a later, ordinary adapter tick
-proceeds normally once the coordinator has bound the authority and been released. Together these prove
-the identical safety invariant the mission requires — the adapter never invokes the driver, never
-constructs a provider client, and never observes/claims/evaluates a bar for an unanchored operation —
-now including a literal concurrent-task interleaving, not merely a deterministic sequential
-reconstruction of the worst case.
+Second — by a live `tokio::sync::Notify`-based rendezvous hook
+(`AutonomousCoverageAuthorityPreBindTestHook`, mirroring the existing D4.4
+`AutonomousCompletedBarPostClaimTestHook` pattern) installed on the coordinator's own tick, firing
+immediately after `create_or_recover` commits the operation row and before `ensure_coverage_authority`
+begins — by `f04_live_coordinator_and_adapter_interleaving_proves_zero_side_effects_while_paused`, whose
+final proof repair (see the preamble above) makes this a genuine same-instant proof:
+
+- **One shared logical instant** (`shared_now_utc=13:05Z`, inside `[preopen_start_utc=13:00Z,
+  effective_operation_open_utc=13:30Z)`) drives both the coordinator's own tick and the concurrent
+  adapter tick — the adapter genuinely finds the exact operation row the coordinator just created, at
+  the coordinator's own `now_utc`, not a separately-timestamped tick.
+- **Genuinely separate tasks, lost-notification hazard structurally excluded**: task A (coordinator)
+  and task B (adapter) are two independent futures polled via `tokio::join!` (not `tokio::spawn` —
+  `Notify::notify_waiters` silently drops a notification with no registered waiter, and two
+  independently OS-scheduled `tokio::spawn` tasks racing to register-vs-notify have no other ordering
+  guarantee; `join!`'s poll-task-A-then-task-B-on-every-wake ordering, combined with task A's own
+  `create_or_recover` DB `.await` before it can reach `notify_waiters()`, guarantees task B's first
+  poll — which does nothing but register on `operation_visible` — runs strictly before task A could
+  possibly notify it; the symmetric argument holds for task A's own `proceed.notified()` registration,
+  issued with no intervening await immediately after `operation_visible.notify_waiters()`).
+- **Full durable before/after snapshot** (not just state/bars/claims): `state`, `state_version`,
+  `run_id`, `bars_observed`, `bars_dispatched`, `last_completed_bar_ts`, `last_dispatched_bar_ts`,
+  operation lifecycle-event count, coverage-event count, dispatch-claim count, and
+  `strategy_signal_evaluations`-scoped evaluation/decision counts, captured by task B itself
+  immediately before and after its own tick while task A remains paused — every field proven identical
+  across the delta. `oms_outbox`/`oms_inbox` are proven zero structurally (both tables carry `run_id
+  uuid not null references runs`; `run_id.is_none()` is asserted in both snapshots) rather than by a
+  raw table count, which would only measure unrelated concurrently-running tests' shared-table state.
+- **Provider/client/driver non-access proof**: task B's paused-window tick runs under a deliberately
+  invalid/sentinel instrument-registry path. Since Stage A (`check_coverage_authority_envelope`) runs
+  strictly before any assignment/runtime-binding resolution or registry load, an outcome of the quiet
+  `coverage_authority_not_bound` path — never `RegistryUnavailable`/`IdentityUnresolved` — is itself the
+  proof that the registry, and any provider client construction it could gate, was never reached.
+- **Release and normal progression**: once released, task A durably binds the authority; a later real
+  adapter tick, under a freshly-constructed validly-configured state (the "restore valid local
+  configuration" step) and the real 5-bar prior-session readiness fixture, proceeds to
+  `DriverOutcome` — the ordinary eligible mode path, not merely a tolerated blocked one.
+
+Together these prove the identical safety invariant the mission requires — the adapter never invokes
+the driver, never constructs a provider client, and never observes/claims/evaluates a bar for an
+unanchored operation — as a literal, same-instant, genuinely concurrent-task proof.
 
 ## 11. Test matrix
 
 File: `core-rs/crates/mqk-daemon/tests/scenario_autonomous_daily_coverage_anchor_and_run_lineage_01.rs`
-(41 tests as of the closure repair, up from the original 34, `--include-ignored --test-threads=1`
-against the isolated port-5434 test database; groups A/B/C/I are pure, no DB required):
+(41 tests, unchanged in count by the final proof repair — `f04` was rewritten in place, not added —
+`--include-ignored --test-threads=1` against the isolated port-5434 test database; groups A/B/C/I are
+pure, no DB required):
 
 ```text
 Group A (construction, pure):       a01-a05
@@ -363,8 +418,10 @@ Group D (durable write/replay/conflict): d01-d09 (d05-d09 added: independent
                                           envelope-field tamper cases -- event_type,
                                           source, run_id, resume_source, detail.operation_id)
 Group E (coordinator ensure-authority): e01-e04
-Group F (adapter authority gate + concurrency proof): f01-f04 (f04 added: the live
-                                          tokio::join! coordinator/adapter interleaving proof)
+Group F (adapter authority gate + concurrency proof): f01-f04 (f04 rewritten by the final
+                                          proof repair: one shared logical instant, full
+                                          before/after durable snapshot, malformed-registry
+                                          provider-non-access proof, release+progression proof)
 Group G (mid-day drift): g01-g02
 Group H (run-lineage helper, DB-backed): h01-h02
 Group I (policy-resolution error taxonomy, pure): i01
@@ -386,20 +443,21 @@ production assertion is unchanged), `scenario_autonomous_daily_session_coordinat
 
 `scenario_autonomous_completed_bar_driver_01` has 9 failures (`DispatchClaimUnresolved{status:"failed"}`
 instead of `DispatchCompleted`) that are **confirmed pre-existing and unrelated to this patch**: the
-identical 9 tests, with materially identical failure text, fail identically against the unmodified
-`3591064a` baseline (reproduced via an isolated `git worktree` and a dedicated, uncontaminated test
-database — never the shared port-5434 `mqk_test` database — to rule out cross-run migration-checksum
-artifacts). 47/56 pass in both the baseline and the patched tree, on both the original E2A commit and
-its closure repair.
+file is untouched by either E2A repair (`git diff --stat` against both `3591064a` and the current HEAD
+is empty), so the identical 9 tests failing identically is structural, not merely observed. 47/56 pass
+against current HEAD, `3591064a`, the original E2A commit, and its closure repair alike.
 
 ## 12. Known limitations
 
-- **Resolved by the closure repair (§10).** The inter-task concurrency proof was previously a
-  deterministic sequential reconstruction of the worst-case ordering only, not a literal
-  `tokio::join!`/`Notify`-synchronized interleaving of two live concurrently-scheduled tasks. A
-  hook-based live-interleaving proof (`AutonomousCoverageAuthorityPreBindTestHook`, mirroring D4.4's
-  `AutonomousCompletedBarPostClaimTestHook` pattern) now exists, proven by
-  `f04_live_coordinator_and_adapter_interleaving_proves_zero_side_effects_while_paused`.
+- **Resolved by the closure repair, then corrected by the final proof repair (§10).** The inter-task
+  concurrency proof was previously a deterministic sequential reconstruction of the worst-case ordering
+  only. The closure repair added a live `tokio::join!`/`Notify`-synchronized interleaving
+  (`AutonomousCoverageAuthorityPreBindTestHook`, mirroring D4.4's
+  `AutonomousCompletedBarPostClaimTestHook` pattern) but drove the two tasks at two *independently
+  timestamped* ticks rather than one shared logical instant — a gap this document's §12 did not itself
+  identify at the time. The final proof repair corrects this: `f04` now drives both tasks at one shared
+  `now_utc`, adds the full before/after durable snapshot, and adds the malformed-registry
+  provider-non-access proof (§10).
 - `scenario_autonomous_completed_bar_driver_01`'s 9 pre-existing failures are not fixed by this patch
   (out of scope — confirmed unrelated via baseline reproduction, §11).
 - No new API route or GUI surface exists to read the coverage anchor or run lineage — E4's job.

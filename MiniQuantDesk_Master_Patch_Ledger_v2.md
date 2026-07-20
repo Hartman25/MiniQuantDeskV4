@@ -14483,3 +14483,150 @@ NEXT AFTER E2A ACCEPTANCE: E2B — strict outcome classifier and finalization CA
 unattended 10-20-session soak: NOT STARTED
 live capital: NOT READY
 ```
+
+## AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E2A-SAME-INSTANT-CONCURRENCY-AND-SIDE-EFFECT-PROOF-01
+
+Patch ID: `AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E2A-SAME-INSTANT-CONCURRENCY-AND-SIDE-EFFECT-PROOF-01`
+Bundle: `AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-COMBINED`, Phase E2A (final proof repair).
+
+Starting HEAD: `0e3799bd9afecb64520ddc2ca5d5c351d14d22c4` (`fix: close autonomous coverage authority
+verification`) — the E2A closure repair commit above. Preserved verbatim, without redesign: the typed
+immutable coverage event, the duplicate-key-rejecting parser, the complete event-envelope validator, the
+exact write/re-read/replay/conflict handling, the Stage A/Stage B split, the adapter authority lookup
+ahead of assignment/runtime resolution, the quiet `coverage_authority_not_bound` path, the coordinator
+ensure-authority seam, the pristine-versus-prior-activity handling, the mid-day policy-drift gate, and
+the raw full run-lineage helper. **No production coordinator/state/coverage-authority file was
+changed** — the closure repair's own pre-bind rendezvous hook was already sufficient; this repair is
+test proof and truthful documentation only.
+
+**The gap this repair closes:** the closure repair's own "Internal review cycle" note (see its ledger
+entry above) records that `f04`'s *first* draft used one shared `now_utc` for both tasks, hit
+`NoRelevantOperation` (the adapter's relevant-operation lookup requires `now_utc` inside
+`[preopen_start_utc, postclose_finalize_utc]` for a fresh `awaiting_preopen` row, and the coordinator's
+own pre-preopen instant did not satisfy that), and was "corrected" by giving the adapter task its own,
+separately-timestamped `adapter_now` — explicitly documented at the time as "deterministic-logic testing
+of two independently-timestamped ticks, not a claim that both instants represent the same real moment."
+That correction shipped as the accepted closure repair, but it never actually proves what the mission
+requires: that the adapter observes the coordinator's *own* newly-created operation as of the
+coordinator's *own* `now_utc`. This repair closes that gap correctly instead of reverting it: `f04` now
+creates the operation directly in `preparing_data` (not `awaiting_preopen`) by choosing `shared_now_utc`
+inside `[preopen_start_utc, effective_operation_open_utc)` — simultaneously a valid `PrepareDataOnly`
+instant for the coordinator's own `initial_state_for_plan` and inside the adapter's relevant-operation
+lookup window — so one shared instant satisfies both sides without hitting the original
+`NoRelevantOperation` failure mode.
+
+**Repairs (`f04_live_coordinator_and_adapter_interleaving_proves_zero_side_effects_while_paused`,
+rewritten in place — same test, not a new one):**
+
+1. **One shared logical instant.** `shared_now_utc=13:05Z` drives both `tick_autonomous_daily_coordinator`
+   and the concurrent `tick_autonomous_completed_bar_driver_from_state` call. Replaces the split
+   `coordinator_now=12:00Z` / `adapter_now=13:05Z` pair.
+2. **Genuinely separate, synchronized tasks with the lost-notification hazard structurally excluded.**
+   Still `tokio::join!` (not `tokio::spawn`) over the existing `AutonomousCoverageAuthorityPreBindTestHook`
+   — deliberately, not merely preserved by inertia: `Notify::notify_waiters` silently drops a
+   notification with no registered waiter, and two independently OS-scheduled `tokio::spawn` tasks
+   racing to register-vs-notify have no ordering guarantee otherwise. `join!`'s poll-task-A-then-task-B
+   ordering, combined with task A's own `create_or_recover` DB `.await` preceding its
+   `notify_waiters()` call, guarantees task B's first poll (registering on `operation_visible`) runs
+   strictly before task A could notify it; the symmetric argument holds for task A's own
+   `proceed.notified()` registration. This reasoning is recorded in `f04`'s own doc comment.
+3. **Durable before/after snapshot.** A new `AuthorityConcurrencySnapshot` (`state`, `state_version`,
+   `run_id`, `bars_observed`, `bars_dispatched`, `last_completed_bar_ts`, `last_dispatched_bar_ts`,
+   operation lifecycle-event count via `mqk_db::list_autonomous_daily_operation_events`, coverage-event
+   count, dispatch-claim count, and `strategy_signal_evaluations`-scoped evaluation/decision counts) is
+   captured by task B itself immediately before and after its own tick, while task A remains paused.
+4. **Zero-side-effect assertions.** Every snapshot field is asserted identical across the before/after
+   delta. `oms_outbox`/`oms_inbox` are proven zero structurally — both tables carry `run_id uuid not
+   null references runs`, and `run_id.is_none()` is asserted in both snapshots — rather than by a raw
+   `count(*)` over either table, which would only measure unrelated concurrently-running tests' shared
+   state, not a scoped delta for this operation.
+5. **Provider/client/driver non-access proof.** Task B's paused-window tick runs under a deliberately
+   invalid/sentinel instrument-registry path. Since Stage A (`check_coverage_authority_envelope`) runs
+   strictly before any assignment/runtime-binding resolution or registry load (unchanged from the
+   closure repair), the quiet `coverage_authority_not_bound` outcome — never
+   `RegistryUnavailable`/`IdentityUnresolved` — is itself the proof the registry was never touched.
+6. **Release and normal progression.** Once released, task A durably binds the authority (unchanged
+   production behavior); a later real adapter tick, under a freshly-constructed, validly-configured
+   state (the "restore valid local configuration" step), proceeds to `DriverOutcome`.
+7. **Driver baseline re-confirmed unchanged (REPAIR 7).** `scenario_autonomous_completed_bar_driver_01`
+   is untouched by this repair (`git diff --stat` against both this repair's own starting HEAD and
+   parent `3591064a` is empty for that file) — 47/56 pass, the same 9 pre-existing
+   `DispatchClaimUnresolved{status:"failed"}` failures, 0 new failures, confirmed structural (not merely
+   observed) because the file was never touched.
+
+**Real readiness fixture required (test-only, no production change):** a shared post-preopen instant
+makes a real coordinator dispatch through `handle_preparing_data`'s daily-data-readiness evaluation
+unavoidable — unlike every other coordinator fixture in this file, which stops before
+`preopen_start_utc` and never reaches it. Two source-level findings, both test-fixture-scoped:
+(a) `swing_momentum` (used by every other test in this file) has a native `StrategySpec.timeframe_secs`
+of `86_400` (1D), silently mismatched against this file's `5m` assignment fixture —
+`REASON_RUNTIME_STRATEGY_TIMEFRAME_MISMATCH` fires the moment readiness is actually evaluated with
+binding, which no other test in this file does; `f04` switches to `intraday_scalper` (native `5m`,
+`LOOKBACK=5`) instead — a fixture correction, not a production defect; (b) `md_bars.ingested_at` is a
+real-wall-clock DB schema default (`timestamptz not null default now()`) with no production write path
+accepting an explicit override, and the production future-skew ceiling is hard-capped at 60 seconds
+regardless of configuration (`effective_future_skew_seconds = configured.min(60).min(timeframe_secs)`)
+— seeding readiness bars via the ordinary ingest helper would race against real wall-clock time on this
+file's fixed calendar-date fixture (`monday_at`/`friday_at`, 2026-07-20/07-17). `f04`'s
+`seed_five_prior_session_readiness_bars` therefore uses direct test-only SQL (explicit historical
+`ingested_at`), matching this file's own precedent (`assert_tampered_row_rejected_and_preserved` already
+constructs `AutonomousSessionEventRow` values directly for the same reason — no production write path
+takes the parameter a test needs).
+
+**Internal review cycle:** one cycle (source audit → narrow proof repair → targeted validation →
+correctness review → scope/safety review). The empirically-discovered readiness-evaluation chain above
+(timeframe mismatch, then asset-class-unknown, then market-data-missing, then provider-ingest-time-future)
+was diagnosed via a temporary, non-committed probe test against the isolated port-5434 database before
+`f04` was rewritten — each fixture gap was closed in turn until the real coordinator and real adapter
+both completed cleanly end-to-end.
+
+**Regressions (each binary run alone, `--include-ignored --test-threads=1`, isolated test Postgres on
+port 5434):** `scenario_autonomous_daily_coverage_anchor_and_run_lineage_01` 41/41 (`f04` rewritten,
+count unchanged), `scenario_autonomous_completed_bar_task_01` 49/49 (untouched), `scenario_autonomous_daily_session_coordinator_01`
+48/48 (untouched), `scenario_autonomous_daily_phase_d_integration_01` 8/8 (untouched).
+`scenario_autonomous_completed_bar_driver_01` 47/56 — 9 identical pre-existing, unrelated failures (file
+untouched, see repair 7 above). Zero new failures anywhere in the required matrix.
+
+**Guards:** `validate_autonomous_daily_paper_operations_01e2a_coverage_anchor_and_run_lineage.ps1`
+(one new check, [16] — one shared logical timestamp, split-clock pattern explicitly rejected, full
+before/after snapshot fields, malformed-registry proof — all checks pass, [1]-[15] unchanged and still
+pass). **Migration:** none. **Format/lint:** `rustfmt --check --edition 2021` clean on the one touched
+Rust file; Clippy `-D warnings` clean on the touched test binary (`mqk-daemon --lib` unchanged, not
+re-linted); `cargo check -p mqk-daemon` clean (only the pre-existing `sqlx-postgres` future-incompat
+note). `git diff --check` / `git diff --cached --check` clean.
+
+**Files changed:** `MiniQuantDesk_Master_Patch_Ledger_v2.md`, `README.md`, `README_TECHNICAL.md`,
+`docs/specs/autonomous_daily_paper_operations_01e2a_coverage_anchor_and_run_lineage.md`,
+`scripts/guards/validate_autonomous_daily_paper_operations_01e2a_coverage_anchor_and_run_lineage.ps1`,
+`core-rs/crates/mqk-daemon/tests/scenario_autonomous_daily_coverage_anchor_and_run_lineage_01.rs`. No
+production Rust file changed (`mqk-daemon/src/**`, `mqk-db/src/**` untouched). No migration changed. No
+API route implemented. No GUI changed. No outcome classifier added. No finalization added.
+
+**Safety confirmation (E2A same-instant concurrency and side-effect proof):**
+
+```text
+PROVIDER CALLS: no
+BROKER CALLS: no
+NETWORK CALLS: no
+REAL DAEMON STARTED: no
+PAPER ORDERS: no
+LIVE ORDERS: no
+PAPER DB TOUCHED: no
+PORT 5440 TOUCHED: no
+MIGRATION CHANGED: no
+API IMPLEMENTED: no
+GUI CHANGED: no
+OUTCOME CLASSIFIER ADDED: no
+FINALIZATION ADDED: no
+```
+
+```text
+E1: ACCEPTED — COMPLETE
+E2A final proof repair: IMPLEMENTATION COMPLETE — AWAITING CHATGPT AND OPERATOR ACCEPTANCE
+E2B: NOT STARTED
+PHASE E: OPEN
+BUNDLE 3 (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-COMBINED): OPEN
+NEXT AFTER E2A ACCEPTANCE: E2B — strict outcome classifier and finalization CAS, only
+unattended 10-20-session soak: NOT STARTED
+live capital: NOT READY
+```

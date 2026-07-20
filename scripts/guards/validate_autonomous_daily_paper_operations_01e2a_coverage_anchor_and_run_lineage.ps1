@@ -55,6 +55,20 @@
 #   [15] A live coordinator/adapter concurrency-proof rendezvous hook and a
 #        `tokio::join!`-driven interleaving test both exist.
 #
+# SAME-INSTANT-CONCURRENCY-AND-SIDE-EFFECT-PROOF-01 (E2A final proof repair)
+# strengthens this guard with check [16] below, covering the one shared
+# logical timestamp requirement, the full before/after durable snapshot, and
+# the malformed-local-configuration provider-non-access proof -- and
+# rejecting the prior two-independently-timestamped-ticks pattern outright.
+#
+#   [16] `f04`'s concurrency proof uses one shared logical `now_utc` for both
+#        tasks (never a split `coordinator_now`/`adapter_now` pair), asserts
+#        `state_version`/lifecycle-event-count/evaluation-count/
+#        decision-count before and after task B's own tick, and proves the
+#        missing-authority outcome survives a deliberately invalid local
+#        instrument-registry path (never `RegistryUnavailable`/
+#        `IdentityUnresolved`).
+#
 # Usage:
 #   powershell -ExecutionPolicy Bypass -File scripts\guards\validate_autonomous_daily_paper_operations_01e2a_coverage_anchor_and_run_lineage.ps1
 #
@@ -405,6 +419,27 @@ if ($null -ne $E2ATestContent) {
     Test-ContentContains "the test file names the live interleaving proof" $E2ATestContent "async fn f04_live_coordinator_and_adapter_interleaving_proves_zero_side_effects_while_paused" | Out-Null
     Test-ContentContains "the test file proves duplicate JSON keys are rejected" $E2ATestContent "fn b06_parse_rejects_duplicate_json_keys" | Out-Null
     Test-ContentContains "the test file proves the write/re-read path tamper-checks every envelope field" $E2ATestContent "assert_tampered_row_rejected_and_preserved" | Out-Null
+}
+
+Write-Host ""
+Show-Info "--- [16] f04: one shared logical instant, full before/after snapshot, malformed-config proof ---"
+$F04Body = Get-ContentBetween -Content $E2ATestContent `
+    -StartNeedle "async fn f04_live_coordinator_and_adapter_interleaving_proves_zero_side_effects_while_paused()" `
+    -EndNeedle "Group G"
+if ($null -eq $F04Body) {
+    $script:Violations++
+    Show-Red "  FAIL -- could not locate f04's body"
+} else {
+    Test-ContentContains "f04 uses one shared logical instant for both tasks" $F04Body "shared_now_utc" | Out-Null
+    Test-ContentDoesNotContain "f04 never reintroduces a split coordinator_now/adapter_now proof" $F04Body "let coordinator_now" | Out-Null
+    Test-ContentDoesNotContain "f04 never reintroduces a split coordinator_now/adapter_now proof (adapter_now)" $F04Body "let adapter_now" | Out-Null
+    Test-ContentContains "f04 asserts state_version unchanged across task B's tick" $F04Body "state_version, after.state_version" | Out-Null
+    Test-ContentContains "f04 asserts zero new lifecycle events from task B" $F04Body "lifecycle_event_count" | Out-Null
+    Test-ContentContains "f04 asserts a zero strategy-evaluation-count delta" $F04Body "evaluation_count" | Out-Null
+    Test-ContentContains "f04 asserts a zero decision-count delta" $F04Body "decision_count" | Out-Null
+    Test-ContentContains "f04 runs the paused-window adapter tick under an invalid instrument-registry path" $F04Body "does/not/exist" | Out-Null
+    Test-ContentContains "f04 documents that a RegistryUnavailable/IdentityUnresolved outcome would mean the invalid path was touched" $F04Body "actually reached before Stage A" | Out-Null
+    Test-ContentContains "f04 proves release + normal progression to DriverOutcome" $F04Body "AutonomousCompletedBarProductionTickOutcome::DriverOutcome" | Out-Null
 }
 
 Write-Host ""

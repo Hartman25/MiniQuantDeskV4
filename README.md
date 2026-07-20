@@ -70,7 +70,20 @@ the id and JSON detail), a duplicate-JSON-key-rejecting typed parser, the
 adapter's authority gate reordered strictly before any assignment/identity
 resolution (a missing anchor is now a quiet no-op even under a locally
 malformed environment), and a live `tokio::join!`-driven coordinator/adapter
-concurrency proof. **E2A repair implementation is complete, awaiting independent
+concurrency proof — followed by the
+AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E2A-SAME-INSTANT-CONCURRENCY-AND-SIDE-EFFECT-PROOF-01
+final proof repair on top of that: the closure repair's own concurrency test
+drove the coordinator and adapter tasks at two *independently timestamped*
+ticks rather than one shared logical instant, so it never actually proved the
+adapter observes the coordinator's own newly-created operation as of the
+coordinator's own `now_utc`. The same test is rewritten in place to use one
+shared `now_utc`, a full durable before/after snapshot (state, state_version,
+run_id, bar/claim/lifecycle-event/coverage-event/evaluation/decision counts)
+proving zero side effects while the coordinator is paused, a
+deliberately-invalid-registry-path proof that the adapter never touches the
+instrument registry before its authority gate resolves, and a
+release-then-normal-progression proof. No production coordinator/state file
+was touched by this repair. **E2A repair implementation is complete, awaiting independent
 ChatGPT/operator acceptance.** No outcome classifier and no finalization
 behavior exist yet — that is E2B, not started here.
 
@@ -139,8 +152,8 @@ independently accepted:
 - the completed-bar production adapter's mandatory per-tick authority prerequisite, now correctly ordered as a two-stage gate: Stage A (exact-id lookup, envelope validation, duplicate-safe parse, payload operation-id verification) runs strictly *before* any assignment/runtime-binding/policy resolution is even attempted, so a missing or invalid anchor is a quiet no-op with zero lifecycle mutation even when the local environment/configuration is itself malformed; only once Stage A proves a real, correctly shaped authority exists does Stage B resolve current policy and semantically compare it against the immutable anchor — no provider client, provider call, bar observation, dispatch claim, or strategy evaluation happens before both stages resolve clean, and durable fail-closed projection remains coordinator-owned
 - a mid-day coverage-policy-drift check: the adapter compares its freshly-resolved current policy (timeframe/grace/history/identity) against the immutable anchor on every tick, both for `PrepareDataOnly`- and `RunningDispatch`-eligible states
 - a narrow, raw `(transition_seq, run_id)` full-run-lineage read helper (never `SELECT DISTINCT`, never the general 100-row API list cap) plus Rust-side monotonicity/uniqueness/current-run-match validation, proven against a real recovery cycle
-- a live, deterministic coordinator/adapter concurrency proof: a `tokio::sync::Notify`-based rendezvous hook pauses the real coordinator tick immediately after `create_or_recover` commits the operation row and before it binds the coverage authority; a `tokio::join!`-driven test runs the real production adapter concurrently against that same row while the coordinator is paused, proving zero lifecycle mutation, zero claims, and zero bar observations from the adapter side, then proves a normal eligible tick proceeds once the coordinator is released
-- an extended scenario test file (`scenario_autonomous_daily_coverage_anchor_and_run_lineage_01.rs`, 41 tests) proving construction bounds, durable replay/conflict (including five independent envelope-field tamper cases), duplicate-JSON-key rejection, the coordinator's pristine-bind and prior-activity fail-closed paths, the adapter's corrected two-stage authority gate (including the live concurrency proof), mid-day drift, and the run-lineage helper
+- a live, deterministic, **same-instant** coordinator/adapter concurrency proof: a `tokio::sync::Notify`-based rendezvous hook pauses the real coordinator tick immediately after `create_or_recover` commits the operation row and before it binds the coverage authority; a `tokio::join!`-driven test runs the real production adapter concurrently against that same row, at the exact same shared `now_utc` the coordinator itself used, while the coordinator is paused — proving zero lifecycle mutation, zero `state_version` change, zero new lifecycle events, zero coverage-event/claim/evaluation/decision-count change from the adapter side, that the adapter never touches a deliberately-invalid instrument-registry path before its authority gate resolves, then proving a normal eligible tick proceeds to `DriverOutcome` once the coordinator is released under restored valid configuration
+- an extended scenario test file (`scenario_autonomous_daily_coverage_anchor_and_run_lineage_01.rs`, 41 tests) proving construction bounds, durable replay/conflict (including five independent envelope-field tamper cases), duplicate-JSON-key rejection, the coordinator's pristine-bind and prior-activity fail-closed paths, the adapter's corrected two-stage authority gate (including the same-instant live concurrency proof), mid-day drift, and the run-lineage helper
 - **no outcome classifier and no finalization behavior were written** — those remain E2B's job; no new API route or GUI surface was added
 
 Still required before Bundle 3 closes:
