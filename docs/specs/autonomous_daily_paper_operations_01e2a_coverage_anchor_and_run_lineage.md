@@ -9,9 +9,40 @@ bar processing`) — the accepted E1 contract commit. This document and the E2A 
 described below are committed together in one commit on top of that HEAD; see
 `MiniQuantDesk_Master_Patch_Ledger_v2.md`'s Bundle 3 entry for the exact resulting commit hash.
 
+**Closure repair** (`AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E2A-AUTHORITY-ENVELOPE-GATE-ORDERING-AND-
+CONCURRENCY-CLOSURE`, applied on top of the original E2A implementation commit `6c77b6f1de3f7fd1075
+fa8a7e3410b593d3d3253`, "daemon: bind autonomous coverage authority"): closes six defects left in the
+original implementation below, found by a fresh, targeted re-read of `autonomous_daily_coverage_authority.rs`
+and `autonomous_completed_bar_task.rs`: (1) every authority read now validates the row's complete
+envelope (`id`/`event_type`/`source`/`run_id IS NULL`/`resume_source IS NULL`) via one shared
+`validate_coverage_authority_envelope` helper, not merely the deterministic id plus a matching JSON
+detail payload (§2.1, §4, new); (2) the JSON parser now decodes directly into a typed,
+`#[serde(deny_unknown_fields)]` wire struct instead of a `serde_json::Value` object map, so a literal
+duplicate JSON key is rejected by serde's own derived `visit_map` rather than silently collapsed to its
+last occurrence — the original §2.2 claim that duplicate-key detection was unnecessary because
+`serde_json` "deduplicates... before this code ever sees it" is retracted as a source-proven defect
+(§2.2, corrected); (3) the read/parse/policy-comparison responsibilities are split into a Stage A
+(authority presence and envelope, requiring no assignment/runtime/policy resolution of any kind) and a
+Stage B (semantic comparison against the one value Stage A already loaded), never re-read or re-parsed
+through a second algorithm (§4, new); (4) the completed-bar adapter's gate is reordered so Stage A runs
+strictly before any assignment/runtime-binding resolution is even attempted — the original ordering
+resolved assignment/runtime/policy configuration (and durably applied an `IdentityUnresolved` blocker
+on failure) *before* ever checking whether an authority existed at all, so a newly-visible, unanchored
+operation racing against a locally malformed environment could receive a lifecycle mutation the mission
+requires stay a quiet no-op (§6, corrected); (5) `write_and_confirm_coverage_authority`'s re-read now
+goes through the same Stage A envelope validator, so a row with any single tampered envelope field is
+rejected without ever overwriting the original (§5, new); (6) the coordinator/adapter inter-task race
+is now proven by a live `tokio::sync::Notify`-based rendezvous hook (`AutonomousCoverageAuthorityPreBindTestHook`,
+mirroring the existing D4.4 `AutonomousCompletedBarPostClaimTestHook` pattern) driving the real
+coordinator tick and the real production adapter tick concurrently via `tokio::join!` — §10's and §12's
+prior "known limitation" (a deterministic sequential reconstruction standing in for a literal
+concurrent-task proof) is resolved and retracted below. This closure repair does not redo the original
+E2A audit except where a repair above required a fresh source read (recorded inline); it is not itself
+an acceptance record, and it does not close Phase E or Bundle 3.
+
 Status: implementation complete, **awaiting ChatGPT and operator acceptance**. This document records
-what E2A built and proved; it is not itself an acceptance record, and it does not close Phase E or
-Bundle 3.
+what E2A (and its closure repair) built and proved; it is not itself an acceptance record, and it does
+not close Phase E or Bundle 3.
 
 ## 1. Scope
 
@@ -95,9 +126,17 @@ positive/ordered bar timestamps, ordered session boundaries) to hold. Any violat
 JSON, a missing field, a wrong-typed field, an unknown schema version, or a semantic-invariant
 violation — returns a typed `CoverageParseError`, never a partially-trusted value.
 
-A raw JSON object with a literal duplicate key is deduplicated (last value wins) by the JSON parser
-itself before this code ever sees a `serde_json::Value` — this is standard `serde_json` behavior for
-self-controlled writer output, not a gap this parser introduces or needs to re-detect.
+**Corrected by the closure repair.** The original claim above — that a duplicate key is harmlessly
+deduplicated by `serde_json::Value` before this code ever sees it — is retracted: a `serde_json::Value`
+object map's `.len()`/key-presence check cannot prove a duplicate key was *absent*, only that the
+resulting map has the expected key set, which is exactly what a duplicated-then-collapsed key also
+produces. `parse_coverage_bound_detail` now decodes directly into a typed wire struct
+(`CoverageBoundDetailWire`, `#[derive(Deserialize)]`, `#[serde(deny_unknown_fields)]`) instead of a
+`serde_json::Value` map. Serde's own derived `Visitor::visit_map` tracks each field in an `Option<T>`
+and returns a `duplicate_field` error the second time any key is seen, before the value is ever
+converted — this is standard `serde`/`serde_derive` struct-deserialization behavior, not a
+custom detection this parser has to implement. `deny_unknown_fields` rejects any key outside the closed
+set, and every field is non-`Option`, so a missing key remains a hard error exactly as before.
 
 ## 3. Canonical coverage construction
 
@@ -176,27 +215,40 @@ coverage-authority problem must never strand a runtime past close (proven in
 
 ## 6. Adapter prerequisite flow
 
-`tick_autonomous_completed_bar_driver_from_state` (`state/autonomous_completed_bar_task.rs`) enforces
-the exact required ordering:
+**Corrected by the closure repair.** The original ordering resolved assignment/runtime-binding/policy
+configuration — and durably applied an `IdentityUnresolved` blocker on any failure there — *before*
+ever checking whether an authority existed for the operation at all. That meant a newly-visible,
+not-yet-anchored operation racing against a locally malformed environment (a missing/invalid
+`MQK_STRATEGY_*` env var, an unresolvable runtime binding) could receive a real lifecycle mutation the
+mission requires stay a quiet no-op regardless of local configuration health. `tick_autonomous_completed_bar_driver_from_state`
+(`state/autonomous_completed_bar_task.rs`) now enforces a two-stage ordering instead:
 
 ```text
 fetch relevant operation
   -> select_driver_mode_for_state (state-only, cheap, non-authority-bearing short-circuit)
-  -> resolve current policy + construct fresh payload
-  -> check_coverage_authority (exact-id read-only lookup, never a write)
-       NotBound    -> CoverageAuthorityUnavailable{coverage_authority_not_bound}, no mutation
+  -> Stage A: check_coverage_authority_envelope (exact-id lookup, envelope validation,
+       duplicate-safe parse, payload operation-id verification -- read-only, never a write,
+       requires no assignment/runtime-binding/policy resolution of any kind)
+       NotBound    -> CoverageAuthorityUnavailable{coverage_authority_not_bound}, no mutation,
+                       zero attempt to resolve assignment/runtime configuration
        Unreadable  -> CoverageAuthorityUnavailable{coverage_authority_unreadable}, no mutation
        Invalid     -> CoverageAuthorityUnavailable{coverage_authority_invalid}, no mutation
-       Conflict    -> CoverageAuthorityUnavailable{coverage_authority_conflict}, no mutation
-       Compatible  -> only then: load_driver_instruments, provider_id resolution,
+       Present     -> only then: resolve assignment/runtime-binding/policy metadata
+                       (existing IdentityUnresolved blocker behavior preserved unchanged for
+                       failures here, now reachable only once a real, correctly shaped
+                       authority has already been proven present)
+  -> Stage B: semantic comparison of the Stage A authority value against the freshly
+       constructed payload (never re-read or re-parsed through a second algorithm)
+       mismatch    -> CoverageAuthorityUnavailable{coverage_authority_conflict}, no mutation
+       match       -> only then: load_driver_instruments, provider_id resolution,
                        readiness evaluator / provider resolver construction, driver invocation
 ```
 
 No provider client is constructed, no provider call is made, no bar is observed, no dispatch claim is
-made, and no strategy evaluation occurs before the authority check resolves clean. The adapter never
-mutates operation lifecycle state for any of the four reason codes — durable fail-closed projection
-remains coordinator-owned, matching the dual-enforcement design (a concurrent adapter tick and a
-coordinator tick are independently scheduled with no synchronization between them).
+made, and no strategy evaluation occurs before both stages resolve clean. The adapter never mutates
+operation lifecycle state for any of the four coverage-authority reason codes — durable fail-closed
+projection remains coordinator-owned, matching the dual-enforcement design (a concurrent adapter tick
+and a coordinator tick are independently scheduled with no synchronization between them).
 
 ## 7. Legacy / prior-activity behavior
 
@@ -277,31 +329,42 @@ two independent ticks and `h01_initial_and_recovery_run_lineage_read_and_validat
 cycle.
 
 The inter-task race (a concurrent completed-bar tick observing a newly-visible, not-yet-anchored
-operation) is proven by direct construction of the worst case rather than a live
-`tokio::join!`/`Notify` interleaving of two concurrently scheduled tasks: the operation row is made
-durable via a direct DB call with zero coverage anchor (exactly the row shape `create_or_recover`
+operation) is proven two ways. First, by direct construction of the worst case: the operation row is
+made durable via a direct DB call with zero coverage anchor (exactly the row shape `create_or_recover`
 alone produces before the coordinator's own tick reaches its ensure-authority write point), then the
 real production adapter is ticked against it
 (`f01_adapter_returns_not_bound_with_zero_side_effects_for_a_newly_visible_unanchored_operation`).
-This proves the identical safety invariant the mission requires — the adapter never invokes the
-driver, never constructs a provider client, and never observes/claims/evaluates a bar for an
-unanchored operation — without a new pausable test hook on the coordinator's own tick (out of scope
-for this patch; no coordinator production code was changed to add one). This is stated as a known
-limitation (§12), not represented as a literal concurrent-task race proof.
+Second — **added by the closure repair, resolving the prior §12 known limitation** — by a live
+`tokio::sync::Notify`-based rendezvous hook (`AutonomousCoverageAuthorityPreBindTestHook`, mirroring
+the existing D4.4 `AutonomousCompletedBarPostClaimTestHook` pattern) installed on the coordinator's own
+tick, firing immediately after `create_or_recover` commits the operation row and before
+`ensure_coverage_authority` begins; a `tokio::join!`-driven test
+(`f04_live_coordinator_and_adapter_interleaving_proves_zero_side_effects_while_paused`) runs the real
+coordinator tick and the real production adapter tick concurrently, proving the adapter observes
+`coverage_authority_not_bound` with zero lifecycle mutation, zero dispatch claims, and zero bar
+observations while the coordinator is paused before binding, then proves a later, ordinary adapter tick
+proceeds normally once the coordinator has bound the authority and been released. Together these prove
+the identical safety invariant the mission requires — the adapter never invokes the driver, never
+constructs a provider client, and never observes/claims/evaluates a bar for an unanchored operation —
+now including a literal concurrent-task interleaving, not merely a deterministic sequential
+reconstruction of the worst case.
 
 ## 11. Test matrix
 
-New file: `core-rs/crates/mqk-daemon/tests/scenario_autonomous_daily_coverage_anchor_and_run_lineage_01.rs`
-(34 tests, `--include-ignored --test-threads=1` against the isolated port-5434 test database; groups
-A/B/C/I are pure, no DB required):
+File: `core-rs/crates/mqk-daemon/tests/scenario_autonomous_daily_coverage_anchor_and_run_lineage_01.rs`
+(41 tests as of the closure repair, up from the original 34, `--include-ignored --test-threads=1`
+against the isolated port-5434 test database; groups A/B/C/I are pure, no DB required):
 
 ```text
 Group A (construction, pure):       a01-a05
-Group B (parse/serialize/equality): b01-b05
+Group B (parse/serialize/equality): b01-b06 (b06 added: duplicate-JSON-key rejection)
 Group C (run-lineage validator, pure): c01-c08
-Group D (durable write/replay/conflict): d01-d04
+Group D (durable write/replay/conflict): d01-d09 (d05-d09 added: independent
+                                          envelope-field tamper cases -- event_type,
+                                          source, run_id, resume_source, detail.operation_id)
 Group E (coordinator ensure-authority): e01-e04
-Group F (adapter authority gate + concurrency proof): f01-f03
+Group F (adapter authority gate + concurrency proof): f01-f04 (f04 added: the live
+                                          tokio::join! coordinator/adapter interleaving proof)
 Group G (mid-day drift): g01-g02
 Group H (run-lineage helper, DB-backed): h01-h02
 Group I (policy-resolution error taxonomy, pure): i01
@@ -310,7 +373,11 @@ Group I (policy-resolution error taxonomy, pure): i01
 Regressions re-run clean against the same isolated DB (`--include-ignored --test-threads=1`, one
 binary at a time): `scenario_autonomous_completed_bar_task_01` (49/49, including new
 `bind_coverage_authority_for_test`-mediated fixtures for the four tests whose operations are
-constructed directly rather than through the coordinator), `scenario_autonomous_daily_session_coordinator_01`
+constructed directly rather than through the coordinator, plus a closure-repair fixture correction to
+`l04_identity_unresolved_degrades_durably_through_the_adapter`: since Stage A now runs before
+assignment resolution, exercising the `IdentityUnresolved` path requires binding a real authority first
+under a resolvable assignment, then clearing the assignment env before the tick under test — the
+production assertion is unchanged), `scenario_autonomous_daily_session_coordinator_01`
 (48/48), `scenario_autonomous_daily_phase_d_integration_01` (8/8, including
 `phase_d_full_day_lifecycle`'s real coordinator+adapter integration), `scenario_daily_data_readiness_start_gate_01`
 (20/20, untouched by this patch), `scenario_autonomous_daily_operation_store_01` (mqk-db, 26/26),
@@ -319,17 +386,20 @@ constructed directly rather than through the coordinator), `scenario_autonomous_
 
 `scenario_autonomous_completed_bar_driver_01` has 9 failures (`DispatchClaimUnresolved{status:"failed"}`
 instead of `DispatchCompleted`) that are **confirmed pre-existing and unrelated to this patch**: the
-identical 9 tests fail identically against the unmodified baseline commit (`git stash` reproduction),
-independent of any E2A change. 47/56 pass in both the baseline and the patched tree.
+identical 9 tests, with materially identical failure text, fail identically against the unmodified
+`3591064a` baseline (reproduced via an isolated `git worktree` and a dedicated, uncontaminated test
+database — never the shared port-5434 `mqk_test` database — to rule out cross-run migration-checksum
+artifacts). 47/56 pass in both the baseline and the patched tree, on both the original E2A commit and
+its closure repair.
 
 ## 12. Known limitations
 
-- The inter-task concurrency proof (§10) is a deterministic sequential reconstruction of the
-  worst-case ordering, not a literal `tokio::join!`/`Notify`-synchronized interleaving of two live
-  concurrently-scheduled tasks. A hook-based live-interleaving proof (mirroring D4.4's
-  `AutonomousCompletedBarPostClaimTestHook` pattern) is a candidate improvement for a future patch but
-  was judged out of scope for E2A — it would require a new pausable checkpoint inside the
-  coordinator's own tick, which is production-code surface beyond this patch's minimal-scope mandate.
+- **Resolved by the closure repair (§10).** The inter-task concurrency proof was previously a
+  deterministic sequential reconstruction of the worst-case ordering only, not a literal
+  `tokio::join!`/`Notify`-synchronized interleaving of two live concurrently-scheduled tasks. A
+  hook-based live-interleaving proof (`AutonomousCoverageAuthorityPreBindTestHook`, mirroring D4.4's
+  `AutonomousCompletedBarPostClaimTestHook` pattern) now exists, proven by
+  `f04_live_coordinator_and_adapter_interleaving_proves_zero_side_effects_while_paused`.
 - `scenario_autonomous_completed_bar_driver_01`'s 9 pre-existing failures are not fixed by this patch
   (out of scope — confirmed unrelated via baseline reproduction, §11).
 - No new API route or GUI surface exists to read the coverage anchor or run lineage — E4's job.

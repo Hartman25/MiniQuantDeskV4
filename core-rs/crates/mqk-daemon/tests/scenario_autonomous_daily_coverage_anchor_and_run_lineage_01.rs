@@ -42,8 +42,8 @@ use mqk_daemon::state::autonomous_completed_bar_task::{
     AutonomousCompletedBarProductionTickOutcome,
 };
 use mqk_daemon::state::autonomous_daily_coordinator::{
-    tick_autonomous_daily_coordinator, AutonomousDailyCoordinatorTickInput,
-    AutonomousDailyCoordinatorTickOutcome,
+    tick_autonomous_daily_coordinator, AutonomousCoverageAuthorityPreBindTestHook,
+    AutonomousDailyCoordinatorTickInput, AutonomousDailyCoordinatorTickOutcome,
 };
 use mqk_daemon::state::autonomous_daily_coverage_authority::{
     check_coverage_authority, construct_coverage_bound_detail, coverage_bound_event_id,
@@ -51,7 +51,7 @@ use mqk_daemon::state::autonomous_daily_coverage_authority::{
     resolve_current_coverage_policy_inputs, serialize_coverage_bound_detail,
     write_and_confirm_coverage_authority, CoverageAuthorityCheck, CoverageAuthorityEnsureResult,
     CoverageConstructionInputs, CoveragePolicyInputs, CoveragePolicyResolutionError,
-    EVENT_TYPE_COVERAGE_BOUND, REASON_COVERAGE_AUTHORITY_CONFLICT,
+    COVERAGE_SOURCE, EVENT_TYPE_COVERAGE_BOUND, REASON_COVERAGE_AUTHORITY_CONFLICT,
     REASON_COVERAGE_AUTHORITY_MISSING_AFTER_ACTIVITY, REASON_COVERAGE_AUTHORITY_NOT_BOUND,
 };
 use mqk_daemon::state::market_calendar::NyseWeekdaysProvider;
@@ -621,6 +621,46 @@ fn b04_parse_rejects_unknown_schema_version() {
     }
 }
 
+/// Append a literal, already-serialized `"key":value` pair to `raw`'s JSON
+/// object as a genuine second occurrence of that key -- not through
+/// `serde_json::Value`, which would collapse it, but as raw text, so the
+/// parser under test is the only thing that ever gets a chance to detect it.
+fn inject_duplicate_key(raw: &str, key_value_json: &str) -> String {
+    let trimmed = raw.trim_end();
+    assert!(trimmed.ends_with('}'), "expected a JSON object: {raw}");
+    format!("{},{}}}", &trimmed[..trimmed.len() - 1], key_value_json)
+}
+
+#[test]
+fn b06_parse_rejects_duplicate_json_keys() {
+    // REPAIR 2 (E2A closure): a literal duplicate JSON key must be rejected
+    // by the parser itself, never silently collapsed to its last occurrence.
+    let op = Uuid::new_v4();
+    let detail = sample_detail(op);
+    let raw = serialize_coverage_bound_detail(&detail);
+
+    let dup_schema_version = inject_duplicate_key(&raw, "\"schema_version\":1");
+    assert!(
+        parse_coverage_bound_detail(&dup_schema_version).is_err(),
+        "duplicate schema_version must be rejected"
+    );
+
+    let dup_operation_id = inject_duplicate_key(&raw, &format!("\"operation_id\":\"{op}\""));
+    assert!(
+        parse_coverage_bound_detail(&dup_operation_id).is_err(),
+        "duplicate operation_id must be rejected"
+    );
+
+    let dup_local_symbol = inject_duplicate_key(
+        &raw,
+        &format!("\"local_symbol\":\"{}\"", detail.local_symbol),
+    );
+    assert!(
+        parse_coverage_bound_detail(&dup_local_symbol).is_err(),
+        "duplicate local_symbol must be rejected"
+    );
+}
+
 #[test]
 fn b05_semantic_equality_detects_changed_timeframe_grace_history_identity() {
     let op = Uuid::new_v4();
@@ -858,6 +898,146 @@ async fn d04_missing_event_check_reports_not_bound() {
         .await
         .expect("check ok");
     assert!(matches!(check, CoverageAuthorityCheck::NotBound));
+}
+
+/// REPAIR 5 (E2A closure): `write_and_confirm_coverage_authority`'s re-read
+/// must independently tamper-check every envelope column, not merely the
+/// `detail` payload. Each sub-case persists a row under the exact event id
+/// with exactly one envelope field wrong, then proves the write/re-read
+/// path rejects it (`Unreadable`) and never overwrites the tampered row
+/// (`ON CONFLICT (id) DO NOTHING` -- the original insert already claimed the
+/// id).
+async fn assert_tampered_row_rejected_and_preserved(
+    pool: &sqlx::PgPool,
+    tampered_row: mqk_db::AutonomousSessionEventRow,
+    fresh: &mqk_daemon::state::autonomous_daily_coverage_authority::CoverageBoundDetail,
+) {
+    let op = fresh.operation_id;
+    mqk_db::persist_autonomous_session_event(pool, &tampered_row)
+        .await
+        .expect("persist tampered row ok");
+
+    let result = write_and_confirm_coverage_authority(pool, fresh, monday_at(12, 0, 0))
+        .await
+        .expect("write attempt ok");
+    assert!(
+        matches!(result, CoverageAuthorityEnsureResult::Unreadable),
+        "tampered envelope must be rejected as Unreadable, got {result:?}"
+    );
+
+    let row_after = fetch_coverage_row(pool, op).await.unwrap();
+    assert_eq!(
+        row_after.event_type, tampered_row.event_type,
+        "the original tampered row must never be overwritten"
+    );
+    assert_eq!(row_after.source, tampered_row.source);
+    assert_eq!(row_after.run_id, tampered_row.run_id);
+    assert_eq!(row_after.resume_source, tampered_row.resume_source);
+    assert_eq!(row_after.detail, tampered_row.detail);
+
+    let _ = sqlx::query("delete from sys_autonomous_session_events where id = $1")
+        .bind(coverage_bound_event_id(op))
+        .execute(pool)
+        .await;
+}
+
+#[tokio::test]
+async fn d05_write_and_confirm_rejects_tampered_event_type() {
+    let Some(pool) = maybe_db("d05").await else {
+        return;
+    };
+    let op = Uuid::new_v4();
+    let detail = sample_detail(op);
+    let tampered_row = mqk_db::AutonomousSessionEventRow {
+        id: coverage_bound_event_id(op),
+        ts_utc: monday_at(11, 0, 0),
+        event_type: "wrong_event_type".to_string(),
+        resume_source: None,
+        detail: serialize_coverage_bound_detail(&detail),
+        run_id: None,
+        source: COVERAGE_SOURCE.to_string(),
+    };
+    assert_tampered_row_rejected_and_preserved(&pool, tampered_row, &detail).await;
+}
+
+#[tokio::test]
+async fn d06_write_and_confirm_rejects_tampered_source() {
+    let Some(pool) = maybe_db("d06").await else {
+        return;
+    };
+    let op = Uuid::new_v4();
+    let detail = sample_detail(op);
+    let tampered_row = mqk_db::AutonomousSessionEventRow {
+        id: coverage_bound_event_id(op),
+        ts_utc: monday_at(11, 0, 0),
+        event_type: EVENT_TYPE_COVERAGE_BOUND.to_string(),
+        resume_source: None,
+        detail: serialize_coverage_bound_detail(&detail),
+        run_id: None,
+        source: "wrong.source".to_string(),
+    };
+    assert_tampered_row_rejected_and_preserved(&pool, tampered_row, &detail).await;
+}
+
+#[tokio::test]
+async fn d07_write_and_confirm_rejects_tampered_run_id() {
+    let Some(pool) = maybe_db("d07").await else {
+        return;
+    };
+    let op = Uuid::new_v4();
+    let detail = sample_detail(op);
+    let tampered_row = mqk_db::AutonomousSessionEventRow {
+        id: coverage_bound_event_id(op),
+        ts_utc: monday_at(11, 0, 0),
+        event_type: EVENT_TYPE_COVERAGE_BOUND.to_string(),
+        resume_source: None,
+        detail: serialize_coverage_bound_detail(&detail),
+        run_id: Some(Uuid::new_v4()),
+        source: COVERAGE_SOURCE.to_string(),
+    };
+    assert_tampered_row_rejected_and_preserved(&pool, tampered_row, &detail).await;
+}
+
+#[tokio::test]
+async fn d08_write_and_confirm_rejects_tampered_resume_source() {
+    let Some(pool) = maybe_db("d08").await else {
+        return;
+    };
+    let op = Uuid::new_v4();
+    let detail = sample_detail(op);
+    let tampered_row = mqk_db::AutonomousSessionEventRow {
+        id: coverage_bound_event_id(op),
+        ts_utc: monday_at(11, 0, 0),
+        event_type: EVENT_TYPE_COVERAGE_BOUND.to_string(),
+        resume_source: Some("unexpected_resume_source".to_string()),
+        detail: serialize_coverage_bound_detail(&detail),
+        run_id: None,
+        source: COVERAGE_SOURCE.to_string(),
+    };
+    assert_tampered_row_rejected_and_preserved(&pool, tampered_row, &detail).await;
+}
+
+#[tokio::test]
+async fn d09_write_and_confirm_rejects_tampered_detail_operation_id() {
+    let Some(pool) = maybe_db("d09").await else {
+        return;
+    };
+    let op = Uuid::new_v4();
+    let detail = sample_detail(op);
+    // The envelope (id/event_type/source/run_id/resume_source) is exactly
+    // correct; only the payload's own `operation_id` field disagrees with
+    // the operation it is stored under.
+    let mismatched_detail = sample_detail(Uuid::new_v4());
+    let tampered_row = mqk_db::AutonomousSessionEventRow {
+        id: coverage_bound_event_id(op),
+        ts_utc: monday_at(11, 0, 0),
+        event_type: EVENT_TYPE_COVERAGE_BOUND.to_string(),
+        resume_source: None,
+        detail: serialize_coverage_bound_detail(&mismatched_detail),
+        run_id: None,
+        source: COVERAGE_SOURCE.to_string(),
+    };
+    assert_tampered_row_rejected_and_preserved(&pool, tampered_row, &detail).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -1330,6 +1510,140 @@ async fn f03_adapter_refuses_on_unreadable_and_conflicting_authority() {
         .unwrap()
         .unwrap();
     assert_eq!(refreshed.state, operation.state);
+
+    reset_env();
+}
+
+#[tokio::test]
+async fn f04_live_coordinator_and_adapter_interleaving_proves_zero_side_effects_while_paused() {
+    let Some(pool) = maybe_db("f04").await else {
+        return;
+    };
+    reset_env();
+    let adapter_id = format!("zze2a-f04-{}", unique_suffix());
+    let symbol = "ZZE2AF04";
+    let instruments = write_instrument_registry(symbol);
+
+    let mut coordinator_st = configured_alpaca_state(pool.clone(), &adapter_id, symbol).await;
+    Arc::get_mut(&mut coordinator_st)
+        .unwrap()
+        .instrument_registry_path = instruments.path().to_str().unwrap().to_string();
+
+    let hook = Arc::new(AutonomousCoverageAuthorityPreBindTestHook::default());
+    coordinator_st
+        .set_coverage_authority_pre_bind_test_hook_for_test(Some(hook.clone()))
+        .await;
+
+    let coordinator_now = monday_at(12, 0, 0); // before preopen (13:00Z)
+                                               // The adapter's own relevant-operation lookup requires `now_utc` to fall
+                                               // within `[preopen_start_utc, postclose_finalize_utc]` (or a special-
+                                               // cased state) for a fresh `awaiting_preopen` row -- matching the same
+                                               // post-preopen instant `f01`/`f02`/`f03` already use for the adapter
+                                               // side. Passing this later instant to task B while task A's own tick
+                                               // still runs at `coordinator_now` is deterministic-logic testing, not a
+                                               // claim that both instants represent the same real moment.
+    let adapter_now = monday_at(13, 5, 0);
+
+    // Task A: the real coordinator tick, paused (via the hook) immediately
+    // after `create_or_recover` commits the operation row and before it
+    // binds the coverage authority.
+    let coordinator_fut = tick_autonomous_daily_coordinator(AutonomousDailyCoordinatorTickInput {
+        state: &coordinator_st,
+        now_utc: coordinator_now,
+    });
+
+    // Task B: the real production completed-bar adapter, ticked concurrently
+    // against the same durable operation row while task A is paused. This
+    // exercises the actual coordinator and adapter concurrently rather than
+    // manually emulating their ordering.
+    let adapter_fut = async {
+        hook.operation_visible.notified().await;
+
+        let mut adapter_st = configured_alpaca_state(pool.clone(), &adapter_id, symbol).await;
+        Arc::get_mut(&mut adapter_st)
+            .unwrap()
+            .instrument_registry_path = instruments.path().to_str().unwrap().to_string();
+        let outcome = tick_autonomous_completed_bar_driver_from_state(&adapter_st, adapter_now)
+            .await
+            .expect("adapter tick ok");
+
+        hook.proceed.notify_waiters();
+        outcome
+    };
+
+    let (coordinator_result, adapter_outcome) = tokio::join!(coordinator_fut, adapter_fut);
+    let coordinator_outcome = coordinator_result.expect("coordinator tick ok");
+    assert_eq!(
+        coordinator_outcome,
+        AutonomousDailyCoordinatorTickOutcome::WaitingForPreopen
+    );
+
+    let slot = mqk_db::fetch_autonomous_daily_operation_for_slot(
+        &pool,
+        chrono::NaiveDate::from_ymd_opt(2026, 7, 20).unwrap(),
+        "PAPER",
+        &adapter_id,
+    )
+    .await
+    .expect("fetch ok")
+    .expect("row exists");
+
+    // Task B, running while task A was paused before binding the authority,
+    // must have observed the quiet not-bound path and produced zero side
+    // effects.
+    match adapter_outcome {
+        AutonomousCompletedBarProductionTickOutcome::CoverageAuthorityUnavailable {
+            operation_id,
+            reason_code,
+        } => {
+            assert_eq!(operation_id, slot.operation_id);
+            assert_eq!(reason_code, REASON_COVERAGE_AUTHORITY_NOT_BOUND);
+        }
+        other => panic!("expected CoverageAuthorityUnavailable(not_bound), got {other:?}"),
+    }
+
+    let refreshed = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, slot.operation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        refreshed.state,
+        mqk_db::STATE_AWAITING_PREOPEN,
+        "task B must never have mutated lifecycle state while paused"
+    );
+    assert_eq!(
+        refreshed.bars_observed, 0,
+        "zero bar observations from task B"
+    );
+    assert_eq!(
+        coverage_claim_count(&pool, slot.operation_id).await,
+        0,
+        "zero dispatch claims from task B"
+    );
+
+    // Task A, once released, must have durably bound the authority.
+    assert!(
+        fetch_coverage_row(&pool, slot.operation_id).await.is_some(),
+        "task A must have bound the coverage authority after being released"
+    );
+
+    // Post-release: a later real adapter tick now proceeds through the
+    // normal eligible path instead of refusing.
+    let adapter_now2 = monday_at(13, 5, 0);
+    let mut adapter_st2 = configured_alpaca_state(pool.clone(), &adapter_id, symbol).await;
+    Arc::get_mut(&mut adapter_st2)
+        .unwrap()
+        .instrument_registry_path = instruments.path().to_str().unwrap().to_string();
+    let outcome2 = tick_autonomous_completed_bar_driver_from_state(&adapter_st2, adapter_now2)
+        .await
+        .expect("tick ok");
+    assert!(
+        matches!(
+            outcome2,
+            AutonomousCompletedBarProductionTickOutcome::DriverOutcome { .. }
+        ),
+        "expected DriverOutcome once the authority is bound, got {outcome2:?}"
+    );
 
     reset_env();
 }

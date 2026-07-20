@@ -35,9 +35,16 @@ durable, operation-scoped `autonomous_daily_coverage_bound` evidence event
 (typed model, canonical construction, write/re-read/replay/conflict
 contract), the coordinator's ensure-authority seam, the completed-bar
 adapter's mandatory per-tick authority/mid-day-drift gate, and a raw
-full-run-lineage read/validate helper — **implementation complete, awaiting
-ChatGPT and operator acceptance.** No outcome classifier and no finalization
-behavior exist yet; that remains E2B.
+full-run-lineage read/validate helper — plus, on top of that, the
+AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E2A-AUTHORITY-ENVELOPE-GATE-ORDERING-AND-CONCURRENCY-CLOSURE
+repair: a complete durable event-envelope validator (id, event_type, source,
+`run_id IS NULL`, `resume_source IS NULL`), a duplicate-JSON-key-rejecting
+typed parser, the adapter's authority gate reordered strictly before any
+assignment/identity resolution so a missing anchor stays a quiet no-op even
+under a locally malformed environment, and a live `tokio::join!`-driven
+coordinator/adapter concurrency proof — **E2A repair implementation
+complete, awaiting ChatGPT and operator acceptance.** No outcome classifier
+and no finalization behavior exist yet; that remains E2B.
 
 The strongest current operational route is:
 
@@ -112,14 +119,22 @@ Accepted (Phase E1, four-times-corrected):
   coordinator wiring, API routes, and durable coverage-anchor/run-lineage foundation remained
   E2A/E2B/E3/E4's job
 
-Implemented on the local `main` worktree (Phase E2A), implementation complete but awaiting independent
-ChatGPT/operator acceptance:
+Implemented on the local `main` worktree (Phase E2A, plus its
+AUTHORITY-ENVELOPE-GATE-ORDERING-AND-CONCURRENCY-CLOSURE repair), implementation complete but awaiting
+independent ChatGPT/operator acceptance:
 
 - the typed, schema-versioned `CoverageBoundDetail` payload
-  (`core-rs/crates/mqk-daemon/src/state/autonomous_daily_coverage_authority.rs`), a manual
-  fail-closed parser (exact key set, rejects missing/wrong-type/unknown-schema-version payloads), and
-  `#[derive(PartialEq)]`-based semantic equality over every immutable field — the payload deliberately
-  excludes `bound_at_utc`; the bind instant is the event row's own `ts_utc` column, metadata only
+  (`core-rs/crates/mqk-daemon/src/state/autonomous_daily_coverage_authority.rs`), a duplicate-key-
+  rejecting typed-wire-struct parser (`CoverageBoundDetailWire`, `#[serde(deny_unknown_fields)]` —
+  decodes directly into a typed struct rather than a `serde_json::Value` object map, so serde's own
+  derived `visit_map` rejects a literal duplicate field the moment it is seen a second time; rejects
+  missing/wrong-type/unknown-field/unknown-schema-version payloads), and `#[derive(PartialEq)]`-based
+  semantic equality over every immutable field — the payload deliberately excludes `bound_at_utc`; the
+  bind instant is the event row's own `ts_utc` column, metadata only
+- `validate_coverage_authority_envelope`: the complete durable event-envelope validator every authority
+  read now uses — verifies the row's exact deterministic `id`, `event_type ==
+  autonomous_daily_coverage_bound`, `source == mqk-daemon.autonomous_daily_coordinator`, `run_id IS
+  NULL`, and `resume_source IS NULL`, never merely the id and a matching JSON detail payload
 - `construct_coverage_bound_detail`, a pure, side-effect-free constructor reusing only
   `daily_data_readiness::expected_intraday_end_ts_window`/`intraday_grid_starts` — no second
   calendar, timeframe, grace, or completed-bar algorithm. The first dispatchable bar is the final
@@ -128,10 +143,16 @@ ChatGPT/operator acceptance:
   identity whose expectation instant is strictly greater than the first bar's own and strictly less
   than `effective_operation_close_utc` (a close-boundary bar is excluded), or the first bar itself
   when none qualifies
-- `write_and_confirm_coverage_authority` / `check_coverage_authority`: the exact write/re-read/
-  idempotent-replay/conflict contract over the existing `sys_autonomous_session_events` store
-  (`ON CONFLICT (id) DO NOTHING`, id = `autonomous_daily_coverage_bound:{operation_id}`) — a write
-  error is never trusted without a confirming authoritative re-read
+- `check_coverage_authority_envelope` (Stage A: exact-id fetch, complete envelope validation,
+  duplicate-safe parse, payload `operation_id` verification — requires no assignment/runtime-binding/
+  policy resolution of any kind) composed with `write_and_confirm_coverage_authority` /
+  `check_coverage_authority` (Stage B: semantic comparison against the one already-loaded authority
+  value, never re-read or re-parsed through a second algorithm): the exact write/re-read/idempotent-
+  replay/conflict contract over the existing `sys_autonomous_session_events` store (`ON CONFLICT (id)
+  DO NOTHING`, id = `autonomous_daily_coverage_bound:{operation_id}`) — a write error is never trusted
+  without a confirming authoritative re-read through the same envelope validator, and a row with any
+  single tampered envelope field (`event_type`/`source`/`run_id`/`resume_source`) or a tampered
+  `detail.operation_id` is rejected without ever overwriting the original row
 - the coordinator's `ensure_coverage_authority` seam
   (`state/autonomous_daily_coordinator.rs`), run immediately after `create_or_recover` and before any
   state-handler dispatch, for both newly created and recovered operations: a pristine operation (zero
@@ -143,14 +164,21 @@ ChatGPT/operator acceptance:
   at or after `effective_operation_close_utc`, canonical close/stop reconciliation always takes
   precedence over a fresh coverage blocker
 - the completed-bar production adapter's mandatory per-tick authority gate
-  (`state/autonomous_completed_bar_task.rs`): after operation fetch and the cheap state-only mode
-  short-circuit, the adapter resolves its current policy, constructs the fresh payload, and checks it
-  against the exact coverage event — strictly before `load_driver_instruments` or any provider/registry
-  object is built. A new `CoverageAuthorityUnavailable { operation_id, reason_code }` outcome variant
-  carries the four closed reason codes (`coverage_authority_not_bound` / `_unreadable` / `_invalid` /
-  `_conflict`); a missing anchor is a quiet, no-mutation no-op, while every other case refuses the
-  driver without the adapter itself mutating lifecycle state — durable fail-closed projection remains
-  coordinator-owned
+  (`state/autonomous_completed_bar_task.rs`), corrected to a two-stage order: after operation fetch and
+  the cheap state-only mode short-circuit, Stage A (`check_coverage_authority_envelope`) runs strictly
+  *before* any assignment/runtime-binding resolution is even attempted — a missing, unreadable, or
+  envelope-invalid authority returns `CoverageAuthorityUnavailable` with zero lifecycle mutation and
+  zero attempt to resolve local assignment/runtime configuration at all, so this stays true even when
+  that local environment/configuration is itself malformed. Only once Stage A proves a real,
+  correctly-shaped authority exists does the adapter resolve its current policy, construct the fresh
+  payload, and semantically compare it (Stage B) against the one authority value Stage A already
+  loaded — strictly before `load_driver_instruments` or any provider/registry object is built. The
+  `CoverageAuthorityUnavailable { operation_id, reason_code }` outcome variant carries the four closed
+  reason codes (`coverage_authority_not_bound` / `_unreadable` / `_invalid` / `_conflict`); a missing
+  anchor is a quiet, no-mutation no-op, while every other case refuses the driver without the adapter
+  itself mutating lifecycle state — durable fail-closed projection remains coordinator-owned. Once
+  Stage A has proven the authority present and valid, the existing source-aligned
+  `IdentityUnresolved`/blocker behavior for assignment/runtime/policy failures is preserved unchanged
 - mid-day coverage-policy drift: the adapter's `resolve_current_coverage_policy_inputs` resolves
   `timeframe_secs`/`required_history_bars`/`effective_grace_seconds` from the assignment's own
   configured timeframe and the strategy registry's data requirements on every tick (deliberately
@@ -168,22 +196,34 @@ ChatGPT/operator acceptance:
 - `mqk_db::fetch_autonomous_session_event_by_id` (exact primary-key read) and
   `mqk_db::count_autonomous_daily_bar_dispatch_claims` — the two narrow `mqk-db` read helpers this
   foundation needed; no migration
-- `tests/scenario_autonomous_daily_coverage_anchor_and_run_lineage_01.rs` (34 tests): construction
+- a live, deterministic coordinator/adapter concurrency proof
+  (`AutonomousCoverageAuthorityPreBindTestHook`, `state/autonomous_daily_coordinator.rs`, mirroring the
+  existing D4.4 `AutonomousCompletedBarPostClaimTestHook` pattern): a `tokio::sync::Notify`-based
+  rendezvous pauses the real coordinator tick immediately after `create_or_recover` commits the
+  operation row and before `ensure_coverage_authority` begins; production never installs the hook (one
+  uncontended async mutex lock per tick). The scenario test drives the real coordinator tick and the
+  real production adapter tick concurrently via `tokio::join!`, proving the adapter observes
+  `coverage_authority_not_bound` with zero lifecycle mutation, zero claims, and zero bar observations
+  while the coordinator is paused, then proves a normal eligible tick proceeds once released
+- `tests/scenario_autonomous_daily_coverage_anchor_and_run_lineage_01.rs` (41 tests): construction
   bounds (ordinary-open spillover, close-boundary exclusion, no-later-bar-qualifies), serialize/parse
-  round-trip and tamper cases, semantic-equality field sensitivity, pure run-lineage validation, the
-  durable write/replay/conflict contract, the coordinator's pristine-bind and prior-activity
-  fail-closed paths (plus close priority), the adapter's authority gate including a deterministic
-  zero-side-effect proof for a newly-visible not-yet-anchored operation and a proceeds-once-bound
-  proof, mid-day drift for both eligible modes, and the DB-backed run-lineage read/validate helper
+  round-trip and tamper cases including duplicate-JSON-key rejection, semantic-equality field
+  sensitivity, pure run-lineage validation, the durable write/replay/conflict contract including five
+  independent envelope-field tamper cases, the coordinator's pristine-bind and prior-activity
+  fail-closed paths (plus close priority), the adapter's corrected two-stage authority gate including a
+  deterministic zero-side-effect proof for a newly-visible not-yet-anchored operation, a
+  proceeds-once-bound proof, and the live `tokio::join!` concurrency proof, mid-day drift for both
+  eligible modes, and the DB-backed run-lineage read/validate helper
 - **no outcome classifier and no finalization behavior were written** — `outcome`/`finalized_at_utc`
   remain unwritten by any production code path; no new API route; no GUI change; no migration; no
   `is_legal_operation_transition` graph change
 
 After D4 and its evaluation-lineage repair (Phase D, accepted complete in full) and the
 four-times-corrected Phase E1 contract (accepted complete) are both accepted, Bundle 3 still requires
-Phase E2A's independent acceptance, then Phase E2B (strict classifier and finalization CAS, built on
-E2A's authorities), E3 coordinator integration, E4 read-only API, E5 integrated proof and closure, Phase
-F GUI/runbook/soak preparation, and Phase G final closure.
+Phase E2A's (and its authority-envelope/gate-ordering/concurrency closure repair's) independent
+acceptance, then Phase E2B (strict classifier and finalization CAS, built on E2A's authorities), E3
+coordinator integration, E4 read-only API, E5 integrated proof and closure, Phase F GUI/runbook/soak
+preparation, and Phase G final closure.
 
 ### Operational meaning
 
@@ -559,8 +599,9 @@ Its current source-grounded capabilities include:
 
 The path is still in **pre-soak hardening** because Bundle 3 is open. Phase D (D1–D4) is accepted
 complete in full; the Phase E1 contract audit (four-times-corrected) is **accepted complete**; Phase
-E2A (durable coverage-anchor/run-lineage evidence foundation) is implementation complete, awaiting
-acceptance. Do not label the current `main` head as a finished autonomous-paper MVP until Phase E's
+E2A (durable coverage-anchor/run-lineage evidence foundation), plus its authority-envelope/gate-
+ordering/concurrency closure repair, is implementation complete, awaiting acceptance. Do not label the
+current `main` head as a finished autonomous-paper MVP until Phase E's
 remaining runtime implementation (E2B–E5) and the later F/G phases are independently accepted.
 
 ### What is expected after Bundle 3
@@ -1037,7 +1078,7 @@ Recommended discipline:
 
 Be honest about these:
 
-- Bundle 3 is not closed; Phase D (D1–D4, integrated lifecycle proof, dispatch-ownership race closure, and the evaluation-lineage repair) is accepted complete in full; the Phase E1 contract audit (the binding durable outcome/no-trade contract, four-times-corrected) is **accepted complete**; Phase E2A (durable coverage-anchor/run-lineage evidence foundation) is implementation complete but awaiting independent ChatGPT/operator acceptance, and no outcome classifier or finalization behavior exists yet
+- Bundle 3 is not closed; Phase D (D1–D4, integrated lifecycle proof, dispatch-ownership race closure, and the evaluation-lineage repair) is accepted complete in full; the Phase E1 contract audit (the binding durable outcome/no-trade contract, four-times-corrected) is **accepted complete**; Phase E2A (durable coverage-anchor/run-lineage evidence foundation), plus its authority-envelope/gate-ordering/concurrency closure repair, is implementation complete but awaiting independent ChatGPT/operator acceptance, and no outcome classifier or finalization behavior exists yet
 - the current main branch should not begin an unattended soak until Phase E's remaining runtime implementation (E2B strict classifier/finalization, then E3–E5, per the accepted E1 contract and built on E2A's authorities) and the later Bundle 3 phases (F/G) are accepted; controlled, operator-supervised autonomous Paper + Alpaca operation is the current Bundle 3 target, not unattended soak
 - Bundle 4 durable paper cash/positions/lots/cost basis/P&L truth is still open
 - real paper fill, reconcile-after-fill, Discord lifecycle, restart, and repeated-session evidence remain incomplete

@@ -15,6 +15,7 @@
 use chrono::{DateTime, Datelike, NaiveDate, Utc};
 use mqk_runtime::native_strategy::EffectiveRuntimeBinding;
 use mqk_strategy::PluginRegistry;
+use serde::Deserialize;
 use sqlx::PgPool;
 use uuid::Uuid;
 
@@ -89,13 +90,22 @@ pub struct CoverageBoundDetail {
 }
 
 // ---------------------------------------------------------------------------
-// Serialization / parsing -- fail-closed. Unknown schema version, missing,
-// duplicated (collapsed to an unexpected key-count mismatch, since a raw
-// JSON object with a truly duplicated key is deduplicated by the JSON
-// parser itself before this code ever sees it), or type-invalid fields are
-// all rejected. No free-form provider/SQL/filesystem/credential/panic text
-// ever enters the payload -- every field is a bounded identity/timestamp/
-// count value.
+// Serialization / parsing -- fail-closed (REPAIR 2, E2A closure). The prior
+// approach decoded into a `serde_json::Value` object map, whose keys are a
+// `BTreeMap`/`Map` that collapses any literal duplicate JSON key to its last
+// occurrence before this code ever saw the shape -- a duplicate `operation_id`
+// or `schema_version` field silently vanished rather than being rejected.
+// This parser instead decodes directly into a typed wire struct
+// (`CoverageBoundDetailWire`) via `#[derive(Deserialize)]`, which serde's
+// derive macro itself refuses to populate twice: the generated
+// `Visitor::visit_map` tracks each field in an `Option<T>` and returns
+// `Error::duplicate_field` the second time any field key is seen, before the
+// value is ever converted. `#[serde(deny_unknown_fields)]` rejects any key
+// outside the closed set, and every field is non-`Option`, so a missing key
+// is also a hard deserialization error -- no fewer, no extra, no duplicate,
+// exactly as the exact-key-set contract requires. No free-form provider/SQL/
+// filesystem/credential/panic text ever enters the payload -- every field is
+// a bounded identity/timestamp/count value.
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -104,27 +114,29 @@ pub enum CoverageParseError {
     UnknownSchemaVersion(i64),
 }
 
-const EXPECTED_FIELDS: &[&str] = &[
-    "schema_version",
-    "operation_id",
-    "market_date",
-    "deployment_mode",
-    "adapter_id",
-    "first_dispatchable_bar_end_ts",
-    "final_dispatchable_bar_end_ts",
-    "local_symbol",
-    "timeframe",
-    "timeframe_secs",
-    "required_history_bars",
-    "effective_grace_seconds",
-    "session_plan_identity",
-    "assignment_identity",
-    "runtime_binding_identity",
-    "exchange_session_open_utc",
-    "exchange_session_close_utc",
-    "effective_operation_open_utc",
-    "effective_operation_close_utc",
-];
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct CoverageBoundDetailWire {
+    schema_version: i64,
+    operation_id: String,
+    market_date: String,
+    deployment_mode: String,
+    adapter_id: String,
+    first_dispatchable_bar_end_ts: i64,
+    final_dispatchable_bar_end_ts: i64,
+    local_symbol: String,
+    timeframe: String,
+    timeframe_secs: i64,
+    required_history_bars: i64,
+    effective_grace_seconds: i64,
+    session_plan_identity: String,
+    assignment_identity: String,
+    runtime_binding_identity: String,
+    exchange_session_open_utc: String,
+    exchange_session_close_utc: String,
+    effective_operation_open_utc: String,
+    effective_operation_close_utc: String,
+}
 
 pub fn serialize_coverage_bound_detail(detail: &CoverageBoundDetail) -> String {
     serde_json::json!({
@@ -151,108 +163,55 @@ pub fn serialize_coverage_bound_detail(detail: &CoverageBoundDetail) -> String {
     .to_string()
 }
 
-fn parse_rfc3339(v: &serde_json::Value) -> Option<DateTime<Utc>> {
-    v.as_str()
-        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+fn parse_rfc3339_str(s: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(s)
+        .ok()
         .map(|dt| dt.with_timezone(&Utc))
 }
 
 pub fn parse_coverage_bound_detail(raw: &str) -> Result<CoverageBoundDetail, CoverageParseError> {
-    let value: serde_json::Value =
+    // `deny_unknown_fields` rejects any extra key; every field below is a
+    // required (non-`Option`) member, so a missing key is also a hard
+    // deserialization error; serde's own derived `visit_map` rejects a
+    // literal duplicate key the moment it is seen a second time, before this
+    // function ever runs. Any of these -- along with plain malformed JSON or
+    // a wrong-typed value -- collapses to `Malformed`.
+    let wire: CoverageBoundDetailWire =
         serde_json::from_str(raw).map_err(|_| CoverageParseError::Malformed)?;
-    let obj = value.as_object().ok_or(CoverageParseError::Malformed)?;
 
-    // Exact key set required -- no fewer, no extra (also the practical
-    // guard against a duplicated key surviving as an unexpected shape,
-    // since the JSON parser itself collapses literal duplicate keys before
-    // constructing this map).
-    if obj.len() != EXPECTED_FIELDS.len() || !EXPECTED_FIELDS.iter().all(|k| obj.contains_key(*k)) {
-        return Err(CoverageParseError::Malformed);
+    if wire.schema_version != COVERAGE_SCHEMA_VERSION {
+        return Err(CoverageParseError::UnknownSchemaVersion(
+            wire.schema_version,
+        ));
     }
 
-    let schema_version = obj["schema_version"]
-        .as_i64()
-        .ok_or(CoverageParseError::Malformed)?;
-    if schema_version != COVERAGE_SCHEMA_VERSION {
-        return Err(CoverageParseError::UnknownSchemaVersion(schema_version));
-    }
-
-    let operation_id = obj["operation_id"]
-        .as_str()
-        .and_then(|s| Uuid::parse_str(s).ok())
-        .ok_or(CoverageParseError::Malformed)?;
-    let market_date = obj["market_date"]
-        .as_str()
-        .ok_or(CoverageParseError::Malformed)?
-        .to_string();
-    let deployment_mode = obj["deployment_mode"]
-        .as_str()
-        .ok_or(CoverageParseError::Malformed)?
-        .to_string();
-    let adapter_id = obj["adapter_id"]
-        .as_str()
-        .ok_or(CoverageParseError::Malformed)?
-        .to_string();
-    let first_dispatchable_bar_end_ts = obj["first_dispatchable_bar_end_ts"]
-        .as_i64()
-        .ok_or(CoverageParseError::Malformed)?;
-    let final_dispatchable_bar_end_ts = obj["final_dispatchable_bar_end_ts"]
-        .as_i64()
-        .ok_or(CoverageParseError::Malformed)?;
-    let local_symbol = obj["local_symbol"]
-        .as_str()
-        .ok_or(CoverageParseError::Malformed)?
-        .to_string();
-    let timeframe = obj["timeframe"]
-        .as_str()
-        .ok_or(CoverageParseError::Malformed)?
-        .to_string();
-    let timeframe_secs = obj["timeframe_secs"]
-        .as_i64()
-        .ok_or(CoverageParseError::Malformed)?;
-    let required_history_bars = obj["required_history_bars"]
-        .as_i64()
-        .ok_or(CoverageParseError::Malformed)?;
-    let effective_grace_seconds = obj["effective_grace_seconds"]
-        .as_i64()
-        .ok_or(CoverageParseError::Malformed)?;
-    let session_plan_identity = obj["session_plan_identity"]
-        .as_str()
-        .ok_or(CoverageParseError::Malformed)?
-        .to_string();
-    let assignment_identity = obj["assignment_identity"]
-        .as_str()
-        .ok_or(CoverageParseError::Malformed)?
-        .to_string();
-    let runtime_binding_identity = obj["runtime_binding_identity"]
-        .as_str()
-        .ok_or(CoverageParseError::Malformed)?
-        .to_string();
+    let operation_id =
+        Uuid::parse_str(&wire.operation_id).map_err(|_| CoverageParseError::Malformed)?;
     let exchange_session_open_utc =
-        parse_rfc3339(&obj["exchange_session_open_utc"]).ok_or(CoverageParseError::Malformed)?;
+        parse_rfc3339_str(&wire.exchange_session_open_utc).ok_or(CoverageParseError::Malformed)?;
     let exchange_session_close_utc =
-        parse_rfc3339(&obj["exchange_session_close_utc"]).ok_or(CoverageParseError::Malformed)?;
-    let effective_operation_open_utc =
-        parse_rfc3339(&obj["effective_operation_open_utc"]).ok_or(CoverageParseError::Malformed)?;
-    let effective_operation_close_utc = parse_rfc3339(&obj["effective_operation_close_utc"])
+        parse_rfc3339_str(&wire.exchange_session_close_utc).ok_or(CoverageParseError::Malformed)?;
+    let effective_operation_open_utc = parse_rfc3339_str(&wire.effective_operation_open_utc)
+        .ok_or(CoverageParseError::Malformed)?;
+    let effective_operation_close_utc = parse_rfc3339_str(&wire.effective_operation_close_utc)
         .ok_or(CoverageParseError::Malformed)?;
 
     let detail = CoverageBoundDetail {
-        schema_version,
+        schema_version: wire.schema_version,
         operation_id,
-        market_date,
-        deployment_mode,
-        adapter_id,
-        first_dispatchable_bar_end_ts,
-        final_dispatchable_bar_end_ts,
-        local_symbol,
-        timeframe,
-        timeframe_secs,
-        required_history_bars,
-        effective_grace_seconds,
-        session_plan_identity,
-        assignment_identity,
-        runtime_binding_identity,
+        market_date: wire.market_date,
+        deployment_mode: wire.deployment_mode,
+        adapter_id: wire.adapter_id,
+        first_dispatchable_bar_end_ts: wire.first_dispatchable_bar_end_ts,
+        final_dispatchable_bar_end_ts: wire.final_dispatchable_bar_end_ts,
+        local_symbol: wire.local_symbol,
+        timeframe: wire.timeframe,
+        timeframe_secs: wire.timeframe_secs,
+        required_history_bars: wire.required_history_bars,
+        effective_grace_seconds: wire.effective_grace_seconds,
+        session_plan_identity: wire.session_plan_identity,
+        assignment_identity: wire.assignment_identity,
+        runtime_binding_identity: wire.runtime_binding_identity,
         exchange_session_open_utc,
         exchange_session_close_utc,
         effective_operation_open_utc,
@@ -596,8 +555,114 @@ pub fn resolve_current_coverage_policy_inputs(
 }
 
 // ---------------------------------------------------------------------------
-// Write / re-read / idempotent-replay / conflict authority contract (§6a).
+// Complete durable event-envelope authority (E2A closure REPAIR 1). A row is
+// not authoritative merely because its deterministic id and JSON detail
+// payload happen to match -- every other envelope column the store itself
+// carries (`event_type`, `source`, `run_id`, `resume_source`) must also
+// match the exact shape this event type is defined to have. This is the one
+// shared validator every authority path below (`write_and_confirm_coverage_
+// authority`'s re-read, `check_coverage_authority_envelope`'s adapter/
+// coordinator read path) is required to use -- never a second,
+// independently-derived envelope check.
 // ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CoverageAuthorityEnvelopeError {
+    WrongId,
+    WrongEventType,
+    RunIdNotNull,
+    ResumeSourceNotNull,
+    WrongSource,
+}
+
+/// Validate every envelope column of a `sys_autonomous_session_events` row
+/// against the exact shape the `autonomous_daily_coverage_bound` event type
+/// is defined to have for `operation_id` (binding contract §6a): `id ==
+/// autonomous_daily_coverage_bound:{operation_id}`, `event_type ==
+/// autonomous_daily_coverage_bound`, `run_id IS NULL` (operation-scoped, not
+/// run-scoped), `resume_source IS NULL`, `source ==
+/// mqk-daemon.autonomous_daily_coordinator`. Never inspects `detail` --
+/// payload parsing and semantic comparison are separate, later stages.
+pub fn validate_coverage_authority_envelope(
+    operation_id: Uuid,
+    row: &mqk_db::AutonomousSessionEventRow,
+) -> Result<(), CoverageAuthorityEnvelopeError> {
+    if row.id != coverage_bound_event_id(operation_id) {
+        return Err(CoverageAuthorityEnvelopeError::WrongId);
+    }
+    if row.event_type != EVENT_TYPE_COVERAGE_BOUND {
+        return Err(CoverageAuthorityEnvelopeError::WrongEventType);
+    }
+    if row.run_id.is_some() {
+        return Err(CoverageAuthorityEnvelopeError::RunIdNotNull);
+    }
+    if row.resume_source.is_some() {
+        return Err(CoverageAuthorityEnvelopeError::ResumeSourceNotNull);
+    }
+    if row.source != COVERAGE_SOURCE {
+        return Err(CoverageAuthorityEnvelopeError::WrongSource);
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// Stage A / Stage B split (E2A closure REPAIR 3). Stage A -- authority
+// presence and envelope -- requires no current assignment, runtime binding,
+// strategy registry, grace configuration, provider registry, or instrument
+// registry: it is exactly "does a correctly-shaped authority event exist for
+// this operation, and what does it durably say." Stage B -- current-policy
+// comparison -- runs only after Stage A succeeds, using the one loaded typed
+// authority value Stage A already parsed; it is never re-read or re-parsed
+// through a second algorithm.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, PartialEq)]
+// Called once per adapter/coordinator tick, never in a hot per-row loop;
+// boxing the payload would only add an allocation for no measurable benefit
+// here.
+#[allow(clippy::large_enum_variant)]
+pub enum CoverageAuthorityEnvelopeCheck {
+    /// Row exists, envelope is exactly correct, detail parsed without error,
+    /// and the parsed payload's own `operation_id` matches. This is the only
+    /// variant carrying a usable authority value.
+    Present(CoverageBoundDetail),
+    /// No exact-id row exists.
+    NotBound,
+    /// A row exists with a correct envelope, but its `detail` failed to
+    /// parse (malformed JSON, duplicate/unknown/missing/wrong-typed field,
+    /// or an unknown schema version).
+    Unreadable,
+    /// A row exists but its envelope (id/event_type/source/run_id/
+    /// resume_source) does not match the exact shape this event type
+    /// requires, or its parsed payload's own `operation_id` disagrees with
+    /// the operation it is stored under.
+    Invalid,
+}
+
+/// Stage A: fetch the exact-id row for `operation_id`, validate its complete
+/// envelope, parse its `detail` with the duplicate-safe typed parser, and
+/// verify the parsed payload's own `operation_id` agrees with the row it was
+/// found under. Read-only -- never writes. Requires no policy resolution of
+/// any kind; a caller with only `operation_id` in hand can run this stage.
+pub async fn check_coverage_authority_envelope(
+    pool: &PgPool,
+    operation_id: Uuid,
+) -> anyhow::Result<CoverageAuthorityEnvelopeCheck> {
+    let id = coverage_bound_event_id(operation_id);
+    let Some(row) = mqk_db::fetch_autonomous_session_event_by_id(pool, &id).await? else {
+        return Ok(CoverageAuthorityEnvelopeCheck::NotBound);
+    };
+    if validate_coverage_authority_envelope(operation_id, &row).is_err() {
+        return Ok(CoverageAuthorityEnvelopeCheck::Invalid);
+    }
+    match parse_coverage_bound_detail(&row.detail) {
+        Err(_) => Ok(CoverageAuthorityEnvelopeCheck::Unreadable),
+        Ok(existing) if existing.operation_id != operation_id => {
+            Ok(CoverageAuthorityEnvelopeCheck::Invalid)
+        }
+        Ok(existing) => Ok(CoverageAuthorityEnvelopeCheck::Present(existing)),
+    }
+}
 
 #[derive(Debug, Clone, PartialEq)]
 // Called once per coordinator tick, never in a hot per-row loop; boxing the
@@ -609,26 +674,31 @@ pub enum CoverageAuthorityEnsureResult {
     Bound(CoverageBoundDetail),
     /// The already-bound row's semantic payload disagrees with `fresh`.
     Conflict,
-    /// Missing, unparseable, or unreadable after a write attempt.
+    /// Missing, envelope-invalid, unparseable, or unreadable after a write
+    /// attempt.
     Unreadable,
 }
 
 /// Attempt to bind `fresh` as the operation's coverage authority: insert
 /// (idempotent, `ON CONFLICT (id) DO NOTHING`), then perform one
-/// authoritative exact-id re-read. Never reports success merely because the
-/// insert call returned `Ok(())` -- only the re-read decides. A write error
-/// is swallowed here (never propagated as a hard failure) because the
-/// re-read alone determines committed truth, exactly as the write-failure/
-/// uncertain-commit contract requires; a DB error on the re-read itself
-/// propagates, since no authority claim can be made without it.
+/// authoritative exact-id re-read through the same Stage A envelope
+/// validator every other authority path uses. Never reports success merely
+/// because the insert call returned `Ok(())` -- only the re-read decides,
+/// and that re-read must pass complete envelope validation, duplicate-safe
+/// parsing, and operation-id verification before semantic equality is even
+/// considered. A write error is swallowed here (never propagated as a hard
+/// failure) because the re-read alone determines committed truth, exactly as
+/// the write-failure/uncertain-commit contract requires; a DB error on the
+/// re-read itself propagates, since no authority claim can be made without
+/// it. `ON CONFLICT (id) DO NOTHING` means the original row already present
+/// under this id is never overwritten by this or any later call.
 pub async fn write_and_confirm_coverage_authority(
     pool: &PgPool,
     fresh: &CoverageBoundDetail,
     ts_utc: DateTime<Utc>,
 ) -> anyhow::Result<CoverageAuthorityEnsureResult> {
-    let id = coverage_bound_event_id(fresh.operation_id);
     let row = mqk_db::AutonomousSessionEventRow {
-        id: id.clone(),
+        id: coverage_bound_event_id(fresh.operation_id),
         ts_utc,
         event_type: EVENT_TYPE_COVERAGE_BOUND.to_string(),
         resume_source: None,
@@ -638,18 +708,14 @@ pub async fn write_and_confirm_coverage_authority(
     };
     let _ = mqk_db::persist_autonomous_session_event(pool, &row).await;
 
-    match mqk_db::fetch_autonomous_session_event_by_id(pool, &id).await? {
-        None => Ok(CoverageAuthorityEnsureResult::Unreadable),
-        Some(existing_row) => match parse_coverage_bound_detail(&existing_row.detail) {
-            Err(_) => Ok(CoverageAuthorityEnsureResult::Unreadable),
-            Ok(existing) if existing.operation_id != fresh.operation_id => {
-                Ok(CoverageAuthorityEnsureResult::Unreadable)
-            }
-            Ok(existing) if &existing == fresh => {
-                Ok(CoverageAuthorityEnsureResult::Bound(existing))
-            }
-            Ok(_existing) => Ok(CoverageAuthorityEnsureResult::Conflict),
-        },
+    match check_coverage_authority_envelope(pool, fresh.operation_id).await? {
+        CoverageAuthorityEnvelopeCheck::NotBound
+        | CoverageAuthorityEnvelopeCheck::Unreadable
+        | CoverageAuthorityEnvelopeCheck::Invalid => Ok(CoverageAuthorityEnsureResult::Unreadable),
+        CoverageAuthorityEnvelopeCheck::Present(existing) if &existing == fresh => {
+            Ok(CoverageAuthorityEnsureResult::Bound(existing))
+        }
+        CoverageAuthorityEnvelopeCheck::Present(_) => Ok(CoverageAuthorityEnsureResult::Conflict),
     }
 }
 
@@ -666,23 +732,23 @@ pub enum CoverageAuthorityCheck {
     Conflict,
 }
 
-/// Read-only exact-id lookup plus parse/identity/semantic verification --
-/// never writes. The completed-bar adapter's per-tick authority gate.
+/// Stage B, composed with Stage A for callers that already have a `fresh`
+/// payload in hand: read-only exact-id lookup plus envelope validation,
+/// duplicate-safe parse, and identity verification (Stage A), then -- only
+/// once Stage A succeeds -- semantic comparison against `fresh` (Stage B).
+/// Never writes. The completed-bar adapter's and coordinator's per-tick
+/// authority gate.
 pub async fn check_coverage_authority(
     pool: &PgPool,
     operation_id: Uuid,
     fresh: &CoverageBoundDetail,
 ) -> anyhow::Result<CoverageAuthorityCheck> {
-    let id = coverage_bound_event_id(operation_id);
-    let Some(row) = mqk_db::fetch_autonomous_session_event_by_id(pool, &id).await? else {
-        return Ok(CoverageAuthorityCheck::NotBound);
-    };
-    match parse_coverage_bound_detail(&row.detail) {
-        Err(_) => Ok(CoverageAuthorityCheck::Unreadable),
-        Ok(existing) => {
-            if existing.operation_id != operation_id {
-                Ok(CoverageAuthorityCheck::Invalid)
-            } else if existing == *fresh {
+    match check_coverage_authority_envelope(pool, operation_id).await? {
+        CoverageAuthorityEnvelopeCheck::NotBound => Ok(CoverageAuthorityCheck::NotBound),
+        CoverageAuthorityEnvelopeCheck::Unreadable => Ok(CoverageAuthorityCheck::Unreadable),
+        CoverageAuthorityEnvelopeCheck::Invalid => Ok(CoverageAuthorityCheck::Invalid),
+        CoverageAuthorityEnvelopeCheck::Present(existing) => {
+            if existing == *fresh {
                 Ok(CoverageAuthorityCheck::Compatible(existing))
             } else {
                 Ok(CoverageAuthorityCheck::Conflict)

@@ -406,6 +406,23 @@ pub async fn tick_autonomous_daily_coordinator(
     };
 
     // AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E2A-COVERAGE-ANCHOR-AND-RUN-
+    // LINEAGE-FOUNDATION closure (REPAIR 6): deterministic two-step
+    // rendezvous for the coordinator/adapter live concurrency proof only.
+    // `operation_visible` is notified immediately after `create_or_recover`
+    // above has durably committed the operation row -- and before this tick
+    // proceeds to bind or verify the coverage authority -- exactly the
+    // window a concurrently scheduled completed-bar adapter tick could
+    // observe the operation row before this coordinator tick has bound its
+    // authority. The coordinator then awaits `proceed` before continuing.
+    // Production never installs this hook (`AppState`'s hook slot defaults
+    // to `None`), so the production cost is exactly one uncontended async
+    // mutex lock per coordinator tick, and the coordinator never waits.
+    if let Some(hook) = state.coverage_authority_pre_bind_test_hook_for_test().await {
+        hook.operation_visible.notify_waiters();
+        hook.proceed.notified().await;
+    }
+
+    // AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E2A-COVERAGE-ANCHOR-AND-RUN-
     // LINEAGE-FOUNDATION (§6a): ensure the operation-scoped coverage anchor
     // exists (or matches) before this tick may proceed to `dispatch_by_state`
     // -- runs for both newly created and recovered operations, strictly
@@ -770,6 +787,22 @@ async fn create_or_recover(
 // AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E2A-COVERAGE-ANCHOR-AND-RUN-LINEAGE-
 // FOUNDATION (§6a): coordinator ensure-authority seam.
 // ---------------------------------------------------------------------------
+
+/// E2A closure REPAIR 6: deterministic two-step rendezvous for the real
+/// coordinator/adapter inter-task concurrency proof only (mirrors
+/// [`super::autonomous_completed_bar_driver::AutonomousCompletedBarPostClaimTestHook`]'s
+/// established pattern). `operation_visible` is notified immediately after
+/// `create_or_recover` commits the operation row and before this tick binds
+/// or verifies the coverage authority; the coordinator then awaits
+/// `proceed` before continuing. Production never installs this hook
+/// (`AppState`'s hook slot defaults to `None`), so the production cost is
+/// exactly one uncontended async mutex lock per coordinator tick, and the
+/// coordinator never waits.
+#[derive(Default)]
+pub struct AutonomousCoverageAuthorityPreBindTestHook {
+    pub operation_visible: tokio::sync::Notify,
+    pub proceed: tokio::sync::Notify,
+}
 
 /// Ensure the operation-scoped `autonomous_daily_coverage_bound` authority
 /// exists and matches this tick's freshly-resolved policy, before the

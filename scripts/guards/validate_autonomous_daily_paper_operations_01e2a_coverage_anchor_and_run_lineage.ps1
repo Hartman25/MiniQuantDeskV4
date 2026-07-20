@@ -10,16 +10,24 @@
 # connection, no daemon start, no cargo/npm build or test -- pure text/source
 # validation only.
 #
+# AUTHORITY-ENVELOPE-GATE-ORDERING-AND-CONCURRENCY-CLOSURE (E2A closure)
+# strengthens this guard with checks [12]-[15] below, covering the complete
+# envelope validator, the duplicate-key-rejecting parser, the adapter's
+# corrected gate ordering (authority lookup strictly before assignment/
+# identity resolution), and the live coordinator/adapter concurrency proof.
+#
 # Checks:
 #   [1]  The coverage-bound event model/id/type/source constants exist.
 #   [2]  `bound_at_utc` never appears in the semantic payload struct or its
 #        serializer/parser (the bind instant is the event row's own `ts_utc`,
 #        excluded from semantic equality).
 #   [3]  The write/re-read/replay/conflict helper performs an exact-id
-#        re-read after every write attempt -- never trusts a bare `Ok(())`.
-#   [4]  The completed-bar adapter's authority gate runs strictly before any
-#        provider-client/registry construction, and no driver invocation is
-#        reachable without it.
+#        re-read (via the Stage A envelope validator) after every write
+#        attempt -- never trusts a bare `Ok(())`.
+#   [4]  The completed-bar adapter's authority gate (Stage A envelope lookup)
+#        runs strictly before any assignment/runtime-binding resolution and
+#        before any provider-client/registry construction, and no driver
+#        invocation is reachable without it.
 #   [5]  The coordinator's ensure-authority seam runs before state dispatch.
 #   [6]  A prior-activity (non-pristine) operation can never have its anchor
 #        fabricated -- the pristine check gates every bind attempt.
@@ -31,7 +39,21 @@
 #        writer, a `completed*` transition call, or a classifier module) was
 #        introduced by this patch's touched files.
 #   [11] README.md / README_TECHNICAL.md never claim Phase E, Bundle 3, an
-#        unattended soak, or live-capital readiness as complete/started.
+#        unattended soak, or live-capital readiness as complete/started, and
+#        never mark E2A itself as accepted/complete.
+#   [12] The complete durable event-envelope validator checks event_type,
+#        source, run_id IS NULL, and resume_source IS NULL (not merely the
+#        deterministic id and JSON detail payload).
+#   [13] The JSON parser rejects duplicate fields deterministically (a typed,
+#        `deny_unknown_fields` wire struct -- never a `serde_json::Value`
+#        object map, which silently collapses a literal duplicate key).
+#   [14] The adapter's Stage A authority envelope lookup precedes assignment/
+#        identity resolution (`build_multi_symbol_runtime_config_from_env`),
+#        not merely provider/registry construction -- a missing authority
+#        must produce the quiet not-bound path even when the local
+#        environment/configuration is malformed.
+#   [15] A live coordinator/adapter concurrency-proof rendezvous hook and a
+#        `tokio::join!`-driven interleaving test both exist.
 #
 # Usage:
 #   powershell -ExecutionPolicy Bypass -File scripts\guards\validate_autonomous_daily_paper_operations_01e2a_coverage_anchor_and_run_lineage.ps1
@@ -155,21 +177,21 @@ if ($null -ne $SerializeFnBody) {
 Test-ContentContains "the payload struct derives PartialEq (the semantic-equality mechanism)" $CoverageContent "#[derive(Debug, Clone, PartialEq)]" | Out-Null
 
 Write-Host ""
-Show-Info "--- [3] Exact-id re-read after every write attempt ---"
+Show-Info "--- [3] Exact-id re-read after every write attempt, through the Stage A envelope validator ---"
 $EnsureFnBody = Get-ContentBetween -Content $CoverageContent `
     -StartNeedle "pub async fn write_and_confirm_coverage_authority(" `
-    -EndNeedle "`r`npub struct CoverageAuthorityCheck"
+    -EndNeedle "`r`n#[derive(Debug, Clone, PartialEq)]"
 if ($null -eq $EnsureFnBody) {
     $script:Violations++
     Show-Red "  FAIL -- could not locate write_and_confirm_coverage_authority's body"
 } else {
-    Test-ContentContains "the write path re-reads by exact id after the insert attempt" $EnsureFnBody "fetch_autonomous_session_event_by_id(pool, &id)" | Out-Null
     Test-ContentContains "the write path never trusts a bare persist Ok(()) alone" $EnsureFnBody "let _ = mqk_db::persist_autonomous_session_event(pool, &row).await;" | Out-Null
+    Test-ContentContains "the write path re-reads through the shared Stage A envelope validator" $EnsureFnBody "check_coverage_authority_envelope(pool, fresh.operation_id)" | Out-Null
 }
 Test-ContentContains "mqk-db exposes an exact-id read for the session event store" $CoverageContent "mqk_db::fetch_autonomous_session_event_by_id" | Out-Null
 
 Write-Host ""
-Show-Info "--- [4] Adapter authority gate precedes provider/registry construction ---"
+Show-Info "--- [4] Adapter authority gate precedes assignment resolution and provider/registry construction ---"
 $TickFnBody = Get-ContentBetween -Content $TaskContent `
     -StartNeedle "pub async fn tick_autonomous_completed_bar_driver_from_state(" `
     -EndNeedle "`r`n/// D3.13"
@@ -177,13 +199,20 @@ if ($null -eq $TickFnBody) {
     $script:Violations++
     Show-Red "  FAIL -- could not locate tick_autonomous_completed_bar_driver_from_state's body"
 } else {
-    $GateIdx = $TickFnBody.IndexOf("check_coverage_authority(", [System.StringComparison]::OrdinalIgnoreCase)
+    $GateIdx = $TickFnBody.IndexOf("check_coverage_authority_envelope(", [System.StringComparison]::OrdinalIgnoreCase)
+    $AssignmentIdx = $TickFnBody.IndexOf("build_multi_symbol_runtime_config_from_env()", [System.StringComparison]::OrdinalIgnoreCase)
     $InstrumentsIdx = $TickFnBody.IndexOf("load_driver_instruments(", [System.StringComparison]::OrdinalIgnoreCase)
-    if ($GateIdx -ge 0 -and $InstrumentsIdx -ge 0 -and $GateIdx -lt $InstrumentsIdx) {
-        Show-Green "  OK -- check_coverage_authority runs before load_driver_instruments"
+    if ($GateIdx -ge 0 -and $AssignmentIdx -ge 0 -and $GateIdx -lt $AssignmentIdx) {
+        Show-Green "  OK -- check_coverage_authority_envelope runs before assignment resolution"
     } else {
         $script:Violations++
-        Show-Red "  FAIL -- the coverage-authority check does not precede load_driver_instruments (gate=$GateIdx, instruments=$InstrumentsIdx)"
+        Show-Red "  FAIL -- the coverage-authority envelope gate does not precede assignment resolution (gate=$GateIdx, assignment=$AssignmentIdx)"
+    }
+    if ($GateIdx -ge 0 -and $InstrumentsIdx -ge 0 -and $GateIdx -lt $InstrumentsIdx) {
+        Show-Green "  OK -- check_coverage_authority_envelope runs before load_driver_instruments"
+    } else {
+        $script:Violations++
+        Show-Red "  FAIL -- the coverage-authority envelope gate does not precede load_driver_instruments (gate=$GateIdx, instruments=$InstrumentsIdx)"
     }
     Test-ContentContains "the adapter has a typed CoverageAuthorityUnavailable outcome" $TickFnBody "CoverageAuthorityUnavailable" | Out-Null
     Test-ContentContains "not-bound is a quiet no-op with no lifecycle mutation" $TaskContent "REASON_COVERAGE_AUTHORITY_NOT_BOUND" | Out-Null
@@ -226,8 +255,8 @@ Test-ContentContains "coordinator only binds after confirming Pristine" $Coordin
 Write-Host ""
 Show-Info "--- [7] Mid-day policy drift is compared before the driver runs ---"
 Test-ContentContains "adapter resolves current policy on every tick" $TaskContent "resolve_current_coverage_policy_inputs(" | Out-Null
-Test-ContentContains "only an exact semantic match reports Compatible" $CoverageContent "else if existing == *fresh {" | Out-Null
-Test-ContentContains "a semantic mismatch reports Conflict, not Compatible" $CoverageContent "Ok(CoverageAuthorityCheck::Conflict)" | Out-Null
+Test-ContentContains "semantic comparison against the Stage A authority value is explicit" $TaskContent "if bound_authority != fresh_coverage {" | Out-Null
+Test-ContentContains "a semantic mismatch reports the conflict reason code, not a silent pass" $TaskContent "REASON_COVERAGE_AUTHORITY_CONFLICT" | Out-Null
 
 Write-Host ""
 Show-Info "--- [8] Run-lineage query never uses SELECT DISTINCT; no general list cap ---"
@@ -249,6 +278,7 @@ Test-ContentContains "the validator detects a current-run mismatch" $DbOperation
 
 Write-Host ""
 Show-Info "--- [9] New E2A scenario test file exists ---"
+$E2ATestContent = $null
 if (Test-FileExists "E2A scenario test file" $PathE2ATest) {
     $E2ATestContent = Get-Content -Raw -Path $PathE2ATest
     if ($E2ATestContent.Length -lt 2000) {
@@ -282,7 +312,7 @@ foreach ($ForbiddenPath in @($PathCoverageRs, $PathCoordinatorRs, $PathTaskRs, $
 }
 
 Write-Host ""
-Show-Info "--- [11] README truth: Phase E / Bundle 3 / soak / live-capital not overclaimed ---"
+Show-Info "--- [11] README truth: Phase E / Bundle 3 / soak / live-capital / E2A-accepted not overclaimed ---"
 $ReadmeContent = $null
 if (Test-FileExists "README.md" $PathReadme) {
     $ReadmeContent = Get-Content -Raw -Path $PathReadme
@@ -298,6 +328,8 @@ $ForbiddenReadmeClaims = @(
     "Bundle 3: CLOSED",
     "Bundle 3 is complete",
     "E2A: ACCEPTED",
+    "E2A is complete",
+    "E2A: COMPLETE",
     "E2B implemented",
     "outcome classifier implemented",
     "soak has started",
@@ -314,8 +346,66 @@ foreach ($Doc in @(@{Name = "README.md"; Content = $ReadmeContent}, @{Name = "RE
     }
 }
 Test-ContentContains "README.md records E1 as accepted" $ReadmeContent "E1 is now accepted" | Out-Null
-Test-ContentContains "README.md records E2A as implementation complete awaiting acceptance" $ReadmeContent "E2A implementation is complete, awaiting independent" | Out-Null
+Test-ContentContains "README.md records E2A repair as implementation complete awaiting acceptance" $ReadmeContent "E2A repair implementation is complete, awaiting independent" | Out-Null
 Test-ContentContains "README_TECHNICAL.md records E1 as accepted" $ReadmeTechContent "E1 is accepted complete" | Out-Null
+
+Write-Host ""
+Show-Info "--- [12] Complete envelope validator checks event_type/source/run_id NULL/resume_source NULL ---"
+$EnvelopeFnBody = Get-ContentBetween -Content $CoverageContent `
+    -StartNeedle "pub fn validate_coverage_authority_envelope(" `
+    -EndNeedle "`r`n}"
+if ($null -eq $EnvelopeFnBody) {
+    $script:Violations++
+    Show-Red "  FAIL -- could not locate validate_coverage_authority_envelope's body"
+} else {
+    Test-ContentContains "envelope validator checks the exact deterministic id" $EnvelopeFnBody "row.id != coverage_bound_event_id(operation_id)" | Out-Null
+    Test-ContentContains "envelope validator checks event_type" $EnvelopeFnBody "row.event_type != EVENT_TYPE_COVERAGE_BOUND" | Out-Null
+    Test-ContentContains "envelope validator checks run_id IS NULL" $EnvelopeFnBody "row.run_id.is_some()" | Out-Null
+    Test-ContentContains "envelope validator checks resume_source IS NULL" $EnvelopeFnBody "row.resume_source.is_some()" | Out-Null
+    Test-ContentContains "envelope validator checks source" $EnvelopeFnBody "row.source != COVERAGE_SOURCE" | Out-Null
+}
+Test-ContentContains "envelope validation is used by the Stage A read path" $CoverageContent "validate_coverage_authority_envelope(operation_id, &row)" | Out-Null
+
+Write-Host ""
+Show-Info "--- [13] Duplicate-key-rejecting typed parser (never a serde_json::Value object map) ---"
+Test-ContentContains "a typed wire struct exists for the coverage-bound detail payload" $CoverageContent "struct CoverageBoundDetailWire" | Out-Null
+Test-ContentContains "the wire struct derives Deserialize" $CoverageContent "#[derive(Debug, Deserialize)]" | Out-Null
+Test-ContentContains "the wire struct denies unknown fields" $CoverageContent "#[serde(deny_unknown_fields)]" | Out-Null
+$ParseFnBody = Get-ContentBetween -Content $CoverageContent `
+    -StartNeedle "pub fn parse_coverage_bound_detail(" `
+    -EndNeedle "`r`nfn validate_semantic_invariants"
+if ($null -eq $ParseFnBody) {
+    $script:Violations++
+    Show-Red "  FAIL -- could not locate parse_coverage_bound_detail's body"
+} else {
+    Test-ContentContains "the parser decodes directly into the typed wire struct" $ParseFnBody "serde_json::from_str(raw)" | Out-Null
+    Test-ContentDoesNotContain "the parser never decodes into a raw serde_json::Value object map" $ParseFnBody "serde_json::Value =" | Out-Null
+}
+
+Write-Host ""
+Show-Info "--- [14] Adapter authority lookup precedes identity resolution even under malformed local config ---"
+if ($null -ne $TickFnBody) {
+    $RuntimeCtxIdx = $TickFnBody.IndexOf("resolve_autonomous_runtime_context(state)", [System.StringComparison]::OrdinalIgnoreCase)
+    $GateIdx2 = $TickFnBody.IndexOf("check_coverage_authority_envelope(", [System.StringComparison]::OrdinalIgnoreCase)
+    if ($GateIdx2 -ge 0 -and $RuntimeCtxIdx -ge 0 -and $GateIdx2 -lt $RuntimeCtxIdx) {
+        Show-Green "  OK -- check_coverage_authority_envelope runs before runtime-binding resolution"
+    } else {
+        $script:Violations++
+        Show-Red "  FAIL -- the coverage-authority envelope gate does not precede runtime-binding resolution (gate=$GateIdx2, runtime_ctx=$RuntimeCtxIdx)"
+    }
+}
+Test-ContentContains "Stage A is documented as running strictly before assignment/runtime/policy resolution" $TaskContent "strictly before any assignment/runtime-binding/policy resolution" | Out-Null
+
+Write-Host ""
+Show-Info "--- [15] Live coordinator/adapter concurrency-proof rendezvous exists ---"
+Test-ContentContains "a deterministic pre-bind rendezvous test hook is defined" $CoordinatorContent "pub struct AutonomousCoverageAuthorityPreBindTestHook" | Out-Null
+Test-ContentContains "the coordinator tick installs the rendezvous point after create_or_recover" $CoordinatorContent "coverage_authority_pre_bind_test_hook_for_test().await" | Out-Null
+if ($null -ne $E2ATestContent) {
+    Test-ContentContains "the test file drives a live coordinator/adapter interleaving with tokio::join!" $E2ATestContent "tokio::join!(coordinator_fut, adapter_fut)" | Out-Null
+    Test-ContentContains "the test file names the live interleaving proof" $E2ATestContent "async fn f04_live_coordinator_and_adapter_interleaving_proves_zero_side_effects_while_paused" | Out-Null
+    Test-ContentContains "the test file proves duplicate JSON keys are rejected" $E2ATestContent "fn b06_parse_rejects_duplicate_json_keys" | Out-Null
+    Test-ContentContains "the test file proves the write/re-read path tamper-checks every envelope field" $E2ATestContent "assert_tampered_row_rejected_and_preserved" | Out-Null
+}
 
 Write-Host ""
 Show-Info "--- Ledger truth ---"

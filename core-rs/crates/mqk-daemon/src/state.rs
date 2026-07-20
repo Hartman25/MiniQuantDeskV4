@@ -455,6 +455,19 @@ pub struct AppState {
             Option<Arc<autonomous_completed_bar_driver::AutonomousCompletedBarPostClaimTestHook>>,
         >,
     >,
+    /// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E2A-COVERAGE-ANCHOR-AND-RUN-
+    /// LINEAGE-FOUNDATION closure REPAIR 6: test-only rendezvous hook for
+    /// the coordinator's post-`create_or_recover`/pre-coverage-authority
+    /// concurrency proof (see
+    /// [`autonomous_daily_coordinator::AutonomousCoverageAuthorityPreBindTestHook`]).
+    /// `None` in production and for every test that does not explicitly
+    /// install it; read once per coordinator tick, never blocking when
+    /// absent.
+    coverage_authority_pre_bind_test_hook: Arc<
+        Mutex<
+            Option<Arc<autonomous_daily_coordinator::AutonomousCoverageAuthorityPreBindTestHook>>,
+        >,
+    >,
     /// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D4-EVALUATION-LINEAGE-AND-
     /// AUTONOMOUS-PREOPEN-CLOSURE-01 REPAIR 4 test seam: when `true`,
     /// `claim_and_dispatch_observed_bar` simulates a
@@ -1348,6 +1361,7 @@ impl AppState {
             native_strategy_bootstrap: Arc::new(Mutex::new(None)),
             pending_strategy_bar_input: Arc::new(Mutex::new(None)),
             completed_bar_post_claim_test_hook: Arc::new(Mutex::new(None)),
+            coverage_authority_pre_bind_test_hook: Arc::new(Mutex::new(None)),
             completed_bar_completion_fault_test_hook: Arc::new(AtomicBool::new(false)),
             completed_bar_task_clock_override: Arc::new(Mutex::new(None)),
             last_bar_input_ts: Arc::new(AtomicI64::new(0)),
@@ -2146,6 +2160,30 @@ operator_reconcile_or_repair_required"
         &self,
     ) -> Option<Arc<autonomous_completed_bar_driver::AutonomousCompletedBarPostClaimTestHook>> {
         self.completed_bar_post_claim_test_hook.lock().await.clone()
+    }
+
+    /// E2A closure REPAIR 6: install (or clear) the coordinator's post-
+    /// `create_or_recover`/pre-coverage-authority concurrency-proof
+    /// rendezvous hook. Test seam only; never called in production.
+    pub async fn set_coverage_authority_pre_bind_test_hook_for_test(
+        &self,
+        hook: Option<Arc<autonomous_daily_coordinator::AutonomousCoverageAuthorityPreBindTestHook>>,
+    ) {
+        *self.coverage_authority_pre_bind_test_hook.lock().await = hook;
+    }
+
+    /// E2A closure REPAIR 6: read the currently installed pre-bind
+    /// rendezvous hook, if any. Called once per coordinator tick,
+    /// immediately after `create_or_recover` commits the operation row;
+    /// `None` in production and in every test that has not explicitly
+    /// installed one.
+    pub(crate) async fn coverage_authority_pre_bind_test_hook_for_test(
+        &self,
+    ) -> Option<Arc<autonomous_daily_coordinator::AutonomousCoverageAuthorityPreBindTestHook>> {
+        self.coverage_authority_pre_bind_test_hook
+            .lock()
+            .await
+            .clone()
     }
 
     /// D4 REPAIR 4: install (or clear) the completion-store-fault test seam.

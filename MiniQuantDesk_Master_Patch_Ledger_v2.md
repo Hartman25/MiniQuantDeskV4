@@ -14325,3 +14325,161 @@ NEXT AFTER E2A ACCEPTANCE: E2B — strict outcome classifier and finalization CA
 unattended 10-20-session soak: NOT STARTED
 live capital: NOT READY
 ```
+
+## AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E2A-AUTHORITY-ENVELOPE-GATE-ORDERING-AND-CONCURRENCY-CLOSURE
+
+Patch ID: `AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E2A-AUTHORITY-ENVELOPE-GATE-ORDERING-AND-CONCURRENCY-CLOSURE`
+Bundle: `AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-COMBINED`, Phase E2A (closure repair).
+
+Starting HEAD: `6c77b6f1de3f7fd1075fa8a7e3410b593d3d3253` (`daemon: bind autonomous coverage
+authority`) — the E2A implementation commit above. Preserved verbatim: D1–D4/Phase D accepted complete
+in full; **E1 is accepted complete**; E2A's durable evidence foundation as implemented above, repaired
+in place below rather than reimplemented.
+
+This repair closes six source-proven defects left in the E2A implementation, found by a fresh, targeted
+re-read of `autonomous_daily_coverage_authority.rs` and `autonomous_completed_bar_task.rs`. It does not
+begin E2B, does not add an outcome classifier or finalization behavior, does not write
+`outcome`/`finalized_at_utc`, and does not add a migration, API route, or GUI surface.
+
+**Repairs:**
+
+1. **Complete durable event-envelope authority.** A row is not authoritative merely because its
+   deterministic id and JSON detail payload happen to match. `validate_coverage_authority_envelope`
+   (new, shared) validates every envelope column — exact `id`, `event_type ==
+   autonomous_daily_coverage_bound`, `source == mqk-daemon.autonomous_daily_coordinator`, `run_id IS
+   NULL`, `resume_source IS NULL` — used identically by the write/re-read path, the read-only Stage A
+   authority check, and the new duplicate/tamper test coverage. Previously only the payload's own
+   `operation_id` field was cross-checked; the row-level envelope columns were never inspected at all.
+2. **Duplicate-key-rejecting JSON parser.** `parse_coverage_bound_detail` no longer decodes into a
+   `serde_json::Value` object map (whose `.len()`/key-presence check cannot distinguish a genuine
+   single occurrence of each key from a duplicated-then-collapsed one). It now decodes directly into a
+   typed `CoverageBoundDetailWire` struct (`#[derive(Deserialize)]`, `#[serde(deny_unknown_fields)]`);
+   serde's own derived `visit_map` rejects a literal duplicate field the instant it is seen a second
+   time, before any value is converted.
+3. **Stage A / Stage B split.** `check_coverage_authority_envelope` (new) is authority presence and
+   envelope only — exact-id fetch, envelope validation, duplicate-safe parse, payload `operation_id`
+   verification — requiring no assignment, runtime binding, strategy registry, grace configuration,
+   provider registry, or instrument registry. `check_coverage_authority` (unchanged signature) now
+   composes Stage A with a Stage B semantic comparison against the one loaded authority value, never a
+   second re-read or re-parse.
+4. **Adapter gate ordering.** `tick_autonomous_completed_bar_driver_from_state` previously resolved
+   assignment/runtime-binding/policy configuration — and durably applied an `IdentityUnresolved`
+   blocker on any failure there — *before* ever checking whether a coverage authority existed at all.
+   Stage A now runs first, strictly before `build_multi_symbol_runtime_config_from_env` and
+   `resolve_autonomous_runtime_context`: a missing, unreadable, or envelope-invalid authority returns
+   `CoverageAuthorityUnavailable` with zero lifecycle mutation and zero attempt to resolve local
+   assignment/runtime configuration, so the quiet not-bound path holds even when the local environment
+   is itself malformed. Once Stage A proves a real, correctly shaped authority present, the existing
+   `IdentityUnresolved`/blocker behavior for assignment/runtime/policy failures is preserved unchanged.
+5. **Write/re-read verification.** `write_and_confirm_coverage_authority`'s re-read now goes through
+   `check_coverage_authority_envelope` (the same Stage A validator), so a row with any single tampered
+   envelope field (`event_type`/`source`/`run_id`/`resume_source`) or a tampered `detail.operation_id`
+   is rejected (`Unreadable`) without ever overwriting the original row (`ON CONFLICT (id) DO NOTHING`
+   already guaranteed this at the DB layer; the repair proves the read side no longer trusts such a row
+   either).
+6. **Live inter-task concurrency proof.** `AutonomousCoverageAuthorityPreBindTestHook` (new, mirroring
+   the existing D4.4 `AutonomousCompletedBarPostClaimTestHook` pattern) pauses the real coordinator tick
+   immediately after `create_or_recover` commits the operation row and before
+   `ensure_coverage_authority` begins; production never installs the hook (one uncontended async mutex
+   lock per tick). `f04_live_coordinator_and_adapter_interleaving_proves_zero_side_effects_while_paused`
+   drives the real coordinator tick and the real production adapter tick concurrently via
+   `tokio::join!`, proving the adapter observes `coverage_authority_not_bound` with zero lifecycle
+   mutation, zero dispatch claims, and zero bar observations while paused, then proves a normal tick
+   proceeds once released — resolving the prior implementation's stated known limitation (a
+   deterministic sequential reconstruction only, never a literal concurrent-task interleaving).
+
+**New test coverage** in `scenario_autonomous_daily_coverage_anchor_and_run_lineage_01.rs` (41 tests,
+up from 34): `b06` (duplicate-JSON-key rejection: schema_version, operation_id, local_symbol, each
+independently); `d05`–`d09` (five independent envelope-tamper cases: event_type, source, run_id,
+resume_source, detail.operation_id — each proven rejected and the original row preserved); `f04` (the
+live `tokio::join!` concurrency proof, plus a post-release ordinary-tick proof).
+
+**Fixture correction (source-aligned, no production-behavior change):**
+`scenario_autonomous_completed_bar_task_01.rs`'s
+`l04_identity_unresolved_degrades_durably_through_the_adapter` exercised "no strategy assignment env at
+all" to force assignment resolution failure. Since Stage A now runs before assignment resolution, that
+scenario can only be reached once a real authority is already bound; the fixture now sets the
+assignment env, binds a real coverage authority via `bind_coverage_authority_for_test`, then clears the
+env before the tick under test — the assertion (`IdentityUnresolved`, durable degrade to
+`manual_intervention_required`, reason `completed_bar_identity_unresolved`) is unchanged.
+
+**Internal review cycle:** one cycle. `f04`'s first draft used the same `now_utc` for both the
+coordinator tick and the concurrently-run adapter tick; the adapter's own relevant-operation lookup
+requires `now_utc` inside `[preopen_start_utc, postclose_finalize_utc]` for a fresh `awaiting_preopen`
+row, and the coordinator's own tick (correctly) used a before-preopen instant, so the adapter observed
+`NoRelevantOperation` instead of the intended `CoverageAuthorityUnavailable{not_bound}`. Corrected by
+giving the adapter task its own later `adapter_now` (the same post-preopen instant `f01`/`f02`/`f03`
+already use for the adapter side), while the coordinator task keeps its own `now_utc` — this is
+deterministic-logic testing of two independently-timestamped ticks, not a claim that both instants
+represent the same real moment.
+
+**Regression truth (`scenario_autonomous_completed_bar_driver_01`, required honest comparison):** 47/56
+pass on this repair's head, 9 fail (`DispatchClaimUnresolved{status:"failed"}` instead of
+`DispatchCompleted`). Reproduced identically — same 9 named tests, materially identical failure text —
+against the unmodified `3591064a` baseline via an isolated `git worktree` and a dedicated,
+uncontaminated Postgres database (`mqk_test_baseline`, dropped after use) rather than the shared
+port-5434 `mqk_test` database, after an initial comparison attempt against the shared database produced
+a spurious 44-failure result traced to a `_sqlx_migrations` checksum artifact from running two
+worktrees' migration sets against the same physical database (a Windows line-ending/checkout
+discrepancy, not a real regression) — confirmed pre-existing and unrelated to this repair, no
+E2A-modified production seam participates in either baseline run.
+
+**Regressions (each binary run alone, `--include-ignored --test-threads=1`, isolated test Postgres on
+port 5434):** `scenario_autonomous_daily_coverage_anchor_and_run_lineage_01` 41/41,
+`scenario_autonomous_completed_bar_task_01` 49/49 (including the `l04` fixture correction above),
+`scenario_autonomous_daily_session_coordinator_01` 48/48, `scenario_autonomous_daily_phase_d_integration_01`
+8/8, `scenario_daily_data_readiness_start_gate_01` 20/20 (untouched), `scenario_autonomous_daily_operation_store_01`
+(mqk-db) 26/26, `scenario_autonomous_daily_operation_lifecycle_01` (mqk-db) 36/36,
+`scenario_autonomous_daily_operation_data_evidence_01` (mqk-db) 9/9.
+`scenario_autonomous_completed_bar_driver_01` 47/56 — 9 pre-existing, unrelated failures per the
+regression truth above. Zero new failures anywhere in the required matrix.
+
+**Guards:** `validate_autonomous_daily_paper_operations_01e2a_coverage_anchor_and_run_lineage.ps1`
+(rewritten with four new checks — [12] complete envelope validation, [13] duplicate-key rejection, [14]
+adapter gate ordering ahead of identity resolution, [15] live concurrency-proof presence — all checks
+pass), `validate_autonomous_daily_paper_operations_01e_outcome_contract.ps1` pass (unmodified). **
+Migration:** none. **Format/lint:** `rustfmt --check` clean on every touched file; Clippy `-D warnings`
+clean on `mqk-daemon --lib` and the two touched test binaries; `cargo check -p mqk-db -p mqk-runtime -p
+mqk-daemon` clean (only the pre-existing `sqlx-postgres` future-incompat note); `git diff --check` /
+`git diff --cached --check` clean.
+
+**Files changed:** `MiniQuantDesk_Master_Patch_Ledger_v2.md`, `README.md`, `README_TECHNICAL.md`,
+`docs/specs/autonomous_daily_paper_operations_01e2a_coverage_anchor_and_run_lineage.md`,
+`scripts/guards/validate_autonomous_daily_paper_operations_01e2a_coverage_anchor_and_run_lineage.ps1`,
+`core-rs/crates/mqk-daemon/src/state.rs`,
+`core-rs/crates/mqk-daemon/src/state/autonomous_daily_coverage_authority.rs`,
+`core-rs/crates/mqk-daemon/src/state/autonomous_daily_coordinator.rs`,
+`core-rs/crates/mqk-daemon/src/state/autonomous_completed_bar_task.rs`,
+`core-rs/crates/mqk-daemon/tests/scenario_autonomous_daily_coverage_anchor_and_run_lineage_01.rs`,
+`core-rs/crates/mqk-daemon/tests/scenario_autonomous_completed_bar_task_01.rs` (one fixture corrected,
+per above). No `mqk-db` production file changed. No migration changed. No API route implemented. No GUI
+changed. No outcome classifier added. No finalization added.
+
+**Safety confirmation (E2A authority-envelope/gate-ordering/concurrency closure):**
+
+```text
+PROVIDER CALLS: no
+BROKER CALLS: no
+NETWORK CALLS: no
+REAL DAEMON STARTED: no
+PAPER ORDERS: no
+LIVE ORDERS: no
+PAPER DB TOUCHED: no
+PORT 5440 TOUCHED: no
+MIGRATION CHANGED: no
+API IMPLEMENTED: no
+GUI CHANGED: no
+OUTCOME CLASSIFIER ADDED: no
+FINALIZATION ADDED: no
+```
+
+```text
+E1: ACCEPTED — COMPLETE
+E2A repair: IMPLEMENTATION COMPLETE — AWAITING CHATGPT AND OPERATOR ACCEPTANCE
+E2B: NOT STARTED
+PHASE E: OPEN
+BUNDLE 3 (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-COMBINED): OPEN
+NEXT AFTER E2A ACCEPTANCE: E2B — strict outcome classifier and finalization CAS, only
+unattended 10-20-session soak: NOT STARTED
+live capital: NOT READY
+```

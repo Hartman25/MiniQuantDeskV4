@@ -260,13 +260,73 @@ pub async fn tick_autonomous_completed_bar_driver_from_state(
         );
     };
 
+    // AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E2A-COVERAGE-ANCHOR-AND-RUN-
+    // LINEAGE-FOUNDATION closure (REPAIR 4 — adapter gate ordering): Stage A
+    // of the mandatory per-tick coverage-authority prerequisite runs first,
+    // strictly before any assignment/runtime-binding/policy resolution.
+    // Required ordering: fetch operation (above) -> state-only mode
+    // short-circuit (above, cheap, non-authority-bearing) -> exact authority
+    // lookup + envelope validation + duplicate-safe parse + payload
+    // operation-id verification (this call) -> only then resolve
+    // assignment/runtime/policy metadata -> semantic comparison (Stage B,
+    // below) -> only then load/build any provider client or
+    // instrument/provider execution object. A missing, unreadable, or
+    // envelope-invalid authority is reported and returned here with zero
+    // lifecycle mutation and zero attempt to resolve assignment/runtime
+    // configuration at all — this remains true even when the local
+    // environment/configuration is malformed, since that resolution is never
+    // reached. No driver invocation, no provider-client construction, no
+    // provider call, no bar observation, no dispatch claim, no strategy
+    // evaluation happens before this gate resolves clean. The adapter never
+    // mutates operation lifecycle state for any coverage-authority outcome
+    // here -- durable fail-closed projection is coordinator-owned.
+    let stage_a = super::autonomous_daily_coverage_authority::check_coverage_authority_envelope(
+        &pool,
+        operation.operation_id,
+    )
+    .await?;
+    let bound_authority = match stage_a {
+        super::autonomous_daily_coverage_authority::CoverageAuthorityEnvelopeCheck::Present(
+            existing,
+        ) => existing,
+        super::autonomous_daily_coverage_authority::CoverageAuthorityEnvelopeCheck::NotBound => {
+            return Ok(
+                AutonomousCompletedBarProductionTickOutcome::CoverageAuthorityUnavailable {
+                    operation_id: operation.operation_id,
+                    reason_code:
+                        super::autonomous_daily_coverage_authority::REASON_COVERAGE_AUTHORITY_NOT_BOUND,
+                },
+            );
+        }
+        super::autonomous_daily_coverage_authority::CoverageAuthorityEnvelopeCheck::Unreadable => {
+            return Ok(
+                AutonomousCompletedBarProductionTickOutcome::CoverageAuthorityUnavailable {
+                    operation_id: operation.operation_id,
+                    reason_code:
+                        super::autonomous_daily_coverage_authority::REASON_COVERAGE_AUTHORITY_UNREADABLE,
+                },
+            );
+        }
+        super::autonomous_daily_coverage_authority::CoverageAuthorityEnvelopeCheck::Invalid => {
+            return Ok(
+                AutonomousCompletedBarProductionTickOutcome::CoverageAuthorityUnavailable {
+                    operation_id: operation.operation_id,
+                    reason_code:
+                        super::autonomous_daily_coverage_authority::REASON_COVERAGE_AUTHORITY_INVALID,
+                },
+            );
+        }
+    };
+
     // AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D3-SUPERVISOR-AND-CRITICAL-OUTCOME-
     // CLOSURE-01 (REPAIR 7): `IdentityUnresolved` and `RegistryUnavailable`
     // are non-recoverable manual/configuration blockers, not merely
     // process-local task outcomes — each is durably applied to the relevant
     // operation via the coordinator's shared critical-blocker edge before
     // being returned. Details are bounded static codes only (REPAIR 8);
-    // registry/filesystem payload text is never persisted.
+    // registry/filesystem payload text is never persisted. Reached only
+    // once Stage A above has proven a correctly-shaped authority event
+    // exists for this operation.
     let assignment_config = match crate::state::build_multi_symbol_runtime_config_from_env() {
         Ok(config) => config,
         Err(_err) => {
@@ -311,18 +371,6 @@ pub async fn tick_autonomous_completed_bar_driver_from_state(
     let runtime_binding_identity =
         derive_runtime_binding_identity(&runtime_context.effective_runtime_binding);
 
-    // AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E2A-COVERAGE-ANCHOR-AND-RUN-
-    // LINEAGE-FOUNDATION (§6a): mandatory per-tick coverage-authority
-    // prerequisite. Required ordering: fetch operation (above) -> state-only
-    // mode short-circuit (above, cheap, non-authority-bearing) -> resolve
-    // current policy/construct fresh payload -> exact coverage-event lookup
-    // and verification -> only then load/build any provider client or
-    // instrument/provider execution object (below). No driver invocation,
-    // no provider-client construction, no provider call, no bar
-    // observation, no dispatch claim, no strategy evaluation happens before
-    // this gate resolves clean. The adapter never mutates operation
-    // lifecycle state for any outcome here -- durable fail-closed
-    // projection is coordinator-owned.
     let readiness_context = daily_data_readiness::load_readiness_context_from_env();
 
     let policy =
@@ -390,50 +438,17 @@ pub async fn tick_autonomous_completed_bar_driver_from_state(
         );
     };
 
-    match super::autonomous_daily_coverage_authority::check_coverage_authority(
-        &pool,
-        operation.operation_id,
-        &fresh_coverage,
-    )
-    .await?
-    {
-        super::autonomous_daily_coverage_authority::CoverageAuthorityCheck::Compatible(_) => {}
-        super::autonomous_daily_coverage_authority::CoverageAuthorityCheck::NotBound => {
-            return Ok(
-                AutonomousCompletedBarProductionTickOutcome::CoverageAuthorityUnavailable {
-                    operation_id: operation.operation_id,
-                    reason_code:
-                        super::autonomous_daily_coverage_authority::REASON_COVERAGE_AUTHORITY_NOT_BOUND,
-                },
-            );
-        }
-        super::autonomous_daily_coverage_authority::CoverageAuthorityCheck::Unreadable => {
-            return Ok(
-                AutonomousCompletedBarProductionTickOutcome::CoverageAuthorityUnavailable {
-                    operation_id: operation.operation_id,
-                    reason_code:
-                        super::autonomous_daily_coverage_authority::REASON_COVERAGE_AUTHORITY_UNREADABLE,
-                },
-            );
-        }
-        super::autonomous_daily_coverage_authority::CoverageAuthorityCheck::Invalid => {
-            return Ok(
-                AutonomousCompletedBarProductionTickOutcome::CoverageAuthorityUnavailable {
-                    operation_id: operation.operation_id,
-                    reason_code:
-                        super::autonomous_daily_coverage_authority::REASON_COVERAGE_AUTHORITY_INVALID,
-                },
-            );
-        }
-        super::autonomous_daily_coverage_authority::CoverageAuthorityCheck::Conflict => {
-            return Ok(
-                AutonomousCompletedBarProductionTickOutcome::CoverageAuthorityUnavailable {
-                    operation_id: operation.operation_id,
-                    reason_code:
-                        super::autonomous_daily_coverage_authority::REASON_COVERAGE_AUTHORITY_CONFLICT,
-                },
-            );
-        }
+    // Stage B: semantic comparison against the exact authority value Stage A
+    // already loaded and validated above -- never re-read or re-parsed
+    // through a second algorithm.
+    if bound_authority != fresh_coverage {
+        return Ok(
+            AutonomousCompletedBarProductionTickOutcome::CoverageAuthorityUnavailable {
+                operation_id: operation.operation_id,
+                reason_code:
+                    super::autonomous_daily_coverage_authority::REASON_COVERAGE_AUTHORITY_CONFLICT,
+            },
+        );
     }
 
     let instruments = match load_driver_instruments(&state.instrument_registry_path) {

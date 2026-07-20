@@ -2146,11 +2146,12 @@ async fn l04_identity_unresolved_degrades_durably_through_the_adapter() {
     };
     reset_env();
     let adapter_id = format!("zztask-{}", unique_suffix());
+    let symbol = "ZZTASKL04";
     let timing = standard_timing();
     let operation = create_test_operation(
         &pool,
         &adapter_id,
-        "ZZTASKL04",
+        symbol,
         "swing_momentum",
         "5m",
         &timing,
@@ -2158,9 +2159,26 @@ async fn l04_identity_unresolved_degrades_durably_through_the_adapter() {
     )
     .await;
 
-    // No strategy assignment env at all -> assignment resolution fails.
+    // E2A closure REPAIR 4: the adapter's authority gate now runs before
+    // assignment/identity resolution, so an identity-resolution failure can
+    // only be observed once a real, correctly shaped authority event has
+    // already been established (mission requirement). Bind that authority
+    // first, using a real, resolvable assignment -- then remove the
+    // assignment env entirely so the adapter's own fresh resolution fails on
+    // the tick under test.
+    std::env::set_var(STRATEGY_SYMBOL_ENV, symbol);
+    std::env::set_var(STRATEGY_IDS_ENV, "swing_momentum");
+    std::env::set_var(STRATEGY_TIMEFRAME_ENV, "5m");
     let st = paper_alpaca_state_with_db(pool.clone(), &adapter_id);
+    st.set_strategy_fleet_for_test(Some(vec![state::StrategyFleetEntry {
+        strategy_id: "swing_momentum".to_string(),
+    }]))
+    .await;
     let now = timing.preopen_start_utc + chrono::Duration::minutes(5);
+    bind_coverage_authority_for_test(&pool, &st, &operation, now).await;
+
+    // No strategy assignment env at all -> assignment resolution fails.
+    reset_env();
     let outcome = tick_autonomous_completed_bar_driver_from_state(&st, now)
         .await
         .expect("tick ok");
