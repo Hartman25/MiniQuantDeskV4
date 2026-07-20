@@ -13979,3 +13979,188 @@ NEXT AFTER E1 ACCEPTANCE: E2A — durable coverage-anchor and run-lineage eviden
 unattended 10-20-session soak: NOT STARTED
 live capital: NOT READY
 ```
+
+---
+
+## AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E1-PRE-DISPATCH-ANCHOR-GATE-AND-STABLE-REPLAY-04
+
+Starting HEAD: `93cbff34f9bfe23ca51e18cd34e3e4e36d39015f` ("docs: bind outcome coverage to daily
+operation"). Documentation/guard-only correction pass 4 of the Phase E1 contract above — no Rust
+file, migration, API route, or GUI file is added or modified by this patch.
+
+**Mission:** correct the final two source-proven authority defects left in §6a by correction pass 3
+— the real concurrency race between operation-row creation and the independent completed-bar task,
+and the missing durable coverage-authority prerequisite/gate contract for the future completed-bar
+adapter — found by a fresh, targeted re-read of `autonomous_daily_coordinator.rs`'s
+`create_or_recover`/`dispatch_by_state` sequencing (`autonomous_daily_coordinator.rs:370-421`) and
+`autonomous_completed_bar_task.rs`'s production adapter and state-only mode selector
+(`tick_autonomous_completed_bar_driver_from_state`/`select_driver_mode_for_state`,
+`autonomous_completed_bar_task.rs:154-250`).
+
+**Corrections made** (full detail in the corrected contract document, §6a):
+
+1. **Real concurrency window (REPAIR 1)** — retires the prior claim that coordinator-local write
+   ordering alone guarantees no `PrepareDataOnly` invocation can occur before the coverage anchor
+   exists. Direct source read confirms the completed-bar production adapter is a separate,
+   independently-scheduled task: it fetches the relevant operation via its own
+   `fetch_relevant_open_autonomous_daily_operation` call and selects a driver mode purely from
+   `select_driver_mode_for_state(&operation.state)`, with no dependency on the coordinator's own tick
+   progress. All three of an operation's initial durable states (`awaiting_preopen`/`preparing_data`/
+   `awaiting_open`) already map to `PrepareDataOnly` the instant the operation row becomes visible —
+   the instant `create_or_recover`'s transaction commits, strictly before the coordinator's *same*
+   tick reaches the coverage-bound write point. A concurrent completed-bar tick can therefore observe
+   the newly-visible operation and invoke `PrepareDataOnly` before the coordinator that created it has
+   written, or even attempted to write, its coverage anchor. This is a real inter-task concurrency
+   boundary, not a documentation preference.
+2. **Coverage authority as an adapter prerequisite (REPAIR 2)** — defines the future E2A production
+   adapter contract: durable state permits `PrepareDataOnly`/`RunningDispatch` **and** an exact
+   coverage-bound event exists **and** parses **and** its `operation_id` matches **and** the adapter's
+   current policy is compatible with the immutable payload — only then may the driver be invoked.
+   Defines the required ordering (fetch operation → load event → parse/verify identity → resolve
+   current policy → compare against anchor → select mode → invoke driver at most once), with an
+   explicit, safe carve-out allowing the existing pure `select_driver_mode_for_state` state-only check
+   to run first as a non-authority-bearing short-circuit (a `None` mode already means no driver
+   invocation regardless of authority).
+3. **Dual enforcement (REPAIR 3)** — the coordinator ensures the anchor exists via a
+   write-then-authoritative-re-read step before proceeding to `dispatch_by_state` (reusing the existing
+   `operation_identity_conflict`-class disposition on mismatch, no new lifecycle state); the
+   completed-bar adapter independently re-verifies the exact anchor on every tick, never relying on
+   task scheduling order, coordinator-tick-first assumptions, sleep timing, or the single-process
+   happy path — required because a newly created operation may be visible before the coordinator
+   finishes binding it, the two tasks are independently scheduled, coverage-policy configuration may
+   drift between coordinator ticks, and a daemon restart may recover an operation before the
+   coordinator's first post-restart reconciliation tick.
+4. **Typed missing-authority outcome (REPAIR 4)** — adds `CoverageAuthorityUnavailable{operation_id,
+   reason_code}` to the adapter's outcome enum, with four closed reason codes:
+   `coverage_authority_not_bound` (a brand-new, not-yet-anchored operation — quiet no-op, no lifecycle
+   mutation, no critical notification, no driver invocation, re-checked next tick),
+   `coverage_authority_unreadable`, `coverage_authority_invalid`, and `coverage_authority_conflict`
+   (all three: adapter refuses the driver; durable fail-closed lifecycle projection remains
+   coordinator-owned; the adapter never automatically overwrites or re-anchors the event).
+5. **Safe legacy/recovered operation handling (REPAIR 5)** — distinguishes a pristine pre-runtime
+   operation (`run_id`/`started_at_utc` both null, zero bars/claims, zero running-transition lineage —
+   safe for the coordinator to bind after ordinary identity verification, the ordinary first-bind
+   path) from an operation with any prior activity or evidence (anchor must never be fabricated
+   retroactively from current mutable configuration; fails closed to
+   `coverage_authority_missing_after_activity`, reusing the existing D1 blocker-signature mechanism,
+   no new lifecycle state, no automatic backfill).
+6. **Mid-day coverage-policy drift (REPAIR 6)** — requires the adapter to compare its independently,
+   per-tick-resolved current policy (symbol/timeframe/timeframe_secs/required_history_bars/
+   effective_grace_seconds/session-plan/assignment/runtime-binding/first-final-bar identities) against
+   the immutable anchor before use; any mismatch returns `coverage_authority_conflict` with no driver
+   invocation — one completed-bar tick must never use changed policy merely because the coordinator's
+   own, independently-scheduled tick has not yet observed the drift.
+7. **Stable replay identity (REPAIR 7)** — removes `bound_at_utc` from the coverage-bound event's JSON
+   payload. Exact replay recomputes the payload on every qualifying coordinator tick, so a caller-`now`
+   timestamp cannot be part of the semantic equality comparison without every replay after the first
+   spuriously reading as conflicting. The bind instant is instead sourced from the existing
+   `sys_autonomous_session_events.ts_utc` row column (already carried by every row in this store) and
+   excluded from the comparison entirely — the semantic payload is exactly the immutable
+   operation/coverage-policy fields.
+8. **Write-atomicity decision (REPAIR 8)** — explicitly decides operation-row creation and
+   coverage-event insertion do not require one combined SQL transaction, because the adapter-side gate
+   (REPAIR 3) independently protects an unanchored operation regardless. E2A may implement a
+   transactionally combined creation helper if narrowly safe, but the adapter gate remains mandatory
+   even under atomic creation — it also protects recovered legacy rows, corrupt/missing events, and
+   mid-day drift, none of which atomic creation alone addresses.
+9. **Readiness/start language (REPAIR 9)** — corrects the failed-start-attempt wording: a failed
+   `daily_data_readiness` start attempt does not create or replace the coverage authority, but the
+   daily coordinator may already have bound the authority *before* that start attempt occurs (the
+   coverage-bound write point runs strictly before the start-gate call). No claim in the contract may
+   read a failed start as implying no coverage-bound event exists.
+10. **E2A decomposition (REPAIR 10)** — rewrites §13's E2A mission into the exact ten-item breakdown:
+    event model/parser; semantic payload comparison excluding changing metadata; write/re-read/
+    idempotent/conflict helper; coordinator ensure-authority seam; completed-bar-adapter authority/
+    compatibility gate; pristine legacy-row binding rule; prior-activity missing-authority fail-closed
+    rule; raw ordered run-lineage helper; restart and concurrency proof; mid-day policy-drift proof.
+    Hard exclusions (no classifier, no finalization CAS, no coordinator invocation beyond the one
+    write point, no API, no GUI, no notification, no transition-graph change) are unchanged.
+
+**E1 guard strengthened (REPAIR 11):**
+`validate_autonomous_daily_paper_operations_01e_outcome_contract.ps1` gained fourteen new checks
+([45]-[58]): the retired coordinator-local-ordering-alone claim (with a positive check confirming the
+replacement text and a negative check confirming the retired sentence no longer appears verbatim), the
+concurrency-boundary description, the mandatory per-tick adapter-side verification requirement and its
+full no-driver-invocation prerequisite chain, the `CoverageAuthorityUnavailable` outcome and all four
+reason codes, the newly-created-operation no-op behavior, the pristine-vs-prior-activity distinction
+and the `coverage_authority_missing_after_activity` code with its retroactive-anchoring prohibition,
+the mid-day policy-drift requirement, the `bound_at_utc` exclusion from both the payload and the
+semantic comparison, the write-atomicity decision and the mandatory-gate-under-atomic-creation
+statement, the corrected failed-start-attempt wording, and the corrected exact ten-item E2A
+decomposition. One pre-existing pass-3 check ([43]) needed its needle updated after the E2A mission
+text was rewritten around the ten-item breakdown — the needle now matches the corrected wording
+("the typed Rust representation and parser for the `autonomous_daily_coverage_bound` event's JSON
+`detail` payload") rather than the retired pass-3 phrasing, verified by re-running the guard until all
+58 checks passed.
+
+**Internal review cycles:** one full cycle (source audit → contract correction → guard correction →
+independent correctness review → independent scope/safety review). The source audit directly read
+`autonomous_daily_coordinator.rs`'s `create_or_recover`/`dispatch_by_state` call sequence and
+`autonomous_completed_bar_task.rs`'s `tick_autonomous_completed_bar_driver_from_state`/
+`select_driver_mode_for_state` before writing any correction, confirming the mission's premise (the
+completed-bar adapter independently fetches the operation and selects mode from durable state alone,
+with no coordination with the coordinator's own tick) against actual source rather than the mission
+prompt's assertion alone. The correctness review caught one defect before commit: an initial guard
+check for the corrected E2A mission heading used a needle spanning across a markdown bold-marker
+boundary (`Repair 10): exactly ten items...` where the actual text is `Repair 10)**: exactly ten
+items...`), which would have failed to match; split into two separate needles (the heading, and the
+"exactly ten items" phrase) to avoid depending on exact markdown-marker placement. The guard was then
+executed against the corrected document and all 58 checks passed. Cycles 2-4 not required — no
+concurrency defect, authority ambiguity, replay/idempotency defect, restart-reconstruction defect,
+unsafe retroactive anchoring, documentation-truth defect, guard failure, or scope violation remained
+after cycle 1.
+
+**Deliverable:** `docs/specs/autonomous_daily_paper_operations_01e_outcome_truth_contract.md`
+corrected in place — a "Correction pass 4" note added at the top (preserving passes 1/2/3 verbatim);
+§6a's coverage-bound event JSON payload rewritten to remove `bound_at_utc`, with a new stable-replay-
+identity paragraph explaining the `ts_utc`-sourced bind instant; §6a's write-order paragraph corrected
+to retire the false coordinator-ordering-alone claim, followed by new "Dual enforcement," "Coverage
+authority as an adapter prerequisite," "Typed missing-authority outcome," "Safe handling of legacy and
+recovered operations," "Mid-day coverage-policy drift," and "Write-atomicity decision" subsections;
+§6a's readiness/start-event-roles cross-check strengthened with the corrected required-truth sentence;
+§13's E2A mission rewritten into the exact ten-item breakdown with matching "Likely files" and "Test
+binaries" updates. This document remains the binding contract for Phases E2A–E5 — corrected, not
+re-audited from scratch beyond what each repair required, and still not itself an acceptance record.
+
+**Guards:** `validate_autonomous_daily_paper_operations_01e_outcome_contract.ps1` (strengthened, all
+58 checks pass), `validate_autonomous_daily_paper_operations_01a_audit.ps1` pass,
+`validate_daily_data_readiness_01e_closure.ps1` pass,
+`validate_autonomous_daily_paper_operations_01d_phase_d_closure.ps1` pass (unmodified),
+`validate_autonomous_daily_paper_operations_01d4_evaluation_lineage_and_autonomous_preopen_closure_01.ps1`
+pass (unmodified), `check_unsafe_patterns.ps1` pass. `git diff --check` / `git diff --cached --check`
+clean. No Cargo command run (no Rust file touched).
+
+**Files changed:** `MiniQuantDesk_Master_Patch_Ledger_v2.md`, `README.md`, `README_TECHNICAL.md`,
+`docs/specs/autonomous_daily_paper_operations_01e_outcome_truth_contract.md`,
+`scripts/guards/validate_autonomous_daily_paper_operations_01e_outcome_contract.ps1`.
+No Rust file changed. No migration changed. No API route implemented. No GUI changed.
+
+**Safety confirmation (E1 pre-dispatch anchor-gate and stable-replay reconciliation):**
+
+```text
+PROVIDER CALLS: no
+BROKER CALLS: no
+NETWORK CALLS: no
+REAL DAEMON STARTED: no
+PAPER ORDERS: no
+LIVE ORDERS: no
+PAPER DB TOUCHED: no
+PORT 5440 TOUCHED: no
+RUST FILES CHANGED: no
+MIGRATION CHANGED: no
+API IMPLEMENTED: no
+GUI CHANGED: no
+PHASE E RUNTIME IMPLEMENTATION STARTED: no
+```
+
+```text
+D4: ACCEPTED — COMPLETE
+PHASE D: ACCEPTED — COMPLETE
+E1 pre-dispatch anchor-gate and stable-replay reconciliation: IMPLEMENTATION COMPLETE — AWAITING
+  CHATGPT AND OPERATOR ACCEPTANCE
+PHASE E RUNTIME IMPLEMENTATION: NOT STARTED
+BUNDLE 3 (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-COMBINED): OPEN
+NEXT AFTER E1 ACCEPTANCE: E2A — durable coverage-anchor and run-lineage evidence foundation, only
+unattended 10-20-session soak: NOT STARTED
+live capital: NOT READY
+```

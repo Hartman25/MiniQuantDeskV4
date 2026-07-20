@@ -107,6 +107,55 @@ the E1 guard with ten new checks. This correction does not redo the pass-1/pass-
 a repair above required a fresh source read (recorded inline); it is not itself an acceptance record,
 and does not close E1, Phase E, or Bundle 3.
 
+**Correction pass 4** (`AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E1-PRE-DISPATCH-ANCHOR-GATE-AND-STABLE-
+REPLAY-04`, applied on top of correction pass 3, starting HEAD
+`93cbff34f9bfe23ca51e18cd34e3e4e36d39015f` ("docs: bind outcome coverage to daily operation")):
+corrects the final two source-proven authority defects in §6a left by correction pass 3, found by a
+fresh, targeted re-read of `autonomous_daily_coordinator.rs`'s `create_or_recover`/`dispatch_by_state`
+sequencing (`autonomous_daily_coordinator.rs:370-421`) and `autonomous_completed_bar_task.rs`'s
+production adapter (`tick_autonomous_completed_bar_driver_from_state`,
+`autonomous_completed_bar_task.rs:154-250`): (1) retires §6a's prior claim that coordinator-local
+write ordering alone prevents an early `PrepareDataOnly` invocation — the completed-bar production
+adapter is a separate, independently-scheduled task that fetches the relevant operation and selects a
+driver mode purely from durable state, with no dependency on the coordinator's own tick progress, so a
+concurrent tick can observe a newly-visible, not-yet-anchored operation and invoke `PrepareDataOnly`
+before the coordinator that created it has written its coverage anchor; this is a real inter-task
+concurrency boundary, not closed by coordinator-local ordering alone (§6a); (2) defines the future
+E2A adapter contract as a mandatory, coverage-authority-gated prerequisite to every driver invocation,
+with a required ordering and an explicit carve-out for the existing state-only `select_driver_mode_
+for_state` short-circuit (§6a); (3) defines dual enforcement — the coordinator ensures the authority
+exists via a write-then-authoritative-re-read step, while the completed-bar adapter independently
+re-verifies the exact authority on every tick, never relying on task scheduling order, coordinator
+tick-first assumptions, sleep timing, or the single-process happy path (§6a); (4) adds one typed
+adapter outcome, `CoverageAuthorityUnavailable`, with four closed reason codes distinguishing an
+unbound-but-new operation (a quiet no-op, no lifecycle mutation, no notification) from an unreadable,
+identity-mismatched, or policy-conflicting anchor (adapter refuses the driver; the coordinator owns
+the durable fail-closed lifecycle projection) (§6a); (5) distinguishes pristine pre-runtime operations
+(no `run_id`/no `started_at_utc`/zero bars/zero claims/zero running-lineage — safe for the coordinator
+to bind after ordinary identity verification) from operations with any prior activity or evidence
+(anchor must never be fabricated retroactively; fails closed to a new reason code,
+`coverage_authority_missing_after_activity`, reusing the existing D1 blocker-signature mechanism, no
+new lifecycle state) (§6a); (6) requires the completed-bar adapter to compare its independently
+resolved current policy (symbol/timeframe/timeframe_secs/required_history_bars/effective_grace_
+seconds/session-plan/assignment/runtime-binding/first-final-bar identities) against the immutable
+anchor on every tick, never assuming the coordinator has already observed a mid-day configuration
+drift (§6a); (7) removes `bound_at_utc` from the coverage-bound event's JSON payload — exact replay
+recomputes the payload on every qualifying coordinator tick, so a caller-`now` timestamp cannot be
+part of the semantic equality comparison; the bind instant is instead sourced from the existing
+`sys_autonomous_session_events.ts_utc` row column, excluded from the comparison entirely (§6a);
+(8) explicitly decides operation-row creation and coverage-event insertion do not require one combined
+SQL transaction, because the adapter-side gate independently protects recovered legacy rows, corrupt
+or missing events, and mid-day drift regardless of creation atomicity — a future transactionally
+combined creation helper must never be treated as a substitute for the adapter gate (§6a);
+(9) corrects the failed-start-attempt wording to state explicitly that the daily coordinator may
+already have bound the operation authority before a failed start attempt ever occurs, and that no
+claim in this document may read a failed start as implying no coverage-bound event exists (§6a);
+(10) rewrites the E2A decomposition (§13) into the exact ten-item breakdown this correction's repairs
+require; (11) strengthens the E1 guard with new checks covering every repair above. This correction
+does not redo the pass-1/pass-2/pass-3 audit except where a repair above required a fresh source read
+(recorded inline); it is not itself an acceptance record, and does not close E1, Phase E, or Bundle 3.
+No Rust file, test file, or migration is added or modified by this correction.
+
 ## 0. Accepted foundation (recorded, not re-litigated)
 
 ```text
@@ -859,8 +908,6 @@ exchange_session_open_utc
 exchange_session_close_utc
 effective_operation_open_utc
 effective_operation_close_utc
-
-bound_at_utc
 ```
 
 This carries every field §6 item 2 needs to reconstruct bounds 4/5 exactly after restart, without
@@ -870,6 +917,23 @@ only if a later implementation patch's own source audit proves it has strictly s
 identity, immutability, queryability, or ordering guarantees than the seam above — none was found by
 this audit, and no new migration is authorized by E1 for this purpose (§13).
 
+**Stable replay identity (corrected — Correction pass 4, Repair 7).** The payload above intentionally
+excludes a `bound_at_utc` field. An earlier draft included one, but exact replay recomputes this
+payload on every coordinator tick that reaches the write point below — a caller-`now`-supplied
+wall-clock binding time cannot be part of a payload that must compare byte/semantically identical
+across every such recomputation, or every tick after the first would appear to be a conflicting
+replay purely due to its own timestamp. The bind timestamp is instead sourced from the existing
+`sys_autonomous_session_events.ts_utc` column already carried by every row in this store
+(`arm_state.rs:274-297`, migration `0032`) — the row's own insert timestamp is the original bind
+instant, and it is excluded from the semantic payload comparison entirely: the semantic payload for
+equality purposes is exactly the immutable operation/coverage-policy fields listed above
+(`schema_version` through `effective_operation_close_utc`), never the row's own `ts_utc`. Required
+replay behavior: the same immutable coverage fields, recomputed on any later tick, produce exact
+semantic replay — zero conflict, zero duplicate event, regardless of how much wall-clock time has
+passed since the original bind. Any immutable coverage field differing between the freshly-recomputed
+payload and the already-bound row's payload produces a conflict — no overwrite, no driver invocation
+— per the conflicting-replay contract defined below.
+
 **Write order and fail-closed policy (new — Correction pass 3, Repair 6).** The coverage-bound event
 must be written strictly after operation identity, session plan, assignment, runtime binding, and
 timeframe/grace policy are all resolved and verified (the same inputs `create_or_recover` already
@@ -877,9 +941,181 @@ requires before an operation row can exist, `autonomous_daily_coordinator.rs:370
 before: the operation becomes eligible for `PrepareDataOnly`; any bar is durably observed for this
 operation; canonical runtime start; or any dispatch claim. Concretely, this is the coordinator tick
 immediately after `create_or_recover` returns a resolved operation and before `dispatch_by_state` is
-called (`autonomous_daily_coordinator.rs:381-421`) — the same tick, never a later one, so no
-`PrepareDataOnly`/`RunningDispatch` invocation for this operation can ever occur without a coverage
-anchor already durably bound.
+called (`autonomous_daily_coordinator.rs:381-421`) — the same tick, never a later one, so the
+coordinator itself never reaches `dispatch_by_state` for this operation without first attempting to
+bind the coverage anchor.
+
+**Corrected (Correction pass 4, Repair 1): this coordinator-local ordering, by itself, does not
+prevent an early `PrepareDataOnly` invocation.** The completed-bar production adapter
+(`tick_autonomous_completed_bar_driver_from_state`, `autonomous_completed_bar_task.rs:210-250`,
+confirmed by direct source read) is a separate, independently-scheduled task: it fetches the relevant
+operation via its own `fetch_relevant_open_autonomous_daily_operation` call
+(`autonomous_completed_bar_task.rs:232-241`) and selects a driver mode purely from
+`select_driver_mode_for_state(&operation.state)` (`autonomous_completed_bar_task.rs:154-164,243`),
+with no dependency on, or awareness of, the coordinator's own tick progress. All three of the
+operation's initial durable states — `awaiting_preopen`, `preparing_data`, `awaiting_open` (plus
+`preflight_blocked`/`start_retrying`) — already map to `PrepareDataOnly` the instant the operation row
+becomes visible, which is the instant `create_or_recover`'s own transaction commits — strictly before
+the coordinator's *same* tick reaches the coverage-bound write point below. A concurrent completed-bar
+task tick can therefore observe the newly-visible operation and invoke `PrepareDataOnly` before the
+coordinator that just created the row has written, or even attempted to write, its coverage anchor.
+This is a real inter-task concurrency boundary, not a documentation preference, and it is not closed
+by coordinator-local write ordering alone — every claim in this document equivalent to "the
+coordinator-local write ordering alone guarantees no `PrepareDataOnly` invocation can occur before the
+anchor exists" is retired by this correction. Closing it requires the independent adapter-side
+authority gate defined next.
+
+**Dual enforcement (new — Correction pass 4, Repair 3).** Because the concurrency boundary above
+cannot be closed by coordinator ordering alone, both sides of it carry independent, non-overlapping
+responsibility:
+
+- **Coordinator-side: ensure authority exists.** After `create_or_recover` resolves an operation and
+  before `dispatch_by_state` is called, the coordinator writes (or replays) the coverage-bound event
+  per the first-write/exact-replay/conflicting-replay contract below, then performs its own
+  authoritative exact-id re-read of the row it just wrote (or found already present) and verifies the
+  re-read payload's semantic fields (per the stable-replay rule above) before proceeding to
+  `dispatch_by_state`. A re-read mismatch, or an unreadable/missing row after a write attempt, uses
+  the existing `operation_identity_conflict`-class fail-closed disposition already documented above —
+  no new lifecycle state or transition edge is introduced for this case. This makes the coordinator's
+  own progression into `dispatch_by_state` conditional on the anchor, but it says nothing about what a
+  concurrently-running completed-bar task tick may already have done.
+- **Adapter-side: verify authority every tick.** The completed-bar production adapter must
+  independently re-verify the exact coverage authority on every tick, before invoking the driver —
+  never relying on task scheduling order, on the coordinator's tick having already run, on sleep
+  timing, or on the single-process happy path. This is required because: (1) a newly created
+  operation may be visible to the adapter before the coordinator's own tick has finished binding it;
+  (2) the completed-bar task and the coordinator are independently scheduled tasks with no
+  synchronization between their tick loops; (3) coverage-policy configuration may drift between
+  coordinator ticks, and the adapter resolves its own configuration independently on every tick (see
+  mid-day drift below); (4) a daemon restart may recover an operation and begin ticking the
+  completed-bar task before the coordinator's own first post-restart reconciliation tick runs. The
+  adapter's authority check is therefore a mandatory per-tick gate, not a one-time startup check.
+
+**Coverage authority as an adapter prerequisite (new — Correction pass 4, Repair 2).** The future E2A
+production adapter contract is: durable operation state permits `PrepareDataOnly` or `RunningDispatch`
+(per the existing state-only `select_driver_mode_for_state`, unchanged and still pure) **and** an
+exact coverage-bound event exists for this `operation_id` **and** its payload parses successfully
+**and** its `operation_id` matches the operation being processed **and** the adapter's
+freshly-resolved current policy (see mid-day drift below) is compatible with the immutable payload —
+only then may the driver be invoked. Absent any one of those conditions: no completed-bar driver
+invocation, no readiness evaluation through the driver, no provider resolution, no provider call, no
+bar observation, no dispatch claim, no strategy evaluation.
+
+The existing pure `select_driver_mode_for_state` function may remain state-only — determining
+*whether a mode is state-legal* is a distinct, cheaper, and orthogonal question from *whether the
+authority required to act on that mode is present*, and a `None` mode result already means no driver
+invocation regardless of authority, so evaluating it first is a safe, non-authority-bearing
+short-circuit. The production adapter must enforce the coverage prerequisite as a separate, mandatory
+gate strictly before the driver call, with this required ordering: (1) fetch the relevant operation;
+(2) load the exact coverage-bound event by `operation_id`; (3) parse the event and verify its
+`operation_id` matches the fetched operation; (4) resolve the adapter's current
+assignment/runtime/timeframe/grace policy exactly as it already does today; (5) compare the current
+policy against the immutable coverage-bound payload (see mid-day drift below); (6) select mode from
+durable state (unchanged, may run earlier as the cheap short-circuit noted above); (7) invoke the
+driver at most once, only if steps 2–5 all resolved clean and step 6 selected a mode. A
+source-aligned ordering variation that runs step 6 before steps 2–5 is acceptable, since it only ever
+produces an *earlier* `None`-mode exit and never allows the driver to be invoked before steps 2–5
+resolve clean; no variation may invoke the driver before those steps resolve clean.
+
+**Typed missing-authority outcome (new — Correction pass 4, Repair 4).** The adapter contract adds one
+typed outcome to `AutonomousCompletedBarProductionTickOutcome` (the same enum
+`NotApplicable`/`NoRelevantOperation`/`ModeNotApplicable`/`IdentityUnresolved` already belong to,
+`autonomous_completed_bar_task.rs:172-190`):
+
+```text
+CoverageAuthorityUnavailable {
+    operation_id: Uuid,
+    reason_code: &'static str,
+}
+```
+
+with a closed reason-code set distinguishing at minimum:
+
+```text
+coverage_authority_not_bound       -- no coverage-bound event exists yet for this operation_id
+coverage_authority_unreadable      -- the event exists but its detail payload fails to parse
+coverage_authority_invalid         -- the parsed payload's own operation_id does not match
+coverage_authority_conflict        -- the payload parses and matches identity, but the adapter's
+                                       freshly-resolved current policy disagrees with it (mid-day
+                                       drift, below)
+```
+
+Required behavior, corrected per case:
+
+- **Newly created operation, anchor not yet written** (`coverage_authority_not_bound`): the adapter
+  returns `CoverageAuthorityUnavailable` for this tick; it performs no lifecycle mutation of the
+  operation row, sends no critical notification, and invokes no driver. This is an ordinary, expected
+  transient state — the coordinator may bind the anchor during its current or a subsequent tick, and
+  the adapter simply re-checks on its own next tick. Treating an unbound-but-brand-new operation as an
+  error would produce alert noise for the ordinary startup race the dual-enforcement design exists to
+  tolerate safely.
+- **Existing operation, invalid or conflicting anchor** (`coverage_authority_unreadable` /
+  `coverage_authority_invalid` / `coverage_authority_conflict`): the adapter refuses the driver for
+  this tick. It does not itself write a competing lifecycle transition — durable fail-closed lifecycle
+  projection for this case remains coordinator-owned (the coordinator's own re-read/verify step above,
+  or its ordinary tick, observes the same unreadable/invalid/conflicting anchor and applies the
+  existing `operation_identity_conflict`-class disposition). The adapter never automatically
+  overwrites or re-anchors the event.
+
+**Safe handling of legacy and recovered operations (new — Correction pass 4, Repair 5).** An operation
+created before E2A is deployed — or any operation recovered by a fresh process before its coverage
+anchor was ever written — may be observed by the adapter or the coordinator with no coverage-bound
+event present. The contract distinguishes two disjoint cases by durable evidence alone, never by
+wall-clock proximity to a deploy:
+
+- **Pristine pre-runtime operation** — every one of `run_id IS NULL`, `started_at_utc IS NULL`,
+  `bars_observed = 0`, `bars_dispatched = 0`, `last_completed_bar_ts IS NULL`,
+  `last_dispatched_bar_ts IS NULL`, zero dispatch claims, and zero `running`-transition lineage
+  entries (§6b) holds. The coordinator may bind the immutable anchor for this operation after its
+  ordinary exact identity/session/policy verification (the same resolution `create_or_recover` already
+  performs) and before any driver invocation — this is the ordinary first-bind path, not a special
+  case; a pristine operation has no activity the anchor could retroactively legitimize, so binding it
+  now is exactly as safe as binding it on operation creation.
+- **Operation with prior activity or evidence** — any of `run_id` present, `started_at_utc` present,
+  `bars_observed > 0`, `bars_dispatched > 0`, a completed/failed/uncertain dispatch claim exists, or a
+  `running`-transition lineage entry exists (§6b). The anchor must never be fabricated retroactively
+  from the process's current mutable configuration for an operation that already has activity the
+  fabricated anchor did not actually govern when that activity occurred. Required result: fail closed
+  to `manual_intervention_required` or a source-aligned degraded state (reusing the existing D1
+  blocker-signature mechanism, no new lifecycle state), reason code
+  `coverage_authority_missing_after_activity`; no driver invocation; no automatic backfill of the
+  authority. This is deliberately more conservative than the pristine case — an operation with any of
+  the activity signals above ran under *some* coverage policy, and that policy is exactly the fact
+  E1's binding rule (above: "no durable proof of the original coverage policy → no
+  `completed_no_trade` finalization") requires proof of; a freshly-computed anchor cannot supply that
+  proof.
+
+**Mid-day coverage-policy drift (new — Correction pass 4, Repair 6).** The completed-bar adapter
+resolves its assignment/runtime/timeframe/grace configuration independently on every tick
+(`build_multi_symbol_runtime_config_from_env`/`resolve_autonomous_runtime_context`,
+`autonomous_completed_bar_task.rs:259+`), exactly as it does today. Once a coverage-bound event
+exists, the adapter must compare its freshly-resolved current policy against the immutable event's
+payload before using any of: `symbol`, `timeframe`, `timeframe_secs`, `required_history_bars`,
+`effective_grace_seconds`, session-plan identity, assignment identity, runtime-binding identity, or
+the payload's own first/final dispatchable-bar identities. A mismatch on any compared field returns
+`CoverageAuthorityUnavailable{reason_code: "coverage_authority_conflict"}` for this tick: no driver
+invocation, no bar observation or claim, and the coordinator applies its existing fail-closed
+identity-conflict disposition once it independently observes the same drift (no new mechanism). One
+completed-bar tick must never use changed grace/history/timeframe policy merely because the
+coordinator has not yet observed the drift on its own, slower tick cadence — the two tasks are
+independently scheduled, and the adapter's own per-tick check is what closes this gap, not any
+assumption about relative tick ordering.
+
+**Write-atomicity decision (new — Correction pass 4, Repair 8).** E1 explicitly decides that
+operation-row creation (`create_or_recover_autonomous_daily_operation`) and coverage-event insertion
+(the write point named above) do not have to execute inside one combined SQL transaction — this is
+safe only because the completed-bar adapter independently refuses to process an unanchored operation
+(the per-tick gate above), not because the two writes are otherwise safe to leave non-atomic. E2A may
+implement a transactionally combined creation helper if its own source review shows the combination is
+narrow and safe (e.g. folding the coverage-bound insert into the same transaction as
+`create_or_recover_autonomous_daily_operation`'s row insert), but a combined transaction must never be
+treated as a substitute for the adapter-side gate — the adapter gate remains mandatory even under
+atomic creation, because it also protects three cases atomic creation cannot: a recovered legacy row
+created before E2A existed (no amount of atomicity at creation time retroactively anchors a
+pre-existing row); a corrupt or missing event discovered later (a transaction guarantees the write
+landed at creation time, not that the row remains readable and valid forever after); and mid-day
+configuration drift (a drift check has nothing to do with whether the original write was
+transactional).
 
 Required behavior, all built on the existing `ON CONFLICT (id) DO NOTHING` primitive plus the same
 authoritative-re-read discipline D4 already established for dispatch-claim completion
@@ -946,6 +1182,12 @@ Required cross-checks:
   resolution failure before that evaluation could even run) never creates or competes with a
   coverage-bound authority — the coverage-bound write happens at the coordinator level, strictly
   before the start-gate call, and does not depend on the start-gate's own outcome.
+  **Required truth (corrected — Correction pass 4, Repair 9):** a failed `daily_data_readiness` start
+  attempt does not create or replace the operation coverage authority — but the daily coordinator may
+  already have bound the operation authority before that start attempt ever occurs, since the
+  coverage-bound write point (immediately after `create_or_recover`) runs strictly before
+  `dispatch_by_state`'s own eventual call into the start gate. No claim in this document may read a
+  failed start attempt as implying no coverage-bound event exists for the operation.
 - Multiple `daily_data_readiness_evaluated` rows may exist per operation (one per attempt); multiple
   `daily_data_readiness_run_linked` rows may exist per operation (one per successful start/recovery);
   **exactly one** `autonomous_daily_coverage_bound` row exists per operation, by construction of its
@@ -1461,27 +1703,52 @@ after this E1 correction is accepted — nothing beyond E2A is authorized yet.**
 
 ### E2A — durable coverage-anchor and run-lineage evidence foundation (next authorized patch, not implemented in E1)
 
-- **Mission (corrected — Correction pass 3, Repair 5/6/8)**: (1) implement the new operation-scoped
-  `autonomous_daily_coverage_bound` event in `sys_autonomous_session_events` per §6a — the write/
-  re-read/idempotent-replay/conflicting-replay helper, invoked at the coordinator write point §6a
-  names (immediately after `create_or_recover` resolves the operation, before `dispatch_by_state`);
-  (2) implement the exact coverage-bound event read/parser (by `operation_id`-keyed `id`); (3) add a
-  narrow, purpose-built `mqk-db` read helper that aggregates an operation's full `run_id` lineage per
-  §6b's corrected raw-row query shape (never `SELECT DISTINCT`), performing monotonicity/uniqueness/
-  current-run-id validation in Rust, unbounded by (or explicitly bounded well above) the
-  general-purpose `list_autonomous_daily_operation_events` cap; (4) prove both survive a restart (a
-  fresh process, fresh `AppState`, reading only durable storage, reconstructs the exact same coverage
-  anchor and run lineage a live process would compute); (5) prove recovery-start compatibility (a
-  recovery start whose freshly-resolved coverage payload disagrees with the already-bound anchor
-  fails closed per §6a's conflicting-replay rule, never silently rewrites it).
+- **Mission (corrected — Correction pass 4, Repair 10)**: exactly ten items, no more, no less:
+  1. immutable operation-scoped coverage event model/parser — the typed Rust representation and
+     parser for the `autonomous_daily_coverage_bound` event's JSON `detail` payload (§6a).
+  2. semantic payload comparison excluding changing metadata — the equality/conflict comparison over
+     exactly the immutable operation/coverage-policy fields, excluding the row's own `ts_utc` (stable
+     replay identity, §6a).
+  3. exact write/re-read/idempotent/conflict helper — the first-write/exact-replay/conflicting-replay/
+     write-failure contract (§6a), reusing `ON CONFLICT (id) DO NOTHING` plus the D4
+     authoritative-re-read discipline.
+  4. coordinator ensure-authority seam — the coordinator-side write-then-authoritative-re-read step,
+     invoked at the point §6a names (immediately after `create_or_recover` resolves the operation,
+     before `dispatch_by_state`), including the pristine-legacy-row bind path (§6a).
+  5. completed-bar-adapter authority/compatibility gate — the per-tick adapter-side prerequisite gate,
+     the `CoverageAuthorityUnavailable` typed outcome and its four reason codes, and the mid-day
+     policy-drift comparison (§6a).
+  6. pristine legacy-row binding rule — the durable-evidence test (`run_id`/`started_at_utc`/
+     `bars_observed`/`bars_dispatched`/`last_completed_bar_ts`/`last_dispatched_bar_ts`/dispatch
+     claims/running-transition lineage all absent) gating when the coordinator may bind an anchor for
+     an operation that predates E2A (§6a).
+  7. prior-activity missing-authority fail-closed rule — the `coverage_authority_missing_after_activity`
+     disposition for a recovered operation with any activity signal and no bound anchor, reusing the
+     existing D1 blocker-signature mechanism, no new lifecycle state (§6a).
+  8. raw ordered run-lineage helper — a narrow, purpose-built `mqk-db` read helper that aggregates an
+     operation's full `run_id` lineage per §6b's corrected raw-row query shape (never `SELECT
+     DISTINCT`), performing monotonicity/uniqueness/current-run-id validation in Rust, unbounded by
+     (or explicitly bounded well above) the general-purpose `list_autonomous_daily_operation_events`
+     cap.
+  9. restart and concurrency proof — a fresh process/fresh `AppState`, reading only durable storage,
+     reconstructs the exact same coverage anchor and run lineage a live process would compute; plus a
+     deterministic proof (reusing D4's `tokio::sync::Notify`-rendezvous pattern, never a sleep) that a
+     concurrent completed-bar task tick observing a newly-visible, not-yet-anchored operation takes the
+     `coverage_authority_not_bound` no-op path rather than invoking the driver.
+  10. mid-day policy-drift proof — a proof that a freshly-resolved adapter policy disagreeing with an
+      already-bound anchor (changed timeframe/grace/history-bars/identity) returns
+      `coverage_authority_conflict` and invokes no driver, on both a state-only-eligible
+      `PrepareDataOnly` tick and a `RunningDispatch` tick.
 - **Likely files**: `core-rs/crates/mqk-daemon/src/state/autonomous_daily_coordinator.rs` (coverage-
-  bound event write, at the point §6a names), `core-rs/crates/mqk-daemon/src/state/
-  autonomous_daily_operation.rs` (coverage payload construction, if the identity/binding derivation
-  helpers live there), `core-rs/crates/mqk-daemon/src/daily_data_readiness.rs` (if the coverage
-  payload's timeframe/grace-seconds inputs are best sourced from this module's existing types),
-  `core-rs/crates/mqk-db/src/autonomous_daily_operation.rs` (new run-lineage read helper) — no file
-  in `daily_data_readiness.rs` needs to change the existing `daily_data_readiness_evaluated`/
-  `daily_data_readiness_run_linked` event types themselves.
+  bound event write and ensure-authority re-read, at the point §6a names),
+  `core-rs/crates/mqk-daemon/src/state/autonomous_completed_bar_task.rs` (the adapter-side
+  authority/compatibility gate and the new `CoverageAuthorityUnavailable` outcome variant),
+  `core-rs/crates/mqk-daemon/src/state/autonomous_daily_operation.rs` (coverage payload construction,
+  if the identity/binding derivation helpers live there), `core-rs/crates/mqk-daemon/src/
+  daily_data_readiness.rs` (if the coverage payload's timeframe/grace-seconds inputs are best sourced
+  from this module's existing types), `core-rs/crates/mqk-db/src/autonomous_daily_operation.rs` (new
+  run-lineage read helper) — no file in `daily_data_readiness.rs` needs to change the existing
+  `daily_data_readiness_evaluated`/`daily_data_readiness_run_linked` event types themselves.
 - **Schema impact**: none expected — the preferred seam is a new `event_type` value and a new
   `operation_id`-keyed `id` convention on the existing `sys_autonomous_session_events` store (no
   migration; the table and its `mqk_db::persist_autonomous_session_event`/`AutonomousSessionEventRow`
@@ -1490,11 +1757,14 @@ after this E1 correction is accepted — nothing beyond E2A is authorized yet.**
   cannot safely carry the coverage fields (§6a already names this as the fallback, not the default).
 - **Test binaries**: new `scenario_autonomous_daily_coverage_anchor_and_run_lineage_01.rs` (or
   equivalent) — proves the coverage-bound event write/re-read/idempotent-replay/conflicting-replay
-  behavior exactly as §6a specifies, proves restart reconstruction of both the coverage anchor and
-  the run lineage across a synthetic recovery cycle (reusing the `phase_d_full_day_lifecycle`
-  recovery fixture pattern), and proves the lineage helper's contradiction-detection
-  (duplicate/out-of-order `run_id`, mismatch against current `run_id`) fails closed to the shape
-  §6b/§7 require.
+  behavior exactly as §6a specifies (items 1–3), the coordinator ensure-authority seam and the
+  pristine/prior-activity legacy-row rules (items 4, 6–7), the adapter-side authority/compatibility
+  gate and its typed outcome/reason codes (item 5), proves restart reconstruction of both the coverage
+  anchor and the run lineage across a synthetic recovery cycle (reusing the `phase_d_full_day_lifecycle`
+  recovery fixture pattern) plus the concurrency no-op proof (item 9), proves the lineage helper's
+  contradiction-detection (duplicate/out-of-order `run_id`, mismatch against current `run_id`) fails
+  closed to the shape §6b/§7 require (item 8), and proves the mid-day policy-drift conflict path
+  (item 10).
 - **Hard exclusions**: no classifier, no finalization CAS write, no coordinator invocation beyond the
   one coverage-bound write point, no API route, no GUI, no notification wiring, no change to the
   `is_legal_operation_transition` graph.

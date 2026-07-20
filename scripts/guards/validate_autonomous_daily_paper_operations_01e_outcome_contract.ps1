@@ -61,6 +61,34 @@
 #   [30] The contract does not guarantee a durable database-unavailable write
 #        during a complete DB outage.
 #
+# Correction pass 4 (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E1-PRE-DISPATCH-ANCHOR-GATE-AND-STABLE-
+# REPLAY-04) checks:
+#   [45] The contract does not claim coordinator-local write ordering alone prevents an early
+#        PrepareDataOnly invocation -- it retires that claim explicitly.
+#   [46] The contract states a concurrent completed-bar task tick can observe a newly-visible,
+#        not-yet-anchored operation and invoke PrepareDataOnly before the coordinator's own write.
+#   [47] The contract requires the completed-bar adapter to verify authority on every tick,
+#        independent of task scheduling order.
+#   [48] The contract enumerates the full no-driver-invocation prerequisite chain (no provider
+#        resolution, no provider call, no bar observation, no dispatch claim, no strategy evaluation).
+#   [49] The contract defines the CoverageAuthorityUnavailable typed adapter outcome.
+#   [50] The contract defines all four coverage-authority reason codes (not_bound / unreadable /
+#        invalid / conflict).
+#   [51] The contract defines the newly-created-operation no-op behavior (no lifecycle mutation, no
+#        notification, no driver invocation).
+#   [52] The contract distinguishes a pristine pre-runtime operation from one with prior activity.
+#   [53] The contract defines the coverage_authority_missing_after_activity fail-closed reason code
+#        and forbids retroactive anchor fabrication after activity exists.
+#   [54] The contract requires the completed-bar adapter to compare current policy against the
+#        immutable anchor on every tick (mid-day drift).
+#   [55] The contract states bound_at_utc is excluded from the coverage-bound event payload and from
+#        the semantic replay comparison.
+#   [56] The contract states the write-atomicity decision: combined transaction not required, and the
+#        adapter gate remains mandatory even under atomic creation.
+#   [57] The contract states a failed start attempt does not imply no coverage-bound event exists, and
+#        that the coordinator may already have bound authority before a failed start attempt occurs.
+#   [58] The contract's E2A decomposition is the corrected exact ten-item breakdown.
+#
 # Correction pass 3 (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E1-OPERATION-SCOPED-COVERAGE-AUTHORITY-
 # RECONCILIATION-03) checks:
 #   [31] The contract does not fall back to the current session's first grid
@@ -490,12 +518,82 @@ Test-ContentContainsNormalized "contract corrects the oms_inbox zero-rows item t
 
 Write-Host ""
 Show-Info "--- [43] E2A's mission builds the new coverage-bound event, not an extension of daily_data_readiness_evaluated ---"
-Test-ContentContainsNormalized "contract's E2A mission implements the new operation-scoped coverage-bound event" $ContractContent "implement the new operation-scoped ``autonomous_daily_coverage_bound`` event in ``sys_autonomous_session_events`` per" | Out-Null
+Test-ContentContainsNormalized "contract's E2A mission implements the new operation-scoped coverage-bound event" $ContractContent "the typed Rust representation and parser for the ``autonomous_daily_coverage_bound`` event's JSON ``detail`` payload" | Out-Null
 Test-ContentContainsNormalized "contract states E2A's coverage-authority half supersedes the extension plan" $ContractContent "not an extension of ``daily_data_readiness_evaluated``" | Out-Null
 
 Write-Host ""
 Show-Info "--- [44] E2B is not authorized until E2A is independently accepted ---"
 Test-ContentContainsNormalized "contract states E2B is not authorized until E2A is independently accepted" $ContractContent "not authorized until E2A is independently accepted" | Out-Null
+
+Write-Host ""
+Show-Info "--- [45] Contract retires the false coordinator-local-ordering-alone claim ---"
+Test-ContentDoesNotContainNormalized "contract does not claim coordinator-local write ordering alone guarantees no early PrepareDataOnly" $ContractContent "so no ``PrepareDataOnly``/``RunningDispatch`` invocation for this operation can ever occur without a coverage anchor already durably bound" | Out-Null
+Test-ContentContainsNormalized "contract explicitly retires the coordinator-local-ordering-alone claim" $ContractContent "this coordinator-local ordering, by itself, does not prevent an early ``PrepareDataOnly`` invocation" | Out-Null
+
+Write-Host ""
+Show-Info "--- [46] Contract states a concurrent completed-bar tick can observe an unanchored operation ---"
+Test-ContentContainsNormalized "contract states a concurrent completed-bar task tick can invoke PrepareDataOnly before the anchor is written" $ContractContent "A concurrent completed-bar task tick can therefore observe the newly-visible operation and invoke ``PrepareDataOnly``" | Out-Null
+
+Write-Host ""
+Show-Info "--- [47] Contract requires the adapter to verify authority every tick, independent of scheduling ---"
+Test-ContentContainsNormalized "contract requires adapter-side authority verification every tick" $ContractContent "Adapter-side: verify authority every tick" | Out-Null
+Test-ContentContainsNormalized "contract forbids relying on task scheduling order" $ContractContent "never relying on task scheduling order" | Out-Null
+
+Write-Host ""
+Show-Info "--- [48] Contract enumerates the full no-driver-invocation prerequisite chain ---"
+Test-ContentContainsNormalized "contract states absent authority blocks provider resolution, provider calls, bar observation, dispatch claims, and strategy evaluation" $ContractContent "no provider resolution, no provider call, no bar observation, no dispatch claim, no strategy evaluation" | Out-Null
+
+Write-Host ""
+Show-Info "--- [49] Contract defines the CoverageAuthorityUnavailable typed adapter outcome ---"
+Test-ContentContains "contract defines CoverageAuthorityUnavailable" $ContractContent "CoverageAuthorityUnavailable" | Out-Null
+
+Write-Host ""
+Show-Info "--- [50] Contract defines all four coverage-authority reason codes ---"
+Test-ContentContains "contract defines coverage_authority_not_bound" $ContractContent "coverage_authority_not_bound" | Out-Null
+Test-ContentContains "contract defines coverage_authority_unreadable" $ContractContent "coverage_authority_unreadable" | Out-Null
+Test-ContentContains "contract defines coverage_authority_invalid" $ContractContent "coverage_authority_invalid" | Out-Null
+Test-ContentContains "contract defines coverage_authority_conflict" $ContractContent "coverage_authority_conflict" | Out-Null
+
+Write-Host ""
+Show-Info "--- [51] Contract defines the newly-created-operation no-op behavior ---"
+Test-ContentContainsNormalized "contract states the adapter performs no lifecycle mutation, no notification, no driver invocation for an unbound new operation" $ContractContent "it performs no lifecycle mutation of the operation row, sends no critical notification, and invokes no driver" | Out-Null
+
+Write-Host ""
+Show-Info "--- [52] Contract distinguishes a pristine pre-runtime operation from a prior-activity operation ---"
+Test-ContentContains "contract names Pristine pre-runtime operation" $ContractContent "Pristine pre-runtime operation" | Out-Null
+Test-ContentContainsNormalized "contract names an operation with prior activity or evidence" $ContractContent "Operation with prior activity or evidence" | Out-Null
+
+Write-Host ""
+Show-Info "--- [53] Contract defines coverage_authority_missing_after_activity and forbids retroactive anchoring ---"
+Test-ContentContains "contract defines coverage_authority_missing_after_activity" $ContractContent "coverage_authority_missing_after_activity" | Out-Null
+Test-ContentContainsNormalized "contract forbids fabricating the anchor retroactively after activity exists" $ContractContent "The anchor must never be fabricated retroactively" | Out-Null
+
+Write-Host ""
+Show-Info "--- [54] Contract requires mid-day policy-drift comparison on every adapter tick ---"
+Test-ContentContainsNormalized "contract section title Mid-day coverage-policy drift exists" $ContractContent "Mid-day coverage-policy drift (new" | Out-Null
+Test-ContentContainsNormalized "contract forbids one tick using changed policy merely because the coordinator has not yet observed the drift" $ContractContent "must never use changed grace/history/timeframe policy merely because the coordinator has not yet observed the drift" | Out-Null
+
+Write-Host ""
+Show-Info "--- [55] Contract excludes bound_at_utc from the payload and from semantic replay comparison ---"
+Test-ContentContainsNormalized "contract states the payload intentionally excludes bound_at_utc" $ContractContent "intentionally excludes a ``bound_at_utc`` field" | Out-Null
+Test-ContentContainsNormalized "contract states ts_utc is excluded from the semantic payload comparison" $ContractContent "excluded from the semantic payload comparison entirely" | Out-Null
+
+Write-Host ""
+Show-Info "--- [56] Contract states the write-atomicity decision and mandatory adapter gate under atomic creation ---"
+Test-ContentContainsNormalized "contract section title Write-atomicity decision exists" $ContractContent "Write-atomicity decision (new" | Out-Null
+Test-ContentContainsNormalized "contract states the adapter gate remains mandatory even under atomic creation" $ContractContent "the adapter gate remains mandatory even under atomic creation" | Out-Null
+
+Write-Host ""
+Show-Info "--- [57] Contract corrects the failed-start-attempt wording ---"
+Test-ContentContainsNormalized "contract states the coordinator may already have bound authority before a failed start attempt occurs" $ContractContent "the daily coordinator may already have bound the operation authority before that start attempt ever occurs" | Out-Null
+Test-ContentContainsNormalized "contract forbids reading a failed start as implying no coverage-bound event exists" $ContractContent "No claim in this document may read a failed start attempt as implying no coverage-bound event exists" | Out-Null
+
+Write-Host ""
+Show-Info "--- [58] Contract's E2A decomposition is the corrected exact ten-item breakdown ---"
+Test-ContentContainsNormalized "contract's E2A mission is the corrected exact ten-item breakdown" $ContractContent "Mission (corrected $EmDash Correction pass 4, Repair 10)" | Out-Null
+Test-ContentContainsNormalized "contract's E2A mission states exactly ten items, no more, no less" $ContractContent "exactly ten items, no more, no less" | Out-Null
+Test-ContentContainsNormalized "contract's E2A mission item 9 names the restart and concurrency proof" $ContractContent "restart and concurrency proof $EmDash a fresh process/fresh ``AppState``" | Out-Null
+Test-ContentContainsNormalized "contract's E2A mission item 10 names the mid-day policy-drift proof" $ContractContent "mid-day policy-drift proof $EmDash a proof that a freshly-resolved adapter policy disagreeing" | Out-Null
 
 # =============================================================================
 # Summary

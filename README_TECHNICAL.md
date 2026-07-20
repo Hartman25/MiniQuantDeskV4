@@ -19,28 +19,37 @@ Use the root `README.md` for the high-level system story.
 
 ## Current proved posture
 
-**Repository snapshot used for this update (2026-07-19):** local `main` at
-`544ec628708d0b8a5381aaaaef6c220af2f98253`
-(`fix: bind autonomous claims to evaluation lineage`), plus independent
+**Repository snapshot used for this update (2026-07-20):** local `main` at
+`93cbff34f9bfe23ca51e18cd34e3e4e36d39015f`
+(`docs: bind outcome coverage to daily operation`), plus independent
 ChatGPT/operator acceptance of D4 and its evaluation-lineage repair together
 — **Phase D is accepted complete in full** — plus the
 AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E1-DURABLE-OUTCOME-AUTHORITY-AND-EVIDENCE-CONTRACT
 patch on top of it (Phase E1: a read-only architecture audit producing the
 binding durable-outcome/no-trade contract for Phase E — implementation
 complete, awaiting ChatGPT and operator acceptance; no Phase E runtime code
-exists yet), plus three documentation/guard-only reconciliation passes
+exists yet), plus four documentation/guard-only reconciliation passes
 (`AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E1-OUTCOME-CONTRACT-RECONCILIATION-01`,
 correcting eight source-proven defects;
 `AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E1-COVERAGE-ANCHOR-AND-RUN-LINEAGE-RECONCILIATION-02`,
 correcting ten further defects in the expected-bar-coverage bounds and the
 run-lineage/precedence/database-failure contract, replacing the original
-single-E2 authorization with an E2A/E2B split; and
+single-E2 authorization with an E2A/E2B split;
 `AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E1-OPERATION-SCOPED-COVERAGE-AUTHORITY-RECONCILIATION-03`,
 retiring the "extend `daily_data_readiness_evaluated`" coverage seam as a
 structural mismatch in favor of one dedicated, operation-scoped, immutable
 `autonomous_daily_coverage_bound` event, correcting an invalid run-lineage SQL
-query, and removing the last singular-current-`run_id` evidence rules) —
-still implementation complete, still awaiting acceptance, not yet accepted.
+query, and removing the last singular-current-`run_id` evidence rules; and
+`AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E1-PRE-DISPATCH-ANCHOR-GATE-AND-STABLE-REPLAY-04`,
+retiring the false claim that coordinator-local write ordering alone prevents
+an early `PrepareDataOnly` invocation, defining dual enforcement (coordinator
+ensure-authority seam plus a per-tick completed-bar-adapter authority gate
+with a new typed `CoverageAuthorityUnavailable` outcome), a pristine-vs-
+prior-activity rule for legacy/recovered operations, a mid-day
+coverage-policy-drift check, a stable replay identity dropping the caller-`now`
+`bound_at_utc` field, a write-atomicity decision, and a corrected
+failed-start-attempt wording) — still implementation complete, still
+awaiting acceptance, not yet accepted.
 
 The strongest current operational route is:
 
@@ -92,7 +101,7 @@ Current local `main` contains, accepted (D1–D4, Phase D accepted complete in f
   the full-day lifecycle test's preopen phase resolves through real production readiness truth with
   zero manual unstick; a supervised-task proof under an injected clock
 
-Present on the local `main` worktree (Phase E1, thrice-corrected), implementation complete but
+Present on the local `main` worktree (Phase E1, four-times-corrected), implementation complete but
 awaiting independent ChatGPT/operator acceptance:
 
 - a read-only architecture audit
@@ -162,9 +171,41 @@ awaiting independent ChatGPT/operator acceptance:
   validated in Rust; the last four singular-current-`run_id` evidence rules (§5/§6) are corrected to
   the full run lineage; the E2A decomposition is rewritten around the corrected coverage-bound event
   and run-lineage query
+- a fourth reconciliation pass
+  (`AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E1-PRE-DISPATCH-ANCHOR-GATE-AND-STABLE-REPLAY-04`) corrected
+  the final pre-dispatch anchor-gate and stable-replay defects: retires the claim that
+  coordinator-local write ordering alone prevents an early `PrepareDataOnly` invocation — the
+  completed-bar production adapter (`tick_autonomous_completed_bar_driver_from_state`) is a separate,
+  independently-scheduled task that fetches the relevant operation and selects a driver mode purely
+  from durable state, so a concurrent tick can observe a newly-visible, not-yet-anchored operation and
+  invoke `PrepareDataOnly` before the coordinator has written its anchor; defines dual enforcement — a
+  coordinator-side write-then-authoritative-re-read "ensure authority" seam, plus a mandatory
+  per-tick, adapter-side authority/compatibility gate that never relies on task scheduling order,
+  coordinator-tick-first assumptions, sleep timing, or the single-process happy path; adds one typed
+  adapter outcome, `CoverageAuthorityUnavailable`, with four closed reason codes
+  (`coverage_authority_not_bound` / `_unreadable` / `_invalid` / `_conflict`) distinguishing a quiet,
+  no-mutation no-op for an unbound-but-brand-new operation from a refused-driver case for an
+  unreadable, identity-mismatched, or policy-conflicting anchor; distinguishes a pristine
+  pre-runtime operation (zero `run_id`/`started_at_utc`/bars/claims/running-lineage — safe for the
+  coordinator to bind after ordinary identity verification) from an operation with any prior activity
+  or evidence (anchor must never be fabricated retroactively; fails closed to
+  `coverage_authority_missing_after_activity`, reusing the existing D1 blocker-signature mechanism, no
+  new lifecycle state); requires the adapter to compare its independently-resolved
+  symbol/timeframe/timeframe_secs/required_history_bars/effective_grace_seconds/identity fields
+  against the immutable anchor on every tick, never assuming the coordinator has already observed a
+  mid-day drift; removes `bound_at_utc` from the coverage-bound event's JSON payload entirely — exact
+  replay recomputes the payload on every qualifying tick, so a caller-`now` timestamp cannot be part of
+  the semantic equality comparison, and the bind instant is instead sourced from the event row's own
+  `ts_utc` column, excluded from the comparison; explicitly decides operation-row creation and
+  coverage-event insertion do not require one combined SQL transaction, since the adapter-side gate
+  independently protects recovered legacy rows, corrupt/missing events, and mid-day drift regardless
+  of creation atomicity; and corrects the failed-start-attempt wording so a failed start is never read
+  as implying no coverage-bound event exists, since the coordinator's write point runs strictly before
+  the start-gate call. The E2A decomposition is rewritten into the exact ten-item breakdown these
+  repairs require.
 
 After D4 and its evaluation-lineage repair (Phase D, accepted complete in full) and the
-thrice-corrected Phase E1 contract are accepted, Bundle 3 still requires Phase E runtime implementation
+four-times-corrected Phase E1 contract are accepted, Bundle 3 still requires Phase E runtime implementation
 (E2A durable coverage-anchor/run-lineage evidence foundation, then E2B–E5, per the accepted E1
 contract), Phase F GUI/runbook/soak preparation, and Phase G final closure.
 
@@ -541,7 +582,7 @@ Its current source-grounded capabilities include:
 - existing readiness, preflight, events, and alert surfaces
 
 The path is still in **pre-soak hardening** because Bundle 3 is open. Phase D (D1–D4) is accepted
-complete in full; the Phase E1 contract audit (thrice-corrected) is implementation complete, awaiting
+complete in full; the Phase E1 contract audit (four-times-corrected) is implementation complete, awaiting
 acceptance. Do not label the current `main` head as a finished autonomous-paper MVP until Phase E's
 runtime implementation (E2A, then E2B–E5) and the later F/G phases are independently accepted.
 
@@ -1019,7 +1060,7 @@ Recommended discipline:
 
 Be honest about these:
 
-- Bundle 3 is not closed; Phase D (D1–D4, integrated lifecycle proof, dispatch-ownership race closure, and the evaluation-lineage repair) is accepted complete in full; the Phase E1 contract audit (the binding durable outcome/no-trade contract, thrice-corrected) is implementation complete but awaiting independent ChatGPT/operator acceptance, and no Phase E runtime code exists yet
+- Bundle 3 is not closed; Phase D (D1–D4, integrated lifecycle proof, dispatch-ownership race closure, and the evaluation-lineage repair) is accepted complete in full; the Phase E1 contract audit (the binding durable outcome/no-trade contract, four-times-corrected) is implementation complete but awaiting independent ChatGPT/operator acceptance, and no Phase E runtime code exists yet
 - the current main branch should not begin an unattended soak until Phase E's runtime implementation (E2A durable coverage-anchor/run-lineage evidence foundation, then E2B–E5, per the accepted E1 contract) and the later Bundle 3 phases (F/G) are accepted; controlled, operator-supervised autonomous Paper + Alpaca operation is the current Bundle 3 target, not unattended soak
 - Bundle 4 durable paper cash/positions/lots/cost basis/P&L truth is still open
 - real paper fill, reconcile-after-fill, Discord lifecycle, restart, and repeated-session evidence remain incomplete
