@@ -11,7 +11,7 @@
   <img src="https://img.shields.io/badge/Rust-stable-orange?logo=rust" />
   <img src="https://img.shields.io/badge/Execution-deterministic-purple" />
   <img src="https://img.shields.io/badge/Proof-DB--backed-blue" />
-  <img src="https://img.shields.io/badge/Status-supervised%20paper%20candidate%20%7C%20live%20not%20ready-orange" />
+  <img src="https://img.shields.io/badge/Status-autonomous%20paper%20hardening%20%7C%20live%20not%20ready-orange" />
 </p>
 
 ## Overview
@@ -43,19 +43,33 @@ Safety is enforced architecturally, not socially.
 
 MiniQuantDeskV4 has real institutional bones and a materially stronger proof posture than scaffold-stage trading repos.
 
+**Repository snapshot used for this update (2026-07-19):** local `main` at
+`98d6d1d82d7ddc0439498480b5d179eba2533d50`
+(`fix: close completed-bar task supervision gaps`), plus the
+AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D4 patch on top of it (Phase D integrated
+lifecycle proof and dispatch-ownership race closure — implementation
+complete, awaiting ChatGPT and operator acceptance; see below).
+
 The strongest current operational route is:
 
 - **deployment mode:** `paper`
 - **adapter:** `alpaca`
+- **current supported operating lane:** long-only, single-symbol US equity/ETF paper trading
 - **operator surface:** daemon + Vite GUI
-- **proof posture:** full repo proof runner, DB-backed proof matrix, guard rails, GUI/daemon contract gate, and Windows low-memory parity
+- **proof posture:** targeted DB-backed scenario tests, repo guards, GUI/daemon contract checks, and the repo-native full proof runner
 
 What that means in plain English:
 
-- the canonical **Paper + Alpaca** path is the most credible route today
+- the canonical **Paper + Alpaca** path is the only route being advanced toward daily autonomous operation
+- strategy promotion and daily-data readiness now fail closed before paper order-producing logic can proceed
+- durable daily-operation identity, retry, recovery, and stop authority are implemented
+- production `main.rs` starts the supervised completed-bar task instead of the legacy blind-timer ticker; the legacy ticker (`state::autonomous_bar_ticker`) remains in source for compatibility tests only and is never spawned in production
+- D3 (completed-bar task terminal supervision, durable critical-outcome handling, task-level exactly-once proof) is accepted complete
+- D4 (integrated preopen-to-shutdown lifecycle proof, plus closing a confirmed completed-bar dispatch-ownership race against the ordinary execution loop) is implementation complete, awaiting ChatGPT and operator acceptance
+- Bundle 3 is still **open** — D4 acceptance, Phase E durable outcome/no-trade truth, GUI/runbook/soak preparation, and closure audit all remain
 - paper+paper is not treated as an authoritative execution path
 - backtest deployment through the daemon is intentionally refused fail-closed
-- live-shadow and live-capital have typed support and start-gate work, but should still be treated as partially trusted modes rather than finished operational claims
+- live-shadow and live-capital remain outside the current operational finish line
 
 ### Current readiness boundary
 
@@ -63,15 +77,69 @@ Use these labels precisely:
 
 | Mode | Current posture | Meaning |
 |---|---|---|
-| **Supervised Paper + Alpaca** | Candidate / operator-watched | Credible current path after a clean proof run, valid env, live Alpaca paper auth, and operator supervision. |
-| **Autonomous Paper + Alpaca** | Mechanically ready — real-fill evidence pending | Long-only single-symbol path is mechanically proven. The 2026-06-15 AAPL/5m smoke proved readiness and no-trade truth, but real order/fill lifecycle, reconcile after real fill, and repeated autonomous cycle proof remain open. |
-| **Live / live-capital** | Not ready | Typed support and gates exist, but this repo should not be treated as safe for unattended live trading yet. |
+| **Supervised Paper + Alpaca** | Available for controlled validation | Credible current path after a clean proof run, valid env, Alpaca paper auth, and active operator supervision. |
+| **Autonomous Paper + Alpaca** | Pre-soak hardening — Bundle 3 open | The durable daily controller, completed-bar production cutover, and the D4 integrated lifecycle/dispatch-ownership proof are implemented; Bundle 3 still requires independent D4 acceptance, durable daily outcome/no-trade truth, operator/runbook preparation, and final closure before it should begin an unattended autonomous soak. Controlled autonomous Paper + Alpaca operation under active operator supervision is the current Bundle 3 target — not unattended soak. |
+| **Live / live-capital** | Not ready | Typed support and gates exist, but this repo must not be treated as safe for unattended live trading. |
 
-**Autonomous paper smoke status (2026-06-15):** the smoke proved that the autonomous session controller can start the paper run at the session window, gates can all go green, the runtime can run, AAPL/5m market data can be fresh, `intraday_scalper` can tick, and the daemon can surface a durable no-trade reason. The observed decision was `strategy=intraday_scalper`, `symbol=AAPL`, `timeframe=5m`, `decision=flat_below_threshold`, `move_bps=12`, `threshold_bps=20`, final verdict `NO_TRADE_WITH_DURABLE_REASON`.
+### Current Bundle 3 position
 
-**Proof status (2026-06-01):** `full_repo_proof.ps1 -ProofProfile full -LowMemory` passed 18/18 lanes. The repo is proof-clean for current scope. Proof-clean is not the same as live-ready. Proof-clean is not the same as safe-capital-deployment.
+`AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-COMBINED` is the active bundle.
 
-The proof harness can prove the current locked repo scope. It does **not** mean the system is profitable, broker-proof, or live-ready.
+Already implemented and accepted (D1–D3):
+
+- authoritative session planning and durable daily-operation identity
+- restart-safe current-state and append-only transition evidence
+- typed start/recovery/stop retry behavior
+- canonical start through `AppState::start_execution_runtime`
+- exact completed-bar detection and durable exactly-once dispatch claims
+- safe recovery and nontrading-day reconciliation
+- durable blocker signatures and operator-facing lifecycle truth
+- the production cutover from the legacy bar ticker to the supervised completed-bar task, with bounded restart, durable permanent-failure degradation, and sticky operator-visible task-failure truth
+
+Implemented on the local `main` worktree (D4), but not yet independently accepted as complete:
+
+- closed a confirmed completed-bar dispatch-ownership race: the completed-bar driver's durable claim now dispatches through the exact-input strategy-dispatch seam directly instead of round-tripping through the shared account-wide pending-bar mailbox the ordinary execution loop also drains every tick, so a concurrent execution-loop tick can no longer cause a real evaluation to be recorded as a failed claim
+- a deterministic concurrency proof for that fix (both interleaving orderings)
+- one integrated scenario test driving a synthetic Paper+Alpaca day through preopen, canonical start, running dispatch, runtime interruption/recovery, session close, and shutdown together for the first time
+
+Still required before Bundle 3 closes:
+
+1. independent ChatGPT/operator acceptance of D4
+2. add Phase E durable end-of-day activity/no-trade outcome and read-only API truth
+3. finish Phase F GUI, runbook, and soak-evidence preparation
+4. complete Phase G closure audit and ledger reconciliation
+
+### What Bundle 3 completion unlocks
+
+After Bundle 3 is closed, the intended result is a daemon that can remain running across supported
+NYSE sessions and autonomously:
+
+- prepare and verify daily market data
+- create or recover one durable daily paper operation
+- arm and start only through the canonical safety gates
+- process only the exact expected completed bar
+- dispatch that bar at most once
+- retry transient failures with bounded backoff
+- recover safely after a daemon/runtime interruption
+- stop the matching owned runtime at the session boundary
+- record a durable daily activity or no-trade outcome
+- expose truthful operator status and evidence
+
+That is the point where the project can begin a **supervised autonomous Paper + Alpaca soak**.
+It is not permission to use live capital. The planned operating sequence is to collect roughly
+10–20 clean autonomous paper sessions, review real order/fill/reconcile/notification evidence,
+and complete durable paper portfolio/P&L truth before broader rollout.
+
+**Historical smoke status (2026-06-15):** the earlier AAPL/5m smoke proved readiness and a durable
+no-trade reason for `intraday_scalper`; it did not close real order/fill lifecycle, reconcile after
+a real fill, Discord trade-lifecycle evidence, or repeated autonomous cycles.
+
+**Historical full-proof status (2026-06-01):** `full_repo_proof.ps1 -ProofProfile full -LowMemory`
+passed 18/18 lanes at that snapshot. Current `main` has advanced materially since then; this README
+does not claim that the 18/18 transcript independently re-proves commit `7cff4592`.
+
+The proof harness can prove a locked repository scope. It does **not** prove profitability,
+broker correctness, or live-capital readiness.
 
 ## Architecture
 
@@ -168,19 +236,22 @@ Operationally, `MAIN` is the canonical engine.
 - scenario-driven reliability validation across runtime, execution, DB, broker, and daemon surfaces
 - guard rails for unsafe patterns, ignored-proof hygiene, migration governance, workspace dependency inheritance, and GUI/daemon contract drift
 
-### Market data
+### Market data and readiness
 
 - canonical `md_bars` ingest
 - CSV and provider ingestion paths
 - incremental provider sync support
 - data-quality reporting artifacts
 - stale / gap / incomplete-bar handling in the integrity path
+- one shared daily-data-readiness evaluator used by start/preflight/operator surfaces
+- explicit provider-call authorization; trusted local exact bars remain usable with provider calls disabled
 
 ### Backtesting and promotion
 
 - deterministic replay
 - conservative ambiguity handling
 - promotion-facing infrastructure and artifact checks
+- durable strategy-promotion authority for paper order-producing paths
 - parity and provenance work is materially stronger than earlier scaffolds
 
 ### Execution core
@@ -192,6 +263,16 @@ Operationally, `MAIN` is the canonical engine.
 - broker/internal order identity mapping
 - partial-fill-aware cancel / replace handling
 - restart and crash-window proof coverage
+
+### Autonomous daily control
+
+- deterministic daily-operation identity and durable state/version authority
+- append-only transition evidence
+- typed retry, recovery, and stop handling
+- nontrading-day recovery and durable ownership checks
+- exact completed-bar observation and durable exactly-once dispatch claims, dispatched through the same exact-input strategy-dispatch seam the execution loop uses — no shared-mailbox race with the ordinary execution loop's own per-tick dispatch
+- production cutover away from the blind legacy ticker (legacy ticker retained in source for compatibility tests only, never spawned in production)
+- fail-closed runtime ownership and blocker-signature handling
 
 ### Risk, integrity, and reconcile
 
@@ -206,7 +287,6 @@ Operationally, `MAIN` is the canonical engine.
 
 - CLI workflows for DB, market data, runs, and backtests
 - HTTP daemon with readiness, preflight, control, audit, and event surfaces
-- canonical Paper + Alpaca autonomous paper path with truthful readiness, session control, WS continuity gating, and durable autonomous-session history
 - persisted restart-intent workflow for admissible mode changes
 - Vite/React GUI operator console with a CI-enforced daemon contract gate
 - optional Windows desktop bootstrap scripts for a stricter desktop operator path
@@ -215,39 +295,54 @@ Operationally, `MAIN` is the canonical engine.
 
 Be honest about the open edges.
 
+- Bundle 3 remains open; D4 (integrated lifecycle proof and dispatch-ownership race closure) is implementation complete and is the immediate item awaiting independent ChatGPT/operator acceptance
+- durable daily outcome/no-trade classification (Phase E), final GUI/runbook/soak preparation (Phase F), and closure audit (Phase G) remain
+- Bundle 4 durable paper cash/positions/lots/cost basis/P&L truth has not started — this is required before trusting the accounting of any extended autonomous soak, not merely a nice-to-have
+- the current autonomous lane is long-only and single-symbol; multi-symbol rollout is deferred until after the soak
+- real paper order/fill/reconcile/Discord evidence is still incomplete
 - research → deployability → runtime artifact closure is not fully complete
 - live-shadow and live-capital typed support are not the same thing as proven safe live operation
 - Alpaca WebSocket gap recovery is still not a complete lifecycle replay story for every non-fill event
 - Alpaca REST fill recovery must remain treated carefully until pagination and high-volume recovery are proven end to end
-- bounded broker retry budgets and operator repair workflows still need hardening before unattended operation
 - shadow/live parity evidence is not yet fully surfaced and enforced end to end
-- portfolio realism and capital-allocation realism still need further hardening
 - some deeper GUI detail surfaces are intentionally deferred or unmounted rather than faked
 - desktop bootstrap exists, but the primary documented operator path remains daemon + browser GUI
 
-## Open live-paper proof items
+## Open autonomous-paper proof items
 
-The long-only single-symbol Paper + Alpaca MVP is mechanically ready. The following items are required before the MVP is fully closed:
+The long-only single-symbol Paper + Alpaca lane is the current finish line, but the autonomous MVP
+should not be called closed until Bundle 3 and its market evidence gates are complete:
 
 | Item | Status |
 |---|---|
+| BUNDLE-3-AUTONOMOUS-DAILY-OPS | Open — D4 acceptance, outcome/API, GUI/runbook/soak prep, and closure remain |
 | PAPER-TRADE-LIFECYCLE-01 | Open — market-hours paper smoke with real fills |
 | RECONCILE-AFTER-REAL-FILL-01 | Open — reconcile pass after a real paper fill |
 | DISCORD-TRADE-LIFECYCLE-REAL-01 | Open — Discord notification evidence from a real cycle |
-| REPEATED-AUTONOMOUS-TRADE-CYCLE-01 | Open — multiple autonomous cycles without operator intervention |
-| PAPER-SMOKE-EVIDENCE-REVIEW-02 | Closed — review tool exists; next market smoke must still be reviewed |
+| AUTONOMOUS-PAPER-SOAK | Not started — target roughly 10–20 clean sessions after Bundle 3 closure |
+| DURABLE-PAPER-PORTFOLIO-PNL | Open — Bundle 4 |
+| PAPER-SMOKE-EVIDENCE-REVIEW-02 | Closed — review tool exists; future smoke evidence still requires review |
 
-These proof items are operational evidence gates, not necessarily code gaps.
+These include both code gates and operational evidence gates.
 
-The 2026-06-15 no-trade smoke is a readiness/no-trade-truth proof, not a real-fill closure. It does not close the real order/fill lifecycle, reconcile-after-fill, Discord real-cycle, or repeated autonomous cycle proof items above.
+The 2026-06-15 no-trade smoke remains useful historical evidence, but it does not close the
+current completed-bar task, real order/fill lifecycle, reconcile-after-fill, Discord real-cycle,
+or repeated autonomous-session proof.
 
 ### Evidence capture workflow
 
-When configured and inside the session window, the autonomous session controller owns starting the paper run. Evidence is captured using the read-only `scripts/windows/Capture-PaperSmokeEvidence.ps1` before and after a paper smoke session, then reviewed with `scripts/windows/Review-PaperSmokeEvidence.ps1 -Latest -WriteSummary`. The full workflow is documented in `docs/runbooks/paper_smoke_evidence_pack.md`. Evidence folders are stored under `evidence/` in timestamped run folders and are gitignored by default.
+When Bundle 3 is closed, configured, and inside the session window, the durable autonomous
+controller should own starting the paper run. Evidence remains captured using the read-only
+`scripts/windows/Capture-PaperSmokeEvidence.ps1` workflow and reviewed with
+`scripts/windows/Review-PaperSmokeEvidence.ps1 -Latest -WriteSummary`. The full workflow is
+documented in `docs/runbooks/paper_smoke_evidence_pack.md`.
 
-`scripts/windows/Run-AAPL5mMarketSmoke.ps1` remains an optional AAPL/5m helper path. It is not the sole source of truth; captured daemon/API/DB evidence plus `Review-PaperSmokeEvidence.ps1` is the review boundary.
+`scripts/windows/Run-AAPL5mMarketSmoke.ps1` remains an optional AAPL/5m helper path. It is not
+the sole source of truth; captured daemon/API/DB evidence plus the review script is the evidence
+boundary.
 
-Live trading remains locked until repeated clean paper evidence and live-capital readiness gates are satisfied.
+Live trading remains locked until repeated clean paper evidence and all later live-capital gates
+are satisfied.
 
 ## Local setup model
 
@@ -464,16 +559,24 @@ Veritas Ledger is engineered primarily to address the second.
 
 ## Roadmap
 
-Items beyond the current long-only single-symbol MVP scope, in rough priority order:
+Immediate operational sequence:
 
-- full data ingestion expansion (additional providers, bar types, tick data)
-- trading methods expansion beyond long-only single-symbol
+1. close Bundle 3 autonomous daily paper operations
+2. build Bundle 4 durable paper portfolio and P&L truth
+3. run and review roughly 10–20 autonomous Paper + Alpaca sessions
+4. close real-fill, reconcile, Discord, restart, and repeated-cycle evidence gates
+5. only then consider broader symbol coverage or later live-shadow preparation
+
+Items beyond the current long-only single-symbol finish line:
+
 - multi-symbol universe support
+- additional strategies only after promotion evidence and operational stability
+- full data-ingestion expansion (additional providers, bar types, tick data)
 - multi-asset expansion
 - trade journal and forensic review surface
-- regime attribution and strategy decay detection
+- regime attribution and strategy-decay detection
 - GUI reskin and multi-monitor operator polish
-- live-capital readiness lock (gated on repeated clean paper evidence and all live-capital gates)
+- live-capital readiness lock, gated on repeated clean paper evidence and all live-capital gates
 
 ## Read next
 

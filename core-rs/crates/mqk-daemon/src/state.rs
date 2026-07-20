@@ -443,6 +443,17 @@ pub struct AppState {
     /// unconsumed prior bar).  Consumed atomically (set to `None`) by
     /// `tick_strategy_dispatch`.
     pending_strategy_bar_input: Arc<Mutex<Option<StrategyBarInput>>>,
+    /// D4.4: test-only rendezvous hook for the completed-bar driver's
+    /// post-claim/pre-dispatch concurrency proof (see
+    /// [`autonomous_completed_bar_driver::AutonomousCompletedBarPostClaimTestHook`]).
+    /// `None` in production and for every test that does not explicitly
+    /// install it; read once per `RunningDispatch` claim, never blocking
+    /// when absent.
+    completed_bar_post_claim_test_hook: Arc<
+        Mutex<
+            Option<Arc<autonomous_completed_bar_driver::AutonomousCompletedBarPostClaimTestHook>>,
+        >,
+    >,
     /// B3: Unix-second timestamp of the last `deposit_strategy_bar_input` call.
     ///
     /// Set to `input.end_ts` on every deposit; never cleared on stop/restart.
@@ -1316,6 +1327,7 @@ impl AppState {
             autonomous_history_degraded: Arc::new(AtomicBool::new(false)),
             native_strategy_bootstrap: Arc::new(Mutex::new(None)),
             pending_strategy_bar_input: Arc::new(Mutex::new(None)),
+            completed_bar_post_claim_test_hook: Arc::new(Mutex::new(None)),
             last_bar_input_ts: Arc::new(AtomicI64::new(0)),
             last_bar_signal_qty: Arc::new(AtomicI64::new(i64::MIN)),
             bar_tick_dispatch_count: Arc::new(AtomicU64::new(0)),
@@ -2084,6 +2096,34 @@ operator_reconcile_or_repair_required"
     /// Read by `/api/v1/strategy/summary` to surface honest `last_decision_time`.
     pub fn last_bar_input_ts(&self) -> i64 {
         self.last_bar_input_ts.load(Ordering::SeqCst)
+    }
+
+    /// D4.2: record `last_bar_input_ts` telemetry for a claim dispatched
+    /// through the exact-input seam (`dispatch_native_strategy_for_symbol_with_bar`
+    /// called directly, bypassing `pending_strategy_bar_input`). Mirrors the
+    /// telemetry side effect of `deposit_strategy_bar_input` without
+    /// touching the mailbox itself.
+    pub(crate) fn record_exact_bar_input_ts(&self, end_ts: i64) {
+        self.last_bar_input_ts.store(end_ts, Ordering::SeqCst);
+    }
+
+    /// D4.4: install (or clear) the completed-bar driver's post-claim
+    /// concurrency-proof rendezvous hook. Test seam only; never called in
+    /// production.
+    pub async fn set_completed_bar_post_claim_test_hook_for_test(
+        &self,
+        hook: Option<Arc<autonomous_completed_bar_driver::AutonomousCompletedBarPostClaimTestHook>>,
+    ) {
+        *self.completed_bar_post_claim_test_hook.lock().await = hook;
+    }
+
+    /// D4.4: read the currently installed post-claim rendezvous hook, if
+    /// any. Called on every `RunningDispatch` claim; `None` in production
+    /// and in every test that has not explicitly installed one.
+    pub(crate) async fn completed_bar_post_claim_test_hook_for_test(
+        &self,
+    ) -> Option<Arc<autonomous_completed_bar_driver::AutonomousCompletedBarPostClaimTestHook>> {
+        self.completed_bar_post_claim_test_hook.lock().await.clone()
     }
 
     /// AUTON-NO-TRADE-01: Record the outcome of a bar tick dispatch.

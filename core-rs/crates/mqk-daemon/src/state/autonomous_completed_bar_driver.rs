@@ -1345,12 +1345,40 @@ async fn observe_and_dispatch_if_ready(
     }
 }
 
-/// C.10-C.13: claim the durable dispatch identity for `bar_end_ts`, and only
-/// on a fresh claim, deposit + consume the canonical
-/// `AppState::tick_strategy_dispatch_for_symbol` path — the exact same
-/// production dispatch path used by the existing autonomous bar ticker and
-/// manual signal route, never a parallel strategy implementation. Never
-/// redispatches an already-completed or unresolved claim.
+/// D4.4: deterministic two-step rendezvous for the completed-bar
+/// dispatch-ownership concurrency proof only. `claimed` is notified
+/// immediately after a fresh durable dispatch claim is created; the driver
+/// then awaits `release` before calling the canonical exact-input dispatch
+/// seam. Production never installs this hook (`AppState`'s hook slot
+/// defaults to `None`), so the production cost is exactly one uncontended
+/// async mutex lock per `RunningDispatch` claim, and the driver never waits.
+#[derive(Default)]
+pub struct AutonomousCompletedBarPostClaimTestHook {
+    pub claimed: tokio::sync::Notify,
+    pub release: tokio::sync::Notify,
+}
+
+/// C.10-C.13/D4.2: claim the durable dispatch identity for `bar_end_ts`, and
+/// only on a fresh claim, dispatch this claim's exact [`StrategyBarInput`]
+/// directly through `AppState::dispatch_native_strategy_for_symbol_with_bar`
+/// — the same canonical native-strategy dispatch implementation the
+/// execution loop and manual signal route use, never a parallel strategy
+/// implementation, but invoked with this claim's own bar value rather than
+/// through the shared `pending_strategy_bar_input` mailbox.
+///
+/// D4.2: this claim must never rely on that shared, destructive mailbox
+/// between claim and evaluation. Depositing then immediately re-taking the
+/// account-wide single slot left a window in which a concurrent
+/// execution-loop tick (`tick_strategy_dispatch_multi_symbol`, driven every
+/// orchestrator tick regardless of this claim) could drain the mailbox
+/// first — causing this claim's own take to return `None` and the claim to
+/// be recorded failed even though a real strategy evaluation had occurred
+/// (for the wrong caller, against the wrong claim). Calling the exact-input
+/// seam directly makes this claim's evaluation independent of mailbox state
+/// entirely; the execution loop's own dispatch and the manual signal route
+/// both continue to read/write the mailbox exactly as before, unaffected.
+///
+/// Never redispatches an already-completed or unresolved claim.
 async fn claim_and_dispatch_observed_bar(
     input: &AutonomousCompletedBarDriverInput<'_>,
     binding: &ResolvedSingleBinding,
@@ -1378,19 +1406,37 @@ async fn claim_and_dispatch_observed_bar(
         mqk_db::BarDispatchClaimOutcome::Claimed => {}
     }
 
-    input
+    let bar = StrategyBarInput {
+        now_tick: operation.bars_observed.max(0) as u64,
+        end_ts: bar_end_ts,
+        limit_price: None,
+        qty: 1,
+    };
+
+    // B3 telemetry parity: `deposit_strategy_bar_input` used to be the sole
+    // writer of `last_bar_input_ts`. This claim no longer calls it, so the
+    // exact-input path records the same telemetry explicitly rather than
+    // silently going stale on `/api/v1/strategy/summary`.
+    input.state.record_exact_bar_input_ts(bar_end_ts);
+
+    // D4.4 concurrency-proof rendezvous — a no-op in production (see
+    // `AutonomousCompletedBarPostClaimTestHook` doc).
+    if let Some(hook) = input
         .state
-        .deposit_strategy_bar_input(StrategyBarInput {
-            now_tick: operation.bars_observed.max(0) as u64,
-            end_ts: bar_end_ts,
-            limit_price: None,
-            qty: 1,
-        })
-        .await;
+        .completed_bar_post_claim_test_hook_for_test()
+        .await
+    {
+        hook.claimed.notify_waiters();
+        hook.release.notified().await;
+    }
 
     let dispatch_result = input
         .state
-        .tick_strategy_dispatch_for_symbol(&binding.symbol, binding.timeframe.as_str())
+        .dispatch_native_strategy_for_symbol_with_bar(
+            &binding.symbol,
+            binding.timeframe.as_str(),
+            bar,
+        )
         .await;
 
     match dispatch_result {

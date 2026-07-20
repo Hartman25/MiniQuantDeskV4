@@ -13054,17 +13054,214 @@ persists until a controller clear — the overlay is what lifts); (c) the
 AL-03 fixture cleanup FK conflict above. Cycles 2-4 not required.
 
 ```text
-D3 (SUPERVISOR-AND-CRITICAL-OUTCOME-CLOSURE-01): IMPLEMENTATION COMPLETE —
-  AWAITING CHATGPT AND OPERATOR ACCEPTANCE
+D3 (SUPERVISOR-AND-CRITICAL-OUTCOME-CLOSURE-01): COMPLETE — ACCEPTED
+  (98d6d1d82d7ddc0439498480b5d179eba2533d50, "fix: close completed-bar task
+  supervision gaps")
   — retained supervisor handle + outer monitor; full restart-exhaustion
   proof (4 generations, restart_count 3, no fifth worker); claim release
   on every exit including supervisor panic; shutdown cancels and awaits;
   durable permanent-task-failure blocker with dedup; sticky
   operator-visible failure truth; complete typed critical-outcome
   classification with bounded details; task-level
-  prepare-to-running exactly-once proof landed (m01). D4 not started.
-Phase D: OPEN
+  prepare-to-running exactly-once proof landed (m01).
+Phase D: OPEN (D4 implementation complete, awaiting acceptance — see below)
 Bundle 3 (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-COMBINED): OPEN
-Next authorized patch after acceptance: Phase D4 — integrated autonomous
-  lifecycle and task proof.
+Next authorized patch after D3 acceptance: Phase D4 — integrated autonomous
+  lifecycle and task proof (see below — already implemented on top of this
+  commit).
+```
+
+---
+
+**Phase D4 integrated lifecycle proof and dispatch-ownership race closure
+(`AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D4-INTEGRATED-LIFECYCLE-PROOF-AND-PHASE-D-CLOSURE`,
+PENDING until committed).** Starting HEAD
+`98d6d1d82d7ddc0439498480b5d179eba2533d50` ("fix: close completed-bar task
+supervision gaps" — D3, accepted).
+
+**Mission.** Audit and close the shared pending-bar dispatch-ownership race
+between the completed-bar driver's durable claim and the ordinary execution
+loop's own per-tick dispatch; add a deterministic concurrency proof for both
+interleaving orderings; add one integrated scenario test driving a synthetic
+Paper+Alpaca day through the D2/D3 production seams together for the first
+time (preopen, canonical start, running dispatch, runtime interruption/
+recovery, session close, shutdown); reconcile Phase D against the Phase A
+contract; add a Phase D closure document and closure guard; update README/
+README_TECHNICAL honestly. Stop before Phase E outcome/no-trade
+implementation.
+
+**Dispatch-ownership race confirmed (truth audit, D4.1):**
+`autonomous_completed_bar_driver::claim_and_dispatch_observed_bar` created a
+fresh durable claim, then deposited the claimed bar into
+`AppState::pending_strategy_bar_input` — a single, destructive, account-wide
+mailbox — and immediately called `tick_strategy_dispatch_for_symbol` to take
+it back. The ordinary execution loop drains that same mailbox unconditionally
+on every ~1s tick (`loop_runner.rs`'s `tick_strategy_dispatch_multi_symbol`),
+independent of the completed-bar task's own cadence. Between the deposit and
+the re-take, a concurrent execution-loop tick could steal the deposited bar
+first; the completed-bar driver's own take then returned `None`, and the
+claim was recorded `DispatchClaimUnresolved{FAILED}` despite a real strategy
+evaluation having occurred — for the wrong caller, against the wrong claim.
+Manual signal route and the legacy ticker are the mailbox's other producers
+and were never part of the race (only the completed-bar driver's own
+deposit-then-immediately-consume sequence created the window).
+
+**REPAIR 1 — single authoritative claim consumer (D4.2,
+`autonomous_completed_bar_driver.rs::claim_and_dispatch_observed_bar`):**
+the claim now dispatches its own `StrategyBarInput` directly through
+`AppState::dispatch_native_strategy_for_symbol_with_bar` — the exact same
+canonical native-strategy dispatch implementation `tick_strategy_dispatch_for_symbol`
+already delegated to — and never touches `pending_strategy_bar_input`. This
+makes the claim's evaluation structurally independent of mailbox state; the
+execution loop's own dispatch and the manual signal route are unchanged (both
+still read/write the mailbox exactly as before). `AppState::record_exact_bar_input_ts`
+preserves the B3 `last_bar_input_ts` telemetry side effect
+`deposit_strategy_bar_input` used to provide, so `/api/v1/strategy/summary`
+does not go stale for completed-bar-driven dispatches.
+
+**REPAIR 2 — claim-completion truth (D4.3):** unchanged in shape (fed from
+the exact-input call's `Option<StrategyBarResult>` instead of the mailbox
+take): `Some` → `complete_autonomous_daily_bar_dispatch` →
+`DispatchCompleted`; `None` → `fail_autonomous_daily_bar_dispatch` →
+`DispatchClaimUnresolved{FAILED}`; already-completed → `AlreadyDispatched`,
+zero redispatch. Both durable writes remain `?`-propagated — a DB write
+failure already surfaces as a tick `Err`, fail-closed, no silent completion
+assumption.
+
+**REPAIR 3 — deterministic concurrency proof (D4.4,
+`AutonomousCompletedBarPostClaimTestHook` on `AppState`, `None` by default,
+one uncontended async-mutex check per `RunningDispatch` claim in production):**
+a test-only two-step `tokio::sync::Notify` rendezvous, checked once
+immediately after a fresh claim and before the exact-input dispatch call.
+`tests/scenario_autonomous_daily_phase_d_integration_01.rs`'s
+`phase_d_concurrency_forward_ordering_execution_loop_cannot_steal_claimed_bar`
+pauses the completed-bar path there, drives a concurrent execution-loop-style
+mailbox dispatch to completion via `tokio::join!`, then resumes — proving
+exactly one evaluation for the claimed bar, the claim completes, the
+concurrent tick independently dispatches its own decoy bar, the mailbox ends
+empty, and a repeat tick is `AlreadyDispatched` with no second evaluation.
+`phase_d_concurrency_reverse_ordering_execution_loop_first_is_also_safe`
+proves the inverse ordering (execution loop fully drains the mailbox before
+the claim is even created) is equally safe. Neither uses a sleep as
+assertion authority.
+
+**REPAIR 4 — integrated lifecycle proof (D4.5, same file,
+`phase_d_full_day_lifecycle`):** reuses AL-03's real-start fixture pattern
+(synthetic registries, seeded canonical `md_bars`, loopback mock Alpaca REST
+server, registered `intraday_scalper`, live broker cursor) — extended to
+additionally drive the completed-bar production adapter
+(`tick_autonomous_completed_bar_driver_from_state`) and a real coordinator
+recovery cycle on top of a real start, which AL-03 itself explicitly does not
+attempt. Proves, against a real isolated-DB fixture: preopen creates a
+durable operation with zero claim/zero evaluation before any bar exists
+(the strict readiness gate's genuine, pre-existing bar-less-preopen refusal
+is preserved, not weakened); `select_driver_mode_for_state` maps every
+pre-running state to `PrepareDataOnly` and `running` to `RunningDispatch`
+(proven directly, pure/DB-independent); canonical start binds an exact local
+`run_id`; a fresh claim dispatches the exact expected bar exactly once and a
+repeat tick is `AlreadyDispatched`; a terminal run without halt (crash
+simulation) is observed by a fresh process with zero local ownership,
+schedules `recovery_retrying` with a bounded future retry, and once due the
+canonical recovery start binds an exact **replacement** `run_id` distinct
+from the original, returning the operation to `running` with the
+already-dispatched bar remaining `AlreadyDispatched` (zero reevaluation);
+session close stops the matching runtime canonically, reaches `stopping`
+with `stopped_at_utc` set, and a post-close driver tick selects no automated
+invocation; zero orders were ever submitted across the whole day
+(`oms_outbox` count 0 for both run ids).
+
+Task-supervision liveness/shutdown-ordering and permanent-failure truth are
+proven in three separate, lighter, still DB-backed fixtures in the same file
+(`phase_d_task_liveness_then_shutdown_blocks_further_ticks`,
+`phase_d_task_permanent_failure_degrades_operation_once_and_stays_visible`,
+`phase_d_spawn_seam_starts_at_most_one_completed_bar_task`), reusing the
+existing D3 supervisor machinery unchanged.
+
+**Fixture note:** the integrated test shares the `(market_date="2024-04-15",
+"PAPER", "alpaca")` daily-slot key with AL-03's own fixture (required because
+`BrokerKind::parse` only recognizes the literal adapter-id string `"alpaca"`
+for the real env-driven broker-kind resolution this test needs). Both files
+clean up their own adapter-id slot before creating a row; this is safe under
+the master patch's mandated one-named-binary-at-a-time regression discipline,
+and was verified by running `scenario_autonomous_paper_day_lifecycle_auton12`
+immediately after the new file with no interference in either direction.
+
+**Documentation:** `docs/specs/autonomous_daily_paper_operations_01d_phase_d_closure.md`
+(new — production task graph, daily-operation lifecycle graph, dispatch
+ownership before/after, restart policy, recovery/session-close/shutdown
+behavior, durable/operator truth ownership, test matrix, known limitations,
+explicit Phase E boundary). `scripts/guards/validate_autonomous_daily_paper_operations_01d_phase_d_closure.ps1`
+(new — source-aware checks: no legacy-ticker spawn, exactly one
+completed-bar-task spawn, shutdown awaits cancellation before runtime
+shutdown, the claim function no longer uses the shared deposit-then-consume
+sequence, the closure doc and integration test exist, the ledger never marks
+Bundle 3/Phase D closed, README/README_TECHNICAL never claim Bundle 3
+complete or soak-ready). README.md / README_TECHNICAL.md updated in place
+(D1–D3 accepted; D4 implementation complete awaiting acceptance; Bundle 3
+still open; legacy ticker documented as compatibility-only).
+
+**Regressions (each binary run alone, `--include-ignored --test-threads=1`,
+isolated test Postgres on port 5434):**
+`scenario_autonomous_daily_phase_d_integration_01` 6/6 (new),
+`scenario_autonomous_completed_bar_task_01` 48/48,
+`scenario_autonomous_completed_bar_driver_01` 56/56,
+`scenario_autonomous_daily_session_coordinator_01` 48/48,
+`scenario_autonomous_paper_day_lifecycle_auton12` 3/3,
+`scenario_daemon_runtime_lifecycle` 24/24,
+`scenario_multi_symbol_dispatch_loop_01` 8/8,
+`scenario_per_symbol_bar_window_01` 14/14,
+`scenario_signal_evaluation_journal_auton_no_signal_obs_01` 7/7,
+`scenario_autonomous_daily_coordinator_policy_01` 35/35,
+`scenario_autonomous_daily_operation_identity_01` 44/44,
+`scenario_daily_data_readiness_start_gate_01` 20/20,
+`scenario_native_strategy_bootstrap_daemon_b1b` 5/5,
+`scenario_autonomous_gate_parity_auton11` 5/5,
+`scenario_autonomous_daily_operation_lifecycle_01` (mqk-db) 36/36,
+`scenario_autonomous_daily_operation_store_01` (mqk-db) 26/26,
+`scenario_autonomous_daily_operation_data_evidence_01` (mqk-db) 8/8,
+`state::autonomous_bar_ticker::tests::` (`--lib`) 5/5. Zero required
+failures. The complete daemon integration suite was deliberately not run.
+
+**Guards:** `validate_autonomous_daily_paper_operations_01a_audit.ps1` pass,
+`validate_daily_data_readiness_01e_closure.ps1` pass,
+`validate_autonomous_daily_paper_operations_01d_phase_d_closure.ps1` pass
+(new), `check_unsafe_patterns.ps1` pass. **Migration:** none (no schema
+change required). **Format/lint:** `rustfmt --check` clean on every touched
+file; Clippy `-D warnings` clean on `mqk-daemon --lib` and the new/changed
+test binaries; `cargo check -p mqk-db -p mqk-runtime -p mqk-daemon` clean
+(only the pre-existing `sqlx-postgres` future-incompat note); `git diff
+--check` and `git diff --cached --check` clean.
+
+**Internal review cycles:** one full cycle (truth audit → implementation →
+targeted validation → independent correctness review → independent
+scope/safety review), with intra-cycle fixture repairs caught by the new
+tests before any commit: (a) the concurrency proof's initial fixture relied
+on an unseeded, empty-`md_bars` fail-closed fallback that only happened to
+return `Some` under accidental connection-pool contention — corrected by
+seeding one real completed bar and a matching freshness override so both
+orderings are deterministic on their own merits, not on pool timing; (b) the
+integrated lifecycle test's preopen tick against pre-seeded "future" bars
+produced a durable `manual_intervention_required` block — corrected by
+seeding bars immediately before the instant they are dated for, matching
+real ingest timing, plus an explicit operator-style unstick transition for
+the (genuine, pre-existing) bar-less-preopen refusal; (c) the recovery
+phase's "crash" simulation left the original `AppState`'s execution loop
+task alive, which halted the replacement run out from under the "restarted"
+process — corrected to properly tear down the original `AppState` via
+`stop_for_shutdown()` before constructing the simulated-restart state,
+matching what an actual process crash implies. Cycles 2-4 not required.
+
+```text
+D3 (SUPERVISOR-AND-CRITICAL-OUTCOME-CLOSURE-01): COMPLETE — ACCEPTED
+D4 (INTEGRATED-LIFECYCLE-PROOF-AND-PHASE-D-CLOSURE): IMPLEMENTATION COMPLETE
+  — AWAITING CHATGPT AND OPERATOR ACCEPTANCE
+  — closed the confirmed completed-bar dispatch-ownership race via a single
+  authoritative exact-input claim consumer; deterministic concurrency proof
+  both orderings; one integrated Paper+Alpaca day scenario proving preopen,
+  canonical start, running dispatch, runtime interruption/recovery with a
+  real replacement run_id, session close, and shutdown together for the
+  first time; Phase D closure document and closure guard landed.
+PHASE D: OPEN pending independent D4 acceptance
+BUNDLE 3 (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-COMBINED): OPEN
+NEXT AFTER ACCEPTANCE: Phase E durable outcome/no-trade and API work
 ```

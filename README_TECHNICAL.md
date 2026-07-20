@@ -19,18 +19,79 @@ Use the root `README.md` for the high-level system story.
 
 ## Current proved posture
 
-The repo snapshot used for this README refresh reflects a clean committed state and a completed full DB-backed proof run through `full_repo_proof.ps1 -ProofProfile full -LowMemory`.
+**Repository snapshot used for this update (2026-07-19):** local `main` at
+`98d6d1d82d7ddc0439498480b5d179eba2533d50`
+(`fix: close completed-bar task supervision gaps` — D3, accepted), plus the
+AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D4 patch on top of it (implementation
+complete, awaiting ChatGPT and operator acceptance).
 
-That matters because this technical README is meant to describe the strongest currently proved path, not an aspirational one.
-
-The strongest current operational route is still:
+The strongest current operational route is:
 
 - `paper` deployment mode
 - `alpaca` adapter
+- long-only, single-symbol US equity/ETF lane
 - daemon + Vite GUI operator path
-- DB-backed proof and guard lanes as the load-bearing validation standard
+- DB-backed targeted scenarios and repository guards as the load-bearing development proof
+- `full_repo_proof.ps1` as the final locked-snapshot proof runner
 
-This is a materially stronger operator posture than early scaffold state, but it is still **not** a safe-live-capital blanket claim.
+The historical 2026-06-01 full DB-backed low-memory proof passed 18/18 lanes, but the repository has
+advanced materially since that snapshot; this README does not represent that historical 18/18
+transcript as a fresh full-repo proof of the current commit.
+
+### Active Bundle 3 boundary
+
+`AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-COMBINED` remains open.
+
+Current local `main` contains, accepted (D1–D3):
+
+- durable daily-operation identity, state/version CAS, and append-only transitions
+- canonical session boundaries and nontrading-day reconciliation
+- typed start, recovery, and stop retries
+- exact completed-bar observation and durable dispatch claims
+- production `main.rs` cutover from the legacy blind ticker to the supervised completed-bar task
+  (legacy ticker retained in source for compatibility tests only, never spawned in production)
+- retained supervisor ownership and shutdown wait behavior
+- full restart-budget exhaustion proof (bounded to 3 restarts / 4 worker generations)
+- durable operation degradation when the task permanently fails
+- sticky operator failure truth (survives session-controller's own Running-style projections)
+- complete typed classification of non-recoverable driver/setup outcomes
+- task-level PrepareDataOnly → RunningDispatch → exactly-once proof
+
+Present on the local `main` worktree (D4), implementation complete but awaiting independent
+ChatGPT/operator acceptance:
+
+- closure of a confirmed completed-bar dispatch-ownership race: the completed-bar driver's durable
+  claim previously deposited into the same shared, account-wide `pending_strategy_bar_input`
+  mailbox the ordinary execution loop drains every tick, then immediately re-took it — a concurrent
+  execution-loop tick could steal the deposited bar first, causing the claim to be recorded failed
+  despite a real evaluation having occurred. The claim now dispatches directly through
+  `AppState::dispatch_native_strategy_for_symbol_with_bar` (the same canonical exact-input dispatch
+  implementation, just called with the claim's own bar value) and never touches the mailbox;
+  execution-loop and manual-signal-route dispatch are unchanged.
+- a deterministic concurrency proof (both interleaving orderings, via an explicit test-only
+  rendezvous hook that is a no-op in production)
+- one integrated scenario test driving a synthetic Paper+Alpaca day through preopen, canonical
+  start, running dispatch, runtime interruption/recovery (a real replacement `run_id`), session
+  close, and shutdown together for the first time
+
+After D4 acceptance, Bundle 3 still requires Phase E durable daily outcome/no-trade truth and
+read-only API work, Phase F GUI/runbook/soak preparation, and Phase G final closure.
+
+### Operational meaning
+
+Completion of Bundle 3 is the boundary for beginning a **supervised autonomous paper soak**.
+It is not a live-capital authorization and it is not the end of the operational roadmap.
+
+The intended post-Bundle-3 sequence is:
+
+1. run final targeted and full locked-snapshot proof
+2. start with operator-watched Paper + Alpaca sessions
+3. collect roughly 10–20 clean autonomous sessions
+4. close real-fill, reconcile, Discord, restart, and repeated-cycle evidence
+5. complete Bundle 4 durable paper portfolio and P&L truth before treating accounting as restart-safe
+
+This is a materially stronger operator posture than early scaffold state, but it is still **not**
+a safe-live-capital blanket claim.
 
 ## Core principles
 
@@ -358,11 +419,11 @@ This section is intentionally blunt.
 
 ### Valid daemon combinations today
 
-Valid mode + adapter combinations with `deployment_start_allowed: true`:
+Valid mode + adapter combinations with `deployment_start_allowed: true` include:
 
 - `paper` mode + `alpaca` adapter — canonical honest paper path
-- `live-shadow` mode + `alpaca` adapter — typed support, no capital authority
-- `live-capital` mode + `alpaca` adapter — typed support with additional runtime gates
+- `live-shadow` mode + `alpaca` adapter — typed support, no current capital authority
+- `live-capital` mode + `alpaca` adapter — typed support with additional gates, not operationally authorized here
 
 ### Fail-closed combinations
 
@@ -373,21 +434,68 @@ Valid mode + adapter combinations with `deployment_start_allowed: true`:
 
 ### Strongest current operational path
 
-The strongest current daemon path is canonical **Paper + Alpaca autonomous paper**.
+The strongest current daemon path is canonical **Paper + Alpaca**.
 
-That path has:
+Its current source-grounded capabilities include:
 
-- truthful readiness at `GET /api/v1/autonomous/readiness`
-- truthful autonomous-paper fields on `GET /api/v1/system/preflight`
-- NYSE-session-aware autonomous controller behavior
-- WS continuity gating before start
-- durable autonomous supervisor history in Postgres
-- autonomous session rows surfaced in `GET /api/v1/events/feed`
-- a one-day soak harness: `scripts/paper_soak_day.sh`
-- an operator runbook: `docs/runbooks/autonomous_paper_ops.md`
+- durable daily-operation state in Postgres
+- canonical NYSE-session planning and persisted operation boundaries
+- strict daily-data-readiness gating before runtime start
+- strategy-promotion gating before paper order-producing logic
+- WS continuity and reconcile truth gates
+- bounded typed start/recovery/stop behavior
+- completed-bar-driven production task instead of the legacy blind timer
+- durable observation and exactly-once dispatch-claim infrastructure, dispatched through the same
+  exact-input strategy-dispatch seam the execution loop uses (D4)
+- existing readiness, preflight, events, and alert surfaces
 
-That does **not** make it live-capital ready.
-It means paper/autonomous operator truth is materially stronger than before.
+The path is still in **pre-soak hardening** because Bundle 3 is open. Do not label the current
+`main` head as a finished autonomous-paper MVP until D4 and the later E/F/G phases are
+independently accepted.
+
+### What is expected after Bundle 3
+
+After Bundle 3 closes, the daemon should be able to remain running across supported NYSE sessions
+and manage the daily Paper + Alpaca lifecycle without a person manually starting and stopping each
+run.
+
+The first deployment posture should still be:
+
+```text
+autonomous PAPER
++ operator watched
++ evidence captured
++ live capital disabled
+```
+
+Use the first sessions as a controlled soak. The project plan is roughly 10–20 clean sessions before
+broader rollout. Bundle 4 then adds trustworthy durable paper cash, positions, lots, cost basis, and
+daily realized/unrealized P&L across restarts.
+
+### Completed-bar task configuration
+
+Current D3 source adds:
+
+```text
+MQK_AUTONOMOUS_COMPLETED_BAR_TICK_SECS
+```
+
+Behavior:
+
+- absent or blank: 15-second default
+- allowed range: 1–300 seconds
+- invalid, zero, negative, or out-of-range: task startup fails closed
+- Tokio missed ticks are skipped rather than replayed in a burst
+
+Provider network calls remain separately authorized by both:
+
+```text
+MQK_AUTONOMOUS_DATA_REFRESH_ENABLED=true
+MQK_ALLOW_PROVIDER_API_CALLS=true
+```
+
+The completed-bar task may still use an exact trusted local bar when provider calls are disabled.
+Do not enable provider calls merely to make startup succeed.
 
 ### Important vocabulary mismatch
 
@@ -411,10 +519,10 @@ Mode transitions are restart-based, not hot-swapped.
 Current truthful operator workflow:
 
 - `change-system-mode` remains a guidance/compatibility path that returns `409`
-- canonical operator actions now include persisted restart-intent workflow through `/api/v1/ops/action`
+- canonical operator actions include persisted restart-intent workflow through `/api/v1/ops/action`
 - `request-mode-change` can persist a restart intent when the transition is admissible-with-restart
 - `cancel-mode-transition` can cancel a pending durable restart intent
-- the action catalog exposes those truthful restart workflows instead of pretending hot mode changes are authoritative
+- the action catalog exposes restart workflows instead of pretending hot mode changes are authoritative
 
 ## CLI entry point
 
@@ -642,6 +750,17 @@ $env:ALPACA_API_SECRET_PAPER = "<your-paper-secret>"
 cargo run -p mqk-daemon
 ```
 
+Optional autonomous-operation variables:
+
+```powershell
+# Completed-bar worker cadence. Default 15; valid range 1-300 seconds.
+$env:MQK_AUTONOMOUS_COMPLETED_BAR_TICK_SECS = "15"
+
+# Only set both to true when real provider latest-bar calls are intentionally authorized.
+$env:MQK_AUTONOMOUS_DATA_REFRESH_ENABLED = "true"
+$env:MQK_ALLOW_PROVIDER_API_CALLS = "true"
+```
+
 Optional session override variables:
 
 ```powershell
@@ -649,7 +768,9 @@ $env:MQK_SESSION_START_HH_MM = "14:30"
 $env:MQK_SESSION_STOP_HH_MM = "21:00"
 ```
 
-Use those only if you explicitly want to override the default NYSE regular-session autonomous window.
+Use session overrides only when you explicitly intend to replace the default NYSE regular-session
+authority for a controlled test. Provider authorization is not required when the exact canonical
+bar is already available locally.
 
 ### Useful daemon surfaces for the canonical paper path
 
@@ -806,11 +927,15 @@ Recommended discipline:
 
 Be honest about these:
 
+- Bundle 3 is not closed; D4 (integrated lifecycle proof and dispatch-ownership race closure) is implementation complete but awaiting independent ChatGPT/operator acceptance
+- the current main branch should not begin an unattended soak until D4 and the later Bundle 3 phases (E/F/G) are accepted; controlled, operator-supervised autonomous Paper + Alpaca operation is the current Bundle 3 target, not unattended soak
+- Bundle 4 durable paper cash/positions/lots/cost basis/P&L truth is still open
+- real paper fill, reconcile-after-fill, Discord lifecycle, restart, and repeated-session evidence remain incomplete
 - the daemon/operator plane is materially stronger, but some deeper GUI detail surfaces remain intentionally deferred or unmounted rather than faked
 - the daemon has typed support for paper, live-shadow, and live-capital on Alpaca, but typed support is not the same thing as safe live operation
 - the backtest system is strong, but still being hardened toward promotion-grade provenance and lifecycle realism
 - shadow/live parity evidence is not yet strong enough for a safe unattended live claim
-- scenario-tested does **not** mean safe for live capital by default
+- scenario-tested does **not** mean profitable, broker-proof, or safe for live capital
 
 ## Reference docs
 
