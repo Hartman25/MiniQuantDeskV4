@@ -13821,3 +13821,161 @@ NEXT AFTER E1 ACCEPTANCE: E2A — durable coverage-anchor and run-lineage eviden
 unattended 10-20-session soak: NOT STARTED
 live capital: NOT READY
 ```
+
+---
+
+## AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E1-OPERATION-SCOPED-COVERAGE-AUTHORITY-RECONCILIATION-03
+
+Starting HEAD: `97fc21fa819b624fc7b791508a173bca3a194208` ("docs: bind outcome contract to coverage
+and run lineage"). Documentation/guard-only correction pass 3 of the Phase E1 contract above — no
+Rust file, migration, API route, or GUI file is added or modified by this patch.
+
+**Mission:** correct the final operation-scoped coverage-authority defects left in correction pass 2,
+found by a fresh, targeted re-read of `build_pre_start_evidence_detail`/
+`persist_pre_start_readiness_evidence` (`daily_data_readiness.rs:1444-1510`),
+`AppState::start_execution_runtime`'s evidence-write call site (`lifecycle.rs:617-676`),
+`mqk_db::persist_autonomous_session_event`/the `sys_autonomous_session_events` schema
+(`arm_state.rs:274-297`, migration `0032`), and `autonomous_daily_coordinator.rs`'s
+`create_or_recover`/`dispatch_by_state` sequencing (`autonomous_daily_coordinator.rs:370-421`).
+
+**Corrections made** (full detail in the corrected contract document):
+
+1. **Canonical bar-timestamp semantics (REPAIR 1, clarifying, no behavior change)** — makes explicit
+   that `intraday_grid_starts` returns session-slot *start* timestamps, and that production uses
+   these same values directly as the canonical `md_bars.end_ts` identity throughout the system; a bar
+   becomes expected only once `end_ts + timeframe_secs + effective_grace_seconds <= now_utc`.
+2. **First intended dispatchable bar (REPAIR 2)** — retires pass 2's fallback of "the current
+   session's first grid slot when no preopen slot qualifies," which is under-inclusive because the
+   production expected window can spill into the previous trading session even at an ordinary,
+   on-time open. The corrected, single formula: the first intended dispatchable bar is the final
+   element of `expected_intraday_end_ts_window` evaluated at `effective_operation_open_utc`, using
+   the operation's own bound calendar/session plan, symbol, timeframe, `timeframe_secs`, effective
+   grace, and `required_history_bars`. Only that final element anchors dispatch; earlier elements in
+   the same window remain strategy-history context, not separate dispatch obligations. A delayed
+   actual start never moves the anchor forward, since it is evaluated at the fixed
+   `effective_operation_open_utc`, never at `started_at_utc` or any other observed runtime instant.
+3. **Coverage window (REPAIR 4)** — updates the exact expected-bar-set definition to match the
+   corrected anchor, which may itself be a previous-session identity: the first anchor plus every
+   subsequent current-session grid identity whose expectation instant is strictly greater than the
+   anchor's own expectation position and strictly less than `effective_operation_close_utc`.
+4. **Operation-scoped coverage authority (REPAIR 5)** — retires §6a's "extend the existing
+   `daily_data_readiness_evaluated` event" seam as a structural mismatch, not merely a preference: a
+   fresh source read confirms that event carries no `operation_id`, is written for every start
+   attempt (successful or refused) including assignment-resolution failures, and reseeds its
+   `evaluation_id` key on every attempt — it cannot safely be repurposed as a one-row-per-operation
+   immutable authority. Replaced with one dedicated, operation-scoped, append-only
+   `autonomous_daily_coverage_bound` event in the existing `sys_autonomous_session_events` store
+   (migration `0032`, no new table, no migration), keyed `operation_id`-only
+   (`autonomous_daily_coverage_bound:{operation_id}`, `run_id` always `NULL`) so the store's own
+   primary key — not an application-level convention — guarantees at most one row per operation.
+5. **Write order and fail-closed policy (REPAIR 6)** — the coverage-bound event must be written after
+   operation identity/session plan/assignment/runtime binding/timeframe/grace policy are resolved and
+   verified (immediately after `create_or_recover` returns, before `dispatch_by_state`,
+   `autonomous_daily_coordinator.rs:381-421`), and before `PrepareDataOnly` eligibility, any bar
+   observation, canonical start, or any dispatch claim. Defines the exact first-write/exact-replay/
+   conflicting-replay/write-failure behavior, reusing the existing `ON CONFLICT (id) DO NOTHING`
+   insert plus the same authoritative-re-read discipline D4 already established for dispatch-claim
+   completion — a conflicting replay (mismatched recomputed payload) fails closed, never overwrites
+   the original anchor; no later recovery start may replace or move it.
+6. **Readiness/start-event roles (REPAIR 7)** — clarifies the three distinct event types now in
+   `sys_autonomous_session_events`: `daily_data_readiness_evaluated` (evidence for one start-gate
+   attempt, many per operation, no `operation_id`), `daily_data_readiness_run_linked` (links one
+   successful readiness evaluation to its `run_id`, many per operation across recovery), and the new
+   `autonomous_daily_coverage_bound` (the one immutable intended-dispatch-window anchor for the
+   entire daily operation, exactly one row per operation). A failed start attempt never creates or
+   competes with a coverage authority; every recovery start must prove compatibility with the
+   already-bound anchor before it may proceed.
+7. **Run-lineage query (REPAIR 8)** — retires pass 2's `SELECT DISTINCT run_id ... ORDER BY
+   transition_seq` query as invalid: PostgreSQL rejects an `ORDER BY` expression not present in a
+   `SELECT DISTINCT` list, and `DISTINCT` would discard the duplicate-row evidence the contract's own
+   contradiction check needs. Replaced with a raw, undeduplicated `(transition_seq, run_id)` row read,
+   with monotonicity/uniqueness/current-run-id-agreement validation performed in Rust, never in SQL.
+8. **Full-lineage language (REPAIR 9)** — removes the four remaining singular-current-`run_id`
+   evidence rules (§5 tier 2/3, §6 items 3–6: strategy evaluations, `oms_outbox`, `oms_inbox`),
+   replacing each with "across every `run_id` in the validated full operation run lineage (§6b)".
+9. **E2A decomposition (REPAIR 10)** — rewrites the E2A mission around the corrected coverage-bound
+   event and run-lineage query: implement the event write/re-read/idempotent-replay/conflicting-replay
+   helper at the coordinator write point named above, the exact coverage-bound event reader, the raw
+   ordered run-lineage helper, and restart/recovery-compatibility proofs. Hard exclusions (no
+   classifier, no finalization CAS, no coordinator invocation beyond the one write point, no API, no
+   GUI, no notification, no transition-graph change) are unchanged.
+
+**E1 guard strengthened (REPAIR 11):**
+`validate_autonomous_daily_paper_operations_01e_outcome_contract.ps1` gained fourteen new checks
+([31]-[44]): the retired current-session-first-slot fallback (with a corrected em-dash-matching
+needle, learning from pass 2's own encoding lesson), the corrected first-anchor formula and its
+required previous-session-spillover and history-vs-obligation consequences, the new coverage-bound
+event's identity/immutability/write-order/fail-closed-replay properties, the corrected raw-row
+run-lineage query and its Rust-side exactly-once validation, the retired singular-`run_id` evidence
+rules, the corrected E2A mission, and the requirement that E2B remain unauthorized until E2A is
+independently accepted. Before adding these, a targeted grep confirmed the literal
+string `select distinct run_id` still appears three times in the corrected document — each one
+inside prose describing the *retirement* of the old query, never as an active instruction — so no
+blind `DoesNotContain` check was written against that substring (it would have been a guaranteed
+false-positive failure); the new checks instead positively assert the corrected query text and its
+Rust-side validation language.
+
+**Internal review cycles:** one full cycle (source audit → contract correction → guard correction →
+independent correctness review → independent scope/safety review). The correctness review caught one
+class of self-inflicted defect before commit: an early draft of guard check [42] used a literal `--`
+in place of the document's actual em-dash character in the negative-check needle for check [31],
+which would have silently failed to catch a reintroduction of the retired fallback text (a
+non-matching needle makes a `DoesNotContain` check vacuously pass regardless of document content) —
+fixed by using the script's existing `$EmDash` variable, and by re-verifying every new needle against
+the actual corrected document text (via `Grep`) before finalizing the guard, rather than trusting
+recalled phrasing. The guard was then executed against the corrected document and all 43 checks
+passed. Cycles 2-4 not required.
+
+**Deliverable:** `docs/specs/autonomous_daily_paper_operations_01e_outcome_truth_contract.md`
+corrected in place — a "Correction pass 3" note added at the top (preserving passes 1/2 verbatim);
+§6 item 2 steps 3/4/6 rewritten (canonical timestamp semantics, corrected first-anchor formula,
+corrected coverage window); §6a rewritten (retired extension seam, new coverage-bound event
+definition, write-order/fail-closed contract, readiness/start-event role clarification); §6b's SQL
+query and aggregation description rewritten (raw rows, Rust-side validation); §5/§6 singular-`run_id`
+phrasing corrected in four places; §13's E2A mission and the E2-vs-E2A/E2B decision paragraph
+rewritten around the corrected seam; §14 (known limitations) updated. This document remains the
+binding contract for Phases E2A–E5 — corrected, not re-audited from scratch beyond what each repair
+required, and still not itself an acceptance record.
+
+**Guards:** `validate_autonomous_daily_paper_operations_01e_outcome_contract.ps1` (strengthened, all
+44 checks pass), `validate_autonomous_daily_paper_operations_01a_audit.ps1` pass,
+`validate_daily_data_readiness_01e_closure.ps1` pass,
+`validate_autonomous_daily_paper_operations_01d_phase_d_closure.ps1` pass (unmodified),
+`validate_autonomous_daily_paper_operations_01d4_evaluation_lineage_and_autonomous_preopen_closure_01.ps1`
+pass (unmodified), `check_unsafe_patterns.ps1` pass. `git diff --check` / `git diff --cached --check`
+clean. No Cargo command run (no Rust file touched).
+
+**Files changed:** `MiniQuantDesk_Master_Patch_Ledger_v2.md`, `README.md`, `README_TECHNICAL.md`,
+`docs/specs/autonomous_daily_paper_operations_01e_outcome_truth_contract.md`,
+`scripts/guards/validate_autonomous_daily_paper_operations_01e_outcome_contract.ps1`.
+No Rust file changed. No migration changed. No API route implemented. No GUI changed.
+
+**Safety confirmation (E1 operation-scoped coverage-authority reconciliation):**
+
+```text
+PROVIDER CALLS: no
+BROKER CALLS: no
+NETWORK CALLS: no
+REAL DAEMON STARTED: no
+PAPER ORDERS: no
+LIVE ORDERS: no
+PAPER DB TOUCHED: no
+PORT 5440 TOUCHED: no
+RUST FILES CHANGED: no
+MIGRATION CHANGED: no
+API IMPLEMENTED: no
+GUI CHANGED: no
+PHASE E RUNTIME IMPLEMENTATION STARTED: no
+```
+
+```text
+D4: ACCEPTED — COMPLETE
+PHASE D: ACCEPTED — COMPLETE
+E1 operation-scoped coverage-authority reconciliation: IMPLEMENTATION COMPLETE — AWAITING CHATGPT
+  AND OPERATOR ACCEPTANCE
+PHASE E RUNTIME IMPLEMENTATION: NOT STARTED
+BUNDLE 3 (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-COMBINED): OPEN
+NEXT AFTER E1 ACCEPTANCE: E2A — durable coverage-anchor and run-lineage evidence foundation, only
+unattended 10-20-session soak: NOT STARTED
+live capital: NOT READY
+```

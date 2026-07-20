@@ -61,6 +61,42 @@
 #   [30] The contract does not guarantee a durable database-unavailable write
 #        during a complete DB outage.
 #
+# Correction pass 3 (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E1-OPERATION-SCOPED-COVERAGE-AUTHORITY-
+# RECONCILIATION-03) checks:
+#   [31] The contract does not fall back to the current session's first grid
+#        slot when no preopen slot qualifies for the first dispatchable bar.
+#   [32] The contract defines the first dispatchable bar as the final element
+#        of expected_intraday_end_ts_window evaluated at
+#        effective_operation_open_utc.
+#   [33] The contract states the first-anchor spillover can select a previous
+#        trading session's own final grid identity, not a current-session bar.
+#   [34] The contract does not treat every readiness-history-window bar as a
+#        separate dispatch obligation -- only the final element anchors
+#        dispatch.
+#   [35] The contract defines a dedicated, operation-scoped
+#        autonomous_daily_coverage_bound event as the coverage authority.
+#   [36] The coverage-bound event is run_id-scoped to NULL (operation-scoped,
+#        not run-scoped).
+#   [37] The contract states the coverage-bound event's own primary key
+#        (not an application convention) guarantees at most one row per
+#        operation.
+#   [38] The contract requires the coverage-bound event to be written before
+#        PrepareDataOnly eligibility, bar observation, canonical start, or any
+#        dispatch claim.
+#   [39] The contract fails closed (no overwrite) on a conflicting coverage
+#        replay for the same operation_id.
+#   [40] The corrected run-lineage query reads raw, undeduplicated
+#        (transition_seq, run_id) rows -- contradiction validation runs in
+#        Rust, never via SQL DISTINCT.
+#   [41] The contract requires each run_id to appear exactly once across the
+#        raw lineage rows (duplicate detection, not SQL-side deduplication).
+#   [42] The contract requires run-scoped evidence reads to aggregate across
+#        the full validated run lineage, never a single run_id, for
+#        strategy_signal_evaluations and oms_outbox/oms_inbox evidence in §6.
+#   [43] E2A's mission is corrected to build the new coverage-bound event,
+#        not to extend the daily_data_readiness_evaluated pre-start payload.
+#   [44] E2B is not authorized until E2A is independently accepted.
+#
 # Usage:
 #   powershell -ExecutionPolicy Bypass -File scripts\guards\validate_autonomous_daily_paper_operations_01e_outcome_contract.ps1
 #
@@ -397,6 +433,69 @@ Show-Info "--- [30] Contract never guarantees a durable database-unavailable wri
 Test-ContentContainsNormalized "contract section 9 defines the database-failure contract" $ContractContent "Database-failure contract (new $EmDash Correction pass 2, Repair 9)" | Out-Null
 Test-ContentContainsNormalized "contract states a complete outage performs no durable write attempt" $ContractContent "performs **no** durable write attempt of any kind" | Out-Null
 Test-ContentContainsNormalized "contract forbids claiming a blocker was persisted without an authoritative re-read" $ContractContent "never claim the blocker was durably persisted without re-reading" | Out-Null
+
+Write-Host ""
+Show-Info "--- [31] First dispatchable bar never falls back to the current session's first grid slot ---"
+Test-ContentDoesNotContainNormalized "contract does not retain the retired current-session-first-slot fallback as active guidance" $ContractContent "the lower bound is simply the grid's first in-session slot $EmDash the ordinary case for a normal-hours start" | Out-Null
+Test-ContentContainsNormalized "contract explicitly retires the current-session-first-slot fallback" $ContractContent "Retired (Repair 2): the Correction-pass-2 fallback of" | Out-Null
+
+Write-Host ""
+Show-Info "--- [32] First dispatchable bar is the final element of expected_intraday_end_ts_window at effective_operation_open_utc ---"
+Test-ContentContainsNormalized "contract anchors the first dispatchable bar at effective_operation_open_utc" $ContractContent "evaluated at exactly ``effective_operation_open_utc``" | Out-Null
+Test-ContentContainsNormalized "contract requires only the final element of the window to anchor dispatch" $ContractContent "Only the **final** (most recent) element of that window is the first bar" | Out-Null
+
+Write-Host ""
+Show-Info "--- [33] Previous-session spillover is an explicit, required consequence ---"
+Test-ContentContainsNormalized "contract states the anchor can be the previous session's final grid identity" $ContractContent "own final grid identity, not a current-session bar" | Out-Null
+
+Write-Host ""
+Show-Info "--- [34] Not every readiness-history-window bar is a separate dispatch obligation ---"
+Test-ContentContainsNormalized "contract states earlier window elements are history context, not dispatch obligations" $ContractContent "not a separate dispatch obligation this operation must independently prove coverage for" | Out-Null
+
+Write-Host ""
+Show-Info "--- [35] A dedicated operation-scoped autonomous_daily_coverage_bound event is the coverage authority ---"
+Test-ContentContainsNormalized "contract defines the autonomous_daily_coverage_bound event id convention" $ContractContent "autonomous_daily_coverage_bound:{operation_id}" | Out-Null
+Test-ContentContainsNormalized "contract retires extending daily_data_readiness_evaluated as the coverage seam" $ContractContent "is unsuitable as a" | Out-Null
+
+Write-Host ""
+Show-Info "--- [36] The coverage-bound event is operation-scoped, run_id NULL ---"
+Test-ContentContainsNormalized "contract states the coverage-bound event is operation-scoped, not run-scoped" $ContractContent "this event is operation-scoped, not run-scoped" | Out-Null
+
+Write-Host ""
+Show-Info "--- [37] The event's own primary key guarantees at most one row per operation ---"
+Test-ContentContainsNormalized "contract states the store's primary key (not a convention) guarantees immutability" $ContractContent "can never produce more than one row per operation" | Out-Null
+
+Write-Host ""
+Show-Info "--- [38] Coverage-bound write precedes PrepareDataOnly, bar observation, canonical start, and dispatch claims ---"
+Test-ContentContainsNormalized "contract requires the coverage-bound write before PrepareDataOnly eligibility" $ContractContent "strictly before: the operation becomes eligible for ``PrepareDataOnly``" | Out-Null
+
+Write-Host ""
+Show-Info "--- [39] Conflicting coverage replay fails closed, never overwrites ---"
+Test-ContentContainsNormalized "contract fails closed on a conflicting coverage-bound replay" $ContractContent "fail closed: no new coverage authority, operation cannot proceed automatically" | Out-Null
+
+Write-Host ""
+Show-Info "--- [40] Run-lineage query reads raw undeduplicated rows; no SQL DISTINCT-based contradiction handling ---"
+Test-ContentContainsNormalized "contract's corrected run-lineage query selects raw transition_seq/run_id rows" $ContractContent "select transition_seq, run_id" | Out-Null
+Test-ContentContainsNormalized "contract states DISTINCT would discard duplicate-row evidence needed for contradiction detection" $ContractContent "must appear in the select list itself" | Out-Null
+
+Write-Host ""
+Show-Info "--- [41] Each run_id must appear exactly once across raw lineage rows (Rust-side duplicate detection) ---"
+Test-ContentContainsNormalized "contract requires exactly-once run_id validation against raw rows" $ContractContent "must appear **exactly once** across the raw rows" | Out-Null
+
+Write-Host ""
+Show-Info "--- [42] Run-scoped evidence reads (§6) aggregate across the full lineage, never a single run_id ---"
+Test-ContentContainsNormalized "contract corrects strategy_signal_evaluations item 3 to the full run lineage, retiring the singular phrasing" $ContractContent "for this operation's ``run_id``" | Out-Null
+Test-ContentContainsNormalized "contract corrects the oms_outbox zero-rows item to the full run lineage" $ContractContent "Zero ``oms_outbox`` rows exist across every ``run_id`` in the validated full operation run lineage" | Out-Null
+Test-ContentContainsNormalized "contract corrects the oms_inbox zero-rows item to the full run lineage" $ContractContent "Zero ``oms_inbox`` rows with ``event_kind IN" | Out-Null
+
+Write-Host ""
+Show-Info "--- [43] E2A's mission builds the new coverage-bound event, not an extension of daily_data_readiness_evaluated ---"
+Test-ContentContainsNormalized "contract's E2A mission implements the new operation-scoped coverage-bound event" $ContractContent "implement the new operation-scoped ``autonomous_daily_coverage_bound`` event in ``sys_autonomous_session_events`` per" | Out-Null
+Test-ContentContainsNormalized "contract states E2A's coverage-authority half supersedes the extension plan" $ContractContent "not an extension of ``daily_data_readiness_evaluated``" | Out-Null
+
+Write-Host ""
+Show-Info "--- [44] E2B is not authorized until E2A is independently accepted ---"
+Test-ContentContainsNormalized "contract states E2B is not authorized until E2A is independently accepted" $ContractContent "not authorized until E2A is independently accepted" | Out-Null
 
 # =============================================================================
 # Summary

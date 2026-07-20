@@ -71,6 +71,42 @@ except where a repair above required a fresh source read (recorded inline); it i
 acceptance record, and does not close E1, Phase E, or Bundle 3. No Rust file, test file, or
 migration is added or modified by this correction.
 
+**Correction pass 3** (`AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E1-OPERATION-SCOPED-COVERAGE-AUTHORITY-
+RECONCILIATION-03`, applied on top of correction pass 2, starting HEAD
+`97fc21fa819b624fc7b791508a173bca3a194208` ("docs: bind outcome contract to coverage and run
+lineage")): corrects the final operation-scoped coverage-authority defects left in pass 2, found by a
+fresh, targeted re-read of `build_pre_start_evidence_detail`/`persist_pre_start_readiness_evidence`
+(`daily_data_readiness.rs:1444-1510`), `AppState::start_execution_runtime`'s evidence-write call site
+(`lifecycle.rs:617-676`), `mqk_db::persist_autonomous_session_event`/the `sys_autonomous_session_events`
+schema (`arm_state.rs:274-297`, migration `0032`), and `autonomous_daily_coordinator.rs`'s
+`create_or_recover`/`dispatch_by_state` sequencing (`autonomous_daily_coordinator.rs:370-421`):
+(1) makes the canonical bar-timestamp convention explicit — `intraday_grid_starts` returns
+session-slot **start** timestamps, used directly as the canonical `md_bars.end_ts` identity
+throughout this system (§6 item 2 step 3, new, no behavior change); (2) retires the pass-2 first-
+dispatchable-bar fallback of "the current session's first grid slot when no preopen slot qualifies"
+— under-inclusive because the production expected window can spill into the previous trading session
+even at an ordinary, on-time open — and replaces it with a single formula: the final element of
+`expected_intraday_end_ts_window` evaluated at `effective_operation_open_utc` (§6 item 2 step 4);
+(3) updates the coverage-window definition (§6 item 2 step 6) to match the corrected anchor, which
+may itself be a previous-session identity; (4) retires §6a's "extend `daily_data_readiness_evaluated`"
+seam as a structural mismatch (that event carries no `operation_id`, is written for every attempt
+including failures, and reseeds its key on every attempt) and replaces it with one dedicated,
+immutable, operation-scoped `autonomous_daily_coverage_bound` event in the existing
+`sys_autonomous_session_events` store, keyed `operation_id`-only, plus its exact write-order and
+fail-closed first-write/exact-replay/conflicting-replay/write-failure contract (§6a); (5) clarifies
+the distinct roles of `daily_data_readiness_evaluated`, `daily_data_readiness_run_linked`, and the new
+`autonomous_daily_coverage_bound` event, and the required start/recovery compatibility check against
+the bound anchor (§6a); (6) retires §6b's `SELECT DISTINCT run_id ... ORDER BY transition_seq` query
+as invalid PostgreSQL (an unselected `ORDER BY` column under `DISTINCT`) and as self-defeating (it
+discards the duplicate-row evidence §6b's own contradiction check needs), replacing it with a raw,
+undeduplicated `(transition_seq, run_id)` row read validated in Rust (§6b); (7) removes the four
+remaining singular-`run_id` evidence rules in §5 tier 2/3 and §6 items 3–6, replacing each with
+"across every `run_id` in the validated full operation run lineage (§6b)"; (8) rewrites the E2A
+decomposition (§13) around the corrected coverage-bound event and run-lineage query; (9) strengthens
+the E1 guard with ten new checks. This correction does not redo the pass-1/pass-2 audit except where
+a repair above required a fresh source read (recorded inline); it is not itself an acceptance record,
+and does not close E1, Phase E, or Bundle 3.
+
 ## 0. Accepted foundation (recorded, not re-litigated)
 
 ```text
@@ -432,11 +468,14 @@ overriding "everything else," which contradicted §4's "evidence-complete proof"
    for a *different* bar → `evidence_degraded`, not yet terminal).
 2. **Broker acknowledgment / order reaching the broker** — `oms_outbox.status IN ('SENT','ACKED')`,
    or `dispatching_at_utc IS NOT NULL`, or an `oms_inbox` row with `event_kind IN ('ack',
-   'cancel_ack','replace_ack','reject')` for a bound `run_id`. An order genuinely reached the
+   'cancel_ack','replace_ack','reject')` for a `run_id` in this operation's full run lineage (§6b,
+   corrected — Correction pass 3, Repair 9: was "a bound `run_id`"). An order genuinely reached the
    broker even if later rejected or never filled — this is real operational activity, not a
    no-trade day.
-3. **Accepted decision / outbox enqueue** — an `oms_outbox` row exists for this `run_id`, but its
-   `status` never advanced past `PENDING`/`CLAIMED`/`FAILED` and never reached the broker. This is
+3. **Accepted decision / outbox enqueue** — an `oms_outbox` row exists for a `run_id` in this
+   operation's full run lineage (§6b, corrected — Correction pass 3, Repair 9: was "for this
+   `run_id`"), but its `status` never advanced past `PENDING`/`CLAIMED`/`FAILED` and never reached
+   the broker. This is
    weaker "activity" — the pipeline decided to trade and enqueued the intent, but nothing external
    confirms it reached the broker. Classified `completed_with_activity` with reason
    `activity_decision_accepted` (a decision was made and durably recorded), distinct from the
@@ -500,29 +539,65 @@ claim coexist.
       (`session_open_utc`, `session_close_utc`, `effective_operation_close_utc` — all persisted
       per-operation columns, migrations `0048`/`0049`) together with the existing pure
       `daily_data_readiness::intraday_grid_starts(session_open_utc, session_close_utc,
-      interval_secs)` helper — **not** `expected_intraday_end_ts_window` (that helper is
-      `required_history_bars`-bounded for readiness-gate purposes, not a full-day coverage list).
-   4. **Lower bound (corrected — Repair 1): never `operation.started_at_utc`.** The accepted Phase D
-      production scenario (`phase_d_full_day_lifecycle`, §4 point 1 of the `01d` closure doc) proves
-      the real production sequence is: `PrepareDataOnly` durably observes a bar via the preopen tail
-      window (`pd_preopen_expected_bar_window`) whose `bar_end_ts` closes **before**
-      `started_at_utc` is ever set; the canonical runtime then starts; `RunningDispatch` then
-      dispatches that **same already-observed bar**, never a bar starting fresh from
-      `started_at_utc`. A `started_at_utc`-anchored lower bound would therefore silently exclude a
-      bar production itself proves is expected and dispatchable — exactly the kind of
-      under-inclusive coverage window the mission forbids ("first dispatch row found," "current
-      `last_completed_bar_ts`" are equally forbidden for the same reason: none of them can prove an
-      *earlier* expected claim is not missing). The real lower bound is the first bar identity the
-      production readiness/completed-bar authority itself would ever expect for this operation:
-      `intraday_grid_starts(session_open_utc, session_close_utc, interval_secs)`'s first slot whose
-      close instant already satisfies the grid's own expectation rule (item 5 below) at
-      `preopen_start_utc` or later — i.e. the first grid slot for which
-      `slot_start + interval_secs + effective_grace_seconds <= <the first instant the operation's
-      own preopen tick could have run>`, mirroring exactly what
-      `expected_intraday_end_ts_window`'s spillover branch and `pd_preopen_expected_bar_window`
-      already compute for the preopen instant in production. If no such slot exists (the operation's
-      own session grid produces nothing expected before the operation starts), the lower bound is
-      simply the grid's first in-session slot — the ordinary case for a normal-hours start.
+      interval_secs)` helper for the full-day coverage list — **not** `expected_intraday_end_ts_window`
+      for that full list (that helper is `required_history_bars`-bounded for readiness-gate purposes,
+      not a full-day coverage list); `expected_intraday_end_ts_window` is still the correct authority
+      for identifying the single first-anchor bar (step 4 below), a distinct, narrower question.
+
+      **Canonical bar-timestamp identity (new, Correction pass 3, Repair 1 — clarifying, no behavior
+      change).** `intraday_grid_starts` returns session-slot **start** timestamps
+      (`daily_data_readiness.rs:1032-1046`, confirmed by direct source read: each grid value is
+      `open_ts, open_ts + interval_secs, ...`, i.e. a bar's *open* instant, not its close instant).
+      Production uses these same start-timestamp values directly as the canonical `md_bars.end_ts`
+      identity for every bar in this system — there is no separate "close timestamp" column;
+      the value compared and stored as a bar's `end_ts` label *is* the slot-start value. This
+      document does not rename or reinterpret any stored timestamp; it states the existing
+      convention explicitly so the arithmetic below cannot be misread as close-timestamp math. A
+      bar identified by `end_ts` value `E` becomes expected only once
+      `E + timeframe_secs + effective_grace_seconds <= now_utc`
+      (`daily_data_readiness.rs:1082`, mirrored by the driver's own gate,
+      `autonomous_completed_bar_driver.rs:910-914`).
+   4. **Lower bound — first intended dispatchable bar (corrected — Correction pass 3, Repair 2,
+      supersedes the Correction-pass-2 formula in full).** Never `operation.started_at_utc`, the
+      first existing dispatch-claim row, `last_completed_bar_ts`, the current session's first grid
+      slot, or the actual (possibly delayed) start time. The accepted Phase D production scenario
+      (`phase_d_full_day_lifecycle`, §4 point 1 of the `01d` closure doc) proves `PrepareDataOnly`
+      durably observes a bar via the preopen tail window whose identity closes **before**
+      `started_at_utc` is ever set, and `RunningDispatch` then dispatches that same already-observed
+      bar — any process-observed instant would silently exclude a bar production itself proves is
+      expected. **Retired (Repair 2): the Correction-pass-2 fallback of "the grid's first in-session
+      slot" when no preopen slot qualified.** That fallback is under-inclusive even at an ordinary,
+      on-time market open: the production expected-bar window can spill into the **previous**
+      trading session regardless of whether the start is late or on time (item 3's
+      `expected_intraday_end_ts_window` spillover branch is exactly this behavior, and
+      `pd_preopen_expected_bar_window` already exercises it in the accepted Phase D proof) — a
+      current-session-first-slot fallback would silently discard that spillover obligation.
+
+      **Corrected, single formula.** The first intended dispatchable bar is the **final element** of
+      `expected_intraday_end_ts_window(calendar_provider, session_plan, effective_operation_open_utc,
+      timeframe_secs, effective_grace_seconds, required_history_bars)` — the same production
+      authority already used elsewhere in this system to compute "the bars a readiness/preopen tick
+      should expect right now" — evaluated at exactly `effective_operation_open_utc` using the
+      operation's own bound calendar/session plan, symbol, timeframe, `timeframe_secs`, effective
+      grace, and `required_history_bars` (never re-derived from a different instant or a different
+      binding). Only the **final** (most recent) element of that window is the first bar *intended
+      for dispatch*; every earlier element in the same window is strategy-history context the
+      readiness gate needed to admit the start, not a separate dispatch obligation this operation
+      must independently prove coverage for.
+
+      Required implications, all already true of `expected_intraday_end_ts_window`'s existing
+      behavior and therefore introducing no new calendar/grid math:
+      - At an ordinary market open evaluated before the current session's own first grid interval has
+        closed (plus grace), the window's spillover branch fires and the final element — hence the
+        first intended dispatchable bar — is the **previous** trading session's own final grid
+        identity, not a current-session bar.
+      - A fixed effective open configured later in the session (after one or more current-session
+        grid slots have already closed) can produce a current-session identity as the final element,
+        with no spillover.
+      - A delayed actual start never moves this anchor forward: the formula is evaluated at the
+        operation's bound `effective_operation_open_utc` — a fixed session-plan fact, durably bound
+        at coverage-anchor write time (§6a) — never at `started_at_utc` or any other observed
+        runtime instant.
    5. **Upper bound (corrected — Repair 2): never the inclusive `bar_end_ts <=
       effective_operation_close_utc`.** `tick_autonomous_completed_bar_driver`
       (`autonomous_completed_bar_driver.rs:910-914`, confirmed by direct source read) refuses *all*
@@ -540,11 +615,18 @@ claim coexist.
       exactly at or after `effective_operation_close_utc` is a bar production itself can never
       process, and the contract must not require its coverage as a precondition for
       `completed_no_trade`.
-   6. **Coverage window (corrected — Repair 1/2 combined)**: the expected completed-bar end-
-      timestamps are the subset of the session's full grid (`intraday_grid_starts`) whose slots
-      satisfy both bound 4 and bound 5 above, **not** `[operation.started_at_utc,
-      min(operation.stopped_at_utc, operation.effective_operation_close_utc)]` as pass 1 specified.
-      If the operation never legally reaches a state where any grid slot could satisfy bound 4 (e.g.
+   6. **Coverage window (corrected — Correction pass 3, Repair 2/4 combined)**: the expected
+      completed-bar end-timestamps are the first intended dispatchable bar identity from bound 4
+      (which may itself be a **previous** trading session's final grid identity, per bound 4's
+      spillover case) plus every subsequent **current-session** grid identity (from
+      `intraday_grid_starts(session_open_utc, session_close_utc, interval_secs)`) whose own
+      expectation instant (`slot_start + interval_secs + effective_grace_seconds`) is strictly
+      greater than bound 4's own expectation instant and strictly less than
+      `effective_operation_close_utc` per bound 5. This is **not** the subset of only the current
+      session's grid in isolation (bound 4 may anchor into the previous session), and it is **not**
+      `[operation.started_at_utc, min(operation.stopped_at_utc, operation.effective_operation_close_utc)]`
+      as pass 1 specified. If the operation never legally reaches a state where bound 4 can be
+      established at all (e.g.
       it reached `stopping` via a pre-running-state edge — `preflight_blocked -> stopping` and
       similar — before any preopen tick or running tick ever ran), the expected-bar set is empty by
       construction. This is **not** classified `completed_no_trade` under any reason code (pass 1's
@@ -599,21 +681,26 @@ claim coexist.
    same one authority — no free-form SQL join is specified here beyond what is stated; the exact
    query shape remains an E2B implementation detail (§13/§14).
 3. At least one durable `strategy_signal_evaluations` row exists with `decision_stage=
-   'strategy_evaluated'` for this operation's `run_id` (i.e., the strategy genuinely ran at least
-   once). Given item 2's complete-coverage proof, this is implied whenever the expected-bar set is
-   nonempty and fully covered — restated here because it remains the deciding fact when the expected
-   set is legitimately empty (item 2's `started_at_utc IS NULL` case): zero evaluations then means
-   zero proof of anything, routed to `unknown_missing_evaluation_evidence`, never assumed no-trade.
-4. **Every** `strategy_signal_evaluations` row with `decision_stage='strategy_evaluated'` for this
-   `run_id` has `signal_generated=false` or `signal_qty=0` (corrected — Correction 4: the original
-   draft's second branch, "or a matching risk-denial row proves denial," is removed — see §5 tier 4
-   and §9's deferred-work note. A nonzero signal with no matching `oms_outbox` row is **never**
-   `completed_no_trade` under any circumstance; it is always routed to nonterminal
+   'strategy_evaluated'` across every `run_id` in the validated full operation run lineage (§6b,
+   corrected — Correction pass 3, Repair 9: was "for this operation's `run_id`") (i.e., the strategy
+   genuinely ran at least once). Given item 2's complete-coverage proof, this is implied whenever the
+   expected-bar set is nonempty and fully covered — restated here because it remains the deciding
+   fact when the expected set is legitimately empty (item 2's `started_at_utc IS NULL` case): zero
+   evaluations then means zero proof of anything, routed to `unknown_missing_evaluation_evidence`,
+   never assumed no-trade.
+4. **Every** `strategy_signal_evaluations` row with `decision_stage='strategy_evaluated'` across every
+   `run_id` in the validated full operation run lineage (§6b, corrected — Correction pass 3, Repair 9:
+   was "for this `run_id`") has `signal_generated=false` or `signal_qty=0` (corrected — Correction 4:
+   the original draft's second branch, "or a matching risk-denial row proves denial," is removed —
+   see §5 tier 4 and §9's deferred-work note. A nonzero signal with no matching `oms_outbox` row is
+   **never** `completed_no_trade` under any circumstance; it is always routed to nonterminal
    `unknown_order_evidence_conflict`, regardless of any coincidentally nearby `sys_risk_denial_
    events` row).
-5. Zero `oms_outbox` rows exist for this `run_id`.
+5. Zero `oms_outbox` rows exist across every `run_id` in the validated full operation run lineage
+   (§6b, corrected — Correction pass 3, Repair 9: was "for this `run_id`").
 6. Zero `oms_inbox` rows with `event_kind IN ('fill','partial_fill','ack','reject','cancel_ack',
-   'replace_ack')` exist for this `run_id`.
+   'replace_ack')` exist across every `run_id` in the validated full operation run lineage (§6b,
+   corrected — Correction pass 3, Repair 9: was "for this `run_id`").
 7. `already_at_target` — the "strategy evaluated and concluded no position change was needed" case
    — is only ever a sub-classification of item 4 above (a `strategy_signal_evaluations` row proving
    the evaluation ran and concluded flat), never inferred from process-local target state.
@@ -701,36 +788,177 @@ identity, final dispatchable bar identity, timeframe, effective grace seconds, a
 identity they were derived against) → no `completed_no_trade` finalization, full stop. A recomputed
 value is not durable proof of what the value was at the time the operation actually ran.
 
-**Preferred future authority (decided, not implemented in E1).** Extend the existing
-`daily_data_readiness_evaluated` pre-start evidence event — not a new event type, not a new table —
-with the additional fields §6 item 2 needs to reconstruct bounds 4/5 exactly after restart:
+**Retired (Correction pass 3, Repair 5): extending `daily_data_readiness_evaluated` is not the
+preferred seam.** Correction pass 2 above proposed extending the existing
+`daily_data_readiness_evaluated` pre-start evidence event with the coverage fields. A fresh source
+read of `AppState::start_execution_runtime`'s call site (`lifecycle.rs:617-676`) and
+`build_pre_start_evidence_detail`/`persist_pre_start_readiness_evidence`
+(`daily_data_readiness.rs:1444-1510`, confirmed by direct read) shows this event is unsuitable as a
+*daily-operation* coverage authority, not merely as a matter of preference:
+
+- it is persisted **before** the durable operation row's identity is even the subject of the write —
+  the event's own JSON payload (§ enumerated above) carries no `operation_id` field at all, only a
+  per-attempt `evaluation_id`;
+- it is written for **every** start attempt, successful or refused, including assignment-resolution
+  failures (`lifecycle.rs:617-658`) — a single operation can accumulate many of these rows across
+  retries and recovery, with no field distinguishing "the one that actually anchors this operation's
+  coverage window" from "a blocked attempt that never started anything";
+- `evaluation_id` is reseeded per attempt (`sg_12`/`sg_13`'s own proof that sequential and
+  concurrent identical attempts receive **distinct** evaluation IDs), so there is no single stable
+  key on this event type an operation could ever treat as its one immutable coverage anchor.
+
+An event type built to answer "what did this one start *attempt* observe" cannot safely be repurposed
+as "what is the one immutable coverage window this *operation* is finalized against" — doing so would
+require bolting an `operation_id`-uniqueness/immutability contract onto a table whose whole existing
+design is many-rows-per-operation-by-construction. This is a structural mismatch the pass-2 finding
+did not weigh, not a mere implementation-detail preference.
+
+**Preferred authority (corrected — Correction pass 3, Repair 5): one dedicated, operation-scoped,
+append-only event, in the existing `sys_autonomous_session_events` store.** No new table, no
+migration — the existing store (migration `0032`, `id text PRIMARY KEY`, `event_type`, `detail`,
+`run_id` nullable, `source`, `ON CONFLICT (id) DO NOTHING` insert semantics via
+`mqk_db::persist_autonomous_session_event`, confirmed by direct source read) already provides
+exactly the append-only, deterministically-keyed, idempotent-insert primitive this needs; only a new
+`event_type` value and a distinct `id` convention are required.
 
 ```text
+event id      : autonomous_daily_coverage_bound:{operation_id}
+event_type    : "autonomous_daily_coverage_bound"
+run_id        : NULL   (this event is operation-scoped, not run-scoped — it is written once
+                         before the operation's first run_id is ever bound, and remains the same
+                         single row across every later run/recovery cycle)
+source        : "mqk-daemon.autonomous_daily_coordinator"
+```
+
+Because the event `id` is keyed on `operation_id` alone (never on `evaluation_id`, attempt count, or
+run_id), the existing `ON CONFLICT (id) DO NOTHING` insert can never produce more than one row per
+operation — the store's own primary key is the immutability mechanism, not an application-level
+convention layered on top of a many-rows-per-operation table. Bounded JSON `detail` payload:
+
+```text
+schema_version
 operation_id
+market_date
+deployment_mode
+adapter_id
+
 first_dispatchable_bar_end_ts
 final_dispatchable_bar_end_ts
+
 local_symbol
 timeframe
 timeframe_secs
+required_history_bars
 effective_grace_seconds
-exchange_session_identity / effective_session_boundary identity (already available via
-  session_plan_identity, §13 of the 01a spec — reused, not reinvented)
+
+session_plan_identity
 assignment_identity
 runtime_binding_identity
-coverage_schema_version
-coverage-bound timestamp (evaluated_at_utc already serves this role)
+
+exchange_session_open_utc
+exchange_session_close_utc
+effective_operation_open_utc
+effective_operation_close_utc
+
+bound_at_utc
 ```
 
-This is preferred over a new table because: (a) the write already happens at exactly the right
-moment (pre-start, before any bar is dispatched) and is already keyed by `evaluation_id` with
-idempotent `ON CONFLICT (id) DO NOTHING` semantics (`persist_pre_start_readiness_evidence`,
-`daily_data_readiness.rs:1489-1510`); (b) it is already linked to the operation via the existing
-`daily_data_readiness_run_linked` companion event; (c) it avoids a second, competing durable
-coverage authority alongside the existing readiness-evidence event. A new dedicated table/migration
-is authorized only if a later implementation patch finds the existing event's JSON `detail` payload
-cannot safely carry this data (e.g. a query-performance or schema-versioning need this audit did not
-find) — E1 does not authorize that new table now; it names the extension as the default seam and
-defers the final decision, with proof, to E2A (§13).
+This carries every field §6 item 2 needs to reconstruct bounds 4/5 exactly after restart, without
+depending on the operation's current mutable environment/assignment configuration. A different
+existing-store seam (e.g. a new column directly on `sys_autonomous_daily_operations`) is acceptable
+only if a later implementation patch's own source audit proves it has strictly stronger operation
+identity, immutability, queryability, or ordering guarantees than the seam above — none was found by
+this audit, and no new migration is authorized by E1 for this purpose (§13).
+
+**Write order and fail-closed policy (new — Correction pass 3, Repair 6).** The coverage-bound event
+must be written strictly after operation identity, session plan, assignment, runtime binding, and
+timeframe/grace policy are all resolved and verified (the same inputs `create_or_recover` already
+requires before an operation row can exist, `autonomous_daily_coordinator.rs:370-396`), and strictly
+before: the operation becomes eligible for `PrepareDataOnly`; any bar is durably observed for this
+operation; canonical runtime start; or any dispatch claim. Concretely, this is the coordinator tick
+immediately after `create_or_recover` returns a resolved operation and before `dispatch_by_state` is
+called (`autonomous_daily_coordinator.rs:381-421`) — the same tick, never a later one, so no
+`PrepareDataOnly`/`RunningDispatch` invocation for this operation can ever occur without a coverage
+anchor already durably bound.
+
+Required behavior, all built on the existing `ON CONFLICT (id) DO NOTHING` primitive plus the same
+authoritative-re-read discipline D4 already established for dispatch-claim completion
+(`reconfirm_dispatch_completion_or_fail_closed`) — no new mechanism, reused verbatim:
+
+```text
+First write
+  persist_autonomous_session_event(coverage-bound row)
+  -> re-read by the exact id "autonomous_daily_coverage_bound:{operation_id}"
+  -> re-read payload must match what was just written
+  -> operation may proceed to dispatch_by_state
+
+Exact replay (same operation_id, byte/semantically identical coverage payload —
+the ordinary case for every coordinator tick after the first for this operation,
+including across a same-day daemon restart, since `create_or_recover` and this
+write point are reached on every tick, not merely once)
+  -> INSERT ... ON CONFLICT (id) DO NOTHING no-ops (row already present)
+  -> re-read confirms the existing row's payload matches the freshly-recomputed payload
+  -> idempotent success, zero duplicate event, operation proceeds
+
+Conflicting replay (same operation_id, a freshly-recomputed coverage payload that
+disagrees with the already-bound row — e.g. an operator changed
+MQK_STRATEGY_BAR_INTERVAL_SECS or a provider's configured grace value mid-day)
+  -> INSERT ... ON CONFLICT (id) DO NOTHING no-ops (the original row is never overwritten —
+     this store has no UPDATE path at all, matching daily_data_readiness_run_linked's own
+     "a second row, never an update" precedent)
+  -> re-read detects the payload mismatch
+  -> fail closed: no new coverage authority, operation cannot proceed automatically
+     (surfaced as manual_intervention_required / operation_identity_conflict-class blocker,
+     the same disposition §13 of the 01a spec already uses for same-day identity conflicts)
+
+Write failure or uncertain commit (the INSERT itself errors, or the result is ambiguous)
+  -> authoritative exact-id re-read
+  -> exact expected payload found -> accept as committed (write landed, acknowledgment was lost)
+  -> missing, mismatched, or unreadable -> fail closed, retried on a later coordinator tick,
+     never assumed persisted
+```
+
+No later recovery start may replace or move the original operation's coverage anchor: every
+recovery-start attempt (§6 item 2 step 7, §6b) re-derives the coverage payload from its own
+current resolution and compares it against the already-bound row via the same conflicting-replay
+path above — a mismatch blocks the recovery start rather than silently rewriting history.
+
+**Readiness/start-event roles, clarified (new — Correction pass 3, Repair 7).** Three distinct
+event types now exist in `sys_autonomous_session_events`, each with exactly one job — none is a
+substitute for another:
+
+```text
+daily_data_readiness_evaluated
+  -> evidence for one start-gate attempt (many per operation across retries/recovery;
+     no operation_id field; the existing behavior, unchanged by this correction)
+
+daily_data_readiness_run_linked
+  -> links one successful readiness evaluation to the run_id it produced (many per operation
+     across recovery cycles, one per successful start; unchanged by this correction)
+
+autonomous_daily_coverage_bound
+  -> the one immutable intended-dispatch-window anchor for the entire daily operation
+     (exactly one row per operation_id, run_id always NULL, new — Repair 5/6 above)
+```
+
+Required cross-checks:
+- A failed start attempt (any `daily_data_readiness_evaluated` row with `start_allowed=false`, or a
+  resolution failure before that evaluation could even run) never creates or competes with a
+  coverage-bound authority — the coverage-bound write happens at the coordinator level, strictly
+  before the start-gate call, and does not depend on the start-gate's own outcome.
+- Multiple `daily_data_readiness_evaluated` rows may exist per operation (one per attempt); multiple
+  `daily_data_readiness_run_linked` rows may exist per operation (one per successful start/recovery);
+  **exactly one** `autonomous_daily_coverage_bound` row exists per operation, by construction of its
+  `operation_id`-keyed `id` and the store's primary key.
+- Every initial and recovery start must prove its freshly-resolved assignment/runtime-binding/
+  timeframe/grace policy is compatible with the already-bound coverage anchor (the conflicting-replay
+  check above) before that start may proceed — a mismatch blocks the start rather than rewriting the
+  anchor.
+
+This is the default seam decided by E1; E2A's own audit may still find the existing JSON `detail`
+payload on this new event type insufficient for a query-performance or schema-versioning reason this
+audit did not find, in which case a dedicated table/migration is authorized as a fallback — but not
+as the default (§13).
 
 ## 6b. Full run lineage (new — Correction pass 2, Repair 6)
 
@@ -743,25 +971,55 @@ silently drop every earlier run's activity and evaluation evidence from the clas
 
 **Authority.** `sys_autonomous_daily_operation_events` (§1.2, migration `0048`) is append-only and
 already records `run_id` on every transition row that carries one
-(`0048_autonomous_daily_operations.sql:171-200`). The full run lineage for one operation is:
+(`0048_autonomous_daily_operations.sql:171-200`).
+
+**Corrected (Correction pass 3, Repair 8): the pass-2 correction's query is invalid and is retired.**
+`SELECT DISTINCT run_id ... ORDER BY transition_seq` is not merely a weak query — in PostgreSQL, a
+`SELECT DISTINCT` list's `ORDER BY` expressions must appear in the select list itself; ordering by a
+column (`transition_seq`) that was projected out by the `DISTINCT` is a query the database itself
+would reject (or, on an engine that tolerated it, could not guarantee ordering against the
+deduplicated rows in the first place). It is also the wrong shape for this contract's own
+requirement: §6b already requires detecting a **duplicate** or **out-of-order** `run_id` as a
+contradiction, and `SELECT DISTINCT` actively discards the very duplicate-row evidence that
+detection needs before the read even reaches Rust.
+
+**Corrected authority.** The future exact helper must read every raw matching row, undeduplicated,
+and perform contradiction validation in Rust — never in SQL:
 
 ```sql
-select distinct run_id
+select transition_seq, run_id
 from sys_autonomous_daily_operation_events
 where operation_id = $1
   and to_state = 'running'
   and run_id is not null
-order by transition_seq
+order by transition_seq asc
 ```
 
-**Confirmed gap.** No existing `mqk-db` read helper performs this aggregation today.
+Required Rust-side validation against the raw row set:
+- `transition_seq` must strictly increase across the returned rows (the query's own `ORDER BY`
+  guarantees retrieval order, not by itself a proof of strict monotonicity — the helper must check
+  it explicitly).
+- Each `run_id` must appear **exactly once** across the raw rows — a `run_id` appearing more than
+  once is a genuine contradiction (a re-used run identity, or a bug elsewhere), not a fact to
+  collapse away with `DISTINCT`.
+- The run IDs, taken in `transition_seq` order, are the full lineage in the order they were bound.
+- The operation's current `run_id` column must equal the lineage's final entry whenever the column
+  is non-`NULL`.
+- An empty lineage is legal only when the operation's current `run_id` column is also `NULL` (the
+  operation never reached `running`).
+- Any violation of the above (duplicate run_id, non-monotonic `transition_seq`, a non-`NULL` current
+  `run_id` with no matching final lineage entry, or a non-`NULL` current `run_id` with an empty
+  lineage) fails closed to `unknown_run_lineage_unavailable` — never silently repaired by
+  deduplicating or re-sorting in SQL.
+
+**Confirmed gap.** No existing `mqk-db` read helper performs this raw-row aggregation today.
 `list_autonomous_daily_operation_events` (`autonomous_daily_operation.rs:1280-1298`, confirmed by
 direct source read) returns the raw, transition-ordered event list bounded by an explicit `limit`
 parameter (the API-layer caller clamps this to `[1,100]`, §11) — it does not filter on `to_state`,
 does not deduplicate `run_id`, and a caller passing too small a `limit` could silently truncate the
 lineage for an operation with an unusually long transition history. A dedicated, narrow read helper
-(unbounded by the general-purpose event-list cap, or explicitly bounded high enough to guarantee
-full-day coverage) is required — named here, not implemented in E1 (§13, E2A).
+must therefore be unbounded by the general-purpose event-list cap (or explicitly bounded well above
+any realistic full-day transition count) — named here, not implemented in E1 (§13, E2A).
 
 **Required aggregation rules:**
 - Collect every distinct `run_id` bound via a `to_state = 'running'` transition, in `transition_seq`
@@ -1163,55 +1421,83 @@ Pass 1 resolved this question **no** — it found every primitive §6 item 2's c
 already existed and composed without new schema, so a single E2 was authorized. That finding is now
 corrected: §6a and §6b (new, this correction) each confirm a genuine durable-evidence-foundation gap
 pass 1's audit missed:
-- **§6a**: the existing `daily_data_readiness_evaluated` evidence payload
-  (`build_pre_start_evidence_detail`, `daily_data_readiness.rs:1444-1483`, confirmed by direct source
-  read) does not persist the exact first/final dispatchable-bar identity, timeframe, or effective
-  grace-seconds actually in force when an operation ran — only assignment/timeframe/readiness-state/
-  blockers. §6 item 2's coverage composition can be *recomputed* from current mutable configuration,
-  but not *durably re-read* as what was actually true when the operation ran. This is precisely the
-  "exact expected set cannot be reconstructed after restart without assuming current mutable
-  environment configuration is unchanged" gap the mission's REPAIR 3 named.
+- **§6a**: no durable event persists the exact first/final dispatchable-bar identity, timeframe, or
+  effective grace-seconds actually in force when an operation ran. §6 item 2's coverage composition
+  can be *recomputed* from current mutable configuration, but not *durably re-read* as what was
+  actually true when the operation ran. This is precisely the "exact expected set cannot be
+  reconstructed after restart without assuming current mutable environment configuration is
+  unchanged" gap the mission's REPAIR 3 named. **Corrected (Correction pass 3, Repair 5)**: §6a's
+  preferred seam is no longer "extend the existing `daily_data_readiness_evaluated` event" — a fresh
+  source read (`build_pre_start_evidence_detail`, `daily_data_readiness.rs:1444-1483`;
+  `lifecycle.rs:617-676`) confirmed that event carries no `operation_id`, is written for every start
+  attempt (successful or refused) with a freshly-reseeded `evaluation_id` each time, and therefore
+  cannot be repurposed as a one-row-per-operation immutable authority without bolting an
+  operation-uniqueness contract onto a table whose design is many-rows-per-operation by construction.
+  §6a's corrected preferred seam is a new, dedicated, operation-scoped `autonomous_daily_coverage_bound`
+  event in the existing `sys_autonomous_session_events` store, keyed `operation_id`-only so the
+  store's own `id` primary key (not an application convention) is the immutability mechanism.
 - **§6b**: no existing `mqk-db` read helper aggregates an operation's full `run_id` lineage across
   recovery — `list_autonomous_daily_operation_events` (`autonomous_daily_operation.rs:1280-1298`,
   confirmed by direct source read) returns the raw, `limit`-bounded transition list only, with no
   `to_state`/`run_id` filtering or deduplication. Reading only `operation.run_id` at finalization
-  time would silently drop earlier runs' activity/evaluation evidence.
+  time would silently drop earlier runs' activity/evaluation evidence. **Corrected (Correction pass
+  3, Repair 8)**: the pass-2 query itself (`SELECT DISTINCT run_id ... ORDER BY transition_seq`) is
+  additionally retired as invalid — `ORDER BY` on a column projected out of a `SELECT DISTINCT` list
+  is not a query PostgreSQL accepts, and `DISTINCT` would discard the duplicate-row evidence §6b's
+  own contradiction check needs. The corrected query reads raw, undeduplicated
+  `(transition_seq, run_id)` rows and validates monotonicity/uniqueness/current-run-id agreement in
+  Rust (§6b).
 
 Both gaps are durable-evidence-foundation work — they must be built, proven against a real test DB,
 and independently accepted **before** a classifier that depends on them is safe to build on top of.
 This is exactly the mission's own dividing line ("E2A should likely: extend the existing readiness/
 start evidence payload with exact coverage authority; add an exact operation-run-lineage read
 helper; prove restart reconstruction; contain no classifier, finalization, coordinator invocation,
-API, GUI, or notification"). **Resolved: E2A/E2B split is now authorized. E2A is the next patch
+API, GUI, or notification") — read "extend the existing readiness/start evidence payload" as
+superseded by the corrected §6a seam above: E2A's coverage-authority half is now "write and prove the
+new operation-scoped `autonomous_daily_coverage_bound` event," not an extension of
+`daily_data_readiness_evaluated`. **Resolved: E2A/E2B split is now authorized. E2A is the next patch
 after this E1 correction is accepted — nothing beyond E2A is authorized yet.**
 
 ### E2A — durable coverage-anchor and run-lineage evidence foundation (next authorized patch, not implemented in E1)
 
-- **Mission**: (1) extend the existing `daily_data_readiness_evaluated` pre-start evidence payload
-  (§6a's preferred future authority — reusing the existing event, not a new table, unless E2A's own
-  audit proves the existing JSON `detail` payload cannot safely carry the additional fields) with the
-  durable coverage-anchor fields §6a lists (first/final dispatchable-bar identity, timeframe,
-  effective grace-seconds, session-plan identity, coverage schema version); (2) add a narrow,
-  purpose-built `mqk-db` read helper that aggregates an operation's full `run_id` lineage per §6b's
-  exact query shape, unbounded by (or explicitly bounded well above) the general-purpose
-  `list_autonomous_daily_operation_events` cap; (3) prove both survive a restart (a fresh process,
-  fresh `AppState`, reading only durable storage, reconstructs the exact same coverage anchor and
-  run lineage a live process would compute).
-- **Likely files**: `core-rs/crates/mqk-daemon/src/daily_data_readiness.rs` (evidence payload
-  extension), `core-rs/crates/mqk-db/src/autonomous_daily_operation.rs` (new run-lineage read
-  helper).
-- **Schema impact**: none expected — the preferred seam extends an existing JSON `detail` payload on
-  an existing event type; a new migration is authorized only if E2A's own audit finds the existing
-  payload cannot safely carry the new fields (§6a already names this as the fallback, not the
-  default).
+- **Mission (corrected — Correction pass 3, Repair 5/6/8)**: (1) implement the new operation-scoped
+  `autonomous_daily_coverage_bound` event in `sys_autonomous_session_events` per §6a — the write/
+  re-read/idempotent-replay/conflicting-replay helper, invoked at the coordinator write point §6a
+  names (immediately after `create_or_recover` resolves the operation, before `dispatch_by_state`);
+  (2) implement the exact coverage-bound event read/parser (by `operation_id`-keyed `id`); (3) add a
+  narrow, purpose-built `mqk-db` read helper that aggregates an operation's full `run_id` lineage per
+  §6b's corrected raw-row query shape (never `SELECT DISTINCT`), performing monotonicity/uniqueness/
+  current-run-id validation in Rust, unbounded by (or explicitly bounded well above) the
+  general-purpose `list_autonomous_daily_operation_events` cap; (4) prove both survive a restart (a
+  fresh process, fresh `AppState`, reading only durable storage, reconstructs the exact same coverage
+  anchor and run lineage a live process would compute); (5) prove recovery-start compatibility (a
+  recovery start whose freshly-resolved coverage payload disagrees with the already-bound anchor
+  fails closed per §6a's conflicting-replay rule, never silently rewrites it).
+- **Likely files**: `core-rs/crates/mqk-daemon/src/state/autonomous_daily_coordinator.rs` (coverage-
+  bound event write, at the point §6a names), `core-rs/crates/mqk-daemon/src/state/
+  autonomous_daily_operation.rs` (coverage payload construction, if the identity/binding derivation
+  helpers live there), `core-rs/crates/mqk-daemon/src/daily_data_readiness.rs` (if the coverage
+  payload's timeframe/grace-seconds inputs are best sourced from this module's existing types),
+  `core-rs/crates/mqk-db/src/autonomous_daily_operation.rs` (new run-lineage read helper) — no file
+  in `daily_data_readiness.rs` needs to change the existing `daily_data_readiness_evaluated`/
+  `daily_data_readiness_run_linked` event types themselves.
+- **Schema impact**: none expected — the preferred seam is a new `event_type` value and a new
+  `operation_id`-keyed `id` convention on the existing `sys_autonomous_session_events` store (no
+  migration; the table and its `mqk_db::persist_autonomous_session_event`/`AutonomousSessionEventRow`
+  write path already exist and require no schema change to accept a new `event_type` string). A new
+  migration/table is authorized only if E2A's own audit finds the existing JSON `detail` payload
+  cannot safely carry the coverage fields (§6a already names this as the fallback, not the default).
 - **Test binaries**: new `scenario_autonomous_daily_coverage_anchor_and_run_lineage_01.rs` (or
-  equivalent) — proves the extended evidence payload round-trips exactly, proves restart
-  reconstruction of both the coverage anchor and the run lineage across a synthetic recovery cycle
-  (reusing the `phase_d_full_day_lifecycle` recovery fixture pattern), and proves the lineage
-  helper's contradiction-detection (duplicate/out-of-order `run_id`, mismatch against current
-  `run_id`) fails closed to the shape §6b/§7 require.
-- **Hard exclusions**: no classifier, no finalization CAS write, no coordinator invocation, no API
-  route, no GUI, no notification wiring, no change to the `is_legal_operation_transition` graph.
+  equivalent) — proves the coverage-bound event write/re-read/idempotent-replay/conflicting-replay
+  behavior exactly as §6a specifies, proves restart reconstruction of both the coverage anchor and
+  the run lineage across a synthetic recovery cycle (reusing the `phase_d_full_day_lifecycle`
+  recovery fixture pattern), and proves the lineage helper's contradiction-detection
+  (duplicate/out-of-order `run_id`, mismatch against current `run_id`) fails closed to the shape
+  §6b/§7 require.
+- **Hard exclusions**: no classifier, no finalization CAS write, no coordinator invocation beyond the
+  one coverage-bound write point, no API route, no GUI, no notification wiring, no change to the
+  `is_legal_operation_transition` graph.
 - **Acceptance boundary**: both durable authorities (coverage anchor, run lineage) proven correct and
   restart-safe in isolation against a real test DB; zero production call sites invoke either as
   outcome-classification input yet.
@@ -1292,16 +1578,20 @@ after this E1 correction is accepted — nothing beyond E2A is authorized yet.**
 
 ## 14. Known limitations
 
-- **No durable coverage-anchor authority exists today** (§6a, new — Correction pass 2, Repair 3/4) —
-  the exact first/final dispatchable-bar identity, timeframe, and effective grace-seconds actually
-  in force when an operation ran are not persisted anywhere durable today; only recomputable from
-  current mutable configuration. `completed_no_trade` cannot safely finalize until E2A builds and
-  proves the extension named in §6a. This is the primary reason the single-E2 decomposition (pass 1)
-  is retired in favor of E2A/E2B (§13).
-- **No run-lineage aggregation helper exists today** (§6b, new — Correction pass 2, Repair 6) — the
-  existing `list_autonomous_daily_operation_events` read is a raw, bounded transition list with no
-  `to_state`/`run_id` filtering. A recovered operation's earlier-run activity/evaluation evidence
-  cannot be safely aggregated until E2A builds the narrow read helper §6b names.
+- **No durable coverage-anchor authority exists today** (§6a, new — Correction pass 2, Repair 3/4;
+  seam corrected — Correction pass 3, Repair 5/6) — the exact first/final dispatchable-bar identity,
+  timeframe, and effective grace-seconds actually in force when an operation ran are not persisted
+  anywhere durable today; only recomputable from current mutable configuration. `completed_no_trade`
+  cannot safely finalize until E2A builds and proves the operation-scoped
+  `autonomous_daily_coverage_bound` event §6a now names (not an extension of
+  `daily_data_readiness_evaluated` — that seam was retired as a structural mismatch, §6a). This is
+  the primary reason the single-E2 decomposition (pass 1) is retired in favor of E2A/E2B (§13).
+- **No run-lineage aggregation helper exists today** (§6b, new — Correction pass 2, Repair 6; query
+  corrected — Correction pass 3, Repair 8) — the existing `list_autonomous_daily_operation_events`
+  read is a raw, bounded transition list with no `to_state`/`run_id` filtering, and the pass-2 `SELECT
+  DISTINCT ... ORDER BY transition_seq` query proposed to replace it is itself invalid and retired.
+  A recovered operation's earlier-run activity/evaluation evidence cannot be safely aggregated until
+  E2A builds the corrected raw-row read helper §6b now names.
 - **`sys_risk_denial_events` cannot be durably correlated to an operation/run/evaluation today**
   (§5 tier 4, §9) — `no_trade_all_signals_blocked` is deferred, not authorized for E2B, and requires
   a separately authorized migration adding a correlation column before it can be implemented safely.
