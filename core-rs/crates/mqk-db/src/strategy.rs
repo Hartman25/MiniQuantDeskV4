@@ -588,6 +588,31 @@ pub async fn fetch_strategy_signal_evaluations_for_run(
     Ok(out)
 }
 
+/// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E4-READ-ONLY-DAILY-OPERATION-API-
+/// PROJECTION: count of durable `strategy_signal_evaluations` rows across an
+/// operation's full validated run lineage (`run_id IN` the supplied set),
+/// unbounded. Read-only. `run_id` is fixed to exactly one value per row, so a
+/// plain count is already duplicate-free across every run in the set — no
+/// `DISTINCT` is needed. An empty `run_ids` slice returns `0` without issuing
+/// a query.
+pub async fn count_strategy_signal_evaluations_for_runs(
+    pool: &PgPool,
+    run_ids: &[Uuid],
+) -> Result<i64> {
+    if run_ids.is_empty() {
+        return Ok(0);
+    }
+    let row = sqlx::query(
+        "select count(*) as cnt from strategy_signal_evaluations where run_id = ANY($1)",
+    )
+    .bind(run_ids)
+    .fetch_one(pool)
+    .await
+    .context("count_strategy_signal_evaluations_for_runs failed")?;
+    row.try_get::<i64, _>("cnt")
+        .context("count_strategy_signal_evaluations_for_runs: decode failed")
+}
+
 // ---------------------------------------------------------------------------
 // AUTON-NO-TRADE-OFFHOURS-01B: Durable autonomous no-trade diagnostic
 // snapshot (autonomous_no_trade_diagnostics)

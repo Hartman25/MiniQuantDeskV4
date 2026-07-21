@@ -666,6 +666,11 @@ pub struct PreflightStatusResponse {
     // non-Paper+ExternalSignalIngestion deployments (not a readiness gate on
     // this surface — see `daily_data_readiness.start_allowed` for that).
     pub daily_data_readiness: DailyDataReadinessResponse,
+
+    // AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E4-READ-ONLY-DAILY-OPERATION-API-
+    // PROJECTION: additive compact daily-operation outcome summary. Fails
+    // soft independently of every other field on this response.
+    pub daily_operation: AutonomousDailyOperationSummary,
 }
 
 // ---------------------------------------------------------------------------
@@ -878,6 +883,11 @@ pub struct AutonomousPaperReadinessResponse {
     // (a blocked assignment already contributes to `blockers`); this field
     // exposes the full per-assignment identity/verdict for operator review.
     pub daily_data_readiness: DailyDataReadinessResponse,
+
+    // AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E4-READ-ONLY-DAILY-OPERATION-API-
+    // PROJECTION: additive compact daily-operation outcome summary. Fails
+    // soft independently of every other field on this response.
+    pub daily_operation: AutonomousDailyOperationSummary,
 }
 
 // ---------------------------------------------------------------------------
@@ -975,6 +985,136 @@ pub struct AutonomousPaperStatusResponse {
     pub autonomous_session_state: String,
     /// RFC 3339 timestamp when this response was generated (UTC).
     pub now_utc: String,
+    // AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E4-READ-ONLY-DAILY-OPERATION-API-
+    // PROJECTION: additive compact daily-operation outcome summary. Always
+    // present; fails soft independently of every other field on this
+    // response (a daily-operation DB failure here never changes this
+    // route's own truth_state/HTTP status).
+    pub daily_operation: AutonomousDailyOperationSummary,
+}
+
+// ---------------------------------------------------------------------------
+// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E4-READ-ONLY-DAILY-OPERATION-API-
+// PROJECTION: GET /api/v1/autonomous/daily-operation[s] and the additive
+// summary block shared by readiness/paper-status/preflight.
+// ---------------------------------------------------------------------------
+
+/// One projected `sys_autonomous_daily_operations` row for the read-only
+/// daily-operation API. Strictly a read model over already-durable columns
+/// plus already-validated full-run-lineage activity counts — no evidence is
+/// computed here, and no classifier/finalizer is ever invoked to produce it.
+///
+/// `outcome_class`/`outcome_reason_code`/`finalized_at_utc` are `null` for
+/// every nonterminal `state` — never a fabricated default while pending.
+/// `strategy_evaluation_count`/`order_activity_count`/`fill_count` are
+/// `null` only when the full run lineage could not be established (never a
+/// false zero); an authoritative empty lineage with no `run_id` yet bound
+/// produces real zeroes.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AutonomousDailyOperationApiRow {
+    pub operation_id: String,
+    pub market_date: String,
+    pub deployment_mode: String,
+    pub adapter_id: String,
+
+    pub state: String,
+    pub state_reason_code: Option<String>,
+    /// `"finalized"` | `"awaiting_finalization"` | `"blocked_insufficient_evidence"` | `"not_yet_eligible"`.
+    pub finalization_status: String,
+
+    /// `"no_trade"` | `"with_activity"` | `"completed"`; `null` while nonterminal.
+    pub outcome_class: Option<String>,
+    /// The durable `outcome` column verbatim; `null` while nonterminal.
+    pub outcome_reason_code: Option<String>,
+    /// RFC3339; `null` while nonterminal.
+    pub finalized_at_utc: Option<String>,
+
+    pub run_id: Option<String>,
+    pub bars_observed: i64,
+    pub bars_dispatched: i64,
+    pub last_completed_bar_ts: Option<i64>,
+    pub last_dispatched_bar_ts: Option<i64>,
+
+    /// Distinct durable `strategy_signal_evaluations` rows across the full
+    /// validated run lineage. `null` only when the lineage itself could not
+    /// be established or read — never a false zero.
+    pub strategy_evaluation_count: Option<i64>,
+    /// Every durable `oms_outbox` row across the full run lineage, plus
+    /// `oms_inbox` rows with `event_kind IN ('ack','cancel_ack','replace_ack','reject')`.
+    /// Fills are never double-counted here. `null` only when unavailable.
+    pub order_activity_count: Option<i64>,
+    /// `oms_inbox` rows across the full run lineage with
+    /// `event_kind IN ('fill','partial_fill')`. `null` only when unavailable.
+    pub fill_count: Option<i64>,
+
+    /// `"complete"` | `"pending"` | `"degraded"` | `"unavailable"`.
+    pub evidence_state: String,
+    /// Bounded closed reason codes currently applying, if any. Never a raw
+    /// error, SQL fragment, path, or credential.
+    pub evidence_blockers: Vec<String>,
+
+    pub created_at_utc: String,
+    pub updated_at_utc: String,
+}
+
+/// Response for `GET /api/v1/autonomous/daily-operation[?market_date=]`.
+///
+/// `truth_state`:
+/// - `"active"` — the operation row and every required read-model field
+///   were queried successfully; `operation` is authoritative.
+/// - `"not_found"` — the DB was reachable and no operation row exists yet
+///   for the requested slot; a legitimate empty state, not unavailability.
+/// - `"backend_unavailable"` — `AppState` has no configured DB pool.
+/// - `"query_failed"` — a DB pool exists but a required read failed.
+/// - `"invalid_request"` — the `market_date` query parameter was malformed;
+///   only this variant accompanies HTTP 400 rather than HTTP 200.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AutonomousDailyOperationResponse {
+    pub canonical_route: String,
+    pub truth_state: String,
+    pub operation: Option<AutonomousDailyOperationApiRow>,
+    pub message: Option<String>,
+}
+
+/// Response for `GET /api/v1/autonomous/daily-operations?limit=`.
+///
+/// `truth_state` uses the same vocabulary as [`AutonomousDailyOperationResponse`]
+/// (no `"invalid_request"` here — `limit` is always clamped, never rejected).
+/// An authoritative empty `rows` list is `"active"`, never `"backend_unavailable"`
+/// or `"query_failed"`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AutonomousDailyOperationsResponse {
+    pub canonical_route: String,
+    pub truth_state: String,
+    /// The caller-supplied `limit` verbatim (defaulted to `20` when absent),
+    /// before clamping — surfaced so an operator can see when their request
+    /// was adjusted.
+    pub requested_limit: i64,
+    /// `requested_limit` clamped to `[1, 100]` — the limit actually used.
+    pub effective_limit: i64,
+    pub rows: Vec<AutonomousDailyOperationApiRow>,
+    pub message: Option<String>,
+}
+
+/// Compact additive daily-operation outcome summary, embedded unchanged into
+/// `AutonomousPaperReadinessResponse`, `AutonomousPaperStatusResponse`, and
+/// `PreflightStatusResponse`. Fails soft independently of its parent route:
+/// a daily-operation DB failure here is reported only via this block's own
+/// `truth_state` and never changes the parent response's other fields, HTTP
+/// status, or gate results.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AutonomousDailyOperationSummary {
+    /// `"active"` | `"not_found"` | `"backend_unavailable"` | `"query_failed"`.
+    pub truth_state: String,
+    pub operation_id: Option<String>,
+    pub market_date: Option<String>,
+    pub state: Option<String>,
+    pub finalization_status: Option<String>,
+    pub outcome_class: Option<String>,
+    pub outcome_reason_code: Option<String>,
+    pub finalized_at_utc: Option<String>,
+    pub evidence_state: Option<String>,
+    pub evidence_blockers: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

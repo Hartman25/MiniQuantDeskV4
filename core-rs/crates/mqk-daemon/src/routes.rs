@@ -30,6 +30,7 @@
 
 pub(crate) mod alerts_events;
 pub(crate) mod audit_ops;
+pub(crate) mod autonomous_daily_operations;
 pub(crate) mod autonomous_paper_status;
 pub(crate) mod backtests;
 pub mod control;
@@ -256,6 +257,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         resolve_incident,
     };
     use audit_ops::{audit_artifacts, audit_operator_actions, ops_operator_timeline};
+    use autonomous_daily_operations::{autonomous_daily_operation, autonomous_daily_operations};
     use autonomous_paper_status::autonomous_paper_status;
     use backtests::{
         backtest_economics_suggestion, backtest_job_status, backtest_job_submit, backtest_jobs_list,
@@ -530,6 +532,19 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/v1/autonomous/paper-status",
             get(autonomous_paper_status),
+        )
+        // AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E4-READ-ONLY-DAILY-OPERATION-API-
+        // PROJECTION: read-only projection of durable daily-operation outcome
+        // truth (public, no auth). No DB write, no classifier/finalizer call,
+        // no provider/broker/Discord call, no run/outbox/inbox/claim/
+        // evaluation creation.
+        .route(
+            "/api/v1/autonomous/daily-operation",
+            get(autonomous_daily_operation),
+        )
+        .route(
+            "/api/v1/autonomous/daily-operations",
+            get(autonomous_daily_operations),
         )
         .route(
             "/api/v1/execution/replace-cancel-chains",

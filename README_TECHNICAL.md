@@ -136,9 +136,26 @@ defense-in-depth. Two new tests
 bringing the E3 coordinator test file to 16 tests, all passing; and
 `store_59_persist_finalization_blocker_refuses_when_matching_runtime_active`
 in the E2B classifier/finalization test file, bringing it to 67 tests, all
-passing) prove zero write and zero notification end-to-end. **E3 (plus this
-repair) is implementation complete, awaiting ChatGPT and operator
-acceptance.** No API route and no GUI surface exist yet; that remains E4.
+passing) prove zero write and zero notification end-to-end. **E3 is now
+accepted** (plus this repair, both accepted together).
+
+On top of that accepted foundation,
+AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E4-READ-ONLY-DAILY-OPERATION-API-PROJECTION
+adds exactly two strictly read-only routes,
+`GET /api/v1/autonomous/daily-operation[?market_date=]` and
+`GET /api/v1/autonomous/daily-operations[?limit=]`, one shared pure
+projection (terminal fields read verbatim from the durable row, never a
+classifier rerun), full-run-lineage activity counts via
+`mqk_db::fetch_and_validate_autonomous_daily_operation_run_lineage` plus one
+new narrow `mqk_db::count_strategy_signal_evaluations_for_runs` helper (no
+migration), and an additive `daily_operation` summary block on
+readiness/paper-status/preflight. A new scenario test file
+(`scenario_autonomous_daily_operation_api_01.rs`, 37 tests) proves the full
+truth-state vocabulary, terminal/nonterminal projection, lineage-scoped
+counts, history ordering/limit-clamping, summary-block fail-soft behavior,
+and zero operation/run/outbox/inbox/claim/evaluation side effects — all 37
+pass. **E4 is implementation complete, awaiting ChatGPT and operator
+acceptance.** No GUI surface exists yet; that remains Phase F.
 
 The strongest current operational route is:
 
@@ -840,9 +857,10 @@ The path is still in **pre-soak hardening** because Bundle 3 is open. Phase D (D
 complete in full; the Phase E1 contract audit (four-times-corrected) is **accepted complete**; Phase
 E2A (durable coverage-anchor/run-lineage evidence foundation), plus both repairs, is **accepted
 complete**; Phase E2B (strict outcome classifier and finalization CAS) is **accepted complete**; Phase
-E3 (coordinator finalization integration and notification) is implementation complete, awaiting
-acceptance. Do not label the current `main` head as a finished autonomous-paper MVP until Phase E's
-remaining runtime implementation (E4–E5) and the later F/G phases are independently accepted.
+E3 (coordinator finalization integration and notification) is **accepted complete**; Phase E4 (the
+read-only daily-operation API) is implementation complete, awaiting acceptance. Do not label the
+current `main` head as a finished autonomous-paper MVP until E4's acceptance, E5's integrated
+closure, and the later F/G phases are independently accepted.
 
 ### What is expected after Bundle 3
 
@@ -1318,7 +1336,7 @@ Recommended discipline:
 
 Be honest about these:
 
-- Bundle 3 is not closed; Phase D (D1–D4, integrated lifecycle proof, dispatch-ownership race closure, and the evaluation-lineage repair) is accepted complete in full; the Phase E1 contract audit (the binding durable outcome/no-trade contract, four-times-corrected) is **accepted complete**; Phase E2A (durable coverage-anchor/run-lineage evidence foundation), plus both repairs, is **accepted complete**; Phase E2B (strict outcome classifier and finalization CAS, built on E2A's authorities) is **accepted complete**; Phase E3 (coordinator finalization integration and notification, built on E2B's classifier/CAS) is implementation complete but awaiting independent ChatGPT/operator acceptance, and no API route or GUI surface exists yet
+- Bundle 3 is not closed; Phase D (D1–D4, integrated lifecycle proof, dispatch-ownership race closure, and the evaluation-lineage repair) is accepted complete in full; the Phase E1 contract audit (the binding durable outcome/no-trade contract, four-times-corrected) is **accepted complete**; Phase E2A (durable coverage-anchor/run-lineage evidence foundation), plus both repairs, is **accepted complete**; Phase E2B (strict outcome classifier and finalization CAS, built on E2A's authorities) is **accepted complete**; Phase E3 (coordinator finalization integration and notification, built on E2B's classifier/CAS) is **accepted complete**; Phase E4 (the read-only daily-operation API, built on E3's accepted foundation) is implementation complete but awaiting independent ChatGPT/operator acceptance, and no GUI surface exists yet
 - the current main branch should not begin an unattended soak until Phase E's remaining runtime implementation (E4 read-only API, then E5 integrated closure, per the accepted E1 contract and built on E3's coordinator finalization integration) and the later Bundle 3 phases (F/G) are accepted; controlled, operator-supervised autonomous Paper + Alpaca operation is the current Bundle 3 target, not unattended soak
 - Bundle 4 durable paper cash/positions/lots/cost basis/P&L truth is still open
 - real paper fill, reconcile-after-fill, Discord lifecycle, restart, and repeated-session evidence remain incomplete

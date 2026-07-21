@@ -51,6 +51,13 @@
 #   [11] README.md / README_TECHNICAL.md never claim Phase E, Bundle 3, an
 #        unattended soak, or live-capital readiness as complete/started, and
 #        never mark E2A itself as accepted/complete.
+#
+# AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E4-READ-ONLY-DAILY-OPERATION-API-
+# PROJECTION reconciles check [11]'s README-truth requirement: E3 is now
+# accepted (recorded by the operator ahead of this patch), so the durable
+# check going forward requires E1/E2A/E2B/E3 recorded as accepted and E4
+# recorded as implementation-complete-awaiting-acceptance -- never E3 itself
+# still described as merely awaiting acceptance.
 #   [12] The complete durable event-envelope validator checks event_type,
 #        source, run_id IS NULL, and resume_source IS NULL (not merely the
 #        deterministic id and JSON detail payload).
@@ -355,25 +362,25 @@ $ReadmeTechContent = $null
 if (Test-FileExists "README_TECHNICAL.md" $PathReadmeTech) {
     $ReadmeTechContent = Get-Content -Raw -Path $PathReadmeTech
 }
-# AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E3-COORDINATOR-FINALIZATION-
-# INTEGRATION-AND-NOTIFICATION: E2B is now accepted (recorded by the
-# operator ahead of this patch); the durable check going forward is the
-# current truthful progression: E1/E2A/E2B accepted, E3 implementation
-# complete but not yet accepted, E4 not started, Phase E/Bundle 3 open, soak
-# not started, live capital not ready.
+# AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E4-READ-ONLY-DAILY-OPERATION-API-
+# PROJECTION: E3 is now accepted (recorded by the operator ahead of this
+# patch); the durable check going forward is the current truthful
+# progression: E1/E2A/E2B/E3 accepted, E4 implementation complete but not yet
+# accepted, E5 not started, Phase E/Bundle 3 open, soak not started, live
+# capital not ready. The prior "E3 not yet accepted" forbidden-claim entries
+# are retired -- E3 acceptance is now the truthful, required state.
 $ForbiddenReadmeClaims = @(
     "Phase E: CLOSED",
     "Phase E: COMPLETE",
     "Phase E is complete",
+    "Phase E: ACCEPTED",
     "Bundle 3: CLOSED",
     "Bundle 3 is complete",
-    "E3: ACCEPTED",
-    "E3 is accepted",
-    "E3 is complete",
-    "E3: COMPLETE",
     "E4 implemented",
     "E4: ACCEPTED",
     "E4 is accepted",
+    "E4 is complete",
+    "E4: COMPLETE",
     "coordinator invocation is accepted",
     "soak has started",
     "soak: STARTED",
@@ -391,7 +398,8 @@ foreach ($Doc in @(@{Name = "README.md"; Content = $ReadmeContent}, @{Name = "RE
 Test-ContentContains "README.md records E1 as accepted" $ReadmeContent "E1 is now accepted" | Out-Null
 Test-ContentContains "README.md records E2A as accepted" $ReadmeContent "E2A (plus both repairs) is now accepted" | Out-Null
 Test-ContentContains "README.md records E2B as accepted" $ReadmeContent "E2B is now accepted" | Out-Null
-Test-ContentContains "README.md records E3 as awaiting acceptance (not yet accepted)" $ReadmeContent "awaiting ChatGPT and operator acceptance" | Out-Null
+Test-ContentContains "README.md records E3 as accepted" $ReadmeContent "E3 is now accepted" | Out-Null
+Test-ContentContains "README.md records E4 as implementation-complete-awaiting-acceptance" $ReadmeContent "awaiting ChatGPT and operator acceptance" | Out-Null
 Test-ContentContains "README_TECHNICAL.md records E1 as accepted" $ReadmeTechContent "E1 is accepted complete" | Out-Null
 Test-ContentContains "README_TECHNICAL.md records E2A as accepted" $ReadmeTechContent "plus both repairs, is **accepted complete**" | Out-Null
 

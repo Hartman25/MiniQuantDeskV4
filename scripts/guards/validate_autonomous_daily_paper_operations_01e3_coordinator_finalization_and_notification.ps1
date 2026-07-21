@@ -49,7 +49,12 @@
 #   [13] No real Discord/network access is introduced by the new E3 test
 #        file -- it never calls `DiscordNotifier::from_env` and never
 #        constructs a non-loopback (`discord.com`) webhook URL.
-#   [14] No E4 API route, response field, or GUI surface is introduced.
+#   [14] AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E4-READ-ONLY-DAILY-OPERATION-API-
+#        PROJECTION reconciliation: the obsolete "no E4 route at all" check
+#        is replaced by a durable equivalent -- exactly the two authorized
+#        E4 read-only routes exist on the public router, neither one invokes
+#        the E3 coordinator's finalization entry points, and no GUI file is
+#        touched.
 #   [15] README.md / README_TECHNICAL.md never mark E3, Phase E, or Bundle 3
 #        as accepted/complete, and record E1/E2A/E2B as accepted with E3
 #        implementation-complete-awaiting-acceptance.
@@ -344,13 +349,24 @@ Test-ContentDoesNotContain "the E3 test file never constructs a discord.com webh
 Test-ContentContains "the E3 test file overrides discord_notifier with a loopback sink or a no-op" $E3TestContent "DiscordNotifier::from_url" | Out-Null
 
 Write-Host ""
-Show-Info "--- [14] No E4 API route, response field, or GUI surface is introduced ---"
+Show-Info "--- [14] Exactly the two authorized E4 read-only routes exist; neither invokes coordinator finalization; no GUI ---"
 $RoutesContent = $null
 if (Test-Path $PathRoutesRs) { $RoutesContent = Get-Content -Raw -Path $PathRoutesRs }
 $ApiTypesContent = $null
 if (Test-Path $PathApiTypesRs) { $ApiTypesContent = Get-Content -Raw -Path $PathApiTypesRs }
-Test-ContentDoesNotContain "routes.rs never references a daily-operation read route" $RoutesContent "daily-operation" | Out-Null
-Test-ContentDoesNotContain "api_types.rs never references the outcome classifier module" $ApiTypesContent "autonomous_daily_outcome" | Out-Null
+$PathE4RouteRs = Join-Path $RepoRoot "core-rs\crates\mqk-daemon\src\routes\autonomous_daily_operations.rs"
+$E4RouteContent = $null
+if (Test-FileExists "E4 route module" $PathE4RouteRs) {
+    $E4RouteContent = Get-Content -Raw -Path $PathE4RouteRs
+}
+Test-ContentContains "routes.rs mounts the single daily-operation GET route" $RoutesContent '"/api/v1/autonomous/daily-operation",' | Out-Null
+Test-ContentContains "routes.rs mounts the history daily-operations GET route" $RoutesContent '"/api/v1/autonomous/daily-operations",' | Out-Null
+Test-ContentDoesNotContain "routes.rs never mounts a POST/PUT/PATCH/DELETE for the single E4 route" $RoutesContent 'post(autonomous_daily_operation)' | Out-Null
+Test-ContentDoesNotContain "routes.rs never mounts a POST/PUT/PATCH/DELETE for the history E4 route" $RoutesContent 'post(autonomous_daily_operations)' | Out-Null
+Test-ContentDoesNotContain "the E4 route module never calls the E2B finalizer" $E4RouteContent "classify_and_finalize_autonomous_daily_operation(" | Out-Null
+Test-ContentDoesNotContain "the E4 route module never calls the terminal finalization CAS directly" $E4RouteContent "finalize_autonomous_daily_operation(" | Out-Null
+Test-ContentDoesNotContain "the E4 route module never calls a coordinator tick function" $E4RouteContent "tick_autonomous_daily_coordinator(" | Out-Null
+Test-ContentDoesNotContain "the E4 route module never sends a notification" $E4RouteContent "discord_notifier" | Out-Null
 if (Test-Path (Join-Path $RepoRoot "core-rs\mqk-gui")) {
     $GuiTouched = git -C $RepoRoot diff --name-only HEAD -- core-rs/mqk-gui 2>$null
     if ([string]::IsNullOrWhiteSpace($GuiTouched)) {
@@ -362,7 +378,7 @@ if (Test-Path (Join-Path $RepoRoot "core-rs\mqk-gui")) {
 }
 
 Write-Host ""
-Show-Info "--- [15] README truth: E1/E2A/E2B accepted, E3 awaiting acceptance, Phase E/Bundle 3 open ---"
+Show-Info "--- [15] README truth: E1/E2A/E2B/E3 accepted, E4 implementation-complete-awaiting-acceptance, Phase E/Bundle 3 open ---"
 $ReadmeContent = $null
 if (Test-FileExists "README.md" $PathReadme) {
     $ReadmeContent = Get-Content -Raw -Path $PathReadme
@@ -371,18 +387,24 @@ $ReadmeTechContent = $null
 if (Test-FileExists "README_TECHNICAL.md" $PathReadmeTech) {
     $ReadmeTechContent = Get-Content -Raw -Path $PathReadmeTech
 }
+# AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E4-READ-ONLY-DAILY-OPERATION-API-
+# PROJECTION: E3 is now accepted (recorded by the operator ahead of this
+# patch) -- the durable check going forward requires E1/E2A/E2B/E3 recorded
+# as accepted and E4 recorded as implementation-complete-awaiting-acceptance,
+# never accepted itself. The prior "E3 not yet accepted" forbidden-claim
+# entries are retired -- E3 acceptance is now the truthful, required state.
 $ForbiddenReadmeClaims = @(
     "Phase E: CLOSED",
     "Phase E: COMPLETE",
     "Phase E is complete",
+    "Phase E: ACCEPTED",
     "Bundle 3: CLOSED",
     "Bundle 3 is complete",
-    "E3: ACCEPTED",
-    "E3 is accepted",
-    "E3 is complete",
-    "E3: COMPLETE",
     "E4 implemented",
     "E4: ACCEPTED",
+    "E4 is accepted",
+    "E4 is complete",
+    "E4: COMPLETE",
     "coordinator invocation is accepted",
     "soak has started",
     "soak: STARTED",
@@ -400,7 +422,8 @@ foreach ($Doc in @(@{Name = "README.md"; Content = $ReadmeContent}, @{Name = "RE
 Test-ContentContains "README.md records E1 as accepted" $ReadmeContent "E1 is now accepted" | Out-Null
 Test-ContentContains "README.md records E2A as accepted" $ReadmeContent "E2A (plus both repairs) is now accepted" | Out-Null
 Test-ContentContains "README.md records E2B as accepted" $ReadmeContent "E2B is now accepted" | Out-Null
-Test-ContentContains "README.md records E3 as implementation-complete-awaiting-acceptance" $ReadmeContent "awaiting ChatGPT and operator acceptance" | Out-Null
+Test-ContentContains "README.md records E3 as accepted" $ReadmeContent "E3 is now accepted" | Out-Null
+Test-ContentContains "README.md records E4 as implementation-complete-awaiting-acceptance" $ReadmeContent "awaiting ChatGPT and operator acceptance" | Out-Null
 
 Write-Host ""
 Show-Info "--- [16] New E3 spec doc and scenario test file exist and are nonempty ---"

@@ -15226,3 +15226,185 @@ NEXT AFTER E3 ACCEPTANCE: E4 only — read-only daily-operation API projection
 unattended 10-20-session soak: NOT STARTED
 live capital: NOT READY
 ```
+
+## AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E4-READ-ONLY-DAILY-OPERATION-API-PROJECTION
+
+**Bundle:** `AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-COMBINED` | **Phase:** E4 — read-only autonomous
+daily-operation API projection.
+
+**Starting HEAD:** `6f96b984d2f3ccaf2679e26b3202908d530e6e0e` ("fix: preserve finalization eligibility
+on policy failure" — the E3 repair commit above). **Disposition entering this patch:** E1/E2A/E2B/E3
+(plus the matching-runtime-policy-failure-gate repair) accepted complete, recorded by the operator
+ahead of this patch; E4 not started.
+
+**Scope.** Implements exactly the strictly read-only read model the E1 contract's §11 and the E3
+document's own §16 "E4 boundary" authorize: the canonical single-operation and history GET routes,
+typed response models, one shared pure projection function, the full truth-state vocabulary, terminal/
+nonterminal outcome projection sourced verbatim from already-durable columns (never a classifier
+rerun), full-run-lineage activity counts as a read-model aggregate (never a false zero), and an
+additive `daily_operation` summary block on readiness/paper-status/preflight. No coordinator
+invocation, no classifier/finalizer call, no notification, and no GUI surface are introduced.
+
+**Routes
+(`core-rs/crates/mqk-daemon/src/routes/autonomous_daily_operations.rs`, new; registered in
+`core-rs/crates/mqk-daemon/src/routes.rs`):**
+
+```text
+GET /api/v1/autonomous/daily-operation[?market_date=YYYY-MM-DD]
+GET /api/v1/autonomous/daily-operations[?limit=N]
+```
+
+Both mounted on the existing public (unauthenticated) router, alongside `autonomous_readiness` and
+`autonomous_paper_status`. Neither route accepts any method other than `GET`. The single route
+resolves an explicit `market_date` via `NaiveDate::parse_from_str(_, "%Y-%m-%d")` (a parse failure
+returns HTTP `400`, `truth_state: "invalid_request"` — the only non-200 case); the default (no
+parameter) path resolves today's canonical market date via
+`state::resolve_autonomous_daily_session_plan_from_env(Utc::now(), &AutonomousDailyPlanTiming::production_default())`
+— the exact pure resolver the coordinator itself uses, performing no DB read/write and creating no
+operation or coverage-bound event. The resolved slot is looked up via
+`mqk_db::fetch_autonomous_daily_operation_for_slot` (never a different query). The history route uses
+`mqk_db::list_recent_autonomous_daily_operations`, `limit` defaulted to `20` and clamped `[1, 100]`.
+
+**Truth-state vocabulary:** `active` | `not_found` | `backend_unavailable` | `query_failed` (all HTTP
+`200`), plus `invalid_request` (HTTP `400`, single route only). An authoritative empty history list is
+`active`, never `backend_unavailable`.
+
+**Shared pure projection (`project_daily_operation_outcome`):** gated strictly on `record.state`.
+Terminal (`completed_no_trade`/`completed_with_activity`/`completed`) rows read `outcome`/
+`finalized_at_utc` verbatim from the durable row, `finalization_status = "finalized"`,
+`evidence_state = "complete"` — the E2B classifier and finalization CAS are never invoked.
+Nonterminal rows always project `null` for `outcome_class`/`outcome_reason_code`/`finalized_at_utc`;
+`finalization_status` is `"blocked_insufficient_evidence"` (evidence_degraded + stopped),
+`"awaiting_finalization"` (stopping/stop_retrying + stopped), or `"not_yet_eligible"` (everything
+else); `evidence_state`/`evidence_blockers` are `"unavailable"` with the matching
+`unknown_run_lineage_unavailable`/`unknown_database_unavailable` code when counts could not be
+gathered, `"degraded"` for a mid-run `evidence_degraded` row, or `"pending"` otherwise — plus the
+current `state_reason_code` when it is one of the eight closed `unknown_*` codes.
+
+**Full-lineage activity counts
+(`gather_daily_operation_activity_counts`):** scoped to the operation's full validated run lineage via
+`mqk_db::fetch_and_validate_autonomous_daily_operation_run_lineage` — never the mutable `run_id`
+column alone. An empty, valid lineage (`operation.run_id IS NULL`) is authoritative zero; an invalid/
+unreadable lineage or any downstream read failure yields `null` for all three counts, never a false
+zero. `strategy_evaluation_count` uses one new narrow mqk-db helper,
+`count_strategy_signal_evaluations_for_runs` (`core-rs/crates/mqk-db/src/strategy.rs`, a single
+`SELECT COUNT(*) ... WHERE run_id = ANY($1)` query — no migration, added because no existing unbounded
+count helper exists for this table and the bounded list functions risk silent truncation).
+`order_activity_count`/`fill_count` reuse E2B's own existing unbounded `outbox_load_all_for_run`/
+`inbox_load_all_for_run` helpers verbatim, summed per lineage `run_id` — fills are never double-counted
+into `order_activity_count`.
+
+**Additive summary block
+(`compute_daily_operation_summary`, `AutonomousDailyOperationSummary` in `api_types.rs`):** added to
+`AutonomousPaperReadinessResponse`, `AutonomousPaperStatusResponse`, and `PreflightStatusResponse`.
+Every response-construction branch in `autonomous_readiness` (2 branches), `autonomous_paper_status`
+(3 branches), and `system_preflight` (1 branch) supplies it. The function returns the summary type
+directly (never `Result`), so a daily-operation DB failure can only ever surface via the summary's own
+`truth_state` field — structurally impossible for it to change the parent route's HTTP status, other
+fields, or gate results.
+
+**Test file (new):**
+`core-rs/crates/mqk-daemon/tests/scenario_autonomous_daily_operation_api_01.rs` — 37 tests (11 non-DB
+router-level/structural, run every time; 26 DB-backed `#[ignore]` tests against the real isolated
+port-5434 test database). Proves: route registration/method shape, malformed `market_date` → 400,
+exact-slot fetch, default-market-date agreement with the canonical resolver, `not_found`/
+`backend_unavailable`/`query_failed` (the latter via a `connect_lazy` pool against an unreachable
+address — pool construction never blocks, every query fails at execution time), terminal no-trade/
+activity/generic-completed projection, nonterminal null-field projection, `awaiting_finalization`/
+`blocked_insufficient_evidence` finalization-status mapping, full-lineage counts across a recovery
+(replacement-run) cycle including an `ack`-vs-`fill` distinction, invalid-lineage null-count proof,
+history ordering/default-limit-20/limit-clamping/authoritative-empty-history, summary-block presence
+and fail-soft behavior on all three parent routes (including a broken-pool proof isolated to the
+`paper-status` not-applicable branch so only the summary's own DB read is exercised), zero operation-
+event/state/version/run/outbox/inbox/claim/evaluation side effects from either route, and a structural
+source-text scan proving the route module never references the classifier/finalizer/coordinator or a
+provider/broker/Discord client. All 37 pass.
+
+**Regressions (each binary run alone, `--include-ignored --test-threads=1`, isolated test Postgres on
+port 5434):** `scenario_autonomous_daily_outcome_coordinator_integration_01` 16/16,
+`scenario_autonomous_daily_outcome_classifier_and_finalization_01` 67/67,
+`scenario_autonomous_daily_coverage_anchor_and_run_lineage_01` 41/41,
+`scenario_autonomous_readiness_auton_truth01` 18/18, `scenario_autonomous_paper_status_summary_01`
+21/21, `scenario_daemon_routes` (covers `GET /api/v1/system/preflight`) 84/84,
+`scenario_route_contract_rt01` (GUI-vs-daemon route contract) 2/2, `scenario_gui_daemon_contract_gate`
+(general API contract) 23/23. The full `mqk-daemon` integration suite was not run, per mission
+instruction. Zero new failures anywhere in the required matrix.
+
+**Guard (new):**
+`scripts/guards/validate_autonomous_daily_paper_operations_01e4_read_only_daily_operation_api.ps1` —
+16 checks covering route registration/method shape, exact-slot/list-helper usage, limit clamping,
+truth-state vocabulary, nonterminal-projection null-field enforcement, full-lineage-helper usage,
+false-zero-count prevention, classifier/finalizer/coordinator/DB-write-helper non-invocation, additive
+summary-block presence and per-branch coverage, fail-soft signature enforcement, raw-error-text
+exclusion, no-GUI, README truth, and new-file existence.
+
+**Guard reconciliation (obsolete point-in-time checks retired in place, per this patch's own
+authorization):**
+`scripts/guards/validate_autonomous_daily_paper_operations_01e2a_coverage_anchor_and_run_lineage.ps1`
+and
+`scripts/guards/validate_autonomous_daily_paper_operations_01e2b_outcome_classifier_and_finalization.ps1`
+both retire their "E3 not yet accepted" forbidden-claim entries (E3 acceptance is now the truthful
+required state) and update their required README-truth phrases to require E1/E2A/E2B/E3 recorded as
+accepted and E4 recorded as implementation-complete-awaiting-acceptance.
+`scripts/guards/validate_autonomous_daily_paper_operations_01e3_coordinator_finalization_and_notification.ps1`
+replaces its former "`routes.rs` never references a daily-operation read route" check (obsolete now
+that E4 is the authorized read-only route work) with a positive check that exactly the two authorized
+E4 GET routes exist, neither is ever mounted with a mutating method, and the E4 route module never
+calls the E2B finalizer, the terminal CAS, a coordinator tick function, or sends a notification; its
+README-truth check is updated the same way as E2A/E2B's. All other E2A/E2B/E3 implementation
+invariants remain enforced unchanged. Verified: all three guards fail with exactly the expected
+pre-reconciliation violation against the pre-patch tree (E3 guard: 1 violation, the obsolete
+`daily-operation` needle check) and pass clean after reconciliation.
+
+**Format/lint:** `rustfmt --check` clean on every touched Rust file (formatted with `rustfmt` directly
+on the touched-file list, never a whole-crate reformat). Narrow Clippy `-D warnings` clean on
+`mqk-db --lib` and `mqk-daemon --lib`. `cargo check -p mqk-db -p mqk-runtime -p mqk-daemon` clean (only
+the pre-existing `sqlx-postgres` future-incompat note, unrelated to this patch).
+
+**Files changed:** `MiniQuantDesk_Master_Patch_Ledger_v2.md`, `README.md`, `README_TECHNICAL.md`,
+`docs/specs/autonomous_daily_paper_operations_01e4_read_only_daily_operation_api.md` (new),
+`scripts/guards/validate_autonomous_daily_paper_operations_01e4_read_only_daily_operation_api.ps1`
+(new),
+`scripts/guards/validate_autonomous_daily_paper_operations_01e2a_coverage_anchor_and_run_lineage.ps1`,
+`scripts/guards/validate_autonomous_daily_paper_operations_01e2b_outcome_classifier_and_finalization.ps1`,
+`scripts/guards/validate_autonomous_daily_paper_operations_01e3_coordinator_finalization_and_notification.ps1`,
+`core-rs/crates/mqk-daemon/src/api_types.rs`,
+`core-rs/crates/mqk-daemon/src/routes.rs`,
+`core-rs/crates/mqk-daemon/src/routes/autonomous_daily_operations.rs` (new),
+`core-rs/crates/mqk-daemon/src/routes/system.rs`,
+`core-rs/crates/mqk-daemon/src/routes/autonomous_paper_status.rs`,
+`core-rs/crates/mqk-db/src/strategy.rs`,
+`core-rs/crates/mqk-daemon/tests/scenario_autonomous_daily_operation_api_01.rs` (new). No migration.
+No GUI changed.
+
+**Safety confirmation:**
+
+```text
+PROVIDER CALLS: no
+BROKER CALLS: no
+DISCORD CALLS: no
+NETWORK CALLS: no
+REAL DAEMON STARTED: no
+PAPER ORDERS: no
+LIVE ORDERS: no
+PAPER DB TOUCHED: no
+PORT 5440 TOUCHED: no
+MIGRATION CHANGED: no
+GUI CHANGED: no
+CLASSIFIER/FINALIZER INVOKED FROM A ROUTE: no
+COORDINATOR TICK INVOKED FROM A ROUTE: no
+```
+
+```text
+E1: ACCEPTED — COMPLETE
+E2A: ACCEPTED — COMPLETE
+E2B: ACCEPTED — COMPLETE
+E3: ACCEPTED — COMPLETE
+E4: IMPLEMENTATION COMPLETE — AWAITING CHATGPT AND OPERATOR ACCEPTANCE
+E5: NOT STARTED
+PHASE E: OPEN
+BUNDLE 3 (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-COMBINED): OPEN
+NEXT AFTER E4 ACCEPTANCE: E5 only — integrated Phase E proof and closure
+unattended 10-20-session soak: NOT STARTED
+live capital: NOT READY
+```

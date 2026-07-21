@@ -24,6 +24,7 @@ use crate::api_types::AutonomousPaperStatusResponse;
 use crate::state::{AppState, DeploymentMode, StrategyMarketDataSource};
 use crate::watchlist_intake::evaluate_watchlist_intake_from_env;
 
+use super::autonomous_daily_operations::compute_daily_operation_summary;
 use super::system::autonomous_session_truth_to_api;
 
 // ---------------------------------------------------------------------------
@@ -82,6 +83,7 @@ pub(crate) async fn autonomous_paper_status(State(st): State<Arc<AppState>>) -> 
                 autonomous_session_state: "not_applicable".to_string(),
                 next_operator_action: "Set deployment mode to Paper+Alpaca (MQK_DAEMON_ADAPTER_ID=alpaca) to use autonomous paper trading".to_string(),
                 now_utc,
+                daily_operation: compute_daily_operation_summary(&st, now).await,
             }),
         )
             .into_response();
@@ -127,6 +129,7 @@ pub(crate) async fn autonomous_paper_status(State(st): State<Arc<AppState>>) -> 
                     autonomous_session_state: "not_applicable".to_string(),
                     next_operator_action: "Check daemon health at /v1/health".to_string(),
                     now_utc,
+                    daily_operation: compute_daily_operation_summary(&st, now).await,
                 }),
             )
                 .into_response();
@@ -440,6 +443,7 @@ pub(crate) async fn autonomous_paper_status(State(st): State<Arc<AppState>>) -> 
             autonomous_session_state: autonomous_state_str,
             next_operator_action,
             now_utc,
+            daily_operation: compute_daily_operation_summary(&st, now).await,
         }),
     )
         .into_response()

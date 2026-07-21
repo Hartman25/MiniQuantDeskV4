@@ -45,21 +45,30 @@
 #        it never re-derives an outcome classification locally (no parallel
 #        classifier) and never issues its own terminal-state SQL/finalize
 #        call (no parallel terminal writer).
-#   [16] No API route or GUI surface was introduced.
+#   [16] Neither `routes.rs` nor `api_types.rs` references the outcome
+#        classifier module directly -- route code never reruns the
+#        classifier or writes terminal/evidence-degraded truth itself.
 #   [17] README.md / README_TECHNICAL.md never claim Phase E, Bundle 3, an
 #        unattended soak, or live-capital readiness as complete/started, and
-#        record E1/E2A/E2B as accepted and E3 as implementation-complete-
+#        record E1/E2A/E2B/E3 as accepted and E4 as implementation-complete-
 #        awaiting-acceptance (not accepted).
 #   [18] The new E2B scenario test file exists and is nonempty.
 #
 # AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E3-COORDINATOR-FINALIZATION-
-# INTEGRATION-AND-NOTIFICATION reconciles two point-in-time checks above that
+# INTEGRATION-AND-NOTIFICATION reconciled two point-in-time checks above that
 # described E3 as "not started": check [15] ("no coordinator integration was
-# introduced") is replaced with a positive proof that exactly one authorized
-# integration seam exists and duplicates none of E2B's own logic; check [17]'s
-# README-truth requirements are updated to the current truthful progression
-# (E2B now accepted, E3 awaiting acceptance). All E2B implementation
-# invariants (checks [1]-[14], [18]-[24]) remain enforced unchanged.
+# introduced") was replaced with a positive proof that exactly one authorized
+# integration seam exists and duplicates none of E2B's own logic.
+#
+# AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E4-READ-ONLY-DAILY-OPERATION-API-
+# PROJECTION further reconciles checks [16]/[17]: E3 is now accepted, and E4
+# adds exactly two authorized read-only routes plus new response types --
+# check [16] is narrowed from "no API route at all" to "route code never
+# references the classifier module" (the real invariant this guard protects),
+# and check [17]'s README-truth requirement now records E1/E2A/E2B/E3 as
+# accepted and E4 as implementation-complete-awaiting-acceptance. All E2B
+# implementation invariants (checks [1]-[14], [18]-[24]) remain enforced
+# unchanged.
 #
 # Usage:
 #   powershell -ExecutionPolicy Bypass -File scripts\guards\validate_autonomous_daily_paper_operations_01e2b_outcome_classifier_and_finalization.ps1
@@ -301,21 +310,23 @@ $ReadmeTechContent = $null
 if (Test-FileExists "README_TECHNICAL.md" $PathReadmeTech) {
     $ReadmeTechContent = Get-Content -Raw -Path $PathReadmeTech
 }
-# AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E3-COORDINATOR-FINALIZATION-
-# INTEGRATION-AND-NOTIFICATION: E2B is now accepted (recorded by the
-# operator ahead of this patch) -- the durable check going forward records
-# E1/E2A/E2B as accepted and E3 as implementation-complete-awaiting-
-# acceptance, never accepted itself.
+# AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E4-READ-ONLY-DAILY-OPERATION-API-
+# PROJECTION: E3 is now accepted (recorded by the operator ahead of this
+# patch) -- the durable check going forward records E1/E2A/E2B/E3 as accepted
+# and E4 as implementation-complete-awaiting-acceptance, never accepted
+# itself. The prior "E3 not yet accepted" forbidden-claim entries are
+# retired -- E3 acceptance is now the truthful, required state.
 $ForbiddenReadmeClaims = @(
     "Phase E: COMPLETE",
     "Phase E is complete",
+    "Phase E: ACCEPTED",
     "Bundle 3: CLOSED",
     "Bundle 3 is complete",
-    "E3: ACCEPTED",
-    "E3 is accepted",
-    "E3 is complete",
-    "E3: COMPLETE",
     "E4 implemented",
+    "E4: ACCEPTED",
+    "E4 is accepted",
+    "E4 is complete",
+    "E4: COMPLETE",
     "coordinator invocation is accepted",
     "soak has started",
     "soak: STARTED",
@@ -332,7 +343,8 @@ foreach ($Doc in @(@{Name = "README.md"; Content = $ReadmeContent}, @{Name = "RE
 }
 Test-ContentContains "README.md records E2A as accepted" $ReadmeContent "E2A (plus both repairs) is now accepted" | Out-Null
 Test-ContentContains "README.md records E2B as accepted" $ReadmeContent "E2B is now accepted" | Out-Null
-Test-ContentContains "README.md records E3 as implementation-complete-awaiting-acceptance" $ReadmeContent "awaiting ChatGPT and operator acceptance" | Out-Null
+Test-ContentContains "README.md records E3 as accepted" $ReadmeContent "E3 is now accepted" | Out-Null
+Test-ContentContains "README.md records E4 as implementation-complete-awaiting-acceptance" $ReadmeContent "awaiting ChatGPT and operator acceptance" | Out-Null
 
 Write-Host ""
 Show-Info "--- [18] New E2B scenario test file exists and is nonempty ---"

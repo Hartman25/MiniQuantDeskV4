@@ -575,6 +575,12 @@ pub(crate) async fn system_preflight(State(st): State<Arc<AppState>>) -> impl In
             // summary. Default-off; observability only.
             runtime_session_source: runtime_session_source_summary_now(&st),
             daily_data_readiness: daily_data_readiness_report,
+            daily_operation:
+                crate::routes::autonomous_daily_operations::compute_daily_operation_summary(
+                    &st,
+                    Utc::now(),
+                )
+                .await,
         }),
     )
         .into_response()
@@ -740,6 +746,11 @@ pub(crate) async fn autonomous_readiness(State(st): State<Arc<AppState>>) -> imp
                 market_data_readiness: None,
                 strategy_decision_diagnostics: None,
                 daily_data_readiness: daily_data_readiness_report,
+                daily_operation:
+                    crate::routes::autonomous_daily_operations::compute_daily_operation_summary(
+                        &st, now,
+                    )
+                    .await,
             }),
         )
             .into_response();
@@ -1169,6 +1180,11 @@ pub(crate) async fn autonomous_readiness(State(st): State<Arc<AppState>>) -> imp
             market_data_readiness: Some(md_readiness),
             strategy_decision_diagnostics,
             daily_data_readiness: daily_data_readiness_report,
+            daily_operation:
+                crate::routes::autonomous_daily_operations::compute_daily_operation_summary(
+                    &st, now,
+                )
+                .await,
         }),
     )
         .into_response()
