@@ -40,15 +40,26 @@
 #        edges both exist.
 #   [14] The evidence-degraded write path never sets `outcome` (only the
 #        terminal finalization CAS may).
-#   [15] No coordinator integration was introduced (the coordinator source
-#        file is untouched by this patch and never calls the E2B entry
-#        point).
+#   [15] Exactly one authorized coordinator integration seam exists (E3): the
+#        coordinator calls the accepted E2B high-level entry point by name;
+#        it never re-derives an outcome classification locally (no parallel
+#        classifier) and never issues its own terminal-state SQL/finalize
+#        call (no parallel terminal writer).
 #   [16] No API route or GUI surface was introduced.
 #   [17] README.md / README_TECHNICAL.md never claim Phase E, Bundle 3, an
 #        unattended soak, or live-capital readiness as complete/started, and
-#        record E2B as implementation-complete-awaiting-acceptance (not
-#        accepted).
+#        record E1/E2A/E2B as accepted and E3 as implementation-complete-
+#        awaiting-acceptance (not accepted).
 #   [18] The new E2B scenario test file exists and is nonempty.
+#
+# AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E3-COORDINATOR-FINALIZATION-
+# INTEGRATION-AND-NOTIFICATION reconciles two point-in-time checks above that
+# described E3 as "not started": check [15] ("no coordinator integration was
+# introduced") is replaced with a positive proof that exactly one authorized
+# integration seam exists and duplicates none of E2B's own logic; check [17]'s
+# README-truth requirements are updated to the current truthful progression
+# (E2B now accepted, E3 awaiting acceptance). All E2B implementation
+# invariants (checks [1]-[14], [18]-[24]) remain enforced unchanged.
 #
 # Usage:
 #   powershell -ExecutionPolicy Bypass -File scripts\guards\validate_autonomous_daily_paper_operations_01e2b_outcome_classifier_and_finalization.ps1
@@ -252,13 +263,15 @@ if ($null -eq $BlockerFnBody) {
 }
 
 Write-Host ""
-Show-Info "--- [15] No coordinator integration was introduced ---"
+Show-Info "--- [15] Exactly one authorized E3 coordinator integration seam exists ---"
 $CoordinatorContent = $null
 if (Test-Path $PathCoordinatorRs) {
     $CoordinatorContent = Get-Content -Raw -Path $PathCoordinatorRs
 }
-Test-ContentDoesNotContain "coordinator never calls classify_and_finalize_autonomous_daily_operation" $CoordinatorContent "classify_and_finalize_autonomous_daily_operation" | Out-Null
-Test-ContentDoesNotContain "coordinator never references the outcome classifier module" $CoordinatorContent "autonomous_daily_outcome::" | Out-Null
+Test-ContentContains "the coordinator calls the accepted E2B production entry point by name" $CoordinatorContent "autonomous_daily_outcome::classify_and_finalize_autonomous_daily_operation(" | Out-Null
+Test-ContentDoesNotContain "the coordinator never calls the E2B test-support effect-seam entry point" $CoordinatorContent "classify_and_finalize_autonomous_daily_operation_with_effect_seam" | Out-Null
+Test-ContentDoesNotContain "the coordinator never re-derives an outcome classification locally (no parallel classifier)" $CoordinatorContent "fn classify_autonomous_daily_outcome" | Out-Null
+Test-ContentDoesNotContain "the coordinator never issues its own terminal-state SQL/finalize call (no parallel terminal writer)" $CoordinatorContent "mqk_db::finalize_autonomous_daily_operation(" | Out-Null
 
 Write-Host ""
 Show-Info "--- [16] No API route or GUI surface was introduced ---"
@@ -279,7 +292,7 @@ if (Test-Path (Join-Path $RepoRoot "core-rs\mqk-gui")) {
 }
 
 Write-Host ""
-Show-Info "--- [17] README truth: Phase E / Bundle 3 / soak / live-capital not overclaimed; E2B recorded correctly ---"
+Show-Info "--- [17] README truth: Phase E / Bundle 3 / soak / live-capital not overclaimed; E1/E2A/E2B accepted, E3 awaiting acceptance ---"
 $ReadmeContent = $null
 if (Test-FileExists "README.md" $PathReadme) {
     $ReadmeContent = Get-Content -Raw -Path $PathReadme
@@ -288,16 +301,22 @@ $ReadmeTechContent = $null
 if (Test-FileExists "README_TECHNICAL.md" $PathReadmeTech) {
     $ReadmeTechContent = Get-Content -Raw -Path $PathReadmeTech
 }
+# AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E3-COORDINATOR-FINALIZATION-
+# INTEGRATION-AND-NOTIFICATION: E2B is now accepted (recorded by the
+# operator ahead of this patch) -- the durable check going forward records
+# E1/E2A/E2B as accepted and E3 as implementation-complete-awaiting-
+# acceptance, never accepted itself.
 $ForbiddenReadmeClaims = @(
     "Phase E: COMPLETE",
     "Phase E is complete",
     "Bundle 3: CLOSED",
     "Bundle 3 is complete",
-    "E2B: ACCEPTED",
-    "E2B is complete",
-    "E2B: COMPLETE",
-    "E3 implemented",
-    "coordinator invokes the outcome classifier",
+    "E3: ACCEPTED",
+    "E3 is accepted",
+    "E3 is complete",
+    "E3: COMPLETE",
+    "E4 implemented",
+    "coordinator invocation is accepted",
     "soak has started",
     "soak: STARTED",
     "unattended soak is underway",
@@ -312,7 +331,8 @@ foreach ($Doc in @(@{Name = "README.md"; Content = $ReadmeContent}, @{Name = "RE
     }
 }
 Test-ContentContains "README.md records E2A as accepted" $ReadmeContent "E2A (plus both repairs) is now accepted" | Out-Null
-Test-ContentContains "README.md records E2B as implementation-complete-awaiting-acceptance" $ReadmeContent "Phase E2B (the strict evidence classifier consuming E2A's authorities" | Out-Null
+Test-ContentContains "README.md records E2B as accepted" $ReadmeContent "E2B is now accepted" | Out-Null
+Test-ContentContains "README.md records E3 as implementation-complete-awaiting-acceptance" $ReadmeContent "awaiting ChatGPT and operator acceptance" | Out-Null
 
 Write-Host ""
 Show-Info "--- [18] New E2B scenario test file exists and is nonempty ---"
@@ -406,6 +426,7 @@ if (Test-FileExists "Master patch ledger" $PathLedger) {
     $LedgerContent = Get-Content -Raw -Path $PathLedger
 }
 Test-ContentContains "ledger records E2A as accepted" $LedgerContent "E2A: ACCEPTED" | Out-Null
+Test-ContentContains "ledger records E2B as accepted" $LedgerContent "E2B: ACCEPTED" | Out-Null
 Test-ContentDoesNotContain "ledger does not claim Phase E complete" $LedgerContent "PHASE E: CLOSED" | Out-Null
 Test-ContentDoesNotContain "ledger does not claim Phase E complete (alt phrasing)" $LedgerContent "PHASE E: COMPLETE" | Out-Null
 Test-ContentDoesNotContain "ledger does not claim Bundle 3 closed" $LedgerContent "BUNDLE 3 (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-COMBINED): CLOSED" | Out-Null

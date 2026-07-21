@@ -16,11 +16,21 @@
 //! structurally impossible, since none of those types are even in scope
 //! here.
 //!
-//! This module implements no coordinator invocation, no API route, no GUI
-//! surface, and no notification. `classify_and_finalize_autonomous_daily_operation`
-//! is the one production entry point a future E3 patch may wire into the
-//! coordinator's `AwaitingOutcomeFinalization` handling -- not called from
-//! any production tick by this patch.
+//! This module implements no API route and no GUI surface, and sends no
+//! notification itself.
+//! `classify_and_finalize_autonomous_daily_operation` is the one production
+//! entry point AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E3-COORDINATOR-
+//! FINALIZATION-INTEGRATION-AND-NOTIFICATION wires into the coordinator's
+//! `AwaitingOutcomeFinalization`/`evidence_degraded` handling
+//! (`autonomous_daily_coordinator.rs`); the coordinator supplies
+//! `AutonomousDailyFinalizationContext`/`AutonomousDailyFinalizationPolicyInputs`
+//! from `AppState`/env exactly as `ensure_coverage_authority` already does
+//! for coverage-anchor binding, and `session_controller.rs`'s
+//! `log_coordinator_outcome` owns sending the E1 §12 notifications, gated on
+//! this module's own durable `newly_applied`/`Finalized`-vs-`AlreadyFinalized`
+//! truth -- never on process-local memory. `persist_autonomous_daily_finalization_blocker`
+//! (E3.4) is the one additional narrow seam E3 uses when current policy
+//! resolution itself fails before evidence gathering can even begin.
 
 use std::collections::HashSet;
 
@@ -165,9 +175,11 @@ pub enum AutonomousDailyOutcomeClassification {
 // E2B.2 -- finalization eligibility
 // ---------------------------------------------------------------------------
 
-/// Process-local runtime-ownership fact the caller supplies -- E3 (not this
-/// patch) will obtain this from `AppState`; E2B represents it as an explicit
-/// input so the classifier itself never reaches into daemon-global state.
+/// Process-local runtime-ownership fact the caller supplies -- the E3
+/// coordinator integration obtains this from `AppState::locally_owned_run_id()`
+/// compared against `operation.run_id`; this module represents it as an
+/// explicit input so the classifier itself never reaches into daemon-global
+/// state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct AutonomousDailyFinalizationContext {
     pub matching_local_runtime_active: bool,
@@ -849,9 +861,22 @@ pub enum AutonomousDailyFinalizationOutcome {
     /// The classifier could not resolve a terminal outcome; the durable
     /// `evidence_degraded` blocker was applied (or confirmed applied, or
     /// refreshed in place on an exact-reason replay).
+    ///
+    /// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E3-COORDINATOR-FINALIZATION-
+    /// INTEGRATION-AND-NOTIFICATION: `newly_applied` is `true` only when
+    /// *this* invocation durably advanced truth -- a fresh
+    /// `stopping`/`stop_retrying -> evidence_degraded` transition that
+    /// applied for real, or an in-place refresh whose reason/signature
+    /// genuinely changed from what was already persisted. It is `false` for
+    /// an exact-reason replay (`AlreadyApplied`) and for the
+    /// authoritative-re-read fallback after an ambiguous write, since that
+    /// path can never prove *this* attempt was the one that advanced durable
+    /// truth. E3's coordinator notification dedup is gated on this field --
+    /// never on process-local memory.
     EvidenceDegraded {
         reason_code: AutonomousDailyUnknownReason,
         record: AutonomousDailyOperationRecord,
+        newly_applied: bool,
     },
     /// A previously `evidence_degraded` (post-stop) operation's evidence now
     /// resolves cleanly; the operation took the existing
@@ -1100,11 +1125,18 @@ async fn apply_evidence_degraded_blocker(
             bounded_detail: detail,
         };
         return match mqk_db::refresh_autonomous_daily_operation_blocker(pool, &refresh_args).await {
-            Ok(mqk_db::RefreshAutonomousDailyOperationBlockerOutcome::Applied(record))
-            | Ok(mqk_db::RefreshAutonomousDailyOperationBlockerOutcome::AlreadyApplied(record)) => {
+            Ok(mqk_db::RefreshAutonomousDailyOperationBlockerOutcome::Applied(record)) => {
                 Ok(AutonomousDailyFinalizationOutcome::EvidenceDegraded {
                     reason_code: reason,
                     record,
+                    newly_applied: true,
+                })
+            }
+            Ok(mqk_db::RefreshAutonomousDailyOperationBlockerOutcome::AlreadyApplied(record)) => {
+                Ok(AutonomousDailyFinalizationOutcome::EvidenceDegraded {
+                    reason_code: reason,
+                    record,
+                    newly_applied: false,
                 })
             }
             Ok(_) | Err(_) => {
@@ -1129,11 +1161,18 @@ async fn apply_evidence_degraded_blocker(
     };
 
     match mqk_db::transition_autonomous_daily_operation(pool, &transition_args).await {
-        Ok(mqk_db::AutonomousDailyTransitionOutcome::Applied(record))
-        | Ok(mqk_db::AutonomousDailyTransitionOutcome::AlreadyApplied(record)) => {
+        Ok(mqk_db::AutonomousDailyTransitionOutcome::Applied(record)) => {
             Ok(AutonomousDailyFinalizationOutcome::EvidenceDegraded {
                 reason_code: reason,
                 record,
+                newly_applied: true,
+            })
+        }
+        Ok(mqk_db::AutonomousDailyTransitionOutcome::AlreadyApplied(record)) => {
+            Ok(AutonomousDailyFinalizationOutcome::EvidenceDegraded {
+                reason_code: reason,
+                record,
+                newly_applied: false,
             })
         }
         Ok(_) | Err(_) => {
@@ -1142,6 +1181,41 @@ async fn apply_evidence_degraded_blocker(
     }
 }
 
+/// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E3-COORDINATOR-FINALIZATION-
+/// INTEGRATION-AND-NOTIFICATION: the narrow, E2B-owned coordinator seam for
+/// E3.4's policy-resolution-failure case. When the coordinator cannot build
+/// [`AutonomousDailyFinalizationPolicyInputs`] at all (current
+/// assignment/config/runtime-binding resolution itself failed), there is no
+/// way to call [`classify_and_finalize_autonomous_daily_operation`] --
+/// evidence gathering requires a real `config`/`binding`/`strategy_registry`
+/// to even attempt. This thin wrapper reuses
+/// [`apply_evidence_degraded_blocker`] verbatim (the same CAS/refresh/
+/// authoritative-re-read machinery every other evidence blocker in this
+/// module uses) so the coordinator never becomes a second, independent
+/// blocker writer. Never call this when policy inputs resolved successfully
+/// -- that case must go through the normal gather/classify pipeline.
+pub async fn persist_autonomous_daily_finalization_blocker(
+    pool: &PgPool,
+    operation: &AutonomousDailyOperationRecord,
+    now_utc: DateTime<Utc>,
+    reason: AutonomousDailyUnknownReason,
+) -> anyhow::Result<AutonomousDailyFinalizationOutcome> {
+    apply_evidence_degraded_blocker(
+        pool,
+        operation,
+        reason,
+        now_utc,
+        AutonomousDailyFinalizationEffectSeam::default(),
+    )
+    .await
+}
+
+/// Authoritative re-read after an ambiguous evidence-degraded blocker write.
+/// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E3-COORDINATOR-FINALIZATION-
+/// INTEGRATION-AND-NOTIFICATION: this path can never prove *this* attempt
+/// was the one that durably advanced truth (the write result itself was
+/// ambiguous) -- `newly_applied` is always `false` here, never `true`, per
+/// the binding rule on [`AutonomousDailyFinalizationOutcome::EvidenceDegraded`].
 async fn reread_confirm_evidence_degraded(
     pool: &PgPool,
     operation_id: Uuid,
@@ -1157,6 +1231,7 @@ async fn reread_confirm_evidence_degraded(
             Ok(AutonomousDailyFinalizationOutcome::EvidenceDegraded {
                 reason_code: reason,
                 record,
+                newly_applied: false,
             })
         }
         _ => Ok(AutonomousDailyFinalizationOutcome::DatabaseUnavailable),
@@ -1209,11 +1284,12 @@ async fn recover_evidence_degraded_to_stopping(
 // ---------------------------------------------------------------------------
 
 /// Classify and (if eligible and resolvable) finalize one autonomous daily
-/// operation. Not called from any production tick by this patch -- E3 owns
-/// wiring this into the coordinator's `AwaitingOutcomeFinalization` handling.
-/// Always uses the all-default (no-op) injected effect seam -- production
-/// behavior is unaffected by [`AutonomousDailyFinalizationEffectSeam`]'s
-/// existence.
+/// operation. Called from the coordinator's `handle_outcome_finalization`
+/// helper (`autonomous_daily_coordinator.rs`, AUTONOMOUS-DAILY-PAPER-
+/// OPERATIONS-01E3-COORDINATOR-FINALIZATION-INTEGRATION-AND-NOTIFICATION)
+/// once per finalization-eligible tick. Always uses the all-default (no-op)
+/// injected effect seam -- production behavior is unaffected by
+/// [`AutonomousDailyFinalizationEffectSeam`]'s existence.
 pub async fn classify_and_finalize_autonomous_daily_operation(
     pool: &PgPool,
     operation_id: Uuid,

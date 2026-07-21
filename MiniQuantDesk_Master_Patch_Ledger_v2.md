@@ -14917,3 +14917,186 @@ NEXT AFTER E2B ACCEPTANCE: E3 only — coordinator finalization integration and 
 unattended 10-20-session soak: NOT STARTED
 live capital: NOT READY
 ```
+
+---
+
+## AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E3-COORDINATOR-FINALIZATION-INTEGRATION-AND-NOTIFICATION
+
+**Bundle:** `AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-COMBINED` | **Phase:** E3 — coordinator finalization
+integration and outcome notification.
+
+**Accepted foundation entering this patch (recorded above, not re-litigated):** E1/E2A accepted
+complete; **E2B is now accepted complete** (recorded by the operator ahead of this patch, starting
+HEAD `1739864fcd27f6e29a995029ad758736df6974c4`, "fix: harden autonomous outcome terminal truth").
+
+**Mission:** wire the accepted E2B finalizer
+(`state::autonomous_daily_outcome::classify_and_finalize_autonomous_daily_operation`) into the
+durable daily coordinator's handling of a durably stopped or post-stop-evidence-degraded operation;
+supply E2B's process-local runtime-stop context and current policy inputs from the existing
+authoritative `AppState`/config seams `ensure_coverage_authority` already uses; route
+post-stop `evidence_degraded` operations through E2B's recovery path; project every E2B result into
+a bounded typed coordinator outcome; send exactly one outcome notification per newly finalized
+operation and exactly one warning per newly applied finalization evidence blocker; prove restart
+safety.
+
+**Integration (`core-rs/crates/mqk-daemon/src/state/autonomous_daily_coordinator.rs`):**
+`handle_stopping`'s stop-completion no-op (`if operation.stopped_at_utc.is_some() { return
+Ok(AwaitingOutcomeFinalization) }`) now routes into a new `handle_outcome_finalization` helper —
+reached from both `dispatch_by_state`'s ordinary per-tick routing and
+`reconcile_existing_operation_against_relevant_lookup`'s fallback-lookup routing, so a stopped
+operation discovered through either path is never abandoned. `dispatch_by_state`'s combined
+`STATE_CONTROLLER_DEGRADED | STATE_EVIDENCE_DEGRADED` arm was split so `evidence_degraded` with a
+durable `stopped_at_utc` also routes into `handle_outcome_finalization`; the symmetric split was
+independently required in `reconcile_existing_operation_against_relevant_lookup` too — a real defect
+found only by running the new integration test suite: without it, a subsequent resolution-failure
+tick would silently overwrite E2B's own durable `unknown_*` reason with an unrelated one on every
+tick, producing a spurious repeated "newly applied" write and a spurious repeated warning
+notification. `dispatch_by_state`'s `completed`/`completed_no_trade`/`completed_with_activity` arm
+(previously an unconditional, misleading `AwaitingOutcomeFinalization`) now returns a read-only
+`OutcomeAlreadyFinalized` projection with no classifier re-run and no DB call beyond the row already
+fetched that tick.
+
+The matching-local-runtime fact (E1 §3.2 condition 4) is computed by a new
+`matching_local_runtime_active(state, operation)` helper from `AppState::locally_owned_run_id()`
+compared against `operation.run_id` — never `locally_started`, task liveness, a process-local bar
+counter, or GUI state. `handle_outcome_finalization` resolves `AutonomousDailyFinalizationPolicyInputs`
+fresh, once per attempt, from exactly `build_multi_symbol_runtime_config_from_env`/
+`resolve_autonomous_runtime_context`/`daily_data_readiness::load_readiness_context_from_env` — the
+same three-call composition `ensure_coverage_authority` already performs for coverage-anchor
+binding; no second parser, no cached policy. When `config`/`runtime_context` resolution itself fails
+(no real config/binding exists to construct policy inputs from at all), a new narrow `pub` wrapper
+added to E2B's own module, `persist_autonomous_daily_finalization_blocker`, persists
+`unknown_assignment_identity_unavailable` by delegating verbatim to the existing private
+`apply_evidence_degraded_blocker` — E2B remains the sole owner of blocker CAS/signature/re-read/
+replay semantics.
+
+Post-stop `evidence_degraded` operations route into the *same* `handle_outcome_finalization` seam for
+recovery-or-replay — E2B's own production entry point already internally dispatches correctly on the
+freshly re-fetched operation's own state (confirmed by direct source read of
+`classify_and_finalize_autonomous_daily_operation_with_effect_seam`'s body: `stopping`/`stop_retrying`
+→ finalize-or-degrade, `evidence_degraded` → recover-or-refresh, both via one shared
+`run_gather_classify_and_persist` pipeline), so exactly one coordinator call site is needed, not the
+two the mission's own prose separately named ("finalization helper" and "recovery/classification
+helper" are the same function).
+
+**Newly-applied authority (`core-rs/crates/mqk-daemon/src/state/autonomous_daily_outcome.rs`):**
+`AutonomousDailyFinalizationOutcome::EvidenceDegraded` gained one new field, `newly_applied: bool`,
+threaded through every CAS branch: a fresh `TransitionOutcome::Applied`/`RefreshOutcome::Applied` →
+`true`; an exact-reason `AlreadyApplied` replay → `false`; the authoritative re-read fallback after an
+ambiguous write (`reread_confirm_evidence_degraded`) → always `false`, since that path can never prove
+*this* invocation newly advanced durable truth. This is the sole, durable-CAS-derived dedup authority
+the coordinator's new warning notification uses.
+
+**Coordinator outcomes (`AutonomousDailyCoordinatorTickOutcome`):** six new bounded typed variants —
+`OutcomeFinalized { operation_id, run_id, outcome_reason_code }`,
+`OutcomeAlreadyFinalized { state, outcome_reason_code }`,
+`OutcomeEvidenceDegraded { operation_id, run_id, reason_code, newly_applied }`,
+`OutcomeRecoveredToStopping`, `OutcomeFinalizationDatabaseUnavailable`,
+`OutcomeFinalizationConflict` — carrying only bounded typed facts, never a raw `anyhow` error, SQL
+text, connection string, filesystem path, provider payload, or panic string.
+`project_finalization_outcome` maps every one of E2B's seven `AutonomousDailyFinalizationOutcome`
+variants onto exactly one of these.
+
+**Notifications (`core-rs/crates/mqk-daemon/src/state/session_controller.rs`):**
+`log_coordinator_outcome`'s match is not a wildcard — every new variant required its own explicit arm.
+`OutcomeFinalized` sends exactly one `discord_notifier.notify_run_status` notification (event
+`autonomous.daily_operation.outcome`), gated structurally on E2B's `Finalized` result only (never
+`AlreadyFinalized`, which maps to the separate, never-notifying `OutcomeAlreadyFinalized`).
+`OutcomeEvidenceDegraded` sends exactly one `discord_notifier.notify_critical_alert` warning
+(`severity: "warning"`, `alert_class: "autonomous.daily_operation.evidence_degraded"`) gated on
+`newly_applied`, mirroring the existing `ManualInterventionRequired` REPAIR-11 pattern.
+`OutcomeAlreadyFinalized`/`OutcomeFinalizationDatabaseUnavailable`/`OutcomeFinalizationConflict` never
+notify. A notifier delivery failure never rolls back, rewrites, or downgrades the already-committed
+terminal row — the DB write and the notification send are two independent steps in
+`log_coordinator_outcome`, itself only ever invoked after `tick_autonomous_daily_coordinator` has
+already returned.
+
+**Restart proof:** proven end-to-end against the real, isolated port-5434 test database, driving the
+real production `run_durable_session_controller_tick` seam (coordinator tick plus notification
+together, exactly as production's poll loop behaves): a fresh `Arc<AppState>` finalizes a durably
+stopped operation exactly once; a second fresh `AppState` observes the already-terminal row read-only
+with zero duplicate notification; an evidence-blocker recovery round trip (degrade → one warning →
+repair → recover to `stopping` → later tick finalizes → one terminal notification, two notifications
+total) crosses no restart boundary incorrectly. No sleep-based assertion authority — every dedup
+assertion is proven against durable DB truth (event-count deltas, `state`/`state_reason_code`/
+`state_version` equality across ticks).
+
+**Tests:** new `core-rs/crates/mqk-daemon/tests/scenario_autonomous_daily_outcome_coordinator_integration_01.rs`
+(16 tests: 14 `#[ignore]` real-DB-backed integration tests against the real production
+coordinator/finalizer seams with an in-process loopback Discord webhook sink — no real network call
+anywhere — one dedicated typed-outcome-projection test, one non-DB source-level guard-redundant unit
+test) — all 16 pass. See the new spec doc §13 for the exact scenario list and the two properties
+documented as covered by E2B's own accepted tests rather than fabricated at this level (a literal
+live-execution-loop matching-runtime block, and a literal complete-DB-outage/partial-evidence-
+read-failure/live-concurrent-writer proof at the coordinator level).
+
+**Regressions (each binary run alone, `--include-ignored --test-threads=1`, isolated test Postgres on
+port 5434):** `scenario_autonomous_daily_outcome_classifier_and_finalization_01` 66/66 (three
+mechanical `EvidenceDegraded` match-pattern updates for the new `newly_applied` field, no assertion
+meaning changed), `scenario_autonomous_daily_session_coordinator_01` 48/48,
+`scenario_autonomous_daily_phase_d_integration_01` 8/8,
+`scenario_autonomous_daily_coverage_anchor_and_run_lineage_01` 41/41,
+`scenario_autonomous_completed_bar_task_01` 49/49, `scenario_autonomous_paper_day_lifecycle_auton12`
+3/3, `scenario_signal_evaluation_journal_auton_no_signal_obs_01` 7/7 (paper-DB-scoped cases self-skip
+without a paper DB env var, unaffected by E3). Zero new failures anywhere in the required matrix.
+`scenario_autonomous_completed_bar_driver_01`'s known 47/56 baseline (9 pre-existing, unrelated
+failures) was not re-run — this patch touches no production seam in that file's driver path.
+
+**Guards:** `validate_autonomous_daily_paper_operations_01a_audit.ps1`,
+`validate_daily_data_readiness_01e_closure.ps1`,
+`validate_autonomous_daily_paper_operations_01d_phase_d_closure.ps1`,
+`validate_autonomous_daily_paper_operations_01d4_evaluation_lineage_and_autonomous_preopen_closure_01.ps1`,
+`validate_autonomous_daily_paper_operations_01e_outcome_contract.ps1`,
+`validate_autonomous_daily_paper_operations_01e2a_coverage_anchor_and_run_lineage.ps1` (checks [10]/[11]
+narrowed to permit exactly the one authorized E3 coordinator call and to record E2B's now-accepted
+status),
+`validate_autonomous_daily_paper_operations_01e2b_outcome_classifier_and_finalization.ps1` (checks
+[15]/[17] narrowed the same way), `validate_autonomous_daily_paper_operations_01e3_coordinator_finalization_and_notification.ps1`
+(new, 16 checks), and `check_unsafe_patterns.ps1` all pass. **Migration:** none. **Format/lint:**
+`rustfmt --check --edition 2021` clean on every touched Rust file; Clippy `-D warnings` clean on
+`mqk-daemon --lib`, the new E3 test binary, and the changed E2B test binary. `cargo check -p mqk-db -p
+mqk-runtime -p mqk-daemon` clean (only the pre-existing `sqlx-postgres` future-incompat note). `git
+diff --check` / `git diff --cached --check` clean.
+
+**Files changed:** `MiniQuantDesk_Master_Patch_Ledger_v2.md`, `README.md`, `README_TECHNICAL.md`,
+`docs/specs/autonomous_daily_paper_operations_01e3_coordinator_finalization_and_notification.md`
+(new), `scripts/guards/validate_autonomous_daily_paper_operations_01e2a_coverage_anchor_and_run_lineage.ps1`,
+`scripts/guards/validate_autonomous_daily_paper_operations_01e2b_outcome_classifier_and_finalization.ps1`,
+`scripts/guards/validate_autonomous_daily_paper_operations_01e3_coordinator_finalization_and_notification.ps1`
+(new), `core-rs/crates/mqk-daemon/src/state/autonomous_daily_coordinator.rs`,
+`core-rs/crates/mqk-daemon/src/state/autonomous_daily_outcome.rs`,
+`core-rs/crates/mqk-daemon/src/state/session_controller.rs`,
+`core-rs/crates/mqk-daemon/tests/scenario_autonomous_daily_outcome_coordinator_integration_01.rs`
+(new), `core-rs/crates/mqk-daemon/tests/scenario_autonomous_daily_outcome_classifier_and_finalization_01.rs`
+(three mechanical match-pattern updates only). No migration. No API route. No GUI changed.
+
+**Safety confirmation:**
+
+```text
+PROVIDER CALLS: no
+BROKER CALLS: no
+NETWORK CALLS: no
+REAL DAEMON STARTED: no
+PAPER ORDERS: no
+LIVE ORDERS: no
+PAPER DB TOUCHED: no
+PORT 5440 TOUCHED: no
+MIGRATION CHANGED: no
+API IMPLEMENTED: no
+GUI CHANGED: no
+COORDINATOR INTEGRATION: yes — exactly one authorized call site into the accepted E2B finalizer
+```
+
+```text
+E1: ACCEPTED — COMPLETE
+E2A: ACCEPTED — COMPLETE
+E2B: ACCEPTED — COMPLETE
+E3: IMPLEMENTATION COMPLETE — AWAITING CHATGPT AND OPERATOR ACCEPTANCE
+E4: NOT STARTED
+E5: NOT STARTED
+PHASE E: OPEN
+BUNDLE 3 (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-COMBINED): OPEN
+NEXT AFTER E3 ACCEPTANCE: E4 only — read-only daily-operation API projection
+unattended 10-20-session soak: NOT STARTED
+live capital: NOT READY
+```

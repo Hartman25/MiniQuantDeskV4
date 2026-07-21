@@ -16,6 +16,16 @@
 # corrected gate ordering (authority lookup strictly before assignment/
 # identity resolution), and the live coordinator/adapter concurrency proof.
 #
+# AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E3-COORDINATOR-FINALIZATION-
+# INTEGRATION-AND-NOTIFICATION reconciles check [10] below: E3 is the
+# explicitly authorized coordinator integration, and its whole mission is to
+# add exactly one authorized call from `autonomous_daily_coordinator.rs` into
+# the E2B finalizer. Check [10] is narrowed to permit exactly that one call
+# while continuing to require E2A's own authority/lineage modules
+# (`autonomous_daily_coverage_authority.rs`) and the completed-bar production
+# adapter (`autonomous_completed_bar_task.rs`) never call the finalizer or
+# reference the outcome-classifier module at all.
+#
 # Checks:
 #   [1]  The coverage-bound event model/id/type/source constants exist.
 #   [2]  `bound_at_utc` never appears in the semantic payload struct or its
@@ -309,20 +319,18 @@ if (Test-FileExists "E2A scenario test file" $PathE2ATest) {
 }
 
 Write-Host ""
-Show-Info "--- [10] E2A files never call the E2B finalizer; E2B remains isolated; no E3 coordinator integration ---"
-# AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E2B-TERMINAL-TRUTH-PRECEDENCE-AND-
-# UNCERTAINTY-CLOSURE (REPAIR 8): the original check [10] was a point-in-time
-# boundary proof frozen at E2A's own accepted commit (705c1010), verifying
-# E2A's own patch did not introduce E2B's finalization surface. It is not a
-# permanent prohibition on the repository ever containing E2B -- E2B is the
-# explicitly authorized next patch, and its whole mission is to add exactly
-# that surface (in its own module, `autonomous_daily_outcome.rs`, and its own
-# store primitive, `mqk-db`'s `finalize_autonomous_daily_operation`). The
-# durable check going forward is narrower and remains meaningful after E2B
-# lands: E2A's own production files never call the E2B finalizer, E2B's
-# classifier/finalizer surface remains isolated in its own module, and no E3
-# coordinator integration exists yet.
-foreach ($ForbiddenPath in @($PathCoverageRs, $PathCoordinatorRs, $PathTaskRs)) {
+Show-Info "--- [10] E2A's own modules never call the E2B finalizer; exactly one authorized E3 coordinator call exists ---"
+# AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E3-COORDINATOR-FINALIZATION-
+# INTEGRATION-AND-NOTIFICATION: the prior check [10] (already narrowed once
+# by E2B's own REPAIR 8) forbade the coordinator from calling the E2B
+# finalizer at all, since no coordinator integration was authorized yet. E3
+# is exactly that authorized integration -- the durable check going forward
+# permits exactly one call site in `autonomous_daily_coordinator.rs` while
+# continuing to forbid it everywhere else: E2A's own coverage-authority
+# module and the completed-bar production adapter must never call the E2B
+# finalizer or reference its module at all, and the coordinator must not
+# duplicate E2B's own classification/persistence logic locally.
+foreach ($ForbiddenPath in @($PathCoverageRs, $PathTaskRs)) {
     if (-not (Test-Path $ForbiddenPath)) { continue }
     $Content = Get-Content -Raw -Path $ForbiddenPath
     $RelName = Split-Path -Leaf $ForbiddenPath
@@ -331,10 +339,14 @@ foreach ($ForbiddenPath in @($PathCoverageRs, $PathCoordinatorRs, $PathTaskRs)) 
 }
 $PathOutcomeRs = Join-Path $RepoRoot "core-rs\crates\mqk-daemon\src\state\autonomous_daily_outcome.rs"
 Test-FileExists "E2B outcome classifier/finalizer module (isolated)" $PathOutcomeRs | Out-Null
-Test-ContentDoesNotContain "coordinator does not invoke the E2B finalizer (no E3 integration yet)" $CoordinatorContent "classify_and_finalize_autonomous_daily_operation(" | Out-Null
+Test-ContentContains "the coordinator calls the accepted E2B production entry point exactly once by name" $CoordinatorContent "autonomous_daily_outcome::classify_and_finalize_autonomous_daily_operation(" | Out-Null
+Test-ContentDoesNotContain "the coordinator never calls the E2B test-support effect-seam entry point" $CoordinatorContent "classify_and_finalize_autonomous_daily_operation_with_effect_seam" | Out-Null
+Test-ContentDoesNotContain "the coordinator never re-derives an outcome classification locally (no parallel classifier)" $CoordinatorContent "fn classify_autonomous_daily_outcome" | Out-Null
+Test-ContentDoesNotContain "the coordinator never issues its own terminal-state SQL/finalize call (no parallel terminal writer)" $CoordinatorContent "mqk_db::finalize_autonomous_daily_operation(" | Out-Null
+Test-ContentDoesNotContain "no API route module is introduced by touched coordinator/outcome files" $CoordinatorContent "async fn get_autonomous_daily_operation" | Out-Null
 
 Write-Host ""
-Show-Info "--- [11] README truth: E1/E2A accepted, E2B awaiting acceptance, E3 not started, Phase E/Bundle 3 open ---"
+Show-Info "--- [11] README truth: E1/E2A/E2B accepted, E3 awaiting acceptance, E4 not started, Phase E/Bundle 3 open ---"
 $ReadmeContent = $null
 if (Test-FileExists "README.md" $PathReadme) {
     $ReadmeContent = Get-Content -Raw -Path $PathReadme
@@ -343,26 +355,26 @@ $ReadmeTechContent = $null
 if (Test-FileExists "README_TECHNICAL.md" $PathReadmeTech) {
     $ReadmeTechContent = Get-Content -Raw -Path $PathReadmeTech
 }
-# REPAIR 8: the original check [11] required the pre-acceptance sentence "E2A
-# repair implementation is complete, awaiting independent" to persist in
-# README.md forever, which would make it impossible to ever honestly record
-# E2A's acceptance. Replaced with the current truthful progression: E1/E2A
-# accepted, E2B implementation complete but not yet accepted, E3 not started,
-# Phase E/Bundle 3 open, soak not started, live capital not ready.
+# AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E3-COORDINATOR-FINALIZATION-
+# INTEGRATION-AND-NOTIFICATION: E2B is now accepted (recorded by the
+# operator ahead of this patch); the durable check going forward is the
+# current truthful progression: E1/E2A/E2B accepted, E3 implementation
+# complete but not yet accepted, E4 not started, Phase E/Bundle 3 open, soak
+# not started, live capital not ready.
 $ForbiddenReadmeClaims = @(
     "Phase E: CLOSED",
     "Phase E: COMPLETE",
     "Phase E is complete",
     "Bundle 3: CLOSED",
     "Bundle 3 is complete",
-    "E2B: ACCEPTED",
-    "E2B is accepted",
-    "E2B is complete",
-    "E2B: COMPLETE",
-    "E3 implemented",
     "E3: ACCEPTED",
     "E3 is accepted",
-    "coordinator invokes the outcome classifier",
+    "E3 is complete",
+    "E3: COMPLETE",
+    "E4 implemented",
+    "E4: ACCEPTED",
+    "E4 is accepted",
+    "coordinator invocation is accepted",
     "soak has started",
     "soak: STARTED",
     "unattended soak is underway",
@@ -378,7 +390,8 @@ foreach ($Doc in @(@{Name = "README.md"; Content = $ReadmeContent}, @{Name = "RE
 }
 Test-ContentContains "README.md records E1 as accepted" $ReadmeContent "E1 is now accepted" | Out-Null
 Test-ContentContains "README.md records E2A as accepted" $ReadmeContent "E2A (plus both repairs) is now accepted" | Out-Null
-Test-ContentContains "README.md records E2B as awaiting acceptance (not yet accepted)" $ReadmeContent "awaiting ChatGPT and operator acceptance" | Out-Null
+Test-ContentContains "README.md records E2B as accepted" $ReadmeContent "E2B is now accepted" | Out-Null
+Test-ContentContains "README.md records E3 as awaiting acceptance (not yet accepted)" $ReadmeContent "awaiting ChatGPT and operator acceptance" | Out-Null
 Test-ContentContains "README_TECHNICAL.md records E1 as accepted" $ReadmeTechContent "E1 is accepted complete" | Out-Null
 Test-ContentContains "README_TECHNICAL.md records E2A as accepted" $ReadmeTechContent "plus both repairs, is **accepted complete**" | Out-Null
 

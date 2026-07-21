@@ -1693,6 +1693,7 @@ async fn store_47_assignment_identity_unavailable_is_not_a_database_failure_proo
         AutonomousDailyFinalizationOutcome::EvidenceDegraded {
             reason_code,
             record,
+            newly_applied: _,
         } => {
             assert_eq!(
                 reason_code,
@@ -1735,6 +1736,7 @@ async fn store_48_real_partial_evidence_read_failure_degrades_via_confirmed_rere
         AutonomousDailyFinalizationOutcome::EvidenceDegraded {
             reason_code,
             record,
+            newly_applied: _,
         } => {
             assert_eq!(
                 reason_code,
@@ -2569,6 +2571,7 @@ async fn integrated_03_unresolved_claim_degrades_then_repairs_then_finalizes() {
         AutonomousDailyFinalizationOutcome::EvidenceDegraded {
             reason_code,
             record,
+            newly_applied: _,
         } => {
             assert_eq!(
                 reason_code,

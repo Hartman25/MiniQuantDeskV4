@@ -247,7 +247,61 @@ pub enum AutonomousDailyCoordinatorTickOutcome {
     },
     StopAttempted,
     RuntimeStopped,
+    /// Stopped and awaiting a later coordinator tick's finalization attempt
+    /// -- either finalization has not been attempted yet this tick, or the
+    /// E2B classifier reported `NotEligible` (e.g. a matching local runtime
+    /// is still active this tick per E1 §3.2 condition 4). No write, no
+    /// notification.
     AwaitingOutcomeFinalization,
+    /// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E3-COORDINATOR-FINALIZATION-
+    /// INTEGRATION-AND-NOTIFICATION: this tick's E2B finalization attempt
+    /// durably reached (or confirmed reaching, via an authoritative re-read)
+    /// a terminal `completed_no_trade`/`completed_with_activity` state for
+    /// the first time. `session_controller.rs`'s `log_coordinator_outcome`
+    /// sends exactly one outcome notification for this variant -- the CAS
+    /// success itself (`Finalized`, never `AlreadyFinalized`) is the sole
+    /// dedup authority, never process-local memory.
+    OutcomeFinalized {
+        operation_id: Uuid,
+        run_id: Option<Uuid>,
+        outcome_reason_code: String,
+    },
+    /// The operation was already terminal (a complete automatic
+    /// `completed_no_trade`/`completed_with_activity` row, or the generic
+    /// administrative `completed` state) before this tick began -- read-only
+    /// projection, no classifier re-run, no notification.
+    OutcomeAlreadyFinalized {
+        state: String,
+        outcome_reason_code: Option<String>,
+    },
+    /// The E2B classifier could not resolve a terminal outcome this tick;
+    /// the durable `evidence_degraded` blocker was applied, confirmed
+    /// applied, or refreshed in place. `newly_applied` is the durable-CAS-
+    /// derived dedup authority `log_coordinator_outcome` uses to decide
+    /// whether to send exactly one warning notification -- mirrors the
+    /// existing `ManualInterventionRequired.newly_applied` pattern.
+    OutcomeEvidenceDegraded {
+        operation_id: Uuid,
+        run_id: Option<Uuid>,
+        reason_code: &'static str,
+        newly_applied: bool,
+    },
+    /// A previously `evidence_degraded` (post-stop) operation's evidence now
+    /// resolves cleanly; the operation took the existing
+    /// `evidence_degraded -> stopping` edge this tick. A later tick performs
+    /// the terminal CAS. No notification -- this is not itself a terminal
+    /// or blocker outcome.
+    OutcomeRecoveredToStopping,
+    /// This tick's finalization attempt could not read (or confirm a write
+    /// against) the database. No write was claimed persisted; no
+    /// notification. Retried on a future tick per the E1 §9 database-failure
+    /// contract.
+    OutcomeFinalizationDatabaseUnavailable,
+    /// This tick's finalization attempt found the operation already
+    /// terminal at a different state/outcome than this attempt's own
+    /// classification would have produced -- never rewritten, no repeated
+    /// notification.
+    OutcomeFinalizationConflict,
 }
 
 // ---------------------------------------------------------------------------
@@ -660,6 +714,20 @@ async fn reconcile_existing_operation_against_relevant_lookup(
                     newly_applied,
                 },
             )
+        }
+        // AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E3-COORDINATOR-FINALIZATION-
+        // INTEGRATION-AND-NOTIFICATION (E3.11): a stopped, finalization-
+        // eligible operation this same resolution-failure tick already
+        // degraded via `handle_outcome_finalization` (routed above through
+        // the `STATE_STOPPING`/`STATE_STOP_RETRYING` arm) must never be
+        // abandoned to this generic resolution-failure blocker on a later
+        // tick -- that would silently overwrite E2B's own durable
+        // `unknown_*` reason/signature with an unrelated one and produce a
+        // spurious "newly applied" write on every such tick. Route back into
+        // the same finalization seam instead, exactly like the
+        // `STATE_STOPPING`/`STATE_STOP_RETRYING` arm above.
+        mqk_db::STATE_EVIDENCE_DEGRADED if operation.stopped_at_utc.is_some() => {
+            handle_outcome_finalization(state, pool, operation, now_utc).await
         }
         STATE_MANUAL_INTERVENTION_REQUIRED
         | mqk_db::STATE_CONTROLLER_DEGRADED
@@ -1906,17 +1974,44 @@ pub async fn dispatch_by_state(
                 reason_code: "calendar_unavailable",
             })
         }
+        // AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E3-COORDINATOR-FINALIZATION-
+        // INTEGRATION-AND-NOTIFICATION (E3.2/E3.9): a `completed*` row
+        // observed on an ordinary tick is already-terminal durable truth --
+        // read-only projection, no classifier re-run (no DB call beyond the
+        // row already fetched this tick), no notification.
         mqk_db::STATE_COMPLETED
         | mqk_db::STATE_COMPLETED_NO_TRADE
-        | mqk_db::STATE_COMPLETED_WITH_ACTIVITY => {
-            Ok(AutonomousDailyCoordinatorTickOutcome::AwaitingOutcomeFinalization)
-        }
-        mqk_db::STATE_CONTROLLER_DEGRADED | mqk_db::STATE_EVIDENCE_DEGRADED => Ok(
+        | mqk_db::STATE_COMPLETED_WITH_ACTIVITY => Ok(
+            AutonomousDailyCoordinatorTickOutcome::OutcomeAlreadyFinalized {
+                state: operation.state.clone(),
+                outcome_reason_code: operation.outcome.clone(),
+            },
+        ),
+        mqk_db::STATE_CONTROLLER_DEGRADED => Ok(
             AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
                 reason_code: "controller_degraded",
                 newly_applied: false,
             },
         ),
+        // E3.2: `evidence_degraded` with a durable `stopped_at_utc` is the
+        // post-stop finalization-evidence-gap case (E1 contract §3.3) --
+        // route to E2B's recovery/classification helper so a later tick can
+        // repair and finalize. A mid-run `evidence_degraded` row
+        // (`stopped_at_utc IS NULL`) is never finalization-eligible (E1 §3.3)
+        // and keeps its existing mid-run manual-intervention projection
+        // unchanged.
+        mqk_db::STATE_EVIDENCE_DEGRADED => {
+            if operation.stopped_at_utc.is_some() {
+                handle_outcome_finalization(state, pool, operation, now_utc).await
+            } else {
+                Ok(
+                    AutonomousDailyCoordinatorTickOutcome::ManualInterventionRequired {
+                        reason_code: "controller_degraded",
+                        newly_applied: false,
+                    },
+                )
+            }
+        }
         other => {
             anyhow::bail!("autonomous_daily_coordinator: unknown operation state '{other}'")
         }
@@ -3085,8 +3180,17 @@ pub async fn handle_stopping(
     postclose_finalize_utc: DateTime<Utc>,
     now_utc: DateTime<Utc>,
 ) -> anyhow::Result<AutonomousDailyCoordinatorTickOutcome> {
+    // AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E3-COORDINATOR-FINALIZATION-
+    // INTEGRATION-AND-NOTIFICATION (E3.1/E3.11): the durable "runtime
+    // concluded" signal is now routed into E2B's finalization classifier
+    // rather than reported as a static, permanently-repeating
+    // `AwaitingOutcomeFinalization` no-op. This single call site is reached
+    // by every caller of `handle_stopping` -- `dispatch_by_state`'s ordinary
+    // per-tick routing and `reconcile_existing_operation_against_relevant_
+    // lookup`'s fallback-lookup routing alike -- so a stopped, finalization-
+    // eligible operation discovered through either path is never abandoned.
     if operation.stopped_at_utc.is_some() {
-        return Ok(AutonomousDailyCoordinatorTickOutcome::AwaitingOutcomeFinalization);
+        return handle_outcome_finalization(state, pool, operation, now_utc).await;
     }
     if now_utc >= postclose_finalize_utc {
         let newly_applied = apply_manual_if_changed(
@@ -3231,6 +3335,158 @@ pub async fn retry_stop(
             )
             .await?;
             Ok(AutonomousDailyCoordinatorTickOutcome::StopAttempted)
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E3-COORDINATOR-FINALIZATION-
+// INTEGRATION-AND-NOTIFICATION -- outcome finalization routing
+// ---------------------------------------------------------------------------
+
+/// E3.1: the durable matching-local-runtime fact, derived exactly as E1
+/// contract §3.2 condition 4 requires -- `operation.run_id` compared against
+/// `AppState::locally_owned_run_id()`. Never `locally_started`, task
+/// liveness, a process-local bar counter, or GUI state. `operation.run_id ==
+/// None` (never started) is never "matching" -- there is nothing to match.
+async fn matching_local_runtime_active(
+    state: &Arc<AppState>,
+    operation: &AutonomousDailyOperationRecord,
+) -> bool {
+    match operation.run_id {
+        Some(expected) => state.locally_owned_run_id().await == Some(expected),
+        None => false,
+    }
+}
+
+/// E3.2/E3.3: route one finalization-eligible tick (`stopping`/
+/// `stop_retrying` with `stopped_at_utc` present, or `evidence_degraded`
+/// with `stopped_at_utc` present) into E2B's accepted
+/// `classify_and_finalize_autonomous_daily_operation`. Callers must only
+/// invoke this when `operation.stopped_at_utc.is_some()` -- this function
+/// performs no additional eligibility gating of its own beyond what E2B's
+/// own `check_finalization_eligibility` already re-verifies internally, and
+/// it invokes E2B at most once per call.
+///
+/// E3.3: current policy inputs are resolved fresh, once per finalization
+/// attempt, from exactly the same production authorities
+/// `ensure_coverage_authority` already threads through
+/// `resolve_current_coverage_policy_inputs` -- no second environment parser,
+/// no duplicate runtime-binding algorithm, no cached process-local policy,
+/// no provider network call.
+///
+/// E3.4: when current assignment/config/runtime-binding resolution itself
+/// fails (before evidence gathering can even begin, since there is no real
+/// `MultiSymbolRuntimeConfig`/`EffectiveRuntimeBinding` to construct
+/// `AutonomousDailyFinalizationPolicyInputs` from), this function persists
+/// `unknown_assignment_identity_unavailable` via E2B's own
+/// `persist_autonomous_daily_finalization_blocker` seam -- never a
+/// fabricated empty configuration, never a second, coordinator-owned
+/// blocker writer.
+async fn handle_outcome_finalization(
+    state: &Arc<AppState>,
+    pool: &PgPool,
+    operation: AutonomousDailyOperationRecord,
+    now_utc: DateTime<Utc>,
+) -> anyhow::Result<AutonomousDailyCoordinatorTickOutcome> {
+    let context = super::autonomous_daily_outcome::AutonomousDailyFinalizationContext {
+        matching_local_runtime_active: matching_local_runtime_active(state, &operation).await,
+    };
+
+    let config = match crate::state::build_multi_symbol_runtime_config_from_env() {
+        Ok(config) => config,
+        Err(_) => {
+            let outcome = super::autonomous_daily_outcome::persist_autonomous_daily_finalization_blocker(
+                pool,
+                &operation,
+                now_utc,
+                super::autonomous_daily_outcome::AutonomousDailyUnknownReason::AssignmentIdentityUnavailable,
+            )
+            .await?;
+            return Ok(project_finalization_outcome(outcome));
+        }
+    };
+
+    let runtime_context = match resolve_autonomous_runtime_context(state).await {
+        Ok(ctx) => ctx,
+        Err(_) => {
+            let outcome = super::autonomous_daily_outcome::persist_autonomous_daily_finalization_blocker(
+                pool,
+                &operation,
+                now_utc,
+                super::autonomous_daily_outcome::AutonomousDailyUnknownReason::AssignmentIdentityUnavailable,
+            )
+            .await?;
+            return Ok(project_finalization_outcome(outcome));
+        }
+    };
+
+    let readiness_context = crate::daily_data_readiness::load_readiness_context_from_env();
+
+    let policy_inputs = super::autonomous_daily_outcome::AutonomousDailyFinalizationPolicyInputs {
+        calendar_provider: readiness_context.calendar_provider.as_ref(),
+        config: &config,
+        binding: &runtime_context.effective_runtime_binding,
+        strategy_registry: &readiness_context.strategy_registry,
+    };
+
+    let outcome =
+        super::autonomous_daily_outcome::classify_and_finalize_autonomous_daily_operation(
+            pool,
+            operation.operation_id,
+            now_utc,
+            context,
+            &policy_inputs,
+        )
+        .await?;
+
+    Ok(project_finalization_outcome(outcome))
+}
+
+/// E3.5/E3.9: project E2B's [`AutonomousDailyFinalizationOutcome`] into a
+/// bounded typed [`AutonomousDailyCoordinatorTickOutcome`] variant -- carries
+/// only bounded typed facts (operation state/outcome/reason codes,
+/// `newly_applied`), never a raw `anyhow` error, SQL text, connection
+/// string, filesystem path, provider payload, or panic string.
+fn project_finalization_outcome(
+    outcome: super::autonomous_daily_outcome::AutonomousDailyFinalizationOutcome,
+) -> AutonomousDailyCoordinatorTickOutcome {
+    use super::autonomous_daily_outcome::AutonomousDailyFinalizationOutcome as FinalizationOutcome;
+    match outcome {
+        FinalizationOutcome::NotEligible => {
+            AutonomousDailyCoordinatorTickOutcome::AwaitingOutcomeFinalization
+        }
+        FinalizationOutcome::AlreadyFinalized(record) => {
+            AutonomousDailyCoordinatorTickOutcome::OutcomeAlreadyFinalized {
+                state: record.state,
+                outcome_reason_code: record.outcome,
+            }
+        }
+        FinalizationOutcome::Finalized { outcome, record } => {
+            AutonomousDailyCoordinatorTickOutcome::OutcomeFinalized {
+                operation_id: record.operation_id,
+                run_id: record.run_id,
+                outcome_reason_code: outcome,
+            }
+        }
+        FinalizationOutcome::EvidenceDegraded {
+            reason_code,
+            newly_applied,
+            record,
+        } => AutonomousDailyCoordinatorTickOutcome::OutcomeEvidenceDegraded {
+            operation_id: record.operation_id,
+            run_id: record.run_id,
+            reason_code: reason_code.as_str(),
+            newly_applied,
+        },
+        FinalizationOutcome::RecoveredToStopping(_) => {
+            AutonomousDailyCoordinatorTickOutcome::OutcomeRecoveredToStopping
+        }
+        FinalizationOutcome::DatabaseUnavailable => {
+            AutonomousDailyCoordinatorTickOutcome::OutcomeFinalizationDatabaseUnavailable
+        }
+        FinalizationOutcome::Conflict => {
+            AutonomousDailyCoordinatorTickOutcome::OutcomeFinalizationConflict
         }
     }
 }

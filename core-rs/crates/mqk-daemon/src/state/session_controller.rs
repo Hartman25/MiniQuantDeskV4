@@ -386,6 +386,136 @@ async fn log_coordinator_outcome(
                 })
                 .await;
         }
+        // AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E3-COORDINATOR-FINALIZATION-
+        // INTEGRATION-AND-NOTIFICATION: exactly one outcome notification per
+        // newly finalized operation. Dedup authority is the coordinator's own
+        // CAS-success-gated projection -- this variant is only ever produced
+        // for `AutonomousDailyFinalizationOutcome::Finalized` (a fresh CAS
+        // apply or a confirmed-via-re-read commit), never for
+        // `AlreadyFinalized` (that maps to `OutcomeAlreadyFinalized` below,
+        // which never notifies). A replay, a later tick observing the same
+        // already-terminal row, and a restart all observe `OutcomeAlreadyFinalized`
+        // instead -- structurally zero duplicate notifications.
+        Outcome::OutcomeFinalized {
+            operation_id,
+            run_id,
+            outcome_reason_code,
+        } => {
+            info!(
+                operation_id = %operation_id,
+                outcome = %outcome_reason_code,
+                "autonomous_daily_coordinator: autonomous daily operation outcome finalized"
+            );
+            state
+                .set_autonomous_session_truth(AutonomousSessionTruth::StoppedAtBoundary {
+                    detail: format!(
+                        "operation finalized: outcome={outcome_reason_code} operation_id={operation_id}"
+                    ),
+                })
+                .await;
+            state
+                .discord_notifier
+                .notify_run_status(&RunStatusPayload {
+                    event: "autonomous.daily_operation.outcome".to_string(),
+                    run_id: run_id.map(|id| id.to_string()),
+                    environment: env,
+                    note: Some(format!(
+                        "operation_id={operation_id} outcome={outcome_reason_code}"
+                    )),
+                    ts_utc: now.to_rfc3339(),
+                })
+                .await;
+        }
+        // Already-terminal read-only projection (a `completed*` row observed
+        // on a later tick, restart, or replay) -- no classifier re-run, no
+        // notification of any kind.
+        Outcome::OutcomeAlreadyFinalized {
+            state: op_state,
+            outcome_reason_code,
+        } => {
+            state
+                .set_autonomous_session_truth(AutonomousSessionTruth::StoppedAtBoundary {
+                    detail: format!(
+                        "operation already finalized: state={op_state} outcome={}",
+                        outcome_reason_code.as_deref().unwrap_or("none")
+                    ),
+                })
+                .await;
+        }
+        // Exactly one warning notification per newly-applied (or durably
+        // changed) finalization evidence blocker; zero for an exact-reason
+        // replay or an unchanged blocker -- `newly_applied` is the durable-
+        // CAS-derived dedup authority, mirroring the existing
+        // `ManualInterventionRequired` pattern (REPAIR 11 above).
+        Outcome::OutcomeEvidenceDegraded {
+            operation_id,
+            run_id,
+            reason_code,
+            newly_applied,
+        } => {
+            warn!(
+                operation_id = %operation_id,
+                reason_code = *reason_code,
+                newly_applied = *newly_applied,
+                "autonomous_daily_coordinator: outcome finalization evidence degraded"
+            );
+            state
+                .set_autonomous_session_truth(AutonomousSessionTruth::StartRefused {
+                    detail: format!("reason_code={reason_code}"),
+                })
+                .await;
+            if *newly_applied {
+                state
+                    .discord_notifier
+                    .notify_critical_alert(&CriticalAlertPayload {
+                        alert_class: "autonomous.daily_operation.evidence_degraded".to_string(),
+                        severity: "warning".to_string(),
+                        summary: "Autonomous daily operation outcome finalization evidence \
+                                  degraded."
+                            .to_string(),
+                        detail: Some(format!(
+                            "reason_code={reason_code} operation_id={operation_id}"
+                        )),
+                        environment: env,
+                        run_id: run_id.map(|id| id.to_string()),
+                        ts_utc: now.to_rfc3339(),
+                    })
+                    .await;
+            }
+        }
+        // Evidence resolved cleanly; the operation took the existing
+        // `evidence_degraded -> stopping` edge this tick. Not itself a
+        // terminal or blocker outcome -- no notification; a later tick
+        // performs the terminal CAS.
+        Outcome::OutcomeRecoveredToStopping => {
+            info!(
+                "autonomous_daily_coordinator: outcome finalization evidence recovered; \
+                 returning to stopping for re-attempt"
+            );
+            state
+                .set_autonomous_session_truth(AutonomousSessionTruth::StoppedAtBoundary {
+                    detail: "operation stopped and is awaiting end-of-day outcome finalization \
+                              (evidence recovered; re-attempt pending)"
+                        .to_string(),
+                })
+                .await;
+        }
+        // Transient finalization-attempt failures: no durable write was
+        // claimed persisted, so no notification -- the coordinator's own
+        // next tick simply retries. Session truth is left unchanged rather
+        // than fabricating a new label for a rare, transient condition.
+        Outcome::OutcomeFinalizationDatabaseUnavailable => {
+            warn!(
+                "autonomous_daily_coordinator: outcome finalization attempt found the database \
+                 unavailable; will retry on a later tick"
+            );
+        }
+        Outcome::OutcomeFinalizationConflict => {
+            warn!(
+                "autonomous_daily_coordinator: outcome finalization attempt observed \
+                 conflicting terminal truth; never rewritten"
+            );
+        }
         Outcome::ManualInterventionRequired {
             reason_code,
             newly_applied,
