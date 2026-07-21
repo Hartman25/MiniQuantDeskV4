@@ -173,6 +173,71 @@ pub struct AutonomousDailyFinalizationContext {
     pub matching_local_runtime_active: bool,
 }
 
+// ---------------------------------------------------------------------------
+// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E2B-TERMINAL-TRUTH-PRECEDENCE-AND-
+// UNCERTAINTY-CLOSURE (REPAIR 5/6): the narrow injected effect seam that lets
+// a test deterministically prove commit-uncertainty and partial-evidence-
+// read-failure behavior against a *real* database, without mocking any
+// successful write. Every field defaults to `false`/`None`, and the
+// production entry point (`classify_and_finalize_autonomous_daily_operation`)
+// always passes the all-default value -- production behavior is byte-for-
+// byte unchanged by this type's existence. No field ever substitutes a fake
+// result for a real one on the successful-write side; each field either (a)
+// performs one additional *real* database write before the real write under
+// test, so that write's own CAS/re-read logic runs unmodified against
+// genuinely different DB state, or (b) discards this attempt's *observation*
+// of an already-real, already-committed result, forcing the same
+// authoritative-re-read path a genuinely lost acknowledgment would.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct AutonomousDailyFinalizationEffectSeam {
+    /// When the real terminal finalization CAS returns `Ok(Applied(_))`
+    /// (the transaction has genuinely committed), discard that result and
+    /// treat the write as uncertain instead -- modeling "commit applied,
+    /// acknowledgment lost." The subsequent authoritative re-read must find
+    /// the same, already-committed terminal truth.
+    pub force_commit_acknowledgment_lost: bool,
+    /// A real, separate database write performed immediately before the
+    /// real terminal finalization CAS, so that CAS's own `(expected_state,
+    /// expected_state_version)` guard naturally fails against genuinely
+    /// different DB state -- never a mocked CAS result.
+    pub pre_commit_effect: AutonomousDailyFinalizationInjectedPreCommitEffect,
+    /// When true, `gather_autonomous_daily_outcome_evidence` fails with a
+    /// synthetic `Err` immediately after successfully resolving identity,
+    /// lineage, coverage, and every expected bar's claim/evaluation
+    /// evidence -- modeling a real, *later* evidence read failing, never a
+    /// failure of the initial operation-row load itself (a complete outage
+    /// is `store_46`'s scenario, unaffected by this field).
+    pub force_evidence_read_failure_after_claims: bool,
+    /// When true, the best-effort `evidence_degraded` blocker write (issued
+    /// after an evidence-read failure) is skipped entirely rather than
+    /// attempted -- modeling a database that is also unavailable for the
+    /// blocker-write step. The subsequent re-read is real and correctly
+    /// observes that no write took place.
+    pub force_blocker_persistence_unavailable: bool,
+}
+
+/// A real, separate database mutation to perform immediately before the real
+/// terminal finalization CAS under test, so that CAS's own guard naturally
+/// mismatches against genuinely different, already-committed DB state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AutonomousDailyFinalizationInjectedPreCommitEffect {
+    #[default]
+    None,
+    /// Real transition of the same operation, at its current (still-stale-
+    /// to-the-caller) `(state, state_version)`, to `stop_retrying` -- a
+    /// legal edge from both `stopping` and (as a same-state no-op guard)
+    /// already `stop_retrying`. Models "CAS did not apply": the real
+    /// terminal CAS below naturally observes a stale expected version.
+    StaleVersionBeforeCommit,
+    /// Real terminal finalization of the same operation, at its current
+    /// (still-stale-to-the-caller) `(state, state_version)`, to a
+    /// *different* valid terminal reason than the one under test. Models a
+    /// genuinely conflicting concurrent writer: the real terminal CAS below
+    /// naturally fails against an already-terminal row with different
+    /// truth.
+    ConflictingTerminalWriteBeforeCommit(AutonomousDailyTerminalReason),
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AutonomousDailyFinalizationEligibility {
     /// `state ∈ {stopping, stop_retrying}`, no matching local runtime, and
@@ -370,6 +435,7 @@ pub async fn gather_autonomous_daily_outcome_evidence(
     pool: &PgPool,
     operation: &AutonomousDailyOperationRecord,
     policy_inputs: &AutonomousDailyFinalizationPolicyInputs<'_>,
+    effect_seam: AutonomousDailyFinalizationEffectSeam,
 ) -> anyhow::Result<AutonomousDailyOutcomeEvidenceSnapshot> {
     let assignment_identity = derive_assignment_identity(policy_inputs.config);
     let runtime_binding_identity = derive_runtime_binding_identity(policy_inputs.binding);
@@ -424,6 +490,20 @@ pub async fn gather_autonomous_daily_outcome_evidence(
                 evaluation,
             });
         }
+    }
+
+    // AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E2B-TERMINAL-TRUTH-PRECEDENCE-AND-
+    // UNCERTAINTY-CLOSURE (REPAIR 6): test-only injected failure point for a
+    // real, *later* evidence read -- identity/lineage/coverage/every
+    // expected bar's claim+evaluation have already been read successfully
+    // above; production never sets this field, so this is a no-op except
+    // under an explicit test-support call.
+    if effect_seam.force_evidence_read_failure_after_claims {
+        anyhow::bail!(
+            "gather_autonomous_daily_outcome_evidence: test-injected partial evidence read \
+             failure after claims for operation {}",
+            operation.operation_id
+        );
     }
 
     let total_claim_count =
@@ -539,20 +619,19 @@ pub fn classify_autonomous_daily_outcome(
         );
     };
 
-    // Step 4: durable coverage anchor. A missing/unusable anchor for an
-    // operation that never reached `running` (empty lineage) is the E1 §6
-    // item 2 step 6 "never reached a state where bound 4 can be established"
-    // case, routed to `unknown_missing_evaluation_evidence` per §7's
-    // "whether ... it legally reached stopping without ever reaching running
-    // at all" trigger; a missing/unusable anchor for an operation that *did*
-    // run is a genuine coverage-proof gap.
+    // Step 4: durable coverage anchor. AUTONOMOUS-DAILY-PAPER-OPERATIONS-
+    // 01E2B-TERMINAL-TRUTH-PRECEDENCE-AND-UNCERTAINTY-CLOSURE (REPAIR 4):
+    // a missing/unusable anchor is always `unknown_incomplete_bar_coverage`,
+    // regardless of whether the run lineage is empty. The prior empty-
+    // lineage special case (routing to `unknown_missing_evaluation_evidence`
+    // for a "never reached running" operation) is removed: the precedence
+    // order is strictly identity -> lineage -> durable coverage authority ->
+    // expected-bar coverage -> claims -> evaluations, and coverage is
+    // decided purely on its own presence/validity, never on a downstream
+    // signal (lineage emptiness) that belongs to an earlier step.
+    // `unknown_missing_evaluation_evidence` is reachable only once coverage
+    // and expected-bar truth are both established (steps 5-7 below).
     let Some(coverage) = &snapshot.coverage else {
-        if lineage.is_empty() {
-            return blocked(
-                AutonomousDailyUnknownReason::MissingEvaluationEvidence,
-                snapshot,
-            );
-        }
         return blocked(
             AutonomousDailyUnknownReason::IncompleteBarCoverage,
             snapshot,
@@ -810,15 +889,63 @@ fn blocker_signature_for_unknown(
 /// Attempt the terminal finalization CAS; on any ambiguous write result
 /// (CAS-false, store error), perform one authoritative re-read by
 /// `operation_id` before deciding the final outcome -- never claims success
-/// on the write result alone.
+/// on the write result alone. `effect_seam` is the REPAIR 5 test-only
+/// injected effect; production always passes the all-default value, which
+/// changes nothing below.
 async fn finalize_with_commit_uncertainty(
     pool: &PgPool,
     operation: &AutonomousDailyOperationRecord,
     reason: AutonomousDailyTerminalReason,
     now_utc: DateTime<Utc>,
+    effect_seam: AutonomousDailyFinalizationEffectSeam,
 ) -> anyhow::Result<AutonomousDailyFinalizationOutcome> {
     let target_state = reason.target_state().to_string();
     let outcome_code = reason.as_str().to_string();
+
+    // REPAIR 5: a real, separate database write performed before the real
+    // CAS under test, so that CAS's own guard naturally mismatches against
+    // genuinely different, already-committed DB state -- never a mocked CAS
+    // result. Production (`AutonomousDailyFinalizationInjectedPreCommitEffect::None`)
+    // performs no extra write here.
+    match effect_seam.pre_commit_effect {
+        AutonomousDailyFinalizationInjectedPreCommitEffect::None => {}
+        AutonomousDailyFinalizationInjectedPreCommitEffect::StaleVersionBeforeCommit => {
+            let _ = mqk_db::transition_autonomous_daily_operation(
+                pool,
+                &mqk_db::TransitionAutonomousDailyOperationArgs {
+                    operation_id: operation.operation_id,
+                    expected_state: operation.state.clone(),
+                    expected_state_version: operation.state_version,
+                    new_state: mqk_db::STATE_STOP_RETRYING.to_string(),
+                    reason_code: None,
+                    blocker_signature: None,
+                    occurred_at_utc: now_utc,
+                    run_id: None,
+                    bounded_detail: bounded_detail(
+                        "test-injected: real pre-commit version bump (stale-CAS proof)",
+                    ),
+                },
+            )
+            .await;
+        }
+        AutonomousDailyFinalizationInjectedPreCommitEffect::ConflictingTerminalWriteBeforeCommit(
+            conflicting_reason,
+        ) => {
+            let conflicting_args = mqk_db::FinalizeAutonomousDailyOperationArgs {
+                operation_id: operation.operation_id,
+                expected_state: operation.state.clone(),
+                expected_state_version: operation.state_version,
+                target_state: conflicting_reason.target_state().to_string(),
+                outcome: conflicting_reason.as_str().to_string(),
+                finalized_at_utc: now_utc,
+                bounded_detail: bounded_detail(
+                    "test-injected: real conflicting concurrent-writer finalize",
+                ),
+            };
+            let _ = mqk_db::finalize_autonomous_daily_operation(pool, &conflicting_args).await;
+        }
+    }
+
     let args = mqk_db::FinalizeAutonomousDailyOperationArgs {
         operation_id: operation.operation_id,
         expected_state: operation.state.clone(),
@@ -831,7 +958,21 @@ async fn finalize_with_commit_uncertainty(
         )),
     };
 
-    let write_result = mqk_db::finalize_autonomous_daily_operation(pool, &args).await;
+    let mut write_result = mqk_db::finalize_autonomous_daily_operation(pool, &args).await;
+
+    // REPAIR 5: the real write above has already committed for real; this
+    // discards this attempt's observation of that `Ok(Applied(_))` result,
+    // modeling "commit applied, acknowledgment lost." Production never sets
+    // this field.
+    if effect_seam.force_commit_acknowledgment_lost {
+        if let Ok(mqk_db::FinalizeAutonomousDailyOperationOutcome::Applied(_)) = &write_result {
+            write_result = Err(anyhow::anyhow!(
+                "test-injected: finalize commit acknowledgment lost after real commit for \
+                 operation {}",
+                operation.operation_id
+            ));
+        }
+    }
 
     match write_result {
         Ok(mqk_db::FinalizeAutonomousDailyOperationOutcome::Applied(record)) => {
@@ -852,22 +993,37 @@ async fn finalize_with_commit_uncertainty(
                 operation.operation_id
             )
         }
-        Ok(mqk_db::FinalizeAutonomousDailyOperationOutcome::NotFound) => {
-            reread_confirm_finalized(pool, operation.operation_id, &target_state, &outcome_code)
-                .await
-        }
-        Ok(mqk_db::FinalizeAutonomousDailyOperationOutcome::StaleState { .. }) | Err(_) => {
-            reread_confirm_finalized(pool, operation.operation_id, &target_state, &outcome_code)
-                .await
+        Ok(mqk_db::FinalizeAutonomousDailyOperationOutcome::NotFound)
+        | Ok(mqk_db::FinalizeAutonomousDailyOperationOutcome::StaleState { .. })
+        | Err(_) => {
+            reread_confirm_finalized(
+                pool,
+                operation.operation_id,
+                &target_state,
+                &outcome_code,
+                operation.state_version,
+            )
+            .await
         }
     }
 }
 
+/// Authoritative re-read after an ambiguous terminal-CAS write result.
+/// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E2B-TERMINAL-TRUTH-PRECEDENCE-AND-
+/// UNCERTAINTY-CLOSURE (REPAIR 3): confirmation requires the exact
+/// authorized target/outcome pair, `finalized_at_utc IS NOT NULL`,
+/// `state_version` strictly greater than the *original* expected version
+/// this attempt's own CAS used (a matching state/outcome at an unadvanced
+/// version is not confirmed finalization -- it did not come from this or any
+/// other real commit), and both `state_reason_code`/`state_blocker_signature`
+/// null (complete terminal truth, mirroring the store-level
+/// `is_complete_automatic_terminal_truth` check).
 async fn reread_confirm_finalized(
     pool: &PgPool,
     operation_id: Uuid,
     expected_target_state: &str,
     expected_outcome: &str,
+    expected_state_version: i64,
 ) -> anyhow::Result<AutonomousDailyFinalizationOutcome> {
     let record = match mqk_db::fetch_autonomous_daily_operation_by_id(pool, operation_id).await {
         Ok(Some(record)) => record,
@@ -877,6 +1033,9 @@ async fn reread_confirm_finalized(
     if record.state == expected_target_state
         && record.outcome.as_deref() == Some(expected_outcome)
         && record.finalized_at_utc.is_some()
+        && record.state_version > expected_state_version
+        && record.state_reason_code.is_none()
+        && record.state_blocker_signature.is_none()
     {
         return Ok(AutonomousDailyFinalizationOutcome::Finalized {
             outcome: expected_outcome.to_string(),
@@ -910,12 +1069,22 @@ async fn apply_evidence_degraded_blocker(
     operation: &AutonomousDailyOperationRecord,
     reason: AutonomousDailyUnknownReason,
     now_utc: DateTime<Utc>,
+    effect_seam: AutonomousDailyFinalizationEffectSeam,
 ) -> anyhow::Result<AutonomousDailyFinalizationOutcome> {
     let signature = blocker_signature_for_unknown(operation, reason);
     let reason_code = signature.reason_code.to_string();
     let detail = bounded_detail(&format!(
         "autonomous daily outcome finalization evidence blocker: {reason_code}"
     ));
+
+    // REPAIR 6: model a database that is also unavailable for the blocker-
+    // write step itself -- skip the real write entirely rather than attempt
+    // and discard it, so the re-read below is genuinely real and genuinely
+    // observes that no write took place (never a fabricated "blocker
+    // written" claim). Production never sets this field.
+    if effect_seam.force_blocker_persistence_unavailable {
+        return reread_confirm_evidence_degraded(pool, operation.operation_id, reason).await;
+    }
 
     if operation.state == mqk_db::STATE_EVIDENCE_DEGRADED {
         let refresh_args = mqk_db::RefreshAutonomousDailyOperationBlockerArgs {
@@ -1042,12 +1211,41 @@ async fn recover_evidence_degraded_to_stopping(
 /// Classify and (if eligible and resolvable) finalize one autonomous daily
 /// operation. Not called from any production tick by this patch -- E3 owns
 /// wiring this into the coordinator's `AwaitingOutcomeFinalization` handling.
+/// Always uses the all-default (no-op) injected effect seam -- production
+/// behavior is unaffected by [`AutonomousDailyFinalizationEffectSeam`]'s
+/// existence.
 pub async fn classify_and_finalize_autonomous_daily_operation(
     pool: &PgPool,
     operation_id: Uuid,
     now_utc: DateTime<Utc>,
     context: AutonomousDailyFinalizationContext,
     policy_inputs: &AutonomousDailyFinalizationPolicyInputs<'_>,
+) -> anyhow::Result<AutonomousDailyFinalizationOutcome> {
+    classify_and_finalize_autonomous_daily_operation_with_effect_seam(
+        pool,
+        operation_id,
+        now_utc,
+        context,
+        policy_inputs,
+        AutonomousDailyFinalizationEffectSeam::default(),
+    )
+    .await
+}
+
+/// Test-support entry point, identical to
+/// [`classify_and_finalize_autonomous_daily_operation`] except for one added
+/// parameter: the REPAIR 5/6 narrow injected effect seam that lets a test
+/// deterministically prove commit-uncertainty and partial-evidence-read-
+/// failure behavior against a real database. The production entry point
+/// above always calls this with [`AutonomousDailyFinalizationEffectSeam::default`],
+/// so production behavior is identical to before this parameter existed.
+pub async fn classify_and_finalize_autonomous_daily_operation_with_effect_seam(
+    pool: &PgPool,
+    operation_id: Uuid,
+    now_utc: DateTime<Utc>,
+    context: AutonomousDailyFinalizationContext,
+    policy_inputs: &AutonomousDailyFinalizationPolicyInputs<'_>,
+    effect_seam: AutonomousDailyFinalizationEffectSeam,
 ) -> anyhow::Result<AutonomousDailyFinalizationOutcome> {
     let operation = match mqk_db::fetch_autonomous_daily_operation_by_id(pool, operation_id).await {
         Ok(Some(operation)) => operation,
@@ -1057,17 +1255,47 @@ pub async fn classify_and_finalize_autonomous_daily_operation(
         Err(_) => return Ok(AutonomousDailyFinalizationOutcome::DatabaseUnavailable),
     };
 
-    if mqk_db::is_terminal_operation_state(&operation.state) {
+    // AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E2B-TERMINAL-TRUTH-PRECEDENCE-AND-
+    // UNCERTAINTY-CLOSURE (REPAIR 2): generic `completed` is read-only
+    // manual/administrative terminal truth -- never rewritten or
+    // reclassified, and never subjected to the automatic-row completeness
+    // check below (it carries no `outcome` in the closed set by
+    // construction).
+    if operation.state == mqk_db::STATE_COMPLETED {
         return Ok(AutonomousDailyFinalizationOutcome::AlreadyFinalized(
             operation,
         ));
+    }
+
+    if mqk_db::is_terminal_operation_state(&operation.state) {
+        // `completed_no_trade` / `completed_with_activity`: only a
+        // *complete* durable terminal truth (exact authorized pair,
+        // `finalized_at_utc` present, no residual reason/blocker fields) may
+        // be reported as already finalized -- a malformed automatic
+        // terminal row (e.g. hand-corrupted, or left mid-write by a crash
+        // this patch's own CAS never permits in practice) is a `Conflict`,
+        // never silently accepted as truth.
+        return if mqk_db::is_complete_automatic_terminal_truth(&operation) {
+            Ok(AutonomousDailyFinalizationOutcome::AlreadyFinalized(
+                operation,
+            ))
+        } else {
+            Ok(AutonomousDailyFinalizationOutcome::Conflict)
+        };
     }
 
     if operation.state == mqk_db::STATE_EVIDENCE_DEGRADED {
         if context.matching_local_runtime_active || operation.stopped_at_utc.is_none() {
             return Ok(AutonomousDailyFinalizationOutcome::NotEligible);
         }
-        return run_gather_classify_and_persist(pool, &operation, policy_inputs, now_utc).await;
+        return run_gather_classify_and_persist(
+            pool,
+            &operation,
+            policy_inputs,
+            now_utc,
+            effect_seam,
+        )
+        .await;
     }
 
     match check_finalization_eligibility(&operation, &context) {
@@ -1076,7 +1304,8 @@ pub async fn classify_and_finalize_autonomous_daily_operation(
             Ok(AutonomousDailyFinalizationOutcome::NotEligible)
         }
         AutonomousDailyFinalizationEligibility::Eligible => {
-            run_gather_classify_and_persist(pool, &operation, policy_inputs, now_utc).await
+            run_gather_classify_and_persist(pool, &operation, policy_inputs, now_utc, effect_seam)
+                .await
         }
     }
 }
@@ -1089,9 +1318,12 @@ async fn run_gather_classify_and_persist(
     operation: &AutonomousDailyOperationRecord,
     policy_inputs: &AutonomousDailyFinalizationPolicyInputs<'_>,
     now_utc: DateTime<Utc>,
+    effect_seam: AutonomousDailyFinalizationEffectSeam,
 ) -> anyhow::Result<AutonomousDailyFinalizationOutcome> {
     let snapshot =
-        match gather_autonomous_daily_outcome_evidence(pool, operation, policy_inputs).await {
+        match gather_autonomous_daily_outcome_evidence(pool, operation, policy_inputs, effect_seam)
+            .await
+        {
             Ok(snapshot) => snapshot,
             Err(_) => {
                 return apply_evidence_degraded_blocker(
@@ -1099,6 +1331,7 @@ async fn run_gather_classify_and_persist(
                     operation,
                     AutonomousDailyUnknownReason::DatabaseUnavailable,
                     now_utc,
+                    effect_seam,
                 )
                 .await;
             }
@@ -1110,11 +1343,13 @@ async fn run_gather_classify_and_persist(
             if operation.state == mqk_db::STATE_EVIDENCE_DEGRADED {
                 recover_evidence_degraded_to_stopping(pool, operation, now_utc).await
             } else {
-                finalize_with_commit_uncertainty(pool, operation, reason_code, now_utc).await
+                finalize_with_commit_uncertainty(pool, operation, reason_code, now_utc, effect_seam)
+                    .await
             }
         }
         AutonomousDailyOutcomeClassification::EvidenceBlocked { reason_code, .. } => {
-            apply_evidence_degraded_blocker(pool, operation, reason_code, now_utc).await
+            apply_evidence_degraded_blocker(pool, operation, reason_code, now_utc, effect_seam)
+                .await
         }
     }
 }

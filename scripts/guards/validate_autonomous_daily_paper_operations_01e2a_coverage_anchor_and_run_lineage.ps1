@@ -309,24 +309,32 @@ if (Test-FileExists "E2A scenario test file" $PathE2ATest) {
 }
 
 Write-Host ""
-Show-Info "--- [10] No E2B classifier/finalizer surface introduced ---"
-foreach ($ForbiddenPath in @($PathCoverageRs, $PathCoordinatorRs, $PathTaskRs, $PathDbOperationRs)) {
+Show-Info "--- [10] E2A files never call the E2B finalizer; E2B remains isolated; no E3 coordinator integration ---"
+# AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E2B-TERMINAL-TRUTH-PRECEDENCE-AND-
+# UNCERTAINTY-CLOSURE (REPAIR 8): the original check [10] was a point-in-time
+# boundary proof frozen at E2A's own accepted commit (705c1010), verifying
+# E2A's own patch did not introduce E2B's finalization surface. It is not a
+# permanent prohibition on the repository ever containing E2B -- E2B is the
+# explicitly authorized next patch, and its whole mission is to add exactly
+# that surface (in its own module, `autonomous_daily_outcome.rs`, and its own
+# store primitive, `mqk-db`'s `finalize_autonomous_daily_operation`). The
+# durable check going forward is narrower and remains meaningful after E2B
+# lands: E2A's own production files never call the E2B finalizer, E2B's
+# classifier/finalizer surface remains isolated in its own module, and no E3
+# coordinator integration exists yet.
+foreach ($ForbiddenPath in @($PathCoverageRs, $PathCoordinatorRs, $PathTaskRs)) {
     if (-not (Test-Path $ForbiddenPath)) { continue }
     $Content = Get-Content -Raw -Path $ForbiddenPath
     $RelName = Split-Path -Leaf $ForbiddenPath
-    Test-ContentDoesNotContain "$RelName never writes finalized_at_utc" $Content "finalized_at_utc =" | Out-Null
-    Test-ContentDoesNotContain "$RelName never sets outcome =" $Content "set outcome" | Out-Null
-    # Note: STATE_COMPLETED_NO_TRADE/STATE_COMPLETED_WITH_ACTIVITY are deliberately not
-    # substring-checked here -- both constants already appear legitimately in pre-existing
-    # exclusion-list code (e.g. "not one of the terminal states" matches!() guards) untouched
-    # by this patch; a bare substring check would false-positive on that pre-existing code.
-    # The finalized_at_utc/outcome-writer and classifier-module checks above and below are the
-    # precise signal for "was E2B's finalization/classification surface introduced."
-    Test-ContentDoesNotContain "$RelName does not define an outcome classifier module" $Content "mod autonomous_daily_outcome_classifier" | Out-Null
+    Test-ContentDoesNotContain "$RelName never calls the E2B finalizer entry point" $Content "classify_and_finalize_autonomous_daily_operation" | Out-Null
+    Test-ContentDoesNotContain "$RelName never references the E2B outcome classifier module" $Content "autonomous_daily_outcome::" | Out-Null
 }
+$PathOutcomeRs = Join-Path $RepoRoot "core-rs\crates\mqk-daemon\src\state\autonomous_daily_outcome.rs"
+Test-FileExists "E2B outcome classifier/finalizer module (isolated)" $PathOutcomeRs | Out-Null
+Test-ContentDoesNotContain "coordinator does not invoke the E2B finalizer (no E3 integration yet)" $CoordinatorContent "classify_and_finalize_autonomous_daily_operation(" | Out-Null
 
 Write-Host ""
-Show-Info "--- [11] README truth: Phase E / Bundle 3 / soak / live-capital / E2A-accepted not overclaimed ---"
+Show-Info "--- [11] README truth: E1/E2A accepted, E2B awaiting acceptance, E3 not started, Phase E/Bundle 3 open ---"
 $ReadmeContent = $null
 if (Test-FileExists "README.md" $PathReadme) {
     $ReadmeContent = Get-Content -Raw -Path $PathReadme
@@ -335,17 +343,26 @@ $ReadmeTechContent = $null
 if (Test-FileExists "README_TECHNICAL.md" $PathReadmeTech) {
     $ReadmeTechContent = Get-Content -Raw -Path $PathReadmeTech
 }
+# REPAIR 8: the original check [11] required the pre-acceptance sentence "E2A
+# repair implementation is complete, awaiting independent" to persist in
+# README.md forever, which would make it impossible to ever honestly record
+# E2A's acceptance. Replaced with the current truthful progression: E1/E2A
+# accepted, E2B implementation complete but not yet accepted, E3 not started,
+# Phase E/Bundle 3 open, soak not started, live capital not ready.
 $ForbiddenReadmeClaims = @(
     "Phase E: CLOSED",
     "Phase E: COMPLETE",
     "Phase E is complete",
     "Bundle 3: CLOSED",
     "Bundle 3 is complete",
-    "E2A: ACCEPTED",
-    "E2A is complete",
-    "E2A: COMPLETE",
-    "E2B implemented",
-    "outcome classifier implemented",
+    "E2B: ACCEPTED",
+    "E2B is accepted",
+    "E2B is complete",
+    "E2B: COMPLETE",
+    "E3 implemented",
+    "E3: ACCEPTED",
+    "E3 is accepted",
+    "coordinator invokes the outcome classifier",
     "soak has started",
     "soak: STARTED",
     "unattended soak is underway",
@@ -360,8 +377,10 @@ foreach ($Doc in @(@{Name = "README.md"; Content = $ReadmeContent}, @{Name = "RE
     }
 }
 Test-ContentContains "README.md records E1 as accepted" $ReadmeContent "E1 is now accepted" | Out-Null
-Test-ContentContains "README.md records E2A repair as implementation complete awaiting acceptance" $ReadmeContent "E2A repair implementation is complete, awaiting independent" | Out-Null
+Test-ContentContains "README.md records E2A as accepted" $ReadmeContent "E2A (plus both repairs) is now accepted" | Out-Null
+Test-ContentContains "README.md records E2B as awaiting acceptance (not yet accepted)" $ReadmeContent "awaiting ChatGPT and operator acceptance" | Out-Null
 Test-ContentContains "README_TECHNICAL.md records E1 as accepted" $ReadmeTechContent "E1 is accepted complete" | Out-Null
+Test-ContentContains "README_TECHNICAL.md records E2A as accepted" $ReadmeTechContent "plus both repairs, is **accepted complete**" | Out-Null
 
 Write-Host ""
 Show-Info "--- [12] Complete envelope validator checks event_type/source/run_id NULL/resume_source NULL ---"

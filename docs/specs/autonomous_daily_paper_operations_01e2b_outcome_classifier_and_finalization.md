@@ -11,6 +11,17 @@ Status: **IMPLEMENTATION COMPLETE — AWAITING CHATGPT AND OPERATOR ACCEPTANCE.*
 records what E2B built and proved; it is not itself an acceptance record, and it does not close
 Phase E or Bundle 3.
 
+**AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E2B-TERMINAL-TRUTH-PRECEDENCE-AND-UNCERTAINTY-CLOSURE**
+(starting HEAD `1918cee9881725a486eb40ec13c4492ee66c007a`) repairs seven source-proven defects left
+in this same still-unaccepted E2B deliverable, found by a fresh, targeted independent review: an
+incomplete terminal state/outcome pairing check, an `AlreadyApplied` replay check that did not
+require complete durable terminal truth, a high-level already-terminal handler that did not
+distinguish generic `completed` from a malformed automatic row, a coverage-missing precedence
+defect (an empty-lineage special case that violated the contract's own strict precedence order), a
+commit-uncertainty re-read missing its version-advance and residual-field checks, and two
+mislabeled/missing database-failure proofs. This closure does not begin E3 and does not change E2B's
+overall acceptance status -- see §13 and the final handoff for the complete repair list.
+
 ## 0. Accepted foundation (recorded, not re-litigated)
 
 ```text
@@ -147,9 +158,7 @@ function's caller, from any other missing expected identity; it is never silentl
 ```text
 1. identity_match                                  -> else unknown_assignment_identity_unavailable
 2. lineage present                                  -> else unknown_run_lineage_unavailable
-3. coverage present                                  -> else:
-     lineage empty (operation never reached running) -> unknown_missing_evaluation_evidence
-     lineage nonempty (operation did run)             -> unknown_incomplete_bar_coverage
+3. coverage present                                  -> else unknown_incomplete_bar_coverage
 4. expected-bar coverage complete + aggregate consistent -> else unknown_incomplete_bar_coverage
 5. zero unresolved claims (status == completed, evaluation_id present) -> else
      unknown_unresolved_dispatch_claim / unknown_missing_evaluation_evidence
@@ -161,17 +170,20 @@ function's caller, from any other missing expected identity; it is never silentl
 9. otherwise -> CompletedNoTrade { no_trade_strategy_evaluated_no_signal }
 ```
 
-Step 3's split (missing-anchor-with-empty-lineage vs. missing-anchor-with-nonempty-lineage) is a
-source-grounded reconciliation of two E1 contract statements that are otherwise in tension: §6
-item 2 step 6 says an operation that never reached a state where the anchor could be established
-routes to `unknown_missing_evaluation_evidence`; §7's own trigger list keys the same code on "zero
-durable `strategy_signal_evaluations` rows... whether the operation reached running... or it
-legally reached stopping without ever reaching running at all." Because a durably-bound anchor
-(§6a) is written by the coordinator's `ensure_coverage_authority` before `dispatch_by_state` ever
-runs, a missing anchor for an operation that *did* bind a run is always a genuine coverage-proof
-gap (`unknown_incomplete_bar_coverage`), never the "never ran" case; the empty-lineage split
-therefore recovers exactly the E1 contract's intended disjoint cases without inventing a new
-reason code. This mapping is proven by `classifier_18` (nonempty lineage) in the test matrix.
+**AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E2B-TERMINAL-TRUTH-PRECEDENCE-AND-UNCERTAINTY-CLOSURE
+(REPAIR 4)** removed step 3's original interpretive split (missing-anchor-with-empty-lineage
+routed to `unknown_missing_evaluation_evidence`, missing-anchor-with-nonempty-lineage routed to
+`unknown_incomplete_bar_coverage`). That split was itself a reconciliation of two E1 contract
+statements in tension (§6 item 2 step 6 vs. §7's trigger list), but it violated the contract's own
+strict precedence order: coverage is decided purely on its own presence/validity, never on a
+downstream signal (lineage emptiness) that belongs to an earlier step. The corrected, binding
+precedence order is strictly **identity -> lineage -> durable coverage authority -> expected-bar
+coverage -> claims -> evaluations**: a missing or unusable coverage anchor is always
+`unknown_incomplete_bar_coverage`, regardless of whether the run lineage is empty.
+`unknown_missing_evaluation_evidence` remains reachable, but only once coverage and expected-bar
+truth are both already established (steps 5-6). This mapping is proven by `classifier_18` (nonempty
+lineage) and `classifier_26` (empty lineage, same `unknown_incomplete_bar_coverage` outcome) in the
+test matrix.
 
 `sys_risk_denial_events` is never read by any function in this module (`classifier_21` is a
 structural proof: the snapshot type carries no such field).
@@ -231,6 +243,23 @@ StaleState                -- not yet terminal, but state/version didn't match
 NotFound / IllegalTarget
 ```
 
+**REPAIR 1/2 (terminal-truth precedence and uncertainty closure):** `IllegalTarget`'s legality
+check originally verified `target_state ∈ {completed_no_trade, completed_with_activity}` and
+`outcome` belonged to the closed four-code set *independently* -- which let a cross-paired
+combination (e.g. `completed_no_trade` + `activity_fill_confirmed`) pass. The check now uses one
+shared pure validator, `mqk_db::is_valid_terminal_state_outcome_pair(state, outcome)`, requiring
+the exact authorized pair. `AlreadyApplied` similarly required only `current.state == target_state
+&& current.outcome == outcome` -- a row whose `finalized_at_utc` was still null, or which carried a
+residual `state_reason_code`/`state_blocker_signature`, could be misreported as an idempotent
+replay. The replay check now additionally requires `mqk_db::is_complete_automatic_terminal_truth`,
+which folds in the pairing check plus `finalized_at_utc IS NOT NULL`,
+`state_reason_code IS NULL`, and `state_blocker_signature IS NULL`; anything short of that is
+`ConflictingTerminalTruth`, never `AlreadyApplied`. The same completeness check gates the
+high-level `classify_and_finalize_autonomous_daily_operation` entry point's already-terminal
+handling: a manual/administrative generic `completed` row is read-only `AlreadyFinalized` before
+the completeness check is ever consulted; a complete automatic row is `AlreadyFinalized`; an
+incomplete/malformed automatic row is `Conflict`, never accepted as truth.
+
 ## 9. Evidence-degraded CAS and recovery
 
 Two new legal edges (`is_legal_operation_transition`, `mqk-db`):
@@ -269,6 +298,31 @@ error, the row is re-read by `operation_id` and the exact expected fields
 before any success is claimed. Never re-runs classification on an uncertain write without first
 re-reading.
 
+**AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E2B-TERMINAL-TRUTH-PRECEDENCE-AND-UNCERTAINTY-CLOSURE
+(REPAIR 3):** the re-read for the terminal finalization path (`reread_confirm_finalized`)
+originally omitted two checks a genuinely confirmed write requires: `state_version` strictly
+greater than the *original* expected version this attempt's own CAS used (a matching state/outcome
+at an unadvanced version is not confirmed finalization), and both `state_reason_code`/
+`state_blocker_signature` null (complete terminal truth, mirroring
+`is_complete_automatic_terminal_truth`). Both are now required; the original expected version is
+threaded explicitly into the re-read.
+
+**REPAIR 5:** the pre-repair "commit-uncertainty" store-level tests (`store_44`/`store_45`) proved
+only that a second identical `finalize_autonomous_daily_operation` call degrades to `AlreadyApplied`
+-- they never exercised the *high-level* `finalize_with_commit_uncertainty`/
+`reread_confirm_finalized` re-read path at all. A narrow, all-default-in-production
+`AutonomousDailyFinalizationEffectSeam` now lets a test prove all three commit-uncertainty
+scenarios end-to-end against a real database, without ever mocking a successful write:
+`force_commit_acknowledgment_lost` discards this attempt's observation of an already-real,
+already-committed `Ok(Applied(_))` result (`store_50`); `pre_commit_effect`'s
+`StaleVersionBeforeCommit` performs one real, separate transition (bumping the same operation's
+version) immediately before the real CAS under test, so that CAS naturally observes a stale
+expected version (`store_51`, which must claim no success); and
+`ConflictingTerminalWriteBeforeCommit` performs one real, separate terminal finalize to a
+*different* valid outcome immediately before the real CAS under test, so that CAS naturally fails
+against an already-terminal row with different truth, and the re-read must report `Conflict`
+(`store_52`, never rewriting the concurrent writer's truth).
+
 Database-failure disposition, matched exactly to E1 §9:
 
 ```text
@@ -279,8 +333,21 @@ Partial read failure (operation row loaded, a later evidence query fails)
   -> best-effort unknown_database_unavailable blocker write, confirmed by re-read
   -> re-read confirms  -> EvidenceDegraded
   -> re-read fails too -> DatabaseUnavailable, never a fabricated "blocker written" claim
-     (store_47 proves the ordinary non-DB-outage evidence-gap path through the same seam)
 ```
+
+**REPAIR 6:** the original `store_47` was named as a partial-evidence-read-failure proof but was
+actually an ordinary, deterministic identity-unavailable evidence gap (empty
+`MultiSymbolRuntimeConfig`) -- never a database read failure of any kind. It is renamed in place
+(`store_47_assignment_identity_unavailable_is_not_a_database_failure_proof`) to state that plainly.
+Two new tests, driven through the same `AutonomousDailyFinalizationEffectSeam`, are the real
+partial-read-failure proofs: `force_evidence_read_failure_after_claims` fails
+`gather_autonomous_daily_outcome_evidence` with a synthetic `Err` immediately after identity,
+lineage, coverage, and every expected bar's claim/evaluation evidence have already been read for
+real -- a genuine *later* evidence-read failure, never a mocked operation-row load (`store_48`,
+best-effort blocker write confirmed by re-read -> `EvidenceDegraded`); combined with
+`force_blocker_persistence_unavailable`, the best-effort blocker write is skipped entirely rather
+than attempted-and-discarded, so the real re-read correctly observes no write took place ->
+`DatabaseUnavailable`, with zero fabricated blocker truth persisted (`store_49`).
 
 No raw SQL/connection/credential text ever enters a durable field — every persisted reason is one
 of the closed `unknown_*` codes above.
@@ -311,19 +378,47 @@ resolve them from `AppState`/env exactly as the coordinator does today, and supp
 
 Not called from any production tick by this patch.
 
+**REPAIR 5/6:** a second, test-support entry point exists alongside the production signature above:
+
+```rust
+pub async fn classify_and_finalize_autonomous_daily_operation_with_effect_seam(
+    pool: &PgPool,
+    operation_id: Uuid,
+    now_utc: DateTime<Utc>,
+    context: AutonomousDailyFinalizationContext,
+    policy_inputs: &AutonomousDailyFinalizationPolicyInputs<'_>,
+    effect_seam: AutonomousDailyFinalizationEffectSeam,
+) -> anyhow::Result<AutonomousDailyFinalizationOutcome>
+```
+
+The production `classify_and_finalize_autonomous_daily_operation` always delegates to this with
+`AutonomousDailyFinalizationEffectSeam::default()` -- production behavior is unchanged by this
+parameter's existence. See §10 for the seam's three fields and what each proves.
+
 ## 12. Test matrix
 
 File:
 `core-rs/crates/mqk-daemon/tests/scenario_autonomous_daily_outcome_classifier_and_finalization_01.rs`
-(54 tests total).
+(66 tests total, up from 54 -- AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E2B-TERMINAL-TRUTH-PRECEDENCE-
+AND-UNCERTAINTY-CLOSURE adds `classifier_26` and `store_48`–`store_58`, and renames `store_47` in
+place).
 
 ```text
-Group 1 (pure classifier + eligibility, no DB): 29 tests
+Group 1 (pure classifier + eligibility, no DB): 30 tests
   classifier_01–classifier_25 (the 25 required classifier scenarios)
+  classifier_26 (REPAIR 4: missing coverage + empty lineage -> unknown_incomplete_bar_coverage)
   eligibility_* (4 pure eligibility-gate proofs)
 
-Group 2 (DB-backed finalization/blocker CAS store proof, --ignored): 22 tests
-  store_26–store_47 (the 22 required store scenarios)
+Group 2 (DB-backed finalization/blocker CAS store proof, --ignored): 33 tests
+  store_26–store_46 (the original store scenarios, unchanged)
+  store_47 (renamed in place: assignment-identity-unavailable, not a database-failure proof)
+  store_48–store_49 (REPAIR 6: real partial-evidence-read-failure, with and without a blocker-
+    write failure)
+  store_50–store_52 (REPAIR 5: the three real, DB-proven commit-uncertainty scenarios)
+  store_53–store_54 (REPAIR 1/7: cross-paired state/outcome combinations are IllegalTarget)
+  store_55–store_56 (REPAIR 2/7: an incomplete terminal row is never AlreadyApplied)
+  store_57–store_58 (REPAIR 2/7: high-level malformed-automatic-row Conflict, generic-completed
+    read-only AlreadyFinalized)
 
 Group 3 (DB-backed integrated end-to-end proof, --ignored): 3 tests
   integrated_01_clean_no_trade_evidence_reaches_completed_no_trade
@@ -333,7 +428,7 @@ Group 3 (DB-backed integrated end-to-end proof, --ignored): 3 tests
      evidence_degraded -> stopping -> later invocation -> completed_no_trade)
 ```
 
-All 54 pass locally (`--include-ignored --test-threads=1`, isolated port-5434 test DB).
+All 66 pass locally (`--include-ignored --test-threads=1`, isolated port-5434 test DB).
 
 Regressions re-run clean against the same isolated DB, one binary at a time
 (`--include-ignored --test-threads=1`):
@@ -350,29 +445,23 @@ seam in that file and was not re-run per the mission's own instruction.
 
 ## 13. Guard-status note (E2A boundary guard)
 
-`scripts/guards/validate_autonomous_daily_paper_operations_01e2a_coverage_anchor_and_run_lineage.ps1`
-now fails with **2 violations** against this commit — both expected, documented consequences of
-E2A's acceptance and E2B's authorized work landing in the same commit, not defects:
+At the original E2B patch's own commit, `validate_autonomous_daily_paper_operations_01e2a_coverage_anchor_and_run_lineage.ps1`
+failed with 2 violations, both expected, documented consequences of E2A's acceptance and E2B's
+authorized work landing in the same commit: check `[10]`'s point-in-time boundary proof (frozen at
+E2A's accepted commit `705c1010`) that no finalization surface existed yet, and the README `[11]`
+acceptance-phrase check requiring the pre-acceptance sentence to persist forever.
 
-1. **Check `[10]`** ("no E2B classifier/finalizer surface was introduced") — its substring check
-   that `core-rs/crates/mqk-db/src/autonomous_daily_operation.rs` never contains
-   `"finalized_at_utc ="` now fails. That check was written as a point-in-time boundary proof for
-   the **E2A patch itself** (frozen at E2A's accepted commit `705c1010`), verifying E2A's own patch
-   did not overreach into E2B's scope. E2B is the explicitly authorized next patch, and its entire
-   mission is to add exactly the finalization surface that check was written to detect the
-   *absence* of at E2A-acceptance-time.
-2. **The README `[11]` acceptance-phrase check** — its check that README.md still contains the
-   pre-acceptance phrase `"E2A repair implementation is complete, awaiting independent"` now fails,
-   because this commit correctly updates that sentence to record E2A as **accepted** (per this
-   patch's own starting-point instruction: `E2A: ACCEPTED — COMPLETE`). Requiring the old
-   not-yet-accepted phrase to persist forever would make it impossible to ever honestly record
-   E2A's acceptance in README.md.
-
-Neither check is a permanent prohibition on the codebase — both were point-in-time proofs scoped
-to the E2A patch's own acceptance state, and continuing to require either to pass would make it
-impossible to both (a) honestly record E2A's acceptance and (b) implement E2B's explicitly
-authorized mission. Every other required existing guard passes; see the final handoff for the
-complete list.
+**AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E2B-TERMINAL-TRUTH-PRECEDENCE-AND-UNCERTAINTY-CLOSURE
+(REPAIR 8)** replaces both checks with durable, non-time-locked equivalents that remain meaningful
+after E2B lands and require no supersession going forward: check `[10]` now verifies E2A's own
+production files (`autonomous_daily_coverage_authority.rs`, `autonomous_daily_coordinator.rs`,
+`autonomous_completed_bar_task.rs`) never call the E2B finalizer and that no E3 coordinator
+integration exists yet; check `[11]` now requires the current truthful progression (E1/E2A
+accepted, E2B awaiting acceptance, E3 not started, Phase E/Bundle 3 open). Both guards --
+`validate_autonomous_daily_paper_operations_01e2a_coverage_anchor_and_run_lineage.ps1` and
+`validate_autonomous_daily_paper_operations_01e2b_outcome_classifier_and_finalization.ps1`
+(strengthened with checks `[19]`–`[24]` for this repair's own defects) -- pass with zero violations
+against this commit. See the final handoff for the complete guard list.
 
 ## 14. E3 boundary
 

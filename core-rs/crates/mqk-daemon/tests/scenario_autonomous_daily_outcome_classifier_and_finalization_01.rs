@@ -6,8 +6,12 @@
 //! and the high-level `classify_and_finalize_autonomous_daily_operation`
 //! entry point.
 //!
-//! Group 1 (classifier, pure, no DB): tests 1-25.
-//! Group 2 (finalization/blocker CAS store proof, DB-backed, `#[ignore]`): tests 26-47.
+//! Group 1 (classifier, pure, no DB): tests 1-26 (AUTONOMOUS-DAILY-PAPER-
+//! OPERATIONS-01E2B-TERMINAL-TRUTH-PRECEDENCE-AND-UNCERTAINTY-CLOSURE
+//! REPAIR 4 adds `classifier_26`).
+//! Group 2 (finalization/blocker CAS store proof, DB-backed, `#[ignore]`):
+//! tests 26-58 (REPAIR 1/2/5/6/7 add `store_48`-`store_58`; `store_47` is
+//! renamed in place -- it was never a database-failure proof).
 //! Group 3 (integrated end-to-end DB-backed proof, `#[ignore]`): three scenarios.
 //!
 //! DB-backed tests require `MQK_DATABASE_URL` and are marked `#[ignore]`. Run with:
@@ -27,9 +31,11 @@ use mqk_daemon::state::autonomous_daily_coverage_authority::{
 };
 use mqk_daemon::state::autonomous_daily_outcome::{
     check_finalization_eligibility, classify_and_finalize_autonomous_daily_operation,
+    classify_and_finalize_autonomous_daily_operation_with_effect_seam,
     classify_autonomous_daily_outcome, derive_expected_bar_set,
     gather_autonomous_daily_outcome_evidence, AutonomousDailyFinalizationContext,
-    AutonomousDailyFinalizationEligibility, AutonomousDailyFinalizationOutcome,
+    AutonomousDailyFinalizationEffectSeam, AutonomousDailyFinalizationEligibility,
+    AutonomousDailyFinalizationInjectedPreCommitEffect, AutonomousDailyFinalizationOutcome,
     AutonomousDailyFinalizationPolicyInputs, AutonomousDailyOutcomeClassification,
     AutonomousDailyOutcomeEvidenceSnapshot, AutonomousDailyTerminalReason,
     AutonomousDailyUnknownReason, ExpectedBarClaimEvidence,
@@ -683,6 +689,27 @@ fn classifier_25_process_local_diagnostic_counters_are_never_read() {
 }
 
 #[test]
+fn classifier_26_missing_coverage_with_empty_lineage_is_incomplete_bar_coverage() {
+    // AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E2B-TERMINAL-TRUTH-PRECEDENCE-AND-
+    // UNCERTAINTY-CLOSURE (REPAIR 4): the precedence order is strictly
+    // identity -> lineage -> durable coverage authority -> expected-bar
+    // coverage -> claims -> evaluations. A missing/unusable coverage anchor
+    // is always `unknown_incomplete_bar_coverage`, even when the lineage is
+    // also empty -- the prior empty-lineage special case (routing to
+    // `unknown_missing_evaluation_evidence` instead) is removed.
+    let detail = base_coverage_detail();
+    let mut builder = clean_no_trade_snapshot(&detail, Uuid::new_v4());
+    builder.snapshot.lineage = Some(Vec::new());
+    builder.snapshot.coverage = None;
+    builder.snapshot.expected_bars = Vec::new();
+    builder.snapshot.claims = Vec::new();
+    assert_blocked(
+        classify_autonomous_daily_outcome(&builder.build()),
+        AutonomousDailyUnknownReason::IncompleteBarCoverage,
+    );
+}
+
+#[test]
 fn eligibility_state_not_stopping_is_not_eligible() {
     let mut op = fixture_operation_record(mqk_db::STATE_RUNNING);
     op.stopped_at_utc = None;
@@ -786,7 +813,7 @@ fn fixture_operation_record(state: &str) -> mqk_db::AutonomousDailyOperationReco
 }
 
 // ---------------------------------------------------------------------------
-// Group 2 — DB-backed finalization/blocker CAS store proof (26-47)
+// Group 2 — DB-backed finalization/blocker CAS store proof (26-58)
 // ---------------------------------------------------------------------------
 
 async fn maybe_db(label: &str) -> Option<sqlx::PgPool> {
@@ -1639,16 +1666,19 @@ async fn store_46_complete_db_outage_performs_no_write() {
 
 #[tokio::test]
 #[ignore]
-async fn store_47_partial_evidence_read_failure_never_fabricates_a_persisted_blocker() {
+async fn store_47_assignment_identity_unavailable_is_not_a_database_failure_proof() {
+    // AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E2B-TERMINAL-TRUTH-PRECEDENCE-AND-
+    // UNCERTAINTY-CLOSURE (REPAIR 6): renamed from its original
+    // "partial_evidence_read_failure" name -- this scenario is an ordinary,
+    // deterministic identity-unavailable evidence gap (empty
+    // `MultiSymbolRuntimeConfig`), never a database read failure of any
+    // kind. `store_48`/`store_49` below are the real partial-evidence-read-
+    // failure proofs, driven through the injected effect seam against a
+    // real database.
     let Some(pool) = maybe_db("store_47").await else {
         return;
     };
     let now = Utc::now().trunc_subsecs(6);
-    // An operation the classifier cannot resolve identity for (empty
-    // MultiSymbolRuntimeConfig) fails closed to `unknown_assignment_identity_unavailable`
-    // via the ordinary evidence-gathering path (not a true DB outage) --
-    // proving the blocker path only ever persists a real, re-read-confirmed
-    // durable row, never an unconfirmed guess.
     let op = stopping_operation(&pool, &unique_adapter_id("s47"), now).await;
     let outcome = classify_and_finalize_autonomous_daily_operation(
         &pool,
@@ -1674,6 +1704,468 @@ async fn store_47_partial_evidence_read_failure_never_fabricates_a_persisted_blo
         }
         other => panic!("expected EvidenceDegraded, got {other:?}"),
     }
+}
+
+#[tokio::test]
+#[ignore]
+async fn store_48_real_partial_evidence_read_failure_degrades_via_confirmed_reread() {
+    // REPAIR 6: a real, later evidence read (the outbox/inbox load, after
+    // identity/lineage/coverage/claims already resolved) fails via the
+    // narrow injected effect seam -- never a mocked operation-row load, and
+    // the operation-transition store below remains fully real and usable.
+    let Some(pool) = maybe_db("store_48").await else {
+        return;
+    };
+    let now = Utc::now().trunc_subsecs(6);
+    let op = stopping_operation(&pool, &unique_adapter_id("s48"), now).await;
+    let outcome = classify_and_finalize_autonomous_daily_operation_with_effect_seam(
+        &pool,
+        op.operation_id,
+        now,
+        AutonomousDailyFinalizationContext::default(),
+        &test_policy_inputs(),
+        AutonomousDailyFinalizationEffectSeam {
+            force_evidence_read_failure_after_claims: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("call ok");
+    match outcome {
+        AutonomousDailyFinalizationOutcome::EvidenceDegraded {
+            reason_code,
+            record,
+        } => {
+            assert_eq!(
+                reason_code,
+                AutonomousDailyUnknownReason::DatabaseUnavailable
+            );
+            assert_eq!(record.state, mqk_db::STATE_EVIDENCE_DEGRADED);
+            assert_eq!(
+                record.state_reason_code.as_deref(),
+                Some("unknown_database_unavailable")
+            );
+            assert!(record.outcome.is_none());
+            assert!(record.finalized_at_utc.is_none());
+            // No raw SQL/connection/error text ever enters a durable field --
+            // the persisted reason is exactly one of the closed `unknown_*`
+            // codes, never the injected test error string.
+            let persisted = record.state_reason_code.as_deref().unwrap_or("");
+            assert!(!persisted.contains("test-injected"));
+            assert!(!persisted.to_lowercase().contains("sql"));
+        }
+        other => panic!("expected EvidenceDegraded(DatabaseUnavailable), got {other:?}"),
+    }
+}
+
+#[tokio::test]
+#[ignore]
+async fn store_49_partial_evidence_read_failure_with_blocker_write_failure_persists_nothing() {
+    // REPAIR 6: the evidence read fails (as in store_48) *and* the best-
+    // effort blocker write/re-read is itself unavailable -- the overall call
+    // must return `DatabaseUnavailable` and the durable row must show zero
+    // fabricated blocker truth.
+    let Some(pool) = maybe_db("store_49").await else {
+        return;
+    };
+    let now = Utc::now().trunc_subsecs(6);
+    let op = stopping_operation(&pool, &unique_adapter_id("s49"), now).await;
+    let outcome = classify_and_finalize_autonomous_daily_operation_with_effect_seam(
+        &pool,
+        op.operation_id,
+        now,
+        AutonomousDailyFinalizationContext::default(),
+        &test_policy_inputs(),
+        AutonomousDailyFinalizationEffectSeam {
+            force_evidence_read_failure_after_claims: true,
+            force_blocker_persistence_unavailable: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("call ok");
+    assert_eq!(
+        outcome,
+        AutonomousDailyFinalizationOutcome::DatabaseUnavailable
+    );
+    let after = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, op.operation_id)
+        .await
+        .expect("fetch ok")
+        .expect("row");
+    assert_eq!(
+        after.state,
+        mqk_db::STATE_STOPPING,
+        "no fabricated blocker may be persisted when the blocker write itself is unavailable"
+    );
+    assert!(after.state_reason_code.is_none());
+    assert!(after.state_blocker_signature.is_none());
+}
+
+#[tokio::test]
+#[ignore]
+async fn store_50_high_level_commit_acknowledgment_lost_confirms_via_reread() {
+    // REPAIR 5, scenario 1: the real terminal CAS genuinely commits; this
+    // attempt's observation of the `Ok(Applied(_))` result is discarded via
+    // the injected seam, forcing the authoritative-re-read path, which must
+    // find the same already-committed terminal truth -- `Finalized`, exactly
+    // one lifecycle event (never a duplicate write).
+    let Some(pool) = maybe_db("store_50").await else {
+        return;
+    };
+    let now = Utc::now().trunc_subsecs(6);
+    let (operation, _run_id, config, binding, registry) =
+        integrated_fixture(&pool, &unique_adapter_id("s50"), now).await;
+    let outcome = classify_and_finalize_autonomous_daily_operation_with_effect_seam(
+        &pool,
+        operation.operation_id,
+        now,
+        AutonomousDailyFinalizationContext::default(),
+        &AutonomousDailyFinalizationPolicyInputs {
+            calendar_provider: &NyseWeekdaysProvider,
+            config: &config,
+            binding: &binding,
+            strategy_registry: &registry,
+        },
+        AutonomousDailyFinalizationEffectSeam {
+            force_commit_acknowledgment_lost: true,
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("call ok");
+    match outcome {
+        AutonomousDailyFinalizationOutcome::Finalized { outcome, record } => {
+            assert_eq!(
+                outcome,
+                mqk_db::OUTCOME_NO_TRADE_STRATEGY_EVALUATED_NO_SIGNAL
+            );
+            assert_eq!(record.state, mqk_db::STATE_COMPLETED_NO_TRADE);
+        }
+        other => panic!("expected Finalized via authoritative re-read, got {other:?}"),
+    }
+    let events = mqk_db::list_autonomous_daily_operation_events(&pool, operation.operation_id, 20)
+        .await
+        .expect("list ok");
+    let terminal_events = events
+        .iter()
+        .filter(|e| e.to_state == mqk_db::STATE_COMPLETED_NO_TRADE)
+        .count();
+    assert_eq!(
+        terminal_events, 1,
+        "commit-ack-lost recovery must never duplicate the terminal event"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn store_51_high_level_cas_false_before_commit_claims_no_success() {
+    // REPAIR 5, scenario 2: a real, separate pre-commit write bumps the same
+    // operation's version (stopping -> stop_retrying) before this attempt's
+    // own real CAS runs, so that CAS naturally observes a stale expected
+    // version -- never a mocked CAS result. The actual row is nonterminal
+    // after re-read, so this attempt must claim no success.
+    let Some(pool) = maybe_db("store_51").await else {
+        return;
+    };
+    let now = Utc::now().trunc_subsecs(6);
+    let (operation, _run_id, config, binding, registry) =
+        integrated_fixture(&pool, &unique_adapter_id("s51"), now).await;
+    let result = classify_and_finalize_autonomous_daily_operation_with_effect_seam(
+        &pool,
+        operation.operation_id,
+        now,
+        AutonomousDailyFinalizationContext::default(),
+        &AutonomousDailyFinalizationPolicyInputs {
+            calendar_provider: &NyseWeekdaysProvider,
+            config: &config,
+            binding: &binding,
+            strategy_registry: &registry,
+        },
+        AutonomousDailyFinalizationEffectSeam {
+            pre_commit_effect:
+                AutonomousDailyFinalizationInjectedPreCommitEffect::StaleVersionBeforeCommit,
+            ..Default::default()
+        },
+    )
+    .await;
+    assert!(
+        result.is_err(),
+        "a genuinely stale CAS against a nonterminal actual row must never claim success, got {result:?}"
+    );
+    let after = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation.operation_id)
+        .await
+        .expect("fetch ok")
+        .expect("row");
+    assert_eq!(after.state, mqk_db::STATE_STOP_RETRYING);
+    assert!(after.outcome.is_none());
+    assert!(after.finalized_at_utc.is_none());
+}
+
+#[tokio::test]
+#[ignore]
+async fn store_52_high_level_conflicting_writer_returns_conflict_never_rewrites() {
+    // REPAIR 5, scenario 3: a real, separate pre-commit write finalizes the
+    // same operation to a *different* valid terminal truth
+    // (completed_with_activity/activity_decision_accepted) before this
+    // attempt's own real CAS (which would otherwise reach
+    // completed_no_trade/no_trade_strategy_evaluated_no_signal from the same
+    // clean no-trade evidence) runs -- the real CAS naturally fails against
+    // the now-already-terminal row, and the re-read must report `Conflict`,
+    // never rewriting the concurrent writer's truth.
+    let Some(pool) = maybe_db("store_52").await else {
+        return;
+    };
+    let now = Utc::now().trunc_subsecs(6);
+    let (operation, _run_id, config, binding, registry) =
+        integrated_fixture(&pool, &unique_adapter_id("s52"), now).await;
+    let outcome = classify_and_finalize_autonomous_daily_operation_with_effect_seam(
+        &pool,
+        operation.operation_id,
+        now,
+        AutonomousDailyFinalizationContext::default(),
+        &AutonomousDailyFinalizationPolicyInputs {
+            calendar_provider: &NyseWeekdaysProvider,
+            config: &config,
+            binding: &binding,
+            strategy_registry: &registry,
+        },
+        AutonomousDailyFinalizationEffectSeam {
+            pre_commit_effect:
+                AutonomousDailyFinalizationInjectedPreCommitEffect::ConflictingTerminalWriteBeforeCommit(
+                    AutonomousDailyTerminalReason::ActivityDecisionAccepted,
+                ),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("call ok");
+    assert_eq!(outcome, AutonomousDailyFinalizationOutcome::Conflict);
+    let after = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation.operation_id)
+        .await
+        .expect("fetch ok")
+        .expect("row");
+    assert_eq!(after.state, mqk_db::STATE_COMPLETED_WITH_ACTIVITY);
+    assert_eq!(
+        after.outcome.as_deref(),
+        Some(mqk_db::OUTCOME_ACTIVITY_DECISION_ACCEPTED)
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn store_53_completed_no_trade_paired_with_activity_outcome_is_illegal() {
+    // REPAIR 1/7: cross-paired combination must be rejected as
+    // `IllegalTarget` before any SQL, and must write nothing.
+    let Some(pool) = maybe_db("store_53").await else {
+        return;
+    };
+    let now = Utc::now().trunc_subsecs(6);
+    let op = stopping_operation(&pool, &unique_adapter_id("s53"), now).await;
+    let args = finalize_args(
+        &op,
+        mqk_db::STATE_COMPLETED_NO_TRADE,
+        mqk_db::OUTCOME_ACTIVITY_FILL_CONFIRMED,
+        now,
+    );
+    match mqk_db::finalize_autonomous_daily_operation(&pool, &args)
+        .await
+        .expect("call ok")
+    {
+        mqk_db::FinalizeAutonomousDailyOperationOutcome::IllegalTarget => {}
+        other => panic!("expected IllegalTarget, got {other:?}"),
+    }
+    let still = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, op.operation_id)
+        .await
+        .expect("fetch")
+        .expect("row");
+    assert_eq!(still.state, mqk_db::STATE_STOPPING);
+    assert!(still.outcome.is_none());
+}
+
+#[tokio::test]
+#[ignore]
+async fn store_54_completed_with_activity_paired_with_no_trade_outcome_is_illegal() {
+    // REPAIR 1/7: the reverse cross-paired combination, same requirement.
+    let Some(pool) = maybe_db("store_54").await else {
+        return;
+    };
+    let now = Utc::now().trunc_subsecs(6);
+    let op = stopping_operation(&pool, &unique_adapter_id("s54"), now).await;
+    let args = finalize_args(
+        &op,
+        mqk_db::STATE_COMPLETED_WITH_ACTIVITY,
+        mqk_db::OUTCOME_NO_TRADE_STRATEGY_EVALUATED_NO_SIGNAL,
+        now,
+    );
+    match mqk_db::finalize_autonomous_daily_operation(&pool, &args)
+        .await
+        .expect("call ok")
+    {
+        mqk_db::FinalizeAutonomousDailyOperationOutcome::IllegalTarget => {}
+        other => panic!("expected IllegalTarget, got {other:?}"),
+    }
+    let still = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, op.operation_id)
+        .await
+        .expect("fetch")
+        .expect("row");
+    assert_eq!(still.state, mqk_db::STATE_STOPPING);
+    assert!(still.outcome.is_none());
+}
+
+#[tokio::test]
+#[ignore]
+async fn store_55_same_state_outcome_but_null_finalized_at_is_not_already_applied() {
+    // REPAIR 2/7: narrow test-only SQL hand-constructs a malformed
+    // "terminal" row whose state/outcome already match what this attempt
+    // requests, but whose `finalized_at_utc` is null -- the schema itself
+    // does not forbid this combination, so the application-level
+    // completeness check under test must be the thing that rejects replay.
+    let Some(pool) = maybe_db("store_55").await else {
+        return;
+    };
+    let now = Utc::now().trunc_subsecs(6);
+    let op = stopping_operation(&pool, &unique_adapter_id("s55"), now).await;
+    sqlx::query(
+        "update sys_autonomous_daily_operations \
+         set state = $1, outcome = $2, finalized_at_utc = null, state_version = state_version + 1 \
+         where operation_id = $3",
+    )
+    .bind(mqk_db::STATE_COMPLETED_NO_TRADE)
+    .bind(mqk_db::OUTCOME_NO_TRADE_STRATEGY_EVALUATED_NO_SIGNAL)
+    .bind(op.operation_id)
+    .execute(&pool)
+    .await
+    .expect("malform row");
+    let args = finalize_args(
+        &op,
+        mqk_db::STATE_COMPLETED_NO_TRADE,
+        mqk_db::OUTCOME_NO_TRADE_STRATEGY_EVALUATED_NO_SIGNAL,
+        now,
+    );
+    match mqk_db::finalize_autonomous_daily_operation(&pool, &args)
+        .await
+        .expect("call ok")
+    {
+        mqk_db::FinalizeAutonomousDailyOperationOutcome::ConflictingTerminalTruth(existing) => {
+            assert!(existing.finalized_at_utc.is_none());
+        }
+        other => panic!(
+            "expected ConflictingTerminalTruth (never AlreadyApplied for an incomplete terminal row), got {other:?}"
+        ),
+    }
+}
+
+#[tokio::test]
+#[ignore]
+async fn store_56_same_state_outcome_but_residual_blocker_fields_is_not_already_applied() {
+    // REPAIR 2/7: same idea as store_55, but the malformed row carries a
+    // residual `state_reason_code` instead of a null `finalized_at_utc`.
+    let Some(pool) = maybe_db("store_56").await else {
+        return;
+    };
+    let now = Utc::now().trunc_subsecs(6);
+    let op = stopping_operation(&pool, &unique_adapter_id("s56"), now).await;
+    sqlx::query(
+        "update sys_autonomous_daily_operations \
+         set state = $1, outcome = $2, finalized_at_utc = $3, \
+             state_reason_code = 'stale_residual_reason', state_version = state_version + 1 \
+         where operation_id = $4",
+    )
+    .bind(mqk_db::STATE_COMPLETED_NO_TRADE)
+    .bind(mqk_db::OUTCOME_NO_TRADE_STRATEGY_EVALUATED_NO_SIGNAL)
+    .bind(now)
+    .bind(op.operation_id)
+    .execute(&pool)
+    .await
+    .expect("malform row");
+    let args = finalize_args(
+        &op,
+        mqk_db::STATE_COMPLETED_NO_TRADE,
+        mqk_db::OUTCOME_NO_TRADE_STRATEGY_EVALUATED_NO_SIGNAL,
+        now,
+    );
+    match mqk_db::finalize_autonomous_daily_operation(&pool, &args)
+        .await
+        .expect("call ok")
+    {
+        mqk_db::FinalizeAutonomousDailyOperationOutcome::ConflictingTerminalTruth(existing) => {
+            assert!(existing.state_reason_code.is_some());
+        }
+        other => panic!("expected ConflictingTerminalTruth, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+#[ignore]
+async fn store_57_high_level_malformed_automatic_terminal_row_is_conflict() {
+    // REPAIR 2/7: the high-level entry point must never treat a malformed
+    // automatic terminal row (here: null `finalized_at_utc`) as accepted
+    // truth -- `Conflict`, never `AlreadyFinalized`.
+    let Some(pool) = maybe_db("store_57").await else {
+        return;
+    };
+    let now = Utc::now().trunc_subsecs(6);
+    let op = stopping_operation(&pool, &unique_adapter_id("s57"), now).await;
+    sqlx::query(
+        "update sys_autonomous_daily_operations \
+         set state = $1, outcome = $2, finalized_at_utc = null, state_version = state_version + 1 \
+         where operation_id = $3",
+    )
+    .bind(mqk_db::STATE_COMPLETED_NO_TRADE)
+    .bind(mqk_db::OUTCOME_NO_TRADE_STRATEGY_EVALUATED_NO_SIGNAL)
+    .bind(op.operation_id)
+    .execute(&pool)
+    .await
+    .expect("malform row");
+    let outcome = classify_and_finalize_autonomous_daily_operation(
+        &pool,
+        op.operation_id,
+        now,
+        AutonomousDailyFinalizationContext::default(),
+        &test_policy_inputs(),
+    )
+    .await
+    .expect("call ok");
+    assert_eq!(outcome, AutonomousDailyFinalizationOutcome::Conflict);
+}
+
+#[tokio::test]
+#[ignore]
+async fn store_58_high_level_generic_completed_row_is_already_finalized_readonly() {
+    // REPAIR 2/7: a manual/administrative `completed` row is read-only
+    // terminal truth -- `AlreadyFinalized`, never rewritten or reclassified.
+    let Some(pool) = maybe_db("store_58").await else {
+        return;
+    };
+    let now = Utc::now().trunc_subsecs(6);
+    let op = stopping_operation(&pool, &unique_adapter_id("s58"), now).await;
+    let manual = transition(&pool, &op, mqk_db::STATE_COMPLETED, None, None, now).await;
+    assert_eq!(manual.state, mqk_db::STATE_COMPLETED);
+    let outcome = classify_and_finalize_autonomous_daily_operation(
+        &pool,
+        op.operation_id,
+        now,
+        AutonomousDailyFinalizationContext::default(),
+        &test_policy_inputs(),
+    )
+    .await
+    .expect("call ok");
+    match outcome {
+        AutonomousDailyFinalizationOutcome::AlreadyFinalized(record) => {
+            assert_eq!(record.state, mqk_db::STATE_COMPLETED);
+        }
+        other => {
+            panic!("expected AlreadyFinalized (read-only) for generic completed, got {other:?}")
+        }
+    }
+    let after = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, op.operation_id)
+        .await
+        .expect("fetch")
+        .expect("row");
+    assert_eq!(
+        after.state_version, manual.state_version,
+        "generic completed row must never be rewritten"
+    );
 }
 
 // ---------------------------------------------------------------------------

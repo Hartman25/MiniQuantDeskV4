@@ -68,9 +68,32 @@ process-local diagnostic counter; the terminal finalization CAS
 set atomically, generic `completed` and `no_trade_reason` both structurally
 unreachable); two new `stopping`/`stop_retrying -> evidence_degraded` legal
 edges; and a commit-uncertainty/database-failure contract mirroring D4's
-authoritative-re-read discipline. **E2B implementation complete, awaiting
-ChatGPT and operator acceptance.** No coordinator invocation, no API route,
-and no GUI surface exist yet; that remains E3/E4.
+authoritative-re-read discipline — plus, on top of that, the
+AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E2B-TERMINAL-TRUTH-PRECEDENCE-AND-UNCERTAINTY-CLOSURE
+repair: `mqk_db::is_valid_terminal_state_outcome_pair` is the single shared
+pure validator for the four authorized state/outcome pairs (closing a defect
+where a cross-paired combination such as `completed_no_trade` +
+`activity_fill_confirmed` previously passed the finalization CAS's legality
+check); `mqk_db::is_complete_automatic_terminal_truth` gates both the store's
+`AlreadyApplied` replay and the daemon's high-level already-terminal handling
+(a matching state/outcome alone is no longer sufficient — `finalized_at_utc`
+must be present and `state_reason_code`/`state_blocker_signature` both null);
+the high-level entry point now distinguishes manual/administrative generic
+`completed` (read-only `AlreadyFinalized`) from a malformed automatic
+terminal row (`Conflict`); the classifier's coverage-missing precedence no
+longer special-cases an empty run lineage (always
+`unknown_incomplete_bar_coverage`, per the corrected identity -> lineage ->
+coverage -> expected-bar -> claims -> evaluations precedence order); and the
+commit-uncertainty re-read now also requires `state_version` to have
+strictly advanced past the original expected version. All three commit-
+uncertainty scenarios (commit-applied-acknowledgment-lost, genuine CAS
+staleness, a genuine conflicting concurrent writer) and the real partial-
+evidence-read-failure scenario are proven end-to-end against a real database
+through a narrow `AutonomousDailyFinalizationEffectSeam` (default no-op in
+production; never a mocked successful write). **E2B (plus this repair)
+remains implementation complete, awaiting ChatGPT and operator acceptance.**
+No coordinator invocation, no API route, and no GUI surface exist yet; that
+remains E3/E4.
 
 The strongest current operational route is:
 

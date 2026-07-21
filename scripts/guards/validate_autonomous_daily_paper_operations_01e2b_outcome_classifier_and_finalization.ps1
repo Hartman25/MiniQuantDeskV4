@@ -316,6 +316,7 @@ Test-ContentContains "README.md records E2B as implementation-complete-awaiting-
 
 Write-Host ""
 Show-Info "--- [18] New E2B scenario test file exists and is nonempty ---"
+$E2BTestContent = $null
 if (Test-FileExists "E2B scenario test file" $PathE2BTest) {
     $E2BTestContent = Get-Content -Raw -Path $PathE2BTest
     if ($E2BTestContent.Length -gt 500) {
@@ -325,6 +326,78 @@ if (Test-FileExists "E2B scenario test file" $PathE2BTest) {
         Show-Red "  FAIL -- E2B test file is suspiciously small"
     }
 }
+
+# =============================================================================
+# AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E2B-TERMINAL-TRUTH-PRECEDENCE-AND-
+# UNCERTAINTY-CLOSURE (REPAIR 9): checks [19]-[24] below strengthen this
+# guard with the exact-pairing validator, the complete-terminal-truth
+# `AlreadyApplied` requirement, the high-level terminal-truth validation, the
+# corrected coverage-missing precedence, and the real (not merely re-labeled)
+# commit-uncertainty and partial-evidence-read-failure seams/tests this
+# closure patch adds.
+# =============================================================================
+
+Write-Host ""
+Show-Info "--- [19] Exact terminal-state/outcome pairing validator exists and gates finalize ---"
+Test-ContentContains "mqk-db exposes the exact pairing validator" $DbOperationContent "pub fn is_valid_terminal_state_outcome_pair(state: &str, outcome: &str) -> bool" | Out-Null
+if ($null -ne $FinalizeFnBody) {
+    Test-ContentContains "finalize_autonomous_daily_operation's IllegalTarget gate uses the pairing validator" $FinalizeFnBody "is_valid_terminal_state_outcome_pair(&args.target_state, &args.outcome)" | Out-Null
+}
+
+Write-Host ""
+Show-Info "--- [20] AlreadyApplied requires complete terminal truth, not merely a state/outcome match ---"
+Test-ContentContains "mqk-db exposes the complete-terminal-truth check" $DbOperationContent "pub fn is_complete_automatic_terminal_truth(record: &AutonomousDailyOperationRecord) -> bool" | Out-Null
+Test-ContentContains "the completeness check requires finalized_at_utc" $DbOperationContent "record.finalized_at_utc.is_some()" | Out-Null
+Test-ContentContains "the completeness check requires a null state_reason_code" $DbOperationContent "record.state_reason_code.is_none()" | Out-Null
+Test-ContentContains "the completeness check requires a null state_blocker_signature" $DbOperationContent "record.state_blocker_signature.is_none()" | Out-Null
+if ($null -ne $FinalizeFnBody) {
+    Test-ContentContains "finalize_autonomous_daily_operation's AlreadyApplied replay uses the completeness check" $FinalizeFnBody "is_complete_automatic_terminal_truth(&current)" | Out-Null
+}
+
+Write-Host ""
+Show-Info "--- [21] High-level already-terminal handling distinguishes generic completed from malformed automatic rows ---"
+$HighLevelEntryBody = Get-ContentBetween -Content $OutcomeContent `
+    -StartNeedle "pub async fn classify_and_finalize_autonomous_daily_operation_with_effect_seam(" `
+    -EndNeedle "`n}"
+if ($null -eq $HighLevelEntryBody) {
+    $script:Violations++
+    Show-Red "  FAIL -- could not locate classify_and_finalize_autonomous_daily_operation_with_effect_seam's body"
+} else {
+    Test-ContentContains "generic completed is handled as read-only before the automatic-row check" $HighLevelEntryBody "operation.state == mqk_db::STATE_COMPLETED" | Out-Null
+    Test-ContentContains "an automatic terminal row's completeness is verified before AlreadyFinalized" $HighLevelEntryBody "mqk_db::is_complete_automatic_terminal_truth(&operation)" | Out-Null
+    Test-ContentContains "an incomplete automatic terminal row returns Conflict, never AlreadyFinalized" $HighLevelEntryBody "AutonomousDailyFinalizationOutcome::Conflict" | Out-Null
+}
+
+Write-Host ""
+Show-Info "--- [22] Coverage-missing precedence: always unknown_incomplete_bar_coverage, no empty-lineage special case ---"
+Test-ContentDoesNotContain "classifier no longer special-cases empty lineage for missing coverage" $ClassifyFnBody "if lineage.is_empty() {" | Out-Null
+$CoverageNoneArm = Get-ContentBetween -Content $OutcomeContent `
+    -StartNeedle "let Some(coverage) = &snapshot.coverage else {" `
+    -EndNeedle "`n    };"
+if ($null -eq $CoverageNoneArm) {
+    $script:Violations++
+    Show-Red "  FAIL -- could not locate the coverage-missing branch"
+} else {
+    Test-ContentContains "coverage-missing branch returns IncompleteBarCoverage unconditionally" $CoverageNoneArm "IncompleteBarCoverage" | Out-Null
+    Test-ContentDoesNotContain "coverage-missing branch no longer branches on lineage emptiness" $CoverageNoneArm "MissingEvaluationEvidence" | Out-Null
+}
+
+Write-Host ""
+Show-Info "--- [23] Real, DB-proven commit-uncertainty effect seam (not a mocked successful write) ---"
+Test-ContentContains "the injected effect seam type exists" $OutcomeContent "pub struct AutonomousDailyFinalizationEffectSeam" | Out-Null
+Test-ContentContains "a test-support entry point threads the effect seam" $OutcomeContent "pub async fn classify_and_finalize_autonomous_daily_operation_with_effect_seam(" | Out-Null
+Test-ContentContains "the production entry point always uses the all-default seam" $OutcomeContent "AutonomousDailyFinalizationEffectSeam::default()" | Out-Null
+Test-ContentContains "commit-uncertainty scenario 1 (ack lost) test exists" $E2BTestContent "async fn store_50_high_level_commit_acknowledgment_lost_confirms_via_reread" | Out-Null
+Test-ContentContains "commit-uncertainty scenario 2 (real stale CAS) test exists" $E2BTestContent "async fn store_51_high_level_cas_false_before_commit_claims_no_success" | Out-Null
+Test-ContentContains "commit-uncertainty scenario 3 (real conflicting writer) test exists" $E2BTestContent "async fn store_52_high_level_conflicting_writer_returns_conflict_never_rewrites" | Out-Null
+
+Write-Host ""
+Show-Info "--- [24] Real partial-evidence-read-failure seam/test (distinct from the identity-unavailable proof) ---"
+Test-ContentContains "the evidence-read-failure injection field exists" $OutcomeContent "force_evidence_read_failure_after_claims: bool" | Out-Null
+Test-ContentContains "the blocker-persistence-unavailable injection field exists" $OutcomeContent "force_blocker_persistence_unavailable: bool" | Out-Null
+Test-ContentContains "the real partial-evidence-read-failure test exists" $E2BTestContent "async fn store_48_real_partial_evidence_read_failure_degrades_via_confirmed_reread" | Out-Null
+Test-ContentContains "the blocker-write-also-fails test exists" $E2BTestContent "async fn store_49_partial_evidence_read_failure_with_blocker_write_failure_persists_nothing" | Out-Null
+Test-ContentContains "store_47 is no longer labeled a database-failure proof" $E2BTestContent "async fn store_47_assignment_identity_unavailable_is_not_a_database_failure_proof" | Out-Null
 
 Write-Host ""
 Show-Info "--- Ledger truth ---"

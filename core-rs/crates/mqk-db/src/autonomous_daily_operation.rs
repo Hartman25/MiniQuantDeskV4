@@ -2701,6 +2701,63 @@ pub fn is_closed_terminal_outcome(outcome: &str) -> bool {
     CLOSED_TERMINAL_OUTCOMES.contains(&outcome)
 }
 
+// ---------------------------------------------------------------------------
+// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E2B-TERMINAL-TRUTH-PRECEDENCE-AND-
+// UNCERTAINTY-CLOSURE (REPAIR 1/2): the single shared pure validator for
+// exact terminal state/outcome pairing, and the companion "complete durable
+// terminal truth" check for an automatic (`completed_no_trade` /
+// `completed_with_activity`) row. `is_closed_terminal_outcome` above checked
+// only that `outcome` belonged to the closed four-code set -- it never
+// verified the outcome actually belonged to *this* target state, so
+// `completed_no_trade` paired with `activity_fill_confirmed` (or any other
+// cross-paired combination) previously passed the finalization CAS's legality
+// check. These two functions are the one place that pairing is decided; both
+// `finalize_autonomous_daily_operation`'s `IllegalTarget`/`AlreadyApplied`
+// checks and the daemon's high-level already-terminal/commit-uncertainty
+// re-read logic consume them rather than re-deriving the pairing rule.
+// ---------------------------------------------------------------------------
+
+/// `true` iff `(state, outcome)` is exactly one of the four authorized
+/// terminal pairs. Every other combination -- including a legal target state
+/// paired with a legal-but-mismatched outcome, a nonterminal state, or an
+/// outcome outside the closed set -- is `false`.
+pub fn is_valid_terminal_state_outcome_pair(state: &str, outcome: &str) -> bool {
+    matches!(
+        (state, outcome),
+        (
+            STATE_COMPLETED_NO_TRADE,
+            OUTCOME_NO_TRADE_STRATEGY_EVALUATED_NO_SIGNAL
+        ) | (
+            STATE_COMPLETED_WITH_ACTIVITY,
+            OUTCOME_ACTIVITY_FILL_CONFIRMED
+        ) | (
+            STATE_COMPLETED_WITH_ACTIVITY,
+            OUTCOME_ACTIVITY_ORDER_SUBMITTED
+        ) | (
+            STATE_COMPLETED_WITH_ACTIVITY,
+            OUTCOME_ACTIVITY_DECISION_ACCEPTED
+        )
+    )
+}
+
+/// `true` iff `record` is a complete, durably-terminal automatic row: an
+/// authorized state/outcome pair, `finalized_at_utc IS NOT NULL`,
+/// `state_reason_code IS NULL`, and `state_blocker_signature IS NULL`. Only
+/// meaningful for `record.state ∈ {completed_no_trade, completed_with_activity}`
+/// -- generic `completed` (manual/administrative terminal truth) is never a
+/// valid input to this check and always returns `false` for it, by
+/// construction of [`is_valid_terminal_state_outcome_pair`] (generic
+/// `completed` pairs with no outcome in the closed set).
+pub fn is_complete_automatic_terminal_truth(record: &AutonomousDailyOperationRecord) -> bool {
+    let Some(outcome) = record.outcome.as_deref() else {
+        return false;
+    };
+    is_valid_terminal_state_outcome_pair(&record.state, outcome)
+        && record.finalized_at_utc.is_some()
+        && record.state_reason_code.is_none()
+        && record.state_blocker_signature.is_none()
+}
+
 /// Arguments for [`finalize_autonomous_daily_operation`].
 #[derive(Debug, Clone)]
 pub struct FinalizeAutonomousDailyOperationArgs {
@@ -2792,15 +2849,15 @@ pub async fn finalize_autonomous_daily_operation(
         args.expected_state.as_str(),
         STATE_STOPPING | STATE_STOP_RETRYING
     );
-    let target_is_legal = matches!(
-        args.target_state.as_str(),
-        STATE_COMPLETED_NO_TRADE | STATE_COMPLETED_WITH_ACTIVITY
-    );
-    let outcome_is_closed = is_closed_terminal_outcome(&args.outcome);
+    // REPAIR 1: exact pairing, not merely "target is a legal completed-*
+    // state" and "outcome is one of the closed four codes" checked
+    // independently -- that independent-check shape previously let
+    // completed_no_trade pair with activity_fill_confirmed (and every other
+    // cross-paired combination) pass this gate.
+    let pair_is_valid = is_valid_terminal_state_outcome_pair(&args.target_state, &args.outcome);
 
     if !expected_is_legal_source
-        || !target_is_legal
-        || !outcome_is_closed
+        || !pair_is_valid
         || !is_legal_operation_transition(Some(&args.expected_state), &args.target_state)
     {
         return Ok(FinalizeAutonomousDailyOperationOutcome::IllegalTarget);
@@ -2882,9 +2939,19 @@ pub async fn finalize_autonomous_daily_operation(
         Some(row) => {
             let current = row_to_operation_record(row)?;
             if is_terminal_operation_state(&current.state) {
-                if current.state == args.target_state
+                // REPAIR 2: an exact `(state, outcome)` match alone is not
+                // sufficient to call this an idempotent replay -- a row
+                // whose `finalized_at_utc` is still null, or which carries a
+                // residual `state_reason_code`/`state_blocker_signature`
+                // from a prior blocked state, is not complete durable
+                // terminal truth, and must never be reported as
+                // `AlreadyApplied`. `is_complete_automatic_terminal_truth`
+                // also implicitly re-confirms the exact pair (redundant with
+                // the `IllegalTarget` gate above, but cheap and exact).
+                let exact_and_complete = current.state == args.target_state
                     && current.outcome.as_deref() == Some(args.outcome.as_str())
-                {
+                    && is_complete_automatic_terminal_truth(&current);
+                if exact_and_complete {
                     FinalizeAutonomousDailyOperationOutcome::AlreadyApplied(current)
                 } else {
                     FinalizeAutonomousDailyOperationOutcome::ConflictingTerminalTruth(current)

@@ -14769,3 +14769,151 @@ NEXT AFTER E2B ACCEPTANCE: E3 only — coordinator finalization integration and 
 unattended 10-20-session soak: NOT STARTED
 live capital: NOT READY
 ```
+
+## AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E2B-TERMINAL-TRUTH-PRECEDENCE-AND-UNCERTAINTY-CLOSURE
+
+Starting HEAD: `1918cee9881725a486eb40ec13c4492ee66c007a` (`daemon: add durable autonomous outcome
+finalizer` — the E2B implementation commit above, still awaiting independent acceptance).
+
+**Scope:** closes seven source-proven defects found in a fresh, targeted review of the still-
+unaccepted E2B deliverable. Preserves the accepted E2B surface without redesign: the typed closed
+classifier model, the durable evidence snapshot, full run-lineage aggregation, the coverage-derived
+expected-bar set, claim/evaluation validation, the fill/order/decision activity hierarchy, the
+no-trade classifier, the post-stop `evidence_degraded` edges, the terminal CAS transaction shape,
+and evidence-degraded recovery through `stopping`. No coordinator integration, no API, no GUI, no
+migration. Full detail:
+`docs/specs/autonomous_daily_paper_operations_01e2b_outcome_classifier_and_finalization.md`.
+
+**REPAIR 1 (exact terminal pairing):** `mqk_db::is_valid_terminal_state_outcome_pair(state,
+outcome)` is the one shared pure validator for the four authorized pairs
+(`completed_no_trade`+`no_trade_strategy_evaluated_no_signal`,
+`completed_with_activity`+{`activity_fill_confirmed`, `activity_order_submitted`,
+`activity_decision_accepted`}). `finalize_autonomous_daily_operation`'s `IllegalTarget` gate
+previously checked "target is a legal completed-* state" and "outcome is one of the closed four
+codes" independently, which let a cross-paired combination (e.g. `completed_no_trade` +
+`activity_fill_confirmed`) pass; it now uses the shared validator directly (`store_53`, `store_54`).
+
+**REPAIR 2 (complete durable terminal truth):** `mqk_db::is_complete_automatic_terminal_truth`
+folds the pairing check together with `finalized_at_utc IS NOT NULL`,
+`state_reason_code IS NULL`, and `state_blocker_signature IS NULL`. The store's `AlreadyApplied`
+replay and the daemon's high-level already-terminal handling both now require this completeness
+check, not merely a matching `(state, outcome)` — a row with a null `finalized_at_utc` or a
+residual reason/blocker field is `ConflictingTerminalTruth`/`Conflict`, never a false-positive
+replay (`store_55`, `store_56`, `store_57`). Generic `completed` (manual/administrative terminal
+truth) is handled first and remains read-only, never subjected to the automatic-row completeness
+check (`store_58`).
+
+**REPAIR 3 (commit-uncertainty re-read):** `reread_confirm_finalized` now also requires
+`state_version` strictly greater than the original expected version this attempt's own CAS used,
+and both `state_reason_code`/`state_blocker_signature` null. The original expected version is
+threaded explicitly into the re-read call.
+
+**REPAIR 4 (missing-coverage precedence):** removed the empty-lineage special case in
+`classify_autonomous_daily_outcome` — a missing/unusable coverage anchor is now always
+`unknown_incomplete_bar_coverage`, regardless of lineage emptiness, matching the contract's strict
+identity → lineage → coverage → expected-bar → claims → evaluations precedence order
+(`classifier_26`).
+
+**REPAIR 5/6 (real commit-uncertainty and partial-evidence-read-failure proofs):** a narrow,
+all-default-in-production `AutonomousDailyFinalizationEffectSeam` (three fields) plus a
+test-support entry point (`classify_and_finalize_autonomous_daily_operation_with_effect_seam`,
+production always delegates with the default seam) let five scenarios be proven end-to-end against
+a real database, never mocking a successful write: commit-applied-acknowledgment-lost (`store_50`),
+genuine CAS staleness via a real pre-commit version bump (`store_51`), a genuine conflicting
+concurrent writer via a real pre-commit finalize to a different outcome (`store_52`), a real later
+evidence-read failure after identity/lineage/coverage/claims already resolved (`store_48`), and
+that same failure combined with the blocker-write step also being unavailable, proving zero
+fabricated persisted blocker (`store_49`). The pre-repair `store_44`/`store_45` only proved
+store-level idempotent replay, never the daemon's high-level re-read path — both are preserved
+unchanged; the new tests close the actual gap. `store_47` (previously mislabeled a
+database-failure proof; it is really an identity-unavailable evidence gap) is renamed in place to
+`store_47_assignment_identity_unavailable_is_not_a_database_failure_proof`.
+
+**REPAIR 7 (direct-store tests):** `store_53`–`store_58` above are exactly the seven required
+direct-store proofs (two illegal-pair rejections, two incomplete-replay rejections, and the two
+high-level malformed-row/generic-completed proofs); `store_32` already proved valid-replay
+zero-duplicate-event.
+
+**REPAIR 8 (E2A guard reconciliation):**
+`validate_autonomous_daily_paper_operations_01e2a_coverage_anchor_and_run_lineage.ps1` check `[10]`
+(previously a point-in-time boundary proof frozen at E2A's own accepted commit, forbidding any
+`finalized_at_utc =`/`set outcome` substring in E2A's own files — necessarily violated once E2B's
+authorized finalization surface exists) is replaced with a durable check that E2A's own production
+files never call the E2B finalizer and that no E3 coordinator integration exists yet. Check `[11]`
+(previously requiring the pre-acceptance README sentence to persist forever, making it impossible
+to ever honestly record E2A's acceptance) is replaced with the current truthful progression
+(E1/E2A accepted, E2B awaiting acceptance, E3 not started, Phase E/Bundle 3 open). Both guards now
+pass with zero violations.
+
+**REPAIR 9 (E2B guard strengthening):** adds checks `[19]`–`[24]`: the exact pairing validator
+gates `finalize_autonomous_daily_operation`; `AlreadyApplied` uses the completeness check; the
+high-level entry point distinguishes generic `completed` from a malformed automatic row; the
+coverage-missing branch no longer special-cases empty lineage; the real commit-uncertainty effect
+seam and its three scenario tests exist; the real partial-evidence-read-failure seam and its two
+tests exist, and `store_47` is no longer labeled a database-failure proof.
+
+**Test binary:**
+`core-rs/crates/mqk-daemon/tests/scenario_autonomous_daily_outcome_classifier_and_finalization_01.rs`
+— 66 tests (up from 54): `classifier_26` and `store_48`–`store_58` added, `store_47` renamed in
+place. All 66 pass locally (`--include-ignored --test-threads=1`, isolated port-5434 test DB).
+
+**Regressions (each binary run alone, `--include-ignored --test-threads=1`, isolated test Postgres
+on port 5434):** `scenario_autonomous_daily_coverage_anchor_and_run_lineage_01` 41/41,
+`scenario_autonomous_daily_operation_store_01` 26/26,
+`scenario_autonomous_daily_operation_lifecycle_01` 36/36,
+`scenario_autonomous_daily_operation_data_evidence_01` 9/9,
+`scenario_autonomous_daily_phase_d_integration_01` 8/8,
+`scenario_signal_evaluation_journal_auton_no_signal_obs_01` 7/7. Zero new failures anywhere in the
+required matrix.
+
+**Guards:** `validate_autonomous_daily_paper_operations_01a_audit.ps1`,
+`validate_daily_data_readiness_01e_closure.ps1`,
+`validate_autonomous_daily_paper_operations_01d_phase_d_closure.ps1`,
+`validate_autonomous_daily_paper_operations_01d4_evaluation_lineage_and_autonomous_preopen_closure_01.ps1`,
+`validate_autonomous_daily_paper_operations_01e_outcome_contract.ps1`,
+`validate_autonomous_daily_paper_operations_01e2a_coverage_anchor_and_run_lineage.ps1` (now passes
+with zero violations, both previously-expected-failing checks replaced per REPAIR 8),
+`validate_autonomous_daily_paper_operations_01e2b_outcome_classifier_and_finalization.ps1`
+(strengthened to 24 checks per REPAIR 9), and `check_unsafe_patterns.ps1` all pass. **Migration:**
+none. **Format/lint:** `rustfmt --check --edition 2021` clean on every touched Rust file; Clippy
+`-D warnings` clean on `mqk-db --lib`, `mqk-daemon --lib`, and the E2B test binary. `cargo check
+-p mqk-db -p mqk-runtime -p mqk-daemon` clean (only the pre-existing `sqlx-postgres`
+future-incompat note). `git diff --check` / `git diff --cached --check` clean.
+
+**Files changed:** `MiniQuantDesk_Master_Patch_Ledger_v2.md`, `README.md`, `README_TECHNICAL.md`,
+`docs/specs/autonomous_daily_paper_operations_01e2b_outcome_classifier_and_finalization.md`,
+`scripts/guards/validate_autonomous_daily_paper_operations_01e2a_coverage_anchor_and_run_lineage.ps1`,
+`scripts/guards/validate_autonomous_daily_paper_operations_01e2b_outcome_classifier_and_finalization.ps1`,
+`core-rs/crates/mqk-db/src/autonomous_daily_operation.rs`,
+`core-rs/crates/mqk-daemon/src/state/autonomous_daily_outcome.rs`,
+`core-rs/crates/mqk-daemon/tests/scenario_autonomous_daily_outcome_classifier_and_finalization_01.rs`.
+No coordinator invocation. No API route. No GUI changed. No migration.
+
+**Safety confirmation:**
+
+```text
+PROVIDER CALLS: no
+BROKER CALLS: no
+NETWORK CALLS: no
+REAL DAEMON STARTED: no
+PAPER ORDERS: no
+LIVE ORDERS: no
+PAPER DB TOUCHED: no
+PORT 5440 TOUCHED: no
+MIGRATION CHANGED: no
+API IMPLEMENTED: no
+GUI CHANGED: no
+COORDINATOR INTEGRATION: no
+```
+
+```text
+E1: ACCEPTED — COMPLETE
+E2A: ACCEPTED — COMPLETE
+E2B (plus this repair): IMPLEMENTATION COMPLETE — AWAITING CHATGPT AND OPERATOR ACCEPTANCE
+E3: NOT STARTED
+PHASE E: OPEN
+BUNDLE 3 (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-COMBINED): OPEN
+NEXT AFTER E2B ACCEPTANCE: E3 only — coordinator finalization integration and notification
+unattended 10-20-session soak: NOT STARTED
+live capital: NOT READY
+```

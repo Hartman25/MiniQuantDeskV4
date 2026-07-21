@@ -92,10 +92,29 @@ run-lineage authorities (never re-deriving them), the terminal finalization
 CAS (`outcome`/`finalized_at_utc` set atomically with the terminal state
 transition, generic `completed` and `no_trade_reason` both structurally
 unreachable), the two new `stopping`/`stop_retrying -> evidence_degraded`
-legal edges, and the commit-uncertainty-safe database-failure contract. **E2B
-implementation is complete, awaiting independent ChatGPT/operator
-acceptance.** No coordinator invocation, no API route, and no GUI surface
-exist yet — that is E3/E4, not started here.
+legal edges, and the commit-uncertainty-safe database-failure contract —
+followed by the
+AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E2B-TERMINAL-TRUTH-PRECEDENCE-AND-UNCERTAINTY-CLOSURE
+repair on top of that: a single shared pure validator now enforces the exact
+authorized terminal state/outcome pairing (a cross-paired combination, e.g.
+`completed_no_trade` with `activity_fill_confirmed`, was previously accepted
+by the finalization CAS's legality check); `AlreadyApplied` replay now
+requires complete durable terminal truth (`finalized_at_utc` present, no
+residual `state_reason_code`/`state_blocker_signature`), not merely a
+matching state/outcome; the high-level entry point distinguishes a
+manual/administrative generic `completed` row (read-only, never rewritten)
+from a malformed automatic terminal row (`Conflict`, never accepted as
+truth); the coverage-missing precedence no longer special-cases an empty run
+lineage (always `unknown_incomplete_bar_coverage`); and the commit-
+uncertainty re-read now requires `state_version` to have strictly advanced
+past this attempt's own expected version, proven end-to-end against a real
+database through a narrow injected effect seam (no mocked successful write)
+covering commit-acknowledgment-loss, genuine CAS staleness, and a genuine
+conflicting concurrent writer, plus a real partial-evidence-read-failure
+proof distinct from the prior mislabeled identity-unavailable test. **E2B
+(plus this repair) remains implementation complete, awaiting independent
+ChatGPT/operator acceptance.** No coordinator invocation, no API route, and
+no GUI surface exist yet — that is E3/E4, not started here.
 
 The strongest current operational route is:
 
