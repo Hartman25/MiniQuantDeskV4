@@ -112,12 +112,32 @@ gained a durable-CAS-derived `newly_applied: bool` field; and
 notification per newly finalized operation and exactly one warning per newly
 applied evidence blocker, both gated on durable facts, never process-local
 memory. A new scenario test file
-(`scenario_autonomous_daily_outcome_coordinator_integration_01.rs`, 16 tests,
-all real-DB-backed against the real production coordinator/finalizer seams
-with a loopback Discord sink, no real network call) proves clean
-finalization, exactly-once finalization/notification, restart safety,
-evidence-degraded recovery, and the resolution-failure fallback path — all 16
-pass. **E3 is implementation complete, awaiting ChatGPT and operator
+(`scenario_autonomous_daily_outcome_coordinator_integration_01.rs`, 15 tests
+as originally accepted — 14 DB-backed `#[ignore]` integration tests plus one
+non-DB source-level unit test, all real-DB-backed against the real
+production coordinator/finalizer seams with a loopback Discord sink, no real
+network call) proves clean finalization, exactly-once finalization/
+notification, restart safety, evidence-degraded recovery, and the
+resolution-failure fallback path — all 15 pass.
+
+AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E3-MATCHING-RUNTIME-POLICY-FAILURE-GATE-
+REPAIR-01 then closed a second confirmed defect: `handle_outcome_finalization`
+computed the matching-local-runtime fact but never consulted it before
+persisting an `evidence_degraded` blocker in its own resolution-failure
+branches, so a matching local runtime could be incorrectly overridden
+whenever current policy/config resolution also failed that tick. The
+coordinator now returns `AwaitingOutcomeFinalization` before any policy
+resolution or blocker persistence is attempted whenever a matching local
+runtime is active, and `persist_autonomous_daily_finalization_blocker` now
+requires the caller's `AutonomousDailyFinalizationContext` and independently
+refuses to write (`NotEligible`) under the same condition, as
+defense-in-depth. Two new tests
+(`ci_03b_matching_local_runtime_blocks_policy_failure_without_write_or_notification`,
+bringing the E3 coordinator test file to 16 tests, all passing; and
+`store_59_persist_finalization_blocker_refuses_when_matching_runtime_active`
+in the E2B classifier/finalization test file, bringing it to 67 tests, all
+passing) prove zero write and zero notification end-to-end. **E3 (plus this
+repair) is implementation complete, awaiting ChatGPT and operator
 acceptance.** No API route and no GUI surface exist yet; that remains E4.
 
 The strongest current operational route is:
@@ -415,22 +435,26 @@ SAME-INSTANT-CONCURRENCY-AND-SIDE-EFFECT-PROOF-01 repairs):
   downgrades the already-committed terminal row — the DB write and the notification send are two
   independent steps, and the DB write already committed before `log_coordinator_outcome` is ever
   invoked
-- `tests/scenario_autonomous_daily_outcome_coordinator_integration_01.rs` (16 tests, all real-DB-backed
-  against the real production `run_durable_session_controller_tick` seam — the same coordinator-tick-
-  plus-notification seam production's poll loop calls — with an in-process loopback Discord webhook
-  sink, no real network call anywhere): clean no-trade and fill-confirmed finalization; a bound
-  `run_id` with no local runtime never blocks finalization; `stopped_at_utc = NULL` never invokes E2B;
-  exactly-once finalization and notification across repeats and restarts; evidence-degraded warning
-  dedup (newly-applied vs. exact-reason replay); evidence repair recovers to `stopping`, not direct
-  completion; a policy-resolution failure persists `unknown_assignment_identity_unavailable` with the
-  same replay dedup; a generic `completed` row and a database-unavailable/conflict result never
-  notify; a notifier no-op never alters durable terminal truth; the completed-bar production adapter
-  never references the finalizer (redundant with the new guard's own check); finalization remains
-  reachable through the resolution-failure fallback lookup — all 16 pass. Two properties (a literal
-  live-execution-loop matching-runtime block, and a literal complete-DB-outage/partial-evidence-
-  read-failure/live-concurrent-writer proof at the coordinator level) are documented as covered instead
-  by E2B's own accepted pure/store-level tests rather than fabricated at this level — see the E3 spec
-  doc §13/§15 for the full reasoning
+- `tests/scenario_autonomous_daily_outcome_coordinator_integration_01.rs` (15 tests as originally
+  accepted, all real-DB-backed against the real production `run_durable_session_controller_tick` seam
+  — the same coordinator-tick-plus-notification seam production's poll loop calls — with an
+  in-process loopback Discord webhook sink, no real network call anywhere): clean no-trade and
+  fill-confirmed finalization; a bound `run_id` with no local runtime never blocks finalization;
+  `stopped_at_utc = NULL` never invokes E2B; exactly-once finalization and notification across
+  repeats and restarts; evidence-degraded warning dedup (newly-applied vs. exact-reason replay);
+  evidence repair recovers to `stopping`, not direct completion; a policy-resolution failure persists
+  `unknown_assignment_identity_unavailable` with the same replay dedup; a generic `completed` row and
+  a database-unavailable/conflict result never notify; a notifier no-op never alters durable terminal
+  truth; the completed-bar production adapter never references the finalizer (redundant with the new
+  guard's own check); finalization remains reachable through the resolution-failure fallback lookup —
+  all 15 pass. A literal complete-DB-outage/partial-evidence-read-failure/live-concurrent-writer proof
+  at the coordinator level remains covered instead by E2B's own accepted pure/store-level tests rather
+  than fabricated at this level — see the E3 spec doc §13/§15 for the full reasoning.
+  AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E3-MATCHING-RUNTIME-POLICY-FAILURE-GATE-REPAIR-01 adds a 16th
+  test, `ci_03b_matching_local_runtime_blocks_policy_failure_without_write_or_notification`, proving
+  at the coordinator integration level (via the existing `AppState::inject_running_loop_for_test`
+  seam, not a full live execution loop) that a matching local runtime blocks finalization even when
+  current policy/config resolution also fails the same tick — all 16 pass
 - **no API route and no GUI surface were added** — those remain E4's job
 
 After D4 and its evaluation-lineage repair (Phase D, accepted complete in full), the

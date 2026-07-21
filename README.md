@@ -132,14 +132,33 @@ tick was fixed along the way: the coordinator's resolution-failure fallback
 path could silently overwrite E2B's own durable evidence-degraded reason
 with an unrelated one on every subsequent tick; it now routes back into the
 same finalization seam instead. A new scenario test file
-(`scenario_autonomous_daily_outcome_coordinator_integration_01.rs`, 16
-tests, all real-DB-backed against the real production coordinator/finalizer
-seams with a loopback Discord sink, no real network call) proves clean
-no-trade and fill-confirmed finalization, notification dedup, restart
-safety, evidence-degraded recovery, and the resolution-failure fallback
-path — all 16 pass. **E3 is implementation complete,
-awaiting ChatGPT and operator acceptance.** No API route and no GUI surface
-exist yet — that is E4, not started here.
+(`scenario_autonomous_daily_outcome_coordinator_integration_01.rs`, 15
+tests as originally accepted — 14 DB-backed `#[ignore]` integration tests
+plus one non-DB source-level unit test — all real-DB-backed against the real
+production coordinator/finalizer seams with a loopback Discord sink, no
+real network call) proves clean no-trade and fill-confirmed finalization,
+notification dedup, restart safety, evidence-degraded recovery, and the
+resolution-failure fallback path — all 15 pass.
+
+A follow-on repair, AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E3-MATCHING-RUNTIME-
+POLICY-FAILURE-GATE-REPAIR-01, closed a second confirmed defect: E3's own
+resolution-failure branches in `handle_outcome_finalization` computed the
+matching-local-runtime fact but never consulted it before persisting an
+`evidence_degraded` blocker, so a matching local runtime could still be
+incorrectly overridden whenever current policy/config resolution also failed
+the same tick. The coordinator now returns `AwaitingOutcomeFinalization`
+before any policy resolution or blocker persistence is attempted whenever a
+matching local runtime is active, and the policy-failure blocker-persistence
+wrapper (`persist_autonomous_daily_finalization_blocker`) independently
+refuses to write (returns `NotEligible`) under the same condition, as
+defense-in-depth. Two new tests
+(`ci_03b_matching_local_runtime_blocks_policy_failure_without_write_or_notification`
+in the E3 coordinator test file, bringing it to 16 tests, all passing; and
+`store_59_persist_finalization_blocker_refuses_when_matching_runtime_active`
+in the E2B classifier/finalization test file) prove zero write and zero
+notification for this case end-to-end. **E3 (plus this repair) is
+implementation complete, awaiting ChatGPT and operator acceptance.** No API
+route and no GUI surface exist yet — that is E4, not started here.
 
 The strongest current operational route is:
 

@@ -153,7 +153,7 @@ existing use inside `ensure_coverage_authority`); the two calls that can fail ar
 **Resolution-failure seam (E3.4).** When `config` or `runtime_context` resolution itself fails —
 before evidence gathering can even begin, since there is no real `MultiSymbolRuntimeConfig`/
 `EffectiveRuntimeBinding` to construct `AutonomousDailyFinalizationPolicyInputs` from —
-`handle_outcome_finalization` persists `unknown_assignment_identity_unavailable` via one new,
+`handle_outcome_finalization` persists `unknown_assignment_identity_unavailable` via one
 narrowly-scoped, `pub` wrapper added to E2B's own module:
 
 ```rust
@@ -163,7 +163,11 @@ pub async fn persist_autonomous_daily_finalization_blocker(
     operation: &AutonomousDailyOperationRecord,
     now_utc: DateTime<Utc>,
     reason: AutonomousDailyUnknownReason,
+    context: AutonomousDailyFinalizationContext,
 ) -> anyhow::Result<AutonomousDailyFinalizationOutcome> {
+    if !finalization_blocker_persistence_eligible(operation, &context) {
+        return Ok(AutonomousDailyFinalizationOutcome::NotEligible);
+    }
     apply_evidence_degraded_blocker(pool, operation, reason, now_utc,
         AutonomousDailyFinalizationEffectSeam::default()).await
 }
@@ -179,6 +183,58 @@ parallel classifier. No raw config, SQL, path, environment, or credential text e
 seam's durable fields — only the closed `AutonomousDailyUnknownReason` code. A DB failure while
 loading or persisting still returns the existing `DatabaseUnavailable` result via the same
 `reread_confirm_evidence_degraded` path every other ambiguous write in E2B already uses.
+
+### 4a. AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E3-MATCHING-RUNTIME-POLICY-FAILURE-GATE-REPAIR-01
+
+**Confirmed defect (closed by this repair).** As originally implemented, `handle_outcome_finalization`
+computed `context.matching_local_runtime_active` but never consulted it before calling
+`build_multi_symbol_runtime_config_from_env`/`resolve_autonomous_runtime_context`/
+`persist_autonomous_daily_finalization_blocker` in its two resolution-failure branches, and the
+original `persist_autonomous_daily_finalization_blocker` performed no eligibility check of its own —
+it delegated straight to `apply_evidence_degraded_blocker`. A `stopping`/`stop_retrying` operation
+with `stopped_at_utc` present whose matching local runtime was still active, observed on a tick where
+current policy/config/runtime-context resolution also failed, could therefore be incorrectly written
+to `evidence_degraded` and warned about, even though E1 contract §3.2 condition 4 requires "no
+matching locally-owned runtime is active" as a precondition for finalization of any kind — including
+the evidence-blocker write, not merely the terminal CAS.
+
+**Repair, two layers of defense:**
+
+1. **Coordinator early gate.** `handle_outcome_finalization` now returns
+   `AutonomousDailyCoordinatorTickOutcome::AwaitingOutcomeFinalization` immediately after computing
+   `context`, strictly before `build_multi_symbol_runtime_config_from_env`,
+   `resolve_autonomous_runtime_context`, `persist_autonomous_daily_finalization_blocker`, or
+   `classify_and_finalize_autonomous_daily_operation` are ever called, whenever
+   `context.matching_local_runtime_active` is `true`. Zero DB writes, zero notifications — identical
+   truth to what E2B's own `check_finalization_eligibility`/`evidence_degraded` gate already produces
+   on the successful-policy-resolution path, just reached without attempting policy resolution first.
+2. **E2B wrapper hardening.** `persist_autonomous_daily_finalization_blocker` now requires the caller
+   to supply `AutonomousDailyFinalizationContext` and gates on a new private
+   `finalization_blocker_persistence_eligible` check — refusing (returning `NotEligible`, zero DB
+   calls) whenever `context.matching_local_runtime_active` is `true`, `operation.stopped_at_utc` is
+   absent, or `operation.state` is not `stopping`, `stop_retrying`, or an already `evidence_degraded`
+   post-stop row. This is deliberate defense-in-depth: the seam must never become a second way to
+   bypass finalization eligibility even if a future caller forgets the coordinator-level check. Both
+   coordinator call sites now thread `context` through.
+
+The pre-existing, still-valid policy-failure behavior (`stopped_at_utc` present, no matching local
+runtime, policy resolution unavailable → `unknown_assignment_identity_unavailable` →
+`evidence_degraded`, with exact-replay `newly_applied=false` and zero duplicate notification) is
+unchanged and re-proven by `ci_16_17`/`store_47`.
+
+**New proof:**
+
+- `ci_03b_matching_local_runtime_blocks_policy_failure_without_write_or_notification`
+  (`scenario_autonomous_daily_outcome_coordinator_integration_01.rs`) drives the real coordinator/
+  session-controller integration path end-to-end and proves zero state/version/reason/signature/
+  outcome change, zero lifecycle-event delta, and zero notification.
+- `store_59_persist_finalization_blocker_refuses_when_matching_runtime_active`
+  (`scenario_autonomous_daily_outcome_classifier_and_finalization_01.rs`) proves the hardened wrapper
+  directly returns `NotEligible` with zero DB writes when supplied a matching-runtime-active context,
+  and that the legitimate case is unaffected.
+- `scripts/guards/validate_autonomous_daily_paper_operations_01e3_coordinator_finalization_and_notification.ps1`
+  checks `[17]`–`[20]` statically enforce both defense layers and the presence of both new tests by
+  exact name; both checks fail against the pre-repair commit and pass after this repair.
 
 ## 5. Coordinator outcome model (E3.5)
 
@@ -334,9 +390,16 @@ end-to-end with a true no-op notifier (`DiscordNotifier::noop()`, never a webhoo
 ## 13. Test matrix
 
 File: `core-rs/crates/mqk-daemon/tests/scenario_autonomous_daily_outcome_coordinator_integration_01.rs`
-(16 tests: 14 `#[ignore]` DB-backed integration tests, one dedicated typed-outcome-projection test,
-one non-DB source-level guard-redundant unit test — `--include-ignored --test-threads=1`, real
-port-5434 test DB, in-process loopback Discord webhook sink, no real network call). All 16 pass.
+(15 tests as originally accepted: 14 `#[ignore]` DB-backed `#[tokio::test]` integration tests
+— including the dedicated typed-outcome-projection test, itself DB-backed and `#[ignore]` — plus
+one non-DB, non-`#[ignore]` source-level guard-redundant `#[test]` unit test, `ci_24`. This
+corrects the original count of "16: 14 DB-backed + one typed-outcome-projection + one non-DB unit
+test" — the typed-outcome-projection test was miscounted as a separate category when it is in fact
+one of the 14 DB-backed `#[ignore]` tests. AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E3-MATCHING-RUNTIME-
+POLICY-FAILURE-GATE-REPAIR-01 adds one further DB-backed `#[ignore]` test, `ci_03b`, bringing the
+file to 16 tests total: 15 DB-backed `#[ignore]` `#[tokio::test]` plus the one non-DB `#[test]`.
+Run with `--include-ignored --test-threads=1`, real port-5434 test DB, in-process loopback Discord
+webhook sink, no real network call. All 16 pass.
 
 ```text
 ci_01  clean no-trade operation finalizes through a real coordinator tick, one notification
@@ -345,6 +408,14 @@ ci_03  a bound run_id with no local runtime never blocks finalization (§2's fal
        end-to-end; the true/blocking side is proven at the pure-function level by E2B's own
        accepted eligibility_* tests, regression-run by this bundle -- see the file's own header
        comment for the documented reason a live-execution-loop integration proof was not built)
+ci_03b AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E3-MATCHING-RUNTIME-POLICY-FAILURE-GATE-REPAIR-01: a
+       matching local runtime blocks finalization even when current policy/config/runtime-context
+       resolution itself also fails this tick -- the confirmed defect this repair closes. Injects
+       a locally-owned execution loop bound to the operation's own durable run_id
+       (`AppState::inject_running_loop_for_test`), clears strategy env so policy resolution
+       genuinely fails, and proves zero state/version/reason/signature/outcome change, zero
+       lifecycle-event delta, zero notification, through both a direct typed coordinator-tick call
+       and the full notifying session-controller integration path
 ci_04  stopped_at_utc = NULL preserves stop/retry handling; E2B is never invoked
 ci_05_06  stop-completion tick defers; the next tick finalizes exactly once (one new lifecycle
           event, one notification total)
@@ -388,7 +459,11 @@ Re-run clean against the same isolated test DB, one binary at a time, `--include
 --test-threads=1`:
 
 ```text
-scenario_autonomous_daily_outcome_classifier_and_finalization_01   66/66
+scenario_autonomous_daily_outcome_classifier_and_finalization_01   67/67 (66/66 as originally
+                                                                     accepted; AUTONOMOUS-DAILY-
+                                                                     PAPER-OPERATIONS-01E3-MATCHING-
+                                                                     RUNTIME-POLICY-FAILURE-GATE-
+                                                                     REPAIR-01 adds store_59)
 scenario_autonomous_daily_session_coordinator_01                   48/48
 scenario_autonomous_daily_phase_d_integration_01                    8/8
 scenario_autonomous_daily_coverage_anchor_and_run_lineage_01        41/41
@@ -399,6 +474,12 @@ scenario_signal_evaluation_journal_auton_no_signal_obs_01            7/7 (paper-
                                                                       env var -- unaffected by E3)
 ```
 
+AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E3-MATCHING-RUNTIME-POLICY-FAILURE-GATE-REPAIR-01 additionally
+re-ran `scenario_autonomous_daily_outcome_coordinator_integration_01` clean (16/16, up from 15/15 as
+originally accepted — see §13) and `scenario_autonomous_daily_session_coordinator_01`/
+`scenario_autonomous_daily_phase_d_integration_01` clean at their existing 48/48 and 8/8 totals,
+confirming the repair introduces no regression outside the two files it touches.
+
 The E2B test binary required one mechanical, non-semantic change: three existing `EvidenceDegraded {
 reason_code, record }` match patterns updated to `{ reason_code, record, newly_applied: _ }` for the
 new field (§6) — no assertion's meaning changed. `scenario_autonomous_completed_bar_driver_01`'s
@@ -408,9 +489,11 @@ re-run — E3 touches no production seam in that file's driver path.
 ## 15. Known limitations
 
 - The matching-local-runtime **blocking** case (§2, §13) is proven at the pure-function level by
-  E2B's own accepted tests, not by a dedicated live-execution-loop integration test in this file —
-  no lighter `pub` test seam exists to inject a bound `execution_loop` handle from an external test
-  crate without widening production surface beyond this patch's scope.
+  E2B's own accepted tests, and — as of AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E3-MATCHING-RUNTIME-
+  POLICY-FAILURE-GATE-REPAIR-01's `ci_03b` (§4a) — at the coordinator integration level too, using
+  the existing `AppState::inject_running_loop_for_test` seam (already relied on by every other
+  AppState-owned-runtime test in this crate) rather than a full mock-Alpaca-backed live execution
+  loop. No new production test surface was added to reach this proof.
 - A literal complete-DB-outage and partial-evidence-read-failure proof at the coordinator level, and
   a literal live-concurrent-writer `Conflict` proof, were not built (§13) — both are already
   exhaustively proven at the E2B store level and re-run clean by this patch's own regression pass.

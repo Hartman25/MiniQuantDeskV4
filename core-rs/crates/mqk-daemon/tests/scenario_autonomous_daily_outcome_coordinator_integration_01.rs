@@ -713,6 +713,184 @@ async fn ci_03_matching_local_runtime_active_is_always_false_with_no_local_runti
     );
 }
 
+/// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E3-MATCHING-RUNTIME-POLICY-FAILURE-
+/// GATE-REPAIR-01: the confirmed defect this repair closes. Before this
+/// repair, `handle_outcome_finalization`'s config/runtime-context-resolution
+/// failure branches called `persist_autonomous_daily_finalization_blocker`
+/// unconditionally -- never honoring `context.matching_local_runtime_active`
+/// -- so a durably stopped operation whose matching local runtime was still
+/// active could be incorrectly written to `evidence_degraded` and warned
+/// about merely because current policy/config resolution also failed that
+/// same tick. This test builds a `stopping` operation with a durably bound
+/// `run_id`, injects a locally-owned execution loop bound to that exact
+/// `run_id` (`AppState::inject_running_loop_for_test`, the existing seam
+/// every other AppState-owned-runtime test in this crate already uses -- no
+/// new production test surface added), clears strategy env so current policy
+/// resolution genuinely fails this tick (mirrors `ci_16_17`'s own fixture),
+/// and drives the real coordinator/session-controller integration path.
+/// Proves: zero state/version/reason/signature/outcome change, zero
+/// lifecycle-event delta, zero notification, and that the tick's own typed
+/// result is the `NotEligible` projection (`AwaitingOutcomeFinalization`).
+#[tokio::test]
+#[ignore]
+async fn ci_03b_matching_local_runtime_blocks_policy_failure_without_write_or_notification() {
+    let Some(pool) = maybe_db("ci_03b").await else {
+        return;
+    };
+    let adapter_id = unique_adapter_id("ci03b");
+    ci_set_env(&adapter_id);
+    let plan = ci_plan();
+    let (webhook_url, alerts) = ci_webhook_sink().await;
+
+    let (assignment_identity, runtime_binding_identity) = ci_matching_identities();
+    let args = ci_create_args(
+        &plan,
+        &adapter_id,
+        assignment_identity,
+        runtime_binding_identity,
+        mqk_db::STATE_AWAITING_OPEN,
+        ci_now(),
+    );
+    let operation = match mqk_db::create_or_recover_autonomous_daily_operation(&pool, &args)
+        .await
+        .expect("create ok")
+    {
+        mqk_db::CreateOrRecoverAutonomousDailyOperationOutcome::Created(record) => record,
+        other => panic!("expected Created, got {other:?}"),
+    };
+
+    let run_id = Uuid::new_v4();
+    mqk_db::insert_run(
+        &pool,
+        &mqk_db::NewRun {
+            run_id,
+            engine_id: adapter_id.clone(),
+            mode: "PAPER".to_string(),
+            started_at_utc: ci_now(),
+            git_hash: "test".to_string(),
+            config_hash: "test".to_string(),
+            config_json: serde_json::json!({}),
+            host_fingerprint: "test".to_string(),
+        },
+    )
+    .await
+    .expect("insert run ok");
+
+    let started = ci_transition(&pool, &operation, mqk_db::STATE_START_RETRYING, ci_now()).await;
+    let to_running = mqk_db::TransitionAutonomousDailyOperationToRunningArgs {
+        operation_id: started.operation_id,
+        expected_state: started.state.clone(),
+        expected_state_version: started.state_version,
+        run_id,
+        started_at_utc: ci_now(),
+        occurred_at_utc: ci_now(),
+        bounded_detail: "ci_03b fixture: force running".to_string(),
+    };
+    let running = match mqk_db::transition_autonomous_daily_operation_to_running(&pool, &to_running)
+        .await
+        .expect("ok")
+    {
+        mqk_db::AutonomousDailyTransitionOutcome::Applied(record) => record,
+        other => panic!("expected Applied, got {other:?}"),
+    };
+
+    let stopping = ci_transition(&pool, &running, mqk_db::STATE_STOPPING, ci_now()).await;
+    mqk_db::record_autonomous_runtime_stopped(&pool, stopping.operation_id, ci_now())
+        .await
+        .expect("stop ok");
+    let operation = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, stopping.operation_id)
+        .await
+        .expect("fetch ok")
+        .expect("row exists");
+    assert_eq!(operation.run_id, Some(run_id), "fixture bound a run_id");
+    assert!(
+        operation.stopped_at_utc.is_some(),
+        "fixture is durably stopped"
+    );
+
+    // Force current policy/config resolution to genuinely fail this tick --
+    // adapter id stays intact so the coordinator still finds our operation
+    // via the relevant-existing-operation fallback lookup, exactly like
+    // `ci_16_17`'s own fixture.
+    ci_clear_strategy_env();
+
+    let st = ci_daemon_state(pool.clone(), &webhook_url).await;
+    // The matching-runtime fact under test: a locally-owned execution loop
+    // bound to the exact same run_id this operation durably bound.
+    st.inject_running_loop_for_test(run_id).await;
+    assert_eq!(
+        st.locally_owned_run_id().await,
+        Some(run_id),
+        "fixture: AppState now owns the matching run_id"
+    );
+
+    let events_before = ci_events_count(&pool, operation.operation_id).await;
+
+    let typed_outcome = ci_tick_typed(&st, ci_now()).await;
+    assert_eq!(
+        typed_outcome,
+        AutonomousDailyCoordinatorTickOutcome::AwaitingOutcomeFinalization,
+        "a matching local runtime must project as the NotEligible/AwaitingOutcomeFinalization \
+         outcome even when policy resolution also fails this tick"
+    );
+
+    let record = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation.operation_id)
+        .await
+        .expect("fetch ok")
+        .expect("row exists");
+    assert_eq!(
+        record.state,
+        mqk_db::STATE_STOPPING,
+        "a matching local runtime must never be reclassified: {record:?}"
+    );
+    assert_eq!(
+        record.state_version, operation.state_version,
+        "zero state-version change while a matching local runtime is active"
+    );
+    assert_eq!(record.state_reason_code, operation.state_reason_code);
+    assert_eq!(
+        record.state_blocker_signature,
+        operation.state_blocker_signature
+    );
+    assert!(record.outcome.is_none(), "outcome remains NULL");
+    assert!(
+        record.finalized_at_utc.is_none(),
+        "finalized_at_utc remains NULL"
+    );
+
+    let events_after_typed = ci_events_count(&pool, operation.operation_id).await;
+    assert_eq!(
+        events_after_typed, events_before,
+        "zero lifecycle-event delta from the direct coordinator tick"
+    );
+
+    // Drive the real, notifying session-controller integration path too --
+    // proves zero notification end-to-end, not merely zero DB write.
+    ci_tick(&st, ci_now() + chrono::Duration::seconds(1)).await;
+
+    let record_2 = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation.operation_id)
+        .await
+        .expect("fetch ok")
+        .expect("row exists");
+    assert_eq!(record_2.state, mqk_db::STATE_STOPPING);
+    assert_eq!(record_2.state_version, operation.state_version);
+    assert!(record_2.outcome.is_none());
+    assert!(record_2.finalized_at_utc.is_none());
+
+    let events_after_notifying_tick = ci_events_count(&pool, operation.operation_id).await;
+    assert_eq!(
+        events_after_notifying_tick, events_before,
+        "zero lifecycle-event delta through the full notifying integration path"
+    );
+
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    assert!(
+        alerts.lock().await.is_empty(),
+        "zero outcome/evidence-degraded/warning notification while a matching local runtime \
+         is active, even though policy resolution also fails this tick"
+    );
+}
+
 /// Req 4: `stopped_at_utc = NULL` preserves existing stop/retry handling and
 /// never invokes E2B (the tick that first sets it returns `RuntimeStopped`,
 /// never a finalization outcome).

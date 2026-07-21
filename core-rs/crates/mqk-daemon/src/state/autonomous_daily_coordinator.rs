@@ -3393,6 +3393,19 @@ async fn handle_outcome_finalization(
         matching_local_runtime_active: matching_local_runtime_active(state, &operation).await,
     };
 
+    // AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E3-MATCHING-RUNTIME-POLICY-FAILURE-
+    // GATE-REPAIR-01: a matching local runtime is still active -- finalization
+    // is not eligible regardless of whether current policy/config/runtime-
+    // context resolution succeeds or fails this tick (E1 contract §3.2
+    // condition 4). Return before config/runtime-context resolution and
+    // before the policy-failure blocker seam are ever reached: zero DB
+    // writes, zero notifications -- exactly the `NotEligible` truth E2B's own
+    // eligibility check would have produced had policy resolution succeeded
+    // this tick.
+    if context.matching_local_runtime_active {
+        return Ok(AutonomousDailyCoordinatorTickOutcome::AwaitingOutcomeFinalization);
+    }
+
     let config = match crate::state::build_multi_symbol_runtime_config_from_env() {
         Ok(config) => config,
         Err(_) => {
@@ -3401,6 +3414,7 @@ async fn handle_outcome_finalization(
                 &operation,
                 now_utc,
                 super::autonomous_daily_outcome::AutonomousDailyUnknownReason::AssignmentIdentityUnavailable,
+                context,
             )
             .await?;
             return Ok(project_finalization_outcome(outcome));
@@ -3415,6 +3429,7 @@ async fn handle_outcome_finalization(
                 &operation,
                 now_utc,
                 super::autonomous_daily_outcome::AutonomousDailyUnknownReason::AssignmentIdentityUnavailable,
+                context,
             )
             .await?;
             return Ok(project_finalization_outcome(outcome));

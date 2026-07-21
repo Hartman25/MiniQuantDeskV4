@@ -15022,13 +15022,15 @@ assertion is proven against durable DB truth (event-count deltas, `state`/`state
 `state_version` equality across ticks).
 
 **Tests:** new `core-rs/crates/mqk-daemon/tests/scenario_autonomous_daily_outcome_coordinator_integration_01.rs`
-(16 tests: 14 `#[ignore]` real-DB-backed integration tests against the real production
-coordinator/finalizer seams with an in-process loopback Discord webhook sink — no real network call
-anywhere — one dedicated typed-outcome-projection test, one non-DB source-level guard-redundant unit
-test) — all 16 pass. See the new spec doc §13 for the exact scenario list and the two properties
-documented as covered by E2B's own accepted tests rather than fabricated at this level (a literal
-live-execution-loop matching-runtime block, and a literal complete-DB-outage/partial-evidence-
-read-failure/live-concurrent-writer proof at the coordinator level).
+(15 tests as originally accepted, corrected from the doc's original miscount of "16: 14 DB-backed +
+one typed-outcome-projection + one non-DB unit" — the typed-outcome-projection test is itself one of
+the 14 DB-backed `#[ignore]` integration tests, not a separate category; the true breakdown is 14
+`#[ignore]` real-DB-backed integration tests against the real production coordinator/finalizer seams
+with an in-process loopback Discord webhook sink — no real network call anywhere — plus one non-DB
+source-level guard-redundant unit test) — all 15 pass. See the new spec doc §13 for the exact scenario
+list and the two properties documented as covered by E2B's own accepted tests rather than fabricated
+at this level (a literal live-execution-loop matching-runtime block, and a literal complete-DB-outage/
+partial-evidence-read-failure/live-concurrent-writer proof at the coordinator level).
 
 **Regressions (each binary run alone, `--include-ignored --test-threads=1`, isolated test Postgres on
 port 5434):** `scenario_autonomous_daily_outcome_classifier_and_finalization_01` 66/66 (three
@@ -15094,6 +15096,130 @@ E2B: ACCEPTED — COMPLETE
 E3: IMPLEMENTATION COMPLETE — AWAITING CHATGPT AND OPERATOR ACCEPTANCE
 E4: NOT STARTED
 E5: NOT STARTED
+PHASE E: OPEN
+BUNDLE 3 (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-COMBINED): OPEN
+NEXT AFTER E3 ACCEPTANCE: E4 only — read-only daily-operation API projection
+unattended 10-20-session soak: NOT STARTED
+live capital: NOT READY
+```
+
+## AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E3-MATCHING-RUNTIME-POLICY-FAILURE-GATE-REPAIR-01
+
+**Bundle:** `AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-COMBINED` | **Phase:** E3 repair — matching-runtime
+eligibility on the policy-failure path.
+
+**Starting HEAD:** `1891bd323a05321aabb1350b4a50bd7876d40b5b` ("daemon: integrate autonomous daily
+finalization" — the E3 commit above). **Disposition entering this repair:** E1/E2A/E2B accepted
+complete; E3 partial, this eligibility repair required before E3 can be re-submitted for acceptance.
+
+**Confirmed defect.** `handle_outcome_finalization` computed
+`AutonomousDailyFinalizationContext { matching_local_runtime_active }` but its config-resolution and
+runtime-context-resolution failure branches called `persist_autonomous_daily_finalization_blocker`
+without ever consulting that fact — the wrapper delegated straight to
+`apply_evidence_degraded_blocker` with no eligibility check of its own. A `stopping`/`stop_retrying`
+operation with `stopped_at_utc` present, whose matching local runtime was still active, observed on a
+tick where current policy/config/runtime-context resolution also failed, could therefore be
+incorrectly written to `evidence_degraded` and warned about — violating E1 contract §3.2 condition 4
+("no matching locally-owned runtime is active" is a precondition for finalization of any kind,
+including the evidence-blocker write, not merely the terminal CAS).
+
+**Repair, two layers of defense
+(`core-rs/crates/mqk-daemon/src/state/autonomous_daily_coordinator.rs`,
+`core-rs/crates/mqk-daemon/src/state/autonomous_daily_outcome.rs`):**
+
+1. **Coordinator early gate.** `handle_outcome_finalization` now returns
+   `AutonomousDailyCoordinatorTickOutcome::AwaitingOutcomeFinalization` immediately after computing
+   `context`, strictly before `build_multi_symbol_runtime_config_from_env`,
+   `resolve_autonomous_runtime_context`, `persist_autonomous_daily_finalization_blocker`, or
+   `classify_and_finalize_autonomous_daily_operation` are ever reached, whenever
+   `context.matching_local_runtime_active` is `true`. Zero DB writes, zero notifications.
+2. **E2B wrapper hardening.** `persist_autonomous_daily_finalization_blocker` now requires the
+   caller's `AutonomousDailyFinalizationContext` and gates on a new private
+   `finalization_blocker_persistence_eligible(operation, &context)` check before ever calling
+   `apply_evidence_degraded_blocker` — refusing (`AutonomousDailyFinalizationOutcome::NotEligible`,
+   zero DB calls) whenever `context.matching_local_runtime_active` is `true`,
+   `operation.stopped_at_utc` is absent, or `operation.state` is not `stopping`, `stop_retrying`, or
+   an already `evidence_degraded` post-stop row. This is deliberate defense-in-depth: the seam must
+   never become a second way to bypass finalization eligibility even if a future caller forgets the
+   coordinator-level gate. Both coordinator call sites now thread `context` through.
+
+The pre-existing, still-valid policy-failure behavior (`stopped_at_utc` present, no matching local
+runtime, policy resolution unavailable → `unknown_assignment_identity_unavailable` →
+`evidence_degraded`, exact-replay `newly_applied=false`, zero duplicate notification) is unchanged —
+re-proven clean by `ci_16_17`/`store_47`.
+
+**Tests:**
+`ci_03b_matching_local_runtime_blocks_policy_failure_without_write_or_notification`
+(`scenario_autonomous_daily_outcome_coordinator_integration_01.rs`, bringing that file from the 15
+tests originally accepted to 16, all passing) builds a `stopping` operation with a durably bound
+`run_id`, injects a locally-owned execution loop bound to that exact `run_id`
+(`AppState::inject_running_loop_for_test` — the existing seam already relied on by every other
+AppState-owned-runtime test in this crate; no new production test surface added), clears strategy env
+so current policy resolution genuinely fails, and drives the real coordinator/session-controller
+integration path — proving zero state/version/reason/signature/outcome change, zero lifecycle-event
+delta, zero notification, and that the tick's own typed result is the `NotEligible` projection
+(`AwaitingOutcomeFinalization`).
+`store_59_persist_finalization_blocker_refuses_when_matching_runtime_active`
+(`scenario_autonomous_daily_outcome_classifier_and_finalization_01.rs`, bringing that file from 66 to
+67 tests, all passing) proves the hardened wrapper directly returns `NotEligible` with zero DB writes
+when supplied a matching-runtime-active context, and that the legitimate policy-failure case is
+unaffected (same wrapper, `matching_local_runtime_active: false`, still applies and returns
+`EvidenceDegraded { newly_applied: true, .. }`).
+
+**Regressions (each binary run alone, `--include-ignored --test-threads=1`, isolated test Postgres on
+port 5434):** `scenario_autonomous_daily_outcome_coordinator_integration_01` 16/16 (up from 15/15),
+`scenario_autonomous_daily_outcome_classifier_and_finalization_01` 67/67 (up from 66/66),
+`scenario_autonomous_daily_session_coordinator_01` 48/48, `scenario_autonomous_daily_phase_d_integration_01`
+8/8. Zero new failures anywhere in the required matrix.
+
+**Guard:** `scripts/guards/validate_autonomous_daily_paper_operations_01e3_coordinator_finalization_and_notification.ps1`
+gains checks `[17]`–`[20]`: `[17]` proves the coordinator's early matching-runtime gate strictly
+precedes config resolution, runtime-context resolution, blocker persistence, and
+classify-and-finalize inside `handle_outcome_finalization`; `[18]` proves the wrapper's shared
+eligibility gate strictly precedes its real write, and that every coordinator call site threads
+`context` through (matched via a formatting-independent regex scan of each call site's argument list,
+so it survives `rustfmt` reflowing); `[19]`/`[20]` require the two new tests by exact function name.
+Verified to fail (8 violations) against commit `1891bd32` (the pre-repair source) and pass clean
+against the repaired tree. Existing checks `[1]`–`[16]` unchanged and still pass.
+
+**Format/lint:** `rustfmt --check` clean on every touched Rust file; narrow Clippy `-D warnings` clean
+on `mqk-daemon --lib`, the E3 integration test binary, and the E2B classifier/finalizer test binary.
+`cargo check -p mqk-db -p mqk-runtime -p mqk-daemon` clean (only the pre-existing `sqlx-postgres`
+future-incompat note). `git diff --check` / `git diff --cached --check` clean.
+
+**Files changed:** `MiniQuantDesk_Master_Patch_Ledger_v2.md`, `README.md`, `README_TECHNICAL.md`,
+`docs/specs/autonomous_daily_paper_operations_01e3_coordinator_finalization_and_notification.md`,
+`scripts/guards/validate_autonomous_daily_paper_operations_01e3_coordinator_finalization_and_notification.ps1`,
+`core-rs/crates/mqk-daemon/src/state/autonomous_daily_coordinator.rs`,
+`core-rs/crates/mqk-daemon/src/state/autonomous_daily_outcome.rs`,
+`core-rs/crates/mqk-daemon/tests/scenario_autonomous_daily_outcome_coordinator_integration_01.rs`,
+`core-rs/crates/mqk-daemon/tests/scenario_autonomous_daily_outcome_classifier_and_finalization_01.rs`.
+No migration. No API route. No GUI changed. `session_controller.rs` unchanged — the notification gate
+was already correctly wired to the coordinator's typed outcome; this repair closes the write/read
+eligibility gap upstream of it, not the notification dispatch itself.
+
+**Safety confirmation:**
+
+```text
+PROVIDER CALLS: no
+BROKER CALLS: no
+NETWORK CALLS: no
+REAL DAEMON STARTED: no
+PAPER ORDERS: no
+LIVE ORDERS: no
+PAPER DB TOUCHED: no
+PORT 5440 TOUCHED: no
+MIGRATION CHANGED: no
+API IMPLEMENTED: no
+GUI CHANGED: no
+```
+
+```text
+E1: ACCEPTED — COMPLETE
+E2A: ACCEPTED — COMPLETE
+E2B: ACCEPTED — COMPLETE
+E3 repair: IMPLEMENTATION COMPLETE — AWAITING CHATGPT AND OPERATOR ACCEPTANCE
+E4: NOT STARTED
 PHASE E: OPEN
 BUNDLE 3 (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-COMBINED): OPEN
 NEXT AFTER E3 ACCEPTANCE: E4 only — read-only daily-operation API projection

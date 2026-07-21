@@ -56,6 +56,31 @@
 #   [16] The new E3 spec doc and scenario test file both exist and are
 #        nonempty.
 #
+# AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E3-MATCHING-RUNTIME-POLICY-FAILURE-
+# GATE-REPAIR-01 (added checks -- closes the confirmed defect where
+# handle_outcome_finalization's config/runtime-context-resolution failure
+# branches could persist an evidence_degraded blocker and notify while a
+# matching local runtime was still active):
+#   [17] `handle_outcome_finalization` returns `AwaitingOutcomeFinalization`
+#        from an early `if context.matching_local_runtime_active` gate,
+#        strictly before its config resolution, runtime-context resolution,
+#        blocker-persistence, and classify-and-finalize calls -- never merely
+#        as a side effect deep inside one of those branches.
+#   [18] `persist_autonomous_daily_finalization_blocker` requires a caller-
+#        supplied `AutonomousDailyFinalizationContext` and refuses to write
+#        (returns `NotEligible`, zero DB calls) via a shared eligibility gate
+#        checked strictly before its real `apply_evidence_degraded_blocker`
+#        write -- defense-in-depth so this seam can never become a second way
+#        to bypass finalization eligibility. Every coordinator call site
+#        threads the context through.
+#   [19] The required coordinator-level DB-backed proof test
+#        (`ci_03b_matching_local_runtime_blocks_policy_failure_without_write_or_notification`)
+#        exists by exact name in the E3 scenario test file.
+#   [20] The required direct E2B store-level proof test for the hardened
+#        wrapper (`store_59_persist_finalization_blocker_refuses_when_matching_runtime_active`)
+#        exists by exact name, calls the wrapper directly with a matching-
+#        runtime-active context, and asserts `NotEligible`.
+#
 # Usage:
 #   powershell -ExecutionPolicy Bypass -File scripts\guards\validate_autonomous_daily_paper_operations_01e3_coordinator_finalization_and_notification.ps1
 #
@@ -77,6 +102,7 @@ $PathRoutesRs       = Join-Path $RepoRoot "core-rs\crates\mqk-daemon\src\routes.
 $PathApiTypesRs     = Join-Path $RepoRoot "core-rs\crates\mqk-daemon\src\api_types.rs"
 $PathE3Spec         = Join-Path $RepoRoot "docs\specs\autonomous_daily_paper_operations_01e3_coordinator_finalization_and_notification.md"
 $PathE3Test         = Join-Path $RepoRoot "core-rs\crates\mqk-daemon\tests\scenario_autonomous_daily_outcome_coordinator_integration_01.rs"
+$PathE2BTest        = Join-Path $RepoRoot "core-rs\crates\mqk-daemon\tests\scenario_autonomous_daily_outcome_classifier_and_finalization_01.rs"
 $PathReadme         = Join-Path $RepoRoot "README.md"
 $PathReadmeTech     = Join-Path $RepoRoot "README_TECHNICAL.md"
 $PathLedger         = Join-Path $RepoRoot "MiniQuantDesk_Master_Patch_Ledger_v2.md"
@@ -394,6 +420,116 @@ if (Test-FileExists "E3 scenario test file" $PathE3Test) {
         $script:Violations++
         Show-Red "  FAIL -- E3 scenario test file is suspiciously short"
     }
+}
+
+Write-Host ""
+Show-Info "--- [17] handle_outcome_finalization gates on matching_local_runtime_active before policy resolution and blocker persistence (E3 repair) ---"
+$HandleOutcomeFinalizationBody = Get-ContentBetween -Content $CoordinatorContent `
+    -StartNeedle "async fn handle_outcome_finalization(" `
+    -EndNeedle "`n}`n`n/// E3.5"
+if ($null -eq $HandleOutcomeFinalizationBody) {
+    $script:Violations++
+    Show-Red "  FAIL -- could not locate handle_outcome_finalization's body"
+} else {
+    $ContextIdx    = $HandleOutcomeFinalizationBody.IndexOf("matching_local_runtime_active: matching_local_runtime_active(state, &operation).await", [System.StringComparison]::OrdinalIgnoreCase)
+    $GateIdx       = $HandleOutcomeFinalizationBody.IndexOf("if context.matching_local_runtime_active {", [System.StringComparison]::OrdinalIgnoreCase)
+    $AwaitingIdx   = $HandleOutcomeFinalizationBody.IndexOf("return Ok(AutonomousDailyCoordinatorTickOutcome::AwaitingOutcomeFinalization);", [System.StringComparison]::OrdinalIgnoreCase)
+    $ConfigIdx     = $HandleOutcomeFinalizationBody.IndexOf("build_multi_symbol_runtime_config_from_env()", [System.StringComparison]::OrdinalIgnoreCase)
+    $RuntimeCtxIdx = $HandleOutcomeFinalizationBody.IndexOf("resolve_autonomous_runtime_context(state).await", [System.StringComparison]::OrdinalIgnoreCase)
+    $FirstPersistIdx = $HandleOutcomeFinalizationBody.IndexOf("persist_autonomous_daily_finalization_blocker(", [System.StringComparison]::OrdinalIgnoreCase)
+    $ClassifyIdx   = $HandleOutcomeFinalizationBody.IndexOf("classify_and_finalize_autonomous_daily_operation(", [System.StringComparison]::OrdinalIgnoreCase)
+
+    if ($ContextIdx -lt 0 -or $GateIdx -lt 0 -or $AwaitingIdx -lt 0) {
+        $script:Violations++
+        Show-Red "  FAIL -- handle_outcome_finalization does not contain the expected early matching-runtime gate returning AwaitingOutcomeFinalization"
+    } elseif ($ConfigIdx -lt 0 -or $RuntimeCtxIdx -lt 0 -or $FirstPersistIdx -lt 0 -or $ClassifyIdx -lt 0) {
+        $script:Violations++
+        Show-Red "  FAIL -- could not locate the four gated calls (config resolution, runtime-context resolution, blocker persistence, classify) inside handle_outcome_finalization"
+    } elseif ($GateIdx -lt $ContextIdx) {
+        $script:Violations++
+        Show-Red "  FAIL -- the matching-runtime gate must appear after context is computed"
+    } elseif ($GateIdx -ge $ConfigIdx -or $GateIdx -ge $RuntimeCtxIdx -or $GateIdx -ge $FirstPersistIdx -or $GateIdx -ge $ClassifyIdx) {
+        $script:Violations++
+        Show-Red "  FAIL -- the matching-runtime gate does not precede config/runtime-context resolution, blocker persistence, and classify_and_finalize_autonomous_daily_operation (gate=$GateIdx, config=$ConfigIdx, runtime_ctx=$RuntimeCtxIdx, persist=$FirstPersistIdx, classify=$ClassifyIdx)"
+    } elseif ($AwaitingIdx -lt $GateIdx -or $AwaitingIdx -gt $ConfigIdx) {
+        $script:Violations++
+        Show-Red "  FAIL -- the early return must produce AwaitingOutcomeFinalization strictly between the gate and the first policy-resolution call"
+    } else {
+        Show-Green "  OK -- handle_outcome_finalization returns AwaitingOutcomeFinalization before any config/runtime-context resolution, blocker persistence, or classification call when a matching local runtime is active"
+    }
+}
+
+Write-Host ""
+Show-Info "--- [18] persist_autonomous_daily_finalization_blocker refuses persistence via a shared eligibility gate (E3 repair) ---"
+$PersistBlockerFnBody2 = Get-ContentBetween -Content $OutcomeContent `
+    -StartNeedle "pub async fn persist_autonomous_daily_finalization_blocker(" `
+    -EndNeedle "`n}"
+if ($null -eq $PersistBlockerFnBody2) {
+    $script:Violations++
+    Show-Red "  FAIL -- could not locate persist_autonomous_daily_finalization_blocker's body (repair)"
+} else {
+    Test-ContentContains "persist_autonomous_daily_finalization_blocker's signature takes an AutonomousDailyFinalizationContext" $PersistBlockerFnBody2 "context: AutonomousDailyFinalizationContext," | Out-Null
+    $EligibilityIdx = $PersistBlockerFnBody2.IndexOf("finalization_blocker_persistence_eligible(operation, &context)", [System.StringComparison]::OrdinalIgnoreCase)
+    $NotEligibleIdx = $PersistBlockerFnBody2.IndexOf("return Ok(AutonomousDailyFinalizationOutcome::NotEligible);", [System.StringComparison]::OrdinalIgnoreCase)
+    $ApplyIdx       = $PersistBlockerFnBody2.IndexOf("apply_evidence_degraded_blocker(", [System.StringComparison]::OrdinalIgnoreCase)
+    if ($EligibilityIdx -lt 0 -or $NotEligibleIdx -lt 0 -or $ApplyIdx -lt 0) {
+        $script:Violations++
+        Show-Red "  FAIL -- persist_autonomous_daily_finalization_blocker does not gate on a shared eligibility check before writing"
+    } elseif ($EligibilityIdx -ge $ApplyIdx -or $NotEligibleIdx -ge $ApplyIdx) {
+        $script:Violations++
+        Show-Red "  FAIL -- the eligibility check/refusal must precede the real write call (eligibility=$EligibilityIdx, not_eligible=$NotEligibleIdx, apply=$ApplyIdx)"
+    } else {
+        Show-Green "  OK -- persist_autonomous_daily_finalization_blocker refuses persistence (NotEligible, zero writes) before ever calling apply_evidence_degraded_blocker"
+    }
+}
+Test-ContentContains "the shared eligibility gate function exists" $OutcomeContent "fn finalization_blocker_persistence_eligible(" | Out-Null
+Test-ContentContains "the eligibility gate refuses when a matching local runtime is active" $OutcomeContent "if context.matching_local_runtime_active {`n        return false;`n    }" | Out-Null
+
+# Every coordinator call site to the wrapper must thread the finalization
+# context through -- matched by scanning each call site's argument list
+# (opening paren to the first following ');') for the word "context", so
+# this check survives rustfmt reflowing the exact call-site formatting.
+$WrapperCallRegex = [regex]'persist_autonomous_daily_finalization_blocker\(([\s\S]*?)\);'
+$WrapperCallMatches = $null
+if ($null -ne $CoordinatorContent) { $WrapperCallMatches = $WrapperCallRegex.Matches($CoordinatorContent) }
+if ($null -eq $WrapperCallMatches -or $WrapperCallMatches.Count -lt 2) {
+    $script:Violations++
+    Show-Red "  FAIL -- expected at least 2 coordinator call sites to persist_autonomous_daily_finalization_blocker, found $(if ($WrapperCallMatches) { $WrapperCallMatches.Count } else { 0 })"
+} else {
+    $AllCallSitesThreadContext = $true
+    foreach ($CallSite in $WrapperCallMatches) {
+        if ($CallSite.Groups[1].Value -notmatch '(?i)\bcontext\b') {
+            $AllCallSitesThreadContext = $false
+        }
+    }
+    if ($AllCallSitesThreadContext) {
+        Show-Green "  OK -- every persist_autonomous_daily_finalization_blocker call site in the coordinator threads the finalization context ($($WrapperCallMatches.Count) call sites)"
+    } else {
+        $script:Violations++
+        Show-Red "  FAIL -- at least one persist_autonomous_daily_finalization_blocker call site does not pass context"
+    }
+}
+
+Write-Host ""
+Show-Info "--- [19] The required coordinator-level DB-backed proof test exists by exact name ---"
+Test-ContentContains "ci_03b_matching_local_runtime_blocks_policy_failure_without_write_or_notification exists in the E3 test file" $E3TestContent "async fn ci_03b_matching_local_runtime_blocks_policy_failure_without_write_or_notification()" | Out-Null
+
+Write-Host ""
+Show-Info "--- [20] A direct E2B store-level wrapper eligibility proof test exists ---"
+$E2BTestContent = $null
+if (Test-FileExists "E2B classifier/finalization scenario test file" $PathE2BTest) {
+    $E2BTestContent = Get-Content -Raw -Path $PathE2BTest
+}
+$E2BWrapperTestBody = Get-ContentBetween -Content $E2BTestContent `
+    -StartNeedle "async fn store_59_persist_finalization_blocker_refuses_when_matching_runtime_active(" `
+    -EndNeedle "`n}"
+if ($null -eq $E2BWrapperTestBody) {
+    $script:Violations++
+    Show-Red "  FAIL -- store_59_persist_finalization_blocker_refuses_when_matching_runtime_active not found in the E2B test file"
+} else {
+    Test-ContentContains "the E2B wrapper proof test calls persist_autonomous_daily_finalization_blocker directly" $E2BWrapperTestBody "persist_autonomous_daily_finalization_blocker(" | Out-Null
+    Test-ContentContains "the E2B wrapper proof test supplies a matching-runtime-active context" $E2BWrapperTestBody "matching_local_runtime_active: true," | Out-Null
+    Test-ContentContains "the E2B wrapper proof test asserts NotEligible" $E2BWrapperTestBody "assert_eq!(outcome, AutonomousDailyFinalizationOutcome::NotEligible);" | Out-Null
 }
 
 Write-Host ""

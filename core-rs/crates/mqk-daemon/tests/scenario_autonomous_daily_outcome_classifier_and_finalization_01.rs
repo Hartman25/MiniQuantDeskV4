@@ -10,8 +10,11 @@
 //! OPERATIONS-01E2B-TERMINAL-TRUTH-PRECEDENCE-AND-UNCERTAINTY-CLOSURE
 //! REPAIR 4 adds `classifier_26`).
 //! Group 2 (finalization/blocker CAS store proof, DB-backed, `#[ignore]`):
-//! tests 26-58 (REPAIR 1/2/5/6/7 add `store_48`-`store_58`; `store_47` is
-//! renamed in place -- it was never a database-failure proof).
+//! tests 26-59 (REPAIR 1/2/5/6/7 add `store_48`-`store_58`; `store_47` is
+//! renamed in place -- it was never a database-failure proof;
+//! AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E3-MATCHING-RUNTIME-POLICY-FAILURE-
+//! GATE-REPAIR-01 adds `store_59`, the hardened
+//! `persist_autonomous_daily_finalization_blocker` eligibility-gate proof).
 //! Group 3 (integrated end-to-end DB-backed proof, `#[ignore]`): three scenarios.
 //!
 //! DB-backed tests require `MQK_DATABASE_URL` and are marked `#[ignore]`. Run with:
@@ -33,12 +36,12 @@ use mqk_daemon::state::autonomous_daily_outcome::{
     check_finalization_eligibility, classify_and_finalize_autonomous_daily_operation,
     classify_and_finalize_autonomous_daily_operation_with_effect_seam,
     classify_autonomous_daily_outcome, derive_expected_bar_set,
-    gather_autonomous_daily_outcome_evidence, AutonomousDailyFinalizationContext,
-    AutonomousDailyFinalizationEffectSeam, AutonomousDailyFinalizationEligibility,
-    AutonomousDailyFinalizationInjectedPreCommitEffect, AutonomousDailyFinalizationOutcome,
-    AutonomousDailyFinalizationPolicyInputs, AutonomousDailyOutcomeClassification,
-    AutonomousDailyOutcomeEvidenceSnapshot, AutonomousDailyTerminalReason,
-    AutonomousDailyUnknownReason, ExpectedBarClaimEvidence,
+    gather_autonomous_daily_outcome_evidence, persist_autonomous_daily_finalization_blocker,
+    AutonomousDailyFinalizationContext, AutonomousDailyFinalizationEffectSeam,
+    AutonomousDailyFinalizationEligibility, AutonomousDailyFinalizationInjectedPreCommitEffect,
+    AutonomousDailyFinalizationOutcome, AutonomousDailyFinalizationPolicyInputs,
+    AutonomousDailyOutcomeClassification, AutonomousDailyOutcomeEvidenceSnapshot,
+    AutonomousDailyTerminalReason, AutonomousDailyUnknownReason, ExpectedBarClaimEvidence,
 };
 use mqk_daemon::state::market_calendar::NyseWeekdaysProvider;
 use mqk_daemon::state::{
@@ -2168,6 +2171,98 @@ async fn store_58_high_level_generic_completed_row_is_already_finalized_readonly
         after.state_version, manual.state_version,
         "generic completed row must never be rewritten"
     );
+}
+
+#[tokio::test]
+#[ignore]
+async fn store_59_persist_finalization_blocker_refuses_when_matching_runtime_active() {
+    // AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E3-MATCHING-RUNTIME-POLICY-FAILURE-
+    // GATE-REPAIR-01 (E2B wrapper hardening): `persist_autonomous_daily_finalization_blocker`
+    // is E3's narrow policy-resolution-failure seam
+    // (`autonomous_daily_coordinator.rs::handle_outcome_finalization`). It
+    // must never become a second way to bypass finalization eligibility --
+    // when the caller-supplied context says a matching local runtime is
+    // still active, this wrapper must refuse to write the `evidence_degraded`
+    // blocker at all, even though the operation is otherwise a durably
+    // stopped `stopping` row that would normally be eligible.
+    let Some(pool) = maybe_db("store_59").await else {
+        return;
+    };
+    let now = Utc::now().trunc_subsecs(6);
+    let op = stopping_operation(&pool, &unique_adapter_id("s59"), now).await;
+    assert!(op.stopped_at_utc.is_some(), "fixture is durably stopped");
+
+    let events_before: i64 = sqlx::query_scalar(
+        "select count(*) from sys_autonomous_daily_operation_events where operation_id = $1",
+    )
+    .bind(op.operation_id)
+    .fetch_one(&pool)
+    .await
+    .expect("count ok");
+
+    let outcome = persist_autonomous_daily_finalization_blocker(
+        &pool,
+        &op,
+        now,
+        AutonomousDailyUnknownReason::AssignmentIdentityUnavailable,
+        AutonomousDailyFinalizationContext {
+            matching_local_runtime_active: true,
+        },
+    )
+    .await
+    .expect("call ok");
+    assert_eq!(outcome, AutonomousDailyFinalizationOutcome::NotEligible);
+
+    let after = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, op.operation_id)
+        .await
+        .expect("fetch ok")
+        .expect("row exists");
+    assert_eq!(after.state, mqk_db::STATE_STOPPING);
+    assert_eq!(
+        after.state_version, op.state_version,
+        "zero state-version change when a matching local runtime is active"
+    );
+    assert_eq!(after.state_reason_code, op.state_reason_code);
+    assert_eq!(after.state_blocker_signature, op.state_blocker_signature);
+
+    let events_after: i64 = sqlx::query_scalar(
+        "select count(*) from sys_autonomous_daily_operation_events where operation_id = $1",
+    )
+    .bind(op.operation_id)
+    .fetch_one(&pool)
+    .await
+    .expect("count ok");
+    assert_eq!(events_after, events_before, "zero lifecycle-event delta");
+
+    // Sanity: the exact same call with the matching-runtime fact false (and
+    // stopped_at_utc present) is the pre-existing, still-valid policy-failure
+    // behavior -- proves this hardening is additive, not a regression of the
+    // legitimate case `store_47`/`ci_16_17` already cover.
+    let permitted = persist_autonomous_daily_finalization_blocker(
+        &pool,
+        &op,
+        now,
+        AutonomousDailyUnknownReason::AssignmentIdentityUnavailable,
+        AutonomousDailyFinalizationContext {
+            matching_local_runtime_active: false,
+        },
+    )
+    .await
+    .expect("call ok");
+    match permitted {
+        AutonomousDailyFinalizationOutcome::EvidenceDegraded {
+            reason_code,
+            newly_applied,
+            ..
+        } => {
+            assert_eq!(
+                reason_code,
+                AutonomousDailyUnknownReason::AssignmentIdentityUnavailable
+            );
+            assert!(newly_applied, "first write for this operation applies");
+        }
+        other => panic!("expected EvidenceDegraded, got {other:?}"),
+    }
 }
 
 // ---------------------------------------------------------------------------

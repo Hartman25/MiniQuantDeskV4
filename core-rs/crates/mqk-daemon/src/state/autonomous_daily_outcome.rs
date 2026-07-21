@@ -1181,6 +1181,33 @@ async fn apply_evidence_degraded_blocker(
     }
 }
 
+/// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E3-MATCHING-RUNTIME-POLICY-FAILURE-
+/// GATE-REPAIR-01: the shared eligibility gate this wrapper enforces before
+/// ever calling [`apply_evidence_degraded_blocker`]. This is the same
+/// eligibility truth [`check_finalization_eligibility`]/
+/// `classify_and_finalize_autonomous_daily_operation_with_effect_seam`'s own
+/// `STATE_EVIDENCE_DEGRADED` branch already apply on the successful-policy-
+/// resolution path -- restated here so a policy-resolution-*failure* caller
+/// can never bypass it. Persistence is permitted only when: no matching
+/// local runtime is active, `stopped_at_utc` is durably present, and
+/// `operation.state` is `stopping`, `stop_retrying`, or an already
+/// `evidence_degraded` post-stop row being refreshed in place.
+fn finalization_blocker_persistence_eligible(
+    operation: &AutonomousDailyOperationRecord,
+    context: &AutonomousDailyFinalizationContext,
+) -> bool {
+    if context.matching_local_runtime_active {
+        return false;
+    }
+    if operation.stopped_at_utc.is_none() {
+        return false;
+    }
+    matches!(
+        operation.state.as_str(),
+        mqk_db::STATE_STOPPING | mqk_db::STATE_STOP_RETRYING | mqk_db::STATE_EVIDENCE_DEGRADED
+    )
+}
+
 /// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E3-COORDINATOR-FINALIZATION-
 /// INTEGRATION-AND-NOTIFICATION: the narrow, E2B-owned coordinator seam for
 /// E3.4's policy-resolution-failure case. When the coordinator cannot build
@@ -1194,12 +1221,25 @@ async fn apply_evidence_degraded_blocker(
 /// module uses) so the coordinator never becomes a second, independent
 /// blocker writer. Never call this when policy inputs resolved successfully
 /// -- that case must go through the normal gather/classify pipeline.
+///
+/// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E3-MATCHING-RUNTIME-POLICY-FAILURE-
+/// GATE-REPAIR-01: `context` is required and checked via
+/// [`finalization_blocker_persistence_eligible`] before any write is
+/// attempted. This is deliberate defense-in-depth on top of the coordinator's
+/// own early return in `handle_outcome_finalization` -- this seam must never
+/// become a second way to bypass finalization eligibility, even if a future
+/// caller forgets the coordinator-level check. An ineligible call returns
+/// [`AutonomousDailyFinalizationOutcome::NotEligible`] with zero DB writes.
 pub async fn persist_autonomous_daily_finalization_blocker(
     pool: &PgPool,
     operation: &AutonomousDailyOperationRecord,
     now_utc: DateTime<Utc>,
     reason: AutonomousDailyUnknownReason,
+    context: AutonomousDailyFinalizationContext,
 ) -> anyhow::Result<AutonomousDailyFinalizationOutcome> {
+    if !finalization_blocker_persistence_eligible(operation, &context) {
+        return Ok(AutonomousDailyFinalizationOutcome::NotEligible);
+    }
     apply_evidence_degraded_blocker(
         pool,
         operation,
