@@ -557,3 +557,45 @@ pub async fn inbox_load_all_applied_for_run(pool: &PgPool, run_id: Uuid) -> Resu
     }
     Ok(out)
 }
+
+/// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E2B-STRICT-OUTCOME-CLASSIFIER-AND-
+/// FINALIZATION-CAS: load every `oms_inbox` row for one run, any
+/// `event_kind`, any `applied_at_utc` status, unbounded, ordered by
+/// `inbox_id asc`. Read-only. Distinct from
+/// [`inbox_load_unapplied_for_run`]/[`inbox_load_all_applied_for_run`] (each
+/// scoped to one apply-status half): the finalization classifier's
+/// fill/ack/reject activity evidence must see every durable broker event
+/// regardless of whether it has been applied to the portfolio yet.
+pub async fn inbox_load_all_for_run(pool: &PgPool, run_id: Uuid) -> Result<Vec<InboxRow>> {
+    let rows = sqlx::query(
+        r#"
+        select inbox_id, run_id, broker_message_id, broker_fill_id,
+               broker_sequence_id, broker_timestamp, message_json,
+               received_at_utc, applied_at_utc, event_kind
+          from oms_inbox
+         where run_id = $1
+         order by inbox_id asc
+        "#,
+    )
+    .bind(run_id)
+    .fetch_all(pool)
+    .await
+    .context("inbox_load_all_for_run failed")?;
+
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        out.push(InboxRow {
+            inbox_id: row.try_get("inbox_id")?,
+            run_id: row.try_get("run_id")?,
+            broker_message_id: row.try_get("broker_message_id")?,
+            broker_fill_id: row.try_get("broker_fill_id")?,
+            broker_sequence_id: row.try_get("broker_sequence_id")?,
+            broker_timestamp: row.try_get("broker_timestamp")?,
+            message_json: row.try_get("message_json")?,
+            received_at_utc: row.try_get("received_at_utc")?,
+            applied_at_utc: row.try_get("applied_at_utc")?,
+            event_kind: row.try_get("event_kind")?,
+        });
+    }
+    Ok(out)
+}

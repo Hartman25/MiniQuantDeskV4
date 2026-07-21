@@ -83,9 +83,19 @@ proving zero side effects while the coordinator is paused, a
 deliberately-invalid-registry-path proof that the adapter never touches the
 instrument registry before its authority gate resolves, and a
 release-then-normal-progression proof. No production coordinator/state file
-was touched by this repair. **E2A repair implementation is complete, awaiting independent
-ChatGPT/operator acceptance.** No outcome classifier and no finalization
-behavior exist yet — that is E2B, not started here.
+was touched by this repair. **E2A (plus both repairs) is now accepted
+complete.** On top of that accepted foundation, the
+AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E2B-STRICT-OUTCOME-CLASSIFIER-AND-FINALIZATION-CAS
+patch implements the strict evidence classifier and durable finalization CAS:
+a pure global-precedence classifier consuming E2A's coverage-anchor and
+run-lineage authorities (never re-deriving them), the terminal finalization
+CAS (`outcome`/`finalized_at_utc` set atomically with the terminal state
+transition, generic `completed` and `no_trade_reason` both structurally
+unreachable), the two new `stopping`/`stop_retrying -> evidence_degraded`
+legal edges, and the commit-uncertainty-safe database-failure contract. **E2B
+implementation is complete, awaiting independent ChatGPT/operator
+acceptance.** No coordinator invocation, no API route, and no GUI surface
+exist yet — that is E3/E4, not started here.
 
 The strongest current operational route is:
 
@@ -105,8 +115,9 @@ What that means in plain English:
 - D4 (integrated preopen-to-shutdown lifecycle proof, plus closing a confirmed completed-bar dispatch-ownership race against the ordinary execution loop) is **accepted complete**
 - a follow-on D4 repair (evaluation-lineage binding: a completed dispatch claim now durably records and confirms the exact strategy-evaluation row that proves it ran, never `None`; the completion write's outcome is honored instead of ignored; the concurrency proof's decoy fixture and the full-day preopen fixture were both corrected; a supervised-task proof under an injected clock was added) is **accepted complete** — **Phase D is accepted complete in full**
 - Phase E1 (a read-only architecture audit producing the binding durable daily outcome/no-trade contract for Phase E, four-times-corrected) is **accepted complete**
-- Phase E2A (the durable coverage-anchor and run-lineage evidence foundation: the `autonomous_daily_coverage_bound` event, the coordinator ensure-authority seam, the completed-bar adapter's mandatory authority/mid-day-drift gate, and the raw run-lineage read/validate helper), plus its AUTHORITY-ENVELOPE-GATE-ORDERING-AND-CONCURRENCY-CLOSURE repair (complete envelope validation, a duplicate-key-rejecting parser, corrected adapter gate ordering, and a live concurrency proof), is implementation complete, awaiting ChatGPT and operator acceptance; no outcome classifier and no finalization behavior exist yet
-- Bundle 3 is still **open** — Phase E runtime implementation (E2B strict classifier/finalization, E3 coordinator integration, E4 read-only API, E5 closure), GUI/runbook/soak preparation, and closure audit all remain
+- Phase E2A (the durable coverage-anchor and run-lineage evidence foundation: the `autonomous_daily_coverage_bound` event, the coordinator ensure-authority seam, the completed-bar adapter's mandatory authority/mid-day-drift gate, and the raw run-lineage read/validate helper), plus its AUTHORITY-ENVELOPE-GATE-ORDERING-AND-CONCURRENCY-CLOSURE and SAME-INSTANT-CONCURRENCY-AND-SIDE-EFFECT-PROOF-01 repairs, is **accepted complete**
+- Phase E2B (the strict evidence classifier consuming E2A's authorities, the terminal finalization CAS, the two new `evidence_degraded` post-stop edges, and the commit-uncertainty/database-failure contract) is implementation complete, awaiting ChatGPT and operator acceptance; no coordinator invocation, no API route, and no GUI surface exist yet
+- Bundle 3 is still **open** — Phase E runtime implementation (E3 coordinator integration, E4 read-only API, E5 closure), GUI/runbook/soak preparation, and closure audit all remain
 - paper+paper is not treated as an authoritative execution path
 - backtest deployment through the daemon is intentionally refused fail-closed
 - live-shadow and live-capital remain outside the current operational finish line
@@ -118,7 +129,7 @@ Use these labels precisely:
 | Mode | Current posture | Meaning |
 |---|---|---|
 | **Supervised Paper + Alpaca** | Available for controlled validation | Credible current path after a clean proof run, valid env, Alpaca paper auth, and active operator supervision. |
-| **Autonomous Paper + Alpaca** | Pre-soak hardening — Bundle 3 open | The durable daily controller, completed-bar production cutover, and the D4 integrated lifecycle/dispatch-ownership proof are implemented and **accepted** (Phase D accepted complete in full); the E1 durable-outcome contract is **accepted**; Bundle 3 still requires durable daily outcome/no-trade truth (Phase E — E2A durable evidence foundation is implementation complete and awaiting acceptance; E2B–E5 runtime implementation has not started), operator/runbook preparation, and final closure before it should begin an unattended autonomous soak. Controlled autonomous Paper + Alpaca operation under active operator supervision is the current Bundle 3 target — not unattended soak. |
+| **Autonomous Paper + Alpaca** | Pre-soak hardening — Bundle 3 open | The durable daily controller, completed-bar production cutover, and the D4 integrated lifecycle/dispatch-ownership proof are implemented and **accepted** (Phase D accepted complete in full); the E1 durable-outcome contract and the E2A durable evidence foundation are **accepted**; Bundle 3 still requires durable daily outcome/no-trade truth (Phase E — E2B strict classifier/finalization CAS is implementation complete and awaiting acceptance; E3–E5 runtime integration/API/closure has not started), operator/runbook preparation, and final closure before it should begin an unattended autonomous soak. Controlled autonomous Paper + Alpaca operation under active operator supervision is the current Bundle 3 target — not unattended soak. |
 | **Live / live-capital** | Not ready | Typed support and gates exist, but this repo must not be treated as safe for unattended live trading. |
 
 ### Current Bundle 3 position
@@ -138,28 +149,26 @@ Already implemented and **accepted** (D1–D4, Phase D accepted complete in full
 - closed a confirmed completed-bar dispatch-ownership race: the completed-bar driver's durable claim dispatches through the exact-input strategy-dispatch seam directly instead of round-tripping through the shared account-wide pending-bar mailbox the ordinary execution loop also drains every tick, so a concurrent execution-loop tick can no longer cause a real evaluation to be recorded as a failed claim, plus a deterministic concurrency proof for that fix (both interleaving orderings) and one integrated scenario test driving a synthetic Paper+Alpaca day through preopen, canonical start, running dispatch, runtime interruption/recovery, session close, and shutdown together
 - a completed dispatch claim durably stores and confirms the exact `strategy_signal_evaluations` row that proves it ran (a shared deterministic identity helper, never a second algorithm); the completion write's `Ok(false)`/`Err` outcomes are honored via one authoritative re-read instead of being silently treated as success; the full-day lifecycle test's preopen phase resolves through real production readiness truth instead of a manual unstick workaround; a supervised-task proof under an injected clock
 - the four-times-corrected Phase E1 durable-outcome/no-trade contract audit (outcome authority, finalization eligibility, terminal-state semantics, activity/no-trade evidence hierarchies, an `unknown_insufficient_evidence` representation requiring no schema migration, evidence-conflict precedence, a restart/idempotency contract, a bounded reason-code matrix, a read-only API contract, a notification contract, and the E2A/E2B decomposition) — **E1 is accepted complete**; no Phase E runtime code was written by E1 itself
+- Phase E2A, plus its AUTHORITY-ENVELOPE-GATE-ORDERING-AND-CONCURRENCY-CLOSURE and SAME-INSTANT-CONCURRENCY-AND-SIDE-EFFECT-PROOF-01 repairs (the typed, schema-versioned `autonomous_daily_coverage_bound` payload model/parser/semantic-equality comparison; canonical side-effect-free first/final dispatchable-bar construction; a complete durable event-envelope validator; a duplicate-JSON-key-rejecting typed parser; the exact write/re-read/idempotent-replay/conflict authority contract; the coordinator's ensure-authority seam with a pristine-bind/prior-activity fail-closed split; the completed-bar adapter's two-stage authority gate and mid-day drift check; a raw run-lineage read/validate helper; and a live, same-instant `tokio::join!`-driven coordinator/adapter concurrency proof) — **E2A is accepted complete**; no outcome classifier and no finalization behavior were written by E2A itself
 
-Implemented on the local `main` worktree (Phase E2A, plus its
-AUTHORITY-ENVELOPE-GATE-ORDERING-AND-CONCURRENCY-CLOSURE repair), but not yet
-independently accepted:
+Implemented on the local `main` worktree
+(AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E2B-STRICT-OUTCOME-CLASSIFIER-AND-FINALIZATION-CAS),
+but not yet independently accepted:
 
-- the typed, schema-versioned `autonomous_daily_coverage_bound` payload model, parser, and semantic-equality comparison (excludes the row's own `ts_utc`, so exact replay across a later coordinator tick never spuriously conflicts on wall-clock time alone)
-- the canonical, side-effect-free construction of the first/final intended dispatchable-bar identity, reusing only `daily_data_readiness::expected_intraday_end_ts_window`/`intraday_grid_starts` — no second calendar, timeframe, grace, or completed-bar algorithm
-- a complete durable event-envelope validator (`validate_coverage_authority_envelope`): every authority read verifies the row's exact deterministic `id`, `event_type`, `source`, `run_id IS NULL`, and `resume_source IS NULL` — never merely the id and a matching JSON payload — used by both the write/re-read path and every read-only authority check
-- a duplicate-JSON-key-rejecting typed parser (`CoverageBoundDetailWire`, `#[serde(deny_unknown_fields)]`): decodes directly into a typed struct instead of a `serde_json::Value` object map, so serde's own derived `visit_map` rejects a literal duplicate field the moment it is seen a second time, before any value is converted
-- the exact write/re-read/idempotent-replay/conflict authority contract over the existing `sys_autonomous_session_events` store (`ON CONFLICT (id) DO NOTHING` plus an authoritative re-read through the same envelope validator; a write error is never trusted without a confirming re-read, and a tampered/invalid re-read is rejected without ever overwriting the original row)
-- the coordinator's ensure-authority seam, run immediately after `create_or_recover` and before any state-handler dispatch: a pristine (zero-activity) operation may bind a fresh anchor; an operation with any prior activity signal (`run_id`, `started_at_utc`, observed/dispatched bars, a dispatch claim, or running-lineage evidence) and no anchor fails closed to `coverage_authority_missing_after_activity`, reusing the existing D1 blocker-signature mechanism — never a retroactively fabricated anchor
-- the completed-bar production adapter's mandatory per-tick authority prerequisite, now correctly ordered as a two-stage gate: Stage A (exact-id lookup, envelope validation, duplicate-safe parse, payload operation-id verification) runs strictly *before* any assignment/runtime-binding/policy resolution is even attempted, so a missing or invalid anchor is a quiet no-op with zero lifecycle mutation even when the local environment/configuration is itself malformed; only once Stage A proves a real, correctly shaped authority exists does Stage B resolve current policy and semantically compare it against the immutable anchor — no provider client, provider call, bar observation, dispatch claim, or strategy evaluation happens before both stages resolve clean, and durable fail-closed projection remains coordinator-owned
-- a mid-day coverage-policy-drift check: the adapter compares its freshly-resolved current policy (timeframe/grace/history/identity) against the immutable anchor on every tick, both for `PrepareDataOnly`- and `RunningDispatch`-eligible states
-- a narrow, raw `(transition_seq, run_id)` full-run-lineage read helper (never `SELECT DISTINCT`, never the general 100-row API list cap) plus Rust-side monotonicity/uniqueness/current-run-match validation, proven against a real recovery cycle
-- a live, deterministic, **same-instant** coordinator/adapter concurrency proof: a `tokio::sync::Notify`-based rendezvous hook pauses the real coordinator tick immediately after `create_or_recover` commits the operation row and before it binds the coverage authority; a `tokio::join!`-driven test runs the real production adapter concurrently against that same row, at the exact same shared `now_utc` the coordinator itself used, while the coordinator is paused — proving zero lifecycle mutation, zero `state_version` change, zero new lifecycle events, zero coverage-event/claim/evaluation/decision-count change from the adapter side, that the adapter never touches a deliberately-invalid instrument-registry path before its authority gate resolves, then proving a normal eligible tick proceeds to `DriverOutcome` once the coordinator is released under restored valid configuration
-- an extended scenario test file (`scenario_autonomous_daily_coverage_anchor_and_run_lineage_01.rs`, 41 tests) proving construction bounds, durable replay/conflict (including five independent envelope-field tamper cases), duplicate-JSON-key rejection, the coordinator's pristine-bind and prior-activity fail-closed paths, the adapter's corrected two-stage authority gate (including the same-instant live concurrency proof), mid-day drift, and the run-lineage helper
-- **no outcome classifier and no finalization behavior were written** — those remain E2B's job; no new API route or GUI surface was added
+- a durable evidence snapshot model plus an async evidence-gathering pass (`gather_autonomous_daily_outcome_evidence`) that performs every database read for one classification attempt up front — the coverage anchor via E2A's own `check_coverage_authority`, the full run lineage via E2A's own validated-lineage helper, the exact expected dispatch-bar set derived purely from the immutable anchor, every expected bar's durable dispatch claim and evaluation row, and every `oms_outbox`/`oms_inbox` row across the complete validated run lineage (two new narrow, unbounded, any-status/any-event-kind read helpers)
+- a pure global-precedence classifier (`classify_autonomous_daily_outcome`) applying the E1 contract's exact ten-step order over that snapshot with zero I/O and zero access to any process-local diagnostic counter — structurally impossible, not merely avoided by convention
+- four closed terminal reason codes (`activity_fill_confirmed`, `activity_order_submitted`, `activity_decision_accepted`, `no_trade_strategy_evaluated_no_signal`) and eight closed nonterminal `unknown_*` reason codes; generic `completed` is not a representable classifier output at all
+- the terminal finalization CAS (`mqk_db::finalize_autonomous_daily_operation`): sets `state`/`outcome`/`finalized_at_utc` atomically in the same `UPDATE`, clears stale blocker/retry evidence, rejects generic `completed` and any outcome outside the closed four-code set before touching SQL, and never writes the retired `no_trade_reason` column — no migration
+- two new legal transition edges (`stopping`/`stop_retrying -> evidence_degraded`, per the E1 contract §3.3), the durable evidence-degraded blocker write reusing the existing D1 blocker-signature mechanism verbatim, and the pre-existing `evidence_degraded -> stopping` edge as the sole recovery path (never finalizing directly from `evidence_degraded`)
+- a commit-uncertainty-safe write discipline for every CAS (finalization and blocker alike): an ambiguous write result always triggers one authoritative re-read before any success is claimed, exactly mirroring D4's dispatch-completion confirmation pattern; complete database outage performs zero write attempts, and a partial evidence-read failure's best-effort blocker write is only ever claimed durable after a confirming re-read
+- a high-level `classify_and_finalize_autonomous_daily_operation` entry point, deliberately **not called from any production tick** — E3's job
+- a new scenario test file (`scenario_autonomous_daily_outcome_classifier_and_finalization_01.rs`, 54 tests: 25 pure classifier scenarios, 4 pure eligibility proofs, 22 DB-backed finalization/blocker CAS store proofs, and 3 DB-backed integrated end-to-end proofs including a full unresolved-claim → degrade → repair → recover → finalize round trip) — all 54 pass
+- **no coordinator invocation, no API route, and no GUI surface were added** — those remain E3/E4's job
 
 Still required before Bundle 3 closes:
 
-1. independent ChatGPT/operator acceptance of the E2A durable evidence foundation and its authority-envelope/gate-ordering/concurrency closure repair
-2. implement Phase E2B (strict outcome classifier and finalization CAS, per the accepted E1 contract, built on E2A's accepted authorities), then E3 coordinator integration, E4 read-only API, E5 integrated proof and closure
+1. independent ChatGPT/operator acceptance of the E2B strict outcome classifier and finalization CAS
+2. implement Phase E3 (coordinator finalization integration and notification, per the accepted E1 contract, built on E2B's accepted classifier/CAS), then E4 read-only API, E5 integrated proof and closure
 3. finish Phase F GUI, runbook, and soak-evidence preparation
 4. complete Phase G closure audit and ledger reconciliation
 
@@ -350,7 +359,7 @@ Operationally, `MAIN` is the canonical engine.
 Be honest about the open edges.
 
 - Bundle 3 remains open; Phase D (D1–D4, integrated lifecycle proof and dispatch-ownership race closure plus the evaluation-lineage repair) is accepted complete in full; the Phase E1 contract audit (the binding durable outcome/no-trade contract, four-times-corrected) is **accepted complete**; Phase E2A (the durable coverage-anchor/run-lineage evidence foundation), plus its AUTHORITY-ENVELOPE-GATE-ORDERING-AND-CONCURRENCY-CLOSURE repair, is implementation complete and is the immediate item awaiting independent ChatGPT/operator acceptance
-- durable daily outcome/no-trade classification runtime (Phase E2B strict classifier/finalization, then E3–E5, per the accepted E1 contract and built on E2A's authorities), final GUI/runbook/soak preparation (Phase F), and closure audit (Phase G) remain
+- durable daily outcome/no-trade classification runtime (Phase E3 coordinator integration and notification, then E4–E5, per the accepted E1 contract and built on E2B's accepted classifier/finalization CAS), final GUI/runbook/soak preparation (Phase F), and closure audit (Phase G) remain
 - Bundle 4 durable paper cash/positions/lots/cost basis/P&L truth has not started — this is required before trusting the accounting of any extended autonomous soak, not merely a nice-to-have
 - the current autonomous lane is long-only and single-symbol; multi-symbol rollout is deferred until after the soak
 - real paper order/fill/reconcile/Discord evidence is still incomplete
@@ -369,7 +378,7 @@ should not be called closed until Bundle 3 and its market evidence gates are com
 
 | Item | Status |
 |---|---|
-| BUNDLE-3-AUTONOMOUS-DAILY-OPS | Open — Phase D accepted complete; Phase E1 contract (four-times-corrected) accepted complete; Phase E2A durable evidence foundation, plus its authority-envelope/gate-ordering/concurrency closure repair, implementation complete, awaiting acceptance; E2B–E5 outcome/API runtime, GUI/runbook/soak prep, and closure remain |
+| BUNDLE-3-AUTONOMOUS-DAILY-OPS | Open — Phase D accepted complete; Phase E1 contract (four-times-corrected) accepted complete; Phase E2A durable evidence foundation, plus its authority-envelope/gate-ordering/concurrency closure repairs, accepted complete; Phase E2B strict outcome classifier and finalization CAS implementation complete, awaiting acceptance; E3–E5 coordinator/API runtime, GUI/runbook/soak prep, and closure remain |
 | PAPER-TRADE-LIFECYCLE-01 | Open — market-hours paper smoke with real fills |
 | RECONCILE-AFTER-REAL-FILL-01 | Open — reconcile pass after a real paper fill |
 | DISCORD-TRADE-LIFECYCLE-REAL-01 | Open — Discord notification evidence from a real cycle |

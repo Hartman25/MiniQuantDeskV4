@@ -14630,3 +14630,142 @@ NEXT AFTER E2A ACCEPTANCE: E2B — strict outcome classifier and finalization CA
 unattended 10-20-session soak: NOT STARTED
 live capital: NOT READY
 ```
+
+## AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E2B-STRICT-OUTCOME-CLASSIFIER-AND-FINALIZATION-CAS
+
+Starting HEAD: `705c1010c19501a5550f4fe6a45ad0ed4f8cc912` (`test: close autonomous coverage
+concurrency proof` — the E2A final proof repair commit, since accepted by ChatGPT and operator;
+this entry records that acceptance: **E1: ACCEPTED — COMPLETE, E2A: ACCEPTED — COMPLETE**).
+
+**Scope:** implements exactly the E2B strict outcome classifier and durable finalization CAS the
+E1 contract (`docs/specs/autonomous_daily_paper_operations_01e_outcome_truth_contract.md`, §13)
+authorizes, built entirely on E2A's accepted coverage-anchor and run-lineage authorities. Full
+detail: `docs/specs/autonomous_daily_paper_operations_01e2b_outcome_classifier_and_finalization.md`.
+
+**New production surface:**
+- `core-rs/crates/mqk-daemon/src/state/autonomous_daily_outcome.rs` (new): the durable evidence
+  snapshot model, the async evidence-gathering pass (`gather_autonomous_daily_outcome_evidence`),
+  the pure global-precedence classifier (`classify_autonomous_daily_outcome`), the pure expected-
+  bar-set derivation (`derive_expected_bar_set`), the finalization-eligibility check, the
+  commit-uncertainty-safe finalization/blocker write helpers, and the high-level
+  `classify_and_finalize_autonomous_daily_operation` entry point. Not called from any production
+  tick by this patch.
+- `core-rs/crates/mqk-db/src/autonomous_daily_operation.rs`: two new legal transition edges
+  (`stopping`/`stop_retrying -> evidence_degraded`, E1 contract §3.3), the closed four-code
+  terminal-outcome constant set, and `finalize_autonomous_daily_operation` — the terminal
+  finalization CAS, atomically setting `state`/`outcome`/`finalized_at_utc` and clearing
+  `state_reason_code`/`state_blocker_signature`/`next_retry_utc`/`last_error`, with typed
+  `Applied`/`AlreadyApplied`/`ConflictingTerminalTruth`/`StaleState`/`NotFound`/`IllegalTarget`
+  outcomes. `no_trade_reason` is never written (retired per E1 contract §2). No migration.
+- `core-rs/crates/mqk-db/src/orders.rs` / `inbox.rs`: two new narrow, unbounded, any-status/any-
+  event-kind read helpers (`outbox_load_all_for_run`, `inbox_load_all_for_run`) scoped to one
+  `run_id` — the classifier's full-lineage activity-evidence aggregation reads every run in E2A's
+  validated lineage through these.
+
+**Evidence-gathering/classification split:** every database read for one classification attempt
+happens in `gather_autonomous_daily_outcome_evidence`, into one durable
+`AutonomousDailyOutcomeEvidenceSnapshot`; `classify_autonomous_daily_outcome` is a pure `fn`
+applying the E1 contract's exact ten-step global precedence order (identity → lineage → coverage
+anchor → expected-bar coverage/aggregate consistency → zero unresolved claims → exact evaluation
+evidence → activity tier → order-evidence conflict → no-trade) with zero I/O. No process-local
+diagnostic field (`AppState`, `bar_tick_dispatch_count`, `last_bar_signal_qty`) is reachable from
+either half — structurally impossible, not merely avoided by convention.
+
+**Reason-code split resolved:** E1 contract §6 item 2 step 6 and §7's own trigger list appear to
+name two different dispositions for "no durable coverage anchor" — resolved by keying on whether
+the operation's full run lineage is empty (never reached `running`, routes to
+`unknown_missing_evaluation_evidence`) versus nonempty (a genuine coverage-proof gap for an
+operation that did run, routes to `unknown_incomplete_bar_coverage`). Documented and tested
+(`classifier_18`) in the spec doc §6.
+
+**Evidence-degraded CAS and recovery:** the new `evidence_degraded` blocker write reuses the
+existing D1 blocker-signature mechanism verbatim (`AutonomousCoordinatorReason::UnclassifiedFailClosed
+{ fault_class: reason.as_str() }` through `blocker_signature()`) — zero changes to
+`autonomous_retry_policy.rs`. Recovery from `evidence_degraded` (stopped, evidence now resolves)
+takes the pre-existing `evidence_degraded -> stopping` edge and returns `RecoveredToStopping` —
+never finalizes directly from `evidence_degraded`, matching the E1 contract's explicit prohibition.
+A mid-run `evidence_degraded` row (`stopped_at_utc IS NULL`) is never eligible for this path.
+
+**Commit uncertainty / database-failure contract (E1 §9):** every CAS write re-reads the row
+authoritatively on any ambiguous result before claiming success, exactly mirroring D4's
+`reconfirm_dispatch_completion_or_fail_closed` discipline. Complete outage (operation row itself
+unloadable) performs zero write attempts; a partial evidence-read failure attempts a best-effort
+`unknown_database_unavailable` blocker write, confirmed by re-read, never fabricated.
+
+**Test binary:**
+`core-rs/crates/mqk-daemon/tests/scenario_autonomous_daily_outcome_classifier_and_finalization_01.rs`
+— 54 tests: 25 required pure-classifier scenarios + 4 pure eligibility proofs (Group 1, no DB), 22
+required DB-backed finalization/blocker CAS store scenarios (Group 2, `--ignored`), 3 required
+DB-backed integrated end-to-end proofs (Group 3, `--ignored`, including the full
+unresolved-claim → `evidence_degraded` → repair → `evidence_degraded -> stopping` →
+`completed_no_trade` round trip). All 54 pass locally.
+
+**Regressions (each binary run alone, `--include-ignored --test-threads=1`, isolated test Postgres
+on port 5434):** `scenario_autonomous_daily_coverage_anchor_and_run_lineage_01` 41/41,
+`scenario_autonomous_daily_operation_store_01` 26/26,
+`scenario_autonomous_daily_operation_lifecycle_01` 36/36,
+`scenario_autonomous_daily_operation_data_evidence_01` 9/9,
+`scenario_autonomous_daily_phase_d_integration_01` 8/8,
+`scenario_signal_evaluation_journal_auton_no_signal_obs_01` 7/7. Zero new failures anywhere in the
+required matrix. `scenario_autonomous_completed_bar_driver_01`'s known 47/56 baseline (9
+pre-existing, unrelated failures) was not re-run — this patch touches no production seam in that
+file.
+
+**Guards:** `validate_autonomous_daily_paper_operations_01a_audit.ps1`,
+`validate_daily_data_readiness_01e_closure.ps1`,
+`validate_autonomous_daily_paper_operations_01d_phase_d_closure.ps1`,
+`validate_autonomous_daily_paper_operations_01d4_evaluation_lineage_and_autonomous_preopen_closure_01.ps1`,
+`validate_autonomous_daily_paper_operations_01e_outcome_contract.ps1`,
+`validate_autonomous_daily_paper_operations_01e2b_outcome_classifier_and_finalization.ps1` (new,
+18 checks), and `check_unsafe_patterns.ps1` all pass.
+`validate_autonomous_daily_paper_operations_01e2a_coverage_anchor_and_run_lineage.ps1` now fails
+with 2 violations, both **expected, documented** consequences of this patch, not defects: check
+`[10]` (a point-in-time boundary proof, frozen at E2A's accepted commit `705c1010`, verifying
+E2A's own patch did not introduce E2B's finalization surface — not a permanent prohibition, and
+E2B's entire authorized mission is to add exactly that surface), and the README `[11]`
+acceptance-phrase check (it requires the pre-acceptance sentence "E2A repair implementation is
+complete, awaiting independent" to persist in README.md, which this patch correctly replaces with
+E2A's own recorded acceptance). See spec doc §13 for the full explanation. **Migration:** none. **Format/lint:** `rustfmt --check --edition 2021`
+clean on every touched Rust file; Clippy `-D warnings` clean on `mqk-db --lib`, `mqk-daemon --lib`,
+and the new E2B test binary. `cargo check -p mqk-db -p mqk-runtime -p mqk-daemon` clean (only the
+pre-existing `sqlx-postgres` future-incompat note). `git diff --check` / `git diff --cached
+--check` clean.
+
+**Files changed:** `MiniQuantDesk_Master_Patch_Ledger_v2.md`, `README.md`, `README_TECHNICAL.md`,
+`docs/specs/autonomous_daily_paper_operations_01e2b_outcome_classifier_and_finalization.md`,
+`scripts/guards/validate_autonomous_daily_paper_operations_01e2b_outcome_classifier_and_finalization.ps1`,
+`core-rs/crates/mqk-db/src/autonomous_daily_operation.rs`, `core-rs/crates/mqk-db/src/orders.rs`,
+`core-rs/crates/mqk-db/src/inbox.rs`,
+`core-rs/crates/mqk-daemon/src/state/autonomous_daily_outcome.rs` (new),
+`core-rs/crates/mqk-daemon/src/state.rs` (module registration only),
+`core-rs/crates/mqk-daemon/tests/scenario_autonomous_daily_outcome_classifier_and_finalization_01.rs`
+(new). No coordinator invocation. No API route. No GUI changed. No migration.
+
+**Safety confirmation:**
+
+```text
+PROVIDER CALLS: no
+BROKER CALLS: no
+NETWORK CALLS: no
+REAL DAEMON STARTED: no
+PAPER ORDERS: no
+LIVE ORDERS: no
+PAPER DB TOUCHED: no
+PORT 5440 TOUCHED: no
+MIGRATION CHANGED: no
+API IMPLEMENTED: no
+GUI CHANGED: no
+COORDINATOR INTEGRATION: no
+```
+
+```text
+E1: ACCEPTED — COMPLETE
+E2A: ACCEPTED — COMPLETE
+E2B: IMPLEMENTATION COMPLETE — AWAITING CHATGPT AND OPERATOR ACCEPTANCE
+E3: NOT STARTED
+PHASE E: OPEN
+BUNDLE 3 (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-COMBINED): OPEN
+NEXT AFTER E2B ACCEPTANCE: E3 only — coordinator finalization integration and notification
+unattended 10-20-session soak: NOT STARTED
+live capital: NOT READY
+```

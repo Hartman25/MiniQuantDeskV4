@@ -963,6 +963,50 @@ pub async fn outbox_load_submitted_for_run(pool: &PgPool, run_id: Uuid) -> Resul
     Ok(out)
 }
 
+/// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E2B-STRICT-OUTCOME-CLASSIFIER-AND-
+/// FINALIZATION-CAS: load every `oms_outbox` row for one run, any status,
+/// unbounded, ordered by `outbox_id asc`. Read-only. Distinct from every
+/// existing run-scoped outbox reader above (each of which filters to a
+/// specific status subset for a specific operational purpose): the
+/// finalization classifier's no-trade/activity evidence needs "did any
+/// outbox row ever exist for this run" and "what is its exact status",
+/// across every status the CHECK constraint allows, not a pre-filtered
+/// subset.
+pub async fn outbox_load_all_for_run(pool: &PgPool, run_id: Uuid) -> Result<Vec<OutboxRow>> {
+    let rows = sqlx::query(
+        r#"
+        select outbox_id, run_id, idempotency_key, order_json, status,
+               created_at_utc, sent_at_utc, claimed_at_utc, claimed_by,
+               dispatching_at_utc, dispatch_attempt_id
+          from oms_outbox
+         where run_id = $1
+         order by outbox_id asc
+        "#,
+    )
+    .bind(run_id)
+    .fetch_all(pool)
+    .await
+    .context("outbox_load_all_for_run failed")?;
+
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        out.push(OutboxRow {
+            outbox_id: row.try_get("outbox_id")?,
+            run_id: row.try_get("run_id")?,
+            idempotency_key: row.try_get("idempotency_key")?,
+            order_json: row.try_get("order_json")?,
+            status: row.try_get("status")?,
+            created_at_utc: row.try_get("created_at_utc")?,
+            sent_at_utc: row.try_get("sent_at_utc")?,
+            claimed_at_utc: row.try_get("claimed_at_utc")?,
+            claimed_by: row.try_get("claimed_by")?,
+            dispatching_at_utc: row.try_get("dispatching_at_utc")?,
+            dispatch_attempt_id: row.try_get("dispatch_attempt_id")?,
+        });
+    }
+    Ok(out)
+}
+
 // ---------------------------------------------------------------------------
 // Broker order ID map persistence — Patch A4
 // ---------------------------------------------------------------------------

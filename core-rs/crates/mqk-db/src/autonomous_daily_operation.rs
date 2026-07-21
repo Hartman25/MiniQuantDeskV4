@@ -169,6 +169,12 @@ pub fn is_legal_operation_transition(previous: Option<&str>, new_state: &str) ->
             new_state,
             STATE_RUNNING | STATE_STOPPING | STATE_MANUAL_INTERVENTION_REQUIRED
         ),
+        // AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E2B-STRICT-OUTCOME-CLASSIFIER-
+        // AND-FINALIZATION-CAS: the E1 outcome contract (§3.3) authorizes
+        // exactly these two new post-stop evidence-gap edges. Recovery routes
+        // back through the pre-existing `evidence_degraded -> stopping` edge
+        // below -- no direct edge from `evidence_degraded` into any
+        // `completed*` state is added.
         Some(STATE_STOPPING) => matches!(
             new_state,
             STATE_COMPLETED
@@ -176,6 +182,7 @@ pub fn is_legal_operation_transition(previous: Option<&str>, new_state: &str) ->
                 | STATE_COMPLETED_WITH_ACTIVITY
                 | STATE_STOP_RETRYING
                 | STATE_MANUAL_INTERVENTION_REQUIRED
+                | STATE_EVIDENCE_DEGRADED
         ),
         Some(STATE_STOP_RETRYING) => matches!(
             new_state,
@@ -183,6 +190,7 @@ pub fn is_legal_operation_transition(previous: Option<&str>, new_state: &str) ->
                 | STATE_COMPLETED_NO_TRADE
                 | STATE_COMPLETED_WITH_ACTIVITY
                 | STATE_MANUAL_INTERVENTION_REQUIRED
+                | STATE_EVIDENCE_DEGRADED
         ),
         Some(STATE_MANUAL_INTERVENTION_REQUIRED) => matches!(
             new_state,
@@ -2660,4 +2668,239 @@ pub async fn record_autonomous_runtime_stopped(
         },
         None => RecordAutonomousRuntimeStoppedOutcome::NotFound,
     })
+}
+
+// ---------------------------------------------------------------------------
+// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E2B-STRICT-OUTCOME-CLASSIFIER-AND-
+// FINALIZATION-CAS: terminal finalization CAS. Extends the CAS-transition
+// contract [`transition_autonomous_daily_operation`] already establishes to
+// additionally set `outcome`/`finalized_at_utc` atomically in the same
+// `UPDATE`, per the E1 outcome contract §2/§9. Generic `completed` and any
+// `outcome` value outside the closed terminal set are rejected before any
+// SQL is issued -- the automatic classifier may never reach for either.
+// ---------------------------------------------------------------------------
+
+pub const OUTCOME_ACTIVITY_FILL_CONFIRMED: &str = "activity_fill_confirmed";
+pub const OUTCOME_ACTIVITY_ORDER_SUBMITTED: &str = "activity_order_submitted";
+pub const OUTCOME_ACTIVITY_DECISION_ACCEPTED: &str = "activity_decision_accepted";
+pub const OUTCOME_NO_TRADE_STRATEGY_EVALUATED_NO_SIGNAL: &str =
+    "no_trade_strategy_evaluated_no_signal";
+
+const CLOSED_TERMINAL_OUTCOMES: [&str; 4] = [
+    OUTCOME_ACTIVITY_FILL_CONFIRMED,
+    OUTCOME_ACTIVITY_ORDER_SUBMITTED,
+    OUTCOME_ACTIVITY_DECISION_ACCEPTED,
+    OUTCOME_NO_TRADE_STRATEGY_EVALUATED_NO_SIGNAL,
+];
+
+/// `true` iff `outcome` is one of the four closed terminal reason codes the
+/// automatic E2B classifier may write. Generic `completed`'s reason (there is
+/// none -- it never carries an `outcome` from this path) and every
+/// nonterminal `unknown_*` code are excluded by construction.
+pub fn is_closed_terminal_outcome(outcome: &str) -> bool {
+    CLOSED_TERMINAL_OUTCOMES.contains(&outcome)
+}
+
+/// Arguments for [`finalize_autonomous_daily_operation`].
+#[derive(Debug, Clone)]
+pub struct FinalizeAutonomousDailyOperationArgs {
+    pub operation_id: Uuid,
+    /// Must be `stopping` or `stop_retrying` -- the only two states with a
+    /// legal edge into a `completed*` state.
+    pub expected_state: String,
+    pub expected_state_version: i64,
+    /// Must be `completed_no_trade` or `completed_with_activity`. Generic
+    /// `completed` is never a legal `target_state` through this function.
+    pub target_state: String,
+    /// Must be one of [`CLOSED_TERMINAL_OUTCOMES`].
+    pub outcome: String,
+    pub finalized_at_utc: DateTime<Utc>,
+    pub bounded_detail: String,
+}
+
+/// Outcome of [`finalize_autonomous_daily_operation`].
+#[derive(Debug, Clone)]
+pub enum FinalizeAutonomousDailyOperationOutcome {
+    /// The finalization CAS applied: `state`/`outcome`/`finalized_at_utc`
+    /// were set atomically, `state_version` incremented by exactly one, and
+    /// one matching event row was inserted at the new `transition_seq`.
+    Applied(AutonomousDailyOperationRecord),
+    /// The operation is already terminal at exactly `target_state` with
+    /// exactly `outcome` already recorded -- a read-only, idempotent replay.
+    /// No second write, no second event.
+    AlreadyApplied(AutonomousDailyOperationRecord),
+    /// `operation_id` exists, is not yet terminal, but its actual
+    /// `(state, state_version)` does not match
+    /// `(expected_state, expected_state_version)`. Nothing was written.
+    StaleState {
+        actual_state: String,
+        actual_state_version: i64,
+    },
+    /// No row exists for `operation_id`.
+    NotFound,
+    /// `expected_state`/`target_state`/`outcome` fails the closed-set/legal-
+    /// edge check above. Checked before any DB write.
+    IllegalTarget,
+    /// The operation is already terminal, but at a different state and/or a
+    /// different `outcome` than this call requested. A terminal row is never
+    /// rewritten -- fail closed rather than silently prefer either value.
+    ConflictingTerminalTruth(AutonomousDailyOperationRecord),
+}
+
+fn validate_finalize_args(args: &FinalizeAutonomousDailyOperationArgs) -> Result<()> {
+    if args.expected_state_version < 1 {
+        anyhow::bail!("finalize_autonomous_daily_operation: expected_state_version must be >= 1");
+    }
+    if args.outcome.is_empty() || args.outcome.len() > 128 {
+        anyhow::bail!("finalize_autonomous_daily_operation: outcome must be 1..=128 chars");
+    }
+    if args.bounded_detail.len() > 4000 {
+        anyhow::bail!("finalize_autonomous_daily_operation: bounded_detail exceeds 4000 chars");
+    }
+    Ok(())
+}
+
+/// Atomically validate-and-apply the terminal finalization CAS transition.
+///
+/// 1. Validates `expected_state ∈ {stopping, stop_retrying}`,
+///    `target_state ∈ {completed_no_trade, completed_with_activity}`,
+///    `outcome` is one of the four closed terminal codes, and the edge is
+///    legal per [`is_legal_operation_transition`] -- all before touching SQL.
+///    An illegal combination never reaches the database.
+/// 2. Guards the `UPDATE` by `(operation_id, expected_state,
+///    expected_state_version)`, exactly like
+///    [`transition_autonomous_daily_operation`].
+/// 3. On a match: sets `state`, `outcome`, `finalized_at_utc` atomically,
+///    clears `state_reason_code`/`state_blocker_signature`/`next_retry_utc`/
+///    `last_error` (a terminal row carries no stale blocker/retry evidence),
+///    increments `state_version` by exactly one, and inserts one matching
+///    event row (`reason_code` = the terminal `outcome`) -- all in one
+///    transaction. `no_trade_reason` is never written (retired, §2).
+/// 4. On no match: re-reads the actual current row. An already-terminal row
+///    with exactly the requested `(state, outcome)` is `AlreadyApplied`
+///    (read-only, no reclassification); an already-terminal row with a
+///    different `state` or `outcome` is `ConflictingTerminalTruth` (never
+///    rewritten); a nonterminal row with a different `(state, version)` is
+///    `StaleState`; no row is `NotFound`.
+pub async fn finalize_autonomous_daily_operation(
+    pool: &PgPool,
+    args: &FinalizeAutonomousDailyOperationArgs,
+) -> Result<FinalizeAutonomousDailyOperationOutcome> {
+    validate_finalize_args(args)?;
+
+    let expected_is_legal_source = matches!(
+        args.expected_state.as_str(),
+        STATE_STOPPING | STATE_STOP_RETRYING
+    );
+    let target_is_legal = matches!(
+        args.target_state.as_str(),
+        STATE_COMPLETED_NO_TRADE | STATE_COMPLETED_WITH_ACTIVITY
+    );
+    let outcome_is_closed = is_closed_terminal_outcome(&args.outcome);
+
+    if !expected_is_legal_source
+        || !target_is_legal
+        || !outcome_is_closed
+        || !is_legal_operation_transition(Some(&args.expected_state), &args.target_state)
+    {
+        return Ok(FinalizeAutonomousDailyOperationOutcome::IllegalTarget);
+    }
+
+    let mut tx = pool
+        .begin()
+        .await
+        .context("finalize_autonomous_daily_operation: begin transaction failed")?;
+
+    let new_version = args.expected_state_version + 1;
+    let event_reason_code = Some(args.outcome.clone());
+
+    let updated_row = sqlx::query(&format!(
+        r#"
+        update sys_autonomous_daily_operations
+        set state = $1,
+            outcome = $2,
+            finalized_at_utc = $3,
+            state_reason_code = null,
+            state_blocker_signature = null,
+            next_retry_utc = null,
+            last_error = null,
+            state_version = $4,
+            updated_at_utc = $3
+        where operation_id = $5 and state = $6 and state_version = $7
+        returning {OPERATION_COLUMNS}
+        "#
+    ))
+    .bind(&args.target_state)
+    .bind(&args.outcome)
+    .bind(args.finalized_at_utc)
+    .bind(new_version)
+    .bind(args.operation_id)
+    .bind(&args.expected_state)
+    .bind(args.expected_state_version)
+    .fetch_optional(&mut *tx)
+    .await
+    .context("finalize_autonomous_daily_operation: CAS update failed")?;
+
+    if let Some(row) = updated_row {
+        let record = row_to_operation_record(row)?;
+
+        sqlx::query(&format!(
+            r#"
+            insert into sys_autonomous_daily_operation_events ({EVENT_COLUMNS})
+            values ($1,$2,$3,$4,$5,$6,$7,$8)
+            "#
+        ))
+        .bind(args.operation_id)
+        .bind(new_version)
+        .bind(&args.expected_state)
+        .bind(&args.target_state)
+        .bind(&event_reason_code)
+        .bind(args.finalized_at_utc)
+        .bind(None::<Uuid>)
+        .bind(&args.bounded_detail)
+        .execute(&mut *tx)
+        .await
+        .context("finalize_autonomous_daily_operation: insert event failed")?;
+
+        tx.commit()
+            .await
+            .context("finalize_autonomous_daily_operation: commit (applied) failed")?;
+
+        return Ok(FinalizeAutonomousDailyOperationOutcome::Applied(record));
+    }
+
+    let current_row = sqlx::query(&format!(
+        "select {OPERATION_COLUMNS} from sys_autonomous_daily_operations where operation_id = $1"
+    ))
+    .bind(args.operation_id)
+    .fetch_optional(&mut *tx)
+    .await
+    .context("finalize_autonomous_daily_operation: current-row re-read failed")?;
+
+    let outcome = match current_row {
+        None => FinalizeAutonomousDailyOperationOutcome::NotFound,
+        Some(row) => {
+            let current = row_to_operation_record(row)?;
+            if is_terminal_operation_state(&current.state) {
+                if current.state == args.target_state
+                    && current.outcome.as_deref() == Some(args.outcome.as_str())
+                {
+                    FinalizeAutonomousDailyOperationOutcome::AlreadyApplied(current)
+                } else {
+                    FinalizeAutonomousDailyOperationOutcome::ConflictingTerminalTruth(current)
+                }
+            } else {
+                FinalizeAutonomousDailyOperationOutcome::StaleState {
+                    actual_state: current.state,
+                    actual_state_version: current.state_version,
+                }
+            }
+        }
+    };
+
+    tx.rollback()
+        .await
+        .context("finalize_autonomous_daily_operation: rollback (no-op read) failed")?;
+
+    Ok(outcome)
 }

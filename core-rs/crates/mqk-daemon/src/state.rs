@@ -11,6 +11,7 @@ pub mod autonomous_completed_bar_task;
 pub mod autonomous_daily_coordinator;
 pub mod autonomous_daily_coverage_authority;
 pub mod autonomous_daily_operation;
+pub mod autonomous_daily_outcome;
 pub mod autonomous_retry_policy;
 pub mod autonomous_runtime_context;
 mod broker;

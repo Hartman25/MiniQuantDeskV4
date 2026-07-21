@@ -55,9 +55,22 @@ evaluation/decision counts) proving zero side effects from the adapter while
 the coordinator remains paused, proves the adapter never touches a
 deliberately-invalid instrument-registry path before its authority gate
 resolves, and proves release-then-normal-progression to `DriverOutcome`. No
-production coordinator/state file was touched by this repair — **E2A repair
-implementation complete, awaiting ChatGPT and operator acceptance.** No
-outcome classifier and no finalization behavior exist yet; that remains E2B.
+production coordinator/state file was touched by this repair — **E2A (plus
+both repairs) is accepted complete.** On top of that accepted foundation, the
+AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E2B-STRICT-OUTCOME-CLASSIFIER-AND-FINALIZATION-CAS
+patch implements the strict evidence classifier and durable finalization CAS
+(`core-rs/crates/mqk-daemon/src/state/autonomous_daily_outcome.rs`): a durable
+evidence-snapshot model plus an async gathering pass consuming E2A's
+coverage-anchor/run-lineage authorities without re-deriving them; a pure,
+zero-I/O global-precedence classifier structurally incapable of reading any
+process-local diagnostic counter; the terminal finalization CAS
+(`mqk_db::finalize_autonomous_daily_operation`, `outcome`/`finalized_at_utc`
+set atomically, generic `completed` and `no_trade_reason` both structurally
+unreachable); two new `stopping`/`stop_retrying -> evidence_degraded` legal
+edges; and a commit-uncertainty/database-failure contract mirroring D4's
+authoritative-re-read discipline. **E2B implementation complete, awaiting
+ChatGPT and operator acceptance.** No coordinator invocation, no API route,
+and no GUI surface exist yet; that remains E3/E4.
 
 The strongest current operational route is:
 
@@ -132,9 +145,8 @@ Accepted (Phase E1, four-times-corrected):
   coordinator wiring, API routes, and durable coverage-anchor/run-lineage foundation remained
   E2A/E2B/E3/E4's job
 
-Implemented on the local `main` worktree (Phase E2A, plus its
-AUTHORITY-ENVELOPE-GATE-ORDERING-AND-CONCURRENCY-CLOSURE repair), implementation complete but awaiting
-independent ChatGPT/operator acceptance:
+Accepted (Phase E2A, plus its AUTHORITY-ENVELOPE-GATE-ORDERING-AND-CONCURRENCY-CLOSURE and
+SAME-INSTANT-CONCURRENCY-AND-SIDE-EFFECT-PROOF-01 repairs):
 
 - the typed, schema-versioned `CoverageBoundDetail` payload
   (`core-rs/crates/mqk-daemon/src/state/autonomous_daily_coverage_authority.rs`), a duplicate-key-
@@ -227,16 +239,77 @@ independent ChatGPT/operator acceptance:
   deterministic zero-side-effect proof for a newly-visible not-yet-anchored operation, a
   proceeds-once-bound proof, and the live `tokio::join!` concurrency proof, mid-day drift for both
   eligible modes, and the DB-backed run-lineage read/validate helper
-- **no outcome classifier and no finalization behavior were written** — `outcome`/`finalized_at_utc`
-  remain unwritten by any production code path; no new API route; no GUI change; no migration; no
-  `is_legal_operation_transition` graph change
+- **no outcome classifier and no finalization behavior were written by E2A itself** —
+  `outcome`/`finalized_at_utc` remained unwritten by any production code path at E2A's own
+  acceptance; no API route; no GUI change; no migration; no `is_legal_operation_transition` graph
+  change from E2A itself
 
-After D4 and its evaluation-lineage repair (Phase D, accepted complete in full) and the
-four-times-corrected Phase E1 contract (accepted complete) are both accepted, Bundle 3 still requires
-Phase E2A's (and its authority-envelope/gate-ordering/concurrency closure repair's) independent
-acceptance, then Phase E2B (strict classifier and finalization CAS, built on E2A's authorities), E3
-coordinator integration, E4 read-only API, E5 integrated proof and closure, Phase F GUI/runbook/soak
-preparation, and Phase G final closure.
+Implemented on the local `main` worktree
+(AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E2B-STRICT-OUTCOME-CLASSIFIER-AND-FINALIZATION-CAS),
+implementation complete but awaiting independent ChatGPT/operator acceptance:
+
+- `core-rs/crates/mqk-daemon/src/state/autonomous_daily_outcome.rs` (new): an
+  `AutonomousDailyOutcomeEvidenceSnapshot` model plus
+  `gather_autonomous_daily_outcome_evidence` (async, DB-read-only) — performs every database read
+  for one classification attempt up front: the coverage anchor via E2A's own
+  `check_coverage_authority`, the full run lineage via E2A's own validated-lineage helper, the exact
+  expected dispatch-bar set (`derive_expected_bar_set`, pure, reuses only
+  `daily_data_readiness::intraday_grid_starts`), every expected bar's durable dispatch claim and
+  evaluation row (raw, unvalidated — every cross-check happens in the pure classifier), and every
+  `oms_outbox`/`oms_inbox` row across the complete validated run lineage via two new narrow,
+  unbounded, any-status/any-event-kind read helpers (`mqk_db::outbox_load_all_for_run`,
+  `mqk_db::inbox_load_all_for_run`)
+- `classify_autonomous_daily_outcome` (pure `fn`, zero I/O): applies the E1 contract's exact
+  ten-step global precedence order (identity → lineage → coverage anchor → expected-bar
+  coverage/aggregate consistency → zero unresolved claims → exact evaluation evidence → activity
+  tier → order-evidence conflict → no-trade) over an already-gathered snapshot. No process-local
+  diagnostic field (`AppState`, `bar_tick_dispatch_count`, `last_bar_signal_qty`) is reachable from
+  the snapshot type at all — structurally impossible, not merely avoided by convention. A missing
+  durable coverage anchor for an operation whose full run lineage is empty (never reached `running`)
+  routes to `unknown_missing_evaluation_evidence`; the same missing anchor for an operation that did
+  run routes to `unknown_incomplete_bar_coverage` — resolving an apparent tension between two E1
+  contract statements by keying on lineage emptiness, documented and tested
+  (`docs/specs/autonomous_daily_paper_operations_01e2b_outcome_classifier_and_finalization.md` §6)
+- four closed terminal reason codes (`activity_fill_confirmed`, `activity_order_submitted`,
+  `activity_decision_accepted`, `no_trade_strategy_evaluated_no_signal`) and eight closed
+  nonterminal `unknown_*` reason codes; generic `completed` is not a representable variant of
+  `AutonomousDailyOutcomeClassification` at all — structurally, not by runtime check
+- `mqk_db::finalize_autonomous_daily_operation` (new,
+  `core-rs/crates/mqk-db/src/autonomous_daily_operation.rs`): the terminal finalization CAS — sets
+  `state`/`outcome`/`finalized_at_utc` atomically in one `UPDATE`, clears
+  `state_reason_code`/`state_blocker_signature`/`next_retry_utc`/`last_error`, rejects generic
+  `completed` and any outcome outside the closed four-code set before touching SQL, and never writes
+  the retired `no_trade_reason` column; typed `Applied`/`AlreadyApplied`/`ConflictingTerminalTruth`/
+  `StaleState`/`NotFound`/`IllegalTarget` outcomes — no migration
+- two new legal transition edges (`stopping`/`stop_retrying -> evidence_degraded`, per the E1
+  contract §3.3, `is_legal_operation_transition`), the evidence-degraded blocker write reusing the
+  existing D1 blocker-signature mechanism verbatim
+  (`AutonomousCoordinatorReason::UnclassifiedFailClosed`, zero changes to
+  `autonomous_retry_policy.rs`), and the pre-existing `evidence_degraded -> stopping` edge as the
+  sole recovery path — never finalizing directly from `evidence_degraded`
+- a commit-uncertainty-safe write discipline for every CAS (finalization and blocker alike),
+  mirroring D4's `reconfirm_dispatch_completion_or_fail_closed` pattern: an ambiguous write result
+  always triggers one authoritative re-read before any success is claimed; complete database outage
+  performs zero write attempts; a partial evidence-read failure's best-effort blocker write is only
+  ever claimed durable after a confirming re-read
+- a high-level `classify_and_finalize_autonomous_daily_operation` entry point taking a narrow,
+  source-aligned `AutonomousDailyFinalizationPolicyInputs` (calendar provider, config, binding,
+  strategy registry — mirroring exactly what the coordinator's own `ensure_coverage_authority`
+  already threads through) instead of a full `AppState` — deliberately **not called from any
+  production tick**
+- `tests/scenario_autonomous_daily_outcome_classifier_and_finalization_01.rs` (54 tests): 25 pure
+  classifier scenarios and 4 pure eligibility proofs (no DB), 22 DB-backed finalization/blocker CAS
+  store proofs, and 3 DB-backed integrated end-to-end proofs (clean no-trade → `completed_no_trade`;
+  clean fill → `completed_with_activity`; unresolved claim → `evidence_degraded` → repair →
+  `evidence_degraded -> stopping` → later invocation → `completed_no_trade`) — all 54 pass
+- **no coordinator invocation, no API route, and no GUI surface were added** — those remain E3/E4's
+  job
+
+After D4 and its evaluation-lineage repair (Phase D, accepted complete in full), the
+four-times-corrected Phase E1 contract, and Phase E2A (plus both repairs) are all accepted, Bundle 3
+still requires Phase E2B's (strict classifier and finalization CAS) independent acceptance, then
+Phase E3 coordinator integration and notification (built on E2B's classifier/CAS), E4 read-only API,
+E5 integrated proof and closure, Phase F GUI/runbook/soak preparation, and Phase G final closure.
 
 ### Operational meaning
 
@@ -612,10 +685,11 @@ Its current source-grounded capabilities include:
 
 The path is still in **pre-soak hardening** because Bundle 3 is open. Phase D (D1–D4) is accepted
 complete in full; the Phase E1 contract audit (four-times-corrected) is **accepted complete**; Phase
-E2A (durable coverage-anchor/run-lineage evidence foundation), plus its authority-envelope/gate-
-ordering/concurrency closure repair, is implementation complete, awaiting acceptance. Do not label the
-current `main` head as a finished autonomous-paper MVP until Phase E's
-remaining runtime implementation (E2B–E5) and the later F/G phases are independently accepted.
+E2A (durable coverage-anchor/run-lineage evidence foundation), plus both repairs, is **accepted
+complete**; Phase E2B (strict outcome classifier and finalization CAS) is implementation complete,
+awaiting acceptance. Do not label the current `main` head as a finished autonomous-paper MVP until
+Phase E's remaining runtime implementation (E3–E5) and the later F/G phases are independently
+accepted.
 
 ### What is expected after Bundle 3
 
@@ -1091,8 +1165,8 @@ Recommended discipline:
 
 Be honest about these:
 
-- Bundle 3 is not closed; Phase D (D1–D4, integrated lifecycle proof, dispatch-ownership race closure, and the evaluation-lineage repair) is accepted complete in full; the Phase E1 contract audit (the binding durable outcome/no-trade contract, four-times-corrected) is **accepted complete**; Phase E2A (durable coverage-anchor/run-lineage evidence foundation), plus its authority-envelope/gate-ordering/concurrency closure repair, is implementation complete but awaiting independent ChatGPT/operator acceptance, and no outcome classifier or finalization behavior exists yet
-- the current main branch should not begin an unattended soak until Phase E's remaining runtime implementation (E2B strict classifier/finalization, then E3–E5, per the accepted E1 contract and built on E2A's authorities) and the later Bundle 3 phases (F/G) are accepted; controlled, operator-supervised autonomous Paper + Alpaca operation is the current Bundle 3 target, not unattended soak
+- Bundle 3 is not closed; Phase D (D1–D4, integrated lifecycle proof, dispatch-ownership race closure, and the evaluation-lineage repair) is accepted complete in full; the Phase E1 contract audit (the binding durable outcome/no-trade contract, four-times-corrected) is **accepted complete**; Phase E2A (durable coverage-anchor/run-lineage evidence foundation), plus both repairs, is **accepted complete**; Phase E2B (strict outcome classifier and finalization CAS, built on E2A's authorities) is implementation complete but awaiting independent ChatGPT/operator acceptance, and no coordinator invocation, API route, or GUI surface exists yet
+- the current main branch should not begin an unattended soak until Phase E's remaining runtime implementation (E3 coordinator integration/notification, then E4–E5, per the accepted E1 contract and built on E2B's classifier/finalization CAS) and the later Bundle 3 phases (F/G) are accepted; controlled, operator-supervised autonomous Paper + Alpaca operation is the current Bundle 3 target, not unattended soak
 - Bundle 4 durable paper cash/positions/lots/cost basis/P&L truth is still open
 - real paper fill, reconcile-after-fill, Discord lifecycle, restart, and repeated-session evidence remain incomplete
 - the daemon/operator plane is materially stronger, but some deeper GUI detail surfaces remain intentionally deferred or unmounted rather than faked
