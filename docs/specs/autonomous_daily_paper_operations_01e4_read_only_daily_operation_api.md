@@ -25,6 +25,13 @@ query value into its message; (5) none of the above was covered by a test or gua
 repair does not redo the original E4 audit except where a fix above required a fresh source read; it
 is not itself an acceptance record, and does not close E4, Phase E, or Bundle 3.
 
+**Repair pass 2** (`AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E4-EXACT-MARKET-DATE-PARSER-REPAIR-02`,
+applied on top of repair pass 1): closes the one remaining E4 validation defect — the explicit
+`market_date` query branch called `NaiveDate::parse_from_str(raw.trim(), "%Y-%m-%d")`, which silently
+accepted whitespace-normalized forms (`" 2026-07-20"`, `"2026-07-20 "`) even though the frozen route
+contract requires the exact lexical form `YYYY-MM-DD` with no normalization. See §5.4 for the full
+defect/repair description. This repair does not close E4, Phase E, or Bundle 3.
+
 ## 0. Accepted foundation (recorded, not re-litigated)
 
 ```text
@@ -90,9 +97,11 @@ than `GET`.
   — the exact pure resolver the coordinator itself uses to derive today's
   session plan. This call performs no DB read, no write, and creates no
   operation or coverage-bound event; it is calendar/timing math only.
-- Explicit `market_date=YYYY-MM-DD`: parsed with `NaiveDate::parse_from_str(_, "%Y-%m-%d")`.
-  A parse failure returns HTTP `400` with `truth_state: "invalid_request"` —
-  the only truth-state value paired with a non-200 status.
+- Explicit `market_date=YYYY-MM-DD`: parsed with the exact lexical parser
+  `parse_exact_market_date` (§5.4) — never `.trim()`-ed or otherwise
+  normalized. A parse failure returns HTTP `400` with
+  `truth_state: "invalid_request"` — the only truth-state value paired with a
+  non-200 status.
 - The resolved date, together with `AppState::deployment_mode().as_db_mode()`
   and `AppState::adapter_id()`, is passed to
   `mqk_db::fetch_autonomous_daily_operation_for_slot` — the exact
@@ -310,6 +319,59 @@ history/summary responses under a forced `DatabaseUnavailable` outcome all repor
 **Guard:** `scripts/guards/validate_autonomous_daily_paper_operations_01e4_read_only_daily_operation_api.ps1`
 gains checks `[17]`-`[22]` covering every repair above plus the new required regression tests.
 
+### 5.4 AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E4-EXACT-MARKET-DATE-PARSER-REPAIR-02
+
+**Confirmed defect (closed by this repair):**
+
+The explicit `market_date` query branch parsed with
+`NaiveDate::parse_from_str(raw.trim(), "%Y-%m-%d")`. `.trim()` is a normalization step, and the E1/E4
+route contract's `YYYY-MM-DD` form is exact lexical text — no whitespace normalization is authorized.
+This accepted whitespace-padded forms such as `market_date=%202026-07-20` (URL-decodes to a leading
+space) and `market_date=2026-07-20%20` (URL-decodes to a trailing space) as if they were the canonical
+form.
+
+**Repair (`core-rs/crates/mqk-daemon/src/routes/autonomous_daily_operations.rs`):**
+
+- A new pure helper, `parse_exact_market_date(raw: &str) -> Option<NaiveDate>`, replaces the direct
+  `NaiveDate::parse_from_str` call in the explicit-`market_date` branch. It performs, in order:
+  1. Exact UTF-8 byte length check (`raw.as_bytes().len() == 10`) — rejects any leading/trailing
+     whitespace, any extra character, and any multi-byte (non-ASCII) input, since a 10-character
+     Unicode string with any non-ASCII code point has a byte length other than 10.
+  2. Byte-position dash check (`bytes[4] == b'-'`, `bytes[7] == b'-'`).
+  3. ASCII-digit check on every other byte (`is_ascii_digit()`).
+  4. `NaiveDate::parse_from_str(raw, "%Y-%m-%d")` (unchanged, no `.trim()`).
+  5. Canonical round-trip check: `parsed.format("%Y-%m-%d").to_string() == raw`. This is a
+     defense-in-depth check — given steps 1-3 already fix the lexical shape, chrono's `%Y-%m-%d`
+     parse is deterministic over it, but the round-trip is what the frozen contract requires and
+     guards against any future chrono parsing-leniency change.
+  - No normalization step of any kind (`.trim()`, case-folding, digit-width normalization) exists
+    anywhere in the parser or the route handler.
+- `autonomous_daily_operation`'s explicit-date branch now calls `parse_exact_market_date(raw)`
+  directly; every other branch (no explicit date → canonical resolver, no DB → `backend_unavailable`,
+  query failure → `query_failed`) is unchanged. The fixed bounded invalid-request message
+  (`"market_date must use exact YYYY-MM-DD format"`) and the never-echo-raw-input behavior (§5.3 item
+  4) are both preserved verbatim.
+
+**Tests added:**
+- Pure-helper unit tests in `core-rs/crates/mqk-daemon/src/routes/autonomous_daily_operations.rs`
+  (`#[cfg(test)] mod exact_market_date_parser_tests`): canonical acceptance; rejection of leading/
+  trailing/interior whitespace, non-zero-padded fields, a leading sign prefix, a trailing suffix,
+  Unicode fullwidth digits, misplaced separators, a non-digit in a digit position, an invalid calendar
+  date, an empty string, and wrong total length.
+- Router-level tests in
+  `core-rs/crates/mqk-daemon/tests/scenario_autonomous_daily_operation_api_01.rs`: `a03d` (canonical
+  `2026-07-20` is accepted by the parser — the no-DB route reaches `backend_unavailable`, never
+  `invalid_request`); `a03e`/`a03f` (URL-decoded leading/trailing whitespace → 400
+  `invalid_request`); `a03g` (non-zero-padded `2026-7-2` → 400); `a03h` (`+2026-07-20` → 400); `a03i`
+  (`2026-07-20Z` → 400); `a03j` (percent-encoded Unicode fullwidth digits → 400). The existing `a03c`
+  long-malformed-input no-raw-echo test is preserved unchanged and rerun.
+
+**Guard:** `scripts/guards/validate_autonomous_daily_paper_operations_01e4_read_only_daily_operation_api.ps1`
+gains checks `[23]`-`[24]`: `parse_exact_market_date` exists and is called from the explicit branch,
+`.trim()` is absent from the entire route module, the exact length/dash/ASCII-digit/round-trip
+validation steps are all present in the parser body, and the three new leading-whitespace/
+trailing-whitespace/non-zero-padded router regression tests exist.
+
 ---
 
 ## 6. Full-lineage activity counts (E4.9)
@@ -397,17 +459,26 @@ blocks or fails) returns `query_failed` for both routes.
 ## 9. Test matrix
 
 File: `core-rs/crates/mqk-daemon/tests/scenario_autonomous_daily_operation_api_01.rs`
-(43 tests, after the §5.3 repair pass: 12 non-DB router-level tests plus one
-non-DB structural source scan, run every time; 30 DB-backed tests marked
-`#[ignore]`, run against the real isolated port-5434 test database with
-`--include-ignored --test-threads=1`). All 43 pass.
+(50 tests, after the §5.4 repair pass: 19 non-DB router-level tests, run
+every time; 31 DB-backed tests marked `#[ignore]`, run against the real
+isolated port-5434 test database with `--include-ignored --test-threads=1`).
+All 50 pass. A further 13 non-DB pure-helper unit tests for
+`parse_exact_market_date` live directly in the route module
+(`core-rs/crates/mqk-daemon/src/routes/autonomous_daily_operations.rs`,
+`#[cfg(test)] mod exact_market_date_parser_tests`), run via
+`cargo test -p mqk-daemon --lib`; all 13 pass.
 
 ```text
-Group A (router-level, no DB):        a01-a10 (a03c added, long malformed
-                                       market_date -> bounded 400)
+Group A (router-level, no DB):        a01-a10, a03d-a03j (seven new in the
+                                       §5.4 repair pass: canonical-accepted,
+                                       leading/trailing whitespace,
+                                       non-zero-padded, sign-prefixed,
+                                       trailing-suffix, Unicode fullwidth
+                                       digit rejections)
 Group B (DB-backed truth/projection/counts/history/summary/read-only proof):
-  b01-b27 (b12b added for the ack-vs-fill count distinction; b06b/b07b added
-  for terminal-projection-under-invalid-lineage; b25-b27 added for
+  b01-b27 (unchanged by the §5.4 repair pass; b12b added for the
+  ack-vs-fill count distinction; b06b/b07b added for
+  terminal-projection-under-invalid-lineage; b25-b27 added for
   downstream-count-read-failure truth-state proof — all five new in the
   §5.3 repair pass)
 ```

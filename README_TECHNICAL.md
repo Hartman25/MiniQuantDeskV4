@@ -163,13 +163,23 @@ shared `response_truth_state_for_counts` mapping (reused by all three
 response-construction sites) and a narrow, always-`false`-in-production
 test-only override for deterministically exercising a downstream database
 failure. The scenario test file (`scenario_autonomous_daily_operation_api_01.rs`,
-now 43 tests) proves the full truth-state vocabulary, terminal/nonterminal
+now 50 tests) proves the full truth-state vocabulary, terminal/nonterminal
 projection honoring the activity-count outcome, lineage-scoped counts,
 history ordering/limit-clamping, summary-block fail-soft behavior,
 downstream count-read-failure truth-state demotion, and zero operation/run/
-outbox/inbox/claim/evaluation side effects — all 43 pass. **E4 (plus this
-repair) is implementation complete, awaiting ChatGPT and operator
-acceptance.** No GUI surface exists yet; that remains Phase F.
+outbox/inbox/claim/evaluation side effects — all 50 pass. A second follow-on
+AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E4-EXACT-MARKET-DATE-PARSER-REPAIR-02
+closed the one remaining E4 validation defect: the explicit `market_date`
+query branch parsed with `NaiveDate::parse_from_str(raw.trim(), "%Y-%m-%d")`,
+silently accepting whitespace-normalized forms the frozen route contract's
+exact `YYYY-MM-DD` lexical form does not authorize. A new pure helper,
+`parse_exact_market_date`, replaces it with an exact byte-length/dash-
+position/ASCII-digit check followed by `chrono` parsing and a canonical
+`format("%Y-%m-%d")` round-trip check against the raw input, rejecting
+whitespace, non-zero-padded fields, sign prefixes, trailing characters, and
+Unicode digit lookalikes; no normalization step remains anywhere in the
+route. **E4 (plus both repairs) is implementation complete, awaiting ChatGPT
+and operator acceptance.** No GUI surface exists yet; that remains Phase F.
 
 The strongest current operational route is:
 

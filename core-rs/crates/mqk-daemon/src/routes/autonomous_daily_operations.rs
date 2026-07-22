@@ -450,6 +450,38 @@ pub(crate) async fn compute_daily_operation_summary(
 // GET /api/v1/autonomous/daily-operation[?market_date=YYYY-MM-DD]
 // ---------------------------------------------------------------------------
 
+/// Exact lexical market-date parser (E4 exact-parser repair). The frozen
+/// route contract requires the literal `YYYY-MM-DD` form with zero
+/// normalization, so this validates byte length, dash positions, and ASCII
+/// digits before the string ever reaches `chrono`, then requires the parsed
+/// date's own canonical formatting to round-trip back to the exact input.
+/// The round-trip catches anything a lenient library parse could otherwise
+/// tolerate (non-zero-padded fields, sign prefixes, trailing characters)
+/// that the byte-level check alone might miss.
+fn parse_exact_market_date(raw: &str) -> Option<NaiveDate> {
+    let bytes = raw.as_bytes();
+    if bytes.len() != 10 {
+        return None;
+    }
+    if bytes[4] != b'-' || bytes[7] != b'-' {
+        return None;
+    }
+    for (i, byte) in bytes.iter().enumerate() {
+        if i == 4 || i == 7 {
+            continue;
+        }
+        if !byte.is_ascii_digit() {
+            return None;
+        }
+    }
+
+    let parsed = NaiveDate::parse_from_str(raw, "%Y-%m-%d").ok()?;
+    if parsed.format("%Y-%m-%d").to_string() != raw {
+        return None;
+    }
+    Some(parsed)
+}
+
 #[derive(Debug, Deserialize)]
 pub(crate) struct DailyOperationQuery {
     market_date: Option<String>,
@@ -473,9 +505,9 @@ pub(crate) async fn autonomous_daily_operation(
     Query(query): Query<DailyOperationQuery>,
 ) -> Response {
     let market_date = match &query.market_date {
-        Some(raw) => match NaiveDate::parse_from_str(raw.trim(), "%Y-%m-%d") {
-            Ok(d) => d,
-            Err(_) => {
+        Some(raw) => match parse_exact_market_date(raw) {
+            Some(d) => d,
+            None => {
                 return (
                     StatusCode::BAD_REQUEST,
                     Json(single_response(
@@ -634,5 +666,87 @@ pub(crate) async fn autonomous_daily_operations(
             }),
         )
             .into_response(),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// parse_exact_market_date -- pure-helper proofs (E4 exact-parser repair)
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod exact_market_date_parser_tests {
+    use super::*;
+
+    #[test]
+    fn accepts_canonical_form() {
+        assert_eq!(
+            parse_exact_market_date("2026-07-20"),
+            NaiveDate::from_ymd_opt(2026, 7, 20)
+        );
+    }
+
+    #[test]
+    fn rejects_leading_whitespace() {
+        assert_eq!(parse_exact_market_date(" 2026-07-20"), None);
+    }
+
+    #[test]
+    fn rejects_trailing_whitespace() {
+        assert_eq!(parse_exact_market_date("2026-07-20 "), None);
+    }
+
+    #[test]
+    fn rejects_interior_whitespace() {
+        assert_eq!(parse_exact_market_date("2026-07- 0"), None);
+    }
+
+    #[test]
+    fn rejects_non_zero_padded_month_and_day() {
+        assert_eq!(parse_exact_market_date("2026-7-2"), None);
+    }
+
+    #[test]
+    fn rejects_leading_sign_prefix() {
+        assert_eq!(parse_exact_market_date("+2026-07-20"), None);
+    }
+
+    #[test]
+    fn rejects_trailing_suffix() {
+        assert_eq!(parse_exact_market_date("2026-07-20Z"), None);
+    }
+
+    #[test]
+    fn rejects_unicode_fullwidth_digits() {
+        assert_eq!(
+            parse_exact_market_date(
+                "\u{FF12}\u{FF10}\u{FF12}\u{FF16}-\u{FF10}\u{FF17}-\u{FF12}\u{FF10}"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn rejects_misplaced_separators() {
+        assert_eq!(parse_exact_market_date("2026-072-0"), None);
+    }
+
+    #[test]
+    fn rejects_non_digit_in_digit_position() {
+        assert_eq!(parse_exact_market_date("2026-0a-20"), None);
+    }
+
+    #[test]
+    fn rejects_invalid_calendar_date() {
+        assert_eq!(parse_exact_market_date("2026-13-40"), None);
+    }
+
+    #[test]
+    fn rejects_empty_string() {
+        assert_eq!(parse_exact_market_date(""), None);
+    }
+
+    #[test]
+    fn rejects_wrong_length() {
+        assert_eq!(parse_exact_market_date("2026-7-200"), None);
     }
 }

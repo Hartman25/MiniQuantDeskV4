@@ -93,6 +93,16 @@
 #        `b26_history_response_database_unavailable_counts_is_query_failed`,
 #        `b27_summary_database_unavailable_counts_is_query_failed_parent_unchanged`)
 #        exist in the E4 scenario test file.
+#   [23] (EXACT-MARKET-DATE-PARSER-REPAIR-02) `parse_exact_market_date` exists
+#        in the E4 route module, the explicit market-date query branch never
+#        calls `.trim()`, the helper enforces exact byte length / dash
+#        position / ASCII-digit validation, and requires a canonical
+#        `format("%Y-%m-%d")` round-trip against the raw input -- no
+#        normalization of any kind is authorized.
+#   [24] (EXACT-MARKET-DATE-PARSER-REPAIR-02) The E4 scenario test file has
+#        dedicated leading-whitespace, trailing-whitespace, and
+#        non-zero-padded market-date regression tests, each asserting a 400
+#        `invalid_request` response.
 #
 # Usage:
 #   powershell -ExecutionPolicy Bypass -File scripts\guards\validate_autonomous_daily_paper_operations_01e4_read_only_daily_operation_api.ps1
@@ -511,6 +521,44 @@ foreach ($TestName in @(
     "b25_single_response_database_unavailable_counts_is_query_failed_with_known_operation",
     "b26_history_response_database_unavailable_counts_is_query_failed",
     "b27_summary_database_unavailable_counts_is_query_failed_parent_unchanged"
+)) {
+    Test-ContentContains "E4 test file defines $TestName" $E4TestContent "fn $TestName(" | Out-Null
+}
+
+Write-Host ""
+Show-Info "--- [23] parse_exact_market_date exists, is trim-free, and enforces exact lexical + round-trip validation ---"
+Test-ContentContains "the E4 route module defines parse_exact_market_date" $E4RouteContent "fn parse_exact_market_date(raw: &str) -> Option<NaiveDate>" | Out-Null
+$ExplicitBranchBody = Get-ContentBetween -Content $E4RouteContent `
+    -StartNeedle "pub(crate) async fn autonomous_daily_operation(" `
+    -EndNeedle "`n    let Some(pool) = st.db.as_ref()"
+if ($null -eq $ExplicitBranchBody) {
+    $script:Violations++
+    Show-Red "  FAIL -- could not locate autonomous_daily_operation's market_date resolution body"
+} else {
+    Test-ContentContains "the explicit market_date branch calls parse_exact_market_date" $ExplicitBranchBody "parse_exact_market_date(raw)" | Out-Null
+    Test-ContentDoesNotContain "the explicit market_date branch never calls raw.trim()" $ExplicitBranchBody "raw.trim()" | Out-Null
+}
+Test-ContentDoesNotContain "the E4 route module never calls .trim() anywhere (no normalization is authorized)" $E4RouteContent ".trim()" | Out-Null
+$ParserFnBody = Get-ContentBetween -Content $E4RouteContent `
+    -StartNeedle "fn parse_exact_market_date(raw: &str) -> Option<NaiveDate> {" `
+    -EndNeedle "`n}"
+if ($null -eq $ParserFnBody) {
+    $script:Violations++
+    Show-Red "  FAIL -- could not locate parse_exact_market_date's body"
+} else {
+    Test-ContentContains "the parser enforces exact byte length 10" $ParserFnBody "bytes.len() != 10" | Out-Null
+    Test-ContentContains "the parser enforces dash at byte 4" $ParserFnBody "bytes[4] != b'-'" | Out-Null
+    Test-ContentContains "the parser enforces dash at byte 7" $ParserFnBody "bytes[7] != b'-'" | Out-Null
+    Test-ContentContains "the parser enforces ASCII digits in every other byte" $ParserFnBody "is_ascii_digit()" | Out-Null
+    Test-ContentContains "the parser requires a canonical format round-trip against the raw input" $ParserFnBody 'parsed.format("%Y-%m-%d").to_string() != raw' | Out-Null
+}
+
+Write-Host ""
+Show-Info "--- [24] Leading-whitespace, trailing-whitespace, and non-zero-padded route regression tests exist ---"
+foreach ($TestName in @(
+    "a03e_leading_whitespace_market_date_returns_400",
+    "a03f_trailing_whitespace_market_date_returns_400",
+    "a03g_non_zero_padded_market_date_returns_400"
 )) {
     Test-ContentContains "E4 test file defines $TestName" $E4TestContent "fn $TestName(" | Out-Null
 }

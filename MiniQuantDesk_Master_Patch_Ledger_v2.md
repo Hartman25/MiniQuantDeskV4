@@ -15526,3 +15526,117 @@ NEXT AFTER E4 ACCEPTANCE: E5 only — integrated Phase E proof and closure
 unattended 10-20-session soak: NOT STARTED
 live capital: NOT READY
 ```
+
+## AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E4-EXACT-MARKET-DATE-PARSER-REPAIR-02
+
+**Bundle:** `AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-COMBINED` | **Phase:** E4 repair pass 2 — exact
+lexical `market_date` query validation on the strictly read-only daily-operation API.
+
+**Starting HEAD:** `b2328a932823189bff227f98dc8252e7cd950601` ("fix: preserve daily operation read
+truth on evidence failure" — the accepted E4 read-truth repair commit). **Disposition entering this
+repair:** E1/E2A/E2B/E3 accepted complete; E4 implementation complete but not yet independently
+accepted, this one remaining validation defect required before E4 can be re-submitted for acceptance.
+
+**Confirmed defect (closed by this repair):**
+
+The explicit `market_date` query branch parsed with
+`NaiveDate::parse_from_str(raw.trim(), "%Y-%m-%d")`. `.trim()` is a normalization step, and the
+frozen route contract's `YYYY-MM-DD` form is exact lexical text — no whitespace normalization is
+authorized. This silently accepted whitespace-padded forms such as `market_date=%202026-07-20`
+(URL-decodes to a leading space) and `market_date=2026-07-20%20` (URL-decodes to a trailing space) as
+if they were the canonical form.
+
+**Repair (`core-rs/crates/mqk-daemon/src/routes/autonomous_daily_operations.rs`):**
+
+1. A new pure helper, `parse_exact_market_date(raw: &str) -> Option<NaiveDate>`, replaces the direct
+   `NaiveDate::parse_from_str` call in the explicit-`market_date` branch. It enforces, in order: exact
+   10-byte UTF-8 length (rejects whitespace, extra characters, and any non-ASCII input — a 10-character
+   Unicode string with any non-ASCII code point has a byte length other than 10); dash bytes at
+   positions 4 and 7; ASCII digits in every other byte position; `chrono` parsing (unchanged, no
+   `.trim()`); and a canonical `parsed.format("%Y-%m-%d").to_string() == raw` round-trip check as
+   defense-in-depth against any future chrono parsing-leniency change.
+2. `autonomous_daily_operation`'s explicit-date branch now calls `parse_exact_market_date(raw)`
+   directly, replacing the whole function definition per patch discipline. Every other branch (no
+   explicit date → canonical resolver, no DB → `backend_unavailable`, query failure → `query_failed`)
+   is unchanged. The fixed bounded invalid-request message
+   (`"market_date must use exact YYYY-MM-DD format"`) and the never-echo-raw-input behavior are both
+   preserved verbatim. No `.trim()` call remains anywhere in the route module.
+
+**Tests:**
+- 13 new pure-helper unit tests in
+  `core-rs/crates/mqk-daemon/src/routes/autonomous_daily_operations.rs`
+  (`#[cfg(test)] mod exact_market_date_parser_tests`): canonical acceptance; rejection of leading/
+  trailing/interior whitespace, non-zero-padded fields, a leading sign prefix, a trailing suffix,
+  Unicode fullwidth digits, misplaced separators, a non-digit in a digit position, an invalid calendar
+  date, an empty string, and wrong total length.
+- 7 new router-level tests in
+  `core-rs/crates/mqk-daemon/tests/scenario_autonomous_daily_operation_api_01.rs` (43 → 50): `a03d`
+  (canonical `2026-07-20` accepted by the parser — no-DB route reaches `backend_unavailable`, never
+  `invalid_request`); `a03e`/`a03f` (URL-decoded leading/trailing whitespace → 400 `invalid_request`);
+  `a03g` (non-zero-padded `2026-7-2` → 400); `a03h` (`+2026-07-20`, percent-encoded so the literal `+`
+  survives form-urlencoded decoding, → 400); `a03i` (`2026-07-20Z` → 400); `a03j` (percent-encoded
+  Unicode fullwidth digits → 400). The existing `a03c` long-malformed-input no-raw-echo test is
+  preserved unchanged and reruns clean.
+
+**Guard:** `scripts/guards/validate_autonomous_daily_paper_operations_01e4_read_only_daily_operation_api.ps1`
+gains checks `[23]`–`[24]`: `[23]` proves `parse_exact_market_date` exists, is called from the explicit
+branch, the branch and the whole module are `.trim()`-free, and the parser body contains the exact
+byte-length/dash-position/ASCII-digit/round-trip validation steps; `[24]` requires the three new
+leading-whitespace/trailing-whitespace/non-zero-padded router regression tests by exact function name.
+All prior checks `[1]`–`[22]` unchanged and still pass.
+
+**Format/lint:** `rustfmt --check --edition 2021` clean on both patch-touched Rust files (the pre-
+existing formatting drift this box's rustfmt reports elsewhere in
+`scenario_autonomous_daily_operation_api_01.rs`, on lines this patch never touched, is a known local
+environment artifact — not introduced by this patch, out of this patch's scope to fix). Narrow Clippy
+`-D warnings` clean on `mqk-daemon --lib` and the E4 scenario test binary. `cargo check -p mqk-db -p
+mqk-runtime -p mqk-daemon` clean. `git diff --check` / `git diff --cached --check` clean.
+
+**Tests run** (one binary at a time, isolated port-5434 test DB):
+
+```text
+scenario_autonomous_daily_operation_api_01                         50/50 (+ 13/13 lib unit tests)
+scenario_autonomous_daily_outcome_coordinator_integration_01       16/16
+scenario_autonomous_daily_outcome_classifier_and_finalization_01   67/67
+scenario_autonomous_daily_coverage_anchor_and_run_lineage_01       41/41
+scenario_autonomous_readiness_auton_truth01                        18/18
+scenario_autonomous_paper_status_summary_01                       21/21
+scenario_daemon_routes                                             84/84
+```
+
+**Files changed:** `core-rs/crates/mqk-daemon/src/routes/autonomous_daily_operations.rs`,
+`core-rs/crates/mqk-daemon/tests/scenario_autonomous_daily_operation_api_01.rs`,
+`docs/specs/autonomous_daily_paper_operations_01e4_read_only_daily_operation_api.md`,
+`scripts/guards/validate_autonomous_daily_paper_operations_01e4_read_only_daily_operation_api.ps1`,
+`MiniQuantDesk_Master_Patch_Ledger_v2.md`, `README.md`, `README_TECHNICAL.md`. No migration. No new
+API route (the two existing E4 routes are unchanged in shape). No GUI changed. No AppState change.
+
+**Safety confirmation:**
+
+```text
+PROVIDER CALLS: no
+BROKER CALLS: no
+NETWORK CALLS: no
+REAL DAEMON STARTED: no
+PAPER ORDERS: no
+LIVE ORDERS: no
+PAPER DB TOUCHED: no
+PORT 5440 TOUCHED: no
+MIGRATION CHANGED: no
+API IMPLEMENTED: no (existing single-route query parsing corrected, no new route)
+GUI CHANGED: no
+```
+
+```text
+E1: ACCEPTED — COMPLETE
+E2A: ACCEPTED — COMPLETE
+E2B: ACCEPTED — COMPLETE
+E3: ACCEPTED — COMPLETE
+E4 exact-parser repair: IMPLEMENTATION COMPLETE — AWAITING CHATGPT AND OPERATOR ACCEPTANCE
+E5: NOT STARTED
+PHASE E: OPEN
+BUNDLE 3 (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-COMBINED): OPEN
+NEXT AFTER E4 ACCEPTANCE: E5 only — integrated Phase E proof and closure
+unattended soak: NOT STARTED
+live capital: NOT READY
+```

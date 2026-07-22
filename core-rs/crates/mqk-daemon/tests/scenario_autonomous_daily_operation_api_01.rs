@@ -141,6 +141,105 @@ async fn a03c_long_malformed_market_date_returns_bounded_400_no_raw_echo() {
 }
 
 #[tokio::test]
+async fn a03d_canonical_market_date_is_accepted_by_the_exact_parser() {
+    // Proves the exact parser accepts the canonical YYYY-MM-DD form: with no
+    // DB configured the route must reach the backend_unavailable branch, not
+    // invalid_request -- i.e. parsing itself succeeded.
+    let router = build_router(no_db_state());
+    let (status, body) = get(
+        router,
+        "/api/v1/autonomous/daily-operation?market_date=2026-07-20",
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["truth_state"].as_str().unwrap(), "backend_unavailable");
+}
+
+#[tokio::test]
+async fn a03e_leading_whitespace_market_date_returns_400() {
+    let router = build_router(no_db_state());
+    // `%20` URL-decodes to a leading space -- the exact parser must reject
+    // it, never trim it away (E4 exact-parser repair).
+    let (status, body) = get(
+        router,
+        "/api/v1/autonomous/daily-operation?market_date=%202026-07-20",
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["truth_state"].as_str().unwrap(), "invalid_request");
+}
+
+#[tokio::test]
+async fn a03f_trailing_whitespace_market_date_returns_400() {
+    let router = build_router(no_db_state());
+    // `%20` URL-decodes to a trailing space -- the exact parser must reject
+    // it, never trim it away (E4 exact-parser repair).
+    let (status, body) = get(
+        router,
+        "/api/v1/autonomous/daily-operation?market_date=2026-07-20%20",
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["truth_state"].as_str().unwrap(), "invalid_request");
+}
+
+#[tokio::test]
+async fn a03g_non_zero_padded_market_date_returns_400() {
+    let router = build_router(no_db_state());
+    let (status, body) = get(
+        router,
+        "/api/v1/autonomous/daily-operation?market_date=2026-7-2",
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["truth_state"].as_str().unwrap(), "invalid_request");
+}
+
+#[tokio::test]
+async fn a03h_sign_prefixed_market_date_returns_400() {
+    let router = build_router(no_db_state());
+    // `%2B` URL-decodes to a literal `+` (a bare `+` in a query string
+    // decodes to a space under application/x-www-form-urlencoded rules).
+    let (status, body) = get(
+        router,
+        "/api/v1/autonomous/daily-operation?market_date=%2B2026-07-20",
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["truth_state"].as_str().unwrap(), "invalid_request");
+}
+
+#[tokio::test]
+async fn a03i_trailing_suffix_market_date_returns_400() {
+    let router = build_router(no_db_state());
+    let (status, body) = get(
+        router,
+        "/api/v1/autonomous/daily-operation?market_date=2026-07-20Z",
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["truth_state"].as_str().unwrap(), "invalid_request");
+}
+
+#[tokio::test]
+async fn a03j_unicode_fullwidth_digit_market_date_returns_400() {
+    let router = build_router(no_db_state());
+    // Fullwidth digit forms (U+FF10..U+FF19) are not ASCII digits -- the
+    // exact parser must reject them even though some lenient date parsers
+    // treat them as digit lookalikes. Percent-encoded byte-for-byte so the
+    // request URI itself stays pure ASCII.
+    let raw = "\u{FF12}\u{FF10}\u{FF12}\u{FF16}-\u{FF10}\u{FF17}-\u{FF12}\u{FF10}";
+    let encoded: String = raw.as_bytes().iter().map(|b| format!("%{b:02X}")).collect();
+    let (status, body) = get(
+        router,
+        &format!("/api/v1/autonomous/daily-operation?market_date={encoded}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["truth_state"].as_str().unwrap(), "invalid_request");
+}
+
+#[tokio::test]
 async fn a04_post_to_single_route_is_not_registered() {
     let router = build_router(no_db_state());
     let status = post_status(router, "/api/v1/autonomous/daily-operation").await;
