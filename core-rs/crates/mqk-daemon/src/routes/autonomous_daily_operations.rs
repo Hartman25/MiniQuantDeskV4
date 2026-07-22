@@ -100,9 +100,20 @@ pub(crate) enum ActivityCounts {
 /// and `inbox_load_all_for_run` are called. Never recomputes coverage or
 /// reruns `classify_autonomous_daily_outcome`.
 pub(crate) async fn gather_daily_operation_activity_counts(
+    st: &AppState,
     pool: &PgPool,
     operation: &AutonomousDailyOperationRecord,
 ) -> ActivityCounts {
+    // AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E4-READ-TRUTH-AND-EVIDENCE-STATE-REPAIR-01:
+    // test-only deterministic override (always false in production; see
+    // `AppState::force_activity_counts_database_unavailable_for_test`) so
+    // scenario tests can drive the real single/history/summary route
+    // handlers through a downstream count-read failure without corrupting a
+    // shared test database.
+    if st.force_activity_counts_database_unavailable_for_test {
+        return ActivityCounts::DatabaseUnavailable;
+    }
+
     let lineage =
         match mqk_db::fetch_and_validate_autonomous_daily_operation_run_lineage(pool, operation)
             .await
@@ -177,31 +188,57 @@ struct DailyOperationOutcomeProjection {
 /// `outcome_class`/`outcome_reason_code`/`finalized_at_utc` are read
 /// verbatim from `record.outcome`/`record.finalized_at_utc` when `state` is
 /// one of the three `completed*` values; every nonterminal row projects
-/// `null` for all three.
+/// `null` for all three. The terminal outcome itself is durable truth and is
+/// always projected regardless of whether the read-model activity counts
+/// could be gathered — but terminal `evidence_state`/`evidence_blockers`
+/// must honor `counts`: `complete` is never returned when a required count
+/// is unavailable, and a generic administrative `completed` row never
+/// certifies the automatic no-trade/with-activity evidence-completeness
+/// chain even when counts are available (it projects `pending` instead).
 fn project_daily_operation_outcome(
     record: &AutonomousDailyOperationRecord,
     counts: &ActivityCounts,
 ) -> DailyOperationOutcomeProjection {
     let state = record.state.as_str();
 
+    // `is_automatic_terminal` distinguishes the two classifier-produced
+    // terminal states (which certify evidence completeness once counts are
+    // available) from generic administrative `completed` (which never does).
     let terminal_outcome_class = if state == mqk_db::STATE_COMPLETED_NO_TRADE {
-        Some("no_trade")
+        Some(("no_trade", true))
     } else if state == mqk_db::STATE_COMPLETED_WITH_ACTIVITY {
-        Some("with_activity")
+        Some(("with_activity", true))
     } else if state == mqk_db::STATE_COMPLETED {
-        Some("completed")
+        Some(("completed", false))
     } else {
         None
     };
 
-    if let Some(class) = terminal_outcome_class {
+    if let Some((class, is_automatic_terminal)) = terminal_outcome_class {
+        let (evidence_state, evidence_blockers) = match counts {
+            ActivityCounts::LineageUnavailable => (
+                "unavailable".to_string(),
+                vec!["unknown_run_lineage_unavailable".to_string()],
+            ),
+            ActivityCounts::DatabaseUnavailable => (
+                "unavailable".to_string(),
+                vec!["unknown_database_unavailable".to_string()],
+            ),
+            ActivityCounts::Available { .. } => {
+                if is_automatic_terminal {
+                    ("complete".to_string(), Vec::new())
+                } else {
+                    ("pending".to_string(), Vec::new())
+                }
+            }
+        };
         return DailyOperationOutcomeProjection {
             outcome_class: Some(class.to_string()),
             outcome_reason_code: record.outcome.clone(),
             finalized_at_utc: record.finalized_at_utc.map(|t| t.to_rfc3339()),
             finalization_status: "finalized".to_string(),
-            evidence_state: "complete".to_string(),
-            evidence_blockers: Vec::new(),
+            evidence_state,
+            evidence_blockers,
         };
     }
 
@@ -299,6 +336,20 @@ pub(crate) fn build_operation_api_row(
     }
 }
 
+/// Shared pure mapping (E4 read-truth repair) from an activity-count outcome
+/// to the top-level `truth_state` every one of the single route, history
+/// route, and additive summary block must report. A lineage contradiction
+/// is a successfully-read-but-unavailable-evidence case — the durable
+/// operation row itself was read fine, so it maps to `active` (with
+/// `evidence_state="unavailable"` carrying the actual gap). Only a genuine
+/// downstream database-read failure ever produces `query_failed` here.
+pub(crate) fn response_truth_state_for_counts(counts: &ActivityCounts) -> &'static str {
+    match counts {
+        ActivityCounts::Available { .. } | ActivityCounts::LineageUnavailable => "active",
+        ActivityCounts::DatabaseUnavailable => "query_failed",
+    }
+}
+
 fn summary_with_truth_state(truth_state: &str) -> AutonomousDailyOperationSummary {
     AutonomousDailyOperationSummary {
         truth_state: truth_state.to_string(),
@@ -315,12 +366,13 @@ fn summary_with_truth_state(truth_state: &str) -> AutonomousDailyOperationSummar
 }
 
 fn build_active_summary(
+    truth_state: &str,
     record: &AutonomousDailyOperationRecord,
     counts: &ActivityCounts,
 ) -> AutonomousDailyOperationSummary {
     let projection = project_daily_operation_outcome(record, counts);
     AutonomousDailyOperationSummary {
-        truth_state: "active".to_string(),
+        truth_state: truth_state.to_string(),
         operation_id: Some(record.operation_id.to_string()),
         market_date: Some(record.market_date.format("%Y-%m-%d").to_string()),
         state: Some(record.state.clone()),
@@ -386,8 +438,8 @@ pub(crate) async fn compute_daily_operation_summary(
     .await
     {
         Ok(Some(record)) => {
-            let counts = gather_daily_operation_activity_counts(pool, &record).await;
-            build_active_summary(&record, &counts)
+            let counts = gather_daily_operation_activity_counts(st, pool, &record).await;
+            build_active_summary(response_truth_state_for_counts(&counts), &record, &counts)
         }
         Ok(None) => summary_with_truth_state("not_found"),
         Err(_) => summary_with_truth_state("query_failed"),
@@ -429,9 +481,7 @@ pub(crate) async fn autonomous_daily_operation(
                     Json(single_response(
                         "invalid_request",
                         None,
-                        Some(format!(
-                            "invalid market_date '{raw}'; expected exact YYYY-MM-DD"
-                        )),
+                        Some("market_date must use exact YYYY-MM-DD format".to_string()),
                     )),
                 )
                     .into_response();
@@ -479,11 +529,12 @@ pub(crate) async fn autonomous_daily_operation(
     .await
     {
         Ok(Some(record)) => {
-            let counts = gather_daily_operation_activity_counts(pool, &record).await;
+            let counts = gather_daily_operation_activity_counts(st.as_ref(), pool, &record).await;
+            let truth_state = response_truth_state_for_counts(&counts);
             let row = build_operation_api_row(&record, &counts);
             (
                 StatusCode::OK,
-                Json(single_response("active", Some(row), None)),
+                Json(single_response(truth_state, Some(row), None)),
             )
                 .into_response()
         }
@@ -545,15 +596,24 @@ pub(crate) async fn autonomous_daily_operations(
     match mqk_db::list_recent_autonomous_daily_operations(pool, effective_limit).await {
         Ok(records) => {
             let mut rows = Vec::with_capacity(records.len());
+            // Any single row's downstream count-read failure demotes the
+            // whole response's top-level truth_state to `query_failed` —
+            // never described as fully `active` while a required read
+            // failed for at least one row (E4 read-truth repair).
+            let mut truth_state = "active";
             for record in &records {
-                let counts = gather_daily_operation_activity_counts(pool, record).await;
+                let counts =
+                    gather_daily_operation_activity_counts(st.as_ref(), pool, record).await;
+                if response_truth_state_for_counts(&counts) == "query_failed" {
+                    truth_state = "query_failed";
+                }
                 rows.push(build_operation_api_row(record, &counts));
             }
             (
                 StatusCode::OK,
                 Json(AutonomousDailyOperationsResponse {
                     canonical_route: CANONICAL_HISTORY.to_string(),
-                    truth_state: "active".to_string(),
+                    truth_state: truth_state.to_string(),
                     requested_limit,
                     effective_limit,
                     rows,

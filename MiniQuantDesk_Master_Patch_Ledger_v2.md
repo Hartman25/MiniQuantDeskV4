@@ -15408,3 +15408,121 @@ NEXT AFTER E4 ACCEPTANCE: E5 only — integrated Phase E proof and closure
 unattended 10-20-session soak: NOT STARTED
 live capital: NOT READY
 ```
+
+## AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E4-READ-TRUTH-AND-EVIDENCE-STATE-REPAIR-01
+
+**Bundle:** `AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-COMBINED` | **Phase:** E4 repair — read-model
+truth and evidence-state honesty on the strictly read-only daily-operation API.
+
+**Starting HEAD:** `176b41491fd743b0de0326743623e81a142e23ff` ("api: expose autonomous daily
+operation outcomes" — the E4 commit above). **Disposition entering this repair:** E1/E2A/E2B/E3
+accepted complete; E4 implementation complete but not yet independently accepted, this read-truth
+repair required before E4 can be re-submitted for acceptance.
+
+**Confirmed defects (independent review, closed by this repair):**
+
+1. `project_daily_operation_outcome`'s terminal branch returned `evidence_state = "complete"`
+   unconditionally for any of the three `completed*` states, never consulting the gathered
+   `ActivityCounts` outcome at all — a terminal row with an unreadable lineage or a failed
+   downstream count read could falsely report complete evidence.
+2. All three response-construction sites (single route, history route,
+   `compute_daily_operation_summary`) hardcoded `truth_state: "active"` once the operation row was
+   found, regardless of whether the subsequent activity-count gather returned
+   `ActivityCounts::DatabaseUnavailable` — a required downstream read failing silently produced an
+   `active` response.
+3. Generic administrative `completed` rows received the identical `evidence_state = "complete"`
+   treatment as the two automatic classifier terminal states, falsely implying the same
+   evidence-completeness certification the E1 contract (§2) reserves for the classifier's own two
+   outputs.
+4. The malformed-`market_date` 400 response interpolated the raw, unbounded caller-controlled query
+   value directly into its message.
+5. None of the above had test or guard coverage.
+
+**Repair (`core-rs/crates/mqk-daemon/src/routes/autonomous_daily_operations.rs`,
+`core-rs/crates/mqk-daemon/src/state.rs`):**
+
+1. `project_daily_operation_outcome`'s terminal branch now matches on `ActivityCounts` exactly like
+   the nonterminal branch: `LineageUnavailable`/`DatabaseUnavailable` produce `evidence_state =
+   "unavailable"` with the matching `unknown_run_lineage_unavailable`/`unknown_database_unavailable`
+   blocker; `Available` produces `"complete"` for `completed_no_trade`/`completed_with_activity` and
+   `"pending"` for generic `completed`. The terminal outcome fields themselves
+   (`outcome_class`/`outcome_reason_code`/`finalized_at_utc`/`finalization_status`) remain
+   unconditionally projected — a durable finalization is never erased by a read-model failure.
+2. A new shared pure function, `response_truth_state_for_counts(counts: &ActivityCounts) ->
+   &'static str` (`Available`/`LineageUnavailable` → `"active"`, `DatabaseUnavailable` →
+   `"query_failed"`), is the single top-level truth-state mapping. The single route, the history
+   route (demoted to `query_failed` if *any* row hits `DatabaseUnavailable`), and
+   `compute_daily_operation_summary`'s active-record branch all call it — no second,
+   independently-derived mapping.
+3. The 400 response now returns the fixed bounded string `"market_date must use exact YYYY-MM-DD
+   format"`, never the raw query value.
+4. A narrow, test-only `AppState::force_activity_counts_database_unavailable_for_test` field
+   (default `false` in every constructor; set only via
+   `AppState::set_force_activity_counts_database_unavailable_for_test`) lets scenario tests drive the
+   real single/history/summary route handlers through a genuine `ActivityCounts::DatabaseUnavailable`
+   outcome deterministically, without corrupting the shared test database or requiring a connection
+   that fails at exactly the second query in the gather sequence. Zero production behavior impact —
+   no production call site ever sets it.
+
+**Tests** (`core-rs/crates/mqk-daemon/tests/scenario_autonomous_daily_operation_api_01.rs`, 37 → 43):
+`b06b`/`b07b` (new — terminal no-trade/with-activity rows with an invalid lineage project
+`evidence_state = "unavailable"`, never `"complete"`, top-level `truth_state` stays `active`); `b08`
+extended (generic `completed` with available counts now asserts `evidence_state = "pending"`); `b13`
+extended (asserts top-level `truth_state` stays `active` for a lineage contradiction — durable row
+read fine, only its evidence-count read-model unavailable); `b25`/`b26`/`b27` (new — single/history/
+summary responses under a forced `DatabaseUnavailable` outcome all report top-level `truth_state =
+"query_failed"`, known durable fields retained, null counts, unavailable evidence, parent gate
+fields on readiness untouched); `a03c` (new — a very long malformed `market_date` returns the fixed
+bounded message, HTTP 400, never the raw value).
+
+**Guard:** `scripts/guards/validate_autonomous_daily_paper_operations_01e4_read_only_daily_operation_api.ps1`
+gains checks `[17]`–`[22]`: `[17]` proves the terminal branch matches on `ActivityCounts` and can
+project both `"complete"` (automatic terminal states) and `"pending"` (generic `completed`), never
+unconditional `"complete"`; `[18]` proves `response_truth_state_for_counts` never maps
+`DatabaseUnavailable` to `"active"`; `[19]` proves `compute_daily_operation_summary` reuses the
+shared mapping instead of hardcoding `"active"`; `[20]` proves the invalid-request branch never
+interpolates the raw `market_date` value; `[21]`/`[22]` require the new terminal-invalid-lineage and
+downstream-count-failure regression tests by exact function name. All prior checks `[1]`–`[16]`
+unchanged and still pass.
+
+**Format/lint:** `rustfmt --check` clean on every touched Rust file. Narrow Clippy `-D warnings`
+clean on `mqk-daemon --lib` and the E4 scenario test binary. `cargo check -p mqk-db -p mqk-runtime
+-p mqk-daemon` clean. `git diff --check` / `git diff --cached --check` clean.
+
+**Files changed:** `MiniQuantDesk_Master_Patch_Ledger_v2.md`, `README.md`, `README_TECHNICAL.md`,
+`docs/specs/autonomous_daily_paper_operations_01e4_read_only_daily_operation_api.md`,
+`scripts/guards/validate_autonomous_daily_paper_operations_01e4_read_only_daily_operation_api.ps1`,
+`core-rs/crates/mqk-daemon/src/routes/autonomous_daily_operations.rs`,
+`core-rs/crates/mqk-daemon/src/state.rs`,
+`core-rs/crates/mqk-daemon/tests/scenario_autonomous_daily_operation_api_01.rs`. No migration. No
+new API route (the two existing E4 routes are unchanged in shape). No GUI changed.
+
+**Safety confirmation:**
+
+```text
+PROVIDER CALLS: no
+BROKER CALLS: no
+NETWORK CALLS: no
+REAL DAEMON STARTED: no
+PAPER ORDERS: no
+LIVE ORDERS: no
+PAPER DB TOUCHED: no
+PORT 5440 TOUCHED: no
+MIGRATION CHANGED: no
+API IMPLEMENTED: no (existing routes' response truth corrected, no new route)
+GUI CHANGED: no
+```
+
+```text
+E1: ACCEPTED — COMPLETE
+E2A: ACCEPTED — COMPLETE
+E2B: ACCEPTED — COMPLETE
+E3: ACCEPTED — COMPLETE
+E4 repair: IMPLEMENTATION COMPLETE — AWAITING CHATGPT AND OPERATOR ACCEPTANCE
+E5: NOT STARTED
+PHASE E: OPEN
+BUNDLE 3 (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-COMBINED): OPEN
+NEXT AFTER E4 ACCEPTANCE: E5 only — integrated Phase E proof and closure
+unattended 10-20-session soak: NOT STARTED
+live capital: NOT READY
+```

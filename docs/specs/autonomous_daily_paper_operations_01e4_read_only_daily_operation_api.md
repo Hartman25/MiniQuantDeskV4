@@ -11,6 +11,20 @@ Status: **IMPLEMENTATION COMPLETE — AWAITING CHATGPT AND OPERATOR ACCEPTANCE.*
 This document records what E4 built and proved; it is not itself an
 acceptance record, and it does not close Phase E or Bundle 3.
 
+**Repair pass 1** (`AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E4-READ-TRUTH-AND-EVIDENCE-STATE-REPAIR-01`,
+applied on top of the original E4 implementation commit `176b4149`): corrects five source-proven
+read-truth defects independent review found in the original draft below — see §5.3 for the full
+defect/repair description. In summary: (1) the terminal projection branch returned
+`evidence_state = "complete"` unconditionally, ignoring `ActivityCounts`, so a terminal row with an
+unreadable lineage or a failed downstream count read could falsely report complete evidence; (2) a
+downstream activity-count database failure still left the single/history/summary responses'
+top-level `truth_state` at `"active"`; (3) generic administrative `completed` rows were
+indistinguishable from the two automatic classifier terminal states for evidence-completeness
+purposes; (4) the malformed-`market_date` 400 response echoed the raw, unbounded caller-controlled
+query value into its message; (5) none of the above was covered by a test or guard check. This
+repair does not redo the original E4 audit except where a fix above required a fresh source read; it
+is not itself an acceptance record, and does not close E4, Phase E, or Bundle 3.
+
 ## 0. Accepted foundation (recorded, not re-litigated)
 
 ```text
@@ -113,6 +127,30 @@ from `fetch_autonomous_daily_operation_for_slot` is `not_found`; an absent
 is `query_failed`. An authoritative empty history list is `active`, never
 `backend_unavailable`.
 
+**Downstream count-read failure (corrected — §5.3 repair pass 1).** Finding
+the operation row itself is only the first read. A shared, pure
+`response_truth_state_for_counts` mapping decides whether the *rest* of the
+read model (the full-lineage activity counts, §6) came back clean:
+
+```text
+ActivityCounts::Available          -> "active"
+ActivityCounts::LineageUnavailable -> "active"  (durable row read fine;
+                                                  only its evidence-count
+                                                  read-model is unavailable)
+ActivityCounts::DatabaseUnavailable -> "query_failed"
+```
+
+For the single route, a `DatabaseUnavailable` count outcome sets the
+top-level `truth_state` to `query_failed` while still returning the known
+durable `operation` row (never nulled out), with all three count fields
+`null` and `evidence_state: "unavailable"`. For the history route, if *any*
+returned row hits `DatabaseUnavailable`, the whole response's top-level
+`truth_state` becomes `query_failed` — rows remain present as bounded
+partial read-model output, but every affected row carries null counts and
+unavailable evidence; the response is never described as fully `active`
+while any row's downstream read failed. The additive summary block (§7)
+applies the same mapping.
+
 ## 4. Response types
 
 Defined in `core-rs/crates/mqk-daemon/src/api_types.rs`:
@@ -148,11 +186,33 @@ state == completed                -> outcome_class = "completed"
 
 For all three: `outcome_reason_code = record.outcome` (verbatim, `None` for
 generic `completed` in the ordinary case), `finalized_at_utc =
-record.finalized_at_utc.map(rfc3339)`, `finalization_status = "finalized"`,
-`evidence_state = "complete"`, `evidence_blockers = []`. The classifier
-(`classify_autonomous_daily_outcome`) and the finalization CAS
-(`mqk_db::finalize_autonomous_daily_operation`) are never called — every
+record.finalized_at_utc.map(rfc3339)`, `finalization_status = "finalized"`.
+The classifier (`classify_autonomous_daily_outcome`) and the finalization
+CAS (`mqk_db::finalize_autonomous_daily_operation`) are never called — every
 field above is read from the already-durable row.
+
+**`evidence_state`/`evidence_blockers` (corrected — §5.3 repair pass 1)**
+depend on `counts`, exactly as the nonterminal branch's own mapping does:
+
+```text
+counts unavailable due to invalid lineage -> "unavailable",
+    blockers = ["unknown_run_lineage_unavailable"]
+counts unavailable due to a DB read failure -> "unavailable",
+    blockers = ["unknown_database_unavailable"]
+counts available AND state IN (completed_no_trade, completed_with_activity)
+    -> "complete", blockers = []
+counts available AND state == completed (generic, administrative)
+    -> "pending", blockers = []
+```
+
+The terminal outcome fields above (`outcome_class`/`outcome_reason_code`/
+`finalized_at_utc`/`finalization_status`) are always projected regardless of
+`counts` — a durably finalized terminal row is never un-finalized by a
+read-model count-read failure. Only the read-model evidence fields honor
+`counts`. `complete` is never returned for any terminal row when a required
+count is unavailable, and generic `completed` never certifies the two
+automatic terminal states' evidence-completeness chain even when counts are
+available.
 
 ### 5.2 Nonterminal projection
 
@@ -187,6 +247,70 @@ When `evidence_blockers` is otherwise empty and `record.state_reason_code`
 is one of the eight closed `unknown_*` codes the E1/E2B contract defines,
 that exact code is also surfaced in `evidence_blockers` — read verbatim,
 never re-derived.
+
+### 5.3 AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E4-READ-TRUTH-AND-EVIDENCE-STATE-REPAIR-01
+
+**Confirmed defects (closed by this repair), found by independent review of the original E4
+implementation commit `176b4149`:**
+
+1. **Terminal evidence state ignored `ActivityCounts`.** `project_daily_operation_outcome`'s
+   terminal branch returned `evidence_state = "complete"` unconditionally for any of the three
+   `completed*` states, never consulting `counts` at all. A terminal row whose full-lineage counts
+   could not be gathered (an unreadable/contradictory lineage or a failed downstream `outbox`/
+   `inbox`/evaluation-count read) therefore falsely reported complete evidence — exactly the
+   "never fabricate evidence completeness" invariant this API exists to uphold.
+2. **Downstream count-read failure did not demote the top-level `truth_state`.** All three
+   response-construction sites (single route, history route, `compute_daily_operation_summary`)
+   hardcoded `truth_state: "active"` once the operation row itself was found, regardless of whether
+   `gather_daily_operation_activity_counts` subsequently returned `ActivityCounts::DatabaseUnavailable`.
+   A required downstream read failing silently produced an `active` response.
+3. **Generic administrative `completed` was indistinguishable from the two automatic terminal
+   states for evidence-completeness purposes.** The E1 contract (§2) reserves `completed_no_trade`/
+   `completed_with_activity` for the automatic classifier and treats generic `completed` as an
+   out-of-scope future manual/administrative path with no equivalent evidence-completeness proof —
+   but the original E4 projection gave all three states the identical `"complete"` treatment.
+4. **The 400 response echoed raw caller input.** The malformed-`market_date` message interpolated
+   the raw query-string value verbatim and had no length bound, an unbounded-input-in-response-text
+   pattern this system's other fail-closed surfaces avoid.
+5. **No test or guard coverage existed for any of the above** — items 1-4 could regress silently.
+
+**Repair (`core-rs/crates/mqk-daemon/src/routes/autonomous_daily_operations.rs`):**
+
+- `project_daily_operation_outcome`'s terminal branch now matches on `counts` exactly like the
+  nonterminal branch: `LineageUnavailable`/`DatabaseUnavailable` produce `evidence_state =
+  "unavailable"` with the matching `unknown_*` blocker; `Available` produces `"complete"` for the
+  two automatic terminal states and `"pending"` for generic `completed` (§5.1/§5.2, corrected above).
+  The terminal outcome fields themselves (`outcome_class`/`outcome_reason_code`/`finalized_at_utc`/
+  `finalization_status`) are unconditionally preserved — a durable finalization is never erased by a
+  read-model failure.
+- A new shared pure function, `response_truth_state_for_counts(counts: &ActivityCounts) ->
+  &'static str`, is the single mapping from an activity-count outcome to the top-level `truth_state`
+  (§3, corrected above). All three response-construction sites (single route, history route,
+  `compute_daily_operation_summary`'s active-record branch) call it — no second, independently
+  derived mapping exists.
+- The malformed-`market_date` 400 response now returns the fixed bounded string
+  `"market_date must use exact YYYY-MM-DD format"`, never the raw query value.
+- A narrow, test-only `AppState::force_activity_counts_database_unavailable_for_test` field (default
+  `false`; set only via `AppState::set_force_activity_counts_database_unavailable_for_test`) lets
+  scenario tests drive the real single/history/summary route handlers through a genuine
+  `ActivityCounts::DatabaseUnavailable` outcome deterministically, without corrupting the shared test
+  database or requiring a connection that fails at exactly the second query in the gather sequence.
+  Zero production behavior impact: no production call site ever sets it, and it defaults to `false`
+  in every `AppState` constructor.
+
+**Tests added** (`core-rs/crates/mqk-daemon/tests/scenario_autonomous_daily_operation_api_01.rs`):
+`b06b`/`b07b` (terminal no-trade/with-activity rows with an invalid lineage project `evidence_state
+= "unavailable"`, never `"complete"`, top-level `truth_state` stays `active`); `b08` extended
+(generic `completed` with available counts projects `evidence_state = "pending"`); `b13` extended
+(top-level `truth_state` stays `active` for a lineage contradiction); `b25`/`b26`/`b27` (single/
+history/summary responses under a forced `DatabaseUnavailable` outcome all report top-level
+`truth_state = "query_failed"`, known durable fields retained, null counts, unavailable evidence);
+`a03c` (a very long malformed `market_date` returns a fixed bounded message, never the raw value).
+
+**Guard:** `scripts/guards/validate_autonomous_daily_paper_operations_01e4_read_only_daily_operation_api.ps1`
+gains checks `[17]`-`[22]` covering every repair above plus the new required regression tests.
+
+---
 
 ## 6. Full-lineage activity counts (E4.9)
 
@@ -273,15 +397,19 @@ blocks or fails) returns `query_failed` for both routes.
 ## 9. Test matrix
 
 File: `core-rs/crates/mqk-daemon/tests/scenario_autonomous_daily_operation_api_01.rs`
-(37 tests: 11 non-DB router-level tests plus one non-DB structural source
-scan, run every time; 25 DB-backed tests marked `#[ignore]`, run against the
-real isolated port-5434 test database with `--include-ignored
---test-threads=1`). All 37 pass.
+(43 tests, after the §5.3 repair pass: 12 non-DB router-level tests plus one
+non-DB structural source scan, run every time; 30 DB-backed tests marked
+`#[ignore]`, run against the real isolated port-5434 test database with
+`--include-ignored --test-threads=1`). All 43 pass.
 
 ```text
-Group A (router-level, no DB):        a01-a10
+Group A (router-level, no DB):        a01-a10 (a03c added, long malformed
+                                       market_date -> bounded 400)
 Group B (DB-backed truth/projection/counts/history/summary/read-only proof):
-  b01-b24 (b12b added for the ack-vs-fill count distinction)
+  b01-b27 (b12b added for the ack-vs-fill count distinction; b06b/b07b added
+  for terminal-projection-under-invalid-lineage; b25-b27 added for
+  downstream-count-read-failure truth-state proof — all five new in the
+  §5.3 repair pass)
 ```
 
 Regressions re-run clean, one binary at a time
@@ -311,11 +439,12 @@ instruction.
   not attempt to reconstruct a fuller multi-cause evidence history; that
   remains the transition-event log's job (`GET` operation events, out of
   scope here).
-- Generic `completed` rows project `evidence_state = "complete"` by the same
-  rule as the two automatic terminal states, since a manually/administratively
-  completed row has no further evidence gap this route can meaningfully
-  surface; this is a read projection choice, not a new evidence-integrity
-  claim.
+- (Corrected — §5.3 repair pass 1: the original draft's claim below was
+  false and has been removed.) Generic `completed` rows project
+  `evidence_state = "pending"`, never `"complete"` — a manually/
+  administratively completed row never certifies the automatic
+  evidence-completeness chain the two classifier terminal states carry, even
+  when the read-model counts themselves are available.
 
 ## 11. E5 boundary
 

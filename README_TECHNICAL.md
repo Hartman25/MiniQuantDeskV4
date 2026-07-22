@@ -149,12 +149,26 @@ classifier rerun), full-run-lineage activity counts via
 `mqk_db::fetch_and_validate_autonomous_daily_operation_run_lineage` plus one
 new narrow `mqk_db::count_strategy_signal_evaluations_for_runs` helper (no
 migration), and an additive `daily_operation` summary block on
-readiness/paper-status/preflight. A new scenario test file
-(`scenario_autonomous_daily_operation_api_01.rs`, 37 tests) proves the full
-truth-state vocabulary, terminal/nonterminal projection, lineage-scoped
-counts, history ordering/limit-clamping, summary-block fail-soft behavior,
-and zero operation/run/outbox/inbox/claim/evaluation side effects — all 37
-pass. **E4 is implementation complete, awaiting ChatGPT and operator
+readiness/paper-status/preflight. A follow-on
+AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E4-READ-TRUTH-AND-EVIDENCE-STATE-REPAIR-01
+repair closed five source-proven read-truth defects: the terminal projection
+reported `evidence_state = "complete"` regardless of whether the activity
+counts could actually be gathered; a downstream count-read failure left the
+single/history/summary responses' top-level `truth_state` at `"active"`;
+generic administrative `completed` received the same evidence-complete
+treatment as the two automatic classifier terminal states; the malformed-
+`market_date` 400 response echoed the raw, unbounded caller-controlled
+query value; and none of this had test or guard coverage. The repair adds a
+shared `response_truth_state_for_counts` mapping (reused by all three
+response-construction sites) and a narrow, always-`false`-in-production
+test-only override for deterministically exercising a downstream database
+failure. The scenario test file (`scenario_autonomous_daily_operation_api_01.rs`,
+now 43 tests) proves the full truth-state vocabulary, terminal/nonterminal
+projection honoring the activity-count outcome, lineage-scoped counts,
+history ordering/limit-clamping, summary-block fail-soft behavior,
+downstream count-read-failure truth-state demotion, and zero operation/run/
+outbox/inbox/claim/evaluation side effects — all 43 pass. **E4 (plus this
+repair) is implementation complete, awaiting ChatGPT and operator
 acceptance.** No GUI surface exists yet; that remains Phase F.
 
 The strongest current operational route is:

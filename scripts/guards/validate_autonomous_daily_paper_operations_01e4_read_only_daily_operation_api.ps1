@@ -69,6 +69,30 @@
 #        accepted and E4 as implementation-complete-awaiting-acceptance.
 #   [16] The new E4 spec doc and scenario test file both exist and are
 #        nonempty.
+#   [17] (READ-TRUTH-AND-EVIDENCE-STATE-REPAIR-01) The terminal projection
+#        branch never returns `evidence_state = "complete"` unconditionally
+#        -- it must branch on `ActivityCounts` (distinguishing the two
+#        automatic classifier terminal states, which may project
+#        `"complete"`, from generic administrative `completed`, which must
+#        never project `"complete"` even when counts are available).
+#   [18] `response_truth_state_for_counts` (or equivalent shared mapping)
+#        never maps `ActivityCounts::DatabaseUnavailable` to `"active"` --
+#        a downstream count-read failure must always demote the top-level
+#        truth_state to `"query_failed"`.
+#   [19] `compute_daily_operation_summary`'s active-record branch reuses the
+#        shared truth-state mapping (never hardcodes `truth_state: "active"`
+#        for a record whose counts might be `DatabaseUnavailable`).
+#   [20] The invalid-request branch never interpolates the raw caller-
+#        controlled `market_date` value into its response message.
+#   [21] The terminal-invalid-lineage regression tests
+#        (`b06b_terminal_no_trade_invalid_lineage_is_unavailable_not_complete`,
+#        `b07b_terminal_activity_invalid_lineage_is_unavailable_not_complete`)
+#        exist in the E4 scenario test file.
+#   [22] The downstream-count-failure truth-state regression tests
+#        (`b25_single_response_database_unavailable_counts_is_query_failed_with_known_operation`,
+#        `b26_history_response_database_unavailable_counts_is_query_failed`,
+#        `b27_summary_database_unavailable_counts_is_query_failed_parent_unchanged`)
+#        exist in the E4 scenario test file.
 #
 # Usage:
 #   powershell -ExecutionPolicy Bypass -File scripts\guards\validate_autonomous_daily_paper_operations_01e4_read_only_daily_operation_api.ps1
@@ -415,6 +439,80 @@ if (Test-FileExists "E4 scenario test file" $PathE4Test) {
         $script:Violations++
         Show-Red "  FAIL -- E4 scenario test file is suspiciously short"
     }
+}
+
+Write-Host ""
+Show-Info "--- [17] Terminal projection honors ActivityCounts -- never unconditional 'complete' ---"
+$TerminalBranchBody = Get-ContentBetween -Content $E4RouteContent `
+    -StartNeedle "if let Some((class, is_automatic_terminal)) = terminal_outcome_class {" `
+    -EndNeedle "`n    // Nonterminal projection."
+if ($null -eq $TerminalBranchBody) {
+    $script:Violations++
+    Show-Red "  FAIL -- could not locate the terminal branch's ActivityCounts-gated body (is_automatic_terminal split missing?)"
+} else {
+    Test-ContentContains "the terminal branch matches on ActivityCounts::LineageUnavailable" $TerminalBranchBody "ActivityCounts::LineageUnavailable" | Out-Null
+    Test-ContentContains "the terminal branch matches on ActivityCounts::DatabaseUnavailable" $TerminalBranchBody "ActivityCounts::DatabaseUnavailable" | Out-Null
+    Test-ContentContains "the terminal branch can still project ""complete"" for the two automatic classifier terminal states" $TerminalBranchBody '"complete".to_string()' | Out-Null
+    Test-ContentContains "the terminal branch projects ""pending"" (never ""complete"") for generic completed even when counts are available" $TerminalBranchBody '"pending".to_string()' | Out-Null
+    Test-ContentContains "the terminal branch's available-counts case is itself gated on is_automatic_terminal" $TerminalBranchBody "if is_automatic_terminal {" | Out-Null
+}
+
+Write-Host ""
+Show-Info "--- [18] DatabaseUnavailable can never produce top-level active ---"
+$TruthMappingFnBody = Get-ContentBetween -Content $E4RouteContent `
+    -StartNeedle "pub(crate) fn response_truth_state_for_counts(counts: &ActivityCounts) -> &'static str {" `
+    -EndNeedle "`n}"
+if ($null -eq $TruthMappingFnBody) {
+    $script:Violations++
+    Show-Red "  FAIL -- could not locate response_truth_state_for_counts's body"
+} else {
+    Test-ContentContains "DatabaseUnavailable maps to query_failed" $TruthMappingFnBody 'ActivityCounts::DatabaseUnavailable => "query_failed"' | Out-Null
+    Test-ContentDoesNotContain "DatabaseUnavailable is never mapped to active" $TruthMappingFnBody 'ActivityCounts::DatabaseUnavailable => "active"' | Out-Null
+    Test-ContentContains "Available/LineageUnavailable map to active" $TruthMappingFnBody 'ActivityCounts::Available { .. } | ActivityCounts::LineageUnavailable => "active"' | Out-Null
+}
+foreach ($Symbol in @(
+    "mqk_db::fetch_autonomous_daily_operation_for_slot(",
+    "list_recent_autonomous_daily_operations("
+)) {
+    Test-ContentContains "the route module still calls $Symbol (single/history lookups unchanged)" $E4RouteContent $Symbol | Out-Null
+}
+
+Write-Host ""
+Show-Info "--- [19] compute_daily_operation_summary reuses the shared truth-state mapping ---"
+$SummaryActiveBranchBody = Get-ContentBetween -Content $E4RouteContent `
+    -StartNeedle "pub(crate) async fn compute_daily_operation_summary(" `
+    -EndNeedle "`n// ---"
+if ($null -eq $SummaryActiveBranchBody) {
+    $script:Violations++
+    Show-Red "  FAIL -- could not locate compute_daily_operation_summary's body"
+} else {
+    Test-ContentContains "compute_daily_operation_summary's active-record branch calls response_truth_state_for_counts" $SummaryActiveBranchBody "response_truth_state_for_counts(&counts)" | Out-Null
+    Test-ContentDoesNotContain "compute_daily_operation_summary never hardcodes truth_state: ""active"" for the active-record branch" $SummaryActiveBranchBody 'build_active_summary("active"' | Out-Null
+}
+
+Write-Host ""
+Show-Info "--- [20] The invalid-request branch never interpolates the raw market_date value ---"
+Test-ContentDoesNotContain "the 400 response never formats the raw query value into its message" $E4RouteContent 'invalid market_date' | Out-Null
+Test-ContentDoesNotContain "the 400 response never interpolates {raw} into its message" $E4RouteContent '{raw}' | Out-Null
+Test-ContentContains "the 400 response uses a fixed bounded message" $E4RouteContent "market_date must use exact YYYY-MM-DD format" | Out-Null
+
+Write-Host ""
+Show-Info "--- [21] Terminal-invalid-lineage regression tests exist ---"
+foreach ($TestName in @(
+    "b06b_terminal_no_trade_invalid_lineage_is_unavailable_not_complete",
+    "b07b_terminal_activity_invalid_lineage_is_unavailable_not_complete"
+)) {
+    Test-ContentContains "E4 test file defines $TestName" $E4TestContent "fn $TestName(" | Out-Null
+}
+
+Write-Host ""
+Show-Info "--- [22] Downstream-count-failure truth-state regression tests exist ---"
+foreach ($TestName in @(
+    "b25_single_response_database_unavailable_counts_is_query_failed_with_known_operation",
+    "b26_history_response_database_unavailable_counts_is_query_failed",
+    "b27_summary_database_unavailable_counts_is_query_failed_parent_unchanged"
+)) {
+    Test-ContentContains "E4 test file defines $TestName" $E4TestContent "fn $TestName(" | Out-Null
 }
 
 Write-Host ""

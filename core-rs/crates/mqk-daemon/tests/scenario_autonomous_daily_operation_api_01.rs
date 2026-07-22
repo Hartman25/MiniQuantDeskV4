@@ -113,6 +113,34 @@ async fn a03b_malformed_month_day_returns_400() {
 }
 
 #[tokio::test]
+async fn a03c_long_malformed_market_date_returns_bounded_400_no_raw_echo() {
+    let router = build_router(no_db_state());
+    // A very long malformed value -- proves the 400 response body never
+    // echoes the raw caller-controlled query input and stays bounded in
+    // length regardless of how long the malformed input is (E4 read-truth
+    // repair).
+    let raw = "x".repeat(4000);
+    let (status, body) = get(
+        router,
+        &format!("/api/v1/autonomous/daily-operation?market_date={raw}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["truth_state"].as_str().unwrap(), "invalid_request");
+    assert!(body["operation"].is_null());
+    let message = body["message"].as_str().unwrap();
+    assert_eq!(
+        message, "market_date must use exact YYYY-MM-DD format",
+        "the response must use a fixed bounded message, never echo the raw input"
+    );
+    assert!(
+        message.len() < 200,
+        "the message must be a small fixed bounded string, got {} chars",
+        message.len()
+    );
+}
+
+#[tokio::test]
 async fn a04_post_to_single_route_is_not_registered() {
     let router = build_router(no_db_state());
     let status = post_status(router, "/api/v1/autonomous/daily-operation").await;
@@ -723,6 +751,12 @@ async fn b08_generic_completed_row_projects_completed() {
     assert_eq!(row["outcome_class"].as_str().unwrap(), "completed");
     assert!(row["outcome_reason_code"].is_null(), "usually null for generic completed");
     assert_eq!(row["finalization_status"].as_str().unwrap(), "finalized");
+    // Generic administrative `completed` never certifies the automatic
+    // no-trade/with-activity evidence-completeness chain, even though the
+    // counts themselves are available (never a false zero) -- this is
+    // "pending", never "complete" (E4 read-truth repair).
+    assert_eq!(row["evidence_state"].as_str().unwrap(), "pending");
+    assert!(row["evidence_blockers"].as_array().unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -974,6 +1008,155 @@ async fn b13_invalid_run_lineage_yields_null_counts_never_false_zero() {
     assert!(blockers
         .iter()
         .any(|v| v.as_str() == Some("unknown_run_lineage_unavailable")));
+    // A lineage contradiction is a successfully-read-but-unavailable-evidence
+    // case, not a query failure -- the durable operation row itself was read
+    // fine, so the top-level truth_state stays "active" (E4 read-truth
+    // repair's shared response_truth_state_for_counts mapping).
+    assert_eq!(body["truth_state"].as_str().unwrap(), "active");
+}
+
+// --- terminal projection under a downstream count-read failure ---
+
+#[tokio::test]
+#[ignore]
+async fn b06b_terminal_no_trade_invalid_lineage_is_unavailable_not_complete() {
+    let Some(pool) = maybe_db("b06b").await else {
+        return;
+    };
+    let adapter_id = unique_adapter_id("b06b");
+    let now = monday_at(20, 0, 0);
+    let market_date = NaiveDate::from_ymd_opt(2026, 7, 20).unwrap();
+
+    let op = create_operation(
+        &pool,
+        &adapter_id,
+        market_date,
+        mqk_db::STATE_AWAITING_OPEN,
+        now,
+    )
+    .await;
+    let op = transition(&pool, &op, mqk_db::STATE_START_RETRYING, None, now).await;
+    let run_1 = Uuid::new_v4();
+    insert_run(&pool, run_1, "e4api-b06b-run1", now).await;
+    let op = transition_to_running(&pool, &op, run_1, now).await;
+    let op = transition(&pool, &op, mqk_db::STATE_STOPPING, None, now).await;
+
+    // Corrupt the lineage before finalize: current run_id no longer matches
+    // any to_state='running' transition's run_id -- CurrentRunMismatch.
+    sqlx::query("update sys_autonomous_daily_operations set run_id = $1 where operation_id = $2")
+        .bind(Uuid::new_v4())
+        .bind(op.operation_id)
+        .execute(&pool)
+        .await
+        .expect("corrupt run_id ok");
+
+    let finalize_args = mqk_db::FinalizeAutonomousDailyOperationArgs {
+        operation_id: op.operation_id,
+        expected_state: op.state.clone(),
+        expected_state_version: op.state_version,
+        target_state: mqk_db::STATE_COMPLETED_NO_TRADE.to_string(),
+        outcome: mqk_db::OUTCOME_NO_TRADE_STRATEGY_EVALUATED_NO_SIGNAL.to_string(),
+        finalized_at_utc: now,
+        bounded_detail: "e4 test finalize no-trade invalid lineage".to_string(),
+    };
+    mqk_db::finalize_autonomous_daily_operation(&pool, &finalize_args)
+        .await
+        .expect("finalize ok");
+
+    let st = app_state(pool.clone(), &adapter_id);
+    let router = build_router(st);
+    let (status, body) = get(
+        router,
+        &format!("/api/v1/autonomous/daily-operation?market_date={market_date}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let row = &body["operation"];
+    // The durable terminal outcome remains projected verbatim -- a read-model
+    // count-read failure never erases already-finalized truth.
+    assert_eq!(
+        row["state"].as_str().unwrap(),
+        mqk_db::STATE_COMPLETED_NO_TRADE
+    );
+    assert_eq!(row["outcome_class"].as_str().unwrap(), "no_trade");
+    assert_eq!(row["finalization_status"].as_str().unwrap(), "finalized");
+    assert!(!row["finalized_at_utc"].is_null());
+    assert!(row["strategy_evaluation_count"].is_null());
+    assert!(row["order_activity_count"].is_null());
+    assert!(row["fill_count"].is_null());
+    // But evidence is never "complete" while a required count is unavailable.
+    assert_eq!(row["evidence_state"].as_str().unwrap(), "unavailable");
+    let blockers = row["evidence_blockers"].as_array().unwrap();
+    assert!(blockers
+        .iter()
+        .any(|v| v.as_str() == Some("unknown_run_lineage_unavailable")));
+    assert_eq!(body["truth_state"].as_str().unwrap(), "active");
+}
+
+#[tokio::test]
+#[ignore]
+async fn b07b_terminal_activity_invalid_lineage_is_unavailable_not_complete() {
+    let Some(pool) = maybe_db("b07b").await else {
+        return;
+    };
+    let adapter_id = unique_adapter_id("b07b");
+    let now = monday_at(20, 0, 0);
+    let market_date = NaiveDate::from_ymd_opt(2026, 7, 20).unwrap();
+
+    let op = create_operation(
+        &pool,
+        &adapter_id,
+        market_date,
+        mqk_db::STATE_AWAITING_OPEN,
+        now,
+    )
+    .await;
+    let op = transition(&pool, &op, mqk_db::STATE_START_RETRYING, None, now).await;
+    let run_1 = Uuid::new_v4();
+    insert_run(&pool, run_1, "e4api-b07b-run1", now).await;
+    let op = transition_to_running(&pool, &op, run_1, now).await;
+    let op = transition(&pool, &op, mqk_db::STATE_STOPPING, None, now).await;
+
+    sqlx::query("update sys_autonomous_daily_operations set run_id = $1 where operation_id = $2")
+        .bind(Uuid::new_v4())
+        .bind(op.operation_id)
+        .execute(&pool)
+        .await
+        .expect("corrupt run_id ok");
+
+    let finalize_args = mqk_db::FinalizeAutonomousDailyOperationArgs {
+        operation_id: op.operation_id,
+        expected_state: op.state.clone(),
+        expected_state_version: op.state_version,
+        target_state: mqk_db::STATE_COMPLETED_WITH_ACTIVITY.to_string(),
+        outcome: mqk_db::OUTCOME_ACTIVITY_FILL_CONFIRMED.to_string(),
+        finalized_at_utc: now,
+        bounded_detail: "e4 test finalize activity invalid lineage".to_string(),
+    };
+    mqk_db::finalize_autonomous_daily_operation(&pool, &finalize_args)
+        .await
+        .expect("finalize ok");
+
+    let st = app_state(pool.clone(), &adapter_id);
+    let router = build_router(st);
+    let (status, body) = get(
+        router,
+        &format!("/api/v1/autonomous/daily-operation?market_date={market_date}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let row = &body["operation"];
+    assert_eq!(row["outcome_class"].as_str().unwrap(), "with_activity");
+    assert_eq!(row["finalization_status"].as_str().unwrap(), "finalized");
+    assert!(row["strategy_evaluation_count"].is_null());
+    assert!(row["order_activity_count"].is_null());
+    assert!(row["fill_count"].is_null());
+    assert_eq!(row["evidence_state"].as_str().unwrap(), "unavailable");
+    let blockers = row["evidence_blockers"].as_array().unwrap();
+    assert!(blockers
+        .iter()
+        .any(|v| v.as_str() == Some("unknown_run_lineage_unavailable")));
+    assert_eq!(body["truth_state"].as_str().unwrap(), "active");
 }
 
 // --- history route ---
@@ -1217,6 +1400,156 @@ async fn b22_calling_both_routes_creates_zero_run_outbox_inbox_claim_evaluation_
     assert_eq!(
         before_evals,
         count_all(&pool, "strategy_signal_evaluations").await
+    );
+}
+
+// --- downstream count-read failure truth (E4 read-truth repair) ---
+//
+// These three tests use `AppState::set_force_activity_counts_database_unavailable_for_test`
+// -- a narrow, test-only, always-`false`-in-production override on
+// `gather_daily_operation_activity_counts` -- to drive the real single/
+// history/summary route handlers through a downstream `ActivityCounts::
+// DatabaseUnavailable` outcome deterministically, without corrupting the
+// shared test database or requiring a connection that fails at exactly the
+// second query in the gather sequence.
+
+#[tokio::test]
+#[ignore]
+async fn b25_single_response_database_unavailable_counts_is_query_failed_with_known_operation() {
+    let Some(pool) = maybe_db("b25").await else {
+        return;
+    };
+    let adapter_id = unique_adapter_id("b25");
+    let now = monday_at(20, 0, 0);
+    let market_date = NaiveDate::from_ymd_opt(2026, 7, 20).unwrap();
+    let op = create_operation(
+        &pool,
+        &adapter_id,
+        market_date,
+        mqk_db::STATE_AWAITING_OPEN,
+        now,
+    )
+    .await;
+
+    let mut inner = AppState::new_for_test_with_db_mode_and_broker(
+        pool.clone(),
+        DeploymentMode::Paper,
+        BrokerKind::Alpaca,
+    );
+    inner.set_adapter_id_for_test(&adapter_id);
+    inner.set_force_activity_counts_database_unavailable_for_test(true);
+    let st = Arc::new(inner);
+    let router = build_router(st);
+    let (status, body) = get(
+        router,
+        &format!("/api/v1/autonomous/daily-operation?market_date={market_date}"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["truth_state"].as_str().unwrap(), "query_failed");
+    let row = &body["operation"];
+    assert!(
+        !row.is_null(),
+        "the known durable operation projection must be retained"
+    );
+    assert_eq!(
+        row["operation_id"].as_str().unwrap(),
+        op.operation_id.to_string()
+    );
+    assert!(row["strategy_evaluation_count"].is_null());
+    assert!(row["order_activity_count"].is_null());
+    assert!(row["fill_count"].is_null());
+    assert_eq!(row["evidence_state"].as_str().unwrap(), "unavailable");
+    let blockers = row["evidence_blockers"].as_array().unwrap();
+    assert!(blockers
+        .iter()
+        .any(|v| v.as_str() == Some("unknown_database_unavailable")));
+}
+
+#[tokio::test]
+#[ignore]
+async fn b26_history_response_database_unavailable_counts_is_query_failed() {
+    let Some(pool) = maybe_db("b26").await else {
+        return;
+    };
+    let adapter_id = unique_adapter_id("b26");
+    let now = monday_at(20, 0, 0);
+    let market_date = NaiveDate::from_ymd_opt(2026, 7, 20).unwrap();
+    create_operation(
+        &pool,
+        &adapter_id,
+        market_date,
+        mqk_db::STATE_AWAITING_OPEN,
+        now,
+    )
+    .await;
+
+    let mut inner = AppState::new_for_test_with_db_mode_and_broker(
+        pool.clone(),
+        DeploymentMode::Paper,
+        BrokerKind::Alpaca,
+    );
+    inner.set_adapter_id_for_test(&adapter_id);
+    inner.set_force_activity_counts_database_unavailable_for_test(true);
+    let st = Arc::new(inner);
+    let router = build_router(st);
+    let (status, body) = get(router, "/api/v1/autonomous/daily-operations?limit=10").await;
+    assert_eq!(status, StatusCode::OK);
+    // At least one returned row hit a downstream count-read failure -- the
+    // whole response's top-level truth_state must never be described as
+    // fully "active".
+    assert_eq!(body["truth_state"].as_str().unwrap(), "query_failed");
+    let rows = body["rows"].as_array().unwrap();
+    let this_adapter: Vec<&Value> = rows
+        .iter()
+        .filter(|r| r["adapter_id"].as_str() == Some(adapter_id.as_str()))
+        .collect();
+    assert_eq!(this_adapter.len(), 1);
+    assert!(this_adapter[0]["strategy_evaluation_count"].is_null());
+    assert_eq!(
+        this_adapter[0]["evidence_state"].as_str().unwrap(),
+        "unavailable"
+    );
+}
+
+#[tokio::test]
+#[ignore]
+async fn b27_summary_database_unavailable_counts_is_query_failed_parent_unchanged() {
+    let Some(pool) = maybe_db("b27").await else {
+        return;
+    };
+    let adapter_id = unique_adapter_id("b27");
+    let Some(market_date_str) = resolve_todays_market_date_str() else {
+        eprintln!("b27: skipped -- canonical market date could not be resolved today");
+        return;
+    };
+    let market_date = NaiveDate::parse_from_str(&market_date_str, "%Y-%m-%d").unwrap();
+    let now = Utc::now();
+    let op = stopping_operation(&pool, &adapter_id, market_date, now).await;
+
+    let mut inner = AppState::new_for_test_with_db_mode_and_broker(
+        pool.clone(),
+        DeploymentMode::Paper,
+        BrokerKind::Alpaca,
+    );
+    inner.set_adapter_id_for_test(&adapter_id);
+    inner.set_force_activity_counts_database_unavailable_for_test(true);
+    let st = Arc::new(inner);
+    let router = build_router(st);
+    let (status, body) = get(router, "/api/v1/autonomous/readiness").await;
+    assert_eq!(status, StatusCode::OK);
+    // Parent readiness's own gate truth is untouched by the additive
+    // summary block's own failure.
+    assert_eq!(body["truth_state"].as_str().unwrap(), "active");
+    assert!(body.get("overall_ready").is_some());
+    assert!(body.get("blockers").is_some());
+    assert_eq!(
+        body["daily_operation"]["truth_state"].as_str().unwrap(),
+        "query_failed"
+    );
+    assert_eq!(
+        body["daily_operation"]["operation_id"].as_str().unwrap(),
+        op.operation_id.to_string()
     );
 }
 

@@ -166,15 +166,27 @@ outcome truth (never rerunning the classifier or finalizer), full-run-lineage
 activity counts (strategy evaluations, order activity, fills — never a false
 zero on an unreadable lineage), and one shared pure projection reused by a
 new additive `daily_operation` summary block on the readiness, paper-status,
-and preflight responses. A new scenario test file
-(`scenario_autonomous_daily_operation_api_01.rs`, 37 tests: 11 non-DB
-router-level/structural tests plus 26 DB-backed proofs) proves truth-state
-vocabulary, terminal/nonterminal projection, lineage-scoped counts, history
-ordering/limit-clamping, summary-block fail-soft behavior, and zero
-operation/run/outbox/inbox/claim/evaluation side effects from either route —
-all 37 pass. **E4 (plus this test suite) is implementation complete,
-awaiting ChatGPT and operator acceptance.** No GUI surface exists yet —
-that is Phase F, not started here.
+and preflight responses. A follow-on
+AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E4-READ-TRUTH-AND-EVIDENCE-STATE-REPAIR-01
+repair closed five read-truth defects independent review found in that
+implementation: the terminal projection could report `evidence_state =
+"complete"` without consulting the activity-count outcome at all; a
+downstream count-read failure still left the top-level `truth_state` at
+`"active"` on the single/history/summary surfaces; generic administrative
+`completed` was given the same evidence-complete treatment as the two
+automatic classifier terminal states; the malformed-`market_date` 400
+response echoed the raw, unbounded caller-controlled query value; and none
+of the above had test or guard coverage. The scenario test file
+(`scenario_autonomous_daily_operation_api_01.rs`, now 43 tests: 12 non-DB
+router-level tests plus one non-DB structural scan, run every time, plus 30
+DB-backed proofs) proves truth-state vocabulary, terminal/nonterminal
+projection honoring the activity-count outcome, lineage-scoped counts,
+history ordering/limit-clamping, summary-block fail-soft behavior, downstream
+count-read-failure truth-state demotion, and zero operation/run/outbox/
+inbox/claim/evaluation side effects from either route — all 43 pass. **E4
+(plus this repair and its test suite) is implementation complete, awaiting
+ChatGPT and operator acceptance.** No GUI surface exists yet — that is Phase
+F, not started here.
 
 The strongest current operational route is:
 
@@ -197,7 +209,7 @@ What that means in plain English:
 - Phase E2A (the durable coverage-anchor and run-lineage evidence foundation: the `autonomous_daily_coverage_bound` event, the coordinator ensure-authority seam, the completed-bar adapter's mandatory authority/mid-day-drift gate, and the raw run-lineage read/validate helper), plus its AUTHORITY-ENVELOPE-GATE-ORDERING-AND-CONCURRENCY-CLOSURE and SAME-INSTANT-CONCURRENCY-AND-SIDE-EFFECT-PROOF-01 repairs, is **accepted complete**
 - Phase E2B (the strict evidence classifier consuming E2A's authorities, the terminal finalization CAS, the two new `evidence_degraded` post-stop edges, and the commit-uncertainty/database-failure contract) is **accepted complete**
 - Phase E3 (coordinator finalization integration: wiring the accepted E2B finalizer into the durable daily coordinator's routing, current policy-input resolution, evidence-degraded recovery routing, six new bounded typed coordinator outcomes, and the E1 §12 outcome/evidence-degraded-warning notifications) is **accepted complete**
-- Phase E4 (the strictly read-only daily-operation API projection: `GET /api/v1/autonomous/daily-operation[s]`, full-run-lineage activity counts, and the additive `daily_operation` summary block on readiness/paper-status/preflight) is implementation complete, awaiting ChatGPT and operator acceptance; no GUI surface exists yet
+- Phase E4 (the strictly read-only daily-operation API projection: `GET /api/v1/autonomous/daily-operation[s]`, full-run-lineage activity counts, and the additive `daily_operation` summary block on readiness/paper-status/preflight), plus its READ-TRUTH-AND-EVIDENCE-STATE-REPAIR-01 repair (terminal evidence state now honors the activity-count outcome instead of always reporting `complete`; a downstream count-read failure now demotes the top-level `truth_state` to `query_failed`; generic administrative `completed` no longer reports evidence as complete; the malformed-`market_date` 400 response no longer echoes raw input), is implementation complete, awaiting ChatGPT and operator acceptance; no GUI surface exists yet
 - Bundle 3 is still **open** — E5 integrated Phase E closure, GUI/runbook/soak preparation, and closure audit all remain
 - paper+paper is not treated as an authoritative execution path
 - backtest deployment through the daemon is intentionally refused fail-closed

@@ -664,6 +664,14 @@ pub struct AppState {
     /// `Some(client)` in tests: the injected capability-aware fake is used directly,
     /// allowing zero-network latest-bar tests without provider credentials.
     pub latest_bar_provider_client: Option<Arc<dyn mqk_md::MarketDataProvider>>,
+    /// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E4-READ-TRUTH-AND-EVIDENCE-STATE-REPAIR-01:
+    /// Test-only override forcing `gather_daily_operation_activity_counts`
+    /// to report a downstream database read failure (`ActivityCounts::DatabaseUnavailable`)
+    /// without touching the database, so scenario tests can drive the real
+    /// single/history/summary daily-operation route handlers through a
+    /// count-read failure deterministically. Always `false` in production —
+    /// no production call site ever sets it.
+    pub(crate) force_activity_counts_database_unavailable_for_test: bool,
     /// DATA-PROVIDER-LATEST-BAR-POLL-01: Process-local last poll result for feed status.
     pub market_data_feed_status:
         Arc<RwLock<Option<crate::api_types::MarketDataFeedPollOnceResponse>>>,
@@ -1043,6 +1051,15 @@ impl AppState {
         self.runtime_selection.adapter_id = adapter_id.to_string();
     }
 
+    /// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E4-READ-TRUTH-AND-EVIDENCE-STATE-REPAIR-01:
+    /// Test helper — force the daily-operation read routes' activity-count
+    /// gather step to report `ActivityCounts::DatabaseUnavailable`
+    /// deterministically, without requiring a real broken database
+    /// connection at exactly the second query in that gather sequence.
+    pub fn set_force_activity_counts_database_unavailable_for_test(&mut self, value: bool) {
+        self.force_activity_counts_database_unavailable_for_test = value;
+    }
+
     /// DATA-INGEST-DAEMON-PROVIDER-JOBS-01: Test helper — inject a fake provider client.
     ///
     /// Allows scenario tests to verify the real sync-provider job path without
@@ -1399,6 +1416,7 @@ impl AppState {
                 }),
             provider_client: None,
             latest_bar_provider_client: None,
+            force_activity_counts_database_unavailable_for_test: false,
             market_data_feed_status: Arc::new(RwLock::new(None)),
             market_data_feed_scheduler: Arc::new(Mutex::new(
                 MarketDataFeedSchedulerRuntimeState::default(),
