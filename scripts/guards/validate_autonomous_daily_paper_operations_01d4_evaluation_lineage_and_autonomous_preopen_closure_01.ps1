@@ -211,12 +211,20 @@ Test-ContentDoesNotContain "ledger does not contain 'Phase D: CLOSED'" $LedgerCo
 $ForbiddenPhaseEClaimsD4Guard = @(
     "PHASE E: CLOSED",
     "PHASE E: COMPLETE",
-    "PHASE E: IMPLEMENTATION COMPLETE",
     "phase e runtime implementation: complete",
     "phase e outcome classifier implemented",
     "phase e is wired",
     "durable daily outcome classification is live"
 )
+# AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E5-INTEGRATED-PHASE-E-PROOF-AND-CLOSURE:
+# "PHASE E: IMPLEMENTATION COMPLETE" alone is retired from this forbidden
+# list, matching the identical reconciliation in
+# validate_autonomous_daily_paper_operations_01e_outcome_contract.ps1. This
+# check was calibrated when D4 was accepted and Phase E runtime work had not
+# started. As of E5, "PHASE E: IMPLEMENTATION COMPLETE -- AWAITING CHATGPT
+# AND OPERATOR ACCEPTANCE" is the honest, required, non-closure status --
+# never used bare as a closure claim (still forbidden above via "PHASE E:
+# CLOSED"/"PHASE E: COMPLETE").
 foreach ($Phrase in $ForbiddenPhaseEClaimsD4Guard) {
     Test-ContentDoesNotContain "ledger does not contain forbidden Phase E claim '$Phrase'" $LedgerContent $Phrase | Out-Null
 }

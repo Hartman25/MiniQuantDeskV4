@@ -259,12 +259,21 @@ Show-Info "--- [3] Phase E is not falsely marked implemented/wired/closed ---"
 $ForbiddenPhaseEClaims = @(
     "PHASE E: CLOSED",
     "PHASE E: COMPLETE",
-    "PHASE E: IMPLEMENTATION COMPLETE",
     "phase e runtime implementation: complete",
     "phase e outcome classifier implemented",
     "phase e is wired",
     "durable daily outcome classification is live"
 )
+# AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E5-INTEGRATED-PHASE-E-PROOF-AND-CLOSURE:
+# "PHASE E: IMPLEMENTATION COMPLETE" alone is retired from this forbidden list.
+# This check was calibrated at E1 (a read-only audit patch that had implemented
+# no Phase E runtime code at all) to catch a premature closure-adjacent claim.
+# As of E5, "PHASE E: IMPLEMENTATION COMPLETE -- AWAITING CHATGPT AND OPERATOR
+# ACCEPTANCE" is the honest, required, non-closure status this same document's
+# own DOCUMENTATION AND STATUS section mandates -- it is never used bare as a
+# closure claim (still forbidden above via "PHASE E: CLOSED"/"PHASE E: COMPLETE"),
+# and Bundle 3/Phase F/G remain independently guarded as open/not-started by the
+# checks below and by the dedicated E5 closure guard.
 foreach ($DocPair in @(
         @{Name="Master patch ledger"; Content=$LedgerContent},
         @{Name="Phase E1 contract doc"; Content=$ContractContent},

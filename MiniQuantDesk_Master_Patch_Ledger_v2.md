@@ -15640,3 +15640,146 @@ NEXT AFTER E4 ACCEPTANCE: E5 only — integrated Phase E proof and closure
 unattended soak: NOT STARTED
 live capital: NOT READY
 ```
+
+## AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E5-INTEGRATED-PHASE-E-PROOF-AND-CLOSURE
+
+**Bundle:** `AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-COMBINED` | **Phase:** E5 — integrated Phase E
+proof and closure.
+
+**Starting HEAD:** `11664945e90a582e6984f0eab66cf89690120769` ("fix: require exact autonomous
+market date query" — the accepted E4 exact-parser repair commit). **Disposition entering this
+patch:** E1/E2A/E2B/E3/E4 all accepted complete; E5 not started.
+
+**Mission:** integrated Phase E closure proof only — prove the accepted E2A/E2B/E3/E4 foundation
+integrates correctly end to end against the real, isolated test database and the real production
+coordinator/finalizer/API seams, using fake/in-memory notifier instrumentation only. No new
+production behavior authorized or introduced.
+
+**Delivered:**
+
+1. One new integrated scenario test file
+   (`core-rs/crates/mqk-daemon/tests/scenario_autonomous_daily_phase_e_closure_01.rs`, 6 tests, all
+   passing) proving:
+   - **Proof A** (`e5_proof_a_clean_no_trade_day_full_pipeline_and_replay`): the full durable path
+     from operation creation through immutable coverage authority, validated run lineage, complete
+     expected-bar coverage, durable stop, coordinator finalization to `completed_no_trade`, exactly
+     one lifecycle finalization event, exactly one outcome notification, and the E4 single-route
+     projection — then a direct typed-projection replay call plus a full before/after durable
+     snapshot proving zero duplicate event, zero duplicate notification, zero API-caused mutation.
+   - **Proof B** (`e5_proof_b_activity_day_full_lineage_across_two_runs`): a real two-`run_id`
+     lineage (run A records a fill and an ack, then a real `running -> recovery_retrying -> running`
+     recovery cycle binds run B, which completes every expected bar) finalizes as
+     `completed_with_activity`/`activity_fill_confirmed` even though the mutable `run_id` column
+     points at run B; the E4 report's `fill_count`/`order_activity_count`/`strategy_evaluation_count`
+     all correctly span the full lineage, cross-checked against raw per-run DB counts.
+   - **Proof C** (`e5_proof_c_evidence_blocker_notifies_once_and_recovers`): a corrupted dispatch
+     claim degrades a stopped operation to `evidence_degraded`/`unknown_unresolved_dispatch_claim`
+     with exactly one warning; an unchanged replay is silent; repairing the claim recovers through
+     `stopping` (never completing directly); the following tick finalizes with exactly one terminal
+     notification; E4 reports the blocked/degraded truth before repair and the finalized/complete
+     truth after.
+   - **Proof D** (`e5_proof_d_restart_safety_stop_terminal_and_evidence_blocker`): restart safety
+     after a durable stop, after a terminal commit, and after an evidence blocker (repair, recovery,
+     and later terminalization), each step driven by a brand-new `Arc<AppState>` — this crate's
+     established restart-proof convention (the accepted E3 `ci_09_10` pattern).
+   - **Proof E** (`e5_proof_e_api_read_only_guarantee`): a full before/after durable snapshot (state,
+     state_version, lifecycle-event count, coverage-event count, run count, dispatch-claim count,
+     strategy-evaluation count, outbox count, inbox count) across all five read routes
+     (`daily-operation`, `daily-operations`, `readiness`, `paper-status`, `system/preflight`) proves
+     zero delta from any GET call.
+   - **Proof F** (`e5_proof_f_fail_soft_api_truth`): `not_found`/`backend_unavailable`/
+     `query_failed`/an invalid-lineage evidence gap (`active` + `evidence_state=unavailable` + null
+     counts)/the exact malformed-`market_date` 400 (`invalid_request`, fixed bounded message, no raw
+     echo) all exercised together against the frozen E4 contract.
+2. New closure specification
+   (`docs/specs/autonomous_daily_paper_operations_01e_phase_e_closure.md`) recording the accepted
+   E1–E4 commits, all six integrated proofs, the complete focused regression matrix, the known
+   completed-bar-driver baseline, known limitations, and the Phase F/G/Bundle 4/soak/live-capital
+   boundaries.
+3. New closure guard
+   (`scripts/guards/validate_autonomous_daily_paper_operations_01e_phase_e_closure.ps1`) invoking
+   every E1–E4 guard and failing if any exits nonzero, plus 24 source-aware Phase-E-specific checks
+   of its own (coverage authority presence, the completed-bar authority gate, full run lineage, the
+   classifier's closed three-variant output, finalization-eligibility gating, matching-runtime-
+   ownership enforcement, terminal/blocker notification dedup, E4 read-only/mutating-call absence,
+   the exact market-date parser, every required integrated proof's presence by name, README/ledger
+   truth, and zero production-Rust/migration change).
+4. Narrow, non-semantic status-only reconciliation in the E2A/E2B/E3/E4 guards' own point-in-time
+   README-phrase checks (no implementation-invariant check was weakened or removed).
+5. `README.md`/`README_TECHNICAL.md`/this ledger updated to record E1–E4 as accepted and E5 as
+   implementation complete, awaiting ChatGPT and operator acceptance.
+
+**No production Rust file was modified by this patch.** No migration. No GUI change. No new API
+route or field. No classifier/finalizer/coordinator/coverage/notification behavior was altered.
+
+**Known completed-bar-driver baseline (recorded honestly, not silently skipped):**
+`scenario_autonomous_completed_bar_driver_01` — 47 passed, 9 pre-existing failures identical to the
+accepted pre-E2A baseline (`3591064a`) and every E2A/E2B/E3/E4 rerun since; 0 new Phase E failures.
+
+**Tests run** (one binary at a time, isolated port-5434 test DB, `--include-ignored
+--test-threads=1`):
+
+```text
+scenario_autonomous_daily_phase_e_closure_01                        6/6  (new, this patch)
+scenario_autonomous_daily_coverage_anchor_and_run_lineage_01        41/41
+scenario_autonomous_daily_outcome_classifier_and_finalization_01    67/67
+scenario_autonomous_daily_outcome_coordinator_integration_01        16/16
+scenario_autonomous_daily_operation_api_01                          50/50
+scenario_autonomous_daily_session_coordinator_01                    48/48
+scenario_autonomous_daily_phase_d_integration_01                     8/8
+scenario_autonomous_completed_bar_task_01                           49/49
+scenario_daily_data_readiness_start_gate_01                         20/20
+scenario_autonomous_daily_operation_store_01                        26/26
+scenario_autonomous_daily_operation_lifecycle_01                    36/36
+scenario_autonomous_daily_operation_data_evidence_01                 9/9
+scenario_signal_evaluation_journal_auton_no_signal_obs_01             7/7
+scenario_autonomous_readiness_auton_truth01                         18/18
+scenario_autonomous_paper_status_summary_01                         21/21
+scenario_daemon_routes                                              84/84
+scenario_route_contract_rt01                                         2/2
+scenario_gui_daemon_contract_gate                                   23/23
+```
+
+**Files changed:** `MiniQuantDesk_Master_Patch_Ledger_v2.md`, `README.md`, `README_TECHNICAL.md`,
+`docs/specs/autonomous_daily_paper_operations_01e_phase_e_closure.md`,
+`scripts/guards/validate_autonomous_daily_paper_operations_01e_phase_e_closure.ps1`,
+`scripts/guards/validate_autonomous_daily_paper_operations_01e2a_coverage_anchor_and_run_lineage.ps1`,
+`scripts/guards/validate_autonomous_daily_paper_operations_01e2b_outcome_classifier_and_finalization.ps1`,
+`scripts/guards/validate_autonomous_daily_paper_operations_01e3_coordinator_finalization_and_notification.ps1`,
+`scripts/guards/validate_autonomous_daily_paper_operations_01e4_read_only_daily_operation_api.ps1`,
+`core-rs/crates/mqk-daemon/tests/scenario_autonomous_daily_phase_e_closure_01.rs`. No migration. No
+production Rust file changed. No GUI changed.
+
+**Safety confirmation:**
+
+```text
+PROVIDER CALLS: no
+BROKER CALLS: no
+NETWORK CALLS: no
+REAL DAEMON STARTED: no
+PAPER ORDERS: no
+LIVE ORDERS: no
+PAPER DB TOUCHED: no
+PORT 5440 TOUCHED: no
+MIGRATION CHANGED: no
+API IMPLEMENTED: no (existing E4 routes exercised, never changed)
+GUI CHANGED: no
+```
+
+```text
+E1: ACCEPTED — COMPLETE
+E2A: ACCEPTED — COMPLETE
+E2B: ACCEPTED — COMPLETE
+E3: ACCEPTED — COMPLETE
+E4: ACCEPTED — COMPLETE
+E5: IMPLEMENTATION COMPLETE — AWAITING CHATGPT AND OPERATOR ACCEPTANCE
+PHASE E: IMPLEMENTATION COMPLETE — AWAITING CHATGPT AND OPERATOR ACCEPTANCE
+PHASE F: NOT STARTED
+PHASE G: NOT STARTED
+BUNDLE 3 (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-COMBINED): OPEN
+BUNDLE 4: NOT STARTED
+NEXT AFTER E5/PHASE E ACCEPTANCE: Phase F only — GUI projection, runbook correction, and supervised
+soak-evidence preparation
+unattended 10-20-session soak: NOT STARTED
+live capital: NOT READY
+```

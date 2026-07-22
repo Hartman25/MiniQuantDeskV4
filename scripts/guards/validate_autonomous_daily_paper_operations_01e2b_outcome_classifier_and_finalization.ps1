@@ -323,10 +323,10 @@ $ForbiddenReadmeClaims = @(
     "Bundle 3: CLOSED",
     "Bundle 3 is complete",
     "E4 implemented",
-    "E4: ACCEPTED",
-    "E4 is accepted",
-    "E4 is complete",
-    "E4: COMPLETE",
+    # AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E5-INTEGRATED-PHASE-E-PROOF-AND-
+    # CLOSURE: "E4: ACCEPTED"/"E4 is accepted"/"E4 is complete"/"E4: COMPLETE"
+    # are retired from this forbidden list -- E4 is now genuinely accepted,
+    # required by this same patch's own documentation truth above.
     "coordinator invocation is accepted",
     "soak has started",
     "soak: STARTED",
@@ -344,7 +344,13 @@ foreach ($Doc in @(@{Name = "README.md"; Content = $ReadmeContent}, @{Name = "RE
 Test-ContentContains "README.md records E2A as accepted" $ReadmeContent "E2A (plus both repairs) is now accepted" | Out-Null
 Test-ContentContains "README.md records E2B as accepted" $ReadmeContent "E2B is now accepted" | Out-Null
 Test-ContentContains "README.md records E3 as accepted" $ReadmeContent "E3 is now accepted" | Out-Null
-Test-ContentContains "README.md records E4 as implementation-complete-awaiting-acceptance" $ReadmeContent "awaiting ChatGPT and operator acceptance" | Out-Null
+# AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E5-INTEGRATED-PHASE-E-PROOF-AND-CLOSURE:
+# E4 is now accepted (recorded by the operator ahead of this patch) -- the
+# durable check going forward records E1/E2A/E2B/E3/E4 as accepted and E5 as
+# implementation-complete-awaiting-acceptance, matching this patch's own
+# required documentation truth.
+Test-ContentContains "README.md records E4 as accepted" $ReadmeContent "E4 (plus both repairs and their test suites) is now accepted" | Out-Null
+Test-ContentContains "README.md records E5 as implementation-complete-awaiting-acceptance" $ReadmeContent "is implementation complete, awaiting ChatGPT and operator acceptance" | Out-Null
 
 Write-Host ""
 Show-Info "--- [18] New E2B scenario test file exists and is nonempty ---"
