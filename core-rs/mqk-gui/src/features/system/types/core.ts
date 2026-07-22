@@ -38,6 +38,7 @@ export const CORE_PANEL_KEYS = [
   "incidents",
   "alerts",
   "session",
+  "dailyOperations",
   "config",
   "marketData",
   "ingest",

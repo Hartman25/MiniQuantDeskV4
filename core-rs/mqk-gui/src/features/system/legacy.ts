@@ -13,6 +13,9 @@
 import type { EndpointFetchResult } from "./http";
 import type {
   AdmissionCheckSurface,
+  AutonomousDailyOperationApiRow,
+  AutonomousDailyOperationSurface,
+  AutonomousDailyOperationsSurface,
   AutonomousPaperStatusSurface,
   ConfigDiffRow,
   DataSourceDetail,
@@ -1061,6 +1064,112 @@ export function mapAutonomousPaperStatusWrapper(
     next_operator_action: wrapper.next_operator_action,
     autonomous_session_state: wrapper.autonomous_session_state,
     now_utc: wrapper.now_utc,
+  };
+}
+
+// ---------------------------------------------------------------------------
+// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01F1: Daily-operation single/history
+// wrapper → surface
+//
+// GET /api/v1/autonomous/daily-operation[s] (accepted E4 read-only API).
+// Both routes always return HTTP 200 with an explicit `truth_state` for
+// every case the GUI can reach without a `market_date` query parameter (the
+// GUI never sends one in F1, so `invalid_request` is not a reachable daemon
+// truth_state here). A network/HTTP failure to reach the route at all is
+// reported by `fetchJsonCandidate` as `ok: false` — that is a GUI-only
+// transport failure and must never be relabeled as the daemon's own
+// authoritative `not_found`. Read-only visibility surfaces; never used to
+// mutate operation state.
+// ---------------------------------------------------------------------------
+
+export interface AutonomousDailyOperationResponseWrapper {
+  canonical_route: string;
+  truth_state: string;
+  operation: AutonomousDailyOperationApiRow | null;
+  message: string | null;
+}
+
+export interface AutonomousDailyOperationsResponseWrapper {
+  canonical_route: string;
+  truth_state: string;
+  requested_limit: number;
+  effective_limit: number;
+  rows: AutonomousDailyOperationApiRow[];
+  message: string | null;
+}
+
+const AUTONOMOUS_DAILY_OPERATION_VALID_TRUTH_STATES = new Set([
+  "active",
+  "not_found",
+  "backend_unavailable",
+  "query_failed",
+]);
+
+const AUTONOMOUS_DAILY_OPERATIONS_VALID_TRUTH_STATES = new Set([
+  "active",
+  "backend_unavailable",
+  "query_failed",
+]);
+
+const ENDPOINT_UNAVAILABLE_DAILY_OPERATION: AutonomousDailyOperationSurface = {
+  transport_state: "endpoint_unavailable",
+  canonical_route: null,
+  truth_state: null,
+  operation: null,
+  message: null,
+};
+
+const ENDPOINT_UNAVAILABLE_DAILY_OPERATIONS: AutonomousDailyOperationsSurface = {
+  transport_state: "endpoint_unavailable",
+  canonical_route: null,
+  truth_state: null,
+  requested_limit: null,
+  effective_limit: null,
+  rows: [],
+  message: null,
+};
+
+// Read-only mapper: preserves the daemon's truth_state verbatim. Any other
+// shape (probe failure, structurally invalid body, unrecognized truth_state)
+// maps to the explicit GUI-only "endpoint_unavailable" transport sentinel —
+// never the daemon's own "not_found", and never a fabricated healthy default.
+export function mapAutonomousDailyOperationResponse(
+  wrapper: AutonomousDailyOperationResponseWrapper | null | undefined,
+): AutonomousDailyOperationSurface {
+  if (
+    wrapper == null ||
+    typeof wrapper.truth_state !== "string" ||
+    !AUTONOMOUS_DAILY_OPERATION_VALID_TRUTH_STATES.has(wrapper.truth_state)
+  ) {
+    return ENDPOINT_UNAVAILABLE_DAILY_OPERATION;
+  }
+  return {
+    transport_state: "available",
+    canonical_route: wrapper.canonical_route,
+    truth_state: wrapper.truth_state as AutonomousDailyOperationSurface["truth_state"],
+    operation: wrapper.operation ?? null,
+    message: wrapper.message ?? null,
+  };
+}
+
+export function mapAutonomousDailyOperationsResponse(
+  wrapper: AutonomousDailyOperationsResponseWrapper | null | undefined,
+): AutonomousDailyOperationsSurface {
+  if (
+    wrapper == null ||
+    typeof wrapper.truth_state !== "string" ||
+    !AUTONOMOUS_DAILY_OPERATIONS_VALID_TRUTH_STATES.has(wrapper.truth_state)
+  ) {
+    return ENDPOINT_UNAVAILABLE_DAILY_OPERATIONS;
+  }
+  return {
+    transport_state: "available",
+    canonical_route: wrapper.canonical_route,
+    truth_state: wrapper.truth_state as AutonomousDailyOperationsSurface["truth_state"],
+    requested_limit: wrapper.requested_limit,
+    effective_limit: wrapper.effective_limit,
+    rows: wrapper.rows ?? [],
+    message: wrapper.message ?? null,
   };
 }
 

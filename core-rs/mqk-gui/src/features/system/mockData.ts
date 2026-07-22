@@ -818,6 +818,25 @@ export const MOCK_MODEL: SystemModel = {
   autonomousLastSignalQty: null,
   autonomousBarContextSource: null,
   autonomousBlockers: [],
+  // AUTONOMOUS-DAILY-PAPER-OPERATIONS-01F1: this mock model intentionally
+  // never fabricates a healthy daily-operation row — the endpoint_unavailable
+  // sentinel is used here just as it is in every other fail-closed fallback.
+  autonomousDailyOperation: {
+    transport_state: "endpoint_unavailable",
+    canonical_route: null,
+    truth_state: null,
+    operation: null,
+    message: null,
+  },
+  autonomousDailyOperations: {
+    transport_state: "endpoint_unavailable",
+    canonical_route: null,
+    truth_state: null,
+    requested_limit: null,
+    effective_limit: null,
+    rows: [],
+    message: null,
+  },
   dataSource: {
     state: "mock",
     reachable: true,

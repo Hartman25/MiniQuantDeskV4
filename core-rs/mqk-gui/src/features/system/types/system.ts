@@ -3,6 +3,7 @@
 // Top-level system status, preflight, metadata, and the composite SystemModel.
 // Also owns DEFAULT_STATUS and DEFAULT_PREFLIGHT constants.
 
+import type { AutonomousDailyOperationSurface, AutonomousDailyOperationsSurface } from "./autonomousDailyOperations";
 import type { DataSourceDetail, ExplicitSurfaceTruth, HealthState, PanelSourceMap, RuntimeStatus, EnvironmentMode } from "./core";
 import type { ExecutionOrderRow, ExecutionOutboxSurface, ExecutionSummary, FillQualityRow, FillQualitySurface, OmsOverview, OrderCausalityResponse, OrderChartResponse, OrderReplayResponse, OrderTimelineSurface, OrderTraceResponse, ReconcileSummary } from "./execution";
 import type { ArtifactRegistrySummary, ConfigFingerprintSummary, MarketDataQualitySummary, RuntimeLeadershipSummary, ServiceTopology, SessionStateSummary, SystemMetrics, TransportSummary } from "./infra";
@@ -387,6 +388,20 @@ export interface SystemModel {
   autonomousBarContextSource: string | null;
   /** Autonomous readiness blockers. Empty when not applicable or all gates pass. */
   autonomousBlockers: string[];
+  /**
+   * AUTONOMOUS-DAILY-PAPER-OPERATIONS-01F1: durable outcome truth for the
+   * current canonical (market_date, deployment_mode, adapter_id) slot.
+   * Source: GET /api/v1/autonomous/daily-operation. Read-only; distinct from
+   * autonomousPaperStatus (in-memory/session composite) and sessionState
+   * (calendar/trading-window truth) — this answers "did today's autonomous
+   * run finalize, and with what evidence."
+   */
+  autonomousDailyOperation: AutonomousDailyOperationSurface;
+  /**
+   * AUTONOMOUS-DAILY-PAPER-OPERATIONS-01F1: recent autonomous daily-operation
+   * history, daemon order preserved. Source: GET /api/v1/autonomous/daily-operations.
+   */
+  autonomousDailyOperations: AutonomousDailyOperationsSurface;
   dataSource: DataSourceDetail;
   panelSources: PanelSourceMap;
   connected: boolean;

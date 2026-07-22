@@ -15880,3 +15880,157 @@ BUNDLE 4: NOT STARTED
 SOAK: NOT STARTED
 LIVE CAPITAL: NOT READY
 ```
+
+---
+
+## AUTONOMOUS-DAILY-PAPER-OPERATIONS-01F1-GUI-DAILY-OPERATION-TRUTH-PROJECTION
+
+**Bundle:** `AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-COMBINED` | **Phase:** F1 — GUI autonomous
+daily-operation truth projection.
+
+**Disposition entering this patch:** E1–E5 accepted complete; Phase E accepted complete in full
+(independent ChatGPT/operator acceptance recorded ahead of this patch, per the operator-supplied
+"ACCEPTED FOUNDATION" record). Phase F open; F1 not started.
+
+**Mission:** build a read-only GUI operator surface for the accepted E4 daily-operation API
+(`GET /api/v1/autonomous/daily-operation[s]`), without reopening, redesigning, or reinterpreting
+any E1–E5 backend behavior, and without touching any daemon production Rust file or migration.
+
+**Delivered (GUI-only; no daemon production Rust file, no migration):**
+
+1. **GUI response types**
+   (`core-rs/mqk-gui/src/features/system/types/autonomousDailyOperations.ts`) — strict mirror of
+   the daemon's `AutonomousDailyOperationApiRow`/`Response`/`sResponse`, plus a GUI-only
+   `transport_state` (`"available" | "endpoint_unavailable"`) layered in front of the daemon's own
+   `truth_state` vocabulary so a network/HTTP failure can never masquerade as the daemon's
+   authoritative `not_found`.
+2. **Wrapper mappers** (`core-rs/mqk-gui/src/features/system/legacy.ts`) —
+   `mapAutonomousDailyOperationResponse`/`mapAutonomousDailyOperationsResponse` follow the same
+   fail-closed convention every other wrapper mapper in this file already uses: an unrecognized or
+   malformed response maps to the fixed `endpoint_unavailable` sentinel, never a guessed truth state.
+3. **Operator-model integration** (`core-rs/mqk-gui/src/features/system/api.ts`) — both canonical
+   routes added to the existing tracked `probes` array in `fetchOperatorModel` (not a fire-and-forget
+   sibling fetch) — a success lands the route in `dataSource.realEndpoints`, a failure in
+   `dataSource.missingEndpoints`. `SystemModel` gained exactly two new fields:
+   `autonomousDailyOperation`/`autonomousDailyOperations`. No second polling timer; the existing
+   `useOperatorModel` interval is reused. No mock-data fallback.
+4. **Dedicated operator screen**
+   (`core-rs/mqk-gui/src/features/autonomousDailyOperations/AutonomousDailyOperationsScreen.tsx`,
+   screen key `dailyOperations`, title "Daily Operations") registered in `MONITOR_GROUPS.operator`
+   next to Dashboard/Ops/Session, and in the left rail next to Session. Renders current-operation
+   truth (finalization status, outcome class/reason, evidence state/blockers, bar/activity counters,
+   identity, timestamps) and recent history in the daemon's own preserved order.
+   **Zero mutation/action controls** — no button, form, input, `onClick`, `postJson`, or
+   `invokeOperatorAction` reference anywhere in the screen source, proven both by source-text grep
+   and by a rendered-markup assertion.
+5. **Null-count-vs-zero handling**
+   (`core-rs/mqk-gui/src/features/autonomousDailyOperations/formatDailyOperationCount.ts`) — a
+   single pure formatter routes all three full-run-lineage activity counts
+   (`strategy_evaluation_count`/`order_activity_count`/`fill_count`) through one place:
+   `null → "Unavailable"`, a real `0 → "0"`.
+6. **Source authority** (`core-rs/mqk-gui/src/features/system/sourceAuthority.ts`) — a dedicated
+   `classifyDailyOperationsSourceAuthority` helper, distinct from the existing coarse per-panel
+   `classifyPanelSources`, implements the required section-level availability matrix: both surfaces
+   available → both sections render their own typed truth; one unavailable → only that section shows
+   an unavailable notice; both unavailable → one screen-level fail-closed notice. `dailyOperations`
+   was also added as a `CorePanelKey` (db-hinted on both routes) purely so the generic
+   `WorkspaceFrame` authority badge every screen already shows works for this screen too — this is
+   independent of, and does not replace, the bespoke per-section helper above.
+7. **Phase-guard reconciliation** — `scripts/guards/validate_autonomous_daily_paper_operations_01e_phase_e_closure.ps1`'s
+   committed-range check is fixed to the immutable `11664945e90a582e6984f0eab66cf89690120769..4b6eec72cb65dec1fc2a8793e9d9d7bdde8328b4`
+   Phase E range (never `..HEAD`, which would misfire once Phase F's own GUI files land in history)
+   plus new ancestor checks (`base` is an ancestor of the accepted Phase E head; the accepted Phase E
+   head is an ancestor of current `HEAD`). A new dedicated F1 guard,
+   `scripts/guards/validate_autonomous_daily_paper_operations_01f1_gui_daily_operation_projection.ps1`,
+   validates this patch's own scope (both routes fetched, screen registered under the operator group,
+   no truth-state collapsing, no false-zero counts, no discarded evidence blockers, no history
+   re-sort, no mutation control, no daemon production Rust/migration file touched, no F2/F3/soak/
+   live-capital overclaim).
+8. **Tests** — 4 new focused GUI test files under
+   `core-rs/mqk-gui/src/features/autonomousDailyOperations/__tests__/` covering both routes being
+   requested; every truth-state distinction preserved (`not_found`/`backend_unavailable`/
+   `query_failed`/`endpoint_unavailable`); active no-trade and with-activity rows mapped without
+   reinterpretation; `awaiting_finalization` and evidence-degraded blockers retained; generic
+   `completed` staying generic; null-vs-zero count rendering; history order/empty/partial-query-failed
+   behavior; screen registration and reachability; the absence of any mutation control; the
+   `classifyDailyOperationsSourceAuthority` matrix; and that the fallback/unavailable mapping
+   fabricates no healthy truth. All registered in `core-rs/mqk-gui/package.json`'s `test` script.
+   `npm test` (832 tests) and `npm run build` both pass.
+
+**No daemon route, response field, classifier, finalizer, coordinator, notification, coverage, or
+lineage change is made by this patch.** No production Rust file touched. No migration touched.
+
+**Backend regression proof (no daemon change required):** `scenario_autonomous_daily_operation_api_01`
+(50/50), `scenario_gui_daemon_contract_gate` (23/23), `scenario_daemon_routes` (73/73, 11 ignored, not
+required) — all re-run unmodified against unmodified daemon source.
+
+**Known compatibility-session-event follow-up:** the coordinator's per-tick compatibility write
+(`AutonomousSessionTruth` → `sys_autonomous_session_events`), already documented by E5's own closure
+spec as re-asserted on every tick including a read-only replay, remains recorded as a **Phase G
+efficiency/audit follow-up** — it is not an API GET side effect (the GUI's two routes cause zero DB
+mutation, per the accepted E5 read-only proof and this patch's own structural no-mutating-symbol
+checks) and it is not operation lifecycle authority. F1 does not modify it.
+
+**Files changed:**
+`docs/specs/autonomous_daily_paper_operations_01f1_gui_daily_operation_projection.md`,
+`scripts/guards/validate_autonomous_daily_paper_operations_01e_phase_e_closure.ps1`,
+`scripts/guards/validate_autonomous_daily_paper_operations_01f1_gui_daily_operation_projection.ps1`,
+`core-rs/mqk-gui/src/features/system/types.ts`,
+`core-rs/mqk-gui/src/features/system/types/autonomousDailyOperations.ts` (new),
+`core-rs/mqk-gui/src/features/system/types/core.ts`,
+`core-rs/mqk-gui/src/features/system/types/system.ts`,
+`core-rs/mqk-gui/src/features/system/legacy.ts`,
+`core-rs/mqk-gui/src/features/system/api.ts`,
+`core-rs/mqk-gui/src/features/system/sourceAuthority.ts`,
+`core-rs/mqk-gui/src/features/system/useOperatorModel.ts`,
+`core-rs/mqk-gui/src/features/system/useSystemModel.ts`,
+`core-rs/mqk-gui/src/features/system/mockData.ts`,
+`core-rs/mqk-gui/src/features/screens/screenRegistry.tsx`,
+`core-rs/mqk-gui/src/components/layout/leftRailNav.ts`,
+`core-rs/mqk-gui/src/features/autonomousDailyOperations/AutonomousDailyOperationsScreen.tsx` (new),
+`core-rs/mqk-gui/src/features/autonomousDailyOperations/formatDailyOperationCount.ts` (new),
+`core-rs/mqk-gui/src/features/autonomousDailyOperations/__tests__/*.test.ts` (new, 4 files),
+`core-rs/mqk-gui/package.json`,
+`MiniQuantDesk_Master_Patch_Ledger_v2.md`, `README.md`, `README_TECHNICAL.md`.
+
+`useSystemModel.ts`/`mockData.ts` were touched only because they independently construct a full
+`SystemModel` literal (a legacy duplicate fallback hook and a dev-preview mock model, respectively)
+and the TypeScript compiler requires every `SystemModel` field to be present; both were given the
+same fail-closed `endpoint_unavailable` default the real fallback model uses — neither fabricates a
+healthy daily-operation row.
+
+**Safety confirmation:**
+
+```text
+PROVIDER CALLS: no
+BROKER CALLS: no
+DISCORD CALLS: no
+NETWORK CALLS: no
+REAL DAEMON STARTED: no
+PAPER ORDERS: no
+LIVE ORDERS: no
+PAPER DB TOUCHED: no
+MIGRATION CHANGED: no
+DAEMON PRODUCTION RUST CHANGED: no
+GUI CHANGED: yes (this patch's entire scope)
+```
+
+```text
+E1: ACCEPTED — COMPLETE
+E2A: ACCEPTED — COMPLETE
+E2B: ACCEPTED — COMPLETE
+E3: ACCEPTED — COMPLETE
+E4: ACCEPTED — COMPLETE
+E5: ACCEPTED — COMPLETE
+PHASE E: ACCEPTED — COMPLETE
+
+F1: IMPLEMENTATION COMPLETE — AWAITING CHATGPT AND OPERATOR ACCEPTANCE
+F2: NOT STARTED
+F3: NOT STARTED
+PHASE F: OPEN
+PHASE G: NOT STARTED
+BUNDLE 3 (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-COMBINED): OPEN
+BUNDLE 4: NOT STARTED
+SOAK: NOT STARTED
+LIVE CAPITAL: NOT READY
+```

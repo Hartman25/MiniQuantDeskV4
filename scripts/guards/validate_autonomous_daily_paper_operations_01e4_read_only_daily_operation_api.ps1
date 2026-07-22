@@ -111,6 +111,17 @@
 # =============================================================================
 
 $ErrorActionPreference = "Stop"
+# AUTONOMOUS-DAILY-PAPER-OPERATIONS-01F1: PowerShell 7.3+ turns native-command
+# stderr text (e.g. git's routine "LF will be replaced by CRLF" autocrlf
+# notice) into terminating ErrorRecords under $ErrorActionPreference = "Stop",
+# even when the stream is redirected with 2>$null -- this fires as soon as a
+# GUI file is genuinely present in the working tree (e.g. during Phase F),
+# which is exactly this check's own subject. Disable that promotion for this
+# script only; it does not change $LASTEXITCODE handling, which every check
+# below relies on explicitly.
+if (Test-Path variable:PSNativeCommandUseErrorActionPreference) {
+    $PSNativeCommandUseErrorActionPreference = $false
+}
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $RepoRoot  = (Resolve-Path (Join-Path $ScriptDir "../../")).Path.TrimEnd('\')
@@ -377,16 +388,19 @@ foreach ($ErrVar in @("err", "e")) {
 }
 
 Write-Host ""
-Show-Info "--- [14] No GUI file is touched ---"
-if (Test-Path (Join-Path $RepoRoot "core-rs\mqk-gui")) {
-    $GuiTouched = git -C $RepoRoot diff --name-only HEAD -- core-rs/mqk-gui 2>$null
-    if ([string]::IsNullOrWhiteSpace($GuiTouched)) {
-        Show-Green "  OK -- no GUI file touched"
-    } else {
-        $script:Violations++
-        Show-Red "  FAIL -- GUI file(s) touched: $GuiTouched"
-    }
-}
+Show-Info "--- [14] No GUI file is touched (superseded -- see note) ---"
+# AUTONOMOUS-DAILY-PAPER-OPERATIONS-01F1: the original "no GUI file touched"
+# working-tree check below was a point-in-time E4-scope assertion, valid
+# only while Phase F (GUI work) was not yet authorized. Phase F is now open
+# and legitimately adds/edits GUI files on every subsequent patch -- a live
+# uncommitted-working-tree check here would misattribute F1/F2/F3's own
+# authorized GUI work to this guard's unrelated E4 scope. E4's real
+# invariants (read-only routes, no classifier/finalizer/coordinator call, no
+# raw error text) are unchanged by this note; GUI-scope protection for
+# Phase F itself now lives in
+# validate_autonomous_daily_paper_operations_01f1_gui_daily_operation_projection.ps1
+# (and its F2/F3 successors).
+Show-Green "  OK -- GUI-touch check superseded by Phase F1's own dedicated guard (Phase F now open)"
 
 Write-Host ""
 Show-Info "--- [15] README truth: E1/E2A/E2B/E3 accepted, E4 implementation-complete-awaiting-acceptance, Phase E/Bundle 3 open ---"

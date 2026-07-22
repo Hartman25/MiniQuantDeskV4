@@ -1,5 +1,7 @@
 import {
   CORE_PANEL_KEYS,
+  type AutonomousDailyOperationSurface,
+  type AutonomousDailyOperationsSurface,
   type CorePanelKey,
   type DataSourceDetail,
   type PanelSourceMap,
@@ -198,6 +200,17 @@ const PANEL_EVIDENCE_HINTS: Record<CorePanelKey, PanelEvidenceHints> = {
     broker: [],
     placeholder: ["sessionState"],
   },
+  // AUTONOMOUS-DAILY-PAPER-OPERATIONS-01F1: both daily-operation routes are
+  // strictly durable Postgres reads over sys_autonomous_daily_operations —
+  // db truth only. This coarse per-panel badge is independent of the
+  // screen's own bespoke per-section classifyDailyOperationsSourceAuthority
+  // (see below), which drives the screen's actual truth-notice rendering.
+  dailyOperations: {
+    db: ["/autonomous/daily-operation"],
+    runtime: [],
+    broker: [],
+    placeholder: [],
+  },
   // Config fingerprint and runtime leadership are daemon runtime state. Diffs are DB.
   config: {
     db: ["/system/config-diffs"],
@@ -338,5 +351,41 @@ export function withClassifiedPanelSources(model: Omit<SystemModel, "panelSource
   return {
     ...model,
     panelSources: classifyPanelSources(model.dataSource, model.connected),
+  };
+}
+
+// ---------------------------------------------------------------------------
+// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01F1: dedicated source-authority helper
+// for the Daily Operations screen.
+//
+// This is intentionally separate from classifyPanelSources' coarse per-panel
+// db/runtime/broker/placeholder classification above: the Daily Operations
+// screen needs section-level (current-operation vs history) availability,
+// derived directly from each surface's own `transport_state` — never
+// inferred from the generic dataSource.realEndpoints/missingEndpoints list,
+// and never collapsed into a single whole-panel block/no-block decision.
+// ---------------------------------------------------------------------------
+
+export type DailyOperationsSectionAuthority = "available" | "unavailable";
+
+export interface DailyOperationsSourceAuthority {
+  current: DailyOperationsSectionAuthority;
+  history: DailyOperationsSectionAuthority;
+  /** True only when both the single-operation and history surfaces are unavailable. */
+  bothUnavailable: boolean;
+}
+
+export function classifyDailyOperationsSourceAuthority(
+  single: AutonomousDailyOperationSurface,
+  history: AutonomousDailyOperationsSurface,
+): DailyOperationsSourceAuthority {
+  const current: DailyOperationsSectionAuthority =
+    single.transport_state === "available" ? "available" : "unavailable";
+  const historyAuthority: DailyOperationsSectionAuthority =
+    history.transport_state === "available" ? "available" : "unavailable";
+  return {
+    current,
+    history: historyAuthority,
+    bothUnavailable: current === "unavailable" && historyAuthority === "unavailable",
   };
 }

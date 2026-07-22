@@ -12,6 +12,7 @@ export const LEFT_RAIL_SECONDARY: readonly ScreenKey[] = [
   "incidents",
   "operatorTimeline",
   "session",
+  "dailyOperations",
   "config",
   "marketData",
   "ingest",

@@ -3,6 +3,7 @@
 // Re-export surface — preserves the pre-refactor public API for all callers.
 // Domain types now live in ./types/* sub-modules.
 
+export * from "./types/autonomousDailyOperations";
 export * from "./types/core";
 export * from "./types/execution";
 export * from "./types/infra";

@@ -173,6 +173,22 @@ const FALLBACK_MODEL: SystemModel = {
   autonomousLastSignalQty: null,
   autonomousBarContextSource: null,
   autonomousBlockers: [],
+  autonomousDailyOperation: {
+    transport_state: "endpoint_unavailable",
+    canonical_route: null,
+    truth_state: null,
+    operation: null,
+    message: null,
+  },
+  autonomousDailyOperations: {
+    transport_state: "endpoint_unavailable",
+    canonical_route: null,
+    truth_state: null,
+    requested_limit: null,
+    effective_limit: null,
+    rows: [],
+    message: null,
+  },
   dataSource: {
     state: "disconnected",
     reachable: false,

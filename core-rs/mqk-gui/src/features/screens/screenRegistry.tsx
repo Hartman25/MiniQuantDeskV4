@@ -1,4 +1,5 @@
 import type { ReactElement } from "react";
+import { AutonomousDailyOperationsScreen } from "../autonomousDailyOperations/AutonomousDailyOperationsScreen";
 import { AuditScreen } from "../audit/AuditScreen";
 import { BacktestResultsScreen } from "../backtests/BacktestResultsScreen";
 import { StrategyScannerScreen } from "../strategyScanner/StrategyScannerScreen";
@@ -47,7 +48,8 @@ export type ScreenKey =
   | "artifacts"
   | "operatorTimeline"
   | "backtests"
-  | "strategyScanner";
+  | "strategyScanner"
+  | "dailyOperations";
 
 /**
  * Which monitor this screen is designed to occupy.
@@ -82,7 +84,7 @@ export interface ScreenDefinition {
  * LeftCommandRail primary/secondary split is derived from operator vs diagnostics groups.
  */
 export const MONITOR_GROUPS: Record<MonitorGroup, readonly ScreenKey[]> = {
-  operator:    ["dashboard", "ops", "portfolio", "reconcile", "strategy", "session", "config", "marketData", "ingest", "settings"],
+  operator:    ["dashboard", "ops", "portfolio", "reconcile", "strategy", "session", "dailyOperations", "config", "marketData", "ingest", "settings"],
   execution:   ["execution"],
   diagnostics: ["audit", "incidents", "alerts", "operatorTimeline", "runtime", "metrics", "topology", "transport", "artifacts", "backtests", "strategyScanner", "risk"],
 };
@@ -135,6 +137,12 @@ export const SCREEN_REGISTRY: Record<ScreenKey, ScreenDefinition> = {
     description: "Market-state and trading-window visibility for safe operator context.",
     monitorGroup: "operator",
     render: ({ model }) => <SessionScreen model={model} />,
+  },
+  dailyOperations: {
+    title: "Daily Operations",
+    description: "Durable autonomous paper-day state, final outcome, evidence posture, and recent history.",
+    monitorGroup: "operator",
+    render: ({ model }) => <AutonomousDailyOperationsScreen model={model} />,
   },
   config: {
     title: "Config",

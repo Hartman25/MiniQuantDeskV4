@@ -22,6 +22,8 @@ import {
   deriveDataSourceDetail,
   deriveExecutionSummaryFromOrders,
   mapActiveAlertsResponse,
+  mapAutonomousDailyOperationResponse,
+  mapAutonomousDailyOperationsResponse,
   mapAutonomousPaperStatusWrapper,
   mapDaemonCatalog,
   mapDryRunStrategyStatusWrapper,
@@ -42,6 +44,8 @@ import {
   mapLegacyStatusToSystemStatus,
   nowIso,
   type ActiveAlertsWrapper,
+  type AutonomousDailyOperationResponseWrapper,
+  type AutonomousDailyOperationsResponseWrapper,
   type AutonomousPaperStatusWrapper,
   type ConfigDiffsWrapper,
   type DaemonActionCatalogResponse,
@@ -524,6 +528,13 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
     // GUI-PAPER-STATUS-VISIBILITY-01: Watchlist status — read-only configured-watchlist
     // truth (no truth_state field on the backend response; GUI derives reachability).
     fetchJsonCandidates<WatchlistStatusWrapper>(["/api/v1/watchlist/status"]),
+    // AUTONOMOUS-DAILY-PAPER-OPERATIONS-01F1: durable daily-operation outcome
+    // truth (accepted E4 read-only API). Included in the tracked probes array
+    // (not a fire-and-forget sibling) so a failure to reach either route
+    // lands the canonical route in dataSource.missingEndpoints, and a
+    // successful fetch lands it in dataSource.realEndpoints.
+    fetchJsonCandidates<AutonomousDailyOperationResponseWrapper>(["/api/v1/autonomous/daily-operation"]),
+    fetchJsonCandidates<AutonomousDailyOperationsResponseWrapper>(["/api/v1/autonomous/daily-operations?limit=20"]),
     ]),
     fetchJsonCandidate<AutonomousReadinessPartial>("/api/v1/autonomous/readiness"),
     // MULTI-SYMBOL-OMS-OVERVIEW-AND-GUI-01: Multi-symbol dispatch summary
@@ -576,6 +587,8 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
     paperJournalR,
     autonomousPaperStatusR,
     watchlistStatusR,
+    autonomousDailyOperationR,
+    autonomousDailyOperationsR,
   ] = probes;
 
   const daemonReachable = statusProbe.ok || healthProbe.ok || Boolean(legacyStatusFromProbe) || probes.some((p) => p.ok);
@@ -794,6 +807,19 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
   const watchlistStatus = mapWatchlistStatusWrapper(
     watchlistStatusR.ok && watchlistStatusR.data != null
       ? (watchlistStatusR.data as WatchlistStatusWrapper)
+      : null,
+  );
+
+  // AUTONOMOUS-DAILY-PAPER-OPERATIONS-01F1: durable daily-operation outcome
+  // truth — read-only, no invocation path derived from either surface.
+  const autonomousDailyOperation = mapAutonomousDailyOperationResponse(
+    autonomousDailyOperationR.ok && autonomousDailyOperationR.data != null
+      ? (autonomousDailyOperationR.data as AutonomousDailyOperationResponseWrapper)
+      : null,
+  );
+  const autonomousDailyOperations = mapAutonomousDailyOperationsResponse(
+    autonomousDailyOperationsR.ok && autonomousDailyOperationsR.data != null
+      ? (autonomousDailyOperationsR.data as AutonomousDailyOperationsResponseWrapper)
       : null,
   );
 
@@ -1092,6 +1118,10 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
     autonomousPaperStatus,
     watchlistStatus,
     admissionCheck,
+    // AUTONOMOUS-DAILY-PAPER-OPERATIONS-01F1: read-only durable daily-operation
+    // outcome truth (current slot + recent history). Visibility only.
+    autonomousDailyOperation,
+    autonomousDailyOperations,
     // MULTI-SYMBOL-OMS-OVERVIEW-AND-GUI-01: Read-only multi-symbol dispatch
     // summary truth surface. Visibility only — no order controls derived here.
     multiSymbolDispatchSummary,

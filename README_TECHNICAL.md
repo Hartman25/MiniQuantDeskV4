@@ -207,8 +207,13 @@ production-Rust/migration/GUI checks now read the committed
 only the working tree was inspected, which sees nothing once E5's own work
 is committed) in addition to the staged/unstaged working tree. Zero
 production Rust, migration, or GUI change. **E5 (plus this closure and its
-repair) is implementation complete, awaiting ChatGPT and operator
-acceptance.** No GUI surface exists yet; that remains Phase F.
+repair) is now accepted — Phase E is accepted complete in full.** On top of
+that, `AUTONOMOUS-DAILY-PAPER-OPERATIONS-01F1-GUI-DAILY-OPERATION-TRUTH-
+PROJECTION` adds the first Phase F GUI surface: a read-only `Daily
+Operations` operator screen consuming the accepted E4 API verbatim, with no
+mutation control and no reinterpretation of daemon truth (§ "Active Bundle 3
+boundary" below). **F1 is implementation complete, awaiting ChatGPT and
+operator acceptance.**
 
 The strongest current operational route is:
 
@@ -531,9 +536,10 @@ After D4 and its evaluation-lineage repair (Phase D, accepted complete in full),
 four-times-corrected Phase E1 contract, Phase E2A (plus both repairs), Phase E2B (strict
 classifier and finalization CAS, plus its terminal-truth-precedence repair), Phase E3 (coordinator
 finalization integration and notification, plus its matching-runtime-policy-failure-gate repair),
-and Phase E4 (the read-only daily-operation API, plus both repairs) are all accepted. Bundle 3 still
-requires Phase E5's (the integrated Phase E closure proof) independent acceptance, then Phase F
-GUI/runbook/soak preparation, and Phase G final closure.
+Phase E4 (the read-only daily-operation API, plus both repairs), and Phase E5 (the integrated Phase
+E closure proof) are all accepted — Phase E is accepted complete in full. Bundle 3 still requires
+Phase F1's (the read-only GUI daily-operation truth projection) independent acceptance, then F2
+operator runbook correction, F3 supervised soak-evidence preparation, and Phase G final closure.
 
 ### Operational meaning
 
@@ -913,9 +919,10 @@ E2A (durable coverage-anchor/run-lineage evidence foundation), plus both repairs
 complete**; Phase E2B (strict outcome classifier and finalization CAS) is **accepted complete**; Phase
 E3 (coordinator finalization integration and notification) is **accepted complete**; Phase E4 (the
 read-only daily-operation API, plus both repairs) is **accepted complete**; Phase E5 (the integrated
-Phase E closure proof) is implementation complete, awaiting acceptance. Do not label the current
-`main` head as a finished autonomous-paper MVP until E5's acceptance and the later F/G phases are
-independently accepted.
+Phase E closure proof) is **accepted complete — Phase E is accepted complete in full**. Phase F1
+(the read-only GUI daily-operation truth projection) is implementation complete, awaiting
+acceptance. Do not label the current `main` head as a finished autonomous-paper MVP until F1's
+acceptance and the later F2/F3/G phases are independently accepted.
 
 ### What is expected after Bundle 3
 
@@ -1391,8 +1398,8 @@ Recommended discipline:
 
 Be honest about these:
 
-- Bundle 3 is not closed; Phase D (D1–D4, integrated lifecycle proof, dispatch-ownership race closure, and the evaluation-lineage repair) is accepted complete in full; the Phase E1 contract audit (the binding durable outcome/no-trade contract, four-times-corrected) is **accepted complete**; Phase E2A (durable coverage-anchor/run-lineage evidence foundation), plus both repairs, is **accepted complete**; Phase E2B (strict outcome classifier and finalization CAS, built on E2A's authorities) is **accepted complete**; Phase E3 (coordinator finalization integration and notification, built on E2B's classifier/CAS) is **accepted complete**; Phase E4 (the read-only daily-operation API, built on E3's accepted foundation, plus both repairs) is **accepted complete**; Phase E5 (the integrated Phase E closure proof, built on E1–E4's accepted foundation, zero production Rust change) is implementation complete but awaiting independent ChatGPT/operator acceptance, and no GUI surface exists yet
-- the current main branch should not begin an unattended soak until Phase E5's own independent acceptance and the later Bundle 3 phases (F/G) are accepted; controlled, operator-supervised autonomous Paper + Alpaca operation is the current Bundle 3 target, not unattended soak
+- Bundle 3 is not closed; Phase D (D1–D4, integrated lifecycle proof, dispatch-ownership race closure, and the evaluation-lineage repair) is accepted complete in full; the Phase E1 contract audit (the binding durable outcome/no-trade contract, four-times-corrected) is **accepted complete**; Phase E2A (durable coverage-anchor/run-lineage evidence foundation), plus both repairs, is **accepted complete**; Phase E2B (strict outcome classifier and finalization CAS, built on E2A's authorities) is **accepted complete**; Phase E3 (coordinator finalization integration and notification, built on E2B's classifier/CAS) is **accepted complete**; Phase E4 (the read-only daily-operation API, built on E3's accepted foundation, plus both repairs) is **accepted complete**; Phase E5 (the integrated Phase E closure proof, built on E1–E4's accepted foundation, zero production Rust change) is **accepted complete — Phase E is accepted complete in full**; Phase F1 (the read-only GUI daily-operation truth projection, built on E4's accepted API, zero daemon change) is implementation complete but awaiting independent ChatGPT/operator acceptance
+- the current main branch should not begin an unattended soak until Phase F1's own independent acceptance and the later Bundle 3 phases (F2, F3, G) are accepted; controlled, operator-supervised autonomous Paper + Alpaca operation is the current Bundle 3 target, not unattended soak
 - Bundle 4 durable paper cash/positions/lots/cost basis/P&L truth is still open
 - real paper fill, reconcile-after-fill, Discord lifecycle, restart, and repeated-session evidence remain incomplete
 - the daemon/operator plane is materially stronger, but some deeper GUI detail surfaces remain intentionally deferred or unmounted rather than faked

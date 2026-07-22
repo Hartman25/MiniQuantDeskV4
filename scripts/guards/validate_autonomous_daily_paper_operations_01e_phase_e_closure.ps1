@@ -54,14 +54,23 @@
 #   [22] The ledger records E1-E4 as accepted, never claims Phase E closed or
 #        Bundle 3 closed.
 #   [23] No production Rust, migration, or GUI file appears in the committed
-#        E5 patch range -- the fixed accepted-E4 head
+#        Phase E patch range -- the fixed accepted-E4 head
 #        (11664945e90a582e6984f0eab66cf89690120769) must be an ancestor of
-#        HEAD, and `git diff --name-only <base>..HEAD` (never `git diff
-#        --name-only HEAD`/`--cached` alone, which only see the working
-#        tree) is the committed-range authority.
-#   [24] No production Rust, migration, or GUI file appears in the current
-#        staged or unstaged working tree either (checked separately from
-#        the committed range in [23]).
+#        the fixed accepted Phase E head
+#        (4b6eec72cb65dec1fc2a8793e9d9d7bdde8328b4), which must in turn be an
+#        ancestor of current HEAD, and
+#        `git diff --name-only <base>..<accepted-Phase-E-head>` (a fixed,
+#        immutable range that never widens as HEAD advances past Phase E --
+#        AUTONOMOUS-DAILY-PAPER-OPERATIONS-01F1 onward legitimately adds GUI
+#        files, so this range must never become `<base>..HEAD` again once
+#        Phase F begins) is the committed-range authority.
+#   [24] No production Rust or migration file appears in the current staged
+#        or unstaged working tree (checked separately from the fixed range
+#        in [23]). GUI files are intentionally NOT forbidden in the working
+#        tree by this check once Phase F has begun -- F1 (and F2/F3) are
+#        authorized to add/edit GUI files; those patches carry their own,
+#        narrower guards (e.g. validate_autonomous_daily_paper_operations_01f1_gui_daily_operation_projection.ps1)
+#        for their own scope.
 #   [25] No `tokio::time::sleep` remains anywhere in the closure test file --
 #        every notification proof is driven by a deterministic completion
 #        signal, never an arbitrary delay.
@@ -436,17 +445,20 @@ Test-ContentContains "ledger records E5 as implementation-complete-awaiting-acce
 # -----------------------------------------------------------------------
 # [23]/[24] Committed patch-scope guard.
 #
-# The accepted E4 closing commit is the fixed base for the Phase E closure
-# range. `git diff --name-only HEAD`/`--cached` alone only ever see the
-# working tree -- once E5's repair work is committed, those two commands
-# report nothing, which would silently let a committed production/
-# migration/GUI change escape this guard entirely. The committed range
-# `$PhaseEClosureBase..HEAD` is the authority for what the E5 patch itself
-# changed; the working tree is inspected separately in [24] so an
-# in-progress (uncommitted) violation is still caught before it is
-# committed.
+# The accepted E4 closing commit is the fixed base, and the accepted E5/
+# Phase E closing commit is the fixed head, for the immutable Phase E
+# closure range. This range never widens as HEAD advances past Phase E --
+# AUTONOMOUS-DAILY-PAPER-OPERATIONS-01F1 onward legitimately adds GUI files
+# to history, and a `<base>..HEAD` range would misfire on every one of
+# those, permanently blocking Phase F. `git diff --name-only HEAD`/
+# `--cached` alone only ever see the working tree, so the fixed committed
+# range below is the authority for what actually landed inside Phase E
+# itself; the working tree is inspected separately in [24] (production
+# Rust/migration only, once Phase F has begun -- GUI files are no longer
+# forbidden there, see [24]'s header comment).
 # -----------------------------------------------------------------------
 $PhaseEClosureBase = "11664945e90a582e6984f0eab66cf89690120769"
+$PhaseEAcceptedHead = "4b6eec72cb65dec1fc2a8793e9d9d7bdde8328b4"
 
 # git's routine autocrlf notice ("LF will be replaced by CRLF...") writes to
 # stderr; under this script's own $ErrorActionPreference = "Stop" that stream
@@ -456,11 +468,14 @@ $PhaseEClosureBase = "11664945e90a582e6984f0eab66cf89690120769"
 # on, never stderr text.
 $PriorErrorActionPreference = $ErrorActionPreference
 $ErrorActionPreference = "Continue"
-& git -C $RepoRoot merge-base --is-ancestor $PhaseEClosureBase HEAD 2>$null
-$BaseIsAncestor = ($LASTEXITCODE -eq 0)
+& git -C $RepoRoot merge-base --is-ancestor $PhaseEClosureBase $PhaseEAcceptedHead 2>$null
+$BaseIsAncestorOfAcceptedHead = ($LASTEXITCODE -eq 0)
+& git -C $RepoRoot merge-base --is-ancestor $PhaseEAcceptedHead HEAD 2>$null
+$AcceptedHeadIsAncestorOfHead = ($LASTEXITCODE -eq 0)
+$BaseIsAncestor = $BaseIsAncestorOfAcceptedHead -and $AcceptedHeadIsAncestorOfHead
 $CommittedRange = @()
-if ($BaseIsAncestor) {
-    $CommittedRange = git -C $RepoRoot diff --name-only "$PhaseEClosureBase..HEAD" 2>$null
+if ($BaseIsAncestorOfAcceptedHead) {
+    $CommittedRange = git -C $RepoRoot diff --name-only "$PhaseEClosureBase..$PhaseEAcceptedHead" 2>$null
 }
 $UnstagedChanges = git -C $RepoRoot diff --name-only 2>$null
 $StagedChanges = git -C $RepoRoot diff --name-only --cached 2>$null
@@ -471,10 +486,9 @@ $UnstagedClean = @($UnstagedChanges) | Where-Object { $_ -ne "" } | Select-Objec
 $StagedClean = @($StagedChanges) | Where-Object { $_ -ne "" } | Select-Object -Unique
 
 function Test-ForbiddenPatchScopePaths {
-    param([string]$Label, [string[]]$Paths)
+    param([string]$Label, [string[]]$Paths, [bool]$AlsoForbidGui = $true)
     $ProductionRust = $Paths | Where-Object { $_ -like "core-rs/*/src/*.rs" -and $_ -notlike "*/tests/*" }
     $Migrations = $Paths | Where-Object { $_ -like "core-rs/crates/mqk-db/migrations/*" }
-    $Gui = $Paths | Where-Object { $_ -like "core-rs/mqk-gui/*" }
 
     if ($null -eq $ProductionRust -or @($ProductionRust).Count -eq 0) {
         Show-Green "  OK -- $Label -- no production Rust file (core-rs/**/src/**.rs)"
@@ -490,28 +504,38 @@ function Test-ForbiddenPatchScopePaths {
         Show-Red "  FAIL -- $Label -- migration file(s): $($Migrations -join ', ')"
     }
 
-    if ($null -eq $Gui -or @($Gui).Count -eq 0) {
-        Show-Green "  OK -- $Label -- no GUI file (core-rs/mqk-gui/**)"
-    } else {
-        $script:Violations++
-        Show-Red "  FAIL -- $Label -- GUI file(s): $($Gui -join ', ')"
+    if ($AlsoForbidGui) {
+        $Gui = $Paths | Where-Object { $_ -like "core-rs/mqk-gui/*" }
+        if ($null -eq $Gui -or @($Gui).Count -eq 0) {
+            Show-Green "  OK -- $Label -- no GUI file (core-rs/mqk-gui/**)"
+        } else {
+            $script:Violations++
+            Show-Red "  FAIL -- $Label -- GUI file(s): $($Gui -join ', ')"
+        }
     }
 }
 
 Write-Host ""
-Show-Info "--- [23] Committed E5 patch range ($PhaseEClosureBase..HEAD) never touches production Rust, migrations, or GUI ---"
-if ($BaseIsAncestor) {
-    Show-Green "  OK -- $PhaseEClosureBase (accepted E4 head) is an ancestor of HEAD"
+Show-Info "--- [23] Fixed accepted Phase E range ($PhaseEClosureBase..$PhaseEAcceptedHead) never touched production Rust, migrations, or GUI ---"
+if ($BaseIsAncestorOfAcceptedHead) {
+    Show-Green "  OK -- $PhaseEClosureBase (accepted E4 head) is an ancestor of $PhaseEAcceptedHead (accepted Phase E head)"
 } else {
     $script:Violations++
-    Show-Red "  FAIL -- $PhaseEClosureBase is not an ancestor of HEAD; the committed patch-scope range cannot be established"
+    Show-Red "  FAIL -- $PhaseEClosureBase is not an ancestor of $PhaseEAcceptedHead; the fixed Phase E closure range cannot be established"
 }
-Test-ForbiddenPatchScopePaths "committed range $PhaseEClosureBase..HEAD" $CommittedRangeClean
+if ($AcceptedHeadIsAncestorOfHead) {
+    Show-Green "  OK -- $PhaseEAcceptedHead (accepted Phase E head) is an ancestor of current HEAD"
+} else {
+    $script:Violations++
+    Show-Red "  FAIL -- $PhaseEAcceptedHead (accepted Phase E head) is not an ancestor of current HEAD"
+}
+Test-ForbiddenPatchScopePaths "fixed range $PhaseEClosureBase..$PhaseEAcceptedHead" $CommittedRangeClean $true
 
 Write-Host ""
-Show-Info "--- [24] Working tree (staged and unstaged, checked separately) never touches production Rust, migrations, or GUI ---"
-Test-ForbiddenPatchScopePaths "unstaged working tree" $UnstagedClean
-Test-ForbiddenPatchScopePaths "staged working tree" $StagedClean
+Show-Info "--- [24] Working tree (staged and unstaged, checked separately) never touches production Rust or migrations ---"
+Show-Info "    (GUI files are not forbidden here once Phase F has begun -- see this check's header comment)"
+Test-ForbiddenPatchScopePaths "unstaged working tree" $UnstagedClean $false
+Test-ForbiddenPatchScopePaths "staged working tree" $StagedClean $false
 
 # -----------------------------------------------------------------------
 # [25] No sleep-based assertion authority remains in the closure test.
