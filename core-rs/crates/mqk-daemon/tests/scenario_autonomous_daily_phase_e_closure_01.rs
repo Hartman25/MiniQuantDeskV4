@@ -167,21 +167,111 @@ async fn maybe_db(label: &str) -> Option<sqlx::PgPool> {
     Some(pool)
 }
 
+/// Deterministic recorder for the loopback Discord sink's captured payloads.
+///
+/// Every payload is stored, and only *after* it is durably stored is the new
+/// count published on a `tokio::sync::watch` channel -- the watch channel is
+/// the sink's own deterministic completion signal. A `watch::Receiver`
+/// always exposes the latest published value via `borrow()` and its
+/// `changed()` future cannot miss an update that happened before it was
+/// polled, so this carries no arbitrary-delay race the way a fixed sleep
+/// would.
+struct PeAlertRecorder {
+    received: tokio::sync::Mutex<Vec<serde_json::Value>>,
+    count_tx: tokio::sync::watch::Sender<usize>,
+}
+
+impl PeAlertRecorder {
+    fn new() -> (Arc<Self>, tokio::sync::watch::Receiver<usize>) {
+        let (count_tx, count_rx) = tokio::sync::watch::channel(0usize);
+        (
+            Arc::new(Self {
+                received: tokio::sync::Mutex::new(Vec::new()),
+                count_tx,
+            }),
+            count_rx,
+        )
+    }
+
+    /// Store one received payload, then publish the new count. The publish
+    /// happens strictly after the payload is stored, so any waiter observing
+    /// the new count via `wait_for_alert_count` is guaranteed to observe the
+    /// payload too.
+    async fn record(&self, payload: serde_json::Value) {
+        let new_len = {
+            let mut guard = self.received.lock().await;
+            guard.push(payload);
+            guard.len()
+        };
+        let _ = self.count_tx.send(new_len);
+    }
+
+    /// Immediate (non-waiting) count read. Valid only where the caller has
+    /// independently established that the production notifier call for the
+    /// preceding tick was already fully `.await`ed before that tick's own
+    /// `.await` returned -- true for every coordinator tick in this file:
+    /// `notify_run_status`/`notify_critical_alert` are called with a direct
+    /// `.await` inside `run_durable_session_controller_tick`'s outcome match
+    /// arm, never spawned onto a separate task. Used only for the
+    /// zero-new-notification (replay) proofs, immediately after the
+    /// coordinator tick whose absence of a new notification is being proven.
+    async fn count_now(&self) -> usize {
+        self.received.lock().await.len()
+    }
+
+    async fn snapshot(&self) -> Vec<serde_json::Value> {
+        self.received.lock().await.clone()
+    }
+}
+
+/// Deterministically wait for the sink to have recorded at least `expected`
+/// payloads, driven entirely by [`PeAlertRecorder`]'s own watch-channel
+/// completion signal -- never an arbitrary delay. The bounded
+/// `tokio::time::timeout` is deadlock/failure protection only: it never
+/// makes the assertion pass, it only prevents a genuinely stuck test (e.g. a
+/// notification that never arrives) from hanging forever.
+async fn wait_for_alert_count(
+    recorder: &Arc<PeAlertRecorder>,
+    count_rx: &mut tokio::sync::watch::Receiver<usize>,
+    expected: usize,
+) -> Vec<serde_json::Value> {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            if *count_rx.borrow() >= expected {
+                return;
+            }
+            count_rx
+                .changed()
+                .await
+                .expect("alert recorder sender dropped while a test still awaited it");
+        }
+    })
+    .await
+    .unwrap_or_else(|_| {
+        panic!(
+            "timed out waiting for alert count >= {expected} (deadlock/failure protection only); \
+             last observed count = {}",
+            *count_rx.borrow()
+        )
+    });
+    recorder.snapshot().await
+}
+
 /// In-process loopback HTTP sink capturing every Discord webhook POST body --
 /// never a real network call.
 async fn pe_webhook_sink() -> (
     String,
-    std::sync::Arc<tokio::sync::Mutex<Vec<serde_json::Value>>>,
+    Arc<PeAlertRecorder>,
+    tokio::sync::watch::Receiver<usize>,
 ) {
-    let received: std::sync::Arc<tokio::sync::Mutex<Vec<serde_json::Value>>> =
-        std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new()));
-    let sink = std::sync::Arc::clone(&received);
+    let (recorder, count_rx) = PeAlertRecorder::new();
+    let sink = Arc::clone(&recorder);
     let app = axum::Router::new().route(
         "/",
         axum::routing::post(move |axum::Json(body): axum::Json<serde_json::Value>| {
-            let sink = std::sync::Arc::clone(&sink);
+            let sink = Arc::clone(&sink);
             async move {
-                sink.lock().await.push(body);
+                sink.record(body).await;
                 axum::http::StatusCode::NO_CONTENT
             }
         }),
@@ -191,7 +281,11 @@ async fn pe_webhook_sink() -> (
     tokio::spawn(async move {
         let _ = axum::serve(listener, app).await;
     });
-    (format!("http://127.0.0.1:{}/", addr.port()), received)
+    (
+        format!("http://127.0.0.1:{}/", addr.port()),
+        recorder,
+        count_rx,
+    )
 }
 
 /// Build a real `Arc<AppState>` wired to the test DB pool, with
@@ -731,24 +825,60 @@ async fn pe_events_count(pool: &sqlx::PgPool, operation_id: Uuid) -> i64 {
 
 /// A durable, before/after-comparable snapshot of every fact INTEGRATED
 /// PROOF E's read-only guarantee requires unchanged.
+///
+/// Scope authority is the *validated full run lineage*
+/// (`mqk_db::fetch_and_validate_autonomous_daily_operation_run_lineage`),
+/// never a single caller-supplied `run_id` -- every lineage-scoped count
+/// below sums across every run in that lineage, exactly as the accepted E4
+/// read routes themselves are required to. The global table totals exist
+/// so a GET route that creates an unrelated row under a newly generated
+/// identity cannot escape this snapshot by falling outside the
+/// operation-scoped counts.
 #[derive(Debug, PartialEq, Eq)]
 struct PeSnapshot {
+    // Operation-scoped, validated-lineage-derived facts.
     state: String,
     state_version: i64,
     lifecycle_event_count: i64,
     coverage_event_count: i64,
-    run_count: i64,
+    raw_running_transition_count: i64,
+    validated_lineage_run_count: i64,
+    lineage_run_table_row_count: i64,
     claim_count: i64,
     evaluation_count: i64,
     outbox_count: i64,
     inbox_count: i64,
+    // Global evidence-table totals (unrelated-row escape-hatch proof).
+    global_runs: i64,
+    global_bar_dispatches: i64,
+    global_strategy_evaluations: i64,
+    global_outbox: i64,
+    global_inbox: i64,
+    global_operation_events: i64,
+    global_session_events: i64,
 }
 
-async fn pe_snapshot(pool: &sqlx::PgPool, operation_id: Uuid, run_id: Uuid) -> PeSnapshot {
+async fn pe_snapshot(pool: &sqlx::PgPool, operation_id: Uuid) -> PeSnapshot {
     let record = mqk_db::fetch_autonomous_daily_operation_by_id(pool, operation_id)
         .await
         .expect("fetch ok")
         .expect("row exists");
+
+    // Full validated run lineage -- never a caller-supplied single run_id.
+    let raw_rows =
+        mqk_db::fetch_autonomous_daily_operation_running_transitions_raw(pool, operation_id)
+            .await
+            .expect("fetch raw lineage rows ok");
+    let raw_running_transition_count = raw_rows.len() as i64;
+    let lineage =
+        match mqk_db::validate_autonomous_daily_operation_run_lineage(&raw_rows, record.run_id) {
+            Ok(lineage) => lineage,
+            Err(err) => panic!(
+                "pe_snapshot: the operation's run lineage must never be contradictory, got {err:?}"
+            ),
+        };
+    let validated_lineage_run_count = lineage.len() as i64;
+
     let lifecycle_event_count = pe_events_count(pool, operation_id).await;
     let coverage_event_count: i64 =
         sqlx::query_scalar("select count(*) from sys_autonomous_session_events where id = $1")
@@ -756,11 +886,9 @@ async fn pe_snapshot(pool: &sqlx::PgPool, operation_id: Uuid, run_id: Uuid) -> P
             .fetch_one(pool)
             .await
             .expect("count ok");
-    let run_count: i64 = sqlx::query_scalar("select count(*) from runs where run_id = $1")
-        .bind(run_id)
-        .fetch_one(pool)
-        .await
-        .expect("count ok");
+
+    // Dispatch claims are scoped to the operation itself, never to a single
+    // run_id -- the same shape `pe_complete_expected_bars` writes against.
     let claim_count: i64 = sqlx::query_scalar(
         "select count(*) from sys_autonomous_daily_bar_dispatches where operation_id = $1",
     )
@@ -768,33 +896,91 @@ async fn pe_snapshot(pool: &sqlx::PgPool, operation_id: Uuid, run_id: Uuid) -> P
     .fetch_one(pool)
     .await
     .expect("count ok");
-    let evaluation_count: i64 =
-        sqlx::query_scalar("select count(*) from strategy_signal_evaluations where run_id = $1")
-            .bind(run_id)
+
+    let mut lineage_run_table_row_count: i64 = 0;
+    let mut evaluation_count: i64 = 0;
+    let mut outbox_count: i64 = 0;
+    let mut inbox_count: i64 = 0;
+    for run_id in &lineage {
+        lineage_run_table_row_count +=
+            sqlx::query_scalar::<_, i64>("select count(*) from runs where run_id = $1")
+                .bind(*run_id)
+                .fetch_one(pool)
+                .await
+                .expect("count ok");
+        evaluation_count += sqlx::query_scalar::<_, i64>(
+            "select count(*) from strategy_signal_evaluations where run_id = $1",
+        )
+        .bind(*run_id)
+        .fetch_one(pool)
+        .await
+        .expect("count ok");
+        outbox_count +=
+            sqlx::query_scalar::<_, i64>("select count(*) from oms_outbox where run_id = $1")
+                .bind(*run_id)
+                .fetch_one(pool)
+                .await
+                .expect("count ok");
+        inbox_count +=
+            sqlx::query_scalar::<_, i64>("select count(*) from oms_inbox where run_id = $1")
+                .bind(*run_id)
+                .fetch_one(pool)
+                .await
+                .expect("count ok");
+    }
+
+    let global_runs: i64 = sqlx::query_scalar("select count(*) from runs")
+        .fetch_one(pool)
+        .await
+        .expect("count ok");
+    let global_bar_dispatches: i64 =
+        sqlx::query_scalar("select count(*) from sys_autonomous_daily_bar_dispatches")
             .fetch_one(pool)
             .await
             .expect("count ok");
-    let outbox_count: i64 = sqlx::query_scalar("select count(*) from oms_outbox where run_id = $1")
-        .bind(run_id)
+    let global_strategy_evaluations: i64 =
+        sqlx::query_scalar("select count(*) from strategy_signal_evaluations")
+            .fetch_one(pool)
+            .await
+            .expect("count ok");
+    let global_outbox: i64 = sqlx::query_scalar("select count(*) from oms_outbox")
         .fetch_one(pool)
         .await
         .expect("count ok");
-    let inbox_count: i64 = sqlx::query_scalar("select count(*) from oms_inbox where run_id = $1")
-        .bind(run_id)
+    let global_inbox: i64 = sqlx::query_scalar("select count(*) from oms_inbox")
         .fetch_one(pool)
         .await
         .expect("count ok");
+    let global_operation_events: i64 =
+        sqlx::query_scalar("select count(*) from sys_autonomous_daily_operation_events")
+            .fetch_one(pool)
+            .await
+            .expect("count ok");
+    let global_session_events: i64 =
+        sqlx::query_scalar("select count(*) from sys_autonomous_session_events")
+            .fetch_one(pool)
+            .await
+            .expect("count ok");
 
     PeSnapshot {
         state: record.state,
         state_version: record.state_version,
         lifecycle_event_count,
         coverage_event_count,
-        run_count,
+        raw_running_transition_count,
+        validated_lineage_run_count,
+        lineage_run_table_row_count,
         claim_count,
         evaluation_count,
         outbox_count,
         inbox_count,
+        global_runs,
+        global_bar_dispatches,
+        global_strategy_evaluations,
+        global_outbox,
+        global_inbox,
+        global_operation_events,
+        global_session_events,
     }
 }
 
@@ -823,8 +1009,8 @@ async fn e5_proof_a_clean_no_trade_day_full_pipeline_and_replay() {
     let adapter_id = unique_adapter_id("proofa");
     pe_set_env(&adapter_id);
     let plan = pe_plan();
-    let (webhook_url, alerts) = pe_webhook_sink().await;
-    let (operation, run_id) = pe_clean_fixture(&pool, &plan, &adapter_id, pe_now(), false).await;
+    let (webhook_url, alerts, mut alert_count_rx) = pe_webhook_sink().await;
+    let (operation, _run_id) = pe_clean_fixture(&pool, &plan, &adapter_id, pe_now(), false).await;
     let st = pe_daemon_state(pool.clone(), &webhook_url).await;
 
     // Durable path: creation -> coverage authority -> validated lineage ->
@@ -843,16 +1029,13 @@ async fn e5_proof_a_clean_no_trade_day_full_pipeline_and_replay() {
     );
     assert!(record.finalized_at_utc.is_some());
 
-    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-    {
-        let captured = alerts.lock().await;
-        assert_eq!(
-            captured.len(),
-            1,
-            "exactly one lifecycle finalization notification, got {captured:?}"
-        );
-        assert_eq!(captured[0]["event"], "autonomous.daily_operation.outcome");
-    }
+    let captured = wait_for_alert_count(&alerts, &mut alert_count_rx, 1).await;
+    assert_eq!(
+        captured.len(),
+        1,
+        "exactly one lifecycle finalization notification, got {captured:?}"
+    );
+    assert_eq!(captured[0]["event"], "autonomous.daily_operation.outcome");
 
     // E4 single-route read: truth_state active, outcome_class no_trade,
     // finalization_status finalized, evidence_state complete, exact
@@ -892,12 +1075,26 @@ async fn e5_proof_a_clean_no_trade_day_full_pipeline_and_replay() {
         "expected OutcomeAlreadyFinalized, got {typed_replay:?}"
     );
 
-    let snapshot_before_replay = pe_snapshot(&pool, operation.operation_id, run_id).await;
+    let events_before_tick_replay = pe_events_count(&pool, operation.operation_id).await;
 
-    // Repeat the coordinator tick and the API read: zero duplicate
-    // lifecycle event, zero duplicate notification, zero DB mutation from
-    // the API call, same durable outcome.
+    // Repeat the coordinator tick: zero duplicate lifecycle event, zero
+    // duplicate notification, same durable outcome. The tick's own accepted
+    // compatibility read-surface write (`AutonomousSessionTruth` ->
+    // `sys_autonomous_session_events`, orthogonal to this operation's E1–E4
+    // durable lifecycle/outcome truth and unconditionally re-asserted by
+    // `log_coordinator_outcome` on every tick, including a read-only
+    // `OutcomeAlreadyFinalized` replay) is expected here and is deliberately
+    // outside the read-only-API snapshot window below, which instead proves
+    // the GET call itself -- not the coordinator tick -- causes zero DB
+    // mutation of any kind.
     pe_tick(&st, pe_now() + chrono::Duration::seconds(1)).await;
+    let events_after_tick_replay = pe_events_count(&pool, operation.operation_id).await;
+    assert_eq!(
+        events_before_tick_replay, events_after_tick_replay,
+        "zero duplicate lifecycle event from the replay coordinator tick"
+    );
+
+    let snapshot_before_api_read = pe_snapshot(&pool, operation.operation_id).await;
     let router2 = build_router(Arc::clone(&st));
     let (status2, body2) = get_json(
         router2,
@@ -913,15 +1110,14 @@ async fn e5_proof_a_clean_no_trade_day_full_pipeline_and_replay() {
         "replay must observe the identical durable outcome"
     );
 
-    let snapshot_after_replay = pe_snapshot(&pool, operation.operation_id, run_id).await;
+    let snapshot_after_api_read = pe_snapshot(&pool, operation.operation_id).await;
     assert_eq!(
-        snapshot_before_replay, snapshot_after_replay,
-        "zero duplicate lifecycle event, zero DB mutation from the replay tick + API read"
+        snapshot_before_api_read, snapshot_after_api_read,
+        "zero DB mutation of any kind (operation-scoped or global) from the read-only API call"
     );
 
-    tokio::time::sleep(std::time::Duration::from_millis(120)).await;
     assert_eq!(
-        alerts.lock().await.len(),
+        alerts.count_now().await,
         1,
         "zero duplicate notification on replay"
     );
@@ -940,7 +1136,7 @@ async fn e5_proof_b_activity_day_full_lineage_across_two_runs() {
     let adapter_id = unique_adapter_id("proofb");
     pe_set_env(&adapter_id);
     let plan = pe_plan();
-    let (webhook_url, alerts) = pe_webhook_sink().await;
+    let (webhook_url, alerts, mut alert_count_rx) = pe_webhook_sink().await;
     let (operation, run_a, run_b) =
         pe_two_run_activity_fixture(&pool, &plan, &adapter_id, pe_now()).await;
     let st = pe_daemon_state(pool.clone(), &webhook_url).await;
@@ -960,12 +1156,8 @@ async fn e5_proof_b_activity_day_full_lineage_across_two_runs() {
     );
     assert_eq!(record.run_id, Some(run_b));
 
-    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-    assert_eq!(
-        alerts.lock().await.len(),
-        1,
-        "exactly one terminal notification"
-    );
+    let captured_b = wait_for_alert_count(&alerts, &mut alert_count_rx, 1).await;
+    assert_eq!(captured_b.len(), 1, "exactly one terminal notification");
 
     let router = build_router(Arc::clone(&st));
     let (status, body) = get_json(
@@ -1024,9 +1216,8 @@ async fn e5_proof_b_activity_day_full_lineage_across_two_runs() {
 
     // Replay: zero duplicate notification.
     pe_tick(&st, pe_now() + chrono::Duration::seconds(1)).await;
-    tokio::time::sleep(std::time::Duration::from_millis(120)).await;
     assert_eq!(
-        alerts.lock().await.len(),
+        alerts.count_now().await,
         1,
         "zero replay notification for the activity-day terminal row"
     );
@@ -1045,7 +1236,7 @@ async fn e5_proof_c_evidence_blocker_notifies_once_and_recovers() {
     let adapter_id = unique_adapter_id("proofc");
     pe_set_env(&adapter_id);
     let plan = pe_plan();
-    let (webhook_url, alerts) = pe_webhook_sink().await;
+    let (webhook_url, alerts, mut alert_count_rx) = pe_webhook_sink().await;
     let (operation, run_id) = pe_clean_fixture(&pool, &plan, &adapter_id, pe_now(), false).await;
 
     // Corrupt one expected bar's claim to `failed` -- the finalization-
@@ -1086,9 +1277,9 @@ async fn e5_proof_c_evidence_blocker_notifies_once_and_recovers() {
     assert!(degraded.outcome.is_none());
     assert!(degraded.finalized_at_utc.is_none());
 
-    tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+    let captured_c1 = wait_for_alert_count(&alerts, &mut alert_count_rx, 1).await;
     assert_eq!(
-        alerts.lock().await.len(),
+        captured_c1.len(),
         1,
         "one warning notification for the newly applied evidence blocker"
     );
@@ -1131,9 +1322,8 @@ async fn e5_proof_c_evidence_blocker_notifies_once_and_recovers() {
         events_after_replay, events_after_blocker,
         "an unchanged blocker replay must not durably advance truth"
     );
-    tokio::time::sleep(std::time::Duration::from_millis(120)).await;
     assert_eq!(
-        alerts.lock().await.len(),
+        alerts.count_now().await,
         1,
         "zero duplicate warning on an unchanged replay"
     );
@@ -1182,9 +1372,9 @@ async fn e5_proof_c_evidence_blocker_notifies_once_and_recovers() {
     assert_eq!(finalized.state, mqk_db::STATE_COMPLETED_NO_TRADE);
     assert!(finalized.finalized_at_utc.is_some());
 
-    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    let captured_c2 = wait_for_alert_count(&alerts, &mut alert_count_rx, 2).await;
     assert_eq!(
-        alerts.lock().await.len(),
+        captured_c2.len(),
         2,
         "one evidence-degraded warning plus one terminal outcome notification"
     );
@@ -1225,7 +1415,7 @@ async fn e5_proof_d_restart_safety_stop_terminal_and_evidence_blocker() {
     let adapter_id_1 = unique_adapter_id("proofd1");
     pe_set_env(&adapter_id_1);
     let plan_1 = pe_plan();
-    let (webhook_url_1, alerts_1) = pe_webhook_sink().await;
+    let (webhook_url_1, alerts_1, mut alert_count_rx_1) = pe_webhook_sink().await;
     let (operation_1, _run_1) =
         pe_clean_fixture(&pool, &plan_1, &adapter_id_1, pe_now(), false).await;
     assert!(
@@ -1248,10 +1438,19 @@ async fn e5_proof_d_restart_safety_stop_terminal_and_evidence_blocker() {
         mqk_db::STATE_COMPLETED_NO_TRADE,
         "the next coordinator tick against a fresh AppState must finalize exactly once"
     );
+    // D1's own finalizing tick must deterministically notify exactly once --
+    // the baseline the D2 zero-delta proof below is measured against.
+    let captured_d1 = wait_for_alert_count(&alerts_1, &mut alert_count_rx_1, 1).await;
+    assert_eq!(
+        captured_d1.len(),
+        1,
+        "D1's finalizing tick against a fresh AppState must notify exactly once"
+    );
 
     // --- D2: restart after terminal commit. ---
     let st_after_terminal = pe_daemon_state(pool.clone(), &webhook_url_1).await;
     let events_before_terminal_restart = pe_events_count(&pool, operation_1.operation_id).await;
+    let alert_count_before_terminal_restart = alerts_1.count_now().await;
     pe_tick(&st_after_terminal, pe_now() + chrono::Duration::seconds(1)).await;
     let record_after_terminal_restart =
         mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation_1.operation_id)
@@ -1268,10 +1467,13 @@ async fn e5_proof_d_restart_safety_stop_terminal_and_evidence_blocker() {
         "zero lifecycle-event delta from a fresh AppState's tick against an already-terminal row"
     );
 
-    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    // `notify_run_status`/`notify_critical_alert` are `.await`ed directly
+    // inside the coordinator's outcome match arm (never spawned), so by the
+    // time the tick above has returned any notification it would send has
+    // already been fully delivered -- an immediate read proves the delta.
     assert_eq!(
-        alerts_1.lock().await.len(),
-        1,
+        alerts_1.count_now().await,
+        alert_count_before_terminal_restart,
         "zero outcome-notification delta across both restarts"
     );
 
@@ -1279,7 +1481,7 @@ async fn e5_proof_d_restart_safety_stop_terminal_and_evidence_blocker() {
     let adapter_id_3 = unique_adapter_id("proofd3");
     pe_set_env(&adapter_id_3);
     let plan_3 = pe_plan();
-    let (webhook_url_3, alerts_3) = pe_webhook_sink().await;
+    let (webhook_url_3, alerts_3, mut alert_count_rx_3) = pe_webhook_sink().await;
     let (operation_3, run_3) =
         pe_clean_fixture(&pool, &plan_3, &adapter_id_3, pe_now(), false).await;
     let corrupted_bar_end_ts: i64 = sqlx::query_scalar(
@@ -1309,11 +1511,12 @@ async fn e5_proof_d_restart_safety_stop_terminal_and_evidence_blocker() {
             .expect("row exists");
     assert_eq!(degraded_3.state, mqk_db::STATE_EVIDENCE_DEGRADED);
     let events_after_first_blocker = pe_events_count(&pool, operation_3.operation_id).await;
-    tokio::time::sleep(std::time::Duration::from_millis(120)).await;
-    assert_eq!(alerts_3.lock().await.len(), 1);
+    let captured_d3_first = wait_for_alert_count(&alerts_3, &mut alert_count_rx_3, 1).await;
+    assert_eq!(captured_d3_first.len(), 1);
 
     // A fresh AppState replays the unchanged blocker -- silent (zero event
     // delta, zero notification delta).
+    let alert_count_before_restarted_replay = alerts_3.count_now().await;
     let st_blocker_restarted = pe_daemon_state(pool.clone(), &webhook_url_3).await;
     pe_tick(
         &st_blocker_restarted,
@@ -1325,10 +1528,11 @@ async fn e5_proof_d_restart_safety_stop_terminal_and_evidence_blocker() {
         events_after_first_blocker, events_after_restarted_replay,
         "a fresh AppState replaying an unchanged blocker must not durably advance truth"
     );
-    tokio::time::sleep(std::time::Duration::from_millis(120)).await;
+    // Direct-await notifier call (see D2's comment above): the delta is
+    // provable immediately after the tick returns, no wait required.
     assert_eq!(
-        alerts_3.lock().await.len(),
-        1,
+        alerts_3.count_now().await,
+        alert_count_before_restarted_replay,
         "zero additional warning from the restarted replay"
     );
 
@@ -1376,9 +1580,9 @@ async fn e5_proof_d_restart_safety_stop_terminal_and_evidence_blocker() {
             .expect("row exists");
     assert_eq!(terminal_3.state, mqk_db::STATE_COMPLETED_NO_TRADE);
 
-    tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+    let captured_d3_final = wait_for_alert_count(&alerts_3, &mut alert_count_rx_3, 2).await;
     assert_eq!(
-        alerts_3.lock().await.len(),
+        captured_d3_final.len(),
         2,
         "one warning plus one terminal notification across the full restart-safe blocker/\
          recovery cycle"
@@ -1398,14 +1602,57 @@ async fn e5_proof_e_api_read_only_guarantee() {
     let adapter_id = unique_adapter_id("proofe");
     pe_set_env(&adapter_id);
     let plan = pe_plan();
-    let (webhook_url, _alerts) = pe_webhook_sink().await;
-    let (operation, run_id) = pe_clean_fixture(&pool, &plan, &adapter_id, pe_now(), false).await;
+    let (webhook_url, _alerts, _alert_count_rx) = pe_webhook_sink().await;
+    let (operation, run_a, run_b) =
+        pe_two_run_activity_fixture(&pool, &plan, &adapter_id, pe_now()).await;
     let st = pe_daemon_state(pool.clone(), &webhook_url).await;
     // Finalize durably first, via the real coordinator, so the read-only
     // routes below have real terminal truth to project.
     pe_tick(&st, pe_now()).await;
 
-    let before = pe_snapshot(&pool, operation.operation_id, run_id).await;
+    // Prove a genuine two-run lineage exists before taking the snapshot --
+    // Proof E's read-only guarantee must be exercised over the full
+    // multi-run lineage, never trivially satisfied by a single-run
+    // operation.
+    let raw_rows = mqk_db::fetch_autonomous_daily_operation_running_transitions_raw(
+        &pool,
+        operation.operation_id,
+    )
+    .await
+    .expect("fetch raw lineage rows ok");
+    let record_for_lineage =
+        mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation.operation_id)
+            .await
+            .expect("fetch ok")
+            .expect("row exists");
+    let lineage = mqk_db::validate_autonomous_daily_operation_run_lineage(
+        &raw_rows,
+        record_for_lineage.run_id,
+    )
+    .expect("proof-e fixture: lineage must validate cleanly");
+    assert_eq!(
+        lineage.len(),
+        2,
+        "proof-e fixture must carry exactly two validated lineage runs, got {lineage:?}"
+    );
+    assert!(
+        lineage.contains(&run_a) && lineage.contains(&run_b),
+        "the validated lineage must contain both fixture runs"
+    );
+
+    let before = pe_snapshot(&pool, operation.operation_id).await;
+    assert_eq!(
+        before.validated_lineage_run_count, 2,
+        "the snapshot itself must observe both lineage runs: {before:?}"
+    );
+    assert!(
+        before.inbox_count >= 2,
+        "the snapshot must include run A's fill+ack inbox evidence, not just run B's: {before:?}"
+    );
+    assert!(
+        before.evaluation_count > 0,
+        "the snapshot must include run B's flat strategy evaluations: {before:?}"
+    );
 
     let routes = [
         format!(
@@ -1424,7 +1671,7 @@ async fn e5_proof_e_api_read_only_guarantee() {
         assert_eq!(status, StatusCode::OK, "route {uri} must return 200");
     }
 
-    let after = pe_snapshot(&pool, operation.operation_id, run_id).await;
+    let after = pe_snapshot(&pool, operation.operation_id).await;
     assert_eq!(
         before, after,
         "every delta caused by the five GET routes must be zero: {before:?} vs {after:?}"

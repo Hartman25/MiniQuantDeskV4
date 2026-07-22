@@ -15783,3 +15783,100 @@ soak-evidence preparation
 unattended 10-20-session soak: NOT STARTED
 live capital: NOT READY
 ```
+
+## AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E5-DETERMINISTIC-NOTIFICATION-SNAPSHOT-AND-CLOSURE-GUARD-REPAIR-01
+
+**Bundle:** `AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-COMBINED` | **Phase:** E5 — proof and closure-guard
+repair.
+
+**Disposition entering this patch:** E1/E2A/E2B/E3/E4 accepted complete; E5/Phase E implementation
+complete, awaiting ChatGPT and operator acceptance (per the E5 entry immediately above).
+
+**Mission:** close four proof defects in the accepted-pending E5 patch, without redesigning any
+E1–E4 production behavior and without touching any production Rust, migration, or GUI file.
+
+**Delivered (all within
+`core-rs/crates/mqk-daemon/tests/scenario_autonomous_daily_phase_e_closure_01.rs`,
+`docs/specs/autonomous_daily_paper_operations_01e_phase_e_closure.md`,
+`scripts/guards/validate_autonomous_daily_paper_operations_01e_phase_e_closure.ps1`, this ledger,
+`README.md`, and `README_TECHNICAL.md` only):**
+
+1. **Deterministic notification observation.** Removed every `tokio::time::sleep` from the closure
+   test. The loopback sink is now `PeAlertRecorder`: it stores each received payload, then publishes
+   the new count on a `tokio::sync::watch` channel — a deterministic completion signal. The new
+   `wait_for_alert_count` helper polls that channel until the expected count is observed, bounded by
+   a `tokio::time::timeout` that exists strictly as deadlock/failure protection, never as what makes
+   an assertion pass. Every zero-new-notification (replay) proof reads the recorder's count
+   immediately after its coordinator tick — valid because the notifier calls
+   (`notify_run_status`/`notify_critical_alert`) were audited and confirmed `.await`ed directly
+   inside `run_durable_session_controller_tick`'s outcome match arm, never spawned onto a separate
+   task.
+2. **Complete read-only snapshot.** `PeSnapshot`/`pe_snapshot` no longer accept a caller-supplied
+   single `run_id`; they now derive the operation's full validated run lineage via
+   `fetch_autonomous_daily_operation_running_transitions_raw` +
+   `validate_autonomous_daily_operation_run_lineage` and fail the test outright on a contradictory
+   lineage. Every lineage-scoped count (run-table rows, strategy-evaluation rows, outbox rows, inbox
+   rows) now sums across every run in the lineage; dispatch claims remain operation-scoped (their
+   native shape). The snapshot additionally records global totals across `runs`,
+   `sys_autonomous_daily_bar_dispatches`, `strategy_signal_evaluations`, `oms_outbox`, `oms_inbox`,
+   `sys_autonomous_daily_operation_events`, and `sys_autonomous_session_events`, closing the gap
+   where a GET route creating an unrelated row under a newly generated identity could escape an
+   operation-scoped-only snapshot. Proof E now runs against the two-run activity fixture
+   (`pe_two_run_activity_fixture`, the same fixture Proof B uses) instead of the single-run clean
+   fixture, asserting the validated lineage contains exactly two run IDs and that the pre-route
+   snapshot's lineage-scoped counts already include both runs before taking its before/after
+   comparison.
+3. **Committed patch-scope closure guard.** Checks `[23]`/`[24]` previously ran only
+   `git diff --name-only HEAD` / `--cached` — commands that see nothing once E5's own work is
+   committed, silently letting a committed production/migration/GUI change escape the guard. The
+   guard now fixes the accepted E4 head (`11664945e90a582e6984f0eab66cf89690120769`) as the Phase E
+   closure base, requires `git merge-base --is-ancestor` to hold, and inspects
+   `git diff --name-only 11664945e90a582e6984f0eab66cf89690120769..HEAD` as the committed-range
+   authority for production Rust/migration/GUI files, reporting the exact offending paths. The
+   staged and unstaged working tree is still inspected separately so an in-progress uncommitted
+   violation is still caught pre-commit.
+4. **Closure-guard proof-quality strengthening.** New checks `[25]`–`[29]`: no `tokio::time::sleep`
+   anywhere in the closure test; the deterministic alert-recorder/wait-for-count helper exists and
+   is backed by a `tokio::sync::watch` channel; `pe_snapshot` derives lineage via the raw-fetch/
+   validate pair rather than a caller-supplied `run_id`; `PeSnapshot` carries all seven global-total
+   fields; Proof E uses the two-run activity fixture. Every existing check `[1]`–`[22]` is
+   unchanged.
+
+**No production Rust file was modified by this patch. No migration. No GUI change.** No E1–E4
+production behavior was reopened or redesigned. No new API route or field.
+
+**Files changed:** `core-rs/crates/mqk-daemon/tests/scenario_autonomous_daily_phase_e_closure_01.rs`,
+`docs/specs/autonomous_daily_paper_operations_01e_phase_e_closure.md`,
+`scripts/guards/validate_autonomous_daily_paper_operations_01e_phase_e_closure.ps1`,
+`MiniQuantDesk_Master_Patch_Ledger_v2.md`, `README.md`, `README_TECHNICAL.md`.
+
+**Safety confirmation:**
+
+```text
+PROVIDER CALLS: no
+BROKER CALLS: no
+NETWORK CALLS: no
+REAL DAEMON STARTED: no
+PAPER ORDERS: no
+LIVE ORDERS: no
+PAPER DB TOUCHED: no
+MIGRATION CHANGED: no
+API IMPLEMENTED: no
+GUI CHANGED: no
+```
+
+```text
+E1: ACCEPTED — COMPLETE
+E2A: ACCEPTED — COMPLETE
+E2B: ACCEPTED — COMPLETE
+E3: ACCEPTED — COMPLETE
+E4: ACCEPTED — COMPLETE
+E5 deterministic proof repair: IMPLEMENTATION COMPLETE — AWAITING CHATGPT AND OPERATOR ACCEPTANCE
+PHASE E: IMPLEMENTATION COMPLETE — AWAITING CHATGPT AND OPERATOR ACCEPTANCE
+PHASE F: NOT STARTED
+PHASE G: NOT STARTED
+BUNDLE 3 (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-COMBINED): OPEN
+BUNDLE 4: NOT STARTED
+SOAK: NOT STARTED
+LIVE CAPITAL: NOT READY
+```

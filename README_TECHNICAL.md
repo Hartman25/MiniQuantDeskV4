@@ -188,9 +188,27 @@ durable stop/terminal commit/evidence blocker, the E4 routes' full read-only
 guarantee, and the frozen E4 fail-soft truth vocabulary, all against the
 real, isolated test database and the real production coordinator/finalizer/
 API seams (fake notifier instrumentation only). Zero production Rust
-behavior changed. **E5 (plus this closure) is implementation complete,
-awaiting ChatGPT and operator acceptance.** No GUI surface exists yet; that
-remains Phase F.
+behavior changed. A follow-on E5 deterministic proof and closure-guard
+repair then closed four proof defects in that patch: every
+`tokio::time::sleep` fixed delay is replaced by a `PeAlertRecorder`/
+`wait_for_alert_count` helper whose completion signal is a
+`tokio::sync::watch` channel (a bounded `tokio::time::timeout` remains only
+as deadlock/failure protection, never as what makes an assertion pass);
+`PeSnapshot`/`pe_snapshot` now derive the operation's full validated run
+lineage instead of accepting a caller-supplied single `run_id`, and
+additionally record global totals across `runs`,
+`sys_autonomous_daily_bar_dispatches`, `strategy_signal_evaluations`,
+`oms_outbox`, `oms_inbox`, `sys_autonomous_daily_operation_events`, and
+`sys_autonomous_session_events` so an unrelated new-identity row cannot
+escape an operation-scoped-only snapshot; the API read-only-guarantee proof
+now runs against a genuine two-run lineage; and the closure guard's
+production-Rust/migration/GUI checks now read the committed
+`11664945e90a582e6984f0eab66cf89690120769..HEAD` patch range (previously
+only the working tree was inspected, which sees nothing once E5's own work
+is committed) in addition to the staged/unstaged working tree. Zero
+production Rust, migration, or GUI change. **E5 (plus this closure and its
+repair) is implementation complete, awaiting ChatGPT and operator
+acceptance.** No GUI surface exists yet; that remains Phase F.
 
 The strongest current operational route is:
 

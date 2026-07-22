@@ -93,11 +93,21 @@ operation creation
 ```
 
 The test then proves a direct typed coordinator-tick call against the same already-terminal row
-projects `OutcomeAlreadyFinalized` (read-only), then repeats the coordinator tick and the API read
-via a full durable before/after snapshot (`state`, `state_version`, lifecycle-event count,
-coverage-event count, run count, dispatch-claim count, strategy-evaluation count, outbox count,
-inbox count) — proving zero duplicate lifecycle event, zero duplicate notification, zero DB
-mutation from the API call, and the same durable outcome.
+projects `OutcomeAlreadyFinalized` (read-only), then repeats the coordinator tick: a lifecycle-event
+count taken immediately before and after the tick proves zero duplicate lifecycle event, and the
+recorder's notification count proves zero duplicate notification. This tick-scoped check is
+deliberately separate from the read-only-API snapshot immediately below it, because the coordinator
+tick's own accepted compatibility read-surface write (`AutonomousSessionTruth` ->
+`sys_autonomous_session_events`, orthogonal to this operation's E1–E4 durable lifecycle/outcome
+truth) is unconditionally re-asserted by `log_coordinator_outcome` on every tick — including a
+read-only `OutcomeAlreadyFinalized` replay — since its `detail` text embeds per-tick state and so
+never compares equal to the prior tick's own detail. That write is expected and out of scope for
+E1–E5; it is not itself an unrelated-identity API-route side effect. The API read itself is then
+independently proven mutation-free via a full durable before/after snapshot (`state`,
+`state_version`, lifecycle-event count, coverage-event count, raw/validated lineage counts,
+lineage-scoped run/claim/evaluation/outbox/inbox counts, and the seven global evidence-table
+totals) taken immediately before and after the GET call, proving the API call itself causes zero DB
+mutation of any kind, and that it observes the same durable outcome.
 
 ## 3. Integrated proof B — activity day, full lineage across two runs
 
@@ -174,17 +184,40 @@ D3 restart after an evidence blocker:
    terminal tick
 ```
 
-No test in this file uses `tokio::time::sleep` as assertion authority for lifecycle or dedup facts
-— every restart/dedup assertion is a durable-DB-row/event-count comparison; `sleep` is used only to
-let the loopback HTTP sink's already-`.await`ed POST become observable before the notification-count
-assertion, exactly matching the accepted E3 file's own convention.
+No test in this file uses `tokio::time::sleep` anywhere, for any purpose, including notification
+observation. The loopback sink (`PeAlertRecorder`) stores each received payload and only then
+publishes the new count on a `tokio::sync::watch` channel; `wait_for_alert_count` polls that
+channel's own `changed()`/`borrow()` pair (never a fixed delay) to prove a notification count
+deterministically, bounded by a `tokio::time::timeout` used strictly as deadlock/failure
+protection — the timeout never makes an assertion pass. Every zero-new-notification (replay) proof
+instead reads the recorder's count immediately after its coordinator tick, which is valid because
+the audit in this patch confirmed `notify_run_status`/`notify_critical_alert` are `.await`ed
+directly inside `run_durable_session_controller_tick`'s outcome match arm and never spawned onto a
+separate task — so by the time a tick's own `.await` returns, any notification it would have sent
+has already been fully delivered.
 
 ## 6. Integrated proof E — API read-only guarantee
 
 Test: `e5_proof_e_api_read_only_guarantee`.
 
-Captures one full durable snapshot (`state`, `state_version`, lifecycle-event count, coverage-event
-count, run count, dispatch-claim count, strategy-evaluation count, outbox count, inbox count) before
+Built on the same two-run activity fixture as Proof B (`pe_two_run_activity_fixture`) rather than
+the single-run clean fixture, so the read-only guarantee is exercised over a genuine multi-run
+lineage, never trivially satisfied by an operation with only one run. Before taking the snapshot,
+the test independently re-derives the raw lineage rows and validates them
+(`fetch_autonomous_daily_operation_running_transitions_raw` +
+`validate_autonomous_daily_operation_run_lineage`) and asserts the lineage contains exactly the two
+fixture run IDs.
+
+`PeSnapshot`'s scope authority is that same validated full run lineage — never a caller-supplied
+single `run_id` — so every lineage-scoped count (`run`, dispatch-claim, strategy-evaluation, outbox,
+inbox) sums across every run in the lineage. The snapshot additionally records global totals for
+`runs`, `sys_autonomous_daily_bar_dispatches`, `strategy_signal_evaluations`, `oms_outbox`,
+`oms_inbox`, `sys_autonomous_daily_operation_events`, and `sys_autonomous_session_events`, so a GET
+route that created an unrelated row under a newly generated identity could not silently escape the
+operation-scoped counts.
+
+The test asserts the pre-route snapshot itself observes both lineage runs (`validated_lineage_run_count
+== 2`) and carries run A's earlier fill/ack inbox evidence, then captures one full snapshot before
 and after calling all five read routes in sequence against the same `AppState`:
 
 ```text
@@ -195,10 +228,11 @@ GET /api/v1/autonomous/paper-status
 GET /api/v1/system/preflight
 ```
 
-Every delta is zero. This is consistent with, and does not re-derive, the accepted E4 structural
-proof (`b21`/`b22`/`b23`/`b24` in `scenario_autonomous_daily_operation_api_01.rs`) that the E4 route
-module never references a classifier/finalizer/coordinator/mutating-DB-helper symbol at all — E5's
-proof is the dynamic, whole-pipeline complement of that static proof.
+Every delta, across every lineage-scoped and global field, is zero. This is consistent with, and
+does not re-derive, the accepted E4 structural proof (`b21`/`b22`/`b23`/`b24` in
+`scenario_autonomous_daily_operation_api_01.rs`) that the E4 route module never references a
+classifier/finalizer/coordinator/mutating-DB-helper symbol at all — E5's proof is the dynamic,
+whole-pipeline complement of that static proof.
 
 ## 7. Integrated proof F — fail-soft API truth
 
@@ -297,3 +331,69 @@ No integrated proof in this patch exposed a production correctness defect. Every
 `scenario_autonomous_daily_phase_e_closure_01.rs` passed against the accepted E1–E4 production code
 unmodified. Per the mission's own binding condition, E1–E4 behavior is not reopened or redesigned by
 this patch.
+
+## 13. E5 deterministic proof and closure-guard repair (this patch)
+
+This repair closes four proof defects in the original E5 patch. **No production Rust file, no
+migration, and no GUI file is touched** — only the closure test file, this spec, the closure guard,
+the ledger, and both READMEs.
+
+1. **Deterministic notification observation.** The prior test used `tokio::time::sleep` fixed
+   delays as the sole mechanism for letting the loopback sink's `.await`ed POST become observable
+   before a notification-count assertion. Every `tokio::time::sleep` call is removed. The sink is
+   now a `PeAlertRecorder`: it stores each received payload, then publishes the new count on a
+   `tokio::sync::watch` channel — a deterministic completion signal, not a delay. `wait_for_alert_count`
+   polls that channel (`changed()`/`borrow()`) until the expected count is observed, bounded by a
+   `tokio::time::timeout` that exists purely as deadlock/failure protection and never makes an
+   assertion pass. Every zero-new-notification (replay) proof instead reads the recorder's count
+   immediately after its coordinator tick — valid because this patch's audit confirmed
+   `notify_run_status`/`notify_critical_alert` are `.await`ed directly inside
+   `run_durable_session_controller_tick`'s outcome match arm and never spawned, so nothing can
+   arrive after the tick's own `.await` returns.
+2. **Complete read-only snapshot.** `PeSnapshot`/`pe_snapshot` no longer accept a caller-supplied
+   single `run_id`. They now derive the operation's full validated run lineage via
+   `fetch_autonomous_daily_operation_running_transitions_raw` +
+   `validate_autonomous_daily_operation_run_lineage` (the same pair
+   `fetch_and_validate_autonomous_daily_operation_run_lineage` composes), fail the test outright if
+   that lineage is contradictory, and sum every lineage-scoped count (run-table rows,
+   strategy-evaluation rows, outbox rows, inbox rows) across every run in the lineage. Dispatch
+   claims remain scoped to the operation directly (their native schema shape). The snapshot also
+   now carries global totals for `runs`, `sys_autonomous_daily_bar_dispatches`,
+   `strategy_signal_evaluations`, `oms_outbox`, `oms_inbox`,
+   `sys_autonomous_daily_operation_events`, and `sys_autonomous_session_events`, closing the gap
+   where a GET route could create an unrelated row under a newly generated identity and escape an
+   operation-scoped-only snapshot. Proof E now runs against the two-run activity fixture (§6 above),
+   asserting the validated lineage contains exactly two run IDs and that the snapshot's
+   lineage-scoped counts include both runs before taking its before/after comparison.
+3. **Committed patch-scope closure guard.** Checks `[23]`/`[24]` previously ran
+   `git diff --name-only HEAD` / `--cached` only — commands that see nothing once E5's work is
+   committed, silently letting a committed production/migration/GUI change escape the guard
+   entirely. The guard now fixes the accepted E4 head
+   (`11664945e90a582e6984f0eab66cf89690120769`) as the Phase E closure base, requires
+   `git merge-base --is-ancestor` to hold, and inspects
+   `git diff --name-only 11664945e90a582e6984f0eab66cf89690120769..HEAD` as the committed-range
+   authority for production Rust (`core-rs/**/src/**.rs`), migrations
+   (`core-rs/crates/mqk-db/migrations/**`), and GUI (`core-rs/mqk-gui/**`) files. The staged and
+   unstaged working tree is still inspected separately (checks now split, still numbered
+   `[23]`/`[24]`) so an in-progress, uncommitted violation is caught before it is committed. The
+   guard reports the exact offending paths for every list it inspects.
+4. **Closure-guard proof-quality strengthening.** New checks `[25]`–`[29]` require: no
+   `tokio::time::sleep` anywhere in the closure test file; a deterministic alert-recorder/
+   wait-for-count helper backed by a `tokio::sync::watch` channel; `pe_snapshot` deriving lineage
+   via the raw-fetch/validate pair rather than a caller-supplied `run_id`; `PeSnapshot` carrying all
+   seven global-total fields; and Proof E using the two-run activity fixture. Every existing E1–E4
+   invariant check (`[1]`–`[22]`) is unchanged.
+
+This repair does not reopen or redesign any E1–E4 behavior, and does not itself close Phase E —
+independent ChatGPT/operator acceptance is still required.
+
+```text
+E5 deterministic proof repair: IMPLEMENTATION COMPLETE — AWAITING CHATGPT AND OPERATOR ACCEPTANCE
+PHASE E:  IMPLEMENTATION COMPLETE — AWAITING CHATGPT AND OPERATOR ACCEPTANCE
+PHASE F:  NOT STARTED
+PHASE G:  NOT STARTED
+BUNDLE 3: OPEN
+BUNDLE 4: NOT STARTED
+SOAK:     NOT STARTED
+LIVE CAPITAL: NOT READY
+```

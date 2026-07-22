@@ -53,10 +53,32 @@
 #        complete-awaiting-acceptance.
 #   [22] The ledger records E1-E4 as accepted, never claims Phase E closed or
 #        Bundle 3 closed.
-#   [23] No production Rust file was modified by this patch (git diff against
-#        HEAD's parent-scoped check: only the E5-authorized file set may
-#        differ under core-rs/**/src/**).
-#   [24] No migration file was added or modified by this patch.
+#   [23] No production Rust, migration, or GUI file appears in the committed
+#        E5 patch range -- the fixed accepted-E4 head
+#        (11664945e90a582e6984f0eab66cf89690120769) must be an ancestor of
+#        HEAD, and `git diff --name-only <base>..HEAD` (never `git diff
+#        --name-only HEAD`/`--cached` alone, which only see the working
+#        tree) is the committed-range authority.
+#   [24] No production Rust, migration, or GUI file appears in the current
+#        staged or unstaged working tree either (checked separately from
+#        the committed range in [23]).
+#   [25] No `tokio::time::sleep` remains anywhere in the closure test file --
+#        every notification proof is driven by a deterministic completion
+#        signal, never an arbitrary delay.
+#   [26] A deterministic alert-recorder / wait-for-count helper exists in the
+#        closure test file (`PeAlertRecorder` / `wait_for_alert_count`,
+#        backed by a `tokio::sync::watch` completion signal).
+#   [27] `PeSnapshot`/`pe_snapshot` derive the full validated run lineage via
+#        `fetch_and_validate_autonomous_daily_operation_run_lineage`'s own
+#        raw-fetch/validate pair rather than accepting a caller-supplied
+#        single `run_id`.
+#   [28] `PeSnapshot` records global evidence-table totals (runs,
+#        sys_autonomous_daily_bar_dispatches, strategy_signal_evaluations,
+#        oms_outbox, oms_inbox, sys_autonomous_daily_operation_events,
+#        sys_autonomous_session_events) in addition to its lineage-scoped
+#        counts.
+#   [29] Integrated Proof E exercises a genuine two-run validated lineage
+#        before taking its before/after snapshot.
 #
 # Usage:
 #   powershell -ExecutionPolicy Bypass -File scripts\guards\validate_autonomous_daily_paper_operations_01e_phase_e_closure.ps1
@@ -412,41 +434,133 @@ Test-ContentDoesNotContain "ledger does not claim Bundle 3 closed" $LedgerConten
 Test-ContentContains "ledger records E5 as implementation-complete-awaiting-acceptance" $LedgerContent "E5" | Out-Null
 
 # -----------------------------------------------------------------------
-# [23]/[24] No production Rust / migration change.
+# [23]/[24] Committed patch-scope guard.
+#
+# The accepted E4 closing commit is the fixed base for the Phase E closure
+# range. `git diff --name-only HEAD`/`--cached` alone only ever see the
+# working tree -- once E5's repair work is committed, those two commands
+# report nothing, which would silently let a committed production/
+# migration/GUI change escape this guard entirely. The committed range
+# `$PhaseEClosureBase..HEAD` is the authority for what the E5 patch itself
+# changed; the working tree is inspected separately in [24] so an
+# in-progress (uncommitted) violation is still caught before it is
+# committed.
 # -----------------------------------------------------------------------
-Write-Host ""
-Show-Info "--- [23] No production Rust file was modified by this patch ---"
+$PhaseEClosureBase = "11664945e90a582e6984f0eab66cf89690120769"
+
 # git's routine autocrlf notice ("LF will be replaced by CRLF...") writes to
 # stderr; under this script's own $ErrorActionPreference = "Stop" that stream
 # can otherwise be promoted to a terminating error. Temporarily relax to
-# "Continue" for these two informational reads only, restoring "Stop" right
-# after -- $LASTEXITCODE/output content are what this check actually relies
+# "Continue" for these informational reads only, restoring "Stop" right
+# after -- $LASTEXITCODE/output content are what these checks actually rely
 # on, never stderr text.
 $PriorErrorActionPreference = $ErrorActionPreference
 $ErrorActionPreference = "Continue"
-$ChangedFiles = git -C $RepoRoot diff --name-only HEAD 2>$null
-$ChangedFilesStaged = git -C $RepoRoot diff --name-only --cached 2>$null
-$ErrorActionPreference = $PriorErrorActionPreference
-$AllChanged = @($ChangedFiles) + @($ChangedFilesStaged) | Where-Object { $_ -ne "" } | Select-Object -Unique
-$ProductionRustChanged = $AllChanged | Where-Object {
-    $_ -like "core-rs/*/src/*.rs" -and $_ -notlike "*/tests/*"
+& git -C $RepoRoot merge-base --is-ancestor $PhaseEClosureBase HEAD 2>$null
+$BaseIsAncestor = ($LASTEXITCODE -eq 0)
+$CommittedRange = @()
+if ($BaseIsAncestor) {
+    $CommittedRange = git -C $RepoRoot diff --name-only "$PhaseEClosureBase..HEAD" 2>$null
 }
-if ($null -eq $ProductionRustChanged -or @($ProductionRustChanged).Count -eq 0) {
-    Show-Green "  OK -- no production Rust file (core-rs/**/src/**.rs) changed"
-} else {
-    $script:Violations++
-    Show-Red "  FAIL -- production Rust file(s) changed: $ProductionRustChanged"
+$UnstagedChanges = git -C $RepoRoot diff --name-only 2>$null
+$StagedChanges = git -C $RepoRoot diff --name-only --cached 2>$null
+$ErrorActionPreference = $PriorErrorActionPreference
+
+$CommittedRangeClean = @($CommittedRange) | Where-Object { $_ -ne "" } | Select-Object -Unique
+$UnstagedClean = @($UnstagedChanges) | Where-Object { $_ -ne "" } | Select-Object -Unique
+$StagedClean = @($StagedChanges) | Where-Object { $_ -ne "" } | Select-Object -Unique
+
+function Test-ForbiddenPatchScopePaths {
+    param([string]$Label, [string[]]$Paths)
+    $ProductionRust = $Paths | Where-Object { $_ -like "core-rs/*/src/*.rs" -and $_ -notlike "*/tests/*" }
+    $Migrations = $Paths | Where-Object { $_ -like "core-rs/crates/mqk-db/migrations/*" }
+    $Gui = $Paths | Where-Object { $_ -like "core-rs/mqk-gui/*" }
+
+    if ($null -eq $ProductionRust -or @($ProductionRust).Count -eq 0) {
+        Show-Green "  OK -- $Label -- no production Rust file (core-rs/**/src/**.rs)"
+    } else {
+        $script:Violations++
+        Show-Red "  FAIL -- $Label -- production Rust file(s): $($ProductionRust -join ', ')"
+    }
+
+    if ($null -eq $Migrations -or @($Migrations).Count -eq 0) {
+        Show-Green "  OK -- $Label -- no migration file"
+    } else {
+        $script:Violations++
+        Show-Red "  FAIL -- $Label -- migration file(s): $($Migrations -join ', ')"
+    }
+
+    if ($null -eq $Gui -or @($Gui).Count -eq 0) {
+        Show-Green "  OK -- $Label -- no GUI file (core-rs/mqk-gui/**)"
+    } else {
+        $script:Violations++
+        Show-Red "  FAIL -- $Label -- GUI file(s): $($Gui -join ', ')"
+    }
 }
 
 Write-Host ""
-Show-Info "--- [24] No migration file was added or modified ---"
-$MigrationChanged = $AllChanged | Where-Object { $_ -like "core-rs/crates/mqk-db/migrations/*" }
-if ($null -eq $MigrationChanged -or @($MigrationChanged).Count -eq 0) {
-    Show-Green "  OK -- no migration file changed"
+Show-Info "--- [23] Committed E5 patch range ($PhaseEClosureBase..HEAD) never touches production Rust, migrations, or GUI ---"
+if ($BaseIsAncestor) {
+    Show-Green "  OK -- $PhaseEClosureBase (accepted E4 head) is an ancestor of HEAD"
 } else {
     $script:Violations++
-    Show-Red "  FAIL -- migration file(s) changed: $MigrationChanged"
+    Show-Red "  FAIL -- $PhaseEClosureBase is not an ancestor of HEAD; the committed patch-scope range cannot be established"
 }
+Test-ForbiddenPatchScopePaths "committed range $PhaseEClosureBase..HEAD" $CommittedRangeClean
+
+Write-Host ""
+Show-Info "--- [24] Working tree (staged and unstaged, checked separately) never touches production Rust, migrations, or GUI ---"
+Test-ForbiddenPatchScopePaths "unstaged working tree" $UnstagedClean
+Test-ForbiddenPatchScopePaths "staged working tree" $StagedClean
+
+# -----------------------------------------------------------------------
+# [25] No sleep-based assertion authority remains in the closure test.
+# -----------------------------------------------------------------------
+Write-Host ""
+Show-Info "--- [25] No tokio::time::sleep remains in the closure test file ---"
+Test-ContentDoesNotContain "the closure test file never calls tokio::time::sleep" $E5TestContent "tokio::time::sleep" | Out-Null
+
+# -----------------------------------------------------------------------
+# [26] Deterministic alert-recorder/wait-for-count helper exists.
+# -----------------------------------------------------------------------
+Write-Host ""
+Show-Info "--- [26] A deterministic alert-recorder helper exists ---"
+Test-ContentContains "PeAlertRecorder exists" $E5TestContent "struct PeAlertRecorder" | Out-Null
+Test-ContentContains "wait_for_alert_count exists" $E5TestContent "async fn wait_for_alert_count(" | Out-Null
+Test-ContentContains "the recorder's completion signal is a tokio::sync::watch channel" $E5TestContent "tokio::sync::watch" | Out-Null
+
+# -----------------------------------------------------------------------
+# [27] PeSnapshot/pe_snapshot derive the full validated run lineage.
+# -----------------------------------------------------------------------
+Write-Host ""
+Show-Info "--- [27] PeSnapshot derives the full validated run lineage, never a caller-supplied run_id ---"
+Test-ContentContains "pe_snapshot fetches the raw lineage rows" $E5TestContent "fetch_autonomous_daily_operation_running_transitions_raw(" | Out-Null
+Test-ContentContains "pe_snapshot validates the raw lineage rows" $E5TestContent "validate_autonomous_daily_operation_run_lineage(" | Out-Null
+Test-ContentContains "pe_snapshot no longer accepts a caller-supplied run_id" $E5TestContent "async fn pe_snapshot(pool: &sqlx::PgPool, operation_id: Uuid)" | Out-Null
+
+# -----------------------------------------------------------------------
+# [28] PeSnapshot records global evidence-table totals.
+# -----------------------------------------------------------------------
+Write-Host ""
+Show-Info "--- [28] PeSnapshot records global evidence-table totals ---"
+foreach ($GlobalField in @(
+    "global_runs",
+    "global_bar_dispatches",
+    "global_strategy_evaluations",
+    "global_outbox",
+    "global_inbox",
+    "global_operation_events",
+    "global_session_events"
+)) {
+    Test-ContentContains "PeSnapshot carries $GlobalField" $E5TestContent $GlobalField | Out-Null
+}
+
+# -----------------------------------------------------------------------
+# [29] Proof E exercises a genuine two-run lineage before its snapshot.
+# -----------------------------------------------------------------------
+Write-Host ""
+Show-Info "--- [29] Proof E asserts a two-run validated lineage before its before/after snapshot ---"
+Test-ContentContains "Proof E uses the two-run activity fixture" $E5TestContent "pe_two_run_activity_fixture(" | Out-Null
 
 # =============================================================================
 # Summary
