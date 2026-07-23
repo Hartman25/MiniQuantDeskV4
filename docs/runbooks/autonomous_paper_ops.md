@@ -13,10 +13,69 @@ This runbook covers:
 - Supervisor history and the `autonomous_history_degraded` truth flag
 - What the one-day soak harness produces and how to interpret it
 
+This runbook also covers the durable **daily-operation lifecycle** truth
+surfaces built by `AUTONOMOUS-DAILY-PAPER-OPERATIONS-01` (Phases D–F1): the
+per-market-day operation record, its finalization/outcome/evidence
+vocabulary, the five read-only routes that project it, and the operator's
+recovery and evidence procedures around it (§15 onward).
+
 **What this runbook does NOT cover:**
 - LiveShadow / LiveCapital modes (see `live_shadow_operational_proof.md`)
 - Artifact promotion and deployability gating (see `operator_workflows.md` §9)
 - CI pipeline and guard scripts (`scripts/guards/`)
+
+---
+
+## 0. Safety boundary
+
+This runbook governs exactly one supported operating lane:
+
+- **Paper + Alpaca only.** No live broker adapter, no live credentials, no
+  live capital, on this lane, ever.
+- **Single-symbol, long-only, US equity/ETF.** Multi-symbol autonomous
+  rollout is not enabled on this lane.
+- **Active operator supervision is required.** The unattended 10–20-session
+  paper soak has **not started**.
+- **Live capital is not ready.** No production/live trading authority exists
+  on this lane, and nothing in this runbook grants it.
+
+If any check below reports a different deployment mode, adapter, symbol
+scope, or an unattended/unsupervised posture, stop and investigate before
+proceeding — do not continue the sequence.
+
+### 0a. Prerequisites
+
+Verify before starting a session:
+
+| Requirement | How to verify |
+|---|---|
+| Supported host | Windows, PowerShell available (this runbook's commands are PowerShell-first) |
+| Repository / commit | `git status` clean or intentionally dirty as expected; `git rev-parse HEAD` matches the commit you intend to run |
+| Docker / Postgres (operating DB) | The **operating paper database** runs on host port `5432` (container name and image per `README_TECHNICAL.md` §"Postgres via Docker"), reachable via `MQK_DATABASE_URL=postgres://postgres:postgres@localhost:5432/mqk_dev` (or your configured equivalent). This is **not** the isolated port-`5434` test database and **not** the port-`5440` reality-test lane — see §0b. |
+| Paper credentials | `ALPACA_API_KEY_PAPER` / `ALPACA_API_SECRET_PAPER` are set in `.env.local` (never printed; never committed). Never use live Alpaca credentials on this lane. |
+| Configuration files | `.env.local` present at repo root (copy from `.env.local.example`); its contents are never displayed by any command in this runbook |
+| Daemon | Buildable/runnable via `cargo run --manifest-path .\core-rs\Cargo.toml -p mqk-daemon`; binds `127.0.0.1:8899` by default |
+| GUI | Buildable/runnable via `npm run dev` in `core-rs\mqk-gui` (or the packaged desktop shortcut, `Launch-VeritasLedger.ps1`) |
+| System clock | Accurate — the session window, market-date resolution, and daily-operation slot lookups are all UTC-clock-derived |
+| Exchange calendar / session awareness | NYSE regular session is the default session-window truth (§3); confirm no unexpected calendar override env vars are set |
+
+Never display `.env.local` contents in any command output, log, or evidence
+capture — see §15.8's read-only capture tooling for the enforced equivalent.
+
+### 0b. Operating database vs. test/reality-test databases (do not confuse these)
+
+| Lane | Host port | Purpose | Use for operator sessions? |
+|---|---|---|---|
+| Operating paper DB | `5432` | The durable database an actual daemon session in this runbook reads/writes | **Yes — this is the one** |
+| Isolated test DB | `5434` | Used only by `cargo test` scenario binaries and CI guards | No — never point a running operator daemon at this |
+| Manual proof DB | `55432` | Manual one-off proof/bootstrap work (`scripts/db_proof_bootstrap.sh`) | No |
+| Reality-test DB | `5440` | `autonomous_reality_test_paper.ps1.ps1`'s own isolated snapshot/crash-recovery harness | No — never use as the operating paper database |
+
+Before trusting any of the ports above, run `docker ps` and confirm what is
+actually listening — see `README_TECHNICAL.md` §"Verify ports before
+trusting any default above" for the full caution (a stale host-side port
+forward can otherwise make a correct password look like an authentication
+failure).
 
 ---
 
@@ -476,3 +535,293 @@ The following assumptions from the older operator_workflows.md §1 are **not cor
 | Arm is always manual | After a clean stop, the DB arm state is `Armed` and the controller will self-arm on the next session tick without operator intervention. Manual arm is only required after a halt or a first-time deployment. |
 
 The §1 statement applies to **non-autonomous (manual)** operation modes.  For the Paper + Alpaca autonomous path, this runbook is the authoritative reference.
+
+---
+
+# Part 2 — Daily-Operation Lifecycle Truth (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01)
+
+Part 1 above (§§0–14) covers the **session controller**: per-day arm/start/
+stop of the execution runtime itself. This part covers the **durable
+daily-operation record** — the per-market-day, per-(deployment_mode,
+adapter_id) lifecycle row built by Phases D–F1 of
+`AUTONOMOUS-DAILY-PAPER-OPERATIONS-01` that tracks coverage, evaluation
+activity, finalization, and outcome classification for that day, independent
+of any single process's in-memory state. Durable database state — not
+process memory — is the lifecycle authority for everything in this part.
+
+## 15. Start-of-day sequence
+
+Run these in order at the start of every supervised paper day.
+
+1. **Start or verify the operating database** (host port `5432`, §0b):
+   ```powershell
+   docker ps --filter "name=mqk-postgres-dev"
+   ```
+   If not running, start it per `README_TECHNICAL.md` §"Postgres via
+   Docker". Do not start or point at the port-`5434` test container or the
+   port-`5440` reality-test container.
+
+2. **Check schema/migration readiness (read-only)**:
+   ```powershell
+   $env:MQK_DATABASE_URL = "postgres://postgres:postgres@localhost:5432/mqk_dev"
+   cargo run --manifest-path .\core-rs\Cargo.toml -p mqk-cli -- db status
+   ```
+   `db status` reports pending migrations without applying them. Only run
+   `db migrate` if you have independently confirmed it is expected and safe
+   for this deployment — this runbook does not authorize routine migration
+   application as part of daily startup.
+
+3. **Start the daemon**:
+   ```powershell
+   $env:MQK_DATABASE_URL = "postgres://postgres:postgres@localhost:5432/mqk_dev"
+   cargo run --manifest-path .\core-rs\Cargo.toml -p mqk-daemon --bin mqk-daemon
+   ```
+   Binds `127.0.0.1:8899` by default.
+
+4. **Start the GUI**:
+   ```powershell
+   cd core-rs\mqk-gui
+   npm run dev
+   ```
+   Or launch the packaged desktop shortcut. The GUI defaults to daemon URL
+   `http://127.0.0.1:8899` (override with `VITE_MQK_DAEMON_URL` or the GUI's
+   saved daemon URL setting).
+
+5. **Confirm daemon connectivity**:
+   ```
+   GET /v1/health
+   ```
+   Must return `ok = true`.
+
+6. **Confirm paper deployment mode and Alpaca paper adapter**:
+   ```
+   GET /api/v1/system/status
+   ```
+   Confirm `daemon_mode == "paper"` and the adapter identity reflects
+   Alpaca (`alpaca_ws_continuity` present, not `"not_applicable"`).
+
+7. **Confirm live routing is disabled**:
+   ```
+   GET /api/v1/system/preflight
+   ```
+   Confirm the live-routing gate reports disabled/blocked for this
+   deployment mode (paper mode never permits live routing; see
+   `operator_control_surface.md` for the full live-routing gate matrix if
+   this ever reads otherwise — do not proceed if it does).
+
+## 16. Required read-only checks — the five authoritative routes
+
+These five routes are the required read-only truth surfaces for a
+supervised session. All are `GET`, all are safe to poll repeatedly, none
+mutate state:
+
+```
+GET /api/v1/autonomous/readiness
+GET /api/v1/autonomous/paper-status
+GET /api/v1/system/preflight
+GET /api/v1/autonomous/daily-operation
+GET /api/v1/autonomous/daily-operations?limit=20
+```
+
+The first three carry an additive `daily_operation` summary block
+(`AutonomousDailyOperationSummary`) built from the same projection as the
+last two. Full route contract:
+`docs/specs/autonomous_daily_paper_operations_01e4_read_only_daily_operation_api.md`.
+
+### 16a. Top-level route truth_state vocabulary
+
+```
+active               -- operation row (and its required read-model fields) queried successfully
+not_found             -- DB reachable, no operation row exists for the requested/current slot
+backend_unavailable   -- no DB pool configured
+query_failed          -- DB pool present but a required read failed
+```
+
+A route reporting `active` means the operation row (and its required
+read-model fields) was queried successfully — this is the only truth_state
+under which the projected fields (finalization status, outcome, evidence)
+should be treated as authoritative for the requested slot.
+
+**`not_found` is not a backend failure.** It means the DB answered and no
+row exists yet for today's slot (e.g. before the session has started) — this
+is expected and healthy at the start of a day. Do not treat it as degraded.
+
+**Null counts are unavailable, not zero.** `strategy_evaluation_count`,
+`order_activity_count`, and `fill_count` are `null` (rendered "Unavailable"
+in the GUI) whenever the underlying full-run-lineage read could not be
+completed — never fabricate `0` from a `null` count, and never read a `null`
+count as "confirmed no activity."
+
+### 16b. Finalization-status vocabulary
+
+```
+not_yet_eligible               -- operation is not yet stopped/eligible for finalization
+awaiting_finalization           -- durably stopped, awaiting the classifier/finalizer to run
+blocked_insufficient_evidence   -- evidence_degraded and durably stopped; finalization blocked
+finalized                       -- a terminal outcome has been durably committed
+```
+
+### 16c. Outcome/evidence posture
+
+A `finalized` operation carries `outcome_class` (`no_trade` |
+`with_activity` | `completed`) and `evidence_state` (`complete` | `pending`
+| `degraded` | `unavailable`). **Generic `completed` is not automatic
+no-trade/activity proof** — it is the out-of-scope manual/administrative
+terminal path (E1 contract §2), never treated by this runbook or by the GUI
+as equivalent evidence-completeness to the two automatic classifier terminal
+states (`no_trade`, `with_activity`), even when its own `evidence_state`
+happens to read `"pending"` rather than `"complete"`. Do not report a
+generic `completed` day as an automatically-verified no-trade day.
+
+## 17. Before-session checklist
+
+- [ ] `daemon_mode == "paper"` (§15.6)
+- [ ] Alpaca paper adapter confirmed active, not a live adapter
+- [ ] Live routing confirmed disabled (§15.7)
+- [ ] Broker/account connectivity: `GET /api/v1/autonomous/readiness` →
+      `ws_continuity == "live"` (or proven at session open)
+- [ ] Database connectivity: `db_status != "unavailable"` in
+      `GET /api/v1/system/status`
+- [ ] Calendar/session truth: `session_in_window` / `session_window_state`
+      reflect the expected NYSE session (§3)
+- [ ] Daily-data readiness: upstream market-data readiness gate is green
+      (per `docs/runbooks/intraday_market_data_refresh.md` if applicable)
+- [ ] Watchlist/promotion readiness (if running a promoted strategy):
+      `GET /api/v1/watchlist/status`
+- [ ] Completed-bar task health: no persistent
+      `CoverageAuthorityUnavailable` / adapter fault visible for the
+      completed-bar dispatch task
+- [ ] Risk and reconcile posture: `reconcile_ready == true`,
+      `kill_switch_active == false`
+- [ ] No unexpected orders or positions:
+      `GET /api/v1/portfolio/positions`, `GET /api/v1/oms/overview`
+- [ ] `GET /api/v1/autonomous/daily-operation` for today: either
+      `not_found` (expected pre-session) or an existing non-finalized row —
+      never a `finalized` row for today before the session has run
+
+## 18. During-session supervision
+
+**GUI screens to monitor:**
+- **Daily Operations** — durable daily-operation state, finalization
+  status, outcome/evidence posture, and recent history (§16). Read-only;
+  no controls.
+- **Session** — session-controller arm/window state (Part 1).
+- **Ops / Dashboard** — runtime status, deadman health, alerts.
+
+**What to watch:**
+- Daily-operation state progression: expect a non-finalized row to appear
+  once the session starts, then remain `not_yet_eligible` through the
+  session, then `awaiting_finalization` shortly after session close, then
+  `finalized` once the classifier/finalizer runs.
+- Completed-bar dispatch/session and order/fill visibility via the existing
+  Part 1 §7 surfaces (`system/status`, `alerts/active`, `events/feed`,
+  `oms/overview`).
+- Risk and reconcile visibility: no unexpected `kill_switch_active`
+  transitions; `reconcile_ready` stays true.
+- Blocker interpretation: an `evidence_degraded` state with
+  `finalization_status == "blocked_insufficient_evidence"` means
+  finalization is durably blocked pending investigation — see §19.
+
+**When not to intervene:** a non-finalized state during the session window
+(`not_yet_eligible`), a `not_found` result before session start, or a
+`query_failed`/`backend_unavailable` reading that self-resolves on the next
+poll are all expected transient states. Do not take a recovery action (§19)
+on the basis of a single poll — confirm the condition persists across at
+least two polling cycles first.
+
+## 19. Recovery procedures
+
+Bounded operator responses only. **Never**: manually rewrite a
+`sys_autonomous_daily_operations` row, force a terminal outcome, bypass a
+blocker, or manually create coverage or evaluation evidence. There is no manual finalization command, and none should ever be invented or run against the database directly.
+
+| Condition | Bounded response |
+|---|---|
+| Preflight blocker (`GET /api/v1/system/preflight` reports a gate false) | Identify the specific failing gate from the response; resolve the underlying cause (e.g. WS not yet live, DB unreachable); do not start a run until the gate clears |
+| `evidence_state == "degraded"` | Investigate the specific `evidence_blockers` codes (bounded closed vocabulary); confirm whether the underlying read-model gap (lineage/DB) is transient; do not attempt to manually supply evidence |
+| `finalization_status == "awaiting_finalization"` persisting unusually long | Confirm the coordinator is ticking (daemon alive, not crashed); this is expected to resolve on the next coordinator tick — do not force finalization |
+| Completed-bar task failure | Check `GET /api/v1/system/status` / alerts for the specific adapter fault; restart the daemon if the task appears stuck; do not manually insert bar-dispatch or evaluation rows |
+| Runtime interruption (daemon crash mid-session) | Restart the daemon; durable state resumes from DB (§21); do not assume the prior in-memory run state |
+| Reconcile mismatch | Follow `operator_control_surface.md`'s reconcile investigation steps; do not flatten or clear state until the mismatch is understood |
+| Risk halt (`kill_switch_active == true`) | Follow Part 1 §4 "After a halt" recovery sequence (investigate → disarm → clear-halted-run → re-arm); this does not touch the daily-operation record, which remains durable and unaffected |
+| Database/API unavailable (`backend_unavailable` / `query_failed`) | Confirm DB container is healthy (`docker ps`, §0b); restart the daemon once DB is confirmed reachable; do not treat this as a finalized/degraded operation outcome — it is a transport/backend truth distinct from operation truth |
+| Daemon restart needed | Stop the daemon process; restart per §15.3; verify §15.5–15.7 again before resuming supervision |
+| GUI restart needed | Restart per §15.4; the GUI has no independent state — a restart only re-establishes polling, it never changes daemon/DB truth |
+
+## 20. Stop and emergency posture
+
+- **Normal end-of-session observation**: at session close, the session
+  controller stops the runtime automatically (Part 1 §10). Confirm
+  `GET /v1/status` → `state == "idle"`, then confirm the daily-operation
+  record transitions toward `awaiting_finalization` and eventually
+  `finalized` (§16b) — this may take one or more coordinator ticks after
+  the runtime stop.
+- **Supervised runtime stop** (mid-session, operator-initiated):
+  ```
+  POST /v1/run/stop
+  Authorization: Bearer <MQK_OPERATOR_TOKEN>
+  ```
+  See Part 1 §10 "Manual override stop". This durably records a stop; the
+  daily-operation record's finalization eligibility is governed by
+  `stopped_at_utc` on the durable row, not by process memory.
+- **Flatten availability and blockers**: see `operator_control_surface.md`
+  §4 for the full flatten procedure and blocker table
+  (`flatten_available`, `flatten_blockers`, `live_routing_enabled`).
+  Flattening is a session-controller/execution action; it does not itself
+  finalize or alter the daily-operation record.
+- **Kill switch / risk halt**: `POST /api/v1/ops/action
+  {"action_key": "kill-switch"}` — see Part 1 §4 and
+  `operator_control_surface.md` §5 for the full emergency-abort procedure.
+- **Evidence preservation before restart**: capture the end-of-day evidence
+  set (§21) before restarting the daemon whenever a restart follows an
+  unusual condition (halt, evidence-degraded, reconcile mismatch) — durable
+  state survives the restart, but point-in-time surface snapshots do not.
+
+## 21. End-of-day evidence
+
+Capture (read-only) at end of day, or before any restart following an
+unusual condition:
+
+- Repository commit (`git rev-parse HEAD`)
+- `GET /api/v1/autonomous/daily-operation` (today's operation)
+- `GET /api/v1/autonomous/daily-operations?limit=20` (recent operations)
+- `GET /api/v1/autonomous/readiness`
+- `GET /api/v1/autonomous/paper-status`
+- `GET /api/v1/system/preflight`
+- `GET /api/v1/system/status`
+- Orders and fills (`GET /api/v1/oms/overview`, `GET /api/v1/portfolio/positions`)
+- Risk posture (`GET /api/v1/risk/denials`)
+- Reconcile posture (`GET /api/v1/reconcile/status`, `GET /api/v1/reconcile/mismatches`)
+- The day's outcome class and evidence-blocker reasons (from the
+  daily-operation row itself)
+- Relevant daemon logs for the session window
+
+See §22 (F3) for the read-only capture tooling that automates this list
+into a single evidence manifest. Never include `.env.local` contents or any
+credential in captured evidence.
+
+## 22. Restart distinctions
+
+Durable database state — never process memory — is lifecycle authority for
+all three of the following:
+
+| Restart scenario | What is durably true | What the operator should expect |
+|---|---|---|
+| Restart after a durable stop but **before finalization** | `stopped_at_utc` is set; `finalization_status` is `awaiting_finalization` or `not_yet_eligible` | On restart, the coordinator resumes ticking; finalization proceeds from durable state on its own schedule — no operator action re-triggers it |
+| Restart after a **terminal commit** (already `finalized`) | `outcome_class` / `finalized_at_utc` are durably set and immutable for that day | The daily-operation row for that market date is read-only history from this point; a restart does not reopen or re-finalize it |
+| Restart after an **evidence blocker** (`blocked_insufficient_evidence`) | The blocker and its reason codes are durably recorded | On restart, investigate per §19's `evidence_state == "degraded"` row before assuming the blocker will self-clear; it will only clear if the underlying evidence read-model condition resolves |
+
+## 23. Explicit prohibitions
+
+- Do not use live Alpaca credentials on this lane, under any circumstance.
+- Do not enable live mode / live routing.
+- Do not use the port-`5434` test database, or the port-`5440`
+  reality-test database, as the operating paper database (§0b).
+- Do not bypass a preflight, evidence, or finalization blocker.
+- Do not manually rewrite `sys_autonomous_daily_operations` rows or invent
+  a manual finalization command.
+- Do not interpret empty/`null` data without checking its `truth_state` —
+  an empty or `null` field is meaningless without the surface's own
+  truth-state qualifier (§16a).
+- Do not begin unattended (unsupervised) operation. The unattended
+  10–20-session soak has not started and is not authorized by this runbook.

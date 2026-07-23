@@ -12,6 +12,15 @@
 # cargo runs are separate, required steps of the F1 mission, not performed by
 # this guard).
 #
+# RECONCILIATION (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01F2-OPERATOR-RUNBOOK-
+# CORRECTION): now that F1 is accepted at the fixed head below, check [12]
+# is scoped to F1's own accepted committed range only (not the live working
+# tree/current HEAD), and the [13]-[16] forbidden-claims list no longer
+# forbids "F2/F3: IMPLEMENTATION COMPLETE" claims -- both are now legitimate
+# once F1 is accepted. This mirrors the same obsolete-assertion
+# reconciliation convention F1 itself applied to the Phase E closure guard's
+# range check. No other F1 check is reopened or weakened.
+#
 # Checks:
 #   [1]  Both canonical E4 routes are fetched from the GUI operator-model
 #        assembly (api.ts).
@@ -322,18 +331,42 @@ Test-NoProductionRustOrMigration "unstaged working tree" $UnstagedClean
 Test-NoProductionRustOrMigration "staged working tree" $StagedClean
 
 # -----------------------------------------------------------------------
-# [12] No F2/F3 work introduced.
+# [12] No F2/F3 work introduced -- WITHIN F1'S OWN COMMITTED RANGE ONLY.
+#
+# Reconciled by AUTONOMOUS-DAILY-PAPER-OPERATIONS-01F2-OPERATOR-RUNBOOK-
+# CORRECTION, mirroring how F1 itself reconciled the Phase E closure guard's
+# own now-obsolete permanent-range assertion (that guard's check [23]/[24]
+# split). This check originally scanned $AllTouchedPaths (committed
+# F1Base..HEAD plus the live working tree), which correctly caught scope
+# creep while F1 was still open -- but F1 is now accepted at the fixed head
+# below, and F2/F3 are legitimately allowed (indeed required) to touch
+# runbook/soak paths once they begin. Widening this check to the live
+# working tree/current HEAD forever would misfire on every legitimate F2/F3
+# patch. The check is therefore fixed to F1's own accepted committed range
+# only -- it proves what F1 itself did, not what happens afterward.
 # -----------------------------------------------------------------------
+$F1AcceptedHead = "bd7336d4dd14dbb1943638b152886eb40b646b7d"
+$PriorErrorActionPreference2 = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+& git -C $RepoRoot merge-base --is-ancestor $F1Base $F1AcceptedHead 2>$null
+$F1RangeBaseIsAncestor = ($LASTEXITCODE -eq 0)
+$F1OwnCommittedRange = @()
+if ($F1RangeBaseIsAncestor) {
+    $F1OwnCommittedRange = git -C $RepoRoot diff --name-only "$F1Base..$F1AcceptedHead" 2>$null
+}
+$ErrorActionPreference = $PriorErrorActionPreference2
+$F1OwnCommittedRangeClean = @($F1OwnCommittedRange) | Where-Object { $_ -ne "" } | Select-Object -Unique
+
 Write-Host ""
-Show-Info "--- [12] No F2/F3 work is introduced ---"
-$F2F3Paths = $AllTouchedPaths | Where-Object {
+Show-Info "--- [12] F1's own accepted committed range ($F1Base..$F1AcceptedHead) introduced no F2/F3 work ---"
+$F2F3Paths = $F1OwnCommittedRangeClean | Where-Object {
     $_ -match "01f2" -or $_ -match "01f3" -or $_ -like "*runbook*" -or $_ -like "*soak*"
 }
 if ($null -eq $F2F3Paths -or @($F2F3Paths).Count -eq 0) {
-    Show-Green "  OK -- no F2/F3/runbook/soak path touched"
+    Show-Green "  OK -- no F2/F3/runbook/soak path touched within F1's own accepted range"
 } else {
     $script:Violations++
-    Show-Red "  FAIL -- F2/F3/runbook/soak path(s) touched: $($F2F3Paths -join ', ')"
+    Show-Red "  FAIL -- F2/F3/runbook/soak path(s) touched within F1's own accepted range: $($F2F3Paths -join ', ')"
 }
 
 # -----------------------------------------------------------------------
@@ -341,6 +374,11 @@ if ($null -eq $F2F3Paths -or @($F2F3Paths).Count -eq 0) {
 # -----------------------------------------------------------------------
 Write-Host ""
 Show-Info "--- [13]-[16] README/ledger never overclaim Phase G, Bundle 3 closure, soak, or live capital ---"
+Show-Info "    (F2/F3 implementation-complete claims are no longer forbidden here -- reconciled by"
+Show-Info "     AUTONOMOUS-DAILY-PAPER-OPERATIONS-01F2-OPERATOR-RUNBOOK-CORRECTION, mirroring the same"
+Show-Info "     obsolete-assertion reconciliation convention F1 itself applied to the Phase E closure"
+Show-Info "     guard; F2/F3 legitimately reach implementation-complete status once F1 is accepted, and"
+Show-Info "     each phase's own guard is the authority on its own overclaim prohibitions from here on)"
 $ReadmeContent = if (Test-FileExists "README.md" $PathReadme) { Get-Content -Raw -Path $PathReadme } else { $null }
 $ReadmeTechContent = if (Test-FileExists "README_TECHNICAL.md" $PathReadmeTech) { Get-Content -Raw -Path $PathReadmeTech } else { $null }
 $LedgerContent = if (Test-FileExists "Master patch ledger" $PathLedger) { Get-Content -Raw -Path $PathLedger } else { $null }
@@ -359,11 +397,7 @@ $ForbiddenClaims = @(
     "LIVE CAPITAL: READY",
     "live capital is ready",
     "approved for live capital",
-    "ready for live capital",
-    "F2: IMPLEMENTATION COMPLETE",
-    "F2 is implementation complete",
-    "F3: IMPLEMENTATION COMPLETE",
-    "F3 is implementation complete"
+    "ready for live capital"
 )
 foreach ($Doc in @(
     @{Name = "README.md"; Content = $ReadmeContent},

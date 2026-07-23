@@ -224,8 +224,18 @@ validation (a malformed HTTP 200 body — e.g. `active` with a missing
 `operation`, or history with a missing/invalid `rows` array — now fails
 closed to `endpoint_unavailable` instead of rendering as false-authoritative
 truth) and renders every history row's `evidence_blockers`, which the
-original F1 pass omitted. **F1 is implementation complete, awaiting ChatGPT
-and operator acceptance.**
+original F1 pass omitted. **F1 (plus this repair) is now accepted.** On top
+of the accepted F1 head,
+`AUTONOMOUS-DAILY-PAPER-OPERATIONS-01F2-OPERATOR-RUNBOOK-CORRECTION` corrects
+the canonical operator runbook (`docs/runbooks/autonomous_paper_ops.md`) to
+cover the durable daily-operation lifecycle: a safety-boundary section, the
+five authoritative read-only routes and their full truth-state/finalization-
+status/evidence vocabulary, a before-session checklist, during-session
+supervision guidance, bounded recovery procedures (never a manual
+finalization command or DB rewrite), stop/emergency posture, end-of-day
+evidence capture, and restart distinctions. Documentation and validation
+only — no daemon, GUI, or migration file is touched. **F2 is implementation
+complete, awaiting final combined acceptance.**
 
 The strongest current operational route is:
 
@@ -250,8 +260,9 @@ What that means in plain English:
 - Phase E3 (coordinator finalization integration: wiring the accepted E2B finalizer into the durable daily coordinator's routing, current policy-input resolution, evidence-degraded recovery routing, six new bounded typed coordinator outcomes, and the E1 §12 outcome/evidence-degraded-warning notifications) is **accepted complete**
 - Phase E4 (the strictly read-only daily-operation API projection: `GET /api/v1/autonomous/daily-operation[s]`, full-run-lineage activity counts, and the additive `daily_operation` summary block on readiness/paper-status/preflight), plus its READ-TRUTH-AND-EVIDENCE-STATE-REPAIR-01 repair (terminal evidence state now honors the activity-count outcome instead of always reporting `complete`; a downstream count-read failure now demotes the top-level `truth_state` to `query_failed`; generic administrative `completed` no longer reports evidence as complete; the malformed-`market_date` 400 response no longer echoes raw input) and its EXACT-MARKET-DATE-PARSER-REPAIR-02 repair (the explicit `market_date` query branch now uses an exact lexical parser instead of `.trim()`-then-parse, rejecting whitespace, non-zero-padded fields, sign prefixes, trailing characters, and Unicode digit lookalikes), is **accepted complete**
 - Phase E5 (the integrated Phase E closure proof: one new scenario test file proving a clean no-trade day, a two-run full-lineage activity day, an evidence-blocker notify-once/silent-replay/recovery cycle, restart safety across a durable stop/terminal commit/evidence blocker, the E4 routes' full read-only guarantee, and the frozen E4 fail-soft truth vocabulary, all against the real test database and the real production coordinator/finalizer/API seams, zero production Rust change) is **accepted complete — Phase E is accepted complete in full**
-- Phase F1 (the read-only GUI daily-operation truth projection: strict TypeScript response types mirroring the accepted E4 API, both canonical routes wired into the existing operator-model polling cycle, a dedicated `Daily Operations` operator screen with no mutation controls, null-count-vs-zero handling, and a screen-local source-authority helper), plus its RUNTIME-SHAPE-AND-HISTORY-BLOCKER-REPAIR-01 repair (complete runtime shape validation of both mapper functions — a malformed HTTP 200 body now fails closed to `endpoint_unavailable` instead of rendering false-authoritative truth — plus history-row `evidence_blockers` rendering, which the original F1 pass omitted), is implementation complete, awaiting ChatGPT and operator acceptance
-- Bundle 3 is still **open** — F2 (operator runbook correction), F3 (supervised soak-evidence preparation), and Phase G closure audit remain, pending F1's own acceptance
+- Phase F1 (the read-only GUI daily-operation truth projection: strict TypeScript response types mirroring the accepted E4 API, both canonical routes wired into the existing operator-model polling cycle, a dedicated `Daily Operations` operator screen with no mutation controls, null-count-vs-zero handling, and a screen-local source-authority helper), plus its RUNTIME-SHAPE-AND-HISTORY-BLOCKER-REPAIR-01 repair (complete runtime shape validation of both mapper functions — a malformed HTTP 200 body now fails closed to `endpoint_unavailable` instead of rendering false-authoritative truth — plus history-row `evidence_blockers` rendering, which the original F1 pass omitted), is **accepted complete**
+- Phase F2 (operator runbook correction: `docs/runbooks/autonomous_paper_ops.md` updated in place with a safety-boundary section, the five authoritative read-only routes and their full vocabulary, before-session checklist, during-session supervision, bounded recovery procedures, stop/emergency posture, end-of-day evidence capture, and restart distinctions — documentation and validation only) is implementation complete, awaiting final combined acceptance
+- Bundle 3 is still **open** — F3 (supervised soak-evidence preparation) and Phase G closure audit remain, pending F2's own acceptance
 - paper+paper is not treated as an authoritative execution path
 - backtest deployment through the daemon is intentionally refused fail-closed
 - live-shadow and live-capital remain outside the current operational finish line
@@ -263,7 +274,7 @@ Use these labels precisely:
 | Mode | Current posture | Meaning |
 |---|---|---|
 | **Supervised Paper + Alpaca** | Available for controlled validation | Credible current path after a clean proof run, valid env, Alpaca paper auth, and active operator supervision. |
-| **Autonomous Paper + Alpaca** | Pre-soak hardening — Bundle 3 open | The durable daily controller, completed-bar production cutover, and the D4 integrated lifecycle/dispatch-ownership proof are implemented and **accepted** (Phase D accepted complete in full); the E1 durable-outcome contract, the E2A durable evidence foundation, the E2B strict classifier/finalization CAS, the E3 coordinator finalization integration, the E4 read-only daily-operation API, and the E5 integrated Phase E closure proof are all **accepted** (Phase E accepted complete in full); Bundle 3 still requires Phase F1's own acceptance (the read-only GUI daily-operation projection, implementation complete, awaiting ChatGPT and operator acceptance), F2 operator runbook correction, F3 supervised soak-evidence preparation, and Phase G final closure before it should begin an unattended autonomous soak. Controlled autonomous Paper + Alpaca operation under active operator supervision is the current Bundle 3 target — not unattended soak. |
+| **Autonomous Paper + Alpaca** | Pre-soak hardening — Bundle 3 open | The durable daily controller, completed-bar production cutover, and the D4 integrated lifecycle/dispatch-ownership proof are implemented and **accepted** (Phase D accepted complete in full); the E1 durable-outcome contract, the E2A durable evidence foundation, the E2B strict classifier/finalization CAS, the E3 coordinator finalization integration, the E4 read-only daily-operation API, and the E5 integrated Phase E closure proof are all **accepted** (Phase E accepted complete in full); the F1 read-only GUI daily-operation projection is **accepted complete**; Bundle 3 still requires F2 operator runbook correction's own final acceptance (implementation complete), F3 supervised soak-evidence preparation, and Phase G final closure before it should begin an unattended autonomous soak. Controlled autonomous Paper + Alpaca operation under active operator supervision is the current Bundle 3 target — not unattended soak. |
 | **Live / live-capital** | Not ready | Typed support and gates exist, but this repo must not be treated as safe for unattended live trading. |
 
 ### Current Bundle 3 position
@@ -332,25 +343,34 @@ plus its READ-TRUTH-AND-EVIDENCE-STATE-REPAIR-01 and EXACT-MARKET-DATE-PARSER-RE
 - **no GUI surface was added** — that remains Phase F's job
 - a follow-on E5 deterministic proof and closure-guard repair: every `tokio::time::sleep` is removed from the closure test in favor of a `PeAlertRecorder`/`wait_for_alert_count` helper driven by a `tokio::sync::watch` completion signal (bounded by a deadlock-protection-only timeout, never a delay that makes an assertion pass); `PeSnapshot`/`pe_snapshot` now derive the operation's full validated run lineage (never a caller-supplied single `run_id`) and additionally record global totals across `runs`/`sys_autonomous_daily_bar_dispatches`/`strategy_signal_evaluations`/`oms_outbox`/`oms_inbox`/`sys_autonomous_daily_operation_events`/`sys_autonomous_session_events`, closing the gap where an unrelated new-identity row could escape an operation-scoped-only snapshot; the read-only guarantee proof now runs against a genuine two-run lineage; and the closure guard's production-Rust/migration/GUI checks now inspect the committed `11664945e90a582e6984f0eab66cf89690120769..HEAD` patch range (previously only the working tree) in addition to the staged/unstaged working tree — **zero production Rust, migration, or GUI change**
 
-Implemented on the local `main` worktree
-(AUTONOMOUS-DAILY-PAPER-OPERATIONS-01F1-GUI-DAILY-OPERATION-TRUTH-PROJECTION),
-but not yet independently accepted:
+**Accepted complete** (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01F1-GUI-DAILY-OPERATION-TRUTH-PROJECTION,
+plus its RUNTIME-SHAPE-AND-HISTORY-BLOCKER-REPAIR-01 repair):
 
 - strict GUI-side TypeScript response types (`AutonomousDailyOperationApiRow`/`AutonomousDailyOperationSurface`/`AutonomousDailyOperationsSurface`) mirroring the accepted E4 daemon API shapes verbatim, plus a GUI-only `transport_state` (`available`/`endpoint_unavailable`) layered in front of the daemon's own `truth_state` so a network/HTTP failure can never masquerade as the daemon's authoritative `not_found`
 - both canonical E4 routes (`GET /api/v1/autonomous/daily-operation`, `GET /api/v1/autonomous/daily-operations?limit=20`) wired into the existing tracked probe assembly in `fetchOperatorModel` — no second polling timer, no mock-data fallback, `SystemModel` gained exactly two new read-only fields (`autonomousDailyOperation`/`autonomousDailyOperations`)
 - a dedicated `Daily Operations` operator screen (`AutonomousDailyOperationsScreen.tsx`, screen key `dailyOperations`, registered in the operator monitor group next to Dashboard/Session/Ops and in the left rail) rendering current-operation truth (finalization status, outcome class/reason, evidence state/blockers, bar and activity counters, identity, timestamps) and recent history in daemon-preserved order — **zero action, mutation, or control element** (no button, form, input, `onClick`, `postJson`, or `invokeOperatorAction` reference anywhere in the screen)
 - a pure `formatDailyOperationCount` helper so the three full-run-lineage activity counts render `null` as an explicit "Unavailable" marker and a real `0` as `"0"` — never a false zero
 - a dedicated `classifyDailyOperationsSourceAuthority` helper (distinct from the existing coarse per-panel `classifyPanelSources`) implementing the required section-level availability matrix: both surfaces available → both sections render; one surface unavailable → only that section shows an unavailable notice; both unavailable → one screen-level fail-closed notice
-- a focused GUI test matrix (4 new test files, 20+ assertions) proving both routes are requested, every truth-state distinction is preserved, null-vs-zero count rendering, history-order preservation, screen registration/reachability, the absence of any mutation control, and that the fallback/unavailable mapping never fabricates healthy truth — `npm test` (832 tests) and `npm run build` both pass
+- a focused GUI test matrix (4 new test files, 20+ assertions) proving both routes are requested, every truth-state distinction is preserved, null-vs-zero count rendering, history-order preservation, screen registration/reachability, the absence of any mutation control, and that the fallback/unavailable mapping never fabricates healthy truth — `npm test` (850 tests) and `npm run build` both pass
 - **zero daemon route, response field, classifier, finalizer, coordinator, notification, coverage, lineage, or migration change** — F1 touches no production Rust file
-- implementation complete, awaiting ChatGPT and operator acceptance
+- **F1 (plus its repair) is now accepted**
+
+Implemented on the local `main` worktree
+(AUTONOMOUS-DAILY-PAPER-OPERATIONS-01F2-OPERATOR-RUNBOOK-CORRECTION),
+but not yet independently accepted:
+
+- `docs/runbooks/autonomous_paper_ops.md` (the existing canonical autonomous-paper runbook) updated in place — no competing duplicate runbook created
+- a new `## 0. Safety boundary` section (Paper + Alpaca only, single-symbol long-only US equity/ETF, active operator supervision required, unattended soak not started, live capital not ready) plus prerequisites and an operating-vs-test-vs-reality-test database port table (operating `5432`; isolated `cargo test` DB `5434`; manual proof DB `55432`; reality-test DB `5440` — the latter three explicitly excluded from operating-database use)
+- a new `# Part 2 — Daily-Operation Lifecycle Truth` section documenting the start-of-day sequence, the five authoritative read-only routes and their full truth-state/finalization-status/evidence vocabulary (`not_found` is explicitly not a backend failure; null counts are explicitly unavailable, not zero; generic `completed` is explicitly not automatic no-trade/activity proof), a before-session checklist, during-session supervision guidance, bounded recovery procedures that never invent a manual finalization command or a database row rewrite, stop/emergency posture, end-of-day evidence capture, and restart distinctions (before finalization / after a terminal commit / after an evidence blocker)
+- a new F2 spec doc and a new source-aware F2 guard that re-invokes the F1 guard and proves the runbook content above
+- **documentation and validation only — no daemon, GUI, or migration file is touched**
+- F2 is implementation complete, awaiting ChatGPT and operator acceptance — recorded in this combined F2/F3/Phase-G closeout session as **AWAITING FINAL COMBINED ACCEPTANCE**
 
 Still required before Bundle 3 closes:
 
-1. independent ChatGPT/operator acceptance of the F1 GUI daily-operation truth projection
-2. F2 — operator runbook and startup/shutdown procedure correction
-3. F3 — supervised soak-evidence preparation and evidence bundle
-4. complete Phase G closure audit and ledger reconciliation
+1. independent ChatGPT/operator acceptance of the F2 operator runbook correction
+2. F3 — supervised soak-evidence preparation and evidence bundle
+3. complete Phase G closure audit and ledger reconciliation
 
 ### What Bundle 3 completion unlocks
 
@@ -558,7 +578,7 @@ should not be called closed until Bundle 3 and its market evidence gates are com
 
 | Item | Status |
 |---|---|
-| BUNDLE-3-AUTONOMOUS-DAILY-OPS | Open — Phase D accepted complete; Phase E1 contract (four-times-corrected) accepted complete; Phase E2A durable evidence foundation, plus its authority-envelope/gate-ordering/concurrency closure repairs, accepted complete; Phase E2B strict outcome classifier and finalization CAS accepted complete; Phase E3 coordinator finalization integration and notification accepted complete; Phase E4 read-only daily-operation API, plus its repairs, accepted complete; Phase E5 integrated Phase E closure proof accepted complete — Phase E accepted complete in full; Phase F1 GUI daily-operation truth projection implementation complete, awaiting acceptance; F2 runbook correction, F3 soak-evidence prep, and closure (Phase G) remain |
+| BUNDLE-3-AUTONOMOUS-DAILY-OPS | Open — Phase D accepted complete; Phase E1 contract (four-times-corrected) accepted complete; Phase E2A durable evidence foundation, plus its authority-envelope/gate-ordering/concurrency closure repairs, accepted complete; Phase E2B strict outcome classifier and finalization CAS accepted complete; Phase E3 coordinator finalization integration and notification accepted complete; Phase E4 read-only daily-operation API, plus its repairs, accepted complete; Phase E5 integrated Phase E closure proof accepted complete — Phase E accepted complete in full; Phase F1 GUI daily-operation truth projection accepted complete; Phase F2 operator runbook correction implementation complete, awaiting acceptance; F3 soak-evidence prep and closure (Phase G) remain |
 | PAPER-TRADE-LIFECYCLE-01 | Open — market-hours paper smoke with real fills |
 | RECONCILE-AFTER-REAL-FILL-01 | Open — reconcile pass after a real paper fill |
 | DISCORD-TRADE-LIFECYCLE-REAL-01 | Open — Discord notification evidence from a real cycle |

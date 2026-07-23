@@ -16144,3 +16144,89 @@ BUNDLE 4: NOT STARTED
 SOAK: NOT STARTED
 LIVE CAPITAL: NOT READY
 ```
+
+---
+
+## AUTONOMOUS-DAILY-PAPER-OPERATIONS-01F1-ACCEPTANCE
+
+F1 (`AUTONOMOUS-DAILY-PAPER-OPERATIONS-01F1-GUI-DAILY-OPERATION-TRUTH-PROJECTION`,
+commit `c7ddccaf`) plus its repair
+(`AUTONOMOUS-DAILY-PAPER-OPERATIONS-01F1-RUNTIME-SHAPE-AND-HISTORY-BLOCKER-REPAIR-01`,
+commit `bd7336d4`) are **accepted**. Accepted F1 range: base `4b6eec72` →
+`c7ddccaf` → accepted head `bd7336d4`. Both commits verified present on
+`main` at the start of the combined F2/F3/G closeout session.
+
+```text
+F1: ACCEPTED — COMPLETE
+PHASE F: OPEN (F2 starting)
+BUNDLE 3 (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-COMBINED): OPEN
+```
+
+---
+
+## AUTONOMOUS-DAILY-PAPER-OPERATIONS-01F2-OPERATOR-RUNBOOK-CORRECTION
+
+**Bundle:** `AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-COMBINED` | **Phase:** F2 —
+operator runbook correction.
+
+Starting HEAD: `bd7336d4` (accepted F1 head). Documentation and validation
+only — no daemon, GUI, or migration file touched.
+
+Updated `docs/runbooks/autonomous_paper_ops.md` in place (the existing
+canonical autonomous-paper runbook — no competing duplicate created):
+
+- `## 0. Safety boundary` (+`0a` prerequisites, `0b` operating-vs-test-vs-
+  reality-test database port table: operating DB `5432`, isolated `cargo
+  test` DB `5434`, manual proof DB `55432`, reality-test DB `5440` — the
+  latter three explicitly excluded from operating-database use).
+- `# Part 2 — Daily-Operation Lifecycle Truth` (`## 15`–`## 23`):
+  start-of-day sequence with exact source-verified commands; the five
+  authoritative read-only routes (`autonomous/readiness`,
+  `autonomous/paper-status`, `system/preflight`, `autonomous/daily-operation`,
+  `autonomous/daily-operations`) and their full truth-state/finalization-
+  status/evidence vocabulary (`not_found` explicitly stated to not be a
+  backend failure; null counts explicitly stated to be unavailable, not
+  zero; generic `completed` explicitly stated to not be automatic
+  no-trade/activity proof); before-session checklist; during-session
+  supervision; bounded recovery procedures (never a manual finalization
+  command, never a DB row rewrite); stop/emergency posture; end-of-day
+  evidence capture list; restart distinctions (before finalization / after a
+  terminal commit / after an evidence blocker) with durable DB state as the
+  explicit lifecycle authority; explicit prohibitions.
+
+New files:
+`docs/specs/autonomous_daily_paper_operations_01f2_operator_runbook_correction.md`,
+`scripts/guards/validate_autonomous_daily_paper_operations_01f2_operator_runbook_correction.ps1`.
+
+Source audit cross-checked every command/port/route referenced against
+currently committed code and docs (`core-rs/crates/mqk-daemon/src/routes.rs`
+route strings, `README.md`/`README_TECHNICAL.md` daemon/GUI start commands
+and DB port map) — no stale command was preserved and none was invented.
+
+**Safety confirmation:**
+
+```text
+PROVIDER CALLS: no
+BROKER CALLS: no
+DISCORD CALLS: no
+NETWORK CALLS: no
+REAL DAEMON STARTED: no
+PAPER ORDERS: no
+LIVE ORDERS: no
+PAPER DB TOUCHED: no
+MIGRATION CHANGED: no
+DAEMON PRODUCTION RUST CHANGED: no
+GUI CHANGED: no
+```
+
+```text
+F1: ACCEPTED — COMPLETE
+F2: IMPLEMENTATION COMPLETE — AWAITING FINAL COMBINED ACCEPTANCE
+F3: NOT STARTED
+PHASE F: OPEN
+PHASE G: NOT STARTED
+BUNDLE 3 (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-COMBINED): OPEN
+BUNDLE 4: NOT STARTED
+SOAK: NOT STARTED
+LIVE CAPITAL: NOT READY
+```
