@@ -46,6 +46,7 @@ import type {
   WatchlistStatusSurface,
 } from "./types";
 import type { OrderTimelineSurface } from "./types/execution";
+import { isAutonomousDailyOperationApiRow } from "./types/autonomousDailyOperations";
 
 // ---------------------------------------------------------------------------
 // Legacy daemon API shapes
@@ -1111,6 +1112,13 @@ const AUTONOMOUS_DAILY_OPERATIONS_VALID_TRUTH_STATES = new Set([
   "query_failed",
 ]);
 
+// Daemon route-contract constants (`CANONICAL_SINGLE` / `CANONICAL_HISTORY`
+// in `core-rs/crates/mqk-daemon/src/routes/autonomous_daily_operations.rs`).
+// A response whose `canonical_route` does not match exactly is treated as
+// malformed, never coerced into the expected route.
+const DAILY_OPERATION_CANONICAL_ROUTE = "/api/v1/autonomous/daily-operation";
+const DAILY_OPERATIONS_CANONICAL_ROUTE = "/api/v1/autonomous/daily-operations";
+
 const ENDPOINT_UNAVAILABLE_DAILY_OPERATION: AutonomousDailyOperationSurface = {
   transport_state: "endpoint_unavailable",
   canonical_route: null,
@@ -1129,47 +1137,93 @@ const ENDPOINT_UNAVAILABLE_DAILY_OPERATIONS: AutonomousDailyOperationsSurface = 
   message: null,
 };
 
-// Read-only mapper: preserves the daemon's truth_state verbatim. Any other
-// shape (probe failure, structurally invalid body, unrecognized truth_state)
-// maps to the explicit GUI-only "endpoint_unavailable" transport sentinel —
-// never the daemon's own "not_found", and never a fabricated healthy default.
+function isFiniteIntegerValue(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && Number.isInteger(value);
+}
+
+function isFiniteIntegerInRange(value: unknown, min: number, max: number): value is number {
+  return isFiniteIntegerValue(value) && value >= min && value <= max;
+}
+
+// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01F1-RUNTIME-SHAPE-AND-HISTORY-BLOCKER-REPAIR-01:
+// complete runtime validator, not just a truth_state check. A malformed
+// successful HTTP 200 body (missing/null operation on "active", a non-null
+// operation on "not_found"/"backend_unavailable", an invalid row anywhere,
+// a wrong canonical_route, or an unrecognized truth_state) fails closed to
+// the GUI-only "endpoint_unavailable" sentinel — it is never repaired,
+// defaulted, or reinterpreted as authoritative daemon truth. In particular,
+// `active` + a missing/null `operation` must never fall through to render
+// as the daemon's own authoritative `not_found`.
 export function mapAutonomousDailyOperationResponse(
   wrapper: AutonomousDailyOperationResponseWrapper | null | undefined,
 ): AutonomousDailyOperationSurface {
   if (
     wrapper == null ||
+    typeof wrapper !== "object" ||
+    wrapper.canonical_route !== DAILY_OPERATION_CANONICAL_ROUTE ||
     typeof wrapper.truth_state !== "string" ||
-    !AUTONOMOUS_DAILY_OPERATION_VALID_TRUTH_STATES.has(wrapper.truth_state)
+    !AUTONOMOUS_DAILY_OPERATION_VALID_TRUTH_STATES.has(wrapper.truth_state) ||
+    !(wrapper.message === null || typeof wrapper.message === "string")
   ) {
     return ENDPOINT_UNAVAILABLE_DAILY_OPERATION;
   }
+
+  const truthState = wrapper.truth_state as AutonomousDailyOperationSurface["truth_state"];
+  const operation = wrapper.operation;
+
+  const operationIsValid =
+    truthState === "active"
+      ? isAutonomousDailyOperationApiRow(operation)
+      : truthState === "query_failed"
+        ? operation === null || isAutonomousDailyOperationApiRow(operation)
+        : operation === null;
+
+  if (!operationIsValid) {
+    return ENDPOINT_UNAVAILABLE_DAILY_OPERATION;
+  }
+
   return {
     transport_state: "available",
     canonical_route: wrapper.canonical_route,
-    truth_state: wrapper.truth_state as AutonomousDailyOperationSurface["truth_state"],
-    operation: wrapper.operation ?? null,
-    message: wrapper.message ?? null,
+    truth_state: truthState,
+    operation: operation ?? null,
+    message: wrapper.message,
   };
 }
 
+// Same complete-validation contract as `mapAutonomousDailyOperationResponse`
+// for the history route: `rows` must be an actual array and every row must
+// pass `isAutonomousDailyOperationApiRow`, never `wrapper.rows ?? []`. A
+// missing/invalid `rows` array or any single malformed row fails the whole
+// response closed to `endpoint_unavailable` — that empty fallback array is
+// never authoritative empty history (compare the daemon's own `active` +
+// `rows: []`, which is preserved verbatim as authoritative).
 export function mapAutonomousDailyOperationsResponse(
   wrapper: AutonomousDailyOperationsResponseWrapper | null | undefined,
 ): AutonomousDailyOperationsSurface {
   if (
     wrapper == null ||
+    typeof wrapper !== "object" ||
+    wrapper.canonical_route !== DAILY_OPERATIONS_CANONICAL_ROUTE ||
     typeof wrapper.truth_state !== "string" ||
-    !AUTONOMOUS_DAILY_OPERATIONS_VALID_TRUTH_STATES.has(wrapper.truth_state)
+    !AUTONOMOUS_DAILY_OPERATIONS_VALID_TRUTH_STATES.has(wrapper.truth_state) ||
+    !isFiniteIntegerValue(wrapper.requested_limit) ||
+    !isFiniteIntegerInRange(wrapper.effective_limit, 1, 100) ||
+    !(wrapper.message === null || typeof wrapper.message === "string") ||
+    !Array.isArray(wrapper.rows) ||
+    !wrapper.rows.every((row) => isAutonomousDailyOperationApiRow(row))
   ) {
     return ENDPOINT_UNAVAILABLE_DAILY_OPERATIONS;
   }
+
   return {
     transport_state: "available",
     canonical_route: wrapper.canonical_route,
     truth_state: wrapper.truth_state as AutonomousDailyOperationsSurface["truth_state"],
     requested_limit: wrapper.requested_limit,
     effective_limit: wrapper.effective_limit,
-    rows: wrapper.rows ?? [],
-    message: wrapper.message ?? null,
+    rows: wrapper.rows,
+    message: wrapper.message,
   };
 }
 

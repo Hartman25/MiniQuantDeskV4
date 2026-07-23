@@ -75,6 +75,9 @@ $PathF1Spec            = Join-Path $RepoRoot "docs\specs\autonomous_daily_paper_
 $PathReadme            = Join-Path $RepoRoot "README.md"
 $PathReadmeTech        = Join-Path $RepoRoot "README_TECHNICAL.md"
 $PathLedger            = Join-Path $RepoRoot "MiniQuantDesk_Master_Patch_Ledger_v2.md"
+$PathApiTestTs         = Join-Path $RepoRoot "core-rs\mqk-gui\src\features\autonomousDailyOperations\__tests__\api.test.ts"
+$PathScreenSourceTestTs = Join-Path $RepoRoot "core-rs\mqk-gui\src\features\autonomousDailyOperations\__tests__\screenSource.test.ts"
+$PathRowValidatorTestTs = Join-Path $RepoRoot "core-rs\mqk-gui\src\features\autonomousDailyOperations\__tests__\isAutonomousDailyOperationApiRow.test.ts"
 
 $Violations = 0
 
@@ -141,6 +144,9 @@ $LeftRailNavContent     = if (Test-Path $PathLeftRailNavTs) { Get-Content -Raw -
 $ScreenContent          = if (Test-Path $PathScreenTsx) { Get-Content -Raw -Path $PathScreenTsx } else { $null }
 $FormatContent          = if (Test-Path $PathFormatTs) { Get-Content -Raw -Path $PathFormatTs } else { $null }
 $PackageJsonContent     = if (Test-Path $PathPackageJson) { Get-Content -Raw -Path $PathPackageJson } else { $null }
+$TypesContent           = if (Test-Path $PathTypesTs) { Get-Content -Raw -Path $PathTypesTs } else { $null }
+$ApiTestContent         = if (Test-Path $PathApiTestTs) { Get-Content -Raw -Path $PathApiTestTs } else { $null }
+$ScreenSourceTestContent = if (Test-Path $PathScreenSourceTestTs) { Get-Content -Raw -Path $PathScreenSourceTestTs } else { $null }
 
 # -----------------------------------------------------------------------
 # [1] Both canonical routes fetched.
@@ -229,6 +235,10 @@ foreach ($Field in @("strategy_evaluation_count", "order_activity_count", "fill_
 
 # -----------------------------------------------------------------------
 # [7] Evidence blockers never discarded.
+#
+# The current-operation panel referencing row.evidence_blockers is not
+# sufficient proof that HISTORY rows also render their blockers -- isolate
+# the HistoryPanel function body specifically (F1 repair [R9]).
 # -----------------------------------------------------------------------
 Write-Host ""
 Show-Info "--- [7] Evidence blockers are rendered, never discarded ---"
@@ -397,6 +407,7 @@ Show-Info "--- [19] F1 GUI test files exist and are registered in package.json -
 $F1TestFiles = @(
     "src/features/autonomousDailyOperations/__tests__/formatDailyOperationCount.test.ts",
     "src/features/autonomousDailyOperations/__tests__/sourceAuthority.test.ts",
+    "src/features/autonomousDailyOperations/__tests__/isAutonomousDailyOperationApiRow.test.ts",
     "src/features/autonomousDailyOperations/__tests__/api.test.ts",
     "src/features/autonomousDailyOperations/__tests__/screenSource.test.ts"
 )
@@ -407,6 +418,110 @@ foreach ($TestFile in $F1TestFiles) {
         Test-ContentContains "package.json registers $Label" $PackageJsonContent $TestFile | Out-Null
     }
 }
+
+# =============================================================================
+# [R1]-[R12] AUTONOMOUS-DAILY-PAPER-OPERATIONS-01F1-RUNTIME-SHAPE-AND-HISTORY-
+# BLOCKER-REPAIR-01 -- source-aware proof for the F1 repair pass. Strengthens
+# [7]'s weak blocker check (satisfied merely by the current-operation panel)
+# with a history-scoped proof, and proves the complete runtime validator,
+# full wrapper-invariant enforcement, and the screen's own defensive
+# active-null branch all actually exist in source -- not just that some
+# truth_state string appears somewhere in the file.
+# =============================================================================
+Write-Host ""
+Write-Host "============================================================"
+Write-Host " [R1]-[R12] Runtime-shape and history-blocker repair"
+Write-Host "============================================================"
+
+# [R1] isAutonomousDailyOperationApiRow exists.
+Write-Host ""
+Show-Info "--- [R1] isAutonomousDailyOperationApiRow runtime validator exists ---"
+Test-ContentContains "types/autonomousDailyOperations.ts exports isAutonomousDailyOperationApiRow" $TypesContent "export function isAutonomousDailyOperationApiRow" | Out-Null
+
+# [R2] All three closed vocabulary validators (sets) exist.
+Write-Host ""
+Show-Info "--- [R2] Closed finalization/outcome/evidence vocabulary sets exist ---"
+Test-ContentContains "types/autonomousDailyOperations.ts defines VALID_FINALIZATION_STATUSES" $TypesContent "VALID_FINALIZATION_STATUSES" | Out-Null
+Test-ContentContains "types/autonomousDailyOperations.ts defines VALID_OUTCOME_CLASSES" $TypesContent "VALID_OUTCOME_CLASSES" | Out-Null
+Test-ContentContains "types/autonomousDailyOperations.ts defines VALID_EVIDENCE_STATES" $TypesContent "VALID_EVIDENCE_STATES" | Out-Null
+
+# [R3] Active single response requires a valid non-null operation.
+Write-Host ""
+Show-Info "--- [R3] active single response requires a valid non-null operation ---"
+Test-ContentContains "legacy.ts requires isAutonomousDailyOperationApiRow on active operation" $LegacyContent 'truthState === "active"' | Out-Null
+Test-ContentContains "legacy.ts calls isAutonomousDailyOperationApiRow(operation)" $LegacyContent "isAutonomousDailyOperationApiRow(operation)" | Out-Null
+
+# [R4] not_found (and backend_unavailable) require operation null.
+Write-Host ""
+Show-Info "--- [R4] not_found/backend_unavailable require operation null ---"
+Test-ContentContains "legacy.ts falls through to operation === null for non-active/query_failed states" $LegacyContent "operation === null" | Out-Null
+
+# [R5]/[R6] History requires Array.isArray(rows) and validates every row.
+Write-Host ""
+Show-Info "--- [R5]/[R6] history requires Array.isArray(rows) and validates every row ---"
+Test-ContentContains "legacy.ts requires Array.isArray(wrapper.rows)" $LegacyContent "Array.isArray(wrapper.rows)" | Out-Null
+Test-ContentContains "legacy.ts validates every history row" $LegacyContent "wrapper.rows.every((row) => isAutonomousDailyOperationApiRow(row))" | Out-Null
+
+# [R7] Successful history mapping never uses the bare `rows ?? []` fallback.
+#
+# Scoped to mapAutonomousDailyOperationsResponse's own function body -- other,
+# unrelated legacy mappers in this file (mapExecutionOutboxWrapper,
+# mapFillQualityWrapper) legitimately use `rows: wrapper.rows ?? []` for
+# their own endpoints and must not trip this F1-scoped check.
+Write-Host ""
+Show-Info "--- [R7] successful history mapping does not use rows ?? [] ---"
+if ($null -ne $LegacyContent) {
+    $DailyOpsMapperMatch = [regex]::Match(
+        $LegacyContent,
+        'export function mapAutonomousDailyOperationsResponse\([\s\S]*?\r?\n\}\r?\n',
+        [System.Text.RegularExpressions.RegexOptions]::Singleline
+    )
+    if ($DailyOpsMapperMatch.Success -and -not $DailyOpsMapperMatch.Value.Contains("wrapper.rows ?? []")) {
+        Show-Green "  OK -- mapAutonomousDailyOperationsResponse does not fall back with rows ?? []"
+    } else {
+        $script:Violations++
+        Show-Red "  FAIL -- mapAutonomousDailyOperationsResponse falls back with rows ?? [] (or function body not found)"
+    }
+} else {
+    $script:Violations++
+    Show-Red "  FAIL -- legacy.ts unreadable, cannot verify history mapper"
+}
+
+# [R8] current active-null cannot enter the not_found branch.
+Write-Host ""
+Show-Info "--- [R8] active + null operation cannot enter the not_found branch ---"
+Test-ContentDoesNotContain 'screen no longer collapses not_found and null-operation into one branch' $ScreenContent 'surface.truth_state === "not_found" || surface.operation == null' | Out-Null
+Test-ContentContains "screen has a distinct not_found-only branch" $ScreenContent 'surface.truth_state === "not_found"' | Out-Null
+Test-ContentContains "screen renders a distinct malformed-response notice" $ScreenContent "Malformed daily-operation response" | Out-Null
+
+# [R9] History-row rendering (not just the current-operation panel)
+# references row.evidence_blockers -- isolate the HistoryPanel function body.
+Write-Host ""
+Show-Info "--- [R9] HistoryPanel itself (not just CurrentOperationPanel) renders row.evidence_blockers ---"
+if ($null -ne $ScreenContent) {
+    $HistoryPanelMatch = [regex]::Match(
+        $ScreenContent,
+        'function HistoryPanel\([\s\S]*?\r?\n\}\r?\n',
+        [System.Text.RegularExpressions.RegexOptions]::Singleline
+    )
+    if ($HistoryPanelMatch.Success -and $HistoryPanelMatch.Value.Contains("row.evidence_blockers")) {
+        Show-Green "  OK -- HistoryPanel body references row.evidence_blockers"
+    } else {
+        $script:Violations++
+        Show-Red "  FAIL -- HistoryPanel body does not reference row.evidence_blockers (history rows must render their own blockers, not just the current-operation panel)"
+    }
+} else {
+    $script:Violations++
+    Show-Red "  FAIL -- screen source unreadable, cannot verify HistoryPanel blocker rendering"
+}
+
+# [R10]/[R11]/[R12] Required new tests exist.
+Write-Host ""
+Show-Info "--- [R10]-[R12] required new tests exist ---"
+Test-ContentContains "malformed active-null test exists" $ApiTestContent "active with null operation maps to endpoint_unavailable" | Out-Null
+Test-ContentContains "malformed history-rows test exists" $ApiTestContent "history containing one malformed row maps the whole surface to endpoint_unavailable" | Out-Null
+Test-ContentContains "history blocker rendering test exists" $ApiTestContent "a history row with two evidence blockers renders both blocker strings" | Out-Null
+Test-ContentContains "screen-level defensive active-null test exists" $ScreenSourceTestContent "screen renders a malformed notice, not the neutral not_found copy, for active truth_state with null operation" | Out-Null
 
 # =============================================================================
 # Summary

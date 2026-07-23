@@ -350,3 +350,140 @@ Phase G (final Bundle 3 closure audit) is not started by this patch. Bundle
 The 10–20-session unattended autonomous paper soak has not started and is
 not authorized by this patch. Live trading is not ready and is not
 authorized by this patch.
+
+## 17. F1 repair pass (RUNTIME-SHAPE-AND-HISTORY-BLOCKER-REPAIR-01)
+
+`AUTONOMOUS-DAILY-PAPER-OPERATIONS-01F1-RUNTIME-SHAPE-AND-HISTORY-BLOCKER-REPAIR-01`
+hardens two defects in the F1 implementation above, on top of starting HEAD
+`c7ddccafebcd3dd761ef2fa54bb8cadeb6144b2a`. It does not reopen any other part
+of this spec — §§1–16 above remain the F1 contract as originally built.
+
+**Defect 1 — incomplete runtime validation.** §4/§5 above describe
+`mapAutonomousDailyOperationResponse`/`mapAutonomousDailyOperationsResponse`
+as validating truth_state and falling back safely on a malformed wrapper.
+In the original F1 implementation this was true only at the wrapper's
+top level: `operation: wrapper.operation ?? null` and
+`rows: wrapper.rows ?? []` meant a successful HTTP 200 body with a missing
+or structurally invalid `operation`/`rows` payload was not rejected — an
+`active` truth_state with a missing `operation`, for example, would carry
+`operation: null` through to the screen exactly like an authoritative
+`not_found`.
+
+**Defect 2 — history blockers not rendered.** §7 above states
+`evidence_blockers` are "rendered verbatim as a list whenever non-empty, for
+both the current-operation panel and (per row) the history table's
+evidence-state column." Only the current-operation panel actually did this;
+`HistoryPanel`'s row template rendered `row.evidence_state` but never
+`row.evidence_blockers`.
+
+### 17.1 Closed GUI-side vocabulary types
+
+`types/autonomousDailyOperations.ts` now defines
+`AutonomousDailyFinalizationStatus`, `AutonomousDailyOutcomeClass`, and
+`AutonomousDailyEvidenceState` as closed string-literal unions mirroring the
+three bounded vocabularies documented on the daemon's
+`AutonomousDailyOperationApiRow` (`api_types.rs`). `finalization_status`,
+`outcome_class`, and `evidence_state` on the GUI's own
+`AutonomousDailyOperationApiRow` are typed against these unions instead of
+`string`. The durable `state` field remains `string` — the backend lifecycle
+state set is broader and is already represented verbatim, not reinterpreted
+by the GUI.
+
+### 17.2 Complete row validator
+
+`isAutonomousDailyOperationApiRow(value: unknown): value is
+AutonomousDailyOperationApiRow` is the single pure runtime validator for one
+API row. It checks every required field's presence, type, and nullability;
+rejects NaN/infinite/non-integer numbers on every count/timestamp field;
+requires `evidence_blockers` to be an actual array of strings; and requires
+`finalization_status`/`outcome_class`/`evidence_state` to be an exact member
+of their closed vocabulary. It never repairs, defaults, coerces, trims,
+sorts, or reinterprets a malformed field — a missing/`undefined` field is
+rejected outright, never silently converted to `null` or `0`.
+
+### 17.3 Complete wrapper validation
+
+Both mapper functions in `legacy.ts` now enforce, before returning
+`transport_state: "available"`:
+
+```text
+canonical_route must equal the exact expected daemon route string
+truth_state must be a recognized value
+message must be string | null
+
+single response:
+  active            -> operation must be exactly one valid row
+  not_found          -> operation must be null
+  backend_unavailable -> operation must be null
+  query_failed       -> operation may be null or one valid row
+
+history response:
+  requested_limit must be a finite integer
+  effective_limit must be a finite integer in [1, 100]
+  rows must satisfy Array.isArray
+  every row in rows must pass isAutonomousDailyOperationApiRow
+```
+
+Any violation returns the existing `endpoint_unavailable` sentinel
+(`ENDPOINT_UNAVAILABLE_DAILY_OPERATION(S)`) unchanged from §4 — no new
+transport/truth-state vocabulary was introduced. `active` + a
+missing/invalid `operation` can now never reach the `truth_state: "active"`
+branch at all; it fails closed before that value is ever assigned. Neither
+mapper contains a `?? []`/`?? null` fallback on `operation` or `rows` for a
+response that is otherwise structurally accepted — the fallback sentinel
+objects (`ENDPOINT_UNAVAILABLE_DAILY_OPERATION(S)`) are the only path to an
+empty/null result, and that path is always `transport_state:
+"endpoint_unavailable"`, never `"available"`.
+
+### 17.4 Defensive screen branch (defense in depth)
+
+`CurrentOperationPanel` in the screen component now branches
+`truth_state === "not_found"` on its own, separately from a new fallback
+branch: `truth_state !== "active" || operation == null` renders a distinct
+"Malformed daily-operation response" notice. Since the mapper (§17.3)
+already guarantees `active` always carries a valid non-null operation, this
+branch is unreachable through the normal fetch path — it exists as a second,
+independent line of defense so the screen itself never trusts the mapper's
+invariant silently, and so a directly-constructed malformed
+`AutonomousDailyOperationSurface` (e.g. in a future caller or test) cannot
+render the neutral not-found copy either.
+
+### 17.5 History blocker rendering
+
+`HistoryPanel`'s row template now renders each row's `evidence_state`
+followed by every `evidence_blockers` entry stacked beneath it, always
+visible with no expansion control, in daemon-provided order, with no
+sorting or deduplication and no raw error text — only the same bounded
+closed reason codes already rendered by the current-operation panel. An
+empty blocker list renders no additional lines.
+
+### 17.6 Guard strengthening
+
+The F1 guard's check `[7]` previously passed as soon as
+`row.evidence_blockers` appeared anywhere in the screen source — satisfied
+by the current-operation panel alone. A new `[R1]`–`[R12]` section isolates
+`HistoryPanel`'s own function body and requires `row.evidence_blockers`
+inside it specifically, and proves (by source content, not just presence of
+a truth-state string) that: the row validator and its three closed
+vocabulary sets exist; the active/not_found/query_failed operation
+invariants and the `Array.isArray(rows)` + per-row history invariant are
+present in `legacy.ts`; neither mapper contains the old `rows ?? []`
+fallback; the screen's `not_found` branch is no longer combined with a
+null-operation check; the malformed-response notice text exists; and the
+new malformed-active-null, malformed-history-row, and history-blocker-
+rendering tests exist. Every existing F1 scope/no-mutation/no-daemon/
+no-migration/Phase-E-range/status check is unchanged.
+
+### 17.7 Tests
+
+`api.test.ts` gained 9 new cases; `screenSource.test.ts` gained 1 new case;
+a new file `__tests__/isAutonomousDailyOperationApiRow.test.ts` (8 cases)
+was added and registered in `package.json`. Full list in the ledger entry
+`AUTONOMOUS-DAILY-PAPER-OPERATIONS-01F1-RUNTIME-SHAPE-AND-HISTORY-BLOCKER-REPAIR-01`.
+
+### 17.8 Scope discipline
+
+No daemon route, response field, classifier, finalizer, coordinator,
+notification, coverage, or lineage change is made by this repair — same as
+§1's boundary for F1 itself. No production Rust file and no migration is
+touched. F2, F3, and Phase G remain untouched and unstarted.

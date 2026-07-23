@@ -362,3 +362,166 @@ test("existing preflight/status truth is unaffected by the new daily-operation p
   assert.equal(model.preflight.daemon_reachable, true);
   assert.equal(model.status.runtime_status, "running");
 });
+
+// ---------------------------------------------------------------------------
+// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01F1-RUNTIME-SHAPE-AND-HISTORY-BLOCKER-REPAIR-01
+// ---------------------------------------------------------------------------
+
+// Repair item 1: "active" + a missing/null operation must fail closed, and
+// must never render as the neutral not_found copy.
+test("active with null operation maps to endpoint_unavailable, never authoritative not_found", async () => {
+  const model = await withMockedFetch(
+    minimalRoutes({
+      [SINGLE_ROUTE]: () =>
+        jsonResponse({ canonical_route: SINGLE_ROUTE, truth_state: "active", operation: null, message: null }),
+    }),
+    fetchOperatorModel,
+  );
+  assert.equal(model.autonomousDailyOperation.transport_state, "endpoint_unavailable");
+  assert.equal(model.autonomousDailyOperation.truth_state, null);
+  const html = renderToStaticMarkup(React.createElement(AutonomousDailyOperationsScreen, { model }));
+  assert.doesNotMatch(html, /No autonomous daily operation exists for the current canonical slot\./);
+});
+
+// Repair item 2: "not_found" + a non-null operation must fail closed.
+test("not_found with a non-null operation maps to endpoint_unavailable", async () => {
+  const model = await withMockedFetch(
+    minimalRoutes({
+      [SINGLE_ROUTE]: () =>
+        jsonResponse({ canonical_route: SINGLE_ROUTE, truth_state: "not_found", operation: baseRow(), message: null }),
+    }),
+    fetchOperatorModel,
+  );
+  assert.equal(model.autonomousDailyOperation.transport_state, "endpoint_unavailable");
+  assert.equal(model.autonomousDailyOperation.truth_state, null);
+});
+
+// Repair item 3: an active row missing evidence_blockers must fail closed.
+test("active row missing evidence_blockers maps to endpoint_unavailable", async () => {
+  const malformedRow = baseRow() as unknown as Record<string, unknown>;
+  delete malformedRow.evidence_blockers;
+  const model = await withMockedFetch(
+    minimalRoutes({
+      [SINGLE_ROUTE]: () =>
+        jsonResponse({ canonical_route: SINGLE_ROUTE, truth_state: "active", operation: malformedRow, message: null }),
+    }),
+    fetchOperatorModel,
+  );
+  assert.equal(model.autonomousDailyOperation.transport_state, "endpoint_unavailable");
+  assert.equal(model.autonomousDailyOperation.truth_state, null);
+});
+
+// Repair item 4: an active row with a non-array blocker field must fail closed.
+test("active row with non-array evidence_blockers maps to endpoint_unavailable", async () => {
+  const malformedRow = { ...baseRow(), evidence_blockers: "not_an_array" };
+  const model = await withMockedFetch(
+    minimalRoutes({
+      [SINGLE_ROUTE]: () =>
+        jsonResponse({ canonical_route: SINGLE_ROUTE, truth_state: "active", operation: malformedRow, message: null }),
+    }),
+    fetchOperatorModel,
+  );
+  assert.equal(model.autonomousDailyOperation.transport_state, "endpoint_unavailable");
+  assert.equal(model.autonomousDailyOperation.truth_state, null);
+});
+
+// Repair item 5: an active row with an unknown finalization_status must fail closed.
+test("active row with unknown finalization_status maps to endpoint_unavailable", async () => {
+  const malformedRow = { ...baseRow(), finalization_status: "some_future_unknown_status" };
+  const model = await withMockedFetch(
+    minimalRoutes({
+      [SINGLE_ROUTE]: () =>
+        jsonResponse({ canonical_route: SINGLE_ROUTE, truth_state: "active", operation: malformedRow, message: null }),
+    }),
+    fetchOperatorModel,
+  );
+  assert.equal(model.autonomousDailyOperation.transport_state, "endpoint_unavailable");
+  assert.equal(model.autonomousDailyOperation.truth_state, null);
+});
+
+// Repair item 6: an active row with an unknown evidence_state must fail closed.
+test("active row with unknown evidence_state maps to endpoint_unavailable", async () => {
+  const malformedRow = { ...baseRow(), evidence_state: "some_future_unknown_state" };
+  const model = await withMockedFetch(
+    minimalRoutes({
+      [SINGLE_ROUTE]: () =>
+        jsonResponse({ canonical_route: SINGLE_ROUTE, truth_state: "active", operation: malformedRow, message: null }),
+    }),
+    fetchOperatorModel,
+  );
+  assert.equal(model.autonomousDailyOperation.transport_state, "endpoint_unavailable");
+  assert.equal(model.autonomousDailyOperation.truth_state, null);
+});
+
+// Repair item 7: an active history response missing `rows` must fail closed,
+// never render as an authoritative empty history.
+test("active history response missing rows maps to endpoint_unavailable, never authoritative empty history", async () => {
+  const model = await withMockedFetch(
+    minimalRoutes({
+      [HISTORY_ROUTE]: () =>
+        jsonResponse({
+          canonical_route: HISTORY_ROUTE,
+          truth_state: "active",
+          requested_limit: 20,
+          effective_limit: 20,
+          message: null,
+        }),
+    }),
+    fetchOperatorModel,
+  );
+  assert.equal(model.autonomousDailyOperations.transport_state, "endpoint_unavailable");
+  assert.equal(model.autonomousDailyOperations.truth_state, null);
+  assert.deepEqual(model.autonomousDailyOperations.rows, []);
+  const html = renderToStaticMarkup(React.createElement(AutonomousDailyOperationsScreen, { model }));
+  assert.doesNotMatch(html, /No autonomous daily operations recorded yet\./);
+});
+
+// Repair item 8: one malformed row in an otherwise-valid history response
+// demotes the whole surface to endpoint_unavailable.
+test("history containing one malformed row maps the whole surface to endpoint_unavailable", async () => {
+  const validRow = baseRow({ operation_id: "cccc" });
+  const malformedRow = { ...baseRow({ operation_id: "dddd" }), evidence_state: "some_future_unknown_state" };
+  const model = await withMockedFetch(
+    minimalRoutes({
+      [HISTORY_ROUTE]: () =>
+        jsonResponse({
+          canonical_route: HISTORY_ROUTE,
+          truth_state: "active",
+          requested_limit: 20,
+          effective_limit: 20,
+          rows: [validRow, malformedRow],
+          message: null,
+        }),
+    }),
+    fetchOperatorModel,
+  );
+  assert.equal(model.autonomousDailyOperations.transport_state, "endpoint_unavailable");
+  assert.equal(model.autonomousDailyOperations.truth_state, null);
+  assert.deepEqual(model.autonomousDailyOperations.rows, []);
+});
+
+// Repair item 11: every evidence blocker on a history row is rendered, not
+// just the first, and not deduplicated.
+test("a history row with two evidence blockers renders both blocker strings", async () => {
+  const row = baseRow({
+    evidence_state: "degraded",
+    evidence_blockers: ["unknown_unresolved_dispatch_claim", "unknown_missing_evaluation_evidence"],
+  });
+  const model = await withMockedFetch(
+    minimalRoutes({
+      [HISTORY_ROUTE]: () =>
+        jsonResponse({
+          canonical_route: HISTORY_ROUTE,
+          truth_state: "active",
+          requested_limit: 20,
+          effective_limit: 20,
+          rows: [row],
+          message: null,
+        }),
+    }),
+    fetchOperatorModel,
+  );
+  const html = renderToStaticMarkup(React.createElement(AutonomousDailyOperationsScreen, { model }));
+  assert.match(html, /unknown_unresolved_dispatch_claim/);
+  assert.match(html, /unknown_missing_evaluation_evidence/);
+});

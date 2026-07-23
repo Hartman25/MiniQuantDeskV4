@@ -16034,3 +16034,113 @@ BUNDLE 4: NOT STARTED
 SOAK: NOT STARTED
 LIVE CAPITAL: NOT READY
 ```
+
+## AUTONOMOUS-DAILY-PAPER-OPERATIONS-01F1-RUNTIME-SHAPE-AND-HISTORY-BLOCKER-REPAIR-01
+
+**Bundle:** `AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-COMBINED` | **Phase:** F1 repair — hardens the
+runtime shape validation and history evidence-blocker visibility of the F1 GUI daily-operation
+truth projection recorded immediately above. Not F2, not F3, not Phase G.
+
+**Starting HEAD:** `c7ddccafebcd3dd761ef2fa54bb8cadeb6144b2a` (`gui: project autonomous daily
+operation truth` — the F1 commit this repair sits on top of).
+
+Two confirmed defects in the accepted-pending F1 GUI mapper/screen were repaired:
+
+1. **Incomplete runtime validation.** `mapAutonomousDailyOperationResponse` and
+   `mapAutonomousDailyOperationsResponse` previously validated only `truth_state`, then used
+   `wrapper.operation ?? null` and `wrapper.rows ?? []`. A malformed but HTTP-200 successful body
+   (e.g. `active` + `operation` missing, `active` history + `rows` missing, a malformed partial
+   row, or an unrecognized finalization/evidence vocabulary string) could render as false-
+   authoritative GUI truth — `active` + null operation could fall through to the same neutral
+   copy as an authoritative `not_found`.
+2. **History blockers not rendered.** The history table showed `evidence_state` per row but never
+   `evidence_blockers`; the prior F1 guard's blocker check was satisfied merely by the current-
+   operation panel referencing `row.evidence_blockers` anywhere in the file, so it never actually
+   proved history-row visibility.
+
+**Repairs:**
+
+- `core-rs/mqk-gui/src/features/system/types/autonomousDailyOperations.ts`: added closed GUI-side
+  vocabulary types `AutonomousDailyFinalizationStatus` / `AutonomousDailyOutcomeClass` /
+  `AutonomousDailyEvidenceState` (source-aligned with `api_types.rs`'s doc-comment vocabularies),
+  narrowed `AutonomousDailyOperationApiRow`'s three fields to those closed types, and added the
+  complete pure runtime validator `isAutonomousDailyOperationApiRow` — checks every required
+  field's type/nullability, rejects NaN/infinite/non-integer numbers, rejects a non-array or
+  non-string-entry `evidence_blockers`, and rejects any unrecognized vocabulary string. Nothing is
+  repaired, defaulted, coerced, or reinterpreted; a missing/`undefined` field is rejected, never
+  silently converted to `null` or `0`.
+- `core-rs/mqk-gui/src/features/system/legacy.ts`: both mapper functions now enforce the full
+  truth-state/operation invariant (`active` → exactly one valid row; `not_found`/
+  `backend_unavailable` → operation must be `null`; `query_failed` → `null` or one valid row) and
+  the full history invariant (`rows` must be `Array.isArray`, every row must pass
+  `isAutonomousDailyOperationApiRow`, `canonical_route` must match exactly, `requested_limit`/
+  `effective_limit` must be finite integers with `effective_limit` in `[1,100]`). Any violation
+  fails closed to the existing `endpoint_unavailable` sentinel — `active` + null operation can
+  never be misreported as `not_found`, and an invalid/missing `rows` array is never treated as
+  authoritative empty history. `rows: wrapper.rows ?? []` no longer exists in either mapper.
+- `core-rs/mqk-gui/src/features/autonomousDailyOperations/AutonomousDailyOperationsScreen.tsx`:
+  `CurrentOperationPanel` now branches `not_found` separately from a new defensive fallback branch
+  — `truth_state !== "active" || operation == null` renders a distinct "Malformed daily-operation
+  response" notice, never the neutral not_found copy and never a fabricated prior/stale operation.
+  This is deliberately redundant with the mapper's own invariant enforcement (defense in depth).
+  `HistoryPanel`'s row rendering now stacks each row's `evidence_state` with every
+  `evidence_blockers` entry beneath it (no sorting, no dedup, no mutation control, no raw error
+  text; an empty blocker list renders no extra lines).
+- `scripts/guards/validate_autonomous_daily_paper_operations_01f1_gui_daily_operation_projection.ps1`:
+  added a new `[R1]`–`[R12]` section proving the validator and both closed-vocabulary/invariant
+  checks exist in source (not just that a truth_state string appears somewhere), that
+  `HistoryPanel`'s own function body (not just `CurrentOperationPanel`) references
+  `row.evidence_blockers`, and that the new malformed-active-null/malformed-history-row/history-
+  blocker-rendering tests exist. All prior F1 scope/no-mutation/no-daemon/no-migration/Phase-E-
+  range/status checks are unchanged.
+
+**Tests added:** 9 new cases in `api.test.ts` (active+null operation → `endpoint_unavailable`
+never `not_found`; `not_found` + non-null operation → `endpoint_unavailable`; active row missing
+`evidence_blockers` → `endpoint_unavailable`; active row with non-array blockers →
+`endpoint_unavailable`; active row with unknown `finalization_status` → `endpoint_unavailable`;
+active row with unknown `evidence_state` → `endpoint_unavailable`; active history missing `rows` →
+`endpoint_unavailable`, never authoritative empty history; one malformed row in history demotes
+the whole surface to `endpoint_unavailable`; a two-blocker history row renders both blocker
+strings), 1 new case in `screenSource.test.ts` (the screen's own defensive branch renders the
+malformed notice for a directly-constructed active+null surface, bypassing the mapper), and a new
+dedicated file `__tests__/isAutonomousDailyOperationApiRow.test.ts` (valid row accepted; nullable
+counts accepted as `null` without conversion; an `undefined` count field rejected rather than
+converted; NaN/infinite numbers rejected; non-array/non-string blockers rejected; unrecognized
+vocabulary rejected; non-object/`null`/array top-level values rejected), registered in
+`package.json`'s `test` script.
+
+**Safety confirmation:**
+
+```text
+PROVIDER CALLS: no
+BROKER CALLS: no
+DISCORD CALLS: no
+NETWORK CALLS: no
+REAL DAEMON STARTED: no
+PAPER ORDERS: no
+LIVE ORDERS: no
+PAPER DB TOUCHED: no
+MIGRATION CHANGED: no
+DAEMON PRODUCTION RUST CHANGED: no
+GUI CHANGED: yes (this patch's entire scope)
+```
+
+```text
+E1: ACCEPTED — COMPLETE
+E2A: ACCEPTED — COMPLETE
+E2B: ACCEPTED — COMPLETE
+E3: ACCEPTED — COMPLETE
+E4: ACCEPTED — COMPLETE
+E5: ACCEPTED — COMPLETE
+PHASE E: ACCEPTED — COMPLETE
+
+F1 repair: IMPLEMENTATION COMPLETE — AWAITING CHATGPT AND OPERATOR ACCEPTANCE
+F2: NOT STARTED
+F3: NOT STARTED
+PHASE F: OPEN
+PHASE G: NOT STARTED
+BUNDLE 3 (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-COMBINED): OPEN
+BUNDLE 4: NOT STARTED
+SOAK: NOT STARTED
+LIVE CAPITAL: NOT READY
+```

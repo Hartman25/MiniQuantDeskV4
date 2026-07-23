@@ -89,6 +89,37 @@ test("mapAutonomousDailyOperationsResponse(null) fabricates no healthy history",
   assert.deepEqual(surface.rows, []);
 });
 
+// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01F1-RUNTIME-SHAPE-AND-HISTORY-BLOCKER-REPAIR-01
+// Repair item 4: the screen itself stays defensive even if a malformed
+// surface reached it directly (bypassing the mapper) — an "active" +
+// null-operation surface must render the malformed notice, never the
+// neutral not_found copy.
+test("screen renders a malformed notice, not the neutral not_found copy, for active truth_state with null operation", () => {
+  const modelBase = {
+    autonomousDailyOperation: {
+      transport_state: "available" as const,
+      canonical_route: "/api/v1/autonomous/daily-operation",
+      truth_state: "active" as const,
+      operation: null,
+      message: null,
+    },
+    autonomousDailyOperations: {
+      transport_state: "available" as const,
+      canonical_route: "/api/v1/autonomous/daily-operations",
+      truth_state: "active" as const,
+      requested_limit: 20,
+      effective_limit: 20,
+      rows: [],
+      message: null,
+    },
+  };
+  const html = renderToStaticMarkup(
+    React.createElement(AutonomousDailyOperationsScreen, { model: modelBase as unknown as SystemModel }),
+  );
+  assert.match(html, /Malformed daily-operation response/);
+  assert.doesNotMatch(html, /No autonomous daily operation exists for the current canonical slot\./);
+});
+
 test("an unrecognized truth_state never falls through as authoritative", () => {
   const surface = mapAutonomousDailyOperationResponse({
     canonical_route: "/api/v1/autonomous/daily-operation",

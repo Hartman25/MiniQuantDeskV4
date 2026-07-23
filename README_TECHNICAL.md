@@ -212,8 +212,18 @@ that, `AUTONOMOUS-DAILY-PAPER-OPERATIONS-01F1-GUI-DAILY-OPERATION-TRUTH-
 PROJECTION` adds the first Phase F GUI surface: a read-only `Daily
 Operations` operator screen consuming the accepted E4 API verbatim, with no
 mutation control and no reinterpretation of daemon truth (§ "Active Bundle 3
-boundary" below). **F1 is implementation complete, awaiting ChatGPT and
-operator acceptance.**
+boundary" below). A follow-on repair,
+`AUTONOMOUS-DAILY-PAPER-OPERATIONS-01F1-RUNTIME-SHAPE-AND-HISTORY-BLOCKER-
+REPAIR-01`, closed two confirmed defects: the GUI mapper functions now
+perform complete runtime shape validation (a malformed HTTP 200 body — e.g.
+`active` truth_state with a missing `operation`, or a history response with
+a missing/invalid `rows` array — now fails closed to `endpoint_unavailable`
+instead of rendering as false-authoritative truth, and `active` + null
+operation can no longer be confused with the daemon's own authoritative
+`not_found`), and the history table now renders every row's
+`evidence_blockers`, which the original F1 pass omitted (only the
+current-operation panel rendered blockers). **F1 is implementation complete,
+awaiting ChatGPT and operator acceptance.**
 
 The strongest current operational route is:
 

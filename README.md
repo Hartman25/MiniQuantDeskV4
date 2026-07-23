@@ -218,7 +218,14 @@ closure) is now accepted — Phase E is accepted complete in full.** On top of
 that, `AUTONOMOUS-DAILY-PAPER-OPERATIONS-01F1-GUI-DAILY-OPERATION-TRUTH-
 PROJECTION` adds the first Phase F GUI surface: a read-only `Daily
 Operations` operator screen consuming the accepted E4 API verbatim (§ below).
-**F1 is implementation complete, awaiting ChatGPT and operator acceptance.**
+A follow-on repair, `AUTONOMOUS-DAILY-PAPER-OPERATIONS-01F1-RUNTIME-SHAPE-
+AND-HISTORY-BLOCKER-REPAIR-01`, hardens the GUI mapper's runtime shape
+validation (a malformed HTTP 200 body — e.g. `active` with a missing
+`operation`, or history with a missing/invalid `rows` array — now fails
+closed to `endpoint_unavailable` instead of rendering as false-authoritative
+truth) and renders every history row's `evidence_blockers`, which the
+original F1 pass omitted. **F1 is implementation complete, awaiting ChatGPT
+and operator acceptance.**
 
 The strongest current operational route is:
 
@@ -243,7 +250,7 @@ What that means in plain English:
 - Phase E3 (coordinator finalization integration: wiring the accepted E2B finalizer into the durable daily coordinator's routing, current policy-input resolution, evidence-degraded recovery routing, six new bounded typed coordinator outcomes, and the E1 §12 outcome/evidence-degraded-warning notifications) is **accepted complete**
 - Phase E4 (the strictly read-only daily-operation API projection: `GET /api/v1/autonomous/daily-operation[s]`, full-run-lineage activity counts, and the additive `daily_operation` summary block on readiness/paper-status/preflight), plus its READ-TRUTH-AND-EVIDENCE-STATE-REPAIR-01 repair (terminal evidence state now honors the activity-count outcome instead of always reporting `complete`; a downstream count-read failure now demotes the top-level `truth_state` to `query_failed`; generic administrative `completed` no longer reports evidence as complete; the malformed-`market_date` 400 response no longer echoes raw input) and its EXACT-MARKET-DATE-PARSER-REPAIR-02 repair (the explicit `market_date` query branch now uses an exact lexical parser instead of `.trim()`-then-parse, rejecting whitespace, non-zero-padded fields, sign prefixes, trailing characters, and Unicode digit lookalikes), is **accepted complete**
 - Phase E5 (the integrated Phase E closure proof: one new scenario test file proving a clean no-trade day, a two-run full-lineage activity day, an evidence-blocker notify-once/silent-replay/recovery cycle, restart safety across a durable stop/terminal commit/evidence blocker, the E4 routes' full read-only guarantee, and the frozen E4 fail-soft truth vocabulary, all against the real test database and the real production coordinator/finalizer/API seams, zero production Rust change) is **accepted complete — Phase E is accepted complete in full**
-- Phase F1 (the read-only GUI daily-operation truth projection: strict TypeScript response types mirroring the accepted E4 API, both canonical routes wired into the existing operator-model polling cycle, a dedicated `Daily Operations` operator screen with no mutation controls, null-count-vs-zero handling, and a screen-local source-authority helper) is implementation complete, awaiting ChatGPT and operator acceptance
+- Phase F1 (the read-only GUI daily-operation truth projection: strict TypeScript response types mirroring the accepted E4 API, both canonical routes wired into the existing operator-model polling cycle, a dedicated `Daily Operations` operator screen with no mutation controls, null-count-vs-zero handling, and a screen-local source-authority helper), plus its RUNTIME-SHAPE-AND-HISTORY-BLOCKER-REPAIR-01 repair (complete runtime shape validation of both mapper functions — a malformed HTTP 200 body now fails closed to `endpoint_unavailable` instead of rendering false-authoritative truth — plus history-row `evidence_blockers` rendering, which the original F1 pass omitted), is implementation complete, awaiting ChatGPT and operator acceptance
 - Bundle 3 is still **open** — F2 (operator runbook correction), F3 (supervised soak-evidence preparation), and Phase G closure audit remain, pending F1's own acceptance
 - paper+paper is not treated as an authoritative execution path
 - backtest deployment through the daemon is intentionally refused fail-closed

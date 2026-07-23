@@ -117,7 +117,7 @@ function CurrentOperationPanel({ surface }: { surface: AutonomousDailyOperationS
     );
   }
 
-  if (surface.truth_state === "not_found" || surface.operation == null) {
+  if (surface.truth_state === "not_found") {
     return (
       <Panel
         title="Current Operation"
@@ -126,6 +126,28 @@ function CurrentOperationPanel({ surface }: { surface: AutonomousDailyOperationS
         <div className="empty-state" role="status">
           No autonomous daily operation exists for the current canonical slot.
         </div>
+      </Panel>
+    );
+  }
+
+  if (surface.truth_state !== "active" || surface.operation == null) {
+    // Defensive fail-closed branch: the mapper is required to guarantee an
+    // "active" truth_state always carries a valid, non-null operation, but
+    // this screen never trusts that invariant silently. An "active" +
+    // missing/null operation, or any other impossible truth_state/operation
+    // combination that reaches this point, renders a distinct malformed
+    // notice — never the neutral not_found message above, and never a
+    // fabricated prior/stale operation.
+    return (
+      <Panel
+        title="Current Operation"
+        subtitle="Durable outcome truth for the current canonical market-date slot."
+      >
+        <DailyOperationTruthNotice
+          title="Malformed response"
+          detail="Malformed daily-operation response."
+          tone="bad"
+        />
       </Panel>
     );
   }
@@ -280,7 +302,14 @@ function HistoryPanel({ surface }: { surface: AutonomousDailyOperationsSurface }
               <span>{row.state}</span>
               <span>{row.finalization_status}</span>
               <span>{outcomeLabel(row)}</span>
-              <span>{row.evidence_state}</span>
+              <span>
+                <div>{row.evidence_state}</div>
+                {row.evidence_blockers.map((blocker) => (
+                  <div key={blocker} style={{ color: "var(--warning)" }}>
+                    {blocker}
+                  </div>
+                ))}
+              </span>
               <span>{formatDailyOperationCount(row.strategy_evaluation_count)}</span>
               <span>{formatDailyOperationCount(row.order_activity_count)}</span>
               <span>{formatDailyOperationCount(row.fill_count)}</span>
