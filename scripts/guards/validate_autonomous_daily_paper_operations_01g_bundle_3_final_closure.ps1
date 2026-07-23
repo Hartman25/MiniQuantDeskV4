@@ -28,7 +28,15 @@
 #   [13] Live capital is not claimed ready.
 #   [14] The G spec doc exists, is nonempty, and records the fixed
 #        historical range authorities.
-#   [15] README/ledger record the correct final combined status.
+#   [15] README/ledger record the correct final combined status, and never
+#        overclaim F2/F3/G/Bundle-3 as accepted.
+#   [16] BUNDLE-3-FINAL-OPERATIONAL-SAFETY-REPAIR range reconciliation:
+#        pre-commit, HEAD must equal the fixed pre-repair G head
+#        (b70c5156); post-commit, the unique "fix: harden bundle 3
+#        operational closeout" commit must exist, have that fixed head as
+#        its direct parent, be an ancestor of current HEAD, and the fixed
+#        b70c5156..<repair commit> range (never ..HEAD) must introduce no
+#        migration or production Rust file.
 #
 # Usage:
 #   powershell -ExecutionPolicy Bypass -File scripts\guards\validate_autonomous_daily_paper_operations_01g_bundle_3_final_closure.ps1
@@ -248,9 +256,32 @@ $CaptureCodeOnlyG = $null
 if ($null -ne $CaptureContent) {
     $CaptureCodeOnlyG = ($CaptureContent -split "`r?`n" | Where-Object { $_.TrimStart() -notmatch '^#' }) -join "`n"
 }
-foreach ($Forbidden in @("-Method Post", "-Method Put", "-Method Patch", "-Method Delete", "ALPACA_API_KEY", "ALPACA_API_SECRET", "MQK_OPERATOR_TOKEN")) {
+foreach ($Forbidden in @("-Method Post", "-Method Put", "-Method Patch", "-Method Delete")) {
     Test-ContentDoesNotContain "capture script's executable code never references '$Forbidden'" $CaptureCodeOnlyG $Forbidden | Out-Null
 }
+# ALPACA_API_KEY / ALPACA_API_SECRET / MQK_OPERATOR_TOKEN legitimately appear
+# as literal strings in REPAIR E's secret-pattern-scan list
+# (Find-SecretShapedPattern) -- a string comparison against captured
+# evidence, not a credential read. The actual exposure risk is the script
+# reading one of these as an environment variable; prove that instead.
+$EnvVarAccessFound = $false
+if ($null -ne $CaptureCodeOnlyG) {
+    foreach ($EnvPattern in @(
+        '\$env:ALPACA', '\$env:MQK_OPERATOR_TOKEN', '\$env:MQK_DATABASE_URL',
+        '\benv:ALPACA', '\benv:MQK_OPERATOR_TOKEN', '\benv:MQK_DATABASE_URL',
+        'GetEnvironmentVariable\([^\)]*ALPACA', 'GetEnvironmentVariable\([^\)]*MQK_OPERATOR_TOKEN',
+        'GetEnvironmentVariable\([^\)]*MQK_DATABASE_URL'
+    )) {
+        if ($CaptureCodeOnlyG -match $EnvPattern) { $EnvVarAccessFound = $true }
+    }
+}
+if (-not $EnvVarAccessFound) {
+    Show-Green "  OK -- capture script never reads ALPACA_*/MQK_OPERATOR_TOKEN/MQK_DATABASE_URL as an environment variable"
+} else {
+    $script:Violations++
+    Show-Red "  FAIL -- capture script appears to read a credential environment variable"
+}
+Test-ContentContains "capture script's secret-pattern list includes 'ALPACA_API_KEY' as a scan pattern (not an env read)" $CaptureContent "ALPACA_API_KEY" | Out-Null
 
 # -----------------------------------------------------------------------
 # [8]/[9] No migration; no daemon production Rust change (fixed range +
@@ -333,6 +364,12 @@ Show-Info "--- [12]/[13] Unattended soak and live-capital readiness are never cl
 $ReadmeContent = if (Test-FileExists "README.md" $PathReadme) { Get-Content -Raw -Path $PathReadme } else { $null }
 $ReadmeTechContent = if (Test-FileExists "README_TECHNICAL.md" $PathReadmeTech) { Get-Content -Raw -Path $PathReadmeTech } else { $null }
 $LedgerContent = if (Test-FileExists "Master patch ledger" $PathLedger) { Get-Content -Raw -Path $PathLedger } else { $null }
+# Built via [char]0x2014 rather than a literal em-dash in source: Windows
+# PowerShell 5.1 reads a BOM-less .ps1 using the system codepage, and a raw
+# UTF-8 em-dash byte sequence embedded in a string literal can silently
+# mis-tokenize (observed: a ParserError on this exact line). Runtime
+# character construction is encoding-independent.
+$EmDash = [char]0x2014
 $ForbiddenClaims = @(
     "SOAK: STARTED",
     "soak has started",
@@ -343,7 +380,11 @@ $ForbiddenClaims = @(
     "ready for live capital",
     "BUNDLE 3: CLOSED",
     "Bundle 3 is now closed",
-    "Bundle 3 has closed"
+    "Bundle 3 has closed",
+    "BUNDLE 3: ACCEPTED",
+    "F2: ACCEPTED $EmDash COMPLETE",
+    "F3: ACCEPTED $EmDash COMPLETE",
+    "PHASE G: ACCEPTED $EmDash COMPLETE"
 )
 foreach ($Doc in @(
     @{Name = "README.md"; Content = $ReadmeContent},
@@ -377,6 +418,83 @@ Show-Info "--- [15] README/ledger record correct final combined status ---"
 Test-ContentContains "README.md mentions F3" $ReadmeContent "F3" | Out-Null
 Test-ContentContains "ledger mentions Phase G" $LedgerContent "PHASE G" | Out-Null
 Test-ContentDoesNotContain "ledger does not claim Bundle 3 accepted" $LedgerContent "BUNDLE 3: ACCEPTED" | Out-Null
+
+# -----------------------------------------------------------------------
+# [16] BUNDLE-3-FINAL-OPERATIONAL-SAFETY-REPAIR range reconciliation.
+#
+# Pre-repair G head is fixed: b70c51563bbe51001d19f1ad9388655820124fb0
+# ("docs: prepare autonomous daily paper bundle 3 closure").
+#
+# Pre-commit (this repair not yet committed): HEAD still equals that fixed
+# pre-repair G head; the repair's own file scope is already covered by the
+# staged/unstaged working-tree checks in [8]/[9] above.
+#
+# Post-commit (and all future validation, including once Bundle 4 begins):
+# locate the unique commit whose exact subject is "fix: harden bundle 3
+# operational closeout"; require the fixed pre-repair G head to be its
+# direct parent; require that repair commit to be an ancestor of the
+# current HEAD; use b70c5156..<repair commit> -- deliberately NEVER
+# b70c5156..HEAD -- as the fixed repair range for the no-production-Rust/
+# no-migration checks. This is a separate, narrower fixed range from the
+# $PhaseEAcceptedHead..HEAD range checked in [8]/[9] above (which
+# legitimately widens as later phases land); this one never widens past
+# the single repair commit it identifies.
+# -----------------------------------------------------------------------
+Write-Host ""
+Show-Info "--- [16] Bundle-3-final-repair range reconciliation (pre-commit vs. post-commit) ---"
+$PreRepairGHead = "b70c51563bbe51001d19f1ad9388655820124fb0"
+$RepairCommitSubject = "fix: harden bundle 3 operational closeout"
+
+$PriorErrorActionPreferenceR = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+$CurrentHead = (git -C $RepoRoot rev-parse HEAD 2>$null | Select-Object -First 1)
+$ErrorActionPreference = $PriorErrorActionPreferenceR
+
+if ($CurrentHead -eq $PreRepairGHead) {
+    Show-Green "  OK -- pre-commit mode: HEAD == $PreRepairGHead (the repair is not yet committed); repair scope is covered by the staged/unstaged working-tree checks above"
+} else {
+    $ErrorActionPreference = "Continue"
+    $MatchingCommits = @(git -C $RepoRoot log --all --format='%H %s' 2>$null |
+        Where-Object { $_ -match '^[0-9a-f]{40} fix: harden bundle 3 operational closeout$' } |
+        ForEach-Object { ($_ -split ' ', 2)[0] } |
+        Select-Object -Unique)
+    $ErrorActionPreference = $PriorErrorActionPreferenceR
+
+    if ($MatchingCommits.Count -ne 1) {
+        $script:Violations++
+        Show-Red "  FAIL -- expected exactly one commit with subject '$RepairCommitSubject', found $($MatchingCommits.Count)"
+    } else {
+        $RepairCommit = $MatchingCommits[0]
+        Show-Green "  OK -- found the unique repair commit: $RepairCommit"
+
+        $ErrorActionPreference = "Continue"
+        $RepairParent = (git -C $RepoRoot rev-parse "$RepairCommit^" 2>$null | Select-Object -First 1)
+        $ErrorActionPreference = $PriorErrorActionPreferenceR
+        if ($RepairParent -eq $PreRepairGHead) {
+            Show-Green "  OK -- $PreRepairGHead is the direct parent of the repair commit"
+        } else {
+            $script:Violations++
+            Show-Red "  FAIL -- the repair commit's direct parent is '$RepairParent', expected '$PreRepairGHead'"
+        }
+
+        $ErrorActionPreference = "Continue"
+        git -C $RepoRoot merge-base --is-ancestor $RepairCommit HEAD 2>$null
+        $RepairIsAncestor = ($LASTEXITCODE -eq 0)
+        $ErrorActionPreference = $PriorErrorActionPreferenceR
+        if ($RepairIsAncestor) {
+            Show-Green "  OK -- the repair commit is an ancestor of current HEAD"
+        } else {
+            $script:Violations++
+            Show-Red "  FAIL -- the repair commit is not an ancestor of current HEAD"
+        }
+
+        $ErrorActionPreference = "Continue"
+        $RepairRange = git -C $RepoRoot diff --name-only "$PreRepairGHead..$RepairCommit" 2>$null
+        $ErrorActionPreference = $PriorErrorActionPreferenceR
+        $RepairRangeClean = @($RepairRange) | Where-Object { $_ -ne "" } | Select-Object -Unique
+        Test-NoMigrationOrProductionRust "fixed repair range $PreRepairGHead..$RepairCommit (never widened to ..HEAD)" $RepairRangeClean
+    }
+}
 
 # =============================================================================
 # Summary

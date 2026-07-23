@@ -12,9 +12,11 @@
 #   - GET only. This script never calls Invoke-RestMethod/Invoke-WebRequest
 #     with any method other than GET, and never references POST/PUT/PATCH/
 #     DELETE anywhere in its source.
-#   - Contacts only the explicitly configured local daemon base URL, and
-#     refuses to run against any host other than 127.0.0.1/localhost/::1
-#     (fail-closed host check below).
+#   - Contacts only a strictly validated, freshly-rebuilt local daemon base
+#     URL: absolute http/https, host exactly 127.0.0.1/localhost/::1, no
+#     UserInfo, no query, no fragment, no path other than empty or '/'
+#     (Get-SanitizedDaemonBaseUrlOrExit below). The caller's raw
+#     -DaemonBaseUrl string is never persisted or echoed past validation.
 #   - Never calls Alpaca or Discord directly, and makes no other external
 #     network request.
 #   - Never starts or stops a runtime, never arms, disarms, flattens, or
@@ -23,7 +25,12 @@
 #   - Never reads or copies .env.local (not referenced anywhere below).
 #   - Never prints or persists a credential, API key, secret, or token --
 #     this script never touches ALPACA_*, MQK_OPERATOR_TOKEN, or any
-#     database-URL environment variable.
+#     database-URL environment variable, and the whole built manifest is
+#     scanned for secret-shaped patterns before any write (Find-
+#     SecretShapedPattern below); a match means zero files are written.
+#   - Capture failures are recorded as bounded records only (route,
+#     error_class, http_status) -- never raw exception text or response
+#     bodies (Get-BoundedErrorClass below).
 #   - Requires an explicit -OutputDirectory and writes only inside it.
 #
 # Modes:
@@ -85,20 +92,66 @@ if ($RepoRoot -eq '') {
 }
 
 # ---------------------------------------------------------------------------
-# Fail-closed host check: never contact anything but a local daemon.
+# REPAIR D: Strict daemon base URL validation, fail-closed before anything
+# else runs. Requires an absolute http/https URI whose host is exactly
+# 127.0.0.1, localhost, or ::1, with no UserInfo, no query, no fragment, and
+# no path other than empty or '/'. On success, a single sanitized URL is
+# rebuilt from scheme + host + explicit/default port ONLY -- the caller's
+# raw -DaemonBaseUrl string is never persisted, echoed, or used again past
+# this point (it could itself carry embedded credentials in UserInfo/query).
+# Refusal output never echoes the rejected raw value.
 # ---------------------------------------------------------------------------
-try {
-    $parsedUri = [Uri]$DaemonBaseUrl
-} catch {
-    Write-Host "REFUSED: -DaemonBaseUrl '$DaemonBaseUrl' is not a valid URI." -ForegroundColor Red
-    exit 1
+function Get-SanitizedDaemonBaseUrlOrExit {
+    param([string]$RawUrl)
+
+    $parsed = $null
+    try {
+        $parsed = [Uri]$RawUrl
+    } catch {
+        Write-Host "REFUSED: -DaemonBaseUrl is not a valid URI." -ForegroundColor Red
+        exit 1
+    }
+    if (-not $parsed.IsAbsoluteUri) {
+        Write-Host "REFUSED: -DaemonBaseUrl must be an absolute URI." -ForegroundColor Red
+        exit 1
+    }
+    $AllowedSchemes = @('http', 'https')
+    if ($AllowedSchemes -notcontains $parsed.Scheme) {
+        Write-Host "REFUSED: -DaemonBaseUrl scheme must be exactly http or https." -ForegroundColor Red
+        exit 1
+    }
+    $AllowedHosts = @('127.0.0.1', 'localhost', '::1')
+    if ($AllowedHosts -notcontains $parsed.Host) {
+        Write-Host "REFUSED: -DaemonBaseUrl host is not a local daemon host (allowed: $($AllowedHosts -join ', '))." -ForegroundColor Red
+        Write-Host "This tool never contacts a non-local host -- refusing to proceed." -ForegroundColor Red
+        exit 1
+    }
+    if ($parsed.UserInfo -ne '') {
+        Write-Host "REFUSED: -DaemonBaseUrl must not contain embedded user info (username/password/token)." -ForegroundColor Red
+        exit 1
+    }
+    if ($parsed.Query -ne '') {
+        Write-Host "REFUSED: -DaemonBaseUrl must not contain a query string." -ForegroundColor Red
+        exit 1
+    }
+    if ($parsed.Fragment -ne '') {
+        Write-Host "REFUSED: -DaemonBaseUrl must not contain a fragment." -ForegroundColor Red
+        exit 1
+    }
+    if ($parsed.AbsolutePath -ne '' -and $parsed.AbsolutePath -ne '/') {
+        Write-Host "REFUSED: -DaemonBaseUrl must not contain a path other than empty or '/'." -ForegroundColor Red
+        exit 1
+    }
+
+    $hostPart = if ($parsed.Host -like '*:*') { "[$($parsed.Host)]" } else { $parsed.Host }
+    if ($parsed.IsDefaultPort) {
+        return "$($parsed.Scheme)://$hostPart"
+    } else {
+        return "$($parsed.Scheme)://$hostPart`:$($parsed.Port)"
+    }
 }
-$AllowedHosts = @('127.0.0.1', 'localhost', '::1')
-if ($AllowedHosts -notcontains $parsedUri.Host) {
-    Write-Host "REFUSED: -DaemonBaseUrl host '$($parsedUri.Host)' is not a local daemon host (allowed: $($AllowedHosts -join ', '))." -ForegroundColor Red
-    Write-Host "This tool never contacts a non-local host -- refusing to proceed." -ForegroundColor Red
-    exit 1
-}
+
+$DaemonBaseUrl = Get-SanitizedDaemonBaseUrlOrExit -RawUrl $DaemonBaseUrl
 
 Write-Host ""
 Write-Host "=== capture_autonomous_paper_session_evidence.ps1 (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01F3) ===" -ForegroundColor Cyan
@@ -120,8 +173,49 @@ if ($ValidateOnly) {
 }
 
 # ---------------------------------------------------------------------------
+# REPAIR F: Bounded capture-error records. Never persist raw PowerShell
+# exception text or raw HTTP response bodies -- only bounded fields (route,
+# error_class, http_status when available) are ever recorded. Never
+# includes: a raw URI with user info, a raw response body, headers, tokens,
+# credentials, stack traces, or environment values.
+# ---------------------------------------------------------------------------
+function Get-BoundedErrorClass {
+    param($ErrorRecord)
+    $ex = $ErrorRecord.Exception
+    $statusCode = $null
+    try {
+        if ($null -ne $ex -and $null -ne $ex.PSObject.Properties['Response'] -and $null -ne $ex.Response -and
+            $null -ne $ex.Response.PSObject.Properties['StatusCode']) {
+            $statusCode = [int]$ex.Response.StatusCode
+        }
+    } catch {
+        $statusCode = $null
+    }
+    if ($null -ne $statusCode) {
+        return @{ Class = 'http_status'; Status = $statusCode }
+    }
+    if ($null -ne $ex -and (
+            $ex -is [System.Threading.Tasks.TaskCanceledException] -or
+            $ex -is [System.TimeoutException]
+        )) {
+        return @{ Class = 'timeout'; Status = $null }
+    }
+    return @{ Class = 'transport'; Status = $null }
+}
+
+function New-BoundedErrorRecord {
+    param([string]$Route, [string]$ErrorClass, $HttpStatus = $null)
+    return [ordered]@{
+        route       = $Route
+        error_class = $ErrorClass
+        http_status = $HttpStatus
+    }
+}
+
+# ---------------------------------------------------------------------------
 # GET-only daemon helper. Never any other HTTP method. Fail-soft: returns
-# $null and records the failure; never throws past this function.
+# $null and records a bounded failure record; never throws past this
+# function and never persists raw exception text.
 # ---------------------------------------------------------------------------
 $CaptureErrors = @()
 $MissingEndpoints = @()
@@ -135,7 +229,7 @@ function Invoke-DaemonGetOnly {
             try {
                 return (Get-Content -Raw -Path $fixtureFile | ConvertFrom-Json)
             } catch {
-                $script:CaptureErrors += "fixture parse error for ${Path}: $_"
+                $script:CaptureErrors += (New-BoundedErrorRecord -Route $Path -ErrorClass 'fixture_parse_error')
                 $script:MissingEndpoints += $Path
                 return $null
             }
@@ -148,7 +242,8 @@ function Invoke-DaemonGetOnly {
         $resp = Invoke-RestMethod -Uri "${DaemonBaseUrl}${Path}" -Method Get -TimeoutSec 5 -ErrorAction Stop
         return $resp
     } catch {
-        $script:CaptureErrors += "GET ${Path} failed: $_"
+        $cls = Get-BoundedErrorClass -ErrorRecord $_
+        $script:CaptureErrors += (New-BoundedErrorRecord -Route $Path -ErrorClass $cls.Class -HttpStatus $cls.Status)
         $script:MissingEndpoints += $Path
         return $null
     }
@@ -164,7 +259,7 @@ $RepositoryCommit = $null
 try {
     $RepositoryCommit = (& git -C $RepoRoot rev-parse HEAD 2>&1 | Select-Object -First 1)
 } catch {
-    $CaptureErrors += "git rev-parse HEAD failed: $_"
+    $CaptureErrors += (New-BoundedErrorRecord -Route 'git_rev_parse_head' -ErrorClass 'local_command_failed')
 }
 
 # ---------------------------------------------------------------------------
@@ -218,7 +313,7 @@ try {
         }
     }
 } catch {
-    $CaptureErrors += "package.json version read failed: $_"
+    $CaptureErrors += (New-BoundedErrorRecord -Route 'package_json_version_read' -ErrorClass 'local_read_failed')
 }
 
 # ---------------------------------------------------------------------------
@@ -310,16 +405,55 @@ if ($null -ne $CurrentDailyOperation -and
 }
 
 # ---------------------------------------------------------------------------
-# Write manifest -- only inside the explicit output directory.
+# REPAIR E: Pre-write secret rejection. One shared secret-pattern detector,
+# run over the fully-built manifest (which covers OperatorNotes, sanitized
+# capture metadata, every serialized captured daemon surface, and capture
+# errors in one pass) BEFORE any directory is created or any file is
+# written. On a match: zero writes, exit nonzero, and the refusal reports
+# only the bounded pattern/category that matched -- never the matching
+# value or its surrounding text.
+# ---------------------------------------------------------------------------
+$SecretPatterns = @(
+    'ALPACA_API_KEY', 'ALPACA_API_SECRET', 'ALPACA_SECRET',
+    'MQK_OPERATOR_TOKEN', 'MQK_DATABASE_URL',
+    'DISCORD_WEBHOOK',
+    'Authorization:',
+    'Bearer ',
+    'password',
+    'api_secret',
+    '.env.local'
+)
+
+function Find-SecretShapedPattern {
+    param([string]$Text)
+    if ($null -eq $Text) { return $null }
+    foreach ($pattern in $SecretPatterns) {
+        if ($Text.IndexOf($pattern, [System.StringComparison]::OrdinalIgnoreCase) -ge 0) {
+            return $pattern
+        }
+    }
+    return $null
+}
+
+$ManifestJson = $Manifest | ConvertTo-Json -Depth 30
+$MatchedSecretPattern = Find-SecretShapedPattern -Text $ManifestJson
+if ($null -ne $MatchedSecretPattern) {
+    Write-Host "REFUSED: captured evidence matches a secret-shaped pattern (category: '$MatchedSecretPattern'). No file was written." -ForegroundColor Red
+    exit 1
+}
+
+# ---------------------------------------------------------------------------
+# Write manifest -- only inside the explicit output directory, only after
+# the secret-pattern rejection above has passed.
 # ---------------------------------------------------------------------------
 New-Item -ItemType Directory -Force -Path $OutputDirectory | Out-Null
 $ManifestPath = Join-Path $OutputDirectory 'autonomous_paper_session_manifest.json'
-$Manifest | ConvertTo-Json -Depth 30 | Set-Content -Path $ManifestPath -Encoding UTF8
+$ManifestJson | Set-Content -Path $ManifestPath -Encoding UTF8
 
 Write-Host "Manifest written: $ManifestPath" -ForegroundColor Green
 if (@($CaptureErrors).Count -gt 0) {
     Write-Host "Capture errors ($(@($CaptureErrors).Count)):" -ForegroundColor Yellow
-    foreach ($e in $CaptureErrors) { Write-Host "  - $e" -ForegroundColor Yellow }
+    foreach ($e in $CaptureErrors) { Write-Host "  - route=$($e.route) error_class=$($e.error_class) http_status=$($e.http_status)" -ForegroundColor Yellow }
 }
 Write-Host ""
 Write-Host "This is one point-in-time evidence capture, not a completed soak session." -ForegroundColor Cyan

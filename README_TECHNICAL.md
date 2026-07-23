@@ -258,9 +258,28 @@ see `docs/specs/autonomous_daily_paper_operations_01g_bundle_3_final_closure.md`
 `scenario_autonomous_completed_bar_driver_01`'s baseline is 47 passed, 9
 identical pre-existing failures, 0 new Bundle 3 failures; `cargo check` on
 `mqk-db`/`mqk-runtime`/`mqk-daemon` and both `git diff --check` commands are
-clean. No genuine production or F1–F3 correctness defect was found. **G is
-implementation complete, awaiting final ChatGPT and operator acceptance.
-Bundle 3 is not marked accepted or closed in this repository.**
+clean.
+
+Independent acceptance review of this F2/F3/G session then found genuine
+defects — F2's runbook contradicted its own supervised-only safety boundary
+and gave an unproven WS-gap restart procedure; F3's tooling accepted an
+unvalidated daemon URL, unbounded error text, and an unobserved/absent
+safety identity as non-violations.
+`AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-F2-F3-G-FINAL-OPERATIONAL-SAFETY-REPAIR`
+closes all of these in one commit: supervised-only runbook language,
+source-proven WS-gap restart guidance (`seed_ws_continuity_from_db` and
+`alpaca_ws_transport.rs` reviewed directly), a legacy-tooling boundary on
+`scripts/paper_soak_day.sh`, strict daemon-URL validation
+(`Get-SanitizedDaemonBaseUrlOrExit`), pre-write secret rejection
+(`Find-SecretShapedPattern`), bounded capture-error records
+(`Get-BoundedErrorClass`), a validator that requires
+paper + alpaca + operator-supervised + observed-false live-routing, a new
+executable local-fixture test suite
+(`scripts/soak/tests/test_autonomous_paper_session_evidence.ps1`, 16/16
+passing), and hardened F2/F3/G guards. No production Rust, daemon API, GUI
+behavior, migration, or real external call. **F2, F3, and Phase G are each
+repair-implementation complete, awaiting final ChatGPT and operator
+acceptance. Bundle 3 is not marked accepted or closed in this repository.**
 
 The strongest current operational route is:
 
@@ -970,9 +989,12 @@ read-only daily-operation API, plus both repairs) is **accepted complete**; Phas
 Phase E closure proof) is **accepted complete — Phase E is accepted complete in full**. Phase F1
 (the read-only GUI daily-operation truth projection) is **accepted complete**. Phase F2 (operator
 runbook correction), Phase F3 (supervised soak-evidence preparation), and Phase G (final Bundle 3
-closure audit) are all implementation complete, awaiting final combined ChatGPT/operator
-acceptance. Do not label the current `main` head as a finished autonomous-paper MVP, and do not
-mark Bundle 3 accepted or closed, until that combined acceptance is given.
+closure audit) each underwent a final operational-safety repair
+(`AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-F2-F3-G-FINAL-OPERATIONAL-SAFETY-REPAIR`) closing defects
+found in independent acceptance review, and are each repair-implementation complete, awaiting final
+combined ChatGPT/operator acceptance. Do not label the current `main` head as a finished
+autonomous-paper MVP, and do not mark Bundle 3 accepted or closed, until that combined acceptance is
+given.
 
 ### What is expected after Bundle 3
 

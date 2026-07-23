@@ -113,35 +113,101 @@ if ($null -ne $Manifest.PSObject.Properties['capture_phase'] -and
 }
 
 # -----------------------------------------------------------------------
-# [5] Deployment mode is paper.
+# [5] REPAIR G: Deployment mode MUST be 'paper'. Null, absent, unknown, or
+#     any other value is a validation failure -- this is a required
+#     supervised-lane safety-identity proof, not an optional/best-effort
+#     field.
 # -----------------------------------------------------------------------
 Write-Host ""
-Show-Info "--- [5] Deployment mode is paper (when known) ---"
-if ($null -eq $Manifest.deployment_mode) {
-    Pass "deployment_mode is null (unavailable) -- not a violation by itself"
-} elseif ($Manifest.deployment_mode -eq 'paper') {
+Show-Info "--- [5] deployment_mode MUST be 'paper' -- null/absent/other value fails ---"
+if ($null -ne $Manifest.PSObject.Properties['deployment_mode'] -and
+    $null -ne $Manifest.deployment_mode -and
+    $Manifest.deployment_mode -eq 'paper') {
     Pass "deployment_mode is paper"
 } else {
-    Fail "deployment_mode is '$($Manifest.deployment_mode)', expected 'paper' -- this lane is Paper + Alpaca only"
+    Fail "deployment_mode is missing, null, or not 'paper' (got: $($Manifest.deployment_mode)) -- this lane is Paper + Alpaca only and this proof is required, not optional"
 }
 
 # -----------------------------------------------------------------------
-# [6] Live routing is not enabled.
+# [5b] REPAIR G: adapter_id MUST be 'alpaca'. Null, absent, unknown, or any
+#      other value is a validation failure.
 # -----------------------------------------------------------------------
 Write-Host ""
-Show-Info "--- [6] Live routing is not enabled (when observable) ---"
-$LiveRoutingEnabled = $null
+Show-Info "--- [5b] adapter_id MUST be 'alpaca' -- null/absent/other value fails ---"
+if ($null -ne $Manifest.PSObject.Properties['adapter_id'] -and
+    $null -ne $Manifest.adapter_id -and
+    $Manifest.adapter_id -eq 'alpaca') {
+    Pass "adapter_id is alpaca"
+} else {
+    Fail "adapter_id is missing, null, or not 'alpaca' (got: $($Manifest.adapter_id))"
+}
+
+# -----------------------------------------------------------------------
+# [5c] REPAIR G: operator_supervised MUST be true. Null, absent, or false
+#      is a validation failure.
+# -----------------------------------------------------------------------
+Write-Host ""
+Show-Info "--- [5c] operator_supervised MUST be true -- null/absent/false fails ---"
+if ($null -ne $Manifest.PSObject.Properties['operator_supervised'] -and
+    $Manifest.operator_supervised -eq $true) {
+    Pass "operator_supervised is true"
+} else {
+    Fail "operator_supervised is missing, null, or not true (got: $($Manifest.operator_supervised)) -- the supported lane requires active operator supervision"
+}
+
+# -----------------------------------------------------------------------
+# [6] REPAIR G: live_routing_enabled MUST be observed false on at least one
+#     authoritative captured surface. Absence from every required surface
+#     is itself a validation failure -- "unobservable" is never accepted as
+#     valid. Any observed true value fails closed.
+# -----------------------------------------------------------------------
+Write-Host ""
+Show-Info "--- [6] live_routing_enabled MUST be observed false -- absence everywhere fails ---"
+$LiveRoutingObserved = $false
+$LiveRoutingAnyTrue = $false
 foreach ($surface in @($Manifest.system_status, $Manifest.system_preflight)) {
     if ($null -ne $surface -and $null -ne $surface.PSObject.Properties['live_routing_enabled']) {
-        $LiveRoutingEnabled = $surface.live_routing_enabled
+        $LiveRoutingObserved = $true
+        if ($surface.live_routing_enabled -eq $true) {
+            $LiveRoutingAnyTrue = $true
+        }
     }
 }
-if ($null -eq $LiveRoutingEnabled) {
-    Pass "live_routing_enabled not observable in this manifest -- not a violation by itself"
-} elseif ($LiveRoutingEnabled -eq $false) {
-    Pass "live_routing_enabled is false"
+if (-not $LiveRoutingObserved) {
+    Fail "live_routing_enabled was not observed on any required surface (system_status/system_preflight) -- absence is a validation failure, not an acceptable 'unobservable' state"
+} elseif ($LiveRoutingAnyTrue) {
+    Fail "live_routing_enabled is true on at least one surface -- this violates the Paper + Alpaca-only safety boundary"
 } else {
-    Fail "live_routing_enabled is true -- this violates the Paper + Alpaca-only safety boundary"
+    Pass "live_routing_enabled is observed false on at least one required surface, and never observed true"
+}
+
+# -----------------------------------------------------------------------
+# [6b] REPAIR G: daemon_base_url re-validated at the manifest level --
+#      absolute local http/https URI, no UserInfo, no query, no fragment.
+# -----------------------------------------------------------------------
+Write-Host ""
+Show-Info "--- [6b] daemon_base_url is a valid local http/https URI with no UserInfo/query/fragment ---"
+$DaemonUrlValue = $Manifest.daemon_base_url
+if ($null -eq $DaemonUrlValue -or [string]$DaemonUrlValue -eq '') {
+    Fail "daemon_base_url is missing or empty"
+} else {
+    $parsedDaemonUrl = $null
+    try { $parsedDaemonUrl = [Uri]$DaemonUrlValue } catch { $parsedDaemonUrl = $null }
+    if ($null -eq $parsedDaemonUrl -or -not $parsedDaemonUrl.IsAbsoluteUri) {
+        Fail "daemon_base_url is not a valid absolute URI"
+    } elseif ($parsedDaemonUrl.Scheme -ne 'http' -and $parsedDaemonUrl.Scheme -ne 'https') {
+        Fail "daemon_base_url scheme is not http or https"
+    } elseif (@('127.0.0.1', 'localhost', '::1') -notcontains $parsedDaemonUrl.Host) {
+        Fail "daemon_base_url host is not a local daemon host"
+    } elseif ($parsedDaemonUrl.UserInfo -ne '') {
+        Fail "daemon_base_url contains embedded UserInfo"
+    } elseif ($parsedDaemonUrl.Query -ne '') {
+        Fail "daemon_base_url contains a query string"
+    } elseif ($parsedDaemonUrl.Fragment -ne '') {
+        Fail "daemon_base_url contains a fragment"
+    } else {
+        Pass "daemon_base_url is a valid local http/https URI with no UserInfo/query/fragment"
+    }
 }
 
 # -----------------------------------------------------------------------
@@ -178,24 +244,66 @@ foreach ($surfaceName in $TruthStateBearingSurfaces) {
 }
 
 # -----------------------------------------------------------------------
-# [9] Null counts remain null -- never coerced to zero by this tooling.
+# [9] REPAIR H: Null-count and truth validation. Counts on
+#     current_daily_operation.operation AND every recent_daily_operations
+#     row must be integer or null only -- never a string placeholder, never
+#     coerced to zero, and never missing on an active operation row. A
+#     missing daemon-sourced capture is only valid when its exact route
+#     appears in missing_endpoints (check [11] below) -- but that alone
+#     does not let the manifest pass the safety-identity checks in
+#     [5]/[5b]/[6] above when deployment/adapter/live-routing proof is
+#     absent as a result.
 # -----------------------------------------------------------------------
 Write-Host ""
-Show-Info "--- [9] Null counts remain null, never coerced to zero ---"
-$op = $Manifest.current_daily_operation
-if ($null -ne $op -and $null -ne $op.PSObject.Properties['operation'] -and $null -ne $op.operation) {
+Show-Info "--- [9] Null-count and truth validation (current operation + every history row) ---"
+
+function Test-CountFieldsOnRow {
+    param([string]$RowLabel, $Row)
     foreach ($countField in @('strategy_evaluation_count', 'order_activity_count', 'fill_count')) {
-        if ($null -ne $op.operation.PSObject.Properties[$countField]) {
-            $val = $op.operation.$countField
+        if ($null -ne $Row.PSObject.Properties[$countField]) {
+            $val = $Row.$countField
             if ($null -eq $val -or ($val -is [int] -or $val -is [long] -or $val -is [double])) {
-                Pass "operation.$countField is null or numeric (never a fabricated non-numeric placeholder): $val"
+                Pass "$RowLabel.$countField is null or numeric (never a fabricated non-numeric placeholder): $val"
             } else {
-                Fail "operation.$countField has an unexpected non-numeric, non-null value: $val"
+                Fail "$RowLabel.$countField has an unexpected non-numeric, non-null value: $val"
             }
+        } else {
+            Fail "$RowLabel.$countField is missing on an active operation row -- a required count field must never be silently absent"
         }
     }
+}
+
+$op = $Manifest.current_daily_operation
+if ($null -ne $op -and $null -ne $op.PSObject.Properties['truth_state'] -and $op.truth_state -eq 'active') {
+    if ($null -ne $op.PSObject.Properties['operation'] -and $null -ne $op.operation) {
+        Test-CountFieldsOnRow -RowLabel "current_daily_operation.operation" -Row $op.operation
+    } else {
+        Fail "current_daily_operation.truth_state is 'active' but operation is missing/null"
+    }
+} elseif ($null -ne $op -and $null -ne $op.PSObject.Properties['truth_state']) {
+    Pass "current_daily_operation.truth_state is '$($op.truth_state)' (not 'active') -- no active-row counts to validate; truth_state preserved distinctly, not collapsed"
 } else {
-    Pass "current_daily_operation.operation not present -- no counts to validate"
+    Pass "current_daily_operation not present -- no counts to validate"
+}
+
+$history = $Manifest.recent_daily_operations
+if ($null -ne $history -and $null -ne $history.PSObject.Properties['truth_state'] -and $history.truth_state -eq 'active') {
+    if ($null -ne $history.PSObject.Properties['rows'] -and $null -ne $history.rows) {
+        $rowIndex = 0
+        foreach ($row in @($history.rows)) {
+            Test-CountFieldsOnRow -RowLabel "recent_daily_operations.rows[$rowIndex]" -Row $row
+            $rowIndex++
+        }
+        if (@($history.rows).Count -eq 0) {
+            Pass "recent_daily_operations.rows is an authoritative empty list -- no rows to validate"
+        }
+    } else {
+        Fail "recent_daily_operations.truth_state is 'active' but rows is missing/null"
+    }
+} elseif ($null -ne $history -and $null -ne $history.PSObject.Properties['truth_state']) {
+    Pass "recent_daily_operations.truth_state is '$($history.truth_state)' (not 'active') -- no active-row counts to validate"
+} else {
+    Pass "recent_daily_operations not present -- no counts to validate"
 }
 
 # -----------------------------------------------------------------------
@@ -209,6 +317,7 @@ $SecretPatterns = @(
     'ALPACA_API_KEY', 'ALPACA_API_SECRET', 'ALPACA_SECRET',
     'MQK_OPERATOR_TOKEN', 'MQK_DATABASE_URL',
     'DISCORD_WEBHOOK',
+    'Authorization:',
     'Bearer ',
     'password',
     'api_secret',

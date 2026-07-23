@@ -355,10 +355,54 @@ During gap:
 
 ### Gap recovery after daemon restart (BRK-07R)
 
-At daemon boot, the last persisted broker cursor is loaded:
-- **Prior cursor = Live** → demoted to `ColdStartUnproven`. WS must re-establish.
-- **Prior cursor = GapDetected** → preserved. The BRK-00R-04 gate immediately blocks start. The operator must resolve the gap (confirm broker positions are clean, cursor is safe) before the autonomous path can resume.
-- **No cursor in DB** → `ColdStartUnproven`. Normal cold-start path.
+At daemon boot, `seed_ws_continuity_from_db` loads the last persisted broker
+cursor and derives the boot-time continuity state from it:
+- **Prior cursor = Live** → demoted to `ColdStartUnproven`. `Live` is not
+  earned until the WS subscription is reconfirmed after restart.
+- **Prior cursor = GapDetected** → preserved as `GapDetected`. The
+  BRK-00R-04 gate immediately blocks a new run start.
+- **No cursor in DB, or a cursor parse failure** → `ColdStartUnproven`
+  (a parse failure is treated fail-closed).
+
+**A persisted `GapDetected` condition remains fail-closed across a daemon
+restart, and restarting the daemon is not itself a repair.** Restarting does
+not clear a persisted gap by itself — the gap clears only through the WS
+transport task's own reconnection. That task starts automatically at daemon
+boot, independent of whether any run is active, and continuously attempts to
+(re)establish the Alpaca `trade_updates` stream with backoff between
+attempts. When it successfully authenticates and the server confirms
+subscription, it repairs the cursor to `Live` (BRK-08R) — whether it started
+from `GapDetected` or `ColdStartUnproven` — and this is the supported
+recovery path. It requires no operator command beyond keeping the daemon
+running and waiting for, or independently verifying, that it completes.
+
+**Before resuming supervision after any gap, the operator must:**
+1. Wait for, or independently verify, the WS transport task's successful
+   reconnection — confirm `ws_continuity == "live"` via
+   `GET /api/v1/autonomous/readiness` — rather than assume recovery from the
+   passage of time alone.
+2. Inspect broker positions, reconcile status, and risk posture
+   (`GET /api/v1/portfolio/positions`, `GET /api/v1/reconcile/status`,
+   `GET /api/v1/reconcile/mismatches`, `GET /api/v1/risk/denials`) before
+   resuming or trusting the session. A repaired cursor that came from a
+   `GapDetected` state only recovers fill events via REST catch-up —
+   non-fill lifecycle events (Ack/CancelAck/ReplaceAck/Reject) from the gap
+   window are permanently unrecoverable from the Alpaca REST API, so this
+   inspection step is required, not optional.
+3. If recovery cannot be proven — WS will not re-establish, or reconcile /
+   risk posture cannot be confirmed clean — keep the lane stopped or halted
+   rather than forcing a start. Do not bypass the BRK-00R-04 gate.
+
+**There is no operator-invocable "repair" command for WS continuity.** The
+only function with a similar name,
+`repair_ws_continuity_from_persisted_cursor_for_test`, exists solely to seed
+test fixtures in the Rust test suite — it is not reachable from any daemon
+route or operator surface. Never treat it as, and never attempt to invoke it
+as, a production operator procedure. Similarly, never restart the daemon
+*for the purpose of* resetting `GapDetected` to `ColdStartUnproven` — the
+cursor state that drives the BRK-00R-04 gate is derived from the
+DB-persisted cursor, which a restart does not clear (see the table above: a
+persisted `GapDetected` cursor survives restart unchanged).
 
 To inspect cursor state after restart:
 ```
@@ -419,9 +463,19 @@ This stops the run cleanly. The session controller will attempt a new start at t
 
 ---
 
-## 11. The paper soak harness (AUTON-SOAK-01)
+## 11. The paper soak harness (AUTON-SOAK-01) — legacy/reference tooling
 
-`scripts/paper_soak_day.sh` is the canonical one-day paper soak harness.
+> **Boundary.** `scripts/paper_soak_day.sh` is legacy/reference tooling
+> only. It is **not** the currently authorized unattended or canonical
+> Bundle 3 evidence process, running it is **not** authorization to begin
+> the unattended soak, and a run of it is **not** evidence that a
+> supervised session or the unattended soak has completed. Current Bundle 3
+> supervised-evidence preparation uses `scripts/soak/` (§21–§22 below);
+> future supervised captures remain operator-controlled. This section is
+> preserved as historical documentation of the older harness, bounded by
+> this warning — it is not superseded content to delete.
+
+`scripts/paper_soak_day.sh` is an existing one-day paper soak harness.
 
 ### What it does
 
@@ -434,15 +488,17 @@ This stops the run cleanly. The session controller will attempt a new start at t
 
 ### Running it
 
+Do not place credentials directly on the command line or in shell history.
+Populate `.env.local` (§2) — the existing secured environment/configuration
+source — and load it into your shell session through your normal
+environment-loading mechanism before running:
+
 ```bash
-MQK_DAEMON_URL=http://127.0.0.1:8899 \
-MQK_OPERATOR_TOKEN=<token> \
-ALPACA_API_KEY_PAPER=<key> \
-ALPACA_API_SECRET_PAPER=<secret> \
-ALPACA_PAPER_BASE_URL=https://paper-api.alpaca.markets \
-MQK_DATABASE_URL=postgres://... \
 bash scripts/paper_soak_day.sh --intraday-interval-secs 1800
 ```
+
+`MQK_DAEMON_URL` is optional and, if overridden from its default, is not a
+credential and may be set inline.
 
 ### Output
 
@@ -495,15 +551,21 @@ Run this before each autonomous paper day.
 ```
 WS = GapDetected at session open?
 ├── YES
-│   ├── Daemon just restarted?
-│   │   ├── YES — Prior gap cursor was preserved (BRK-07R).
-│   │   │        Check positions are clean.  If clean, manually repair:
-│   │   │        use repair_ws_continuity seam (test/recovery path) or
-│   │   │        simply confirm Alpaca positions, then restart daemon to
-│   │   │        reset cursor to ColdStartUnproven → WS will re-establish.
-│   │   └── NO  — WS disconnected mid-session.  Wait for WS reconnect.
-│   │             If WS does not recover: inspect DISCORD_WEBHOOK_ALERTS.
-│   │             Manual stop if positions are at risk.
+│   ├── A persisted GapDetected condition remains fail-closed across
+│   │   restart (§8) — this holds whether the daemon just restarted or the
+│   │   gap occurred mid-session.  Restarting the daemon is not itself a
+│   │   repair, and there is no operator-invocable repair command.
+│   │   1. Wait for, or independently verify, the WS transport task's own
+│   │      automatic reconnection (`ws_continuity == "live"` in
+│   │      `GET /api/v1/autonomous/readiness`).  This happens on its own —
+│   │      do not attempt to force it.
+│   │   2. Inspect broker positions, reconcile status, and risk posture
+│   │      before resuming or trusting the session (§8 step 2).
+│   │   3. If WS does not recover, or positions/reconcile/risk cannot be
+│   │      confirmed clean: inspect DISCORD_WEBHOOK_ALERTS if configured;
+│   │      keep the lane stopped or halted; manual stop if positions are at
+│   │      risk.  Do not bypass the BRK-00R-04 gate and do not start a new
+│   │      run until recovery is proven.
 └── NO — WS = Live → autonomous path proceeds normally.
 
 autonomous_history_degraded = true?
@@ -530,11 +592,21 @@ The following assumptions from the older operator_workflows.md §1 are **not cor
 
 | Old assumption | Correct behavior |
 |---|---|
-| "No auto-arm, auto-start, or auto-mode-change occurs without operator input" | **Auto-arm and auto-start both occur on the autonomous paper path.** The session controller calls `try_autonomous_arm` and `start_execution_runtime` automatically within the session window when all gates pass. |
-| "The operator must initiate each action explicitly" | The autonomous path is explicitly designed for unsupervised intraday operation. The operator arms once, then the controller handles per-session start/stop. |
-| Arm is always manual | After a clean stop, the DB arm state is `Armed` and the controller will self-arm on the next session tick without operator intervention. Manual arm is only required after a halt or a first-time deployment. |
+| "No auto-arm, auto-start, or auto-mode-change occurs without operator input" | **Auto-arm and auto-start both occur on the autonomous paper path.** The session controller calls `try_autonomous_arm` and `start_execution_runtime` automatically within the session window when all gates pass — these are scheduled runtime actions the controller performs on its own, without a per-run operator click. |
+| "The operator must initiate each action explicitly" | The controller performs scheduled per-session start/stop actions automatically. **This does not mean the lane is authorized to run unattended.** Active operator supervision is still required for the supported Paper + Alpaca lane (§0) — the controller autonomously executing routine start/stop actions is not the same thing as an unsupervised/unattended authorization. The unattended 10–20-session paper soak has **not started** and is not authorized by this runbook. |
+| Arm is always manual | After a clean stop, the DB arm state is `Armed` and the controller will self-arm on the next session tick without operator intervention. Manual arm is only required after a halt or a first-time deployment. This automatic re-arm is a scheduled runtime action, not a grant of unsupervised operation. |
 
-The §1 statement applies to **non-autonomous (manual)** operation modes.  For the Paper + Alpaca autonomous path, this runbook is the authoritative reference.
+**No routine intervention expected during a healthy session is not the same
+claim as supervision being unnecessary.** That a healthy session requires no
+routine operator clicks (§6) does not mean operator supervision is
+unnecessary — the operator is still expected to be actively monitoring the
+truth surfaces in §7 and Part 2 §18 throughout the session, per the §0
+safety boundary.
+
+The §1 statement applies to **non-autonomous (manual)** operation modes. For
+the Paper + Alpaca autonomous path, this runbook is the authoritative
+reference — the supported lane is supervised automatic start/stop, never
+unattended or unsupervised operation.
 
 ---
 

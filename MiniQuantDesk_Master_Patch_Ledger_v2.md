@@ -16404,3 +16404,140 @@ LIVE CAPITAL: NOT READY
 
 Bundle 3 is **not** marked accepted or closed in the repository by this
 patch.
+
+---
+
+## AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-F2-F3-G-FINAL-OPERATIONAL-SAFETY-REPAIR
+
+**Bundle:** `AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-COMBINED` | **Phase:** final
+combined F2/F3/G operational-safety repair.
+
+Starting HEAD: `b70c5156` (`docs: prepare autonomous daily paper bundle 3
+closure` — the G commit). Closes the acceptance-review defects found in F2's
+runbook and F3's capture/validator tooling. No production Rust, daemon API,
+GUI behavior, migration, or real external call — documentation and
+PowerShell tooling only.
+
+**Runbook (`docs/runbooks/autonomous_paper_ops.md`) repairs:**
+
+- §14 rewritten: removed "explicitly designed for unsupervised intraday
+  operation" (contradicted the same runbook's own §0 "active operator
+  supervision is required"); states the controller performs scheduled
+  runtime actions autonomously, that this is not an unattended
+  authorization, and preserves "no routine intervention expected" ≠
+  "supervision unnecessary."
+- §8/§13 rewritten per source review of `mqk-daemon`'s
+  `seed_ws_continuity_from_db` and `alpaca_ws_transport.rs`: a persisted
+  `GapDetected` cursor survives restart unchanged (fail-closed, never reset
+  by restart); recovery happens only through the WS transport task's own
+  automatic reconnection; `repair_ws_continuity_from_persisted_cursor_for_test`
+  is confirmed test-only (no daemon route) and must never be treated as an
+  operator procedure; removed "restart daemon to reset cursor to
+  ColdStartUnproven" and "use repair_ws_continuity seam."
+- §11 given an explicit legacy/reference-tooling boundary for
+  `scripts/paper_soak_day.sh` (not the current Bundle 3 evidence process,
+  not soak authorization, not soak-completion evidence); its example
+  command no longer places Alpaca credentials on the command line.
+
+**Capture/validator (`scripts/soak/`) repairs:**
+
+- `capture_autonomous_paper_session_evidence.ps1`: `-DaemonBaseUrl`
+  validation replaced with `Get-SanitizedDaemonBaseUrlOrExit` (absolute
+  http/https, allow-listed host, no UserInfo/query/fragment, no path other
+  than empty/`/`; one sanitized URL is rebuilt and persisted, the caller's
+  raw value never is); a shared `Find-SecretShapedPattern` scan runs over
+  the fully-built manifest before any directory/file write (zero writes on
+  a match, only the matched category is reported); `Invoke-DaemonGetOnly`
+  and the git/package.json read paths now record only bounded error fields
+  (`route`, `error_class`, `http_status`) via `Get-BoundedErrorClass`/
+  `New-BoundedErrorRecord` — never raw exception text or response bodies.
+- `validate_autonomous_paper_session_evidence.ps1`: now requires
+  `deployment_mode == "paper"`, `adapter_id == "alpaca"`,
+  `operator_supervised == true` (null/absent/other fails), requires
+  `live_routing_enabled` observed `false` on at least one surface (absence
+  everywhere is itself a failure), re-validates `daemon_base_url`, and
+  extends the null/integer count check to every `recent_daily_operations`
+  history row (previously current-operation only).
+- New: `scripts/soak/tests/test_autonomous_paper_session_evidence.ps1`
+  (REPAIR I) — one positive proof plus the fifteen required negative
+  proofs (deployment_mode null/live, adapter_id null/wrong,
+  operator_supervised false, live_routing_enabled absent/true, DaemonBaseUrl
+  with UserInfo/query/fragment, OperatorNotes/captured-fixture secret
+  patterns, missing/non-integer counts). Fixture mode and temp files only —
+  no daemon, no network. 16/16 scenarios pass.
+
+**Guard repairs:**
+
+- F2 guard: new check `[16]` fails if the runbook contains any of the
+  removed contradictory phrases and requires the corrected language above.
+- F3 guard: check `[7]` now proves strict URI validation; check `[8]`
+  proves the paper/alpaca/operator_supervised/observed-live-routing-false
+  identity; check `[9]` proves pre-write secret rejection precedes the
+  output write; new check `[9b]` proves bounded error records; new check
+  `[12b]` executes the REPAIR I fixture suite and requires exit 0; check
+  `[6]`'s `.env.local` scan and check `[9]`'s ALPACA/token-name scan were
+  narrowed from a blanket substring ban to targeted file-access/
+  environment-read pattern checks, so the (required) literal secret-pattern
+  strings in the capture script's own detector no longer false-positive.
+- G guard: check `[7]` narrowed the same way for its own re-assertion; new
+  check `[16]` implements the mission's dual-mode range reconciliation —
+  pre-commit, requires `HEAD == b70c5156`; post-commit, locates the unique
+  `fix: harden bundle 3 operational closeout` commit, requires `b70c5156`
+  as its direct parent and its presence as an ancestor of HEAD, and diffs
+  `b70c5156..<repair commit>` (never `..HEAD`) for the no-migration/
+  no-production-Rust proof; `ForbiddenClaims` extended to reject an
+  overclaimed accepted-complete status for F2, F3, Phase G, or Bundle 3
+  ahead of independent acceptance.
+
+**Documentation:** F2/F3/G spec docs each gained a `## Repair` section
+recording the defect/fix pairs above (append-only — no prior spec content
+altered); the G spec's two affected closure-question answers (Q3 live
+routing, Q12 F3 safety) are restated citing the repaired guard checks.
+
+**Safety confirmation:**
+
+```text
+PROVIDER CALLS: no
+BROKER CALLS: no
+DISCORD CALLS: no
+NETWORK CALLS: no (fixture/-ValidateOnly testing only; no real daemon contacted)
+REAL DAEMON STARTED: no
+PAPER ORDERS: no
+LIVE ORDERS: no
+PAPER DB TOUCHED: no
+MIGRATION CHANGED: no
+DAEMON PRODUCTION RUST CHANGED: no
+GUI CHANGED: no
+GENERATED EVIDENCE STAGED: no
+```
+
+```text
+F1: ACCEPTED — COMPLETE
+
+F2:
+REPAIR IMPLEMENTATION COMPLETE —
+AWAITING FINAL CHATGPT/OPERATOR ACCEPTANCE
+
+F3:
+REPAIR IMPLEMENTATION COMPLETE —
+AWAITING FINAL CHATGPT/OPERATOR ACCEPTANCE
+
+PHASE F:
+IMPLEMENTATION COMPLETE —
+AWAITING FINAL CHATGPT/OPERATOR ACCEPTANCE
+
+PHASE G:
+REPAIR IMPLEMENTATION COMPLETE —
+AWAITING FINAL CHATGPT/OPERATOR ACCEPTANCE
+
+BUNDLE 3:
+CLOSURE IMPLEMENTATION COMPLETE —
+AWAITING FINAL CHATGPT AND OPERATOR ACCEPTANCE
+
+BUNDLE 4: NOT STARTED
+UNATTENDED SOAK: NOT STARTED
+LIVE CAPITAL: NOT READY
+```
+
+Bundle 3 is **not** marked accepted or closed in the repository by this
+patch.

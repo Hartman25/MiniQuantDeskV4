@@ -279,3 +279,42 @@ patch.
 
 One commit: `docs: prepare autonomous daily paper bundle 3 closure`. No
 push.
+
+## 9. Repair (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-F2-F3-G-FINAL-OPERATIONAL-SAFETY-REPAIR)
+
+Independent acceptance review of this G audit, plus F2 and F3, found
+defects this audit's own §1/§2 did not catch (F2's runbook contained
+contradictory unsupervised-operation and WS-gap-restart language; F3's
+capture/validator tooling accepted unobserved/absent safety-identity proof
+as non-violations). Per this repair's own mission, these are corrected in
+place in F2/F3 rather than re-litigated here — see
+`docs/specs/autonomous_daily_paper_operations_01f2_operator_runbook_correction.md`
+§10 and
+`docs/specs/autonomous_daily_paper_operations_01f3_supervised_soak_evidence_preparation.md`
+§12 for the full defect/fix record. This section corrects the two §2
+closure-question answers the repair directly affects, citing the repaired
+committed evidence (starting HEAD `b70c5156`, one commit `fix: harden
+bundle 3 operational closeout`):
+
+- **Q3 ("Is live routing disabled and visibly gated?")** — Still yes, and
+  now more strongly proven: F3's validator previously treated an
+  unobserved `live_routing_enabled` as a non-violation. It now requires
+  `live_routing_enabled` to be positively observed `false` on at least one
+  captured surface — absence from every surface is itself a validation
+  failure (F3 guard check `[8]`).
+- **Q12 ("Is F3 GET-only, secret-safe, and non-trading?")** — Still yes,
+  and now more strongly proven: the capture script's daemon-URL check was a
+  bare host comparison (silently permitting embedded UserInfo, a query
+  string, or a fragment on an otherwise-local host) and its error paths
+  persisted raw exception text; the validator accepted a `null`
+  `deployment_mode`/`adapter_id`/`operator_supervised` as non-violations.
+  All four gaps are closed (F3 guard checks `[7]`, `[8]`, `[9]`, `[9b]`),
+  and `[12b]` now executes the new REPAIR I fixture test suite and requires
+  exit 0 rather than relying on documentation claims alone.
+
+No other closure question is affected — Q1/Q2/Q4-Q11/Q13 are unchanged by
+this repair. The Phase G guard's own checks `[1]`, `[6]`, `[7]`, and the new
+`[16]` range-reconciliation check re-assert the repaired F1-F3 behavior and
+the fixed `b70c5156..<repair commit>` scope boundary described in the
+mission's G-range-reconciliation instruction. This repair adds no new
+trading behavior and does not itself close Bundle 3.

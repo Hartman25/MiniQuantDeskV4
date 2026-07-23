@@ -260,3 +260,62 @@ Phase G (final Bundle 3 closure audit) is not started by this patch. Bundle
 The unattended 10-20-session paper soak has not started and is not
 authorized by this patch — this patch prepares evidence tooling only. Live
 trading is not ready and is not authorized by this patch.
+
+## 12. Repair (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-F2-F3-G-FINAL-OPERATIONAL-SAFETY-REPAIR)
+
+Bundle 3 acceptance review found gaps in this patch's capture/validator
+hardening, closed by the combined F2/F3/G final repair (starting HEAD
+`b70c5156`, one commit `fix: harden bundle 3 operational closeout`):
+
+- **Capture URI safety.** `capture_autonomous_paper_session_evidence.ps1`'s
+  `-DaemonBaseUrl` check was a bare host-string comparison. It is now a full
+  strict validation (`Get-SanitizedDaemonBaseUrlOrExit`): absolute URI,
+  scheme exactly `http`/`https`, host exactly
+  `127.0.0.1`/`localhost`/`::1`, no UserInfo, no query, no fragment, no path
+  other than empty or `/`. On success the script builds and persists one
+  sanitized URL from scheme + host + explicit/default port — the caller's
+  raw string is never persisted or echoed, and refusal output never echoes
+  the rejected value.
+- **Pre-write secret rejection.** A shared `Find-SecretShapedPattern`
+  detector now scans the fully-built manifest (covering `OperatorNotes`,
+  every captured daemon surface, and capture errors in one pass) before any
+  directory is created or file written. A match means zero writes and a
+  nonzero exit; only the matched pattern category is reported, never the
+  matching text.
+- **Bounded capture errors.** `Invoke-DaemonGetOnly` and the git/package.json
+  read paths no longer interpolate raw PowerShell exception text into
+  `capture_errors`. `Get-BoundedErrorClass`/`New-BoundedErrorRecord` record
+  only `route`, `error_class` (`http_status` | `timeout` | `transport` |
+  `fixture_parse_error` | `local_command_failed` | `local_read_failed`), and
+  `http_status` when available — never a raw URI, response body, headers,
+  tokens, credentials, stack trace, or environment value.
+- **Validator safety-identity proof.** `validate_autonomous_paper_session_evidence.ps1`
+  previously accepted a `null` `deployment_mode`/unobserved
+  `live_routing_enabled` as non-violations. It now requires
+  `deployment_mode == "paper"`, `adapter_id == "alpaca"`, and
+  `operator_supervised == true` (null/absent/other value fails), requires
+  `live_routing_enabled` to be observed `false` on at least one surface
+  (absence from every surface is itself a failure — "unobservable" is never
+  accepted), and re-validates `daemon_base_url`.
+- **Null-count and truth validation.** The null-count check now covers
+  every `recent_daily_operations` history row (not just the current
+  operation), requires each of the three count fields present as a key
+  (never silently missing) on any row whose surface reports
+  `truth_state == "active"`, and continues to require null-or-numeric
+  values only.
+- **Executable fixture tests (REPAIR I).**
+  `scripts/soak/tests/test_autonomous_paper_session_evidence.ps1` is new: a
+  positive proof (valid paper/alpaca/supervised/live-routing-false/valid
+  counts → capture and validator both pass) plus the required negative
+  proofs — deployment_mode null/`"live"`, adapter_id null/wrong,
+  operator_supervised false, live_routing_enabled absent/true,
+  DaemonBaseUrl with UserInfo/query/fragment, OperatorNotes with a secret
+  pattern, a captured fixture with a secret pattern, and missing/non-integer
+  counts. Every capture-level rejection proves both a nonzero exit and that
+  no manifest file was written. Fixture mode and temporary files only — no
+  daemon call, no network call.
+
+The F3 guard's checks `[7]`-`[9b]`, `[12b]` prove this structurally, including
+executing the fixture test script and requiring exit 0. No other F3
+deliverable changed; the manifest schema/template and checklist are
+unchanged (the stricter contract was satisfiable without a schema change).

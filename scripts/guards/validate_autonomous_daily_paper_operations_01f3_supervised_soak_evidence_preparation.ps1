@@ -6,27 +6,42 @@
 # tooling, built on top of the already-accepted F1 and implementation-
 # complete F2. Pure text/source validation only -- no network call, no
 # provider/broker call, no DB connection, no daemon start, no cargo/npm
-# build or test.
+# build or test. The one exception is check [12b], which executes the
+# REPAIR I fixture test script -- that script itself only ever touches
+# temporary local files and -FixturePath, never a daemon or the network.
 #
 # Checks:
 #   [1]  The F2 guard exists and, when invoked, exits 0.
-#   [2]  The spec, guard, capture script, validator script, template, and
-#        checklist all exist and are nonempty.
+#   [2]  The spec, guard, capture script, validator script, template,
+#        checklist, and REPAIR I fixture test script all exist and are
+#        nonempty.
 #   [3]  The capture script is GET-only: contains "-Method Get" and contains
 #        no Post/Put/Patch/Delete HTTP method reference.
 #   [4]  No Alpaca or Discord URL/host string appears in the capture script.
 #   [5]  No order-submission, start/stop/halt, arm/disarm, flatten, or
 #        finalization route string appears in the capture script.
 #   [6]  .env.local is never referenced in the capture script.
-#   [7]  The capture script's fail-closed local-host check exists.
-#   [8]  The validator script rejects a non-paper deployment_mode and a
-#        live_routing_enabled: true value.
-#   [9]  The validator script contains the secret-pattern scan.
+#   [7]  The capture script performs strict daemon-base-URL validation:
+#        absolute URI, allow-listed host, no UserInfo, no query, no
+#        fragment, no path other than empty/'/' -- not just a bare host
+#        comparison.
+#   [8]  The validator script proves the supported supervised-lane safety
+#        identity: deployment_mode == paper, adapter_id == alpaca,
+#        operator_supervised == true, and live_routing_enabled observed
+#        false (absence from every surface is itself a failure); it also
+#        re-validates daemon_base_url.
+#   [9]  The validator script contains the secret-pattern scan, and the
+#        capture script's own pre-write secret rejection provably precedes
+#        its output directory/file write.
+#   [9b] The capture script records only bounded error fields (route,
+#        error_class, http_status) and never interpolates a raw exception
+#        into a stored error string.
 #   [10] The validator script's null-count check exists and never coerces
 #        null counts to a numeric value.
 #   [11] .gitignore contains the smoke_logs/autonomous_paper_soak/ rule.
 #   [12] No generated evidence file is staged or present in the current
 #        working tree (staged and unstaged).
+#   [12b] The REPAIR I fixture test script is executed for real and exits 0.
 #   [13] No production Rust, migration, or GUI production file is touched.
 #   [14] README.md / README_TECHNICAL.md / ledger record correct F3 status
 #        and never overclaim Phase G, Bundle 3 closure, soak-started, or
@@ -51,6 +66,7 @@ $PathCaptureScript  = Join-Path $RepoRoot "scripts\soak\capture_autonomous_paper
 $PathValidatorScript = Join-Path $RepoRoot "scripts\soak\validate_autonomous_paper_session_evidence.ps1"
 $PathTemplate       = Join-Path $RepoRoot "scripts\soak\templates\autonomous_paper_session_manifest.template.json"
 $PathChecklist      = Join-Path $RepoRoot "scripts\soak\supervised_session_evidence_checklist.md"
+$PathFixtureTest    = Join-Path $RepoRoot "scripts\soak\tests\test_autonomous_paper_session_evidence.ps1"
 $PathGitignore      = Join-Path $RepoRoot ".gitignore"
 $PathReadme         = Join-Path $RepoRoot "README.md"
 $PathReadmeTech     = Join-Path $RepoRoot "README_TECHNICAL.md"
@@ -154,6 +170,11 @@ if (Test-FileExists "F3 spec doc" $PathF3Spec) {
     $F3SpecContent = Get-Content -Raw -Path $PathF3Spec
     if ($F3SpecContent.Length -gt 2000) { Show-Green "  OK -- F3 spec is nonempty" } else { $script:Violations++; Show-Red "  FAIL -- F3 spec is suspiciously short" }
 }
+$FixtureTestContent = $null
+if (Test-FileExists "test_autonomous_paper_session_evidence.ps1 (REPAIR I fixture tests)" $PathFixtureTest) {
+    $FixtureTestContent = Get-Content -Raw -Path $PathFixtureTest
+    if ($FixtureTestContent.Length -gt 500) { Show-Green "  OK -- fixture test script is nonempty" } else { $script:Violations++; Show-Red "  FAIL -- fixture test script is suspiciously short" }
+}
 
 # -----------------------------------------------------------------------
 # [3] Capture script is GET-only.
@@ -189,48 +210,107 @@ foreach ($Forbidden in @(
 }
 
 # -----------------------------------------------------------------------
-# [6] .env.local never referenced in executable code.
+# [6] .env.local is never read, tested, or joined as a file path by the
+#     capture script.
 #
-# The safety-comment block legitimately documents this prohibition using
-# the literal filename ("Never reads or copies .env.local") -- that is
-# prose, not a file access. This check strips comment-only lines (lines
-# whose first non-whitespace character is '#') before scanning, so it
-# proves no CODE line reads/joins/tests the path, without forbidding the
-# script from naming the very file it promises never to touch.
+# The safety-comment block documents this prohibition in prose ("Never
+# reads or copies .env.local"), and REPAIR E's secret-pattern list
+# legitimately includes the literal string '.env.local' as one of the
+# patterns it scans captured evidence FOR (a string comparison, not a file
+# access) -- both are expected non-file-access references. This check
+# instead proves no CODE line combines .env.local with a file-access
+# cmdlet (Get-Content / Test-Path / Import- / Join-Path), which is the
+# actual safety property ("never reads or copies").
 # -----------------------------------------------------------------------
 Write-Host ""
-Show-Info "--- [6] .env.local is never referenced in executable code (comments excluded) ---"
-$CaptureCodeOnly = $null
+Show-Info "--- [6] .env.local is never read, tested, or joined as a file path ---"
+$EnvLocalFileAccessFound = $false
 if ($null -ne $CaptureContent) {
-    $CaptureCodeOnly = ($CaptureContent -split "`r?`n" | Where-Object { $_.TrimStart() -notmatch '^#' }) -join "`n"
+    foreach ($AccessPattern in @(
+        'Get-Content[^\r\n]*\.env\.local',
+        'Test-Path[^\r\n]*\.env\.local',
+        'Import-[A-Za-z]+[^\r\n]*\.env\.local',
+        'Join-Path[^\r\n]*\.env\.local'
+    )) {
+        if ($CaptureContent -match $AccessPattern) {
+            $EnvLocalFileAccessFound = $true
+        }
+    }
 }
-Test-ContentDoesNotContain "capture script's executable code never references .env.local" $CaptureCodeOnly ".env.local" | Out-Null
+if (-not $EnvLocalFileAccessFound) {
+    Show-Green "  OK -- capture script never reads, tests, or joins a path to .env.local"
+} else {
+    $script:Violations++
+    Show-Red "  FAIL -- capture script appears to access .env.local as a file"
+}
+Test-ContentContains "capture script's secret-pattern list includes the literal '.env.local' scan pattern" $CaptureContent "'.env.local'" | Out-Null
 
 # -----------------------------------------------------------------------
-# [7] Fail-closed local-host check exists.
+# [7] Fail-closed local-host check exists, and is a full strict URI
+#     validation (absolute http/https, allow-listed host, no UserInfo, no
+#     query, no fragment, no path other than empty/'/') rather than a
+#     bare host comparison.
 # -----------------------------------------------------------------------
 Write-Host ""
-Show-Info "--- [7] Fail-closed local-host check exists ---"
+Show-Info "--- [7] Strict daemon-base-URL validation exists (scheme/host/UserInfo/query/fragment/path) ---"
 Test-ContentContains "capture script checks the daemon host against an allow-list" $CaptureContent "AllowedHosts" | Out-Null
 Test-ContentContains "capture script refuses a non-local host" $CaptureContent "REFUSED" | Out-Null
+Test-ContentContains "capture script requires an absolute URI" $CaptureContent "IsAbsoluteUri" | Out-Null
+Test-ContentContains "capture script rejects embedded UserInfo" $CaptureContent "must not contain embedded user info" | Out-Null
+Test-ContentContains "capture script rejects a query string" $CaptureContent "must not contain a query string" | Out-Null
+Test-ContentContains "capture script rejects a fragment" $CaptureContent "must not contain a fragment" | Out-Null
+Test-ContentContains "capture script rejects a non-empty/non-'/' path" $CaptureContent "must not contain a path other than empty or" | Out-Null
+Test-ContentContains "capture script builds one sanitized URL and never persists the caller's raw value" $CaptureContent "the caller's" | Out-Null
 
 # -----------------------------------------------------------------------
-# [8] Validator rejects live mode and live routing.
+# [8] Validator proves the supported supervised-lane safety identity:
+#     deployment_mode == paper, adapter_id == alpaca, operator_supervised
+#     == true, and live_routing_enabled observed false (never accepting
+#     absence-from-every-surface as valid).
 # -----------------------------------------------------------------------
 Write-Host ""
-Show-Info "--- [8] Validator rejects non-paper deployment_mode and live_routing_enabled: true ---"
-Test-ContentContains "validator checks deployment_mode against paper" $ValidatorContent "-eq 'paper'" | Out-Null
-Test-ContentContains "validator checks live_routing_enabled" $ValidatorContent "LiveRoutingEnabled" | Out-Null
+Show-Info "--- [8] Validator proves paper + alpaca + operator_supervised + observed live-routing-false ---"
+Test-ContentContains "validator requires deployment_mode -eq 'paper'" $ValidatorContent "-eq 'paper'" | Out-Null
+Test-ContentContains "validator requires adapter_id -eq 'alpaca'" $ValidatorContent "-eq 'alpaca'" | Out-Null
+Test-ContentContains 'validator requires operator_supervised -eq $true' $ValidatorContent "operator_supervised -eq" | Out-Null
+Test-ContentContains "validator checks live_routing_enabled" $ValidatorContent "live_routing_enabled" | Out-Null
+Test-ContentContains "validator fails when live_routing_enabled is unobserved on every surface" $ValidatorContent "was not observed on any required surface" | Out-Null
+Test-ContentContains "validator re-validates daemon_base_url (UserInfo/query/fragment)" $ValidatorContent "daemon_base_url contains embedded UserInfo" | Out-Null
 
 # -----------------------------------------------------------------------
-# [9] Validator contains the secret-pattern scan.
+# [9] Validator contains the secret-pattern scan, AND the capture script
+#     performs its own pre-write secret rejection (REPAIR E) before any
+#     directory is created or file is written -- structurally, not just by
+#     documentation claim.
 # -----------------------------------------------------------------------
 Write-Host ""
-Show-Info "--- [9] Validator contains a secret-pattern scan ---"
+Show-Info "--- [9] Validator contains a secret-pattern scan; capture script rejects secrets before any write ---"
 Test-ContentContains "validator defines SecretPatterns" $ValidatorContent "SecretPatterns" | Out-Null
 foreach ($Pattern in @("ALPACA_API_KEY", "MQK_OPERATOR_TOKEN", "MQK_DATABASE_URL", "Bearer ")) {
     Test-ContentContains "validator scans for '$Pattern'" $ValidatorContent $Pattern | Out-Null
 }
+Test-ContentContains "capture script defines a secret-shaped pattern detector" $CaptureContent "Find-SecretShapedPattern" | Out-Null
+Test-ContentContains "capture script refuses on a secret match before writing" $CaptureContent "No file was written" | Out-Null
+if ($null -ne $CaptureContent) {
+    $SecretScanIndex = $CaptureContent.IndexOf("MatchedSecretPattern", [System.StringComparison]::OrdinalIgnoreCase)
+    $DirectoryWriteIndex = $CaptureContent.IndexOf("New-Item -ItemType Directory -Force -Path `$OutputDirectory", [System.StringComparison]::OrdinalIgnoreCase)
+    if ($SecretScanIndex -ge 0 -and $DirectoryWriteIndex -ge 0 -and $SecretScanIndex -lt $DirectoryWriteIndex) {
+        Show-Green "  OK -- capture script's secret scan runs before the output directory/file is created"
+    } else {
+        $script:Violations++
+        Show-Red "  FAIL -- capture script's secret scan does not provably precede the output write (scan index: $SecretScanIndex, write index: $DirectoryWriteIndex)"
+    }
+}
+
+# -----------------------------------------------------------------------
+# [9b] Capture script records only bounded error fields (REPAIR F) --
+#      never raw PowerShell exception text or a raw HTTP response body.
+# -----------------------------------------------------------------------
+Write-Host ""
+Show-Info "--- [9b] Capture script records only bounded error fields, never raw exception text ---"
+Test-ContentContains "capture script classifies errors into bounded records" $CaptureContent "Get-BoundedErrorClass" | Out-Null
+Test-ContentContains "capture script's bounded error record has route/error_class/http_status only" $CaptureContent "error_class" | Out-Null
+Test-ContentDoesNotContain 'capture script never interpolates a raw exception into a stored error string (''failed: $_'')' $CaptureContent 'failed: $_' | Out-Null
 
 # -----------------------------------------------------------------------
 # [10] Validator's null-count check never coerces null to numeric.
@@ -272,6 +352,27 @@ if ($null -eq $EvidencePaths -or @($EvidencePaths).Count -eq 0) {
 } else {
     $script:Violations++
     Show-Red "  FAIL -- generated evidence file(s) present: $($EvidencePaths -join ', ')"
+}
+
+# -----------------------------------------------------------------------
+# [12b] REPAIR I: the fixture test script exists and, when executed,
+#       exits 0. This runs it for real (temp files/fixtures only, no
+#       daemon, no network) rather than just checking for its presence.
+# -----------------------------------------------------------------------
+Write-Host ""
+Show-Info "--- [12b] Fixture test script exists and exits 0 when executed ---"
+if (Test-Path $PathFixtureTest) {
+    & powershell -ExecutionPolicy Bypass -File $PathFixtureTest *> $null
+    $fixtureTestExitCode = $LASTEXITCODE
+    if ($fixtureTestExitCode -eq 0) {
+        Show-Green "  OK -- fixture test script exits 0"
+    } else {
+        $script:Violations++
+        Show-Red "  FAIL -- fixture test script exited $fixtureTestExitCode"
+    }
+} else {
+    $script:Violations++
+    Show-Red "  FAIL -- fixture test script not found: $PathFixtureTest"
 }
 
 # -----------------------------------------------------------------------

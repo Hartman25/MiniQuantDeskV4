@@ -403,9 +403,23 @@ required closure questions, all resolving to a supported "yes" (see
 plus the `scenario_autonomous_completed_bar_driver_01` baseline (47 passed,
 9 identical pre-existing failures, 0 new Bundle 3 failures) was re-run
 clean. `cargo check` on `mqk-db`/`mqk-runtime`/`mqk-daemon` is clean;
-`git diff --check` and `git diff --cached --check` are clean. No genuine
-production or F1–F3 correctness defect was found. **Phase G is implementation
-complete, awaiting final ChatGPT and operator acceptance.**
+`git diff --check` and `git diff --cached --check` are clean.
+
+Independent acceptance review of this F2/F3/G session then found genuine
+defects: F2's runbook contradicted its own supervised-only safety boundary
+and gave an unproven WS-gap restart procedure, and F3's capture/validator
+tooling accepted an unvalidated daemon URL, unbounded error text, and an
+unobserved/absent safety-identity as non-violations.
+`AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-F2-F3-G-FINAL-OPERATIONAL-SAFETY-REPAIR`
+closes all of these in one commit — supervised-only runbook language,
+source-proven WS-gap restart guidance, a legacy-tooling boundary on the
+older soak harness, strict daemon-URL validation, pre-write secret
+rejection, bounded capture-error records, a validator that requires
+paper + alpaca + operator-supervised + observed-false live-routing, executable
+local-fixture tests (16/16 passing), and hardened F2/F3/G guards — with no
+production Rust, daemon API, GUI behavior, migration, or real external call.
+**F2, F3, and Phase G are each repair-implementation complete, awaiting
+final ChatGPT and operator acceptance.**
 
 ```text
 D1–D4: ACCEPTED — COMPLETE
@@ -415,18 +429,29 @@ E1–E5: ACCEPTED — COMPLETE
 PHASE E: ACCEPTED — COMPLETE
 
 F1: ACCEPTED — COMPLETE
-F2: IMPLEMENTATION COMPLETE — AWAITING FINAL CHATGPT/OPERATOR ACCEPTANCE
-F3: IMPLEMENTATION COMPLETE — AWAITING FINAL CHATGPT/OPERATOR ACCEPTANCE
-PHASE F: IMPLEMENTATION COMPLETE — AWAITING FINAL CHATGPT/OPERATOR ACCEPTANCE
 
-PHASE G: IMPLEMENTATION COMPLETE — AWAITING FINAL CHATGPT/OPERATOR ACCEPTANCE
+F2:
+REPAIR IMPLEMENTATION COMPLETE —
+AWAITING FINAL CHATGPT/OPERATOR ACCEPTANCE
+
+F3:
+REPAIR IMPLEMENTATION COMPLETE —
+AWAITING FINAL CHATGPT/OPERATOR ACCEPTANCE
+
+PHASE F:
+IMPLEMENTATION COMPLETE —
+AWAITING FINAL CHATGPT/OPERATOR ACCEPTANCE
+
+PHASE G:
+REPAIR IMPLEMENTATION COMPLETE —
+AWAITING FINAL CHATGPT/OPERATOR ACCEPTANCE
 
 BUNDLE 3:
 CLOSURE IMPLEMENTATION COMPLETE —
 AWAITING FINAL CHATGPT AND OPERATOR ACCEPTANCE
 
 BUNDLE 4: NOT STARTED
-UNATTENDED 10–20-SESSION SOAK: NOT STARTED
+UNATTENDED SOAK: NOT STARTED
 LIVE CAPITAL: NOT READY
 ```
 
@@ -434,7 +459,7 @@ Bundle 3 is **not** marked accepted or closed in this repository. Still
 required before Bundle 3 closes:
 
 1. independent ChatGPT/operator acceptance of this combined F2/F3/Phase-G
-   closeout session
+   closeout session and its final operational-safety repair
 
 ### What Bundle 3 completion unlocks
 

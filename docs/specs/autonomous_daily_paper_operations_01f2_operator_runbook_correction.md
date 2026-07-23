@@ -186,3 +186,43 @@ Phase G (final Bundle 3 closure audit) is not started by this patch. Bundle
 The unattended 10-20-session paper soak has not started and is not
 authorized by this patch. Live trading is not ready and is not authorized by
 this patch.
+
+## 10. Repair (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-F2-F3-G-FINAL-OPERATIONAL-SAFETY-REPAIR)
+
+Bundle 3 acceptance review found this patch's runbook content contained
+contradictory language later corrected by the combined F2/F3/G final repair
+(starting HEAD `b70c5156`, one commit `fix: harden bundle 3 operational
+closeout`). Recorded here so this spec continues to reflect what is actually
+committed at HEAD, not what F2 originally shipped:
+
+- §14 ("Stale assumptions corrected") originally stated the autonomous path
+  "is explicitly designed for unsupervised intraday operation." This
+  contradicted this same patch's own §0 safety boundary
+  ("Active operator supervision is required"). §14 was rewritten to state
+  that the controller autonomously performs scheduled runtime actions,
+  that active operator supervision is still required for the supported
+  lane, and that autonomous execution does not mean unattended
+  authorization — while preserving the distinction that no routine
+  intervention is expected during a healthy session.
+- §8/§13 (WS gap and recovery) originally instructed the operator to
+  "restart daemon to reset cursor to ColdStartUnproven" or "use
+  repair_ws_continuity seam." Source review of
+  `core-rs/crates/mqk-daemon/src/state.rs`'s `seed_ws_continuity_from_db`
+  and `core-rs/crates/mqk-daemon/src/state/alpaca_ws_transport.rs` proved
+  neither claim: a persisted `GapDetected` cursor survives a restart
+  unchanged (fail-closed, not reset), and
+  `repair_ws_continuity_from_persisted_cursor_for_test` is a test-only
+  helper with no daemon route or operator surface. §8/§13 were rewritten
+  to state that a restart is not a repair, that recovery happens only
+  through the WS transport task's own automatic reconnection, and that the
+  operator must verify recovery and inspect positions/reconcile/risk
+  before resuming.
+- §11 (the paper soak harness) originally called `scripts/paper_soak_day.sh`
+  "the canonical one-day paper soak harness" without a supervised-Bundle-3
+  boundary, and its example command placed Alpaca credentials directly on
+  the command line. §11 now carries an explicit legacy/reference-tooling
+  boundary and its example loads `.env.local` instead of inlining
+  credentials.
+
+The F2 guard's check `[16]` proves the corrected language is present and the
+removed phrases are absent. No other F2 deliverable changed.

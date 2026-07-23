@@ -343,6 +343,29 @@ Test-ContentContains "README.md records F2 status" $ReadmeContent "F2" | Out-Nul
 Test-ContentContains "ledger records F2" $LedgerContent "F2" | Out-Null
 Test-ContentDoesNotContain "ledger does not claim Phase F closed" $LedgerContent "PHASE F: CLOSED" | Out-Null
 
+# -----------------------------------------------------------------------
+# [16] BUNDLE-3-FINAL-OPERATIONAL-SAFETY-REPAIR: the runbook must never
+#      contain the specific contradictory/unsafe phrases this repair
+#      removed, and must contain the specific corrected safety language it
+#      added (supervised-only truth, fail-closed WS-gap restart procedure,
+#      legacy soak-harness boundary).
+# -----------------------------------------------------------------------
+Write-Host ""
+Show-Info "--- [16] Repaired runbook content: forbidden phrases absent, corrected language present ---"
+foreach ($Forbidden in @(
+    "designed for unsupervised intraday operation",
+    "restart daemon to reset cursor to ColdStartUnproven",
+    "use repair_ws_continuity seam",
+    "the canonical one-day paper soak harness"
+)) {
+    Test-ContentDoesNotContain "runbook does not contain forbidden phrase '$Forbidden'" $RunbookContent $Forbidden | Out-Null
+}
+Test-ContentContains "runbook marks the legacy soak-harness boundary" $RunbookContent "is legacy/reference tooling" | Out-Null
+Test-ContentContains "runbook states a persisted GapDetected remains fail-closed across restart" $RunbookContent "remains fail-closed across a daemon" | Out-Null
+Test-ContentContains "runbook states restart alone is not a repair" $RunbookContent "restarting the daemon is not itself a repair" | Out-Null
+Test-ContentContains "runbook states there is no operator-invocable repair command" $RunbookContent "no operator-invocable" | Out-Null
+Test-ContentContains "runbook distinguishes no-routine-intervention from supervision-unnecessary" $RunbookContent "No routine intervention expected during a healthy session is not the same" | Out-Null
+
 # =============================================================================
 # Summary
 # =============================================================================
