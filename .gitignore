@@ -96,6 +96,11 @@ continue/
 # -----------------------------
 evidence/paper_smoke_*/
 
+# Supervised autonomous paper session evidence captures
+# (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01F3) -- generated manifests only,
+# never staged or committed.
+smoke_logs/autonomous_paper_soak/
+
 # -----------------------------
 # Local archives / dumps
 # -----------------------------

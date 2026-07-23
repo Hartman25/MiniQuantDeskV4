@@ -7,6 +7,13 @@
 # text/source validation only -- no network call, no provider/broker call,
 # no DB connection, no daemon start, no cargo/npm build or test.
 #
+# RECONCILIATION (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01F3-SUPERVISED-SOAK-
+# EVIDENCE-PREPARATION): the [15] forbidden-claims list no longer forbids
+# "F3: IMPLEMENTATION COMPLETE" claims -- that is now legitimate once F2 is
+# implementation complete and F3 begins. This mirrors the same obsolete-
+# assertion reconciliation convention F1's guard applied for F2. No other
+# F2 check is reopened or weakened.
+#
 # Checks:
 #   [1]  The F1 guard exists and, when invoked, exits 0.
 #   [2]  The runbook and F2 spec doc both exist and are nonempty.
@@ -321,9 +328,7 @@ $ForbiddenClaims = @(
     "LIVE CAPITAL: READY",
     "live capital is ready",
     "approved for live capital",
-    "ready for live capital",
-    "F3: IMPLEMENTATION COMPLETE",
-    "F3 is implementation complete"
+    "ready for live capital"
 )
 foreach ($Doc in @(
     @{Name = "README.md"; Content = $ReadmeContent},

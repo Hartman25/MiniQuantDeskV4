@@ -1,0 +1,30 @@
+{
+  "schema_version": "autonomous-paper-soak-evidence-v1",
+  "session_evidence_id": null,
+  "capture_phase": null,
+  "captured_at_utc": null,
+  "market_date": null,
+  "repository_commit": null,
+  "deployment_mode": null,
+  "adapter_id": null,
+  "daemon_base_url": null,
+  "operator_supervised": null,
+
+  "system_status": null,
+  "system_preflight": null,
+  "autonomous_readiness": null,
+  "autonomous_paper_status": null,
+  "current_daily_operation": null,
+  "recent_daily_operations": null,
+  "orders_summary": null,
+  "fills_summary": null,
+  "reconcile_status": null,
+  "risk_posture": null,
+  "completed_bar_task_status": null,
+  "gui_build_version": null,
+
+  "capture_errors": [],
+  "missing_endpoints": [],
+  "operator_notes": null,
+  "artifact_hashes": {}
+}

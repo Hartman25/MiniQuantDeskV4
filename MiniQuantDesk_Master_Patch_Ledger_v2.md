@@ -16230,3 +16230,68 @@ BUNDLE 4: NOT STARTED
 SOAK: NOT STARTED
 LIVE CAPITAL: NOT READY
 ```
+
+---
+
+## AUTONOMOUS-DAILY-PAPER-OPERATIONS-01F3-SUPERVISED-SOAK-EVIDENCE-PREPARATION
+
+**Bundle:** `AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-COMBINED` | **Phase:** F3 —
+supervised soak-evidence preparation.
+
+Starting HEAD: `8494e1ea` (F2 commit). Prepares read-only evidence-capture
+tooling for future supervised sessions only — does not perform, start,
+count, or claim an unattended soak. No daemon, trading, broker, strategy,
+risk, or execution behavior change.
+
+New files:
+
+- `scripts/soak/capture_autonomous_paper_session_evidence.ps1` — GET-only,
+  fail-closed to `127.0.0.1`/`localhost`/`::1` daemon hosts only, never
+  reads `.env.local`, never touches a credential env var, never calls a
+  mutating/lifecycle route; `-ValidateOnly` and `-FixturePath` safe modes.
+- `scripts/soak/validate_autonomous_paper_session_evidence.ps1` — schema/
+  truth-state/null-count/secret-pattern manifest validator.
+- `scripts/soak/templates/autonomous_paper_session_manifest.template.json`
+  (`schema_version: "autonomous-paper-soak-evidence-v1"`).
+- `scripts/soak/supervised_session_evidence_checklist.md`.
+- `docs/specs/autonomous_daily_paper_operations_01f3_supervised_soak_evidence_preparation.md`,
+  `scripts/guards/validate_autonomous_daily_paper_operations_01f3_supervised_soak_evidence_preparation.ps1`.
+
+Modified: `.gitignore` (one narrow rule,
+`smoke_logs/autonomous_paper_soak/` — the tool's default ignored output
+location).
+
+Manual fixture/`-ValidateOnly` round-trip testing performed against a temp
+directory outside the repository (never staged): capture produces a
+schema-valid manifest; the validator accepts it; the validator rejects a
+mutated `deployment_mode: "live"`, an injected `ALPACA_API_KEY`-shaped
+string, and a silently-nulled field not recorded in `missing_endpoints`.
+
+**Safety confirmation:**
+
+```text
+PROVIDER CALLS: no
+BROKER CALLS: no
+DISCORD CALLS: no
+NETWORK CALLS: no (fixture/validate-only testing only; no real daemon contacted)
+REAL DAEMON STARTED: no
+PAPER ORDERS: no
+LIVE ORDERS: no
+PAPER DB TOUCHED: no
+MIGRATION CHANGED: no
+DAEMON PRODUCTION RUST CHANGED: no
+GUI CHANGED: no
+GENERATED EVIDENCE STAGED: no
+```
+
+```text
+F1: ACCEPTED — COMPLETE
+F2: IMPLEMENTATION COMPLETE — AWAITING FINAL COMBINED ACCEPTANCE
+F3: IMPLEMENTATION COMPLETE — AWAITING FINAL COMBINED ACCEPTANCE
+PHASE F: IMPLEMENTATION COMPLETE — AWAITING FINAL COMBINED ACCEPTANCE
+PHASE G: NOT STARTED
+BUNDLE 3 (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-COMBINED): OPEN
+BUNDLE 4: NOT STARTED
+SOAK: NOT STARTED
+LIVE CAPITAL: NOT READY
+```

@@ -237,7 +237,19 @@ rewrite, stop/emergency posture, end-of-day evidence capture, and restart
 distinctions (before finalization / after a terminal commit / after an
 evidence blocker). Documentation and validation only — no daemon, GUI, or
 migration file is touched. **F2 is implementation complete, awaiting final
-combined acceptance.**
+combined acceptance.** On top of F2,
+`AUTONOMOUS-DAILY-PAPER-OPERATIONS-01F3-SUPERVISED-SOAK-EVIDENCE-PREPARATION`
+prepares read-only evidence-capture tooling for future supervised sessions —
+`scripts/soak/capture_autonomous_paper_session_evidence.ps1` (GET-only,
+fail-closed to a local daemon host, no `.env.local` read, no credential
+handling, `-ValidateOnly`/`-FixturePath` safe modes),
+`scripts/soak/validate_autonomous_paper_session_evidence.ps1` (schema,
+truth-state, null-count, and secret-pattern validation), the
+`autonomous-paper-soak-evidence-v1` manifest template, an operator
+checklist, and one narrow `.gitignore` rule for the tool's default ignored
+output location. It does not perform, start, count, or claim an unattended
+soak session, and no generated evidence is staged or committed. **F3 is
+implementation complete, awaiting final combined acceptance.**
 
 The strongest current operational route is:
 
@@ -563,8 +575,8 @@ finalization integration and notification, plus its matching-runtime-policy-fail
 Phase E4 (the read-only daily-operation API, plus both repairs), and Phase E5 (the integrated Phase
 E closure proof) are all accepted — Phase E is accepted complete in full. Phase F1 (the read-only
 GUI daily-operation truth projection) is accepted complete. Bundle 3 still requires F2 operator
-runbook correction's own final combined acceptance (implementation complete), F3 supervised
-soak-evidence preparation, and Phase G final closure.
+runbook correction's and F3 supervised soak-evidence preparation's own final combined acceptance
+(both implementation complete), and Phase G final closure.
 
 ### Operational meaning
 
@@ -946,9 +958,9 @@ E3 (coordinator finalization integration and notification) is **accepted complet
 read-only daily-operation API, plus both repairs) is **accepted complete**; Phase E5 (the integrated
 Phase E closure proof) is **accepted complete — Phase E is accepted complete in full**. Phase F1
 (the read-only GUI daily-operation truth projection) is **accepted complete**. Phase F2 (operator
-runbook correction) is implementation complete, awaiting final combined acceptance. Do not label
-the current `main` head as a finished autonomous-paper MVP until F2's acceptance and the later
-F3/G phases are independently accepted.
+runbook correction) and Phase F3 (supervised soak-evidence preparation) are both implementation
+complete, awaiting final combined acceptance. Do not label the current `main` head as a finished
+autonomous-paper MVP until F2/F3's acceptance and Phase G are independently accepted.
 
 ### What is expected after Bundle 3
 
@@ -1424,8 +1436,8 @@ Recommended discipline:
 
 Be honest about these:
 
-- Bundle 3 is not closed; Phase D (D1–D4, integrated lifecycle proof, dispatch-ownership race closure, and the evaluation-lineage repair) is accepted complete in full; the Phase E1 contract audit (the binding durable outcome/no-trade contract, four-times-corrected) is **accepted complete**; Phase E2A (durable coverage-anchor/run-lineage evidence foundation), plus both repairs, is **accepted complete**; Phase E2B (strict outcome classifier and finalization CAS, built on E2A's authorities) is **accepted complete**; Phase E3 (coordinator finalization integration and notification, built on E2B's classifier/CAS) is **accepted complete**; Phase E4 (the read-only daily-operation API, built on E3's accepted foundation, plus both repairs) is **accepted complete**; Phase E5 (the integrated Phase E closure proof, built on E1–E4's accepted foundation, zero production Rust change) is **accepted complete — Phase E is accepted complete in full**; Phase F1 (the read-only GUI daily-operation truth projection, built on E4's accepted API, zero daemon change) is **accepted complete**; Phase F2 (operator runbook correction, documentation and validation only) is implementation complete but awaiting final combined acceptance
-- the current main branch should not begin an unattended soak until Phase F2's own final combined acceptance and the later Bundle 3 phases (F3, G) are accepted; controlled, operator-supervised autonomous Paper + Alpaca operation is the current Bundle 3 target, not unattended soak
+- Bundle 3 is not closed; Phase D (D1–D4, integrated lifecycle proof, dispatch-ownership race closure, and the evaluation-lineage repair) is accepted complete in full; the Phase E1 contract audit (the binding durable outcome/no-trade contract, four-times-corrected) is **accepted complete**; Phase E2A (durable coverage-anchor/run-lineage evidence foundation), plus both repairs, is **accepted complete**; Phase E2B (strict outcome classifier and finalization CAS, built on E2A's authorities) is **accepted complete**; Phase E3 (coordinator finalization integration and notification, built on E2B's classifier/CAS) is **accepted complete**; Phase E4 (the read-only daily-operation API, built on E3's accepted foundation, plus both repairs) is **accepted complete**; Phase E5 (the integrated Phase E closure proof, built on E1–E4's accepted foundation, zero production Rust change) is **accepted complete — Phase E is accepted complete in full**; Phase F1 (the read-only GUI daily-operation truth projection, built on E4's accepted API, zero daemon change) is **accepted complete**; Phase F2 (operator runbook correction, documentation and validation only) and Phase F3 (supervised soak-evidence preparation tooling, documentation and validation only) are both implementation complete but awaiting final combined acceptance
+- the current main branch should not begin an unattended soak until Phase F2/F3's own final combined acceptance and the later Bundle 3 phase (Phase G) is accepted; controlled, operator-supervised autonomous Paper + Alpaca operation is the current Bundle 3 target, not unattended soak
 - Bundle 4 durable paper cash/positions/lots/cost basis/P&L truth is still open
 - real paper fill, reconcile-after-fill, Discord lifecycle, restart, and repeated-session evidence remain incomplete
 - the daemon/operator plane is materially stronger, but some deeper GUI detail surfaces remain intentionally deferred or unmounted rather than faked
