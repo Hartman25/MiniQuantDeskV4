@@ -16295,3 +16295,112 @@ BUNDLE 4: NOT STARTED
 SOAK: NOT STARTED
 LIVE CAPITAL: NOT READY
 ```
+
+---
+
+## AUTONOMOUS-DAILY-PAPER-OPERATIONS-01G-BUNDLE-3-FINAL-CLOSURE-AUDIT
+
+**Bundle:** `AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-COMBINED` | **Phase:** G —
+final Bundle 3 closure audit.
+
+Starting HEAD: `088f436b` (F3 commit). Audits D1 through F3 against
+committed repository state (specs, guards, tests, ledger — not session
+memory). No new trading behavior. No genuine production or F1–F3
+correctness defect was found; per the mission's instruction, had one been
+found this phase would report BLOCKED rather than repair it in place.
+
+Fixed historical range authorities recorded in the G spec:
+
+```text
+Accepted Phase E base:  11664945e90a582e6984f0eab66cf89690120769
+Accepted Phase E head:  4b6eec72cb65dec1fc2a8793e9d9d7bdde8328b4
+Accepted F1 base:       4b6eec72cb65dec1fc2a8793e9d9d7bdde8328b4
+Original F1 commit:     c7ddccafebcd3dd761ef2fa54bb8cadeb6144b2a
+Accepted F1 head:       bd7336d4dd14dbb1943638b152886eb40b646b7d
+F2 commit:              8494e1eaa36ce6800479aae61a7ce80f69db4dfc
+F3 commit:               088f436ba8fe8e1c3ae85ee55bdd84ffdfdb6604
+```
+
+Thirteen required closure questions answered, all resolving to a supported
+"yes" (docs/specs/...01g_bundle_3_final_closure.md §2). Pre-existing E5
+compatibility session-event observation re-confirmed as a known Phase G
+efficiency/audit follow-up, not a correctness blocker — no production code
+touched for it.
+
+**Final regression matrix** (one binary at a time,
+`--include-ignored --test-threads=1`):
+
+```text
+scenario_autonomous_daily_phase_e_closure_01                       6/6
+scenario_autonomous_daily_operation_api_01                        50/50
+scenario_autonomous_daily_coverage_anchor_and_run_lineage_01       41/41
+scenario_autonomous_daily_outcome_classifier_and_finalization_01   67/67
+scenario_autonomous_daily_outcome_coordinator_integration_01       16/16
+scenario_autonomous_daily_session_coordinator_01                   48/48
+scenario_autonomous_daily_phase_d_integration_01                    8/8
+scenario_autonomous_completed_bar_task_01                          49/49
+scenario_daily_data_readiness_start_gate_01                        20/20
+scenario_autonomous_readiness_auton_truth01                        18/18
+scenario_autonomous_paper_status_summary_01                        21/21
+scenario_daemon_routes                                             84/84
+scenario_route_contract_rt01                                        2/2
+scenario_gui_daemon_contract_gate                                  23/23
+
+Driver baseline (scenario_autonomous_completed_bar_driver_01):
+  47 passed, 9 identical pre-existing failures, 0 new Bundle 3 failures
+
+npm test (core-rs/mqk-gui): 850/850 PASS
+npm run build (core-rs/mqk-gui): PASS
+cargo check -p mqk-db -p mqk-runtime -p mqk-daemon: PASS (clean)
+git diff --check: PASS
+git diff --cached --check: PASS
+```
+
+New files:
+`docs/specs/autonomous_daily_paper_operations_01g_bundle_3_final_closure.md`,
+`scripts/guards/validate_autonomous_daily_paper_operations_01g_bundle_3_final_closure.ps1`.
+
+**Safety confirmation:**
+
+```text
+PROVIDER CALLS: no
+BROKER CALLS: no
+DISCORD CALLS: no
+NETWORK CALLS: no
+REAL DAEMON STARTED: no
+PAPER ORDERS: no
+LIVE ORDERS: no
+PAPER DB TOUCHED: no
+TEST DB: port 5434 only
+MIGRATION CHANGED: no
+DAEMON PRODUCTION RUST CHANGED: no
+GUI CHANGED: no
+BUNDLE 4 STARTED: no
+MULTI-SYMBOL AUTONOMOUS ENABLED: no
+```
+
+```text
+D1–D4: ACCEPTED — COMPLETE
+PHASE D: ACCEPTED — COMPLETE
+
+E1–E5: ACCEPTED — COMPLETE
+PHASE E: ACCEPTED — COMPLETE
+
+F1: ACCEPTED — COMPLETE
+F2: IMPLEMENTATION COMPLETE — AWAITING FINAL CHATGPT/OPERATOR ACCEPTANCE
+F3: IMPLEMENTATION COMPLETE — AWAITING FINAL CHATGPT/OPERATOR ACCEPTANCE
+PHASE F: IMPLEMENTATION COMPLETE — AWAITING FINAL CHATGPT/OPERATOR ACCEPTANCE
+
+PHASE G: IMPLEMENTATION COMPLETE — AWAITING FINAL CHATGPT/OPERATOR ACCEPTANCE
+
+BUNDLE 3:
+CLOSURE IMPLEMENTATION COMPLETE —
+AWAITING FINAL CHATGPT AND OPERATOR ACCEPTANCE
+
+BUNDLE 4: NOT STARTED
+UNATTENDED 10–20-SESSION SOAK: NOT STARTED
+LIVE CAPITAL: NOT READY
+```
+
+Bundle 3 is **not** marked accepted or closed in the repository by this
+patch.

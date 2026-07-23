@@ -274,7 +274,7 @@ Use these labels precisely:
 | Mode | Current posture | Meaning |
 |---|---|---|
 | **Supervised Paper + Alpaca** | Available for controlled validation | Credible current path after a clean proof run, valid env, Alpaca paper auth, and active operator supervision. |
-| **Autonomous Paper + Alpaca** | Pre-soak hardening — Bundle 3 open | The durable daily controller, completed-bar production cutover, and the D4 integrated lifecycle/dispatch-ownership proof are implemented and **accepted** (Phase D accepted complete in full); the E1 durable-outcome contract, the E2A durable evidence foundation, the E2B strict classifier/finalization CAS, the E3 coordinator finalization integration, the E4 read-only daily-operation API, and the E5 integrated Phase E closure proof are all **accepted** (Phase E accepted complete in full); the F1 read-only GUI daily-operation projection is **accepted complete**; Bundle 3 still requires F2 operator runbook correction's and F3 supervised soak-evidence preparation's own final combined acceptance (both implementation complete), and Phase G final closure before it should begin an unattended autonomous soak. Controlled autonomous Paper + Alpaca operation under active operator supervision is the current Bundle 3 target — not unattended soak. |
+| **Autonomous Paper + Alpaca** | Pre-soak hardening — Bundle 3 open | The durable daily controller, completed-bar production cutover, and the D4 integrated lifecycle/dispatch-ownership proof are implemented and **accepted** (Phase D accepted complete in full); the E1 durable-outcome contract, the E2A durable evidence foundation, the E2B strict classifier/finalization CAS, the E3 coordinator finalization integration, the E4 read-only daily-operation API, and the E5 integrated Phase E closure proof are all **accepted** (Phase E accepted complete in full); the F1 read-only GUI daily-operation projection is **accepted complete**; F2 operator runbook correction, F3 supervised soak-evidence preparation, and the Phase G final closure audit are all implementation complete, awaiting final combined ChatGPT/operator acceptance before Bundle 3 can begin an unattended autonomous soak. Controlled autonomous Paper + Alpaca operation under active operator supervision is the current Bundle 3 target — not unattended soak. |
 | **Live / live-capital** | Not ready | Typed support and gates exist, but this repo must not be treated as safe for unattended live trading. |
 
 ### Current Bundle 3 position
@@ -394,10 +394,47 @@ soak:
   acceptance — recorded in this combined closeout session as AWAITING
   FINAL COMBINED ACCEPTANCE**
 
-Still required before Bundle 3 closes:
+On top of F3, `AUTONOMOUS-DAILY-PAPER-OPERATIONS-01G-BUNDLE-3-FINAL-CLOSURE-AUDIT`
+audits D1 through F3 against the committed repository state (specs, guards,
+tests, ledger — not session memory) and answers the mission's thirteen
+required closure questions, all resolving to a supported "yes" (see
+`docs/specs/autonomous_daily_paper_operations_01g_bundle_3_final_closure.md`
+§2). The full regression matrix (14 named scenario binaries, all passing)
+plus the `scenario_autonomous_completed_bar_driver_01` baseline (47 passed,
+9 identical pre-existing failures, 0 new Bundle 3 failures) was re-run
+clean. `cargo check` on `mqk-db`/`mqk-runtime`/`mqk-daemon` is clean;
+`git diff --check` and `git diff --cached --check` are clean. No genuine
+production or F1–F3 correctness defect was found. **Phase G is implementation
+complete, awaiting final ChatGPT and operator acceptance.**
 
-1. independent ChatGPT/operator acceptance of F2 and F3
-2. complete Phase G closure audit and ledger reconciliation
+```text
+D1–D4: ACCEPTED — COMPLETE
+PHASE D: ACCEPTED — COMPLETE
+
+E1–E5: ACCEPTED — COMPLETE
+PHASE E: ACCEPTED — COMPLETE
+
+F1: ACCEPTED — COMPLETE
+F2: IMPLEMENTATION COMPLETE — AWAITING FINAL CHATGPT/OPERATOR ACCEPTANCE
+F3: IMPLEMENTATION COMPLETE — AWAITING FINAL CHATGPT/OPERATOR ACCEPTANCE
+PHASE F: IMPLEMENTATION COMPLETE — AWAITING FINAL CHATGPT/OPERATOR ACCEPTANCE
+
+PHASE G: IMPLEMENTATION COMPLETE — AWAITING FINAL CHATGPT/OPERATOR ACCEPTANCE
+
+BUNDLE 3:
+CLOSURE IMPLEMENTATION COMPLETE —
+AWAITING FINAL CHATGPT AND OPERATOR ACCEPTANCE
+
+BUNDLE 4: NOT STARTED
+UNATTENDED 10–20-SESSION SOAK: NOT STARTED
+LIVE CAPITAL: NOT READY
+```
+
+Bundle 3 is **not** marked accepted or closed in this repository. Still
+required before Bundle 3 closes:
+
+1. independent ChatGPT/operator acceptance of this combined F2/F3/Phase-G
+   closeout session
 
 ### What Bundle 3 completion unlocks
 
@@ -605,7 +642,7 @@ should not be called closed until Bundle 3 and its market evidence gates are com
 
 | Item | Status |
 |---|---|
-| BUNDLE-3-AUTONOMOUS-DAILY-OPS | Open — Phase D accepted complete; Phase E1 contract (four-times-corrected) accepted complete; Phase E2A durable evidence foundation, plus its authority-envelope/gate-ordering/concurrency closure repairs, accepted complete; Phase E2B strict outcome classifier and finalization CAS accepted complete; Phase E3 coordinator finalization integration and notification accepted complete; Phase E4 read-only daily-operation API, plus its repairs, accepted complete; Phase E5 integrated Phase E closure proof accepted complete — Phase E accepted complete in full; Phase F1 GUI daily-operation truth projection accepted complete; Phase F2 operator runbook correction and Phase F3 supervised soak-evidence preparation both implementation complete, awaiting acceptance; closure (Phase G) remains |
+| BUNDLE-3-AUTONOMOUS-DAILY-OPS | Open — Phase D accepted complete; Phase E1 contract (four-times-corrected) accepted complete; Phase E2A durable evidence foundation, plus its authority-envelope/gate-ordering/concurrency closure repairs, accepted complete; Phase E2B strict outcome classifier and finalization CAS accepted complete; Phase E3 coordinator finalization integration and notification accepted complete; Phase E4 read-only daily-operation API, plus its repairs, accepted complete; Phase E5 integrated Phase E closure proof accepted complete — Phase E accepted complete in full; Phase F1 GUI daily-operation truth projection accepted complete; Phase F2 operator runbook correction, Phase F3 supervised soak-evidence preparation, and the Phase G final closure audit are all implementation complete, awaiting final combined ChatGPT/operator acceptance |
 | PAPER-TRADE-LIFECYCLE-01 | Open — market-hours paper smoke with real fills |
 | RECONCILE-AFTER-REAL-FILL-01 | Open — reconcile pass after a real paper fill |
 | DISCORD-TRADE-LIFECYCLE-REAL-01 | Open — Discord notification evidence from a real cycle |
