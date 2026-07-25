@@ -387,6 +387,21 @@ fn bar(symbol: &str, timeframe: &str, end_ts: i64, is_complete: bool) -> mqk_md:
     }
 }
 
+/// Guards the one-time, run-wide fixture sweep below so it executes exactly
+/// once per test-binary invocation.
+///
+/// `cargo test`'s default parallelism runs many `#[tokio::test]`s in this
+/// file concurrently against the same DB. Every test uses its own distinct
+/// `zzdrv-*` adapter_id, so no cleanup is ever needed *between* tests within
+/// one run — but a wildcard `adapter_id like 'zzdrv%'` sweep re-run mid-suite
+/// would delete a *different*, still-in-flight test's freshly created
+/// fixture rows (and, worse, permanently orphan that operation_id's event
+/// rows: once its parent operations row is gone, no later join-based cleanup
+/// can ever find them again). Running the sweep once, before any test's
+/// fixtures exist, is both sufficient (it only needs to clear leftovers from
+/// a previous, possibly crashed run) and safe under parallelism.
+static ZZDRV_FIXTURES_SWEPT: tokio::sync::OnceCell<()> = tokio::sync::OnceCell::const_new();
+
 async fn maybe_db(label: &str) -> Option<sqlx::PgPool> {
     let url = match std::env::var("MQK_DATABASE_URL") {
         Ok(url) => url,
@@ -401,22 +416,33 @@ async fn maybe_db(label: &str) -> Option<sqlx::PgPool> {
         .await
         .expect("connect MQK_DATABASE_URL");
     mqk_db::migrate(&pool).await.expect("run migrations");
-    sqlx::query("delete from sys_autonomous_daily_bar_dispatches where local_symbol like 'ZZDRV%'")
-        .execute(&pool)
-        .await
-        .expect("clean dispatch claims");
-    sqlx::query("delete from sys_autonomous_daily_operation_events where operation_id in (select operation_id from sys_autonomous_daily_operations where adapter_id like 'zzdrv%')")
-        .execute(&pool)
-        .await
-        .expect("clean operation events");
-    sqlx::query("delete from sys_autonomous_daily_operations where adapter_id like 'zzdrv%'")
-        .execute(&pool)
-        .await
-        .expect("clean operations");
-    sqlx::query("delete from md_bars where symbol like 'ZZDRV%'")
-        .execute(&pool)
-        .await
-        .expect("clean md_bars");
+    ZZDRV_FIXTURES_SWEPT
+        .get_or_init(|| async {
+            sqlx::query(
+                "delete from sys_autonomous_daily_bar_dispatches where local_symbol like 'ZZDRV%'",
+            )
+            .execute(&pool)
+            .await
+            .expect("clean dispatch claims");
+            // Delete by adapter_id AND sweep orphans (events whose operation
+            // row is already gone, e.g. from a previous run that crashed
+            // mid-cleanup).
+            sqlx::query("delete from sys_autonomous_daily_operation_events where operation_id in (select operation_id from sys_autonomous_daily_operations where adapter_id like 'zzdrv%') or operation_id not in (select operation_id from sys_autonomous_daily_operations)")
+                .execute(&pool)
+                .await
+                .expect("clean operation events");
+            sqlx::query(
+                "delete from sys_autonomous_daily_operations where adapter_id like 'zzdrv%'",
+            )
+            .execute(&pool)
+            .await
+            .expect("clean operations");
+            sqlx::query("delete from md_bars where symbol like 'ZZDRV%'")
+                .execute(&pool)
+                .await
+                .expect("clean md_bars");
+        })
+        .await;
     Some(pool)
 }
 
@@ -467,26 +493,49 @@ fn past_timing() -> Timing {
     }
 }
 
+/// Session anchored to the real wall clock at call time, not a fixed
+/// calendar date.
+///
+/// `dispatch_native_strategy_for_symbol_with_bar`'s per-tick staleness gate
+/// (MD-STALENESS-PER-TICK-GATE-01) always compares a dispatched bar's
+/// `end_ts` against the genuine `Utc::now()` at the instant the tick runs —
+/// intraday timeframes cap that age at
+/// `market_data_freshness::DEFAULT_INTRADAY_BAR_MAX_AGE_SECS` (900s) unless
+/// overridden. Every assertion in this file that expects a completed
+/// dispatch derives its expected `bar_end_ts` relative to
+/// `timing.effective_open`/`timing.exchange_open` (e.g.
+/// `timing.effective_open.timestamp() + 300`), so anchoring `exchange_open`
+/// a fixed, comfortable margin behind the real instant this function is
+/// called keeps every one of those derived bar timestamps fresh under the
+/// tightest (intraday) cap — regardless of what day this suite actually
+/// runs on. `exchange_open` sits 10 minutes behind `now`, so a bar at
+/// `effective_open + 0..=600s` (the widest span asserted anywhere in this
+/// file) always lands strictly between "10 minutes old" and "just now": old
+/// enough to never be a future bar, fresh enough to clear the 900s intraday
+/// cap with margin, and no `sleep`/timing race is involved since the value
+/// is captured once per call.
 fn standard_timing() -> Timing {
-    let market_date = NaiveDate::from_ymd_opt(2026, 7, 20).unwrap(); // Monday
-    let previous_trading_date = NaiveDate::from_ymd_opt(2026, 7, 17).unwrap(); // Friday
-    let exchange_open = DateTime::parse_from_rfc3339("2026-07-20T13:30:00Z")
-        .unwrap()
-        .with_timezone(&Utc);
-    let exchange_close = DateTime::parse_from_rfc3339("2026-07-20T20:00:00Z")
-        .unwrap()
-        .with_timezone(&Utc);
+    let now = Utc::now();
+    let market_date = now.date_naive();
+    let previous_trading_date = market_date - chrono::Duration::days(3);
+    // `latest_closed_bar_end_ts` (the provider-poll future-skew check) floors
+    // `now_utc` to the nearest 5-minute boundary for "5m" timeframe targets.
+    // `exchange_open` must itself sit on a 5-minute boundary so that
+    // `effective_open + 300/600s` land on the same boundaries the poll seam
+    // independently derives from `now_utc` — otherwise a sub-minute-precision
+    // anchor can floor to an earlier boundary than the bar this fixture
+    // seeded, which the poll seam then rejects as future-skewed.
+    let unaligned_anchor = now - chrono::Duration::minutes(10);
+    let aligned_epoch = unaligned_anchor.timestamp().div_euclid(300) * 300;
+    let exchange_open = DateTime::<Utc>::from_timestamp(aligned_epoch, 0).unwrap();
+    let exchange_close = exchange_open + chrono::Duration::hours(6) + chrono::Duration::minutes(30);
     Timing {
-        preopen_start_utc: DateTime::parse_from_rfc3339("2026-07-20T13:00:00Z")
-            .unwrap()
-            .with_timezone(&Utc),
+        preopen_start_utc: exchange_open - chrono::Duration::minutes(30),
         exchange_open,
         exchange_close,
         effective_open: exchange_open,
         effective_close: exchange_close,
-        postclose_finalize_utc: DateTime::parse_from_rfc3339("2026-07-20T20:15:00Z")
-            .unwrap()
-            .with_timezone(&Utc),
+        postclose_finalize_utc: exchange_close + chrono::Duration::minutes(15),
         previous_trading_date,
         market_date,
     }
