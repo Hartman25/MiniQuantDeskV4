@@ -515,12 +515,19 @@ async fn pl_11_outbox_plus_inbox_fill_is_order_filled_pnl_pending() {
     );
     assert_eq!(json["inbox_truth_state"], "present");
     assert_eq!(json["lifecycle_summary"]["fill_seen"], true);
+    // DURABLE-PAPER-PORTFOLIO-AND-PNL-01E: portfolio_truth_state/pnl_truth_state
+    // are now real computed values read from the durable snapshot/accounting
+    // tables (B4-B/B4-C/B4-D), not the prior hardcoded
+    // "in_memory_only_not_restart_surviving" placeholder. This fixture seeds
+    // an outbox+inbox fill but no durable Paper+Alpaca snapshot or
+    // accounting row, so both must honestly report unavailable/not_found --
+    // never fabricated as "active".
     assert_eq!(
-        json["portfolio_truth_state"], "in_memory_only_not_restart_surviving",
+        json["portfolio_truth_state"], "snapshot_unavailable",
         "PL-11: portfolio_truth_state must be honest, not fabricated 'active'; got: {json}"
     );
     assert_eq!(
-        json["pnl_truth_state"], "in_memory_only_not_restart_surviving",
+        json["pnl_truth_state"], "not_found",
         "PL-11: pnl_truth_state must be honest, not fabricated 'active'; got: {json}"
     );
 

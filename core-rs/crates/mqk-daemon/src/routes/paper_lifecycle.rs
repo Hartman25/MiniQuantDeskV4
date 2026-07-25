@@ -169,6 +169,36 @@ pub(crate) async fn execution_paper_lifecycle(
         .await
         .unwrap_or_default();
 
+    // DURABLE-PAPER-PORTFOLIO-AND-PNL-01E: read (never write) the durable
+    // snapshot/accounting truth B4-B/B4-C/B4-D added, so
+    // portfolio_truth_state/pnl_truth_state below are real computed values
+    // instead of the prior hardcoded "in_memory_only_not_restart_surviving".
+    // This route only ever reads these tables -- it never triggers a
+    // snapshot persist or accounting replay itself.
+    let durable_snapshot = mqk_db::fetch_latest_paper_portfolio_snapshot(
+        db,
+        "paper",
+        mqk_db::PAPER_PORTFOLIO_SNAPSHOT_SOURCE_EXTERNAL_ALPACA,
+    )
+    .await
+    .ok()
+    .flatten();
+    let durable_accounting = mqk_db::fetch_paper_portfolio_accounting_state(db, run_id)
+        .await
+        .ok()
+        .flatten();
+
+    let portfolio_truth_state = if durable_snapshot.is_some() {
+        "active"
+    } else {
+        "snapshot_unavailable"
+    };
+    let pnl_truth_state = match durable_accounting.as_ref() {
+        Some(a) if a.accounting_epoch == "incomplete" => "fill_history_incomplete",
+        Some(_) => "active",
+        None => "not_found",
+    };
+
     let signal_count = signal_rows.len();
     let generated_signal_count = signal_rows.iter().filter(|r| r.signal_generated).count();
     let no_trade_diagnostic_count = no_trade_rows.len();
@@ -208,6 +238,7 @@ pub(crate) async fn execution_paper_lifecycle(
         outbox_count,
         fill_seen,
         order_failed_or_rejected,
+        durable_accounting.as_ref(),
     );
 
     let summary = PaperLifecycleSummary {
@@ -225,11 +256,18 @@ pub(crate) async fn execution_paper_lifecycle(
         full_lifecycle_visible,
     };
 
-    warnings.push(
-        "portfolio/P&L visibility for this run is in-memory-only and not restart-surviving — \
-         see portfolio_truth_state/pnl_truth_state"
-            .to_string(),
-    );
+    if portfolio_truth_state != "active" {
+        warnings.push(format!(
+            "durable portfolio truth is not yet available for this run (portfolio_truth_state={portfolio_truth_state})"
+        ));
+    }
+    if pnl_truth_state == "fill_history_incomplete" {
+        warnings.push(
+            "durable P&L truth is incomplete for this run — a position exists whose fill \
+             history does not fully explain it (see /api/v1/portfolio/durable-summary)"
+                .to_string(),
+        );
+    }
 
     (
         StatusCode::OK,
@@ -241,8 +279,8 @@ pub(crate) async fn execution_paper_lifecycle(
             no_trade_truth_state: truth_label(no_trade_diagnostic_count),
             outbox_truth_state: truth_label(outbox_count),
             inbox_truth_state: truth_label(inbox_count),
-            portfolio_truth_state: "in_memory_only_not_restart_surviving".to_string(),
-            pnl_truth_state: "in_memory_only_not_restart_surviving".to_string(),
+            portfolio_truth_state: portfolio_truth_state.to_string(),
+            pnl_truth_state: pnl_truth_state.to_string(),
             run_id: Some(run_id.to_string()),
             run: Some(run_row_to_api(&run)),
             signal_evaluations: signal_rows.into_iter().map(signal_row_to_api).collect(),
@@ -276,6 +314,15 @@ fn truth_label(count: usize) -> String {
 /// Deterministic classification of a run's lifecycle state from already
 /// computed counts/flags. Pure — no I/O, fully unit-testable.
 ///
+/// `durable_accounting` distinguishes, once a fill has been seen, whether
+/// durable P&L truth (B4-D) is already available for this run:
+/// - `None` — no durable accounting row exists yet: `"order_filled_pnl_pending"`.
+/// - `Some` with `accounting_epoch == "complete"` — durable realized P&L is
+///   available: `"order_filled_portfolio_durable_pnl_available"`.
+/// - `Some` with `accounting_epoch == "incomplete"` — a position exists
+///   whose fill history doesn't fully explain it:
+///   `"order_filled_portfolio_durable_pnl_incomplete"`.
+///
 /// Returns `(overall_lifecycle_state, full_lifecycle_visible)`.
 fn classify_overall_lifecycle_state(
     signal_count: usize,
@@ -284,9 +331,17 @@ fn classify_overall_lifecycle_state(
     outbox_count: usize,
     fill_seen: bool,
     order_failed_or_rejected: bool,
+    durable_accounting: Option<&mqk_db::PaperPortfolioAccountingStateRecord>,
 ) -> (String, bool) {
     if fill_seen {
-        return ("order_filled_pnl_pending".to_string(), true);
+        let state = match durable_accounting {
+            None => "order_filled_pnl_pending",
+            Some(a) if a.accounting_epoch == "incomplete" => {
+                "order_filled_portfolio_durable_pnl_incomplete"
+            }
+            Some(_) => "order_filled_portfolio_durable_pnl_available",
+        };
+        return (state.to_string(), true);
     }
     if order_failed_or_rejected {
         return ("order_rejected_or_failed".to_string(), true);
@@ -430,45 +485,78 @@ fn inbox_row_to_api(r: mqk_db::InboxRow) -> PaperLifecycleInboxRow {
 #[cfg(test)]
 mod tests {
     use super::classify_overall_lifecycle_state;
+    use chrono::{TimeZone, Utc};
+    use uuid::Uuid;
+
+    fn accounting_row(epoch: &str) -> mqk_db::PaperPortfolioAccountingStateRecord {
+        mqk_db::PaperPortfolioAccountingStateRecord {
+            run_id: Uuid::new_v4(),
+            cash_micros: 0,
+            realized_pnl_micros: 0,
+            fees_micros: 0,
+            last_applied_inbox_id: 1,
+            accounting_epoch: epoch.to_string(),
+            accounting_epoch_reason: None,
+            updated_at_utc: Utc.with_ymd_and_hms(2099, 1, 1, 0, 0, 0).unwrap(),
+        }
+    }
 
     #[test]
-    fn fill_seen_wins_over_everything_else() {
-        let (state, visible) = classify_overall_lifecycle_state(3, 1, 0, 1, true, true);
+    fn fill_seen_without_durable_accounting_is_pnl_pending() {
+        let (state, visible) = classify_overall_lifecycle_state(3, 1, 0, 1, true, true, None);
         assert_eq!(state, "order_filled_pnl_pending");
         assert!(visible);
     }
 
     #[test]
+    fn fill_seen_with_complete_durable_accounting_is_available() {
+        let complete = accounting_row("complete");
+        let (state, visible) =
+            classify_overall_lifecycle_state(3, 1, 0, 1, true, true, Some(&complete));
+        assert_eq!(state, "order_filled_portfolio_durable_pnl_available");
+        assert!(visible);
+    }
+
+    #[test]
+    fn fill_seen_with_incomplete_durable_accounting_is_incomplete() {
+        let incomplete = accounting_row("incomplete");
+        let (state, visible) =
+            classify_overall_lifecycle_state(3, 1, 0, 1, true, true, Some(&incomplete));
+        assert_eq!(state, "order_filled_portfolio_durable_pnl_incomplete");
+        assert!(visible);
+    }
+
+    #[test]
     fn failed_or_rejected_without_fill() {
-        let (state, visible) = classify_overall_lifecycle_state(1, 1, 0, 1, false, true);
+        let (state, visible) = classify_overall_lifecycle_state(1, 1, 0, 1, false, true, None);
         assert_eq!(state, "order_rejected_or_failed");
         assert!(visible);
     }
 
     #[test]
     fn outbox_only_is_fill_pending() {
-        let (state, visible) = classify_overall_lifecycle_state(1, 1, 0, 1, false, false);
+        let (state, visible) = classify_overall_lifecycle_state(1, 1, 0, 1, false, false, None);
         assert_eq!(state, "order_submitted_fill_pending");
         assert!(visible);
     }
 
     #[test]
     fn no_trade_diagnostic_explains_absence_of_order() {
-        let (state, visible) = classify_overall_lifecycle_state(0, 0, 2, 0, false, false);
+        let (state, visible) = classify_overall_lifecycle_state(0, 0, 2, 0, false, false, None);
         assert_eq!(state, "no_signal_durably_explained");
         assert!(visible);
     }
 
     #[test]
     fn signal_evaluated_but_none_generated_explains_absence_of_order() {
-        let (state, visible) = classify_overall_lifecycle_state(3, 0, 0, 0, false, false);
+        let (state, visible) = classify_overall_lifecycle_state(3, 0, 0, 0, false, false, None);
         assert_eq!(state, "no_signal_durably_explained");
         assert!(visible);
     }
 
     #[test]
     fn nothing_at_all_is_partial_visibility() {
-        let (state, visible) = classify_overall_lifecycle_state(0, 0, 0, 0, false, false);
+        let (state, visible) = classify_overall_lifecycle_state(0, 0, 0, 0, false, false, None);
         assert_eq!(state, "partial_visibility");
         assert!(!visible);
     }

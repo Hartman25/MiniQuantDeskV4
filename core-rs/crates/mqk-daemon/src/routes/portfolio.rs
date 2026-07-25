@@ -71,15 +71,15 @@ fn selected_positions_pnl_timeframe(query: &PortfolioPnlQuery) -> String {
 }
 
 #[derive(Clone)]
-struct PositionPnlResult {
-    mark_price: Option<f64>,
-    mark_source: Option<String>,
-    unrealized_pnl: Option<f64>,
+pub(crate) struct PositionPnlResult {
+    pub(crate) mark_price: Option<f64>,
+    pub(crate) mark_source: Option<String>,
+    pub(crate) unrealized_pnl: Option<f64>,
     /// Exact micros form of `unrealized_pnl`, used for lossless aggregation
     /// in `portfolio_summary`. Not exposed on the wire.
-    unrealized_pnl_micros: Option<i128>,
-    pnl_truth_state: String,
-    pnl_unavailable_reason: Option<String>,
+    pub(crate) unrealized_pnl_micros: Option<i128>,
+    pub(crate) pnl_truth_state: String,
+    pub(crate) pnl_unavailable_reason: Option<String>,
 }
 
 impl PositionPnlResult {
@@ -114,7 +114,7 @@ impl PositionPnlResult {
 /// surfaces an explicit `pnl_truth_state` + `pnl_unavailable_reason` rather
 /// than a silent `null`. `qty == 0` positions never require a mark — their
 /// P&L is always exactly `0`.
-async fn compute_broker_positions_pnl(
+pub(crate) async fn compute_broker_positions_pnl(
     st: &AppState,
     positions: &[mqk_schemas::BrokerPosition],
     timeframe: &str,
@@ -213,7 +213,7 @@ async fn compute_broker_positions_pnl(
 /// same all-or-nothing truth-state discipline `compute_portfolio_weights`
 /// already uses for NAV. Returns `(unrealized_pnl, pnl_truth_state,
 /// pnl_unavailable_reason)`.
-fn aggregate_positions_pnl(
+pub(crate) fn aggregate_positions_pnl(
     pnl_by_symbol: &BTreeMap<String, PositionPnlResult>,
 ) -> (Option<f64>, String, Option<String>) {
     if pnl_by_symbol.is_empty() {
@@ -256,14 +256,14 @@ fn aggregate_positions_pnl(
 /// Result of resolving `daily_pnl` for the current instant. Mirrors
 /// `PositionPnlResult`'s never-fabricate discipline: `daily_pnl` is `Some`
 /// only in the `"active"` truth state.
-struct DailyPnlResult {
-    daily_pnl: Option<f64>,
-    truth_state: String,
-    unavailable_reason: Option<String>,
-    baseline_trading_date: Option<String>,
-    baseline_equity: Option<f64>,
-    baseline_source: Option<String>,
-    baseline_captured_at_utc: Option<String>,
+pub(crate) struct DailyPnlResult {
+    pub(crate) daily_pnl: Option<f64>,
+    pub(crate) truth_state: String,
+    pub(crate) unavailable_reason: Option<String>,
+    pub(crate) baseline_trading_date: Option<String>,
+    pub(crate) baseline_equity: Option<f64>,
+    pub(crate) baseline_source: Option<String>,
+    pub(crate) baseline_captured_at_utc: Option<String>,
 }
 
 impl DailyPnlResult {
@@ -317,7 +317,7 @@ fn most_recent_trading_day_before(now_utc: DateTime<Utc>) -> Option<NaiveDate> {
 /// row all report an explicit truth state and reason rather than a
 /// silently-approximated `daily_pnl`. Route-call reads only — never
 /// inserts, updates, or deletes a baseline row.
-async fn resolve_daily_pnl(
+pub(crate) async fn resolve_daily_pnl(
     st: &AppState,
     current_equity: f64,
     now_utc: DateTime<Utc>,

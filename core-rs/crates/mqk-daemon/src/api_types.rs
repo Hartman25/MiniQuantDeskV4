@@ -1198,6 +1198,102 @@ pub struct PortfolioSummaryResponse {
     pub buying_power: Option<f64>,
 }
 
+// ---------------------------------------------------------------------------
+// DURABLE-PAPER-PORTFOLIO-AND-PNL-01E: read-only durable portfolio truth.
+//
+// Distinct from PortfolioSummaryResponse/PortfolioPositionsResponse above,
+// which are broker-snapshot-derived and in-memory-only (reset on every
+// daemon restart). These surfaces read the durable tables B4-B/B4-C/B4-D
+// added and survive a restart. `null` always means unavailable/unproven --
+// never zero; a true zero is always the literal numeric `0`.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortfolioDurableSummaryResponse {
+    /// Overall gate for this response: `"active"` when a durable snapshot
+    /// was found, otherwise mirrors `snapshot_truth_state`.
+    pub truth_state: String,
+
+    pub snapshot_truth_state: String,
+    pub snapshot_id: Option<String>,
+    pub captured_at_utc: Option<String>,
+    pub source: Option<String>,
+    pub deployment_mode: Option<String>,
+    pub account_equity: Option<f64>,
+    pub cash: Option<f64>,
+    pub currency: Option<String>,
+    pub run_id: Option<String>,
+    pub operation_id: Option<String>,
+
+    /// `"active"` | `"fill_history_incomplete"` | `"accounting_epoch_unavailable"`
+    /// | `"not_found"` | `"db_unavailable"`.
+    pub accounting_truth_state: String,
+    /// `"complete"` | `"incomplete"`, present only when
+    /// `accounting_truth_state != "not_found"`.
+    pub accounting_epoch: Option<String>,
+    pub accounting_epoch_reason: Option<String>,
+    pub last_applied_inbox_id: Option<i64>,
+
+    pub realized_pnl: Option<f64>,
+    pub realized_pnl_truth_state: String,
+    pub realized_pnl_unavailable_reason: Option<String>,
+    pub fees: Option<f64>,
+    /// Cumulative cash movement produced by this run's durably-replayed
+    /// fills (not the absolute account cash balance -- that is `cash`
+    /// above, from the durable snapshot).
+    pub cumulative_cash_movement: Option<f64>,
+
+    pub unrealized_pnl: Option<f64>,
+    pub unrealized_pnl_truth_state: String,
+    pub unrealized_pnl_unavailable_reason: Option<String>,
+
+    pub daily_pnl: Option<f64>,
+    pub daily_pnl_truth_state: String,
+    pub daily_pnl_unavailable_reason: Option<String>,
+
+    pub blockers: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortfolioDurablePositionRow {
+    pub symbol: String,
+    pub qty_signed: i64,
+    pub avg_entry_price: f64,
+    pub provenance: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortfolioDurablePositionsResponse {
+    /// `"active"` | `"snapshot_unavailable"` | `"snapshot_stale"` |
+    /// `"db_unavailable"` | `"query_failed"`.
+    pub truth_state: String,
+    pub snapshot_id: Option<String>,
+    pub captured_at_utc: Option<String>,
+    pub run_id: Option<String>,
+    pub positions: Vec<PortfolioDurablePositionRow>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortfolioDurableSnapshotRow {
+    pub snapshot_id: String,
+    pub captured_at_utc: String,
+    pub deployment_mode: String,
+    pub source: String,
+    pub equity: f64,
+    pub cash: f64,
+    pub currency: String,
+    pub truth_state: String,
+    pub run_id: Option<String>,
+    pub operation_id: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PortfolioDurableSnapshotsResponse {
+    /// `"active"` (zero or more rows found) | `"db_unavailable"` | `"query_failed"`.
+    pub truth_state: String,
+    pub snapshots: Vec<PortfolioDurableSnapshotRow>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RiskSummaryResponse {
     pub has_snapshot: bool,

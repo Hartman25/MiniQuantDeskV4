@@ -106,6 +106,17 @@ async fn fixture_run(pool: &sqlx::PgPool, run_id: Uuid) {
 }
 
 async fn cleanup(pool: &sqlx::PgPool, run_id: Uuid) {
+    // DURABLE-PAPER-PORTFOLIO-AND-PNL-01D: accept_external_broker_snapshot
+    // (the seam every test in this file exercises) now also refreshes
+    // sys_paper_portfolio_accounting_state as a side effect of persisting a
+    // snapshot -- this row must be deleted before `runs`, or the `runs`
+    // delete below fails on its REFERENCES constraint (silently, since it's
+    // wrapped in `let _ =`), leaking a stale run_id row that collides with
+    // this same deterministic run_id on the next test invocation.
+    let _ = sqlx::query("delete from sys_paper_portfolio_accounting_state where run_id = $1")
+        .bind(run_id)
+        .execute(pool)
+        .await;
     let _ = sqlx::query(
         "delete from sys_paper_portfolio_snapshot_positions where snapshot_id in (select snapshot_id from sys_paper_portfolio_snapshots where run_id = $1)",
     )

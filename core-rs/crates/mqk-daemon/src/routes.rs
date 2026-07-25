@@ -35,6 +35,7 @@ pub(crate) mod autonomous_paper_status;
 pub(crate) mod backtests;
 pub mod control;
 pub(crate) mod control_plane;
+pub(crate) mod durable_portfolio;
 pub(crate) mod execution;
 pub(crate) mod execution_flow;
 pub(crate) mod execution_order_analysis;
@@ -282,6 +283,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         market_data_feed_scheduler_status, market_data_feed_scheduler_stop,
         market_data_feed_status, market_data_ingest_plan, tracked_equities_list,
     };
+    use durable_portfolio::{
+        portfolio_durable_positions, portfolio_durable_snapshots, portfolio_durable_summary,
+    };
     use market_data_readiness::market_data_readiness_status;
     use oms_metrics::{metrics_dashboards, oms_overview};
     use paper_journal::paper_journal;
@@ -434,6 +438,21 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/v1/portfolio/live-weights",
             get(portfolio_live_weights),
+        )
+        // DURABLE-PAPER-PORTFOLIO-AND-PNL-01E: restart-surviving durable
+        // portfolio/P&L truth, additive to the in-memory-only routes above.
+        // GET-only -- never inserts, updates, or deletes a row.
+        .route(
+            "/api/v1/portfolio/durable-summary",
+            get(portfolio_durable_summary),
+        )
+        .route(
+            "/api/v1/portfolio/durable-positions",
+            get(portfolio_durable_positions),
+        )
+        .route(
+            "/api/v1/portfolio/durable-snapshots",
+            get(portfolio_durable_snapshots),
         )
         // PAPER-DAILY-PNL-CAPTURE-01D: read-only baseline provenance lookup
         // by trading_date (public, no auth). No DB writes, no broker/provider
