@@ -186,7 +186,16 @@ impl AppState {
                         }
                     })?;
 
-                    *self.broker_snapshot.write().await = Some(fetched.clone());
+                    // DURABLE-PAPER-PORTFOLIO-AND-PNL-01C: canonical acceptance seam --
+                    // writes the in-memory cache (unchanged) and additively persists
+                    // this as authoritative Paper+Alpaca portfolio truth.
+                    super::snapshot::accept_external_broker_snapshot(
+                        self,
+                        fetched.clone(),
+                        Some(run_id),
+                        None,
+                    )
+                    .await;
 
                     // AUTON-PAPER-RISK-03: build a second adapter dedicated to periodic
                     // snapshot refresh in the execution loop.  build_daemon_broker reads
@@ -382,6 +391,15 @@ impl AppState {
             self.snapshot_fetcher.clone(),
         ) {
             let expiry_broker_snapshots = Arc::clone(&self.broker_snapshot);
+            // DURABLE-PAPER-PORTFOLIO-AND-PNL-01C: this closure is sync (invoked
+            // synchronously from the orchestrator tick), so the durable-persist
+            // half of accept_external_broker_snapshot can't be awaited directly
+            // here -- capture just the owned pieces it needs (all Clone/Copy,
+            // 'static) and spawn it as a best-effort task, matching the
+            // existing tokio::spawn pattern used by the alert sink below.
+            let expiry_persist_db = self.db.clone();
+            let expiry_persist_deployment_mode = self.deployment_mode();
+            let expiry_persist_broker_kind = self.runtime_selection.broker_kind;
             orch.set_terminal_fill_expiry_refresher(Box::new(move || {
                 let schema_fresh = match tokio::task::block_in_place(|| fetcher.fetch_snapshot()) {
                     Ok(s) => s,
@@ -394,6 +412,20 @@ impl AppState {
                 // background reconcile see the fresh data without re-fetching.
                 if let Ok(mut guard) = expiry_broker_snapshots.try_write() {
                     *guard = Some(schema_fresh.clone());
+                }
+                {
+                    let db = expiry_persist_db.clone();
+                    let snapshot = schema_fresh.clone();
+                    tokio::spawn(
+                        super::snapshot::persist_external_broker_snapshot_best_effort(
+                            db,
+                            expiry_persist_deployment_mode,
+                            expiry_persist_broker_kind,
+                            snapshot,
+                            Some(run_id),
+                            None,
+                        ),
+                    );
                 }
                 reconcile_broker_snapshot_from_schema(&schema_fresh).ok()
             }));

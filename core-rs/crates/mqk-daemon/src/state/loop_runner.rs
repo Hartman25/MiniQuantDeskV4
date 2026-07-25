@@ -505,7 +505,17 @@ pub(super) fn spawn_execution_loop(
                             if let Some(fetcher) = fetcher_opt {
                                 match tokio::task::block_in_place(|| fetcher.fetch_snapshot()) {
                                     Ok(fresh) => {
-                                        *broker_snapshot_cache.write().await = Some(fresh);
+                                        // DURABLE-PAPER-PORTFOLIO-AND-PNL-01C: canonical
+                                        // acceptance seam -- writes the in-memory cache
+                                        // (unchanged) and additively persists this as
+                                        // authoritative Paper+Alpaca portfolio truth.
+                                        super::snapshot::accept_external_broker_snapshot(
+                                            &state_arc,
+                                            fresh,
+                                            Some(run_id),
+                                            None,
+                                        )
+                                        .await;
                                         tracing::debug!(
                                             run_id = %run_id,
                                             "external_broker_snapshot_refreshed"

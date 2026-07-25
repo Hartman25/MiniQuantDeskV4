@@ -2816,6 +2816,23 @@ operator_reconcile_or_repair_required"
         .await
     }
 
+    /// Test seam for DURABLE-PAPER-PORTFOLIO-AND-PNL-01C.
+    ///
+    /// Calls the real production acceptance seam
+    /// ([`snapshot::accept_external_broker_snapshot`]) directly with an
+    /// already-constructed `BrokerSnapshot`, so tests exercise the exact
+    /// same in-memory-write-plus-durable-persist path the run-start
+    /// cold-fetch and periodic-refresh call sites use, without requiring a
+    /// live orchestrator, run, or broker fetch.
+    pub async fn accept_external_broker_snapshot_for_test(
+        &self,
+        snapshot: mqk_schemas::BrokerSnapshot,
+        run_id: Option<uuid::Uuid>,
+        operation_id: Option<uuid::Uuid>,
+    ) {
+        snapshot::accept_external_broker_snapshot(self, snapshot, run_id, operation_id).await;
+    }
+
     /// Test seam for the multi-symbol dispatch loop after DB rows are loaded.
     ///
     /// Mirrors [`Self::tick_strategy_dispatch_multi_symbol`] but accepts a

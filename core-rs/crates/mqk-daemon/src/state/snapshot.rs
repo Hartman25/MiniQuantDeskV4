@@ -644,6 +644,156 @@ pub(crate) async fn recover_oms_and_portfolio(
 }
 
 // ---------------------------------------------------------------------------
+// DURABLE-PAPER-PORTFOLIO-AND-PNL-01C: authoritative snapshot acceptance
+// ---------------------------------------------------------------------------
+
+/// Canonical acceptance seam for a real (`External`-source) broker snapshot.
+///
+/// Writes `snapshot` into `state.broker_snapshot` (unchanged existing
+/// behavior — every reader of that field keeps working exactly as before)
+/// and, additively, attempts durable persistence as authoritative
+/// Paper+Alpaca portfolio truth. Persistence is best-effort relative to the
+/// in-memory acceptance: a failure is logged and never blocks, reverts, or
+/// delays it, and successful persistence is never itself a license to
+/// trade — it does not touch reconcile, risk, or order submission.
+///
+/// This function (and [`persist_external_broker_snapshot_best_effort`], for
+/// the one call site that cannot hold an `.await` directly — the sync
+/// terminal-fill-expiry-refresher closure in `orchestrator_build.rs`, which
+/// spawns the persistence half instead) is the *only* place that may write
+/// `state.broker_snapshot` for the `External` source. The `Synthetic`
+/// branch and the dev-only injection routes never call it and never
+/// produce durable authoritative truth — see the B4-A contract's
+/// source-authority distinction.
+pub(crate) async fn accept_external_broker_snapshot(
+    state: &super::AppState,
+    snapshot: mqk_schemas::BrokerSnapshot,
+    run_id: Option<uuid::Uuid>,
+    operation_id: Option<uuid::Uuid>,
+) {
+    *state.broker_snapshot.write().await = Some(snapshot.clone());
+    persist_external_broker_snapshot_best_effort(
+        state.db.clone(),
+        state.deployment_mode(),
+        state.runtime_selection.broker_kind,
+        snapshot,
+        run_id,
+        operation_id,
+    )
+    .await;
+}
+
+/// Attempts durable persistence of an already-accepted `External`-source
+/// broker snapshot. Never panics, never returns an error to the caller —
+/// every failure mode is logged and swallowed, since this is additive
+/// truth on top of the existing in-memory acceptance, not a gate for it.
+///
+/// Only the Paper+Alpaca lane this bundle supports is eligible; any other
+/// deployment mode or broker kind is a deliberate, silent no-op (this
+/// function is never called for anything else in production, but stays
+/// fail-closed on its own in case that ever changes).
+pub(crate) async fn persist_external_broker_snapshot_best_effort(
+    db: Option<sqlx::PgPool>,
+    deployment_mode: super::types::DeploymentMode,
+    broker_kind: Option<super::types::BrokerKind>,
+    snapshot: mqk_schemas::BrokerSnapshot,
+    run_id: Option<uuid::Uuid>,
+    operation_id: Option<uuid::Uuid>,
+) {
+    if deployment_mode != super::types::DeploymentMode::Paper {
+        return;
+    }
+    if broker_kind != Some(super::types::BrokerKind::Alpaca) {
+        return;
+    }
+    let Some(pool) = db else {
+        tracing::warn!("durable_paper_portfolio_snapshot_skip: no_db_pool_configured");
+        return;
+    };
+
+    let Some(equity_micros) =
+        crate::routes::helpers::parse_decimal_micros(&snapshot.account.equity)
+    else {
+        tracing::warn!("durable_paper_portfolio_snapshot_skip: account_equity_unparseable");
+        return;
+    };
+    let Some(cash_micros) = crate::routes::helpers::parse_decimal_micros(&snapshot.account.cash)
+    else {
+        tracing::warn!("durable_paper_portfolio_snapshot_skip: account_cash_unparseable");
+        return;
+    };
+
+    let mut positions = Vec::with_capacity(snapshot.positions.len());
+    for p in &snapshot.positions {
+        let Some(qty_signed) = parse_signed_qty(&p.qty) else {
+            tracing::warn!(
+                symbol = %p.symbol,
+                "durable_paper_portfolio_snapshot_skip: position_qty_unparseable"
+            );
+            return;
+        };
+        let Some(avg_entry_price_micros) =
+            crate::routes::helpers::parse_decimal_micros(&p.avg_price)
+        else {
+            tracing::warn!(
+                symbol = %p.symbol,
+                "durable_paper_portfolio_snapshot_skip: position_avg_price_unparseable"
+            );
+            return;
+        };
+        positions.push(mqk_db::PaperPortfolioSnapshotPosition {
+            symbol: p.symbol.clone(),
+            qty_signed,
+            avg_entry_price_micros,
+            provenance: mqk_db::PAPER_PORTFOLIO_SNAPSHOT_SOURCE_EXTERNAL_ALPACA.to_string(),
+        });
+    }
+
+    // Deterministic identity (B4-A §3): re-persisting the exact same
+    // snapshot (same captured_at_utc/run_id/source) is an idempotent
+    // no-op, never a duplicate row.
+    let snapshot_id = uuid::Uuid::new_v5(
+        &uuid::Uuid::NAMESPACE_DNS,
+        format!(
+            "mqk.paper-portfolio-snapshot.v1|{}|{}|{}",
+            snapshot.captured_at_utc.to_rfc3339(),
+            run_id.map(|id| id.to_string()).unwrap_or_default(),
+            mqk_db::PAPER_PORTFOLIO_SNAPSHOT_SOURCE_EXTERNAL_ALPACA,
+        )
+        .as_bytes(),
+    );
+
+    let result = mqk_db::insert_or_confirm_paper_portfolio_snapshot(
+        &pool,
+        mqk_db::NewPaperPortfolioSnapshot {
+            snapshot_id,
+            captured_at_utc: snapshot.captured_at_utc,
+            deployment_mode: deployment_mode.as_api_label().to_string(),
+            source: mqk_db::PAPER_PORTFOLIO_SNAPSHOT_SOURCE_EXTERNAL_ALPACA.to_string(),
+            equity_micros,
+            cash_micros,
+            currency: snapshot.account.currency.clone(),
+            truth_state: "active".to_string(),
+            run_id,
+            operation_id,
+            positions,
+        },
+    )
+    .await;
+
+    match result {
+        Ok(mqk_db::InsertPaperPortfolioSnapshotOutcome::Inserted { .. })
+        | Ok(mqk_db::InsertPaperPortfolioSnapshotOutcome::AlreadyExists { .. }) => {}
+        Ok(mqk_db::InsertPaperPortfolioSnapshotOutcome::Conflict { detail }) => {
+            tracing::warn!(detail = %detail, "durable_paper_portfolio_snapshot_conflict");
+        }
+        Err(err) => {
+            tracing::warn!(error = %err, "durable_paper_portfolio_snapshot_persist_failed");
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // RECONCILE-ORDER-STATUS-MAP-01 unit tests
 // ---------------------------------------------------------------------------
 
