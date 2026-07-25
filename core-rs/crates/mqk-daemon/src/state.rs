@@ -25,6 +25,7 @@ pub mod market_calendar;
 pub mod market_data_latest_bar;
 mod multi_symbol_config;
 mod orchestrator_build;
+mod paper_portfolio_accounting;
 mod per_symbol_bar_window;
 pub mod runtime_session_source;
 mod session_controller;

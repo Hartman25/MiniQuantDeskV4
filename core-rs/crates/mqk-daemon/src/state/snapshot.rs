@@ -676,11 +676,28 @@ pub(crate) async fn accept_external_broker_snapshot(
         state.db.clone(),
         state.deployment_mode(),
         state.runtime_selection.broker_kind,
-        snapshot,
+        snapshot.clone(),
         run_id,
         operation_id,
     )
     .await;
+
+    // DURABLE-PAPER-PORTFOLIO-AND-PNL-01D: every acceptance of a fresh
+    // authoritative snapshot is also the natural point to refresh the
+    // durable fill-accounting projection -- this run's positions are known
+    // (from `snapshot`) and its run_id is known, so no separate polling
+    // loop or call site is needed.
+    if let Some(run_id) = run_id {
+        super::paper_portfolio_accounting::refresh_paper_portfolio_accounting_state_best_effort(
+            state.db.clone(),
+            state.deployment_mode(),
+            state.runtime_selection.broker_kind,
+            run_id,
+            snapshot.positions,
+            Utc::now(),
+        )
+        .await;
+    }
 }
 
 /// Attempts durable persistence of an already-accepted `External`-source
