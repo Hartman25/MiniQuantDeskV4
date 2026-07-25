@@ -406,11 +406,17 @@ if (Test-FileExists "README_TECHNICAL.md" $PathReadmeTech) {
 # as accepted and E4 recorded as implementation-complete-awaiting-acceptance,
 # never accepted itself. The prior "E3 not yet accepted" forbidden-claim
 # entries are retired -- E3 acceptance is now the truthful, required state.
+#
+# AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-BUNDLE-3-FINAL-GUARD-AND-EVIDENCE-
+# INTEGRITY-REPAIR: "Phase E: ACCEPTED" is retired from this forbidden list --
+# Phase E is now genuinely accepted-complete, truthfully recorded in
+# README.md's own status block ("PHASE E: ACCEPTED -- COMPLETE"); this check
+# was calibrated while Phase E was still open and would otherwise
+# permanently misfire on that now-required, truthful status line.
 $ForbiddenReadmeClaims = @(
     "Phase E: CLOSED",
     "Phase E: COMPLETE",
     "Phase E is complete",
-    "Phase E: ACCEPTED",
     "Bundle 3: CLOSED",
     "Bundle 3 is complete",
     "E4 implemented",
@@ -442,7 +448,14 @@ Test-ContentContains "README.md records E3 as accepted" $ReadmeContent "E3 is no
 # implementation-complete-awaiting-acceptance, matching this patch's own
 # required documentation truth.
 Test-ContentContains "README.md records E4 as accepted" $ReadmeContent "E4 (plus both repairs and their test suites) is now accepted" | Out-Null
-Test-ContentContains "README.md records E5 as implementation-complete-awaiting-acceptance" $ReadmeContent "is implementation complete, awaiting ChatGPT and operator acceptance" | Out-Null
+# AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-BUNDLE-3-FINAL-GUARD-AND-EVIDENCE-
+# INTEGRITY-REPAIR: E5 is now genuinely accepted (Phase E accepted complete
+# in full) -- the prior needle ("is implementation complete, awaiting
+# ChatGPT and operator acceptance") was calibrated while E5 itself was still
+# open, and coincidentally also matched unrelated F2/F3 status prose
+# elsewhere in README.md rather than actually asserting E5's own status. The
+# durable check going forward requires the truthful, current wording.
+Test-ContentContains "README.md records E5 as accepted" $ReadmeContent "E5 (plus this" | Out-Null
 
 Write-Host ""
 Show-Info "--- [16] New E3 spec doc and scenario test file exist and are nonempty ---"

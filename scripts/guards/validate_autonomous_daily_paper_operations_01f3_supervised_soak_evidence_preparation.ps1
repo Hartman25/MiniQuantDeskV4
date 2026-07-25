@@ -263,19 +263,52 @@ Test-ContentContains "capture script rejects a non-empty/non-'/' path" $CaptureC
 Test-ContentContains "capture script builds one sanitized URL and never persists the caller's raw value" $CaptureContent "the caller's" | Out-Null
 
 # -----------------------------------------------------------------------
-# [8] Validator proves the supported supervised-lane safety identity:
-#     deployment_mode == paper, adapter_id == alpaca, operator_supervised
-#     == true, and live_routing_enabled observed false (never accepting
-#     absence-from-every-surface as valid).
+# [8] BUNDLE-3-FINAL-GUARD-AND-EVIDENCE-INTEGRITY-REPAIR: Validator proves
+#     the supported supervised-lane safety identity with EXACT type/value
+#     matching, not PowerShell's coercing `-eq` -- deployment_mode/
+#     adapter_id are required to be an exact-type string ([string] check)
+#     compared with ordinal (case-sensitive, no-whitespace-normalization)
+#     equality, and operator_supervised/live_routing_enabled are required
+#     to be exactly System.Boolean before any value comparison; a coerced
+#     1/"true"/"PAPER"/"paper " can no longer pass. live_routing_enabled
+#     absence from every surface remains a failure, never accepted as
+#     "unobservable".
 # -----------------------------------------------------------------------
 Write-Host ""
-Show-Info "--- [8] Validator proves paper + alpaca + operator_supervised + observed live-routing-false ---"
-Test-ContentContains "validator requires deployment_mode -eq 'paper'" $ValidatorContent "-eq 'paper'" | Out-Null
-Test-ContentContains "validator requires adapter_id -eq 'alpaca'" $ValidatorContent "-eq 'alpaca'" | Out-Null
-Test-ContentContains 'validator requires operator_supervised -eq $true' $ValidatorContent "operator_supervised -eq" | Out-Null
+Show-Info "--- [8] Validator proves paper + alpaca + operator_supervised + observed live-routing-false, all type- and value-exact ---"
+Test-ContentContains "validator's exact-string helper checks the runtime type is [string] before comparing" $ValidatorContent "-isnot [string]" | Out-Null
+Test-ContentContains "validator's exact-string helper uses ordinal (case-sensitive) equality, never a coercing -eq" $ValidatorContent "[System.StringComparison]::Ordinal" | Out-Null
+Test-ContentContains "validator requires deployment_mode to resolve to the exact string 'paper'" $ValidatorContent "-FieldName 'deployment_mode' -Expected 'paper'" | Out-Null
+Test-ContentContains "validator requires adapter_id to resolve to the exact string 'alpaca'" $ValidatorContent "-FieldName 'adapter_id' -Expected 'alpaca'" | Out-Null
+Test-ContentContains "validator's exact-boolean helper checks the runtime type is exactly [bool], never a coerced 1/'true'" $ValidatorContent "-isnot [bool]" | Out-Null
+Test-ContentContains "validator requires operator_supervised to resolve to exactly Boolean true" $ValidatorContent "-FieldName 'operator_supervised'" | Out-Null
 Test-ContentContains "validator checks live_routing_enabled" $ValidatorContent "live_routing_enabled" | Out-Null
+Test-ContentContains "validator requires every observed live_routing_enabled value to be exactly System.Boolean" $ValidatorContent "expected exact boolean false" | Out-Null
 Test-ContentContains "validator fails when live_routing_enabled is unobserved on every surface" $ValidatorContent "was not observed on any required surface" | Out-Null
 Test-ContentContains "validator re-validates daemon_base_url (UserInfo/query/fragment)" $ValidatorContent "daemon_base_url contains embedded UserInfo" | Out-Null
+Test-ContentContains "validator re-validates daemon_base_url's path is empty or '/'" $ValidatorContent "path is not empty or '/'" | Out-Null
+
+# -----------------------------------------------------------------------
+# [8b] Validator requires a valid 40-hex-character repository_commit SHA --
+#      a nonempty arbitrary string is no longer sufficient.
+# -----------------------------------------------------------------------
+Write-Host ""
+Show-Info "--- [8b] Validator requires repository_commit to match ^[0-9a-fA-F]{40}\$ ---"
+Test-ContentContains "validator requires the 40-hex-character SHA pattern" $ValidatorContent '[0-9a-fA-F]{40}' | Out-Null
+Test-ContentDoesNotContain "validator no longer accepts a merely-nonempty repository_commit string" $ValidatorContent "repository_commit present:" | Out-Null
+
+# -----------------------------------------------------------------------
+# [8c] Capture script captures repository_commit via `git rev-parse
+#      --verify HEAD`, checks $LASTEXITCODE explicitly, and never merges
+#      Git's stderr into the captured value (2>&1 is retired in favor of a
+#      discarded 2>$null stderr stream).
+# -----------------------------------------------------------------------
+Write-Host ""
+Show-Info "--- [8c] Capture script uses git rev-parse --verify HEAD, checks LASTEXITCODE, never merges stderr ---"
+Test-ContentContains "capture script uses git rev-parse --verify HEAD" $CaptureContent "rev-parse --verify HEAD" | Out-Null
+Test-ContentContains "capture script checks `$LASTEXITCODE explicitly for the commit capture" $CaptureContent '$CommitExitCode = $LASTEXITCODE' | Out-Null
+Test-ContentDoesNotContain "capture script never merges git stderr into stdout via 2>&1 for the commit capture" $CaptureContent "rev-parse HEAD 2>&1" | Out-Null
+Test-ContentContains "capture script validates the captured commit's exact 40-hex shape before accepting it" $CaptureContent "'^[0-9a-fA-F]{40}$'" | Out-Null
 
 # -----------------------------------------------------------------------
 # [9] Validator contains the secret-pattern scan, AND the capture script
@@ -313,12 +346,36 @@ Test-ContentContains "capture script's bounded error record has route/error_clas
 Test-ContentDoesNotContain 'capture script never interpolates a raw exception into a stored error string (''failed: $_'')' $CaptureContent 'failed: $_' | Out-Null
 
 # -----------------------------------------------------------------------
-# [10] Validator's null-count check never coerces null to numeric.
+# [10] BUNDLE-3-FINAL-GUARD-AND-EVIDENCE-INTEGRITY-REPAIR: Validator's
+#      count authority is a strict integer-or-null helper -- never coerces
+#      null to numeric, never accepts Double/Decimal/negative/a numeric
+#      string as a count, and validates query_failed's retained rows (both
+#      the single operation and every history row) rather than skipping
+#      them.
 # -----------------------------------------------------------------------
 Write-Host ""
-Show-Info "--- [10] Validator preserves null counts, never coerces to a numeric value ---"
+Show-Info "--- [10] Validator's strict integer-or-null count helper covers every retained truth state ---"
 Test-ContentContains "validator checks strategy_evaluation_count/order_activity_count/fill_count" $ValidatorContent "strategy_evaluation_count" | Out-Null
 Test-ContentDoesNotContain "validator never defaults a null count to 0" $ValidatorContent "?? 0" | Out-Null
+Test-ContentContains "validator's count helper enumerates only integral .NET numeric types" $ValidatorContent "`$IntegralTypes = @([byte], [sbyte], [int16], [uint16], [int32], [uint32], [int64], [uint64])" | Out-Null
+Test-ContentContains "validator's count helper rejects a non-integral type (Double/Decimal/string) explicitly" $ValidatorContent "Double/Decimal/numeric-string values are never accepted as a count" | Out-Null
+Test-ContentContains "validator's count helper rejects a negative integer" $ValidatorContent "must be nonnegative" | Out-Null
+Test-ContentContains "validator validates the single operation's query_failed retained-row counts" $ValidatorContent "query_failed, retained" | Out-Null
+Test-ContentContains "validator validates every history row's query_failed retained counts, never skipping them" $ValidatorContent 'truth_state $histTruthState, retained' | Out-Null
+Test-ContentContains "validator requires not_found/backend_unavailable single-operation rows to carry a null operation" $ValidatorContent "must never carry a retained operation row" | Out-Null
+Test-ContentContains "validator requires backend_unavailable history rows to be absent or an authoritative empty array" $ValidatorContent "backend_unavailable" | Out-Null
+
+# -----------------------------------------------------------------------
+# [10b] Validator requires capture_errors to be a bounded array (only
+#       route/error_class/http_status; never a raw string entry), and
+#       independently re-checks daemon_base_url's path.
+# -----------------------------------------------------------------------
+Write-Host ""
+Show-Info "--- [10b] Validator requires bounded capture_errors entries and re-checks daemon_base_url's path ---"
+Test-ContentContains "validator defines the allowed bounded capture-error field set" $ValidatorContent "`$AllowedCaptureErrorFields = @('route', 'error_class', 'http_status')" | Out-Null
+Test-ContentContains "validator rejects a raw string capture_errors entry" $ValidatorContent "is a raw string, not a bounded object" | Out-Null
+Test-ContentContains "validator requires http_status to be null or an integer" $ValidatorContent "neither null nor an integer" | Out-Null
+Test-ContentContains "validator independently checks daemon_base_url path is empty or '/'" $ValidatorContent "daemon_base_url path is empty or '/'" | Out-Null
 
 # -----------------------------------------------------------------------
 # [11] .gitignore contains the default output rule.

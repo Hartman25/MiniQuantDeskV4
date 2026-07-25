@@ -211,6 +211,89 @@ function Test-ValidatorLevelRejection {
     }
 }
 
+# ---------------------------------------------------------------------------
+# BUNDLE-3-FINAL-GUARD-AND-EVIDENCE-INTEGRITY-REPAIR (REPAIR H): a handcrafted
+# baseline manifest for validator-level type/shape rejection proofs the real
+# capture script cannot itself produce (it always emits a well-typed Boolean
+# for operator_supervised and reads deployment_mode/adapter_id verbatim as
+# strings) -- these tests exercise the VALIDATOR's own exact-type/exact-shape
+# enforcement directly, writing a manifest file without going through
+# capture_autonomous_paper_session_evidence.ps1 at all.
+# ---------------------------------------------------------------------------
+function New-BaselineManifestForValidatorTests {
+    $baseline = [ordered]@{
+        schema_version           = 'autonomous-paper-soak-evidence-v1'
+        session_evidence_id      = 'pre_session-20260722-000000'
+        capture_phase            = 'pre_session'
+        captured_at_utc          = '2026-07-22T00:00:00Z'
+        market_date              = $null
+        repository_commit        = '0123456789abcdef0123456789abcdef01234567'
+        deployment_mode          = 'paper'
+        adapter_id               = 'alpaca'
+        daemon_base_url          = 'http://127.0.0.1:8899'
+        operator_supervised      = $true
+
+        system_status             = [ordered]@{ daemon_mode = 'paper'; adapter_id = 'alpaca'; live_routing_enabled = $false }
+        system_preflight          = [ordered]@{ live_routing_enabled = $false }
+        autonomous_readiness      = [ordered]@{ truth_state = 'active' }
+        autonomous_paper_status   = [ordered]@{ truth_state = 'active' }
+        current_daily_operation   = [ordered]@{
+            truth_state = 'active'
+            operation   = [ordered]@{
+                operation_id              = 'op-fixture-1'
+                strategy_evaluation_count = 3
+                order_activity_count      = 2
+                fill_count                = 1
+            }
+        }
+        recent_daily_operations   = [ordered]@{
+            truth_state = 'active'
+            rows        = @(
+                [ordered]@{
+                    operation_id              = 'op-fixture-0'
+                    strategy_evaluation_count = 5
+                    order_activity_count      = 1
+                    fill_count                = 0
+                }
+            )
+        }
+        orders_summary            = [ordered]@{}
+        fills_summary             = [ordered]@{}
+        reconcile_status          = [ordered]@{}
+        risk_posture              = [ordered]@{}
+        completed_bar_task_status = [ordered]@{}
+        gui_build_version         = '0.0.0'
+
+        capture_errors      = @()
+        missing_endpoints   = @()
+        operator_notes      = $null
+        artifact_hashes     = [ordered]@{}
+    }
+    # Round-trip through JSON to produce the same PSCustomObject/typed-number
+    # shape the real validator reads from a manifest file (a raw hashtable's
+    # value types do not always match what ConvertFrom-Json would produce).
+    return ($baseline | ConvertTo-Json -Depth 20 | ConvertFrom-Json)
+}
+
+function Test-ValidatorRejectsHandcraftedManifest {
+    param(
+        [string]$TestRoot,
+        [string]$CaseName,
+        [string]$CaseSlug,
+        [scriptblock]$Mutate
+    )
+    Write-Host ""
+    Show-Info "--- Negative (validator-level, handcrafted manifest): $CaseName ---"
+    $manifestObj = New-BaselineManifestForValidatorTests
+    & $Mutate $manifestObj
+    $outDir = New-CaseOutputDir -TestRoot $TestRoot -CaseSlug $CaseSlug
+    New-Item -ItemType Directory -Force -Path $outDir | Out-Null
+    $manifestPath = Join-Path $outDir 'autonomous_paper_session_manifest.json'
+    ($manifestObj | ConvertTo-Json -Depth 20) | Set-Content -Path $manifestPath -Encoding UTF8
+    $validateExit = Invoke-ChildScript -ScriptPath $ValidatorScriptPath -ScriptArgs @('-ManifestPath', $manifestPath)
+    Assert-ExitNonZero -Label "$CaseName -- validator rejects the handcrafted manifest" -Actual $validateExit
+}
+
 function Test-CaptureLevelRejection {
     param(
         [string]$TestRoot,
@@ -372,6 +455,118 @@ try {
         'api_v1_alerts_active.json' = [ordered]@{ detail = 'leaked credential: ALPACA_API_KEY=abcdef123456' }
     }
     Test-CaptureLevelRejection -TestRoot $TestRoot -CaseName 'captured fixture containing a secret pattern' -CaseSlug 'fixture_secret' -FixtureDir $fixtureSecretDir
+
+    # -------------------------------------------------------------------
+    # BUNDLE-3-FINAL-GUARD-AND-EVIDENCE-INTEGRITY-REPAIR (REPAIR H):
+    # focused rejection proofs for every edge this repair closed. Every
+    # case below is a validator-level rejection against a handcrafted
+    # manifest, proving the exact-type/exact-shape enforcement directly
+    # (Repairs D/F/G), except the final one, which is a capture-level proof
+    # for the new strict repository-commit capture (Repair E).
+    # -------------------------------------------------------------------
+    Test-ValidatorRejectsHandcraftedManifest -TestRoot $TestRoot -CaseName 'operator_supervised = 1 (Int64, not Boolean)' -CaseSlug 'opsup_int1' -Mutate {
+        param($m) $m.operator_supervised = 1
+    }
+    Test-ValidatorRejectsHandcraftedManifest -TestRoot $TestRoot -CaseName 'operator_supervised = "true" (string, not Boolean)' -CaseSlug 'opsup_strtrue' -Mutate {
+        param($m) $m.operator_supervised = 'true'
+    }
+
+    Test-ValidatorRejectsHandcraftedManifest -TestRoot $TestRoot -CaseName 'live_routing_enabled = null' -CaseSlug 'liverouting_null' -Mutate {
+        param($m) $m.system_status.live_routing_enabled = $null; $m.system_preflight.live_routing_enabled = $null
+    }
+    Test-ValidatorRejectsHandcraftedManifest -TestRoot $TestRoot -CaseName 'live_routing_enabled = 0 (Int64, not Boolean)' -CaseSlug 'liverouting_int0' -Mutate {
+        param($m) $m.system_status.live_routing_enabled = 0
+    }
+    Test-ValidatorRejectsHandcraftedManifest -TestRoot $TestRoot -CaseName 'live_routing_enabled = "false" (string, not Boolean)' -CaseSlug 'liverouting_strfalse' -Mutate {
+        param($m) $m.system_status.live_routing_enabled = 'false'
+    }
+
+    Test-ValidatorRejectsHandcraftedManifest -TestRoot $TestRoot -CaseName 'deployment_mode = "PAPER" (wrong case)' -CaseSlug 'depmode_case' -Mutate {
+        param($m) $m.deployment_mode = 'PAPER'
+    }
+    Test-ValidatorRejectsHandcraftedManifest -TestRoot $TestRoot -CaseName 'deployment_mode = "paper " (trailing whitespace)' -CaseSlug 'depmode_trailingspace' -Mutate {
+        param($m) $m.deployment_mode = 'paper '
+    }
+    Test-ValidatorRejectsHandcraftedManifest -TestRoot $TestRoot -CaseName 'adapter_id = "ALPACA" (wrong case)' -CaseSlug 'adapter_case' -Mutate {
+        param($m) $m.adapter_id = 'ALPACA'
+    }
+    Test-ValidatorRejectsHandcraftedManifest -TestRoot $TestRoot -CaseName 'adapter_id = "alpaca " (trailing whitespace)' -CaseSlug 'adapter_trailingspace' -Mutate {
+        param($m) $m.adapter_id = 'alpaca '
+    }
+
+    Test-ValidatorRejectsHandcraftedManifest -TestRoot $TestRoot -CaseName 'repository_commit malformed / non-SHA' -CaseSlug 'commit_malformed' -Mutate {
+        param($m) $m.repository_commit = 'not-a-real-sha'
+    }
+
+    Test-ValidatorRejectsHandcraftedManifest -TestRoot $TestRoot -CaseName 'current active-operation count = 1.5 (Double, not integral)' -CaseSlug 'current_active_double' -Mutate {
+        param($m) $m.current_daily_operation.operation.fill_count = 1.5
+    }
+    Test-ValidatorRejectsHandcraftedManifest -TestRoot $TestRoot -CaseName 'current query_failed retained-operation count = 1.5 (Double, not integral)' -CaseSlug 'current_queryfailed_double' -Mutate {
+        param($m)
+        $m.current_daily_operation.truth_state = 'query_failed'
+        $m.current_daily_operation.operation.fill_count = 1.5
+    }
+    Test-ValidatorRejectsHandcraftedManifest -TestRoot $TestRoot -CaseName 'history active row count = 1.5 (Double, not integral)' -CaseSlug 'history_active_double' -Mutate {
+        param($m) $m.recent_daily_operations.rows[0].fill_count = 1.5
+    }
+    Test-ValidatorRejectsHandcraftedManifest -TestRoot $TestRoot -CaseName 'history query_failed partial row missing a count field' -CaseSlug 'history_queryfailed_missing' -Mutate {
+        param($m)
+        $m.recent_daily_operations.truth_state = 'query_failed'
+        $m.recent_daily_operations.rows[0].PSObject.Properties.Remove('fill_count')
+    }
+    Test-ValidatorRejectsHandcraftedManifest -TestRoot $TestRoot -CaseName 'history query_failed partial row count = 1.5 (Double, not integral)' -CaseSlug 'history_queryfailed_double' -Mutate {
+        param($m)
+        $m.recent_daily_operations.truth_state = 'query_failed'
+        $m.recent_daily_operations.rows[0].fill_count = 1.5
+    }
+    Test-ValidatorRejectsHandcraftedManifest -TestRoot $TestRoot -CaseName 'negative count' -CaseSlug 'negative_count' -Mutate {
+        param($m) $m.current_daily_operation.operation.fill_count = -1
+    }
+
+    Test-ValidatorRejectsHandcraftedManifest -TestRoot $TestRoot -CaseName 'daemon_base_url with a non-root path' -CaseSlug 'daemonurl_nonrootpath' -Mutate {
+        param($m) $m.daemon_base_url = 'http://127.0.0.1:8899/status'
+    }
+    Test-ValidatorRejectsHandcraftedManifest -TestRoot $TestRoot -CaseName 'capture_errors containing a raw string' -CaseSlug 'captureerrors_rawstring' -Mutate {
+        param($m) $m.capture_errors = @('raw exception text leaked: fatal: something failed')
+    }
+
+    # ---------------------------------------------------------------
+    # Capture-level (real capture script, no daemon/network call): an
+    # invalid -RepoRoot (not a Git repository) proves repository_commit
+    # capture failure is bounded -- never raw Git stderr -- and that the
+    # resulting manifest (repository_commit null) is rejected by the
+    # validator.
+    # ---------------------------------------------------------------
+    Write-Host ""
+    Show-Info "--- Negative (capture-level, invalid RepoRoot): repository_commit capture failure is bounded, never raw Git stderr ---"
+    $InvalidRepoRoot = Join-Path $TestRoot 'not_a_git_repo'
+    New-Item -ItemType Directory -Force -Path $InvalidRepoRoot | Out-Null
+    $InvalidRepoOutDir = New-CaseOutputDir -TestRoot $TestRoot -CaseSlug 'invalid_reporoot'
+    $InvalidRepoArgs = @(
+        '-OutputDirectory', $InvalidRepoOutDir,
+        '-CapturePhase', 'pre_session',
+        '-DaemonBaseUrl', 'http://127.0.0.1:8899',
+        '-FixturePath', $BaselineFixtures,
+        '-RepoRoot', $InvalidRepoRoot
+    )
+    $InvalidRepoExit = Invoke-ChildScript -ScriptPath $CaptureScriptPath -ScriptArgs $InvalidRepoArgs
+    $InvalidRepoManifestPath = Join-Path $InvalidRepoOutDir 'autonomous_paper_session_manifest.json'
+    Assert-ExitCode -Label "invalid RepoRoot -- capture still exits 0 (a commit-capture failure is bounded, not fatal)" -Expected 0 -Actual $InvalidRepoExit
+    Assert-True -Label "invalid RepoRoot -- manifest file was written" -Condition (Test-Path $InvalidRepoManifestPath)
+    if (Test-Path $InvalidRepoManifestPath) {
+        $InvalidRepoManifestRaw = Get-Content -Raw -Path $InvalidRepoManifestPath
+        $InvalidRepoManifest = $InvalidRepoManifestRaw | ConvertFrom-Json
+        Assert-True -Label "invalid RepoRoot -- repository_commit is null" -Condition ($null -eq $InvalidRepoManifest.repository_commit)
+        $HasGitCaptureError = $false
+        foreach ($e in @($InvalidRepoManifest.capture_errors)) {
+            if ($e.route -eq 'git_rev_parse_head') { $HasGitCaptureError = $true }
+        }
+        Assert-True -Label "invalid RepoRoot -- a bounded git_rev_parse_head capture_errors entry exists" -Condition $HasGitCaptureError
+        Assert-True -Label "invalid RepoRoot -- manifest text never contains raw Git stderr ('fatal:')" -Condition ($InvalidRepoManifestRaw.IndexOf('fatal:', [System.StringComparison]::OrdinalIgnoreCase) -lt 0)
+        Assert-True -Label "invalid RepoRoot -- manifest text never contains raw Git stderr ('not a git repository')" -Condition ($InvalidRepoManifestRaw.IndexOf('not a git repository', [System.StringComparison]::OrdinalIgnoreCase) -lt 0)
+        $InvalidRepoValidateExit = Invoke-ChildScript -ScriptPath $ValidatorScriptPath -ScriptArgs @('-ManifestPath', $InvalidRepoManifestPath)
+        Assert-ExitNonZero -Label "invalid RepoRoot -- validator rejects the resulting manifest (null repository_commit)" -Actual $InvalidRepoValidateExit
+    }
 }
 finally {
     Remove-Item -Path $TestRoot -Recurse -Force -ErrorAction SilentlyContinue

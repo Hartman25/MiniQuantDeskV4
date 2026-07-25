@@ -104,16 +104,37 @@ Write-Host " AUTONOMOUS-DAILY-PAPER-OPERATIONS-01G-BUNDLE-3-FINAL-CLOSURE-AUDIT 
 Write-Host "============================================================"
 
 # -----------------------------------------------------------------------
-# [1] F1/F2/F3 guards exist and exit 0 (transitively covers E1-E5 too).
+# [1] AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-BUNDLE-3-FINAL-GUARD-AND-
+# EVIDENCE-INTEGRITY-REPAIR: the complete D/E/F guard matrix is now invoked
+# EXPLICITLY, by exact filename, rather than relying on transitive
+# execution (F3 -> F2 -> F1 only, which never touched the D-guards or any
+# E-guard directly). A single table-driven helper invokes every guard below
+# and requires exit 0 from each one independently; a failure anywhere in
+# the matrix is reported by exact filename and exit code, and one guard's
+# failure never suppresses or skips the remaining guards in the table.
 # -----------------------------------------------------------------------
 Write-Host ""
-Show-Info "--- [1] F1, F2, and F3 guards all exist and exit 0 ---"
-$RequiredPriorGuards = @(
+Show-Info "--- [1] The complete D/E/F guard matrix all exist and exit 0 ---"
+$FullGuardMatrix = @(
+    "validate_autonomous_daily_paper_operations_01a_audit.ps1",
+    "validate_daily_data_readiness_01e_closure.ps1",
+    "validate_autonomous_daily_paper_operations_01d_phase_d_closure.ps1",
+    "validate_autonomous_daily_paper_operations_01d4_evaluation_lineage_and_autonomous_preopen_closure_01.ps1",
+
+    "validate_autonomous_daily_paper_operations_01e_outcome_contract.ps1",
+    "validate_autonomous_daily_paper_operations_01e2a_coverage_anchor_and_run_lineage.ps1",
+    "validate_autonomous_daily_paper_operations_01e2b_outcome_classifier_and_finalization.ps1",
+    "validate_autonomous_daily_paper_operations_01e3_coordinator_finalization_and_notification.ps1",
+    "validate_autonomous_daily_paper_operations_01e4_read_only_daily_operation_api.ps1",
+    "validate_autonomous_daily_paper_operations_01e_phase_e_closure.ps1",
+
     "validate_autonomous_daily_paper_operations_01f1_gui_daily_operation_projection.ps1",
     "validate_autonomous_daily_paper_operations_01f2_operator_runbook_correction.ps1",
-    "validate_autonomous_daily_paper_operations_01f3_supervised_soak_evidence_preparation.ps1"
+    "validate_autonomous_daily_paper_operations_01f3_supervised_soak_evidence_preparation.ps1",
+
+    "check_unsafe_patterns.ps1"
 )
-foreach ($GuardName in $RequiredPriorGuards) {
+foreach ($GuardName in $FullGuardMatrix) {
     $GuardPath = Join-Path $ScriptDir $GuardName
     if (-not (Test-Path $GuardPath)) {
         $script:Violations++
@@ -284,27 +305,41 @@ if (-not $EnvVarAccessFound) {
 Test-ContentContains "capture script's secret-pattern list includes 'ALPACA_API_KEY' as a scan pattern (not an env read)" $CaptureContent "ALPACA_API_KEY" | Out-Null
 
 # -----------------------------------------------------------------------
-# [8]/[9] No migration; no daemon production Rust change (fixed range +
-# working tree).
+# [8]/[9] No migration; no daemon production Rust change; no GUI production
+# behavior change since F1. AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-BUNDLE-3-
+# FINAL-GUARD-AND-EVIDENCE-INTEGRITY-REPAIR: the prior version of this check
+# used $PhaseEAcceptedHead..HEAD as a PERMANENT scope authority -- that range
+# silently widens forever as HEAD advances, so it can never serve as a fixed,
+# immutable Bundle 3 authority (the same defect the Phase E closure guard's
+# own [23] check was originally repaired for). This is now a dual-mode,
+# self-locating fixed range, identical in spirit to check [16] below:
+#
+#   Pre-commit (this repair not yet committed): HEAD still equals the fixed
+#   pre-repair G head (b70c5156); the fixed-range authority proof is skipped
+#   (there is no repair commit yet to bound it), and the always-run
+#   staged/unstaged working-tree checks below are the authority for the
+#   patch's own scope in this mode.
+#
+#   Post-commit (and all future validation, including once Bundle 4 begins):
+#   locate the unique commit whose exact subject is "fix: close bundle 3
+#   proof and evidence gaps"; require the fixed pre-repair-2 head (HEAD ==
+#   7b3ca1529e46638ba84544c50c2da5c10881ceb7, "fix: harden bundle 3
+#   operational closeout") to be its direct parent; require that commit to
+#   be an ancestor of current HEAD. Once located, use
+#   $PhaseEAcceptedHead..<that commit> -- deliberately NEVER ..HEAD -- as
+#   the final, immutable Bundle 3 committed-range authority for the
+#   no-migration/no-production-Rust proof, and
+#   $F1AcceptedHead..<that commit> (also never ..HEAD) for the no-GUI-
+#   production-behavior-change proof covering everything committed since F1.
+#   Neither range ever widens as HEAD advances past this commit into
+#   Bundle 4 or beyond.
 # -----------------------------------------------------------------------
 Write-Host ""
-Show-Info "--- [8]/[9] F1-G introduced no migration; F2/F3/G changed no daemon production Rust ---"
+Show-Info "--- [8]/[9] Fixed, immutable Bundle 3 committed-range authority (never widened to ..HEAD) ---"
 $PhaseEAcceptedHead = "4b6eec72cb65dec1fc2a8793e9d9d7bdde8328b4"
-$PriorErrorActionPreference = $ErrorActionPreference
-$ErrorActionPreference = "Continue"
-& git -C $RepoRoot merge-base --is-ancestor $PhaseEAcceptedHead HEAD 2>$null
-$BaseIsAncestor = ($LASTEXITCODE -eq 0)
-$CommittedRange = @()
-if ($BaseIsAncestor) {
-    $CommittedRange = git -C $RepoRoot diff --name-only "$PhaseEAcceptedHead..HEAD" 2>$null
-}
-$UnstagedChanges = git -C $RepoRoot diff --name-only 2>$null
-$StagedChanges = git -C $RepoRoot diff --name-only --cached 2>$null
-$ErrorActionPreference = $PriorErrorActionPreference
-
-$CommittedRangeClean = @($CommittedRange) | Where-Object { $_ -ne "" } | Select-Object -Unique
-$UnstagedClean = @($UnstagedChanges) | Where-Object { $_ -ne "" } | Select-Object -Unique
-$StagedClean = @($StagedChanges) | Where-Object { $_ -ne "" } | Select-Object -Unique
+$F1AcceptedHead = "bd7336d4dd14dbb1943638b152886eb40b646b7d"
+$PreRepair2GHead = "7b3ca1529e46638ba84544c50c2da5c10881ceb7"
+$RepairCommit2Subject = "fix: close bundle 3 proof and evidence gaps"
 
 function Test-NoMigrationOrProductionRust {
     param([string]$Label, [string[]]$Paths)
@@ -323,15 +358,100 @@ function Test-NoMigrationOrProductionRust {
         Show-Red "  FAIL -- $Label -- production Rust file(s): $($ProductionRust -join ', ')"
     }
 }
-if ($BaseIsAncestor) {
-    Show-Green "  OK -- $PhaseEAcceptedHead (accepted Phase E head) is an ancestor of HEAD"
-} else {
-    $script:Violations++
-    Show-Red "  FAIL -- $PhaseEAcceptedHead is not an ancestor of HEAD -- cannot establish the F1-G committed range"
+
+function Test-NoGuiProductionFile {
+    param([string]$Label, [string[]]$Paths)
+    $Gui = $Paths | Where-Object { $_ -like "core-rs/mqk-gui/src/*" }
+    if ($null -eq $Gui -or @($Gui).Count -eq 0) {
+        Show-Green "  OK -- $Label -- no GUI production file (no GUI behavior change)"
+    } else {
+        $script:Violations++
+        Show-Red "  FAIL -- $Label -- GUI production file(s): $($Gui -join ', ')"
+    }
 }
-Test-NoMigrationOrProductionRust "committed range $PhaseEAcceptedHead..HEAD (covers F1, F2, F3, G)" $CommittedRangeClean
+
+$PriorErrorActionPreferenceFR = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+$CurrentHeadFR = (git -C $RepoRoot rev-parse HEAD 2>$null | Select-Object -First 1)
+$ErrorActionPreference = $PriorErrorActionPreferenceFR
+
+$FinalRepairCommit = $null
+if ($CurrentHeadFR -eq $PreRepair2GHead) {
+    Show-Green "  OK -- pre-commit mode: HEAD == $PreRepair2GHead (this repair is not yet committed); the fixed-range authority proof is deferred to post-commit validation, and the staged/unstaged working-tree checks below cover the current scope"
+} else {
+    $ErrorActionPreference = "Continue"
+    $MatchingCommits2 = @(git -C $RepoRoot log --all --format='%H %s' 2>$null |
+        Where-Object { $_ -match "^[0-9a-f]{40} $([regex]::Escape($RepairCommit2Subject))$" } |
+        ForEach-Object { ($_ -split ' ', 2)[0] } |
+        Select-Object -Unique)
+    $ErrorActionPreference = $PriorErrorActionPreferenceFR
+
+    if ($MatchingCommits2.Count -ne 1) {
+        $script:Violations++
+        Show-Red "  FAIL -- expected exactly one commit with subject '$RepairCommit2Subject', found $($MatchingCommits2.Count)"
+    } else {
+        $CandidateRepairCommit = $MatchingCommits2[0]
+        Show-Green "  OK -- found the unique repair commit: $CandidateRepairCommit"
+
+        $ErrorActionPreference = "Continue"
+        $RepairParent2 = (git -C $RepoRoot rev-parse "$CandidateRepairCommit^" 2>$null | Select-Object -First 1)
+        $ErrorActionPreference = $PriorErrorActionPreferenceFR
+        if ($RepairParent2 -eq $PreRepair2GHead) {
+            Show-Green "  OK -- $PreRepair2GHead is the direct parent of the repair commit"
+        } else {
+            $script:Violations++
+            Show-Red "  FAIL -- the repair commit's direct parent is '$RepairParent2', expected '$PreRepair2GHead'"
+        }
+
+        $ErrorActionPreference = "Continue"
+        git -C $RepoRoot merge-base --is-ancestor $CandidateRepairCommit HEAD 2>$null
+        $RepairIsAncestor2 = ($LASTEXITCODE -eq 0)
+        $ErrorActionPreference = $PriorErrorActionPreferenceFR
+        if ($RepairIsAncestor2) {
+            Show-Green "  OK -- the repair commit is an ancestor of current HEAD"
+            $FinalRepairCommit = $CandidateRepairCommit
+        } else {
+            $script:Violations++
+            Show-Red "  FAIL -- the repair commit is not an ancestor of current HEAD"
+        }
+    }
+}
+
+if ($null -ne $FinalRepairCommit) {
+    $ErrorActionPreference = "Continue"
+    $Bundle3FixedRange = git -C $RepoRoot diff --name-only "$PhaseEAcceptedHead..$FinalRepairCommit" 2>$null
+    $PostF1FixedRange = git -C $RepoRoot diff --name-only "$F1AcceptedHead..$FinalRepairCommit" 2>$null
+    $ErrorActionPreference = $PriorErrorActionPreferenceFR
+    $Bundle3FixedRangeClean = @($Bundle3FixedRange) | Where-Object { $_ -ne "" } | Select-Object -Unique
+    $PostF1FixedRangeClean = @($PostF1FixedRange) | Where-Object { $_ -ne "" } | Select-Object -Unique
+    Test-NoMigrationOrProductionRust "fixed Bundle 3 range $PhaseEAcceptedHead..$FinalRepairCommit (never widened to ..HEAD)" $Bundle3FixedRangeClean
+    Test-NoGuiProductionFile "fixed post-F1 range $F1AcceptedHead..$FinalRepairCommit (never widened to ..HEAD)" $PostF1FixedRangeClean
+}
+
+$ErrorActionPreference = "Continue"
+$UnstagedChanges = git -C $RepoRoot diff --name-only 2>$null
+$StagedChanges = git -C $RepoRoot diff --name-only --cached 2>$null
+$ErrorActionPreference = $PriorErrorActionPreferenceFR
+$UnstagedClean = @($UnstagedChanges) | Where-Object { $_ -ne "" } | Select-Object -Unique
+$StagedClean = @($StagedChanges) | Where-Object { $_ -ne "" } | Select-Object -Unique
 Test-NoMigrationOrProductionRust "unstaged working tree" $UnstagedClean
 Test-NoMigrationOrProductionRust "staged working tree" $StagedClean
+
+# Informational-only (not a fixed authority): scans PhaseEAcceptedHead..HEAD
+# for the Bundle-4/multi-symbol canary checks [10]/[11] below, which
+# legitimately want to see everything up to current HEAD, not a frozen
+# range -- their purpose is "has Bundle 4 or multi-symbol rollout started as
+# of right now", not a proof about what one fixed patch did.
+$PriorErrorActionPreference = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+& git -C $RepoRoot merge-base --is-ancestor $PhaseEAcceptedHead HEAD 2>$null
+$BaseIsAncestor = ($LASTEXITCODE -eq 0)
+$CommittedRange = @()
+if ($BaseIsAncestor) {
+    $CommittedRange = git -C $RepoRoot diff --name-only "$PhaseEAcceptedHead..HEAD" 2>$null
+}
+$ErrorActionPreference = $PriorErrorActionPreference
+$CommittedRangeClean = @($CommittedRange) | Where-Object { $_ -ne "" } | Select-Object -Unique
 
 # -----------------------------------------------------------------------
 # [10] Bundle 4 is not started.
@@ -370,6 +490,15 @@ $LedgerContent = if (Test-FileExists "Master patch ledger" $PathLedger) { Get-Co
 # mis-tokenize (observed: a ParserError on this exact line). Runtime
 # character construction is encoding-independent.
 $EmDash = [char]0x2014
+# AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-BUNDLE-3-FINAL-GUARD-AND-EVIDENCE-
+# INTEGRITY-REPAIR: "F2: ACCEPTED -- COMPLETE" is retired from this forbidden
+# list. F2 is now genuinely accepted-complete (recorded by the operator
+# ahead of this patch, per the mission's own required current truth) -- this
+# entry was calibrated while F2 was still awaiting acceptance and would
+# otherwise permanently misfire on that now-required, truthful status line.
+# "F3: ACCEPTED -- COMPLETE" and "PHASE G: ACCEPTED -- COMPLETE" remain
+# forbidden below -- neither F3 nor Phase G is accepted yet, so neither
+# entry is stale.
 $ForbiddenClaims = @(
     "SOAK: STARTED",
     "soak has started",
@@ -382,7 +511,6 @@ $ForbiddenClaims = @(
     "Bundle 3 is now closed",
     "Bundle 3 has closed",
     "BUNDLE 3: ACCEPTED",
-    "F2: ACCEPTED $EmDash COMPLETE",
     "F3: ACCEPTED $EmDash COMPLETE",
     "PHASE G: ACCEPTED $EmDash COMPLETE"
 )

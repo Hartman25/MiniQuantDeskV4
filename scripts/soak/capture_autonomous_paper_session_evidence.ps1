@@ -255,9 +255,31 @@ function Invoke-DaemonGetOnly {
 $CapturedAtUtc = (Get-Date).ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
 $SessionEvidenceId = "$CapturePhase-$((Get-Date).ToUniversalTime().ToString('yyyyMMdd-HHmmss'))"
 
+# ---------------------------------------------------------------------------
+# BUNDLE-3-FINAL-GUARD-AND-EVIDENCE-INTEGRITY-REPAIR: repository_commit is
+# now captured via `git rev-parse --verify HEAD`, checking $LASTEXITCODE
+# explicitly, reading stdout only (stderr is always discarded to $null and
+# never merged into stdout, so a failure's Git stderr text is never
+# captured, stored, or persisted anywhere). A successful call is accepted
+# only when it yields exactly one line matching a 40-hex-character SHA;
+# anything else (command failure, malformed/multi-line output) leaves
+# repository_commit null and appends one bounded error record -- never a
+# raw Git error string.
+# ---------------------------------------------------------------------------
 $RepositoryCommit = $null
 try {
-    $RepositoryCommit = (& git -C $RepoRoot rev-parse HEAD 2>&1 | Select-Object -First 1)
+    $CommitOutput = & git -C $RepoRoot rev-parse --verify HEAD 2>$null
+    $CommitExitCode = $LASTEXITCODE
+    if ($CommitExitCode -eq 0) {
+        $CommitCandidates = @($CommitOutput | Where-Object { $_ -ne '' })
+        if (@($CommitCandidates).Count -eq 1 -and $CommitCandidates[0] -match '^[0-9a-fA-F]{40}$') {
+            $RepositoryCommit = $CommitCandidates[0]
+        } else {
+            $CaptureErrors += (New-BoundedErrorRecord -Route 'git_rev_parse_head' -ErrorClass 'invalid_commit_shape')
+        }
+    } else {
+        $CaptureErrors += (New-BoundedErrorRecord -Route 'git_rev_parse_head' -ErrorClass 'local_command_failed')
+    }
 } catch {
     $CaptureErrors += (New-BoundedErrorRecord -Route 'git_rev_parse_head' -ErrorClass 'local_command_failed')
 }

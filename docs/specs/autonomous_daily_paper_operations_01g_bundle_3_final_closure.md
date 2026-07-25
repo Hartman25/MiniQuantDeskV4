@@ -7,11 +7,12 @@ Phase: Phase G — final Bundle 3 closure audit.
 Starting HEAD: `088f436b` (`ops: prepare supervised autonomous paper soak
 evidence` — the F3 commit).
 
-Status: **IMPLEMENTATION COMPLETE — AWAITING FINAL CHATGPT AND OPERATOR
-ACCEPTANCE.** Phase G adds no new trading behavior. This document is the
-audit record; it does not itself close Bundle 3 — Bundle 3 closure requires
-independent ChatGPT and operator acceptance of this combined F2/F3/G
-closeout session.
+Status: **FINAL REPAIR IMPLEMENTATION COMPLETE — AWAITING CHATGPT/OPERATOR
+ACCEPTANCE** (see §10 for the final guard-and-evidence-integrity repair).
+Phase G adds no new trading behavior. This document is the audit record; it
+does not itself close Bundle 3 — Bundle 3 closure requires independent
+ChatGPT and operator acceptance of this combined F2/F3/G closeout session
+and its two follow-on repairs.
 
 ## 0. Fixed historical range authorities
 
@@ -318,3 +319,63 @@ this repair. The Phase G guard's own checks `[1]`, `[6]`, `[7]`, and the new
 the fixed `b70c5156..<repair commit>` scope boundary described in the
 mission's G-range-reconciliation instruction. This repair adds no new
 trading behavior and does not itself close Bundle 3.
+
+## 10. Final repair (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-BUNDLE-3-FINAL-GUARD-AND-EVIDENCE-INTEGRITY-REPAIR)
+
+Ahead of this repair, F2 was recorded accepted by the operator. Independent
+proof-integrity review then found four defects in the guard chain and
+evidence tooling itself, not in Bundle 3's trading/lifecycle behavior:
+
+1. The E2A/E2B/E3/E4/E5 guards' own `"Phase E: ACCEPTED"` forbidden-claim
+   entry (and E5's additional `"E5: ACCEPTED"` entry) had gone stale the
+   moment Phase E was genuinely accepted — each guard was permanently
+   failing against the truthful, required README status line. Separately,
+   the same five guards' `"README.md records E5 as implementation-complete-
+   awaiting-acceptance"` required-positive check (needle: `"is
+   implementation complete, awaiting ChatGPT and operator acceptance"`) had
+   also gone stale for the identical reason, and had only ever matched by
+   coincidence against unrelated F2/F3 status prose rather than an actual
+   assertion about E5.
+2. This Phase G guard's check `[1]` only ever invoked the F1/F2/F3 guards,
+   relying on F3→F2→F1's own transitive chain — which never actually
+   re-invokes a single D-guard or E-guard directly, contrary to this
+   document's own §5/§6 description of a "guard matrix."
+3. This Phase G guard's checks `[8]`/`[9]` diffed `$PhaseEAcceptedHead..HEAD`
+   — a permanently-widening window that can never serve as the fixed,
+   immutable Bundle 3 committed-range authority §0 above claims to be.
+4. The F3 evidence validator (`scripts/soak/validate_autonomous_paper_
+   session_evidence.ps1`) still accepted several coercible/unsafe shapes:
+   PowerShell's `-eq` coerces type and compares strings case-insensitively,
+   so `operator_supervised = 1` or `deployment_mode = "PAPER"`/`"paper "`
+   would incorrectly pass; `live_routing_enabled` accepted any non-Boolean
+   truthy value; `repository_commit` accepted any nonempty string
+   (including raw Git error text on a capture failure); and the count check
+   accepted a `Double`/negative value and silently skipped `query_failed`
+   retained rows.
+
+Starting HEAD `7b3ca152` (`fix: harden bundle 3 operational closeout`), one
+commit `fix: close bundle 3 proof and evidence gaps` closes all four: the
+stale forbidden/required-positive entries are retired or corrected across
+the five guards with every genuine implementation invariant ([1]-[29]
+across the five guards) preserved unchanged; this Phase G guard's check
+`[1]` now explicitly invokes, by exact filename, all fourteen D/E/F guards
+plus `check_unsafe_patterns.ps1`, reporting any failure by exact filename
+and exit code; checks `[8]`/`[9]` are now a dual-mode, self-locating fixed
+range identical in spirit to §9's own `[16]` pairing — post-commit, bounded
+by the unique `fix: close bundle 3 proof and evidence gaps` commit (direct
+parent `7b3ca152`), using `4b6eec72..<that commit>` (never `..HEAD`) for the
+no-migration/no-production-Rust proof and `bd7336d4..<that commit>` (also
+never `..HEAD`) for the post-F1 no-GUI-production-file proof; and the F3
+evidence tooling now enforces exact-type/exact-value safety-identity checks,
+a strict integer-or-null count helper covering every retained `query_failed`
+row, a bounded `capture_errors` shape check, and a `git rev-parse --verify
+HEAD`-based commit capture that never persists Git stderr. The local-fixture
+suite grew from 16 to 35 scenarios. `ForbiddenClaims` retired the now-stale
+`"F2: ACCEPTED — COMPLETE"` entry (F2 is now genuinely accepted) while
+keeping `"F3: ACCEPTED — COMPLETE"`/`"PHASE G: ACCEPTED — COMPLETE"`
+forbidden.
+
+No closure question in §2 is reopened by this repair — the underlying
+Bundle 3 trading/lifecycle behavior this audit examined is unchanged. This
+repair adds no new trading behavior, touches no production Rust/daemon
+API/migration/GUI file, and does not itself close Bundle 3.

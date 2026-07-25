@@ -16541,3 +16541,204 @@ LIVE CAPITAL: NOT READY
 
 Bundle 3 is **not** marked accepted or closed in the repository by this
 patch.
+
+---
+
+## AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-BUNDLE-3-FINAL-GUARD-AND-EVIDENCE-INTEGRITY-REPAIR
+
+**Bundle:** `AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-COMBINED` | **Phase:** final
+Bundle 3 proof-integrity repair.
+
+Starting HEAD: `7b3ca152` (`fix: harden bundle 3 operational closeout` — the
+prior repair commit). Ahead of this patch, F2 was recorded accepted by the
+operator; independent review then found the E2A–E4/E5 guards' own stale
+"Phase E: ACCEPTED"/"E5: ACCEPTED" forbidden-claim entries (each guard was
+permanently failing against the now-truthful, required README status line),
+the Phase G guard's transitive-only prior-guard invocation (F1→F2→F3 never
+actually re-ran a single D-guard or E-guard directly), the Phase G
+committed-range proof's permanently-widening `4b6eec72..HEAD` window, and
+several coercible/unsafe shapes the F3 evidence validator still accepted.
+No production Rust, daemon API, migration, GUI behavior, broker, provider,
+trading, order, or live-capital change — guards and PowerShell tooling only.
+
+**Phase E guard reconciliation (E2A/E2B/E3/E4/E5):**
+
+- Retired the now-stale `"Phase E: ACCEPTED"` forbidden-claim entry from
+  each of the E2A/E2B/E3/E4/E5 guards' `$ForbiddenReadmeClaims` lists, and
+  the additional stale `"E5: ACCEPTED"` entry from E5's own list — Phase E
+  (E1–E5) is now genuinely accepted-complete, and each entry was calibrated
+  while Phase E was still open. The bare (unqualified) "closed"/"complete"
+  phrasings for Phase E remain forbidden in each guard's list (Phase E has
+  never used that wording without the "accepted" qualifier, so those
+  entries are not stale).
+- E2A/E2B/E3/E4/E5's own `"README.md records E5 as implementation-complete-
+  awaiting-acceptance"` required-positive check (needle: `"is implementation
+  complete, awaiting ChatGPT and operator acceptance"`) had gone stale for
+  the same reason — E5 is now genuinely accepted, and the old needle
+  happened only to coincidentally match unrelated F2/F3 status prose
+  elsewhere in README.md, not an actual assertion about E5. Replaced with a
+  check for the truthful, current wording (`"E5 (plus this"`, anchored to
+  the accepted-E5 sentence).
+- No implementation invariant was removed from any of these guards — every
+  structural/behavioral check ([1]–[29] across the five guards) is
+  unchanged.
+
+**Phase G guard — explicit guard matrix (Repair B):**
+
+- Check `[1]` replaced: previously invoked only the F1/F2/F3 guards
+  (relying on F3→F2→F1's own transitive chain, which never touches a
+  D-guard or E-guard directly). Now a single table-driven loop explicitly
+  invokes, by exact filename, `validate_autonomous_daily_paper_operations_
+  01a_audit.ps1`, `validate_daily_data_readiness_01e_closure.ps1`,
+  `validate_autonomous_daily_paper_operations_01d_phase_d_closure.ps1`,
+  `validate_autonomous_daily_paper_operations_01d4_evaluation_lineage_and_
+  autonomous_preopen_closure_01.ps1`, all six E-guards
+  (`01e_outcome_contract`, `01e2a`, `01e2b`, `01e3`, `01e4`,
+  `01e_phase_e_closure`), all three F-guards (`01f1`, `01f2`, `01f3`), and
+  `check_unsafe_patterns.ps1` — fourteen guards total, each required to
+  exit 0 independently, with every failure reported by exact filename and
+  exit code and no failure suppressing the remaining guards in the table.
+
+**Phase G guard — fixed Bundle 3 committed range (Repair C):**
+
+- Checks `[8]`/`[9]` replaced: the prior version diffed
+  `$PhaseEAcceptedHead..HEAD`, a permanently-widening window that can never
+  serve as a fixed, immutable Bundle 3 authority. Now a dual-mode,
+  self-locating range identical in spirit to check `[16]`'s existing
+  `b70c5156` pairing: pre-commit (`HEAD == 7b3ca152`), the fixed-range proof
+  is deferred to post-commit validation and the always-run staged/unstaged
+  working-tree checks cover the current scope; post-commit, locates the
+  unique commit whose exact subject is `fix: close bundle 3 proof and
+  evidence gaps`, requires `7b3ca152` as its direct parent and its presence
+  as an ancestor of HEAD, then uses `4b6eec72..<that commit>` (never
+  `..HEAD`) as the final, immutable Bundle 3 no-migration/no-production-Rust
+  authority, and `bd7336d4..<that commit>` (also never `..HEAD`) as the
+  post-F1 no-GUI-production-file authority. Neither range ever widens as
+  HEAD advances into Bundle 4 or beyond. The Bundle-4/multi-symbol canary
+  checks `[10]`/`[11]` continue to scan `$PhaseEAcceptedHead..HEAD`
+  informationally (their purpose is "has Bundle 4 started as of right now,"
+  not a fixed-range authority claim).
+- `ForbiddenClaims` (soak/live/Bundle-3/F-acceptance overclaim scan):
+  retired the now-stale `"F2: ACCEPTED — COMPLETE"` entry (F2 is now
+  genuinely accepted) while keeping `"F3: ACCEPTED — COMPLETE"` and
+  `"PHASE G: ACCEPTED — COMPLETE"` forbidden (neither is accepted yet).
+
+**F3 evidence tooling (Repairs D/E/F/G):**
+
+- `scripts/soak/capture_autonomous_paper_session_evidence.ps1`:
+  `repository_commit` is now captured via `git rev-parse --verify HEAD`,
+  checking `$LASTEXITCODE` explicitly and reading stdout only (stderr is
+  always discarded to `$null`, never merged via `2>&1` and never captured)
+  — a successful call is accepted only when it yields exactly one line
+  matching `^[0-9a-fA-F]{40}$`; any other outcome leaves `repository_commit`
+  null and appends one bounded `local_command_failed`/`invalid_commit_shape`
+  error, never raw Git error text.
+- `scripts/soak/validate_autonomous_paper_session_evidence.ps1`:
+  - `deployment_mode`/`adapter_id`/`operator_supervised` are now validated
+    by dedicated exact-type helpers (`Test-ExactStringField`/
+    `Test-ExactBooleanTrueField`) requiring the exact runtime .NET type
+    (`[string]`/`[bool]`) and an ordinal (case-sensitive, no-normalization)
+    value match — rejecting a coerced `1`, `"true"`, `"PAPER"`, or
+    `"paper "` that PowerShell's coercing `-eq` previously let through.
+  - `live_routing_enabled` across `system_status`/`system_preflight` now
+    requires every *observed* value to be exactly `System.Boolean` and
+    exactly `false` (rejecting `null`/`0`/`"false"`/`"true"`, and `true`
+    remains a safety failure under every circumstance); absence from every
+    surface remains a failure.
+  - `daemon_base_url` re-validation extended to also require the path be
+    empty or `/`.
+  - `repository_commit` now requires the exact `^[0-9a-fA-F]{40}$` shape —
+    a merely-nonempty string is no longer sufficient.
+  - The count-validation helper is now a strict integer-or-null authority
+    (`Test-IntegerOrNullCount`): null, or a nonnegative value of an
+    integral .NET numeric type only (`Byte`/`Int16`/`Int32`/`Int64`/
+    `UInt16`/`UInt32`/`UInt64`/`SByte`) — rejecting `Double`/`Decimal`,
+    negative integers, and numeric strings. Applied per the frozen API
+    truth-state shape: single-operation `active` requires the operation row
+    and validates all three counts; `query_failed` permits a null operation
+    but validates it when present (never skipped); `not_found`/
+    `backend_unavailable` require a null operation. History `active`/
+    `query_failed` require `rows` to be an array and validate every
+    (including every retained `query_failed`) row; `backend_unavailable`
+    requires `rows` absent or an authoritative empty array.
+  - New: `capture_errors` must be a bounded array — each entry only
+    `route`/`error_class`/`http_status` (never a raw string entry, never an
+    extra field), and `http_status` must be null or an integer.
+- Fixture suite (`scripts/soak/tests/test_autonomous_paper_session_evidence.ps1`,
+  Repair H) grew from 16 to 35 scenarios: all 16 prior scenarios preserved
+  verbatim, plus 18 new validator-level rejection proofs against a
+  handcrafted baseline manifest (`operator_supervised` = `1`/`"true"`;
+  `live_routing_enabled` = `null`/`0`/`"false"`; `deployment_mode` =
+  `"PAPER"`/`"paper "`; `adapter_id` = `"ALPACA"`/`"alpaca "`; a malformed
+  `repository_commit`; a `Double` count on an active/query_failed single
+  operation, on a history row, and negative; a `query_failed` history row
+  missing a count field; a non-root `daemon_base_url` path; a raw string
+  `capture_errors` entry) and 1 new capture-level proof (an invalid
+  `-RepoRoot` proves `repository_commit` capture failure is bounded, never
+  raw Git stderr, and that the resulting manifest is rejected by the
+  validator).
+
+**Guard repairs (F3/G):**
+
+- F3 guard: check `[8]` rewritten to prove the exact-type/exact-value
+  safety-identity helpers exist and are used (rather than the retired
+  coercing `-eq` needles); new check `[8b]` proves the 40-hex
+  `repository_commit` requirement; new check `[8c]` proves the capture
+  script's `git rev-parse --verify HEAD`/`$LASTEXITCODE`/no-`2>&1` shape;
+  check `[10]` rewritten to prove the strict integral-count helper and
+  `query_failed` retained-row coverage; new check `[10b]` proves the
+  bounded `capture_errors` shape and the daemon-URL path re-check.
+- G guard: see the Phase G sections above (checks `[1]`, `[8]`/`[9]`,
+  `ForbiddenClaims`).
+
+**Documentation:** README.md/README_TECHNICAL.md updated in place — F2 is
+now recorded `ACCEPTED — COMPLETE`; F3/Phase G are recorded
+`FINAL REPAIR IMPLEMENTATION COMPLETE — AWAITING CHATGPT/OPERATOR
+ACCEPTANCE`; this repair is described narratively alongside the prior
+`AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-F2-F3-G-FINAL-OPERATIONAL-SAFETY-
+REPAIR` entry. This ledger entry records the same.
+
+**Safety confirmation:**
+
+```text
+PROVIDER CALLS: no
+BROKER CALLS: no
+DISCORD CALLS: no
+NETWORK CALLS: no (fixture/-ValidateOnly testing only; no real daemon contacted)
+REAL DAEMON STARTED: no
+PAPER ORDERS: no
+LIVE ORDERS: no
+PAPER DB TOUCHED: no
+MIGRATION CHANGED: no
+DAEMON PRODUCTION RUST CHANGED: no
+GUI CHANGED: no
+GENERATED EVIDENCE STAGED: no
+```
+
+```text
+F1: ACCEPTED — COMPLETE
+F2: ACCEPTED — COMPLETE
+
+F3:
+FINAL REPAIR IMPLEMENTATION COMPLETE —
+AWAITING CHATGPT/OPERATOR ACCEPTANCE
+
+PHASE F:
+IMPLEMENTATION COMPLETE —
+AWAITING CHATGPT/OPERATOR ACCEPTANCE
+
+PHASE G:
+FINAL REPAIR IMPLEMENTATION COMPLETE —
+AWAITING CHATGPT/OPERATOR ACCEPTANCE
+
+BUNDLE 3:
+CLOSURE IMPLEMENTATION COMPLETE —
+AWAITING FINAL CHATGPT AND OPERATOR ACCEPTANCE
+
+BUNDLE 4: NOT STARTED
+UNATTENDED SOAK: NOT STARTED
+LIVE CAPITAL: NOT READY
+```
+
+Bundle 3 is **not** marked accepted or closed in the repository by this
+patch.

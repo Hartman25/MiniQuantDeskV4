@@ -7,7 +7,8 @@ Phase: Phase F3 — supervised soak-evidence preparation.
 Starting HEAD: `8494e1ea` (`docs: correct autonomous paper operations
 runbook` — the F2 commit).
 
-Status: **IMPLEMENTATION COMPLETE — AWAITING FINAL COMBINED ACCEPTANCE.**
+Status: **FINAL REPAIR IMPLEMENTATION COMPLETE — AWAITING CHATGPT/OPERATOR
+ACCEPTANCE** (see §13 for the final proof-integrity repair).
 This document records what F3 built; it is not itself an acceptance record,
 and it does not close Phase F, Phase G, or Bundle 3.
 
@@ -319,3 +320,59 @@ The F3 guard's checks `[7]`-`[9b]`, `[12b]` prove this structurally, including
 executing the fixture test script and requiring exit 0. No other F3
 deliverable changed; the manifest schema/template and checklist are
 unchanged (the stricter contract was satisfiable without a schema change).
+
+## 13. Final repair (AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-BUNDLE-3-FINAL-GUARD-AND-EVIDENCE-INTEGRITY-REPAIR)
+
+Independent proof-integrity review of the F2/F3/G repair above found the
+evidence validator still accepted several coercible/unsafe shapes: `-eq`
+comparisons in PowerShell coerce type (an `operator_supervised` of `1`
+would coerce `$true` to `1` and pass; a `deployment_mode` of `"PAPER"` or
+`"paper "` would pass PowerShell's case-insensitive/whitespace-tolerant
+`-eq`); `live_routing_enabled` accepted any truthy non-Boolean value;
+`repository_commit` accepted any nonempty string, including raw Git error
+text if the commit capture ever failed; and the count check accepted a
+`Double`/negative value and silently skipped `query_failed` retained rows.
+Starting HEAD `7b3ca152` (`fix: harden bundle 3 operational closeout`), one
+commit `fix: close bundle 3 proof and evidence gaps`:
+
+- `scripts/soak/capture_autonomous_paper_session_evidence.ps1`:
+  `repository_commit` is now captured via `git rev-parse --verify HEAD`,
+  checking `$LASTEXITCODE` explicitly and reading stdout only (`2>$null`
+  discards stderr; it is never merged via `2>&1` and never captured). A
+  successful call is accepted only when it yields exactly one line matching
+  `^[0-9a-fA-F]{40}$`; any other outcome leaves `repository_commit` null and
+  appends one bounded `local_command_failed`/`invalid_commit_shape` error —
+  never raw Git error text.
+- `scripts/soak/validate_autonomous_paper_session_evidence.ps1`:
+  `deployment_mode`/`adapter_id`/`operator_supervised` are now validated by
+  exact-type helpers requiring the runtime .NET type (`[string]`/`[bool]`)
+  and an ordinal, case-sensitive value match — rejecting a coerced `1`,
+  `"true"`, `"PAPER"`, or `"paper "`. `live_routing_enabled` requires every
+  observed value to be exactly `System.Boolean` and exactly `false`
+  (rejecting `null`/`0`/`"false"`/`"true"`); absence everywhere remains a
+  failure. `daemon_base_url` re-validation now also requires the path be
+  empty or `/`. `repository_commit` now requires the exact
+  `^[0-9a-fA-F]{40}$` shape. The count check is now a strict integer-or-null
+  helper (rejecting `Double`/`Decimal`/negative/numeric-string counts) that
+  validates every retained `query_failed` row (single operation and every
+  history row) rather than skipping it, and requires history `rows` to be
+  present as an array under `active`/`query_failed` and absent-or-empty
+  under `backend_unavailable`. `capture_errors` must now be a bounded array
+  (`route`/`error_class`/`http_status` only — never a raw string entry).
+- `scripts/soak/tests/test_autonomous_paper_session_evidence.ps1`: grew from
+  16 to 35 scenarios — all 16 prior scenarios unchanged, plus 18 new
+  validator-level rejection proofs against a handcrafted manifest and 1 new
+  capture-level proof (an invalid `-RepoRoot` proves the commit-capture
+  failure path is bounded, never raw Git stderr, and that the resulting
+  manifest is rejected by the validator).
+- F3 guard: check `[8]` rewritten to prove the exact-type/exact-value
+  helpers; new checks `[8b]`/`[8c]` prove the 40-hex commit requirement and
+  the capture script's `git rev-parse --verify HEAD` shape; check `[10]`
+  rewritten to prove the strict integral-count helper and `query_failed`
+  retained-row coverage; new check `[10b]` proves the bounded
+  `capture_errors` shape and the daemon-URL path re-check.
+
+No daemon, provider, broker, Discord, or network call is introduced by this
+repair. F3 remains **FINAL REPAIR IMPLEMENTATION COMPLETE — AWAITING
+CHATGPT/OPERATOR ACCEPTANCE**; it does not itself close Phase F, Phase G, or
+Bundle 3.
