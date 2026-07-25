@@ -300,6 +300,15 @@ $FillsSummary            = Invoke-DaemonGetOnly -Path '/api/v1/portfolio/fills'
 $ReconcileStatus         = Invoke-DaemonGetOnly -Path '/api/v1/reconcile/status'
 $RiskPosture             = Invoke-DaemonGetOnly -Path '/api/v1/risk/summary'
 
+# DURABLE-PAPER-PORTFOLIO-AND-PNL-01F: restart-surviving durable portfolio/
+# P&L truth (docs/runbooks/autonomous_paper_ops.md §16d). GET-only, same
+# Invoke-DaemonGetOnly seam as every other route above -- a failure here is
+# recorded as a bounded error record + missing-endpoint entry exactly like
+# any other route, never a fabricated fallback.
+$DurablePortfolioSummary   = Invoke-DaemonGetOnly -Path '/api/v1/portfolio/durable-summary'
+$DurablePortfolioPositions = Invoke-DaemonGetOnly -Path '/api/v1/portfolio/durable-positions'
+$DurablePortfolioSnapshots = Invoke-DaemonGetOnly -Path '/api/v1/portfolio/durable-snapshots?limit=20'
+
 # completed_bar_task_status: no dedicated daemon route surfaces this field
 # under its own name today. The closest existing read-only truth surface is
 # the alerts feed (docs/runbooks/autonomous_paper_ops.md §19 points operators
@@ -374,6 +383,9 @@ $HashCandidates = [ordered]@{
     reconcile_status         = $ReconcileStatus
     risk_posture             = $RiskPosture
     completed_bar_task_status = $CompletedBarTaskStatus
+    durable_portfolio_summary   = $DurablePortfolioSummary
+    durable_portfolio_positions = $DurablePortfolioPositions
+    durable_portfolio_snapshots = $DurablePortfolioSnapshots
 }
 foreach ($key in $HashCandidates.Keys) {
     $h = Get-JsonSha256 -Value $HashCandidates[$key]
@@ -410,6 +422,10 @@ $Manifest = [ordered]@{
     risk_posture              = $RiskPosture
     completed_bar_task_status = $CompletedBarTaskStatus
     gui_build_version         = $GuiBuildVersion
+
+    durable_portfolio_summary   = $DurablePortfolioSummary
+    durable_portfolio_positions = $DurablePortfolioPositions
+    durable_portfolio_snapshots = $DurablePortfolioSnapshots
 
     capture_errors      = @($CaptureErrors)
     missing_endpoints   = @($MissingEndpoints | Select-Object -Unique)

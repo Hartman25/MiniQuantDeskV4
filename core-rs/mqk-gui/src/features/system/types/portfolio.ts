@@ -89,3 +89,74 @@ export interface ReconcileMismatchRow {
   status: Severity;
   note: string;
 }
+
+// ---------------------------------------------------------------------------
+// DURABLE-PAPER-PORTFOLIO-AND-PNL-01F: restart-surviving durable portfolio
+// truth (GET /api/v1/portfolio/durable-summary et al). Distinct from
+// PortfolioSummary above, which is broker-snapshot-derived and reset on
+// every daemon restart. `null` here always means unavailable/unproven —
+// never zero; a true zero is the literal number `0`.
+// ---------------------------------------------------------------------------
+
+export interface DurablePortfolioSummary {
+  truth_state: string;
+  snapshot_truth_state: string;
+  snapshot_id: string | null;
+  captured_at_utc: string | null;
+  source: string | null;
+  deployment_mode: string | null;
+  account_equity: number | null;
+  cash: number | null;
+  currency: string | null;
+  run_id: string | null;
+  operation_id: string | null;
+  accounting_truth_state: string;
+  accounting_epoch: string | null;
+  accounting_epoch_reason: string | null;
+  last_applied_inbox_id: number | null;
+  realized_pnl: number | null;
+  realized_pnl_truth_state: string;
+  realized_pnl_unavailable_reason: string | null;
+  fees: number | null;
+  cumulative_cash_movement: number | null;
+  unrealized_pnl: number | null;
+  unrealized_pnl_truth_state: string;
+  unrealized_pnl_unavailable_reason: string | null;
+  daily_pnl: number | null;
+  daily_pnl_truth_state: string;
+  daily_pnl_unavailable_reason: string | null;
+  blockers: string[];
+}
+
+export interface DurablePortfolioPositionRow {
+  symbol: string;
+  qty_signed: number;
+  avg_entry_price: number;
+  provenance: string;
+}
+
+export interface DurablePortfolioPositionsResponse {
+  truth_state: string;
+  snapshot_id: string | null;
+  captured_at_utc: string | null;
+  run_id: string | null;
+  positions: DurablePortfolioPositionRow[];
+}
+
+export interface DurablePortfolioSnapshotRow {
+  snapshot_id: string;
+  captured_at_utc: string;
+  deployment_mode: string;
+  source: string;
+  equity: number;
+  cash: number;
+  currency: string;
+  truth_state: string;
+  run_id: string | null;
+  operation_id: string | null;
+}
+
+export interface DurablePortfolioSnapshotsResponse {
+  truth_state: string;
+  snapshots: DurablePortfolioSnapshotRow[];
+}

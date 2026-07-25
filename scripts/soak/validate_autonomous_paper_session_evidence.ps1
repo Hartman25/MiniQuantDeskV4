@@ -89,6 +89,7 @@ $RequiredFields = @(
     'autonomous_paper_status', 'current_daily_operation', 'recent_daily_operations',
     'orders_summary', 'fills_summary', 'reconcile_status', 'risk_posture',
     'completed_bar_task_status', 'gui_build_version',
+    'durable_portfolio_summary', 'durable_portfolio_positions', 'durable_portfolio_snapshots',
     'capture_errors', 'missing_endpoints', 'operator_notes', 'artifact_hashes'
 )
 foreach ($field in $RequiredFields) {
@@ -465,6 +466,9 @@ $DaemonSourcedFields = @{
     'reconcile_status'          = '/api/v1/reconcile/status'
     'risk_posture'              = '/api/v1/risk/summary'
     'completed_bar_task_status' = '/api/v1/alerts/active'
+    'durable_portfolio_summary'   = '/api/v1/portfolio/durable-summary'
+    'durable_portfolio_positions' = '/api/v1/portfolio/durable-positions'
+    'durable_portfolio_snapshots' = '/api/v1/portfolio/durable-snapshots?limit=20'
 }
 $MissingEndpointsList = @()
 if ($null -ne $Manifest.PSObject.Properties['missing_endpoints']) {
@@ -556,6 +560,58 @@ if ($null -ne $DaemonUrlValue -and [string]$DaemonUrlValue -ne '' -and $null -ne
     }
 } else {
     Fail "daemon_base_url could not be parsed as an absolute URI -- path cannot be verified"
+}
+
+# -----------------------------------------------------------------------
+# [13] DURABLE-PAPER-PORTFOLIO-AND-PNL-01F: durable snapshot/accounting
+# truth, when present, must carry its own explicit truth-state fields --
+# never a bare data blob with no provenance. Absence (null, recorded in
+# missing_endpoints per [11]) is legitimate; presence without a truth_state
+# field is not.
+# -----------------------------------------------------------------------
+Write-Host ""
+Show-Info "--- [13] Durable portfolio/accounting truth carries explicit truth-state fields ---"
+if ($null -ne $Manifest.durable_portfolio_summary) {
+    $dps = $Manifest.durable_portfolio_summary
+    $RequiredSummaryTruthFields = @(
+        'truth_state', 'snapshot_truth_state', 'accounting_truth_state',
+        'realized_pnl_truth_state', 'unrealized_pnl_truth_state', 'daily_pnl_truth_state'
+    )
+    foreach ($f in $RequiredSummaryTruthFields) {
+        if ($null -ne $dps.PSObject.Properties[$f] -and $null -ne $dps.$f) {
+            Pass "durable_portfolio_summary.$f is present: $($dps.$f)"
+        } else {
+            Fail "durable_portfolio_summary.$f is missing or null -- every truth-state field must be explicit"
+        }
+    }
+    # accounting_epoch (when accounting_truth_state is "active" or
+    # "fill_history_incomplete") must be one of the closed vocabulary --
+    # never an arbitrary string standing in for completeness.
+    if ($null -ne $dps.PSObject.Properties['accounting_epoch'] -and $null -ne $dps.accounting_epoch) {
+        if (@('complete', 'incomplete') -contains $dps.accounting_epoch) {
+            Pass "durable_portfolio_summary.accounting_epoch is a valid closed value: $($dps.accounting_epoch)"
+        } else {
+            Fail "durable_portfolio_summary.accounting_epoch is not 'complete'/'incomplete' (got: '$($dps.accounting_epoch)')"
+        }
+    }
+} else {
+    Show-Info "durable_portfolio_summary is null -- skipping truth-state field checks (presence/missing_endpoints already checked in [11])"
+}
+if ($null -ne $Manifest.durable_portfolio_positions) {
+    $dpp = $Manifest.durable_portfolio_positions
+    if ($null -ne $dpp.PSObject.Properties['truth_state'] -and $null -ne $dpp.truth_state) {
+        Pass "durable_portfolio_positions.truth_state is present: $($dpp.truth_state)"
+    } else {
+        Fail "durable_portfolio_positions.truth_state is missing or null"
+    }
+}
+if ($null -ne $Manifest.durable_portfolio_snapshots) {
+    $dpsnap = $Manifest.durable_portfolio_snapshots
+    if ($null -ne $dpsnap.PSObject.Properties['truth_state'] -and $null -ne $dpsnap.truth_state) {
+        Pass "durable_portfolio_snapshots.truth_state is present: $($dpsnap.truth_state)"
+    } else {
+        Fail "durable_portfolio_snapshots.truth_state is missing or null"
+    }
 }
 
 # =============================================================================

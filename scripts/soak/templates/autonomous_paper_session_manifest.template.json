@@ -23,6 +23,10 @@
   "completed_bar_task_status": null,
   "gui_build_version": null,
 
+  "durable_portfolio_summary": null,
+  "durable_portfolio_positions": null,
+  "durable_portfolio_snapshots": null,
+
   "capture_errors": [],
   "missing_endpoints": [],
   "operator_notes": null,

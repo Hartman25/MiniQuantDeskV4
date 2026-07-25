@@ -2109,6 +2109,10 @@ ul {
 .val-warn     { color: var(--warning); }
 .val-critical { color: var(--critical); font-weight: 700; }
 .val-muted    { color: var(--muted); }
+/* DURABLE-PAPER-PORTFOLIO-AND-PNL-01F: explicit "Unavailable" label for a
+   null durable-truth field — distinct from val-muted so a null value never
+   reads as merely quiet/secondary data; it is a truth-state gap. */
+.val-unavailable { color: var(--muted); font-style: italic; }
 
 /* Conventional terminal side coloring: buy = green, sell = red */
 .side-buy  { color: var(--success); font-weight: 600; letter-spacing: 0.03em; }

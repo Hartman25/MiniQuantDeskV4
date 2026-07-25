@@ -8,7 +8,7 @@ import type { DataSourceDetail, ExplicitSurfaceTruth, HealthState, PanelSourceMa
 import type { ExecutionOrderRow, ExecutionOutboxSurface, ExecutionSummary, FillQualityRow, FillQualitySurface, OmsOverview, OrderCausalityResponse, OrderChartResponse, OrderReplayResponse, OrderTimelineSurface, OrderTraceResponse, ReconcileSummary } from "./execution";
 import type { ArtifactRegistrySummary, ConfigFingerprintSummary, MarketDataQualitySummary, RuntimeLeadershipSummary, ServiceTopology, SessionStateSummary, SystemMetrics, TransportSummary } from "./infra";
 import type { AuditActionRow, AlertTriageRow, FeedEvent, IncidentCase, OperatorActionDefinition, OperatorAlert, OperatorTimelineEvent, PaperJournalAdmissionRow, PaperJournalTruthState, ReplaceCancelChainRow } from "./ops";
-import type { FillRow, OpenOrderRow, PortfolioSummary, PositionRow, ReconcileMismatchRow, RiskDenialRow, RiskSummary } from "./portfolio";
+import type { DurablePortfolioPositionsResponse, DurablePortfolioSnapshotsResponse, DurablePortfolioSummary, FillRow, OpenOrderRow, PortfolioSummary, PositionRow, ReconcileMismatchRow, RiskDenialRow, RiskSummary } from "./portfolio";
 import type { ConfigDiffRow, DryRunStrategyStatusSurface, MultiSymbolDispatchSummarySurface, StrategyDecisionDiagnostics, StrategyRow, StrategySuppressionRow } from "./strategy";
 
 export interface SystemStatus {
@@ -402,6 +402,15 @@ export interface SystemModel {
    * history, daemon order preserved. Source: GET /api/v1/autonomous/daily-operations.
    */
   autonomousDailyOperations: AutonomousDailyOperationsSurface;
+  /**
+   * DURABLE-PAPER-PORTFOLIO-AND-PNL-01F: restart-surviving durable portfolio/
+   * P&L truth. Distinct from `portfolioSummary`/`positions` above, which are
+   * broker-snapshot-derived and reset on every daemon restart. Source:
+   * GET /api/v1/portfolio/durable-summary, durable-positions, durable-snapshots.
+   */
+  durablePortfolioSummary: DurablePortfolioSummary;
+  durablePortfolioPositions: DurablePortfolioPositionsResponse;
+  durablePortfolioSnapshots: DurablePortfolioSnapshotsResponse;
   dataSource: DataSourceDetail;
   panelSources: PanelSourceMap;
   connected: boolean;

@@ -745,6 +745,59 @@ states (`no_trade`, `with_activity`), even when its own `evidence_state`
 happens to read `"pending"` rather than `"complete"`. Do not report a
 generic `completed` day as an automatically-verified no-trade day.
 
+### 16d. Durable portfolio and P&L truth (DURABLE-PAPER-PORTFOLIO-AND-PNL-01)
+
+Three additional read-only routes surface restart-surviving portfolio/P&L
+truth, distinct from the older in-memory-only broker-snapshot routes
+(`GET /api/v1/portfolio/summary`, `/positions` — reset on every daemon
+restart):
+
+```
+GET /api/v1/portfolio/durable-summary[?run_id=]
+GET /api/v1/portfolio/durable-positions[?run_id=]
+GET /api/v1/portfolio/durable-snapshots?limit=20
+```
+
+**How to tell the two apart.** The in-memory routes answer "what does the
+currently-running process believe right now" and go blank/unknown the
+instant the daemon restarts. The durable routes answer "what was the last
+authoritative Paper+Alpaca broker truth this system captured, and what
+does the durably-replayed fill history prove about it" — both survive a
+restart, both are backed by Postgres, not process memory. Never read one as
+a substitute for the other; the GUI's Portfolio screen renders them as two
+separate panels for exactly this reason.
+
+**Truth-state vocabulary added:**
+
+```
+snapshot_truth_state:    active | snapshot_unavailable | snapshot_stale | db_unavailable | query_failed
+accounting_truth_state:  active | fill_history_incomplete | not_found | db_unavailable | query_failed
+```
+
+`fill_history_incomplete` means the durable fill history known to this
+system does not fully explain a nonzero broker-reported position — most
+commonly a position adopted from before this system's fill history began
+(see §22's restart-adoption note below). **This is never silently fixed by
+inventing an opening fill.** The position itself remains visible (from the
+durable snapshot) even while `realized_pnl` stays `null` with an explicit
+reason. If you see `fill_history_incomplete` and did not expect an adopted
+position, investigate before trusting any displayed realized P&L for that
+symbol — there is none to trust yet.
+
+`GET /api/v1/execution/paper-lifecycle`'s `portfolio_truth_state`/
+`pnl_truth_state` fields now read this same durable truth (previously a
+hardcoded placeholder). Its `overall_lifecycle_state` gains two new values
+once a fill has been seen: `order_filled_portfolio_durable_pnl_available`
+(durable accounting is complete) and
+`order_filled_portfolio_durable_pnl_incomplete` (durable accounting exists
+but its epoch is incomplete) — both refine the older
+`order_filled_pnl_pending` (no durable accounting row yet).
+
+**Do not trust or report P&L when:** `snapshot_truth_state` is anything
+other than `active`, `accounting_truth_state` is anything other than
+`active`, or `realized_pnl`/`unrealized_pnl`/`daily_pnl` is `null` — a
+`null` financial value is unavailable truth, never zero.
+
 ## 17. Before-session checklist
 
 - [ ] `daemon_mode == "paper"` (§15.6)
@@ -862,6 +915,8 @@ unusual condition:
 - `GET /api/v1/system/preflight`
 - `GET /api/v1/system/status`
 - Orders and fills (`GET /api/v1/oms/overview`, `GET /api/v1/portfolio/positions`)
+- Durable portfolio/P&L truth (`GET /api/v1/portfolio/durable-summary`,
+  `/durable-positions`, `/durable-snapshots?limit=20` — §16d)
 - Risk posture (`GET /api/v1/risk/denials`)
 - Reconcile posture (`GET /api/v1/reconcile/status`, `GET /api/v1/reconcile/mismatches`)
 - The day's outcome class and evidence-blocker reasons (from the
@@ -882,6 +937,18 @@ all three of the following:
 | Restart after a durable stop but **before finalization** | `stopped_at_utc` is set; `finalization_status` is `awaiting_finalization` or `not_yet_eligible` | On restart, the coordinator resumes ticking; finalization proceeds from durable state on its own schedule — no operator action re-triggers it |
 | Restart after a **terminal commit** (already `finalized`) | `outcome_class` / `finalized_at_utc` are durably set and immutable for that day | The daily-operation row for that market date is read-only history from this point; a restart does not reopen or re-finalize it |
 | Restart after an **evidence blocker** (`blocked_insufficient_evidence`) | The blocker and its reason codes are durably recorded | On restart, investigate per §19's `evidence_state == "degraded"` row before assuming the blocker will self-clear; it will only clear if the underlying evidence read-model condition resolves |
+| Restart with an **already-adopted broker position** and no fill history in this system for it | The durable snapshot shows the position (from real broker truth); the durable accounting row (if any) reports `accounting_epoch: "incomplete"` for that symbol | Position quantity/cost basis remain trustworthy (broker-sourced); do not trust `realized_pnl` for that symbol until enough fill history accumulates to fully explain it — never manually patch the accounting row to force `"complete"` |
+
+## 22a. How the durable portfolio/P&L surface fits the daily-P&L baseline flow
+
+The existing daily-P&L baseline (`sys_account_equity_baseline`, its capture
+action, and `daily_pnl` on `GET /api/v1/portfolio/summary`) is **unchanged**
+by Bundle 4 and remains the sole source of `daily_pnl`. The new durable
+routes (§16d) read that same existing baseline via the same existing
+`resolve_daily_pnl` logic — they do not recompute daily P&L from the fill
+ledger. Realized P&L (fill-derived, FIFO) and daily P&L (baseline-derived,
+equity-delta) are two independent figures that will not generally agree —
+this is expected, not a discrepancy to reconcile.
 
 ## 23. Explicit prohibitions
 
@@ -892,6 +959,13 @@ all three of the following:
 - Do not bypass a preflight, evidence, or finalization blocker.
 - Do not manually rewrite `sys_autonomous_daily_operations` rows or invent
   a manual finalization command.
+- Do not manually edit `sys_paper_portfolio_snapshots`,
+  `sys_paper_portfolio_snapshot_positions`, or
+  `sys_paper_portfolio_accounting_state` rows, and do not invent a
+  synthetic opening fill to force `accounting_epoch` from `"incomplete"` to
+  `"complete"` — an incomplete epoch reflects genuinely incomplete fill
+  history and must be resolved by accumulating real fills, not by editing
+  the row.
 - Do not interpret empty/`null` data without checking its `truth_state` —
   an empty or `null` field is meaningless without the surface's own
   truth-state qualifier (§16a).

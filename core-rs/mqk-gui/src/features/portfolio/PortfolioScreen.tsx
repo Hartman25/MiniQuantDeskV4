@@ -11,14 +11,46 @@ function formatMicros(micros: number): string {
   return (micros / 1_000_000).toLocaleString(undefined, { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 4 });
 }
 
+// DURABLE-PAPER-PORTFOLIO-AND-PNL-01F: `null` always means unavailable/
+// unproven and must render as the word "Unavailable" — never silently
+// collapsed into the same "—" glyph the broker-snapshot panel above uses
+// for its own, pre-existing null convention. A true numeric zero (e.g. a
+// flat position, or exactly-zero P&L) always renders as the literal `0`.
+function formatDurableMoney(value: number | null) {
+  if (value == null) return <span className="val-unavailable">Unavailable</span>;
+  return formatMoney(value);
+}
+
+function formatDurableCount(value: number | null) {
+  if (value == null) return <span className="val-unavailable">Unavailable</span>;
+  return String(value);
+}
+
 export function PortfolioScreen({ model }: { model: SystemModel }) {
   const p = model.portfolioSummary;
+  const durable = model.durablePortfolioSummary;
   const truthState = panelTruthRenderState(model, "portfolio");
+
+  // DURABLE-PAPER-PORTFOLIO-AND-PNL-01F: the durable, restart-surviving
+  // section renders unconditionally, below the in-memory hard-close notice
+  // when one fires. This is deliberate — durable truth is exactly what
+  // remains visible when in-memory broker-snapshot truth is degraded or
+  // absent (e.g. immediately after a daemon restart), so gating it behind
+  // the same check would hide it precisely when it is most useful. The two
+  // truths are never collapsed into one: this section only ever reads
+  // model.durablePortfolioSummary/Positions/Snapshots, never
+  // model.portfolioSummary/positions.
+  const durableSection = <DurablePortfolioSection model={model} durable={durable} />;
 
   // Hard-close on any compromised truth state: stale equity and positions are directly
   // dangerous under live conditions. Silent pass-through of stale/degraded is not acceptable.
   if (truthState !== null) {
-    return <TruthStateNotice state={truthState} />;
+    return (
+      <div className="screen-grid desk-screen-grid">
+        <TruthStateNotice state={truthState} />
+        {durableSection}
+      </div>
+    );
   }
 
   return (
@@ -164,6 +196,127 @@ export function PortfolioScreen({ model }: { model: SystemModel }) {
           )}
         </Panel>
       </div>
+
+      {durableSection}
     </div>
+  );
+}
+
+// ---------------------------------------------------------------------------
+// DURABLE-PAPER-PORTFOLIO-AND-PNL-01F
+// ---------------------------------------------------------------------------
+
+/**
+ * Restart-surviving durable portfolio/P&L truth, rendered as its own
+ * section rather than merged into the broker-snapshot panels above — the
+ * two must never be collapsed into one truth. Renders its own truth-state
+ * notices inline (never hard-blocks the whole screen) and contains no
+ * capture/retry/order/arm/flatten control of any kind — read-only display
+ * only, sourced from model.durablePortfolioSummary/Positions/Snapshots.
+ */
+function DurablePortfolioSection({
+  model,
+  durable,
+}: {
+  model: SystemModel;
+  durable: SystemModel["durablePortfolioSummary"];
+}) {
+  return (
+    <>
+      <div className="desk-panel-grid desk-panel-grid-primary">
+        <Panel
+          title="Durable Portfolio (restart-surviving)"
+          subtitle={
+            durable.snapshot_truth_state === "active"
+              ? `Snapshot ${durable.snapshot_id ?? "unknown"} — ${durable.source ?? "unknown source"} @ ${formatDateTime(durable.captured_at_utc)}`
+              : `Durable snapshot: ${durable.snapshot_truth_state}`
+          }
+        >
+          {durable.snapshot_truth_state === "snapshot_stale" && (
+            <div className="unavailable-notice">
+              Durable snapshot is stale — the last known authoritative capture is older than the
+              refresh interval. Do not treat these values as current.
+            </div>
+          )}
+          {durable.snapshot_truth_state !== "active" && durable.snapshot_truth_state !== "snapshot_stale" && (
+            <div className="unavailable-notice">
+              Durable portfolio truth unavailable ({durable.snapshot_truth_state}). This is
+              independent of the in-memory broker-snapshot panels above.
+            </div>
+          )}
+          <div className="metric-list">
+            <div><span>Equity</span><strong>{formatDurableMoney(durable.account_equity)}</strong></div>
+            <div><span>Cash</span><strong>{formatDurableMoney(durable.cash)}</strong></div>
+            <div><span>Currency</span><strong>{durable.currency ?? <span className="val-unavailable">Unavailable</span>}</strong></div>
+            <div><span>Run</span><strong>{durable.run_id ?? <span className="val-unavailable">Unavailable</span>}</strong></div>
+            <div><span>Accounting completeness</span><strong>
+              {durable.accounting_epoch == null
+                ? <span className="val-unavailable">Unavailable</span>
+                : durable.accounting_epoch === "complete"
+                  ? <span className="val-ok">Complete</span>
+                  : <span className="val-critical">Incomplete</span>}
+            </strong></div>
+            <div><span>Realized PnL</span><strong>{formatDurableMoney(durable.realized_pnl)}</strong></div>
+            <div><span>Unrealized PnL</span><strong>{formatDurableMoney(durable.unrealized_pnl)}</strong></div>
+            <div><span>Daily PnL</span><strong>{formatDurableMoney(durable.daily_pnl)}</strong></div>
+            <div><span>Fees</span><strong>{formatDurableMoney(durable.fees)}</strong></div>
+            <div><span>Cumulative cash movement</span><strong>{formatDurableMoney(durable.cumulative_cash_movement)}</strong></div>
+          </div>
+          {durable.accounting_epoch_reason && (
+            <div className="unavailable-notice">Accounting incomplete: {durable.accounting_epoch_reason}</div>
+          )}
+          {durable.blockers.length > 0 && (
+            <div className="unavailable-notice">
+              {durable.blockers.map((b) => <div key={b}>{b}</div>)}
+            </div>
+          )}
+        </Panel>
+
+        <Panel title="Durable positions" subtitle="Restart-surviving — from the durable snapshot, not the in-memory broker snapshot">
+          {model.durablePortfolioPositions.truth_state !== "active" ? (
+            <div className="unavailable-notice">
+              Durable positions unavailable ({model.durablePortfolioPositions.truth_state}).
+            </div>
+          ) : model.durablePortfolioPositions.positions.length === 0 ? (
+            <div className="empty-state">Flat — no durable positions.</div>
+          ) : (
+            <DataTable
+              rows={model.durablePortfolioPositions.positions}
+              rowKey={(row) => row.symbol}
+              columns={[
+                { key: "symbol", title: "Symbol", render: (row) => row.symbol },
+                { key: "qty", title: "Qty", render: (row) => formatDurableCount(row.qty_signed) },
+                { key: "avg", title: "Avg entry", render: (row) => formatDurableMoney(row.avg_entry_price) },
+                { key: "provenance", title: "Provenance", render: (row) => row.provenance },
+              ]}
+            />
+          )}
+        </Panel>
+      </div>
+
+      <div className="desk-panel-grid desk-panel-grid-primary">
+        <Panel title="Recent durable snapshots" subtitle="Durable snapshot history — restart-surviving">
+          {model.durablePortfolioSnapshots.truth_state !== "active" ? (
+            <div className="unavailable-notice">
+              Durable snapshot history unavailable ({model.durablePortfolioSnapshots.truth_state}).
+            </div>
+          ) : model.durablePortfolioSnapshots.snapshots.length === 0 ? (
+            <div className="empty-state">No durable snapshots captured yet.</div>
+          ) : (
+            <DataTable
+              rows={model.durablePortfolioSnapshots.snapshots}
+              rowKey={(row) => row.snapshot_id}
+              columns={[
+                { key: "at", title: "Captured", render: (row) => formatDateTime(row.captured_at_utc) },
+                { key: "source", title: "Source", render: (row) => row.source },
+                { key: "equity", title: "Equity", render: (row) => formatMoney(row.equity) },
+                { key: "cash", title: "Cash", render: (row) => formatMoney(row.cash) },
+                { key: "run", title: "Run", render: (row) => row.run_id ?? "—" },
+              ]}
+            />
+          )}
+        </Panel>
+      </div>
+    </>
   );
 }

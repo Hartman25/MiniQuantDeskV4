@@ -55,6 +55,11 @@ powershell -ExecutionPolicy Bypass -File scripts\soak\capture_autonomous_paper_s
 - [ ] Confirm `capture_errors` / `missing_endpoints` are reviewed — an
       unavailable surface is expected occasionally; a growing or unexplained
       list across captures is worth investigating.
+- [ ] Confirm `durable_portfolio_summary.snapshot_truth_state` and
+      `.accounting_truth_state` are `"active"` once a run has produced a
+      fill — `"fill_history_incomplete"` here means a position exists that
+      the fill history doesn't fully explain (runbook §16d); investigate
+      before trusting `realized_pnl` for that capture.
 - [ ] Do **not** stage or commit the generated manifest or its output
       directory. Generated evidence stays local and ignored.
 

@@ -160,6 +160,19 @@ function New-BaselineFixtureSet {
     Write-JsonFixture $Dir 'api_v1_reconcile_status.json'    ([ordered]@{})
     Write-JsonFixture $Dir 'api_v1_risk_summary.json'        ([ordered]@{})
     Write-JsonFixture $Dir 'api_v1_alerts_active.json'       ([ordered]@{})
+    # DURABLE-PAPER-PORTFOLIO-AND-PNL-01F: restart-surviving durable
+    # portfolio/P&L truth fixtures (docs/runbooks/autonomous_paper_ops.md §16d).
+    Write-JsonFixture $Dir 'api_v1_portfolio_durable-summary.json' ([ordered]@{
+        truth_state                = 'active'
+        snapshot_truth_state       = 'active'
+        accounting_truth_state     = 'active'
+        accounting_epoch           = 'complete'
+        realized_pnl_truth_state   = 'active'
+        unrealized_pnl_truth_state = 'active'
+        daily_pnl_truth_state      = 'active'
+    })
+    Write-JsonFixture $Dir 'api_v1_portfolio_durable-positions.json' ([ordered]@{ truth_state = 'active'; positions = @() })
+    Write-JsonFixture $Dir 'api_v1_portfolio_durable-snapshots.json' ([ordered]@{ truth_state = 'active'; snapshots = @() })
 }
 
 function New-FixtureVariant {
@@ -263,6 +276,18 @@ function New-BaselineManifestForValidatorTests {
         risk_posture              = [ordered]@{}
         completed_bar_task_status = [ordered]@{}
         gui_build_version         = '0.0.0'
+
+        durable_portfolio_summary   = [ordered]@{
+            truth_state                = 'active'
+            snapshot_truth_state       = 'active'
+            accounting_truth_state     = 'active'
+            accounting_epoch           = 'complete'
+            realized_pnl_truth_state   = 'active'
+            unrealized_pnl_truth_state = 'active'
+            daily_pnl_truth_state      = 'active'
+        }
+        durable_portfolio_positions = [ordered]@{ truth_state = 'active' }
+        durable_portfolio_snapshots = [ordered]@{ truth_state = 'active' }
 
         capture_errors      = @()
         missing_endpoints   = @()
@@ -528,6 +553,26 @@ try {
     }
     Test-ValidatorRejectsHandcraftedManifest -TestRoot $TestRoot -CaseName 'capture_errors containing a raw string' -CaseSlug 'captureerrors_rawstring' -Mutate {
         param($m) $m.capture_errors = @('raw exception text leaked: fatal: something failed')
+    }
+
+    # DURABLE-PAPER-PORTFOLIO-AND-PNL-01F: durable portfolio/accounting
+    # truth must carry explicit truth-state fields when present -- a bare
+    # data blob with no truth_state is rejected, and accounting_epoch must
+    # be one of the closed vocabulary.
+    Test-ValidatorRejectsHandcraftedManifest -TestRoot $TestRoot -CaseName 'durable_portfolio_summary missing truth_state' -CaseSlug 'durable_summary_missing_truthstate' -Mutate {
+        param($m) $m.durable_portfolio_summary.PSObject.Properties.Remove('truth_state')
+    }
+    Test-ValidatorRejectsHandcraftedManifest -TestRoot $TestRoot -CaseName 'durable_portfolio_summary missing accounting_truth_state' -CaseSlug 'durable_summary_missing_accounting_truthstate' -Mutate {
+        param($m) $m.durable_portfolio_summary.PSObject.Properties.Remove('accounting_truth_state')
+    }
+    Test-ValidatorRejectsHandcraftedManifest -TestRoot $TestRoot -CaseName 'durable_portfolio_summary.accounting_epoch not in closed vocabulary' -CaseSlug 'durable_summary_bad_epoch' -Mutate {
+        param($m) $m.durable_portfolio_summary.accounting_epoch = 'mostly_complete'
+    }
+    Test-ValidatorRejectsHandcraftedManifest -TestRoot $TestRoot -CaseName 'durable_portfolio_positions missing truth_state' -CaseSlug 'durable_positions_missing_truthstate' -Mutate {
+        param($m) $m.durable_portfolio_positions.PSObject.Properties.Remove('truth_state')
+    }
+    Test-ValidatorRejectsHandcraftedManifest -TestRoot $TestRoot -CaseName 'durable_portfolio_snapshots missing truth_state' -CaseSlug 'durable_snapshots_missing_truthstate' -Mutate {
+        param($m) $m.durable_portfolio_snapshots.PSObject.Properties.Remove('truth_state')
     }
 
     # ---------------------------------------------------------------

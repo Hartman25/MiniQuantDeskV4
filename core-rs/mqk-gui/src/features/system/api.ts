@@ -86,6 +86,9 @@ import type {
   ArtifactRow,
   AuditActionRow,
   ConfigFingerprintSummary,
+  DurablePortfolioPositionsResponse,
+  DurablePortfolioSnapshotsResponse,
+  DurablePortfolioSummary,
   ExecutionFlowSurface,
   ExecutionOrderRow,
   ExecutionSummary,
@@ -535,6 +538,13 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
     // successful fetch lands it in dataSource.realEndpoints.
     fetchJsonCandidates<AutonomousDailyOperationResponseWrapper>(["/api/v1/autonomous/daily-operation"]),
     fetchJsonCandidates<AutonomousDailyOperationsResponseWrapper>(["/api/v1/autonomous/daily-operations?limit=20"]),
+    // DURABLE-PAPER-PORTFOLIO-AND-PNL-01F: restart-surviving durable
+    // portfolio/P&L truth (read-only). Included in the tracked probes array
+    // so a failure lands the canonical route in dataSource.missingEndpoints,
+    // matching every other durable-run route in this file.
+    fetchJsonCandidates<DurablePortfolioSummary>(["/api/v1/portfolio/durable-summary"]),
+    fetchJsonCandidates<DurablePortfolioPositionsResponse>(["/api/v1/portfolio/durable-positions"]),
+    fetchJsonCandidates<DurablePortfolioSnapshotsResponse>(["/api/v1/portfolio/durable-snapshots?limit=20"]),
     ]),
     fetchJsonCandidate<AutonomousReadinessPartial>("/api/v1/autonomous/readiness"),
     // MULTI-SYMBOL-OMS-OVERVIEW-AND-GUI-01: Multi-symbol dispatch summary
@@ -589,6 +599,9 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
     watchlistStatusR,
     autonomousDailyOperationR,
     autonomousDailyOperationsR,
+    durablePortfolioSummaryR,
+    durablePortfolioPositionsR,
+    durablePortfolioSnapshotsR,
   ] = probes;
 
   const daemonReachable = statusProbe.ok || healthProbe.ok || Boolean(legacyStatusFromProbe) || probes.some((p) => p.ok);
@@ -795,6 +808,59 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
   const fillQualityTelemetry = mapFillQualityWrapper(fillQualityR.ok && fillQualityR.data != null ? fillQualityR.data as FillQualityWrapper : null);
   // GUI-OPS-01: Paper journal surface — dual-lane via extracted mapper.
   const paperJournal = mapPaperJournalWrapper(paperJournalR.ok && paperJournalR.data != null ? paperJournalR.data as PaperJournalWrapper : null);
+  // DURABLE-PAPER-PORTFOLIO-AND-PNL-01F: restart-surviving durable portfolio
+  // truth. Each response already carries its own explicit truth_state field
+  // (per the B4-A/B4-E contract), so a successful fetch is used directly —
+  // only an unreachable/failed fetch falls back to the unavailable default.
+  const unavailableDurablePortfolioSummary: DurablePortfolioSummary = {
+    truth_state: "db_unavailable",
+    snapshot_truth_state: "db_unavailable",
+    snapshot_id: null,
+    captured_at_utc: null,
+    source: null,
+    deployment_mode: null,
+    account_equity: null,
+    cash: null,
+    currency: null,
+    run_id: null,
+    operation_id: null,
+    accounting_truth_state: "db_unavailable",
+    accounting_epoch: null,
+    accounting_epoch_reason: null,
+    last_applied_inbox_id: null,
+    realized_pnl: null,
+    realized_pnl_truth_state: "db_unavailable",
+    realized_pnl_unavailable_reason: "backend truth unavailable",
+    fees: null,
+    cumulative_cash_movement: null,
+    unrealized_pnl: null,
+    unrealized_pnl_truth_state: "db_unavailable",
+    unrealized_pnl_unavailable_reason: "backend truth unavailable",
+    daily_pnl: null,
+    daily_pnl_truth_state: "db_unavailable",
+    daily_pnl_unavailable_reason: "backend truth unavailable",
+    blockers: ["backend truth unavailable"],
+  };
+  const unavailableDurablePortfolioPositions: DurablePortfolioPositionsResponse = {
+    truth_state: "db_unavailable",
+    snapshot_id: null,
+    captured_at_utc: null,
+    run_id: null,
+    positions: [],
+  };
+  const unavailableDurablePortfolioSnapshots: DurablePortfolioSnapshotsResponse = {
+    truth_state: "db_unavailable",
+    snapshots: [],
+  };
+  const durablePortfolioSummary = durablePortfolioSummaryR.ok && durablePortfolioSummaryR.data != null
+    ? (durablePortfolioSummaryR.data as DurablePortfolioSummary)
+    : unavailableDurablePortfolioSummary;
+  const durablePortfolioPositions = durablePortfolioPositionsR.ok && durablePortfolioPositionsR.data != null
+    ? (durablePortfolioPositionsR.data as DurablePortfolioPositionsResponse)
+    : unavailableDurablePortfolioPositions;
+  const durablePortfolioSnapshots = durablePortfolioSnapshotsR.ok && durablePortfolioSnapshotsR.data != null
+    ? (durablePortfolioSnapshotsR.data as DurablePortfolioSnapshotsResponse)
+    : unavailableDurablePortfolioSnapshots;
   // GUI-PAPER-STATUS-VISIBILITY-01: Autonomous paper status — composite read-only truth
   // surface (runtime/arm/reconcile/flatten/watchlist/readiness). Visibility only — no
   // action invocation is derived from this surface.
@@ -1122,6 +1188,11 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
     // outcome truth (current slot + recent history). Visibility only.
     autonomousDailyOperation,
     autonomousDailyOperations,
+    // DURABLE-PAPER-PORTFOLIO-AND-PNL-01F: read-only, restart-surviving
+    // durable portfolio/P&L truth. Visibility only.
+    durablePortfolioSummary,
+    durablePortfolioPositions,
+    durablePortfolioSnapshots,
     // MULTI-SYMBOL-OMS-OVERVIEW-AND-GUI-01: Read-only multi-symbol dispatch
     // summary truth surface. Visibility only — no order controls derived here.
     multiSymbolDispatchSummary,
