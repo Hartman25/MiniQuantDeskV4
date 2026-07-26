@@ -16742,3 +16742,178 @@ LIVE CAPITAL: NOT READY
 
 Bundle 3 is **not** marked accepted or closed in the repository by this
 patch.
+
+---
+
+## DURABLE-PAPER-PORTFOLIO-AND-PNL-01-COMBINED (Bundle 4: B4-0 through B4-G)
+
+Closes the durable, restart-surviving portfolio and P&L truth gap for the
+supported operating lane (paper, Alpaca, single-symbol long-only US
+equity/ETF, supervised), on top of Bundle 3's closure-implementation
+(D1 through Phase G, unchanged by this bundle; still itself awaiting final
+ChatGPT/operator acceptance, not affected or advanced by this bundle).
+
+**B4-0 (`COMPLETED-BAR-DRIVER-TIME-INDEPENDENT-FIXTURES-01`):**
+`scenario_autonomous_completed_bar_driver_01.rs`'s `standard_timing()` was
+anchored to a fixed calendar date; every assertion in the file already
+derives its expected `bar_end_ts` relative to `timing.effective_open` (no
+absolute epoch literals exist anywhere in the file), but the real-wall-clock
+staleness gate in `dispatch_native_strategy_for_symbol_with_bar` ages the
+fixed anchor out from under it once real time drifts past the applicable
+cap. Re-anchored to `Utc::now()` at call time (floored to a 5-minute
+boundary, matching the provider-poll seam's own flooring), leaving
+`past_timing()` fixed/historical as designed. Also fixed a pre-existing,
+unrelated cross-test DB race in the same file's `maybe_db()` cleanup helper
+(wildcard cleanup under parallel execution could delete a different test's
+fixture rows, or permanently orphan event rows), guarded with a
+`tokio::sync::OnceCell` one-time sweep. 56/56 passing, stable across
+`--test-threads=1` and default parallelism.
+
+**B4-A (`DURABLE-PAPER-PORTFOLIO-AND-PNL-01A-CURRENT-TRUTH-AND-CONTRACT`):**
+Full source audit locking: no single existing funnel writes
+`AppState.broker_snapshot` for the real (External/Alpaca) source across its
+three real-fetch call sites; `oms_inbox` already provides a complete,
+ordered, deduped, replayable fill stream, so no new fill/accounting-event
+table is introduced (a durable accounting projection stores a
+`last_applied_inbox_id` watermark instead); realized P&L is explicitly
+incomplete (never fabricated) for any position whose opening fill isn't
+traceable through applied inbox rows; the existing daily-P&L baseline
+table/writer/reader are reused unchanged. Docs-only.
+
+**B4-B (`DURABLE-PAPER-PORTFOLIO-AND-PNL-01B-DURABLE-STORE`):** Migration
+0053 adds `sys_paper_portfolio_snapshots`/`sys_paper_portfolio_snapshot_positions`
+(append-only, deterministically-identified durable snapshot copy, `source`
+schema-constrained to `external_alpaca`/`synthetic_diagnostic`) and
+`sys_paper_portfolio_accounting_state` (one row per `run_id`, computed
+summary only — no fill content duplicated). New `mqk-db::paper_portfolio`
+module with idempotent, fail-closed insert/upsert helpers (a snapshot
+content mismatch on replay is a typed `Conflict`; an accounting watermark
+regression is a typed `Rejected`). 14/14 DB-backed tests pass. Zero daemon
+callers — persistence layer only.
+
+**B4-C (`DURABLE-PAPER-PORTFOLIO-AND-PNL-01C-SNAPSHOT-PERSISTENCE-AND-RESTART`):**
+`state::snapshot::accept_external_broker_snapshot` becomes the sole
+function writing `AppState.broker_snapshot` for the External source,
+wired into all three real call sites (run-start cold-fetch, periodic
+refresh — both `.await`ed directly; the terminal-fill-expiry-refresher's
+sync closure spawns the persist half via `tokio::spawn`, matching the
+existing Discord-alert-sink pattern). Fail-closed on source authority
+(Paper+Alpaca only, checked in the function itself) and fail-soft on every
+persistence failure mode. 9/9 tests pass. Found and fixed a genuine
+cross-test race during testing: `fetch_latest_paper_portfolio_snapshot` is
+global across all runs sharing `(deployment_mode, source)`, so using it to
+locate a just-persisted row was racy under parallel test execution — fixed
+by looking rows up via their exact deterministic `snapshot_id` instead.
+
+**B4-D (`DURABLE-PAPER-PORTFOLIO-AND-PNL-01D-DURABLE-ACCOUNTING-AND-PNL`):**
+`replay_paper_portfolio_accounting` reuses `recover_oms_and_portfolio`
+directly (not a second, simpler replay) specifically because that function
+already applies the duplicate-fill guard the live apply path uses — a
+naive re-iteration of `oms_inbox` would have silently double-counted a fill
+delivered via both WS and REST. Wired into the same B4-C seam (accounting
+refresh happens whenever a fresh snapshot is accepted). 13/13 tests pass,
+each driving real `oms_outbox`/`oms_inbox` fixture rows: FIFO buy/sell
+gain/loss/fees/close, duplicate-refresh zero-delta, partial-then-final
+exact-once, restart-identical replay, pre-existing and partial-mismatch
+positions blocking the accounting epoch without fabrication, flat-portfolio
+known-zero truth, daily-P&L baseline untouched.
+
+**B4-E (`DURABLE-PAPER-PORTFOLIO-AND-PNL-01E-READ-ONLY-API`):** Three new
+GET-only routes (`durable-summary`, `durable-positions`,
+`durable-snapshots?limit=`) additive to the existing broker-snapshot
+routes; `GET /api/v1/execution/paper-lifecycle`'s `portfolio_truth_state`/
+`pnl_truth_state` (previously a hardcoded placeholder) now read the same
+durable tables, and its lifecycle classifier gained
+`order_filled_portfolio_durable_pnl_available`/`_incomplete`. 11/11 new
+tests pass; a dedicated read-only proof asserts zero row-count delta
+across every durable table for repeated GETs. Found and fixed two
+cross-phase issues: an existing test (`pl_11`) asserting the literal
+placeholder string this patch replaces, and a B4-C test-cleanup gap
+exposed by B4-D's new accounting-refresh side effect (leaked `runs` rows
+across invocations, purged from the local test DB).
+
+**B4-F (`DURABLE-PAPER-PORTFOLIO-AND-PNL-01F-OPERATOR-INTEGRATION`):**
+Operator Portfolio screen gained a `DurablePortfolioSection` (three
+read-only panels), rendered unconditionally — not behind the existing
+in-memory panel's hard-close gate, since durable truth is exactly what
+remains visible when in-memory truth is degraded (verified live in the
+browser preview with the daemon disconnected). `null` renders as the
+literal word "Unavailable" (new `.val-unavailable` token), never silently
+as zero. Runbook gained §16d/§22a documenting the new routes, the
+`fill_history_incomplete` meaning, and a prohibition against manually
+editing the new tables or fabricating fills. Bundle 3's soak-evidence
+capture/validate scripts extended to the same durable truth, with 5 new
+negative tests. `npm run build`/`npm test`: clean, 850/850.
+
+**B4-G (`DURABLE-PAPER-PORTFOLIO-AND-PNL-01G-INTEGRATED-CLOSURE`):**
+`scenario_durable_paper_portfolio_and_pnl_01.rs` (4 integrated proofs, real
+production seams, real `oms_outbox`/`oms_inbox` fixtures) combines snapshot
+durability, exactly-once fill accounting, restart-identical replay,
+fabrication-free incomplete-history handling, and independently
+positive/negative/zero realized P&L into single end-to-end tests; the full
+signal→order→ack→fill→durable-accounting→durable-visibility chain (and its
+restart-reconstructability) is proven via the real `paper-lifecycle` route.
+API read-only and GUI-contract proofs are not duplicated — they reference
+B4-E's/B4-F's own dedicated evidence. Final Bundle 4 closure guard invokes
+every prior guard (Bundle 3 final + B4-0..B4-F) plus
+`check_unsafe_patterns.ps1`. Found and fixed one real unsafe-pattern
+violation during final audit: a B4-E unit-test fixture used
+`Uuid::new_v4()` instead of this bundle's deterministic `new_v5` fixture
+convention.
+
+**Known limitations:** `fetch_latest_paper_portfolio_snapshot`/
+`fetch_recent_paper_portfolio_snapshots` are global across all runs sharing
+`(deployment_mode, source)`, not run-scoped — correct for the one-run-at-a-
+time supervised lane this bundle targets, not a general multi-run-concurrent
+design. Open FIFO lots are not stored durably; they are recomputed on read
+via `recompute_from_ledger` replaying applied `oms_inbox` rows up to the
+stored watermark. The terminal-fill-expiry-refresher's durable-persist half
+runs via `tokio::spawn` (fire-and-forget) rather than being awaited inline,
+since that call site is a sync closure — best-effort by design, matching
+this bundle's fail-soft persistence contract.
+
+**Safety confirmation:**
+
+```text
+PROVIDER CALLS: no
+BROKER CALLS: no
+DISCORD CALLS: no
+NETWORK CALLS: no (isolated port-5434 test DB and local dev-server browser
+                    check only; daemon intentionally not running for the
+                    GUI verification, all requests to 127.0.0.1:8899 failed
+                    with ERR_CONNECTION_REFUSED)
+REAL DAEMON STARTED: no
+PAPER ORDERS: no
+LIVE ORDERS: no
+OPERATING PAPER DB TOUCHED: no
+TEST DB: port 5434 only
+MULTI-SYMBOL ENABLED: no
+BUNDLE 5 STARTED: no
+```
+
+```text
+B4-0: IMPLEMENTATION COMPLETE — AWAITING FINAL ACCEPTANCE
+B4-A: IMPLEMENTATION COMPLETE — AWAITING FINAL ACCEPTANCE
+B4-B: IMPLEMENTATION COMPLETE — AWAITING FINAL ACCEPTANCE
+B4-C: IMPLEMENTATION COMPLETE — AWAITING FINAL ACCEPTANCE
+B4-D: IMPLEMENTATION COMPLETE — AWAITING FINAL ACCEPTANCE
+B4-E: IMPLEMENTATION COMPLETE — AWAITING FINAL ACCEPTANCE
+B4-F: IMPLEMENTATION COMPLETE — AWAITING FINAL ACCEPTANCE
+B4-G: IMPLEMENTATION COMPLETE — AWAITING FINAL ACCEPTANCE
+
+BUNDLE 3:
+CLOSURE IMPLEMENTATION COMPLETE —
+AWAITING FINAL CHATGPT AND OPERATOR ACCEPTANCE
+
+BUNDLE 4:
+CLOSURE IMPLEMENTATION COMPLETE —
+AWAITING FINAL CHATGPT AND OPERATOR ACCEPTANCE
+
+BUNDLE 5: NOT STARTED
+MULTI-SYMBOL AUTONOMOUS: NOT ENABLED
+UNATTENDED 10–20-SESSION SOAK: NOT STARTED
+LIVE CAPITAL: NOT READY
+```
+
+Bundle 4 is **not** marked accepted or closed in the repository by this
+patch.

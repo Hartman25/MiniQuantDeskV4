@@ -490,7 +490,7 @@ mod tests {
 
     fn accounting_row(epoch: &str) -> mqk_db::PaperPortfolioAccountingStateRecord {
         mqk_db::PaperPortfolioAccountingStateRecord {
-            run_id: Uuid::new_v4(),
+            run_id: Uuid::new_v5(&Uuid::NAMESPACE_DNS, b"test.paper-lifecycle.v1|accounting_row"),
             cash_micros: 0,
             realized_pnl_micros: 0,
             fees_micros: 0,
