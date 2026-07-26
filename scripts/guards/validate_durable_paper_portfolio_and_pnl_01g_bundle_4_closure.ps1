@@ -745,6 +745,159 @@ if ($null -eq $OutOfScopePaths -or @($OutOfScopePaths).Count -eq 0) {
     Show-Fail "Out-of-scope file(s) changed: $($OutOfScopePaths -join ', ')"
 }
 
+# -----------------------------------------------------------------------
+# [37]-[45] DURABLE-PAPER-PORTFOLIO-AND-PNL-01-FINAL-READ-SIDE-AUTHORITY-
+# REPAIR invariants.
+# -----------------------------------------------------------------------
+$DurablePortfolioTextH = if (Test-Path -LiteralPath $DurablePortfolioRoutesFile) { [System.IO.File]::ReadAllText($DurablePortfolioRoutesFile) } else { '' }
+$PaperLifecycleTextH = if (Test-Path -LiteralPath $PaperLifecycleRoutesFile) { [System.IO.File]::ReadAllText($PaperLifecycleRoutesFile) } else { '' }
+$PortfolioProvenanceTextH = if (Test-Path -LiteralPath $PortfolioProvenanceFileG) { [System.IO.File]::ReadAllText($PortfolioProvenanceFileG) } else { '' }
+$GuiValidatorTextH = if (Test-Path -LiteralPath $GuiValidatorFileG) { [System.IO.File]::ReadAllText($GuiValidatorFileG) } else { '' }
+$ReadOnlyApiTestFile = Join-Path $RepoRoot 'core-rs\crates\mqk-daemon\tests\scenario_durable_paper_portfolio_read_only_api_01.rs'
+$ReadOnlyApiTestTextH = if (Test-Path -LiteralPath $ReadOnlyApiTestFile) { [System.IO.File]::ReadAllText($ReadOnlyApiTestFile) } else { '' }
+
+Write-Host ''
+Show-Info '--- [37] Shared read-side snapshot-authority validator exists ---'
+if ($PortfolioProvenanceTextH -match 'pub\(crate\) fn validate_run_scoped_snapshot_authority\(' -and
+    $PortfolioProvenanceTextH -match 'pub\(crate\) fn validate_snapshot_scalar_authority\(') {
+    Show-Green "validate_run_scoped_snapshot_authority and validate_snapshot_scalar_authority exist as real functions"
+} else {
+    Show-Fail "Shared read-side snapshot-authority validator function(s) missing"
+}
+
+Write-Host ''
+Show-Info '--- [38] Exact USD/active/run-owned scalar authority is enforced ---'
+$ScalarAuthorityChecks = @(
+    'record\.currency\s*!=\s*"USD"',
+    'record\.truth_state\s*!=\s*"active"',
+    'record\.deployment_mode\s*!=\s*"paper"',
+    'record\.run_id\.is_none\(\)',
+    'snapshot\.snapshot\.run_id\s*!=\s*Some\(resolved_run_id\)'
+)
+foreach ($pattern in $ScalarAuthorityChecks) {
+    if ($PortfolioProvenanceTextH -match $pattern) {
+        Show-Green "Scalar authority check present: $pattern"
+    } else {
+        Show-Fail "Missing scalar authority check: $pattern"
+    }
+}
+
+Write-Host ''
+Show-Info '--- [39] Blank-symbol, duplicate-symbol, invalid-price, and invalid-provenance position refusal ---'
+$PositionAuthorityChecks = @(
+    'trimmed\.is_empty\(\)',
+    'DuplicatePositionSymbol',
+    'position\.qty_signed\s*!=\s*0\s*&&\s*position\.avg_entry_price_micros\s*<=\s*0',
+    'position\.provenance\s*!=\s*mqk_db::PAPER_PORTFOLIO_SNAPSHOT_SOURCE_EXTERNAL_ALPACA'
+)
+foreach ($pattern in $PositionAuthorityChecks) {
+    if ($PortfolioProvenanceTextH -match $pattern) {
+        Show-Green "Position authority check present: $pattern"
+    } else {
+        Show-Fail "Missing position authority check: $pattern"
+    }
+}
+
+Write-Host ''
+Show-Info '--- [40] invalid_snapshot is a real closed-vocabulary state, not just documentation ---'
+if ($PortfolioProvenanceTextH -match 'InvalidSnapshot' -and $PortfolioProvenanceTextH -match '"invalid_snapshot"') {
+    Show-Green "PortfolioProvenanceState::InvalidSnapshot exists and maps to the literal string 'invalid_snapshot'"
+} else {
+    Show-Fail "InvalidSnapshot state not found as real code in portfolio_provenance.rs"
+}
+if ($PortfolioProvenanceTextH -match 'snapshot_invalid:\s*bool') {
+    Show-Green "classify_portfolio_provenance threads a snapshot_invalid flag (checked before the accounting row)"
+} else {
+    Show-Fail "classify_portfolio_provenance does not visibly accept a snapshot_invalid flag"
+}
+
+Write-Host ''
+Show-Info '--- [41] Every affected route calls the shared validator and fails closed ---'
+if ($DurablePortfolioTextH -match 'validate_run_scoped_snapshot_authority' -and
+    (($DurablePortfolioTextH | Select-String -Pattern 'validate_run_scoped_snapshot_authority' -AllMatches).Matches.Count -ge 2)) {
+    Show-Green "durable_portfolio.rs calls validate_run_scoped_snapshot_authority for both summary and positions"
+} else {
+    Show-Fail "durable_portfolio.rs does not visibly call validate_run_scoped_snapshot_authority at least twice (summary + positions)"
+}
+if ($DurablePortfolioTextH -match 'validate_snapshot_scalar_authority') {
+    Show-Green "durable_portfolio.rs (durable-snapshots history) calls validate_snapshot_scalar_authority"
+} else {
+    Show-Fail "durable_portfolio.rs does not call validate_snapshot_scalar_authority for the history surface"
+}
+if ($PaperLifecycleTextH -match 'validate_run_scoped_snapshot_authority') {
+    Show-Green "paper_lifecycle.rs calls validate_run_scoped_snapshot_authority"
+} else {
+    Show-Fail "paper_lifecycle.rs does not call validate_run_scoped_snapshot_authority"
+}
+if ($DurablePortfolioTextH -match 'invalid_snapshot_summary\(' -and
+    $DurablePortfolioTextH -match 'fn invalid_snapshot_summary\(') {
+    Show-Green "durable-summary has a dedicated invalid_snapshot response builder that nulls every financial/accounting field"
+} else {
+    Show-Fail "durable-summary has no dedicated invalid_snapshot response builder"
+}
+
+Write-Host ''
+Show-Info '--- [42] GUI closed-state and history scalar-authority validation ---'
+if ($GuiValidatorTextH -match "'invalid_snapshot'" -or $GuiValidatorTextH -match '"invalid_snapshot"') {
+    Show-Green "durablePortfolio.ts closed vocabulary includes invalid_snapshot"
+} else {
+    Show-Fail "durablePortfolio.ts closed vocabulary is missing invalid_snapshot"
+}
+if ($GuiValidatorTextH -match 's\.deployment_mode\s*===\s*"paper"' -and
+    $GuiValidatorTextH -match 's\.source\s*===\s*"external_alpaca"' -and
+    $GuiValidatorTextH -match 's\.currency\s*===\s*"USD"' -and
+    $GuiValidatorTextH -match 'isString\(s\.run_id\)') {
+    Show-Green "isValidSnapshotRow enforces exact paper/external_alpaca/USD and non-null run_id on every history row"
+} else {
+    Show-Fail "isValidSnapshotRow does not visibly enforce exact scalar authority on every history row"
+}
+if ($GuiValidatorTextH -match 'truth_state\s*===\s*"invalid_snapshot"') {
+    Show-Green "durablePortfolio.ts contains an invalid_snapshot-specific state invariant"
+} else {
+    Show-Fail "durablePortfolio.ts does not visibly branch on invalid_snapshot"
+}
+
+Write-Host ''
+Show-Info '--- [43] Required read-side authority scenario tests exist ---'
+$RequiredAuthorityTests = @(
+    'durable_summary_rejects_non_usd_currency_snapshot',
+    'durable_summary_rejects_non_active_truth_state_snapshot',
+    'durable_snapshots_history_fails_closed_on_null_run_id_row',
+    'durable_summary_and_positions_reject_blank_position_symbol',
+    'durable_summary_rejects_nonzero_qty_with_non_positive_avg_price',
+    'durable_summary_rejects_position_provenance_not_external_alpaca',
+    'durable_summary_malformed_snapshot_with_matching_accounting_cannot_expose_active_pnl',
+    'paper_lifecycle_cannot_report_durable_pnl_available_from_invalid_snapshot',
+    'durable_positions_returns_no_rows_for_invalid_snapshot',
+    'durable_snapshots_history_fails_whole_wrapper_closed_on_one_malformed_row',
+    'durable_summary_and_positions_remain_active_for_a_fully_valid_snapshot',
+    'invalid_snapshot_routes_perform_zero_writes'
+)
+foreach ($testName in $RequiredAuthorityTests) {
+    if ($ReadOnlyApiTestTextH -match "fn $testName\(") {
+        Show-Green "Required test present: $testName"
+    } else {
+        Show-Fail "Missing required test: $testName"
+    }
+}
+
+Write-Host ''
+Show-Info '--- [44] No migration, broker adapter, order-submission, strategy, or risk-limit change in this repair ---'
+# Reuses the same fixed starting-commit authority as [35]/[36] -- this
+# repair lands strictly after that commit, so the existing diff range
+# already covers it; re-asserted here as an explicit, separately-named
+# check for this repair's own closure evidence.
+if ($null -eq $MigrationDiffFilesClean -or @($MigrationDiffFilesClean).Count -eq 0) {
+    Show-Green "No migration file changed by this repair (reusing the [35] fixed-range check)"
+} else {
+    Show-Fail "Migration file(s) changed: $($MigrationDiffFilesClean -join ', ')"
+}
+if ($null -eq $OutOfScopePaths -or @($OutOfScopePaths).Count -eq 0) {
+    Show-Green "No broker adapter, strategy, risk, or execution-core file changed by this repair (reusing the [36] fixed-range check)"
+} else {
+    Show-Fail "Out-of-scope file(s) changed: $($OutOfScopePaths -join ', ')"
+}
+
 Write-Host ''
 Write-Host '============================================================'
 if ($Violations -gt 0) {

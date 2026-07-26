@@ -156,6 +156,77 @@ async fn cleanup_run(pool: &sqlx::PgPool, run_id: Uuid) {
         .await;
 }
 
+/// Deletes exactly one snapshot row (and its position children) by
+/// `snapshot_id` -- used for the B4 final read-side authority repair's
+/// `run_id = NULL` scalar-authority fixtures, which `cleanup_run` (scoped by
+/// `run_id`) cannot reach.
+async fn cleanup_snapshot(pool: &sqlx::PgPool, snapshot_id: Uuid) {
+    let _ =
+        sqlx::query("delete from sys_paper_portfolio_snapshot_positions where snapshot_id = $1")
+            .bind(snapshot_id)
+            .execute(pool)
+            .await;
+    let _ = sqlx::query("delete from sys_paper_portfolio_snapshots where snapshot_id = $1")
+        .bind(snapshot_id)
+        .execute(pool)
+        .await;
+}
+
+/// Inserts a durable snapshot with fully caller-controlled
+/// currency/truth_state/positions/run_id -- directly constructs a legacy or
+/// malformed row exactly as `insert_or_confirm_paper_portfolio_snapshot`
+/// permits (it validates only `source`, never currency/truth_state/position
+/// content), proving the B4 final read-side authority repair's read-side
+/// validator is what catches these, not the write path.
+#[allow(clippy::too_many_arguments)]
+async fn seed_snapshot_raw(
+    pool: &sqlx::PgPool,
+    run_id: Option<Uuid>,
+    captured_at_utc: chrono::DateTime<Utc>,
+    currency: &str,
+    truth_state: &str,
+    positions: Vec<mqk_db::PaperPortfolioSnapshotPosition>,
+) -> Uuid {
+    let snapshot_id = Uuid::new_v5(
+        &Uuid::NAMESPACE_DNS,
+        format!(
+            "mqk.paper-portfolio-snapshot.raw.v1|{run_id:?}|{}",
+            captured_at_utc.to_rfc3339(),
+        )
+        .as_bytes(),
+    );
+    match mqk_db::insert_or_confirm_paper_portfolio_snapshot(
+        pool,
+        mqk_db::NewPaperPortfolioSnapshot {
+            snapshot_id,
+            captured_at_utc,
+            deployment_mode: "paper".to_string(),
+            source: mqk_db::PAPER_PORTFOLIO_SNAPSHOT_SOURCE_EXTERNAL_ALPACA.to_string(),
+            equity_micros: 100_000_000_000,
+            cash_micros: 40_000_000_000,
+            currency: currency.to_string(),
+            truth_state: truth_state.to_string(),
+            run_id,
+            operation_id: None,
+            positions,
+        },
+    )
+    .await
+    .expect("raw snapshot insert should succeed")
+    {
+        mqk_db::InsertPaperPortfolioSnapshotOutcome::Inserted { record, .. } => record.snapshot_id,
+        mqk_db::InsertPaperPortfolioSnapshotOutcome::AlreadyExists { record } => record.snapshot_id,
+        mqk_db::InsertPaperPortfolioSnapshotOutcome::Conflict { detail } => {
+            panic!("raw snapshot insert conflicted: {detail}")
+        }
+    }
+}
+
+fn far_future_ts(seed_offset_minutes: i64) -> chrono::DateTime<Utc> {
+    Utc.with_ymd_and_hms(2199, 1, 1, 0, 0, 0).unwrap()
+        + chrono::Duration::minutes(seed_offset_minutes)
+}
+
 async fn seed_snapshot(
     pool: &sqlx::PgPool,
     run_id: Uuid,
@@ -1126,6 +1197,544 @@ async fn repeated_gets_across_all_durable_routes_never_mutate_any_row() {
     assert_eq!(
         before, after,
         "repeated GETs across every durable route must produce zero row-count delta"
+    );
+
+    cleanup_run(&pool, run_id).await;
+}
+
+// ---------------------------------------------------------------------------
+// DURABLE-PAPER-PORTFOLIO-AND-PNL-01-FINAL-READ-SIDE-AUTHORITY-REPAIR
+//
+// Every test below directly constructs (via `seed_snapshot_raw`, which -- like
+// `insert_or_confirm_paper_portfolio_snapshot` itself -- validates only
+// `source`, never currency/truth_state/position content) a legacy or
+// malformed durable row that could not be *newly written* through the
+// hardened write seam, then proves the READ seams independently fail closed
+// on it rather than trusting `deployment_mode`/`source`/`run_id` alone.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored --test-threads=1"]
+async fn durable_summary_rejects_non_usd_currency_snapshot() {
+    let pool = test_pool().await;
+    let run_id = fixed_run_id("durable_summary_rejects_non_usd_currency_snapshot");
+    seed_run(&pool, run_id, far_future_ts(0)).await;
+    seed_snapshot_raw(
+        &pool,
+        Some(run_id),
+        far_future_ts(1),
+        "EUR",
+        "active",
+        vec![],
+    )
+    .await;
+
+    let router = router_with_pool(pool.clone());
+    let (status, body) = call(
+        router,
+        get(&format!(
+            "/api/v1/portfolio/durable-summary?run_id={run_id}"
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let json = parse_json(body);
+    assert_eq!(json["truth_state"], "invalid_snapshot");
+    assert_eq!(json["snapshot_truth_state"], "invalid_snapshot");
+    assert_eq!(json["accounting_truth_state"], "invalid_snapshot");
+    assert!(json["account_equity"].is_null());
+    assert!(json["cash"].is_null());
+    assert!(json["currency"].is_null());
+    assert!(json["realized_pnl"].is_null());
+    assert!(!json["blockers"].as_array().unwrap().is_empty());
+
+    cleanup_run(&pool, run_id).await;
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored --test-threads=1"]
+async fn durable_summary_rejects_non_active_truth_state_snapshot() {
+    let pool = test_pool().await;
+    let run_id = fixed_run_id("durable_summary_rejects_non_active_truth_state_snapshot");
+    seed_run(&pool, run_id, far_future_ts(0)).await;
+    seed_snapshot_raw(
+        &pool,
+        Some(run_id),
+        far_future_ts(1),
+        "USD",
+        "quarantined",
+        vec![],
+    )
+    .await;
+
+    let router = router_with_pool(pool.clone());
+    let (status, body) = call(
+        router,
+        get(&format!(
+            "/api/v1/portfolio/durable-summary?run_id={run_id}"
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let json = parse_json(body);
+    assert_eq!(json["truth_state"], "invalid_snapshot");
+    assert!(json["account_equity"].is_null());
+
+    cleanup_run(&pool, run_id).await;
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored --test-threads=1"]
+async fn durable_snapshots_history_fails_closed_on_null_run_id_row() {
+    let pool = test_pool().await;
+    let snapshot_id =
+        seed_snapshot_raw(&pool, None, far_future_ts(10), "USD", "active", vec![]).await;
+
+    let router = router_with_pool(pool.clone());
+    let (status, body) = call(router, get("/api/v1/portfolio/durable-snapshots?limit=1")).await;
+    assert_eq!(status, StatusCode::OK);
+    let json = parse_json(body);
+    assert_eq!(
+        json["truth_state"], "invalid_snapshot",
+        "a null run_id row (fetch_latest_paper_portfolio_snapshot_for_run permits this table shape, \
+         even though the run-scoped query itself never matches it) must fail the history wrapper closed: {json}"
+    );
+    assert_eq!(json["snapshots"].as_array().unwrap().len(), 0);
+
+    cleanup_snapshot(&pool, snapshot_id).await;
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored --test-threads=1"]
+async fn durable_summary_and_positions_reject_blank_position_symbol() {
+    let pool = test_pool().await;
+    let run_id = fixed_run_id("durable_summary_and_positions_reject_blank_position_symbol");
+    seed_run(&pool, run_id, far_future_ts(0)).await;
+    seed_snapshot_raw(
+        &pool,
+        Some(run_id),
+        far_future_ts(1),
+        "USD",
+        "active",
+        vec![mqk_db::PaperPortfolioSnapshotPosition {
+            symbol: "   ".to_string(),
+            qty_signed: 10,
+            avg_entry_price_micros: 150_000_000,
+            provenance: mqk_db::PAPER_PORTFOLIO_SNAPSHOT_SOURCE_EXTERNAL_ALPACA.to_string(),
+        }],
+    )
+    .await;
+
+    let router = router_with_pool(pool.clone());
+
+    let (status, body) = call(
+        router.clone(),
+        get(&format!(
+            "/api/v1/portfolio/durable-summary?run_id={run_id}"
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(parse_json(body)["truth_state"], "invalid_snapshot");
+
+    let (status, body) = call(
+        router,
+        get(&format!(
+            "/api/v1/portfolio/durable-positions?run_id={run_id}"
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let json = parse_json(body);
+    assert_eq!(json["truth_state"], "invalid_snapshot");
+    assert_eq!(json["positions"].as_array().unwrap().len(), 0);
+
+    cleanup_run(&pool, run_id).await;
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored --test-threads=1"]
+async fn durable_summary_rejects_nonzero_qty_with_non_positive_avg_price() {
+    let pool = test_pool().await;
+    let run_id = fixed_run_id("durable_summary_rejects_nonzero_qty_with_non_positive_avg_price");
+    seed_run(&pool, run_id, far_future_ts(0)).await;
+    seed_snapshot_raw(
+        &pool,
+        Some(run_id),
+        far_future_ts(1),
+        "USD",
+        "active",
+        vec![mqk_db::PaperPortfolioSnapshotPosition {
+            symbol: "AAPL".to_string(),
+            qty_signed: 10,
+            avg_entry_price_micros: 0,
+            provenance: mqk_db::PAPER_PORTFOLIO_SNAPSHOT_SOURCE_EXTERNAL_ALPACA.to_string(),
+        }],
+    )
+    .await;
+
+    let router = router_with_pool(pool.clone());
+    let (status, body) = call(
+        router,
+        get(&format!(
+            "/api/v1/portfolio/durable-summary?run_id={run_id}"
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(parse_json(body)["truth_state"], "invalid_snapshot");
+
+    cleanup_run(&pool, run_id).await;
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored --test-threads=1"]
+async fn durable_summary_rejects_position_provenance_not_external_alpaca() {
+    let pool = test_pool().await;
+    let run_id = fixed_run_id("durable_summary_rejects_position_provenance_not_external_alpaca");
+    seed_run(&pool, run_id, far_future_ts(0)).await;
+    seed_snapshot_raw(
+        &pool,
+        Some(run_id),
+        far_future_ts(1),
+        "USD",
+        "active",
+        vec![mqk_db::PaperPortfolioSnapshotPosition {
+            symbol: "AAPL".to_string(),
+            qty_signed: 10,
+            avg_entry_price_micros: 150_000_000,
+            provenance: "manual_override".to_string(),
+        }],
+    )
+    .await;
+
+    let router = router_with_pool(pool.clone());
+    let (status, body) = call(
+        router,
+        get(&format!(
+            "/api/v1/portfolio/durable-summary?run_id={run_id}"
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(parse_json(body)["truth_state"], "invalid_snapshot");
+
+    cleanup_run(&pool, run_id).await;
+}
+
+/// A malformed selected snapshot paired with a fully well-formed, matching
+/// accounting row must never expose active realized P&L -- the accounting
+/// write seam validates `run_id`/`deployment_mode`/`source`/`currency` on
+/// its source snapshot (mqk-db `fetch_snapshot_authority_tx`) but not
+/// `truth_state` or position content, so this combination is reachable
+/// through the existing write path and must be caught here, read-side.
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored --test-threads=1"]
+async fn durable_summary_malformed_snapshot_with_matching_accounting_cannot_expose_active_pnl() {
+    let pool = test_pool().await;
+    let run_id = fixed_run_id(
+        "durable_summary_malformed_snapshot_with_matching_accounting_cannot_expose_active_pnl",
+    );
+    seed_run(&pool, run_id, far_future_ts(0)).await;
+    let snapshot_id = seed_snapshot_raw(
+        &pool,
+        Some(run_id),
+        far_future_ts(1),
+        "USD",
+        "quarantined",
+        vec![],
+    )
+    .await;
+    seed_accounting(&pool, run_id, "complete", snapshot_id).await;
+
+    let router = router_with_pool(pool.clone());
+    let (status, body) = call(
+        router,
+        get(&format!(
+            "/api/v1/portfolio/durable-summary?run_id={run_id}"
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let json = parse_json(body);
+    assert_eq!(json["truth_state"], "invalid_snapshot");
+    assert_eq!(json["accounting_truth_state"], "invalid_snapshot");
+    assert!(
+        json["realized_pnl"].is_null(),
+        "a malformed snapshot must never be paired with an accounting row, however well-formed: {json}"
+    );
+
+    cleanup_run(&pool, run_id).await;
+}
+
+/// Same malformed-snapshot-plus-matching-accounting scenario as above, but
+/// through the paper-lifecycle route: a fill has occurred, so without this
+/// repair `overall_lifecycle_state` would read
+/// `"order_filled_portfolio_durable_pnl_available"`.
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored --test-threads=1"]
+async fn paper_lifecycle_cannot_report_durable_pnl_available_from_invalid_snapshot() {
+    let pool = test_pool().await;
+    let run_id =
+        fixed_run_id("paper_lifecycle_cannot_report_durable_pnl_available_from_invalid_snapshot");
+    let ts = far_future_ts(0);
+    seed_run(&pool, run_id, ts).await;
+    seed_outbox_and_fill(&pool, run_id, ts).await;
+    let snapshot_id = seed_snapshot_raw(
+        &pool,
+        Some(run_id),
+        far_future_ts(1),
+        "USD",
+        "quarantined",
+        vec![],
+    )
+    .await;
+    seed_accounting(&pool, run_id, "complete", snapshot_id).await;
+
+    let router = router_with_pool(pool.clone());
+    let (status, body) = call(
+        router,
+        get(&format!(
+            "/api/v1/execution/paper-lifecycle?run_id={run_id}"
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let json = parse_json(body);
+    assert_eq!(json["portfolio_truth_state"], "invalid_snapshot");
+    assert_eq!(json["pnl_truth_state"], "invalid_snapshot");
+    assert_ne!(
+        json["lifecycle_summary"]["overall_lifecycle_state"],
+        "order_filled_portfolio_durable_pnl_available",
+        "an invalid snapshot must never surface as durable P&L available: {json}"
+    );
+
+    cleanup_run(&pool, run_id).await;
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored --test-threads=1"]
+async fn durable_positions_returns_no_rows_for_invalid_snapshot() {
+    let pool = test_pool().await;
+    let run_id = fixed_run_id("durable_positions_returns_no_rows_for_invalid_snapshot");
+    seed_run(&pool, run_id, far_future_ts(0)).await;
+    seed_snapshot_raw(
+        &pool,
+        Some(run_id),
+        far_future_ts(1),
+        "USD",
+        "active",
+        vec![mqk_db::PaperPortfolioSnapshotPosition {
+            symbol: "AAPL".to_string(),
+            qty_signed: 10,
+            avg_entry_price_micros: 0,
+            provenance: mqk_db::PAPER_PORTFOLIO_SNAPSHOT_SOURCE_EXTERNAL_ALPACA.to_string(),
+        }],
+    )
+    .await;
+
+    let router = router_with_pool(pool.clone());
+    let (status, body) = call(
+        router,
+        get(&format!(
+            "/api/v1/portfolio/durable-positions?run_id={run_id}"
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let json = parse_json(body);
+    assert_eq!(json["truth_state"], "invalid_snapshot");
+    assert_eq!(json["positions"].as_array().unwrap().len(), 0);
+    assert!(
+        json["snapshot_id"].is_null(),
+        "snapshot identity may be omitted from the public response for an invalid snapshot: {json}"
+    );
+
+    cleanup_run(&pool, run_id).await;
+}
+
+/// The history wrapper fails the WHOLE response closed on a single malformed
+/// scalar row -- it never silently drops just the bad row while rendering
+/// the rest as if the surface were fully proven active.
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored --test-threads=1"]
+async fn durable_snapshots_history_fails_whole_wrapper_closed_on_one_malformed_row() {
+    let pool = test_pool().await;
+    let run_id =
+        fixed_run_id("durable_snapshots_history_fails_whole_wrapper_closed_on_one_malformed_row");
+    seed_run(&pool, run_id, far_future_ts(0)).await;
+    // One fully valid row...
+    let valid_id = seed_snapshot(&pool, run_id, far_future_ts(20), 10).await;
+    // ...and one malformed row (non-USD currency), strictly newer.
+    let invalid_id = seed_snapshot_raw(
+        &pool,
+        Some(run_id),
+        far_future_ts(21),
+        "EUR",
+        "active",
+        vec![],
+    )
+    .await;
+
+    let router = router_with_pool(pool.clone());
+    let (status, body) = call(router, get("/api/v1/portfolio/durable-snapshots?limit=2")).await;
+    assert_eq!(status, StatusCode::OK);
+    let json = parse_json(body);
+    assert_eq!(
+        json["truth_state"], "invalid_snapshot",
+        "one malformed row must fail the whole wrapper closed, never silently drop just that row: {json}"
+    );
+    assert_eq!(
+        json["snapshots"].as_array().unwrap().len(),
+        0,
+        "the valid row must not be rendered either once any row in the selected window fails: {json}"
+    );
+
+    cleanup_run(&pool, run_id).await;
+    let _ = valid_id;
+    let _ = invalid_id;
+}
+
+/// A fully valid, well-formed latest snapshot is unaffected by this repair
+/// -- it remains `"active"` (or `"snapshot_stale"`) exactly as before.
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored --test-threads=1"]
+async fn durable_summary_and_positions_remain_active_for_a_fully_valid_snapshot() {
+    let pool = test_pool().await;
+    let run_id =
+        fixed_run_id("durable_summary_and_positions_remain_active_for_a_fully_valid_snapshot");
+    seed_run(&pool, run_id, far_future_ts(0)).await;
+    let snapshot_id = seed_snapshot(&pool, run_id, Utc::now(), 10).await;
+    seed_accounting(&pool, run_id, "complete", snapshot_id).await;
+
+    let router = router_with_pool(pool.clone());
+
+    let (status, body) = call(
+        router.clone(),
+        get(&format!(
+            "/api/v1/portfolio/durable-summary?run_id={run_id}"
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let json = parse_json(body);
+    assert_eq!(json["truth_state"], "active");
+    assert_eq!(json["accounting_truth_state"], "active");
+    assert_eq!(json["realized_pnl"], 40.0);
+
+    let (status, body) = call(
+        router,
+        get(&format!(
+            "/api/v1/portfolio/durable-positions?run_id={run_id}"
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let json = parse_json(body);
+    assert_eq!(json["truth_state"], "active");
+    assert_eq!(json["positions"].as_array().unwrap().len(), 1);
+
+    cleanup_run(&pool, run_id).await;
+}
+
+/// Every affected GET route (durable-summary, durable-positions,
+/// durable-snapshots, paper-lifecycle) performs zero writes even on the
+/// invalid_snapshot fail-closed path.
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored --test-threads=1"]
+async fn invalid_snapshot_routes_perform_zero_writes() {
+    let pool = test_pool().await;
+    let run_id = fixed_run_id("invalid_snapshot_routes_perform_zero_writes");
+    let ts = far_future_ts(0);
+    seed_run(&pool, run_id, ts).await;
+    seed_outbox_and_fill(&pool, run_id, ts).await;
+    let snapshot_id = seed_snapshot_raw(
+        &pool,
+        Some(run_id),
+        far_future_ts(1),
+        "USD",
+        "quarantined",
+        vec![],
+    )
+    .await;
+    seed_accounting(&pool, run_id, "complete", snapshot_id).await;
+
+    async fn counts(pool: &sqlx::PgPool, run_id: Uuid) -> (i64, i64, i64, i64, i64, i64) {
+        let snapshots: i64 = sqlx::query_scalar(
+            "select count(*) from sys_paper_portfolio_snapshots where run_id = $1",
+        )
+        .bind(run_id)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        let positions: i64 = sqlx::query_scalar(
+            "select count(*) from sys_paper_portfolio_snapshot_positions where snapshot_id in (select snapshot_id from sys_paper_portfolio_snapshots where run_id = $1)",
+        )
+        .bind(run_id)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        let accounting: i64 = sqlx::query_scalar(
+            "select count(*) from sys_paper_portfolio_accounting_state where run_id = $1",
+        )
+        .bind(run_id)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        let outbox: i64 = sqlx::query_scalar("select count(*) from oms_outbox where run_id = $1")
+            .bind(run_id)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        let inbox: i64 = sqlx::query_scalar("select count(*) from oms_inbox where run_id = $1")
+            .bind(run_id)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        let runs: i64 = sqlx::query_scalar("select count(*) from runs where run_id = $1")
+            .bind(run_id)
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        (snapshots, positions, accounting, outbox, inbox, runs)
+    }
+
+    let before = counts(&pool, run_id).await;
+
+    let router = router_with_pool(pool.clone());
+    for _ in 0..3 {
+        let _ = call(
+            router.clone(),
+            get(&format!(
+                "/api/v1/portfolio/durable-summary?run_id={run_id}"
+            )),
+        )
+        .await;
+        let _ = call(
+            router.clone(),
+            get(&format!(
+                "/api/v1/portfolio/durable-positions?run_id={run_id}"
+            )),
+        )
+        .await;
+        let _ = call(
+            router.clone(),
+            get("/api/v1/portfolio/durable-snapshots?limit=5"),
+        )
+        .await;
+        let _ = call(
+            router.clone(),
+            get(&format!(
+                "/api/v1/execution/paper-lifecycle?run_id={run_id}"
+            )),
+        )
+        .await;
+    }
+
+    let after = counts(&pool, run_id).await;
+    assert_eq!(
+        before, after,
+        "repeated GETs on the invalid_snapshot fail-closed path must produce zero row-count delta"
     );
 
     cleanup_run(&pool, run_id).await;

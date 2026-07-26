@@ -36,6 +36,7 @@ export const DURABLE_SUMMARY_TRUTH_STATES = [
   "query_failed",
   "not_found",
   "unsupported_source",
+  "invalid_snapshot",
 ] as const;
 export type DurableSummaryTruthState = (typeof DURABLE_SUMMARY_TRUTH_STATES)[number];
 
@@ -52,6 +53,7 @@ export const DURABLE_ACCOUNTING_TRUTH_STATES = [
   "db_unavailable",
   "query_failed",
   "unsupported_source",
+  "invalid_snapshot",
 ] as const;
 export type DurableAccountingTruthState = (typeof DURABLE_ACCOUNTING_TRUTH_STATES)[number];
 
@@ -60,6 +62,7 @@ export const DURABLE_UNREALIZED_PNL_TRUTH_STATES = [
   "snapshot_unavailable",
   "db_unavailable",
   "mark_unavailable",
+  "invalid_snapshot",
 ] as const;
 export type DurableUnrealizedPnlTruthState = (typeof DURABLE_UNREALIZED_PNL_TRUTH_STATES)[number];
 
@@ -69,6 +72,7 @@ export const DURABLE_DAILY_PNL_TRUTH_STATES = [
   "db_unavailable",
   "baseline_unavailable",
   "stale_baseline",
+  "invalid_snapshot",
 ] as const;
 export type DurableDailyPnlTruthState = (typeof DURABLE_DAILY_PNL_TRUTH_STATES)[number];
 
@@ -80,10 +84,16 @@ export const DURABLE_POSITIONS_TRUTH_STATES = [
   "query_failed",
   "not_found",
   "unsupported_source",
+  "invalid_snapshot",
 ] as const;
 export type DurablePositionsTruthState = (typeof DURABLE_POSITIONS_TRUTH_STATES)[number];
 
-export const DURABLE_SNAPSHOTS_TRUTH_STATES = ["active", "db_unavailable", "query_failed"] as const;
+export const DURABLE_SNAPSHOTS_TRUTH_STATES = [
+  "active",
+  "db_unavailable",
+  "query_failed",
+  "invalid_snapshot",
+] as const;
 export type DurableSnapshotsTruthState = (typeof DURABLE_SNAPSHOTS_TRUTH_STATES)[number];
 
 // Each individual snapshot-history row's own `truth_state` column -- the
@@ -230,6 +240,16 @@ export function parseDurablePortfolioSummary(raw: unknown): DurablePortfolioSumm
     }
   }
 
+  // B4 final read-side authority repair: `invalid_snapshot` must never
+  // carry active/stale financial truth -- a response claiming
+  // invalid_snapshot but smuggling a non-null account_equity/cash fails
+  // closed here rather than being trusted and rendered.
+  if (r.snapshot_truth_state === "invalid_snapshot") {
+    if (r.account_equity !== null || r.cash !== null) {
+      return reject();
+    }
+  }
+
   // C3: an "active" accounting/P&L truth must carry a proven, matching
   // snapshot provenance and a finite realized P&L -- this is the exact
   // invariant the B4 closure repair's shared classifier guarantees
@@ -313,6 +333,13 @@ export function parseDurablePortfolioPositions(raw: unknown): DurablePortfolioPo
     }
   }
 
+  // B4 final read-side authority repair: invalid_snapshot must never carry
+  // position rows -- a response smuggling positions alongside
+  // invalid_snapshot fails closed rather than being rendered.
+  if (r.truth_state === "invalid_snapshot" && (r.positions as unknown[]).length > 0) {
+    return reject();
+  }
+
   return {
     truth_state: r.truth_state as DurablePositionsTruthState,
     snapshot_id: r.snapshot_id as string | null,
@@ -322,19 +349,29 @@ export function parseDurablePortfolioPositions(raw: unknown): DurablePortfolioPo
   };
 }
 
+// B4 final read-side authority repair: every row on the history surface is
+// individually authoritative-or-nothing -- `DURABLE_SNAPSHOT_ROW_TRUTH_STATES`
+// only ever admits `"active"` for a row's own `truth_state`, so this
+// validator enforces the full scalar authority contract (exact
+// deployment_mode/source/currency, non-null run_id, finite equity/cash) on
+// every row, matching the daemon's own per-row scalar authority check
+// (`routes/portfolio_provenance.rs::validate_snapshot_scalar_authority`) --
+// a row with the "right shape" but the wrong deployment_mode/source/currency
+// or a null run_id must fail closed here too, never rendered as if it were
+// proven paper+Alpaca+USD truth.
 function isValidSnapshotRow(v: unknown): v is DurablePortfolioSnapshotRow {
   if (!v || typeof v !== "object") return false;
   const s = v as Record<string, unknown>;
   return (
     isString(s.snapshot_id) &&
     isString(s.captured_at_utc) &&
-    isString(s.deployment_mode) &&
-    isString(s.source) &&
+    s.deployment_mode === "paper" &&
+    s.source === "external_alpaca" &&
     isFiniteNumber(s.equity) &&
     isFiniteNumber(s.cash) &&
-    isString(s.currency) &&
+    s.currency === "USD" &&
     isEnumValue(s.truth_state, DURABLE_SNAPSHOT_ROW_TRUTH_STATES) &&
-    isNullableString(s.run_id) &&
+    isString(s.run_id) &&
     isNullableString(s.operation_id)
   );
 }
@@ -348,6 +385,14 @@ export function parseDurablePortfolioSnapshots(raw: unknown): DurablePortfolioSn
 
   if (!isEnumValue(r.truth_state, DURABLE_SNAPSHOTS_TRUTH_STATES)) return reject();
   if (!Array.isArray(r.snapshots) || !r.snapshots.every(isValidSnapshotRow)) return reject();
+
+  // B4 final read-side authority repair: the daemon fails the whole wrapper
+  // closed (truth_state = invalid_snapshot, snapshots = []) on any
+  // authority-invalid row rather than dropping only that row -- a response
+  // smuggling rows alongside invalid_snapshot fails closed here too.
+  if (r.truth_state === "invalid_snapshot" && (r.snapshots as unknown[]).length > 0) {
+    return reject();
+  }
 
   return {
     truth_state: r.truth_state as DurableSnapshotsTruthState,

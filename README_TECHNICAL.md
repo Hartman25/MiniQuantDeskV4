@@ -703,9 +703,32 @@ same-watermark accounting staleness, unconfirmed-snapshot accounting, one-direct
 leaked/collapsed API errors, and a Bundle-3-guard live canary) which
 `DURABLE-PAPER-PORTFOLIO-AND-PNL-01-FINAL-RUN-SCOPING-ACCOUNTING-AND-CLOSURE-REPAIR` closes in one
 commit (see `MiniQuantDesk_Master_Patch_Ledger_v2.md` and the per-phase spec addenda under
-`docs/specs/durable_paper_portfolio_and_pnl_01*.md`). B4-B through B4-G are now **final repair
-implementation complete, awaiting ChatGPT and operator acceptance**; Bundle 4 remains not accepted
-or closed.
+`docs/specs/durable_paper_portfolio_and_pnl_01*.md`).
+
+A further pass, `DURABLE-PAPER-PORTFOLIO-AND-PNL-01-FINAL-COHERENCE-AND-ACCEPTANCE-PROOF`, closed
+remaining source-proven coherence gaps: transactional source-snapshot integrity and deterministic
+snapshot-authority ordering on every accounting write; one shared provenance classifier
+(`routes/portfolio_provenance.rs::classify_portfolio_provenance`) used identically by durable-summary
+and paper-lifecycle; and closed GUI truth-state vocabularies with non-finite/non-integral numeric
+rejection and snapshot-id (not just run-id) cross-response consistency.
+
+A final read-side authority repair,
+`DURABLE-PAPER-PORTFOLIO-AND-PNL-01-FINAL-READ-SIDE-AUTHORITY-REPAIR`, closed the remaining
+confirmed gap: the write seam already refused to *persist* an invalid authoritative snapshot (wrong
+currency, runless, blank position symbol, non-positive average entry price, wrong provenance), but
+every durable read route (`durable-summary`, `durable-positions`, `durable-snapshots`,
+`paper-lifecycle`) still selected the latest run-scoped row using only `deployment_mode`/`source`/
+`run_id`, never independently re-validating its currency, stored `truth_state`, or position content.
+Two new shared, pure validators (`validate_run_scoped_snapshot_authority`/
+`validate_snapshot_scalar_authority` in `routes/portfolio_provenance.rs`) are now called by all four
+routes; an eighth closed provenance state, `invalid_snapshot`, is checked before any accounting row
+is even matched (so a malformed snapshot can never be paired with one) and is architecturally
+unreachable as `order_filled_portfolio_durable_pnl_available` (the lifecycle classifier's match is
+exhaustive over the new state — a compiler guarantee, not a convention). No fallback to an older
+snapshot anywhere: the selected latest row fails closed in place, so corruption stays visible instead
+of masked. 12 new DB-backed scenario tests, 20 new pure unit tests, and 11 new GUI tests prove this.
+B4-B through B4-G are now **final read-side authority repair and closure proof complete, awaiting
+ChatGPT and operator acceptance**; Bundle 4 remains not accepted or closed.
 
 ### Operational meaning
 

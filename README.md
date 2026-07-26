@@ -522,13 +522,32 @@ integral numeric rejection, state invariants, and snapshot-id (not just
 run-id) cross-response consistency (mqk-gui). See the ledger for full
 per-phase detail.
 
+A final read-side authority repair,
+`DURABLE-PAPER-PORTFOLIO-AND-PNL-01-FINAL-READ-SIDE-AUTHORITY-REPAIR`,
+closes the remaining confirmed gap: the write seam already refused to
+*persist* an invalid authoritative snapshot, but every durable read route
+still selected the latest run-scoped row by `deployment_mode`/`source`/
+`run_id` alone, without independently re-validating its currency,
+`truth_state`, or position content. One new shared validator
+(`validate_run_scoped_snapshot_authority`/`validate_snapshot_scalar_authority`
+in `routes/portfolio_provenance.rs`) is now called by durable-summary,
+durable-positions, durable-snapshots, and paper-lifecycle; an eighth closed
+provenance state, `invalid_snapshot`, is architecturally unreachable-as-active
+(the lifecycle classifier's match is exhaustive over it, a compiler
+guarantee) and never paired with an accounting row. No fallback to an older
+snapshot: the selected latest row fails closed in place. 12 new DB-backed
+scenario tests, 20 new pure unit tests, and 11 new GUI tests prove this,
+including a malformed snapshot paired with a fully well-formed matching
+accounting row still cannot expose active realized P&L. See the ledger for
+full detail.
+
 ```text
 B4-0: ACCEPTED — COMPLETE
 B4-A: ACCEPTED — COMPLETE
-B4-B–B4-G: FINAL REPAIR AND CLOSURE PROOF COMPLETE — AWAITING CHATGPT/OPERATOR ACCEPTANCE
+B4-B–B4-G: FINAL READ-SIDE AUTHORITY REPAIR AND CLOSURE PROOF COMPLETE — AWAITING CHATGPT/OPERATOR ACCEPTANCE
 
 BUNDLE 4:
-FINAL REPAIR AND CLOSURE PROOF COMPLETE —
+FINAL READ-SIDE AUTHORITY REPAIR AND CLOSURE PROOF COMPLETE —
 AWAITING FINAL CHATGPT AND OPERATOR ACCEPTANCE
 
 BUNDLE 5: NOT STARTED

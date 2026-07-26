@@ -33,7 +33,9 @@ use uuid::Uuid;
 use super::durable_portfolio::{
     resolve_run, RunResolution, INVALID_RUN_ID_MESSAGE, QUERY_FAILED_MESSAGE,
 };
-use super::portfolio_provenance::{classify_portfolio_provenance, PortfolioProvenanceState};
+use super::portfolio_provenance::{
+    classify_portfolio_provenance, validate_run_scoped_snapshot_authority, PortfolioProvenanceState,
+};
 use crate::api_types::{
     PaperLifecycleInboxRow, PaperLifecycleNoTradeDiagnosticRow, PaperLifecycleOutboxRow,
     PaperLifecycleResponse, PaperLifecycleRunRow, PaperLifecycleSignalEvaluationRow,
@@ -215,7 +217,21 @@ pub(crate) async fn execution_paper_lifecycle(
             tracing::warn!(error = %err, run_id = %run_id, "paper_lifecycle_accounting_query_failed");
         }
 
+        // B4 final read-side authority repair: the same shared validator
+        // durable-summary/durable-positions use -- a selected snapshot that
+        // fails authority validation (wrong currency, non-active
+        // truth_state, blank/duplicate/invalid-provenance position, run_id
+        // mismatch) must never be paired with an accounting row, and the
+        // overall lifecycle must never report durable P&L as available from
+        // it. No fallback to an older snapshot.
+        let snapshot_invalid = snapshot_result
+            .as_ref()
+            .ok()
+            .and_then(|s| s.as_ref())
+            .is_some_and(|s| validate_run_scoped_snapshot_authority(s, run_id).is_err());
+
         let portfolio_state = match &snapshot_result {
+            Ok(Some(_)) if snapshot_invalid => PortfolioProvenanceState::InvalidSnapshot.as_str(),
             Ok(Some(_)) => "active",
             Ok(None) => "snapshot_unavailable",
             Err(_) => "query_failed",
@@ -233,12 +249,16 @@ pub(crate) async fn execution_paper_lifecycle(
         // currently selected for this run) be caught as
         // accounting_snapshot_mismatch here too, instead of a
         // hand-rolled comparison that never checked snapshot identity at
-        // all (the exact defect this repair closes).
+        // all (the exact defect this repair closes). `snapshot_invalid`
+        // (B4 final read-side authority repair) is checked by the
+        // classifier before the accounting row is even matched, so an
+        // invalid snapshot can never be paired with accounting here either.
         let pnl_provenance = classify_portfolio_provenance(
             is_paper_mode,
             snapshot_query_failed,
             accounting_query_failed,
             snapshot_id,
+            snapshot_invalid,
             accounting.as_ref(),
         );
         (portfolio_state, pnl_provenance)
@@ -375,9 +395,13 @@ fn truth_label(count: usize) -> String {
 ///   exists whose fill history doesn't fully explain it:
 ///   `"order_filled_portfolio_durable_pnl_incomplete"`.
 /// - every other state (`NotFound`, `AccountingEpochUnavailable`,
-///   `AccountingSnapshotMismatch`, `QueryFailed`, `UnsupportedSource`) —
-///   durable P&L truth is not yet provably available either way:
-///   `"order_filled_pnl_pending"`.
+///   `AccountingSnapshotMismatch`, `QueryFailed`, `UnsupportedSource`,
+///   `InvalidSnapshot`) — durable P&L truth is not yet provably available
+///   either way: `"order_filled_pnl_pending"`. `InvalidSnapshot` (B4 final
+///   read-side authority repair) is grouped here by construction (Rust match
+///   exhaustiveness), not by convention -- it is architecturally impossible
+///   for this function to report `"order_filled_portfolio_durable_pnl_available"`
+///   from a malformed selected snapshot.
 ///
 /// Returns `(overall_lifecycle_state, full_lifecycle_visible)`.
 fn classify_overall_lifecycle_state(
@@ -399,7 +423,8 @@ fn classify_overall_lifecycle_state(
             | PortfolioProvenanceState::AccountingEpochUnavailable
             | PortfolioProvenanceState::AccountingSnapshotMismatch
             | PortfolioProvenanceState::QueryFailed
-            | PortfolioProvenanceState::UnsupportedSource => "order_filled_pnl_pending",
+            | PortfolioProvenanceState::UnsupportedSource
+            | PortfolioProvenanceState::InvalidSnapshot => "order_filled_pnl_pending",
         };
         return (state.to_string(), true);
     }
@@ -612,6 +637,25 @@ mod tests {
             true,
             true,
             PortfolioProvenanceState::AccountingSnapshotMismatch,
+        );
+        assert_eq!(state, "order_filled_pnl_pending");
+        assert!(visible);
+    }
+
+    /// B4 final read-side authority repair: a malformed selected snapshot
+    /// must never surface as `"order_filled_portfolio_durable_pnl_available"`
+    /// either -- it falls back to pending, exactly like every other
+    /// non-Active/non-FillHistoryIncomplete state.
+    #[test]
+    fn fill_seen_with_invalid_snapshot_is_pnl_pending_not_available() {
+        let (state, visible) = classify_overall_lifecycle_state(
+            3,
+            1,
+            0,
+            1,
+            true,
+            true,
+            PortfolioProvenanceState::InvalidSnapshot,
         );
         assert_eq!(state, "order_filled_pnl_pending");
         assert!(visible);

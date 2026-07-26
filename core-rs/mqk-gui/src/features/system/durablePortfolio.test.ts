@@ -310,8 +310,8 @@ test("parseDurablePortfolioSnapshots preserves history order", () => {
   const raw = {
     truth_state: "active",
     snapshots: [
-      { snapshot_id: "s2", captured_at_utc: "t2", deployment_mode: "paper", source: "external_alpaca", equity: 2, cash: 2, currency: "USD", truth_state: "active", run_id: null, operation_id: null },
-      { snapshot_id: "s1", captured_at_utc: "t1", deployment_mode: "paper", source: "external_alpaca", equity: 1, cash: 1, currency: "USD", truth_state: "active", run_id: null, operation_id: null },
+      { snapshot_id: "s2", captured_at_utc: "t2", deployment_mode: "paper", source: "external_alpaca", equity: 2, cash: 2, currency: "USD", truth_state: "active", run_id: "run-a", operation_id: null },
+      { snapshot_id: "s1", captured_at_utc: "t1", deployment_mode: "paper", source: "external_alpaca", equity: 1, cash: 1, currency: "USD", truth_state: "active", run_id: "run-a", operation_id: null },
     ],
   };
   const parsed = parseDurablePortfolioSnapshots(raw);
@@ -348,6 +348,150 @@ test("parseDurablePortfolioSnapshots fails closed on a non-finite equity in a ro
   };
   const parsed = parseDurablePortfolioSnapshots(raw);
   assert.equal(parsed.truth_state, "db_unavailable");
+});
+
+// ---------------------------------------------------------------------------
+// B4 final read-side authority repair: invalid_snapshot
+// ---------------------------------------------------------------------------
+
+test("parseDurablePortfolioSummary accepts the invalid_snapshot closed state with null financial truth", () => {
+  const parsed = parseDurablePortfolioSummary(
+    validSummaryRaw({
+      truth_state: "invalid_snapshot",
+      snapshot_truth_state: "invalid_snapshot",
+      snapshot_id: null,
+      captured_at_utc: null,
+      source: null,
+      deployment_mode: null,
+      account_equity: null,
+      cash: null,
+      currency: null,
+      accounting_truth_state: "invalid_snapshot",
+      accounting_epoch: null,
+      accounting_epoch_reason: null,
+      accounting_source_snapshot_id: null,
+      last_applied_inbox_id: null,
+      realized_pnl: null,
+      realized_pnl_truth_state: "invalid_snapshot",
+      unrealized_pnl: null,
+      unrealized_pnl_truth_state: "invalid_snapshot",
+      daily_pnl: null,
+      daily_pnl_truth_state: "invalid_snapshot",
+      blockers: ["durable snapshot currency is not 'USD'"],
+    }),
+  );
+  assert.equal(parsed.truth_state, "invalid_snapshot");
+  assert.equal(parsed.snapshot_truth_state, "invalid_snapshot");
+  assert.equal(parsed.account_equity, null);
+  assert.equal(parsed.cash, null);
+  assert.equal(parsed.realized_pnl, null);
+});
+
+test("parseDurablePortfolioSummary never renders active financial truth for invalid_snapshot even if the body smuggles a non-null equity", () => {
+  const parsed = parseDurablePortfolioSummary(
+    validSummaryRaw({
+      truth_state: "invalid_snapshot",
+      snapshot_truth_state: "invalid_snapshot",
+      accounting_truth_state: "invalid_snapshot",
+      realized_pnl_truth_state: "invalid_snapshot",
+      // account_equity/cash left at the base fixture's non-null values --
+      // a malformed/malicious body pairing invalid_snapshot with live-looking
+      // financial truth must fail closed entirely, not just pass those two
+      // fields through.
+    }),
+  );
+  assert.equal(parsed.truth_state, "db_unavailable");
+});
+
+test("parseDurablePortfolioPositions accepts invalid_snapshot with empty positions", () => {
+  const parsed = parseDurablePortfolioPositions(
+    validPositionsRaw({
+      truth_state: "invalid_snapshot",
+      snapshot_id: null,
+      captured_at_utc: null,
+      positions: [],
+    }),
+  );
+  assert.equal(parsed.truth_state, "invalid_snapshot");
+  assert.deepEqual(parsed.positions, []);
+});
+
+test("parseDurablePortfolioPositions fails closed when invalid_snapshot smuggles a position row", () => {
+  const parsed = parseDurablePortfolioPositions(
+    validPositionsRaw({ truth_state: "invalid_snapshot", snapshot_id: null, captured_at_utc: null }),
+  );
+  assert.equal(parsed.truth_state, "db_unavailable");
+  assert.deepEqual(parsed.positions, []);
+});
+
+test("parseDurablePortfolioSnapshots accepts invalid_snapshot with an empty wrapper", () => {
+  const parsed = parseDurablePortfolioSnapshots({ truth_state: "invalid_snapshot", snapshots: [] });
+  assert.equal(parsed.truth_state, "invalid_snapshot");
+  assert.deepEqual(parsed.snapshots, []);
+});
+
+test("parseDurablePortfolioSnapshots fails closed when invalid_snapshot smuggles a row", () => {
+  const raw = {
+    truth_state: "invalid_snapshot",
+    snapshots: [
+      { snapshot_id: "s1", captured_at_utc: "t1", deployment_mode: "paper", source: "external_alpaca", equity: 1, cash: 1, currency: "USD", truth_state: "active", run_id: "run-a", operation_id: null },
+    ],
+  };
+  const parsed = parseDurablePortfolioSnapshots(raw);
+  assert.equal(parsed.truth_state, "db_unavailable");
+});
+
+test("parseDurablePortfolioSnapshots fails closed on a row with the wrong deployment_mode even if otherwise well-formed", () => {
+  const raw = {
+    truth_state: "active",
+    snapshots: [
+      { snapshot_id: "s1", captured_at_utc: "t1", deployment_mode: "live", source: "external_alpaca", equity: 1, cash: 1, currency: "USD", truth_state: "active", run_id: "run-a", operation_id: null },
+    ],
+  };
+  assert.equal(parseDurablePortfolioSnapshots(raw).truth_state, "db_unavailable");
+});
+
+test("parseDurablePortfolioSnapshots fails closed on a row with a non-external_alpaca source", () => {
+  const raw = {
+    truth_state: "active",
+    snapshots: [
+      { snapshot_id: "s1", captured_at_utc: "t1", deployment_mode: "paper", source: "synthetic_diagnostic", equity: 1, cash: 1, currency: "USD", truth_state: "active", run_id: "run-a", operation_id: null },
+    ],
+  };
+  assert.equal(parseDurablePortfolioSnapshots(raw).truth_state, "db_unavailable");
+});
+
+test("parseDurablePortfolioSnapshots fails closed on a row with a non-USD currency", () => {
+  const raw = {
+    truth_state: "active",
+    snapshots: [
+      { snapshot_id: "s1", captured_at_utc: "t1", deployment_mode: "paper", source: "external_alpaca", equity: 1, cash: 1, currency: "EUR", truth_state: "active", run_id: "run-a", operation_id: null },
+    ],
+  };
+  assert.equal(parseDurablePortfolioSnapshots(raw).truth_state, "db_unavailable");
+});
+
+test("parseDurablePortfolioSnapshots fails closed on a row with a null run_id", () => {
+  const raw = {
+    truth_state: "active",
+    snapshots: [
+      { snapshot_id: "s1", captured_at_utc: "t1", deployment_mode: "paper", source: "external_alpaca", equity: 1, cash: 1, currency: "USD", truth_state: "active", run_id: null, operation_id: null },
+    ],
+  };
+  assert.equal(parseDurablePortfolioSnapshots(raw).truth_state, "db_unavailable");
+});
+
+test("parseDurablePortfolioSnapshots accepts a fully valid paper/external_alpaca/USD/active row with a non-null run_id", () => {
+  const raw = {
+    truth_state: "active",
+    snapshots: [
+      { snapshot_id: "s1", captured_at_utc: "t1", deployment_mode: "paper", source: "external_alpaca", equity: 1, cash: 1, currency: "USD", truth_state: "active", run_id: "run-a", operation_id: null },
+    ],
+  };
+  const parsed = parseDurablePortfolioSnapshots(raw);
+  assert.equal(parsed.truth_state, "active");
+  assert.equal(parsed.snapshots.length, 1);
+  assert.equal(parsed.snapshots[0].run_id, "run-a");
 });
 
 // ---------------------------------------------------------------------------

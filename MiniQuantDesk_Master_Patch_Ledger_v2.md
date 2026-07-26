@@ -17125,3 +17125,115 @@ LIVE CAPITAL: NOT READY
 
 Bundle 4 is **not** marked accepted or closed in the repository by this
 patch.
+
+## DURABLE-PAPER-PORTFOLIO-AND-PNL-01-FINAL-READ-SIDE-AUTHORITY-REPAIR
+
+Final Bundle 4 read-side authority repair, on top of the
+FINAL-COHERENCE-AND-ACCEPTANCE-PROOF above. Closes the confirmed defect that
+the write seam already refuses to *persist* a new invalid authoritative
+snapshot, but the durable read seams (`durable-summary`, `durable-positions`,
+`durable-snapshots`, `paper-lifecycle`) still selected the latest run-scoped
+row using only `deployment_mode`/`source`/`run_id`, never independently
+re-validating its currency, stored `truth_state`, or position content before
+reporting it as authoritative -- so a legacy or directly-inserted malformed
+row could still be reported as active durable truth.
+
+**Shared validator (`routes/portfolio_provenance.rs`).** Two new pure
+functions: `validate_run_scoped_snapshot_authority(snapshot,
+resolved_run_id)` (full contract, incl. position content -- used by
+durable-summary/positions/paper-lifecycle) and
+`validate_snapshot_scalar_authority(record)` (the scalar-only subset for the
+history surface, which fetches no position children). Both return a bounded,
+closed-vocabulary `SnapshotAuthorityViolation`, never raw row content.
+`PortfolioProvenanceState` gained an eighth state, `InvalidSnapshot`
+(`"invalid_snapshot"`); `classify_portfolio_provenance` gained a
+`snapshot_invalid: bool` parameter checked before the accounting row is even
+matched, so a malformed selected snapshot can never be paired with an
+accounting row. No fallback to an older snapshot anywhere -- every check
+operates on the selected latest row only, so corruption fails closed and
+stays visible.
+
+**Routes.** Durable-summary returns a new `invalid_snapshot_summary`
+response (every financial/accounting/P&L field null, `run_id` preserved,
+zero writes) before any equity/cash/P&L computation is attempted.
+Durable-positions returns empty positions with snapshot identity omitted.
+Paper-lifecycle's `portfolio_truth_state`/`pnl_truth_state` both read
+`"invalid_snapshot"` via the same shared classifier;
+`classify_overall_lifecycle_state`'s match over `PortfolioProvenanceState`
+is exhaustive over the new variant, making
+`"order_filled_portfolio_durable_pnl_available"` architecturally
+unreachable from an invalid snapshot (a compiler-enforced guarantee, not a
+convention). Durable-snapshots history fails the *whole* wrapper closed on
+one malformed scalar row (`truth_state = "invalid_snapshot"`,
+`snapshots = []`), never silently dropping just that row.
+
+**GUI (`durablePortfolio.ts`).** `"invalid_snapshot"` added to every
+applicable closed vocabulary. New invariants: `invalid_snapshot` must carry
+null `account_equity`/`cash` (summary) and an empty array (positions,
+snapshot history) -- a response smuggling live-looking data alongside
+`invalid_snapshot` fails closed. `isValidSnapshotRow` strengthened from
+generic string/nullable checks to exact-value checks
+(`deployment_mode === "paper"`, `source === "external_alpaca"`,
+`currency === "USD"`, non-null `run_id`) on every history row, matching the
+daemon's own per-row scalar authority contract. Paper-lifecycle has no GUI
+caller (confirmed via repo-wide search), so no paper-lifecycle GUI change
+was needed.
+
+**Tests.** 12 new DB-backed scenario tests
+(`scenario_durable_paper_portfolio_read_only_api_01.rs`, directly
+constructing malformed rows the same way `insert_or_confirm_paper_portfolio_snapshot`
+itself permits -- source-only validation, matching a legacy/pre-repair row
+exactly), 20 new pure unit tests (`portfolio_provenance.rs`,
+`paper_lifecycle.rs`), 11 new GUI tests (`durablePortfolio.test.ts`).
+Notably, one test proves a malformed snapshot (non-active `truth_state`)
+paired with a *fully well-formed, matching* accounting row still cannot
+expose active realized P&L -- the accounting write seam's own
+`fetch_snapshot_authority_tx` validates `run_id`/`deployment_mode`/`source`/
+`currency` on its source snapshot but not `truth_state` or position content,
+so this exact combination is reachable through the existing write path and
+had to be caught read-side.
+
+**Guard.** `validate_durable_paper_portfolio_and_pnl_01g_bundle_4_closure.ps1`
+gained checks `[37]`-`[44]`, independently proving as real source: the
+shared validator functions exist; exact USD/active/run-owned scalar
+authority and blank/duplicate/invalid-price/invalid-provenance position
+refusal are real code; `InvalidSnapshot` is a real closed-vocabulary state;
+every affected route calls the shared validator; the GUI closed-state and
+history scalar-authority strengthening exist; all 12 required scenario
+tests exist by name; and the existing fixed-range no-migration/no-broker/
+no-strategy/no-risk-limit checks (`[35]`/`[36]`) still hold.
+
+No new database migration. No broker adapter, order-submission, strategy,
+or risk-limit change anywhere in this patch.
+
+```text
+PROVIDER CALLS: no
+BROKER CALLS: no
+DISCORD CALLS: no
+NETWORK CALLS: no (isolated port-5434 test DB and npm test/build only)
+REAL DAEMON STARTED: no
+PAPER ORDERS: no
+LIVE ORDERS: no
+TEST DB: port 5434 only
+MULTI-SYMBOL ENABLED: no
+BUNDLE 5 STARTED: no
+BROKER ADAPTER CHANGED: no
+ORDER SUBMISSION CHANGED: no
+STRATEGY CHANGED: no
+RISK LIMITS CHANGED: no
+```
+
+```text
+BUNDLE 3: ACCEPTED — COMPLETE
+
+BUNDLE 4:
+FINAL READ-SIDE AUTHORITY REPAIR AND CLOSURE PROOF COMPLETE —
+AWAITING FINAL CHATGPT AND OPERATOR ACCEPTANCE
+
+BUNDLE 5: NOT STARTED
+UNATTENDED 10–20-SESSION SOAK: NOT STARTED
+LIVE CAPITAL: NOT READY
+```
+
+Bundle 4 is **not** marked accepted or closed in the repository by this
+patch.

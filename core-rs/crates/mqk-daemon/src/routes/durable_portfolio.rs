@@ -31,7 +31,10 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use super::portfolio::{aggregate_positions_pnl, compute_broker_positions_pnl, resolve_daily_pnl};
-use super::portfolio_provenance::{classify_portfolio_provenance, PortfolioProvenanceState};
+use super::portfolio_provenance::{
+    classify_portfolio_provenance, validate_run_scoped_snapshot_authority,
+    validate_snapshot_scalar_authority, PortfolioProvenanceState, SnapshotAuthorityViolation,
+};
 use crate::api_types::{
     PortfolioDurablePositionRow, PortfolioDurablePositionsResponse, PortfolioDurableSnapshotRow,
     PortfolioDurableSnapshotsResponse, PortfolioDurableSummaryResponse,
@@ -274,6 +277,22 @@ pub(crate) async fn portfolio_durable_summary(
             .into_response();
     };
 
+    // B4 final read-side authority repair: independently re-validate the
+    // selected snapshot's own identity/position content before trusting it
+    // as authoritative -- a legacy or directly-inserted malformed row (wrong
+    // currency, non-active truth_state, blank/duplicate/invalid-provenance
+    // position) must fail closed here rather than being reported as active,
+    // and must never be paired with an accounting row. No fallback to an
+    // older snapshot: this is the selected latest row, so corruption stays
+    // visible instead of silently masked by an earlier, valid one.
+    if let Err(violation) = validate_run_scoped_snapshot_authority(&snapshot, run.run_id) {
+        return (
+            StatusCode::OK,
+            Json(invalid_snapshot_summary(run.run_id, violation)),
+        )
+            .into_response();
+    }
+
     let age_secs = (Utc::now() - snapshot.snapshot.captured_at_utc).num_seconds();
     let snapshot_truth_state = if age_secs > DURABLE_SNAPSHOT_STALE_SECS {
         blockers.push(format!(
@@ -387,7 +406,13 @@ fn accounting_fields(
     Option<f64>,
 ) {
     const SCALE: f64 = mqk_portfolio::MICROS_SCALE as f64;
-    let state = classify_portfolio_provenance(true, false, false, snapshot_id, accounting);
+    // `snapshot_invalid` is always `false` here: `portfolio_durable_summary`
+    // already returns `invalid_snapshot_summary` and never reaches this
+    // function whenever a selected snapshot fails
+    // `validate_run_scoped_snapshot_authority` (B4 final read-side authority
+    // repair) -- the only two ways to arrive here are "no snapshot at all"
+    // (`snapshot_id == None`) or "a snapshot that already passed validation".
+    let state = classify_portfolio_provenance(true, false, false, snapshot_id, false, accounting);
     let truth_state = state.as_str().to_string();
 
     match state {
@@ -477,7 +502,15 @@ fn accounting_fields(
                 Some(row.cash_micros as f64 / SCALE),
             )
         }
-        PortfolioProvenanceState::QueryFailed | PortfolioProvenanceState::UnsupportedSource => (
+        // Unreachable in practice: this function is only ever called with
+        // `snapshot_invalid == false` (see call site above), so the
+        // classifier can never actually return `InvalidSnapshot` here --
+        // kept as a real match arm (grouped with the other unavailable
+        // states) rather than `unreachable!()` so this stays a total,
+        // panic-free function if that assumption is ever revisited.
+        PortfolioProvenanceState::QueryFailed
+        | PortfolioProvenanceState::UnsupportedSource
+        | PortfolioProvenanceState::InvalidSnapshot => (
             truth_state.clone(),
             None,
             None,
@@ -520,6 +553,53 @@ fn unavailable_summary(truth_state: &str, detail: &str) -> PortfolioDurableSumma
         unrealized_pnl_unavailable_reason: Some(detail.to_string()),
         daily_pnl: None,
         daily_pnl_truth_state: truth_state.to_string(),
+        daily_pnl_unavailable_reason: Some(detail.to_string()),
+        blockers: vec![detail.to_string()],
+    }
+}
+
+/// The `truth_state = "invalid_snapshot"` response for durable-summary (B4
+/// final read-side authority repair). `run_id` is the already-resolved run
+/// (independent of the malformed snapshot's own content); every field
+/// sourced from the selected snapshot itself (identity, account
+/// equity/cash/currency) is null -- never leaked, never repaired. No
+/// accounting row is paired with an invalid snapshot: accounting/P&L
+/// truth_state is `"invalid_snapshot"` too, with every value null.
+fn invalid_snapshot_summary(
+    run_id: Uuid,
+    violation: SnapshotAuthorityViolation,
+) -> PortfolioDurableSummaryResponse {
+    let truth_state = PortfolioProvenanceState::InvalidSnapshot
+        .as_str()
+        .to_string();
+    let detail = violation.blocker_message();
+    PortfolioDurableSummaryResponse {
+        truth_state: truth_state.clone(),
+        snapshot_truth_state: truth_state.clone(),
+        snapshot_id: None,
+        captured_at_utc: None,
+        source: None,
+        deployment_mode: None,
+        account_equity: None,
+        cash: None,
+        currency: None,
+        run_id: Some(run_id.to_string()),
+        operation_id: None,
+        accounting_truth_state: truth_state.clone(),
+        accounting_epoch: None,
+        accounting_epoch_reason: None,
+        accounting_source_snapshot_id: None,
+        last_applied_inbox_id: None,
+        realized_pnl: None,
+        realized_pnl_truth_state: truth_state.clone(),
+        realized_pnl_unavailable_reason: Some(detail.to_string()),
+        fees: None,
+        cumulative_cash_movement: None,
+        unrealized_pnl: None,
+        unrealized_pnl_truth_state: truth_state.clone(),
+        unrealized_pnl_unavailable_reason: Some(detail.to_string()),
+        daily_pnl: None,
+        daily_pnl_truth_state: truth_state,
         daily_pnl_unavailable_reason: Some(detail.to_string()),
         blockers: vec![detail.to_string()],
     }
@@ -646,6 +726,26 @@ pub(crate) async fn portfolio_durable_positions(
             .into_response();
     };
 
+    // B4 final read-side authority repair: same shared validator as
+    // durable-summary. On failure, positions must be empty (never partial or
+    // repaired) -- snapshot identity may be omitted from the public response
+    // since it names a row that failed authority validation.
+    if validate_run_scoped_snapshot_authority(&snapshot, run.run_id).is_err() {
+        return (
+            StatusCode::OK,
+            Json(PortfolioDurablePositionsResponse {
+                truth_state: PortfolioProvenanceState::InvalidSnapshot
+                    .as_str()
+                    .to_string(),
+                snapshot_id: None,
+                captured_at_utc: None,
+                run_id: run_id.map(|id| id.to_string()),
+                positions: vec![],
+            }),
+        )
+            .into_response();
+    }
+
     let age_secs = (Utc::now() - snapshot.snapshot.captured_at_utc).num_seconds();
     let truth_state = if age_secs > DURABLE_SNAPSHOT_STALE_SECS {
         "snapshot_stale"
@@ -724,6 +824,33 @@ pub(crate) async fn portfolio_durable_snapshots(
                 .into_response();
         }
     };
+
+    // B4 final read-side authority repair: `fetch_recent_paper_portfolio_snapshots`
+    // returns scalar rows only (no position children), so every row is
+    // checked against the scalar-only authority contract
+    // (deployment_mode/source/currency/truth_state/non-null run_id). A
+    // single malformed row fails the WHOLE wrapper closed -- never silently
+    // dropped while the rest render as if the surface were fully proven
+    // active.
+    if let Some(violation) = rows
+        .iter()
+        .find_map(|r| validate_snapshot_scalar_authority(r).err())
+    {
+        tracing::warn!(
+            violation = violation.blocker_message(),
+            "durable_snapshots_history_row_failed_authority_validation"
+        );
+        return (
+            StatusCode::OK,
+            Json(PortfolioDurableSnapshotsResponse {
+                truth_state: PortfolioProvenanceState::InvalidSnapshot
+                    .as_str()
+                    .to_string(),
+                snapshots: vec![],
+            }),
+        )
+            .into_response();
+    }
 
     let snapshots = rows
         .into_iter()
