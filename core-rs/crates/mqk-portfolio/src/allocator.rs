@@ -26,12 +26,34 @@ use std::collections::BTreeMap;
 pub enum AllocationError {
     /// Equity NAV is zero or negative; cannot compute weights.
     NonPositiveEquity,
-    /// A candidate symbol is an empty string.
+    /// A candidate symbol is an empty string (or blank after trim).
     EmptySymbol,
     /// A score value is NaN or infinite.
     InvalidScore { symbol: String },
     /// Maximum position count constraint is zero.
     ZeroMaxPositions,
+    /// The same symbol appears more than once in the candidate set.
+    ///
+    /// Never silently resolved by last-write-wins into the internal
+    /// `BTreeMap` — a duplicate symbol in one allocation cycle is a
+    /// caller-side invariant violation (RUNTIME-OPPORTUNITY-ALLOCATION-01
+    /// Q10) and must fail closed rather than pick a candidate arbitrarily.
+    DuplicateSymbol { symbol: String },
+    /// A configured constraint is non-finite, non-positive, or internally
+    /// inconsistent with another configured constraint (e.g.
+    /// `max_single_weight > max_gross_weight`).
+    InvalidConstraint { detail: String },
+    /// The long-only seam only: a candidate carries a negative score.
+    /// Negative scores imply short bias, which the long-only runtime lane
+    /// never supports.
+    NegativeScoreOnLongOnlyLane { symbol: String },
+    /// The long-only seam only: `max_positions` (explicit or effective)
+    /// exceeds the caller-supplied runtime ceiling (e.g. the watchlist-v2
+    /// hard ceiling).
+    MaxPositionsExceedsCeiling {
+        max_positions: usize,
+        ceiling: usize,
+    },
 }
 
 impl std::fmt::Display for AllocationError {
@@ -43,6 +65,29 @@ impl std::fmt::Display for AllocationError {
                 write!(f, "invalid (NaN/inf) score for symbol '{symbol}'")
             }
             Self::ZeroMaxPositions => write!(f, "max_positions constraint must be > 0"),
+            Self::DuplicateSymbol { symbol } => {
+                write!(
+                    f,
+                    "duplicate candidate symbol '{symbol}' in one allocation cycle"
+                )
+            }
+            Self::InvalidConstraint { detail } => {
+                write!(f, "invalid allocation constraint: {detail}")
+            }
+            Self::NegativeScoreOnLongOnlyLane { symbol } => {
+                write!(
+                    f,
+                    "negative score for symbol '{symbol}' is not permitted on the long-only \
+                     allocation lane"
+                )
+            }
+            Self::MaxPositionsExceedsCeiling {
+                max_positions,
+                ceiling,
+            } => write!(
+                f,
+                "max_positions={max_positions} exceeds the runtime ceiling={ceiling}"
+            ),
         }
     }
 }
@@ -118,6 +163,69 @@ impl AllocationConstraints {
 impl Default for AllocationConstraints {
     fn default() -> Self {
         Self::unconstrained()
+    }
+}
+
+/// Frozen valid range for any configured fractional-weight constraint field
+/// (`max_gross_weight`, `max_net_weight`, `max_single_weight`): must be
+/// finite and in `(0.0, MAX_CONSTRAINT_WEIGHT]`. Zero/negative disables
+/// rather than constrains (ambiguous intent) and is rejected; unbounded
+/// (`None`) remains the explicit way to leave a dimension unconstrained.
+/// `10.0` (1000% gross) is a generous ceiling that only exists to catch
+/// unit-confused misconfiguration (e.g. a caller accidentally passing a
+/// percentage like `120.0` instead of a fraction like `1.2`).
+const MAX_CONSTRAINT_WEIGHT: f64 = 10.0;
+
+impl AllocationConstraints {
+    /// Validate that every configured field is finite, within the frozen
+    /// valid range, and internally consistent with the other configured
+    /// fields. Called by [`Allocator::allocate_long_only`]; the generic
+    /// (research, short-capable) [`Allocator::allocate`] does not call this
+    /// automatically so existing short-capable callers are unaffected.
+    pub fn validate(&self) -> Result<(), AllocationError> {
+        for (name, value) in [
+            ("max_gross_weight", self.max_gross_weight),
+            ("max_net_weight", self.max_net_weight),
+            ("max_single_weight", self.max_single_weight),
+        ] {
+            if let Some(v) = value {
+                if !v.is_finite() || v <= 0.0 || v > MAX_CONSTRAINT_WEIGHT {
+                    return Err(AllocationError::InvalidConstraint {
+                        detail: format!(
+                            "{name}={v} must be finite and in (0.0, {MAX_CONSTRAINT_WEIGHT}]"
+                        ),
+                    });
+                }
+            }
+        }
+
+        if let (Some(single), Some(gross)) = (self.max_single_weight, self.max_gross_weight) {
+            if single > gross {
+                return Err(AllocationError::InvalidConstraint {
+                    detail: format!(
+                        "max_single_weight={single} must not exceed max_gross_weight={gross}"
+                    ),
+                });
+            }
+        }
+
+        if let (Some(net), Some(gross)) = (self.max_net_weight, self.max_gross_weight) {
+            if net > gross {
+                return Err(AllocationError::InvalidConstraint {
+                    detail: format!(
+                        "max_net_weight={net} must not exceed max_gross_weight={gross}"
+                    ),
+                });
+            }
+        }
+
+        if let Some(mp) = self.max_positions {
+            if mp == 0 {
+                return Err(AllocationError::ZeroMaxPositions);
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -227,8 +335,9 @@ impl Allocator {
             }
         }
 
+        let mut seen_symbols: std::collections::HashSet<&str> = std::collections::HashSet::new();
         for c in candidates {
-            if c.symbol.is_empty() {
+            if c.symbol.trim().is_empty() {
                 return Err(AllocationError::EmptySymbol);
             }
             if !c.score.is_finite() {
@@ -236,15 +345,23 @@ impl Allocator {
                     symbol: c.symbol.clone(),
                 });
             }
+            if !seen_symbols.insert(c.symbol.as_str()) {
+                return Err(AllocationError::DuplicateSymbol {
+                    symbol: c.symbol.clone(),
+                });
+            }
         }
 
-        // ── 1. Sort by |score| desc ──────────────────────────────────────────
+        // ── 1. Sort by |score| desc, exact-symbol asc tie-break ──────────────
+        // A pure `partial_cmp` on tied |score| falls back to `Equal`, which
+        // makes a stable sort preserve *input* order on ties — output would
+        // then depend on candidate input order, violating determinism.
+        // Breaking every tie on the (now guaranteed-unique) symbol gives a
+        // total order independent of input order.
         let mut sorted: Vec<&Candidate> = candidates.iter().collect();
-        sorted.sort_by(|a, b| {
-            b.score
-                .abs()
-                .partial_cmp(&a.score.abs())
-                .unwrap_or(std::cmp::Ordering::Equal)
+        sorted.sort_by(|a, b| match b.score.abs().partial_cmp(&a.score.abs()) {
+            Some(std::cmp::Ordering::Equal) | None => a.symbol.cmp(&b.symbol),
+            Some(ord) => ord,
         });
 
         // ── 2. max_positions truncation ──────────────────────────────────────
@@ -356,6 +473,71 @@ impl Allocator {
             gross_weight: final_gross,
             net_weight: final_net,
         })
+    }
+
+    /// Long-only runtime allocation entry point (RUNTIME-OPPORTUNITY-ALLOCATION-01
+    /// Phase C).
+    ///
+    /// Distinct from [`Allocator::allocate`] (the generic, short-capable
+    /// research entry point, unchanged and still used as-is by existing
+    /// callers) — this seam adds the guarantees the paper runtime requires
+    /// and nothing else:
+    ///
+    /// - every configured constraint must be finite, in the frozen valid
+    ///   range, and internally consistent ([`AllocationConstraints::validate`]);
+    /// - `max_positions` (explicit or, when unconstrained, the effective
+    ///   value applied) must be positive and must not exceed
+    ///   `runtime_ceiling` (e.g. the watchlist-v2 hard ceiling);
+    /// - every candidate score must be `>= 0.0` — negative (short-implying)
+    ///   scores are refused rather than silently producing a short weight.
+    ///
+    /// `runtime_ceiling` must be `> 0`; `0` is treated as a caller
+    /// programming error and rejected via `MaxPositionsExceedsCeiling`.
+    ///
+    /// All other behavior (sorting, normalisation, clipping, gross/net
+    /// trimming, zero-weight pruning) is identical to [`Allocator::allocate`].
+    pub fn allocate_long_only(
+        &self,
+        equity_micros: i64,
+        candidates: &[Candidate],
+        runtime_ceiling: usize,
+    ) -> Result<AllocationDecision, AllocationError> {
+        self.constraints.validate()?;
+
+        if runtime_ceiling == 0 {
+            return Err(AllocationError::MaxPositionsExceedsCeiling {
+                max_positions: self.constraints.max_positions.unwrap_or(1),
+                ceiling: 0,
+            });
+        }
+
+        let effective_max_positions = self.constraints.max_positions.unwrap_or(runtime_ceiling);
+        if effective_max_positions == 0 {
+            return Err(AllocationError::ZeroMaxPositions);
+        }
+        if effective_max_positions > runtime_ceiling {
+            return Err(AllocationError::MaxPositionsExceedsCeiling {
+                max_positions: effective_max_positions,
+                ceiling: runtime_ceiling,
+            });
+        }
+
+        for c in candidates {
+            if c.score < 0.0 {
+                return Err(AllocationError::NegativeScoreOnLongOnlyLane {
+                    symbol: c.symbol.clone(),
+                });
+            }
+        }
+
+        // Enforce the effective ceiling even when the caller left
+        // `max_positions` unconstrained, so the long-only lane never
+        // silently exceeds `runtime_ceiling`.
+        let bounded = Allocator::new(AllocationConstraints {
+            max_positions: Some(effective_max_positions),
+            ..self.constraints.clone()
+        });
+        bounded.allocate(equity_micros, candidates)
     }
 }
 
@@ -619,5 +801,260 @@ mod tests {
             .to_string()
             .is_empty());
         assert!(!AllocationError::ZeroMaxPositions.to_string().is_empty());
+        assert!(!AllocationError::DuplicateSymbol { symbol: "X".into() }
+            .to_string()
+            .is_empty());
+        assert!(!AllocationError::InvalidConstraint { detail: "x".into() }
+            .to_string()
+            .is_empty());
+        assert!(
+            !AllocationError::NegativeScoreOnLongOnlyLane { symbol: "X".into() }
+                .to_string()
+                .is_empty()
+        );
+        assert!(!AllocationError::MaxPositionsExceedsCeiling {
+            max_positions: 6,
+            ceiling: 5
+        }
+        .to_string()
+        .is_empty());
+    }
+
+    // ── Phase C hardening: duplicate / blank symbol ───────────────────────────
+
+    #[test]
+    fn rejects_duplicate_symbol() {
+        let a = Allocator::unconstrained();
+        let err = a
+            .allocate(NAV, &[cand("SPY", 1.0), cand("SPY", 2.0)])
+            .unwrap_err();
+        assert_eq!(
+            err,
+            AllocationError::DuplicateSymbol {
+                symbol: "SPY".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn rejects_blank_after_trim_symbol() {
+        let a = Allocator::unconstrained();
+        let err = a.allocate(NAV, &[cand("   ", 1.0)]).unwrap_err();
+        assert_eq!(err, AllocationError::EmptySymbol);
+    }
+
+    // ── Phase C hardening: deterministic tie-break ────────────────────────────
+
+    #[test]
+    fn tied_scores_break_tie_by_symbol_ascending() {
+        let a = Allocator::new(AllocationConstraints {
+            max_positions: Some(1),
+            ..AllocationConstraints::unconstrained()
+        });
+        // Both scores tied at 1.0 -> tie-break must pick "AAA" (symbol asc),
+        // regardless of input order.
+        let dec1 = a
+            .allocate(NAV, &[cand("ZZZ", 1.0), cand("AAA", 1.0)])
+            .unwrap();
+        let dec2 = a
+            .allocate(NAV, &[cand("AAA", 1.0), cand("ZZZ", 1.0)])
+            .unwrap();
+        assert!(dec1.weights.contains_key("AAA"));
+        assert!(dec2.weights.contains_key("AAA"));
+        assert_eq!(dec1, dec2);
+    }
+
+    #[test]
+    fn output_deterministic_across_candidate_input_order() {
+        let a = Allocator::new(AllocationConstraints::long_only_standard());
+        let forward = a
+            .allocate(NAV, &[cand("AAA", 3.0), cand("BBB", 2.0), cand("CCC", 1.0)])
+            .unwrap();
+        let reversed = a
+            .allocate(NAV, &[cand("CCC", 1.0), cand("BBB", 2.0), cand("AAA", 3.0)])
+            .unwrap();
+        assert_eq!(forward, reversed);
+    }
+
+    // ── Phase C hardening: AllocationConstraints::validate ────────────────────
+
+    #[test]
+    fn validate_rejects_nonfinite_constraint() {
+        let c = AllocationConstraints {
+            max_gross_weight: Some(f64::INFINITY),
+            ..AllocationConstraints::unconstrained()
+        };
+        assert!(matches!(
+            c.validate(),
+            Err(AllocationError::InvalidConstraint { .. })
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_negative_or_zero_constraint() {
+        let c = AllocationConstraints {
+            max_gross_weight: Some(0.0),
+            ..AllocationConstraints::unconstrained()
+        };
+        assert!(matches!(
+            c.validate(),
+            Err(AllocationError::InvalidConstraint { .. })
+        ));
+        let c2 = AllocationConstraints {
+            max_single_weight: Some(-0.1),
+            ..AllocationConstraints::unconstrained()
+        };
+        assert!(matches!(
+            c2.validate(),
+            Err(AllocationError::InvalidConstraint { .. })
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_out_of_range_constraint() {
+        let c = AllocationConstraints {
+            max_gross_weight: Some(50.0),
+            ..AllocationConstraints::unconstrained()
+        };
+        assert!(matches!(
+            c.validate(),
+            Err(AllocationError::InvalidConstraint { .. })
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_single_exceeding_gross() {
+        let c = AllocationConstraints {
+            max_single_weight: Some(0.5),
+            max_gross_weight: Some(0.3),
+            ..AllocationConstraints::unconstrained()
+        };
+        assert!(matches!(
+            c.validate(),
+            Err(AllocationError::InvalidConstraint { .. })
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_net_exceeding_gross() {
+        let c = AllocationConstraints {
+            max_net_weight: Some(0.5),
+            max_gross_weight: Some(0.3),
+            ..AllocationConstraints::unconstrained()
+        };
+        assert!(matches!(
+            c.validate(),
+            Err(AllocationError::InvalidConstraint { .. })
+        ));
+    }
+
+    #[test]
+    fn validate_accepts_long_only_standard() {
+        assert!(AllocationConstraints::long_only_standard()
+            .validate()
+            .is_ok());
+    }
+
+    // ── Phase C hardening: allocate_long_only ─────────────────────────────────
+
+    #[test]
+    fn long_only_rejects_negative_score() {
+        let a = Allocator::new(AllocationConstraints::long_only_standard());
+        let err = a
+            .allocate_long_only(NAV, &[cand("TLT", -1.0)], 5)
+            .unwrap_err();
+        assert_eq!(
+            err,
+            AllocationError::NegativeScoreOnLongOnlyLane {
+                symbol: "TLT".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn long_only_rejects_max_positions_exceeding_ceiling() {
+        let a = Allocator::new(AllocationConstraints {
+            max_positions: Some(6),
+            ..AllocationConstraints::long_only_standard()
+        });
+        let err = a
+            .allocate_long_only(NAV, &[cand("SPY", 1.0)], 5)
+            .unwrap_err();
+        assert_eq!(
+            err,
+            AllocationError::MaxPositionsExceedsCeiling {
+                max_positions: 6,
+                ceiling: 5
+            }
+        );
+    }
+
+    #[test]
+    fn long_only_unconstrained_max_positions_bounded_by_ceiling() {
+        let a = Allocator::new(AllocationConstraints::long_only_standard());
+        let candidates: Vec<Candidate> = ["A", "B", "C", "D", "E", "F", "G"]
+            .iter()
+            .map(|s| cand(s, 1.0))
+            .collect();
+        let dec = a.allocate_long_only(NAV, &candidates, 5).unwrap();
+        assert!(
+            dec.position_count() <= 5,
+            "expected at most ceiling(5) positions, got {}",
+            dec.position_count()
+        );
+    }
+
+    #[test]
+    fn long_only_rejects_invalid_constraint() {
+        let a = Allocator::new(AllocationConstraints {
+            max_gross_weight: Some(f64::NAN),
+            ..AllocationConstraints::unconstrained()
+        });
+        let err = a
+            .allocate_long_only(NAV, &[cand("SPY", 1.0)], 5)
+            .unwrap_err();
+        assert!(matches!(err, AllocationError::InvalidConstraint { .. }));
+    }
+
+    #[test]
+    fn long_only_zero_ceiling_rejected() {
+        let a = Allocator::unconstrained();
+        let err = a
+            .allocate_long_only(NAV, &[cand("SPY", 1.0)], 0)
+            .unwrap_err();
+        assert_eq!(
+            err,
+            AllocationError::MaxPositionsExceedsCeiling {
+                max_positions: 1,
+                ceiling: 0
+            }
+        );
+    }
+
+    #[test]
+    fn long_only_accepts_valid_long_candidates_and_produces_no_zero_weights() {
+        let a = Allocator::new(AllocationConstraints::long_only_standard());
+        let dec = a
+            .allocate_long_only(NAV, &[cand("SPY", 2.0), cand("QQQ", 1.0)], 5)
+            .unwrap();
+        assert!(dec.weights.values().all(|w| *w != 0.0));
+        for w in dec.weights.values() {
+            assert!(
+                *w >= 0.0,
+                "long-only lane must not produce negative weights"
+            );
+        }
+    }
+
+    #[test]
+    fn long_only_deterministic_across_input_order() {
+        let a = Allocator::new(AllocationConstraints::long_only_standard());
+        let forward = a
+            .allocate_long_only(NAV, &[cand("AAA", 3.0), cand("BBB", 2.0)], 5)
+            .unwrap();
+        let reversed = a
+            .allocate_long_only(NAV, &[cand("BBB", 2.0), cand("AAA", 3.0)], 5)
+            .unwrap();
+        assert_eq!(forward, reversed);
     }
 }
