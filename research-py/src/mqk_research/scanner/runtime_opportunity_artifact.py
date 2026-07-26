@@ -84,18 +84,47 @@ def _stable_hash(payload: Any) -> str:
     return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
-def watchlist_lineage_hash(watchlist: dict[str, Any]) -> str:
-    """Deterministic hash of a watchlist-v2 artifact's identity-relevant content."""
-    return _stable_hash(
-        {
-            "schema_version": watchlist.get("schema_version"),
-            "generated_at_utc": watchlist.get("generated_at_utc"),
-            "symbols": watchlist.get("symbols"),
-            "strategy_assignments": watchlist.get("strategy_assignments"),
-            "max_symbols_to_trade": watchlist.get("max_symbols_to_trade"),
-            "max_concurrent_positions": watchlist.get("max_concurrent_positions"),
-        }
+def _canonical_watchlist_lineage_string(watchlist: dict[str, Any]) -> str:
+    """
+    Build a canonical, delimiter-based (not JSON) string over the
+    identity-relevant watchlist fields.
+
+    Deliberately NOT JSON: JSON map-key ordering and number formatting are
+    library/feature-flag dependent (e.g. serde_json's `preserve_order`
+    feature), which would make a byte-for-byte hash impossible to safely
+    replicate on the Rust daemon side. This format is unambiguous in any
+    language: fixed field order, sorted map entries, comma/colon delimiters.
+    """
+    schema_version = str(watchlist.get("schema_version") or "")
+    generated_at_utc = str(watchlist.get("generated_at_utc") or "")
+    max_symbols_to_trade = watchlist.get("max_symbols_to_trade")
+    max_concurrent_positions = watchlist.get("max_concurrent_positions")
+    symbols = [str(s) for s in (watchlist.get("symbols") or [])]
+    strategy_assignments = dict(watchlist.get("strategy_assignments") or {})
+    sa_str = ",".join(f"{k}:{v}" for k, v in sorted(strategy_assignments.items()))
+    symbols_str = ",".join(symbols)
+    msts = "" if max_symbols_to_trade is None else str(int(max_symbols_to_trade))
+    mcp = "" if max_concurrent_positions is None else str(int(max_concurrent_positions))
+    return (
+        f"schema_version={schema_version}|"
+        f"generated_at_utc={generated_at_utc}|"
+        f"max_symbols_to_trade={msts}|"
+        f"max_concurrent_positions={mcp}|"
+        f"symbols={symbols_str}|"
+        f"strategy_assignments={sa_str}"
     )
+
+
+def watchlist_lineage_hash(watchlist: dict[str, Any]) -> str:
+    """
+    Deterministic hash of a watchlist-v2 artifact's identity-relevant content.
+
+    Uses a canonical delimited string (see `_canonical_watchlist_lineage_string`)
+    rather than JSON so the daemon's Rust-side validator can recompute this
+    exact hash from the raw watchlist JSON.
+    """
+    blob = _canonical_watchlist_lineage_string(watchlist)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()
 
 
 def candidate_lineage_hash(candidate_record: dict[str, Any]) -> str:
