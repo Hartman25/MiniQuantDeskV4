@@ -17237,3 +17237,125 @@ LIVE CAPITAL: NOT READY
 
 Bundle 4 is **not** marked accepted or closed in the repository by this
 patch.
+
+## BRANCH-RECONCILIATION-AND-BUNDLE-4-ACCEPTANCE-01
+
+Branch reconciliation across every local and remote branch, plus recording
+Bundle 4 as independently accepted per the decision already made by ChatGPT
+and the operator.
+
+**Branch reconciliation.** Fetched and classified every local and remote
+branch against `main` (accepted head `750b52809c569982dfe773c52be7c015227ff048`,
+`fix: fail closed on malformed durable portfolio snapshots`). All AI/ML lab
+branches (`ai/ml-local-lab-foundation-01`,
+`claude/miniquantdeskv4-ai-ml-lab-b56dae`,
+`origin/review/ai-ml-local-lab-foundation-01`, and
+`claude/ai-lab-foundation-repair-bfca18` by name match) were excluded from
+merge consideration without inspecting their source beyond ref metadata.
+Every remaining non-AI branch was either already an ancestor of `main`
+(`claude/agitated-lumiere-f7c208`, `claude/busy-bardeen-9c0e9a`,
+`claude/modest-driscoll`, `claude/optimistic-bohr-96b041`,
+`claude/wizardly-darwin-aee3db`, `codex/implement-migration-governance`,
+`worktree-agent-a09163dbe98ed72bd`, and `origin/review/bundle4-final-coherence`,
+matching the expected already-contained classification), or patch-equivalent
+(its unique commit's content is byte-identical to, or already superseded by
+more current content on, `main`):
+
+- `claude/intelligent-bose-dfe00b` (`fix(execution): bound retryable
+  dispatch attempts`) — its migration `0038_outbox_retry_state.sql`,
+  `mqk_db::outbox_record_retry`/`RetryDispatchOutcome`/
+  `MAX_DISPATCH_ATTEMPTS`, and `scenario_exec_retry_01.rs` are byte-identical
+  to what already exists in `main`'s HEAD tree. Zero action.
+- `claude/trusting-perlman` (`Close L-02A+L-03`) — its `OPERATOR_LEDGER.md`/
+  `MASTER_COMMAND_BRIEF.md` edits move MT-01/MT-02 from Open to Closed; `main`
+  already records both as Closed with a more current reconciliation snapshot.
+  Merging would conflict and regress doc currency. Zero action.
+- `origin/codex/audit-last-two-patches-and-fix-stuck-state` (`Fix daemon
+  cancel proof test shutdown hang`) — `inject_running_loop_for_test` in
+  `main`'s `mqk-daemon/src/state.rs` already contains this exact fix. Zero
+  action.
+
+One non-AI branch was classified `diverged_review_required` and left
+untouched: `codex/apply-determinism-fixes-det01` (`Remove wall-clock
+timestamp`), 915 commits behind `main`, changes `derive_runtime_holder_id`'s
+signature (drops `run_id` from the runtime-lease holder identity string),
+threads a new daemon time-source indirection through lifecycle-critical
+paths (`start`/`heartbeat`/`halt`/deadman-enforcement), and touches CI. No
+prior acceptance evidence for this exact change exists in this ledger. Not
+merged; flagged `BLOCKED_FOR_REVIEW` for a future patch to evaluate on its
+own terms against current `main`.
+
+No branch was merged. No branch was deleted, renamed, rebased, or
+force-updated. No AI/ML branch was modified, merged, or inspected beyond ref
+metadata.
+
+**Bundle 4 acceptance record.** Per the decision already made by ChatGPT and
+the operator, `README.md`, `README_TECHNICAL.md`, this ledger, and
+`docs/specs/durable_paper_portfolio_and_pnl_01g_bundle_4_closure.md` are
+updated from "final read-side authority repair and closure proof complete,
+awaiting final ChatGPT and operator acceptance" to accepted:
+
+```text
+BUNDLE 3: ACCEPTED — COMPLETE
+
+BUNDLE 4: ACCEPTED — COMPLETE
+
+SUPERVISED PAPER SOAK:
+AUTHORIZED — NOT YET STARTED
+
+UNATTENDED 10–20-SESSION PAPER SOAK:
+NOT YET AUTHORIZED
+
+BUNDLE 5:
+NOT STARTED
+
+LIVE CAPITAL:
+NOT READY
+```
+
+Accepted Bundle 4 head: `750b52809c569982dfe773c52be7c015227ff048`.
+
+This acceptance: (1) accepts the Bundle 4 production implementation as
+complete; (2) authorizes the next operational step — a **supervised** Paper
++ Alpaca soak under active operator supervision; (3) does **not** authorize
+live capital; (4) does **not** claim that any soak session has occurred; and
+(5) requires Bundle 5 development to occur in a separate branch/worktree,
+never modifying the frozen soak baseline during a session. No historical
+entry above this one is rewritten — each earlier "awaiting acceptance"
+snapshot remains as the true status at the commit it documents; only the
+current, present-tense status is updated by this patch.
+
+No production Rust, daemon API, migration, GUI behavior, broker, provider,
+trading, order, or live-capital change. No new database migration. Docs and
+this ledger only.
+
+```text
+PROVIDER CALLS: no
+BROKER CALLS: no
+DISCORD CALLS: no
+NETWORK CALLS: no
+REAL DAEMON STARTED: no
+PAPER ORDERS: no
+LIVE ORDERS: no
+TEST DB: none required (docs-only patch)
+MULTI-SYMBOL ENABLED: no
+BUNDLE 5 STARTED: no
+BROKER ADAPTER CHANGED: no
+ORDER SUBMISSION CHANGED: no
+STRATEGY CHANGED: no
+RISK LIMITS CHANGED: no
+PUSH PERFORMED: no
+BRANCHES DELETED: no
+AI/ML BRANCH MODIFIED: no
+```
+
+```text
+BUNDLE 3: ACCEPTED — COMPLETE
+
+BUNDLE 4: ACCEPTED — COMPLETE
+
+SUPERVISED PAPER SOAK: AUTHORIZED — NOT YET STARTED
+UNATTENDED 10–20-SESSION SOAK: NOT YET AUTHORIZED
+BUNDLE 5: NOT STARTED
+LIVE CAPITAL: NOT READY
+```

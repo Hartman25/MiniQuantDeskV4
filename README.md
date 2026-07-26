@@ -265,7 +265,7 @@ What that means in plain English:
 - Phase E5 (the integrated Phase E closure proof: one new scenario test file proving a clean no-trade day, a two-run full-lineage activity day, an evidence-blocker notify-once/silent-replay/recovery cycle, restart safety across a durable stop/terminal commit/evidence blocker, the E4 routes' full read-only guarantee, and the frozen E4 fail-soft truth vocabulary, all against the real test database and the real production coordinator/finalizer/API seams, zero production Rust change) is **accepted complete — Phase E is accepted complete in full**
 - Phase F1 (the read-only GUI daily-operation truth projection: strict TypeScript response types mirroring the accepted E4 API, both canonical routes wired into the existing operator-model polling cycle, a dedicated `Daily Operations` operator screen with no mutation controls, null-count-vs-zero handling, and a screen-local source-authority helper), plus its RUNTIME-SHAPE-AND-HISTORY-BLOCKER-REPAIR-01 repair (complete runtime shape validation of both mapper functions — a malformed HTTP 200 body now fails closed to `endpoint_unavailable` instead of rendering false-authoritative truth — plus history-row `evidence_blockers` rendering, which the original F1 pass omitted), is **accepted complete**
 - Phase F2 (operator runbook correction: `docs/runbooks/autonomous_paper_ops.md` updated in place with a safety-boundary section, the five authoritative read-only routes and their full vocabulary, before-session checklist, during-session supervision, bounded recovery procedures, stop/emergency posture, end-of-day evidence capture, and restart distinctions — documentation and validation only), plus its final operational-safety repair, is **accepted complete**
-- Bundle 3 (D1 through Phase G, including the final guard-and-evidence-integrity repair) is **accepted complete** (independent ChatGPT/operator acceptance received); Bundle 4 (`DURABLE-PAPER-PORTFOLIO-AND-PNL-01-COMBINED`, durable paper portfolio/P&L truth) is closure-implementation complete, awaiting final ChatGPT/operator acceptance, built on Bundle 3's now-accepted foundation
+- Bundle 3 (D1 through Phase G, including the final guard-and-evidence-integrity repair) is **accepted complete** (independent ChatGPT/operator acceptance received); Bundle 4 (`DURABLE-PAPER-PORTFOLIO-AND-PNL-01-COMBINED`, durable paper portfolio/P&L truth) is **accepted complete** (independent ChatGPT/operator acceptance received, accepted head `750b52809c569982dfe773c52be7c015227ff048`), built on Bundle 3's now-accepted foundation. Acceptance authorizes a **supervised** Paper + Alpaca soak under active operator supervision; it does not authorize an unattended soak and does not authorize live capital, and no soak session has occurred yet.
 - paper+paper is not treated as an authoritative execution path
 - backtest deployment through the daemon is intentionally refused fail-closed
 - live-shadow and live-capital remain outside the current operational finish line
@@ -277,7 +277,7 @@ Use these labels precisely:
 | Mode | Current posture | Meaning |
 |---|---|---|
 | **Supervised Paper + Alpaca** | Available for controlled validation | Credible current path after a clean proof run, valid env, Alpaca paper auth, and active operator supervision. |
-| **Autonomous Paper + Alpaca** | Pre-soak hardening — Bundle 3 accepted, Bundle 4 awaiting acceptance | Bundle 3 (`AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-COMBINED`, D1 through Phase G) is **ACCEPTED — COMPLETE** (independent ChatGPT/operator acceptance received). Bundle 4 (`DURABLE-PAPER-PORTFOLIO-AND-PNL-01-COMBINED`, durable paper portfolio/fill-accounting/P&L truth, B4-0 through B4-G), built on top of Bundle 3's now-accepted implementation, is **closure-implementation complete, awaiting final ChatGPT/operator acceptance** before an unattended autonomous soak may begin. Controlled autonomous Paper + Alpaca operation under active operator supervision remains the current target — not unattended soak. |
+| **Autonomous Paper + Alpaca** | Bundle 3 accepted, Bundle 4 accepted — supervised soak authorized, not yet started | Bundle 3 (`AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-COMBINED`, D1 through Phase G) is **ACCEPTED — COMPLETE** (independent ChatGPT/operator acceptance received). Bundle 4 (`DURABLE-PAPER-PORTFOLIO-AND-PNL-01-COMBINED`, durable paper portfolio/fill-accounting/P&L truth, B4-0 through B4-G), built on top of Bundle 3's now-accepted implementation, is **ACCEPTED — COMPLETE** (independent ChatGPT/operator acceptance received, accepted head `750b52809c569982dfe773c52be7c015227ff048`). Acceptance **authorizes a supervised** Paper + Alpaca soak under active operator supervision — no session has started. The unattended 10–20-session soak is **not yet authorized**, and live capital is not ready. |
 | **Live / live-capital** | Not ready | Typed support and gates exist, but this repo must not be treated as safe for unattended live trading. |
 
 ### Current Bundle 3 position
@@ -542,25 +542,37 @@ accounting row still cannot expose active realized P&L. See the ledger for
 full detail.
 
 ```text
-B4-0: ACCEPTED — COMPLETE
-B4-A: ACCEPTED — COMPLETE
-B4-B–B4-G: FINAL READ-SIDE AUTHORITY REPAIR AND CLOSURE PROOF COMPLETE — AWAITING CHATGPT/OPERATOR ACCEPTANCE
+BUNDLE 3: ACCEPTED — COMPLETE
 
-BUNDLE 4:
-FINAL READ-SIDE AUTHORITY REPAIR AND CLOSURE PROOF COMPLETE —
-AWAITING FINAL CHATGPT AND OPERATOR ACCEPTANCE
+BUNDLE 4: ACCEPTED — COMPLETE
 
-BUNDLE 5: NOT STARTED
-MULTI-SYMBOL AUTONOMOUS: NOT ENABLED
-UNATTENDED 10–20-SESSION SOAK: NOT STARTED
-LIVE CAPITAL: NOT READY
+SUPERVISED PAPER SOAK:
+AUTHORIZED — NOT YET STARTED
+
+UNATTENDED 10–20-SESSION PAPER SOAK:
+NOT YET AUTHORIZED
+
+BUNDLE 5:
+NOT STARTED
+
+LIVE CAPITAL:
+NOT READY
 ```
 
-Bundle 4 is **not** marked accepted or closed in this repository. Still
-required before Bundle 4 closes:
+Bundle 4 (B4-0 through the final read-side authority repair and closure
+proof) has now received independent ChatGPT/operator acceptance —
+**BUNDLE 4: ACCEPTED — COMPLETE**, accepted head
+`750b52809c569982dfe773c52be7c015227ff048`. This acceptance:
 
-1. independent ChatGPT/operator acceptance of the final repair and
-   coherence proof (B4-B through B4-G)
+1. accepts the Bundle 4 production implementation as complete;
+2. authorizes the next operational step — a **supervised** Paper + Alpaca
+   soak under active operator supervision;
+3. does **not** authorize live capital;
+4. does **not** claim that any soak session has occurred — the unattended
+   10–20-session paper soak remains **not yet authorized**;
+5. Bundle 5 development must occur in a separate branch/worktree and must
+   not modify the frozen soak baseline during a session — Bundle 5 is
+   **not started**.
 
 ### What Bundle 3 completion unlocks
 
@@ -579,9 +591,12 @@ supported NYSE sessions and autonomously:
 - expose truthful operator status and evidence
 
 That is the point where the project can begin a **supervised autonomous Paper + Alpaca soak**.
-It is not permission to use live capital. The planned operating sequence is to collect roughly
-10–20 clean autonomous paper sessions, review real order/fill/reconcile/notification evidence,
-and complete durable paper portfolio/P&L truth before broader rollout.
+It is not permission to use live capital. Bundle 4 (durable paper portfolio/P&L truth) is now
+**ACCEPTED — COMPLETE**, which authorizes exactly this supervised soak — not an unattended one.
+The planned operating sequence is to collect roughly 10–20 clean autonomous paper sessions under
+active operator supervision, review real order/fill/reconcile/notification evidence, and only then
+seek separate authorization for an unattended 10–20-session soak before broader rollout. No soak
+session has occurred yet.
 
 **Historical smoke status (2026-06-15):** the earlier AAPL/5m smoke proved readiness and a durable
 no-trade reason for `intraday_scalper`; it did not close real order/fill lifecycle, reconcile after
@@ -749,7 +764,7 @@ Operationally, `MAIN` is the canonical engine.
 Be honest about the open edges.
 
 - Bundle 3 (`AUTONOMOUS-DAILY-PAPER-OPERATIONS-01-COMBINED`, D1 through Phase G including the final guard-and-evidence-integrity repair) is **accepted complete** (independent ChatGPT/operator acceptance received)
-- Bundle 4 (`DURABLE-PAPER-PORTFOLIO-AND-PNL-01-COMBINED`, durable paper cash/positions/lots/cost-basis/P&L truth) is **closure-implementation complete (B4-0 through B4-G), awaiting final ChatGPT/operator acceptance** — required before trusting the accounting of any extended autonomous soak, not merely a nice-to-have
+- Bundle 4 (`DURABLE-PAPER-PORTFOLIO-AND-PNL-01-COMBINED`, durable paper cash/positions/lots/cost-basis/P&L truth) is **accepted complete (B4-0 through B4-G), independent ChatGPT/operator acceptance received** — this authorizes a supervised soak, not an unattended one, and not live capital
 - the current autonomous lane is long-only and single-symbol; multi-symbol rollout is deferred until after the soak
 - real paper order/fill/reconcile/Discord evidence is still incomplete
 - research → deployability → runtime artifact closure is not fully complete
@@ -772,8 +787,8 @@ evidence gates (real-fill/reconcile/Discord evidence, the autonomous-paper soak)
 | PAPER-TRADE-LIFECYCLE-01 | Open — market-hours paper smoke with real fills |
 | RECONCILE-AFTER-REAL-FILL-01 | Open — reconcile pass after a real paper fill |
 | DISCORD-TRADE-LIFECYCLE-REAL-01 | Open — Discord notification evidence from a real cycle |
-| AUTONOMOUS-PAPER-SOAK | Not started — target roughly 10–20 clean sessions after Bundle 4 closure |
-| DURABLE-PAPER-PORTFOLIO-PNL | Closure-implementation complete (B4-0–B4-G), awaiting final ChatGPT/operator acceptance |
+| AUTONOMOUS-PAPER-SOAK | Supervised soak authorized, not yet started — target roughly 10–20 clean sessions; unattended soak not yet authorized |
+| DURABLE-PAPER-PORTFOLIO-PNL | Accepted complete (B4-0–B4-G), independent ChatGPT/operator acceptance received |
 | PAPER-SMOKE-EVIDENCE-REVIEW-02 | Closed — review tool exists; future smoke evidence still requires review |
 
 These include both code gates and operational evidence gates.
@@ -1015,10 +1030,10 @@ Veritas Ledger is engineered primarily to address the second.
 Immediate operational sequence:
 
 1. Bundle 3 autonomous daily paper operations — **accepted complete**
-2. close Bundle 4 durable paper portfolio and P&L truth (closure-implementation complete, awaiting final ChatGPT/operator acceptance)
-3. run and review roughly 10–20 autonomous Paper + Alpaca sessions
-4. close real-fill, reconcile, Discord, restart, and repeated-cycle evidence gates
-5. only then consider broader symbol coverage or later live-shadow preparation
+2. Bundle 4 durable paper portfolio and P&L truth — **accepted complete** (supervised soak authorized, not yet started)
+3. run and review roughly 10–20 **supervised** autonomous Paper + Alpaca sessions under active operator supervision
+4. close real-fill, reconcile, Discord, restart, and repeated-cycle evidence gates; only then seek separate authorization for an unattended 10–20-session soak
+5. only then consider broader symbol coverage, Bundle 5, or later live-shadow preparation (Bundle 5 work must occur in a separate branch/worktree, not against the frozen soak baseline)
 
 Items beyond the current long-only single-symbol finish line:
 

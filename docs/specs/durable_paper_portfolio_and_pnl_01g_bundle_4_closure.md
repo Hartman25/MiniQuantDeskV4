@@ -521,4 +521,42 @@ LIVE CAPITAL: NOT READY
 ```
 
 Bundle 4 is **not** marked accepted or closed in the repository by this
-patch.
+patch — see the acceptance addendum below for the subsequent independent
+acceptance decision.
+
+## Acceptance addendum — BRANCH-RECONCILIATION-AND-BUNDLE-4-ACCEPTANCE-01
+
+Per the decision already made by ChatGPT and the operator, Bundle 4 (B4-0
+through the final read-side authority repair and closure proof documented
+above) has now received independent ChatGPT/operator acceptance.
+
+```text
+BUNDLE 3: ACCEPTED — COMPLETE
+
+BUNDLE 4: ACCEPTED — COMPLETE
+
+SUPERVISED PAPER SOAK:
+AUTHORIZED — NOT YET STARTED
+
+UNATTENDED 10–20-SESSION PAPER SOAK:
+NOT YET AUTHORIZED
+
+BUNDLE 5:
+NOT STARTED
+
+LIVE CAPITAL:
+NOT READY
+```
+
+Accepted Bundle 4 head: `750b52809c569982dfe773c52be7c015227ff048` (`fix:
+fail closed on malformed durable portfolio snapshots`).
+
+This acceptance: (1) accepts the Bundle 4 production implementation
+documented in this spec as complete; (2) authorizes the next operational
+step — a **supervised** Paper + Alpaca soak under active operator
+supervision; (3) does **not** authorize live capital; (4) does **not** claim
+that any soak session has occurred; and (5) requires Bundle 5 development to
+occur in a separate branch/worktree, never modifying the frozen soak
+baseline during a session. The closure-implementation narrative above this
+addendum is unchanged and is not rewritten to imply acceptance happened
+before this commit.
