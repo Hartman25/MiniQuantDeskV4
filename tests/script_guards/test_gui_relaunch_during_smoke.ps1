@@ -76,7 +76,7 @@ if ($scriptText -match [regex]::Escape('-SkipGui:$SkipGui') -and
 $guiFnMatch = [regex]::Match($scriptText, '(?s)function Start-GuiObserveIfRequested.*?(?=# CHECK-ONLY mode:)')
 $guiFnBody  = if ($guiFnMatch.Success) { $guiFnMatch.Value } else { '' }
 
-$step8bMatch = [regex]::Match($scriptText, '(?s)# -{10,}\r?\n# STEP 8B: Relaunch GUI.*?(?=# -{10,}\r?\n# STEP 9:)')
+$step8bMatch = [regex]::Match($scriptText, '(?s)# -{10,}\r?\n# STEP 8B: Relaunch GUI.*?(?=# -{10,}\r?\n# STEP \d)')
 $step8bBody  = if ($step8bMatch.Success) { $step8bMatch.Value } else { '' }
 
 $guiCombined = $guiFnBody + "`n" + $step8bBody

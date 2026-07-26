@@ -121,8 +121,8 @@ if (Test-Path $StateRs) {
 if (Test-Path $LifecycleRs) {
     $LifecycleContent = Get-Content $LifecycleRs -Raw
 
-    if ($LifecycleContent -match 'self\.day_signal_count\.store\(0, Ordering::SeqCst\)' -and
-        $LifecycleContent -match 'self\.reset_symbol_day_order_counts\(\)\.await') {
+    if ($LifecycleContent -match 'self\.(?:state\.)?day_signal_count\.store\(0, Ordering::SeqCst\)' -and
+        $LifecycleContent -match 'self\.(?:state\.)?reset_symbol_day_order_counts\(\)\.await') {
         Assert-Pass "G05: lifecycle.rs resets reset_symbol_day_order_counts() alongside day_signal_count at run start"
     } else {
         Assert-Fail "G05: per-symbol counter reset NOT found alongside day_signal_count reset in lifecycle.rs"
@@ -132,12 +132,23 @@ if (Test-Path $LifecycleRs) {
 }
 
 # G06 -- decision.rs Gate 1f inserted between Gate 1 and Gate 1e
+#
+# Matched with regex (not IndexOf literal substrings): rustfmt line-wraps long
+# method chains (`state\n    .method(...)\n    .await`), so an exact
+# single-line substring search goes stale the moment the chain is reformatted
+# even though the gate ordering and behavior are unchanged. `\s` in .NET regex
+# spans newlines, so this tolerates any whitespace the formatter inserts
+# between `state`, `.method(...)`, and `.await`.
 if (Test-Path $DecisionRs) {
     $DecisionContent = Get-Content $DecisionRs -Raw
 
-    $Gate1Idx  = $DecisionContent.IndexOf('state.day_signal_limit_exceeded()')
-    $Gate1fIdx = $DecisionContent.IndexOf('state.symbol_day_order_limit_exceeded(&decision.symbol).await')
-    $Gate1eIdx = $DecisionContent.IndexOf('evaluate_strategy_budget_from_env(&sid)')
+    $Gate1Match  = [regex]::Match($DecisionContent, 'state\s*\.\s*day_signal_limit_exceeded\(\)')
+    $Gate1fMatch = [regex]::Match($DecisionContent, 'state\s*\.\s*symbol_day_order_limit_exceeded\(&decision\.symbol\)\s*\.\s*await')
+    $Gate1eMatch = [regex]::Match($DecisionContent, 'evaluate_strategy_budget_from_env\(&sid\)')
+
+    $Gate1Idx  = if ($Gate1Match.Success)  { $Gate1Match.Index }  else { -1 }
+    $Gate1fIdx = if ($Gate1fMatch.Success) { $Gate1fMatch.Index } else { -1 }
+    $Gate1eIdx = if ($Gate1eMatch.Success) { $Gate1eMatch.Index } else { -1 }
 
     if ($Gate1Idx -ge 0 -and $Gate1fIdx -gt $Gate1Idx -and $Gate1eIdx -gt $Gate1fIdx -and
         $DecisionContent -match '"symbol_day_limit_reached"') {
@@ -147,17 +158,34 @@ if (Test-Path $DecisionRs) {
     }
 
     # G07 -- Gate 7 Ok(true) increments both counters
-    $OkTrueIdx = $DecisionContent.IndexOf('Ok(true) => {')
-    if ($OkTrueIdx -ge 0) {
-        $OkTrueBlock = $DecisionContent.Substring($OkTrueIdx, [Math]::Min(600, $DecisionContent.Length - $OkTrueIdx))
-        if ($OkTrueBlock -match 'state\.increment_day_signal_count\(\);' -and
-            $OkTrueBlock -match 'state\.increment_symbol_day_order_count\(&decision\.symbol\)\.await;') {
+    #
+    # Scoped to the specific outbox-enqueue match statement rather than a
+    # first-occurrence 'Ok(true) => {' search, so a second, unrelated Ok(true)
+    # arm elsewhere in the file (e.g. added by a later patch) cannot cause
+    # this guard to inspect the wrong branch. The arm body is bounded to its
+    # own closing brace (up to the sibling 'Ok(false)' arm that follows in
+    # this match statement) rather than a fixed-size character window -- a
+    # fixed window can silently bleed past the arm's actual close brace and
+    # match content that was moved into the *next* arm, producing a false
+    # pass. The counter-increment match itself is whitespace-tolerant for the
+    # same rustfmt line-wrap reason as G06 above.
+    $Gate7AnchorMatch = [regex]::Match($DecisionContent, 'mqk_db::outbox_enqueue\(')
+    $OkTrueArmMatch = if ($Gate7AnchorMatch.Success) {
+        [regex]::Match(
+            $DecisionContent.Substring($Gate7AnchorMatch.Index),
+            '(?s)Ok\(true\)\s*=>\s*\{(.*?)\r?\n\s*\}\r?\n\s*Ok\(false\)'
+        )
+    } else { [regex]::Match('', '(?!)') }
+    if ($OkTrueArmMatch.Success) {
+        $OkTrueBlock = $OkTrueArmMatch.Groups[1].Value
+        if ($OkTrueBlock -match 'state\s*\.\s*increment_day_signal_count\(\);' -and
+            $OkTrueBlock -match 'state\s*\.\s*increment_symbol_day_order_count\(&decision\.symbol\)\s*\.\s*await;') {
             Assert-Pass "G07: decision.rs Gate 7 Ok(true) arm increments both increment_day_signal_count and increment_symbol_day_order_count"
         } else {
             Assert-Fail "G07: Gate 7 Ok(true) arm does NOT increment both day-order counters"
         }
     } else {
-        Assert-Fail "G07: Gate 7 'Ok(true) => {' arm not found in decision.rs"
+        Assert-Fail "G07: Gate 7 'Ok(true) => { ... } Ok(false)' arm (outbox_enqueue accepted branch) not found in decision.rs"
     }
 
     # G08 -- module-doc gate sequence documents Gate 1f

@@ -219,17 +219,33 @@ if ($DesignContent -match 'MULTI-SYMBOL-OMS-OVERVIEW-AND-GUI-01.*CLOSED' -and
 }
 
 # -----------------------------------------------------------------------
-# G14: BACKTEST-GUI-CLOSURE-01 (the repo's "backtest GUI experience"
-# initiative) remains open/not-started and untouched by this patch
+# G14: MULTI-SYMBOL-OMS-OVERVIEW-AND-GUI-01 (Patch 10, commit
+# e4fc73cac56bc2a21eac60af46a28ee62e2dd8e4) never touched the master patch
+# ledger or started BACKTEST-GUI-CLOSURE-01 -- proven against Patch 10's own
+# fixed historical commit diff, not against BACKTEST-GUI-CLOSURE-01's current
+# ledger status. BACKTEST-GUI-CLOSURE-01 was QUEUED when Patch 10 landed and
+# has since legitimately closed via unrelated later work; a permanent
+# premarket guard requiring it stay QUEUED forever would fail on every later
+# accepted patch that closes it, which is not a regression in this GUI-only
+# patch. The live diff check (this session's uncommitted changes) still
+# guards against *this* guard-repair patch touching the ledger.
 # -----------------------------------------------------------------------
-$MasterLedgerContent = if (Test-Path $MasterLedger) { Get-Content $MasterLedger -Raw } else { '' }
+$Patch10Commit = 'e4fc73cac56bc2a21eac60af46a28ee62e2dd8e4'
 $MasterLedgerTouched = @($DiffNames | Where-Object { $_ -match '^MiniQuantDesk_Master_Patch_Ledger_v2\.md$' })
 
-if ($MasterLedgerTouched.Count -eq 0 -and
-    $MasterLedgerContent -match 'BACKTEST-GUI-CLOSURE-01.*QUEUED') {
-    Assert-Pass "G14: BACKTEST-GUI-CLOSURE-01 remains QUEUED/open and untouched by this patch"
+Push-Location $RepoRoot
+$Patch10CommitExists = (git cat-file -t $Patch10Commit 2>$null) -eq 'commit'
+$Patch10DiffNames = if ($Patch10CommitExists) {
+    @(git show --name-only --format='' $Patch10Commit 2>$null) | Where-Object { $_ }
+} else { @() }
+Pop-Location
+
+$Patch10TouchedLedger = @($Patch10DiffNames | Where-Object { $_ -match '^MiniQuantDesk_Master_Patch_Ledger_v2\.md$' })
+
+if ($Patch10CommitExists -and $MasterLedgerTouched.Count -eq 0 -and $Patch10TouchedLedger.Count -eq 0) {
+    Assert-Pass "G14: Patch 10 ($Patch10Commit) never touched the master patch ledger (fixed historical evidence), and this patch does not touch it either"
 } else {
-    Assert-Fail "G14: BACKTEST-GUI-CLOSURE-01 status changed or master patch ledger touched by this patch"
+    Assert-Fail "G14: master patch ledger touched by Patch 10's historical commit, by this patch's live diff, or Patch 10 commit not found"
 }
 
 Write-Host ''
