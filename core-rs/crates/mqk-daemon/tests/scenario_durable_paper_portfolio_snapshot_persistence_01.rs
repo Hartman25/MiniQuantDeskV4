@@ -535,3 +535,214 @@ async fn zero_oms_delta_and_zero_broker_calls() {
 
     cleanup(&pool, run_id).await;
 }
+
+// ---------------------------------------------------------------------------
+// B4 final closure repair (A1): snapshot authority validation.
+// ---------------------------------------------------------------------------
+
+async fn count_snapshots_captured_at(
+    pool: &sqlx::PgPool,
+    captured_at_utc: chrono::DateTime<Utc>,
+) -> i64 {
+    sqlx::query_scalar("select count(*) from sys_paper_portfolio_snapshots where captured_at_utc = $1")
+        .bind(captured_at_utc)
+        .fetch_one(pool)
+        .await
+        .expect("count query should succeed")
+}
+
+/// A1: a run_id-less external snapshot must never be durably persisted --
+/// with no run ownership, no run-scoped route could ever prove it
+/// authoritative, so it would be an orphaned row.
+#[tokio::test]
+async fn missing_run_ownership_is_rejected_and_not_persisted() {
+    let Some(pool) = test_pool().await else {
+        return;
+    };
+    let mut state = AppState::new_for_test_with_broker_kind(BrokerKind::Alpaca);
+    state.db = Some(pool.clone());
+
+    let captured_at_utc = Utc.with_ymd_and_hms(2099, 3, 1, 15, 0, 0).unwrap();
+    let before = count_snapshots_captured_at(&pool, captured_at_utc).await;
+    let snapshot = fixture_snapshot(captured_at_utc, "100000.00", "40000.00");
+    state
+        .accept_external_broker_snapshot_for_test(snapshot, None, None)
+        .await;
+    let after = count_snapshots_captured_at(&pool, captured_at_utc).await;
+
+    assert_eq!(
+        before, after,
+        "a run_id-less snapshot must never be durably persisted"
+    );
+    assert!(
+        state.broker_snapshot.read().await.is_some(),
+        "in-memory acceptance must still succeed even when durable persistence is refused"
+    );
+}
+
+/// A1: a non-USD account currency must never be durably persisted as
+/// authoritative Paper+Alpaca truth -- this bundle's accounting has no
+/// cross-currency conversion.
+#[tokio::test]
+async fn non_usd_currency_is_rejected_and_not_persisted() {
+    let Some(pool) = test_pool().await else {
+        return;
+    };
+    let run_id = fixed_run_id("non_usd_currency_is_rejected_and_not_persisted");
+    cleanup(&pool, run_id).await;
+    fixture_run(&pool, run_id).await;
+
+    let mut state = AppState::new_for_test_with_broker_kind(BrokerKind::Alpaca);
+    state.db = Some(pool.clone());
+
+    let mut snapshot = fixture_snapshot(
+        Utc.with_ymd_and_hms(2099, 3, 1, 13, 0, 0).unwrap(),
+        "100000.00",
+        "40000.00",
+    );
+    snapshot.account.currency = "EUR".to_string();
+    state
+        .accept_external_broker_snapshot_for_test(snapshot, Some(run_id), None)
+        .await;
+
+    let count: i64 =
+        sqlx::query_scalar("select count(*) from sys_paper_portfolio_snapshots where run_id = $1")
+            .bind(run_id)
+            .fetch_one(&pool)
+            .await
+            .expect("count query should succeed");
+    assert_eq!(
+        count, 0,
+        "a non-USD account currency must never be durably persisted"
+    );
+
+    cleanup(&pool, run_id).await;
+}
+
+/// A1: a blank (or whitespace-only) position symbol must never be durably
+/// persisted -- the whole snapshot is refused, not just that one position.
+#[tokio::test]
+async fn blank_position_symbol_is_rejected_and_not_persisted() {
+    let Some(pool) = test_pool().await else {
+        return;
+    };
+    let run_id = fixed_run_id("blank_position_symbol_is_rejected_and_not_persisted");
+    cleanup(&pool, run_id).await;
+    fixture_run(&pool, run_id).await;
+
+    let mut state = AppState::new_for_test_with_broker_kind(BrokerKind::Alpaca);
+    state.db = Some(pool.clone());
+
+    let mut snapshot = fixture_snapshot(
+        Utc.with_ymd_and_hms(2099, 3, 1, 13, 0, 0).unwrap(),
+        "100000.00",
+        "40000.00",
+    );
+    snapshot.positions = vec![BrokerPosition {
+        symbol: "   ".to_string(),
+        qty: "10".to_string(),
+        avg_price: "150.00".to_string(),
+    }];
+    state
+        .accept_external_broker_snapshot_for_test(snapshot, Some(run_id), None)
+        .await;
+
+    let count: i64 =
+        sqlx::query_scalar("select count(*) from sys_paper_portfolio_snapshots where run_id = $1")
+            .bind(run_id)
+            .fetch_one(&pool)
+            .await
+            .expect("count query should succeed");
+    assert_eq!(
+        count, 0,
+        "a blank position symbol must refuse the whole snapshot, never a partial persist"
+    );
+
+    cleanup(&pool, run_id).await;
+}
+
+/// A1: a nonzero position with a zero (or negative) average entry price is
+/// not valid broker fill history and must never be durably persisted.
+#[tokio::test]
+async fn nonzero_position_with_non_positive_avg_price_is_rejected() {
+    let Some(pool) = test_pool().await else {
+        return;
+    };
+    let run_id = fixed_run_id("nonzero_position_with_non_positive_avg_price_is_rejected");
+    cleanup(&pool, run_id).await;
+    fixture_run(&pool, run_id).await;
+
+    let mut state = AppState::new_for_test_with_broker_kind(BrokerKind::Alpaca);
+    state.db = Some(pool.clone());
+
+    let mut snapshot = fixture_snapshot(
+        Utc.with_ymd_and_hms(2099, 3, 1, 13, 0, 0).unwrap(),
+        "100000.00",
+        "40000.00",
+    );
+    snapshot.positions = vec![BrokerPosition {
+        symbol: "AAPL".to_string(),
+        qty: "10".to_string(),
+        avg_price: "0.00".to_string(),
+    }];
+    state
+        .accept_external_broker_snapshot_for_test(snapshot, Some(run_id), None)
+        .await;
+
+    let count: i64 =
+        sqlx::query_scalar("select count(*) from sys_paper_portfolio_snapshots where run_id = $1")
+            .bind(run_id)
+            .fetch_one(&pool)
+            .await
+            .expect("count query should succeed");
+    assert_eq!(
+        count, 0,
+        "a nonzero position with a zero average entry price must never be durably persisted"
+    );
+
+    cleanup(&pool, run_id).await;
+}
+
+/// A1: a FLAT (qty=0) position's average entry price is not economically
+/// meaningful and is exempt from the strictly-positive check -- a flat
+/// position with avg_price "0" must persist normally (matches the existing
+/// `full_sell_closes_position` shape used across this bundle's fixtures).
+#[tokio::test]
+async fn flat_position_with_zero_avg_price_is_accepted() {
+    let Some(pool) = test_pool().await else {
+        return;
+    };
+    let run_id = fixed_run_id("flat_position_with_zero_avg_price_is_accepted");
+    cleanup(&pool, run_id).await;
+    fixture_run(&pool, run_id).await;
+
+    let mut state = AppState::new_for_test_with_broker_kind(BrokerKind::Alpaca);
+    state.db = Some(pool.clone());
+
+    let mut snapshot = fixture_snapshot(
+        Utc.with_ymd_and_hms(2099, 3, 1, 13, 0, 0).unwrap(),
+        "100000.00",
+        "40000.00",
+    );
+    snapshot.positions = vec![BrokerPosition {
+        symbol: "AAPL".to_string(),
+        qty: "0".to_string(),
+        avg_price: "0".to_string(),
+    }];
+    state
+        .accept_external_broker_snapshot_for_test(snapshot, Some(run_id), None)
+        .await;
+
+    let count: i64 =
+        sqlx::query_scalar("select count(*) from sys_paper_portfolio_snapshots where run_id = $1")
+            .bind(run_id)
+            .fetch_one(&pool)
+            .await
+            .expect("count query should succeed");
+    assert_eq!(
+        count, 1,
+        "a flat position's zero avg_price must not be refused"
+    );
+
+    cleanup(&pool, run_id).await;
+}

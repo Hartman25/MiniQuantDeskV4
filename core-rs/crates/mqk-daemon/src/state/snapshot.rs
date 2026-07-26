@@ -767,6 +767,28 @@ pub(crate) async fn persist_external_broker_snapshot_best_effort(
         return ExternalSnapshotPersistOutcome::Unavailable;
     };
 
+    // A1: an externally authoritative snapshot may be confirmed only when
+    // it carries real run ownership -- a run_id-less snapshot can never be
+    // resolved by any run-scoped route (durable-summary/positions,
+    // paper-lifecycle), so persisting it would create an orphaned row no
+    // reader could ever prove authoritative. Fail closed rather than
+    // persist an unownable snapshot.
+    let Some(run_id) = run_id else {
+        tracing::warn!("durable_paper_portfolio_snapshot_skip: missing_run_ownership");
+        return ExternalSnapshotPersistOutcome::InvalidSnapshot;
+    };
+
+    // A1: currency must be exactly "USD" -- this bundle's accounting
+    // (cash/equity/P&L) has no cross-currency conversion; a non-USD
+    // snapshot cannot be authoritative Paper+Alpaca truth.
+    if snapshot.account.currency != "USD" {
+        tracing::warn!(
+            currency = %snapshot.account.currency,
+            "durable_paper_portfolio_snapshot_skip: unsupported_currency"
+        );
+        return ExternalSnapshotPersistOutcome::InvalidSnapshot;
+    }
+
     let Some(equity_micros) =
         crate::routes::helpers::parse_decimal_micros(&snapshot.account.equity)
     else {
@@ -781,6 +803,12 @@ pub(crate) async fn persist_external_broker_snapshot_best_effort(
 
     let mut positions = Vec::with_capacity(snapshot.positions.len());
     for p in &snapshot.positions {
+        // A1: every position symbol must be nonblank after trimming -- a
+        // blank symbol can never be authoritative position identity.
+        if p.symbol.trim().is_empty() {
+            tracing::warn!("durable_paper_portfolio_snapshot_skip: position_symbol_blank");
+            return ExternalSnapshotPersistOutcome::InvalidSnapshot;
+        }
         let Some(qty_signed) = parse_signed_qty(&p.qty) else {
             tracing::warn!(
                 symbol = %p.symbol,
@@ -797,6 +825,19 @@ pub(crate) async fn persist_external_broker_snapshot_best_effort(
             );
             return ExternalSnapshotPersistOutcome::InvalidSnapshot;
         };
+        // A1: every NONZERO position's average entry price must be strictly
+        // positive -- a flat (qty=0) position's avg price is not
+        // economically meaningful and is not checked, but a non-flat
+        // position with a zero or negative avg price is not a valid broker
+        // fill history and must be refused rather than persisted.
+        if qty_signed != 0 && avg_entry_price_micros <= 0 {
+            tracing::warn!(
+                symbol = %p.symbol,
+                avg_entry_price_micros,
+                "durable_paper_portfolio_snapshot_skip: position_avg_price_not_positive"
+            );
+            return ExternalSnapshotPersistOutcome::InvalidSnapshot;
+        }
         positions.push(mqk_db::PaperPortfolioSnapshotPosition {
             symbol: p.symbol.clone(),
             qty_signed,
@@ -813,7 +854,7 @@ pub(crate) async fn persist_external_broker_snapshot_best_effort(
         format!(
             "mqk.paper-portfolio-snapshot.v1|{}|{}|{}",
             snapshot.captured_at_utc.to_rfc3339(),
-            run_id.map(|id| id.to_string()).unwrap_or_default(),
+            run_id,
             mqk_db::PAPER_PORTFOLIO_SNAPSHOT_SOURCE_EXTERNAL_ALPACA,
         )
         .as_bytes(),
@@ -830,7 +871,7 @@ pub(crate) async fn persist_external_broker_snapshot_best_effort(
             cash_micros,
             currency: snapshot.account.currency.clone(),
             truth_state: "active".to_string(),
-            run_id,
+            run_id: Some(run_id),
             operation_id,
             positions,
         },

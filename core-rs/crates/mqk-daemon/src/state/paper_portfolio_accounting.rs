@@ -56,9 +56,14 @@ fn normalize_broker_positions(
     broker_positions: &[mqk_schemas::BrokerPosition],
 ) -> (BTreeMap<String, i64>, Vec<String>) {
     let mut by_symbol: BTreeMap<String, Vec<Option<i64>>> = BTreeMap::new();
+    let mut blockers = Vec::new();
     for bp in broker_positions {
         let symbol = bp.symbol.trim();
         if symbol.is_empty() {
+            // A2: a blank broker position symbol must never be silently
+            // skipped -- it is bounded, deterministic completeness evidence
+            // in its own right, not an absence of evidence.
+            blockers.push("broker_position_symbol_blank".to_string());
             continue;
         }
         let parsed = super::snapshot::parse_signed_qty(&bp.qty);
@@ -69,7 +74,6 @@ fn normalize_broker_positions(
     }
 
     let mut qty_by_symbol = BTreeMap::new();
-    let mut blockers = Vec::new();
     for (symbol, parses) in by_symbol {
         if parses.len() > 1 {
             blockers.push(format!("duplicate_broker_position_symbol:{symbol}"));
@@ -247,12 +251,117 @@ pub(crate) async fn refresh_paper_portfolio_accounting_state_best_effort(
         }
         Ok(mqk_db::UpsertPaperPortfolioAccountingStateOutcome::Conflict { detail, .. }) => {
             // Same watermark, same snapshot, but different fill-derived
-            // values -- nondeterministic replay or corruption. Never
-            // overwritten; surfaced as a warning for operator diagnosis.
+            // values (or a drifted epoch/reason for the same snapshot) --
+            // nondeterministic replay or corruption. Never overwritten;
+            // surfaced as a warning for operator diagnosis.
             tracing::warn!(detail = %detail, "durable_paper_portfolio_accounting_conflict");
+        }
+        Ok(mqk_db::UpsertPaperPortfolioAccountingStateOutcome::InvalidSourceSnapshot {
+            detail,
+        }) => {
+            // The caller supplied a source_snapshot_id that does not resolve
+            // to a durable, run-scoped, paper/external_alpaca/USD snapshot --
+            // should not happen since every call site here gates on a
+            // Confirmed persistence outcome first, but fail closed with a
+            // warning rather than silently dropping the replay.
+            tracing::warn!(detail = %detail, "durable_paper_portfolio_accounting_invalid_source_snapshot");
+        }
+        Ok(mqk_db::UpsertPaperPortfolioAccountingStateOutcome::RejectedStaleSnapshot {
+            detail,
+        }) => {
+            // The candidate snapshot is not newer (or not-older, on a higher
+            // watermark) than the snapshot already recorded -- provenance
+            // must never move backward. Never overwritten.
+            tracing::warn!(detail = %detail, "durable_paper_portfolio_accounting_stale_snapshot_rejected");
         }
         Err(err) => {
             tracing::warn!(error = %err, "durable_paper_portfolio_accounting_persist_failed");
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// B4 final closure repair (A2): bidirectional completeness -- blank symbols
+// must never be silently skipped.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod normalize_broker_positions_tests {
+    use super::normalize_broker_positions;
+    use mqk_schemas::BrokerPosition;
+
+    fn position(symbol: &str, qty: &str) -> BrokerPosition {
+        BrokerPosition {
+            symbol: symbol.to_string(),
+            qty: qty.to_string(),
+            avg_price: "150.00".to_string(),
+        }
+    }
+
+    /// A2: a blank symbol is a bounded blocker, never a silent skip -- the
+    /// prior implementation's `continue` on `symbol.is_empty()` dropped the
+    /// row with zero trace.
+    #[test]
+    fn blank_symbol_produces_bounded_blocker() {
+        let positions = vec![position("", "10")];
+        let (qty_by_symbol, blockers) = normalize_broker_positions(&positions);
+        assert!(qty_by_symbol.is_empty());
+        assert_eq!(blockers, vec!["broker_position_symbol_blank".to_string()]);
+    }
+
+    /// A2: a whitespace-only symbol is blank after trimming.
+    #[test]
+    fn whitespace_only_symbol_produces_bounded_blocker() {
+        let positions = vec![position("   ", "10")];
+        let (qty_by_symbol, blockers) = normalize_broker_positions(&positions);
+        assert!(qty_by_symbol.is_empty());
+        assert_eq!(blockers, vec!["broker_position_symbol_blank".to_string()]);
+    }
+
+    /// A2: multiple blank-symbol rows collapse to one blocker (deduped by
+    /// the caller's `blockers.sort(); blockers.dedup();`), and a valid
+    /// position alongside a blank one is still reported.
+    #[test]
+    fn valid_position_alongside_blank_symbol_is_still_reported() {
+        let positions = vec![position("AAPL", "10"), position("", "5")];
+        let (qty_by_symbol, blockers) = normalize_broker_positions(&positions);
+        assert_eq!(qty_by_symbol.get("AAPL"), Some(&10));
+        assert_eq!(blockers, vec!["broker_position_symbol_blank".to_string()]);
+    }
+
+    /// Existing behavior preserved: an unparseable quantity is a bounded
+    /// blocker keyed by symbol.
+    #[test]
+    fn unparseable_quantity_produces_bounded_blocker() {
+        let positions = vec![position("AAPL", "not-a-number")];
+        let (qty_by_symbol, blockers) = normalize_broker_positions(&positions);
+        assert!(qty_by_symbol.is_empty());
+        assert_eq!(
+            blockers,
+            vec!["broker_position_quantity_unparseable:AAPL".to_string()]
+        );
+    }
+
+    /// Existing behavior preserved: a duplicate symbol is a bounded blocker,
+    /// never silently merged or overwritten.
+    #[test]
+    fn duplicate_symbol_produces_bounded_blocker() {
+        let positions = vec![position("AAPL", "10"), position("AAPL", "20")];
+        let (qty_by_symbol, blockers) = normalize_broker_positions(&positions);
+        assert!(qty_by_symbol.is_empty());
+        assert_eq!(
+            blockers,
+            vec!["duplicate_broker_position_symbol:AAPL".to_string()]
+        );
+    }
+
+    /// A zero-quantity position is dropped from `qty_by_symbol` (flat, not
+    /// a blocker) -- existing behavior preserved.
+    #[test]
+    fn zero_quantity_is_dropped_without_blocker() {
+        let positions = vec![position("AAPL", "0")];
+        let (qty_by_symbol, blockers) = normalize_broker_positions(&positions);
+        assert!(qty_by_symbol.is_empty());
+        assert!(blockers.is_empty());
     }
 }

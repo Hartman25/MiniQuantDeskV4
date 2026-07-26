@@ -603,6 +603,106 @@ pub enum UpsertPaperPortfolioAccountingStateOutcome {
         current_last_applied_inbox_id: i64,
         detail: String,
     },
+    /// The supplied `source_snapshot_id` does not resolve to a durable
+    /// snapshot belonging to this run, or resolves to one that is not
+    /// `deployment_mode = "paper"` / `source = "external_alpaca"` /
+    /// `currency = "USD"` -- the accounting seam's authority contract
+    /// requires all four together (B4 final closure repair, Repair A3).
+    /// Fail closed: zero write, checked inside the same transaction as the
+    /// write so the result can never be invalidated before it commits.
+    InvalidSourceSnapshot { detail: String },
+    /// The supplied source snapshot resolves and matches run/mode/source/
+    /// currency, but is *older or equal* (by the canonical
+    /// `(captured_at_utc, snapshot_id)` authority order -- newer
+    /// `captured_at_utc` wins, ties broken by greater `snapshot_id`) than
+    /// the snapshot already recorded as this run's accounting
+    /// `source_snapshot_id`. Accounting provenance must never move
+    /// backward, even when the caller's watermark is otherwise valid or
+    /// higher. Fail closed: zero write.
+    RejectedStaleSnapshot { detail: String },
+}
+
+/// Minimal snapshot authority fields needed to validate a `source_snapshot_id`
+/// (A3) and to order two snapshots deterministically (A4/A5). Read inside the
+/// same transaction as the accounting write it gates -- snapshot rows are
+/// append-only (never updated after insert), so a plain, unlocked read here
+/// is already transactionally coherent: no concurrent transaction can change
+/// the row out from under this one between the read and the write.
+struct SnapshotAuthorityRow {
+    run_id: Option<Uuid>,
+    deployment_mode: String,
+    source: String,
+    currency: String,
+    captured_at_utc: DateTime<Utc>,
+}
+
+async fn fetch_snapshot_authority_tx(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    snapshot_id: Uuid,
+) -> Result<Option<SnapshotAuthorityRow>> {
+    let row = sqlx::query(
+        r#"
+        select run_id, deployment_mode, source, currency, captured_at_utc
+        from sys_paper_portfolio_snapshots
+        where snapshot_id = $1
+        "#,
+    )
+    .bind(snapshot_id)
+    .fetch_optional(&mut **tx)
+    .await
+    .context("fetch_snapshot_authority_tx failed")?;
+
+    Ok(row.map(|r| SnapshotAuthorityRow {
+        run_id: r.get("run_id"),
+        deployment_mode: r.get("deployment_mode"),
+        source: r.get("source"),
+        currency: r.get("currency"),
+        captured_at_utc: r.get("captured_at_utc"),
+    }))
+}
+
+/// `true` when `candidate_key` (`(captured_at_utc, snapshot_id)` of the
+/// snapshot being written) is authoritative-or-equal relative to
+/// `existing_source_snapshot_id` (the snapshot already recorded on the
+/// accounting row) under the canonical B4 ordering: newer `captured_at_utc`
+/// wins; ties broken by greater `snapshot_id`.
+///
+/// - No existing source snapshot recorded (`None`, e.g. a legacy row) --
+///   nothing to violate, always `true`.
+/// - Existing source snapshot is the exact same id as the candidate --
+///   trivially not older, always `true` (covers the same-watermark
+///   same-snapshot and higher-watermark same-snapshot paths without an
+///   extra query).
+/// - Otherwise, the existing snapshot's own authority is fetched (inside the
+///   same transaction) and compared. `require_strictly_newer = true` for the
+///   same-watermark different-snapshot path (A5: "only when the candidate
+///   snapshot is strictly newer"); `false` for the higher-watermark path
+///   (A5: "not older than the currently recorded source snapshot").
+async fn candidate_snapshot_is_authoritative(
+    tx: &mut sqlx::Transaction<'_, sqlx::Postgres>,
+    candidate_id: Uuid,
+    candidate_key: (DateTime<Utc>, Uuid),
+    existing_source_snapshot_id: Option<Uuid>,
+    require_strictly_newer: bool,
+) -> Result<bool> {
+    let Some(existing_id) = existing_source_snapshot_id else {
+        return Ok(true);
+    };
+    if existing_id == candidate_id {
+        return Ok(true);
+    }
+    let Some(existing_authority) = fetch_snapshot_authority_tx(tx, existing_id).await? else {
+        // The existing row's source_snapshot_id no longer resolves (should
+        // be impossible under the FK) -- fail closed rather than assume
+        // authority either way.
+        return Ok(false);
+    };
+    let existing_key = (existing_authority.captured_at_utc, existing_id);
+    if require_strictly_newer {
+        Ok(candidate_key > existing_key)
+    } else {
+        Ok(candidate_key >= existing_key)
+    }
 }
 
 fn row_to_accounting_record(row: &sqlx::postgres::PgRow) -> PaperPortfolioAccountingStateRecord {
@@ -642,6 +742,74 @@ pub async fn upsert_paper_portfolio_accounting_state(
         .begin()
         .await
         .context("upsert_paper_portfolio_accounting_state: begin failed")?;
+
+    // A3: source-snapshot integrity, checked inside this same transaction
+    // before any accounting row is touched. A null/missing/cross-run/
+    // null-run/unsupported-source/non-paper/unsupported-currency snapshot
+    // must never authorize an accounting write.
+    let candidate_authority = fetch_snapshot_authority_tx(&mut tx, args.source_snapshot_id).await?;
+    let Some(candidate_authority) = candidate_authority else {
+        tx.rollback().await.context(
+            "upsert_paper_portfolio_accounting_state: rollback (missing source snapshot) failed",
+        )?;
+        return Ok(
+            UpsertPaperPortfolioAccountingStateOutcome::InvalidSourceSnapshot {
+                detail: format!(
+                    "source_snapshot_id {} does not resolve to any durable snapshot",
+                    args.source_snapshot_id
+                ),
+            },
+        );
+    };
+    if candidate_authority.run_id != Some(args.run_id) {
+        tx.rollback().await.context(
+            "upsert_paper_portfolio_accounting_state: rollback (run_id mismatch) failed",
+        )?;
+        return Ok(UpsertPaperPortfolioAccountingStateOutcome::InvalidSourceSnapshot {
+            detail: format!(
+                "source_snapshot_id {} has run_id {:?}, expected {} (null or cross-run source snapshot)",
+                args.source_snapshot_id, candidate_authority.run_id, args.run_id
+            ),
+        });
+    }
+    if candidate_authority.deployment_mode != "paper" {
+        tx.rollback().await.context(
+            "upsert_paper_portfolio_accounting_state: rollback (non-paper snapshot) failed",
+        )?;
+        return Ok(
+            UpsertPaperPortfolioAccountingStateOutcome::InvalidSourceSnapshot {
+                detail: format!(
+                    "source_snapshot_id {} has deployment_mode '{}', expected 'paper'",
+                    args.source_snapshot_id, candidate_authority.deployment_mode
+                ),
+            },
+        );
+    }
+    if candidate_authority.source != PAPER_PORTFOLIO_SNAPSHOT_SOURCE_EXTERNAL_ALPACA {
+        tx.rollback().await.context(
+            "upsert_paper_portfolio_accounting_state: rollback (unsupported source) failed",
+        )?;
+        return Ok(UpsertPaperPortfolioAccountingStateOutcome::InvalidSourceSnapshot {
+            detail: format!(
+                "source_snapshot_id {} has source '{}', expected '{PAPER_PORTFOLIO_SNAPSHOT_SOURCE_EXTERNAL_ALPACA}'",
+                args.source_snapshot_id, candidate_authority.source
+            ),
+        });
+    }
+    if candidate_authority.currency != "USD" {
+        tx.rollback().await.context(
+            "upsert_paper_portfolio_accounting_state: rollback (unsupported currency) failed",
+        )?;
+        return Ok(
+            UpsertPaperPortfolioAccountingStateOutcome::InvalidSourceSnapshot {
+                detail: format!(
+                    "source_snapshot_id {} has currency '{}', expected 'USD'",
+                    args.source_snapshot_id, candidate_authority.currency
+                ),
+            },
+        );
+    }
+    let candidate_key = (candidate_authority.captured_at_utc, args.source_snapshot_id);
 
     let existing = sqlx::query(
         r#"
@@ -701,7 +869,8 @@ pub async fn upsert_paper_portfolio_accounting_state(
             Ok(UpsertPaperPortfolioAccountingStateOutcome::Inserted { record: new_record })
         }
         Some(row) => {
-            let existing_watermark: i64 = row.get("last_applied_inbox_id");
+            let existing_record = row_to_accounting_record(&row);
+            let existing_watermark: i64 = existing_record.last_applied_inbox_id;
             if args.last_applied_inbox_id < existing_watermark {
                 tx.rollback().await.context(
                     "upsert_paper_portfolio_accounting_state: rollback (rejected) failed",
@@ -715,7 +884,6 @@ pub async fn upsert_paper_portfolio_accounting_state(
                 });
             }
             if args.last_applied_inbox_id == existing_watermark {
-                let existing_record = row_to_accounting_record(&row);
                 let fill_derived_matches = existing_record.cash_micros == args.cash_micros
                     && existing_record.realized_pnl_micros == args.realized_pnl_micros
                     && existing_record.fees_micros == args.fees_micros;
@@ -738,18 +906,65 @@ pub async fn upsert_paper_portfolio_accounting_state(
                 let epoch_unchanged = existing_record.accounting_epoch == args.accounting_epoch
                     && existing_record.accounting_epoch_reason == args.accounting_epoch_reason;
 
-                if same_snapshot && epoch_unchanged {
+                if same_snapshot {
+                    if epoch_unchanged {
+                        tx.rollback().await.context(
+                            "upsert_paper_portfolio_accounting_state: rollback (already-current) failed",
+                        )?;
+                        return Ok(UpsertPaperPortfolioAccountingStateOutcome::AlreadyCurrent {
+                            record: existing_record,
+                        });
+                    }
+                    // A5: same snapshot, same fill-derived values, but the
+                    // epoch classification drifted -- since accounting_epoch
+                    // is a deterministic function of (snapshot, fill
+                    // history), an identical snapshot must always reproduce
+                    // an identical epoch/reason. A drift here means
+                    // nondeterministic replay or corruption, exactly like a
+                    // fill-derived-value drift -- fail closed as Conflict,
+                    // never silently accepted as an update.
                     tx.rollback().await.context(
-                        "upsert_paper_portfolio_accounting_state: rollback (already-current) failed",
+                        "upsert_paper_portfolio_accounting_state: rollback (epoch conflict) failed",
                     )?;
-                    return Ok(UpsertPaperPortfolioAccountingStateOutcome::AlreadyCurrent {
+                    let detail = format!(
+                        "run_id {} has last_applied_inbox_id {existing_watermark} and source_snapshot_id {:?} unchanged, but accounting_epoch/accounting_epoch_reason differ from this replay -- nondeterministic replay or corruption, refusing to overwrite",
+                        args.run_id, existing_record.source_snapshot_id
+                    );
+                    return Ok(UpsertPaperPortfolioAccountingStateOutcome::Conflict {
                         record: existing_record,
+                        detail,
                     });
                 }
 
-                // Same watermark, same fill-derived values, but the snapshot
-                // (and/or the epoch classification it produced) changed --
-                // update only the snapshot-dependent fields.
+                // A5: a *different* snapshot at the same watermark may only
+                // supersede the recorded one when it is strictly newer under
+                // the canonical (captured_at_utc, snapshot_id) authority
+                // order -- never an older or same-instant-but-lower-id
+                // snapshot, even though the fill-derived values match.
+                let authoritative = candidate_snapshot_is_authoritative(
+                    &mut tx,
+                    args.source_snapshot_id,
+                    candidate_key,
+                    existing_record.source_snapshot_id,
+                    true,
+                )
+                .await?;
+                if !authoritative {
+                    tx.rollback().await.context(
+                        "upsert_paper_portfolio_accounting_state: rollback (stale snapshot at same watermark) failed",
+                    )?;
+                    return Ok(UpsertPaperPortfolioAccountingStateOutcome::RejectedStaleSnapshot {
+                        detail: format!(
+                            "run_id {} already has source_snapshot_id {:?} which is not older than candidate {} at the same watermark {}",
+                            args.run_id, existing_record.source_snapshot_id, args.source_snapshot_id, existing_watermark
+                        ),
+                    });
+                }
+
+                // Same watermark, same fill-derived values, but a strictly
+                // newer snapshot (and/or the epoch classification it
+                // produced) changed -- update only the snapshot-dependent
+                // fields.
                 sqlx::query(
                     r#"
                     update sys_paper_portfolio_accounting_state
@@ -778,6 +993,30 @@ pub async fn upsert_paper_portfolio_accounting_state(
                         record: new_record,
                     },
                 );
+            }
+
+            // A5: higher watermark must never regress source-snapshot
+            // provenance -- the candidate snapshot must not be older than
+            // the one already recorded, even though the watermark itself is
+            // advancing.
+            let authoritative = candidate_snapshot_is_authoritative(
+                &mut tx,
+                args.source_snapshot_id,
+                candidate_key,
+                existing_record.source_snapshot_id,
+                false,
+            )
+            .await?;
+            if !authoritative {
+                tx.rollback().await.context(
+                    "upsert_paper_portfolio_accounting_state: rollback (stale snapshot at higher watermark) failed",
+                )?;
+                return Ok(UpsertPaperPortfolioAccountingStateOutcome::RejectedStaleSnapshot {
+                    detail: format!(
+                        "run_id {} already has source_snapshot_id {:?} which is not older than candidate {} even though watermark {} > {}",
+                        args.run_id, existing_record.source_snapshot_id, args.source_snapshot_id, args.last_applied_inbox_id, existing_watermark
+                    ),
+                });
             }
 
             sqlx::query(
