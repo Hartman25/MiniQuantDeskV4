@@ -46,6 +46,7 @@ pub(crate) mod oms_metrics;
 pub(crate) mod paper_journal;
 pub(crate) mod paper_lifecycle;
 pub(crate) mod portfolio;
+pub(crate) mod portfolio_allocation;
 pub(crate) mod portfolio_provenance;
 pub(crate) mod reconcile;
 pub(crate) mod repair;
@@ -296,6 +297,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         portfolio_live_weights, portfolio_open_orders, portfolio_positions, portfolio_summary,
         risk_denials, risk_summary,
     };
+    use portfolio_allocation::{
+        portfolio_allocation_plan_by_id, portfolio_allocation_plans, portfolio_allocation_status,
+    };
     use reconcile::{reconcile_mismatches, reconcile_status};
     use repair::{
         repair_adopt_broker_position_baseline, repair_halted_run_fill_apply,
@@ -454,6 +458,21 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/v1/portfolio/durable-snapshots",
             get(portfolio_durable_snapshots),
+        )
+        // RUNTIME-OPPORTUNITY-ALLOCATION-01 Phase H: read-only allocation
+        // truth. GET-only -- never inserts, updates, or deletes a row.
+        // approved_for_live is always false in every response.
+        .route(
+            "/api/v1/portfolio/allocation/status",
+            get(portfolio_allocation_status),
+        )
+        .route(
+            "/api/v1/portfolio/allocation/plans",
+            get(portfolio_allocation_plans),
+        )
+        .route(
+            "/api/v1/portfolio/allocation/plans/:plan_id",
+            get(portfolio_allocation_plan_by_id),
         )
         // PAPER-DAILY-PNL-CAPTURE-01D: read-only baseline provenance lookup
         // by trading_date (public, no auth). No DB writes, no broker/provider
