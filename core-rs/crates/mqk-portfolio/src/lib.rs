@@ -19,6 +19,7 @@ mod valuation;
 
 pub mod allocator;
 pub mod constraints;
+pub mod cycle;
 pub mod ledger;
 
 pub use accounting::{apply_entry, apply_fill, recompute_from_ledger};
@@ -30,6 +31,12 @@ pub use constraints::{
     check_all, check_sector_limits, check_turnover, check_weight_bounds, compute_turnover,
     evaluate_sector_risk, ConstraintViolation, SectorConstraint, SectorRiskEvaluation,
     TurnoverConstraint, WeightBoundsConstraint,
+};
+// RUNTIME-OPPORTUNITY-ALLOCATION-01 Phase D: pure allocation-cycle model,
+// zero new callers (Bundle 5 daemon wiring is the only intended consumer).
+pub use cycle::{
+    compute_allocation_cycle, AllocationCandidateInput, AllocationCandidateResult,
+    AllocationCycleContext, AllocationCycleResult, AllocationDisposition,
 };
 pub use ledger::{Ledger, LedgerError, LedgerSnapshot};
 
@@ -48,8 +55,8 @@ pub use types::{CashEntry, Fill, LedgerEntry, Lot, PortfolioState, PositionState
 
 // PORTFOLIO-LIVE-WEIGHTS-01: live position valuation / weight truth seam
 pub use valuation::{
-    compute_portfolio_weights, PositionMark, PositionWeightInput, PositionWeightRow,
-    PortfolioWeightsSnapshot,
+    compute_portfolio_weights, PortfolioWeightsSnapshot, PositionMark, PositionWeightInput,
+    PositionWeightRow,
 };
 
 // PAPER-PNL-OPERATOR-VISIBILITY-CLOSURE-01B: per-position unrealized P&L
