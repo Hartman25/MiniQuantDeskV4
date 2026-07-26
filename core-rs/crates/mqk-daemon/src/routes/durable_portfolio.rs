@@ -31,6 +31,7 @@ use serde::Deserialize;
 use uuid::Uuid;
 
 use super::portfolio::{aggregate_positions_pnl, compute_broker_positions_pnl, resolve_daily_pnl};
+use super::portfolio_provenance::{classify_portfolio_provenance, PortfolioProvenanceState};
 use crate::api_types::{
     PortfolioDurablePositionRow, PortfolioDurablePositionsResponse, PortfolioDurableSnapshotRow,
     PortfolioDurableSnapshotsResponse, PortfolioDurableSummaryResponse,
@@ -113,7 +114,7 @@ pub(crate) async fn resolve_run(db: &sqlx::PgPool, explicit_run_id: Option<Uuid>
 
 /// Fixed bounded message for an invalid `run_id` query param — never echoes
 /// the caller-supplied raw value back onto the wire.
-const INVALID_RUN_ID_MESSAGE: &str = "run_id query parameter is not a valid UUID";
+pub(crate) const INVALID_RUN_ID_MESSAGE: &str = "run_id query parameter is not a valid UUID";
 
 fn parse_explicit_run_id(raw: Option<&str>) -> Result<Option<Uuid>, &'static str> {
     match raw {
@@ -234,7 +235,7 @@ pub(crate) async fn portfolio_durable_summary(
             realized_pnl_reason,
             fees,
             cash_movement,
-        ) = accounting_fields(accounting.as_ref());
+        ) = accounting_fields(None, accounting.as_ref());
         return (
             StatusCode::OK,
             Json(PortfolioDurableSummaryResponse {
@@ -298,7 +299,13 @@ pub(crate) async fn portfolio_durable_summary(
         realized_pnl_reason,
         fees,
         cash_movement,
-    ) = accounting_fields(accounting.as_ref());
+    ) = accounting_fields(Some(snapshot.snapshot.snapshot_id), accounting.as_ref());
+    if accounting_truth_state == "accounting_snapshot_mismatch" {
+        blockers.push(
+            "accounting row's source snapshot does not match the currently selected durable snapshot"
+                .to_string(),
+        );
+    }
 
     // Unrealized P&L reuses the existing broker-position mark lookup,
     // driven off the durable snapshot's positions rather than the
@@ -356,8 +363,16 @@ pub(crate) async fn portfolio_durable_summary(
         .into_response()
 }
 
+/// Projects the shared [`classify_portfolio_provenance`] verdict into the
+/// granular fields `PortfolioDurableSummaryResponse` exposes. `snapshot_id`
+/// is the currently-selected run-scoped durable snapshot's id (`None` if no
+/// such snapshot exists yet for this run) -- this is what lets the
+/// classifier detect a stale/mismatched accounting row instead of the prior
+/// implementation, which never compared `accounting.source_snapshot_id`
+/// against the selected snapshot at all (B4 closure repair, Phase B).
 #[allow(clippy::type_complexity)]
 fn accounting_fields(
+    snapshot_id: Option<Uuid>,
     accounting: Option<&mqk_db::PaperPortfolioAccountingStateRecord>,
 ) -> (
     String,
@@ -371,61 +386,108 @@ fn accounting_fields(
     Option<f64>,
     Option<f64>,
 ) {
-    match accounting {
-        None => (
-            "not_found".to_string(),
+    const SCALE: f64 = mqk_portfolio::MICROS_SCALE as f64;
+    let state = classify_portfolio_provenance(true, false, false, snapshot_id, accounting);
+    let truth_state = state.as_str().to_string();
+
+    match state {
+        PortfolioProvenanceState::NotFound => (
+            truth_state.clone(),
             None,
             None,
             None,
             None,
             None,
-            "not_found".to_string(),
+            truth_state,
             Some("no accounting rows exist yet for this run".to_string()),
             None,
             None,
         ),
-        Some(row) if row.accounting_epoch == "incomplete" => (
-            "fill_history_incomplete".to_string(),
-            Some(row.accounting_epoch.clone()),
-            row.accounting_epoch_reason.clone(),
-            row.source_snapshot_id.map(|id| id.to_string()),
-            Some(row.last_applied_inbox_id),
-            None,
-            "fill_history_incomplete".to_string(),
-            row.accounting_epoch_reason.clone(),
-            Some(row.fees_micros as f64 / mqk_portfolio::MICROS_SCALE as f64),
-            Some(row.cash_micros as f64 / mqk_portfolio::MICROS_SCALE as f64),
-        ),
-        // A row without recorded snapshot provenance cannot be proven to
-        // trace back to a specific confirmed broker snapshot -- report it
-        // as unproven rather than active, even though the epoch itself
-        // says "complete" (B4 closure repair: "no fabricated truth").
-        Some(row) if row.source_snapshot_id.is_none() => (
-            "accounting_epoch_unavailable".to_string(),
-            Some(row.accounting_epoch.clone()),
-            None,
-            None,
-            Some(row.last_applied_inbox_id),
-            None,
-            "accounting_epoch_unavailable".to_string(),
-            Some(
+        PortfolioProvenanceState::AccountingEpochUnavailable => {
+            let row = accounting
+                .expect("classifier: AccountingEpochUnavailable implies an accounting row exists");
+            let has_snapshot = snapshot_id.is_some();
+            let reason = if has_snapshot {
                 "accounting row has no recorded source snapshot; completeness cannot be traced"
-                    .to_string(),
-            ),
-            Some(row.fees_micros as f64 / mqk_portfolio::MICROS_SCALE as f64),
-            Some(row.cash_micros as f64 / mqk_portfolio::MICROS_SCALE as f64),
-        ),
-        Some(row) => (
-            "active".to_string(),
-            Some(row.accounting_epoch.clone()),
+                    .to_string()
+            } else {
+                "no durable snapshot exists yet for this run; accounting completeness cannot be traced"
+                    .to_string()
+            };
+            (
+                truth_state.clone(),
+                Some(row.accounting_epoch.clone()),
+                None,
+                None,
+                Some(row.last_applied_inbox_id),
+                None,
+                truth_state,
+                Some(reason),
+                has_snapshot.then_some(row.fees_micros as f64 / SCALE),
+                has_snapshot.then_some(row.cash_micros as f64 / SCALE),
+            )
+        }
+        PortfolioProvenanceState::AccountingSnapshotMismatch => {
+            let row = accounting
+                .expect("classifier: AccountingSnapshotMismatch implies an accounting row exists");
+            (
+                truth_state.clone(),
+                Some(row.accounting_epoch.clone()),
+                row.accounting_epoch_reason.clone(),
+                row.source_snapshot_id.map(|id| id.to_string()),
+                Some(row.last_applied_inbox_id),
+                None,
+                truth_state,
+                Some(
+                    "accounting row's source snapshot does not match the currently selected durable snapshot"
+                        .to_string(),
+                ),
+                Some(row.fees_micros as f64 / SCALE),
+                Some(row.cash_micros as f64 / SCALE),
+            )
+        }
+        PortfolioProvenanceState::FillHistoryIncomplete => {
+            let row = accounting
+                .expect("classifier: FillHistoryIncomplete implies an accounting row exists");
+            (
+                truth_state.clone(),
+                Some(row.accounting_epoch.clone()),
+                row.accounting_epoch_reason.clone(),
+                row.source_snapshot_id.map(|id| id.to_string()),
+                Some(row.last_applied_inbox_id),
+                None,
+                truth_state,
+                row.accounting_epoch_reason.clone(),
+                Some(row.fees_micros as f64 / SCALE),
+                Some(row.cash_micros as f64 / SCALE),
+            )
+        }
+        PortfolioProvenanceState::Active => {
+            let row = accounting.expect("classifier: Active implies an accounting row exists");
+            (
+                truth_state.clone(),
+                Some(row.accounting_epoch.clone()),
+                None,
+                row.source_snapshot_id.map(|id| id.to_string()),
+                Some(row.last_applied_inbox_id),
+                Some(row.realized_pnl_micros as f64 / SCALE),
+                truth_state,
+                None,
+                Some(row.fees_micros as f64 / SCALE),
+                Some(row.cash_micros as f64 / SCALE),
+            )
+        }
+        PortfolioProvenanceState::QueryFailed | PortfolioProvenanceState::UnsupportedSource => (
+            truth_state.clone(),
             None,
-            row.source_snapshot_id.map(|id| id.to_string()),
-            Some(row.last_applied_inbox_id),
-            Some(row.realized_pnl_micros as f64 / mqk_portfolio::MICROS_SCALE as f64),
-            "active".to_string(),
             None,
-            Some(row.fees_micros as f64 / mqk_portfolio::MICROS_SCALE as f64),
-            Some(row.cash_micros as f64 / mqk_portfolio::MICROS_SCALE as f64),
+            None,
+            None,
+            None,
+            truth_state,
+            Some(QUERY_FAILED_MESSAGE.to_string()),
+            None,
+            None,
         ),
     }
 }

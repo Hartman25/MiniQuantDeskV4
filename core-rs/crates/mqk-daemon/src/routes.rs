@@ -46,6 +46,7 @@ pub(crate) mod oms_metrics;
 pub(crate) mod paper_journal;
 pub(crate) mod paper_lifecycle;
 pub(crate) mod portfolio;
+pub(crate) mod portfolio_provenance;
 pub(crate) mod reconcile;
 pub(crate) mod repair;
 pub(crate) mod strategy;
@@ -267,6 +268,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         integrity_arm, integrity_disarm, ops_action, ops_catalog, ops_mode_change_guidance,
         run_halt, run_start, run_stop,
     };
+    use durable_portfolio::{
+        portfolio_durable_positions, portfolio_durable_snapshots, portfolio_durable_summary,
+    };
     use execution::{
         execution_fill_quality, execution_order_cancel, execution_order_submit, execution_orders,
         execution_signal_evaluations, execution_summary,
@@ -282,9 +286,6 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         market_data_feed_poll_once, market_data_feed_scheduler_start,
         market_data_feed_scheduler_status, market_data_feed_scheduler_stop,
         market_data_feed_status, market_data_ingest_plan, tracked_equities_list,
-    };
-    use durable_portfolio::{
-        portfolio_durable_positions, portfolio_durable_snapshots, portfolio_durable_summary,
     };
     use market_data_readiness::market_data_readiness_status;
     use oms_metrics::{metrics_dashboards, oms_overview};
