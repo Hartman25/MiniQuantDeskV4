@@ -275,29 +275,36 @@ foreach ($Forbidden in @("postJson", "invokeOperatorAction", "onRunAction", "<bu
 #
 # F1 legitimately adds/edits many GUI files -- unlike the E5 Phase E closure
 # guard, this guard does not forbid GUI files. Base is the accepted Phase E
-# closing commit (fixed); the committed range is base..HEAD (never widened
-# permanently past this patch's own scope in a way that would misfire on a
-# future, unrelated GUI patch -- this guard is F1's own, not reused verbatim
-# by F2/F3).
+# closing commit (fixed); F1AcceptedHead is F1's own accepted committed head
+# (also fixed) -- the historical proof range is base..F1AcceptedHead,
+# deliberately NEVER ..HEAD. A permanent ..HEAD range does not stay scoped
+# to this patch: every later bundle's own legitimate production Rust/
+# migration commits land inside base..HEAD too, so the check would flag
+# them forever as violations of F1's scope (this is exactly what happened
+# to Bundle 4's DURABLE-PAPER-PORTFOLIO-AND-PNL-01-COMBINED commits, and
+# cascaded into F2/F3 since their guards invoke this one as a prerequisite).
+# Live working-tree staged/unstaged changes are still checked separately
+# below to catch scope creep while THIS patch is in flight; they say
+# nothing about later, unrelated patches.
 # -----------------------------------------------------------------------
 $F1Base = "4b6eec72cb65dec1fc2a8793e9d9d7bdde8328b4"
+$F1AcceptedHead = "bd7336d4dd14dbb1943638b152886eb40b646b7d"
 
 $PriorErrorActionPreference = $ErrorActionPreference
 $ErrorActionPreference = "Continue"
-& git -C $RepoRoot merge-base --is-ancestor $F1Base HEAD 2>$null
+& git -C $RepoRoot merge-base --is-ancestor $F1Base $F1AcceptedHead 2>$null
 $BaseIsAncestor = ($LASTEXITCODE -eq 0)
-$CommittedRange = @()
+$F1FixedRange = @()
 if ($BaseIsAncestor) {
-    $CommittedRange = git -C $RepoRoot diff --name-only "$F1Base..HEAD" 2>$null
+    $F1FixedRange = git -C $RepoRoot diff --name-only "$F1Base..$F1AcceptedHead" 2>$null
 }
 $UnstagedChanges = git -C $RepoRoot diff --name-only 2>$null
 $StagedChanges = git -C $RepoRoot diff --name-only --cached 2>$null
 $ErrorActionPreference = $PriorErrorActionPreference
 
-$CommittedRangeClean = @($CommittedRange) | Where-Object { $_ -ne "" } | Select-Object -Unique
+$F1FixedRangeClean = @($F1FixedRange) | Where-Object { $_ -ne "" } | Select-Object -Unique
 $UnstagedClean = @($UnstagedChanges) | Where-Object { $_ -ne "" } | Select-Object -Unique
 $StagedClean = @($StagedChanges) | Where-Object { $_ -ne "" } | Select-Object -Unique
-$AllTouchedPaths = @($CommittedRangeClean) + @($UnstagedClean) + @($StagedClean) | Select-Object -Unique
 
 function Test-NoProductionRustOrMigration {
     param([string]$Label, [string[]]$Paths)
@@ -322,13 +329,34 @@ function Test-NoProductionRustOrMigration {
 Write-Host ""
 Show-Info "--- [10]/[11] No daemon production Rust file or migration is touched ---"
 if ($BaseIsAncestor) {
-    Show-Green "  OK -- $F1Base (accepted Phase E head) is an ancestor of HEAD"
+    Show-Green "  OK -- $F1Base (accepted Phase E head) is an ancestor of $F1AcceptedHead (F1's own accepted head)"
 } else {
-    Show-Info "  INFO -- $F1Base is not (yet) an ancestor of HEAD -- checking working tree only"
+    Show-Info "  INFO -- $F1Base is not (yet) an ancestor of $F1AcceptedHead -- checking working tree only"
 }
-Test-NoProductionRustOrMigration "committed range $F1Base..HEAD" $CommittedRangeClean
+Test-NoProductionRustOrMigration "F1's own fixed committed range $F1Base..$F1AcceptedHead (never widened to ..HEAD)" $F1FixedRangeClean
 Test-NoProductionRustOrMigration "unstaged working tree" $UnstagedClean
 Test-NoProductionRustOrMigration "staged working tree" $StagedClean
+
+# Informational only (never a violation): how much has changed between
+# F1's own accepted head and current HEAD. This is not a patch-scope proof
+# -- every later bundle legitimately touches production Rust and migration
+# files -- it exists only so a future need for "what has landed since F1"
+# has a place to look without resurrecting the permanent ..HEAD range that
+# caused this defect in the first place.
+$ErrorActionPreference = "Continue"
+& git -C $RepoRoot merge-base --is-ancestor $F1AcceptedHead HEAD 2>$null
+$F1AcceptedHeadIsAncestorOfHead = ($LASTEXITCODE -eq 0)
+$SinceF1Range = @()
+if ($F1AcceptedHeadIsAncestorOfHead) {
+    $SinceF1Range = git -C $RepoRoot diff --name-only "$F1AcceptedHead..HEAD" 2>$null
+}
+$ErrorActionPreference = $PriorErrorActionPreference
+$SinceF1RangeClean = @($SinceF1Range) | Where-Object { $_ -ne "" } | Select-Object -Unique
+if ($F1AcceptedHeadIsAncestorOfHead) {
+    Show-Info "  INFO -- $(@($SinceF1RangeClean).Count) file(s) changed in $F1AcceptedHead..HEAD (informational only, not a violation)"
+} else {
+    Show-Info "  INFO -- $F1AcceptedHead is not an ancestor of HEAD -- skipping informational since-F1 diff"
+}
 
 # -----------------------------------------------------------------------
 # [12] No F2/F3 work introduced -- WITHIN F1'S OWN COMMITTED RANGE ONLY.
@@ -336,26 +364,12 @@ Test-NoProductionRustOrMigration "staged working tree" $StagedClean
 # Reconciled by AUTONOMOUS-DAILY-PAPER-OPERATIONS-01F2-OPERATOR-RUNBOOK-
 # CORRECTION, mirroring how F1 itself reconciled the Phase E closure guard's
 # own now-obsolete permanent-range assertion (that guard's check [23]/[24]
-# split). This check originally scanned $AllTouchedPaths (committed
-# F1Base..HEAD plus the live working tree), which correctly caught scope
-# creep while F1 was still open -- but F1 is now accepted at the fixed head
-# below, and F2/F3 are legitimately allowed (indeed required) to touch
-# runbook/soak paths once they begin. Widening this check to the live
-# working tree/current HEAD forever would misfire on every legitimate F2/F3
-# patch. The check is therefore fixed to F1's own accepted committed range
-# only -- it proves what F1 itself did, not what happens afterward.
+# split). F2/F3 are legitimately allowed (indeed required) to touch
+# runbook/soak paths once they begin, so this reuses the same fixed
+# $F1Base..$F1AcceptedHead range already computed for checks [10]/[11]
+# above -- it proves what F1 itself did, not what happens afterward.
 # -----------------------------------------------------------------------
-$F1AcceptedHead = "bd7336d4dd14dbb1943638b152886eb40b646b7d"
-$PriorErrorActionPreference2 = $ErrorActionPreference
-$ErrorActionPreference = "Continue"
-& git -C $RepoRoot merge-base --is-ancestor $F1Base $F1AcceptedHead 2>$null
-$F1RangeBaseIsAncestor = ($LASTEXITCODE -eq 0)
-$F1OwnCommittedRange = @()
-if ($F1RangeBaseIsAncestor) {
-    $F1OwnCommittedRange = git -C $RepoRoot diff --name-only "$F1Base..$F1AcceptedHead" 2>$null
-}
-$ErrorActionPreference = $PriorErrorActionPreference2
-$F1OwnCommittedRangeClean = @($F1OwnCommittedRange) | Where-Object { $_ -ne "" } | Select-Object -Unique
+$F1OwnCommittedRangeClean = $F1FixedRangeClean
 
 Write-Host ""
 Show-Info "--- [12] F1's own accepted committed range ($F1Base..$F1AcceptedHead) introduced no F2/F3 work ---"
