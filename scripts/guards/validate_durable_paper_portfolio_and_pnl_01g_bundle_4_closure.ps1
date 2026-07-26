@@ -562,6 +562,189 @@ if (Test-Path -LiteralPath $GuiValidatorFileG) {
     Show-Fail "GUI durable-portfolio runtime validator module not found: $GuiValidatorFileG"
 }
 
+# -----------------------------------------------------------------------
+# [23]-[36] DURABLE-PAPER-PORTFOLIO-AND-PNL-01-FINAL-COHERENCE-AND-
+# ACCEPTANCE-PROOF invariants (Phase A/B/C).
+# -----------------------------------------------------------------------
+$PortfolioProvenanceFileG = Join-Path $RepoRoot 'core-rs\crates\mqk-daemon\src\routes\portfolio_provenance.rs'
+$PortfolioProvenanceTextG = if (Test-Path -LiteralPath $PortfolioProvenanceFileG) { [System.IO.File]::ReadAllText($PortfolioProvenanceFileG) } else { '' }
+
+Write-Host ''
+Show-Info '--- [23] USD authority is enforced ---'
+if ($SnapshotTextG -match 'snapshot\.account\.currency\s*!=\s*"USD"') {
+    Show-Green "snapshot.rs refuses a non-USD account currency before persisting an external snapshot"
+} else {
+    Show-Fail "snapshot.rs does not visibly enforce USD currency on external snapshot acceptance"
+}
+if ($PaperPortfolioDbTextG -match 'candidate_authority\.currency\s*!=\s*"USD"') {
+    Show-Green "mqk-db enforces USD currency on the accounting source-snapshot authority check"
+} else {
+    Show-Fail "mqk-db does not visibly enforce USD currency on the source-snapshot authority check"
+}
+
+Write-Host ''
+Show-Info '--- [24] Non-null run ownership is enforced for authoritative external snapshots ---'
+if ($SnapshotTextG -match 'let Some\(run_id\) = run_id else') {
+    Show-Green "snapshot.rs refuses a run_id-less external snapshot before persisting"
+} else {
+    Show-Fail "snapshot.rs does not visibly require non-null run ownership before persisting"
+}
+
+Write-Host ''
+Show-Info '--- [25] Blank symbols cannot be skipped ---'
+if ($SnapshotTextG -match 'p\.symbol\.trim\(\)\.is_empty\(\)') {
+    Show-Green "snapshot.rs refuses a blank position symbol before persisting"
+} else {
+    Show-Fail "snapshot.rs does not visibly refuse a blank position symbol"
+}
+if ($AccountingTextG -match 'broker_position_symbol_blank') {
+    Show-Green "paper_portfolio_accounting.rs reports a blank broker position symbol as a bounded blocker, never a silent skip"
+} else {
+    Show-Fail "paper_portfolio_accounting.rs does not report a blank broker position symbol as a bounded blocker"
+}
+
+Write-Host ''
+Show-Info '--- [26] Source snapshot must belong to the accounting run (transactional integrity) ---'
+if ($PaperPortfolioDbTextG -match 'InvalidSourceSnapshot' -and
+    $PaperPortfolioDbTextG -match 'candidate_authority\.run_id\s*!=\s*Some\(args\.run_id\)') {
+    Show-Green "upsert_paper_portfolio_accounting_state rejects a null/cross-run source snapshot as InvalidSourceSnapshot"
+} else {
+    Show-Fail "upsert_paper_portfolio_accounting_state does not visibly validate source-snapshot run ownership"
+}
+if ($PaperPortfolioDbTextG -match 'fetch_snapshot_authority_tx') {
+    Show-Green "Source-snapshot authority is fetched inside the same transaction as the accounting write"
+} else {
+    Show-Fail "No transactional source-snapshot authority fetch found"
+}
+
+Write-Host ''
+Show-Info '--- [27] Same-snapshot epoch/reason drift is a Conflict, never a silent update ---'
+if ($PaperPortfolioDbTextG -match 'epoch classification drifted' -and
+    $PaperPortfolioDbTextG -match 'UpsertPaperPortfolioAccountingStateOutcome::Conflict') {
+    Show-Green "A same-snapshot epoch/reason drift with unchanged fill-derived values is rejected as Conflict"
+} else {
+    Show-Fail "Same-snapshot epoch/reason drift does not visibly reject as Conflict"
+}
+
+Write-Host ''
+Show-Info '--- [28] Older snapshot provenance cannot replace newer ---'
+if ($PaperPortfolioDbTextG -match 'RejectedStaleSnapshot') {
+    Show-Green "RejectedStaleSnapshot outcome variant exists as real code"
+} else {
+    Show-Fail "RejectedStaleSnapshot outcome variant missing -- stale-snapshot regression is not rejected"
+}
+
+Write-Host ''
+Show-Info '--- [29] Snapshot authority ordering is deterministic ((captured_at_utc, snapshot_id)) ---'
+if ($PaperPortfolioDbTextG -match 'candidate_snapshot_is_authoritative' -and
+    $PaperPortfolioDbTextG -match '\(DateTime<Utc>,\s*Uuid\)') {
+    Show-Green "A single deterministic (captured_at_utc, snapshot_id) authority-ordering helper exists and is reused"
+} else {
+    Show-Fail "No single deterministic snapshot-authority-ordering helper found"
+}
+
+Write-Host ''
+Show-Info '--- [30] Summary accounting must match the selected snapshot (shared classifier) ---'
+if ($PortfolioProvenanceTextG -match 'AccountingSnapshotMismatch') {
+    Show-Green "The shared provenance classifier defines an AccountingSnapshotMismatch state"
+} else {
+    Show-Fail "No AccountingSnapshotMismatch state found in the shared provenance classifier"
+}
+if ($DurablePortfolioTextG -match 'classify_portfolio_provenance') {
+    Show-Green "durable_portfolio.rs uses the shared provenance classifier"
+} else {
+    Show-Fail "durable_portfolio.rs does not use the shared provenance classifier"
+}
+
+Write-Host ''
+Show-Info '--- [31] Paper lifecycle uses the same provenance classifier as durable-summary ---'
+if ($PaperLifecycleTextG -match 'classify_portfolio_provenance') {
+    Show-Green "paper_lifecycle.rs uses the shared provenance classifier"
+} else {
+    Show-Fail "paper_lifecycle.rs does not use the shared provenance classifier -- risk of drift from durable-summary"
+}
+if ($PaperLifecycleTextG -match 'durable_accounting\s*:\s*Option') {
+    Show-Fail "paper_lifecycle.rs still classifies overall_lifecycle_state from a raw accounting row instead of the shared classifier verdict"
+} else {
+    Show-Green "paper_lifecycle.rs no longer classifies overall_lifecycle_state from a raw accounting row"
+}
+
+Write-Host ''
+Show-Info '--- [32] Paper-lifecycle invalid-run_id errors are bounded and never echo raw input ---'
+if ($PaperLifecycleTextG -match 'INVALID_RUN_ID_MESSAGE') {
+    Show-Green "paper_lifecycle.rs uses the shared fixed, bounded invalid-run_id message"
+} else {
+    Show-Fail "paper_lifecycle.rs does not use the shared fixed invalid-run_id message"
+}
+if ($PaperLifecycleTextG -match 'run_id is not a valid UUID: \{s\}') {
+    Show-Fail "paper_lifecycle.rs still echoes the raw supplied run_id value in its error message"
+} else {
+    Show-Green "paper_lifecycle.rs does not echo the raw supplied run_id value"
+}
+
+Write-Host ''
+Show-Info '--- [33] All nested GUI truth states are closed (including the new Phase B/C states) ---'
+$GuiValidatorTextG23 = if (Test-Path -LiteralPath $GuiValidatorFileG) { [System.IO.File]::ReadAllText($GuiValidatorFileG) } else { '' }
+$RequiredGuiStates = @(
+    'accounting_snapshot_mismatch',
+    'fill_history_incomplete',
+    'accounting_epoch_unavailable',
+    'query_failed'
+)
+foreach ($state in $RequiredGuiStates) {
+    if ($GuiValidatorTextG23 -match [regex]::Escape($state)) {
+        Show-Green "GUI closed vocabulary includes: $state"
+    } else {
+        Show-Fail "GUI closed vocabulary is missing: $state"
+    }
+}
+if ($GuiValidatorTextG23 -match 'Number\.isFinite' -and $GuiValidatorTextG23 -match 'Number\.isSafeInteger') {
+    Show-Green "GUI validator rejects non-finite and unsafe/non-integral numeric fields"
+} else {
+    Show-Fail "GUI validator does not visibly reject non-finite/unsafe numeric fields"
+}
+
+Write-Host ''
+Show-Info '--- [34] GUI authoritative surfaces require matching run AND snapshot IDs ---'
+if ($GuiValidatorTextG23 -match 'snapshotMismatch') {
+    Show-Green "enforceRunScopeConsistency compares snapshot_id, not only run_id"
+} else {
+    Show-Fail "enforceRunScopeConsistency does not visibly compare snapshot_id"
+}
+
+Write-Host ''
+Show-Info '--- [35] No new database migration was added by this patch ---'
+$PriorEapMig = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+$StartingHeadForMigrationCheck = '32bda6b7ab2bb85b5908d97d4903c0d4892fcb0a'
+$MigrationDiffFiles = @(git -C $RepoRoot diff --name-only "$StartingHeadForMigrationCheck..HEAD" -- core-rs/crates/mqk-db/migrations 2>$null)
+$ErrorActionPreference = $PriorEapMig
+$MigrationDiffFilesClean = @($MigrationDiffFiles) | Where-Object { $_ -ne '' }
+if ($null -eq $MigrationDiffFilesClean -or @($MigrationDiffFilesClean).Count -eq 0) {
+    Show-Green "No migration file changed since the patch's starting commit $StartingHeadForMigrationCheck"
+} else {
+    Show-Fail "Migration file(s) changed since the starting commit: $($MigrationDiffFilesClean -join ', ')"
+}
+
+Write-Host ''
+Show-Info '--- [36] No broker adapter, order-submission, strategy, or risk-limit path changed ---'
+$PriorEapScope = $ErrorActionPreference
+$ErrorActionPreference = 'Continue'
+$FullDiffFiles = @(git -C $RepoRoot diff --name-only "$StartingHeadForMigrationCheck..HEAD" 2>$null)
+$ErrorActionPreference = $PriorEapScope
+$FullDiffFilesClean = @($FullDiffFiles) | Where-Object { $_ -ne '' }
+$OutOfScopePaths = $FullDiffFilesClean | Where-Object {
+    $_ -like 'core-rs/crates/mqk-broker-*/*' -or
+    $_ -like 'core-rs/crates/mqk-strategy/*' -or
+    $_ -like 'core-rs/crates/mqk-risk/*' -or
+    $_ -like 'core-rs/crates/mqk-execution/src/*'
+}
+if ($null -eq $OutOfScopePaths -or @($OutOfScopePaths).Count -eq 0) {
+    Show-Green "No broker adapter, strategy, risk, or execution-core file changed since $StartingHeadForMigrationCheck"
+} else {
+    Show-Fail "Out-of-scope file(s) changed: $($OutOfScopePaths -join ', ')"
+}
+
 Write-Host ''
 Write-Host '============================================================'
 if ($Violations -gt 0) {

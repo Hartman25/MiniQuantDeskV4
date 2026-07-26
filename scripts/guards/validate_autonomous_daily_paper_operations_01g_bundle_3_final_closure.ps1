@@ -483,9 +483,19 @@ Test-ContentDoesNotContain "runbook does not claim multi-symbol autonomous rollo
 # -----------------------------------------------------------------------
 Write-Host ""
 Show-Info "--- [12]/[13] Unattended soak and live-capital readiness are never claimed ---"
-$ReadmeContent = if (Test-FileExists "README.md" $PathReadme) { Get-Content -Raw -Path $PathReadme } else { $null }
-$ReadmeTechContent = if (Test-FileExists "README_TECHNICAL.md" $PathReadmeTech) { Get-Content -Raw -Path $PathReadmeTech } else { $null }
-$LedgerContent = if (Test-FileExists "Master patch ledger" $PathLedger) { Get-Content -Raw -Path $PathLedger } else { $null }
+# DURABLE-PAPER-PORTFOLIO-AND-PNL-01-FINAL-COHERENCE-AND-ACCEPTANCE-PROOF:
+# explicit -Encoding UTF8 is required here -- Windows PowerShell 5.1's
+# Get-Content -Raw silently misdecodes a BOM-less UTF-8 file containing a
+# multi-byte character (e.g. the em-dash used throughout these status
+# blocks) under the system default encoding, which made a Test-ContentContains
+# check for a needle containing an em-dash always fail even when the exact
+# text was genuinely present in the file (verified: default-encoding read
+# reports Contains()=false, -Encoding UTF8 read reports Contains()=true for
+# the identical file/needle). pwsh (PowerShell 7+) is unaffected, but this
+# guard's own usage header specifies `powershell` (5.1).
+$ReadmeContent = if (Test-FileExists "README.md" $PathReadme) { Get-Content -Raw -Encoding UTF8 -Path $PathReadme } else { $null }
+$ReadmeTechContent = if (Test-FileExists "README_TECHNICAL.md" $PathReadmeTech) { Get-Content -Raw -Encoding UTF8 -Path $PathReadmeTech } else { $null }
+$LedgerContent = if (Test-FileExists "Master patch ledger" $PathLedger) { Get-Content -Raw -Encoding UTF8 -Path $PathLedger } else { $null }
 # Built via [char]0x2014 rather than a literal em-dash in source: Windows
 # PowerShell 5.1 reads a BOM-less .ps1 using the system codepage, and a raw
 # UTF-8 em-dash byte sequence embedded in a string literal can silently
@@ -498,9 +508,20 @@ $EmDash = [char]0x2014
 # ahead of this patch, per the mission's own required current truth) -- this
 # entry was calibrated while F2 was still awaiting acceptance and would
 # otherwise permanently misfire on that now-required, truthful status line.
-# "F3: ACCEPTED -- COMPLETE" and "PHASE G: ACCEPTED -- COMPLETE" remain
-# forbidden below -- neither F3 nor Phase G is accepted yet, so neither
-# entry is stale.
+#
+# DURABLE-PAPER-PORTFOLIO-AND-PNL-01-FINAL-COHERENCE-AND-ACCEPTANCE-PROOF:
+# "BUNDLE 3: ACCEPTED", "F3: ACCEPTED -- COMPLETE", and "PHASE G: ACCEPTED --
+# COMPLETE" are all retired from this forbidden list by the identical
+# precedent -- Bundle 3 (D1 through Phase G, including F3 and Phase G
+# themselves) has now received independent ChatGPT/operator acceptance as a
+# whole, so a bundle-level "accepted complete" claim while its own F3/Phase G
+# constituents were still described as merely "awaiting acceptance" would be
+# internally contradictory. The truthful current status line is
+# "BUNDLE 3: ACCEPTED -- COMPLETE", and this guard's own current-head check
+# is updated to REQUIRE that status (see [15] below) rather than forbid it.
+# "BUNDLE 3: CLOSED" / "Bundle 3 is now closed" / "Bundle 3 has closed"
+# remain forbidden: accepted-complete is a distinct, narrower claim than
+# closed, and this repository has not marked Bundle 3 closed.
 $ForbiddenClaims = @(
     "SOAK: STARTED",
     "soak has started",
@@ -511,10 +532,7 @@ $ForbiddenClaims = @(
     "ready for live capital",
     "BUNDLE 3: CLOSED",
     "Bundle 3 is now closed",
-    "Bundle 3 has closed",
-    "BUNDLE 3: ACCEPTED",
-    "F3: ACCEPTED $EmDash COMPLETE",
-    "PHASE G: ACCEPTED $EmDash COMPLETE"
+    "Bundle 3 has closed"
 )
 foreach ($Doc in @(
     @{Name = "README.md"; Content = $ReadmeContent},
@@ -542,12 +560,20 @@ Test-ContentContains "G spec records 47 passed / 9 pre-existing failures" $GSpec
 
 # -----------------------------------------------------------------------
 # [15] README/ledger record correct final combined status.
+#
+# DURABLE-PAPER-PORTFOLIO-AND-PNL-01-FINAL-COHERENCE-AND-ACCEPTANCE-PROOF:
+# Bundle 3 has now received independent ChatGPT/operator acceptance -- the
+# truthful current status is REQUIRED to read "BUNDLE 3: ACCEPTED --
+# COMPLETE" in the ledger and README, replacing the obsolete
+# Test-ContentDoesNotContain check that forbade this exact status while
+# Bundle 3 was still awaiting acceptance.
 # -----------------------------------------------------------------------
 Write-Host ""
 Show-Info "--- [15] README/ledger record correct final combined status ---"
 Test-ContentContains "README.md mentions F3" $ReadmeContent "F3" | Out-Null
 Test-ContentContains "ledger mentions Phase G" $LedgerContent "PHASE G" | Out-Null
-Test-ContentDoesNotContain "ledger does not claim Bundle 3 accepted" $LedgerContent "BUNDLE 3: ACCEPTED" | Out-Null
+Test-ContentContains "ledger records Bundle 3 accepted-complete status" $LedgerContent "BUNDLE 3: ACCEPTED $EmDash COMPLETE" | Out-Null
+Test-ContentContains "README.md records Bundle 3 accepted-complete status" $ReadmeContent "BUNDLE 3: ACCEPTED $EmDash COMPLETE" | Out-Null
 
 # -----------------------------------------------------------------------
 # [16] BUNDLE-3-FINAL-OPERATIONAL-SAFETY-REPAIR range reconciliation.

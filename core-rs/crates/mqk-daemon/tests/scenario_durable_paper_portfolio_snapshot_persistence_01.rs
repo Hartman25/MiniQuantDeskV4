@@ -544,11 +544,13 @@ async fn count_snapshots_captured_at(
     pool: &sqlx::PgPool,
     captured_at_utc: chrono::DateTime<Utc>,
 ) -> i64 {
-    sqlx::query_scalar("select count(*) from sys_paper_portfolio_snapshots where captured_at_utc = $1")
-        .bind(captured_at_utc)
-        .fetch_one(pool)
-        .await
-        .expect("count query should succeed")
+    sqlx::query_scalar(
+        "select count(*) from sys_paper_portfolio_snapshots where captured_at_utc = $1",
+    )
+    .bind(captured_at_utc)
+    .fetch_one(pool)
+    .await
+    .expect("count query should succeed")
 }
 
 /// A1: a run_id-less external snapshot must never be durably persisted --

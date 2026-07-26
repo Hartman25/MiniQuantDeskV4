@@ -258,4 +258,113 @@ capture: 22/22). `cargo check`/`clippy -D warnings`/`rustfmt --check` clean
 on every file this repair touched. GUI: `npm test` 866/866, `npm run build`
 clean.
 
+## DURABLE-PAPER-PORTFOLIO-AND-PNL-01-FINAL-COHERENCE-AND-ACCEPTANCE-PROOF
+
+Final Bundle 4 coherence and closure repair, on top of the
+FINAL-RUN-SCOPING-ACCOUNTING-AND-CLOSURE-REPAIR above. Reconciles Bundle
+3's now-accepted status and closes the remaining source-proven Bundle 4
+accounting/API/GUI coherence gaps found by a fresh false-truth review of the
+changed dependency cone.
+
+**Accounting coherence (mqk-db).** `upsert_paper_portfolio_accounting_state`
+now validates `source_snapshot_id` transactionally, inside the same
+transaction as the write, via a new `fetch_snapshot_authority_tx` helper
+and a new `SnapshotAuthorityRow`/`candidate_snapshot_is_authoritative`
+deterministic-ordering pair: a null, missing, cross-run, null-run,
+non-paper, non-`external_alpaca`, or non-USD source snapshot is rejected as
+`InvalidSourceSnapshot` before any write. Snapshot authority ordering
+`(captured_at_utc, snapshot_id)` — newer wins, ties broken by greater
+`snapshot_id` — is now enforced on every transition: a same-watermark
+different-snapshot update requires the candidate to be strictly newer, and
+a higher-watermark update can never regress recorded provenance; both
+violations reject as `RejectedStaleSnapshot`. A same-snapshot epoch/reason
+drift with unchanged fill-derived values is now `Conflict` (previously
+silently accepted as `UpdatedForSnapshot`) — an identical snapshot replayed
+against identical fills must always reproduce the identical epoch.
+`persist_external_broker_snapshot_best_effort` (mqk-daemon) now requires
+non-null run ownership, USD currency, nonblank position symbols, and a
+strictly positive average entry price on every nonzero position.
+`normalize_broker_positions` no longer silently skips a blank broker
+position symbol (`broker_position_symbol_blank`).
+
+**API/lifecycle coherence (mqk-daemon).** New module
+`routes/portfolio_provenance.rs` exports one pure, shared classifier
+(`classify_portfolio_provenance` / `PortfolioProvenanceState`: `active` |
+`fill_history_incomplete` | `accounting_epoch_unavailable` |
+`accounting_snapshot_mismatch` | `not_found` | `query_failed` |
+`unsupported_source`), used identically by `durable_portfolio.rs` and
+`paper_lifecycle.rs`. Closes the defect where `durable_portfolio.rs`'s
+`accounting_fields` never compared an accounting row's `source_snapshot_id`
+against the currently-selected snapshot at all — a stale accounting row
+pointing at a superseded snapshot could be reported `"active"` beside a
+newer snapshot, and `paper_lifecycle.rs`'s `classify_overall_lifecycle_state`
+(which inspected the raw accounting row directly) could still report
+`order_filled_portfolio_durable_pnl_available` even though provenance no
+longer matched. `paper_lifecycle.rs`'s invalid-`run_id` handling now uses
+the identical fixed, bounded `INVALID_RUN_ID_MESSAGE` as
+`durable_portfolio.rs` instead of formatting `"run_id is not a valid UUID: {s}"`
+(which echoed the raw supplied value).
+
+**GUI runtime contract (mqk-gui).** `durablePortfolio.ts` closes every
+nested truth-state vocabulary: adds `accounting_snapshot_mismatch`; closes
+`unrealized_pnl_truth_state`/`daily_pnl_truth_state`, which were previously
+unchecked strings; adds a closed vocabulary for each snapshot-history row's
+own `truth_state`. Numeric fields now reject non-finite (NaN/Infinity/
+-Infinity) values and non-integral/unsafe integers (`last_applied_inbox_id`,
+`qty_signed`) instead of coercing them. State invariants: an
+`"active"`/`"snapshot_stale"` snapshot response must carry real identity
+fields (`source == external_alpaca`, `deployment_mode == paper`,
+`currency == USD`, non-null `run_id`/`snapshot_id`, finite equity/cash); an
+`"active"` accounting/P&L response must carry `accounting_epoch ==
+"complete"`, a non-null `accounting_source_snapshot_id` equal to
+`snapshot_id`, and a finite `realized_pnl`. `enforceRunScopeConsistency` now
+also compares `snapshot_id` (previously only `run_id`), so positions from a
+different snapshot generation of the same run are rejected too.
+`PortfolioScreen`'s accounting-completeness chip now gates on the
+authoritative `accounting_truth_state` instead of the raw `accounting_epoch`
+string (a stale `accounting_snapshot_mismatch` row's own epoch may still
+read `"complete"` from when it was current).
+
+**Bundle 3 status reconciliation.** Bundle 3 (D1 through Phase G) has now
+received independent ChatGPT/operator acceptance.
+`validate_autonomous_daily_paper_operations_01g_bundle_3_final_closure.ps1`
+is updated to match: `"BUNDLE 3: ACCEPTED"` (and, since Bundle 3's
+acceptance necessarily includes its own F3/Phase G constituents, `"F3:
+ACCEPTED -- COMPLETE"` and `"PHASE G: ACCEPTED -- COMPLETE"`) are retired
+from the forbidden-claims list, and check `[15]` now requires `"BUNDLE 3:
+ACCEPTED -- COMPLETE"` in the ledger and README instead of forbidding it.
+Fixed a real encoding bug found while making this check pass: Windows
+PowerShell 5.1's `Get-Content -Raw` (without an explicit `-Encoding`)
+silently misdecodes a BOM-less UTF-8 file's em-dash characters under the
+system default codepage, which made any `Test-ContentContains` check for a
+needle containing an em-dash always fail even when the exact text was
+genuinely present — verified directly (default-encoding read reports
+`Contains()=false`, `-Encoding UTF8` read reports `Contains()=true` for the
+identical file/needle). All three `Get-Content -Raw` calls for
+README/README_TECHNICAL/ledger in that guard now specify `-Encoding UTF8`.
+
+**Bundle 4 closure guard strengthening.** Added checks `[23]`–`[36]` to
+`validate_durable_paper_portfolio_and_pnl_01g_bundle_4_closure.ps1`,
+independently proving as real source code (not just documentation): USD
+currency enforcement in both `snapshot.rs` and the mqk-db authority check;
+non-null run ownership enforcement for external snapshot acceptance; blank
+symbols cannot be skipped (both the snapshot-acceptance refusal and the
+accounting-completeness bounded blocker); the source snapshot must resolve
+and belong to the accounting run, checked transactionally
+(`fetch_snapshot_authority_tx`); a same-snapshot epoch/reason drift rejects
+as `Conflict`; `RejectedStaleSnapshot` exists; the deterministic
+`(captured_at_utc, snapshot_id)` ordering helper exists and is reused; the
+shared provenance classifier exists and is used by both
+`durable_portfolio.rs` and `paper_lifecycle.rs` (and `paper_lifecycle.rs` no
+longer classifies its lifecycle summary from a raw accounting row);
+paper-lifecycle's invalid-`run_id` handling is bounded and never echoes raw
+input; every required nested GUI truth state is present in the closed
+vocabulary, including non-finite/unsafe-numeric rejection; the GUI
+cross-response check compares `snapshot_id`; no migration file changed
+since this patch's starting commit; and no broker-adapter/strategy/risk/
+execution-core file changed since the same starting commit.
+
+No new database migration. No broker adapter, order-submission, strategy,
+or risk-limit change anywhere in this patch.
+
 One repair commit: `fix: harden durable paper portfolio closure`.

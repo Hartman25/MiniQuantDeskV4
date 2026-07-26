@@ -17026,3 +17026,102 @@ LIVE CAPITAL: NOT READY
 
 Bundle 4 is **not** marked accepted or closed in the repository by this
 patch.
+
+## DURABLE-PAPER-PORTFOLIO-AND-PNL-01-FINAL-COHERENCE-AND-ACCEPTANCE-PROOF
+
+Final Bundle 4 coherence and closure repair. Reconciles Bundle 3's now-true
+accepted status, closes remaining source-proven Bundle 4 accounting/API/GUI
+coherence defects, and strengthens the Bundle 4 closure guard.
+
+**Bundle 3 status reconciliation.** Bundle 3 (D1 through Phase G, including
+the final guard-and-evidence-integrity repair) has now received independent
+ChatGPT/operator acceptance. The Bundle 3 final closure guard
+(`validate_autonomous_daily_paper_operations_01g_bundle_3_final_closure.ps1`)
+is updated to match: `"BUNDLE 3: ACCEPTED"` is retired from its forbidden-
+claim list (identical precedent to F2's own retirement earlier in Bundle 3's
+history) and check `[15]` now *requires* `"BUNDLE 3: ACCEPTED — COMPLETE"`
+in both the ledger and README, replacing the obsolete
+`Test-ContentDoesNotContain` check that forbade this now-true status. Bundle
+3's immutable historical committed-range proofs (checks `[8]`/`[9]`/`[16]`)
+and every other invariant in that guard are unchanged. This reconciliation
+does not rewrite historical evidence: prior ledger/README status blocks
+above, dated before this acceptance, are left as the truthful record of
+what was known at each point in time.
+
+**Accounting coherence (Phase A).** `upsert_paper_portfolio_accounting_state`
+now validates `source_snapshot_id` transactionally, inside the same
+transaction as the write, before touching the accounting row: a null,
+missing, cross-run, null-run, non-paper, non-`external_alpaca`, or non-USD
+source snapshot is rejected as `InvalidSourceSnapshot`, zero write. Snapshot
+authority ordering `(captured_at_utc, snapshot_id)` is now enforced on every
+transition: a same-watermark different-snapshot update is only accepted when
+the candidate is strictly newer, and a higher-watermark update can never
+regress recorded snapshot provenance -- both violations reject as
+`RejectedStaleSnapshot`, zero write. A same-snapshot epoch/reason drift with
+unchanged fill-derived values is now `Conflict` (previously silently
+accepted as an update) since an identical snapshot replayed against
+identical fills must always reproduce the identical epoch.
+`persist_external_broker_snapshot_best_effort` now requires non-null run
+ownership, USD currency, nonblank position symbols, and a strictly positive
+average entry price on every nonzero position. `normalize_broker_positions`
+no longer silently skips a blank broker position symbol.
+
+**API/lifecycle coherence (Phase B).** One new shared, pure classifier
+(`routes/portfolio_provenance.rs::classify_portfolio_provenance`) is now
+used identically by durable-summary and paper-lifecycle, closing the defect
+where durable-summary never compared an accounting row's
+`source_snapshot_id` against the currently-selected snapshot at all -- a
+stale accounting row pointing at a superseded snapshot could be reported
+`"active"` beside a newer snapshot, and could still surface
+`order_filled_portfolio_durable_pnl_available` on paper-lifecycle even
+though provenance no longer matched. paper-lifecycle's invalid-`run_id`
+handling now uses the identical fixed, bounded message as durable-summary
+instead of echoing the raw supplied value.
+
+**GUI runtime contract (Phase C).** `durablePortfolio.ts` closes every
+nested truth-state vocabulary (adds `accounting_snapshot_mismatch`; closes
+the previously-unchecked unrealized/daily P&L state strings), rejects
+non-finite and non-integral/unsafe numeric fields instead of coercing them,
+and enforces state invariants for "active"/"snapshot_stale" responses
+(matching snapshot identity/account fields; matching, non-null
+`accounting_source_snapshot_id`; finite `realized_pnl`).
+`enforceRunScopeConsistency` now also compares `snapshot_id` (previously
+only `run_id`). `PortfolioScreen`'s accounting-completeness chip now gates
+on the authoritative `accounting_truth_state` instead of the raw
+`accounting_epoch` string.
+
+No new database migration. No broker adapter, order-submission, strategy,
+or risk-limit change anywhere in this patch.
+
+```text
+PROVIDER CALLS: no
+BROKER CALLS: no
+DISCORD CALLS: no
+NETWORK CALLS: no (isolated port-5434 test DB and npm test/build only)
+REAL DAEMON STARTED: no
+PAPER ORDERS: no
+LIVE ORDERS: no
+TEST DB: port 5434 only
+MULTI-SYMBOL ENABLED: no
+BUNDLE 5 STARTED: no
+BROKER ADAPTER CHANGED: no
+ORDER SUBMISSION CHANGED: no
+STRATEGY CHANGED: no
+RISK LIMITS CHANGED: no
+```
+
+```text
+BUNDLE 3: ACCEPTED — COMPLETE
+
+BUNDLE 4:
+FINAL REPAIR AND CLOSURE PROOF COMPLETE —
+AWAITING FINAL CHATGPT AND OPERATOR ACCEPTANCE
+
+BUNDLE 5: NOT STARTED
+MULTI-SYMBOL AUTONOMOUS: NOT ENABLED
+UNATTENDED 10–20-SESSION SOAK: NOT STARTED
+LIVE CAPITAL: NOT READY
+```
+
+Bundle 4 is **not** marked accepted or closed in the repository by this
+patch.

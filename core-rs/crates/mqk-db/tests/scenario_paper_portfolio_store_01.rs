@@ -1664,7 +1664,8 @@ async fn same_snapshot_epoch_drift_is_conflict() {
     let run_id = fixed_run_id("same_snapshot_epoch_drift_is_conflict");
     cleanup(&pool, &[run_id]).await;
     fixture_run(&pool, run_id).await;
-    let snapshot_id = fixture_snapshot(&pool, run_id, "same_snapshot_epoch_drift_is_conflict").await;
+    let snapshot_id =
+        fixture_snapshot(&pool, run_id, "same_snapshot_epoch_drift_is_conflict").await;
 
     let base_args = |epoch: &str, reason: Option<String>| UpsertPaperPortfolioAccountingStateArgs {
         run_id,
@@ -2029,8 +2030,14 @@ async fn newer_snapshot_updates_completeness_with_unchanged_fills() {
     match outcome {
         UpsertPaperPortfolioAccountingStateOutcome::UpdatedForSnapshot { record } => {
             assert_eq!(record.source_snapshot_id, Some(snapshot_b));
-            assert_eq!(record.accounting_epoch, PAPER_PORTFOLIO_ACCOUNTING_EPOCH_COMPLETE);
-            assert_eq!(record.cash_micros, 40_000_000_000, "fill-derived cash must be unchanged");
+            assert_eq!(
+                record.accounting_epoch,
+                PAPER_PORTFOLIO_ACCOUNTING_EPOCH_COMPLETE
+            );
+            assert_eq!(
+                record.cash_micros, 40_000_000_000,
+                "fill-derived cash must be unchanged"
+            );
         }
         other => panic!("expected UpdatedForSnapshot, got {other:?}"),
     }
