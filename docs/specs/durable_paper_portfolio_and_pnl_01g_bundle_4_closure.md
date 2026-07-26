@@ -201,3 +201,61 @@ Bundle 5 is not started. Multi-symbol autonomous trading is not enabled.
 The unattended 10–20-session soak has not started and is not claimed
 started anywhere in this bundle's commits or documentation. Live capital
 is not ready and no file in this bundle touches live-mode gating.
+
+## FINAL-RUN-SCOPING-ACCOUNTING-AND-CLOSURE-REPAIR addendum
+
+Patch ID: `DURABLE-PAPER-PORTFOLIO-AND-PNL-01-FINAL-RUN-SCOPING-ACCOUNTING-AND-CLOSURE-REPAIR`
+
+This is the consolidated correctness/closure repair the Bundle 4 final
+closure review required before ChatGPT/operator acceptance. Six confirmed
+defects (cross-run contamination, same-watermark accounting staleness,
+unconfirmed-snapshot accounting, one-directional completeness, leaked/
+collapsed API errors, and a live Bundle-3-guard canary that could never
+pass once Bundle 4 legitimately existed) are closed across `mqk-db`,
+`mqk-daemon`, the GUI, and the guard scripts — see the 01B/01C/01D/01E/01F
+addenda above for the per-phase detail.
+
+**Bundle 3 final guard reconciliation (Defect 6).** Check `[10]` in
+`validate_autonomous_daily_paper_operations_01g_bundle_3_final_closure.ps1`
+was a live canary scanning `$PhaseEAcceptedHead..HEAD` (ever-widening) for
+any Bundle-4-named path — it necessarily failed the moment Bundle 4
+legitimately started, which made it impossible for this very guard (a
+prerequisite of the Bundle 4 closure guard) to ever pass again. It is now a
+fixed historical proof over `$PhaseEAcceptedHead..$FinalRepairCommit` (the
+same immutable range checks `[8]`/`[9]` already established, never widened
+to `..HEAD`): Bundle 4 did not exist inside Bundle 3's own committed range,
+which is a permanent fact independent of how far HEAD advances afterward.
+Verified: this range (`4b6eec72..e3eb2fe2`) contains zero Bundle-4-named
+paths; the live canary's growing range (`4b6eec72..HEAD` at the time of this
+repair) contained two.
+
+**Bundle 4 closure guard strengthening.** Added checks `[12]`–`[22]` to
+`validate_durable_paper_portfolio_and_pnl_01g_bundle_4_closure.ps1`,
+independently proving: the run-scoped snapshot helper exists and is the
+only one `durable_portfolio.rs`/`paper_lifecycle.rs` call (never the global
+non-run-scoped one); the echoed `run_id` is tied to the same resolved run
+used for the lookups; accounting carries `source_snapshot_id`; the
+accounting refresh is gated on a `Confirmed` persistence outcome;
+same-watermark upserts compare full content (`Conflict`/`UpdatedForSnapshot`
+exist and are tested); completeness compares both symbol directions and
+cannot skip an unparseable quantity; no public route formats a raw error
+onto the wire; explicit-run query failure is distinguished from not_found;
+and the GUI runtime validators exist.
+
+Verification (this repair): every focused Bundle 4 test binary re-run
+against the port-5434 test DB (`mqk-db` paper-portfolio-store: 15/15;
+`mqk-daemon` durable snapshot-persistence: 9/9, accounting: 13/13,
+and-pnl: 4/4, read-only-api: 17/17, paper-order-lifecycle-visibility:
+13/13) plus the adjacent regression set (autonomous completed-bar-driver:
+56/56, autonomous daily-operation API: 49/50 — the one failure,
+`b26_history_response_database_unavailable_counts_is_query_failed`, is a
+pre-existing shared-test-DB row-accumulation flake unrelated to this
+patch: it fails identically with this patch's changes fully reverted, in
+an area (`autonomous_daily_operations`) this repair does not touch — and
+autonomous daily-phase-E closure: 6/6, GUI/daemon contract gate: 23/23,
+full daemon routes: 84/84, daily-P&L baseline: 11/11, daily-P&L baseline
+capture: 22/22). `cargo check`/`clippy -D warnings`/`rustfmt --check` clean
+on every file this repair touched. GUI: `npm test` 866/866, `npm run build`
+clean.
+
+One repair commit: `fix: harden durable paper portfolio closure`.

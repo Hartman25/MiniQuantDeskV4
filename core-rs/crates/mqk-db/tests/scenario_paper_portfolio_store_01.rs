@@ -16,9 +16,9 @@
 
 use chrono::{TimeZone, Utc};
 use mqk_db::{
-    fetch_latest_paper_portfolio_snapshot, fetch_paper_portfolio_accounting_state,
-    fetch_paper_portfolio_snapshot_by_id, fetch_recent_paper_portfolio_snapshots,
-    insert_or_confirm_paper_portfolio_snapshot, insert_run,
+    fetch_latest_paper_portfolio_snapshot, fetch_latest_paper_portfolio_snapshot_for_run,
+    fetch_paper_portfolio_accounting_state, fetch_paper_portfolio_snapshot_by_id,
+    fetch_recent_paper_portfolio_snapshots, insert_or_confirm_paper_portfolio_snapshot, insert_run,
     upsert_paper_portfolio_accounting_state, InsertPaperPortfolioSnapshotOutcome,
     NewPaperPortfolioSnapshot, NewRun, PaperPortfolioSnapshotPosition,
     UpsertPaperPortfolioAccountingStateArgs, UpsertPaperPortfolioAccountingStateOutcome,
@@ -82,6 +82,38 @@ fn fixed_run_id(seed: &str) -> Uuid {
         &Uuid::NAMESPACE_DNS,
         format!("test.paper-portfolio-store.v1|{seed}").as_bytes(),
     )
+}
+
+/// Inserts a minimal durable snapshot for `run_id` and returns its
+/// `snapshot_id` -- `source_snapshot_id` is a real FK
+/// (`sys_paper_portfolio_accounting_state.source_snapshot_id` references
+/// `sys_paper_portfolio_snapshots.snapshot_id`), so any accounting-only
+/// test that supplies a `source_snapshot_id` must first insert the
+/// snapshot row it points at.
+async fn fixture_snapshot(pool: &sqlx::PgPool, run_id: Uuid, seed: &str) -> Uuid {
+    let snapshot_id = Uuid::new_v5(
+        &Uuid::NAMESPACE_DNS,
+        format!("test.paper-portfolio-store.v1|snapshot|{seed}").as_bytes(),
+    );
+    insert_or_confirm_paper_portfolio_snapshot(
+        pool,
+        NewPaperPortfolioSnapshot {
+            snapshot_id,
+            captured_at_utc: Utc.with_ymd_and_hms(2099, 2, 1, 13, 0, 0).unwrap(),
+            deployment_mode: "paper".to_string(),
+            source: PAPER_PORTFOLIO_SNAPSHOT_SOURCE_EXTERNAL_ALPACA.to_string(),
+            equity_micros: 100_000_000_000,
+            cash_micros: 40_000_000_000,
+            currency: "USD".to_string(),
+            truth_state: "active".to_string(),
+            run_id: Some(run_id),
+            operation_id: None,
+            positions: vec![],
+        },
+    )
+    .await
+    .expect("fixture snapshot insert should succeed");
+    snapshot_id
 }
 
 // ---------------------------------------------------------------------------
@@ -427,6 +459,149 @@ async fn multiple_snapshots_ordered_deterministically() {
     cleanup(&pool, &[run_id]).await;
 }
 
+/// `fetch_latest_paper_portfolio_snapshot_for_run` never returns a snapshot
+/// belonging to a different run, even when that other run's snapshot is
+/// strictly newer -- proving the B4 closure repair's cross-run isolation.
+/// Also proves a snapshot with `run_id = None` can never satisfy a
+/// run-scoped query.
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-db --test scenario_paper_portfolio_store_01 -- --include-ignored"]
+async fn run_scoped_snapshot_never_crosses_runs() {
+    let pool = match test_pool().await {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("{e}");
+            return;
+        }
+    };
+    let run_a = fixed_run_id("run_scoped_snapshot_never_crosses_runs.a");
+    let run_b = fixed_run_id("run_scoped_snapshot_never_crosses_runs.b");
+    cleanup(&pool, &[run_a, run_b]).await;
+    fixture_run(&pool, run_a).await;
+    fixture_run(&pool, run_b).await;
+
+    let snapshot_a = Uuid::new_v5(
+        &Uuid::NAMESPACE_DNS,
+        b"test.paper-portfolio-store.v1|run-scoped-a",
+    );
+    insert_or_confirm_paper_portfolio_snapshot(
+        &pool,
+        NewPaperPortfolioSnapshot {
+            snapshot_id: snapshot_a,
+            captured_at_utc: Utc.with_ymd_and_hms(2099, 2, 1, 13, 0, 0).unwrap(),
+            deployment_mode: "paper".to_string(),
+            source: PAPER_PORTFOLIO_SNAPSHOT_SOURCE_EXTERNAL_ALPACA.to_string(),
+            equity_micros: 100_000_000_000,
+            cash_micros: 40_000_000_000,
+            currency: "USD".to_string(),
+            truth_state: "active".to_string(),
+            run_id: Some(run_a),
+            operation_id: None,
+            positions: vec![],
+        },
+    )
+    .await
+    .expect("insert should succeed");
+
+    // run_b's snapshot is strictly NEWER than run_a's.
+    let snapshot_b = Uuid::new_v5(
+        &Uuid::NAMESPACE_DNS,
+        b"test.paper-portfolio-store.v1|run-scoped-b",
+    );
+    insert_or_confirm_paper_portfolio_snapshot(
+        &pool,
+        NewPaperPortfolioSnapshot {
+            snapshot_id: snapshot_b,
+            captured_at_utc: Utc.with_ymd_and_hms(2099, 2, 1, 14, 0, 0).unwrap(),
+            deployment_mode: "paper".to_string(),
+            source: PAPER_PORTFOLIO_SNAPSHOT_SOURCE_EXTERNAL_ALPACA.to_string(),
+            equity_micros: 200_000_000_000,
+            cash_micros: 80_000_000_000,
+            currency: "USD".to_string(),
+            truth_state: "active".to_string(),
+            run_id: Some(run_b),
+            operation_id: None,
+            positions: vec![],
+        },
+    )
+    .await
+    .expect("insert should succeed");
+
+    // A run-scoped query for run_a must return run_a's snapshot, never
+    // run_b's newer one.
+    let fetched_a = fetch_latest_paper_portfolio_snapshot_for_run(
+        &pool,
+        "paper",
+        PAPER_PORTFOLIO_SNAPSHOT_SOURCE_EXTERNAL_ALPACA,
+        run_a,
+    )
+    .await
+    .expect("fetch should succeed")
+    .expect("run_a snapshot should exist");
+    assert_eq!(
+        fetched_a.snapshot.snapshot_id, snapshot_a,
+        "run-scoped query for run_a must never return run_b's newer snapshot"
+    );
+    assert_eq!(fetched_a.snapshot.run_id, Some(run_a));
+
+    // A snapshot with run_id = None must never satisfy a run-scoped query.
+    let snapshot_null_run = Uuid::new_v5(
+        &Uuid::NAMESPACE_DNS,
+        b"test.paper-portfolio-store.v1|run-scoped-null-run",
+    );
+    insert_or_confirm_paper_portfolio_snapshot(
+        &pool,
+        NewPaperPortfolioSnapshot {
+            snapshot_id: snapshot_null_run,
+            captured_at_utc: Utc.with_ymd_and_hms(2099, 2, 1, 15, 0, 0).unwrap(),
+            deployment_mode: "paper".to_string(),
+            source: PAPER_PORTFOLIO_SNAPSHOT_SOURCE_EXTERNAL_ALPACA.to_string(),
+            equity_micros: 300_000_000_000,
+            cash_micros: 90_000_000_000,
+            currency: "USD".to_string(),
+            truth_state: "active".to_string(),
+            run_id: None,
+            operation_id: None,
+            positions: vec![],
+        },
+    )
+    .await
+    .expect("insert should succeed");
+
+    let fetched_a_again = fetch_latest_paper_portfolio_snapshot_for_run(
+        &pool,
+        "paper",
+        PAPER_PORTFOLIO_SNAPSHOT_SOURCE_EXTERNAL_ALPACA,
+        run_a,
+    )
+    .await
+    .expect("fetch should succeed")
+    .expect("run_a snapshot should still exist");
+    assert_eq!(
+        fetched_a_again.snapshot.snapshot_id, snapshot_a,
+        "a null-run_id snapshot must never satisfy a run-scoped query, even when newest"
+    );
+
+    // A run with no snapshot at all resolves to None, never a fabricated row.
+    let run_c = fixed_run_id("run_scoped_snapshot_never_crosses_runs.c");
+    fixture_run(&pool, run_c).await;
+    let fetched_c = fetch_latest_paper_portfolio_snapshot_for_run(
+        &pool,
+        "paper",
+        PAPER_PORTFOLIO_SNAPSHOT_SOURCE_EXTERNAL_ALPACA,
+        run_c,
+    )
+    .await
+    .expect("fetch should succeed");
+    assert!(fetched_c.is_none());
+
+    cleanup(&pool, &[run_a, run_b, run_c]).await;
+    let _ = sqlx::query("delete from sys_paper_portfolio_snapshots where snapshot_id = $1")
+        .bind(snapshot_null_run)
+        .execute(&pool)
+        .await;
+}
+
 /// A flat account (no positions) round-trips with zero position rows.
 #[tokio::test]
 #[ignore = "requires MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-db --test scenario_paper_portfolio_store_01 -- --include-ignored"]
@@ -606,6 +781,7 @@ async fn first_accounting_state_write_inserts() {
     let run_id = fixed_run_id("first_accounting_state_write_inserts");
     cleanup(&pool, &[run_id]).await;
     fixture_run(&pool, run_id).await;
+    let snapshot_id = fixture_snapshot(&pool, run_id, "first_accounting_state_write_inserts").await;
 
     let outcome = upsert_paper_portfolio_accounting_state(
         &pool,
@@ -618,6 +794,7 @@ async fn first_accounting_state_write_inserts() {
             accounting_epoch: PAPER_PORTFOLIO_ACCOUNTING_EPOCH_COMPLETE.to_string(),
             accounting_epoch_reason: None,
             updated_at_utc: Utc.with_ymd_and_hms(2099, 2, 1, 13, 0, 0).unwrap(),
+            source_snapshot_id: snapshot_id,
         },
     )
     .await
@@ -640,9 +817,14 @@ async fn first_accounting_state_write_inserts() {
     cleanup(&pool, &[run_id]).await;
 }
 
-/// Re-confirming the same watermark is an idempotent no-op (AlreadyCurrent),
-/// advancing to a higher watermark is a real Update, and attempting to
-/// regress the watermark is Rejected without mutating the row.
+/// Re-confirming the same watermark with identical content is an idempotent
+/// no-op (AlreadyCurrent), advancing to a higher watermark is a real Update,
+/// and attempting to regress the watermark is Rejected without mutating the
+/// row. Also proves the B4 closure repair: a same-watermark replay whose
+/// fill-derived values differ from the stored row is a Conflict (not a
+/// silent AlreadyCurrent) -- the previous behavior compared the watermark
+/// only and returned AlreadyCurrent unconditionally, which could mask a
+/// nondeterministic-replay bug.
 #[tokio::test]
 #[ignore = "requires MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-db --test scenario_paper_portfolio_store_01 -- --include-ignored"]
 async fn accounting_state_watermark_idempotency_and_ordering() {
@@ -657,43 +839,98 @@ async fn accounting_state_watermark_idempotency_and_ordering() {
     cleanup(&pool, &[run_id]).await;
     fixture_run(&pool, run_id).await;
 
-    let base_args = |watermark: i64, cash: i64| UpsertPaperPortfolioAccountingStateArgs {
+    let snapshot_a = fixture_snapshot(
+        &pool,
         run_id,
-        cash_micros: cash,
-        realized_pnl_micros: 0,
-        fees_micros: 0,
-        last_applied_inbox_id: watermark,
-        accounting_epoch: PAPER_PORTFOLIO_ACCOUNTING_EPOCH_COMPLETE.to_string(),
-        accounting_epoch_reason: None,
-        updated_at_utc: Utc.with_ymd_and_hms(2099, 2, 1, 13, 0, 0).unwrap(),
-    };
+        "accounting_state_watermark_idempotency_and_ordering.a",
+    )
+    .await;
+    let snapshot_b = fixture_snapshot(
+        &pool,
+        run_id,
+        "accounting_state_watermark_idempotency_and_ordering.b",
+    )
+    .await;
 
-    let inserted = upsert_paper_portfolio_accounting_state(&pool, base_args(5, 40_000_000_000))
-        .await
-        .expect("insert should succeed");
+    let base_args =
+        |watermark: i64, cash: i64, snapshot_id: Uuid| UpsertPaperPortfolioAccountingStateArgs {
+            run_id,
+            cash_micros: cash,
+            realized_pnl_micros: 0,
+            fees_micros: 0,
+            last_applied_inbox_id: watermark,
+            accounting_epoch: PAPER_PORTFOLIO_ACCOUNTING_EPOCH_COMPLETE.to_string(),
+            accounting_epoch_reason: None,
+            updated_at_utc: Utc.with_ymd_and_hms(2099, 2, 1, 13, 0, 0).unwrap(),
+            source_snapshot_id: snapshot_id,
+        };
+
+    let inserted =
+        upsert_paper_portfolio_accounting_state(&pool, base_args(5, 40_000_000_000, snapshot_a))
+            .await
+            .expect("insert should succeed");
     assert!(matches!(
         inserted,
         UpsertPaperPortfolioAccountingStateOutcome::Inserted { .. }
     ));
 
-    // Exact replay at the same watermark: idempotent no-op.
-    let replay = upsert_paper_portfolio_accounting_state(&pool, base_args(5, 999_999_999))
-        .await
-        .expect("replay should succeed");
+    // Exact replay at the same watermark, same snapshot, identical content:
+    // idempotent no-op.
+    let replay =
+        upsert_paper_portfolio_accounting_state(&pool, base_args(5, 40_000_000_000, snapshot_a))
+            .await
+            .expect("replay should succeed");
     match replay {
         UpsertPaperPortfolioAccountingStateOutcome::AlreadyCurrent { record } => {
-            assert_eq!(
-                record.cash_micros, 40_000_000_000,
-                "AlreadyCurrent must return the existing stored value, not the caller's replayed input"
-            );
+            assert_eq!(record.cash_micros, 40_000_000_000);
         }
         other => panic!("expected AlreadyCurrent, got {other:?}"),
     }
 
-    // Advance to a higher watermark: real update.
-    let advanced = upsert_paper_portfolio_accounting_state(&pool, base_args(9, 41_000_000_000))
+    // Same watermark, same snapshot, but DIFFERENT fill-derived value:
+    // this is nondeterministic-replay territory -- must fail closed as a
+    // Conflict, never silently accepted as AlreadyCurrent.
+    let conflict =
+        upsert_paper_portfolio_accounting_state(&pool, base_args(5, 999_999_999, snapshot_a))
+            .await
+            .expect("conflicting replay call should succeed at the Rust level (returns Conflict)");
+    match conflict {
+        UpsertPaperPortfolioAccountingStateOutcome::Conflict { record, .. } => {
+            assert_eq!(
+                record.cash_micros, 40_000_000_000,
+                "Conflict must return the existing stored value, never the caller's differing input"
+            );
+        }
+        other => panic!("expected Conflict, got {other:?}"),
+    }
+    let after_conflict = fetch_paper_portfolio_accounting_state(&pool, run_id)
         .await
-        .expect("advance should succeed");
+        .expect("fetch should succeed")
+        .expect("row should exist");
+    assert_eq!(
+        after_conflict.cash_micros, 40_000_000_000,
+        "a Conflict must never mutate the stored row"
+    );
+
+    // Same watermark, same fill-derived values, but a NEW confirmed
+    // snapshot: only the snapshot-dependent fields advance.
+    let updated_for_snapshot =
+        upsert_paper_portfolio_accounting_state(&pool, base_args(5, 40_000_000_000, snapshot_b))
+            .await
+            .expect("updated-for-snapshot call should succeed");
+    match updated_for_snapshot {
+        UpsertPaperPortfolioAccountingStateOutcome::UpdatedForSnapshot { record } => {
+            assert_eq!(record.source_snapshot_id, Some(snapshot_b));
+            assert_eq!(record.cash_micros, 40_000_000_000);
+        }
+        other => panic!("expected UpdatedForSnapshot, got {other:?}"),
+    }
+
+    // Advance to a higher watermark: real update.
+    let advanced =
+        upsert_paper_portfolio_accounting_state(&pool, base_args(9, 41_000_000_000, snapshot_b))
+            .await
+            .expect("advance should succeed");
     match advanced {
         UpsertPaperPortfolioAccountingStateOutcome::Updated {
             previous_last_applied_inbox_id,
@@ -707,7 +944,7 @@ async fn accounting_state_watermark_idempotency_and_ordering() {
     }
 
     // Attempt to regress: rejected, existing row untouched.
-    let regressed = upsert_paper_portfolio_accounting_state(&pool, base_args(3, 1))
+    let regressed = upsert_paper_portfolio_accounting_state(&pool, base_args(3, 1, snapshot_b))
         .await
         .expect("regression attempt call should succeed at the Rust level (returns Rejected)");
     match regressed {
@@ -748,6 +985,12 @@ async fn incomplete_accounting_epoch_round_trips_reason() {
     let run_id = fixed_run_id("incomplete_accounting_epoch_round_trips_reason");
     cleanup(&pool, &[run_id]).await;
     fixture_run(&pool, run_id).await;
+    let snapshot_id = fixture_snapshot(
+        &pool,
+        run_id,
+        "incomplete_accounting_epoch_round_trips_reason",
+    )
+    .await;
 
     upsert_paper_portfolio_accounting_state(
         &pool,
@@ -762,6 +1005,7 @@ async fn incomplete_accounting_epoch_round_trips_reason() {
                 "pre_existing_position_no_opening_fill_in_inbox".to_string(),
             ),
             updated_at_utc: Utc.with_ymd_and_hms(2099, 2, 1, 13, 0, 0).unwrap(),
+            source_snapshot_id: snapshot_id,
         },
     )
     .await
@@ -809,6 +1053,10 @@ async fn invalid_accounting_epoch_rejected() {
             accounting_epoch: "made_up_epoch".to_string(),
             accounting_epoch_reason: None,
             updated_at_utc: Utc.with_ymd_and_hms(2099, 2, 1, 13, 0, 0).unwrap(),
+            source_snapshot_id: Uuid::new_v5(
+                &Uuid::NAMESPACE_DNS,
+                b"test.paper-portfolio-store.v1|invalid_accounting_epoch_rejected",
+            ),
         },
     )
     .await;
@@ -885,6 +1133,7 @@ async fn restart_reconstruction_reads_back_prior_writes() {
             accounting_epoch: PAPER_PORTFOLIO_ACCOUNTING_EPOCH_COMPLETE.to_string(),
             accounting_epoch_reason: None,
             updated_at_utc: Utc.with_ymd_and_hms(2099, 2, 1, 13, 0, 0).unwrap(),
+            source_snapshot_id: snapshot_id,
         },
     )
     .await
@@ -909,6 +1158,11 @@ async fn restart_reconstruction_reads_back_prior_writes() {
         .expect("accounting state should survive restart");
     assert_eq!(fetched_accounting.last_applied_inbox_id, 3);
     assert_eq!(fetched_accounting.realized_pnl_micros, 1_000_000);
+    assert_eq!(
+        fetched_accounting.source_snapshot_id,
+        Some(snapshot_id),
+        "accounting snapshot provenance must survive a restart"
+    );
 
     cleanup(&pool_after, &[run_id]).await;
 }
@@ -975,6 +1229,7 @@ async fn no_outbox_or_inbox_writes() {
             accounting_epoch: PAPER_PORTFOLIO_ACCOUNTING_EPOCH_COMPLETE.to_string(),
             accounting_epoch_reason: None,
             updated_at_utc: Utc.with_ymd_and_hms(2099, 2, 1, 13, 0, 0).unwrap(),
+            source_snapshot_id: snapshot_id,
         },
     )
     .await

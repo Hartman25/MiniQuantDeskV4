@@ -249,6 +249,7 @@ function DurablePortfolioSection({
             <div><span>Cash</span><strong>{formatDurableMoney(durable.cash)}</strong></div>
             <div><span>Currency</span><strong>{durable.currency ?? <span className="val-unavailable">Unavailable</span>}</strong></div>
             <div><span>Run</span><strong>{durable.run_id ?? <span className="val-unavailable">Unavailable</span>}</strong></div>
+            <div><span>Accounting source snapshot</span><strong>{durable.accounting_source_snapshot_id ?? <span className="val-unavailable">Unavailable</span>}</strong></div>
             <div><span>Accounting completeness</span><strong>
               {durable.accounting_epoch == null
                 ? <span className="val-unavailable">Unavailable</span>

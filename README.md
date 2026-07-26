@@ -513,8 +513,18 @@ against the isolated port-5434 test database with real production seams —
 no synthetic broker events, no fabricated fills/marks/P&L, fail-closed on
 incomplete fill history.
 
+The Bundle 4 final closure review found six correctness/closure defects
+(cross-run snapshot/accounting contamination, same-watermark accounting
+staleness, unconfirmed-snapshot accounting, one-directional completeness,
+leaked/collapsed API errors, and a Bundle-3-guard live canary that could
+never pass once Bundle 4 existed) — all six are closed by
+`DURABLE-PAPER-PORTFOLIO-AND-PNL-01-FINAL-RUN-SCOPING-ACCOUNTING-AND-CLOSURE-REPAIR`
+(one commit; see the ledger and the per-phase spec addenda for detail).
+
 ```text
-B4-0–B4-G: IMPLEMENTATION COMPLETE — AWAITING FINAL ACCEPTANCE
+B4-0: ACCEPTED — COMPLETE
+B4-A: ACCEPTED — COMPLETE
+B4-B–B4-G: FINAL REPAIR IMPLEMENTATION COMPLETE — AWAITING CHATGPT/OPERATOR ACCEPTANCE
 
 BUNDLE 4:
 CLOSURE IMPLEMENTATION COMPLETE —
@@ -529,7 +539,8 @@ LIVE CAPITAL: NOT READY
 Bundle 4 is **not** marked accepted or closed in this repository. Still
 required before Bundle 4 closes:
 
-1. independent ChatGPT/operator acceptance of B4-0 through B4-G
+1. independent ChatGPT/operator acceptance of the final repair (B4-B
+   through B4-G)
 
 ### What Bundle 3 completion unlocks
 

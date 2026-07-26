@@ -395,6 +395,64 @@ pub async fn fetch_latest_paper_portfolio_snapshot(
     }))
 }
 
+/// Fetch the most recently captured snapshot (with positions) for a given
+/// `deployment_mode` + `source` **that belongs to exactly `run_id`**, or
+/// `None` if no such snapshot exists.
+///
+/// This is the run-scoped counterpart of [`fetch_latest_paper_portfolio_snapshot`]:
+/// callers resolving truth for one specific run (durable-summary,
+/// durable-positions, paper-lifecycle) must use this function instead of the
+/// global-latest one, so a newer snapshot belonging to a *different* run can
+/// never be attributed to the run being queried. A snapshot row whose
+/// `run_id` is `NULL` can never satisfy `run_id = $3` in SQL and therefore
+/// can never match a run-scoped query — this is enforced by the query itself,
+/// not by post-filtering.
+pub async fn fetch_latest_paper_portfolio_snapshot_for_run(
+    pool: &PgPool,
+    deployment_mode: &str,
+    source: &str,
+    run_id: Uuid,
+) -> Result<Option<PaperPortfolioSnapshotWithPositions>> {
+    let row = sqlx::query(
+        r#"
+        select snapshot_id, captured_at_utc, deployment_mode, source,
+               equity_micros, cash_micros, currency, truth_state, run_id, operation_id
+        from sys_paper_portfolio_snapshots
+        where deployment_mode = $1 and source = $2 and run_id = $3
+        order by captured_at_utc desc, snapshot_id desc
+        limit 1
+        "#,
+    )
+    .bind(deployment_mode)
+    .bind(source)
+    .bind(run_id)
+    .fetch_optional(pool)
+    .await
+    .context("fetch_latest_paper_portfolio_snapshot_for_run failed")?;
+
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let snapshot_id: Uuid = row.get("snapshot_id");
+    let snapshot = PaperPortfolioSnapshotRecord {
+        snapshot_id,
+        captured_at_utc: row.get("captured_at_utc"),
+        deployment_mode: row.get("deployment_mode"),
+        source: row.get("source"),
+        equity_micros: row.get("equity_micros"),
+        cash_micros: row.get("cash_micros"),
+        currency: row.get("currency"),
+        truth_state: row.get("truth_state"),
+        run_id: row.get("run_id"),
+        operation_id: row.get("operation_id"),
+    };
+    let positions = fetch_positions_rows(pool, snapshot_id).await?;
+    Ok(Some(PaperPortfolioSnapshotWithPositions {
+        snapshot,
+        positions,
+    }))
+}
+
 /// Fetch up to `limit` most recent snapshots (scalar fields only, no
 /// position children) for a given `deployment_mode` + `source`, newest
 /// first.
@@ -467,12 +525,22 @@ pub struct PaperPortfolioAccountingStateRecord {
     pub accounting_epoch: String,
     pub accounting_epoch_reason: Option<String>,
     pub updated_at_utc: DateTime<Utc>,
+    /// The broker snapshot whose positions were used to compute
+    /// `accounting_epoch`/`accounting_epoch_reason`. `None` for rows written
+    /// before this provenance column existed (legacy rows round-trip as
+    /// `None`, never backfilled/fabricated) — a reader must not report such
+    /// a row as fully proven active accounting truth (B4 closure repair).
+    pub source_snapshot_id: Option<Uuid>,
 }
 
 /// Arguments to [`upsert_paper_portfolio_accounting_state`]. `last_applied_inbox_id`
 /// is the caller's freshly-computed replay watermark (from
 /// `mqk_db::inbox_load_all_applied_for_run`'s highest `inbox_id`, or 0 if no
-/// applied fills exist yet).
+/// applied fills exist yet). `source_snapshot_id` is the confirmed durable
+/// snapshot (see [`InsertPaperPortfolioSnapshotOutcome::Inserted`] /
+/// `AlreadyExists`) whose positions were replayed to derive
+/// `accounting_epoch`/`accounting_epoch_reason` — callers must never pass a
+/// snapshot id that was not itself durably confirmed.
 #[derive(Debug, Clone)]
 pub struct UpsertPaperPortfolioAccountingStateArgs {
     pub run_id: Uuid,
@@ -483,6 +551,7 @@ pub struct UpsertPaperPortfolioAccountingStateArgs {
     pub accounting_epoch: String,
     pub accounting_epoch_reason: Option<String>,
     pub updated_at_utc: DateTime<Utc>,
+    pub source_snapshot_id: Uuid,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -492,18 +561,39 @@ pub enum UpsertPaperPortfolioAccountingStateOutcome {
         record: PaperPortfolioAccountingStateRecord,
     },
     /// A row existed with a strictly lower `last_applied_inbox_id` —
-    /// updated to the new watermark/summary.
+    /// updated to the new watermark/summary (full replace: fill-derived
+    /// fields and snapshot provenance both advance).
     Updated {
         previous_last_applied_inbox_id: i64,
         record: PaperPortfolioAccountingStateRecord,
     },
-    /// A row already existed with exactly this `last_applied_inbox_id` —
-    /// idempotent confirmation, zero writes. The existing row is returned
-    /// unchanged (the caller's freshly-recomputed values are not compared
-    /// or written, since a deterministic replay of the same inbox rows
-    /// always yields the same result by construction).
+    /// A row already existed with exactly this `last_applied_inbox_id`, the
+    /// exact same `source_snapshot_id`, and byte-identical fill-derived
+    /// fields (`cash_micros`/`realized_pnl_micros`/`fees_micros`) —
+    /// idempotent confirmation, zero writes.
     AlreadyCurrent {
         record: PaperPortfolioAccountingStateRecord,
+    },
+    /// A row already existed with the same watermark and identical
+    /// fill-derived fields, but a *different* (newer, still-confirmed)
+    /// `source_snapshot_id` — a new broker snapshot arrived with no new
+    /// inbox row, which can legitimately flip completeness
+    /// (complete/incomplete) without the fill replay itself changing. Only
+    /// `source_snapshot_id`/`accounting_epoch`/`accounting_epoch_reason`/
+    /// `updated_at_utc` are written; `cash_micros`/`realized_pnl_micros`/
+    /// `fees_micros`/`last_applied_inbox_id` are left untouched (they
+    /// already matched).
+    UpdatedForSnapshot {
+        record: PaperPortfolioAccountingStateRecord,
+    },
+    /// A row already existed with the same watermark but *different*
+    /// fill-derived fields (cash/realized-P&L/fees). This indicates
+    /// nondeterministic replay or corruption — the same `oms_inbox` history
+    /// must always replay to the same summary. Fail closed: zero writes,
+    /// the existing row is never overwritten.
+    Conflict {
+        record: PaperPortfolioAccountingStateRecord,
+        detail: String,
     },
     /// A row already existed with a *higher* `last_applied_inbox_id` than
     /// the caller supplied. Fail closed: the caller computed from a stale
@@ -515,7 +605,28 @@ pub enum UpsertPaperPortfolioAccountingStateOutcome {
     },
 }
 
+fn row_to_accounting_record(row: &sqlx::postgres::PgRow) -> PaperPortfolioAccountingStateRecord {
+    PaperPortfolioAccountingStateRecord {
+        run_id: row.get("run_id"),
+        cash_micros: row.get("cash_micros"),
+        realized_pnl_micros: row.get("realized_pnl_micros"),
+        fees_micros: row.get("fees_micros"),
+        last_applied_inbox_id: row.get("last_applied_inbox_id"),
+        accounting_epoch: row.get("accounting_epoch"),
+        accounting_epoch_reason: row.get("accounting_epoch_reason"),
+        updated_at_utc: row.get("updated_at_utc"),
+        source_snapshot_id: row.get("source_snapshot_id"),
+    }
+}
+
 /// Insert or confirm the durable accounting-state row for one `run_id`.
+///
+/// See [`UpsertPaperPortfolioAccountingStateOutcome`] for the full same-
+/// watermark comparison matrix (exact match / snapshot-only change /
+/// conflict) that replaced the prior "same watermark always means
+/// AlreadyCurrent, no comparison" behavior — that prior behavior let a new
+/// broker snapshot with no new inbox row leave a stale
+/// complete/incomplete/`accounting_epoch_reason` classification in place.
 pub async fn upsert_paper_portfolio_accounting_state(
     pool: &PgPool,
     args: UpsertPaperPortfolioAccountingStateArgs,
@@ -535,7 +646,8 @@ pub async fn upsert_paper_portfolio_accounting_state(
     let existing = sqlx::query(
         r#"
         select run_id, cash_micros, realized_pnl_micros, fees_micros,
-               last_applied_inbox_id, accounting_epoch, accounting_epoch_reason, updated_at_utc
+               last_applied_inbox_id, accounting_epoch, accounting_epoch_reason,
+               updated_at_utc, source_snapshot_id
         from sys_paper_portfolio_accounting_state
         where run_id = $1
         for update
@@ -555,6 +667,7 @@ pub async fn upsert_paper_portfolio_accounting_state(
         accounting_epoch: args.accounting_epoch.clone(),
         accounting_epoch_reason: args.accounting_epoch_reason.clone(),
         updated_at_utc: args.updated_at_utc,
+        source_snapshot_id: Some(args.source_snapshot_id),
     };
 
     match existing {
@@ -563,8 +676,9 @@ pub async fn upsert_paper_portfolio_accounting_state(
                 r#"
                 insert into sys_paper_portfolio_accounting_state
                     (run_id, cash_micros, realized_pnl_micros, fees_micros,
-                     last_applied_inbox_id, accounting_epoch, accounting_epoch_reason, updated_at_utc)
-                values ($1, $2, $3, $4, $5, $6, $7, $8)
+                     last_applied_inbox_id, accounting_epoch, accounting_epoch_reason,
+                     updated_at_utc, source_snapshot_id)
+                values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
                 "#,
             )
             .bind(args.run_id)
@@ -575,6 +689,7 @@ pub async fn upsert_paper_portfolio_accounting_state(
             .bind(&args.accounting_epoch)
             .bind(&args.accounting_epoch_reason)
             .bind(args.updated_at_utc)
+            .bind(args.source_snapshot_id)
             .execute(&mut *tx)
             .await
             .context("upsert_paper_portfolio_accounting_state: insert failed")?;
@@ -600,20 +715,69 @@ pub async fn upsert_paper_portfolio_accounting_state(
                 });
             }
             if args.last_applied_inbox_id == existing_watermark {
-                let record = PaperPortfolioAccountingStateRecord {
-                    run_id: row.get("run_id"),
-                    cash_micros: row.get("cash_micros"),
-                    realized_pnl_micros: row.get("realized_pnl_micros"),
-                    fees_micros: row.get("fees_micros"),
-                    last_applied_inbox_id: row.get("last_applied_inbox_id"),
-                    accounting_epoch: row.get("accounting_epoch"),
-                    accounting_epoch_reason: row.get("accounting_epoch_reason"),
-                    updated_at_utc: row.get("updated_at_utc"),
-                };
-                tx.rollback().await.context(
-                    "upsert_paper_portfolio_accounting_state: rollback (already-current) failed",
+                let existing_record = row_to_accounting_record(&row);
+                let fill_derived_matches = existing_record.cash_micros == args.cash_micros
+                    && existing_record.realized_pnl_micros == args.realized_pnl_micros
+                    && existing_record.fees_micros == args.fees_micros;
+
+                if !fill_derived_matches {
+                    tx.rollback().await.context(
+                        "upsert_paper_portfolio_accounting_state: rollback (conflict) failed",
+                    )?;
+                    return Ok(UpsertPaperPortfolioAccountingStateOutcome::Conflict {
+                        record: existing_record,
+                        detail: format!(
+                            "run_id {} has last_applied_inbox_id {existing_watermark} with fill-derived values that differ from this replay -- nondeterministic replay or corruption, refusing to overwrite",
+                            args.run_id
+                        ),
+                    });
+                }
+
+                let same_snapshot =
+                    existing_record.source_snapshot_id == Some(args.source_snapshot_id);
+                let epoch_unchanged = existing_record.accounting_epoch == args.accounting_epoch
+                    && existing_record.accounting_epoch_reason == args.accounting_epoch_reason;
+
+                if same_snapshot && epoch_unchanged {
+                    tx.rollback().await.context(
+                        "upsert_paper_portfolio_accounting_state: rollback (already-current) failed",
+                    )?;
+                    return Ok(UpsertPaperPortfolioAccountingStateOutcome::AlreadyCurrent {
+                        record: existing_record,
+                    });
+                }
+
+                // Same watermark, same fill-derived values, but the snapshot
+                // (and/or the epoch classification it produced) changed --
+                // update only the snapshot-dependent fields.
+                sqlx::query(
+                    r#"
+                    update sys_paper_portfolio_accounting_state
+                    set accounting_epoch = $2,
+                        accounting_epoch_reason = $3,
+                        updated_at_utc = $4,
+                        source_snapshot_id = $5
+                    where run_id = $1
+                    "#,
+                )
+                .bind(args.run_id)
+                .bind(&args.accounting_epoch)
+                .bind(&args.accounting_epoch_reason)
+                .bind(args.updated_at_utc)
+                .bind(args.source_snapshot_id)
+                .execute(&mut *tx)
+                .await
+                .context("upsert_paper_portfolio_accounting_state: update-for-snapshot failed")?;
+
+                tx.commit().await.context(
+                    "upsert_paper_portfolio_accounting_state: commit (update-for-snapshot) failed",
                 )?;
-                return Ok(UpsertPaperPortfolioAccountingStateOutcome::AlreadyCurrent { record });
+
+                return Ok(
+                    UpsertPaperPortfolioAccountingStateOutcome::UpdatedForSnapshot {
+                        record: new_record,
+                    },
+                );
             }
 
             sqlx::query(
@@ -625,7 +789,8 @@ pub async fn upsert_paper_portfolio_accounting_state(
                     last_applied_inbox_id = $5,
                     accounting_epoch = $6,
                     accounting_epoch_reason = $7,
-                    updated_at_utc = $8
+                    updated_at_utc = $8,
+                    source_snapshot_id = $9
                 where run_id = $1
                 "#,
             )
@@ -637,6 +802,7 @@ pub async fn upsert_paper_portfolio_accounting_state(
             .bind(&args.accounting_epoch)
             .bind(&args.accounting_epoch_reason)
             .bind(args.updated_at_utc)
+            .bind(args.source_snapshot_id)
             .execute(&mut *tx)
             .await
             .context("upsert_paper_portfolio_accounting_state: update failed")?;
@@ -663,7 +829,8 @@ pub async fn fetch_paper_portfolio_accounting_state(
     let row = sqlx::query(
         r#"
         select run_id, cash_micros, realized_pnl_micros, fees_micros,
-               last_applied_inbox_id, accounting_epoch, accounting_epoch_reason, updated_at_utc
+               last_applied_inbox_id, accounting_epoch, accounting_epoch_reason,
+               updated_at_utc, source_snapshot_id
         from sys_paper_portfolio_accounting_state
         where run_id = $1
         "#,
@@ -673,14 +840,5 @@ pub async fn fetch_paper_portfolio_accounting_state(
     .await
     .context("fetch_paper_portfolio_accounting_state failed")?;
 
-    Ok(row.map(|r| PaperPortfolioAccountingStateRecord {
-        run_id: r.get("run_id"),
-        cash_micros: r.get("cash_micros"),
-        realized_pnl_micros: r.get("realized_pnl_micros"),
-        fees_micros: r.get("fees_micros"),
-        last_applied_inbox_id: r.get("last_applied_inbox_id"),
-        accounting_epoch: r.get("accounting_epoch"),
-        accounting_epoch_reason: r.get("accounting_epoch_reason"),
-        updated_at_utc: r.get("updated_at_utc"),
-    }))
+    Ok(row.map(|r| row_to_accounting_record(&r)))
 }

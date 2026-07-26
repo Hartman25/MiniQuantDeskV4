@@ -647,6 +647,36 @@ pub(crate) async fn recover_oms_and_portfolio(
 // DURABLE-PAPER-PORTFOLIO-AND-PNL-01C: authoritative snapshot acceptance
 // ---------------------------------------------------------------------------
 
+/// Typed outcome of [`persist_external_broker_snapshot_best_effort`].
+///
+/// DURABLE-PAPER-PORTFOLIO-AND-PNL-01-FINAL-RUN-SCOPING-ACCOUNTING-AND-CLOSURE-REPAIR
+/// (Repair C): accounting refresh must only ever run against a snapshot
+/// that was itself durably confirmed -- `Confirmed` is the sole variant
+/// that carries a `snapshot_id` a caller may pass to the accounting
+/// refresh. Every other variant means "no confirmed snapshot id exists for
+/// this call" and must never feed the accounting seam.
+#[derive(Debug, Clone, PartialEq)]
+pub(crate) enum ExternalSnapshotPersistOutcome {
+    /// The snapshot is durably present under `snapshot_id` -- either freshly
+    /// inserted or an exact idempotent replay of an existing row.
+    Confirmed {
+        snapshot_id: uuid::Uuid,
+        newly_inserted: bool,
+    },
+    /// Deployment mode / broker kind is outside the Paper+Alpaca lane this
+    /// bundle supports -- a deliberate no-op, not a failure.
+    SkippedUnsupported,
+    /// No DB pool is configured.
+    Unavailable,
+    /// The same `snapshot_id` already exists with different content.
+    Conflict,
+    /// The persistence query itself failed.
+    DatabaseFailure,
+    /// The snapshot's own fields (equity/cash/position qty/avg price)
+    /// could not be parsed into a durable row.
+    InvalidSnapshot,
+}
+
 /// Canonical acceptance seam for a real (`External`-source) broker snapshot.
 ///
 /// Writes `snapshot` into `state.broker_snapshot` (unchanged existing
@@ -672,7 +702,7 @@ pub(crate) async fn accept_external_broker_snapshot(
     operation_id: Option<uuid::Uuid>,
 ) {
     *state.broker_snapshot.write().await = Some(snapshot.clone());
-    persist_external_broker_snapshot_best_effort(
+    let persist_outcome = persist_external_broker_snapshot_best_effort(
         state.db.clone(),
         state.deployment_mode(),
         state.runtime_selection.broker_kind,
@@ -682,17 +712,22 @@ pub(crate) async fn accept_external_broker_snapshot(
     )
     .await;
 
-    // DURABLE-PAPER-PORTFOLIO-AND-PNL-01D: every acceptance of a fresh
-    // authoritative snapshot is also the natural point to refresh the
-    // durable fill-accounting projection -- this run's positions are known
-    // (from `snapshot`) and its run_id is known, so no separate polling
-    // loop or call site is needed.
-    if let Some(run_id) = run_id {
+    // DURABLE-PAPER-PORTFOLIO-AND-PNL-01D (repaired by the closure-repair
+    // Confirmed-snapshot gate): every acceptance of a fresh authoritative
+    // snapshot is also the natural point to refresh the durable
+    // fill-accounting projection -- but only once the snapshot itself is
+    // durably confirmed. A best-effort persistence failure/conflict must
+    // never leave a stale accounting row claiming completeness against a
+    // snapshot that was never actually written.
+    if let (Some(run_id), ExternalSnapshotPersistOutcome::Confirmed { snapshot_id, .. }) =
+        (run_id, &persist_outcome)
+    {
         super::paper_portfolio_accounting::refresh_paper_portfolio_accounting_state_best_effort(
             state.db.clone(),
             state.deployment_mode(),
             state.runtime_selection.broker_kind,
             run_id,
+            *snapshot_id,
             snapshot.positions,
             Utc::now(),
         )
@@ -702,8 +737,12 @@ pub(crate) async fn accept_external_broker_snapshot(
 
 /// Attempts durable persistence of an already-accepted `External`-source
 /// broker snapshot. Never panics, never returns an error to the caller —
-/// every failure mode is logged and swallowed, since this is additive
+/// every failure mode is logged, swallowed, and reported through the typed
+/// [`ExternalSnapshotPersistOutcome`] return value, since this is additive
 /// truth on top of the existing in-memory acceptance, not a gate for it.
+/// Callers wanting to trigger the accounting refresh must inspect the
+/// returned outcome for `Confirmed` and use its `snapshot_id` — never
+/// derive one independently.
 ///
 /// Only the Paper+Alpaca lane this bundle supports is eligible; any other
 /// deployment mode or broker kind is a deliberate, silent no-op (this
@@ -716,28 +755,28 @@ pub(crate) async fn persist_external_broker_snapshot_best_effort(
     snapshot: mqk_schemas::BrokerSnapshot,
     run_id: Option<uuid::Uuid>,
     operation_id: Option<uuid::Uuid>,
-) {
+) -> ExternalSnapshotPersistOutcome {
     if deployment_mode != super::types::DeploymentMode::Paper {
-        return;
+        return ExternalSnapshotPersistOutcome::SkippedUnsupported;
     }
     if broker_kind != Some(super::types::BrokerKind::Alpaca) {
-        return;
+        return ExternalSnapshotPersistOutcome::SkippedUnsupported;
     }
     let Some(pool) = db else {
         tracing::warn!("durable_paper_portfolio_snapshot_skip: no_db_pool_configured");
-        return;
+        return ExternalSnapshotPersistOutcome::Unavailable;
     };
 
     let Some(equity_micros) =
         crate::routes::helpers::parse_decimal_micros(&snapshot.account.equity)
     else {
         tracing::warn!("durable_paper_portfolio_snapshot_skip: account_equity_unparseable");
-        return;
+        return ExternalSnapshotPersistOutcome::InvalidSnapshot;
     };
     let Some(cash_micros) = crate::routes::helpers::parse_decimal_micros(&snapshot.account.cash)
     else {
         tracing::warn!("durable_paper_portfolio_snapshot_skip: account_cash_unparseable");
-        return;
+        return ExternalSnapshotPersistOutcome::InvalidSnapshot;
     };
 
     let mut positions = Vec::with_capacity(snapshot.positions.len());
@@ -747,7 +786,7 @@ pub(crate) async fn persist_external_broker_snapshot_best_effort(
                 symbol = %p.symbol,
                 "durable_paper_portfolio_snapshot_skip: position_qty_unparseable"
             );
-            return;
+            return ExternalSnapshotPersistOutcome::InvalidSnapshot;
         };
         let Some(avg_entry_price_micros) =
             crate::routes::helpers::parse_decimal_micros(&p.avg_price)
@@ -756,7 +795,7 @@ pub(crate) async fn persist_external_broker_snapshot_best_effort(
                 symbol = %p.symbol,
                 "durable_paper_portfolio_snapshot_skip: position_avg_price_unparseable"
             );
-            return;
+            return ExternalSnapshotPersistOutcome::InvalidSnapshot;
         };
         positions.push(mqk_db::PaperPortfolioSnapshotPosition {
             symbol: p.symbol.clone(),
@@ -799,13 +838,25 @@ pub(crate) async fn persist_external_broker_snapshot_best_effort(
     .await;
 
     match result {
-        Ok(mqk_db::InsertPaperPortfolioSnapshotOutcome::Inserted { .. })
-        | Ok(mqk_db::InsertPaperPortfolioSnapshotOutcome::AlreadyExists { .. }) => {}
+        Ok(mqk_db::InsertPaperPortfolioSnapshotOutcome::Inserted { .. }) => {
+            ExternalSnapshotPersistOutcome::Confirmed {
+                snapshot_id,
+                newly_inserted: true,
+            }
+        }
+        Ok(mqk_db::InsertPaperPortfolioSnapshotOutcome::AlreadyExists { .. }) => {
+            ExternalSnapshotPersistOutcome::Confirmed {
+                snapshot_id,
+                newly_inserted: false,
+            }
+        }
         Ok(mqk_db::InsertPaperPortfolioSnapshotOutcome::Conflict { detail }) => {
             tracing::warn!(detail = %detail, "durable_paper_portfolio_snapshot_conflict");
+            ExternalSnapshotPersistOutcome::Conflict
         }
         Err(err) => {
             tracing::warn!(error = %err, "durable_paper_portfolio_snapshot_persist_failed");
+            ExternalSnapshotPersistOutcome::DatabaseFailure
         }
     }
 }

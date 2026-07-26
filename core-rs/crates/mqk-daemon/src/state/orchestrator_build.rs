@@ -415,17 +415,40 @@ impl AppState {
                 }
                 {
                     let db = expiry_persist_db.clone();
+                    let db_for_accounting = expiry_persist_db.clone();
                     let snapshot = schema_fresh.clone();
-                    tokio::spawn(
-                        super::snapshot::persist_external_broker_snapshot_best_effort(
+                    tokio::spawn(async move {
+                        let outcome = super::snapshot::persist_external_broker_snapshot_best_effort(
                             db,
                             expiry_persist_deployment_mode,
                             expiry_persist_broker_kind,
-                            snapshot,
+                            snapshot.clone(),
                             Some(run_id),
                             None,
-                        ),
-                    );
+                        )
+                        .await;
+                        // DURABLE-PAPER-PORTFOLIO-AND-PNL closure repair
+                        // (Repair C): accounting refresh must gate on a
+                        // *confirmed* snapshot id, at every External
+                        // acceptance call site -- including this spawned
+                        // one, which the prior patch left unwired.
+                        if let super::snapshot::ExternalSnapshotPersistOutcome::Confirmed {
+                            snapshot_id,
+                            ..
+                        } = outcome
+                        {
+                            super::paper_portfolio_accounting::refresh_paper_portfolio_accounting_state_best_effort(
+                                db_for_accounting,
+                                expiry_persist_deployment_mode,
+                                expiry_persist_broker_kind,
+                                run_id,
+                                snapshot_id,
+                                snapshot.positions,
+                                Utc::now(),
+                            )
+                            .await;
+                        }
+                    });
                 }
                 reconcile_broker_snapshot_from_schema(&schema_fresh).ok()
             }));

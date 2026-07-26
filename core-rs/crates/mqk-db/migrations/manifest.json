@@ -332,6 +332,12 @@
       "path": "0053_paper_portfolio_durable_store.sql",
       "status": "applied",
       "intent": "DURABLE-PAPER-PORTFOLIO-AND-PNL-01B-DURABLE-STORE: add sys_paper_portfolio_snapshots (append-only, deterministically-identified durable copy of an accepted authoritative broker account/position snapshot; source distinguishes 'external_alpaca' real truth from 'synthetic_diagnostic', never authoritative), sys_paper_portfolio_snapshot_positions (child rows, PK (snapshot_id, symbol)), and sys_paper_portfolio_accounting_state (one row per run_id, caching a replay of that run's already-durable oms_inbox applied fills through mqk-portfolio's FIFO engine -- not a second fill ledger; no fill content is duplicated, only the computed cash/realized-P&L/fees summary and the last_applied_inbox_id watermark that makes re-application idempotent). Additive only, does not modify any existing table. No DEFAULT now()/gen_random_uuid() -- every timestamp and identity is caller-supplied."
+    },
+    {
+      "id": "0054",
+      "path": "0054_paper_portfolio_accounting_snapshot_provenance.sql",
+      "status": "applied",
+      "intent": "DURABLE-PAPER-PORTFOLIO-AND-PNL-01-FINAL-RUN-SCOPING-ACCOUNTING-AND-CLOSURE-REPAIR: add nullable source_snapshot_id (self-referencing FK to sys_paper_portfolio_snapshots.snapshot_id) to sys_paper_portfolio_accounting_state, additive, does not modify 0053. Ties a durable accounting row to the exact broker snapshot whose positions were used to compute its accounting_epoch/accounting_epoch_reason, closing the cross-run/cross-snapshot provenance gap found in the Bundle 4 final closure review. Legacy rows round-trip source_snapshot_id as null (never backfilled/fabricated); a null value means completeness cannot be traced to a specific snapshot and must not be reported as fully proven active truth."
     }
   ]
 }

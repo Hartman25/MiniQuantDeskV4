@@ -13,6 +13,15 @@
 
 import { withClassifiedPanelSources } from "./sourceAuthority";
 import {
+  enforceRunScopeConsistency,
+  parseDurablePortfolioPositions,
+  parseDurablePortfolioSnapshots,
+  parseDurablePortfolioSummary,
+  unavailableDurablePortfolioPositions,
+  unavailableDurablePortfolioSnapshots,
+  unavailableDurablePortfolioSummary,
+} from "./durablePortfolio";
+import {
   fetchJsonCandidate,
   fetchJsonCandidates,
   tryFetchJson,
@@ -808,59 +817,32 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
   const fillQualityTelemetry = mapFillQualityWrapper(fillQualityR.ok && fillQualityR.data != null ? fillQualityR.data as FillQualityWrapper : null);
   // GUI-OPS-01: Paper journal surface — dual-lane via extracted mapper.
   const paperJournal = mapPaperJournalWrapper(paperJournalR.ok && paperJournalR.data != null ? paperJournalR.data as PaperJournalWrapper : null);
-  // DURABLE-PAPER-PORTFOLIO-AND-PNL-01F: restart-surviving durable portfolio
-  // truth. Each response already carries its own explicit truth_state field
-  // (per the B4-A/B4-E contract), so a successful fetch is used directly —
-  // only an unreachable/failed fetch falls back to the unavailable default.
-  const unavailableDurablePortfolioSummary: DurablePortfolioSummary = {
-    truth_state: "db_unavailable",
-    snapshot_truth_state: "db_unavailable",
-    snapshot_id: null,
-    captured_at_utc: null,
-    source: null,
-    deployment_mode: null,
-    account_equity: null,
-    cash: null,
-    currency: null,
-    run_id: null,
-    operation_id: null,
-    accounting_truth_state: "db_unavailable",
-    accounting_epoch: null,
-    accounting_epoch_reason: null,
-    last_applied_inbox_id: null,
-    realized_pnl: null,
-    realized_pnl_truth_state: "db_unavailable",
-    realized_pnl_unavailable_reason: "backend truth unavailable",
-    fees: null,
-    cumulative_cash_movement: null,
-    unrealized_pnl: null,
-    unrealized_pnl_truth_state: "db_unavailable",
-    unrealized_pnl_unavailable_reason: "backend truth unavailable",
-    daily_pnl: null,
-    daily_pnl_truth_state: "db_unavailable",
-    daily_pnl_unavailable_reason: "backend truth unavailable",
-    blockers: ["backend truth unavailable"],
-  };
-  const unavailableDurablePortfolioPositions: DurablePortfolioPositionsResponse = {
-    truth_state: "db_unavailable",
-    snapshot_id: null,
-    captured_at_utc: null,
-    run_id: null,
-    positions: [],
-  };
-  const unavailableDurablePortfolioSnapshots: DurablePortfolioSnapshotsResponse = {
-    truth_state: "db_unavailable",
-    snapshots: [],
-  };
-  const durablePortfolioSummary = durablePortfolioSummaryR.ok && durablePortfolioSummaryR.data != null
-    ? (durablePortfolioSummaryR.data as DurablePortfolioSummary)
-    : unavailableDurablePortfolioSummary;
-  const durablePortfolioPositions = durablePortfolioPositionsR.ok && durablePortfolioPositionsR.data != null
-    ? (durablePortfolioPositionsR.data as DurablePortfolioPositionsResponse)
-    : unavailableDurablePortfolioPositions;
-  const durablePortfolioSnapshots = durablePortfolioSnapshotsR.ok && durablePortfolioSnapshotsR.data != null
-    ? (durablePortfolioSnapshotsR.data as DurablePortfolioSnapshotsResponse)
-    : unavailableDurablePortfolioSnapshots;
+  // DURABLE-PAPER-PORTFOLIO-AND-PNL-01F (hardened by the B4 closure repair,
+  // Repair H): restart-surviving durable portfolio truth. Each response
+  // already carries its own explicit truth_state field (per the B4-A/B4-E
+  // contract), but a successful HTTP 200 is no longer trusted at face
+  // value -- `parseDurablePortfolioSummary`/`Positions`/`Snapshots` validate
+  // every required field and every truth_state against a closed
+  // vocabulary, failing closed (to the same unavailable sentinel as an
+  // unreachable fetch) on any malformed body or unrecognized truth_state.
+  const durablePortfolioSummary =
+    durablePortfolioSummaryR.ok && durablePortfolioSummaryR.data != null
+      ? parseDurablePortfolioSummary(durablePortfolioSummaryR.data)
+      : unavailableDurablePortfolioSummary("backend truth unavailable");
+  const durablePortfolioPositionsRaw =
+    durablePortfolioPositionsR.ok && durablePortfolioPositionsR.data != null
+      ? parseDurablePortfolioPositions(durablePortfolioPositionsR.data)
+      : unavailableDurablePortfolioPositions();
+  // Run-mismatch fail-closed: an active summary must never be paired with
+  // an active positions response naming a different run_id.
+  const durablePortfolioPositions = enforceRunScopeConsistency(
+    durablePortfolioSummary,
+    durablePortfolioPositionsRaw,
+  );
+  const durablePortfolioSnapshots =
+    durablePortfolioSnapshotsR.ok && durablePortfolioSnapshotsR.data != null
+      ? parseDurablePortfolioSnapshots(durablePortfolioSnapshotsR.data)
+      : unavailableDurablePortfolioSnapshots();
   // GUI-PAPER-STATUS-VISIBILITY-01: Autonomous paper status — composite read-only truth
   // surface (runtime/arm/reconcile/flatten/watchlist/readiness). Visibility only — no
   // action invocation is derived from this surface.

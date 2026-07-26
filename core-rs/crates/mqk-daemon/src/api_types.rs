@@ -1233,6 +1233,11 @@ pub struct PortfolioDurableSummaryResponse {
     pub accounting_epoch: Option<String>,
     pub accounting_epoch_reason: Option<String>,
     pub last_applied_inbox_id: Option<i64>,
+    /// The durable broker snapshot whose positions were replayed to derive
+    /// `accounting_epoch`. `None` when the accounting row predates this
+    /// provenance column, or when no accounting row exists yet — a `None`
+    /// here means completeness cannot be traced to a specific snapshot.
+    pub accounting_source_snapshot_id: Option<String>,
 
     pub realized_pnl: Option<f64>,
     pub realized_pnl_truth_state: String,
@@ -4770,14 +4775,18 @@ pub struct PaperLifecycleResponse {
     pub outbox_truth_state: String,
     /// `"present"` | `"empty"` | `"unavailable"`.
     pub inbox_truth_state: String,
-    /// Always `"in_memory_only_not_restart_surviving"` when a run is
-    /// resolved: this route never reads `AppState.broker_snapshot` /
-    /// `AppState.execution_snapshot` (in-memory, lost on restart) and no
-    /// durable portfolio/position table exists in the repo today (see
-    /// Phase A audit doc). This is an honest capability boundary, not a
-    /// fabricated "active" claim.
+    /// `"active"` (a durable snapshot exists for exactly this run) |
+    /// `"snapshot_unavailable"` (no durable snapshot for this run) |
+    /// `"unsupported_source"` (resolved run is not PAPER-mode) |
+    /// `"query_failed"` (the durable snapshot query itself failed). Reads
+    /// the run-scoped durable snapshot table (B4-B/B4-C, run-scoped by the
+    /// B4 closure repair) — never `AppState.broker_snapshot` (in-memory,
+    /// lost on restart) and never another run's snapshot.
     pub portfolio_truth_state: String,
-    /// Mirrors `portfolio_truth_state` for the same reason.
+    /// `"active"` | `"fill_history_incomplete"` | `"not_found"` |
+    /// `"unsupported_source"` | `"query_failed"` — same run-scoped durable
+    /// accounting-state read, same failure vocabulary as
+    /// `portfolio_truth_state`.
     pub pnl_truth_state: String,
     pub run_id: Option<String>,
     pub run: Option<PaperLifecycleRunRow>,

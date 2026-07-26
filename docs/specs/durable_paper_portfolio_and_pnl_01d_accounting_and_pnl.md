@@ -116,3 +116,41 @@ up its own `oms_outbox`/`oms_inbox`/`sys_paper_portfolio_*` rows).
 - Regression check: `scenario_autonomous_completed_bar_driver_01` (56/56),
   `scenario_paper_daily_pnl_baseline_01` (11/11),
   `scenario_durable_paper_portfolio_snapshot_persistence_01` (9/9) — all unchanged.
+
+## FINAL-RUN-SCOPING-ACCOUNTING-AND-CLOSURE-REPAIR addendum
+
+Patch ID: `DURABLE-PAPER-PORTFOLIO-AND-PNL-01-FINAL-RUN-SCOPING-ACCOUNTING-AND-CLOSURE-REPAIR`
+
+`replay_paper_portfolio_accounting`'s completeness check is now
+bidirectional and validation-complete, replacing the prior one-directional
+check (which only asked "does every nonzero broker position have a
+matching fill-derived quantity" and silently skipped an unparseable broker
+quantity via `continue`). `normalize_broker_positions` now reports every
+data-quality failure as a bounded reason code instead of skipping past it,
+and the completeness comparison covers the full symbol union in both
+directions:
+
+- `broker_position_missing_fill_history:<symbol>` — a nonzero broker
+  position with no matching fill-derived quantity (the original direction).
+- `fill_history_position_missing_at_broker:<symbol>` — a nonzero
+  fill-derived position the broker snapshot no longer reports (the new
+  direction; the prior implementation could not detect this at all).
+- `position_quantity_mismatch:<symbol>` — both sides have the symbol, but
+  quantities differ.
+- `broker_position_quantity_unparseable:<symbol>` — an unparseable broker
+  quantity is now a blocker, never silently skipped.
+- `duplicate_broker_position_symbol:<symbol>` — a symbol appearing more
+  than once in the broker snapshot's position list.
+
+All detected reasons are sorted and joined (`;`-separated) into
+`accounting_epoch_reason` rather than reporting only the first one
+encountered, so an operator sees the full picture. `refresh_paper_portfolio_accounting_state_best_effort`
+now takes a `source_snapshot_id: Uuid` parameter (see the 01B addendum) and
+handles the new `UpdatedForSnapshot`/`Conflict` upsert outcomes.
+
+Verification: `cargo test -p mqk-daemon --test
+scenario_durable_paper_portfolio_accounting_01 -- --include-ignored
+--test-threads=1`: 13/13 pass, unchanged (existing single-mismatch
+scenarios remain valid — a single mismatch still produces exactly one
+reason code, now via the bidirectional path rather than the one-directional
+one).

@@ -437,35 +437,37 @@ $StagedClean = @($StagedChanges) | Where-Object { $_ -ne "" } | Select-Object -U
 Test-NoMigrationOrProductionRust "unstaged working tree" $UnstagedClean
 Test-NoMigrationOrProductionRust "staged working tree" $StagedClean
 
-# Informational-only (not a fixed authority): scans PhaseEAcceptedHead..HEAD
-# for the Bundle-4/multi-symbol canary checks [10]/[11] below, which
-# legitimately want to see everything up to current HEAD, not a frozen
-# range -- their purpose is "has Bundle 4 or multi-symbol rollout started as
-# of right now", not a proof about what one fixed patch did.
-$PriorErrorActionPreference = $ErrorActionPreference
-$ErrorActionPreference = "Continue"
-& git -C $RepoRoot merge-base --is-ancestor $PhaseEAcceptedHead HEAD 2>$null
-$BaseIsAncestor = ($LASTEXITCODE -eq 0)
-$CommittedRange = @()
-if ($BaseIsAncestor) {
-    $CommittedRange = git -C $RepoRoot diff --name-only "$PhaseEAcceptedHead..HEAD" 2>$null
-}
-$ErrorActionPreference = $PriorErrorActionPreference
-$CommittedRangeClean = @($CommittedRange) | Where-Object { $_ -ne "" } | Select-Object -Unique
-
 # -----------------------------------------------------------------------
-# [10] Bundle 4 is not started.
+# [10] Bundle 4 did not exist inside Bundle 3's own immutable committed
+# range. DURABLE-PAPER-PORTFOLIO-AND-PNL closure repair (Defect 6): the
+# prior version of this check was a LIVE canary -- it scanned
+# $PhaseEAcceptedHead..HEAD (current HEAD, ever-widening) for any Bundle-4-
+# named path and failed once Bundle 4 legitimately started, which made it
+# impossible for the Bundle 4 closure guard (which invokes this guard as a
+# prerequisite) to ever pass once Bundle 4 existed -- current and future
+# heads may legitimately contain Bundle 4 work; that is not a Bundle 3
+# regression.
+#
+# This is now a fixed HISTORICAL proof: Bundle 3's own immutable committed
+# range ($PhaseEAcceptedHead..$FinalRepairCommit, the same fixed range
+# checks [8]/[9] above already use and never widen to ..HEAD) must never
+# have contained a Bundle-4-named path. That fact is permanent regardless
+# of how far HEAD advances afterward.
 # -----------------------------------------------------------------------
 Write-Host ""
-Show-Info "--- [10] Bundle 4 is not started ---"
-$Bundle4Paths = @($CommittedRangeClean) + @($UnstagedClean) + @($StagedClean) | Where-Object {
-    $_ -match "bundle.?4" -or $_ -match "BUNDLE-4"
-} | Select-Object -Unique
-if ($null -eq $Bundle4Paths -or @($Bundle4Paths).Count -eq 0) {
-    Show-Green "  OK -- no Bundle 4 path touched"
+Show-Info "--- [10] Bundle 4 did not exist inside Bundle 3's immutable committed range ---"
+if ($null -eq $FinalRepairCommit) {
+    Show-Green "  OK -- pre-commit mode: fixed-range authority proof deferred to post-commit validation (see [8]/[9])"
 } else {
-    $script:Violations++
-    Show-Red "  FAIL -- Bundle 4 path(s) touched: $($Bundle4Paths -join ', ')"
+    $Bundle4Paths = @($Bundle3FixedRangeClean) | Where-Object {
+        $_ -match "bundle.?4" -or $_ -match "BUNDLE-4"
+    } | Select-Object -Unique
+    if ($null -eq $Bundle4Paths -or @($Bundle4Paths).Count -eq 0) {
+        Show-Green "  OK -- no Bundle 4 path exists in the fixed range $PhaseEAcceptedHead..$FinalRepairCommit"
+    } else {
+        $script:Violations++
+        Show-Red "  FAIL -- Bundle 4 path(s) found inside Bundle 3's immutable committed range: $($Bundle4Paths -join ', ')"
+    }
 }
 
 # -----------------------------------------------------------------------

@@ -202,7 +202,7 @@ async fn seed_snapshot(
     snapshot_id
 }
 
-async fn seed_accounting(pool: &sqlx::PgPool, run_id: Uuid, epoch: &str) {
+async fn seed_accounting(pool: &sqlx::PgPool, run_id: Uuid, epoch: &str, snapshot_id: Uuid) {
     mqk_db::upsert_paper_portfolio_accounting_state(
         pool,
         mqk_db::UpsertPaperPortfolioAccountingStateArgs {
@@ -218,6 +218,7 @@ async fn seed_accounting(pool: &sqlx::PgPool, run_id: Uuid, epoch: &str) {
                 None
             },
             updated_at_utc: Utc.with_ymd_and_hms(2099, 5, 1, 13, 0, 0).unwrap(),
+            source_snapshot_id: snapshot_id,
         },
     )
     .await
@@ -301,12 +302,19 @@ async fn mutation_methods_are_rejected() {
 async fn durable_summary_no_snapshot_is_snapshot_unavailable() {
     let pool = test_pool().await;
     let run_id = fixed_run_id("durable_summary_no_snapshot_is_snapshot_unavailable");
-    seed_run(&pool, run_id, Utc.with_ymd_and_hms(2099, 5, 1, 12, 0, 0).unwrap()).await;
+    seed_run(
+        &pool,
+        run_id,
+        Utc.with_ymd_and_hms(2099, 5, 1, 12, 0, 0).unwrap(),
+    )
+    .await;
 
     let router = router_with_pool(pool.clone());
     let (status, body) = call(
         router,
-        get(&format!("/api/v1/portfolio/durable-summary?run_id={run_id}")),
+        get(&format!(
+            "/api/v1/portfolio/durable-summary?run_id={run_id}"
+        )),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -324,14 +332,27 @@ async fn durable_summary_no_snapshot_is_snapshot_unavailable() {
 async fn durable_summary_with_complete_accounting_populates_realized_pnl() {
     let pool = test_pool().await;
     let run_id = fixed_run_id("durable_summary_with_complete_accounting_populates_realized_pnl");
-    seed_run(&pool, run_id, Utc.with_ymd_and_hms(2099, 5, 1, 12, 0, 0).unwrap()).await;
-    seed_snapshot(&pool, run_id, Utc.with_ymd_and_hms(2099, 5, 1, 13, 0, 0).unwrap(), 10).await;
-    seed_accounting(&pool, run_id, "complete").await;
+    seed_run(
+        &pool,
+        run_id,
+        Utc.with_ymd_and_hms(2099, 5, 1, 12, 0, 0).unwrap(),
+    )
+    .await;
+    let snapshot_id = seed_snapshot(
+        &pool,
+        run_id,
+        Utc.with_ymd_and_hms(2099, 5, 1, 13, 0, 0).unwrap(),
+        10,
+    )
+    .await;
+    seed_accounting(&pool, run_id, "complete", snapshot_id).await;
 
     let router = router_with_pool(pool.clone());
     let (status, body) = call(
         router,
-        get(&format!("/api/v1/portfolio/durable-summary?run_id={run_id}")),
+        get(&format!(
+            "/api/v1/portfolio/durable-summary?run_id={run_id}"
+        )),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -351,14 +372,27 @@ async fn durable_summary_incomplete_epoch_blocks_realized_pnl_but_shows_position
     let pool = test_pool().await;
     let run_id =
         fixed_run_id("durable_summary_incomplete_epoch_blocks_realized_pnl_but_shows_position");
-    seed_run(&pool, run_id, Utc.with_ymd_and_hms(2099, 5, 1, 12, 0, 0).unwrap()).await;
-    seed_snapshot(&pool, run_id, Utc.with_ymd_and_hms(2099, 5, 1, 13, 0, 0).unwrap(), 25).await;
-    seed_accounting(&pool, run_id, "incomplete").await;
+    seed_run(
+        &pool,
+        run_id,
+        Utc.with_ymd_and_hms(2099, 5, 1, 12, 0, 0).unwrap(),
+    )
+    .await;
+    let snapshot_id = seed_snapshot(
+        &pool,
+        run_id,
+        Utc.with_ymd_and_hms(2099, 5, 1, 13, 0, 0).unwrap(),
+        25,
+    )
+    .await;
+    seed_accounting(&pool, run_id, "incomplete", snapshot_id).await;
 
     let router = router_with_pool(pool.clone());
     let (status, body) = call(
         router,
-        get(&format!("/api/v1/portfolio/durable-summary?run_id={run_id}")),
+        get(&format!(
+            "/api/v1/portfolio/durable-summary?run_id={run_id}"
+        )),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -378,6 +412,184 @@ async fn durable_summary_incomplete_epoch_blocks_realized_pnl_but_shows_position
 }
 
 // ---------------------------------------------------------------------------
+// Cross-run isolation (B4 closure repair, Repair A / Defect 1)
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored --test-threads=1"]
+async fn durable_summary_never_returns_a_different_runs_snapshot() {
+    let pool = test_pool().await;
+    let run_a = fixed_run_id("durable_summary_never_returns_a_different_runs_snapshot.a");
+    let run_b = fixed_run_id("durable_summary_never_returns_a_different_runs_snapshot.b");
+    seed_run(&pool, run_a, Utc.with_ymd_and_hms(2099, 5, 1, 12, 0, 0).unwrap()).await;
+    seed_run(&pool, run_b, Utc.with_ymd_and_hms(2099, 5, 1, 12, 30, 0).unwrap()).await;
+
+    seed_snapshot(&pool, run_a, Utc.with_ymd_and_hms(2099, 5, 1, 13, 0, 0).unwrap(), 10).await;
+    // run_b's snapshot is strictly NEWER than run_a's.
+    seed_snapshot(&pool, run_b, Utc.with_ymd_and_hms(2099, 5, 1, 14, 0, 0).unwrap(), 99).await;
+
+    let router = router_with_pool(pool.clone());
+    let (status, body) = call(
+        router,
+        get(&format!("/api/v1/portfolio/durable-summary?run_id={run_a}")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let json = parse_json(body);
+    assert_eq!(
+        json["run_id"], run_a.to_string(),
+        "response run_id must be run_a, never run_b"
+    );
+    assert_eq!(
+        json["truth_state"], "active",
+        "run_a's own snapshot must satisfy the query"
+    );
+
+    cleanup_run(&pool, run_a).await;
+    cleanup_run(&pool, run_b).await;
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored --test-threads=1"]
+async fn durable_positions_never_returns_a_different_runs_snapshot() {
+    let pool = test_pool().await;
+    let run_a = fixed_run_id("durable_positions_never_returns_a_different_runs_snapshot.a");
+    let run_b = fixed_run_id("durable_positions_never_returns_a_different_runs_snapshot.b");
+    seed_run(&pool, run_a, Utc.with_ymd_and_hms(2099, 5, 1, 12, 0, 0).unwrap()).await;
+    seed_run(&pool, run_b, Utc.with_ymd_and_hms(2099, 5, 1, 12, 30, 0).unwrap()).await;
+
+    seed_snapshot(&pool, run_a, Utc.with_ymd_and_hms(2099, 5, 1, 13, 0, 0).unwrap(), 10).await;
+    seed_snapshot(&pool, run_b, Utc.with_ymd_and_hms(2099, 5, 1, 14, 0, 0).unwrap(), 99).await;
+
+    let router = router_with_pool(pool.clone());
+    let (status, body) = call(
+        router,
+        get(&format!(
+            "/api/v1/portfolio/durable-positions?run_id={run_a}"
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let json = parse_json(body);
+    assert_eq!(json["run_id"], run_a.to_string());
+    let positions = json["positions"].as_array().expect("positions array");
+    assert_eq!(positions.len(), 1);
+    assert_eq!(
+        positions[0]["qty_signed"], 10,
+        "must be run_a's qty (10), never run_b's (99)"
+    );
+
+    cleanup_run(&pool, run_a).await;
+    cleanup_run(&pool, run_b).await;
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored --test-threads=1"]
+async fn paper_lifecycle_never_reports_a_different_runs_portfolio_truth() {
+    let pool = test_pool().await;
+    let run_a = fixed_run_id("paper_lifecycle_never_reports_a_different_runs_portfolio_truth.a");
+    let run_b = fixed_run_id("paper_lifecycle_never_reports_a_different_runs_portfolio_truth.b");
+    seed_run(&pool, run_a, Utc.with_ymd_and_hms(2099, 5, 1, 12, 0, 0).unwrap()).await;
+    seed_run(&pool, run_b, Utc.with_ymd_and_hms(2099, 5, 1, 12, 30, 0).unwrap()).await;
+
+    // Only run_b has a durable snapshot; run_a has none.
+    seed_snapshot(&pool, run_b, Utc.with_ymd_and_hms(2099, 5, 1, 14, 0, 0).unwrap(), 99).await;
+
+    let router = router_with_pool(pool.clone());
+    let (status, body) = call(
+        router,
+        get(&format!("/api/v1/execution/paper-lifecycle?run_id={run_a}")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let json = parse_json(body);
+    assert_eq!(json["run_id"], run_a.to_string());
+    assert_eq!(
+        json["portfolio_truth_state"], "snapshot_unavailable",
+        "run_a has no snapshot of its own -- run_b's snapshot must never be attributed to run_a"
+    );
+
+    cleanup_run(&pool, run_a).await;
+    cleanup_run(&pool, run_b).await;
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored --test-threads=1"]
+async fn durable_summary_non_paper_run_fails_closed() {
+    let pool = test_pool().await;
+    let run_id = fixed_run_id("durable_summary_non_paper_run_fails_closed");
+    cleanup_run(&pool, run_id).await;
+    mqk_db::insert_run(
+        &pool,
+        &mqk_db::NewRun {
+            run_id,
+            engine_id: "mqk-daemon".to_string(),
+            mode: "BACKTEST".to_string(),
+            started_at_utc: Utc.with_ymd_and_hms(2099, 5, 1, 12, 0, 0).unwrap(),
+            git_hash: "test".to_string(),
+            config_hash: "test".to_string(),
+            config_json: serde_json::json!({}),
+            host_fingerprint: "test".to_string(),
+        },
+    )
+    .await
+    .expect("insert_run failed");
+    seed_snapshot(&pool, run_id, Utc.with_ymd_and_hms(2099, 5, 1, 13, 0, 0).unwrap(), 10).await;
+
+    let router = router_with_pool(pool.clone());
+    let (status, body) = call(
+        router,
+        get(&format!("/api/v1/portfolio/durable-summary?run_id={run_id}")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let json = parse_json(body);
+    assert_eq!(
+        json["truth_state"], "unsupported_source",
+        "a resolved non-PAPER run must never surface active Paper+Alpaca portfolio truth"
+    );
+
+    cleanup_run(&pool, run_id).await;
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored --test-threads=1"]
+async fn durable_summary_unknown_explicit_run_id_is_not_found() {
+    let pool = test_pool().await;
+    let unknown_run_id = fixed_run_id("durable_summary_unknown_explicit_run_id_is_not_found.never_inserted");
+
+    let router = router_with_pool(pool.clone());
+    let (status, body) = call(
+        router,
+        get(&format!(
+            "/api/v1/portfolio/durable-summary?run_id={unknown_run_id}"
+        )),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    let json = parse_json(body);
+    assert_eq!(json["truth_state"], "not_found");
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored --test-threads=1"]
+async fn durable_summary_invalid_run_id_has_fixed_bounded_message() {
+    let pool = test_pool().await;
+    let router = router_with_pool(pool.clone());
+    let (status, body) = call(
+        router,
+        get("/api/v1/portfolio/durable-summary?run_id=not-a-uuid-at-all"),
+    )
+    .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let json = parse_json(body);
+    assert_eq!(
+        json["detail"], "run_id query parameter is not a valid UUID",
+        "the raw invalid input must never be echoed back onto the wire"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // durable-positions
 // ---------------------------------------------------------------------------
 
@@ -386,13 +598,20 @@ async fn durable_summary_incomplete_epoch_blocks_realized_pnl_but_shows_position
 async fn durable_positions_returns_positions_from_latest_snapshot() {
     let pool = test_pool().await;
     let run_id = fixed_run_id("durable_positions_returns_positions_from_latest_snapshot");
-    seed_run(&pool, run_id, Utc.with_ymd_and_hms(2099, 5, 1, 12, 0, 0).unwrap()).await;
+    seed_run(
+        &pool,
+        run_id,
+        Utc.with_ymd_and_hms(2099, 5, 1, 12, 0, 0).unwrap(),
+    )
+    .await;
     seed_snapshot(&pool, run_id, Utc::now(), 10).await;
 
     let router = router_with_pool(pool.clone());
     let (status, body) = call(
         router,
-        get(&format!("/api/v1/portfolio/durable-positions?run_id={run_id}")),
+        get(&format!(
+            "/api/v1/portfolio/durable-positions?run_id={run_id}"
+        )),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -411,7 +630,12 @@ async fn durable_positions_returns_positions_from_latest_snapshot() {
 async fn durable_positions_flags_stale_snapshot() {
     let pool = test_pool().await;
     let run_id = fixed_run_id("durable_positions_flags_stale_snapshot");
-    seed_run(&pool, run_id, Utc.with_ymd_and_hms(2099, 5, 1, 12, 0, 0).unwrap()).await;
+    seed_run(
+        &pool,
+        run_id,
+        Utc.with_ymd_and_hms(2099, 5, 1, 12, 0, 0).unwrap(),
+    )
+    .await;
     // Captured far enough in the past to exceed the 180s staleness threshold.
     let stale_captured_at = Utc::now() - chrono::Duration::seconds(600);
     seed_snapshot(&pool, run_id, stale_captured_at, 10).await;
@@ -419,7 +643,9 @@ async fn durable_positions_flags_stale_snapshot() {
     let router = router_with_pool(pool.clone());
     let (status, body) = call(
         router,
-        get(&format!("/api/v1/portfolio/durable-positions?run_id={run_id}")),
+        get(&format!(
+            "/api/v1/portfolio/durable-positions?run_id={run_id}"
+        )),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -438,7 +664,12 @@ async fn durable_positions_flags_stale_snapshot() {
 async fn durable_snapshots_list_respects_limit_and_orders_newest_first() {
     let pool = test_pool().await;
     let run_id = fixed_run_id("durable_snapshots_list_respects_limit_and_orders_newest_first");
-    seed_run(&pool, run_id, Utc.with_ymd_and_hms(2099, 5, 1, 12, 0, 0).unwrap()).await;
+    seed_run(
+        &pool,
+        run_id,
+        Utc.with_ymd_and_hms(2099, 5, 1, 12, 0, 0).unwrap(),
+    )
+    .await;
     let mut ids = vec![];
     for i in 0..3i64 {
         let ts = Utc.with_ymd_and_hms(2099, 5, 1, 13, 0, 0).unwrap() + chrono::Duration::minutes(i);
@@ -475,13 +706,15 @@ async fn paper_lifecycle_reports_durable_pnl_available_once_accounting_is_comple
     let ts = Utc.with_ymd_and_hms(2099, 5, 1, 12, 0, 0).unwrap();
     seed_run(&pool, run_id, ts).await;
     seed_outbox_and_fill(&pool, run_id, ts).await;
-    seed_snapshot(&pool, run_id, ts, 10).await;
-    seed_accounting(&pool, run_id, "complete").await;
+    let snapshot_id = seed_snapshot(&pool, run_id, ts, 10).await;
+    seed_accounting(&pool, run_id, "complete", snapshot_id).await;
 
     let router = router_with_pool(pool.clone());
     let (status, body) = call(
         router,
-        get(&format!("/api/v1/execution/paper-lifecycle?run_id={run_id}")),
+        get(&format!(
+            "/api/v1/execution/paper-lifecycle?run_id={run_id}"
+        )),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -504,13 +737,15 @@ async fn paper_lifecycle_reports_durable_pnl_incomplete() {
     let ts = Utc.with_ymd_and_hms(2099, 5, 1, 12, 0, 0).unwrap();
     seed_run(&pool, run_id, ts).await;
     seed_outbox_and_fill(&pool, run_id, ts).await;
-    seed_snapshot(&pool, run_id, ts, 25).await;
-    seed_accounting(&pool, run_id, "incomplete").await;
+    let snapshot_id = seed_snapshot(&pool, run_id, ts, 25).await;
+    seed_accounting(&pool, run_id, "incomplete", snapshot_id).await;
 
     let router = router_with_pool(pool.clone());
     let (status, body) = call(
         router,
-        get(&format!("/api/v1/execution/paper-lifecycle?run_id={run_id}")),
+        get(&format!(
+            "/api/v1/execution/paper-lifecycle?run_id={run_id}"
+        )),
     )
     .await;
     assert_eq!(status, StatusCode::OK);
@@ -537,8 +772,8 @@ async fn repeated_gets_across_all_durable_routes_never_mutate_any_row() {
     let ts = Utc.with_ymd_and_hms(2099, 5, 1, 12, 0, 0).unwrap();
     seed_run(&pool, run_id, ts).await;
     seed_outbox_and_fill(&pool, run_id, ts).await;
-    seed_snapshot(&pool, run_id, ts, 10).await;
-    seed_accounting(&pool, run_id, "complete").await;
+    let snapshot_id = seed_snapshot(&pool, run_id, ts, 10).await;
+    seed_accounting(&pool, run_id, "complete", snapshot_id).await;
 
     async fn counts(pool: &sqlx::PgPool, run_id: Uuid) -> (i64, i64, i64, i64, i64, i64) {
         let snapshots: i64 = sqlx::query_scalar(
@@ -586,12 +821,16 @@ async fn repeated_gets_across_all_durable_routes_never_mutate_any_row() {
     for _ in 0..3 {
         let _ = call(
             router.clone(),
-            get(&format!("/api/v1/portfolio/durable-summary?run_id={run_id}")),
+            get(&format!(
+                "/api/v1/portfolio/durable-summary?run_id={run_id}"
+            )),
         )
         .await;
         let _ = call(
             router.clone(),
-            get(&format!("/api/v1/portfolio/durable-positions?run_id={run_id}")),
+            get(&format!(
+                "/api/v1/portfolio/durable-positions?run_id={run_id}"
+            )),
         )
         .await;
         let _ = call(
@@ -601,7 +840,9 @@ async fn repeated_gets_across_all_durable_routes_never_mutate_any_row() {
         .await;
         let _ = call(
             router.clone(),
-            get(&format!("/api/v1/execution/paper-lifecycle?run_id={run_id}")),
+            get(&format!(
+                "/api/v1/execution/paper-lifecycle?run_id={run_id}"
+            )),
         )
         .await;
     }

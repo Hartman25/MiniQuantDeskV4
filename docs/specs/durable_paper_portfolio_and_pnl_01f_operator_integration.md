@@ -108,3 +108,38 @@ any existing check's behavior.
   `durable-snapshots?limit=20`) observed firing; zero console errors.
 - `scripts/soak/tests/test_autonomous_paper_session_evidence.ps1`: 40/40
   scenarios pass (35 pre-existing + 5 new durable-truth negative cases).
+
+## FINAL-RUN-SCOPING-ACCOUNTING-AND-CLOSURE-REPAIR addendum
+
+Patch ID: `DURABLE-PAPER-PORTFOLIO-AND-PNL-01-FINAL-RUN-SCOPING-ACCOUNTING-AND-CLOSURE-REPAIR`
+
+New module `core-rs/mqk-gui/src/features/system/durablePortfolio.ts` hardens
+the GUI runtime contract for all three durable-portfolio routes, closing the
+gap where a successful HTTP 200 was trusted at face value
+(`result.data as DurablePortfolioSummary`) with no shape or
+`truth_state`-vocabulary validation:
+
+- `parseDurablePortfolioSummary` / `parseDurablePortfolioPositions` /
+  `parseDurablePortfolioSnapshots` validate every required field and check
+  every `truth_state` value against a closed vocabulary
+  (`DURABLE_SUMMARY_TRUTH_STATES` etc.); a malformed body or an
+  unrecognized `truth_state` fails closed to the same unavailable sentinel
+  an unreachable fetch already produced.
+- `enforceRunScopeConsistency` rejects a positions response whose `run_id`
+  differs from an `active` summary's `run_id` when both claim `"active"` —
+  the GUI-side backstop for the same cross-run-contamination class of bug
+  Repair A closes on the daemon side.
+- `api.ts`'s `fetchOperatorModel` now calls these validators instead of
+  casting `durablePortfolioSummaryR.data`/`Positions`/`Snapshots` directly.
+- `DurablePortfolioSummary` gained `accounting_source_snapshot_id: string |
+  null`; `PortfolioScreen.tsx`'s durable section now displays it under
+  "Accounting source snapshot" (read-only, no mutation control added).
+- New test file `durablePortfolio.test.ts` (18 tests): valid-response
+  acceptance, malformed-body rejection, unrecognized-truth_state rejection,
+  null-vs-zero preservation, `fill_history_incomplete`/`query_failed`
+  preservation, history-order preservation, and the run-mismatch guard in
+  both directions (rejects on mismatch, passes through on match, does not
+  fire when either side is not `"active"`).
+
+Verification: `npm test` in `core-rs/mqk-gui`: 866/866 pass (848 pre-existing
++ 18 new). `npm run build`: clean (tsc + vite).

@@ -135,3 +135,54 @@ All 11 pass on first run against the isolated port-5434 test DB.
   cleanup-gap fix above, three consecutive runs),
   `scenario_durable_paper_portfolio_accounting_01` (13/13),
   `scenario_paper_pnl_operator_visibility_01` (13/13).
+
+## FINAL-RUN-SCOPING-ACCOUNTING-AND-CLOSURE-REPAIR addendum
+
+Patch ID: `DURABLE-PAPER-PORTFOLIO-AND-PNL-01-FINAL-RUN-SCOPING-ACCOUNTING-AND-CLOSURE-REPAIR`
+
+Closes six defects found in the Bundle 4 final closure review:
+
+1. **Cross-run contamination (Defect 1).** `portfolio_durable_summary` and
+   `portfolio_durable_positions` now resolve the target run first and call
+   `fetch_latest_paper_portfolio_snapshot_for_run(db, "paper", ..., run.run_id)`
+   — never the global `fetch_latest_paper_portfolio_snapshot`. A newer
+   snapshot belonging to a different run can no longer satisfy either
+   route. `run_id` in the response is always the resolved run's own id,
+   never independently echoed. The `durable-snapshots` history route
+   remains global by design (each row already carries its own `run_id`).
+2. **Non-PAPER run source authority.** A resolved run whose `mode !=
+   "PAPER"` now returns `truth_state: "unsupported_source"` on both routes
+   instead of silently reading whatever snapshot/accounting rows share its
+   `run_id`.
+3. **Bounded errors (Defect 5).** A new `RunResolution` enum
+   (`Found`/`NotFound`/`QueryFailed`) and `is_row_not_found` helper
+   distinguish a genuine "no such run" from a DB query failure — an
+   explicit `?run_id=` whose lookup fails at the DB level now returns
+   `query_failed`, never `not_found`. Every raw `format!("{err:#}")` on a
+   public response was replaced with the fixed, bounded
+   `QUERY_FAILED_MESSAGE`; the real error is logged server-side via
+   `tracing::warn!` instead. An invalid `run_id` UUID returns a fixed
+   message (`"run_id query parameter is not a valid UUID"`), never echoing
+   the caller's raw input.
+4. **Accounting provenance surfaced.** `PortfolioDurableSummaryResponse`
+   gained `accounting_source_snapshot_id`; a row whose `source_snapshot_id`
+   is `None` (legacy, pre-repair row) is reported as
+   `accounting_truth_state: "accounting_epoch_unavailable"` rather than
+   `"active"` — completeness that cannot be traced to a specific snapshot is
+   never claimed as fully proven.
+5. **`paper_lifecycle.rs` (Defect 1/5, shared fix).** Shares
+   `resolve_run`/`RunResolution` with the durable-portfolio routes; its
+   `portfolio_truth_state`/`pnl_truth_state` computation is now run-scoped
+   the same way, with the same non-PAPER/query_failed vocabulary.
+6. New cross-run and bounded-error tests added to
+   `scenario_durable_paper_portfolio_read_only_api_01.rs`:
+   `durable_summary_never_returns_a_different_runs_snapshot`,
+   `durable_positions_never_returns_a_different_runs_snapshot`,
+   `paper_lifecycle_never_reports_a_different_runs_portfolio_truth`,
+   `durable_summary_non_paper_run_fails_closed`,
+   `durable_summary_unknown_explicit_run_id_is_not_found`,
+   `durable_summary_invalid_run_id_has_fixed_bounded_message`.
+
+Verification: `cargo test -p mqk-daemon --test
+scenario_durable_paper_portfolio_read_only_api_01 -- --include-ignored
+--test-threads=1`: 17/17 pass (11 original + 6 new).

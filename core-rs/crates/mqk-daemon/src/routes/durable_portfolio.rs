@@ -61,23 +61,66 @@ pub(crate) struct SnapshotsListParams {
     pub limit: Option<i64>,
 }
 
-async fn resolve_run(
-    db: &sqlx::PgPool,
-    explicit_run_id: Option<Uuid>,
-) -> Result<Option<mqk_db::RunRow>, anyhow::Error> {
+/// Bounded, closed-vocabulary run resolution outcome. Distinguishes an
+/// explicit-run query failure (`QueryFailed`) from a genuine absence
+/// (`NotFound`) — the prior `.ok()` collapse could not tell these apart,
+/// silently reporting a transient DB failure as an ordinary not-found run
+/// (B4 closure repair, Defect 5).
+pub(crate) enum RunResolution {
+    Found(Box<mqk_db::RunRow>),
+    NotFound,
+    QueryFailed,
+}
+
+/// `true` when `err`'s cause chain bottoms out at `sqlx::Error::RowNotFound`
+/// — i.e. the query executed successfully and simply found no row, as
+/// opposed to a connection/transport/syntax failure.
+fn is_row_not_found(err: &anyhow::Error) -> bool {
+    err.chain().any(|cause| {
+        cause
+            .downcast_ref::<sqlx::Error>()
+            .is_some_and(|e| matches!(e, sqlx::Error::RowNotFound))
+    })
+}
+
+/// Fixed, bounded message for any durable-portfolio query failure. Never
+/// includes the raw DB error, SQL text, connection string, or any other
+/// internal detail on the public wire — the real error is logged
+/// server-side via `tracing::warn!` at the call site instead.
+pub(crate) const QUERY_FAILED_MESSAGE: &str = "a durable portfolio query failed";
+
+pub(crate) async fn resolve_run(db: &sqlx::PgPool, explicit_run_id: Option<Uuid>) -> RunResolution {
     if let Some(run_id) = explicit_run_id {
-        Ok(mqk_db::fetch_run(db, run_id).await.ok())
+        match mqk_db::fetch_run(db, run_id).await {
+            Ok(run) => RunResolution::Found(Box::new(run)),
+            Err(err) if is_row_not_found(&err) => RunResolution::NotFound,
+            Err(err) => {
+                tracing::warn!(error = %err, run_id = %run_id, "durable_portfolio_run_query_failed");
+                RunResolution::QueryFailed
+            }
+        }
     } else {
-        mqk_db::fetch_latest_run_for_engine(db, DAEMON_ENGINE_ID, PAPER_MODE).await
+        match mqk_db::fetch_latest_run_for_engine(db, DAEMON_ENGINE_ID, PAPER_MODE).await {
+            Ok(Some(run)) => RunResolution::Found(Box::new(run)),
+            Ok(None) => RunResolution::NotFound,
+            Err(err) => {
+                tracing::warn!(error = %err, "durable_portfolio_latest_run_query_failed");
+                RunResolution::QueryFailed
+            }
+        }
     }
 }
 
-fn parse_explicit_run_id(raw: Option<&str>) -> Result<Option<Uuid>, String> {
+/// Fixed bounded message for an invalid `run_id` query param — never echoes
+/// the caller-supplied raw value back onto the wire.
+const INVALID_RUN_ID_MESSAGE: &str = "run_id query parameter is not a valid UUID";
+
+fn parse_explicit_run_id(raw: Option<&str>) -> Result<Option<Uuid>, &'static str> {
     match raw {
         Some(s) => s
             .parse::<Uuid>()
             .map(Some)
-            .map_err(|_| format!("run_id is not a valid UUID: {s}")),
+            .map_err(|_| INVALID_RUN_ID_MESSAGE),
         None => Ok(None),
     }
 }
@@ -104,39 +147,60 @@ pub(crate) async fn portfolio_durable_summary(
     let Some(db) = st.db.as_ref() else {
         return (
             StatusCode::OK,
-            Json(unavailable_summary("db_unavailable", "no_db_pool_configured")),
+            Json(unavailable_summary(
+                "db_unavailable",
+                "no_db_pool_configured",
+            )),
         )
             .into_response();
     };
 
     let run = match resolve_run(db, explicit_run_id).await {
-        Ok(r) => r,
-        Err(err) => {
+        RunResolution::Found(r) => *r,
+        RunResolution::QueryFailed => {
             return (
                 StatusCode::OK,
-                Json(unavailable_summary("query_failed", &format!("{err:#}"))),
+                Json(unavailable_summary("query_failed", QUERY_FAILED_MESSAGE)),
+            )
+                .into_response();
+        }
+        RunResolution::NotFound => {
+            return (
+                StatusCode::OK,
+                Json(unavailable_summary("not_found", "no run resolved")),
             )
                 .into_response();
         }
     };
 
-    let Some(run) = run else {
-        return (StatusCode::OK, Json(unavailable_summary("not_found", "no run resolved")))
+    // A run resolved to a non-PAPER mode can never supply active Paper+Alpaca
+    // portfolio truth -- fail closed rather than silently reading whatever
+    // snapshot/accounting rows happen to share its run_id.
+    if run.mode != PAPER_MODE {
+        return (
+            StatusCode::OK,
+            Json(unavailable_summary(
+                "unsupported_source",
+                "resolved run is not a PAPER-mode run",
+            )),
+        )
             .into_response();
-    };
+    }
 
-    let snapshot = match mqk_db::fetch_latest_paper_portfolio_snapshot(
+    let snapshot = match mqk_db::fetch_latest_paper_portfolio_snapshot_for_run(
         db,
         "paper",
         mqk_db::PAPER_PORTFOLIO_SNAPSHOT_SOURCE_EXTERNAL_ALPACA,
+        run.run_id,
     )
     .await
     {
         Ok(s) => s,
         Err(err) => {
+            tracing::warn!(error = %err, run_id = %run.run_id, "durable_portfolio_snapshot_query_failed");
             return (
                 StatusCode::OK,
-                Json(unavailable_summary("query_failed", &format!("{err:#}"))),
+                Json(unavailable_summary("query_failed", QUERY_FAILED_MESSAGE)),
             )
                 .into_response();
         }
@@ -145,9 +209,10 @@ pub(crate) async fn portfolio_durable_summary(
     let accounting = match mqk_db::fetch_paper_portfolio_accounting_state(db, run.run_id).await {
         Ok(a) => a,
         Err(err) => {
+            tracing::warn!(error = %err, run_id = %run.run_id, "durable_portfolio_accounting_query_failed");
             return (
                 StatusCode::OK,
-                Json(unavailable_summary("query_failed", &format!("{err:#}"))),
+                Json(unavailable_summary("query_failed", QUERY_FAILED_MESSAGE)),
             )
                 .into_response();
         }
@@ -158,8 +223,18 @@ pub(crate) async fn portfolio_durable_summary(
     let Some(snapshot) = snapshot else {
         // No durable snapshot yet -- accounting/pnl fields stay unavailable
         // too, since unrealized P&L needs the snapshot's positions.
-        let (accounting_truth_state, accounting_epoch, accounting_epoch_reason, last_applied_inbox_id, realized_pnl, realized_pnl_truth_state, realized_pnl_reason, fees, cash_movement) =
-            accounting_fields(accounting.as_ref());
+        let (
+            accounting_truth_state,
+            accounting_epoch,
+            accounting_epoch_reason,
+            accounting_source_snapshot_id,
+            last_applied_inbox_id,
+            realized_pnl,
+            realized_pnl_truth_state,
+            realized_pnl_reason,
+            fees,
+            cash_movement,
+        ) = accounting_fields(accounting.as_ref());
         return (
             StatusCode::OK,
             Json(PortfolioDurableSummaryResponse {
@@ -177,6 +252,7 @@ pub(crate) async fn portfolio_durable_summary(
                 accounting_truth_state,
                 accounting_epoch,
                 accounting_epoch_reason,
+                accounting_source_snapshot_id,
                 last_applied_inbox_id,
                 realized_pnl,
                 realized_pnl_truth_state,
@@ -185,7 +261,9 @@ pub(crate) async fn portfolio_durable_summary(
                 cumulative_cash_movement: cash_movement,
                 unrealized_pnl: None,
                 unrealized_pnl_truth_state: "snapshot_unavailable".to_string(),
-                unrealized_pnl_unavailable_reason: Some("no durable snapshot exists yet".to_string()),
+                unrealized_pnl_unavailable_reason: Some(
+                    "no durable snapshot exists yet".to_string(),
+                ),
                 daily_pnl: None,
                 daily_pnl_truth_state: "snapshot_unavailable".to_string(),
                 daily_pnl_unavailable_reason: Some("no durable snapshot exists yet".to_string()),
@@ -205,11 +283,22 @@ pub(crate) async fn portfolio_durable_summary(
         "active"
     };
 
-    let account_equity = snapshot.snapshot.equity_micros as f64 / mqk_portfolio::MICROS_SCALE as f64;
+    let account_equity =
+        snapshot.snapshot.equity_micros as f64 / mqk_portfolio::MICROS_SCALE as f64;
     let cash = snapshot.snapshot.cash_micros as f64 / mqk_portfolio::MICROS_SCALE as f64;
 
-    let (accounting_truth_state, accounting_epoch, accounting_epoch_reason, last_applied_inbox_id, realized_pnl, realized_pnl_truth_state, realized_pnl_reason, fees, cash_movement) =
-        accounting_fields(accounting.as_ref());
+    let (
+        accounting_truth_state,
+        accounting_epoch,
+        accounting_epoch_reason,
+        accounting_source_snapshot_id,
+        last_applied_inbox_id,
+        realized_pnl,
+        realized_pnl_truth_state,
+        realized_pnl_reason,
+        fees,
+        cash_movement,
+    ) = accounting_fields(accounting.as_ref());
 
     // Unrealized P&L reuses the existing broker-position mark lookup,
     // driven off the durable snapshot's positions rather than the
@@ -224,7 +313,8 @@ pub(crate) async fn portfolio_durable_summary(
                 .to_string(),
         })
         .collect();
-    let pnl_by_symbol = compute_broker_positions_pnl(&st, &broker_positions, DEFAULT_TIMEFRAME).await;
+    let pnl_by_symbol =
+        compute_broker_positions_pnl(&st, &broker_positions, DEFAULT_TIMEFRAME).await;
     let (unrealized_pnl, unrealized_pnl_truth_state, unrealized_pnl_unavailable_reason) =
         aggregate_positions_pnl(&pnl_by_symbol);
 
@@ -247,6 +337,7 @@ pub(crate) async fn portfolio_durable_summary(
             accounting_truth_state,
             accounting_epoch,
             accounting_epoch_reason,
+            accounting_source_snapshot_id,
             last_applied_inbox_id,
             realized_pnl,
             realized_pnl_truth_state,
@@ -272,6 +363,7 @@ fn accounting_fields(
     String,
     Option<String>,
     Option<String>,
+    Option<String>,
     Option<i64>,
     Option<f64>,
     String,
@@ -286,6 +378,7 @@ fn accounting_fields(
             None,
             None,
             None,
+            None,
             "not_found".to_string(),
             Some("no accounting rows exist yet for this run".to_string()),
             None,
@@ -295,6 +388,7 @@ fn accounting_fields(
             "fill_history_incomplete".to_string(),
             Some(row.accounting_epoch.clone()),
             row.accounting_epoch_reason.clone(),
+            row.source_snapshot_id.map(|id| id.to_string()),
             Some(row.last_applied_inbox_id),
             None,
             "fill_history_incomplete".to_string(),
@@ -302,10 +396,30 @@ fn accounting_fields(
             Some(row.fees_micros as f64 / mqk_portfolio::MICROS_SCALE as f64),
             Some(row.cash_micros as f64 / mqk_portfolio::MICROS_SCALE as f64),
         ),
+        // A row without recorded snapshot provenance cannot be proven to
+        // trace back to a specific confirmed broker snapshot -- report it
+        // as unproven rather than active, even though the epoch itself
+        // says "complete" (B4 closure repair: "no fabricated truth").
+        Some(row) if row.source_snapshot_id.is_none() => (
+            "accounting_epoch_unavailable".to_string(),
+            Some(row.accounting_epoch.clone()),
+            None,
+            None,
+            Some(row.last_applied_inbox_id),
+            None,
+            "accounting_epoch_unavailable".to_string(),
+            Some(
+                "accounting row has no recorded source snapshot; completeness cannot be traced"
+                    .to_string(),
+            ),
+            Some(row.fees_micros as f64 / mqk_portfolio::MICROS_SCALE as f64),
+            Some(row.cash_micros as f64 / mqk_portfolio::MICROS_SCALE as f64),
+        ),
         Some(row) => (
             "active".to_string(),
             Some(row.accounting_epoch.clone()),
             None,
+            row.source_snapshot_id.map(|id| id.to_string()),
             Some(row.last_applied_inbox_id),
             Some(row.realized_pnl_micros as f64 / mqk_portfolio::MICROS_SCALE as f64),
             "active".to_string(),
@@ -332,6 +446,7 @@ fn unavailable_summary(truth_state: &str, detail: &str) -> PortfolioDurableSumma
         accounting_truth_state: truth_state.to_string(),
         accounting_epoch: None,
         accounting_epoch_reason: None,
+        accounting_source_snapshot_id: None,
         last_applied_inbox_id: None,
         realized_pnl: None,
         realized_pnl_truth_state: truth_state.to_string(),
@@ -381,24 +496,66 @@ pub(crate) async fn portfolio_durable_positions(
             .into_response();
     };
 
-    // run_id is resolved only to echo it on the response and to keep this
-    // route's query-param contract identical to the other durable routes;
-    // the snapshot lookup itself is not run-scoped (see
-    // docs/specs/durable_paper_portfolio_and_pnl_01e_read_only_api.md).
-    let run_id = match resolve_run(db, explicit_run_id).await {
-        Ok(r) => r.map(|r| r.run_id),
-        Err(_) => None,
+    // Run resolution is now the same fail-closed authority every other
+    // durable route uses: an explicit-run query failure is distinct from
+    // not_found, and the snapshot lookup below is scoped to exactly this
+    // run (see docs/specs/durable_paper_portfolio_and_pnl_01e_read_only_api.md).
+    let run = match resolve_run(db, explicit_run_id).await {
+        RunResolution::Found(r) => *r,
+        RunResolution::QueryFailed => {
+            return (
+                StatusCode::OK,
+                Json(PortfolioDurablePositionsResponse {
+                    truth_state: "query_failed".to_string(),
+                    snapshot_id: None,
+                    captured_at_utc: None,
+                    run_id: None,
+                    positions: vec![],
+                }),
+            )
+                .into_response();
+        }
+        RunResolution::NotFound => {
+            return (
+                StatusCode::OK,
+                Json(PortfolioDurablePositionsResponse {
+                    truth_state: "not_found".to_string(),
+                    snapshot_id: None,
+                    captured_at_utc: None,
+                    run_id: explicit_run_id.map(|id| id.to_string()),
+                    positions: vec![],
+                }),
+            )
+                .into_response();
+        }
     };
+    let run_id = Some(run.run_id);
 
-    let snapshot = match mqk_db::fetch_latest_paper_portfolio_snapshot(
+    if run.mode != PAPER_MODE {
+        return (
+            StatusCode::OK,
+            Json(PortfolioDurablePositionsResponse {
+                truth_state: "unsupported_source".to_string(),
+                snapshot_id: None,
+                captured_at_utc: None,
+                run_id: run_id.map(|id| id.to_string()),
+                positions: vec![],
+            }),
+        )
+            .into_response();
+    }
+
+    let snapshot = match mqk_db::fetch_latest_paper_portfolio_snapshot_for_run(
         db,
         "paper",
         mqk_db::PAPER_PORTFOLIO_SNAPSHOT_SOURCE_EXTERNAL_ALPACA,
+        run.run_id,
     )
     .await
     {
         Ok(s) => s,
-        Err(_) => {
+        Err(err) => {
+            tracing::warn!(error = %err, run_id = %run.run_id, "durable_positions_snapshot_query_failed");
             return (
                 StatusCode::OK,
                 Json(PortfolioDurablePositionsResponse {
@@ -531,4 +688,3 @@ pub(crate) async fn portfolio_durable_snapshots(
     )
         .into_response()
 }
-

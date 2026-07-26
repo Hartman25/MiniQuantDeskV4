@@ -389,6 +389,179 @@ if ($MatchingFinalCommits.Count -eq 0) {
     }
 }
 
+# -----------------------------------------------------------------------
+# [12]-[22] FINAL-RUN-SCOPING-ACCOUNTING-AND-CLOSURE-REPAIR invariants.
+# -----------------------------------------------------------------------
+$PaperPortfolioDbFileG = Join-Path $RepoRoot 'core-rs\crates\mqk-db\src\paper_portfolio.rs'
+$SnapshotFileG = Join-Path $RepoRoot 'core-rs\crates\mqk-daemon\src\state\snapshot.rs'
+$AccountingFileG = Join-Path $RepoRoot 'core-rs\crates\mqk-daemon\src\state\paper_portfolio_accounting.rs'
+$MigrationFileG = Join-Path $RepoRoot 'core-rs\crates\mqk-db\migrations\0054_paper_portfolio_accounting_snapshot_provenance.sql'
+$DurablePortfolioTextG = if (Test-Path -LiteralPath $DurablePortfolioRoutesFile) { [System.IO.File]::ReadAllText($DurablePortfolioRoutesFile) } else { '' }
+$PaperLifecycleTextG = if (Test-Path -LiteralPath $PaperLifecycleRoutesFile) { [System.IO.File]::ReadAllText($PaperLifecycleRoutesFile) } else { '' }
+$PaperPortfolioDbTextG = if (Test-Path -LiteralPath $PaperPortfolioDbFileG) { [System.IO.File]::ReadAllText($PaperPortfolioDbFileG) } else { '' }
+$SnapshotTextG = if (Test-Path -LiteralPath $SnapshotFileG) { [System.IO.File]::ReadAllText($SnapshotFileG) } else { '' }
+$AccountingTextG = if (Test-Path -LiteralPath $AccountingFileG) { [System.IO.File]::ReadAllText($AccountingFileG) } else { '' }
+$GuiValidatorFileG = Join-Path $RepoRoot 'core-rs\mqk-gui\src\features\system\durablePortfolio.ts'
+
+Write-Host ''
+Show-Info '--- [12] Run-scoped snapshot helper exists ---'
+if ($PaperPortfolioDbTextG -match 'pub async fn fetch_latest_paper_portfolio_snapshot_for_run\(') {
+    Show-Green "fetch_latest_paper_portfolio_snapshot_for_run exists in mqk-db"
+} else {
+    Show-Fail "fetch_latest_paper_portfolio_snapshot_for_run not found in mqk-db"
+}
+
+Write-Host ''
+Show-Info '--- [13] Run-scoped routes never call the global (non-run-scoped) latest-snapshot helper ---'
+# Matches a call to the global helper ONLY (not the _for_run variant): the
+# function name followed directly by "(", not by "_for_run(".
+$GlobalHelperCallPattern = 'fetch_latest_paper_portfolio_snapshot\('
+foreach ($pair in @(
+        @{ Name = 'durable_portfolio.rs'; Text = $DurablePortfolioTextG },
+        @{ Name = 'paper_lifecycle.rs'; Text = $PaperLifecycleTextG }
+    )) {
+    if ($pair.Text -match $GlobalHelperCallPattern) {
+        Show-Fail "$($pair.Name) still calls the global (non-run-scoped) fetch_latest_paper_portfolio_snapshot -- cross-run contamination risk"
+    } else {
+        Show-Green "$($pair.Name) never calls the global (non-run-scoped) fetch_latest_paper_portfolio_snapshot"
+    }
+    if ($pair.Text -match 'fetch_latest_paper_portfolio_snapshot_for_run\(') {
+        Show-Green "$($pair.Name) uses the run-scoped helper"
+    } else {
+        Show-Fail "$($pair.Name) does not call the run-scoped helper"
+    }
+}
+
+Write-Host ''
+Show-Info '--- [14] Response run_id is not independently echoed from an unrelated run ---'
+# durable_portfolio.rs must derive its response run_id from the SAME
+# resolved `run` the snapshot/accounting lookups used (`run.run_id`), never
+# from a second, independently-resolved run.
+if ($DurablePortfolioTextG -match 'run_id:\s*Some\(run\.run_id\.to_string\(\)\)') {
+    Show-Green "durable_portfolio.rs echoes run_id from the same resolved run used for snapshot/accounting lookups"
+} else {
+    Show-Fail "durable_portfolio.rs does not visibly tie its echoed run_id to the resolved run"
+}
+
+Write-Host ''
+Show-Info '--- [15] Accounting carries source_snapshot_id provenance ---'
+if ($PaperPortfolioDbTextG -match 'source_snapshot_id') {
+    Show-Green "mqk-db accounting record/args carry source_snapshot_id"
+} else {
+    Show-Fail "mqk-db accounting record/args do not carry source_snapshot_id"
+}
+if (Test-Path -LiteralPath $MigrationFileG) {
+    Show-Green "Additive migration adding source_snapshot_id exists"
+} else {
+    Show-Fail "No additive migration found adding source_snapshot_id"
+}
+
+Write-Host ''
+Show-Info '--- [16] Accounting refresh requires confirmed snapshot persistence ---'
+if ($SnapshotTextG -match 'ExternalSnapshotPersistOutcome') {
+    Show-Green "snapshot.rs defines a typed persistence outcome"
+} else {
+    Show-Fail "snapshot.rs does not define a typed persistence outcome"
+}
+if ($SnapshotTextG -match 'ExternalSnapshotPersistOutcome::Confirmed[\s\S]{0,400}refresh_paper_portfolio_accounting_state_best_effort') {
+    Show-Green "Accounting refresh in the canonical acceptance seam is gated on a Confirmed persistence outcome"
+} else {
+    Show-Fail "Accounting refresh does not appear gated on a Confirmed persistence outcome in snapshot.rs"
+}
+
+Write-Host ''
+Show-Info '--- [17] Same-watermark upsert compares full content (not watermark alone) ---'
+if ($PaperPortfolioDbTextG -match 'UpsertPaperPortfolioAccountingStateOutcome::Conflict' -and
+    $PaperPortfolioDbTextG -match 'UpsertPaperPortfolioAccountingStateOutcome::UpdatedForSnapshot') {
+    Show-Green "Conflict and UpdatedForSnapshot outcome variants exist as real code"
+} else {
+    Show-Fail "Conflict/UpdatedForSnapshot outcome variants missing -- same-watermark replay is not fully compared"
+}
+$DbTestFileG = Join-Path $RepoRoot 'core-rs\crates\mqk-db\tests\scenario_paper_portfolio_store_01.rs'
+if (Test-Path -LiteralPath $DbTestFileG) {
+    $DbTestTextG = [System.IO.File]::ReadAllText($DbTestFileG)
+    if ($DbTestTextG -match 'expected Conflict' -and $DbTestTextG -match 'expected UpdatedForSnapshot') {
+        Show-Green "Same-watermark/same-snapshot conflict and same-watermark/new-snapshot update are both tested"
+    } else {
+        Show-Fail "Missing test coverage for same-watermark conflict and/or same-watermark new-snapshot update"
+    }
+}
+
+Write-Host ''
+Show-Info '--- [18] Accounting completeness compares both symbol directions ---'
+$RequiredCompletenessReasons = @(
+    'broker_position_missing_fill_history',
+    'fill_history_position_missing_at_broker',
+    'position_quantity_mismatch',
+    'broker_position_quantity_unparseable',
+    'duplicate_broker_position_symbol'
+)
+foreach ($reason in $RequiredCompletenessReasons) {
+    if ($AccountingTextG -match [regex]::Escape($reason)) {
+        Show-Green "Completeness reason code present: $reason"
+    } else {
+        Show-Fail "Missing bidirectional completeness reason code: $reason"
+    }
+}
+
+Write-Host ''
+Show-Info '--- [19] Unparseable broker quantity cannot be silently skipped ---'
+if ($AccountingTextG -match 'broker_position_quantity_unparseable') {
+    Show-Green "An unparseable broker quantity is reported as a blocker, not silently continued past"
+} else {
+    Show-Fail "No reason code found for an unparseable broker quantity"
+}
+
+Write-Host ''
+Show-Info '--- [20] Public durable-portfolio routes never leak a raw formatted DB error ---'
+$RawErrorPattern = '\{err:#\}|\{e:#\}|\{err:\?\}|\{e:\?\}'
+foreach ($pair in @(
+        @{ Name = 'durable_portfolio.rs'; Text = $DurablePortfolioTextG },
+        @{ Name = 'paper_lifecycle.rs'; Text = $PaperLifecycleTextG }
+    )) {
+    if ($pair.Text -match $RawErrorPattern) {
+        Show-Fail "$($pair.Name) still formats a raw error onto a response path (format!(`"{err:#}`") or similar)"
+    } else {
+        Show-Green "$($pair.Name) contains no raw formatted-error interpolation"
+    }
+}
+
+Write-Host ''
+Show-Info '--- [21] Explicit-run query failure cannot become not_found ---'
+if ($DurablePortfolioTextG -match 'enum RunResolution' -and
+    $DurablePortfolioTextG -match 'QueryFailed' -and
+    $DurablePortfolioTextG -match 'NotFound') {
+    Show-Green "RunResolution distinguishes QueryFailed from NotFound as separate variants"
+} else {
+    Show-Fail "RunResolution does not distinguish QueryFailed from NotFound"
+}
+if ($DurablePortfolioTextG -match 'is_row_not_found') {
+    Show-Green "Row-not-found is distinguished from other DB errors via is_row_not_found"
+} else {
+    Show-Fail "No is_row_not_found distinction found -- explicit-run DB failures risk collapsing to not_found"
+}
+
+Write-Host ''
+Show-Info '--- [22] GUI runtime validators exist for the durable-portfolio contract ---'
+if (Test-Path -LiteralPath $GuiValidatorFileG) {
+    $GuiValidatorTextG = [System.IO.File]::ReadAllText($GuiValidatorFileG)
+    $RequiredValidators = @(
+        'parseDurablePortfolioSummary',
+        'parseDurablePortfolioPositions',
+        'parseDurablePortfolioSnapshots',
+        'enforceRunScopeConsistency'
+    )
+    foreach ($fn in $RequiredValidators) {
+        if ($GuiValidatorTextG -match "function $fn\(" -or $GuiValidatorTextG -match "export function $fn\(") {
+            Show-Green "GUI runtime validator present: $fn"
+        } else {
+            Show-Fail "Missing GUI runtime validator: $fn"
+        }
+    }
+} else {
+    Show-Fail "GUI durable-portfolio runtime validator module not found: $GuiValidatorFileG"
+}
+
 Write-Host ''
 Write-Host '============================================================'
 if ($Violations -gt 0) {

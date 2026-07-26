@@ -16917,3 +16917,112 @@ LIVE CAPITAL: NOT READY
 
 Bundle 4 is **not** marked accepted or closed in the repository by this
 patch.
+
+## DURABLE-PAPER-PORTFOLIO-AND-PNL-01-FINAL-RUN-SCOPING-ACCOUNTING-AND-CLOSURE-REPAIR
+
+Consolidated final correctness and closure repair across B4-B through B4-G,
+required by the Bundle 4 final closure review before ChatGPT/operator
+acceptance. Six confirmed defects closed in one commit (see the addenda in
+`docs/specs/durable_paper_portfolio_and_pnl_01b_durable_store.md` through
+`..._01g_bundle_4_closure.md` for full per-phase detail):
+
+1. **Cross-run durable truth (Defect 1).** Added
+   `fetch_latest_paper_portfolio_snapshot_for_run` (mqk-db); wired into
+   `portfolio_durable_summary`, `portfolio_durable_positions`, and
+   `execution_paper_lifecycle` in place of the global, non-run-scoped
+   fetch. A newer snapshot belonging to a different run can no longer be
+   attributed to the run being queried; a snapshot with `run_id = NULL`
+   can never satisfy a run-scoped query.
+2. **Same-watermark accounting staleness (Defect 2).** New migration
+   `0054_paper_portfolio_accounting_snapshot_provenance.sql` adds
+   `source_snapshot_id` to `sys_paper_portfolio_accounting_state`.
+   `upsert_paper_portfolio_accounting_state` now compares full fill-derived
+   content at the same watermark (`AlreadyCurrent` only on exact match,
+   `Conflict` on differing fill-derived values, `UpdatedForSnapshot` when
+   only the snapshot/epoch changed) instead of treating an unchanged
+   watermark as automatically identical.
+3. **Unconfirmed-snapshot accounting (Defect 3).** `persist_external_broker_snapshot_best_effort`
+   now returns a typed `ExternalSnapshotPersistOutcome`; the accounting
+   refresh (in `accept_external_broker_snapshot` and the
+   previously-unwired `orchestrator_build.rs` spawned closure) runs only on
+   a `Confirmed` outcome.
+4. **One-directional completeness (Defect 4).** `replay_paper_portfolio_accounting`
+   now checks both directions (broker-missing-from-fills,
+   fill-missing-from-broker), plus unparseable-quantity and
+   duplicate-symbol data-quality failures that the prior implementation
+   silently skipped past.
+5. **Leaked/collapsed API errors (Defect 5).** Bounded `RunResolution`
+   (`Found`/`NotFound`/`QueryFailed`) replaces `.ok()` collapse; no public
+   route formats a raw DB error onto the wire; invalid UUIDs get a fixed
+   message, never echoing raw input.
+6. **Non-passable Bundle 4 closure guard (Defect 6).** Bundle 3 final
+   guard's check `[10]` (live canary requiring Bundle 4 not to have
+   started) replaced with a fixed historical proof over Bundle 3's own
+   immutable committed range. Bundle 4 closure guard strengthened with 11
+   new checks (`[12]`–`[22]`) independently proving every repair above is
+   real code, not just documented.
+
+**Safety confirmation:**
+
+```text
+PROVIDER CALLS: no
+BROKER CALLS: no
+DISCORD CALLS: no
+NETWORK CALLS: no (isolated port-5434 test DB and npm test/build only)
+REAL DAEMON STARTED: no
+PAPER ORDERS: no
+LIVE ORDERS: no
+TEST DB: port 5434 only
+MULTI-SYMBOL ENABLED: no
+BUNDLE 5 STARTED: no
+BROKER ADAPTER CHANGED: no
+ORDER SUBMISSION CHANGED: no
+STRATEGY CHANGED: no
+RISK LIMITS CHANGED: no
+```
+
+```text
+BUNDLE 3:
+CLOSURE IMPLEMENTATION COMPLETE —
+AWAITING FINAL CHATGPT AND OPERATOR ACCEPTANCE
+(unchanged by this repair)
+
+B4-0: ACCEPTED — COMPLETE
+B4-A: ACCEPTED — COMPLETE
+
+B4-B:
+FINAL REPAIR IMPLEMENTATION COMPLETE —
+AWAITING CHATGPT AND OPERATOR ACCEPTANCE
+
+B4-C:
+FINAL REPAIR IMPLEMENTATION COMPLETE —
+AWAITING CHATGPT AND OPERATOR ACCEPTANCE
+
+B4-D:
+FINAL REPAIR IMPLEMENTATION COMPLETE —
+AWAITING CHATGPT AND OPERATOR ACCEPTANCE
+
+B4-E:
+FINAL REPAIR IMPLEMENTATION COMPLETE —
+AWAITING CHATGPT AND OPERATOR ACCEPTANCE
+
+B4-F:
+FINAL REPAIR IMPLEMENTATION COMPLETE —
+AWAITING CHATGPT AND OPERATOR ACCEPTANCE
+
+B4-G:
+FINAL REPAIR IMPLEMENTATION COMPLETE —
+AWAITING CHATGPT AND OPERATOR ACCEPTANCE
+
+BUNDLE 4:
+CLOSURE IMPLEMENTATION COMPLETE —
+AWAITING FINAL CHATGPT AND OPERATOR ACCEPTANCE
+
+BUNDLE 5: NOT STARTED
+MULTI-SYMBOL AUTONOMOUS: NOT ENABLED
+UNATTENDED 10–20-SESSION SOAK: NOT STARTED
+LIVE CAPITAL: NOT READY
+```
+
+Bundle 4 is **not** marked accepted or closed in the repository by this
+patch.

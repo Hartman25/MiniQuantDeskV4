@@ -19,10 +19,18 @@
 //! ledger's `Fill` entries (not tracked as a separate running total inside
 //! `mqk-portfolio` itself).
 
+use std::collections::BTreeMap;
+
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
 
+/// Legacy single-mismatch reason prefix, retained only as a doc/historical
+/// reference — [`replay_paper_portfolio_accounting`] now emits one of the
+/// bidirectional reason codes below (`broker_position_missing_fill_history`,
+/// `fill_history_position_missing_at_broker`, `position_quantity_mismatch`,
+/// `broker_position_quantity_unparseable`, `duplicate_broker_position_symbol`).
+#[allow(dead_code)]
 pub(crate) const ACCOUNTING_EPOCH_INCOMPLETE_REASON_PREFIX: &str =
     "pre_existing_position_no_matching_fill_history";
 
@@ -36,17 +44,62 @@ pub(crate) struct PaperAccountingReplay {
     pub accounting_epoch_reason: Option<String>,
 }
 
-/// Replays `run_id`'s durable fill history and cross-checks it against
-/// `broker_positions` (the authoritative, currently-known broker position
-/// truth for this run — callers should pass the same positions from the
-/// broker snapshot they just accepted).
+/// Groups raw broker positions by symbol, parses quantities, and reports
+/// every validation failure as a deterministic bounded reason code instead
+/// of silently skipping it. A symbol that appears more than once in
+/// `broker_positions` (whether or not the repeated rows agree) is itself an
+/// anomaly and is reported as `duplicate_broker_position_symbol` rather than
+/// merged or de-duplicated silently.
 ///
-/// Any nonzero broker position whose FIFO-replayed net quantity does not
-/// exactly match is flagged `incomplete`: the fill history known to this
-/// run does not fully explain that position (most commonly, a pre-existing
-/// broker position adopted before any fill in this run's `oms_inbox`
-/// history). This function never fabricates a synthetic opening fill to
-/// force a match — an incomplete epoch is reported truthfully instead.
+/// Returns `(symbol -> nonzero signed qty, sorted blocker reason codes)`.
+fn normalize_broker_positions(
+    broker_positions: &[mqk_schemas::BrokerPosition],
+) -> (BTreeMap<String, i64>, Vec<String>) {
+    let mut by_symbol: BTreeMap<String, Vec<Option<i64>>> = BTreeMap::new();
+    for bp in broker_positions {
+        let symbol = bp.symbol.trim();
+        if symbol.is_empty() {
+            continue;
+        }
+        let parsed = super::snapshot::parse_signed_qty(&bp.qty);
+        by_symbol
+            .entry(symbol.to_string())
+            .or_default()
+            .push(parsed);
+    }
+
+    let mut qty_by_symbol = BTreeMap::new();
+    let mut blockers = Vec::new();
+    for (symbol, parses) in by_symbol {
+        if parses.len() > 1 {
+            blockers.push(format!("duplicate_broker_position_symbol:{symbol}"));
+            continue;
+        }
+        match parses[0] {
+            None => blockers.push(format!("broker_position_quantity_unparseable:{symbol}")),
+            Some(0) => {}
+            Some(qty) => {
+                qty_by_symbol.insert(symbol, qty);
+            }
+        }
+    }
+    (qty_by_symbol, blockers)
+}
+
+/// Replays `run_id`'s durable fill history and cross-checks it, in both
+/// directions, against `broker_positions` (the authoritative, currently-known
+/// broker position truth for this run — callers should pass the same
+/// positions from the broker snapshot they just accepted).
+///
+/// Bidirectional completeness (B4 closure repair): the prior implementation
+/// only checked "does every nonzero broker position have a matching
+/// fill-derived quantity", which silently accepted a fill-derived nonzero
+/// position that the broker snapshot no longer reports. Both directions are
+/// now checked, plus broker-side data-quality failures (unparseable
+/// quantity, duplicate/conflicting symbol) that must never be silently
+/// skipped past. This function never fabricates a synthetic opening fill to
+/// force a match — an incomplete epoch (with every detected reason code,
+/// sorted deterministically) is reported truthfully instead.
 pub(crate) async fn replay_paper_portfolio_accounting(
     pool: &PgPool,
     run_id: Uuid,
@@ -70,28 +123,50 @@ pub(crate) async fn replay_paper_portfolio_accounting(
         })
         .sum();
 
+    let (broker_qty_by_symbol, mut blockers) = normalize_broker_positions(broker_positions);
+
+    let replay_qty_by_symbol: BTreeMap<String, i64> = portfolio
+        .positions
+        .iter()
+        .filter_map(|(symbol, pos)| {
+            let net: i64 = pos.lots.iter().map(|lot| lot.qty_signed).sum();
+            if net == 0 {
+                None
+            } else {
+                Some((symbol.clone(), net))
+            }
+        })
+        .collect();
+
+    let all_symbols: std::collections::BTreeSet<&String> = broker_qty_by_symbol
+        .keys()
+        .chain(replay_qty_by_symbol.keys())
+        .collect();
+    for symbol in all_symbols {
+        match (
+            broker_qty_by_symbol.get(symbol),
+            replay_qty_by_symbol.get(symbol),
+        ) {
+            (Some(_), None) => {
+                blockers.push(format!("broker_position_missing_fill_history:{symbol}"));
+            }
+            (None, Some(_)) => {
+                blockers.push(format!("fill_history_position_missing_at_broker:{symbol}"));
+            }
+            (Some(broker_qty), Some(replay_qty)) if broker_qty != replay_qty => {
+                blockers.push(format!("position_quantity_mismatch:{symbol}"));
+            }
+            _ => {}
+        }
+    }
+    blockers.sort();
+    blockers.dedup();
+
     let mut accounting_epoch = "complete";
     let mut accounting_epoch_reason = None;
-    for bp in broker_positions {
-        let Some(broker_qty_signed) = super::snapshot::parse_signed_qty(&bp.qty) else {
-            continue;
-        };
-        if broker_qty_signed == 0 {
-            continue;
-        }
-        let ledger_qty_signed: i64 = portfolio
-            .positions
-            .get(&bp.symbol)
-            .map(|p| p.lots.iter().map(|lot| lot.qty_signed).sum())
-            .unwrap_or(0);
-        if ledger_qty_signed != broker_qty_signed {
-            accounting_epoch = "incomplete";
-            accounting_epoch_reason = Some(format!(
-                "{ACCOUNTING_EPOCH_INCOMPLETE_REASON_PREFIX}:{}:broker_qty={broker_qty_signed}:fill_history_derived_qty={ledger_qty_signed}",
-                bp.symbol
-            ));
-            break;
-        }
+    if !blockers.is_empty() {
+        accounting_epoch = "incomplete";
+        accounting_epoch_reason = Some(blockers.join(";"));
     }
 
     Ok(PaperAccountingReplay {
@@ -109,12 +184,18 @@ pub(crate) async fn replay_paper_portfolio_accounting(
 /// is (Paper + Alpaca only). Every failure mode is logged and swallowed —
 /// this is additive truth on top of whatever in-memory/durable snapshot
 /// truth already exists, never a gate for it.
+///
+/// `source_snapshot_id` must be a *confirmed* durable snapshot id (from
+/// [`super::snapshot::ExternalSnapshotPersistOutcome::Confirmed`]) — every
+/// call site is required to gate on that confirmation before calling this
+/// function (B4 closure repair, Repair C).
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn refresh_paper_portfolio_accounting_state_best_effort(
     db: Option<PgPool>,
     deployment_mode: super::types::DeploymentMode,
     broker_kind: Option<super::types::BrokerKind>,
     run_id: Uuid,
+    source_snapshot_id: Uuid,
     broker_positions: Vec<mqk_schemas::BrokerPosition>,
     occurred_at_utc: DateTime<Utc>,
 ) {
@@ -148,6 +229,7 @@ pub(crate) async fn refresh_paper_portfolio_accounting_state_best_effort(
             accounting_epoch: replay.accounting_epoch.to_string(),
             accounting_epoch_reason: replay.accounting_epoch_reason,
             updated_at_utc: occurred_at_utc,
+            source_snapshot_id,
         },
     )
     .await;
@@ -155,12 +237,19 @@ pub(crate) async fn refresh_paper_portfolio_accounting_state_best_effort(
     match result {
         Ok(mqk_db::UpsertPaperPortfolioAccountingStateOutcome::Inserted { .. })
         | Ok(mqk_db::UpsertPaperPortfolioAccountingStateOutcome::Updated { .. })
+        | Ok(mqk_db::UpsertPaperPortfolioAccountingStateOutcome::UpdatedForSnapshot { .. })
         | Ok(mqk_db::UpsertPaperPortfolioAccountingStateOutcome::AlreadyCurrent { .. }) => {}
         Ok(mqk_db::UpsertPaperPortfolioAccountingStateOutcome::Rejected { detail, .. }) => {
             // Should not happen in normal operation (the watermark only ever
             // advances) -- a stale-replay bug would surface here, so this is
             // a warning, not a silent drop.
             tracing::warn!(detail = %detail, "durable_paper_portfolio_accounting_watermark_rejected");
+        }
+        Ok(mqk_db::UpsertPaperPortfolioAccountingStateOutcome::Conflict { detail, .. }) => {
+            // Same watermark, same snapshot, but different fill-derived
+            // values -- nondeterministic replay or corruption. Never
+            // overwritten; surfaced as a warning for operator diagnosis.
+            tracing::warn!(detail = %detail, "durable_paper_portfolio_accounting_conflict");
         }
         Err(err) => {
             tracing::warn!(error = %err, "durable_paper_portfolio_accounting_persist_failed");

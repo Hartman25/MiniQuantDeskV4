@@ -106,3 +106,39 @@ deterministic `run_id`/`snapshot_id` derived from its own test name).
 - `cargo fmt --check` on the two new files: no diff.
 - Zero provider/broker/network calls anywhere in this patch.
 - No production wiring — `mqk-daemon` is untouched by this patch.
+
+## FINAL-RUN-SCOPING-ACCOUNTING-AND-CLOSURE-REPAIR addendum
+
+Patch ID: `DURABLE-PAPER-PORTFOLIO-AND-PNL-01-FINAL-RUN-SCOPING-ACCOUNTING-AND-CLOSURE-REPAIR`
+
+Two additive changes on top of this phase's original schema/store, closing
+gaps found in the Bundle 4 final closure review:
+
+- `fetch_latest_paper_portfolio_snapshot_for_run(pool, deployment_mode,
+  source, run_id)` — the run-scoped counterpart of
+  `fetch_latest_paper_portfolio_snapshot`. `WHERE ... AND run_id = $3`
+  means a snapshot whose `run_id` is `NULL` can never satisfy a run-scoped
+  query, and a different run's newer snapshot can never be returned in its
+  place. The global function is unchanged and still used by the
+  `durable-snapshots` history route, which is explicitly not run-scoped.
+- Migration `0054_paper_portfolio_accounting_snapshot_provenance.sql`
+  (additive, does not modify `0053`) adds nullable
+  `source_snapshot_id uuid REFERENCES sys_paper_portfolio_snapshots(snapshot_id)`
+  to `sys_paper_portfolio_accounting_state`, so a durable accounting row
+  can be traced back to the exact confirmed snapshot whose positions
+  produced its `accounting_epoch`. `UpsertPaperPortfolioAccountingStateArgs`
+  now requires a `source_snapshot_id`; `UpsertPaperPortfolioAccountingStateOutcome`
+  gained `UpdatedForSnapshot` (same watermark, same fill-derived values, new
+  snapshot — only snapshot-dependent fields advance) and `Conflict` (same
+  watermark, differing fill-derived values — fail closed, zero writes) to
+  replace the prior "same watermark is always `AlreadyCurrent`, no content
+  comparison" behavior, which could leave a stale `accounting_epoch`/reason
+  in place after a new broker snapshot arrived with no new inbox row.
+
+New tests in `scenario_paper_portfolio_store_01.rs`:
+`run_scoped_snapshot_never_crosses_runs` (cross-run isolation + null-run_id
+exclusion + no-snapshot-for-run resolves `None`) and an extended
+`accounting_state_watermark_idempotency_and_ordering` proving the full
+same-watermark matrix (`AlreadyCurrent` / `Conflict` / `UpdatedForSnapshot`
+/ `Updated` / `Rejected`). All 15 tests in the file pass against the
+port-5434 test DB, `--test-threads=1`.

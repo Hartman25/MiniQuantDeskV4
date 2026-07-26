@@ -204,6 +204,7 @@ const FALLBACK_MODEL: SystemModel = {
     accounting_truth_state: "unavailable",
     accounting_epoch: null,
     accounting_epoch_reason: null,
+    accounting_source_snapshot_id: null,
     last_applied_inbox_id: null,
     realized_pnl: null,
     realized_pnl_truth_state: "unavailable",

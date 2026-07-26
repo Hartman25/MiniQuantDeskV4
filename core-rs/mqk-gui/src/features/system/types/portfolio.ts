@@ -113,6 +113,7 @@ export interface DurablePortfolioSummary {
   accounting_truth_state: string;
   accounting_epoch: string | null;
   accounting_epoch_reason: string | null;
+  accounting_source_snapshot_id: string | null;
   last_applied_inbox_id: number | null;
   realized_pnl: number | null;
   realized_pnl_truth_state: string;

@@ -701,6 +701,15 @@ and no live-capital, multi-symbol, or unattended-soak change anywhere in Bundle 
 B4-G are each implementation complete, awaiting final ChatGPT and operator acceptance — Bundle 4 is
 not marked accepted or closed in this repository.**
 
+The Bundle 4 final closure review found six correctness/closure defects (run-scoping,
+same-watermark accounting staleness, unconfirmed-snapshot accounting, one-directional completeness,
+leaked/collapsed API errors, and a Bundle-3-guard live canary) which
+`DURABLE-PAPER-PORTFOLIO-AND-PNL-01-FINAL-RUN-SCOPING-ACCOUNTING-AND-CLOSURE-REPAIR` closes in one
+commit (see `MiniQuantDesk_Master_Patch_Ledger_v2.md` and the per-phase spec addenda under
+`docs/specs/durable_paper_portfolio_and_pnl_01*.md`). B4-B through B4-G are now **final repair
+implementation complete, awaiting ChatGPT and operator acceptance**; Bundle 4 remains not accepted
+or closed.
+
 ### Operational meaning
 
 Final ChatGPT and operator acceptance of Bundle 3, followed by Bundle 4 (durable paper portfolio

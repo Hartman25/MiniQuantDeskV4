@@ -109,3 +109,28 @@ to the completed-bar-driver scenario.
 - `cargo test -p mqk-daemon --test scenario_autonomous_completed_bar_driver_01`: still 56/56 (regression check — this patch touches `orchestrator_build.rs`/`loop_runner.rs`, which that scenario exercises indirectly via the same module tree).
 - `cargo test -p mqk-daemon --test scenario_paper_daily_pnl_baseline_01`: still 11/11 (existing daily-P&L baseline untouched).
 - `cargo test -p mqk-daemon --test scenario_paper_order_lifecycle_visibility_01`: still 5/5 passing, 8 ignored (unchanged).
+
+## FINAL-RUN-SCOPING-ACCOUNTING-AND-CLOSURE-REPAIR addendum
+
+Patch ID: `DURABLE-PAPER-PORTFOLIO-AND-PNL-01-FINAL-RUN-SCOPING-ACCOUNTING-AND-CLOSURE-REPAIR`
+
+`persist_external_broker_snapshot_best_effort` now returns a typed
+`ExternalSnapshotPersistOutcome` (`Confirmed { snapshot_id, newly_inserted }`
+/ `SkippedUnsupported` / `Unavailable` / `Conflict` / `DatabaseFailure` /
+`InvalidSnapshot`) instead of `()`. `accept_external_broker_snapshot` calls
+the accounting refresh (B4-D) only when the persist outcome is `Confirmed`,
+passing its `snapshot_id` through as the accounting row's provenance —
+closing the gap where a best-effort persistence failure or conflict could
+previously still trigger an accounting refresh with no confirmed snapshot
+backing it. The same gating was applied to the one call site that could not
+await the persist call directly (`orchestrator_build.rs`'s
+`terminal_fill_expiry_refresher`, a spawned `tokio::spawn` task) — the prior
+version of that closure only spawned the persist half and never chained the
+accounting refresh at all.
+
+Verification: `cargo test -p mqk-daemon --test
+scenario_durable_paper_portfolio_snapshot_persistence_01 -- --include-ignored
+--test-threads=1`: 9/9 pass, unchanged. `cargo clippy -p mqk-db -p mqk-daemon
+--tests -- -D warnings`: clean on every file this repair touched (one
+pre-existing `large_enum_variant` lint on the new `RunResolution` type,
+introduced and then fixed in the same patch by boxing the `Found` variant).

@@ -30,6 +30,7 @@ use axum::{
 use serde::Deserialize;
 use uuid::Uuid;
 
+use super::durable_portfolio::{resolve_run, RunResolution, QUERY_FAILED_MESSAGE};
 use crate::api_types::{
     PaperLifecycleInboxRow, PaperLifecycleNoTradeDiagnosticRow, PaperLifecycleOutboxRow,
     PaperLifecycleResponse, PaperLifecycleRunRow, PaperLifecycleSignalEvaluationRow,
@@ -103,42 +104,43 @@ pub(crate) async fn execution_paper_lifecycle(
 
     // Resolve the target run: explicit run_id takes priority, else the
     // latest durable PAPER run for this engine (never in-memory state).
-    let resolved_run = if let Some(run_id) = explicit_run_id {
-        mqk_db::fetch_run(db, run_id).await.ok()
-    } else {
-        match mqk_db::fetch_latest_run_for_engine(db, DAEMON_ENGINE_ID, PAPER_MODE).await {
-            Ok(row) => row,
-            Err(e) => {
-                return (
-                    StatusCode::SERVICE_UNAVAILABLE,
-                    Json(serde_json::json!({
-                        "error": "run_lookup_failed",
-                        "detail": format!("{e:#}"),
-                    })),
-                )
-                    .into_response();
-            }
+    // Shares `resolve_run`/`RunResolution` with the durable-portfolio
+    // routes so an explicit-run DB failure is distinguished from a genuine
+    // not_found here too (B4 closure repair, Defect 5) instead of the two
+    // collapsing to the same `SERVICE_UNAVAILABLE`/`not_found` outcomes the
+    // prior `.ok()` conversion produced.
+    let run = match resolve_run(db, explicit_run_id).await {
+        RunResolution::Found(r) => *r,
+        RunResolution::QueryFailed => {
+            return (
+                StatusCode::OK,
+                Json(empty_response(
+                    "query_failed",
+                    explicit_run_id.map(|id| id.to_string()),
+                    vec![QUERY_FAILED_MESSAGE.to_string()],
+                )),
+            )
+                .into_response();
         }
-    };
-
-    let Some(run) = resolved_run else {
-        let truth_state = if explicit_run_id.is_some() {
-            "not_found"
-        } else {
-            "no_rows"
-        };
-        return (
-            StatusCode::OK,
-            Json(empty_response(
-                truth_state,
-                explicit_run_id.map(|id| id.to_string()),
-                vec![match explicit_run_id {
-                    Some(id) => format!("no run found for run_id={id}"),
-                    None => format!("no {PAPER_MODE} run exists for engine={DAEMON_ENGINE_ID}"),
-                }],
-            )),
-        )
-            .into_response();
+        RunResolution::NotFound => {
+            let truth_state = if explicit_run_id.is_some() {
+                "not_found"
+            } else {
+                "no_rows"
+            };
+            return (
+                StatusCode::OK,
+                Json(empty_response(
+                    truth_state,
+                    explicit_run_id.map(|id| id.to_string()),
+                    vec![match explicit_run_id {
+                        Some(id) => format!("no run found for run_id={id}"),
+                        None => format!("no {PAPER_MODE} run exists for engine={DAEMON_ENGINE_ID}"),
+                    }],
+                )),
+            )
+                .into_response();
+        }
     };
 
     let run_id = run.run_id;
@@ -175,28 +177,44 @@ pub(crate) async fn execution_paper_lifecycle(
     // instead of the prior hardcoded "in_memory_only_not_restart_surviving".
     // This route only ever reads these tables -- it never triggers a
     // snapshot persist or accounting replay itself.
-    let durable_snapshot = mqk_db::fetch_latest_paper_portfolio_snapshot(
-        db,
-        "paper",
-        mqk_db::PAPER_PORTFOLIO_SNAPSHOT_SOURCE_EXTERNAL_ALPACA,
-    )
-    .await
-    .ok()
-    .flatten();
-    let durable_accounting = mqk_db::fetch_paper_portfolio_accounting_state(db, run_id)
-        .await
-        .ok()
-        .flatten();
-
-    let portfolio_truth_state = if durable_snapshot.is_some() {
-        "active"
+    //
+    // Run-scoped (B4 closure repair, Repair G): a non-PAPER-mode run can
+    // never surface active durable portfolio/P&L truth, and the snapshot
+    // lookup is scoped to exactly this run_id so a newer snapshot belonging
+    // to a different run can never be attributed here. A query failure is
+    // surfaced as `query_failed`, never silently collapsed into
+    // `snapshot_unavailable`/`not_found`.
+    let (portfolio_truth_state, pnl_truth_state, durable_accounting) = if run.mode != PAPER_MODE {
+        ("unsupported_source", "unsupported_source", None)
     } else {
-        "snapshot_unavailable"
-    };
-    let pnl_truth_state = match durable_accounting.as_ref() {
-        Some(a) if a.accounting_epoch == "incomplete" => "fill_history_incomplete",
-        Some(_) => "active",
-        None => "not_found",
+        let snapshot_result = mqk_db::fetch_latest_paper_portfolio_snapshot_for_run(
+            db,
+            "paper",
+            mqk_db::PAPER_PORTFOLIO_SNAPSHOT_SOURCE_EXTERNAL_ALPACA,
+            run_id,
+        )
+        .await;
+        let accounting_result = mqk_db::fetch_paper_portfolio_accounting_state(db, run_id).await;
+
+        let portfolio_state = match &snapshot_result {
+            Ok(Some(_)) => "active",
+            Ok(None) => "snapshot_unavailable",
+            Err(err) => {
+                tracing::warn!(error = %err, run_id = %run_id, "paper_lifecycle_snapshot_query_failed");
+                "query_failed"
+            }
+        };
+        let accounting = accounting_result.as_ref().ok().and_then(|a| a.clone());
+        let pnl_state = match &accounting_result {
+            Err(err) => {
+                tracing::warn!(error = %err, run_id = %run_id, "paper_lifecycle_accounting_query_failed");
+                "query_failed"
+            }
+            Ok(Some(a)) if a.accounting_epoch == "incomplete" => "fill_history_incomplete",
+            Ok(Some(_)) => "active",
+            Ok(None) => "not_found",
+        };
+        (portfolio_state, pnl_state, accounting)
     };
 
     let signal_count = signal_rows.len();
@@ -490,7 +508,10 @@ mod tests {
 
     fn accounting_row(epoch: &str) -> mqk_db::PaperPortfolioAccountingStateRecord {
         mqk_db::PaperPortfolioAccountingStateRecord {
-            run_id: Uuid::new_v5(&Uuid::NAMESPACE_DNS, b"test.paper-lifecycle.v1|accounting_row"),
+            run_id: Uuid::new_v5(
+                &Uuid::NAMESPACE_DNS,
+                b"test.paper-lifecycle.v1|accounting_row",
+            ),
             cash_micros: 0,
             realized_pnl_micros: 0,
             fees_micros: 0,
@@ -498,6 +519,10 @@ mod tests {
             accounting_epoch: epoch.to_string(),
             accounting_epoch_reason: None,
             updated_at_utc: Utc.with_ymd_and_hms(2099, 1, 1, 0, 0, 0).unwrap(),
+            source_snapshot_id: Some(Uuid::new_v5(
+                &Uuid::NAMESPACE_DNS,
+                b"test.paper-lifecycle.v1|accounting_row.snapshot",
+            )),
         }
     }
 
