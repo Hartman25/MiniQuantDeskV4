@@ -82,6 +82,7 @@ pub mod paper_portfolio;
 pub mod reconcile_state;
 pub mod restart_intent;
 pub mod runs;
+pub mod runtime_opportunity_allocation;
 pub mod strategy;
 pub mod strategy_promotion;
 
@@ -103,6 +104,9 @@ pub use paper_portfolio::*;
 pub use reconcile_state::*;
 pub use restart_intent::*;
 pub use runs::*;
+// RUNTIME-OPPORTUNITY-ALLOCATION-01 Phase G: durable allocation-cycle
+// evidence store (never portfolio/P&L/order truth).
+pub use runtime_opportunity_allocation::*;
 pub use strategy::*;
 pub use strategy_promotion::*;
 

@@ -310,6 +310,110 @@ pub fn apply_runtime_opportunity_allocation(
 }
 
 // ---------------------------------------------------------------------------
+// Phase G: durable evidence persistence (best-effort, never blocks the tick)
+// ---------------------------------------------------------------------------
+
+fn disposition_str(d: AllocationDisposition) -> &'static str {
+    match d {
+        AllocationDisposition::Allowed => "allowed",
+        AllocationDisposition::ClampedDown => "clamped_down",
+        AllocationDisposition::RefusedNoCapital => "refused_no_capital",
+        AllocationDisposition::RefusedFailClosed => "refused_fail_closed",
+    }
+}
+
+fn plan_to_new_db_plan(
+    plan: &AllocationCycleResult,
+    mode: RuntimeOpportunityAllocationMode,
+) -> Option<mqk_db::NewRuntimeOpportunityAllocationPlan> {
+    let plan_id = plan.context.cycle_id.parse::<Uuid>().ok()?;
+    let run_id = plan.context.run_id.parse::<Uuid>().ok()?;
+    let source_snapshot_id = plan.context.source_snapshot_id.parse::<Uuid>().ok();
+
+    let allowed_count = plan
+        .candidates
+        .iter()
+        .filter(|c| {
+            matches!(
+                c.disposition,
+                AllocationDisposition::Allowed | AllocationDisposition::ClampedDown
+            )
+        })
+        .count() as i32;
+
+    let candidates = plan
+        .candidates
+        .iter()
+        .enumerate()
+        .map(|(i, c)| mqk_db::NewRuntimeOpportunityAllocationCandidate {
+            ordinal: i as i32,
+            symbol: c.symbol.clone(),
+            strategy_id: c.strategy_id.clone(),
+            input_score_micros: mqk_db::scale_to_micros(c.input_score),
+            target_weight_micros: mqk_db::scale_to_micros(c.target_weight),
+            current_qty: c.current_qty,
+            strategy_target_qty: c.strategy_target_qty,
+            allocation_target_qty: c.allocation_target_qty,
+            final_target_qty: c.final_target_qty,
+            disposition: disposition_str(c.disposition).to_string(),
+            reason_code: c.reason_code.clone(),
+            evaluation_price_micros: c.evaluation_price_micros,
+        })
+        .collect();
+
+    Some(mqk_db::NewRuntimeOpportunityAllocationPlan {
+        plan_id,
+        cycle_id: plan_id,
+        run_id,
+        mode: mode.as_str().to_string(),
+        opportunity_artifact_id: plan.context.opportunity_artifact_id.clone(),
+        source_snapshot_id,
+        equity_micros: plan.context.equity_micros,
+        candidate_count: plan.candidates.len() as i32,
+        allowed_count,
+        gross_weight_micros: mqk_db::scale_to_micros(plan.gross_weight),
+        net_weight_micros: mqk_db::scale_to_micros(plan.net_weight),
+        truth_state: plan.truth_state.clone(),
+        blockers: plan.blockers.clone(),
+        created_at_utc: Utc::now(),
+        candidates,
+    })
+}
+
+/// Persist `plan` (when present) to durable evidence. Best-effort: a
+/// persistence failure is logged and otherwise ignored — this is evidence,
+/// not authoritative order/portfolio truth, and must never block or fail
+/// the tick that produced it. Never called for `mode == Off` (no plan
+/// exists in that case).
+async fn persist_plan_if_present(
+    state_arc: &Arc<AppState>,
+    plan: &Option<AllocationCycleResult>,
+    mode: RuntimeOpportunityAllocationMode,
+) {
+    let Some(plan) = plan else { return };
+    let Some(db) = state_arc.db.as_ref() else {
+        return;
+    };
+    let Some(new_plan) = plan_to_new_db_plan(plan, mode) else {
+        tracing::warn!(
+            cycle_id = %plan.context.cycle_id,
+            "runtime_opportunity_allocation_plan_persist_skipped: cycle_id/run_id not a valid UUID"
+        );
+        return;
+    };
+    match mqk_db::insert_runtime_opportunity_allocation_plan(db, new_plan).await {
+        Ok(_) => {}
+        Err(err) => {
+            tracing::warn!(
+                cycle_id = %plan.context.cycle_id,
+                error = %err,
+                "runtime_opportunity_allocation_plan_persist_failed"
+            );
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // I/O glue — the only impure code in this module
 // ---------------------------------------------------------------------------
 
@@ -476,7 +580,9 @@ pub async fn gather_and_apply(
         opportunity_set,
         active_snapshot,
     };
-    apply_runtime_opportunity_allocation(&ctx, decisions, current_positions, &prices)
+    let outcome = apply_runtime_opportunity_allocation(&ctx, decisions, current_positions, &prices);
+    persist_plan_if_present(state_arc, &outcome.plan, eff.effective_mode).await;
+    outcome
 }
 
 #[cfg(test)]
@@ -764,5 +870,69 @@ mod tests {
         let id1 = compute_cycle_id(run_id(), 42, &["AAPL".to_string(), "MSFT".to_string()]);
         let id2 = compute_cycle_id(run_id(), 42, &["MSFT".to_string(), "AAPL".to_string()]);
         assert_eq!(id1, id2);
+    }
+
+    // ── Phase G: plan -> durable-row conversion ───────────────────────────────
+
+    #[test]
+    fn disposition_str_covers_every_variant() {
+        assert_eq!(disposition_str(AllocationDisposition::Allowed), "allowed");
+        assert_eq!(
+            disposition_str(AllocationDisposition::ClampedDown),
+            "clamped_down"
+        );
+        assert_eq!(
+            disposition_str(AllocationDisposition::RefusedNoCapital),
+            "refused_no_capital"
+        );
+        assert_eq!(
+            disposition_str(AllocationDisposition::RefusedFailClosed),
+            "refused_fail_closed"
+        );
+    }
+
+    #[test]
+    fn plan_to_new_db_plan_converts_valid_plan() {
+        let mut current = BTreeMap::new();
+        current.insert("AAPL".to_string(), 0i64);
+        let mut prices = BTreeMap::new();
+        prices.insert("AAPL".to_string(), 100_000_000i64);
+        let decisions = vec![buy("AAPL", "intraday_scalper", 10)];
+        let out = apply_runtime_opportunity_allocation(
+            &base_ctx(RuntimeOpportunityAllocationMode::Shadow),
+            decisions,
+            &current,
+            &prices,
+        );
+        let plan = out.plan.unwrap();
+        let db_plan = plan_to_new_db_plan(&plan, RuntimeOpportunityAllocationMode::Shadow).unwrap();
+        assert_eq!(db_plan.mode, "shadow");
+        assert_eq!(db_plan.plan_id, db_plan.cycle_id);
+        assert_eq!(db_plan.run_id, run_id());
+        assert_eq!(db_plan.candidates.len(), 1);
+        assert_eq!(db_plan.candidates[0].symbol, "AAPL");
+        assert_eq!(db_plan.candidates[0].input_score_micros, 900_000);
+    }
+
+    #[test]
+    fn plan_to_new_db_plan_none_when_cycle_id_not_a_uuid() {
+        let context = AllocationCycleContext {
+            cycle_id: "not-a-uuid".to_string(),
+            run_id: run_id().to_string(),
+            market_date: "2026-07-26".to_string(),
+            timeframe: "5m".to_string(),
+            opportunity_artifact_id: "artifact-1".to_string(),
+            source_snapshot_id: "snap-1".to_string(),
+            equity_micros: 1,
+        };
+        let plan = AllocationCycleResult {
+            context,
+            candidates: vec![],
+            gross_weight: 0.0,
+            net_weight: 0.0,
+            truth_state: "computed".to_string(),
+            blockers: vec![],
+        };
+        assert!(plan_to_new_db_plan(&plan, RuntimeOpportunityAllocationMode::Shadow).is_none());
     }
 }

@@ -338,6 +338,12 @@
       "path": "0054_paper_portfolio_accounting_snapshot_provenance.sql",
       "status": "applied",
       "intent": "DURABLE-PAPER-PORTFOLIO-AND-PNL-01-FINAL-RUN-SCOPING-ACCOUNTING-AND-CLOSURE-REPAIR: add nullable source_snapshot_id (self-referencing FK to sys_paper_portfolio_snapshots.snapshot_id) to sys_paper_portfolio_accounting_state, additive, does not modify 0053. Ties a durable accounting row to the exact broker snapshot whose positions were used to compute its accounting_epoch/accounting_epoch_reason, closing the cross-run/cross-snapshot provenance gap found in the Bundle 4 final closure review. Legacy rows round-trip source_snapshot_id as null (never backfilled/fabricated); a null value means completeness cannot be traced to a specific snapshot and must not be reported as fully proven active truth."
+    },
+    {
+      "id": "0055",
+      "path": "0055_runtime_opportunity_allocation_plans.sql",
+      "status": "applied",
+      "intent": "RUNTIME-OPPORTUNITY-ALLOCATION-01 Phase G: add sys_runtime_opportunity_allocation_plans (one durable row per allocation cycle, plan_id = the deterministic cycle_id, written only in shadow/paper_enforced mode -- the default off mode never writes here) and sys_runtime_opportunity_allocation_candidates (child rows, one per new/increasing-buy candidate considered; sell/reduce/exit/flatten decisions never appear here). Allocation evidence only -- never portfolio/P&L/order truth; equity_micros/source_snapshot_id are copied from the already-durable sys_paper_portfolio_snapshots row the cycle read, not a second NAV source. Scores/weights stored as scaled integers (x1,000,000), no binary float column. Additive only, does not modify any existing table. No DEFAULT now()/gen_random_uuid() -- every timestamp and identity is caller-supplied."
     }
   ]
 }

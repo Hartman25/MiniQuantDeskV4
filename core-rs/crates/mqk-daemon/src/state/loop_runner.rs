@@ -1039,12 +1039,10 @@ pub(super) fn spawn_execution_loop(
                                 &current_positions,
                             )
                             .await;
-                        // TODO(RUNTIME-OPPORTUNITY-ALLOCATION-01 Phase G):
-                        // persist allocation_outcome.plan to durable evidence
-                        // tables when Some. Not yet wired — shadow/enforced
-                        // evidence is currently operator-invisible until
-                        // Phase G/H land.
-                        let _ = &allocation_outcome.plan;
+                        // RUNTIME-OPPORTUNITY-ALLOCATION-01 Phase G: the plan
+                        // (when Some) is already persisted as durable
+                        // evidence inside gather_and_apply, best-effort —
+                        // nothing further to do with it here.
 
                         for decision in allocation_outcome.decisions {
                             // MULTI-SYMBOL-CAPITAL-CAPS-01 cap #6: relocated
