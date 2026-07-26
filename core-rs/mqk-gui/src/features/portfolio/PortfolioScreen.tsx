@@ -251,11 +251,25 @@ function DurablePortfolioSection({
             <div><span>Run</span><strong>{durable.run_id ?? <span className="val-unavailable">Unavailable</span>}</strong></div>
             <div><span>Accounting source snapshot</span><strong>{durable.accounting_source_snapshot_id ?? <span className="val-unavailable">Unavailable</span>}</strong></div>
             <div><span>Accounting completeness</span><strong>
-              {durable.accounting_epoch == null
-                ? <span className="val-unavailable">Unavailable</span>
-                : durable.accounting_epoch === "complete"
-                  ? <span className="val-ok">Complete</span>
-                  : <span className="val-critical">Incomplete</span>}
+              {(() => {
+                // B4 closure repair (Phase C): gate the displayed label on
+                // the authoritative accounting_truth_state, never the raw
+                // accounting_epoch string alone -- a stale accounting row
+                // (accounting_snapshot_mismatch) can carry
+                // accounting_epoch === "complete" from when it WAS current,
+                // and showing "Complete" for that would fabricate truth the
+                // server has already flagged as unproven.
+                switch (durable.accounting_truth_state) {
+                  case "active":
+                    return <span className="val-ok">Complete</span>;
+                  case "fill_history_incomplete":
+                    return <span className="val-critical">Incomplete</span>;
+                  case "accounting_snapshot_mismatch":
+                    return <span className="val-critical">Stale (snapshot mismatch)</span>;
+                  default:
+                    return <span className="val-unavailable">Unavailable</span>;
+                }
+              })()}
             </strong></div>
             <div><span>Realized PnL</span><strong>{formatDurableMoney(durable.realized_pnl)}</strong></div>
             <div><span>Unrealized PnL</span><strong>{formatDurableMoney(durable.unrealized_pnl)}</strong></div>

@@ -1,7 +1,8 @@
 // core-rs/mqk-gui/src/features/system/durablePortfolio.test.ts
 //
-// DURABLE-PAPER-PORTFOLIO-AND-PNL closure repair (Repair H): proof tests for
-// the durable-portfolio runtime validators/fail-closed sentinels.
+// DURABLE-PAPER-PORTFOLIO-AND-PNL closure repair (Repair H, hardened by the
+// B4-FINAL-COHERENCE-AND-ACCEPTANCE-PROOF Phase C): proof tests for the
+// durable-portfolio runtime validators/fail-closed sentinels.
 
 import test from "node:test";
 import assert from "node:assert/strict";
@@ -86,6 +87,30 @@ test("parseDurablePortfolioSummary fails closed on an unrecognized accounting_tr
   assert.equal(parsed.truth_state, "db_unavailable");
 });
 
+test("parseDurablePortfolioSummary accepts the Phase B accounting_snapshot_mismatch state", () => {
+  const parsed = parseDurablePortfolioSummary(
+    validSummaryRaw({
+      accounting_truth_state: "accounting_snapshot_mismatch",
+      accounting_source_snapshot_id: "snap-0-stale",
+      realized_pnl: null,
+      realized_pnl_truth_state: "accounting_snapshot_mismatch",
+      blockers: ["accounting row's source snapshot does not match the currently selected durable snapshot"],
+    }),
+  );
+  assert.equal(parsed.accounting_truth_state, "accounting_snapshot_mismatch");
+  assert.equal(parsed.realized_pnl, null);
+});
+
+test("parseDurablePortfolioSummary fails closed on an unrecognized unrealized_pnl_truth_state", () => {
+  const parsed = parseDurablePortfolioSummary(validSummaryRaw({ unrealized_pnl_truth_state: "made_up" }));
+  assert.equal(parsed.truth_state, "db_unavailable");
+});
+
+test("parseDurablePortfolioSummary fails closed on an unrecognized daily_pnl_truth_state", () => {
+  const parsed = parseDurablePortfolioSummary(validSummaryRaw({ daily_pnl_truth_state: "made_up" }));
+  assert.equal(parsed.truth_state, "db_unavailable");
+});
+
 test("parseDurablePortfolioSummary preserves null vs. zero distinction", () => {
   const withZero = parseDurablePortfolioSummary(validSummaryRaw({ realized_pnl: 0 }));
   assert.equal(withZero.realized_pnl, 0);
@@ -115,12 +140,103 @@ test("parseDurablePortfolioSummary preserves query_failed", () => {
       snapshot_truth_state: "query_failed",
       accounting_truth_state: "query_failed",
       realized_pnl_truth_state: "query_failed",
-      unrealized_pnl_truth_state: "query_failed",
-      daily_pnl_truth_state: "query_failed",
+      unrealized_pnl_truth_state: "db_unavailable",
+      daily_pnl_truth_state: "db_unavailable",
       blockers: ["a durable portfolio query failed"],
     }),
   );
   assert.equal(parsed.truth_state, "query_failed");
+});
+
+// ---------------------------------------------------------------------------
+// Numeric validation
+// ---------------------------------------------------------------------------
+
+for (const badValue of [Number.NaN, Number.POSITIVE_INFINITY, Number.NEGATIVE_INFINITY]) {
+  test(`parseDurablePortfolioSummary fails closed on realized_pnl = ${String(badValue)}`, () => {
+    const parsed = parseDurablePortfolioSummary(validSummaryRaw({ realized_pnl: badValue }));
+    assert.equal(parsed.truth_state, "db_unavailable");
+  });
+
+  test(`parseDurablePortfolioSummary fails closed on account_equity = ${String(badValue)}`, () => {
+    const parsed = parseDurablePortfolioSummary(validSummaryRaw({ account_equity: badValue }));
+    assert.equal(parsed.truth_state, "db_unavailable");
+  });
+}
+
+test("parseDurablePortfolioSummary fails closed on a numeric string in place of a number", () => {
+  const parsed = parseDurablePortfolioSummary(validSummaryRaw({ realized_pnl: "40" }));
+  assert.equal(parsed.truth_state, "db_unavailable");
+});
+
+test("parseDurablePortfolioSummary fails closed on a fractional last_applied_inbox_id", () => {
+  const parsed = parseDurablePortfolioSummary(validSummaryRaw({ last_applied_inbox_id: 3.5 }));
+  assert.equal(parsed.truth_state, "db_unavailable");
+});
+
+test("parseDurablePortfolioSummary fails closed on a negative last_applied_inbox_id", () => {
+  const parsed = parseDurablePortfolioSummary(validSummaryRaw({ last_applied_inbox_id: -1 }));
+  assert.equal(parsed.truth_state, "db_unavailable");
+});
+
+test("parseDurablePortfolioSummary fails closed on an unsafe (identity-losing) last_applied_inbox_id", () => {
+  const parsed = parseDurablePortfolioSummary(
+    validSummaryRaw({ last_applied_inbox_id: Number.MAX_SAFE_INTEGER + 10 }),
+  );
+  assert.equal(parsed.truth_state, "db_unavailable");
+});
+
+test("parseDurablePortfolioSummary accepts a null last_applied_inbox_id", () => {
+  const parsed = parseDurablePortfolioSummary(
+    validSummaryRaw({
+      accounting_truth_state: "not_found",
+      accounting_epoch: null,
+      accounting_source_snapshot_id: null,
+      last_applied_inbox_id: null,
+      realized_pnl: null,
+      realized_pnl_truth_state: "not_found",
+    }),
+  );
+  assert.equal(parsed.last_applied_inbox_id, null);
+});
+
+// ---------------------------------------------------------------------------
+// C3 state invariants
+// ---------------------------------------------------------------------------
+
+test("parseDurablePortfolioSummary rejects an active response missing snapshot_id", () => {
+  const parsed = parseDurablePortfolioSummary(validSummaryRaw({ snapshot_id: null }));
+  assert.equal(parsed.truth_state, "db_unavailable");
+});
+
+test("parseDurablePortfolioSummary rejects an active response with a non-external_alpaca source", () => {
+  const parsed = parseDurablePortfolioSummary(validSummaryRaw({ source: "synthetic_diagnostic" }));
+  assert.equal(parsed.truth_state, "db_unavailable");
+});
+
+test("parseDurablePortfolioSummary rejects an active response with a non-USD currency", () => {
+  const parsed = parseDurablePortfolioSummary(validSummaryRaw({ currency: "EUR" }));
+  assert.equal(parsed.truth_state, "db_unavailable");
+});
+
+test("parseDurablePortfolioSummary rejects active accounting truth whose source snapshot does not match the selected snapshot", () => {
+  const parsed = parseDurablePortfolioSummary(
+    validSummaryRaw({ accounting_source_snapshot_id: "snap-stale", realized_pnl: 40 }),
+  );
+  assert.equal(parsed.truth_state, "db_unavailable");
+});
+
+test("parseDurablePortfolioSummary rejects active accounting truth with a null accounting_epoch", () => {
+  const parsed = parseDurablePortfolioSummary(validSummaryRaw({ accounting_epoch: "incomplete" }));
+  assert.equal(parsed.truth_state, "db_unavailable");
+});
+
+test("parseDurablePortfolioSummary accepts a coherent snapshot_stale response", () => {
+  const parsed = parseDurablePortfolioSummary(
+    validSummaryRaw({ truth_state: "snapshot_stale", snapshot_truth_state: "snapshot_stale" }),
+  );
+  assert.equal(parsed.snapshot_truth_state, "snapshot_stale");
+  assert.equal(parsed.snapshot_id, "snap-1");
 });
 
 // ---------------------------------------------------------------------------
@@ -142,8 +258,47 @@ test("parseDurablePortfolioPositions fails closed on a malformed row", () => {
   assert.deepEqual(parsed.positions, []);
 });
 
+test("parseDurablePortfolioPositions fails closed on a fractional qty_signed", () => {
+  const parsed = parseDurablePortfolioPositions(
+    validPositionsRaw({
+      positions: [{ symbol: "AAPL", qty_signed: 10.5, avg_entry_price: 150, provenance: "external_alpaca" }],
+    }),
+  );
+  assert.equal(parsed.truth_state, "db_unavailable");
+});
+
+test("parseDurablePortfolioPositions fails closed on an unsafe qty_signed", () => {
+  const parsed = parseDurablePortfolioPositions(
+    validPositionsRaw({
+      positions: [
+        {
+          symbol: "AAPL",
+          qty_signed: Number.MAX_SAFE_INTEGER + 10,
+          avg_entry_price: 150,
+          provenance: "external_alpaca",
+        },
+      ],
+    }),
+  );
+  assert.equal(parsed.truth_state, "db_unavailable");
+});
+
+test("parseDurablePortfolioPositions fails closed on a non-finite avg_entry_price", () => {
+  const parsed = parseDurablePortfolioPositions(
+    validPositionsRaw({
+      positions: [{ symbol: "AAPL", qty_signed: 10, avg_entry_price: Number.NaN, provenance: "external_alpaca" }],
+    }),
+  );
+  assert.equal(parsed.truth_state, "db_unavailable");
+});
+
 test("parseDurablePortfolioPositions fails closed on an unrecognized truth_state", () => {
   const parsed = parseDurablePortfolioPositions(validPositionsRaw({ truth_state: "fabricated" }));
+  assert.equal(parsed.truth_state, "db_unavailable");
+});
+
+test("parseDurablePortfolioPositions rejects an active response missing run_id", () => {
+  const parsed = parseDurablePortfolioPositions(validPositionsRaw({ run_id: null }));
   assert.equal(parsed.truth_state, "db_unavailable");
 });
 
@@ -168,8 +323,35 @@ test("parseDurablePortfolioSnapshots fails closed on malformed rows", () => {
   assert.equal(parsed.truth_state, "db_unavailable");
 });
 
+test("parseDurablePortfolioSnapshots fails closed on an unrecognized wrapper truth_state", () => {
+  const parsed = parseDurablePortfolioSnapshots({ truth_state: "fabricated", snapshots: [] });
+  assert.equal(parsed.truth_state, "db_unavailable");
+});
+
+test("parseDurablePortfolioSnapshots fails closed on an unrecognized per-row truth_state", () => {
+  const raw = {
+    truth_state: "active",
+    snapshots: [
+      { snapshot_id: "s1", captured_at_utc: "t1", deployment_mode: "paper", source: "external_alpaca", equity: 1, cash: 1, currency: "USD", truth_state: "fabricated", run_id: null, operation_id: null },
+    ],
+  };
+  const parsed = parseDurablePortfolioSnapshots(raw);
+  assert.equal(parsed.truth_state, "db_unavailable");
+});
+
+test("parseDurablePortfolioSnapshots fails closed on a non-finite equity in a row", () => {
+  const raw = {
+    truth_state: "active",
+    snapshots: [
+      { snapshot_id: "s1", captured_at_utc: "t1", deployment_mode: "paper", source: "external_alpaca", equity: Number.POSITIVE_INFINITY, cash: 1, currency: "USD", truth_state: "active", run_id: null, operation_id: null },
+    ],
+  };
+  const parsed = parseDurablePortfolioSnapshots(raw);
+  assert.equal(parsed.truth_state, "db_unavailable");
+});
+
 // ---------------------------------------------------------------------------
-// Cross-response run-scoping
+// Cross-response run/snapshot-scoping
 // ---------------------------------------------------------------------------
 
 test("enforceRunScopeConsistency rejects positions naming a different run than an active summary", () => {
@@ -180,21 +362,44 @@ test("enforceRunScopeConsistency rejects positions naming a different run than a
   assert.deepEqual(result.positions, []);
 });
 
-test("enforceRunScopeConsistency passes through matching run_ids", () => {
-  const summary = parseDurablePortfolioSummary(validSummaryRaw({ run_id: "run-a" }));
-  const positions = parseDurablePortfolioPositions(validPositionsRaw({ run_id: "run-a" }));
+test("enforceRunScopeConsistency rejects positions naming the same run but a different snapshot than an active summary", () => {
+  const summary = parseDurablePortfolioSummary(validSummaryRaw({ run_id: "run-a", snapshot_id: "snap-1" }));
+  const positions = parseDurablePortfolioPositions(
+    validPositionsRaw({ run_id: "run-a", snapshot_id: "snap-2" }),
+  );
+  const result = enforceRunScopeConsistency(summary, positions);
+  assert.equal(result.truth_state, "query_failed");
+  assert.deepEqual(result.positions, []);
+});
+
+test("enforceRunScopeConsistency passes through matching run_id and snapshot_id", () => {
+  const summary = parseDurablePortfolioSummary(validSummaryRaw({ run_id: "run-a", snapshot_id: "snap-1" }));
+  const positions = parseDurablePortfolioPositions(
+    validPositionsRaw({ run_id: "run-a", snapshot_id: "snap-1" }),
+  );
   const result = enforceRunScopeConsistency(summary, positions);
   assert.equal(result.truth_state, "active");
   assert.equal(result.positions.length, 1);
 });
 
 test("enforceRunScopeConsistency does not reject when either side is not active", () => {
-  const summary = parseDurablePortfolioSummary(validSummaryRaw({ run_id: "run-a", truth_state: "snapshot_stale" }));
+  const summary = parseDurablePortfolioSummary(validSummaryRaw({ run_id: "run-a", truth_state: "unsupported_source", snapshot_truth_state: "unsupported_source" }));
   const positions = parseDurablePortfolioPositions(validPositionsRaw({ run_id: "run-b" }));
   const result = enforceRunScopeConsistency(summary, positions);
-  // Not both "active", so the mismatch guard does not fire -- positions
-  // pass through unchanged (the summary side is already flagged stale).
+  // Not both "active"/"snapshot_stale", so the mismatch guard does not fire
+  // -- positions pass through unchanged.
   assert.deepEqual(result, positions);
+});
+
+test("enforceRunScopeConsistency treats snapshot_stale as authoritative on both sides", () => {
+  const summary = parseDurablePortfolioSummary(
+    validSummaryRaw({ truth_state: "snapshot_stale", snapshot_truth_state: "snapshot_stale", run_id: "run-a", snapshot_id: "snap-1" }),
+  );
+  const positions = parseDurablePortfolioPositions(
+    validPositionsRaw({ truth_state: "snapshot_stale", run_id: "run-a", snapshot_id: "snap-2" }),
+  );
+  const result = enforceRunScopeConsistency(summary, positions);
+  assert.equal(result.truth_state, "query_failed", "a snapshot mismatch must fail closed even when both sides are merely stale, not fully active");
 });
 
 test("unavailableDurablePortfolioPositions sentinel has null run_id and empty rows", () => {
