@@ -666,44 +666,24 @@ pub(super) fn spawn_execution_loop(
                             state_arc.max_new_orders_per_tick().await;
                         let mut new_orders_this_tick: u32 = 0;
 
+                        // RUNTIME-OPPORTUNITY-ALLOCATION-01 Phase F: decisions
+                        // are now collected across every symbol in this tick
+                        // before any of them are submitted, so Bundle 5's
+                        // opportunity allocator can run once over the whole
+                        // same-cycle candidate set. Cap #6
+                        // (max_new_orders_per_tick) necessarily moves with the
+                        // submission step below (it counts *accepted*
+                        // decisions, which can only happen at submission
+                        // time) — see runtime_opportunity_allocation.rs's
+                        // module docs for why this is unavoidable and why the
+                        // cap's effect (same running count, same order, same
+                        // "max_new_orders_per_tick_reached" reason) is
+                        // unchanged.
+                        let mut all_decisions: Vec<crate::decision::InternalStrategyDecision> =
+                            Vec::new();
+
                         for (assignment, mut bar_result) in dispatch_results {
                             let strategy_id = bar_result.spec.name.clone();
-                            // MULTI-SYMBOL-CAPITAL-CAPS-01 cap #6: once the
-                            // per-tick new-order cap is reached, remaining
-                            // symbols in this tick (artifact order, design doc
-                            // §5 Q4) are skipped entirely — re-evaluated fresh
-                            // next tick from then-current bar/position state
-                            // (no queuing mechanism needed).
-                            if AppState::max_new_orders_per_tick_reason(
-                                new_orders_this_tick,
-                                max_new_orders_per_tick_cap,
-                            )
-                            .is_some()
-                            {
-                                let no_order_reason = "max_new_orders_per_tick_reached";
-                                tracing::warn!(
-                                    run_id = %run_id,
-                                    symbol = %assignment.symbol,
-                                    new_orders_this_tick,
-                                    cap = ?max_new_orders_per_tick_cap,
-                                    no_order_reason,
-                                    "b1c_symbol_skipped_max_new_orders_per_tick: per-tick \
-                                     new-order cap reached; symbol's decisions skipped \
-                                     this tick, re-evaluated next tick"
-                                );
-                                let current =
-                                    current_positions.get(&assignment.symbol).copied().unwrap_or(0);
-                                state_arc
-                                    .record_per_symbol_target_state(build_per_symbol_target_state(
-                                        assignment.symbol.clone(),
-                                        assignment.strategy_id.clone(),
-                                        current,
-                                        current,
-                                        no_order_reason,
-                                    ))
-                                    .await;
-                                continue;
-                            }
 
                             // MULTI-SYMBOL-DISPATCH-LOOP-01 fail-closed symbol guard:
                             // the native strategy bootstrap's StrategyHost emits
@@ -1027,70 +1007,147 @@ pub(super) fn spawn_execution_loop(
                                      check b1c_position_delta_diagnostic for no_order_reason)"
                                 );
                             }
-                            for decision in decisions {
-                                let did = decision.decision_id.clone();
-                                let sid = decision.strategy_id.clone();
-                                let decision_symbol = decision.symbol.clone();
-                                let decision_side = decision.side.clone();
-                                let decision_qty = decision.qty;
-                                let outcome = crate::decision::submit_internal_strategy_decision(
-                                    &state_arc,
-                                    decision,
-                                )
-                                .await;
-                                let mut target_state = state_arc
-                                    .per_symbol_target_state_for_symbol(&decision_symbol)
-                                    .await
-                                    .unwrap_or_else(|| {
-                                        let current = current_positions
-                                            .get(&decision_symbol)
-                                            .copied()
-                                            .unwrap_or(0);
-                                        let target = match decision_side
-                                            .trim()
-                                            .to_ascii_lowercase()
-                                            .as_str()
-                                        {
-                                            "sell" => current - decision_qty,
-                                            _ => current + decision_qty,
-                                        };
-                                        build_per_symbol_target_state(
-                                            decision_symbol.clone(),
-                                            sid.clone(),
-                                            current,
-                                            target,
-                                            "order_will_be_submitted",
-                                        )
-                                    });
-                                target_state.last_decision_id = Some(did.clone());
-                                target_state.last_decision_disposition =
-                                    Some(outcome.disposition.clone());
-                                target_state.updated_at_utc = Utc::now().to_rfc3339();
+                            // RUNTIME-OPPORTUNITY-ALLOCATION-01 Phase F:
+                            // collect this symbol's decisions rather than
+                            // submitting them immediately — the whole tick's
+                            // decisions are batched below so the opportunity
+                            // allocator sees every same-cycle candidate at
+                            // once (one call per tick, never one call per
+                            // symbol).
+                            all_decisions.extend(decisions);
+                        }
+
+                        // RUNTIME-OPPORTUNITY-ALLOCATION-01 Phase F: one
+                        // allocation call for this tick's whole batch. When
+                        // MQK_RUNTIME_OPPORTUNITY_ALLOCATION_MODE=off (the
+                        // default) or there are no buy-side decisions this
+                        // tick, this is a zero-cost passthrough — no I/O, no
+                        // allocator call, `all_decisions` returned unchanged.
+                        let market_date_today = Utc::now().format("%Y-%m-%d").to_string();
+                        let dispatch_timeframe = multi_symbol_assignments
+                            .first()
+                            .map(|a| a.timeframe.clone())
+                            .unwrap_or_default();
+                        let allocation_outcome =
+                            crate::runtime_opportunity_allocation::gather_and_apply(
+                                &state_arc,
+                                run_id,
+                                now_micros,
+                                market_date_today,
+                                dispatch_timeframe,
+                                all_decisions,
+                                &current_positions,
+                            )
+                            .await;
+                        // TODO(RUNTIME-OPPORTUNITY-ALLOCATION-01 Phase G):
+                        // persist allocation_outcome.plan to durable evidence
+                        // tables when Some. Not yet wired — shadow/enforced
+                        // evidence is currently operator-invisible until
+                        // Phase G/H land.
+                        let _ = &allocation_outcome.plan;
+
+                        for decision in allocation_outcome.decisions {
+                            // MULTI-SYMBOL-CAPITAL-CAPS-01 cap #6: relocated
+                            // here (submission time) because it counts
+                            // *accepted* decisions — see this file's
+                            // "Phase F" comment above the `all_decisions`
+                            // declaration for why. Same running count, same
+                            // dispatch order, same reason string as before.
+                            if AppState::max_new_orders_per_tick_reason(
+                                new_orders_this_tick,
+                                max_new_orders_per_tick_cap,
+                            )
+                            .is_some()
+                            {
+                                let no_order_reason = "max_new_orders_per_tick_reached";
+                                tracing::warn!(
+                                    run_id = %run_id,
+                                    symbol = %decision.symbol,
+                                    new_orders_this_tick,
+                                    cap = ?max_new_orders_per_tick_cap,
+                                    no_order_reason,
+                                    "b1c_symbol_skipped_max_new_orders_per_tick: per-tick \
+                                     new-order cap reached; decision skipped this tick, \
+                                     re-evaluated next tick"
+                                );
+                                let current = current_positions
+                                    .get(&decision.symbol)
+                                    .copied()
+                                    .unwrap_or(0);
                                 state_arc
-                                    .record_per_symbol_target_state(target_state)
+                                    .record_per_symbol_target_state(build_per_symbol_target_state(
+                                        decision.symbol.clone(),
+                                        decision.strategy_id.clone(),
+                                        current,
+                                        current,
+                                        no_order_reason,
+                                    ))
                                     .await;
-                                if outcome.accepted {
-                                    // MULTI-SYMBOL-CAPITAL-CAPS-01 cap #6:
-                                    // count this accepted decision toward
-                                    // the per-tick new-order cap so later
-                                    // symbols in this tick's iteration order
-                                    // can be skipped once the cap is reached.
-                                    new_orders_this_tick += 1;
-                                    tracing::info!(
-                                        run_id = %run_id,
-                                        decision_id = %did,
-                                        strategy_id = %sid,
-                                        "b1c_native_decision_accepted"
-                                    );
-                                } else {
-                                    tracing::warn!(
-                                        run_id = %run_id,
-                                        decision_id = %did,
-                                        strategy_id = %sid,
-                                        disposition = %outcome.disposition,
-                                        "b1c_native_decision_not_accepted"
-                                    );
-                                }
+                                continue;
+                            }
+
+                            let did = decision.decision_id.clone();
+                            let sid = decision.strategy_id.clone();
+                            let decision_symbol = decision.symbol.clone();
+                            let decision_side = decision.side.clone();
+                            let decision_qty = decision.qty;
+                            let outcome = crate::decision::submit_internal_strategy_decision(
+                                &state_arc,
+                                decision,
+                            )
+                            .await;
+                            let mut target_state = state_arc
+                                .per_symbol_target_state_for_symbol(&decision_symbol)
+                                .await
+                                .unwrap_or_else(|| {
+                                    let current = current_positions
+                                        .get(&decision_symbol)
+                                        .copied()
+                                        .unwrap_or(0);
+                                    let target = match decision_side
+                                        .trim()
+                                        .to_ascii_lowercase()
+                                        .as_str()
+                                    {
+                                        "sell" => current - decision_qty,
+                                        _ => current + decision_qty,
+                                    };
+                                    build_per_symbol_target_state(
+                                        decision_symbol.clone(),
+                                        sid.clone(),
+                                        current,
+                                        target,
+                                        "order_will_be_submitted",
+                                    )
+                                });
+                            target_state.last_decision_id = Some(did.clone());
+                            target_state.last_decision_disposition =
+                                Some(outcome.disposition.clone());
+                            target_state.updated_at_utc = Utc::now().to_rfc3339();
+                            state_arc
+                                .record_per_symbol_target_state(target_state)
+                                .await;
+                            if outcome.accepted {
+                                // MULTI-SYMBOL-CAPITAL-CAPS-01 cap #6: count
+                                // this accepted decision toward the per-tick
+                                // new-order cap so later decisions in this
+                                // tick's dispatch order can be skipped once
+                                // the cap is reached.
+                                new_orders_this_tick += 1;
+                                tracing::info!(
+                                    run_id = %run_id,
+                                    decision_id = %did,
+                                    strategy_id = %sid,
+                                    "b1c_native_decision_accepted"
+                                );
+                            } else {
+                                tracing::warn!(
+                                    run_id = %run_id,
+                                    decision_id = %did,
+                                    strategy_id = %sid,
+                                    disposition = %outcome.disposition,
+                                    "b1c_native_decision_not_accepted"
+                                );
                             }
                         }
                     }

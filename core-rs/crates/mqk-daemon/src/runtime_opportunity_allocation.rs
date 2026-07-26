@@ -9,19 +9,40 @@
 //! wires into `state/loop_runner.rs`, replacing "submit each symbol's
 //! decisions as soon as they're derived" with "collect every symbol's
 //! decisions for this tick, then submit" — everything else in the existing
-//! per-symbol loop (caps #2/#4/#6, per-symbol target-state recording,
-//! Discord alerts, dry-run diagnostics) is untouched.
+//! per-symbol loop (caps #2/#4, per-symbol target-state recording, Discord
+//! alerts, dry-run diagnostics) is untouched.
 //!
-//! I/O-free itself: prices, current positions, the loaded opportunity
-//! artifact, and the active durable snapshot are all supplied by the caller.
+//! One exception: cap #6 (`max_new_orders_per_tick`) counts *accepted*
+//! submissions, which can only happen at submission time — so it necessarily
+//! moves from "skip the rest of this symbol's dispatch before deriving
+//! decisions" (its old position, mid-derivation) to "skip the rest of this
+//! tick's decisions before submitting" (its new position, after allocation
+//! narrowing, in the same dispatch order). This does not change the cap's
+//! effect (same running accepted-count, same order, same
+//! `"max_new_orders_per_tick_reached"` reason) — it only changes *when* in
+//! the pipeline the check runs, which Bundle 5's "collect the whole cycle
+//! before submitting" requirement makes unavoidable. See Phase F docs
+//! (docs/specs/runtime_opportunity_allocation_01c_shadow_runtime.md).
+//!
+//! `apply_runtime_opportunity_allocation` itself is I/O-free — prices,
+//! current positions, the loaded opportunity artifact, and the active
+//! durable snapshot are all supplied by the caller. [`gather_and_apply`] is
+//! the thin, I/O-performing glue `loop_runner.rs` actually calls once per
+//! tick; it resolves the effective mode (with the live-lock), loads the
+//! watchlist/opportunity artifacts, resolves the active durable snapshot,
+//! fetches evaluation prices for buy-candidate symbols only, and delegates
+//! to the pure function above.
 
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
+use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
 use crate::decision::InternalStrategyDecision;
 use crate::runtime_opportunity_artifact::LoadedRuntimeOpportunitySet;
 use crate::runtime_opportunity_mode::RuntimeOpportunityAllocationMode;
+use crate::state::AppState;
 use mqk_portfolio::{
     compute_allocation_cycle, AllocationCandidateInput, AllocationCycleContext,
     AllocationCycleResult, AllocationDisposition,
@@ -286,6 +307,176 @@ pub fn apply_runtime_opportunity_allocation(
         decisions: other_decisions,
         plan: Some(plan),
     }
+}
+
+// ---------------------------------------------------------------------------
+// I/O glue — the only impure code in this module
+// ---------------------------------------------------------------------------
+
+/// Mirrors `routes/durable_portfolio.rs::DURABLE_SNAPSHOT_STALE_SECS`
+/// (private to that module). Duplicated rather than exposed cross-module to
+/// avoid touching Bundle 4's route file for a Bundle 5 concern; keep these
+/// two constants in sync if the staleness threshold is ever revisited.
+const DURABLE_SNAPSHOT_STALE_SECS_MIRROR: i64 = 180;
+
+fn load_watchlist_and_raw_json() -> Option<(
+    crate::watchlist_intake::LoadedWatchlistArtifact,
+    serde_json::Value,
+)> {
+    let outcome = crate::watchlist_intake::evaluate_watchlist_intake_from_env();
+    if !outcome.approved_for_autonomous_paper() {
+        return None;
+    }
+    let artifact = outcome.artifact()?.clone();
+    let raw_path = std::env::var(crate::watchlist_intake::ENV_PAPER_WATCHLIST_PATH).ok()?;
+    let contents = std::fs::read_to_string(raw_path).ok()?;
+    let json: serde_json::Value = serde_json::from_str(&contents).ok()?;
+    Some((artifact, json))
+}
+
+async fn resolve_active_snapshot(
+    pool: &sqlx::PgPool,
+    run_id: Uuid,
+    now: DateTime<Utc>,
+) -> Option<ActiveSnapshotFacts> {
+    let snap = mqk_db::fetch_latest_paper_portfolio_snapshot_for_run(
+        pool,
+        "paper",
+        mqk_db::PAPER_PORTFOLIO_SNAPSHOT_SOURCE_EXTERNAL_ALPACA,
+        run_id,
+    )
+    .await
+    .ok()??;
+    let rec = &snap.snapshot;
+    if rec.truth_state != "active" || rec.currency != "USD" {
+        return None;
+    }
+    let age_secs = (now - rec.captured_at_utc).num_seconds();
+    if age_secs > DURABLE_SNAPSHOT_STALE_SECS_MIRROR {
+        return None;
+    }
+    Some(ActiveSnapshotFacts {
+        snapshot_id: rec.snapshot_id.to_string(),
+        equity_micros: rec.equity_micros,
+    })
+}
+
+/// Fetch the latest completed-bar close price for each of `symbols`, using
+/// the same read-only DB call the existing dry-run diagnostics path already
+/// uses (`fetch_recent_completed_bars_for_strategy`). A symbol with no
+/// completed bar simply has no entry — the pure cycle model treats an
+/// absent price as "no price available" and fails closed for that candidate
+/// only.
+async fn fetch_prices_for_symbols(
+    pool: &sqlx::PgPool,
+    symbols: &[String],
+    timeframe: &str,
+) -> BTreeMap<String, i64> {
+    let mut out = BTreeMap::new();
+    for symbol in symbols {
+        if let Ok(bars) =
+            mqk_db::fetch_recent_completed_bars_for_strategy(pool, symbol, timeframe, 1).await
+        {
+            if let Some(latest) = bars.last() {
+                out.insert(symbol.clone(), latest.close_micros);
+            }
+        }
+    }
+    out
+}
+
+/// The single per-tick call site `loop_runner.rs` uses. Resolves the
+/// effective mode (env + live-lock), gathers every I/O-sourced fact the pure
+/// [`apply_runtime_opportunity_allocation`] needs, and delegates to it.
+///
+/// When the effective mode is `Off`, returns `decisions` untouched and skips
+/// every I/O call below — the default configuration has zero additional
+/// runtime cost.
+pub async fn gather_and_apply(
+    state_arc: &Arc<AppState>,
+    run_id: Uuid,
+    now_micros: i64,
+    market_date: String,
+    timeframe: String,
+    decisions: Vec<InternalStrategyDecision>,
+    current_positions: &BTreeMap<String, i64>,
+) -> RuntimeOpportunityAllocationOutcome {
+    let resolution =
+        crate::runtime_opportunity_mode::resolve_runtime_opportunity_allocation_mode_from_env();
+    let broker_kind = crate::state::BrokerKind::parse(state_arc.adapter_id());
+    let eff = crate::runtime_opportunity_mode::effective_mode(
+        &resolution,
+        state_arc.deployment_mode(),
+        broker_kind,
+    );
+
+    if eff.effective_mode == RuntimeOpportunityAllocationMode::Off {
+        return RuntimeOpportunityAllocationOutcome {
+            decisions,
+            plan: None,
+        };
+    }
+
+    let runtime_ceiling = crate::watchlist_intake::MULTI_SYMBOL_HARD_CEILING as usize;
+
+    let Some(db) = state_arc.db.as_ref() else {
+        let ctx = RuntimeOpportunityAllocationContext {
+            mode: eff.effective_mode,
+            run_id,
+            market_date,
+            timeframe,
+            now_micros,
+            runtime_ceiling,
+            opportunity_set: None,
+            active_snapshot: None,
+        };
+        return apply_runtime_opportunity_allocation(
+            &ctx,
+            decisions,
+            current_positions,
+            &BTreeMap::new(),
+        );
+    };
+
+    let now_utc = Utc::now();
+    let watchlist_bundle = load_watchlist_and_raw_json();
+    let opportunity_set: Option<LoadedRuntimeOpportunitySet> = match &watchlist_bundle {
+        Some((wl, wl_json)) => {
+            let outcome =
+                crate::runtime_opportunity_artifact::evaluate_runtime_opportunity_intake_from_env(
+                    wl,
+                    wl_json,
+                    now_utc,
+                    &market_date,
+                );
+            outcome.artifact().cloned()
+        }
+        None => None,
+    };
+    let active_snapshot = resolve_active_snapshot(db, run_id, now_utc).await;
+
+    let buy_symbols: Vec<String> = decisions
+        .iter()
+        .filter(|d| d.side.eq_ignore_ascii_case("buy"))
+        .map(|d| d.symbol.clone())
+        .collect();
+    let prices = if buy_symbols.is_empty() {
+        BTreeMap::new()
+    } else {
+        fetch_prices_for_symbols(db, &buy_symbols, &timeframe).await
+    };
+
+    let ctx = RuntimeOpportunityAllocationContext {
+        mode: eff.effective_mode,
+        run_id,
+        market_date,
+        timeframe,
+        now_micros,
+        runtime_ceiling,
+        opportunity_set,
+        active_snapshot,
+    };
+    apply_runtime_opportunity_allocation(&ctx, decisions, current_positions, &prices)
 }
 
 #[cfg(test)]
