@@ -627,8 +627,14 @@ pub(super) fn spawn_execution_loop(
                     // Returns no results on most ticks (no pending bar) and when no
                     // active bootstrap exists — both are fail-closed, not errors.
                     // Shadow-mode results produce no decisions (fail-closed).
+                    // RUNTIME-OPPORTUNITY-ALLOCATION-01 authority repair
+                    // (Phase A): use the bar-facts-carrying dispatch seam so
+                    // each symbol's exact evaluated-bar identity/close is
+                    // available below, without a second DB fetch.
                     let dispatch_results = state_arc
-                        .tick_strategy_dispatch_multi_symbol(&multi_symbol_assignments)
+                        .tick_strategy_dispatch_multi_symbol_with_bar_facts(
+                            &multi_symbol_assignments,
+                        )
                         .await;
                     if !dispatch_results.is_empty() {
                         let now_micros = Utc::now().timestamp_micros(); // allow: loop-context wall-clock for decision_id
@@ -679,10 +685,11 @@ pub(super) fn spawn_execution_loop(
                         // cap's effect (same running count, same order, same
                         // "max_new_orders_per_tick_reached" reason) is
                         // unchanged.
-                        let mut all_decisions: Vec<crate::decision::InternalStrategyDecision> =
-                            Vec::new();
+                        let mut all_decisions: Vec<
+                            crate::runtime_opportunity_allocation::PendingDecisionWithBarFacts,
+                        > = Vec::new();
 
-                        for (assignment, mut bar_result) in dispatch_results {
+                        for (assignment, mut bar_result, bar_facts) in dispatch_results {
                             let strategy_id = bar_result.spec.name.clone();
 
                             // MULTI-SYMBOL-DISPATCH-LOOP-01 fail-closed symbol guard:
@@ -1014,7 +1021,18 @@ pub(super) fn spawn_execution_loop(
                             // allocator sees every same-cycle candidate at
                             // once (one call per tick, never one call per
                             // symbol).
-                            all_decisions.extend(decisions);
+                            //
+                            // Authority repair Phase A: every decision
+                            // derived from this one `bar_result` shares the
+                            // exact same evaluated-bar facts (`bar_facts`) —
+                            // captured once, at dispatch time, above; never
+                            // re-fetched here or later.
+                            all_decisions.extend(decisions.into_iter().map(|decision| {
+                                crate::runtime_opportunity_allocation::PendingDecisionWithBarFacts {
+                                    decision,
+                                    bar_facts: bar_facts.clone(),
+                                }
+                            }));
                         }
 
                         // RUNTIME-OPPORTUNITY-ALLOCATION-01 Phase F: one

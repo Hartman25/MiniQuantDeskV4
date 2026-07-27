@@ -856,6 +856,27 @@ pub struct StrategyBarInput {
     pub qty: i64,
 }
 
+/// RUNTIME-OPPORTUNITY-ALLOCATION-01 authority repair (Phase A — exact
+/// strategy bar authority): the exact immutable completed-bar facts a
+/// strategy's `on_bar` evaluation was actually run against, captured at the
+/// same point the DB bar window is loaded (never re-derived or re-fetched
+/// afterward).
+///
+/// `symbol` / `timeframe` / `strategy_id` identify which dispatch produced
+/// this bar; `bar_end_ts` / `close_micros` are copied verbatim from the last
+/// (most recent) row of the exact `db_bars` window
+/// [`AppState::dispatch_native_strategy_for_symbol_with_loaded_bars_and_facts`]
+/// evaluated the strategy against. Any later-arriving bar in the DB cannot
+/// change these fields — they are a snapshot in time, not a live query.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct EvaluatedBarFacts {
+    pub symbol: String,
+    pub strategy_id: String,
+    pub timeframe: String,
+    pub bar_end_ts: i64,
+    pub close_micros: i64,
+}
+
 /// AUTON-NO-SIGNAL-OBS-01: one durable signal-evaluation journal write
 /// attempt, scoped to a single symbol/timeframe/tick.
 ///
@@ -2367,6 +2388,13 @@ operator_reconcile_or_repair_required"
             .await;
     }
 
+    /// Thin wrapper over
+    /// [`Self::dispatch_native_strategy_for_symbol_with_loaded_bars_and_facts`]
+    /// that discards the exact evaluated-bar facts. Preserves the exact
+    /// pre-repair signature/behavior for the existing single-symbol dispatch
+    /// path and the `_for_test` seams — callers that need the bar facts
+    /// (RUNTIME-OPPORTUNITY-ALLOCATION-01 authority repair, Phase A) use the
+    /// `_and_facts` variant directly instead.
     async fn dispatch_native_strategy_for_symbol_with_loaded_bars(
         &self,
         symbol: &str,
@@ -2375,6 +2403,34 @@ operator_reconcile_or_repair_required"
         db_bars: Vec<mqk_db::MdBarRow>,
         now_ts: i64,
     ) -> Option<mqk_strategy::StrategyBarResult> {
+        self.dispatch_native_strategy_for_symbol_with_loaded_bars_and_facts(
+            symbol,
+            md_timeframe,
+            bar,
+            db_bars,
+            now_ts,
+        )
+        .await
+        .map(|(result, _facts)| result)
+    }
+
+    /// RUNTIME-OPPORTUNITY-ALLOCATION-01 authority repair (Phase A): the one
+    /// canonical DB-backed dispatch implementation. Returns the
+    /// [`EvaluatedBarFacts`] captured from the exact `db_bars` window the
+    /// strategy was evaluated against, alongside the result — never a second,
+    /// independently-derived bar lookup. `Some` only when the strategy
+    /// actually ran against a real (non-empty, non-stale) completed-bar
+    /// window; every early fail-closed return (missing/stale bars) yields
+    /// `None`, matching the pre-repair `dispatch_native_strategy_for_symbol_with_loaded_bars`
+    /// behavior exactly.
+    async fn dispatch_native_strategy_for_symbol_with_loaded_bars_and_facts(
+        &self,
+        symbol: &str,
+        md_timeframe: &str,
+        bar: StrategyBarInput,
+        db_bars: Vec<mqk_db::MdBarRow>,
+        now_ts: i64,
+    ) -> Option<(mqk_strategy::StrategyBarResult, EvaluatedBarFacts)> {
         if db_bars.is_empty() {
             // No completed bars for this symbol/timeframe.
             self.last_bar_context_bars.store(0, Ordering::SeqCst);
@@ -2428,7 +2484,14 @@ operator_reconcile_or_repair_required"
         // MD-STALENESS-PER-TICK-GATE-01: fail-closed per-dispatch-tick
         // staleness gate. `db_bars` is oldest-first, so the last element is the
         // latest completed bar.
-        let latest_end_ts = db_bars.last().map(|b| b.end_ts);
+        //
+        // RUNTIME-OPPORTUNITY-ALLOCATION-01 authority repair (Phase A): this
+        // is also the exact completed bar the strategy below is evaluated
+        // against — `latest_bar_row` is captured once, here, and copied
+        // verbatim into `EvaluatedBarFacts` at the bottom of this function.
+        // Nothing after this point may substitute a different bar.
+        let latest_bar_row = db_bars.last().cloned();
+        let latest_end_ts = latest_bar_row.as_ref().map(|b| b.end_ts);
         let staleness_cap_secs = self
             .per_symbol_bar_staleness_secs_for_timeframe(md_timeframe)
             .await;
@@ -2533,7 +2596,23 @@ operator_reconcile_or_repair_required"
             })
             .await;
         }
-        result
+        // RUNTIME-OPPORTUNITY-ALLOCATION-01 authority repair (Phase A): pair
+        // the result with the exact bar it was evaluated against. `expect`
+        // is safe here — `latest_bar_row` is `Some` whenever this line is
+        // reached (the only `None` case, `db_bars.is_empty()`, already
+        // returned above), so this can never panic in practice.
+        result.map(|bar_result| {
+            let bar_row = latest_bar_row
+                .expect("latest_bar_row is Some whenever db_bars was non-empty (checked above)");
+            let facts = EvaluatedBarFacts {
+                symbol: symbol.to_string(),
+                strategy_id: bar_result.spec.name.clone(),
+                timeframe: md_timeframe.to_string(),
+                bar_end_ts: bar_row.end_ts,
+                close_micros: bar_row.close_micros,
+            };
+            (bar_result, facts)
+        })
     }
 
     /// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D4-EVALUATION-LINEAGE-AND-
@@ -2704,6 +2783,25 @@ operator_reconcile_or_repair_required"
         timeframe: &str,
         bar: StrategyBarInput,
     ) -> Option<mqk_strategy::StrategyBarResult> {
+        self.dispatch_native_strategy_for_symbol_with_bar_and_facts(symbol, timeframe, bar)
+            .await
+            .map(|(result, _facts)| result)
+    }
+
+    /// RUNTIME-OPPORTUNITY-ALLOCATION-01 authority repair (Phase A): the one
+    /// canonical implementation [`Self::dispatch_native_strategy_for_symbol_with_bar`]
+    /// delegates to. Returns `Some((_, Some(facts)))` only on the DB-backed
+    /// completed-bar path; the single-stub fallback (no DB pool, unset
+    /// symbol/timeframe, or a DB read failure) has no real completed bar to
+    /// bind a price to, so it returns `Some((_, None))` — callers must treat
+    /// `None` facts the same as a missing bar for allocation-sizing purposes
+    /// (fail closed for new/increasing buys only; sells are unaffected).
+    async fn dispatch_native_strategy_for_symbol_with_bar_and_facts(
+        &self,
+        symbol: &str,
+        timeframe: &str,
+        bar: StrategyBarInput,
+    ) -> Option<(mqk_strategy::StrategyBarResult, Option<EvaluatedBarFacts>)> {
         // AUTON-SIGNAL-CONTEXT-01: attempt DB-backed context window.
         let symbol = symbol.trim();
         let md_timeframe = timeframe.trim();
@@ -2719,14 +2817,15 @@ operator_reconcile_or_repair_required"
             {
                 Ok(db_bars) => {
                     return self
-                        .dispatch_native_strategy_for_symbol_with_loaded_bars(
+                        .dispatch_native_strategy_for_symbol_with_loaded_bars_and_facts(
                             symbol,
                             md_timeframe,
                             bar,
                             db_bars,
                             Utc::now().timestamp(),
                         )
-                        .await;
+                        .await
+                        .map(|(result, facts)| (result, Some(facts)));
                 }
                 Err(e) => {
                     self.last_bar_context_bars.store(0, Ordering::SeqCst);
@@ -2772,6 +2871,7 @@ operator_reconcile_or_repair_required"
             bar.qty,
         )
         .await
+        .map(|result| (result, None))
     }
 
     /// PER-SYMBOL-BAR-WINDOW-01: symbol/timeframe-parameterized extraction of
@@ -2950,6 +3050,47 @@ operator_reconcile_or_repair_required"
                 .await
             {
                 results.push((assignment.clone(), bar_result));
+            }
+        }
+        results
+    }
+
+    /// RUNTIME-OPPORTUNITY-ALLOCATION-01 authority repair (Phase A): the
+    /// production execution-loop dispatch seam. Identical dispatch order,
+    /// bar-input handling, and per-symbol semantics to
+    /// [`Self::tick_strategy_dispatch_multi_symbol`] — same single `.take()`
+    /// of the pending bar input, same per-assignment loop, same "only `Some`
+    /// results collected" filtering — but additionally carries each result's
+    /// exact [`EvaluatedBarFacts`] (or `None` on the single-stub fallback
+    /// path) so the caller can bind a same-cycle allocation decision to the
+    /// exact bar its strategy evaluation used, without a second DB fetch.
+    /// `loop_runner.rs`'s execution loop calls this instead of
+    /// `tick_strategy_dispatch_multi_symbol`; the latter is retained for its
+    /// existing test callers and does not duplicate this dispatch logic —
+    /// both ultimately call
+    /// [`Self::dispatch_native_strategy_for_symbol_with_bar_and_facts`].
+    pub async fn tick_strategy_dispatch_multi_symbol_with_bar_facts(
+        &self,
+        assignments: &[SymbolStrategyAssignment],
+    ) -> Vec<(
+        SymbolStrategyAssignment,
+        mqk_strategy::StrategyBarResult,
+        Option<EvaluatedBarFacts>,
+    )> {
+        let Some(bar) = self.pending_strategy_bar_input.lock().await.take() else {
+            return Vec::new();
+        };
+        let mut results = Vec::new();
+        for assignment in assignments {
+            if let Some((bar_result, facts)) = self
+                .dispatch_native_strategy_for_symbol_with_bar_and_facts(
+                    &assignment.symbol,
+                    &assignment.timeframe,
+                    bar.clone(),
+                )
+                .await
+            {
+                results.push((assignment.clone(), bar_result, facts));
             }
         }
         results
