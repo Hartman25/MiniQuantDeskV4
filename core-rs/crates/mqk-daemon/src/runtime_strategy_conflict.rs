@@ -16,6 +16,19 @@
 //! the caller. [`gather_and_resolve`] is the thin, I/O-performing glue
 //! `loop_runner.rs` actually calls once per tick; it resolves the effective
 //! mode (with the live-lock) and delegates to the pure function above.
+//!
+//! # AUTHORITY-AND-EVIDENCE-REPAIR-01 (Defects 2 and 3)
+//!
+//! [`candidate_inputs`] looks up each decision's current position through
+//! one canonical symbol index (`mqk_portfolio::canonical_symbol`) so a
+//! decision symbol's casing can never cause a held position to read as
+//! flat. [`compute_conflict_cycle_id`] now binds cycle identity to every
+//! field capable of changing the resolver's output or its truthful
+//! evidence — including the configured and effective mode, each
+//! candidate's own `timeframe_secs`, full bar provenance, and order
+//! semantics — so the same candidates evaluated once in `shadow` and again
+//! in `paper_enforced` (or under any other economically-distinct input)
+//! never collide on the same `plan_id`.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -26,55 +39,114 @@ use crate::runtime_opportunity_allocation::PendingDecisionWithBarFacts;
 use crate::runtime_strategy_conflict_mode::ConflictPolicyMode;
 use crate::state::AppState;
 use mqk_portfolio::{
-    resolve_conflict_cycle, ConflictCandidateInput, ConflictCycleContext, ConflictCycleResult,
+    canonical_symbol, resolve_conflict_cycle, ConflictCandidateInput, ConflictCycleContext,
+    ConflictCycleResult,
 };
 
-/// Deterministic per-cycle economic identity (mirrors
-/// `runtime_opportunity_allocation::compute_cycle_id`'s Phase B repair
-/// exactly): UUIDv5 of `run_id` + `market_date` + `timeframe` + the conflict
-/// policy schema version + the sorted
-/// `(symbol, strategy_id, side, qty, current_qty, bar_end_ts)` tuple set of
-/// every candidate this cycle. Sorting makes the id independent of dispatch
-/// order; omitting the loop-tick wall clock and `decision_id` (which embeds
-/// wall-clock material — see `decision::bar_result_to_decisions`) makes
-/// reprocessing the exact same economic cycle on a later tick produce the
-/// exact same id. `current_qty`/`qty` together fully determine each
-/// candidate's proposed target deterministically, so a change to either is
-/// already captured without needing the (derived) proposed target itself in
-/// the seed.
+/// One candidate's canonical economic-identity seed fragment for
+/// [`compute_conflict_cycle_id`]. Every field capable of changing the pure
+/// resolver's output, or the truthful evidence recorded for it, is
+/// represented here explicitly (never `Debug`-derived, so the format is
+/// exact and stable under field reordering).
+fn candidate_identity_seed(c: &ConflictCandidateInput) -> String {
+    let symbol = canonical_symbol(&c.symbol);
+    let strategy_id = c.strategy_id.trim().to_string();
+    let side = c.side.trim().to_ascii_lowercase();
+    let order_type = c.order_type.trim().to_ascii_lowercase();
+    let tif = c.time_in_force.trim().to_ascii_lowercase();
+    let limit_price = c
+        .limit_price
+        .map(|p| p.to_string())
+        .unwrap_or_else(|| "none".to_string());
+    // Explicit bar-fact presence: distinct from any individual field being
+    // absent, so "missing entirely" and "present but mismatched" can never
+    // hash to the same identity by coincidence.
+    let bar_present = c.bar_symbol.is_some()
+        && c.bar_strategy_id.is_some()
+        && c.bar_timeframe.is_some()
+        && c.bar_end_ts.is_some()
+        && c.close_micros.is_some();
+    let bar_symbol = c
+        .bar_symbol
+        .as_deref()
+        .map(canonical_symbol)
+        .unwrap_or_else(|| "none".to_string());
+    let bar_strategy_id = c
+        .bar_strategy_id
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or("none")
+        .to_string();
+    let bar_timeframe = c
+        .bar_timeframe
+        .as_deref()
+        .map(str::trim)
+        .unwrap_or("none")
+        .to_string();
+    let bar_end_ts = c
+        .bar_end_ts
+        .map(|t| t.to_string())
+        .unwrap_or_else(|| "none".to_string());
+    let close_micros = c
+        .close_micros
+        .map(|v| v.to_string())
+        .unwrap_or_else(|| "none".to_string());
+    format!(
+        "{symbol}:{strategy_id}:{side}:{qty}:{current_qty}:{timeframe_secs}:{order_type}:{tif}:\
+         {limit_price}:{bar_present}:{bar_symbol}:{bar_strategy_id}:{bar_timeframe}:{bar_end_ts}:\
+         {close_micros}",
+        qty = c.qty,
+        current_qty = c.current_qty,
+        timeframe_secs = c.timeframe_secs,
+    )
+}
+
+/// Deterministic per-cycle economic identity. UUIDv5 of `run_id` +
+/// `market_date` + `timeframe` + the conflict policy schema version + the
+/// configured (requested) mode + the effective mode + the sorted set of
+/// every candidate's full economic-identity seed
+/// ([`candidate_identity_seed`]) this cycle.
+///
+/// AUTHORITY-AND-EVIDENCE-REPAIR-01 Defect 3 repair: the previous seed
+/// covered only `(symbol, strategy_id, side, qty, current_qty, bar_end_ts)`
+/// and omitted mode entirely, so the exact same candidates evaluated once
+/// in `shadow` and again in `paper_enforced` collided on the same
+/// `plan_id` — the DB then silently treated the enforced write as
+/// `AlreadyExists` and preserved stale shadow-mode evidence. Every field
+/// capable of changing the resolver's output or its truthful evidence
+/// (mode, per-candidate `timeframe_secs`, full bar provenance including
+/// close, and order semantics) is now included. Sorting makes the id
+/// independent of dispatch order; omitting the loop-tick wall clock and
+/// `decision_id` (which embeds wall-clock material — see
+/// `decision::bar_result_to_decisions`) makes reprocessing the exact same
+/// economic cycle on a later tick produce the exact same id.
 pub fn compute_conflict_cycle_id(
     run_id: Uuid,
     market_date: &str,
     timeframe: &str,
+    configured_mode: ConflictPolicyMode,
+    effective_mode: ConflictPolicyMode,
     candidates: &[ConflictCandidateInput],
 ) -> String {
-    let mut tuples: Vec<(String, String, String, i64, i64, i64)> = candidates
-        .iter()
-        .map(|c| {
-            (
-                c.symbol.trim().to_string(),
-                c.strategy_id.trim().to_string(),
-                c.side.trim().to_ascii_lowercase(),
-                c.qty,
-                c.current_qty,
-                c.bar_end_ts.unwrap_or(i64::MIN),
-            )
-        })
-        .collect();
-    tuples.sort();
-    let candidates_str = tuples
-        .iter()
-        .map(|(sym, sid, side, qty, cur, bar)| format!("{sym}:{sid}:{side}:{qty}:{cur}:{bar}"))
-        .collect::<Vec<_>>()
-        .join(",");
+    let mut seeds: Vec<String> = candidates.iter().map(candidate_identity_seed).collect();
+    seeds.sort();
+    let candidates_str = seeds.join(",");
     let seed = format!(
-        "mqk.strategy-conflict-policy-cycle.v1|{run_id}|{market_date}|{timeframe}|{}|{candidates_str}",
-        mqk_portfolio::CONFLICT_POLICY_SCHEMA_VERSION
+        "mqk.strategy-conflict-policy-cycle.v2|{run_id}|{market_date}|{timeframe}|{schema}|\
+         {configured}|{effective}|{candidates_str}",
+        schema = mqk_portfolio::CONFLICT_POLICY_SCHEMA_VERSION,
+        configured = configured_mode.as_str(),
+        effective = effective_mode.as_str(),
     );
     Uuid::new_v5(&Uuid::NAMESPACE_DNS, seed.as_bytes()).to_string()
 }
 
 pub struct ConflictPolicyContext {
+    /// As configured (requested) before the live-lock, e.g. an operator
+    /// asking for `paper_enforced` outside the paper+Alpaca lane. Evidence
+    /// and cycle-identity only — dispatch always follows [`Self::mode`]
+    /// (the already live-lock-resolved effective mode).
+    pub configured_mode: ConflictPolicyMode,
     /// Already live-lock-resolved (see `runtime_strategy_conflict_mode::effective_mode`).
     pub mode: ConflictPolicyMode,
     pub run_id: Uuid,
@@ -98,15 +170,26 @@ pub struct ConflictPolicyOutcome {
 
 fn candidate_inputs(
     decisions: &[PendingDecisionWithBarFacts],
-    timeframe: &str,
     current_positions: &BTreeMap<String, i64>,
 ) -> Vec<ConflictCandidateInput> {
+    // AUTHORITY-AND-EVIDENCE-REPAIR-01 Defect 2: one canonical symbol index
+    // for the current-position lookup, built once, so a decision symbol's
+    // casing (e.g. "aapl") can never read a held position (keyed "AAPL")
+    // as flat. Mirrors the exact same `canonical_symbol` used for
+    // grouping, bar-symbol comparison, and evidence inside
+    // `mqk_portfolio::conflict_policy` — one normalization, every call
+    // site.
+    let canonical_positions: BTreeMap<String, i64> = current_positions
+        .iter()
+        .map(|(sym, qty)| (canonical_symbol(sym), *qty))
+        .collect();
+
     decisions
         .iter()
         .enumerate()
         .map(|(ordinal, p)| {
-            let current_qty = current_positions
-                .get(&p.decision.symbol)
+            let current_qty = canonical_positions
+                .get(&canonical_symbol(&p.decision.symbol))
                 .copied()
                 .unwrap_or(0);
             let (bar_symbol, bar_strategy_id, bar_timeframe, bar_end_ts, close_micros) =
@@ -124,11 +207,13 @@ fn candidate_inputs(
                 ordinal,
                 symbol: p.decision.symbol.clone(),
                 strategy_id: p.decision.strategy_id.clone(),
-                timeframe: timeframe.to_string(),
                 timeframe_secs: p.decision.timeframe_secs,
                 side: p.decision.side.clone(),
                 qty: p.decision.qty,
                 current_qty,
+                order_type: p.decision.order_type.clone(),
+                time_in_force: p.decision.time_in_force.clone(),
+                limit_price: p.decision.limit_price,
                 bar_symbol,
                 bar_strategy_id,
                 bar_timeframe,
@@ -162,9 +247,15 @@ pub fn apply_conflict_policy(
         };
     }
 
-    let candidates = candidate_inputs(&decisions, &ctx.timeframe, current_positions);
-    let cycle_id =
-        compute_conflict_cycle_id(ctx.run_id, &ctx.market_date, &ctx.timeframe, &candidates);
+    let candidates = candidate_inputs(&decisions, current_positions);
+    let cycle_id = compute_conflict_cycle_id(
+        ctx.run_id,
+        &ctx.market_date,
+        &ctx.timeframe,
+        ctx.configured_mode,
+        ctx.mode,
+        &candidates,
+    );
     let cycle_context = ConflictCycleContext {
         cycle_id,
         run_id: ctx.run_id.to_string(),
@@ -217,7 +308,8 @@ fn disposition_str(d: mqk_portfolio::ConflictDisposition) -> &'static str {
 
 fn plan_to_new_db_plan(
     plan: &ConflictCycleResult,
-    mode: ConflictPolicyMode,
+    configured_mode: ConflictPolicyMode,
+    effective_mode: ConflictPolicyMode,
     run_id: Uuid,
     created_at_utc: chrono::DateTime<chrono::Utc>,
 ) -> Option<mqk_db::NewRuntimeStrategyConflictPlan> {
@@ -238,6 +330,11 @@ fn plan_to_new_db_plan(
             ) {
                 refused_count += 1;
             }
+            let bar_present = c.bar_symbol.is_some()
+                && c.bar_strategy_id.is_some()
+                && c.bar_timeframe.is_some()
+                && c.bar_end_ts.is_some()
+                && c.close_micros.is_some();
             candidates.push(mqk_db::NewRuntimeStrategyConflictCandidate {
                 ordinal: c.ordinal as i32,
                 symbol: sym.symbol.clone(),
@@ -246,8 +343,16 @@ fn plan_to_new_db_plan(
                 side: c.side.trim().to_ascii_lowercase(),
                 qty: c.qty,
                 current_qty: c.current_qty,
+                order_type: c.order_type.trim().to_ascii_lowercase(),
+                time_in_force: c.time_in_force.trim().to_ascii_lowercase(),
+                limit_price: c.limit_price,
                 proposed_target_qty: c.proposed_target_qty,
+                bar_present,
+                bar_symbol: c.bar_symbol.clone(),
+                bar_strategy_id: c.bar_strategy_id.clone(),
+                bar_timeframe: c.bar_timeframe.clone(),
                 bar_end_ts: c.bar_end_ts,
+                close_micros: c.close_micros,
                 selected: c.selected,
                 disposition: disposition_str(c.disposition).to_string(),
                 reason_code: c.reason_code.clone(),
@@ -260,7 +365,8 @@ fn plan_to_new_db_plan(
         plan_id,
         cycle_id: plan_id,
         run_id,
-        mode: mode.as_str().to_string(),
+        mode: effective_mode.as_str().to_string(),
+        configured_mode: configured_mode.as_str().to_string(),
         market_date: plan.context.market_date.clone(),
         policy_schema_version: plan.context.policy_schema_version.clone(),
         symbol_group_count: plan.symbol_results.len() as i32,
@@ -283,7 +389,8 @@ fn plan_to_new_db_plan(
 async fn persist_plan_if_present(
     state_arc: &Arc<AppState>,
     plan: &Option<ConflictCycleResult>,
-    mode: ConflictPolicyMode,
+    configured_mode: ConflictPolicyMode,
+    effective_mode: ConflictPolicyMode,
     run_id: Uuid,
     now_micros: i64,
 ) {
@@ -295,7 +402,8 @@ async fn persist_plan_if_present(
     // is recorded as the current wall clock at persistence time.
     let _ = now_micros;
     let created_at_utc = chrono::Utc::now();
-    let Some(new_plan) = plan_to_new_db_plan(plan, mode, run_id, created_at_utc) else {
+    let Some(new_plan) = plan_to_new_db_plan(plan, configured_mode, effective_mode, run_id, created_at_utc)
+    else {
         tracing::warn!(
             cycle_id = %plan.context.cycle_id,
             "runtime_strategy_conflict_plan_persist_skipped: cycle_id is not a valid UUID"
@@ -303,7 +411,21 @@ async fn persist_plan_if_present(
         return;
     };
     match mqk_db::insert_runtime_strategy_conflict_plan(db, new_plan).await {
-        Ok(_) => {}
+        Ok(mqk_db::InsertRuntimeStrategyConflictPlanOutcome::Inserted)
+        | Ok(mqk_db::InsertRuntimeStrategyConflictPlanOutcome::AlreadyExists) => {}
+        Ok(mqk_db::InsertRuntimeStrategyConflictPlanOutcome::PayloadCollision { detail }) => {
+            // AUTHORITY-AND-EVIDENCE-REPAIR-01 Defect 4: same plan_id, but
+            // the stored payload diverges from this replay's payload. This
+            // must never be treated as idempotent -- log loudly and leave
+            // the original row untouched; the tick itself is never
+            // blocked (evidence, not authoritative truth).
+            tracing::error!(
+                cycle_id = %plan.context.cycle_id,
+                detail = %detail,
+                "runtime_strategy_conflict_plan_persist_payload_collision: same plan_id, \
+                 divergent payload -- not idempotent, original row preserved"
+            );
+        }
         Err(err) => {
             tracing::warn!(
                 cycle_id = %plan.context.cycle_id,
@@ -346,6 +468,7 @@ pub async fn gather_and_resolve(
     }
 
     let ctx = ConflictPolicyContext {
+        configured_mode: eff.configured_mode,
         mode: eff.effective_mode,
         run_id,
         market_date,
@@ -356,6 +479,7 @@ pub async fn gather_and_resolve(
     persist_plan_if_present(
         state_arc,
         &outcome.plan,
+        eff.configured_mode,
         eff.effective_mode,
         run_id,
         now_micros,
@@ -412,6 +536,23 @@ mod tests {
         }
     }
 
+    /// A sell with real bar facts attached, mirroring production
+    /// (`loop_runner.rs` clones the same `bar_facts` onto every decision
+    /// derived from one bar result, buy or sell).
+    fn bound_sell(
+        symbol: &str,
+        strategy_id: &str,
+        qty: i64,
+        bar_end_ts: i64,
+    ) -> PendingDecisionWithBarFacts {
+        PendingDecisionWithBarFacts {
+            decision: decision(symbol, strategy_id, "sell", qty),
+            bar_facts: Some(facts(symbol, strategy_id, bar_end_ts)),
+        }
+    }
+
+    /// A sell with no bar facts at all -- structurally invalid after the
+    /// Defect 2 repair.
     fn unbound_sell(symbol: &str, strategy_id: &str, qty: i64) -> PendingDecisionWithBarFacts {
         PendingDecisionWithBarFacts {
             decision: decision(symbol, strategy_id, "sell", qty),
@@ -421,6 +562,7 @@ mod tests {
 
     fn ctx(mode: ConflictPolicyMode) -> ConflictPolicyContext {
         ConflictPolicyContext {
+            configured_mode: mode,
             mode,
             run_id: run_id(),
             market_date: "2026-07-26".to_string(),
@@ -499,7 +641,7 @@ mod tests {
         current.insert("AAPL".to_string(), 20i64);
         let decisions = vec![
             bound_buy("AAPL", "s1", 10, 1_000),
-            unbound_sell("AAPL", "s2", 5),
+            bound_sell("AAPL", "s2", 5, 2_000),
         ];
         let out =
             apply_conflict_policy(&ctx(ConflictPolicyMode::PaperEnforced), decisions, &current);
@@ -521,6 +663,28 @@ mod tests {
             apply_conflict_policy(&ctx(ConflictPolicyMode::PaperEnforced), decisions, &current);
         assert_eq!(out.decisions.len(), 1);
         assert_eq!(out.decisions[0].decision.symbol, "MSFT");
+    }
+
+    #[test]
+    fn unbound_sell_is_refused_and_never_reaches_downstream() {
+        // AUTHORITY-AND-EVIDENCE-REPAIR-01 Defect 2: a sell with no bar
+        // facts is now structurally invalid, end to end.
+        let mut current = BTreeMap::new();
+        current.insert("AAPL".to_string(), 20i64);
+        let decisions = vec![unbound_sell("AAPL", "s1", 5)];
+        let out = apply_conflict_policy(&ctx(ConflictPolicyMode::PaperEnforced), decisions, &current);
+        assert!(out.decisions.is_empty());
+    }
+
+    #[test]
+    fn lowercase_decision_symbol_still_reads_the_held_position() {
+        // AUTHORITY-AND-EVIDENCE-REPAIR-01 Defect 2: "aapl" must read the
+        // exact same current quantity as "AAPL" -- never zero/flat.
+        let mut current = BTreeMap::new();
+        current.insert("AAPL".to_string(), 20i64);
+        let decisions = vec![bound_sell("aapl", "s1", 5, 1_000)];
+        let out = apply_conflict_policy(&ctx(ConflictPolicyMode::PaperEnforced), decisions, &current);
+        assert_eq!(out.decisions.len(), 1, "lowercase symbol must still resolve current_qty=20 and pass");
     }
 
     #[test]
@@ -643,19 +807,264 @@ mod tests {
             ordinal: 0,
             symbol: "AAPL".to_string(),
             strategy_id: "s1".to_string(),
-            timeframe: TIMEFRAME.to_string(),
             timeframe_secs: 300,
             side: "buy".to_string(),
             qty: 10,
             current_qty: 0,
+            order_type: "market".to_string(),
+            time_in_force: "day".to_string(),
+            limit_price: None,
             bar_symbol: Some("AAPL".to_string()),
             bar_strategy_id: Some("s1".to_string()),
             bar_timeframe: Some(TIMEFRAME.to_string()),
             bar_end_ts: Some(1_000),
             close_micros: Some(100_000_000),
         }];
-        let id1 = compute_conflict_cycle_id(run_id(), "2026-07-26", TIMEFRAME, &candidates);
-        let id2 = compute_conflict_cycle_id(run_id(), "2026-07-26", TIMEFRAME, &candidates);
+        let id1 = compute_conflict_cycle_id(
+            run_id(),
+            "2026-07-26",
+            TIMEFRAME,
+            ConflictPolicyMode::Shadow,
+            ConflictPolicyMode::Shadow,
+            &candidates,
+        );
+        let id2 = compute_conflict_cycle_id(
+            run_id(),
+            "2026-07-26",
+            TIMEFRAME,
+            ConflictPolicyMode::Shadow,
+            ConflictPolicyMode::Shadow,
+            &candidates,
+        );
         assert_eq!(id1, id2);
+    }
+
+    // ── AUTHORITY-AND-EVIDENCE-REPAIR-01 Defect 3: cycle identity must
+    // depend on mode, per-candidate timeframe_secs, bar timeframe, close,
+    // presence, and order semantics ────────────────────────────────────
+
+    fn one_candidate() -> Vec<ConflictCandidateInput> {
+        vec![ConflictCandidateInput {
+            ordinal: 0,
+            symbol: "AAPL".to_string(),
+            strategy_id: "s1".to_string(),
+            timeframe_secs: 300,
+            side: "buy".to_string(),
+            qty: 10,
+            current_qty: 0,
+            order_type: "market".to_string(),
+            time_in_force: "day".to_string(),
+            limit_price: None,
+            bar_symbol: Some("AAPL".to_string()),
+            bar_strategy_id: Some("s1".to_string()),
+            bar_timeframe: Some("5m".to_string()),
+            bar_end_ts: Some(1_000),
+            close_micros: Some(100_000_000),
+        }]
+    }
+
+    #[test]
+    fn shadow_versus_paper_enforced_changes_plan_id() {
+        let candidates = one_candidate();
+        let shadow = compute_conflict_cycle_id(
+            run_id(),
+            "2026-07-26",
+            TIMEFRAME,
+            ConflictPolicyMode::Shadow,
+            ConflictPolicyMode::Shadow,
+            &candidates,
+        );
+        let enforced = compute_conflict_cycle_id(
+            run_id(),
+            "2026-07-26",
+            TIMEFRAME,
+            ConflictPolicyMode::PaperEnforced,
+            ConflictPolicyMode::PaperEnforced,
+            &candidates,
+        );
+        assert_ne!(shadow, enforced);
+    }
+
+    #[test]
+    fn configured_versus_effective_mode_divergence_changes_plan_id() {
+        let candidates = one_candidate();
+        let live_locked = compute_conflict_cycle_id(
+            run_id(),
+            "2026-07-26",
+            TIMEFRAME,
+            ConflictPolicyMode::PaperEnforced, // configured
+            ConflictPolicyMode::Off,           // live-locked down to Off
+            &candidates,
+        );
+        let honest_off = compute_conflict_cycle_id(
+            run_id(),
+            "2026-07-26",
+            TIMEFRAME,
+            ConflictPolicyMode::Off,
+            ConflictPolicyMode::Off,
+            &candidates,
+        );
+        assert_ne!(live_locked, honest_off);
+    }
+
+    #[test]
+    fn changed_timeframe_secs_changes_plan_id() {
+        let mut candidates = one_candidate();
+        let id1 = compute_conflict_cycle_id(
+            run_id(),
+            "2026-07-26",
+            TIMEFRAME,
+            ConflictPolicyMode::Shadow,
+            ConflictPolicyMode::Shadow,
+            &candidates,
+        );
+        candidates[0].timeframe_secs = 900;
+        let id2 = compute_conflict_cycle_id(
+            run_id(),
+            "2026-07-26",
+            TIMEFRAME,
+            ConflictPolicyMode::Shadow,
+            ConflictPolicyMode::Shadow,
+            &candidates,
+        );
+        assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn changed_bar_timeframe_changes_plan_id() {
+        let mut candidates = one_candidate();
+        let id1 = compute_conflict_cycle_id(
+            run_id(),
+            "2026-07-26",
+            TIMEFRAME,
+            ConflictPolicyMode::Shadow,
+            ConflictPolicyMode::Shadow,
+            &candidates,
+        );
+        candidates[0].bar_timeframe = Some("1h".to_string());
+        let id2 = compute_conflict_cycle_id(
+            run_id(),
+            "2026-07-26",
+            TIMEFRAME,
+            ConflictPolicyMode::Shadow,
+            ConflictPolicyMode::Shadow,
+            &candidates,
+        );
+        assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn changed_close_changes_plan_id() {
+        let mut candidates = one_candidate();
+        let id1 = compute_conflict_cycle_id(
+            run_id(),
+            "2026-07-26",
+            TIMEFRAME,
+            ConflictPolicyMode::Shadow,
+            ConflictPolicyMode::Shadow,
+            &candidates,
+        );
+        candidates[0].close_micros = Some(200_000_000);
+        let id2 = compute_conflict_cycle_id(
+            run_id(),
+            "2026-07-26",
+            TIMEFRAME,
+            ConflictPolicyMode::Shadow,
+            ConflictPolicyMode::Shadow,
+            &candidates,
+        );
+        assert_ne!(id1, id2);
+    }
+
+    #[test]
+    fn missing_versus_present_bar_facts_changes_plan_id() {
+        let mut candidates = one_candidate();
+        let present = compute_conflict_cycle_id(
+            run_id(),
+            "2026-07-26",
+            TIMEFRAME,
+            ConflictPolicyMode::Shadow,
+            ConflictPolicyMode::Shadow,
+            &candidates,
+        );
+        candidates[0].bar_symbol = None;
+        candidates[0].bar_strategy_id = None;
+        candidates[0].bar_timeframe = None;
+        candidates[0].bar_end_ts = None;
+        candidates[0].close_micros = None;
+        let missing = compute_conflict_cycle_id(
+            run_id(),
+            "2026-07-26",
+            TIMEFRAME,
+            ConflictPolicyMode::Shadow,
+            ConflictPolicyMode::Shadow,
+            &candidates,
+        );
+        assert_ne!(present, missing);
+    }
+
+    #[test]
+    fn changed_order_semantics_changes_plan_id() {
+        let mut candidates = one_candidate();
+        let market = compute_conflict_cycle_id(
+            run_id(),
+            "2026-07-26",
+            TIMEFRAME,
+            ConflictPolicyMode::Shadow,
+            ConflictPolicyMode::Shadow,
+            &candidates,
+        );
+        candidates[0].order_type = "limit".to_string();
+        candidates[0].limit_price = Some(50_000_000);
+        let limit = compute_conflict_cycle_id(
+            run_id(),
+            "2026-07-26",
+            TIMEFRAME,
+            ConflictPolicyMode::Shadow,
+            ConflictPolicyMode::Shadow,
+            &candidates,
+        );
+        assert_ne!(market, limit);
+    }
+
+    #[test]
+    fn candidate_input_order_remains_irrelevant_to_plan_id() {
+        let mut c0 = one_candidate();
+        c0.push(ConflictCandidateInput {
+            ordinal: 1,
+            symbol: "MSFT".to_string(),
+            strategy_id: "s1".to_string(),
+            timeframe_secs: 300,
+            side: "buy".to_string(),
+            qty: 5,
+            current_qty: 0,
+            order_type: "market".to_string(),
+            time_in_force: "day".to_string(),
+            limit_price: None,
+            bar_symbol: Some("MSFT".to_string()),
+            bar_strategy_id: Some("s1".to_string()),
+            bar_timeframe: Some("5m".to_string()),
+            bar_end_ts: Some(2_000),
+            close_micros: Some(50_000_000),
+        });
+        let mut c1 = c0.clone();
+        c1.reverse();
+        let id0 = compute_conflict_cycle_id(
+            run_id(),
+            "2026-07-26",
+            TIMEFRAME,
+            ConflictPolicyMode::Shadow,
+            ConflictPolicyMode::Shadow,
+            &c0,
+        );
+        let id1 = compute_conflict_cycle_id(
+            run_id(),
+            "2026-07-26",
+            TIMEFRAME,
+            ConflictPolicyMode::Shadow,
+            ConflictPolicyMode::Shadow,
+            &c1,
+        );
+        assert_eq!(id0, id1);
     }
 }
