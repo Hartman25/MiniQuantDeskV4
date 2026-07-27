@@ -97,7 +97,18 @@ pub(crate) struct ConflictPlanCandidateRow {
     pub qty: i64,
     pub current_qty: i64,
     pub proposed_target_qty: Option<i64>,
+    /// `None` on a pre-0057 legacy row.
+    pub order_type: Option<String>,
+    /// `None` on a pre-0057 legacy row.
+    pub time_in_force: Option<String>,
+    pub limit_price: Option<i64>,
+    /// `None` on a pre-0057 legacy row -- distinct from `Some(false)`.
+    pub bar_present: Option<bool>,
+    pub bar_symbol: Option<String>,
+    pub bar_strategy_id: Option<String>,
+    pub bar_timeframe: Option<String>,
     pub bar_end_ts: Option<i64>,
+    pub close_micros: Option<i64>,
     pub selected: bool,
     pub disposition: String,
     pub reason_code: String,
@@ -142,10 +153,16 @@ pub(crate) struct ConflictPlansListResponse {
     /// Only rows that passed the shared shape validator — a malformed row
     /// is never silently mixed into this list.
     pub plans: Vec<ConflictPlanRow>,
-    /// How many rows the underlying query returned but this route excluded
-    /// because they failed the shared shape validator. `0` means every
-    /// returned row was structurally sound.
+    /// How many rows were successfully read and failed the shared evidence
+    /// validator. `0` means every successfully-read row was structurally
+    /// sound. Defect 5: reserved *only* for rows that were actually read —
+    /// a query failure or a vanished row is never counted here.
     pub excluded_malformed_count: i64,
+    /// How many summary rows vanished (were deleted) between the summary
+    /// read and the per-row detail read — distinguishable from
+    /// `excluded_malformed_count` because a race is not evidence
+    /// corruption.
+    pub excluded_vanished_count: i64,
     pub checked_at_utc: String,
 }
 
@@ -191,7 +208,15 @@ fn candidate_row_from_record(
         qty: rec.qty,
         current_qty: rec.current_qty,
         proposed_target_qty: rec.proposed_target_qty,
+        order_type: rec.order_type.clone(),
+        time_in_force: rec.time_in_force.clone(),
+        limit_price: rec.limit_price,
+        bar_present: rec.bar_present,
+        bar_symbol: rec.bar_symbol.clone(),
+        bar_strategy_id: rec.bar_strategy_id.clone(),
+        bar_timeframe: rec.bar_timeframe.clone(),
         bar_end_ts: rec.bar_end_ts,
+        close_micros: rec.close_micros,
         selected: rec.selected,
         disposition: rec.disposition.clone(),
         reason_code: rec.reason_code.clone(),
@@ -274,15 +299,15 @@ pub(crate) async fn strategy_conflict_status(
     // before projecting any of its fields. A malformed latest plan is
     // surfaced as invalid_evidence -- never silently skipped in favor of
     // an older, valid plan.
-    let latest_summary = match mqk_db::fetch_recent_runtime_strategy_conflict_plans(db, run.run_id, 1).await
-    {
-        Ok(plans) => plans.into_iter().next(),
-        Err(err) => {
-            tracing::warn!(error = %err, "strategy_conflict_status_plan_query_failed");
-            response.truth_state = ConflictTruthState::QueryFailed;
-            return (StatusCode::OK, Json(response)).into_response();
-        }
-    };
+    let latest_summary =
+        match mqk_db::fetch_recent_runtime_strategy_conflict_plans(db, run.run_id, 1).await {
+            Ok(plans) => plans.into_iter().next(),
+            Err(err) => {
+                tracing::warn!(error = %err, "strategy_conflict_status_plan_query_failed");
+                response.truth_state = ConflictTruthState::QueryFailed;
+                return (StatusCode::OK, Json(response)).into_response();
+            }
+        };
 
     let Some(latest_summary) = latest_summary else {
         // No plan yet for this run -- honest empty, still active.
@@ -357,6 +382,7 @@ pub(crate) async fn strategy_conflict_plans(
                 run_id: None,
                 plans: vec![],
                 excluded_malformed_count: 0,
+                excluded_vanished_count: 0,
                 checked_at_utc,
             }),
         )
@@ -373,6 +399,7 @@ pub(crate) async fn strategy_conflict_plans(
                     run_id: None,
                     plans: vec![],
                     excluded_malformed_count: 0,
+                    excluded_vanished_count: 0,
                     checked_at_utc,
                 }),
             )
@@ -386,6 +413,7 @@ pub(crate) async fn strategy_conflict_plans(
                     run_id: None,
                     plans: vec![],
                     excluded_malformed_count: 0,
+                    excluded_vanished_count: 0,
                     checked_at_utc,
                 }),
             )
@@ -399,35 +427,53 @@ pub(crate) async fn strategy_conflict_plans(
 
     match mqk_db::fetch_recent_runtime_strategy_conflict_plans(db, run.run_id, limit).await {
         Ok(records) => {
-            // Defect 6: a malformed row is excluded, never silently mixed
-            // into an "active" list as if it were sound evidence. `limit`
-            // is bounded to at most 100, so the extra per-row candidate
-            // fetch needed for the full check is a bounded cost, not an
-            // unbounded N+1 -- correctness over one saved query per row.
+            // Defect 5: a per-row detail/candidate query *error* is not
+            // malformed evidence -- it means this route could not prove
+            // anything about the list at all, so the whole response fails
+            // closed to `query_failed` with no active list projection,
+            // rather than silently folding the failure into
+            // `excluded_malformed_count` under an otherwise-`active`
+            // truth_state. A row that merely *vanished* between the two
+            // reads (a benign concurrent-delete race) remains
+            // distinguishable from a row that was read and failed
+            // validation. `limit` is bounded to at most 100, so the extra
+            // per-row candidate fetch needed for the full check is a
+            // bounded cost, not an unbounded N+1 -- correctness over one
+            // saved query per row.
             let mut plans = Vec::with_capacity(records.len());
             let mut excluded_malformed_count = 0i64;
+            let mut excluded_vanished_count = 0i64;
             for rec in &records {
-                let full_check = match mqk_db::fetch_runtime_strategy_conflict_plan(db, rec.plan_id).await
-                {
+                match mqk_db::fetch_runtime_strategy_conflict_plan(db, rec.plan_id).await {
                     Ok(Some((plan_record, candidate_records))) => {
-                        validate_plan_with_candidates(&plan_record, &candidate_records).valid
+                        if validate_plan_with_candidates(&plan_record, &candidate_records).valid {
+                            plans.push(plan_row_from_record(rec));
+                        } else {
+                            excluded_malformed_count += 1;
+                        }
                     }
-                    // A row that vanished or failed to fetch between the
-                    // two reads is never treated as sound evidence.
-                    Ok(None) => false,
+                    Ok(None) => {
+                        excluded_vanished_count += 1;
+                    }
                     Err(err) => {
                         tracing::warn!(
                             error = %err,
                             plan_id = %rec.plan_id,
                             "strategy_conflict_plans_row_detail_query_failed"
                         );
-                        false
+                        return (
+                            StatusCode::OK,
+                            Json(ConflictPlansListResponse {
+                                truth_state: ConflictTruthState::QueryFailed,
+                                run_id: Some(run.run_id.to_string()),
+                                plans: vec![],
+                                excluded_malformed_count: 0,
+                                excluded_vanished_count: 0,
+                                checked_at_utc,
+                            }),
+                        )
+                            .into_response();
                     }
-                };
-                if full_check {
-                    plans.push(plan_row_from_record(rec));
-                } else {
-                    excluded_malformed_count += 1;
                 }
             }
             (
@@ -437,6 +483,7 @@ pub(crate) async fn strategy_conflict_plans(
                     run_id: Some(run.run_id.to_string()),
                     plans,
                     excluded_malformed_count,
+                    excluded_vanished_count,
                     checked_at_utc,
                 }),
             )
@@ -451,6 +498,7 @@ pub(crate) async fn strategy_conflict_plans(
                     run_id: Some(run.run_id.to_string()),
                     plans: vec![],
                     excluded_malformed_count: 0,
+                    excluded_vanished_count: 0,
                     checked_at_utc,
                 }),
             )
