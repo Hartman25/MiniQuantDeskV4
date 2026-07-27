@@ -35,6 +35,8 @@ MIGRATION_0056="core-rs/crates/mqk-db/migrations/0056_runtime_strategy_conflict_
 CONFLICT_DB_STORE="core-rs/crates/mqk-db/src/runtime_strategy_conflict.rs"
 CONFLICT_EVIDENCE_VALIDATION="core-rs/crates/mqk-daemon/src/conflict_evidence_validation.rs"
 MIGRATION_0057="core-rs/crates/mqk-db/migrations/0057_runtime_strategy_conflict_evidence_provenance.sql"
+# FINAL-IDENTITY-AND-READ-AUTHORITY-REPAIR-01 additions.
+CONFLICT_TYPES_TS="core-rs/mqk-gui/src/features/system/types/strategyConflict.ts"
 
 # ---------------------------------------------------------------------------
 # Check functions — each takes the file path(s) to check, so the self-test
@@ -202,6 +204,13 @@ check_per_candidate_timeframe_authority() {
 # Cycle identity must include the configured and effective mode -- the
 # defect that let identical candidates in shadow vs paper_enforced collide
 # on the same plan_id.
+#
+# FINAL-IDENTITY-AND-READ-AUTHORITY-REPAIR-01: the seed construction no
+# longer uses a single interpolated format!() string with named
+# `{configured}`/`{effective}` placeholders -- it builds a `top_fields`
+# array (each element length-prefixed via `lp()`, Defect 3's unambiguous
+# encoding) that includes `configured_mode.as_str().to_string()` and
+# `effective_mode.as_str().to_string()` explicitly.
 check_mode_in_cycle_identity() {
   local f="$1"
   [[ -f "$f" ]] || { echo "FAIL:missing $f"; return; }
@@ -209,7 +218,8 @@ check_mode_in_cycle_identity() {
     echo "FAIL:compute_conflict_cycle_id does not take a configured_mode parameter"
     return
   fi
-  if ! grep -qF '{configured}' "$f" || ! grep -qF '{effective}' "$f"; then
+  if ! grep -qF 'configured_mode.as_str().to_string()' "$f" \
+      || ! grep -qF 'effective_mode.as_str().to_string()' "$f"; then
     echo "FAIL:the cycle-id seed string does not include both configured and effective mode"
     return
   fi
@@ -218,6 +228,11 @@ check_mode_in_cycle_identity() {
 
 # Cycle identity must include full bar provenance (explicit presence flag
 # and close) -- not just bar_end_ts.
+#
+# FINAL-IDENTITY-AND-READ-AUTHORITY-REPAIR-01: `bar_present` and
+# `close_micros` are now folded into the seed via the `fields` array inside
+# `candidate_identity_seed` (length-prefixed, Defect 3), not a named
+# `{bar_present}`/`{close_micros}` format placeholder.
 check_bar_presence_in_cycle_identity() {
   local f="$1"
   [[ -f "$f" ]] || { echo "FAIL:missing $f"; return; }
@@ -225,12 +240,12 @@ check_bar_presence_in_cycle_identity() {
     echo "FAIL:cycle identity seed has no explicit bar-presence field"
     return
   fi
-  if ! grep -qF '{bar_present}' "$f"; then
-    echo "FAIL:bar_present is computed but not folded into the identity seed string"
+  if ! grep -qF 'bar_present.to_string(),' "$f"; then
+    echo "FAIL:bar_present is computed but not folded into the identity seed fields"
     return
   fi
-  if ! grep -qF '{close_micros}' "$f"; then
-    echo "FAIL:close_micros is not folded into the identity seed string"
+  if ! grep -qE '^\s*close_micros,\s*$' "$f"; then
+    echo "FAIL:close_micros is not folded into the identity seed fields"
     return
   fi
   echo "PASS"
@@ -286,6 +301,214 @@ check_status_no_fallback_on_invalid_latest() {
   fi
   if ! grep -q 'if !validation.valid {' "$f"; then
     echo "FAIL:status has no explicit validation-failure branch for the latest plan"
+    return
+  fi
+  echo "PASS"
+}
+
+# ---------------------------------------------------------------------------
+# FINAL-IDENTITY-AND-READ-AUTHORITY-REPAIR-01 mutation-negative check
+# functions (Defects 1-8 final repair).
+# ---------------------------------------------------------------------------
+
+# Defect 1: no global first-assignment timeframe in Bundle 6 identity --
+# `compute_conflict_cycle_id` must not take a global `timeframe: &str`
+# parameter, and `loop_runner.rs` must not pass `dispatch_timeframe` into
+# the `gather_and_resolve` call site.
+check_no_global_timeframe_in_bundle6_identity() {
+  local runtime_file="$1" loop_runner="$2"
+  [[ -f "$runtime_file" ]] || { echo "FAIL:missing $runtime_file"; return; }
+  [[ -f "$loop_runner" ]] || { echo "FAIL:missing $loop_runner"; return; }
+
+  local sig
+  sig="$(awk '/pub fn compute_conflict_cycle_id\(/,/-> String \{/' "$runtime_file")"
+  if [[ -z "$sig" ]]; then
+    echo "FAIL:compute_conflict_cycle_id function not found"
+    return
+  fi
+  if echo "$sig" | grep -qE 'timeframe: &str'; then
+    echo "FAIL:compute_conflict_cycle_id still takes a global timeframe parameter"
+    return
+  fi
+
+  local call_block
+  call_block="$(awk '/runtime_strategy_conflict::gather_and_resolve\(/,/\.await;/' "$loop_runner")"
+  if [[ -z "$call_block" ]]; then
+    echo "FAIL:gather_and_resolve call site not found in loop_runner"
+    return
+  fi
+  if echo "$call_block" | grep -q 'dispatch_timeframe'; then
+    echo "FAIL:loop_runner still passes dispatch_timeframe into gather_and_resolve"
+    return
+  fi
+  echo "PASS"
+}
+
+# Defect 2: DB replay comparison must be ordinal-independent -- a canonical
+# sorted Vec<CandidateSnapshot>, never a BTreeMap keyed by ordinal. Matches
+# only an actual type position (`->` or `:` immediately before), so the
+# module's own historical doc-comment describing the prior (fixed) defect
+# never self-trips this check.
+check_replay_ordinal_independent() {
+  local f="$1"
+  [[ -f "$f" ]] || { echo "FAIL:missing $f"; return; }
+  if grep -qE '(->|:)\s*BTreeMap<i32,\s*CandidateSnapshot>' "$f"; then
+    echo "FAIL:candidate replay comparison is still keyed by ordinal (BTreeMap<i32, CandidateSnapshot>)"
+    return
+  fi
+  if ! grep -qE 'Vec<CandidateSnapshot>' "$f"; then
+    echo "FAIL:candidate replay comparison no longer produces a canonical sorted Vec<CandidateSnapshot>"
+    return
+  fi
+  if ! grep -q 'snapshots.sort();' "$f"; then
+    echo "FAIL:candidate snapshots are not canonically sorted before comparison"
+    return
+  fi
+  echo "PASS"
+}
+
+# Defect 3: read-side validation must recompute the deterministic cycle id
+# from reconstructed durable evidence and require it to equal the
+# persisted plan_id/cycle_id.
+check_read_validation_recomputes_cycle_id() {
+  local f="$1"
+  [[ -f "$f" ]] || { echo "FAIL:missing $f"; return; }
+  if ! grep -q 'compute_conflict_cycle_id(' "$f"; then
+    echo "FAIL:read-side validator no longer recomputes the cycle id"
+    return
+  fi
+  if ! grep -q 'recomputed_cycle_id' "$f"; then
+    echo "FAIL:read-side validator does not compare a recomputed cycle id against persisted evidence"
+    return
+  fi
+  echo "PASS"
+}
+
+# Defect 4: read-side validation must re-run the pure resolver against the
+# reconstructed candidate batch and compare every recomputed candidate
+# outcome (selected/disposition/reason_code/proposed_target_qty) against
+# persisted evidence.
+check_read_validation_reruns_pure_resolver() {
+  local f="$1"
+  [[ -f "$f" ]] || { echo "FAIL:missing $f"; return; }
+  if ! grep -q 'resolve_conflict_cycle(cycle_context, &inputs)' "$f"; then
+    echo "FAIL:read-side validator no longer re-runs the pure resolver against reconstructed candidates"
+    return
+  fi
+  if ! grep -q 'expected.selected != c.selected' "$f"; then
+    echo "FAIL:recomputed candidate outcome is no longer compared against persisted selected/disposition/reason/target"
+    return
+  fi
+  echo "PASS"
+}
+
+# Defect 4: a selected candidate with no proposed_target_qty must be
+# rejected, never silently accepted.
+check_selected_target_none_rejected() {
+  local f="$1"
+  [[ -f "$f" ]] || { echo "FAIL:missing $f"; return; }
+  if ! grep -q 'c.selected && c.proposed_target_qty.is_none()' "$f"; then
+    echo "FAIL:a selected candidate with no proposed_target_qty is no longer rejected"
+    return
+  fi
+  echo "PASS"
+}
+
+# Defect 4: a persisted configured_mode/mode combination the runtime can
+# never actually produce must be rejected (mode incoherence).
+check_mode_coherence_enforced() {
+  local f="$1"
+  [[ -f "$f" ]] || { echo "FAIL:missing $f"; return; }
+  if ! grep -q 'cm != plan.mode.as_str()' "$f"; then
+    echo "FAIL:configured_mode/mode coherence is no longer enforced"
+    return
+  fi
+  echo "PASS"
+}
+
+# Defect 4: symbol_group_count must be reconciled against the candidates'
+# actual canonical symbol groups, not merely trusted from the stored field.
+check_symbol_group_count_recomputed() {
+  local f="$1"
+  [[ -f "$f" ]] || { echo "FAIL:missing $f"; return; }
+  if ! grep -q 'canonical_symbol_groups' "$f"; then
+    echo "FAIL:symbol_group_count is no longer reconciled against actual canonical symbol groups"
+    return
+  fi
+  echo "PASS"
+}
+
+# Defect 5: a per-row detail/candidate query error while building the
+# plans list must return query_failed with no active list projection --
+# never folded into excluded_malformed_count under an "active" truth_state.
+# A vanished row must remain distinguishable via its own counter.
+check_list_query_failure_distinct() {
+  local f="$1"
+  [[ -f "$f" ]] || { echo "FAIL:missing $f"; return; }
+  if ! grep -q 'excluded_vanished_count' "$f"; then
+    echo "FAIL:vanished-row count is no longer distinguished from malformed count"
+    return
+  fi
+  local err_block
+  err_block="$(awk '/strategy_conflict_plans_row_detail_query_failed/,/into_response\(\);/' "$f")"
+  if [[ -z "$err_block" ]]; then
+    echo "FAIL:list route detail-query error arm not found"
+    return
+  fi
+  if echo "$err_block" | grep -q 'excluded_malformed_count += 1'; then
+    echo "FAIL:a per-row query failure is still folded into excluded_malformed_count"
+    return
+  fi
+  if ! echo "$err_block" | grep -q 'ConflictTruthState::QueryFailed'; then
+    echo "FAIL:a per-row query failure does not return truth_state=query_failed"
+    return
+  fi
+  echo "PASS"
+}
+
+# Defect 6: deterministic latest/history ordering must keep the plan_id
+# DESC tie-break alongside created_at_utc DESC.
+check_latest_ordering_tie_break() {
+  local f="$1"
+  [[ -f "$f" ]] || { echo "FAIL:missing $f"; return; }
+  if ! grep -qiE 'order by created_at_utc desc, plan_id desc' "$f"; then
+    echo "FAIL:deterministic latest/history ordering lost the plan_id DESC tie-break"
+    return
+  fi
+  echo "PASS"
+}
+
+# Defect 7: the API candidate row (and its GUI type mirror) must expose
+# full 0057 provenance, not just bar_end_ts.
+check_api_provenance_fields_present() {
+  local route_file="$1" ts_types_file="$2"
+  [[ -f "$route_file" ]] || { echo "FAIL:missing $route_file"; return; }
+  [[ -f "$ts_types_file" ]] || { echo "FAIL:missing $ts_types_file"; return; }
+  local field
+  for field in order_type time_in_force limit_price bar_present bar_symbol bar_strategy_id bar_timeframe close_micros; do
+    if ! grep -q "pub $field:" "$route_file"; then
+      echo "FAIL:API candidate row is missing provenance field '$field'"
+      return
+    fi
+    if ! grep -q "$field" "$ts_types_file"; then
+      echo "FAIL:GUI candidate row type is missing provenance field '$field'"
+      return
+    fi
+  done
+  echo "PASS"
+}
+
+# Defect 8: total blockers and per-plan candidate count must both be
+# bounded, with a truncation-truth message when exceeded.
+check_blocker_bounds_enforced() {
+  local f="$1"
+  [[ -f "$f" ]] || { echo "FAIL:missing $f"; return; }
+  if ! grep -q 'MAX_BLOCKERS' "$f" || ! grep -q 'MAX_BLOCKER_LEN' "$f" || ! grep -q 'MAX_CANDIDATES_PER_PLAN' "$f"; then
+    echo "FAIL:blocker/candidate bounds (MAX_BLOCKERS/MAX_BLOCKER_LEN/MAX_CANDIDATES_PER_PLAN) are missing"
+    return
+  fi
+  if ! grep -q 'fn bound_blockers(' "$f"; then
+    echo "FAIL:bound_blockers truncation helper is missing"
     return
   fi
   echo "PASS"
@@ -484,6 +707,76 @@ run_real_checks() {
   fi
   ok "migration 0057 is additive, no implicit time/uuid defaults"
 
+  # ---------------------------------------------------------------------
+  # FINAL-IDENTITY-AND-READ-AUTHORITY-REPAIR-01 checks (24-34).
+  # ---------------------------------------------------------------------
+
+  # 24. No global first-assignment timeframe in Bundle 6 identity.
+  local r24
+  r24="$(check_no_global_timeframe_in_bundle6_identity "$CONFLICT_RUNTIME" "$LOOP_RUNNER")"
+  [[ "$r24" == PASS ]] || fail "${r24#FAIL:}"
+  ok "Bundle 6 cycle identity has no global first-assignment timeframe"
+
+  # 25. DB replay comparison is ordinal-independent.
+  local r25
+  r25="$(check_replay_ordinal_independent "$CONFLICT_DB_STORE")"
+  [[ "$r25" == PASS ]] || fail "${r25#FAIL:}"
+  ok "DB replay comparison is ordinal-independent (canonical sorted Vec)"
+
+  # 26. Read validation recomputes the cycle id.
+  local r26
+  r26="$(check_read_validation_recomputes_cycle_id "$CONFLICT_EVIDENCE_VALIDATION")"
+  [[ "$r26" == PASS ]] || fail "${r26#FAIL:}"
+  ok "read-side validation recomputes and compares the cycle id"
+
+  # 27. Read validation re-runs the pure resolver.
+  local r27
+  r27="$(check_read_validation_reruns_pure_resolver "$CONFLICT_EVIDENCE_VALIDATION")"
+  [[ "$r27" == PASS ]] || fail "${r27#FAIL:}"
+  ok "read-side validation re-runs the pure resolver and compares its outcome"
+
+  # 28. Selected candidate with no target is rejected.
+  local r28
+  r28="$(check_selected_target_none_rejected "$CONFLICT_EVIDENCE_VALIDATION")"
+  [[ "$r28" == PASS ]] || fail "${r28#FAIL:}"
+  ok "a selected candidate with no proposed_target_qty is rejected"
+
+  # 29. configured_mode/mode coherence is enforced.
+  local r29
+  r29="$(check_mode_coherence_enforced "$CONFLICT_EVIDENCE_VALIDATION")"
+  [[ "$r29" == PASS ]] || fail "${r29#FAIL:}"
+  ok "configured_mode/mode incoherence is rejected"
+
+  # 30. symbol_group_count is reconciled.
+  local r30
+  r30="$(check_symbol_group_count_recomputed "$CONFLICT_EVIDENCE_VALIDATION")"
+  [[ "$r30" == PASS ]] || fail "${r30#FAIL:}"
+  ok "symbol_group_count is reconciled against actual canonical symbol groups"
+
+  # 31. List query failure is distinct from malformed/active.
+  local r31
+  r31="$(check_list_query_failure_distinct "$CONFLICT_ROUTE")"
+  [[ "$r31" == PASS ]] || fail "${r31#FAIL:}"
+  ok "list route distinguishes query failure from malformed/vanished rows"
+
+  # 32. Deterministic latest ordering keeps the plan_id tie-break.
+  local r32
+  r32="$(check_latest_ordering_tie_break "$CONFLICT_DB_STORE")"
+  [[ "$r32" == PASS ]] || fail "${r32#FAIL:}"
+  ok "deterministic latest/history ordering keeps the plan_id DESC tie-break"
+
+  # 33. API/GUI provenance fields present.
+  local r33
+  r33="$(check_api_provenance_fields_present "$CONFLICT_ROUTE" "$CONFLICT_TYPES_TS")"
+  [[ "$r33" == PASS ]] || fail "${r33#FAIL:}"
+  ok "API/GUI expose full 0057 candidate provenance"
+
+  # 34. Blocker/candidate bounds enforced.
+  local r34
+  r34="$(check_blocker_bounds_enforced "$CONFLICT_EVIDENCE_VALIDATION")"
+  [[ "$r34" == PASS ]] || fail "${r34#FAIL:}"
+  ok "blocker count/length and per-plan candidate count are bounded"
+
   echo "[msc-guard] ALL CHECKS PASSED"
 }
 
@@ -586,15 +879,15 @@ PY
   sed -i 's/canonical_timeframe_str(c\.timeframe_secs)/GLOBAL_TIMEFRAME_STR/g' "$scratch/conflict_policy_mut_j.rs"
   assert_now_fails "MUT-J per-candidate timeframe authority removed" "$(check_per_candidate_timeframe_authority "$scratch/conflict_policy_mut_j.rs")"
 
-  # MUT-K: mode removed from cycle identity (seed string no longer folds in
-  # configured/effective mode).
+  # MUT-K: mode removed from cycle identity (seed fields array no longer
+  # folds in configured/effective mode).
   cp "$CONFLICT_RUNTIME" "$scratch/conflict_runtime_mut_k.rs"
-  sed -i 's/{configured}|{effective}|/{candidates_str_only}|/' "$scratch/conflict_runtime_mut_k.rs"
+  sed -i '/configured_mode\.as_str()\.to_string(),/d' "$scratch/conflict_runtime_mut_k.rs"
   assert_now_fails "MUT-K mode removed from cycle identity seed" "$(check_mode_in_cycle_identity "$scratch/conflict_runtime_mut_k.rs")"
 
-  # MUT-L: close/bar-presence removed from cycle identity seed.
+  # MUT-L: close/bar-presence removed from cycle identity seed fields.
   cp "$CONFLICT_RUNTIME" "$scratch/conflict_runtime_mut_l.rs"
-  sed -i 's/{bar_present}/bar_present_removed/; s/{close_micros}/close_micros_removed/' "$scratch/conflict_runtime_mut_l.rs"
+  sed -i '/bar_present\.to_string(),/d; /^\s*close_micros,\s*$/d' "$scratch/conflict_runtime_mut_l.rs"
   assert_now_fails "MUT-L bar_present/close removed from cycle identity seed" "$(check_bar_presence_in_cycle_identity "$scratch/conflict_runtime_mut_l.rs")"
 
   # MUT-M: divergent same-ID replay silently accepted as idempotent
@@ -614,6 +907,103 @@ PY
   cp "$CONFLICT_ROUTE" "$scratch/route_mut_o.rs"
   sed -i 's/fetch_recent_runtime_strategy_conflict_plans(db, run\.run_id, 1)/fetch_recent_runtime_strategy_conflict_plans(db, run.run_id, 5)/' "$scratch/route_mut_o.rs"
   assert_now_fails "MUT-O status falls back past the single latest plan" "$(check_status_no_fallback_on_invalid_latest "$scratch/route_mut_o.rs")"
+
+  # ---------------------------------------------------------------------
+  # FINAL-IDENTITY-AND-READ-AUTHORITY-REPAIR-01 mutation-negative fixtures.
+  # ---------------------------------------------------------------------
+
+  # MUT-P: global first-assignment timeframe reintroduced into
+  # compute_conflict_cycle_id's own signature.
+  cp "$CONFLICT_RUNTIME" "$scratch/conflict_runtime_mut_p.rs"
+  sed -i 's/pub fn compute_conflict_cycle_id(/pub fn compute_conflict_cycle_id(\n    timeframe: \&str,/' "$scratch/conflict_runtime_mut_p.rs"
+  assert_now_fails "MUT-P global timeframe reintroduced into cycle identity signature" "$(check_no_global_timeframe_in_bundle6_identity "$scratch/conflict_runtime_mut_p.rs" "$LOOP_RUNNER")"
+
+  # MUT-P2: loop_runner regresses to passing dispatch_timeframe back into
+  # the gather_and_resolve call site.
+  cp "$LOOP_RUNNER" "$scratch/loop_runner_mut_p2.rs"
+  python - "$scratch/loop_runner_mut_p2.rs" <<'PY'
+import sys
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+anchor = "runtime_strategy_conflict::gather_and_resolve("
+idx = text.find(anchor)
+end = text.find(".await;", idx)
+block = text[idx:end]
+mutated = block.replace("all_decisions,", "all_decisions,\n                            dispatch_timeframe.clone(),", 1)
+text = text[:idx] + mutated + text[end:]
+open(path, "w", encoding="utf-8").write(text)
+PY
+  assert_now_fails "MUT-P2 dispatch_timeframe reintroduced into gather_and_resolve call" "$(check_no_global_timeframe_in_bundle6_identity "$CONFLICT_RUNTIME" "$scratch/loop_runner_mut_p2.rs")"
+
+  # MUT-Q: DB replay comparison reverted to an ordinal-keyed map.
+  cp "$CONFLICT_DB_STORE" "$scratch/db_store_mut_q.rs"
+  sed -i 's/Vec<CandidateSnapshot>/BTreeMap<i32, CandidateSnapshot>/g; s/snapshots\.sort();/let _ = 0;/g' "$scratch/db_store_mut_q.rs"
+  assert_now_fails "MUT-Q replay comparison reverted to ordinal-keyed map" "$(check_replay_ordinal_independent "$scratch/db_store_mut_q.rs")"
+
+  # MUT-R: cycle-id recomputation removed from read-side validation.
+  cp "$CONFLICT_EVIDENCE_VALIDATION" "$scratch/evidence_validation_mut_r.rs"
+  sed -i 's/recomputed_cycle_id/xxx_removed_xxx/g' "$scratch/evidence_validation_mut_r.rs"
+  assert_now_fails "MUT-R cycle-id recomputation removed from read validation" "$(check_read_validation_recomputes_cycle_id "$scratch/evidence_validation_mut_r.rs")"
+
+  # MUT-S: recomputed-outcome comparison against persisted evidence removed
+  # (read validation stops re-running the pure resolver in any meaningful
+  # way).
+  cp "$CONFLICT_EVIDENCE_VALIDATION" "$scratch/evidence_validation_mut_s.rs"
+  sed -i 's/expected\.selected != c\.selected/false/g' "$scratch/evidence_validation_mut_s.rs"
+  assert_now_fails "MUT-S recomputed-outcome comparison removed" "$(check_read_validation_reruns_pure_resolver "$scratch/evidence_validation_mut_s.rs")"
+
+  # MUT-T: a selected candidate with no proposed_target_qty is silently
+  # accepted again.
+  cp "$CONFLICT_EVIDENCE_VALIDATION" "$scratch/evidence_validation_mut_t.rs"
+  sed -i 's/c\.selected && c\.proposed_target_qty\.is_none()/false/g' "$scratch/evidence_validation_mut_t.rs"
+  assert_now_fails "MUT-T selected-with-none-target check removed" "$(check_selected_target_none_rejected "$scratch/evidence_validation_mut_t.rs")"
+
+  # MUT-U: configured_mode/mode incoherence is silently accepted again.
+  cp "$CONFLICT_EVIDENCE_VALIDATION" "$scratch/evidence_validation_mut_u.rs"
+  sed -i 's/cm != plan\.mode\.as_str()/false/g' "$scratch/evidence_validation_mut_u.rs"
+  assert_now_fails "MUT-U configured_mode/mode coherence check removed" "$(check_mode_coherence_enforced "$scratch/evidence_validation_mut_u.rs")"
+
+  # MUT-V: symbol_group_count reconciliation removed.
+  cp "$CONFLICT_EVIDENCE_VALIDATION" "$scratch/evidence_validation_mut_v.rs"
+  sed -i 's/canonical_symbol_groups/xxx_removed_xxx/g' "$scratch/evidence_validation_mut_v.rs"
+  assert_now_fails "MUT-V symbol_group_count reconciliation removed" "$(check_symbol_group_count_recomputed "$scratch/evidence_validation_mut_v.rs")"
+
+  # MUT-W: vanished-row count removed/merged back into malformed count.
+  cp "$CONFLICT_ROUTE" "$scratch/route_mut_w.rs"
+  sed -i 's/excluded_vanished_count/excluded_malformed_count_renamed/g' "$scratch/route_mut_w.rs"
+  assert_now_fails "MUT-W vanished-row count removed/merged" "$(check_list_query_failure_distinct "$scratch/route_mut_w.rs")"
+
+  # MUT-W2: a per-row query failure is folded back into an active/
+  # malformed projection instead of failing the whole list closed.
+  cp "$CONFLICT_ROUTE" "$scratch/route_mut_w2.rs"
+  python - "$scratch/route_mut_w2.rs" <<'PY'
+import sys
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+anchor = "strategy_conflict_plans_row_detail_query_failed"
+idx = text.find(anchor)
+end = text.find("into_response();", idx) + len("into_response();")
+block = text[idx:end]
+mutated = block.replace("ConflictTruthState::QueryFailed", "ConflictTruthState::Active")
+text = text[:idx] + mutated + text[end:]
+open(path, "w", encoding="utf-8").write(text)
+PY
+  assert_now_fails "MUT-W2 per-row query failure folded back into active projection" "$(check_list_query_failure_distinct "$scratch/route_mut_w2.rs")"
+
+  # MUT-X: deterministic latest ordering loses the plan_id DESC tie-break.
+  cp "$CONFLICT_DB_STORE" "$scratch/db_store_mut_x.rs"
+  sed -i 's/order by created_at_utc desc, plan_id desc/order by created_at_utc desc/' "$scratch/db_store_mut_x.rs"
+  assert_now_fails "MUT-X plan_id DESC tie-break removed" "$(check_latest_ordering_tie_break "$scratch/db_store_mut_x.rs")"
+
+  # MUT-Y: an API provenance field is removed/renamed.
+  cp "$CONFLICT_ROUTE" "$scratch/route_mut_y.rs"
+  sed -i 's/pub bar_timeframe:/pub bar_timeframe_removed:/' "$scratch/route_mut_y.rs"
+  assert_now_fails "MUT-Y API provenance field removed" "$(check_api_provenance_fields_present "$scratch/route_mut_y.rs" "$CONFLICT_TYPES_TS")"
+
+  # MUT-Z: blocker-bounds truncation helper removed.
+  cp "$CONFLICT_EVIDENCE_VALIDATION" "$scratch/evidence_validation_mut_z.rs"
+  sed -i 's/fn bound_blockers/fn bound_blockers_renamed/' "$scratch/evidence_validation_mut_z.rs"
+  assert_now_fails "MUT-Z blocker-bounds truncation helper removed" "$(check_blocker_bounds_enforced "$scratch/evidence_validation_mut_z.rs")"
 
   if [[ "$failures" -gt 0 ]]; then
     echo "[msc-guard-selftest] FAIL: $failures mutation(s) were not caught" >&2

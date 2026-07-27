@@ -443,7 +443,178 @@ while ($true) {
 
 ## 6. Active / Next Patch
 
-### MULTI-STRATEGY-CONFLICT-POLICY-01-AUTHORITY-AND-EVIDENCE-REPAIR — IMPLEMENTATION AND CLOSURE PROOF COMPLETE — AWAITING CHATGPT AND OPERATOR ACCEPTANCE BEFORE PUSH
+### MULTI-STRATEGY-CONFLICT-POLICY-01-FINAL-IDENTITY-AND-READ-AUTHORITY-REPAIR — FINAL IDENTITY AND READ-AUTHORITY REPAIR COMPLETE — AWAITING CHATGPT AND OPERATOR ACCEPTANCE BEFORE PUSH
+
+**Worktree/branch:** primary worktree `C:\Users\Zacha\Desktop\MiniQuantDeskV4`,
+directly on `main`. No new branch or worktree created. Starting HEAD
+`9c16432748009232a835e041f3208cdb120d44f3` (the first authority repair's
+published-but-not-accepted head — see the entry immediately below, which
+this entry supersedes). Not pushed.
+
+**Scope:** repair of 8 independent-review defects found in the first
+authority repair (`MULTI-STRATEGY-CONFLICT-POLICY-01-AUTHORITY-AND-
+EVIDENCE-REPAIR`) after it was published to `origin/main`: (1) cycle
+identity still depended on a global first-assignment timeframe derived in
+`loop_runner.rs`, so reordering mixed-timeframe assignments could change
+the plan id while the exact economic candidate set was unchanged; (2) the
+DB replay/collision comparison was keyed by candidate `ordinal`
+(`enumerate()`-assigned per batch), so the identical economic set replayed
+in a different input order was misclassified as `PayloadCollision`; (3)
+durable evidence could not recompute or prove `plan_id`/`cycle_id` — a
+corrupted row with matching-but-arbitrary UUIDs passed; (4) the read
+validator checked presence, not policy truth (no recomputed cycle id, no
+re-run of the pure resolver, `symbol_group_count` untrusted, several
+disposition/mode/target coherence gaps); (5) a list-route detail-query
+*error* was folded into `excluded_malformed_count` under `truth_state=
+active`; (6) latest/history ordering had no deterministic tie-break on a
+`created_at_utc` tie; (7) the API/GUI omitted full 0057 provenance
+(order/time-in-force/limit price, full bar identity) from the candidate
+projection; (8) evidence blockers and per-plan candidate counts were
+unbounded.
+
+**Commits (6, on `main`):** `runtime: canonicalize conflict cycle
+identity` (Defect 1 + Defect 3's length-prefixed encoding + schema version
+v1→v2) → `db: make conflict replay ordinal-independent` (Defect 2 +
+Defect 6 tie-break) → `api: rederive durable conflict truth` (Defects
+3/4/8, the read-side validator) → `api: distinguish list query failures
+and deterministic latest` (Defect 5 + Defect 7 API half) → `gui: expose
+full conflict provenance` (Defect 7 GUI half) → `test: close final bundle
+6 authority proof` (guard/self-test extension + this ledger entry, this
+commit).
+
+**Defect 1 (global timeframe in identity):**
+`runtime_strategy_conflict::compute_conflict_cycle_id` no longer takes a
+`timeframe: &str` parameter at all. `loop_runner.rs`'s
+`multi_symbol_assignments.first()`-derived `dispatch_timeframe` is now
+computed *after* the Bundle 6 call site and passed only to Bundle 5's
+`gather_and_apply` (narrow call-site split; Bundle 5's own accepted
+timeframe context is otherwise unchanged). Identity depends solely on
+canonical cycle facts and each candidate's own `timeframe_secs`/bar facts.
+A new test (`mixed_timeframe_batch_reordered_with_different_ordinals_yields_same_cycle_id`)
+proves two symbols on different native timeframes, reassembled in the
+opposite assignment order with swapped source ordinals, still yield the
+same cycle id.
+
+**Defect 2 (ordinal-keyed replay):** `mqk-db`'s
+`new_candidate_snapshots`/`stored_candidate_snapshots` no longer return a
+`BTreeMap<i32, CandidateSnapshot>`. Both now build a `Vec<CandidateSnapshot>`
+(excluding `ordinal` from the comparable payload) and sort it canonically,
+so replay comparison is independent of insertion order and of which
+ordinal each candidate happened to be assigned this run, while still
+preserving multiplicity (a genuine duplicate candidate remains
+distinguishable). New DB-backed test
+`regenerated_batch_with_swapped_source_ordinals_is_still_idempotent`.
+
+**Defect 3 (shared identity, unambiguous encoding, recomputation):** one
+function, `runtime_strategy_conflict::compute_conflict_cycle_id`, is now
+the single implementation used both to mint a plan's identity at runtime
+and to recompute it from reconstructed durable evidence during read-side
+validation — there is no second, divergent implementation. Its seed is
+built from length-prefixed fields (`lp(s) = "{s.len()}:{s}"`) rather than
+unescaped colon/comma concatenation, so no field's own content can be
+misread as a delimiter. `CONFLICT_POLICY_SCHEMA_VERSION` bumped
+`multi-strategy-conflict-policy-v1` → `-v2`; the read-side validator's
+`SUPPORTED_SCHEMA_VERSIONS` admits only the current version, so a `-v1`
+row is legacy/incomplete evidence, never active current truth.
+
+**Defect 4 (read validator re-derives policy truth):**
+`conflict_evidence_validation::validate_plan_with_candidates`, whenever a
+plan carries full current-schema provenance, reconstructs the exact
+`ConflictCandidateInput` batch from persisted rows, recomputes the cycle
+id and requires it to equal `plan_id`/`cycle_id`, re-runs
+`mqk_portfolio::resolve_conflict_cycle`, and compares every recomputed
+candidate outcome (selected/disposition/reason_code/proposed_target_qty)
+against persisted evidence. Also newly enforced: `configured_mode`/`mode`
+coherence (a persisted non-off mode can only ever equal its own
+`configured_mode` — proven from `runtime_strategy_conflict_mode::
+effective_mode`'s own two possible outcomes), plan `truth_state`/
+`blockers` coherence, `symbol_group_count` reconciled against actual
+canonical symbol groups, `passthrough` implies `selected`, a selected
+candidate must carry a target, candidate `plan_id` equality, and blank
+canonical symbol/strategy rejection.
+
+**Defect 5 (query failure vs malformed):**
+`routes::strategy_conflict::strategy_conflict_plans`'s per-row detail
+query `Err` arm now returns the whole response `truth_state=query_failed`
+with no active list projection, instead of incrementing
+`excluded_malformed_count` under `truth_state=active`. A vanished row
+(the summary existed, the detail fetch returned `None`) is counted
+separately via a new `excluded_vanished_count` field, never conflated
+with a validated-and-rejected malformed row.
+
+**Defect 6 (deterministic ordering):**
+`fetch_recent_runtime_strategy_conflict_plans` orders by
+`created_at_utc DESC, plan_id DESC`. New test
+`tied_created_at_utc_is_broken_deterministically_by_plan_id_desc` proves
+stable ordering across repeated reads when two plans share a timestamp.
+
+**Defect 7 (full provenance):** `ConflictPlanCandidateRow` (API) and its
+GUI type/parser/panel mirror now carry `order_type`, `time_in_force`,
+`limit_price`, `bar_present`, `bar_symbol`, `bar_strategy_id`,
+`bar_timeframe`, and `close_micros` alongside the pre-existing
+`bar_end_ts` — read-only, `approved_for_live` still hardcoded `false`
+everywhere.
+
+**Defect 8 (bounded reads):** `MAX_CANDIDATES_PER_PLAN` (64) refuses
+unbounded per-plan validation work; `MAX_BLOCKERS` (25) /
+`MAX_BLOCKER_LEN` (200) bound the blockers ever returned, with a final
+truthful truncation message (never echoing raw stored values) when
+exceeded.
+
+**Guard:** `scripts/guards/check_multi_strategy_conflict_policy_01.sh`
+extended with 11 new real checks (34 total) and 13 new mutation-negative
+fixtures (30 total, `--self-test`) covering: no global timeframe in
+identity (both the function signature and the `loop_runner.rs` call
+site), ordinal-independent replay, cycle-id recomputation present,
+pure-resolver re-run present, selected-with-no-target rejected,
+configured/mode coherence enforced, `symbol_group_count` reconciled,
+list query failure distinguished from malformed/active, `plan_id DESC`
+tie-break present, full API/GUI provenance fields present, and blocker/
+candidate bounds enforced. Two pre-existing checks
+(`check_mode_in_cycle_identity`, `check_bar_presence_in_cycle_identity`)
+were themselves repaired to match the new length-prefixed encoding (they
+previously grepped for the old named `{configured}`/`{bar_present}`
+format-string placeholders, which no longer exist). All 30 fixtures
+caught; all 34 real checks pass.
+
+**Validation (this session, isolated port-5434 test DB only):** full pure
+`mqk-portfolio` conflict-policy suite (42 tests), `mqk-daemon` conflict
+runtime/mode/evidence-validation suite (68 tests), `mqk-db` DB-backed
+replay/collision/ordering suite (14 tests, `--include-ignored
+--test-threads=1`), `mqk-daemon` DB-backed API suite (16 tests, same
+flags), full GUI test suite (953 tests) and `npm run build` (tsc + vite),
+Bundle 5 (`runtime_opportunity_*`) and decision/capital-policy regression
+suites, `check_unsafe_patterns.sh`/`.ps1`, `check_workspace_dep_
+inheritance.sh`, `check_ignored_load_bearing_proofs.sh`,
+`check_migration_governance.sh`, `check_runtime_opportunity_allocation_01.sh`
+(Bundle 5 guard), and this bundle's own guard/self-test — all pass.
+`git diff --check` / `git diff --cached --check` clean (only pre-existing
+LF/CRLF autocrlf warnings on GUI files, no whitespace errors). `cargo fmt
+--check` limited to the files this repair touched (whole-crate `cargo fmt`
+on this box reformats large pre-existing unrelated drift, as previously
+noted) — clean. `cargo clippy -p mqk-daemon --all-targets` without `-D
+warnings` compiles clean; the pre-existing `-D warnings` failures in
+`state/session_controller.rs` and the `scenario_runtime_session_v2_*`
+test files are unrelated to any file this repair touched (confirmed via
+`git diff`) and unchanged from the prior repair's documented condition.
+Final `Invoke-PaperPremarketValidation.ps1` run separately — see that
+command's own output for the authoritative `FINAL: PASS`/`FAIL` line.
+
+**Not done in this session (by design):** push, Bundle 7 (dynamic
+strategy-symbol selection), watchdog/Discord/alert expansion, autonomous
+paper soak, AI-lab repair, live-capital authorization, broad multi-asset
+execution, multi-host `StrategyHost` runtime, watchlist schema widening,
+resuming AI-lab work, starting the real paper daemon, or touching the
+operating paper database (port 5440).
+
+**Disposition:** see the FINAL HANDOFF report for this session for the
+authoritative current validation result and disposition. Not marked
+accepted in this entry — that determination is reserved for ChatGPT/
+operator review.
+
+---
+
+### MULTI-STRATEGY-CONFLICT-POLICY-01-AUTHORITY-AND-EVIDENCE-REPAIR — SUPERSEDED BY FINAL-IDENTITY-AND-READ-AUTHORITY-REPAIR (see above), NOT ACCEPTED
 
 **Worktree/branch:** primary worktree `C:\Users\Zacha\Desktop\MiniQuantDeskV4`,
 directly on `main`. No new branch or worktree created. Starting HEAD
@@ -464,14 +635,20 @@ provenance; (6) the API projected malformed persisted evidence as active
 truth; (7) the ledger/handoff undercounted Bundle 6's commits and said "not
 pushed" after it had been published.
 
-**Commits (6, on `main`):** `portfolio: fail closed on ambiguous conflict
-candidates` (Defects 1–2, pure crate) → `runtime: bind conflict identity to
-full economic facts` (Defect 2 daemon half + Defect 3) → `db: harden
-conflict evidence identity and replay` (Defects 4–5, migration 0057) →
-`api: validate durable conflict evidence` (Defect 6 API half) → `gui:
-render invalid conflict evidence truth` (Defect 6 GUI half) → `test: close
-bundle 6 authority repair proof` (Defect 7 docs + guard mutation-negative
-proofs, this commit).
+**Commits (8, on `main`, through `9c164327`):** `portfolio: fail closed on
+ambiguous conflict candidates` (Defects 1–2, pure crate) → `runtime: bind
+conflict identity to full economic facts` (Defect 2 daemon half + Defect
+3) → `db: harden conflict evidence identity and replay` (Defects 4–5,
+migration 0057) → `api: validate durable conflict evidence` (Defect 6 API
+half) → `gui: render invalid conflict evidence truth` (Defect 6 GUI half)
+→ `test: close bundle 6 authority repair proof` (Defect 7 docs + guard
+mutation-negative proofs) → `style: apply rustfmt to authority-repair
+files` → `fix: use deterministic UUIDs in conflict-evidence-validation
+tests`. **Correction (FINAL-IDENTITY-AND-READ-AUTHORITY-REPAIR-01):** this
+entry originally undercounted its own commits as "6" — the two follow-up
+commits above (`cd15c73f`, `9c164327`) landed after this entry was first
+written and were never folded back into the count. The true range is 8
+commits, `c68f2726`..`9c164327`.
 
 **Defect 1 (ambiguous invalid competitor):** in
 `mqk-portfolio/src/conflict_policy.rs`'s `resolve_symbol_group`, the
