@@ -28,6 +28,19 @@ import {
   type EndpointFetchResult,
 } from "./http";
 import {
+  parseAllocationPlanDetail,
+  parseAllocationPlansList,
+  parseAllocationStatus,
+  unavailableAllocationPlanDetail,
+  unavailableAllocationPlansList,
+  unavailableAllocationStatus,
+} from "./runtimeOpportunityAllocation";
+import type {
+  AllocationPlanDetail,
+  AllocationPlansList,
+  AllocationStatus,
+} from "./types/allocation";
+import {
   deriveDataSourceDetail,
   deriveExecutionSummaryFromOrders,
   mapActiveAlertsResponse,
@@ -163,6 +176,62 @@ export async function getInstrumentRegistryV2SourceStatus(): Promise<GetInstrume
   }
 
   return { ok: true, data: result.data };
+}
+
+// ---------------------------------------------------------------------------
+// RUNTIME-OPPORTUNITY-ALLOCATION-01 Phase H: read-only allocation truth.
+// Public routes, no operator token. GET-only — never used for trade
+// submission or any mutation.
+// ---------------------------------------------------------------------------
+
+export interface GetAllocationStatusResult {
+  ok: boolean;
+  data: AllocationStatus;
+  error?: string;
+}
+
+export async function getAllocationStatus(): Promise<GetAllocationStatusResult> {
+  const result = await fetchJsonCandidate<unknown>("/api/v1/portfolio/allocation/status");
+  if (!result.ok) {
+    return {
+      ok: false,
+      data: unavailableAllocationStatus(result.error ?? "allocation status fetch failed"),
+      error: result.error,
+    };
+  }
+  return { ok: true, data: parseAllocationStatus(result.data) };
+}
+
+export interface GetAllocationPlanDetailResult {
+  ok: boolean;
+  data: AllocationPlanDetail;
+  error?: string;
+}
+
+export async function getAllocationPlanDetail(planId: string): Promise<GetAllocationPlanDetailResult> {
+  const result = await fetchJsonCandidate<unknown>(
+    `/api/v1/portfolio/allocation/plans/${encodeURIComponent(planId)}`,
+  );
+  if (!result.ok) {
+    return { ok: false, data: unavailableAllocationPlanDetail(), error: result.error };
+  }
+  return { ok: true, data: parseAllocationPlanDetail(result.data) };
+}
+
+export interface GetAllocationPlansListResult {
+  ok: boolean;
+  data: AllocationPlansList;
+  error?: string;
+}
+
+export async function getAllocationPlansList(limit = 20): Promise<GetAllocationPlansListResult> {
+  const result = await fetchJsonCandidate<unknown>(
+    `/api/v1/portfolio/allocation/plans?limit=${encodeURIComponent(String(limit))}`,
+  );
+  if (!result.ok) {
+    return { ok: false, data: unavailableAllocationPlansList(), error: result.error };
+  }
+  return { ok: true, data: parseAllocationPlansList(result.data) };
 }
 
 // ---------------------------------------------------------------------------

@@ -8,8 +8,14 @@ import {
 test("System/Status sections include registry-v2 source status and asset capability matrix", () => {
   assert.ok(systemStatusScreenIncludes("instrument-registry-v2-source"));
   assert.ok(systemStatusScreenIncludes("asset-capability-matrix"));
+  assert.ok(systemStatusScreenIncludes("runtime-opportunity-allocation"));
   assert.deepEqual(
     [...SYSTEM_STATUS_SECTION_IDS],
-    ["operations-metadata", "instrument-registry-v2-source", "asset-capability-matrix"],
+    [
+      "operations-metadata",
+      "instrument-registry-v2-source",
+      "asset-capability-matrix",
+      "runtime-opportunity-allocation",
+    ],
   );
 });
