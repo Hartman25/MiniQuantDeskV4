@@ -26,6 +26,24 @@
 //! - Every candidate this module can select is returned by ordinal
 //!   reference into the caller's own input slice — this module never
 //!   constructs a new decision, id, quantity, side, symbol, or bar.
+//!
+//! # AUTHORITY-AND-EVIDENCE-REPAIR-01 (frozen by the operating rules for
+//! this repair)
+//! - A lone structurally valid **buy** never authorizes new exposure when a
+//!   sibling candidate in the same symbol group is structurally invalid (or
+//!   otherwise prevents exact target consensus) — see
+//!   [`REASON_AMBIGUOUS_INVALID_COMPETITOR_REFUSED`]. A lone structurally
+//!   valid **sell/reduction** still survives invalid siblings and retains
+//!   safety precedence — refusing a reduction because an unrelated
+//!   candidate is malformed would be *less* safe, not more.
+//! - Every candidate — buy or sell — must carry exact, matching evaluated
+//!   bar provenance (canonical symbol, strategy identity, timeframe,
+//!   positive bar end timestamp). Positive close is required only for
+//!   new/increasing exposure; a reduction's economics never depend on
+//!   price, but its bar identity must still be present and exact.
+//! - Symbol grouping, bar-symbol comparison, and evidence all use one
+//!   canonical symbol normalization ([`canonical_symbol`]) so `"aapl"` and
+//!   `"AAPL"` are always the same economic symbol.
 
 use std::collections::BTreeMap;
 
@@ -56,11 +74,57 @@ pub const REASON_NOT_SELECTED: &str = "not_selected";
 /// operator auditability; never used for any other purpose.
 pub const REASON_INCREASE_OVERRIDDEN_BY_RISK_REDUCTION: &str =
     "increase_overridden_by_risk_reduction";
+/// AUTHORITY-AND-EVIDENCE-REPAIR-01 (Defect 1): the sole structurally valid
+/// candidate in a multi-candidate group is a **buy**, but one or more
+/// siblings are structurally invalid (or otherwise prevent exact target
+/// consensus). Ambiguity that cannot be resolved to a proven target must
+/// refuse the whole symbol group rather than authorize new exposure on the
+/// strength of one unopposed-but-uncorroborated candidate. Never used for a
+/// sole valid sell/reduction — see module docs.
+pub const REASON_AMBIGUOUS_INVALID_COMPETITOR_REFUSED: &str =
+    "ambiguous_invalid_competitor_refused";
 
 pub const TRUTH_STATE_COMPUTED: &str = "computed";
 
 /// Frozen policy schema version, carried through into durable evidence.
 pub const CONFLICT_POLICY_SCHEMA_VERSION: &str = "multi-strategy-conflict-policy-v1";
+
+// ---------------------------------------------------------------------------
+// Canonical symbol normalization
+// ---------------------------------------------------------------------------
+
+/// The single canonical equity-symbol normalization used consistently for
+/// current-position lookup, grouping, bar-symbol comparison, identity, and
+/// evidence throughout this module (and by its `mqk-daemon` caller for the
+/// current-position lookup it performs before candidates ever reach here).
+/// Trim whitespace, uppercase — mirrors the established repo convention
+/// (`PerSymbolPendingBarInputs::normalize_symbol`,
+/// `routes::strategy_promotions::normalize_symbol`). `"aapl"` and `"AAPL"`
+/// are always the same economic symbol; a caller that reads current
+/// quantity for one casing while grouping candidates under the other would
+/// silently treat a held position as flat.
+pub fn canonical_symbol(symbol: &str) -> String {
+    symbol.trim().to_ascii_uppercase()
+}
+
+/// Deterministic, pure `timeframe_secs -> canonical timeframe string`
+/// conversion. Deliberately mirrors `mqk_artifacts::timeframe_from_secs`'s
+/// fixed table exactly (this crate is zero-dependency and cannot import
+/// that private helper) so a candidate's own `timeframe_secs` — never a
+/// caller-supplied, potentially-stale global string — is the single source
+/// of truth a candidate's `bar_timeframe` is checked against.
+fn canonical_timeframe_str(timeframe_secs: i64) -> Option<String> {
+    let s = match timeframe_secs {
+        60 => "1m".to_string(),
+        300 => "5m".to_string(),
+        900 => "15m".to_string(),
+        3_600 => "1h".to_string(),
+        86_400 => "1D".to_string(),
+        secs if secs > 0 => format!("{secs}s"),
+        _ => return None,
+    };
+    Some(s)
+}
 
 // ---------------------------------------------------------------------------
 // Types
@@ -90,21 +154,29 @@ pub struct ConflictCandidateInput {
     pub ordinal: usize,
     pub symbol: String,
     pub strategy_id: String,
-    /// Canonical timeframe string this decision's cycle was dispatched
-    /// under (matches Bundle 5's `ctx.timeframe` usage) — compared against
-    /// `bar_timeframe` for buy candidates.
-    pub timeframe: String,
     pub timeframe_secs: i64,
     /// `"buy"` or `"sell"`, case-insensitive; anything else is structurally
     /// invalid.
     pub side: String,
     pub qty: i64,
     pub current_qty: i64,
+    /// Order type used for economic identity (`"market"` / `"limit"`, etc.)
+    /// — never inspected for validity here (that is
+    /// `decision.rs::validate_fields`'s job); carried through for exact
+    /// economic identity and durable evidence.
+    pub order_type: String,
+    /// Time-in-force used for economic identity — carried through
+    /// unvalidated, same rationale as `order_type`.
+    pub time_in_force: String,
+    /// Limit price (when present) used for economic identity — carried
+    /// through unvalidated, same rationale as `order_type`.
+    pub limit_price: Option<i64>,
     /// Exact evaluated-bar identity this decision was derived from.
-    /// Required (and must match `symbol`/`strategy_id`/`timeframe`) for a
-    /// `"buy"` candidate; never consulted for a `"sell"` candidate (no price
-    /// is needed to reduce or exit a position — mirrors Bundle 5's own
-    /// sell/reduce exemption).
+    /// Required (and must match `symbol`/`strategy_id`/`timeframe_secs`)
+    /// for **every** candidate — buy or sell. A reduction's economics never
+    /// depend on price, so `close_micros` is not required to be positive
+    /// for a sell, but the bar identity itself must still be present and
+    /// exact (AUTHORITY-AND-EVIDENCE-REPAIR-01 Defect 2).
     pub bar_symbol: Option<String>,
     pub bar_strategy_id: Option<String>,
     pub bar_timeframe: Option<String>,
@@ -126,8 +198,9 @@ pub enum ConflictDisposition {
     /// Structurally invalid on its own terms (bad field, overflow, missing
     /// bar facts, would-create-short).
     RefusedInvalid,
-    /// The whole symbol group was refused (conflicting increase targets, or
-    /// a duplicate economic candidate identity within the group).
+    /// The whole symbol group was refused (conflicting increase targets, a
+    /// duplicate economic candidate identity within the group, or an
+    /// ambiguous invalid competitor blocking proven target consensus).
     RefusedConflict,
 }
 
@@ -139,9 +212,16 @@ pub struct ConflictCandidateResult {
     pub side: String,
     pub qty: i64,
     pub current_qty: i64,
+    pub order_type: String,
+    pub time_in_force: String,
+    pub limit_price: Option<i64>,
     /// `None` only when the candidate's own delta arithmetic overflowed.
     pub proposed_target_qty: Option<i64>,
+    pub bar_symbol: Option<String>,
+    pub bar_strategy_id: Option<String>,
+    pub bar_timeframe: Option<String>,
     pub bar_end_ts: Option<i64>,
+    pub close_micros: Option<i64>,
     pub selected: bool,
     pub disposition: ConflictDisposition,
     pub reason_code: String,
@@ -242,30 +322,38 @@ fn validate_candidate(c: &ConflictCandidateInput) -> Validated {
         };
     }
 
-    if let Side::Buy = side {
-        let bar_ok = match (
-            &c.bar_symbol,
-            &c.bar_strategy_id,
-            &c.bar_timeframe,
-            c.bar_end_ts,
-            c.close_micros,
-        ) {
-            (Some(bs), Some(bsid), Some(btf), Some(bts), Some(close)) => {
-                bs.trim() == c.symbol.trim()
-                    && bsid.trim() == c.strategy_id.trim()
-                    && btf.trim() == c.timeframe.trim()
-                    && bts > 0
-                    && close > 0
-            }
-            _ => false,
-        };
-        if !bar_ok {
-            return Validated {
-                proposed_target_qty: Some(proposed_target_qty),
-                valid: false,
-                reason_code: REASON_MISSING_OR_MISMATCHED_BAR_FACTS,
-            };
+    // AUTHORITY-AND-EVIDENCE-REPAIR-01 Defect 2: every candidate -- buy or
+    // sell -- must carry exact, matching evaluated-bar provenance: the
+    // canonical symbol, the exact strategy identity, and the timeframe
+    // implied by the candidate's own `timeframe_secs` (never a caller
+    // global). Positive close is required only for new/increasing
+    // exposure; a reduction's own economics never depend on price.
+    let expected_timeframe = canonical_timeframe_str(c.timeframe_secs);
+    let bar_ok = match (
+        &c.bar_symbol,
+        &c.bar_strategy_id,
+        &c.bar_timeframe,
+        c.bar_end_ts,
+        c.close_micros,
+    ) {
+        (Some(bs), Some(bsid), Some(btf), Some(bts), Some(close)) => {
+            canonical_symbol(bs) == canonical_symbol(&c.symbol)
+                && bsid.trim() == c.strategy_id.trim()
+                && expected_timeframe.as_deref() == Some(btf.trim())
+                && bts > 0
+                && match side {
+                    Side::Buy => close > 0,
+                    Side::Sell => true,
+                }
         }
+        _ => false,
+    };
+    if !bar_ok {
+        return Validated {
+            proposed_target_qty: Some(proposed_target_qty),
+            valid: false,
+            reason_code: REASON_MISSING_OR_MISMATCHED_BAR_FACTS,
+        };
     }
 
     Validated {
@@ -300,14 +388,77 @@ fn tie_break_key(c: &ConflictCandidateInput) -> (String, i64, i64, String, i64, 
 }
 
 /// Economic identity used to detect a duplicate candidate within one
-/// symbol's group: two structurally valid candidates that claim to be
-/// derived from the same strategy, side, and (for buys) the same exact bar.
-fn economic_identity(c: &ConflictCandidateInput) -> (String, String, Option<i64>) {
-    (
-        c.strategy_id.trim().to_string(),
-        c.side.trim().to_ascii_lowercase(),
-        c.bar_end_ts,
-    )
+/// symbol's group. AUTHORITY-AND-EVIDENCE-REPAIR-01 Defect 3: two
+/// same-strategy/same-bar candidates with different quantities/targets are
+/// *conflicting* economic proposals, not identical duplicates -- this
+/// identity must include every canonical economic field capable of
+/// distinguishing two genuinely different candidates (quantity, current
+/// position, order semantics, and full bar provenance), not just
+/// `(strategy_id, side, bar_end_ts)`.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+struct EconomicIdentity {
+    strategy_id: String,
+    side: String,
+    qty: i64,
+    current_qty: i64,
+    order_type: String,
+    time_in_force: String,
+    limit_price: Option<i64>,
+    bar_symbol: Option<String>,
+    bar_strategy_id: Option<String>,
+    bar_timeframe: Option<String>,
+    bar_end_ts: Option<i64>,
+    close_micros: Option<i64>,
+}
+
+fn economic_identity(c: &ConflictCandidateInput) -> EconomicIdentity {
+    EconomicIdentity {
+        strategy_id: c.strategy_id.trim().to_string(),
+        side: c.side.trim().to_ascii_lowercase(),
+        qty: c.qty,
+        current_qty: c.current_qty,
+        order_type: c.order_type.trim().to_ascii_lowercase(),
+        time_in_force: c.time_in_force.trim().to_ascii_lowercase(),
+        limit_price: c.limit_price,
+        bar_symbol: c.bar_symbol.as_deref().map(canonical_symbol),
+        bar_strategy_id: c.bar_strategy_id.as_deref().map(|s| s.trim().to_string()),
+        bar_timeframe: c.bar_timeframe.as_deref().map(|s| s.trim().to_string()),
+        bar_end_ts: c.bar_end_ts,
+        close_micros: c.close_micros,
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Candidate-result construction helper
+// ---------------------------------------------------------------------------
+
+fn candidate_result(
+    c: &ConflictCandidateInput,
+    v: &Validated,
+    selected: bool,
+    disposition: ConflictDisposition,
+    reason_code: &str,
+) -> ConflictCandidateResult {
+    ConflictCandidateResult {
+        ordinal: c.ordinal,
+        strategy_id: c.strategy_id.clone(),
+        timeframe_secs: c.timeframe_secs,
+        side: c.side.clone(),
+        qty: c.qty,
+        current_qty: c.current_qty,
+        order_type: c.order_type.clone(),
+        time_in_force: c.time_in_force.clone(),
+        limit_price: c.limit_price,
+        proposed_target_qty: v.proposed_target_qty,
+        bar_symbol: c.bar_symbol.clone(),
+        bar_strategy_id: c.bar_strategy_id.clone(),
+        bar_timeframe: c.bar_timeframe.clone(),
+        bar_end_ts: c.bar_end_ts,
+        close_micros: c.close_micros,
+        selected,
+        disposition,
+        reason_code: reason_code.to_string(),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -320,8 +471,7 @@ fn resolve_symbol_group(symbol: &str, group: &[&ConflictCandidateInput]) -> Conf
     // Duplicate economic candidate identity among structurally valid
     // candidates fails the whole group closed (Q: never silently
     // deduplicate; never pick one arbitrarily).
-    let mut seen: std::collections::HashSet<(String, String, Option<i64>)> =
-        std::collections::HashSet::new();
+    let mut seen: std::collections::HashSet<EconomicIdentity> = std::collections::HashSet::new();
     let mut has_duplicate = false;
     for (c, v) in group.iter().zip(validations.iter()) {
         if v.valid && !seen.insert(economic_identity(c)) {
@@ -333,18 +483,14 @@ fn resolve_symbol_group(symbol: &str, group: &[&ConflictCandidateInput]) -> Conf
         let candidates = group
             .iter()
             .zip(validations.iter())
-            .map(|(c, v)| ConflictCandidateResult {
-                ordinal: c.ordinal,
-                strategy_id: c.strategy_id.clone(),
-                timeframe_secs: c.timeframe_secs,
-                side: c.side.clone(),
-                qty: c.qty,
-                current_qty: c.current_qty,
-                proposed_target_qty: v.proposed_target_qty,
-                bar_end_ts: c.bar_end_ts,
-                selected: false,
-                disposition: ConflictDisposition::RefusedConflict,
-                reason_code: REASON_DUPLICATE_ECONOMIC_CANDIDATE.to_string(),
+            .map(|(c, v)| {
+                candidate_result(
+                    c,
+                    v,
+                    false,
+                    ConflictDisposition::RefusedConflict,
+                    REASON_DUPLICATE_ECONOMIC_CANDIDATE,
+                )
             })
             .collect();
         return ConflictSymbolResult {
@@ -372,19 +518,13 @@ fn resolve_symbol_group(symbol: &str, group: &[&ConflictCandidateInput]) -> Conf
         } else {
             (ConflictDisposition::RefusedInvalid, v.reason_code, None)
         };
-        let candidates = vec![ConflictCandidateResult {
-            ordinal: c.ordinal,
-            strategy_id: c.strategy_id.clone(),
-            timeframe_secs: c.timeframe_secs,
-            side: c.side.clone(),
-            qty: c.qty,
-            current_qty: c.current_qty,
-            proposed_target_qty: v.proposed_target_qty,
-            bar_end_ts: c.bar_end_ts,
-            selected: v.valid,
+        let candidates = vec![candidate_result(
+            c,
+            v,
+            v.valid,
             disposition,
-            reason_code: reason_code.to_string(),
-        }];
+            reason_code,
+        )];
         return ConflictSymbolResult {
             symbol: symbol.to_string(),
             selected_ordinal,
@@ -396,74 +536,106 @@ fn resolve_symbol_group(symbol: &str, group: &[&ConflictCandidateInput]) -> Conf
 
     if valid_indices.is_empty() {
         // Multiple candidates, none structurally valid.
-        let reason = if group.len() == 1 {
-            validations[0].reason_code
-        } else {
-            REASON_NO_VALID_CANDIDATE
-        };
         let candidates = group
             .iter()
             .zip(validations.iter())
-            .map(|(c, v)| ConflictCandidateResult {
-                ordinal: c.ordinal,
-                strategy_id: c.strategy_id.clone(),
-                timeframe_secs: c.timeframe_secs,
-                side: c.side.clone(),
-                qty: c.qty,
-                current_qty: c.current_qty,
-                proposed_target_qty: v.proposed_target_qty,
-                bar_end_ts: c.bar_end_ts,
-                selected: false,
-                disposition: ConflictDisposition::RefusedInvalid,
-                reason_code: v.reason_code.to_string(),
+            .map(|(c, v)| {
+                candidate_result(
+                    c,
+                    v,
+                    false,
+                    ConflictDisposition::RefusedInvalid,
+                    v.reason_code,
+                )
             })
             .collect();
         return ConflictSymbolResult {
             symbol: symbol.to_string(),
             selected_ordinal: None,
             disposition: ConflictDisposition::RefusedInvalid,
-            reason_code: reason.to_string(),
+            reason_code: REASON_NO_VALID_CANDIDATE.to_string(),
             candidates,
         };
     }
 
     if valid_indices.len() == 1 {
         let i = valid_indices[0];
-        let (winner, _) = (group[i], &validations[i]);
+        let (winner, winner_v) = (group[i], &validations[i]);
+        // AUTHORITY-AND-EVIDENCE-REPAIR-01 Defect 1: this group has more
+        // than one input candidate (group.len() > 1, guaranteed by the
+        // group.len() == 1 early return above), but only one of them is
+        // structurally valid. A sole valid SELL/reduction still survives
+        // its invalid siblings and keeps safety precedence -- refusing a
+        // reduction because an unrelated candidate is malformed would be
+        // less safe, not more. A sole valid BUY, however, must NOT
+        // authorize new exposure while ambiguity (an invalid or otherwise
+        // non-corroborating sibling) prevents exact target consensus: the
+        // whole symbol group is refused instead.
+        let winner_is_sell = matches!(parse_side(&winner.side), Some(Side::Sell));
+        if winner_is_sell {
+            let candidates = group
+                .iter()
+                .zip(validations.iter())
+                .enumerate()
+                .map(|(idx, (c, v))| {
+                    let is_winner = idx == i;
+                    candidate_result(
+                        c,
+                        v,
+                        is_winner,
+                        if is_winner {
+                            ConflictDisposition::Passthrough
+                        } else {
+                            ConflictDisposition::RefusedInvalid
+                        },
+                        if is_winner {
+                            REASON_SINGLE_CANDIDATE_PASSTHROUGH
+                        } else {
+                            v.reason_code
+                        },
+                    )
+                })
+                .collect();
+            return ConflictSymbolResult {
+                symbol: symbol.to_string(),
+                selected_ordinal: Some(winner.ordinal),
+                disposition: ConflictDisposition::Passthrough,
+                reason_code: REASON_SINGLE_CANDIDATE_PASSTHROUGH.to_string(),
+                candidates,
+            };
+        }
+
+        // Sole valid candidate is a BUY with at least one invalid sibling:
+        // refuse the whole group closed.
+        let _ = winner_v; // proposed_target_qty still recorded per-candidate below
         let candidates = group
             .iter()
             .zip(validations.iter())
             .enumerate()
             .map(|(idx, (c, v))| {
                 let is_winner = idx == i;
-                ConflictCandidateResult {
-                    ordinal: c.ordinal,
-                    strategy_id: c.strategy_id.clone(),
-                    timeframe_secs: c.timeframe_secs,
-                    side: c.side.clone(),
-                    qty: c.qty,
-                    current_qty: c.current_qty,
-                    proposed_target_qty: v.proposed_target_qty,
-                    bar_end_ts: c.bar_end_ts,
-                    selected: is_winner,
-                    disposition: if is_winner {
-                        ConflictDisposition::Passthrough
+                candidate_result(
+                    c,
+                    v,
+                    false,
+                    if is_winner {
+                        ConflictDisposition::RefusedConflict
                     } else {
                         ConflictDisposition::RefusedInvalid
                     },
-                    reason_code: if is_winner {
-                        REASON_SINGLE_CANDIDATE_PASSTHROUGH.to_string()
+                    if is_winner {
+                        REASON_AMBIGUOUS_INVALID_COMPETITOR_REFUSED
                     } else {
-                        v.reason_code.to_string()
+                        v.reason_code
                     },
-                }
+                )
             })
             .collect();
         return ConflictSymbolResult {
             symbol: symbol.to_string(),
-            selected_ordinal: Some(winner.ordinal),
-            disposition: ConflictDisposition::Passthrough,
-            reason_code: REASON_SINGLE_CANDIDATE_PASSTHROUGH.to_string(),
+            selected_ordinal: None,
+            disposition: ConflictDisposition::RefusedConflict,
+            reason_code: REASON_AMBIGUOUS_INVALID_COMPETITOR_REFUSED.to_string(),
             candidates,
         };
     }
@@ -524,27 +696,12 @@ fn resolve_symbol_group(symbol: &str, group: &[&ConflictCandidateInput]) -> Conf
                     let (disposition, reason_code) = if v.valid {
                         (
                             ConflictDisposition::RefusedConflict,
-                            REASON_CONFLICTING_INCREASE_TARGETS_REFUSED.to_string(),
+                            REASON_CONFLICTING_INCREASE_TARGETS_REFUSED,
                         )
                     } else {
-                        (
-                            ConflictDisposition::RefusedInvalid,
-                            v.reason_code.to_string(),
-                        )
+                        (ConflictDisposition::RefusedInvalid, v.reason_code)
                     };
-                    ConflictCandidateResult {
-                        ordinal: c.ordinal,
-                        strategy_id: c.strategy_id.clone(),
-                        timeframe_secs: c.timeframe_secs,
-                        side: c.side.clone(),
-                        qty: c.qty,
-                        current_qty: c.current_qty,
-                        proposed_target_qty: v.proposed_target_qty,
-                        bar_end_ts: c.bar_end_ts,
-                        selected: false,
-                        disposition,
-                        reason_code,
-                    }
+                    candidate_result(c, v, false, disposition, reason_code)
                 })
                 .collect();
             return ConflictSymbolResult {
@@ -564,34 +721,10 @@ fn resolve_symbol_group(symbol: &str, group: &[&ConflictCandidateInput]) -> Conf
         .enumerate()
         .map(|(idx, (c, v))| {
             if idx == selected_idx {
-                return ConflictCandidateResult {
-                    ordinal: c.ordinal,
-                    strategy_id: c.strategy_id.clone(),
-                    timeframe_secs: c.timeframe_secs,
-                    side: c.side.clone(),
-                    qty: c.qty,
-                    current_qty: c.current_qty,
-                    proposed_target_qty: v.proposed_target_qty,
-                    bar_end_ts: c.bar_end_ts,
-                    selected: true,
-                    disposition: group_disposition,
-                    reason_code: group_reason.to_string(),
-                };
+                return candidate_result(c, v, true, group_disposition, group_reason);
             }
             if !v.valid {
-                return ConflictCandidateResult {
-                    ordinal: c.ordinal,
-                    strategy_id: c.strategy_id.clone(),
-                    timeframe_secs: c.timeframe_secs,
-                    side: c.side.clone(),
-                    qty: c.qty,
-                    current_qty: c.current_qty,
-                    proposed_target_qty: v.proposed_target_qty,
-                    bar_end_ts: c.bar_end_ts,
-                    selected: false,
-                    disposition: ConflictDisposition::RefusedInvalid,
-                    reason_code: v.reason_code.to_string(),
-                };
+                return candidate_result(c, v, false, ConflictDisposition::RefusedInvalid, v.reason_code);
             }
             let is_increasing = parse_side(&c.side).map(|s| matches!(s, Side::Buy)) == Some(true);
             let reason = if selected_via_reduction && is_increasing {
@@ -599,19 +732,7 @@ fn resolve_symbol_group(symbol: &str, group: &[&ConflictCandidateInput]) -> Conf
             } else {
                 REASON_NOT_SELECTED
             };
-            ConflictCandidateResult {
-                ordinal: c.ordinal,
-                strategy_id: c.strategy_id.clone(),
-                timeframe_secs: c.timeframe_secs,
-                side: c.side.clone(),
-                qty: c.qty,
-                current_qty: c.current_qty,
-                proposed_target_qty: v.proposed_target_qty,
-                bar_end_ts: c.bar_end_ts,
-                selected: false,
-                disposition: ConflictDisposition::NotSelected,
-                reason_code: reason.to_string(),
-            }
+            candidate_result(c, v, false, ConflictDisposition::NotSelected, reason)
         })
         .collect();
 
@@ -629,11 +750,11 @@ fn resolve_symbol_group(symbol: &str, group: &[&ConflictCandidateInput]) -> Conf
 // ---------------------------------------------------------------------------
 
 /// Resolve one whole same-cycle batch of candidates, grouped independently
-/// per normalized symbol (trim only — no case-folding; tickers are already
-/// canonical in this codebase). Deterministic: identical inputs, in any
-/// order, always produce a bit-identical [`ConflictCycleResult`] (symbol
-/// groups sorted by symbol ascending in the output; within-group ordering
-/// is `candidates` in original input order for audit readability, but the
+/// per [`canonical_symbol`] (trim + uppercase — `"aapl"` and `"AAPL"` are
+/// always the same group). Deterministic: identical inputs, in any order,
+/// always produce a bit-identical [`ConflictCycleResult`] (symbol groups
+/// sorted by symbol ascending in the output; within-group ordering is
+/// `candidates` in original input order for audit readability, but the
 /// *decision* of which one is selected never depends on that order).
 pub fn resolve_conflict_cycle(
     context: ConflictCycleContext,
@@ -642,7 +763,7 @@ pub fn resolve_conflict_cycle(
     let mut groups: BTreeMap<String, Vec<&ConflictCandidateInput>> = BTreeMap::new();
     for c in candidates {
         groups
-            .entry(c.symbol.trim().to_string())
+            .entry(canonical_symbol(&c.symbol))
             .or_default()
             .push(c);
     }
@@ -686,11 +807,13 @@ mod tests {
             ordinal,
             symbol: symbol.to_string(),
             strategy_id: strategy_id.to_string(),
-            timeframe: "5m".to_string(),
             timeframe_secs: 300,
             side: "buy".to_string(),
             qty,
             current_qty,
+            order_type: "market".to_string(),
+            time_in_force: "day".to_string(),
+            limit_price: None,
             bar_symbol: Some(symbol.to_string()),
             bar_strategy_id: Some(strategy_id.to_string()),
             bar_timeframe: Some("5m".to_string()),
@@ -699,7 +822,38 @@ mod tests {
         }
     }
 
+    /// A sell with exact, matching bar provenance (positive close is not
+    /// required for a reduction, but the identity fields still are).
     fn sell(
+        ordinal: usize,
+        symbol: &str,
+        strategy_id: &str,
+        qty: i64,
+        current_qty: i64,
+        bar_end_ts: i64,
+    ) -> ConflictCandidateInput {
+        ConflictCandidateInput {
+            ordinal,
+            symbol: symbol.to_string(),
+            strategy_id: strategy_id.to_string(),
+            timeframe_secs: 300,
+            side: "sell".to_string(),
+            qty,
+            current_qty,
+            order_type: "market".to_string(),
+            time_in_force: "day".to_string(),
+            limit_price: None,
+            bar_symbol: Some(symbol.to_string()),
+            bar_strategy_id: Some(strategy_id.to_string()),
+            bar_timeframe: Some("5m".to_string()),
+            bar_end_ts: Some(bar_end_ts),
+            close_micros: Some(0),
+        }
+    }
+
+    /// A sell with no bar facts at all -- structurally invalid after the
+    /// Defect 2 repair (previously always valid).
+    fn unbound_sell(
         ordinal: usize,
         symbol: &str,
         strategy_id: &str,
@@ -710,11 +864,13 @@ mod tests {
             ordinal,
             symbol: symbol.to_string(),
             strategy_id: strategy_id.to_string(),
-            timeframe: "5m".to_string(),
             timeframe_secs: 300,
             side: "sell".to_string(),
             qty,
             current_qty,
+            order_type: "market".to_string(),
+            time_in_force: "day".to_string(),
+            limit_price: None,
             bar_symbol: None,
             bar_strategy_id: None,
             bar_timeframe: None,
@@ -781,8 +937,14 @@ mod tests {
 
     #[test]
     fn input_order_does_not_change_result() {
-        let forward = vec![sell(0, "AAPL", "s1", 5, 20), sell(1, "AAPL", "s2", 8, 20)];
-        let reversed = vec![sell(0, "AAPL", "s2", 8, 20), sell(1, "AAPL", "s1", 5, 20)];
+        let forward = vec![
+            sell(0, "AAPL", "s1", 5, 20, 1_000),
+            sell(1, "AAPL", "s2", 8, 20, 2_000),
+        ];
+        let reversed = vec![
+            sell(0, "AAPL", "s2", 8, 20, 2_000),
+            sell(1, "AAPL", "s1", 5, 20, 1_000),
+        ];
         let r1 = resolve_conflict_cycle(ctx(), &forward);
         let r2 = resolve_conflict_cycle(ctx(), &reversed);
         // Both must select the strategy proposing the smallest target
@@ -852,7 +1014,7 @@ mod tests {
     fn buy_versus_reduction_reduction_is_selected() {
         let candidates = vec![
             buy(0, "AAPL", "s1", 10, 20, 1_000, 100_000_000),
-            sell(1, "AAPL", "s2", 5, 20),
+            sell(1, "AAPL", "s2", 5, 20, 2_000),
         ];
         let res = resolve_conflict_cycle(ctx(), &candidates);
         let aapl = result_for(&res, "AAPL");
@@ -869,8 +1031,8 @@ mod tests {
     #[test]
     fn multiple_reductions_selects_smallest_explicit_target() {
         let candidates = vec![
-            sell(0, "AAPL", "s1", 3, 20), // target 17
-            sell(1, "AAPL", "s2", 8, 20), // target 12 (greater reduction)
+            sell(0, "AAPL", "s1", 3, 20, 1_000), // target 17
+            sell(1, "AAPL", "s2", 8, 20, 2_000), // target 12 (greater reduction)
         ];
         let res = resolve_conflict_cycle(ctx(), &candidates);
         let aapl = result_for(&res, "AAPL");
@@ -881,8 +1043,14 @@ mod tests {
 
     #[test]
     fn equal_selected_targets_tie_break_is_stable() {
-        let forward = vec![sell(0, "AAPL", "zzz", 8, 20), sell(1, "AAPL", "aaa", 8, 20)];
-        let reversed = vec![sell(0, "AAPL", "aaa", 8, 20), sell(1, "AAPL", "zzz", 8, 20)];
+        let forward = vec![
+            sell(0, "AAPL", "zzz", 8, 20, 1_000),
+            sell(1, "AAPL", "aaa", 8, 20, 1_000),
+        ];
+        let reversed = vec![
+            sell(0, "AAPL", "aaa", 8, 20, 1_000),
+            sell(1, "AAPL", "zzz", 8, 20, 1_000),
+        ];
         let r1 = resolve_conflict_cycle(ctx(), &forward);
         let r2 = resolve_conflict_cycle(ctx(), &reversed);
         let w1 = result_for(&r1, "AAPL")
@@ -901,7 +1069,10 @@ mod tests {
 
     #[test]
     fn no_target_averaging_netting_or_summing() {
-        let candidates = vec![sell(0, "AAPL", "s1", 3, 20), sell(1, "AAPL", "s2", 8, 20)];
+        let candidates = vec![
+            sell(0, "AAPL", "s1", 3, 20, 1_000),
+            sell(1, "AAPL", "s2", 8, 20, 2_000),
+        ];
         let res = resolve_conflict_cycle(ctx(), &candidates);
         let winner = result_for(&res, "AAPL")
             .candidates
@@ -919,7 +1090,7 @@ mod tests {
     fn selected_candidate_exactly_equals_one_input_by_ordinal() {
         let candidates = vec![
             buy(0, "AAPL", "s1", 10, 0, 1_000, 100_000_000),
-            sell(1, "AAPL", "s2", 5, 20),
+            sell(1, "AAPL", "s2", 5, 20, 2_000),
         ];
         let res = resolve_conflict_cycle(ctx(), &candidates);
         let selected = res.selected_ordinals();
@@ -937,7 +1108,7 @@ mod tests {
 
     #[test]
     fn no_short_target_ever_selected() {
-        let candidates = vec![sell(0, "AAPL", "s1", 30, 20)]; // target -10
+        let candidates = vec![unbound_sell(0, "AAPL", "s1", 30, 20)]; // target -10, fails before bar check
         let res = resolve_conflict_cycle(ctx(), &candidates);
         let aapl = result_for(&res, "AAPL");
         assert_eq!(aapl.disposition, ConflictDisposition::RefusedInvalid);
@@ -947,7 +1118,10 @@ mod tests {
 
     #[test]
     fn no_oversell_from_multiple_sells_only_one_survives() {
-        let candidates = vec![sell(0, "AAPL", "s1", 5, 20), sell(1, "AAPL", "s2", 8, 20)];
+        let candidates = vec![
+            sell(0, "AAPL", "s1", 5, 20, 1_000),
+            sell(1, "AAPL", "s2", 8, 20, 2_000),
+        ];
         let res = resolve_conflict_cycle(ctx(), &candidates);
         let aapl = result_for(&res, "AAPL");
         let selected_count = aapl.candidates.iter().filter(|c| c.selected).count();
@@ -964,7 +1138,7 @@ mod tests {
 
     #[test]
     fn checked_sub_overflow_is_refused() {
-        let candidates = vec![sell(0, "AAPL", "s1", i64::MAX, i64::MIN)];
+        let candidates = vec![unbound_sell(0, "AAPL", "s1", i64::MAX, i64::MIN)];
         let res = resolve_conflict_cycle(ctx(), &candidates);
         let aapl = result_for(&res, "AAPL");
         assert_eq!(aapl.reason_code, REASON_ARITHMETIC_OVERFLOW);
@@ -1038,9 +1212,29 @@ mod tests {
     }
 
     #[test]
+    fn differing_quantities_are_not_treated_as_duplicates() {
+        // Same strategy/side/bar, but different qty/target: a genuine
+        // conflicting proposal, not a duplicate -- must reach the normal
+        // ambiguous-increase-consensus path, never the duplicate-identity
+        // short-circuit (AUTHORITY-AND-EVIDENCE-REPAIR-01 Defect 3).
+        let candidates = vec![
+            buy(0, "AAPL", "s1", 10, 0, 1_000, 100_000_000),
+            buy(1, "AAPL", "s1", 20, 0, 1_000, 100_000_000),
+        ];
+        let res = resolve_conflict_cycle(ctx(), &candidates);
+        let aapl = result_for(&res, "AAPL");
+        assert_eq!(aapl.disposition, ConflictDisposition::RefusedConflict);
+        assert_eq!(
+            aapl.reason_code,
+            REASON_CONFLICTING_INCREASE_TARGETS_REFUSED
+        );
+        assert_ne!(aapl.reason_code, REASON_DUPLICATE_ECONOMIC_CANDIDATE);
+    }
+
+    #[test]
     fn valid_reduction_survives_unrelated_invalid_increasing_candidate() {
         let candidates = vec![
-            sell(0, "AAPL", "s1", 5, 20),
+            sell(0, "AAPL", "s1", 5, 20, 1_000),
             buy(1, "AAPL", "s2", -3, 0, 1_000, 100_000_000), // invalid: qty<=0
         ];
         let res = resolve_conflict_cycle(ctx(), &candidates);
@@ -1065,7 +1259,7 @@ mod tests {
     fn all_invalid_multi_candidate_group_refused_with_no_valid_candidate() {
         let candidates = vec![
             buy(0, "AAPL", "s1", -1, 0, 1_000, 100_000_000),
-            sell(1, "AAPL", "s2", 999, 0), // would create short
+            unbound_sell(1, "AAPL", "s2", 999, 0), // would create short
         ];
         let res = resolve_conflict_cycle(ctx(), &candidates);
         let aapl = result_for(&res, "AAPL");
@@ -1075,8 +1269,8 @@ mod tests {
     }
 
     #[test]
-    fn sell_never_requires_bar_facts() {
-        let candidates = vec![sell(0, "AAPL", "s1", 5, 20)];
+    fn sell_with_matching_bar_facts_is_valid_passthrough() {
+        let candidates = vec![sell(0, "AAPL", "s1", 5, 20, 1_000)];
         let res = resolve_conflict_cycle(ctx(), &candidates);
         let aapl = result_for(&res, "AAPL");
         assert_eq!(aapl.disposition, ConflictDisposition::Passthrough);
@@ -1098,7 +1292,8 @@ mod tests {
     fn blank_symbol_is_refused() {
         let c = buy(0, "   ", "s1", 10, 0, 1_000, 100_000_000);
         let res = resolve_conflict_cycle(ctx(), &[c]);
-        // Groups by trimmed symbol "" -- still resolved, still refused.
+        // Groups by canonical (trimmed+uppercased) symbol "" -- still
+        // resolved, still refused.
         let group = result_for(&res, "");
         assert_eq!(group.reason_code, REASON_INVALID_CANDIDATE_REFUSED);
     }
@@ -1107,11 +1302,163 @@ mod tests {
     fn selected_ordinals_helper_returns_exactly_the_survivors() {
         let candidates = vec![
             buy(0, "AAPL", "s1", 10, 0, 1_000, 100_000_000),
-            sell(1, "MSFT", "s1", 3, 10),
+            sell(1, "MSFT", "s1", 3, 10, 2_000),
         ];
         let res = resolve_conflict_cycle(ctx(), &candidates);
         let mut ordinals = res.selected_ordinals();
         ordinals.sort();
         assert_eq!(ordinals, vec![0, 1]);
+    }
+
+    // ── AUTHORITY-AND-EVIDENCE-REPAIR-01 Defect 1: ambiguous invalid
+    // competitor must refuse a sole valid BUY, never a sole valid SELL ─────
+
+    #[test]
+    fn valid_buy_plus_invalid_buy_sibling_is_refused_ambiguous() {
+        let candidates = vec![
+            buy(0, "AAPL", "s1", 10, 0, 1_000, 100_000_000),
+            buy(1, "AAPL", "s2", -5, 0, 1_000, 100_000_000), // invalid: qty<=0
+        ];
+        let res = resolve_conflict_cycle(ctx(), &candidates);
+        let aapl = result_for(&res, "AAPL");
+        assert_eq!(aapl.disposition, ConflictDisposition::RefusedConflict);
+        assert_eq!(
+            aapl.reason_code,
+            REASON_AMBIGUOUS_INVALID_COMPETITOR_REFUSED
+        );
+        assert_eq!(aapl.selected_ordinal, None);
+        assert!(aapl.candidates.iter().all(|c| !c.selected));
+        let winner_row = aapl.candidates.iter().find(|c| c.ordinal == 0).unwrap();
+        assert_eq!(
+            winner_row.reason_code,
+            REASON_AMBIGUOUS_INVALID_COMPETITOR_REFUSED
+        );
+    }
+
+    #[test]
+    fn valid_buy_plus_malformed_side_sibling_is_refused_ambiguous() {
+        let mut malformed = buy(1, "AAPL", "s2", 10, 0, 1_000, 100_000_000);
+        malformed.side = "hold".to_string();
+        let candidates = vec![buy(0, "AAPL", "s1", 10, 0, 1_000, 100_000_000), malformed];
+        let res = resolve_conflict_cycle(ctx(), &candidates);
+        let aapl = result_for(&res, "AAPL");
+        assert_eq!(aapl.disposition, ConflictDisposition::RefusedConflict);
+        assert_eq!(
+            aapl.reason_code,
+            REASON_AMBIGUOUS_INVALID_COMPETITOR_REFUSED
+        );
+        assert_eq!(aapl.selected_ordinal, None);
+    }
+
+    #[test]
+    fn valid_buy_plus_overflow_sibling_is_refused_ambiguous() {
+        let overflow = buy(1, "AAPL", "s2", i64::MAX, 1, 1_000, 100_000_000);
+        let candidates = vec![buy(0, "AAPL", "s1", 10, 0, 1_000, 100_000_000), overflow];
+        let res = resolve_conflict_cycle(ctx(), &candidates);
+        let aapl = result_for(&res, "AAPL");
+        assert_eq!(aapl.disposition, ConflictDisposition::RefusedConflict);
+        assert_eq!(
+            aapl.reason_code,
+            REASON_AMBIGUOUS_INVALID_COMPETITOR_REFUSED
+        );
+        assert_eq!(aapl.selected_ordinal, None);
+        let overflow_row = aapl.candidates.iter().find(|c| c.ordinal == 1).unwrap();
+        assert_eq!(overflow_row.reason_code, REASON_ARITHMETIC_OVERFLOW);
+    }
+
+    #[test]
+    fn valid_reduction_plus_invalid_buy_sibling_still_selected() {
+        let candidates = vec![
+            sell(0, "AAPL", "s1", 5, 20, 1_000),
+            buy(1, "AAPL", "s2", -3, 0, 1_000, 100_000_000), // invalid: qty<=0
+        ];
+        let res = resolve_conflict_cycle(ctx(), &candidates);
+        let aapl = result_for(&res, "AAPL");
+        assert_eq!(aapl.disposition, ConflictDisposition::Passthrough);
+        assert_eq!(aapl.reason_code, REASON_SINGLE_CANDIDATE_PASSTHROUGH);
+        assert_eq!(aapl.selected_ordinal, Some(0));
+    }
+
+    // ── AUTHORITY-AND-EVIDENCE-REPAIR-01 Defect 2: bar/timeframe authority
+    // for both sides, per-candidate timeframe_secs, canonical symbol ──────
+
+    #[test]
+    fn sell_missing_bar_facts_is_refused() {
+        let candidates = vec![unbound_sell(0, "AAPL", "s1", 5, 20)];
+        let res = resolve_conflict_cycle(ctx(), &candidates);
+        let aapl = result_for(&res, "AAPL");
+        assert_eq!(aapl.disposition, ConflictDisposition::RefusedInvalid);
+        assert_eq!(aapl.reason_code, REASON_MISSING_OR_MISMATCHED_BAR_FACTS);
+        assert_eq!(aapl.selected_ordinal, None);
+    }
+
+    #[test]
+    fn sell_mismatched_bar_facts_is_refused() {
+        let mut c = sell(0, "AAPL", "s1", 5, 20, 1_000);
+        c.bar_symbol = Some("MSFT".to_string());
+        let res = resolve_conflict_cycle(ctx(), &[c]);
+        assert_eq!(
+            result_for(&res, "AAPL").reason_code,
+            REASON_MISSING_OR_MISMATCHED_BAR_FACTS
+        );
+    }
+
+    #[test]
+    fn sell_zero_close_does_not_block_a_reduction() {
+        // A reduction's economics never depend on price -- zero/absent
+        // close must not itself invalidate an otherwise fully-bound sell.
+        let mut c = sell(0, "AAPL", "s1", 5, 20, 1_000);
+        c.close_micros = Some(0);
+        let res = resolve_conflict_cycle(ctx(), &[c]);
+        let aapl = result_for(&res, "AAPL");
+        assert_eq!(aapl.disposition, ConflictDisposition::Passthrough);
+        assert_eq!(aapl.selected_ordinal, Some(0));
+    }
+
+    #[test]
+    fn per_candidate_timeframe_mismatch_is_refused_even_with_correct_secs() {
+        // The candidate's own timeframe_secs (300 == "5m") must govern the
+        // bar-timeframe check -- a bar stamped "1h" is wrong regardless of
+        // what any other candidate in the same tick was dispatched under.
+        let mut c = buy(0, "AAPL", "s1", 10, 0, 1_000, 100_000_000);
+        c.bar_timeframe = Some("1h".to_string());
+        let res = resolve_conflict_cycle(ctx(), &[c]);
+        assert_eq!(
+            result_for(&res, "AAPL").reason_code,
+            REASON_MISSING_OR_MISMATCHED_BAR_FACTS
+        );
+    }
+
+    #[test]
+    fn per_candidate_timeframe_secs_drives_expected_bar_timeframe_string() {
+        // 900s canonicalizes to "15m", not "5m" -- proves the check is
+        // driven by *this* candidate's own timeframe_secs, not a fixed
+        // constant.
+        let mut c = buy(0, "AAPL", "s1", 10, 0, 1_000, 100_000_000);
+        c.timeframe_secs = 900;
+        c.bar_timeframe = Some("15m".to_string());
+        let res = resolve_conflict_cycle(ctx(), &[c]);
+        let aapl = result_for(&res, "AAPL");
+        assert_eq!(aapl.disposition, ConflictDisposition::Passthrough);
+    }
+
+    #[test]
+    fn case_insensitive_canonical_symbol_groups_together() {
+        let candidates = vec![
+            buy(0, "aapl", "s1", 10, 0, 1_000, 100_000_000),
+            buy(1, "AAPL", "s2", 10, 0, 1_000, 100_000_000),
+        ];
+        let res = resolve_conflict_cycle(ctx(), &candidates);
+        // Exactly one canonical "AAPL" group -- not two separate groups.
+        assert_eq!(res.symbol_results.len(), 1);
+        let aapl = result_for(&res, "AAPL");
+        assert_eq!(aapl.disposition, ConflictDisposition::Selected);
+        assert_eq!(aapl.reason_code, REASON_TARGET_CONSENSUS_PASSTHROUGH);
+    }
+
+    #[test]
+    fn canonical_symbol_trims_and_uppercases() {
+        assert_eq!(canonical_symbol(" aapl "), "AAPL");
+        assert_eq!(canonical_symbol("AAPL"), "AAPL");
     }
 }

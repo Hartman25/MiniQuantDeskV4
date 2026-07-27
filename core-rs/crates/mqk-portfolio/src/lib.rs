@@ -44,8 +44,9 @@ pub use ledger::{Ledger, LedgerError, LedgerSnapshot};
 // MULTI-STRATEGY-CONFLICT-POLICY-01 Phase A: pure conflict-resolution model,
 // zero new callers (Bundle 6 daemon wiring is the only intended consumer).
 pub use conflict_policy::{
-    resolve_conflict_cycle, ConflictCandidateInput, ConflictCandidateResult, ConflictCycleContext,
-    ConflictCycleResult, ConflictDisposition, ConflictSymbolResult, CONFLICT_POLICY_SCHEMA_VERSION,
+    canonical_symbol, resolve_conflict_cycle, ConflictCandidateInput, ConflictCandidateResult,
+    ConflictCycleContext, ConflictCycleResult, ConflictDisposition, ConflictSymbolResult,
+    CONFLICT_POLICY_SCHEMA_VERSION, REASON_AMBIGUOUS_INVALID_COMPETITOR_REFUSED,
     REASON_ARITHMETIC_OVERFLOW, REASON_CONFLICTING_INCREASE_TARGETS_REFUSED,
     REASON_DUPLICATE_ECONOMIC_CANDIDATE, REASON_INCREASE_OVERRIDDEN_BY_RISK_REDUCTION,
     REASON_INVALID_CANDIDATE_REFUSED, REASON_MISSING_OR_MISMATCHED_BAR_FACTS, REASON_NOT_SELECTED,
