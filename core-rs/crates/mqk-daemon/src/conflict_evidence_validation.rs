@@ -170,9 +170,10 @@ pub fn validate_plan_with_candidates(
             ));
         }
         if c.qty <= 0 {
-            result
-                .blockers
-                .push(format!("candidate ordinal {} has non-positive qty", c.ordinal));
+            result.blockers.push(format!(
+                "candidate ordinal {} has non-positive qty",
+                c.ordinal
+            ));
         }
         if c.current_qty < 0 {
             result.blockers.push(format!(
@@ -236,7 +237,10 @@ pub fn validate_plan_with_candidates(
                 .entry(mqk_portfolio::canonical_symbol(&c.symbol))
                 .or_insert(0) += 1;
         }
-        if matches!(c.disposition.as_str(), "refused_invalid" | "refused_conflict") {
+        if matches!(
+            c.disposition.as_str(),
+            "refused_invalid" | "refused_conflict"
+        ) {
             refused_count += 1;
         }
 
@@ -285,9 +289,9 @@ pub fn validate_plan_with_candidates(
     }
     for (symbol, count) in &selected_by_symbol {
         if *count > 1 {
-            result
-                .blockers
-                .push(format!("symbol {symbol} has more than one selected candidate"));
+            result.blockers.push(format!(
+                "symbol {symbol} has more than one selected candidate"
+            ));
         }
     }
     if selected_count != plan.selected_count {
@@ -313,12 +317,20 @@ mod tests {
     use chrono::{TimeZone, Utc};
     use uuid::Uuid;
 
-    fn plan(overrides: impl FnOnce(&mut RuntimeStrategyConflictPlanRecord)) -> RuntimeStrategyConflictPlanRecord {
-        let plan_id = Uuid::new_v4();
+    fn plan(
+        overrides: impl FnOnce(&mut RuntimeStrategyConflictPlanRecord),
+    ) -> RuntimeStrategyConflictPlanRecord {
+        let plan_id = Uuid::new_v5(
+            &Uuid::NAMESPACE_DNS,
+            b"test.conflict-evidence-validation.plan",
+        );
         let mut p = RuntimeStrategyConflictPlanRecord {
             plan_id,
             cycle_id: plan_id,
-            run_id: Uuid::new_v4(),
+            run_id: Uuid::new_v5(
+                &Uuid::NAMESPACE_DNS,
+                b"test.conflict-evidence-validation.run",
+            ),
             mode: "shadow".to_string(),
             configured_mode: Some("shadow".to_string()),
             market_date: "2026-07-26".to_string(),
@@ -339,7 +351,10 @@ mod tests {
         overrides: impl FnOnce(&mut RuntimeStrategyConflictCandidateRecord),
     ) -> RuntimeStrategyConflictCandidateRecord {
         let mut c = RuntimeStrategyConflictCandidateRecord {
-            plan_id: Uuid::new_v4(),
+            plan_id: Uuid::new_v5(
+                &Uuid::NAMESPACE_DNS,
+                b"test.conflict-evidence-validation.plan",
+            ),
             ordinal: 0,
             symbol: "AAPL".to_string(),
             strategy_id: "s1".to_string(),
@@ -375,7 +390,12 @@ mod tests {
 
     #[test]
     fn plan_id_cycle_id_mismatch_is_invalid() {
-        let p = plan(|p| p.cycle_id = Uuid::new_v4());
+        let p = plan(|p| {
+            p.cycle_id = Uuid::new_v5(
+                &Uuid::NAMESPACE_DNS,
+                b"test.conflict-evidence-validation.mismatch",
+            )
+        });
         let v = validate_plan_shape(&p);
         assert!(!v.valid);
     }
