@@ -200,6 +200,120 @@ pub fn apply_conflict_policy(
     }
 }
 
+// ---------------------------------------------------------------------------
+// Phase C: durable evidence persistence (best-effort, never blocks the tick)
+// ---------------------------------------------------------------------------
+
+fn disposition_str(d: mqk_portfolio::ConflictDisposition) -> &'static str {
+    use mqk_portfolio::ConflictDisposition;
+    match d {
+        ConflictDisposition::Passthrough => "passthrough",
+        ConflictDisposition::Selected => "selected",
+        ConflictDisposition::NotSelected => "not_selected",
+        ConflictDisposition::RefusedInvalid => "refused_invalid",
+        ConflictDisposition::RefusedConflict => "refused_conflict",
+    }
+}
+
+fn plan_to_new_db_plan(
+    plan: &ConflictCycleResult,
+    mode: ConflictPolicyMode,
+    run_id: Uuid,
+    created_at_utc: chrono::DateTime<chrono::Utc>,
+) -> Option<mqk_db::NewRuntimeStrategyConflictPlan> {
+    let plan_id = plan.context.cycle_id.parse::<Uuid>().ok()?;
+
+    let mut candidates = Vec::new();
+    let mut selected_count = 0i32;
+    let mut refused_count = 0i32;
+    for sym in &plan.symbol_results {
+        for c in &sym.candidates {
+            if c.selected {
+                selected_count += 1;
+            }
+            if matches!(
+                c.disposition,
+                mqk_portfolio::ConflictDisposition::RefusedInvalid
+                    | mqk_portfolio::ConflictDisposition::RefusedConflict
+            ) {
+                refused_count += 1;
+            }
+            candidates.push(mqk_db::NewRuntimeStrategyConflictCandidate {
+                ordinal: c.ordinal as i32,
+                symbol: sym.symbol.clone(),
+                strategy_id: c.strategy_id.clone(),
+                timeframe_secs: c.timeframe_secs,
+                side: c.side.trim().to_ascii_lowercase(),
+                qty: c.qty,
+                current_qty: c.current_qty,
+                proposed_target_qty: c.proposed_target_qty,
+                bar_end_ts: c.bar_end_ts,
+                selected: c.selected,
+                disposition: disposition_str(c.disposition).to_string(),
+                reason_code: c.reason_code.clone(),
+            });
+        }
+    }
+    let candidate_count = candidates.len() as i32;
+
+    Some(mqk_db::NewRuntimeStrategyConflictPlan {
+        plan_id,
+        cycle_id: plan_id,
+        run_id,
+        mode: mode.as_str().to_string(),
+        market_date: plan.context.market_date.clone(),
+        policy_schema_version: plan.context.policy_schema_version.clone(),
+        symbol_group_count: plan.symbol_results.len() as i32,
+        candidate_count,
+        selected_count,
+        refused_count,
+        truth_state: plan.truth_state.clone(),
+        blockers: plan.blockers.clone(),
+        created_at_utc,
+        candidates,
+    })
+}
+
+/// Persist `plan` (when present) to durable evidence. Best-effort: a
+/// persistence failure is logged and otherwise ignored — this is evidence,
+/// not authoritative order/portfolio truth, and must never block or fail
+/// the tick that produced it, and must never alter which decision the pure
+/// policy already selected. Never called for `mode == Off` (no plan exists
+/// in that case).
+async fn persist_plan_if_present(
+    state_arc: &Arc<AppState>,
+    plan: &Option<ConflictCycleResult>,
+    mode: ConflictPolicyMode,
+    run_id: Uuid,
+    now_micros: i64,
+) {
+    let Some(plan) = plan else { return };
+    let Some(db) = state_arc.db.as_ref() else {
+        return;
+    };
+    // now_micros is loop-tick evidence context, not identity; created_at_utc
+    // is recorded as the current wall clock at persistence time.
+    let _ = now_micros;
+    let created_at_utc = chrono::Utc::now();
+    let Some(new_plan) = plan_to_new_db_plan(plan, mode, run_id, created_at_utc) else {
+        tracing::warn!(
+            cycle_id = %plan.context.cycle_id,
+            "runtime_strategy_conflict_plan_persist_skipped: cycle_id is not a valid UUID"
+        );
+        return;
+    };
+    match mqk_db::insert_runtime_strategy_conflict_plan(db, new_plan).await {
+        Ok(_) => {}
+        Err(err) => {
+            tracing::warn!(
+                cycle_id = %plan.context.cycle_id,
+                error = %err,
+                "runtime_strategy_conflict_plan_persist_failed"
+            );
+        }
+    }
+}
+
 /// The single per-tick call site `loop_runner.rs` uses. Resolves the
 /// effective mode (env + live-lock) and delegates to the pure
 /// [`apply_conflict_policy`] above.
@@ -238,7 +352,16 @@ pub async fn gather_and_resolve(
         timeframe,
         now_micros,
     };
-    apply_conflict_policy(&ctx, decisions, current_positions)
+    let outcome = apply_conflict_policy(&ctx, decisions, current_positions);
+    persist_plan_if_present(
+        state_arc,
+        &outcome.plan,
+        eff.effective_mode,
+        run_id,
+        now_micros,
+    )
+    .await;
+    outcome
 }
 
 #[cfg(test)]

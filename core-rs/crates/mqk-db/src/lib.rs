@@ -83,6 +83,7 @@ pub mod reconcile_state;
 pub mod restart_intent;
 pub mod runs;
 pub mod runtime_opportunity_allocation;
+pub mod runtime_strategy_conflict;
 pub mod strategy;
 pub mod strategy_promotion;
 
@@ -107,6 +108,9 @@ pub use runs::*;
 // RUNTIME-OPPORTUNITY-ALLOCATION-01 Phase G: durable allocation-cycle
 // evidence store (never portfolio/P&L/order truth).
 pub use runtime_opportunity_allocation::*;
+// MULTI-STRATEGY-CONFLICT-POLICY-01 Phase C: durable conflict-resolution
+// evidence store (never portfolio/P&L/order truth).
+pub use runtime_strategy_conflict::*;
 pub use strategy::*;
 pub use strategy_promotion::*;
 
