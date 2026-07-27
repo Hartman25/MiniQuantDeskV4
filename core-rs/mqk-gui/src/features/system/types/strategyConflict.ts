@@ -16,6 +16,8 @@ export interface ConflictStatus {
   latest_plan_symbol_group_count: number | null;
   latest_plan_candidate_count: number | null;
   latest_plan_selected_count: number | null;
+  /** Non-empty only when truth_state === "invalid_evidence". */
+  evidence_blockers: string[];
   checked_at_utc: string;
 }
 
@@ -38,6 +40,8 @@ export interface ConflictPlanRow {
   cycle_id: string;
   run_id: string;
   mode: string;
+  /** `null` on a pre-schema-repair legacy row. */
+  configured_mode: string | null;
   market_date: string;
   policy_schema_version: string;
   symbol_group_count: number;
@@ -54,6 +58,8 @@ export interface ConflictPlanDetail {
   truth_state: string;
   plan: ConflictPlanRow | null;
   candidates: ConflictPlanCandidateRow[];
+  /** Non-empty only when truth_state === "invalid_evidence". */
+  evidence_blockers: string[];
   checked_at_utc: string;
 }
 
@@ -61,5 +67,8 @@ export interface ConflictPlansList {
   truth_state: string;
   run_id: string | null;
   plans: ConflictPlanRow[];
+  /** How many rows the query returned but were excluded for failing the
+   * shared evidence validator -- never silently mixed into `plans`. */
+  excluded_malformed_count: number;
   checked_at_utc: string;
 }

@@ -107,6 +107,17 @@ export function StrategyConflictPolicyPanel() {
               Conflict policy query failed — durable evidence could not be read.
             </div>
           )}
+          {status.truth_state === "invalid_evidence" && (
+            <div className="unavailable-notice unavailable-critical">
+              <strong>Latest conflict-policy evidence is malformed and was refused</strong> — never
+              projected as active truth, and never silently replaced by an older plan.
+              <ul>
+                {status.evidence_blockers.map((b, i) => (
+                  <li key={i}>{b}</li>
+                ))}
+              </ul>
+            </div>
+          )}
           <div>
             <span>Latest plan</span>
             <strong>{status.latest_plan_id ?? "— (none this run)"}</strong>
@@ -122,9 +133,25 @@ export function StrategyConflictPolicyPanel() {
           <div className="unavailable-notice">{status.current_runtime_limitation}</div>
         </div>
       )}
+      {!loading && !error && plan && plan.truth_state === "invalid_evidence" && (
+        <div className="unavailable-notice unavailable-critical">
+          <strong>Plan detail evidence is malformed and was refused</strong> — not rendered as active.
+          <ul>
+            {plan.evidence_blockers.map((b, i) => (
+              <li key={i}>{b}</li>
+            ))}
+          </ul>
+        </div>
+      )}
       {!loading && !error && plan && plan.truth_state === "active" && plan.plan && (
         <table className="data-table">
-          <caption>Latest plan candidates ({plan.plan.mode})</caption>
+          <caption>
+            Latest plan candidates ({plan.plan.mode}
+            {plan.plan.configured_mode && plan.plan.configured_mode !== plan.plan.mode
+              ? `, configured: ${plan.plan.configured_mode}`
+              : ""}
+            )
+          </caption>
           <thead>
             <tr>
               <th>Symbol</th>
