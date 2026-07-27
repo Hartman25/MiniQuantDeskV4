@@ -85,6 +85,7 @@ fn sample_plan(run_id: Uuid, plan_id: Uuid) -> NewRuntimeStrategyConflictPlan {
         cycle_id: plan_id,
         run_id,
         mode: "shadow".to_string(),
+        configured_mode: "shadow".to_string(),
         market_date: "2099-02-01".to_string(),
         policy_schema_version: "multi-strategy-conflict-policy-v1".to_string(),
         symbol_group_count: 1,
@@ -103,8 +104,16 @@ fn sample_plan(run_id: Uuid, plan_id: Uuid) -> NewRuntimeStrategyConflictPlan {
                 side: "sell".to_string(),
                 qty: 5,
                 current_qty: 20,
+                order_type: "market".to_string(),
+                time_in_force: "day".to_string(),
+                limit_price: None,
                 proposed_target_qty: Some(15),
-                bar_end_ts: None,
+                bar_present: true,
+                bar_symbol: Some("AAPL".to_string()),
+                bar_strategy_id: Some("strategy_a".to_string()),
+                bar_timeframe: Some("5m".to_string()),
+                bar_end_ts: Some(900),
+                close_micros: Some(0),
                 selected: true,
                 disposition: "selected".to_string(),
                 reason_code: "risk_reducing_candidate_selected".to_string(),
@@ -117,8 +126,16 @@ fn sample_plan(run_id: Uuid, plan_id: Uuid) -> NewRuntimeStrategyConflictPlan {
                 side: "buy".to_string(),
                 qty: 10,
                 current_qty: 20,
+                order_type: "market".to_string(),
+                time_in_force: "day".to_string(),
+                limit_price: None,
                 proposed_target_qty: Some(30),
+                bar_present: true,
+                bar_symbol: Some("AAPL".to_string()),
+                bar_strategy_id: Some("strategy_b".to_string()),
+                bar_timeframe: Some("5m".to_string()),
                 bar_end_ts: Some(1_000),
+                close_micros: Some(100_000_000),
                 selected: false,
                 disposition: "not_selected".to_string(),
                 reason_code: "increase_overridden_by_risk_reduction".to_string(),
@@ -205,6 +222,216 @@ async fn re_persisting_same_plan_id_is_idempotent_no_op() {
         candidates.len(),
         2,
         "no duplicate candidate rows from replay"
+    );
+
+    cleanup(&pool, &[run_id]).await;
+}
+
+/// AUTHORITY-AND-EVIDENCE-REPAIR-01 Defect 4: a divergent payload under the
+/// same `plan_id` must never be silently accepted as an idempotent replay.
+/// Asserts `PayloadCollision` and that the originally-stored row is left
+/// untouched.
+async fn assert_payload_collision_and_original_preserved(
+    pool: &sqlx::PgPool,
+    original: NewRuntimeStrategyConflictPlan,
+    mutated: NewRuntimeStrategyConflictPlan,
+) {
+    let plan_id = original.plan_id;
+    let first = insert_runtime_strategy_conflict_plan(pool, original)
+        .await
+        .expect("first insert should succeed");
+    assert_eq!(first, InsertRuntimeStrategyConflictPlanOutcome::Inserted);
+
+    let second = insert_runtime_strategy_conflict_plan(pool, mutated)
+        .await
+        .expect("second insert should not error, only report collision");
+    match second {
+        InsertRuntimeStrategyConflictPlanOutcome::PayloadCollision { .. } => {}
+        other => panic!("expected PayloadCollision, got {other:?}"),
+    }
+
+    let (fetched_plan, _) = fetch_runtime_strategy_conflict_plan(pool, plan_id)
+        .await
+        .expect("fetch should succeed")
+        .expect("plan should exist");
+    assert_eq!(
+        fetched_plan.mode, "shadow",
+        "original row must be preserved, never overwritten by the divergent replay"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL"]
+async fn divergent_mode_under_same_plan_id_is_a_payload_collision() {
+    let Ok(pool) = test_pool().await else {
+        eprintln!("skipped: requires MQK_DATABASE_URL");
+        return;
+    };
+    let run_id = fixed_run_id("collision_mode");
+    cleanup(&pool, &[run_id]).await;
+    fixture_run(&pool, run_id).await;
+
+    let plan_id = fixed_plan_id("collision_mode");
+    let original = sample_plan(run_id, plan_id);
+    let mut mutated = sample_plan(run_id, plan_id);
+    mutated.mode = "paper_enforced".to_string();
+    mutated.configured_mode = "paper_enforced".to_string();
+
+    assert_payload_collision_and_original_preserved(&pool, original, mutated).await;
+    cleanup(&pool, &[run_id]).await;
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL"]
+async fn divergent_candidate_quantity_under_same_plan_id_is_a_payload_collision() {
+    let Ok(pool) = test_pool().await else {
+        eprintln!("skipped: requires MQK_DATABASE_URL");
+        return;
+    };
+    let run_id = fixed_run_id("collision_qty");
+    cleanup(&pool, &[run_id]).await;
+    fixture_run(&pool, run_id).await;
+
+    let plan_id = fixed_plan_id("collision_qty");
+    let original = sample_plan(run_id, plan_id);
+    let mut mutated = sample_plan(run_id, plan_id);
+    mutated.candidates[0].qty = 999;
+
+    assert_payload_collision_and_original_preserved(&pool, original, mutated).await;
+    cleanup(&pool, &[run_id]).await;
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL"]
+async fn divergent_bar_identity_under_same_plan_id_is_a_payload_collision() {
+    let Ok(pool) = test_pool().await else {
+        eprintln!("skipped: requires MQK_DATABASE_URL");
+        return;
+    };
+    let run_id = fixed_run_id("collision_bar");
+    cleanup(&pool, &[run_id]).await;
+    fixture_run(&pool, run_id).await;
+
+    let plan_id = fixed_plan_id("collision_bar");
+    let original = sample_plan(run_id, plan_id);
+    let mut mutated = sample_plan(run_id, plan_id);
+    mutated.candidates[1].bar_end_ts = Some(2_000);
+
+    assert_payload_collision_and_original_preserved(&pool, original, mutated).await;
+    cleanup(&pool, &[run_id]).await;
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL"]
+async fn divergent_disposition_under_same_plan_id_is_a_payload_collision() {
+    let Ok(pool) = test_pool().await else {
+        eprintln!("skipped: requires MQK_DATABASE_URL");
+        return;
+    };
+    let run_id = fixed_run_id("collision_disposition");
+    cleanup(&pool, &[run_id]).await;
+    fixture_run(&pool, run_id).await;
+
+    let plan_id = fixed_plan_id("collision_disposition");
+    let original = sample_plan(run_id, plan_id);
+    let mut mutated = sample_plan(run_id, plan_id);
+    mutated.candidates[1].disposition = "refused_invalid".to_string();
+
+    assert_payload_collision_and_original_preserved(&pool, original, mutated).await;
+    cleanup(&pool, &[run_id]).await;
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL"]
+async fn divergent_selected_flag_under_same_plan_id_is_a_payload_collision() {
+    let Ok(pool) = test_pool().await else {
+        eprintln!("skipped: requires MQK_DATABASE_URL");
+        return;
+    };
+    let run_id = fixed_run_id("collision_selected");
+    cleanup(&pool, &[run_id]).await;
+    fixture_run(&pool, run_id).await;
+
+    let plan_id = fixed_plan_id("collision_selected");
+    let original = sample_plan(run_id, plan_id);
+    let mut mutated = sample_plan(run_id, plan_id);
+    mutated.candidates[0].selected = false;
+    mutated.selected_count = 0;
+
+    assert_payload_collision_and_original_preserved(&pool, original, mutated).await;
+    cleanup(&pool, &[run_id]).await;
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL"]
+async fn divergent_counts_under_same_plan_id_is_a_payload_collision() {
+    let Ok(pool) = test_pool().await else {
+        eprintln!("skipped: requires MQK_DATABASE_URL");
+        return;
+    };
+    let run_id = fixed_run_id("collision_counts");
+    cleanup(&pool, &[run_id]).await;
+    fixture_run(&pool, run_id).await;
+
+    let plan_id = fixed_plan_id("collision_counts");
+    let original = sample_plan(run_id, plan_id);
+    let mut mutated = sample_plan(run_id, plan_id);
+    mutated.refused_count = 2;
+
+    assert_payload_collision_and_original_preserved(&pool, original, mutated).await;
+    cleanup(&pool, &[run_id]).await;
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL"]
+async fn divergent_reason_code_under_same_plan_id_is_a_payload_collision() {
+    let Ok(pool) = test_pool().await else {
+        eprintln!("skipped: requires MQK_DATABASE_URL");
+        return;
+    };
+    let run_id = fixed_run_id("collision_reason");
+    cleanup(&pool, &[run_id]).await;
+    fixture_run(&pool, run_id).await;
+
+    let plan_id = fixed_plan_id("collision_reason");
+    let original = sample_plan(run_id, plan_id);
+    let mut mutated = sample_plan(run_id, plan_id);
+    mutated.candidates[1].reason_code = "not_selected".to_string();
+
+    assert_payload_collision_and_original_preserved(&pool, original, mutated).await;
+    cleanup(&pool, &[run_id]).await;
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL"]
+async fn identical_replay_with_reordered_candidates_is_still_idempotent() {
+    // Defect 4: candidate comparison must be independent of caller
+    // insertion order.
+    let Ok(pool) = test_pool().await else {
+        eprintln!("skipped: requires MQK_DATABASE_URL");
+        return;
+    };
+    let run_id = fixed_run_id("reordered_replay");
+    cleanup(&pool, &[run_id]).await;
+    fixture_run(&pool, run_id).await;
+
+    let plan_id = fixed_plan_id("reordered_replay");
+    let original = sample_plan(run_id, plan_id);
+    let mut reordered = sample_plan(run_id, plan_id);
+    reordered.candidates.reverse();
+
+    let first = insert_runtime_strategy_conflict_plan(&pool, original)
+        .await
+        .expect("first insert should succeed");
+    assert_eq!(first, InsertRuntimeStrategyConflictPlanOutcome::Inserted);
+
+    let second = insert_runtime_strategy_conflict_plan(&pool, reordered)
+        .await
+        .expect("second insert should succeed as a no-op");
+    assert_eq!(
+        second,
+        InsertRuntimeStrategyConflictPlanOutcome::AlreadyExists,
+        "candidate vector order must never affect replay comparison"
     );
 
     cleanup(&pool, &[run_id]).await;

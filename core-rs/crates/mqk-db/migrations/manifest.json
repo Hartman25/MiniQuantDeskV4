@@ -350,6 +350,12 @@
       "path": "0056_runtime_strategy_conflict_plans.sql",
       "status": "applied",
       "intent": "MULTI-STRATEGY-CONFLICT-POLICY-01 Phase C: add sys_runtime_strategy_conflict_plans (one durable row per conflict-policy cycle, plan_id = the deterministic cycle_id, written only in shadow/paper_enforced mode -- the default off mode never writes here) and sys_runtime_strategy_conflict_candidates (child rows, one per candidate considered across every symbol group in the cycle, both buy and sell sides). Conflict-resolution evidence only -- never portfolio/P&L/order truth; records which exact original candidate (if any) was selected per symbol and why, never a rebuilt decision. Additive only, does not modify any existing table. No DEFAULT now()/gen_random_uuid() -- every timestamp and identity is caller-supplied."
+    },
+    {
+      "id": "0057",
+      "path": "0057_runtime_strategy_conflict_evidence_provenance.sql",
+      "status": "applied",
+      "intent": "MULTI-STRATEGY-CONFLICT-POLICY-01-AUTHORITY-AND-EVIDENCE-REPAIR Defect 5: add nullable configured_mode to sys_runtime_strategy_conflict_plans (requested mode before the paper+Alpaca live-lock; mode remains the already-resolved effective mode) plus a plan_id=cycle_id consistency CHECK, and nullable order_type/time_in_force/limit_price/bar_present/bar_symbol/bar_strategy_id/bar_timeframe/close_micros to sys_runtime_strategy_conflict_candidates (full candidate bar provenance and order semantics, closing the 0056 gap where sell candidates carried no bar facts at all). Additive only, does not modify 0056. No backfill -- every 0056-era row round-trips the new columns as NULL and must be read as legacy/incomplete evidence, never fabricated or projected as active current truth."
     }
   ]
 }

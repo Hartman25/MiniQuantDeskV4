@@ -6,12 +6,20 @@
 //!
 //! Written only when the runtime mode is `shadow` or `paper_enforced` — the
 //! default `off` mode never calls anything in this module. Idempotent by
-//! construction: `plan_id` is the caller-minted deterministic `cycle_id`, so
-//! `ON CONFLICT (plan_id) DO NOTHING` (via the same existence-check +
-//! rollback-on-duplicate pattern used by
-//! `runtime_opportunity_allocation::insert_runtime_opportunity_allocation_plan`)
-//! makes re-persisting the same logical cycle a no-op rather than a
-//! duplicate or an error.
+//! construction: `plan_id` is the caller-minted deterministic `cycle_id`.
+//!
+//! # AUTHORITY-AND-EVIDENCE-REPAIR-01 Defect 4
+//!
+//! A `plan_id` match no longer implies idempotent replay by itself. When
+//! `plan_id` already exists, [`insert_runtime_strategy_conflict_plan`] now
+//! fetches the stored plan and candidates and compares them canonically
+//! (independent of candidate insertion order, sensitive to every evidence
+//! field) against the incoming payload. An exact match is the intended
+//! idempotent no-op (`AlreadyExists`); any divergence is a
+//! [`InsertRuntimeStrategyConflictPlanOutcome::PayloadCollision`] — never
+//! silently accepted as a replay.
+
+use std::collections::BTreeMap;
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -28,8 +36,22 @@ pub struct NewRuntimeStrategyConflictCandidate {
     pub side: String,
     pub qty: i64,
     pub current_qty: i64,
+    /// Order semantics -- part of the cycle's economic identity
+    /// (`compute_conflict_cycle_id`), persisted here as durable evidence.
+    pub order_type: String,
+    pub time_in_force: String,
+    pub limit_price: Option<i64>,
     pub proposed_target_qty: Option<i64>,
+    /// `true` only when every bar-identity field below is present. An
+    /// explicit tri-state field distinct from any individual bar column
+    /// being null, so "bar facts entirely absent" and "bar facts present"
+    /// are never conflated.
+    pub bar_present: bool,
+    pub bar_symbol: Option<String>,
+    pub bar_strategy_id: Option<String>,
+    pub bar_timeframe: Option<String>,
     pub bar_end_ts: Option<i64>,
+    pub close_micros: Option<i64>,
     pub selected: bool,
     /// One of: `passthrough`, `selected`, `not_selected`, `refused_invalid`,
     /// `refused_conflict`.
@@ -43,7 +65,12 @@ pub struct NewRuntimeStrategyConflictPlan {
     pub cycle_id: Uuid,
     pub run_id: Uuid,
     /// `"shadow"` or `"paper_enforced"` — `"off"` must never be persisted.
+    /// This is the already live-lock-resolved *effective* mode.
     pub mode: String,
+    /// The mode as configured/requested before the live-lock. Distinct
+    /// from `mode` (Defect 3/5) so evidence can distinguish "operator
+    /// asked for X" from "X is what actually ran."
+    pub configured_mode: String,
     pub market_date: String,
     pub policy_schema_version: String,
     pub symbol_group_count: i32,
@@ -62,6 +89,9 @@ pub struct RuntimeStrategyConflictPlanRecord {
     pub cycle_id: Uuid,
     pub run_id: Uuid,
     pub mode: String,
+    /// `None` on a 0056-era row written before this column existed --
+    /// legacy/incomplete evidence, never fabricated.
+    pub configured_mode: Option<String>,
     pub market_date: String,
     pub policy_schema_version: String,
     pub symbol_group_count: i32,
@@ -83,8 +113,18 @@ pub struct RuntimeStrategyConflictCandidateRecord {
     pub side: String,
     pub qty: i64,
     pub current_qty: i64,
+    /// `None` on a 0056-era row.
+    pub order_type: Option<String>,
+    pub time_in_force: Option<String>,
+    pub limit_price: Option<i64>,
     pub proposed_target_qty: Option<i64>,
+    /// `None` on a 0056-era row -- legacy/unknown, distinct from `Some(false)`.
+    pub bar_present: Option<bool>,
+    pub bar_symbol: Option<String>,
+    pub bar_strategy_id: Option<String>,
+    pub bar_timeframe: Option<String>,
     pub bar_end_ts: Option<i64>,
+    pub close_micros: Option<i64>,
     pub selected: bool,
     pub disposition: String,
     pub reason_code: String,
@@ -93,9 +133,171 @@ pub struct RuntimeStrategyConflictCandidateRecord {
 #[derive(Debug, Clone, PartialEq)]
 pub enum InsertRuntimeStrategyConflictPlanOutcome {
     Inserted,
-    /// `plan_id` already existed — idempotent no-op (re-run of the same
+    /// `plan_id` already existed and the stored payload is canonically
+    /// identical to this replay -- idempotent no-op (re-run of the same
     /// logical cycle, or a crash/restart replay).
     AlreadyExists,
+    /// `plan_id` already existed but the stored payload diverges from this
+    /// replay's payload (AUTHORITY-AND-EVIDENCE-REPAIR-01 Defect 4). Never
+    /// silently accepted as idempotent and never overwrites the original
+    /// row -- fail-closed collision outcome for the caller to log/alert on.
+    PayloadCollision { detail: String },
+}
+
+/// Canonical, order-independent snapshot of one plan's comparable fields
+/// (excludes `created_at_utc`, which is evidence-only wall-clock capture
+/// time, not part of the plan's economic identity or truth).
+#[derive(Debug, Clone, PartialEq)]
+struct PlanSnapshot {
+    cycle_id: Uuid,
+    run_id: Uuid,
+    mode: String,
+    configured_mode: Option<String>,
+    market_date: String,
+    policy_schema_version: String,
+    symbol_group_count: i32,
+    candidate_count: i32,
+    selected_count: i32,
+    refused_count: i32,
+    truth_state: String,
+    blockers: Vec<String>,
+}
+
+/// Canonical, order-independent snapshot of one candidate row keyed by
+/// `ordinal` (unique within a plan) so two candidate vectors can be
+/// compared regardless of caller insertion order while remaining sensitive
+/// to every evidence field.
+#[derive(Debug, Clone, PartialEq)]
+struct CandidateSnapshot {
+    symbol: String,
+    strategy_id: String,
+    timeframe_secs: i64,
+    side: String,
+    qty: i64,
+    current_qty: i64,
+    order_type: Option<String>,
+    time_in_force: Option<String>,
+    limit_price: Option<i64>,
+    proposed_target_qty: Option<i64>,
+    bar_present: Option<bool>,
+    bar_symbol: Option<String>,
+    bar_strategy_id: Option<String>,
+    bar_timeframe: Option<String>,
+    bar_end_ts: Option<i64>,
+    close_micros: Option<i64>,
+    selected: bool,
+    disposition: String,
+    reason_code: String,
+}
+
+fn new_plan_snapshot(plan: &NewRuntimeStrategyConflictPlan) -> PlanSnapshot {
+    PlanSnapshot {
+        cycle_id: plan.cycle_id,
+        run_id: plan.run_id,
+        mode: plan.mode.clone(),
+        configured_mode: Some(plan.configured_mode.clone()),
+        market_date: plan.market_date.clone(),
+        policy_schema_version: plan.policy_schema_version.clone(),
+        symbol_group_count: plan.symbol_group_count,
+        candidate_count: plan.candidate_count,
+        selected_count: plan.selected_count,
+        refused_count: plan.refused_count,
+        truth_state: plan.truth_state.clone(),
+        blockers: {
+            let mut b = plan.blockers.clone();
+            b.sort();
+            b
+        },
+    }
+}
+
+fn stored_plan_snapshot(rec: &RuntimeStrategyConflictPlanRecord) -> PlanSnapshot {
+    PlanSnapshot {
+        cycle_id: rec.cycle_id,
+        run_id: rec.run_id,
+        mode: rec.mode.clone(),
+        configured_mode: rec.configured_mode.clone(),
+        market_date: rec.market_date.clone(),
+        policy_schema_version: rec.policy_schema_version.clone(),
+        symbol_group_count: rec.symbol_group_count,
+        candidate_count: rec.candidate_count,
+        selected_count: rec.selected_count,
+        refused_count: rec.refused_count,
+        truth_state: rec.truth_state.clone(),
+        blockers: {
+            let mut b = rec.blockers.clone();
+            b.sort();
+            b
+        },
+    }
+}
+
+fn new_candidate_snapshots(
+    candidates: &[NewRuntimeStrategyConflictCandidate],
+) -> BTreeMap<i32, CandidateSnapshot> {
+    candidates
+        .iter()
+        .map(|c| {
+            (
+                c.ordinal,
+                CandidateSnapshot {
+                    symbol: c.symbol.clone(),
+                    strategy_id: c.strategy_id.clone(),
+                    timeframe_secs: c.timeframe_secs,
+                    side: c.side.clone(),
+                    qty: c.qty,
+                    current_qty: c.current_qty,
+                    order_type: Some(c.order_type.clone()),
+                    time_in_force: Some(c.time_in_force.clone()),
+                    limit_price: c.limit_price,
+                    proposed_target_qty: c.proposed_target_qty,
+                    bar_present: Some(c.bar_present),
+                    bar_symbol: c.bar_symbol.clone(),
+                    bar_strategy_id: c.bar_strategy_id.clone(),
+                    bar_timeframe: c.bar_timeframe.clone(),
+                    bar_end_ts: c.bar_end_ts,
+                    close_micros: c.close_micros,
+                    selected: c.selected,
+                    disposition: c.disposition.clone(),
+                    reason_code: c.reason_code.clone(),
+                },
+            )
+        })
+        .collect()
+}
+
+fn stored_candidate_snapshots(
+    candidates: &[RuntimeStrategyConflictCandidateRecord],
+) -> BTreeMap<i32, CandidateSnapshot> {
+    candidates
+        .iter()
+        .map(|c| {
+            (
+                c.ordinal,
+                CandidateSnapshot {
+                    symbol: c.symbol.clone(),
+                    strategy_id: c.strategy_id.clone(),
+                    timeframe_secs: c.timeframe_secs,
+                    side: c.side.clone(),
+                    qty: c.qty,
+                    current_qty: c.current_qty,
+                    order_type: c.order_type.clone(),
+                    time_in_force: c.time_in_force.clone(),
+                    limit_price: c.limit_price,
+                    proposed_target_qty: c.proposed_target_qty,
+                    bar_present: c.bar_present,
+                    bar_symbol: c.bar_symbol.clone(),
+                    bar_strategy_id: c.bar_strategy_id.clone(),
+                    bar_timeframe: c.bar_timeframe.clone(),
+                    bar_end_ts: c.bar_end_ts,
+                    close_micros: c.close_micros,
+                    selected: c.selected,
+                    disposition: c.disposition.clone(),
+                    reason_code: c.reason_code.clone(),
+                },
+            )
+        })
+        .collect()
 }
 
 /// Persist one conflict plan and its candidates atomically. Only ever
@@ -110,34 +312,70 @@ pub async fn insert_runtime_strategy_conflict_plan(
         .await
         .context("insert_runtime_strategy_conflict_plan: begin failed")?;
 
-    let existing: Option<Uuid> = sqlx::query_scalar(
-        "select plan_id from sys_runtime_strategy_conflict_plans where plan_id = $1",
+    let existing_plan_row = sqlx::query(
+        "select plan_id, cycle_id, run_id, mode, configured_mode, market_date, \
+         policy_schema_version, symbol_group_count, candidate_count, selected_count, \
+         refused_count, truth_state, blockers, created_at_utc \
+         from sys_runtime_strategy_conflict_plans where plan_id = $1",
     )
     .bind(plan.plan_id)
     .fetch_optional(&mut *tx)
     .await
     .context("insert_runtime_strategy_conflict_plan: existence check failed")?;
 
-    if existing.is_some() {
+    if let Some(row) = existing_plan_row {
+        let existing_record = plan_row_to_record(&row);
+        let existing_candidate_rows = sqlx::query(
+            "select plan_id, ordinal, symbol, strategy_id, timeframe_secs, side, qty, \
+             current_qty, order_type, time_in_force, limit_price, proposed_target_qty, \
+             bar_present, bar_symbol, bar_strategy_id, bar_timeframe, bar_end_ts, \
+             close_micros, selected, disposition, reason_code \
+             from sys_runtime_strategy_conflict_candidates where plan_id = $1",
+        )
+        .bind(plan.plan_id)
+        .fetch_all(&mut *tx)
+        .await
+        .context("insert_runtime_strategy_conflict_plan: existing candidates query failed")?;
+        let existing_candidates: Vec<RuntimeStrategyConflictCandidateRecord> =
+            existing_candidate_rows
+                .iter()
+                .map(candidate_row_to_record)
+                .collect();
+
         tx.rollback()
             .await
             .context("insert_runtime_strategy_conflict_plan: rollback (read-only path) failed")?;
-        return Ok(InsertRuntimeStrategyConflictPlanOutcome::AlreadyExists);
+
+        let plans_match = stored_plan_snapshot(&existing_record) == new_plan_snapshot(&plan);
+        let candidates_match =
+            stored_candidate_snapshots(&existing_candidates) == new_candidate_snapshots(&plan.candidates);
+
+        if plans_match && candidates_match {
+            return Ok(InsertRuntimeStrategyConflictPlanOutcome::AlreadyExists);
+        }
+        return Ok(InsertRuntimeStrategyConflictPlanOutcome::PayloadCollision {
+            detail: format!(
+                "plan_id {} already exists with a divergent payload (plan fields match: {}, \
+                 candidate fields match: {}); never treated as idempotent replay",
+                plan.plan_id, plans_match, candidates_match
+            ),
+        });
     }
 
     sqlx::query(
         r#"
         insert into sys_runtime_strategy_conflict_plans
-            (plan_id, cycle_id, run_id, mode, market_date, policy_schema_version,
-             symbol_group_count, candidate_count, selected_count, refused_count,
-             truth_state, blockers, created_at_utc)
-        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+            (plan_id, cycle_id, run_id, mode, configured_mode, market_date,
+             policy_schema_version, symbol_group_count, candidate_count, selected_count,
+             refused_count, truth_state, blockers, created_at_utc)
+        values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
         "#,
     )
     .bind(plan.plan_id)
     .bind(plan.cycle_id)
     .bind(plan.run_id)
     .bind(&plan.mode)
+    .bind(&plan.configured_mode)
     .bind(&plan.market_date)
     .bind(&plan.policy_schema_version)
     .bind(plan.symbol_group_count)
@@ -156,9 +394,11 @@ pub async fn insert_runtime_strategy_conflict_plan(
             r#"
             insert into sys_runtime_strategy_conflict_candidates
                 (plan_id, ordinal, symbol, strategy_id, timeframe_secs, side, qty,
-                 current_qty, proposed_target_qty, bar_end_ts, selected, disposition,
-                 reason_code)
-            values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+                 current_qty, order_type, time_in_force, limit_price, proposed_target_qty,
+                 bar_present, bar_symbol, bar_strategy_id, bar_timeframe, bar_end_ts,
+                 close_micros, selected, disposition, reason_code)
+            values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
+                    $17, $18, $19, $20, $21)
             "#,
         )
         .bind(plan.plan_id)
@@ -169,8 +409,16 @@ pub async fn insert_runtime_strategy_conflict_plan(
         .bind(&c.side)
         .bind(c.qty)
         .bind(c.current_qty)
+        .bind(&c.order_type)
+        .bind(&c.time_in_force)
+        .bind(c.limit_price)
         .bind(c.proposed_target_qty)
+        .bind(c.bar_present)
+        .bind(&c.bar_symbol)
+        .bind(&c.bar_strategy_id)
+        .bind(&c.bar_timeframe)
         .bind(c.bar_end_ts)
+        .bind(c.close_micros)
         .bind(c.selected)
         .bind(&c.disposition)
         .bind(&c.reason_code)
@@ -193,6 +441,7 @@ fn plan_row_to_record(row: &sqlx::postgres::PgRow) -> RuntimeStrategyConflictPla
         cycle_id: row.get("cycle_id"),
         run_id: row.get("run_id"),
         mode: row.get("mode"),
+        configured_mode: row.get("configured_mode"),
         market_date: row.get("market_date"),
         policy_schema_version: row.get("policy_schema_version"),
         symbol_group_count: row.get("symbol_group_count"),
@@ -216,8 +465,16 @@ fn candidate_row_to_record(row: &sqlx::postgres::PgRow) -> RuntimeStrategyConfli
         side: row.get("side"),
         qty: row.get("qty"),
         current_qty: row.get("current_qty"),
+        order_type: row.get("order_type"),
+        time_in_force: row.get("time_in_force"),
+        limit_price: row.get("limit_price"),
         proposed_target_qty: row.get("proposed_target_qty"),
+        bar_present: row.get("bar_present"),
+        bar_symbol: row.get("bar_symbol"),
+        bar_strategy_id: row.get("bar_strategy_id"),
+        bar_timeframe: row.get("bar_timeframe"),
         bar_end_ts: row.get("bar_end_ts"),
+        close_micros: row.get("close_micros"),
         selected: row.get("selected"),
         disposition: row.get("disposition"),
         reason_code: row.get("reason_code"),
@@ -235,9 +492,9 @@ pub async fn fetch_runtime_strategy_conflict_plan(
     )>,
 > {
     let Some(plan_row) = sqlx::query(
-        "select plan_id, cycle_id, run_id, mode, market_date, policy_schema_version, \
-         symbol_group_count, candidate_count, selected_count, refused_count, truth_state, \
-         blockers, created_at_utc \
+        "select plan_id, cycle_id, run_id, mode, configured_mode, market_date, \
+         policy_schema_version, symbol_group_count, candidate_count, selected_count, \
+         refused_count, truth_state, blockers, created_at_utc \
          from sys_runtime_strategy_conflict_plans where plan_id = $1",
     )
     .bind(plan_id)
@@ -250,7 +507,9 @@ pub async fn fetch_runtime_strategy_conflict_plan(
 
     let candidate_rows = sqlx::query(
         "select plan_id, ordinal, symbol, strategy_id, timeframe_secs, side, qty, current_qty, \
-         proposed_target_qty, bar_end_ts, selected, disposition, reason_code \
+         order_type, time_in_force, limit_price, proposed_target_qty, bar_present, bar_symbol, \
+         bar_strategy_id, bar_timeframe, bar_end_ts, close_micros, selected, disposition, \
+         reason_code \
          from sys_runtime_strategy_conflict_candidates where plan_id = $1 order by ordinal",
     )
     .bind(plan_id)
@@ -269,9 +528,9 @@ pub async fn fetch_recent_runtime_strategy_conflict_plans(
     limit: i64,
 ) -> Result<Vec<RuntimeStrategyConflictPlanRecord>> {
     let rows = sqlx::query(
-        "select plan_id, cycle_id, run_id, mode, market_date, policy_schema_version, \
-         symbol_group_count, candidate_count, selected_count, refused_count, truth_state, \
-         blockers, created_at_utc \
+        "select plan_id, cycle_id, run_id, mode, configured_mode, market_date, \
+         policy_schema_version, symbol_group_count, candidate_count, selected_count, \
+         refused_count, truth_state, blockers, created_at_utc \
          from sys_runtime_strategy_conflict_plans \
          where run_id = $1 order by created_at_utc desc limit $2",
     )
