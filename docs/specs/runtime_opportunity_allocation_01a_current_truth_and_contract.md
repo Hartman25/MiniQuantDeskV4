@@ -256,10 +256,17 @@ rejection requirement), not silently deduplicated by last-write-wins.
    every existing cap in Q7's table, in the existing order, via the existing
    `submit_internal_strategy_decision` seam (Q8) — Bundle 5 adds one narrowing
    step before that seam, nothing after it.
-7. **Cycle identity**: a new deterministic `cycle_id` (UUIDv5 of
-   `run_id` + shared `now_micros` + sorted dispatched-symbol set), minted in
-   Phase D, distinct from but derived from the same inputs as `decision_id`
-   (Q9).
+7. **Cycle identity**: a deterministic `cycle_id`, minted in Phase D/F,
+   distinct from `decision_id`. Originally specified here as UUIDv5 of
+   `run_id` + shared `now_micros` + sorted dispatched-symbol set —
+   **corrected by RUNTIME-OPPORTUNITY-ALLOCATION-01-READINESS-AND-AUTHORITY-REPAIR-01
+   (Phase B)**, since a wall-clock-derived id meant reprocessing the same
+   completed-bar economic cycle on a later tick minted a different id and
+   broke the idempotency this identity exists to provide. The identity is
+   now UUIDv5 of `run_id` + `market_date` + `timeframe` + the opportunity
+   artifact id + the sorted `(symbol, strategy_id, exact completed-bar
+   end-timestamp)` tuple set — no wall clock, no insertion order, no random
+   id (Q9).
 8. **Duplicate-symbol-in-cycle**: fail closed, reject the cycle's
    new/increasing-buy competition for that symbol rather than pick one
    arbitrarily (Q10).

@@ -123,29 +123,200 @@ if (Test-Path $StateRs) {
     Assert-Fail "G04: state.rs not found at $StateRs"
 }
 
-# G05 -- loop_runner.rs wires cap #6 into the B1C per-symbol dispatch loop
+# G05 -- loop_runner.rs wires cap #6 into the post-allocation submission loop
+#
+# RUNTIME-OPPORTUNITY-ALLOCATION-01-READINESS-AND-AUTHORITY-REPAIR-01: cap #6
+# necessarily relocated from "first check inside the per-symbol
+# derive-decisions loop" to "first check inside the post-allocation
+# submission loop" -- it counts *accepted* submissions, which can only be
+# known after Bundle 5's opportunity allocator has narrowed the tick's whole
+# same-cycle candidate batch. The cap's *effect* is unchanged (same running
+# accepted-count, same dispatch order, same
+# "max_new_orders_per_tick_reached" reason) -- only *where* in the pipeline
+# the check runs. `Test-Cap6Wiring` below is the one shared check both the
+# real file (this section) and the mutation-negative fixtures (further down)
+# call, so there is exactly one definition of "correctly wired" to drift out
+# of sync.
+function Test-Cap6Wiring([string]$Content) {
+    $CapReadIdx       = $Content.IndexOf('state_arc.max_new_orders_per_tick().await')
+    $CounterInitIdx   = $Content.IndexOf('let mut new_orders_this_tick: u32 = 0;')
+    $AllocCallIdx     = $Content.IndexOf('runtime_opportunity_allocation::gather_and_apply(')
+    $PostAllocLoopIdx = $Content.IndexOf('for decision in allocation_outcome.decisions')
+    $ReasonCheckIdx   = $Content.IndexOf('AppState::max_new_orders_per_tick_reason(')
+    $SubmitIdx        = $Content.IndexOf('submit_internal_strategy_decision(')
+    $AcceptedIdx      = $Content.IndexOf('if outcome.accepted {')
+    $ElseSearchStart  = [Math]::Max($AcceptedIdx, 0)
+    $ElseIdx          = $Content.IndexOf('} else {', $ElseSearchStart)
+    $IncrementIdx     = $Content.IndexOf('new_orders_this_tick += 1;')
+    $HasReasonString  = $Content -match [regex]::Escape('"max_new_orders_per_tick_reached"')
+
+    return (
+        $CapReadIdx -ge 0 -and
+        $CounterInitIdx -gt $CapReadIdx -and
+        $AllocCallIdx -gt $CounterInitIdx -and
+        $PostAllocLoopIdx -gt $AllocCallIdx -and
+        $ReasonCheckIdx -gt $PostAllocLoopIdx -and
+        $ReasonCheckIdx -ge 0 -and $SubmitIdx -ge 0 -and $ReasonCheckIdx -lt $SubmitIdx -and
+        $AcceptedIdx -gt $SubmitIdx -and
+        $IncrementIdx -gt $AcceptedIdx -and
+        ($ElseIdx -lt 0 -or $IncrementIdx -lt $ElseIdx) -and
+        $HasReasonString
+    )
+}
+
 if (Test-Path $LoopRunnerRs) {
     $LoopContent = Get-Content $LoopRunnerRs -Raw
 
-    $CapReadIdx     = $LoopContent.IndexOf('state_arc.max_new_orders_per_tick().await')
-    $CounterInitIdx = $LoopContent.IndexOf('let mut new_orders_this_tick: u32 = 0;')
-    $LoopStartIdx   = $LoopContent.IndexOf('for (assignment, mut bar_result) in dispatch_results {')
-    $ReasonCheckIdx = $LoopContent.IndexOf('AppState::max_new_orders_per_tick_reason(')
-    $RetainIdx      = $LoopContent.IndexOf('AppState::retain_targets_matching_symbol(')
-    $AcceptedIdx    = $LoopContent.IndexOf('if outcome.accepted {')
-    $IncrementIdx   = $LoopContent.IndexOf('new_orders_this_tick += 1;')
-
-    if ($CapReadIdx -ge 0 -and $CounterInitIdx -gt $CapReadIdx -and
-        $CounterInitIdx -lt $LoopStartIdx -and
-        $LoopStartIdx -lt $ReasonCheckIdx -and $ReasonCheckIdx -lt $RetainIdx -and
-        $AcceptedIdx -ge 0 -and $IncrementIdx -gt $AcceptedIdx -and
-        $LoopContent -match '"b1c_symbol_skipped_max_new_orders_per_tick') {
-        Assert-Pass "G05: loop_runner.rs reads the cap #6 config + initializes new_orders_this_tick before the per-symbol loop, checks max_new_orders_per_tick_reason first in each iteration (b1c_symbol_skipped_max_new_orders_per_tick), and increments the counter on each accepted decision"
+    if (Test-Cap6Wiring $LoopContent) {
+        Assert-Pass "G05: loop_runner.rs reads the cap #6 config + initializes new_orders_this_tick before the per-symbol dispatch loop, runs the opportunity allocator over the whole tick's batch, then checks max_new_orders_per_tick_reason FIRST inside the post-allocation submission loop (before submit_internal_strategy_decision), and increments the counter only inside the accepted branch"
     } else {
-        Assert-Fail "G05: cap #6 wiring NOT found in expected order in loop_runner.rs B1C loop"
+        Assert-Fail "G05: cap #6 wiring NOT found in expected order in loop_runner.rs's post-allocation submission loop"
     }
 } else {
     Assert-Fail "G05: loop_runner.rs not found at $LoopRunnerRs"
+}
+
+# G05-MUT -- mutation-negative proof: `Test-Cap6Wiring` must FAIL on each of
+# four minimal fixtures, each representing exactly one way the real wiring
+# could regress. This proves the check above actually discriminates correct
+# from incorrect wiring, rather than passing on anything cap#6-shaped.
+$Cap6GoodFixture = @'
+let max_new_orders_per_tick_cap = state_arc.max_new_orders_per_tick().await;
+let mut new_orders_this_tick: u32 = 0;
+let allocation_outcome = crate::runtime_opportunity_allocation::gather_and_apply(
+    &state_arc, run_id, now_micros, market_date_today, dispatch_timeframe, all_decisions, &current_positions,
+).await;
+for decision in allocation_outcome.decisions {
+    if AppState::max_new_orders_per_tick_reason(
+        new_orders_this_tick,
+        max_new_orders_per_tick_cap,
+    ).is_some() {
+        continue;
+    }
+    let outcome = crate::decision::submit_internal_strategy_decision(&state_arc, decision).await;
+    if outcome.accepted {
+        new_orders_this_tick += 1;
+    } else {
+    }
+}
+"max_new_orders_per_tick_reached"
+'@
+
+if (Test-Cap6Wiring $Cap6GoodFixture) {
+    Assert-Pass "G05-MUT-00: Test-Cap6Wiring accepts the correctly-ordered positive fixture"
+} else {
+    Assert-Fail "G05-MUT-00: Test-Cap6Wiring rejected a correctly-ordered fixture -- the check itself is broken"
+}
+
+# G05-MUT-A: cap check moved to AFTER submission.
+$Cap6MutMovedAfterSubmit = @'
+let max_new_orders_per_tick_cap = state_arc.max_new_orders_per_tick().await;
+let mut new_orders_this_tick: u32 = 0;
+let allocation_outcome = crate::runtime_opportunity_allocation::gather_and_apply(
+    &state_arc, run_id, now_micros, market_date_today, dispatch_timeframe, all_decisions, &current_positions,
+).await;
+for decision in allocation_outcome.decisions {
+    let outcome = crate::decision::submit_internal_strategy_decision(&state_arc, decision).await;
+    if AppState::max_new_orders_per_tick_reason(
+        new_orders_this_tick,
+        max_new_orders_per_tick_cap,
+    ).is_some() {
+        continue;
+    }
+    if outcome.accepted {
+        new_orders_this_tick += 1;
+    } else {
+    }
+}
+"max_new_orders_per_tick_reached"
+'@
+if (-not (Test-Cap6Wiring $Cap6MutMovedAfterSubmit)) {
+    Assert-Pass "G05-MUT-A: Test-Cap6Wiring correctly fails when the cap check is moved after submission"
+} else {
+    Assert-Fail "G05-MUT-A: Test-Cap6Wiring did NOT catch the cap check being moved after submission"
+}
+
+# G05-MUT-B: increment removed entirely.
+$Cap6MutNoIncrement = @'
+let max_new_orders_per_tick_cap = state_arc.max_new_orders_per_tick().await;
+let mut new_orders_this_tick: u32 = 0;
+let allocation_outcome = crate::runtime_opportunity_allocation::gather_and_apply(
+    &state_arc, run_id, now_micros, market_date_today, dispatch_timeframe, all_decisions, &current_positions,
+).await;
+for decision in allocation_outcome.decisions {
+    if AppState::max_new_orders_per_tick_reason(
+        new_orders_this_tick,
+        max_new_orders_per_tick_cap,
+    ).is_some() {
+        continue;
+    }
+    let outcome = crate::decision::submit_internal_strategy_decision(&state_arc, decision).await;
+    if outcome.accepted {
+    } else {
+    }
+}
+"max_new_orders_per_tick_reached"
+'@
+if (-not (Test-Cap6Wiring $Cap6MutNoIncrement)) {
+    Assert-Pass "G05-MUT-B: Test-Cap6Wiring correctly fails when the accepted-counter increment is removed"
+} else {
+    Assert-Fail "G05-MUT-B: Test-Cap6Wiring did NOT catch a missing increment"
+}
+
+# G05-MUT-C: increment moved outside the accepted-only branch (rejected
+# submissions would also increment the count).
+$Cap6MutUnconditionalIncrement = @'
+let max_new_orders_per_tick_cap = state_arc.max_new_orders_per_tick().await;
+let mut new_orders_this_tick: u32 = 0;
+let allocation_outcome = crate::runtime_opportunity_allocation::gather_and_apply(
+    &state_arc, run_id, now_micros, market_date_today, dispatch_timeframe, all_decisions, &current_positions,
+).await;
+for decision in allocation_outcome.decisions {
+    if AppState::max_new_orders_per_tick_reason(
+        new_orders_this_tick,
+        max_new_orders_per_tick_cap,
+    ).is_some() {
+        continue;
+    }
+    let outcome = crate::decision::submit_internal_strategy_decision(&state_arc, decision).await;
+    new_orders_this_tick += 1;
+    if outcome.accepted {
+    } else {
+    }
+}
+"max_new_orders_per_tick_reached"
+'@
+if (-not (Test-Cap6Wiring $Cap6MutUnconditionalIncrement)) {
+    Assert-Pass "G05-MUT-C: Test-Cap6Wiring correctly fails when the increment is unconditional (would count rejected submissions)"
+} else {
+    Assert-Fail "G05-MUT-C: Test-Cap6Wiring did NOT catch an unconditional (accepted-or-not) increment"
+}
+
+# G05-MUT-D: bounded reason string removed.
+$Cap6MutNoReasonString = @'
+let max_new_orders_per_tick_cap = state_arc.max_new_orders_per_tick().await;
+let mut new_orders_this_tick: u32 = 0;
+let allocation_outcome = crate::runtime_opportunity_allocation::gather_and_apply(
+    &state_arc, run_id, now_micros, market_date_today, dispatch_timeframe, all_decisions, &current_positions,
+).await;
+for decision in allocation_outcome.decisions {
+    if AppState::max_new_orders_per_tick_reason(
+        new_orders_this_tick,
+        max_new_orders_per_tick_cap,
+    ).is_some() {
+        continue;
+    }
+    let outcome = crate::decision::submit_internal_strategy_decision(&state_arc, decision).await;
+    if outcome.accepted {
+        new_orders_this_tick += 1;
+    } else {
+    }
+}
+'@
+if (-not (Test-Cap6Wiring $Cap6MutNoReasonString)) {
+    Assert-Pass "G05-MUT-D: Test-Cap6Wiring correctly fails when the bounded reason string is removed"
+} else {
+    Assert-Fail "G05-MUT-D: Test-Cap6Wiring did NOT catch a missing bounded reason string"
 }
 
 # G06 -- scenario test file has C6-01..C6-09 labels

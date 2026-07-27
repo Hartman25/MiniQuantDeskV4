@@ -1,6 +1,7 @@
 # RUNTIME-OPPORTUNITY-ALLOCATION-01 — Phase F(inal): Bundle 5 Closure
 
-Disposition:
+Disposition (as originally written by the 9-commit Phase A–H patch this
+document indexes):
 
 ```
 RUNTIME-OPPORTUNITY-ALLOCATION-01:
@@ -8,10 +9,26 @@ IMPLEMENTATION AND CLOSURE PROOF COMPLETE —
 AWAITING CHATGPT AND OPERATOR ACCEPTANCE
 ```
 
-This document is the single evidence index for Bundle 5. It does not repeat
-the per-phase design rationale already in `01a`–`01e`; it records what was
-built, where, and how it was proven, so a future reader (or the acceptance
-reviewer) does not have to reconstruct that from commit messages alone.
+**Superseded — read this first.** Independent source review of this exact
+patch found three authority defects (exact strategy-bar price source,
+wall-clock-based cycle identity, a duplicated/shallower snapshot-authority
+check) plus two premarket script-guard failures, closed by
+`RUNTIME-OPPORTUNITY-ALLOCATION-01-READINESS-AND-AUTHORITY-REPAIR-01` — see
+the Master Patch Ledger entry of that name for the authoritative current
+status and the repair's own test/guard evidence. **Bundle 5 was not accepted
+at the disposition above**, and this document's evidence table below
+(current as of the original 9 commits) is retained as a historical record of
+what was proven at that point, not as the current closure state. Where this
+document's phase narrative below describes price sourcing or cycle
+identity, the "Dependency-cone expansions" note further down is the specific
+claim the repair corrected — treat `01c`/`01d` (already updated) as the
+current truth for those two topics, not this file.
+
+This document is the single evidence index for the original Bundle 5 patch.
+It does not repeat the per-phase design rationale already in `01a`–`01e`; it
+records what was built, where, and how it was proven, so a future reader (or
+the acceptance reviewer) does not have to reconstruct that from commit
+messages alone.
 
 ## Source / branch
 
@@ -49,10 +66,19 @@ discovery, none silent):
   resolution to match the existing convention exactly rather than
   reimplementing it.
 - `core-rs/crates/mqk-strategy/src/types.rs` (`StrategyBarResult`, read
-  only) — needed to confirm no completed-bar price is exposed on the
-  primary dispatch result, which is why Phase F fetches price via the same
-  `fetch_recent_completed_bars_for_strategy` call the existing dry-run path
-  already uses, rather than inventing a new price source.
+  only) — confirmed no completed-bar price is exposed on the primary
+  dispatch result, which is why the original Phase F fetched price via a
+  second `fetch_recent_completed_bars_for_strategy` call rather than
+  carrying the exact evaluated bar forward. **Corrected by
+  RUNTIME-OPPORTUNITY-ALLOCATION-01-READINESS-AND-AUTHORITY-REPAIR-01
+  (Phase A)**: this second fetch was exactly the authority defect the
+  repair closed — a newer bar could land in the DB between strategy
+  evaluation and allocation, silently pricing a decision off a bar the
+  strategy never saw. The repair widened `state.rs`'s dispatch seam to
+  return the exact `EvaluatedBarFacts` (symbol/strategy_id/timeframe/
+  bar_end_ts/close_micros) alongside each `StrategyBarResult`, so the price
+  used for allocation is always the exact bar the strategy actually
+  evaluated — never a second, independently-timed fetch.
 - `core-rs/mqk-gui/src/features/system/durablePortfolio.ts` (read only) —
   template for the GUI fail-closed parsing pattern (`api.ts`,
   `systemStatusSections.ts`, `InstrumentRegistryV2SourcePanel.tsx` likewise

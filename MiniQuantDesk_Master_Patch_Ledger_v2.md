@@ -566,8 +566,143 @@ not started) — passes. `check_migration_governance.sh` — passes.
 authorization, live capital, AI integration, Bundle 6 (multi-strategy
 conflict policy).
 
-**Disposition:** `RUNTIME-OPPORTUNITY-ALLOCATION-01: IMPLEMENTATION AND
-CLOSURE PROOF COMPLETE — AWAITING CHATGPT AND OPERATOR ACCEPTANCE.`
+**Disposition (superseded — see repair entry immediately below):**
+`RUNTIME-OPPORTUNITY-ALLOCATION-01: IMPLEMENTATION AND
+CLOSURE PROOF COMPLETE — AWAITING CHATGPT AND OPERATOR ACCEPTANCE.` Bundle 5
+was **not accepted** at this disposition — independent source review of
+this exact 9-commit patch found three authority defects and the combined
+premarket validator ended `FINAL: FAIL` (two script-guard failures). See
+`RUNTIME-OPPORTUNITY-ALLOCATION-01-READINESS-AND-AUTHORITY-REPAIR-01` below
+for the repair and its current, authoritative status.
+
+---
+
+### RUNTIME-OPPORTUNITY-ALLOCATION-01-READINESS-AND-AUTHORITY-REPAIR-01
+
+**Branch:** `bundle/5-runtime-opportunity-allocation-01` (same worktree/
+branch as the entry above — this is a repair on top of those 9 commits, not
+a new bundle). Starting HEAD `0326add3f860c458163a443771336e13f27db27e`
+(merge commit reconciling the branch with accepted main at `4284884d`).
+
+**Why:** the review branch (`origin/review/bundle5-runtime-opportunity-allocation`)
+was 11 commits ahead of accepted main and contained the intended Bundle 5
+source, but `Invoke-PaperPremarketValidation.ps1` ended `FINAL: FAIL` —
+`test_multi_symbol_tick_order_cap.ps1` (G05, a stale guard after the
+intentional cap-#6 relocation) and `test_pdt_cross_symbol_summation.ps1`
+(G11, generated untracked research artifacts polluting the guard's
+git-status scope) both failed. Independent source review additionally found
+three authority defects that had to be closed before merge could even be
+considered:
+
+- **A. Exact strategy-bar price source.** The runtime allocation price was
+  re-fetched as "the latest completed bar" from the DB *after* strategy
+  evaluation, via a second `fetch_recent_completed_bars_for_strategy` call —
+  not proven to be the exact bar that produced each strategy decision. A
+  newer bar landing between evaluation and allocation could silently price
+  a decision off data the strategy never saw.
+- **B. Wall-clock cycle identity.** `compute_cycle_id` included the
+  loop-tick wall clock (`now_micros`). Reprocessing the exact same
+  completed-bar economic cycle on a later tick produced a different
+  `cycle_id`/`plan_id`, so durable-plan idempotency was not actually bound
+  to the economic cycle it claimed to represent.
+- **C. Duplicated, shallower snapshot authority.** `resolve_active_snapshot`
+  hand-rolled its own `truth_state`/`currency`/age check against a private
+  `DURABLE_SNAPSHOT_STALE_SECS_MIRROR` constant instead of reusing the
+  accepted Bundle 4 read-side authority seam
+  (`routes::portfolio_provenance::validate_run_scoped_snapshot_authority`) —
+  a provenance-validation and future-drift gap (position-provenance/
+  duplicate-symbol/malformed-row checks Bundle 4 already enforces were not
+  applied to Bundle 5's read).
+
+**Phase A repair — exact bar authority:**
+`core-rs/crates/mqk-daemon/src/state.rs` widens the DB-backed dispatch seam
+(`dispatch_native_strategy_for_symbol_with_loaded_bars_and_facts`,
+`dispatch_native_strategy_for_symbol_with_bar_and_facts`,
+`tick_strategy_dispatch_multi_symbol_with_bar_facts`) to return the exact
+`EvaluatedBarFacts` (symbol, strategy_id, timeframe, bar end-timestamp,
+close_micros) captured at the same point the DB bar window is loaded,
+alongside each `StrategyBarResult` — the pre-repair signatures
+(`dispatch_native_strategy_for_symbol_with_loaded_bars`,
+`dispatch_native_strategy_for_symbol_with_bar`,
+`tick_strategy_dispatch_multi_symbol`) are retained as thin wrappers so
+every existing test caller is unaffected. `loop_runner.rs` pairs each
+symbol's decisions with those exact facts
+(`runtime_opportunity_allocation::PendingDecisionWithBarFacts`) before
+batching the tick; `apply_runtime_opportunity_allocation` no longer receives
+or looks up a price map at all — each buy candidate's
+`evaluation_price_micros` comes exclusively from its own bound
+`EvaluatedBarFacts.close_micros`. A missing `bar_facts`, or one whose
+symbol/strategy_id/timeframe does not match the decision it is paired with,
+refuses that buy individually (`fail_closed_missing_or_mismatched_bar_facts`)
+— sell/reduce decisions never consult bar facts at all.
+
+**Phase B repair — economic cycle identity:** `compute_cycle_id` is now
+UUIDv5 of `run_id` + `market_date` + `timeframe` + the opportunity artifact
+id + the sorted `(symbol, strategy_id, exact bar end-timestamp)` tuple set
+of the candidates with proven bar facts — no `Utc::now()`, no loop-tick
+time, no insertion order, no random UUID. Two or more candidates resolving
+to the identical tuple fails the whole cycle closed
+(`fail_closed_duplicate_candidate_tuple`), mirroring the pure cycle model's
+own duplicate-symbol guard. `created_at_utc` remains evidence-only (Phase G
+persistence timestamp), never identity.
+
+**Phase C repair — shared snapshot authority:**
+`core-rs/crates/mqk-daemon/src/routes/portfolio_provenance.rs` gains
+`DURABLE_SNAPSHOT_STALE_SECS` (moved from `durable_portfolio.rs`, which now
+imports it — single source, unchanged value/behavior/tests) and a new
+`validate_snapshot_freshness` (future-timestamp rejection +
+staleness), additive to the existing `validate_run_scoped_snapshot_authority`.
+`runtime_opportunity_allocation::resolve_active_snapshot` now calls both —
+`DURABLE_SNAPSHOT_STALE_SECS_MIRROR` is deleted, no local shallow validator
+remains. An invalid or malformed latest snapshot is refused outright, never
+falling back to an older snapshot. Bundle 4's own route behavior/tests are
+unchanged: the new freshness function is additive, not substituted into the
+existing soft-staleness-annotation read routes.
+
+**Phase D repair — cap #6 guard + behavior:** cap #6 stays at its
+post-allocation location (`loop_runner.rs`'s submission loop over
+`allocation_outcome.decisions`) — executable proof (`scenario_multi_symbol_tick_order_cap_01.rs`,
+all 9 C6 cases, unchanged) confirms the boundary is still inclusive, only
+accepted submissions increment, refused/duplicate/no-op/allocation-dropped/
+sell decisions never consume the cap, and the reason
+`"max_new_orders_per_tick_reached"` is unchanged.
+`tests/script_guards/test_multi_symbol_tick_order_cap.ps1`'s G05 is repaired
+to locate and validate the new post-allocation seam (cap read → counter
+init → allocator call → post-allocation loop → cap check before submit →
+accepted-only increment), with four mutation-negative fixtures
+(`G05-MUT-A`..`D`) proving the check fails when the cap check moves after
+submission, the increment is removed, the increment becomes unconditional
+(would count rejected submissions), or the bounded reason string is
+removed.
+
+**Phase E repair — worktree hygiene:** the two untracked generated EXP
+research-engine paths (`research-py/experiments/exp_distributed/artifacts/`,
+`.../state/`, documented as generated output in that directory's own
+README) are removed from the worktree and added to `.gitignore` as two
+narrow, exact-path rules — no widening of the ignore contract beyond those
+two subdirectories. `test_pdt_cross_symbol_summation.ps1` needed no code
+change: its G11 check already only flags untracked paths under
+`research-py/`, and a properly-ignored path is not untracked.
+
+**Documentation:** `01a`/`01c`/`01d`/`01f` (`docs/specs/runtime_opportunity_allocation_*`)
+corrected to describe the repaired exact-bar price source, the repaired
+cycle identity, and the repaired shared snapshot authority in place of the
+original (defective) claims; `01f`'s original "CLOSURE PROOF COMPLETE"
+disposition is marked superseded, pointing here.
+
+**Commits:** see this repair's own commits on
+`bundle/5-runtime-opportunity-allocation-01`, after
+`0326add3f860c458163a443771336e13f27db27e` — the original 10 Bundle 5
+commits and the main-baseline merge commit are unmodified (no amend, no
+rebase).
+
+**Not done in this repair (unchanged from the entry above):** merge into
+`main`, push to main, soak authorization, live capital, AI integration,
+Bundle 6.
+
+**Disposition:** see the FINAL HANDOFF report for this repair session for
+the authoritative current validation result and disposition — do not treat
+either Bundle 5 entry in this file as accepted.
 
 ---
 

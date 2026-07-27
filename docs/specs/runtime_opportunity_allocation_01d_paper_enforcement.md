@@ -10,10 +10,21 @@ Migration:
 Two additive tables, no existing table modified:
 
 - `sys_runtime_opportunity_allocation_plans` — one row per allocation cycle.
-  `plan_id` **is** the deterministic `cycle_id` (UUIDv5 of `run_id` + the
-  shared tick timestamp + the sorted dispatched-symbol set), so re-persisting
-  the same logical cycle (e.g. after a crash/restart mid-tick) is a proven
-  no-op, not a duplicate.
+  `plan_id` **is** the deterministic `cycle_id`. **Repaired** (see
+  RUNTIME-OPPORTUNITY-ALLOCATION-01-READINESS-AND-AUTHORITY-REPAIR-01, Phase
+  B): originally UUIDv5 of `run_id` + the loop-tick wall clock
+  (`now_micros`) + the sorted dispatched-symbol set — that included the
+  wall clock, so reprocessing the exact same completed-bar economic cycle
+  on a later tick minted a *different* id, and durable-insert idempotency
+  was not actually bound to the economic cycle. Now UUIDv5 of `run_id` +
+  `market_date` + `timeframe` + the opportunity artifact id + the sorted
+  `(symbol, strategy_id, exact completed-bar end-timestamp)` tuple set of
+  the candidates with proven bar facts — no wall clock, no insertion order,
+  no random id. Reprocessing the same run/artifact/bar candidate set on a
+  later tick now yields the identical `cycle_id`/`plan_id`, so re-persisting
+  the same logical economic cycle (e.g. after a crash/restart mid-tick, or a
+  later tick re-observing the same completed bar) is a proven no-op, not a
+  duplicate.
 - `sys_runtime_opportunity_allocation_candidates` — child rows, one per
   new/increasing-buy candidate considered. Sell/reduce/exit/flatten
   decisions never enter this model and are never rows here.

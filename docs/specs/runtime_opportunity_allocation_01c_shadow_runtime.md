@@ -71,15 +71,26 @@ the single per-tick call site `loop_runner.rs` uses:
    every mode.
 3. If there are no buy decisions this tick, returns immediately (nothing to
    allocate) — `plan: None`.
-4. Otherwise loads the watchlist + `runtime-opportunity-set-v1` artifact,
-   resolves the latest durable `PaperPortfolioSnapshot` (must be
-   `truth_state == "active"`, `currency == "USD"`, `source ==
-   external_alpaca`, not older than 180s — mirroring
-   `routes/durable_portfolio.rs`'s own staleness constant, duplicated rather
-   than cross-module-exposed to avoid touching Bundle 4's route file), and
-   fetches each buy-candidate symbol's latest completed-bar close price via
-   the existing `fetch_recent_completed_bars_for_strategy` read path (same
-   call the dry-run diagnostics already use).
+4. Otherwise loads the watchlist + `runtime-opportunity-set-v1` artifact and
+   resolves the latest durable `PaperPortfolioSnapshot` by reusing the exact
+   accepted Bundle 4 read-side authority seam
+   (`routes::portfolio_provenance::validate_run_scoped_snapshot_authority` +
+   `validate_snapshot_freshness`, sharing the single canonical
+   `DURABLE_SNAPSHOT_STALE_SECS` constant with `routes/durable_portfolio.rs`
+   — no local duplicate, no shallower check, no fallback to an older
+   snapshot on failure). See
+   [RUNTIME-OPPORTUNITY-ALLOCATION-01-READINESS-AND-AUTHORITY-REPAIR-01](../../MiniQuantDesk_Master_Patch_Ledger_v2.md)
+   (Phase C) for what this replaced.
+   **Price source (repaired):** each buy candidate's price is never fetched
+   here at all. It is the exact completed-bar close the strategy's `on_bar`
+   evaluation was actually run against, captured once at dispatch time
+   (`AppState::dispatch_native_strategy_for_symbol_with_loaded_bars_and_facts`
+   in `state.rs`) and carried forward as `EvaluatedBarFacts` through
+   `loop_runner.rs`'s per-tick decision batch into
+   `apply_runtime_opportunity_allocation`. A buy candidate with missing or
+   mismatched bar facts (symbol/strategy_id/timeframe) is refused
+   individually — never priced from a re-fetched or substitute bar (Phase A
+   of the same repair).
 5. Missing/invalid artifact or snapshot refuses **every buy** this cycle
    (`fail_closed_no_opportunity_authority` /
    `fail_closed_no_durable_snapshot`) without fabricating a score or

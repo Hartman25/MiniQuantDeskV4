@@ -37,6 +37,15 @@ logs/
 research-py/runs/
 research-py/runs_*/
 
+# EXP-only distributed-research-engine generated outputs (state DB + batch
+# artifacts) -- documented as generated in
+# research-py/experiments/exp_distributed/README.md ("Outputs"). Narrowly
+# scoped to these two exact generated subdirectories; tracked source in the
+# same directory (README.md, example_batch.json, sample_prices.csv, and
+# research-py/src/mqk_research/exp_distributed/**) is unaffected.
+research-py/experiments/exp_distributed/artifacts/
+research-py/experiments/exp_distributed/state/
+
 # Coverage / profiling outputs
 coverage/
 *.profraw

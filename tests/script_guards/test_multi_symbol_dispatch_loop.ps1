@@ -128,11 +128,20 @@ if (Test-Path $LoopRunner) {
         Assert-Fail "G06: loop_runner.rs does not build multi_symbol_assignments via build_multi_symbol_runtime_config_from_env"
     }
 
-    # G07 -- per-tick call to tick_strategy_dispatch_multi_symbol
-    if ($LoopContent -match 'tick_strategy_dispatch_multi_symbol\(&multi_symbol_assignments\)') {
-        Assert-Pass "G07: loop_runner.rs calls tick_strategy_dispatch_multi_symbol(&multi_symbol_assignments) per tick"
+    # G07 -- per-tick call to the multi-symbol dispatch seam.
+    #
+    # RUNTIME-OPPORTUNITY-ALLOCATION-01-READINESS-AND-AUTHORITY-REPAIR-01
+    # (Phase A): production wiring now calls
+    # `tick_strategy_dispatch_multi_symbol_with_bar_facts`, the bar-facts-
+    # carrying sibling of `tick_strategy_dispatch_multi_symbol` (still
+    # defined per G01 above, retained for its existing test callers; both
+    # ultimately call the same underlying dispatch implementation -- see
+    # state.rs). Accept either name so this guard reflects the current
+    # production seam without re-litigating G01's contract.
+    if ($LoopContent -match 'tick_strategy_dispatch_multi_symbol(_with_bar_facts)?\(\s*\r?\n?\s*&multi_symbol_assignments,?\s*\r?\n?\s*\)') {
+        Assert-Pass "G07: loop_runner.rs calls a tick_strategy_dispatch_multi_symbol* seam with &multi_symbol_assignments per tick"
     } else {
-        Assert-Fail "G07: loop_runner.rs does not call tick_strategy_dispatch_multi_symbol(&multi_symbol_assignments)"
+        Assert-Fail "G07: loop_runner.rs does not call tick_strategy_dispatch_multi_symbol(_with_bar_facts)?(&multi_symbol_assignments)"
     }
 
     # G08 -- retain_targets_matching_symbol + b1c_symbol_mismatch_skipped guard wired
@@ -143,9 +152,14 @@ if (Test-Path $LoopRunner) {
         Assert-Fail "G08: loop_runner.rs does not apply the retain_targets_matching_symbol / b1c_symbol_mismatch_skipped guard"
     }
 
-    # G09 -- current_positions snapshot read exactly once per tick (Q2), outside the per-symbol loop
+    # G09 -- current_positions snapshot read exactly once per tick (Q2),
+    # outside the per-symbol loop. Phase A of the authority repair adds a
+    # third per-iteration binding (`bar_facts`, the exact evaluated-bar
+    # facts paired with each symbol's dispatch result) to the same loop --
+    # the current_positions-once-before-the-loop structure itself is
+    # unchanged.
     if ($LoopContent -match 'let current_positions: Option<BTreeMap<String, i64>> = \{' -and
-        $LoopContent -match 'for \(assignment, mut bar_result\) in dispatch_results \{') {
+        $LoopContent -match 'for \(assignment, mut bar_result, bar_facts\) in dispatch_results \{') {
         Assert-Pass "G09: current_positions snapshot is read once per tick, before the per-symbol loop (design doc §5 Q2)"
     } else {
         Assert-Fail "G09: current_positions snapshot / per-symbol loop structure NOT found as expected"
