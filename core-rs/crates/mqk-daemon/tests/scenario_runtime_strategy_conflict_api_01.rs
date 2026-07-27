@@ -282,9 +282,219 @@ async fn default_off_mode_reports_truthfully() {
         .contains("one strategy host"));
 }
 
+/// Seeds a plan whose sole candidate carries a `reason_code` outside the
+/// closed vocabulary `mqk_portfolio::conflict_policy` can ever produce --
+/// evidence corruption the DB's own CHECK constraints do not (and cannot,
+/// short of duplicating the whole closed reason vocabulary as a CHECK)
+/// catch, but the shared read-side validator (Defect 6) must.
+async fn seed_malformed_plan(
+    pool: &sqlx::PgPool,
+    run_id: Uuid,
+    plan_id: Uuid,
+    created_at_utc: chrono::DateTime<Utc>,
+) {
+    mqk_db::insert_runtime_strategy_conflict_plan(
+        pool,
+        mqk_db::NewRuntimeStrategyConflictPlan {
+            plan_id,
+            cycle_id: plan_id,
+            run_id,
+            mode: "shadow".to_string(),
+            configured_mode: "shadow".to_string(),
+            market_date: "2099-02-01".to_string(),
+            policy_schema_version: "multi-strategy-conflict-policy-v1".to_string(),
+            symbol_group_count: 1,
+            candidate_count: 1,
+            selected_count: 1,
+            refused_count: 0,
+            truth_state: "computed".to_string(),
+            blockers: vec![],
+            created_at_utc,
+            candidates: vec![mqk_db::NewRuntimeStrategyConflictCandidate {
+                ordinal: 0,
+                symbol: "AAPL".to_string(),
+                strategy_id: "strategy_a".to_string(),
+                timeframe_secs: 300,
+                side: "buy".to_string(),
+                qty: 10,
+                current_qty: 0,
+                order_type: "market".to_string(),
+                time_in_force: "day".to_string(),
+                limit_price: None,
+                proposed_target_qty: Some(10),
+                bar_present: true,
+                bar_symbol: Some("AAPL".to_string()),
+                bar_strategy_id: Some("strategy_a".to_string()),
+                bar_timeframe: Some("5m".to_string()),
+                bar_end_ts: Some(1_000),
+                close_micros: Some(100_000_000),
+                selected: true,
+                // Not a member of the closed reason-code vocabulary --
+                // the DB accepts free text here, so only the shared
+                // read-side validator can catch this.
+                disposition: "selected".to_string(),
+                reason_code: "totally_made_up_reason_not_in_vocabulary".to_string(),
+            }],
+        },
+    )
+    .await
+    .expect("seed_malformed_plan insert should succeed");
+}
+
 // ---------------------------------------------------------------------------
 // DB-backed proofs
 // ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL"]
+async fn status_surfaces_invalid_evidence_and_never_falls_back_to_older_plan() {
+    let Some(pool) = test_pool().await else {
+        return;
+    };
+    let run_id = fixed_run_id("invalid_evidence_status");
+    cleanup(&pool, run_id).await;
+    seed_run(&pool, run_id).await;
+
+    let older_valid_plan_id = fixed_plan_id("invalid_evidence_status_older");
+    mqk_db::insert_runtime_strategy_conflict_plan(
+        &pool,
+        mqk_db::NewRuntimeStrategyConflictPlan {
+            plan_id: older_valid_plan_id,
+            cycle_id: older_valid_plan_id,
+            run_id,
+            mode: "shadow".to_string(),
+            configured_mode: "shadow".to_string(),
+            market_date: "2099-02-01".to_string(),
+            policy_schema_version: "multi-strategy-conflict-policy-v1".to_string(),
+            symbol_group_count: 1,
+            candidate_count: 1,
+            selected_count: 1,
+            refused_count: 0,
+            truth_state: "computed".to_string(),
+            blockers: vec![],
+            created_at_utc: Utc.with_ymd_and_hms(2099, 2, 1, 12, 0, 0).unwrap(),
+            candidates: vec![mqk_db::NewRuntimeStrategyConflictCandidate {
+                ordinal: 0,
+                symbol: "MSFT".to_string(),
+                strategy_id: "strategy_a".to_string(),
+                timeframe_secs: 300,
+                side: "sell".to_string(),
+                qty: 5,
+                current_qty: 20,
+                order_type: "market".to_string(),
+                time_in_force: "day".to_string(),
+                limit_price: None,
+                proposed_target_qty: Some(15),
+                bar_present: true,
+                bar_symbol: Some("MSFT".to_string()),
+                bar_strategy_id: Some("strategy_a".to_string()),
+                bar_timeframe: Some("5m".to_string()),
+                bar_end_ts: Some(900),
+                close_micros: Some(0),
+                selected: true,
+                disposition: "selected".to_string(),
+                reason_code: "risk_reducing_candidate_selected".to_string(),
+            }],
+        },
+    )
+    .await
+    .expect("older valid plan insert should succeed");
+
+    let malformed_plan_id = fixed_plan_id("invalid_evidence_status_newer");
+    seed_malformed_plan(
+        &pool,
+        run_id,
+        malformed_plan_id,
+        Utc.with_ymd_and_hms(2099, 2, 1, 12, 10, 0).unwrap(),
+    )
+    .await;
+
+    let router = router_with_pool(pool.clone());
+    let (status, body) = call(
+        router,
+        get(&format!("/api/v1/strategy/conflict/status?run_id={run_id}")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["truth_state"], "invalid_evidence");
+    assert_eq!(
+        body["latest_plan_id"],
+        serde_json::Value::Null,
+        "must never fall back to the older valid plan"
+    );
+    assert!(!body["evidence_blockers"]
+        .as_array()
+        .expect("evidence_blockers must be an array")
+        .is_empty());
+
+    cleanup(&pool, run_id).await;
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL"]
+async fn plan_by_id_returns_invalid_evidence_for_a_malformed_plan() {
+    let Some(pool) = test_pool().await else {
+        return;
+    };
+    let run_id = fixed_run_id("invalid_evidence_detail");
+    cleanup(&pool, run_id).await;
+    seed_run(&pool, run_id).await;
+    let plan_id = fixed_plan_id("invalid_evidence_detail");
+    seed_malformed_plan(&pool, run_id, plan_id, Utc.with_ymd_and_hms(2099, 2, 1, 12, 0, 0).unwrap()).await;
+
+    let router = router_with_pool(pool.clone());
+    let (status, body) = call(
+        router,
+        get(&format!("/api/v1/strategy/conflict/plans/{plan_id}")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["truth_state"], "invalid_evidence");
+    assert_eq!(body["plan"], serde_json::Value::Null);
+    assert_eq!(body["candidates"], serde_json::json!([]));
+    assert!(!body["evidence_blockers"]
+        .as_array()
+        .expect("evidence_blockers must be an array")
+        .is_empty());
+
+    cleanup(&pool, run_id).await;
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL"]
+async fn plans_list_excludes_malformed_rows_and_reports_the_count() {
+    let Some(pool) = test_pool().await else {
+        return;
+    };
+    let run_id = fixed_run_id("invalid_evidence_list");
+    cleanup(&pool, run_id).await;
+    seed_run(&pool, run_id).await;
+    seed_plan(&pool, run_id, fixed_plan_id("invalid_evidence_list_valid")).await;
+    seed_malformed_plan(
+        &pool,
+        run_id,
+        fixed_plan_id("invalid_evidence_list_malformed"),
+        Utc.with_ymd_and_hms(2099, 2, 1, 12, 5, 0).unwrap(),
+    )
+    .await;
+
+    let router = router_with_pool(pool.clone());
+    let (status, body) = call(
+        router,
+        get(&format!("/api/v1/strategy/conflict/plans?run_id={run_id}")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["truth_state"], "active");
+    assert_eq!(
+        body["plans"].as_array().unwrap().len(),
+        1,
+        "the malformed row must never be silently mixed into the active list"
+    );
+    assert_eq!(body["excluded_malformed_count"], 1);
+
+    cleanup(&pool, run_id).await;
+}
 
 #[tokio::test]
 #[ignore = "requires MQK_DATABASE_URL"]

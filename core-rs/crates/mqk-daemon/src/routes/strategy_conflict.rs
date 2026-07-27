@@ -12,6 +12,13 @@
 // `routes/durable_portfolio.rs` / `routes/portfolio_allocation.rs` exactly:
 // an explicit `?run_id=` query param, or else the latest durable PAPER run
 // for this engine.
+//
+// AUTHORITY-AND-EVIDENCE-REPAIR-01 Defect 6: every route in this file now
+// runs the shared `conflict_evidence_validation` validator before
+// projecting a persisted row as `active` truth. A malformed plan is
+// surfaced as `invalid_evidence` with bounded blockers, never silently
+// treated as active current truth, and status never falls back from a
+// malformed latest plan to an older one.
 
 use std::sync::Arc;
 
@@ -26,6 +33,7 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::durable_portfolio::{resolve_run, RunResolution};
+use crate::conflict_evidence_validation::validate_plan_with_candidates;
 use crate::runtime_strategy_conflict_mode::{
     effective_mode, resolve_conflict_policy_mode_from_env,
 };
@@ -37,15 +45,18 @@ use crate::state::{AppState, BrokerKind};
 
 /// Closed vocabulary. `db_unavailable` / `query_failed` / `not_found` mirror
 /// the durable-portfolio/allocation routes; `active` means the mode/plan
-/// lookup completed (a valid response was produced, whether or not a plan
-/// exists yet); `invalid_configuration` means the env var is set to an
-/// unrecognized value (mode still runs as `off`, but the operator must be
-/// told why).
+/// lookup completed AND (when a plan was inspected) that plan passed the
+/// shared evidence validator; `invalid_configuration` means the env var is
+/// set to an unrecognized value (mode still runs as `off`, but the operator
+/// must be told why); `invalid_evidence` means a persisted plan/candidate
+/// row failed the shared read-side validator and was refused, never
+/// projected as active truth.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 pub(crate) enum ConflictTruthState {
     Active,
     InvalidConfiguration,
+    InvalidEvidence,
     DbUnavailable,
     QueryFailed,
     NotFound,
@@ -71,6 +82,9 @@ pub(crate) struct ConflictStatusResponse {
     pub latest_plan_symbol_group_count: Option<i32>,
     pub latest_plan_candidate_count: Option<i32>,
     pub latest_plan_selected_count: Option<i32>,
+    /// Non-empty only when `truth_state == invalid_evidence`: why the
+    /// latest plan for this run was refused rather than projected active.
+    pub evidence_blockers: Vec<String>,
     pub checked_at_utc: String,
 }
 
@@ -95,6 +109,9 @@ pub(crate) struct ConflictPlanRow {
     pub cycle_id: String,
     pub run_id: String,
     pub mode: String,
+    /// `None` on a pre-0057 legacy row, or when this row was excluded from
+    /// a list because it failed the shared shape validator.
+    pub configured_mode: Option<String>,
     pub market_date: String,
     pub policy_schema_version: String,
     pub symbol_group_count: i32,
@@ -113,6 +130,8 @@ pub(crate) struct ConflictPlanDetailResponse {
     pub truth_state: ConflictTruthState,
     pub plan: Option<ConflictPlanRow>,
     pub candidates: Vec<ConflictPlanCandidateRow>,
+    /// Non-empty only when `truth_state == invalid_evidence`.
+    pub evidence_blockers: Vec<String>,
     pub checked_at_utc: String,
 }
 
@@ -120,7 +139,13 @@ pub(crate) struct ConflictPlanDetailResponse {
 pub(crate) struct ConflictPlansListResponse {
     pub truth_state: ConflictTruthState,
     pub run_id: Option<String>,
+    /// Only rows that passed the shared shape validator — a malformed row
+    /// is never silently mixed into this list.
     pub plans: Vec<ConflictPlanRow>,
+    /// How many rows the underlying query returned but this route excluded
+    /// because they failed the shared shape validator. `0` means every
+    /// returned row was structurally sound.
+    pub excluded_malformed_count: i64,
     pub checked_at_utc: String,
 }
 
@@ -141,6 +166,7 @@ fn plan_row_from_record(rec: &mqk_db::RuntimeStrategyConflictPlanRecord) -> Conf
         cycle_id: rec.cycle_id.to_string(),
         run_id: rec.run_id.to_string(),
         mode: rec.mode.clone(),
+        configured_mode: rec.configured_mode.clone(),
         market_date: rec.market_date.clone(),
         policy_schema_version: rec.policy_schema_version.clone(),
         symbol_group_count: rec.symbol_group_count,
@@ -204,6 +230,7 @@ pub(crate) async fn strategy_conflict_status(
         latest_plan_symbol_group_count: None,
         latest_plan_candidate_count: None,
         latest_plan_selected_count: None,
+        evidence_blockers: vec![],
         checked_at_utc: checked_at_utc.clone(),
     };
     if eff.invalid_configuration.is_some() {
@@ -243,18 +270,47 @@ pub(crate) async fn strategy_conflict_status(
     };
     response.run_id = Some(run.run_id.to_string());
 
-    match mqk_db::fetch_recent_runtime_strategy_conflict_plans(db, run.run_id, 1).await {
-        Ok(plans) => {
-            if let Some(latest) = plans.into_iter().next() {
-                response.latest_plan_id = Some(latest.plan_id.to_string());
-                response.latest_plan_created_at_utc = Some(latest.created_at_utc.to_rfc3339());
-                response.latest_plan_symbol_group_count = Some(latest.symbol_group_count);
-                response.latest_plan_candidate_count = Some(latest.candidate_count);
-                response.latest_plan_selected_count = Some(latest.selected_count);
-            }
-        }
+    // Defect 6: inspect and validate the latest plan *plus its candidates*
+    // before projecting any of its fields. A malformed latest plan is
+    // surfaced as invalid_evidence -- never silently skipped in favor of
+    // an older, valid plan.
+    let latest_summary = match mqk_db::fetch_recent_runtime_strategy_conflict_plans(db, run.run_id, 1).await
+    {
+        Ok(plans) => plans.into_iter().next(),
         Err(err) => {
             tracing::warn!(error = %err, "strategy_conflict_status_plan_query_failed");
+            response.truth_state = ConflictTruthState::QueryFailed;
+            return (StatusCode::OK, Json(response)).into_response();
+        }
+    };
+
+    let Some(latest_summary) = latest_summary else {
+        // No plan yet for this run -- honest empty, still active.
+        return (StatusCode::OK, Json(response)).into_response();
+    };
+
+    match mqk_db::fetch_runtime_strategy_conflict_plan(db, latest_summary.plan_id).await {
+        Ok(Some((plan_record, candidate_records))) => {
+            let validation = validate_plan_with_candidates(&plan_record, &candidate_records);
+            if !validation.valid {
+                response.truth_state = ConflictTruthState::InvalidEvidence;
+                response.evidence_blockers = validation.blockers;
+                return (StatusCode::OK, Json(response)).into_response();
+            }
+            response.latest_plan_id = Some(plan_record.plan_id.to_string());
+            response.latest_plan_created_at_utc = Some(plan_record.created_at_utc.to_rfc3339());
+            response.latest_plan_symbol_group_count = Some(plan_record.symbol_group_count);
+            response.latest_plan_candidate_count = Some(plan_record.candidate_count);
+            response.latest_plan_selected_count = Some(plan_record.selected_count);
+        }
+        Ok(None) => {
+            // The summary row vanished between the two reads (concurrent
+            // delete elsewhere is not a route this file exposes -- treat
+            // defensively as not_found rather than fabricating a plan).
+            response.truth_state = ConflictTruthState::NotFound;
+        }
+        Err(err) => {
+            tracing::warn!(error = %err, plan_id = %latest_summary.plan_id, "strategy_conflict_status_plan_detail_query_failed");
             response.truth_state = ConflictTruthState::QueryFailed;
         }
     }
@@ -300,6 +356,7 @@ pub(crate) async fn strategy_conflict_plans(
                 truth_state: ConflictTruthState::DbUnavailable,
                 run_id: None,
                 plans: vec![],
+                excluded_malformed_count: 0,
                 checked_at_utc,
             }),
         )
@@ -315,6 +372,7 @@ pub(crate) async fn strategy_conflict_plans(
                     truth_state: ConflictTruthState::QueryFailed,
                     run_id: None,
                     plans: vec![],
+                    excluded_malformed_count: 0,
                     checked_at_utc,
                 }),
             )
@@ -327,6 +385,7 @@ pub(crate) async fn strategy_conflict_plans(
                     truth_state: ConflictTruthState::NotFound,
                     run_id: None,
                     plans: vec![],
+                    excluded_malformed_count: 0,
                     checked_at_utc,
                 }),
             )
@@ -340,13 +399,44 @@ pub(crate) async fn strategy_conflict_plans(
 
     match mqk_db::fetch_recent_runtime_strategy_conflict_plans(db, run.run_id, limit).await {
         Ok(records) => {
-            let plans = records.iter().map(plan_row_from_record).collect();
+            // Defect 6: a malformed row is excluded, never silently mixed
+            // into an "active" list as if it were sound evidence. `limit`
+            // is bounded to at most 100, so the extra per-row candidate
+            // fetch needed for the full check is a bounded cost, not an
+            // unbounded N+1 -- correctness over one saved query per row.
+            let mut plans = Vec::with_capacity(records.len());
+            let mut excluded_malformed_count = 0i64;
+            for rec in &records {
+                let full_check = match mqk_db::fetch_runtime_strategy_conflict_plan(db, rec.plan_id).await
+                {
+                    Ok(Some((plan_record, candidate_records))) => {
+                        validate_plan_with_candidates(&plan_record, &candidate_records).valid
+                    }
+                    // A row that vanished or failed to fetch between the
+                    // two reads is never treated as sound evidence.
+                    Ok(None) => false,
+                    Err(err) => {
+                        tracing::warn!(
+                            error = %err,
+                            plan_id = %rec.plan_id,
+                            "strategy_conflict_plans_row_detail_query_failed"
+                        );
+                        false
+                    }
+                };
+                if full_check {
+                    plans.push(plan_row_from_record(rec));
+                } else {
+                    excluded_malformed_count += 1;
+                }
+            }
             (
                 StatusCode::OK,
                 Json(ConflictPlansListResponse {
                     truth_state: ConflictTruthState::Active,
                     run_id: Some(run.run_id.to_string()),
                     plans,
+                    excluded_malformed_count,
                     checked_at_utc,
                 }),
             )
@@ -360,6 +450,7 @@ pub(crate) async fn strategy_conflict_plans(
                     truth_state: ConflictTruthState::QueryFailed,
                     run_id: Some(run.run_id.to_string()),
                     plans: vec![],
+                    excluded_malformed_count: 0,
                     checked_at_utc,
                 }),
             )
@@ -400,6 +491,7 @@ pub(crate) async fn strategy_conflict_plan_by_id(
                 truth_state: ConflictTruthState::DbUnavailable,
                 plan: None,
                 candidates: vec![],
+                evidence_blockers: vec![],
                 checked_at_utc,
             }),
         )
@@ -407,25 +499,43 @@ pub(crate) async fn strategy_conflict_plan_by_id(
     };
 
     match mqk_db::fetch_runtime_strategy_conflict_plan(db, plan_id).await {
-        Ok(Some((plan_record, candidate_records))) => (
-            StatusCode::OK,
-            Json(ConflictPlanDetailResponse {
-                truth_state: ConflictTruthState::Active,
-                plan: Some(plan_row_from_record(&plan_record)),
-                candidates: candidate_records
-                    .iter()
-                    .map(candidate_row_from_record)
-                    .collect(),
-                checked_at_utc,
-            }),
-        )
-            .into_response(),
+        Ok(Some((plan_record, candidate_records))) => {
+            let validation = validate_plan_with_candidates(&plan_record, &candidate_records);
+            if !validation.valid {
+                return (
+                    StatusCode::OK,
+                    Json(ConflictPlanDetailResponse {
+                        truth_state: ConflictTruthState::InvalidEvidence,
+                        plan: None,
+                        candidates: vec![],
+                        evidence_blockers: validation.blockers,
+                        checked_at_utc,
+                    }),
+                )
+                    .into_response();
+            }
+            (
+                StatusCode::OK,
+                Json(ConflictPlanDetailResponse {
+                    truth_state: ConflictTruthState::Active,
+                    plan: Some(plan_row_from_record(&plan_record)),
+                    candidates: candidate_records
+                        .iter()
+                        .map(candidate_row_from_record)
+                        .collect(),
+                    evidence_blockers: vec![],
+                    checked_at_utc,
+                }),
+            )
+                .into_response()
+        }
         Ok(None) => (
             StatusCode::OK,
             Json(ConflictPlanDetailResponse {
                 truth_state: ConflictTruthState::NotFound,
                 plan: None,
                 candidates: vec![],
+                evidence_blockers: vec![],
                 checked_at_utc,
             }),
         )
@@ -438,6 +548,7 @@ pub(crate) async fn strategy_conflict_plan_by_id(
                     truth_state: ConflictTruthState::QueryFailed,
                     plan: None,
                     candidates: vec![],
+                    evidence_blockers: vec![],
                     checked_at_utc,
                 }),
             )

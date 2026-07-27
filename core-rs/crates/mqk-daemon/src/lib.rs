@@ -8,6 +8,7 @@ pub mod artifact_intake;
 pub mod backtest_jobs;
 pub mod bind;
 pub mod capital_policy;
+pub mod conflict_evidence_validation;
 pub mod cors;
 pub mod daily_data_readiness;
 pub mod decision;
