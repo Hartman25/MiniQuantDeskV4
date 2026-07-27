@@ -443,6 +443,134 @@ while ($true) {
 
 ## 6. Active / Next Patch
 
+### RUNTIME-OPPORTUNITY-ALLOCATION-01-COMBINED — IMPLEMENTATION AND CLOSURE PROOF COMPLETE — AWAITING CHATGPT AND OPERATOR ACCEPTANCE
+
+**Branch:** `bundle/5-runtime-opportunity-allocation-01` (separate worktree
+`MiniQuantDeskV4-bundle5`, created from accepted `main` at `5355c579`; `main`
+and the primary soak worktree are untouched by this branch).
+
+**Scope:** a deterministic, fail-closed, paper-only, long-only pre-decision
+constraint layer that considers all eligible same-cycle symbol opportunities
+together before allowing new/increasing long exposure, on top of the
+existing `mqk-portfolio::allocator`. One narrowing step inserted before the
+existing `submit_internal_strategy_decision` seam — every downstream gate
+(registry, promotion, suppression, arm, run, budget, per-symbol caps, sector
+risk, outbox, broker, reconciliation) is unchanged.
+
+**Phase A (audit):**
+[docs/specs/runtime_opportunity_allocation_01a_current_truth_and_contract.md](../docs/specs/runtime_opportunity_allocation_01a_current_truth_and_contract.md)
+answers all 10 required audit questions from source. Key finding: scanner
+`total_score` (produced in `scoring.py::score_candidate`) is dropped before
+reaching the daemon's trusted `LoadedWatchlistArtifact` — the runtime had no
+source-proven score to allocate on. This makes Phase B (a new artifact)
+required rather than optional.
+
+**Phase B — `runtime-opportunity-set-v1` artifact:** Python builder/validator
+(`research-py/src/mqk_research/scanner/runtime_opportunity_artifact.py`, 30
+tests) + Rust daemon-side read-only loader/validator
+(`core-rs/crates/mqk-daemon/src/runtime_opportunity_artifact.rs`, 25 tests,
+mirrors `watchlist_intake.rs`'s pattern). Score is a canonical 6-decimal
+string (`score_source: "scanner_total_score"` only), never a binary float.
+Watchlist-lineage binding uses a canonical delimited-string hash (not JSON —
+serde_json's map-ordering is feature-flag dependent) so the Rust side can
+recompute it byte-for-byte from the raw watchlist JSON.
+
+**Phase C — allocator hardening:**
+`core-rs/crates/mqk-portfolio/src/allocator.rs`. Fixed two pre-existing
+determinism gaps in the shared (short-capable) core: duplicate symbols were
+silently overwritten via `BTreeMap` insert (now `DuplicateSymbol` error);
+tied `|score|` candidates broke ties by input order via a stable sort (now
+an explicit symbol-ascending tie-break). Added
+`Allocator::allocate_long_only(equity_micros, candidates, runtime_ceiling)`:
+rejects negative scores, validates every constraint
+(`AllocationConstraints::validate`), enforces `max_positions` against a
+caller-supplied runtime ceiling. 24 new tests.
+
+**Phase D — pure allocation-cycle model:**
+`core-rs/crates/mqk-portfolio/src/cycle.rs`. `compute_allocation_cycle`
+composes one same-cycle candidate set through the long-only allocator seam.
+Zero-dependency, zero-IO (mqk-portfolio stays a dependency-free crate — every
+identity/timestamp is caller-supplied). Nonpositive equity or a duplicate
+symbol fails the whole cycle closed; nonpositive price/invalid score/
+non-increasing target fails closed only for that one candidate.
+`final_target_qty` always in `[current_qty, strategy_target_qty]`. 15 new
+tests.
+
+**Phase E — runtime mode:**
+`core-rs/crates/mqk-daemon/src/runtime_opportunity_mode.rs`.
+`MQK_RUNTIME_OPPORTUNITY_ALLOCATION_MODE` ∈ `{off, shadow, paper_enforced}`,
+default `off`, unknown value fails closed to `off` with an
+`invalid_configuration` flag. Hard live-lock forces effective mode to `off`
+(not `shadow`) outside `deployment_mode == paper && adapter == alpaca`. 9
+new tests.
+
+**Phase F — runtime wiring:**
+`core-rs/crates/mqk-daemon/src/runtime_opportunity_allocation.rs` (batching/
+apply layer, 12 unit tests) +
+`core-rs/crates/mqk-daemon/src/state/loop_runner.rs` (restructured from
+"submit each symbol's decisions immediately" to "collect the whole tick's
+decisions, batch-allocate once, then submit" — the minimum change for one
+allocator call to see the whole same-cycle candidate set). Cap #6
+(`max_new_orders_per_tick`) necessarily relocated from a pre-derivation
+per-symbol skip to a post-allocation per-decision skip at submission time
+(it counts *accepted* submissions, which can only be known then) — same
+running count, same order, same reason string, only the pipeline position
+changed. Regression-proven against the isolated port-5434 test DB across 8
+named scenario files; full `mqk-daemon` lib suite 424/426 (2 pre-existing,
+unrelated `alpaca_ws_transport` test-DB migration-drift failures).
+
+**Phase G — durable evidence:** migration `0055`
+(`sys_runtime_opportunity_allocation_plans`/`_candidates`, additive, no
+existing table modified, no `DEFAULT now()`/`gen_random_uuid()`) +
+`core-rs/crates/mqk-db/src/runtime_opportunity_allocation.rs` (idempotent
+insert via existence-check + rollback-on-duplicate in one transaction). Best-
+effort persist from `gather_and_apply` — a write failure never blocks the
+tick. Evidence only: `equity_micros`/`source_snapshot_id` are copies of the
+already-durable snapshot row, never a second NAV source; scores/weights
+stored as scaled integers, never a binary float column. 3 DB-backed tests +
+migration governance guard pass.
+
+**Phase H — read-only API/GUI:** `GET /api/v1/portfolio/allocation/
+{status,plans,plans/:plan_id}` (`routes/portfolio_allocation.rs`, 13 tests
+including a zero-write proof and bounded/non-echoing invalid-input handling)
++ `RuntimeOpportunityAllocationPanel.tsx` on the Settings screen (fail-closed
+parser `runtimeOpportunityAllocation.ts`, 16 tests; 922/922 total GUI suite;
+`npm run build` clean). Browser verification of the mounted panel was not
+performed — the app hard-gates every screen behind a live daemon connection,
+and starting the real daemon in this worktree is forbidden by this bundle's
+own soak-isolation rules; correctness rests on the build + parser tests.
+
+**False-truth review:** see
+[docs/specs/runtime_opportunity_allocation_01d_paper_enforcement.md](../docs/specs/runtime_opportunity_allocation_01d_paper_enforcement.md)'s
+falsification table — 13 claims independently attempted to be falsified
+against the actual test suite; none confirmed.
+
+**Guards:** `scripts/guards/check_runtime_opportunity_allocation_01.sh` (11
+static proofs: pure-crate dependency check, no direct broker/outbox call
+from Bundle 5's new modules, default-off, live-lock predicate present,
+`approved_for_live` hardcoded false, GET-only routes, read-only GUI panel,
+additive migration with no implicit defaults, no AI/ML reference, Bundle 6
+not started) — passes. `check_migration_governance.sh` — passes.
+
+**Commits (9):** `docs: freeze runtime opportunity allocation contract` →
+`portfolio: harden deterministic long-only opportunity allocation` →
+`research: export source-proven runtime opportunity artifacts` →
+`portfolio: add pure allocation-cycle model` →
+`runtime: add shadow opportunity allocation plans` →
+`runtime: wire opportunity allocation into the multi-symbol dispatch loop` →
+`db: add durable runtime opportunity allocation evidence store` →
+`api: expose read-only runtime allocation truth` →
+`gui: render runtime allocation truth read-only`.
+
+**Not done in this bundle (by design):** merge into `main`, push, soak
+authorization, live capital, AI integration, Bundle 6 (multi-strategy
+conflict policy).
+
+**Disposition:** `RUNTIME-OPPORTUNITY-ALLOCATION-01: IMPLEMENTATION AND
+CLOSURE PROOF COMPLETE — AWAITING CHATGPT AND OPERATOR ACCEPTANCE.`
+
+---
+
 ### DOCS-README-CURRENT-STATUS-20260615-01 — CLOSED
 
 README/README_TECHNICAL were updated for the 2026-06-15 no-trade smoke, GUI dev port `1420`, GUI/CLI backtest cash micros warning, and evidence workflow wording. Doc-only patch; no code, script, config, evidence, or generated artifact changes.

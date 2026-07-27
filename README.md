@@ -546,14 +546,17 @@ BUNDLE 3: ACCEPTED — COMPLETE
 
 BUNDLE 4: ACCEPTED — COMPLETE
 
-SUPERVISED PAPER SOAK:
-AUTHORIZED — NOT YET STARTED
-
-UNATTENDED 10–20-SESSION PAPER SOAK:
-NOT YET AUTHORIZED
-
 BUNDLE 5:
-NOT STARTED
+IMPLEMENTATION AND CLOSURE PROOF COMPLETE —
+AWAITING CHATGPT AND OPERATOR ACCEPTANCE
+
+BUNDLE 6: NOT STARTED
+
+SUPERVISED PAPER SOAK:
+PRIMARY MAIN BASELINE UNAFFECTED BY THIS BRANCH
+
+UNATTENDED PAPER SOAK:
+NOT YET AUTHORIZED
 
 LIVE CAPITAL:
 NOT READY
@@ -570,9 +573,63 @@ proof) has now received independent ChatGPT/operator acceptance —
 3. does **not** authorize live capital;
 4. does **not** claim that any soak session has occurred — the unattended
    10–20-session paper soak remains **not yet authorized**;
-5. Bundle 5 development must occur in a separate branch/worktree and must
-   not modify the frozen soak baseline during a session — Bundle 5 is
-   **not started**.
+5. Bundle 5 development occurred in a separate branch/worktree
+   (`bundle/5-runtime-opportunity-allocation-01`) and did not modify the
+   frozen soak baseline on `main` — this section documents Bundle 5's
+   result; it does not itself authorize soak, live capital, or any change
+   to the accepted Bundle 3/4 baseline.
+
+### Bundle 5: runtime opportunity allocation
+
+`RUNTIME-OPPORTUNITY-ALLOCATION-01-COMBINED` adds a deterministic,
+fail-closed, **paper-only** pre-decision constraint layer that considers all
+eligible same-cycle symbol opportunities together before allowing new or
+increasing long exposure — built on the existing `mqk-portfolio::allocator`,
+hardened for the runtime. It is one narrowing step inserted before the
+existing `submit_internal_strategy_decision` seam; every existing gate
+downstream (registry, promotion, suppression, arm, run, budget, per-symbol
+caps, sector risk, outbox, broker, reconciliation) is unchanged and still
+runs on whatever the allocator passes through.
+
+Governing rule: the allocator can only **reduce** new/increasing buy
+exposure below what a strategy already asked for — it can never create a
+trade the strategy did not produce, never raise a target above the
+strategy's own target, never create a short, and never block a
+risk-reducing sell, event-risk flatten, operator flatten, or reconciliation
+repair. It is not live-capital authority, does not consume AI output, and
+does not solve multi-strategy conflicts (deferred to Bundle 6).
+
+Default runtime mode is `off` (exact pre-Bundle-5 behavior, zero I/O, zero
+allocator call). `MQK_RUNTIME_OPPORTUNITY_ALLOCATION_MODE=shadow` computes
+and durably persists an allocation plan for operator visibility with zero
+effect on submitted decisions. `paper_enforced` clamps/refuses only
+new/increasing buys, and is only reachable under a hard live-lock
+(`deployment_mode == paper && adapter == alpaca`) — any other deployment
+context forces the effective mode back to `off` regardless of configuration.
+
+A new immutable `runtime-opportunity-set-v1` artifact (research-py
+scanner/promotion pipeline, daemon-side read-only consumer) is the *only*
+source-proven score the allocator may use — the Phase A audit found that the
+existing watchlist artifact drops scanner `total_score` before it reaches
+the daemon's trusted watchlist type, so this bundle could not have safely
+derived a score from the existing pipeline without inventing one. Two new
+additive tables (`sys_runtime_opportunity_allocation_plans`/`_candidates`,
+migration `0055`) hold allocation-cycle evidence only — never portfolio,
+fill, order, or P&L truth. Three new read-only API routes and one read-only
+GUI panel expose this evidence; none of the three routes ever writes a row.
+
+See
+[docs/specs/runtime_opportunity_allocation_01a_current_truth_and_contract.md](docs/specs/runtime_opportunity_allocation_01a_current_truth_and_contract.md)
+through
+[docs/specs/runtime_opportunity_allocation_01f_bundle_5_closure.md](docs/specs/runtime_opportunity_allocation_01f_bundle_5_closure.md)
+for the full audit, contract, and per-phase closure evidence, and the ledger
+for the complete commit-by-commit record.
+
+**RUNTIME-OPPORTUNITY-ALLOCATION-01: IMPLEMENTATION AND CLOSURE PROOF
+COMPLETE — AWAITING CHATGPT AND OPERATOR ACCEPTANCE.** This branch does not
+merge into `main`, does not modify the accepted Bundle 3/4 baseline, does
+not enable the allocator on the supervised-soak `main` baseline, and does
+not authorize live capital or begin Bundle 6.
 
 ### What Bundle 3 completion unlocks
 

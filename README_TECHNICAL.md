@@ -330,8 +330,16 @@ fills/marks/P&L) has now received independent ChatGPT/operator acceptance —
 below). This acceptance authorizes a **supervised** Paper + Alpaca soak under
 active operator supervision; it does not authorize live capital and does not
 claim any soak session has occurred. The unattended 10–20-session paper soak
-remains **not yet authorized**. Bundle 5 is **not started** and must occur in
-a separate branch/worktree, not against the frozen soak baseline.
+remains **not yet authorized**. Bundle 5
+(`RUNTIME-OPPORTUNITY-ALLOCATION-01-COMBINED`, a paper-only, long-only,
+pre-decision buy-narrowing layer on top of `mqk-portfolio::allocator`) has
+reached **IMPLEMENTATION AND CLOSURE PROOF COMPLETE — AWAITING CHATGPT AND
+OPERATOR ACCEPTANCE** on its own branch/worktree
+(`bundle/5-runtime-opportunity-allocation-01`), without modifying this
+frozen `main` soak baseline; see README.md's "Bundle 5: runtime opportunity
+allocation" section and `docs/specs/runtime_opportunity_allocation_01a`
+through `01f` for full detail. Bundle 6 (multi-strategy conflict policy)
+remains **not started**.
 
 The strongest current operational route is:
 
@@ -743,8 +751,10 @@ Bundle 3 and Bundle 4 (durable paper portfolio and P&L truth) are both now accep
 authorizes the next operational step — a **supervised** autonomous Paper + Alpaca soak under active
 operator supervision. It is not a live-capital authorization, it does not claim any soak session has
 occurred, and it does not authorize the unattended 10–20-session soak (still **not yet authorized**).
-Bundle 5 is **not started** and must occur in a separate branch/worktree, not against the frozen soak
-baseline, and must not modify that baseline during a session.
+Bundle 5 has reached **IMPLEMENTATION AND CLOSURE PROOF COMPLETE — AWAITING
+CHATGPT AND OPERATOR ACCEPTANCE** on its own branch/worktree, without
+modifying this frozen `main` soak baseline (see README.md's Bundle 5
+section for detail). Bundle 6 remains **not started**.
 
 The intended sequence is:
 
