@@ -443,6 +443,129 @@ while ($true) {
 
 ## 6. Active / Next Patch
 
+### MULTI-STRATEGY-CONFLICT-POLICY-01-COMBINED — IMPLEMENTATION AND CLOSURE PROOF COMPLETE — AWAITING CHATGPT AND OPERATOR ACCEPTANCE BEFORE PUSH
+
+**Worktree/branch:** primary worktree `C:\Users\Zacha\Desktop\MiniQuantDeskV4`,
+directly on `main`. No new branch or worktree created. Starting HEAD
+`a0852c2f6ffd2343c9b6740728abd5b7889bcb15` (the verified Bundle 5 acceptance
+checkpoint, see the entry immediately below). Not pushed.
+
+**Scope:** Bundle 6 — a deterministic, fail-closed, paper-only
+conflict-resolution layer for multiple same-cycle strategy decisions
+concerning the same symbol, sitting after strategy-decision derivation and
+before Bundle 5's runtime opportunity allocation. Source audit:
+[docs/specs/multi_strategy_conflict_policy_01a_current_truth_and_contract.md](../docs/specs/multi_strategy_conflict_policy_01a_current_truth_and_contract.md).
+
+**Current one-strategy-per-symbol truth (unchanged by this bundle):**
+`NativeStrategyBootstrap::bootstrap` still instantiates exactly one
+`StrategyHost` from `fleet_ids[0]` ("Single-strategy Tier A policy") and
+`StrategyHost::register` still returns `MultiStrategyNotAllowed` on a second
+registration; `docs/design/native_multi_symbol_dispatch.md` confirms only
+the one symbol matching the host's fixed-at-construction target can ever
+produce a non-empty decision. Bundle 6 therefore provably narrows nothing
+today in production — it is a future-safe seam Bundle 7 (dynamic
+strategy-symbol selection, explicitly not started) can call instead of
+inventing its own conflict semantics.
+
+**Phase A — pure conflict model:**
+`core-rs/crates/mqk-portfolio/src/conflict_policy.rs` (zero-dependency,
+zero-IO, mirrors `cycle.rs`'s shape). `resolve_conflict_cycle` groups
+candidates by symbol and, per the frozen policy: passes through a lone
+valid candidate; selects the smallest-target risk-reducing (sell) candidate
+when one or more exist (safety precedence over any competing increase);
+passes through one canonical representative on exact target consensus among
+increases; refuses the whole group on differing increase targets or a
+duplicate economic candidate identity; every selected/refused candidate is
+the exact original input by ordinal reference, never rebuilt. 30 pure unit
+tests.
+
+**Phase B — mode + insertion point:**
+`runtime_strategy_conflict_mode.rs` (mirrors `runtime_opportunity_mode.rs`:
+off/shadow/paper_enforced, default off, hard live-lock to off outside
+paper+Alpaca) + `runtime_strategy_conflict.rs` (mirrors
+`runtime_opportunity_allocation.rs`'s pure-apply/impure-gather split;
+`compute_conflict_cycle_id` mirrors Bundle 5's Phase B repair — no wall
+clock, no `decision_id`). Wired into `state/loop_runner.rs` as the single
+per-tick call immediately before Bundle 5's `gather_and_apply`; Bundle 5's
+own position, cap #6, and canonical `submit_internal_strategy_decision` are
+unmoved. 24 new tests. Full `mqk-daemon` lib suite: 470/470, no regression.
+
+**Phase C — durable evidence:** migration `0056`
+(`sys_runtime_strategy_conflict_plans`/`_candidates`, additive, no existing
+table modified, no `DEFAULT now()`/`gen_random_uuid()`, next sequential id
+per manifest.json) + `core-rs/crates/mqk-db/src/runtime_strategy_conflict.rs`
+(idempotent insert via existence-check + rollback-on-duplicate, mirrors the
+allocation store exactly). Best-effort persist from `gather_and_resolve`,
+never called for `off`. 4 DB-backed tests pass against the isolated
+port-5434 test DB; Bundle 5's own DB store tests re-verified green with
+migration 0056 present.
+
+**Phase D — read-only API/GUI:** `GET /api/v1/strategy/conflict/
+{status,plans,plans/:plan_id}` (`routes/strategy_conflict.rs`, mirrors
+`routes/portfolio_allocation.rs`; 13 tests incl. zero-write proof and
+bounded/non-echoing invalid-input handling) + `StrategyConflictPolicyPanel.tsx`
+on the Settings screen (fail-closed parser `strategyConflict.ts`, 18 tests;
+938/938 total GUI suite; `npm run build` clean). Status route explicitly
+reports `current_runtime_limitation` so the panel never implies
+multi-strategy runtime is enabled. Browser verification of the mounted
+panel was not performed for the same reason as Bundle 5 (app hard-gates
+every screen behind a live daemon connection; starting the real daemon is
+out of this bundle's scope) — correctness rests on the build + parser +
+route tests.
+
+**Phase E — structural guard:**
+`scripts/guards/check_multi_strategy_conflict_policy_01.sh` (15 static
+proofs: pure-crate dependency check, no direct broker/outbox call from
+Bundle 6's new modules, no dynamic-selection/score-ranking reference,
+default-off, live-lock predicate present, `approved_for_live` hardcoded
+false, GET-only routes, read-only GUI panel, additive migration with no
+implicit defaults, insertion-point ordering (conflict → Bundle 5 → cap #6 →
+canonical submit), `NativeStrategyBootstrap` single-strategy-fleet marker
+unchanged, watchlist `strategy_assignments` still one-strategy-per-symbol,
+Bundle 7 not started, no AI/ML reference) with a `--self-test` mode proving
+all 7 required mutation-negative fixtures (insertion-point tampering,
+default-mode tampering, live-lock removal, broker/outbox injection, GUI
+mutation-control injection, dynamic-selection injection) are actually
+caught, not vacuously true — passes.
+
+**Guard repair (direct, unavoidable consequence of Bundle 6 starting):**
+`check_runtime_opportunity_allocation_01.sh`'s check #11 asserted Bundle 6
+had not started — a point-in-time statement this bundle's own operator
+authorization makes obsolete. Replaced with a check that Bundle 5's own
+`gather_and_apply` insertion point in `loop_runner.rs` remains intact.
+`check_migration_governance.sh` repaired to fall back to `python` when
+`python3` resolves to a Windows Store app-execution-alias stub rather than
+a real interpreter on this box (the underlying manifest-vs-disk check was
+already correct; only the interpreter resolution was broken).
+
+**Commits (5, on `main`):** `docs: accept bundle 5 and pin shell guards to
+LF` → `portfolio: add pure deterministic strategy conflict policy` →
+`runtime: wire paper conflict policy before opportunity allocation` →
+`db: persist strategy conflict evidence` → `api: expose read-only strategy
+conflict truth` (this last commit also carries the GUI half — see commit
+body).
+
+**Not done in this bundle (by design):** push, dynamic strategy-symbol
+selection (Bundle 7), watchdog/Discord/alert expansion (Bundle 8),
+autonomous paper soak (Bundle 9), AI-lab repair (Bundle 10), live-capital
+authorization (Bundle 11), broad multi-asset execution (Bundle 12),
+multi-host `StrategyHost` runtime, watchlist schema widening.
+
+**Known pre-existing, out-of-scope condition:** `cargo clippy -p mqk-daemon
+--lib --tests -- -D warnings` fails on `await_holding_lock` findings in
+`core-rs/crates/mqk-daemon/src/state/session_controller.rs` test code —
+verified via `git diff` that this file is untouched by Bundle 6 and the
+findings pre-date this bundle. `cargo clippy -p mqk-daemon --lib -- -D
+warnings` and clippy scoped to Bundle 6's own new integration test target
+are both clean.
+
+**Disposition:** see the FINAL HANDOFF report for this session for the
+authoritative current validation result and disposition. Bundle 6 is
+**not** marked accepted in this entry — that determination is reserved for
+ChatGPT/operator review.
+
+---
+
 ### RUNTIME-OPPORTUNITY-ALLOCATION-01-COMBINED — IMPLEMENTATION AND CLOSURE PROOF COMPLETE — AWAITING CHATGPT AND OPERATOR ACCEPTANCE
 
 **Branch:** `bundle/5-runtime-opportunity-allocation-01` (separate worktree
