@@ -87,7 +87,16 @@ pub const REASON_AMBIGUOUS_INVALID_COMPETITOR_REFUSED: &str =
 pub const TRUTH_STATE_COMPUTED: &str = "computed";
 
 /// Frozen policy schema version, carried through into durable evidence.
-pub const CONFLICT_POLICY_SCHEMA_VERSION: &str = "multi-strategy-conflict-policy-v1";
+///
+/// FINAL-IDENTITY-AND-READ-AUTHORITY-REPAIR-01: bumped from `-v1` to `-v2`
+/// because the cycle-identity contract changed (the global first-assignment
+/// timeframe was removed from identity and the seed encoding became
+/// length-prefixed/unambiguous — see
+/// `mqk-daemon::runtime_strategy_conflict::compute_conflict_cycle_id`). A
+/// persisted `-v1` row is legacy/incomplete evidence under the new contract,
+/// never current active truth — the read-side validator's supported-version
+/// set intentionally excludes it.
+pub const CONFLICT_POLICY_SCHEMA_VERSION: &str = "multi-strategy-conflict-policy-v2";
 
 // ---------------------------------------------------------------------------
 // Canonical symbol normalization

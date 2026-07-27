@@ -1050,20 +1050,28 @@ pub(super) fn spawn_execution_loop(
                         // today at most one candidate ever competes per
                         // symbol per tick.
                         let market_date_today = Utc::now().format("%Y-%m-%d").to_string();
-                        let dispatch_timeframe = multi_symbol_assignments
-                            .first()
-                            .map(|a| a.timeframe.clone())
-                            .unwrap_or_default();
+                        // FINAL-IDENTITY-AND-READ-AUTHORITY-REPAIR-01 Defect
+                        // 1: Bundle 6 no longer receives this global
+                        // first-assignment timeframe at all -- its cycle
+                        // identity is derived solely from canonical cycle
+                        // facts and each candidate's own timeframe/bar
+                        // facts. `dispatch_timeframe` remains Bundle 5's
+                        // accepted context (unchanged) and is computed here,
+                        // after the Bundle 6 call, purely for that
+                        // downstream call site.
                         let conflict_outcome = crate::runtime_strategy_conflict::gather_and_resolve(
                             &state_arc,
                             run_id,
                             now_micros,
                             market_date_today.clone(),
-                            dispatch_timeframe.clone(),
                             all_decisions,
                             &current_positions,
                         )
                         .await;
+                        let dispatch_timeframe = multi_symbol_assignments
+                            .first()
+                            .map(|a| a.timeframe.clone())
+                            .unwrap_or_default();
                         // MULTI-STRATEGY-CONFLICT-POLICY-01 Phase C: the
                         // conflict plan (when Some) is persisted as durable
                         // evidence inside gather_and_resolve, best-effort —

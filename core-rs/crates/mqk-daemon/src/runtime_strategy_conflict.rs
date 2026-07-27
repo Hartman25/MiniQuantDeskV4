@@ -43,11 +43,26 @@ use mqk_portfolio::{
     ConflictCycleResult,
 };
 
+/// Length-prefixed (netstring-style) encoding of one field: `"{len}:{s}"`.
+/// Concatenating `lp(...)` for a fixed, known-arity, known-order sequence of
+/// fields is injective — a field's own content (including a literal colon,
+/// comma, or pipe) can never be misread as a delimiter, because each field's
+/// exact byte length is recorded immediately before it. This replaces the
+/// prior unescaped colon/comma-joined seed (FINAL-IDENTITY-AND-READ-
+/// AUTHORITY-REPAIR-01 Defect 3): that format could not distinguish, say, a
+/// symbol containing a literal colon from a delimiter boundary. Never
+/// decoded — this is a one-way hash preimage, so injectivity (not
+/// parseability) is the only requirement.
+fn lp(s: &str) -> String {
+    format!("{}:{}", s.len(), s)
+}
+
 /// One candidate's canonical economic-identity seed fragment for
 /// [`compute_conflict_cycle_id`]. Every field capable of changing the pure
 /// resolver's output, or the truthful evidence recorded for it, is
 /// represented here explicitly (never `Debug`-derived, so the format is
-/// exact and stable under field reordering).
+/// exact and stable under field reordering), each length-prefixed via
+/// [`lp`] so the concatenation is unambiguous.
 fn candidate_identity_seed(c: &ConflictCandidateInput) -> String {
     let symbol = canonical_symbol(&c.symbol);
     let strategy_id = c.strategy_id.trim().to_string();
@@ -91,53 +106,89 @@ fn candidate_identity_seed(c: &ConflictCandidateInput) -> String {
         .close_micros
         .map(|v| v.to_string())
         .unwrap_or_else(|| "none".to_string());
-    format!(
-        "{symbol}:{strategy_id}:{side}:{qty}:{current_qty}:{timeframe_secs}:{order_type}:{tif}:\
-         {limit_price}:{bar_present}:{bar_symbol}:{bar_strategy_id}:{bar_timeframe}:{bar_end_ts}:\
-         {close_micros}",
-        qty = c.qty,
-        current_qty = c.current_qty,
-        timeframe_secs = c.timeframe_secs,
-    )
+    // FINAL-IDENTITY-AND-READ-AUTHORITY-REPAIR-01 Defect 1: this candidate's
+    // own `timeframe_secs` is the sole timeframe fact in identity — there is
+    // no caller-supplied global timeframe field on `ConflictCandidateInput`
+    // at all, so a mixed-timeframe batch's identity can never depend on
+    // which assignment happened to dispatch first.
+    let fields = [
+        symbol,
+        strategy_id,
+        side,
+        c.qty.to_string(),
+        c.current_qty.to_string(),
+        c.timeframe_secs.to_string(),
+        order_type,
+        tif,
+        limit_price,
+        bar_present.to_string(),
+        bar_symbol,
+        bar_strategy_id,
+        bar_timeframe,
+        bar_end_ts,
+        close_micros,
+    ];
+    fields.iter().map(|f| lp(f)).collect()
 }
 
 /// Deterministic per-cycle economic identity. UUIDv5 of `run_id` +
-/// `market_date` + `timeframe` + the conflict policy schema version + the
-/// configured (requested) mode + the effective mode + the sorted set of
-/// every candidate's full economic-identity seed
-/// ([`candidate_identity_seed`]) this cycle.
+/// `market_date` + the conflict policy schema version + the configured
+/// (requested) mode + the effective mode + the sorted set of every
+/// candidate's full economic-identity seed ([`candidate_identity_seed`])
+/// this cycle. Every top-level field and every candidate seed is
+/// length-prefixed ([`lp`]) so the concatenation is unambiguous.
 ///
-/// AUTHORITY-AND-EVIDENCE-REPAIR-01 Defect 3 repair: the previous seed
-/// covered only `(symbol, strategy_id, side, qty, current_qty, bar_end_ts)`
-/// and omitted mode entirely, so the exact same candidates evaluated once
-/// in `shadow` and again in `paper_enforced` collided on the same
-/// `plan_id` — the DB then silently treated the enforced write as
-/// `AlreadyExists` and preserved stale shadow-mode evidence. Every field
-/// capable of changing the resolver's output or its truthful evidence
-/// (mode, per-candidate `timeframe_secs`, full bar provenance including
-/// close, and order semantics) is now included. Sorting makes the id
-/// independent of dispatch order; omitting the loop-tick wall clock and
-/// `decision_id` (which embeds wall-clock material — see
-/// `decision::bar_result_to_decisions`) makes reprocessing the exact same
-/// economic cycle on a later tick produce the exact same id.
+/// This is the single shared canonical cycle-identity implementation
+/// (FINAL-IDENTITY-AND-READ-AUTHORITY-REPAIR-01 Defect 3): runtime plan
+/// creation ([`apply_conflict_policy`]) and read-side evidence validation
+/// (`conflict_evidence_validation::validate_plan_with_candidates`, which
+/// reconstructs the exact candidate batch from durable evidence and
+/// recomputes this same function) both call it — there is no second,
+/// divergent identity implementation anywhere in the codebase.
+///
+/// Defect 1 repair: no `timeframe` parameter exists here at all. The prior
+/// signature took a caller-supplied global timeframe string (derived in
+/// `loop_runner.rs` from `multi_symbol_assignments.first()`), so reordering
+/// the assignment list could change the cycle id while the exact economic
+/// candidate set was unchanged. Every candidate already carries its own
+/// authoritative `timeframe_secs` in [`candidate_identity_seed`] — that is
+/// now the only timeframe fact identity ever depends on.
+///
+/// AUTHORITY-AND-EVIDENCE-REPAIR-01 Defect 3 repair (carried forward): the
+/// previous seed covered only `(symbol, strategy_id, side, qty,
+/// current_qty, bar_end_ts)` and omitted mode entirely, so the exact same
+/// candidates evaluated once in `shadow` and again in `paper_enforced`
+/// collided on the same `plan_id` — the DB then silently treated the
+/// enforced write as `AlreadyExists` and preserved stale shadow-mode
+/// evidence. Every field capable of changing the resolver's output or its
+/// truthful evidence (mode, per-candidate `timeframe_secs`, full bar
+/// provenance including close, and order semantics) is now included.
+/// Sorting makes the id independent of dispatch order; omitting the
+/// loop-tick wall clock and `decision_id` (which embeds wall-clock material
+/// — see `decision::bar_result_to_decisions`) makes reprocessing the exact
+/// same economic cycle on a later tick produce the exact same id.
 pub fn compute_conflict_cycle_id(
     run_id: Uuid,
     market_date: &str,
-    timeframe: &str,
     configured_mode: ConflictPolicyMode,
     effective_mode: ConflictPolicyMode,
     candidates: &[ConflictCandidateInput],
 ) -> String {
     let mut seeds: Vec<String> = candidates.iter().map(candidate_identity_seed).collect();
     seeds.sort();
-    let candidates_str = seeds.join(",");
-    let seed = format!(
-        "mqk.strategy-conflict-policy-cycle.v2|{run_id}|{market_date}|{timeframe}|{schema}|\
-         {configured}|{effective}|{candidates_str}",
-        schema = mqk_portfolio::CONFLICT_POLICY_SCHEMA_VERSION,
-        configured = configured_mode.as_str(),
-        effective = effective_mode.as_str(),
-    );
+    let candidates_blob: String = seeds.iter().map(|s| lp(s)).collect();
+    let top_fields = [
+        run_id.to_string(),
+        market_date.to_string(),
+        mqk_portfolio::CONFLICT_POLICY_SCHEMA_VERSION.to_string(),
+        configured_mode.as_str().to_string(),
+        effective_mode.as_str().to_string(),
+    ];
+    let mut seed = "mqk.strategy-conflict-policy-cycle.v3|".to_string();
+    for f in &top_fields {
+        seed.push_str(&lp(f));
+    }
+    seed.push_str(&candidates_blob);
     Uuid::new_v5(&Uuid::NAMESPACE_DNS, seed.as_bytes()).to_string()
 }
 
@@ -151,7 +202,6 @@ pub struct ConflictPolicyContext {
     pub mode: ConflictPolicyMode,
     pub run_id: Uuid,
     pub market_date: String,
-    pub timeframe: String,
     /// Evidence-only (Phase C's `created_at_utc`) — never part of cycle
     /// identity.
     pub now_micros: i64,
@@ -251,7 +301,6 @@ pub fn apply_conflict_policy(
     let cycle_id = compute_conflict_cycle_id(
         ctx.run_id,
         &ctx.market_date,
-        &ctx.timeframe,
         ctx.configured_mode,
         ctx.mode,
         &candidates,
@@ -295,7 +344,10 @@ pub fn apply_conflict_policy(
 // Phase C: durable evidence persistence (best-effort, never blocks the tick)
 // ---------------------------------------------------------------------------
 
-fn disposition_str(d: mqk_portfolio::ConflictDisposition) -> &'static str {
+/// `pub(crate)` so `conflict_evidence_validation.rs`'s read-side
+/// recomputation compares against this exact same mapping — never a second,
+/// possibly-divergent copy.
+pub(crate) fn disposition_str(d: mqk_portfolio::ConflictDisposition) -> &'static str {
     use mqk_portfolio::ConflictDisposition;
     match d {
         ConflictDisposition::Passthrough => "passthrough",
@@ -448,12 +500,19 @@ async fn persist_plan_if_present(
 /// When the effective mode is `Off`, returns `decisions` untouched and
 /// performs no candidate construction — the default configuration has zero
 /// additional runtime cost.
+///
+/// Defect 1 repair: no `timeframe` parameter exists here at all — Bundle 6
+/// identity is now derived solely from canonical cycle facts and each
+/// candidate's own timeframe/bar facts (see [`compute_conflict_cycle_id`]).
+/// Bundle 5's `runtime_opportunity_allocation::gather_and_apply` still
+/// receives its own accepted `dispatch_timeframe` context directly from
+/// `loop_runner.rs` — this narrow call-site split is the only change to
+/// Bundle 5's timeframe handling.
 pub async fn gather_and_resolve(
     state_arc: &Arc<AppState>,
     run_id: Uuid,
     now_micros: i64,
     market_date: String,
-    timeframe: String,
     decisions: Vec<PendingDecisionWithBarFacts>,
     current_positions: &BTreeMap<String, i64>,
 ) -> ConflictPolicyOutcome {
@@ -477,7 +536,6 @@ pub async fn gather_and_resolve(
         mode: eff.effective_mode,
         run_id,
         market_date,
-        timeframe,
         now_micros,
     };
     let outcome = apply_conflict_policy(&ctx, decisions, current_positions);
@@ -571,7 +629,6 @@ mod tests {
             mode,
             run_id: run_id(),
             market_date: "2026-07-26".to_string(),
-            timeframe: TIMEFRAME.to_string(),
             now_micros: 1_000_000,
         }
     }
@@ -834,7 +891,6 @@ mod tests {
         let id1 = compute_conflict_cycle_id(
             run_id(),
             "2026-07-26",
-            TIMEFRAME,
             ConflictPolicyMode::Shadow,
             ConflictPolicyMode::Shadow,
             &candidates,
@@ -842,7 +898,6 @@ mod tests {
         let id2 = compute_conflict_cycle_id(
             run_id(),
             "2026-07-26",
-            TIMEFRAME,
             ConflictPolicyMode::Shadow,
             ConflictPolicyMode::Shadow,
             &candidates,
@@ -880,7 +935,6 @@ mod tests {
         let shadow = compute_conflict_cycle_id(
             run_id(),
             "2026-07-26",
-            TIMEFRAME,
             ConflictPolicyMode::Shadow,
             ConflictPolicyMode::Shadow,
             &candidates,
@@ -888,7 +942,6 @@ mod tests {
         let enforced = compute_conflict_cycle_id(
             run_id(),
             "2026-07-26",
-            TIMEFRAME,
             ConflictPolicyMode::PaperEnforced,
             ConflictPolicyMode::PaperEnforced,
             &candidates,
@@ -902,7 +955,6 @@ mod tests {
         let live_locked = compute_conflict_cycle_id(
             run_id(),
             "2026-07-26",
-            TIMEFRAME,
             ConflictPolicyMode::PaperEnforced, // configured
             ConflictPolicyMode::Off,           // live-locked down to Off
             &candidates,
@@ -910,7 +962,6 @@ mod tests {
         let honest_off = compute_conflict_cycle_id(
             run_id(),
             "2026-07-26",
-            TIMEFRAME,
             ConflictPolicyMode::Off,
             ConflictPolicyMode::Off,
             &candidates,
@@ -924,7 +975,6 @@ mod tests {
         let id1 = compute_conflict_cycle_id(
             run_id(),
             "2026-07-26",
-            TIMEFRAME,
             ConflictPolicyMode::Shadow,
             ConflictPolicyMode::Shadow,
             &candidates,
@@ -933,7 +983,6 @@ mod tests {
         let id2 = compute_conflict_cycle_id(
             run_id(),
             "2026-07-26",
-            TIMEFRAME,
             ConflictPolicyMode::Shadow,
             ConflictPolicyMode::Shadow,
             &candidates,
@@ -947,7 +996,6 @@ mod tests {
         let id1 = compute_conflict_cycle_id(
             run_id(),
             "2026-07-26",
-            TIMEFRAME,
             ConflictPolicyMode::Shadow,
             ConflictPolicyMode::Shadow,
             &candidates,
@@ -956,7 +1004,6 @@ mod tests {
         let id2 = compute_conflict_cycle_id(
             run_id(),
             "2026-07-26",
-            TIMEFRAME,
             ConflictPolicyMode::Shadow,
             ConflictPolicyMode::Shadow,
             &candidates,
@@ -970,7 +1017,6 @@ mod tests {
         let id1 = compute_conflict_cycle_id(
             run_id(),
             "2026-07-26",
-            TIMEFRAME,
             ConflictPolicyMode::Shadow,
             ConflictPolicyMode::Shadow,
             &candidates,
@@ -979,7 +1025,6 @@ mod tests {
         let id2 = compute_conflict_cycle_id(
             run_id(),
             "2026-07-26",
-            TIMEFRAME,
             ConflictPolicyMode::Shadow,
             ConflictPolicyMode::Shadow,
             &candidates,
@@ -993,7 +1038,6 @@ mod tests {
         let present = compute_conflict_cycle_id(
             run_id(),
             "2026-07-26",
-            TIMEFRAME,
             ConflictPolicyMode::Shadow,
             ConflictPolicyMode::Shadow,
             &candidates,
@@ -1006,7 +1050,6 @@ mod tests {
         let missing = compute_conflict_cycle_id(
             run_id(),
             "2026-07-26",
-            TIMEFRAME,
             ConflictPolicyMode::Shadow,
             ConflictPolicyMode::Shadow,
             &candidates,
@@ -1020,7 +1063,6 @@ mod tests {
         let market = compute_conflict_cycle_id(
             run_id(),
             "2026-07-26",
-            TIMEFRAME,
             ConflictPolicyMode::Shadow,
             ConflictPolicyMode::Shadow,
             &candidates,
@@ -1030,7 +1072,6 @@ mod tests {
         let limit = compute_conflict_cycle_id(
             run_id(),
             "2026-07-26",
-            TIMEFRAME,
             ConflictPolicyMode::Shadow,
             ConflictPolicyMode::Shadow,
             &candidates,
@@ -1063,7 +1104,6 @@ mod tests {
         let id0 = compute_conflict_cycle_id(
             run_id(),
             "2026-07-26",
-            TIMEFRAME,
             ConflictPolicyMode::Shadow,
             ConflictPolicyMode::Shadow,
             &c0,
@@ -1071,11 +1111,80 @@ mod tests {
         let id1 = compute_conflict_cycle_id(
             run_id(),
             "2026-07-26",
-            TIMEFRAME,
             ConflictPolicyMode::Shadow,
             ConflictPolicyMode::Shadow,
             &c1,
         );
         assert_eq!(id0, id1);
+    }
+
+    // ── FINAL-IDENTITY-AND-READ-AUTHORITY-REPAIR-01 Defect 1: no global
+    // first-assignment timeframe in identity; mixed-timeframe reordering
+    // (different assignment order, different source ordinals) must never
+    // change the cycle id for the same exact economic candidate set ──────
+
+    fn mixed_timeframe_candidate(
+        ordinal: usize,
+        symbol: &str,
+        timeframe_secs: i64,
+        bar_timeframe: &str,
+    ) -> ConflictCandidateInput {
+        ConflictCandidateInput {
+            ordinal,
+            symbol: symbol.to_string(),
+            strategy_id: "s1".to_string(),
+            timeframe_secs,
+            side: "buy".to_string(),
+            qty: 10,
+            current_qty: 0,
+            order_type: "market".to_string(),
+            time_in_force: "day".to_string(),
+            limit_price: None,
+            bar_symbol: Some(symbol.to_string()),
+            bar_strategy_id: Some("s1".to_string()),
+            bar_timeframe: Some(bar_timeframe.to_string()),
+            bar_end_ts: Some(1_000),
+            close_micros: Some(100_000_000),
+        }
+    }
+
+    #[test]
+    fn mixed_timeframe_batch_reordered_with_different_ordinals_yields_same_cycle_id() {
+        // Simulates two symbols dispatched on different native timeframes
+        // (e.g. AAPL on 5m, MSFT on 1h) assembled in one order (AAPL first,
+        // ordinal 0/1) and then in the reverse assignment order (MSFT
+        // first, ordinal 0/1) -- exactly the scenario where the old
+        // `multi_symbol_assignments.first()`-derived global timeframe could
+        // change depending on which assignment happened to dispatch first,
+        // even though the economic candidate set is identical.
+        let first_order = vec![
+            mixed_timeframe_candidate(0, "AAPL", 300, "5m"),
+            mixed_timeframe_candidate(1, "MSFT", 3_600, "1h"),
+        ];
+        // Same two candidates, reassembled in the opposite assignment
+        // order -- each now carries a different `ordinal` than it did
+        // above (MSFT is ordinal 0 here, AAPL is ordinal 1).
+        let reversed_order = vec![
+            mixed_timeframe_candidate(0, "MSFT", 3_600, "1h"),
+            mixed_timeframe_candidate(1, "AAPL", 300, "5m"),
+        ];
+        let id_first = compute_conflict_cycle_id(
+            run_id(),
+            "2026-07-26",
+            ConflictPolicyMode::Shadow,
+            ConflictPolicyMode::Shadow,
+            &first_order,
+        );
+        let id_reversed = compute_conflict_cycle_id(
+            run_id(),
+            "2026-07-26",
+            ConflictPolicyMode::Shadow,
+            ConflictPolicyMode::Shadow,
+            &reversed_order,
+        );
+        assert_eq!(
+            id_first, id_reversed,
+            "mixed-timeframe reordering with different source ordinals must never change cycle id"
+        );
     }
 }

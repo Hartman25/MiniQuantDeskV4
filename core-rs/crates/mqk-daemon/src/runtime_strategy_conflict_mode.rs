@@ -38,6 +38,21 @@ impl ConflictPolicyMode {
             Self::PaperEnforced => "paper_enforced",
         }
     }
+
+    /// Exact inverse of [`Self::as_str`] — `None` for anything else. Used by
+    /// the read-side evidence validator to parse a persisted `mode` /
+    /// `configured_mode` column back into the closed enum before recomputing
+    /// cycle identity; never used to accept a caller-facing free-form value
+    /// (that path is [`resolve_conflict_policy_mode`], which fails closed to
+    /// `Off` with `invalid_configuration` instead of returning `None`).
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "off" => Some(Self::Off),
+            "shadow" => Some(Self::Shadow),
+            "paper_enforced" => Some(Self::PaperEnforced),
+            _ => None,
+        }
+    }
 }
 
 /// Result of parsing the raw env value, before any deployment-mode live-lock
@@ -244,6 +259,24 @@ mod tests {
         let eff = effective_mode(&resolution, DeploymentMode::LiveCapital, None);
         assert_eq!(eff.effective_mode, ConflictPolicyMode::Off);
         assert!(!eff.live_lock_applied);
+    }
+
+    #[test]
+    fn parse_is_exact_inverse_of_as_str() {
+        for mode in [
+            ConflictPolicyMode::Off,
+            ConflictPolicyMode::Shadow,
+            ConflictPolicyMode::PaperEnforced,
+        ] {
+            assert_eq!(ConflictPolicyMode::parse(mode.as_str()), Some(mode));
+        }
+    }
+
+    #[test]
+    fn parse_rejects_unrecognized_or_miscased_value() {
+        assert_eq!(ConflictPolicyMode::parse("bogus"), None);
+        assert_eq!(ConflictPolicyMode::parse("Off"), None);
+        assert_eq!(ConflictPolicyMode::parse(""), None);
     }
 
     #[test]
