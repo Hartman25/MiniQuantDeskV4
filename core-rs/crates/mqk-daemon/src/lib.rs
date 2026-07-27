@@ -25,6 +25,8 @@ pub mod routes;
 pub mod runtime_opportunity_allocation;
 pub mod runtime_opportunity_artifact;
 pub mod runtime_opportunity_mode;
+pub mod runtime_strategy_conflict;
+pub mod runtime_strategy_conflict_mode;
 pub mod state;
 pub mod strategy_scan_jobs;
 pub mod suppression;

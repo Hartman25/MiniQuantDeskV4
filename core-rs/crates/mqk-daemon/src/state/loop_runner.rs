@@ -1035,17 +1035,46 @@ pub(super) fn spawn_execution_loop(
                             }));
                         }
 
+                        // MULTI-STRATEGY-CONFLICT-POLICY-01 Phase B: resolve
+                        // same-symbol conflicts across this tick's whole
+                        // batch, once, before Bundle 5's opportunity
+                        // allocation ever sees it. When
+                        // MQK_STRATEGY_CONFLICT_POLICY_MODE=off (the
+                        // default), this is a zero-cost passthrough — no
+                        // candidate construction, no conflict-plan DB write,
+                        // `all_decisions` returned unchanged and in original
+                        // order. The current one-strategy-per-symbol runtime
+                        // means this is normally a no-op even in shadow/
+                        // paper_enforced mode (see
+                        // docs/specs/multi_strategy_conflict_policy_01a):
+                        // today at most one candidate ever competes per
+                        // symbol per tick.
+                        let market_date_today = Utc::now().format("%Y-%m-%d").to_string();
+                        let dispatch_timeframe = multi_symbol_assignments
+                            .first()
+                            .map(|a| a.timeframe.clone())
+                            .unwrap_or_default();
+                        let conflict_outcome = crate::runtime_strategy_conflict::gather_and_resolve(
+                            &state_arc,
+                            run_id,
+                            now_micros,
+                            market_date_today.clone(),
+                            dispatch_timeframe.clone(),
+                            all_decisions,
+                            &current_positions,
+                        )
+                        .await;
+                        // MULTI-STRATEGY-CONFLICT-POLICY-01 Phase C: the
+                        // conflict plan (when Some) is persisted as durable
+                        // evidence inside gather_and_resolve, best-effort —
+                        // nothing further to do with it here.
+
                         // RUNTIME-OPPORTUNITY-ALLOCATION-01 Phase F: one
                         // allocation call for this tick's whole batch. When
                         // MQK_RUNTIME_OPPORTUNITY_ALLOCATION_MODE=off (the
                         // default) or there are no buy-side decisions this
                         // tick, this is a zero-cost passthrough — no I/O, no
                         // allocator call, `all_decisions` returned unchanged.
-                        let market_date_today = Utc::now().format("%Y-%m-%d").to_string();
-                        let dispatch_timeframe = multi_symbol_assignments
-                            .first()
-                            .map(|a| a.timeframe.clone())
-                            .unwrap_or_default();
                         let allocation_outcome =
                             crate::runtime_opportunity_allocation::gather_and_apply(
                                 &state_arc,
@@ -1053,7 +1082,7 @@ pub(super) fn spawn_execution_loop(
                                 now_micros,
                                 market_date_today,
                                 dispatch_timeframe,
-                                all_decisions,
+                                conflict_outcome.decisions,
                                 &current_positions,
                             )
                             .await;
