@@ -227,12 +227,27 @@ if ($ScopeDiff.Count -eq 0) {
 
 # ---------------------------------------------------------------------------
 # Safety: no .env.local read/printed, no secrets
+#
+# Scanned with full-line comments stripped first: these source files carry
+# pre-existing, unrelated doc comments (e.g. md.rs's kraken_sync_network_gate
+# rationale) that discuss the repo's dev-environment .env.local convention in
+# prose. That is not this patch's H1 code reading or printing the file, so a
+# whole-file substring scan would false-positive on it. The invariant this
+# guard protects is that no *code* added for H1 support opens, reads, or
+# prints .env.local.
 # ---------------------------------------------------------------------------
 
-foreach ($content in @($CoverageContent, $MdLibContent, $AlpacaContent, $CliMdContent)) {
-    Assert-NotContains $content '.env.local' "H116-no-env-local"
+function Strip-CommentLines {
+    param([string]$Content)
+    return (($Content -split "`r?`n") | Where-Object {
+        $_.Trim() -notmatch '^(//|#)'
+    }) -join "`n"
 }
-Write-Host 'PASS [H116]: no .env.local references in patched files'
+
+foreach ($content in @($CoverageContent, $MdLibContent, $AlpacaContent, $CliMdContent)) {
+    Assert-NotContains (Strip-CommentLines $content) '.env.local' "H116-no-env-local"
+}
+Write-Host 'PASS [H116]: no .env.local references in patched files (comment-only mentions excluded)'
 
 Write-Host ''
 if ($Failures.Count -eq 0) {
