@@ -111,6 +111,7 @@ export function unavailableConflictPlansList(): ConflictPlansList {
     run_id: null,
     plans: [],
     excluded_malformed_count: 0,
+    excluded_vanished_count: 0,
     checked_at_utc: new Date().toISOString(),
   };
 }
@@ -118,6 +119,12 @@ export function unavailableConflictPlansList(): ConflictPlansList {
 // ---------------------------------------------------------------------------
 // Validators
 // ---------------------------------------------------------------------------
+
+const CONFLICT_ORDER_TYPES = ["market", "limit"] as const;
+
+function isNullableBoolean(v: unknown): v is boolean | null {
+  return v === null || typeof v === "boolean";
+}
 
 function isValidCandidateRow(v: unknown): v is ConflictPlanCandidateRow {
   if (!v || typeof v !== "object") return false;
@@ -130,7 +137,15 @@ function isValidCandidateRow(v: unknown): v is ConflictPlanCandidateRow {
     isSafeInteger(c.qty) &&
     isSafeInteger(c.current_qty) &&
     isNullableSafeInteger(c.proposed_target_qty) &&
+    (c.order_type === null || isEnumValue(c.order_type, CONFLICT_ORDER_TYPES)) &&
+    isNullableString(c.time_in_force) &&
+    isNullableSafeInteger(c.limit_price) &&
+    isNullableBoolean(c.bar_present) &&
+    isNullableString(c.bar_symbol) &&
+    isNullableString(c.bar_strategy_id) &&
+    isNullableString(c.bar_timeframe) &&
     isNullableSafeInteger(c.bar_end_ts) &&
+    isNullableSafeInteger(c.close_micros) &&
     isBoolean(c.selected) &&
     isEnumValue(c.disposition, CONFLICT_DISPOSITIONS) &&
     isString(c.reason_code)
@@ -256,14 +271,24 @@ export function parseConflictPlansList(raw: unknown): ConflictPlansList {
   if (!isString(r.checked_at_utc)) return reject();
   if (!Array.isArray(r.plans) || !r.plans.every(isValidPlanRow)) return reject();
   if (!isSafeInteger(r.excluded_malformed_count) || (r.excluded_malformed_count as number) < 0) return reject();
+  if (!isSafeInteger(r.excluded_vanished_count) || (r.excluded_vanished_count as number) < 0) return reject();
 
   if (r.truth_state !== "active" && (r.plans as unknown[]).length > 0) return reject();
+  // A query failure never carries partial exclusion counts alongside it —
+  // it fails closed entirely, never mixed with an "active-ish" projection.
+  if (
+    r.truth_state === "query_failed" &&
+    ((r.excluded_malformed_count as number) > 0 || (r.excluded_vanished_count as number) > 0)
+  ) {
+    return reject();
+  }
 
   return {
     truth_state: r.truth_state as string,
     run_id: r.run_id as string | null,
     plans: r.plans as ConflictPlanRow[],
     excluded_malformed_count: r.excluded_malformed_count as number,
+    excluded_vanished_count: r.excluded_vanished_count as number,
     checked_at_utc: r.checked_at_utc as string,
   };
 }

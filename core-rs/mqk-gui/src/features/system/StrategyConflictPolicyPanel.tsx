@@ -160,6 +160,15 @@ export function StrategyConflictPolicyPanel() {
               <th>Qty</th>
               <th>Current</th>
               <th>Proposed target</th>
+              <th>Order type</th>
+              <th>Time in force</th>
+              <th>Limit price</th>
+              <th>Bar present</th>
+              <th>Bar symbol</th>
+              <th>Bar strategy</th>
+              <th>Bar timeframe</th>
+              <th>Bar end ts</th>
+              <th>Close</th>
               <th>Selected</th>
               <th>Disposition</th>
               <th>Reason</th>
@@ -174,6 +183,15 @@ export function StrategyConflictPolicyPanel() {
                 <td>{c.qty}</td>
                 <td>{c.current_qty}</td>
                 <td>{c.proposed_target_qty ?? "—"}</td>
+                <td>{c.order_type ?? "— (legacy)"}</td>
+                <td>{c.time_in_force ?? "— (legacy)"}</td>
+                <td>{c.limit_price ?? "—"}</td>
+                <td>{c.bar_present === null ? "— (legacy)" : c.bar_present ? "yes" : "no"}</td>
+                <td>{c.bar_symbol ?? "—"}</td>
+                <td>{c.bar_strategy_id ?? "—"}</td>
+                <td>{c.bar_timeframe ?? "—"}</td>
+                <td>{c.bar_end_ts ?? "—"}</td>
+                <td>{c.close_micros ?? "—"}</td>
                 <td>{c.selected ? "yes" : "no"}</td>
                 <td>{c.disposition}</td>
                 <td>{c.reason_code}</td>

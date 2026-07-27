@@ -41,7 +41,15 @@ function validCandidateRaw(overrides: Record<string, unknown> = {}): Record<stri
     qty: 5,
     current_qty: 20,
     proposed_target_qty: 15,
-    bar_end_ts: null,
+    order_type: "market",
+    time_in_force: "day",
+    limit_price: null,
+    bar_present: true,
+    bar_symbol: "AAPL",
+    bar_strategy_id: "strategy_a",
+    bar_timeframe: "5m",
+    bar_end_ts: 900,
+    close_micros: 0,
     selected: true,
     disposition: "selected",
     reason_code: "risk_reducing_candidate_selected",
@@ -264,11 +272,13 @@ test("parseConflictPlansList accepts a valid active list", () => {
     run_id: "run-1",
     plans: [validPlanRaw()],
     excluded_malformed_count: 0,
+    excluded_vanished_count: 0,
     checked_at_utc: "2099-05-01T13:05:00Z",
   });
   assert.equal(parsed.truth_state, "active");
   assert.equal(parsed.plans.length, 1);
   assert.equal(parsed.excluded_malformed_count, 0);
+  assert.equal(parsed.excluded_vanished_count, 0);
 });
 
 test("parseConflictPlansList reports excluded malformed rows without listing them", () => {
@@ -277,11 +287,26 @@ test("parseConflictPlansList reports excluded malformed rows without listing the
     run_id: "run-1",
     plans: [validPlanRaw()],
     excluded_malformed_count: 2,
+    excluded_vanished_count: 0,
     checked_at_utc: "2099-05-01T13:05:00Z",
   });
   assert.equal(parsed.truth_state, "active");
   assert.equal(parsed.plans.length, 1);
   assert.equal(parsed.excluded_malformed_count, 2);
+});
+
+test("parseConflictPlansList reports excluded vanished rows distinctly from malformed rows", () => {
+  const parsed = parseConflictPlansList({
+    truth_state: "active",
+    run_id: "run-1",
+    plans: [validPlanRaw()],
+    excluded_malformed_count: 1,
+    excluded_vanished_count: 1,
+    checked_at_utc: "2099-05-01T13:05:00Z",
+  });
+  assert.equal(parsed.truth_state, "active");
+  assert.equal(parsed.excluded_malformed_count, 1);
+  assert.equal(parsed.excluded_vanished_count, 1);
 });
 
 test("parseConflictPlansList rejects a negative excluded_malformed_count", () => {
@@ -290,6 +315,30 @@ test("parseConflictPlansList rejects a negative excluded_malformed_count", () =>
     run_id: "run-1",
     plans: [],
     excluded_malformed_count: -1,
+    excluded_vanished_count: 0,
+    checked_at_utc: "2099-05-01T13:05:00Z",
+  });
+  assert.equal(parsed.truth_state, "db_unavailable");
+});
+
+test("parseConflictPlansList rejects a negative excluded_vanished_count", () => {
+  const parsed = parseConflictPlansList({
+    truth_state: "active",
+    run_id: "run-1",
+    plans: [],
+    excluded_malformed_count: 0,
+    excluded_vanished_count: -1,
+    checked_at_utc: "2099-05-01T13:05:00Z",
+  });
+  assert.equal(parsed.truth_state, "db_unavailable");
+});
+
+test("parseConflictPlansList rejects a missing excluded_vanished_count", () => {
+  const parsed = parseConflictPlansList({
+    truth_state: "active",
+    run_id: "run-1",
+    plans: [],
+    excluded_malformed_count: 0,
     checked_at_utc: "2099-05-01T13:05:00Z",
   });
   assert.equal(parsed.truth_state, "db_unavailable");
@@ -301,6 +350,19 @@ test("parseConflictPlansList rejects a non-active truth_state with plans present
     run_id: "run-1",
     plans: [validPlanRaw()],
     excluded_malformed_count: 0,
+    excluded_vanished_count: 0,
+    checked_at_utc: "2099-05-01T13:05:00Z",
+  });
+  assert.equal(parsed.truth_state, "db_unavailable");
+});
+
+test("parseConflictPlansList rejects query_failed carrying nonzero exclusion counts", () => {
+  const parsed = parseConflictPlansList({
+    truth_state: "query_failed",
+    run_id: "run-1",
+    plans: [],
+    excluded_malformed_count: 1,
+    excluded_vanished_count: 0,
     checked_at_utc: "2099-05-01T13:05:00Z",
   });
   assert.equal(parsed.truth_state, "db_unavailable");
@@ -312,8 +374,67 @@ test("parseConflictPlansList reports db_unavailable truthfully with empty plans"
     run_id: null,
     plans: [],
     excluded_malformed_count: 0,
+    excluded_vanished_count: 0,
     checked_at_utc: "2099-05-01T13:05:00Z",
   });
   assert.equal(parsed.truth_state, "db_unavailable");
   assert.equal(parsed.plans.length, 0);
+});
+
+// ---------------------------------------------------------------------------
+// Defect 7: full 0057 candidate provenance
+// ---------------------------------------------------------------------------
+
+test("parseConflictPlanDetail accepts full candidate provenance fields", () => {
+  const parsed = parseConflictPlanDetail({
+    truth_state: "active",
+    plan: validPlanRaw(),
+    candidates: [validCandidateRaw()],
+    evidence_blockers: [],
+    checked_at_utc: "2099-05-01T13:05:00Z",
+  });
+  assert.equal(parsed.truth_state, "active");
+  const c = parsed.candidates[0];
+  assert.equal(c.order_type, "market");
+  assert.equal(c.time_in_force, "day");
+  assert.equal(c.limit_price, null);
+  assert.equal(c.bar_present, true);
+  assert.equal(c.bar_symbol, "AAPL");
+  assert.equal(c.bar_strategy_id, "strategy_a");
+  assert.equal(c.bar_timeframe, "5m");
+  assert.equal(c.close_micros, 0);
+});
+
+test("parseConflictPlanDetail accepts a legacy candidate with null provenance", () => {
+  const parsed = parseConflictPlanDetail({
+    truth_state: "active",
+    plan: validPlanRaw(),
+    candidates: [
+      validCandidateRaw({
+        order_type: null,
+        time_in_force: null,
+        bar_present: null,
+        bar_symbol: null,
+        bar_strategy_id: null,
+        bar_timeframe: null,
+        close_micros: null,
+      }),
+    ],
+    evidence_blockers: [],
+    checked_at_utc: "2099-05-01T13:05:00Z",
+  });
+  assert.equal(parsed.truth_state, "active");
+  assert.equal(parsed.candidates[0].order_type, null);
+  assert.equal(parsed.candidates[0].bar_present, null);
+});
+
+test("parseConflictPlanDetail rejects an unrecognized order_type", () => {
+  const parsed = parseConflictPlanDetail({
+    truth_state: "active",
+    plan: validPlanRaw(),
+    candidates: [validCandidateRaw({ order_type: "stop_limit_bogus" })],
+    evidence_blockers: [],
+    checked_at_utc: "2099-05-01T13:05:00Z",
+  });
+  assert.equal(parsed.truth_state, "db_unavailable");
 });
