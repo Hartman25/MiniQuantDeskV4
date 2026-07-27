@@ -443,12 +443,163 @@ while ($true) {
 
 ## 6. Active / Next Patch
 
-### MULTI-STRATEGY-CONFLICT-POLICY-01-COMBINED — IMPLEMENTATION AND CLOSURE PROOF COMPLETE — AWAITING CHATGPT AND OPERATOR ACCEPTANCE BEFORE PUSH
+### MULTI-STRATEGY-CONFLICT-POLICY-01-AUTHORITY-AND-EVIDENCE-REPAIR — IMPLEMENTATION AND CLOSURE PROOF COMPLETE — AWAITING CHATGPT AND OPERATOR ACCEPTANCE BEFORE PUSH
+
+**Worktree/branch:** primary worktree `C:\Users\Zacha\Desktop\MiniQuantDeskV4`,
+directly on `main`. No new branch or worktree created. Starting HEAD
+`75a98a39562507b366f358ed1eeccc737532b0e4` (Bundle 6's published-but-not-
+accepted head — see the entry immediately below). Not pushed.
+
+**Scope:** repair of 7 independent-review defects found in Bundle 6
+(`MULTI-STRATEGY-CONFLICT-POLICY-01-COMBINED`) after it was published to
+`origin/main`: (1) a lone valid buy could authorize new exposure alongside
+an invalid sibling; (2) bar/timeframe authority was buy-only and compared
+against a global first-assignment timeframe string instead of each
+candidate's own `timeframe_secs`; (3) cycle economic identity omitted mode
+and several other fields, letting the same candidates collide on the same
+`plan_id` across `shadow`/`paper_enforced`; (4) durable idempotency
+accepted a divergent payload under the same `plan_id` as a silent replay;
+(5) durable evidence (migration 0056) lacked full bar/order-semantics
+provenance; (6) the API projected malformed persisted evidence as active
+truth; (7) the ledger/handoff undercounted Bundle 6's commits and said "not
+pushed" after it had been published.
+
+**Commits (6, on `main`):** `portfolio: fail closed on ambiguous conflict
+candidates` (Defects 1–2, pure crate) → `runtime: bind conflict identity to
+full economic facts` (Defect 2 daemon half + Defect 3) → `db: harden
+conflict evidence identity and replay` (Defects 4–5, migration 0057) →
+`api: validate durable conflict evidence` (Defect 6 API half) → `gui:
+render invalid conflict evidence truth` (Defect 6 GUI half) → `test: close
+bundle 6 authority repair proof` (Defect 7 docs + guard mutation-negative
+proofs, this commit).
+
+**Defect 1 (ambiguous invalid competitor):** in
+`mqk-portfolio/src/conflict_policy.rs`'s `resolve_symbol_group`, the
+`valid_indices.len() == 1` branch (reached only when the group has more
+than one candidate) now inspects the sole valid candidate's side. A valid
+sell/reduction still passes through unchanged (safety precedence over an
+unrelated invalid sibling). A valid buy now refuses the whole group with
+the new `REASON_AMBIGUOUS_INVALID_COMPETITOR_REFUSED` reason instead of
+authorizing new exposure on the strength of one unopposed-but-
+uncorroborated candidate.
+
+**Defect 2 (bar/timeframe authority):** `validate_candidate`'s bar-identity
+check now runs for every candidate (buy or sell) — canonical symbol,
+strategy identity, and timeframe must be present and exact; only the
+positive-close requirement remains buy-only. Timeframe is checked against a
+new pure `canonical_timeframe_str(timeframe_secs)` table (mirrors
+`mqk_artifacts::timeframe_from_secs`) driven by each candidate's own
+`timeframe_secs`, and the old caller-global `timeframe: String` field is
+removed from `ConflictCandidateInput`. A new `canonical_symbol()` helper
+(trim + uppercase) is used consistently for grouping, bar-symbol
+comparison, and (in `mqk-daemon::runtime_strategy_conflict::candidate_inputs`)
+the current-position lookup, so `"aapl"` can never read a held `"AAPL"`
+position as flat.
+
+**Defect 3 (cycle identity):**
+`runtime_strategy_conflict::compute_conflict_cycle_id`'s seed now includes
+the configured (requested) mode, the effective mode, and — per candidate —
+`timeframe_secs`, full bar provenance (symbol/strategy/timeframe/end_ts/
+close/explicit presence), and order semantics (`order_type`/
+`time_in_force`/`limit_price`), not just
+`(symbol, strategy_id, side, qty, current_qty, bar_end_ts)`. Duplicate-
+candidate identity (`conflict_policy.rs`'s `economic_identity`) gained the
+same fields so two candidates that differ only in quantity/target are
+recognized as conflicting proposals, not silently deduplicated.
+
+**Defect 4 (durable replay):** `mqk-db::insert_runtime_strategy_conflict_plan`
+no longer treats a `plan_id` match as automatic `AlreadyExists`. It fetches
+the stored plan+candidates and compares them canonically (candidates keyed
+by ordinal, order-independent, sensitive to every evidence field). An exact
+match stays idempotent; any divergence returns the new
+`PayloadCollision` outcome and leaves the original row untouched.
+
+**Defect 5 (durable evidence):** additive migration `0057` (0056
+untouched) adds nullable `configured_mode` to
+`sys_runtime_strategy_conflict_plans` (plus a `plan_id = cycle_id`
+consistency CHECK) and nullable `order_type`/`time_in_force`/`limit_price`/
+`bar_present`/`bar_symbol`/`bar_strategy_id`/`bar_timeframe`/`close_micros`
+to `sys_runtime_strategy_conflict_candidates`. No backfill — 0056-era rows
+round-trip the new columns as NULL and are read as legacy/incomplete
+evidence, never fabricated or projected as active.
+
+**Defect 6 (read authority):** one new shared validator
+(`mqk-daemon/src/conflict_evidence_validation.rs`,
+`validate_plan_shape`/`validate_plan_with_candidates`) used by all three
+`routes/strategy_conflict.rs` routes. New `invalid_evidence` truth_state
+with bounded `evidence_blockers`. Status fetches and fully validates the
+latest plan's candidates before projecting any field and never falls back
+to an older plan when the latest is malformed. Detail returns
+`invalid_evidence` instead of an active projection. List runs the full
+per-row check (bounded by the existing 1–100 limit clamp) and excludes
+malformed rows, reporting `excluded_malformed_count` — never silently
+mixing them into an active list. GUI (`strategyConflict.ts` parsers,
+`StrategyConflictPolicyPanel.tsx`) renders the new state and blockers
+instead of silently omitting the section.
+
+**Defect 7 (truth reconciliation):** see the truth-reconciliation note
+added to the Bundle 6 entry immediately below — corrects "5 commits"/"not
+pushed" to the true 6-commit range and published head, without rewriting
+the original commit messages, and states Bundle 6 is not accepted.
+
+**Guard:** `scripts/guards/check_multi_strategy_conflict_policy_01.sh`
+extended with 8 new real checks (23 total) and 8 new mutation-negative
+fixtures (15 total, `--self-test`) covering: sole-valid-buy-plus-invalid-
+sibling refusal, sell bar provenance no longer optional, per-candidate
+timeframe authority, mode present in cycle identity, bar presence/close
+present in cycle identity, divergent same-ID payload rejected, API
+evidence validation present, and status never falling back past the single
+latest plan. All 15 fixtures caught; all 23 real checks pass. Every
+pre-existing Bundle 6 check (ordering/default-off/live-lock/GET-only/
+read-only/no-broker/no-AI/single-strategy-fleet) re-verified unchanged.
+
+**Not done in this session (by design):** push, Bundle 7 (dynamic
+strategy-symbol selection), watchdog/Discord/alert expansion, autonomous
+paper soak, AI-lab repair, live-capital authorization, broad multi-asset
+execution, multi-host `StrategyHost` runtime, watchlist schema widening,
+resuming AI-lab work, starting the real paper daemon, or touching the
+operating paper database (port 5440) — all DB-backed proof in this session
+ran only against the isolated port-5434 test DB.
+
+**Known pre-existing, out-of-scope condition (unchanged from Bundle 6):**
+`cargo clippy -p mqk-daemon --lib --tests -- -D warnings` still fails on
+`await_holding_lock`/`bool_assert_comparison` findings in
+`core-rs/crates/mqk-daemon/src/state/session_controller.rs` and
+`runtime_session_source.rs` test code — confirmed via `git diff` that
+neither file is touched by this repair; every file this repair *did* touch
+is clippy-clean.
+
+**Disposition:** see the FINAL HANDOFF report for this session for the
+authoritative current validation result and disposition. Not marked
+accepted in this entry — that determination is reserved for ChatGPT/
+operator review.
+
+---
+
+### MULTI-STRATEGY-CONFLICT-POLICY-01-COMBINED — PUBLISHED, NOT ACCEPTED, SUPERSEDED BY AUTHORITY-AND-EVIDENCE-REPAIR-01 (see above)
 
 **Worktree/branch:** primary worktree `C:\Users\Zacha\Desktop\MiniQuantDeskV4`,
 directly on `main`. No new branch or worktree created. Starting HEAD
 `a0852c2f6ffd2343c9b6740728abd5b7889bcb15` (the verified Bundle 5 acceptance
-checkpoint, see the entry immediately below). Not pushed.
+checkpoint, see the entry immediately below).
+
+**Truth reconciliation (AUTHORITY-AND-EVIDENCE-REPAIR-01, added after this
+entry was first written):** this entry originally said "Not pushed" and
+listed 5 commits. Both statements were accurate at the moment they were
+written but are now stale: the original Bundle 6 implementation range
+`a0852c2f..75a98a39` actually contains **six** commits (the commit list
+below was missing the final structural-proof commit), and that range was
+subsequently **published to `origin/main`** at
+`75a98a39562507b366f358ed1eeccc737532b0e4`. Independent source review after
+publication found authority and durable-evidence defects (ambiguous invalid
+competitor could authorize a buy; incomplete bar/timeframe authority; cycle
+identity collisions across shadow/paper_enforced; silent idempotent-replay
+acceptance of divergent payloads; under-specified durable evidence; API
+projecting malformed evidence as active) — **`75a98a39` is therefore not
+accepted** and is superseded by the `MULTI-STRATEGY-CONFLICT-POLICY-01-
+AUTHORITY-AND-EVIDENCE-REPAIR` commits recorded later in this ledger. This
+note corrects the record without rewriting the six original commit
+messages.
 
 **Scope:** Bundle 6 — a deterministic, fail-closed, paper-only
 conflict-resolution layer for multiple same-cycle strategy decisions
@@ -538,12 +689,14 @@ authorization makes obsolete. Replaced with a check that Bundle 5's own
 a real interpreter on this box (the underlying manifest-vs-disk check was
 already correct; only the interpreter resolution was broken).
 
-**Commits (5, on `main`):** `docs: accept bundle 5 and pin shell guards to
-LF` → `portfolio: add pure deterministic strategy conflict policy` →
-`runtime: wire paper conflict policy before opportunity allocation` →
-`db: persist strategy conflict evidence` → `api: expose read-only strategy
-conflict truth` (this last commit also carries the GUI half — see commit
-body).
+**Commits (6, on `main`, published to `origin/main` at `75a98a39` — see the
+truth-reconciliation note above; superseded, not accepted):** `docs: accept
+bundle 5 and pin shell guards to LF` → `portfolio: add pure deterministic
+strategy conflict policy` → `runtime: wire paper conflict policy before
+opportunity allocation` → `db: persist strategy conflict evidence` → `api:
+expose read-only strategy conflict truth` (this commit also carries the GUI
+half — see commit body) → `test: close bundle 6 conflict policy structural
+proof`.
 
 **Not done in this bundle (by design):** push, dynamic strategy-symbol
 selection (Bundle 7), watchdog/Discord/alert expansion (Bundle 8),

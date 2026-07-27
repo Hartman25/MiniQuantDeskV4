@@ -31,6 +31,10 @@ CONFLICT_PANEL="core-rs/mqk-gui/src/features/system/StrategyConflictPolicyPanel.
 CONFLICT_POLICY_RS="core-rs/crates/mqk-portfolio/src/conflict_policy.rs"
 NATIVE_STRATEGY_RS="core-rs/crates/mqk-runtime/src/native_strategy.rs"
 MIGRATION_0056="core-rs/crates/mqk-db/migrations/0056_runtime_strategy_conflict_plans.sql"
+# AUTHORITY-AND-EVIDENCE-REPAIR-01 additions.
+CONFLICT_DB_STORE="core-rs/crates/mqk-db/src/runtime_strategy_conflict.rs"
+CONFLICT_EVIDENCE_VALIDATION="core-rs/crates/mqk-daemon/src/conflict_evidence_validation.rs"
+MIGRATION_0057="core-rs/crates/mqk-db/migrations/0057_runtime_strategy_conflict_evidence_provenance.sql"
 
 # ---------------------------------------------------------------------------
 # Check functions — each takes the file path(s) to check, so the self-test
@@ -133,6 +137,157 @@ check_no_dynamic_selection() {
       return
     fi
   done
+  echo "PASS"
+}
+
+# ---------------------------------------------------------------------------
+# AUTHORITY-AND-EVIDENCE-REPAIR-01 mutation-negative check functions.
+# ---------------------------------------------------------------------------
+
+# A sole valid BUY in a multi-candidate group must never pass alongside an
+# invalid sibling -- proven by the ambiguous-invalid-competitor reason
+# constant being both defined AND actually referenced (a definition with no
+# reference would mean the dead-code path never runs).
+check_ambiguous_buy_refused() {
+  local f="$1"
+  [[ -f "$f" ]] || { echo "FAIL:missing $f"; return; }
+  local hits
+  hits="$(grep -c 'REASON_AMBIGUOUS_INVALID_COMPETITOR_REFUSED' "$f" || true)"
+  if [[ "$hits" -ge 2 ]]; then
+    echo "PASS"
+  else
+    echo "FAIL:ambiguous-invalid-competitor reason not defined+referenced ($hits occurrence(s))"
+  fi
+}
+
+# A sell candidate must require full bar provenance exactly like a buy
+# (only the positive-close requirement differs) -- proven by the absence of
+# the old Buy-only exemption gate and the presence of the unconditional
+# per-side match inside the bar check.
+check_sell_bar_provenance_required() {
+  local f="$1"
+  [[ -f "$f" ]] || { echo "FAIL:missing $f"; return; }
+  if grep -q 'if let Side::Buy = side {' "$f"; then
+    echo "FAIL:sell candidates are exempted from the bar-provenance check (Buy-only gate present)"
+    return
+  fi
+  if ! grep -q 'Side::Sell => true' "$f"; then
+    echo "FAIL:sell branch of the bar-provenance close check is missing"
+    return
+  fi
+  echo "PASS"
+}
+
+# Bar timeframe must be checked against each candidate's own timeframe_secs
+# (via a pure secs->string table), never a single caller-supplied global
+# timeframe string.
+check_per_candidate_timeframe_authority() {
+  local f="$1"
+  [[ -f "$f" ]] || { echo "FAIL:missing $f"; return; }
+  if ! grep -q 'fn canonical_timeframe_str' "$f"; then
+    echo "FAIL:canonical_timeframe_str (timeframe_secs -> string) converter missing"
+    return
+  fi
+  if ! grep -q 'canonical_timeframe_str(c.timeframe_secs)' "$f"; then
+    echo "FAIL:bar-timeframe check is not driven by the candidate's own timeframe_secs"
+    return
+  fi
+  if grep -qE '^\s*pub timeframe: String,' "$f"; then
+    echo "FAIL:the removed caller-global 'timeframe' field is still present on ConflictCandidateInput"
+    return
+  fi
+  echo "PASS"
+}
+
+# Cycle identity must include the configured and effective mode -- the
+# defect that let identical candidates in shadow vs paper_enforced collide
+# on the same plan_id.
+check_mode_in_cycle_identity() {
+  local f="$1"
+  [[ -f "$f" ]] || { echo "FAIL:missing $f"; return; }
+  if ! grep -q 'configured_mode: ConflictPolicyMode' "$f"; then
+    echo "FAIL:compute_conflict_cycle_id does not take a configured_mode parameter"
+    return
+  fi
+  if ! grep -qF '{configured}' "$f" || ! grep -qF '{effective}' "$f"; then
+    echo "FAIL:the cycle-id seed string does not include both configured and effective mode"
+    return
+  fi
+  echo "PASS"
+}
+
+# Cycle identity must include full bar provenance (explicit presence flag
+# and close) -- not just bar_end_ts.
+check_bar_presence_in_cycle_identity() {
+  local f="$1"
+  [[ -f "$f" ]] || { echo "FAIL:missing $f"; return; }
+  if ! grep -q 'let bar_present' "$f"; then
+    echo "FAIL:cycle identity seed has no explicit bar-presence field"
+    return
+  fi
+  if ! grep -qF '{bar_present}' "$f"; then
+    echo "FAIL:bar_present is computed but not folded into the identity seed string"
+    return
+  fi
+  if ! grep -qF '{close_micros}' "$f"; then
+    echo "FAIL:close_micros is not folded into the identity seed string"
+    return
+  fi
+  echo "PASS"
+}
+
+# A plan_id match must never be accepted as idempotent when the stored
+# payload diverges from the replay -- proven by the PayloadCollision
+# outcome variant existing and being reachable from the existence-check
+# branch (not just declared and unused).
+check_divergent_replay_rejected() {
+  local f="$1"
+  [[ -f "$f" ]] || { echo "FAIL:missing $f"; return; }
+  if ! grep -q 'PayloadCollision' "$f"; then
+    echo "FAIL:no PayloadCollision outcome -- a plan_id match may be accepted as idempotent unconditionally"
+    return
+  fi
+  if ! grep -qE 'plans_match\s*&&\s*candidates_match' "$f"; then
+    echo "FAIL:no canonical full-payload comparison gating the idempotent-replay outcome"
+    return
+  fi
+  echo "PASS"
+}
+
+# The API must run the shared evidence validator before ever projecting a
+# persisted row as active truth.
+check_api_evidence_validation_present() {
+  local route_file="$1" validator_file="$2"
+  [[ -f "$route_file" ]] || { echo "FAIL:missing $route_file"; return; }
+  [[ -f "$validator_file" ]] || { echo "FAIL:missing $validator_file"; return; }
+  if ! grep -q 'fn validate_plan_with_candidates' "$validator_file"; then
+    echo "FAIL:shared validator validate_plan_with_candidates is missing"
+    return
+  fi
+  if ! grep -q 'validate_plan_with_candidates' "$route_file"; then
+    echo "FAIL:routes/strategy_conflict.rs never calls the shared evidence validator"
+    return
+  fi
+  if ! grep -q 'InvalidEvidence' "$route_file"; then
+    echo "FAIL:routes/strategy_conflict.rs has no invalid_evidence truth_state"
+    return
+  fi
+  echo "PASS"
+}
+
+# status must inspect only the single latest plan (limit=1) and return on a
+# validation failure rather than looping/falling back to an older plan.
+check_status_no_fallback_on_invalid_latest() {
+  local f="$1"
+  [[ -f "$f" ]] || { echo "FAIL:missing $f"; return; }
+  if ! grep -qE 'fetch_recent_runtime_strategy_conflict_plans\(db, run\.run_id, 1\)' "$f"; then
+    echo "FAIL:status no longer bounds itself to exactly the single latest plan (limit=1)"
+    return
+  fi
+  if ! grep -q 'if !validation.valid {' "$f"; then
+    echo "FAIL:status has no explicit validation-failure branch for the latest plan"
+    return
+  fi
   echo "PASS"
 }
 
@@ -268,6 +423,67 @@ run_real_checks() {
   fi
   ok "no AI/ML reference found in Bundle 6 files"
 
+  # ---------------------------------------------------------------------
+  # AUTHORITY-AND-EVIDENCE-REPAIR-01 checks (15-22).
+  # ---------------------------------------------------------------------
+
+  # 15. Sole valid BUY refused alongside an invalid sibling.
+  local r15
+  r15="$(check_ambiguous_buy_refused "$CONFLICT_POLICY_RS")"
+  [[ "$r15" == PASS ]] || fail "${r15#FAIL:}"
+  ok "sole valid buy is refused (not authorized) alongside an invalid sibling"
+
+  # 16. Sell candidates require full bar provenance, same as buys.
+  local r16
+  r16="$(check_sell_bar_provenance_required "$CONFLICT_POLICY_RS")"
+  [[ "$r16" == PASS ]] || fail "${r16#FAIL:}"
+  ok "sell candidates require bar provenance (not exempted)"
+
+  # 17. Per-candidate timeframe authority (own timeframe_secs, not a global).
+  local r17
+  r17="$(check_per_candidate_timeframe_authority "$CONFLICT_POLICY_RS")"
+  [[ "$r17" == PASS ]] || fail "${r17#FAIL:}"
+  ok "bar-timeframe check is driven by each candidate's own timeframe_secs"
+
+  # 18. Mode is part of cycle economic identity.
+  local r18
+  r18="$(check_mode_in_cycle_identity "$CONFLICT_RUNTIME")"
+  [[ "$r18" == PASS ]] || fail "${r18#FAIL:}"
+  ok "configured and effective mode are part of cycle identity"
+
+  # 19. Bar presence/close are part of cycle economic identity.
+  local r19
+  r19="$(check_bar_presence_in_cycle_identity "$CONFLICT_RUNTIME")"
+  [[ "$r19" == PASS ]] || fail "${r19#FAIL:}"
+  ok "bar presence and close are part of cycle identity"
+
+  # 20. Divergent same-plan_id payload is never accepted as idempotent.
+  local r20
+  r20="$(check_divergent_replay_rejected "$CONFLICT_DB_STORE")"
+  [[ "$r20" == PASS ]] || fail "${r20#FAIL:}"
+  ok "a divergent same-plan_id payload is rejected, not treated as idempotent replay"
+
+  # 21. API runs the shared evidence validator before projecting active truth.
+  local r21
+  r21="$(check_api_evidence_validation_present "$CONFLICT_ROUTE" "$CONFLICT_EVIDENCE_VALIDATION")"
+  [[ "$r21" == PASS ]] || fail "${r21#FAIL:}"
+  ok "API validates durable evidence before projecting active truth"
+
+  # 22. status never falls back from a malformed latest plan to an older one.
+  local r22
+  r22="$(check_status_no_fallback_on_invalid_latest "$CONFLICT_ROUTE")"
+  [[ "$r22" == PASS ]] || fail "${r22#FAIL:}"
+  ok "status inspects only the single latest plan and never falls back on malformed evidence"
+
+  # 23. Migration 0057 additive, no implicit time/uuid defaults.
+  if grep -qiE '^\s*DROP |^\s*ALTER TABLE .* DROP ' "$MIGRATION_0057"; then
+    fail "migration 0057 must be additive only (no DROP)"
+  fi
+  if grep -v '^\s*--' "$MIGRATION_0057" | grep -qiE 'DEFAULT\s+now\(\)|DEFAULT\s+gen_random_uuid\(\)'; then
+    fail "migration 0057 must not use DEFAULT now()/gen_random_uuid()"
+  fi
+  ok "migration 0057 is additive, no implicit time/uuid defaults"
+
   echo "[msc-guard] ALL CHECKS PASSED"
 }
 
@@ -350,6 +566,54 @@ PY
   cp "$CONFLICT_POLICY_RS" "$scratch/conflict_policy_mut_g.rs"
   printf '\n// score_candidate placeholder\n' >> "$scratch/conflict_policy_mut_g.rs"
   assert_now_fails "MUT-G dynamic-selection/score-ranking reference introduced" "$(check_no_dynamic_selection "$scratch/conflict_policy_mut_g.rs")"
+
+  # MUT-H: the ambiguous-invalid-competitor refusal path is deleted/renamed
+  # (simulates the sole-valid-buy branch going back to unconditional
+  # passthrough regardless of invalid siblings).
+  cp "$CONFLICT_POLICY_RS" "$scratch/conflict_policy_mut_h.rs"
+  sed -i 's/REASON_AMBIGUOUS_INVALID_COMPETITOR_REFUSED/REASON_XXX_REMOVED/g' "$scratch/conflict_policy_mut_h.rs"
+  assert_now_fails "MUT-H ambiguous-invalid-competitor refusal removed" "$(check_ambiguous_buy_refused "$scratch/conflict_policy_mut_h.rs")"
+
+  # MUT-I: sell bar provenance is made optional again (Buy-only gate
+  # reintroduced).
+  cp "$CONFLICT_POLICY_RS" "$scratch/conflict_policy_mut_i.rs"
+  printf '\nfn _mut_i_marker(side: &Side) { if let Side::Buy = side { let _ = 1; } }\n' >> "$scratch/conflict_policy_mut_i.rs"
+  assert_now_fails "MUT-I sell bar provenance made optional" "$(check_sell_bar_provenance_required "$scratch/conflict_policy_mut_i.rs")"
+
+  # MUT-J: per-candidate timeframe authority removed (bar-timeframe check no
+  # longer driven by the candidate's own timeframe_secs).
+  cp "$CONFLICT_POLICY_RS" "$scratch/conflict_policy_mut_j.rs"
+  sed -i 's/canonical_timeframe_str(c\.timeframe_secs)/GLOBAL_TIMEFRAME_STR/g' "$scratch/conflict_policy_mut_j.rs"
+  assert_now_fails "MUT-J per-candidate timeframe authority removed" "$(check_per_candidate_timeframe_authority "$scratch/conflict_policy_mut_j.rs")"
+
+  # MUT-K: mode removed from cycle identity (seed string no longer folds in
+  # configured/effective mode).
+  cp "$CONFLICT_RUNTIME" "$scratch/conflict_runtime_mut_k.rs"
+  sed -i 's/{configured}|{effective}|/{candidates_str_only}|/' "$scratch/conflict_runtime_mut_k.rs"
+  assert_now_fails "MUT-K mode removed from cycle identity seed" "$(check_mode_in_cycle_identity "$scratch/conflict_runtime_mut_k.rs")"
+
+  # MUT-L: close/bar-presence removed from cycle identity seed.
+  cp "$CONFLICT_RUNTIME" "$scratch/conflict_runtime_mut_l.rs"
+  sed -i 's/{bar_present}/bar_present_removed/; s/{close_micros}/close_micros_removed/' "$scratch/conflict_runtime_mut_l.rs"
+  assert_now_fails "MUT-L bar_present/close removed from cycle identity seed" "$(check_bar_presence_in_cycle_identity "$scratch/conflict_runtime_mut_l.rs")"
+
+  # MUT-M: divergent same-ID replay silently accepted as idempotent
+  # (PayloadCollision handling deleted).
+  cp "$CONFLICT_DB_STORE" "$scratch/db_store_mut_m.rs"
+  sed -i 's/PayloadCollision/AlreadyExistsRenamed/g; s/plans_match && candidates_match/true/' "$scratch/db_store_mut_m.rs"
+  assert_now_fails "MUT-M divergent same-ID replay accepted as idempotent" "$(check_divergent_replay_rejected "$scratch/db_store_mut_m.rs")"
+
+  # MUT-N: API malformed-evidence validation bypassed (route no longer calls
+  # the shared validator).
+  cp "$CONFLICT_ROUTE" "$scratch/route_mut_n.rs"
+  sed -i 's/validate_plan_with_candidates/validateXplanXwithXcandidates/g' "$scratch/route_mut_n.rs"
+  assert_now_fails "MUT-N API evidence validation bypassed" "$(check_api_evidence_validation_present "$scratch/route_mut_n.rs" "$CONFLICT_EVIDENCE_VALIDATION")"
+
+  # MUT-O: status falls back from a malformed latest plan to an older one
+  # (limit widened past 1, or the validation-failure branch removed).
+  cp "$CONFLICT_ROUTE" "$scratch/route_mut_o.rs"
+  sed -i 's/fetch_recent_runtime_strategy_conflict_plans(db, run\.run_id, 1)/fetch_recent_runtime_strategy_conflict_plans(db, run.run_id, 5)/' "$scratch/route_mut_o.rs"
+  assert_now_fails "MUT-O status falls back past the single latest plan" "$(check_status_no_fallback_on_invalid_latest "$scratch/route_mut_o.rs")"
 
   if [[ "$failures" -gt 0 ]]; then
     echo "[msc-guard-selftest] FAIL: $failures mutation(s) were not caught" >&2
