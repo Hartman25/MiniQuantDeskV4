@@ -440,7 +440,13 @@ async fn plan_by_id_returns_invalid_evidence_for_a_malformed_plan() {
     cleanup(&pool, run_id).await;
     seed_run(&pool, run_id).await;
     let plan_id = fixed_plan_id("invalid_evidence_detail");
-    seed_malformed_plan(&pool, run_id, plan_id, Utc.with_ymd_and_hms(2099, 2, 1, 12, 0, 0).unwrap()).await;
+    seed_malformed_plan(
+        &pool,
+        run_id,
+        plan_id,
+        Utc.with_ymd_and_hms(2099, 2, 1, 12, 0, 0).unwrap(),
+    )
+    .await;
 
     let router = router_with_pool(pool.clone());
     let (status, body) = call(

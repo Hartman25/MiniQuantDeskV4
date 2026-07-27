@@ -402,8 +402,13 @@ async fn persist_plan_if_present(
     // is recorded as the current wall clock at persistence time.
     let _ = now_micros;
     let created_at_utc = chrono::Utc::now();
-    let Some(new_plan) = plan_to_new_db_plan(plan, configured_mode, effective_mode, run_id, created_at_utc)
-    else {
+    let Some(new_plan) = plan_to_new_db_plan(
+        plan,
+        configured_mode,
+        effective_mode,
+        run_id,
+        created_at_utc,
+    ) else {
         tracing::warn!(
             cycle_id = %plan.context.cycle_id,
             "runtime_strategy_conflict_plan_persist_skipped: cycle_id is not a valid UUID"
@@ -672,7 +677,8 @@ mod tests {
         let mut current = BTreeMap::new();
         current.insert("AAPL".to_string(), 20i64);
         let decisions = vec![unbound_sell("AAPL", "s1", 5)];
-        let out = apply_conflict_policy(&ctx(ConflictPolicyMode::PaperEnforced), decisions, &current);
+        let out =
+            apply_conflict_policy(&ctx(ConflictPolicyMode::PaperEnforced), decisions, &current);
         assert!(out.decisions.is_empty());
     }
 
@@ -683,8 +689,13 @@ mod tests {
         let mut current = BTreeMap::new();
         current.insert("AAPL".to_string(), 20i64);
         let decisions = vec![bound_sell("aapl", "s1", 5, 1_000)];
-        let out = apply_conflict_policy(&ctx(ConflictPolicyMode::PaperEnforced), decisions, &current);
-        assert_eq!(out.decisions.len(), 1, "lowercase symbol must still resolve current_qty=20 and pass");
+        let out =
+            apply_conflict_policy(&ctx(ConflictPolicyMode::PaperEnforced), decisions, &current);
+        assert_eq!(
+            out.decisions.len(),
+            1,
+            "lowercase symbol must still resolve current_qty=20 and pass"
+        );
     }
 
     #[test]

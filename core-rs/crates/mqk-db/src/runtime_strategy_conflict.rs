@@ -141,7 +141,9 @@ pub enum InsertRuntimeStrategyConflictPlanOutcome {
     /// replay's payload (AUTHORITY-AND-EVIDENCE-REPAIR-01 Defect 4). Never
     /// silently accepted as idempotent and never overwrites the original
     /// row -- fail-closed collision outcome for the caller to log/alert on.
-    PayloadCollision { detail: String },
+    PayloadCollision {
+        detail: String,
+    },
 }
 
 /// Canonical, order-independent snapshot of one plan's comparable fields
@@ -347,8 +349,8 @@ pub async fn insert_runtime_strategy_conflict_plan(
             .context("insert_runtime_strategy_conflict_plan: rollback (read-only path) failed")?;
 
         let plans_match = stored_plan_snapshot(&existing_record) == new_plan_snapshot(&plan);
-        let candidates_match =
-            stored_candidate_snapshots(&existing_candidates) == new_candidate_snapshots(&plan.candidates);
+        let candidates_match = stored_candidate_snapshots(&existing_candidates)
+            == new_candidate_snapshots(&plan.candidates);
 
         if plans_match && candidates_match {
             return Ok(InsertRuntimeStrategyConflictPlanOutcome::AlreadyExists);
