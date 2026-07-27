@@ -706,6 +706,34 @@ either Bundle 5 entry in this file as accepted.
 
 ---
 
+### RUNTIME-OPPORTUNITY-ALLOCATION-01: ACCEPTED — COMPLETE
+
+**Acceptance checkpoint verified on `main` before Bundle 6 started.**
+
+- Accepted main SHA: `a0852c2f6ffd2343c9b6740728abd5b7889bcb15`.
+- Local `main` and `origin/main` both resolved to that exact SHA
+  immediately before Bundle 6 (`MULTI-STRATEGY-CONFLICT-POLICY-01-COMBINED`)
+  began; tracked working tree was clean (only the two known allowed
+  untracked operator paths present: `MiniQuantDesk_Master_Patch_Ledger_v2_updated.md`,
+  `smoke_logs/`).
+- `bash ./scripts/guards/check_runtime_opportunity_allocation_01.sh` on that
+  SHA: `[roa-guard] ALL CHECKS PASSED` (all 11 static proofs).
+- `bash ./scripts/guards/check_migration_governance.sh` on that SHA: `OK: no
+  unauthorized migration SQL directories` / `OK: manifest matches
+  authoritative SQL chain`.
+- `powershell -ExecutionPolicy Bypass -File scripts\windows\Invoke-PaperPremarketValidation.ps1`
+  on that SHA: `FINAL: PASS` (repo status / script guards / GUI tests / GUI
+  build / Rust baseline snapshot tests / Rust runtime orchestrator tests all
+  `PASS`).
+- No live-capital authorization exists or was granted at this checkpoint.
+
+This supersedes the "not accepted" dispositions on both entries above for
+the purpose of unblocking Bundle 6 only — it does not retroactively alter
+the historical record of the original Bundle 5 closure-guard failure and its
+repair, which remains as documented above.
+
+---
+
 ### DOCS-README-CURRENT-STATUS-20260615-01 — CLOSED
 
 README/README_TECHNICAL were updated for the 2026-06-15 no-trade smoke, GUI dev port `1420`, GUI/CLI backtest cash micros warning, and evidence workflow wording. Doc-only patch; no code, script, config, evidence, or generated artifact changes.

@@ -32,7 +32,14 @@ fi
 echo "[migration-guard] OK: no unauthorized migration SQL directories"
 
 # Guard 2: manifest must exactly match SQL files in authoritative directory.
-python3 - "$MANIFEST_PATH" "$REPO_ROOT/$AUTHORITATIVE_DIR" <<'PY'
+# Prefer python3, but fall back to python -- on some Windows checkouts
+# `python3` resolves to the Microsoft Store app-execution-alias stub rather
+# than a real interpreter, while `python` resolves to the actual install.
+PYTHON_BIN="python3"
+if ! command -v python3 >/dev/null 2>&1 || ! python3 --version >/dev/null 2>&1; then
+  PYTHON_BIN="python"
+fi
+"$PYTHON_BIN" - "$MANIFEST_PATH" "$REPO_ROOT/$AUTHORITATIVE_DIR" <<'PY'
 import json
 import pathlib
 import sys
