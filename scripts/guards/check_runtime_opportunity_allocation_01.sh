@@ -153,12 +153,22 @@ fi
 ok "no AI/ML reference found in Bundle 5 files"
 
 # ---------------------------------------------------------------------------
-# 11. Bundle 6 (multi-strategy conflict policy) is not started -- no file
-#     path referencing it exists yet.
+# 11. Bundle 6 (multi-strategy conflict policy), once started under explicit
+#     operator authorization, must not have altered Bundle 5's own insertion
+#     point: `runtime_opportunity_allocation::gather_and_apply` must still be
+#     the call `loop_runner.rs` makes for its per-tick allocation step (no
+#     Bundle-6-owned function silently replacing this call site). This
+#     replaces the original "Bundle 6 must not exist yet" check, which is a
+#     point-in-time statement made obsolete the moment Bundle 6 was
+#     operator-authorized (MULTI-STRATEGY-CONFLICT-POLICY-01-COMBINED) --
+#     that authorization and its own ordering/insertion-point invariants are
+#     independently enforced by check_multi_strategy_conflict_policy_01.sh.
 # ---------------------------------------------------------------------------
-if git ls-files | grep -qiE 'multi.strategy.conflict|bundle.?6'; then
-  fail "Bundle 6 (multi-strategy conflict policy) must not be started"
+if grep -q 'runtime_opportunity_allocation::gather_and_apply' \
+    core-rs/crates/mqk-daemon/src/state/loop_runner.rs; then
+  ok "Bundle 5's gather_and_apply insertion point in loop_runner.rs is intact"
+else
+  fail "Bundle 5's gather_and_apply call in loop_runner.rs is missing or renamed"
 fi
-ok "Bundle 6 not started"
 
 echo "[roa-guard] ALL CHECKS PASSED"
