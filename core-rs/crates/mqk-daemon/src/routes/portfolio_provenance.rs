@@ -38,7 +38,16 @@
 // falling back to an older one, so corruption or legacy-incompatible truth
 // stays visible instead of silently masked.
 
+use chrono::{DateTime, Utc};
 use uuid::Uuid;
+
+/// Shared staleness threshold for a durable Paper+Alpaca portfolio snapshot's
+/// `captured_at_utc`. The single canonical value every durable read route
+/// (`routes/durable_portfolio.rs`) and every durable-snapshot consumer
+/// (Bundle 5's `runtime_opportunity_allocation::gather_and_apply`) must use —
+/// no module-local mirror/duplicate of this number is permitted (see
+/// RUNTIME-OPPORTUNITY-ALLOCATION-01 authority repair, Phase C).
+pub(crate) const DURABLE_SNAPSHOT_STALE_SECS: i64 = 180;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PortfolioProvenanceState {
@@ -176,6 +185,18 @@ pub(crate) enum SnapshotAuthorityViolation {
     DuplicatePositionSymbol,
     NonzeroQtyWithNonPositiveAvgPrice,
     PositionProvenanceNotExternalAlpaca,
+    /// RUNTIME-OPPORTUNITY-ALLOCATION-01 authority repair (Phase C):
+    /// `captured_at_utc` is older than the caller-supplied max age. Not
+    /// applied by the Bundle 4 read routes today (they annotate staleness in
+    /// the response instead of failing closed) -- consumed by
+    /// [`validate_snapshot_freshness`], used by Bundle 5's allocation
+    /// authority check, which must fail closed rather than size a buy off a
+    /// stale snapshot.
+    SnapshotStale,
+    /// Phase C: `captured_at_utc` is further in the future than ordinary
+    /// clock skew can explain -- a corrupted or malformed timestamp, never
+    /// treated as "freshest available".
+    SnapshotTimestampInFuture,
 }
 
 impl SnapshotAuthorityViolation {
@@ -208,8 +229,45 @@ impl SnapshotAuthorityViolation {
             Self::PositionProvenanceNotExternalAlpaca => {
                 "durable snapshot contains a position with provenance other than 'external_alpaca'"
             }
+            Self::SnapshotStale => "durable snapshot is older than the maximum allowed age",
+            Self::SnapshotTimestampInFuture => {
+                "durable snapshot captured_at_utc is in the future"
+            }
         }
     }
+}
+
+/// Small allowance for ordinary clock jitter between the process that wrote
+/// `captured_at_utc` and the process now validating it. A timestamp further
+/// in the future than this cannot be explained by normal skew and is treated
+/// as corrupted/malformed input -- fail closed rather than accepted as the
+/// freshest available truth.
+const FUTURE_TIMESTAMP_TOLERANCE_SECS: i64 = 5;
+
+/// RUNTIME-OPPORTUNITY-ALLOCATION-01 authority repair (Phase C): shared
+/// freshness check for a durable snapshot's `captured_at_utc`, reused by any
+/// caller that needs a hard fail-closed freshness gate (Bundle 5's
+/// allocation authority resolution). This is intentionally a separate
+/// function from `validate_run_scoped_snapshot_authority` -- the existing
+/// Bundle 4 read routes (`routes/durable_portfolio.rs`) apply their own
+/// staleness threshold as a soft `truth_state` annotation (data still
+/// returned, just labeled `snapshot_stale`) rather than a hard failure, and
+/// that accepted behavior/tests must not change. Callers that need a hard
+/// gate call this explicitly, in addition to
+/// `validate_run_scoped_snapshot_authority`.
+pub(crate) fn validate_snapshot_freshness(
+    captured_at_utc: DateTime<Utc>,
+    now: DateTime<Utc>,
+    max_age_secs: i64,
+) -> Result<(), SnapshotAuthorityViolation> {
+    let age_secs = (now - captured_at_utc).num_seconds();
+    if age_secs < -FUTURE_TIMESTAMP_TOLERANCE_SECS {
+        return Err(SnapshotAuthorityViolation::SnapshotTimestampInFuture);
+    }
+    if age_secs > max_age_secs {
+        return Err(SnapshotAuthorityViolation::SnapshotStale);
+    }
+    Ok(())
 }
 
 /// Scalar-only authority fields shared by both validators below:
@@ -652,5 +710,59 @@ mod tests {
             validate_snapshot_scalar_authority(&snap.snapshot),
             Err(SnapshotAuthorityViolation::NotUsdCurrency)
         );
+    }
+
+    // -----------------------------------------------------------------
+    // RUNTIME-OPPORTUNITY-ALLOCATION-01 authority repair (Phase C):
+    // shared freshness validator.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn freshness_accepts_a_recent_timestamp() {
+        let now = Utc.with_ymd_and_hms(2099, 1, 1, 0, 3, 0).unwrap();
+        let captured = Utc.with_ymd_and_hms(2099, 1, 1, 0, 0, 0).unwrap();
+        assert_eq!(
+            validate_snapshot_freshness(captured, now, DURABLE_SNAPSHOT_STALE_SECS),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn freshness_rejects_a_stale_timestamp() {
+        let now = Utc.with_ymd_and_hms(2099, 1, 1, 1, 0, 0).unwrap();
+        let captured = Utc.with_ymd_and_hms(2099, 1, 1, 0, 0, 0).unwrap();
+        assert_eq!(
+            validate_snapshot_freshness(captured, now, DURABLE_SNAPSHOT_STALE_SECS),
+            Err(SnapshotAuthorityViolation::SnapshotStale)
+        );
+    }
+
+    #[test]
+    fn freshness_rejects_a_future_timestamp_beyond_tolerance() {
+        let now = Utc.with_ymd_and_hms(2099, 1, 1, 0, 0, 0).unwrap();
+        let captured = Utc.with_ymd_and_hms(2099, 1, 1, 0, 5, 0).unwrap();
+        assert_eq!(
+            validate_snapshot_freshness(captured, now, DURABLE_SNAPSHOT_STALE_SECS),
+            Err(SnapshotAuthorityViolation::SnapshotTimestampInFuture)
+        );
+    }
+
+    #[test]
+    fn freshness_tolerates_small_clock_skew_into_the_future() {
+        let now = Utc.with_ymd_and_hms(2099, 1, 1, 0, 0, 0).unwrap();
+        let captured = now + chrono::Duration::seconds(2);
+        assert_eq!(
+            validate_snapshot_freshness(captured, now, DURABLE_SNAPSHOT_STALE_SECS),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn freshness_boundary_is_inclusive_of_max_age() {
+        let now = Utc.with_ymd_and_hms(2099, 1, 1, 0, 3, 0).unwrap();
+        let captured = Utc.with_ymd_and_hms(2099, 1, 1, 0, 0, 0).unwrap();
+        // Exactly max_age_secs old -> still fresh (age_secs > max_age_secs is
+        // the failure condition, not >=).
+        assert_eq!(validate_snapshot_freshness(captured, now, 180), Ok(()));
     }
 }

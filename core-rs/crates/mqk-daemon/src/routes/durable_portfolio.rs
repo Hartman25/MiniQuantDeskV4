@@ -34,6 +34,7 @@ use super::portfolio::{aggregate_positions_pnl, compute_broker_positions_pnl, re
 use super::portfolio_provenance::{
     classify_portfolio_provenance, validate_run_scoped_snapshot_authority,
     validate_snapshot_scalar_authority, PortfolioProvenanceState, SnapshotAuthorityViolation,
+    DURABLE_SNAPSHOT_STALE_SECS,
 };
 use crate::api_types::{
     PortfolioDurablePositionRow, PortfolioDurablePositionsResponse, PortfolioDurableSnapshotRow,
@@ -49,11 +50,13 @@ const PAPER_MODE: &str = "PAPER";
 /// `/api/v1/portfolio/summary`/`/positions` default.
 const DEFAULT_TIMEFRAME: &str = "1D";
 
-/// Mirrors `routes/system.rs::BROKER_SNAPSHOT_STALE_SECS` -- the same
-/// staleness threshold for an External (Alpaca) broker snapshot, applied
-/// here to the durable snapshot's `captured_at_utc` instead of the
-/// in-memory one.
-const DURABLE_SNAPSHOT_STALE_SECS: i64 = 180;
+// RUNTIME-OPPORTUNITY-ALLOCATION-01 authority repair (Phase C):
+// `DURABLE_SNAPSHOT_STALE_SECS` now lives in `portfolio_provenance.rs` (the
+// shared read-side authority module both this route file and Bundle 5's
+// allocation authority resolution import from) instead of being defined
+// locally here -- same value (180s), single source. Mirrors
+// `routes/system.rs::BROKER_SNAPSHOT_STALE_SECS`, the equivalent threshold
+// for the in-memory (non-durable) External broker snapshot.
 
 #[derive(Debug, Deserialize)]
 pub(crate) struct RunIdParam {
