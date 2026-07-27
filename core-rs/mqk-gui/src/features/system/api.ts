@@ -41,6 +41,19 @@ import type {
   AllocationStatus,
 } from "./types/allocation";
 import {
+  parseConflictPlanDetail,
+  parseConflictPlansList,
+  parseConflictStatus,
+  unavailableConflictPlanDetail,
+  unavailableConflictPlansList,
+  unavailableConflictStatus,
+} from "./strategyConflict";
+import type {
+  ConflictPlanDetail,
+  ConflictPlansList,
+  ConflictStatus,
+} from "./types/strategyConflict";
+import {
   deriveDataSourceDetail,
   deriveExecutionSummaryFromOrders,
   mapActiveAlertsResponse,
@@ -232,6 +245,62 @@ export async function getAllocationPlansList(limit = 20): Promise<GetAllocationP
     return { ok: false, data: unavailableAllocationPlansList(), error: result.error };
   }
   return { ok: true, data: parseAllocationPlansList(result.data) };
+}
+
+// ---------------------------------------------------------------------------
+// MULTI-STRATEGY-CONFLICT-POLICY-01 Phase D: read-only conflict-policy
+// truth. Public routes, no operator token. GET-only — never used for trade
+// submission or any mutation.
+// ---------------------------------------------------------------------------
+
+export interface GetConflictStatusResult {
+  ok: boolean;
+  data: ConflictStatus;
+  error?: string;
+}
+
+export async function getConflictStatus(): Promise<GetConflictStatusResult> {
+  const result = await fetchJsonCandidate<unknown>("/api/v1/strategy/conflict/status");
+  if (!result.ok) {
+    return {
+      ok: false,
+      data: unavailableConflictStatus(result.error ?? "conflict status fetch failed"),
+      error: result.error,
+    };
+  }
+  return { ok: true, data: parseConflictStatus(result.data) };
+}
+
+export interface GetConflictPlanDetailResult {
+  ok: boolean;
+  data: ConflictPlanDetail;
+  error?: string;
+}
+
+export async function getConflictPlanDetail(planId: string): Promise<GetConflictPlanDetailResult> {
+  const result = await fetchJsonCandidate<unknown>(
+    `/api/v1/strategy/conflict/plans/${encodeURIComponent(planId)}`,
+  );
+  if (!result.ok) {
+    return { ok: false, data: unavailableConflictPlanDetail(), error: result.error };
+  }
+  return { ok: true, data: parseConflictPlanDetail(result.data) };
+}
+
+export interface GetConflictPlansListResult {
+  ok: boolean;
+  data: ConflictPlansList;
+  error?: string;
+}
+
+export async function getConflictPlansList(limit = 20): Promise<GetConflictPlansListResult> {
+  const result = await fetchJsonCandidate<unknown>(
+    `/api/v1/strategy/conflict/plans?limit=${encodeURIComponent(String(limit))}`,
+  );
+  if (!result.ok) {
+    return { ok: false, data: unavailableConflictPlansList(), error: result.error };
+  }
+  return { ok: true, data: parseConflictPlansList(result.data) };
 }
 
 // ---------------------------------------------------------------------------

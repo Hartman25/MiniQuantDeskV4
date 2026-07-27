@@ -4,6 +4,7 @@ import { formatLabel } from "../../lib/format";
 import { AssetCapabilityMatrixPanel } from "../system/AssetCapabilityMatrixPanel";
 import { InstrumentRegistryV2SourcePanel } from "../system/InstrumentRegistryV2SourcePanel";
 import { RuntimeOpportunityAllocationPanel } from "../system/RuntimeOpportunityAllocationPanel";
+import { StrategyConflictPolicyPanel } from "../system/StrategyConflictPolicyPanel";
 import { systemStatusScreenIncludes } from "../system/systemStatusSections";
 import type { SystemModel } from "../system/types";
 
@@ -70,6 +71,7 @@ export function SettingsScreen({ model }: { model: SystemModel }) {
       {systemStatusScreenIncludes("instrument-registry-v2-source") && <InstrumentRegistryV2SourcePanel />}
       {systemStatusScreenIncludes("asset-capability-matrix") && <AssetCapabilityMatrixPanel />}
       {systemStatusScreenIncludes("runtime-opportunity-allocation") && <RuntimeOpportunityAllocationPanel />}
+      {systemStatusScreenIncludes("strategy-conflict-policy") && <StrategyConflictPolicyPanel />}
     </div>
   );
 }

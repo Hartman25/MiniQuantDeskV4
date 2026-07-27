@@ -9,6 +9,7 @@ test("System/Status sections include registry-v2 source status and asset capabil
   assert.ok(systemStatusScreenIncludes("instrument-registry-v2-source"));
   assert.ok(systemStatusScreenIncludes("asset-capability-matrix"));
   assert.ok(systemStatusScreenIncludes("runtime-opportunity-allocation"));
+  assert.ok(systemStatusScreenIncludes("strategy-conflict-policy"));
   assert.deepEqual(
     [...SYSTEM_STATUS_SECTION_IDS],
     [
@@ -16,6 +17,7 @@ test("System/Status sections include registry-v2 source status and asset capabil
       "instrument-registry-v2-source",
       "asset-capability-matrix",
       "runtime-opportunity-allocation",
+      "strategy-conflict-policy",
     ],
   );
 });

@@ -51,6 +51,7 @@ pub(crate) mod portfolio_provenance;
 pub(crate) mod reconcile;
 pub(crate) mod repair;
 pub(crate) mod strategy;
+pub(crate) mod strategy_conflict;
 pub(crate) mod strategy_promotions;
 pub(crate) mod strategy_scans;
 pub(crate) mod system;
@@ -310,6 +311,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         multi_symbol_dispatch_summary, strategy_dry_run_status, strategy_signal, strategy_summary,
         strategy_suppressions,
     };
+    use strategy_conflict::{
+        strategy_conflict_plan_by_id, strategy_conflict_plans, strategy_conflict_status,
+    };
     use strategy_promotions::{
         strategy_promotion_check, strategy_promotion_history, strategy_promotion_transition,
         strategy_promotions,
@@ -473,6 +477,21 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/v1/portfolio/allocation/plans/:plan_id",
             get(portfolio_allocation_plan_by_id),
+        )
+        // MULTI-STRATEGY-CONFLICT-POLICY-01 Phase D: read-only conflict-
+        // policy truth. GET-only -- never inserts, updates, or deletes a
+        // row. approved_for_live is always false in every response.
+        .route(
+            "/api/v1/strategy/conflict/status",
+            get(strategy_conflict_status),
+        )
+        .route(
+            "/api/v1/strategy/conflict/plans",
+            get(strategy_conflict_plans),
+        )
+        .route(
+            "/api/v1/strategy/conflict/plans/:plan_id",
+            get(strategy_conflict_plan_by_id),
         )
         // PAPER-DAILY-PNL-CAPTURE-01D: read-only baseline provenance lookup
         // by trading_date (public, no auth). No DB writes, no broker/provider
