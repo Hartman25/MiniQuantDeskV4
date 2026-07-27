@@ -437,6 +437,72 @@ async fn identical_replay_with_reordered_candidates_is_still_idempotent() {
     cleanup(&pool, &[run_id]).await;
 }
 
+/// FINAL-IDENTITY-AND-READ-AUTHORITY-REPAIR-01 Defect 2: the prior repair's
+/// `identical_replay_with_reordered_candidates_is_still_idempotent` above
+/// only reversed the `Vec` position of two candidates while each kept its
+/// own original `ordinal` field (0 stayed 0, 1 stayed 1). That masked the
+/// real defect: Bundle 6 assigns `ordinal` via `enumerate()` over the
+/// *incoming batch*, so the same economic candidate set assembled from a
+/// different upstream assignment order is assigned genuinely different
+/// ordinals. This test regenerates the exact same economic candidates with
+/// their ordinals swapped (the candidate that was ordinal 0 is now ordinal
+/// 1, and vice versa) and proves the DB still treats it as an idempotent
+/// replay -- not a `PayloadCollision`.
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL"]
+async fn regenerated_batch_with_swapped_source_ordinals_is_still_idempotent() {
+    let Ok(pool) = test_pool().await else {
+        eprintln!("skipped: requires MQK_DATABASE_URL");
+        return;
+    };
+    let run_id = fixed_run_id("swapped_ordinals");
+    cleanup(&pool, &[run_id]).await;
+    fixture_run(&pool, run_id).await;
+
+    let plan_id = fixed_plan_id("swapped_ordinals");
+    let original = sample_plan(run_id, plan_id);
+    let mut regenerated = sample_plan(run_id, plan_id);
+    // Swap which economic candidate is assigned ordinal 0 vs ordinal 1 --
+    // same two economic candidates, different source ordinals, as if the
+    // upstream assignment/input list had been reordered before Bundle 6's
+    // `enumerate()` ran.
+    regenerated.candidates[0].ordinal = 1;
+    regenerated.candidates[1].ordinal = 0;
+
+    let first = insert_runtime_strategy_conflict_plan(&pool, original)
+        .await
+        .expect("first insert should succeed");
+    assert_eq!(first, InsertRuntimeStrategyConflictPlanOutcome::Inserted);
+
+    let second = insert_runtime_strategy_conflict_plan(&pool, regenerated)
+        .await
+        .expect("second insert should succeed as a no-op");
+    assert_eq!(
+        second,
+        InsertRuntimeStrategyConflictPlanOutcome::AlreadyExists,
+        "a swapped source ordinal must never turn an identical economic replay into a \
+         PayloadCollision"
+    );
+
+    let (_, candidates) = fetch_runtime_strategy_conflict_plan(&pool, plan_id)
+        .await
+        .expect("fetch should succeed")
+        .expect("plan should exist");
+    assert_eq!(
+        candidates.len(),
+        2,
+        "no duplicate candidate rows from the swapped-ordinal replay"
+    );
+
+    cleanup(&pool, &[run_id]).await;
+}
+
+// Note: `divergent_candidate_quantity_under_same_plan_id_is_a_payload_collision`
+// above already proves that a genuinely different economic candidate set
+// under unchanged ordinals is correctly caught as a `PayloadCollision` --
+// ordinal-independent comparison never degrades into "any two candidates
+// are interchangeable."
+
 #[tokio::test]
 #[ignore = "requires MQK_DATABASE_URL"]
 async fn changed_cycle_creates_a_distinct_plan() {
@@ -502,4 +568,54 @@ async fn recent_plans_ordered_newest_first_and_scoped_to_run() {
     assert_eq!(recent[1].plan_id, plan_a.plan_id);
 
     cleanup(&pool, &[run_id, other_run_id]).await;
+}
+
+/// FINAL-IDENTITY-AND-READ-AUTHORITY-REPAIR-01 Defect 6: two plans
+/// persisted with the *same* `created_at_utc` (two conflict-policy cycles
+/// resolved within the same wall-clock tick) previously had no
+/// deterministic tie-break -- `ORDER BY created_at_utc DESC` alone could
+/// return either row first, nondeterministically, across identical reads.
+/// Proves the `plan_id DESC` tie-break makes "latest" and "history"
+/// ordering deterministic even when timestamps tie exactly.
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL"]
+async fn tied_created_at_utc_is_broken_deterministically_by_plan_id_desc() {
+    let Ok(pool) = test_pool().await else {
+        eprintln!("skipped: requires MQK_DATABASE_URL");
+        return;
+    };
+    let run_id = fixed_run_id("tied_timestamps");
+    cleanup(&pool, &[run_id]).await;
+    fixture_run(&pool, run_id).await;
+
+    let tied_at = Utc.with_ymd_and_hms(2099, 2, 1, 12, 0, 0).unwrap();
+    let mut plan_a = sample_plan(run_id, fixed_plan_id("tied_timestamps_a"));
+    plan_a.created_at_utc = tied_at;
+    let mut plan_b = sample_plan(run_id, fixed_plan_id("tied_timestamps_b"));
+    plan_b.created_at_utc = tied_at;
+
+    let expected_first = std::cmp::max(plan_a.plan_id, plan_b.plan_id);
+    let expected_second = std::cmp::min(plan_a.plan_id, plan_b.plan_id);
+
+    for plan in [plan_a.clone(), plan_b.clone()] {
+        insert_runtime_strategy_conflict_plan(&pool, plan)
+            .await
+            .expect("insert should succeed");
+    }
+
+    // Repeated reads must always agree on the same deterministic order,
+    // never flip nondeterministically across identical calls.
+    for _ in 0..3 {
+        let recent = fetch_recent_runtime_strategy_conflict_plans(&pool, run_id, 10)
+            .await
+            .expect("fetch should succeed");
+        assert_eq!(recent.len(), 2);
+        assert_eq!(
+            recent[0].plan_id, expected_first,
+            "tied created_at_utc must be broken by plan_id DESC"
+        );
+        assert_eq!(recent[1].plan_id, expected_second);
+    }
+
+    cleanup(&pool, &[run_id]).await;
 }

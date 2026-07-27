@@ -18,8 +18,27 @@
 //! idempotent no-op (`AlreadyExists`); any divergence is a
 //! [`InsertRuntimeStrategyConflictPlanOutcome::PayloadCollision`] — never
 //! silently accepted as a replay.
-
-use std::collections::BTreeMap;
+//!
+//! # FINAL-IDENTITY-AND-READ-AUTHORITY-REPAIR-01 Defect 2
+//!
+//! The candidate comparison above was still keyed by `ordinal` (a
+//! `BTreeMap<i32, CandidateSnapshot>`), and `ordinal` is assigned by
+//! `enumerate()` over Bundle 6's incoming batch — so the identical economic
+//! candidate set replayed in a different input order received different
+//! ordinals and was incorrectly classified as `PayloadCollision`.
+//! [`new_candidate_snapshots`] / [`stored_candidate_snapshots`] now exclude
+//! `ordinal` from the comparable payload and return a canonically *sorted*
+//! `Vec<CandidateSnapshot>` (preserving multiplicity — a genuine duplicate
+//! candidate is still distinguishable from a single one) instead of a map
+//! keyed by ordinal.
+//!
+//! # FINAL-IDENTITY-AND-READ-AUTHORITY-REPAIR-01 Defect 6
+//!
+//! [`fetch_recent_runtime_strategy_conflict_plans`] now orders by
+//! `created_at_utc DESC, plan_id DESC` — a tie on `created_at_utc` (two
+//! plans persisted within the same wall-clock tick) previously had no
+//! deterministic tie-break, so "latest" could return either row
+//! nondeterministically across identical reads.
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
@@ -165,11 +184,20 @@ struct PlanSnapshot {
     blockers: Vec<String>,
 }
 
-/// Canonical, order-independent snapshot of one candidate row keyed by
-/// `ordinal` (unique within a plan) so two candidate vectors can be
-/// compared regardless of caller insertion order while remaining sensitive
-/// to every evidence field.
-#[derive(Debug, Clone, PartialEq)]
+/// Canonical, order-independent snapshot of one candidate row.
+///
+/// FINAL-IDENTITY-AND-READ-AUTHORITY-REPAIR-01 Defect 2: this snapshot
+/// deliberately excludes `ordinal`. `ordinal` is assigned by `enumerate()`
+/// over Bundle 6's incoming batch (see
+/// `mqk-daemon::runtime_strategy_conflict::candidate_inputs`) purely to
+/// identify *which* input decision a selection refers to for that one
+/// resolution call — it is never part of a candidate's economic identity.
+/// The exact same economic candidate set replayed in a different input
+/// order is assigned different ordinals, but must still compare as the
+/// identical set: see [`new_candidate_snapshots`] / [`stored_candidate_snapshots`],
+/// which sort snapshots into a canonical order (preserving multiplicity)
+/// instead of keying a map by `ordinal`.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct CandidateSnapshot {
     symbol: String,
     strategy_id: String,
@@ -234,72 +262,71 @@ fn stored_plan_snapshot(rec: &RuntimeStrategyConflictPlanRecord) -> PlanSnapshot
     }
 }
 
+/// Canonical order: sorted ascending, `ordinal` excluded entirely from the
+/// comparable payload. Two candidate vectors describing the identical
+/// economic multiset (same values, same multiplicity) always sort to the
+/// same `Vec<CandidateSnapshot>` regardless of caller insertion order or
+/// which ordinal each was assigned this replay.
 fn new_candidate_snapshots(
     candidates: &[NewRuntimeStrategyConflictCandidate],
-) -> BTreeMap<i32, CandidateSnapshot> {
-    candidates
+) -> Vec<CandidateSnapshot> {
+    let mut snapshots: Vec<CandidateSnapshot> = candidates
         .iter()
-        .map(|c| {
-            (
-                c.ordinal,
-                CandidateSnapshot {
-                    symbol: c.symbol.clone(),
-                    strategy_id: c.strategy_id.clone(),
-                    timeframe_secs: c.timeframe_secs,
-                    side: c.side.clone(),
-                    qty: c.qty,
-                    current_qty: c.current_qty,
-                    order_type: Some(c.order_type.clone()),
-                    time_in_force: Some(c.time_in_force.clone()),
-                    limit_price: c.limit_price,
-                    proposed_target_qty: c.proposed_target_qty,
-                    bar_present: Some(c.bar_present),
-                    bar_symbol: c.bar_symbol.clone(),
-                    bar_strategy_id: c.bar_strategy_id.clone(),
-                    bar_timeframe: c.bar_timeframe.clone(),
-                    bar_end_ts: c.bar_end_ts,
-                    close_micros: c.close_micros,
-                    selected: c.selected,
-                    disposition: c.disposition.clone(),
-                    reason_code: c.reason_code.clone(),
-                },
-            )
+        .map(|c| CandidateSnapshot {
+            symbol: c.symbol.clone(),
+            strategy_id: c.strategy_id.clone(),
+            timeframe_secs: c.timeframe_secs,
+            side: c.side.clone(),
+            qty: c.qty,
+            current_qty: c.current_qty,
+            order_type: Some(c.order_type.clone()),
+            time_in_force: Some(c.time_in_force.clone()),
+            limit_price: c.limit_price,
+            proposed_target_qty: c.proposed_target_qty,
+            bar_present: Some(c.bar_present),
+            bar_symbol: c.bar_symbol.clone(),
+            bar_strategy_id: c.bar_strategy_id.clone(),
+            bar_timeframe: c.bar_timeframe.clone(),
+            bar_end_ts: c.bar_end_ts,
+            close_micros: c.close_micros,
+            selected: c.selected,
+            disposition: c.disposition.clone(),
+            reason_code: c.reason_code.clone(),
         })
-        .collect()
+        .collect();
+    snapshots.sort();
+    snapshots
 }
 
 fn stored_candidate_snapshots(
     candidates: &[RuntimeStrategyConflictCandidateRecord],
-) -> BTreeMap<i32, CandidateSnapshot> {
-    candidates
+) -> Vec<CandidateSnapshot> {
+    let mut snapshots: Vec<CandidateSnapshot> = candidates
         .iter()
-        .map(|c| {
-            (
-                c.ordinal,
-                CandidateSnapshot {
-                    symbol: c.symbol.clone(),
-                    strategy_id: c.strategy_id.clone(),
-                    timeframe_secs: c.timeframe_secs,
-                    side: c.side.clone(),
-                    qty: c.qty,
-                    current_qty: c.current_qty,
-                    order_type: c.order_type.clone(),
-                    time_in_force: c.time_in_force.clone(),
-                    limit_price: c.limit_price,
-                    proposed_target_qty: c.proposed_target_qty,
-                    bar_present: c.bar_present,
-                    bar_symbol: c.bar_symbol.clone(),
-                    bar_strategy_id: c.bar_strategy_id.clone(),
-                    bar_timeframe: c.bar_timeframe.clone(),
-                    bar_end_ts: c.bar_end_ts,
-                    close_micros: c.close_micros,
-                    selected: c.selected,
-                    disposition: c.disposition.clone(),
-                    reason_code: c.reason_code.clone(),
-                },
-            )
+        .map(|c| CandidateSnapshot {
+            symbol: c.symbol.clone(),
+            strategy_id: c.strategy_id.clone(),
+            timeframe_secs: c.timeframe_secs,
+            side: c.side.clone(),
+            qty: c.qty,
+            current_qty: c.current_qty,
+            order_type: c.order_type.clone(),
+            time_in_force: c.time_in_force.clone(),
+            limit_price: c.limit_price,
+            proposed_target_qty: c.proposed_target_qty,
+            bar_present: c.bar_present,
+            bar_symbol: c.bar_symbol.clone(),
+            bar_strategy_id: c.bar_strategy_id.clone(),
+            bar_timeframe: c.bar_timeframe.clone(),
+            bar_end_ts: c.bar_end_ts,
+            close_micros: c.close_micros,
+            selected: c.selected,
+            disposition: c.disposition.clone(),
+            reason_code: c.reason_code.clone(),
         })
-        .collect()
+        .collect();
+    snapshots.sort();
+    snapshots
 }
 
 /// Persist one conflict plan and its candidates atomically. Only ever
@@ -534,7 +561,7 @@ pub async fn fetch_recent_runtime_strategy_conflict_plans(
          policy_schema_version, symbol_group_count, candidate_count, selected_count, \
          refused_count, truth_state, blockers, created_at_utc \
          from sys_runtime_strategy_conflict_plans \
-         where run_id = $1 order by created_at_utc desc limit $2",
+         where run_id = $1 order by created_at_utc desc, plan_id desc limit $2",
     )
     .bind(run_id)
     .bind(limit)
