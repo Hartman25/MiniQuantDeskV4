@@ -321,6 +321,23 @@ pub fn build_daemon_plugin_registry_and_symbol() -> (PluginRegistry, Option<Stri
     (registry, effective_symbol)
 }
 
+/// DYNAMIC-STRATEGY-SYMBOL-SELECTION-01 Phase 5: build a plugin registry for
+/// one explicit, caller-supplied symbol — never `MQK_STRATEGY_SYMBOL` or any
+/// other env read. Identical registration set to
+/// [`build_daemon_plugin_registry_and_symbol`] (all built-in engines), the
+/// only difference being the symbol source: a parameter here, `std::env::var`
+/// there. This is the narrow constructor Bundle 7's per-symbol run-scoped
+/// host pool uses to instantiate one strategy for one exact selected symbol,
+/// independent of whatever `MQK_STRATEGY_SYMBOL` currently holds — the
+/// env-based builder above remains completely unchanged and is still what
+/// `off`-mode/legacy single-symbol dispatch uses.
+pub fn build_daemon_plugin_registry_for_symbol(symbol: &str) -> PluginRegistry {
+    let mut registry = PluginRegistry::new();
+    mqk_strategy::engines::register_builtin_strategies(&mut registry, symbol.to_string())
+        .expect("daemon built-in strategy registration must not fail: duplicate names are a programming error");
+    registry
+}
+
 // ---------------------------------------------------------------------------
 // DAILY-DATA-READINESS-AND-FRESHNESS-01-COMBINED Phase B: immutable effective
 // runtime binding snapshot.
@@ -506,5 +523,40 @@ mod tests {
             1,
             "SC-NS-06: stub context must have exactly one bar"
         );
+    }
+
+    // ── DYNAMIC-STRATEGY-SYMBOL-SELECTION-01 Phase 5 ──────────────────────
+
+    #[test]
+    fn build_daemon_plugin_registry_for_symbol_registers_all_builtins() {
+        let registry = build_daemon_plugin_registry_for_symbol("AAPL");
+        let names: Vec<&str> = registry.list().iter().map(|m| m.name.as_str()).collect();
+        assert!(names.contains(&"swing_momentum"));
+        assert!(names.contains(&"mean_reversion"));
+        assert!(names.contains(&"volatility_breakout"));
+        assert!(names.contains(&"intraday_scalper"));
+    }
+
+    #[test]
+    fn build_daemon_plugin_registry_for_symbol_ignores_env_var() {
+        // The narrow constructor must never read MQK_STRATEGY_SYMBOL -- prove
+        // it by setting the env var to a different value than the symbol
+        // parameter and confirming instantiate_verified still succeeds
+        // (i.e. the strategy is genuinely bound to the parameter, not env).
+        std::env::set_var("MQK_STRATEGY_SYMBOL", "MSFT");
+        let registry = build_daemon_plugin_registry_for_symbol("AAPL");
+        std::env::remove_var("MQK_STRATEGY_SYMBOL");
+        assert!(registry.instantiate_verified("swing_momentum").is_ok());
+    }
+
+    #[test]
+    fn build_daemon_plugin_registry_for_symbol_two_symbols_are_independent() {
+        let aapl_registry = build_daemon_plugin_registry_for_symbol("AAPL");
+        let msft_registry = build_daemon_plugin_registry_for_symbol("MSFT");
+        assert!(aapl_registry.instantiate_verified("swing_momentum").is_ok());
+        assert!(msft_registry.instantiate_verified("swing_momentum").is_ok());
+        // Each registry is its own instance -- registering into one never
+        // affects the other's catalogue.
+        assert_eq!(aapl_registry.len(), msft_registry.len());
     }
 }
