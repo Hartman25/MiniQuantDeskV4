@@ -33,11 +33,15 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::durable_portfolio::{resolve_run, RunResolution};
-use crate::conflict_evidence_validation::validate_plan_with_candidates;
+use crate::conflict_evidence_validation::{
+    evidence_validation_for_candidate_limit_exceeded, validate_plan_with_candidates,
+    MAX_CANDIDATES_PER_PLAN,
+};
 use crate::runtime_strategy_conflict_mode::{
     effective_mode, resolve_conflict_policy_mode_from_env,
 };
 use crate::state::{AppState, BrokerKind};
+use mqk_db::BoundedConflictPlanFetch;
 
 // ---------------------------------------------------------------------------
 // Response types
@@ -314,8 +318,14 @@ pub(crate) async fn strategy_conflict_status(
         return (StatusCode::OK, Json(response)).into_response();
     };
 
-    match mqk_db::fetch_runtime_strategy_conflict_plan(db, latest_summary.plan_id).await {
-        Ok(Some((plan_record, candidate_records))) => {
+    match mqk_db::fetch_runtime_strategy_conflict_plan_for_read(
+        db,
+        latest_summary.plan_id,
+        MAX_CANDIDATES_PER_PLAN,
+    )
+    .await
+    {
+        Ok(BoundedConflictPlanFetch::Complete(plan_record, candidate_records)) => {
             let validation = validate_plan_with_candidates(&plan_record, &candidate_records);
             if !validation.valid {
                 response.truth_state = ConflictTruthState::InvalidEvidence;
@@ -328,7 +338,18 @@ pub(crate) async fn strategy_conflict_status(
             response.latest_plan_candidate_count = Some(plan_record.candidate_count);
             response.latest_plan_selected_count = Some(plan_record.selected_count);
         }
-        Ok(None) => {
+        Ok(BoundedConflictPlanFetch::CandidateLimitExceeded {
+            observed_at_least, ..
+        }) => {
+            // Defect 2: the durable plan exceeds the shared bounded-read
+            // limit -- fail closed to invalid_evidence with no fallback to
+            // an older plan, exactly like any other malformed-evidence
+            // outcome. No candidate data was fetched.
+            let validation = evidence_validation_for_candidate_limit_exceeded(observed_at_least);
+            response.truth_state = ConflictTruthState::InvalidEvidence;
+            response.evidence_blockers = validation.blockers;
+        }
+        Ok(BoundedConflictPlanFetch::NotFound) => {
             // The summary row vanished between the two reads (concurrent
             // delete elsewhere is not a route this file exposes -- treat
             // defensively as not_found rather than fabricating a plan).
@@ -444,15 +465,27 @@ pub(crate) async fn strategy_conflict_plans(
             let mut excluded_malformed_count = 0i64;
             let mut excluded_vanished_count = 0i64;
             for rec in &records {
-                match mqk_db::fetch_runtime_strategy_conflict_plan(db, rec.plan_id).await {
-                    Ok(Some((plan_record, candidate_records))) => {
+                match mqk_db::fetch_runtime_strategy_conflict_plan_for_read(
+                    db,
+                    rec.plan_id,
+                    MAX_CANDIDATES_PER_PLAN,
+                )
+                .await
+                {
+                    Ok(BoundedConflictPlanFetch::Complete(plan_record, candidate_records)) => {
                         if validate_plan_with_candidates(&plan_record, &candidate_records).valid {
                             plans.push(plan_row_from_record(rec));
                         } else {
                             excluded_malformed_count += 1;
                         }
                     }
-                    Ok(None) => {
+                    Ok(BoundedConflictPlanFetch::CandidateLimitExceeded { .. }) => {
+                        // Defect 2: a successfully-read over-limit plan is
+                        // malformed evidence, never active -- and never
+                        // projected with partial candidate data.
+                        excluded_malformed_count += 1;
+                    }
+                    Ok(BoundedConflictPlanFetch::NotFound) => {
                         excluded_vanished_count += 1;
                     }
                     Err(err) => {
@@ -546,8 +579,14 @@ pub(crate) async fn strategy_conflict_plan_by_id(
             .into_response();
     };
 
-    match mqk_db::fetch_runtime_strategy_conflict_plan(db, plan_id).await {
-        Ok(Some((plan_record, candidate_records))) => {
+    match mqk_db::fetch_runtime_strategy_conflict_plan_for_read(
+        db,
+        plan_id,
+        MAX_CANDIDATES_PER_PLAN,
+    )
+    .await
+    {
+        Ok(BoundedConflictPlanFetch::Complete(plan_record, candidate_records)) => {
             let validation = validate_plan_with_candidates(&plan_record, &candidate_records);
             if !validation.valid {
                 return (
@@ -577,7 +616,25 @@ pub(crate) async fn strategy_conflict_plan_by_id(
             )
                 .into_response()
         }
-        Ok(None) => (
+        Ok(BoundedConflictPlanFetch::CandidateLimitExceeded {
+            observed_at_least, ..
+        }) => {
+            // Defect 2: over-limit plan -- invalid_evidence, no partial
+            // candidate projection.
+            let validation = evidence_validation_for_candidate_limit_exceeded(observed_at_least);
+            (
+                StatusCode::OK,
+                Json(ConflictPlanDetailResponse {
+                    truth_state: ConflictTruthState::InvalidEvidence,
+                    plan: None,
+                    candidates: vec![],
+                    evidence_blockers: validation.blockers,
+                    checked_at_utc,
+                }),
+            )
+                .into_response()
+        }
+        Ok(BoundedConflictPlanFetch::NotFound) => (
             StatusCode::OK,
             Json(ConflictPlanDetailResponse {
                 truth_state: ConflictTruthState::NotFound,

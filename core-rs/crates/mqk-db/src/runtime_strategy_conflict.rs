@@ -39,11 +39,52 @@
 //! plans persisted within the same wall-clock tick) previously had no
 //! deterministic tie-break, so "latest" could return either row
 //! nondeterministically across identical reads.
+//!
+//! # UTF8-AND-BOUNDED-READ-CLOSURE Defect 2
+//!
+//! [`fetch_runtime_strategy_conflict_plan`] always fetched every candidate
+//! row for a plan unconditionally — the daemon's read-side validator only
+//! rejected a plan with more than its own candidate bound *after* that
+//! unbounded fetch completed, so a pathological/corrupted plan claiming
+//! thousands of candidates could still force an unbounded DB read, an
+//! unbounded allocation, and an unbounded response body before fail-closed
+//! validation ever ran.
+//!
+//! [`fetch_runtime_strategy_conflict_plan_for_read`] is a separate, bounded
+//! read-side fetch seam for status/list/detail evidence projection: it
+//! fetches at most [`RUNTIME_STRATEGY_CONFLICT_CANDIDATE_READ_BOUND`] + 1
+//! candidate rows via SQL `LIMIT`, which is just enough to prove the durable
+//! plan exceeds the bound without ever fetching more. It never projects
+//! partial candidate data for an over-limit plan.
+//!
+//! [`fetch_runtime_strategy_conflict_plan`] (unbounded) remains for trusted
+//! internal DB replay/collision comparison (idempotent-replay payload
+//! comparison requires the exact, complete stored candidate set) — API
+//! routes must use the bounded seam, never this one, for evidence
+//! projection.
+//!
+//! [`RUNTIME_STRATEGY_CONFLICT_CANDIDATE_READ_BOUND`] is the single shared
+//! bound authority: the daemon's read-side evidence validator imports this
+//! same constant (see `mqk-daemon::conflict_evidence_validation`) instead of
+//! declaring its own, so the SQL fetch bound and the validator's bound can
+//! never silently drift apart.
 
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use sqlx::PgPool;
 use uuid::Uuid;
+
+/// UTF8-AND-BOUNDED-READ-CLOSURE: the single shared candidate-read bound
+/// authority. Consumed by both [`fetch_runtime_strategy_conflict_plan_for_read`]
+/// (the SQL `LIMIT`) and the daemon's read-side evidence validator (see
+/// `mqk-daemon::conflict_evidence_validation::MAX_CANDIDATES_PER_PLAN`,
+/// which is defined in terms of this same constant) so the two bounds can
+/// never silently drift apart. Normal plans carry a handful of candidates
+/// (bounded by `watchlist_intake::MULTI_SYMBOL_HARD_CEILING`, currently 5,
+/// times at most a few competing strategies per symbol); this bound is
+/// generous headroom while still refusing an unbounded read for a
+/// pathological/corrupted row.
+pub const RUNTIME_STRATEGY_CONFLICT_CANDIDATE_READ_BOUND: usize = 64;
 
 #[derive(Debug, Clone)]
 pub struct NewRuntimeStrategyConflictCandidate {
@@ -548,6 +589,88 @@ pub async fn fetch_runtime_strategy_conflict_plan(
 
     let candidates = candidate_rows.iter().map(candidate_row_to_record).collect();
     Ok(Some((plan_row_to_record(&plan_row), candidates)))
+}
+
+/// UTF8-AND-BOUNDED-READ-CLOSURE Defect 2: outcome of the bounded read-side
+/// fetch seam. Explicitly distinguishes a complete in-bound plan, a plan
+/// proven to exceed the bound (with no candidate data projected), and a
+/// plan that does not exist -- no caller can infer completeness from a
+/// silently truncated candidate vector.
+#[derive(Debug, Clone, PartialEq)]
+pub enum BoundedConflictPlanFetch {
+    /// The plan exists and its candidate count is within the bound -- every
+    /// candidate row is included, exactly as fetched.
+    Complete(
+        RuntimeStrategyConflictPlanRecord,
+        Vec<RuntimeStrategyConflictCandidateRecord>,
+    ),
+    /// The plan exists but its candidate count exceeds `bound`. No
+    /// candidate data is projected. `observed_at_least` is the number of
+    /// rows actually returned by the bounded `LIMIT bound + 1` query
+    /// (always exactly `bound + 1`) -- a proven lower bound on the true
+    /// count, never the true count itself.
+    CandidateLimitExceeded {
+        plan: RuntimeStrategyConflictPlanRecord,
+        observed_at_least: usize,
+    },
+    /// No plan exists for this `plan_id`.
+    NotFound,
+}
+
+/// UTF8-AND-BOUNDED-READ-CLOSURE Defect 2: bounded read-side fetch for
+/// status/list/detail evidence projection. Fetches at most `bound + 1`
+/// candidate rows via SQL `LIMIT` -- enough to prove the durable plan
+/// exceeds `bound`, never more. Distinct from
+/// [`fetch_runtime_strategy_conflict_plan`] (unbounded), which remains
+/// reserved for trusted internal DB replay/collision comparison where
+/// complete-payload comparison is required. API routes must call this
+/// function, never the unbounded one, for evidence projection.
+pub async fn fetch_runtime_strategy_conflict_plan_for_read(
+    pool: &PgPool,
+    plan_id: Uuid,
+    bound: usize,
+) -> Result<BoundedConflictPlanFetch> {
+    let Some(plan_row) = sqlx::query(
+        "select plan_id, cycle_id, run_id, mode, configured_mode, market_date, \
+         policy_schema_version, symbol_group_count, candidate_count, selected_count, \
+         refused_count, truth_state, blockers, created_at_utc \
+         from sys_runtime_strategy_conflict_plans where plan_id = $1",
+    )
+    .bind(plan_id)
+    .fetch_optional(pool)
+    .await
+    .context("fetch_runtime_strategy_conflict_plan_for_read: plan query failed")?
+    else {
+        return Ok(BoundedConflictPlanFetch::NotFound);
+    };
+    let plan_record = plan_row_to_record(&plan_row);
+
+    let fetch_limit: i64 = i64::try_from(bound.saturating_add(1))
+        .context("fetch_runtime_strategy_conflict_plan_for_read: bound does not fit in i64")?;
+
+    let candidate_rows = sqlx::query(
+        "select plan_id, ordinal, symbol, strategy_id, timeframe_secs, side, qty, current_qty, \
+         order_type, time_in_force, limit_price, proposed_target_qty, bar_present, bar_symbol, \
+         bar_strategy_id, bar_timeframe, bar_end_ts, close_micros, selected, disposition, \
+         reason_code \
+         from sys_runtime_strategy_conflict_candidates where plan_id = $1 order by ordinal \
+         limit $2",
+    )
+    .bind(plan_id)
+    .bind(fetch_limit)
+    .fetch_all(pool)
+    .await
+    .context("fetch_runtime_strategy_conflict_plan_for_read: candidates query failed")?;
+
+    if candidate_rows.len() > bound {
+        return Ok(BoundedConflictPlanFetch::CandidateLimitExceeded {
+            plan: plan_record,
+            observed_at_least: candidate_rows.len(),
+        });
+    }
+
+    let candidates = candidate_rows.iter().map(candidate_row_to_record).collect();
+    Ok(BoundedConflictPlanFetch::Complete(plan_record, candidates))
 }
 
 /// Fetch up to `limit` most recent plans for `run_id`, newest first.
