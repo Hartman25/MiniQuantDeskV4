@@ -37,6 +37,11 @@ CONFLICT_EVIDENCE_VALIDATION="core-rs/crates/mqk-daemon/src/conflict_evidence_va
 MIGRATION_0057="core-rs/crates/mqk-db/migrations/0057_runtime_strategy_conflict_evidence_provenance.sql"
 # FINAL-IDENTITY-AND-READ-AUTHORITY-REPAIR-01 additions.
 CONFLICT_TYPES_TS="core-rs/mqk-gui/src/features/system/types/strategyConflict.ts"
+# DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-COMBINED-CONTINUATION-AND-CLOSURE
+# Phase 1 addition: Bundle 7's pure module is now allowed to exist (see
+# check_bundle7_pure_module_no_broker_outbox / check_bundle6_runs_exactly_once
+# / check_bundle7_dispatch_feeds_bundle6_when_wired below).
+DYNAMIC_SELECTION_RS="core-rs/crates/mqk-portfolio/src/dynamic_selection.rs"
 
 # ---------------------------------------------------------------------------
 # Check functions — each takes the file path(s) to check, so the self-test
@@ -140,6 +145,72 @@ check_no_dynamic_selection() {
     fi
   done
   echo "PASS"
+}
+
+# ---------------------------------------------------------------------------
+# DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-COMBINED-CONTINUATION-AND-CLOSURE
+# Phase 1: Bundle 7 authority-boundary checks (replace the obsolete "Bundle 7
+# not started" assertion). Bundle 7's pure module is explicitly allowed to
+# exist and be developed -- what must never happen is Bundle 7 bypassing
+# Bundle 6, duplicating Bundle 6's call site, or gaining its own direct
+# broker/outbox authority. "Bundle 7 does not modify Bundle 6 conflict
+# semantics" is proven by the existing check_no_dynamic_selection check
+# against conflict_policy.rs (unchanged, still run below).
+# ---------------------------------------------------------------------------
+
+# Bundle 7's pure module, if present, must never call the outbox or a broker
+# adapter directly -- same zero-authority discipline as Bundle 6's
+# conflict_policy.rs. Its absence is not itself a failure: "Bundle 7 pure
+# module may exist" means existing is allowed, not mandatory.
+check_bundle7_pure_module_no_broker_outbox() {
+  local f="$1"
+  if [[ ! -f "$f" ]]; then
+    echo "PASS"
+    return
+  fi
+  check_no_broker_outbox "$f"
+}
+
+# Bundle 6's conflict resolution must run exactly once per tick -- not zero
+# (already caught by check_ordering's missing-call-site branch), and not
+# duplicated (a second call site would silently double-apply conflict
+# resolution against the same decision batch).
+check_bundle6_runs_exactly_once() {
+  local f="$1"
+  [[ -f "$f" ]] || { echo "FAIL:missing $f"; return; }
+  local hits
+  hits="$(grep -c 'runtime_strategy_conflict::gather_and_resolve' "$f" || true)"
+  if [[ "$hits" -ne 1 ]]; then
+    echo "FAIL:runtime_strategy_conflict::gather_and_resolve call count is $hits, expected exactly 1"
+    return
+  fi
+  echo "PASS"
+}
+
+# If a Bundle 7 dynamic-selection dispatch call site has been wired into the
+# tick loop, it must feed into Bundle 6 -- i.e. appear strictly before
+# Bundle 6's conflict-resolution call site, never after/bypassing it. When no
+# such call site exists yet (Bundle 7 not wired into dispatch), this is
+# vacuously satisfied: an unwired pure module is explicitly allowed.
+check_bundle7_dispatch_feeds_bundle6_when_wired() {
+  local f="$1"
+  [[ -f "$f" ]] || { echo "FAIL:missing $f"; return; }
+  local selection_line conflict_line
+  selection_line="$(grep -nE 'dynamic_selection::|runtime_dynamic_selection::' "$f" | head -1 | cut -d: -f1 || true)"
+  if [[ -z "$selection_line" ]]; then
+    echo "PASS"
+    return
+  fi
+  conflict_line="$(grep -n 'runtime_strategy_conflict::gather_and_resolve' "$f" | head -1 | cut -d: -f1 || true)"
+  if [[ -z "$conflict_line" ]]; then
+    echo "FAIL:dynamic-selection call site present but Bundle 6 conflict-resolution call site is missing"
+    return
+  fi
+  if [[ "$selection_line" -lt "$conflict_line" ]]; then
+    echo "PASS"
+  else
+    echo "FAIL:dynamic-selection call site (line $selection_line) does not precede Bundle 6 conflict resolution (line $conflict_line) -- selection must feed into Bundle 6, never bypass it"
+  fi
 }
 
 # ---------------------------------------------------------------------------
@@ -781,11 +852,20 @@ run_real_checks() {
     fail "watchlist strategy_assignments schema may have been widened to multi-strategy"
   fi
 
-  # 13. Bundle 7 (dynamic strategy-symbol selection) not started.
-  if git ls-files | grep -qiE 'dynamic.strategy.symbol|bundle.?7'; then
-    fail "Bundle 7 (dynamic strategy-symbol selection) must not be started"
-  fi
-  ok "Bundle 7 not started"
+  # 13. Bundle 7 (dynamic strategy-symbol selection) authority boundaries.
+  #     Bundle 7's pure module is allowed to exist and be developed; what
+  #     must never happen is Bundle 7 bypassing Bundle 6, duplicating
+  #     Bundle 6's call site, or gaining direct broker/outbox authority of
+  #     its own. ("Bundle 7 does not modify Bundle 6 conflict semantics" is
+  #     proven by check 2b's check_no_dynamic_selection above.)
+  local r13a r13b r13c
+  r13a="$(check_bundle7_pure_module_no_broker_outbox "$DYNAMIC_SELECTION_RS")"
+  [[ "$r13a" == PASS ]] || fail "${r13a#FAIL:}"
+  r13b="$(check_bundle6_runs_exactly_once "$LOOP_RUNNER")"
+  [[ "$r13b" == PASS ]] || fail "${r13b#FAIL:}"
+  r13c="$(check_bundle7_dispatch_feeds_bundle6_when_wired "$LOOP_RUNNER")"
+  [[ "$r13c" == PASS ]] || fail "${r13c#FAIL:}"
+  ok "Bundle 7 authority boundaries intact: pure module has no broker/outbox authority, Bundle 6 runs exactly once, any wired Bundle 7 dispatch feeds into Bundle 6 rather than bypassing it"
 
   # 14. No AI/ML framework or provider reference anywhere in Bundle 6's new
   #     files.
@@ -1349,6 +1429,49 @@ PY
   cp "$CONFLICT_EVIDENCE_VALIDATION" "$scratch/evidence_validation_mut_jj.rs"
   sed -i 's/pub const MAX_CANDIDATES_PER_PLAN: usize = mqk_db::RUNTIME_STRATEGY_CONFLICT_CANDIDATE_READ_BOUND;/pub const MAX_CANDIDATES_PER_PLAN: usize = 64;/' "$scratch/evidence_validation_mut_jj.rs"
   assert_now_fails "MUT-JJ validator bound reverts to a hardcoded literal (drift risk)" "$(check_shared_bound_no_drift "$scratch/evidence_validation_mut_jj.rs" "$CONFLICT_DB_STORE")"
+
+  # ---------------------------------------------------------------------
+  # DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-COMBINED-CONTINUATION-AND-CLOSURE
+  # Phase 1 mutation-negative fixtures: Bundle 7 authority boundaries.
+  # ---------------------------------------------------------------------
+
+  # MUT-KK: Bundle 7's pure module gains a direct broker/outbox call.
+  cp "$DYNAMIC_SELECTION_RS" "$scratch/dynamic_selection_mut_kk.rs"
+  printf '\nfn _mut_kk() { let _ = "outbox_enqueue("; }\n' >> "$scratch/dynamic_selection_mut_kk.rs"
+  assert_now_fails "MUT-KK Bundle 7 pure module gains broker/outbox call" "$(check_bundle7_pure_module_no_broker_outbox "$scratch/dynamic_selection_mut_kk.rs")"
+
+  # MUT-LL: Bundle 6's conflict-resolution call site is duplicated (would
+  # silently double-apply conflict resolution against the same tick).
+  cp "$LOOP_RUNNER" "$scratch/loop_runner_mut_ll.rs"
+  python - "$scratch/loop_runner_mut_ll.rs" <<'PY'
+import sys
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+anchor = "runtime_strategy_conflict::gather_and_resolve"
+idx = text.find(anchor)
+line_start = text.rfind("\n", 0, idx) + 1
+line_end = text.find("\n", idx)
+line = text[line_start:line_end]
+text = text[:line_end] + "\n" + line + " // MUT-LL duplicate" + text[line_end:]
+open(path, "w", encoding="utf-8").write(text)
+PY
+  assert_now_fails "MUT-LL Bundle 6 conflict-resolution call site duplicated" "$(check_bundle6_runs_exactly_once "$scratch/loop_runner_mut_ll.rs")"
+
+  # MUT-MM: a Bundle 7 dynamic-selection call site is placed after Bundle
+  # 6's conflict resolution (simulates dispatch bypassing Bundle 6 instead
+  # of feeding into it).
+  cp "$LOOP_RUNNER" "$scratch/loop_runner_mut_mm.rs"
+  python - "$scratch/loop_runner_mut_mm.rs" <<'PY'
+import sys
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+anchor = "crate::decision::submit_internal_strategy_decision"
+idx = text.find(anchor)
+marker = "\n    // dynamic_selection::mut_mm_bypass_marker\n"
+text = text[:idx] + marker + text[idx:]
+open(path, "w", encoding="utf-8").write(text)
+PY
+  assert_now_fails "MUT-MM Bundle 7 dispatch call site placed after Bundle 6 (bypass)" "$(check_bundle7_dispatch_feeds_bundle6_when_wired "$scratch/loop_runner_mut_mm.rs")"
 
   if [[ "$failures" -gt 0 ]]; then
     echo "[msc-guard-selftest] FAIL: $failures mutation(s) were not caught" >&2
