@@ -213,7 +213,7 @@ pub fn compute_diagnostics_with_config(
     }
 }
 
-const NAME: &str = "intraday_scalper";
+pub(crate) const NAME: &str = "intraday_scalper";
 /// Strategy ID for the short-only variant.  Distinct from `NAME` so both
 /// identities can be registered and selected independently.
 pub const SHORT_NAME: &str = "intraday_short_scalper";

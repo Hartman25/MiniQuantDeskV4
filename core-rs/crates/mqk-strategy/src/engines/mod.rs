@@ -13,6 +13,28 @@ pub use mean_reversion::MeanReversionStrategy;
 pub use swing_momentum::SwingMomentumStrategy;
 pub use volatility_breakout::VolatilityBreakoutStrategy;
 
+/// IR9: the single authoritative list of every strategy identity
+/// [`register_builtin_strategies`] registers, in registration order. Four
+/// engine *implementations* (`swing_momentum`, `mean_reversion`,
+/// `volatility_breakout`, `intraday_scalper`) back five registered strategy
+/// *identities* — `intraday_scalper`'s short-only variant
+/// (`intraday_short_scalper`) is a distinct registered identity sharing the
+/// same engine implementation. Any bound or guard elsewhere in the
+/// workspace that needs to know the size or membership of the built-in
+/// strategy universe (e.g. `mqk_portfolio::MAX_STRATEGY_UNIVERSE`) must
+/// consume or cross-check against this list, not a hand-maintained count —
+/// see `registered_strategy_ids_match_this_constant` below and the
+/// cross-crate bound test in `mqk-daemon`. Adding a new registration to
+/// [`register_builtin_strategies`] without updating this constant fails
+/// that structural test.
+pub const REGISTERED_STRATEGY_IDS: &[&str] = &[
+    swing_momentum::NAME,
+    mean_reversion::NAME,
+    volatility_breakout::NAME,
+    intraday_scalper::NAME,
+    intraday_scalper::SHORT_NAME,
+];
+
 /// Register the built-in deterministic strategy engines.
 ///
 /// Tier A intent:
@@ -116,4 +138,47 @@ pub fn register_builtin_strategies_with_sizing(
     })?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod registered_strategy_ids_tests {
+    use super::*;
+
+    /// IR9: [`REGISTERED_STRATEGY_IDS`] must track [`register_builtin_strategies`]
+    /// exactly — same identities, same count, same order. A new registration
+    /// added to that function without updating the constant fails this test,
+    /// which is the whole point: the bound can never silently drift out from
+    /// under the strategies actually registered.
+    #[test]
+    fn registered_strategy_ids_match_register_builtin_strategies_exactly() {
+        let mut registry = PluginRegistry::new();
+        register_builtin_strategies(&mut registry, "TEST_SYMBOL".to_string())
+            .expect("register_builtin_strategies must succeed for a fresh registry");
+
+        let actual: Vec<&str> = registry.list().iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(
+            actual, REGISTERED_STRATEGY_IDS,
+            "REGISTERED_STRATEGY_IDS has drifted from register_builtin_strategies' actual \
+             registrations -- update the constant to match"
+        );
+    }
+
+    #[test]
+    fn registered_strategy_ids_has_five_distinct_entries() {
+        let mut unique = REGISTERED_STRATEGY_IDS.to_vec();
+        unique.sort_unstable();
+        unique.dedup();
+        assert_eq!(
+            unique.len(),
+            REGISTERED_STRATEGY_IDS.len(),
+            "every registered strategy identity must be distinct"
+        );
+        assert_eq!(REGISTERED_STRATEGY_IDS.len(), 5);
+    }
+
+    #[test]
+    fn short_scalper_identity_is_present_and_distinct_from_long() {
+        assert!(REGISTERED_STRATEGY_IDS.contains(&"intraday_scalper"));
+        assert!(REGISTERED_STRATEGY_IDS.contains(&"intraday_short_scalper"));
+    }
 }

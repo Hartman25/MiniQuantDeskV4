@@ -3,7 +3,7 @@ use crate::{
     StrategySpec, TargetPosition,
 };
 
-const NAME: &str = "swing_momentum";
+pub(crate) const NAME: &str = "swing_momentum";
 const VERSION: &str = "0.1.0";
 const TIMEFRAME_SECS: i64 = 86_400; // 1D
 const LOOKBACK: usize = 20;

@@ -3,7 +3,7 @@ use crate::{
     StrategySpec, TargetPosition,
 };
 
-const NAME: &str = "volatility_breakout";
+pub(crate) const NAME: &str = "volatility_breakout";
 const VERSION: &str = "0.1.0";
 const TIMEFRAME_SECS: i64 = 3_600; // 1H
 const LOOKBACK: usize = 20;
