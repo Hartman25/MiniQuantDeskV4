@@ -23,13 +23,24 @@
 //! - Never ranks by signal size, order quantity, or P&L — the only fields
 //!   this module reads for ranking are `canonical_score_micros`,
 //!   `scanner_rank`, and `watchlist_assigned`.
-//! - `plan_id` is caller-minted (never computed here), exactly like
-//!   `cycle_id`/`conflict_policy`'s `cycle_id` — this zero-dependency crate
-//!   never reads a clock or mints a UUID. The caller derives it via UUIDv5
-//!   from a canonical, length-prefixed serialization of every
-//!   result-affecting fact this module's output exposes, so the read side
-//!   can recompute and validate it independently.
 //! - Exactly one selected candidate per symbol, or none — never more.
+//!
+//! # Non-circular plan identity (R5)
+//! [`DynamicSelectionPlan`] carries no `plan_id` — this crate never mints or
+//! accepts one, and never reads a clock or UUID source. The plan this module
+//! returns is the complete, identity-free, canonically resolved truth. The
+//! caller (`mqk-daemon`) computes [`canonical_plan_identity_material`]
+//! against that resolved plan, hashes it (UUIDv5 or equivalent) to mint
+//! `plan_id`, and wraps `(plan_id, plan)` in its own durable envelope type.
+//! This is Option A of the two non-circular designs considered: the pure
+//! selector never consumes a pre-existing plan identity, so there is no
+//! two-source identity contract and no risk of running the selector twice
+//! against independently reconstructed facts. The read-side validator
+//! (Phase 9, daemon-side) must call the same
+//! [`canonical_plan_identity_material`] function against a plan it
+//! reconstructed from durable evidence and re-ran through
+//! [`compute_dynamic_selection_plan`], then compare bytes to the durable
+//! `plan_id` — never reconstruct this serialization independently.
 
 use std::collections::BTreeMap;
 
@@ -62,12 +73,36 @@ pub const REASON_NO_VALID_CANDIDATE: &str = "no_valid_candidate_for_symbol";
 pub const TRUTH_STATE_COMPUTED: &str = "computed";
 pub const TRUTH_STATE_NO_ELIGIBLE_SYMBOLS: &str = "fail_closed_no_eligible_symbols";
 pub const TRUTH_STATE_DUPLICATE_ELIGIBLE_SYMBOL: &str = "fail_closed_duplicate_eligible_symbol";
+pub const TRUTH_STATE_BLANK_ELIGIBLE_SYMBOL: &str = "fail_closed_blank_eligible_symbol";
+pub const TRUTH_STATE_ELIGIBLE_SYMBOLS_OVER_LIMIT: &str = "fail_closed_eligible_symbols_over_limit";
+pub const TRUTH_STATE_CANDIDATES_OVER_LIMIT: &str = "fail_closed_candidates_over_limit";
 pub const TRUTH_STATE_CANDIDATE_OUTSIDE_ELIGIBLE_SET: &str =
     "fail_closed_candidate_outside_eligible_set";
 
 /// Frozen pure-model schema version, carried through into durable evidence
 /// and into the caller-minted `plan_id` derivation recipe.
 pub const DYNAMIC_SELECTION_SCHEMA_VERSION: &str = "dynamic-strategy-symbol-selection-v1";
+
+// ---------------------------------------------------------------------------
+// R7: bounds — refuse over-limit input before any expensive work
+// ---------------------------------------------------------------------------
+
+/// Mirrors `mqk-daemon::watchlist_intake::MULTI_SYMBOL_HARD_CEILING` (5).
+/// This zero-dependency crate cannot import `mqk-daemon`, so the value is
+/// duplicated here and must stay numerically identical to that ceiling.
+pub const MAX_ELIGIBLE_SYMBOLS: usize = 5;
+
+/// Mirrors the current built-in strategy plugin universe size registered by
+/// `mqk-strategy::engines::register_builtin_strategies` as of this writing:
+/// swing_momentum, mean_reversion, volatility_breakout, intraday_scalper
+/// (long), intraday_scalper (short) — 5 registrations. Any candidate
+/// strategy_id set the daemon builds must already be deduplicated against
+/// this universe before it reaches this module.
+pub const MAX_STRATEGY_UNIVERSE: usize = 5;
+
+/// Derived bound on total `(symbol, strategy_id[, timeframe])` candidate
+/// pairs a plan may consider: [`MAX_ELIGIBLE_SYMBOLS`] × [`MAX_STRATEGY_UNIVERSE`].
+pub const MAX_CANDIDATE_PAIRS: usize = MAX_ELIGIBLE_SYMBOLS * MAX_STRATEGY_UNIVERSE;
 
 // ---------------------------------------------------------------------------
 // Mode
@@ -130,11 +165,12 @@ fn canonical_strategy_id(strategy_id: &str) -> String {
 
 /// Immutable facts about one selection plan, supplied by the caller. Every
 /// identity/timestamp field is caller-minted — this zero-dependency crate
-/// never reads a clock or mints a UUID.
+/// never reads a clock or mints a UUID. There is no `plan_id` field: see
+/// module-level docs, "Non-circular plan identity" (R5) —
+/// [`canonical_plan_identity_material`] is computed from the *resolved*
+/// [`DynamicSelectionPlan`], not supplied upfront.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DynamicSelectionContext {
-    /// Deterministic plan identity (caller-minted UUIDv5 or equivalent).
-    pub plan_id: String,
     pub run_id: String,
     pub schema_version: String,
     pub configured_mode: DynamicSelectionMode,
@@ -153,11 +189,11 @@ pub struct DynamicSelectionContext {
 }
 
 /// Evidence already durably fetched, recomputed, and compared by the caller
-/// for one `(symbol, strategy_id)` candidate. This module trusts none of
-/// these booleans blindly in the sense of skipping its own gate ordering,
-/// but performs no DB/filesystem re-validation of its own — that trust
-/// boundary belongs to the caller (mirrors every other pure policy module in
-/// this crate).
+/// for one `(symbol, strategy_id, timeframe_secs)` candidate. This module
+/// trusts none of these booleans blindly in the sense of skipping its own
+/// gate ordering, but performs no DB/filesystem re-validation of its own —
+/// that trust boundary belongs to the caller (mirrors every other pure
+/// policy module in this crate).
 #[derive(Clone, Debug, PartialEq)]
 pub struct SelectionCandidateEvidence {
     /// `false` when the durable promotion query itself failed (DB
@@ -209,7 +245,10 @@ pub struct SelectionCandidateEvidence {
     pub evidence_fingerprint: Option<String>,
 }
 
-/// One `(symbol, strategy_id)` candidate under selection consideration.
+/// One `(symbol, strategy_id, timeframe_secs)` candidate under selection
+/// consideration. Candidate identity is the full triple — two rows sharing
+/// `symbol`/`strategy_id` but differing `timeframe_secs` are distinct
+/// identities, never merged (R2).
 #[derive(Clone, Debug, PartialEq)]
 pub struct SelectionCandidateInput {
     pub symbol: String,
@@ -230,6 +269,10 @@ pub enum SelectionCandidateDisposition {
     Refused,
 }
 
+/// One canonical candidate snapshot — sufficient on its own to persist,
+/// reconstruct, rerun, and compare the selector (R6). Every result-affecting
+/// authority fact from [`SelectionCandidateEvidence`] is carried through;
+/// nothing durable read-back needs to guess.
 #[derive(Clone, Debug, PartialEq)]
 pub struct SelectionCandidateResult {
     pub symbol: String,
@@ -238,7 +281,19 @@ pub struct SelectionCandidateResult {
     pub canonical_score_micros: Option<i64>,
     pub scanner_rank: Option<u32>,
     pub watchlist_assigned: bool,
+    pub promotion_query_ok: bool,
+    pub promotion_state: Option<String>,
+    pub promotion_effective: bool,
+    pub promotion_expired: bool,
+    pub evidence_resolved: bool,
+    pub review_state_is_paper_candidate: bool,
+    pub fingerprint_matches: bool,
+    pub plugin_instantiable: bool,
+    pub timeframe_matches: bool,
+    pub data_ready: bool,
     pub evidence_review_id: Option<String>,
+    pub evidence_scanner_scan_id: Option<String>,
+    pub evidence_artifact_path: Option<String>,
     pub evidence_fingerprint: Option<String>,
     pub selected: bool,
     pub disposition: SelectionCandidateDisposition,
@@ -252,10 +307,15 @@ pub struct SymbolSelectionResult {
     pub disposition: SelectionCandidateDisposition,
     pub reason_code: String,
     /// One row per input candidate for this symbol, deterministically
-    /// sorted by canonical `strategy_id` ascending (never input order).
+    /// sorted by `(strategy_id, timeframe_secs)` ascending — never input
+    /// order, and never dependent on which divergent-duplicate row was
+    /// encountered first (R4).
     pub candidates: Vec<SelectionCandidateResult>,
 }
 
+/// Identity-free, canonically resolved selection plan. See module-level
+/// docs, "Non-circular plan identity" (R5) — this type intentionally has no
+/// `plan_id` field.
 #[derive(Clone, Debug, PartialEq)]
 pub struct DynamicSelectionPlan {
     pub context: DynamicSelectionContext,
@@ -375,19 +435,50 @@ fn candidate_result(
     disposition: SelectionCandidateDisposition,
     reason_code: &str,
 ) -> SelectionCandidateResult {
+    let e = &c.evidence;
     SelectionCandidateResult {
         symbol: canonical_symbol(&c.symbol),
         strategy_id: canonical_strategy_id(&c.strategy_id),
         timeframe_secs: c.timeframe_secs,
-        canonical_score_micros: c.evidence.canonical_score_micros,
-        scanner_rank: c.evidence.scanner_rank,
-        watchlist_assigned: c.evidence.watchlist_assigned,
-        evidence_review_id: c.evidence.evidence_review_id.clone(),
-        evidence_fingerprint: c.evidence.evidence_fingerprint.clone(),
+        canonical_score_micros: e.canonical_score_micros,
+        scanner_rank: e.scanner_rank,
+        watchlist_assigned: e.watchlist_assigned,
+        promotion_query_ok: e.promotion_query_ok,
+        promotion_state: e.promotion_state.clone(),
+        promotion_effective: e.promotion_effective,
+        promotion_expired: e.promotion_expired,
+        evidence_resolved: e.evidence_resolved,
+        review_state_is_paper_candidate: e.review_state_is_paper_candidate,
+        fingerprint_matches: e.fingerprint_matches,
+        plugin_instantiable: e.plugin_instantiable,
+        timeframe_matches: e.timeframe_matches,
+        data_ready: e.data_ready,
+        evidence_review_id: e.evidence_review_id.clone(),
+        evidence_scanner_scan_id: e.evidence_scanner_scan_id.clone(),
+        evidence_artifact_path: e.evidence_artifact_path.clone(),
+        evidence_fingerprint: e.evidence_fingerprint.clone(),
         selected,
         disposition,
         reason_code: reason_code.to_string(),
     }
+}
+
+/// Full canonical candidate payload used for R3's exact-replay equality and
+/// R4's deterministic ordering key: canonical symbol, canonical
+/// `strategy_id`, `timeframe_secs`, and every evidence field (via `Debug`,
+/// which is faithful for the plain scalar/`Option`/`String` fields on
+/// [`SelectionCandidateEvidence`]). Two rows are an idempotent exact replay
+/// only when this entire key matches, not evidence alone (R3).
+fn canonical_candidate_payload_key(symbol: &str, c: &SelectionCandidateInput) -> String {
+    format!(
+        "{:?}",
+        (
+            symbol,
+            canonical_strategy_id(&c.strategy_id),
+            c.timeframe_secs,
+            &c.evidence,
+        )
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -395,13 +486,15 @@ fn candidate_result(
 // ---------------------------------------------------------------------------
 
 fn resolve_symbol_group(symbol: &str, group: &[&SelectionCandidateInput]) -> SymbolSelectionResult {
-    // Identity de-duplication: two rows sharing the same canonical
-    // strategy_id are either an idempotent exact replay (kept once) or a
-    // divergent duplicate (both refused) — never silently pick one.
-    let mut by_strategy: BTreeMap<String, Vec<&SelectionCandidateInput>> = BTreeMap::new();
+    // Identity de-duplication: candidate identity is the full triple
+    // (canonical symbol [fixed by this group], canonical strategy_id,
+    // timeframe_secs) — R2. Two rows sharing symbol+strategy_id but
+    // differing timeframe_secs are distinct identities and are gated
+    // independently, never collapsed.
+    let mut by_identity: BTreeMap<(String, i64), Vec<&SelectionCandidateInput>> = BTreeMap::new();
     for c in group {
-        by_strategy
-            .entry(canonical_strategy_id(&c.strategy_id))
+        by_identity
+            .entry((canonical_strategy_id(&c.strategy_id), c.timeframe_secs))
             .or_default()
             .push(c);
     }
@@ -409,12 +502,27 @@ fn resolve_symbol_group(symbol: &str, group: &[&SelectionCandidateInput]) -> Sym
     let mut results: Vec<SelectionCandidateResult> = Vec::new();
     let mut ranking_pool: Vec<&SelectionCandidateInput> = Vec::new();
 
-    for rows in by_strategy.values() {
+    for rows in by_identity.values() {
         if rows.len() > 1 {
-            let first_evidence = &rows[0].evidence;
-            let all_identical = rows.iter().all(|r| &r.evidence == first_evidence);
+            // Exact-replay equality compares the complete canonical
+            // candidate payload (symbol + strategy_id + timeframe_secs +
+            // every evidence field), not evidence alone (R3). Symbol and
+            // identity are already fixed within this group/bucket, so the
+            // full-payload key still discriminates purely on evidence here
+            // — computed explicitly (not inferred from bucketing) so the
+            // equality contract is self-evident at the call site.
+            let first_key = canonical_candidate_payload_key(symbol, rows[0]);
+            let all_identical = rows
+                .iter()
+                .all(|r| canonical_candidate_payload_key(symbol, r) == first_key);
             if !all_identical {
-                for r in rows {
+                // R4: divergent duplicates must sort by a complete stable
+                // payload key before entering `results`, so their relative
+                // order — and therefore plan equality — never depends on
+                // which row the caller happened to supply first.
+                let mut sorted_rows: Vec<&SelectionCandidateInput> = rows.clone();
+                sorted_rows.sort_by_key(|r| canonical_candidate_payload_key(symbol, r));
+                for r in &sorted_rows {
                     results.push(candidate_result(
                         r,
                         false,
@@ -425,7 +533,8 @@ fn resolve_symbol_group(symbol: &str, group: &[&SelectionCandidateInput]) -> Sym
                 continue;
             }
         }
-        // Idempotent replay or single row: evaluate exactly once.
+        // Idempotent replay (full-payload-identical) or single row:
+        // evaluate exactly once.
         let representative = rows[0];
         let gate = evaluate_evidence_gate(representative);
         if !gate.valid {
@@ -441,7 +550,10 @@ fn resolve_symbol_group(symbol: &str, group: &[&SelectionCandidateInput]) -> Sym
     }
 
     if ranking_pool.is_empty() {
-        results.sort_by(|a, b| a.strategy_id.cmp(&b.strategy_id));
+        results.sort_by(|a, b| {
+            (a.strategy_id.as_str(), a.timeframe_secs)
+                .cmp(&(b.strategy_id.as_str(), b.timeframe_secs))
+        });
         return SymbolSelectionResult {
             symbol: symbol.to_string(),
             selected_strategy_id: None,
@@ -588,7 +700,9 @@ fn resolve_symbol_group(symbol: &str, group: &[&SelectionCandidateInput]) -> Sym
         ),
     };
 
-    results.sort_by(|a, b| a.strategy_id.cmp(&b.strategy_id));
+    results.sort_by(|a, b| {
+        (a.strategy_id.as_str(), a.timeframe_secs).cmp(&(b.strategy_id.as_str(), b.timeframe_secs))
+    });
 
     SymbolSelectionResult {
         symbol: symbol.to_string(),
@@ -625,15 +739,18 @@ fn fail_closed_plan(
 /// [`SymbolSelectionResult`] in the output, even when zero candidates
 /// were supplied for it (no silent omission). `candidates` may be supplied
 /// in any order and for symbols/strategies in any order — the result is
-/// byte/equality-identical regardless (candidates sorted by symbol then
-/// strategy_id in the output).
+/// equality-identical regardless (candidates sorted by `(strategy_id,
+/// timeframe_secs)` in the output, including divergent duplicates, whose
+/// relative order is fixed by their full canonical payload — R4).
 ///
 /// Fails the whole plan closed (empty `symbol_results`, non-`"computed"`
 /// `truth_state`) only for a caller-contract violation: an empty eligible
-/// set, a duplicate eligible symbol after canonicalization, or a candidate
-/// whose symbol is outside the eligible set. Per-symbol "no valid
-/// candidate" is never a whole-plan failure — it is a normal, visible,
-/// fail-closed outcome for that one symbol.
+/// set, an eligible set over [`MAX_ELIGIBLE_SYMBOLS`], a blank/whitespace
+/// eligible symbol (R1), a duplicate eligible symbol after canonicalization,
+/// a candidate slice over [`MAX_CANDIDATE_PAIRS`] (R7), or a candidate whose
+/// symbol is outside the eligible set. Per-symbol "no valid candidate" is
+/// never a whole-plan failure — it is a normal, visible, fail-closed outcome
+/// for that one symbol.
 pub fn compute_dynamic_selection_plan(
     context: DynamicSelectionContext,
     eligible_symbols: &[String],
@@ -646,12 +763,30 @@ pub fn compute_dynamic_selection_plan(
             "eligible_symbols must not be empty".to_string(),
         );
     }
+    if eligible_symbols.len() > MAX_ELIGIBLE_SYMBOLS {
+        return fail_closed_plan(
+            context,
+            TRUTH_STATE_ELIGIBLE_SYMBOLS_OVER_LIMIT,
+            format!(
+                "eligible_symbols.len()={} exceeds MAX_ELIGIBLE_SYMBOLS={}",
+                eligible_symbols.len(),
+                MAX_ELIGIBLE_SYMBOLS
+            ),
+        );
+    }
 
     let mut canonical_eligible: Vec<String> = Vec::with_capacity(eligible_symbols.len());
     {
         let mut seen = std::collections::HashSet::new();
         for s in eligible_symbols {
             let canon = canonical_symbol(s);
+            if canon.is_empty() {
+                return fail_closed_plan(
+                    context,
+                    TRUTH_STATE_BLANK_ELIGIBLE_SYMBOL,
+                    format!("eligible_symbols entry '{s}' canonicalizes to a blank symbol"),
+                );
+            }
             if !seen.insert(canon.clone()) {
                 return fail_closed_plan(
                     context,
@@ -664,6 +799,18 @@ pub fn compute_dynamic_selection_plan(
     }
     let eligible_set: std::collections::HashSet<&str> =
         canonical_eligible.iter().map(String::as_str).collect();
+
+    if candidates.len() > MAX_CANDIDATE_PAIRS {
+        return fail_closed_plan(
+            context,
+            TRUTH_STATE_CANDIDATES_OVER_LIMIT,
+            format!(
+                "candidates.len()={} exceeds MAX_CANDIDATE_PAIRS={}",
+                candidates.len(),
+                MAX_CANDIDATE_PAIRS
+            ),
+        );
+    }
 
     for c in candidates {
         let canon = canonical_symbol(&c.symbol);
@@ -700,13 +847,131 @@ pub fn compute_dynamic_selection_plan(
     }
 }
 
+// ---------------------------------------------------------------------------
+// R5/R6: non-circular plan identity material
+// ---------------------------------------------------------------------------
+
+fn push_len_prefixed(buf: &mut Vec<u8>, s: &str) {
+    let bytes = s.as_bytes();
+    buf.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
+    buf.extend_from_slice(bytes);
+}
+
+fn push_opt_str(buf: &mut Vec<u8>, s: &Option<String>) {
+    match s {
+        Some(v) => {
+            buf.push(1);
+            push_len_prefixed(buf, v);
+        }
+        None => buf.push(0),
+    }
+}
+
+fn push_bool(buf: &mut Vec<u8>, b: bool) {
+    buf.push(u8::from(b));
+}
+
+fn push_i64(buf: &mut Vec<u8>, v: i64) {
+    buf.extend_from_slice(&v.to_be_bytes());
+}
+
+fn push_opt_i64(buf: &mut Vec<u8>, v: Option<i64>) {
+    match v {
+        Some(x) => {
+            buf.push(1);
+            push_i64(buf, x);
+        }
+        None => buf.push(0),
+    }
+}
+
+fn push_opt_u32(buf: &mut Vec<u8>, v: Option<u32>) {
+    match v {
+        Some(x) => {
+            buf.push(1);
+            buf.extend_from_slice(&x.to_be_bytes());
+        }
+        None => buf.push(0),
+    }
+}
+
+fn push_disposition(buf: &mut Vec<u8>, d: SelectionCandidateDisposition) {
+    let tag: u8 = match d {
+        SelectionCandidateDisposition::Selected => 0,
+        SelectionCandidateDisposition::NotSelected => 1,
+        SelectionCandidateDisposition::Refused => 2,
+    };
+    buf.push(tag);
+}
+
+/// Canonical, length-prefixed byte serialization of every result-affecting
+/// fact this module's output exposes — deterministic and total over a
+/// resolved [`DynamicSelectionPlan`]. See module-level docs, "Non-circular
+/// plan identity" (R5): the caller hashes this (UUIDv5 or equivalent) to
+/// mint `plan_id` only *after* selection has resolved.
+pub fn canonical_plan_identity_material(plan: &DynamicSelectionPlan) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let c = &plan.context;
+    push_len_prefixed(&mut buf, DYNAMIC_SELECTION_SCHEMA_VERSION);
+    push_len_prefixed(&mut buf, &c.schema_version);
+    push_len_prefixed(&mut buf, &c.run_id);
+    push_len_prefixed(&mut buf, c.configured_mode.as_str());
+    push_len_prefixed(&mut buf, c.effective_mode.as_str());
+    push_bool(&mut buf, c.live_lock_applied);
+    push_len_prefixed(&mut buf, &c.source_kind);
+    push_len_prefixed(&mut buf, &c.source_identity);
+    push_len_prefixed(&mut buf, &c.market_date);
+    push_len_prefixed(&mut buf, &plan.truth_state);
+
+    buf.extend_from_slice(&(plan.blockers.len() as u32).to_be_bytes());
+    for b in &plan.blockers {
+        push_len_prefixed(&mut buf, b);
+    }
+
+    buf.extend_from_slice(&(plan.symbol_results.len() as u32).to_be_bytes());
+    for sr in &plan.symbol_results {
+        push_len_prefixed(&mut buf, &sr.symbol);
+        push_opt_str(&mut buf, &sr.selected_strategy_id);
+        push_disposition(&mut buf, sr.disposition);
+        push_len_prefixed(&mut buf, &sr.reason_code);
+
+        buf.extend_from_slice(&(sr.candidates.len() as u32).to_be_bytes());
+        for cand in &sr.candidates {
+            push_len_prefixed(&mut buf, &cand.symbol);
+            push_len_prefixed(&mut buf, &cand.strategy_id);
+            push_i64(&mut buf, cand.timeframe_secs);
+            push_opt_i64(&mut buf, cand.canonical_score_micros);
+            push_opt_u32(&mut buf, cand.scanner_rank);
+            push_bool(&mut buf, cand.watchlist_assigned);
+            push_bool(&mut buf, cand.promotion_query_ok);
+            push_opt_str(&mut buf, &cand.promotion_state);
+            push_bool(&mut buf, cand.promotion_effective);
+            push_bool(&mut buf, cand.promotion_expired);
+            push_bool(&mut buf, cand.evidence_resolved);
+            push_bool(&mut buf, cand.review_state_is_paper_candidate);
+            push_bool(&mut buf, cand.fingerprint_matches);
+            push_bool(&mut buf, cand.plugin_instantiable);
+            push_bool(&mut buf, cand.timeframe_matches);
+            push_bool(&mut buf, cand.data_ready);
+            push_opt_str(&mut buf, &cand.evidence_review_id);
+            push_opt_str(&mut buf, &cand.evidence_scanner_scan_id);
+            push_opt_str(&mut buf, &cand.evidence_artifact_path);
+            push_opt_str(&mut buf, &cand.evidence_fingerprint);
+            push_bool(&mut buf, cand.selected);
+            push_disposition(&mut buf, cand.disposition);
+            push_len_prefixed(&mut buf, &cand.reason_code);
+        }
+    }
+
+    buf
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn ctx() -> DynamicSelectionContext {
         DynamicSelectionContext {
-            plan_id: "plan-1".to_string(),
             run_id: "run-1".to_string(),
             schema_version: DYNAMIC_SELECTION_SCHEMA_VERSION.to_string(),
             configured_mode: DynamicSelectionMode::PaperEnforced,
@@ -751,10 +1016,21 @@ mod tests {
         rank: Option<u32>,
         watchlist: bool,
     ) -> SelectionCandidateInput {
+        candidate_tf(symbol, strategy_id, 300, score_micros, rank, watchlist)
+    }
+
+    fn candidate_tf(
+        symbol: &str,
+        strategy_id: &str,
+        timeframe_secs: i64,
+        score_micros: i64,
+        rank: Option<u32>,
+        watchlist: bool,
+    ) -> SelectionCandidateInput {
         SelectionCandidateInput {
             symbol: symbol.to_string(),
             strategy_id: strategy_id.to_string(),
-            timeframe_secs: 300,
+            timeframe_secs,
             evidence: valid_evidence(score_micros, rank, watchlist),
         }
     }
@@ -1106,6 +1382,55 @@ mod tests {
             .all(|c| c.reason_code == REASON_REFUSED_DIVERGENT_DUPLICATE));
     }
 
+    #[test]
+    fn divergent_duplicate_result_order_is_permutation_independent() {
+        // R4: two rows with the same identity but different evidence (a
+        // divergent duplicate) must produce equality-identical plans no
+        // matter which row the caller supplied first.
+        let c1 = candidate("AAPL", "swing_momentum", 500_000, Some(1), false);
+        let c2 = candidate("AAPL", "swing_momentum", 900_000, Some(2), false);
+        let forward = vec![c1.clone(), c2.clone()];
+        let reversed = vec![c2, c1];
+        let r1 = compute_dynamic_selection_plan(ctx(), &symbols(&["AAPL"]), &forward);
+        let r2 = compute_dynamic_selection_plan(ctx(), &symbols(&["AAPL"]), &reversed);
+        assert_eq!(
+            r1, r2,
+            "divergent duplicate row order must never change the plan"
+        );
+    }
+
+    #[test]
+    fn same_symbol_strategy_different_timeframe_is_not_an_exact_replay() {
+        // R2/R3: identity is (symbol, strategy_id, timeframe_secs) -- two
+        // rows differing only in timeframe are distinct identities, each
+        // independently gated (here: same strategy at 300s vs 900s, both
+        // otherwise valid, must both survive as separate candidate rows,
+        // never collapsed into one).
+        let c_300 = candidate_tf("AAPL", "swing_momentum", 300, 500_000, Some(1), false);
+        let c_900 = candidate_tf("AAPL", "swing_momentum", 900, 500_000, Some(1), false);
+        let plan = compute_dynamic_selection_plan(ctx(), &symbols(&["AAPL"]), &[c_300, c_900]);
+        let aapl = result_for(&plan, "AAPL");
+        assert_eq!(
+            aapl.candidates.len(),
+            2,
+            "distinct timeframes must never collapse into one replay row"
+        );
+        assert!(aapl
+            .candidates
+            .iter()
+            .all(|c| c.reason_code != REASON_REFUSED_DIVERGENT_DUPLICATE));
+    }
+
+    #[test]
+    fn full_payload_duplicate_replay_is_idempotent_including_timeframe() {
+        let c1 = candidate_tf("AAPL", "swing_momentum", 900, 500_000, Some(1), false);
+        let c2 = c1.clone();
+        let plan = compute_dynamic_selection_plan(ctx(), &symbols(&["AAPL"]), &[c1, c2]);
+        let aapl = result_for(&plan, "AAPL");
+        assert_eq!(aapl.candidates.len(), 1);
+        assert_eq!(aapl.candidates[0].timeframe_secs, 900);
+    }
+
     // ── Determinism / input-order independence ─────────────────────────────
 
     #[test]
@@ -1217,5 +1542,141 @@ mod tests {
     fn canonical_symbol_trims_and_uppercases() {
         assert_eq!(canonical_symbol(" aapl "), "AAPL");
         assert_eq!(canonical_symbol("AAPL"), "AAPL");
+    }
+
+    // ── R1: blank eligible symbols ───────────────────────────────────────
+
+    #[test]
+    fn raw_empty_eligible_symbol_fails_whole_plan_closed() {
+        let plan = compute_dynamic_selection_plan(ctx(), &symbols(&["AAPL", ""]), &[]);
+        assert_eq!(plan.truth_state, TRUTH_STATE_BLANK_ELIGIBLE_SYMBOL);
+        assert!(plan.symbol_results.is_empty());
+    }
+
+    #[test]
+    fn whitespace_only_eligible_symbol_fails_whole_plan_closed() {
+        let plan = compute_dynamic_selection_plan(ctx(), &symbols(&["AAPL", "   "]), &[]);
+        assert_eq!(plan.truth_state, TRUTH_STATE_BLANK_ELIGIBLE_SYMBOL);
+    }
+
+    #[test]
+    fn tab_only_eligible_symbol_fails_whole_plan_closed() {
+        let plan = compute_dynamic_selection_plan(ctx(), &symbols(&["AAPL", "\t\t"]), &[]);
+        assert_eq!(plan.truth_state, TRUTH_STATE_BLANK_ELIGIBLE_SYMBOL);
+    }
+
+    #[test]
+    fn mixed_valid_and_blank_eligible_symbols_fails_whole_plan_closed() {
+        let plan = compute_dynamic_selection_plan(ctx(), &symbols(&["AAPL", "MSFT", " "]), &[]);
+        assert_eq!(plan.truth_state, TRUTH_STATE_BLANK_ELIGIBLE_SYMBOL);
+        assert!(
+            plan.symbol_results.is_empty(),
+            "one blank entry fails the whole plan, not just that entry"
+        );
+    }
+
+    #[test]
+    fn candidate_blank_identity_is_still_independently_refused() {
+        // A candidate-level blank identity (not an eligible-symbol-level
+        // blank) must still be refused per-candidate by the evidence gate,
+        // independent of the R1 eligible-symbol check.
+        let mut c = candidate("AAPL", "swing_momentum", 500_000, Some(1), false);
+        c.strategy_id = "   ".to_string();
+        let plan = compute_dynamic_selection_plan(ctx(), &symbols(&["AAPL"]), &[c]);
+        assert_eq!(plan.truth_state, TRUTH_STATE_COMPUTED);
+        assert_eq!(
+            result_for(&plan, "AAPL").candidates[0].reason_code,
+            REASON_REFUSED_BLANK_IDENTITY
+        );
+    }
+
+    // ── R7: bounds ───────────────────────────────────────────────────────
+
+    #[test]
+    fn eligible_symbols_over_limit_fails_whole_plan_closed() {
+        let over = symbols(&["A", "B", "C", "D", "E", "F"]);
+        assert!(over.len() > MAX_ELIGIBLE_SYMBOLS);
+        let plan = compute_dynamic_selection_plan(ctx(), &over, &[]);
+        assert_eq!(plan.truth_state, TRUTH_STATE_ELIGIBLE_SYMBOLS_OVER_LIMIT);
+        assert!(plan.symbol_results.is_empty());
+    }
+
+    #[test]
+    fn eligible_symbols_at_limit_succeeds() {
+        let at_limit = symbols(&["A", "B", "C", "D", "E"]);
+        assert_eq!(at_limit.len(), MAX_ELIGIBLE_SYMBOLS);
+        let plan = compute_dynamic_selection_plan(ctx(), &at_limit, &[]);
+        assert_eq!(plan.truth_state, TRUTH_STATE_COMPUTED);
+    }
+
+    #[test]
+    fn candidates_over_limit_fails_whole_plan_closed() {
+        let eligible = symbols(&["AAPL"]);
+        let mut over_candidates = Vec::new();
+        for i in 0..(MAX_CANDIDATE_PAIRS + 1) {
+            over_candidates.push(candidate(
+                "AAPL",
+                &format!("strategy_{i}"),
+                500_000,
+                Some(1),
+                false,
+            ));
+        }
+        let plan = compute_dynamic_selection_plan(ctx(), &eligible, &over_candidates);
+        assert_eq!(plan.truth_state, TRUTH_STATE_CANDIDATES_OVER_LIMIT);
+        assert!(plan.symbol_results.is_empty());
+    }
+
+    // ── R5/R6: non-circular identity material ──────────────────────────────
+
+    #[test]
+    fn identity_material_is_deterministic_for_equal_plans() {
+        let candidates = vec![candidate("AAPL", "swing_momentum", 500_000, Some(1), false)];
+        let p1 = compute_dynamic_selection_plan(ctx(), &symbols(&["AAPL"]), &candidates);
+        let p2 = compute_dynamic_selection_plan(ctx(), &symbols(&["AAPL"]), &candidates);
+        assert_eq!(
+            canonical_plan_identity_material(&p1),
+            canonical_plan_identity_material(&p2)
+        );
+    }
+
+    #[test]
+    fn identity_material_differs_when_result_affecting_fact_differs() {
+        let c1 = vec![candidate("AAPL", "swing_momentum", 500_000, Some(1), false)];
+        let c2 = vec![candidate("AAPL", "swing_momentum", 600_000, Some(1), false)];
+        let p1 = compute_dynamic_selection_plan(ctx(), &symbols(&["AAPL"]), &c1);
+        let p2 = compute_dynamic_selection_plan(ctx(), &symbols(&["AAPL"]), &c2);
+        assert_ne!(
+            canonical_plan_identity_material(&p1),
+            canonical_plan_identity_material(&p2)
+        );
+    }
+
+    #[test]
+    fn identity_material_is_permutation_independent() {
+        let forward = vec![
+            candidate("AAPL", "a_strategy", 500_000, Some(1), false),
+            candidate("MSFT", "b_strategy", 300_000, Some(1), false),
+        ];
+        let mut reversed = forward.clone();
+        reversed.reverse();
+        let symbols_list = symbols(&["AAPL", "MSFT"]);
+        let p1 = compute_dynamic_selection_plan(ctx(), &symbols_list, &forward);
+        let p2 = compute_dynamic_selection_plan(ctx(), &symbols_list, &reversed);
+        assert_eq!(
+            canonical_plan_identity_material(&p1),
+            canonical_plan_identity_material(&p2)
+        );
+    }
+
+    #[test]
+    fn plan_has_no_plan_id_field() {
+        // Compile-time proof of R5: DynamicSelectionPlan/Context expose no
+        // plan_id -- if either type grows one back, this module must be
+        // revisited. This test exists to make that removal discoverable in
+        // a diff rather than silently reintroducing the circular contract.
+        let candidates = vec![candidate("AAPL", "swing_momentum", 500_000, Some(1), false)];
+        let plan = compute_dynamic_selection_plan(ctx(), &symbols(&["AAPL"]), &candidates);
+        let _material = canonical_plan_identity_material(&plan);
     }
 }
