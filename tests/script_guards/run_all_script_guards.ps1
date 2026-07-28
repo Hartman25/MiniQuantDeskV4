@@ -79,6 +79,7 @@ $Guards = @(
     'test_watchlist_promo_v2_multi_symbol.ps1',
     'test_multi_symbol_smoke_evidence.ps1',
     'test_pdt_cross_symbol_summation.ps1',
+    'test_pdt_cross_symbol_summation_self_test.ps1',
     'test_multi_symbol_smoke_runner_gate.ps1'
 )
 

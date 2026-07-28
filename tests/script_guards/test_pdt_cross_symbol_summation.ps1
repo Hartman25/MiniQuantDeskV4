@@ -199,19 +199,59 @@ if (-not $ForbiddenDb) {
 }
 
 # G14 -- no approved_for_live=true / live-routing authority introduced.
-# Checked against ADDED lines only (git diff HEAD) plus full content of new
-# untracked files, so historical prose elsewhere in the repo discussing
-# approved_for_live cannot trip this guard.
+#
+# Source-candidate rule (PREMARKET-GUARD-UNTRACKED-EVIDENCE-SCOPE-01): this
+# guard must never scan operator evidence (smoke_logs/, exports/, the
+# untracked updated-ledger doc) or the script_guards tests themselves --
+# only paths that can actually introduce runtime/startup/config authority
+# are eligible for full-content scanning. Tracked added lines (git diff
+# HEAD) are still checked, but scoped through the same predicate so that
+# guard-script comments describing the forbidden pattern don't false-trip.
+function Test-IsGuardSourceCandidate([string]$RelPath) {
+    $p = $RelPath -replace '\\', '/'
+
+    # Known non-source evidence/output roots and the guard tests themselves
+    # -- never eligible for content scanning, regardless of what strings
+    # they contain.
+    if ($p -match '^smoke_logs/' -or
+        $p -match '^exports/' -or
+        $p -eq 'MiniQuantDesk_Master_Patch_Ledger_v2_updated.md' -or
+        $p -match '^tests/script_guards/') {
+        return $false
+    }
+
+    # Source-driven allowlist: only these roots can introduce
+    # runtime/startup/config authority.
+    if ($p -match '^core-rs/' -or
+        $p -match '^research-py/' -or
+        $p -match '^config/') {
+        return $true
+    }
+    if ($p -match '^scripts/' -and $p -notmatch '^scripts/tests/script_guards/') {
+        return $true
+    }
+
+    # Narrowly justified root configuration files.
+    if ($p -match '^(Cargo\.toml|Cargo\.lock|docker-compose\.ya?ml)$') {
+        return $true
+    }
+
+    return $false
+}
+
 Push-Location $RepoRoot
 $AddedLines = @()
-$AddedLines += (git diff HEAD 2>$null | Where-Object { $_ -match '^\+[^+]' })
-# Exclude script_guards files themselves -- guard scripts describe forbidden
-# patterns (e.g. "no approved_for_live=true") in comments, which would
-# otherwise false-positive against this check.
+
+$TrackedChanged = git diff HEAD --name-only 2>$null | Where-Object { $_ }
+$EligibleTrackedFiles = $TrackedChanged | Where-Object { Test-IsGuardSourceCandidate $_ }
+if ($EligibleTrackedFiles) {
+    $AddedLines += (git diff HEAD -- $EligibleTrackedFiles 2>$null | Where-Object { $_ -match '^\+[^+]' })
+}
+
 $Untracked = git status --porcelain=v1 --untracked-files=all 2>$null |
     Where-Object { $_ -match '^\?\?' } |
     ForEach-Object { $_.Substring(3).Trim() } |
-    Where-Object { $_ -notmatch '^tests/script_guards/' }
+    Where-Object { Test-IsGuardSourceCandidate $_ }
 foreach ($f in $Untracked) {
     $full = Join-Path $RepoRoot $f
     if (Test-Path $full -PathType Leaf) {
@@ -220,7 +260,9 @@ foreach ($f in $Untracked) {
 }
 Pop-Location
 
-$LiveAuthorityPattern = 'approved_for_live\s*[:=]\s*(true|True)|live_routing_enabled\s*[:=]\s*(true|True)'
+# Allows an optional surrounding quote (JSON keys: "live_routing_enabled":)
+# and an optional PowerShell sigil on the value ($true).
+$LiveAuthorityPattern = '(approved_for_live|live_routing_enabled)"?\s*[:=]\s*"?\$?(true|True)'
 $LiveAuthorityHits = $AddedLines | Where-Object { $_ -match $LiveAuthorityPattern }
 if (-not $LiveAuthorityHits) {
     Assert-Pass "G14: no approved_for_live=true / live-routing authority introduced"
