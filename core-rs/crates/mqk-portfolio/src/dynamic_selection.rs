@@ -243,6 +243,17 @@ pub struct SelectionCandidateEvidence {
     pub evidence_scanner_scan_id: Option<String>,
     pub evidence_artifact_path: Option<String>,
     pub evidence_fingerprint: Option<String>,
+    /// IR5: the precise, closed-vocabulary reason the caller observed for
+    /// this candidate's refusal (e.g. a daemon-side
+    /// `CandidateEvidenceReason::code()`), carried through even when the
+    /// pure gate's own coarse `reason_code` collapses several distinct
+    /// causes onto one boolean (see [`evaluate_evidence_gate`]). `None` for
+    /// a candidate that never reached a caller-observed failure (evidence
+    /// gate passed, or the candidate lost only at ranking). Never a
+    /// caller-supplied free-form string — always one of a bounded,
+    /// caller-owned closed vocabulary, so this module remains free of any
+    /// unbounded external text.
+    pub exact_reason: Option<&'static str>,
 }
 
 /// One `(symbol, strategy_id, timeframe_secs)` candidate under selection
@@ -295,6 +306,8 @@ pub struct SelectionCandidateResult {
     pub evidence_scanner_scan_id: Option<String>,
     pub evidence_artifact_path: Option<String>,
     pub evidence_fingerprint: Option<String>,
+    /// IR5: see [`SelectionCandidateEvidence::exact_reason`].
+    pub exact_reason: Option<&'static str>,
     pub selected: bool,
     pub disposition: SelectionCandidateDisposition,
     pub reason_code: String,
@@ -362,6 +375,120 @@ impl DynamicSelectionPlan {
             })
             .collect()
     }
+}
+
+// ---------------------------------------------------------------------------
+// IR2: selected-row coherence
+// ---------------------------------------------------------------------------
+
+/// Every way a resolved [`SymbolSelectionResult`] can fail to satisfy the
+/// selected-row coherence contract IR2 requires before any host can be
+/// constructed from it: `selected_strategy_id` present iff exactly one
+/// candidate carries `selected == true`; that one candidate's `strategy_id`
+/// equals `selected_strategy_id` canonically; its `disposition` is
+/// `Selected`; and its `timeframe_secs` is strictly positive. This module's
+/// own [`resolve_symbol_group`] always produces coherent output for a
+/// freshly-computed plan — this check exists for every *other* path a
+/// [`DynamicSelectionPlan`] can reach a caller: durable read-back
+/// (Phase 8/9), a hand-built fixture, or any future serialization
+/// round-trip. Never trust selected-row shape implicitly; always verify.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SelectionCoherenceViolation {
+    /// `selected_strategy_id` is `Some(..)` but no candidate has
+    /// `selected == true`.
+    SelectedIdWithoutSelectedCandidate,
+    /// A candidate has `selected == true` but `selected_strategy_id` is
+    /// `None`.
+    SelectedCandidateWithoutSelectedId,
+    /// More than one candidate has `selected == true` for this symbol.
+    MultipleSelectedCandidates,
+    /// The one selected candidate's `strategy_id` does not canonically equal
+    /// `selected_strategy_id`.
+    SelectedCandidateIdMismatch,
+    /// The one selected candidate's `disposition` is not
+    /// `SelectionCandidateDisposition::Selected`.
+    SelectedCandidateDispositionMismatch,
+    /// The one selected candidate's `timeframe_secs` is not strictly
+    /// positive.
+    SelectedCandidateNonPositiveTimeframe,
+}
+
+impl SelectionCoherenceViolation {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::SelectedIdWithoutSelectedCandidate => {
+                "selection_coherence_selected_id_without_selected_candidate"
+            }
+            Self::SelectedCandidateWithoutSelectedId => {
+                "selection_coherence_selected_candidate_without_selected_id"
+            }
+            Self::MultipleSelectedCandidates => "selection_coherence_multiple_selected_candidates",
+            Self::SelectedCandidateIdMismatch => {
+                "selection_coherence_selected_candidate_id_mismatch"
+            }
+            Self::SelectedCandidateDispositionMismatch => {
+                "selection_coherence_selected_candidate_disposition_mismatch"
+            }
+            Self::SelectedCandidateNonPositiveTimeframe => {
+                "selection_coherence_selected_candidate_non_positive_timeframe"
+            }
+        }
+    }
+}
+
+/// Verify one symbol's selected-row coherence. See
+/// [`SelectionCoherenceViolation`] for the exact contract.
+pub fn verify_symbol_selection_coherence(
+    sr: &SymbolSelectionResult,
+) -> Result<(), SelectionCoherenceViolation> {
+    let selected_candidates: Vec<&SelectionCandidateResult> =
+        sr.candidates.iter().filter(|c| c.selected).collect();
+
+    match (&sr.selected_strategy_id, selected_candidates.len()) {
+        (Some(_), 0) => {
+            return Err(SelectionCoherenceViolation::SelectedIdWithoutSelectedCandidate)
+        }
+        (Some(_), n) if n > 1 => {
+            return Err(SelectionCoherenceViolation::MultipleSelectedCandidates)
+        }
+        (None, n) if n > 0 => {
+            return Err(SelectionCoherenceViolation::SelectedCandidateWithoutSelectedId)
+        }
+        _ => {}
+    }
+
+    if let Some(id) = &sr.selected_strategy_id {
+        let cand = selected_candidates[0];
+        if &cand.strategy_id != id {
+            return Err(SelectionCoherenceViolation::SelectedCandidateIdMismatch);
+        }
+        if cand.disposition != SelectionCandidateDisposition::Selected {
+            return Err(SelectionCoherenceViolation::SelectedCandidateDispositionMismatch);
+        }
+        if cand.timeframe_secs <= 0 {
+            return Err(SelectionCoherenceViolation::SelectedCandidateNonPositiveTimeframe);
+        }
+    }
+
+    Ok(())
+}
+
+/// Verify every symbol's selected-row coherence across a whole plan.
+/// Returns one `(symbol, violation)` entry per incoherent symbol — empty
+/// when the whole plan is coherent. Never short-circuits on the first
+/// violation, so a caller (e.g. the daemon's start-gate) can report every
+/// incoherent symbol at once rather than one refusal at a time.
+pub fn verify_plan_selection_coherence(
+    plan: &DynamicSelectionPlan,
+) -> Vec<(String, SelectionCoherenceViolation)> {
+    plan.symbol_results
+        .iter()
+        .filter_map(|sr| {
+            verify_symbol_selection_coherence(sr)
+                .err()
+                .map(|v| (sr.symbol.clone(), v))
+        })
+        .collect()
 }
 
 // ---------------------------------------------------------------------------
@@ -457,28 +584,47 @@ fn candidate_result(
         evidence_scanner_scan_id: e.evidence_scanner_scan_id.clone(),
         evidence_artifact_path: e.evidence_artifact_path.clone(),
         evidence_fingerprint: e.evidence_fingerprint.clone(),
+        exact_reason: e.exact_reason,
         selected,
         disposition,
         reason_code: reason_code.to_string(),
     }
 }
 
-/// Full canonical candidate payload used for R3's exact-replay equality and
-/// R4's deterministic ordering key: canonical symbol, canonical
-/// `strategy_id`, `timeframe_secs`, and every evidence field (via `Debug`,
-/// which is faithful for the plain scalar/`Option`/`String` fields on
-/// [`SelectionCandidateEvidence`]). Two rows are an idempotent exact replay
-/// only when this entire key matches, not evidence alone (R3).
-fn canonical_candidate_payload_key(symbol: &str, c: &SelectionCandidateInput) -> String {
-    format!(
-        "{:?}",
-        (
-            symbol,
-            canonical_strategy_id(&c.strategy_id),
-            c.timeframe_secs,
-            &c.evidence,
-        )
-    )
+/// IR8: full canonical candidate payload used for R3's exact-replay equality
+/// and R4's deterministic ordering key: canonical symbol, canonical
+/// `strategy_id`, `timeframe_secs`, and every evidence field, serialized
+/// through the same explicit length-prefixed byte primitives
+/// ([`push_len_prefixed`]/[`push_bool`]/[`push_opt_str`]/[`push_opt_i64`]/
+/// [`push_opt_u32`]/[`push_opt_static_str`]) that [`canonical_plan_identity_material`]
+/// uses for the resolved plan — never `Debug`, pointer identity, source
+/// ordinal, or input order. Two rows are an idempotent exact replay only
+/// when this entire byte key matches, not evidence alone (R3).
+fn canonical_candidate_payload_key(symbol: &str, c: &SelectionCandidateInput) -> Vec<u8> {
+    let mut buf = Vec::new();
+    let e = &c.evidence;
+    push_len_prefixed(&mut buf, symbol);
+    push_len_prefixed(&mut buf, &canonical_strategy_id(&c.strategy_id));
+    push_i64(&mut buf, c.timeframe_secs);
+    push_bool(&mut buf, e.promotion_query_ok);
+    push_opt_str(&mut buf, &e.promotion_state);
+    push_bool(&mut buf, e.promotion_effective);
+    push_bool(&mut buf, e.promotion_expired);
+    push_bool(&mut buf, e.evidence_resolved);
+    push_bool(&mut buf, e.review_state_is_paper_candidate);
+    push_bool(&mut buf, e.fingerprint_matches);
+    push_bool(&mut buf, e.plugin_instantiable);
+    push_bool(&mut buf, e.timeframe_matches);
+    push_bool(&mut buf, e.data_ready);
+    push_opt_i64(&mut buf, e.canonical_score_micros);
+    push_opt_u32(&mut buf, e.scanner_rank);
+    push_bool(&mut buf, e.watchlist_assigned);
+    push_opt_str(&mut buf, &e.evidence_review_id);
+    push_opt_str(&mut buf, &e.evidence_scanner_scan_id);
+    push_opt_str(&mut buf, &e.evidence_artifact_path);
+    push_opt_str(&mut buf, &e.evidence_fingerprint);
+    push_opt_static_str(&mut buf, e.exact_reason);
+    buf
 }
 
 // ---------------------------------------------------------------------------
@@ -867,6 +1013,19 @@ fn push_opt_str(buf: &mut Vec<u8>, s: &Option<String>) {
     }
 }
 
+/// Same tag+length-prefix convention as [`push_opt_str`], for a
+/// caller-owned `&'static str` (e.g. [`SelectionCandidateEvidence::exact_reason`])
+/// rather than an owned `String` — avoids an allocation at every call site.
+fn push_opt_static_str(buf: &mut Vec<u8>, s: Option<&str>) {
+    match s {
+        Some(v) => {
+            buf.push(1);
+            push_len_prefixed(buf, v);
+        }
+        None => buf.push(0),
+    }
+}
+
 fn push_bool(buf: &mut Vec<u8>, b: bool) {
     buf.push(u8::from(b));
 }
@@ -957,6 +1116,7 @@ pub fn canonical_plan_identity_material(plan: &DynamicSelectionPlan) -> Vec<u8> 
             push_opt_str(&mut buf, &cand.evidence_scanner_scan_id);
             push_opt_str(&mut buf, &cand.evidence_artifact_path);
             push_opt_str(&mut buf, &cand.evidence_fingerprint);
+            push_opt_static_str(&mut buf, cand.exact_reason);
             push_bool(&mut buf, cand.selected);
             push_disposition(&mut buf, cand.disposition);
             push_len_prefixed(&mut buf, &cand.reason_code);
@@ -1006,6 +1166,7 @@ mod tests {
             evidence_scanner_scan_id: Some("scan-1".to_string()),
             evidence_artifact_path: Some("/artifacts/review-1".to_string()),
             evidence_fingerprint: Some("fp-1".to_string()),
+            exact_reason: None,
         }
     }
 
@@ -1667,6 +1828,161 @@ mod tests {
             canonical_plan_identity_material(&p1),
             canonical_plan_identity_material(&p2)
         );
+    }
+
+    // ── IR2: selected-row coherence ─────────────────────────────────────
+
+    fn coherent_selected_result() -> SymbolSelectionResult {
+        let plan = compute_dynamic_selection_plan(
+            ctx(),
+            &symbols(&["AAPL"]),
+            &[candidate("AAPL", "swing_momentum", 500_000, Some(1), false)],
+        );
+        result_for(&plan, "AAPL").clone()
+    }
+
+    #[test]
+    fn naturally_computed_selection_is_coherent() {
+        let sr = coherent_selected_result();
+        assert!(verify_symbol_selection_coherence(&sr).is_ok());
+    }
+
+    #[test]
+    fn naturally_computed_no_selection_is_coherent() {
+        let plan = compute_dynamic_selection_plan(ctx(), &symbols(&["AAPL"]), &[]);
+        let sr = result_for(&plan, "AAPL");
+        assert!(verify_symbol_selection_coherence(sr).is_ok());
+    }
+
+    #[test]
+    fn selected_id_with_no_selected_candidate_is_incoherent() {
+        let mut sr = coherent_selected_result();
+        for c in &mut sr.candidates {
+            c.selected = false;
+        }
+        assert_eq!(
+            verify_symbol_selection_coherence(&sr),
+            Err(SelectionCoherenceViolation::SelectedIdWithoutSelectedCandidate)
+        );
+    }
+
+    #[test]
+    fn selected_candidate_with_no_selected_id_is_incoherent() {
+        let mut sr = coherent_selected_result();
+        sr.selected_strategy_id = None;
+        assert_eq!(
+            verify_symbol_selection_coherence(&sr),
+            Err(SelectionCoherenceViolation::SelectedCandidateWithoutSelectedId)
+        );
+    }
+
+    #[test]
+    fn two_selected_candidates_is_incoherent() {
+        let mut sr = coherent_selected_result();
+        let mut extra = sr.candidates[0].clone();
+        extra.strategy_id = "another_strategy".to_string();
+        sr.candidates.push(extra);
+        assert_eq!(
+            verify_symbol_selection_coherence(&sr),
+            Err(SelectionCoherenceViolation::MultipleSelectedCandidates)
+        );
+    }
+
+    #[test]
+    fn selected_candidate_id_mismatch_is_incoherent() {
+        let mut sr = coherent_selected_result();
+        sr.selected_strategy_id = Some("some_other_strategy".to_string());
+        assert_eq!(
+            verify_symbol_selection_coherence(&sr),
+            Err(SelectionCoherenceViolation::SelectedCandidateIdMismatch)
+        );
+    }
+
+    #[test]
+    fn refused_disposition_on_selected_row_is_incoherent() {
+        let mut sr = coherent_selected_result();
+        sr.candidates[0].disposition = SelectionCandidateDisposition::Refused;
+        assert_eq!(
+            verify_symbol_selection_coherence(&sr),
+            Err(SelectionCoherenceViolation::SelectedCandidateDispositionMismatch)
+        );
+    }
+
+    #[test]
+    fn non_positive_timeframe_on_selected_row_is_incoherent() {
+        let mut sr = coherent_selected_result();
+        sr.candidates[0].timeframe_secs = 0;
+        assert_eq!(
+            verify_symbol_selection_coherence(&sr),
+            Err(SelectionCoherenceViolation::SelectedCandidateNonPositiveTimeframe)
+        );
+    }
+
+    #[test]
+    fn plan_level_coherence_reports_every_incoherent_symbol() {
+        let mut plan = compute_dynamic_selection_plan(
+            ctx(),
+            &symbols(&["AAPL", "MSFT"]),
+            &[
+                candidate("AAPL", "swing_momentum", 500_000, Some(1), false),
+                candidate("MSFT", "mean_reversion", 700_000, Some(1), false),
+            ],
+        );
+        for sr in &mut plan.symbol_results {
+            sr.selected_strategy_id = None;
+        }
+        let violations = verify_plan_selection_coherence(&plan);
+        assert_eq!(violations.len(), 2);
+        assert!(violations.iter().any(|(s, v)| s == "AAPL"
+            && *v == SelectionCoherenceViolation::SelectedCandidateWithoutSelectedId));
+        assert!(violations.iter().any(|(s, v)| s == "MSFT"
+            && *v == SelectionCoherenceViolation::SelectedCandidateWithoutSelectedId));
+    }
+
+    #[test]
+    fn plan_level_coherence_is_empty_for_a_fully_coherent_plan() {
+        let plan = compute_dynamic_selection_plan(
+            ctx(),
+            &symbols(&["AAPL", "MSFT"]),
+            &[
+                candidate("AAPL", "swing_momentum", 500_000, Some(1), false),
+                candidate("MSFT", "mean_reversion", 700_000, Some(1), false),
+            ],
+        );
+        assert!(verify_plan_selection_coherence(&plan).is_empty());
+    }
+
+    // ── IR8: canonical candidate payload key is byte-based, not Debug ──────
+
+    #[test]
+    fn divergent_duplicate_still_refused_via_byte_based_key() {
+        let c1 = candidate("AAPL", "swing_momentum", 500_000, Some(1), false);
+        let mut c2 = c1.clone();
+        c2.evidence.canonical_score_micros = Some(900_000);
+        let plan = compute_dynamic_selection_plan(ctx(), &symbols(&["AAPL"]), &[c1, c2]);
+        let aapl = result_for(&plan, "AAPL");
+        assert!(aapl
+            .candidates
+            .iter()
+            .all(|c| c.reason_code == REASON_REFUSED_DIVERGENT_DUPLICATE));
+    }
+
+    #[test]
+    fn exact_reason_differing_alone_is_a_divergent_duplicate() {
+        // Two rows identical in every field the pure gate reads, but
+        // differing only in the caller-supplied diagnostic exact_reason --
+        // the byte-based key must still catch this as a genuine payload
+        // difference (it is real caller-observed data, not decorative).
+        let mut c1 = candidate("AAPL", "swing_momentum", 500_000, Some(1), false);
+        c1.evidence.exact_reason = Some("promotion_query_failed");
+        let mut c2 = c1.clone();
+        c2.evidence.exact_reason = Some("no_promotion_record");
+        let plan = compute_dynamic_selection_plan(ctx(), &symbols(&["AAPL"]), &[c1, c2]);
+        let aapl = result_for(&plan, "AAPL");
+        assert!(aapl
+            .candidates
+            .iter()
+            .all(|c| c.reason_code == REASON_REFUSED_DIVERGENT_DUPLICATE));
     }
 
     #[test]

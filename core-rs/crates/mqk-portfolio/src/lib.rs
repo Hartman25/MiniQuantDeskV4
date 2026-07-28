@@ -47,11 +47,13 @@ pub use ledger::{Ledger, LedgerError, LedgerSnapshot};
 // intended consumer).
 pub use dynamic_selection::{
     canonical_plan_identity_material, canonical_symbol as dynamic_selection_canonical_symbol,
-    compute_dynamic_selection_plan, DynamicSelectionContext, DynamicSelectionMode,
+    compute_dynamic_selection_plan, verify_plan_selection_coherence,
+    verify_symbol_selection_coherence, DynamicSelectionContext, DynamicSelectionMode,
     DynamicSelectionPlan, SelectionCandidateDisposition, SelectionCandidateEvidence,
-    SelectionCandidateInput, SelectionCandidateResult, SymbolSelectionResult,
-    DYNAMIC_SELECTION_SCHEMA_VERSION, MAX_CANDIDATE_PAIRS, MAX_ELIGIBLE_SYMBOLS,
-    MAX_STRATEGY_UNIVERSE, REASON_NOT_SELECTED_LOST_TIE_BREAK, REASON_NOT_SELECTED_LOWER_SCORE,
+    SelectionCandidateInput, SelectionCandidateResult, SelectionCoherenceViolation,
+    SymbolSelectionResult, DYNAMIC_SELECTION_SCHEMA_VERSION, MAX_CANDIDATE_PAIRS,
+    MAX_ELIGIBLE_SYMBOLS, MAX_STRATEGY_UNIVERSE, REASON_NOT_SELECTED_LOST_TIE_BREAK,
+    REASON_NOT_SELECTED_LOWER_SCORE,
     REASON_NO_VALID_CANDIDATE as DYNAMIC_SELECTION_REASON_NO_VALID_CANDIDATE,
     REASON_REFUSED_BLANK_IDENTITY as DYNAMIC_SELECTION_REASON_REFUSED_BLANK_IDENTITY,
     REASON_REFUSED_DATA_NOT_READY, REASON_REFUSED_DIVERGENT_DUPLICATE,
