@@ -21,6 +21,7 @@ pub mod allocator;
 pub mod conflict_policy;
 pub mod constraints;
 pub mod cycle;
+pub mod dynamic_selection;
 pub mod ledger;
 
 pub use accounting::{apply_entry, apply_fill, recompute_from_ledger};
@@ -40,6 +41,28 @@ pub use cycle::{
     AllocationCycleContext, AllocationCycleResult, AllocationDisposition,
 };
 pub use ledger::{Ledger, LedgerError, LedgerSnapshot};
+
+// DYNAMIC-STRATEGY-SYMBOL-SELECTION-01 Phase 2: pure dynamic strategy-symbol
+// selection model, zero new callers (Bundle 7 daemon wiring is the only
+// intended consumer).
+pub use dynamic_selection::{
+    canonical_symbol as dynamic_selection_canonical_symbol, compute_dynamic_selection_plan,
+    DynamicSelectionContext, DynamicSelectionMode, DynamicSelectionPlan,
+    SelectionCandidateDisposition, SelectionCandidateEvidence, SelectionCandidateInput,
+    SelectionCandidateResult, SymbolSelectionResult, DYNAMIC_SELECTION_SCHEMA_VERSION,
+    REASON_NOT_SELECTED_LOST_TIE_BREAK, REASON_NOT_SELECTED_LOWER_SCORE,
+    REASON_NO_VALID_CANDIDATE as DYNAMIC_SELECTION_REASON_NO_VALID_CANDIDATE,
+    REASON_REFUSED_BLANK_IDENTITY as DYNAMIC_SELECTION_REASON_REFUSED_BLANK_IDENTITY,
+    REASON_REFUSED_DATA_NOT_READY, REASON_REFUSED_DIVERGENT_DUPLICATE, REASON_REFUSED_EVIDENCE_READ_FAILED,
+    REASON_REFUSED_EXPIRED, REASON_REFUSED_FINGERPRINT_MISMATCH, REASON_REFUSED_MISSING_RANK_FOR_TIE,
+    REASON_REFUSED_MISSING_SCORE, REASON_REFUSED_NOT_ACTIVE_PAPER, REASON_REFUSED_NOT_PAPER_CANDIDATE,
+    REASON_REFUSED_NOT_YET_EFFECTIVE, REASON_REFUSED_PROMOTION_QUERY_FAILED,
+    REASON_REFUSED_TIMEFRAME_MISMATCH, REASON_REFUSED_UNSUPPORTED_STRATEGY,
+    REASON_SELECTED_HIGHEST_SCORE, REASON_SELECTED_TIE_BREAK_RANK,
+    REASON_SELECTED_TIE_BREAK_STRATEGY_ID, REASON_SELECTED_TIE_BREAK_WATCHLIST,
+    TRUTH_STATE_CANDIDATE_OUTSIDE_ELIGIBLE_SET, TRUTH_STATE_COMPUTED as DYNAMIC_SELECTION_TRUTH_STATE_COMPUTED,
+    TRUTH_STATE_DUPLICATE_ELIGIBLE_SYMBOL, TRUTH_STATE_NO_ELIGIBLE_SYMBOLS,
+};
 
 // MULTI-STRATEGY-CONFLICT-POLICY-01 Phase A: pure conflict-resolution model,
 // zero new callers (Bundle 6 daemon wiring is the only intended consumer).
