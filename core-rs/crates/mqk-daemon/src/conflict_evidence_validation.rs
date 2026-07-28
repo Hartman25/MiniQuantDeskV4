@@ -106,13 +106,18 @@ const MAX_BLOCKERS: usize = 25;
 /// truncated defensively before being returned.
 const MAX_BLOCKER_LEN: usize = 200;
 
-/// Defect 8: maximum candidates validated/projected for one plan. Normal
+/// Defect 8 / UTF8-AND-BOUNDED-READ-CLOSURE Defect 2: maximum candidates
+/// validated/projected for one plan. Defined in terms of
+/// [`mqk_db::RUNTIME_STRATEGY_CONFLICT_CANDIDATE_READ_BOUND`] -- the same
+/// shared bound authority the bounded DB read seam
+/// (`mqk_db::fetch_runtime_strategy_conflict_plan_for_read`) uses for its
+/// SQL `LIMIT` -- so the two bounds can never silently drift apart. Normal
 /// plans carry a handful of candidates (bounded by
 /// `watchlist_intake::MULTI_SYMBOL_HARD_CEILING`, currently 5, times at
 /// most a few competing strategies per symbol); this bound is generous
 /// headroom while still refusing to perform unbounded validation work or
 /// return an unbounded response body for a pathological row.
-const MAX_CANDIDATES_PER_PLAN: usize = 64;
+pub const MAX_CANDIDATES_PER_PLAN: usize = mqk_db::RUNTIME_STRATEGY_CONFLICT_CANDIDATE_READ_BOUND;
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct EvidenceValidation {
@@ -123,26 +128,116 @@ pub struct EvidenceValidation {
     pub blockers: Vec<String>,
 }
 
+/// UTF8-AND-BOUNDED-READ-CLOSURE Defect 1: the truncation marker appended to
+/// any blocker string cut short by [`safe_truncate_utf8`]. Its own byte
+/// length is reserved out of [`MAX_BLOCKER_LEN`] before any content is kept,
+/// so the marker is never itself responsible for exceeding the maximum.
+const TRUNCATION_SUFFIX: &str = "... (truncated)";
+
+/// UTF8-AND-BOUNDED-READ-CLOSURE Defect 1: truncate `s` to at most `max_len`
+/// UTF-8 *bytes*, including the [`TRUNCATION_SUFFIX`], without ever
+/// panicking and without ever producing invalid UTF-8 (no lossy slicing, no
+/// replacement characters).
+///
+/// `String::truncate(n)` panics whenever `n` is not a `char` boundary of the
+/// string -- a corrupted/tampered durable row can carry arbitrary multibyte
+/// Unicode (e.g. in `market_date`), so blindly truncating at a fixed byte
+/// offset can crash a read-only status/detail/list request while this
+/// validator is trying to fail closed. This helper instead:
+/// 1. Returns `s` unchanged when it already fits within `max_len` bytes.
+/// 2. Otherwise reserves [`TRUNCATION_SUFFIX`]'s byte length out of the
+///    budget, then walks backward from the remaining byte budget to the
+///    nearest `is_char_boundary()` -- so content is only ever sliced at a
+///    proven valid boundary, never mid-character.
+/// 3. Appends the suffix within that same reserved budget, so the final
+///    result (content + suffix) never exceeds `max_len` bytes.
+///
+/// Pure: no clock, random, DB, network, broker, or environment access.
+fn safe_truncate_utf8(s: &str, max_len: usize) -> String {
+    if s.len() <= max_len {
+        return s.to_string();
+    }
+
+    let suffix = TRUNCATION_SUFFIX;
+    // Degenerate bound smaller than the suffix itself -- still must never
+    // panic and must never exceed max_len. Return as much of the suffix as
+    // fits, truncated at its own nearest valid boundary.
+    if max_len <= suffix.len() {
+        let mut boundary = max_len.min(suffix.len());
+        while boundary > 0 && !suffix.is_char_boundary(boundary) {
+            boundary -= 1;
+        }
+        return suffix[..boundary].to_string();
+    }
+
+    let budget = max_len - suffix.len();
+    let mut boundary = budget.min(s.len());
+    while boundary > 0 && !s.is_char_boundary(boundary) {
+        boundary -= 1;
+    }
+
+    let mut out = String::with_capacity(boundary + suffix.len());
+    out.push_str(&s[..boundary]);
+    out.push_str(suffix);
+    debug_assert!(out.len() <= max_len);
+    out
+}
+
 /// Defect 8: bound the final blockers vector -- at most [`MAX_BLOCKERS`]
 /// entries, each at most [`MAX_BLOCKER_LEN`] bytes, with a final bounded
 /// truth message (never echoing a raw stored value) when truncation
 /// occurred. Applied once, at the very end of validation, so every
 /// intermediate check above can push freely without its own bound.
+///
+/// UTF8-AND-BOUNDED-READ-CLOSURE Defect 1: both per-blocker truncation and
+/// the final omission message are bounded via [`safe_truncate_utf8`] -- an
+/// arbitrary multibyte-Unicode stored value can never crash this path, and
+/// the returned length can never exceed [`MAX_BLOCKER_LEN`].
 fn bound_blockers(mut blockers: Vec<String>) -> Vec<String> {
     for b in &mut blockers {
         if b.len() > MAX_BLOCKER_LEN {
-            b.truncate(MAX_BLOCKER_LEN);
-            b.push_str("... (truncated)");
+            *b = safe_truncate_utf8(b, MAX_BLOCKER_LEN);
         }
     }
     if blockers.len() > MAX_BLOCKERS {
         let omitted = blockers.len() - (MAX_BLOCKERS - 1);
         blockers.truncate(MAX_BLOCKERS - 1);
-        blockers.push(format!(
-            "{omitted} additional blocker(s) omitted (bounded evidence output)"
-        ));
+        let omitted_message =
+            format!("{omitted} additional blocker(s) omitted (bounded evidence output)");
+        blockers.push(safe_truncate_utf8(&omitted_message, MAX_BLOCKER_LEN));
     }
     blockers
+}
+
+/// Defect 8 / UTF8-AND-BOUNDED-READ-CLOSURE Defect 2: the single message
+/// builder for "this plan's candidate count exceeds the shared bound" --
+/// shared between [`validate_plan_with_candidates`]'s own defense-in-depth
+/// check and [`evidence_validation_for_candidate_limit_exceeded`] (used by
+/// callers of the bounded DB read seam, which never fetches candidate data
+/// for an over-limit plan in the first place). Never echoes any candidate
+/// content -- only the observed count and the configured bound.
+fn candidate_limit_exceeded_blocker(observed_at_least: usize) -> Vec<String> {
+    vec![format!(
+        "candidate_count {observed_at_least} exceeds the maximum {MAX_CANDIDATES_PER_PLAN} \
+         permitted for read-side validation (bounded read)"
+    )]
+}
+
+/// UTF8-AND-BOUNDED-READ-CLOSURE Defect 2: read-side evidence validation for
+/// a plan whose candidate row count was already proven (by the bounded DB
+/// read seam) to exceed [`MAX_CANDIDATES_PER_PLAN`] *before* any candidate
+/// row was fetched. Callers (see `routes/strategy_conflict.rs`) use this
+/// instead of [`validate_plan_with_candidates`] for
+/// `mqk_db::BoundedConflictPlanFetch::CandidateLimitExceeded` -- there is no
+/// candidate data to validate, and none is ever projected.
+pub fn evidence_validation_for_candidate_limit_exceeded(
+    observed_at_least: usize,
+) -> EvidenceValidation {
+    let blockers = bound_blockers(candidate_limit_exceeded_blocker(observed_at_least));
+    EvidenceValidation {
+        valid: false,
+        blockers,
+    }
 }
 
 fn is_market_date_shaped(s: &str) -> bool {
@@ -237,14 +332,16 @@ pub fn validate_plan_with_candidates(
     let mut result = validate_plan_shape(plan);
 
     // Defect 8: refuse to perform unbounded per-candidate validation work
-    // (or return an unbounded response body) for a pathological row.
+    // (or return an unbounded response body) for a pathological row. In
+    // practice a caller using the bounded DB read seam
+    // (`mqk_db::fetch_runtime_strategy_conflict_plan_for_read`) already
+    // refuses to fetch more than `MAX_CANDIDATES_PER_PLAN + 1` candidates,
+    // so this branch is defense-in-depth for any direct caller of this
+    // function (including this module's own unit tests).
     if candidates.len() > MAX_CANDIDATES_PER_PLAN {
-        result.blockers.push(format!(
-            "candidate_count {} exceeds the maximum {} permitted for read-side validation \
-             (bounded read)",
-            candidates.len(),
-            MAX_CANDIDATES_PER_PLAN
-        ));
+        result
+            .blockers
+            .extend(candidate_limit_exceeded_blocker(candidates.len()));
         let blockers = bound_blockers(result.blockers);
         return EvidenceValidation {
             valid: false,
@@ -763,6 +860,112 @@ mod tests {
             created_at_utc: Utc.with_ymd_and_hms(2026, 7, 26, 12, 0, 0).unwrap(),
         };
         (plan, candidate_records)
+    }
+
+    // ── UTF8-AND-BOUNDED-READ-CLOSURE Defect 1: safe_truncate_utf8 ────────
+
+    #[test]
+    fn ascii_string_below_limit_is_unchanged() {
+        let s = "short blocker";
+        assert_eq!(safe_truncate_utf8(s, 200), s);
+    }
+
+    #[test]
+    fn ascii_string_exactly_at_limit_is_unchanged() {
+        let s = "a".repeat(50);
+        assert_eq!(safe_truncate_utf8(&s, 50), s);
+    }
+
+    #[test]
+    fn ascii_string_above_limit_truncates_with_suffix_within_limit() {
+        let s = "a".repeat(300);
+        let out = safe_truncate_utf8(&s, 200);
+        assert!(out.len() <= 200, "output exceeded max_len: {}", out.len());
+        assert!(out.ends_with(TRUNCATION_SUFFIX));
+    }
+
+    #[test]
+    fn two_byte_unicode_crossing_boundary_never_panics() {
+        // U+00E9 'é' is 2 bytes in UTF-8. Repeat enough to force the byte
+        // budget to fall in the middle of a character.
+        let s = "é".repeat(150);
+        let out = safe_truncate_utf8(&s, 200);
+        assert!(out.len() <= 200);
+        assert!(std::str::from_utf8(out.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn three_byte_unicode_crossing_boundary_never_panics() {
+        // U+4E2D '中' is 3 bytes in UTF-8.
+        let s = "中".repeat(150);
+        let out = safe_truncate_utf8(&s, 200);
+        assert!(out.len() <= 200);
+        assert!(std::str::from_utf8(out.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn four_byte_unicode_emoji_crossing_boundary_never_panics() {
+        // U+1F600 emoji is 4 bytes in UTF-8.
+        let s = "😀".repeat(150);
+        let out = safe_truncate_utf8(&s, 200);
+        assert!(out.len() <= 200);
+        assert!(std::str::from_utf8(out.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn mixed_ascii_and_unicode_truncates_at_valid_boundary() {
+        let mut s = String::new();
+        for i in 0..100 {
+            if i % 3 == 0 {
+                s.push('😀');
+            } else if i % 3 == 1 {
+                s.push('中');
+            } else {
+                s.push('a');
+            }
+        }
+        let out = safe_truncate_utf8(&s, 200);
+        assert!(out.len() <= 200);
+        assert!(std::str::from_utf8(out.as_bytes()).is_ok());
+    }
+
+    #[test]
+    fn output_byte_length_never_exceeds_maximum_across_many_lengths() {
+        for max_len in [1usize, 5, 10, 16, 17, 20, 50, 200] {
+            for reps in [1usize, 10, 50, 150] {
+                let s = "😀🎉中é a".repeat(reps);
+                let out = safe_truncate_utf8(&s, max_len);
+                assert!(
+                    out.len() <= max_len,
+                    "max_len={max_len} reps={reps} out.len()={}",
+                    out.len()
+                );
+                assert!(std::str::from_utf8(out.as_bytes()).is_ok());
+            }
+        }
+    }
+
+    #[test]
+    fn suffix_present_whenever_truncation_occurred() {
+        let s = "x".repeat(500);
+        let out = safe_truncate_utf8(&s, 200);
+        assert_ne!(out, s);
+        assert!(
+            out.ends_with(TRUNCATION_SUFFIX),
+            "truncated output must carry the suffix: {out}"
+        );
+    }
+
+    #[test]
+    fn pathological_long_unicode_market_date_produces_invalid_not_panic() {
+        let (mut p, _c) = consistent_evidence(vec![single_well_formed_candidate()]);
+        p.market_date = "🎉".repeat(5_000);
+        let v = validate_plan_shape(&p);
+        assert!(!v.valid);
+        for b in &v.blockers {
+            assert!(b.len() <= MAX_BLOCKER_LEN);
+            assert!(std::str::from_utf8(b.as_bytes()).is_ok());
+        }
     }
 
     #[test]
