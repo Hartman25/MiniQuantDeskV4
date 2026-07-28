@@ -211,12 +211,23 @@ async fn evaluate_candidate(
     now_utc: DateTime<Utc>,
 ) -> SelectionCandidateEvidence {
     let mut registry = PluginRegistry::new();
-    let _ = mqk_strategy::engines::register_builtin_strategies(&mut registry, p.symbol.clone());
-    let (plugin_instantiable, timeframe_matches) =
-        match registry.instantiate_verified(&p.strategy_id) {
+    // IR10: the ephemeral per-symbol registry's construction result must
+    // never be discarded -- a construction failure fails this candidate
+    // closed with its own distinct reason, rather than silently proceeding
+    // against a registry that failed to build (which would make every
+    // subsequent `instantiate_verified` call fail with the far less
+    // informative `UnknownStrategy`).
+    let registry_construction =
+        mqk_strategy::engines::register_builtin_strategies(&mut registry, p.symbol.clone())
+            .map_err(|_| CandidateEvidenceReason::RegistryConstructionFailed);
+
+    let (plugin_probe_ok, timeframe_matches) = match registry_construction {
+        Ok(()) => match registry.instantiate_verified(&p.strategy_id) {
             Ok(strategy) => (true, strategy.spec().timeframe_secs == p.timeframe_secs),
             Err(_) => (false, false),
-        };
+        },
+        Err(_) => (false, false),
+    };
 
     let synthetic_binding = EffectiveRuntimeBinding {
         effective_runtime_strategy_id: Some(p.strategy_id.clone()),
@@ -241,11 +252,38 @@ async fn evaluate_candidate(
     .await;
     let data_ready = readiness.is_ready();
 
-    let mut evidence = match ctx.db {
+    // IR4: durable strategy-registry `enabled` truth -- independent of, and
+    // checked in addition to, plugin instantiability above. Plugin
+    // instantiation proves the engine *can* run; this proves the identity
+    // is *durably admitted* to run, using the same authority internal
+    // admission already consults (`sys_strategy_registry`).
+    let registry_enabled_check: Result<(), CandidateEvidenceReason> = match ctx.db {
+        None => Err(CandidateEvidenceReason::RegistryQueryFailed),
+        Some(pool) => {
+            crate::promotion_evidence_validation::validate_strategy_registry_enabled(
+                pool,
+                &p.strategy_id,
+            )
+            .await
+        }
+    };
+
+    let plugin_stage: Result<(), CandidateEvidenceReason> = registry_construction
+        .and(registry_enabled_check)
+        .and(if plugin_probe_ok {
+            Ok(())
+        } else {
+            Err(CandidateEvidenceReason::UnsupportedStrategyPlugin)
+        });
+
+    let (mut evidence, promotion_stage_reason) = match ctx.db {
         // No DB pool configured -- equivalent to the promotion query itself
         // being unable to run at all; reuses PromotionQueryFailed (the
         // pure-model-facing effect is identical: promotion_query_ok=false).
-        None => refused_evidence(CandidateEvidenceReason::PromotionQueryFailed),
+        None => (
+            refused_evidence(CandidateEvidenceReason::PromotionQueryFailed),
+            Some(CandidateEvidenceReason::PromotionQueryFailed),
+        ),
         Some(pool) => match validate_active_paper_candidate(
             pool,
             ctx.st,
@@ -256,33 +294,49 @@ async fn evaluate_candidate(
         )
         .await
         {
-            Ok(v) => SelectionCandidateEvidence {
-                promotion_query_ok: true,
-                promotion_state: Some(mqk_db::PROMOTION_STATE_ACTIVE_PAPER.to_string()),
-                promotion_effective: true,
-                promotion_expired: false,
-                evidence_resolved: true,
-                review_state_is_paper_candidate: true,
-                fingerprint_matches: true,
-                plugin_instantiable: true,
-                timeframe_matches: true,
-                data_ready: true,
-                canonical_score_micros: Some(v.canonical_score_micros),
-                scanner_rank: v.scanner_rank,
-                watchlist_assigned: false,
-                evidence_review_id: Some(v.evidence_review_id),
-                evidence_scanner_scan_id: Some(v.evidence_scanner_scan_id),
-                evidence_artifact_path: Some(v.evidence_artifact_path),
-                evidence_fingerprint: Some(v.evidence_fingerprint),
-            },
-            Err(reason) => refused_evidence(reason),
+            Ok(v) => (
+                SelectionCandidateEvidence {
+                    promotion_query_ok: true,
+                    promotion_state: Some(mqk_db::PROMOTION_STATE_ACTIVE_PAPER.to_string()),
+                    promotion_effective: true,
+                    promotion_expired: false,
+                    evidence_resolved: true,
+                    review_state_is_paper_candidate: true,
+                    fingerprint_matches: true,
+                    plugin_instantiable: true,
+                    timeframe_matches: true,
+                    data_ready: true,
+                    canonical_score_micros: Some(v.canonical_score_micros),
+                    scanner_rank: v.scanner_rank,
+                    watchlist_assigned: false,
+                    evidence_review_id: Some(v.evidence_review_id),
+                    evidence_scanner_scan_id: Some(v.evidence_scanner_scan_id),
+                    evidence_artifact_path: Some(v.evidence_artifact_path),
+                    evidence_fingerprint: Some(v.evidence_fingerprint),
+                    exact_reason: None,
+                },
+                None,
+            ),
+            Err(reason) => (refused_evidence(reason), Some(reason)),
         },
     };
 
-    evidence.plugin_instantiable = plugin_instantiable;
+    // IR5: exact_reason precedence mirrors the pure gate's own fixed check
+    // order (`evaluate_evidence_gate` checks promotion/evidence fields
+    // before `plugin_instantiable`) -- a promotion-chain failure is always
+    // the true first-observed cause when one occurred; registry/plugin
+    // failures are only surfaced as exact_reason when the promotion chain
+    // itself passed.
+    let exact_reason = match promotion_stage_reason {
+        Some(r) => Some(r.code()),
+        None => plugin_stage.as_ref().err().map(|r| r.code()),
+    };
+
+    evidence.plugin_instantiable = plugin_stage.is_ok();
     evidence.timeframe_matches = timeframe_matches;
     evidence.data_ready = data_ready;
     evidence.watchlist_assigned = p.watchlist_assigned;
+    evidence.exact_reason = exact_reason;
     evidence
 }
 
@@ -310,6 +364,7 @@ fn placeholder_evidence() -> SelectionCandidateEvidence {
         evidence_scanner_scan_id: None,
         evidence_artifact_path: None,
         evidence_fingerprint: None,
+        exact_reason: None,
     }
 }
 
@@ -340,6 +395,11 @@ fn refused_evidence(reason: CandidateEvidenceReason) -> SelectionCandidateEviden
         ArtifactNotPaperCandidate => e.review_state_is_paper_candidate = false,
         FingerprintMismatch => e.fingerprint_matches = false,
         ScoreMissing | ScoreNotFinite => e.canonical_score_micros = None,
+        RegistryQueryFailed
+        | RegistryRowMissing
+        | RegistryDisabled
+        | UnsupportedStrategyPlugin
+        | RegistryConstructionFailed => e.plugin_instantiable = false,
     }
     e
 }
@@ -698,6 +758,26 @@ mod tests {
             pool.clone(),
             OperatorAuthMode::ExplicitDevNoToken,
         ));
+
+        // IR4: the durable strategy registry is now an independent
+        // admission gate alongside plugin instantiability -- this fixture
+        // must durably register+enable the strategy_id under test so the
+        // candidate can reach the readiness gate (the one gate this test
+        // specifically proves), same as internal admission would require.
+        mqk_db::upsert_strategy_registry_entry(
+            &pool,
+            &mqk_db::UpsertStrategyRegistryArgs {
+                strategy_id: strategy_id.clone(),
+                display_name: "Swing Momentum (fixture)".to_string(),
+                enabled: true,
+                kind: "bar_driven".to_string(),
+                registered_at_utc: Utc::now(),
+                updated_at_utc: Utc::now(),
+                note: String::new(),
+            },
+        )
+        .await
+        .expect("upsert strategy registry entry");
 
         async fn transition(
             st: Arc<AppState>,

@@ -215,6 +215,29 @@ pub enum CandidateEvidenceReason {
     ScoreMissing,
     ScoreNotFinite,
     RankOutOfRange,
+    /// IR4: the durable `sys_strategy_registry` query itself failed (DB
+    /// unavailable, query error) — distinct from a query that succeeded and
+    /// found no row.
+    RegistryQueryFailed,
+    /// IR4: the durable strategy registry has no row at all for this
+    /// `strategy_id` — plugin instantiability is not equivalent to durable
+    /// registry admission; a candidate whose engine instantiates but whose
+    /// identity was never registered must still be refused.
+    RegistryRowMissing,
+    /// IR4: the durable strategy registry row exists but `enabled = false`.
+    RegistryDisabled,
+    /// IR4: the plugin registry could not instantiate this `strategy_id` at
+    /// all (unknown name or internal metadata/spec inconsistency) —
+    /// distinct from `RegistryDisabled`/`RegistryRowMissing`, which are
+    /// durable-registry-admission failures, not plugin-construction
+    /// failures.
+    UnsupportedStrategyPlugin,
+    /// IR10: the ephemeral per-symbol [`mqk_strategy::PluginRegistry`]
+    /// itself failed to construct (`register_builtin_strategies` returned
+    /// `Err`, e.g. a duplicate-name programming error) — never silently
+    /// discarded; this candidate is refused rather than proceeding against
+    /// a registry that failed to build.
+    RegistryConstructionFailed,
 }
 
 impl CandidateEvidenceReason {
@@ -240,7 +263,36 @@ impl CandidateEvidenceReason {
             Self::ScoreMissing => "score_missing",
             Self::ScoreNotFinite => "score_not_finite",
             Self::RankOutOfRange => "rank_out_of_range",
+            Self::RegistryQueryFailed => "registry_query_failed",
+            Self::RegistryRowMissing => "registry_row_missing",
+            Self::RegistryDisabled => "registry_disabled",
+            Self::UnsupportedStrategyPlugin => "unsupported_strategy_plugin",
+            Self::RegistryConstructionFailed => "registry_construction_failed",
         }
+    }
+}
+
+/// IR4: validate that `strategy_id` is currently an enabled entry in the
+/// durable strategy registry (`sys_strategy_registry`) — the same durable
+/// authority internal admission already consults
+/// (`mqk_db::fetch_strategy_registry_entry`). Plugin instantiability
+/// ([`mqk_strategy::PluginRegistry::instantiate_verified`]) is a separate,
+/// independent check: an engine can instantiate for a `strategy_id` that
+/// was never durably registered (or was registered and then disabled), and
+/// this function is what catches that gap. Distinctly refuses query
+/// failure, missing row, and disabled — never folds them into one generic
+/// "not usable" outcome.
+pub async fn validate_strategy_registry_enabled(
+    db: &PgPool,
+    strategy_id: &str,
+) -> Result<(), CandidateEvidenceReason> {
+    let record = mqk_db::fetch_strategy_registry_entry(db, strategy_id)
+        .await
+        .map_err(|_| CandidateEvidenceReason::RegistryQueryFailed)?;
+    match record {
+        None => Err(CandidateEvidenceReason::RegistryRowMissing),
+        Some(r) if !r.enabled => Err(CandidateEvidenceReason::RegistryDisabled),
+        Some(_) => Ok(()),
     }
 }
 
@@ -508,6 +560,11 @@ mod tests {
             CandidateEvidenceReason::ScoreMissing,
             CandidateEvidenceReason::ScoreNotFinite,
             CandidateEvidenceReason::RankOutOfRange,
+            CandidateEvidenceReason::RegistryQueryFailed,
+            CandidateEvidenceReason::RegistryRowMissing,
+            CandidateEvidenceReason::RegistryDisabled,
+            CandidateEvidenceReason::UnsupportedStrategyPlugin,
+            CandidateEvidenceReason::RegistryConstructionFailed,
         ];
         let mut codes: Vec<&str> = all.iter().map(|r| r.code()).collect();
         let unique_count = {
@@ -522,5 +579,82 @@ mod tests {
             "every reason code must be distinct"
         );
         codes.clear();
+    }
+
+    // ── IR4: validate_strategy_registry_enabled (DB-backed) ────────────────
+
+    async fn make_db_pool_for_test() -> sqlx::PgPool {
+        let url = std::env::var(mqk_db::ENV_DB_URL).unwrap_or_else(|_| {
+            panic!(
+                "DB tests require MQK_DATABASE_URL; run: \
+                 MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test \
+                 cargo test -p mqk-daemon --lib promotion_evidence_validation \
+                 -- --include-ignored --test-threads=1"
+            )
+        });
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await
+            .expect("connect to test DB");
+        mqk_db::migrate(&pool).await.expect("run migrations");
+        pool
+    }
+
+    #[tokio::test]
+    #[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+    async fn missing_registry_row_is_refused() {
+        let pool = make_db_pool_for_test().await;
+        let strategy_id = format!("nonexistent_{}", uuid::Uuid::new_v4());
+        let result = validate_strategy_registry_enabled(&pool, &strategy_id).await;
+        assert_eq!(result, Err(CandidateEvidenceReason::RegistryRowMissing));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+    async fn disabled_registry_row_is_refused() {
+        let pool = make_db_pool_for_test().await;
+        let strategy_id = format!("disabled_strat_{}", uuid::Uuid::new_v4());
+        mqk_db::upsert_strategy_registry_entry(
+            &pool,
+            &mqk_db::UpsertStrategyRegistryArgs {
+                strategy_id: strategy_id.clone(),
+                display_name: "Test Disabled".to_string(),
+                enabled: false,
+                kind: "bar_driven".to_string(),
+                registered_at_utc: Utc::now(),
+                updated_at_utc: Utc::now(),
+                note: String::new(),
+            },
+        )
+        .await
+        .expect("upsert must succeed");
+
+        let result = validate_strategy_registry_enabled(&pool, &strategy_id).await;
+        assert_eq!(result, Err(CandidateEvidenceReason::RegistryDisabled));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+    async fn enabled_registry_row_passes() {
+        let pool = make_db_pool_for_test().await;
+        let strategy_id = format!("enabled_strat_{}", uuid::Uuid::new_v4());
+        mqk_db::upsert_strategy_registry_entry(
+            &pool,
+            &mqk_db::UpsertStrategyRegistryArgs {
+                strategy_id: strategy_id.clone(),
+                display_name: "Test Enabled".to_string(),
+                enabled: true,
+                kind: "bar_driven".to_string(),
+                registered_at_utc: Utc::now(),
+                updated_at_utc: Utc::now(),
+                note: String::new(),
+            },
+        )
+        .await
+        .expect("upsert must succeed");
+
+        let result = validate_strategy_registry_enabled(&pool, &strategy_id).await;
+        assert!(result.is_ok());
     }
 }
