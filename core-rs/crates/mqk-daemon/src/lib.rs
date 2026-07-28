@@ -13,6 +13,7 @@ pub mod cors;
 pub mod daily_data_readiness;
 pub mod decision;
 pub mod dev_gate;
+pub mod dynamic_selection_mode;
 pub mod earnings_calendar;
 pub mod event_risk_blackout;
 pub mod ingest_jobs;
