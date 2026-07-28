@@ -13,9 +13,11 @@
 
 use chrono::{TimeZone, Utc};
 use mqk_db::{
-    fetch_recent_runtime_strategy_conflict_plans, fetch_runtime_strategy_conflict_plan, insert_run,
-    insert_runtime_strategy_conflict_plan, InsertRuntimeStrategyConflictPlanOutcome, NewRun,
-    NewRuntimeStrategyConflictCandidate, NewRuntimeStrategyConflictPlan, ENV_DB_URL,
+    fetch_recent_runtime_strategy_conflict_plans, fetch_runtime_strategy_conflict_plan,
+    fetch_runtime_strategy_conflict_plan_for_read, insert_run,
+    insert_runtime_strategy_conflict_plan, BoundedConflictPlanFetch,
+    InsertRuntimeStrategyConflictPlanOutcome, NewRun, NewRuntimeStrategyConflictCandidate,
+    NewRuntimeStrategyConflictPlan, ENV_DB_URL, RUNTIME_STRATEGY_CONFLICT_CANDIDATE_READ_BOUND,
 };
 use uuid::Uuid;
 
@@ -616,6 +618,230 @@ async fn tied_created_at_utc_is_broken_deterministically_by_plan_id_desc() {
         );
         assert_eq!(recent[1].plan_id, expected_second);
     }
+
+    cleanup(&pool, &[run_id]).await;
+}
+
+// ── UTF8-AND-BOUNDED-READ-CLOSURE Defect 2: bounded read seam ─────────────
+
+/// One placeholder candidate at `ordinal`, on its own distinct symbol so
+/// `symbol_group_count`/`candidate_count` bookkeeping stays simple -- these
+/// bounded-read tests only care about candidate *count* behavior, not
+/// conflict-policy economics.
+fn placeholder_candidate(ordinal: i32) -> NewRuntimeStrategyConflictCandidate {
+    NewRuntimeStrategyConflictCandidate {
+        ordinal,
+        symbol: format!("SYM{ordinal}"),
+        strategy_id: "strategy_a".to_string(),
+        timeframe_secs: 300,
+        side: "buy".to_string(),
+        qty: 10,
+        current_qty: 0,
+        order_type: "market".to_string(),
+        time_in_force: "day".to_string(),
+        limit_price: None,
+        proposed_target_qty: Some(10),
+        bar_present: true,
+        bar_symbol: Some(format!("SYM{ordinal}")),
+        bar_strategy_id: Some("strategy_a".to_string()),
+        bar_timeframe: Some("5m".to_string()),
+        bar_end_ts: Some(1_000 + ordinal as i64),
+        close_micros: Some(100_000_000),
+        selected: true,
+        disposition: "passthrough".to_string(),
+        reason_code: "single_candidate_passthrough".to_string(),
+    }
+}
+
+fn plan_with_n_candidates(run_id: Uuid, plan_id: Uuid, n: i32) -> NewRuntimeStrategyConflictPlan {
+    let candidates: Vec<_> = (0..n).map(placeholder_candidate).collect();
+    NewRuntimeStrategyConflictPlan {
+        plan_id,
+        cycle_id: plan_id,
+        run_id,
+        mode: "shadow".to_string(),
+        configured_mode: "shadow".to_string(),
+        market_date: "2099-02-01".to_string(),
+        policy_schema_version: "multi-strategy-conflict-policy-v1".to_string(),
+        symbol_group_count: n,
+        candidate_count: n,
+        selected_count: n,
+        refused_count: 0,
+        truth_state: "computed".to_string(),
+        blockers: vec![],
+        created_at_utc: Utc.with_ymd_and_hms(2099, 2, 1, 12, 5, 0).unwrap(),
+        candidates,
+    }
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL"]
+async fn bounded_read_returns_complete_for_exactly_the_bound() {
+    let Ok(pool) = test_pool().await else {
+        eprintln!("skipped: requires MQK_DATABASE_URL");
+        return;
+    };
+    let bound = RUNTIME_STRATEGY_CONFLICT_CANDIDATE_READ_BOUND;
+    let run_id = fixed_run_id("bounded_read_at_bound");
+    cleanup(&pool, &[run_id]).await;
+    fixture_run(&pool, run_id).await;
+
+    let plan_id = fixed_plan_id("bounded_read_at_bound");
+    let plan = plan_with_n_candidates(run_id, plan_id, bound as i32);
+    insert_runtime_strategy_conflict_plan(&pool, plan)
+        .await
+        .expect("insert should succeed");
+
+    let result = fetch_runtime_strategy_conflict_plan_for_read(&pool, plan_id, bound)
+        .await
+        .expect("bounded fetch should succeed");
+    match result {
+        BoundedConflictPlanFetch::Complete(plan_record, candidates) => {
+            assert_eq!(plan_record.plan_id, plan_id);
+            assert_eq!(
+                candidates.len(),
+                bound,
+                "exactly the bound must be fetched and validated through the bounded seam"
+            );
+        }
+        other => panic!("expected Complete at exactly the bound, got {other:?}"),
+    }
+
+    cleanup(&pool, &[run_id]).await;
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL"]
+async fn bounded_read_reports_limit_exceeded_at_bound_plus_one() {
+    let Ok(pool) = test_pool().await else {
+        eprintln!("skipped: requires MQK_DATABASE_URL");
+        return;
+    };
+    let bound = RUNTIME_STRATEGY_CONFLICT_CANDIDATE_READ_BOUND;
+    let run_id = fixed_run_id("bounded_read_over_by_one");
+    cleanup(&pool, &[run_id]).await;
+    fixture_run(&pool, run_id).await;
+
+    let plan_id = fixed_plan_id("bounded_read_over_by_one");
+    let plan = plan_with_n_candidates(run_id, plan_id, (bound + 1) as i32);
+    insert_runtime_strategy_conflict_plan(&pool, plan)
+        .await
+        .expect("insert should succeed");
+
+    let result = fetch_runtime_strategy_conflict_plan_for_read(&pool, plan_id, bound)
+        .await
+        .expect("bounded fetch should succeed");
+    match result {
+        BoundedConflictPlanFetch::CandidateLimitExceeded {
+            observed_at_least, ..
+        } => {
+            assert_eq!(
+                observed_at_least,
+                bound + 1,
+                "65 candidates must be detected as exceeding the bound"
+            );
+        }
+        other => panic!("expected CandidateLimitExceeded, got {other:?}"),
+    }
+
+    cleanup(&pool, &[run_id]).await;
+}
+
+/// A plan claiming far more than the bound must never cause the bounded
+/// seam to fetch (or allocate) more than `bound + 1` rows -- proven by
+/// `observed_at_least` staying exactly `bound + 1` even though the durable
+/// plan actually has many more candidate rows than that.
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL"]
+async fn bounded_read_never_fetches_more_than_bound_plus_one_for_a_pathological_plan() {
+    let Ok(pool) = test_pool().await else {
+        eprintln!("skipped: requires MQK_DATABASE_URL");
+        return;
+    };
+    let bound = RUNTIME_STRATEGY_CONFLICT_CANDIDATE_READ_BOUND;
+    let run_id = fixed_run_id("bounded_read_pathological");
+    cleanup(&pool, &[run_id]).await;
+    fixture_run(&pool, run_id).await;
+
+    let plan_id = fixed_plan_id("bounded_read_pathological");
+    // Far more than the bound -- proves the SQL LIMIT actually caps the
+    // fetch rather than merely being validated against after an unbounded
+    // read.
+    let pathological_count = (bound * 3) as i32;
+    let plan = plan_with_n_candidates(run_id, plan_id, pathological_count);
+    insert_runtime_strategy_conflict_plan(&pool, plan)
+        .await
+        .expect("insert should succeed");
+
+    let result = fetch_runtime_strategy_conflict_plan_for_read(&pool, plan_id, bound)
+        .await
+        .expect("bounded fetch should succeed");
+    match result {
+        BoundedConflictPlanFetch::CandidateLimitExceeded {
+            observed_at_least, ..
+        } => {
+            assert_eq!(
+                observed_at_least,
+                bound + 1,
+                "the bounded seam must never fetch more than bound + 1 rows, regardless of \
+                 how many candidate rows the pathological plan actually has"
+            );
+        }
+        other => panic!("expected CandidateLimitExceeded, got {other:?}"),
+    }
+
+    cleanup(&pool, &[run_id]).await;
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL"]
+async fn bounded_read_reports_not_found_for_unknown_plan_id() {
+    let Ok(pool) = test_pool().await else {
+        eprintln!("skipped: requires MQK_DATABASE_URL");
+        return;
+    };
+    let bound = RUNTIME_STRATEGY_CONFLICT_CANDIDATE_READ_BOUND;
+    let unknown = Uuid::new_v4();
+
+    let result = fetch_runtime_strategy_conflict_plan_for_read(&pool, unknown, bound)
+        .await
+        .expect("bounded fetch should succeed");
+    assert_eq!(result, BoundedConflictPlanFetch::NotFound);
+}
+
+/// The unbounded full-payload fetch (used by the replay/collision-detection
+/// insertion path) must remain unaffected by the new bounded seam -- a plan
+/// with more candidates than the bound is still fetched in full when the
+/// caller explicitly asks for the unbounded path.
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL"]
+async fn unbounded_fetch_still_returns_every_candidate_for_an_over_limit_plan() {
+    let Ok(pool) = test_pool().await else {
+        eprintln!("skipped: requires MQK_DATABASE_URL");
+        return;
+    };
+    let bound = RUNTIME_STRATEGY_CONFLICT_CANDIDATE_READ_BOUND;
+    let run_id = fixed_run_id("unbounded_fetch_over_limit");
+    cleanup(&pool, &[run_id]).await;
+    fixture_run(&pool, run_id).await;
+
+    let plan_id = fixed_plan_id("unbounded_fetch_over_limit");
+    let over_limit_count = (bound + 5) as i32;
+    let plan = plan_with_n_candidates(run_id, plan_id, over_limit_count);
+    insert_runtime_strategy_conflict_plan(&pool, plan)
+        .await
+        .expect("insert should succeed");
+
+    let (_, candidates) = fetch_runtime_strategy_conflict_plan(&pool, plan_id)
+        .await
+        .expect("unbounded fetch should succeed")
+        .expect("plan should exist");
+    assert_eq!(
+        candidates.len(),
+        over_limit_count as usize,
+        "the unbounded fetch (reserved for internal DB replay/collision comparison) must \
+         remain unaffected by the new bounded seam"
+    );
 
     cleanup(&pool, &[run_id]).await;
 }

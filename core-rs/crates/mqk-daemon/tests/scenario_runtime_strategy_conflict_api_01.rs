@@ -144,6 +144,68 @@ fn seed_variant_bar_end_ts(seed: &str) -> i64 {
     900 + seed.bytes().map(i64::from).sum::<i64>()
 }
 
+/// UTF8-AND-BOUNDED-READ-CLOSURE Defect 2: seeds a plan with `n` placeholder
+/// candidates (one per distinct symbol) to exercise the bounded read seam's
+/// candidate-count behavior. Not economically self-consistent (unlike
+/// `seed_plan`) -- these tests only care about candidate *count*, not
+/// recomputed policy outcome, so an over-limit plan is expected to fail
+/// bounded-read validation before the recompute step is ever reached.
+async fn seed_plan_with_n_candidates(
+    pool: &sqlx::PgPool,
+    run_id: Uuid,
+    plan_id: Uuid,
+    n: i32,
+    created_at_utc: chrono::DateTime<Utc>,
+) {
+    let candidates: Vec<mqk_db::NewRuntimeStrategyConflictCandidate> = (0..n)
+        .map(|i| mqk_db::NewRuntimeStrategyConflictCandidate {
+            ordinal: i,
+            symbol: format!("SYM{i}"),
+            strategy_id: "strategy_a".to_string(),
+            timeframe_secs: 300,
+            side: "buy".to_string(),
+            qty: 10,
+            current_qty: 0,
+            order_type: "market".to_string(),
+            time_in_force: "day".to_string(),
+            limit_price: None,
+            proposed_target_qty: Some(10),
+            bar_present: true,
+            bar_symbol: Some(format!("SYM{i}")),
+            bar_strategy_id: Some("strategy_a".to_string()),
+            bar_timeframe: Some("5m".to_string()),
+            bar_end_ts: Some(1_000 + i as i64),
+            close_micros: Some(100_000_000),
+            selected: true,
+            disposition: "passthrough".to_string(),
+            reason_code: "single_candidate_passthrough".to_string(),
+        })
+        .collect();
+
+    mqk_db::insert_runtime_strategy_conflict_plan(
+        pool,
+        mqk_db::NewRuntimeStrategyConflictPlan {
+            plan_id,
+            cycle_id: plan_id,
+            run_id,
+            mode: "shadow".to_string(),
+            configured_mode: "shadow".to_string(),
+            market_date: "2099-02-01".to_string(),
+            policy_schema_version: mqk_portfolio::CONFLICT_POLICY_SCHEMA_VERSION.to_string(),
+            symbol_group_count: n,
+            candidate_count: n,
+            selected_count: n,
+            refused_count: 0,
+            truth_state: "computed".to_string(),
+            blockers: vec![],
+            created_at_utc,
+            candidates,
+        },
+    )
+    .await
+    .expect("seed_plan_with_n_candidates insert should succeed");
+}
+
 /// Seeds one fully self-consistent (FINAL-IDENTITY-AND-READ-AUTHORITY-
 /// REPAIR-01 Defect 3/4) conflict plan -- a lone valid sell candidate,
 /// which the real pure resolver always treats as a single-candidate-group
@@ -719,6 +781,316 @@ async fn repeated_gets_perform_zero_writes() {
     assert_eq!(
         count_before, count_after,
         "GET routes must perform zero writes"
+    );
+
+    cleanup(&pool, run_id).await;
+}
+
+// ── UTF8-AND-BOUNDED-READ-CLOSURE Defect 2: bounded read seam ─────────────
+
+const READ_BOUND: i32 = mqk_db::RUNTIME_STRATEGY_CONFLICT_CANDIDATE_READ_BOUND as i32;
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL"]
+async fn status_returns_invalid_evidence_for_an_over_limit_latest_plan() {
+    let Some(pool) = test_pool().await else {
+        return;
+    };
+    let run_id = fixed_run_id("bounded_status_over_limit");
+    cleanup(&pool, run_id).await;
+    seed_run(&pool, run_id).await;
+
+    let older_valid_plan_id = fixed_plan_id("bounded_status_over_limit_older");
+    seed_plan_with_n_candidates(
+        &pool,
+        run_id,
+        older_valid_plan_id,
+        1,
+        Utc.with_ymd_and_hms(2099, 2, 1, 12, 0, 0).unwrap(),
+    )
+    .await;
+
+    let over_limit_plan_id = fixed_plan_id("bounded_status_over_limit_newer");
+    seed_plan_with_n_candidates(
+        &pool,
+        run_id,
+        over_limit_plan_id,
+        READ_BOUND + 1,
+        Utc.with_ymd_and_hms(2099, 2, 1, 12, 10, 0).unwrap(),
+    )
+    .await;
+
+    let router = router_with_pool(pool.clone());
+    let (status, body) = call(
+        router,
+        get(&format!("/api/v1/strategy/conflict/status?run_id={run_id}")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["truth_state"], "invalid_evidence");
+    assert_eq!(
+        body["latest_plan_id"],
+        serde_json::Value::Null,
+        "must never fall back to the older valid plan"
+    );
+    assert!(!body["evidence_blockers"]
+        .as_array()
+        .expect("evidence_blockers must be an array")
+        .is_empty());
+
+    cleanup(&pool, run_id).await;
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL"]
+async fn plan_by_id_returns_invalid_evidence_with_no_candidates_for_an_over_limit_plan() {
+    let Some(pool) = test_pool().await else {
+        return;
+    };
+    let run_id = fixed_run_id("bounded_detail_over_limit");
+    cleanup(&pool, run_id).await;
+    seed_run(&pool, run_id).await;
+    let plan_id = fixed_plan_id("bounded_detail_over_limit");
+    seed_plan_with_n_candidates(
+        &pool,
+        run_id,
+        plan_id,
+        READ_BOUND + 1,
+        Utc.with_ymd_and_hms(2099, 2, 1, 12, 0, 0).unwrap(),
+    )
+    .await;
+
+    let router = router_with_pool(pool.clone());
+    let (status, body) = call(
+        router,
+        get(&format!("/api/v1/strategy/conflict/plans/{plan_id}")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["truth_state"], "invalid_evidence");
+    assert_eq!(body["plan"], serde_json::Value::Null);
+    assert_eq!(
+        body["candidates"],
+        serde_json::json!([]),
+        "no partial candidate projection for an over-limit plan"
+    );
+    assert!(!body["evidence_blockers"]
+        .as_array()
+        .expect("evidence_blockers must be an array")
+        .is_empty());
+
+    cleanup(&pool, run_id).await;
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL"]
+async fn plans_list_counts_a_successfully_read_over_limit_plan_as_malformed() {
+    let Some(pool) = test_pool().await else {
+        return;
+    };
+    let run_id = fixed_run_id("bounded_list_over_limit");
+    cleanup(&pool, run_id).await;
+    seed_run(&pool, run_id).await;
+    seed_plan(&pool, run_id, "bounded_list_over_limit_valid").await;
+    seed_plan_with_n_candidates(
+        &pool,
+        run_id,
+        fixed_plan_id("bounded_list_over_limit_malformed"),
+        READ_BOUND + 1,
+        Utc.with_ymd_and_hms(2099, 2, 1, 12, 5, 0).unwrap(),
+    )
+    .await;
+
+    let router = router_with_pool(pool.clone());
+    let (status, body) = call(
+        router,
+        get(&format!("/api/v1/strategy/conflict/plans?run_id={run_id}")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["truth_state"], "active");
+    assert_eq!(
+        body["plans"].as_array().unwrap().len(),
+        1,
+        "the over-limit row must never be silently mixed into the active list"
+    );
+    assert_eq!(body["excluded_malformed_count"], 1);
+    assert_eq!(
+        body["excluded_vanished_count"], 0,
+        "an over-limit-but-present row must never be miscounted as vanished"
+    );
+
+    cleanup(&pool, run_id).await;
+}
+
+/// Local mirror of `mqk_daemon::runtime_strategy_conflict::disposition_str`
+/// (`pub(crate)`, not visible outside the crate) -- only used to build a
+/// self-consistent fixture for the test below.
+fn local_disposition_str(d: mqk_portfolio::ConflictDisposition) -> &'static str {
+    match d {
+        mqk_portfolio::ConflictDisposition::Passthrough => "passthrough",
+        mqk_portfolio::ConflictDisposition::Selected => "selected",
+        mqk_portfolio::ConflictDisposition::NotSelected => "not_selected",
+        mqk_portfolio::ConflictDisposition::RefusedInvalid => "refused_invalid",
+        mqk_portfolio::ConflictDisposition::RefusedConflict => "refused_conflict",
+    }
+}
+
+/// Seeds a plan whose `n` candidates are each a lone valid buy on their own
+/// distinct symbol -- the real pure resolver always treats a lone valid
+/// candidate as a single-candidate-group passthrough, so this fixture is
+/// mechanically self-consistent (mints `plan_id`/`cycle_id` via the same
+/// shared identity function the runtime and validator use, and every
+/// candidate's persisted outcome is the resolver's actual output). Unlike
+/// `seed_plan_with_n_candidates`, this is not merely count-shaped -- it
+/// remains valid under the read-side validator's full cycle-id/policy
+/// recomputation.
+async fn seed_self_consistent_plan_with_n_candidates(
+    pool: &sqlx::PgPool,
+    run_id: Uuid,
+    seed: &str,
+    n: i32,
+) -> Uuid {
+    let base_bar_end_ts = seed_variant_bar_end_ts(seed);
+    let inputs: Vec<mqk_portfolio::ConflictCandidateInput> = (0..n)
+        .map(|i| {
+            let symbol = format!("SYM{i}");
+            mqk_portfolio::ConflictCandidateInput {
+                ordinal: i as usize,
+                symbol: symbol.clone(),
+                strategy_id: "strategy_a".to_string(),
+                timeframe_secs: 300,
+                side: "buy".to_string(),
+                qty: 10,
+                current_qty: 0,
+                order_type: "market".to_string(),
+                time_in_force: "day".to_string(),
+                limit_price: None,
+                bar_symbol: Some(symbol.clone()),
+                bar_strategy_id: Some("strategy_a".to_string()),
+                bar_timeframe: Some("5m".to_string()),
+                bar_end_ts: Some(base_bar_end_ts + i as i64),
+                close_micros: Some(100_000_000),
+            }
+        })
+        .collect();
+
+    let plan_id_str = mqk_daemon::runtime_strategy_conflict::compute_conflict_cycle_id(
+        run_id,
+        "2099-02-01",
+        mqk_daemon::runtime_strategy_conflict_mode::ConflictPolicyMode::Shadow,
+        mqk_daemon::runtime_strategy_conflict_mode::ConflictPolicyMode::Shadow,
+        &inputs,
+    );
+    let plan_id: Uuid = plan_id_str
+        .parse()
+        .expect("compute_conflict_cycle_id returns a valid uuid");
+
+    let cycle_context = mqk_portfolio::ConflictCycleContext {
+        cycle_id: plan_id_str,
+        run_id: run_id.to_string(),
+        market_date: "2099-02-01".to_string(),
+        policy_schema_version: mqk_portfolio::CONFLICT_POLICY_SCHEMA_VERSION.to_string(),
+    };
+    let result = mqk_portfolio::resolve_conflict_cycle(cycle_context, &inputs);
+
+    let mut candidate_records = Vec::new();
+    let mut selected_count = 0i32;
+    let mut refused_count = 0i32;
+    for sym in &result.symbol_results {
+        for c in &sym.candidates {
+            if c.selected {
+                selected_count += 1;
+            }
+            if matches!(
+                c.disposition,
+                mqk_portfolio::ConflictDisposition::RefusedInvalid
+                    | mqk_portfolio::ConflictDisposition::RefusedConflict
+            ) {
+                refused_count += 1;
+            }
+            let bar_present = c.bar_symbol.is_some()
+                && c.bar_strategy_id.is_some()
+                && c.bar_timeframe.is_some()
+                && c.bar_end_ts.is_some()
+                && c.close_micros.is_some();
+            candidate_records.push(mqk_db::NewRuntimeStrategyConflictCandidate {
+                ordinal: c.ordinal as i32,
+                symbol: sym.symbol.clone(),
+                strategy_id: c.strategy_id.clone(),
+                timeframe_secs: c.timeframe_secs,
+                side: c.side.clone(),
+                qty: c.qty,
+                current_qty: c.current_qty,
+                order_type: c.order_type.clone(),
+                time_in_force: c.time_in_force.clone(),
+                limit_price: c.limit_price,
+                proposed_target_qty: c.proposed_target_qty,
+                bar_present,
+                bar_symbol: c.bar_symbol.clone(),
+                bar_strategy_id: c.bar_strategy_id.clone(),
+                bar_timeframe: c.bar_timeframe.clone(),
+                bar_end_ts: c.bar_end_ts,
+                close_micros: c.close_micros,
+                selected: c.selected,
+                disposition: local_disposition_str(c.disposition).to_string(),
+                reason_code: c.reason_code.clone(),
+            });
+        }
+    }
+    candidate_records.sort_by_key(|c| c.ordinal);
+
+    mqk_db::insert_runtime_strategy_conflict_plan(
+        pool,
+        mqk_db::NewRuntimeStrategyConflictPlan {
+            plan_id,
+            cycle_id: plan_id,
+            run_id,
+            mode: "shadow".to_string(),
+            configured_mode: "shadow".to_string(),
+            market_date: "2099-02-01".to_string(),
+            policy_schema_version: mqk_portfolio::CONFLICT_POLICY_SCHEMA_VERSION.to_string(),
+            symbol_group_count: result.symbol_results.len() as i32,
+            candidate_count: candidate_records.len() as i32,
+            selected_count,
+            refused_count,
+            truth_state: result.truth_state.clone(),
+            blockers: result.blockers.clone(),
+            created_at_utc: Utc.with_ymd_and_hms(2099, 2, 1, 12, 5, 0).unwrap(),
+            candidates: candidate_records,
+        },
+    )
+    .await
+    .expect("seed_self_consistent_plan_with_n_candidates insert should succeed");
+
+    plan_id
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL"]
+async fn plan_by_id_still_returns_active_for_a_plan_at_exactly_the_bound() {
+    let Some(pool) = test_pool().await else {
+        return;
+    };
+    let run_id = fixed_run_id("bounded_detail_at_bound");
+    cleanup(&pool, run_id).await;
+    seed_run(&pool, run_id).await;
+    let plan_id =
+        seed_self_consistent_plan_with_n_candidates(&pool, run_id, "bounded_at_bound", READ_BOUND)
+            .await;
+
+    let router = router_with_pool(pool.clone());
+    let (status, body) = call(
+        router,
+        get(&format!("/api/v1/strategy/conflict/plans/{plan_id}")),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["truth_state"], "active", "unexpected body: {body}");
+    assert_eq!(
+        body["candidates"].as_array().unwrap().len(),
+        READ_BOUND as usize,
+        "a plan at exactly the bound must remain fully readable through the bounded seam"
     );
 
     cleanup(&pool, run_id).await;

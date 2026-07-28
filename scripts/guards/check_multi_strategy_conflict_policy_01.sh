@@ -515,6 +515,171 @@ check_blocker_bounds_enforced() {
 }
 
 # ---------------------------------------------------------------------------
+# UTF8-AND-BOUNDED-READ-CLOSURE mutation-negative check functions.
+# ---------------------------------------------------------------------------
+
+# Defect 1: blocker truncation must use an explicit UTF-8 character-boundary
+# helper, never blind byte-offset truncation.
+check_utf8_safe_truncation_helper() {
+  local f="$1"
+  [[ -f "$f" ]] || { echo "FAIL:missing $f"; return; }
+  if ! grep -q 'fn safe_truncate_utf8(' "$f"; then
+    echo "FAIL:safe_truncate_utf8 UTF-8 char-boundary helper is missing"
+    return
+  fi
+  if ! grep -q 'is_char_boundary' "$f"; then
+    echo "FAIL:truncation helper does not use is_char_boundary"
+    return
+  fi
+  echo "PASS"
+}
+
+# Defect 1: no direct String::truncate(MAX_BLOCKER_LEN) may remain in
+# blocker-bounding code -- it panics on a non-char-boundary offset.
+check_no_raw_truncate_in_blocker_bounding() {
+  local f="$1"
+  [[ -f "$f" ]] || { echo "FAIL:missing $f"; return; }
+  if grep -q 'truncate(MAX_BLOCKER_LEN)' "$f"; then
+    echo "FAIL:direct truncate(MAX_BLOCKER_LEN) call present -- must use safe_truncate_utf8 instead"
+    return
+  fi
+  if ! grep -q 'safe_truncate_utf8(' "$f"; then
+    echo "FAIL:bound_blockers no longer calls safe_truncate_utf8"
+    return
+  fi
+  echo "PASS"
+}
+
+# Defect 1: the truncation suffix's byte length must be reserved out of
+# max_len before any content is kept, so content + suffix never exceeds it.
+check_suffix_reserved_within_max() {
+  local f="$1"
+  [[ -f "$f" ]] || { echo "FAIL:missing $f"; return; }
+  if ! grep -qE 'max_len\s*-\s*suffix\.len\(\)' "$f"; then
+    echo "FAIL:truncation budget does not reserve the suffix length out of max_len"
+    return
+  fi
+  echo "PASS"
+}
+
+# Defect 2: the bounded read-side fetch seam must use a parameterized SQL
+# LIMIT of bound + 1, and must return an explicit CandidateLimitExceeded
+# outcome rather than silently truncating.
+check_sql_bounded_limit() {
+  local f="$1"
+  [[ -f "$f" ]] || { echo "FAIL:missing $f"; return; }
+  local body
+  body="$(awk '/pub async fn fetch_runtime_strategy_conflict_plan_for_read\(/,/^}/' "$f")"
+  if [[ -z "$body" ]]; then
+    echo "FAIL:fetch_runtime_strategy_conflict_plan_for_read is missing"
+    return
+  fi
+  if ! echo "$body" | grep -qE 'limit \$2'; then
+    echo "FAIL:bounded read seam's candidate query has no parameterized SQL LIMIT"
+    return
+  fi
+  if ! echo "$body" | grep -qE 'saturating_add\(1\)|bound *\+ *1'; then
+    echo "FAIL:bounded read seam does not fetch bound + 1 rows"
+    return
+  fi
+  if ! echo "$body" | grep -q 'CandidateLimitExceeded'; then
+    echo "FAIL:bounded read seam never returns CandidateLimitExceeded"
+    return
+  fi
+  echo "PASS"
+}
+
+# Defect 2: status/list/detail routes must all call the bounded read seam,
+# and none may call the unbounded full candidate fetch directly.
+check_routes_use_bounded_seam() {
+  local f="$1"
+  [[ -f "$f" ]] || { echo "FAIL:missing $f"; return; }
+  local hits
+  hits="$(grep -c 'fetch_runtime_strategy_conflict_plan_for_read' "$f" || true)"
+  if [[ "$hits" -lt 3 ]]; then
+    echo "FAIL:status/list/detail routes do not all call the bounded read seam (found $hits call site(s), need >= 3)"
+    return
+  fi
+  if grep -qE 'fetch_runtime_strategy_conflict_plan\(' "$f"; then
+    echo "FAIL:a route still calls the unbounded fetch_runtime_strategy_conflict_plan directly"
+    return
+  fi
+  echo "PASS"
+}
+
+# Defect 2: the unbounded full-payload fetch (reserved for internal DB
+# replay/collision comparison) must never itself gain a LIMIT.
+check_full_replay_path_unbounded() {
+  local f="$1"
+  [[ -f "$f" ]] || { echo "FAIL:missing $f"; return; }
+  local body
+  body="$(awk '/pub async fn fetch_runtime_strategy_conflict_plan\(/,/^}/' "$f")"
+  if [[ -z "$body" ]]; then
+    echo "FAIL:fetch_runtime_strategy_conflict_plan (unbounded replay fetch) is missing"
+    return
+  fi
+  if echo "$body" | grep -qiE '\blimit\b'; then
+    echo "FAIL:the unbounded full-payload fetch has been accidentally limited"
+    return
+  fi
+  echo "PASS"
+}
+
+# Defect 2: status must fail closed to invalid_evidence for an over-limit
+# latest plan -- never active, never query_failed.
+check_status_over_limit_is_invalid_evidence() {
+  local f="$1"
+  [[ -f "$f" ]] || { echo "FAIL:missing $f"; return; }
+  if ! grep -A6 'the durable plan exceeds the shared bounded-read' "$f" | grep -q 'ConflictTruthState::InvalidEvidence'; then
+    echo "FAIL:status route no longer maps an over-limit latest plan to invalid_evidence"
+    return
+  fi
+  echo "PASS"
+}
+
+# Defect 2: detail must never project partial candidate data for an
+# over-limit plan.
+check_detail_over_limit_no_partial_candidates() {
+  local f="$1"
+  [[ -f "$f" ]] || { echo "FAIL:missing $f"; return; }
+  if ! grep -A10 'over-limit plan -- invalid_evidence, no partial' "$f" | grep -q 'candidates: vec!\[\],'; then
+    echo "FAIL:detail route projects partial/non-empty candidate data for an over-limit plan"
+    return
+  fi
+  echo "PASS"
+}
+
+# Defect 2: list must count a successfully-read over-limit plan as
+# malformed, never silently drop it from that count.
+check_list_over_limit_counts_as_malformed() {
+  local f="$1"
+  [[ -f "$f" ]] || { echo "FAIL:missing $f"; return; }
+  if ! grep -A4 'a successfully-read over-limit plan is' "$f" | grep -q 'excluded_malformed_count += 1;'; then
+    echo "FAIL:list route no longer counts a successfully-read over-limit plan as malformed"
+    return
+  fi
+  echo "PASS"
+}
+
+# Shared bound authority: the daemon's validator bound must reference the
+# same mqk-db constant the SQL fetch uses, never its own hardcoded literal --
+# proves the two bounds cannot silently drift apart.
+check_shared_bound_no_drift() {
+  local validator_file="$1" db_file="$2"
+  [[ -f "$validator_file" ]] || { echo "FAIL:missing $validator_file"; return; }
+  [[ -f "$db_file" ]] || { echo "FAIL:missing $db_file"; return; }
+  if ! grep -q 'pub const RUNTIME_STRATEGY_CONFLICT_CANDIDATE_READ_BOUND' "$db_file"; then
+    echo "FAIL:shared candidate-read bound constant is missing from mqk-db"
+    return
+  fi
+  if ! grep -qE 'MAX_CANDIDATES_PER_PLAN: usize = mqk_db::RUNTIME_STRATEGY_CONFLICT_CANDIDATE_READ_BOUND' "$validator_file"; then
+    echo "FAIL:daemon validator's MAX_CANDIDATES_PER_PLAN no longer references the shared mqk-db bound -- SQL fetch bound and validator bound can silently drift apart"
+    return
+  fi
+  echo "PASS"
+}
+
+# ---------------------------------------------------------------------------
 # Real-tree run
 # ---------------------------------------------------------------------------
 
@@ -777,6 +942,71 @@ run_real_checks() {
   [[ "$r34" == PASS ]] || fail "${r34#FAIL:}"
   ok "blocker count/length and per-plan candidate count are bounded"
 
+  # ---------------------------------------------------------------------
+  # UTF8-AND-BOUNDED-READ-CLOSURE checks (35-43).
+  # ---------------------------------------------------------------------
+
+  # 35. UTF-8-safe truncation helper present and uses is_char_boundary.
+  local r35
+  r35="$(check_utf8_safe_truncation_helper "$CONFLICT_EVIDENCE_VALIDATION")"
+  [[ "$r35" == PASS ]] || fail "${r35#FAIL:}"
+  ok "blocker truncation uses an explicit UTF-8 character-boundary helper"
+
+  # 36. No direct String::truncate(MAX_BLOCKER_LEN) in blocker bounding.
+  local r36
+  r36="$(check_no_raw_truncate_in_blocker_bounding "$CONFLICT_EVIDENCE_VALIDATION")"
+  [[ "$r36" == PASS ]] || fail "${r36#FAIL:}"
+  ok "no direct String::truncate(MAX_BLOCKER_LEN) remains in blocker-bounding code"
+
+  # 37. Truncation suffix length is reserved within the maximum.
+  local r37
+  r37="$(check_suffix_reserved_within_max "$CONFLICT_EVIDENCE_VALIDATION")"
+  [[ "$r37" == PASS ]] || fail "${r37#FAIL:}"
+  ok "truncation suffix length is reserved out of the configured maximum"
+
+  # 38. Bounded DB read seam uses a parameterized SQL LIMIT of bound + 1.
+  local r38
+  r38="$(check_sql_bounded_limit "$CONFLICT_DB_STORE")"
+  [[ "$r38" == PASS ]] || fail "${r38#FAIL:}"
+  ok "bounded read seam fetches at most bound + 1 candidate rows via SQL LIMIT"
+
+  # 39. status/list/detail all use the bounded seam, never the unbounded fetch.
+  local r39
+  r39="$(check_routes_use_bounded_seam "$CONFLICT_ROUTE")"
+  [[ "$r39" == PASS ]] || fail "${r39#FAIL:}"
+  ok "status/list/detail routes all use the bounded read seam, never the unbounded fetch"
+
+  # 40. Unbounded full-payload fetch (replay path) never gains a LIMIT.
+  local r40
+  r40="$(check_full_replay_path_unbounded "$CONFLICT_DB_STORE")"
+  [[ "$r40" == PASS ]] || fail "${r40#FAIL:}"
+  ok "the unbounded full-payload fetch used by internal DB replay remains unlimited"
+
+  # 41. status maps an over-limit latest plan to invalid_evidence.
+  local r41
+  r41="$(check_status_over_limit_is_invalid_evidence "$CONFLICT_ROUTE")"
+  [[ "$r41" == PASS ]] || fail "${r41#FAIL:}"
+  ok "status maps an over-limit latest plan to invalid_evidence, never active/query_failed"
+
+  # 42. detail projects no candidates for an over-limit plan.
+  local r42
+  r42="$(check_detail_over_limit_no_partial_candidates "$CONFLICT_ROUTE")"
+  [[ "$r42" == PASS ]] || fail "${r42#FAIL:}"
+  ok "detail never projects partial candidate data for an over-limit plan"
+
+  # 43. list counts a successfully-read over-limit plan as malformed.
+  local r43
+  r43="$(check_list_over_limit_counts_as_malformed "$CONFLICT_ROUTE")"
+  [[ "$r43" == PASS ]] || fail "${r43#FAIL:}"
+  ok "list counts a successfully-read over-limit plan as malformed evidence"
+
+  # 44. Shared bound authority: no drift between SQL fetch bound and
+  #     validator bound.
+  local r44
+  r44="$(check_shared_bound_no_drift "$CONFLICT_EVIDENCE_VALIDATION" "$CONFLICT_DB_STORE")"
+  [[ "$r44" == PASS ]] || fail "${r44#FAIL:}"
+  ok "daemon validator bound and SQL fetch bound share one authoritative constant"
+
   echo "[msc-guard] ALL CHECKS PASSED"
 }
 
@@ -1004,6 +1234,121 @@ PY
   cp "$CONFLICT_EVIDENCE_VALIDATION" "$scratch/evidence_validation_mut_z.rs"
   sed -i 's/fn bound_blockers/fn bound_blockers_renamed/' "$scratch/evidence_validation_mut_z.rs"
   assert_now_fails "MUT-Z blocker-bounds truncation helper removed" "$(check_blocker_bounds_enforced "$scratch/evidence_validation_mut_z.rs")"
+
+  # ---------------------------------------------------------------------
+  # UTF8-AND-BOUNDED-READ-CLOSURE mutation-negative fixtures.
+  # ---------------------------------------------------------------------
+
+  # MUT-AA: UTF-8-safe truncation helper removed/renamed.
+  cp "$CONFLICT_EVIDENCE_VALIDATION" "$scratch/evidence_validation_mut_aa.rs"
+  sed -i 's/fn safe_truncate_utf8/fn safe_truncate_utf8_renamed/' "$scratch/evidence_validation_mut_aa.rs"
+  assert_now_fails "MUT-AA UTF-8-safe truncation helper removed/renamed" "$(check_utf8_safe_truncation_helper "$scratch/evidence_validation_mut_aa.rs")"
+
+  # MUT-BB: safe truncation reverted to direct String::truncate(MAX_BLOCKER_LEN).
+  cp "$CONFLICT_EVIDENCE_VALIDATION" "$scratch/evidence_validation_mut_bb.rs"
+  sed -i 's/\*b = safe_truncate_utf8(b, MAX_BLOCKER_LEN);/b.truncate(MAX_BLOCKER_LEN);/' "$scratch/evidence_validation_mut_bb.rs"
+  assert_now_fails "MUT-BB safe truncation reverted to direct String::truncate" "$(check_no_raw_truncate_in_blocker_bounding "$scratch/evidence_validation_mut_bb.rs")"
+
+  # MUT-CC: suffix length no longer reserved out of max_len (suffix could be
+  # appended outside the configured maximum).
+  cp "$CONFLICT_EVIDENCE_VALIDATION" "$scratch/evidence_validation_mut_cc.rs"
+  sed -i 's/max_len - suffix\.len()/max_len/' "$scratch/evidence_validation_mut_cc.rs"
+  assert_now_fails "MUT-CC suffix length no longer reserved from max_len" "$(check_suffix_reserved_within_max "$scratch/evidence_validation_mut_cc.rs")"
+
+  # MUT-DD: bounded read seam's SQL LIMIT removed from the candidate query.
+  cp "$CONFLICT_DB_STORE" "$scratch/db_store_mut_dd.rs"
+  python - "$scratch/db_store_mut_dd.rs" <<'PY'
+import sys
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+anchor = "pub async fn fetch_runtime_strategy_conflict_plan_for_read("
+idx = text.find(anchor)
+end = text.find("\n}\n", idx)
+block = text[idx:end]
+lines = [l for l in block.split("\n") if "limit $2" not in l]
+mutated = "\n".join(lines)
+text = text[:idx] + mutated + text[end:]
+open(path, "w", encoding="utf-8").write(text)
+PY
+  assert_now_fails "MUT-DD bounded SQL LIMIT removed from candidate query" "$(check_sql_bounded_limit "$scratch/db_store_mut_dd.rs")"
+
+  # MUT-EE: routes revert to the unbounded candidate fetch.
+  cp "$CONFLICT_ROUTE" "$scratch/route_mut_ee.rs"
+  sed -i 's/fetch_runtime_strategy_conflict_plan_for_read/fetch_runtime_strategy_conflict_plan/g' "$scratch/route_mut_ee.rs"
+  assert_now_fails "MUT-EE routes revert to the unbounded candidate fetch" "$(check_routes_use_bounded_seam "$scratch/route_mut_ee.rs")"
+
+  # MUT-FF: the unbounded full-payload replay fetch is accidentally limited.
+  cp "$CONFLICT_DB_STORE" "$scratch/db_store_mut_ff.rs"
+  python - "$scratch/db_store_mut_ff.rs" <<'PY'
+import sys
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+anchor = "pub async fn fetch_runtime_strategy_conflict_plan("
+idx = text.find(anchor)
+end = text.find("\n}\n", idx)
+block = text[idx:end]
+mutated = block.replace(
+    "from sys_runtime_strategy_conflict_candidates where plan_id = $1 order by ordinal\",",
+    "from sys_runtime_strategy_conflict_candidates where plan_id = $1 order by ordinal limit 65\",",
+)
+text = text[:idx] + mutated + text[end:]
+open(path, "w", encoding="utf-8").write(text)
+PY
+  assert_now_fails "MUT-FF unbounded full-payload replay fetch accidentally limited" "$(check_full_replay_path_unbounded "$scratch/db_store_mut_ff.rs")"
+
+  # MUT-GG: status stops mapping an over-limit latest plan to invalid_evidence.
+  cp "$CONFLICT_ROUTE" "$scratch/route_mut_gg.rs"
+  python - "$scratch/route_mut_gg.rs" <<'PY'
+import sys
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+anchor = "the durable plan exceeds the shared bounded-read"
+idx = text.find(anchor)
+end = text.find("}", idx) + 1
+block = text[idx:end]
+mutated = block.replace("ConflictTruthState::InvalidEvidence", "ConflictTruthState::Active")
+text = text[:idx] + mutated + text[end:]
+open(path, "w", encoding="utf-8").write(text)
+PY
+  assert_now_fails "MUT-GG status over-limit plan no longer maps to invalid_evidence" "$(check_status_over_limit_is_invalid_evidence "$scratch/route_mut_gg.rs")"
+
+  # MUT-HH: detail projects candidate data for an over-limit plan.
+  cp "$CONFLICT_ROUTE" "$scratch/route_mut_hh.rs"
+  python - "$scratch/route_mut_hh.rs" <<'PY'
+import sys
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+anchor = "over-limit plan -- invalid_evidence, no partial"
+idx = text.find(anchor)
+end = text.find("into_response()", idx) + len("into_response()")
+block = text[idx:end]
+mutated = block.replace("candidates: vec![],", "candidates: some_partial_candidates(),", 1)
+text = text[:idx] + mutated + text[end:]
+open(path, "w", encoding="utf-8").write(text)
+PY
+  assert_now_fails "MUT-HH detail route projects candidate data for an over-limit plan" "$(check_detail_over_limit_no_partial_candidates "$scratch/route_mut_hh.rs")"
+
+  # MUT-II: list stops counting a successfully-read over-limit plan as malformed.
+  cp "$CONFLICT_ROUTE" "$scratch/route_mut_ii.rs"
+  python - "$scratch/route_mut_ii.rs" <<'PY'
+import sys
+path = sys.argv[1]
+text = open(path, encoding="utf-8").read()
+anchor = "a successfully-read over-limit plan is"
+idx = text.find(anchor)
+end = text.find("}", idx) + 1
+block = text[idx:end]
+mutated = block.replace("excluded_malformed_count += 1;", "// dropped")
+text = text[:idx] + mutated + text[end:]
+open(path, "w", encoding="utf-8").write(text)
+PY
+  assert_now_fails "MUT-II list route stops counting an over-limit plan as malformed" "$(check_list_over_limit_counts_as_malformed "$scratch/route_mut_ii.rs")"
+
+  # MUT-JJ: daemon validator bound reverts to a hardcoded literal, no longer
+  # referencing the shared mqk-db constant (drift risk reintroduced).
+  cp "$CONFLICT_EVIDENCE_VALIDATION" "$scratch/evidence_validation_mut_jj.rs"
+  sed -i 's/pub const MAX_CANDIDATES_PER_PLAN: usize = mqk_db::RUNTIME_STRATEGY_CONFLICT_CANDIDATE_READ_BOUND;/pub const MAX_CANDIDATES_PER_PLAN: usize = 64;/' "$scratch/evidence_validation_mut_jj.rs"
+  assert_now_fails "MUT-JJ validator bound reverts to a hardcoded literal (drift risk)" "$(check_shared_bound_no_drift "$scratch/evidence_validation_mut_jj.rs" "$CONFLICT_DB_STORE")"
 
   if [[ "$failures" -gt 0 ]]; then
     echo "[msc-guard-selftest] FAIL: $failures mutation(s) were not caught" >&2

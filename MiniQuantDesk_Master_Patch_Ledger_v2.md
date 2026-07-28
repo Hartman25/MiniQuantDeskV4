@@ -443,7 +443,126 @@ while ($true) {
 
 ## 6. Active / Next Patch
 
-### MULTI-STRATEGY-CONFLICT-POLICY-01-FINAL-IDENTITY-AND-READ-AUTHORITY-REPAIR — FINAL IDENTITY AND READ-AUTHORITY REPAIR COMPLETE — AWAITING CHATGPT AND OPERATOR ACCEPTANCE BEFORE PUSH
+### MULTI-STRATEGY-CONFLICT-POLICY-01-UTF8-AND-BOUNDED-READ-CLOSURE — UTF8 AND BOUNDED-READ CLOSURE COMPLETE — AWAITING CHATGPT AND OPERATOR ACCEPTANCE BEFORE PUSH
+
+**Worktree/branch:** primary worktree `C:\Users\Zacha\Desktop\MiniQuantDeskV4`,
+directly on `main`. No new branch or worktree created. Published starting
+head `c6c0c0eb7298193ba8af8eaff73a1bff35f9f4e3` (the prior final-identity-
+and-read-authority repair — see the entry immediately below, which this
+entry supersedes; that entry's Bundle 6 remained NOT accepted). Not pushed.
+
+**Scope:** repair of 2 remaining read-side hardening defects found in
+independent review of `c6c0c0eb`: (1) `bound_blockers`'s
+`String::truncate(MAX_BLOCKER_LEN)` panics whenever the byte offset does
+not land on a UTF-8 character boundary — a corrupted/tampered durable row
+carrying arbitrary multibyte Unicode (e.g. `market_date`) could crash a
+read-only status/detail/list request while the validator was trying to
+fail closed; the same code also appended the truncation suffix *after*
+truncating to the claimed maximum, so a returned blocker could exceed
+`MAX_BLOCKER_LEN`; (2) `fetch_runtime_strategy_conflict_plan` (used by
+every status/list/detail route) fetched every candidate row for a plan
+unconditionally, and the daemon's read-side validator only rejected an
+over-limit plan *after* that unbounded fetch completed — a pathological or
+corrupted plan claiming thousands of candidates could still force an
+unbounded DB read/allocation/response-construction cost before fail-closed
+validation ever ran.
+
+**Commits (3, on `main`):** `api: make conflict blockers utf8 safe`
+(`4b591e60`, Defect 1) → `db: bound conflict evidence candidate reads`
+(`e644b445`, Defect 2) → `test: close bundle 6 read hardening proof`
+(guard/self-test extension + this ledger entry, this commit).
+
+**Defect 1 (UTF-8-unsafe blocker truncation):** a new
+`safe_truncate_utf8(s, max_len)` helper in
+`conflict_evidence_validation.rs` reserves the truncation suffix
+(`"... (truncated)"`)'s own byte length out of `max_len`, walks backward to
+the nearest `is_char_boundary()` within that reduced budget, and only then
+slices and appends the suffix — content + suffix together never exceed
+`max_len` bytes, and the function never panics on arbitrary valid UTF-8
+(no lossy slicing, no replacement characters). `bound_blockers` now routes
+both per-blocker truncation and the final bounded omission message through
+this helper. 13 new unit tests cover ASCII at/below/above the limit,
+2/3/4-byte Unicode and emoji crossing the truncation boundary, mixed
+ASCII+Unicode, output byte-length/UTF-8-validity invariants across many
+`(max_len, repetition)` combinations, suffix-always-present-when-truncated,
+and a pathological 5,000-codepoint-emoji `market_date` producing
+`invalid_evidence` (via `validate_plan_shape`) rather than a panic.
+
+**Defect 2 (unbounded fetch before validation limit):** a new shared bound
+authority, `mqk_db::RUNTIME_STRATEGY_CONFLICT_CANDIDATE_READ_BOUND` (64),
+and a separate bounded read-side fetch seam,
+`fetch_runtime_strategy_conflict_plan_for_read`, issue a SQL `LIMIT` of
+`bound + 1` — just enough to prove a durable plan exceeds the bound, never
+more — and return an explicit `BoundedConflictPlanFetch::{Complete,
+CandidateLimitExceeded, NotFound}` outcome; no caller infers completeness
+from a truncated vector. `conflict_evidence_validation::
+MAX_CANDIDATES_PER_PLAN` is redefined as `mqk_db::
+RUNTIME_STRATEGY_CONFLICT_CANDIDATE_READ_BOUND` (not its own literal), so
+the SQL fetch bound and the daemon validation bound share one source of
+truth and cannot silently drift apart. `routes/strategy_conflict.rs`'s
+status/list/detail handlers now call the bounded seam instead of the
+unbounded fetch: status fails closed to `invalid_evidence` for an
+over-limit latest plan with no fallback to an older plan (unchanged prior
+invariant); detail returns `invalid_evidence` with zero candidates
+projected; list counts an over-limit-but-successfully-read plan as
+malformed evidence (`excluded_malformed_count`), distinct from a query
+failure (`query_failed`, unchanged) or a vanished row
+(`excluded_vanished_count`, unchanged). The original
+`fetch_runtime_strategy_conflict_plan` remains unbounded and unchanged —
+reserved for `insert_runtime_strategy_conflict_plan`'s replay/collision
+comparison, which requires the complete stored payload and must never be
+limited.
+
+**Guard:** `scripts/guards/check_multi_strategy_conflict_policy_01.sh`
+extended with 10 new real checks (44 total) and 10 new mutation-negative
+fixtures (40 total, `--self-test`) covering: the UTF-8-safe truncation
+helper's presence and its use of `is_char_boundary`, absence of any direct
+`truncate(MAX_BLOCKER_LEN)` call in blocker-bounding code, the suffix
+length being reserved out of the maximum, the bounded read seam's
+parameterized `LIMIT $2` (bound + 1) and its `CandidateLimitExceeded`
+outcome, status/list/detail all calling the bounded seam and never the
+unbounded fetch directly, the unbounded replay-path fetch never itself
+gaining a `LIMIT`, over-limit truth mapping to `invalid_evidence` in
+status/detail (never active/query_failed) and to malformed in list (never
+silently dropped), and the daemon's `MAX_CANDIDATES_PER_PLAN` referencing
+`mqk_db`'s shared constant rather than its own literal (no drift). All 40
+fixtures caught; all 44 real checks pass.
+
+**Validation (this session, isolated port-5434 test DB only):** 39
+`conflict_evidence_validation` unit tests (13 new UTF-8-safety tests + all
+prior), 19 `mqk-db` DB-backed conflict-store tests (5 new bounded-read
+tests + all prior, `--include-ignored --test-threads=1`), 20 `mqk-daemon`
+DB-backed conflict API scenario tests (6 new bounded-read tests + all
+prior, same flags) — all pass. `cargo check`/`cargo clippy --all-targets`
+clean (no warnings) for `mqk-db`/`mqk-daemon` on every file this repair
+touched; `rustfmt` applied directly to the touched files only (whole-crate
+`cargo fmt --check` on this box reports pre-existing unrelated drift in
+`routes/portfolio.rs`, untouched by this repair). This bundle's own
+guard/self-test, `check_runtime_opportunity_allocation_01.sh` (Bundle 5
+guard), `check_migration_governance.sh`, `check_unsafe_patterns.sh`,
+`check_workspace_dep_inheritance.sh`, and
+`check_ignored_load_bearing_proofs.sh` all pass. No GUI source touched, so
+no GUI test/build run. `git diff --check` / `git diff --cached --check`
+clean. No migration added — no schema change was needed for either defect.
+Final `Invoke-PaperPremarketValidation.ps1` run separately — see that
+command's own output for the authoritative `FINAL: PASS`/`FAIL` line.
+
+**Not done in this session (by design):** push, Bundle 7 (dynamic
+strategy-symbol selection), any strategy/runtime economic behavior change,
+Bundle 5 allocation semantics, Bundle 6 conflict economic policy, cycle
+identity, strategy promotion, risk/readiness/session/arm/run authority,
+OMS/outbox/order schemas, broker adapters, reconciliation or
+portfolio/P&L authority, resuming AI-lab work, starting the real paper
+daemon, or touching the operating paper database (port 5440).
+
+**Disposition:** see the FINAL HANDOFF report for this session for the
+authoritative current validation result and disposition. Not marked
+accepted in this entry — that determination is reserved for ChatGPT/
+operator review.
+
+---
+
+### MULTI-STRATEGY-CONFLICT-POLICY-01-FINAL-IDENTITY-AND-READ-AUTHORITY-REPAIR — SUPERSEDED BY UTF8-AND-BOUNDED-READ-CLOSURE (see above), NOT ACCEPTED
 
 **Worktree/branch:** primary worktree `C:\Users\Zacha\Desktop\MiniQuantDeskV4`,
 directly on `main`. No new branch or worktree created. Starting HEAD
