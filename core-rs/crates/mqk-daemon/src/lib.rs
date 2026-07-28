@@ -16,6 +16,7 @@ pub mod dev_gate;
 pub mod dynamic_selection_host_pool;
 pub mod dynamic_selection_mode;
 pub mod dynamic_selection_plan_builder;
+pub mod dynamic_selection_start_gate;
 pub mod earnings_calendar;
 pub mod event_risk_blackout;
 pub mod ingest_jobs;
