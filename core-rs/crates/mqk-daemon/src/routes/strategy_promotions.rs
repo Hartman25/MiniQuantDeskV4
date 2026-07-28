@@ -21,7 +21,6 @@
 //! - No order, outbox, broker, run-start, or arm route is called or
 //!   referenced anywhere in this module.
 
-use std::path::Path;
 use std::sync::Arc;
 
 use axum::{
@@ -32,7 +31,6 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use serde::Deserialize;
-use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::api_types::{
@@ -40,14 +38,14 @@ use crate::api_types::{
     StrategyPromotionTransitionRequest, StrategyPromotionTransitionResponse,
     StrategyPromotionsResponse,
 };
+use crate::promotion_evidence_validation::validate_paper_candidate_evidence;
 use crate::state::AppState;
 use mqk_db::{
     evaluate_promotion_tradability, fetch_all_current_promotions, fetch_current_promotion_state,
     fetch_promotion_history, insert_strategy_promotion_transition_serialized,
     is_known_promotion_state, is_legal_transition, resolve_evidence_lineage,
-    scanner_timeframe_label_to_secs, transition_requires_evidence,
-    InsertStrategyPromotionTransitionArgs, StrategyPromotionTransitionRecord,
-    TransitionInsertOutcome,
+    transition_requires_evidence, InsertStrategyPromotionTransitionArgs,
+    StrategyPromotionTransitionRecord, TransitionInsertOutcome,
 };
 
 const CANONICAL_ROUTE_PROMOTIONS: &str = "/api/v1/strategy/promotions";
@@ -508,114 +506,6 @@ fn transition_response(args: TransitionResponseArgs) -> Response {
         }),
     )
         .into_response()
-}
-
-/// Evidence independently read and validated from a review artifact
-/// directory, ready to attach to a transition insert.
-struct ValidatedEvidence {
-    review_id: String,
-    scanner_scan_id: String,
-    git_hash: String,
-    artifact_path: String,
-    fingerprint: String,
-}
-
-/// Root-bounded, content-validated read of a review artifact directory,
-/// mirroring the exact canonicalize+root-prefix pattern used by
-/// `GET /api/v1/strategy-scans/review-artifact`
-/// (`routes/strategy_scans.rs`). Never trusts caller-supplied claims about
-/// the evidence — always re-derives the fingerprint from the matched
-/// decision row's own serialized content.
-fn validate_paper_candidate_evidence(
-    st: &AppState,
-    review_dir: &str,
-    strategy_id: &str,
-    symbol: &str,
-    timeframe_secs: i64,
-) -> Result<ValidatedEvidence, String> {
-    let requested = review_dir.trim();
-    if requested.is_empty() {
-        return Err("review_dir is required for this transition".to_string());
-    }
-
-    let candidate_path = Path::new(requested);
-    let root = Path::new(&st.strategy_review_artifact_root);
-
-    let candidate_canon = std::fs::canonicalize(candidate_path)
-        .map_err(|_| format!("review_dir not found: {requested}"))?;
-    let root_canon = std::fs::canonicalize(root).map_err(|_| {
-        format!(
-            "configured review artifact root is unavailable: {}",
-            root.display()
-        )
-    })?;
-    if !candidate_canon.starts_with(&root_canon) {
-        return Err(
-            "review_dir does not resolve inside the configured review artifact root".to_string(),
-        );
-    }
-
-    let manifest_path = candidate_canon.join("manifest.json");
-    let decisions_path = candidate_canon.join("review_decisions.json");
-    for p in [&manifest_path, &decisions_path] {
-        if !p.is_file() {
-            return Err(format!("expected artifact file not found: {}", p.display()));
-        }
-    }
-
-    let manifest: mqk_backtest::ReviewManifest = read_json(&manifest_path)?;
-    let decisions: Vec<mqk_backtest::StrategyScanReviewDecision> = read_json(&decisions_path)?;
-
-    let matches: Vec<&mqk_backtest::StrategyScanReviewDecision> = decisions
-        .iter()
-        .filter(|d| {
-            d.strategy_id.trim() == strategy_id
-                && d.symbol.trim().to_ascii_uppercase() == symbol
-                && scanner_timeframe_label_to_secs(&d.timeframe) == Some(timeframe_secs)
-        })
-        .collect();
-
-    if matches.is_empty() {
-        return Err(format!(
-            "no matching evidence row found for strategy_id='{strategy_id}' symbol='{symbol}' \
-             timeframe_secs={timeframe_secs} in review artifact"
-        ));
-    }
-    if matches.len() > 1 {
-        return Err(format!(
-            "review artifact contains {} ambiguous matching rows for this exact identity; \
-             evidence must be unambiguous",
-            matches.len()
-        ));
-    }
-    let matched = matches[0];
-
-    if matched.review_state != mqk_backtest::StrategyScanReviewState::PaperCandidate {
-        return Err(format!(
-            "matched evidence row has review_state='{}', not 'paper_candidate'",
-            matched.review_state.code()
-        ));
-    }
-
-    let canonical_json = serde_json::to_string(matched)
-        .map_err(|e| format!("failed to serialize matched evidence row: {e}"))?;
-    let mut hasher = Sha256::new();
-    hasher.update(canonical_json.as_bytes());
-    let fingerprint = hex::encode(hasher.finalize());
-
-    Ok(ValidatedEvidence {
-        review_id: manifest.review_id,
-        scanner_scan_id: manifest.scanner_scan_id,
-        git_hash: manifest.git_hash,
-        artifact_path: candidate_canon.display().to_string(),
-        fingerprint,
-    })
-}
-
-fn read_json<T: serde::de::DeserializeOwned>(path: &std::path::Path) -> Result<T, String> {
-    let raw = std::fs::read_to_string(path)
-        .map_err(|e| format!("read failed: {}: {e}", path.display()))?;
-    serde_json::from_str(&raw).map_err(|e| format!("parse failed: {}: {e}", path.display()))
 }
 
 pub(crate) async fn strategy_promotion_transition(
