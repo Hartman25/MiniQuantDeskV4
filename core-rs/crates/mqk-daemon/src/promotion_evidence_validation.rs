@@ -23,7 +23,7 @@
 //! there is no second, weaker reimplementation.
 
 use std::io::Read as _;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -95,19 +95,23 @@ fn read_bounded<R: std::io::Read>(mut reader: R, max_bytes: u64) -> Result<Vec<u
     Ok(buf)
 }
 
-/// Defect 2: open `path` exactly once, read metadata from that same handle
-/// for a cheap (non-authoritative) early refusal, then bound the actual byte
-/// stream through [`read_bounded`] -- one content read only. UTF-8 decoding
+/// Defect 4: bound the actual byte stream of an *already-open* handle
+/// through [`read_bounded`] -- one content read only, against the exact
+/// handle [`open_confined_regular_child`] proved is confined, regular, and
+/// identity-matched. Never reopens by path (see that function's doc
+/// comment for why a path-based reopen is unsound here). UTF-8 decoding
 /// happens only after the bounded byte read completes, so an invalid-UTF-8
 /// file is refused distinctly from an over-size one.
-fn read_bounded_file_string(path: &Path, max_bytes: u64) -> Result<String, String> {
-    let file =
-        std::fs::File::open(path).map_err(|e| format!("read failed: {}: {e}", path.display()))?;
+fn read_bounded_file_string(
+    file: std::fs::File,
+    display_path: &Path,
+    max_bytes: u64,
+) -> Result<String, String> {
     if let Ok(meta) = file.metadata() {
         if meta.len() > max_bytes {
             return Err(format!(
                 "{} exceeds max allowed size ({} bytes > {max_bytes} bytes)",
-                path.display(),
+                display_path.display(),
                 meta.len(),
             ));
         }
@@ -116,13 +120,14 @@ fn read_bounded_file_string(path: &Path, max_bytes: u64) -> Result<String, Strin
         if e.contains("exceeds max allowed size") {
             format!(
                 "{} exceeds max allowed size ({max_bytes} bytes)",
-                path.display()
+                display_path.display()
             )
         } else {
-            format!("{e}: {}", path.display())
+            format!("{e}: {}", display_path.display())
         }
     })?;
-    String::from_utf8(bytes).map_err(|e| format!("invalid utf-8 in {}: {e}", path.display()))
+    String::from_utf8(bytes)
+        .map_err(|e| format!("invalid utf-8 in {}: {e}", display_path.display()))
 }
 
 /// Shadow deserialization target used solely to recover the exact raw JSON
@@ -163,28 +168,32 @@ struct MatchedDecisions {
 }
 
 fn read_and_match_decisions(
-    decisions_path: &Path,
+    decisions_file: std::fs::File,
+    display_path: &Path,
     strategy_id: &str,
     symbol: &str,
     timeframe_secs: i64,
 ) -> Result<MatchedDecisions, String> {
-    // Defect 2: one bounded read through a single already-open file handle
-    // -- no separate `std::fs::metadata(path)` call against the path
-    // followed by an independent, unbounded `std::fs::read_to_string(path)`
-    // call (the file the path resolves to could grow or be replaced between
-    // those two calls). Everything below parses this single bounded,
+    // Defect 4: one bounded read through the single already-open,
+    // confinement-proven, identity-verified file handle
+    // [`open_confined_regular_child`] returned -- never a separate
+    // `std::fs::metadata(path)`/`std::fs::read_to_string(path)` reopen by
+    // path (the file the path resolves to could be unlinked and replaced,
+    // or a symlink retargeted, between a path-based check and a later
+    // path-based open). Everything below parses this single bounded,
     // immutable buffer.
-    let raw_text = read_bounded_file_string(decisions_path, MAX_DECISIONS_FILE_BYTES)?;
+    let raw_text =
+        read_bounded_file_string(decisions_file, display_path, MAX_DECISIONS_FILE_BYTES)?;
 
     let decisions: Vec<mqk_backtest::StrategyScanReviewDecision> = serde_json::from_str(&raw_text)
-        .map_err(|e| format!("parse failed: {}: {e}", decisions_path.display()))?;
+        .map_err(|e| format!("parse failed: {}: {e}", display_path.display()))?;
     let raw_rows: Vec<RawScoreRow> = serde_json::from_str(&raw_text)
-        .map_err(|e| format!("parse failed: {}: {e}", decisions_path.display()))?;
+        .map_err(|e| format!("parse failed: {}: {e}", display_path.display()))?;
 
     if decisions.len() != raw_rows.len() {
         return Err(format!(
             "typed/raw row count mismatch parsing the same buffer of {}: typed={} raw={}",
-            decisions_path.display(),
+            display_path.display(),
             decisions.len(),
             raw_rows.len()
         ));
@@ -196,7 +205,7 @@ fn read_and_match_decisions(
         {
             return Err(format!(
                 "typed/raw row identity mismatch at index {i} parsing {}",
-                decisions_path.display()
+                display_path.display()
             ));
         }
     }
@@ -445,30 +454,33 @@ pub fn validate_paper_candidate_evidence(
         );
     }
 
-    // Defect 3: canonicalize and root/candidate-confine each *child* file
-    // independently -- canonicalizing the directory above proves nothing
-    // about a symlink or reparse point planted as manifest.json or
+    // Defect 4: canonicalize, root/candidate-confine, open, and
+    // identity-verify each *child* file independently, through one opened
+    // handle -- canonicalizing the directory above proves nothing about a
+    // symlink or reparse point planted as manifest.json or
     // review_decisions.json itself; a bare `Path::is_file()` on the
     // un-canonicalized join follows such a link without ever proving where
-    // it actually points.
-    let manifest_path = canonicalize_and_confine_child(
-        &candidate_canon.join("manifest.json"),
-        &root_canon,
-        &candidate_canon,
-    )?;
-    let decisions_path = canonicalize_and_confine_child(
-        &candidate_canon.join("review_decisions.json"),
-        &root_canon,
-        &candidate_canon,
-    )?;
+    // it actually points. The handle this returns is what every subsequent
+    // read below binds to -- neither child is ever reopened by path.
+    let manifest_child = candidate_canon.join("manifest.json");
+    let manifest_file =
+        open_confined_regular_child(&manifest_child, &root_canon, &candidate_canon)?;
+    let decisions_child = candidate_canon.join("review_decisions.json");
+    let decisions_file =
+        open_confined_regular_child(&decisions_child, &root_canon, &candidate_canon)?;
 
     let manifest: mqk_backtest::ReviewManifest =
-        read_json(&manifest_path, MAX_MANIFEST_FILE_BYTES)?;
+        read_json(manifest_file, &manifest_child, MAX_MANIFEST_FILE_BYTES)?;
 
     // Defect A: one bounded, single-filesystem-read parse -- no second read
-    // of `decisions_path` anywhere below.
-    let matched_decisions =
-        read_and_match_decisions(&decisions_path, strategy_id, symbol, timeframe_secs)?;
+    // of `decisions_child` anywhere below.
+    let matched_decisions = read_and_match_decisions(
+        decisions_file,
+        &decisions_child,
+        strategy_id,
+        symbol,
+        timeframe_secs,
+    )?;
     let matched = &matched_decisions.decisions[matched_decisions.matched_index];
 
     if matched.review_state != mqk_backtest::StrategyScanReviewState::PaperCandidate {
@@ -504,35 +516,58 @@ pub fn validate_paper_candidate_evidence(
     })
 }
 
-/// Defect 2: bounded, single-open-handle JSON read -- see
-/// [`read_bounded_file_string`]. No unbounded `read_to_string` on any
-/// artifact authority file.
+/// Defect 4: bounded, single-open-handle JSON read -- see
+/// [`read_bounded_file_string`]. No unbounded `read_to_string`, and no
+/// reopen by path, on any artifact authority file.
 fn read_json<T: serde::de::DeserializeOwned>(
-    path: &std::path::Path,
+    file: std::fs::File,
+    display_path: &std::path::Path,
     max_bytes: u64,
 ) -> Result<T, String> {
-    let raw = read_bounded_file_string(path, max_bytes)?;
-    serde_json::from_str(&raw).map_err(|e| format!("parse failed: {}: {e}", path.display()))
+    let raw = read_bounded_file_string(file, display_path, max_bytes)?;
+    serde_json::from_str(&raw).map_err(|e| format!("parse failed: {}: {e}", display_path.display()))
 }
 
 // ---------------------------------------------------------------------------
-// Defect 3: root/candidate-confined child artifact path resolution
+// Defect 4: root/candidate-confined child artifact open, bound to one handle
 // ---------------------------------------------------------------------------
+//
+// The prior implementation (`canonicalize_and_confine_child`) proved
+// confinement and regularity against a *path* and returned that `PathBuf` --
+// every actual read then reopened the file by that same path a second time
+// (`read_json`/`read_and_match_decisions` -> `read_bounded_file_string` ->
+// `std::fs::File::open(path)`). Nothing prevented the file the path resolved
+// to from being unlinked and replaced, or a symlink retargeted, in the
+// window between the confinement proof and that second open (TOCTOU) -- the
+// confinement check would have proven something true of a file that no
+// longer exists by the time it is actually read.
+//
+// [`open_confined_regular_child`] closes that gap: it canonicalizes and
+// confines exactly as before, then opens the canonical path itself and
+// hands back the *open handle* -- there is no second, independent open by
+// path anywhere in this module. It additionally re-verifies the opened
+// handle is itself a regular file (a swap could have replaced it with a
+// FIFO, device node, or directory) and, where the platform supports it,
+// compares the opened handle's identity against the pre-open confinement
+// check's metadata to catch a same-path swap in between.
 
-/// Defect 3: canonicalize `child` (expected to be a path directly inside
-/// `candidate_canon`) and prove it resolves inside *both* `root_canon` (the
+/// Defect 4: canonicalize `child` (expected to be a path directly inside
+/// `candidate_canon`), prove it resolves inside *both* `root_canon` (the
 /// whole configured review-artifact root) and `candidate_canon` (this exact
-/// candidate's own directory) -- `std::fs::canonicalize` fully resolves any
-/// symlink/reparse-point chain, so a child planted as a symlink pointing
-/// outside either boundary is caught here, before any content is ever read.
-/// Refuses a missing child, an escaped child, and a non-regular child (e.g.
-/// a directory) with distinct messages -- never trusts `Path::is_file()` on
-/// the un-canonicalized join alone.
-fn canonicalize_and_confine_child(
+/// candidate's own directory), open the canonical path exactly once, and
+/// bind every subsequent check to that one opened handle.
+///
+/// Refuses a missing child, an escaped child, a non-regular child (e.g. a
+/// directory), and a child whose identity changed between the confinement
+/// check and the open, each with a distinct message -- never trusts
+/// `Path::is_file()` on the un-canonicalized join alone, and never trusts a
+/// `PathBuf` returned from an earlier check as proof of what a later open
+/// will return.
+fn open_confined_regular_child(
     child: &Path,
     root_canon: &Path,
     candidate_canon: &Path,
-) -> Result<PathBuf, String> {
+) -> Result<std::fs::File, String> {
     let child_canon = std::fs::canonicalize(child)
         .map_err(|_| format!("expected artifact file not found: {}", child.display()))?;
     if !child_canon.starts_with(root_canon) || !child_canon.starts_with(candidate_canon) {
@@ -541,15 +576,86 @@ fn canonicalize_and_confine_child(
             child.display()
         ));
     }
-    let meta = std::fs::metadata(&child_canon)
+    // Checked metadata: a pre-open, path-based proof that the canonicalized
+    // path is currently a regular file -- necessary but not sufficient on
+    // its own (a later open could still observe a different, swapped-in
+    // file at the same path); see the opened-handle re-verification below.
+    let checked_meta = std::fs::metadata(&child_canon)
         .map_err(|e| format!("read failed: {}: {e}", child_canon.display()))?;
-    if !meta.is_file() {
+    if !checked_meta.is_file() {
         return Err(format!(
             "expected artifact file is not a regular file: {}",
             child_canon.display()
         ));
     }
-    Ok(child_canon)
+
+    // The one and only open of this path -- every later read binds to this
+    // handle, never reopens by path.
+    let file = std::fs::File::open(&child_canon)
+        .map_err(|e| format!("read failed: {}: {e}", child_canon.display()))?;
+    let opened_meta = file
+        .metadata()
+        .map_err(|e| format!("read failed: {}: {e}", child_canon.display()))?;
+    if !opened_meta.is_file() {
+        return Err(format!(
+            "expected artifact file is not a regular file: {}",
+            child_canon.display()
+        ));
+    }
+
+    // Bind the opened handle's identity back to the checked metadata --
+    // detects a swap (unlink+recreate, symlink retarget) in the window
+    // between the path-based check above and this open.
+    if !opened_handle_identity_matches(&checked_meta, &opened_meta) {
+        return Err(format!(
+            "artifact file identity changed between check and open: {}",
+            child_canon.display()
+        ));
+    }
+
+    Ok(file)
+}
+
+/// Defect 4: `true` iff `opened` (metadata read from an already-open
+/// [`std::fs::File`] handle) still identifies the same underlying file
+/// `checked` (metadata read from a path-based, pre-open confinement check)
+/// referred to -- factored out of [`open_confined_regular_child`] so the
+/// comparison itself is directly unit-testable against two genuinely
+/// different files' metadata, without needing to win a real filesystem
+/// race.
+///
+/// Unix: device + inode is a stable, always-available identity pair -- a
+/// swap (unlink+recreate, or a symlink chain retargeted) changes at least
+/// one of them even if size/mtime happen to coincide.
+///
+/// Windows: the stable `std::os::windows::fs::MetadataExt` surface has no
+/// equivalent to Unix's device/inode pair -- the file-index fields that
+/// would provide one (`file_index`, `volume_serial_number`) are gated
+/// behind the unstable `windows_by_handle` feature and unavailable on
+/// stable Rust. This is a *documented, strictly weaker* fallback: compare
+/// file size, last-write time, and creation time. A swap that preserves all
+/// three (e.g. an in-place truncate+rewrite completing within the same
+/// filesystem-timestamp tick) would not be caught -- unlike the Unix
+/// branch, this is not a proof of identity, only a best-effort
+/// corroboration.
+fn opened_handle_identity_matches(checked: &std::fs::Metadata, opened: &std::fs::Metadata) -> bool {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        checked.dev() == opened.dev() && checked.ino() == opened.ino()
+    }
+    #[cfg(windows)]
+    {
+        use std::os::windows::fs::MetadataExt;
+        checked.file_size() == opened.file_size()
+            && checked.last_write_time() == opened.last_write_time()
+            && checked.creation_time() == opened.creation_time()
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = (checked, opened);
+        true
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1100,6 +1206,15 @@ mod tests {
         )
     }
 
+    /// Defect 4: the handle-based read functions (`read_bounded_file_string`,
+    /// `read_json`, `read_and_match_decisions`) now take an already-open
+    /// `File` rather than a path -- this helper opens a fixture path once so
+    /// call sites below read exactly like they did before the signature
+    /// change.
+    fn open_for_test(path: &std::path::Path) -> std::fs::File {
+        std::fs::File::open(path).expect("open fixture file")
+    }
+
     #[test]
     fn valid_decisions_are_read_from_a_single_filesystem_read() {
         let (root, review_dir) = write_fixture(
@@ -1125,8 +1240,10 @@ mod tests {
         // still validates successfully were it re-read lazily, which it is
         // not -- this proves the parse already happened against the one
         // buffer captured up front.
+        let decisions_path = review_dir.join("review_decisions.json");
         let matched = read_and_match_decisions(
-            &review_dir.join("review_decisions.json"),
+            open_for_test(&decisions_path),
+            &decisions_path,
             "swing_momentum",
             "AAPL",
             86400,
@@ -1158,8 +1275,10 @@ mod tests {
         std::fs::write(review_dir.join("review_decisions.json"), oversized)
             .expect("write oversized decisions");
 
+        let decisions_path = review_dir.join("review_decisions.json");
         let err = read_and_match_decisions(
-            &review_dir.join("review_decisions.json"),
+            open_for_test(&decisions_path),
+            &decisions_path,
             "swing_momentum",
             "AAPL",
             86400,
@@ -1178,8 +1297,10 @@ mod tests {
     fn malformed_json_is_refused_distinctly() {
         let (root, review_dir) = write_fixture("malformed", "not valid json at all");
 
+        let decisions_path = review_dir.join("review_decisions.json");
         let err = read_and_match_decisions(
-            &review_dir.join("review_decisions.json"),
+            open_for_test(&decisions_path),
+            &decisions_path,
             "swing_momentum",
             "AAPL",
             86400,
@@ -1259,8 +1380,10 @@ mod tests {
             ]"#,
         );
 
+        let decisions_path = review_dir.join("review_decisions.json");
         let err = read_and_match_decisions(
-            &review_dir.join("review_decisions.json"),
+            open_for_test(&decisions_path),
+            &decisions_path,
             "swing_momentum",
             "AAPL",
             86400,
@@ -1325,7 +1448,8 @@ mod tests {
         let path = root.join("f.txt");
         std::fs::write(&path, vec![b'a'; 50]).expect("write fixture");
 
-        let out = read_bounded_file_string(&path, 50).expect("exactly MAX must be accepted");
+        let out = read_bounded_file_string(open_for_test(&path), &path, 50)
+            .expect("exactly MAX must be accepted");
         assert_eq!(out.len(), 50);
 
         std::fs::remove_dir_all(&root).ok();
@@ -1339,7 +1463,8 @@ mod tests {
         let path = root.join("f.txt");
         std::fs::write(&path, vec![b'a'; 51]).expect("write fixture");
 
-        let err = read_bounded_file_string(&path, 50).expect_err("MAX+1 must be refused");
+        let err = read_bounded_file_string(open_for_test(&path), &path, 50)
+            .expect_err("MAX+1 must be refused");
         assert!(err.contains("exceeds max allowed size"), "got: {err}");
 
         std::fs::remove_dir_all(&root).ok();
@@ -1353,7 +1478,8 @@ mod tests {
         let path = root.join("f.txt");
         std::fs::write(&path, [0xff, 0xfe, 0xfd]).expect("write fixture");
 
-        let err = read_bounded_file_string(&path, 100).expect_err("invalid utf-8 must be refused");
+        let err = read_bounded_file_string(open_for_test(&path), &path, 100)
+            .expect_err("invalid utf-8 must be refused");
         assert!(err.contains("invalid utf-8"), "got: {err}");
         assert!(
             !err.contains("exceeds max allowed size"),
@@ -1375,7 +1501,7 @@ mod tests {
             .expect("write oversized manifest");
 
         let result: Result<mqk_backtest::ReviewManifest, String> =
-            read_json(&path, MAX_MANIFEST_FILE_BYTES);
+            read_json(open_for_test(&path), &path, MAX_MANIFEST_FILE_BYTES);
         let err = result.expect_err("over-limit manifest must be refused");
         assert!(err.contains("exceeds max allowed size"), "got: {err}");
 
@@ -1550,6 +1676,183 @@ mod tests {
         }
 
         std::fs::remove_file(&outside).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    // ── Defect 4: bind confinement to the opened handle ───────────────────
+
+    /// Defect 4, test 1: the handle [`open_confined_regular_child`] returns
+    /// is the exact handle every subsequent read binds to -- proven here by
+    /// replacing the file at the same path (a full unlink+recreate, which
+    /// changes the underlying inode on Unix) *after* the confined handle was
+    /// opened, then reading through that handle. A path-based reopen (the
+    /// prior split API) would observe the replacement content; the opened
+    /// handle must still observe the original.
+    #[test]
+    fn opened_handle_reads_original_content_even_if_path_is_replaced_after_open() {
+        let (root, review_dir) = write_fixture(
+            "defect4_handle_binding",
+            r#"[{
+                "symbol": "AAPL",
+                "timeframe": "1D",
+                "strategy_id": "swing_momentum",
+                "scanner_rank": 1,
+                "scanner_score": 9.0,
+                "review_state": "paper_candidate",
+                "reason_codes": [],
+                "blockers": [],
+                "warnings": []
+            }]"#,
+        );
+        let root_canon = std::fs::canonicalize(&root).expect("canonicalize root");
+        let candidate_canon = std::fs::canonicalize(&review_dir).expect("canonicalize candidate");
+        let decisions_child = candidate_canon.join("review_decisions.json");
+
+        let file = open_confined_regular_child(&decisions_child, &root_canon, &candidate_canon)
+            .expect("must open confined child");
+
+        // Replace the file at the same path with different content AFTER
+        // the handle was opened. If this fails (some platforms/filesystems
+        // refuse to remove a file with an open handle), skip the rest of
+        // this test explicitly rather than silently passing.
+        if let Err(e) = std::fs::remove_file(&decisions_child) {
+            eprintln!(
+                "skipping opened_handle_reads_original_content_even_if_path_is_replaced_after_open: \
+                 could not remove a file with an open handle on this platform: {e}"
+            );
+            std::fs::remove_dir_all(&root).ok();
+            return;
+        }
+        std::fs::write(&decisions_child, "[]").expect("write replacement content");
+
+        let raw = read_bounded_file_string(file, &decisions_child, MAX_DECISIONS_FILE_BYTES)
+            .expect("read through the already-open handle must still succeed");
+        assert!(
+            raw.contains("swing_momentum"),
+            "must read the ORIGINAL content through the already-open handle, not the \
+             replacement written after open: {raw}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Defect 4, test 2: normal files pass -- confined, regular, identity
+    /// stable end to end (already exercised by
+    /// `normal_in_root_child_files_pass` above; this restates it directly
+    /// against the new handle-returning helper).
+    #[test]
+    fn open_confined_regular_child_normal_file_passes() {
+        let (root, review_dir) = write_fixture("defect4_normal", "[]");
+        let root_canon = std::fs::canonicalize(&root).expect("canonicalize root");
+        let candidate_canon = std::fs::canonicalize(&review_dir).expect("canonicalize candidate");
+        let manifest_child = candidate_canon.join("manifest.json");
+
+        let file = open_confined_regular_child(&manifest_child, &root_canon, &candidate_canon)
+            .expect("a normal in-root file must open");
+        assert!(file.metadata().expect("metadata").is_file());
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Defect 4, test 3: symlink escape refuses (restates the existing
+    /// `manifest_child_symlink_escape_refused`/`decisions_child_symlink_escape_refused`
+    /// coverage directly against the new handle-returning helper).
+    #[cfg(unix)]
+    #[test]
+    fn open_confined_regular_child_symlink_escape_refused() {
+        let (root, review_dir) = write_fixture("defect4_symlink_escape", "[]");
+        let outside = std::env::temp_dir().join(format!(
+            "mqk_daemon_defect4_outside_{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(&outside, "outside content").expect("write outside file");
+        std::fs::remove_file(review_dir.join("manifest.json")).expect("remove manifest");
+        std::os::unix::fs::symlink(&outside, review_dir.join("manifest.json"))
+            .expect("create manifest.json as a symlink escaping the root");
+
+        let root_canon = std::fs::canonicalize(&root).expect("canonicalize root");
+        let candidate_canon = std::fs::canonicalize(&review_dir).expect("canonicalize candidate");
+        let manifest_child = candidate_canon.join("manifest.json");
+
+        let err = open_confined_regular_child(&manifest_child, &root_canon, &candidate_canon)
+            .expect_err("a symlink escaping the root must be refused");
+        assert!(
+            err.contains("does not resolve inside the configured review artifact root"),
+            "got: {err}"
+        );
+
+        std::fs::remove_file(&outside).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Defect 4, test 4: an injectable replacement/swap between the
+    /// pre-open confinement check and the open is detected -- proven
+    /// deterministically against [`opened_handle_identity_matches`] (the
+    /// comparison [`open_confined_regular_child`] uses internally) with two
+    /// genuinely different files' metadata, rather than trying to win a
+    /// real filesystem race.
+    #[test]
+    fn identity_mismatch_between_two_different_files_is_detected() {
+        let root = std::env::temp_dir().join(format!(
+            "mqk_daemon_defect4_identity_{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).expect("create temp dir");
+        let path_a = root.join("a.txt");
+        let path_b = root.join("b.txt");
+        std::fs::write(&path_a, "content-a").expect("write a");
+        std::fs::write(&path_b, "a very different length of content for b").expect("write b");
+
+        let meta_a = std::fs::metadata(&path_a).expect("stat a");
+        let meta_b = std::fs::metadata(&path_b).expect("stat b");
+        assert!(
+            !opened_handle_identity_matches(&meta_a, &meta_b),
+            "two distinct files must never be treated as the same identity"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Defect 4, test 4 (companion): consistent identity (two stats of the
+    /// exact same unchanged file) is accepted -- the positive case for the
+    /// same comparison.
+    #[test]
+    fn identity_match_for_the_same_unchanged_file_is_accepted() {
+        let root = std::env::temp_dir().join(format!(
+            "mqk_daemon_defect4_identity_same_{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).expect("create temp dir");
+        let path = root.join("f.txt");
+        std::fs::write(&path, "stable content").expect("write fixture");
+
+        let meta_1 = std::fs::metadata(&path).expect("stat 1");
+        let meta_2 = std::fs::metadata(&path).expect("stat 2");
+        assert!(
+            opened_handle_identity_matches(&meta_1, &meta_2),
+            "two stats of the same unchanged file must match"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    /// Defect 4, test 5: nonregular child refuses (restates the existing
+    /// `non_regular_child_is_refused` coverage directly against the new
+    /// handle-returning helper).
+    #[test]
+    fn open_confined_regular_child_nonregular_child_refused() {
+        let (root, review_dir) = write_fixture("defect4_non_regular", "[]");
+        std::fs::remove_file(review_dir.join("manifest.json")).expect("remove manifest");
+        std::fs::create_dir_all(review_dir.join("manifest.json")).expect("create dir in its place");
+
+        let root_canon = std::fs::canonicalize(&root).expect("canonicalize root");
+        let candidate_canon = std::fs::canonicalize(&review_dir).expect("canonicalize candidate");
+        let manifest_child = candidate_canon.join("manifest.json");
+
+        let err = open_confined_regular_child(&manifest_child, &root_canon, &candidate_canon)
+            .expect_err("a directory in place of manifest.json must be refused");
+        assert!(err.contains("not a regular file"), "got: {err}");
+
         std::fs::remove_dir_all(&root).ok();
     }
 
