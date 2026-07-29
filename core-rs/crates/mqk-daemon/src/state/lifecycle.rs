@@ -33,8 +33,9 @@ use super::{
     spawn_reconcile_tick, uptime_secs,
 };
 use super::{
-    AcceptedArtifactProvenance, BrokerKind, DeploymentMode, OperatorAuthMode,
-    RuntimeLifecycleError, StatusSnapshot, StrategyMarketDataSource,
+    AcceptedArtifactProvenance, BrokerKind, DeploymentMode, DynamicSelectionLifecycleFaultSeam,
+    DynamicSelectionRuntimeState, OperatorAuthMode, RuntimeLifecycleError, StatusSnapshot,
+    StrategyMarketDataSource,
 };
 use super::{AppState, DAEMON_ENGINE_ID, RECONCILE_TICK_INTERVAL};
 
@@ -106,6 +107,170 @@ impl AutonomousArmRejection {
 }
 
 impl AppState {
+    /// DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7A: build the
+    /// authoritative, frozen dynamic-selection start snapshot for `run_id`.
+    ///
+    /// Resolves the dynamic-selection mode, the `MultiSymbolRuntimeConfig`,
+    /// and the calendar/session authority timestamp exactly once each, then
+    /// evaluates `evaluate_dynamic_selection_start_gate` exactly once. Never
+    /// touches `AppState` — the caller commits the returned value later, at
+    /// the same point `ProductionRuntimeStartEffects` publishes every other
+    /// run-start effect.
+    ///
+    /// `Ok(state)` covers every disposition except `PaperEnforcedRefused`:
+    /// `Off` (zero I/O beyond the one env-var mode read), `ShadowAllowed`,
+    /// `ShadowInvalid` (including a Shadow-mode `MultiSymbolRuntimeConfig`
+    /// resolution failure — Shadow never blocks the run), and
+    /// `PaperEnforcedAllowed`. `Err(_)` covers `PaperEnforcedRefused` and a
+    /// PaperEnforced-mode config-resolution failure — both refuse the whole
+    /// start before any run advancement, with no `AppState` mutation.
+    async fn build_dynamic_selection_start_snapshot(
+        self: &Arc<Self>,
+        run_id: uuid::Uuid,
+    ) -> Result<DynamicSelectionRuntimeState, RuntimeLifecycleError> {
+        use crate::dynamic_selection_start_gate::DynamicSelectionStartGateDisposition;
+        use mqk_portfolio::DynamicSelectionMode;
+
+        // Mode resolved exactly once: one env-var read, one pure live-lock
+        // combinator call. Never reread later in this function.
+        let mode_resolution =
+            crate::dynamic_selection_mode::resolve_dynamic_selection_mode_from_env();
+        let effective = crate::dynamic_selection_mode::effective_mode(
+            &mode_resolution,
+            self.deployment_mode(),
+            self.runtime_selection.broker_kind,
+        );
+
+        if effective.effective_mode == DynamicSelectionMode::Off {
+            // Off: zero further I/O — no config resolution, no calendar
+            // provider, no plan builder, no promotion query, no host pool.
+            return Ok(DynamicSelectionRuntimeState {
+                run_id,
+                disposition: DynamicSelectionStartGateDisposition::Off,
+                configured_mode: effective.configured_mode,
+                effective_mode: effective.effective_mode,
+                live_lock_applied: effective.live_lock_applied,
+                plan: None,
+                selected_pairs: Vec::new(),
+                host_pool: None,
+                reasons: Vec::new(),
+                approved_for_live: false,
+            });
+        }
+
+        // Non-Off (Shadow or PaperEnforced) is only reachable when
+        // deployment_mode==Paper && broker_kind==Alpaca (the mode live-lock
+        // proves this) — exactly the predicate the pre-existing
+        // daily-data-readiness/premarket-freshness gates above already use —
+        // so the resolution calls below are safe to make unconditionally.
+        let multi_symbol_config = match crate::state::build_multi_symbol_runtime_config_from_env() {
+            Ok(cfg) => cfg,
+            Err(err) => {
+                if effective.effective_mode == DynamicSelectionMode::Shadow {
+                    // Shadow never blocks the run — record the truthful
+                    // failure and let the legacy start continue.
+                    return Ok(DynamicSelectionRuntimeState {
+                        run_id,
+                        disposition: DynamicSelectionStartGateDisposition::ShadowInvalid,
+                        configured_mode: effective.configured_mode,
+                        effective_mode: effective.effective_mode,
+                        live_lock_applied: effective.live_lock_applied,
+                        plan: None,
+                        selected_pairs: Vec::new(),
+                        host_pool: None,
+                        reasons: vec![
+                            crate::dynamic_selection_start_gate::DynamicSelectionStartGateReason::PlanInvalid {
+                                truth_state: format!(
+                                    "multi_symbol_config_unavailable:{}",
+                                    err.as_str()
+                                ),
+                            },
+                        ],
+                        approved_for_live: false,
+                    });
+                }
+                return Err(RuntimeLifecycleError::forbidden(
+                    "runtime.start_refused.dynamic_selection_config_unavailable",
+                    "dynamic_selection",
+                    format!(
+                        "dynamic selection paper_enforced start refused: MultiSymbolRuntimeConfig \
+                         resolution failed: {} (DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7A)",
+                        err.as_str()
+                    ),
+                ));
+            }
+        };
+
+        // Calendar/session authority + provider/instrument registries,
+        // resolved exactly once from the same env-driven composition the
+        // daily-data-readiness gate above already uses
+        // (`daily_data_readiness::load_readiness_context_from_env`).
+        let readiness_context = crate::daily_data_readiness::load_readiness_context_from_env();
+        let configured_strategy_ids =
+            crate::daily_data_readiness::fleet_ids_from_env().unwrap_or_default();
+        let now_utc = Utc::now();
+        let run_id_str = run_id.to_string();
+
+        let context = crate::dynamic_selection_start_gate::build_dynamic_selection_context(
+            &run_id_str,
+            &effective,
+            &multi_symbol_config,
+            readiness_context.calendar_provider.as_ref(),
+            now_utc,
+        );
+
+        let plan_ctx = crate::dynamic_selection_plan_builder::DynamicSelectionPlanBuildContext {
+            db: self.db.as_ref(),
+            st: self,
+            calendar_provider: readiness_context.calendar_provider.as_ref(),
+            provider_configs: &readiness_context.provider_configs,
+            instruments: &readiness_context.instruments,
+        };
+
+        let outcome = crate::dynamic_selection_start_gate::evaluate_dynamic_selection_start_gate(
+            &plan_ctx,
+            &multi_symbol_config,
+            &configured_strategy_ids,
+            &effective,
+            context,
+            &run_id_str,
+            now_utc,
+        )
+        .await;
+
+        if outcome.disposition == DynamicSelectionStartGateDisposition::PaperEnforcedRefused {
+            let reason_codes: Vec<&'static str> =
+                outcome.reasons.iter().map(|r| r.code()).collect();
+            return Err(RuntimeLifecycleError::forbidden(
+                "runtime.start_refused.dynamic_selection_paper_enforced_refused",
+                "dynamic_selection_start_gate",
+                format!(
+                    "dynamic selection paper_enforced start gate refused start: run_id={run_id}; \
+                     reasons={reason_codes:?} (DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7A)"
+                ),
+            ));
+        }
+
+        let selected_pairs = outcome
+            .plan
+            .as_ref()
+            .map(crate::dynamic_selection_start_gate::selected_host_pool_keys)
+            .unwrap_or_default();
+
+        Ok(DynamicSelectionRuntimeState {
+            run_id,
+            disposition: outcome.disposition,
+            configured_mode: effective.configured_mode,
+            effective_mode: effective.effective_mode,
+            live_lock_applied: effective.live_lock_applied,
+            plan: outcome.plan.map(Arc::new),
+            selected_pairs,
+            host_pool: outcome.host_pool.map(Arc::new),
+            reasons: outcome.reasons,
+            approved_for_live: false,
+        })
+    }
+
     pub async fn start_execution_runtime(
         self: &Arc<Self>,
     ) -> Result<StatusSnapshot, RuntimeLifecycleError> {
@@ -842,6 +1007,51 @@ impl AppState {
 
         let run_id = self.create_or_reuse_run_for_start(&db).await?;
 
+        // BUNDLE-7-PHASE-7A fault seam: after run row creation, before
+        // dynamic-selection evaluation. No AppState selection state exists
+        // yet — nothing to clean up beyond returning the error.
+        if self
+            .dynamic_selection_fault_seam_is(
+                DynamicSelectionLifecycleFaultSeam::AfterRunRowCreation,
+            )
+            .await
+        {
+            return Err(RuntimeLifecycleError::internal(
+                "dynamic_selection.fault_seam.after_run_row_creation",
+                "test-injected fault after run row creation",
+            ));
+        }
+
+        // DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7A: build the frozen
+        // dynamic-selection outcome for this exact run_id now — `run_id`
+        // must exist before the evaluator can be called (it validates the
+        // caller-supplied context's run_id against this one). A
+        // `PaperEnforcedRefused` disposition refuses the whole start here,
+        // before any run advancement — the run row is left `Created`
+        // (unarmed/unbegun/unspawned), matching this codebase's existing
+        // fail-closed convention for other pre-advancement refusals (see
+        // `RunLinkPersistFailed` below). Every other disposition (`Off`,
+        // `ShadowAllowed`, `ShadowInvalid`, `PaperEnforcedAllowed`) is
+        // committed to `AppState` later, inside the same atomic
+        // start-commit sequence that publishes every other run-start
+        // effect — never here.
+        let dynamic_selection_outcome = self.build_dynamic_selection_start_snapshot(run_id).await?;
+
+        // BUNDLE-7-PHASE-7A fault seam: after selection evaluation, before
+        // effects construction. No AppState selection state has been
+        // committed yet — nothing to clean up beyond returning the error.
+        if self
+            .dynamic_selection_fault_seam_is(
+                DynamicSelectionLifecycleFaultSeam::AfterSelectionEvaluation,
+            )
+            .await
+        {
+            return Err(RuntimeLifecycleError::internal(
+                "dynamic_selection.fault_seam.after_selection_evaluation",
+                "test-injected fault after selection evaluation",
+            ));
+        }
+
         // DAILY-DATA-READINESS-01C-ENFORCEMENT-01 / REPAIR 3-4
         // (DAILY-DATA-READINESS-01C-CLOSURE-REPAIR-01): advance the
         // created/reused run to an active execution loop. `run_id` now
@@ -865,6 +1075,7 @@ impl AppState {
             artifact_intake: std::sync::Mutex::new(Some(artifact_intake)),
             native_strategy_bootstrap: std::sync::Mutex::new(Some(native_strategy_bootstrap)),
             orchestrator: std::sync::Mutex::new(None),
+            dynamic_selection_outcome: std::sync::Mutex::new(Some(dynamic_selection_outcome)),
         };
         let mut lifecycle_trace: Vec<&'static str> = Vec::new();
         crate::daily_data_readiness::advance_run_to_active(
@@ -1084,6 +1295,12 @@ impl AppState {
     ) -> Result<StatusSnapshot, RuntimeLifecycleError> {
         let _op = self.lifecycle_op.lock().await;
         self.reap_finished_execution_loop().await?;
+        // BUNDLE-7-PHASE-7A: an operator-initiated stop immediately
+        // disowns dynamic-selection authority — before any DB call below
+        // that could fail, and before either the truth-mismatch conflict
+        // return or the no-local-owner idle return. Idempotent no-op when
+        // already `None`.
+        self.clear_dynamic_selection_runtime_state().await;
         let handle = match self.take_execution_loop_for_control().await? {
             Some(handle) => handle,
             None => {
@@ -1144,6 +1361,11 @@ impl AppState {
     ) -> Result<StatusSnapshot, RuntimeLifecycleError> {
         let _op = self.lifecycle_op.lock().await;
         self.reap_finished_execution_loop().await?;
+        // BUNDLE-7-PHASE-7A: an operator-initiated halt immediately disowns
+        // dynamic-selection authority — before any DB call below that could
+        // fail, and before either the truth-mismatch conflict return or the
+        // no-local-owner path. Idempotent no-op when already `None`.
+        self.clear_dynamic_selection_runtime_state().await;
 
         let handle = self.take_execution_loop_for_control().await?;
         if handle.is_none() {
@@ -1341,6 +1563,15 @@ impl AppState {
                 }
             }
         }
+        // BUNDLE-7-PHASE-7A: unlike the pre-existing `accepted_artifact`/
+        // `native_strategy_bootstrap` fields (which this function does not
+        // clear — a pre-existing asymmetry, not introduced here), shutdown
+        // MUST clear dynamic-selection state explicitly: it runs regardless
+        // of whether a local loop handle was found, and regardless of the
+        // DB `stop_run` outcome above, so the process never carries stale
+        // selection authority into the next boot's status truth. Idempotent
+        // no-op when already `None`.
+        self.clear_dynamic_selection_runtime_state().await;
     }
 }
 
@@ -1368,6 +1599,11 @@ struct ProductionRuntimeStartEffects<'a> {
     native_strategy_bootstrap: std::sync::Mutex<Option<NativeStrategyBootstrap>>,
     /// Populated by `start_runtime_effects`, consumed by `spawn_loop`.
     orchestrator: std::sync::Mutex<Option<DaemonOrchestrator>>,
+    /// BUNDLE-7-PHASE-7A: the already-evaluated, frozen dynamic-selection
+    /// outcome for this run, consumed exactly once by `start_runtime_effects`
+    /// (committed to `AppState` near the end, alongside
+    /// `native_strategy_bootstrap`).
+    dynamic_selection_outcome: std::sync::Mutex<Option<DynamicSelectionRuntimeState>>,
 }
 
 #[async_trait::async_trait]
@@ -1392,6 +1628,28 @@ impl crate::daily_data_readiness::RuntimeStartEffects for ProductionRuntimeStart
                     _ => RuntimeStartEffectsError::internal(fault_class, message),
                 }
             })?;
+
+        // BUNDLE-7-PHASE-7A fault seam: after orchestrator construction,
+        // before arm/begin/tick. No dynamic-selection state has been
+        // committed yet — release the freshly-acquired lease and return;
+        // nothing else to clean up.
+        if self
+            .state
+            .dynamic_selection_fault_seam_is(
+                DynamicSelectionLifecycleFaultSeam::AfterOrchestratorConstruction,
+            )
+            .await
+        {
+            if let Err(rel_err) = orchestrator.release_runtime_leadership().await {
+                tracing::warn!(
+                    "runtime_lease_release_failed_on_dynamic_selection_fault_seam error={rel_err}"
+                );
+            }
+            return Err(RuntimeStartEffectsError::internal(
+                "dynamic_selection.fault_seam.after_orchestrator_construction",
+                "test-injected fault after orchestrator construction",
+            ));
+        }
 
         if let Err(err) = mqk_db::arm_run(&self.db, run_id).await {
             if let Err(rel_err) = orchestrator.release_runtime_leadership().await {
@@ -1454,6 +1712,28 @@ impl crate::daily_data_readiness::RuntimeStartEffects for ProductionRuntimeStart
             return Err(RuntimeStartEffectsError::internal(
                 "post-initial-tick heartbeat refresh failed",
                 err.to_string(),
+            ));
+        }
+
+        // BUNDLE-7-PHASE-7A fault seam: after run arm/begin/initial tick
+        // (and the post-tick heartbeat refresh), before any counter
+        // reset/snapshot/provenance/bootstrap/selection commit. No
+        // dynamic-selection state has been committed yet.
+        if self
+            .state
+            .dynamic_selection_fault_seam_is(
+                DynamicSelectionLifecycleFaultSeam::AfterRunArmBeginInitialTick,
+            )
+            .await
+        {
+            if let Err(rel_err) = orchestrator.release_runtime_leadership().await {
+                tracing::warn!(
+                    "runtime_lease_release_failed_on_dynamic_selection_fault_seam error={rel_err}"
+                );
+            }
+            return Err(RuntimeStartEffectsError::internal(
+                "dynamic_selection.fault_seam.after_run_arm_begin_initial_tick",
+                "test-injected fault after run arm/begin/initial tick",
             ));
         }
 
@@ -1528,6 +1808,54 @@ impl crate::daily_data_readiness::RuntimeStartEffects for ProductionRuntimeStart
             *self.state.native_strategy_bootstrap.lock().await = Some(bootstrap);
         }
 
+        // BUNDLE-7-PHASE-7A: commit the already-evaluated, frozen
+        // dynamic-selection outcome now — after every other run-start
+        // effect above has succeeded, immediately before this run is handed
+        // to `spawn_loop`. From this point on a spawn conflict/failure MUST
+        // clear what was just committed (see the fault seam and the
+        // ownership-conflict branch in `spawn_loop` below) — this function
+        // deliberately never leaves committed selection state paired with
+        // no local loop owner.
+        //
+        // The `.take()` is hoisted for the same reason as
+        // `bootstrap_to_store` above: keep the `std::sync::MutexGuard`
+        // temporary from living across the `.await` in
+        // `commit_dynamic_selection_runtime_state`.
+        let dynamic_selection_outcome_to_commit = self
+            .dynamic_selection_outcome
+            .lock()
+            .expect("dynamic_selection_outcome mutex poisoned")
+            .take();
+        if let Some(outcome) = dynamic_selection_outcome_to_commit {
+            self.state
+                .commit_dynamic_selection_runtime_state(outcome)
+                .await;
+        }
+
+        // BUNDLE-7-PHASE-7A fault seam: immediately after the process-local
+        // selection commit above, before this function returns `Ok(())`.
+        // Selection state IS committed at this point — clear it before
+        // propagating the failure, so no observer can see committed
+        // selection state with no corresponding local loop owner.
+        if self
+            .state
+            .dynamic_selection_fault_seam_is(
+                DynamicSelectionLifecycleFaultSeam::AfterProcessLocalSelectionCommit,
+            )
+            .await
+        {
+            self.state.clear_dynamic_selection_runtime_state().await;
+            if let Err(rel_err) = orchestrator.release_runtime_leadership().await {
+                tracing::warn!(
+                    "runtime_lease_release_failed_on_dynamic_selection_fault_seam error={rel_err}"
+                );
+            }
+            return Err(RuntimeStartEffectsError::internal(
+                "dynamic_selection.fault_seam.after_process_local_selection_commit",
+                "test-injected fault after process-local selection commit",
+            ));
+        }
+
         *self
             .orchestrator
             .lock()
@@ -1541,6 +1869,24 @@ impl crate::daily_data_readiness::RuntimeStartEffects for ProductionRuntimeStart
     ) -> Result<(), crate::daily_data_readiness::RuntimeStartEffectsError> {
         use crate::daily_data_readiness::RuntimeStartEffectsError;
 
+        // BUNDLE-7-PHASE-7A fault seam: immediately before loop spawn.
+        // Selection state was already committed by `start_runtime_effects`
+        // above — clear it before propagating the failure so no observer
+        // can see committed selection state with no local loop owner.
+        if self
+            .state
+            .dynamic_selection_fault_seam_is(
+                DynamicSelectionLifecycleFaultSeam::ImmediatelyBeforeLoopSpawn,
+            )
+            .await
+        {
+            self.state.clear_dynamic_selection_runtime_state().await;
+            return Err(RuntimeStartEffectsError::internal(
+                "dynamic_selection.fault_seam.immediately_before_loop_spawn",
+                "test-injected fault immediately before loop spawn",
+            ));
+        }
+
         let orchestrator = self
             .orchestrator
             .lock()
@@ -1550,6 +1896,11 @@ impl crate::daily_data_readiness::RuntimeStartEffects for ProductionRuntimeStart
         let handle = spawn_execution_loop(Arc::clone(self.state), orchestrator, run_id);
         let mut lock = self.state.execution_loop.lock().await;
         if lock.is_some() {
+            // BUNDLE-7-PHASE-7A: real loop-ownership conflict — selection
+            // state was already committed above; a duplicate loop is being
+            // refused, so no local loop will ever own this commit. Clear it
+            // (never leave committed selection state paired with no owner).
+            self.state.clear_dynamic_selection_runtime_state().await;
             return Err(RuntimeStartEffectsError::conflict(
                 "runtime.start_refused.local_ownership_conflict",
                 "runtime ownership changed while starting; refusing duplicate loop",
@@ -1557,5 +1908,594 @@ impl crate::daily_data_readiness::RuntimeStartEffects for ProductionRuntimeStart
         }
         *lock = Some(handle);
         Ok(())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7A: `build_dynamic_selection_
+// start_snapshot` disposition-determination unit proof.
+//
+// These exercise the private method directly (in-crate, same module tree),
+// deliberately bypassing every earlier unrelated start gate (WS continuity,
+// daily-data-readiness, artifact intake, capital policy) that a full
+// `start_execution_runtime()` call would also have to satisfy for
+// Paper+Alpaca — none of which this patch touches or needs to re-prove.
+// None of these tests require a database connection or Alpaca credentials:
+// `build_dynamic_selection_start_snapshot` never constructs a broker.
+//
+// Full end-to-end lifecycle wiring (atomic commit, fault seams, cleanup on
+// every exit path, real loop-ownership-conflict cleanup) is proven
+// separately in `tests/scenario_bundle7_phase7a_lifecycle_wiring_01.rs`
+// against Paper+Paper (Off disposition, zero Alpaca dependency) using only
+// the public API.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod dynamic_selection_start_snapshot_tests {
+    use super::*;
+    use std::sync::OnceLock;
+    use tokio::sync::Mutex as TokioMutex;
+
+    /// Serializes every test in this module that touches the process-global
+    /// `MQK_STRATEGY_SYMBOL` / `MQK_STRATEGY_IDS` / `MQK_STRATEGY_MD_TIMEFRAME`
+    /// / `MQK_DYNAMIC_STRATEGY_SYMBOL_SELECTION_MODE` env vars — mirrors the
+    /// `env_lock()` convention already used by the daily-data-readiness
+    /// start-gate scenario tests. Scoped to this compiled test binary
+    /// (`cargo test -p mqk-daemon --lib`) only.
+    fn env_lock() -> &'static TokioMutex<()> {
+        static LOCK: OnceLock<TokioMutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| TokioMutex::new(()))
+    }
+
+    fn clear_dynamic_selection_env() {
+        std::env::remove_var(
+            crate::dynamic_selection_mode::DYNAMIC_STRATEGY_SYMBOL_SELECTION_MODE_ENV,
+        );
+        std::env::remove_var("MQK_STRATEGY_SYMBOL");
+        std::env::remove_var("MQK_STRATEGY_IDS");
+        std::env::remove_var("MQK_STRATEGY_MD_TIMEFRAME");
+    }
+
+    /// Off: broker=Paper (never Alpaca) live-locks to Off regardless of the
+    /// configured mode env var — proves the live lock AND that Off requires
+    /// no DB and no `MQK_STRATEGY_SYMBOL`/`MQK_STRATEGY_IDS` configuration
+    /// (zero selection I/O).
+    #[tokio::test]
+    async fn off_via_live_lock_needs_no_db_and_no_symbol_config() {
+        let _guard = env_lock().lock().await;
+        clear_dynamic_selection_env();
+        std::env::set_var(
+            crate::dynamic_selection_mode::DYNAMIC_STRATEGY_SYMBOL_SELECTION_MODE_ENV,
+            "shadow",
+        );
+
+        let state = Arc::new(AppState::new_for_test_with_mode_and_broker(
+            DeploymentMode::Paper,
+            BrokerKind::Paper,
+        ));
+        assert!(state.db.is_none(), "precondition: no DB configured");
+
+        let run_id = uuid::Uuid::new_v5(
+            &uuid::Uuid::NAMESPACE_DNS,
+            b"mqk-daemon.phase7a.off_live_lock",
+        );
+        let result = state.build_dynamic_selection_start_snapshot(run_id).await;
+        clear_dynamic_selection_env();
+
+        let outcome = result.expect("Off must never refuse the start");
+        assert_eq!(
+            outcome.disposition,
+            crate::dynamic_selection_start_gate::DynamicSelectionStartGateDisposition::Off
+        );
+        assert_eq!(
+            outcome.configured_mode,
+            mqk_portfolio::DynamicSelectionMode::Shadow,
+            "configured_mode must reflect the raw env value, even though it was demoted"
+        );
+        assert_eq!(
+            outcome.effective_mode,
+            mqk_portfolio::DynamicSelectionMode::Off
+        );
+        assert!(
+            outcome.live_lock_applied,
+            "broker=Paper must trigger the live lock"
+        );
+        assert!(outcome.plan.is_none());
+        assert!(outcome.selected_pairs.is_empty());
+        assert!(outcome.host_pool.is_none());
+        assert!(outcome.reasons.is_empty());
+        assert!(!outcome.approved_for_live);
+        assert_eq!(outcome.run_id, run_id);
+    }
+
+    /// Off: mode env var unset (the honest default) on Paper+Alpaca — Off
+    /// without any live-lock demotion (`live_lock_applied` must be `false`
+    /// since `configured_mode` was already `Off`, not forced there).
+    #[tokio::test]
+    async fn off_by_default_configuration_is_not_live_locked() {
+        let _guard = env_lock().lock().await;
+        clear_dynamic_selection_env();
+
+        let state = Arc::new(AppState::new_for_test_with_mode_and_broker(
+            DeploymentMode::Paper,
+            BrokerKind::Alpaca,
+        ));
+        let run_id = uuid::Uuid::new_v5(
+            &uuid::Uuid::NAMESPACE_DNS,
+            b"mqk-daemon.phase7a.off_default",
+        );
+        let outcome = state
+            .build_dynamic_selection_start_snapshot(run_id)
+            .await
+            .expect("Off must never refuse the start");
+
+        assert_eq!(
+            outcome.disposition,
+            crate::dynamic_selection_start_gate::DynamicSelectionStartGateDisposition::Off
+        );
+        assert_eq!(
+            outcome.configured_mode,
+            mqk_portfolio::DynamicSelectionMode::Off
+        );
+        assert!(!outcome.live_lock_applied);
+    }
+
+    /// Shadow, `MultiSymbolRuntimeConfig` resolution itself fails
+    /// (`MQK_STRATEGY_SYMBOL` unset) — Shadow must never block the run: the
+    /// truthful failure is recorded as `ShadowInvalid` with no plan/pool.
+    #[tokio::test]
+    async fn shadow_with_unresolvable_config_is_invalid_not_blocking() {
+        let _guard = env_lock().lock().await;
+        clear_dynamic_selection_env();
+        std::env::set_var(
+            crate::dynamic_selection_mode::DYNAMIC_STRATEGY_SYMBOL_SELECTION_MODE_ENV,
+            "shadow",
+        );
+
+        let state = Arc::new(AppState::new_for_test_with_mode_and_broker(
+            DeploymentMode::Paper,
+            BrokerKind::Alpaca,
+        ));
+        let run_id = uuid::Uuid::new_v5(
+            &uuid::Uuid::NAMESPACE_DNS,
+            b"mqk-daemon.phase7a.shadow_no_config",
+        );
+        let result = state.build_dynamic_selection_start_snapshot(run_id).await;
+        clear_dynamic_selection_env();
+
+        let outcome =
+            result.expect("Shadow must never refuse the start, even on its own config failure");
+        assert_eq!(
+            outcome.disposition,
+            crate::dynamic_selection_start_gate::DynamicSelectionStartGateDisposition::ShadowInvalid
+        );
+        assert!(outcome.plan.is_none());
+        assert!(outcome.host_pool.is_none());
+        assert!(outcome.selected_pairs.is_empty());
+        assert_eq!(outcome.reasons.len(), 1);
+        assert!(matches!(
+            &outcome.reasons[0],
+            crate::dynamic_selection_start_gate::DynamicSelectionStartGateReason::PlanInvalid { truth_state }
+                if truth_state.starts_with("multi_symbol_config_unavailable:")
+        ));
+    }
+
+    /// PaperEnforced, `MultiSymbolRuntimeConfig` resolution fails — must
+    /// refuse the whole start (`Err`), before any run advancement.
+    #[tokio::test]
+    async fn paper_enforced_with_unresolvable_config_is_refused() {
+        let _guard = env_lock().lock().await;
+        clear_dynamic_selection_env();
+        std::env::set_var(
+            crate::dynamic_selection_mode::DYNAMIC_STRATEGY_SYMBOL_SELECTION_MODE_ENV,
+            "paper_enforced",
+        );
+
+        let state = Arc::new(AppState::new_for_test_with_mode_and_broker(
+            DeploymentMode::Paper,
+            BrokerKind::Alpaca,
+        ));
+        let run_id = uuid::Uuid::new_v5(
+            &uuid::Uuid::NAMESPACE_DNS,
+            b"mqk-daemon.phase7a.paper_enforced_no_config",
+        );
+        let result = state.build_dynamic_selection_start_snapshot(run_id).await;
+        clear_dynamic_selection_env();
+
+        let err = result.expect_err("PaperEnforced must refuse when config cannot be resolved");
+        assert_eq!(
+            err.fault_class(),
+            "runtime.start_refused.dynamic_selection_config_unavailable"
+        );
+    }
+
+    /// Shadow, `MultiSymbolRuntimeConfig` resolves successfully but no DB is
+    /// configured — the evaluator's own `DbUnavailable` path fires
+    /// (distinct from this function's own config-resolution failure above).
+    #[tokio::test]
+    async fn shadow_with_resolved_config_and_no_db_is_invalid_via_db_unavailable() {
+        let _guard = env_lock().lock().await;
+        clear_dynamic_selection_env();
+        std::env::set_var(
+            crate::dynamic_selection_mode::DYNAMIC_STRATEGY_SYMBOL_SELECTION_MODE_ENV,
+            "shadow",
+        );
+        std::env::set_var("MQK_STRATEGY_SYMBOL", "AAPL");
+        std::env::set_var("MQK_STRATEGY_IDS", "intraday_scalper");
+        std::env::set_var("MQK_STRATEGY_MD_TIMEFRAME", "5m");
+
+        let state = Arc::new(AppState::new_for_test_with_mode_and_broker(
+            DeploymentMode::Paper,
+            BrokerKind::Alpaca,
+        ));
+        assert!(state.db.is_none(), "precondition: no DB configured");
+        let run_id = uuid::Uuid::new_v5(
+            &uuid::Uuid::NAMESPACE_DNS,
+            b"mqk-daemon.phase7a.shadow_db_unavail",
+        );
+        let result = state.build_dynamic_selection_start_snapshot(run_id).await;
+        clear_dynamic_selection_env();
+
+        let outcome = result.expect("Shadow must never refuse the start");
+        assert_eq!(
+            outcome.disposition,
+            crate::dynamic_selection_start_gate::DynamicSelectionStartGateDisposition::ShadowInvalid
+        );
+        assert!(outcome.plan.is_none());
+        assert!(outcome.host_pool.is_none());
+        assert_eq!(
+            outcome.reasons,
+            vec![
+                crate::dynamic_selection_start_gate::DynamicSelectionStartGateReason::DbUnavailable
+            ]
+        );
+    }
+
+    /// PaperEnforced, config resolves but no DB — the evaluator's own
+    /// `DbUnavailable` refusal fires (distinct from this function's own
+    /// config-resolution refusal above).
+    #[tokio::test]
+    async fn paper_enforced_with_resolved_config_and_no_db_is_refused_via_db_unavailable() {
+        let _guard = env_lock().lock().await;
+        clear_dynamic_selection_env();
+        std::env::set_var(
+            crate::dynamic_selection_mode::DYNAMIC_STRATEGY_SYMBOL_SELECTION_MODE_ENV,
+            "paper_enforced",
+        );
+        std::env::set_var("MQK_STRATEGY_SYMBOL", "AAPL");
+        std::env::set_var("MQK_STRATEGY_IDS", "intraday_scalper");
+        std::env::set_var("MQK_STRATEGY_MD_TIMEFRAME", "5m");
+
+        let state = Arc::new(AppState::new_for_test_with_mode_and_broker(
+            DeploymentMode::Paper,
+            BrokerKind::Alpaca,
+        ));
+        let run_id = uuid::Uuid::new_v5(
+            &uuid::Uuid::NAMESPACE_DNS,
+            b"mqk-daemon.phase7a.paper_enforced_db_unavail",
+        );
+        let result = state.build_dynamic_selection_start_snapshot(run_id).await;
+        clear_dynamic_selection_env();
+
+        let err = result.expect_err("PaperEnforced must refuse when DB is unavailable");
+        assert_eq!(
+            err.fault_class(),
+            "runtime.start_refused.dynamic_selection_paper_enforced_refused"
+        );
+    }
+
+    /// Live deployments resolve Off regardless of configured mode, and
+    /// cannot store a pool (Off never builds one) — proves the live lock for
+    /// the `LiveCapital` boundary specifically, not just non-Alpaca brokers.
+    #[tokio::test]
+    async fn live_capital_resolves_off_and_stores_no_pool() {
+        let _guard = env_lock().lock().await;
+        clear_dynamic_selection_env();
+        std::env::set_var(
+            crate::dynamic_selection_mode::DYNAMIC_STRATEGY_SYMBOL_SELECTION_MODE_ENV,
+            "paper_enforced",
+        );
+
+        let state = Arc::new(AppState::new_for_test_with_mode_and_broker(
+            DeploymentMode::LiveCapital,
+            BrokerKind::Alpaca,
+        ));
+        let run_id = uuid::Uuid::new_v5(
+            &uuid::Uuid::NAMESPACE_DNS,
+            b"mqk-daemon.phase7a.live_capital_off",
+        );
+        let result = state.build_dynamic_selection_start_snapshot(run_id).await;
+        clear_dynamic_selection_env();
+
+        let outcome = result.expect("Off must never refuse the start");
+        assert_eq!(
+            outcome.disposition,
+            crate::dynamic_selection_start_gate::DynamicSelectionStartGateDisposition::Off
+        );
+        assert!(outcome.live_lock_applied);
+        assert!(outcome.host_pool.is_none());
+        assert!(outcome.plan.is_none());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7A: cleanup-contract proof.
+//
+// `commit_dynamic_selection_runtime_state` is `pub(crate)`, so these must be
+// in-crate tests. They deliberately bypass the credential-gated start path
+// entirely (see `tests/scenario_bundle7_phase7a_lifecycle_wiring_01.rs` for
+// why a real `start_execution_runtime()` success cannot be driven here
+// without Alpaca credentials this patch must not load): a fixture
+// `DynamicSelectionRuntimeState` is committed directly, then the real public
+// `stop_execution_runtime`/`halt_execution_runtime`/`stop_for_shutdown`/
+// `reap_finished_execution_loop` functions are exercised to prove they clear
+// it — genuine proof of the cleanup wiring this patch adds, independent of
+// whichever disposition produced the committed state.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod dynamic_selection_cleanup_contract_tests {
+    use super::*;
+
+    fn fixture_off_state(run_id: uuid::Uuid) -> DynamicSelectionRuntimeState {
+        DynamicSelectionRuntimeState {
+            run_id,
+            disposition:
+                crate::dynamic_selection_start_gate::DynamicSelectionStartGateDisposition::Off,
+            configured_mode: mqk_portfolio::DynamicSelectionMode::Off,
+            effective_mode: mqk_portfolio::DynamicSelectionMode::Off,
+            live_lock_applied: false,
+            plan: None,
+            selected_pairs: Vec::new(),
+            host_pool: None,
+            reasons: Vec::new(),
+            approved_for_live: false,
+        }
+    }
+
+    /// `stop_execution_runtime` clears committed dynamic-selection state
+    /// even with no active local loop and no DB configured (the "idle,
+    /// nothing to stop" path).
+    #[tokio::test]
+    async fn stop_clears_committed_state_with_no_active_loop_and_no_db() {
+        let state = Arc::new(AppState::new_for_test_with_mode_and_broker(
+            DeploymentMode::Paper,
+            BrokerKind::Alpaca,
+        ));
+        let run_id = uuid::Uuid::new_v5(
+            &uuid::Uuid::NAMESPACE_DNS,
+            b"mqk-daemon.phase7a.cleanup.stop",
+        );
+        state
+            .commit_dynamic_selection_runtime_state(fixture_off_state(run_id))
+            .await;
+        assert!(state.dynamic_selection_runtime_snapshot().await.is_some());
+
+        state
+            .stop_execution_runtime()
+            .await
+            .expect("stop with no active loop and no DB must succeed (idle status)");
+        assert!(
+            state.dynamic_selection_runtime_snapshot().await.is_none(),
+            "stop_execution_runtime must clear dynamic-selection state"
+        );
+    }
+
+    /// `halt_execution_runtime` clears committed dynamic-selection state
+    /// *even when the overall call itself errors* on a missing DB — the
+    /// clear is placed before `db_pool()?` deliberately, so local
+    /// dynamic-selection authority is disowned the instant an operator halts,
+    /// independent of whether the DB bookkeeping step later succeeds.
+    #[tokio::test]
+    async fn halt_clears_committed_state_even_when_the_call_itself_errors() {
+        let state = Arc::new(AppState::new_for_test_with_mode_and_broker(
+            DeploymentMode::Paper,
+            BrokerKind::Alpaca,
+        ));
+        let run_id = uuid::Uuid::new_v5(
+            &uuid::Uuid::NAMESPACE_DNS,
+            b"mqk-daemon.phase7a.cleanup.halt",
+        );
+        state
+            .commit_dynamic_selection_runtime_state(fixture_off_state(run_id))
+            .await;
+        assert!(state.dynamic_selection_runtime_snapshot().await.is_some());
+
+        let err = state
+            .halt_execution_runtime()
+            .await
+            .expect_err("halt without a configured DB must error at db_pool()");
+        assert_eq!(
+            err.fault_class(),
+            "runtime.start_refused.service_unavailable"
+        );
+        assert!(
+            state.dynamic_selection_runtime_snapshot().await.is_none(),
+            "halt_execution_runtime must clear dynamic-selection state before the DB-dependent \
+             steps that can fail, not only on a fully successful halt"
+        );
+    }
+
+    /// `stop_for_shutdown` clears committed dynamic-selection state even
+    /// with no active local loop — unlike the pre-existing
+    /// `accepted_artifact`/`native_strategy_bootstrap` fields (which this
+    /// function does not clear at all), this is new, required behavior.
+    #[tokio::test]
+    async fn stop_for_shutdown_clears_committed_state_with_no_active_loop() {
+        let state = Arc::new(AppState::new_for_test_with_mode_and_broker(
+            DeploymentMode::Paper,
+            BrokerKind::Alpaca,
+        ));
+        let run_id = uuid::Uuid::new_v5(
+            &uuid::Uuid::NAMESPACE_DNS,
+            b"mqk-daemon.phase7a.cleanup.shutdown",
+        );
+        state
+            .commit_dynamic_selection_runtime_state(fixture_off_state(run_id))
+            .await;
+
+        state.stop_for_shutdown().await;
+        assert!(
+            state.dynamic_selection_runtime_snapshot().await.is_none(),
+            "stop_for_shutdown must clear dynamic-selection state"
+        );
+    }
+
+    /// Cleanup is idempotent: clearing twice (or clearing when already
+    /// `None`) never panics and always leaves `None`.
+    #[tokio::test]
+    async fn clear_is_idempotent() {
+        let state = Arc::new(AppState::new_for_test_with_mode_and_broker(
+            DeploymentMode::Paper,
+            BrokerKind::Alpaca,
+        ));
+        state.clear_dynamic_selection_runtime_state().await;
+        assert!(state.dynamic_selection_runtime_snapshot().await.is_none());
+
+        let run_id = uuid::Uuid::new_v5(
+            &uuid::Uuid::NAMESPACE_DNS,
+            b"mqk-daemon.phase7a.cleanup.idempotent",
+        );
+        state
+            .commit_dynamic_selection_runtime_state(fixture_off_state(run_id))
+            .await;
+        state.clear_dynamic_selection_runtime_state().await;
+        state.clear_dynamic_selection_runtime_state().await;
+        assert!(state.dynamic_selection_runtime_snapshot().await.is_none());
+    }
+
+    /// A fresh commit is always a full overwrite, never a merge with a
+    /// stale prior value — proves restart-cannot-reuse-stale-state at the
+    /// container level, independent of run-creation machinery.
+    #[tokio::test]
+    async fn commit_always_overwrites_never_merges() {
+        let state = Arc::new(AppState::new_for_test_with_mode_and_broker(
+            DeploymentMode::Paper,
+            BrokerKind::Alpaca,
+        ));
+        let run_a = uuid::Uuid::new_v5(
+            &uuid::Uuid::NAMESPACE_DNS,
+            b"mqk-daemon.phase7a.cleanup.run_a",
+        );
+        let run_b = uuid::Uuid::new_v5(
+            &uuid::Uuid::NAMESPACE_DNS,
+            b"mqk-daemon.phase7a.cleanup.run_b",
+        );
+
+        state
+            .commit_dynamic_selection_runtime_state(fixture_off_state(run_a))
+            .await;
+        assert_eq!(
+            state
+                .dynamic_selection_runtime_snapshot()
+                .await
+                .unwrap()
+                .run_id,
+            run_a
+        );
+
+        state
+            .commit_dynamic_selection_runtime_state(fixture_off_state(run_b))
+            .await;
+        let after = state.dynamic_selection_runtime_snapshot().await.unwrap();
+        assert_eq!(
+            after.run_id, run_b,
+            "the second commit must fully replace the first"
+        );
+    }
+
+    /// `reap_finished_execution_loop` clears committed dynamic-selection
+    /// state when it reaps a loop that finished on its own (crash/supervisor
+    /// exit), independent of `stop_execution_runtime`/`halt_execution_runtime`
+    /// ever being called.
+    #[tokio::test]
+    async fn reap_of_a_finished_loop_clears_committed_state() {
+        let state = Arc::new(AppState::new_for_test_with_mode_and_broker(
+            DeploymentMode::Paper,
+            BrokerKind::Alpaca,
+        ));
+        let run_id = uuid::Uuid::new_v5(
+            &uuid::Uuid::NAMESPACE_DNS,
+            b"mqk-daemon.phase7a.cleanup.reap",
+        );
+        state
+            .commit_dynamic_selection_runtime_state(fixture_off_state(run_id))
+            .await;
+
+        let (stop_tx, _stop_rx) = tokio::sync::watch::channel(ExecutionLoopCommand::Run);
+        let join_handle =
+            tokio::spawn(async { crate::state::types::ExecutionLoopExit { note: None } });
+        // Let the trivial task actually finish before installing it, so
+        // `reap_finished_execution_loop`'s `is_finished()` check takes the
+        // "already finished" branch deterministically.
+        while !join_handle.is_finished() {
+            tokio::task::yield_now().await;
+        }
+        let handle = crate::state::types::ExecutionLoopHandle {
+            run_id,
+            stop_tx,
+            join_handle,
+        };
+        *state.execution_loop.lock().await = Some(handle);
+
+        let exit = state
+            .reap_finished_execution_loop()
+            .await
+            .expect("reap must not error");
+        assert!(exit.is_some(), "reap must observe the finished loop");
+        assert!(
+            state.dynamic_selection_runtime_snapshot().await.is_none(),
+            "reap_finished_execution_loop must clear dynamic-selection state \
+             for a loop that finished on its own"
+        );
+    }
+
+    /// The fault-seam get/set primitive round-trips correctly and defaults
+    /// to `None` (no seam installed) — the invariant every fault-seam check
+    /// inside `start_execution_runtime`/`ProductionRuntimeStartEffects`
+    /// depends on.
+    #[tokio::test]
+    async fn fault_seam_primitive_round_trips_and_defaults_to_none() {
+        let state = Arc::new(AppState::new_for_test_with_mode_and_broker(
+            DeploymentMode::Paper,
+            BrokerKind::Alpaca,
+        ));
+        assert!(
+            !state
+                .dynamic_selection_fault_seam_is(
+                    DynamicSelectionLifecycleFaultSeam::AfterRunRowCreation
+                )
+                .await,
+            "a fresh state must have no fault seam installed"
+        );
+
+        state
+            .set_dynamic_selection_fault_seam_for_test(Some(
+                DynamicSelectionLifecycleFaultSeam::AfterRunRowCreation,
+            ))
+            .await;
+        assert!(
+            state
+                .dynamic_selection_fault_seam_is(
+                    DynamicSelectionLifecycleFaultSeam::AfterRunRowCreation
+                )
+                .await
+        );
+        assert!(
+            !state
+                .dynamic_selection_fault_seam_is(
+                    DynamicSelectionLifecycleFaultSeam::ImmediatelyBeforeLoopSpawn
+                )
+                .await,
+            "a different seam variant must not match"
+        );
+
+        state.set_dynamic_selection_fault_seam_for_test(None).await;
+        assert!(
+            !state
+                .dynamic_selection_fault_seam_is(
+                    DynamicSelectionLifecycleFaultSeam::AfterRunRowCreation
+                )
+                .await,
+            "clearing the seam must be respected"
+        );
     }
 }

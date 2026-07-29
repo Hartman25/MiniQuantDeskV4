@@ -301,7 +301,7 @@ pub struct DynamicSelectionStartGateOutcome {
 /// verify plan coherence before calling this; it trusts the "exactly zero or
 /// one selected candidate per symbol" invariant coherence proves rather than
 /// re-deriving it.
-fn selected_host_pool_keys(plan: &DynamicSelectionPlan) -> Vec<HostPoolKey> {
+pub(crate) fn selected_host_pool_keys(plan: &DynamicSelectionPlan) -> Vec<HostPoolKey> {
     plan.symbol_results
         .iter()
         .filter_map(|sr| {
