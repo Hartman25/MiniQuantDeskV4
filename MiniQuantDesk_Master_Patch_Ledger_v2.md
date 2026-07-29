@@ -18222,3 +18222,104 @@ UNATTENDED 10–20-SESSION SOAK: NOT YET AUTHORIZED
 BUNDLE 5: NOT STARTED
 LIVE CAPITAL: NOT READY
 ```
+
+---
+
+## DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7A-LIFECYCLE-OWNERSHIP-AND-CLEANUP (2026-07-28)
+
+**Status: PARTIAL — one named technical requirement remains open with exact evidence.**
+
+This entry documents Bundle 7's Phase 7A patch only. It does not rewrite,
+supersede, or resolve any historical Bundle 5/Bundle 4/soak status entry
+above — those remain the true status as of the commits they document. Bundle
+5/6/7 foundation work visible in `git log` predates this entry and is not
+re-described here; see `git log` for the authoritative commit history.
+
+Wires the already-reviewed dynamic-selection start-gate
+(`dynamic_selection_start_gate::evaluate_dynamic_selection_start_gate`) into
+`AppState::start_execution_runtime`'s run-start/stop/halt/shutdown/reap
+lifecycle for the first time — the evaluator had zero production call sites
+before this patch. Adds a run-scoped `DynamicSelectionRuntimeState` container
+(`state/types.rs`), commits it atomically alongside execution-loop ownership
+inside `ProductionRuntimeStartEffects`, and clears it on every lifecycle exit
+path (stop/halt/shutdown/reap/loop-ownership-conflict). No economic dispatch,
+durable plan persistence, API routes, or GUI added — `loop_runner.rs` is
+proven byte-identical to the starting HEAD by a structural guard test.
+
+Starting HEAD: `3f69db0e54fb8c9744eabbf26b938e57ce004d4d` (== `origin/main`).
+
+**Closed:**
+- Run-scoped `DynamicSelectionRuntimeState`/`DynamicSelectionLifecycleFaultSeam`
+  types, `AppState` fields, and read/commit/clear helpers.
+- Atomic start-commit wiring in `start_execution_runtime` /
+  `ProductionRuntimeStartEffects` (mode/config/calendar resolved exactly once,
+  gate evaluated exactly once, commit ordered immediately before loop spawn).
+- Six test-only fault seams plus the real loop-ownership-conflict path, all
+  rolling back committed selection state on failure.
+- Cleanup wired into `stop_execution_runtime`, `halt_execution_runtime`
+  (clears even when the call itself later errors on a missing DB),
+  `stop_for_shutdown` (previously cleared neither existing sibling field —
+  this is new, required behavior), and `reap_finished_execution_loop`.
+- Narrow additive `dynamic_selection` projection on
+  `GET /api/v1/autonomous/readiness` (`api_types.rs` /
+  `routes/system.rs`) — preview mode/effective-mode plus the actual
+  committed disposition/plan/pool/pair-count/run-id truth.
+- 15 real, executed tests: 7 disposition-determination unit tests
+  (`state::lifecycle::dynamic_selection_start_snapshot_tests`, no DB/creds),
+  8 cleanup-contract tests (`state::lifecycle::
+  dynamic_selection_cleanup_contract_tests`, no DB/creds), plus the
+  loop_runner structural guard. All pass (`cargo test -p mqk-daemon --lib`).
+- rustfmt/clippy clean for every file this patch touches. Full
+  `cargo test -p mqk-daemon --lib` (628 tests), Bundle 5 guard, Bundle 6
+  guard, migration governance guard, unsafe-pattern guard (sh + ps1),
+  no-promotion-evidence-bypass guard, `git diff --check` all pass with zero
+  regressions. Daily-data-readiness (91 tests), autonomous daily coordinator
+  policy (35), autonomous paper session hygiene (11), clear-halted-run H03–H07
+  (5), native strategy bootstrap B1B (5) all pass unchanged.
+
+**Open (the named gap):**
+Full end-to-end proof of the atomic commit + all seven fault seams through a
+**real successful** `start_execution_runtime()` call could not be executed.
+`deployment_mode_readiness` (`state/env.rs`) fail-closed-refuses
+`(Paper, Paper)` before this patch's code is ever reached (`LockedPaperBroker`
+"is not an honest paper trading path"); the only deployment/broker pairs that
+pass are Paper+Alpaca and the Live modes with Alpaca, every one of which
+constructs a real `AlpacaBrokerAdapter` whose first orchestrator tick makes a
+real `fetch_events` REST call regardless of run state. This patch's own
+operating constraints forbid loading Alpaca credentials, starting the real
+daemon, or making network calls — so this specific proof needs either live
+paper credentials (forbidden here) or a mock-Alpaca-server test harness (not
+built in this patch). No existing test in this repo drives a full successful
+`start_execution_runtime()` either, for the identical reason (see
+`scenario_clear_halted_run_auton04.rs` H06). Substituted instead: direct unit
+tests of the private evaluation function (bypassing credential-gated gates
+entirely) plus cleanup-contract tests that commit fixture state directly via
+the `pub(crate)` commit method and prove the public stop/halt/shutdown/reap
+functions clear it — genuine, executed, but not a full E2E proof under a real
+run id created by `create_or_reuse_run_for_start`.
+
+Also observed, not caused by this patch: 6 of 7 tests in
+`scenario_dynamic_selection_evidence_validation_01.rs` fail against the
+shared port-5434 test DB with `illegal_transition` (`previous_state:
+active_paper`) — `unique_id()` in that test file is a deterministic hash, not
+time-varying, so a prior session's leftover `active_paper` rows for the same
+identities now block a fresh run. This patch does not touch
+`promotion_evidence_validation.rs` or the strategy-registry state machine.
+
+**Next:** either explicit operator authorization to build a mock-Alpaca-server
+test harness for Phase 7A/7B E2E proof, or accept the unit + cleanup-contract
+proof as sufficient and proceed to Phase 7B (economic dispatch wiring) under
+the same constraint.
+
+```text
+DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7A-LIFECYCLE-OWNERSHIP-AND-CLEANUP:
+PARTIAL — ONE NAMED TECHNICAL REQUIREMENT REMAINS OPEN WITH EXACT EVIDENCE
+PUSHED: no
+ECONOMIC DISPATCH CHANGED: no
+DURABLE PLAN TABLES STARTED: no
+API/GUI STARTED: no
+BUNDLE 8 STARTED: no
+DAEMON STARTED: no
+ORDERS PLACED: no
+LIVE CAPITAL ENABLED: no
+```
