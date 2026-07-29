@@ -9,6 +9,7 @@
 //! - Pure deterministic logic (no IO, no time, no broker wiring)
 
 mod accounting;
+mod canonical_decimal;
 mod fixedpoint;
 mod instrument_economics;
 mod metrics;
@@ -45,6 +46,12 @@ pub use ledger::{Ledger, LedgerError, LedgerSnapshot};
 // DYNAMIC-STRATEGY-SYMBOL-SELECTION-01 Phase 2: pure dynamic strategy-symbol
 // selection model, zero new callers (Bundle 7 daemon wiring is the only
 // intended consumer).
+// IR7: pure decimal-exact score canonicalization/comparison, zero I/O.
+pub use canonical_decimal::{
+    canonical_decimal_to_micros_if_exact, canonicalize_decimal_token,
+    compare_canonical_decimal_strings,
+};
+
 pub use dynamic_selection::{
     canonical_plan_identity_material, canonical_symbol as dynamic_selection_canonical_symbol,
     compute_dynamic_selection_plan, verify_plan_selection_coherence,

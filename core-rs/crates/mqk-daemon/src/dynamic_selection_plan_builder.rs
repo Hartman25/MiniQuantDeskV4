@@ -268,6 +268,12 @@ async fn evaluate_candidate(
         }
     };
 
+    // IR6: captured before `registry_enabled_check` is consumed by the
+    // `.and()` chain below, so the exact registry-enabled outcome can be
+    // exposed on the evidence snapshot as its own field (IR4), distinct from
+    // the combined `plugin_instantiable` gate.
+    let registry_enabled = registry_enabled_check.is_ok();
+
     let plugin_stage: Result<(), CandidateEvidenceReason> = registry_construction
         .and(registry_enabled_check)
         .and(if plugin_probe_ok {
@@ -302,17 +308,27 @@ async fn evaluate_candidate(
                     promotion_expired: false,
                     evidence_resolved: true,
                     review_state_is_paper_candidate: true,
+                    evidence_review_state: Some(v.evidence_review_state),
                     fingerprint_matches: true,
+                    // Overwritten unconditionally below from `registry_enabled`
+                    // (computed independently of this promotion-chain result).
+                    registry_enabled: false,
                     plugin_instantiable: true,
                     timeframe_matches: true,
                     data_ready: true,
-                    canonical_score_micros: Some(v.canonical_score_micros),
+                    canonical_score_decimal: Some(v.canonical_score_decimal),
+                    canonical_score_micros: v.canonical_score_micros,
                     scanner_rank: v.scanner_rank,
                     watchlist_assigned: false,
                     evidence_review_id: Some(v.evidence_review_id),
                     evidence_scanner_scan_id: Some(v.evidence_scanner_scan_id),
                     evidence_artifact_path: Some(v.evidence_artifact_path),
                     evidence_fingerprint: Some(v.evidence_fingerprint),
+                    evidence_git_hash: Some(v.evidence_git_hash),
+                    promotion_transition_id: Some(v.promotion_transition_id.to_string()),
+                    promotion_effective_at: Some(v.promotion_effective_at.to_rfc3339()),
+                    promotion_expires_at: v.promotion_expires_at.map(|t| t.to_rfc3339()),
+                    evidence_transition_id: Some(v.evidence_transition_id.to_string()),
                     exact_reason: None,
                 },
                 None,
@@ -333,6 +349,7 @@ async fn evaluate_candidate(
     };
 
     evidence.plugin_instantiable = plugin_stage.is_ok();
+    evidence.registry_enabled = registry_enabled;
     evidence.timeframe_matches = timeframe_matches;
     evidence.data_ready = data_ready;
     evidence.watchlist_assigned = p.watchlist_assigned;
@@ -353,10 +370,13 @@ fn placeholder_evidence() -> SelectionCandidateEvidence {
         promotion_expired: false,
         evidence_resolved: true,
         review_state_is_paper_candidate: true,
+        evidence_review_state: None,
         fingerprint_matches: true,
+        registry_enabled: true,
         plugin_instantiable: true,
         timeframe_matches: true,
         data_ready: true,
+        canonical_score_decimal: Some("0".to_string()),
         canonical_score_micros: Some(0),
         scanner_rank: None,
         watchlist_assigned: false,
@@ -364,6 +384,11 @@ fn placeholder_evidence() -> SelectionCandidateEvidence {
         evidence_scanner_scan_id: None,
         evidence_artifact_path: None,
         evidence_fingerprint: None,
+        evidence_git_hash: None,
+        promotion_transition_id: None,
+        promotion_effective_at: None,
+        promotion_expires_at: None,
+        evidence_transition_id: None,
         exact_reason: None,
     }
 }
@@ -394,12 +419,15 @@ fn refused_evidence(reason: CandidateEvidenceReason) -> SelectionCandidateEviden
         | RankOutOfRange => e.evidence_resolved = false,
         ArtifactNotPaperCandidate => e.review_state_is_paper_candidate = false,
         FingerprintMismatch => e.fingerprint_matches = false,
-        ScoreMissing | ScoreNotFinite => e.canonical_score_micros = None,
-        RegistryQueryFailed
-        | RegistryRowMissing
-        | RegistryDisabled
-        | UnsupportedStrategyPlugin
-        | RegistryConstructionFailed => e.plugin_instantiable = false,
+        ScoreMissing | ScoreNotFinite => {
+            e.canonical_score_decimal = None;
+            e.canonical_score_micros = None;
+        }
+        RegistryQueryFailed | RegistryRowMissing | RegistryDisabled => {
+            e.registry_enabled = false;
+            e.plugin_instantiable = false;
+        }
+        UnsupportedStrategyPlugin | RegistryConstructionFailed => e.plugin_instantiable = false,
     }
     e
 }

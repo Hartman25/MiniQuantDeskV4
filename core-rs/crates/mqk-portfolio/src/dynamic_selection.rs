@@ -16,12 +16,15 @@
 //!
 //! # Scope (frozen by
 //! docs/specs/dynamic_strategy_symbol_selection_01a_current_truth_and_contract.md)
-//! - Never invents a score. [`SelectionCandidateEvidence::canonical_score_micros`]
-//!   must already be a caller-validated, finite, decimal-exact scaled-integer
-//!   conversion of the durable `scanner_score` — this module never parses or
-//!   hashes a raw float.
+//! - Never invents a score. [`SelectionCandidateEvidence::canonical_score_decimal`]
+//!   must already be a caller-validated, exact decimal-string conversion
+//!   (IR7 — [`crate::canonicalize_decimal_token`]) of the durable
+//!   `scanner_score`'s raw JSON numeric token — this module never parses or
+//!   hashes a raw float, and never ranks via the derived
+//!   `canonical_score_micros` bridge (which can be `None` even when a valid
+//!   decimal score is present).
 //! - Never ranks by signal size, order quantity, or P&L — the only fields
-//!   this module reads for ranking are `canonical_score_micros`,
+//!   this module reads for ranking are `canonical_score_decimal`,
 //!   `scanner_rank`, and `watchlist_assigned`.
 //! - Exactly one selected candidate per symbol, or none — never more.
 //!
@@ -213,10 +216,22 @@ pub struct SelectionCandidateEvidence {
     /// `true` when the resolved evidence transition's matched review row has
     /// `review_state == "paper_candidate"`.
     pub review_state_is_paper_candidate: bool,
+    /// IR6: the matched review row's exact `review_state` string (e.g.
+    /// `"paper_candidate"`, `"rejected"`), carried through in full even
+    /// though only one value passes [`Self::review_state_is_paper_candidate`]
+    /// -- never collapsed to the boolean alone.
+    pub evidence_review_state: Option<String>,
     /// `true` when the caller recomputed the review-row fingerprint
     /// (SHA-256 of the canonical serialized row) and it matched the durable
     /// `evidence_fingerprint` column exactly.
     pub fingerprint_matches: bool,
+    /// IR4: `true` when the durable strategy registry
+    /// (`sys_strategy_registry`) has an `enabled = true` row for this
+    /// `strategy_id` -- independent of, and distinct from,
+    /// [`Self::plugin_instantiable`] (an engine can instantiate for an
+    /// identity that was never durably registered, or was registered and
+    /// then disabled).
+    pub registry_enabled: bool,
     /// `true` when the strategy is registered/enabled in the strategy
     /// registry and `PluginRegistry::instantiate_verified` succeeded for
     /// this exact symbol.
@@ -227,10 +242,21 @@ pub struct SelectionCandidateEvidence {
     /// `true` when daily data readiness/freshness covers this exact
     /// `(symbol, timeframe)` pair.
     pub data_ready: bool,
-    /// Canonical, decimal-exact scaled-integer (micros) representation of
-    /// the durable `scanner_score`. `None` when the score is missing,
-    /// non-finite, or the caller could not produce an unambiguous
-    /// conversion — never a fabricated default.
+    /// IR7: canonical, decimal-exact string representation of the durable
+    /// `scanner_score`, as produced by
+    /// [`crate::canonicalize_decimal_token`] from the artifact's raw JSON
+    /// numeric token — never derived from a float. This is the
+    /// authoritative score for gating/ranking/identity. `None` when the
+    /// score is missing, the raw token was not a valid/supported decimal,
+    /// or the caller could not produce one — never a fabricated default.
+    pub canonical_score_decimal: Option<String>,
+    /// Convenience bridge to the legacy scaled-integer (micros, 1e-6)
+    /// representation, via [`crate::canonical_decimal_to_micros_if_exact`].
+    /// `Some` only when `canonical_score_decimal` is exactly representable
+    /// at that scale (at most six fractional digits) — never a rounded
+    /// approximation of a higher-precision value. Carried through for
+    /// backward-compatible callers/persistence; never itself the ranking or
+    /// identity authority (see [`SelectionCandidateEvidence::canonical_score_decimal`]).
     pub canonical_score_micros: Option<i64>,
     /// `None` when the durable `scanner_rank` is absent.
     pub scanner_rank: Option<u32>,
@@ -243,6 +269,26 @@ pub struct SelectionCandidateEvidence {
     pub evidence_scanner_scan_id: Option<String>,
     pub evidence_artifact_path: Option<String>,
     pub evidence_fingerprint: Option<String>,
+    /// IR6: the review artifact manifest's `git_hash`, carried through
+    /// unvalidated (like the other evidence identity fields above) for
+    /// durable evidence/read-side recomputation.
+    pub evidence_git_hash: Option<String>,
+    /// IR6: the durable promotion transition id that put this identity into
+    /// `active_paper` (the transition the plan's authority is actually
+    /// resting on) — `None` only when no promotion record exists at all.
+    pub promotion_transition_id: Option<String>,
+    /// IR6: `effective_at_utc` of [`Self::promotion_transition_id`], RFC3339.
+    pub promotion_effective_at: Option<String>,
+    /// IR6: `expires_at_utc` of [`Self::promotion_transition_id`] (`None` if
+    /// the promotion carries no expiry), RFC3339.
+    pub promotion_expires_at: Option<String>,
+    /// IR6: the exact transition id that established the evidence currently
+    /// authorizing this identity (see
+    /// `mqk_db::StrategyPromotionTransitionRecord::evidence_transition_id`
+    /// / `resolve_evidence_lineage`) — distinct from
+    /// [`Self::promotion_transition_id`] when the current `active_paper`
+    /// transition inherited its evidence from an earlier transition.
+    pub evidence_transition_id: Option<String>,
     /// IR5: the precise, closed-vocabulary reason the caller observed for
     /// this candidate's refusal (e.g. a daemon-side
     /// `CandidateEvidenceReason::code()`), carried through even when the
@@ -289,6 +335,8 @@ pub struct SelectionCandidateResult {
     pub symbol: String,
     pub strategy_id: String,
     pub timeframe_secs: i64,
+    /// IR7: see [`SelectionCandidateEvidence::canonical_score_decimal`].
+    pub canonical_score_decimal: Option<String>,
     pub canonical_score_micros: Option<i64>,
     pub scanner_rank: Option<u32>,
     pub watchlist_assigned: bool,
@@ -298,7 +346,11 @@ pub struct SelectionCandidateResult {
     pub promotion_expired: bool,
     pub evidence_resolved: bool,
     pub review_state_is_paper_candidate: bool,
+    /// IR6: see [`SelectionCandidateEvidence::evidence_review_state`].
+    pub evidence_review_state: Option<String>,
     pub fingerprint_matches: bool,
+    /// IR4/IR6: see [`SelectionCandidateEvidence::registry_enabled`].
+    pub registry_enabled: bool,
     pub plugin_instantiable: bool,
     pub timeframe_matches: bool,
     pub data_ready: bool,
@@ -306,6 +358,16 @@ pub struct SelectionCandidateResult {
     pub evidence_scanner_scan_id: Option<String>,
     pub evidence_artifact_path: Option<String>,
     pub evidence_fingerprint: Option<String>,
+    /// IR6: see [`SelectionCandidateEvidence::evidence_git_hash`].
+    pub evidence_git_hash: Option<String>,
+    /// IR6: see [`SelectionCandidateEvidence::promotion_transition_id`].
+    pub promotion_transition_id: Option<String>,
+    /// IR6: see [`SelectionCandidateEvidence::promotion_effective_at`].
+    pub promotion_effective_at: Option<String>,
+    /// IR6: see [`SelectionCandidateEvidence::promotion_expires_at`].
+    pub promotion_expires_at: Option<String>,
+    /// IR6: see [`SelectionCandidateEvidence::evidence_transition_id`].
+    pub evidence_transition_id: Option<String>,
     /// IR5: see [`SelectionCandidateEvidence::exact_reason`].
     pub exact_reason: Option<&'static str>,
     pub selected: bool,
@@ -543,11 +605,12 @@ fn evaluate_evidence_gate(c: &SelectionCandidateInput) -> GateOutcome {
     if !e.data_ready {
         return invalid(REASON_REFUSED_DATA_NOT_READY);
     }
-    match e.canonical_score_micros {
-        // The caller is responsible for finiteness (this type is already an
-        // integer, not a float) and for scaling; this gate only requires a
-        // score to be present at all -- "must be finite and present" per the
-        // ranking contract, nothing more.
+    match &e.canonical_score_decimal {
+        // IR7: `canonical_score_decimal` is the authoritative score --
+        // already caller-validated as an exact, finite decimal (never a
+        // float) by construction ([`crate::canonicalize_decimal_token`]
+        // rejects non-finite/unsupported tokens itself); this gate only
+        // requires one to be present at all.
         Some(_) => GateOutcome {
             valid: true,
             reason_code: TRUTH_STATE_COMPUTED,
@@ -567,6 +630,7 @@ fn candidate_result(
         symbol: canonical_symbol(&c.symbol),
         strategy_id: canonical_strategy_id(&c.strategy_id),
         timeframe_secs: c.timeframe_secs,
+        canonical_score_decimal: e.canonical_score_decimal.clone(),
         canonical_score_micros: e.canonical_score_micros,
         scanner_rank: e.scanner_rank,
         watchlist_assigned: e.watchlist_assigned,
@@ -576,7 +640,9 @@ fn candidate_result(
         promotion_expired: e.promotion_expired,
         evidence_resolved: e.evidence_resolved,
         review_state_is_paper_candidate: e.review_state_is_paper_candidate,
+        evidence_review_state: e.evidence_review_state.clone(),
         fingerprint_matches: e.fingerprint_matches,
+        registry_enabled: e.registry_enabled,
         plugin_instantiable: e.plugin_instantiable,
         timeframe_matches: e.timeframe_matches,
         data_ready: e.data_ready,
@@ -584,6 +650,11 @@ fn candidate_result(
         evidence_scanner_scan_id: e.evidence_scanner_scan_id.clone(),
         evidence_artifact_path: e.evidence_artifact_path.clone(),
         evidence_fingerprint: e.evidence_fingerprint.clone(),
+        evidence_git_hash: e.evidence_git_hash.clone(),
+        promotion_transition_id: e.promotion_transition_id.clone(),
+        promotion_effective_at: e.promotion_effective_at.clone(),
+        promotion_expires_at: e.promotion_expires_at.clone(),
+        evidence_transition_id: e.evidence_transition_id.clone(),
         exact_reason: e.exact_reason,
         selected,
         disposition,
@@ -612,10 +683,17 @@ fn canonical_candidate_payload_key(symbol: &str, c: &SelectionCandidateInput) ->
     push_bool(&mut buf, e.promotion_expired);
     push_bool(&mut buf, e.evidence_resolved);
     push_bool(&mut buf, e.review_state_is_paper_candidate);
+    push_opt_str(&mut buf, &e.evidence_review_state);
     push_bool(&mut buf, e.fingerprint_matches);
+    push_bool(&mut buf, e.registry_enabled);
     push_bool(&mut buf, e.plugin_instantiable);
     push_bool(&mut buf, e.timeframe_matches);
     push_bool(&mut buf, e.data_ready);
+    // IR7: the canonical decimal string is the authoritative score in
+    // identity -- never the derived micros bridge, which can be `None`
+    // even when the decimal score is present (more than six fractional
+    // digits) and must never silently collapse two distinct decimal values.
+    push_opt_str(&mut buf, &e.canonical_score_decimal);
     push_opt_i64(&mut buf, e.canonical_score_micros);
     push_opt_u32(&mut buf, e.scanner_rank);
     push_bool(&mut buf, e.watchlist_assigned);
@@ -623,6 +701,11 @@ fn canonical_candidate_payload_key(symbol: &str, c: &SelectionCandidateInput) ->
     push_opt_str(&mut buf, &e.evidence_scanner_scan_id);
     push_opt_str(&mut buf, &e.evidence_artifact_path);
     push_opt_str(&mut buf, &e.evidence_fingerprint);
+    push_opt_str(&mut buf, &e.evidence_git_hash);
+    push_opt_str(&mut buf, &e.promotion_transition_id);
+    push_opt_str(&mut buf, &e.promotion_effective_at);
+    push_opt_str(&mut buf, &e.promotion_expires_at);
+    push_opt_str(&mut buf, &e.evidence_transition_id);
     push_opt_static_str(&mut buf, e.exact_reason);
     buf
 }
@@ -709,16 +792,25 @@ fn resolve_symbol_group(symbol: &str, group: &[&SelectionCandidateInput]) -> Sym
         };
     }
 
-    // Step 1: highest canonical_score_micros wins outright.
-    let max_score = ranking_pool
+    // Step 1: highest canonical_score_decimal wins outright -- IR7: compared
+    // as exact decimal strings, never through a float or a lossy
+    // scaled-integer rounding that could silently collapse two distinct
+    // values into a tie.
+    let max_score: &str = ranking_pool
         .iter()
-        .map(|c| c.evidence.canonical_score_micros.expect("gated Some"))
-        .max()
+        .map(|c| {
+            c.evidence
+                .canonical_score_decimal
+                .as_deref()
+                .expect("gated Some")
+        })
+        .max_by(|a, b| crate::compare_canonical_decimal_strings(a, b))
         .expect("ranking_pool non-empty");
+    let max_score = max_score.to_string();
     let mut leaders: Vec<&SelectionCandidateInput> = ranking_pool
         .iter()
         .copied()
-        .filter(|c| c.evidence.canonical_score_micros == Some(max_score))
+        .filter(|c| c.evidence.canonical_score_decimal.as_deref() == Some(max_score.as_str()))
         .collect();
 
     let mut selected: Option<&SelectionCandidateInput> = None;
@@ -780,8 +872,17 @@ fn resolve_symbol_group(symbol: &str, group: &[&SelectionCandidateInput]) -> Sym
                     .collect();
                 if watchlist_leaders.len() == 1 {
                     let winner = *watchlist_leaders[0];
+                    // IR8: identify the winner by its canonical identity
+                    // triple (strategy_id, timeframe_secs) -- distinct within
+                    // `rank_leaders` by construction (one candidate per
+                    // identity bucket) -- never by pointer identity.
+                    let winner_key = (
+                        canonical_strategy_id(&winner.strategy_id),
+                        winner.timeframe_secs,
+                    );
                     for c in &rank_leaders {
-                        if !std::ptr::eq(*c, winner) {
+                        let c_key = (canonical_strategy_id(&c.strategy_id), c.timeframe_secs);
+                        if c_key != winner_key {
                             results.push(candidate_result(
                                 c,
                                 false,
@@ -815,7 +916,7 @@ fn resolve_symbol_group(symbol: &str, group: &[&SelectionCandidateInput]) -> Sym
 
     // Every valid, non-max-score candidate lost outright on score.
     for c in &ranking_pool {
-        if c.evidence.canonical_score_micros != Some(max_score) {
+        if c.evidence.canonical_score_decimal.as_deref() != Some(max_score.as_str()) {
             results.push(candidate_result(
                 c,
                 false,
@@ -1099,6 +1200,8 @@ pub fn canonical_plan_identity_material(plan: &DynamicSelectionPlan) -> Vec<u8> 
             push_len_prefixed(&mut buf, &cand.symbol);
             push_len_prefixed(&mut buf, &cand.strategy_id);
             push_i64(&mut buf, cand.timeframe_secs);
+            // IR7: canonical decimal string is authoritative in identity.
+            push_opt_str(&mut buf, &cand.canonical_score_decimal);
             push_opt_i64(&mut buf, cand.canonical_score_micros);
             push_opt_u32(&mut buf, cand.scanner_rank);
             push_bool(&mut buf, cand.watchlist_assigned);
@@ -1108,7 +1211,9 @@ pub fn canonical_plan_identity_material(plan: &DynamicSelectionPlan) -> Vec<u8> 
             push_bool(&mut buf, cand.promotion_expired);
             push_bool(&mut buf, cand.evidence_resolved);
             push_bool(&mut buf, cand.review_state_is_paper_candidate);
+            push_opt_str(&mut buf, &cand.evidence_review_state);
             push_bool(&mut buf, cand.fingerprint_matches);
+            push_bool(&mut buf, cand.registry_enabled);
             push_bool(&mut buf, cand.plugin_instantiable);
             push_bool(&mut buf, cand.timeframe_matches);
             push_bool(&mut buf, cand.data_ready);
@@ -1116,6 +1221,11 @@ pub fn canonical_plan_identity_material(plan: &DynamicSelectionPlan) -> Vec<u8> 
             push_opt_str(&mut buf, &cand.evidence_scanner_scan_id);
             push_opt_str(&mut buf, &cand.evidence_artifact_path);
             push_opt_str(&mut buf, &cand.evidence_fingerprint);
+            push_opt_str(&mut buf, &cand.evidence_git_hash);
+            push_opt_str(&mut buf, &cand.promotion_transition_id);
+            push_opt_str(&mut buf, &cand.promotion_effective_at);
+            push_opt_str(&mut buf, &cand.promotion_expires_at);
+            push_opt_str(&mut buf, &cand.evidence_transition_id);
             push_opt_static_str(&mut buf, cand.exact_reason);
             push_bool(&mut buf, cand.selected);
             push_disposition(&mut buf, cand.disposition);
@@ -1143,6 +1253,24 @@ mod tests {
         }
     }
 
+    /// IR7 test fixture helper: build the canonical decimal string
+    /// corresponding exactly to a micros value, via the same canonicalizer
+    /// the real read path uses -- never a hand-rolled second
+    /// implementation.
+    fn decimal_from_micros(micros: i64) -> String {
+        let negative = micros < 0;
+        let abs = (micros as i128).unsigned_abs();
+        let int_part = abs / 1_000_000;
+        let frac_part = abs % 1_000_000;
+        let token = format!(
+            "{}{}.{:06}",
+            if negative { "-" } else { "" },
+            int_part,
+            frac_part
+        );
+        crate::canonicalize_decimal_token(&token).expect("valid fixture token")
+    }
+
     fn valid_evidence(
         score_micros: i64,
         rank: Option<u32>,
@@ -1155,10 +1283,13 @@ mod tests {
             promotion_expired: false,
             evidence_resolved: true,
             review_state_is_paper_candidate: true,
+            evidence_review_state: Some("paper_candidate".to_string()),
             fingerprint_matches: true,
+            registry_enabled: true,
             plugin_instantiable: true,
             timeframe_matches: true,
             data_ready: true,
+            canonical_score_decimal: Some(decimal_from_micros(score_micros)),
             canonical_score_micros: Some(score_micros),
             scanner_rank: rank,
             watchlist_assigned: watchlist,
@@ -1166,6 +1297,11 @@ mod tests {
             evidence_scanner_scan_id: Some("scan-1".to_string()),
             evidence_artifact_path: Some("/artifacts/review-1".to_string()),
             evidence_fingerprint: Some("fp-1".to_string()),
+            evidence_git_hash: Some("git-hash-1".to_string()),
+            promotion_transition_id: Some("11111111-1111-1111-1111-111111111111".to_string()),
+            promotion_effective_at: Some("2026-01-01T00:00:00Z".to_string()),
+            promotion_expires_at: None,
+            evidence_transition_id: Some("11111111-1111-1111-1111-111111111111".to_string()),
             exact_reason: None,
         }
     }
@@ -1458,6 +1594,7 @@ mod tests {
     #[test]
     fn missing_score_is_refused() {
         let mut c = candidate("AAPL", "swing_momentum", 500_000, Some(1), false);
+        c.evidence.canonical_score_decimal = None;
         c.evidence.canonical_score_micros = None;
         let plan = compute_dynamic_selection_plan(ctx(), &symbols(&["AAPL"]), &[c]);
         assert_eq!(
@@ -1958,6 +2095,7 @@ mod tests {
     fn divergent_duplicate_still_refused_via_byte_based_key() {
         let c1 = candidate("AAPL", "swing_momentum", 500_000, Some(1), false);
         let mut c2 = c1.clone();
+        c2.evidence.canonical_score_decimal = Some(decimal_from_micros(900_000));
         c2.evidence.canonical_score_micros = Some(900_000);
         let plan = compute_dynamic_selection_plan(ctx(), &symbols(&["AAPL"]), &[c1, c2]);
         let aapl = result_for(&plan, "AAPL");

@@ -327,7 +327,8 @@ async fn valid_active_paper_candidate_succeeds() {
     let result =
         validate_active_paper_candidate(&pool, &st, &strategy_id, "AAPL", 86400, Utc::now()).await;
     let evidence = result.expect("expected Ok for a valid active_paper candidate");
-    assert_eq!(evidence.canonical_score_micros, 9_000_000);
+    assert_eq!(evidence.canonical_score_decimal, "9");
+    assert_eq!(evidence.canonical_score_micros, Some(9_000_000));
     assert_eq!(evidence.scanner_rank, Some(1));
     assert!(!evidence.evidence_fingerprint.is_empty());
 }

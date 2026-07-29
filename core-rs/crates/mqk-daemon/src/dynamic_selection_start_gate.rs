@@ -482,6 +482,23 @@ mod tests {
         }
     }
 
+    /// Mirrors `mqk_portfolio::dynamic_selection`'s own test helper of the
+    /// same name -- builds the canonical decimal string exactly
+    /// corresponding to a micros value via the real canonicalizer.
+    fn decimal_from_micros(micros: i64) -> String {
+        let negative = micros < 0;
+        let abs = (micros as i128).unsigned_abs();
+        let int_part = abs / 1_000_000;
+        let frac_part = abs % 1_000_000;
+        let token = format!(
+            "{}{}.{:06}",
+            if negative { "-" } else { "" },
+            int_part,
+            frac_part
+        );
+        mqk_portfolio::canonicalize_decimal_token(&token).expect("valid fixture token")
+    }
+
     fn valid_evidence(score_micros: i64) -> SelectionCandidateEvidence {
         SelectionCandidateEvidence {
             promotion_query_ok: true,
@@ -490,10 +507,13 @@ mod tests {
             promotion_expired: false,
             evidence_resolved: true,
             review_state_is_paper_candidate: true,
+            evidence_review_state: Some("paper_candidate".to_string()),
             fingerprint_matches: true,
+            registry_enabled: true,
             plugin_instantiable: true,
             timeframe_matches: true,
             data_ready: true,
+            canonical_score_decimal: Some(decimal_from_micros(score_micros)),
             canonical_score_micros: Some(score_micros),
             scanner_rank: Some(1),
             watchlist_assigned: true,
@@ -501,6 +521,11 @@ mod tests {
             evidence_scanner_scan_id: Some("scan-1".to_string()),
             evidence_artifact_path: Some("/artifacts/review-1".to_string()),
             evidence_fingerprint: Some("fp-1".to_string()),
+            evidence_git_hash: Some("git-hash-1".to_string()),
+            promotion_transition_id: Some("11111111-1111-1111-1111-111111111111".to_string()),
+            promotion_effective_at: Some("2026-01-01T00:00:00Z".to_string()),
+            promotion_expires_at: None,
+            evidence_transition_id: Some("11111111-1111-1111-1111-111111111111".to_string()),
             exact_reason: None,
         }
     }

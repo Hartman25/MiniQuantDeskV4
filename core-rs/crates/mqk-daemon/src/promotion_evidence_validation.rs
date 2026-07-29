@@ -26,6 +26,7 @@ use std::path::Path;
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
+use serde_json::value::RawValue;
 use sha2::{Digest, Sha256};
 use sqlx::PgPool;
 
@@ -38,28 +39,51 @@ use mqk_db::{
 // ---------------------------------------------------------------------------
 // Score/rank canonicalization
 // ---------------------------------------------------------------------------
+//
+// IR7: the old `raw_f64 * 1e6 -> round()` scheme is gone -- it is not an
+// exact representation of the artifact's JSON numeric token (see
+// `mqk_portfolio::canonicalize_decimal_token`'s module docs for why). Score
+// canonicalization now runs entirely on the *raw JSON token text*, captured
+// via `serde_json::value::RawValue` (the `raw_value` feature only adds this
+// opt-in capability; it changes nothing about how any other type in this
+// crate deserializes numbers) and handed to the pure, zero-float
+// `mqk_portfolio::canonicalize_decimal_token` for parsing/canonicalization.
 
-/// Scaled-integer representation for `scanner_score` -- deliberately its own
-/// constant, independent of Bundle 5's `RUNTIME_OPPORTUNITY_SCALE`
-/// (`mqk-db::runtime_opportunity_allocation::scale_to_micros`): Bundle 7
-/// must not couple its score representation to Bundle 5's, even though both
-/// happen to use 1e6 today. Matches `mqk_portfolio::MICROS_SCALE`.
-pub const CANDIDATE_SCORE_SCALE: f64 = 1_000_000.0;
+/// Shadow deserialization target used solely to recover the exact raw JSON
+/// text of one row's `scanner_score` field, positionally aligned with the
+/// already-matched-and-validated `Vec<StrategyScanReviewDecision>` parsed
+/// from the same `review_decisions.json` text. Every other field is
+/// intentionally omitted -- serde ignores unknown/absent fields by default,
+/// and this type never becomes the source of truth for anything except the
+/// one raw token.
+#[derive(serde::Deserialize)]
+struct RawScoreRow<'a> {
+    #[serde(borrow)]
+    scanner_score: Option<&'a RawValue>,
+}
 
-/// Convert a raw `scanner_score` to a decimal-exact scaled-integer (micros)
-/// representation. Returns `None` for non-finite input (`NaN`/`±inf`) or a
-/// magnitude that would overflow `i64` once scaled -- never silently
-/// saturates or clamps, since that would fabricate a score the artifact
-/// never actually contained.
-pub fn canonical_score_to_micros(value: f64) -> Option<i64> {
-    if !value.is_finite() {
-        return None;
-    }
-    let scaled = value * CANDIDATE_SCORE_SCALE;
-    if !scaled.is_finite() || scaled < i64::MIN as f64 || scaled > i64::MAX as f64 {
-        return None;
-    }
-    Some(scaled.round() as i64)
+/// Re-read `decisions_path`'s raw text and recover the exact JSON numeric
+/// token backing `decisions[matched_index].scanner_score` -- `Ok(None)` when
+/// the artifact's `scanner_score` is JSON `null` (absent), never a
+/// fabricated `"0"`. The two parses (into `Vec<StrategyScanReviewDecision>`
+/// and into `Vec<RawScoreRow>`) read the *same* file text and therefore
+/// preserve the same array order, so positional alignment by
+/// `matched_index` is exact.
+fn extract_raw_scanner_score_token(
+    decisions_path: &Path,
+    matched_index: usize,
+) -> Result<Option<String>, String> {
+    let raw_text = std::fs::read_to_string(decisions_path)
+        .map_err(|e| format!("read failed: {}: {e}", decisions_path.display()))?;
+    let rows: Vec<RawScoreRow> = serde_json::from_str(&raw_text)
+        .map_err(|e| format!("parse failed: {}: {e}", decisions_path.display()))?;
+    let row = rows.get(matched_index).ok_or_else(|| {
+        format!(
+            "matched row index {matched_index} vanished on raw re-scan of {}",
+            decisions_path.display()
+        )
+    })?;
+    Ok(row.scanner_score.map(|rv| rv.get().to_string()))
 }
 
 // ---------------------------------------------------------------------------
@@ -78,11 +102,23 @@ pub struct ValidatedEvidence {
     pub artifact_path: String,
     pub fingerprint: String,
     /// `None` when the matched row's raw `scanner_score` is absent from the
-    /// artifact -- never defaulted to `0.0` or any other sentinel.
+    /// artifact -- never defaulted to `0.0` or any other sentinel. Retained
+    /// for any existing caller that wants the lossy float; the read path
+    /// (`validate_active_paper_candidate`) uses [`Self::scanner_score_token`]
+    /// instead (IR7).
     pub scanner_score: Option<f64>,
+    /// IR7: the exact raw JSON numeric token backing `scanner_score`, e.g.
+    /// `"0.1234567"` -- never round-tripped through a float. `None` exactly
+    /// when [`Self::scanner_score`] is `None`.
+    pub scanner_score_token: Option<String>,
     /// `None` when the matched row's raw `scanner_rank` is absent from the
     /// artifact -- never defaulted.
     pub scanner_rank: Option<usize>,
+    /// IR6: the matched row's exact `review_state` code (e.g.
+    /// `"paper_candidate"`) -- carried through even though this function
+    /// itself already enforces it must equal `"paper_candidate"` on
+    /// success, so a caller never has to guess or re-derive it.
+    pub review_state: String,
 }
 
 /// Root-bounded, content-validated read of a review artifact directory,
@@ -153,6 +189,14 @@ pub fn validate_paper_candidate_evidence(
             matches.len()
         ));
     }
+    let matched_index = decisions
+        .iter()
+        .position(|d| {
+            d.strategy_id.trim() == strategy_id
+                && d.symbol.trim().to_ascii_uppercase() == symbol
+                && scanner_timeframe_label_to_secs(&d.timeframe) == Some(timeframe_secs)
+        })
+        .expect("matched above; index recomputation must agree");
     let matched = matches[0];
 
     if matched.review_state != mqk_backtest::StrategyScanReviewState::PaperCandidate {
@@ -168,6 +212,12 @@ pub fn validate_paper_candidate_evidence(
     hasher.update(canonical_json.as_bytes());
     let fingerprint = hex::encode(hasher.finalize());
 
+    // IR7: recover the exact raw JSON token backing this row's
+    // `scanner_score`, positionally, from the same file text already parsed
+    // above -- never derived from `matched.scanner_score: Option<f64>`,
+    // which has already lost any precision beyond an f64's.
+    let scanner_score_token = extract_raw_scanner_score_token(&decisions_path, matched_index)?;
+
     Ok(ValidatedEvidence {
         review_id: manifest.review_id,
         scanner_scan_id: manifest.scanner_scan_id,
@@ -175,7 +225,9 @@ pub fn validate_paper_candidate_evidence(
         artifact_path: candidate_canon.display().to_string(),
         fingerprint,
         scanner_score: matched.scanner_score,
+        scanner_score_token,
         scanner_rank: matched.scanner_rank,
+        review_state: matched.review_state.code().to_string(),
     })
 }
 
@@ -337,8 +389,29 @@ pub struct ValidatedCandidateEvidence {
     pub evidence_scanner_scan_id: String,
     pub evidence_artifact_path: String,
     pub evidence_fingerprint: String,
-    pub canonical_score_micros: i64,
+    /// IR6: the review artifact manifest's `git_hash`.
+    pub evidence_git_hash: String,
+    /// IR6: the matched review row's exact `review_state` code.
+    pub evidence_review_state: String,
+    /// IR7: canonical, decimal-exact string form of the durable
+    /// `scanner_score` -- the authoritative score; never derived from a
+    /// float.
+    pub canonical_score_decimal: String,
+    /// IR7: convenience bridge to the legacy scaled-integer (micros)
+    /// representation, `Some` only when exactly representable at that
+    /// scale. See `mqk_portfolio::canonical_decimal_to_micros_if_exact`.
+    pub canonical_score_micros: Option<i64>,
     pub scanner_rank: Option<u32>,
+    /// IR6: the durable promotion transition id currently authorizing this
+    /// identity's `active_paper` state.
+    pub promotion_transition_id: uuid::Uuid,
+    pub promotion_effective_at: DateTime<Utc>,
+    pub promotion_expires_at: Option<DateTime<Utc>>,
+    /// IR6: the exact transition id that established the evidence this
+    /// validation compared against (see
+    /// `mqk_db::StrategyPromotionTransitionRecord::evidence_transition_id`
+    /// / `resolve_evidence_lineage`).
+    pub evidence_transition_id: uuid::Uuid,
 }
 
 /// Validate that `(strategy_id, symbol, timeframe_secs)` is currently an
@@ -405,12 +478,16 @@ pub async fn validate_active_paper_candidate(
         return Err(CandidateEvidenceReason::FingerprintMismatch);
     }
 
-    let canonical_score_micros = match fresh.scanner_score {
+    // IR7: canonicalize from the exact raw JSON token -- never from
+    // `fresh.scanner_score: Option<f64>`, which has already lost any
+    // precision beyond an f64's.
+    let canonical_score_decimal = match fresh.scanner_score_token.as_deref() {
         None => return Err(CandidateEvidenceReason::ScoreMissing),
-        Some(score) => {
-            canonical_score_to_micros(score).ok_or(CandidateEvidenceReason::ScoreNotFinite)?
-        }
+        Some(token) => mqk_portfolio::canonicalize_decimal_token(token)
+            .ok_or(CandidateEvidenceReason::ScoreNotFinite)?,
     };
+    let canonical_score_micros =
+        mqk_portfolio::canonical_decimal_to_micros_if_exact(&canonical_score_decimal);
     let scanner_rank = match fresh.scanner_rank {
         None => None,
         Some(r) => Some(u32::try_from(r).map_err(|_| CandidateEvidenceReason::RankOutOfRange)?),
@@ -421,8 +498,15 @@ pub async fn validate_active_paper_candidate(
         evidence_scanner_scan_id: fresh.scanner_scan_id,
         evidence_artifact_path: fresh.artifact_path,
         evidence_fingerprint: fresh.fingerprint,
+        evidence_git_hash: fresh.git_hash,
+        evidence_review_state: fresh.review_state,
+        canonical_score_decimal,
         canonical_score_micros,
         scanner_rank,
+        promotion_transition_id: record.transition_id,
+        promotion_effective_at: record.effective_at_utc,
+        promotion_expires_at: record.expires_at_utc,
+        evidence_transition_id: evidence.transition_id,
     })
 }
 
@@ -430,31 +514,90 @@ pub async fn validate_active_paper_candidate(
 mod tests {
     use super::*;
 
-    // ── canonical_score_to_micros ────────────────────────────────────────
+    // ── IR7: exact raw-token extraction, filesystem-to-RawValue end-to-end ──
+    // (pure-decimal canonicalization math itself is proven in
+    // mqk_portfolio::canonical_decimal's own unit tests; this test proves
+    // this crate's artifact-reading layer hands that math the untouched
+    // original token, not an f64 round-trip.)
 
     #[test]
-    fn finite_score_converts_exactly() {
-        assert_eq!(canonical_score_to_micros(9.0), Some(9_000_000));
-        assert_eq!(canonical_score_to_micros(0.5), Some(500_000));
-        assert_eq!(canonical_score_to_micros(-1.25), Some(-1_250_000));
-        assert_eq!(canonical_score_to_micros(0.0), Some(0));
-    }
+    fn scanner_score_token_preserves_precision_an_f64_roundtrip_would_lose() {
+        let root = std::env::temp_dir().join(format!(
+            "mqk_daemon_scanner_score_token_test_{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).expect("create temp root");
+        let review_dir = root.join("review-1");
+        std::fs::create_dir_all(&review_dir).expect("create review dir");
 
-    #[test]
-    fn nan_score_is_rejected() {
-        assert_eq!(canonical_score_to_micros(f64::NAN), None);
-    }
+        std::fs::write(
+            review_dir.join("manifest.json"),
+            r#"{
+                "schema_version": 1,
+                "review_id": "review-1",
+                "scanner_scan_id": "scan-1",
+                "source_artifact_dir": "fixture",
+                "created_at_utc": "2026-07-01T00:00:00Z",
+                "git_hash": "test-git-hash",
+                "policy_min_bars_used": 252,
+                "policy_min_trade_count": 5,
+                "policy_min_total_return_pct": 0.0,
+                "policy_min_alpha_pct": 0.0,
+                "policy_max_drawdown_pct": 25.0,
+                "policy_min_profit_factor": 1.05,
+                "candidate_count": 1,
+                "blocked_count": 0,
+                "needs_review_count": 0,
+                "watchlist_candidate_count": 0,
+                "paper_candidate_count": 1,
+                "rejected_count": 0,
+                "blockers": [],
+                "warnings": []
+            }"#,
+        )
+        .expect("write manifest");
 
-    #[test]
-    fn infinite_score_is_rejected() {
-        assert_eq!(canonical_score_to_micros(f64::INFINITY), None);
-        assert_eq!(canonical_score_to_micros(f64::NEG_INFINITY), None);
-    }
+        // 15 fractional digits -- an f64 round-trip through
+        // `raw * 1e6 -> round()` cannot be trusted to preserve this exactly;
+        // the raw-token path must hand back this literal string untouched.
+        std::fs::write(
+            review_dir.join("review_decisions.json"),
+            r#"[{
+                "symbol": "AAPL",
+                "timeframe": "1D",
+                "strategy_id": "swing_momentum",
+                "scanner_rank": 1,
+                "scanner_score": 0.123456789012345,
+                "review_state": "paper_candidate",
+                "reason_codes": ["eligible_paper_candidate"],
+                "blockers": [],
+                "warnings": []
+            }]"#,
+        )
+        .expect("write decisions");
 
-    #[test]
-    fn overflowing_score_is_rejected_not_clamped() {
-        assert_eq!(canonical_score_to_micros(f64::MAX), None);
-        assert_eq!(canonical_score_to_micros(-f64::MAX), None);
+        std::env::set_var("MQK_STRATEGY_REVIEW_ARTIFACT_ROOT", &root);
+        let st = crate::state::AppState::new_with_operator_auth(
+            crate::state::OperatorAuthMode::ExplicitDevNoToken,
+        );
+
+        let evidence = validate_paper_candidate_evidence(
+            &st,
+            review_dir.to_str().unwrap(),
+            "swing_momentum",
+            "AAPL",
+            86400,
+        )
+        .expect("evidence must validate");
+
+        assert_eq!(
+            evidence.scanner_score_token.as_deref(),
+            Some("0.123456789012345"),
+            "must be the exact original token, not an f64-rounded approximation"
+        );
+        assert_eq!(evidence.review_state, "paper_candidate");
+
+        std::fs::remove_dir_all(&root).ok();
     }
 
     // ── classify_artifact_error ─────────────────────────────────────────

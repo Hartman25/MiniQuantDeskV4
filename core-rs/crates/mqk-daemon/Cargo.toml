@@ -19,7 +19,13 @@ chrono.workspace = true
 # PATCH S1: dev-time .env.local bootstrap
 dotenvy.workspace = true
 serde.workspace = true
-serde_json.workspace = true
+# IR7 (DYNAMIC-STRATEGY-SYMBOL-SELECTION-01): `raw_value` lets us capture the
+# exact raw JSON numeric token for a `scanner_score` field without altering
+# how any other type in this crate (or the workspace's shared serde_json)
+# deserializes numbers -- unlike `arbitrary_precision`, it changes nothing
+# about existing `f64`/`Value` behavior; it only adds the opt-in
+# `RawValue` capability this crate's read-side score canonicalizer uses.
+serde_json = { workspace = true, features = ["raw_value"] }
 tokio = { workspace = true, features = ["signal", "time", "net"] }
 uuid.workspace = true
 
