@@ -704,6 +704,7 @@ pub(crate) async fn autonomous_readiness(State(st): State<Arc<AppState>>) -> imp
         crate::routes::market_data_readiness::compute_daily_data_readiness_response(&st, now).await;
 
     if !is_paper_alpaca {
+        let dynamic_selection = dynamic_selection_readiness_projection(&st).await;
         return (
             StatusCode::OK,
             Json(AutonomousPaperReadinessResponse {
@@ -751,6 +752,7 @@ pub(crate) async fn autonomous_readiness(State(st): State<Arc<AppState>>) -> imp
                         &st, now,
                     )
                     .await,
+                dynamic_selection,
             }),
         )
             .into_response();
@@ -1142,6 +1144,8 @@ pub(crate) async fn autonomous_readiness(State(st): State<Arc<AppState>>) -> imp
     })
     .await;
 
+    let dynamic_selection = dynamic_selection_readiness_projection(&st).await;
+
     (
         StatusCode::OK,
         Json(AutonomousPaperReadinessResponse {
@@ -1185,6 +1189,7 @@ pub(crate) async fn autonomous_readiness(State(st): State<Arc<AppState>>) -> imp
                     &st, now,
                 )
                 .await,
+            dynamic_selection,
         }),
     )
         .into_response()
@@ -1271,6 +1276,63 @@ pub(crate) async fn autonomous_no_trade_diagnostics(
         }),
     )
         .into_response()
+}
+
+/// DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7A: build the narrow additive
+/// dynamic-selection projection for `GET /api/v1/autonomous/readiness`.
+///
+/// `configured_mode`/`effective_mode`/`live_lock_applied` are a fresh
+/// preview evaluation — safe per `dynamic_selection_mode::effective_mode`'s
+/// own documented contract for a read-only route, as long as it is honestly
+/// labeled as current-config truth rather than the active run's binding
+/// (which this projection does via its doc comment, not a route-level
+/// claim). `disposition`/`plan_present`/`host_pool_present`/
+/// `selected_pair_count`/`owning_run_id` reflect the actual committed
+/// run-scoped truth, independently, and are never synthesized from the
+/// preview mode resolution above.
+async fn dynamic_selection_readiness_projection(
+    st: &Arc<AppState>,
+) -> crate::api_types::DynamicSelectionReadinessProjection {
+    let mode_resolution = crate::dynamic_selection_mode::resolve_dynamic_selection_mode_from_env();
+    let effective = crate::dynamic_selection_mode::effective_mode(
+        &mode_resolution,
+        st.deployment_mode(),
+        st.runtime_selection().broker_kind,
+    );
+    let snapshot = st.dynamic_selection_runtime_snapshot().await;
+
+    crate::api_types::DynamicSelectionReadinessProjection {
+        configured_mode: effective.configured_mode.as_str().to_string(),
+        effective_mode: effective.effective_mode.as_str().to_string(),
+        live_lock_applied: effective.live_lock_applied,
+        disposition: snapshot
+            .as_ref()
+            .map(|s| dynamic_selection_disposition_str(s.disposition).to_string()),
+        plan_present: snapshot.as_ref().is_some_and(|s| s.plan_present()),
+        host_pool_present: snapshot.as_ref().is_some_and(|s| s.host_pool_present()),
+        selected_pair_count: snapshot
+            .as_ref()
+            .map(|s| s.selected_pair_count() as u64)
+            .unwrap_or(0),
+        owning_run_id: snapshot.as_ref().map(|s| s.run_id),
+        approved_for_live: snapshot.as_ref().is_some_and(|s| s.approved_for_live),
+    }
+}
+
+/// Stable lowercase string for each closed disposition variant. Exhaustive
+/// by construction — a new variant added upstream fails this match at
+/// compile time rather than silently falling through.
+fn dynamic_selection_disposition_str(
+    disposition: crate::dynamic_selection_start_gate::DynamicSelectionStartGateDisposition,
+) -> &'static str {
+    use crate::dynamic_selection_start_gate::DynamicSelectionStartGateDisposition as D;
+    match disposition {
+        D::Off => "off",
+        D::ShadowAllowed => "shadow_allowed",
+        D::ShadowInvalid => "shadow_invalid",
+        D::PaperEnforcedAllowed => "paper_enforced_allowed",
+        D::PaperEnforcedRefused => "paper_enforced_refused",
+    }
 }
 
 // AUTON-NO-TRADE-01: Bar ticker Gate 2 derivation — pure helper for testability.

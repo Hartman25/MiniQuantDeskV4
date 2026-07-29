@@ -888,6 +888,46 @@ pub struct AutonomousPaperReadinessResponse {
     // PROJECTION: additive compact daily-operation outcome summary. Fails
     // soft independently of every other field on this response.
     pub daily_operation: AutonomousDailyOperationSummary,
+
+    // DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7A: narrow additive
+    // process-local dynamic-selection lifecycle truth. Not the final Bundle 7
+    // status route/GUI panel — a preview projection only, factored into
+    // neither `blockers` nor `overall_ready`.
+    pub dynamic_selection: DynamicSelectionReadinessProjection,
+}
+
+/// DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7A: narrow, additive,
+/// process-local projection of dynamic-selection lifecycle truth.
+///
+/// `configured_mode`/`effective_mode`/`live_lock_applied` are a fresh
+/// preview evaluation (same mode resolver `start_execution_runtime` uses),
+/// current-config truth as of this request — not necessarily the mode the
+/// active run (if any) was actually started under. `disposition` and every
+/// field below it reflect the actual committed
+/// `AppState::dynamic_selection_runtime_snapshot()` for the currently owned
+/// run, and are `None`/`false`/`0` when no run is active or no commitment
+/// has happened yet. Never fabricates presence — a `null` `disposition` here
+/// means "no committed truth exists right now", not "Off".
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DynamicSelectionReadinessProjection {
+    /// `"off"` | `"shadow"` | `"paper_enforced"` — fresh preview, current env config.
+    pub configured_mode: String,
+    /// `"off"` | `"shadow"` | `"paper_enforced"` — after the deployment-mode live lock.
+    pub effective_mode: String,
+    /// `true` when the live lock forced `effective_mode` down to `"off"`.
+    pub live_lock_applied: bool,
+    /// `"off"` | `"shadow_allowed"` | `"shadow_invalid"` | `"paper_enforced_allowed"`.
+    /// `null` when no run is active or nothing has been committed yet.
+    /// `"paper_enforced_refused"` is never observed here — a refused start
+    /// commits no `AppState` selection state.
+    pub disposition: Option<String>,
+    pub plan_present: bool,
+    pub host_pool_present: bool,
+    pub selected_pair_count: u64,
+    /// The run this committed truth belongs to. `null` when `disposition` is `null`.
+    pub owning_run_id: Option<Uuid>,
+    /// Always `false` in this patch.
+    pub approved_for_live: bool,
 }
 
 // ---------------------------------------------------------------------------
