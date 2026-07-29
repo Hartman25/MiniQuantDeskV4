@@ -22,7 +22,8 @@
 //! Both callers share the exact same artifact-reading/fingerprint logic —
 //! there is no second, weaker reimplementation.
 
-use std::path::Path;
+use std::io::Read as _;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use chrono::{DateTime, Utc};
@@ -54,6 +55,75 @@ use mqk_db::{
 /// exists purely so a malformed or adversarial artifact fails closed instead
 /// of allocating without limit.
 const MAX_DECISIONS_FILE_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Defect 2: bound `manifest.json`'s size too -- much smaller than the
+/// decisions file in ordinary operation, but never unbounded.
+const MAX_MANIFEST_FILE_BYTES: u64 = 1024 * 1024;
+
+// ---------------------------------------------------------------------------
+// Defect 2: bounded-handle artifact reads (closes the metadata/read race)
+// ---------------------------------------------------------------------------
+//
+// The prior implementation checked `std::fs::metadata(path).len()` and then
+// called `std::fs::read_to_string(path)` as two independent filesystem
+// operations against the same *path* -- the file the path resolves to can
+// grow or be replaced entirely between those two calls (TOCTOU), so the
+// metadata check proved nothing about what the read actually returned, and
+// the read itself was unbounded. [`read_bounded`] reads through one already-
+// open handle with a `max_bytes + 1`-byte cap as the actual proof -- the
+// number of bytes it can prove it read, never a size some other syscall
+// reported. [`read_bounded_file_string`] adds a cheap early-refusal
+// `metadata()` call against that *same* handle (defense-in-depth only, not
+// the authority) and UTF-8-decodes only after the bounded byte read
+// completes.
+
+/// Defect 2: read at most `max_bytes` bytes from `reader`, refusing with a
+/// distinct error the moment more than `max_bytes` bytes are available --
+/// generic over [`std::io::Read`] so it is directly testable against an
+/// in-memory buffer, with no filesystem involved.
+fn read_bounded<R: std::io::Read>(mut reader: R, max_bytes: u64) -> Result<Vec<u8>, String> {
+    let limit = max_bytes.saturating_add(1);
+    let mut buf = Vec::new();
+    reader
+        .by_ref()
+        .take(limit)
+        .read_to_end(&mut buf)
+        .map_err(|e| format!("read failed: {e}"))?;
+    if buf.len() as u64 > max_bytes {
+        return Err(format!("exceeds max allowed size ({max_bytes} bytes)"));
+    }
+    Ok(buf)
+}
+
+/// Defect 2: open `path` exactly once, read metadata from that same handle
+/// for a cheap (non-authoritative) early refusal, then bound the actual byte
+/// stream through [`read_bounded`] -- one content read only. UTF-8 decoding
+/// happens only after the bounded byte read completes, so an invalid-UTF-8
+/// file is refused distinctly from an over-size one.
+fn read_bounded_file_string(path: &Path, max_bytes: u64) -> Result<String, String> {
+    let file =
+        std::fs::File::open(path).map_err(|e| format!("read failed: {}: {e}", path.display()))?;
+    if let Ok(meta) = file.metadata() {
+        if meta.len() > max_bytes {
+            return Err(format!(
+                "{} exceeds max allowed size ({} bytes > {max_bytes} bytes)",
+                path.display(),
+                meta.len(),
+            ));
+        }
+    }
+    let bytes = read_bounded(file, max_bytes).map_err(|e| {
+        if e.contains("exceeds max allowed size") {
+            format!(
+                "{} exceeds max allowed size ({max_bytes} bytes)",
+                path.display()
+            )
+        } else {
+            format!("{e}: {}", path.display())
+        }
+    })?;
+    String::from_utf8(bytes).map_err(|e| format!("invalid utf-8 in {}: {e}", path.display()))
+}
 
 /// Shadow deserialization target used solely to recover the exact raw JSON
 /// text of one row's `scanner_score` field, and the same row's identity
@@ -98,23 +168,13 @@ fn read_and_match_decisions(
     symbol: &str,
     timeframe_secs: i64,
 ) -> Result<MatchedDecisions, String> {
-    // Bound file size before allocation -- checked via metadata, before the
-    // single read below ever pulls the content into memory.
-    let file_len = std::fs::metadata(decisions_path)
-        .map_err(|e| format!("read failed: {}: {e}", decisions_path.display()))?
-        .len();
-    if file_len > MAX_DECISIONS_FILE_BYTES {
-        return Err(format!(
-            "review_decisions.json exceeds max allowed size ({file_len} bytes > \
-             {MAX_DECISIONS_FILE_BYTES} bytes): {}",
-            decisions_path.display()
-        ));
-    }
-
-    // The one, only filesystem read of this file's content -- everything
-    // below parses this single bounded, immutable buffer.
-    let raw_text = std::fs::read_to_string(decisions_path)
-        .map_err(|e| format!("read failed: {}: {e}", decisions_path.display()))?;
+    // Defect 2: one bounded read through a single already-open file handle
+    // -- no separate `std::fs::metadata(path)` call against the path
+    // followed by an independent, unbounded `std::fs::read_to_string(path)`
+    // call (the file the path resolves to could grow or be replaced between
+    // those two calls). Everything below parses this single bounded,
+    // immutable buffer.
+    let raw_text = read_bounded_file_string(decisions_path, MAX_DECISIONS_FILE_BYTES)?;
 
     let decisions: Vec<mqk_backtest::StrategyScanReviewDecision> = serde_json::from_str(&raw_text)
         .map_err(|e| format!("parse failed: {}: {e}", decisions_path.display()))?;
@@ -385,15 +445,25 @@ pub fn validate_paper_candidate_evidence(
         );
     }
 
-    let manifest_path = candidate_canon.join("manifest.json");
-    let decisions_path = candidate_canon.join("review_decisions.json");
-    for p in [&manifest_path, &decisions_path] {
-        if !p.is_file() {
-            return Err(format!("expected artifact file not found: {}", p.display()));
-        }
-    }
+    // Defect 3: canonicalize and root/candidate-confine each *child* file
+    // independently -- canonicalizing the directory above proves nothing
+    // about a symlink or reparse point planted as manifest.json or
+    // review_decisions.json itself; a bare `Path::is_file()` on the
+    // un-canonicalized join follows such a link without ever proving where
+    // it actually points.
+    let manifest_path = canonicalize_and_confine_child(
+        &candidate_canon.join("manifest.json"),
+        &root_canon,
+        &candidate_canon,
+    )?;
+    let decisions_path = canonicalize_and_confine_child(
+        &candidate_canon.join("review_decisions.json"),
+        &root_canon,
+        &candidate_canon,
+    )?;
 
-    let manifest: mqk_backtest::ReviewManifest = read_json(&manifest_path)?;
+    let manifest: mqk_backtest::ReviewManifest =
+        read_json(&manifest_path, MAX_MANIFEST_FILE_BYTES)?;
 
     // Defect A: one bounded, single-filesystem-read parse -- no second read
     // of `decisions_path` anywhere below.
@@ -434,10 +504,52 @@ pub fn validate_paper_candidate_evidence(
     })
 }
 
-fn read_json<T: serde::de::DeserializeOwned>(path: &std::path::Path) -> Result<T, String> {
-    let raw = std::fs::read_to_string(path)
-        .map_err(|e| format!("read failed: {}: {e}", path.display()))?;
+/// Defect 2: bounded, single-open-handle JSON read -- see
+/// [`read_bounded_file_string`]. No unbounded `read_to_string` on any
+/// artifact authority file.
+fn read_json<T: serde::de::DeserializeOwned>(
+    path: &std::path::Path,
+    max_bytes: u64,
+) -> Result<T, String> {
+    let raw = read_bounded_file_string(path, max_bytes)?;
     serde_json::from_str(&raw).map_err(|e| format!("parse failed: {}: {e}", path.display()))
+}
+
+// ---------------------------------------------------------------------------
+// Defect 3: root/candidate-confined child artifact path resolution
+// ---------------------------------------------------------------------------
+
+/// Defect 3: canonicalize `child` (expected to be a path directly inside
+/// `candidate_canon`) and prove it resolves inside *both* `root_canon` (the
+/// whole configured review-artifact root) and `candidate_canon` (this exact
+/// candidate's own directory) -- `std::fs::canonicalize` fully resolves any
+/// symlink/reparse-point chain, so a child planted as a symlink pointing
+/// outside either boundary is caught here, before any content is ever read.
+/// Refuses a missing child, an escaped child, and a non-regular child (e.g.
+/// a directory) with distinct messages -- never trusts `Path::is_file()` on
+/// the un-canonicalized join alone.
+fn canonicalize_and_confine_child(
+    child: &Path,
+    root_canon: &Path,
+    candidate_canon: &Path,
+) -> Result<PathBuf, String> {
+    let child_canon = std::fs::canonicalize(child)
+        .map_err(|_| format!("expected artifact file not found: {}", child.display()))?;
+    if !child_canon.starts_with(root_canon) || !child_canon.starts_with(candidate_canon) {
+        return Err(format!(
+            "artifact file does not resolve inside the configured review artifact root: {}",
+            child.display()
+        ));
+    }
+    let meta = std::fs::metadata(&child_canon)
+        .map_err(|e| format!("read failed: {}: {e}", child_canon.display()))?;
+    if !meta.is_file() {
+        return Err(format!(
+            "expected artifact file is not a regular file: {}",
+            child_canon.display()
+        ));
+    }
+    Ok(child_canon)
 }
 
 // ---------------------------------------------------------------------------
@@ -661,14 +773,30 @@ pub struct ValidatedCandidateEvidence {
     pub evidence_review_id: String,
     pub evidence_scanner_scan_id: String,
     pub evidence_artifact_path: String,
-    pub evidence_fingerprint: String,
-    /// Defect B: the durable, recomputed-and-matched v2 exact-score
-    /// fingerprint (see [`compute_evidence_fingerprint_v2`]). Always present
-    /// on a successful [`validate_active_paper_candidate`] result -- an
-    /// identity whose durable evidence lacks a v2 fingerprint fails closed
-    /// with [`CandidateEvidenceReason::DurableFingerprintV2Missing`] before
-    /// this struct is ever constructed.
-    pub evidence_fingerprint_v2: String,
+    /// Defect 1: the durable legacy `evidence_fingerprint` column value read
+    /// back from the promotion transition, distinct from
+    /// [`Self::recomputed_legacy_fingerprint`] even though the two are
+    /// required byte-equal for this struct to ever be constructed (a
+    /// mismatch fails closed with [`CandidateEvidenceReason::FingerprintMismatch`]
+    /// before reaching here) -- provenance is never collapsed to one
+    /// ambiguous field, so a future durable readback can always tell which
+    /// value came from disk and which was freshly computed.
+    pub durable_legacy_fingerprint: String,
+    /// Defect 1: the legacy fingerprint freshly recomputed from the review
+    /// artifact at validation time. See [`Self::durable_legacy_fingerprint`].
+    pub recomputed_legacy_fingerprint: String,
+    /// Defect B/Defect 1: the durable v2 exact-score fingerprint (see
+    /// [`compute_evidence_fingerprint_v2`]), as read back from the
+    /// promotion transition. Always present on a successful
+    /// [`validate_active_paper_candidate`] result -- an identity whose
+    /// durable evidence lacks a v2 fingerprint fails closed with
+    /// [`CandidateEvidenceReason::DurableFingerprintV2Missing`] before this
+    /// struct is ever constructed.
+    pub durable_exact_fingerprint_v2: String,
+    /// Defect 1: the v2 exact-score fingerprint freshly recomputed from the
+    /// review artifact's raw score token at validation time. See
+    /// [`Self::durable_exact_fingerprint_v2`].
+    pub recomputed_exact_fingerprint_v2: String,
     /// IR6: the review artifact manifest's `git_hash`.
     pub evidence_git_hash: String,
     /// IR6: the matched review row's exact `review_state` code.
@@ -808,8 +936,10 @@ pub async fn validate_active_paper_candidate(
         evidence_review_id: fresh.review_id,
         evidence_scanner_scan_id: fresh.scanner_scan_id,
         evidence_artifact_path: fresh.artifact_path,
-        evidence_fingerprint: fresh.fingerprint,
-        evidence_fingerprint_v2: durable_fingerprint_v2.to_string(),
+        durable_legacy_fingerprint: durable_fingerprint.to_string(),
+        recomputed_legacy_fingerprint: fresh.fingerprint,
+        durable_exact_fingerprint_v2: durable_fingerprint_v2.to_string(),
+        recomputed_exact_fingerprint_v2: recomputed_v2,
         evidence_git_hash: fresh.git_hash,
         evidence_review_state: fresh.review_state,
         canonical_score_decimal,
@@ -1142,6 +1272,284 @@ mod tests {
             CandidateEvidenceReason::ArtifactDuplicateIdentity
         );
 
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    // ── Defect 2: bounded-handle reader ───────────────────────────────────
+
+    /// An in-memory [`std::io::Read`] fixture that reports an arbitrary
+    /// number of available bytes regardless of what a filesystem's
+    /// `metadata()` might separately claim -- proves `read_bounded` enforces
+    /// the actual byte count it reads, never a size some other syscall
+    /// reported (Defect 2's core fix).
+    struct FixedReader(std::io::Cursor<Vec<u8>>);
+    impl std::io::Read for FixedReader {
+        fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+            self.0.read(buf)
+        }
+    }
+
+    #[test]
+    fn read_bounded_accepts_exactly_max_bytes() {
+        let data = vec![b'x'; 100];
+        let reader = FixedReader(std::io::Cursor::new(data.clone()));
+        let out = read_bounded(reader, 100).expect("exactly MAX must be accepted");
+        assert_eq!(out, data);
+    }
+
+    #[test]
+    fn read_bounded_refuses_max_plus_one_bytes() {
+        let data = vec![b'x'; 101];
+        let reader = FixedReader(std::io::Cursor::new(data));
+        let err = read_bounded(reader, 100).expect_err("MAX+1 must be refused");
+        assert!(err.contains("exceeds max allowed size"), "got: {err}");
+    }
+
+    #[test]
+    fn read_bounded_ignores_misleading_small_declared_size() {
+        // A `Read` implementation that behaves as if it were much smaller
+        // than it actually is (there is no `metadata()` on this type at
+        // all) -- `read_bounded` only ever trusts the bytes it actually
+        // reads, never a separately-reported size.
+        let data = vec![b'y'; 10_000];
+        let reader = FixedReader(std::io::Cursor::new(data));
+        let err = read_bounded(reader, 100).expect_err("oversized stream must be refused");
+        assert!(err.contains("exceeds max allowed size"), "got: {err}");
+    }
+
+    #[test]
+    fn read_bounded_file_string_exactly_max_accepted() {
+        let root =
+            std::env::temp_dir().join(format!("mqk_daemon_bounded_ok_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).expect("create temp dir");
+        let path = root.join("f.txt");
+        std::fs::write(&path, vec![b'a'; 50]).expect("write fixture");
+
+        let out = read_bounded_file_string(&path, 50).expect("exactly MAX must be accepted");
+        assert_eq!(out.len(), 50);
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn read_bounded_file_string_max_plus_one_refused() {
+        let root =
+            std::env::temp_dir().join(format!("mqk_daemon_bounded_over_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).expect("create temp dir");
+        let path = root.join("f.txt");
+        std::fs::write(&path, vec![b'a'; 51]).expect("write fixture");
+
+        let err = read_bounded_file_string(&path, 50).expect_err("MAX+1 must be refused");
+        assert!(err.contains("exceeds max allowed size"), "got: {err}");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn read_bounded_file_string_invalid_utf8_refused_distinctly() {
+        let root =
+            std::env::temp_dir().join(format!("mqk_daemon_bounded_utf8_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&root).expect("create temp dir");
+        let path = root.join("f.txt");
+        std::fs::write(&path, [0xff, 0xfe, 0xfd]).expect("write fixture");
+
+        let err = read_bounded_file_string(&path, 100).expect_err("invalid utf-8 must be refused");
+        assert!(err.contains("invalid utf-8"), "got: {err}");
+        assert!(
+            !err.contains("exceeds max allowed size"),
+            "must be a distinct refusal from an over-size one: {err}"
+        );
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn read_json_over_limit_manifest_is_refused_before_parsing() {
+        let root = std::env::temp_dir().join(format!(
+            "mqk_daemon_manifest_bound_{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::create_dir_all(&root).expect("create temp dir");
+        let path = root.join("manifest.json");
+        std::fs::write(&path, vec![b'{'; MAX_MANIFEST_FILE_BYTES as usize + 1])
+            .expect("write oversized manifest");
+
+        let result: Result<mqk_backtest::ReviewManifest, String> =
+            read_json(&path, MAX_MANIFEST_FILE_BYTES);
+        let err = result.expect_err("over-limit manifest must be refused");
+        assert!(err.contains("exceeds max allowed size"), "got: {err}");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    // ── Defect 3: symlink/reparse-point child escape ──────────────────────
+
+    #[test]
+    fn normal_in_root_child_files_pass() {
+        let (root, review_dir) = write_fixture(
+            "defect3_normal",
+            r#"[{
+                "symbol": "AAPL",
+                "timeframe": "1D",
+                "strategy_id": "swing_momentum",
+                "scanner_rank": 1,
+                "scanner_score": 9.0,
+                "review_state": "paper_candidate",
+                "reason_codes": [],
+                "blockers": [],
+                "warnings": []
+            }]"#,
+        );
+        let st = fixture_state(&root);
+        let evidence = validate_paper_candidate_evidence(
+            &st,
+            review_dir.to_str().unwrap(),
+            "swing_momentum",
+            "AAPL",
+            86400,
+        )
+        .expect("normal in-root artifact must validate");
+        assert_eq!(evidence.review_state, "paper_candidate");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[test]
+    fn non_regular_child_is_refused() {
+        let (root, review_dir) = write_fixture("defect3_non_regular", "[]");
+        // Replace manifest.json with a directory -- a non-regular child.
+        std::fs::remove_file(review_dir.join("manifest.json")).expect("remove manifest");
+        std::fs::create_dir_all(review_dir.join("manifest.json")).expect("create dir in its place");
+
+        let st = fixture_state(&root);
+        let err = validate_paper_candidate_evidence(
+            &st,
+            review_dir.to_str().unwrap(),
+            "swing_momentum",
+            "AAPL",
+            86400,
+        )
+        .expect_err("a directory in place of manifest.json must be refused");
+        assert!(err.contains("not a regular file"), "got: {err}");
+
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn manifest_child_symlink_escape_refused() {
+        let (root, review_dir) = write_fixture("defect3_manifest_escape", "[]");
+        let outside = std::env::temp_dir().join(format!(
+            "mqk_daemon_defect3_outside_{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(&outside, "not a real manifest").expect("write outside file");
+
+        std::fs::remove_file(review_dir.join("manifest.json")).expect("remove manifest");
+        std::os::unix::fs::symlink(&outside, review_dir.join("manifest.json"))
+            .expect("create manifest.json as a symlink escaping the root");
+
+        let st = fixture_state(&root);
+        let err = validate_paper_candidate_evidence(
+            &st,
+            review_dir.to_str().unwrap(),
+            "swing_momentum",
+            "AAPL",
+            86400,
+        )
+        .expect_err("a manifest.json symlink escaping the root must be refused");
+        assert!(
+            err.contains("does not resolve inside the configured review artifact root"),
+            "got: {err}"
+        );
+        assert_eq!(
+            classify_artifact_error(&err),
+            CandidateEvidenceReason::ArtifactRootEscape
+        );
+
+        std::fs::remove_file(&outside).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn decisions_child_symlink_escape_refused() {
+        let (root, review_dir) = write_fixture("defect3_decisions_escape", "[]");
+        let outside = std::env::temp_dir().join(format!(
+            "mqk_daemon_defect3_outside_decisions_{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(&outside, "[]").expect("write outside file");
+
+        std::fs::remove_file(review_dir.join("review_decisions.json")).expect("remove decisions");
+        std::os::unix::fs::symlink(&outside, review_dir.join("review_decisions.json"))
+            .expect("create review_decisions.json as a symlink escaping the root");
+
+        let st = fixture_state(&root);
+        let err = validate_paper_candidate_evidence(
+            &st,
+            review_dir.to_str().unwrap(),
+            "swing_momentum",
+            "AAPL",
+            86400,
+        )
+        .expect_err("a review_decisions.json symlink escaping the root must be refused");
+        assert!(
+            err.contains("does not resolve inside the configured review artifact root"),
+            "got: {err}"
+        );
+        assert_eq!(
+            classify_artifact_error(&err),
+            CandidateEvidenceReason::ArtifactRootEscape
+        );
+
+        std::fs::remove_file(&outside).ok();
+        std::fs::remove_dir_all(&root).ok();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn manifest_child_symlink_escape_refused() {
+        let (root, review_dir) = write_fixture("defect3_manifest_escape_win", "[]");
+        let outside = std::env::temp_dir().join(format!(
+            "mqk_daemon_defect3_outside_win_{}",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(&outside, "not a real manifest").expect("write outside file");
+
+        std::fs::remove_file(review_dir.join("manifest.json")).expect("remove manifest");
+        // Platform inability to create a symlink (no privilege on this
+        // Windows account) skips only this fixture, with an explicit reason
+        // -- never silently passes it.
+        match std::os::windows::fs::symlink_file(&outside, review_dir.join("manifest.json")) {
+            Ok(()) => {
+                let st = fixture_state(&root);
+                let err = validate_paper_candidate_evidence(
+                    &st,
+                    review_dir.to_str().unwrap(),
+                    "swing_momentum",
+                    "AAPL",
+                    86400,
+                )
+                .expect_err("a manifest.json symlink escaping the root must be refused");
+                assert!(
+                    err.contains("does not resolve inside the configured review artifact root"),
+                    "got: {err}"
+                );
+                assert_eq!(
+                    classify_artifact_error(&err),
+                    CandidateEvidenceReason::ArtifactRootEscape
+                );
+            }
+            Err(e) => {
+                eprintln!(
+                    "skipping manifest_child_symlink_escape_refused: this Windows account \
+                     lacks symlink-creation privilege: {e}"
+                );
+            }
+        }
+
+        std::fs::remove_file(&outside).ok();
         std::fs::remove_dir_all(&root).ok();
     }
 

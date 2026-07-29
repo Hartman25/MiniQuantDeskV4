@@ -330,7 +330,16 @@ async fn valid_active_paper_candidate_succeeds() {
     assert_eq!(evidence.canonical_score_decimal, "9");
     assert_eq!(evidence.canonical_score_micros, Some(9_000_000));
     assert_eq!(evidence.scanner_rank, Some(1));
-    assert!(!evidence.evidence_fingerprint.is_empty());
+    assert!(!evidence.recomputed_legacy_fingerprint.is_empty());
+    assert!(!evidence.recomputed_exact_fingerprint_v2.is_empty());
+    assert_eq!(
+        evidence.durable_legacy_fingerprint,
+        evidence.recomputed_legacy_fingerprint
+    );
+    assert_eq!(
+        evidence.durable_exact_fingerprint_v2,
+        evidence.recomputed_exact_fingerprint_v2
+    );
 }
 
 #[tokio::test]
