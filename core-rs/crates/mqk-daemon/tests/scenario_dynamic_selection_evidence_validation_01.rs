@@ -51,17 +51,31 @@ use uuid::Uuid;
 // one self-contained fixture set per scenario file).
 // ---------------------------------------------------------------------------
 
+/// Deterministic UUIDv5, namespaced by an explicit per-call-site seed string
+/// -- never `Uuid::new_v4()`. Fixture uniqueness comes from the seed text
+/// (always the caller-supplied label/prefix, itself unique per call site in
+/// this file), not from randomness.
+fn det_uuid(seed: &str) -> Uuid {
+    Uuid::new_v5(&Uuid::NAMESPACE_URL, seed.as_bytes())
+}
+
 fn temp_dir(label: &str) -> PathBuf {
     let dir = std::env::temp_dir().join(format!(
         "mqk_daemon_dyn_sel_evidence_{label}_{}",
-        Uuid::new_v4()
+        det_uuid(&format!(
+            "scenario_dynamic_selection_evidence_validation_01::temp_dir::{label}"
+        ))
     ));
     std::fs::create_dir_all(&dir).expect("create temp dir");
     dir
 }
 
 fn unique_id(prefix: &str) -> String {
-    let u = Uuid::new_v4().to_string().replace('-', "");
+    let u = det_uuid(&format!(
+        "scenario_dynamic_selection_evidence_validation_01::unique_id::{prefix}"
+    ))
+    .to_string()
+    .replace('-', "");
     format!("{prefix}_{}", &u[..12])
 }
 
@@ -70,7 +84,10 @@ fn write_fixture(out_dir: &Path, decisions: Vec<StrategyScanReviewDecision>) -> 
         .iter()
         .filter(|d| d.review_state == StrategyScanReviewState::PaperCandidate)
         .count();
-    let review_id = Uuid::new_v4();
+    let review_id = det_uuid(&format!(
+        "scenario_dynamic_selection_evidence_validation_01::write_fixture::{}",
+        out_dir.display()
+    ));
     let manifest = ReviewManifest {
         schema_version: 1,
         review_id: review_id.to_string(),

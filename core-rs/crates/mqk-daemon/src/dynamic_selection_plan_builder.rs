@@ -542,6 +542,14 @@ mod tests {
     use crate::state::market_calendar::NyseWeekdaysProvider;
     use crate::state::{MultiSymbolConfigSource, OperatorAuthMode};
 
+    /// Deterministic UUIDv5, namespaced by an explicit per-call-site seed
+    /// string -- never `Uuid::new_v4()`. Fixture uniqueness comes from the
+    /// seed text (always naming the test and the field it identifies), not
+    /// from randomness.
+    fn det_uuid(seed: &str) -> uuid::Uuid {
+        uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, seed.as_bytes())
+    }
+
     fn config(symbols: Vec<SymbolStrategyAssignment>) -> MultiSymbolRuntimeConfig {
         MultiSymbolRuntimeConfig {
             schema_version: "multi-symbol-runtime-config-v1".to_string(),
@@ -817,20 +825,24 @@ mod tests {
 
         let root = std::env::temp_dir().join(format!(
             "mqk_daemon_dyn_sel_plan_builder_{}",
-            uuid::Uuid::new_v4()
+            det_uuid("dynamic_selection_plan_builder::full_evidence_chain_passes_refused_only_on_data_readiness::root")
         ));
         std::fs::create_dir_all(&root).expect("create temp dir");
         std::env::set_var("MQK_STRATEGY_REVIEW_ARTIFACT_ROOT", &root);
 
         // A real built-in strategy name is required for plugin_instantiable
         // to pass (the plugin registry only recognizes the 5 fixed builtin
-        // names) -- uniqueness across repeated test runs instead comes from
-        // the symbol, which register_builtin_strategies binds fresh for any
-        // symbol string, real or fixture-only.
+        // names) -- the symbol, which register_builtin_strategies binds
+        // fresh for any symbol string, real or fixture-only, is derived
+        // deterministically below (never Uuid::new_v4()) so this identity
+        // is reproducible across runs.
         let strategy_id = "swing_momentum".to_string();
         let symbol = format!(
             "ZZ{}",
-            uuid::Uuid::new_v4().to_string().replace('-', "")[..8].to_ascii_uppercase()
+            det_uuid("dynamic_selection_plan_builder::full_evidence_chain_passes_refused_only_on_data_readiness::symbol")
+                .to_string()
+                .replace('-', "")[..8]
+                .to_ascii_uppercase()
         );
         let decision = mqk_backtest::StrategyScanReviewDecision {
             symbol: symbol.clone(),
@@ -843,7 +855,7 @@ mod tests {
             blockers: Vec::new(),
             warnings: Vec::new(),
         };
-        let review_id = uuid::Uuid::new_v4();
+        let review_id = det_uuid("dynamic_selection_plan_builder::full_evidence_chain_passes_refused_only_on_data_readiness::review_id");
         let manifest = mqk_backtest::ReviewManifest {
             schema_version: 1,
             review_id: review_id.to_string(),

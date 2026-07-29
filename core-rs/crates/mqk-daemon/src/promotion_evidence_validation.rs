@@ -1072,6 +1072,14 @@ mod tests {
     /// sequence, so acquiring the lock there is sufficient.
     static ENV_ROOT_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
+    /// Deterministic UUIDv5, namespaced by an explicit per-call-site seed
+    /// string -- never `Uuid::new_v4()`. Fixture uniqueness comes from the
+    /// seed text (always naming the test and the field it identifies), not
+    /// from randomness.
+    fn det_uuid(seed: &str) -> uuid::Uuid {
+        uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_URL, seed.as_bytes())
+    }
+
     // ── IR7: exact raw-token extraction, filesystem-to-RawValue end-to-end ──
     // (pure-decimal canonicalization math itself is proven in
     // mqk_portfolio::canonical_decimal's own unit tests; this test proves
@@ -1082,7 +1090,7 @@ mod tests {
     fn scanner_score_token_preserves_precision_an_f64_roundtrip_would_lose() {
         let root = std::env::temp_dir().join(format!(
             "mqk_daemon_scanner_score_token_test_{}",
-            uuid::Uuid::new_v4()
+            det_uuid("promotion_evidence_validation::scanner_score_token_preserves_precision_an_f64_roundtrip_would_lose")
         ));
         std::fs::create_dir_all(&root).expect("create temp root");
         let review_dir = root.join("review-1");
@@ -1187,7 +1195,9 @@ mod tests {
     fn write_fixture(name: &str, decisions_json: &str) -> (std::path::PathBuf, std::path::PathBuf) {
         let root = std::env::temp_dir().join(format!(
             "mqk_daemon_defect_a_{name}_{}",
-            uuid::Uuid::new_v4()
+            det_uuid(&format!(
+                "promotion_evidence_validation::write_fixture::{name}"
+            ))
         ));
         std::fs::create_dir_all(&root).expect("create temp root");
         let review_dir = root.join("review-1");
@@ -1442,8 +1452,12 @@ mod tests {
 
     #[test]
     fn read_bounded_file_string_exactly_max_accepted() {
-        let root =
-            std::env::temp_dir().join(format!("mqk_daemon_bounded_ok_{}", uuid::Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!(
+            "mqk_daemon_bounded_ok_{}",
+            det_uuid(
+                "promotion_evidence_validation::read_bounded_file_string_exactly_max_accepted"
+            )
+        ));
         std::fs::create_dir_all(&root).expect("create temp dir");
         let path = root.join("f.txt");
         std::fs::write(&path, vec![b'a'; 50]).expect("write fixture");
@@ -1457,8 +1471,12 @@ mod tests {
 
     #[test]
     fn read_bounded_file_string_max_plus_one_refused() {
-        let root =
-            std::env::temp_dir().join(format!("mqk_daemon_bounded_over_{}", uuid::Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!(
+            "mqk_daemon_bounded_over_{}",
+            det_uuid(
+                "promotion_evidence_validation::read_bounded_file_string_max_plus_one_refused"
+            )
+        ));
         std::fs::create_dir_all(&root).expect("create temp dir");
         let path = root.join("f.txt");
         std::fs::write(&path, vec![b'a'; 51]).expect("write fixture");
@@ -1472,8 +1490,10 @@ mod tests {
 
     #[test]
     fn read_bounded_file_string_invalid_utf8_refused_distinctly() {
-        let root =
-            std::env::temp_dir().join(format!("mqk_daemon_bounded_utf8_{}", uuid::Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!(
+            "mqk_daemon_bounded_utf8_{}",
+            det_uuid("promotion_evidence_validation::read_bounded_file_string_invalid_utf8_refused_distinctly")
+        ));
         std::fs::create_dir_all(&root).expect("create temp dir");
         let path = root.join("f.txt");
         std::fs::write(&path, [0xff, 0xfe, 0xfd]).expect("write fixture");
@@ -1493,7 +1513,7 @@ mod tests {
     fn read_json_over_limit_manifest_is_refused_before_parsing() {
         let root = std::env::temp_dir().join(format!(
             "mqk_daemon_manifest_bound_{}",
-            uuid::Uuid::new_v4()
+            det_uuid("promotion_evidence_validation::read_json_over_limit_manifest_is_refused_before_parsing")
         ));
         std::fs::create_dir_all(&root).expect("create temp dir");
         let path = root.join("manifest.json");
@@ -1567,7 +1587,7 @@ mod tests {
         let (root, review_dir) = write_fixture("defect3_manifest_escape", "[]");
         let outside = std::env::temp_dir().join(format!(
             "mqk_daemon_defect3_outside_{}",
-            uuid::Uuid::new_v4()
+            det_uuid("promotion_evidence_validation::manifest_child_symlink_escape_refused::unix")
         ));
         std::fs::write(&outside, "not a real manifest").expect("write outside file");
 
@@ -1603,7 +1623,7 @@ mod tests {
         let (root, review_dir) = write_fixture("defect3_decisions_escape", "[]");
         let outside = std::env::temp_dir().join(format!(
             "mqk_daemon_defect3_outside_decisions_{}",
-            uuid::Uuid::new_v4()
+            det_uuid("promotion_evidence_validation::decisions_child_symlink_escape_refused")
         ));
         std::fs::write(&outside, "[]").expect("write outside file");
 
@@ -1639,7 +1659,9 @@ mod tests {
         let (root, review_dir) = write_fixture("defect3_manifest_escape_win", "[]");
         let outside = std::env::temp_dir().join(format!(
             "mqk_daemon_defect3_outside_win_{}",
-            uuid::Uuid::new_v4()
+            det_uuid(
+                "promotion_evidence_validation::manifest_child_symlink_escape_refused::windows"
+            )
         ));
         std::fs::write(&outside, "not a real manifest").expect("write outside file");
 
@@ -1763,7 +1785,9 @@ mod tests {
         let (root, review_dir) = write_fixture("defect4_symlink_escape", "[]");
         let outside = std::env::temp_dir().join(format!(
             "mqk_daemon_defect4_outside_{}",
-            uuid::Uuid::new_v4()
+            det_uuid(
+                "promotion_evidence_validation::open_confined_regular_child_symlink_escape_refused"
+            )
         ));
         std::fs::write(&outside, "outside content").expect("write outside file");
         std::fs::remove_file(review_dir.join("manifest.json")).expect("remove manifest");
@@ -1795,7 +1819,7 @@ mod tests {
     fn identity_mismatch_between_two_different_files_is_detected() {
         let root = std::env::temp_dir().join(format!(
             "mqk_daemon_defect4_identity_{}",
-            uuid::Uuid::new_v4()
+            det_uuid("promotion_evidence_validation::identity_mismatch_between_two_different_files_is_detected")
         ));
         std::fs::create_dir_all(&root).expect("create temp dir");
         let path_a = root.join("a.txt");
@@ -1820,7 +1844,7 @@ mod tests {
     fn identity_match_for_the_same_unchanged_file_is_accepted() {
         let root = std::env::temp_dir().join(format!(
             "mqk_daemon_defect4_identity_same_{}",
-            uuid::Uuid::new_v4()
+            det_uuid("promotion_evidence_validation::identity_match_for_the_same_unchanged_file_is_accepted")
         ));
         std::fs::create_dir_all(&root).expect("create temp dir");
         let path = root.join("f.txt");
@@ -2241,7 +2265,10 @@ mod tests {
     #[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
     async fn missing_registry_row_is_refused() {
         let pool = make_db_pool_for_test().await;
-        let strategy_id = format!("nonexistent_{}", uuid::Uuid::new_v4());
+        let strategy_id = format!(
+            "nonexistent_{}",
+            det_uuid("promotion_evidence_validation::missing_registry_row_is_refused")
+        );
         let result = validate_strategy_registry_enabled(&pool, &strategy_id).await;
         assert_eq!(result, Err(CandidateEvidenceReason::RegistryRowMissing));
     }
@@ -2250,7 +2277,10 @@ mod tests {
     #[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
     async fn disabled_registry_row_is_refused() {
         let pool = make_db_pool_for_test().await;
-        let strategy_id = format!("disabled_strat_{}", uuid::Uuid::new_v4());
+        let strategy_id = format!(
+            "disabled_strat_{}",
+            det_uuid("promotion_evidence_validation::disabled_registry_row_is_refused")
+        );
         mqk_db::upsert_strategy_registry_entry(
             &pool,
             &mqk_db::UpsertStrategyRegistryArgs {
@@ -2274,7 +2304,10 @@ mod tests {
     #[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
     async fn enabled_registry_row_passes() {
         let pool = make_db_pool_for_test().await;
-        let strategy_id = format!("enabled_strat_{}", uuid::Uuid::new_v4());
+        let strategy_id = format!(
+            "enabled_strat_{}",
+            det_uuid("promotion_evidence_validation::enabled_registry_row_passes")
+        );
         mqk_db::upsert_strategy_registry_entry(
             &pool,
             &mqk_db::UpsertStrategyRegistryArgs {
