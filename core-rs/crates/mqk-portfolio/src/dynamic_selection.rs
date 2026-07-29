@@ -73,6 +73,35 @@ pub const REASON_REFUSED_FINGERPRINT_V2_MISSING: &str = "refused_evidence_finger
 /// Defect 1: durable and recomputed v2 exact-score fingerprints are both
 /// present but disagree.
 pub const REASON_REFUSED_FINGERPRINT_V2_MISMATCH: &str = "refused_evidence_fingerprint_v2_mismatch";
+/// Defect 1: either the durable or the recomputed legacy fingerprint is
+/// absent -- distinct from [`REASON_REFUSED_FINGERPRINT_MISMATCH`] (both
+/// present but disagreeing), mirroring the v2-missing/v2-mismatch split
+/// above.
+pub const REASON_REFUSED_FINGERPRINT_MISSING: &str = "refused_evidence_fingerprint_missing";
+/// Defect 1: a present legacy fingerprint value is not exactly 64 lowercase
+/// hexadecimal characters.
+pub const REASON_REFUSED_FINGERPRINT_MALFORMED: &str = "refused_evidence_fingerprint_malformed";
+/// Defect 1: the caller-supplied `legacy_fingerprint_matches` boolean
+/// disagrees with the truth derived directly from the durable/recomputed
+/// values themselves -- refused distinctly from a coherent (boolean agrees)
+/// mismatch, since a disagreeing boolean means the caller's own comparison
+/// cannot be trusted at all, not just that the fingerprints differ.
+pub const REASON_REFUSED_FINGERPRINT_INCOHERENT: &str =
+    "refused_evidence_fingerprint_boolean_incoherent";
+/// Defect 1: a present v2 exact-score fingerprint value is not exactly 64
+/// lowercase hexadecimal characters.
+pub const REASON_REFUSED_FINGERPRINT_V2_MALFORMED: &str =
+    "refused_evidence_fingerprint_v2_malformed";
+/// Defect 1: the caller-supplied `exact_fingerprint_v2_matches` boolean
+/// disagrees with the truth derived directly from the durable/recomputed
+/// values themselves. See [`REASON_REFUSED_FINGERPRINT_INCOHERENT`].
+pub const REASON_REFUSED_FINGERPRINT_V2_INCOHERENT: &str =
+    "refused_evidence_fingerprint_v2_boolean_incoherent";
+/// Defect 2: the caller-supplied pre-gate `exact_reason` diagnosis on
+/// [`SelectionCandidateEvidence`] is inconsistent with the evidence-gate
+/// check that actually failed -- see [`candidate_result`].
+pub const REASON_REFUSED_PRE_GATE_REASON_INCONSISTENT: &str =
+    "refused_pre_gate_reason_inconsistent";
 pub const REASON_REFUSED_UNSUPPORTED_STRATEGY: &str = "refused_unsupported_strategy_plugin";
 pub const REASON_REFUSED_TIMEFRAME_MISMATCH: &str = "refused_timeframe_mismatch";
 pub const REASON_REFUSED_DATA_NOT_READY: &str = "refused_data_not_ready";
@@ -257,6 +286,26 @@ pub enum ExactSelectionReason {
     ArtifactOverLimit,
     FingerprintMismatch,
     FingerprintV2Mismatch,
+    /// Defect 1: a present legacy fingerprint value is not exactly 64
+    /// lowercase hexadecimal characters.
+    LegacyFingerprintMalformed,
+    /// Defect 1: the caller-supplied `legacy_fingerprint_matches` boolean
+    /// disagrees with the truth derived directly from the durable/recomputed
+    /// values -- a boolean/value incoherence, not a plain mismatch.
+    LegacyFingerprintMatchIncoherent,
+    /// Defect 1: a present v2 exact-score fingerprint value is not exactly
+    /// 64 lowercase hexadecimal characters.
+    FingerprintV2Malformed,
+    /// Defect 1: the caller-supplied `exact_fingerprint_v2_matches` boolean
+    /// disagrees with the truth derived directly from the durable/recomputed
+    /// values -- a boolean/value incoherence, not a plain mismatch.
+    FingerprintV2MatchIncoherent,
+    /// Defect 2: the caller-supplied pre-gate `exact_reason` diagnosis is
+    /// inconsistent with the evidence-gate check that actually failed --
+    /// trusted only after proving agreement (see
+    /// [`gate_reason_accepts_pregate_refinement`]); disagreement fails
+    /// closed here rather than silently accepting an unproven diagnosis.
+    PreGateReasonInconsistent,
     // -- score/rank --
     ScoreMissing,
     ScoreNotFinite,
@@ -316,6 +365,13 @@ impl ExactSelectionReason {
             Self::ArtifactOverLimit => "artifact_over_limit".to_string(),
             Self::FingerprintMismatch => "fingerprint_mismatch".to_string(),
             Self::FingerprintV2Mismatch => "fingerprint_v2_mismatch".to_string(),
+            Self::LegacyFingerprintMalformed => "legacy_fingerprint_malformed".to_string(),
+            Self::LegacyFingerprintMatchIncoherent => {
+                "legacy_fingerprint_match_incoherent".to_string()
+            }
+            Self::FingerprintV2Malformed => "fingerprint_v2_malformed".to_string(),
+            Self::FingerprintV2MatchIncoherent => "fingerprint_v2_match_incoherent".to_string(),
+            Self::PreGateReasonInconsistent => "pre_gate_reason_inconsistent".to_string(),
             Self::ScoreMissing => "score_missing".to_string(),
             Self::ScoreNotFinite => "score_not_finite".to_string(),
             Self::RankOutOfRange => "rank_out_of_range".to_string(),
@@ -373,6 +429,11 @@ impl ExactSelectionReason {
             "artifact_over_limit" => Self::ArtifactOverLimit,
             "fingerprint_mismatch" => Self::FingerprintMismatch,
             "fingerprint_v2_mismatch" => Self::FingerprintV2Mismatch,
+            "legacy_fingerprint_malformed" => Self::LegacyFingerprintMalformed,
+            "legacy_fingerprint_match_incoherent" => Self::LegacyFingerprintMatchIncoherent,
+            "fingerprint_v2_malformed" => Self::FingerprintV2Malformed,
+            "fingerprint_v2_match_incoherent" => Self::FingerprintV2MatchIncoherent,
+            "pre_gate_reason_inconsistent" => Self::PreGateReasonInconsistent,
             "score_missing" => Self::ScoreMissing,
             "score_not_finite" => Self::ScoreNotFinite,
             "rank_out_of_range" => Self::RankOutOfRange,
@@ -905,68 +966,160 @@ pub fn verify_plan_selection_coherence(
 }
 
 // ---------------------------------------------------------------------------
+// Defect 1: fingerprint pair coherence -- derive truth from the durable and
+// recomputed values themselves, never trust a caller-supplied match boolean
+// blindly.
+// ---------------------------------------------------------------------------
+
+/// Pure format validator: exactly 64 lowercase SHA-256 hexadecimal
+/// characters. Used for both the legacy and v2 exact-score fingerprint
+/// fields before any equality comparison between durable and recomputed
+/// values is trusted.
+pub fn is_valid_sha256_hex_fingerprint(s: &str) -> bool {
+    s.len() == 64
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+/// One fingerprint pair's fully-derived gate outcome -- presence, format,
+/// and the caller-supplied match boolean's coherence with the derived
+/// equality are all checked here; a bare boolean is never trusted alone.
+enum FingerprintGateOutcome {
+    /// Both present, valid format, byte-equal, and the caller's match
+    /// boolean agrees (`true`) -- ranking may proceed.
+    Ok,
+    /// Either the durable or recomputed value is absent.
+    Missing,
+    /// Either present value is not exactly 64 lowercase hexadecimal
+    /// characters.
+    Malformed,
+    /// The caller's match boolean disagrees with the derived equality
+    /// (in either direction) -- the boolean itself cannot be trusted.
+    Incoherent,
+    /// Both present, valid format, unequal, and the caller's match boolean
+    /// agrees (`false`) -- a genuine, coherent mismatch.
+    Mismatch,
+}
+
+fn evaluate_fingerprint_gate(
+    durable: &Option<String>,
+    recomputed: &Option<String>,
+    claimed_match: bool,
+) -> FingerprintGateOutcome {
+    let (durable, recomputed) = match (durable, recomputed) {
+        (Some(d), Some(r)) => (d, r),
+        _ => return FingerprintGateOutcome::Missing,
+    };
+    if !is_valid_sha256_hex_fingerprint(durable) || !is_valid_sha256_hex_fingerprint(recomputed) {
+        return FingerprintGateOutcome::Malformed;
+    }
+    let derived_match = durable == recomputed;
+    if derived_match != claimed_match {
+        return FingerprintGateOutcome::Incoherent;
+    }
+    if derived_match {
+        FingerprintGateOutcome::Ok
+    } else {
+        FingerprintGateOutcome::Mismatch
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Per-candidate evidence gate (first failing reason wins)
 // ---------------------------------------------------------------------------
 
-struct GateOutcome {
-    valid: bool,
-    reason_code: &'static str,
+/// The pure gate's own deterministic diagnosis for one candidate --
+/// [`GateOutcome::Invalid`] always carries the gate's own coarse-safe exact
+/// reason (e.g. [`ExactSelectionReason::PromotionNotActivePaper`], never the
+/// finer [`ExactSelectionReason::NoPromotionRecord`] the gate's own boolean
+/// checks cannot distinguish on their own). [`candidate_result`] is the only
+/// place a caller-supplied pre-gate diagnosis may refine this further, and
+/// only after proving it agrees with this reason (Defect 2).
+enum GateOutcome {
+    Valid,
+    Invalid(ExactSelectionReason),
 }
 
 fn evaluate_evidence_gate(c: &SelectionCandidateInput) -> GateOutcome {
-    let invalid = |reason: &'static str| GateOutcome {
-        valid: false,
-        reason_code: reason,
-    };
+    use GateOutcome::Invalid;
 
     if canonical_symbol(&c.symbol).is_empty() || canonical_strategy_id(&c.strategy_id).is_empty() {
-        return invalid(REASON_REFUSED_BLANK_IDENTITY);
+        return Invalid(ExactSelectionReason::BlankIdentity);
     }
     if c.timeframe_secs <= 0 {
-        return invalid(REASON_REFUSED_BLANK_IDENTITY);
+        return Invalid(ExactSelectionReason::BlankIdentity);
     }
     let e = &c.evidence;
     if !e.promotion_query_ok {
-        return invalid(REASON_REFUSED_PROMOTION_QUERY_FAILED);
+        return Invalid(ExactSelectionReason::PromotionQueryFailed);
     }
     if e.promotion_state.as_deref() != Some("active_paper") {
-        return invalid(REASON_REFUSED_NOT_ACTIVE_PAPER);
+        return Invalid(ExactSelectionReason::PromotionNotActivePaper);
     }
     if !e.promotion_effective {
-        return invalid(REASON_REFUSED_NOT_YET_EFFECTIVE);
+        return Invalid(ExactSelectionReason::PromotionNotYetEffective);
     }
     if e.promotion_expired {
-        return invalid(REASON_REFUSED_EXPIRED);
+        return Invalid(ExactSelectionReason::PromotionExpired);
     }
     if !e.evidence_resolved {
-        return invalid(REASON_REFUSED_EVIDENCE_READ_FAILED);
+        return Invalid(ExactSelectionReason::EvidenceLineageBroken);
     }
     if !e.review_state_is_paper_candidate {
-        return invalid(REASON_REFUSED_NOT_PAPER_CANDIDATE);
+        return Invalid(ExactSelectionReason::ArtifactNotPaperCandidate);
     }
-    if !e.legacy_fingerprint_matches {
-        return invalid(REASON_REFUSED_FINGERPRINT_MISMATCH);
+    // Defect 1: legacy and v2 fingerprint pairs are each fully derived --
+    // presence, format, and boolean coherence -- as two distinct steps.
+    // Ranking is eligible only when both pairs resolve `Ok`; malformed
+    // shape, unequal values, and boolean/value incoherence all fail closed
+    // with their own distinct exact reason, never folded into one generic
+    // fingerprint failure.
+    match evaluate_fingerprint_gate(
+        &e.durable_legacy_fingerprint,
+        &e.recomputed_legacy_fingerprint,
+        e.legacy_fingerprint_matches,
+    ) {
+        FingerprintGateOutcome::Ok => {}
+        FingerprintGateOutcome::Missing => {
+            return Invalid(ExactSelectionReason::DurableFingerprintMissing)
+        }
+        FingerprintGateOutcome::Malformed => {
+            return Invalid(ExactSelectionReason::LegacyFingerprintMalformed)
+        }
+        FingerprintGateOutcome::Incoherent => {
+            return Invalid(ExactSelectionReason::LegacyFingerprintMatchIncoherent)
+        }
+        FingerprintGateOutcome::Mismatch => {
+            return Invalid(ExactSelectionReason::FingerprintMismatch)
+        }
     }
-    // Defect 1: v2 exact-score fingerprint presence and match are checked as
-    // two distinct steps, immediately after the legacy check -- ranking is
-    // eligible only when both the legacy and the v2 match are explicitly
-    // `true`. Missing (either side absent) and mismatched (both present but
-    // disagreeing) are refused with distinct exact reasons -- never folded
-    // into one generic fingerprint failure.
-    if e.durable_exact_fingerprint_v2.is_none() || e.recomputed_exact_fingerprint_v2.is_none() {
-        return invalid(REASON_REFUSED_FINGERPRINT_V2_MISSING);
-    }
-    if !e.exact_fingerprint_v2_matches {
-        return invalid(REASON_REFUSED_FINGERPRINT_V2_MISMATCH);
+    match evaluate_fingerprint_gate(
+        &e.durable_exact_fingerprint_v2,
+        &e.recomputed_exact_fingerprint_v2,
+        e.exact_fingerprint_v2_matches,
+    ) {
+        FingerprintGateOutcome::Ok => {}
+        FingerprintGateOutcome::Missing => {
+            return Invalid(ExactSelectionReason::DurableFingerprintV2Missing)
+        }
+        FingerprintGateOutcome::Malformed => {
+            return Invalid(ExactSelectionReason::FingerprintV2Malformed)
+        }
+        FingerprintGateOutcome::Incoherent => {
+            return Invalid(ExactSelectionReason::FingerprintV2MatchIncoherent)
+        }
+        FingerprintGateOutcome::Mismatch => {
+            return Invalid(ExactSelectionReason::FingerprintV2Mismatch)
+        }
     }
     if !e.plugin_instantiable {
-        return invalid(REASON_REFUSED_UNSUPPORTED_STRATEGY);
+        return Invalid(ExactSelectionReason::UnsupportedStrategyPlugin);
     }
     if !e.timeframe_matches {
-        return invalid(REASON_REFUSED_TIMEFRAME_MISMATCH);
+        return Invalid(ExactSelectionReason::TimeframeMismatch);
     }
     if !e.data_ready {
-        return invalid(REASON_REFUSED_DATA_NOT_READY);
+        return Invalid(ExactSelectionReason::DataNotReadyUnspecified);
     }
     match &e.canonical_score_decimal {
         // IR7: `canonical_score_decimal` is the authoritative score --
@@ -974,80 +1127,160 @@ fn evaluate_evidence_gate(c: &SelectionCandidateInput) -> GateOutcome {
         // float) by construction ([`crate::canonicalize_decimal_token`]
         // rejects non-finite/unsupported tokens itself); this gate only
         // requires one to be present at all.
-        Some(_) => GateOutcome {
-            valid: true,
-            reason_code: TRUTH_STATE_COMPUTED,
-        },
-        None => invalid(REASON_REFUSED_MISSING_SCORE),
+        Some(_) => GateOutcome::Valid,
+        None => Invalid(ExactSelectionReason::ScoreMissing),
     }
 }
 
-/// Defect E: map one of this module's own closed `REASON_*`/`TRUTH_STATE_*`
-/// string constants to its [`ExactSelectionReason`] counterpart -- the
-/// fallback used by [`candidate_result`] (and, at the symbol level,
-/// [`resolve_symbol_group`]) whenever the caller did not already supply a
-/// more precise `exact_reason` on the evidence itself (e.g. a hand-built
-/// fixture, or a gate/ranking outcome this module derived on its own from
-/// evidence booleans rather than a caller-observed cause). `REASON_REFUSED_NOT_ACTIVE_PAPER`
-/// maps to the more common [`ExactSelectionReason::PromotionNotActivePaper`]
-/// case -- the finer `NoPromotionRecord` distinction is only available via a
-/// caller-supplied `exact_reason`, since this gate's own coarse boolean
-/// check cannot distinguish "no record" from "wrong state" on its own.
-/// `REASON_REFUSED_DATA_NOT_READY` maps to
-/// [`ExactSelectionReason::DataNotReadyUnspecified`] for the same reason —
-/// the specific readiness blocker is only available via a caller-supplied
-/// `exact_reason`. Returns `None` for any string outside this module's own
-/// closed vocabulary — never a guess.
-fn exact_reason_for_reason_code(reason_code: &str) -> Option<ExactSelectionReason> {
-    Some(match reason_code {
-        REASON_REFUSED_BLANK_IDENTITY => ExactSelectionReason::BlankIdentity,
-        REASON_REFUSED_PROMOTION_QUERY_FAILED => ExactSelectionReason::PromotionQueryFailed,
-        REASON_REFUSED_NOT_ACTIVE_PAPER => ExactSelectionReason::PromotionNotActivePaper,
-        REASON_REFUSED_NOT_YET_EFFECTIVE => ExactSelectionReason::PromotionNotYetEffective,
-        REASON_REFUSED_EXPIRED => ExactSelectionReason::PromotionExpired,
-        REASON_REFUSED_EVIDENCE_READ_FAILED => ExactSelectionReason::EvidenceLineageBroken,
-        REASON_REFUSED_NOT_PAPER_CANDIDATE => ExactSelectionReason::ArtifactNotPaperCandidate,
-        REASON_REFUSED_FINGERPRINT_MISMATCH => ExactSelectionReason::FingerprintMismatch,
-        REASON_REFUSED_FINGERPRINT_V2_MISSING => ExactSelectionReason::DurableFingerprintV2Missing,
-        REASON_REFUSED_FINGERPRINT_V2_MISMATCH => ExactSelectionReason::FingerprintV2Mismatch,
-        REASON_REFUSED_UNSUPPORTED_STRATEGY => ExactSelectionReason::UnsupportedStrategyPlugin,
-        REASON_REFUSED_TIMEFRAME_MISMATCH => ExactSelectionReason::TimeframeMismatch,
-        REASON_REFUSED_DATA_NOT_READY => ExactSelectionReason::DataNotReadyUnspecified,
-        REASON_REFUSED_MISSING_SCORE => ExactSelectionReason::ScoreMissing,
-        REASON_REFUSED_MISSING_RANK_FOR_TIE => ExactSelectionReason::MissingRankRequiredForTie,
-        REASON_REFUSED_DIVERGENT_DUPLICATE => ExactSelectionReason::DivergentDuplicate,
-        REASON_NO_VALID_CANDIDATE => ExactSelectionReason::NoValidCandidate,
-        REASON_SELECTED_HIGHEST_SCORE => ExactSelectionReason::SelectedHighestScore,
-        REASON_SELECTED_TIE_BREAK_RANK => ExactSelectionReason::SelectedTieBreakRank,
-        REASON_SELECTED_TIE_BREAK_WATCHLIST => ExactSelectionReason::SelectedTieBreakWatchlist,
-        REASON_SELECTED_TIE_BREAK_STRATEGY_ID => ExactSelectionReason::SelectedTieBreakStrategyId,
-        REASON_NOT_SELECTED_LOWER_SCORE => ExactSelectionReason::NotSelectedLowerScore,
-        REASON_NOT_SELECTED_LOST_TIE_BREAK => ExactSelectionReason::NotSelectedLostTieBreak,
-        _ => return None,
-    })
+/// Defect 2: the exhaustive, closed match from every [`ExactSelectionReason`]
+/// variant to its stable public `reason_code` string -- the single authority
+/// for deriving `reason_code` from a resolved `exact_reason`, replacing the
+/// old (and removed) `exact_reason_for_reason_code`'s inverse, fallible,
+/// `.expect`-guarded direction. Every previously-producible `REASON_*`
+/// string is preserved byte-for-byte (legacy persisted values remain
+/// readable); variants the pure gate itself never produces (only reachable
+/// via a caller-supplied, gate-compatible pre-gate diagnosis) map to the
+/// same coarse `REASON_*` bucket their gate-producible counterpart already
+/// used, since `reason_code` has always been the coarse, not the exact,
+/// authority. Being an exhaustive match, this function cannot compile with a
+/// variant left unhandled -- there is no wildcard arm and no possible panic
+/// path.
+fn public_reason_code(reason: ExactSelectionReason) -> &'static str {
+    use ExactSelectionReason as R;
+    match reason {
+        R::RegistryQueryFailed
+        | R::RegistryRowMissing
+        | R::RegistryDisabled
+        | R::UnsupportedStrategyPlugin
+        | R::RegistryConstructionFailed => REASON_REFUSED_UNSUPPORTED_STRATEGY,
+        R::TimeframeMismatch => REASON_REFUSED_TIMEFRAME_MISMATCH,
+        R::BlankIdentity => REASON_REFUSED_BLANK_IDENTITY,
+        R::PromotionQueryFailed => REASON_REFUSED_PROMOTION_QUERY_FAILED,
+        R::NoPromotionRecord | R::PromotionNotActivePaper => REASON_REFUSED_NOT_ACTIVE_PAPER,
+        R::PromotionNotYetEffective => REASON_REFUSED_NOT_YET_EFFECTIVE,
+        R::PromotionExpired => REASON_REFUSED_EXPIRED,
+        R::EvidenceLineageQueryFailed
+        | R::EvidenceLineageBroken
+        | R::ArtifactPathMissing
+        | R::ArtifactRootUnavailable
+        | R::ArtifactMissing
+        | R::ArtifactRootEscape
+        | R::ArtifactMalformed
+        | R::ArtifactDuplicateIdentity
+        | R::ArtifactNoMatchingRow
+        | R::ArtifactRowIdentityMismatch
+        | R::ArtifactOverLimit
+        | R::RankOutOfRange => REASON_REFUSED_EVIDENCE_READ_FAILED,
+        R::DurableFingerprintMissing => REASON_REFUSED_FINGERPRINT_MISSING,
+        R::DurableFingerprintV2Missing => REASON_REFUSED_FINGERPRINT_V2_MISSING,
+        R::ArtifactNotPaperCandidate => REASON_REFUSED_NOT_PAPER_CANDIDATE,
+        R::FingerprintMismatch => REASON_REFUSED_FINGERPRINT_MISMATCH,
+        R::FingerprintV2Mismatch => REASON_REFUSED_FINGERPRINT_V2_MISMATCH,
+        R::LegacyFingerprintMalformed => REASON_REFUSED_FINGERPRINT_MALFORMED,
+        R::LegacyFingerprintMatchIncoherent => REASON_REFUSED_FINGERPRINT_INCOHERENT,
+        R::FingerprintV2Malformed => REASON_REFUSED_FINGERPRINT_V2_MALFORMED,
+        R::FingerprintV2MatchIncoherent => REASON_REFUSED_FINGERPRINT_V2_INCOHERENT,
+        R::PreGateReasonInconsistent => REASON_REFUSED_PRE_GATE_REASON_INCONSISTENT,
+        R::ScoreMissing | R::ScoreNotFinite => REASON_REFUSED_MISSING_SCORE,
+        R::DataNotReady(_) | R::DataNotReadyUnspecified => REASON_REFUSED_DATA_NOT_READY,
+        R::DivergentDuplicate => REASON_REFUSED_DIVERGENT_DUPLICATE,
+        R::NotSelectedLowerScore => REASON_NOT_SELECTED_LOWER_SCORE,
+        R::NotSelectedLostTieBreak => REASON_NOT_SELECTED_LOST_TIE_BREAK,
+        R::MissingRankRequiredForTie => REASON_REFUSED_MISSING_RANK_FOR_TIE,
+        R::SelectedHighestScore => REASON_SELECTED_HIGHEST_SCORE,
+        R::SelectedTieBreakRank => REASON_SELECTED_TIE_BREAK_RANK,
+        R::SelectedTieBreakWatchlist => REASON_SELECTED_TIE_BREAK_WATCHLIST,
+        R::SelectedTieBreakStrategyId => REASON_SELECTED_TIE_BREAK_STRATEGY_ID,
+        R::NoValidCandidate => REASON_NO_VALID_CANDIDATE,
+    }
+}
+
+/// Defect 2: `true` only when `pregate` is a documented, strictly narrower
+/// explanation of exactly the same evidence-gate failure `gate_reason`
+/// itself already diagnosed -- never a guess. Every non-identity entry here
+/// mirrors a real ambiguity the pure gate's own coarse boolean check cannot
+/// resolve on its own (the daemon caller sets `pregate` in the very same
+/// branch that flips the boolean/field this gate reads -- see
+/// `mqk-daemon::dynamic_selection_plan_builder::refused_evidence`), so this
+/// is a proof the two are talking about the same underlying cause, not a
+/// permissive allowlist. An unmatched pair is incompatible and fails closed
+/// via [`ExactSelectionReason::PreGateReasonInconsistent`] in
+/// [`candidate_result`].
+fn gate_reason_accepts_pregate_refinement(
+    gate_reason: ExactSelectionReason,
+    pregate: ExactSelectionReason,
+) -> bool {
+    use ExactSelectionReason as R;
+    if gate_reason == pregate {
+        return true;
+    }
+    match gate_reason {
+        R::PromotionNotActivePaper => matches!(pregate, R::NoPromotionRecord),
+        R::EvidenceLineageBroken => matches!(
+            pregate,
+            R::EvidenceLineageQueryFailed
+                | R::ArtifactPathMissing
+                | R::DurableFingerprintMissing
+                | R::ArtifactRootUnavailable
+                | R::ArtifactMissing
+                | R::ArtifactRootEscape
+                | R::ArtifactMalformed
+                | R::ArtifactDuplicateIdentity
+                | R::ArtifactNoMatchingRow
+                | R::ArtifactRowIdentityMismatch
+                | R::ArtifactOverLimit
+                | R::RankOutOfRange
+        ),
+        R::UnsupportedStrategyPlugin => matches!(
+            pregate,
+            R::RegistryQueryFailed
+                | R::RegistryRowMissing
+                | R::RegistryDisabled
+                | R::RegistryConstructionFailed
+        ),
+        R::DataNotReadyUnspecified => matches!(pregate, R::DataNotReady(_)),
+        _ => false,
+    }
+}
+
+/// Defect 2: how a candidate's final exact reason must be resolved -- the
+/// single enum every [`candidate_result`] call site now passes, replacing
+/// the old raw `&str reason_code` parameter.
+enum ResolvedOutcomeReason {
+    /// A selector-determined outcome (ranking, tie-break, divergent
+    /// duplicate, or no-valid-candidate) -- always this exact reason,
+    /// **never** consulting [`SelectionCandidateEvidence::exact_reason`].
+    /// These outcomes are decided by this module's own ranking logic, not by
+    /// an evidence-gate failure, so a caller's pre-gate diagnosis (which
+    /// describes a *different* kind of event) can never apply here.
+    Selector(ExactSelectionReason),
+    /// An evidence-gate refusal -- `gate_reason` is the gate's own
+    /// deterministic diagnosis; the caller's pre-gate `exact_reason` (if
+    /// any) is trusted only when
+    /// [`gate_reason_accepts_pregate_refinement`] proves it agrees.
+    EvidenceGateRefusal(ExactSelectionReason),
 }
 
 fn candidate_result(
     c: &SelectionCandidateInput,
     selected: bool,
     disposition: SelectionCandidateDisposition,
-    reason_code: &str,
+    outcome: ResolvedOutcomeReason,
 ) -> SelectionCandidateResult {
     let e = &c.evidence;
-    // Defect E/Defect 4: every candidate result gets a final, authoritative,
-    // structurally non-optional exact reason -- the caller-supplied pre-gate
-    // diagnosis when present (more precise than this module's own coarse
-    // reason_code), else derived from the reason_code that was actually
-    // assigned to this result. The `.expect` below is total by construction,
-    // never a guess against unknown/external data: `reason_code` here is
-    // always one of this module's own closed `REASON_*` constants (see the
-    // call sites of `candidate_result`), and `exact_reason_for_reason_code`
-    // covers every one of them (proven by
-    // `every_producible_reason_code_maps_to_an_exact_reason` below).
-    let exact_reason = e.exact_reason.unwrap_or_else(|| {
-        exact_reason_for_reason_code(reason_code)
-            .expect("reason_code must be one of this module's own closed REASON_* constants")
-    });
+    // Defect 2: no `.expect`/`.unwrap` anywhere in this resolution -- every
+    // arm is a total, direct assignment.
+    let exact_reason = match outcome {
+        ResolvedOutcomeReason::Selector(reason) => reason,
+        ResolvedOutcomeReason::EvidenceGateRefusal(gate_reason) => match e.exact_reason {
+            Some(pregate) if gate_reason_accepts_pregate_refinement(gate_reason, pregate) => {
+                pregate
+            }
+            Some(_inconsistent) => ExactSelectionReason::PreGateReasonInconsistent,
+            None => gate_reason,
+        },
+    };
+    let reason_code = public_reason_code(exact_reason);
     SelectionCandidateResult {
         symbol: canonical_symbol(&c.symbol),
         strategy_id: canonical_strategy_id(&c.strategy_id),
@@ -1086,6 +1319,114 @@ fn candidate_result(
         disposition,
         reason_code: reason_code.to_string(),
     }
+}
+
+// ---------------------------------------------------------------------------
+// Defect 2: candidate reason-tuple coherence
+// ---------------------------------------------------------------------------
+
+/// The closed set of [`ExactSelectionReason`] variants a `Selected`
+/// candidate result may carry.
+fn is_selected_reason_family(reason: ExactSelectionReason) -> bool {
+    matches!(
+        reason,
+        ExactSelectionReason::SelectedHighestScore
+            | ExactSelectionReason::SelectedTieBreakRank
+            | ExactSelectionReason::SelectedTieBreakWatchlist
+            | ExactSelectionReason::SelectedTieBreakStrategyId
+    )
+}
+
+/// The closed set of [`ExactSelectionReason`] variants a `NotSelected`
+/// candidate result may carry.
+fn is_not_selected_reason_family(reason: ExactSelectionReason) -> bool {
+    matches!(
+        reason,
+        ExactSelectionReason::NotSelectedLowerScore | ExactSelectionReason::NotSelectedLostTieBreak
+    )
+}
+
+/// Every way one [`SelectionCandidateResult`]'s `(reason_code, exact_reason,
+/// disposition, selected)` tuple can fail to cohere -- see
+/// [`verify_candidate_result_coherence`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CandidateReasonCoherenceViolation {
+    /// `selected` disagrees with `disposition == Selected`.
+    SelectedFlagDispositionMismatch,
+    /// `reason_code` is not the exhaustively-derived public code for
+    /// `exact_reason`.
+    ReasonCodeExactReasonMismatch,
+    /// `disposition == Selected` but `exact_reason` is outside the closed
+    /// selected-reason family.
+    SelectedDispositionWrongReasonFamily,
+    /// `disposition == NotSelected` but `exact_reason` is outside the closed
+    /// not-selected-reason family.
+    NotSelectedDispositionWrongReasonFamily,
+    /// `disposition == Refused` but `exact_reason` is inside the
+    /// selected/not-selected reason family (which must only ever appear on
+    /// a non-refused row).
+    RefusedDispositionWrongReasonFamily,
+}
+
+impl CandidateReasonCoherenceViolation {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::SelectedFlagDispositionMismatch => {
+                "candidate_reason_selected_flag_disposition_mismatch"
+            }
+            Self::ReasonCodeExactReasonMismatch => "candidate_reason_code_exact_reason_mismatch",
+            Self::SelectedDispositionWrongReasonFamily => {
+                "candidate_reason_selected_disposition_wrong_reason_family"
+            }
+            Self::NotSelectedDispositionWrongReasonFamily => {
+                "candidate_reason_not_selected_disposition_wrong_reason_family"
+            }
+            Self::RefusedDispositionWrongReasonFamily => {
+                "candidate_reason_refused_disposition_wrong_reason_family"
+            }
+        }
+    }
+}
+
+/// Verify one candidate result's `(reason_code, exact_reason, disposition,
+/// selected)` form a single coherent, closed tuple -- Defect 2. Mirrors
+/// [`verify_symbol_selection_coherence`]'s "never trust shape implicitly"
+/// philosophy at the candidate level, so durable read-back (or any
+/// hand-built fixture) can be verified, not just this module's own
+/// freshly-computed output.
+pub fn verify_candidate_result_coherence(
+    c: &SelectionCandidateResult,
+) -> Result<(), CandidateReasonCoherenceViolation> {
+    if c.selected != (c.disposition == SelectionCandidateDisposition::Selected) {
+        return Err(CandidateReasonCoherenceViolation::SelectedFlagDispositionMismatch);
+    }
+    if c.reason_code != public_reason_code(c.exact_reason) {
+        return Err(CandidateReasonCoherenceViolation::ReasonCodeExactReasonMismatch);
+    }
+    match c.disposition {
+        SelectionCandidateDisposition::Selected => {
+            if !is_selected_reason_family(c.exact_reason) {
+                return Err(
+                    CandidateReasonCoherenceViolation::SelectedDispositionWrongReasonFamily,
+                );
+            }
+        }
+        SelectionCandidateDisposition::NotSelected => {
+            if !is_not_selected_reason_family(c.exact_reason) {
+                return Err(
+                    CandidateReasonCoherenceViolation::NotSelectedDispositionWrongReasonFamily,
+                );
+            }
+        }
+        SelectionCandidateDisposition::Refused => {
+            if is_selected_reason_family(c.exact_reason)
+                || is_not_selected_reason_family(c.exact_reason)
+            {
+                return Err(CandidateReasonCoherenceViolation::RefusedDispositionWrongReasonFamily);
+            }
+        }
+    }
+    Ok(())
 }
 
 /// IR8: full canonical candidate payload used for R3's exact-replay equality
@@ -1191,7 +1532,7 @@ fn resolve_symbol_group(symbol: &str, group: &[&SelectionCandidateInput]) -> Sym
                         r,
                         false,
                         SelectionCandidateDisposition::Refused,
-                        REASON_REFUSED_DIVERGENT_DUPLICATE,
+                        ResolvedOutcomeReason::Selector(ExactSelectionReason::DivergentDuplicate),
                     ));
                 }
                 continue;
@@ -1200,16 +1541,16 @@ fn resolve_symbol_group(symbol: &str, group: &[&SelectionCandidateInput]) -> Sym
         // Idempotent replay (full-payload-identical) or single row:
         // evaluate exactly once.
         let representative = rows[0];
-        let gate = evaluate_evidence_gate(representative);
-        if !gate.valid {
-            results.push(candidate_result(
-                representative,
-                false,
-                SelectionCandidateDisposition::Refused,
-                gate.reason_code,
-            ));
-        } else {
-            ranking_pool.push(representative);
+        match evaluate_evidence_gate(representative) {
+            GateOutcome::Invalid(gate_reason) => {
+                results.push(candidate_result(
+                    representative,
+                    false,
+                    SelectionCandidateDisposition::Refused,
+                    ResolvedOutcomeReason::EvidenceGateRefusal(gate_reason),
+                ));
+            }
+            GateOutcome::Valid => ranking_pool.push(representative),
         }
     }
 
@@ -1250,7 +1591,7 @@ fn resolve_symbol_group(symbol: &str, group: &[&SelectionCandidateInput]) -> Sym
         .collect();
 
     let mut selected: Option<&SelectionCandidateInput> = None;
-    let mut selected_reason = REASON_SELECTED_HIGHEST_SCORE;
+    let mut selected_reason = ExactSelectionReason::SelectedHighestScore;
 
     if leaders.len() == 1 {
         selected = Some(leaders[0]);
@@ -1266,14 +1607,14 @@ fn resolve_symbol_group(symbol: &str, group: &[&SelectionCandidateInput]) -> Sym
                 c,
                 false,
                 SelectionCandidateDisposition::Refused,
-                REASON_REFUSED_MISSING_RANK_FOR_TIE,
+                ResolvedOutcomeReason::Selector(ExactSelectionReason::MissingRankRequiredForTie),
             ));
         }
         leaders = rank_ok;
 
         if leaders.len() == 1 {
             selected = Some(leaders[0]);
-            selected_reason = REASON_SELECTED_TIE_BREAK_RANK;
+            selected_reason = ExactSelectionReason::SelectedTieBreakRank;
         } else if leaders.len() > 1 {
             let min_rank = leaders
                 .iter()
@@ -1291,14 +1632,16 @@ fn resolve_symbol_group(symbol: &str, group: &[&SelectionCandidateInput]) -> Sym
                         c,
                         false,
                         SelectionCandidateDisposition::NotSelected,
-                        REASON_NOT_SELECTED_LOST_TIE_BREAK,
+                        ResolvedOutcomeReason::Selector(
+                            ExactSelectionReason::NotSelectedLostTieBreak,
+                        ),
                     ));
                 }
             }
 
             if rank_leaders.len() == 1 {
                 selected = Some(rank_leaders[0]);
-                selected_reason = REASON_SELECTED_TIE_BREAK_RANK;
+                selected_reason = ExactSelectionReason::SelectedTieBreakRank;
             } else {
                 // Step 3: watchlist-preferred assignment, only if exactly
                 // one tied candidate carries it.
@@ -1323,12 +1666,14 @@ fn resolve_symbol_group(symbol: &str, group: &[&SelectionCandidateInput]) -> Sym
                                 c,
                                 false,
                                 SelectionCandidateDisposition::NotSelected,
-                                REASON_NOT_SELECTED_LOST_TIE_BREAK,
+                                ResolvedOutcomeReason::Selector(
+                                    ExactSelectionReason::NotSelectedLostTieBreak,
+                                ),
                             ));
                         }
                     }
                     selected = Some(winner);
-                    selected_reason = REASON_SELECTED_TIE_BREAK_WATCHLIST;
+                    selected_reason = ExactSelectionReason::SelectedTieBreakWatchlist;
                 } else {
                     // Step 4: final deterministic tie-break, canonical
                     // strategy_id ascending — always resolves since every
@@ -1340,11 +1685,13 @@ fn resolve_symbol_group(symbol: &str, group: &[&SelectionCandidateInput]) -> Sym
                             c,
                             false,
                             SelectionCandidateDisposition::NotSelected,
-                            REASON_NOT_SELECTED_LOST_TIE_BREAK,
+                            ResolvedOutcomeReason::Selector(
+                                ExactSelectionReason::NotSelectedLostTieBreak,
+                            ),
                         ));
                     }
                     selected = Some(winner);
-                    selected_reason = REASON_SELECTED_TIE_BREAK_STRATEGY_ID;
+                    selected_reason = ExactSelectionReason::SelectedTieBreakStrategyId;
                 }
             }
         }
@@ -1357,29 +1704,29 @@ fn resolve_symbol_group(symbol: &str, group: &[&SelectionCandidateInput]) -> Sym
                 c,
                 false,
                 SelectionCandidateDisposition::NotSelected,
-                REASON_NOT_SELECTED_LOWER_SCORE,
+                ResolvedOutcomeReason::Selector(ExactSelectionReason::NotSelectedLowerScore),
             ));
         }
     }
 
-    let (selected_strategy_id, disposition, reason_code) = match selected {
+    let (selected_strategy_id, disposition, exact_reason) = match selected {
         Some(winner) => {
             results.push(candidate_result(
                 winner,
                 true,
                 SelectionCandidateDisposition::Selected,
-                selected_reason,
+                ResolvedOutcomeReason::Selector(selected_reason),
             ));
             (
                 Some(canonical_strategy_id(&winner.strategy_id)),
                 SelectionCandidateDisposition::Selected,
-                selected_reason.to_string(),
+                selected_reason,
             )
         }
         None => (
             None,
             SelectionCandidateDisposition::Refused,
-            REASON_NO_VALID_CANDIDATE.to_string(),
+            ExactSelectionReason::NoValidCandidate,
         ),
     };
 
@@ -1387,17 +1734,15 @@ fn resolve_symbol_group(symbol: &str, group: &[&SelectionCandidateInput]) -> Sym
         (a.strategy_id.as_str(), a.timeframe_secs).cmp(&(b.strategy_id.as_str(), b.timeframe_secs))
     });
 
-    // Defect 4: total by construction -- `reason_code` here is always
-    // either `REASON_NO_VALID_CANDIDATE` or one of the `REASON_SELECTED_*`
-    // constants (see `selected`/`None` match above), both covered by
-    // `exact_reason_for_reason_code`.
-    let exact_reason = exact_reason_for_reason_code(&reason_code)
-        .expect("reason_code must be one of this module's own closed REASON_* constants");
+    // Defect 2: symbol-level reason uses the same typed authority as every
+    // candidate result -- `reason_code` is derived from `exact_reason` via
+    // the same exhaustive `public_reason_code`, never a separate string
+    // literal or a fallible reverse lookup.
     SymbolSelectionResult {
         symbol: symbol.to_string(),
         selected_strategy_id,
         disposition,
-        reason_code,
+        reason_code: public_reason_code(exact_reason).to_string(),
         exact_reason,
         candidates: results,
     }
@@ -2055,17 +2400,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn fingerprint_mismatch_is_refused() {
-        let mut c = candidate("AAPL", "swing_momentum", 500_000, Some(1), false);
-        c.evidence.legacy_fingerprint_matches = false;
-        let plan = compute_dynamic_selection_plan(ctx(), &symbols(&["AAPL"]), &[c]);
-        assert_eq!(
-            result_for(&plan, "AAPL").candidates[0].reason_code,
-            REASON_REFUSED_FINGERPRINT_MISMATCH
-        );
-    }
-
     // ── Defect 1: v2 exact-score fingerprint provenance ───────────────────
 
     #[test]
@@ -2079,35 +2413,199 @@ mod tests {
         );
     }
 
+    // ── Defect 1: pure fingerprint coherence -- ten required scenarios ────
+
     #[test]
-    fn legacy_match_with_v2_mismatch_refuses() {
+    fn valid_production_fingerprint_pairs_rank() {
+        // Defect 1, test 9: real SHA-256-shaped hex digests (not the
+        // repeated-char `fp_hex` fixture shorthand), byte-equal on both
+        // sides, matching booleans -- ranks normally.
         let mut c = candidate("AAPL", "swing_momentum", 500_000, Some(1), false);
-        c.evidence.exact_fingerprint_v2_matches = false;
+        let legacy = "2d5b93caf42d3260f7709ab401a84dd65742cf88d5d60e36f75075e02ab59df7".to_string();
+        let v2 = "e1798b67d53875abb1d403f26ef08f8c162b714dd886598423d8b545d5a02e40".to_string();
+        assert!(is_valid_sha256_hex_fingerprint(&legacy));
+        assert!(is_valid_sha256_hex_fingerprint(&v2));
+        c.evidence.durable_legacy_fingerprint = Some(legacy.clone());
+        c.evidence.recomputed_legacy_fingerprint = Some(legacy);
+        c.evidence.legacy_fingerprint_matches = true;
+        c.evidence.durable_exact_fingerprint_v2 = Some(v2.clone());
+        c.evidence.recomputed_exact_fingerprint_v2 = Some(v2);
+        c.evidence.exact_fingerprint_v2_matches = true;
         let plan = compute_dynamic_selection_plan(ctx(), &symbols(&["AAPL"]), &[c]);
         assert_eq!(
-            result_for(&plan, "AAPL").candidates[0].reason_code,
-            REASON_REFUSED_FINGERPRINT_V2_MISMATCH
-        );
-        assert_eq!(
-            result_for(&plan, "AAPL").candidates[0].exact_reason,
-            ExactSelectionReason::FingerprintV2Mismatch
+            result_for(&plan, "AAPL").selected_strategy_id,
+            Some("swing_momentum".to_string())
         );
     }
 
     #[test]
-    fn v2_match_with_legacy_mismatch_refuses() {
+    fn legacy_match_true_with_absent_values_refuses() {
+        // Defect 1, test 1.
+        let mut c = candidate("AAPL", "swing_momentum", 500_000, Some(1), false);
+        c.evidence.durable_legacy_fingerprint = None;
+        c.evidence.recomputed_legacy_fingerprint = None;
+        c.evidence.legacy_fingerprint_matches = true;
+        let plan = compute_dynamic_selection_plan(ctx(), &symbols(&["AAPL"]), &[c]);
+        let cand = &result_for(&plan, "AAPL").candidates[0];
+        assert_eq!(cand.reason_code, REASON_REFUSED_FINGERPRINT_MISSING);
+        assert_eq!(
+            cand.exact_reason,
+            ExactSelectionReason::DurableFingerprintMissing
+        );
+    }
+
+    #[test]
+    fn legacy_match_true_with_unequal_values_refuses() {
+        // Defect 1, test 2: the boolean claims a match but the underlying
+        // values disagree -- incoherent, not a plain mismatch.
+        let mut c = candidate("AAPL", "swing_momentum", 500_000, Some(1), false);
+        c.evidence.durable_legacy_fingerprint = Some(fp_hex('a'));
+        c.evidence.recomputed_legacy_fingerprint = Some(fp_hex('e'));
+        c.evidence.legacy_fingerprint_matches = true;
+        let plan = compute_dynamic_selection_plan(ctx(), &symbols(&["AAPL"]), &[c]);
+        let cand = &result_for(&plan, "AAPL").candidates[0];
+        assert_eq!(cand.reason_code, REASON_REFUSED_FINGERPRINT_INCOHERENT);
+        assert_eq!(
+            cand.exact_reason,
+            ExactSelectionReason::LegacyFingerprintMatchIncoherent
+        );
+    }
+
+    #[test]
+    fn legacy_match_false_with_equal_values_refuses_as_incoherent() {
+        // Defect 1, test 3: durable/recomputed default to the same value
+        // (fp_hex('a')) from `valid_evidence`; only the claimed-false
+        // boolean is flipped -- the derived truth (equal) disagrees with
+        // it, so this is incoherent, never a plain "match=false" mismatch.
         let mut c = candidate("AAPL", "swing_momentum", 500_000, Some(1), false);
         c.evidence.legacy_fingerprint_matches = false;
         let plan = compute_dynamic_selection_plan(ctx(), &symbols(&["AAPL"]), &[c]);
+        let cand = &result_for(&plan, "AAPL").candidates[0];
+        assert_eq!(cand.reason_code, REASON_REFUSED_FINGERPRINT_INCOHERENT);
         assert_eq!(
-            result_for(&plan, "AAPL").candidates[0].reason_code,
-            REASON_REFUSED_FINGERPRINT_MISMATCH,
-            "legacy is checked before v2, so a legacy mismatch wins regardless of v2's own state"
+            cand.exact_reason,
+            ExactSelectionReason::LegacyFingerprintMatchIncoherent
         );
+    }
+
+    #[test]
+    fn malformed_legacy_fingerprint_refuses() {
+        // Defect 1, test 4: malformed shape refuses before equality is ever
+        // trusted, even though the two malformed strings are textually
+        // equal and the boolean claims true.
+        let mut c = candidate("AAPL", "swing_momentum", 500_000, Some(1), false);
+        c.evidence.durable_legacy_fingerprint = Some("not-64-hex-chars".to_string());
+        c.evidence.recomputed_legacy_fingerprint = Some("not-64-hex-chars".to_string());
+        c.evidence.legacy_fingerprint_matches = true;
+        let plan = compute_dynamic_selection_plan(ctx(), &symbols(&["AAPL"]), &[c]);
+        let cand = &result_for(&plan, "AAPL").candidates[0];
+        assert_eq!(cand.reason_code, REASON_REFUSED_FINGERPRINT_MALFORMED);
+        assert_eq!(
+            cand.exact_reason,
+            ExactSelectionReason::LegacyFingerprintMalformed
+        );
+    }
+
+    #[test]
+    fn v2_match_true_with_malformed_values_refuses() {
+        // Defect 1, test 5.
+        let mut c = candidate("AAPL", "swing_momentum", 500_000, Some(1), false);
+        c.evidence.durable_exact_fingerprint_v2 = Some("ZZZZ-not-hex".to_string());
+        c.evidence.recomputed_exact_fingerprint_v2 = Some("ZZZZ-not-hex".to_string());
+        c.evidence.exact_fingerprint_v2_matches = true;
+        let plan = compute_dynamic_selection_plan(ctx(), &symbols(&["AAPL"]), &[c]);
+        let cand = &result_for(&plan, "AAPL").candidates[0];
+        assert_eq!(cand.reason_code, REASON_REFUSED_FINGERPRINT_V2_MALFORMED);
+        assert_eq!(
+            cand.exact_reason,
+            ExactSelectionReason::FingerprintV2Malformed
+        );
+    }
+
+    #[test]
+    fn v2_match_true_with_unequal_values_refuses() {
+        // Defect 1, test 6.
+        let mut c = candidate("AAPL", "swing_momentum", 500_000, Some(1), false);
+        c.evidence.durable_exact_fingerprint_v2 = Some(fp_hex('b'));
+        c.evidence.recomputed_exact_fingerprint_v2 = Some(fp_hex('c'));
+        c.evidence.exact_fingerprint_v2_matches = true;
+        let plan = compute_dynamic_selection_plan(ctx(), &symbols(&["AAPL"]), &[c]);
+        let cand = &result_for(&plan, "AAPL").candidates[0];
+        assert_eq!(cand.reason_code, REASON_REFUSED_FINGERPRINT_V2_INCOHERENT);
+        assert_eq!(
+            cand.exact_reason,
+            ExactSelectionReason::FingerprintV2MatchIncoherent
+        );
+    }
+
+    #[test]
+    fn v2_match_false_with_equal_values_refuses_as_incoherent() {
+        // Defect 1, test 7: durable/recomputed v2 default to the same value
+        // (fp_hex('b')) from `valid_evidence`; only the claimed-false
+        // boolean is flipped.
+        let mut c = candidate("AAPL", "swing_momentum", 500_000, Some(1), false);
+        c.evidence.exact_fingerprint_v2_matches = false;
+        let plan = compute_dynamic_selection_plan(ctx(), &symbols(&["AAPL"]), &[c]);
+        let cand = &result_for(&plan, "AAPL").candidates[0];
+        assert_eq!(cand.reason_code, REASON_REFUSED_FINGERPRINT_V2_INCOHERENT);
+        assert_eq!(
+            cand.exact_reason,
+            ExactSelectionReason::FingerprintV2MatchIncoherent
+        );
+    }
+
+    #[test]
+    fn each_fingerprint_field_mutation_changes_identity_deterministically() {
+        // Defect 1, test 10: durable_legacy, recomputed_legacy, durable_v2,
+        // and recomputed_v2 each independently change the canonical
+        // candidate payload and the resolved plan identity -- each mutation
+        // keeps its pair coherent (both sides updated together) so the
+        // candidate still ranks, isolating the identity change from any
+        // refusal side effect.
+        let base = candidate("AAPL", "swing_momentum", 500_000, Some(1), false);
+        let base_key = canonical_candidate_payload_key("AAPL", &base);
+        let base_plan =
+            compute_dynamic_selection_plan(ctx(), &symbols(&["AAPL"]), std::slice::from_ref(&base));
+        let base_identity = canonical_plan_identity_material(&base_plan);
+
+        let mut durable_legacy = base.clone();
+        durable_legacy.evidence.durable_legacy_fingerprint = Some(fp_hex('e'));
+        durable_legacy.evidence.recomputed_legacy_fingerprint = Some(fp_hex('e'));
+
+        let mut recomputed_legacy = base.clone();
+        recomputed_legacy.evidence.durable_legacy_fingerprint = Some(fp_hex('f'));
+        recomputed_legacy.evidence.recomputed_legacy_fingerprint = Some(fp_hex('f'));
+
+        let mut durable_v2 = base.clone();
+        durable_v2.evidence.durable_exact_fingerprint_v2 = Some(fp_hex('1'));
+        durable_v2.evidence.recomputed_exact_fingerprint_v2 = Some(fp_hex('1'));
+
+        let mut recomputed_v2 = base.clone();
+        recomputed_v2.evidence.durable_exact_fingerprint_v2 = Some(fp_hex('2'));
+        recomputed_v2.evidence.recomputed_exact_fingerprint_v2 = Some(fp_hex('2'));
+
+        for mutated in [durable_legacy, recomputed_legacy, durable_v2, recomputed_v2] {
+            let mutated_key = canonical_candidate_payload_key("AAPL", &mutated);
+            assert_ne!(
+                mutated_key, base_key,
+                "mutated fixture must change the payload key"
+            );
+            let mutated_plan = compute_dynamic_selection_plan(
+                ctx(),
+                &symbols(&["AAPL"]),
+                std::slice::from_ref(&mutated),
+            );
+            assert_ne!(
+                canonical_plan_identity_material(&mutated_plan),
+                base_identity,
+                "mutated fixture must change resolved plan identity"
+            );
+        }
     }
 
     #[test]
     fn missing_v2_refuses_distinctly_from_mismatched_v2() {
+        // Defect 1, test 8.
         let mut c = candidate("AAPL", "swing_momentum", 500_000, Some(1), false);
         c.evidence.durable_exact_fingerprint_v2 = None;
         c.evidence.recomputed_exact_fingerprint_v2 = None;
@@ -2136,11 +2634,8 @@ mod tests {
         // but this test only cares that payload/identity differ -- both
         // fixtures independently gate-refuse on v2 mismatch, which is fine:
         // the point is the byte-level identity, not the ranking outcome.
-        let plan_base = compute_dynamic_selection_plan(
-            ctx(),
-            &symbols(&["AAPL"]),
-            std::slice::from_ref(&base),
-        );
+        let plan_base =
+            compute_dynamic_selection_plan(ctx(), &symbols(&["AAPL"]), std::slice::from_ref(&base));
         let plan_changed = compute_dynamic_selection_plan(
             ctx(),
             &symbols(&["AAPL"]),
@@ -2163,11 +2658,8 @@ mod tests {
         let base = candidate("AAPL", "swing_momentum", 500_000, Some(1), false);
         let mut changed = base.clone();
         changed.evidence.recomputed_exact_fingerprint_v2 = Some(fp_hex('c'));
-        let plan_base = compute_dynamic_selection_plan(
-            ctx(),
-            &symbols(&["AAPL"]),
-            std::slice::from_ref(&base),
-        );
+        let plan_base =
+            compute_dynamic_selection_plan(ctx(), &symbols(&["AAPL"]), std::slice::from_ref(&base));
         let plan_changed = compute_dynamic_selection_plan(
             ctx(),
             &symbols(&["AAPL"]),
@@ -2853,6 +3345,11 @@ mod tests {
             ExactSelectionReason::ArtifactOverLimit,
             ExactSelectionReason::FingerprintMismatch,
             ExactSelectionReason::FingerprintV2Mismatch,
+            ExactSelectionReason::LegacyFingerprintMalformed,
+            ExactSelectionReason::LegacyFingerprintMatchIncoherent,
+            ExactSelectionReason::FingerprintV2Malformed,
+            ExactSelectionReason::FingerprintV2MatchIncoherent,
+            ExactSelectionReason::PreGateReasonInconsistent,
             ExactSelectionReason::ScoreMissing,
             ExactSelectionReason::ScoreNotFinite,
             ExactSelectionReason::RankOutOfRange,
@@ -3027,45 +3524,157 @@ mod tests {
             .all(|c| c.exact_reason == ExactSelectionReason::DivergentDuplicate));
     }
 
-    // ── Defect 4: totality proof for exact_reason_for_reason_code ─────────
+    // ── Defect 2: typed final result reasons -- eight required scenarios ──
 
-    /// Every `REASON_*` string constant this module can itself produce as a
-    /// `reason_code` on a [`SelectionCandidateResult`]/[`SymbolSelectionResult`]
-    /// must map to a distinct [`ExactSelectionReason`] -- proves the
-    /// `.expect(...)` calls in [`candidate_result`] and [`resolve_symbol_group`]
-    /// are total by construction, never a latent panic.
     #[test]
-    fn every_producible_reason_code_maps_to_an_exact_reason() {
-        let all_reason_codes = [
-            REASON_SELECTED_HIGHEST_SCORE,
-            REASON_SELECTED_TIE_BREAK_RANK,
-            REASON_SELECTED_TIE_BREAK_WATCHLIST,
-            REASON_SELECTED_TIE_BREAK_STRATEGY_ID,
-            REASON_NOT_SELECTED_LOWER_SCORE,
-            REASON_NOT_SELECTED_LOST_TIE_BREAK,
-            REASON_REFUSED_BLANK_IDENTITY,
-            REASON_REFUSED_PROMOTION_QUERY_FAILED,
-            REASON_REFUSED_NOT_ACTIVE_PAPER,
-            REASON_REFUSED_NOT_YET_EFFECTIVE,
-            REASON_REFUSED_EXPIRED,
-            REASON_REFUSED_EVIDENCE_READ_FAILED,
-            REASON_REFUSED_NOT_PAPER_CANDIDATE,
-            REASON_REFUSED_FINGERPRINT_MISMATCH,
-            REASON_REFUSED_FINGERPRINT_V2_MISSING,
-            REASON_REFUSED_FINGERPRINT_V2_MISMATCH,
-            REASON_REFUSED_UNSUPPORTED_STRATEGY,
-            REASON_REFUSED_TIMEFRAME_MISMATCH,
-            REASON_REFUSED_DATA_NOT_READY,
-            REASON_REFUSED_MISSING_SCORE,
-            REASON_REFUSED_MISSING_RANK_FOR_TIE,
-            REASON_REFUSED_DIVERGENT_DUPLICATE,
-            REASON_NO_VALID_CANDIDATE,
+    fn no_panic_path_for_any_evidence_exact_reason_value() {
+        // Defect 2, test 1: every ExactSelectionReason variant, supplied as
+        // a caller pre-gate diagnosis against a fixed evidence-gate failure
+        // (promotion not active paper), must resolve without panicking --
+        // incompatible pairs fail closed via PreGateReasonInconsistent
+        // rather than any expect/unwrap.
+        for reason in all_exact_selection_reasons() {
+            let mut c = candidate("AAPL", "swing_momentum", 500_000, Some(1), false);
+            c.evidence.promotion_state = None;
+            c.evidence.exact_reason = Some(reason);
+            let plan = compute_dynamic_selection_plan(ctx(), &symbols(&["AAPL"]), &[c]);
+            let _ = result_for(&plan, "AAPL");
+        }
+    }
+
+    #[test]
+    fn divergent_duplicate_cannot_retain_a_promotion_or_readiness_reason() {
+        // Defect 2, test 3: selector-determined outcomes (here: divergent
+        // duplicate) must never surface a caller's pre-gate diagnosis, even
+        // when one is present and would otherwise look plausible.
+        let mut c1 = candidate("AAPL", "swing_momentum", 500_000, Some(1), false);
+        c1.evidence.exact_reason = Some(ExactSelectionReason::PromotionExpired);
+        let mut c2 = c1.clone();
+        c2.evidence.canonical_score_decimal = Some(decimal_from_micros(900_000));
+        c2.evidence.canonical_score_micros = Some(900_000);
+        c2.evidence.exact_reason = Some(ExactSelectionReason::DataNotReadyUnspecified);
+        let plan = compute_dynamic_selection_plan(ctx(), &symbols(&["AAPL"]), &[c1, c2]);
+        let aapl = result_for(&plan, "AAPL");
+        assert!(aapl
+            .candidates
+            .iter()
+            .all(|c| c.exact_reason == ExactSelectionReason::DivergentDuplicate));
+    }
+
+    #[test]
+    fn all_selected_not_selected_and_refused_tuples_are_coherent() {
+        // Defect 2, test 4.
+        let candidates = vec![
+            candidate("AAPL", "swing_momentum", 900_000, Some(1), false),
+            candidate("AAPL", "mean_reversion", 500_000, Some(2), false),
+            {
+                let mut c = candidate("AAPL", "volatility_breakout", 300_000, Some(3), false);
+                c.evidence.promotion_state = None;
+                c
+            },
         ];
-        for code in all_reason_codes {
+        let plan = compute_dynamic_selection_plan(ctx(), &symbols(&["AAPL"]), &candidates);
+        for cand in &result_for(&plan, "AAPL").candidates {
             assert!(
-                exact_reason_for_reason_code(code).is_some(),
-                "reason_code '{code}' has no exact_reason mapping"
+                verify_candidate_result_coherence(cand).is_ok(),
+                "{cand:?} must be coherent"
             );
         }
+    }
+
+    #[test]
+    fn inconsistent_pre_gate_reason_fails_closed() {
+        // Defect 2, test 5: the caller-supplied pre-gate diagnosis names a
+        // completely unrelated failure to the check that actually fired --
+        // never proven to agree, so it fails closed distinctly.
+        let mut c = candidate("AAPL", "swing_momentum", 500_000, Some(1), false);
+        c.evidence.promotion_state = None;
+        c.evidence.exact_reason = Some(ExactSelectionReason::PromotionExpired);
+        let plan = compute_dynamic_selection_plan(ctx(), &symbols(&["AAPL"]), &[c]);
+        let cand = &result_for(&plan, "AAPL").candidates[0];
+        assert_eq!(
+            cand.exact_reason,
+            ExactSelectionReason::PreGateReasonInconsistent
+        );
+        assert_eq!(
+            cand.reason_code,
+            REASON_REFUSED_PRE_GATE_REASON_INCONSISTENT
+        );
+        assert_eq!(cand.disposition, SelectionCandidateDisposition::Refused);
+    }
+
+    #[test]
+    fn compatible_pre_gate_refinement_is_trusted() {
+        // Companion to test 5: a *compatible* pre-gate refinement (the
+        // finer NoPromotionRecord explanation of the same
+        // PromotionNotActivePaper gate check) is trusted and surfaced.
+        let mut c = candidate("AAPL", "swing_momentum", 500_000, Some(1), false);
+        c.evidence.promotion_state = None;
+        c.evidence.exact_reason = Some(ExactSelectionReason::NoPromotionRecord);
+        let plan = compute_dynamic_selection_plan(ctx(), &symbols(&["AAPL"]), &[c]);
+        let cand = &result_for(&plan, "AAPL").candidates[0];
+        assert_eq!(cand.exact_reason, ExactSelectionReason::NoPromotionRecord);
+        assert_eq!(cand.reason_code, REASON_REFUSED_NOT_ACTIVE_PAPER);
+    }
+
+    #[test]
+    fn public_reason_code_is_defined_for_every_exact_selection_reason() {
+        // Defect 2, test 6: `public_reason_code` is an exhaustive match with
+        // no wildcard arm -- the crate would not compile if any variant
+        // were left unhandled. This loop is a runtime companion proof.
+        for reason in all_exact_selection_reasons() {
+            assert!(!public_reason_code(reason).is_empty());
+        }
+    }
+
+    #[test]
+    fn legacy_reason_code_strings_remain_unchanged() {
+        // Defect 2, test 7.
+        assert_eq!(REASON_REFUSED_NOT_ACTIVE_PAPER, "refused_not_active_paper");
+        assert_eq!(
+            REASON_REFUSED_FINGERPRINT_MISMATCH,
+            "refused_evidence_fingerprint_mismatch"
+        );
+        assert_eq!(
+            REASON_REFUSED_FINGERPRINT_V2_MISSING,
+            "refused_evidence_fingerprint_v2_missing"
+        );
+        assert_eq!(
+            REASON_REFUSED_FINGERPRINT_V2_MISMATCH,
+            "refused_evidence_fingerprint_v2_mismatch"
+        );
+        assert_eq!(REASON_SELECTED_HIGHEST_SCORE, "selected_highest_score");
+        assert_eq!(REASON_NO_VALID_CANDIDATE, "no_valid_candidate_for_symbol");
+        assert_eq!(
+            public_reason_code(ExactSelectionReason::PromotionNotActivePaper),
+            REASON_REFUSED_NOT_ACTIVE_PAPER
+        );
+        assert_eq!(
+            public_reason_code(ExactSelectionReason::NoPromotionRecord),
+            REASON_REFUSED_NOT_ACTIVE_PAPER,
+            "the finer NoPromotionRecord pre-gate diagnosis still surfaces the same coarse legacy reason_code"
+        );
+        assert_eq!(
+            public_reason_code(ExactSelectionReason::DivergentDuplicate),
+            REASON_REFUSED_DIVERGENT_DUPLICATE
+        );
+    }
+
+    #[test]
+    fn permutation_identity_remains_stable_with_typed_reasons() {
+        // Defect 2, test 8.
+        let mut c1 = candidate("AAPL", "swing_momentum", 900_000, Some(1), false);
+        c1.evidence.exact_reason = Some(ExactSelectionReason::PromotionQueryFailed);
+        let mut c2 = candidate("MSFT", "mean_reversion", 500_000, Some(1), false);
+        c2.evidence.promotion_state = None;
+        c2.evidence.exact_reason = Some(ExactSelectionReason::NoPromotionRecord);
+        let forward = vec![c1.clone(), c2.clone()];
+        let reversed = vec![c2, c1];
+        let p1 = compute_dynamic_selection_plan(ctx(), &symbols(&["AAPL", "MSFT"]), &forward);
+        let p2 = compute_dynamic_selection_plan(ctx(), &symbols(&["AAPL", "MSFT"]), &reversed);
+        assert_eq!(
+            p1, p2,
+            "typed pre-gate reasons must not break permutation independence"
+        );
     }
 }

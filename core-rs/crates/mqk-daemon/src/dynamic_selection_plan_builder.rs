@@ -428,6 +428,17 @@ async fn evaluate_candidate(
     evidence
 }
 
+/// Defect 1: valid-shaped (64 lowercase hex) legacy fingerprint placeholder
+/// -- see [`placeholder_evidence`]'s doc comment on why this must be
+/// genuinely well-formed, not just a human-readable label.
+const PLACEHOLDER_LEGACY_FINGERPRINT: &str =
+    "86842b99db711429e7d503e0e3a5f6f2d31d9e8b91f19310a32220fc8fdd8b0e";
+/// Defect 1: valid-shaped (64 lowercase hex) v2 fingerprint placeholder,
+/// distinct from [`PLACEHOLDER_LEGACY_FINGERPRINT`] so the two never
+/// accidentally collide in an equality assertion.
+const PLACEHOLDER_V2_FINGERPRINT: &str =
+    "8d82312144cef2506a296d2620bad311a2095990045cb4518aa4bac054a2de95";
+
 /// A "good" evidence baseline used only as a starting point for
 /// [`refused_evidence`] and the over-limit short-circuit's inert
 /// placeholder -- every field the failing reason doesn't explicitly flip is
@@ -442,11 +453,19 @@ fn placeholder_evidence() -> SelectionCandidateEvidence {
         evidence_resolved: true,
         review_state_is_paper_candidate: true,
         evidence_review_state: None,
-        durable_legacy_fingerprint: Some("placeholder-legacy-fingerprint".to_string()),
-        recomputed_legacy_fingerprint: Some("placeholder-legacy-fingerprint".to_string()),
+        // Defect 1: the pure gate now derives fingerprint-match truth from
+        // these values themselves (format + byte equality), never just from
+        // the `*_matches` booleans below -- these placeholders must
+        // therefore be genuinely valid-shaped (64 lowercase hex) and
+        // byte-equal on each side, or every failing reason ordered *after*
+        // the fingerprint checks in `evaluate_evidence_gate`'s fixed order
+        // (unsupported plugin, timeframe mismatch, data not ready, missing
+        // score) would incorrectly surface as a fingerprint failure instead.
+        durable_legacy_fingerprint: Some(PLACEHOLDER_LEGACY_FINGERPRINT.to_string()),
+        recomputed_legacy_fingerprint: Some(PLACEHOLDER_LEGACY_FINGERPRINT.to_string()),
         legacy_fingerprint_matches: true,
-        durable_exact_fingerprint_v2: Some("placeholder-v2-fingerprint".to_string()),
-        recomputed_exact_fingerprint_v2: Some("placeholder-v2-fingerprint".to_string()),
+        durable_exact_fingerprint_v2: Some(PLACEHOLDER_V2_FINGERPRINT.to_string()),
+        recomputed_exact_fingerprint_v2: Some(PLACEHOLDER_V2_FINGERPRINT.to_string()),
         exact_fingerprint_v2_matches: true,
         registry_enabled: true,
         plugin_instantiable: true,

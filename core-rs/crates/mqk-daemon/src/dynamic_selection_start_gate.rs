@@ -702,11 +702,23 @@ mod tests {
             evidence_resolved: true,
             review_state_is_paper_candidate: true,
             evidence_review_state: Some("paper_candidate".to_string()),
-            durable_legacy_fingerprint: Some("fp-1".to_string()),
-            recomputed_legacy_fingerprint: Some("fp-1".to_string()),
+            // Defect 1: must be genuinely valid-shaped (64 lowercase hex)
+            // and byte-equal on each side -- the pure gate now derives
+            // fingerprint-match truth from these values themselves, never
+            // just from the `*_matches` booleans below.
+            durable_legacy_fingerprint: Some(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+            ),
+            recomputed_legacy_fingerprint: Some(
+                "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_string(),
+            ),
             legacy_fingerprint_matches: true,
-            durable_exact_fingerprint_v2: Some("fp-v2-1".to_string()),
-            recomputed_exact_fingerprint_v2: Some("fp-v2-1".to_string()),
+            durable_exact_fingerprint_v2: Some(
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+            ),
+            recomputed_exact_fingerprint_v2: Some(
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_string(),
+            ),
             exact_fingerprint_v2_matches: true,
             registry_enabled: true,
             plugin_instantiable: true,
