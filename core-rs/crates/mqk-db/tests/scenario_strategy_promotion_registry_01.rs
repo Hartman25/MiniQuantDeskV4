@@ -34,13 +34,12 @@
 use chrono::{Duration, Utc};
 use mqk_db::{
     evaluate_promotion_tradability, fetch_current_promotion_state, fetch_promotion_history,
-    insert_legacy_evidence_transition_unchecked, insert_strategy_promotion_transition,
-    insert_strategy_promotion_transition_serialized, is_legal_transition, resolve_evidence_lineage,
-    transition_requires_evidence, upsert_strategy_registry_entry,
-    InsertStrategyPromotionTransitionArgs, PromotionReasonCode, TransitionInsertOutcome,
-    UpsertStrategyRegistryArgs, ENV_DB_URL, PROMOTION_STATE_ACTIVE_PAPER, PROMOTION_STATE_DEMOTED,
-    PROMOTION_STATE_PAPER_APPROVED, PROMOTION_STATE_REJECTED, PROMOTION_STATE_RETIRED,
-    PROMOTION_STATE_SHADOW_APPROVED,
+    insert_strategy_promotion_transition, insert_strategy_promotion_transition_serialized,
+    is_legal_transition, resolve_evidence_lineage, transition_requires_evidence,
+    upsert_strategy_registry_entry, InsertStrategyPromotionTransitionArgs, PromotionReasonCode,
+    TransitionInsertOutcome, UpsertStrategyRegistryArgs, ENV_DB_URL, PROMOTION_STATE_ACTIVE_PAPER,
+    PROMOTION_STATE_DEMOTED, PROMOTION_STATE_PAPER_APPROVED, PROMOTION_STATE_REJECTED,
+    PROMOTION_STATE_RETIRED, PROMOTION_STATE_SHADOW_APPROVED,
 };
 use sqlx::postgres::PgPoolOptions;
 use uuid::Uuid;
@@ -118,8 +117,8 @@ fn make_args(
         // fingerprints, each exactly 64 lowercase hex characters -- this
         // fixture default is a genuine fresh (production-shaped) bundle;
         // tests that specifically need a legacy (pre-0058, v2-absent) row
-        // route through `insert_legacy_evidence_transition_unchecked`
-        // instead of overriding this default to `None`.
+        // seed it via direct SQL (`seed_legacy_v2_absent_transition_row`
+        // below) -- no public library function can construct that shape.
         evidence_fingerprint: Some(FIXTURE_LEGACY_FINGERPRINT.to_string()),
         evidence_fingerprint_v2: Some(FIXTURE_V2_FINGERPRINT.to_string()),
         effective_at_utc: effective_at,
@@ -1739,15 +1738,78 @@ async fn absent_v2_fingerprint_on_a_new_row_is_refused_on_insert() -> anyhow::Re
     Ok(())
 }
 
-/// Defect 3, test 5: the explicit migration/legacy-seeding-only seam can
-/// still construct a genuine pre-migration-0058-shaped row (evidence-bearing,
-/// no v2 fingerprint) -- e.g. to reproduce historical data in a regression
-/// fixture -- without weakening either of the two real insert paths above,
-/// which now refuse this exact shape for a *new* transition (see
-/// `absent_v2_fingerprint_on_a_new_row_is_refused_on_insert`).
+/// BUNDLE-7-FOUNDATION-ACCEPTANCE-REPAIR-04: direct pre-0058 fixture
+/// seeding. Migration 0058 added `evidence_fingerprint_v2` with no backfill,
+/// so a genuine legacy row (recorded before that migration) is durably
+/// `evidence_fingerprint_v2 IS NULL`. No public `mqk_db` function can
+/// construct that shape any more -- both real insert paths
+/// ([`insert_strategy_promotion_transition`] and
+/// [`insert_strategy_promotion_transition_serialized`]) refuse a *new*
+/// evidence-bearing transition with an absent v2 fingerprint (Defect 3, see
+/// `absent_v2_fingerprint_on_a_new_row_is_refused_on_insert`), and the prior
+/// `insert_legacy_evidence_transition_unchecked` bypass seam has been
+/// removed from the production library entirely (it was reachable from any
+/// production code path despite its "test-only" documentation). A test that
+/// needs a genuine legacy row must therefore build it directly against the
+/// table, clearly labeled as such -- never through a library function.
+async fn seed_legacy_v2_absent_transition_row(
+    pool: &sqlx::PgPool,
+    args: &InsertStrategyPromotionTransitionArgs,
+) -> anyhow::Result<()> {
+    sqlx::query(
+        r#"
+        insert into sys_strategy_promotion_transitions (
+            transition_id, strategy_id, symbol, timeframe_secs,
+            config_fingerprint, config_identity_status,
+            previous_state, new_state,
+            parent_transition_id, evidence_transition_id,
+            evidence_review_id, evidence_scanner_scan_id, evidence_git_hash,
+            evidence_artifact_path, evidence_fingerprint, evidence_fingerprint_v2,
+            effective_at_utc, expires_at_utc, initiated_by, reason, created_at_utc
+        )
+        values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
+        "#,
+    )
+    .bind(args.transition_id)
+    .bind(&args.strategy_id)
+    .bind(&args.symbol)
+    .bind(args.timeframe_secs)
+    .bind(&args.config_fingerprint)
+    .bind(&args.config_identity_status)
+    .bind(&args.previous_state)
+    .bind(&args.new_state)
+    .bind(args.parent_transition_id)
+    .bind(args.evidence_transition_id)
+    .bind(&args.evidence_review_id)
+    .bind(&args.evidence_scanner_scan_id)
+    .bind(&args.evidence_git_hash)
+    .bind(&args.evidence_artifact_path)
+    .bind(&args.evidence_fingerprint)
+    .bind(&args.evidence_fingerprint_v2)
+    .bind(args.effective_at_utc)
+    .bind(args.expires_at_utc)
+    .bind(&args.initiated_by)
+    .bind(&args.reason)
+    .bind(args.created_at_utc)
+    .execute(pool)
+    .await?;
+    Ok(())
+}
+
+/// Defect 3, test 5 (BUNDLE-7-FOUNDATION-ACCEPTANCE-REPAIR-04): a genuine
+/// pre-migration-0058-shaped row (evidence-bearing, no v2 fingerprint),
+/// seeded via direct SQL (never a library bypass function -- see
+/// [`seed_legacy_v2_absent_transition_row`]), remains fully readable through
+/// the normal read path -- and its durably-`NULL` `evidence_fingerprint_v2`
+/// is exactly the precondition
+/// `mqk_daemon::promotion_evidence_validation::validate_active_paper_candidate`
+/// checks (`evidence.evidence_fingerprint_v2 ... .ok_or(DurableFingerprintV2Missing)`)
+/// to refuse ranking a legacy identity under Bundle 7 -- so this row is
+/// provably Bundle-7-ineligible without needing a second, duplicated
+/// cross-crate DB round-trip to prove the same single-field check.
 #[tokio::test]
 #[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
-async fn legacy_seeding_seam_can_still_construct_a_v2_absent_row() -> anyhow::Result<()> {
+async fn legacy_v2_absent_row_is_readable_and_bundle7_ineligible() -> anyhow::Result<()> {
     let pool = test_pool().await?;
     let strategy_id = unique_id("v2_absent_legacy_seam");
     let symbol = "AAPL";
@@ -1770,16 +1832,22 @@ async fn legacy_seeding_seam_can_still_construct_a_v2_absent_row() -> anyhow::Re
         "evidence-bearing fixture"
     );
 
-    let inserted = insert_legacy_evidence_transition_unchecked(&pool, &args).await?;
-    assert!(inserted, "legacy-seeding seam must accept a v2-absent row");
+    seed_legacy_v2_absent_transition_row(&pool, &args)
+        .await
+        .expect("direct pre-0058 fixture seed must succeed");
 
     let current = fetch_current_promotion_state(&pool, &strategy_id, symbol, timeframe_secs)
         .await?
         .expect("legacy-seeded row must be immediately queryable");
-    assert_eq!(current.evidence_fingerprint_v2, None);
     assert_eq!(
         current.evidence_fingerprint.as_deref(),
         Some(FIXTURE_LEGACY_FINGERPRINT)
+    );
+    assert_eq!(
+        current.evidence_fingerprint_v2, None,
+        "durably NULL v2 fingerprint is the exact precondition that makes this identity \
+         Bundle-7-ineligible (DurableFingerprintV2Missing) -- never backfilled from the \
+         mutable artifact filesystem at read time"
     );
 
     Ok(())

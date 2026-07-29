@@ -160,30 +160,43 @@ fn is_fresh_evidence_insert(args: &InsertStrategyPromotionTransitionArgs) -> boo
 /// *presence* -- a caller could insert a brand-new evidence-bearing
 /// transition with a full legacy bundle and no v2 fingerprint at all,
 /// silently reproducing the exact legacy shape Bundle 7's read-side
-/// validator refuses to rank. Never weakened for test fixtures --
-/// [`insert_legacy_evidence_transition_unchecked`] is the only sanctioned
-/// bypass, and it is never reachable from production code.
+/// validator refuses to rank. Never weakened for test fixtures -- there is
+/// no production function that bypasses this check; a genuine
+/// pre-migration-0058 legacy row must be seeded via direct SQL in the test
+/// itself, never through a public library seam.
 fn validate_fresh_evidence_bundle(args: &InsertStrategyPromotionTransitionArgs) -> Result<()> {
     if !is_fresh_evidence_insert(args) {
         return Ok(());
     }
-    let fields_present = [
-        args.evidence_review_id.is_some(),
-        args.evidence_scanner_scan_id.is_some(),
-        args.evidence_git_hash.is_some(),
-        args.evidence_artifact_path.is_some(),
-        args.evidence_fingerprint.is_some(),
-        args.evidence_fingerprint_v2.is_some(),
-    ];
-    if !fields_present.iter().all(|&p| p) {
+    // Pattern-match all six evidence content fields at once -- if any single
+    // one is `None`, the match itself fails and falls through to the
+    // bounded "all-present or all-absent" error below, never a panic. `fp`
+    // and `fp2` are extracted directly from this same match, so there is no
+    // separate `.expect()` step that could observe a stale/inconsistent
+    // view of `args`.
+    let (
+        Some(_review_id),
+        Some(_scanner_scan_id),
+        Some(_git_hash),
+        Some(_artifact_path),
+        Some(fp),
+        Some(fp2),
+    ) = (
+        args.evidence_review_id.as_deref(),
+        args.evidence_scanner_scan_id.as_deref(),
+        args.evidence_git_hash.as_deref(),
+        args.evidence_artifact_path.as_deref(),
+        args.evidence_fingerprint.as_deref(),
+        args.evidence_fingerprint_v2.as_deref(),
+    )
+    else {
         anyhow::bail!(
             "fresh evidence bundle must be all-present or all-absent -- this transition carries \
              at least one evidence content field, so every evidence content field (review_id, \
              scanner_scan_id, git_hash, artifact_path, fingerprint, fingerprint_v2) must be \
              present"
         );
-    }
-    let fp = args.evidence_fingerprint.as_deref().expect("all_present");
+    };
     if !is_valid_evidence_fingerprint_v2_hex(fp) {
         anyhow::bail!(
             "fresh evidence_fingerprint must be exactly 64 lowercase hex characters when this \
@@ -191,10 +204,6 @@ fn validate_fresh_evidence_bundle(args: &InsertStrategyPromotionTransitionArgs) 
             fp.chars().count()
         );
     }
-    let fp2 = args
-        .evidence_fingerprint_v2
-        .as_deref()
-        .expect("all_present");
     if !is_valid_evidence_fingerprint_v2_hex(fp2) {
         anyhow::bail!(
             "fresh evidence_fingerprint_v2 must be exactly 64 lowercase hex characters when this \
@@ -388,16 +397,29 @@ const SELECT_COLUMNS: &str = r#"
 ///
 /// Idempotent via `ON CONFLICT (transition_id) DO NOTHING`. Returns
 /// `Ok(true)` when a new row was actually inserted, `Ok(false)` when the
-/// `transition_id` already existed (duplicate/replay — no-op, not an
-/// error). Returns `Err` if `strategy_id`/`symbol` are blank or
-/// `symbol == "*"`, if `initiated_by` is blank, or if `timeframe_secs` is
-/// not positive — validated before any DB contact, mirroring the DB
-/// `CHECK` constraints as defense in depth. Does **not** validate
-/// transition legality — callers must call [`is_legal_transition`] (using
-/// a `previous_state` freshly obtained from
+/// `transition_id` already existed with an *exact*-matching payload
+/// (verified via [`args_match_existing_record`] — a genuine replay, no-op,
+/// not an error). Returns `Err` if `strategy_id`/`symbol` are blank or
+/// `symbol == "*"`, if `initiated_by` is blank, if `timeframe_secs` is
+/// not positive, or if `transition_id` already exists with a *divergent*
+/// payload (a same-id collision — never silently collapsed into an
+/// idempotent duplicate) — the first four are validated before any DB
+/// contact, mirroring the DB `CHECK` constraints as defense in depth. Does
+/// **not** validate transition legality — callers must call
+/// [`is_legal_transition`] (using a `previous_state` freshly obtained from
 /// [`fetch_current_promotion_state`]) before calling this function; the DB
 /// `CHECK` constraint is a structural backstop against an application bug,
 /// not the primary enforcement point.
+///
+/// Not concurrency-safe against another writer racing the same identity
+/// (no advisory lock, no parent re-validation) — the daemon's
+/// `POST /api/v1/strategy/promotions/transition` route always uses
+/// [`insert_strategy_promotion_transition_serialized`] instead. This bare
+/// form exists for direct, non-concurrent test-fixture seeding of a
+/// *fresh-evidence-shaped* row only; a genuine pre-migration-0058 legacy
+/// row (evidence-bearing, no `evidence_fingerprint_v2`) cannot be seeded
+/// through any public function — construct it via direct SQL in the test
+/// itself, clearly labeled as pre-0058 fixture seeding.
 pub async fn insert_strategy_promotion_transition(
     pool: &PgPool,
     args: &InsertStrategyPromotionTransitionArgs,
@@ -465,7 +487,39 @@ pub async fn insert_strategy_promotion_transition(
     .await
     .context("insert_strategy_promotion_transition failed")?;
 
-    Ok(result.rows_affected() > 0)
+    if result.rows_affected() > 0 {
+        return Ok(true);
+    }
+
+    // `transition_id` already existed -- distinguish an exact-replay
+    // duplicate (silently a no-op, matching this function's documented
+    // idempotent contract) from a same-id divergent payload (never
+    // silently collapsed into a duplicate -- refused as a collision).
+    let existing_row = sqlx::query(&format!(
+        "select {SELECT_COLUMNS} from sys_strategy_promotion_transitions where transition_id = $1"
+    ))
+    .bind(args.transition_id)
+    .fetch_optional(pool)
+    .await
+    .context("insert_strategy_promotion_transition: post-conflict readback failed")?;
+    let Some(row) = existing_row else {
+        anyhow::bail!(
+            "insert_strategy_promotion_transition: conflict reported but existing row not found \
+             for transition_id {}",
+            args.transition_id
+        );
+    };
+    let record = row_to_record(row)?;
+    if args_match_existing_record(args, &record) {
+        Ok(false)
+    } else {
+        anyhow::bail!(
+            "insert_strategy_promotion_transition: transition_id {} already exists with a \
+             different payload -- refusing to silently collapse a same-id divergent payload \
+             into an idempotent duplicate",
+            args.transition_id
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -700,107 +754,6 @@ pub async fn insert_strategy_promotion_transition_serialized(
             created_at_utc: args.created_at_utc,
         },
     ))
-}
-
-// ---------------------------------------------------------------------------
-// Defect 3: migration/legacy-fixture-seeding-only insert seam
-// ---------------------------------------------------------------------------
-
-/// Migration/legacy-fixture-seeding-only insert path: bypasses
-/// [`validate_fresh_evidence_bundle`] entirely so a caller can construct a
-/// row shaped like a genuine pre-migration-0058 legacy evidence-bearing
-/// transition (a legacy `evidence_fingerprint` with no
-/// `evidence_fingerprint_v2`, or any other historically-legal-but-now-refused
-/// evidence shape) -- exactly the shape [`insert_strategy_promotion_transition`]
-/// and [`insert_strategy_promotion_transition_serialized`] now refuse to
-/// accept for a *new* transition.
-///
-/// Never call this from any production code path (route handlers, the
-/// daemon's promotion pipeline, or any operator action) -- it exists solely
-/// so scenario/regression tests and one-off historical-data migrations can
-/// seed a legacy-shaped fixture without weakening the two real insert paths
-/// above. Still enforces every other structural check those functions do
-/// (blank identity, wildcard symbol, non-positive timeframe, unknown
-/// state) -- only the fresh-evidence-bundle rule is skipped. Idempotent via
-/// `ON CONFLICT (transition_id) DO NOTHING`, mirroring
-/// [`insert_strategy_promotion_transition`]'s bare (non-serialized)
-/// contract -- no collision detection, since this seam is never meant to
-/// arbitrate concurrent production writers.
-pub async fn insert_legacy_evidence_transition_unchecked(
-    pool: &PgPool,
-    args: &InsertStrategyPromotionTransitionArgs,
-) -> Result<bool> {
-    if args.strategy_id.trim().is_empty() {
-        anyhow::bail!("insert_legacy_evidence_transition_unchecked: strategy_id must not be empty");
-    }
-    if args.symbol.trim().is_empty() {
-        anyhow::bail!("insert_legacy_evidence_transition_unchecked: symbol must not be empty");
-    }
-    if args.symbol.trim() == "*" {
-        anyhow::bail!(
-            "insert_legacy_evidence_transition_unchecked: wildcard symbol '*' is forbidden"
-        );
-    }
-    if args.timeframe_secs <= 0 {
-        anyhow::bail!(
-            "insert_legacy_evidence_transition_unchecked: timeframe_secs must be positive"
-        );
-    }
-    if args.initiated_by.trim().is_empty() {
-        anyhow::bail!(
-            "insert_legacy_evidence_transition_unchecked: initiated_by must not be empty"
-        );
-    }
-    if !is_known_promotion_state(&args.new_state) {
-        anyhow::bail!(
-            "insert_legacy_evidence_transition_unchecked: unknown new_state '{}'",
-            args.new_state
-        );
-    }
-    // Deliberately no `validate_fresh_evidence_bundle` call -- see doc
-    // comment above.
-
-    let result = sqlx::query(
-        r#"
-        insert into sys_strategy_promotion_transitions (
-            transition_id, strategy_id, symbol, timeframe_secs,
-            config_fingerprint, config_identity_status,
-            previous_state, new_state,
-            parent_transition_id, evidence_transition_id,
-            evidence_review_id, evidence_scanner_scan_id, evidence_git_hash,
-            evidence_artifact_path, evidence_fingerprint, evidence_fingerprint_v2,
-            effective_at_utc, expires_at_utc, initiated_by, reason, created_at_utc
-        )
-        values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
-        on conflict (transition_id) do nothing
-        "#,
-    )
-    .bind(args.transition_id)
-    .bind(&args.strategy_id)
-    .bind(&args.symbol)
-    .bind(args.timeframe_secs)
-    .bind(&args.config_fingerprint)
-    .bind(&args.config_identity_status)
-    .bind(&args.previous_state)
-    .bind(&args.new_state)
-    .bind(args.parent_transition_id)
-    .bind(args.evidence_transition_id)
-    .bind(&args.evidence_review_id)
-    .bind(&args.evidence_scanner_scan_id)
-    .bind(&args.evidence_git_hash)
-    .bind(&args.evidence_artifact_path)
-    .bind(&args.evidence_fingerprint)
-    .bind(&args.evidence_fingerprint_v2)
-    .bind(args.effective_at_utc)
-    .bind(args.expires_at_utc)
-    .bind(&args.initiated_by)
-    .bind(&args.reason)
-    .bind(args.created_at_utc)
-    .execute(pool)
-    .await
-    .context("insert_legacy_evidence_transition_unchecked failed")?;
-
-    Ok(result.rows_affected() > 0)
 }
 
 // ---------------------------------------------------------------------------
