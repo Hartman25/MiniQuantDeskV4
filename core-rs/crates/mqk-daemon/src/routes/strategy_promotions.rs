@@ -820,6 +820,26 @@ pub(crate) async fn strategy_promotion_transition(
         evidence_git_hash: evidence.as_ref().map(|e| e.git_hash.clone()),
         evidence_artifact_path: evidence.as_ref().map(|e| e.artifact_path.clone()),
         evidence_fingerprint: evidence.as_ref().map(|e| e.fingerprint.clone()),
+        // Defect B: newly written evidence stores legacy and v2
+        // fingerprints together -- computed from the exact raw score token,
+        // never the lossy `f64` the legacy fingerprint's serialization
+        // already went through.
+        evidence_fingerprint_v2: evidence.as_ref().map(|e| {
+            crate::promotion_evidence_validation::compute_evidence_fingerprint_v2(
+                &e.review_id,
+                &e.scanner_scan_id,
+                &e.git_hash,
+                &strategy_id,
+                &symbol,
+                timeframe_secs,
+                &e.review_state,
+                e.scanner_score_token.as_deref(),
+                e.scanner_rank,
+                &e.reason_codes,
+                &e.blockers,
+                &e.warnings,
+            )
+        }),
         effective_at_utc,
         expires_at_utc,
         initiated_by,

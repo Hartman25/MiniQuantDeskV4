@@ -128,6 +128,7 @@ async fn seed_active_paper_promotion(
             evidence_git_hash: None,
             evidence_artifact_path: None,
             evidence_fingerprint: None,
+            evidence_fingerprint_v2: None,
             effective_at_utc: effective_at,
             expires_at_utc: None,
             initiated_by: "test-seed".to_string(),

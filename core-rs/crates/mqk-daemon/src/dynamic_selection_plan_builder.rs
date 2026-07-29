@@ -128,9 +128,18 @@ pub async fn build_dynamic_selection_plan(
         .map(|a| ds_canonical_symbol(&a.symbol))
         .collect();
 
-    // Cheap, zero-I/O (symbol, strategy_id) pair assembly -- R7: refuse
-    // over-limit input before any filesystem/DB/host work.
+    // Cheap, zero-I/O (symbol, strategy_id) pair assembly -- R7/Defect F:
+    // refuse over-limit input (both the total pairs bound and, independently,
+    // any single symbol's own universe-size bound) before any filesystem/DB/
+    // host work.
     let mut pending: Vec<PendingCandidate> = Vec::new();
+    // Defect F: `true` the moment any one symbol's deduplicated candidate
+    // strategy-ID set exceeds `MAX_STRATEGY_UNIVERSE` (which mirrors
+    // `mqk_strategy::engines::REGISTERED_STRATEGY_IDS`'s five identities) --
+    // checked per symbol, independently of the total-pairs bound below,
+    // since a single over-loaded symbol can stay under the total while still
+    // locally violating this one.
+    let mut per_symbol_over_limit = false;
     for assignment in &multi_symbol_config.symbols {
         let symbol = ds_canonical_symbol(&assignment.symbol);
         let Ok(tf) = Timeframe::parse(&assignment.timeframe) else {
@@ -143,6 +152,9 @@ pub async fn build_dynamic_selection_plan(
         let timeframe_secs = tf.duration_secs();
         let assigned_strategy_id = assignment.strategy_id.trim().to_string();
 
+        // Defect F: trim/deduplicate configured IDs (already the existing
+        // contract) -- the union of the configured fleet and the
+        // watchlist-assigned strategy, deduplicated exactly once.
         let mut ids: Vec<String> = configured_strategy_ids
             .iter()
             .map(|s| s.trim().to_string())
@@ -153,6 +165,10 @@ pub async fn build_dynamic_selection_plan(
         }
         ids.sort();
         ids.dedup();
+
+        if ids.len() > mqk_portfolio::MAX_STRATEGY_UNIVERSE {
+            per_symbol_over_limit = true;
+        }
 
         for strategy_id in ids {
             let watchlist_assigned = strategy_id == assigned_strategy_id;
@@ -169,6 +185,7 @@ pub async fn build_dynamic_selection_plan(
     if eligible_symbols.is_empty()
         || eligible_symbols.len() > MAX_ELIGIBLE_SYMBOLS
         || pending.len() > MAX_CANDIDATE_PAIRS
+        || per_symbol_over_limit
     {
         // Bound violated -- the pure model's own bound check produces the
         // correct fail-closed truth state; identity fields are real
@@ -210,6 +227,25 @@ async fn evaluate_candidate(
     p: &PendingCandidate,
     now_utc: DateTime<Utc>,
 ) -> SelectionCandidateEvidence {
+    // Defect F: classify an unregistered strategy_id cheaply, against
+    // `mqk_strategy::engines::REGISTERED_STRATEGY_IDS` (the five-identity
+    // authority) -- zero I/O, not even ephemeral registry construction --
+    // and refuse immediately, before any promotion/artifact/readiness query
+    // is ever dispatched. A watchlist-assigned unknown ID still gets a
+    // visible `Refused` row here (never silently dropped); it simply never
+    // reaches any I/O to produce one.
+    if !mqk_strategy::engines::REGISTERED_STRATEGY_IDS.contains(&p.strategy_id.as_str()) {
+        let mut evidence = refused_evidence(CandidateEvidenceReason::UnsupportedStrategyPlugin);
+        evidence.plugin_instantiable = false;
+        evidence.registry_enabled = false;
+        evidence.timeframe_matches = false;
+        evidence.data_ready = false;
+        evidence.watchlist_assigned = p.watchlist_assigned;
+        evidence.exact_reason =
+            Some(mqk_portfolio::ExactSelectionReason::UnsupportedStrategyPlugin);
+        return evidence;
+    }
+
     let mut registry = PluginRegistry::new();
     // IR10: the ephemeral per-symbol registry's construction result must
     // never be discarded -- a construction failure fails this candidate
@@ -337,16 +373,47 @@ async fn evaluate_candidate(
         },
     };
 
-    // IR5: exact_reason precedence mirrors the pure gate's own fixed check
-    // order (`evaluate_evidence_gate` checks promotion/evidence fields
-    // before `plugin_instantiable`) -- a promotion-chain failure is always
-    // the true first-observed cause when one occurred; registry/plugin
-    // failures are only surfaced as exact_reason when the promotion chain
-    // itself passed.
-    let exact_reason = match promotion_stage_reason {
-        Some(r) => Some(r.code()),
-        None => plugin_stage.as_ref().err().map(|r| r.code()),
+    // Defect E: when data_ready is false, capture the *specific* daily-
+    // readiness blocker (never just the boolean) as a typed, closed
+    // exact_reason -- `readiness.blockers`'s first entry is this
+    // candidate's own top-level blocker; an unrecognized/absent blocker
+    // string falls back to the honest `DataNotReadyUnspecified` rather than
+    // fabricating a specific one never observed.
+    let readiness_exact_reason = if data_ready {
+        None
+    } else {
+        Some(
+            readiness
+                .blockers
+                .first()
+                .and_then(|code| mqk_portfolio::ReadinessBlockerReason::parse_code(code))
+                .map(mqk_portfolio::ExactSelectionReason::DataNotReady)
+                .unwrap_or(mqk_portfolio::ExactSelectionReason::DataNotReadyUnspecified),
+        )
     };
+    let timeframe_exact_reason = if plugin_probe_ok && !timeframe_matches {
+        Some(mqk_portfolio::ExactSelectionReason::TimeframeMismatch)
+    } else {
+        None
+    };
+
+    // IR5/Defect E: exact_reason precedence mirrors the pure gate's own
+    // fixed check order (`evaluate_evidence_gate` checks promotion/evidence
+    // fields, then plugin_instantiable, then timeframe_matches, then
+    // data_ready) -- a promotion-chain failure is always the true
+    // first-observed cause when one occurred; registry/plugin, then
+    // timeframe, then readiness are only surfaced as exact_reason when every
+    // earlier-in-order stage passed.
+    let exact_reason = promotion_stage_reason
+        .map(CandidateEvidenceReason::to_exact_selection_reason)
+        .or_else(|| {
+            plugin_stage
+                .as_ref()
+                .err()
+                .map(|r| r.to_exact_selection_reason())
+        })
+        .or(timeframe_exact_reason)
+        .or(readiness_exact_reason);
 
     evidence.plugin_instantiable = plugin_stage.is_ok();
     evidence.registry_enabled = registry_enabled;
@@ -410,15 +477,18 @@ fn refused_evidence(reason: CandidateEvidenceReason) -> SelectionCandidateEviden
         | EvidenceLineageBroken
         | ArtifactPathMissing
         | DurableFingerprintMissing
+        | DurableFingerprintV2Missing
         | ArtifactRootUnavailable
         | ArtifactMissing
         | ArtifactRootEscape
         | ArtifactMalformed
         | ArtifactDuplicateIdentity
         | ArtifactNoMatchingRow
+        | ArtifactRowIdentityMismatch
+        | ArtifactOverLimit
         | RankOutOfRange => e.evidence_resolved = false,
         ArtifactNotPaperCandidate => e.review_state_is_paper_candidate = false,
-        FingerprintMismatch => e.fingerprint_matches = false,
+        FingerprintMismatch | FingerprintV2Mismatch => e.fingerprint_matches = false,
         ScoreMissing | ScoreNotFinite => {
             e.canonical_score_decimal = None;
             e.canonical_score_micros = None;
@@ -617,6 +687,13 @@ mod tests {
         );
     }
 
+    /// Defect F: an unregistered strategy_id is now classified cheaply
+    /// against `mqk_strategy::engines::REGISTERED_STRATEGY_IDS` *before* any
+    /// promotion/artifact/readiness query -- refused as
+    /// `unsupported_strategy_plugin` even with no DB pool at all, which
+    /// structurally proves the promotion query was never reached for this
+    /// candidate (the old behavior, with no DB, always produced
+    /// `promotion_query_failed` instead, since that query ran unconditionally).
     #[tokio::test]
     async fn unregistered_strategy_id_is_refused_unsupported_strategy() {
         let st = Arc::new(AppState::new_with_operator_auth(
@@ -633,14 +710,13 @@ mod tests {
         let plan = build_dynamic_selection_plan(&ctx, &cfg, &[], ds_context(), Utc::now()).await;
         let aapl = &plan.symbol_results[0];
         assert_eq!(aapl.candidates.len(), 1);
-        // promotion_query_ok=false is checked before plugin_instantiable in
-        // gate order, so with no DB this candidate is refused for the
-        // promotion-query reason, not unsupported_strategy -- proven
-        // separately below with the gate-ordering-independent assertion
-        // that plugin_instantiable itself came back false.
         assert_eq!(
             aapl.candidates[0].reason_code,
-            mqk_portfolio::REASON_REFUSED_PROMOTION_QUERY_FAILED
+            mqk_portfolio::REASON_REFUSED_UNSUPPORTED_STRATEGY
+        );
+        assert_eq!(
+            aapl.candidates[0].exact_reason,
+            Some(mqk_portfolio::ExactSelectionReason::UnsupportedStrategyPlugin)
         );
     }
 
@@ -913,6 +989,140 @@ mod tests {
             mqk_portfolio::REASON_REFUSED_DATA_NOT_READY,
             "expected refusal at the data-readiness gate specifically (no md_bars \
              ingested for this fixture), proving every earlier gate passed"
+        );
+    }
+
+    // ── Defect F: per-symbol strategy bound before I/O ───────────────────
+
+    /// Defect F: `mqk_portfolio::MAX_STRATEGY_UNIVERSE` (the bound this
+    /// builder enforces per symbol, before any I/O) must stay structurally
+    /// tied to `mqk_strategy::engines::REGISTERED_STRATEGY_IDS`'s actual
+    /// count -- a registration added to one without updating the other
+    /// silently drifts the bound out from under the real universe.
+    #[test]
+    fn max_strategy_universe_matches_registered_strategy_ids_count() {
+        assert_eq!(
+            mqk_portfolio::MAX_STRATEGY_UNIVERSE,
+            mqk_strategy::engines::REGISTERED_STRATEGY_IDS.len(),
+            "MAX_STRATEGY_UNIVERSE has drifted from REGISTERED_STRATEGY_IDS's actual count"
+        );
+    }
+
+    /// Defect F: six distinct strategy IDs configured for one symbol must
+    /// stop the whole plan closed *before* any candidate I/O -- proven with
+    /// `ctx_no_db` (a `None` DB pool would make every candidate's promotion
+    /// query fail anyway, so the *only* way this test's assertion can pass
+    /// is if the over-limit short-circuit fires before `evaluate_candidate`
+    /// ever runs, since a computed plan would otherwise still be reachable
+    /// via the zero-DB-refusal path).
+    #[tokio::test]
+    async fn six_strategy_ids_for_one_symbol_stops_before_io() {
+        let st = Arc::new(AppState::new_with_operator_auth(
+            OperatorAuthMode::ExplicitDevNoToken,
+        ));
+        let calendar = NyseWeekdaysProvider;
+        let ctx = ctx_no_db(&st, &calendar);
+        let cfg = config(vec![SymbolStrategyAssignment {
+            symbol: "AAPL".to_string(),
+            strategy_id: "assigned_only".to_string(),
+            timeframe: "1D".to_string(),
+        }]);
+        let fleet: Vec<String> = (0..6).map(|i| format!("strategy_{i}")).collect();
+
+        let plan = build_dynamic_selection_plan(&ctx, &cfg, &fleet, ds_context(), Utc::now()).await;
+        assert_eq!(
+            plan.truth_state,
+            mqk_portfolio::TRUTH_STATE_SYMBOL_CANDIDATES_OVER_LIMIT
+        );
+        assert!(
+            plan.symbol_results.is_empty(),
+            "over-limit fails the whole plan closed with no per-symbol results"
+        );
+    }
+
+    /// Defect F: exactly five known strategy IDs for one symbol must still
+    /// evaluate normally (the bound is `<=` MAX_STRATEGY_UNIVERSE, not `<`).
+    #[tokio::test]
+    async fn five_known_strategy_ids_for_one_symbol_evaluate_normally() {
+        let st = Arc::new(AppState::new_with_operator_auth(
+            OperatorAuthMode::ExplicitDevNoToken,
+        ));
+        let calendar = NyseWeekdaysProvider;
+        let ctx = ctx_no_db(&st, &calendar);
+        let cfg = config(vec![SymbolStrategyAssignment {
+            symbol: "AAPL".to_string(),
+            strategy_id: "swing_momentum".to_string(),
+            timeframe: "1D".to_string(),
+        }]);
+        let fleet: Vec<String> = mqk_strategy::engines::REGISTERED_STRATEGY_IDS
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        assert_eq!(fleet.len(), 5);
+
+        let plan = build_dynamic_selection_plan(&ctx, &cfg, &fleet, ds_context(), Utc::now()).await;
+        assert_eq!(
+            plan.truth_state,
+            mqk_portfolio::DYNAMIC_SELECTION_TRUTH_STATE_COMPUTED
+        );
+        let aapl = &plan.symbol_results[0];
+        assert_eq!(aapl.candidates.len(), 5, "all five known IDs evaluate");
+        // With no DB, every known ID reaches the promotion-query stage (the
+        // stage right after the cheap registration check) -- proving each
+        // one was individually evaluated, not short-circuited as unknown.
+        for c in &aapl.candidates {
+            assert_eq!(
+                c.reason_code,
+                mqk_portfolio::REASON_REFUSED_PROMOTION_QUERY_FAILED
+            );
+        }
+    }
+
+    /// Defect F: an unknown strategy_id performs zero candidate I/O -- with
+    /// `ctx_no_db`, a *known* ID's refusal reason is `promotion_query_failed`
+    /// (it reached the DB stage and found no pool); an *unknown* ID's
+    /// refusal reason must instead be `unsupported_strategy_plugin`,
+    /// structurally proving it never reached that DB stage at all.
+    #[tokio::test]
+    async fn unknown_strategy_id_performs_zero_candidate_io() {
+        let st = Arc::new(AppState::new_with_operator_auth(
+            OperatorAuthMode::ExplicitDevNoToken,
+        ));
+        let calendar = NyseWeekdaysProvider;
+        let ctx = ctx_no_db(&st, &calendar);
+        let cfg = config(vec![SymbolStrategyAssignment {
+            symbol: "AAPL".to_string(),
+            strategy_id: "swing_momentum".to_string(),
+            timeframe: "1D".to_string(),
+        }]);
+        let fleet = vec![
+            "swing_momentum".to_string(),
+            "totally_unknown_strategy".to_string(),
+        ];
+
+        let plan = build_dynamic_selection_plan(&ctx, &cfg, &fleet, ds_context(), Utc::now()).await;
+        let aapl = &plan.symbol_results[0];
+        assert_eq!(aapl.candidates.len(), 2);
+        let known = aapl
+            .candidates
+            .iter()
+            .find(|c| c.strategy_id == "swing_momentum")
+            .unwrap();
+        let unknown = aapl
+            .candidates
+            .iter()
+            .find(|c| c.strategy_id == "totally_unknown_strategy")
+            .unwrap();
+        assert_eq!(
+            known.reason_code,
+            mqk_portfolio::REASON_REFUSED_PROMOTION_QUERY_FAILED,
+            "the known ID reached the DB stage"
+        );
+        assert_eq!(
+            unknown.reason_code,
+            mqk_portfolio::REASON_REFUSED_UNSUPPORTED_STRATEGY,
+            "the unknown ID never reached the DB stage -- watchlist/fleet visibility \
+             preserved (it still appears as a refused row), just with zero I/O"
         );
     }
 }

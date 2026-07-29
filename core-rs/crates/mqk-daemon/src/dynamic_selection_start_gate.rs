@@ -25,18 +25,47 @@
 //! as frozen (a correctness hazard, not a safety improvement).
 //!
 //! # `not_applicable` vs `allowed`
-//! Bundle 7 has authority *only* when `effective_mode == PaperEnforced`. If
-//! the resolved mode is `Off`/`Shadow` — including when `Shadow` or
-//! `PaperEnforced` was configured but the live lock demoted `effective_mode`
-//! to `Off` — this evaluator performs **no I/O of any kind** and returns
-//! `not_applicable = true, allowed = true`: the caller must proceed exactly
-//! as if Bundle 7 did not exist for this run (legacy Tier A dispatch,
-//! unaffected). This is the load-bearing distinction from `allowed = false`:
-//! `not_applicable` means "Bundle 7 is inert here, by design" (Phase 2's
-//! live-lock contract); `allowed = false` means "the operator explicitly
-//! configured `paper_enforced`, it is genuinely in effect, and it cannot be
-//! honored" — which must refuse the *whole* run start, never silently fall
-//! back to legacy single-strategy dispatch (fail-closed over fail-open).
+//! Bundle 7 has authority *only* when `effective_mode == PaperEnforced`.
+//!
+//! **`Off`** (configured `Off`, or `Shadow`/`PaperEnforced` demoted there by
+//! the live lock) is the *only* mode that performs **no I/O of any kind** —
+//! it returns `not_applicable = true, allowed = true` and the caller must
+//! proceed exactly as if Bundle 7 did not exist for this run (legacy Tier A
+//! dispatch, unaffected).
+//!
+//! **`Shadow`** is genuinely effective and is *not* `not_applicable`: it
+//! performs real I/O (builds and identifies a real
+//! [`DynamicSelectionPlan`] via [`build_dynamic_selection_plan`]), but is
+//! never permitted to affect economic dispatch or hold a host pool — see
+//! Defect C below and [`DynamicSelectionStartGateDisposition::ShadowAllowed`]/
+//! [`DynamicSelectionStartGateDisposition::ShadowInvalid`]. Conflating Shadow
+//! with Off's "no I/O" contract was a stale-documentation defect; the two are
+//! not the same disposition and must never be described as if they were.
+//!
+//! `allowed = false` (only reachable via `PaperEnforcedRefused`) means "the
+//! operator explicitly configured `paper_enforced`, it is genuinely in
+//! effect, and it cannot be honored" — which must refuse the *whole* run
+//! start, never silently fall back to legacy single-strategy dispatch
+//! (fail-closed over fail-open). Shadow, by construction, can never produce
+//! `allowed = false` — see Defect C.
+//!
+//! # Defect C — shadow failure truth
+//! Shadow must never be indistinguishable from a successful, computed plan
+//! when it is not one. `effective_mode == Shadow` resolves to exactly one of:
+//! - [`DynamicSelectionStartGateDisposition::ShadowAllowed`] — a `computed`
+//!   plan with at least one selection: Shadow's own explicitly *positive*
+//!   outcome.
+//! - [`DynamicSelectionStartGateDisposition::ShadowInvalid`] — context
+//!   incoherence, DB unavailable, a non-`computed` plan `truth_state`, or a
+//!   `computed` plan with zero selections across the whole universe: a
+//!   *bounded, distinct* refused-shaped outcome (see
+//!   [`DynamicSelectionStartGateReason`]), carried on `reasons`.
+//!
+//! In both cases `allowed` is always `true` (Shadow failures never block
+//! legacy economic operation) and `host_pool` is always `None` (Shadow never
+//! constructs or retains a host pool) — only the disposition and `reasons`
+//! distinguish a genuine positive outcome from an invalid one. A Shadow
+//! failure is never labeled `ShadowAllowed`.
 //!
 //! # Not yet wired
 //! This evaluator is standalone and returns its outcome to the caller — it
@@ -62,7 +91,78 @@ use crate::dynamic_selection_mode::EffectiveDynamicSelectionMode;
 use crate::dynamic_selection_plan_builder::{
     build_dynamic_selection_plan, DynamicSelectionPlanBuildContext,
 };
-use crate::state::MultiSymbolRuntimeConfig;
+use crate::state::market_calendar::{resolve_market_session_schedule, MarketCalendarProvider};
+use crate::state::{MultiSymbolConfigSource, MultiSymbolRuntimeConfig};
+
+/// Defect D: `"YYYY-MM-DD"` formatting for a market-date tuple, mirroring
+/// the identical helper already used by
+/// `routes::market_data_readiness::format_market_date` and
+/// `state::autonomous_daily_operation::format_market_date` (duplicated
+/// rather than imported across modules for a one-line helper, matching this
+/// codebase's existing convention for this exact function).
+fn format_market_date(date: (i64, i64, i64)) -> String {
+    format!("{:04}-{:02}-{:02}", date.0, date.1, date.2)
+}
+
+/// Defect D: derive the *authoritative* `(source_kind, source_identity)`
+/// pair from the actual [`MultiSymbolConfigSource`] the run is using --
+/// `"env_single_symbol_fallback"`/`"env"` for the legacy fallback,
+/// `"watchlist_v2"`/the artifact's own path for an approved watchlist-v2
+/// artifact. A caller-supplied context can never claim one kind while
+/// carrying the other kind's identity (or vice versa): both fields are
+/// always derived together, from the same real source, never independently.
+fn source_kind_and_identity(source: &MultiSymbolConfigSource) -> (String, String) {
+    match source {
+        MultiSymbolConfigSource::EnvSingleSymbolFallback => {
+            ("env_single_symbol_fallback".to_string(), "env".to_string())
+        }
+        MultiSymbolConfigSource::WatchlistArtifactV2 { path } => {
+            ("watchlist_v2".to_string(), path.clone())
+        }
+    }
+}
+
+/// Defect D: build the authoritative [`DynamicSelectionContext`] this start
+/// gate evaluation actually corresponds to -- every field derived from a real
+/// authority source, never a caller-supplied opaque string:
+///
+/// - `run_id`: the actual run id this evaluation was invoked for.
+/// - `schema_version`: the current pure-model schema version constant.
+/// - `configured_mode`/`effective_mode`/`live_lock_applied`: the resolver's
+///   own [`EffectiveDynamicSelectionMode`] output.
+/// - `source_kind`/`source_identity`: derived together from the actual
+///   [`MultiSymbolRuntimeConfig::source`] (see [`source_kind_and_identity`])
+///   -- a watchlist-v2 run and an env-fallback run can never impersonate one
+///   another here.
+/// - `market_date`: the accepted market-calendar/session schedule's own
+///   `market_date`, resolved from `calendar_provider` at `now_utc` --
+///   never a caller-supplied date string.
+///
+/// This is the value [`evaluate_dynamic_selection_start_gate`] treats as
+/// ground truth and compares the caller-supplied context against
+/// ([`validate_context_coherence`]) -- it is never itself trusted from a
+/// caller.
+pub fn build_dynamic_selection_context(
+    run_id: &str,
+    effective_mode: &EffectiveDynamicSelectionMode,
+    multi_symbol_config: &MultiSymbolRuntimeConfig,
+    calendar_provider: &dyn MarketCalendarProvider,
+    now_utc: DateTime<Utc>,
+) -> DynamicSelectionContext {
+    let (source_kind, source_identity) = source_kind_and_identity(&multi_symbol_config.source);
+    let schedule = resolve_market_session_schedule(calendar_provider, now_utc);
+
+    DynamicSelectionContext {
+        run_id: run_id.to_string(),
+        schema_version: mqk_portfolio::DYNAMIC_SELECTION_SCHEMA_VERSION.to_string(),
+        configured_mode: effective_mode.configured_mode,
+        effective_mode: effective_mode.effective_mode,
+        live_lock_applied: effective_mode.live_lock_applied,
+        source_kind,
+        source_identity,
+        market_date: format_market_date(schedule.market_date),
+    }
+}
 
 /// Closed, bounded reason-code vocabulary for a refused start-gate
 /// evaluation. Every distinct failure mode Phase 6 named gets its own
@@ -154,15 +254,20 @@ pub enum DynamicSelectionStartGateDisposition {
     /// the live lock). Zero selection DB/filesystem/host/persistence work;
     /// the caller proceeds exactly as if Bundle 7 did not exist.
     Off,
-    /// `effective_mode == Shadow`: a plan was built, validated, and
-    /// identified for evidence purposes. Never blocks run start (`allowed`
-    /// is always `true`), never retains a host pool, and has zero economic
-    /// effect -- legacy dispatch is untouched.
+    /// `effective_mode == Shadow`: a `computed` plan with at least one
+    /// selection was built, validated, and identified for evidence purposes
+    /// -- Shadow's own explicitly *positive* outcome (Defect C). Never blocks
+    /// run start (`allowed` is always `true`), never retains a host pool, and
+    /// has zero economic effect -- legacy dispatch is untouched.
     ShadowAllowed,
-    /// `effective_mode == Shadow`, but the context/mode coherence check
-    /// (IR3) failed before a plan could be built. Still never blocks run
-    /// start.
-    ShadowRefused,
+    /// `effective_mode == Shadow`, but the outcome is not a genuine positive
+    /// one (Defect C) -- covers context/mode incoherence (IR3), DB
+    /// unavailable, a non-`computed` plan `truth_state`, or a `computed` plan
+    /// with zero selections. `reasons` always carries a bounded explanation.
+    /// Still never blocks run start (`allowed` is always `true`) and never
+    /// retains a host pool -- Shadow has no economic authority to withhold,
+    /// and a Shadow failure is never labeled `ShadowAllowed`.
+    ShadowInvalid,
     /// `effective_mode == PaperEnforced` and every requirement passed: a
     /// validated plan and a constructed host pool are both present.
     PaperEnforcedAllowed,
@@ -311,43 +416,112 @@ fn host_pool_error_detail(e: &HostPoolBuildError) -> String {
     format!("{e:?}")
 }
 
-/// IR3: prove the caller-supplied [`DynamicSelectionContext`] agrees with
-/// the resolver's own [`EffectiveDynamicSelectionMode`] output and the run
-/// this evaluation was actually invoked for, before either is trusted.
+/// Defect C: evaluate an already-built Shadow-mode
+/// [`DynamicSelectionPlan`] for its shadow-truth outcome -- split out from
+/// [`evaluate_dynamic_selection_start_gate`] so it can be tested directly
+/// against hand-constructed plan fixtures, mirroring
+/// [`evaluate_plan_for_start_gate`]'s split for the `PaperEnforced` path.
+///
+/// Always produces a `Shadow*` disposition, always `allowed = true` (Shadow
+/// never blocks legacy economic operation), and always `host_pool = None`
+/// (Shadow never constructs or retains a host pool) -- only the disposition
+/// and `reasons` distinguish a genuine positive outcome
+/// ([`DynamicSelectionStartGateDisposition::ShadowAllowed`]: `computed` truth
+/// state, at least one selection) from an invalid one
+/// ([`DynamicSelectionStartGateDisposition::ShadowInvalid`]: non-`computed`
+/// truth state, or `computed` with zero selections).
+fn evaluate_shadow_plan_outcome(plan: DynamicSelectionPlan) -> DynamicSelectionStartGateOutcome {
+    if plan.truth_state != DYNAMIC_SELECTION_TRUTH_STATE_COMPUTED {
+        let truth_state = plan.truth_state.clone();
+        return DynamicSelectionStartGateOutcome {
+            disposition: DynamicSelectionStartGateDisposition::ShadowInvalid,
+            not_applicable: false,
+            allowed: true,
+            plan: Some(plan),
+            host_pool: None,
+            reasons: vec![DynamicSelectionStartGateReason::PlanInvalid { truth_state }],
+        };
+    }
+
+    if plan.selected_count() == 0 {
+        return DynamicSelectionStartGateOutcome {
+            disposition: DynamicSelectionStartGateDisposition::ShadowInvalid,
+            not_applicable: false,
+            allowed: true,
+            plan: Some(plan),
+            host_pool: None,
+            reasons: vec![DynamicSelectionStartGateReason::NoSelectedPair],
+        };
+    }
+
+    DynamicSelectionStartGateOutcome {
+        disposition: DynamicSelectionStartGateDisposition::ShadowAllowed,
+        not_applicable: false,
+        allowed: true,
+        plan: Some(plan),
+        host_pool: None,
+        reasons: Vec::new(),
+    }
+}
+
+/// Defect D: prove the caller-supplied [`DynamicSelectionContext`] agrees,
+/// field-for-field, with `expected` -- a context built entirely from real
+/// authority sources by [`build_dynamic_selection_context`] (the resolver's
+/// own mode/live-lock output, the run actually being started, the actual
+/// [`MultiSymbolRuntimeConfig::source`], and the accepted market-calendar
+/// schedule). A caller-supplied nonblank string is *never* accepted as
+/// authority on its own -- `source_kind`/`source_identity`/`market_date` are
+/// no longer merely checked for blankness, they are checked for exact
+/// equality with what the real sources actually produced, so a
+/// watchlist-v2 run can never impersonate an env-fallback run's context (or
+/// vice versa) by supplying a nonblank-but-wrong pair.
+///
 /// Returns the first incoherence found (fixed check order, never a random
 /// pick). This is the same rule the read-side historical validator (Phase 9)
 /// must apply to a durably-persisted context.
 fn validate_context_coherence(
     context: &DynamicSelectionContext,
-    effective_mode: &EffectiveDynamicSelectionMode,
-    expected_run_id: &str,
+    expected: &DynamicSelectionContext,
 ) -> Result<(), &'static str> {
-    if context.schema_version != mqk_portfolio::DYNAMIC_SELECTION_SCHEMA_VERSION {
+    if context.schema_version != expected.schema_version {
         return Err("context.schema_version does not match the current pure-model schema version");
     }
-    if context.configured_mode != effective_mode.configured_mode {
+    if context.configured_mode != expected.configured_mode {
         return Err("context.configured_mode does not match the resolver's configured_mode");
     }
-    if context.effective_mode != effective_mode.effective_mode {
+    if context.effective_mode != expected.effective_mode {
         return Err("context.effective_mode does not match the resolver's effective_mode");
     }
-    if context.live_lock_applied != effective_mode.live_lock_applied {
+    if context.live_lock_applied != expected.live_lock_applied {
         return Err("context.live_lock_applied does not match the resolver's live_lock_applied");
     }
     if context.run_id.trim().is_empty() {
         return Err("context.run_id is blank");
     }
-    if context.run_id != expected_run_id {
+    if context.run_id != expected.run_id {
         return Err("context.run_id does not match the run being started");
     }
     if context.source_kind.trim().is_empty() {
         return Err("context.source_kind is blank");
     }
+    if context.source_kind != expected.source_kind {
+        return Err(
+            "context.source_kind does not match the actual MultiSymbolRuntimeConfig source",
+        );
+    }
     if context.source_identity.trim().is_empty() {
         return Err("context.source_identity is blank");
     }
+    if context.source_identity != expected.source_identity {
+        return Err(
+            "context.source_identity does not match the actual MultiSymbolRuntimeConfig source identity",
+        );
+    }
     if context.market_date.trim().is_empty() {
         return Err("context.market_date is blank");
+    }
+    if context.market_date != expected.market_date {
+        return Err("context.market_date does not match the accepted market-calendar session date");
     }
     Ok(())
 }
@@ -366,9 +540,9 @@ fn validate_context_coherence(
 ///   zero I/O, exactly the legacy path.
 /// - `Shadow`: builds, validates, and identifies the same plan
 ///   `PaperEnforced` would build (context coherence permitting) —
-///   [`DynamicSelectionStartGateDisposition::ShadowAllowed`]/`ShadowRefused`.
-///   Never retains a host pool, never blocks run start (`allowed` is always
-///   `true`), and has zero economic effect.
+///   [`DynamicSelectionStartGateDisposition::ShadowAllowed`]/`ShadowInvalid`
+///   (Defect C). Never retains a host pool, never blocks run start (`allowed`
+///   is always `true`), and has zero economic effect.
 /// - `PaperEnforced`: builds/validates/persists* the plan and constructs the
 ///   host pool — [`DynamicSelectionStartGateDisposition::PaperEnforcedAllowed`]/`PaperEnforcedRefused`.
 ///   Refusal blocks the whole run start. (*Durable persistence is Phase 8;
@@ -395,9 +569,20 @@ pub async fn evaluate_dynamic_selection_start_gate(
         };
     }
 
-    if let Err(detail) = validate_context_coherence(&context, effective_mode, run_id) {
+    // Defect D: the authoritative context this evaluation actually
+    // corresponds to, derived entirely from real sources -- never trusted
+    // from `context` itself.
+    let expected_context = build_dynamic_selection_context(
+        run_id,
+        effective_mode,
+        multi_symbol_config,
+        ctx.calendar_provider,
+        now_utc,
+    );
+
+    if let Err(detail) = validate_context_coherence(&context, &expected_context) {
         let disposition = if effective_mode.effective_mode == DynamicSelectionMode::Shadow {
-            DynamicSelectionStartGateDisposition::ShadowRefused
+            DynamicSelectionStartGateDisposition::ShadowInvalid
         } else {
             DynamicSelectionStartGateDisposition::PaperEnforcedRefused
         };
@@ -415,10 +600,25 @@ pub async fn evaluate_dynamic_selection_start_gate(
     }
 
     if effective_mode.effective_mode == DynamicSelectionMode::Shadow {
+        // Defect C: Shadow failures must be distinguishable from a genuine
+        // positive outcome -- DB unavailable is checked *before* attempting
+        // to build a plan (a plan built with no DB pool would just collapse
+        // every candidate to `promotion_query_failed`, silently masking the
+        // real cause).
+        if ctx.db.is_none() {
+            return DynamicSelectionStartGateOutcome {
+                disposition: DynamicSelectionStartGateDisposition::ShadowInvalid,
+                not_applicable: false,
+                allowed: true,
+                plan: None,
+                host_pool: None,
+                reasons: vec![DynamicSelectionStartGateReason::DbUnavailable],
+            };
+        }
+
         // Shadow builds/validates/identifies the same plan PaperEnforced
-        // would build (even a DB-unavailable or refused plan is valid
-        // evidence to identify and, later, persist) -- but never retains a
-        // host pool and never blocks run start.
+        // would build -- but never retains a host pool and never blocks run
+        // start, regardless of the plan's own outcome.
         let plan = build_dynamic_selection_plan(
             ctx,
             multi_symbol_config,
@@ -427,14 +627,8 @@ pub async fn evaluate_dynamic_selection_start_gate(
             now_utc,
         )
         .await;
-        return DynamicSelectionStartGateOutcome {
-            disposition: DynamicSelectionStartGateDisposition::ShadowAllowed,
-            not_applicable: false,
-            allowed: true,
-            plan: Some(plan),
-            host_pool: None,
-            reasons: Vec::new(),
-        };
+
+        return evaluate_shadow_plan_outcome(plan);
     }
 
     // effective_mode.effective_mode == PaperEnforced from here.
@@ -748,12 +942,12 @@ mod tests {
         assert!(outcome.reasons.is_empty());
     }
 
-    /// IR1: a genuinely-effective Shadow mode must never be lumped with Off
-    /// -- it performs I/O, builds a real plan, and returns it (for future
-    /// durable persistence / evidence), but never retains a host pool and
-    /// never blocks run start even when the plan itself refuses everything.
+    /// Defect C: Shadow with no DB pool must be distinguishable from a
+    /// genuine positive outcome -- `ShadowInvalid` with a `DbUnavailable`
+    /// reason, never `ShadowAllowed` with an empty `reasons` list. Still
+    /// never blocks run start and never retains a host pool.
     #[tokio::test]
-    async fn effective_shadow_mode_builds_and_returns_a_plan_without_a_host_pool() {
+    async fn effective_shadow_mode_with_no_db_is_shadow_invalid_not_shadow_allowed() {
         use crate::state::{MultiSymbolConfigSource, OperatorAuthMode};
         use std::sync::Arc;
 
@@ -778,15 +972,21 @@ mod tests {
             max_concurrent_symbols: 1,
             source: MultiSymbolConfigSource::EnvSingleSymbolFallback,
         };
-        let mut shadow_ds_context = ds_context();
-        shadow_ds_context.configured_mode = DynamicSelectionMode::Shadow;
-        shadow_ds_context.effective_mode = DynamicSelectionMode::Shadow;
         let effective = EffectiveDynamicSelectionMode {
             configured_mode: DynamicSelectionMode::Shadow,
             effective_mode: DynamicSelectionMode::Shadow,
             invalid_configuration: None,
             live_lock_applied: false,
         };
+        let now_utc = Utc::now();
+        // Defect D: build a genuinely coherent context via the same
+        // authority-derivation function the evaluator itself uses -- never
+        // a hand-typed literal date, which would silently drift out of sync
+        // with `now_utc` and turn this test's fixture into a hidden
+        // ContextIncoherent failure on any day other than the one it was
+        // written on.
+        let shadow_ds_context =
+            build_dynamic_selection_context("run-1", &effective, &cfg, &calendar, now_utc);
 
         let outcome = evaluate_dynamic_selection_start_gate(
             &ctx,
@@ -795,23 +995,102 @@ mod tests {
             &effective,
             shadow_ds_context,
             "run-1",
-            Utc::now(),
+            now_utc,
         )
         .await;
         assert_eq!(
             outcome.disposition,
-            DynamicSelectionStartGateDisposition::ShadowAllowed
+            DynamicSelectionStartGateDisposition::ShadowInvalid,
+            "no DB must never be labeled ShadowAllowed"
         );
         assert!(!outcome.not_applicable, "shadow performs real I/O");
         assert!(outcome.allowed, "shadow never blocks run start");
         assert!(
-            outcome.plan.is_some(),
-            "shadow must build and return a plan"
+            outcome.plan.is_none(),
+            "no plan is built when DB is unavailable"
         );
         assert!(
             outcome.host_pool.is_none(),
             "shadow must never retain a host pool"
         );
+        assert_eq!(
+            outcome.reasons,
+            vec![DynamicSelectionStartGateReason::DbUnavailable],
+            "shadow invalid must carry a bounded reason, never an empty list"
+        );
+    }
+
+    /// Defect C: a `computed` Shadow plan with zero selections across the
+    /// whole universe must be `ShadowInvalid` (`NoSelectedPair`), never
+    /// `ShadowAllowed` -- a Shadow "success" with nothing selected is not a
+    /// genuine positive outcome.
+    #[test]
+    fn shadow_plan_with_zero_selections_is_shadow_invalid() {
+        let candidates = vec![SelectionCandidateInput {
+            symbol: "AAPL".to_string(),
+            strategy_id: "swing_momentum".to_string(),
+            timeframe_secs: 86400,
+            evidence: SelectionCandidateEvidence {
+                promotion_state: None,
+                ..valid_evidence(500_000)
+            },
+        }];
+        let plan = mqk_portfolio::compute_dynamic_selection_plan(
+            ds_context(),
+            &["AAPL".to_string()],
+            &candidates,
+        );
+        assert_eq!(plan.selected_count(), 0);
+
+        let outcome = evaluate_shadow_plan_outcome(plan);
+        assert_eq!(
+            outcome.disposition,
+            DynamicSelectionStartGateDisposition::ShadowInvalid
+        );
+        assert!(outcome.allowed, "shadow never blocks run start");
+        assert!(outcome.host_pool.is_none());
+        assert_eq!(
+            outcome.reasons,
+            vec![DynamicSelectionStartGateReason::NoSelectedPair]
+        );
+    }
+
+    /// Defect C: a non-`computed` plan `truth_state` in Shadow mode must be
+    /// `ShadowInvalid` (`PlanInvalid`), never `ShadowAllowed`.
+    #[test]
+    fn shadow_non_computed_plan_is_shadow_invalid() {
+        let plan = mqk_portfolio::compute_dynamic_selection_plan(ds_context(), &[], &[]);
+        assert_ne!(
+            plan.truth_state,
+            mqk_portfolio::DYNAMIC_SELECTION_TRUTH_STATE_COMPUTED
+        );
+
+        let outcome = evaluate_shadow_plan_outcome(plan);
+        assert_eq!(
+            outcome.disposition,
+            DynamicSelectionStartGateDisposition::ShadowInvalid
+        );
+        assert!(outcome.allowed);
+        assert!(outcome
+            .reasons
+            .iter()
+            .any(|r| matches!(r, DynamicSelectionStartGateReason::PlanInvalid { .. })));
+    }
+
+    /// Defect C: a genuinely valid, `computed`, non-empty-selection Shadow
+    /// plan is the one and only path to `ShadowAllowed`.
+    #[test]
+    fn shadow_valid_computed_plan_with_a_selection_is_shadow_allowed() {
+        let plan = computed_plan_all_selected();
+        let outcome = evaluate_shadow_plan_outcome(plan);
+        assert_eq!(
+            outcome.disposition,
+            DynamicSelectionStartGateDisposition::ShadowAllowed
+        );
+        assert!(outcome.allowed);
+        assert!(outcome.reasons.is_empty());
+        assert!(outcome.host_pool.is_none());
+        assert!(outcome.plan.is_some());
     }
 
     /// IR3: a context whose `effective_mode` disagrees with the resolver's
@@ -863,6 +1142,67 @@ mod tests {
             DynamicSelectionStartGateDisposition::PaperEnforcedRefused
         );
         assert!(!outcome.allowed);
+        assert!(
+            outcome.plan.is_none(),
+            "no plan built on context incoherence"
+        );
+        assert!(outcome
+            .reasons
+            .iter()
+            .any(|r| matches!(r, DynamicSelectionStartGateReason::ContextIncoherent { .. })));
+    }
+
+    /// Defect C: Shadow's own context incoherence must be `ShadowInvalid`
+    /// with a bounded reason, never `ShadowAllowed` -- and, unlike the
+    /// `PaperEnforced` case above, must never block run start.
+    #[tokio::test]
+    async fn shadow_incoherent_context_is_shadow_invalid_and_never_blocks() {
+        use crate::state::{MultiSymbolConfigSource, OperatorAuthMode};
+        use std::sync::Arc;
+
+        let st = Arc::new(crate::state::AppState::new_with_operator_auth(
+            OperatorAuthMode::ExplicitDevNoToken,
+        ));
+        let calendar = crate::state::market_calendar::NyseWeekdaysProvider;
+        let ctx = DynamicSelectionPlanBuildContext {
+            db: None,
+            st: &st,
+            calendar_provider: &calendar,
+            provider_configs: &[],
+            instruments: &[],
+        };
+        let cfg = crate::state::MultiSymbolRuntimeConfig {
+            schema_version: "multi-symbol-runtime-config-v1".to_string(),
+            symbols: vec![],
+            max_concurrent_symbols: 1,
+            source: MultiSymbolConfigSource::EnvSingleSymbolFallback,
+        };
+        let effective = EffectiveDynamicSelectionMode {
+            configured_mode: DynamicSelectionMode::Shadow,
+            effective_mode: DynamicSelectionMode::Shadow,
+            invalid_configuration: None,
+            live_lock_applied: false,
+        };
+        // context claims PaperEnforced while the resolver says Shadow.
+        let mut mismatched = ds_context();
+        mismatched.configured_mode = DynamicSelectionMode::PaperEnforced;
+        mismatched.effective_mode = DynamicSelectionMode::PaperEnforced;
+
+        let outcome = evaluate_dynamic_selection_start_gate(
+            &ctx,
+            &cfg,
+            &[],
+            &effective,
+            mismatched,
+            "run-1",
+            Utc::now(),
+        )
+        .await;
+        assert_eq!(
+            outcome.disposition,
+            DynamicSelectionStartGateDisposition::ShadowInvalid
+        );
+        assert!(outcome.allowed, "shadow never blocks run start");
         assert!(
             outcome.plan.is_none(),
             "no plan built on context incoherence"
@@ -958,15 +1298,21 @@ mod tests {
             invalid_configuration: None,
             live_lock_applied: false,
         };
+        let now_utc = Utc::now();
+        // Defect D: a genuinely coherent context, built the same way the
+        // evaluator itself derives its authoritative expectation -- never a
+        // hand-typed literal date that only happens to match "today".
+        let context =
+            build_dynamic_selection_context("run-1", &effective, &cfg, &calendar, now_utc);
 
         let outcome = evaluate_dynamic_selection_start_gate(
             &ctx,
             &cfg,
             &[],
             &effective,
-            ds_context(),
+            context,
             "run-1",
-            Utc::now(),
+            now_utc,
         )
         .await;
         assert_eq!(
@@ -1025,5 +1371,218 @@ mod tests {
                 sr.selected_strategy_id
             );
         }
+    }
+
+    // ── Defect D: context source authority ───────────────────────────────
+
+    fn env_fallback_cfg() -> crate::state::MultiSymbolRuntimeConfig {
+        crate::state::MultiSymbolRuntimeConfig {
+            schema_version: "multi-symbol-runtime-config-v1".to_string(),
+            symbols: vec![crate::state::SymbolStrategyAssignment {
+                symbol: "AAPL".to_string(),
+                strategy_id: "swing_momentum".to_string(),
+                timeframe: "1D".to_string(),
+            }],
+            max_concurrent_symbols: 1,
+            source: MultiSymbolConfigSource::EnvSingleSymbolFallback,
+        }
+    }
+
+    fn watchlist_cfg(path: &str) -> crate::state::MultiSymbolRuntimeConfig {
+        crate::state::MultiSymbolRuntimeConfig {
+            schema_version: "multi-symbol-runtime-config-v1".to_string(),
+            symbols: vec![crate::state::SymbolStrategyAssignment {
+                symbol: "AAPL".to_string(),
+                strategy_id: "swing_momentum".to_string(),
+                timeframe: "1D".to_string(),
+            }],
+            max_concurrent_symbols: 5,
+            source: MultiSymbolConfigSource::WatchlistArtifactV2 {
+                path: path.to_string(),
+            },
+        }
+    }
+
+    #[test]
+    fn build_dynamic_selection_context_derives_source_kind_and_identity_from_the_real_config() {
+        let calendar = crate::state::market_calendar::NyseWeekdaysProvider;
+        let now_utc = Utc::now();
+        let effective = EffectiveDynamicSelectionMode {
+            configured_mode: DynamicSelectionMode::PaperEnforced,
+            effective_mode: DynamicSelectionMode::PaperEnforced,
+            invalid_configuration: None,
+            live_lock_applied: false,
+        };
+
+        let env_ctx = build_dynamic_selection_context(
+            "run-1",
+            &effective,
+            &env_fallback_cfg(),
+            &calendar,
+            now_utc,
+        );
+        assert_eq!(env_ctx.source_kind, "env_single_symbol_fallback");
+        assert_eq!(env_ctx.source_identity, "env");
+
+        let watchlist_cfg = watchlist_cfg("/approved/watchlist-v2.json");
+        let watchlist_ctx = build_dynamic_selection_context(
+            "run-1",
+            &effective,
+            &watchlist_cfg,
+            &calendar,
+            now_utc,
+        );
+        assert_eq!(watchlist_ctx.source_kind, "watchlist_v2");
+        assert_eq!(watchlist_ctx.source_identity, "/approved/watchlist-v2.json");
+
+        assert_eq!(
+            env_ctx.schema_version,
+            mqk_portfolio::DYNAMIC_SELECTION_SCHEMA_VERSION
+        );
+        assert_eq!(env_ctx.run_id, "run-1");
+        assert_eq!(env_ctx.configured_mode, DynamicSelectionMode::PaperEnforced);
+        assert_eq!(env_ctx.effective_mode, DynamicSelectionMode::PaperEnforced);
+        assert!(!env_ctx.live_lock_applied);
+        assert!(
+            !env_ctx.market_date.is_empty(),
+            "market_date must be derived, never blank"
+        );
+    }
+
+    /// One coherent baseline used by every "reject a single wrong field"
+    /// test below -- built the same way the evaluator itself derives its
+    /// authoritative expectation, so each test can mutate exactly one field
+    /// away from truth.
+    fn coherent_context_and_deps() -> (
+        crate::state::MultiSymbolRuntimeConfig,
+        EffectiveDynamicSelectionMode,
+        DateTime<Utc>,
+        DynamicSelectionContext,
+    ) {
+        let cfg = env_fallback_cfg();
+        let effective = EffectiveDynamicSelectionMode {
+            configured_mode: DynamicSelectionMode::PaperEnforced,
+            effective_mode: DynamicSelectionMode::PaperEnforced,
+            invalid_configuration: None,
+            live_lock_applied: false,
+        };
+        let now_utc = Utc::now();
+        let calendar = crate::state::market_calendar::NyseWeekdaysProvider;
+        let context =
+            build_dynamic_selection_context("run-1", &effective, &cfg, &calendar, now_utc);
+        (cfg, effective, now_utc, context)
+    }
+
+    async fn run_with_context(
+        cfg: &crate::state::MultiSymbolRuntimeConfig,
+        effective: &EffectiveDynamicSelectionMode,
+        context: DynamicSelectionContext,
+        now_utc: DateTime<Utc>,
+    ) -> DynamicSelectionStartGateOutcome {
+        use crate::state::OperatorAuthMode;
+        use std::sync::Arc;
+        let st = Arc::new(crate::state::AppState::new_with_operator_auth(
+            OperatorAuthMode::ExplicitDevNoToken,
+        ));
+        let calendar = crate::state::market_calendar::NyseWeekdaysProvider;
+        let ctx = DynamicSelectionPlanBuildContext {
+            db: None,
+            st: &st,
+            calendar_provider: &calendar,
+            provider_configs: &[],
+            instruments: &[],
+        };
+        evaluate_dynamic_selection_start_gate(&ctx, cfg, &[], effective, context, "run-1", now_utc)
+            .await
+    }
+
+    fn assert_context_incoherent_refused(outcome: &DynamicSelectionStartGateOutcome) {
+        assert_eq!(
+            outcome.disposition,
+            DynamicSelectionStartGateDisposition::PaperEnforcedRefused
+        );
+        assert!(!outcome.allowed);
+        assert!(outcome.plan.is_none());
+        assert!(outcome
+            .reasons
+            .iter()
+            .any(|r| matches!(r, DynamicSelectionStartGateReason::ContextIncoherent { .. })));
+    }
+
+    #[tokio::test]
+    async fn wrong_schema_version_is_refused() {
+        let (cfg, effective, now_utc, mut context) = coherent_context_and_deps();
+        context.schema_version = "some-other-schema-v0".to_string();
+        let outcome = run_with_context(&cfg, &effective, context, now_utc).await;
+        assert_context_incoherent_refused(&outcome);
+    }
+
+    #[tokio::test]
+    async fn wrong_live_lock_applied_is_refused() {
+        let (cfg, effective, now_utc, mut context) = coherent_context_and_deps();
+        context.live_lock_applied = !context.live_lock_applied;
+        let outcome = run_with_context(&cfg, &effective, context, now_utc).await;
+        assert_context_incoherent_refused(&outcome);
+    }
+
+    #[tokio::test]
+    async fn wrong_source_kind_is_refused() {
+        let (cfg, effective, now_utc, mut context) = coherent_context_and_deps();
+        context.source_kind = "watchlist_v2".to_string();
+        let outcome = run_with_context(&cfg, &effective, context, now_utc).await;
+        assert_context_incoherent_refused(&outcome);
+    }
+
+    #[tokio::test]
+    async fn wrong_source_identity_is_refused() {
+        let (cfg, effective, now_utc, mut context) = coherent_context_and_deps();
+        context.source_identity = "/some/other/path.json".to_string();
+        let outcome = run_with_context(&cfg, &effective, context, now_utc).await;
+        assert_context_incoherent_refused(&outcome);
+    }
+
+    #[tokio::test]
+    async fn wrong_market_date_is_refused() {
+        let (cfg, effective, now_utc, mut context) = coherent_context_and_deps();
+        context.market_date = "1999-01-01".to_string();
+        let outcome = run_with_context(&cfg, &effective, context, now_utc).await;
+        assert_context_incoherent_refused(&outcome);
+    }
+
+    /// Defect D: an env-fallback run cannot impersonate a watchlist-v2 run
+    /// by claiming its `source_kind` *and* a nonblank `source_identity` --
+    /// both fields are checked against the actual config together, not
+    /// merely for non-blankness.
+    #[tokio::test]
+    async fn env_fallback_run_cannot_impersonate_a_watchlist_v2_source() {
+        let (cfg, effective, now_utc, mut context) = coherent_context_and_deps();
+        assert_eq!(cfg.source, MultiSymbolConfigSource::EnvSingleSymbolFallback);
+        context.source_kind = "watchlist_v2".to_string();
+        context.source_identity = "/approved/watchlist-v2.json".to_string();
+        let outcome = run_with_context(&cfg, &effective, context, now_utc).await;
+        assert_context_incoherent_refused(&outcome);
+    }
+
+    /// Defect D: the reverse impersonation -- a watchlist-v2 run's actual
+    /// config, paired with a context claiming the env-fallback identity.
+    #[tokio::test]
+    async fn watchlist_v2_run_cannot_impersonate_env_fallback_source() {
+        let cfg = watchlist_cfg("/approved/watchlist-v2.json");
+        let effective = EffectiveDynamicSelectionMode {
+            configured_mode: DynamicSelectionMode::PaperEnforced,
+            effective_mode: DynamicSelectionMode::PaperEnforced,
+            invalid_configuration: None,
+            live_lock_applied: false,
+        };
+        let now_utc = Utc::now();
+        let calendar = crate::state::market_calendar::NyseWeekdaysProvider;
+        let mut context =
+            build_dynamic_selection_context("run-1", &effective, &cfg, &calendar, now_utc);
+        assert_eq!(context.source_kind, "watchlist_v2");
+        context.source_kind = "env_single_symbol_fallback".to_string();
+        context.source_identity = "env".to_string();
+
+        let outcome = run_with_context(&cfg, &effective, context, now_utc).await;
+        assert_context_incoherent_refused(&outcome);
     }
 }
