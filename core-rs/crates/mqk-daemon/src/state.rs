@@ -134,8 +134,9 @@ pub(crate) use snapshot::{
 pub use types::{
     AcceptedArtifactProvenance, AlpacaWsContinuityState, AutonomousRecoveryResumeSource,
     AutonomousSessionTruth, BrokerKind, BrokerSnapshotTruthSource, BuildInfo, BusMsg,
-    DeploymentMode, OperatorAuthMode, ReconcileStatusSnapshot, RestartTruthSnapshot,
-    RuntimeLifecycleError, StatusSnapshot, StrategyMarketDataSource,
+    DeploymentMode, DynamicSelectionLifecycleFaultSeam, DynamicSelectionRuntimeState,
+    OperatorAuthMode, ReconcileStatusSnapshot, RestartTruthSnapshot, RuntimeLifecycleError,
+    StatusSnapshot, StrategyMarketDataSource,
 };
 pub(crate) use types::{ExecutionLoopCommand, ExecutionLoopExit, ExecutionLoopHandle};
 pub use ws_gap_recovery::WsGapRecoveryOutcome;
@@ -737,6 +738,18 @@ pub struct AppState {
     /// task ownership/liveness/cancellation handles. Constructed once per
     /// `AppState` and never reconstructed for the process lifetime.
     completed_bar_task: autonomous_completed_bar_task::AutonomousCompletedBarTaskRuntime,
+    /// DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7A: run-scoped
+    /// dynamic-selection lifecycle truth for the currently owned execution
+    /// run. `None` when no run is active. Committed exactly once, atomically,
+    /// as part of the same authoritative start-commit sequence that publishes
+    /// `execution_loop` ownership; cleared on every lifecycle exit path
+    /// (stop/halt/shutdown/reap/failed start/loop-ownership-conflict).
+    /// Process-local only — no durable persistence in this patch.
+    dynamic_selection_runtime: Arc<RwLock<Option<DynamicSelectionRuntimeState>>>,
+    /// DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7A: test-only
+    /// fault-injection seam for the atomic start-commit sequence. `None` in
+    /// production and for every test that does not explicitly install one.
+    dynamic_selection_fault_seam: Arc<RwLock<Option<DynamicSelectionLifecycleFaultSeam>>>,
 }
 
 /// BROKER-FILL-REST-RECOVERY-01: Injectable abstraction over Alpaca REST activity fetch.
@@ -1453,6 +1466,8 @@ impl AppState {
             per_symbol_position_cap_alerted_symbols: Arc::new(RwLock::new(HashSet::new())),
             completed_bar_task:
                 autonomous_completed_bar_task::AutonomousCompletedBarTaskRuntime::default(),
+            dynamic_selection_runtime: Arc::new(RwLock::new(None)),
+            dynamic_selection_fault_seam: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -3500,6 +3515,10 @@ operator_reconcile_or_repair_required"
                     .join_handle
                     .await
                     .map_err(|err| RuntimeLifecycleError::internal("loop reap failed", err))?;
+                // BUNDLE-7-PHASE-7A: the loop is gone (finished on its own,
+                // e.g. panic/supervisor exit) — no locally-owned run remains
+                // to hold selection authority.
+                self.clear_dynamic_selection_runtime_state().await;
                 self.publish_status(StatusSnapshot {
                     daemon_uptime_secs: uptime_secs(),
                     active_run_id: None,
@@ -3542,10 +3561,64 @@ operator_reconcile_or_repair_required"
                     .join_handle
                     .await
                     .map_err(|err| RuntimeLifecycleError::internal("loop join failed", err))?;
+                // BUNDLE-7-PHASE-7A: reaped a finished loop directly (any
+                // caller, not only stop/halt) — the run it belonged to no
+                // longer has a local owner.
+                self.clear_dynamic_selection_runtime_state().await;
                 Ok(Some(exit))
             }
             None => Ok(None),
         }
+    }
+
+    // -----------------------------------------------------------------
+    // DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7A: run-scoped lifecycle
+    // state read/commit/clear. No mutation route is exposed beyond these
+    // three — `commit_dynamic_selection_runtime_state` is `pub(crate)` so
+    // only in-crate lifecycle wiring (never an operator route) can publish
+    // a new value.
+    // -----------------------------------------------------------------
+
+    /// Read-only snapshot of the current dynamic-selection runtime truth.
+    /// `None` when no run is active or the active run's disposition has not
+    /// yet been committed. Cheap: every field is `Arc`-backed or `Copy`.
+    pub async fn dynamic_selection_runtime_snapshot(&self) -> Option<DynamicSelectionRuntimeState> {
+        self.dynamic_selection_runtime.read().await.clone()
+    }
+
+    /// Publish a freshly evaluated, already-frozen dynamic-selection outcome
+    /// as the active run's authoritative truth. Always a full overwrite —
+    /// never a partial/in-place update — so a new run's commit can never
+    /// merge with a stale prior value.
+    pub(crate) async fn commit_dynamic_selection_runtime_state(
+        &self,
+        state: DynamicSelectionRuntimeState,
+    ) {
+        *self.dynamic_selection_runtime.write().await = Some(state);
+    }
+
+    /// Idempotent clear — safe to call on every lifecycle exit path
+    /// regardless of whether a value is currently present.
+    pub(crate) async fn clear_dynamic_selection_runtime_state(&self) {
+        *self.dynamic_selection_runtime.write().await = None;
+    }
+
+    /// `true` when the installed test fault seam matches `seam`. Always
+    /// `false` in production (no call site ever installs one outside tests).
+    pub(crate) async fn dynamic_selection_fault_seam_is(
+        &self,
+        seam: DynamicSelectionLifecycleFaultSeam,
+    ) -> bool {
+        *self.dynamic_selection_fault_seam.read().await == Some(seam)
+    }
+
+    /// Test helper: install (or clear, via `None`) a fault-injection seam
+    /// for the atomic dynamic-selection start-commit sequence.
+    pub async fn set_dynamic_selection_fault_seam_for_test(
+        &self,
+        seam: Option<DynamicSelectionLifecycleFaultSeam>,
+    ) {
+        *self.dynamic_selection_fault_seam.write().await = seam;
     }
 
     pub async fn publish_status(&self, snapshot: StatusSnapshot) {

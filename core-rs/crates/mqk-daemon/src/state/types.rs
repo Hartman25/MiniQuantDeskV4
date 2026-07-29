@@ -463,6 +463,114 @@ pub enum AutonomousSessionTruth {
     },
 }
 
+// ---------------------------------------------------------------------------
+// DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7A: run-scoped lifecycle truth
+// ---------------------------------------------------------------------------
+
+/// Phase 7A: the single, immutable, run-scoped dynamic-selection lifecycle
+/// truth committed at run start and cleared on every lifecycle exit path
+/// (stop/halt/shutdown/reap/failed start). Process-local only — no durable
+/// persistence in this patch (Phase 8).
+///
+/// Every field corresponds to exactly one `run_id`, frozen at the moment
+/// `evaluate_dynamic_selection_start_gate` returned its outcome for that
+/// run. A later run receives a brand-new value here (an unconditional
+/// overwrite on commit), never an in-place mutation of this one — so a
+/// restart can never observe a mix of two runs' selection truth.
+///
+/// `plan`/`host_pool` are wrapped in `Arc` so this whole struct stays
+/// cheaply `Clone` (for `AppState::dynamic_selection_runtime_snapshot`)
+/// even though `DynamicSelectionHostPool` itself derives neither `Clone`
+/// nor `Debug` — `Arc<T>: Clone` holds regardless of `T`'s own bounds.
+#[derive(Clone)]
+pub struct DynamicSelectionRuntimeState {
+    pub run_id: Uuid,
+    pub disposition: crate::dynamic_selection_start_gate::DynamicSelectionStartGateDisposition,
+    pub configured_mode: mqk_portfolio::DynamicSelectionMode,
+    pub effective_mode: mqk_portfolio::DynamicSelectionMode,
+    pub live_lock_applied: bool,
+    /// `Some` only for `ShadowAllowed`, `ShadowInvalid` (when a plan was
+    /// actually built), and `PaperEnforcedAllowed`. `None` for `Off` and for
+    /// any refusal reached before a plan could be built (context-incoherent,
+    /// DB-unavailable, config-unavailable).
+    pub plan: Option<Arc<mqk_portfolio::DynamicSelectionPlan>>,
+    /// Bounded `(symbol, strategy_id, timeframe_secs)` projection of
+    /// `plan`'s selected rows — the exact triples
+    /// `DynamicSelectionHostPool::build` would key on. Empty for `Off` and
+    /// for any disposition with no selected pair.
+    pub selected_pairs: Vec<(String, String, i64)>,
+    /// `Some` only for `PaperEnforcedAllowed` — the only disposition that
+    /// owns a host pool. Shadow never builds one (it has no economic
+    /// authority to withhold).
+    pub host_pool: Option<Arc<crate::dynamic_selection_host_pool::DynamicSelectionHostPool>>,
+    pub reasons: Vec<crate::dynamic_selection_start_gate::DynamicSelectionStartGateReason>,
+    /// Always `false` in this patch. Bundle 7 dynamic selection is not
+    /// dispatch-authoritative under any disposition here — this field exists
+    /// so a future status surface never has to fabricate this invariant.
+    pub approved_for_live: bool,
+}
+
+impl DynamicSelectionRuntimeState {
+    pub fn selected_pair_count(&self) -> usize {
+        self.selected_pairs.len()
+    }
+
+    pub fn plan_present(&self) -> bool {
+        self.plan.is_some()
+    }
+
+    pub fn host_pool_present(&self) -> bool {
+        self.host_pool.is_some()
+    }
+}
+
+/// Manual `Debug` impl: `DynamicSelectionHostPool` itself derives neither
+/// `Clone` nor `Debug` (it is not meant to be cloned or dumped whole), so
+/// this prints only its presence/size — never its internal `StrategyHost`
+/// contents.
+impl fmt::Debug for DynamicSelectionRuntimeState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("DynamicSelectionRuntimeState")
+            .field("run_id", &self.run_id)
+            .field("disposition", &self.disposition)
+            .field("configured_mode", &self.configured_mode)
+            .field("effective_mode", &self.effective_mode)
+            .field("live_lock_applied", &self.live_lock_applied)
+            .field("plan_present", &self.plan.is_some())
+            .field("selected_pairs", &self.selected_pairs)
+            .field(
+                "host_pool",
+                &self
+                    .host_pool
+                    .as_ref()
+                    .map(|p| format!("<present, {} host(s)>", p.len()))
+                    .unwrap_or_else(|| "<absent>".to_string()),
+            )
+            .field("reasons", &self.reasons)
+            .field("approved_for_live", &self.approved_for_live)
+            .finish()
+    }
+}
+
+/// Phase 7A test-only fault-injection points for the atomic start-commit
+/// sequence in `AppState::start_execution_runtime` /
+/// `ProductionRuntimeStartEffects`. `None` in production and for every test
+/// that does not explicitly install one via
+/// `AppState::set_dynamic_selection_fault_seam_for_test` — the real sequence
+/// always runs unmodified. Loop-ownership-conflict cleanup is proven via the
+/// real conflict path (a pre-populated `execution_loop` handle), not a seam
+/// variant here, since that failure mode already exists and is directly
+/// reachable without injection.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum DynamicSelectionLifecycleFaultSeam {
+    AfterSelectionEvaluation,
+    AfterRunRowCreation,
+    AfterOrchestratorConstruction,
+    AfterRunArmBeginInitialTick,
+    AfterProcessLocalSelectionCommit,
+    ImmediatelyBeforeLoopSpawn,
+}
+
 impl AlpacaWsContinuityState {
     /// Canonical lowercase status string for API responses and logging.
     pub fn as_status_str(&self) -> &'static str {
