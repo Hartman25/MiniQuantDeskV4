@@ -356,6 +356,12 @@
       "path": "0057_runtime_strategy_conflict_evidence_provenance.sql",
       "status": "applied",
       "intent": "MULTI-STRATEGY-CONFLICT-POLICY-01-AUTHORITY-AND-EVIDENCE-REPAIR Defect 5: add nullable configured_mode to sys_runtime_strategy_conflict_plans (requested mode before the paper+Alpaca live-lock; mode remains the already-resolved effective mode) plus a plan_id=cycle_id consistency CHECK, and nullable order_type/time_in_force/limit_price/bar_present/bar_symbol/bar_strategy_id/bar_timeframe/close_micros to sys_runtime_strategy_conflict_candidates (full candidate bar provenance and order semantics, closing the 0056 gap where sell candidates carried no bar facts at all). Additive only, does not modify 0056. No backfill -- every 0056-era row round-trips the new columns as NULL and must be read as legacy/incomplete evidence, never fabricated or projected as active current truth."
+    },
+    {
+      "id": "0058",
+      "path": "0058_strategy_promotion_evidence_fingerprint_v2.sql",
+      "status": "applied",
+      "intent": "DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-FOUNDATION-AUTHORITY-CLOSURE-02 Defect B: add nullable evidence_fingerprint_v2 to sys_strategy_promotion_transitions, additive, does not modify 0046/0047. The legacy evidence_fingerprint hashes the matched review row after scanner_score has already been deserialized to f64, so two distinct raw decimal tokens can collide to the same legacy fingerprint while producing different exact Bundle 7 rankings. evidence_fingerprint_v2 is a versioned SHA-256 computed directly from the exact raw score token plus every other matched-row field affecting evidence identity. Legacy rows round-trip this column as NULL -- never backfilled from the mutable review-artifact filesystem at read time; Bundle 7's read-side validator refuses any identity lacking a v2 fingerprint with a distinct durable_fingerprint_v2_missing reason."
     }
   ]
 }

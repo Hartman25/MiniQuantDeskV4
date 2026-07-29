@@ -143,6 +143,14 @@ pub struct StrategyPromotionTransitionRecord {
     pub evidence_git_hash: Option<String>,
     pub evidence_artifact_path: Option<String>,
     pub evidence_fingerprint: Option<String>,
+    /// DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-FOUNDATION-AUTHORITY-CLOSURE-02
+    /// Defect B: the versioned exact-score evidence fingerprint (see
+    /// `mqk-daemon::promotion_evidence_validation::compute_evidence_fingerprint_v2`),
+    /// hashed directly from the raw JSON score token -- never through the
+    /// legacy `f64` round-trip. `None` for every row inserted before this
+    /// column existed (legacy row) -- never backfilled from the mutable
+    /// review-artifact filesystem at read time.
+    pub evidence_fingerprint_v2: Option<String>,
     pub effective_at_utc: DateTime<Utc>,
     /// Only `active_paper` gives this field any tradability effect (see
     /// [`evaluate_promotion_tradability`]). Every other state may still
@@ -187,6 +195,8 @@ pub struct InsertStrategyPromotionTransitionArgs {
     pub evidence_git_hash: Option<String>,
     pub evidence_artifact_path: Option<String>,
     pub evidence_fingerprint: Option<String>,
+    /// See [`StrategyPromotionTransitionRecord::evidence_fingerprint_v2`].
+    pub evidence_fingerprint_v2: Option<String>,
     pub effective_at_utc: DateTime<Utc>,
     pub expires_at_utc: Option<DateTime<Utc>>,
     pub initiated_by: String,
@@ -213,6 +223,7 @@ fn row_to_record(
         evidence_git_hash: r.try_get("evidence_git_hash")?,
         evidence_artifact_path: r.try_get("evidence_artifact_path")?,
         evidence_fingerprint: r.try_get("evidence_fingerprint")?,
+        evidence_fingerprint_v2: r.try_get("evidence_fingerprint_v2")?,
         effective_at_utc: r.try_get("effective_at_utc")?,
         expires_at_utc: r.try_get("expires_at_utc")?,
         initiated_by: r.try_get("initiated_by")?,
@@ -227,7 +238,7 @@ const SELECT_COLUMNS: &str = r#"
     previous_state, new_state,
     parent_transition_id, evidence_transition_id,
     evidence_review_id, evidence_scanner_scan_id, evidence_git_hash,
-    evidence_artifact_path, evidence_fingerprint,
+    evidence_artifact_path, evidence_fingerprint, evidence_fingerprint_v2,
     effective_at_utc, expires_at_utc, initiated_by, reason, created_at_utc
 "#;
 
@@ -283,10 +294,10 @@ pub async fn insert_strategy_promotion_transition(
             previous_state, new_state,
             parent_transition_id, evidence_transition_id,
             evidence_review_id, evidence_scanner_scan_id, evidence_git_hash,
-            evidence_artifact_path, evidence_fingerprint,
+            evidence_artifact_path, evidence_fingerprint, evidence_fingerprint_v2,
             effective_at_utc, expires_at_utc, initiated_by, reason, created_at_utc
         )
-        values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
+        values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
         on conflict (transition_id) do nothing
         "#,
     )
@@ -305,6 +316,7 @@ pub async fn insert_strategy_promotion_transition(
     .bind(&args.evidence_git_hash)
     .bind(&args.evidence_artifact_path)
     .bind(&args.evidence_fingerprint)
+    .bind(&args.evidence_fingerprint_v2)
     .bind(args.effective_at_utc)
     .bind(args.expires_at_utc)
     .bind(&args.initiated_by)
@@ -475,10 +487,10 @@ pub async fn insert_strategy_promotion_transition_serialized(
             previous_state, new_state,
             parent_transition_id, evidence_transition_id,
             evidence_review_id, evidence_scanner_scan_id, evidence_git_hash,
-            evidence_artifact_path, evidence_fingerprint,
+            evidence_artifact_path, evidence_fingerprint, evidence_fingerprint_v2,
             effective_at_utc, expires_at_utc, initiated_by, reason, created_at_utc
         )
-        values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
+        values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
         "#,
     )
     .bind(args.transition_id)
@@ -496,6 +508,7 @@ pub async fn insert_strategy_promotion_transition_serialized(
     .bind(&args.evidence_git_hash)
     .bind(&args.evidence_artifact_path)
     .bind(&args.evidence_fingerprint)
+    .bind(&args.evidence_fingerprint_v2)
     .bind(args.effective_at_utc)
     .bind(args.expires_at_utc)
     .bind(&args.initiated_by)
@@ -526,6 +539,7 @@ pub async fn insert_strategy_promotion_transition_serialized(
             evidence_git_hash: args.evidence_git_hash.clone(),
             evidence_artifact_path: args.evidence_artifact_path.clone(),
             evidence_fingerprint: args.evidence_fingerprint.clone(),
+            evidence_fingerprint_v2: args.evidence_fingerprint_v2.clone(),
             effective_at_utc: args.effective_at_utc,
             expires_at_utc: args.expires_at_utc,
             initiated_by: args.initiated_by.clone(),
