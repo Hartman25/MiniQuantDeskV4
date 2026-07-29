@@ -34,12 +34,13 @@
 use chrono::{Duration, Utc};
 use mqk_db::{
     evaluate_promotion_tradability, fetch_current_promotion_state, fetch_promotion_history,
-    insert_strategy_promotion_transition, insert_strategy_promotion_transition_serialized,
-    is_legal_transition, resolve_evidence_lineage, transition_requires_evidence,
-    upsert_strategy_registry_entry, InsertStrategyPromotionTransitionArgs, PromotionReasonCode,
-    TransitionInsertOutcome, UpsertStrategyRegistryArgs, ENV_DB_URL, PROMOTION_STATE_ACTIVE_PAPER,
-    PROMOTION_STATE_DEMOTED, PROMOTION_STATE_PAPER_APPROVED, PROMOTION_STATE_REJECTED,
-    PROMOTION_STATE_RETIRED, PROMOTION_STATE_SHADOW_APPROVED,
+    insert_legacy_evidence_transition_unchecked, insert_strategy_promotion_transition,
+    insert_strategy_promotion_transition_serialized, is_legal_transition, resolve_evidence_lineage,
+    transition_requires_evidence, upsert_strategy_registry_entry,
+    InsertStrategyPromotionTransitionArgs, PromotionReasonCode, TransitionInsertOutcome,
+    UpsertStrategyRegistryArgs, ENV_DB_URL, PROMOTION_STATE_ACTIVE_PAPER, PROMOTION_STATE_DEMOTED,
+    PROMOTION_STATE_PAPER_APPROVED, PROMOTION_STATE_REJECTED, PROMOTION_STATE_RETIRED,
+    PROMOTION_STATE_SHADOW_APPROVED,
 };
 use sqlx::postgres::PgPoolOptions;
 use uuid::Uuid;
@@ -75,6 +76,18 @@ fn transition_id_for(seed: &str) -> Uuid {
     Uuid::new_v5(&Uuid::NAMESPACE_URL, seed.as_bytes())
 }
 
+/// Defect 3: a valid-shaped 64-lowercase-hex legacy fingerprint fixture --
+/// production insert paths now refuse a fresh evidence-bearing transition
+/// whose `evidence_fingerprint` isn't this shape, so every test fixture in
+/// this file that flows through the validated insert paths must use one.
+const FIXTURE_LEGACY_FINGERPRINT: &str =
+    "6f0ef4b13f13d6e2df411454ab0475bc608e59fccce2d226379b97a2e2d63c11";
+/// Defect 3: a valid-shaped 64-lowercase-hex v2 fingerprint fixture,
+/// distinct from [`FIXTURE_LEGACY_FINGERPRINT`] so the two never
+/// accidentally collide in an equality assertion.
+const FIXTURE_V2_FINGERPRINT: &str =
+    "13b520c87278ee76536032a742a025694975698b866eade5ee5386e226559ead";
+
 #[allow(clippy::too_many_arguments)]
 fn make_args(
     transition_id: Uuid,
@@ -101,8 +114,14 @@ fn make_args(
         evidence_scanner_scan_id: Some("scan-evidence-id".to_string()),
         evidence_git_hash: Some("deadbeef".to_string()),
         evidence_artifact_path: Some("exports/strategy_reviews/test".to_string()),
-        evidence_fingerprint: Some("fingerprint-abc123".to_string()),
-        evidence_fingerprint_v2: None,
+        // Defect 3: a fresh evidence-bearing insert now requires both
+        // fingerprints, each exactly 64 lowercase hex characters -- this
+        // fixture default is a genuine fresh (production-shaped) bundle;
+        // tests that specifically need a legacy (pre-0058, v2-absent) row
+        // route through `insert_legacy_evidence_transition_unchecked`
+        // instead of overriding this default to `None`.
+        evidence_fingerprint: Some(FIXTURE_LEGACY_FINGERPRINT.to_string()),
+        evidence_fingerprint_v2: Some(FIXTURE_V2_FINGERPRINT.to_string()),
         effective_at_utc: effective_at,
         expires_at_utc: None,
         initiated_by: "test-operator".to_string(),
@@ -1150,7 +1169,8 @@ async fn evidence_lineage_carried_forward_through_paper_and_active() -> anyhow::
     root_args.evidence_scanner_scan_id = Some("scan-001".to_string());
     root_args.evidence_git_hash = Some("deadbeef01".to_string());
     root_args.evidence_artifact_path = Some("exports/strategy_reviews/evid".to_string());
-    root_args.evidence_fingerprint = Some("fingerprint-001".to_string());
+    root_args.evidence_fingerprint =
+        Some("67684119ecbfa8391eee4cc571d59adab9c6dad3d41f7788a984b36da1028dc5".to_string());
     let root_outcome = insert_strategy_promotion_transition_serialized(&pool, &root_args).await?;
     assert!(matches!(root_outcome, TransitionInsertOutcome::Inserted(_)));
 
@@ -1177,6 +1197,7 @@ async fn evidence_lineage_carried_forward_through_paper_and_active() -> anyhow::
     paper_args.evidence_git_hash = None;
     paper_args.evidence_artifact_path = None;
     paper_args.evidence_fingerprint = None;
+    paper_args.evidence_fingerprint_v2 = None;
     let paper_outcome = insert_strategy_promotion_transition_serialized(&pool, &paper_args).await?;
     let TransitionInsertOutcome::Inserted(paper_record) = paper_outcome else {
         panic!("expected Inserted");
@@ -1204,6 +1225,7 @@ async fn evidence_lineage_carried_forward_through_paper_and_active() -> anyhow::
     active_args.evidence_git_hash = None;
     active_args.evidence_artifact_path = None;
     active_args.evidence_fingerprint = None;
+    active_args.evidence_fingerprint_v2 = None;
     let active_outcome =
         insert_strategy_promotion_transition_serialized(&pool, &active_args).await?;
     let TransitionInsertOutcome::Inserted(active_record) = active_outcome else {
@@ -1227,7 +1249,7 @@ async fn evidence_lineage_carried_forward_through_paper_and_active() -> anyhow::
     assert_eq!(resolved.evidence_git_hash.as_deref(), Some("deadbeef01"));
     assert_eq!(
         resolved.evidence_fingerprint.as_deref(),
-        Some("fingerprint-001")
+        Some("67684119ecbfa8391eee4cc571d59adab9c6dad3d41f7788a984b36da1028dc5")
     );
 
     Ok(())
@@ -1281,6 +1303,7 @@ async fn reapproval_from_demoted_establishes_fresh_evidence_lineage() -> anyhow:
     paper_args.evidence_git_hash = None;
     paper_args.evidence_artifact_path = None;
     paper_args.evidence_fingerprint = None;
+    paper_args.evidence_fingerprint_v2 = None;
     let paper_outcome = insert_strategy_promotion_transition_serialized(&pool, &paper_args).await?;
     let TransitionInsertOutcome::Inserted(paper_record) = paper_outcome else {
         panic!("expected Inserted");
@@ -1305,6 +1328,7 @@ async fn reapproval_from_demoted_establishes_fresh_evidence_lineage() -> anyhow:
     demoted_args.evidence_git_hash = None;
     demoted_args.evidence_artifact_path = None;
     demoted_args.evidence_fingerprint = None;
+    demoted_args.evidence_fingerprint_v2 = None;
     let demoted_outcome =
         insert_strategy_promotion_transition_serialized(&pool, &demoted_args).await?;
     let TransitionInsertOutcome::Inserted(demoted_record) = demoted_outcome else {
@@ -1494,18 +1518,189 @@ async fn valid_v2_fingerprint_inserts_and_replays_idempotently() -> anyhow::Resu
     Ok(())
 }
 
+/// Defect 3, test 2: v2 present with legacy `evidence_fingerprint` absent is
+/// refused just as symmetrically as the reverse (legacy without v2).
 #[tokio::test]
 #[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
-async fn absent_v2_fingerprint_remains_a_legal_legacy_row() -> anyhow::Result<()> {
-    // A "legacy row" -- evidence-bearing (evidence_review_id present) but
-    // predating migration 0058's v2 fingerprint, so evidence_fingerprint_v2
-    // is None. This must remain insertable: Bundle 7's read-side validator
-    // (mqk-daemon's validate_active_paper_candidate) is exactly what refuses
-    // to *rank* such a row (DurableFingerprintV2Missing) -- the DB layer
-    // itself never blocks recording history that predates a schema
-    // addition.
+async fn v2_fingerprint_without_legacy_is_refused_on_insert() -> anyhow::Result<()> {
     let pool = test_pool().await?;
-    let strategy_id = unique_id("v2_absent_legacy");
+    let strategy_id = unique_id("v2_no_legacy");
+    let symbol = "AAPL";
+    let timeframe_secs = 86_400;
+    let now = Utc::now();
+
+    let mut args = make_args(
+        transition_id_for(&format!("{strategy_id}:{symbol}:v2_no_legacy")),
+        &strategy_id,
+        symbol,
+        timeframe_secs,
+        None,
+        PROMOTION_STATE_SHADOW_APPROVED,
+        now,
+        now,
+    );
+    args.evidence_fingerprint = None;
+
+    let err = insert_strategy_promotion_transition_serialized(&pool, &args)
+        .await
+        .expect_err("a fresh evidence-bearing insert with no legacy fingerprint must be refused");
+    assert!(
+        format!("{err:#}").contains("all-present or all-absent"),
+        "got: {err:#}"
+    );
+
+    Ok(())
+}
+
+/// Defect 3, test 3: any partial evidence bundle (here: only `evidence_review_id`
+/// present, everything else absent, including both fingerprints) is refused.
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn partial_evidence_bundle_is_refused_on_insert() -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    let strategy_id = unique_id("v2_partial");
+    let symbol = "AAPL";
+    let timeframe_secs = 86_400;
+    let now = Utc::now();
+
+    let mut args = make_args(
+        transition_id_for(&format!("{strategy_id}:{symbol}:partial")),
+        &strategy_id,
+        symbol,
+        timeframe_secs,
+        None,
+        PROMOTION_STATE_SHADOW_APPROVED,
+        now,
+        now,
+    );
+    args.evidence_scanner_scan_id = None;
+    args.evidence_git_hash = None;
+    args.evidence_artifact_path = None;
+    args.evidence_fingerprint = None;
+    args.evidence_fingerprint_v2 = None;
+    assert!(args.evidence_review_id.is_some(), "only review_id present");
+
+    let err = insert_strategy_promotion_transition_serialized(&pool, &args)
+        .await
+        .expect_err("a partial evidence bundle must be refused");
+    assert!(
+        format!("{err:#}").contains("all-present or all-absent"),
+        "got: {err:#}"
+    );
+
+    Ok(())
+}
+
+/// Defect 3, tests 7 and 9: the same `transition_id` submitted a second time
+/// with a divergent `evidence_fingerprint_v2` is a `Conflict`, never a
+/// `Duplicate` -- and the original durable row is preserved unchanged.
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn same_transition_id_different_v2_is_a_collision_not_duplicate() -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    let strategy_id = unique_id("collide_v2");
+    let symbol = "AAPL";
+    let timeframe_secs = 86_400;
+    let now = Utc::now();
+    let tid = transition_id_for(&format!("{strategy_id}:{symbol}:collide_v2"));
+
+    let first_args = make_args(
+        tid,
+        &strategy_id,
+        symbol,
+        timeframe_secs,
+        None,
+        PROMOTION_STATE_SHADOW_APPROVED,
+        now,
+        now,
+    );
+    let first = insert_strategy_promotion_transition_serialized(&pool, &first_args).await?;
+    assert!(matches!(first, TransitionInsertOutcome::Inserted(_)));
+
+    let mut second_args = first_args.clone();
+    second_args.evidence_fingerprint_v2 = Some("c".repeat(64));
+    let second = insert_strategy_promotion_transition_serialized(&pool, &second_args).await?;
+    match second {
+        TransitionInsertOutcome::Conflict { current } => {
+            let current = current.expect("existing row must be returned on collision");
+            assert_eq!(
+                current.evidence_fingerprint_v2.as_deref(),
+                Some(FIXTURE_V2_FINGERPRINT),
+                "the original durable row must be preserved unchanged, not overwritten"
+            );
+        }
+        other => panic!("expected Conflict on divergent same-transition_id insert, got {other:?}"),
+    }
+
+    let history = fetch_promotion_history(&pool, &strategy_id, symbol, timeframe_secs, 10).await?;
+    assert_eq!(
+        history.len(),
+        1,
+        "a collision must never produce a second row"
+    );
+    assert_eq!(
+        history[0].evidence_fingerprint_v2.as_deref(),
+        Some(FIXTURE_V2_FINGERPRINT)
+    );
+
+    Ok(())
+}
+
+/// Defect 3, test 8: the same `transition_id` submitted a second time with a
+/// divergent evidence field *other than* v2 (here: `evidence_git_hash`) is
+/// also a `Conflict`, not just a v2-specific special case.
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn same_transition_id_different_evidence_field_is_a_collision() -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    let strategy_id = unique_id("collide_git_hash");
+    let symbol = "AAPL";
+    let timeframe_secs = 86_400;
+    let now = Utc::now();
+    let tid = transition_id_for(&format!("{strategy_id}:{symbol}:collide_git_hash"));
+
+    let first_args = make_args(
+        tid,
+        &strategy_id,
+        symbol,
+        timeframe_secs,
+        None,
+        PROMOTION_STATE_SHADOW_APPROVED,
+        now,
+        now,
+    );
+    let first = insert_strategy_promotion_transition_serialized(&pool, &first_args).await?;
+    assert!(matches!(first, TransitionInsertOutcome::Inserted(_)));
+
+    let mut second_args = first_args.clone();
+    second_args.evidence_git_hash = Some("divergent-git-hash".to_string());
+    let second = insert_strategy_promotion_transition_serialized(&pool, &second_args).await?;
+    match second {
+        TransitionInsertOutcome::Conflict { current } => {
+            let current = current.expect("existing row must be returned on collision");
+            assert_eq!(
+                current.evidence_git_hash.as_deref(),
+                Some("deadbeef"),
+                "the original durable row must be preserved unchanged"
+            );
+        }
+        other => panic!("expected Conflict on divergent same-transition_id insert, got {other:?}"),
+    }
+
+    Ok(())
+}
+
+/// Defect 3, test 1: a *new* evidence-bearing transition (fresh evidence --
+/// content fields present) with no v2 fingerprint is refused by the normal,
+/// validated insert path -- this is exactly the legacy shape Bundle 7's
+/// read-side validator separately refuses to *rank*
+/// (`DurableFingerprintV2Missing`), but it must never reach durable storage
+/// as a *new* row in the first place.
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn absent_v2_fingerprint_on_a_new_row_is_refused_on_insert() -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    let strategy_id = unique_id("v2_absent_new");
     let symbol = "AAPL";
     let timeframe_secs = 86_400;
     let now = Utc::now();
@@ -1526,11 +1721,66 @@ async fn absent_v2_fingerprint_remains_a_legal_legacy_row() -> anyhow::Result<()
         "evidence-bearing fixture"
     );
 
-    let outcome = insert_strategy_promotion_transition_serialized(&pool, &args).await?;
-    let TransitionInsertOutcome::Inserted(record) = outcome else {
-        panic!("expected Inserted");
-    };
-    assert_eq!(record.evidence_fingerprint_v2, None);
+    let err = insert_strategy_promotion_transition_serialized(&pool, &args)
+        .await
+        .expect_err("a fresh evidence-bearing insert with no v2 fingerprint must be refused");
+    assert!(
+        format!("{err:#}").contains("all-present or all-absent"),
+        "got: {err:#}"
+    );
+
+    let current =
+        fetch_current_promotion_state(&pool, &strategy_id, symbol, timeframe_secs).await?;
+    assert!(
+        current.is_none(),
+        "a refused insert must leave zero durable trace"
+    );
+
+    Ok(())
+}
+
+/// Defect 3, test 5: the explicit migration/legacy-seeding-only seam can
+/// still construct a genuine pre-migration-0058-shaped row (evidence-bearing,
+/// no v2 fingerprint) -- e.g. to reproduce historical data in a regression
+/// fixture -- without weakening either of the two real insert paths above,
+/// which now refuse this exact shape for a *new* transition (see
+/// `absent_v2_fingerprint_on_a_new_row_is_refused_on_insert`).
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn legacy_seeding_seam_can_still_construct_a_v2_absent_row() -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    let strategy_id = unique_id("v2_absent_legacy_seam");
+    let symbol = "AAPL";
+    let timeframe_secs = 86_400;
+    let now = Utc::now();
+
+    let mut args = make_args(
+        transition_id_for(&format!("{strategy_id}:{symbol}:legacy_no_v2_seam")),
+        &strategy_id,
+        symbol,
+        timeframe_secs,
+        None,
+        PROMOTION_STATE_SHADOW_APPROVED,
+        now,
+        now,
+    );
+    args.evidence_fingerprint_v2 = None;
+    assert!(
+        args.evidence_review_id.is_some(),
+        "evidence-bearing fixture"
+    );
+
+    let inserted = insert_legacy_evidence_transition_unchecked(&pool, &args).await?;
+    assert!(inserted, "legacy-seeding seam must accept a v2-absent row");
+
+    let current = fetch_current_promotion_state(&pool, &strategy_id, symbol, timeframe_secs)
+        .await?
+        .expect("legacy-seeded row must be immediately queryable");
+    assert_eq!(current.evidence_fingerprint_v2, None);
+    assert_eq!(
+        current.evidence_fingerprint.as_deref(),
+        Some(FIXTURE_LEGACY_FINGERPRINT)
+    );
 
     Ok(())
 }

@@ -126,22 +126,124 @@ pub fn is_valid_evidence_fingerprint_v2_hex(s: &str) -> bool {
             .all(|b| b.is_ascii_digit() || matches!(b, b'a'..=b'f'))
 }
 
-/// Refuse a present-but-malformed `evidence_fingerprint_v2` before it ever
-/// reaches storage. Absent (`None`) is always allowed -- legacy rows
-/// predating migration 0058, and any non-evidence-bearing transition that
-/// only carries lineage forward, round-trip it as `NULL`; this validates
-/// shape only, never presence.
-fn validate_evidence_fingerprint_v2_shape(v2: &Option<String>) -> Result<()> {
-    if let Some(v) = v2 {
-        if !is_valid_evidence_fingerprint_v2_hex(v) {
-            anyhow::bail!(
-                "evidence_fingerprint_v2 must be exactly 64 lowercase hex characters when \
-                 present (got {} chars): {v:?}",
-                v.chars().count()
-            );
-        }
+/// Defect 3: `true` iff `args` carries any evidence content field at all, or
+/// self-references as its own evidence-bearing transition (`evidence_transition_id
+/// == transition_id`) -- either signal is independently sufficient to
+/// classify this insert as "fresh evidence" for
+/// [`validate_fresh_evidence_bundle`]. Mirrors [`resolve_evidence_lineage`]'s
+/// own authority (`evidence_review_id.is_some()` is checked first there,
+/// before falling back to `evidence_transition_id == transition_id`) -- this
+/// validator and that resolver must never disagree about what counts as
+/// "this row carries its own evidence."
+fn is_fresh_evidence_insert(args: &InsertStrategyPromotionTransitionArgs) -> bool {
+    args.evidence_transition_id == Some(args.transition_id)
+        || args.evidence_review_id.is_some()
+        || args.evidence_scanner_scan_id.is_some()
+        || args.evidence_git_hash.is_some()
+        || args.evidence_artifact_path.is_some()
+        || args.evidence_fingerprint.is_some()
+        || args.evidence_fingerprint_v2.is_some()
+}
+
+/// Defect 3: a fresh evidence-bearing insert (see [`is_fresh_evidence_insert`])
+/// must carry a complete, valid evidence bundle -- every evidence content
+/// field present (never a partial subset) and both the legacy and v2
+/// fingerprints exactly 64 lowercase hexadecimal characters. A transition
+/// that is not fresh evidence (including one that carries
+/// `evidence_transition_id` lineage pointing to an *earlier* transition,
+/// without duplicating that transition's evidence columns onto itself) is
+/// untouched by this check -- absent evidence always round-trips as `NULL`.
+///
+/// This closes the gap where [`insert_strategy_promotion_transition`]/
+/// [`insert_strategy_promotion_transition_serialized`] previously only
+/// validated `evidence_fingerprint_v2`'s *shape when present*, never its
+/// *presence* -- a caller could insert a brand-new evidence-bearing
+/// transition with a full legacy bundle and no v2 fingerprint at all,
+/// silently reproducing the exact legacy shape Bundle 7's read-side
+/// validator refuses to rank. Never weakened for test fixtures --
+/// [`insert_legacy_evidence_transition_unchecked`] is the only sanctioned
+/// bypass, and it is never reachable from production code.
+fn validate_fresh_evidence_bundle(args: &InsertStrategyPromotionTransitionArgs) -> Result<()> {
+    if !is_fresh_evidence_insert(args) {
+        return Ok(());
+    }
+    let fields_present = [
+        args.evidence_review_id.is_some(),
+        args.evidence_scanner_scan_id.is_some(),
+        args.evidence_git_hash.is_some(),
+        args.evidence_artifact_path.is_some(),
+        args.evidence_fingerprint.is_some(),
+        args.evidence_fingerprint_v2.is_some(),
+    ];
+    if !fields_present.iter().all(|&p| p) {
+        anyhow::bail!(
+            "fresh evidence bundle must be all-present or all-absent -- this transition carries \
+             at least one evidence content field, so every evidence content field (review_id, \
+             scanner_scan_id, git_hash, artifact_path, fingerprint, fingerprint_v2) must be \
+             present"
+        );
+    }
+    let fp = args.evidence_fingerprint.as_deref().expect("all_present");
+    if !is_valid_evidence_fingerprint_v2_hex(fp) {
+        anyhow::bail!(
+            "fresh evidence_fingerprint must be exactly 64 lowercase hex characters when this \
+             transition carries fresh evidence (got {} chars): {fp:?}",
+            fp.chars().count()
+        );
+    }
+    let fp2 = args
+        .evidence_fingerprint_v2
+        .as_deref()
+        .expect("all_present");
+    if !is_valid_evidence_fingerprint_v2_hex(fp2) {
+        anyhow::bail!(
+            "fresh evidence_fingerprint_v2 must be exactly 64 lowercase hex characters when this \
+             transition carries fresh evidence (got {} chars): {fp2:?}",
+            fp2.chars().count()
+        );
     }
     Ok(())
+}
+
+/// Defect 3: `true` iff every field on `args` matches the corresponding
+/// field on `existing` exactly -- the canonical payload comparison an exact
+/// replay of `args.transition_id` must pass to be classified `Duplicate`
+/// rather than `Conflict`. Any divergence (a different `evidence_fingerprint_v2`,
+/// a different `new_state`, or any other field) means the same
+/// `transition_id` was submitted for two different logical transitions --
+/// never silently classified as an idempotent replay.
+fn args_match_existing_record(
+    args: &InsertStrategyPromotionTransitionArgs,
+    existing: &StrategyPromotionTransitionRecord,
+) -> bool {
+    // Postgres `timestamptz` columns store microsecond precision -- an
+    // in-memory `DateTime<Utc>` (e.g. from `Utc::now()`) can carry
+    // nanosecond precision, so a raw `==` between the caller's pre-insert
+    // value and the durable read-back value can spuriously disagree on an
+    // exact replay. Compare at microsecond precision (the DB's own
+    // precision) on both sides, mirroring the truncation Postgres itself
+    // already performed on `existing`.
+    args.strategy_id == existing.strategy_id
+        && args.symbol == existing.symbol
+        && args.timeframe_secs == existing.timeframe_secs
+        && args.config_fingerprint == existing.config_fingerprint
+        && args.config_identity_status == existing.config_identity_status
+        && args.previous_state == existing.previous_state
+        && args.new_state == existing.new_state
+        && args.parent_transition_id == existing.parent_transition_id
+        && args.evidence_transition_id == existing.evidence_transition_id
+        && args.evidence_review_id == existing.evidence_review_id
+        && args.evidence_scanner_scan_id == existing.evidence_scanner_scan_id
+        && args.evidence_git_hash == existing.evidence_git_hash
+        && args.evidence_artifact_path == existing.evidence_artifact_path
+        && args.evidence_fingerprint == existing.evidence_fingerprint
+        && args.evidence_fingerprint_v2 == existing.evidence_fingerprint_v2
+        && args.effective_at_utc.timestamp_micros() == existing.effective_at_utc.timestamp_micros()
+        && args.expires_at_utc.map(|t| t.timestamp_micros())
+            == existing.expires_at_utc.map(|t| t.timestamp_micros())
+        && args.initiated_by == existing.initiated_by
+        && args.reason == existing.reason
+        && args.created_at_utc.timestamp_micros() == existing.created_at_utc.timestamp_micros()
 }
 
 // ---------------------------------------------------------------------------
@@ -321,8 +423,7 @@ pub async fn insert_strategy_promotion_transition(
             args.new_state
         );
     }
-    validate_evidence_fingerprint_v2_shape(&args.evidence_fingerprint_v2)
-        .context("insert_strategy_promotion_transition")?;
+    validate_fresh_evidence_bundle(args).context("insert_strategy_promotion_transition")?;
 
     let result = sqlx::query(
         r#"
@@ -459,7 +560,7 @@ pub async fn insert_strategy_promotion_transition_serialized(
             args.new_state
         );
     }
-    validate_evidence_fingerprint_v2_shape(&args.evidence_fingerprint_v2)
+    validate_fresh_evidence_bundle(args)
         .context("insert_strategy_promotion_transition_serialized")?;
 
     let mut tx = pool
@@ -475,8 +576,12 @@ pub async fn insert_strategy_promotion_transition_serialized(
         .context("insert_strategy_promotion_transition_serialized: advisory lock failed")?;
 
     // Idempotency check, inside the lock: does this exact transition_id
-    // already exist? If so, this is a replay — return the existing row
-    // untouched, before any parent/current-state comparison runs at all.
+    // already exist? If so, compare the existing row against the submitted
+    // canonical payload (Defect 3) -- an exact-replay is a `Duplicate`
+    // (returned untouched, before any parent/current-state comparison runs
+    // at all); a divergent payload sharing the same transition_id is a
+    // `Conflict`, never silently classified as an idempotent replay. Either
+    // way the original durable row is never modified here.
     let existing_row = sqlx::query(&format!(
         "select {SELECT_COLUMNS} from sys_strategy_promotion_transitions where transition_id = $1"
     ))
@@ -486,6 +591,14 @@ pub async fn insert_strategy_promotion_transition_serialized(
     .context("insert_strategy_promotion_transition_serialized: idempotency check failed")?;
     if let Some(row) = existing_row {
         let record = row_to_record(row)?;
+        if !args_match_existing_record(args, &record) {
+            tx.rollback().await.context(
+                "insert_strategy_promotion_transition_serialized: rollback (collision) failed",
+            )?;
+            return Ok(TransitionInsertOutcome::Conflict {
+                current: Some(record),
+            });
+        }
         tx.commit().await.context(
             "insert_strategy_promotion_transition_serialized: commit (duplicate) failed",
         )?;
@@ -587,6 +700,107 @@ pub async fn insert_strategy_promotion_transition_serialized(
             created_at_utc: args.created_at_utc,
         },
     ))
+}
+
+// ---------------------------------------------------------------------------
+// Defect 3: migration/legacy-fixture-seeding-only insert seam
+// ---------------------------------------------------------------------------
+
+/// Migration/legacy-fixture-seeding-only insert path: bypasses
+/// [`validate_fresh_evidence_bundle`] entirely so a caller can construct a
+/// row shaped like a genuine pre-migration-0058 legacy evidence-bearing
+/// transition (a legacy `evidence_fingerprint` with no
+/// `evidence_fingerprint_v2`, or any other historically-legal-but-now-refused
+/// evidence shape) -- exactly the shape [`insert_strategy_promotion_transition`]
+/// and [`insert_strategy_promotion_transition_serialized`] now refuse to
+/// accept for a *new* transition.
+///
+/// Never call this from any production code path (route handlers, the
+/// daemon's promotion pipeline, or any operator action) -- it exists solely
+/// so scenario/regression tests and one-off historical-data migrations can
+/// seed a legacy-shaped fixture without weakening the two real insert paths
+/// above. Still enforces every other structural check those functions do
+/// (blank identity, wildcard symbol, non-positive timeframe, unknown
+/// state) -- only the fresh-evidence-bundle rule is skipped. Idempotent via
+/// `ON CONFLICT (transition_id) DO NOTHING`, mirroring
+/// [`insert_strategy_promotion_transition`]'s bare (non-serialized)
+/// contract -- no collision detection, since this seam is never meant to
+/// arbitrate concurrent production writers.
+pub async fn insert_legacy_evidence_transition_unchecked(
+    pool: &PgPool,
+    args: &InsertStrategyPromotionTransitionArgs,
+) -> Result<bool> {
+    if args.strategy_id.trim().is_empty() {
+        anyhow::bail!("insert_legacy_evidence_transition_unchecked: strategy_id must not be empty");
+    }
+    if args.symbol.trim().is_empty() {
+        anyhow::bail!("insert_legacy_evidence_transition_unchecked: symbol must not be empty");
+    }
+    if args.symbol.trim() == "*" {
+        anyhow::bail!(
+            "insert_legacy_evidence_transition_unchecked: wildcard symbol '*' is forbidden"
+        );
+    }
+    if args.timeframe_secs <= 0 {
+        anyhow::bail!(
+            "insert_legacy_evidence_transition_unchecked: timeframe_secs must be positive"
+        );
+    }
+    if args.initiated_by.trim().is_empty() {
+        anyhow::bail!(
+            "insert_legacy_evidence_transition_unchecked: initiated_by must not be empty"
+        );
+    }
+    if !is_known_promotion_state(&args.new_state) {
+        anyhow::bail!(
+            "insert_legacy_evidence_transition_unchecked: unknown new_state '{}'",
+            args.new_state
+        );
+    }
+    // Deliberately no `validate_fresh_evidence_bundle` call -- see doc
+    // comment above.
+
+    let result = sqlx::query(
+        r#"
+        insert into sys_strategy_promotion_transitions (
+            transition_id, strategy_id, symbol, timeframe_secs,
+            config_fingerprint, config_identity_status,
+            previous_state, new_state,
+            parent_transition_id, evidence_transition_id,
+            evidence_review_id, evidence_scanner_scan_id, evidence_git_hash,
+            evidence_artifact_path, evidence_fingerprint, evidence_fingerprint_v2,
+            effective_at_utc, expires_at_utc, initiated_by, reason, created_at_utc
+        )
+        values ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21)
+        on conflict (transition_id) do nothing
+        "#,
+    )
+    .bind(args.transition_id)
+    .bind(&args.strategy_id)
+    .bind(&args.symbol)
+    .bind(args.timeframe_secs)
+    .bind(&args.config_fingerprint)
+    .bind(&args.config_identity_status)
+    .bind(&args.previous_state)
+    .bind(&args.new_state)
+    .bind(args.parent_transition_id)
+    .bind(args.evidence_transition_id)
+    .bind(&args.evidence_review_id)
+    .bind(&args.evidence_scanner_scan_id)
+    .bind(&args.evidence_git_hash)
+    .bind(&args.evidence_artifact_path)
+    .bind(&args.evidence_fingerprint)
+    .bind(&args.evidence_fingerprint_v2)
+    .bind(args.effective_at_utc)
+    .bind(args.expires_at_utc)
+    .bind(&args.initiated_by)
+    .bind(&args.reason)
+    .bind(args.created_at_utc)
+    .execute(pool)
+    .await
+    .context("insert_legacy_evidence_transition_unchecked failed")?;
+
+    Ok(result.rows_affected() > 0)
 }
 
 // ---------------------------------------------------------------------------
@@ -881,21 +1095,191 @@ mod fingerprint_v2_shape_tests {
         assert!(!is_valid_evidence_fingerprint_v2_hex(&v));
     }
 
+    fn no_evidence_args() -> InsertStrategyPromotionTransitionArgs {
+        InsertStrategyPromotionTransitionArgs {
+            transition_id: Uuid::nil(),
+            strategy_id: "swing_momentum".to_string(),
+            symbol: "AAPL".to_string(),
+            timeframe_secs: 86400,
+            config_fingerprint: None,
+            config_identity_status: "unavailable_in_current_runtime".to_string(),
+            previous_state: Some(PROMOTION_STATE_PAPER_APPROVED.to_string()),
+            new_state: PROMOTION_STATE_ACTIVE_PAPER.to_string(),
+            parent_transition_id: None,
+            evidence_transition_id: None,
+            evidence_review_id: None,
+            evidence_scanner_scan_id: None,
+            evidence_git_hash: None,
+            evidence_artifact_path: None,
+            evidence_fingerprint: None,
+            evidence_fingerprint_v2: None,
+            effective_at_utc: DateTime::<Utc>::MIN_UTC,
+            expires_at_utc: None,
+            initiated_by: "test-operator".to_string(),
+            reason: "unit test".to_string(),
+            created_at_utc: DateTime::<Utc>::MIN_UTC,
+        }
+    }
+
+    fn fresh_evidence_args() -> InsertStrategyPromotionTransitionArgs {
+        let mut a = no_evidence_args();
+        a.evidence_transition_id = Some(a.transition_id);
+        a.evidence_review_id = Some("review-1".to_string());
+        a.evidence_scanner_scan_id = Some("scan-1".to_string());
+        a.evidence_git_hash = Some("deadbeef".to_string());
+        a.evidence_artifact_path = Some("exports/strategy_reviews/x".to_string());
+        a.evidence_fingerprint = Some("a".repeat(64));
+        a.evidence_fingerprint_v2 = Some("b".repeat(64));
+        a
+    }
+
     #[test]
     fn absent_v2_always_passes_shape_validation() {
-        assert!(validate_evidence_fingerprint_v2_shape(&None).is_ok());
+        assert!(validate_fresh_evidence_bundle(&no_evidence_args()).is_ok());
     }
 
     #[test]
     fn present_valid_v2_passes_shape_validation() {
-        let v = Some("a".repeat(64));
-        assert!(validate_evidence_fingerprint_v2_shape(&v).is_ok());
+        assert!(validate_fresh_evidence_bundle(&fresh_evidence_args()).is_ok());
     }
 
     #[test]
     fn present_malformed_v2_fails_shape_validation() {
-        let v = Some("not-a-hex-fingerprint".to_string());
-        let err = validate_evidence_fingerprint_v2_shape(&v).expect_err("must be refused");
+        let mut a = fresh_evidence_args();
+        a.evidence_fingerprint_v2 = Some("not-a-hex-fingerprint".to_string());
+        let err = validate_fresh_evidence_bundle(&a).expect_err("must be refused");
         assert!(err.to_string().contains("64 lowercase hex"), "got: {err}");
+    }
+
+    // ── Defect 3: fresh evidence bundle structural rules ──────────────────
+
+    #[test]
+    fn lineage_only_transition_with_no_evidence_content_passes() {
+        // Non-evidence transition (e.g. paper_approved -> active_paper)
+        // carrying no evidence_transition_id at all.
+        assert!(validate_fresh_evidence_bundle(&no_evidence_args()).is_ok());
+    }
+
+    #[test]
+    fn lineage_only_transition_pointing_elsewhere_passes_without_content() {
+        // Carries evidence_transition_id lineage to an *earlier* transition
+        // without duplicating that transition's evidence columns onto
+        // itself -- explicitly allowed.
+        let mut a = no_evidence_args();
+        a.evidence_transition_id = Some(Uuid::new_v5(&Uuid::NAMESPACE_URL, b"earlier-transition"));
+        assert!(validate_fresh_evidence_bundle(&a).is_ok());
+    }
+
+    #[test]
+    fn legacy_fingerprint_without_v2_refuses() {
+        // Defect 3, test 1.
+        let mut a = fresh_evidence_args();
+        a.evidence_fingerprint_v2 = None;
+        let err = validate_fresh_evidence_bundle(&a).expect_err("must be refused");
+        assert!(
+            err.to_string().contains("all-present or all-absent"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn v2_without_legacy_refuses() {
+        // Defect 3, test 2.
+        let mut a = fresh_evidence_args();
+        a.evidence_fingerprint = None;
+        let err = validate_fresh_evidence_bundle(&a).expect_err("must be refused");
+        assert!(
+            err.to_string().contains("all-present or all-absent"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn partial_evidence_bundle_refuses() {
+        // Defect 3, test 3: only review_id present, everything else absent.
+        let mut a = no_evidence_args();
+        a.evidence_review_id = Some("review-1".to_string());
+        let err = validate_fresh_evidence_bundle(&a).expect_err("must be refused");
+        assert!(
+            err.to_string().contains("all-present or all-absent"),
+            "got: {err}"
+        );
+    }
+
+    #[test]
+    fn lineage_only_non_evidence_transition_passes() {
+        // Defect 3, test 4.
+        let mut a = no_evidence_args();
+        a.evidence_transition_id = Some(Uuid::new_v5(&Uuid::NAMESPACE_URL, b"root"));
+        assert!(validate_fresh_evidence_bundle(&a).is_ok());
+    }
+
+    #[test]
+    fn valid_fresh_evidence_bundle_passes() {
+        // Defect 3, test 6 (structural half -- DB round-trip covered by the
+        // integration scenario test).
+        assert!(validate_fresh_evidence_bundle(&fresh_evidence_args()).is_ok());
+    }
+
+    #[test]
+    fn args_match_existing_record_true_for_identical_payload() {
+        let a = fresh_evidence_args();
+        let record = StrategyPromotionTransitionRecord {
+            transition_id: a.transition_id,
+            strategy_id: a.strategy_id.clone(),
+            symbol: a.symbol.clone(),
+            timeframe_secs: a.timeframe_secs,
+            config_fingerprint: a.config_fingerprint.clone(),
+            config_identity_status: a.config_identity_status.clone(),
+            previous_state: a.previous_state.clone(),
+            new_state: a.new_state.clone(),
+            parent_transition_id: a.parent_transition_id,
+            evidence_transition_id: a.evidence_transition_id,
+            evidence_review_id: a.evidence_review_id.clone(),
+            evidence_scanner_scan_id: a.evidence_scanner_scan_id.clone(),
+            evidence_git_hash: a.evidence_git_hash.clone(),
+            evidence_artifact_path: a.evidence_artifact_path.clone(),
+            evidence_fingerprint: a.evidence_fingerprint.clone(),
+            evidence_fingerprint_v2: a.evidence_fingerprint_v2.clone(),
+            effective_at_utc: a.effective_at_utc,
+            expires_at_utc: a.expires_at_utc,
+            initiated_by: a.initiated_by.clone(),
+            reason: a.reason.clone(),
+            created_at_utc: a.created_at_utc,
+        };
+        assert!(args_match_existing_record(&a, &record));
+    }
+
+    #[test]
+    fn args_match_existing_record_false_when_v2_diverges() {
+        // Defect 3, test 7: same transition_id, different v2 -- a
+        // collision, never a Duplicate.
+        let a = fresh_evidence_args();
+        let mut record_args = a.clone();
+        record_args.evidence_fingerprint_v2 = Some("c".repeat(64));
+        let record = StrategyPromotionTransitionRecord {
+            transition_id: record_args.transition_id,
+            strategy_id: record_args.strategy_id.clone(),
+            symbol: record_args.symbol.clone(),
+            timeframe_secs: record_args.timeframe_secs,
+            config_fingerprint: record_args.config_fingerprint.clone(),
+            config_identity_status: record_args.config_identity_status.clone(),
+            previous_state: record_args.previous_state.clone(),
+            new_state: record_args.new_state.clone(),
+            parent_transition_id: record_args.parent_transition_id,
+            evidence_transition_id: record_args.evidence_transition_id,
+            evidence_review_id: record_args.evidence_review_id.clone(),
+            evidence_scanner_scan_id: record_args.evidence_scanner_scan_id.clone(),
+            evidence_git_hash: record_args.evidence_git_hash.clone(),
+            evidence_artifact_path: record_args.evidence_artifact_path.clone(),
+            evidence_fingerprint: record_args.evidence_fingerprint.clone(),
+            evidence_fingerprint_v2: record_args.evidence_fingerprint_v2.clone(),
+            effective_at_utc: record_args.effective_at_utc,
+            expires_at_utc: record_args.expires_at_utc,
+            initiated_by: record_args.initiated_by.clone(),
+            reason: record_args.reason.clone(),
+            created_at_utc: record_args.created_at_utc,
+        };
+        assert!(!args_match_existing_record(&a, &record));
     }
 }
