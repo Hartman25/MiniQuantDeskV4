@@ -1361,3 +1361,176 @@ async fn reapproval_from_demoted_establishes_fresh_evidence_lineage() -> anyhow:
 
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-FINAL-FOUNDATION-PROVENANCE-AND-
+// ARTIFACT-HARDENING: evidence_fingerprint_v2 insertion hardening.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn malformed_v2_fingerprint_is_refused_on_insert() -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    let strategy_id = unique_id("v2_malformed");
+    let symbol = "AAPL";
+    let timeframe_secs = 86_400;
+    let now = Utc::now();
+
+    let mut args = make_args(
+        transition_id_for(&format!("{strategy_id}:{symbol}:malformed_v2")),
+        &strategy_id,
+        symbol,
+        timeframe_secs,
+        None,
+        PROMOTION_STATE_SHADOW_APPROVED,
+        now,
+        now,
+    );
+    args.evidence_fingerprint_v2 = Some("not-a-valid-hex-fingerprint".to_string());
+
+    let err = insert_strategy_promotion_transition_serialized(&pool, &args)
+        .await
+        .expect_err("a malformed v2 fingerprint must be refused before it reaches storage");
+    assert!(
+        format!("{err:#}").contains("64 lowercase hex"),
+        "got: {err:#}"
+    );
+
+    // Never actually inserted -- no row exists for this identity.
+    let current =
+        fetch_current_promotion_state(&pool, &strategy_id, symbol, timeframe_secs).await?;
+    assert!(
+        current.is_none(),
+        "a refused insert must leave zero durable trace"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn wrong_length_v2_fingerprint_is_refused_on_insert() -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    let strategy_id = unique_id("v2_wronglen");
+    let symbol = "AAPL";
+    let timeframe_secs = 86_400;
+    let now = Utc::now();
+
+    let mut args = make_args(
+        transition_id_for(&format!("{strategy_id}:{symbol}:wrong_len_v2")),
+        &strategy_id,
+        symbol,
+        timeframe_secs,
+        None,
+        PROMOTION_STATE_SHADOW_APPROVED,
+        now,
+        now,
+    );
+    // 63 hex chars, not 64.
+    args.evidence_fingerprint_v2 = Some("a".repeat(63));
+
+    let err = insert_strategy_promotion_transition(&pool, &args)
+        .await
+        .expect_err("a wrong-length v2 fingerprint must be refused");
+    assert!(
+        format!("{err:#}").contains("64 lowercase hex"),
+        "got: {err:#}"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn valid_v2_fingerprint_inserts_and_replays_idempotently() -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    let strategy_id = unique_id("v2_valid");
+    let symbol = "AAPL";
+    let timeframe_secs = 86_400;
+    let now = Utc::now();
+    let valid_v2 = "b".repeat(64);
+
+    let mut args = make_args(
+        transition_id_for(&format!("{strategy_id}:{symbol}:valid_v2")),
+        &strategy_id,
+        symbol,
+        timeframe_secs,
+        None,
+        PROMOTION_STATE_SHADOW_APPROVED,
+        now,
+        now,
+    );
+    args.evidence_fingerprint_v2 = Some(valid_v2.clone());
+
+    let outcome = insert_strategy_promotion_transition_serialized(&pool, &args).await?;
+    let TransitionInsertOutcome::Inserted(record) = outcome else {
+        panic!("expected Inserted");
+    };
+    assert_eq!(
+        record.evidence_fingerprint_v2.as_deref(),
+        Some(valid_v2.as_str())
+    );
+
+    // Exact replay (same transition_id, same content) is idempotent -- no
+    // second row, no error, and the v2 fingerprint round-trips unchanged.
+    let replay_outcome = insert_strategy_promotion_transition_serialized(&pool, &args).await?;
+    match replay_outcome {
+        TransitionInsertOutcome::Duplicate(dup) => {
+            assert_eq!(
+                dup.evidence_fingerprint_v2.as_deref(),
+                Some(valid_v2.as_str())
+            );
+        }
+        other => panic!("expected Duplicate on exact replay, got {other:?}"),
+    }
+
+    let history = fetch_promotion_history(&pool, &strategy_id, symbol, timeframe_secs, 10).await?;
+    assert_eq!(
+        history.len(),
+        1,
+        "a replayed insert must never produce a second row (collision proof)"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn absent_v2_fingerprint_remains_a_legal_legacy_row() -> anyhow::Result<()> {
+    // A "legacy row" -- evidence-bearing (evidence_review_id present) but
+    // predating migration 0058's v2 fingerprint, so evidence_fingerprint_v2
+    // is None. This must remain insertable: Bundle 7's read-side validator
+    // (mqk-daemon's validate_active_paper_candidate) is exactly what refuses
+    // to *rank* such a row (DurableFingerprintV2Missing) -- the DB layer
+    // itself never blocks recording history that predates a schema
+    // addition.
+    let pool = test_pool().await?;
+    let strategy_id = unique_id("v2_absent_legacy");
+    let symbol = "AAPL";
+    let timeframe_secs = 86_400;
+    let now = Utc::now();
+
+    let mut args = make_args(
+        transition_id_for(&format!("{strategy_id}:{symbol}:legacy_no_v2")),
+        &strategy_id,
+        symbol,
+        timeframe_secs,
+        None,
+        PROMOTION_STATE_SHADOW_APPROVED,
+        now,
+        now,
+    );
+    args.evidence_fingerprint_v2 = None;
+    assert!(
+        args.evidence_review_id.is_some(),
+        "evidence-bearing fixture"
+    );
+
+    let outcome = insert_strategy_promotion_transition_serialized(&pool, &args).await?;
+    let TransitionInsertOutcome::Inserted(record) = outcome else {
+        panic!("expected Inserted");
+    };
+    assert_eq!(record.evidence_fingerprint_v2, None);
+
+    Ok(())
+}

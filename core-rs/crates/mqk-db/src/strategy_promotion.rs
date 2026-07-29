@@ -109,6 +109,42 @@ pub fn scanner_timeframe_label_to_secs(label: &str) -> Option<i64> {
 }
 
 // ---------------------------------------------------------------------------
+// DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-FINAL-FOUNDATION-PROVENANCE-AND-
+// ARTIFACT-HARDENING: evidence_fingerprint_v2 format hardening (migration
+// 0058 is append-only and carries no CHECK constraint of its own -- format
+// is enforced at the application boundary instead).
+// ---------------------------------------------------------------------------
+
+/// `true` iff `s` is exactly 64 lowercase hex characters -- the only shape
+/// `mqk-daemon::promotion_evidence_validation::compute_evidence_fingerprint_v2`
+/// (a SHA-256 hex digest via the `hex` crate, which always encodes
+/// lowercase) or any other legitimate caller ever produces for
+/// `evidence_fingerprint_v2`.
+pub fn is_valid_evidence_fingerprint_v2_hex(s: &str) -> bool {
+    s.len() == 64
+        && s.bytes()
+            .all(|b| b.is_ascii_digit() || matches!(b, b'a'..=b'f'))
+}
+
+/// Refuse a present-but-malformed `evidence_fingerprint_v2` before it ever
+/// reaches storage. Absent (`None`) is always allowed -- legacy rows
+/// predating migration 0058, and any non-evidence-bearing transition that
+/// only carries lineage forward, round-trip it as `NULL`; this validates
+/// shape only, never presence.
+fn validate_evidence_fingerprint_v2_shape(v2: &Option<String>) -> Result<()> {
+    if let Some(v) = v2 {
+        if !is_valid_evidence_fingerprint_v2_hex(v) {
+            anyhow::bail!(
+                "evidence_fingerprint_v2 must be exactly 64 lowercase hex characters when \
+                 present (got {} chars): {v:?}",
+                v.chars().count()
+            );
+        }
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
 // Records
 // ---------------------------------------------------------------------------
 
@@ -285,6 +321,8 @@ pub async fn insert_strategy_promotion_transition(
             args.new_state
         );
     }
+    validate_evidence_fingerprint_v2_shape(&args.evidence_fingerprint_v2)
+        .context("insert_strategy_promotion_transition")?;
 
     let result = sqlx::query(
         r#"
@@ -421,6 +459,8 @@ pub async fn insert_strategy_promotion_transition_serialized(
             args.new_state
         );
     }
+    validate_evidence_fingerprint_v2_shape(&args.evidence_fingerprint_v2)
+        .context("insert_strategy_promotion_transition_serialized")?;
 
     let mut tx = pool
         .begin()
@@ -806,4 +846,56 @@ pub async fn resolve_evidence_lineage(
         return Ok(Some(record.clone()));
     }
     fetch_promotion_transition_by_id(pool, evidence_transition_id).await
+}
+
+#[cfg(test)]
+mod fingerprint_v2_shape_tests {
+    use super::*;
+
+    #[test]
+    fn sixty_four_lowercase_hex_chars_is_valid() {
+        let v = "a".repeat(64);
+        assert!(is_valid_evidence_fingerprint_v2_hex(&v));
+        let mixed_digits = "0123456789abcdef".repeat(4);
+        assert_eq!(mixed_digits.len(), 64);
+        assert!(is_valid_evidence_fingerprint_v2_hex(&mixed_digits));
+    }
+
+    #[test]
+    fn wrong_length_is_invalid() {
+        assert!(!is_valid_evidence_fingerprint_v2_hex(&"a".repeat(63)));
+        assert!(!is_valid_evidence_fingerprint_v2_hex(&"a".repeat(65)));
+        assert!(!is_valid_evidence_fingerprint_v2_hex(""));
+    }
+
+    #[test]
+    fn uppercase_hex_is_invalid() {
+        let v = "A".repeat(64);
+        assert!(!is_valid_evidence_fingerprint_v2_hex(&v));
+    }
+
+    #[test]
+    fn non_hex_characters_are_invalid() {
+        let mut v = "a".repeat(63);
+        v.push('g');
+        assert!(!is_valid_evidence_fingerprint_v2_hex(&v));
+    }
+
+    #[test]
+    fn absent_v2_always_passes_shape_validation() {
+        assert!(validate_evidence_fingerprint_v2_shape(&None).is_ok());
+    }
+
+    #[test]
+    fn present_valid_v2_passes_shape_validation() {
+        let v = Some("a".repeat(64));
+        assert!(validate_evidence_fingerprint_v2_shape(&v).is_ok());
+    }
+
+    #[test]
+    fn present_malformed_v2_fails_shape_validation() {
+        let v = Some("not-a-hex-fingerprint".to_string());
+        let err = validate_evidence_fingerprint_v2_shape(&v).expect_err("must be refused");
+        assert!(err.to_string().contains("64 lowercase hex"), "got: {err}");
+    }
 }
