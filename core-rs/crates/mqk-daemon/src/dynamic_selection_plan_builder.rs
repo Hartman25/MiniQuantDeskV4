@@ -345,7 +345,12 @@ async fn evaluate_candidate(
                     evidence_resolved: true,
                     review_state_is_paper_candidate: true,
                     evidence_review_state: Some(v.evidence_review_state),
-                    fingerprint_matches: true,
+                    durable_legacy_fingerprint: Some(v.durable_legacy_fingerprint),
+                    recomputed_legacy_fingerprint: Some(v.recomputed_legacy_fingerprint),
+                    legacy_fingerprint_matches: true,
+                    durable_exact_fingerprint_v2: Some(v.durable_exact_fingerprint_v2),
+                    recomputed_exact_fingerprint_v2: Some(v.recomputed_exact_fingerprint_v2),
+                    exact_fingerprint_v2_matches: true,
                     // Overwritten unconditionally below from `registry_enabled`
                     // (computed independently of this promotion-chain result).
                     registry_enabled: false,
@@ -359,7 +364,6 @@ async fn evaluate_candidate(
                     evidence_review_id: Some(v.evidence_review_id),
                     evidence_scanner_scan_id: Some(v.evidence_scanner_scan_id),
                     evidence_artifact_path: Some(v.evidence_artifact_path),
-                    evidence_fingerprint: Some(v.evidence_fingerprint),
                     evidence_git_hash: Some(v.evidence_git_hash),
                     promotion_transition_id: Some(v.promotion_transition_id.to_string()),
                     promotion_effective_at: Some(v.promotion_effective_at.to_rfc3339()),
@@ -438,7 +442,12 @@ fn placeholder_evidence() -> SelectionCandidateEvidence {
         evidence_resolved: true,
         review_state_is_paper_candidate: true,
         evidence_review_state: None,
-        fingerprint_matches: true,
+        durable_legacy_fingerprint: Some("placeholder-legacy-fingerprint".to_string()),
+        recomputed_legacy_fingerprint: Some("placeholder-legacy-fingerprint".to_string()),
+        legacy_fingerprint_matches: true,
+        durable_exact_fingerprint_v2: Some("placeholder-v2-fingerprint".to_string()),
+        recomputed_exact_fingerprint_v2: Some("placeholder-v2-fingerprint".to_string()),
+        exact_fingerprint_v2_matches: true,
         registry_enabled: true,
         plugin_instantiable: true,
         timeframe_matches: true,
@@ -450,7 +459,6 @@ fn placeholder_evidence() -> SelectionCandidateEvidence {
         evidence_review_id: None,
         evidence_scanner_scan_id: None,
         evidence_artifact_path: None,
-        evidence_fingerprint: None,
         evidence_git_hash: None,
         promotion_transition_id: None,
         promotion_effective_at: None,
@@ -477,7 +485,6 @@ fn refused_evidence(reason: CandidateEvidenceReason) -> SelectionCandidateEviden
         | EvidenceLineageBroken
         | ArtifactPathMissing
         | DurableFingerprintMissing
-        | DurableFingerprintV2Missing
         | ArtifactRootUnavailable
         | ArtifactMissing
         | ArtifactRootEscape
@@ -488,7 +495,15 @@ fn refused_evidence(reason: CandidateEvidenceReason) -> SelectionCandidateEviden
         | ArtifactOverLimit
         | RankOutOfRange => e.evidence_resolved = false,
         ArtifactNotPaperCandidate => e.review_state_is_paper_candidate = false,
-        FingerprintMismatch | FingerprintV2Mismatch => e.fingerprint_matches = false,
+        FingerprintMismatch => e.legacy_fingerprint_matches = false,
+        // Defect 1: v2-missing and v2-mismatch are distinct causes at the
+        // pure-model gate too -- flip the exact field that produces the
+        // matching gate-stage refusal, never the coarser legacy flag.
+        DurableFingerprintV2Missing => {
+            e.durable_exact_fingerprint_v2 = None;
+            e.recomputed_exact_fingerprint_v2 = None;
+        }
+        FingerprintV2Mismatch => e.exact_fingerprint_v2_matches = false,
         ScoreMissing | ScoreNotFinite => {
             e.canonical_score_decimal = None;
             e.canonical_score_micros = None;
@@ -716,7 +731,7 @@ mod tests {
         );
         assert_eq!(
             aapl.candidates[0].exact_reason,
-            Some(mqk_portfolio::ExactSelectionReason::UnsupportedStrategyPlugin)
+            mqk_portfolio::ExactSelectionReason::UnsupportedStrategyPlugin
         );
     }
 

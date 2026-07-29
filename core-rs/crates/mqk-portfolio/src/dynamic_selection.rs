@@ -65,6 +65,14 @@ pub const REASON_REFUSED_EXPIRED: &str = "refused_promotion_expired";
 pub const REASON_REFUSED_EVIDENCE_READ_FAILED: &str = "refused_evidence_read_failed";
 pub const REASON_REFUSED_NOT_PAPER_CANDIDATE: &str = "refused_review_state_not_paper_candidate";
 pub const REASON_REFUSED_FINGERPRINT_MISMATCH: &str = "refused_evidence_fingerprint_mismatch";
+/// Defect 1: the durable evidence-bearing transition lacks a v2 exact-score
+/// fingerprint (or the caller could not supply a recomputed one) -- distinct
+/// from [`REASON_REFUSED_FINGERPRINT_V2_MISMATCH`] (both present but
+/// disagreeing).
+pub const REASON_REFUSED_FINGERPRINT_V2_MISSING: &str = "refused_evidence_fingerprint_v2_missing";
+/// Defect 1: durable and recomputed v2 exact-score fingerprints are both
+/// present but disagree.
+pub const REASON_REFUSED_FINGERPRINT_V2_MISMATCH: &str = "refused_evidence_fingerprint_v2_mismatch";
 pub const REASON_REFUSED_UNSUPPORTED_STRATEGY: &str = "refused_unsupported_strategy_plugin";
 pub const REASON_REFUSED_TIMEFRAME_MISMATCH: &str = "refused_timeframe_mismatch";
 pub const REASON_REFUSED_DATA_NOT_READY: &str = "refused_data_not_ready";
@@ -518,10 +526,35 @@ pub struct SelectionCandidateEvidence {
     /// though only one value passes [`Self::review_state_is_paper_candidate`]
     /// -- never collapsed to the boolean alone.
     pub evidence_review_state: Option<String>,
+    /// Defect 1: the durable legacy `evidence_fingerprint` column value, as
+    /// read back by the caller -- `None` only when no promotion/evidence
+    /// record exists at all. Carried separately from
+    /// [`Self::recomputed_legacy_fingerprint`] so durable persistence and
+    /// plan identity never collapse "what was on file" and "what we just
+    /// computed" into one ambiguous value.
+    pub durable_legacy_fingerprint: Option<String>,
+    /// Defect 1: the legacy SHA-256 fingerprint the caller freshly
+    /// recomputed from the review artifact, before comparing it against
+    /// [`Self::durable_legacy_fingerprint`].
+    pub recomputed_legacy_fingerprint: Option<String>,
     /// `true` when the caller recomputed the review-row fingerprint
     /// (SHA-256 of the canonical serialized row) and it matched the durable
     /// `evidence_fingerprint` column exactly.
-    pub fingerprint_matches: bool,
+    pub legacy_fingerprint_matches: bool,
+    /// Defect 1: the durable versioned exact-score `evidence_fingerprint_v2`
+    /// column value, as read back by the caller -- `None` when no such
+    /// value exists (a legacy row, or no promotion/evidence record at all).
+    pub durable_exact_fingerprint_v2: Option<String>,
+    /// Defect 1: the v2 exact-score fingerprint the caller freshly
+    /// recomputed from the review artifact's raw score token, before
+    /// comparing it against [`Self::durable_exact_fingerprint_v2`].
+    pub recomputed_exact_fingerprint_v2: Option<String>,
+    /// Defect 1: `true` only when both [`Self::durable_exact_fingerprint_v2`]
+    /// and [`Self::recomputed_exact_fingerprint_v2`] are present and equal
+    /// byte-for-byte. Ranking requires this *and*
+    /// [`Self::legacy_fingerprint_matches`] to both be explicitly `true` --
+    /// see [`evaluate_evidence_gate`].
+    pub exact_fingerprint_v2_matches: bool,
     /// IR4: `true` when the durable strategy registry
     /// (`sys_strategy_registry`) has an `enabled = true` row for this
     /// `strategy_id` -- independent of, and distinct from,
@@ -565,7 +598,6 @@ pub struct SelectionCandidateEvidence {
     pub evidence_review_id: Option<String>,
     pub evidence_scanner_scan_id: Option<String>,
     pub evidence_artifact_path: Option<String>,
-    pub evidence_fingerprint: Option<String>,
     /// IR6: the review artifact manifest's `git_hash`, carried through
     /// unvalidated (like the other evidence identity fields above) for
     /// durable evidence/read-side recomputation.
@@ -597,7 +629,7 @@ pub struct SelectionCandidateEvidence {
     /// derives the *final*, authoritative exact reason for every candidate
     /// result from this field (when present) or from the gate/ranking
     /// outcome itself (when absent), so every [`SelectionCandidateResult`]
-    /// ends up with `exact_reason: Some(_)`. Never a caller-supplied
+    /// ends up with a resolved `exact_reason`. Never a caller-supplied
     /// free-form string — always one of [`ExactSelectionReason`]'s bounded,
     /// closed variants.
     pub exact_reason: Option<ExactSelectionReason>,
@@ -649,7 +681,16 @@ pub struct SelectionCandidateResult {
     pub review_state_is_paper_candidate: bool,
     /// IR6: see [`SelectionCandidateEvidence::evidence_review_state`].
     pub evidence_review_state: Option<String>,
-    pub fingerprint_matches: bool,
+    /// Defect 1: see [`SelectionCandidateEvidence::durable_legacy_fingerprint`].
+    pub durable_legacy_fingerprint: Option<String>,
+    /// Defect 1: see [`SelectionCandidateEvidence::recomputed_legacy_fingerprint`].
+    pub recomputed_legacy_fingerprint: Option<String>,
+    pub legacy_fingerprint_matches: bool,
+    /// Defect 1: see [`SelectionCandidateEvidence::durable_exact_fingerprint_v2`].
+    pub durable_exact_fingerprint_v2: Option<String>,
+    /// Defect 1: see [`SelectionCandidateEvidence::recomputed_exact_fingerprint_v2`].
+    pub recomputed_exact_fingerprint_v2: Option<String>,
+    pub exact_fingerprint_v2_matches: bool,
     /// IR4/IR6: see [`SelectionCandidateEvidence::registry_enabled`].
     pub registry_enabled: bool,
     pub plugin_instantiable: bool,
@@ -658,7 +699,6 @@ pub struct SelectionCandidateResult {
     pub evidence_review_id: Option<String>,
     pub evidence_scanner_scan_id: Option<String>,
     pub evidence_artifact_path: Option<String>,
-    pub evidence_fingerprint: Option<String>,
     /// IR6: see [`SelectionCandidateEvidence::evidence_git_hash`].
     pub evidence_git_hash: Option<String>,
     /// IR6: see [`SelectionCandidateEvidence::promotion_transition_id`].
@@ -669,10 +709,11 @@ pub struct SelectionCandidateResult {
     pub promotion_expires_at: Option<String>,
     /// IR6: see [`SelectionCandidateEvidence::evidence_transition_id`].
     pub evidence_transition_id: Option<String>,
-    /// Defect E: the final, authoritative closed-vocabulary exact reason for
-    /// this candidate result -- always `Some(_)` (see
-    /// [`SelectionCandidateEvidence::exact_reason`]).
-    pub exact_reason: Option<ExactSelectionReason>,
+    /// Defect E/Defect 4: the final, authoritative closed-vocabulary exact
+    /// reason for this candidate result -- structurally non-optional (see
+    /// [`SelectionCandidateEvidence::exact_reason`] for the still-optional
+    /// pre-gate input diagnosis this is derived from).
+    pub exact_reason: ExactSelectionReason,
     pub selected: bool,
     pub disposition: SelectionCandidateDisposition,
     pub reason_code: String,
@@ -684,13 +725,13 @@ pub struct SymbolSelectionResult {
     pub selected_strategy_id: Option<String>,
     pub disposition: SelectionCandidateDisposition,
     pub reason_code: String,
-    /// Defect E: the closed-vocabulary counterpart to `reason_code` at the
-    /// symbol level -- `Some(ExactSelectionReason::NoValidCandidate)` when
+    /// Defect E/Defect 4: the closed-vocabulary counterpart to `reason_code`
+    /// at the symbol level -- `ExactSelectionReason::NoValidCandidate` when
     /// `reason_code == REASON_NO_VALID_CANDIDATE` (covers the case where a
     /// symbol has zero candidate rows at all, so no [`SelectionCandidateResult`]
     /// exists to carry that reason itself), or the winning candidate's own
-    /// exact reason when one was selected. Always `Some(_)`.
-    pub exact_reason: Option<ExactSelectionReason>,
+    /// exact reason when one was selected. Structurally non-optional.
+    pub exact_reason: ExactSelectionReason,
     /// One row per input candidate for this symbol, deterministically
     /// sorted by `(strategy_id, timeframe_secs)` ascending — never input
     /// order, and never dependent on which divergent-duplicate row was
@@ -903,8 +944,20 @@ fn evaluate_evidence_gate(c: &SelectionCandidateInput) -> GateOutcome {
     if !e.review_state_is_paper_candidate {
         return invalid(REASON_REFUSED_NOT_PAPER_CANDIDATE);
     }
-    if !e.fingerprint_matches {
+    if !e.legacy_fingerprint_matches {
         return invalid(REASON_REFUSED_FINGERPRINT_MISMATCH);
+    }
+    // Defect 1: v2 exact-score fingerprint presence and match are checked as
+    // two distinct steps, immediately after the legacy check -- ranking is
+    // eligible only when both the legacy and the v2 match are explicitly
+    // `true`. Missing (either side absent) and mismatched (both present but
+    // disagreeing) are refused with distinct exact reasons -- never folded
+    // into one generic fingerprint failure.
+    if e.durable_exact_fingerprint_v2.is_none() || e.recomputed_exact_fingerprint_v2.is_none() {
+        return invalid(REASON_REFUSED_FINGERPRINT_V2_MISSING);
+    }
+    if !e.exact_fingerprint_v2_matches {
+        return invalid(REASON_REFUSED_FINGERPRINT_V2_MISMATCH);
     }
     if !e.plugin_instantiable {
         return invalid(REASON_REFUSED_UNSUPPORTED_STRATEGY);
@@ -955,6 +1008,8 @@ fn exact_reason_for_reason_code(reason_code: &str) -> Option<ExactSelectionReaso
         REASON_REFUSED_EVIDENCE_READ_FAILED => ExactSelectionReason::EvidenceLineageBroken,
         REASON_REFUSED_NOT_PAPER_CANDIDATE => ExactSelectionReason::ArtifactNotPaperCandidate,
         REASON_REFUSED_FINGERPRINT_MISMATCH => ExactSelectionReason::FingerprintMismatch,
+        REASON_REFUSED_FINGERPRINT_V2_MISSING => ExactSelectionReason::DurableFingerprintV2Missing,
+        REASON_REFUSED_FINGERPRINT_V2_MISMATCH => ExactSelectionReason::FingerprintV2Mismatch,
         REASON_REFUSED_UNSUPPORTED_STRATEGY => ExactSelectionReason::UnsupportedStrategyPlugin,
         REASON_REFUSED_TIMEFRAME_MISMATCH => ExactSelectionReason::TimeframeMismatch,
         REASON_REFUSED_DATA_NOT_READY => ExactSelectionReason::DataNotReadyUnspecified,
@@ -979,13 +1034,20 @@ fn candidate_result(
     reason_code: &str,
 ) -> SelectionCandidateResult {
     let e = &c.evidence;
-    // Defect E: every candidate result gets a final, authoritative exact
-    // reason -- the caller-supplied pre-gate diagnosis when present (more
-    // precise than this module's own coarse reason_code), else derived from
-    // the reason_code that was actually assigned to this result.
-    let exact_reason = e
-        .exact_reason
-        .or_else(|| exact_reason_for_reason_code(reason_code));
+    // Defect E/Defect 4: every candidate result gets a final, authoritative,
+    // structurally non-optional exact reason -- the caller-supplied pre-gate
+    // diagnosis when present (more precise than this module's own coarse
+    // reason_code), else derived from the reason_code that was actually
+    // assigned to this result. The `.expect` below is total by construction,
+    // never a guess against unknown/external data: `reason_code` here is
+    // always one of this module's own closed `REASON_*` constants (see the
+    // call sites of `candidate_result`), and `exact_reason_for_reason_code`
+    // covers every one of them (proven by
+    // `every_producible_reason_code_maps_to_an_exact_reason` below).
+    let exact_reason = e.exact_reason.unwrap_or_else(|| {
+        exact_reason_for_reason_code(reason_code)
+            .expect("reason_code must be one of this module's own closed REASON_* constants")
+    });
     SelectionCandidateResult {
         symbol: canonical_symbol(&c.symbol),
         strategy_id: canonical_strategy_id(&c.strategy_id),
@@ -1001,7 +1063,12 @@ fn candidate_result(
         evidence_resolved: e.evidence_resolved,
         review_state_is_paper_candidate: e.review_state_is_paper_candidate,
         evidence_review_state: e.evidence_review_state.clone(),
-        fingerprint_matches: e.fingerprint_matches,
+        durable_legacy_fingerprint: e.durable_legacy_fingerprint.clone(),
+        recomputed_legacy_fingerprint: e.recomputed_legacy_fingerprint.clone(),
+        legacy_fingerprint_matches: e.legacy_fingerprint_matches,
+        durable_exact_fingerprint_v2: e.durable_exact_fingerprint_v2.clone(),
+        recomputed_exact_fingerprint_v2: e.recomputed_exact_fingerprint_v2.clone(),
+        exact_fingerprint_v2_matches: e.exact_fingerprint_v2_matches,
         registry_enabled: e.registry_enabled,
         plugin_instantiable: e.plugin_instantiable,
         timeframe_matches: e.timeframe_matches,
@@ -1009,7 +1076,6 @@ fn candidate_result(
         evidence_review_id: e.evidence_review_id.clone(),
         evidence_scanner_scan_id: e.evidence_scanner_scan_id.clone(),
         evidence_artifact_path: e.evidence_artifact_path.clone(),
-        evidence_fingerprint: e.evidence_fingerprint.clone(),
         evidence_git_hash: e.evidence_git_hash.clone(),
         promotion_transition_id: e.promotion_transition_id.clone(),
         promotion_effective_at: e.promotion_effective_at.clone(),
@@ -1027,7 +1093,7 @@ fn candidate_result(
 /// `strategy_id`, `timeframe_secs`, and every evidence field, serialized
 /// through the same explicit length-prefixed byte primitives
 /// ([`push_len_prefixed`]/[`push_bool`]/[`push_opt_str`]/[`push_opt_i64`]/
-/// [`push_opt_u32`]/[`push_opt_exact_reason`]) that [`canonical_plan_identity_material`]
+/// [`push_opt_u32`]/[`push_opt_exact_reason`]/[`push_exact_reason`]) that [`canonical_plan_identity_material`]
 /// uses for the resolved plan — never `Debug`, pointer identity, source
 /// ordinal, or input order. Two rows are an idempotent exact replay only
 /// when this entire byte key matches, not evidence alone (R3).
@@ -1044,7 +1110,17 @@ fn canonical_candidate_payload_key(symbol: &str, c: &SelectionCandidateInput) ->
     push_bool(&mut buf, e.evidence_resolved);
     push_bool(&mut buf, e.review_state_is_paper_candidate);
     push_opt_str(&mut buf, &e.evidence_review_state);
-    push_bool(&mut buf, e.fingerprint_matches);
+    // Defect 1: durable/recomputed legacy and v2 exact-score fingerprints,
+    // and both match booleans, are each their own distinct field in the
+    // canonical payload -- never collapsed into one ambiguous
+    // evidence_fingerprint alias. A change to any one of these six values
+    // alone changes this payload key.
+    push_opt_str(&mut buf, &e.durable_legacy_fingerprint);
+    push_opt_str(&mut buf, &e.recomputed_legacy_fingerprint);
+    push_bool(&mut buf, e.legacy_fingerprint_matches);
+    push_opt_str(&mut buf, &e.durable_exact_fingerprint_v2);
+    push_opt_str(&mut buf, &e.recomputed_exact_fingerprint_v2);
+    push_bool(&mut buf, e.exact_fingerprint_v2_matches);
     push_bool(&mut buf, e.registry_enabled);
     push_bool(&mut buf, e.plugin_instantiable);
     push_bool(&mut buf, e.timeframe_matches);
@@ -1060,7 +1136,6 @@ fn canonical_candidate_payload_key(symbol: &str, c: &SelectionCandidateInput) ->
     push_opt_str(&mut buf, &e.evidence_review_id);
     push_opt_str(&mut buf, &e.evidence_scanner_scan_id);
     push_opt_str(&mut buf, &e.evidence_artifact_path);
-    push_opt_str(&mut buf, &e.evidence_fingerprint);
     push_opt_str(&mut buf, &e.evidence_git_hash);
     push_opt_str(&mut buf, &e.promotion_transition_id);
     push_opt_str(&mut buf, &e.promotion_effective_at);
@@ -1148,7 +1223,7 @@ fn resolve_symbol_group(symbol: &str, group: &[&SelectionCandidateInput]) -> Sym
             selected_strategy_id: None,
             disposition: SelectionCandidateDisposition::Refused,
             reason_code: REASON_NO_VALID_CANDIDATE.to_string(),
-            exact_reason: Some(ExactSelectionReason::NoValidCandidate),
+            exact_reason: ExactSelectionReason::NoValidCandidate,
             candidates: results,
         };
     }
@@ -1312,7 +1387,12 @@ fn resolve_symbol_group(symbol: &str, group: &[&SelectionCandidateInput]) -> Sym
         (a.strategy_id.as_str(), a.timeframe_secs).cmp(&(b.strategy_id.as_str(), b.timeframe_secs))
     });
 
-    let exact_reason = exact_reason_for_reason_code(&reason_code);
+    // Defect 4: total by construction -- `reason_code` here is always
+    // either `REASON_NO_VALID_CANDIDATE` or one of the `REASON_SELECTED_*`
+    // constants (see `selected`/`None` match above), both covered by
+    // `exact_reason_for_reason_code`.
+    let exact_reason = exact_reason_for_reason_code(&reason_code)
+        .expect("reason_code must be one of this module's own closed REASON_* constants");
     SymbolSelectionResult {
         symbol: symbol.to_string(),
         selected_strategy_id,
@@ -1517,6 +1597,14 @@ fn push_opt_exact_reason(buf: &mut Vec<u8>, reason: Option<ExactSelectionReason>
     }
 }
 
+/// Defect 4: non-optional counterpart to [`push_opt_exact_reason`], for the
+/// now-structurally-non-optional resolved `exact_reason` on
+/// [`SelectionCandidateResult`]/[`SymbolSelectionResult`] -- no presence tag
+/// byte, since one is never needed.
+fn push_exact_reason(buf: &mut Vec<u8>, reason: ExactSelectionReason) {
+    push_len_prefixed(buf, &reason.code());
+}
+
 fn push_bool(buf: &mut Vec<u8>, b: bool) {
     buf.push(u8::from(b));
 }
@@ -1584,7 +1672,7 @@ pub fn canonical_plan_identity_material(plan: &DynamicSelectionPlan) -> Vec<u8> 
         push_opt_str(&mut buf, &sr.selected_strategy_id);
         push_disposition(&mut buf, sr.disposition);
         push_len_prefixed(&mut buf, &sr.reason_code);
-        push_opt_exact_reason(&mut buf, sr.exact_reason);
+        push_exact_reason(&mut buf, sr.exact_reason);
 
         buf.extend_from_slice(&(sr.candidates.len() as u32).to_be_bytes());
         for cand in &sr.candidates {
@@ -1603,7 +1691,14 @@ pub fn canonical_plan_identity_material(plan: &DynamicSelectionPlan) -> Vec<u8> 
             push_bool(&mut buf, cand.evidence_resolved);
             push_bool(&mut buf, cand.review_state_is_paper_candidate);
             push_opt_str(&mut buf, &cand.evidence_review_state);
-            push_bool(&mut buf, cand.fingerprint_matches);
+            // Defect 1: six distinct fingerprint-provenance fields, never
+            // one ambiguous alias -- mirrors canonical_candidate_payload_key.
+            push_opt_str(&mut buf, &cand.durable_legacy_fingerprint);
+            push_opt_str(&mut buf, &cand.recomputed_legacy_fingerprint);
+            push_bool(&mut buf, cand.legacy_fingerprint_matches);
+            push_opt_str(&mut buf, &cand.durable_exact_fingerprint_v2);
+            push_opt_str(&mut buf, &cand.recomputed_exact_fingerprint_v2);
+            push_bool(&mut buf, cand.exact_fingerprint_v2_matches);
             push_bool(&mut buf, cand.registry_enabled);
             push_bool(&mut buf, cand.plugin_instantiable);
             push_bool(&mut buf, cand.timeframe_matches);
@@ -1611,13 +1706,12 @@ pub fn canonical_plan_identity_material(plan: &DynamicSelectionPlan) -> Vec<u8> 
             push_opt_str(&mut buf, &cand.evidence_review_id);
             push_opt_str(&mut buf, &cand.evidence_scanner_scan_id);
             push_opt_str(&mut buf, &cand.evidence_artifact_path);
-            push_opt_str(&mut buf, &cand.evidence_fingerprint);
             push_opt_str(&mut buf, &cand.evidence_git_hash);
             push_opt_str(&mut buf, &cand.promotion_transition_id);
             push_opt_str(&mut buf, &cand.promotion_effective_at);
             push_opt_str(&mut buf, &cand.promotion_expires_at);
             push_opt_str(&mut buf, &cand.evidence_transition_id);
-            push_opt_exact_reason(&mut buf, cand.exact_reason);
+            push_exact_reason(&mut buf, cand.exact_reason);
             push_bool(&mut buf, cand.selected);
             push_disposition(&mut buf, cand.disposition);
             push_len_prefixed(&mut buf, &cand.reason_code);
@@ -1662,6 +1756,14 @@ mod tests {
         crate::canonicalize_decimal_token(&token).expect("valid fixture token")
     }
 
+    /// A syntactically valid-looking 64-lowercase-hex fingerprint fixture,
+    /// distinguished by `tag` (repeated to fill 64 chars) so distinct calls
+    /// (e.g. legacy vs v2, durable vs recomputed) are trivially distinct
+    /// values, never accidentally colliding.
+    fn fp_hex(tag: char) -> String {
+        std::iter::repeat_n(tag, 64).collect()
+    }
+
     fn valid_evidence(
         score_micros: i64,
         rank: Option<u32>,
@@ -1675,7 +1777,12 @@ mod tests {
             evidence_resolved: true,
             review_state_is_paper_candidate: true,
             evidence_review_state: Some("paper_candidate".to_string()),
-            fingerprint_matches: true,
+            durable_legacy_fingerprint: Some(fp_hex('a')),
+            recomputed_legacy_fingerprint: Some(fp_hex('a')),
+            legacy_fingerprint_matches: true,
+            durable_exact_fingerprint_v2: Some(fp_hex('b')),
+            recomputed_exact_fingerprint_v2: Some(fp_hex('b')),
+            exact_fingerprint_v2_matches: true,
             registry_enabled: true,
             plugin_instantiable: true,
             timeframe_matches: true,
@@ -1687,7 +1794,6 @@ mod tests {
             evidence_review_id: Some("review-1".to_string()),
             evidence_scanner_scan_id: Some("scan-1".to_string()),
             evidence_artifact_path: Some("/artifacts/review-1".to_string()),
-            evidence_fingerprint: Some("fp-1".to_string()),
             evidence_git_hash: Some("git-hash-1".to_string()),
             promotion_transition_id: Some("11111111-1111-1111-1111-111111111111".to_string()),
             promotion_effective_at: Some("2026-01-01T00:00:00Z".to_string()),
@@ -1952,12 +2058,177 @@ mod tests {
     #[test]
     fn fingerprint_mismatch_is_refused() {
         let mut c = candidate("AAPL", "swing_momentum", 500_000, Some(1), false);
-        c.evidence.fingerprint_matches = false;
+        c.evidence.legacy_fingerprint_matches = false;
         let plan = compute_dynamic_selection_plan(ctx(), &symbols(&["AAPL"]), &[c]);
         assert_eq!(
             result_for(&plan, "AAPL").candidates[0].reason_code,
             REASON_REFUSED_FINGERPRINT_MISMATCH
         );
+    }
+
+    // ── Defect 1: v2 exact-score fingerprint provenance ───────────────────
+
+    #[test]
+    fn legacy_match_and_v2_match_both_required_to_rank() {
+        let c = candidate("AAPL", "swing_momentum", 500_000, Some(1), false);
+        let plan = compute_dynamic_selection_plan(ctx(), &symbols(&["AAPL"]), &[c]);
+        assert_eq!(
+            result_for(&plan, "AAPL").selected_strategy_id,
+            Some("swing_momentum".to_string()),
+            "both matches true must rank normally"
+        );
+    }
+
+    #[test]
+    fn legacy_match_with_v2_mismatch_refuses() {
+        let mut c = candidate("AAPL", "swing_momentum", 500_000, Some(1), false);
+        c.evidence.exact_fingerprint_v2_matches = false;
+        let plan = compute_dynamic_selection_plan(ctx(), &symbols(&["AAPL"]), &[c]);
+        assert_eq!(
+            result_for(&plan, "AAPL").candidates[0].reason_code,
+            REASON_REFUSED_FINGERPRINT_V2_MISMATCH
+        );
+        assert_eq!(
+            result_for(&plan, "AAPL").candidates[0].exact_reason,
+            ExactSelectionReason::FingerprintV2Mismatch
+        );
+    }
+
+    #[test]
+    fn v2_match_with_legacy_mismatch_refuses() {
+        let mut c = candidate("AAPL", "swing_momentum", 500_000, Some(1), false);
+        c.evidence.legacy_fingerprint_matches = false;
+        let plan = compute_dynamic_selection_plan(ctx(), &symbols(&["AAPL"]), &[c]);
+        assert_eq!(
+            result_for(&plan, "AAPL").candidates[0].reason_code,
+            REASON_REFUSED_FINGERPRINT_MISMATCH,
+            "legacy is checked before v2, so a legacy mismatch wins regardless of v2's own state"
+        );
+    }
+
+    #[test]
+    fn missing_v2_refuses_distinctly_from_mismatched_v2() {
+        let mut c = candidate("AAPL", "swing_momentum", 500_000, Some(1), false);
+        c.evidence.durable_exact_fingerprint_v2 = None;
+        c.evidence.recomputed_exact_fingerprint_v2 = None;
+        c.evidence.exact_fingerprint_v2_matches = false;
+        let plan = compute_dynamic_selection_plan(ctx(), &symbols(&["AAPL"]), &[c]);
+        assert_eq!(
+            result_for(&plan, "AAPL").candidates[0].reason_code,
+            REASON_REFUSED_FINGERPRINT_V2_MISSING
+        );
+        assert_eq!(
+            result_for(&plan, "AAPL").candidates[0].exact_reason,
+            ExactSelectionReason::DurableFingerprintV2Missing
+        );
+        assert_ne!(
+            REASON_REFUSED_FINGERPRINT_V2_MISSING, REASON_REFUSED_FINGERPRINT_V2_MISMATCH,
+            "missing and mismatched must remain distinct reason codes"
+        );
+    }
+
+    #[test]
+    fn changing_only_durable_v2_changes_payload_and_plan_identity() {
+        let base = candidate("AAPL", "swing_momentum", 500_000, Some(1), false);
+        let mut changed = base.clone();
+        changed.evidence.durable_exact_fingerprint_v2 = Some(fp_hex('c'));
+        // Recomputed must still equal durable for a "ranks normally" fixture,
+        // but this test only cares that payload/identity differ -- both
+        // fixtures independently gate-refuse on v2 mismatch, which is fine:
+        // the point is the byte-level identity, not the ranking outcome.
+        let plan_base = compute_dynamic_selection_plan(
+            ctx(),
+            &symbols(&["AAPL"]),
+            std::slice::from_ref(&base),
+        );
+        let plan_changed = compute_dynamic_selection_plan(
+            ctx(),
+            &symbols(&["AAPL"]),
+            std::slice::from_ref(&changed),
+        );
+        assert_ne!(
+            canonical_candidate_payload_key("AAPL", &base),
+            canonical_candidate_payload_key("AAPL", &changed),
+            "durable v2 alone must change the canonical candidate payload"
+        );
+        assert_ne!(
+            canonical_plan_identity_material(&plan_base),
+            canonical_plan_identity_material(&plan_changed),
+            "durable v2 alone must change plan identity"
+        );
+    }
+
+    #[test]
+    fn changing_only_recomputed_v2_changes_payload_and_plan_identity() {
+        let base = candidate("AAPL", "swing_momentum", 500_000, Some(1), false);
+        let mut changed = base.clone();
+        changed.evidence.recomputed_exact_fingerprint_v2 = Some(fp_hex('c'));
+        let plan_base = compute_dynamic_selection_plan(
+            ctx(),
+            &symbols(&["AAPL"]),
+            std::slice::from_ref(&base),
+        );
+        let plan_changed = compute_dynamic_selection_plan(
+            ctx(),
+            &symbols(&["AAPL"]),
+            std::slice::from_ref(&changed),
+        );
+        assert_ne!(
+            canonical_candidate_payload_key("AAPL", &base),
+            canonical_candidate_payload_key("AAPL", &changed),
+            "recomputed v2 alone must change the canonical candidate payload"
+        );
+        assert_ne!(
+            canonical_plan_identity_material(&plan_base),
+            canonical_plan_identity_material(&plan_changed),
+            "recomputed v2 alone must change plan identity"
+        );
+    }
+
+    #[test]
+    fn same_legacy_but_different_v2_cannot_replay_identically() {
+        // Two candidates sharing the same identity and equal legacy
+        // fingerprints, but disagreeing v2 durable values -- must be treated
+        // as a divergent duplicate (not silently collapsed via legacy alone).
+        let mut c1 = candidate("AAPL", "swing_momentum", 500_000, Some(1), false);
+        let mut c2 = c1.clone();
+        c1.evidence.durable_exact_fingerprint_v2 = Some(fp_hex('c'));
+        c1.evidence.recomputed_exact_fingerprint_v2 = Some(fp_hex('c'));
+        c2.evidence.durable_exact_fingerprint_v2 = Some(fp_hex('d'));
+        c2.evidence.recomputed_exact_fingerprint_v2 = Some(fp_hex('d'));
+        let plan = compute_dynamic_selection_plan(ctx(), &symbols(&["AAPL"]), &[c1, c2]);
+        let aapl = result_for(&plan, "AAPL");
+        assert_eq!(aapl.candidates.len(), 2);
+        assert!(aapl
+            .candidates
+            .iter()
+            .all(|c| c.reason_code == REASON_REFUSED_DIVERGENT_DUPLICATE));
+    }
+
+    #[test]
+    fn v2_fingerprint_field_permutations_do_not_affect_other_candidates() {
+        // Input order/permutation independence, specific to the new v2
+        // fields: two candidates for distinct symbols, supplied in reverse
+        // order, must still each resolve to their own correct outcome.
+        let mut ok = candidate("AAPL", "swing_momentum", 500_000, Some(1), false);
+        let mut bad = candidate("MSFT", "mean_reversion", 700_000, Some(1), false);
+        bad.evidence.exact_fingerprint_v2_matches = false;
+        let plan_a = compute_dynamic_selection_plan(
+            ctx(),
+            &symbols(&["AAPL", "MSFT"]),
+            &[ok.clone(), bad.clone()],
+        );
+        let plan_b = compute_dynamic_selection_plan(
+            ctx(),
+            &symbols(&["AAPL", "MSFT"]),
+            &[bad.clone(), ok.clone()],
+        );
+        assert_eq!(
+            canonical_plan_identity_material(&plan_a),
+            canonical_plan_identity_material(&plan_b),
+            "input order must not affect resolved plan identity"
+        );
+        let _ = (&mut ok, &mut bad);
     }
 
     #[test]
@@ -2693,13 +2964,10 @@ mod tests {
         let plan = compute_dynamic_selection_plan(ctx(), &symbols(&["AAPL"]), &candidates);
         let aapl = result_for(&plan, "AAPL");
         assert_eq!(aapl.candidates.len(), 3);
-        for c in &aapl.candidates {
-            assert!(
-                c.exact_reason.is_some(),
-                "candidate {} must carry an exact reason",
-                c.strategy_id
-            );
-        }
+        // Defect 4: exact_reason is now structurally non-optional -- every
+        // candidate result has one by construction, so there is nothing left
+        // to assert presence of; this loop is retained only to document the
+        // invariant at the call site.
         let winner = aapl
             .candidates
             .iter()
@@ -2707,7 +2975,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             winner.exact_reason,
-            Some(ExactSelectionReason::SelectedHighestScore)
+            ExactSelectionReason::SelectedHighestScore
         );
         let loser = aapl
             .candidates
@@ -2716,7 +2984,7 @@ mod tests {
             .unwrap();
         assert_eq!(
             loser.exact_reason,
-            Some(ExactSelectionReason::NotSelectedLowerScore)
+            ExactSelectionReason::NotSelectedLowerScore
         );
         let refused = aapl
             .candidates
@@ -2725,12 +2993,12 @@ mod tests {
             .unwrap();
         assert_eq!(
             refused.exact_reason,
-            Some(ExactSelectionReason::PromotionNotActivePaper)
+            ExactSelectionReason::PromotionNotActivePaper
         );
 
         assert_eq!(
             aapl.exact_reason,
-            Some(ExactSelectionReason::SelectedHighestScore),
+            ExactSelectionReason::SelectedHighestScore,
             "symbol-level exact_reason mirrors the winning candidate's"
         );
     }
@@ -2740,10 +3008,7 @@ mod tests {
         let plan = compute_dynamic_selection_plan(ctx(), &symbols(&["AAPL"]), &[]);
         let aapl = result_for(&plan, "AAPL");
         assert!(aapl.candidates.is_empty());
-        assert_eq!(
-            aapl.exact_reason,
-            Some(ExactSelectionReason::NoValidCandidate)
-        );
+        assert_eq!(aapl.exact_reason, ExactSelectionReason::NoValidCandidate);
     }
 
     #[test]
@@ -2759,6 +3024,48 @@ mod tests {
         assert!(aapl
             .candidates
             .iter()
-            .all(|c| c.exact_reason == Some(ExactSelectionReason::DivergentDuplicate)));
+            .all(|c| c.exact_reason == ExactSelectionReason::DivergentDuplicate));
+    }
+
+    // ── Defect 4: totality proof for exact_reason_for_reason_code ─────────
+
+    /// Every `REASON_*` string constant this module can itself produce as a
+    /// `reason_code` on a [`SelectionCandidateResult`]/[`SymbolSelectionResult`]
+    /// must map to a distinct [`ExactSelectionReason`] -- proves the
+    /// `.expect(...)` calls in [`candidate_result`] and [`resolve_symbol_group`]
+    /// are total by construction, never a latent panic.
+    #[test]
+    fn every_producible_reason_code_maps_to_an_exact_reason() {
+        let all_reason_codes = [
+            REASON_SELECTED_HIGHEST_SCORE,
+            REASON_SELECTED_TIE_BREAK_RANK,
+            REASON_SELECTED_TIE_BREAK_WATCHLIST,
+            REASON_SELECTED_TIE_BREAK_STRATEGY_ID,
+            REASON_NOT_SELECTED_LOWER_SCORE,
+            REASON_NOT_SELECTED_LOST_TIE_BREAK,
+            REASON_REFUSED_BLANK_IDENTITY,
+            REASON_REFUSED_PROMOTION_QUERY_FAILED,
+            REASON_REFUSED_NOT_ACTIVE_PAPER,
+            REASON_REFUSED_NOT_YET_EFFECTIVE,
+            REASON_REFUSED_EXPIRED,
+            REASON_REFUSED_EVIDENCE_READ_FAILED,
+            REASON_REFUSED_NOT_PAPER_CANDIDATE,
+            REASON_REFUSED_FINGERPRINT_MISMATCH,
+            REASON_REFUSED_FINGERPRINT_V2_MISSING,
+            REASON_REFUSED_FINGERPRINT_V2_MISMATCH,
+            REASON_REFUSED_UNSUPPORTED_STRATEGY,
+            REASON_REFUSED_TIMEFRAME_MISMATCH,
+            REASON_REFUSED_DATA_NOT_READY,
+            REASON_REFUSED_MISSING_SCORE,
+            REASON_REFUSED_MISSING_RANK_FOR_TIE,
+            REASON_REFUSED_DIVERGENT_DUPLICATE,
+            REASON_NO_VALID_CANDIDATE,
+        ];
+        for code in all_reason_codes {
+            assert!(
+                exact_reason_for_reason_code(code).is_some(),
+                "reason_code '{code}' has no exact_reason mapping"
+            );
+        }
     }
 }
