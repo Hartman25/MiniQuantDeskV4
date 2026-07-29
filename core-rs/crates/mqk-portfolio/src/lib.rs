@@ -56,9 +56,10 @@ pub use dynamic_selection::{
     canonical_plan_identity_material, canonical_symbol as dynamic_selection_canonical_symbol,
     compute_dynamic_selection_plan, verify_plan_selection_coherence,
     verify_symbol_selection_coherence, DynamicSelectionContext, DynamicSelectionMode,
-    DynamicSelectionPlan, SelectionCandidateDisposition, SelectionCandidateEvidence,
-    SelectionCandidateInput, SelectionCandidateResult, SelectionCoherenceViolation,
-    SymbolSelectionResult, DYNAMIC_SELECTION_SCHEMA_VERSION, MAX_CANDIDATE_PAIRS,
+    DynamicSelectionPlan, ExactSelectionReason, ReadinessBlockerReason,
+    SelectionCandidateDisposition, SelectionCandidateEvidence, SelectionCandidateInput,
+    SelectionCandidateResult, SelectionCoherenceViolation, SymbolSelectionResult,
+    DYNAMIC_SELECTION_SCHEMA_VERSION, MAX_CANDIDATE_PAIRS,
     MAX_ELIGIBLE_SYMBOLS, MAX_STRATEGY_UNIVERSE, REASON_NOT_SELECTED_LOST_TIE_BREAK,
     REASON_NOT_SELECTED_LOWER_SCORE,
     REASON_NO_VALID_CANDIDATE as DYNAMIC_SELECTION_REASON_NO_VALID_CANDIDATE,
@@ -75,7 +76,7 @@ pub use dynamic_selection::{
     TRUTH_STATE_CANDIDATES_OVER_LIMIT, TRUTH_STATE_CANDIDATE_OUTSIDE_ELIGIBLE_SET,
     TRUTH_STATE_COMPUTED as DYNAMIC_SELECTION_TRUTH_STATE_COMPUTED,
     TRUTH_STATE_DUPLICATE_ELIGIBLE_SYMBOL, TRUTH_STATE_ELIGIBLE_SYMBOLS_OVER_LIMIT,
-    TRUTH_STATE_NO_ELIGIBLE_SYMBOLS,
+    TRUTH_STATE_NO_ELIGIBLE_SYMBOLS, TRUTH_STATE_SYMBOL_CANDIDATES_OVER_LIMIT,
 };
 
 // MULTI-STRATEGY-CONFLICT-POLICY-01 Phase A: pure conflict-resolution model,

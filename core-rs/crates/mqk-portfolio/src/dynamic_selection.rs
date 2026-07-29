@@ -81,10 +81,307 @@ pub const TRUTH_STATE_ELIGIBLE_SYMBOLS_OVER_LIMIT: &str = "fail_closed_eligible_
 pub const TRUTH_STATE_CANDIDATES_OVER_LIMIT: &str = "fail_closed_candidates_over_limit";
 pub const TRUTH_STATE_CANDIDATE_OUTSIDE_ELIGIBLE_SET: &str =
     "fail_closed_candidate_outside_eligible_set";
+/// Defect F: a single symbol's candidate rows exceed [`MAX_STRATEGY_UNIVERSE`]
+/// -- distinct from [`TRUTH_STATE_CANDIDATES_OVER_LIMIT`] (the *total* pairs
+/// bound across every symbol), since a single symbol can locally exceed the
+/// per-symbol universe size while the plan-wide total still sits under
+/// [`MAX_CANDIDATE_PAIRS`].
+pub const TRUTH_STATE_SYMBOL_CANDIDATES_OVER_LIMIT: &str =
+    "fail_closed_symbol_candidates_over_limit";
 
 /// Frozen pure-model schema version, carried through into durable evidence
 /// and into the caller-minted `plan_id` derivation recipe.
 pub const DYNAMIC_SELECTION_SCHEMA_VERSION: &str = "dynamic-strategy-symbol-selection-v1";
+
+// ---------------------------------------------------------------------------
+// Defect E — closed, persistable exact-reason vocabulary
+// ---------------------------------------------------------------------------
+//
+// [`SelectionCandidateEvidence::exact_reason`] used to be a bare
+// `Option<&'static str>` -- a caller-owned string that carried no closed-set
+// guarantee of its own and could not round-trip through a `code()`/
+// `parse_code()` pair. [`ExactSelectionReason`] is the single closed,
+// bounded, persistable vocabulary every candidate result's exact reason is
+// now drawn from -- covering registry/plugin/spec/timeframe failures,
+// promotion/evidence/artifact/fingerprint failures (including the v2 exact-
+// score fingerprint), score/rank failures, every daily-readiness blocker
+// category candidate evaluation can observe, divergent duplicates,
+// lower-score/tie-break nonselection, every selected reason, and
+// no-valid-candidate. `parse_code` returns `None` for any string outside
+// this closed set -- an unrecognized persisted code must fail closed, never
+// silently resolve to a guessed variant.
+
+/// The closed vocabulary of daily-data-readiness blocker categories a
+/// candidate evaluation can observe (mirrors `mqk-daemon`'s
+/// `daily_data_readiness::REASON_*` constants -- this zero-dependency crate
+/// cannot import `mqk-daemon`, so the vocabulary is duplicated here and must
+/// stay numerically/textually identical to that module's `&'static str`
+/// constants).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ReadinessBlockerReason {
+    RequiredAssignmentsMissing,
+    AssignmentResolutionFailed,
+    RuntimeStrategyAssignmentMismatch,
+    RuntimeStrategySymbolBindingMismatch,
+    RuntimeStrategyTimeframeMismatch,
+    StrategyRequirementUnknown,
+    AssetClassUnknown,
+    ProviderProvenanceInvalid,
+    ProviderSymbolMismatch,
+    ProviderIdMismatch,
+    ProviderUnknown,
+    ProviderIngestTimeFuture,
+    ProviderDisabled,
+    ProviderCapabilityMismatch,
+    ProviderTimestampConventionUnverified,
+    CalendarUnavailable,
+    UnsupportedTimeframe,
+    UnsupportedIntradayContinuity,
+    MarketDataMissing,
+    InsufficientHistory,
+    DuplicateTimestamp,
+    InteriorGap,
+    LatestBarFuture,
+    ExpectedLatestBarMissing,
+}
+
+impl ReadinessBlockerReason {
+    pub fn code(&self) -> &'static str {
+        match self {
+            Self::RequiredAssignmentsMissing => "required_assignments_missing",
+            Self::AssignmentResolutionFailed => "assignment_resolution_failed",
+            Self::RuntimeStrategyAssignmentMismatch => "runtime_strategy_assignment_mismatch",
+            Self::RuntimeStrategySymbolBindingMismatch => {
+                "runtime_strategy_symbol_binding_mismatch"
+            }
+            Self::RuntimeStrategyTimeframeMismatch => "runtime_strategy_timeframe_mismatch",
+            Self::StrategyRequirementUnknown => "strategy_requirement_unknown",
+            Self::AssetClassUnknown => "asset_class_unknown",
+            Self::ProviderProvenanceInvalid => "provider_provenance_invalid",
+            Self::ProviderSymbolMismatch => "provider_symbol_mismatch",
+            Self::ProviderIdMismatch => "provider_id_mismatch",
+            Self::ProviderUnknown => "provider_unknown",
+            Self::ProviderIngestTimeFuture => "provider_ingest_time_future",
+            Self::ProviderDisabled => "provider_disabled",
+            Self::ProviderCapabilityMismatch => "provider_capability_mismatch",
+            Self::ProviderTimestampConventionUnverified => {
+                "provider_timestamp_convention_unverified"
+            }
+            Self::CalendarUnavailable => "calendar_unavailable",
+            Self::UnsupportedTimeframe => "unsupported_timeframe",
+            Self::UnsupportedIntradayContinuity => "unsupported_intraday_continuity",
+            Self::MarketDataMissing => "market_data_missing",
+            Self::InsufficientHistory => "insufficient_history",
+            Self::DuplicateTimestamp => "duplicate_timestamp",
+            Self::InteriorGap => "interior_gap",
+            Self::LatestBarFuture => "latest_bar_future",
+            Self::ExpectedLatestBarMissing => "expected_latest_bar_missing",
+        }
+    }
+
+    pub fn parse_code(code: &str) -> Option<Self> {
+        Some(match code {
+            "required_assignments_missing" => Self::RequiredAssignmentsMissing,
+            "assignment_resolution_failed" => Self::AssignmentResolutionFailed,
+            "runtime_strategy_assignment_mismatch" => Self::RuntimeStrategyAssignmentMismatch,
+            "runtime_strategy_symbol_binding_mismatch" => {
+                Self::RuntimeStrategySymbolBindingMismatch
+            }
+            "runtime_strategy_timeframe_mismatch" => Self::RuntimeStrategyTimeframeMismatch,
+            "strategy_requirement_unknown" => Self::StrategyRequirementUnknown,
+            "asset_class_unknown" => Self::AssetClassUnknown,
+            "provider_provenance_invalid" => Self::ProviderProvenanceInvalid,
+            "provider_symbol_mismatch" => Self::ProviderSymbolMismatch,
+            "provider_id_mismatch" => Self::ProviderIdMismatch,
+            "provider_unknown" => Self::ProviderUnknown,
+            "provider_ingest_time_future" => Self::ProviderIngestTimeFuture,
+            "provider_disabled" => Self::ProviderDisabled,
+            "provider_capability_mismatch" => Self::ProviderCapabilityMismatch,
+            "provider_timestamp_convention_unverified" => {
+                Self::ProviderTimestampConventionUnverified
+            }
+            "calendar_unavailable" => Self::CalendarUnavailable,
+            "unsupported_timeframe" => Self::UnsupportedTimeframe,
+            "unsupported_intraday_continuity" => Self::UnsupportedIntradayContinuity,
+            "market_data_missing" => Self::MarketDataMissing,
+            "insufficient_history" => Self::InsufficientHistory,
+            "duplicate_timestamp" => Self::DuplicateTimestamp,
+            "interior_gap" => Self::InteriorGap,
+            "latest_bar_future" => Self::LatestBarFuture,
+            "expected_latest_bar_missing" => Self::ExpectedLatestBarMissing,
+            _ => return None,
+        })
+    }
+}
+
+/// The single closed, bounded, persistable exact-reason vocabulary for one
+/// candidate (or symbol) result. See module docs above.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExactSelectionReason {
+    // -- registry/plugin/spec/timeframe --
+    RegistryQueryFailed,
+    RegistryRowMissing,
+    RegistryDisabled,
+    UnsupportedStrategyPlugin,
+    RegistryConstructionFailed,
+    TimeframeMismatch,
+    // -- structural identity --
+    BlankIdentity,
+    // -- promotion/evidence/artifact/fingerprint (incl. v2) --
+    PromotionQueryFailed,
+    NoPromotionRecord,
+    PromotionNotActivePaper,
+    PromotionNotYetEffective,
+    PromotionExpired,
+    EvidenceLineageQueryFailed,
+    EvidenceLineageBroken,
+    ArtifactPathMissing,
+    DurableFingerprintMissing,
+    DurableFingerprintV2Missing,
+    ArtifactRootUnavailable,
+    ArtifactMissing,
+    ArtifactRootEscape,
+    ArtifactMalformed,
+    ArtifactDuplicateIdentity,
+    ArtifactNotPaperCandidate,
+    ArtifactNoMatchingRow,
+    ArtifactRowIdentityMismatch,
+    ArtifactOverLimit,
+    FingerprintMismatch,
+    FingerprintV2Mismatch,
+    // -- score/rank --
+    ScoreMissing,
+    ScoreNotFinite,
+    RankOutOfRange,
+    // -- daily-readiness (wraps the closed readiness-blocker vocabulary) --
+    DataNotReady(ReadinessBlockerReason),
+    /// The caller flagged `data_ready = false` but supplied no specific
+    /// readiness blocker -- honest about the gap rather than fabricating a
+    /// specific blocker it never observed.
+    DataNotReadyUnspecified,
+    // -- divergent duplicate --
+    DivergentDuplicate,
+    // -- lower-score/tie-break nonselection --
+    NotSelectedLowerScore,
+    NotSelectedLostTieBreak,
+    MissingRankRequiredForTie,
+    // -- every selected reason --
+    SelectedHighestScore,
+    SelectedTieBreakRank,
+    SelectedTieBreakWatchlist,
+    SelectedTieBreakStrategyId,
+    // -- no-valid-candidate --
+    NoValidCandidate,
+}
+
+impl ExactSelectionReason {
+    /// Stable, bounded, owned code -- `String` rather than `&'static str`
+    /// only because [`Self::DataNotReady`] composes a nested code; every
+    /// other variant returns a `'static`-backed literal wrapped in `String`.
+    pub fn code(&self) -> String {
+        match self {
+            Self::RegistryQueryFailed => "registry_query_failed".to_string(),
+            Self::RegistryRowMissing => "registry_row_missing".to_string(),
+            Self::RegistryDisabled => "registry_disabled".to_string(),
+            Self::UnsupportedStrategyPlugin => "unsupported_strategy_plugin".to_string(),
+            Self::RegistryConstructionFailed => "registry_construction_failed".to_string(),
+            Self::TimeframeMismatch => "timeframe_mismatch".to_string(),
+            Self::BlankIdentity => "blank_identity".to_string(),
+            Self::PromotionQueryFailed => "promotion_query_failed".to_string(),
+            Self::NoPromotionRecord => "no_promotion_record".to_string(),
+            Self::PromotionNotActivePaper => "promotion_not_active_paper".to_string(),
+            Self::PromotionNotYetEffective => "promotion_not_yet_effective".to_string(),
+            Self::PromotionExpired => "promotion_expired".to_string(),
+            Self::EvidenceLineageQueryFailed => "evidence_lineage_query_failed".to_string(),
+            Self::EvidenceLineageBroken => "evidence_lineage_broken".to_string(),
+            Self::ArtifactPathMissing => "artifact_path_missing".to_string(),
+            Self::DurableFingerprintMissing => "durable_fingerprint_missing".to_string(),
+            Self::DurableFingerprintV2Missing => "durable_fingerprint_v2_missing".to_string(),
+            Self::ArtifactRootUnavailable => "artifact_root_unavailable".to_string(),
+            Self::ArtifactMissing => "artifact_missing".to_string(),
+            Self::ArtifactRootEscape => "artifact_root_escape".to_string(),
+            Self::ArtifactMalformed => "artifact_malformed".to_string(),
+            Self::ArtifactDuplicateIdentity => "artifact_duplicate_identity".to_string(),
+            Self::ArtifactNotPaperCandidate => "artifact_not_paper_candidate".to_string(),
+            Self::ArtifactNoMatchingRow => "artifact_no_matching_row".to_string(),
+            Self::ArtifactRowIdentityMismatch => "artifact_row_identity_mismatch".to_string(),
+            Self::ArtifactOverLimit => "artifact_over_limit".to_string(),
+            Self::FingerprintMismatch => "fingerprint_mismatch".to_string(),
+            Self::FingerprintV2Mismatch => "fingerprint_v2_mismatch".to_string(),
+            Self::ScoreMissing => "score_missing".to_string(),
+            Self::ScoreNotFinite => "score_not_finite".to_string(),
+            Self::RankOutOfRange => "rank_out_of_range".to_string(),
+            Self::DataNotReady(blocker) => format!("data_not_ready:{}", blocker.code()),
+            Self::DataNotReadyUnspecified => "data_not_ready_unspecified".to_string(),
+            Self::DivergentDuplicate => "divergent_duplicate".to_string(),
+            Self::NotSelectedLowerScore => "not_selected_lower_score".to_string(),
+            Self::NotSelectedLostTieBreak => "not_selected_lost_tie_break".to_string(),
+            Self::MissingRankRequiredForTie => "missing_rank_required_for_tie".to_string(),
+            Self::SelectedHighestScore => "selected_highest_score".to_string(),
+            Self::SelectedTieBreakRank => "selected_tie_break_lower_rank".to_string(),
+            Self::SelectedTieBreakWatchlist => {
+                "selected_tie_break_watchlist_assignment".to_string()
+            }
+            Self::SelectedTieBreakStrategyId => {
+                "selected_tie_break_strategy_id_ascending".to_string()
+            }
+            Self::NoValidCandidate => "no_valid_candidate_for_symbol".to_string(),
+        }
+    }
+
+    /// Parse a persisted code back into a closed variant. Returns `None`
+    /// for anything outside the closed vocabulary -- an unrecognized code
+    /// must fail closed, never resolve to a guessed variant.
+    pub fn parse_code(code: &str) -> Option<Self> {
+        if let Some(blocker_code) = code.strip_prefix("data_not_ready:") {
+            return ReadinessBlockerReason::parse_code(blocker_code).map(Self::DataNotReady);
+        }
+        Some(match code {
+            "registry_query_failed" => Self::RegistryQueryFailed,
+            "registry_row_missing" => Self::RegistryRowMissing,
+            "registry_disabled" => Self::RegistryDisabled,
+            "unsupported_strategy_plugin" => Self::UnsupportedStrategyPlugin,
+            "registry_construction_failed" => Self::RegistryConstructionFailed,
+            "timeframe_mismatch" => Self::TimeframeMismatch,
+            "blank_identity" => Self::BlankIdentity,
+            "promotion_query_failed" => Self::PromotionQueryFailed,
+            "no_promotion_record" => Self::NoPromotionRecord,
+            "promotion_not_active_paper" => Self::PromotionNotActivePaper,
+            "promotion_not_yet_effective" => Self::PromotionNotYetEffective,
+            "promotion_expired" => Self::PromotionExpired,
+            "evidence_lineage_query_failed" => Self::EvidenceLineageQueryFailed,
+            "evidence_lineage_broken" => Self::EvidenceLineageBroken,
+            "artifact_path_missing" => Self::ArtifactPathMissing,
+            "durable_fingerprint_missing" => Self::DurableFingerprintMissing,
+            "durable_fingerprint_v2_missing" => Self::DurableFingerprintV2Missing,
+            "artifact_root_unavailable" => Self::ArtifactRootUnavailable,
+            "artifact_missing" => Self::ArtifactMissing,
+            "artifact_root_escape" => Self::ArtifactRootEscape,
+            "artifact_malformed" => Self::ArtifactMalformed,
+            "artifact_duplicate_identity" => Self::ArtifactDuplicateIdentity,
+            "artifact_not_paper_candidate" => Self::ArtifactNotPaperCandidate,
+            "artifact_no_matching_row" => Self::ArtifactNoMatchingRow,
+            "artifact_row_identity_mismatch" => Self::ArtifactRowIdentityMismatch,
+            "artifact_over_limit" => Self::ArtifactOverLimit,
+            "fingerprint_mismatch" => Self::FingerprintMismatch,
+            "fingerprint_v2_mismatch" => Self::FingerprintV2Mismatch,
+            "score_missing" => Self::ScoreMissing,
+            "score_not_finite" => Self::ScoreNotFinite,
+            "rank_out_of_range" => Self::RankOutOfRange,
+            "data_not_ready_unspecified" => Self::DataNotReadyUnspecified,
+            "divergent_duplicate" => Self::DivergentDuplicate,
+            "not_selected_lower_score" => Self::NotSelectedLowerScore,
+            "not_selected_lost_tie_break" => Self::NotSelectedLostTieBreak,
+            "missing_rank_required_for_tie" => Self::MissingRankRequiredForTie,
+            "selected_highest_score" => Self::SelectedHighestScore,
+            "selected_tie_break_lower_rank" => Self::SelectedTieBreakRank,
+            "selected_tie_break_watchlist_assignment" => Self::SelectedTieBreakWatchlist,
+            "selected_tie_break_strategy_id_ascending" => Self::SelectedTieBreakStrategyId,
+            "no_valid_candidate_for_symbol" => Self::NoValidCandidate,
+            _ => return None,
+        })
+    }
+}
 
 // ---------------------------------------------------------------------------
 // R7: bounds — refuse over-limit input before any expensive work
@@ -289,17 +586,21 @@ pub struct SelectionCandidateEvidence {
     /// [`Self::promotion_transition_id`] when the current `active_paper`
     /// transition inherited its evidence from an earlier transition.
     pub evidence_transition_id: Option<String>,
-    /// IR5: the precise, closed-vocabulary reason the caller observed for
-    /// this candidate's refusal (e.g. a daemon-side
-    /// `CandidateEvidenceReason::code()`), carried through even when the
-    /// pure gate's own coarse `reason_code` collapses several distinct
-    /// causes onto one boolean (see [`evaluate_evidence_gate`]). `None` for
-    /// a candidate that never reached a caller-observed failure (evidence
-    /// gate passed, or the candidate lost only at ranking). Never a
-    /// caller-supplied free-form string — always one of a bounded,
-    /// caller-owned closed vocabulary, so this module remains free of any
-    /// unbounded external text.
-    pub exact_reason: Option<&'static str>,
+    /// Defect E: the precise, closed-vocabulary reason the caller observed
+    /// for this candidate's pre-gate refusal (e.g. a daemon-side
+    /// `CandidateEvidenceReason` mapped to [`ExactSelectionReason`]), carried
+    /// through even when the pure gate's own coarse `reason_code` collapses
+    /// several distinct causes onto one boolean (see
+    /// [`evaluate_evidence_gate`]). `None` for a candidate that never
+    /// reached a caller-observed pre-gate failure -- [`candidate_result`]
+    /// (or [`resolve_symbol_group`] for a symbol-level outcome) always
+    /// derives the *final*, authoritative exact reason for every candidate
+    /// result from this field (when present) or from the gate/ranking
+    /// outcome itself (when absent), so every [`SelectionCandidateResult`]
+    /// ends up with `exact_reason: Some(_)`. Never a caller-supplied
+    /// free-form string — always one of [`ExactSelectionReason`]'s bounded,
+    /// closed variants.
+    pub exact_reason: Option<ExactSelectionReason>,
 }
 
 /// One `(symbol, strategy_id, timeframe_secs)` candidate under selection
@@ -368,8 +669,10 @@ pub struct SelectionCandidateResult {
     pub promotion_expires_at: Option<String>,
     /// IR6: see [`SelectionCandidateEvidence::evidence_transition_id`].
     pub evidence_transition_id: Option<String>,
-    /// IR5: see [`SelectionCandidateEvidence::exact_reason`].
-    pub exact_reason: Option<&'static str>,
+    /// Defect E: the final, authoritative closed-vocabulary exact reason for
+    /// this candidate result -- always `Some(_)` (see
+    /// [`SelectionCandidateEvidence::exact_reason`]).
+    pub exact_reason: Option<ExactSelectionReason>,
     pub selected: bool,
     pub disposition: SelectionCandidateDisposition,
     pub reason_code: String,
@@ -381,6 +684,13 @@ pub struct SymbolSelectionResult {
     pub selected_strategy_id: Option<String>,
     pub disposition: SelectionCandidateDisposition,
     pub reason_code: String,
+    /// Defect E: the closed-vocabulary counterpart to `reason_code` at the
+    /// symbol level -- `Some(ExactSelectionReason::NoValidCandidate)` when
+    /// `reason_code == REASON_NO_VALID_CANDIDATE` (covers the case where a
+    /// symbol has zero candidate rows at all, so no [`SelectionCandidateResult`]
+    /// exists to carry that reason itself), or the winning candidate's own
+    /// exact reason when one was selected. Always `Some(_)`.
+    pub exact_reason: Option<ExactSelectionReason>,
     /// One row per input candidate for this symbol, deterministically
     /// sorted by `(strategy_id, timeframe_secs)` ascending — never input
     /// order, and never dependent on which divergent-duplicate row was
@@ -619,6 +929,49 @@ fn evaluate_evidence_gate(c: &SelectionCandidateInput) -> GateOutcome {
     }
 }
 
+/// Defect E: map one of this module's own closed `REASON_*`/`TRUTH_STATE_*`
+/// string constants to its [`ExactSelectionReason`] counterpart -- the
+/// fallback used by [`candidate_result`] (and, at the symbol level,
+/// [`resolve_symbol_group`]) whenever the caller did not already supply a
+/// more precise `exact_reason` on the evidence itself (e.g. a hand-built
+/// fixture, or a gate/ranking outcome this module derived on its own from
+/// evidence booleans rather than a caller-observed cause). `REASON_REFUSED_NOT_ACTIVE_PAPER`
+/// maps to the more common [`ExactSelectionReason::PromotionNotActivePaper`]
+/// case -- the finer `NoPromotionRecord` distinction is only available via a
+/// caller-supplied `exact_reason`, since this gate's own coarse boolean
+/// check cannot distinguish "no record" from "wrong state" on its own.
+/// `REASON_REFUSED_DATA_NOT_READY` maps to
+/// [`ExactSelectionReason::DataNotReadyUnspecified`] for the same reason —
+/// the specific readiness blocker is only available via a caller-supplied
+/// `exact_reason`. Returns `None` for any string outside this module's own
+/// closed vocabulary — never a guess.
+fn exact_reason_for_reason_code(reason_code: &str) -> Option<ExactSelectionReason> {
+    Some(match reason_code {
+        REASON_REFUSED_BLANK_IDENTITY => ExactSelectionReason::BlankIdentity,
+        REASON_REFUSED_PROMOTION_QUERY_FAILED => ExactSelectionReason::PromotionQueryFailed,
+        REASON_REFUSED_NOT_ACTIVE_PAPER => ExactSelectionReason::PromotionNotActivePaper,
+        REASON_REFUSED_NOT_YET_EFFECTIVE => ExactSelectionReason::PromotionNotYetEffective,
+        REASON_REFUSED_EXPIRED => ExactSelectionReason::PromotionExpired,
+        REASON_REFUSED_EVIDENCE_READ_FAILED => ExactSelectionReason::EvidenceLineageBroken,
+        REASON_REFUSED_NOT_PAPER_CANDIDATE => ExactSelectionReason::ArtifactNotPaperCandidate,
+        REASON_REFUSED_FINGERPRINT_MISMATCH => ExactSelectionReason::FingerprintMismatch,
+        REASON_REFUSED_UNSUPPORTED_STRATEGY => ExactSelectionReason::UnsupportedStrategyPlugin,
+        REASON_REFUSED_TIMEFRAME_MISMATCH => ExactSelectionReason::TimeframeMismatch,
+        REASON_REFUSED_DATA_NOT_READY => ExactSelectionReason::DataNotReadyUnspecified,
+        REASON_REFUSED_MISSING_SCORE => ExactSelectionReason::ScoreMissing,
+        REASON_REFUSED_MISSING_RANK_FOR_TIE => ExactSelectionReason::MissingRankRequiredForTie,
+        REASON_REFUSED_DIVERGENT_DUPLICATE => ExactSelectionReason::DivergentDuplicate,
+        REASON_NO_VALID_CANDIDATE => ExactSelectionReason::NoValidCandidate,
+        REASON_SELECTED_HIGHEST_SCORE => ExactSelectionReason::SelectedHighestScore,
+        REASON_SELECTED_TIE_BREAK_RANK => ExactSelectionReason::SelectedTieBreakRank,
+        REASON_SELECTED_TIE_BREAK_WATCHLIST => ExactSelectionReason::SelectedTieBreakWatchlist,
+        REASON_SELECTED_TIE_BREAK_STRATEGY_ID => ExactSelectionReason::SelectedTieBreakStrategyId,
+        REASON_NOT_SELECTED_LOWER_SCORE => ExactSelectionReason::NotSelectedLowerScore,
+        REASON_NOT_SELECTED_LOST_TIE_BREAK => ExactSelectionReason::NotSelectedLostTieBreak,
+        _ => return None,
+    })
+}
+
 fn candidate_result(
     c: &SelectionCandidateInput,
     selected: bool,
@@ -626,6 +979,13 @@ fn candidate_result(
     reason_code: &str,
 ) -> SelectionCandidateResult {
     let e = &c.evidence;
+    // Defect E: every candidate result gets a final, authoritative exact
+    // reason -- the caller-supplied pre-gate diagnosis when present (more
+    // precise than this module's own coarse reason_code), else derived from
+    // the reason_code that was actually assigned to this result.
+    let exact_reason = e
+        .exact_reason
+        .or_else(|| exact_reason_for_reason_code(reason_code));
     SelectionCandidateResult {
         symbol: canonical_symbol(&c.symbol),
         strategy_id: canonical_strategy_id(&c.strategy_id),
@@ -655,7 +1015,7 @@ fn candidate_result(
         promotion_effective_at: e.promotion_effective_at.clone(),
         promotion_expires_at: e.promotion_expires_at.clone(),
         evidence_transition_id: e.evidence_transition_id.clone(),
-        exact_reason: e.exact_reason,
+        exact_reason,
         selected,
         disposition,
         reason_code: reason_code.to_string(),
@@ -667,7 +1027,7 @@ fn candidate_result(
 /// `strategy_id`, `timeframe_secs`, and every evidence field, serialized
 /// through the same explicit length-prefixed byte primitives
 /// ([`push_len_prefixed`]/[`push_bool`]/[`push_opt_str`]/[`push_opt_i64`]/
-/// [`push_opt_u32`]/[`push_opt_static_str`]) that [`canonical_plan_identity_material`]
+/// [`push_opt_u32`]/[`push_opt_exact_reason`]) that [`canonical_plan_identity_material`]
 /// uses for the resolved plan — never `Debug`, pointer identity, source
 /// ordinal, or input order. Two rows are an idempotent exact replay only
 /// when this entire byte key matches, not evidence alone (R3).
@@ -706,7 +1066,7 @@ fn canonical_candidate_payload_key(symbol: &str, c: &SelectionCandidateInput) ->
     push_opt_str(&mut buf, &e.promotion_effective_at);
     push_opt_str(&mut buf, &e.promotion_expires_at);
     push_opt_str(&mut buf, &e.evidence_transition_id);
-    push_opt_static_str(&mut buf, e.exact_reason);
+    push_opt_exact_reason(&mut buf, e.exact_reason);
     buf
 }
 
@@ -788,6 +1148,7 @@ fn resolve_symbol_group(symbol: &str, group: &[&SelectionCandidateInput]) -> Sym
             selected_strategy_id: None,
             disposition: SelectionCandidateDisposition::Refused,
             reason_code: REASON_NO_VALID_CANDIDATE.to_string(),
+            exact_reason: Some(ExactSelectionReason::NoValidCandidate),
             candidates: results,
         };
     }
@@ -951,11 +1312,13 @@ fn resolve_symbol_group(symbol: &str, group: &[&SelectionCandidateInput]) -> Sym
         (a.strategy_id.as_str(), a.timeframe_secs).cmp(&(b.strategy_id.as_str(), b.timeframe_secs))
     });
 
+    let exact_reason = exact_reason_for_reason_code(&reason_code);
     SymbolSelectionResult {
         symbol: symbol.to_string(),
         selected_strategy_id,
         disposition,
         reason_code,
+        exact_reason,
         candidates: results,
     }
 }
@@ -1070,6 +1433,32 @@ pub fn compute_dynamic_selection_plan(
         }
     }
 
+    // Defect F: structurally tie the per-symbol candidate universe to
+    // MAX_STRATEGY_UNIVERSE (which mirrors the five-identity
+    // `REGISTERED_STRATEGY_IDS` authority) -- a single symbol carrying more
+    // candidate rows than the entire strategy universe has identities is a
+    // caller-contract violation, checked here independently of the total
+    // MAX_CANDIDATE_PAIRS bound above (which a single over-loaded symbol can
+    // stay under while still locally violating this one).
+    let mut per_symbol_counts: BTreeMap<String, usize> = BTreeMap::new();
+    for c in candidates {
+        *per_symbol_counts
+            .entry(canonical_symbol(&c.symbol))
+            .or_insert(0) += 1;
+    }
+    if let Some((over_symbol, count)) = per_symbol_counts
+        .iter()
+        .find(|(_, &n)| n > MAX_STRATEGY_UNIVERSE)
+    {
+        return fail_closed_plan(
+            context,
+            TRUTH_STATE_SYMBOL_CANDIDATES_OVER_LIMIT,
+            format!(
+                "symbol '{over_symbol}' has {count} candidates, exceeding MAX_STRATEGY_UNIVERSE={MAX_STRATEGY_UNIVERSE}"
+            ),
+        );
+    }
+
     let mut groups: BTreeMap<String, Vec<&SelectionCandidateInput>> = BTreeMap::new();
     for symbol in &canonical_eligible {
         groups.entry(symbol.clone()).or_default();
@@ -1114,14 +1503,15 @@ fn push_opt_str(buf: &mut Vec<u8>, s: &Option<String>) {
     }
 }
 
-/// Same tag+length-prefix convention as [`push_opt_str`], for a
-/// caller-owned `&'static str` (e.g. [`SelectionCandidateEvidence::exact_reason`])
-/// rather than an owned `String` — avoids an allocation at every call site.
-fn push_opt_static_str(buf: &mut Vec<u8>, s: Option<&str>) {
-    match s {
+/// Same tag+length-prefix convention as [`push_opt_str`], for
+/// [`ExactSelectionReason`] (e.g. [`SelectionCandidateEvidence::exact_reason`])
+/// -- serialized via its own closed, bounded `.code()`, never `Debug` or any
+/// other unbounded representation.
+fn push_opt_exact_reason(buf: &mut Vec<u8>, reason: Option<ExactSelectionReason>) {
+    match reason {
         Some(v) => {
             buf.push(1);
-            push_len_prefixed(buf, v);
+            push_len_prefixed(buf, &v.code());
         }
         None => buf.push(0),
     }
@@ -1194,6 +1584,7 @@ pub fn canonical_plan_identity_material(plan: &DynamicSelectionPlan) -> Vec<u8> 
         push_opt_str(&mut buf, &sr.selected_strategy_id);
         push_disposition(&mut buf, sr.disposition);
         push_len_prefixed(&mut buf, &sr.reason_code);
+        push_opt_exact_reason(&mut buf, sr.exact_reason);
 
         buf.extend_from_slice(&(sr.candidates.len() as u32).to_be_bytes());
         for cand in &sr.candidates {
@@ -1226,7 +1617,7 @@ pub fn canonical_plan_identity_material(plan: &DynamicSelectionPlan) -> Vec<u8> 
             push_opt_str(&mut buf, &cand.promotion_effective_at);
             push_opt_str(&mut buf, &cand.promotion_expires_at);
             push_opt_str(&mut buf, &cand.evidence_transition_id);
-            push_opt_static_str(&mut buf, cand.exact_reason);
+            push_opt_exact_reason(&mut buf, cand.exact_reason);
             push_bool(&mut buf, cand.selected);
             push_disposition(&mut buf, cand.disposition);
             push_len_prefixed(&mut buf, &cand.reason_code);
@@ -1925,6 +2316,31 @@ mod tests {
         assert!(plan.symbol_results.is_empty());
     }
 
+    /// Defect F: a single symbol carrying more candidates than
+    /// `MAX_STRATEGY_UNIVERSE` (5) fails the whole plan closed with its own
+    /// distinct truth_state -- proven with a total candidate count (6) well
+    /// under `MAX_CANDIDATE_PAIRS` (25), so this is genuinely a *different*
+    /// bound from the total-pairs check above, not a restatement of it.
+    #[test]
+    fn six_strategy_ids_for_one_symbol_fails_whole_plan_closed() {
+        let eligible = symbols(&["AAPL"]);
+        assert_eq!(MAX_STRATEGY_UNIVERSE, 5);
+        let mut over_candidates = Vec::new();
+        for i in 0..(MAX_STRATEGY_UNIVERSE + 1) {
+            over_candidates.push(candidate(
+                "AAPL",
+                &format!("strategy_{i}"),
+                500_000,
+                Some(1),
+                false,
+            ));
+        }
+        assert!(over_candidates.len() < MAX_CANDIDATE_PAIRS);
+        let plan = compute_dynamic_selection_plan(ctx(), &eligible, &over_candidates);
+        assert_eq!(plan.truth_state, TRUTH_STATE_SYMBOL_CANDIDATES_OVER_LIMIT);
+        assert!(plan.symbol_results.is_empty());
+    }
+
     // ── R5/R6: non-circular identity material ──────────────────────────────
 
     #[test]
@@ -2112,9 +2528,9 @@ mod tests {
         // the byte-based key must still catch this as a genuine payload
         // difference (it is real caller-observed data, not decorative).
         let mut c1 = candidate("AAPL", "swing_momentum", 500_000, Some(1), false);
-        c1.evidence.exact_reason = Some("promotion_query_failed");
+        c1.evidence.exact_reason = Some(ExactSelectionReason::PromotionQueryFailed);
         let mut c2 = c1.clone();
-        c2.evidence.exact_reason = Some("no_promotion_record");
+        c2.evidence.exact_reason = Some(ExactSelectionReason::NoPromotionRecord);
         let plan = compute_dynamic_selection_plan(ctx(), &symbols(&["AAPL"]), &[c1, c2]);
         let aapl = result_for(&plan, "AAPL");
         assert!(aapl
@@ -2132,5 +2548,217 @@ mod tests {
         let candidates = vec![candidate("AAPL", "swing_momentum", 500_000, Some(1), false)];
         let plan = compute_dynamic_selection_plan(ctx(), &symbols(&["AAPL"]), &candidates);
         let _material = canonical_plan_identity_material(&plan);
+    }
+
+    // ── Defect E: closed persistable exact-reason vocabulary ─────────────
+
+    fn all_exact_selection_reasons() -> Vec<ExactSelectionReason> {
+        vec![
+            ExactSelectionReason::RegistryQueryFailed,
+            ExactSelectionReason::RegistryRowMissing,
+            ExactSelectionReason::RegistryDisabled,
+            ExactSelectionReason::UnsupportedStrategyPlugin,
+            ExactSelectionReason::RegistryConstructionFailed,
+            ExactSelectionReason::TimeframeMismatch,
+            ExactSelectionReason::BlankIdentity,
+            ExactSelectionReason::PromotionQueryFailed,
+            ExactSelectionReason::NoPromotionRecord,
+            ExactSelectionReason::PromotionNotActivePaper,
+            ExactSelectionReason::PromotionNotYetEffective,
+            ExactSelectionReason::PromotionExpired,
+            ExactSelectionReason::EvidenceLineageQueryFailed,
+            ExactSelectionReason::EvidenceLineageBroken,
+            ExactSelectionReason::ArtifactPathMissing,
+            ExactSelectionReason::DurableFingerprintMissing,
+            ExactSelectionReason::DurableFingerprintV2Missing,
+            ExactSelectionReason::ArtifactRootUnavailable,
+            ExactSelectionReason::ArtifactMissing,
+            ExactSelectionReason::ArtifactRootEscape,
+            ExactSelectionReason::ArtifactMalformed,
+            ExactSelectionReason::ArtifactDuplicateIdentity,
+            ExactSelectionReason::ArtifactNotPaperCandidate,
+            ExactSelectionReason::ArtifactNoMatchingRow,
+            ExactSelectionReason::ArtifactRowIdentityMismatch,
+            ExactSelectionReason::ArtifactOverLimit,
+            ExactSelectionReason::FingerprintMismatch,
+            ExactSelectionReason::FingerprintV2Mismatch,
+            ExactSelectionReason::ScoreMissing,
+            ExactSelectionReason::ScoreNotFinite,
+            ExactSelectionReason::RankOutOfRange,
+            ExactSelectionReason::DataNotReady(ReadinessBlockerReason::CalendarUnavailable),
+            ExactSelectionReason::DataNotReady(ReadinessBlockerReason::MarketDataMissing),
+            ExactSelectionReason::DataNotReadyUnspecified,
+            ExactSelectionReason::DivergentDuplicate,
+            ExactSelectionReason::NotSelectedLowerScore,
+            ExactSelectionReason::NotSelectedLostTieBreak,
+            ExactSelectionReason::MissingRankRequiredForTie,
+            ExactSelectionReason::SelectedHighestScore,
+            ExactSelectionReason::SelectedTieBreakRank,
+            ExactSelectionReason::SelectedTieBreakWatchlist,
+            ExactSelectionReason::SelectedTieBreakStrategyId,
+            ExactSelectionReason::NoValidCandidate,
+        ]
+    }
+
+    #[test]
+    fn every_exact_selection_reason_code_round_trips_through_parse_code() {
+        for reason in all_exact_selection_reasons() {
+            let code = reason.code();
+            assert_eq!(
+                ExactSelectionReason::parse_code(&code),
+                Some(reason),
+                "code '{code}' must parse back to the same variant"
+            );
+        }
+    }
+
+    #[test]
+    fn every_exact_selection_reason_code_is_distinct() {
+        let mut codes: Vec<String> = all_exact_selection_reasons()
+            .iter()
+            .map(|r| r.code())
+            .collect();
+        let unique_count = {
+            let mut c = codes.clone();
+            c.sort();
+            c.dedup();
+            c.len()
+        };
+        assert_eq!(unique_count, codes.len(), "every code must be distinct");
+        codes.clear();
+    }
+
+    #[test]
+    fn unknown_exact_selection_reason_code_fails_closed() {
+        assert_eq!(
+            ExactSelectionReason::parse_code("totally_unrecognized_future_code"),
+            None
+        );
+        assert_eq!(
+            ExactSelectionReason::parse_code("data_not_ready:totally_unrecognized_blocker"),
+            None
+        );
+    }
+
+    #[test]
+    fn every_readiness_blocker_reason_code_round_trips() {
+        let all = [
+            ReadinessBlockerReason::RequiredAssignmentsMissing,
+            ReadinessBlockerReason::AssignmentResolutionFailed,
+            ReadinessBlockerReason::RuntimeStrategyAssignmentMismatch,
+            ReadinessBlockerReason::RuntimeStrategySymbolBindingMismatch,
+            ReadinessBlockerReason::RuntimeStrategyTimeframeMismatch,
+            ReadinessBlockerReason::StrategyRequirementUnknown,
+            ReadinessBlockerReason::AssetClassUnknown,
+            ReadinessBlockerReason::ProviderProvenanceInvalid,
+            ReadinessBlockerReason::ProviderSymbolMismatch,
+            ReadinessBlockerReason::ProviderIdMismatch,
+            ReadinessBlockerReason::ProviderUnknown,
+            ReadinessBlockerReason::ProviderIngestTimeFuture,
+            ReadinessBlockerReason::ProviderDisabled,
+            ReadinessBlockerReason::ProviderCapabilityMismatch,
+            ReadinessBlockerReason::ProviderTimestampConventionUnverified,
+            ReadinessBlockerReason::CalendarUnavailable,
+            ReadinessBlockerReason::UnsupportedTimeframe,
+            ReadinessBlockerReason::UnsupportedIntradayContinuity,
+            ReadinessBlockerReason::MarketDataMissing,
+            ReadinessBlockerReason::InsufficientHistory,
+            ReadinessBlockerReason::DuplicateTimestamp,
+            ReadinessBlockerReason::InteriorGap,
+            ReadinessBlockerReason::LatestBarFuture,
+            ReadinessBlockerReason::ExpectedLatestBarMissing,
+        ];
+        for reason in all {
+            assert_eq!(
+                ReadinessBlockerReason::parse_code(reason.code()),
+                Some(reason)
+            );
+        }
+    }
+
+    #[test]
+    fn selected_not_selected_and_refused_candidates_all_carry_an_exact_reason() {
+        // Defect E: every candidate result must have an exact reason --
+        // proven across a selected winner, a lower-score loser, and a
+        // gate-refused candidate in the same plan.
+        let candidates = vec![
+            candidate("AAPL", "swing_momentum", 900_000, Some(1), false),
+            candidate("AAPL", "mean_reversion", 500_000, Some(2), false),
+            {
+                let mut c = candidate("AAPL", "volatility_breakout", 300_000, Some(3), false);
+                c.evidence.promotion_state = None;
+                c
+            },
+        ];
+        let plan = compute_dynamic_selection_plan(ctx(), &symbols(&["AAPL"]), &candidates);
+        let aapl = result_for(&plan, "AAPL");
+        assert_eq!(aapl.candidates.len(), 3);
+        for c in &aapl.candidates {
+            assert!(
+                c.exact_reason.is_some(),
+                "candidate {} must carry an exact reason",
+                c.strategy_id
+            );
+        }
+        let winner = aapl
+            .candidates
+            .iter()
+            .find(|c| c.strategy_id == "swing_momentum")
+            .unwrap();
+        assert_eq!(
+            winner.exact_reason,
+            Some(ExactSelectionReason::SelectedHighestScore)
+        );
+        let loser = aapl
+            .candidates
+            .iter()
+            .find(|c| c.strategy_id == "mean_reversion")
+            .unwrap();
+        assert_eq!(
+            loser.exact_reason,
+            Some(ExactSelectionReason::NotSelectedLowerScore)
+        );
+        let refused = aapl
+            .candidates
+            .iter()
+            .find(|c| c.strategy_id == "volatility_breakout")
+            .unwrap();
+        assert_eq!(
+            refused.exact_reason,
+            Some(ExactSelectionReason::PromotionNotActivePaper)
+        );
+
+        assert_eq!(
+            aapl.exact_reason,
+            Some(ExactSelectionReason::SelectedHighestScore),
+            "symbol-level exact_reason mirrors the winning candidate's"
+        );
+    }
+
+    #[test]
+    fn symbol_with_no_candidates_has_no_valid_candidate_exact_reason() {
+        let plan = compute_dynamic_selection_plan(ctx(), &symbols(&["AAPL"]), &[]);
+        let aapl = result_for(&plan, "AAPL");
+        assert!(aapl.candidates.is_empty());
+        assert_eq!(
+            aapl.exact_reason,
+            Some(ExactSelectionReason::NoValidCandidate)
+        );
+    }
+
+    #[test]
+    fn divergent_duplicate_candidates_carry_the_divergent_duplicate_exact_reason() {
+        let mut c1 = candidate("AAPL", "swing_momentum", 500_000, Some(1), false);
+        let mut c2 = c1.clone();
+        c2.evidence.canonical_score_decimal = Some(decimal_from_micros(900_000));
+        c2.evidence.canonical_score_micros = Some(900_000);
+        c1.evidence.exact_reason = None;
+        c2.evidence.exact_reason = None;
+        let plan = compute_dynamic_selection_plan(ctx(), &symbols(&["AAPL"]), &[c1, c2]);
+        let aapl = result_for(&plan, "AAPL");
+        assert!(aapl
+            .candidates
+            .iter()
+            .all(|c| c.exact_reason == Some(ExactSelectionReason::DivergentDuplicate)));
     }
 }
