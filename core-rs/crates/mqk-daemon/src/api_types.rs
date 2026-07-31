@@ -909,12 +909,27 @@ pub struct AutonomousPaperReadinessResponse {
 /// has happened yet. Never fabricates presence — a `null` `disposition` here
 /// means "no committed truth exists right now", not "Off".
 #[derive(Debug, Clone, Serialize, Deserialize)]
+///
+/// ATOMICITY-SINGLE-SNAPSHOT-REPAIR requirement 6: every field on this
+/// struct except the `preview_*` trio is *committed run-scoped truth* —
+/// when `disposition` is `Some`, every other non-`preview_*` field on this
+/// value was read from that exact same committed `DynamicSelectionRuntimeState`
+/// snapshot, never mixed with a fresh env-preview read. When `disposition`
+/// is `None` (no run has committed a disposition), every non-`preview_*`
+/// field is in its neutral/absent state (`None`/`false`/`0`) — never
+/// silently populated from the current env config. The `preview_*` fields
+/// are the only place a fresh, current-env-config evaluation appears, and
+/// are always present regardless of whether a run is active — never proof
+/// of an active run's binding.
 pub struct DynamicSelectionReadinessProjection {
-    /// `"off"` | `"shadow"` | `"paper_enforced"` — fresh preview, current env config.
-    pub configured_mode: String,
-    /// `"off"` | `"shadow"` | `"paper_enforced"` — after the deployment-mode live lock.
-    pub effective_mode: String,
-    /// `true` when the live lock forced `effective_mode` down to `"off"`.
+    /// `"off"` | `"shadow"` | `"paper_enforced"` — the committed run's
+    /// resolved mode. `null` when `disposition` is `null`.
+    pub configured_mode: Option<String>,
+    /// `"off"` | `"shadow"` | `"paper_enforced"` — the committed run's mode
+    /// after the deployment-mode live lock. `null` when `disposition` is `null`.
+    pub effective_mode: Option<String>,
+    /// `true` when the live lock forced the committed run's `effective_mode`
+    /// down to `"off"`. `false` (neutral default) when `disposition` is `null`.
     pub live_lock_applied: bool,
     /// `"off"` | `"shadow_allowed"` | `"shadow_invalid"` | `"paper_enforced_allowed"`.
     /// `null` when no run is active or nothing has been committed yet.
@@ -928,6 +943,17 @@ pub struct DynamicSelectionReadinessProjection {
     pub owning_run_id: Option<Uuid>,
     /// Always `false` in this patch.
     pub approved_for_live: bool,
+    /// Fresh preview evaluation of the *current* env config — `"off"` |
+    /// `"shadow"` | `"paper_enforced"`. Never proof of an active run's
+    /// binding; distinctly named so it can never be mistaken for the
+    /// committed `configured_mode` above.
+    pub preview_configured_mode: String,
+    /// Fresh preview evaluation of the *current* env config, after the
+    /// deployment-mode live lock.
+    pub preview_effective_mode: String,
+    /// `true` when the live lock would force the *current* env config's
+    /// effective mode down to `"off"`.
+    pub preview_live_lock_applied: bool,
 }
 
 // ---------------------------------------------------------------------------

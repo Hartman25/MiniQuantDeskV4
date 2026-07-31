@@ -1281,20 +1281,23 @@ pub(crate) async fn autonomous_no_trade_diagnostics(
 /// DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7A: build the narrow additive
 /// dynamic-selection projection for `GET /api/v1/autonomous/readiness`.
 ///
-/// `configured_mode`/`effective_mode`/`live_lock_applied` are a fresh
-/// preview evaluation — safe per `dynamic_selection_mode::effective_mode`'s
-/// own documented contract for a read-only route, as long as it is honestly
-/// labeled as current-config truth rather than the active run's binding
-/// (which this projection does via its doc comment, not a route-level
-/// claim). `disposition`/`plan_present`/`host_pool_present`/
-/// `selected_pair_count`/`owning_run_id` reflect the actual committed
-/// run-scoped truth, independently, and are never synthesized from the
-/// preview mode resolution above.
+/// ATOMICITY-SINGLE-SNAPSHOT-REPAIR requirement 6: `configured_mode`/
+/// `effective_mode`/`live_lock_applied`/`disposition`/`plan_present`/
+/// `host_pool_present`/`selected_pair_count`/`owning_run_id`/
+/// `approved_for_live` all come from the *one* committed snapshot when it
+/// exists — never mixed with a fresh env-preview read. When no snapshot is
+/// committed, every one of those fields is in its neutral/absent state
+/// (`None`/`false`/`0`), never silently populated from current env config.
+/// The current-env-config preview lives only in the separately named
+/// `preview_configured_mode`/`preview_effective_mode`/
+/// `preview_live_lock_applied` fields, which are always a fresh evaluation
+/// regardless of whether a run is active — never proof of an active run's
+/// binding.
 async fn dynamic_selection_readiness_projection(
     st: &Arc<AppState>,
 ) -> crate::api_types::DynamicSelectionReadinessProjection {
     let mode_resolution = crate::dynamic_selection_mode::resolve_dynamic_selection_mode_from_env();
-    let effective = crate::dynamic_selection_mode::effective_mode(
+    let preview = crate::dynamic_selection_mode::effective_mode(
         &mode_resolution,
         st.deployment_mode(),
         st.runtime_selection().broker_kind,
@@ -1302,9 +1305,13 @@ async fn dynamic_selection_readiness_projection(
     let snapshot = st.dynamic_selection_runtime_snapshot().await;
 
     crate::api_types::DynamicSelectionReadinessProjection {
-        configured_mode: effective.configured_mode.as_str().to_string(),
-        effective_mode: effective.effective_mode.as_str().to_string(),
-        live_lock_applied: effective.live_lock_applied,
+        configured_mode: snapshot
+            .as_ref()
+            .map(|s| s.configured_mode.as_str().to_string()),
+        effective_mode: snapshot
+            .as_ref()
+            .map(|s| s.effective_mode.as_str().to_string()),
+        live_lock_applied: snapshot.as_ref().is_some_and(|s| s.live_lock_applied),
         disposition: snapshot
             .as_ref()
             .map(|s| dynamic_selection_disposition_str(s.disposition).to_string()),
@@ -1316,6 +1323,9 @@ async fn dynamic_selection_readiness_projection(
             .unwrap_or(0),
         owning_run_id: snapshot.as_ref().map(|s| s.run_id),
         approved_for_live: snapshot.as_ref().is_some_and(|s| s.approved_for_live),
+        preview_configured_mode: preview.configured_mode.as_str().to_string(),
+        preview_effective_mode: preview.effective_mode.as_str().to_string(),
+        preview_live_lock_applied: preview.live_lock_applied,
     }
 }
 
@@ -3261,5 +3271,126 @@ mod tests {
         );
         assert_eq!(code, "NO_ACTIVE_RUN_PENDING_START");
         assert_eq!(stage, "pre_runtime_start");
+    }
+
+    // -----------------------------------------------------------------
+    // ATOMICITY-SINGLE-SNAPSHOT-REPAIR requirement 6: committed truth must
+    // never mix with a fresh env-preview read.
+    // -----------------------------------------------------------------
+
+    /// Serializes every test in this module that mutates
+    /// `MQK_DYNAMIC_STRATEGY_SYMBOL_SELECTION_MODE` — mirrors the
+    /// `env_lock()` convention in `state::lifecycle`'s dynamic-selection
+    /// test modules.
+    fn dynamic_selection_env_lock() -> &'static tokio::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+    }
+
+    /// A minimal committed fixture: Shadow, no plan/pool — only the fields
+    /// this test inspects are load-bearing.
+    fn fixture_shadow_committed(run_id: uuid::Uuid) -> crate::state::DynamicSelectionRuntimeState {
+        crate::state::DynamicSelectionRuntimeState {
+            run_id,
+            disposition:
+                crate::dynamic_selection_start_gate::DynamicSelectionStartGateDisposition::ShadowAllowed,
+            configured_mode: mqk_portfolio::DynamicSelectionMode::Shadow,
+            effective_mode: mqk_portfolio::DynamicSelectionMode::Shadow,
+            live_lock_applied: false,
+            plan: None,
+            selected_pairs: Vec::new(),
+            host_pool: None,
+            reasons: Vec::new(),
+            approved_for_live: false,
+        }
+    }
+
+    /// No committed snapshot exists: every committed-truth field must be in
+    /// its neutral/absent state, and the preview fields must reflect the
+    /// current env config — never the other way around.
+    #[tokio::test]
+    async fn readiness_projection_with_no_committed_snapshot_is_all_neutral() {
+        let _guard = dynamic_selection_env_lock().lock().await;
+        std::env::remove_var(
+            crate::dynamic_selection_mode::DYNAMIC_STRATEGY_SYMBOL_SELECTION_MODE_ENV,
+        );
+        std::env::set_var(
+            crate::dynamic_selection_mode::DYNAMIC_STRATEGY_SYMBOL_SELECTION_MODE_ENV,
+            "shadow",
+        );
+
+        let state = std::sync::Arc::new(AppState::new_for_test_with_mode_and_broker(
+            DeploymentMode::Paper,
+            crate::state::BrokerKind::Alpaca,
+        ));
+        assert!(state.dynamic_selection_runtime_snapshot().await.is_none());
+
+        let projection = dynamic_selection_readiness_projection(&state).await;
+        std::env::remove_var(
+            crate::dynamic_selection_mode::DYNAMIC_STRATEGY_SYMBOL_SELECTION_MODE_ENV,
+        );
+
+        assert_eq!(projection.configured_mode, None);
+        assert_eq!(projection.effective_mode, None);
+        assert!(!projection.live_lock_applied);
+        assert_eq!(projection.disposition, None);
+        assert!(!projection.plan_present);
+        assert!(!projection.host_pool_present);
+        assert_eq!(projection.selected_pair_count, 0);
+        assert_eq!(projection.owning_run_id, None);
+        assert!(!projection.approved_for_live);
+        assert_eq!(projection.preview_configured_mode, "shadow");
+        assert_eq!(projection.preview_effective_mode, "shadow");
+    }
+
+    /// A committed snapshot exists: every committed-truth field must come
+    /// from that snapshot, and mutating env *after* the commit must never
+    /// change the committed truth — only the separately-named preview
+    /// fields may move.
+    #[tokio::test]
+    async fn readiness_projection_with_committed_snapshot_ignores_later_env_mutation() {
+        let _guard = dynamic_selection_env_lock().lock().await;
+        std::env::remove_var(
+            crate::dynamic_selection_mode::DYNAMIC_STRATEGY_SYMBOL_SELECTION_MODE_ENV,
+        );
+        std::env::set_var(
+            crate::dynamic_selection_mode::DYNAMIC_STRATEGY_SYMBOL_SELECTION_MODE_ENV,
+            "shadow",
+        );
+
+        let state = std::sync::Arc::new(AppState::new_for_test_with_mode_and_broker(
+            DeploymentMode::Paper,
+            crate::state::BrokerKind::Alpaca,
+        ));
+        let run_id = uuid::Uuid::new_v5(
+            &uuid::Uuid::NAMESPACE_DNS,
+            b"mqk-daemon.atomicity_repair.status_coherence",
+        );
+        state
+            .commit_dynamic_selection_runtime_state(fixture_shadow_committed(run_id))
+            .await;
+
+        // Mutate env to a *different* mode after the commit — a status
+        // read must not let this leak into the committed truth.
+        std::env::set_var(
+            crate::dynamic_selection_mode::DYNAMIC_STRATEGY_SYMBOL_SELECTION_MODE_ENV,
+            "paper_enforced",
+        );
+
+        let projection = dynamic_selection_readiness_projection(&state).await;
+        std::env::remove_var(
+            crate::dynamic_selection_mode::DYNAMIC_STRATEGY_SYMBOL_SELECTION_MODE_ENV,
+        );
+
+        assert_eq!(projection.configured_mode.as_deref(), Some("shadow"));
+        assert_eq!(projection.effective_mode.as_deref(), Some("shadow"));
+        assert_eq!(projection.disposition.as_deref(), Some("shadow_allowed"));
+        assert_eq!(projection.owning_run_id, Some(run_id));
+        assert_eq!(
+            projection.preview_configured_mode, "paper_enforced",
+            "the preview fields — and only the preview fields — must reflect \
+             the post-commit env mutation"
+        );
+        assert_eq!(projection.preview_effective_mode, "paper_enforced");
     }
 }
