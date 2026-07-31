@@ -106,40 +106,133 @@ impl AutonomousArmRejection {
     }
 }
 
+// ---------------------------------------------------------------------------
+// DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7A-ATOMICITY-SINGLE-SNAPSHOT-REPAIR:
+// one frozen start-attempt authority snapshot.
+//
+// Every environment/config/calendar/provider/fleet/clock input a single
+// `start_execution_runtime` attempt needs is resolved exactly once here and
+// reused, by reference, for: the daily-data-readiness gate, the
+// dynamic-selection start-gate evaluation, and the spawned execution loop's
+// per-symbol dispatch assignments. No consumer re-reads env, the watchlist
+// artifact, the calendar/provider/instrument registries, or the fleet-id
+// env var a second time within the same start attempt — and `now_utc` goes
+// through the same test-overridable clock (`AppState::daily_data_readiness_
+// now`) every consumer previously read independently (the dynamic-selection
+// evaluator used a raw, non-overridable `Utc::now()` before this repair,
+// which could disagree with the readiness gate's clock across a test
+// boundary or a slow tick).
+// ---------------------------------------------------------------------------
+
+struct StartAttemptAuthoritySnapshot {
+    now_utc: chrono::DateTime<Utc>,
+    effective_mode: crate::dynamic_selection_mode::EffectiveDynamicSelectionMode,
+    multi_symbol_config:
+        Result<crate::state::MultiSymbolRuntimeConfig, crate::state::MultiSymbolConfigError>,
+    readiness_context: crate::daily_data_readiness::DailyDataReadinessContext,
+    configured_strategy_ids: Vec<String>,
+}
+
+impl StartAttemptAuthoritySnapshot {
+    /// Resolve every start-attempt input exactly once. Pure I/O only (env
+    /// vars, at most one watchlist-artifact file read, the provider/
+    /// instrument/calendar registry files, and the shared test-overridable
+    /// clock) — no DB, no broker, no network.
+    async fn resolve(state: &AppState) -> Self {
+        let mode_resolution =
+            crate::dynamic_selection_mode::resolve_dynamic_selection_mode_from_env();
+        let effective_mode = crate::dynamic_selection_mode::effective_mode(
+            &mode_resolution,
+            state.deployment_mode(),
+            state.runtime_selection.broker_kind,
+        );
+        let now_utc = state.daily_data_readiness_now().await;
+        Self {
+            now_utc,
+            effective_mode,
+            multi_symbol_config: crate::state::build_multi_symbol_runtime_config_from_env(),
+            readiness_context: crate::daily_data_readiness::load_readiness_context_from_env(),
+            configured_strategy_ids: crate::daily_data_readiness::fleet_ids_from_env()
+                .unwrap_or_default(),
+        }
+    }
+
+    /// The frozen legacy assignment vector the execution loop dispatches
+    /// against — `snapshot.multi_symbol_config`'s `symbols`, or empty when
+    /// resolution failed (matches the pre-existing no-op behavior of
+    /// `tick_strategy_dispatch` when strategy dispatch is not configured).
+    fn legacy_assignments(&self) -> Vec<crate::state::SymbolStrategyAssignment> {
+        self.multi_symbol_config
+            .as_ref()
+            .map(|cfg| cfg.symbols.clone())
+            .unwrap_or_default()
+    }
+}
+
+/// DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7A-ATOMICITY-SINGLE-SNAPSHOT-
+/// REPAIR requirement 7: pure decision function for the temporary
+/// `paper_enforced` interlock, extracted for direct unit testing
+/// independent of the full credential-gated `start_execution_runtime` path.
+///
+/// `effective_mode == PaperEnforced` can only mean `disposition ==
+/// PaperEnforcedAllowed` (`PaperEnforcedRefused` already returns `Err`
+/// earlier, inside `build_dynamic_selection_start_snapshot`) — but
+/// `disposition` is checked explicitly too, fail-closed, rather than
+/// relying on that invariant alone. Off and Shadow are unaffected: Shadow
+/// is the only non-Off mode this interlock allows to start.
+fn paper_enforced_dispatch_not_wired_refusal(
+    outcome: &DynamicSelectionRuntimeState,
+    run_id: uuid::Uuid,
+) -> Option<RuntimeLifecycleError> {
+    if outcome.effective_mode == mqk_portfolio::DynamicSelectionMode::PaperEnforced
+        && outcome.disposition
+            != crate::dynamic_selection_start_gate::DynamicSelectionStartGateDisposition::Off
+    {
+        return Some(RuntimeLifecycleError::forbidden(
+            "runtime.start_refused.dynamic_selection_dispatch_not_wired",
+            "dynamic_selection_dispatch",
+            format!(
+                "dynamic-selection mode 'paper_enforced' resolved disposition={:?} for \
+                 run_id={run_id}, but Phase 7B selected-host economic dispatch is not \
+                 wired; paper_enforced must not start the legacy economic path until \
+                 Phase 7B selected-host dispatch is accepted -- only Off and Shadow may \
+                 start a run today \
+                 (DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7A-ATOMICITY-SINGLE-SNAPSHOT-REPAIR)",
+                outcome.disposition,
+            ),
+        ));
+    }
+    None
+}
+
 impl AppState {
     /// DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7A: build the
     /// authoritative, frozen dynamic-selection start snapshot for `run_id`.
     ///
-    /// Resolves the dynamic-selection mode, the `MultiSymbolRuntimeConfig`,
-    /// and the calendar/session authority timestamp exactly once each, then
-    /// evaluates `evaluate_dynamic_selection_start_gate` exactly once. Never
-    /// touches `AppState` — the caller commits the returned value later, at
-    /// the same point `ProductionRuntimeStartEffects` publishes every other
-    /// run-start effect.
+    /// Consumes the already-resolved `StartAttemptAuthoritySnapshot` — never
+    /// re-resolves the mode, `MultiSymbolRuntimeConfig`, calendar/provider
+    /// registries, fleet ids, or clock itself (ATOMICITY-SINGLE-SNAPSHOT-
+    /// REPAIR). Evaluates `evaluate_dynamic_selection_start_gate` exactly
+    /// once. Never touches `AppState` — the caller commits the returned
+    /// value later, at the same point `ProductionRuntimeStartEffects`
+    /// publishes every other run-start effect.
     ///
     /// `Ok(state)` covers every disposition except `PaperEnforcedRefused`:
-    /// `Off` (zero I/O beyond the one env-var mode read), `ShadowAllowed`,
-    /// `ShadowInvalid` (including a Shadow-mode `MultiSymbolRuntimeConfig`
-    /// resolution failure — Shadow never blocks the run), and
-    /// `PaperEnforcedAllowed`. `Err(_)` covers `PaperEnforcedRefused` and a
-    /// PaperEnforced-mode config-resolution failure — both refuse the whole
-    /// start before any run advancement, with no `AppState` mutation.
+    /// `Off` (zero further I/O), `ShadowAllowed`, `ShadowInvalid` (including
+    /// a Shadow-mode `MultiSymbolRuntimeConfig` resolution failure — Shadow
+    /// never blocks the run), and `PaperEnforcedAllowed`. `Err(_)` covers
+    /// `PaperEnforcedRefused` and a PaperEnforced-mode config-resolution
+    /// failure — both refuse the whole start before any run advancement,
+    /// with no `AppState` mutation.
     async fn build_dynamic_selection_start_snapshot(
         self: &Arc<Self>,
         run_id: uuid::Uuid,
+        snapshot: &StartAttemptAuthoritySnapshot,
     ) -> Result<DynamicSelectionRuntimeState, RuntimeLifecycleError> {
         use crate::dynamic_selection_start_gate::DynamicSelectionStartGateDisposition;
         use mqk_portfolio::DynamicSelectionMode;
 
-        // Mode resolved exactly once: one env-var read, one pure live-lock
-        // combinator call. Never reread later in this function.
-        let mode_resolution =
-            crate::dynamic_selection_mode::resolve_dynamic_selection_mode_from_env();
-        let effective = crate::dynamic_selection_mode::effective_mode(
-            &mode_resolution,
-            self.deployment_mode(),
-            self.runtime_selection.broker_kind,
-        );
+        let effective = &snapshot.effective_mode;
 
         if effective.effective_mode == DynamicSelectionMode::Off {
             // Off: zero further I/O — no config resolution, no calendar
@@ -162,8 +255,12 @@ impl AppState {
         // deployment_mode==Paper && broker_kind==Alpaca (the mode live-lock
         // proves this) — exactly the predicate the pre-existing
         // daily-data-readiness/premarket-freshness gates above already use —
-        // so the resolution calls below are safe to make unconditionally.
-        let multi_symbol_config = match crate::state::build_multi_symbol_runtime_config_from_env() {
+        // so reading the frozen snapshot's config result unconditionally is
+        // safe. ATOMICITY-SINGLE-SNAPSHOT-REPAIR: this is the same
+        // `MultiSymbolRuntimeConfig` result the daily-data-readiness gate
+        // (when applicable) and the spawned loop's dispatch assignments use
+        // — never a second, independently-resolved value.
+        let multi_symbol_config = match snapshot.multi_symbol_config.as_ref() {
             Ok(cfg) => cfg,
             Err(err) => {
                 if effective.effective_mode == DynamicSelectionMode::Shadow {
@@ -201,20 +298,18 @@ impl AppState {
             }
         };
 
-        // Calendar/session authority + provider/instrument registries,
-        // resolved exactly once from the same env-driven composition the
-        // daily-data-readiness gate above already uses
-        // (`daily_data_readiness::load_readiness_context_from_env`).
-        let readiness_context = crate::daily_data_readiness::load_readiness_context_from_env();
-        let configured_strategy_ids =
-            crate::daily_data_readiness::fleet_ids_from_env().unwrap_or_default();
-        let now_utc = Utc::now();
+        // Calendar/session authority + provider/instrument registries +
+        // fleet ids + clock: all frozen in `snapshot`, resolved exactly once
+        // — never re-read here.
+        let readiness_context = &snapshot.readiness_context;
+        let configured_strategy_ids = &snapshot.configured_strategy_ids;
+        let now_utc = snapshot.now_utc;
         let run_id_str = run_id.to_string();
 
         let context = crate::dynamic_selection_start_gate::build_dynamic_selection_context(
             &run_id_str,
-            &effective,
-            &multi_symbol_config,
+            effective,
+            multi_symbol_config,
             readiness_context.calendar_provider.as_ref(),
             now_utc,
         );
@@ -229,9 +324,9 @@ impl AppState {
 
         let outcome = crate::dynamic_selection_start_gate::evaluate_dynamic_selection_start_gate(
             &plan_ctx,
-            &multi_symbol_config,
-            &configured_strategy_ids,
-            &effective,
+            multi_symbol_config,
+            configured_strategy_ids,
+            effective,
             context,
             &run_id_str,
             now_utc,
@@ -776,12 +871,22 @@ impl AppState {
             }
         }
 
+        // DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7A-ATOMICITY-SINGLE-
+        // SNAPSHOT-REPAIR: resolve the one frozen start-attempt authority
+        // snapshot now — before the readiness gate below, so both the
+        // readiness gate and the dynamic-selection evaluation further down
+        // (and the execution loop's dispatch assignments, via
+        // `snapshot.legacy_assignments()`) consume this exact value. No
+        // second env/watchlist/config/calendar/provider/fleet read anywhere
+        // else in this function.
+        let start_attempt_snapshot = StartAttemptAuthoritySnapshot::resolve(self).await;
+
         let mut daily_data_readiness_evaluation_id: Option<uuid::Uuid> = None;
         if self.deployment_mode() == DeploymentMode::Paper
             && self.strategy_market_data_source()
                 == StrategyMarketDataSource::ExternalSignalIngestion
         {
-            let evaluated_at_utc = self.daily_data_readiness_now().await;
+            let evaluated_at_utc = start_attempt_snapshot.now_utc;
             // REPAIR 1 (...MISSING-ASSIGNMENT-EVIDENCE-REPAIR-01): allocate a
             // fresh attempt sequence number for this actual start-gate
             // evaluation (never for a GET/preview evaluation) BEFORE
@@ -790,53 +895,53 @@ impl AppState {
             // assignment resolution — never collide on `evaluation_id`.
             let attempt_seq = self.next_daily_data_readiness_attempt_seq();
 
-            let config_result = crate::state::build_multi_symbol_runtime_config_from_env();
-
             // REPAIR 2/3: construct the resolved-or-blocked assignment
             // identity, `evaluation_id`, and readiness report from whichever
             // branch actually happened — never a fabricated
-            // `MultiSymbolRuntimeConfig` for the failure branch.
-            let (report, evaluation_id, assignment_resolution_error) = match &config_result {
-                Ok(config) => {
-                    let readiness_context =
-                        crate::daily_data_readiness::load_readiness_context_from_env();
-                    let report = crate::daily_data_readiness::evaluate_readiness_with_binding(
-                        self.db.as_ref(),
-                        config,
-                        &effective_runtime_binding,
-                        &readiness_context,
-                        evaluated_at_utc,
-                    )
-                    .await;
-                    let evaluation_id = crate::daily_data_readiness::compute_evaluation_id(
-                        evaluated_at_utc,
-                        attempt_seq,
-                        &effective_runtime_binding,
-                        config,
-                    );
-                    (report, evaluation_id, None::<&'static str>)
-                }
-                Err(err) => {
-                    let top_level_blocker =
-                        crate::daily_data_readiness::top_level_blocker_for_config_error(err);
-                    let report = crate::daily_data_readiness::blocked_report(top_level_blocker);
-                    // Bounded, stable failure identity (REPAIR 2) — never
-                    // secrets, full environment dumps, or unbounded
-                    // filesystem errors; `MultiSymbolConfigError::as_str()`
-                    // is itself already a fixed, small set of literal
-                    // strings.
-                    let assignment_identity =
-                        vec![format!("assignment_resolution_error:{}", err.as_str())];
-                    let evaluation_id =
+            // `MultiSymbolRuntimeConfig` for the failure branch. Consumes
+            // the frozen snapshot's config result — never a second
+            // `build_multi_symbol_runtime_config_from_env()` call.
+            let (report, evaluation_id, assignment_resolution_error) =
+                match &start_attempt_snapshot.multi_symbol_config {
+                    Ok(config) => {
+                        let readiness_context = &start_attempt_snapshot.readiness_context;
+                        let report = crate::daily_data_readiness::evaluate_readiness_with_binding(
+                            self.db.as_ref(),
+                            config,
+                            &effective_runtime_binding,
+                            readiness_context,
+                            evaluated_at_utc,
+                        )
+                        .await;
+                        let evaluation_id = crate::daily_data_readiness::compute_evaluation_id(
+                            evaluated_at_utc,
+                            attempt_seq,
+                            &effective_runtime_binding,
+                            config,
+                        );
+                        (report, evaluation_id, None::<&'static str>)
+                    }
+                    Err(err) => {
+                        let top_level_blocker =
+                            crate::daily_data_readiness::top_level_blocker_for_config_error(err);
+                        let report = crate::daily_data_readiness::blocked_report(top_level_blocker);
+                        // Bounded, stable failure identity (REPAIR 2) — never
+                        // secrets, full environment dumps, or unbounded
+                        // filesystem errors; `MultiSymbolConfigError::as_str()`
+                        // is itself already a fixed, small set of literal
+                        // strings.
+                        let assignment_identity =
+                            vec![format!("assignment_resolution_error:{}", err.as_str())];
+                        let evaluation_id =
                         crate::daily_data_readiness::compute_evaluation_id_from_assignment_identity(
                             evaluated_at_utc,
                             attempt_seq,
                             &effective_runtime_binding,
                             &assignment_identity,
                         );
-                    (report, evaluation_id, Some(err.as_str()))
-                }
-            };
+                        (report, evaluation_id, Some(err.as_str()))
+                    }
+                };
 
             // The real write is always attempted (regardless of any test
             // override) — the pre-start event must be attempted before run
@@ -1035,7 +1140,9 @@ impl AppState {
         // committed to `AppState` later, inside the same atomic
         // start-commit sequence that publishes every other run-start
         // effect — never here.
-        let dynamic_selection_outcome = self.build_dynamic_selection_start_snapshot(run_id).await?;
+        let dynamic_selection_outcome = self
+            .build_dynamic_selection_start_snapshot(run_id, &start_attempt_snapshot)
+            .await?;
 
         // BUNDLE-7-PHASE-7A fault seam: after selection evaluation, before
         // effects construction. No AppState selection state has been
@@ -1050,6 +1157,20 @@ impl AppState {
                 "dynamic_selection.fault_seam.after_selection_evaluation",
                 "test-injected fault after selection evaluation",
             ));
+        }
+
+        // DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7A-ATOMICITY-SINGLE-
+        // SNAPSHOT-REPAIR requirement 7: temporary `paper_enforced`
+        // interlock. Phase 7B selected-host economic dispatch is not wired
+        // -- a `paper_enforced`-effective start must never fall through to
+        // the legacy economic path. Refuses before arm/begin/spawn -- the
+        // run row is left `Created`, and the evaluated-but-refused outcome
+        // is discarded here, never committed to `AppState` (no active
+        // pool/state survives a refused attempt).
+        if let Some(err) =
+            paper_enforced_dispatch_not_wired_refusal(&dynamic_selection_outcome, run_id)
+        {
+            return Err(err);
         }
 
         // DAILY-DATA-READINESS-01C-ENFORCEMENT-01 / REPAIR 3-4
@@ -1076,6 +1197,11 @@ impl AppState {
             native_strategy_bootstrap: std::sync::Mutex::new(Some(native_strategy_bootstrap)),
             orchestrator: std::sync::Mutex::new(None),
             dynamic_selection_outcome: std::sync::Mutex::new(Some(dynamic_selection_outcome)),
+            // ATOMICITY-SINGLE-SNAPSHOT-REPAIR: the frozen legacy assignment
+            // vector from the one start-attempt snapshot resolved above —
+            // `spawn_loop` passes this to `spawn_execution_loop` instead of
+            // letting it re-read env/watchlist state a third time.
+            legacy_assignments: start_attempt_snapshot.legacy_assignments(),
         };
         let mut lifecycle_trace: Vec<&'static str> = Vec::new();
         crate::daily_data_readiness::advance_run_to_active(
@@ -1604,6 +1730,12 @@ struct ProductionRuntimeStartEffects<'a> {
     /// (committed to `AppState` near the end, alongside
     /// `native_strategy_bootstrap`).
     dynamic_selection_outcome: std::sync::Mutex<Option<DynamicSelectionRuntimeState>>,
+    /// ATOMICITY-SINGLE-SNAPSHOT-REPAIR: the frozen legacy assignment
+    /// vector from the one `StartAttemptAuthoritySnapshot` resolved by
+    /// `start_execution_runtime` — handed to `spawn_execution_loop` by
+    /// `spawn_loop` below instead of letting the loop re-read env/watchlist
+    /// state a third time.
+    legacy_assignments: Vec<crate::state::SymbolStrategyAssignment>,
 }
 
 #[async_trait::async_trait]
@@ -1834,9 +1966,11 @@ impl crate::daily_data_readiness::RuntimeStartEffects for ProductionRuntimeStart
 
         // BUNDLE-7-PHASE-7A fault seam: immediately after the process-local
         // selection commit above, before this function returns `Ok(())`.
-        // Selection state IS committed at this point — clear it before
-        // propagating the failure, so no observer can see committed
-        // selection state with no corresponding local loop owner.
+        // Selection state IS committed at this point — but the caller
+        // (`advance_run_to_active`) now runs `rollback_local_effects` (a
+        // run_id-scoped compare-and-clear) on this `Err` uniformly, so this
+        // branch itself only needs to release the orchestrator lease it
+        // holds locally.
         if self
             .state
             .dynamic_selection_fault_seam_is(
@@ -1844,7 +1978,6 @@ impl crate::daily_data_readiness::RuntimeStartEffects for ProductionRuntimeStart
             )
             .await
         {
-            self.state.clear_dynamic_selection_runtime_state().await;
             if let Err(rel_err) = orchestrator.release_runtime_leadership().await {
                 tracing::warn!(
                     "runtime_lease_release_failed_on_dynamic_selection_fault_seam error={rel_err}"
@@ -1863,16 +1996,31 @@ impl crate::daily_data_readiness::RuntimeStartEffects for ProductionRuntimeStart
         Ok(())
     }
 
-    async fn spawn_loop(
+    /// ATOMICITY-SINGLE-SNAPSHOT-REPAIR requirement 3: reserve the local
+    /// loop-ownership slot strictly before `spawn_loop` constructs any
+    /// task. Relies on `AppState::lifecycle_op` (held for the whole
+    /// duration of `start_execution_runtime`, including this call and the
+    /// later `spawn_loop`/rollback) to serialize every local start/stop/
+    /// halt attempt within one process — no other writer can install a
+    /// handle into `execution_loop` between this check and `spawn_loop`'s
+    /// later install. A real ownership conflict here is refused *before*
+    /// any task is ever created, closing the pre-existing detached-task
+    /// window (the previous code called `spawn_execution_loop` — which
+    /// `tokio::spawn`s the ticking task immediately — before checking for
+    /// a conflict, so a conflict left an orphaned, untracked task running).
+    async fn reserve_local_ownership(
         &self,
-        run_id: uuid::Uuid,
+        _run_id: uuid::Uuid,
     ) -> Result<(), crate::daily_data_readiness::RuntimeStartEffectsError> {
         use crate::daily_data_readiness::RuntimeStartEffectsError;
 
-        // BUNDLE-7-PHASE-7A fault seam: immediately before loop spawn.
-        // Selection state was already committed by `start_runtime_effects`
-        // above — clear it before propagating the failure so no observer
-        // can see committed selection state with no local loop owner.
+        // BUNDLE-7-PHASE-7A fault seam: immediately before loop spawn — now
+        // evaluated at the ownership-reservation step, strictly before any
+        // task is constructed. `rollback_local_effects` (called by
+        // `advance_run_to_active` on this `Err`) clears the selection state
+        // `start_runtime_effects` already committed; the orchestrator lease
+        // acquired above is released below, in this same branch, since only
+        // this struct holds it.
         if self
             .state
             .dynamic_selection_fault_seam_is(
@@ -1880,34 +2028,99 @@ impl crate::daily_data_readiness::RuntimeStartEffects for ProductionRuntimeStart
             )
             .await
         {
-            self.state.clear_dynamic_selection_runtime_state().await;
+            // Hoisted into its own statement (not the `if let` scrutinee) so
+            // the `std::sync::MutexGuard` temporary is dropped before the
+            // `.await` below — a guard alive across the scrutinee is kept
+            // alive for the whole `if let` block by Rust's temporary-
+            // lifetime rules, which would make this function's returned
+            // future `!Send` (same pattern as `bootstrap_to_store` in
+            // `start_runtime_effects` above).
+            let orchestrator_to_release = self
+                .orchestrator
+                .lock()
+                .expect("orchestrator mutex poisoned")
+                .take();
+            if let Some(mut orchestrator) = orchestrator_to_release {
+                if let Err(rel_err) = orchestrator.release_runtime_leadership().await {
+                    tracing::warn!(
+                        "runtime_lease_release_failed_on_dynamic_selection_fault_seam error={rel_err}"
+                    );
+                }
+            }
             return Err(RuntimeStartEffectsError::internal(
                 "dynamic_selection.fault_seam.immediately_before_loop_spawn",
                 "test-injected fault immediately before loop spawn",
             ));
         }
 
-        let orchestrator = self
-            .orchestrator
-            .lock()
-            .expect("orchestrator mutex poisoned")
-            .take()
-            .expect("spawn_loop must be called only after start_runtime_effects succeeds");
-        let handle = spawn_execution_loop(Arc::clone(self.state), orchestrator, run_id);
-        let mut lock = self.state.execution_loop.lock().await;
+        let lock = self.state.execution_loop.lock().await;
         if lock.is_some() {
-            // BUNDLE-7-PHASE-7A: real loop-ownership conflict — selection
-            // state was already committed above; a duplicate loop is being
-            // refused, so no local loop will ever own this commit. Clear it
-            // (never leave committed selection state paired with no owner).
-            self.state.clear_dynamic_selection_runtime_state().await;
+            drop(lock);
+            // BUNDLE-7-PHASE-7A: real loop-ownership conflict — no task is
+            // ever constructed for this attempt. The orchestrator built by
+            // `start_runtime_effects` will never be used; release its
+            // lease now rather than leaking it until Drop.
+            let orchestrator_to_release = self
+                .orchestrator
+                .lock()
+                .expect("orchestrator mutex poisoned")
+                .take();
+            if let Some(mut orchestrator) = orchestrator_to_release {
+                if let Err(rel_err) = orchestrator.release_runtime_leadership().await {
+                    tracing::warn!(
+                        "runtime_lease_release_failed_on_ownership_conflict error={rel_err}"
+                    );
+                }
+            }
             return Err(RuntimeStartEffectsError::conflict(
                 "runtime.start_refused.local_ownership_conflict",
                 "runtime ownership changed while starting; refusing duplicate loop",
             ));
         }
-        *lock = Some(handle);
         Ok(())
+    }
+
+    /// Only called after `reserve_local_ownership` has returned `Ok` — the
+    /// slot is known empty and no other local start attempt can run
+    /// concurrently (see `reserve_local_ownership`'s doc comment), so this
+    /// install can never race a second writer.
+    async fn spawn_loop(
+        &self,
+        run_id: uuid::Uuid,
+    ) -> Result<(), crate::daily_data_readiness::RuntimeStartEffectsError> {
+        let orchestrator = self
+            .orchestrator
+            .lock()
+            .expect("orchestrator mutex poisoned")
+            .take()
+            .expect("spawn_loop must be called only after reserve_local_ownership succeeds");
+        let handle = spawn_execution_loop(
+            Arc::clone(self.state),
+            orchestrator,
+            run_id,
+            self.legacy_assignments.clone(),
+        );
+        *self.state.execution_loop.lock().await = Some(handle);
+        Ok(())
+    }
+
+    /// ATOMICITY-SINGLE-SNAPSHOT-REPAIR requirement 2/4: clear every local
+    /// effect this attempt may have committed, run_id-scoped where the
+    /// underlying state carries a run_id. Idempotent — safe to call
+    /// regardless of how far the attempt got (some fields may never have
+    /// been touched for an early failure; clearing them again is a no-op).
+    async fn rollback_local_effects(&self, run_id: uuid::Uuid) {
+        self.state
+            .clear_dynamic_selection_runtime_state_for_run(run_id)
+            .await;
+        *self.state.accepted_artifact.write().await = None;
+        *self.state.native_strategy_bootstrap.lock().await = None;
+        *self.state.execution_snapshot.write().await = None;
+        self.state.day_signal_count.store(0, Ordering::SeqCst);
+        self.state.reset_symbol_day_order_counts().await;
+        self.state.reset_signal_blocked_alert_state();
+        self.state.reset_bar_tick_counters();
+        self.state.clear_per_symbol_target_states().await;
     }
 }
 
@@ -1978,7 +2191,10 @@ mod dynamic_selection_start_snapshot_tests {
             &uuid::Uuid::NAMESPACE_DNS,
             b"mqk-daemon.phase7a.off_live_lock",
         );
-        let result = state.build_dynamic_selection_start_snapshot(run_id).await;
+        let snapshot = StartAttemptAuthoritySnapshot::resolve(&state).await;
+        let result = state
+            .build_dynamic_selection_start_snapshot(run_id, &snapshot)
+            .await;
         clear_dynamic_selection_env();
 
         let outcome = result.expect("Off must never refuse the start");
@@ -2023,8 +2239,9 @@ mod dynamic_selection_start_snapshot_tests {
             &uuid::Uuid::NAMESPACE_DNS,
             b"mqk-daemon.phase7a.off_default",
         );
+        let snapshot = StartAttemptAuthoritySnapshot::resolve(&state).await;
         let outcome = state
-            .build_dynamic_selection_start_snapshot(run_id)
+            .build_dynamic_selection_start_snapshot(run_id, &snapshot)
             .await
             .expect("Off must never refuse the start");
 
@@ -2059,7 +2276,10 @@ mod dynamic_selection_start_snapshot_tests {
             &uuid::Uuid::NAMESPACE_DNS,
             b"mqk-daemon.phase7a.shadow_no_config",
         );
-        let result = state.build_dynamic_selection_start_snapshot(run_id).await;
+        let snapshot = StartAttemptAuthoritySnapshot::resolve(&state).await;
+        let result = state
+            .build_dynamic_selection_start_snapshot(run_id, &snapshot)
+            .await;
         clear_dynamic_selection_env();
 
         let outcome =
@@ -2098,7 +2318,10 @@ mod dynamic_selection_start_snapshot_tests {
             &uuid::Uuid::NAMESPACE_DNS,
             b"mqk-daemon.phase7a.paper_enforced_no_config",
         );
-        let result = state.build_dynamic_selection_start_snapshot(run_id).await;
+        let snapshot = StartAttemptAuthoritySnapshot::resolve(&state).await;
+        let result = state
+            .build_dynamic_selection_start_snapshot(run_id, &snapshot)
+            .await;
         clear_dynamic_selection_env();
 
         let err = result.expect_err("PaperEnforced must refuse when config cannot be resolved");
@@ -2132,7 +2355,10 @@ mod dynamic_selection_start_snapshot_tests {
             &uuid::Uuid::NAMESPACE_DNS,
             b"mqk-daemon.phase7a.shadow_db_unavail",
         );
-        let result = state.build_dynamic_selection_start_snapshot(run_id).await;
+        let snapshot = StartAttemptAuthoritySnapshot::resolve(&state).await;
+        let result = state
+            .build_dynamic_selection_start_snapshot(run_id, &snapshot)
+            .await;
         clear_dynamic_selection_env();
 
         let outcome = result.expect("Shadow must never refuse the start");
@@ -2173,7 +2399,10 @@ mod dynamic_selection_start_snapshot_tests {
             &uuid::Uuid::NAMESPACE_DNS,
             b"mqk-daemon.phase7a.paper_enforced_db_unavail",
         );
-        let result = state.build_dynamic_selection_start_snapshot(run_id).await;
+        let snapshot = StartAttemptAuthoritySnapshot::resolve(&state).await;
+        let result = state
+            .build_dynamic_selection_start_snapshot(run_id, &snapshot)
+            .await;
         clear_dynamic_selection_env();
 
         let err = result.expect_err("PaperEnforced must refuse when DB is unavailable");
@@ -2203,7 +2432,10 @@ mod dynamic_selection_start_snapshot_tests {
             &uuid::Uuid::NAMESPACE_DNS,
             b"mqk-daemon.phase7a.live_capital_off",
         );
-        let result = state.build_dynamic_selection_start_snapshot(run_id).await;
+        let snapshot = StartAttemptAuthoritySnapshot::resolve(&state).await;
+        let result = state
+            .build_dynamic_selection_start_snapshot(run_id, &snapshot)
+            .await;
         clear_dynamic_selection_env();
 
         let outcome = result.expect("Off must never refuse the start");
@@ -2497,5 +2729,151 @@ mod dynamic_selection_cleanup_contract_tests {
                 .await,
             "clearing the seam must be respected"
         );
+    }
+
+    /// ATOMICITY-SINGLE-SNAPSHOT-REPAIR requirement 4: run_id-scoped
+    /// compare-and-clear. A rollback for an *older* run_id must never clear
+    /// a *newer* run's already-committed state — the load-bearing property
+    /// that lets a slow/late rollback for a failed attempt race safely
+    /// against a subsequent successful start within the same process.
+    #[tokio::test]
+    async fn clear_for_run_never_clears_a_different_newer_run() {
+        let state = Arc::new(AppState::new_for_test_with_mode_and_broker(
+            DeploymentMode::Paper,
+            BrokerKind::Alpaca,
+        ));
+        let run_a = uuid::Uuid::new_v5(
+            &uuid::Uuid::NAMESPACE_DNS,
+            b"mqk-daemon.phase7a.atomicity.run_a",
+        );
+        let run_b = uuid::Uuid::new_v5(
+            &uuid::Uuid::NAMESPACE_DNS,
+            b"mqk-daemon.phase7a.atomicity.run_b",
+        );
+
+        // Run A committed, then Run B supersedes it (the ordinary
+        // stop-A/start-B sequence).
+        state
+            .commit_dynamic_selection_runtime_state(fixture_off_state(run_a))
+            .await;
+        state
+            .commit_dynamic_selection_runtime_state(fixture_off_state(run_b))
+            .await;
+        assert_eq!(
+            state
+                .dynamic_selection_runtime_snapshot()
+                .await
+                .unwrap()
+                .run_id,
+            run_b
+        );
+
+        // A late rollback for the now-superseded run A must not clear B.
+        state
+            .clear_dynamic_selection_runtime_state_for_run(run_a)
+            .await;
+        assert_eq!(
+            state
+                .dynamic_selection_runtime_snapshot()
+                .await
+                .unwrap()
+                .run_id,
+            run_b,
+            "a compare-and-clear for a stale run_id must never clear a newer run's state"
+        );
+
+        // The matching run_id does clear it.
+        state
+            .clear_dynamic_selection_runtime_state_for_run(run_b)
+            .await;
+        assert!(state.dynamic_selection_runtime_snapshot().await.is_none());
+    }
+
+    /// Compare-and-clear against an already-`None` value is a safe no-op
+    /// (idempotent), regardless of which run_id is passed.
+    #[tokio::test]
+    async fn clear_for_run_on_absent_state_is_a_safe_noop() {
+        let state = Arc::new(AppState::new_for_test_with_mode_and_broker(
+            DeploymentMode::Paper,
+            BrokerKind::Alpaca,
+        ));
+        let run_id = uuid::Uuid::new_v5(
+            &uuid::Uuid::NAMESPACE_DNS,
+            b"mqk-daemon.phase7a.atomicity.absent",
+        );
+        state
+            .clear_dynamic_selection_runtime_state_for_run(run_id)
+            .await;
+        assert!(state.dynamic_selection_runtime_snapshot().await.is_none());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7A-ATOMICITY-SINGLE-SNAPSHOT-
+// REPAIR requirement 7: `paper_enforced_dispatch_not_wired_refusal` proof.
+// Pure function, no DB/credentials/broker — direct unit coverage of the
+// interlock decision independent of the full start path.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod paper_enforced_interlock_tests {
+    use super::*;
+
+    fn outcome(
+        effective_mode: mqk_portfolio::DynamicSelectionMode,
+        disposition: crate::dynamic_selection_start_gate::DynamicSelectionStartGateDisposition,
+    ) -> DynamicSelectionRuntimeState {
+        DynamicSelectionRuntimeState {
+            run_id: uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_DNS, b"phase7a.interlock.fixture"),
+            disposition,
+            configured_mode: effective_mode,
+            effective_mode,
+            live_lock_applied: false,
+            plan: None,
+            selected_pairs: Vec::new(),
+            host_pool: None,
+            reasons: Vec::new(),
+            approved_for_live: false,
+        }
+    }
+
+    #[test]
+    fn paper_enforced_allowed_is_refused() {
+        let o = outcome(
+            mqk_portfolio::DynamicSelectionMode::PaperEnforced,
+            crate::dynamic_selection_start_gate::DynamicSelectionStartGateDisposition::PaperEnforcedAllowed,
+        );
+        let err = paper_enforced_dispatch_not_wired_refusal(&o, o.run_id)
+            .expect("paper_enforced_allowed must be refused until Phase 7B is wired");
+        assert_eq!(
+            err.fault_class(),
+            "runtime.start_refused.dynamic_selection_dispatch_not_wired"
+        );
+    }
+
+    #[test]
+    fn off_is_never_refused() {
+        let o = outcome(
+            mqk_portfolio::DynamicSelectionMode::Off,
+            crate::dynamic_selection_start_gate::DynamicSelectionStartGateDisposition::Off,
+        );
+        assert!(paper_enforced_dispatch_not_wired_refusal(&o, o.run_id).is_none());
+    }
+
+    #[test]
+    fn shadow_allowed_is_never_refused() {
+        let o = outcome(
+            mqk_portfolio::DynamicSelectionMode::Shadow,
+            crate::dynamic_selection_start_gate::DynamicSelectionStartGateDisposition::ShadowAllowed,
+        );
+        assert!(paper_enforced_dispatch_not_wired_refusal(&o, o.run_id).is_none());
+    }
+
+    #[test]
+    fn shadow_invalid_is_never_refused() {
+        let o = outcome(
+            mqk_portfolio::DynamicSelectionMode::Shadow,
+            crate::dynamic_selection_start_gate::DynamicSelectionStartGateDisposition::ShadowInvalid,
+        );
+        assert!(paper_enforced_dispatch_not_wired_refusal(&o, o.run_id).is_none());
     }
 }

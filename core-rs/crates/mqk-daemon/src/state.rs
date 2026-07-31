@@ -1954,7 +1954,10 @@ operator_reconcile_or_repair_required"
         // The deadman block inside the loop checks `db` (from state.db), which
         // is None for all new_for_test_with_* AppState constructors, so the
         // deadman is skipped and PT-AUTO-01 fires clean on GapDetected.
-        let handle = loop_runner::spawn_execution_loop(Arc::clone(self), orchestrator, run_id);
+        // No dispatch assignments needed — this proof only exercises the
+        // gap-detection exit path, not per-symbol dispatch.
+        let handle =
+            loop_runner::spawn_execution_loop(Arc::clone(self), orchestrator, run_id, Vec::new());
 
         // Await the loop exit.  Resolves as soon as the loop terminates.
         match handle.join_handle.await {
@@ -3601,6 +3604,20 @@ operator_reconcile_or_repair_required"
     /// regardless of whether a value is currently present.
     pub(crate) async fn clear_dynamic_selection_runtime_state(&self) {
         *self.dynamic_selection_runtime.write().await = None;
+    }
+
+    /// ATOMICITY-SINGLE-SNAPSHOT-REPAIR requirement 4: run_id-scoped
+    /// compare-and-clear. Clears only when the currently-committed value's
+    /// `run_id` matches `run_id` — a failed start attempt's rollback for
+    /// run A must never clear a newer, already-active run B's committed
+    /// state (e.g. a rollback task still running in the background after a
+    /// later start attempt has already succeeded). Idempotent: clearing an
+    /// already-`None` or already-mismatched value is a safe no-op.
+    pub(crate) async fn clear_dynamic_selection_runtime_state_for_run(&self, run_id: Uuid) {
+        let mut guard = self.dynamic_selection_runtime.write().await;
+        if guard.as_ref().is_some_and(|state| state.run_id == run_id) {
+            *guard = None;
+        }
     }
 
     /// `true` when the installed test fault seam matches `seam`. Always

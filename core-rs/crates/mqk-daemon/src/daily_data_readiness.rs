@@ -1561,6 +1561,10 @@ pub async fn persist_run_linked_readiness_evidence(
 
 /// Ordered trace tag pushed after a successful run-linked evidence persist.
 pub const TRACE_RUN_LINK_EVENT_PERSISTED: &str = "run_link_event_persisted";
+/// Ordered trace tag pushed after local loop ownership has been reserved
+/// (ATOMICITY-SINGLE-SNAPSHOT-REPAIR requirement 3), before the loop task
+/// is ever spawned.
+pub const TRACE_OWNERSHIP_RESERVED: &str = "ownership_reserved";
 /// Ordered trace tag pushed after the execution loop has been spawned.
 pub const TRACE_LOOP_SPAWNED: &str = "loop_spawned";
 
@@ -1605,26 +1609,58 @@ impl RuntimeStartEffectsError {
     }
 }
 
-/// The two production effects that follow run creation and (when
-/// applicable) run-linked evidence persistence. Implemented once for
-/// production (`state::lifecycle::ProductionRuntimeStartEffects`, wrapping
-/// the exact existing orchestrator-build/arm/begin/tick/spawn sequence) and
-/// once for the synthetic lifecycle proof test (a no-op/counter-based fake
-/// that never constructs a broker, provider, or scheduler).
+/// The production effects that follow run creation and (when applicable)
+/// run-linked evidence persistence. Implemented once for production
+/// (`state::lifecycle::ProductionRuntimeStartEffects`, wrapping the exact
+/// existing orchestrator-build/arm/begin/tick/spawn sequence) and once for
+/// the synthetic lifecycle proof test (a no-op/counter-based fake that
+/// never constructs a broker, provider, or scheduler) —
+/// ATOMICITY-SINGLE-SNAPSHOT-REPAIR extends both implementations with the
+/// same reserve/rollback contract, so a hermetic test using the fake
+/// exercises the exact same [`advance_run_to_active`] sequencing production
+/// uses, never a separate test-only reimplementation of it.
 #[async_trait::async_trait]
 pub trait RuntimeStartEffects: Send + Sync {
     /// Construct/arm/begin the runtime for `run_id` and perform every other
     /// one-time run-activation side effect the production path performs
     /// between run creation and loop spawn. Must not spawn the execution
-    /// loop itself (see [`RuntimeStartEffects::spawn_loop`]).
+    /// loop itself (see [`RuntimeStartEffects::spawn_loop`]) and must not
+    /// reserve local loop ownership (see
+    /// [`RuntimeStartEffects::reserve_local_ownership`]).
     async fn start_runtime_effects(
         &self,
         run_id: uuid::Uuid,
     ) -> Result<(), RuntimeStartEffectsError>;
 
+    /// Reserve local loop ownership for `run_id` — must be called, and must
+    /// succeed, strictly before [`RuntimeStartEffects::spawn_loop`]
+    /// constructs any task (ATOMICITY-SINGLE-SNAPSHOT-REPAIR requirement 3:
+    /// "reserve ownership before spawn"). Returns a `Conflict` when another
+    /// local owner already holds the run slot; on conflict the
+    /// implementation must not spawn a task and must release any
+    /// leadership/lease it already acquired for this attempt — no barrier,
+    /// deadman check, tick, dispatch, outbox write, or broker action may
+    /// occur before this reservation succeeds.
+    async fn reserve_local_ownership(
+        &self,
+        run_id: uuid::Uuid,
+    ) -> Result<(), RuntimeStartEffectsError>;
+
     /// Spawn the execution loop for `run_id`. Only called after
-    /// [`RuntimeStartEffects::start_runtime_effects`] has returned `Ok`.
+    /// [`RuntimeStartEffects::reserve_local_ownership`] has returned `Ok`.
     async fn spawn_loop(&self, run_id: uuid::Uuid) -> Result<(), RuntimeStartEffectsError>;
+
+    /// Fail-closed rollback: clear every local (in-process) effect this
+    /// attempt committed for `run_id` — dynamic-selection state, accepted
+    /// artifact, native strategy bootstrap, execution snapshot, per-run
+    /// counters, and per-symbol target state. Called by
+    /// [`advance_run_to_active`] on any failure from
+    /// [`RuntimeStartEffects::start_runtime_effects`],
+    /// [`RuntimeStartEffects::reserve_local_ownership`], or
+    /// [`RuntimeStartEffects::spawn_loop`] — regardless of how far the
+    /// attempt got, so it must be idempotent and must never clear state
+    /// committed by a different, newer `run_id` (compare-and-clear).
+    async fn rollback_local_effects(&self, run_id: uuid::Uuid);
 }
 
 /// Failure from [`advance_run_to_active`]. `RunLinkPersistFailed` is
@@ -1666,15 +1702,78 @@ pub async fn advance_run_to_active<E: RuntimeStartEffects>(
         trace.push(TRACE_RUN_LINK_EVENT_PERSISTED);
     }
 
-    effects
-        .start_runtime_effects(run_id)
-        .await
-        .map_err(RuntimeStartSequenceError::Effects)?;
+    if let Err(err) = effects.start_runtime_effects(run_id).await {
+        rollback_failed_start_attempt(db, effects, run_id).await;
+        return Err(RuntimeStartSequenceError::Effects(err));
+    }
 
-    effects
-        .spawn_loop(run_id)
-        .await
-        .map_err(RuntimeStartSequenceError::Effects)?;
+    // ATOMICITY-SINGLE-SNAPSHOT-REPAIR requirement 3: reserve local loop
+    // ownership *before* any task is spawned. A conflict here means another
+    // local owner already holds the run slot — no task is ever constructed
+    // for this attempt, so there is nothing to detach/leak.
+    if let Err(err) = effects.reserve_local_ownership(run_id).await {
+        rollback_failed_start_attempt(db, effects, run_id).await;
+        return Err(RuntimeStartSequenceError::Effects(err));
+    }
+    trace.push(TRACE_OWNERSHIP_RESERVED);
+
+    if let Err(err) = effects.spawn_loop(run_id).await {
+        rollback_failed_start_attempt(db, effects, run_id).await;
+        return Err(RuntimeStartSequenceError::Effects(err));
+    }
     trace.push(TRACE_LOOP_SPAWNED);
     Ok(())
+}
+
+/// ATOMICITY-SINGLE-SNAPSHOT-REPAIR requirement 2: the shared, fail-closed
+/// rollback [`advance_run_to_active`] runs on any failure once
+/// `start_runtime_effects` has begun. Two independent, idempotent steps:
+///
+/// 1. `effects.rollback_local_effects(run_id)` — clears every local
+///    (in-process) effect this attempt may have committed. Implementations
+///    own their own run_id-scoped compare-and-clear so an older attempt's
+///    rollback can never clear a newer run's committed state.
+/// 2. Durable run rollback — if `run_id` reached `Armed`/`Running` (i.e.
+///    `arm_run` succeeded before the failure), move it back to `Stopped`
+///    (`mqk_db::stop_run`'s own precondition already no-ops for every other
+///    status, so this is safe to call unconditionally and is naturally a
+///    no-op for a failure that happened before `arm_run`).
+///
+/// The original error is always what the caller returns — this function
+/// never masks it. A rollback failure (fetch/stop_run error) is logged, not
+/// propagated, since surfacing a *second*, rollback-specific error in place
+/// of the real cause would be strictly less honest.
+async fn rollback_failed_start_attempt<E: RuntimeStartEffects>(
+    db: &PgPool,
+    effects: &E,
+    run_id: uuid::Uuid,
+) {
+    effects.rollback_local_effects(run_id).await;
+
+    match mqk_db::fetch_run(db, run_id).await {
+        Ok(run)
+            if matches!(
+                run.status,
+                mqk_db::RunStatus::Armed | mqk_db::RunStatus::Running
+            ) =>
+        {
+            if let Err(err) = mqk_db::stop_run(db, run_id).await {
+                tracing::error!(
+                    run_id = %run_id,
+                    "rollback_failed_start_attempt_stop_run_failed error={err}"
+                );
+            }
+        }
+        Ok(_) => {
+            // Already Created/Stopped/Halted — nothing to roll back
+            // (idempotent: a retried rollback for the same run_id, or a
+            // failure that happened before `arm_run`, both land here).
+        }
+        Err(err) => {
+            tracing::error!(
+                run_id = %run_id,
+                "rollback_failed_start_attempt_fetch_run_failed error={err}"
+            );
+        }
+    }
 }

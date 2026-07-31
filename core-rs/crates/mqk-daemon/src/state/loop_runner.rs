@@ -45,6 +45,16 @@ pub(super) fn spawn_execution_loop(
     state: Arc<AppState>,
     mut orchestrator: DaemonOrchestrator,
     run_id: Uuid,
+    // ATOMICITY-SINGLE-SNAPSHOT-REPAIR: the per-symbol dispatch assignment
+    // list, already resolved exactly once by the caller's
+    // `StartAttemptAuthoritySnapshot` (the same value the daily-data-
+    // readiness gate and the dynamic-selection evaluation for this exact
+    // start attempt also consumed) — never re-resolved here from env/
+    // watchlist state a second (now third) time. Empty means even the
+    // legacy single-symbol env fallback was unconfigured, matching the
+    // existing no-op behavior of `tick_strategy_dispatch` when strategy
+    // dispatch is not configured.
+    multi_symbol_assignments: Vec<super::SymbolStrategyAssignment>,
 ) -> ExecutionLoopHandle {
     let (stop_tx, mut stop_rx) = watch::channel(ExecutionLoopCommand::Run);
     let snapshot_cache = Arc::clone(&state.execution_snapshot);
@@ -55,20 +65,6 @@ pub(super) fn spawn_execution_loop(
     let broker_snapshot_source = state.broker_snapshot_source();
     // PT-AUTO-01: retained for ws_continuity_gap_requires_halt() check per tick.
     let state_arc = Arc::clone(&state);
-
-    // MULTI-SYMBOL-DISPATCH-LOOP-01: build the per-symbol dispatch assignment
-    // list once, synchronously, before entering the async loop.
-    // `build_multi_symbol_runtime_config_from_env` is pure (env vars plus one
-    // watchlist-artifact file read via `evaluate_watchlist_intake_from_env`) —
-    // a one-time read here, not per tick. `Err` means even the legacy
-    // single-symbol env fallback is unconfigured (`MQK_STRATEGY_SYMBOL` /
-    // `MQK_STRATEGY_IDS` / `MQK_STRATEGY_MD_TIMEFRAME` absent or empty) — an
-    // empty assignment list, matching the existing no-op behavior of
-    // `tick_strategy_dispatch` when strategy dispatch is not configured.
-    let multi_symbol_assignments: Vec<super::SymbolStrategyAssignment> =
-        super::build_multi_symbol_runtime_config_from_env()
-            .map(|cfg| cfg.symbols)
-            .unwrap_or_default();
 
     // MULTI-STRATEGY-RUNTIME-DRY-RUN-01: one-time env read, mirroring
     // `multi_symbol_assignments` above. Empty unless MQK_DRY_RUN_STRATEGY_IDS
