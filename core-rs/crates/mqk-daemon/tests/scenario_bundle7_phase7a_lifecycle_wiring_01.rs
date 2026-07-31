@@ -42,6 +42,19 @@
 //!   `commit_dynamic_selection_runtime_state` is `pub(crate)`) —
 //!   `state::lifecycle::dynamic_selection_cleanup_contract_tests` (`cargo
 //!   test -p mqk-daemon --lib`), no DB, no credentials.
+//! - ATOMICITY-SINGLE-SNAPSHOT-REPAIR: the atomic-commit/rollback/
+//!   ownership-reservation sequencing itself — `daily_data_readiness::
+//!   advance_run_to_active`, the *exact* shared coordinator both
+//!   `state::lifecycle::ProductionRuntimeStartEffects` (production) and a
+//!   hermetic fake `RuntimeStartEffects` implementation drive — proven
+//!   against a real isolated test DB (arm_run/begin_run genuinely
+//!   transition the row; a rollback genuinely moves it back to `STOPPED`)
+//!   in `scenario_bundle7_phase7a_atomicity_repair_01.rs`. Still no broker/
+//!   provider/network activity: the fake is structurally incapable of
+//!   either. This is the narrow "injected effects/shared coordinator"
+//!   proof the ATOMICITY-SINGLE-SNAPSHOT-REPAIR patch adds — it is not a
+//!   full real `ProductionRuntimeStartEffects` success, which still needs
+//!   the mock-Alpaca-server harness (or live credentials) named above.
 //!
 //! This file keeps only what is genuinely provable through the public API
 //! without a DB or credentials: constructor initialization.
