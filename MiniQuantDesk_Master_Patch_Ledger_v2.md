@@ -18323,3 +18323,170 @@ DAEMON STARTED: no
 ORDERS PLACED: no
 LIVE CAPITAL ENABLED: no
 ```
+
+## DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7A-ATOMICITY-SINGLE-SNAPSHOT-REPAIR (2026-07-31)
+
+**Status: COMPLETE — AWAITING CHATGPT AND OPERATOR ACCEPTANCE BEFORE PUSH.**
+
+This entry documents this repair patch only. It does not rewrite, supersede,
+or resolve the prior `DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7A-LIFECYCLE-
+OWNERSHIP-AND-CLEANUP` entry above — that entry's own named open gap (no full
+real `start_execution_runtime()` success without Alpaca credentials) is an
+environment/operating-rule constraint, not something this repair could close
+either; see "Still open" below.
+
+Starting HEAD: `9323b7699af5e4c553522fa118a49c644a3611da` (== `origin/main`).
+Final HEAD: `dc7654828a11a6667f4921ae3e43e2fe3c4856be`.
+
+Repairs the 8 named blockers in the prior Phase 7A patch:
+
+1. **One frozen start-attempt snapshot** (`StartAttemptAuthoritySnapshot`,
+   `state/lifecycle.rs`) — dynamic-selection mode, `MultiSymbolRuntimeConfig`,
+   calendar/provider/instrument registries, fleet ids, and the authoritative
+   clock resolved exactly once per start attempt and reused by the
+   daily-data-readiness gate, the dynamic-selection start-gate evaluation,
+   and the spawned loop's dispatch assignments. Previously up to three
+   independent reads, two different clocks (`daily_data_readiness_now()` vs
+   raw `Utc::now()`). `spawn_execution_loop` now takes the frozen assignment
+   list as a parameter instead of re-resolving it a third time.
+2. **Durable run rollback** — `RuntimeStartEffects::rollback_local_effects`
+   (per-implementation local-state clear) plus a shared
+   `rollback_failed_start_attempt` helper in `daily_data_readiness::
+   advance_run_to_active` that moves the durable run from Armed/Running back
+   to Stopped on any failure after `start_runtime_effects` begins. Idempotent,
+   never masks the original error.
+3. **Reserve ownership before spawn** — `reserve_local_ownership` is a new
+   trait method `advance_run_to_active` calls strictly before `spawn_loop`.
+   Closes a real detached-task bug: the prior code called
+   `spawn_execution_loop` (which `tokio::spawn`s the ticking task
+   immediately) *before* checking `AppState::execution_loop` for a conflict,
+   so a conflict left an orphaned, untracked task running until it noticed
+   its `stop_tx` had been dropped.
+4. **Atomic local commit** — `clear_dynamic_selection_runtime_state_for_run`
+   (run_id-scoped compare-and-clear on `AppState`) plus
+   `ProductionRuntimeStartEffects::rollback_local_effects` clearing accepted
+   artifact / native bootstrap / execution snapshot / per-run counters /
+   target state uniformly on failure.
+5. **Hermetic real-sequence tests** — `scenario_bundle7_phase7a_atomicity_
+   repair_01.rs` drives `advance_run_to_active` (the exact shared coordinator
+   production uses) against a hermetic fake effects implementation that
+   genuinely arms/begins the run via real `mqk_db` calls against the isolated
+   port-5434 test DB. No network, no credentials.
+6. **Coherent status** — `DynamicSelectionReadinessProjection`'s
+   `configured_mode`/`effective_mode`/`live_lock_applied` now come from the
+   committed snapshot (null/false when none exists) instead of a fresh env
+   preview; the preview moves to separately named `preview_*` fields.
+7. **Temporary `paper_enforced` interlock** — a `paper_enforced`-effective
+   start (disposition `PaperEnforcedAllowed`) is refused before arm/begin/
+   spawn with `runtime.start_refused.dynamic_selection_dispatch_not_wired`
+   until Phase 7B selected-host dispatch is accepted. This closes a real,
+   previously-live gap: nothing before this patch actually blocked
+   `paper_enforced` from falling through to the legacy economic path.
+8. **Test/guard truth** — the whole-file byte-identical `loop_runner.rs`
+   guard (which requirement 1's signature change legitimately breaks) is
+   replaced with a narrower guard proving the tick loop body (economic
+   dispatch: strategy dispatch, Bundle 5/6 ordering, cap #6, outbox, broker
+   calls) is still byte-identical to the required starting HEAD from the
+   anchor line onward. No stale "full E2E proof exists" claim was found
+   anywhere in-repo to remove — the prior entry already stated the opposite
+   honestly.
+
+**Commits:**
+1. `a1809211` — daemon: freeze one start-attempt snapshot, reserve ownership,
+   roll back atomically (requirements 1/2/3/4/7).
+2. `ccda2800` — api: separate committed dynamic-selection truth from env
+   preview (requirement 6).
+3. `dc765482` — test: close hermetic Phase 7A atomicity/ownership proof
+   (requirements 5/8, plus unit tests for 4/7).
+
+(The suggested 5-commit split could not be produced cleanly: requirements
+1/2/3/4/7's code lives in the same functions in `state/lifecycle.rs` and
+`daily_data_readiness.rs` — splitting further would have meant committing
+states that don't compile or don't pass their own tests in between.)
+
+**Proof:**
+- New hermetic DB tests (`scenario_bundle7_phase7a_atomicity_repair_01.rs`,
+  5 tests): success ordering (`ownership_reserved` strictly before
+  `loop_spawned`), a post-`arm_run` failure rolls the durable run back to
+  `STOPPED`, an ownership conflict spawns zero tasks (detached-task fix),
+  two competing attempts spawn exactly one task total and the loser never
+  disturbs the winner's reservation, and a structural single-real-call-site
+  proof for the three frozen-snapshot inputs. All pass against the isolated
+  port-5434 test DB.
+- New/updated unit tests in `state::lifecycle` (no DB/credentials): 4
+  `paper_enforced` interlock decision tests, 2 run_id compare-and-clear
+  tests. New coherence tests in `routes::system` (2): committed truth is
+  neutral with no snapshot; a post-commit env mutation changes only the
+  `preview_*` fields.
+- `cargo test -p mqk-daemon --lib`: 636 passed, 0 failed, 4 ignored
+  (unrelated, pre-existing `#[ignore]`d DB tests).
+- `scenario_daily_data_readiness_start_gate_01.rs`: 20/20 pass (SG-16's
+  expected ordering trace updated for the new `ownership_reserved` tag —
+  the only behavioral change this repair required in a pre-existing test).
+- `scenario_bundle7_phase7a_loop_runner_unchanged_guard_01.rs` (new narrow
+  guard): 2/2 pass.
+- Native strategy bootstrap B1A/B1B: 8/8 non-credential-gated tests pass
+  (3 credential-gated B1A tests remain `#[ignore]`d — same Alpaca-credential
+  constraint as the prior entry, not exercised, per this patch's own
+  operating rules).
+- Strategy promotion regressions: `scenario_strategy_promotion_routes_01.rs`
+  17/17 pass, `scenario_strategy_promotion_runtime_gate_01.rs` 28/28 pass
+  (both `--include-ignored`, DB-backed).
+- Guards: Bundle 5 (`check_runtime_opportunity_allocation_01.sh`) and Bundle
+  6 (`check_multi_strategy_conflict_policy_01.sh`) both `ALL CHECKS PASSED` —
+  Bundle 5's guard explicitly confirms its `loop_runner.rs` insertion point
+  is intact after requirement 1's signature change. Migration governance,
+  unsafe-pattern (sh + ps1), no-promotion-evidence-bypass, workspace-dep-
+  inheritance, ignored-load-bearing-proofs guards all pass.
+- `rustfmt`: applied to every file this patch touches; unrelated files
+  `cargo fmt` also reformatted (pre-existing drift on this machine's
+  toolchain vs. the CI pin) were reverted, untouched.
+- `clippy -D warnings` on `--lib --tests`: zero warnings in any file this
+  patch touches; 28 pre-existing errors confined to
+  `state/session_controller.rs` and `state/runtime_session_source.rs`
+  (`await_holding_lock` + `assert_eq!` literal-bool lints), the same
+  pre-existing local-toolchain-vs-CI-pin mismatch the prior
+  `BUNDLE7-FOUNDATION-ACCEPTANCE-REPAIR-04` session already documented.
+- `git diff --check`: clean.
+
+**Environment note (not a code defect):** `C:\tmp` was completely out of
+disk space mid-session from ~30 stale `mqk-target-*` build-cache directories
+left by prior, already-closed sessions (regenerable Cargo artifacts, not
+git-tracked, not source). This produced misleading transient compile errors
+in files this patch never touched. Cleared ~330GB by deleting those stale
+caches; the resulting `mqk-target-phase7a-final` dir was used for the test
+runs reported above. A full whole-repo `cargo test -p mqk-daemon --tests
+--no-run` (compiling & linking all ~200 integration test binaries in one
+parallel pass) was not achievable even after clearing disk — it consistently
+crashed a subset of `rustc`/linker processes (`STATUS_STACK_BUFFER_OVERRUN`)
+under full parallelism on this machine, unrelated to any specific source
+file. Validation above instead ran the full `--lib` suite plus every
+individually-named regression file from this patch's own VALIDATION section,
+which is a strictly stronger, targeted signal for the code this patch
+actually touches.
+
+**Still open (inherited from the prior entry, not newly introduced or
+closable by this repair):** a full real `start_execution_runtime()` success
+against `ProductionRuntimeStartEffects` itself — as opposed to the hermetic
+shared-coordinator proof this repair adds — still needs either a
+mock-Alpaca-server test harness or live paper credentials, both out of this
+patch's scope and forbidden by its own operating rules. The production-only
+orchestrator-lease-release-on-conflict branch inside
+`ProductionRuntimeStartEffects::reserve_local_ownership` is therefore
+compile-proven and code-reviewed but not exercised by an executed test; the
+*shared* reserve-before-spawn/rollback sequencing it participates in is
+exercised, hermetically, via `advance_run_to_active` in the new test file.
+
+```text
+DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7A-ATOMICITY-SINGLE-SNAPSHOT-REPAIR:
+COMPLETE — AWAITING CHATGPT AND OPERATOR ACCEPTANCE BEFORE PUSH
+PUSHED: no
+PHASE 7B ECONOMIC DISPATCH CHANGED: no
+DURABLE SELECTION TABLES STARTED: no
+FINAL API/GUI STARTED: no
+BUNDLE 8 STARTED: no
+REAL DAEMON STARTED: no
+ORDERS PLACED: no
+LIVE CAPITAL ENABLED: no
+AI CONSUMED: no
+```
