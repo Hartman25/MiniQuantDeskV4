@@ -777,6 +777,32 @@ pub struct AppState {
     /// fault-injection seam for the atomic start-commit sequence. `None` in
     /// production and for every test that does not explicitly install one.
     dynamic_selection_fault_seam: Arc<RwLock<Option<DynamicSelectionLifecycleFaultSeam>>>,
+    /// PHASE-7A-FINAL-PRIVATE-PRODUCTION-EFFECTS-PROOF requirement 6: a
+    /// narrow, always-`false`-in-production hermetic-broker override. When
+    /// a test explicitly enables it (`#[cfg(test)]`-only setter), the one
+    /// `build_daemon_broker` call site in `build_execution_orchestrator`
+    /// that would refuse `BrokerKind::Paper` instead constructs
+    /// `DaemonBroker::Paper(LockedPaperBroker::default())` directly — the
+    /// same in-process, zero-network, zero-credential broker
+    /// `build_daemon_broker` would build if it did not refuse Paper as a
+    /// business-rule gate. This never weakens `build_daemon_broker` itself
+    /// (the real gate is untouched and always applies whenever this flag is
+    /// `false`, which is always true in production); it only lets a
+    /// `#[cfg(test)]` caller reach a genuinely successful
+    /// `ProductionRuntimeStartEffects` start hermetically, through the
+    /// exact same production code path.
+    hermetic_test_broker_override: Arc<RwLock<bool>>,
+    /// PHASE-7A-FINAL-PRIVATE-PRODUCTION-EFFECTS-PROOF requirement 6:
+    /// hermetic injection point for the barrier-cancellation / Active-
+    /// install-failure matrix. Always `false` in production and for every
+    /// test that does not explicitly enable it (setter is
+    /// `#[cfg(test)]`-gated). See `install_active_runtime`.
+    force_install_active_runtime_conflict: Arc<AtomicBool>,
+    /// PHASE-7A-FINAL-PRIVATE-PRODUCTION-EFFECTS-PROOF requirement 6:
+    /// hermetic injection point forcing `release_orchestrator_leadership`'s
+    /// outcome to a simulated failure. Always `false` in production and for
+    /// every test that does not explicitly enable it.
+    force_leadership_release_failure: Arc<AtomicBool>,
 }
 
 /// ATOMIC-OWNERSHIP-AND-ROLLBACK-TRUTH-01 requirement 2: every locally-
@@ -1509,6 +1535,9 @@ impl AppState {
             completed_bar_task:
                 autonomous_completed_bar_task::AutonomousCompletedBarTaskRuntime::default(),
             dynamic_selection_fault_seam: Arc::new(RwLock::new(None)),
+            hermetic_test_broker_override: Arc::new(RwLock::new(false)),
+            force_install_active_runtime_conflict: Arc::new(AtomicBool::new(false)),
+            force_leadership_release_failure: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -3774,13 +3803,27 @@ operator_reconcile_or_repair_required"
                 run_id: starting,
                 metadata,
             } if *starting == run_id => {
-                let metadata = Arc::clone(metadata);
-                *lock = LocalRuntimeOwnership::Active {
-                    run_id,
-                    metadata,
-                    handle,
-                };
-                return Ok(());
+                // PHASE-7A-FINAL-PRIVATE-PRODUCTION-EFFECTS-PROOF
+                // requirement 6: hermetic injection point for the
+                // barrier-cancellation / Active-install-failure matrix
+                // (R6 items 19/20). Always `false` in production and for
+                // every test that does not explicitly enable it. When
+                // enabled, this takes the exact same conflict-cleanup path
+                // (stop + join the just-spawned handle, return `Err`) the
+                // genuine `StartingForDifferentRun`/`AlreadyActive`
+                // branches below already use — no new lifecycle code, only
+                // a deterministic trigger for it.
+                if self.install_active_runtime_conflict_forced() {
+                    InstallActiveRuntimeError::NotStarting
+                } else {
+                    let metadata = Arc::clone(metadata);
+                    *lock = LocalRuntimeOwnership::Active {
+                        run_id,
+                        metadata,
+                        handle,
+                    };
+                    return Ok(());
+                }
             }
             LocalRuntimeOwnership::Starting {
                 run_id: starting, ..
@@ -3953,6 +3996,15 @@ operator_reconcile_or_repair_required"
     /// Always a full overwrite when establishing fresh — never a
     /// partial/in-place merge with a stale prior value for a *different*
     /// run_id.
+    ///
+    /// Genuinely test-only in purpose (see doc above) and, since
+    /// PHASE-7A-FINAL-PRIVATE-PRODUCTION-EFFECTS-PROOF narrowed its one
+    /// non-test caller (`commit_dynamic_selection_runtime_state_for_test`)
+    /// to `#[cfg(test)]`, every remaining call site is already inside a
+    /// `#[cfg(test)]` module — gating this function the same way removes
+    /// the resulting dead-code warning in default-build production and
+    /// matches its real, test-only role.
+    #[cfg(test)]
     pub(crate) async fn commit_dynamic_selection_runtime_state(
         &self,
         state: DynamicSelectionRuntimeState,
@@ -4048,9 +4100,68 @@ operator_reconcile_or_repair_required"
         *self.dynamic_selection_fault_seam.read().await == Some(seam)
     }
 
+    /// `true` only when a `#[cfg(test)]` caller has explicitly enabled the
+    /// hermetic broker override. Always `false` in production — no
+    /// production call site ever enables it, and the setter that could is
+    /// itself `#[cfg(test)]`-gated (see `set_hermetic_test_broker_override_
+    /// for_test` below), so it cannot exist in a default-build binary.
+    pub(crate) async fn hermetic_test_broker_override_enabled(&self) -> bool {
+        *self.hermetic_test_broker_override.read().await
+    }
+
+    /// PHASE-7A-FINAL-PRIVATE-PRODUCTION-EFFECTS-PROOF requirement 6: enable
+    /// (or disable) the hermetic broker override for the real-effects
+    /// success matrix. `pub(crate)` + `#[cfg(test)]` — reachable only from
+    /// this crate's own test build.
+    #[cfg(test)]
+    pub(crate) async fn set_hermetic_test_broker_override_for_test(&self, enabled: bool) {
+        *self.hermetic_test_broker_override.write().await = enabled;
+    }
+
+    /// `true` only when a `#[cfg(test)]` caller has explicitly enabled the
+    /// forced install-conflict injection. Always `false` in production.
+    pub(crate) fn install_active_runtime_conflict_forced(&self) -> bool {
+        self.force_install_active_runtime_conflict
+            .load(Ordering::SeqCst)
+    }
+
+    /// PHASE-7A-FINAL-PRIVATE-PRODUCTION-EFFECTS-PROOF requirement 6:
+    /// enable (or disable) the forced install-conflict injection for the
+    /// barrier-cancellation / Active-install-failure matrix. `pub(crate)` +
+    /// `#[cfg(test)]` — reachable only from this crate's own test build.
+    #[cfg(test)]
+    pub(crate) fn set_install_active_runtime_conflict_for_test(&self, enabled: bool) {
+        self.force_install_active_runtime_conflict
+            .store(enabled, Ordering::SeqCst);
+    }
+
+    /// `true` only when a `#[cfg(test)]` caller has explicitly enabled the
+    /// forced leadership-release-failure injection. Always `false` in
+    /// production.
+    pub(crate) fn leadership_release_failure_forced(&self) -> bool {
+        self.force_leadership_release_failure.load(Ordering::SeqCst)
+    }
+
+    /// PHASE-7A-FINAL-PRIVATE-PRODUCTION-EFFECTS-PROOF requirement 6:
+    /// enable (or disable) the forced leadership-release-failure injection.
+    /// `pub(crate)` + `#[cfg(test)]` — reachable only from this crate's own
+    /// test build.
+    #[cfg(test)]
+    pub(crate) fn set_leadership_release_failure_for_test(&self, enabled: bool) {
+        self.force_leadership_release_failure
+            .store(enabled, Ordering::SeqCst);
+    }
+
     /// Test helper: install (or clear, via `None`) a fault-injection seam
     /// for the atomic dynamic-selection start-commit sequence.
-    pub async fn set_dynamic_selection_fault_seam_for_test(
+    ///
+    /// PHASE-7A-FINAL-PRIVATE-PRODUCTION-EFFECTS-PROOF requirement 5: this
+    /// mutates a Phase 7A fault seam, so it must not be a default-build
+    /// production-reachable API. `pub(crate)` + `#[cfg(test)]` — reachable
+    /// only from this crate's own `#[cfg(test)]` modules, never from an
+    /// external `tests/*.rs` integration test or from production code.
+    #[cfg(test)]
+    pub(crate) async fn set_dynamic_selection_fault_seam_for_test(
         &self,
         seam: Option<DynamicSelectionLifecycleFaultSeam>,
     ) {
@@ -4102,14 +4213,22 @@ impl AppState {
     /// operator route exposes raw provenance), but needed by sentinel-
     /// preservation tests to prove a losing start attempt's rollback left a
     /// different, legitimate owner's committed provenance untouched.
-    pub async fn accepted_artifact_snapshot_for_test(&self) -> Option<AcceptedArtifactProvenance> {
+    /// PHASE-7A-FINAL-PRIVATE-PRODUCTION-EFFECTS-PROOF requirement 5: this
+    /// plants active metadata used to prove Phase 7A sentinel-preservation,
+    /// so it must not be default-build production-reachable.
+    /// `pub(crate)` + `#[cfg(test)]` — this crate's own tests only.
+    #[cfg(test)]
+    pub(crate) async fn accepted_artifact_snapshot_for_test(
+        &self,
+    ) -> Option<AcceptedArtifactProvenance> {
         self.accepted_artifact.read().await.clone()
     }
 
     /// ATOMIC-OWNERSHIP-AND-ROLLBACK-TRUTH-01 requirement 3: read-only test
     /// accessor for `day_signal_count`, for the same sentinel-preservation
     /// reason as `accepted_artifact_snapshot_for_test`.
-    pub fn day_signal_count_snapshot_for_test(&self) -> u32 {
+    #[cfg(test)]
+    pub(crate) fn day_signal_count_snapshot_for_test(&self) -> u32 {
         self.day_signal_count.load(Ordering::SeqCst)
     }
 
@@ -4117,7 +4236,8 @@ impl AppState {
     /// sentinel `accepted_artifact` value, for a sentinel-preservation test
     /// to prove a *different* run's failed/rolled-back start attempt never
     /// clears it.
-    pub async fn plant_accepted_artifact_for_test(
+    #[cfg(test)]
+    pub(crate) async fn plant_accepted_artifact_for_test(
         &self,
         value: Option<AcceptedArtifactProvenance>,
     ) {
@@ -4127,16 +4247,24 @@ impl AppState {
     /// ATOMIC-OWNERSHIP-AND-ROLLBACK-TRUTH-01 requirement 3: plant a
     /// sentinel `day_signal_count` value, for the same reason as
     /// `plant_accepted_artifact_for_test`.
-    pub fn plant_day_signal_count_for_test(&self, value: u32) {
+    #[cfg(test)]
+    pub(crate) fn plant_day_signal_count_for_test(&self, value: u32) {
         self.day_signal_count.store(value, Ordering::SeqCst)
     }
 
-    /// ATOMIC-OWNERSHIP-AND-ROLLBACK-TRUTH-01 requirement 3: `pub` test-only
+    /// ATOMIC-OWNERSHIP-AND-ROLLBACK-TRUTH-01 requirement 3: test-only
     /// wrapper over the `pub(crate)` `commit_dynamic_selection_runtime_
-    /// state`, so an external integration test can plant a sentinel
-    /// dynamic-selection value for a run without driving a real start
-    /// attempt.
-    pub async fn commit_dynamic_selection_runtime_state_for_test(
+    /// state`, so an in-crate test can plant a sentinel dynamic-selection
+    /// value for a run without driving a real start attempt.
+    ///
+    /// PHASE-7A-FINAL-PRIVATE-PRODUCTION-EFFECTS-PROOF requirement 5:
+    /// narrowed from a `pub` external-integration-test seam to
+    /// `pub(crate)` + `#[cfg(test)]` — the one external test that used to
+    /// call this (`scenario_bundle7_phase7a_final_atomic_ownership_and_
+    /// rollback_truth_01.rs`) was moved in-crate alongside
+    /// `drive_production_start_effects_for_test`.
+    #[cfg(test)]
+    pub(crate) async fn commit_dynamic_selection_runtime_state_for_test(
         &self,
         state: DynamicSelectionRuntimeState,
     ) {

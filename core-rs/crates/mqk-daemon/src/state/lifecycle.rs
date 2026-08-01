@@ -1989,59 +1989,6 @@ impl AppState {
 }
 
 // ---------------------------------------------------------------------------
-// ATOMIC-OWNERSHIP-AND-ROLLBACK-TRUTH-01 requirement 6: test-only seam to
-// drive the exact production `ProductionRuntimeStartEffects` +
-// `daily_data_readiness::advance_run_to_active` sequencing directly,
-// bypassing `start_execution_runtime`'s outer deployment/capital/artifact/
-// policy gates — which, for `BrokerKind::Paper`, would refuse before ever
-// reaching this code (`deployment_mode_readiness` refuses `(Paper, Paper)`
-// outright; see `scenario_bundle7_phase7a_lifecycle_wiring_01.rs`).
-//
-// `self.runtime_selection.broker_kind` must be `BrokerKind::Paper` for this
-// to be hermetic: `build_execution_orchestrator` then constructs
-// `DaemonBroker::Paper(LockedPaperBroker::default())` — in-process, zero
-// network, zero credentials, exactly the same broker
-// `AppState::run_loop_one_tick_for_test` already uses for the same reason.
-// This lets an integration test exercise the *real* reservation/commit/
-// spawn/rollback code path (not a fake `RuntimeStartEffects`) against a
-// real isolated test DB.
-//
-// Never called in production; not cfg-gated, following the `_for_test`
-// naming convention established by `run_loop_one_tick_for_test`/
-// `inject_running_loop_for_test`/`establish_db_backed_active_run_for_test`.
-impl AppState {
-    pub async fn drive_production_start_effects_for_test(
-        self: &Arc<Self>,
-        db: PgPool,
-        run_id: uuid::Uuid,
-        dynamic_selection_outcome: Option<DynamicSelectionRuntimeState>,
-    ) -> (
-        Result<(), crate::daily_data_readiness::RuntimeStartSequenceError>,
-        Vec<&'static str>,
-    ) {
-        let effects = ProductionRuntimeStartEffects {
-            state: self,
-            db: db.clone(),
-            artifact_intake: std::sync::Mutex::new(Some(ArtifactIntakeOutcome::NotConfigured)),
-            native_strategy_bootstrap: std::sync::Mutex::new(None),
-            orchestrator: std::sync::Mutex::new(None),
-            dynamic_selection_outcome: std::sync::Mutex::new(dynamic_selection_outcome),
-            legacy_assignments: Vec::new(),
-            start_phase: std::sync::Mutex::new(
-                crate::daily_data_readiness::RuntimeStartPhase::BeforeArm,
-            ),
-            leadership_release_outcome: std::sync::Mutex::new(None),
-        };
-        let mut trace: Vec<&'static str> = Vec::new();
-        let result = crate::daily_data_readiness::advance_run_to_active(
-            &db, &effects, run_id, None, &mut trace,
-        )
-        .await;
-        (result, trace)
-    }
-}
-
-// ---------------------------------------------------------------------------
 // REPAIR 3 (DAILY-DATA-READINESS-01C-CLOSURE-REPAIR-01): production
 // implementation of `daily_data_readiness::RuntimeStartEffects`.
 //
@@ -2112,10 +2059,20 @@ impl ProductionRuntimeStartEffects<'_> {
         mut orchestrator: DaemonOrchestrator,
         context: &'static str,
     ) {
-        let outcome = orchestrator
-            .release_runtime_leadership()
-            .await
-            .map_err(|err| err.to_string());
+        // PHASE-7A-FINAL-PRIVATE-PRODUCTION-EFFECTS-PROOF requirement 6:
+        // hermetic injection point for a forced leadership-release
+        // failure. Always `false` in production and for every test that
+        // does not explicitly enable it; the real release call and its
+        // real error path are otherwise unchanged.
+        let outcome = if self.state.leadership_release_failure_forced() {
+            Err("test-injected leadership release failure".to_string())
+        } else {
+            orchestrator
+                .release_runtime_leadership()
+                .await
+                .map_err(|err| err.to_string())
+        };
+        drop(orchestrator);
         if let Err(ref message) = outcome {
             tracing::warn!("runtime_lease_release_failed_on_{context} error={message}");
         }
@@ -2551,6 +2508,738 @@ impl crate::daily_data_readiness::RuntimeStartEffects for ProductionRuntimeStart
             .start_phase
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7A-FINAL-PRIVATE-PRODUCTION-
+// EFFECTS-PROOF requirement 6: private, in-crate hermetic seam that drives
+// the exact production `ProductionRuntimeStartEffects` +
+// `daily_data_readiness::advance_run_to_active` sequencing directly,
+// bypassing `start_execution_runtime`'s outer deployment/capital/artifact/
+// policy gates — which, for `BrokerKind::Paper`, would refuse before ever
+// reaching this code (`deployment_mode_readiness` refuses `(Paper, Paper)`
+// outright; see `scenario_bundle7_phase7a_lifecycle_wiring_01.rs`).
+//
+// This used to be a `pub` non-cfg-gated seam on `AppState`
+// (`drive_production_start_effects_for_test`), reachable from any
+// downstream crate or external `tests/*.rs` integration test — a
+// default-build production-accessible driver of `ProductionRuntimeStartEffects`,
+// exactly the R5 bypass this patch closes. It is now `pub(crate)` and
+// `#[cfg(test)]`: reachable only from this crate's own test build, never
+// from production code or an external integration test.
+//
+// `self.runtime_selection.broker_kind` must be `BrokerKind::Paper` for this
+// to be hermetic: `build_execution_orchestrator` then constructs
+// `DaemonBroker::Paper(LockedPaperBroker::default())` — in-process, zero
+// network, zero credentials. This lets a test exercise the *real*
+// reservation/commit/spawn/rollback code path (not a fake
+// `RuntimeStartEffects`) against a real isolated test DB, without ever
+// constructing a broker capable of live capital.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+impl AppState {
+    pub(crate) async fn drive_production_start_effects_for_test(
+        self: &Arc<Self>,
+        db: PgPool,
+        run_id: uuid::Uuid,
+        dynamic_selection_outcome: Option<DynamicSelectionRuntimeState>,
+    ) -> (
+        Result<(), crate::daily_data_readiness::RuntimeStartSequenceError>,
+        Vec<&'static str>,
+    ) {
+        let effects = ProductionRuntimeStartEffects {
+            state: self,
+            db: db.clone(),
+            artifact_intake: std::sync::Mutex::new(Some(ArtifactIntakeOutcome::NotConfigured)),
+            native_strategy_bootstrap: std::sync::Mutex::new(None),
+            orchestrator: std::sync::Mutex::new(None),
+            dynamic_selection_outcome: std::sync::Mutex::new(dynamic_selection_outcome),
+            legacy_assignments: Vec::new(),
+            start_phase: std::sync::Mutex::new(
+                crate::daily_data_readiness::RuntimeStartPhase::BeforeArm,
+            ),
+            leadership_release_outcome: std::sync::Mutex::new(None),
+        };
+        let mut trace: Vec<&'static str> = Vec::new();
+        let result = crate::daily_data_readiness::advance_run_to_active(
+            &db, &effects, run_id, None, &mut trace,
+        )
+        .await;
+        (result, trace)
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7A-FINAL-PRIVATE-PRODUCTION-
+// EFFECTS-PROOF requirement 6: real-effects success/failure matrix driven
+// through `AppState::drive_production_start_effects_for_test` above — the
+// actual `ProductionRuntimeStartEffects` implementation, never a fake.
+//
+// Moved in-crate from the former external integration test
+// `tests/scenario_bundle7_phase7a_final_atomic_ownership_and_rollback_
+// truth_01.rs` (deleted) so it can reach the now-private (`pub(crate)`,
+// `#[cfg(test)]`) seams above. Per repo DB-test rule, hard-refuses any
+// `MQK_DATABASE_URL` that is not explicitly the port-5434 local test DB.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod real_production_effects_matrix_tests {
+    use super::*;
+
+    /// Serializes every test in this module: they all contend for the same
+    /// `(DAEMON_ENGINE_ID, Paper)` "active run" slot via
+    /// `AppState::create_or_reuse_run_for_start`.
+    fn db_test_lock() -> &'static tokio::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+    }
+
+    /// Hard-refuses any `MQK_DATABASE_URL` that is not explicitly the
+    /// port-5434 local test database — never 5440 (paper), never an
+    /// unqualified host.
+    async fn db_pool_or_skip(label: &str) -> Option<PgPool> {
+        let Ok(url) = std::env::var("MQK_DATABASE_URL") else {
+            eprintln!("{label}: skipped; MQK_DATABASE_URL is not set");
+            return None;
+        };
+        if !url.contains(":5434") {
+            eprintln!(
+                "{label}: skipped; MQK_DATABASE_URL must be the port-5434 \
+                 local test DB, refusing to run against: {url}"
+            );
+            return None;
+        }
+        let pool = match sqlx::postgres::PgPoolOptions::new()
+            .max_connections(3)
+            .connect(&url)
+            .await
+        {
+            Ok(pool) => pool,
+            Err(e) => {
+                eprintln!("{label}: skipped; could not connect to MQK_DATABASE_URL: {e}");
+                return None;
+            }
+        };
+        if let Err(e) = mqk_db::migrate(&pool).await {
+            eprintln!("{label}: skipped; mqk_db::migrate failed: {e}");
+            return None;
+        }
+        Some(pool)
+    }
+
+    async fn clear_any_preexisting_active_daemon_run(pool: &PgPool) {
+        let _ = sqlx::query(
+            "update runs set status = 'STOPPED', stopped_at_utc = now() \
+             where engine_id = 'mqk-daemon' and mode = 'PAPER' and status in ('ARMED', 'RUNNING')",
+        )
+        .execute(pool)
+        .await;
+    }
+
+    async fn delete_run_and_its_events(pool: &PgPool, run_id: uuid::Uuid) {
+        let _ = sqlx::query("delete from sys_autonomous_session_events where run_id = $1")
+            .bind(run_id)
+            .execute(pool)
+            .await;
+        let _ = sqlx::query("delete from runs where run_id = $1")
+            .bind(run_id)
+            .execute(pool)
+            .await;
+    }
+
+    /// A hermetic `Paper`+`Paper` `AppState` wired to the real test DB. Never
+    /// start-able to a genuine `Active` loop through the real broker-
+    /// construction path (`build_daemon_broker` refuses `BrokerKind::Paper`)
+    /// — this module uses that refusal itself as a real, deterministic
+    /// `start_runtime_effects` failure (FA-01), and never needs a working
+    /// broker for the reservation-only proof (FA-02).
+    fn hermetic_paper_state(pool: &PgPool) -> Arc<AppState> {
+        let mut state =
+            AppState::new_for_test_with_mode_and_broker(DeploymentMode::Paper, BrokerKind::Paper);
+        state.db = Some(pool.clone());
+        Arc::new(state)
+    }
+
+    fn off_disposition_fixture(run_id: uuid::Uuid) -> DynamicSelectionRuntimeState {
+        DynamicSelectionRuntimeState {
+            run_id,
+            disposition:
+                crate::dynamic_selection_start_gate::DynamicSelectionStartGateDisposition::Off,
+            configured_mode: mqk_portfolio::DynamicSelectionMode::Off,
+            effective_mode: mqk_portfolio::DynamicSelectionMode::Off,
+            live_lock_applied: false,
+            plan: None,
+            selected_pairs: Vec::new(),
+            host_pool: None,
+            reasons: Vec::new(),
+            approved_for_live: false,
+        }
+    }
+
+    // -------------------------------------------------------------------
+    // FA-01: a genuine `start_runtime_effects` failure (real broker
+    // construction refusing `BrokerKind::Paper`) is cleanly rolled back —
+    // reservation released, phase stays `BeforeArm` (arm_run was never
+    // attempted), durable disposition is `AlreadyNonActive` (nothing was
+    // ever armed).
+    // -------------------------------------------------------------------
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fa_01_real_orchestrator_construction_failure_is_cleanly_rolled_back() {
+        let _g = db_test_lock().lock().await;
+        let Some(pool) = db_pool_or_skip("FA-01").await else {
+            return;
+        };
+        clear_any_preexisting_active_daemon_run(&pool).await;
+        let state = hermetic_paper_state(&pool);
+        let run_id = state
+            .create_or_reuse_run_for_start(&pool)
+            .await
+            .expect("run creation must succeed");
+
+        let (result, trace) = state
+            .drive_production_start_effects_for_test(
+                pool.clone(),
+                run_id,
+                Some(off_disposition_fixture(run_id)),
+            )
+            .await;
+
+        assert!(
+            result.is_err(),
+            "FA-01: expected failure (Paper broker construction is refused)"
+        );
+        let (original, rollback) = match result.unwrap_err() {
+            crate::daily_data_readiness::RuntimeStartSequenceError::Effects {
+                original,
+                rollback,
+            } => (original, rollback),
+            other => panic!("FA-01: expected Effects, got {other:?}"),
+        };
+        assert_eq!(
+            original.fault_class, "runtime.start_refused.paper_broker_not_execution_path",
+            "FA-01: this must be the real build_daemon_broker refusal, not a \
+             different failure mode: {original:?}"
+        );
+        assert_eq!(
+            trace,
+            vec!["ownership_reserved"],
+            "FA-01: reservation succeeds (it never touches a broker); the \
+             failure happens inside the next step, start_runtime_effects, \
+             before any further trace tag fires"
+        );
+        assert!(
+            matches!(
+                rollback.phase_reached,
+                crate::daily_data_readiness::RuntimeStartPhase::BeforeArm
+            ),
+            "FA-01: the real orchestrator construction failure happens before \
+             arm_run is ever attempted — phase must still be BeforeArm: \
+             {rollback:?}"
+        );
+        assert!(
+            matches!(
+                rollback.durable,
+                crate::daily_data_readiness::DurableRollbackDisposition::AlreadyNonActive
+            ),
+            "FA-01: nothing was ever armed, so the durable run was never \
+             Armed/Running: {rollback:?}"
+        );
+        assert!(!rollback.durable_status_unknown);
+
+        assert_eq!(
+            state.locally_owned_run_id().await,
+            None,
+            "FA-01: a failed start must release its own reservation"
+        );
+        assert!(
+            state.dynamic_selection_runtime_snapshot().await.is_none(),
+            "FA-01: no dynamic-selection state may survive a failed start — \
+             start_runtime_effects failed before the local bundle was ever built"
+        );
+        assert!(matches!(
+            mqk_db::fetch_run(&pool, run_id)
+                .await
+                .expect("fetch_run")
+                .status,
+            mqk_db::RunStatus::Created
+        ));
+
+        delete_run_and_its_events(&pool, run_id).await;
+    }
+
+    // -------------------------------------------------------------------
+    // FA-02 (requirement 3, explicit ask): "Add a production-AppState test
+    // with sentinel values for an existing owner. After a conflicting
+    // start, prove loop/artifact/bootstrap/snapshot/counters/targets/
+    // dynamic-selection state are unchanged."
+    // -------------------------------------------------------------------
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fa_02_ownership_conflict_preserves_existing_owner_sentinel_state() {
+        let _g = db_test_lock().lock().await;
+        let Some(pool) = db_pool_or_skip("FA-02").await else {
+            return;
+        };
+        clear_any_preexisting_active_daemon_run(&pool).await;
+        let state = hermetic_paper_state(&pool);
+
+        let run_a = uuid::Uuid::new_v5(
+            &uuid::Uuid::NAMESPACE_DNS,
+            b"mqk-daemon.phase7a.final.fa02.run_a",
+        );
+        state
+            .establish_db_backed_active_run_for_test(run_a)
+            .await
+            .expect("FA-02: run A must be established as the active owner");
+
+        let sentinel_artifact = AcceptedArtifactProvenance {
+            artifact_id: "fa-02-sentinel-artifact".to_string(),
+            artifact_type: "sentinel".to_string(),
+            stage: "sentinel".to_string(),
+            produced_by: "fa-02-test".to_string(),
+        };
+        state
+            .plant_accepted_artifact_for_test(Some(sentinel_artifact.clone()))
+            .await;
+        state.plant_day_signal_count_for_test(4242);
+        state
+            .commit_dynamic_selection_runtime_state_for_test(off_disposition_fixture(run_a))
+            .await;
+
+        assert_eq!(state.locally_owned_run_id().await, Some(run_a));
+
+        let run_b = uuid::Uuid::new_v5(
+            &uuid::Uuid::NAMESPACE_DNS,
+            format!("mqk-daemon.phase7a.final.fa02.run_b.{run_a}").as_bytes(),
+        );
+        mqk_db::insert_run(
+            &pool,
+            &mqk_db::NewRun {
+                run_id: run_b,
+                engine_id: "mqk-daemon".to_string(),
+                mode: "PAPER".to_string(),
+                started_at_utc: Utc::now(),
+                git_hash: "UNKNOWN".to_string(),
+                config_hash: "fa-02-test".to_string(),
+                config_json: serde_json::json!({"test": "fa-02"}),
+                host_fingerprint: "fa-02-test-host".to_string(),
+            },
+        )
+        .await
+        .expect("FA-02: run_b insert must succeed");
+
+        let (result_b, trace_b) = state
+            .drive_production_start_effects_for_test(
+                pool.clone(),
+                run_b,
+                Some(off_disposition_fixture(run_b)),
+            )
+            .await;
+
+        assert!(result_b.is_err(), "FA-02: run B must be refused");
+        assert!(
+            trace_b.is_empty(),
+            "FA-02: no ordered-trace tag may fire for a reservation conflict"
+        );
+        let (original_b, rollback_b) = match result_b.unwrap_err() {
+            crate::daily_data_readiness::RuntimeStartSequenceError::Effects {
+                original,
+                rollback,
+            } => (original, rollback),
+            other => panic!("FA-02: expected Effects, got {other:?}"),
+        };
+        assert_eq!(
+            original_b.fault_class, "runtime.start_refused.local_ownership_conflict",
+            "FA-02: this must be the real reservation conflict, not a different \
+             failure mode: {original_b:?}"
+        );
+        assert!(
+            matches!(
+                rollback_b.durable,
+                crate::daily_data_readiness::DurableRollbackDisposition::AlreadyNonActive
+            ),
+            "FA-02: run B was never armed, so its own durable rollback is a \
+             no-op: {rollback_b:?}"
+        );
+
+        assert_eq!(
+            state.locally_owned_run_id().await,
+            Some(run_a),
+            "FA-02: the slot must still show run A as the Active owner — run \
+             B's rollback must never clear a different run's reservation"
+        );
+        let after_selection = state
+            .dynamic_selection_runtime_snapshot()
+            .await
+            .expect("FA-02: run A's dynamic-selection state must still be present");
+        assert_eq!(
+            after_selection.run_id, run_a,
+            "FA-02: run A's committed dynamic-selection state must be unchanged \
+             (still tagged with run A's run_id, never cleared or overwritten by \
+             run B's rollback)"
+        );
+        assert_eq!(
+            state.day_signal_count_snapshot_for_test(),
+            4242,
+            "FA-02: run A's sentinel day_signal_count must be unchanged"
+        );
+        assert_eq!(
+            state.accepted_artifact_snapshot_for_test().await,
+            Some(sentinel_artifact),
+            "FA-02: run A's sentinel accepted_artifact provenance must be unchanged"
+        );
+        assert!(matches!(
+            mqk_db::fetch_run(&pool, run_a)
+                .await
+                .expect("fetch_run run_a")
+                .status,
+            mqk_db::RunStatus::Running
+        ));
+        assert!(matches!(
+            mqk_db::fetch_run(&pool, run_b)
+                .await
+                .expect("fetch_run run_b")
+                .status,
+            mqk_db::RunStatus::Created
+        ));
+
+        let _ = state.stop_execution_runtime().await;
+        delete_run_and_its_events(&pool, run_a).await;
+        delete_run_and_its_events(&pool, run_b).await;
+    }
+
+    // -------------------------------------------------------------------
+    // SUCCESS-01 (R6 success scenario 1, `Off`): genuine end-to-end success
+    // through the real production-effects path. The hermetic broker
+    // override lets `build_execution_orchestrator` construct a real
+    // (in-process, zero-network, zero-credential) Paper orchestrator
+    // instead of `build_daemon_broker` refusing `BrokerKind::Paper` — the
+    // one thing that made a genuine success unreachable before this patch
+    // (see the module doc above and the deleted external test file's own
+    // documented conclusion). Proves reserve -> arm -> begin -> initial
+    // heartbeat -> initial tick -> post-tick heartbeat -> Starting
+    // metadata/mirrors -> barriered spawn -> Active -> barrier release,
+    // then a real stop, through the exact production
+    // `ProductionRuntimeStartEffects` implementation — never a fake.
+    // -------------------------------------------------------------------
+    #[tokio::test(flavor = "multi_thread")]
+    async fn success_off_disposition_reaches_active_and_stops_cleanly() {
+        let _g = db_test_lock().lock().await;
+        let Some(pool) = db_pool_or_skip("SUCCESS-01").await else {
+            return;
+        };
+        clear_any_preexisting_active_daemon_run(&pool).await;
+        let state = hermetic_paper_state(&pool);
+        state.set_hermetic_test_broker_override_for_test(true).await;
+        let run_id = state
+            .create_or_reuse_run_for_start(&pool)
+            .await
+            .expect("run creation must succeed");
+
+        let (result, trace) = state
+            .drive_production_start_effects_for_test(
+                pool.clone(),
+                run_id,
+                Some(off_disposition_fixture(run_id)),
+            )
+            .await;
+        state
+            .set_hermetic_test_broker_override_for_test(false)
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "SUCCESS-01: expected a genuine success through the real \
+             production-effects path with the hermetic broker override \
+             enabled: {result:?}"
+        );
+        assert_eq!(
+            trace,
+            vec![
+                "ownership_reserved",
+                "local_bundle_committed",
+                "loop_spawned"
+            ],
+            "SUCCESS-01: every ordered-trace tag must fire exactly once, in order"
+        );
+
+        assert_eq!(state.locally_owned_run_id().await, Some(run_id));
+        assert!(matches!(
+            mqk_db::fetch_run(&pool, run_id)
+                .await
+                .expect("fetch_run")
+                .status,
+            mqk_db::RunStatus::Running
+        ));
+
+        // A real stop through the real cleanup path.
+        let stop_result = state.stop_execution_runtime().await;
+        assert!(
+            stop_result.is_ok(),
+            "SUCCESS-01: stop must succeed: {stop_result:?}"
+        );
+        assert_eq!(
+            state.locally_owned_run_id().await,
+            None,
+            "SUCCESS-01: stop must fully clear local ownership"
+        );
+
+        delete_run_and_its_events(&pool, run_id).await;
+    }
+
+    // -------------------------------------------------------------------
+    // FAULT-SEAM-01: the `AfterOrchestratorConstruction` seam, now finally
+    // exercised end-to-end through a *genuinely successful* orchestrator
+    // construction (hermetic broker override) rather than the real
+    // `paper_broker_not_execution_path` refusal FA-01 already covers. This
+    // seam fires strictly before `arm_run`, so the durable rollback must be
+    // `AlreadyNonActive` and the phase must stay `BeforeArm`.
+    // -------------------------------------------------------------------
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fault_seam_after_orchestrator_construction_rolls_back_cleanly() {
+        let _g = db_test_lock().lock().await;
+        let Some(pool) = db_pool_or_skip("FAULT-SEAM-01").await else {
+            return;
+        };
+        clear_any_preexisting_active_daemon_run(&pool).await;
+        let state = hermetic_paper_state(&pool);
+        state.set_hermetic_test_broker_override_for_test(true).await;
+        state
+            .set_dynamic_selection_fault_seam_for_test(Some(
+                DynamicSelectionLifecycleFaultSeam::AfterOrchestratorConstruction,
+            ))
+            .await;
+        let run_id = state
+            .create_or_reuse_run_for_start(&pool)
+            .await
+            .expect("run creation must succeed");
+
+        let (result, trace) = state
+            .drive_production_start_effects_for_test(
+                pool.clone(),
+                run_id,
+                Some(off_disposition_fixture(run_id)),
+            )
+            .await;
+        state
+            .set_hermetic_test_broker_override_for_test(false)
+            .await;
+        state.set_dynamic_selection_fault_seam_for_test(None).await;
+
+        assert!(
+            result.is_err(),
+            "FAULT-SEAM-01: expected an injected failure"
+        );
+        let (original, rollback) = match result.unwrap_err() {
+            crate::daily_data_readiness::RuntimeStartSequenceError::Effects {
+                original,
+                rollback,
+            } => (original, rollback),
+            other => panic!("FAULT-SEAM-01: expected Effects, got {other:?}"),
+        };
+        assert_eq!(
+            original.fault_class,
+            "dynamic_selection.fault_seam.after_orchestrator_construction"
+        );
+        assert_eq!(
+            trace,
+            vec!["ownership_reserved"],
+            "FAULT-SEAM-01: the seam fires inside start_runtime_effects, \
+             strictly before local_bundle_committed"
+        );
+        assert!(matches!(
+            rollback.phase_reached,
+            crate::daily_data_readiness::RuntimeStartPhase::BeforeArm
+        ));
+        assert!(matches!(
+            rollback.durable,
+            crate::daily_data_readiness::DurableRollbackDisposition::AlreadyNonActive
+        ));
+        assert_eq!(
+            rollback.local.leadership_release_outcome,
+            Some(Ok(())),
+            "FAULT-SEAM-01: a real orchestrator was constructed (leadership \
+             acquired) before the seam fired, so rollback must release it \
+             exactly once, successfully"
+        );
+        assert_eq!(state.locally_owned_run_id().await, None);
+
+        delete_run_and_its_events(&pool, run_id).await;
+    }
+
+    // -------------------------------------------------------------------
+    // BARRIER-TRUTH-01 (R6 items 19/20, "explicitly inspect barrier-cancel
+    // and Active-install-failure paths"): a forced `install_active_runtime`
+    // conflict after a genuinely successful `start_runtime_effects` (real
+    // arm/begin/heartbeat/tick, real orchestrator leadership acquired,
+    // orchestrator already moved into the spawned task) must still release
+    // that leadership lease exactly once, and the spawned task must never
+    // proceed past the startup barrier (no detached task, no economic
+    // work). This test is what surfaced the gap fixed in this same patch:
+    // `spawn_execution_loop`'s two pre-barrier exit branches previously
+    // only `drop_outside_async_context(orchestrator)`-ed without releasing
+    // the lease first.
+    // -------------------------------------------------------------------
+    #[tokio::test(flavor = "multi_thread")]
+    async fn barrier_truth_install_conflict_releases_leadership_and_cancels_barrier() {
+        let _g = db_test_lock().lock().await;
+        let Some(pool) = db_pool_or_skip("BARRIER-TRUTH-01").await else {
+            return;
+        };
+        clear_any_preexisting_active_daemon_run(&pool).await;
+        let state = hermetic_paper_state(&pool);
+        state.set_hermetic_test_broker_override_for_test(true).await;
+        state.set_install_active_runtime_conflict_for_test(true);
+        let run_id = state
+            .create_or_reuse_run_for_start(&pool)
+            .await
+            .expect("run creation must succeed");
+
+        let (result, trace) = state
+            .drive_production_start_effects_for_test(
+                pool.clone(),
+                run_id,
+                Some(off_disposition_fixture(run_id)),
+            )
+            .await;
+        state
+            .set_hermetic_test_broker_override_for_test(false)
+            .await;
+        state.set_install_active_runtime_conflict_for_test(false);
+
+        assert!(
+            result.is_err(),
+            "BARRIER-TRUTH-01: expected the forced install conflict to fail the start"
+        );
+        let (original, rollback) = match result.unwrap_err() {
+            crate::daily_data_readiness::RuntimeStartSequenceError::Effects {
+                original,
+                rollback,
+            } => (original, rollback),
+            other => panic!("BARRIER-TRUTH-01: expected Effects, got {other:?}"),
+        };
+        assert_eq!(
+            original.fault_class,
+            "runtime.start_refused.spawn_loop_install_failed"
+        );
+        assert_eq!(
+            trace,
+            vec!["ownership_reserved", "local_bundle_committed"],
+            "BARRIER-TRUTH-01: loop_spawned must never fire — install_active_runtime \
+             failed before spawn_loop could report success"
+        );
+        // start_runtime_effects fully succeeded (real arm/begin/tick), so the
+        // durable run reached Armed/Running before this failure — and
+        // `LocalCommitStarted` is not `cleanly_stoppable()` (tick() was
+        // already called), so the durable rollback must be `Halted`, not
+        // `Stopped`.
+        assert!(matches!(
+            rollback.phase_reached,
+            crate::daily_data_readiness::RuntimeStartPhase::LocalCommitStarted
+        ));
+        assert!(matches!(
+            rollback.durable,
+            crate::daily_data_readiness::DurableRollbackDisposition::Halted
+        ));
+        assert!(!rollback.durable_status_unknown);
+        // The core barrier-leadership-truth proof: leadership was acquired
+        // (a real orchestrator was constructed and moved into the spawned
+        // task before install failed) and must be released exactly once —
+        // by the spawned task's pre-barrier exit path, not by
+        // `rollback_local_effects` (which finds `self.orchestrator` already
+        // taken and returns `None` for this exact race).
+        assert_eq!(
+            rollback.local.leadership_release_outcome, None,
+            "BARRIER-TRUTH-01: by the time install_active_runtime fails, the \
+             orchestrator has already been moved into the spawned task — \
+             rollback_local_effects has nothing left to release"
+        );
+
+        assert_eq!(
+            state.locally_owned_run_id().await,
+            None,
+            "BARRIER-TRUTH-01: the failed install must not leave a stuck \
+             Starting/Active slot"
+        );
+        assert!(matches!(
+            mqk_db::fetch_run(&pool, run_id)
+                .await
+                .expect("fetch_run")
+                .status,
+            mqk_db::RunStatus::Halted
+        ));
+
+        delete_run_and_its_events(&pool, run_id).await;
+    }
+
+    // -------------------------------------------------------------------
+    // LEADERSHIP-RELEASE-FAILURE-01 (R6 item 29): a forced leadership-
+    // release failure on an otherwise-successful start's rollback path
+    // must surface in structured degraded truth (`Some(Err(_))`), never be
+    // silently discarded, and must not prevent the rest of rollback
+    // (reservation release) from completing.
+    // -------------------------------------------------------------------
+    #[tokio::test(flavor = "multi_thread")]
+    async fn leadership_release_failure_is_recorded_not_discarded() {
+        let _g = db_test_lock().lock().await;
+        let Some(pool) = db_pool_or_skip("LEADERSHIP-RELEASE-FAILURE-01").await else {
+            return;
+        };
+        clear_any_preexisting_active_daemon_run(&pool).await;
+        let state = hermetic_paper_state(&pool);
+        state.set_hermetic_test_broker_override_for_test(true).await;
+        state.set_leadership_release_failure_for_test(true);
+        state
+            .set_dynamic_selection_fault_seam_for_test(Some(
+                DynamicSelectionLifecycleFaultSeam::AfterOrchestratorConstruction,
+            ))
+            .await;
+        let run_id = state
+            .create_or_reuse_run_for_start(&pool)
+            .await
+            .expect("run creation must succeed");
+
+        let (result, trace) = state
+            .drive_production_start_effects_for_test(
+                pool.clone(),
+                run_id,
+                Some(off_disposition_fixture(run_id)),
+            )
+            .await;
+        state
+            .set_hermetic_test_broker_override_for_test(false)
+            .await;
+        state.set_leadership_release_failure_for_test(false);
+        state.set_dynamic_selection_fault_seam_for_test(None).await;
+
+        assert!(result.is_err());
+        let (_original, rollback) = match result.unwrap_err() {
+            crate::daily_data_readiness::RuntimeStartSequenceError::Effects {
+                original,
+                rollback,
+            } => (original, rollback),
+            other => panic!("LEADERSHIP-RELEASE-FAILURE-01: expected Effects, got {other:?}"),
+        };
+        assert_eq!(trace, vec!["ownership_reserved"]);
+        let Some(Err(release_err)) = rollback.local.leadership_release_outcome else {
+            panic!(
+                "LEADERSHIP-RELEASE-FAILURE-01: a real orchestrator was \
+                 constructed (leadership acquired), and the release was \
+                 forced to fail — the outcome must be `Some(Err(_))`, never \
+                 discarded: {:?}",
+                rollback.local.leadership_release_outcome
+            );
+        };
+        assert_eq!(release_err, "test-injected leadership release failure");
+        // The release failure must not prevent the rest of rollback
+        // (reservation release) from completing.
+        assert_eq!(
+            state.locally_owned_run_id().await,
+            None,
+            "LEADERSHIP-RELEASE-FAILURE-01: reservation must still be \
+             released even though the leadership-release sub-step failed"
+        );
+
+        delete_run_and_its_events(&pool, run_id).await;
     }
 }
 

@@ -94,10 +94,23 @@ pub(super) fn spawn_execution_loop(
                     // Sender dropped without ever releasing (install
                     // failure took the "drop, don't send" branch) — treat
                     // identically to an explicit stop: exit now, no
-                    // economic work. `orchestrator` must be dropped off the
-                    // async executor (see `drop_outside_async_context`) —
-                    // it was never used, but may embed a blocking-client
-                    // runtime.
+                    // economic work.
+                    //
+                    // BARRIER LEADERSHIP/TRUTH (PHASE-7A-FINAL-PRIVATE-
+                    // PRODUCTION-EFFECTS-PROOF): if this attempt's
+                    // `start_runtime_effects` acquired the orchestrator's
+                    // runtime leadership lease, dropping `orchestrator`
+                    // does NOT release an async DB lease — the drop is
+                    // synchronous (deliberately moved off the async
+                    // executor by `drop_outside_async_context`, since it
+                    // may embed a blocking-client runtime) and cannot await
+                    // the release. The lease must be released explicitly,
+                    // exactly once, before the drop.
+                    if let Err(release_err) = orchestrator.release_runtime_leadership().await {
+                        tracing::warn!(
+                            "runtime_lease_release_failed_before_barrier_release error={release_err}"
+                        );
+                    }
                     drop_outside_async_context(orchestrator);
                     return ExecutionLoopExit {
                         note: Some(
@@ -110,8 +123,15 @@ pub(super) fn spawn_execution_loop(
                 // Cancelled before the barrier ever released (e.g. a
                 // concurrent stop/shutdown signaled this handle directly).
                 // `changed.is_err()` (sender dropped) is also treated as a
-                // stop — either way, no economic work has happened.
+                // stop — either way, no economic work has happened. Same
+                // explicit-release requirement as the barrier-cancellation
+                // branch above.
                 let _ = changed;
+                if let Err(release_err) = orchestrator.release_runtime_leadership().await {
+                    tracing::warn!(
+                        "runtime_lease_release_failed_before_barrier_release error={release_err}"
+                    );
+                }
                 drop_outside_async_context(orchestrator);
                 return ExecutionLoopExit {
                     note: Some(

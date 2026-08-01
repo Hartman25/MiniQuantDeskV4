@@ -116,18 +116,32 @@ impl AppState {
             *sides_lock = recovered_sides.clone();
         }
 
+        // PHASE-7A-FINAL-PRIVATE-PRODUCTION-EFFECTS-PROOF requirement 6: the
+        // one hermetic-broker injection point. `hermetic_test_broker_
+        // override_enabled` is always `false` in production and for every
+        // test that does not explicitly enable it (its setter is
+        // `#[cfg(test)]`-gated) — so this branch is dead in every default
+        // build and every non-injecting test. It never weakens
+        // `build_daemon_broker` itself: the real gate below is untouched
+        // and unconditionally applies whenever the override is not
+        // explicitly enabled by an in-crate test.
+        //
         // `AlpacaBrokerAdapter::new()` constructs a `reqwest::blocking::Client`
         // which temporarily creates and drops an internal Tokio runtime.  Tokio
         // 1.49 panics when any runtime is dropped inside an async context.
         // `block_in_place` moves execution off the async context so the drop
         // is safe.  Requires a multi-thread runtime (production and
         // `#[tokio::test(flavor = "multi_thread")]` tests both satisfy this).
-        let daemon_broker = tokio::task::block_in_place(|| {
-            build_daemon_broker(
-                self.runtime_selection.broker_kind,
-                self.runtime_selection.deployment_mode,
-            )
-        })?;
+        let daemon_broker = if self.hermetic_test_broker_override_enabled().await {
+            DaemonBroker::Paper(mqk_broker_paper::LockedPaperBroker::default())
+        } else {
+            tokio::task::block_in_place(|| {
+                build_daemon_broker(
+                    self.runtime_selection.broker_kind,
+                    self.runtime_selection.deployment_mode,
+                )
+            })?
+        };
 
         let broker_seed = match self.broker_snapshot_source {
             BrokerSnapshotTruthSource::Synthetic => {
