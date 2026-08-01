@@ -974,6 +974,115 @@ pub struct EvaluatedBarFacts {
     pub close_micros: i64,
 }
 
+/// PHASE-7B-SELECTED-HOST-ECONOMIC-DISPATCH-CLOSURE Part 4: the outcome of
+/// [`AppState::prepare_bar_window_for_symbol_timeframe`] — the one common
+/// bar-window preparation authority both the legacy and selected-host
+/// dispatch backends call. `Refused` covers the exact same missing/stale-bar
+/// fail-closed cases the pre-Phase-7B single implementation returned `None`
+/// for (already durably recorded via `record_signal_evaluation` before this
+/// is returned) — no backend gets a second chance to reinterpret a refusal.
+enum BarWindowPrepOutcome {
+    Refused,
+    Ready {
+        window: mqk_strategy::RecentBarsWindow,
+        /// The exact latest (most recent) completed bar this window was
+        /// built from — copied verbatim into `EvaluatedBarFacts` by the
+        /// caller, never re-derived.
+        latest_bar_row: mqk_db::MdBarRow,
+        bars_loaded: usize,
+        diagnostic_decision: &'static str,
+        diagnostic_reason: &'static str,
+    },
+}
+
+/// PHASE-7B-SELECTED-HOST-ECONOMIC-DISPATCH-CLOSURE Part 5: every way a
+/// selected-host dispatch result can fail coherence with its frozen
+/// [`crate::dynamic_selection_dispatch_authority::SelectedDispatchBinding`].
+/// A structural fault, never an ordinary no-signal condition — the caller
+/// must submit zero decisions for the whole affected tick and halt/disarm
+/// fail-closed rather than fall back to legacy dispatch.
+#[derive(Debug, Clone)]
+#[allow(dead_code)] // fields are read via the derived `Debug` impl in tracing::error! diagnostics
+pub(crate) enum SelectedHostDispatchFault {
+    HostMissingAtDispatch {
+        symbol: String,
+        strategy_id: String,
+        timeframe_secs: i64,
+    },
+    HostOnBarError {
+        symbol: String,
+        strategy_id: String,
+        detail: String,
+    },
+    SpecNameMismatch {
+        symbol: String,
+        expected_strategy_id: String,
+        got: String,
+    },
+    SpecTimeframeMismatch {
+        symbol: String,
+        expected_secs: i64,
+        got_secs: i64,
+    },
+    TargetSymbolMismatch {
+        expected_symbol: String,
+        got_symbol: String,
+    },
+}
+
+/// PHASE-7B-SELECTED-HOST-ECONOMIC-DISPATCH-CLOSURE Part 5: the pure
+/// selected-host result coherence check, extracted from `AppState::
+/// tick_strategy_dispatch_selected_hosts_with_bar_facts` so every mismatch
+/// branch is directly unit-testable against a hand-built
+/// [`mqk_strategy::StrategyBarResult`], without needing a deliberately-
+/// corrupted [`crate::dynamic_selection_host_pool::DynamicSelectionHostPool`]
+/// (which the pool's own `build()` cannot produce — every mismatch this
+/// checks for is structurally prevented by `DynamicSelectionHostPool::
+/// build`'s own construction-time checks, making this pure defense-in-depth
+/// unreachable in practice via the accepted construction path, exactly like
+/// the codebase's other "checked explicitly anyway, never assumed" IR2-style
+/// guards).
+pub(crate) fn check_selected_host_result_coherence(
+    binding: &crate::dynamic_selection_dispatch_authority::SelectedDispatchBinding,
+    bar_result: &mqk_strategy::StrategyBarResult,
+) -> Result<(), SelectedHostDispatchFault> {
+    if bar_result.spec.name != binding.strategy_id {
+        return Err(SelectedHostDispatchFault::SpecNameMismatch {
+            symbol: binding.symbol.clone(),
+            expected_strategy_id: binding.strategy_id.clone(),
+            got: bar_result.spec.name.clone(),
+        });
+    }
+    if bar_result.spec.timeframe_secs != binding.timeframe_secs {
+        return Err(SelectedHostDispatchFault::SpecTimeframeMismatch {
+            symbol: binding.symbol.clone(),
+            expected_secs: binding.timeframe_secs,
+            got_secs: bar_result.spec.timeframe_secs,
+        });
+    }
+    for t in &bar_result.intents.output.targets {
+        if !t.symbol.trim().eq_ignore_ascii_case(binding.symbol.trim()) {
+            return Err(SelectedHostDispatchFault::TargetSymbolMismatch {
+                expected_symbol: binding.symbol.clone(),
+                got_symbol: t.symbol.clone(),
+            });
+        }
+    }
+    Ok(())
+}
+
+impl SelectedHostDispatchFault {
+    pub(crate) fn code(&self) -> &'static str {
+        match self {
+            Self::HostMissingAtDispatch { .. } => "selected_host_missing_at_dispatch",
+            Self::HostOnBarError { .. } => "selected_host_on_bar_error",
+            Self::SpecNameMismatch { .. } => "selected_host_spec_name_mismatch",
+            Self::SpecTimeframeMismatch { .. } => "selected_host_spec_timeframe_mismatch",
+            Self::TargetSymbolMismatch { .. } => "selected_host_target_symbol_mismatch",
+        }
+    }
+}
+
 /// AUTON-NO-SIGNAL-OBS-01: one durable signal-evaluation journal write
 /// attempt, scoped to a single symbol/timeframe/tick.
 ///
@@ -2053,7 +2162,9 @@ operator_reconcile_or_repair_required"
             Arc::clone(self),
             orchestrator,
             run_id,
-            Vec::new(),
+            crate::dynamic_selection_dispatch_authority::RuntimeStrategyDispatchAuthority::Legacy {
+                assignments: Vec::new(),
+            },
             barrier_rx,
         );
 
@@ -2530,23 +2641,23 @@ operator_reconcile_or_repair_required"
         .map(|(result, _facts)| result)
     }
 
-    /// RUNTIME-OPPORTUNITY-ALLOCATION-01 authority repair (Phase A): the one
-    /// canonical DB-backed dispatch implementation. Returns the
-    /// [`EvaluatedBarFacts`] captured from the exact `db_bars` window the
-    /// strategy was evaluated against, alongside the result — never a second,
-    /// independently-derived bar lookup. `Some` only when the strategy
-    /// actually ran against a real (non-empty, non-stale) completed-bar
-    /// window; every early fail-closed return (missing/stale bars) yields
-    /// `None`, matching the pre-repair `dispatch_native_strategy_for_symbol_with_loaded_bars`
-    /// behavior exactly.
-    async fn dispatch_native_strategy_for_symbol_with_loaded_bars_and_facts(
+    /// PHASE-7B-SELECTED-HOST-ECONOMIC-DISPATCH-CLOSURE Part 4: the common
+    /// bar-window preparation authority shared by both dispatch backends
+    /// (legacy native bootstrap, selected-host). Contains exactly the
+    /// fail-closed missing/stale-bar gates, diagnostics computation, and
+    /// [`mqk_strategy::RecentBarsWindow`] construction previously inlined in
+    /// [`Self::dispatch_native_strategy_for_symbol_with_loaded_bars_and_facts`]
+    /// — moved verbatim, not reimplemented, so both backends see byte-
+    /// identical staleness/diagnostic behavior. Neither backend performs a
+    /// second DB bar-window load after this call.
+    async fn prepare_bar_window_for_symbol_timeframe(
         &self,
         symbol: &str,
         md_timeframe: &str,
-        bar: StrategyBarInput,
+        bar: &StrategyBarInput,
         db_bars: Vec<mqk_db::MdBarRow>,
         now_ts: i64,
-    ) -> Option<(mqk_strategy::StrategyBarResult, EvaluatedBarFacts)> {
+    ) -> BarWindowPrepOutcome {
         if db_bars.is_empty() {
             // No completed bars for this symbol/timeframe.
             self.last_bar_context_bars.store(0, Ordering::SeqCst);
@@ -2594,7 +2705,7 @@ operator_reconcile_or_repair_required"
                 decision_stage: "pre_dispatch_gate",
             })
             .await;
-            return None;
+            return BarWindowPrepOutcome::Refused;
         }
 
         // MD-STALENESS-PER-TICK-GATE-01: fail-closed per-dispatch-tick
@@ -2604,8 +2715,8 @@ operator_reconcile_or_repair_required"
         // RUNTIME-OPPORTUNITY-ALLOCATION-01 authority repair (Phase A): this
         // is also the exact completed bar the strategy below is evaluated
         // against — `latest_bar_row` is captured once, here, and copied
-        // verbatim into `EvaluatedBarFacts` at the bottom of this function.
-        // Nothing after this point may substitute a different bar.
+        // verbatim into `EvaluatedBarFacts` by the caller. Nothing after this
+        // point may substitute a different bar.
         let latest_bar_row = db_bars.last().cloned();
         let latest_end_ts = latest_bar_row.as_ref().map(|b| b.end_ts);
         let staleness_cap_secs = self
@@ -2654,7 +2765,7 @@ operator_reconcile_or_repair_required"
                 decision_stage: "pre_dispatch_gate",
             })
             .await;
-            return None;
+            return BarWindowPrepOutcome::Refused;
         }
 
         let bars_loaded = db_bars.len();
@@ -2680,6 +2791,64 @@ operator_reconcile_or_repair_required"
             bars_loaded,
             "auton_signal_context_01: db_bar_window_built"
         );
+        BarWindowPrepOutcome::Ready {
+            window,
+            latest_bar_row: latest_bar_row
+                .expect("latest_bar_row is Some whenever db_bars was non-empty (checked above)"),
+            bars_loaded,
+            diagnostic_decision,
+            diagnostic_reason,
+        }
+    }
+
+    /// RUNTIME-OPPORTUNITY-ALLOCATION-01 authority repair (Phase A): the one
+    /// canonical DB-backed dispatch implementation. Returns the
+    /// [`EvaluatedBarFacts`] captured from the exact `db_bars` window the
+    /// strategy was evaluated against, alongside the result — never a second,
+    /// independently-derived bar lookup. `Some` only when the strategy
+    /// actually ran against a real (non-empty, non-stale) completed-bar
+    /// window; every early fail-closed return (missing/stale bars) yields
+    /// `None`, matching the pre-repair `dispatch_native_strategy_for_symbol_with_loaded_bars`
+    /// behavior exactly.
+    ///
+    /// PHASE-7B: this is the `Legacy` dispatch backend. Delegates the
+    /// common bar-window preparation to
+    /// [`Self::prepare_bar_window_for_symbol_timeframe`] — behavior is
+    /// byte-identical to the pre-Phase-7B implementation.
+    async fn dispatch_native_strategy_for_symbol_with_loaded_bars_and_facts(
+        &self,
+        symbol: &str,
+        md_timeframe: &str,
+        bar: StrategyBarInput,
+        db_bars: Vec<mqk_db::MdBarRow>,
+        now_ts: i64,
+    ) -> Option<(mqk_strategy::StrategyBarResult, EvaluatedBarFacts)> {
+        let (window, latest_bar_row, bars_loaded, diagnostic_decision, diagnostic_reason) =
+            match self
+                .prepare_bar_window_for_symbol_timeframe(
+                    symbol,
+                    md_timeframe,
+                    &bar,
+                    db_bars,
+                    now_ts,
+                )
+                .await
+            {
+                BarWindowPrepOutcome::Refused => return None,
+                BarWindowPrepOutcome::Ready {
+                    window,
+                    latest_bar_row,
+                    bars_loaded,
+                    diagnostic_decision,
+                    diagnostic_reason,
+                } => (
+                    window,
+                    latest_bar_row,
+                    bars_loaded,
+                    diagnostic_decision,
+                    diagnostic_reason,
+                ),
+            };
         let result = self
             .invoke_native_strategy_on_bar_from_window(bar.now_tick, window)
             .await;
@@ -2702,8 +2871,7 @@ operator_reconcile_or_repair_required"
                 timeframe: md_timeframe,
                 bar_context_source: "db_loaded",
                 bars_loaded: bars_loaded as i64,
-                latest_bar_ts_utc: latest_end_ts
-                    .and_then(|ts| DateTime::<Utc>::from_timestamp(ts, 0)),
+                latest_bar_ts_utc: DateTime::<Utc>::from_timestamp(latest_bar_row.end_ts, 0),
                 signal_generated: signal_qty != 0,
                 signal_qty: Some(signal_qty),
                 reason_code: diagnostic_decision,
@@ -2713,19 +2881,16 @@ operator_reconcile_or_repair_required"
             .await;
         }
         // RUNTIME-OPPORTUNITY-ALLOCATION-01 authority repair (Phase A): pair
-        // the result with the exact bar it was evaluated against. `expect`
-        // is safe here — `latest_bar_row` is `Some` whenever this line is
-        // reached (the only `None` case, `db_bars.is_empty()`, already
-        // returned above), so this can never panic in practice.
+        // the result with the exact bar it was evaluated against —
+        // `latest_bar_row` is the exact row `prepare_bar_window_for_symbol_
+        // timeframe` captured from this same `db_bars` window.
         result.map(|bar_result| {
-            let bar_row = latest_bar_row
-                .expect("latest_bar_row is Some whenever db_bars was non-empty (checked above)");
             let facts = EvaluatedBarFacts {
                 symbol: symbol.to_string(),
                 strategy_id: bar_result.spec.name.clone(),
                 timeframe: md_timeframe.to_string(),
-                bar_end_ts: bar_row.end_ts,
-                close_micros: bar_row.close_micros,
+                bar_end_ts: latest_bar_row.end_ts,
+                close_micros: latest_bar_row.close_micros,
             };
             (bar_result, facts)
         })
@@ -3210,6 +3375,172 @@ operator_reconcile_or_repair_required"
             }
         }
         results
+    }
+
+    /// PHASE-7B-SELECTED-HOST-ECONOMIC-DISPATCH-CLOSURE Part 4: the
+    /// `DynamicPaperEnforced` dispatch backend — the frozen selected-host
+    /// authority is the ONLY strategy-evaluation authority when this is
+    /// called; the legacy native bootstrap is never touched. Same single
+    /// `.take()` of the pending bar input as
+    /// [`Self::tick_strategy_dispatch_multi_symbol_with_bar_facts`], same
+    /// per-binding sequential order (`bindings` is already in the frozen
+    /// plan's deterministic symbol-ascending order — never re-sorted here),
+    /// same one-DB-bar-window-load-per-selected-symbol/timeframe shape,
+    /// reusing the exact common bar-window authority
+    /// ([`Self::prepare_bar_window_for_symbol_timeframe`]) the legacy
+    /// backend uses. Returns `Err` (never invented decisions) the instant a
+    /// selected-host result fails Part 5 coherence — the caller must submit
+    /// zero decisions for the whole tick and halt.
+    pub(crate) async fn tick_strategy_dispatch_selected_hosts_with_bar_facts(
+        &self,
+        bindings: &[crate::dynamic_selection_dispatch_authority::SelectedDispatchBinding],
+        host_pool: &mut crate::dynamic_selection_host_pool::DynamicSelectionHostPool,
+    ) -> Result<
+        Vec<(
+            SymbolStrategyAssignment,
+            mqk_strategy::StrategyBarResult,
+            Option<EvaluatedBarFacts>,
+        )>,
+        SelectedHostDispatchFault,
+    > {
+        let Some(bar) = self.pending_strategy_bar_input.lock().await.take() else {
+            return Ok(Vec::new());
+        };
+        let mut results = Vec::new();
+        for binding in bindings {
+            let db_bars = match &self.db {
+                Some(pool) => {
+                    match mqk_db::fetch_recent_completed_bars_for_strategy(
+                        pool,
+                        &binding.symbol,
+                        &binding.db_timeframe_label,
+                        STRATEGY_CONTEXT_LOAD_LIMIT,
+                    )
+                    .await
+                    {
+                        Ok(rows) => rows,
+                        Err(e) => {
+                            // Part 4: a DB load error must not invoke a
+                            // selected host using the legacy stub fallback —
+                            // this binding produces no result this tick, no
+                            // other binding is affected.
+                            self.last_bar_context_bars.store(0, Ordering::SeqCst);
+                            tracing::warn!(
+                                symbol = %binding.symbol,
+                                strategy_id = %binding.strategy_id,
+                                error = %e,
+                                "phase7b_selected_host_db_bar_load_failed: no stub fallback \
+                                 for selected-host dispatch; binding skipped this tick"
+                            );
+                            continue;
+                        }
+                    }
+                }
+                None => {
+                    // PaperEnforcedAllowed always requires a DB (readiness/
+                    // promotion evaluation already required one to reach
+                    // this disposition) — no stub fallback for selected
+                    // hosts, ever.
+                    continue;
+                }
+            };
+
+            let now_ts = Utc::now().timestamp();
+            let (window, latest_bar_row, bars_loaded, diagnostic_decision, diagnostic_reason) =
+                match self
+                    .prepare_bar_window_for_symbol_timeframe(
+                        &binding.symbol,
+                        &binding.db_timeframe_label,
+                        &bar,
+                        db_bars,
+                        now_ts,
+                    )
+                    .await
+                {
+                    BarWindowPrepOutcome::Refused => continue,
+                    BarWindowPrepOutcome::Ready {
+                        window,
+                        latest_bar_row,
+                        bars_loaded,
+                        diagnostic_decision,
+                        diagnostic_reason,
+                    } => (
+                        window,
+                        latest_bar_row,
+                        bars_loaded,
+                        diagnostic_decision,
+                        diagnostic_reason,
+                    ),
+                };
+
+            let Some(host) = host_pool.get_mut(
+                &binding.symbol,
+                &binding.strategy_id,
+                binding.timeframe_secs,
+            ) else {
+                return Err(SelectedHostDispatchFault::HostMissingAtDispatch {
+                    symbol: binding.symbol.clone(),
+                    strategy_id: binding.strategy_id.clone(),
+                    timeframe_secs: binding.timeframe_secs,
+                });
+            };
+            let ctx =
+                mqk_strategy::StrategyContext::new(binding.timeframe_secs, bar.now_tick, window);
+            let bar_result = match host.on_bar(&ctx) {
+                Ok(r) => r,
+                Err(e) => {
+                    return Err(SelectedHostDispatchFault::HostOnBarError {
+                        symbol: binding.symbol.clone(),
+                        strategy_id: binding.strategy_id.clone(),
+                        detail: format!("{e:?}"),
+                    })
+                }
+            };
+
+            // Part 5: selected-host result coherence — a mismatch here is a
+            // structural fault, never an ordinary no-signal condition. Pure
+            // helper (`check_selected_host_result_coherence`) so every
+            // mismatch branch is directly unit-testable without needing a
+            // deliberately-corrupted host pool.
+            check_selected_host_result_coherence(binding, &bar_result)?;
+
+            let signal_qty: i64 = bar_result
+                .intents
+                .output
+                .targets
+                .iter()
+                .map(|t| t.qty)
+                .sum();
+            self.record_signal_evaluation(SignalEvaluationAttempt {
+                now_tick: bar.now_tick,
+                symbol: &binding.symbol,
+                timeframe: &binding.db_timeframe_label,
+                bar_context_source: "db_loaded",
+                bars_loaded: bars_loaded as i64,
+                latest_bar_ts_utc: DateTime::<Utc>::from_timestamp(latest_bar_row.end_ts, 0),
+                signal_generated: signal_qty != 0,
+                signal_qty: Some(signal_qty),
+                reason_code: diagnostic_decision,
+                reason: diagnostic_reason,
+                decision_stage: "strategy_evaluated",
+            })
+            .await;
+
+            let facts = EvaluatedBarFacts {
+                symbol: binding.symbol.clone(),
+                strategy_id: binding.strategy_id.clone(),
+                timeframe: binding.db_timeframe_label.clone(),
+                bar_end_ts: latest_bar_row.end_ts,
+                close_micros: latest_bar_row.close_micros,
+            };
+            let assignment = SymbolStrategyAssignment {
+                symbol: binding.symbol.clone(),
+                strategy_id: binding.strategy_id.clone(),
+                timeframe: binding.db_timeframe_label.clone(),
+            };
+            results.push((assignment, bar_result, Some(facts)));
+        }
+        Ok(results)
     }
 
     /// MULTI-SYMBOL-DISPATCH-LOOP-01 fail-closed symbol guard: retain only
@@ -5840,8 +6171,9 @@ mod ownership_state_machine_tests {
             effective_mode: mqk_portfolio::DynamicSelectionMode::Off,
             live_lock_applied: false,
             plan: None,
+            plan_id: None,
             selected_pairs: Vec::new(),
-            host_pool: None,
+            host_pool_present: false,
             reasons: Vec::new(),
             approved_for_live: false,
         };
@@ -5973,7 +6305,9 @@ mod ownership_state_machine_tests {
             Arc::clone(state),
             orchestrator,
             run_id,
-            Vec::new(),
+            crate::dynamic_selection_dispatch_authority::RuntimeStrategyDispatchAuthority::Legacy {
+                assignments: Vec::new(),
+            },
             barrier_rx,
         )
     }
@@ -6105,5 +6439,536 @@ mod ownership_state_machine_tests {
         state
             .clear_local_runtime_for_run(run_a, LifecycleClearReason::FailedStart)
             .await;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PHASE-7B-SELECTED-HOST-ECONOMIC-DISPATCH-CLOSURE Part 10: selected-host
+// dispatch closure tests.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod phase7b_selected_host_dispatch_tests {
+    use super::*;
+    use crate::dynamic_selection_dispatch_authority::SelectedDispatchBinding;
+    use crate::dynamic_selection_host_pool::DynamicSelectionHostPool;
+    use mqk_strategy::{
+        IntentMode, StrategyBarResult, StrategyIntents, StrategyOutput, StrategySpec,
+        TargetPosition,
+    };
+    use sqlx::PgPool;
+
+    fn test_plan_id() -> Uuid {
+        Uuid::new_v5(&Uuid::NAMESPACE_DNS, b"phase7b.test.plan")
+    }
+
+    fn binding(
+        symbol: &str,
+        strategy_id: &str,
+        timeframe_secs: i64,
+        label: &str,
+    ) -> SelectedDispatchBinding {
+        SelectedDispatchBinding {
+            symbol: symbol.to_string(),
+            strategy_id: strategy_id.to_string(),
+            timeframe_secs,
+            db_timeframe_label: label.to_string(),
+            selection_reason_code: "test_fixture".to_string(),
+            plan_id: test_plan_id(),
+        }
+    }
+
+    fn bar_result(
+        spec_name: &str,
+        timeframe_secs: i64,
+        target_symbol: &str,
+        qty: i64,
+    ) -> StrategyBarResult {
+        StrategyBarResult {
+            spec: StrategySpec::new(spec_name, timeframe_secs),
+            intents: StrategyIntents {
+                mode: IntentMode::Live,
+                output: StrategyOutput::new(vec![TargetPosition {
+                    symbol: target_symbol.to_string(),
+                    qty,
+                }]),
+            },
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Part 5: pure coherence-check tests (no DB, no host pool needed).
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn coherent_result_passes() {
+        let b = binding("AAPL", "intraday_scalper", 300, "5m");
+        let r = bar_result("intraday_scalper", 300, "AAPL", 10);
+        assert!(check_selected_host_result_coherence(&b, &r).is_ok());
+    }
+
+    #[test]
+    fn spec_name_mismatch_is_rejected() {
+        let b = binding("AAPL", "intraday_scalper", 300, "5m");
+        let r = bar_result("swing_momentum", 300, "AAPL", 10);
+        let err = check_selected_host_result_coherence(&b, &r).unwrap_err();
+        assert!(matches!(
+            err,
+            SelectedHostDispatchFault::SpecNameMismatch { .. }
+        ));
+        assert_eq!(err.code(), "selected_host_spec_name_mismatch");
+    }
+
+    #[test]
+    fn spec_timeframe_mismatch_is_rejected() {
+        let b = binding("AAPL", "intraday_scalper", 300, "5m");
+        let r = bar_result("intraday_scalper", 3600, "AAPL", 10);
+        let err = check_selected_host_result_coherence(&b, &r).unwrap_err();
+        assert!(matches!(
+            err,
+            SelectedHostDispatchFault::SpecTimeframeMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn target_symbol_mismatch_is_rejected() {
+        let b = binding("AAPL", "intraday_scalper", 300, "5m");
+        let r = bar_result("intraday_scalper", 300, "MSFT", 10);
+        let err = check_selected_host_result_coherence(&b, &r).unwrap_err();
+        assert!(matches!(
+            err,
+            SelectedHostDispatchFault::TargetSymbolMismatch { .. }
+        ));
+    }
+
+    #[test]
+    fn target_symbol_match_is_case_insensitive_and_trimmed() {
+        let b = binding("AAPL", "intraday_scalper", 300, "5m");
+        let r = bar_result("intraday_scalper", 300, " aapl ", 10);
+        assert!(check_selected_host_result_coherence(&b, &r).is_ok());
+    }
+
+    // -----------------------------------------------------------------
+    // DB-backed dispatch tests. Port 5434 local test DB only; skipped
+    // (never a hard failure) when unavailable, matching this crate's
+    // established `db_pool_or_skip` convention.
+    // -----------------------------------------------------------------
+
+    async fn db_pool_or_skip(label: &str) -> Option<PgPool> {
+        let Ok(url) = std::env::var("MQK_DATABASE_URL") else {
+            eprintln!("{label}: MQK_DATABASE_URL not set; skipped");
+            return None;
+        };
+        if !url.contains(":5434") {
+            eprintln!("{label}: MQK_DATABASE_URL must be the port-5434 local test DB; skipped");
+            return None;
+        }
+        let pool = match sqlx::postgres::PgPoolOptions::new()
+            .max_connections(3)
+            .connect(&url)
+            .await
+        {
+            Ok(pool) => pool,
+            Err(e) => {
+                eprintln!("{label}: could not connect to MQK_DATABASE_URL: {e}; skipped");
+                return None;
+            }
+        };
+        if let Err(e) = mqk_db::migrate(&pool).await {
+            eprintln!("{label}: mqk_db::migrate failed: {e}; skipped");
+            return None;
+        }
+        Some(pool)
+    }
+
+    async fn seed_bar(
+        pool: &PgPool,
+        symbol: &str,
+        timeframe: &str,
+        end_ts: i64,
+        close_micros: i64,
+    ) {
+        sqlx::query(
+            r#"
+            insert into md_bars (
+              symbol, timeframe, end_ts, open_micros, high_micros, low_micros,
+              close_micros, volume, is_complete, provider_id, provider_source,
+              provider_symbol, ingest_mode, ingested_at
+            ) values ($1,$2,$3,$4,$4,$4,$4,1000,true,
+                      'phase7b_test','phase7b_test',$1,'historical_sync',now())
+            on conflict do nothing
+            "#,
+        )
+        .bind(symbol)
+        .bind(timeframe)
+        .bind(end_ts)
+        .bind(close_micros)
+        .execute(pool)
+        .await
+        .expect("seed bar insert failed");
+    }
+
+    async fn cleanup_bars(pool: &PgPool, symbol: &str) {
+        let _ =
+            sqlx::query("delete from md_bars where symbol = $1 and provider_id = 'phase7b_test'")
+                .bind(symbol)
+                .execute(pool)
+                .await;
+    }
+
+    fn hermetic_state_with_db(pool: &PgPool) -> Arc<AppState> {
+        let mut state =
+            AppState::new_for_test_with_mode_and_broker(DeploymentMode::Paper, BrokerKind::Paper);
+        state.db = Some(pool.clone());
+        Arc::new(state)
+    }
+
+    fn recent_bar_ts() -> i64 {
+        Utc::now().timestamp() - 60
+    }
+
+    /// Test 7: two selected symbols with different strategies each invoke
+    /// the exact host once.
+    #[tokio::test]
+    async fn two_selected_symbols_different_strategies_each_invoked_once() {
+        let Some(pool) = db_pool_or_skip("PHASE7B-07").await else {
+            return;
+        };
+        let ts = recent_bar_ts();
+        seed_bar(&pool, "PHASE7BAAPL", "5m", ts, 100_000_000).await;
+        seed_bar(&pool, "PHASE7BMSFT", "1H", ts, 200_000_000).await;
+
+        let keys = vec![
+            (
+                "PHASE7BAAPL".to_string(),
+                "intraday_scalper".to_string(),
+                300,
+            ),
+            (
+                "PHASE7BMSFT".to_string(),
+                "volatility_breakout".to_string(),
+                3600,
+            ),
+        ];
+        let mut host_pool = DynamicSelectionHostPool::build(&keys).expect("pool builds");
+        let bindings = vec![
+            binding("PHASE7BAAPL", "intraday_scalper", 300, "5m"),
+            binding("PHASE7BMSFT", "volatility_breakout", 3600, "1H"),
+        ];
+
+        let state = hermetic_state_with_db(&pool);
+        state
+            .deposit_strategy_bar_input(StrategyBarInput {
+                now_tick: 1,
+                end_ts: ts,
+                limit_price: Some(100_000_000),
+                qty: 0,
+            })
+            .await;
+
+        let results = state
+            .tick_strategy_dispatch_selected_hosts_with_bar_facts(&bindings, &mut host_pool)
+            .await
+            .expect("dispatch must not fault on a coherent selected batch");
+
+        assert_eq!(
+            results.len(),
+            2,
+            "each selected binding must produce a result"
+        );
+        let aapl = results
+            .iter()
+            .find(|(a, _, _)| a.symbol == "PHASE7BAAPL")
+            .expect("AAPL result present");
+        assert_eq!(aapl.1.spec.name, "intraday_scalper");
+        assert_eq!(aapl.2.as_ref().unwrap().timeframe, "5m");
+        let msft = results
+            .iter()
+            .find(|(a, _, _)| a.symbol == "PHASE7BMSFT")
+            .expect("MSFT result present");
+        assert_eq!(msft.1.spec.name, "volatility_breakout");
+        assert_eq!(msft.2.as_ref().unwrap().timeframe, "1H");
+
+        cleanup_bars(&pool, "PHASE7BAAPL").await;
+        cleanup_bars(&pool, "PHASE7BMSFT").await;
+    }
+
+    /// Test 8: the same strategy selected for two symbols uses two isolated
+    /// host instances and correct target symbols (no cross-symbol leakage).
+    #[tokio::test]
+    async fn same_strategy_two_symbols_uses_isolated_hosts() {
+        let Some(pool) = db_pool_or_skip("PHASE7B-08").await else {
+            return;
+        };
+        let ts = recent_bar_ts();
+        seed_bar(&pool, "PHASE7BAAA", "5m", ts, 100_000_000).await;
+        seed_bar(&pool, "PHASE7BBBB", "5m", ts, 100_000_000).await;
+
+        let keys = vec![
+            (
+                "PHASE7BAAA".to_string(),
+                "intraday_scalper".to_string(),
+                300,
+            ),
+            (
+                "PHASE7BBBB".to_string(),
+                "intraday_scalper".to_string(),
+                300,
+            ),
+        ];
+        let mut host_pool = DynamicSelectionHostPool::build(&keys).expect("pool builds");
+        assert_eq!(
+            host_pool.len(),
+            2,
+            "one isolated host per symbol, same strategy"
+        );
+        let bindings = vec![
+            binding("PHASE7BAAA", "intraday_scalper", 300, "5m"),
+            binding("PHASE7BBBB", "intraday_scalper", 300, "5m"),
+        ];
+
+        let state = hermetic_state_with_db(&pool);
+        state
+            .deposit_strategy_bar_input(StrategyBarInput {
+                now_tick: 1,
+                end_ts: ts,
+                limit_price: Some(100_000_000),
+                qty: 0,
+            })
+            .await;
+
+        let results = state
+            .tick_strategy_dispatch_selected_hosts_with_bar_facts(&bindings, &mut host_pool)
+            .await
+            .expect("dispatch must not fault");
+        assert_eq!(results.len(), 2);
+        for (assignment, result, facts) in &results {
+            // Host isolation proof: every target this symbol's host emitted
+            // belongs to that exact symbol -- never the other symbol's.
+            for t in &result.intents.output.targets {
+                assert_eq!(
+                    t.symbol, assignment.symbol,
+                    "a shared/leaked host would emit the wrong symbol's targets"
+                );
+            }
+            assert_eq!(facts.as_ref().unwrap().symbol, assignment.symbol);
+        }
+
+        cleanup_bars(&pool, "PHASE7BAAA").await;
+        cleanup_bars(&pool, "PHASE7BBBB").await;
+    }
+
+    /// Test 9: a mixed 5m + 1h selected batch uses exact per-binding bar
+    /// windows and truthful per-symbol timeframe facts.
+    #[tokio::test]
+    async fn mixed_5m_and_1h_batch_uses_exact_per_binding_windows() {
+        let Some(pool) = db_pool_or_skip("PHASE7B-09").await else {
+            return;
+        };
+        let ts = recent_bar_ts();
+        seed_bar(&pool, "PHASE7BMIX5", "5m", ts, 100_000_000).await;
+        seed_bar(&pool, "PHASE7BMIX1", "1H", ts, 300_000_000).await;
+
+        let keys = vec![
+            (
+                "PHASE7BMIX5".to_string(),
+                "intraday_scalper".to_string(),
+                300,
+            ),
+            (
+                "PHASE7BMIX1".to_string(),
+                "volatility_breakout".to_string(),
+                3600,
+            ),
+        ];
+        let mut host_pool = DynamicSelectionHostPool::build(&keys).expect("pool builds");
+        let bindings = vec![
+            binding("PHASE7BMIX5", "intraday_scalper", 300, "5m"),
+            binding("PHASE7BMIX1", "volatility_breakout", 3600, "1H"),
+        ];
+
+        let state = hermetic_state_with_db(&pool);
+        state
+            .deposit_strategy_bar_input(StrategyBarInput {
+                now_tick: 1,
+                end_ts: ts,
+                limit_price: Some(100_000_000),
+                qty: 0,
+            })
+            .await;
+
+        let results = state
+            .tick_strategy_dispatch_selected_hosts_with_bar_facts(&bindings, &mut host_pool)
+            .await
+            .expect("mixed-timeframe dispatch must not fault");
+        assert_eq!(results.len(), 2);
+        let five_m = results
+            .iter()
+            .find(|(a, _, _)| a.symbol == "PHASE7BMIX5")
+            .unwrap();
+        assert_eq!(five_m.2.as_ref().unwrap().timeframe, "5m");
+        assert_eq!(five_m.2.as_ref().unwrap().close_micros, 100_000_000);
+        let one_h = results
+            .iter()
+            .find(|(a, _, _)| a.symbol == "PHASE7BMIX1")
+            .unwrap();
+        assert_eq!(one_h.2.as_ref().unwrap().timeframe, "1H");
+        assert_eq!(one_h.2.as_ref().unwrap().close_micros, 300_000_000);
+
+        cleanup_bars(&pool, "PHASE7BMIX5").await;
+        cleanup_bars(&pool, "PHASE7BMIX1").await;
+    }
+
+    /// Test 10: one pending bar input is consumed once for the whole tick,
+    /// not once per binding.
+    #[tokio::test]
+    async fn one_pending_bar_consumed_once_for_whole_tick() {
+        let Some(pool) = db_pool_or_skip("PHASE7B-10").await else {
+            return;
+        };
+        let ts = recent_bar_ts();
+        seed_bar(&pool, "PHASE7BONE1", "5m", ts, 100_000_000).await;
+        seed_bar(&pool, "PHASE7BONE2", "5m", ts, 100_000_000).await;
+
+        let keys = vec![
+            (
+                "PHASE7BONE1".to_string(),
+                "intraday_scalper".to_string(),
+                300,
+            ),
+            (
+                "PHASE7BONE2".to_string(),
+                "intraday_scalper".to_string(),
+                300,
+            ),
+        ];
+        let mut host_pool = DynamicSelectionHostPool::build(&keys).expect("pool builds");
+        let bindings = vec![
+            binding("PHASE7BONE1", "intraday_scalper", 300, "5m"),
+            binding("PHASE7BONE2", "intraday_scalper", 300, "5m"),
+        ];
+
+        let state = hermetic_state_with_db(&pool);
+        state
+            .deposit_strategy_bar_input(StrategyBarInput {
+                now_tick: 1,
+                end_ts: ts,
+                limit_price: Some(100_000_000),
+                qty: 0,
+            })
+            .await;
+        assert!(!state.pending_strategy_bar_input_is_none_for_test().await);
+
+        let results = state
+            .tick_strategy_dispatch_selected_hosts_with_bar_facts(&bindings, &mut host_pool)
+            .await
+            .expect("dispatch must not fault");
+        assert_eq!(
+            results.len(),
+            2,
+            "one take() serves both bindings this tick"
+        );
+        assert!(
+            state.pending_strategy_bar_input_is_none_for_test().await,
+            "the single pending bar must be consumed, not left for a second tick"
+        );
+
+        // A second call with nothing pending must yield zero results, never
+        // a stale re-dispatch of the same bar.
+        let second = state
+            .tick_strategy_dispatch_selected_hosts_with_bar_facts(&bindings, &mut host_pool)
+            .await
+            .expect("no fault on an empty pending slot");
+        assert!(second.is_empty());
+
+        cleanup_bars(&pool, "PHASE7BONE1").await;
+        cleanup_bars(&pool, "PHASE7BONE2").await;
+    }
+
+    /// Test 13: a missing host key (binding present, pool entry absent)
+    /// fails closed with zero results, never a legacy fallback.
+    #[tokio::test]
+    async fn missing_host_key_fails_closed_zero_results() {
+        let Some(pool) = db_pool_or_skip("PHASE7B-13").await else {
+            return;
+        };
+        let ts = recent_bar_ts();
+        seed_bar(&pool, "PHASE7BMISSING", "5m", ts, 100_000_000).await;
+
+        // Empty pool -- the binding's key has no corresponding host.
+        let mut host_pool = DynamicSelectionHostPool::build(&[]).expect("empty pool builds");
+        let bindings = vec![binding("PHASE7BMISSING", "intraday_scalper", 300, "5m")];
+
+        let state = hermetic_state_with_db(&pool);
+        state
+            .deposit_strategy_bar_input(StrategyBarInput {
+                now_tick: 1,
+                end_ts: ts,
+                limit_price: Some(100_000_000),
+                qty: 0,
+            })
+            .await;
+
+        let err = state
+            .tick_strategy_dispatch_selected_hosts_with_bar_facts(&bindings, &mut host_pool)
+            .await
+            .expect_err("a missing host key must fail closed, not silently skip");
+        assert!(matches!(
+            err,
+            SelectedHostDispatchFault::HostMissingAtDispatch { .. }
+        ));
+
+        cleanup_bars(&pool, "PHASE7BMISSING").await;
+    }
+
+    /// Test 25: missing bars invoke no host and produce no result for that
+    /// binding (fail-closed, not an error) -- no other binding is affected.
+    #[tokio::test]
+    async fn missing_bars_invoke_no_host_and_produce_no_result() {
+        let Some(pool) = db_pool_or_skip("PHASE7B-25").await else {
+            return;
+        };
+        // No bars seeded at all for this symbol.
+        let keys = vec![(
+            "PHASE7BNOBARS".to_string(),
+            "intraday_scalper".to_string(),
+            300,
+        )];
+        let mut host_pool = DynamicSelectionHostPool::build(&keys).expect("pool builds");
+        let bindings = vec![binding("PHASE7BNOBARS", "intraday_scalper", 300, "5m")];
+
+        let state = hermetic_state_with_db(&pool);
+        state
+            .deposit_strategy_bar_input(StrategyBarInput {
+                now_tick: 1,
+                end_ts: Utc::now().timestamp(),
+                limit_price: Some(100_000_000),
+                qty: 0,
+            })
+            .await;
+
+        let results = state
+            .tick_strategy_dispatch_selected_hosts_with_bar_facts(&bindings, &mut host_pool)
+            .await
+            .expect("missing bars must be a fail-closed no-op, not a fault");
+        assert!(results.is_empty(), "no bars -> no host call -> no result");
+    }
+
+    /// Off/Legacy structural proof: `RuntimeStrategyDispatchAuthority::
+    /// Legacy` carries no host pool at all, so the selected-host dispatch
+    /// function is structurally unreachable for it -- the loop_runner.rs
+    /// match arm never calls `tick_strategy_dispatch_selected_hosts_with_
+    /// bar_facts` for `Legacy` (see loop_runner.rs and the Phase 7B guard
+    /// script). This is proven by construction, not a runtime counter.
+    #[test]
+    fn legacy_authority_carries_no_host_pool() {
+        let legacy =
+            crate::dynamic_selection_dispatch_authority::RuntimeStrategyDispatchAuthority::Legacy {
+                assignments: vec![SymbolStrategyAssignment {
+                    symbol: "AAPL".to_string(),
+                    strategy_id: "intraday_scalper".to_string(),
+                    timeframe: "5m".to_string(),
+                }],
+            };
+        assert!(!legacy.is_dynamic_paper_enforced());
     }
 }
