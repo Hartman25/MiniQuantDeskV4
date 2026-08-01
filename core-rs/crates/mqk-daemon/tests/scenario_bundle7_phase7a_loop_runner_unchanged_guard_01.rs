@@ -41,12 +41,22 @@
 //! present by a companion assertion below, and its own behavior (zero
 //! economic work before barrier release) is proven by dedicated unit tests
 //! in `state/loop_runner.rs`, not by this structural byte-diff.
+//!
+//! DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7A-FINAL-PRIVATE-PRODUCTION-
+//! EFFECTS-PROOF (R6, "BARRIER LEADERSHIP/TRUTH") legitimately adds one more
+//! prologue change, still strictly above the anchor: both pre-barrier exit
+//! branches (barrier-cancel and stop-before-barrier-release) now explicitly
+//! call `orchestrator.release_runtime_leadership().await` before
+//! `drop_outside_async_context(orchestrator)` — a real gap this patch found
+//! (every other exit path in this file already released leadership before
+//! dropping; these two did not). `STARTING_HEAD` is bumped to this patch's
+//! own required starting commit, per this file's own stated convention.
 
 use std::process::Command;
 
-/// BUNDLE-7-PHASE-7A-CORE-ATOMIC-STATE-MACHINE-CLOSURE's required starting
-/// local HEAD / origin/main.
-const STARTING_HEAD: &str = "294ce902951da96ad30a915d0c2ed924eb5147db";
+/// DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7A-FINAL-PRIVATE-PRODUCTION-
+/// EFFECTS-PROOF's required starting local HEAD / origin/main.
+const STARTING_HEAD: &str = "985dd0d1b4af17a89223bda26bbfe4e8436e58e1";
 const LOOP_RUNNER_PATH: &str = "core-rs/crates/mqk-daemon/src/state/loop_runner.rs";
 
 /// The first line of the unchanged tick-loop-body region. Everything from

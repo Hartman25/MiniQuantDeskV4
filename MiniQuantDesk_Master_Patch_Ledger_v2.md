@@ -19446,3 +19446,225 @@ DISPOSITION:
 DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7A-CORE-ATOMIC-STATE-MACHINE-CLOSURE:
 COMPLETE — AWAITING CHATGPT AND OPERATOR ACCEPTANCE BEFORE PUSH
 ```
+
+## DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7A-FINAL-PRIVATE-PRODUCTION-EFFECTS-PROOF (2026-08-01)
+
+**Scope.** Final Bundle 7 Phase 7A patch. Closes R5 (remove production-
+accessible Phase 7A test/start bypasses) fully. R6 (execute the real
+`ProductionRuntimeStartEffects` success/failure matrix hermetically through
+private dependency injection) is PARTIAL: the private injection boundary is
+built and real, a genuine end-to-end success is proven for the first time,
+the explicitly-required barrier-leadership/truth paths are proven (and a
+real gap found and fixed), but the full enumerated 29-failure-point matrix
+is not exhaustively covered — see "R6 remaining open" below.
+
+**R5 — removed bypasses.** Seven `_for_test` seams that were exclusively
+used by the external `tests/scenario_bundle7_phase7a_final_atomic_
+ownership_and_rollback_truth_01.rs` (confirmed via per-symbol grep across
+every `tests/*.rs` file — the other ~15 files calling similarly-named
+`inject_running_loop_for_test`/`establish_db_backed_active_run_for_test`/
+`gap_halt_owned_runtime_for_test` are unrelated, pre-existing, broadly-used
+general test fixtures, deliberately left untouched per "audit but don't
+broadly rewrite unrelated ones") are now `pub(crate)` + `#[cfg(test)]`:
+`drive_production_start_effects_for_test`,
+`set_dynamic_selection_fault_seam_for_test`,
+`commit_dynamic_selection_runtime_state_for_test`,
+`plant_accepted_artifact_for_test`, `plant_day_signal_count_for_test`,
+`accepted_artifact_snapshot_for_test`, `day_signal_count_snapshot_for_test`.
+`commit_dynamic_selection_runtime_state` (the underlying `pub(crate)`
+function, genuinely test-only in purpose per its own doc comment) is now
+also `#[cfg(test)]` — its one remaining caller after the above narrowing
+would otherwise be dead code in a default build.
+
+The external test file was deleted; its two tests (FA-01, FA-02) moved
+in-crate into a new `#[cfg(test)] mod real_production_effects_matrix_tests`
+in `state/lifecycle.rs`, alongside the also-newly-private
+`drive_production_start_effects_for_test`. Its DB-connection helper was
+tightened from a blacklist (excludes `:5440`) to a hard allowlist
+(requires `:5434`), per repo DB-test rule.
+
+New guard `scripts/guards/check_no_phase7a_production_effects_bypass.ps1`
+fails if any of the seven symbols above ever regress back to a plain `pub
+fn`/`pub async fn`. `cargo check -p mqk-daemon --lib` (default features)
+is the authoritative proof — clean, zero warnings.
+
+**R6 — private hermetic injection boundary.** Added to `AppState` (all
+always-`false`-in-production, all setters `#[cfg(test)]`-gated):
+- `hermetic_test_broker_override` (`RwLock<bool>`) — when enabled, the one
+  `build_daemon_broker` call site inside `build_execution_orchestrator`
+  (`state/orchestrator_build.rs`) that refuses `BrokerKind::Paper`
+  constructs `DaemonBroker::Paper(LockedPaperBroker::default())` directly
+  instead — the same broker `build_daemon_broker` would build if it did
+  not refuse Paper as a business-rule gate. Never weakens
+  `build_daemon_broker` itself: the real gate is untouched and
+  unconditionally applies whenever the override is not explicitly enabled.
+  This is the one thing that made a genuine `ProductionRuntimeStartEffects`
+  success unreachable before this patch (the deleted external test file's
+  own doc comment documented this exact conclusion).
+- `force_install_active_runtime_conflict` (`AtomicBool`) — `install_active_
+  runtime`'s genuine `Starting{run_id}` success branch takes the exact same
+  conflict-cleanup path (stop+join the just-spawned handle, return `Err`)
+  the real `StartingForDifferentRun`/`AlreadyActive` branches already use,
+  deterministically instead of by race.
+- `force_leadership_release_failure` (`AtomicBool`) — `release_
+  orchestrator_leadership` (in `ProductionRuntimeStartEffects`) records a
+  simulated `Err` instead of calling the real
+  `orchestrator.release_runtime_leadership()`.
+
+All three are checked at their exact real call sites inside the actual
+`ProductionRuntimeStartEffects`/`install_active_runtime` implementation —
+no second lifecycle implementation, no new branch in the real success
+path, same trait impl drives both production and tests.
+
+**Real bug found and fixed (BARRIER LEADERSHIP/TRUTH).** Writing the
+install-conflict test surfaced a genuine gap: `spawn_execution_loop`'s two
+pre-barrier exit branches (barrier-cancel, stop-before-barrier-release)
+called `drop_outside_async_context(orchestrator)` directly, without first
+calling `orchestrator.release_runtime_leadership().await` — every *other*
+exit path in the same file (deadman-expired, normal loop exits) already did
+release leadership first. This meant: whenever `install_active_runtime`
+failed *after* the orchestrator had already been moved into the spawned
+task (a real successful `start_runtime_effects`, orchestrator leadership
+already acquired), the leadership lease was silently never released —
+`rollback_local_effects` finds `self.orchestrator` already taken (`None`)
+so it has nothing left to release either. Fixed by adding the explicit
+`release_runtime_leadership().await` call (matching the established
+pattern) to both branches in `state/loop_runner.rs`.
+
+**Tests added** (in `state/lifecycle.rs`'s new
+`real_production_effects_matrix_tests` module, all `#[tokio::test(flavor =
+"multi_thread")]`, DB tests hard-refuse unless `MQK_DATABASE_URL` contains
+`:5434`):
+- `fa_01_real_orchestrator_construction_failure_is_cleanly_rolled_back`,
+  `fa_02_ownership_conflict_preserves_existing_owner_sentinel_state` —
+  moved verbatim (logic unchanged) from the deleted external test file.
+- `success_off_disposition_reaches_active_and_stops_cleanly` — R6 success
+  scenario 1 (`Off`): genuine reserve → arm → begin → initial heartbeat →
+  initial tick → post-tick heartbeat → Starting metadata/mirrors →
+  barriered spawn → Active → barrier release → real stop, through the real
+  `ProductionRuntimeStartEffects`, via the hermetic broker override.
+- `fault_seam_after_orchestrator_construction_rolls_back_cleanly` — the
+  pre-existing `AfterOrchestratorConstruction` fault seam, now finally
+  exercised end-to-end through a *genuinely successful* construction
+  (previously only reachable via the real Paper-broker-refusal failure
+  FA-01 already covers) — also asserts the real orchestrator's leadership
+  lease is released exactly once on rollback.
+- `barrier_truth_install_conflict_releases_leadership_and_cancels_barrier`
+  — R6 items 19/20 ("explicitly inspect barrier-cancel and Active-install-
+  failure paths"): forces the install conflict after a genuinely
+  successful `start_runtime_effects` (orchestrator already moved into the
+  spawned task); asserts the correct phase (`LocalCommitStarted`, not
+  cleanly-stoppable) and durable disposition (`Halted`, not `Stopped`),
+  that `rollback_local_effects`'s own leadership-release finds nothing
+  left to release (`None`) since the spawned task's exit path is what
+  actually releases it, and that ownership ends up fully `Idle`.
+- `leadership_release_failure_is_recorded_not_discarded` — R6 item 29:
+  proves a forced release failure surfaces as `Some(Err(_))` in structured
+  `RollbackOutcome` truth, is not silently discarded, and does not prevent
+  the rest of rollback (reservation release) from completing.
+
+**R6 remaining open** (not started, not claimed): separately-forced
+arm/begin/initial-heartbeat/post-tick-heartbeat/initial-tick failures
+(items 10-15 of the requested matrix — reaching these hermetically past a
+genuinely successful orchestrator construction is now possible via the
+hermetic broker override, but no dedicated forced-failure hook exists yet
+for these specific sub-steps, unlike the existing fault-seam points already
+exercised above); spawned-task panic/join-failure (item 21); durable-
+rollback query-failure and transition-failure (items 27/28, forcing
+`mqk_db::fetch_run`/`stop_run`/`halt_run` to fail specifically inside
+`rollback_failed_start_attempt`); a dedicated stop/halt/shutdown/reap proof
+driven specifically through this new seam (the existing, pre-existing
+`dynamic_selection_cleanup_contract_tests` module already covers stop/
+halt/shutdown/reap generally, but not via a run that reached `Active`
+through the real `ProductionRuntimeStartEffects` hermetic success path
+specifically). None of these were attempted; none are claimed done.
+
+**Proof.**
+- `cargo check -p mqk-daemon --lib` (default features): clean, zero
+  warnings.
+- `check_no_phase7a_production_effects_bypass.ps1`: OK.
+- `check_phase7a_final_closure.ps1` (new final guard, all four checks):
+  OK — no bypass; `paper_enforced` interlock string present; economic
+  tick body byte-identical (delegates to `scenario_bundle7_phase7a_
+  loop_runner_unchanged_guard_01`, `STARTING_HEAD` rebased to this
+  patch's own required starting commit `985dd0d1`, per that file's own
+  rolling-anchor convention); no literal `approved_for_live: true`
+  anywhere in `src/`.
+- `cargo test -p mqk-daemon --no-run` (full crate, all targets): clean.
+- Against the real port-5434 test DB (`mqk-test-postgres` docker
+  container; never 5440): all 6 new/moved
+  `real_production_effects_matrix_tests` genuinely connect and pass (not
+  a skip path) — FA-01, FA-02, SUCCESS-01, FAULT-SEAM-01, BARRIER-TRUTH-01,
+  LEADERSHIP-RELEASE-FAILURE-01. Regression check against the same DB:
+  `scenario_bundle7_phase7a_atomicity_repair_01` (5/5 — AR-01..05),
+  `scenario_daily_data_readiness_start_gate_01` (20/20 — SG-01..21),
+  `scenario_bundle7_phase7a_lifecycle_wiring_01` (1/1) — all pass, no
+  regressions.
+- `rustfmt --edition 2021 --check`: clean on every file this session
+  touched (one drift found and fixed with `cargo fmt` before finalizing).
+- `cargo clippy -p mqk-daemon --lib --tests -- -D warnings`: 48 errors emitted,
+  zero originate from any file this session touched — all in
+  `state/session_controller.rs`, `state/runtime_session_source.rs`,
+  `tests/scenario_runtime_session_v2_active_cutover_hook_asset_core_05e.rs`,
+  and `tests/scenario_runtime_session_v2_cutover_scaffold_asset_core_05d.rs`
+  (confirmed by listing every emitted `-->` path) — same pre-existing
+  local-toolchain-vs-CI-pin mismatch prior entries documented.
+- `git diff --check` / `git diff --cached --check`: clean.
+- No migrations added. No forbidden path touched.
+
+**Commits (deviating from the suggested 4-way split):**
+1. `daemon+test: remove default-build Phase 7A bypasses, add private hermetic
+   production-effects injection, and prove the real-effects matrix` —
+   `state.rs`, `state/lifecycle.rs`, `state/loop_runner.rs`,
+   `state/orchestrator_build.rs`; deletes the external test file.
+2. `guard/docs: close Phase 7A R5, partial R6` — the two new guard scripts,
+   `STARTING_HEAD` bump in the existing loop-runner guard test, this entry.
+
+Same class of reason the immediately-prior patch's own entry documented for
+its analogous deviation: R5's bypass-removal and R6's injection-seam
+additions live in the same few files, in several cases the same functions
+(e.g. `install_active_runtime`'s match arm), and — more binding than
+topical proximity — splitting the seam's production code from the tests
+that exercise it would leave an intermediate commit with `#[cfg(test)]`
+setter methods no test yet calls, which `cargo clippy -p mqk-daemon --lib
+--tests -- -D warnings` would correctly flag as dead code at that commit
+were it checked out alone. Keeping the seam and its tests together avoids
+a commit that only compiles clean in isolation by coincidence of lint
+configuration.
+
+```text
+DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7A-FINAL-PRIVATE-PRODUCTION-EFFECTS-PROOF:
+
+Patch: DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7A-FINAL-PRIVATE-PRODUCTION-EFFECTS-PROOF
+Worktree: C:\Users\Zacha\Desktop\MiniQuantDeskV4
+Branch: main
+Starting HEAD: 985dd0d1b4af17a89223bda26bbfe4e8436e58e1
+Final HEAD: <filled in after commit>
+Commits: 2
+Pushed: NO
+Phase 7B started: NO
+Bundle 8 started: NO
+Real daemon started: NO
+Orders placed: NO
+
+R5: CLOSED -- 7 default-build bypass seams narrowed to pub(crate)+#[cfg(test)]; external test file deleted, moved in-crate; guard + cargo check --lib prove absence
+R6: PARTIAL -- private injection boundary real and working (hermetic broker override, install-conflict, leadership-release-failure); success scenario 1 proven end-to-end for the first time; barrier-leadership/truth explicitly inspected, real gap found+fixed; 4/29 matrix failure points + reservation-conflict newly/re-proven through this seam; arm/begin/heartbeat/tick-specific injections, spawned-task-panic, durable-rollback query/transition failures, and a seam-specific stop/halt/shutdown/reap proof remain OPEN
+BARRIER TRUTH FIX: spawn_execution_loop's two pre-barrier exit branches now explicitly release orchestrator leadership before dropping (previously silently skipped it -- every other exit path in the file already did)
+TESTS: 6/6 real_production_effects_matrix_tests genuinely pass against port-5434 DB; AR-01..05, SG-01..21, lifecycle_wiring all still pass (no regressions); cargo test -p mqk-daemon --no-run clean (full crate)
+VALIDATION: rustfmt clean; clippy zero errors in touched files (48 pre-existing errors elsewhere, unrelated); both guards OK; git diff --check clean
+
+FILES CHANGED: core-rs/crates/mqk-daemon/src/state.rs, core-rs/crates/mqk-daemon/src/state/lifecycle.rs, core-rs/crates/mqk-daemon/src/state/loop_runner.rs, core-rs/crates/mqk-daemon/src/state/orchestrator_build.rs, core-rs/crates/mqk-daemon/tests/scenario_bundle7_phase7a_loop_runner_unchanged_guard_01.rs
+FILES ADDED: scripts/guards/check_no_phase7a_production_effects_bypass.ps1, scripts/guards/check_phase7a_final_closure.ps1
+FILES DELETED: core-rs/crates/mqk-daemon/tests/scenario_bundle7_phase7a_final_atomic_ownership_and_rollback_truth_01.rs
+FILES RENAMED: none
+UNEXPECTED FILES: none
+MIGRATIONS ADDED: NONE
+PHASE 7B ECONOMIC DISPATCH CHANGED: NO
+STRATEGY/RISK/BROKER/PORTFOLIO/RECONCILIATION AUTHORITY CHANGED: NO
+AI CONSUMED: NO
+LIVE CAPITAL ENABLED: NO
+
+DISPOSITION:
+DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7A-FINAL-PRIVATE-PRODUCTION-EFFECTS-PROOF:
+PARTIAL -- R5 CLOSED with exact evidence above. R6's private injection boundary is real and proven (success scenario + barrier-leadership/truth + 4 fault-seam/conflict/release-failure paths, all passing against the real DB), but the full 29-point failure matrix is not exhaustively covered -- named remaining items above, none started, none claimed.
+```
