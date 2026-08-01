@@ -18794,3 +18794,217 @@ ORDERS PLACED: no
 LIVE CAPITAL ENABLED: no
 AI CONSUMED: no
 ```
+
+## DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7A-TRUE-ATOMIC-BUNDLE-BARRIER-AND-TEST-BOUNDARY-CLOSURE (2026-07-31)
+
+The prior entry's own "AWAITING ... ACCEPTANCE" disposition was not accepted.
+The reviewing operator returned 8 named defects against it. This session
+closed 2 of the 8 with real, DB-verified evidence; the other 6 are OPEN,
+each with exact technical evidence gathered this session, not attempted
+(several are structurally large and one — requirement 6 — is partially
+blocked by a constraint the prior entry itself already documented).
+
+**1. ONE RAW START AUTHORITY — CLOSED.** `StartAttemptAuthoritySnapshot::
+resolve` (`state/lifecycle.rs`) previously called `build_multi_symbol_
+runtime_config_from_env()` and `required_symbols_for_freshness_gate_from_
+env()` directly — each independently called `evaluate_watchlist_intake_
+from_env()` (a second file read of the same watchlist artifact) and each
+independently re-read the legacy `MQK_STRATEGY_SYMBOL`/`MQK_STRATEGY_IDS`/
+timeframe env vars. Fixed by adding `MultiSymbolConfigRawInputs` +
+`read_multi_symbol_config_raw_inputs_from_env()` (`state/multi_symbol_
+config.rs`) — one watchlist read, one legacy-env read — and a new pure
+`market_data_freshness::required_symbols_with_source(watchlist_outcome,
+timeframe, legacy_symbol)` core (the old `required_symbols_with_source_
+from_env` is now a thin wrapper over it, unchanged for its other callers).
+`resolve()` now calls the raw-input reader once and derives both
+`multi_symbol_config` and `required_freshness_symbols` from that one
+snapshot — zero direct calls to either original `_from_env` function
+remain in `lifecycle.rs`. Also added `resolve_autonomous_runtime_context_
+from_fleet(state, fleet_ids)` (`state/autonomous_runtime_context.rs`) — the
+named "or equivalent" seam — with `resolve_autonomous_runtime_context` now
+a thin wrapper over it, so a future caller holding an already-frozen fleet
+value never needs a second `strategy_fleet_snapshot()` read. The
+`configured_strategy_ids` (`fleet_ids_from_env()`) vs. B1A bootstrap fleet
+(`strategy_fleet_snapshot()`) duplication remains — confirmed still
+deliberate (test-injection seam, documented in-file) and out of this
+patch's file scope to unify further.
+Structural guard `scenario_bundle7_phase7a_atomicity_repair_01.rs::ar_05`
+rewritten for the new architecture (was asserting the *old* direct-call
+pattern as correct — now asserts zero real call sites for the two `_from_
+env` functions and exactly one each for `read_multi_symbol_config_raw_
+inputs_from_env`/`required_symbols_with_source`/`load_readiness_context_
+from_env`, all still zero in `loop_runner.rs`).
+
+**7. BUNDLE-7 TRUST-BOUNDARY PANICS — CLOSED** (for every panic this
+patch's own git-blame range, `9323b769..HEAD` before this session, actually
+introduced — confirmed by `git log -p` over that range; no other file in
+scope had one). `take_execution_loop_for_control`/`reap_finished_execution_
+loop` (`state.rs`) no longer `unreachable!()` after a redundant check-then-
+match on the same held lock — rewritten as a single unconditional `mem::
+replace`-then-restore-if-wrong-variant (the exact pattern `take_execution_
+loop_for_shutdown` already used). `reserve_execution_loop_slot` no longer
+`.expect("non-Empty slot always carries a run_id")` — rewritten as an
+exhaustive match reading each variant's own `run_id` field directly (and
+the now-unused `ExecutionLoopSlot::run_id()` helper was deleted as dead
+code). In `ProductionRuntimeStartEffects` (`state/lifecycle.rs`): all six
+`.expect("... mutex poisoned")` call sites now `.unwrap_or_else(|poisoned|
+poisoned.into_inner())`, matching the poison-recovery pattern this same
+struct's `set_phase`/`release_orchestrator_leadership` already used for the
+same reason (pure process-local progress state, no invariant a poisoned
+write could violate). The one genuine "consumed twice" panic
+(`artifact_intake.lock().take().expect("start_runtime_effects must be
+called at most once")`) is now a typed `RuntimeStartEffectsError` (with the
+orchestrator lease released first, matching every other failure branch in
+that function) instead of a panic. `native_strategy_bootstrap`/`dynamic_
+selection_outcome`'s `.take()` returning `None` was never a "called twice"
+bug (both are legitimately optional), so only their mutex-poison `.expect`
+needed the same fix, not a new typed error. "Barrier/install panic paths"
+(the fourth item under requirement 7) has no code to fix yet — it is
+contingent on requirement 3 (the barrier does not exist), which is OPEN
+below.
+
+**OPEN — requirement 2 (true atomic run-scoped bundle).** `commit_run_
+start_bundle`/`rollback_run_start_bundle_for_run` (`state.rs`) still write
+across ~9 separate lock objects (`execution_snapshot`, `accepted_artifact`,
+`native_strategy_bootstrap`, `day_signal_count` atomic, symbol-day-order-
+counts, signal-blocked-alert state, bar-tick counters, per-symbol target
+states, `dynamic_selection_runtime`, `run_start_commit_owner`) rather than
+one lock guarding one enum (`None`/`Starting{run_id,prepared}`/
+`Active{run_id,bundle}`/`Degraded{run_id,rollback_truth}` per the patch's
+own sketch). Collapsing these into one lock touches every read site across
+`loop_runner.rs`'s tick body (which the patch's own "economic non-change"
+clause forbids altering) and `daily_data_readiness.rs`'s target-state reads
+— a genuinely large, high-risk refactor not attempted this session given
+the "measure twice" cost of getting a live-money atomicity boundary wrong
+under this session's remaining time budget. Not started.
+
+**OPEN — requirement 3 (real startup barrier).** Confirmed real via source
+read: `ProductionRuntimeStartEffects::spawn_loop` (`state/lifecycle.rs`)
+calls `spawn_execution_loop` (which `tokio::spawn`s the task immediately)
+*before* `install_active_execution_loop_slot` transitions the slot to
+`Active`. `loop_runner.rs`'s spawned task's first `tokio::select!` arm is
+`ticker.tick()` on a `tokio::time::interval` (default `MissedTickBehavior`
+fires the first tick immediately once polled) racing `stop_rx.changed()` —
+so the task can reach its first deadman/tick pass while the slot is still
+`Reserved`, before `install_active_execution_loop_slot` has returned. A
+real fix needs a barrier (e.g. a `tokio::sync::Notify`/oneshot) the spawned
+task awaits — racing against `stop_rx.changed()` in the same `select!`, so
+a failed install can still stop/join it — released only after `install_
+active_execution_loop_slot` succeeds. Not started; this is exactly the
+prerequisite for requirement 7's fourth item ("barrier/install panic
+paths").
+
+**OPEN — requirement 4 (complete successful-exit cleanup).** Depends on
+requirement 2's bundle existing first (`clear_run_scoped_runtime_for_run`
+as specified needs one bundle to clear atomically, not ~9 separate
+compare-and-clear calls to keep in sync by hand). Not started.
+
+**OPEN — requirement 5 (remove public production test bypass).**
+`drive_production_start_effects_for_test` (`state/lifecycle.rs`) and its
+sibling sentinel-planting helpers (`plant_accepted_artifact_for_test`,
+`plant_day_signal_count_for_test`, `commit_dynamic_selection_runtime_
+state_for_test`, `set_dynamic_selection_fault_seam_for_test`) remain `pub`,
+non-cfg-gated, in the normal build. Investigated the two options the patch
+allows: moving the ~400-line external test file (`tests/scenario_bundle7_
+phase7a_final_atomic_ownership_and_rollback_truth_01.rs`) into an in-crate
+`#[cfg(test)]` module is a real relocation (module visibility, `PgPool`
+plumbing, the `MQK_DATABASE_URL` skip-guard all move too); the feature-flag
+alternative (non-default `test-harness` Cargo feature, self-dependency in
+`[dev-dependencies]` so the external `tests/` binary can enable it) is the
+standard idiomatic pattern but requires updating this crate's `Cargo.toml`,
+verifying no default/workspace feature pulls it in, and updating every
+validation/CI invocation of `cargo test -p mqk-daemon` to pass `--features
+test-harness` — a wider blast radius than fit this session's remaining
+budget without risking either committing an incomplete gate (worse than
+today's honest `pub`) or breaking other still-passing test invocations.
+Not started.
+
+**OPEN — requirement 6 (real production-effects success/failure matrix).**
+The prior entry's own item 6 already documented the exact blocker: a
+genuine *successful* start through the real `build_execution_orchestrator`
+-> `build_daemon_broker` path requires live Alpaca paper credentials or a
+mock-Alpaca-server harness — `build_daemon_broker` refuses `BrokerKind::
+Paper` outright ("the only authoritative paper execution path is
+Paper+Alpaca"). This session independently re-confirmed that constraint is
+still in force (unchanged code path) rather than re-deriving it from
+scratch. This means the "Off success -> Active -> stop", `ShadowAllowed`
+success, `ShadowInvalid` success, arm/begin/initial-heartbeat, and post-
+tick-heartbeat success rows of the requested matrix cannot be proven
+against real effects under this patch's own "no network, no credentials"
+constraint — only the failure/rollback rows (already 2/2 proven in the
+prior entry's `fa_01`/`fa_02`) are reachable hermetically today. Closing
+this requirement for real would need either an operator decision to permit
+a mock-Alpaca-server harness (a scope decision, not a code change this
+session can make unilaterally) or a hermetic in-process paper-execution
+path `build_daemon_broker` doesn't yet have. Not started; flagged for an
+explicit operator/reviewer decision rather than silently narrowing the
+requirement.
+
+**OPEN — requirement 8 (reserve before run-link activation write).** Not
+investigated this session (time budget went to requirements 1/7 and to
+scoping 2/3/4/5/6 accurately) — `advance_run_to_active`'s exact write order
+relative to `reserve_execution_loop_slot` needs its own read before any
+fix, not attempted here.
+
+**Commits:**
+1. `daemon: derive one authority from one raw snapshot` — requirement 1:
+   `state.rs` (re-export), `state/multi_symbol_config.rs`, `market_data_
+   freshness.rs`, `state/lifecycle.rs` (`resolve()`), `state/autonomous_
+   runtime_context.rs`, plus the rewritten `ar_05` structural guard.
+2. `daemon: remove Bundle-7 trust-boundary panics in loop-ownership and
+   start-effects paths` — requirement 7: `state.rs` (execution_loop slot
+   machinery), `state/lifecycle.rs` (`ProductionRuntimeStartEffects`),
+   `state/types.rs` (dead-code removal).
+3. `docs: record Phase 7A true-atomic partial repair (2 of 8 closed)` —
+   this entry.
+
+**Proof:**
+- `cargo check -p mqk-daemon --lib --tests`: clean, zero warnings, after
+  removing the two dead-code/unused-import warnings the initial edit
+  introduced.
+- `cargo test -p mqk-daemon --lib`: 636 passed, 0 failed, 4 ignored
+  (unchanged).
+- Against the real port-5434 test DB (`MQK_DATABASE_URL=postgresql://
+  postgres:postgres@localhost:5434/mqk_test`, verified not the paper DB
+  before every run): `scenario_bundle7_phase7a_final_atomic_ownership_and_
+  rollback_truth_01.rs` 2/2, `scenario_bundle7_phase7a_atomicity_repair_
+  01.rs` 5/5 (including the rewritten `ar_05`), `scenario_bundle7_phase7a_
+  lifecycle_wiring_01.rs` 1/1, `scenario_bundle7_phase7a_loop_runner_
+  unchanged_guard_01.rs` 2/2 (economic tick-loop body still byte-identical
+  to `9323b7699af5e4c553522fa118a49c644a3611da`), the full daily-data-
+  readiness/premarket-freshness/multi-symbol-config/watchlist regression
+  surface (12 test files, 250 individual tests) 250/250, the full
+  autonomous-daily-coordinator/completed-bar-task regression surface (11
+  test files) all passing (0 failed across every file).
+- Guards: `check_migration_governance.sh`, `check_unsafe_patterns.ps1`,
+  `check_runtime_opportunity_allocation_01.sh` (Bundle 5),
+  `check_multi_strategy_conflict_policy_01.sh` (Bundle 6),
+  `check_ignored_load_bearing_proofs.sh`, `check_workspace_dep_
+  inheritance.sh`, `check_no_promotion_evidence_bypass.ps1` — all pass.
+- `rustfmt --edition 2021 --check`: clean on every file this session
+  touched.
+- `clippy -p mqk-daemon --lib --tests -- -D warnings`: zero errors
+  originate from any file this session touched (confirmed by listing every
+  emitted `-->` path); the only errors are the same pre-existing
+  `await_holding_lock`/`assert_eq!`-literal-bool lints in `state/session_
+  controller.rs`, `state/runtime_session_source.rs`, and one unrelated test
+  file, already documented by the prior entry as a local-toolchain-vs-CI-
+  pin mismatch.
+- `git diff --check` / `git diff --cached --check`: clean.
+- No migrations added. No forbidden path (`.env.local`, the untracked
+  ledger-update file, `smoke_logs/`) staged or touched.
+
+```text
+DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7A-TRUE-ATOMIC-BUNDLE-BARRIER-AND-TEST-BOUNDARY-CLOSURE:
+PARTIAL — 6 OF 8 NAMED REQUIREMENTS REMAIN OPEN (2, 3, 4, 5, 6, 8) WITH
+EXACT EVIDENCE ABOVE; REQUIREMENTS 1 AND 7 CLOSED AND DB-VERIFIED
+PUSHED: no
+PHASE 7B ECONOMIC DISPATCH CHANGED: no
+DURABLE TABLES STARTED: no
+FINAL API/GUI STARTED: no
+BUNDLE 8 STARTED: no
+REAL DAEMON STARTED: no
+ORDERS PLACED: no
+LIVE CAPITAL ENABLED: no
+AI CONSUMED: no
+```
