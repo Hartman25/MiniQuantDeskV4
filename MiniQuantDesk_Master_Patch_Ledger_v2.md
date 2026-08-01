@@ -19221,3 +19221,228 @@ ORDERS PLACED: no
 LIVE CAPITAL ENABLED: no
 AI CONSUMED: no
 ```
+
+## DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7A-CORE-ATOMIC-STATE-MACHINE-CLOSURE (2026-08-01)
+
+**Scope.** Patch 1 of the fixed two-patch Phase 7A completion sequence. Closes
+requirements 2 (one authoritative local lifecycle ownership state), 3
+(startup barrier before any loop/economic work), 4 (complete run-ID-scoped
+cleanup on every lifecycle exit), and 8 (local reservation before run-linked
+readiness evidence persistence). Requirements 5/6 remain explicitly deferred
+to the final Phase 7A patch — not started, not claimed.
+
+**R2 — one ownership state machine.** Replaced the prior split of three
+independently-mutated authorities — `ExecutionLoopSlot`
+(`Empty`/`Reserved`/`Active`), `run_start_commit_owner` (a bare
+`Option<Uuid>` tag for a separately-stored legacy field bundle), and
+`dynamic_selection_runtime` (an independently-committed/cleared
+`Option<DynamicSelectionRuntimeState>`) — with one enum behind one lock:
+`LocalRuntimeOwnership::{Idle, Reserved{run_id}, Starting{run_id,metadata},
+Active{run_id,metadata,handle}, Degraded{run_id,detail}}`
+(`state/types.rs`). `RunStartMetadata` (bound at `Reserved -> Starting`)
+carries run_id, accepted-artifact copy, native-bootstrap presence witness,
+dynamic-selection truth (the one field an existing production getter,
+`dynamic_selection_runtime_snapshot`, genuinely projects from), frozen
+per-symbol assignments/source, and `approved_for_live=false` — per the
+root-cause design rule in the prompt, `execution_snapshot`,
+`accepted_artifact`, `native_strategy_bootstrap`, per-run counters, and
+per-symbol target state remain in their existing separate "economic mirror"
+storage (moving them would touch `loop_runner.rs`'s hot tick-body reads,
+out of scope) rather than being physically relocated into the ownership
+enum. `reserve_runtime_ownership`/`prepare_starting_metadata_and_mirrors`/
+`install_active_runtime` are the three sole legal transitions, each typed,
+none panicking (no `expect`/`unwrap`/`unreachable!`).
+
+**R3 — startup barrier.** `spawn_execution_loop` (`state/loop_runner.rs`)
+now takes a `tokio::sync::oneshot::Receiver<()>` and, as the literal first
+statement inside its spawned task, races it against `stop_rx.changed()`
+before ever constructing the `tokio::time::interval` ticker. Neither
+close/cancel arm touches economic state; both explicitly drop the
+orchestrator off the async executor (`drop_outside_async_context`) since it
+may embed a blocking-client runtime. The caller
+(`ProductionRuntimeStartEffects::spawn_loop`, `state/lifecycle.rs`) spawns
+the task holding the barrier's sender, calls `install_active_runtime`
+(`Starting -> Active`), and only releases the barrier *after* that install
+succeeds; on install failure the sender is simply dropped (the task has
+already been stopped+joined by `install_active_runtime` itself via the
+stop_rx arm, before ever reaching economic work) — no detached task.
+
+**R4 — complete run-scoped cleanup.** One authority,
+`AppState::clear_local_runtime_for_run(run_id, reason)`, handles every
+lifecycle exit: compares the caller-supplied `run_id` against current
+ownership (never a blind clear — requirement 4's "run A cannot clear B" and
+"no blanket clear before owned run ID is known"), stops+joins any live
+`Active` handle, then clears every economic mirror
+(`execution_snapshot`, `accepted_artifact`, `native_strategy_bootstrap`,
+`day_signal_count`(+by-symbol), the three blocked-alert dedup sets, the
+three bar-tick counters, `per_symbol_target_state`) together with ownership
+itself. `clear_currently_owned_local_runtime` wraps it for the
+stop/halt/shutdown call sites that don't already know which run_id they're
+clearing — it peeks live ownership first, then delegates. `stop_for_shutdown`
+now acquires the same `lifecycle_op` serialization every other local
+start/stop/halt transition uses (previously it deliberately bypassed it) —
+because every start attempt holds that lock for its *entire*
+reserve-through-barriered-install duration, shutdown can structurally never
+observe `Reserved`/`Starting` once it acquires the lock, which is what
+"shutdown safely cancels Reserved/Starting under lifecycle serialization"
+means in practice. A durable `stop_run`/`halt_run` write failing *after*
+local authority is already fully removed now transitions ownership to
+`Degraded{run_id, detail}` (`note_local_runtime_degraded`) instead of
+silently presenting a clean `Idle` — `current_status_snapshot` surfaces this
+as an explicit `state: "degraded"` note.
+
+**R8 — reserve before run-link write.** `daily_data_readiness::
+advance_run_to_active` now calls `effects.reserve_local_ownership(run_id)`
+as its first action, strictly before the run-linked readiness-evidence
+persist (previously the reverse). On a run-link-persist failure, the
+function releases only that reservation via the same
+`rollback_failed_start_attempt` path every other failure branch already
+uses (nothing else was ever built), and `RuntimeStartSequenceError::
+RunLinkPersistFailed` now carries the same structured `RollbackOutcome`
+truth `Effects` does.
+
+**Tests added** (hermetic unless noted): `state::
+ownership_state_machine_tests` (11 tests — Idle→Reserved→Starting→Active;
+duplicate-reservation-preserves-owner; wrong-run install/clear refuse
+without mutation, including a real never-finishing handle proven stopped;
+reservation-conflict-preserves-complete-sentinel-state across every economic
+mirror; Reserved/Starting never reported running, including a `Degraded`
+state; Active status requires matching run_id/metadata/handle including
+accepted-artifact/native-bootstrap-presence/frozen-assignments/source/
+approved_for_live; full-mirror-cleanup inspecting every listed
+field/counter/map; idempotent no-op clear; two barrier tests spawning the
+*real* execution loop task against a minimal in-process Paper orchestrator
+— zero economic work before release, and a dropped-sender barrier exits and
+joins promptly; an install-failure-leaves-no-detached-task proof via a
+shared exit flag). Extended `state::lifecycle::
+dynamic_selection_cleanup_contract_tests`'s four existing stop/halt/
+shutdown/reap tests to also plant and assert `accepted_artifact`/
+`day_signal_count` are cleared, not only dynamic-selection state (closing
+the "full cleanup" gap those tests previously only partially covered).
+Updated `scenario_daily_data_readiness_start_gate_01.rs`'s SG-16 (new
+trace order: `ownership_reserved` before `run_link_event_persisted`) and
+SG-17 (reservation now succeeds before the closed-pool run-link write
+fails, so `rollback.durable` is honestly `QueryFailed`/
+`durable_status_unknown=true` against that same closed pool, and
+`ownership_reserved` legitimately appears in the trace) to match the R8
+reorder. Rebased `scenario_bundle7_phase7a_loop_runner_unchanged_guard_01`'s
+anchor from `tokio::spawn(async move {` to the ticker line immediately
+below the new barrier-wait prologue, added a companion assertion the
+barrier-wait block is present, and re-pointed `STARTING_HEAD` at this
+patch's own required starting commit — the *tick-loop-body* byte-diff
+guard (everything from the ticker line to EOF) still passes unmodified,
+proving Bundle 5/6 economic dispatch is untouched.
+
+**Proof.**
+- `cargo check -p mqk-daemon --lib --tests`: clean, zero warnings (six
+  `RunStartMetadata` fields carry an explicit, justified `#[allow(dead_
+  code)]` — see the field-level comments in `state/types.rs` for why:
+  `accepted_artifact_provenance()` deliberately keeps reading the separate
+  economic-mirror field instead of projecting from metadata, because
+  `scenario_artifact_provenance_tv01cd.rs`'s AP-01..AP-06 route-contract
+  proof is driven entirely through the mirror-only `set_accepted_artifact_
+  for_test` seam; the remaining fields exist to satisfy requirement 2
+  invariant 8's self-describing-metadata ask and are exercised directly by
+  this patch's own tests, per invariant 11's "may project", not "must").
+- `cargo test -p mqk-daemon --lib`: 653 passed, 0 failed, 4 ignored.
+- `cargo test -p mqk-daemon --tests` (full non-DB integration suite, default
+  parallelism): 0 failures caused by this patch. Two pre-existing, unrelated
+  flaky failures observed across two separate full runs
+  (`scenario_autonomous_daily_session_coordinator_01.rs::a03_...` and
+  `scenario_combined_paper_gate_rts07_rsk07.rs::g01_...`) — neither file is
+  touched by this patch; `a03` passes deterministically under
+  `--test-threads=1` (a parallel env-var race), and `g01` was independently
+  reproduced failing identically against the *pristine, unmodified* starting
+  HEAD 294ce902 with this patch's changes fully `git stash`ed away, proving
+  it predates this session.
+- Against the real port-5434 test DB (never 5440): `scenario_bundle7_
+  phase7a_atomicity_repair_01` (5/5 — AR-01..05), `scenario_bundle7_phase7a_
+  final_atomic_ownership_and_rollback_truth_01` (2/2 — FA-01/FA-02, the real
+  `ProductionRuntimeStartEffects` reservation/rollback proof), `scenario_
+  daily_data_readiness_start_gate_01` (20/20 — SG-01..21, including the
+  updated SG-16/SG-17), `scenario_native_strategy_bootstrap_daemon_b1a`/
+  `_b1b`, `scenario_premarket_data_readiness_gate_01` (25/25), `scenario_
+  runtime_opportunity_allocation_api_01` (Bundle 5) and `scenario_runtime_
+  strategy_conflict_api_01` (Bundle 6) — every file 0 failed.
+- Guards: `check_migration_governance.sh`, `check_unsafe_patterns.sh`,
+  `check_unsafe_patterns.ps1`, `check_workspace_dep_inheritance.sh`,
+  `check_ignored_load_bearing_proofs.sh`, `check_no_promotion_evidence_
+  bypass.ps1`, `check_runtime_opportunity_allocation_01.sh` (Bundle 5),
+  `check_multi_strategy_conflict_policy_01.sh` (Bundle 6) — all pass.
+- `rustfmt --edition 2021 --check`: clean on every file this session
+  touched.
+- `cargo clippy -p mqk-daemon --lib --tests -- -D warnings`: zero errors
+  originate from any file this session touched (confirmed by listing every
+  emitted `-->` path — all 58 errors are in `state/session_controller.rs`,
+  `state/runtime_session_source.rs`, and `tests/scenario_runtime_session_
+  v2_active_cutover_hook_asset_core_05e.rs`, none of which this session
+  touched — same pre-existing local-toolchain-vs-CI-pin mismatch prior
+  entries documented).
+- `git diff --check` / `git diff --cached --check`: clean.
+- No migrations added. No forbidden path (`.env.local`, the untracked
+  ledger-update file, `smoke_logs/`) staged or touched. `git status`
+  confirms exactly 7 tracked files modified, nothing else.
+
+**Commits (deviating from the suggested 5-way split — see rationale
+below):**
+1. `daemon: unify local runtime ownership, barrier install, full cleanup,
+   and reserve-before-run-link ordering` — `state/types.rs`, `state.rs`,
+   `state/lifecycle.rs`, `state/loop_runner.rs`, `daily_data_readiness.rs`.
+2. `test/docs: prove core state-machine closure` — the two updated
+   integration test files plus this entry.
+
+Rust's whole-crate compilation makes the prompt's suggested finer-grained
+split (separate commits per requirement) produce non-compiling intermediate
+states without introducing temporary compatibility shims this codebase's
+own conventions avoid: `state/lifecycle.rs`'s `ProductionRuntimeStartEffects`
+references `state.rs`'s new function names directly (no old names survive),
+and `daily_data_readiness.rs`'s new `RunLinkPersistFailed{rollback}` field
+requires `state/lifecycle.rs`'s matching `.map_err` arm in the same commit
+(a partial pattern match on that variant would not compile otherwise). Every
+file changed in commit 1 is therefore genuinely interdependent at the
+Rust-module level, not merely topically related.
+
+```text
+DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7A-CORE-ATOMIC-STATE-MACHINE-CLOSURE:
+
+Patch: DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7A-CORE-ATOMIC-STATE-MACHINE-CLOSURE
+Worktree: C:\Users\Zacha\Desktop\MiniQuantDeskV4
+Branch: main
+Starting HEAD: 294ce902951da96ad30a915d0c2ed924eb5147db
+Final HEAD: <filled in after commit>
+Commits: 2
+Pushed: NO
+Final test-boundary patch started: NO
+Phase 7B started: NO
+Bundle 8 started: NO
+Real daemon started: NO
+Orders placed: NO
+
+OWNERSHIP STATE: LocalRuntimeOwnership{Idle,Reserved,Starting,Active,Degraded} — one enum, one lock, replacing ExecutionLoopSlot + run_start_commit_owner + dynamic_selection_runtime
+RESERVATION: reserve_runtime_ownership — Idle->Reserved{run_id}, typed conflict, no panic
+STARTING METADATA: prepare_starting_metadata_and_mirrors — Reserved->Starting{run_id,metadata}, mirrors committed same step
+ACTIVE INSTALL: install_active_runtime — Starting->Active{run_id,metadata,handle}, mismatch stops+joins the handle before returning Err
+STARTUP BARRIER: real — task waits on oneshot barrier raced against stop_rx before the ticker is ever built; barrier released only after install succeeds
+RUN-LINK ORDER: reserve_local_ownership now precedes persist_run_linked_readiness_evidence; run-link failure releases only the reservation
+FULL CLEANUP: clear_local_runtime_for_run — run_id-scoped, stops+joins any live handle, clears every economic mirror, used by failed-start/stop/halt/shutdown/reap
+STATUS: Idle=no active run; Reserved/Starting=never reported running; Active=locally_owned_run_id()==Some(run_id); Degraded=explicit "degraded" status with detail note
+PAPER_ENFORCED INTERLOCK: unchanged — runtime.start_refused.dynamic_selection_dispatch_not_wired still fires before reservation (paper_enforced_interlock_tests untouched, still passing)
+ECONOMIC NON-CHANGE: loop_runner_tick_body_is_byte_identical_to_patch_starting_head still passes (anchor rebased to the ticker line immediately below the new barrier prologue)
+TESTS: 653/653 mqk-daemon --lib; targeted DB-backed suites (AR-01..05, FA-01/02, SG-01..21, native-bootstrap, premarket-readiness, Bundle5/6 API) all pass on port 5434; 2 pre-existing unrelated flaky failures confirmed via pristine-HEAD stash comparison
+VALIDATION: rustfmt clean; clippy -D warnings zero errors in touched files; all named guards pass; git diff --check clean
+
+FILES CHANGED: core-rs/crates/mqk-daemon/src/daily_data_readiness.rs, core-rs/crates/mqk-daemon/src/state.rs, core-rs/crates/mqk-daemon/src/state/lifecycle.rs, core-rs/crates/mqk-daemon/src/state/loop_runner.rs, core-rs/crates/mqk-daemon/src/state/types.rs, core-rs/crates/mqk-daemon/tests/scenario_bundle7_phase7a_loop_runner_unchanged_guard_01.rs, core-rs/crates/mqk-daemon/tests/scenario_daily_data_readiness_start_gate_01.rs
+FILES ADDED: none
+FILES DELETED: none
+FILES RENAMED: none
+UNEXPECTED FILES: none
+MIGRATIONS ADDED: NONE
+PHASE 7B ECONOMIC DISPATCH CHANGED: NO
+STRATEGY/RISK/BROKER/PORTFOLIO/RECONCILIATION AUTHORITY CHANGED: NO
+AI CONSUMED: NO
+LIVE CAPITAL ENABLED: NO
+
+DISPOSITION:
+DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7A-CORE-ATOMIC-STATE-MACHINE-CLOSURE:
+COMPLETE — AWAITING CHATGPT AND OPERATOR ACCEPTANCE BEFORE PUSH
+```

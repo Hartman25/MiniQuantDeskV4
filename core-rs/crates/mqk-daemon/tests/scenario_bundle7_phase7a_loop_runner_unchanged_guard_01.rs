@@ -29,20 +29,34 @@
 //! If this test ever needs to change beyond bumping `STARTING_HEAD`, that
 //! is itself proof the patch scope was violated — fix the patch, not the
 //! guard.
+//!
+//! BUNDLE-7-PHASE-7A-CORE-ATOMIC-STATE-MACHINE-CLOSURE requirement 3
+//! (startup barrier) legitimately moves this guard's anchor a second time,
+//! for the same class of reason the ATOMICITY-SINGLE-SNAPSHOT-REPAIR patch
+//! moved it the first time: the task must wait on a startup barrier
+//! (raced against its own stop signal) *before* the ticker is ever
+//! created — that wait, by construction, sits between the previous anchor
+//! (`tokio::spawn(async move {`) and the ticker line. The anchor now starts
+//! at the ticker line itself; the barrier-wait block above it is proven
+//! present by a companion assertion below, and its own behavior (zero
+//! economic work before barrier release) is proven by dedicated unit tests
+//! in `state/loop_runner.rs`, not by this structural byte-diff.
 
 use std::process::Command;
 
-/// DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7A-ATOMICITY-SINGLE-SNAPSHOT-
-/// REPAIR's required starting local HEAD / origin/main.
-const STARTING_HEAD: &str = "9323b7699af5e4c553522fa118a49c644a3611da";
+/// BUNDLE-7-PHASE-7A-CORE-ATOMIC-STATE-MACHINE-CLOSURE's required starting
+/// local HEAD / origin/main.
+const STARTING_HEAD: &str = "294ce902951da96ad30a915d0c2ed924eb5147db";
 const LOOP_RUNNER_PATH: &str = "core-rs/crates/mqk-daemon/src/state/loop_runner.rs";
 
 /// The first line of the unchanged tick-loop-body region. Everything from
 /// this exact line (inclusive) to end-of-file must be byte-identical to
 /// `STARTING_HEAD` — this is the real economic dispatch body (Bundle 5/6
 /// ordering, cap #6, outbox, broker calls), never touched by lifecycle-only
-/// wiring patches.
-const REQUIRED_TICK_LOOP_ANCHOR: &str = "    let join_handle = tokio::spawn(async move {";
+/// wiring patches. The startup-barrier wait (requirement 3) sits entirely
+/// above this anchor, in the prologue.
+const REQUIRED_TICK_LOOP_ANCHOR: &str =
+    "        let mut ticker = tokio::time::interval(EXECUTION_LOOP_INTERVAL);";
 
 fn repo_root() -> std::path::PathBuf {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
@@ -127,5 +141,16 @@ fn loop_runner_prologue_still_defines_multi_symbol_assignments_before_the_anchor
     assert!(
         prologue.contains("fn spawn_execution_loop("),
         "spawn_execution_loop's signature must still precede the anchor"
+    );
+    assert!(
+        prologue.contains("start_barrier: tokio::sync::oneshot::Receiver<()>"),
+        "requirement 3: the startup barrier parameter must still be declared \
+         before the unchanged tick loop body"
+    );
+    assert!(
+        prologue.contains("tokio::select!") && prologue.contains("barrier_result = start_barrier"),
+        "requirement 3: the task must still wait on the startup barrier \
+         (raced against its own stop signal) strictly before the ticker \
+         line the anchor now starts at"
     );
 }

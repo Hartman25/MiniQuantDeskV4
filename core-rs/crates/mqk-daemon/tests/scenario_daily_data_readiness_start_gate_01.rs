@@ -1505,15 +1505,17 @@ async fn sg_16_synthetic_ready_start_proves_ordering_and_shared_evaluation_id() 
             "readiness_evaluated",
             "pre_start_event_persisted",
             "run_created",
-            "run_link_event_persisted",
-            // ATOMIC-OWNERSHIP-AND-ROLLBACK-TRUTH-01 requirement 2: local
-            // loop ownership is reserved strictly before runtime effects run
-            // or the loop is spawned.
+            // BUNDLE-7-PHASE-7A-CORE-ATOMIC-STATE-MACHINE-CLOSURE
+            // requirement 8: local loop ownership is now reserved *before*
+            // the run-linked readiness evidence write (previously the
+            // reverse) — "reserve before run-link write".
             "ownership_reserved",
+            "run_link_event_persisted",
             "local_bundle_committed",
             "loop_spawned",
         ],
-        "REPAIR 3 / ATOMICITY-SINGLE-SNAPSHOT-REPAIR: required ordering trace"
+        "REPAIR 3 / BUNDLE-7-PHASE-7A-CORE-ATOMIC-STATE-MACHINE-CLOSURE requirement 8: \
+         required ordering trace"
     );
     assert_eq!(
         fake.start_runtime_effects_calls
@@ -1688,6 +1690,7 @@ async fn sg_17_run_link_persist_failure_fails_closed_no_effects_invoked() {
             mqk_daemon::daily_data_readiness::RuntimeStartSequenceError::RunLinkPersistFailed {
                 evaluation_id: got_eval,
                 run_id: got_run,
+                rollback,
             },
         ) => {
             assert_eq!(
@@ -1695,6 +1698,32 @@ async fn sg_17_run_link_persist_failure_fails_closed_no_effects_invoked() {
                 "req #4: error must carry the evaluation_id"
             );
             assert_eq!(got_run, run_id, "req #4: error must carry the run_id");
+            // BUNDLE-7-PHASE-7A-CORE-ATOMIC-STATE-MACHINE-CLOSURE
+            // requirement 8: reservation happens *before* the run-link
+            // write now, so a run-link failure's rollback truth reflects a
+            // reservation-only release — the durable run never reached
+            // Armed/Running (arm_run is never called before a successful
+            // run-link persist). This test forces the failure by closing
+            // `bad_pool` outright (not merely making one write fail), and
+            // `advance_run_to_active`'s rollback path queries the durable
+            // run through that *same* pool — so the durable check itself
+            // fails too (`QueryFailed`/`durable_status_unknown: true`),
+            // honestly reporting "unknown", never fabricating a confirmed
+            // `AlreadyNonActive` the closed pool never actually proved.
+            assert!(
+                matches!(
+                    rollback.durable,
+                    mqk_daemon::daily_data_readiness::DurableRollbackDisposition::QueryFailed
+                ),
+                "req #8: with a fully closed pool, the durable rollback query itself \
+                 must fail honestly, not fabricate a confirmed status: {:?}",
+                rollback.durable
+            );
+            assert!(
+                rollback.durable_status_unknown,
+                "req #8: a closed-pool rollback query must report the durable status \
+                 as unknown, never falsely confirmed"
+            );
         }
         other => panic!("SG-17 (REPAIR 4): expected RunLinkPersistFailed, got {other:?}"),
     }
@@ -1712,9 +1741,15 @@ async fn sg_17_run_link_persist_failure_fails_closed_no_effects_invoked() {
         0,
         "req #3: a run-linked evidence failure must never spawn the execution loop"
     );
-    assert!(
-        trace.is_empty(),
-        "req #3: no ordered-trace tag may fire past the failed link: {trace:?}"
+    // BUNDLE-7-PHASE-7A-CORE-ATOMIC-STATE-MACHINE-CLOSURE requirement 8:
+    // reservation now happens *before* the run-link write, so
+    // "ownership_reserved" legitimately fires before the link fails — but
+    // no tag past it (never "run_link_event_persisted", never
+    // "local_bundle_committed"/"loop_spawned").
+    assert_eq!(
+        trace,
+        vec!["ownership_reserved"],
+        "req #3/req #8: only the reservation trace tag may fire past the failed link: {trace:?}"
     );
 
     // req #6: no false run_linked record exists for this run.
