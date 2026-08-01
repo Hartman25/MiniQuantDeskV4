@@ -18490,3 +18490,307 @@ ORDERS PLACED: no
 LIVE CAPITAL ENABLED: no
 AI CONSUMED: no
 ```
+
+## DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7A-FINAL-ATOMIC-OWNERSHIP-AND-ROLLBACK-TRUTH (2026-07-31)
+
+**Status: COMPLETE — AWAITING CHATGPT AND OPERATOR ACCEPTANCE BEFORE PUSH.**
+
+This entry closes the 10 named defects the prior
+`ATOMICITY-SINGLE-SNAPSHOT-REPAIR` entry left unaccepted: bootstrap/binding
+still resolved twice, ownership published before it was actually reserved,
+rollback able to clear a different owner's committed state, a blanket
+Stopped policy regardless of how far a start attempt progressed, and a
+rollback failure that was logged and swallowed instead of returned. It does
+not rewrite or supersede either prior Phase 7A entry above.
+
+Starting HEAD: `cc9f4f90dbf82833f862501cf95ab4eb596f2015` (== `origin/main`).
+Final HEAD: (see commit list below — reported at push time).
+
+**1. Single start-attempt authority.** `StartAttemptAuthoritySnapshot`
+(`state/lifecycle.rs`) now also constructs the B1A native strategy bootstrap
+and effective runtime binding (via the same `bootstrap_with_effective_
+binding` call `autonomous_runtime_context::resolve_autonomous_runtime_
+context` performs) and the frozen premarket required-symbol/timeframe
+vector, alongside the mode/`MultiSymbolRuntimeConfig`/readiness-context/
+fleet-ids/clock fields the prior entry already froze. The legacy
+`PREMARKET-DATA-READINESS-GATE-01` gate now reads `snapshot.required_
+freshness_symbols` and `snapshot.now_utc` instead of calling
+`required_symbols_for_freshness_gate_from_env()` and `Utc::now()` a second
+time. `resolve()` stays infallible and only *constructs* the bootstrap; the
+B1A Failed/Dormant gate check itself stays at its original call-site
+position in `start_execution_runtime`, unchanged in fault class, message,
+or ordering — moving that check inside `resolve()` was tried and reverted
+after it broke `state::lifecycle`'s own `dynamic_selection_start_snapshot_
+tests` module, which deliberately bypasses every gate but the one under
+test.
+   - **Named residual, not closed:** the snapshot's B1A bootstrap
+     construction still sources fleet ids from `AppState::strategy_fleet_
+     snapshot()` (a boot-time cache of `MQK_STRATEGY_IDS`), not from the
+     same `fleet_ids_from_env()` read the snapshot's own `configured_
+     strategy_ids` field uses. Unifying them would require changing
+     `autonomous_runtime_context::resolve_autonomous_runtime_context`'s
+     signature, which has call sites in `autonomous_daily_coordinator.rs`
+     and `autonomous_completed_bar_task.rs` — both outside this patch's
+     declared file scope. Attempted once, reverted: it broke 8 tests in
+     `scenario_daily_data_readiness_start_gate_01.rs` that use `set_
+     strategy_fleet_for_test` specifically to configure the bootstrap
+     without mutating the process-global env var. Left as a narrow, honestly
+     documented duplication (both sources ultimately derive from the same
+     env var in production; they can only disagree if env mutates between
+     daemon boot and a given start attempt).
+
+**2/3. Real ownership state machine, reserved before anything publishes.**
+`ExecutionLoopSlot` (`state/types.rs`) replaces the prior `Option<
+ExecutionLoopHandle>` with `Empty` / `Reserved { run_id }` / `Active(handle)`.
+`AppState` gained `reserve_execution_loop_slot` (atomic `Empty -> Reserved`),
+`install_active_execution_loop_slot` (`Reserved{run_id} -> Active`, typed
+`Err` — see requirement 7), and `release_execution_loop_reservation_for_run`
+(compare-and-clear). `RuntimeStartEffects::reserve_local_ownership` is now
+the trait's first call — `advance_run_to_active` calls it before `start_
+runtime_effects` does any DB write or runtime construction, not after (the
+prior entry's `reserve_local_ownership` ran third, after `start_runtime_
+effects` had already armed/begun the run and committed dynamic-selection
+state). A real ownership conflict is now refused before `arm_run` is ever
+attempted, not after.
+
+The legacy run-scoped local field bundle (execution snapshot, accepted
+artifact, native strategy bootstrap, per-run counters, dynamic-selection
+state) is now built entirely from local bindings inside `start_runtime_
+effects` and committed to `AppState` in one call, `commit_run_start_
+bundle`, tagged with a new `run_start_commit_owner: Arc<RwLock<Option<Uuid>>>`
+field. `rollback_run_start_bundle_for_run` is the compare-and-clear
+counterpart — a rollback for run A can only clear these fields when `run_
+start_commit_owner == Some(run_a)`, never when they were committed by a
+different run B. (`dynamic_selection_runtime`'s own independent compare-
+and-clear from the prior entry is unchanged and still run separately.)
+
+**4. Phase-aware durable rollback.** `RuntimeStartPhase` (`daily_data_
+readiness.rs`, `pub` — it has to cross the integration-test boundary the
+`RuntimeStartEffects` trait is driven from): `BeforeArm` ->
+`ArmedBeforeBegin` -> `RunningBeforeInitialTick` -> `InitialTickStarted` ->
+`InitialTickCompleted` -> `LocalCommitStarted` -> `LoopInstalled`.
+`ProductionRuntimeStartEffects` advances this phase at each real milestone
+(before/after `arm_run`, before/after `begin_run`+heartbeat, before calling
+`orchestrator.tick()` — not after, so an in-flight tick failure is recorded
+as "started", never silently reverts to "never called" — after tick, after
+the local bundle commit). `RuntimeStartPhase::cleanly_stoppable()` is `true`
+at or before `RunningBeforeInitialTick` (tick never called) and `false` from
+`InitialTickStarted` onward. `rollback_failed_start_attempt` now moves an
+Armed/Running durable run to `Stopped` only when cleanly stoppable, to
+`Halted` otherwise — the prior entry unconditionally called `stop_run`
+regardless of how far the attempt got.
+
+**5. Rollback failure returned, not swallowed.** `rollback_local_effects`'s
+return type changed from `()` to `LocalRollbackOutcome { leadership_release_
+outcome: Option<Result<(), String>> }` — every `orchestrator.release_
+runtime_leadership()` call site now routes through one `release_
+orchestrator_leadership` helper that records the outcome instead of only
+`tracing::warn!`-ing it. `rollback_failed_start_attempt` returns a new
+`RollbackOutcome { phase_reached, local, durable, durable_status_unknown }`
+struct — `DurableRollbackDisposition` is `Stopped` / `Halted` /
+`AlreadyNonActive` / `QueryFailed` / `TransitionFailed`, with `durable_
+status_unknown` set on the latter two. `RuntimeStartSequenceError::Effects`
+changed from a single-field tuple variant to `{ original, rollback }`.
+`start_execution_runtime`'s error mapping never masks `original`, but when
+`rollback.is_degraded()` (durable status unknown, or the lease-release
+outcome was itself an `Err`) it upgrades the response to `runtime.start_
+refused.rollback_degraded` (503) with both the original fault and the full
+rollback truth embedded in the message, instead of returning the original
+error as if the cleanup were unremarkable.
+
+**6. Hermetic tests against the real production effects path, not only the
+fake.** `AppState::drive_production_start_effects_for_test` (test-only,
+non-cfg-gated, following the `_for_test` convention `run_loop_one_tick_
+for_test`/`inject_running_loop_for_test` already established) constructs a
+real `ProductionRuntimeStartEffects` and drives it through the real
+`daily_data_readiness::advance_run_to_active` — never a fake. New file
+`scenario_bundle7_phase7a_final_atomic_ownership_and_rollback_truth_01.rs`
+(2 tests, both pass against the real port-5434 test DB, no network, no
+credentials):
+   - `fa_01`: a genuine `start_runtime_effects` failure — `build_execution_
+     orchestrator`'s real `build_daemon_broker` refuses `BrokerKind::Paper`
+     with `runtime.start_refused.paper_broker_not_execution_path` — is
+     cleanly rolled back: phase stays `BeforeArm`, durable disposition is
+     `AlreadyNonActive`, the reservation is released, and the ordered trace
+     stops at `ownership_reserved`.
+   - `fa_02` (requirement 3's explicit ask — "a production-AppState test
+     with sentinel values for an existing owner... prove loop/artifact/
+     bootstrap/snapshot/counters/targets/dynamic-selection state are
+     unchanged"): run A is established as a real `Active` local owner via
+     the pre-existing `establish_db_backed_active_run_for_test` seam, then
+     carries sentinel values planted through three new test-only setters
+     (`plant_accepted_artifact_for_test`, `plant_day_signal_count_for_
+     test`, `commit_dynamic_selection_runtime_state_for_test`). A real run B
+     start attempt is refused by the real `reserve_local_ownership` (the
+     slot is genuinely `Active` for run A). Every sentinel field —
+     `locally_owned_run_id`, the dynamic-selection state's `run_id`, the
+     planted `day_signal_count`, the planted `accepted_artifact` — is
+     asserted unchanged afterward.
+   - **Named residual, not closed — same constraint the immediately-prior
+     entry already named and could not close either:** a genuine
+     *successful* start through the real broker-construction path
+     (`build_execution_orchestrator` -> `build_daemon_broker`) needs live
+     Alpaca paper credentials or a mock-Alpaca-server harness; neither is
+     available under this patch's own operating rules.
+     `build_daemon_broker` itself refuses `BrokerKind::Paper` outright
+     ("the in-process fill engine has no market-data source wired... the
+     only authoritative paper execution path is Paper+Alpaca") — a second,
+     deeper gate than the outer `deployment_mode_readiness` refusal the
+     prior entry named, independently rediscovered while writing `fa_01`
+     (an earlier draft of this test assumed `BrokerKind::Paper` would reach
+     a real success and had to be redesigned once this gate was hit). The
+     full fault-seam matrix listed in the patch prompt
+     (`AfterRunRowCreation`/`AfterSelectionEvaluation`/etc. against real
+     effects, `PaperEnforced` interlock end-to-end, stop/halt/shutdown/reap
+     against a real spawned loop, restart-after-every-failed-phase) is
+     therefore still proven only against the fake (`scenario_bundle7_
+     phase7a_atomicity_repair_01.rs`, updated for the new call order — see
+     below) or as pure-function unit tests, not against real effects.
+
+**7. New panic paths replaced with typed errors / poison recovery.**
+`install_active_execution_loop_slot` no longer panics on a duplicate or
+misordered call — it returns `InstallActiveExecutionLoopSlotError`
+(`NoReservation` / `ReservedForDifferentRun` / `AlreadyActive`) and, since
+the handle's task is already running by the time this is called, stops and
+joins it before returning `Err` rather than dropping the handle and leaking
+a detached task. `spawn_loop`'s missing-orchestrator and install-failure
+paths return `RuntimeStartEffectsError` instead of `.expect()`-panicking.
+The two new `std::sync::Mutex` fields this patch added (`start_phase`,
+`leadership_release_outcome`) recover from poison
+(`.unwrap_or_else(|poisoned| poisoned.into_inner())`) instead of
+propagating it as a second panic — pure process-local progress-tracking
+state with no invariant a poisoned write could violate. Pre-existing
+poisoned-mutex `.expect()` calls this patch did not introduce (`artifact_
+intake`, `native_strategy_bootstrap`, `dynamic_selection_outcome`,
+`orchestrator`) were left unchanged — not a new panic path, out of this
+patch's minimal-scope discipline to touch.
+
+**8. Premarket gate.** Covered under requirement 1 above — frozen vector
+and timestamp, same missing/insufficient/stale semantics, same gate
+ordering.
+
+**9. `PAPER_ENFORCED` interlock.** Unchanged. `paper_enforced_dispatch_not_
+wired_refusal` and `runtime.start_refused.dynamic_selection_dispatch_not_
+wired` are still checked at the same call site, still refuse before arm/
+begin/reservation/spawn. Verified by grep against the final diff, not just
+by not having touched the lines.
+
+**10. Status truth.** `dynamic_selection_readiness_projection`'s committed/
+preview separation (from the prior entry) is untouched. The specific
+requirement-10 hazard — a status reader observing committed dynamic-
+selection truth while the local ownership slot is still `Empty` — is closed
+structurally by requirement 2/3's reorder (the slot is `Reserved`, never
+`Empty`, for the entire window between reservation and bundle commit).
+`locally_owned_run_id()`/`active_owned_run_id()` still only return `Some`
+for `Active`, never `Reserved`, so "running" status text (set once, only
+after full success) is unaffected.
+
+**Economic non-change.** Only `spawn_loop`'s call into `loop_runner::
+spawn_execution_loop` changed (passing the frozen assignment vector,
+already true from the prior entry) — the tick-loop body itself is
+unchanged, proven by the pre-existing `scenario_bundle7_phase7a_loop_
+runner_unchanged_guard_01.rs` guard (still 2/2 passing against the same
+`REQUIRED_TICK_LOOP_ANCHOR`).
+
+**Commits:**
+1. `daemon: freeze start authority, reserve ownership before publish, phase-
+   aware run-scoped rollback` — requirements 1-7 combined. Attempted a
+   finer split matching the patch's suggested 6-commit plan; reverted for
+   the same reason the prior entry gave — the ownership-slot type, the
+   reserve-before-publish reorder, the run-scoped bundle commit/rollback,
+   and the phase-aware durable policy all live in the same functions across
+   `state.rs`/`state/lifecycle.rs`/`state/types.rs`/`daily_data_readiness.rs`;
+   splitting further would mean committing states that don't compile or
+   don't pass their own tests in between.
+2. `test: close hermetic Phase 7A final atomic ownership and rollback proof`
+   — updated `scenario_bundle7_phase7a_atomicity_repair_01.rs` (new
+   reserve-first call order, `AlreadyNonActive` in place of `Stopped` for a
+   pre-arm reservation conflict), updated `scenario_daily_data_readiness_
+   start_gate_01.rs` (SG-16's trace gains `local_bundle_committed`), new
+   `scenario_bundle7_phase7a_final_atomic_ownership_and_rollback_truth_01.rs`.
+3. `docs: record Phase 7A final atomic ownership and rollback repair` — this
+   entry.
+
+**Proof:**
+- `cargo test -p mqk-daemon --lib`: 636 passed, 0 failed, 4 ignored
+  (unchanged from the prior entry — none of the ignored tests are in scope
+  here).
+- `scenario_bundle7_phase7a_atomicity_repair_01.rs`: 5/5 pass — success
+  trace now `["ownership_reserved", "local_bundle_committed",
+  "loop_spawned"]`; a post-arm failure still rolls the durable run to
+  `Stopped` (phase `RunningBeforeInitialTick`, cleanly stoppable); a
+  reservation conflict is now refused *before* `arm_run`/`begin_run` are
+  ever attempted (0 calls, was 1 in the prior entry) and the durable run is
+  `AlreadyNonActive` (was `Stopped`) since nothing was ever armed.
+- `scenario_bundle7_phase7a_final_atomic_ownership_and_rollback_truth_01.rs`
+  (new): 2/2 pass, against the real `ProductionRuntimeStartEffects`.
+- `scenario_daily_data_readiness_start_gate_01.rs`: 20/20 pass.
+- `scenario_bundle7_phase7a_lifecycle_wiring_01.rs`: 1/1 pass.
+- `scenario_bundle7_phase7a_loop_runner_unchanged_guard_01.rs`: 2/2 pass —
+  economic tick-loop body still byte-identical to
+  `9323b7699af5e4c553522fa118a49c644a3611da`.
+- Broader regression sweep: every test file in `core-rs/crates/mqk-daemon/
+  tests/` that references `start_execution_runtime`/`stop_execution_
+  runtime`/`halt_execution_runtime`/`stop_for_shutdown`/`inject_running_
+  loop_for_test`/`establish_db_backed_active_run_for_test`/`locally_owned_
+  run_id` (47 files — the highest-risk surface for this patch) run against
+  the real port-5434 test DB: 79/81 individual test functions pass across
+  the two batches this was split into (compile-time resource limits on this
+  machine — see below); the 2 failures
+  (`scenario_paper_alpaca_proof_bundle_brk00r06.rs::{brk00r06_e02,
+  brk00r06_e03}` and `scenario_paper_alpaca_proof_bundle_brk00r06.rs::
+  ptday02_e08` from the first batch, `scenario_reconcile_start_gate_
+  brk09r.rs::{brk09r_r03,brk09r_r04}` from the second — 5 test functions
+  across 2 files) were independently reproduced against unmodified HEAD
+  (`git stash` this patch's tracked-file changes, re-run, `git stash pop`)
+  and fail identically there: both files assert a Paper+Alpaca start with
+  no `MQK_STRATEGY_SYMBOL` configured reaches a 503 DB-unavailable gate,
+  but the pre-existing (untouched by this patch)
+  `DAILY-DATA-READINESS-01C-ENFORCEMENT-01` strict readiness gate now fires
+  first with 403 whenever `MultiSymbolRuntimeConfig` resolution fails,
+  regardless of DB availability — a real, pre-existing, unrelated test/gate
+  drift this patch did not introduce and did not touch. Flagged for a
+  separate fix, not attempted here (out of scope).
+- Guards: `check_runtime_opportunity_allocation_01.sh` (Bundle 5) and
+  `check_multi_strategy_conflict_policy_01.sh` (Bundle 6) both `ALL CHECKS
+  PASSED`. `check_migration_governance.sh`, `check_unsafe_patterns.sh`,
+  `check_workspace_dep_inheritance.sh`, `check_ignored_load_bearing_
+  proofs.sh` all pass.
+- `rustfmt --edition 2021 --check`: clean on every file this patch touches.
+- `clippy -p mqk-daemon --lib --tests -- -D warnings`: zero errors in any
+  file this patch touches (confirmed by cross-referencing every emitted
+  `-->` path); the only errors are the same 28 pre-existing
+  `await_holding_lock`/`assert_eq!`-literal-bool lints in `state/session_
+  controller.rs` and `state/runtime_session_source.rs`, plus two unrelated
+  pre-existing test files, that the prior entry already documented as a
+  local-toolchain-vs-CI-pin mismatch.
+- `git diff --check`: clean.
+
+**Environment note (not a code defect):** a full `cargo test -p mqk-daemon`
+across all ~235 integration test binaries in one invocation was not
+achievable on this machine — confirmed twice, with a completely fresh
+`CARGO_TARGET_DIR` on the second attempt: builds fail partway through with
+either `STATUS_STACK_BUFFER_OVERRUN` from `rustc.exe`/the linker or "The
+paging file is too small for this operation to complete. (os error 1455)",
+consistent with the *prior* entry's own independently-documented finding
+("crashed a subset of rustc/linker processes... under full parallelism on
+this machine"). Validation above instead ran the full `--lib` suite plus
+every individually-named Phase 7A test file plus the full 47-file
+lifecycle-relevant regression surface, split into two `--test`-flag batches
+of ~46/45 files each (still below the machine's full-235-file ceiling) —
+the same "strictly stronger, targeted signal" substitution the prior entry
+used for the same reason.
+
+```text
+DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7A-FINAL-ATOMIC-OWNERSHIP-AND-ROLLBACK-TRUTH:
+COMPLETE — AWAITING CHATGPT AND OPERATOR ACCEPTANCE BEFORE PUSH
+PUSHED: no
+PHASE 7B ECONOMIC DISPATCH CHANGED: no
+DURABLE TABLES STARTED: no
+FINAL API/GUI STARTED: no
+BUNDLE 8 STARTED: no
+REAL DAEMON STARTED: no
+ORDERS PLACED: no
+LIVE CAPITAL ENABLED: no
+AI CONSUMED: no
+```
