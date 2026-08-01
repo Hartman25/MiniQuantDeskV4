@@ -597,6 +597,12 @@ fn ar_05_each_start_attempt_input_is_resolved_at_exactly_one_real_call_site() {
     for needle in [
         "build_multi_symbol_runtime_config_from_env",
         "required_symbols_for_freshness_gate_from_env",
+        // BUNDLE-7-PHASE-7A-SINGLE-FROZEN-FLEET-AUTHORITY-CLOSURE requirement
+        // 4: the non-fleet-aware raw-input reader is no longer called from
+        // the start path — `read_multi_symbol_config_raw_inputs_from_env_and_
+        // fleet` (checked below) is the sole reader `StartAttemptAuthority
+        // Snapshot::resolve` uses.
+        "read_multi_symbol_config_raw_inputs_from_env",
     ] {
         assert_eq!(
             count_real_calls(&lifecycle_src, needle),
@@ -609,24 +615,35 @@ fn ar_05_each_start_attempt_input_is_resolved_at_exactly_one_real_call_site() {
     }
     for needle in [
         "load_readiness_context_from_env",
-        "read_multi_symbol_config_raw_inputs_from_env",
+        "read_multi_symbol_config_raw_inputs_from_env_and_fleet",
         "required_symbols_with_source",
+        // BUNDLE-7-PHASE-7A-SINGLE-FROZEN-FLEET-AUTHORITY-CLOSURE requirement
+        // 1: the one fleet-resolution operation per start attempt.
+        "FrozenStrategyFleet::resolve",
+        "strategy_fleet_snapshot",
     ] {
         assert_eq!(
             count_real_calls(&lifecycle_src, needle),
             1,
             "AR-05: {needle} must have exactly one real call site in \
-             lifecycle.rs (inside StartAttemptAuthoritySnapshot::resolve) — \
-             found a different count, meaning either a second read crept back \
-             in or the resolver itself was removed"
+             lifecycle.rs (inside StartAttemptAuthoritySnapshot::resolve, or \
+             inside FrozenStrategyFleet::resolve which that one call reaches) \
+             — found a different count, meaning either a second read crept \
+             back in or the resolver itself was removed"
         );
     }
     for needle in [
         "build_multi_symbol_runtime_config_from_env",
         "load_readiness_context_from_env",
         "read_multi_symbol_config_raw_inputs_from_env",
+        "read_multi_symbol_config_raw_inputs_from_env_and_fleet",
         "required_symbols_with_source",
         "required_symbols_for_freshness_gate_from_env",
+        // BUNDLE-7-PHASE-7A-SINGLE-FROZEN-FLEET-AUTHORITY-CLOSURE test
+        // requirement 6: loop_runner.rs must never re-resolve the fleet.
+        "strategy_fleet_snapshot",
+        "fleet_ids_from_env",
+        "FrozenStrategyFleet::resolve",
     ] {
         assert_eq!(
             count_real_calls(&loop_runner_src, needle),
@@ -636,19 +653,27 @@ fn ar_05_each_start_attempt_input_is_resolved_at_exactly_one_real_call_site() {
              never re-resolve it"
         );
     }
+    assert!(
+        !loop_runner_src.contains("MQK_STRATEGY_IDS"),
+        "AR-05: loop_runner.rs must never reference MQK_STRATEGY_IDS directly \
+         — it must consume the frozen fleet-derived parameters passed in, \
+         never read the env var itself"
+    );
 
-    // fleet_ids_from_env is also called once by B1A's
-    // `resolve_autonomous_runtime_context` seam (a distinct, pre-existing
-    // native-strategy-bootstrap concern, not part of this snapshot) — so
-    // this one has two legitimate real call sites in lifecycle.rs, not one.
-    // Bounding it at exactly two (rather than leaving it unchecked) still
-    // proves no *third*, redundant read was introduced by this patch.
+    // BUNDLE-7-PHASE-7A-SINGLE-FROZEN-FLEET-AUTHORITY-CLOSURE requirement 1:
+    // `daily_data_readiness::fleet_ids_from_env` now has exactly one real
+    // call site in lifecycle.rs — inside `FrozenStrategyFleet::resolve`,
+    // the one permitted fallback when `AppState::strategy_fleet_snapshot()`
+    // is genuinely absent. (B1A's independent `resolve_autonomous_runtime_
+    // context` seam in `autonomous_runtime_context.rs` — a separate file —
+    // calls `AppState::strategy_fleet_snapshot()` directly, not
+    // `fleet_ids_from_env`, so it does not add to this count.)
     assert_eq!(
         count_real_calls(&lifecycle_src, "fleet_ids_from_env"),
         1,
         "AR-05: fleet_ids_from_env must have exactly one real call site in \
-         lifecycle.rs itself (inside StartAttemptAuthoritySnapshot::resolve) \
-         — B1A's own fleet-id resolution lives in \
-         autonomous_runtime_context.rs, a separate file, not lifecycle.rs"
+         lifecycle.rs itself (inside FrozenStrategyFleet::resolve) — found a \
+         different count, meaning either a second read crept back in or the \
+         one permitted fallback read was removed"
     );
 }

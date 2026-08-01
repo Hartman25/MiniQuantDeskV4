@@ -19008,3 +19008,216 @@ ORDERS PLACED: no
 LIVE CAPITAL ENABLED: no
 AI CONSUMED: no
 ```
+
+## DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7A-SINGLE-FROZEN-FLEET-AUTHORITY-CLOSURE (2026-07-31)
+
+**Corrective note on the prior entry.** The immediately-preceding entry's
+requirement 1 ("ONE RAW START AUTHORITY — CLOSED") was accurate for the
+watchlist/legacy-env raw-read consolidation it actually delivered (5df48f7c:
+one `evaluate_watchlist_intake_from_env()` read, one legacy-env read, folded
+into `StartAttemptAuthoritySnapshot::resolve`), but that entry's own text
+already flagged the residual gap it did *not* close: "The
+`configured_strategy_ids` (`fleet_ids_from_env()`) vs. B1A bootstrap fleet
+(`strategy_fleet_snapshot()`) duplication remains." That duplication meant
+one start attempt could still use a boot-time/test-injected fleet for B1A's
+bootstrap while independently re-reading live `MQK_STRATEGY_IDS` for
+`configured_strategy_ids`, and a *third*, separately-read
+`first_strategy_id_from_env()` value for the legacy single-symbol
+assignment's `strategy_id` — three fleet reads that could disagree within
+one start attempt. This entry closes that exact split. It does not reopen
+or relitigate anything else the prior entry closed (watchlist/legacy-env
+consolidation, the 7 trust-boundary panic removals) or claim any of
+requirements 2/3/4/5/6/8 (still OPEN, unstarted this session, per operator
+instruction).
+
+**Fix.** Added `FrozenStrategyFleet` / `FrozenStrategyFleetSource`
+(`state/lifecycle.rs`) — one fleet-resolution operation per start attempt:
+`AppState::strategy_fleet_snapshot()` (the boot-time `MQK_STRATEGY_IDS`
+cache, or a test-injected value via `set_strategy_fleet_for_test`) if
+`Some(_)`, else exactly one fallback `daily_data_readiness::
+fleet_ids_from_env()` read. `StartAttemptAuthoritySnapshot::resolve` now
+calls `FrozenStrategyFleet::resolve` exactly once and derives every
+fleet-dependent value from that one struct:
+- B1A bootstrap/effective binding: `bootstrap_with_effective_binding(Some(&
+  frozen_fleet.strategy_ids))` (`None`/`Some([])` are behaviorally identical
+  inputs to `NativeStrategyBootstrap::bootstrap` — both resolve `Dormant` —
+  so this is not a behavior change for the empty/absent case).
+- The dynamic-selection `configured_strategy_ids` universe:
+  `&snapshot.frozen_fleet.strategy_ids` directly (same binding
+  `build_dynamic_selection_start_snapshot` already used, now reading the
+  unified field instead of a separately-resolved one).
+- The legacy single-symbol assignment's `strategy_id`: added
+  `read_multi_symbol_config_raw_inputs_from_env_and_fleet(frozen_first_
+  strategy_id)` (`state/multi_symbol_config.rs`) — the "or equivalent"
+  fleet-aware raw-input reader the prior entry's own `resolve_
+  autonomous_runtime_context_from_fleet` seam anticipated. `resolve()` now
+  calls this fleet-aware reader instead of the plain `_from_env` one, so
+  `MultiSymbolConfigRawInputs::legacy_strategy_id` comes from `frozen_
+  fleet.first()`, never a second `first_strategy_id_from_env()` read.
+  Watchlist-v2 resolution is untouched by this change (it never consulted a
+  fleet vector before, and still doesn't — a watchlist-assigned strategy
+  outside the frozen fleet still resolves at this pure config layer; actual
+  admission is the existing, unchanged, downstream DB-backed
+  `sys_strategy_registry` check in `dynamic_selection_plan_builder.rs`, per
+  requirement 8's explicit instruction).
+- Readiness fleet binding: unaffected directly, but now consistent by
+  construction — `evaluate_readiness_with_binding` already consumed `snapshot.
+  effective_runtime_binding`, which is itself now derived from the same
+  frozen fleet.
+
+`loop_runner.rs` already had zero fleet/env reads before this patch and
+still does (re-verified, not just assumed).
+
+**Test-injection semantics preserved, not duplicated.** The `AppState`-
+injected fleet (`set_strategy_fleet_for_test`) remains authoritative
+whenever present — `FrozenStrategyFleet::resolve` reads `strategy_fleet_
+snapshot()` first and only falls back to env when it is `None`. No second
+production fleet source was retained to preserve the seam.
+
+**Tests added** (`state/lifecycle.rs::frozen_strategy_fleet_tests`,
+`state/multi_symbol_config.rs::frozen_fleet_raw_inputs_tests`, both
+hermetic — no DB, no broker, no Alpaca credentials):
+1. `appstate_fleet_wins_over_a_disagreeing_env_var_before_and_after_capture`
+   — AppState fleet `["strategy-a","strategy-b"]`, `MQK_STRATEGY_IDS`
+   disagreeing both before *and* after `resolve()` is called: bootstrap,
+   the legacy assignment, and the dynamic-selection `configured_strategy_
+   ids` binding (definitionally `&snapshot.frozen_fleet.strategy_ids`, the
+   same field asserted) all use `strategy-a`/`strategy-b`, never `strategy-
+   x`/`strategy-y`.
+2. `env_fallback_used_only_when_appstate_fleet_is_genuinely_absent` — `set_
+   strategy_fleet_for_test(None)` + `MQK_STRATEGY_IDS=" strategy-c ,
+   strategy-d ,, "`: the one permitted fallback read normalizes
+   (trim/split/filter) into `["strategy-c","strategy-d"]`, consumed
+   identically by bootstrap and the legacy assignment.
+3. `empty_frozen_fleet_fails_closed_dormant_and_missing_strategy_id` — an
+   explicitly-injected empty `Vec` (still `Some(_)`, so `AppStateSnapshot`
+   source, not `EnvFallback`) bootstraps `Dormant` and the legacy path fails
+   closed with `MissingStrategyId` — never a fabricated strategy id.
+4. `multi_symbol_config.rs`: `legacy_strategy_id_comes_from_the_frozen_
+   parameter_not_env` (frozen parameter wins over a disagreeing env value),
+   `none_frozen_strategy_id_fails_closed_missing_strategy_id`, and
+   `watchlist_assignment_outside_any_fleet_still_resolves_at_this_layer`
+   (requirement 8: this pure builder never filters by a configured fleet —
+   a symbol assigned to a strategy_id absent from any fleet still resolves
+   here; fleet admission is the separate, unchanged, downstream DB-backed
+   concern).
+5. Structural proof (rewrote `scenario_bundle7_phase7a_atomicity_repair_
+   01.rs::ar_05`, the same guard the prior entry's requirement-1 fix
+   rewrote): `FrozenStrategyFleet::resolve` and `AppState::strategy_fleet_
+   snapshot()` each have exactly one real call site in `lifecycle.rs`
+   (inside `StartAttemptAuthoritySnapshot::resolve`); `read_multi_symbol_
+   config_raw_inputs_from_env` (the non-fleet-aware reader) now has zero
+   real call sites there (`read_multi_symbol_config_raw_inputs_from_env_
+   and_fleet` has exactly one); `fleet_ids_from_env` still has exactly one
+   real call site in `lifecycle.rs` (now inside `FrozenStrategyFleet::
+   resolve`, the one permitted fallback, rather than the prior entry's
+   separate `configured_strategy_ids` line).
+6. `loop_runner.rs` reconfirmed structurally at zero real call sites for
+   `strategy_fleet_snapshot`, `fleet_ids_from_env`, and `FrozenStrategyFleet::
+   resolve`, plus a direct `MQK_STRATEGY_IDS` string-literal check.
+
+**Found and fixed one genuine test regression this repair caused — treated
+as positive confirming evidence, not collateral damage.**
+`scenario_daily_data_readiness_start_gate_01.rs::sg_02_strategy_id_
+mismatch_blocks_before_run_creation` (requirement #2/#19 of the daily-data-
+readiness contract: the `runtime_strategy_assignment_mismatch` gate must
+use the exact bootstrap that was actually constructed, not a second guess)
+had deliberately constructed its mismatch by giving `MQK_STRATEGY_IDS` (the
+old source of the legacy assignment's `strategy_id`) a different value than
+the `AppState`-injected fleet (the old source of B1A's real bootstrap) —
+i.e. it relied on exactly the duplication this patch closes. After the fix,
+the legacy path's assigned `strategy_id` and B1A's bootstrapped strategy can
+no longer diverge by construction, so that test's old mechanism stopped
+producing a mismatch (confirmed as the actual, sole cause via isolated
+single-test reruns — not a flake: `assignment_blockers=["ZZSG01/5m: []"]`,
+i.e. the mismatch blocker no longer fired). Rewrote SG-02 to construct the
+same mismatch through the one channel that still legitimately can diverge
+after this patch: a watchlist-v2 per-symbol assignment naming a different
+strategy than the fleet's bootstrapped entry (mirrors SG-03's existing
+watchlist-based construction for the symbol-mismatch case). Re-verified:
+all 20/20 tests in that file still pass, including the rewritten SG-02.
+
+**Incidental fix: cross-module env-var test race.** Adding fleet-env-
+mutating tests in two files (`lifecycle.rs`, `multi_symbol_config.rs`) that
+each previously used their own private per-module `env_lock()` exposed a
+real, previously-latent race: `dynamic_selection_start_snapshot_tests`
+(pre-existing, in `lifecycle.rs`) had its own separate lock guarding the
+same `MQK_STRATEGY_SYMBOL`/`MQK_STRATEGY_IDS`/`MQK_STRATEGY_MD_TIMEFRAME`
+env vars, so tests in different modules could run concurrently and stomp on
+each other's env state — reproduced directly (`cargo test -p mqk-daemon
+--lib` failed 5/642 nondeterministically, including one pre-existing,
+untouched test, `paper_enforced_with_resolved_config_and_no_db_is_refused_
+via_db_unavailable`). Fixed by adding one crate-wide `#[cfg(test)]`
+`state::shared_test_locks::strategy_fleet_env_test_lock()` (`state.rs`) and
+having all three modules' `env_lock()` delegate to it. Reran `cargo test -p
+mqk-daemon --lib` 3× consecutively after the fix: 642/642 passed every run,
+zero flakes.
+
+**Commits:**
+1. `daemon: freeze one fleet authority for all start consumers` —
+   `state.rs` (shared test lock + raw-input re-export swap), `state/
+   lifecycle.rs` (`FrozenStrategyFleet`, `StartAttemptAuthoritySnapshot::
+   resolve`, `frozen_strategy_fleet_tests`), `state/multi_symbol_config.rs`
+   (`read_multi_symbol_config_raw_inputs_from_env_and_fleet`, `frozen_
+   fleet_raw_inputs_tests`).
+2. `test/docs: prove and record single-fleet closure` — rewrote `ar_05` in
+   `tests/scenario_bundle7_phase7a_atomicity_repair_01.rs`; rewrote SG-02 in
+   `tests/scenario_daily_data_readiness_start_gate_01.rs`; this entry.
+
+**Proof:**
+- `cargo check -p mqk-daemon --lib --tests`: clean, zero warnings.
+- `cargo test -p mqk-daemon --lib`: 642 passed (637 baseline + 5 new), 0
+  failed, 4 ignored — reran 3× consecutively, zero flakes.
+- Against the real port-5434 test DB (`MQK_DATABASE_URL=postgresql://
+  postgres:postgres@localhost:5434/mqk_test`, verified not the paper DB
+  before every run; `--test-threads=1`, required by a pre-existing,
+  unrelated intra-file DB-contention property of `scenario_autonomous_
+  completed_bar_task_01.rs` this session did not introduce and did not
+  touch — reconfirmed by isolating that one file, which also fails under
+  default parallelism with `--test-threads=1` unset): `ar_05` plus the full
+  `scenario_bundle7_phase7a_atomicity_repair_01.rs` (5/5) and `scenario_
+  bundle7_phase7a_final_atomic_ownership_and_rollback_truth_01.rs` (2/2);
+  the full daily-data-readiness/premarket-freshness/multi-symbol-config/
+  watchlist/native-bootstrap/dynamic-selection-evidence regression surface
+  (`scenario_daily_data_readiness_01`, `_api_01`, `_start_gate_01` [20/20,
+  including the rewritten SG-02], `scenario_dynamic_selection_evidence_
+  validation_01`, `scenario_multi_symbol_capital_caps_01`, `_day_order_
+  cap_01`, `_dispatch_loop_01`, `_dispatch_summary_01`, `_runtime_config_
+  01`, `_tick_order_cap_01`, `scenario_native_strategy_bootstrap_daemon_
+  b1a`/`_b1b`, `scenario_premarket_data_readiness_gate_01`, `scenario_
+  watchlist_admission_dryrun_01`, `_readonly_handoff_01`); `scenario_
+  bundle7_phase7a_lifecycle_wiring_01` (3/3) and `_loop_runner_unchanged_
+  guard_01` (5/5, economic tick-loop body still unchanged); `scenario_
+  autonomous_completed_bar_task_01` (47/47) and `scenario_autonomous_
+  daily_coordinator_policy_01` (32/32) — every file 0 failed.
+- Guards: `check_migration_governance.sh`, `check_unsafe_patterns.sh`,
+  `check_unsafe_patterns.ps1`, `check_workspace_dep_inheritance.sh`,
+  `check_ignored_load_bearing_proofs.sh`, `check_no_promotion_evidence_
+  bypass.ps1`, `check_runtime_opportunity_allocation_01.sh` (Bundle 5),
+  `check_multi_strategy_conflict_policy_01.sh` (Bundle 6) — all pass.
+- `rustfmt --edition 2021 --check`: clean on every file this session
+  touched.
+- `cargo clippy -p mqk-daemon --lib --tests -- -D warnings`: zero errors
+  originate from any file this session touched (confirmed by listing every
+  emitted `-->` path — all 28 errors are in `state/session_controller.rs`,
+  `state/runtime_session_source.rs`, and `tests/scenario_runtime_session_
+  v2_cutover_scaffold_asset_core_05d.rs`, none of which this session
+  touched — same pre-existing local-toolchain-vs-CI-pin mismatch the prior
+  entry documented).
+- `git diff --check` / `git diff --cached --check`: clean.
+- No migrations added. No forbidden path (`.env.local`, the untracked
+  ledger-update file, `smoke_logs/`) staged or touched. `git status`
+  confirms exactly 5 tracked files modified, nothing else.
+
+```text
+DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7A-SINGLE-FROZEN-FLEET-AUTHORITY-CLOSURE:
+COMPLETE — AWAITING CHATGPT AND OPERATOR ACCEPTANCE BEFORE PUSH
+PUSHED: no
+OTHER PHASE 7A REQUIREMENTS STARTED (2,3,4,5,6,8): no
+PHASE 7B STARTED: no
+BUNDLE 8 STARTED: no
+REAL DAEMON STARTED: no
+ORDERS PLACED: no
+LIVE CAPITAL ENABLED: no
+AI CONSUMED: no
+```

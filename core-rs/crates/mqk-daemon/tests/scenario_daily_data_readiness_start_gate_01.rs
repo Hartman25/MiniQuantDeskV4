@@ -321,22 +321,34 @@ async fn sg_01_missing_assignments_blocks_before_run_creation() {
 // SG-02 — strategy-ID mismatch blocks before run creation (req #2, #19)
 // ---------------------------------------------------------------------------
 
+// BUNDLE-7-PHASE-7A-SINGLE-FROZEN-FLEET-AUTHORITY-CLOSURE note: this test
+// used to construct the strategy-id mismatch via the legacy single-symbol
+// path by giving `MQK_STRATEGY_IDS` (then the source of the legacy
+// assignment's `strategy_id`) a different value than the `AppState`-injected
+// fleet (then the source of B1A's real bootstrap) — i.e. it relied on the
+// exact fleet-source duplication that patch closed. After that closure, the
+// legacy single-symbol path's assigned `strategy_id` and B1A's bootstrapped
+// strategy always come from the same one frozen fleet capture, so they can
+// no longer diverge by construction. The watchlist-v2 path is the one
+// channel that still legitimately can diverge (a per-symbol assignment is
+// independent of which single fleet entry B1A actually bootstraps, per its
+// Tier-A single-strategy policy) — this now proves the mismatch through
+// that channel instead, preserving the same requirement (#2, #19: the gate
+// uses the exact bootstrap it constructed, not a second guess).
 #[tokio::test]
 async fn sg_02_strategy_id_mismatch_blocks_before_run_creation() {
     let _g = env_lock().lock().await;
     clear_env();
     let dir = write_registries();
+    // Watchlist-v2 assigns SYMBOL to a DIFFERENT strategy than the fleet's
+    // bootstrap strategy (fleet[0], "intraday_scalper") — symbol and
+    // timeframe both still agree, so only the strategy-id axis mismatches.
+    let watchlist_path = write_watchlist(SYMBOL, "intraday_short_scalper");
     unsafe {
-        std::env::set_var("MQK_STRATEGY_SYMBOL", SYMBOL);
-        std::env::set_var("MQK_STRATEGY_IDS", "intraday_scalper");
         std::env::set_var("MQK_STRATEGY_MD_TIMEFRAME", "5m");
+        std::env::set_var("MQK_PAPER_WATCHLIST_PATH", &watchlist_path);
     }
-    // Fleet (the source of the REAL bootstrap's active strategy, per B1A) is
-    // deliberately a DIFFERENT strategy sharing the same TIMEFRAME_SECS=300
-    // (intraday_short_scalper) so only the strategy-id axis mismatches —
-    // symbol and timeframe both still agree. Proves the gate uses the exact
-    // bootstrap it constructed (req #19), not the env-var-derived id.
-    let st = ready_state_with_fleet(Some("intraday_short_scalper")).await;
+    let st = ready_state_with_fleet(Some("intraday_scalper")).await;
 
     let err = st
         .start_execution_runtime()
@@ -354,6 +366,7 @@ async fn sg_02_strategy_id_mismatch_blocks_before_run_creation() {
 
     clear_env();
     cleanup(&dir);
+    let _ = std::fs::remove_file(&watchlist_path);
 }
 
 // ---------------------------------------------------------------------------
