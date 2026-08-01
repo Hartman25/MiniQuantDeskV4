@@ -385,21 +385,72 @@ pub fn build_multi_symbol_runtime_config_from_env_and_watchlist(
 /// `watchlist_outcome` via `crate::watchlist_intake::evaluate_watchlist_intake_from_env`
 /// and the legacy inputs from the same env vars as
 /// [`build_legacy_single_symbol_config_from_env`].
+///
+/// Thin wrapper over [`read_multi_symbol_config_raw_inputs_from_env`] +
+/// [`MultiSymbolConfigRawInputs::build_config`] — kept for existing callers
+/// (`daily_data_readiness.rs`, `autonomous_completed_bar_task.rs`,
+/// `autonomous_daily_coordinator.rs`, `routes/market_data_readiness.rs`)
+/// that only need the resolved config, not the raw watchlist/env inputs a
+/// single frozen start-attempt snapshot also needs to hand to
+/// `market_data_freshness::required_symbols_with_source` without a second
+/// watchlist read (BUNDLE-7-PHASE-7A-TRUE-ATOMIC requirement 1).
 pub fn build_multi_symbol_runtime_config_from_env(
 ) -> Result<MultiSymbolRuntimeConfig, MultiSymbolConfigError> {
-    let outcome = crate::watchlist_intake::evaluate_watchlist_intake_from_env();
-    let configured_path = std::env::var(crate::watchlist_intake::ENV_PAPER_WATCHLIST_PATH).ok();
-    let symbol = std::env::var(ENV_STRATEGY_SYMBOL).ok();
-    let strategy_id = first_strategy_id_from_env();
-    let timeframe = std::env::var(super::STRATEGY_MD_TIMEFRAME_ENV).ok();
+    read_multi_symbol_config_raw_inputs_from_env().build_config()
+}
 
-    build_multi_symbol_runtime_config_from_env_and_watchlist(
-        &outcome,
-        configured_path.as_deref(),
-        symbol.as_deref(),
-        strategy_id.as_deref(),
-        timeframe.as_deref(),
-    )
+// ---------------------------------------------------------------------------
+// BUNDLE-7-PHASE-7A-TRUE-ATOMIC requirement 1 — one raw read, shared
+// ---------------------------------------------------------------------------
+
+/// Every env/watchlist input [`build_multi_symbol_runtime_config_from_env_and_watchlist`]
+/// and `market_data_freshness::required_symbols_with_source` both need,
+/// read exactly once.
+///
+/// A single frozen start-attempt snapshot (`StartAttemptAuthoritySnapshot`
+/// in `state/lifecycle.rs`) reads this struct once via
+/// [`read_multi_symbol_config_raw_inputs_from_env`] and derives both the
+/// [`MultiSymbolRuntimeConfig`] (via [`MultiSymbolConfigRawInputs::build_config`])
+/// and the premarket freshness gate's required-symbol vector from it — never
+/// two independent watchlist-artifact reads or two independent legacy-env
+/// reads within the same start attempt.
+#[derive(Debug, Clone)]
+pub(crate) struct MultiSymbolConfigRawInputs {
+    pub(crate) watchlist_outcome: WatchlistIntakeOutcome,
+    pub(crate) configured_watchlist_path: Option<String>,
+    pub(crate) legacy_symbol: Option<String>,
+    pub(crate) legacy_strategy_id: Option<String>,
+    pub(crate) legacy_timeframe: Option<String>,
+}
+
+impl MultiSymbolConfigRawInputs {
+    /// [`build_multi_symbol_runtime_config_from_env_and_watchlist`], driven
+    /// from this already-resolved snapshot instead of re-reading env/the
+    /// watchlist artifact.
+    pub(crate) fn build_config(&self) -> Result<MultiSymbolRuntimeConfig, MultiSymbolConfigError> {
+        build_multi_symbol_runtime_config_from_env_and_watchlist(
+            &self.watchlist_outcome,
+            self.configured_watchlist_path.as_deref(),
+            self.legacy_symbol.as_deref(),
+            self.legacy_strategy_id.as_deref(),
+            self.legacy_timeframe.as_deref(),
+        )
+    }
+}
+
+/// Read [`MultiSymbolConfigRawInputs`] from the environment: exactly one
+/// `evaluate_watchlist_intake_from_env()` call and exactly one read each of
+/// `MQK_PAPER_WATCHLIST_PATH`, `MQK_STRATEGY_SYMBOL`, `MQK_STRATEGY_IDS`
+/// (first non-empty entry), and `MQK_STRATEGY_MD_TIMEFRAME`.
+pub(crate) fn read_multi_symbol_config_raw_inputs_from_env() -> MultiSymbolConfigRawInputs {
+    MultiSymbolConfigRawInputs {
+        watchlist_outcome: crate::watchlist_intake::evaluate_watchlist_intake_from_env(),
+        configured_watchlist_path: std::env::var(crate::watchlist_intake::ENV_PAPER_WATCHLIST_PATH)
+            .ok(),
+        legacy_symbol: std::env::var(ENV_STRATEGY_SYMBOL).ok(),
+        legacy_strategy_id: first_strategy_id_from_env(),
+        legacy_timeframe: std::env::var(super::STRATEGY_MD_TIMEFRAME_ENV).ok(),
+    }
 }
 
 // ---------------------------------------------------------------------------

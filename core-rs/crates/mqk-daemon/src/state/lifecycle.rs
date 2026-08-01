@@ -18,9 +18,7 @@ use crate::capital_policy::{
     evaluate_capital_policy_from_env, evaluate_deployment_economics_from_env, CapitalPolicyOutcome,
     DeploymentEconomicsOutcome,
 };
-use crate::market_data_freshness::{
-    evaluate_md_freshness_status_for_symbols, required_symbols_for_freshness_gate_from_env,
-};
+use crate::market_data_freshness::evaluate_md_freshness_status_for_symbols;
 use crate::parity_evidence::{evaluate_parity_evidence_from_env, ParityEvidenceOutcome};
 
 use sqlx::PgPool;
@@ -176,6 +174,26 @@ impl StartAttemptAuthoritySnapshot {
         let configured_strategy_ids =
             crate::daily_data_readiness::fleet_ids_from_env().unwrap_or_default();
 
+        // BUNDLE-7-PHASE-7A-TRUE-ATOMIC requirement 1: one raw read of the
+        // watchlist artifact and the legacy MQK_STRATEGY_SYMBOL/IDS/timeframe
+        // env vars, shared by both `MultiSymbolRuntimeConfig` construction
+        // and the premarket freshness gate's required-symbol resolution
+        // below — replaces two independent calls
+        // (`build_multi_symbol_runtime_config_from_env()`,
+        // `required_symbols_for_freshness_gate_from_env()`) that each
+        // previously performed their own, separately-timed
+        // `evaluate_watchlist_intake_from_env()` file read and their own
+        // separate env reads.
+        let multi_symbol_raw_inputs = crate::state::read_multi_symbol_config_raw_inputs_from_env();
+        let multi_symbol_config = multi_symbol_raw_inputs.build_config();
+        let required_freshness_symbols =
+            crate::market_data_freshness::required_symbols_with_source(
+                &multi_symbol_raw_inputs.watchlist_outcome,
+                multi_symbol_raw_inputs.legacy_timeframe.as_deref(),
+                multi_symbol_raw_inputs.legacy_symbol.as_deref(),
+            )
+            .required;
+
         // B1A construction, folded in: the exact same
         // `bootstrap_with_effective_binding` call and fleet-id source
         // (`AppState::strategy_fleet_snapshot()`, NOT `fleet_ids_from_env()`
@@ -210,10 +228,10 @@ impl StartAttemptAuthoritySnapshot {
         Self {
             now_utc,
             effective_mode,
-            multi_symbol_config: crate::state::build_multi_symbol_runtime_config_from_env(),
+            multi_symbol_config,
             readiness_context: crate::daily_data_readiness::load_readiness_context_from_env(),
             configured_strategy_ids,
-            required_freshness_symbols: required_symbols_for_freshness_gate_from_env(),
+            required_freshness_symbols,
             native_strategy_bootstrap,
             effective_runtime_binding,
         }
@@ -2163,25 +2181,44 @@ impl crate::daily_data_readiness::RuntimeStartEffects for ProductionRuntimeStart
         // provenance. Only `Accepted` carries positive provenance; every
         // other outcome yields `None` (fail-closed: absent/invalid/
         // unavailable artifacts are not recorded as consumed).
-        let accepted_artifact = match self
+        // BUNDLE-7-PHASE-7A-TRUE-ATOMIC requirement 7: mutex-poison recovery
+        // via `unwrap_or_else(|poisoned| poisoned.into_inner())` (matches
+        // `set_phase`/`release_orchestrator_leadership` — pure process-local
+        // progress state, no invariant a poisoned write could violate).  The
+        // inner `.take()` returning `None` here is a genuine caller-ordering
+        // bug (this trait method must be driven at most once per attempt),
+        // and is now a typed error instead of a panic.
+        let artifact_intake_value = self
             .artifact_intake
             .lock()
-            .expect("artifact_intake mutex poisoned")
-            .take()
-            .expect("start_runtime_effects must be called at most once")
-        {
-            ArtifactIntakeOutcome::Accepted {
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take();
+        let accepted_artifact = match artifact_intake_value {
+            Some(ArtifactIntakeOutcome::Accepted {
                 artifact_id,
                 artifact_type,
                 stage,
                 produced_by,
-            } => Some(AcceptedArtifactProvenance {
+            }) => Some(AcceptedArtifactProvenance {
                 artifact_id,
                 artifact_type,
                 stage,
                 produced_by,
             }),
-            _ => None,
+            Some(_) => None,
+            None => {
+                self.release_orchestrator_leadership(
+                    orchestrator,
+                    "start_runtime_effects_called_twice",
+                )
+                .await;
+                return Err(RuntimeStartEffectsError::internal(
+                    "runtime.start_refused.start_runtime_effects_called_twice",
+                    "start_runtime_effects consumed artifact_intake a second time; \
+                     this indicates a caller-ordering bug (each RuntimeStartEffects \
+                     instance must drive at most one start attempt)",
+                ));
+            }
         };
 
         // B1A: native strategy bootstrap for the active run — taken here,
@@ -2190,7 +2227,7 @@ impl crate::daily_data_readiness::RuntimeStartEffects for ProductionRuntimeStart
         let native_strategy_bootstrap = self
             .native_strategy_bootstrap
             .lock()
-            .expect("native_strategy_bootstrap mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take();
 
         // BUNDLE-7-PHASE-7A: the already-evaluated, frozen dynamic-selection
@@ -2201,7 +2238,7 @@ impl crate::daily_data_readiness::RuntimeStartEffects for ProductionRuntimeStart
         let dynamic_selection_outcome = self
             .dynamic_selection_outcome
             .lock()
-            .expect("dynamic_selection_outcome mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take();
 
         self.state
@@ -2241,7 +2278,7 @@ impl crate::daily_data_readiness::RuntimeStartEffects for ProductionRuntimeStart
         *self
             .orchestrator
             .lock()
-            .expect("orchestrator mutex poisoned") = Some(orchestrator);
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(orchestrator);
         Ok(())
     }
 
@@ -2267,7 +2304,7 @@ impl crate::daily_data_readiness::RuntimeStartEffects for ProductionRuntimeStart
             let orchestrator_to_release = self
                 .orchestrator
                 .lock()
-                .expect("orchestrator mutex poisoned")
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .take();
             if let Some(orchestrator) = orchestrator_to_release {
                 self.release_orchestrator_leadership(orchestrator, "dynamic_selection_fault_seam")
@@ -2282,7 +2319,7 @@ impl crate::daily_data_readiness::RuntimeStartEffects for ProductionRuntimeStart
         let orchestrator_to_spawn = self
             .orchestrator
             .lock()
-            .expect("orchestrator mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take();
         let Some(orchestrator) = orchestrator_to_spawn else {
             // ATOMIC-OWNERSHIP-AND-ROLLBACK-TRUTH-01 requirement 7: a
@@ -2332,7 +2369,7 @@ impl crate::daily_data_readiness::RuntimeStartEffects for ProductionRuntimeStart
         let orchestrator_to_release = self
             .orchestrator
             .lock()
-            .expect("orchestrator mutex poisoned")
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take();
         if let Some(orchestrator) = orchestrator_to_release {
             self.release_orchestrator_leadership(orchestrator, "rollback_local_effects")

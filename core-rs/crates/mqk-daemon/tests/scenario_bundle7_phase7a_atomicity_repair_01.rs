@@ -585,9 +585,32 @@ fn ar_05_each_start_attempt_input_is_resolved_at_exactly_one_real_call_site() {
         std::fs::read_to_string(root.join("core-rs/crates/mqk-daemon/src/state/loop_runner.rs"))
             .expect("read loop_runner.rs");
 
+    // BUNDLE-7-PHASE-7A-TRUE-ATOMIC requirement 1: `lifecycle.rs` no longer
+    // calls `build_multi_symbol_runtime_config_from_env` or
+    // `required_symbols_for_freshness_gate_from_env` directly — each
+    // independently performed its own `evaluate_watchlist_intake_from_env()`
+    // file read and its own legacy-env reads. Both are now zero real call
+    // sites in `lifecycle.rs`; `read_multi_symbol_config_raw_inputs_from_env`
+    // is the sole one-time raw read, and `required_symbols_with_source`
+    // (the pure core, not its `_from_env` wrapper) derives the freshness
+    // gate's required-symbol vector from that same raw snapshot.
     for needle in [
         "build_multi_symbol_runtime_config_from_env",
+        "required_symbols_for_freshness_gate_from_env",
+    ] {
+        assert_eq!(
+            count_real_calls(&lifecycle_src, needle),
+            0,
+            "AR-05: {needle} must have zero real call sites in lifecycle.rs — \
+             StartAttemptAuthoritySnapshot::resolve must derive this value \
+             from the one shared raw watchlist/env snapshot instead of \
+             calling this independently-reading function directly"
+        );
+    }
+    for needle in [
         "load_readiness_context_from_env",
+        "read_multi_symbol_config_raw_inputs_from_env",
+        "required_symbols_with_source",
     ] {
         assert_eq!(
             count_real_calls(&lifecycle_src, needle),
@@ -597,6 +620,14 @@ fn ar_05_each_start_attempt_input_is_resolved_at_exactly_one_real_call_site() {
              found a different count, meaning either a second read crept back \
              in or the resolver itself was removed"
         );
+    }
+    for needle in [
+        "build_multi_symbol_runtime_config_from_env",
+        "load_readiness_context_from_env",
+        "read_multi_symbol_config_raw_inputs_from_env",
+        "required_symbols_with_source",
+        "required_symbols_for_freshness_gate_from_env",
+    ] {
         assert_eq!(
             count_real_calls(&loop_runner_src, needle),
             0,

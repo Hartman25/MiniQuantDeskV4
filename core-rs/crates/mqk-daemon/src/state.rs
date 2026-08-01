@@ -111,6 +111,13 @@ pub use multi_symbol_config::{
     MultiSymbolConfigSource, MultiSymbolRuntimeConfig, SymbolStrategyAssignment,
     MULTI_SYMBOL_RUNTIME_CONFIG_SCHEMA_VERSION,
 };
+// BUNDLE-7-PHASE-7A-TRUE-ATOMIC requirement 1: crate-internal-only raw-input
+// seam so `StartAttemptAuthoritySnapshot::resolve` (state/lifecycle.rs) can
+// read the watchlist artifact and legacy env vars exactly once and derive
+// both `MultiSymbolRuntimeConfig` and the premarket freshness gate's
+// required-symbol vector from that one read — never a second, independently
+// resolved watchlist/env read within the same start attempt.
+pub(crate) use multi_symbol_config::read_multi_symbol_config_raw_inputs_from_env;
 pub use per_symbol_bar_window::{
     classify_bar_staleness, load_recent_completed_bars_for_symbol_window,
     per_symbol_loaded_bars_from_rows, EmptySymbolError, PerSymbolBarInput, PerSymbolBarWindow,
@@ -3540,14 +3547,16 @@ operator_reconcile_or_repair_required"
     ) -> Result<Option<ExecutionLoopHandle>, RuntimeLifecycleError> {
         let handle = {
             let mut lock = self.execution_loop.lock().await;
-            match &*lock {
-                ExecutionLoopSlot::Active(_) => {
-                    match std::mem::replace(&mut *lock, ExecutionLoopSlot::Empty) {
-                        ExecutionLoopSlot::Active(handle) => Some(handle),
-                        _ => unreachable!("checked Active above"),
-                    }
+            // BUNDLE-7-PHASE-7A-TRUE-ATOMIC requirement 7: unconditional
+            // replace-then-restore-if-wrong-variant instead of check-then-
+            // replace-then-unreachable!() — the lock is held for the whole
+            // span so behavior is identical, but this has no panic path.
+            match std::mem::replace(&mut *lock, ExecutionLoopSlot::Empty) {
+                ExecutionLoopSlot::Active(handle) => Some(handle),
+                other => {
+                    *lock = other;
+                    None
                 }
-                _ => None,
             }
         };
 
@@ -3598,17 +3607,18 @@ operator_reconcile_or_repair_required"
     ) -> Result<Option<ExecutionLoopExit>, RuntimeLifecycleError> {
         let handle = {
             let mut lock = self.execution_loop.lock().await;
-            let is_finished = matches!(
-                &*lock,
-                ExecutionLoopSlot::Active(handle) if handle.join_handle.is_finished()
-            );
-            if is_finished {
-                match std::mem::replace(&mut *lock, ExecutionLoopSlot::Empty) {
-                    ExecutionLoopSlot::Active(handle) => Some(handle),
-                    _ => unreachable!("checked Active+finished above"),
+            // BUNDLE-7-PHASE-7A-TRUE-ATOMIC requirement 7: unconditional
+            // replace-then-restore-if-not-taken instead of check-then-
+            // replace-then-unreachable!() — the lock is held for the whole
+            // span so behavior is identical, but this has no panic path.
+            match std::mem::replace(&mut *lock, ExecutionLoopSlot::Empty) {
+                ExecutionLoopSlot::Active(handle) if handle.join_handle.is_finished() => {
+                    Some(handle)
                 }
-            } else {
-                None
+                other => {
+                    *lock = other;
+                    None
+                }
             }
         };
 
@@ -3644,14 +3654,18 @@ operator_reconcile_or_repair_required"
     /// conflict — reservation is meant to happen at most once per attempt).
     pub(crate) async fn reserve_execution_loop_slot(&self, run_id: Uuid) -> Result<(), Uuid> {
         let mut lock = self.execution_loop.lock().await;
+        // BUNDLE-7-PHASE-7A-TRUE-ATOMIC requirement 7: exhaustive match
+        // instead of `ExecutionLoopSlot::run_id().expect(...)` — every
+        // non-Empty variant's conflicting run_id is read directly from its
+        // own fields, so there is no panic path even if a future variant
+        // were added without updating `run_id()`.
         match &*lock {
             ExecutionLoopSlot::Empty => {
                 *lock = ExecutionLoopSlot::Reserved { run_id };
                 Ok(())
             }
-            other => Err(other
-                .run_id()
-                .expect("non-Empty slot always carries a run_id")),
+            ExecutionLoopSlot::Reserved { run_id: existing } => Err(*existing),
+            ExecutionLoopSlot::Active(handle) => Err(handle.run_id),
         }
     }
 

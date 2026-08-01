@@ -264,18 +264,6 @@ pub(crate) enum ExecutionLoopSlot {
     Active(ExecutionLoopHandle),
 }
 
-impl ExecutionLoopSlot {
-    /// The `run_id` currently occupying the slot (`Reserved` or `Active`),
-    /// or `None` when `Empty`.
-    pub(crate) fn run_id(&self) -> Option<Uuid> {
-        match self {
-            ExecutionLoopSlot::Empty => None,
-            ExecutionLoopSlot::Reserved { run_id } => Some(*run_id),
-            ExecutionLoopSlot::Active(handle) => Some(handle.run_id),
-        }
-    }
-}
-
 /// ATOMIC-OWNERSHIP-AND-ROLLBACK-TRUTH-01 requirement 7: typed failure from
 /// `AppState::install_active_execution_loop_slot`, replacing what was
 /// previously a panic on a duplicate/misordered call.

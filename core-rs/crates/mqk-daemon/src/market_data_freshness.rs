@@ -603,22 +603,52 @@ pub struct RequiredSymbolsResolution {
 /// thin wrapper over this one) — so the premarket readiness gate and any
 /// provenance-aware caller (e.g. the ingest-plan surface) can never disagree
 /// about which symbols are required or where they came from.
+///
+/// Thin wrapper over [`required_symbols_with_source`] — reads the watchlist
+/// artifact and the legacy `MQK_STRATEGY_SYMBOL`/timeframe env vars exactly
+/// once each, then delegates to the pure core. Kept for existing callers
+/// that only need the resolved list/provenance, not a caller-supplied
+/// already-resolved watchlist outcome.
 pub fn required_symbols_with_source_from_env() -> RequiredSymbolsResolution {
-    let timeframe = std::env::var(crate::state::STRATEGY_MD_TIMEFRAME_ENV)
-        .map(|v| v.trim().to_string())
-        .unwrap_or_default();
-
+    let timeframe = std::env::var(crate::state::STRATEGY_MD_TIMEFRAME_ENV).ok();
     let watchlist_outcome = crate::watchlist_intake::evaluate_watchlist_intake_from_env();
+    let legacy_symbol = std::env::var("MQK_STRATEGY_SYMBOL").ok();
+    required_symbols_with_source(
+        &watchlist_outcome,
+        timeframe.as_deref(),
+        legacy_symbol.as_deref(),
+    )
+}
+
+/// BUNDLE-7-PHASE-7A-TRUE-ATOMIC requirement 1: pure core of
+/// [`required_symbols_with_source_from_env`], taking an already-resolved
+/// `watchlist_outcome` and the legacy symbol/timeframe inputs instead of
+/// reading the watchlist artifact or env itself.
+///
+/// `StartAttemptAuthoritySnapshot::resolve` (`state/lifecycle.rs`) calls
+/// this with the exact same `WatchlistIntakeOutcome` and legacy inputs
+/// [`crate::state::multi_symbol_config::MultiSymbolConfigRawInputs`]
+/// resolved for [`crate::state::MultiSymbolRuntimeConfig`] construction —
+/// so the premarket freshness gate and the multi-symbol dispatch
+/// assignment can never disagree about which watchlist file content or
+/// legacy env value was in effect for a given start attempt (no second,
+/// independently-timed watchlist-artifact read).
+pub(crate) fn required_symbols_with_source(
+    watchlist_outcome: &WatchlistIntakeOutcome,
+    timeframe: Option<&str>,
+    legacy_symbol: Option<&str>,
+) -> RequiredSymbolsResolution {
+    let timeframe = timeframe.map(|v| v.trim().to_string()).unwrap_or_default();
 
     if timeframe.is_empty() {
         return RequiredSymbolsResolution {
             required: Vec::new(),
             source: SYMBOL_SOURCE_NONE,
-            watchlist_outcome,
+            watchlist_outcome: watchlist_outcome.clone(),
         };
     }
 
-    if let WatchlistIntakeOutcome::LoadedApproved { artifact } = &watchlist_outcome {
+    if let WatchlistIntakeOutcome::LoadedApproved { artifact } = watchlist_outcome {
         if artifact.schema_version == crate::watchlist_intake::WATCHLIST_SCHEMA_VERSION_V2
             && !artifact.symbols.is_empty()
         {
@@ -633,25 +663,25 @@ pub fn required_symbols_with_source_from_env() -> RequiredSymbolsResolution {
             return RequiredSymbolsResolution {
                 required,
                 source: SYMBOL_SOURCE_WATCHLIST_V2,
-                watchlist_outcome,
+                watchlist_outcome: watchlist_outcome.clone(),
             };
         }
     }
 
-    let symbol = std::env::var("MQK_STRATEGY_SYMBOL")
+    let symbol = legacy_symbol
         .map(|v| v.trim().to_string())
         .unwrap_or_default();
     if symbol.is_empty() {
         return RequiredSymbolsResolution {
             required: Vec::new(),
             source: SYMBOL_SOURCE_NONE,
-            watchlist_outcome,
+            watchlist_outcome: watchlist_outcome.clone(),
         };
     }
 
     RequiredSymbolsResolution {
         required: vec![RequiredSymbolTimeframe { symbol, timeframe }],
         source: SYMBOL_SOURCE_ENV_STRATEGY_SYMBOL,
-        watchlist_outcome,
+        watchlist_outcome: watchlist_outcome.clone(),
     }
 }

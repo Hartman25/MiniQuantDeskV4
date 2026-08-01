@@ -74,12 +74,33 @@ pub async fn resolve_autonomous_runtime_context(
             .map(|e| e.strategy_id)
             .collect::<Vec<_>>()
     });
+    resolve_autonomous_runtime_context_from_fleet(state, fleet_ids.as_deref()).await
+}
+
+/// BUNDLE-7-PHASE-7A-TRUE-ATOMIC requirement 1: [`resolve_autonomous_runtime_context`],
+/// taking an already-resolved `fleet_ids` instead of reading
+/// `AppState::strategy_fleet_snapshot()` itself.
+///
+/// `resolve_autonomous_runtime_context` is now a thin wrapper over this
+/// function — kept for existing callers (`autonomous_daily_coordinator.rs`,
+/// `autonomous_completed_bar_task.rs`) that have no independently-resolved
+/// fleet snapshot of their own for the current tick and simply want the one
+/// canonical `state.strategy_fleet_snapshot()` read this module has always
+/// performed. This function exists so a caller that *does* already hold a
+/// frozen fleet value for the current attempt/tick (e.g. a future caller
+/// built around a frozen per-operation snapshot) can reuse the exact same
+/// bootstrap/binding derivation without forcing a second, independently-timed
+/// fleet read.
+pub async fn resolve_autonomous_runtime_context_from_fleet(
+    state: &AppState,
+    fleet_ids: Option<&[String]>,
+) -> Result<ResolvedAutonomousRuntimeContext, RuntimeLifecycleError> {
     // DAILY-DATA-READINESS-01C-ENFORCEMENT-01: one registry-construction call
     // captures both the bootstrap and the target-symbol read together, so the
     // effective binding derived below can never disagree with a second,
     // independently-read symbol value.
     let (native_strategy_bootstrap, effective_runtime_binding) =
-        bootstrap_with_effective_binding(fleet_ids.as_deref());
+        bootstrap_with_effective_binding(fleet_ids);
 
     if native_strategy_bootstrap.is_failed() {
         return Err(RuntimeLifecycleError::forbidden(
