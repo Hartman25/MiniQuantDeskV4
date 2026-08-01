@@ -813,6 +813,12 @@ pub struct AppState {
     /// can prove "exactly once" for a given start attempt rather than
     /// inferring it from the absence of a second failure.
     pre_barrier_leadership_release_count: Arc<AtomicU32>,
+    /// PHASE-7A-R6-EXHAUSTIVE-MATRIX-CLOSURE-REPAIR-01 Part 3 row 21:
+    /// hermetic injection point forcing the spawned execution loop task to
+    /// panic immediately after the startup barrier releases (before any
+    /// economic work). Always `false` in production and for every test
+    /// that does not explicitly enable it (setter is `#[cfg(test)]`-gated).
+    force_execution_loop_panic: Arc<AtomicBool>,
 }
 
 /// ATOMIC-OWNERSHIP-AND-ROLLBACK-TRUTH-01 requirement 2: every locally-
@@ -1549,6 +1555,7 @@ impl AppState {
             force_install_active_runtime_conflict: Arc::new(AtomicBool::new(false)),
             force_leadership_release_failure: Arc::new(AtomicBool::new(false)),
             pre_barrier_leadership_release_count: Arc::new(AtomicU32::new(0)),
+            force_execution_loop_panic: Arc::new(AtomicBool::new(false)),
         }
     }
 
@@ -3696,16 +3703,36 @@ operator_reconcile_or_repair_required"
         match handle {
             Some(handle) => {
                 let run_id = handle.run_id;
-                let exit = handle
-                    .join_handle
-                    .await
-                    .map_err(|err| RuntimeLifecycleError::internal("loop join failed", err))?;
                 // BUNDLE-7-PHASE-7A-CORE-ATOMIC-STATE-MACHINE-CLOSURE
                 // requirement 4: reaped a finished loop directly (any
                 // caller, not only stop/halt) — the run it belonged to no
                 // longer has a local owner, so every economic mirror for it
-                // is cleared too.
+                // is cleared too, regardless of whether the join itself
+                // succeeded (PHASE-7A-R6-EXHAUSTIVE-MATRIX-CLOSURE-REPAIR-01
+                // Part 4: ownership was already unconditionally moved to
+                // `Idle` above by the time this runs — mirrors must not be
+                // left stale behind it either way).
                 self.clear_economic_mirrors_for_run(run_id).await;
+                let exit = match handle.join_handle.await {
+                    Ok(exit) => exit,
+                    Err(err) => {
+                        // PHASE-7A-R6-EXHAUSTIVE-MATRIX-CLOSURE-REPAIR-01
+                        // Part 4 (R6 row 21/25): a panicked task's join
+                        // failure must not leave ownership looking like a
+                        // clean `Idle` — mark `Degraded` before returning
+                        // the error, exactly like every other reap/stop/
+                        // halt/shutdown join-failure path now does.
+                        self.note_local_runtime_degraded(
+                            run_id,
+                            BoundedLifecycleDegradation {
+                                operation: "reap_join",
+                                detail: err.to_string(),
+                            },
+                        )
+                        .await;
+                        return Err(RuntimeLifecycleError::internal("loop join failed", err));
+                    }
+                };
                 // PHASE-7A-R6-EXHAUSTIVE-MATRIX-CLOSURE-REPAIR-01 Part 4: a
                 // self-finished loop's own leadership-release outcome must
                 // not be silently discarded by a caller that only inspects
@@ -4227,6 +4254,22 @@ operator_reconcile_or_repair_required"
     pub(crate) fn pre_barrier_leadership_release_count_for_test(&self) -> u32 {
         self.pre_barrier_leadership_release_count
             .load(Ordering::SeqCst)
+    }
+
+    /// `true` only when a `#[cfg(test)]` caller has explicitly enabled the
+    /// forced execution-loop-panic injection. Always `false` in production.
+    pub(crate) fn execution_loop_panic_forced(&self) -> bool {
+        self.force_execution_loop_panic.load(Ordering::SeqCst)
+    }
+
+    /// PHASE-7A-R6-EXHAUSTIVE-MATRIX-CLOSURE-REPAIR-01 Part 3 row 21:
+    /// enable (or disable) the forced execution-loop-panic injection.
+    /// `pub(crate)` + `#[cfg(test)]` — reachable only from this crate's own
+    /// test build.
+    #[cfg(test)]
+    pub(crate) fn set_execution_loop_panic_for_test(&self, enabled: bool) {
+        self.force_execution_loop_panic
+            .store(enabled, Ordering::SeqCst);
     }
 
     /// Test helper: install (or clear, via `None`) a fault-injection seam

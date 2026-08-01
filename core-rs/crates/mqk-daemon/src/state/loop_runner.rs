@@ -161,6 +161,20 @@ pub(super) fn spawn_execution_loop(
             }
         }
 
+        // PHASE-7A-R6-EXHAUSTIVE-MATRIX-CLOSURE-REPAIR-01 Part 3 row 21
+        // ("spawned-task panic/join failure"): a narrow, always-`false`-in-
+        // production panic-injection point, checked once, strictly after
+        // the startup barrier has released (so the panic proves a
+        // genuinely `Active` task's join/leadership-release truth is
+        // surfaced correctly, never a pre-barrier artifact). The setter is
+        // `#[cfg(test)]`-gated; this check itself is unconditional (a
+        // single atomic load, harmless in production) — matching the
+        // existing `force_leadership_release_failure`/`force_install_
+        // active_runtime_conflict` convention.
+        if state_arc.execution_loop_panic_forced() {
+            panic!("PHASE-7A-R6-MATRIX-CLOSURE test-injected execution loop panic");
+        }
+
         let mut ticker = tokio::time::interval(EXECUTION_LOOP_INTERVAL);
         // AUTON-PAPER-RISK-03: countdown to next External broker snapshot refresh.
         let mut external_refresh_ticks: u32 = 0;

@@ -906,6 +906,28 @@ pub enum DynamicSelectionLifecycleFaultSeam {
     AfterRunArmBeginInitialTick,
     AfterProcessLocalSelectionCommit,
     ImmediatelyBeforeLoopSpawn,
+    /// PHASE-7A-R6-EXHAUSTIVE-MATRIX-CLOSURE-REPAIR-01 Part 3 row 11: after
+    /// a genuine `arm_run` success, before `begin_run` is called, perturbs
+    /// the durable run to `Stopped` via the same real `mqk_db::stop_run`
+    /// production callers use — never a fake/injected error. The real
+    /// `begin_run` call immediately afterward then organically fails
+    /// (`begin_run invalid state: STOPPED`) because the row it reads back
+    /// no longer matches its own precondition.
+    PerturbRunStoppedBeforeBegin,
+    /// PHASE-7A-R6-EXHAUSTIVE-MATRIX-CLOSURE-REPAIR-01 Part 3 row 12: after
+    /// a genuine `begin_run` success, before the initial `heartbeat_run`
+    /// call, perturbs the durable run to `Stopped` the same way — the real
+    /// `heartbeat_run` call immediately afterward organically fails
+    /// (`heartbeat_run invalid state: STOPPED`).
+    PerturbRunStoppedBeforeInitialHeartbeat,
+    /// PHASE-7A-R6-EXHAUSTIVE-MATRIX-CLOSURE-REPAIR-01 Part 3 row 27
+    /// ("durable rollback query failure"): fires at the same point as
+    /// `AfterOrchestratorConstruction`, but its real action is deleting the
+    /// run row itself (via the real `mqk_db` delete, not a fake) before
+    /// returning the error. `rollback_failed_start_attempt`'s own
+    /// `fetch_run` call then organically fails (`RowNotFound`) because the
+    /// row genuinely no longer exists.
+    DeleteRunRowBeforeArm,
 }
 
 impl AlpacaWsContinuityState {

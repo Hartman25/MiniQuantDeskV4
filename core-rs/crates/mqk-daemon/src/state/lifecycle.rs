@@ -2232,6 +2232,32 @@ impl crate::daily_data_readiness::RuntimeStartEffects for ProductionRuntimeStart
             ));
         }
 
+        // PHASE-7A-R6-EXHAUSTIVE-MATRIX-CLOSURE-REPAIR-01 Part 3 row 27
+        // ("durable rollback query failure"): real perturbation, always
+        // `false` in production and for every test that does not
+        // explicitly enable it. Deletes the run row for real — the
+        // rollback path's own `fetch_run` call then organically fails
+        // (`RowNotFound`) because the row genuinely no longer exists,
+        // rather than a fabricated query error.
+        if self
+            .state
+            .dynamic_selection_fault_seam_is(
+                DynamicSelectionLifecycleFaultSeam::DeleteRunRowBeforeArm,
+            )
+            .await
+        {
+            self.release_orchestrator_leadership(orchestrator, "dynamic_selection_fault_seam")
+                .await;
+            let _ = sqlx::query("delete from runs where run_id = $1")
+                .bind(run_id)
+                .execute(&self.db)
+                .await;
+            return Err(RuntimeStartEffectsError::internal(
+                "dynamic_selection.fault_seam.delete_run_row_before_arm",
+                "test-injected run-row deletion before arm",
+            ));
+        }
+
         if let Err(err) = mqk_db::arm_run(&self.db, run_id).await {
             self.release_orchestrator_leadership(orchestrator, "arm_rollback")
                 .await;
@@ -2242,6 +2268,22 @@ impl crate::daily_data_readiness::RuntimeStartEffects for ProductionRuntimeStart
         }
         self.set_phase(RuntimeStartPhase::ArmedBeforeBegin);
 
+        // PHASE-7A-R6-EXHAUSTIVE-MATRIX-CLOSURE-REPAIR-01 Part 3 row 11:
+        // real perturbation, always `false` in production and for every
+        // test that does not explicitly enable it. Uses the same real
+        // `mqk_db::stop_run` production callers use — the immediately
+        // following real `begin_run` call then organically fails against
+        // the perturbed state, rather than a fabricated error.
+        if self
+            .state
+            .dynamic_selection_fault_seam_is(
+                DynamicSelectionLifecycleFaultSeam::PerturbRunStoppedBeforeBegin,
+            )
+            .await
+        {
+            let _ = mqk_db::stop_run(&self.db, run_id).await;
+        }
+
         if let Err(err) = mqk_db::begin_run(&self.db, run_id).await {
             self.release_orchestrator_leadership(orchestrator, "begin_rollback")
                 .await;
@@ -2250,6 +2292,21 @@ impl crate::daily_data_readiness::RuntimeStartEffects for ProductionRuntimeStart
                 err.to_string(),
             ));
         }
+
+        // PHASE-7A-R6-EXHAUSTIVE-MATRIX-CLOSURE-REPAIR-01 Part 3 row 12:
+        // same technique, one call site later — perturbs after a genuine
+        // `begin_run` success so the real initial `heartbeat_run` call
+        // organically fails.
+        if self
+            .state
+            .dynamic_selection_fault_seam_is(
+                DynamicSelectionLifecycleFaultSeam::PerturbRunStoppedBeforeInitialHeartbeat,
+            )
+            .await
+        {
+            let _ = mqk_db::stop_run(&self.db, run_id).await;
+        }
+
         if let Err(err) = mqk_db::heartbeat_run(&self.db, run_id, Utc::now()).await {
             self.release_orchestrator_leadership(orchestrator, "heartbeat_rollback")
                 .await;
@@ -2684,6 +2741,51 @@ impl AppState {
         .await;
         (result, trace)
     }
+
+    /// PHASE-7A-R6-EXHAUSTIVE-MATRIX-CLOSURE-REPAIR-01 Part 3 row 9
+    /// ("run-linked evidence persistence failure"): identical to
+    /// [`Self::drive_production_start_effects_for_test`] except it drives
+    /// `advance_run_to_active` with a real `readiness_link`, so the real
+    /// `persist_run_linked_readiness_evidence` call executes (never a fake
+    /// bypass). `pub(crate)` + `#[cfg(test)]`, reachable only from this
+    /// crate's own test build.
+    #[cfg(test)]
+    pub(crate) async fn drive_production_start_effects_with_readiness_link_for_test(
+        self: &Arc<Self>,
+        db: PgPool,
+        run_id: uuid::Uuid,
+        dynamic_selection_outcome: Option<DynamicSelectionRuntimeState>,
+        readiness_link: Option<(uuid::Uuid, chrono::DateTime<Utc>)>,
+    ) -> (
+        Result<(), crate::daily_data_readiness::RuntimeStartSequenceError>,
+        Vec<&'static str>,
+    ) {
+        let effects = ProductionRuntimeStartEffects {
+            state: self,
+            db: db.clone(),
+            artifact_intake: std::sync::Mutex::new(Some(ArtifactIntakeOutcome::NotConfigured)),
+            native_strategy_bootstrap: std::sync::Mutex::new(None),
+            orchestrator: std::sync::Mutex::new(None),
+            dynamic_selection_outcome: std::sync::Mutex::new(dynamic_selection_outcome),
+            legacy_assignments: Vec::new(),
+            start_phase: std::sync::Mutex::new(
+                crate::daily_data_readiness::RuntimeStartPhase::BeforeArm,
+            ),
+            leadership_release_outcome: std::sync::Mutex::new(None),
+            task_side_leadership_release_outcome: std::sync::Mutex::new(None),
+            task_side_join_outcome: std::sync::Mutex::new(None),
+        };
+        let mut trace: Vec<&'static str> = Vec::new();
+        let result = crate::daily_data_readiness::advance_run_to_active(
+            &db,
+            &effects,
+            run_id,
+            readiness_link,
+            &mut trace,
+        )
+        .await;
+        (result, trace)
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -2713,16 +2815,38 @@ mod real_production_effects_matrix_tests {
     /// Hard-refuses any `MQK_DATABASE_URL` that is not explicitly the
     /// port-5434 local test database — never 5440 (paper), never an
     /// unqualified host.
+    /// PHASE-7A-R6-EXHAUSTIVE-MATRIX-CLOSURE-REPAIR-01 Part 5: name of the
+    /// env var that turns every early-return below from a silent skip into
+    /// a hard test failure. Unset (the default) preserves the pre-existing
+    /// behavior — general `cargo test` runs remain DB-optional. Set by the
+    /// dedicated fail-fast matrix command only.
+    const REQUIRE_MATRIX_ENV: &str = "MQK_REQUIRE_PHASE7A_R6_MATRIX";
+
+    fn require_matrix() -> bool {
+        std::env::var(REQUIRE_MATRIX_ENV).as_deref() == Ok("1")
+    }
+
     async fn db_pool_or_skip(label: &str) -> Option<PgPool> {
         let Ok(url) = std::env::var("MQK_DATABASE_URL") else {
-            eprintln!("{label}: skipped; MQK_DATABASE_URL is not set");
+            let message = format!("{label}: MQK_DATABASE_URL is not set");
+            if require_matrix() {
+                panic!(
+                    "{message} — MQK_REQUIRE_PHASE7A_R6_MATRIX=1 requires the port-5434 \
+                     local test DB; refusing to silently skip"
+                );
+            }
+            eprintln!("{message}; skipped");
             return None;
         };
         if !url.contains(":5434") {
-            eprintln!(
-                "{label}: skipped; MQK_DATABASE_URL must be the port-5434 \
-                 local test DB, refusing to run against: {url}"
+            let message = format!(
+                "{label}: MQK_DATABASE_URL must be the port-5434 local test DB, \
+                 refusing to run against: {url}"
             );
+            if require_matrix() {
+                panic!("{message}");
+            }
+            eprintln!("{message}; skipped");
             return None;
         }
         let pool = match sqlx::postgres::PgPoolOptions::new()
@@ -2732,12 +2856,20 @@ mod real_production_effects_matrix_tests {
         {
             Ok(pool) => pool,
             Err(e) => {
-                eprintln!("{label}: skipped; could not connect to MQK_DATABASE_URL: {e}");
+                let message = format!("{label}: could not connect to MQK_DATABASE_URL: {e}");
+                if require_matrix() {
+                    panic!("{message}");
+                }
+                eprintln!("{message}; skipped");
                 return None;
             }
         };
         if let Err(e) = mqk_db::migrate(&pool).await {
-            eprintln!("{label}: skipped; mqk_db::migrate failed: {e}");
+            let message = format!("{label}: mqk_db::migrate failed: {e}");
+            if require_matrix() {
+                panic!("{message}");
+            }
+            eprintln!("{message}; skipped");
             return None;
         }
         Some(pool)
@@ -2747,6 +2879,27 @@ mod real_production_effects_matrix_tests {
         let _ = sqlx::query(
             "update runs set status = 'STOPPED', stopped_at_utc = now() \
              where engine_id = 'mqk-daemon' and mode = 'PAPER' and status in ('ARMED', 'RUNNING')",
+        )
+        .execute(pool)
+        .await;
+        // PHASE-7A-R6-EXHAUSTIVE-MATRIX-CLOSURE-REPAIR-01 Part 4: a test in
+        // this module (e.g. CLEANUP-HALT-01) may leave the shared reusable
+        // run row `HALTED` — `create_or_reuse_run_for_start` refuses to
+        // reuse a Halted run without an explicit operator clear, exactly
+        // like production. Delete it (not merely clear the status) so every
+        // test in this module starts from a genuinely clean slate
+        // regardless of run order or a prior test panicking before its own
+        // cleanup ran.
+        let _ = sqlx::query(
+            "delete from sys_autonomous_session_events where run_id in \
+             (select run_id from runs where engine_id = 'mqk-daemon' and mode = 'PAPER' \
+              and status = 'HALTED')",
+        )
+        .execute(pool)
+        .await;
+        let _ = sqlx::query(
+            "delete from runs where engine_id = 'mqk-daemon' and mode = 'PAPER' \
+             and status = 'HALTED'",
         )
         .execute(pool)
         .await;
@@ -2788,6 +2941,50 @@ mod real_production_effects_matrix_tests {
             selected_pairs: Vec::new(),
             host_pool: None,
             reasons: Vec::new(),
+            approved_for_live: false,
+        }
+    }
+
+    /// PHASE-7A-R6-EXHAUSTIVE-MATRIX-CLOSURE-REPAIR-01 Part 2 success
+    /// scenario 2: `ShadowAllowed` — a positive Shadow-mode outcome with a
+    /// non-empty selected-pair set, never a host pool (Shadow has no
+    /// economic authority to withhold).
+    fn shadow_allowed_disposition_fixture(run_id: uuid::Uuid) -> DynamicSelectionRuntimeState {
+        DynamicSelectionRuntimeState {
+            run_id,
+            disposition:
+                crate::dynamic_selection_start_gate::DynamicSelectionStartGateDisposition::ShadowAllowed,
+            configured_mode: mqk_portfolio::DynamicSelectionMode::Shadow,
+            effective_mode: mqk_portfolio::DynamicSelectionMode::Shadow,
+            live_lock_applied: false,
+            plan: None,
+            selected_pairs: vec![("AAPL".to_string(), "swing_momentum".to_string(), 300)],
+            host_pool: None,
+            reasons: Vec::new(),
+            approved_for_live: false,
+        }
+    }
+
+    /// PHASE-7A-R6-EXHAUSTIVE-MATRIX-CLOSURE-REPAIR-01 Part 2 success
+    /// scenario 3: `ShadowInvalid` — Shadow never blocks the run even when
+    /// its own outcome was not a genuine positive one; the invalid reasons
+    /// are preserved, no host pool, no selected pairs.
+    fn shadow_invalid_disposition_fixture(run_id: uuid::Uuid) -> DynamicSelectionRuntimeState {
+        DynamicSelectionRuntimeState {
+            run_id,
+            disposition:
+                crate::dynamic_selection_start_gate::DynamicSelectionStartGateDisposition::ShadowInvalid,
+            configured_mode: mqk_portfolio::DynamicSelectionMode::Shadow,
+            effective_mode: mqk_portfolio::DynamicSelectionMode::Shadow,
+            live_lock_applied: false,
+            plan: None,
+            selected_pairs: Vec::new(),
+            host_pool: None,
+            reasons: vec![
+                crate::dynamic_selection_start_gate::DynamicSelectionStartGateReason::PlanInvalid {
+                    truth_state: "test_injected_invalid".to_string(),
+                },
+            ],
             approved_for_live: false,
         }
     }
@@ -3103,6 +3300,344 @@ mod real_production_effects_matrix_tests {
     }
 
     // -------------------------------------------------------------------
+    // SUCCESS-02 (R6 success scenario 2): ShadowAllowed reaches Active
+    // through the real production-effects path, preserves its
+    // dynamic-selection metadata (selected pairs, no host pool,
+    // approved_for_live=false), and stop clears everything.
+    // -------------------------------------------------------------------
+    #[tokio::test(flavor = "multi_thread")]
+    async fn success_shadow_allowed_disposition_reaches_active_and_stops_cleanly() {
+        let _g = db_test_lock().lock().await;
+        let Some(pool) = db_pool_or_skip("SUCCESS-02").await else {
+            return;
+        };
+        clear_any_preexisting_active_daemon_run(&pool).await;
+        let state = hermetic_paper_state(&pool);
+        state.set_hermetic_test_broker_override_for_test(true).await;
+        let run_id = state
+            .create_or_reuse_run_for_start(&pool)
+            .await
+            .expect("run creation must succeed");
+
+        let (result, trace) = state
+            .drive_production_start_effects_for_test(
+                pool.clone(),
+                run_id,
+                Some(shadow_allowed_disposition_fixture(run_id)),
+            )
+            .await;
+        state
+            .set_hermetic_test_broker_override_for_test(false)
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "SUCCESS-02: expected a genuine ShadowAllowed success: {result:?}"
+        );
+        assert_eq!(
+            trace,
+            vec![
+                "ownership_reserved",
+                "local_bundle_committed",
+                "loop_spawned"
+            ]
+        );
+        assert_eq!(state.locally_owned_run_id().await, Some(run_id));
+        assert!(matches!(
+            mqk_db::fetch_run(&pool, run_id)
+                .await
+                .expect("fetch_run")
+                .status,
+            mqk_db::RunStatus::Running
+        ));
+
+        let snapshot = state
+            .dynamic_selection_runtime_snapshot()
+            .await
+            .expect("SUCCESS-02: dynamic-selection metadata must be committed for ShadowAllowed");
+        assert!(matches!(
+            snapshot.disposition,
+            crate::dynamic_selection_start_gate::DynamicSelectionStartGateDisposition::ShadowAllowed
+        ));
+        assert_eq!(
+            snapshot.selected_pairs,
+            vec![("AAPL".to_string(), "swing_momentum".to_string(), 300)],
+            "SUCCESS-02: selected pairs must be preserved exactly"
+        );
+        assert!(
+            snapshot.host_pool.is_none(),
+            "SUCCESS-02: Shadow must never retain a host pool"
+        );
+        assert!(!snapshot.approved_for_live);
+
+        let stop_result = state.stop_execution_runtime().await;
+        assert!(
+            stop_result.is_ok(),
+            "SUCCESS-02: stop must succeed: {stop_result:?}"
+        );
+        assert_eq!(state.locally_owned_run_id().await, None);
+        assert!(
+            state.dynamic_selection_runtime_snapshot().await.is_none(),
+            "SUCCESS-02: stop must clear dynamic-selection metadata too"
+        );
+
+        delete_run_and_its_events(&pool, run_id).await;
+    }
+
+    // -------------------------------------------------------------------
+    // SUCCESS-03 (R6 success scenario 3): ShadowInvalid still reaches
+    // Active through the real production-effects path (Shadow never
+    // blocks the run) and preserves its invalid reasons; stop clears
+    // everything.
+    // -------------------------------------------------------------------
+    #[tokio::test(flavor = "multi_thread")]
+    async fn success_shadow_invalid_disposition_reaches_active_and_stops_cleanly() {
+        let _g = db_test_lock().lock().await;
+        let Some(pool) = db_pool_or_skip("SUCCESS-03").await else {
+            return;
+        };
+        clear_any_preexisting_active_daemon_run(&pool).await;
+        let state = hermetic_paper_state(&pool);
+        state.set_hermetic_test_broker_override_for_test(true).await;
+        let run_id = state
+            .create_or_reuse_run_for_start(&pool)
+            .await
+            .expect("run creation must succeed");
+
+        let (result, trace) = state
+            .drive_production_start_effects_for_test(
+                pool.clone(),
+                run_id,
+                Some(shadow_invalid_disposition_fixture(run_id)),
+            )
+            .await;
+        state
+            .set_hermetic_test_broker_override_for_test(false)
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "SUCCESS-03: ShadowInvalid must never block the run: {result:?}"
+        );
+        assert_eq!(
+            trace,
+            vec![
+                "ownership_reserved",
+                "local_bundle_committed",
+                "loop_spawned"
+            ]
+        );
+        assert_eq!(state.locally_owned_run_id().await, Some(run_id));
+        assert!(matches!(
+            mqk_db::fetch_run(&pool, run_id)
+                .await
+                .expect("fetch_run")
+                .status,
+            mqk_db::RunStatus::Running
+        ));
+
+        let snapshot = state
+            .dynamic_selection_runtime_snapshot()
+            .await
+            .expect("SUCCESS-03: dynamic-selection metadata must be committed for ShadowInvalid");
+        assert!(matches!(
+            snapshot.disposition,
+            crate::dynamic_selection_start_gate::DynamicSelectionStartGateDisposition::ShadowInvalid
+        ));
+        assert!(snapshot.selected_pairs.is_empty());
+        assert!(snapshot.host_pool.is_none());
+        assert_eq!(
+            snapshot.reasons.len(),
+            1,
+            "SUCCESS-03: invalid reasons must be preserved"
+        );
+        assert!(matches!(
+            snapshot.reasons[0],
+            crate::dynamic_selection_start_gate::DynamicSelectionStartGateReason::PlanInvalid { .. }
+        ));
+
+        let stop_result = state.stop_execution_runtime().await;
+        assert!(
+            stop_result.is_ok(),
+            "SUCCESS-03: stop must succeed: {stop_result:?}"
+        );
+        assert_eq!(state.locally_owned_run_id().await, None);
+
+        delete_run_and_its_events(&pool, run_id).await;
+    }
+
+    // -------------------------------------------------------------------
+    // CLEANUP-HALT-01 (R6 item 23, Part 4): starting from a run that
+    // reached Active through the real hermetic ProductionRuntimeStartEffects
+    // path, a real `halt_execution_runtime()` call must clear local
+    // ownership, disarm+halt integrity, and durably halt the run.
+    // -------------------------------------------------------------------
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cleanup_halt_from_real_active_run_clears_ownership_and_halts_durably() {
+        let _g = db_test_lock().lock().await;
+        let Some(pool) = db_pool_or_skip("CLEANUP-HALT-01").await else {
+            return;
+        };
+        clear_any_preexisting_active_daemon_run(&pool).await;
+        let state = hermetic_paper_state(&pool);
+        state.set_hermetic_test_broker_override_for_test(true).await;
+        let run_id = state
+            .create_or_reuse_run_for_start(&pool)
+            .await
+            .expect("run creation must succeed");
+        let (result, _trace) = state
+            .drive_production_start_effects_for_test(
+                pool.clone(),
+                run_id,
+                Some(off_disposition_fixture(run_id)),
+            )
+            .await;
+        state
+            .set_hermetic_test_broker_override_for_test(false)
+            .await;
+        result.expect("CLEANUP-HALT-01: setup must reach Active");
+        assert_eq!(state.locally_owned_run_id().await, Some(run_id));
+
+        let halt_result = state.halt_execution_runtime().await;
+        assert!(
+            halt_result.is_ok(),
+            "CLEANUP-HALT-01: halt must succeed: {halt_result:?}"
+        );
+        assert_eq!(
+            state.locally_owned_run_id().await,
+            None,
+            "CLEANUP-HALT-01: halt must fully clear local ownership"
+        );
+        assert!(matches!(
+            mqk_db::fetch_run(&pool, run_id)
+                .await
+                .expect("fetch_run")
+                .status,
+            mqk_db::RunStatus::Halted
+        ));
+        assert!(
+            state.integrity.read().await.is_execution_blocked(),
+            "CLEANUP-HALT-01: integrity must be disarmed+halted after an operator halt"
+        );
+
+        // Restart after this exit must succeed (Part 4: "restart succeeds
+        // after each exit") — but `create_or_reuse_run_for_start` refuses to
+        // reuse a durably Halted run without an explicit operator
+        // acknowledgment first, exactly like the real operator flow.
+        mqk_db::clear_halted_run(&pool, run_id)
+            .await
+            .expect("CLEANUP-HALT-01: operator halt-clear must succeed");
+        {
+            let mut integrity = state.integrity.write().await;
+            integrity.disarmed = false;
+            integrity.halted = false;
+        }
+        let run_id_2 = state
+            .create_or_reuse_run_for_start(&pool)
+            .await
+            .expect("CLEANUP-HALT-01: restart run creation must succeed");
+        state.set_hermetic_test_broker_override_for_test(true).await;
+        let (restart_result, _trace2) = state
+            .drive_production_start_effects_for_test(
+                pool.clone(),
+                run_id_2,
+                Some(off_disposition_fixture(run_id_2)),
+            )
+            .await;
+        state
+            .set_hermetic_test_broker_override_for_test(false)
+            .await;
+        assert!(
+            restart_result.is_ok(),
+            "CLEANUP-HALT-01: restart after halt must succeed: {restart_result:?}"
+        );
+        state
+            .stop_execution_runtime()
+            .await
+            .expect("CLEANUP-HALT-01: cleanup stop must succeed");
+
+        delete_run_and_its_events(&pool, run_id).await;
+        delete_run_and_its_events(&pool, run_id_2).await;
+    }
+
+    // -------------------------------------------------------------------
+    // CLEANUP-SHUTDOWN-01 (R6 item 24, Part 4): starting from a run that
+    // reached Active through the real hermetic path, `stop_for_shutdown()`
+    // must clear local ownership and durably stop the run (Armed/Running ->
+    // Stopped) — never leave the durable run dangling as Armed/Running with
+    // no local owner.
+    // -------------------------------------------------------------------
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cleanup_shutdown_from_real_active_run_clears_ownership_and_stops_durably() {
+        let _g = db_test_lock().lock().await;
+        let Some(pool) = db_pool_or_skip("CLEANUP-SHUTDOWN-01").await else {
+            return;
+        };
+        clear_any_preexisting_active_daemon_run(&pool).await;
+        let state = hermetic_paper_state(&pool);
+        state.set_hermetic_test_broker_override_for_test(true).await;
+        let run_id = state
+            .create_or_reuse_run_for_start(&pool)
+            .await
+            .expect("run creation must succeed");
+        let (result, _trace) = state
+            .drive_production_start_effects_for_test(
+                pool.clone(),
+                run_id,
+                Some(off_disposition_fixture(run_id)),
+            )
+            .await;
+        state
+            .set_hermetic_test_broker_override_for_test(false)
+            .await;
+        result.expect("CLEANUP-SHUTDOWN-01: setup must reach Active");
+        assert_eq!(state.locally_owned_run_id().await, Some(run_id));
+
+        state.stop_for_shutdown().await;
+
+        assert_eq!(
+            state.locally_owned_run_id().await,
+            None,
+            "CLEANUP-SHUTDOWN-01: shutdown must fully clear local ownership"
+        );
+        assert!(matches!(
+            mqk_db::fetch_run(&pool, run_id)
+                .await
+                .expect("fetch_run")
+                .status,
+            mqk_db::RunStatus::Stopped
+        ));
+
+        // Restart after shutdown must succeed too.
+        let run_id_2 = state
+            .create_or_reuse_run_for_start(&pool)
+            .await
+            .expect("CLEANUP-SHUTDOWN-01: restart run creation must succeed");
+        state.set_hermetic_test_broker_override_for_test(true).await;
+        let (restart_result, _trace2) = state
+            .drive_production_start_effects_for_test(
+                pool.clone(),
+                run_id_2,
+                Some(off_disposition_fixture(run_id_2)),
+            )
+            .await;
+        state
+            .set_hermetic_test_broker_override_for_test(false)
+            .await;
+        assert!(
+            restart_result.is_ok(),
+            "CLEANUP-SHUTDOWN-01: restart after shutdown must succeed: {restart_result:?}"
+        );
+        state
+            .stop_execution_runtime()
+            .await
+            .expect("CLEANUP-SHUTDOWN-01: cleanup stop must succeed");
+
+        delete_run_and_its_events(&pool, run_id).await;
+        delete_run_and_its_events(&pool, run_id_2).await;
+    }
+
+    // -------------------------------------------------------------------
     // FAULT-SEAM-01: the `AfterOrchestratorConstruction` seam, now finally
     // exercised end-to-end through a *genuinely successful* orchestrator
     // construction (hermetic broker override) rather than the real
@@ -3180,6 +3715,762 @@ mod real_production_effects_matrix_tests {
         assert_eq!(state.locally_owned_run_id().await, None);
 
         delete_run_and_its_events(&pool, run_id).await;
+    }
+
+    // -------------------------------------------------------------------
+    // FAULT-ARM-01 (R6 row 10, "arm failure"): the durable run is already
+    // `Armed` (a real, organic `mqk_db::arm_run` call made before driving
+    // the start attempt) — the real `arm_run` inside `start_runtime_effects`
+    // then genuinely fails against that pre-existing state, no injected
+    // seam. Phase stays `BeforeArm` (arm_run is attempted but fails before
+    // completing), so rollback sees the pre-armed row and durably stops it.
+    // -------------------------------------------------------------------
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fault_arm_01_real_arm_run_failure_against_already_armed_row_rolls_back_cleanly() {
+        let _g = db_test_lock().lock().await;
+        let Some(pool) = db_pool_or_skip("FAULT-ARM-01").await else {
+            return;
+        };
+        clear_any_preexisting_active_daemon_run(&pool).await;
+        let state = hermetic_paper_state(&pool);
+        state.set_hermetic_test_broker_override_for_test(true).await;
+        let run_id = state
+            .create_or_reuse_run_for_start(&pool)
+            .await
+            .expect("run creation must succeed");
+        mqk_db::arm_run(&pool, run_id)
+            .await
+            .expect("FAULT-ARM-01: pre-arming the row must succeed");
+
+        let (result, trace) = state
+            .drive_production_start_effects_for_test(
+                pool.clone(),
+                run_id,
+                Some(off_disposition_fixture(run_id)),
+            )
+            .await;
+        state
+            .set_hermetic_test_broker_override_for_test(false)
+            .await;
+
+        assert!(
+            result.is_err(),
+            "FAULT-ARM-01: expected a real arm_run failure"
+        );
+        let (original, rollback) = match result.unwrap_err() {
+            crate::daily_data_readiness::RuntimeStartSequenceError::Effects {
+                original,
+                rollback,
+            } => (original, rollback),
+            other => panic!("FAULT-ARM-01: expected Effects, got {other:?}"),
+        };
+        assert_eq!(original.fault_class, "start arm_run failed");
+        assert_eq!(trace, vec!["ownership_reserved"]);
+        assert!(matches!(
+            rollback.phase_reached,
+            crate::daily_data_readiness::RuntimeStartPhase::BeforeArm
+        ));
+        assert!(matches!(
+            rollback.durable,
+            crate::daily_data_readiness::DurableRollbackDisposition::Stopped
+        ));
+        assert!(!rollback.durable_status_unknown);
+        assert_eq!(
+            rollback.local.leadership_release_outcome,
+            Some(Ok(())),
+            "FAULT-ARM-01: a real orchestrator was constructed before the \
+             real arm_run failure, so rollback must release its lease"
+        );
+        assert_eq!(state.locally_owned_run_id().await, None);
+        assert!(matches!(
+            mqk_db::fetch_run(&pool, run_id)
+                .await
+                .expect("fetch_run")
+                .status,
+            mqk_db::RunStatus::Stopped
+        ));
+
+        // Restart after this failure must succeed.
+        let restart_run_id = state
+            .create_or_reuse_run_for_start(&pool)
+            .await
+            .expect("FAULT-ARM-01: restart run creation must succeed");
+        state.set_hermetic_test_broker_override_for_test(true).await;
+        let (restart_result, _trace) = state
+            .drive_production_start_effects_for_test(
+                pool.clone(),
+                restart_run_id,
+                Some(off_disposition_fixture(restart_run_id)),
+            )
+            .await;
+        state
+            .set_hermetic_test_broker_override_for_test(false)
+            .await;
+        assert!(
+            restart_result.is_ok(),
+            "FAULT-ARM-01: restart must succeed: {restart_result:?}"
+        );
+        state
+            .stop_execution_runtime()
+            .await
+            .expect("FAULT-ARM-01: cleanup stop must succeed");
+
+        delete_run_and_its_events(&pool, run_id).await;
+        delete_run_and_its_events(&pool, restart_run_id).await;
+    }
+
+    // -------------------------------------------------------------------
+    // FAULT-BEGIN-01 (R6 row 11, "begin failure"): after a genuine arm_run
+    // success, the row is perturbed to `Stopped` via the real `stop_run`
+    // (PerturbRunStoppedBeforeBegin) — the real `begin_run` call
+    // immediately afterward then genuinely fails against that state.
+    // Rollback finds the row already non-Armed/Running (`AlreadyNonActive`)
+    // rather than needing its own transition.
+    // -------------------------------------------------------------------
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fault_begin_01_real_begin_run_failure_after_perturbed_stop_rolls_back_cleanly() {
+        let _g = db_test_lock().lock().await;
+        let Some(pool) = db_pool_or_skip("FAULT-BEGIN-01").await else {
+            return;
+        };
+        clear_any_preexisting_active_daemon_run(&pool).await;
+        let state = hermetic_paper_state(&pool);
+        state.set_hermetic_test_broker_override_for_test(true).await;
+        state
+            .set_dynamic_selection_fault_seam_for_test(Some(
+                DynamicSelectionLifecycleFaultSeam::PerturbRunStoppedBeforeBegin,
+            ))
+            .await;
+        let run_id = state
+            .create_or_reuse_run_for_start(&pool)
+            .await
+            .expect("run creation must succeed");
+
+        let (result, trace) = state
+            .drive_production_start_effects_for_test(
+                pool.clone(),
+                run_id,
+                Some(off_disposition_fixture(run_id)),
+            )
+            .await;
+        state
+            .set_hermetic_test_broker_override_for_test(false)
+            .await;
+        state.set_dynamic_selection_fault_seam_for_test(None).await;
+
+        assert!(
+            result.is_err(),
+            "FAULT-BEGIN-01: expected a real begin_run failure"
+        );
+        let (original, rollback) = match result.unwrap_err() {
+            crate::daily_data_readiness::RuntimeStartSequenceError::Effects {
+                original,
+                rollback,
+            } => (original, rollback),
+            other => panic!("FAULT-BEGIN-01: expected Effects, got {other:?}"),
+        };
+        assert_eq!(original.fault_class, "start begin_run failed");
+        assert_eq!(trace, vec!["ownership_reserved"]);
+        assert!(matches!(
+            rollback.phase_reached,
+            crate::daily_data_readiness::RuntimeStartPhase::ArmedBeforeBegin
+        ));
+        assert!(matches!(
+            rollback.durable,
+            crate::daily_data_readiness::DurableRollbackDisposition::AlreadyNonActive
+        ));
+        assert!(!rollback.durable_status_unknown);
+        assert_eq!(rollback.local.leadership_release_outcome, Some(Ok(())));
+        assert_eq!(state.locally_owned_run_id().await, None);
+        assert!(matches!(
+            mqk_db::fetch_run(&pool, run_id)
+                .await
+                .expect("fetch_run")
+                .status,
+            mqk_db::RunStatus::Stopped
+        ));
+
+        delete_run_and_its_events(&pool, run_id).await;
+    }
+
+    // -------------------------------------------------------------------
+    // FAULT-HEARTBEAT-01 (R6 row 12, "initial heartbeat failure"): after a
+    // genuine begin_run success, the row is perturbed to `Stopped`
+    // (PerturbRunStoppedBeforeInitialHeartbeat) — the real initial
+    // `heartbeat_run` call immediately afterward then genuinely fails.
+    // -------------------------------------------------------------------
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fault_heartbeat_01_real_initial_heartbeat_failure_after_perturbed_stop_rolls_back_cleanly(
+    ) {
+        let _g = db_test_lock().lock().await;
+        let Some(pool) = db_pool_or_skip("FAULT-HEARTBEAT-01").await else {
+            return;
+        };
+        clear_any_preexisting_active_daemon_run(&pool).await;
+        let state = hermetic_paper_state(&pool);
+        state.set_hermetic_test_broker_override_for_test(true).await;
+        state
+            .set_dynamic_selection_fault_seam_for_test(Some(
+                DynamicSelectionLifecycleFaultSeam::PerturbRunStoppedBeforeInitialHeartbeat,
+            ))
+            .await;
+        let run_id = state
+            .create_or_reuse_run_for_start(&pool)
+            .await
+            .expect("run creation must succeed");
+
+        let (result, trace) = state
+            .drive_production_start_effects_for_test(
+                pool.clone(),
+                run_id,
+                Some(off_disposition_fixture(run_id)),
+            )
+            .await;
+        state
+            .set_hermetic_test_broker_override_for_test(false)
+            .await;
+        state.set_dynamic_selection_fault_seam_for_test(None).await;
+
+        assert!(
+            result.is_err(),
+            "FAULT-HEARTBEAT-01: expected a real initial heartbeat failure"
+        );
+        let (original, rollback) = match result.unwrap_err() {
+            crate::daily_data_readiness::RuntimeStartSequenceError::Effects {
+                original,
+                rollback,
+            } => (original, rollback),
+            other => panic!("FAULT-HEARTBEAT-01: expected Effects, got {other:?}"),
+        };
+        assert_eq!(original.fault_class, "start initial heartbeat failed");
+        assert_eq!(trace, vec!["ownership_reserved"]);
+        assert!(matches!(
+            rollback.phase_reached,
+            crate::daily_data_readiness::RuntimeStartPhase::ArmedBeforeBegin
+        ));
+        assert!(matches!(
+            rollback.durable,
+            crate::daily_data_readiness::DurableRollbackDisposition::AlreadyNonActive
+        ));
+        assert!(!rollback.durable_status_unknown);
+        assert_eq!(rollback.local.leadership_release_outcome, Some(Ok(())));
+        assert_eq!(state.locally_owned_run_id().await, None);
+        assert!(matches!(
+            mqk_db::fetch_run(&pool, run_id)
+                .await
+                .expect("fetch_run")
+                .status,
+            mqk_db::RunStatus::Stopped
+        ));
+
+        delete_run_and_its_events(&pool, run_id).await;
+    }
+
+    // -------------------------------------------------------------------
+    // FAULT-POST-TICK-01 (R6 row 16, "post-initial-tick fault seam"): the
+    // `AfterRunArmBeginInitialTick` seam, fired after a genuinely successful
+    // real arm/begin/initial-tick/post-tick-heartbeat sequence. Phase is
+    // `InitialTickCompleted` (past the "tick was called" boundary), so the
+    // durable rollback must be `Halted`, not `Stopped` — no evidence a
+    // clean retry is safe once tick() has run.
+    // -------------------------------------------------------------------
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fault_post_tick_01_seam_after_real_tick_rolls_back_halted() {
+        let _g = db_test_lock().lock().await;
+        let Some(pool) = db_pool_or_skip("FAULT-POST-TICK-01").await else {
+            return;
+        };
+        clear_any_preexisting_active_daemon_run(&pool).await;
+        let state = hermetic_paper_state(&pool);
+        state.set_hermetic_test_broker_override_for_test(true).await;
+        state
+            .set_dynamic_selection_fault_seam_for_test(Some(
+                DynamicSelectionLifecycleFaultSeam::AfterRunArmBeginInitialTick,
+            ))
+            .await;
+        let run_id = state
+            .create_or_reuse_run_for_start(&pool)
+            .await
+            .expect("run creation must succeed");
+
+        let (result, trace) = state
+            .drive_production_start_effects_for_test(
+                pool.clone(),
+                run_id,
+                Some(off_disposition_fixture(run_id)),
+            )
+            .await;
+        state
+            .set_hermetic_test_broker_override_for_test(false)
+            .await;
+        state.set_dynamic_selection_fault_seam_for_test(None).await;
+
+        assert!(
+            result.is_err(),
+            "FAULT-POST-TICK-01: expected the injected failure"
+        );
+        let (original, rollback) = match result.unwrap_err() {
+            crate::daily_data_readiness::RuntimeStartSequenceError::Effects {
+                original,
+                rollback,
+            } => (original, rollback),
+            other => panic!("FAULT-POST-TICK-01: expected Effects, got {other:?}"),
+        };
+        assert_eq!(
+            original.fault_class,
+            "dynamic_selection.fault_seam.after_run_arm_begin_initial_tick"
+        );
+        assert_eq!(trace, vec!["ownership_reserved"]);
+        assert!(matches!(
+            rollback.phase_reached,
+            crate::daily_data_readiness::RuntimeStartPhase::InitialTickCompleted
+        ));
+        assert!(matches!(
+            rollback.durable,
+            crate::daily_data_readiness::DurableRollbackDisposition::Halted
+        ));
+        assert!(!rollback.durable_status_unknown);
+        assert_eq!(rollback.local.leadership_release_outcome, Some(Ok(())));
+        assert_eq!(state.locally_owned_run_id().await, None);
+        assert!(matches!(
+            mqk_db::fetch_run(&pool, run_id)
+                .await
+                .expect("fetch_run")
+                .status,
+            mqk_db::RunStatus::Halted
+        ));
+
+        delete_run_and_its_events(&pool, run_id).await;
+    }
+
+    // -------------------------------------------------------------------
+    // FAULT-POST-COMMIT-01 (R6 row 18 boundary, "immediately after the
+    // run-start bundle commit"): the `AfterProcessLocalSelectionCommit`
+    // seam fires after the local run-start bundle (including
+    // dynamic-selection truth) is already committed to `AppState` —
+    // `rollback_local_effects`'s run_id-scoped clear must remove that
+    // already-published metadata, not merely a reservation.
+    // -------------------------------------------------------------------
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fault_post_commit_01_seam_after_bundle_commit_clears_published_metadata() {
+        let _g = db_test_lock().lock().await;
+        let Some(pool) = db_pool_or_skip("FAULT-POST-COMMIT-01").await else {
+            return;
+        };
+        clear_any_preexisting_active_daemon_run(&pool).await;
+        let state = hermetic_paper_state(&pool);
+        state.set_hermetic_test_broker_override_for_test(true).await;
+        state
+            .set_dynamic_selection_fault_seam_for_test(Some(
+                DynamicSelectionLifecycleFaultSeam::AfterProcessLocalSelectionCommit,
+            ))
+            .await;
+        let run_id = state
+            .create_or_reuse_run_for_start(&pool)
+            .await
+            .expect("run creation must succeed");
+
+        let (result, trace) = state
+            .drive_production_start_effects_for_test(
+                pool.clone(),
+                run_id,
+                Some(off_disposition_fixture(run_id)),
+            )
+            .await;
+        state
+            .set_hermetic_test_broker_override_for_test(false)
+            .await;
+        state.set_dynamic_selection_fault_seam_for_test(None).await;
+
+        assert!(
+            result.is_err(),
+            "FAULT-POST-COMMIT-01: expected the injected failure"
+        );
+        let (original, rollback) = match result.unwrap_err() {
+            crate::daily_data_readiness::RuntimeStartSequenceError::Effects {
+                original,
+                rollback,
+            } => (original, rollback),
+            other => panic!("FAULT-POST-COMMIT-01: expected Effects, got {other:?}"),
+        };
+        assert_eq!(
+            original.fault_class,
+            "dynamic_selection.fault_seam.after_process_local_selection_commit"
+        );
+        // The bundle IS committed (Starting{run_id, metadata}) before this
+        // seam fires, but `advance_run_to_active`'s trace only records
+        // `local_bundle_committed` once `start_runtime_effects` itself
+        // returns `Ok` — this seam returns `Err`, so the trace stops at
+        // reservation.
+        assert_eq!(trace, vec!["ownership_reserved"]);
+        assert!(matches!(
+            rollback.phase_reached,
+            crate::daily_data_readiness::RuntimeStartPhase::LocalCommitStarted
+        ));
+        assert!(matches!(
+            rollback.durable,
+            crate::daily_data_readiness::DurableRollbackDisposition::Halted
+        ));
+        assert!(!rollback.durable_status_unknown);
+        assert_eq!(rollback.local.leadership_release_outcome, Some(Ok(())));
+        assert_eq!(
+            state.locally_owned_run_id().await,
+            None,
+            "FAULT-POST-COMMIT-01: the already-published Starting metadata \
+             must be cleared by rollback, not left dangling"
+        );
+        assert!(matches!(
+            mqk_db::fetch_run(&pool, run_id)
+                .await
+                .expect("fetch_run")
+                .status,
+            mqk_db::RunStatus::Halted
+        ));
+
+        delete_run_and_its_events(&pool, run_id).await;
+    }
+
+    // -------------------------------------------------------------------
+    // FAULT-PRE-SPAWN-01 (R6 row 18, "immediately-before-spawn fault
+    // seam"): the `ImmediatelyBeforeLoopSpawn` seam fires inside
+    // `spawn_loop`, after `start_runtime_effects` already returned `Ok`
+    // (so the trace does reach `local_bundle_committed`) but before the
+    // execution loop is ever spawned — no task, no barrier, no Active
+    // transition.
+    // -------------------------------------------------------------------
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fault_pre_spawn_01_seam_before_loop_spawn_never_spawns_a_task() {
+        let _g = db_test_lock().lock().await;
+        let Some(pool) = db_pool_or_skip("FAULT-PRE-SPAWN-01").await else {
+            return;
+        };
+        clear_any_preexisting_active_daemon_run(&pool).await;
+        let state = hermetic_paper_state(&pool);
+        state.set_hermetic_test_broker_override_for_test(true).await;
+        state
+            .set_dynamic_selection_fault_seam_for_test(Some(
+                DynamicSelectionLifecycleFaultSeam::ImmediatelyBeforeLoopSpawn,
+            ))
+            .await;
+        let run_id = state
+            .create_or_reuse_run_for_start(&pool)
+            .await
+            .expect("run creation must succeed");
+
+        let (result, trace) = state
+            .drive_production_start_effects_for_test(
+                pool.clone(),
+                run_id,
+                Some(off_disposition_fixture(run_id)),
+            )
+            .await;
+        state
+            .set_hermetic_test_broker_override_for_test(false)
+            .await;
+        state.set_dynamic_selection_fault_seam_for_test(None).await;
+
+        assert!(
+            result.is_err(),
+            "FAULT-PRE-SPAWN-01: expected the injected failure"
+        );
+        let (original, rollback) = match result.unwrap_err() {
+            crate::daily_data_readiness::RuntimeStartSequenceError::Effects {
+                original,
+                rollback,
+            } => (original, rollback),
+            other => panic!("FAULT-PRE-SPAWN-01: expected Effects, got {other:?}"),
+        };
+        assert_eq!(
+            original.fault_class,
+            "dynamic_selection.fault_seam.immediately_before_loop_spawn"
+        );
+        assert_eq!(
+            trace,
+            vec!["ownership_reserved", "local_bundle_committed"],
+            "FAULT-PRE-SPAWN-01: start_runtime_effects succeeded (bundle \
+             committed); loop_spawned must never fire"
+        );
+        assert!(matches!(
+            rollback.phase_reached,
+            crate::daily_data_readiness::RuntimeStartPhase::LocalCommitStarted
+        ));
+        assert!(matches!(
+            rollback.durable,
+            crate::daily_data_readiness::DurableRollbackDisposition::Halted
+        ));
+        assert!(!rollback.durable_status_unknown);
+        assert_eq!(rollback.local.leadership_release_outcome, Some(Ok(())));
+        assert_eq!(state.locally_owned_run_id().await, None);
+        assert!(matches!(
+            mqk_db::fetch_run(&pool, run_id)
+                .await
+                .expect("fetch_run")
+                .status,
+            mqk_db::RunStatus::Halted
+        ));
+
+        delete_run_and_its_events(&pool, run_id).await;
+    }
+
+    // -------------------------------------------------------------------
+    // RUN-LINK-01 (R6 row 9 boundary, positive path): driving
+    // `advance_run_to_active` with a real `readiness_link` exercises the
+    // real `persist_run_linked_readiness_evidence` write and the
+    // `run_link_event_persisted` trace tag — previously untested by any
+    // `real_production_effects_matrix_tests` case (every other test passes
+    // `readiness_link=None`). The genuine *failure* of this exact write
+    // (row 9's other half) is not exercised here — see the final handoff
+    // for why (no FK constraint on `sys_autonomous_session_events.run_id`,
+    // an upsert `on conflict (id) do nothing`, and no existing test-only
+    // override at this exact call site inside `advance_run_to_active`).
+    // -------------------------------------------------------------------
+    #[tokio::test(flavor = "multi_thread")]
+    async fn run_link_01_real_readiness_link_persists_and_reaches_active() {
+        let _g = db_test_lock().lock().await;
+        let Some(pool) = db_pool_or_skip("RUN-LINK-01").await else {
+            return;
+        };
+        clear_any_preexisting_active_daemon_run(&pool).await;
+        let state = hermetic_paper_state(&pool);
+        state.set_hermetic_test_broker_override_for_test(true).await;
+        let run_id = state
+            .create_or_reuse_run_for_start(&pool)
+            .await
+            .expect("run creation must succeed");
+        let evaluation_id = uuid::Uuid::new_v5(
+            &uuid::Uuid::NAMESPACE_DNS,
+            b"phase7a.run_link_01.evaluation_id",
+        );
+        let linked_at_utc = Utc::now();
+
+        let (result, trace) = state
+            .drive_production_start_effects_with_readiness_link_for_test(
+                pool.clone(),
+                run_id,
+                Some(off_disposition_fixture(run_id)),
+                Some((evaluation_id, linked_at_utc)),
+            )
+            .await;
+        state
+            .set_hermetic_test_broker_override_for_test(false)
+            .await;
+
+        assert!(result.is_ok(), "RUN-LINK-01: expected success: {result:?}");
+        assert_eq!(
+            trace,
+            vec![
+                "ownership_reserved",
+                "run_link_event_persisted",
+                "local_bundle_committed",
+                "loop_spawned"
+            ],
+            "RUN-LINK-01: run_link_event_persisted must fire between \
+             reservation and local bundle commit"
+        );
+        assert_eq!(state.locally_owned_run_id().await, Some(run_id));
+
+        state
+            .stop_execution_runtime()
+            .await
+            .expect("RUN-LINK-01: cleanup stop must succeed");
+        delete_run_and_its_events(&pool, run_id).await;
+    }
+
+    // -------------------------------------------------------------------
+    // TASK-PANIC-01 (R6 row 21, "spawned-task panic/join failure"): a run
+    // reaches genuine `Active` through the real hermetic path, then its
+    // spawned task panics immediately after the startup barrier releases.
+    // `stop_execution_runtime` must surface this as structured degraded
+    // truth (join failure -> `note_local_runtime_degraded`), never a false
+    // clean `Idle`, and a subsequent restart must still succeed.
+    // -------------------------------------------------------------------
+    #[tokio::test(flavor = "multi_thread")]
+    async fn task_panic_01_spawned_task_panic_surfaces_as_degraded_not_idle() {
+        let _g = db_test_lock().lock().await;
+        let Some(pool) = db_pool_or_skip("TASK-PANIC-01").await else {
+            return;
+        };
+        clear_any_preexisting_active_daemon_run(&pool).await;
+        let state = hermetic_paper_state(&pool);
+        state.set_hermetic_test_broker_override_for_test(true).await;
+        state.set_execution_loop_panic_for_test(true);
+        let run_id = state
+            .create_or_reuse_run_for_start(&pool)
+            .await
+            .expect("run creation must succeed");
+
+        let (result, _trace) = state
+            .drive_production_start_effects_for_test(
+                pool.clone(),
+                run_id,
+                Some(off_disposition_fixture(run_id)),
+            )
+            .await;
+        state
+            .set_hermetic_test_broker_override_for_test(false)
+            .await;
+        result.expect("TASK-PANIC-01: setup must reach Active before the task panics");
+
+        // Give the spawned task a moment to actually panic after the
+        // barrier release (it does so before any ticker/economic work, so
+        // this is generous, not load-bearing timing).
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        state.set_execution_loop_panic_for_test(false);
+
+        // By the time `stop_execution_runtime` runs, the panicked task is
+        // already finished — `reap_finished_execution_loop` (called first,
+        // at the top of `stop_execution_runtime`) reaps it directly and
+        // surfaces the join failure itself, before `clear_currently_owned_
+        // local_runtime`'s own join-failure path would ever get a chance to.
+        let stop_result = state.stop_execution_runtime().await;
+        assert!(
+            stop_result.is_err(),
+            "TASK-PANIC-01: a joined panic must be reported as an error, not silently absorbed"
+        );
+        let err = stop_result.unwrap_err();
+        assert_eq!(
+            err.fault_class(),
+            "loop join failed",
+            "TASK-PANIC-01: unexpected fault class: {err:?}"
+        );
+
+        // Degraded truth, not a clean Idle.
+        match &*state.runtime_ownership.lock().await {
+            crate::state::LocalRuntimeOwnership::Degraded {
+                run_id: degraded_run_id,
+                ..
+            } => {
+                assert_eq!(*degraded_run_id, run_id);
+            }
+            other => panic!(
+                "TASK-PANIC-01: expected Degraded after a panicked task's join failure, got {other:?}"
+            ),
+        }
+
+        // Clear the local Degraded slot the same way a real operator
+        // recovery would before attempting a new run.
+        {
+            let mut lock = state.runtime_ownership.lock().await;
+            *lock = crate::state::LocalRuntimeOwnership::Idle;
+        }
+        mqk_db::clear_halted_run(&pool, run_id).await.ok();
+        mqk_db::stop_run(&pool, run_id).await.ok();
+        let run_id_2 = state
+            .create_or_reuse_run_for_start(&pool)
+            .await
+            .expect("TASK-PANIC-01: restart run creation must succeed");
+        state.set_hermetic_test_broker_override_for_test(true).await;
+        let (restart_result, _trace2) = state
+            .drive_production_start_effects_for_test(
+                pool.clone(),
+                run_id_2,
+                Some(off_disposition_fixture(run_id_2)),
+            )
+            .await;
+        state
+            .set_hermetic_test_broker_override_for_test(false)
+            .await;
+        // A panicked task never runs its own release-leadership cleanup
+        // (a genuine Rust panic skips ordinary code, only `Drop` runs) —
+        // the DB-side runtime lease this attempt's orchestrator held is
+        // therefore still live, held by a now-dead in-memory holder, until
+        // it naturally expires. This is a real, pre-existing property of
+        // `mqk_runtime`'s lease (out of this patch's scope to change) —
+        // the correct, fail-closed outcome is that an immediate restart is
+        // refused, not silently allowed to race a lease it cannot prove is
+        // safe to take over. Proving this refusal (rather than assuming a
+        // clean restart) is itself the honest completion of this row.
+        match restart_result {
+            Err(crate::daily_data_readiness::RuntimeStartSequenceError::Effects {
+                original,
+                ..
+            }) => {
+                assert_eq!(
+                    original.fault_class, "runtime.start_refused.service_unavailable",
+                    "TASK-PANIC-01: expected a lease-unavailable refusal, got {original:?}"
+                );
+            }
+            other => panic!(
+                "TASK-PANIC-01: expected the still-live lease to refuse an immediate \
+                 restart, got {other:?}"
+            ),
+        }
+
+        delete_run_and_its_events(&pool, run_id).await;
+        delete_run_and_its_events(&pool, run_id_2).await;
+    }
+
+    // -------------------------------------------------------------------
+    // FAULT-ROLLBACK-QUERY-01 (R6 row 27, "durable rollback query
+    // failure"): the run row is genuinely deleted before `arm_run` is
+    // attempted — `rollback_failed_start_attempt`'s own `fetch_run` call
+    // then organically fails (`RowNotFound`), never a fabricated query
+    // error. Must surface as `QueryFailed` with `durable_status_unknown =
+    // true`, and `RollbackOutcome::is_degraded()` must reflect it.
+    // -------------------------------------------------------------------
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fault_rollback_query_01_deleted_run_row_makes_fetch_run_fail_organically() {
+        let _g = db_test_lock().lock().await;
+        let Some(pool) = db_pool_or_skip("FAULT-ROLLBACK-QUERY-01").await else {
+            return;
+        };
+        clear_any_preexisting_active_daemon_run(&pool).await;
+        let state = hermetic_paper_state(&pool);
+        state.set_hermetic_test_broker_override_for_test(true).await;
+        state
+            .set_dynamic_selection_fault_seam_for_test(Some(
+                DynamicSelectionLifecycleFaultSeam::DeleteRunRowBeforeArm,
+            ))
+            .await;
+        let run_id = state
+            .create_or_reuse_run_for_start(&pool)
+            .await
+            .expect("run creation must succeed");
+
+        let (result, trace) = state
+            .drive_production_start_effects_for_test(
+                pool.clone(),
+                run_id,
+                Some(off_disposition_fixture(run_id)),
+            )
+            .await;
+        state
+            .set_hermetic_test_broker_override_for_test(false)
+            .await;
+        state.set_dynamic_selection_fault_seam_for_test(None).await;
+
+        assert!(
+            result.is_err(),
+            "FAULT-ROLLBACK-QUERY-01: expected the injected failure"
+        );
+        let (original, rollback) = match result.unwrap_err() {
+            crate::daily_data_readiness::RuntimeStartSequenceError::Effects {
+                original,
+                rollback,
+            } => (original, rollback),
+            other => panic!("FAULT-ROLLBACK-QUERY-01: expected Effects, got {other:?}"),
+        };
+        assert_eq!(
+            original.fault_class,
+            "dynamic_selection.fault_seam.delete_run_row_before_arm"
+        );
+        assert_eq!(trace, vec!["ownership_reserved"]);
+        assert!(matches!(
+            rollback.durable,
+            crate::daily_data_readiness::DurableRollbackDisposition::QueryFailed
+        ));
+        assert!(
+            rollback.durable_status_unknown,
+            "FAULT-ROLLBACK-QUERY-01: a failed fetch_run means the durable status is \
+             genuinely unknown, not safely assumed clean"
+        );
+        assert!(
+            rollback.is_degraded(),
+            "FAULT-ROLLBACK-QUERY-01: is_degraded() must reflect durable_status_unknown"
+        );
+        assert_eq!(state.locally_owned_run_id().await, None);
+
+        // The row was deleted; nothing further to clean up.
     }
 
     // -------------------------------------------------------------------
