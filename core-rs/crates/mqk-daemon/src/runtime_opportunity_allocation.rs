@@ -151,6 +151,21 @@ pub struct RuntimeOpportunityAllocationContext {
     /// `None` when no valid (Phase C shared-authority-validated) durable
     /// snapshot exists.
     pub active_snapshot: Option<ActiveSnapshotFacts>,
+    /// PHASE-7B-SELECTED-HOST-ECONOMIC-DISPATCH-CLOSURE Part 7: per-symbol
+    /// expected DB bar-timeframe label, for a mixed-timeframe dynamic-
+    /// selection batch. `None` (the default, and the only value ever passed
+    /// by the pre-Phase-7B legacy/Off/Shadow call site) preserves the exact
+    /// original admission check (`facts.timeframe == ctx.timeframe`) byte-
+    /// for-byte. `Some(map)` is used only for a `PaperEnforcedAllowed`
+    /// dynamic-selection batch, where different selected candidates may
+    /// legitimately carry different timeframes and `ctx.timeframe` itself
+    /// becomes a canonical multi-timeframe label (Part 7 point 5) rather
+    /// than a single real timeframe — so each candidate's bar facts must be
+    /// checked against *its own* selected timeframe label, not the batch
+    /// label. Never changes allocator ranking, sizing, or admission
+    /// *policy* — only which per-candidate value the existing bar-facts
+    /// coherence check compares against.
+    pub per_candidate_timeframe_label: Option<BTreeMap<String, String>>,
 }
 
 pub const REASON_NO_OPPORTUNITY_AUTHORITY: &str = "fail_closed_no_opportunity_authority";
@@ -306,9 +321,23 @@ pub fn apply_runtime_opportunity_allocation(
     let mut bar_end_ts_by_symbol: BTreeMap<String, i64> = BTreeMap::new();
     for p in &buy_pending {
         if let Some(facts) = &p.bar_facts {
+            // Part 7: a mixed-timeframe dynamic-selection batch checks each
+            // candidate's bar facts against *its own* selected timeframe
+            // label (`per_candidate_timeframe_label`), not the single
+            // batch-wide `ctx.timeframe` — which, in that mode, is a
+            // canonical multi-timeframe identity label, not a real
+            // timeframe any individual bar could match. The legacy/Off/
+            // Shadow call site never sets this map, so its behavior here is
+            // byte-identical to the original single-`ctx.timeframe` check.
+            let timeframe_matches = match &ctx.per_candidate_timeframe_label {
+                Some(map) => map
+                    .get(&p.decision.symbol)
+                    .is_some_and(|label| &facts.timeframe == label),
+                None => facts.timeframe == ctx.timeframe,
+            };
             if facts.symbol == p.decision.symbol
                 && facts.strategy_id == p.decision.strategy_id
-                && facts.timeframe == ctx.timeframe
+                && timeframe_matches
             {
                 close_micros_by_symbol.insert(p.decision.symbol.clone(), facts.close_micros);
                 bar_end_ts_by_symbol.insert(p.decision.symbol.clone(), facts.bar_end_ts);
@@ -645,12 +674,21 @@ async fn resolve_active_snapshot(
 /// When the effective mode is `Off`, returns `decisions` untouched and skips
 /// every I/O call below — the default configuration has zero additional
 /// runtime cost.
+// PHASE-7B-SELECTED-HOST-ECONOMIC-DISPATCH-CLOSURE Part 7 added the 8th
+// (`per_candidate_timeframe_label`) parameter, crossing clippy's default
+// too-many-arguments threshold. Every existing parameter is already
+// independently load-bearing (this is a thin I/O-performing wrapper around
+// `RuntimeOpportunityAllocationContext`, not a candidate for a param-object
+// refactor this patch's scope does not call for) -- the codebase's own
+// existing convention.
+#[allow(clippy::too_many_arguments)]
 pub async fn gather_and_apply(
     state_arc: &Arc<AppState>,
     run_id: Uuid,
     now_micros: i64,
     market_date: String,
     timeframe: String,
+    per_candidate_timeframe_label: Option<BTreeMap<String, String>>,
     decisions: Vec<PendingDecisionWithBarFacts>,
     current_positions: &BTreeMap<String, i64>,
 ) -> RuntimeOpportunityAllocationOutcome {
@@ -682,6 +720,7 @@ pub async fn gather_and_apply(
             runtime_ceiling,
             opportunity_set: None,
             active_snapshot: None,
+            per_candidate_timeframe_label,
         };
         return apply_runtime_opportunity_allocation(&ctx, decisions, current_positions);
     };
@@ -712,6 +751,7 @@ pub async fn gather_and_apply(
         runtime_ceiling,
         opportunity_set,
         active_snapshot,
+        per_candidate_timeframe_label,
     };
     let outcome = apply_runtime_opportunity_allocation(&ctx, decisions, current_positions);
     persist_plan_if_present(state_arc, &outcome.plan, eff.effective_mode).await;
@@ -828,6 +868,7 @@ mod tests {
                 snapshot_id: "snap-1".to_string(),
                 equity_micros: 100_000 * 1_000_000,
             }),
+            per_candidate_timeframe_label: None,
         }
     }
 
@@ -1410,5 +1451,145 @@ mod tests {
             blockers: vec![],
         };
         assert!(plan_to_new_db_plan(&plan, RuntimeOpportunityAllocationMode::Shadow).is_none());
+    }
+
+    // -----------------------------------------------------------------
+    // PHASE-7B-SELECTED-HOST-ECONOMIC-DISPATCH-CLOSURE Part 7: mixed-
+    // timeframe per-candidate admission tests.
+    // -----------------------------------------------------------------
+
+    fn facts_with_timeframe(
+        symbol: &str,
+        strategy_id: &str,
+        timeframe: &str,
+        bar_end_ts: i64,
+        close_micros: i64,
+    ) -> EvaluatedBarFacts {
+        EvaluatedBarFacts {
+            symbol: symbol.to_string(),
+            strategy_id: strategy_id.to_string(),
+            timeframe: timeframe.to_string(),
+            bar_end_ts,
+            close_micros,
+        }
+    }
+
+    /// Legacy/Off/Shadow behavior is byte-identical when
+    /// `per_candidate_timeframe_label` is `None` -- the admission check
+    /// falls back to the single `ctx.timeframe` comparison exactly as
+    /// before this patch. A candidate whose own facts.timeframe differs
+    /// from `ctx.timeframe` is refused, matching pre-Phase-7B behavior.
+    #[test]
+    fn none_per_candidate_map_preserves_original_single_timeframe_admission() {
+        let mut current = BTreeMap::new();
+        current.insert("AAPL".to_string(), 0i64);
+        let decisions = vec![PendingDecisionWithBarFacts {
+            decision: buy("AAPL", "intraday_scalper", 10),
+            // facts.timeframe ("1H") differs from ctx.timeframe ("5m") --
+            // must be refused, exactly like the original behavior.
+            bar_facts: Some(facts_with_timeframe(
+                "AAPL",
+                "intraday_scalper",
+                "1H",
+                1_000,
+                100_000_000,
+            )),
+        }];
+        let out = apply_runtime_opportunity_allocation(
+            &base_ctx(RuntimeOpportunityAllocationMode::PaperEnforced),
+            decisions,
+            &current,
+        );
+        assert!(
+            out.decisions.is_empty(),
+            "mismatched-timeframe bar facts must still be refused when no \
+             per-candidate map is supplied (legacy behavior unchanged)"
+        );
+        let plan = out.plan.expect("plan must be built");
+        assert_eq!(
+            plan.candidates[0].reason_code,
+            REASON_MISSING_OR_MISMATCHED_BAR_FACTS
+        );
+    }
+
+    /// A genuine mixed 5m + 1H selected batch: each candidate's bar facts
+    /// are checked against *its own* selected timeframe label via
+    /// `per_candidate_timeframe_label`, not the single batch-wide
+    /// `ctx.timeframe` -- both candidates price successfully.
+    #[test]
+    fn mixed_timeframe_batch_admits_each_candidate_against_its_own_timeframe() {
+        let mut current = BTreeMap::new();
+        current.insert("AAPL".to_string(), 0i64);
+        current.insert("MSFT".to_string(), 0i64);
+        let decisions = vec![
+            PendingDecisionWithBarFacts {
+                decision: buy("AAPL", "intraday_scalper", 10),
+                bar_facts: Some(facts_with_timeframe(
+                    "AAPL",
+                    "intraday_scalper",
+                    "5m",
+                    1_000,
+                    100_000_000,
+                )),
+            },
+            PendingDecisionWithBarFacts {
+                decision: buy("MSFT", "intraday_scalper", 5),
+                bar_facts: Some(facts_with_timeframe(
+                    "MSFT",
+                    "intraday_scalper",
+                    "1H",
+                    2_000,
+                    200_000_000,
+                )),
+            },
+        ];
+        let mut per_symbol = BTreeMap::new();
+        per_symbol.insert("AAPL".to_string(), "5m".to_string());
+        per_symbol.insert("MSFT".to_string(), "1H".to_string());
+        let mut ctx = base_ctx(RuntimeOpportunityAllocationMode::PaperEnforced);
+        ctx.timeframe = "5m+1H".to_string(); // canonical multi-timeframe label (Part 7 point 5)
+        ctx.per_candidate_timeframe_label = Some(per_symbol);
+        ctx.opportunity_set = Some(opportunity_set(vec![
+            ("AAPL", "intraday_scalper", 0.9),
+            ("MSFT", "intraday_scalper", 0.9),
+        ]));
+
+        let out = apply_runtime_opportunity_allocation(&ctx, decisions, &current);
+        let plan = out.plan.expect("plan must be built");
+        assert!(
+            plan.candidates
+                .iter()
+                .all(|c| c.reason_code != REASON_MISSING_OR_MISMATCHED_BAR_FACTS),
+            "both candidates must be admitted against their own timeframe: {:?}",
+            plan.candidates
+        );
+    }
+
+    /// A candidate's facts.timeframe not matching ITS OWN entry in
+    /// `per_candidate_timeframe_label` is still refused individually (the
+    /// coherence check is per-candidate-strict, not simply "any map
+    /// present admits everything").
+    #[test]
+    fn mixed_timeframe_map_still_refuses_a_genuinely_wrong_candidate_timeframe() {
+        let mut current = BTreeMap::new();
+        current.insert("AAPL".to_string(), 0i64);
+        let decisions = vec![PendingDecisionWithBarFacts {
+            decision: buy("AAPL", "intraday_scalper", 10),
+            // facts claim "1H" but the binding's own expected label is "5m".
+            bar_facts: Some(facts_with_timeframe(
+                "AAPL",
+                "intraday_scalper",
+                "1H",
+                1_000,
+                100_000_000,
+            )),
+        }];
+        let mut per_symbol = BTreeMap::new();
+        per_symbol.insert("AAPL".to_string(), "5m".to_string());
+        let mut ctx = base_ctx(RuntimeOpportunityAllocationMode::PaperEnforced);
+        ctx.per_candidate_timeframe_label = Some(per_symbol);
+
+        let out = apply_runtime_opportunity_allocation(&ctx, decisions, &current);
+        assert!(out.decisions.is_empty());
     }
 }

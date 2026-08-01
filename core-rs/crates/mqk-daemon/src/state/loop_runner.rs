@@ -31,12 +31,34 @@ use super::types::{
     BrokerSnapshotTruthSource, BusMsg, DaemonOrchestrator, ExecutionLoopCommand, ExecutionLoopExit,
     ExecutionLoopHandle, ReconcileStatusSnapshot, StatusSnapshot,
 };
+use crate::dynamic_selection_dispatch_authority::RuntimeStrategyDispatchAuthority;
 use crate::notify::CriticalAlertPayload;
 
 use super::{
     dry_run_strategy_ids_from_env, evaluate_dry_run_strategies, AppState, PerSymbolTargetState,
     DEADMAN_TTL_SECONDS, EXECUTION_LOOP_INTERVAL, STRATEGY_CONTEXT_LOAD_LIMIT,
 };
+
+/// PHASE-7B-SELECTED-HOST-ECONOMIC-DISPATCH-CLOSURE Part 6: `true` when
+/// `(symbol, strategy_id)` has a recorded dynamic-selection dispatch
+/// provenance entry, OR when `provenance` is empty — the latter is the
+/// `Legacy`/`Off`/`Shadow` case, which never builds a provenance map at all
+/// (Off/Shadow decisions always carry no provenance requirement). Only a
+/// non-empty map (i.e. `DynamicPaperEnforced`) enforces that every decision
+/// must be found.
+fn provenance_matches(
+    provenance: &std::collections::BTreeMap<
+        (String, String),
+        crate::dynamic_selection_dispatch_authority::DynamicSelectionDispatchProvenance,
+    >,
+    symbol: &str,
+    strategy_id: &str,
+) -> bool {
+    if provenance.is_empty() {
+        return true;
+    }
+    provenance.contains_key(&(symbol.to_string(), strategy_id.to_string()))
+}
 
 // ---------------------------------------------------------------------------
 // spawn_execution_loop
@@ -46,16 +68,17 @@ pub(super) fn spawn_execution_loop(
     state: Arc<AppState>,
     mut orchestrator: DaemonOrchestrator,
     run_id: Uuid,
-    // ATOMICITY-SINGLE-SNAPSHOT-REPAIR: the per-symbol dispatch assignment
-    // list, already resolved exactly once by the caller's
-    // `StartAttemptAuthoritySnapshot` (the same value the daily-data-
-    // readiness gate and the dynamic-selection evaluation for this exact
-    // start attempt also consumed) — never re-resolved here from env/
-    // watchlist state a second (now third) time. Empty means even the
-    // legacy single-symbol env fallback was unconfigured, matching the
-    // existing no-op behavior of `tick_strategy_dispatch` when strategy
-    // dispatch is not configured.
-    multi_symbol_assignments: Vec<super::SymbolStrategyAssignment>,
+    // PHASE-7B-SELECTED-HOST-ECONOMIC-DISPATCH-CLOSURE Part 1/3: the one
+    // frozen, run-scoped strategy-dispatch authority, built exactly once by
+    // `build_dynamic_selection_start_snapshot` before the startup barrier
+    // below ever releases — `Legacy` (carrying the exact same frozen
+    // per-symbol assignment list ATOMICITY-SINGLE-SNAPSHOT-REPAIR
+    // established) for `Off`/`Shadow`, `DynamicPaperEnforced` (owning the
+    // one built host pool) only for `PaperEnforcedAllowed`. Moved wholesale
+    // into this task — never cloned, never rebuilt, never shared with any
+    // other owner. Dropped automatically when this task exits (stop/halt/
+    // shutdown/reap/panic), which drops the whole host pool with it.
+    dispatch_authority: RuntimeStrategyDispatchAuthority,
     // BUNDLE-7-PHASE-7A-CORE-ATOMIC-STATE-MACHINE-CLOSURE requirement 3:
     // the startup barrier. The task waits here, before doing ANY economic
     // work (no ticker, no deadman, no tick, no outbox/broker touch), until
@@ -178,6 +201,13 @@ pub(super) fn spawn_execution_loop(
         let mut ticker = tokio::time::interval(EXECUTION_LOOP_INTERVAL);
         // AUTON-PAPER-RISK-03: countdown to next External broker snapshot refresh.
         let mut external_refresh_ticks: u32 = 0;
+        // PHASE-7B-SELECTED-HOST-ECONOMIC-DISPATCH-CLOSURE Part 3: this
+        // task is the one exclusive mutable owner of `dispatch_authority`
+        // (and, for `DynamicPaperEnforced`, the host pool it carries) for
+        // the rest of this task's life — never read or mutated from
+        // anywhere else. No selector/plan-builder/promotion/evidence call
+        // occurs anywhere in this loop.
+        let mut dispatch_authority = dispatch_authority;
         loop {
             tokio::select! {
                 changed = stop_rx.changed() => {
@@ -743,8 +773,7 @@ pub(super) fn spawn_execution_loop(
                     // this tick rather than assuming a flat position — fail-closed.
                     //
                     // MULTI-SYMBOL-DISPATCH-LOOP-01: dispatch is a per-symbol loop
-                    // over `multi_symbol_assignments` (artifact order, design doc
-                    // §5 Q4), built once at loop startup. For the legacy
+                    // (artifact order, design doc §5 Q4). For the legacy
                     // EnvSingleSymbolFallback config (exactly one assignment, the
                     // MQK_STRATEGY_SYMBOL / MQK_STRATEGY_MD_TIMEFRAME pair) this is
                     // behaviorally identical to the prior single-dispatch call.
@@ -756,11 +785,125 @@ pub(super) fn spawn_execution_loop(
                     // (Phase A): use the bar-facts-carrying dispatch seam so
                     // each symbol's exact evaluated-bar identity/close is
                     // available below, without a second DB fetch.
-                    let dispatch_results = state_arc
-                        .tick_strategy_dispatch_multi_symbol_with_bar_facts(
-                            &multi_symbol_assignments,
-                        )
-                        .await;
+                    //
+                    // PHASE-7B-SELECTED-HOST-ECONOMIC-DISPATCH-CLOSURE Part 8:
+                    // the one canonical per-tick pipeline branches here on the
+                    // frozen dispatch authority — `Legacy` calls the exact
+                    // pre-Phase-7B seam unchanged; `DynamicPaperEnforced` calls
+                    // the selected-host backend (Part 4), which is the ONLY
+                    // strategy-evaluation authority for its bindings this run
+                    // (the legacy native bootstrap is never touched while this
+                    // variant is active). A selected-host coherence fault
+                    // (Part 5) halts/disarms fail-closed with zero decisions
+                    // for the whole tick — never a fallback to legacy dispatch.
+                    let dynamic_selection_dispatch_provenance: std::collections::BTreeMap<
+                        (String, String),
+                        crate::dynamic_selection_dispatch_authority::DynamicSelectionDispatchProvenance,
+                    > = match &dispatch_authority {
+                        RuntimeStrategyDispatchAuthority::Legacy { .. } => {
+                            std::collections::BTreeMap::new()
+                        }
+                        RuntimeStrategyDispatchAuthority::DynamicPaperEnforced {
+                            run_id: authority_run_id,
+                            plan_id,
+                            bindings,
+                            ..
+                        } => bindings
+                            .iter()
+                            .map(|b| {
+                                (
+                                    (b.symbol.clone(), b.strategy_id.clone()),
+                                    crate::dynamic_selection_dispatch_authority::DynamicSelectionDispatchProvenance {
+                                        run_id: *authority_run_id,
+                                        plan_id: *plan_id,
+                                        symbol: b.symbol.clone(),
+                                        strategy_id: b.strategy_id.clone(),
+                                        timeframe_secs: b.timeframe_secs,
+                                    },
+                                )
+                            })
+                            .collect(),
+                    };
+                    let dispatch_results = match &mut dispatch_authority {
+                        RuntimeStrategyDispatchAuthority::Legacy { assignments } => {
+                            state_arc
+                                .tick_strategy_dispatch_multi_symbol_with_bar_facts(assignments)
+                                .await
+                        }
+                        RuntimeStrategyDispatchAuthority::DynamicPaperEnforced {
+                            bindings,
+                            host_pool,
+                            ..
+                        } => {
+                            match state_arc
+                                .tick_strategy_dispatch_selected_hosts_with_bar_facts(
+                                    bindings, host_pool,
+                                )
+                                .await
+                            {
+                                Ok(results) => results,
+                                Err(fault) => {
+                                    // Part 5: a selected-host result coherence
+                                    // mismatch is a structural fault, never an
+                                    // ordinary no-signal condition — zero
+                                    // decisions this tick, halt/disarm
+                                    // fail-closed using the existing loop halt
+                                    // authority (the same disarm/halt/
+                                    // integrity/leadership-release/exit
+                                    // sequence the deadman-supervisor-failure
+                                    // path above already uses), never a
+                                    // fallback to legacy dispatch.
+                                    tracing::error!(
+                                        run_id = %run_id,
+                                        fault_code = fault.code(),
+                                        fault = ?fault,
+                                        "phase7b_selected_host_dispatch_fault: halting run"
+                                    );
+                                    if let Some(ref pool) = db {
+                                        let now = Utc::now();
+                                        if let Err(halt_err) =
+                                            mqk_db::halt_run(pool, run_id, now).await
+                                        {
+                                            tracing::error!(run_id = %run_id, "execution_loop_halt_run_persist_failed error={halt_err}");
+                                        }
+                                        if let Err(disarm_err) =
+                                            mqk_db::persist_arm_state_canonical(
+                                                pool,
+                                                mqk_db::ArmState::Disarmed,
+                                                Some(
+                                                    mqk_db::DisarmReason::DeadmanSupervisorFailure,
+                                                ),
+                                            )
+                                            .await
+                                        {
+                                            tracing::error!(run_id = %run_id, "execution_loop_disarm_persist_failed error={disarm_err}");
+                                        }
+                                    }
+                                    {
+                                        let mut ig = integrity.write().await;
+                                        ig.disarmed = true;
+                                        ig.halted = true;
+                                    }
+                                    let release_outcome = orchestrator
+                                        .release_runtime_leadership()
+                                        .await
+                                        .map_err(|release_err| {
+                                            tracing::warn!("runtime_lease_release_failed error={release_err}");
+                                            release_err.to_string()
+                                        });
+                                    let exit = ExecutionLoopExit {
+                                        note: Some(format!(
+                                            "execution loop halted: selected-host dispatch fault: {}",
+                                            fault.code()
+                                        )),
+                                        leadership_release_outcome: Some(release_outcome),
+                                    };
+                                    drop_outside_async_context(orchestrator);
+                                    return exit;
+                                }
+                            }
+                        }
+                    };
                     if !dispatch_results.is_empty() {
                         let now_micros = Utc::now().timestamp_micros(); // allow: loop-context wall-clock for decision_id
                         // Derive current position truth from the execution snapshot
@@ -1175,15 +1318,35 @@ pub(super) fn spawn_execution_loop(
                         // today at most one candidate ever competes per
                         // symbol per tick.
                         let market_date_today = Utc::now().format("%Y-%m-%d").to_string();
+
+                        // PHASE-7B Part 6: validate every decision's
+                        // dynamic-selection provenance before it is handed
+                        // to Bundle 6 — a no-op (always true) for `Legacy`
+                        // (empty provenance map). Missing/mismatched
+                        // provenance in `paper_enforced` fails the whole
+                        // tick closed before the first submission.
+                        let provenance_ok_pre_bundle6 = all_decisions.iter().all(|p| {
+                            provenance_matches(
+                                &dynamic_selection_dispatch_provenance,
+                                &p.decision.symbol,
+                                &p.decision.strategy_id,
+                            )
+                        });
+                        if !provenance_ok_pre_bundle6 {
+                            tracing::error!(
+                                run_id = %run_id,
+                                "phase7b_dynamic_selection_provenance_missing_pre_bundle6: \
+                                 refusing whole tick closed, zero submissions"
+                            );
+                            continue;
+                        }
+
                         // FINAL-IDENTITY-AND-READ-AUTHORITY-REPAIR-01 Defect
-                        // 1: Bundle 6 no longer receives this global
-                        // first-assignment timeframe at all -- its cycle
-                        // identity is derived solely from canonical cycle
-                        // facts and each candidate's own timeframe/bar
-                        // facts. `dispatch_timeframe` remains Bundle 5's
-                        // accepted context (unchanged) and is computed here,
-                        // after the Bundle 6 call, purely for that
-                        // downstream call site.
+                        // 1: Bundle 6 no longer receives a global timeframe
+                        // at all -- its cycle identity is derived solely
+                        // from canonical cycle facts and each candidate's
+                        // own timeframe/bar facts (already true; unchanged
+                        // by Phase 7B).
                         let conflict_outcome = crate::runtime_strategy_conflict::gather_and_resolve(
                             &state_arc,
                             run_id,
@@ -1193,10 +1356,78 @@ pub(super) fn spawn_execution_loop(
                             &current_positions,
                         )
                         .await;
-                        let dispatch_timeframe = multi_symbol_assignments
-                            .first()
-                            .map(|a| a.timeframe.clone())
-                            .unwrap_or_default();
+
+                        // PHASE-7B Part 6: re-validate after Bundle 6 —
+                        // provenance must survive conflict resolution
+                        // unchanged (Bundle 6 never sees this map, so it
+                        // structurally cannot rewrite it; this proves no
+                        // decision the map doesn't recognize could have
+                        // been substituted in).
+                        let provenance_ok_post_bundle6 =
+                            conflict_outcome.decisions.iter().all(|p| {
+                                provenance_matches(
+                                    &dynamic_selection_dispatch_provenance,
+                                    &p.decision.symbol,
+                                    &p.decision.strategy_id,
+                                )
+                            });
+                        if !provenance_ok_post_bundle6 {
+                            tracing::error!(
+                                run_id = %run_id,
+                                "phase7b_dynamic_selection_provenance_missing_post_bundle6: \
+                                 refusing whole tick closed, zero submissions"
+                            );
+                            continue;
+                        }
+
+                        // PHASE-7B Part 7: mixed-timeframe cycle-level
+                        // authority for Bundle 5. `Legacy` is byte-identical
+                        // to the pre-Phase-7B behavior (first-assignment
+                        // timeframe, no per-candidate map — the existing
+                        // single-`ctx.timeframe` bar-facts admission check
+                        // is unchanged). `DynamicPaperEnforced` derives a
+                        // truthful canonical multi-timeframe label from the
+                        // sorted, deduplicated set of this tick's surviving
+                        // candidates' own selected timeframes, and supplies
+                        // a per-symbol expected-timeframe-label map so each
+                        // candidate's bar facts are checked against *its
+                        // own* selected timeframe rather than the single
+                        // batch label — never allocator ranking/sizing
+                        // policy, only which value the existing coherence
+                        // check compares against.
+                        let (dispatch_timeframe, per_candidate_timeframe_label) =
+                            match &dispatch_authority {
+                                RuntimeStrategyDispatchAuthority::Legacy { assignments } => (
+                                    assignments
+                                        .first()
+                                        .map(|a| a.timeframe.clone())
+                                        .unwrap_or_default(),
+                                    None,
+                                ),
+                                RuntimeStrategyDispatchAuthority::DynamicPaperEnforced {
+                                    bindings,
+                                    ..
+                                } => {
+                                    let mut per_symbol: std::collections::BTreeMap<String, String> =
+                                        std::collections::BTreeMap::new();
+                                    let mut labels: std::collections::BTreeSet<String> =
+                                        std::collections::BTreeSet::new();
+                                    for p in &conflict_outcome.decisions {
+                                        if let Some(b) = bindings
+                                            .iter()
+                                            .find(|b| b.symbol == p.decision.symbol)
+                                        {
+                                            per_symbol.insert(
+                                                b.symbol.clone(),
+                                                b.db_timeframe_label.clone(),
+                                            );
+                                            labels.insert(b.db_timeframe_label.clone());
+                                        }
+                                    }
+                                    let canonical_label = labels.into_iter().collect::<Vec<_>>().join("+");
+                                    (canonical_label, Some(per_symbol))
+                                }
+                            };
                         // MULTI-STRATEGY-CONFLICT-POLICY-01 Phase C: the
                         // conflict plan (when Some) is persisted as durable
                         // evidence inside gather_and_resolve, best-effort —
@@ -1215,6 +1446,7 @@ pub(super) fn spawn_execution_loop(
                                 now_micros,
                                 market_date_today,
                                 dispatch_timeframe,
+                                per_candidate_timeframe_label,
                                 conflict_outcome.decisions,
                                 &current_positions,
                             )
@@ -1223,6 +1455,28 @@ pub(super) fn spawn_execution_loop(
                         // (when Some) is already persisted as durable
                         // evidence inside gather_and_apply, best-effort —
                         // nothing further to do with it here.
+
+                        // PHASE-7B Part 6: re-validate after Bundle 5, before
+                        // cap #6/submission — provenance must survive
+                        // allocation unchanged except the permitted qty
+                        // change (symbol/strategy_id identity is untouched
+                        // by `rebuild_decision_with_qty`).
+                        let provenance_ok_post_bundle5 =
+                            allocation_outcome.decisions.iter().all(|d| {
+                                provenance_matches(
+                                    &dynamic_selection_dispatch_provenance,
+                                    &d.symbol,
+                                    &d.strategy_id,
+                                )
+                            });
+                        if !provenance_ok_post_bundle5 {
+                            tracing::error!(
+                                run_id = %run_id,
+                                "phase7b_dynamic_selection_provenance_missing_post_bundle5: \
+                                 refusing whole tick closed, zero submissions"
+                            );
+                            continue;
+                        }
 
                         for decision in allocation_outcome.decisions {
                             // MULTI-SYMBOL-CAPITAL-CAPS-01 cap #6: relocated
@@ -1579,4 +1833,50 @@ pub(super) async fn publish_reconcile_failure(
         level: "ERROR".to_string(),
         msg: note.to_string(),
     });
+}
+
+#[cfg(test)]
+mod phase7b_provenance_tests {
+    use super::*;
+    use crate::dynamic_selection_dispatch_authority::DynamicSelectionDispatchProvenance;
+
+    fn prov(
+        run_id: Uuid,
+        plan_id: Uuid,
+        symbol: &str,
+        strategy_id: &str,
+    ) -> DynamicSelectionDispatchProvenance {
+        DynamicSelectionDispatchProvenance {
+            run_id,
+            plan_id,
+            symbol: symbol.to_string(),
+            strategy_id: strategy_id.to_string(),
+            timeframe_secs: 300,
+        }
+    }
+
+    /// PHASE-7B Part 6: an empty provenance map (the `Legacy`/`Off`/
+    /// `Shadow` case, which never builds one) is a no-op -- every decision
+    /// passes, since Off/Shadow decisions carry no provenance requirement
+    /// at all.
+    #[test]
+    fn empty_provenance_map_is_a_legacy_noop() {
+        let empty = std::collections::BTreeMap::new();
+        assert!(provenance_matches(&empty, "AAPL", "intraday_scalper"));
+        assert!(provenance_matches(&empty, "ANYTHING", "ANYTHING"));
+    }
+
+    #[test]
+    fn non_empty_map_requires_an_exact_symbol_strategy_match() {
+        let run_id = Uuid::new_v5(&Uuid::NAMESPACE_DNS, b"phase7b.test.run_id");
+        let plan_id = Uuid::new_v5(&Uuid::NAMESPACE_DNS, b"phase7b.test.plan_id");
+        let mut map = std::collections::BTreeMap::new();
+        map.insert(
+            ("AAPL".to_string(), "intraday_scalper".to_string()),
+            prov(run_id, plan_id, "AAPL", "intraday_scalper"),
+        );
+        assert!(provenance_matches(&map, "AAPL", "intraday_scalper"));
+        assert!(!provenance_matches(&map, "MSFT", "intraday_scalper"));
+        assert!(!provenance_matches(&map, "AAPL", "swing_momentum"));
+    }
 }
