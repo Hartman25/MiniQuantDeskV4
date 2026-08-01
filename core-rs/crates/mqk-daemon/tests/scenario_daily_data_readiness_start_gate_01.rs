@@ -1299,24 +1299,25 @@ struct FakeRuntimeStartEffects {
 
 #[async_trait::async_trait]
 impl mqk_daemon::daily_data_readiness::RuntimeStartEffects for FakeRuntimeStartEffects {
+    // ATOMIC-OWNERSHIP-AND-ROLLBACK-TRUTH-01: this fake never constructs a
+    // real local-ownership slot (it has none), so reservation always
+    // succeeds — this file's tests never construct a real
+    // `AppState::execution_loop` conflict; that is proven separately
+    // against the real `ProductionRuntimeStartEffects`/
+    // `AppState::execution_loop`.
+    async fn reserve_local_ownership(
+        &self,
+        _run_id: uuid::Uuid,
+    ) -> Result<(), mqk_daemon::daily_data_readiness::RuntimeStartEffectsError> {
+        Ok(())
+    }
+
     async fn start_runtime_effects(
         &self,
         _run_id: uuid::Uuid,
     ) -> Result<(), mqk_daemon::daily_data_readiness::RuntimeStartEffectsError> {
         self.start_runtime_effects_calls
             .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-        Ok(())
-    }
-
-    // ATOMICITY-SINGLE-SNAPSHOT-REPAIR: this fake never constructs a real
-    // local-ownership slot (it has none), so reservation always succeeds —
-    // this file's tests never construct a real `AppState::execution_loop`
-    // conflict; that is proven separately against the real
-    // `ProductionRuntimeStartEffects`/`AppState::execution_loop`.
-    async fn reserve_local_ownership(
-        &self,
-        _run_id: uuid::Uuid,
-    ) -> Result<(), mqk_daemon::daily_data_readiness::RuntimeStartEffectsError> {
         Ok(())
     }
 
@@ -1340,10 +1341,19 @@ impl mqk_daemon::daily_data_readiness::RuntimeStartEffects for FakeRuntimeStartE
         Ok(())
     }
 
-    // ATOMICITY-SINGLE-SNAPSHOT-REPAIR: this fake commits no local
+    // ATOMIC-OWNERSHIP-AND-ROLLBACK-TRUTH-01: this fake commits no local
     // (`AppState`) effects, so rollback is a no-op — SG-16/SG-17 never
     // exercise a failure path after `start_runtime_effects` succeeds.
-    async fn rollback_local_effects(&self, _run_id: uuid::Uuid) {}
+    async fn rollback_local_effects(
+        &self,
+        _run_id: uuid::Uuid,
+    ) -> mqk_daemon::daily_data_readiness::LocalRollbackOutcome {
+        mqk_daemon::daily_data_readiness::LocalRollbackOutcome::default()
+    }
+
+    fn start_phase_reached(&self) -> mqk_daemon::daily_data_readiness::RuntimeStartPhase {
+        mqk_daemon::daily_data_readiness::RuntimeStartPhase::LoopInstalled
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1483,9 +1493,11 @@ async fn sg_16_synthetic_ready_start_proves_ordering_and_shared_evaluation_id() 
             "pre_start_event_persisted",
             "run_created",
             "run_link_event_persisted",
-            // ATOMICITY-SINGLE-SNAPSHOT-REPAIR requirement 3: local loop
-            // ownership is now reserved strictly before the loop is spawned.
+            // ATOMIC-OWNERSHIP-AND-ROLLBACK-TRUTH-01 requirement 2: local
+            // loop ownership is reserved strictly before runtime effects run
+            // or the loop is spawned.
             "ownership_reserved",
+            "local_bundle_committed",
             "loop_spawned",
         ],
         "REPAIR 3 / ATOMICITY-SINGLE-SNAPSHOT-REPAIR: required ordering trace"

@@ -1,5 +1,5 @@
-//! DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7A-ATOMICITY-SINGLE-SNAPSHOT-
-//! REPAIR: hermetic real-sequence proof for requirements 2/3/5.
+//! DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7A-FINAL-ATOMIC-OWNERSHIP-AND-
+//! ROLLBACK-TRUTH: hermetic real-sequence proof for requirements 2/3/4/5.
 //!
 //! `daily_data_readiness::advance_run_to_active` is the exact shared
 //! coordinator `AppState::start_execution_runtime` calls in production
@@ -12,15 +12,23 @@
 //! failure), but never constructs a broker, provider, or scheduler. No
 //! network, no credentials.
 //!
+//! The call order under test is `reserve_local_ownership` ->
+//! `start_runtime_effects` -> `spawn_loop` — reservation is deliberately
+//! the first call, strictly before any local/durable effect, so a
+//! local-ownership conflict is refused before `arm_run` is ever attempted.
+//!
 //! What this file proves:
-//! - success path: ownership is reserved strictly before the loop is
-//!   spawned (trace ordering), and rollback never fires.
+//! - success path: ownership is reserved strictly before runtime effects
+//!   run or the loop is spawned (trace ordering), and rollback never fires.
 //! - a failure after `arm_run` succeeds moves the durable run back to
-//!   `STOPPED` (requirement 2), and `rollback_local_effects` fires exactly
-//!   once with the correct `run_id`.
-//! - an ownership conflict at `reserve_local_ownership` never spawns a
-//!   task — zero detached tasks (requirement 3) — and still rolls the
-//!   durable run back.
+//!   `STOPPED` (requirement 2 — the fake's phase tracking reports
+//!   `RunningBeforeInitialTick`, which is cleanly stoppable per requirement
+//!   4), and `rollback_local_effects` fires exactly once with the correct
+//!   `run_id`.
+//! - an ownership conflict at `reserve_local_ownership` never attempts
+//!   `arm_run`/`begin_run` and never spawns a task — zero detached tasks
+//!   (requirement 3) — the durable run is left untouched (`Created`,
+//!   `AlreadyNonActive`) since nothing was ever armed.
 //! - two competing attempts against the same local-ownership slot: exactly
 //!   one task is ever spawned, and the loser's rollback never disturbs the
 //!   winner's reservation (requirement 3's "retain the legitimate owner").
@@ -32,7 +40,10 @@
 //! operating rules forbid loading credentials for. The disposition-
 //! determination logic and the `paper_enforced` interlock are proven
 //! separately, hermetically, as pure-function unit tests in
-//! `state::lifecycle` (`cargo test -p mqk-daemon --lib`).
+//! `state::lifecycle` (`cargo test -p mqk-daemon --lib`). A hermetic proof
+//! against `ProductionRuntimeStartEffects` itself (no real broker, DI'd
+//! orchestrator) lives in
+//! `scenario_bundle7_phase7a_final_atomic_ownership_and_rollback_truth_01.rs`.
 
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
@@ -145,12 +156,20 @@ struct FakeAtomicityEffects {
     /// Stands in for `AppState::execution_loop` — `Some(run_id)` means a
     /// local owner already holds the slot.
     owned_run_id: StdMutex<Option<Uuid>>,
+
+    /// ATOMIC-OWNERSHIP-AND-ROLLBACK-TRUTH-01 requirement 4: mirrors
+    /// `ProductionRuntimeStartEffects`'s phase tracking, updated at the same
+    /// milestones (arm succeeded, begin+heartbeat succeeded) so the
+    /// phase-aware durable rollback policy (Stopped vs Halted) is exercised
+    /// identically to production.
+    phase: StdMutex<mqk_daemon::daily_data_readiness::RuntimeStartPhase>,
 }
 
 impl FakeAtomicityEffects {
     fn new(pool: sqlx::PgPool) -> Self {
         Self {
             pool: Some(pool),
+            phase: StdMutex::new(mqk_daemon::daily_data_readiness::RuntimeStartPhase::BeforeArm),
             ..Default::default()
         }
     }
@@ -162,6 +181,7 @@ impl FakeAtomicityEffects {
         Self {
             pool: Some(pool),
             owned_run_id: StdMutex::new(*other.owned_run_id.lock().unwrap()),
+            phase: StdMutex::new(mqk_daemon::daily_data_readiness::RuntimeStartPhase::BeforeArm),
             ..Default::default()
         }
     }
@@ -169,28 +189,8 @@ impl FakeAtomicityEffects {
 
 #[async_trait::async_trait]
 impl RuntimeStartEffects for FakeAtomicityEffects {
-    async fn start_runtime_effects(&self, run_id: Uuid) -> Result<(), RuntimeStartEffectsError> {
-        self.start_runtime_effects_calls
-            .fetch_add(1, Ordering::SeqCst);
-        let pool = self.pool.as_ref().expect("pool configured");
-        mqk_db::arm_run(pool, run_id)
-            .await
-            .expect("fake start_runtime_effects: arm_run must succeed");
-        mqk_db::begin_run(pool, run_id)
-            .await
-            .expect("fake start_runtime_effects: begin_run must succeed");
-        if self
-            .fail_start_runtime_effects_after_arm
-            .load(Ordering::SeqCst)
-        {
-            return Err(RuntimeStartEffectsError::internal(
-                "fake.start_runtime_effects_failed_after_arm",
-                "injected failure after arm_run/begin_run succeeded",
-            ));
-        }
-        Ok(())
-    }
-
+    // ATOMIC-OWNERSHIP-AND-ROLLBACK-TRUTH-01 requirement 2: reservation is
+    // the first call — before `arm_run`/`begin_run` are ever attempted.
     async fn reserve_local_ownership(&self, run_id: Uuid) -> Result<(), RuntimeStartEffectsError> {
         self.reserve_local_ownership_calls
             .fetch_add(1, Ordering::SeqCst);
@@ -208,6 +208,32 @@ impl RuntimeStartEffects for FakeAtomicityEffects {
             ));
         }
         *slot = Some(run_id);
+        Ok(())
+    }
+
+    async fn start_runtime_effects(&self, run_id: Uuid) -> Result<(), RuntimeStartEffectsError> {
+        self.start_runtime_effects_calls
+            .fetch_add(1, Ordering::SeqCst);
+        let pool = self.pool.as_ref().expect("pool configured");
+        mqk_db::arm_run(pool, run_id)
+            .await
+            .expect("fake start_runtime_effects: arm_run must succeed");
+        *self.phase.lock().unwrap() =
+            mqk_daemon::daily_data_readiness::RuntimeStartPhase::ArmedBeforeBegin;
+        mqk_db::begin_run(pool, run_id)
+            .await
+            .expect("fake start_runtime_effects: begin_run must succeed");
+        *self.phase.lock().unwrap() =
+            mqk_daemon::daily_data_readiness::RuntimeStartPhase::RunningBeforeInitialTick;
+        if self
+            .fail_start_runtime_effects_after_arm
+            .load(Ordering::SeqCst)
+        {
+            return Err(RuntimeStartEffectsError::internal(
+                "fake.start_runtime_effects_failed_after_arm",
+                "injected failure after arm_run/begin_run succeeded",
+            ));
+        }
         Ok(())
     }
 
@@ -230,19 +256,31 @@ impl RuntimeStartEffects for FakeAtomicityEffects {
         handle.await.expect("synthetic loop task join");
         assert_eq!(counter.load(Ordering::SeqCst), 1);
         self.spawned_task_count.fetch_add(1, Ordering::SeqCst);
+        *self.phase.lock().unwrap() =
+            mqk_daemon::daily_data_readiness::RuntimeStartPhase::LoopInstalled;
         Ok(())
     }
 
-    async fn rollback_local_effects(&self, run_id: Uuid) {
+    async fn rollback_local_effects(
+        &self,
+        run_id: Uuid,
+    ) -> mqk_daemon::daily_data_readiness::LocalRollbackOutcome {
         self.rollback_local_effects_calls
             .fetch_add(1, Ordering::SeqCst);
         self.rollback_run_ids.lock().unwrap().push(run_id);
         // Mirrors production's local-effects clearing: the reservation
-        // this attempt held (if any) is released on rollback.
+        // this attempt held (if any) is released on rollback — compare-
+        // and-clear, so a loser's rollback can never clear a different
+        // winner's reservation.
         let mut slot = self.owned_run_id.lock().unwrap();
         if *slot == Some(run_id) {
             *slot = None;
         }
+        mqk_daemon::daily_data_readiness::LocalRollbackOutcome::default()
+    }
+
+    fn start_phase_reached(&self) -> mqk_daemon::daily_data_readiness::RuntimeStartPhase {
+        *self.phase.lock().unwrap()
     }
 }
 
@@ -267,8 +305,13 @@ async fn ar_01_success_path_reserves_ownership_before_spawn_and_never_rolls_back
     assert!(result.is_ok(), "AR-01: expected success: {result:?}");
     assert_eq!(
         trace,
-        vec!["ownership_reserved", "loop_spawned"],
-        "AR-01: ownership must be reserved strictly before the loop is spawned"
+        vec![
+            "ownership_reserved",
+            "local_bundle_committed",
+            "loop_spawned"
+        ],
+        "AR-01: ownership must be reserved strictly before runtime effects run \
+         or the loop is spawned"
     );
     assert_eq!(fake.start_runtime_effects_calls.load(Ordering::SeqCst), 1);
     assert_eq!(fake.reserve_local_ownership_calls.load(Ordering::SeqCst), 1);
@@ -311,12 +354,21 @@ async fn ar_02_failure_after_arm_rolls_durable_run_back_to_stopped() {
     let result = advance_run_to_active(&pool, &fake, run_id, None, &mut trace).await;
 
     assert!(result.is_err(), "AR-02: expected failure");
-    assert!(matches!(
-        result.unwrap_err(),
-        RuntimeStartSequenceError::Effects(_)
-    ));
-    assert!(trace.is_empty(), "AR-02: no trace tag before the failure");
-    assert_eq!(fake.reserve_local_ownership_calls.load(Ordering::SeqCst), 0);
+    let err = result.unwrap_err();
+    let (original, rollback) = match err {
+        RuntimeStartSequenceError::Effects { original, rollback } => (original, rollback),
+        other => panic!("AR-02: expected Effects, got {other:?}"),
+    };
+    assert_eq!(
+        original.fault_class,
+        "fake.start_runtime_effects_failed_after_arm"
+    );
+    assert_eq!(
+        trace,
+        vec!["ownership_reserved"],
+        "AR-02: ownership is reserved before the failing start_runtime_effects call"
+    );
+    assert_eq!(fake.reserve_local_ownership_calls.load(Ordering::SeqCst), 1);
     assert_eq!(fake.spawn_loop_calls.load(Ordering::SeqCst), 0);
     assert_eq!(
         fake.spawned_task_count.load(Ordering::SeqCst),
@@ -325,6 +377,16 @@ async fn ar_02_failure_after_arm_rolls_durable_run_back_to_stopped() {
     );
     assert_eq!(fake.rollback_local_effects_calls.load(Ordering::SeqCst), 1);
     assert_eq!(*fake.rollback_run_ids.lock().unwrap(), vec![run_id]);
+    assert!(
+        matches!(
+            rollback.durable,
+            mqk_daemon::daily_data_readiness::DurableRollbackDisposition::Stopped
+        ),
+        "AR-02: arm+begin succeeded but tick was never attempted (phase= \
+         RunningBeforeInitialTick, cleanly stoppable per requirement 4) — \
+         durable rollback must be Stopped, not Halted: {rollback:?}"
+    );
+    assert!(!rollback.durable_status_unknown);
     assert!(
         matches!(
             fetch_run_status(&pool, run_id).await,
@@ -338,9 +400,10 @@ async fn ar_02_failure_after_arm_rolls_durable_run_back_to_stopped() {
 }
 
 // ---------------------------------------------------------------------------
-// AR-03 (requirement 3): an ownership-reservation conflict never spawns a
-// task — the detached-task proof — and still rolls the durable run back
-// (arm/begin already succeeded before the conflict is detected).
+// AR-03 (requirement 2/3): an ownership-reservation conflict — now the very
+// first call in the sequence — never attempts arm_run/begin_run and never
+// spawns a task (the detached-task proof). The durable run is left
+// untouched (`Created`, `AlreadyNonActive`) since nothing was ever armed.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -360,8 +423,17 @@ async fn ar_03_ownership_conflict_spawns_no_task_and_still_rolls_back() {
     let result = advance_run_to_active(&pool, &fake, run_id, None, &mut trace).await;
 
     assert!(result.is_err(), "AR-03: expected conflict");
+    let rollback = match result.unwrap_err() {
+        RuntimeStartSequenceError::Effects { rollback, .. } => rollback,
+        other => panic!("AR-03: expected Effects, got {other:?}"),
+    };
     assert!(trace.is_empty());
-    assert_eq!(fake.start_runtime_effects_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        fake.start_runtime_effects_calls.load(Ordering::SeqCst),
+        0,
+        "AR-03: reservation now runs first — a conflict must never reach \
+         start_runtime_effects (arm_run/begin_run)"
+    );
     assert_eq!(fake.reserve_local_ownership_calls.load(Ordering::SeqCst), 1);
     assert_eq!(
         fake.spawn_loop_calls.load(Ordering::SeqCst),
@@ -374,9 +446,17 @@ async fn ar_03_ownership_conflict_spawns_no_task_and_still_rolls_back() {
         "AR-03: detached-task proof — a reservation conflict must create zero tasks"
     );
     assert_eq!(fake.rollback_local_effects_calls.load(Ordering::SeqCst), 1);
+    assert!(
+        matches!(
+            rollback.durable,
+            mqk_daemon::daily_data_readiness::DurableRollbackDisposition::AlreadyNonActive
+        ),
+        "AR-03: nothing was ever armed, so the durable run was never \
+         Armed/Running — rollback must report AlreadyNonActive: {rollback:?}"
+    );
     assert!(matches!(
         fetch_run_status(&pool, run_id).await,
-        mqk_db::RunStatus::Stopped
+        mqk_db::RunStatus::Created
     ));
 
     delete_run_and_its_events(&pool, run_id).await;
