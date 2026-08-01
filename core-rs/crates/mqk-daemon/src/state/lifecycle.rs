@@ -327,42 +327,6 @@ impl StartAttemptAuthoritySnapshot {
     }
 }
 
-/// DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7A-ATOMICITY-SINGLE-SNAPSHOT-
-/// REPAIR requirement 7: pure decision function for the temporary
-/// `paper_enforced` interlock, extracted for direct unit testing
-/// independent of the full credential-gated `start_execution_runtime` path.
-///
-/// `effective_mode == PaperEnforced` can only mean `disposition ==
-/// PaperEnforcedAllowed` (`PaperEnforcedRefused` already returns `Err`
-/// earlier, inside `build_dynamic_selection_start_snapshot`) — but
-/// `disposition` is checked explicitly too, fail-closed, rather than
-/// relying on that invariant alone. Off and Shadow are unaffected: Shadow
-/// is the only non-Off mode this interlock allows to start.
-fn paper_enforced_dispatch_not_wired_refusal(
-    outcome: &DynamicSelectionRuntimeState,
-    run_id: uuid::Uuid,
-) -> Option<RuntimeLifecycleError> {
-    if outcome.effective_mode == mqk_portfolio::DynamicSelectionMode::PaperEnforced
-        && outcome.disposition
-            != crate::dynamic_selection_start_gate::DynamicSelectionStartGateDisposition::Off
-    {
-        return Some(RuntimeLifecycleError::forbidden(
-            "runtime.start_refused.dynamic_selection_dispatch_not_wired",
-            "dynamic_selection_dispatch",
-            format!(
-                "dynamic-selection mode 'paper_enforced' resolved disposition={:?} for \
-                 run_id={run_id}, but Phase 7B selected-host economic dispatch is not \
-                 wired; paper_enforced must not start the legacy economic path until \
-                 Phase 7B selected-host dispatch is accepted -- only Off and Shadow may \
-                 start a run today \
-                 (DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7A-ATOMICITY-SINGLE-SNAPSHOT-REPAIR)",
-                outcome.disposition,
-            ),
-        ));
-    }
-    None
-}
-
 impl AppState {
     /// DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7A: build the
     /// authoritative, frozen dynamic-selection start snapshot for `run_id`.
@@ -386,7 +350,14 @@ impl AppState {
         self: &Arc<Self>,
         run_id: uuid::Uuid,
         snapshot: &StartAttemptAuthoritySnapshot,
-    ) -> Result<DynamicSelectionRuntimeState, RuntimeLifecycleError> {
+    ) -> Result<
+        (
+            DynamicSelectionRuntimeState,
+            crate::dynamic_selection_dispatch_authority::RuntimeStrategyDispatchAuthority,
+        ),
+        RuntimeLifecycleError,
+    > {
+        use crate::dynamic_selection_dispatch_authority::RuntimeStrategyDispatchAuthority;
         use crate::dynamic_selection_start_gate::DynamicSelectionStartGateDisposition;
         use mqk_portfolio::DynamicSelectionMode;
 
@@ -395,18 +366,24 @@ impl AppState {
         if effective.effective_mode == DynamicSelectionMode::Off {
             // Off: zero further I/O — no config resolution, no calendar
             // provider, no plan builder, no promotion query, no host pool.
-            return Ok(DynamicSelectionRuntimeState {
-                run_id,
-                disposition: DynamicSelectionStartGateDisposition::Off,
-                configured_mode: effective.configured_mode,
-                effective_mode: effective.effective_mode,
-                live_lock_applied: effective.live_lock_applied,
-                plan: None,
-                selected_pairs: Vec::new(),
-                host_pool: None,
-                reasons: Vec::new(),
-                approved_for_live: false,
-            });
+            return Ok((
+                DynamicSelectionRuntimeState {
+                    run_id,
+                    disposition: DynamicSelectionStartGateDisposition::Off,
+                    configured_mode: effective.configured_mode,
+                    effective_mode: effective.effective_mode,
+                    live_lock_applied: effective.live_lock_applied,
+                    plan: None,
+                    plan_id: None,
+                    selected_pairs: Vec::new(),
+                    host_pool_present: false,
+                    reasons: Vec::new(),
+                    approved_for_live: false,
+                },
+                RuntimeStrategyDispatchAuthority::Legacy {
+                    assignments: snapshot.legacy_assignments(),
+                },
+            ));
         }
 
         // Non-Off (Shadow or PaperEnforced) is only reachable when
@@ -424,25 +401,31 @@ impl AppState {
                 if effective.effective_mode == DynamicSelectionMode::Shadow {
                     // Shadow never blocks the run — record the truthful
                     // failure and let the legacy start continue.
-                    return Ok(DynamicSelectionRuntimeState {
-                        run_id,
-                        disposition: DynamicSelectionStartGateDisposition::ShadowInvalid,
-                        configured_mode: effective.configured_mode,
-                        effective_mode: effective.effective_mode,
-                        live_lock_applied: effective.live_lock_applied,
-                        plan: None,
-                        selected_pairs: Vec::new(),
-                        host_pool: None,
-                        reasons: vec![
-                            crate::dynamic_selection_start_gate::DynamicSelectionStartGateReason::PlanInvalid {
-                                truth_state: format!(
-                                    "multi_symbol_config_unavailable:{}",
-                                    err.as_str()
-                                ),
-                            },
-                        ],
-                        approved_for_live: false,
-                    });
+                    return Ok((
+                        DynamicSelectionRuntimeState {
+                            run_id,
+                            disposition: DynamicSelectionStartGateDisposition::ShadowInvalid,
+                            configured_mode: effective.configured_mode,
+                            effective_mode: effective.effective_mode,
+                            live_lock_applied: effective.live_lock_applied,
+                            plan: None,
+                            plan_id: None,
+                            selected_pairs: Vec::new(),
+                            host_pool_present: false,
+                            reasons: vec![
+                                crate::dynamic_selection_start_gate::DynamicSelectionStartGateReason::PlanInvalid {
+                                    truth_state: format!(
+                                        "multi_symbol_config_unavailable:{}",
+                                        err.as_str()
+                                    ),
+                                },
+                            ],
+                            approved_for_live: false,
+                        },
+                        RuntimeStrategyDispatchAuthority::Legacy {
+                            assignments: snapshot.legacy_assignments(),
+                        },
+                    ));
                 }
                 return Err(RuntimeLifecycleError::forbidden(
                     "runtime.start_refused.dynamic_selection_config_unavailable",
@@ -510,18 +493,70 @@ impl AppState {
             .map(crate::dynamic_selection_start_gate::selected_host_pool_keys)
             .unwrap_or_default();
 
-        Ok(DynamicSelectionRuntimeState {
-            run_id,
-            disposition: outcome.disposition,
-            configured_mode: effective.configured_mode,
-            effective_mode: effective.effective_mode,
-            live_lock_applied: effective.live_lock_applied,
-            plan: outcome.plan.map(Arc::new),
-            selected_pairs,
-            host_pool: outcome.host_pool.map(Arc::new),
-            reasons: outcome.reasons,
-            approved_for_live: false,
-        })
+        // Part 2: mint the one deterministic plan identity whenever a plan
+        // was actually built (Shadow* and PaperEnforcedAllowed) — evidence/
+        // status truth for every disposition that has a plan, not only the
+        // dispatch-authoritative one.
+        let plan_id = outcome
+            .plan
+            .as_ref()
+            .map(crate::dynamic_selection_dispatch_authority::derive_dynamic_selection_plan_id);
+
+        // Parts 1/3/9: `PaperEnforcedAllowed` is the only disposition that
+        // ever builds a `DynamicPaperEnforced` dispatch authority. Building
+        // it here — before this function returns, before the loop barrier
+        // releases — and failing the whole start closed on any coherence
+        // defect is the positive Phase 7B dispatch-authority guard that
+        // replaces the prior temporary
+        // `dynamic_selection_dispatch_not_wired` interlock.
+        let (host_pool_present, dispatch_authority) = match (outcome.plan.as_ref(), outcome.host_pool)
+        {
+            (Some(plan), Some(host_pool)) => {
+                let plan_id = plan_id.expect("plan_id is Some whenever outcome.plan is Some");
+                match crate::dynamic_selection_dispatch_authority::build_dynamic_paper_enforced_dispatch_authority(
+                    run_id, plan, plan_id, host_pool,
+                ) {
+                    Ok(authority) => (true, authority),
+                    Err(build_err) => {
+                        return Err(RuntimeLifecycleError::forbidden(
+                            "runtime.start_refused.dynamic_selection_dispatch_authority_invalid",
+                            "dynamic_selection_dispatch_authority",
+                            format!(
+                                "dynamic selection paper_enforced start refused: the selected-host \
+                                 dispatch authority could not be built coherently from the frozen \
+                                 plan and host pool for run_id={run_id}: {build_err:?} (code={}) \
+                                 (DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7B-SELECTED-HOST-\
+                                 ECONOMIC-DISPATCH-CLOSURE)",
+                                build_err.code(),
+                            ),
+                        ));
+                    }
+                }
+            }
+            _ => (
+                false,
+                crate::dynamic_selection_dispatch_authority::RuntimeStrategyDispatchAuthority::Legacy {
+                    assignments: snapshot.legacy_assignments(),
+                },
+            ),
+        };
+
+        Ok((
+            DynamicSelectionRuntimeState {
+                run_id,
+                disposition: outcome.disposition,
+                configured_mode: effective.configured_mode,
+                effective_mode: effective.effective_mode,
+                live_lock_applied: effective.live_lock_applied,
+                plan: outcome.plan.map(Arc::new),
+                plan_id,
+                selected_pairs,
+                host_pool_present,
+                reasons: outcome.reasons,
+                approved_for_live: false,
+            },
+            dispatch_authority,
+        ))
     }
 
     pub async fn start_execution_runtime(
@@ -1350,7 +1385,7 @@ impl AppState {
         // committed to `AppState` later, inside the same atomic
         // start-commit sequence that publishes every other run-start
         // effect — never here.
-        let dynamic_selection_outcome = self
+        let (dynamic_selection_outcome, dispatch_authority) = self
             .build_dynamic_selection_start_snapshot(run_id, &start_attempt_snapshot)
             .await?;
 
@@ -1369,19 +1404,18 @@ impl AppState {
             ));
         }
 
-        // DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7A-ATOMICITY-SINGLE-
-        // SNAPSHOT-REPAIR requirement 7: temporary `paper_enforced`
-        // interlock. Phase 7B selected-host economic dispatch is not wired
-        // -- a `paper_enforced`-effective start must never fall through to
-        // the legacy economic path. Refuses before arm/begin/spawn -- the
-        // run row is left `Created`, and the evaluated-but-refused outcome
-        // is discarded here, never committed to `AppState` (no active
-        // pool/state survives a refused attempt).
-        if let Some(err) =
-            paper_enforced_dispatch_not_wired_refusal(&dynamic_selection_outcome, run_id)
-        {
-            return Err(err);
-        }
+        // PHASE-7B-SELECTED-HOST-ECONOMIC-DISPATCH-CLOSURE Part 9: the prior
+        // temporary `paper_enforced` interlock
+        // (`paper_enforced_dispatch_not_wired_refusal`) is removed — the
+        // positive dispatch-authority guard now lives inside
+        // `build_dynamic_selection_start_snapshot` itself
+        // (`build_dynamic_paper_enforced_dispatch_authority` fails the whole
+        // start closed on any coherence defect before this point is ever
+        // reached). `PaperEnforcedAllowed` may now proceed through arm/
+        // begin/barrier/Active carrying `dispatch_authority ==
+        // DynamicPaperEnforced`; `PaperEnforcedRefused` still blocks inside
+        // `build_dynamic_selection_start_snapshot` above; `Off`/`Shadow`
+        // always carry `dispatch_authority == Legacy`.
 
         // DAILY-DATA-READINESS-01C-ENFORCEMENT-01 / REPAIR 3-4
         // (DAILY-DATA-READINESS-01C-CLOSURE-REPAIR-01): advance the
@@ -1420,6 +1454,7 @@ impl AppState {
             )),
             orchestrator: std::sync::Mutex::new(None),
             dynamic_selection_outcome: std::sync::Mutex::new(Some(dynamic_selection_outcome)),
+            dispatch_authority: std::sync::Mutex::new(Some(dispatch_authority)),
             start_phase: std::sync::Mutex::new(
                 crate::daily_data_readiness::RuntimeStartPhase::BeforeArm,
             ),
@@ -2086,6 +2121,15 @@ struct ProductionRuntimeStartEffects<'a> {
     /// `spawn_loop` below instead of letting the loop re-read env/watchlist
     /// state a third time.
     legacy_assignments: Vec<crate::state::SymbolStrategyAssignment>,
+    /// PHASE-7B-SELECTED-HOST-ECONOMIC-DISPATCH-CLOSURE Part 1: the one
+    /// frozen run-scoped dispatch authority built by
+    /// `build_dynamic_selection_start_snapshot` — `Legacy` for `Off`/
+    /// `Shadow`, `DynamicPaperEnforced` only for `PaperEnforcedAllowed`.
+    /// Consumed exactly once by `spawn_loop`, which moves it wholesale into
+    /// `spawn_execution_loop` — never cloned, never rebuilt.
+    dispatch_authority: std::sync::Mutex<
+        Option<crate::dynamic_selection_dispatch_authority::RuntimeStrategyDispatchAuthority>,
+    >,
     /// ATOMIC-OWNERSHIP-AND-ROLLBACK-TRUTH-01 requirement 4: how far this
     /// attempt has progressed. Updated synchronously (no `.await` held)
     /// at every milestone; read back by `start_phase_reached`.
@@ -2566,12 +2610,29 @@ impl crate::daily_data_readiness::RuntimeStartEffects for ProductionRuntimeStart
         // touch) until this barrier is released, which only happens below,
         // strictly after `install_active_runtime` has atomically installed
         // this exact handle as `Active` for `run_id`.
+        // PHASE-7B-SELECTED-HOST-ECONOMIC-DISPATCH-CLOSURE Part 1/3: move the
+        // one frozen dispatch authority (built once, before this point, by
+        // `build_dynamic_selection_start_snapshot`) wholesale into the
+        // spawned loop task — never cloned, never rebuilt. Taken from the
+        // Mutex exactly once per start attempt, matching this trait's
+        // existing single-consumption convention for `orchestrator`/
+        // `native_strategy_bootstrap`/`dynamic_selection_outcome` above.
+        let dispatch_authority = self
+            .dispatch_authority
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .take()
+            .unwrap_or_else(|| {
+                crate::dynamic_selection_dispatch_authority::RuntimeStrategyDispatchAuthority::Legacy {
+                    assignments: self.legacy_assignments.clone(),
+                }
+            });
         let (barrier_tx, barrier_rx) = tokio::sync::oneshot::channel();
         let handle = spawn_execution_loop(
             Arc::clone(self.state),
             orchestrator,
             run_id,
-            self.legacy_assignments.clone(),
+            dispatch_authority,
             barrier_rx,
         );
         if let Err(install_err) = self.state.install_active_runtime(run_id, handle).await {
@@ -2727,6 +2788,7 @@ impl AppState {
             orchestrator: std::sync::Mutex::new(None),
             dynamic_selection_outcome: std::sync::Mutex::new(dynamic_selection_outcome),
             legacy_assignments: Vec::new(),
+            dispatch_authority: std::sync::Mutex::new(None),
             start_phase: std::sync::Mutex::new(
                 crate::daily_data_readiness::RuntimeStartPhase::BeforeArm,
             ),
@@ -2768,6 +2830,7 @@ impl AppState {
             orchestrator: std::sync::Mutex::new(None),
             dynamic_selection_outcome: std::sync::Mutex::new(dynamic_selection_outcome),
             legacy_assignments: Vec::new(),
+            dispatch_authority: std::sync::Mutex::new(None),
             start_phase: std::sync::Mutex::new(
                 crate::daily_data_readiness::RuntimeStartPhase::BeforeArm,
             ),
@@ -2938,8 +3001,9 @@ mod real_production_effects_matrix_tests {
             effective_mode: mqk_portfolio::DynamicSelectionMode::Off,
             live_lock_applied: false,
             plan: None,
+            plan_id: None,
             selected_pairs: Vec::new(),
-            host_pool: None,
+            host_pool_present: false,
             reasons: Vec::new(),
             approved_for_live: false,
         }
@@ -2958,8 +3022,9 @@ mod real_production_effects_matrix_tests {
             effective_mode: mqk_portfolio::DynamicSelectionMode::Shadow,
             live_lock_applied: false,
             plan: None,
+            plan_id: None,
             selected_pairs: vec![("AAPL".to_string(), "swing_momentum".to_string(), 300)],
-            host_pool: None,
+            host_pool_present: false,
             reasons: Vec::new(),
             approved_for_live: false,
         }
@@ -2978,8 +3043,9 @@ mod real_production_effects_matrix_tests {
             effective_mode: mqk_portfolio::DynamicSelectionMode::Shadow,
             live_lock_applied: false,
             plan: None,
+            plan_id: None,
             selected_pairs: Vec::new(),
-            host_pool: None,
+            host_pool_present: false,
             reasons: vec![
                 crate::dynamic_selection_start_gate::DynamicSelectionStartGateReason::PlanInvalid {
                     truth_state: "test_injected_invalid".to_string(),
@@ -3365,7 +3431,7 @@ mod real_production_effects_matrix_tests {
             "SUCCESS-02: selected pairs must be preserved exactly"
         );
         assert!(
-            snapshot.host_pool.is_none(),
+            !snapshot.host_pool_present,
             "SUCCESS-02: Shadow must never retain a host pool"
         );
         assert!(!snapshot.approved_for_live);
@@ -3445,7 +3511,7 @@ mod real_production_effects_matrix_tests {
             crate::dynamic_selection_start_gate::DynamicSelectionStartGateDisposition::ShadowInvalid
         ));
         assert!(snapshot.selected_pairs.is_empty());
-        assert!(snapshot.host_pool.is_none());
+        assert!(!snapshot.host_pool_present);
         assert_eq!(
             snapshot.reasons.len(),
             1,
@@ -4756,7 +4822,7 @@ mod dynamic_selection_start_snapshot_tests {
             .await;
         clear_dynamic_selection_env();
 
-        let outcome = result.expect("Off must never refuse the start");
+        let (outcome, dispatch_authority) = result.expect("Off must never refuse the start");
         assert_eq!(
             outcome.disposition,
             crate::dynamic_selection_start_gate::DynamicSelectionStartGateDisposition::Off
@@ -4776,10 +4842,11 @@ mod dynamic_selection_start_snapshot_tests {
         );
         assert!(outcome.plan.is_none());
         assert!(outcome.selected_pairs.is_empty());
-        assert!(outcome.host_pool.is_none());
+        assert!(!outcome.host_pool_present);
         assert!(outcome.reasons.is_empty());
         assert!(!outcome.approved_for_live);
         assert_eq!(outcome.run_id, run_id);
+        assert!(!dispatch_authority.is_dynamic_paper_enforced());
     }
 
     /// Off: mode env var unset (the honest default) on Paper+Alpaca — Off
@@ -4799,7 +4866,7 @@ mod dynamic_selection_start_snapshot_tests {
             b"mqk-daemon.phase7a.off_default",
         );
         let snapshot = StartAttemptAuthoritySnapshot::resolve(&state).await;
-        let outcome = state
+        let (outcome, _dispatch_authority) = state
             .build_dynamic_selection_start_snapshot(run_id, &snapshot)
             .await
             .expect("Off must never refuse the start");
@@ -4841,15 +4908,16 @@ mod dynamic_selection_start_snapshot_tests {
             .await;
         clear_dynamic_selection_env();
 
-        let outcome =
+        let (outcome, dispatch_authority) =
             result.expect("Shadow must never refuse the start, even on its own config failure");
         assert_eq!(
             outcome.disposition,
             crate::dynamic_selection_start_gate::DynamicSelectionStartGateDisposition::ShadowInvalid
         );
         assert!(outcome.plan.is_none());
-        assert!(outcome.host_pool.is_none());
+        assert!(!outcome.host_pool_present);
         assert!(outcome.selected_pairs.is_empty());
+        assert!(!dispatch_authority.is_dynamic_paper_enforced());
         assert_eq!(outcome.reasons.len(), 1);
         assert!(matches!(
             &outcome.reasons[0],
@@ -4920,13 +4988,13 @@ mod dynamic_selection_start_snapshot_tests {
             .await;
         clear_dynamic_selection_env();
 
-        let outcome = result.expect("Shadow must never refuse the start");
+        let (outcome, _dispatch_authority) = result.expect("Shadow must never refuse the start");
         assert_eq!(
             outcome.disposition,
             crate::dynamic_selection_start_gate::DynamicSelectionStartGateDisposition::ShadowInvalid
         );
         assert!(outcome.plan.is_none());
-        assert!(outcome.host_pool.is_none());
+        assert!(!outcome.host_pool_present);
         assert_eq!(
             outcome.reasons,
             vec![
@@ -4997,14 +5065,15 @@ mod dynamic_selection_start_snapshot_tests {
             .await;
         clear_dynamic_selection_env();
 
-        let outcome = result.expect("Off must never refuse the start");
+        let (outcome, dispatch_authority) = result.expect("Off must never refuse the start");
         assert_eq!(
             outcome.disposition,
             crate::dynamic_selection_start_gate::DynamicSelectionStartGateDisposition::Off
         );
         assert!(outcome.live_lock_applied);
-        assert!(outcome.host_pool.is_none());
+        assert!(!outcome.host_pool_present);
         assert!(outcome.plan.is_none());
+        assert!(!dispatch_authority.is_dynamic_paper_enforced());
     }
 }
 
@@ -5035,8 +5104,9 @@ mod dynamic_selection_cleanup_contract_tests {
             effective_mode: mqk_portfolio::DynamicSelectionMode::Off,
             live_lock_applied: false,
             plan: None,
+            plan_id: None,
             selected_pairs: Vec::new(),
-            host_pool: None,
+            host_pool_present: false,
             reasons: Vec::new(),
             approved_for_live: false,
         }
@@ -5463,74 +5533,21 @@ mod dynamic_selection_cleanup_contract_tests {
 }
 
 // ---------------------------------------------------------------------------
-// DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7A-ATOMICITY-SINGLE-SNAPSHOT-
-// REPAIR requirement 7: `paper_enforced_dispatch_not_wired_refusal` proof.
-// Pure function, no DB/credentials/broker — direct unit coverage of the
-// interlock decision independent of the full start path.
+// PHASE-7B-SELECTED-HOST-ECONOMIC-DISPATCH-CLOSURE Part 9: the prior
+// temporary `paper_enforced_dispatch_not_wired_refusal` interlock (and its
+// dedicated unit-test module) is removed — replaced by the positive
+// dispatch-authority guard embedded in `build_dynamic_selection_start_
+// snapshot` (which now returns `Ok((state, DynamicPaperEnforced{..}))` for a
+// coherent `PaperEnforcedAllowed` plan instead of refusing). That guard's
+// pure, directly-testable core is
+// `crate::dynamic_selection_dispatch_authority::build_dynamic_paper_
+// enforced_dispatch_authority` (see that module's own unit tests) and the
+// full end-to-end proof lives in the `dynamic_selection_start_snapshot_tests`
+// module above (`live_capital_resolves_off_and_stores_no_pool` and friends,
+// each now asserting `!dispatch_authority.is_dynamic_paper_enforced()` for
+// every non-`PaperEnforcedAllowed` disposition) and in the Phase 7B closure
+// tests (`dynamic_selection_phase7b_dispatch_tests`, below).
 // ---------------------------------------------------------------------------
-#[cfg(test)]
-mod paper_enforced_interlock_tests {
-    use super::*;
-
-    fn outcome(
-        effective_mode: mqk_portfolio::DynamicSelectionMode,
-        disposition: crate::dynamic_selection_start_gate::DynamicSelectionStartGateDisposition,
-    ) -> DynamicSelectionRuntimeState {
-        DynamicSelectionRuntimeState {
-            run_id: uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_DNS, b"phase7a.interlock.fixture"),
-            disposition,
-            configured_mode: effective_mode,
-            effective_mode,
-            live_lock_applied: false,
-            plan: None,
-            selected_pairs: Vec::new(),
-            host_pool: None,
-            reasons: Vec::new(),
-            approved_for_live: false,
-        }
-    }
-
-    #[test]
-    fn paper_enforced_allowed_is_refused() {
-        let o = outcome(
-            mqk_portfolio::DynamicSelectionMode::PaperEnforced,
-            crate::dynamic_selection_start_gate::DynamicSelectionStartGateDisposition::PaperEnforcedAllowed,
-        );
-        let err = paper_enforced_dispatch_not_wired_refusal(&o, o.run_id)
-            .expect("paper_enforced_allowed must be refused until Phase 7B is wired");
-        assert_eq!(
-            err.fault_class(),
-            "runtime.start_refused.dynamic_selection_dispatch_not_wired"
-        );
-    }
-
-    #[test]
-    fn off_is_never_refused() {
-        let o = outcome(
-            mqk_portfolio::DynamicSelectionMode::Off,
-            crate::dynamic_selection_start_gate::DynamicSelectionStartGateDisposition::Off,
-        );
-        assert!(paper_enforced_dispatch_not_wired_refusal(&o, o.run_id).is_none());
-    }
-
-    #[test]
-    fn shadow_allowed_is_never_refused() {
-        let o = outcome(
-            mqk_portfolio::DynamicSelectionMode::Shadow,
-            crate::dynamic_selection_start_gate::DynamicSelectionStartGateDisposition::ShadowAllowed,
-        );
-        assert!(paper_enforced_dispatch_not_wired_refusal(&o, o.run_id).is_none());
-    }
-
-    #[test]
-    fn shadow_invalid_is_never_refused() {
-        let o = outcome(
-            mqk_portfolio::DynamicSelectionMode::Shadow,
-            crate::dynamic_selection_start_gate::DynamicSelectionStartGateDisposition::ShadowInvalid,
-        );
-        assert!(paper_enforced_dispatch_not_wired_refusal(&o, o.run_id).is_none());
-    }
-}
 
 // ---------------------------------------------------------------------------
 // DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7A-SINGLE-FROZEN-FLEET-
