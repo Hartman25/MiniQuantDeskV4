@@ -230,6 +230,18 @@ pub(crate) enum ExecutionLoopCommand {
 #[derive(Debug)]
 pub(crate) struct ExecutionLoopExit {
     pub(crate) note: Option<String>,
+    /// PHASE-7A-R6-EXHAUSTIVE-MATRIX-CLOSURE-REPAIR-01: the outcome of this
+    /// task releasing the orchestrator's runtime leadership lease before
+    /// exiting, if it held one. `None` only when the task exited without
+    /// ever owning a lease to release (not applicable to any current exit
+    /// path — every exit, pre- or post-barrier, releases first — but kept
+    /// `Option` rather than assumed-`Some` so a future exit path that
+    /// genuinely never acquires the lease is not forced to fabricate an
+    /// outcome). Never reduced to a log line: the caller that joins this
+    /// handle (`install_active_runtime`'s conflict-cleanup path, or
+    /// `clear_local_runtime_for_run`'s stop/halt/shutdown/reap path) must
+    /// fold this into its own structured truth instead of discarding it.
+    pub(crate) leadership_release_outcome: Option<Result<(), String>>,
 }
 
 #[derive(Debug)]
@@ -422,27 +434,81 @@ impl fmt::Display for PrepareStartingMetadataError {
     }
 }
 
+/// PHASE-7A-R6-EXHAUSTIVE-MATRIX-CLOSURE-REPAIR-01 Part 1 requirement 3:
+/// structured truth about the just-spawned task that `install_active_
+/// runtime` stopped and joined on any conflict/mismatch, instead of
+/// discarding the join result (`let _ = handle.join_handle.await;`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct InstallRuntimeTaskCleanup {
+    /// `Ok(())` when `handle.join_handle.await` resolved normally. `Err(_)`
+    /// when the join itself failed (the spawned task panicked) — never
+    /// discarded via `let _ =`.
+    pub(crate) join_outcome: Result<(), String>,
+    /// The task's own `ExecutionLoopExit::leadership_release_outcome` when
+    /// the join succeeded. `None` when the join itself failed (a panicked
+    /// task's exit value is unavailable — its release outcome, if any, is
+    /// genuinely unknown, not silently assumed `Ok`).
+    pub(crate) leadership_release_outcome: Option<Result<(), String>>,
+}
+
+impl InstallRuntimeTaskCleanup {
+    /// `true` when either the join failed (task panicked — its cleanup
+    /// truth is unknown) or the task reported a failed leadership release.
+    /// Callers use this to decide whether the resulting rollback/degraded
+    /// truth must be surfaced rather than treated as an ordinary clean
+    /// refusal.
+    pub(crate) fn is_degraded(&self) -> bool {
+        self.join_outcome.is_err()
+            || self
+                .leadership_release_outcome
+                .as_ref()
+                .is_some_and(|r| r.is_err())
+    }
+}
+
 /// Typed failure from `AppState::install_active_runtime` — the `Starting {
 /// run_id, metadata } -> Active { run_id, metadata, handle }` transition.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum InstallActiveRuntimeError {
     /// The slot is not `Starting` for this run_id at all (`Idle`/`Reserved`).
-    NotStarting,
+    NotStarting { cleanup: InstallRuntimeTaskCleanup },
     /// The slot is `Starting` for a *different* run_id.
-    StartingForDifferentRun { starting_run_id: Uuid },
+    StartingForDifferentRun {
+        starting_run_id: Uuid,
+        cleanup: InstallRuntimeTaskCleanup,
+    },
     /// The slot is already `Active` — a second install was attempted.
-    AlreadyActive { active_run_id: Uuid },
+    AlreadyActive {
+        active_run_id: Uuid,
+        cleanup: InstallRuntimeTaskCleanup,
+    },
+}
+
+impl InstallActiveRuntimeError {
+    /// Consumes `self`, returning the task-side cleanup truth every variant
+    /// carries — the caller (`ProductionRuntimeStartEffects::spawn_loop`)
+    /// folds this into its own structured rollback truth instead of
+    /// matching on the specific refusal reason.
+    pub(crate) fn into_cleanup(self) -> InstallRuntimeTaskCleanup {
+        match self {
+            Self::NotStarting { cleanup }
+            | Self::StartingForDifferentRun { cleanup, .. }
+            | Self::AlreadyActive { cleanup, .. } => cleanup,
+        }
+    }
 }
 
 impl fmt::Display for InstallActiveRuntimeError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::NotStarting => write!(f, "runtime ownership is not Starting"),
-            Self::StartingForDifferentRun { starting_run_id } => write!(
+            Self::NotStarting { .. } => write!(f, "runtime ownership is not Starting"),
+            Self::StartingForDifferentRun {
+                starting_run_id, ..
+            } => write!(
                 f,
                 "runtime ownership is Starting for a different run_id: {starting_run_id}"
             ),
-            Self::AlreadyActive { active_run_id } => write!(
+            Self::AlreadyActive { active_run_id, .. } => write!(
                 f,
                 "runtime ownership is already active for run_id: {active_run_id}"
             ),
@@ -483,6 +549,25 @@ pub(crate) struct LocalRuntimeClearOutcome {
     pub(crate) stopped_live_handle: bool,
     /// `Some(detail)` when joining the handle failed (a panic in the task).
     pub(crate) join_error: Option<String>,
+    /// PHASE-7A-R6-EXHAUSTIVE-MATRIX-CLOSURE-REPAIR-01: the joined task's
+    /// own `ExecutionLoopExit::leadership_release_outcome`, when the join
+    /// succeeded. `None` when no live handle was found, or when the join
+    /// itself failed (`join_error` is `Some` instead).
+    pub(crate) leadership_release_outcome: Option<Result<(), String>>,
+}
+
+impl LocalRuntimeClearOutcome {
+    /// `true` when the joined task's cleanup could not be confirmed clean —
+    /// a join failure (panic) or a reported leadership-release failure.
+    /// Callers (stop/halt/shutdown/reap) must treat this as degraded truth,
+    /// never as a plain successful `Idle` transition.
+    pub(crate) fn is_degraded(&self) -> bool {
+        self.join_error.is_some()
+            || self
+                .leadership_release_outcome
+                .as_ref()
+                .is_some_and(|r| r.is_err())
+    }
 }
 
 // NOTE: `RuntimeStartPhase` lives in `crate::daily_data_readiness` (it must

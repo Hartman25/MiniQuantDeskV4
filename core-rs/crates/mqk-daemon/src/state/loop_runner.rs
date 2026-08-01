@@ -10,6 +10,7 @@
 //! broadcasts a halted status snapshot.
 
 use std::collections::BTreeMap;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -97,25 +98,36 @@ pub(super) fn spawn_execution_loop(
                     // economic work.
                     //
                     // BARRIER LEADERSHIP/TRUTH (PHASE-7A-FINAL-PRIVATE-
-                    // PRODUCTION-EFFECTS-PROOF): if this attempt's
-                    // `start_runtime_effects` acquired the orchestrator's
-                    // runtime leadership lease, dropping `orchestrator`
-                    // does NOT release an async DB lease — the drop is
-                    // synchronous (deliberately moved off the async
-                    // executor by `drop_outside_async_context`, since it
-                    // may embed a blocking-client runtime) and cannot await
-                    // the release. The lease must be released explicitly,
-                    // exactly once, before the drop.
-                    if let Err(release_err) = orchestrator.release_runtime_leadership().await {
-                        tracing::warn!(
-                            "runtime_lease_release_failed_before_barrier_release error={release_err}"
-                        );
-                    }
+                    // PRODUCTION-EFFECTS-PROOF, structured in PHASE-7A-R6-
+                    // EXHAUSTIVE-MATRIX-CLOSURE-REPAIR-01 Part 1): if this
+                    // attempt's `start_runtime_effects` acquired the
+                    // orchestrator's runtime leadership lease, dropping
+                    // `orchestrator` does NOT release an async DB lease —
+                    // the drop is synchronous (deliberately moved off the
+                    // async executor by `drop_outside_async_context`, since
+                    // it may embed a blocking-client runtime) and cannot
+                    // await the release. The lease must be released
+                    // explicitly, exactly once, before the drop — and the
+                    // outcome must reach the caller as structured truth on
+                    // `ExecutionLoopExit`, never reduced to only a log line.
+                    let release_outcome = orchestrator
+                        .release_runtime_leadership()
+                        .await
+                        .map_err(|release_err| {
+                            tracing::warn!(
+                                "runtime_lease_release_failed_before_barrier_release error={release_err}"
+                            );
+                            release_err.to_string()
+                        });
+                    state_arc
+                        .pre_barrier_leadership_release_count
+                        .fetch_add(1, Ordering::SeqCst);
                     drop_outside_async_context(orchestrator);
                     return ExecutionLoopExit {
                         note: Some(
                             "execution loop cancelled before startup barrier release".to_string(),
                         ),
+                        leadership_release_outcome: Some(release_outcome),
                     };
                 }
             }
@@ -127,16 +139,24 @@ pub(super) fn spawn_execution_loop(
                 // explicit-release requirement as the barrier-cancellation
                 // branch above.
                 let _ = changed;
-                if let Err(release_err) = orchestrator.release_runtime_leadership().await {
-                    tracing::warn!(
-                        "runtime_lease_release_failed_before_barrier_release error={release_err}"
-                    );
-                }
+                let release_outcome = orchestrator
+                    .release_runtime_leadership()
+                    .await
+                    .map_err(|release_err| {
+                        tracing::warn!(
+                            "runtime_lease_release_failed_before_barrier_release error={release_err}"
+                        );
+                        release_err.to_string()
+                    });
+                state_arc
+                    .pre_barrier_leadership_release_count
+                    .fetch_add(1, Ordering::SeqCst);
                 drop_outside_async_context(orchestrator);
                 return ExecutionLoopExit {
                     note: Some(
                         "execution loop stopped before startup barrier release".to_string(),
                     ),
+                    leadership_release_outcome: Some(release_outcome),
                 };
             }
         }
@@ -197,11 +217,16 @@ pub(super) fn spawn_execution_loop(
                                             .await;
                                     });
                                 }
-                                if let Err(release_err) = orchestrator.release_runtime_leadership().await {
-                                    tracing::warn!("runtime_lease_release_failed error={release_err}");
-                                }
+                                let release_outcome = orchestrator
+                                    .release_runtime_leadership()
+                                    .await
+                                    .map_err(|release_err| {
+                                        tracing::warn!("runtime_lease_release_failed error={release_err}");
+                                        release_err.to_string()
+                                    });
                                 let exit = ExecutionLoopExit {
                                     note: Some("execution loop halted: deadman expired".to_string()),
+                                    leadership_release_outcome: Some(release_outcome),
                                 };
                                 drop_outside_async_context(orchestrator);
                                 return exit;
@@ -256,11 +281,16 @@ pub(super) fn spawn_execution_loop(
                                             .await;
                                     });
                                 }
-                                if let Err(release_err) = orchestrator.release_runtime_leadership().await {
-                                    tracing::warn!("runtime_lease_release_failed error={release_err}");
-                                }
+                                let release_outcome = orchestrator
+                                    .release_runtime_leadership()
+                                    .await
+                                    .map_err(|release_err| {
+                                        tracing::warn!("runtime_lease_release_failed error={release_err}");
+                                        release_err.to_string()
+                                    });
                                 let exit = ExecutionLoopExit {
                                     note: Some(format!("execution loop halted: deadman check failed: {err}")),
+                                    leadership_release_outcome: Some(release_outcome),
                                 };
                                 drop_outside_async_context(orchestrator);
                                 return exit;
@@ -292,16 +322,19 @@ pub(super) fn spawn_execution_loop(
                             ig.disarmed = true;
                             ig.halted = true;
                         }
-                        if let Err(release_err) =
-                            orchestrator.release_runtime_leadership().await
-                        {
-                            tracing::warn!("runtime_lease_release_failed error={release_err}");
-                        }
+                        let release_outcome = orchestrator
+                            .release_runtime_leadership()
+                            .await
+                            .map_err(|release_err| {
+                                tracing::warn!("runtime_lease_release_failed error={release_err}");
+                                release_err.to_string()
+                            });
                         let exit = ExecutionLoopExit {
                             note: Some(
                                 "execution loop halted: Alpaca WS continuity gap detected"
                                     .to_string(),
                             ),
+                            leadership_release_outcome: Some(release_outcome),
                         };
                         drop_outside_async_context(orchestrator);
                         return exit;
@@ -319,11 +352,16 @@ pub(super) fn spawn_execution_loop(
                             let mut ig = integrity.write().await;
                             ig.halted = true;
                         }
-                        if let Err(release_err) = orchestrator.release_runtime_leadership().await {
-                            tracing::warn!("runtime_lease_release_failed error={release_err}");
-                        }
+                        let release_outcome = orchestrator
+                            .release_runtime_leadership()
+                            .await
+                            .map_err(|release_err| {
+                                tracing::warn!("runtime_lease_release_failed error={release_err}");
+                                release_err.to_string()
+                            });
                         let exit = ExecutionLoopExit {
                             note: Some(format!("execution loop halted: {err}")),
+                            leadership_release_outcome: Some(release_outcome),
                         };
                         drop_outside_async_context(orchestrator);
                         return exit;
@@ -384,15 +422,18 @@ pub(super) fn spawn_execution_loop(
                                         .await;
                                 });
                             }
-                            if let Err(release_err) =
-                                orchestrator.release_runtime_leadership().await
-                            {
-                                tracing::warn!("runtime_lease_release_failed error={release_err}");
-                            }
+                            let release_outcome = orchestrator
+                                .release_runtime_leadership()
+                                .await
+                                .map_err(|release_err| {
+                                    tracing::warn!("runtime_lease_release_failed error={release_err}");
+                                    release_err.to_string()
+                                });
                             let exit = ExecutionLoopExit {
                                 note: Some(
                                     "execution loop halted: deadman expired post-tick".to_string(),
                                 ),
+                                leadership_release_outcome: Some(release_outcome),
                             };
                             drop_outside_async_context(orchestrator);
                             return exit;
@@ -446,11 +487,16 @@ pub(super) fn spawn_execution_loop(
                                         .await;
                                 });
                             }
-                            if let Err(release_err) = orchestrator.release_runtime_leadership().await {
-                                tracing::warn!("runtime_lease_release_failed error={release_err}");
-                            }
+                            let release_outcome = orchestrator
+                                .release_runtime_leadership()
+                                .await
+                                .map_err(|release_err| {
+                                    tracing::warn!("runtime_lease_release_failed error={release_err}");
+                                    release_err.to_string()
+                                });
                             let exit = ExecutionLoopExit {
                                 note: Some(format!("execution loop heartbeat failed: {err}")),
+                                leadership_release_outcome: Some(release_outcome),
                             };
                             drop_outside_async_context(orchestrator);
                             return exit;
@@ -1273,12 +1319,17 @@ pub(super) fn spawn_execution_loop(
             }
         }
 
-        if let Err(err) = orchestrator.release_runtime_leadership().await {
-            tracing::warn!("runtime_lease_release_failed error={err}");
-        }
+        let release_outcome = orchestrator
+            .release_runtime_leadership()
+            .await
+            .map_err(|err| {
+                tracing::warn!("runtime_lease_release_failed error={err}");
+                err.to_string()
+            });
 
         let exit = ExecutionLoopExit {
             note: Some("execution loop stopped".to_string()),
+            leadership_release_outcome: Some(release_outcome),
         };
         drop_outside_async_context(orchestrator);
         exit

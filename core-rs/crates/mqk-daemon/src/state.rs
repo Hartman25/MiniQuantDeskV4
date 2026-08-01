@@ -166,8 +166,9 @@ pub use types::{
 };
 pub(crate) use types::{
     BoundedLifecycleDegradation, ExecutionLoopCommand, ExecutionLoopExit, ExecutionLoopHandle,
-    InstallActiveRuntimeError, LifecycleClearReason, LocalRuntimeClearOutcome,
-    LocalRuntimeOwnership, PrepareStartingMetadataError, RunStartMetadata,
+    InstallActiveRuntimeError, InstallRuntimeTaskCleanup, LifecycleClearReason,
+    LocalRuntimeClearOutcome, LocalRuntimeOwnership, PrepareStartingMetadataError,
+    RunStartMetadata,
 };
 pub use ws_gap_recovery::WsGapRecoveryOutcome;
 // Internal (crate-visible) re-exports used across this module.
@@ -803,6 +804,15 @@ pub struct AppState {
     /// outcome to a simulated failure. Always `false` in production and for
     /// every test that does not explicitly enable it.
     force_leadership_release_failure: Arc<AtomicBool>,
+    /// PHASE-7A-R6-EXHAUSTIVE-MATRIX-CLOSURE-REPAIR-01 Part 1 requirement 6:
+    /// counts how many times `spawn_execution_loop`'s two pre-barrier exit
+    /// branches (barrier-sender-dropped, stop-before-barrier-release)
+    /// released the orchestrator's runtime leadership lease. Incremented
+    /// unconditionally (a plain atomic increment, harmless in production);
+    /// only the `#[cfg(test)]` reader is test-only. Exists solely so a test
+    /// can prove "exactly once" for a given start attempt rather than
+    /// inferring it from the absence of a second failure.
+    pre_barrier_leadership_release_count: Arc<AtomicU32>,
 }
 
 /// ATOMIC-OWNERSHIP-AND-ROLLBACK-TRUTH-01 requirement 2: every locally-
@@ -1538,6 +1548,7 @@ impl AppState {
             hermetic_test_broker_override: Arc::new(RwLock::new(false)),
             force_install_active_runtime_conflict: Arc::new(AtomicBool::new(false)),
             force_leadership_release_failure: Arc::new(AtomicBool::new(false)),
+            pre_barrier_leadership_release_count: Arc::new(AtomicU32::new(0)),
         }
     }
 
@@ -3695,6 +3706,23 @@ operator_reconcile_or_repair_required"
                 // longer has a local owner, so every economic mirror for it
                 // is cleared too.
                 self.clear_economic_mirrors_for_run(run_id).await;
+                // PHASE-7A-R6-EXHAUSTIVE-MATRIX-CLOSURE-REPAIR-01 Part 4: a
+                // self-finished loop's own leadership-release outcome must
+                // not be silently discarded by a caller that only inspects
+                // `exit.note` — a reported release failure is degraded
+                // truth, recorded here so every caller (stop, halt) gets it
+                // for free instead of each having to re-check the reap
+                // result individually.
+                if let Some(Err(ref release_err)) = exit.leadership_release_outcome {
+                    self.note_local_runtime_degraded(
+                        run_id,
+                        BoundedLifecycleDegradation {
+                            operation: "reap_leadership_release",
+                            detail: release_err.clone(),
+                        },
+                    )
+                    .await;
+                }
                 Ok(Some(exit))
             }
             None => Ok(None),
@@ -3797,8 +3825,20 @@ operator_reconcile_or_repair_required"
         run_id: Uuid,
         handle: ExecutionLoopHandle,
     ) -> Result<(), InstallActiveRuntimeError> {
+        // PHASE-7A-R6-EXHAUSTIVE-MATRIX-CLOSURE-REPAIR-01 Part 1
+        // requirement 3: the refusal reason is determined first (still
+        // holding `lock`), then the just-spawned task is stopped and
+        // joined, and only then is the reason paired with the join's
+        // structured cleanup truth — never a discarded `let _ =
+        // handle.join_handle.await;`.
+        enum Reason {
+            NotStarting,
+            StartingForDifferentRun { starting_run_id: Uuid },
+            AlreadyActive { active_run_id: Uuid },
+        }
+
         let mut lock = self.runtime_ownership.lock().await;
-        let err = match &*lock {
+        let reason = match &*lock {
             LocalRuntimeOwnership::Starting {
                 run_id: starting,
                 metadata,
@@ -3814,7 +3854,7 @@ operator_reconcile_or_repair_required"
                 // branches below already use — no new lifecycle code, only
                 // a deterministic trigger for it.
                 if self.install_active_runtime_conflict_forced() {
-                    InstallActiveRuntimeError::NotStarting
+                    Reason::NotStarting
                 } else {
                     let metadata = Arc::clone(metadata);
                     *lock = LocalRuntimeOwnership::Active {
@@ -3827,20 +3867,39 @@ operator_reconcile_or_repair_required"
             }
             LocalRuntimeOwnership::Starting {
                 run_id: starting, ..
-            } => InstallActiveRuntimeError::StartingForDifferentRun {
+            } => Reason::StartingForDifferentRun {
                 starting_run_id: *starting,
             },
-            LocalRuntimeOwnership::Active { run_id: active, .. } => {
-                InstallActiveRuntimeError::AlreadyActive {
-                    active_run_id: *active,
-                }
-            }
-            _ => InstallActiveRuntimeError::NotStarting,
+            LocalRuntimeOwnership::Active { run_id: active, .. } => Reason::AlreadyActive {
+                active_run_id: *active,
+            },
+            _ => Reason::NotStarting,
         };
         drop(lock);
         let _ = handle.stop_tx.send(ExecutionLoopCommand::Stop);
-        let _ = handle.join_handle.await;
-        Err(err)
+        let cleanup = match handle.join_handle.await {
+            Ok(exit) => InstallRuntimeTaskCleanup {
+                join_outcome: Ok(()),
+                leadership_release_outcome: exit.leadership_release_outcome,
+            },
+            Err(join_err) => InstallRuntimeTaskCleanup {
+                join_outcome: Err(join_err.to_string()),
+                leadership_release_outcome: None,
+            },
+        };
+        Err(match reason {
+            Reason::NotStarting => InstallActiveRuntimeError::NotStarting { cleanup },
+            Reason::StartingForDifferentRun { starting_run_id } => {
+                InstallActiveRuntimeError::StartingForDifferentRun {
+                    starting_run_id,
+                    cleanup,
+                }
+            }
+            Reason::AlreadyActive { active_run_id } => InstallActiveRuntimeError::AlreadyActive {
+                active_run_id,
+                cleanup,
+            },
+        })
     }
 
     // -----------------------------------------------------------------
@@ -3905,8 +3964,13 @@ operator_reconcile_or_repair_required"
         if let LocalRuntimeOwnership::Active { handle, .. } = owned {
             outcome.stopped_live_handle = !handle.join_handle.is_finished();
             let _ = handle.stop_tx.send(ExecutionLoopCommand::Stop);
-            if let Err(err) = handle.join_handle.await {
-                outcome.join_error = Some(err.to_string());
+            match handle.join_handle.await {
+                Ok(exit) => {
+                    outcome.leadership_release_outcome = exit.leadership_release_outcome;
+                }
+                Err(err) => {
+                    outcome.join_error = Some(err.to_string());
+                }
             }
         }
 
@@ -4036,9 +4100,11 @@ operator_reconcile_or_repair_required"
             tokio::select! {
                 _ = stop_rx.changed() => ExecutionLoopExit {
                     note: Some("test loop stopped".to_string()),
+                    leadership_release_outcome: None,
                 },
                 _ = tokio::time::sleep(std::time::Duration::from_secs(86_400)) => ExecutionLoopExit {
                     note: None,
+                    leadership_release_outcome: None,
                 },
             }
         });
@@ -4150,6 +4216,17 @@ operator_reconcile_or_repair_required"
     pub(crate) fn set_leadership_release_failure_for_test(&self, enabled: bool) {
         self.force_leadership_release_failure
             .store(enabled, Ordering::SeqCst);
+    }
+
+    /// PHASE-7A-R6-EXHAUSTIVE-MATRIX-CLOSURE-REPAIR-01 Part 1 requirement 6:
+    /// read back how many times a pre-barrier exit branch released the
+    /// runtime leadership lease, for a test to assert "exactly once" rather
+    /// than infer it. `pub(crate)` + `#[cfg(test)]` — never reachable from
+    /// production code.
+    #[cfg(test)]
+    pub(crate) fn pre_barrier_leadership_release_count_for_test(&self) -> u32 {
+        self.pre_barrier_leadership_release_count
+            .load(Ordering::SeqCst)
     }
 
     /// Test helper: install (or clear, via `None`) a fault-injection seam
@@ -4278,9 +4355,11 @@ impl AppState {
             tokio::select! {
                 _ = stop_rx.changed() => ExecutionLoopExit {
                     note: Some("test loop stopped".to_string()),
+                    leadership_release_outcome: None,
                 },
                 _ = tokio::time::sleep(std::time::Duration::from_secs(86_400)) => ExecutionLoopExit {
                     note: None,
+                    leadership_release_outcome: None,
                 },
             }
         });
@@ -5219,9 +5298,11 @@ mod ownership_state_machine_tests {
             tokio::select! {
                 _ = stop_rx.changed() => ExecutionLoopExit {
                     note: Some("test loop stopped".to_string()),
+                    leadership_release_outcome: None,
                 },
                 _ = tokio::time::sleep(std::time::Duration::from_secs(86_400)) => ExecutionLoopExit {
                     note: None,
+                    leadership_release_outcome: None,
                 },
             }
         });
@@ -5386,7 +5467,8 @@ mod ownership_state_machine_tests {
         assert!(matches!(
             err,
             InstallActiveRuntimeError::StartingForDifferentRun {
-                starting_run_id
+                starting_run_id,
+                ..
             } if starting_run_id == run_a
         ));
         assert!(matches!(
@@ -5952,6 +6034,7 @@ mod ownership_state_machine_tests {
             exited_clone.store(true, std::sync::atomic::Ordering::SeqCst);
             ExecutionLoopExit {
                 note: Some("test loop stopped".to_string()),
+                leadership_release_outcome: None,
             }
         });
         let handle_b = ExecutionLoopHandle {

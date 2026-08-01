@@ -1669,8 +1669,26 @@ pub struct LocalRollbackOutcome {
     /// `Some(Err(_))` when this attempt had acquired the orchestrator's
     /// runtime leadership lease and releasing it failed. `None` when no
     /// lease was ever held for this attempt (e.g. the attempt failed before
-    /// the orchestrator was constructed, or reservation itself conflicted).
+    /// the orchestrator was constructed, or reservation itself conflicted),
+    /// OR when the lease was instead released by the spawned task itself
+    /// (see `task_side_leadership_release_outcome`) after the orchestrator
+    /// had already been handed off to it.
     pub leadership_release_outcome: Option<Result<(), String>>,
+    /// PHASE-7A-R6-EXHAUSTIVE-MATRIX-CLOSURE-REPAIR-01 Part 1: `Some(_)`
+    /// when the orchestrator had already been moved into the spawned
+    /// execution-loop task (a successful `spawn_loop` handoff) before a
+    /// barrier/install failure required that task to release the lease
+    /// itself, before `rollback_local_effects` ever ran (which finds
+    /// `self.orchestrator` already taken and has nothing left to release).
+    /// Distinct from `leadership_release_outcome` (released directly by
+    /// `ProductionRuntimeStartEffects` before any handoff) so a test can
+    /// assert precisely which code path performed the exactly-once release.
+    pub task_side_leadership_release_outcome: Option<Result<(), String>>,
+    /// `Some(Err(_))` when the join of that spawned task's handle itself
+    /// failed (the task panicked) — never discarded via `let _ =`. `None`
+    /// when no task was ever spawned for this attempt, or the join
+    /// succeeded.
+    pub task_side_join_outcome: Option<Result<(), String>>,
 }
 
 /// ATOMIC-OWNERSHIP-AND-ROLLBACK-TRUTH-01 requirement 5: bounded, structured
@@ -1719,6 +1737,16 @@ impl RollbackOutcome {
             || self
                 .local
                 .leadership_release_outcome
+                .as_ref()
+                .is_some_and(|r| r.is_err())
+            || self
+                .local
+                .task_side_leadership_release_outcome
+                .as_ref()
+                .is_some_and(|r| r.is_err())
+            || self
+                .local
+                .task_side_join_outcome
                 .as_ref()
                 .is_some_and(|r| r.is_err())
     }

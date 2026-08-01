@@ -1424,6 +1424,8 @@ impl AppState {
                 crate::daily_data_readiness::RuntimeStartPhase::BeforeArm,
             ),
             leadership_release_outcome: std::sync::Mutex::new(None),
+            task_side_leadership_release_outcome: std::sync::Mutex::new(None),
+            task_side_join_outcome: std::sync::Mutex::new(None),
         };
         let mut lifecycle_trace: Vec<&'static str> = Vec::new();
         crate::daily_data_readiness::advance_run_to_active(
@@ -1705,10 +1707,33 @@ impl AppState {
             return self.current_status_snapshot().await;
         };
 
-        if let Some(join_err) = outcome.join_error {
+        // PHASE-7A-R6-EXHAUSTIVE-MATRIX-CLOSURE-REPAIR-01 Part 4: a join
+        // failure (task panic) or a reported leadership-release failure
+        // both mean this run's true final state is unconfirmed — ownership
+        // was already unconditionally moved to `Idle` by the clear above,
+        // so without this the operator would see a clean-looking `Idle`
+        // instead of the truth. Mark `Degraded` before returning, exactly
+        // like the pre-existing `stop_run`-failure branch below already
+        // does for a durable-transition failure.
+        if outcome.is_degraded() {
+            let detail = match (&outcome.join_error, &outcome.leadership_release_outcome) {
+                (Some(join_err), _) => format!("execution loop join failed: {join_err}"),
+                (None, Some(Err(release_err))) => {
+                    format!("runtime leadership release failed: {release_err}")
+                }
+                _ => "unknown degraded cleanup".to_string(),
+            };
+            self.note_local_runtime_degraded(
+                run_id,
+                crate::state::BoundedLifecycleDegradation {
+                    operation: "stop_join_or_release",
+                    detail: detail.clone(),
+                },
+            )
+            .await;
             return Err(RuntimeLifecycleError::internal(
-                "stop join failed",
-                join_err,
+                "stop join or release failed",
+                detail,
             ));
         }
 
@@ -1787,10 +1812,29 @@ impl AppState {
 
         let db = self.db_pool()?;
         if let Some((run_id, outcome)) = cleared {
-            if let Some(join_err) = outcome.join_error {
+            // PHASE-7A-R6-EXHAUSTIVE-MATRIX-CLOSURE-REPAIR-01 Part 4: same
+            // degraded-truth requirement as `stop_execution_runtime` — a
+            // join failure or reported release failure must not be
+            // followed by a silent `Idle`.
+            if outcome.is_degraded() {
+                let detail = match (&outcome.join_error, &outcome.leadership_release_outcome) {
+                    (Some(join_err), _) => format!("execution loop join failed: {join_err}"),
+                    (None, Some(Err(release_err))) => {
+                        format!("runtime leadership release failed: {release_err}")
+                    }
+                    _ => "unknown degraded cleanup".to_string(),
+                };
+                self.note_local_runtime_degraded(
+                    run_id,
+                    crate::state::BoundedLifecycleDegradation {
+                        operation: "halt_join_or_release",
+                        detail: detail.clone(),
+                    },
+                )
+                .await;
                 return Err(RuntimeLifecycleError::internal(
-                    "halt join failed",
-                    join_err,
+                    "halt join or release failed",
+                    detail,
                 ));
             }
             if let Err(err) = mqk_db::halt_run(&db, run_id, Utc::now()).await {
@@ -1955,8 +1999,27 @@ impl AppState {
         let Some((run_id, outcome)) = cleared else {
             return;
         };
-        if let Some(err) = outcome.join_error {
-            tracing::warn!("shutdown join failed for {run_id}: {err}");
+        // PHASE-7A-R6-EXHAUSTIVE-MATRIX-CLOSURE-REPAIR-01 Part 4: same
+        // degraded-truth requirement as stop/halt — shutdown has no
+        // caller to return an `Err` to, but it must still record `Degraded`
+        // rather than leave a silent `Idle` behind an unconfirmed cleanup.
+        if outcome.is_degraded() {
+            let detail = match (&outcome.join_error, &outcome.leadership_release_outcome) {
+                (Some(join_err), _) => format!("execution loop join failed: {join_err}"),
+                (None, Some(Err(release_err))) => {
+                    format!("runtime leadership release failed: {release_err}")
+                }
+                _ => "unknown degraded cleanup".to_string(),
+            };
+            tracing::warn!("shutdown join_or_release failed for {run_id}: {detail}");
+            self.note_local_runtime_degraded(
+                run_id,
+                crate::state::BoundedLifecycleDegradation {
+                    operation: "shutdown_join_or_release",
+                    detail,
+                },
+            )
+            .await;
             return;
         }
         let Some(db) = self.db.as_ref() else {
@@ -2034,6 +2097,17 @@ struct ProductionRuntimeStartEffects<'a> {
     /// `rollback_local_effects` into the structured `LocalRollbackOutcome`
     /// instead of only a `tracing::warn!` line.
     leadership_release_outcome: std::sync::Mutex<Option<Result<(), String>>>,
+    /// PHASE-7A-R6-EXHAUSTIVE-MATRIX-CLOSURE-REPAIR-01 Part 1: populated by
+    /// `spawn_loop` only when `install_active_runtime` fails *after* the
+    /// orchestrator was already handed off to the spawned task — the
+    /// task-side pre-barrier exit branch's own
+    /// `ExecutionLoopExit::leadership_release_outcome`, folded into
+    /// `rollback_local_effects`'s returned `LocalRollbackOutcome` instead of
+    /// being lost once `install_active_runtime` discarded it.
+    task_side_leadership_release_outcome: std::sync::Mutex<Option<Result<(), String>>>,
+    /// Same provenance as above: `Some(Err(_))` when joining the spawned
+    /// task itself failed (a panic), never discarded.
+    task_side_join_outcome: std::sync::Mutex<Option<Result<(), String>>>,
 }
 
 impl ProductionRuntimeStartEffects<'_> {
@@ -2451,9 +2525,39 @@ impl crate::daily_data_readiness::RuntimeStartEffects for ProductionRuntimeStart
             // sender here (rather than sending) is inert either way; no
             // detached task remains.
             drop(barrier_tx);
+            let message = format!("failed to install the spawned execution loop: {install_err}");
+            // PHASE-7A-R6-EXHAUSTIVE-MATRIX-CLOSURE-REPAIR-01 Part 1
+            // requirement 4/5: fold the task's own join/leadership-release
+            // truth into this attempt's rollback truth instead of letting
+            // `install_active_runtime`'s typed cleanup evaporate once this
+            // function returns only a `RuntimeStartEffectsError` string.
+            // `rollback_local_effects` (driven next by `advance_run_to_
+            // active`'s fail-closed rollback) reads these back into
+            // `LocalRollbackOutcome` — never a double release, since
+            // `self.orchestrator` is already `None` by this point (moved
+            // into the spawned task above).
+            let cleanup = install_err.into_cleanup();
+            if cleanup.is_degraded() {
+                tracing::error!(
+                    run_id = %run_id,
+                    "runtime_start_barrier_task_cleanup_degraded join_outcome={:?} \
+                     leadership_release_outcome={:?}",
+                    cleanup.join_outcome,
+                    cleanup.leadership_release_outcome,
+                );
+            }
+            *self
+                .task_side_join_outcome
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(cleanup.join_outcome);
+            *self
+                .task_side_leadership_release_outcome
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()) =
+                cleanup.leadership_release_outcome;
             return Err(RuntimeStartEffectsError::internal(
                 "runtime.start_refused.spawn_loop_install_failed",
-                format!("failed to install the spawned execution loop: {install_err}"),
+                message,
             ));
         }
         self.set_phase(RuntimeStartPhase::LoopInstalled);
@@ -2497,6 +2601,16 @@ impl crate::daily_data_readiness::RuntimeStartEffects for ProductionRuntimeStart
         crate::daily_data_readiness::LocalRollbackOutcome {
             leadership_release_outcome: self
                 .leadership_release_outcome
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take(),
+            task_side_leadership_release_outcome: self
+                .task_side_leadership_release_outcome
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take(),
+            task_side_join_outcome: self
+                .task_side_join_outcome
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .take(),
@@ -2560,6 +2674,8 @@ impl AppState {
                 crate::daily_data_readiness::RuntimeStartPhase::BeforeArm,
             ),
             leadership_release_outcome: std::sync::Mutex::new(None),
+            task_side_leadership_release_outcome: std::sync::Mutex::new(None),
+            task_side_join_outcome: std::sync::Mutex::new(None),
         };
         let mut trace: Vec<&'static str> = Vec::new();
         let result = crate::daily_data_readiness::advance_run_to_active(
@@ -3146,12 +3262,40 @@ mod real_production_effects_matrix_tests {
         // task before install failed) and must be released exactly once —
         // by the spawned task's pre-barrier exit path, not by
         // `rollback_local_effects` (which finds `self.orchestrator` already
-        // taken and returns `None` for this exact race).
+        // taken and has nothing left to release directly).
         assert_eq!(
             rollback.local.leadership_release_outcome, None,
             "BARRIER-TRUTH-01: by the time install_active_runtime fails, the \
              orchestrator has already been moved into the spawned task — \
-             rollback_local_effects has nothing left to release"
+             rollback_local_effects itself has nothing left to release \
+             (the release happens task-side instead; see \
+             task_side_leadership_release_outcome below)"
+        );
+        // PHASE-7A-R6-EXHAUSTIVE-MATRIX-CLOSURE-REPAIR-01 Part 1: the
+        // task-side release truth (previously only a `tracing::warn!` line,
+        // never reaching this struct) must now be visible here as genuine
+        // structured proof the lease was released exactly once.
+        assert_eq!(
+            rollback.local.task_side_leadership_release_outcome,
+            Some(Ok(())),
+            "BARRIER-TRUTH-01: the spawned task's own pre-barrier exit \
+             branch (stop-before-barrier-release) must have released the \
+             lease successfully, and that outcome must reach rollback \
+             truth instead of being discarded by install_active_runtime's \
+             join"
+        );
+        assert_eq!(
+            rollback.local.task_side_join_outcome,
+            Some(Ok(())),
+            "BARRIER-TRUTH-01: install_active_runtime's join of the \
+             stopped task must be recorded, not discarded via `let _ = \
+             handle.join_handle.await;`"
+        );
+        assert_eq!(
+            state.pre_barrier_leadership_release_count_for_test(),
+            1,
+            "BARRIER-TRUTH-01: the pre-barrier release path must fire \
+             exactly once for this attempt"
         );
 
         assert_eq!(
@@ -3840,8 +3984,12 @@ mod dynamic_selection_cleanup_contract_tests {
         // `execution_loop` write.
         let (stop_tx, _stop_rx) =
             tokio::sync::watch::channel(crate::state::types::ExecutionLoopCommand::Run);
-        let join_handle =
-            tokio::spawn(async { crate::state::types::ExecutionLoopExit { note: None } });
+        let join_handle = tokio::spawn(async {
+            crate::state::types::ExecutionLoopExit {
+                note: None,
+                leadership_release_outcome: None,
+            }
+        });
         // Let the trivial task actually finish before installing it, so
         // `reap_finished_execution_loop`'s `is_finished()` check takes the
         // "already finished" branch deterministically.
