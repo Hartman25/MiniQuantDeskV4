@@ -18,10 +18,16 @@
 #   1. No default-build production-reachable Phase 7A effects-driver or
 #      ownership-mutation bypass (delegates to
 #      check_no_phase7a_production_effects_bypass.ps1).
-#   2. The `paper_enforced` -> Phase 7B-dispatch-not-wired interlock string
-#      is still present verbatim in state/lifecycle.rs -- Phase 7B
-#      selected-host economic dispatch has not been silently wired in by
-#      this patch.
+#   2. PHASE-7B-SELECTED-HOST-ECONOMIC-DISPATCH-CLOSURE Part 9: the prior
+#      `paper_enforced` -> Phase-7B-dispatch-not-wired interlock has been
+#      intentionally replaced (not merely deleted) by a positive
+#      dispatch-authority guard now embedded in
+#      `build_dynamic_selection_start_snapshot`. This check proves the
+#      replacement is genuine: the OLD refusal fault-class string must be
+#      GONE from state/lifecycle.rs, and the NEW guard's fault-class string
+#      must be PRESENT. Phase 7B's own closure guard
+#      (check_phase7b_selected_host_dispatch_closure.ps1) is the full proof
+#      of the new contract; this check only guards against a silent revert.
 #   3. The economic dispatch body inside `spawn_execution_loop` is
 #      unchanged, by running the crate's OWN established structural guard
 #      test (`scenario_bundle7_phase7a_loop_runner_unchanged_guard_01`)
@@ -73,38 +79,25 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 # ---------------------------------------------------------------------------
-# Check 2: the paper_enforced / Phase-7B-not-wired interlock -- behaviorally
-# executed, not merely grepped. PHASE-7A-R6-EXHAUSTIVE-MATRIX-CLOSURE-
-# REPAIR-01: string presence alone does not prove the refusal actually
-# fires; this now also runs the crate's own unit test that directly drives
-# `paper_enforced_dispatch_not_wired_refusal` against a constructed
-# PaperEnforcedAllowed outcome and asserts the exact fault_class comes back.
-# The string check is kept as a cheap first signal (a byte-identical
-# fault_class string the test itself also asserts on), but is no longer the
-# sole proof.
+# Check 2: PHASE-7B Part 9 -- the old interlock is genuinely gone (not
+# merely bypassed) and the new positive dispatch-authority guard is present.
 # ---------------------------------------------------------------------------
 Write-Host ""
-Write-Host "-- Check 2: paper_enforced dispatch-not-wired interlock behaviorally executes --"
+Write-Host "-- Check 2: Phase 7A interlock replaced by Phase 7B dispatch-authority guard --"
 $LifecycleFile = Join-Path $RepoRoot "core-rs\crates\mqk-daemon\src\state\lifecycle.rs"
-$InterlockHit = Select-String -Path $LifecycleFile -Pattern "runtime.start_refused.dynamic_selection_dispatch_not_wired" -SimpleMatch
-if (-not $InterlockHit) {
-    Write-Host " FAIL -- interlock fault_class string not found in $LifecycleFile" -ForegroundColor Red
+$OldInterlockHit = Select-String -Path $LifecycleFile -Pattern "runtime.start_refused.dynamic_selection_dispatch_not_wired" -SimpleMatch
+if ($OldInterlockHit) {
+    Write-Host " FAIL -- old dispatch-not-wired interlock string still present at line $($OldInterlockHit[0].LineNumber); Phase 7B must remove it, not layer on top of it" -ForegroundColor Red
     $Failures++
 } else {
-    Write-Host " OK -- interlock string present at line $($InterlockHit[0].LineNumber)" -ForegroundColor Green
+    Write-Host " OK -- old dispatch-not-wired interlock string is gone" -ForegroundColor Green
 }
-
-Push-Location (Join-Path $RepoRoot "core-rs")
-try {
-    & cargo test -p mqk-daemon --lib paper_enforced_allowed_is_refused
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host " FAIL -- paper_enforced_allowed_is_refused did not pass (behavioral proof)" -ForegroundColor Red
-        $Failures++
-    } else {
-        Write-Host " OK -- paper_enforced_allowed_is_refused behaviorally proves the refusal fires" -ForegroundColor Green
-    }
-} finally {
-    Pop-Location
+$NewGuardHit = Select-String -Path $LifecycleFile -Pattern "runtime.start_refused.dynamic_selection_dispatch_authority_invalid" -SimpleMatch
+if (-not $NewGuardHit) {
+    Write-Host " FAIL -- new Phase 7B dispatch-authority guard fault_class string not found in $LifecycleFile" -ForegroundColor Red
+    $Failures++
+} else {
+    Write-Host " OK -- new dispatch-authority guard string present at line $($NewGuardHit[0].LineNumber)" -ForegroundColor Green
 }
 
 # ---------------------------------------------------------------------------

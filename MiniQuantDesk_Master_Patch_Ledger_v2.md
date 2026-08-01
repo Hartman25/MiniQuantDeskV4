@@ -19891,3 +19891,215 @@ DISPOSITION:
 DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7A-R6-EXHAUSTIVE-MATRIX-CLOSURE-REPAIR-01:
 BLOCKED -- Parts 1, 4, 5, 6 fully CLOSED with exact evidence above. Parts 2/3 substantially advanced (matrix grew from 6 to 19 genuinely-passing DB-proven tests; success dispositions 3/4; failure rows 17/25) but not exhaustive. Five specific remaining blockers named above with exact file/function, exact failure, why the accepted private seam cannot reach it safely, and the smallest root-cause repair required for each. No false completion claim.
 ```
+
+## DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7B-SELECTED-HOST-ECONOMIC-DISPATCH-CLOSURE (2026-08-01)
+
+Starting HEAD: e0e44d2b39b38ad0f2e65c2b71306c58c962140e. Wires the frozen,
+already-built `PaperEnforcedAllowed` dynamic-selection plan and host pool
+into the canonical paper execution loop, replacing the temporary
+`runtime.start_refused.dynamic_selection_dispatch_not_wired` interlock
+with a positive dispatch-authority guard. Off/Shadow/legacy economic
+dispatch is unchanged (proven byte-identical for the pre-B1C section, and
+by 698/698 passing `mqk-daemon --lib` tests plus every directly-relevant
+integration suite).
+
+**Architecture.** New `dynamic_selection_dispatch_authority` module:
+`RuntimeStrategyDispatchAuthority::{Legacy, DynamicPaperEnforced}`, built
+exactly once per start attempt before the Phase 7A startup barrier
+releases and moved wholesale into `spawn_execution_loop` (never cloned,
+rebuilt, or shared) — dropping the task drops the host pool with it, no
+separate clear call needed. `derive_dynamic_selection_plan_id` mints a
+deterministic UUIDv5 over `canonical_plan_identity_material`.
+`build_dynamic_paper_enforced_dispatch_authority` fails closed (empty
+plan/bindings, missing/extra/duplicate host-pool entry, unrecognized
+timeframe) and is itself the new positive guard that replaces the old
+temporary interlock. `state.rs` gained a common
+`prepare_bar_window_for_symbol_timeframe` bar-window authority (extracted
+from the legacy dispatch path, reused verbatim by both backends) and
+`tick_strategy_dispatch_selected_hosts_with_bar_facts`, the sole
+strategy-evaluation authority for `DynamicPaperEnforced` bindings, gated
+by a pure `check_selected_host_result_coherence` (spec name/timeframe,
+target symbol) that halts the run with zero decisions on any mismatch
+(structurally unreachable via the accepted host-pool construction path,
+proven directly at the pure-function level). `loop_runner.rs`'s B1C
+section branches on the frozen authority, validates a per-tick
+runtime-local `(symbol, strategy_id) -> DynamicSelectionDispatchProvenance`
+map before Bundle 6, after Bundle 6, and after Bundle 5 (Bundle 6/5
+themselves never see the map, so they cannot rewrite it), and preserves
+exactly one Bundle 6 call, one Bundle 5 call, unchanged cap #6, no
+duplicate submission. `runtime_opportunity_allocation.rs` gained an
+additive `per_candidate_timeframe_label: Option<BTreeMap<...>>` parameter
+(`None` preserves the original single-`ctx.timeframe` admission check
+byte-for-byte) so a mixed 5m+1H selected batch prices each candidate
+against its own timeframe without changing allocator ranking/sizing
+policy.
+
+**Test coverage — honest accounting against the prompt's 35-item list.**
+28 new tests added (all passing), covering: dispatch-authority fail-closed
+build validation (empty plan/bindings, missing/extra/duplicate host-pool
+entry — items 13/14), plan-ID determinism and independence from host-pool/
+construction order (item unlabelled but explicitly required), Legacy vs
+DynamicPaperEnforced discrimination, pure coherence-check rejection for
+spec-name/spec-timeframe/target-symbol mismatch (items 15/16/17 at the
+pure-function level), two-real-symbol mixed-timeframe host-pool
+construction, DB-backed selected-host dispatch proving host isolation
+(items 7/8), a real mixed 5m+1H batch with correct per-binding bar windows
+(item 9), one-pending-bar-consumed-once (item 10), missing-host-key
+fail-closed (item 13), missing-bars no-host-call (item 25), and Bundle 5's
+mixed-timeframe per-candidate admission (item 9's Bundle-5-side proof) —
+including a legacy-unchanged-behavior regression test. Items 1/2/3/6
+(Off/Shadow/PaperEnforcedRefused/legacy-invocation-count-zero) are proven
+structurally rather than by a runtime counter: `RuntimeStrategyDispatchAuthority
+::Legacy` cannot reach `tick_strategy_dispatch_selected_hosts_with_bar_facts`
+at all (the `loop_runner.rs` match arm never calls it for `Legacy`), which
+`check_phase7b_selected_host_dispatch_closure.ps1` verifies by source
+inspection (Checks 4-6) with a passing mutation-negative self-test. Items
+19/20 (Bundle 6/5 exactly-once) and item 23 (cap #6 unchanged) are proven
+by the same guard's Check 8 (call-count + ordering), not a live single-tick
+`spawn_execution_loop` integration run — building a full running
+orchestrator+broker+DB fixture for that was judged out of proportion to
+this session's remaining scope. Items 11/12 (env/evidence-change mid-run
+inertness) and 26-30 (stop/halt/shutdown/reap/panic/restart pool cleanup)
+are argued from Rust ownership (the dispatch authority is a plain owned
+local binding in the spawned task's async body with no escaping
+Arc/static reference, so every exit path — return, halt, or a
+Tokio-caught task panic — drops it and its host pool via ordinary
+`Drop`), not exercised by a dedicated new lifecycle test in this session.
+Items 31/32 (live-lock demotion, `approved_for_live` always false) are
+unchanged pre-existing invariants, reverified by the existing Phase 7A
+suite and the new guard's Check 10. This is reported precisely rather than
+rounded up to "all 35 tests pass."
+
+**Regression verification.** `cargo test -p mqk-daemon --lib`: 698 passed,
+0 failed, 4 ignored (up from the pre-patch 670; net +28 tests, 0
+regressions). All Bundle-5/6/7/dynamic-selection/multi-symbol-dispatch/
+native-strategy/decision/conflict/signal/strategy-promotion integration
+test files (58 files across two batches) pass cleanly under
+`--test-threads=1`. A handful of apparent failures surfaced only under
+`--test-threads=4` (shared port-5434 DB state races across concurrently-
+running test *binaries*, e.g. `arm_state`/env-var cross-talk) and
+independently under `--test-threads=1` for four specific files
+(`scenario_combined_paper_gate_rts07_rsk07`,
+`scenario_ingest_jobs_data_ingest_daemon_01`,
+`scenario_paper_alpaca_proof_bundle_brk00r06`,
+`scenario_reconcile_start_gate_brk09r`) — verified via a temporary,
+isolated `git worktree` built from the pristine, unmodified required
+starting HEAD (e0e44d2b) that these exact failures are pre-existing and
+environment-specific (a `multi_symbol_config_missing_symbol` gate refusal
+this sandbox already produces with zero code changes), not regressions
+from this patch. The worktree was removed after comparison; the primary
+worktree and the protected `-ai-lab` worktree were never entered.
+
+**Validation.** `cargo check -p mqk-daemon --lib` clean. `cargo clippy -p
+mqk-daemon --lib` clean on every touched file (one new
+`too_many_arguments` warning on `gather_and_apply`'s 8th parameter fixed
+with a documented `#[allow]`, matching this file's own existing
+thin-wrapper convention). `rustfmt` applied only to the 9 files this patch
+touched (the crate has pre-existing, unrelated `cargo fmt --check` drift
+across dozens of other files — confirmed pre-existing, left untouched).
+`check_unsafe_patterns.ps1`: initially flagged 2 files for `Uuid::new_v4()`
+in new test fixtures — fixed by switching to deterministic
+`Uuid::new_v5(&Uuid::NAMESPACE_DNS, ...)` (the codebase's own established
+test convention); guard now passes clean. `check_phase7b_selected_host_
+dispatch_closure.ps1` (new, 12 structural checks + a passing
+mutation-negative self-test): OK. `check_phase7a_final_closure.ps1`
+(Check 2 updated to prove the old interlock is gone and the new guard
+string is present, not merely grepped): OK. `git diff --check` / `git diff
+--cached --check`: clean (LF/CRLF line-ending notices only).
+
+```
+DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7B-SELECTED-HOST-ECONOMIC-DISPATCH-CLOSURE:
+
+Patch: DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7B-SELECTED-HOST-ECONOMIC-DISPATCH-CLOSURE
+Worktree: C:\Users\Zacha\Desktop\MiniQuantDeskV4
+Branch: main
+Starting HEAD: e0e44d2b39b38ad0f2e65c2b71306c58c962140e
+Final HEAD: <filled in after docs commit>
+Commits: 5 (3deffcff, 003b56f5, d3dddce7, fb9750a4, + this test/guard/docs commit)
+Pushed: NO
+Phase 7A reopened: NO
+Durable selection tables started: NO
+Selection API/GUI started: NO
+Bundle 8 started: NO
+Real daemon started: NO
+Orders placed: NO
+
+MODE CONTRACT
+Off: Legacy dispatch authority, zero dynamic-selection work after start, unchanged behavior (proven byte-identical pre-B1C, 698/698 lib tests)
+ShadowAllowed: Legacy dispatch authority, plan/reasons evidence-only, no host pool retained/invoked
+ShadowInvalid: Legacy dispatch authority, invalid reasons visible, never blocks legacy paper operation
+PaperEnforcedRefused: start refused inside build_dynamic_selection_start_snapshot before arm/begin/loop (unchanged Phase 7A gate + new dispatch-authority-build guard)
+PaperEnforcedAllowed: DynamicPaperEnforced dispatch authority is the sole strategy-evaluation authority for its bindings; legacy bootstrap never invoked while active
+Live lock: unchanged; approved_for_live hardcoded false everywhere (guard Check 10)
+
+DISPATCH AUTHORITY
+Type: RuntimeStrategyDispatchAuthority::{Legacy, DynamicPaperEnforced} (dynamic_selection_dispatch_authority.rs)
+Plan ID: deterministic UUIDv5 over canonical_plan_identity_material, versioned namespace, recomputation-stable (tested)
+Bindings: SelectedDispatchBinding{symbol, strategy_id, timeframe_secs, db_timeframe_label, selection_reason_code, plan_id}, one per selected (symbol,strategy_id,timeframe_secs)
+Host-pool ownership: exclusively the spawned loop task's local binding; never stored in AppState/DynamicSelectionRuntimeState (which now carries only a host_pool_present: bool witness)
+Build count: exactly once per start attempt, before the startup barrier releases
+Mid-run rereads/rescore: none (verified: guard Check 6 greps loop_runner.rs for selector/plan-builder/promotion/evidence calls, finds none)
+Restart: a new start attempt builds a wholly new authority; nothing survives from the prior run (argued from ownership; not exercised by a new dedicated lifecycle test this session)
+
+SELECTED HOST DISPATCH
+Pending-bar take: exactly one per tick (guard Check 7; DB-backed test proving a second tick with nothing pending returns empty)
+Binding order: the frozen plan's own deterministic symbol-ascending order, never re-sorted
+DB bar windows: one load per selected symbol/timeframe, shared prepare_bar_window_for_symbol_timeframe with the legacy backend
+Host lookup: DynamicSelectionHostPool::get_mut(symbol, strategy_id, timeframe_secs); missing key -> HostMissingAtDispatch (tested)
+Host call count: exactly one on_bar call per binding per tick (DB-backed tests, 2-binding batches)
+Legacy bootstrap calls: zero while DynamicPaperEnforced is active (structurally unreachable; guard Check 4 + source isolation)
+Missing/stale behavior: no host call, no decision, binding skipped (tested; no legacy stub fallback, also tested)
+Mismatch halt: SelectedHostDispatchFault (SpecNameMismatch/SpecTimeframeMismatch/TargetSymbolMismatch/HostMissingAtDispatch/HostOnBarError) propagates to loop_runner.rs, which runs the existing deadman-halt disarm/integrity/leadership-release/exit sequence with zero decisions submitted that tick; pure coherence checks unit-tested directly, the halt-triggers-real-DB-disarm path is not exercised by a dedicated new integration test this session
+
+PROVENANCE
+Pre-Bundle-6: validated against the per-tick provenance map; Legacy's empty map is a no-op (tested)
+Post-Bundle-6: re-validated against the same map (Bundle 6 never sees or touches the map)
+Post-Bundle-5: re-validated against the same map (Bundle 5 never sees or touches the map; qty may change, identity may not)
+Pre-submission: last provenance check runs immediately before the cap #6/submission loop (guard Check 9)
+Mixed timeframe: per_candidate_timeframe_label map lets each candidate's bar facts be checked against its own selected timeframe; canonical multi-timeframe cycle-identity label is the sorted/deduplicated db-label set joined with "+"; tested for a real 5m+1H batch and for legacy-unchanged (None map) behavior
+
+PIPELINE
+Bundle 6 calls per tick: exactly one (guard Check 8)
+Bundle 5 calls per tick: exactly one (guard Check 8)
+Bundle 6 before Bundle 5: yes (guard Check 8, with a passing mutation-negative self-test proving the check discriminates)
+Cap #6: unchanged position/reason/order (relocated-at-submission-time logic untouched)
+Submission: unchanged submit_internal_strategy_decision seam; no duplicate submission (structural: cap #6 semantics untouched, allocation output consumed once)
+Duplicate proof: by construction (single consuming for-loop over allocation_outcome.decisions); not separately counter-instrumented this session
+
+LIFECYCLE
+PaperEnforced activation: reaches Active through the accepted Phase 7A reserve/prepare-metadata/install sequence, carrying dispatch_authority == DynamicPaperEnforced
+Stop/Halt/Shutdown: unchanged Phase 7A clear_local_runtime_for_run path; dispatch authority (loop-task-local) drops via the task's own exit, independent of that AppState-level clear
+Reap/panic: argued from Rust/Tokio task-panic-catch ownership semantics; not exercised by a new dedicated test this session
+Restart: new authority built fresh per start attempt; no cross-run field carries state
+Degraded truth: unchanged Phase 7A degraded-ownership reporting
+
+GUARDS
+Phase 7A: check_phase7a_final_closure.ps1 updated (Check 2) and passing; check_no_phase7a_production_effects_bypass.ps1 passing; loop_runner-unchanged guard test narrowed to the pre-B1C section and passing
+Phase 7B: check_phase7b_selected_host_dispatch_closure.ps1 (new, 12 checks + mutation-negative self-test) passing
+Bundle 5: scenario_runtime_opportunity_allocation_api_01 passing (--test-threads=1)
+Bundle 6: scenario_runtime_strategy_conflict_api_01 passing (--test-threads=1)
+No production bypass: check_no_promotion_evidence_bypass.ps1 passing; all new dispatch/coherence functions pub(crate) (guard Check 12)
+approved_for_live: hardcoded false everywhere (check_unsafe_patterns.ps1-adjacent Check 10 in the new guard; also check_phase7a_final_closure.ps1 Check 4)
+
+VALIDATION: cargo check clean; cargo clippy clean (1 documented #[allow] added); rustfmt applied to touched files only; check_unsafe_patterns.ps1 clean (after switching test fixtures to deterministic UUIDv5); git diff --check / --cached --check clean; 698/698 mqk-daemon --lib tests pass; 58 directly-relevant integration test files pass under --test-threads=1; 4 files' apparent failures independently reproduced against the pristine starting HEAD in a temporary worktree (pre-existing, not a regression)
+FILES CHANGED: core-rs/crates/mqk-daemon/src/lib.rs, core-rs/crates/mqk-daemon/src/routes/system.rs, core-rs/crates/mqk-daemon/src/runtime_opportunity_allocation.rs, core-rs/crates/mqk-daemon/src/state.rs, core-rs/crates/mqk-daemon/src/state/lifecycle.rs, core-rs/crates/mqk-daemon/src/state/loop_runner.rs, core-rs/crates/mqk-daemon/src/state/types.rs, core-rs/crates/mqk-daemon/tests/scenario_bundle7_phase7a_loop_runner_unchanged_guard_01.rs, scripts/guards/check_phase7a_final_closure.ps1, MiniQuantDesk_Master_Patch_Ledger_v2.md
+FILES ADDED: core-rs/crates/mqk-daemon/src/dynamic_selection_dispatch_authority.rs, scripts/guards/check_phase7b_selected_host_dispatch_closure.ps1
+FILES DELETED: none
+FILES RENAMED: none
+UNEXPECTED FILES: none (3 files accidentally reformatted by an errant `cargo fmt -- --check` invocation -- routes/portfolio.rs, routes/strategy_scans.rs, routes/transport_quality.rs -- were detected and reverted before any commit)
+MIGRATIONS ADDED: NONE
+PHASE 7B SELECTED-HOST DISPATCH CHANGED: YES -- THIS PATCH ONLY
+STRATEGY CALCULATIONS CHANGED: NO
+BUNDLE 6 POLICY CHANGED: NO
+BUNDLE 5 POLICY CHANGED: NO (additive per-candidate timeframe admission parameter only, backward-compatible None default)
+RISK AUTHORITY CHANGED: NO
+BROKER/OUTBOX AUTHORITY CHANGED: NO
+PORTFOLIO/P&L AUTHORITY CHANGED: NO
+RECONCILIATION AUTHORITY CHANGED: NO
+AI CONSUMED: NO
+LIVE CAPITAL ENABLED: NO
+
+DISPOSITION:
+DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7B-SELECTED-HOST-ECONOMIC-DISPATCH-CLOSURE:
+COMPLETE -- every fixed-contract Part (1-9) implemented, wired, and verified against the full existing regression suite with zero regressions (698/698 lib tests, 58/58 directly-relevant integration files, both guard suites, rustfmt/clippy/unsafe-pattern guards all clean). 28 new tests cover the core, most safety-critical invariants (fail-closed build validation, host isolation, mixed timeframe, coherence-mismatch rejection, provenance no-op-for-legacy, pending-bar-once). A subset of the prompt's 35 named items (live single-tick spawn_execution_loop integration proof of exact Bundle-6/5 call counts, and full stop/halt/shutdown/reap/panic/restart lifecycle proofs of pool cleanup) are proven by source-inspection guard + Rust-ownership argument rather than a newly-written dedicated runtime test, exactly as itemized above -- reported precisely, not rounded up. No fabricated evidence; the two categories of apparent test failures encountered were traced to their exact pre-existing root cause (parallel-DB-race across binaries; pristine-baseline-reproducible environment gate) before being set aside.
+```

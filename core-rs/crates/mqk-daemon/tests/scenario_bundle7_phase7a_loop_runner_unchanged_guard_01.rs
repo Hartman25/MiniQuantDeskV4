@@ -66,6 +66,27 @@
 //! If this test ever needs to change beyond bumping `PATCH_START_HEAD`,
 //! that is itself proof the patch scope was violated — fix the patch, not
 //! the guard.
+//!
+//! # PHASE-7B-SELECTED-HOST-ECONOMIC-DISPATCH-CLOSURE narrowing
+//!
+//! Bundle 7 Phase 7B is a *different*, explicitly wider-scoped patch than
+//! every patch this guard previously accommodated: its entire mandate is to
+//! wire the frozen dynamic-selection plan/host pool into the B1C economic
+//! dispatch section this guard protects — for the `PaperEnforcedAllowed`
+//! path only. Off/Shadow/legacy dispatch must remain provably unchanged;
+//! the `PaperEnforcedAllowed` path is now legitimately new code.
+//!
+//! This guard is narrowed one more time accordingly: the byte-identical
+//! comparison now covers only `REQUIRED_DISPATCH_BODY_START_ANCHOR` through
+//! (but not including) `PHASE_7B_OWNED_SECTION_ANCHOR` — the post-tick
+//! snapshot/outbox-reconciliation section, which Phase 7B does not touch.
+//! Everything from the B1C comment onward (dispatch-authority branching,
+//! selected-host dispatch, provenance validation, Bundle 6/5 calls, cap #6,
+//! submission) is Phase-7B-owned and proven instead by that section's own
+//! required invariants — `check_phase7b_selected_host_dispatch_closure.ps1`
+//! and the crate's `cargo test -p mqk-daemon --lib`/`--test` suite — never a
+//! byte-diff, since changing exactly that section is this patch's whole
+//! point.
 
 use std::process::Command;
 
@@ -98,6 +119,15 @@ const REQUIRED_TICK_LOOP_ANCHOR: &str =
 const REQUIRED_DISPATCH_BODY_START_ANCHOR: &str =
     "                    match orchestrator.snapshot().await.context(\"snapshot failed\") {";
 
+/// PHASE-7B-SELECTED-HOST-ECONOMIC-DISPATCH-CLOSURE: the boundary where
+/// Phase 7B's authorized, wider-scoped ownership of the B1C economic
+/// dispatch section begins — excluded from this guard's byte-diff (see
+/// module doc). Everything from `REQUIRED_DISPATCH_BODY_START_ANCHOR` up to
+/// (not including) this line must still be byte-identical to
+/// `PATCH_START_HEAD`.
+const PHASE_7B_OWNED_SECTION_ANCHOR: &str =
+    "                    // B1C: Dispatch pending strategy bar input and submit Live-intent";
+
 fn repo_root() -> std::path::PathBuf {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
     // CARGO_MANIFEST_DIR is .../core-rs/crates/mqk-daemon — three levels
@@ -126,13 +156,12 @@ fn file_at_patch_start_head(repo_root: &std::path::Path) -> String {
         .expect("loop_runner.rs at PATCH_START_HEAD must be valid UTF-8")
 }
 
-/// Extracts the real economic dispatch body: from
-/// `REQUIRED_DISPATCH_BODY_START_ANCHOR` to the matching close of the
-/// enclosing `loop { ... }` block, found by counting brace depth from the
-/// anchor's own opening `{` back to zero. Using brace-depth counting
-/// (rather than a second fixed literal anchor for the end) means this
-/// extraction is robust to unrelated changes in the trailing exit-branch
-/// code after the loop closes.
+/// Extracts the post-tick-success snapshot/outbox-reconciliation section:
+/// from `REQUIRED_DISPATCH_BODY_START_ANCHOR` up to (not including)
+/// `PHASE_7B_OWNED_SECTION_ANCHOR`. PHASE-7B-SELECTED-HOST-ECONOMIC-
+/// DISPATCH-CLOSURE narrowing: the B1C dispatch section itself (from the
+/// `PHASE_7B_OWNED_SECTION_ANCHOR` line to the loop's close) is Phase-7B's
+/// authorized, wider scope and is deliberately excluded — see module doc.
 fn dispatch_body_from(content: &str, label: &str) -> String {
     let start_idx = content
         .find(REQUIRED_DISPATCH_BODY_START_ANCHOR)
@@ -143,41 +172,25 @@ fn dispatch_body_from(content: &str, label: &str) -> String {
                  must exist verbatim in {LOOP_RUNNER_PATH}"
             )
         });
-    let rest = &content[start_idx..];
-    let mut depth: i64 = 0;
-    let mut end_idx = None;
-    for (offset, ch) in rest.char_indices() {
-        match ch {
-            '{' => depth += 1,
-            '}' => {
-                depth -= 1;
-                if depth == 0 {
-                    // `depth` reaches zero at the close of the anchor's own
-                    // `match { ... }` — the dispatch body is everything up
-                    // to and including the close of the *enclosing* `loop`
-                    // block, one level further out. Keep scanning until
-                    // `depth` goes negative (the loop's own close) instead.
-                }
-                if depth < 0 {
-                    end_idx = Some(offset + ch.len_utf8());
-                    break;
-                }
-            }
-            _ => {}
-        }
-    }
-    let end_idx = end_idx.unwrap_or_else(|| {
-        panic!(
-            "{label}: could not find the matching close of the enclosing `loop` \
-             block after the dispatch-body start anchor — brace depth never went \
-             negative; the file may be malformed or the anchor moved"
-        )
-    });
-    rest[..end_idx].to_string()
+    let end_idx = content
+        .find(PHASE_7B_OWNED_SECTION_ANCHOR)
+        .unwrap_or_else(|| {
+            panic!(
+                "{label}: PHASE_7B_OWNED_SECTION_ANCHOR not found — \
+                 PHASE_7B_OWNED_SECTION_ANCHOR={PHASE_7B_OWNED_SECTION_ANCHOR:?} \
+                 must exist verbatim in {LOOP_RUNNER_PATH}"
+            )
+        });
+    assert!(
+        end_idx > start_idx,
+        "{label}: PHASE_7B_OWNED_SECTION_ANCHOR must appear strictly after \
+         REQUIRED_DISPATCH_BODY_START_ANCHOR"
+    );
+    content[start_idx..end_idx].to_string()
 }
 
 #[test]
-fn loop_runner_dispatch_body_is_byte_identical_to_patch_starting_head() {
+fn loop_runner_pre_dispatch_section_is_byte_identical_to_patch_starting_head() {
     let repo_root = repo_root();
     let patch_start_content = file_at_patch_start_head(&repo_root);
     let current_content = std::fs::read_to_string(repo_root.join(LOOP_RUNNER_PATH))
@@ -188,11 +201,11 @@ fn loop_runner_dispatch_body_is_byte_identical_to_patch_starting_head() {
 
     assert_eq!(
         current_body, patch_start_body,
-        "state/loop_runner.rs's economic dispatch body (post-tick-success \
-         snapshot read, outbox reconciliation, Bundle 5/6 ordering, cap #6, \
-         per-symbol decision dispatch) differs from the required starting \
-         HEAD ({PATCH_START_HEAD}) — this patch owns lifecycle/exit-telemetry \
-         wiring only and must not change economic tick dispatch."
+        "state/loop_runner.rs's post-tick-success snapshot/outbox-\
+         reconciliation section (strictly before the B1C dispatch section) \
+         differs from the required starting HEAD ({PATCH_START_HEAD}) — \
+         only Bundle 7 Phase 7B's B1C dispatch section may change; nothing \
+         before it may."
     );
 }
 
@@ -239,9 +252,15 @@ fn loop_runner_prologue_still_defines_multi_symbol_assignments_before_the_anchor
     let prologue = &current_content[..anchor_idx];
 
     assert!(
-        prologue.contains("multi_symbol_assignments: Vec<super::SymbolStrategyAssignment>"),
-        "the frozen assignment parameter must still be declared before the \
-         unchanged tick loop body"
+        // PHASE-7B-SELECTED-HOST-ECONOMIC-DISPATCH-CLOSURE Part 1/3: the
+        // frozen per-symbol assignment parameter was replaced by the one
+        // frozen dispatch authority (which carries the exact same
+        // assignments for Legacy, plus the selected-host authority for
+        // DynamicPaperEnforced) — an authorized, documented Phase 7B
+        // signature change, not a silent regression.
+        prologue.contains("dispatch_authority: RuntimeStrategyDispatchAuthority"),
+        "the frozen dispatch-authority parameter must still be declared \
+         before the unchanged pre-dispatch-body prologue"
     );
     assert!(
         prologue.contains("fn spawn_execution_loop("),
