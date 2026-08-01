@@ -3298,8 +3298,9 @@ mod tests {
             effective_mode: mqk_portfolio::DynamicSelectionMode::Shadow,
             live_lock_applied: false,
             plan: None,
+            plan_id: None,
             selected_pairs: Vec::new(),
-            host_pool: None,
+            host_pool_present: false,
             reasons: Vec::new(),
             approved_for_live: false,
         }

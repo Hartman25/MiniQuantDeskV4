@@ -815,10 +815,17 @@ pub enum AutonomousSessionTruth {
 /// overwrite on commit), never an in-place mutation of this one — so a
 /// restart can never observe a mix of two runs' selection truth.
 ///
-/// `plan`/`host_pool` are wrapped in `Arc` so this whole struct stays
-/// cheaply `Clone` (for `AppState::dynamic_selection_runtime_snapshot`)
-/// even though `DynamicSelectionHostPool` itself derives neither `Clone`
-/// nor `Debug` — `Arc<T>: Clone` holds regardless of `T`'s own bounds.
+/// `plan` is wrapped in `Arc` so this whole struct stays cheaply `Clone`
+/// (for `AppState::dynamic_selection_runtime_snapshot`).
+///
+/// PHASE-7B-SELECTED-HOST-ECONOMIC-DISPATCH-CLOSURE: the real, mutable
+/// [`crate::dynamic_selection_host_pool::DynamicSelectionHostPool`] is never
+/// stored here. This struct is snapshotted (cloned) freely for status reads,
+/// so it can never be the pool's exclusive mutable owner — the one built
+/// pool is moved wholesale into the execution loop task instead (see
+/// `RuntimeStrategyDispatchAuthority`, `state/loop_runner.rs`). `host_pool_
+/// present`/`plan_id` are the immutable, cheaply-cloned status witnesses of
+/// that fact, not the object itself.
 #[derive(Clone)]
 pub struct DynamicSelectionRuntimeState {
     pub run_id: Uuid,
@@ -831,15 +838,19 @@ pub struct DynamicSelectionRuntimeState {
     /// any refusal reached before a plan could be built (context-incoherent,
     /// DB-unavailable, config-unavailable).
     pub plan: Option<Arc<mqk_portfolio::DynamicSelectionPlan>>,
+    /// Deterministic UUIDv5 identity minted from `plan` via
+    /// `mqk_portfolio::canonical_plan_identity_material` (Part 2). `Some`
+    /// exactly when `plan` is `Some`.
+    pub plan_id: Option<Uuid>,
     /// Bounded `(symbol, strategy_id, timeframe_secs)` projection of
     /// `plan`'s selected rows — the exact triples
     /// `DynamicSelectionHostPool::build` would key on. Empty for `Off` and
     /// for any disposition with no selected pair.
     pub selected_pairs: Vec<(String, String, i64)>,
-    /// `Some` only for `PaperEnforcedAllowed` — the only disposition that
-    /// owns a host pool. Shadow never builds one (it has no economic
-    /// authority to withhold).
-    pub host_pool: Option<Arc<crate::dynamic_selection_host_pool::DynamicSelectionHostPool>>,
+    /// `true` only for `PaperEnforcedAllowed` — the only disposition that
+    /// builds a host pool. Status witness only: the real pool is owned
+    /// exclusively by the execution loop task, never by this struct.
+    pub host_pool_present: bool,
     pub reasons: Vec<crate::dynamic_selection_start_gate::DynamicSelectionStartGateReason>,
     /// Always `false` in this patch. Bundle 7 dynamic selection is not
     /// dispatch-authoritative under any disposition here — this field exists
@@ -857,14 +868,14 @@ impl DynamicSelectionRuntimeState {
     }
 
     pub fn host_pool_present(&self) -> bool {
-        self.host_pool.is_some()
+        self.host_pool_present
     }
 }
 
-/// Manual `Debug` impl: `DynamicSelectionHostPool` itself derives neither
-/// `Clone` nor `Debug` (it is not meant to be cloned or dumped whole), so
-/// this prints only its presence/size — never its internal `StrategyHost`
-/// contents.
+/// Manual `Debug` impl kept for source-stability across the Phase 7B field
+/// change (was needed to hide `DynamicSelectionHostPool` internals; the
+/// pool no longer lives here at all, but the explicit impl is retained
+/// rather than switching call sites to a derive).
 impl fmt::Debug for DynamicSelectionRuntimeState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("DynamicSelectionRuntimeState")
@@ -874,15 +885,9 @@ impl fmt::Debug for DynamicSelectionRuntimeState {
             .field("effective_mode", &self.effective_mode)
             .field("live_lock_applied", &self.live_lock_applied)
             .field("plan_present", &self.plan.is_some())
+            .field("plan_id", &self.plan_id)
             .field("selected_pairs", &self.selected_pairs)
-            .field(
-                "host_pool",
-                &self
-                    .host_pool
-                    .as_ref()
-                    .map(|p| format!("<present, {} host(s)>", p.len()))
-                    .unwrap_or_else(|| "<absent>".to_string()),
-            )
+            .field("host_pool_present", &self.host_pool_present)
             .field("reasons", &self.reasons)
             .field("approved_for_live", &self.approved_for_live)
             .finish()
