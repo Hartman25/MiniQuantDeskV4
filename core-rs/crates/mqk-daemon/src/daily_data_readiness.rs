@@ -1559,13 +1559,18 @@ pub async fn persist_run_linked_readiness_evidence(
 // reimplementation of that ordering exists either.
 // ---------------------------------------------------------------------------
 
+/// Ordered trace tag pushed after local loop ownership has been reserved
+/// (ATOMIC-OWNERSHIP-AND-ROLLBACK-TRUTH-01 requirement 2), strictly before
+/// any other local effect is built or published.
+pub const TRACE_OWNERSHIP_RESERVED: &str = "ownership_reserved";
 /// Ordered trace tag pushed after a successful run-linked evidence persist.
 pub const TRACE_RUN_LINK_EVENT_PERSISTED: &str = "run_link_event_persisted";
-/// Ordered trace tag pushed after local loop ownership has been reserved
-/// (ATOMICITY-SINGLE-SNAPSHOT-REPAIR requirement 3), before the loop task
-/// is ever spawned.
-pub const TRACE_OWNERSHIP_RESERVED: &str = "ownership_reserved";
-/// Ordered trace tag pushed after the execution loop has been spawned.
+/// Ordered trace tag pushed after the local run-start bundle has been
+/// committed to `AppState` (requirement 2's "commit all run-scoped AppState
+/// fields for run_id").
+pub const TRACE_LOCAL_BUNDLE_COMMITTED: &str = "local_bundle_committed";
+/// Ordered trace tag pushed after the execution loop has been spawned and
+/// installed into the reserved slot.
 pub const TRACE_LOOP_SPAWNED: &str = "loop_spawned";
 
 /// Which `RuntimeLifecycleError` constructor a [`RuntimeStartEffectsError`]
@@ -1609,80 +1614,208 @@ impl RuntimeStartEffectsError {
     }
 }
 
+/// ATOMIC-OWNERSHIP-AND-ROLLBACK-TRUTH-01 requirement 4: how far a single
+/// start attempt progressed before it failed, read from
+/// [`RuntimeStartEffects::start_phase_reached`] after any failure. Ordered
+/// earliest to latest; later phases carry stronger evidence that
+/// broker/outbox/DB-visible side effects may already exist.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum RuntimeStartPhase {
+    /// Before `arm_run` has been attempted (includes a reservation conflict
+    /// — no runtime construction was ever attempted).
+    #[default]
+    BeforeArm,
+    /// `arm_run` succeeded; `begin_run` not yet attempted.
+    ArmedBeforeBegin,
+    /// `begin_run` and the initial heartbeat succeeded; `orchestrator.tick()`
+    /// not yet called.
+    RunningBeforeInitialTick,
+    /// `orchestrator.tick()` has been called but had not yet returned when
+    /// the failure was observed — its outcome is genuinely unknown; it may
+    /// have already written to the DB, the outbox, or the broker.
+    InitialTickStarted,
+    /// `orchestrator.tick()` returned `Ok` and the post-tick heartbeat
+    /// refresh succeeded.
+    InitialTickCompleted,
+    /// Every runtime-construction effect above succeeded; committing the
+    /// local run-scoped bundle to `AppState` is underway.
+    LocalCommitStarted,
+    /// The local bundle is committed and the execution loop handle has been
+    /// installed into the active slot.
+    LoopInstalled,
+}
+
+impl RuntimeStartPhase {
+    /// Requirement 4 policy: failures at or before
+    /// `RunningBeforeInitialTick` (strictly before `tick()` is ever called)
+    /// have caused no broker/outbox-visible side effects yet and may
+    /// cleanly become `Stopped`. Once `tick()` has been called — whether or
+    /// not it returned, and everything after — a clean retry is not proven,
+    /// so the durable run must be `Halted` instead.
+    pub fn cleanly_stoppable(&self) -> bool {
+        matches!(
+            self,
+            RuntimeStartPhase::BeforeArm
+                | RuntimeStartPhase::ArmedBeforeBegin
+                | RuntimeStartPhase::RunningBeforeInitialTick
+        )
+    }
+}
+
+/// Local (in-process) rollback outcome from a single
+/// [`RuntimeStartEffects::rollback_local_effects`] call.
+#[derive(Debug, Default)]
+pub struct LocalRollbackOutcome {
+    /// `Some(Err(_))` when this attempt had acquired the orchestrator's
+    /// runtime leadership lease and releasing it failed. `None` when no
+    /// lease was ever held for this attempt (e.g. the attempt failed before
+    /// the orchestrator was constructed, or reservation itself conflicted).
+    pub leadership_release_outcome: Option<Result<(), String>>,
+}
+
+/// ATOMIC-OWNERSHIP-AND-ROLLBACK-TRUTH-01 requirement 5: bounded, structured
+/// truth about what happened when a failed start attempt was rolled back —
+/// never silently swallowed. `durable_status_unknown` is the fail-closed
+/// signal a caller must check before treating the original error as an
+/// ordinary, fully-cleaned-up start refusal.
+#[derive(Debug)]
+pub enum DurableRollbackDisposition {
+    /// The durable run reached `Armed`/`Running` and was moved to `Stopped`
+    /// (phase was cleanly stoppable — no evidence `tick()` was ever called).
+    Stopped,
+    /// The durable run reached `Armed`/`Running` and was moved to `Halted`
+    /// (phase was at or past `InitialTickStarted` — a clean retry is not
+    /// proven).
+    Halted,
+    /// The durable run was never `Armed`/`Running` (e.g. a reservation
+    /// conflict before `arm_run` was ever attempted) — nothing to roll back.
+    AlreadyNonActive,
+    /// `fetch_run` itself failed — the durable run's current status is
+    /// unknown.
+    QueryFailed,
+    /// `stop_run`/`halt_run` failed after `fetch_run` confirmed
+    /// `Armed`/`Running` — the durable run may still be `Armed`/`Running`
+    /// with no local owner.
+    TransitionFailed,
+}
+
+#[derive(Debug)]
+pub struct RollbackOutcome {
+    pub phase_reached: RuntimeStartPhase,
+    pub local: LocalRollbackOutcome,
+    pub durable: DurableRollbackDisposition,
+    /// `true` for `QueryFailed`/`TransitionFailed` — the durable run's
+    /// terminal status could not be confirmed by this rollback attempt.
+    pub durable_status_unknown: bool,
+}
+
+impl RollbackOutcome {
+    /// `true` when either the durable rollback could not confirm a safe
+    /// terminal state, or the orchestrator lease release failed — either
+    /// condition means a caller must not treat the original error as an
+    /// ordinary, fully-cleaned-up start refusal.
+    pub fn is_degraded(&self) -> bool {
+        self.durable_status_unknown
+            || self
+                .local
+                .leadership_release_outcome
+                .as_ref()
+                .is_some_and(|r| r.is_err())
+    }
+}
+
 /// The production effects that follow run creation and (when applicable)
 /// run-linked evidence persistence. Implemented once for production
 /// (`state::lifecycle::ProductionRuntimeStartEffects`, wrapping the exact
 /// existing orchestrator-build/arm/begin/tick/spawn sequence) and once for
-/// the synthetic lifecycle proof test (a no-op/counter-based fake that
-/// never constructs a broker, provider, or scheduler) —
-/// ATOMICITY-SINGLE-SNAPSHOT-REPAIR extends both implementations with the
-/// same reserve/rollback contract, so a hermetic test using the fake
-/// exercises the exact same [`advance_run_to_active`] sequencing production
-/// uses, never a separate test-only reimplementation of it.
+/// each synthetic lifecycle proof test (no-op/counter-based fakes that
+/// never construct a broker, provider, or scheduler) — every implementation
+/// shares the same reserve-before-publish/rollback/phase contract, so a
+/// hermetic test using a fake exercises the exact same
+/// [`advance_run_to_active`] sequencing production uses, never a separate
+/// test-only reimplementation of it.
 #[async_trait::async_trait]
 pub trait RuntimeStartEffects: Send + Sync {
-    /// Construct/arm/begin the runtime for `run_id` and perform every other
-    /// one-time run-activation side effect the production path performs
-    /// between run creation and loop spawn. Must not spawn the execution
-    /// loop itself (see [`RuntimeStartEffects::spawn_loop`]) and must not
-    /// reserve local loop ownership (see
-    /// [`RuntimeStartEffects::reserve_local_ownership`]).
-    async fn start_runtime_effects(
-        &self,
-        run_id: uuid::Uuid,
-    ) -> Result<(), RuntimeStartEffectsError>;
-
-    /// Reserve local loop ownership for `run_id` — must be called, and must
-    /// succeed, strictly before [`RuntimeStartEffects::spawn_loop`]
-    /// constructs any task (ATOMICITY-SINGLE-SNAPSHOT-REPAIR requirement 3:
-    /// "reserve ownership before spawn"). Returns a `Conflict` when another
-    /// local owner already holds the run slot; on conflict the
-    /// implementation must not spawn a task and must release any
-    /// leadership/lease it already acquired for this attempt — no barrier,
-    /// deadman check, tick, dispatch, outbox write, or broker action may
-    /// occur before this reservation succeeds.
+    /// Reserve local loop ownership for `run_id` — the first
+    /// `RuntimeStartEffects` call [`advance_run_to_active`] makes, strictly
+    /// before any runtime construction or `AppState` publication
+    /// (ATOMIC-OWNERSHIP-AND-ROLLBACK-TRUTH-01 requirement 2: "reserve
+    /// ownership before publish"). Returns a `Conflict` when another local
+    /// owner already holds the run slot; on conflict the implementation
+    /// must not have touched any other local state for this attempt yet —
+    /// there is nothing to release beyond the (never-acquired) reservation
+    /// itself.
     async fn reserve_local_ownership(
         &self,
         run_id: uuid::Uuid,
     ) -> Result<(), RuntimeStartEffectsError>;
 
-    /// Spawn the execution loop for `run_id`. Only called after
-    /// [`RuntimeStartEffects::reserve_local_ownership`] has returned `Ok`.
+    /// Construct/arm/begin/tick the runtime for `run_id`, then commit the
+    /// prepared local run-start bundle to `AppState` as one call. Only
+    /// called after [`RuntimeStartEffects::reserve_local_ownership`] has
+    /// returned `Ok`. Must not spawn the execution loop itself (see
+    /// [`RuntimeStartEffects::spawn_loop`]).
+    async fn start_runtime_effects(
+        &self,
+        run_id: uuid::Uuid,
+    ) -> Result<(), RuntimeStartEffectsError>;
+
+    /// Spawn the execution loop for `run_id` and install it into the
+    /// reserved slot. Only called after
+    /// [`RuntimeStartEffects::start_runtime_effects`] has returned `Ok`.
     async fn spawn_loop(&self, run_id: uuid::Uuid) -> Result<(), RuntimeStartEffectsError>;
 
     /// Fail-closed rollback: clear every local (in-process) effect this
-    /// attempt committed for `run_id` — dynamic-selection state, accepted
-    /// artifact, native strategy bootstrap, execution snapshot, per-run
-    /// counters, and per-symbol target state. Called by
-    /// [`advance_run_to_active`] on any failure from
-    /// [`RuntimeStartEffects::start_runtime_effects`],
-    /// [`RuntimeStartEffects::reserve_local_ownership`], or
+    /// attempt committed for `run_id` — the loop-ownership reservation,
+    /// dynamic-selection state, accepted artifact, native strategy
+    /// bootstrap, execution snapshot, per-run counters, and per-symbol
+    /// target state. Called by [`advance_run_to_active`] on any failure
+    /// from [`RuntimeStartEffects::reserve_local_ownership`],
+    /// [`RuntimeStartEffects::start_runtime_effects`], or
     /// [`RuntimeStartEffects::spawn_loop`] — regardless of how far the
     /// attempt got, so it must be idempotent and must never clear state
     /// committed by a different, newer `run_id` (compare-and-clear).
-    async fn rollback_local_effects(&self, run_id: uuid::Uuid);
+    async fn rollback_local_effects(&self, run_id: uuid::Uuid) -> LocalRollbackOutcome;
+
+    /// How far this attempt progressed before it failed. Read synchronously
+    /// (no `.await`) after any failure, for [`RuntimeStartPhase`]-aware
+    /// durable rollback policy (requirement 4).
+    fn start_phase_reached(&self) -> RuntimeStartPhase;
 }
 
 /// Failure from [`advance_run_to_active`]. `RunLinkPersistFailed` is
 /// REPAIR 4's fail-closed policy: the run row already exists but is never
-/// armed/begun/ticked and the loop is never spawned.
+/// armed/begun/ticked and the loop is never spawned. `Effects` carries the
+/// original fault plus the full rollback truth (requirement 5) — never
+/// masked, and a caller can check `rollback.is_degraded()` before treating
+/// the original error as an ordinary, fully-cleaned-up start refusal.
 #[derive(Debug)]
 pub enum RuntimeStartSequenceError {
     RunLinkPersistFailed {
         evaluation_id: uuid::Uuid,
         run_id: uuid::Uuid,
     },
-    Effects(RuntimeStartEffectsError),
+    Effects {
+        original: RuntimeStartEffectsError,
+        rollback: RollbackOutcome,
+    },
 }
 
-/// Run-linked-evidence (if `readiness_link` is `Some`, fail-closed per
-/// REPAIR 4) → runtime effects → loop spawn, in this exact order (REPAIR 3).
-/// `run_id` must already be durably created by the caller
-/// (`AppState::create_or_reuse_run_for_start`) before calling this function.
-/// `readiness_link` is `None` for deployments where the strict daily-data
-/// readiness gate is not applicable (no `evaluation_id` was ever computed
-/// for this start attempt) — such attempts proceed straight to runtime
-/// effects, exactly as before this patch.
+/// Reservation → run-linked-evidence (if `readiness_link` is `Some`,
+/// fail-closed per REPAIR 4) → runtime effects/local commit → loop spawn,
+/// in this exact order. `run_id` must already be durably created by the
+/// caller (`AppState::create_or_reuse_run_for_start`) before calling this
+/// function. `readiness_link` is `None` for deployments where the strict
+/// daily-data readiness gate is not applicable (no `evaluation_id` was ever
+/// computed for this start attempt) — such attempts proceed straight to
+/// runtime effects, exactly as before this patch.
+///
+/// The run-linked evidence persist (pre-existing REPAIR 4 fail-closed
+/// policy, unrelated to local loop ownership) runs first, exactly as
+/// before this patch. `RuntimeStartEffects::reserve_local_ownership` is
+/// then the very first *trait* call (ATOMIC-OWNERSHIP-AND-ROLLBACK-TRUTH-01
+/// requirement 2) — strictly before `start_runtime_effects` does any
+/// runtime construction or `AppState` publication.
 pub async fn advance_run_to_active<E: RuntimeStartEffects>(
     db: &PgPool,
     effects: &E,
@@ -1702,78 +1835,112 @@ pub async fn advance_run_to_active<E: RuntimeStartEffects>(
         trace.push(TRACE_RUN_LINK_EVENT_PERSISTED);
     }
 
-    if let Err(err) = effects.start_runtime_effects(run_id).await {
-        rollback_failed_start_attempt(db, effects, run_id).await;
-        return Err(RuntimeStartSequenceError::Effects(err));
-    }
-
-    // ATOMICITY-SINGLE-SNAPSHOT-REPAIR requirement 3: reserve local loop
-    // ownership *before* any task is spawned. A conflict here means another
-    // local owner already holds the run slot — no task is ever constructed
-    // for this attempt, so there is nothing to detach/leak.
     if let Err(err) = effects.reserve_local_ownership(run_id).await {
-        rollback_failed_start_attempt(db, effects, run_id).await;
-        return Err(RuntimeStartSequenceError::Effects(err));
+        let rollback = rollback_failed_start_attempt(db, effects, run_id).await;
+        return Err(RuntimeStartSequenceError::Effects {
+            original: err,
+            rollback,
+        });
     }
     trace.push(TRACE_OWNERSHIP_RESERVED);
 
+    if let Err(err) = effects.start_runtime_effects(run_id).await {
+        let rollback = rollback_failed_start_attempt(db, effects, run_id).await;
+        return Err(RuntimeStartSequenceError::Effects {
+            original: err,
+            rollback,
+        });
+    }
+    trace.push(TRACE_LOCAL_BUNDLE_COMMITTED);
+
     if let Err(err) = effects.spawn_loop(run_id).await {
-        rollback_failed_start_attempt(db, effects, run_id).await;
-        return Err(RuntimeStartSequenceError::Effects(err));
+        let rollback = rollback_failed_start_attempt(db, effects, run_id).await;
+        return Err(RuntimeStartSequenceError::Effects {
+            original: err,
+            rollback,
+        });
     }
     trace.push(TRACE_LOOP_SPAWNED);
     Ok(())
 }
 
-/// ATOMICITY-SINGLE-SNAPSHOT-REPAIR requirement 2: the shared, fail-closed
-/// rollback [`advance_run_to_active`] runs on any failure once
-/// `start_runtime_effects` has begun. Two independent, idempotent steps:
+/// ATOMIC-OWNERSHIP-AND-ROLLBACK-TRUTH-01 requirements 2/4/5: the shared
+/// fail-closed rollback [`advance_run_to_active`] runs on any failure.
 ///
 /// 1. `effects.rollback_local_effects(run_id)` — clears every local
-///    (in-process) effect this attempt may have committed. Implementations
-///    own their own run_id-scoped compare-and-clear so an older attempt's
-///    rollback can never clear a newer run's committed state.
-/// 2. Durable run rollback — if `run_id` reached `Armed`/`Running` (i.e.
-///    `arm_run` succeeded before the failure), move it back to `Stopped`
-///    (`mqk_db::stop_run`'s own precondition already no-ops for every other
-///    status, so this is safe to call unconditionally and is naturally a
-///    no-op for a failure that happened before `arm_run`).
+///    (in-process) effect this attempt may have committed, including its
+///    loop-ownership reservation. Implementations own their own
+///    run_id-scoped compare-and-clear so an older attempt's rollback can
+///    never clear a newer run's committed state.
+/// 2. Durable run rollback, phase-aware (requirement 4): if `run_id`
+///    reached `Armed`/`Running`, move it to `Stopped` when
+///    `start_phase_reached().cleanly_stoppable()`, otherwise `Halted`.
+///    `AlreadyNonActive` when the run never reached `Armed`/`Running`
+///    (naturally a no-op for a failure that happened before `arm_run`, e.g.
+///    a reservation conflict).
 ///
 /// The original error is always what the caller returns — this function
-/// never masks it. A rollback failure (fetch/stop_run error) is logged, not
-/// propagated, since surfacing a *second*, rollback-specific error in place
-/// of the real cause would be strictly less honest.
+/// never masks it (requirement 5) — but every rollback outcome, including a
+/// `fetch_run`/`stop_run`/`halt_run` failure, is now returned as structured
+/// [`RollbackOutcome`] truth rather than merely logged.
 async fn rollback_failed_start_attempt<E: RuntimeStartEffects>(
     db: &PgPool,
     effects: &E,
     run_id: uuid::Uuid,
-) {
-    effects.rollback_local_effects(run_id).await;
+) -> RollbackOutcome {
+    let local = effects.rollback_local_effects(run_id).await;
+    let phase_reached = effects.start_phase_reached();
 
-    match mqk_db::fetch_run(db, run_id).await {
+    let (durable, durable_status_unknown) = match mqk_db::fetch_run(db, run_id).await {
         Ok(run)
             if matches!(
                 run.status,
                 mqk_db::RunStatus::Armed | mqk_db::RunStatus::Running
             ) =>
         {
-            if let Err(err) = mqk_db::stop_run(db, run_id).await {
-                tracing::error!(
-                    run_id = %run_id,
-                    "rollback_failed_start_attempt_stop_run_failed error={err}"
-                );
+            if phase_reached.cleanly_stoppable() {
+                match mqk_db::stop_run(db, run_id).await {
+                    Ok(()) => (DurableRollbackDisposition::Stopped, false),
+                    Err(err) => {
+                        tracing::error!(
+                            run_id = %run_id,
+                            "rollback_failed_start_attempt_stop_run_failed error={err}"
+                        );
+                        (DurableRollbackDisposition::TransitionFailed, true)
+                    }
+                }
+            } else {
+                match mqk_db::halt_run(db, run_id, Utc::now()).await {
+                    Ok(()) => (DurableRollbackDisposition::Halted, false),
+                    Err(err) => {
+                        tracing::error!(
+                            run_id = %run_id,
+                            "rollback_failed_start_attempt_halt_run_failed error={err}"
+                        );
+                        (DurableRollbackDisposition::TransitionFailed, true)
+                    }
+                }
             }
         }
         Ok(_) => {
             // Already Created/Stopped/Halted — nothing to roll back
             // (idempotent: a retried rollback for the same run_id, or a
             // failure that happened before `arm_run`, both land here).
+            (DurableRollbackDisposition::AlreadyNonActive, false)
         }
         Err(err) => {
             tracing::error!(
                 run_id = %run_id,
                 "rollback_failed_start_attempt_fetch_run_failed error={err}"
             );
+            (DurableRollbackDisposition::QueryFailed, true)
         }
+    };
+
+    RollbackOutcome {
+        phase_reached,
+        local,
+        durable,
+        durable_status_unknown,
     }
 }

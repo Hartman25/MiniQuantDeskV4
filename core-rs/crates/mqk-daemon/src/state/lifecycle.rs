@@ -6,7 +6,6 @@
 //! in `state.rs`; they are accessible here because Rust allows child modules to
 //! read items that are private to a parent module.
 
-use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use chrono::Utc;
@@ -39,7 +38,7 @@ use super::{
 };
 use super::{AppState, DAEMON_ENGINE_ID, RECONCILE_TICK_INTERVAL};
 
-use mqk_runtime::native_strategy::NativeStrategyBootstrap;
+use mqk_runtime::native_strategy::{bootstrap_with_effective_binding, NativeStrategyBootstrap};
 
 // ---------------------------------------------------------------------------
 // AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D2: typed autonomous arm outcome
@@ -131,13 +130,40 @@ struct StartAttemptAuthoritySnapshot {
         Result<crate::state::MultiSymbolRuntimeConfig, crate::state::MultiSymbolConfigError>,
     readiness_context: crate::daily_data_readiness::DailyDataReadinessContext,
     configured_strategy_ids: Vec<String>,
+    /// ATOMIC-OWNERSHIP-AND-ROLLBACK-TRUTH-01 requirement 1: the frozen
+    /// premarket required symbol/timeframe vector — the legacy
+    /// PREMARKET-DATA-READINESS-GATE-01 gate below must consume this field,
+    /// never call `required_symbols_for_freshness_gate_from_env()` itself a
+    /// second time within the same start attempt.
+    required_freshness_symbols: Vec<crate::market_data_freshness::RequiredSymbolTimeframe>,
+    /// ATOMIC-OWNERSHIP-AND-ROLLBACK-TRUTH-01 requirement 1: B1A's native
+    /// strategy bootstrap and its derived effective runtime binding, folded
+    /// into this one authority object instead of being resolved as a
+    /// separate local pair before the snapshot exists.
+    native_strategy_bootstrap: NativeStrategyBootstrap,
+    effective_runtime_binding: mqk_runtime::native_strategy::EffectiveRuntimeBinding,
 }
 
 impl StartAttemptAuthoritySnapshot {
-    /// Resolve every start-attempt input exactly once. Pure I/O only (env
-    /// vars, at most one watchlist-artifact file read, the provider/
-    /// instrument/calendar registry files, and the shared test-overridable
-    /// clock) — no DB, no broker, no network.
+    /// Resolve every start-attempt input exactly once, so no other part of
+    /// `start_execution_runtime` reads env, watchlist state, the
+    /// calendar/provider/instrument registries, the fleet-id env var, or
+    /// the clock independently. Pure I/O only (env vars, at most one
+    /// watchlist-artifact file read, the provider/instrument/calendar
+    /// registry files, and the shared test-overridable clock) — no DB, no
+    /// broker, no network. Infallible: this only *constructs* the B1A
+    /// native strategy bootstrap once (folding that construction into this
+    /// one authority object closes the ordering gap where the snapshot's
+    /// other fields — mode, clock, `MultiSymbolRuntimeConfig`, readiness
+    /// context, fleet ids — used to be resolved strictly after bootstrap/
+    /// binding already existed as a separate local pair). It never decides
+    /// whether the attempt may proceed with that bootstrap — the B1A
+    /// Failed/Dormant gate check stays in `start_execution_runtime`, at its
+    /// original position (after every pre-DB deployment/capital/policy
+    /// gate, before the fixed-window-override check), reading this field
+    /// by reference. Gate order, fault classes, and messages are unchanged
+    /// — only *when the values are computed* moved earlier, to this one
+    /// call.
     async fn resolve(state: &AppState) -> Self {
         let mode_resolution =
             crate::dynamic_selection_mode::resolve_dynamic_selection_mode_from_env();
@@ -147,13 +173,49 @@ impl StartAttemptAuthoritySnapshot {
             state.runtime_selection.broker_kind,
         );
         let now_utc = state.daily_data_readiness_now().await;
+        let configured_strategy_ids =
+            crate::daily_data_readiness::fleet_ids_from_env().unwrap_or_default();
+
+        // B1A construction, folded in: the exact same
+        // `bootstrap_with_effective_binding` call and fleet-id source
+        // (`AppState::strategy_fleet_snapshot()`, NOT `fleet_ids_from_env()`
+        // above) `autonomous_runtime_context::resolve_autonomous_runtime_
+        // context` uses — deliberately kept as its own, separate read.
+        // `strategy_fleet_snapshot()` is a distinct concept from
+        // `configured_strategy_ids`: it is both the production boot-time
+        // cache of `MQK_STRATEGY_IDS` *and* a dedicated test-injection seam
+        // (`AppState::set_strategy_fleet_for_test`) several existing
+        // integration tests rely on to configure the B1A bootstrap without
+        // mutating the process-global env var (which would race other
+        // tests). Sourcing B1A's bootstrap from `configured_strategy_ids`
+        // instead breaks that seam. This remains a known, narrow residual
+        // duplication — unifying it would require changing
+        // `resolve_autonomous_runtime_context`'s signature, which has call
+        // sites outside this patch's declared file scope
+        // (`autonomous_daily_coordinator.rs`, `autonomous_completed_bar_
+        // task.rs`) — not attempted here. `resolve` only *constructs* the
+        // bootstrap once; it never decides whether the attempt may proceed
+        // with it — the B1A Failed/Dormant gate check stays in
+        // `start_execution_runtime`, at its original position, reading this
+        // field by reference.
+        let fleet_ids_for_bootstrap = state.strategy_fleet_snapshot().await.map(|entries| {
+            entries
+                .into_iter()
+                .map(|entry| entry.strategy_id)
+                .collect::<Vec<_>>()
+        });
+        let (native_strategy_bootstrap, effective_runtime_binding) =
+            bootstrap_with_effective_binding(fleet_ids_for_bootstrap.as_deref());
+
         Self {
             now_utc,
             effective_mode,
             multi_symbol_config: crate::state::build_multi_symbol_runtime_config_from_env(),
             readiness_context: crate::daily_data_readiness::load_readiness_context_from_env(),
-            configured_strategy_ids: crate::daily_data_readiness::fleet_ids_from_env()
-                .unwrap_or_default(),
+            configured_strategy_ids,
+            required_freshness_symbols: required_symbols_for_freshness_gate_from_env(),
+            native_strategy_bootstrap,
+            effective_runtime_binding,
         }
     }
 
@@ -780,7 +842,9 @@ impl AppState {
             }
         }
 
-        // B1A: Native strategy bootstrap gate.
+        // B1A: Native strategy bootstrap gate, folded into the one
+        // start-attempt authority snapshot (ATOMIC-OWNERSHIP-AND-ROLLBACK-
+        // TRUTH-01 requirement 1).
         //
         // Evaluate the native strategy bootstrap from fleet truth (MQK_STRATEGY_IDS)
         // and the daemon plugin registry before acquiring any DB resources.
@@ -795,21 +859,70 @@ impl AppState {
         //   - before any DB resources or run rows are acquired (no dangling rows)
         //   - ordered after all deployment/capital/policy gates (last pre-DB gate)
         //
-        // The bootstrap is kept as a local binding and stored in AppState only
-        // after a fully successful run start so the field is never left populated
-        // by a failed start attempt.
+        // The bootstrap lives only in `start_attempt_snapshot` (a local
+        // binding) and is stored in AppState only after a fully successful
+        // run start (inside `ProductionRuntimeStartEffects::start_runtime_
+        // effects`'s local commit bundle), so the field is never left
+        // populated by a failed start attempt.
         //
-        // AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D1-TYPED-COORDINATOR-POLICY:
-        // this resolution is extracted into the shared, side-effect-free
-        // `autonomous_runtime_context::resolve_autonomous_runtime_context`
-        // seam so a future daily coordinator can resolve the identical
-        // bootstrap/binding without a second, independently-derived
-        // resolution. Gate order, fault classes, and messages are unchanged
-        // — this call site behaves identically to the former inline block.
-        let super::autonomous_runtime_context::ResolvedAutonomousRuntimeContext {
-            native_strategy_bootstrap,
-            effective_runtime_binding,
-        } = super::autonomous_runtime_context::resolve_autonomous_runtime_context(self).await?;
+        // ATOMIC-OWNERSHIP-AND-ROLLBACK-TRUTH-01 requirement 1: this is now
+        // the single point every start-attempt input is resolved —
+        // `StartAttemptAuthoritySnapshot::resolve` folds in B1A's bootstrap/
+        // binding construction alongside the dynamic-selection mode,
+        // `MultiSymbolRuntimeConfig`, readiness context, fleet ids,
+        // premarket required-symbols vector, and clock — resolved here,
+        // once, and reused by every gate/evaluator below (this gate itself,
+        // the strict readiness gate, the legacy premarket freshness gate,
+        // the dynamic-selection start-gate evaluation, and the spawned
+        // execution loop's dispatch assignments via `snapshot.
+        // legacy_assignments()`). Gate order, fault classes, and messages
+        // are unchanged — only *when* the values are computed moved
+        // earlier, to this one call.
+        let start_attempt_snapshot = StartAttemptAuthoritySnapshot::resolve(self).await;
+
+        if start_attempt_snapshot.native_strategy_bootstrap.is_failed() {
+            return Err(RuntimeLifecycleError::forbidden(
+                "runtime.start_refused.native_strategy_bootstrap_failed",
+                "native_strategy_bootstrap",
+                format!(
+                    "native strategy bootstrap failed (truth_state='{}'): {}; \
+                     ensure the strategy named in MQK_STRATEGY_IDS is registered \
+                     in the daemon plugin registry before starting; \
+                     operators must not set MQK_STRATEGY_IDS until the target \
+                     strategy engine is wired into the registry",
+                    start_attempt_snapshot
+                        .native_strategy_bootstrap
+                        .truth_state(),
+                    start_attempt_snapshot
+                        .native_strategy_bootstrap
+                        .failure_reason()
+                        .unwrap_or("unknown"),
+                ),
+            ));
+        }
+
+        // STRATEGY-DORMANCY-01: Paper+Alpaca autonomous path requires an
+        // active strategy bootstrap. Dormant is allowed for non-paper
+        // deployments (e.g. LiveShadow running in monitor-only mode); this
+        // block is scoped to Paper+Alpaca only, matching the pre-extraction
+        // gate exactly.
+        if start_attempt_snapshot
+            .native_strategy_bootstrap
+            .is_dormant()
+            && self.deployment_mode() == DeploymentMode::Paper
+            && self.runtime_selection.broker_kind == Some(BrokerKind::Alpaca)
+        {
+            return Err(RuntimeLifecycleError::forbidden(
+                "runtime.start_refused.strategy_bootstrap_dormant",
+                "native_strategy_bootstrap",
+                "paper+alpaca autonomous path requires an active strategy bootstrap; \
+                 MQK_STRATEGY_IDS is absent or empty — no strategy engine will generate \
+                 decisions; set MQK_STRATEGY_IDS to a registered strategy name \
+                 (e.g. 'swing_momentum') and ensure it is enabled in \
+                 sys_strategy_registry before starting the autonomous paper path \
+                 (STRATEGY-DORMANCY-01)",
+            ));
+        }
 
         // DAILY-DATA-READINESS-01C-ENFORCEMENT-01: strict daily data
         // readiness start gate.
@@ -818,9 +931,10 @@ impl AppState {
         // predicate the PREMARKET-DATA-READINESS-GATE-01 legacy gate below
         // uses, never hardcoded to BrokerKind::Alpaca (contract §C.5).
         //
-        // Uses the exact `native_strategy_bootstrap`/`effective_runtime_binding`
-        // pair constructed above (B1A) — never a second, independently
-        // constructed bootstrap (Phase B's `evaluate_daily_data_readiness_from_env`
+        // Uses the exact `start_attempt_snapshot.native_strategy_bootstrap`/
+        // `.effective_runtime_binding` pair resolved above (B1A, folded into
+        // the snapshot) — never a second, independently constructed
+        // bootstrap (Phase B's `evaluate_daily_data_readiness_from_env`
         // lifecycle-safety contract).
         //
         // Placed after B1A (bootstrap/binding resolution) and before
@@ -871,16 +985,6 @@ impl AppState {
             }
         }
 
-        // DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7A-ATOMICITY-SINGLE-
-        // SNAPSHOT-REPAIR: resolve the one frozen start-attempt authority
-        // snapshot now — before the readiness gate below, so both the
-        // readiness gate and the dynamic-selection evaluation further down
-        // (and the execution loop's dispatch assignments, via
-        // `snapshot.legacy_assignments()`) consume this exact value. No
-        // second env/watchlist/config/calendar/provider/fleet read anywhere
-        // else in this function.
-        let start_attempt_snapshot = StartAttemptAuthoritySnapshot::resolve(self).await;
-
         let mut daily_data_readiness_evaluation_id: Option<uuid::Uuid> = None;
         if self.deployment_mode() == DeploymentMode::Paper
             && self.strategy_market_data_source()
@@ -908,7 +1012,7 @@ impl AppState {
                         let report = crate::daily_data_readiness::evaluate_readiness_with_binding(
                             self.db.as_ref(),
                             config,
-                            &effective_runtime_binding,
+                            &start_attempt_snapshot.effective_runtime_binding,
                             readiness_context,
                             evaluated_at_utc,
                         )
@@ -916,7 +1020,7 @@ impl AppState {
                         let evaluation_id = crate::daily_data_readiness::compute_evaluation_id(
                             evaluated_at_utc,
                             attempt_seq,
-                            &effective_runtime_binding,
+                            &start_attempt_snapshot.effective_runtime_binding,
                             config,
                         );
                         (report, evaluation_id, None::<&'static str>)
@@ -936,7 +1040,7 @@ impl AppState {
                         crate::daily_data_readiness::compute_evaluation_id_from_assignment_identity(
                             evaluated_at_utc,
                             attempt_seq,
-                            &effective_runtime_binding,
+                            &start_attempt_snapshot.effective_runtime_binding,
                             &assignment_identity,
                         );
                         (report, evaluation_id, Some(err.as_str()))
@@ -1025,7 +1129,10 @@ impl AppState {
         //
         // Placed immediately after db_pool() so the gate runs once, before any
         // run rows are created or leadership is acquired.
-        if let Some(strategy_id) = native_strategy_bootstrap.active_strategy_id() {
+        if let Some(strategy_id) = start_attempt_snapshot
+            .native_strategy_bootstrap
+            .active_strategy_id()
+        {
             match mqk_db::fetch_strategy_registry_entry(&db, strategy_id).await {
                 Ok(Some(record)) if record.enabled => {
                     // Registered and enabled — pass through.
@@ -1082,15 +1189,22 @@ impl AppState {
         //
         // Placed after db_pool() (requires DB) and before insert_run / lease acquisition
         // so a readiness refusal leaves no dangling run rows.
+        //
+        // ATOMIC-OWNERSHIP-AND-ROLLBACK-TRUTH-01 requirement 1/8: consumes
+        // `start_attempt_snapshot.required_freshness_symbols` and `.now_utc`
+        // — the exact frozen vector and evaluation timestamp every other
+        // gate in this attempt uses — instead of independently calling
+        // `required_symbols_for_freshness_gate_from_env()` and `Utc::now()`
+        // a second time. Missing/insufficient/stale semantics and gate
+        // ordering are unchanged.
         if self.deployment_mode() == DeploymentMode::Paper
             && self.strategy_market_data_source()
                 == StrategyMarketDataSource::ExternalSignalIngestion
         {
-            let required = required_symbols_for_freshness_gate_from_env();
             let readiness = evaluate_md_freshness_status_for_symbols(
                 Some(&db),
-                &required,
-                Utc::now().timestamp(),
+                &start_attempt_snapshot.required_freshness_symbols,
+                start_attempt_snapshot.now_utc.timestamp(),
             )
             .await;
             if !readiness.start_allowed {
@@ -1194,14 +1308,26 @@ impl AppState {
             state: self,
             db: db.clone(),
             artifact_intake: std::sync::Mutex::new(Some(artifact_intake)),
-            native_strategy_bootstrap: std::sync::Mutex::new(Some(native_strategy_bootstrap)),
-            orchestrator: std::sync::Mutex::new(None),
-            dynamic_selection_outcome: std::sync::Mutex::new(Some(dynamic_selection_outcome)),
             // ATOMICITY-SINGLE-SNAPSHOT-REPAIR: the frozen legacy assignment
             // vector from the one start-attempt snapshot resolved above —
             // `spawn_loop` passes this to `spawn_execution_loop` instead of
-            // letting it re-read env/watchlist state a third time.
+            // letting it re-read env/watchlist state a third time. Read
+            // before the partial move of `native_strategy_bootstrap` below
+            // (both are fields of `start_attempt_snapshot`, and this method
+            // call needs the whole struct still intact).
             legacy_assignments: start_attempt_snapshot.legacy_assignments(),
+            // Moves `native_strategy_bootstrap` out of `start_attempt_
+            // snapshot` — the last use of that field; every other field
+            // consumed above was read by reference only.
+            native_strategy_bootstrap: std::sync::Mutex::new(Some(
+                start_attempt_snapshot.native_strategy_bootstrap,
+            )),
+            orchestrator: std::sync::Mutex::new(None),
+            dynamic_selection_outcome: std::sync::Mutex::new(Some(dynamic_selection_outcome)),
+            start_phase: std::sync::Mutex::new(
+                crate::daily_data_readiness::RuntimeStartPhase::BeforeArm,
+            ),
+            leadership_release_outcome: std::sync::Mutex::new(None),
         };
         let mut lifecycle_trace: Vec<&'static str> = Vec::new();
         crate::daily_data_readiness::advance_run_to_active(
@@ -1226,20 +1352,43 @@ impl AppState {
                     crate::daily_data_readiness::REASON_READINESS_RUN_LINK_PERSIST_FAILED,
                 ),
             ),
-            crate::daily_data_readiness::RuntimeStartSequenceError::Effects(effects_err) => {
-                match effects_err.kind {
+            crate::daily_data_readiness::RuntimeStartSequenceError::Effects {
+                original,
+                rollback,
+            } => {
+                let base = match original.kind {
                     crate::daily_data_readiness::RuntimeStartEffectsErrorKind::Internal => {
-                        RuntimeLifecycleError::internal(
-                            effects_err.fault_class,
-                            effects_err.message,
-                        )
+                        RuntimeLifecycleError::internal(original.fault_class, original.message)
                     }
                     crate::daily_data_readiness::RuntimeStartEffectsErrorKind::Conflict => {
-                        RuntimeLifecycleError::conflict(
-                            effects_err.fault_class,
-                            effects_err.message,
-                        )
+                        RuntimeLifecycleError::conflict(original.fault_class, original.message)
                     }
+                };
+                // ATOMIC-OWNERSHIP-AND-ROLLBACK-TRUTH-01 requirement 5: never
+                // mask the original fault, but never present an ordinary
+                // start error when rollback itself could not confirm a safe
+                // terminal state — the DB may still say Armed/Running, or
+                // the orchestrator lease release may have failed.
+                if rollback.is_degraded() {
+                    RuntimeLifecycleError::service_unavailable(
+                        "runtime.start_refused.rollback_degraded",
+                        format!(
+                            "start attempt failed and rollback could not confirm a safe \
+                             terminal state; original fault ({}): {base}; \
+                             rollback: phase_reached={:?} durable={:?} \
+                             durable_status_unknown={} leadership_release_outcome={:?}; \
+                             operator must verify the durable run status directly \
+                             before retrying ({})",
+                            base.fault_class(),
+                            rollback.phase_reached,
+                            rollback.durable,
+                            rollback.durable_status_unknown,
+                            rollback.local.leadership_release_outcome,
+                            "ATOMIC-OWNERSHIP-AND-ROLLBACK-TRUTH-01",
+                        ),
+                    )
+                } else {
+                    base
                 }
             }
         })?;
@@ -1702,6 +1851,59 @@ impl AppState {
 }
 
 // ---------------------------------------------------------------------------
+// ATOMIC-OWNERSHIP-AND-ROLLBACK-TRUTH-01 requirement 6: test-only seam to
+// drive the exact production `ProductionRuntimeStartEffects` +
+// `daily_data_readiness::advance_run_to_active` sequencing directly,
+// bypassing `start_execution_runtime`'s outer deployment/capital/artifact/
+// policy gates — which, for `BrokerKind::Paper`, would refuse before ever
+// reaching this code (`deployment_mode_readiness` refuses `(Paper, Paper)`
+// outright; see `scenario_bundle7_phase7a_lifecycle_wiring_01.rs`).
+//
+// `self.runtime_selection.broker_kind` must be `BrokerKind::Paper` for this
+// to be hermetic: `build_execution_orchestrator` then constructs
+// `DaemonBroker::Paper(LockedPaperBroker::default())` — in-process, zero
+// network, zero credentials, exactly the same broker
+// `AppState::run_loop_one_tick_for_test` already uses for the same reason.
+// This lets an integration test exercise the *real* reservation/commit/
+// spawn/rollback code path (not a fake `RuntimeStartEffects`) against a
+// real isolated test DB.
+//
+// Never called in production; not cfg-gated, following the `_for_test`
+// naming convention established by `run_loop_one_tick_for_test`/
+// `inject_running_loop_for_test`/`establish_db_backed_active_run_for_test`.
+impl AppState {
+    pub async fn drive_production_start_effects_for_test(
+        self: &Arc<Self>,
+        db: PgPool,
+        run_id: uuid::Uuid,
+        dynamic_selection_outcome: Option<DynamicSelectionRuntimeState>,
+    ) -> (
+        Result<(), crate::daily_data_readiness::RuntimeStartSequenceError>,
+        Vec<&'static str>,
+    ) {
+        let effects = ProductionRuntimeStartEffects {
+            state: self,
+            db: db.clone(),
+            artifact_intake: std::sync::Mutex::new(Some(ArtifactIntakeOutcome::NotConfigured)),
+            native_strategy_bootstrap: std::sync::Mutex::new(None),
+            orchestrator: std::sync::Mutex::new(None),
+            dynamic_selection_outcome: std::sync::Mutex::new(dynamic_selection_outcome),
+            legacy_assignments: Vec::new(),
+            start_phase: std::sync::Mutex::new(
+                crate::daily_data_readiness::RuntimeStartPhase::BeforeArm,
+            ),
+            leadership_release_outcome: std::sync::Mutex::new(None),
+        };
+        let mut trace: Vec<&'static str> = Vec::new();
+        let result = crate::daily_data_readiness::advance_run_to_active(
+            &db, &effects, run_id, None, &mut trace,
+        )
+        .await;
+        (result, trace)
+    }
+}
+
+// ---------------------------------------------------------------------------
 // REPAIR 3 (DAILY-DATA-READINESS-01C-CLOSURE-REPAIR-01): production
 // implementation of `daily_data_readiness::RuntimeStartEffects`.
 //
@@ -1721,13 +1923,13 @@ struct ProductionRuntimeStartEffects<'a> {
     /// never held across an `.await`.
     artifact_intake: std::sync::Mutex<Option<ArtifactIntakeOutcome>>,
     /// Consumed exactly once by `start_runtime_effects` (B1A bootstrap
-    /// storage).
+    /// storage) — held locally until the run-start bundle commit.
     native_strategy_bootstrap: std::sync::Mutex<Option<NativeStrategyBootstrap>>,
     /// Populated by `start_runtime_effects`, consumed by `spawn_loop`.
     orchestrator: std::sync::Mutex<Option<DaemonOrchestrator>>,
     /// BUNDLE-7-PHASE-7A: the already-evaluated, frozen dynamic-selection
     /// outcome for this run, consumed exactly once by `start_runtime_effects`
-    /// (committed to `AppState` near the end, alongside
+    /// (committed to `AppState` as part of the same run-start bundle as
     /// `native_strategy_bootstrap`).
     dynamic_selection_outcome: std::sync::Mutex<Option<DynamicSelectionRuntimeState>>,
     /// ATOMICITY-SINGLE-SNAPSHOT-REPAIR: the frozen legacy assignment
@@ -1736,15 +1938,96 @@ struct ProductionRuntimeStartEffects<'a> {
     /// `spawn_loop` below instead of letting the loop re-read env/watchlist
     /// state a third time.
     legacy_assignments: Vec<crate::state::SymbolStrategyAssignment>,
+    /// ATOMIC-OWNERSHIP-AND-ROLLBACK-TRUTH-01 requirement 4: how far this
+    /// attempt has progressed. Updated synchronously (no `.await` held)
+    /// at every milestone; read back by `start_phase_reached`.
+    start_phase: std::sync::Mutex<crate::daily_data_readiness::RuntimeStartPhase>,
+    /// ATOMIC-OWNERSHIP-AND-ROLLBACK-TRUTH-01 requirement 5: the outcome of
+    /// releasing the orchestrator's runtime leadership lease for this
+    /// attempt, if it was ever acquired — recorded at the exact call site
+    /// that released it (`release_orchestrator_leadership`), read back by
+    /// `rollback_local_effects` into the structured `LocalRollbackOutcome`
+    /// instead of only a `tracing::warn!` line.
+    leadership_release_outcome: std::sync::Mutex<Option<Result<(), String>>>,
+}
+
+impl ProductionRuntimeStartEffects<'_> {
+    /// ATOMIC-OWNERSHIP-AND-ROLLBACK-TRUTH-01 requirement 7: recovers from
+    /// a poisoned mutex (another thread panicked while holding it) instead
+    /// of propagating the poison as a second panic here — this is pure,
+    /// process-local progress-tracking state with no invariant that a
+    /// poisoned write could violate, so taking the possibly-stale inner
+    /// value is strictly safer than panicking a second time.
+    fn set_phase(&self, phase: crate::daily_data_readiness::RuntimeStartPhase) {
+        *self
+            .start_phase
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = phase;
+    }
+
+    /// Release `orchestrator`'s runtime leadership lease and record the
+    /// outcome for `rollback_local_effects` to surface, instead of only
+    /// logging it. `context` is a short label for the `tracing::warn!` line
+    /// on failure (matches the pre-existing per-call-site message suffixes).
+    async fn release_orchestrator_leadership(
+        &self,
+        mut orchestrator: DaemonOrchestrator,
+        context: &'static str,
+    ) {
+        let outcome = orchestrator
+            .release_runtime_leadership()
+            .await
+            .map_err(|err| err.to_string());
+        if let Err(ref message) = outcome {
+            tracing::warn!("runtime_lease_release_failed_on_{context} error={message}");
+        }
+        *self
+            .leadership_release_outcome
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(outcome);
+    }
 }
 
 #[async_trait::async_trait]
 impl crate::daily_data_readiness::RuntimeStartEffects for ProductionRuntimeStartEffects<'_> {
-    async fn start_runtime_effects(
+    /// ATOMIC-OWNERSHIP-AND-ROLLBACK-TRUTH-01 requirement 2: the very first
+    /// `RuntimeStartEffects` call `advance_run_to_active` makes for this
+    /// attempt — strictly before any runtime construction or `AppState`
+    /// publication. Relies on `AppState::lifecycle_op` (held for the whole
+    /// duration of `start_execution_runtime`, including this call and the
+    /// later `start_runtime_effects`/`spawn_loop`/rollback) to serialize
+    /// every local start/stop/halt attempt within one process — no other
+    /// writer can install a handle into `execution_loop` between this
+    /// reservation and `spawn_loop`'s later install. A real ownership
+    /// conflict here is refused before any DB write or runtime construction
+    /// for this attempt happens at all.
+    async fn reserve_local_ownership(
         &self,
         run_id: uuid::Uuid,
     ) -> Result<(), crate::daily_data_readiness::RuntimeStartEffectsError> {
         use crate::daily_data_readiness::RuntimeStartEffectsError;
+
+        self.state
+            .reserve_execution_loop_slot(run_id)
+            .await
+            .map_err(|_conflicting_run_id| {
+                RuntimeStartEffectsError::conflict(
+                    "runtime.start_refused.local_ownership_conflict",
+                    "runtime ownership changed while starting; refusing duplicate loop",
+                )
+            })
+    }
+
+    /// Only called after `reserve_local_ownership` has returned `Ok`.
+    /// Constructs/arms/begins/ticks the runtime using purely local bindings,
+    /// then commits the prepared [`RunStartLocalBundle`] to `AppState` in
+    /// one call (`commit_run_start_bundle`) — no field is published
+    /// individually as it becomes available.
+    async fn start_runtime_effects(
+        &self,
+        run_id: uuid::Uuid,
+    ) -> Result<(), crate::daily_data_readiness::RuntimeStartEffectsError> {
+        use crate::daily_data_readiness::{RuntimeStartEffectsError, RuntimeStartPhase};
 
         let mut orchestrator = self
             .state
@@ -1764,7 +2047,7 @@ impl crate::daily_data_readiness::RuntimeStartEffects for ProductionRuntimeStart
         // BUNDLE-7-PHASE-7A fault seam: after orchestrator construction,
         // before arm/begin/tick. No dynamic-selection state has been
         // committed yet — release the freshly-acquired lease and return;
-        // nothing else to clean up.
+        // nothing else to clean up. Phase remains `BeforeArm`.
         if self
             .state
             .dynamic_selection_fault_seam_is(
@@ -1772,11 +2055,8 @@ impl crate::daily_data_readiness::RuntimeStartEffects for ProductionRuntimeStart
             )
             .await
         {
-            if let Err(rel_err) = orchestrator.release_runtime_leadership().await {
-                tracing::warn!(
-                    "runtime_lease_release_failed_on_dynamic_selection_fault_seam error={rel_err}"
-                );
-            }
+            self.release_orchestrator_leadership(orchestrator, "dynamic_selection_fault_seam")
+                .await;
             return Err(RuntimeStartEffectsError::internal(
                 "dynamic_selection.fault_seam.after_orchestrator_construction",
                 "test-injected fault after orchestrator construction",
@@ -1784,39 +2064,42 @@ impl crate::daily_data_readiness::RuntimeStartEffects for ProductionRuntimeStart
         }
 
         if let Err(err) = mqk_db::arm_run(&self.db, run_id).await {
-            if let Err(rel_err) = orchestrator.release_runtime_leadership().await {
-                tracing::warn!("runtime_lease_release_failed_on_arm_rollback error={rel_err}");
-            }
+            self.release_orchestrator_leadership(orchestrator, "arm_rollback")
+                .await;
             return Err(RuntimeStartEffectsError::internal(
                 "start arm_run failed",
                 err.to_string(),
             ));
         }
+        self.set_phase(RuntimeStartPhase::ArmedBeforeBegin);
+
         if let Err(err) = mqk_db::begin_run(&self.db, run_id).await {
-            if let Err(rel_err) = orchestrator.release_runtime_leadership().await {
-                tracing::warn!("runtime_lease_release_failed_on_begin_rollback error={rel_err}");
-            }
+            self.release_orchestrator_leadership(orchestrator, "begin_rollback")
+                .await;
             return Err(RuntimeStartEffectsError::internal(
                 "start begin_run failed",
                 err.to_string(),
             ));
         }
         if let Err(err) = mqk_db::heartbeat_run(&self.db, run_id, Utc::now()).await {
-            if let Err(rel_err) = orchestrator.release_runtime_leadership().await {
-                tracing::warn!(
-                    "runtime_lease_release_failed_on_heartbeat_rollback error={rel_err}"
-                );
-            }
+            self.release_orchestrator_leadership(orchestrator, "heartbeat_rollback")
+                .await;
             return Err(RuntimeStartEffectsError::internal(
                 "start initial heartbeat failed",
                 err.to_string(),
             ));
         }
+        self.set_phase(RuntimeStartPhase::RunningBeforeInitialTick);
+
+        // Phase advances to `InitialTickStarted` before the call, not after
+        // — a failure discovered here (including a panic unwind, since the
+        // phase is already recorded) must be treated as "tick's outcome is
+        // unknown", never as "tick never ran" (requirement 4).
+        self.set_phase(RuntimeStartPhase::InitialTickStarted);
         if let Err(err) = orchestrator.tick().await {
             let message = err.to_string();
-            if let Err(rel_err) = orchestrator.release_runtime_leadership().await {
-                tracing::warn!("runtime_lease_release_failed_on_tick_rollback error={rel_err}");
-            }
+            self.release_orchestrator_leadership(orchestrator, "tick_rollback")
+                .await;
             if message.contains("RUNTIME_LEASE") {
                 return Err(RuntimeStartEffectsError::conflict(
                     "runtime.start_refused.service_unavailable",
@@ -1828,6 +2111,7 @@ impl crate::daily_data_readiness::RuntimeStartEffects for ProductionRuntimeStart
                 message,
             ));
         }
+        self.set_phase(RuntimeStartPhase::InitialTickCompleted);
 
         // DEADMAN-EXPIRED-AFTER-START-01: refresh heartbeat after the initial
         // tick.  orchestrator.tick() may block for tens of seconds (Alpaca
@@ -1836,11 +2120,8 @@ impl crate::daily_data_readiness::RuntimeStartEffects for ProductionRuntimeStart
         // pre-tick deadman check would then fire immediately.  A fresh
         // heartbeat here ensures the loop starts with a current timestamp.
         if let Err(err) = mqk_db::heartbeat_run(&self.db, run_id, Utc::now()).await {
-            if let Err(rel_err) = orchestrator.release_runtime_leadership().await {
-                tracing::warn!(
-                    "runtime_lease_release_failed_on_post_tick_heartbeat error={rel_err}"
-                );
-            }
+            self.release_orchestrator_leadership(orchestrator, "post_tick_heartbeat")
+                .await;
             return Err(RuntimeStartEffectsError::internal(
                 "post-initial-tick heartbeat refresh failed",
                 err.to_string(),
@@ -1850,7 +2131,9 @@ impl crate::daily_data_readiness::RuntimeStartEffects for ProductionRuntimeStart
         // BUNDLE-7-PHASE-7A fault seam: after run arm/begin/initial tick
         // (and the post-tick heartbeat refresh), before any counter
         // reset/snapshot/provenance/bootstrap/selection commit. No
-        // dynamic-selection state has been committed yet.
+        // dynamic-selection state has been committed yet. Phase is already
+        // `InitialTickCompleted` — not cleanly stoppable — matching
+        // requirement 4's "once tick begins or completes, Halted" policy.
         if self
             .state
             .dynamic_selection_fault_seam_is(
@@ -1858,115 +2141,84 @@ impl crate::daily_data_readiness::RuntimeStartEffects for ProductionRuntimeStart
             )
             .await
         {
-            if let Err(rel_err) = orchestrator.release_runtime_leadership().await {
-                tracing::warn!(
-                    "runtime_lease_release_failed_on_dynamic_selection_fault_seam error={rel_err}"
-                );
-            }
+            self.release_orchestrator_leadership(orchestrator, "dynamic_selection_fault_seam")
+                .await;
             return Err(RuntimeStartEffectsError::internal(
                 "dynamic_selection.fault_seam.after_run_arm_begin_initial_tick",
                 "test-injected fault after run arm/begin/initial tick",
             ));
         }
 
-        if let Ok(initial_snapshot) = orchestrator.snapshot().await {
-            *self.state.execution_snapshot.write().await = Some(initial_snapshot);
-        }
+        self.set_phase(RuntimeStartPhase::LocalCommitStarted);
 
-        // PT-AUTO-02: reset per-run signal intake counter at each new start so
-        // the bound applies per execution run, not per daemon process lifetime.
-        self.state.day_signal_count.store(0, Ordering::SeqCst);
-        // MULTI-SYMBOL-DAY-ORDER-CAP-01: reset per-symbol order intake counters
-        // (cap #4) at the same run-start boundary as day_signal_count.
-        self.state.reset_symbol_day_order_counts().await;
-        // DISCORD-SIGNAL-BLOCKED-GATE-ALERTS-01: reset dedup state so each new
-        // run gets fresh B5 and day-limit alert windows.
-        self.state.reset_signal_blocked_alert_state();
-        // AUTON-NO-TRADE-01: reset bar-tick counters alongside signal counter.
-        self.state.reset_bar_tick_counters();
-        // PER-SYMBOL-TARGET-STATE-01: clear observability-only target state at
-        // the same run-start boundary as other in-memory per-run tracking.
-        self.state.clear_per_symbol_target_states().await;
+        // ATOMIC-OWNERSHIP-AND-ROLLBACK-TRUTH-01 requirement 2: build every
+        // run-scoped local value first (unpublished), then commit the whole
+        // bundle to `AppState` in one call — never field-by-field as each
+        // becomes available.
+        let execution_snapshot = orchestrator.snapshot().await.ok();
 
-        // TV-01C: capture artifact provenance at run start.
-        //
-        // Uses the artifact intake result evaluated once above (TV-01 hoist) —
-        // the same identity that passed all pre-DB gates is the identity recorded
-        // as this run's provenance.  No second evaluation; TOCTOU gap closed.
-        //
-        // Only `Accepted` carries positive provenance; all other outcomes leave
-        // `accepted_artifact` as `None` (fail-closed: absent/invalid/unavailable
-        // artifacts are not recorded as consumed).
+        // TV-01C: artifact provenance. Uses the artifact intake result
+        // evaluated once above (TV-01 hoist) — the same identity that
+        // passed all pre-DB gates is the identity recorded as this run's
+        // provenance. Only `Accepted` carries positive provenance; every
+        // other outcome yields `None` (fail-closed: absent/invalid/
+        // unavailable artifacts are not recorded as consumed).
+        let accepted_artifact = match self
+            .artifact_intake
+            .lock()
+            .expect("artifact_intake mutex poisoned")
+            .take()
+            .expect("start_runtime_effects must be called at most once")
         {
-            let artifact_intake = self
-                .artifact_intake
-                .lock()
-                .expect("artifact_intake mutex poisoned")
-                .take()
-                .expect("start_runtime_effects must be called at most once");
-            let provenance = match artifact_intake {
-                ArtifactIntakeOutcome::Accepted {
-                    artifact_id,
-                    artifact_type,
-                    stage,
-                    produced_by,
-                } => Some(AcceptedArtifactProvenance {
-                    artifact_id,
-                    artifact_type,
-                    stage,
-                    produced_by,
-                }),
-                _ => None,
-            };
-            *self.state.accepted_artifact.write().await = provenance;
-        }
+            ArtifactIntakeOutcome::Accepted {
+                artifact_id,
+                artifact_type,
+                stage,
+                produced_by,
+            } => Some(AcceptedArtifactProvenance {
+                artifact_id,
+                artifact_type,
+                stage,
+                produced_by,
+            }),
+            _ => None,
+        };
 
-        // B1A: store native strategy bootstrap for the active run.
-        // Placed after all DB operations and the initial tick succeed so the
-        // field is only populated when the run is fully live.
-        //
-        // The `.take()` is hoisted into its own statement (rather than
-        // inline in the `if let` scrutinee) so the `std::sync::MutexGuard`
-        // temporary is dropped before the `.await` below — a guard alive
-        // across an `if let` scrutinee is kept alive for the whole block by
-        // Rust's temporary-lifetime rules, which would make this function's
-        // returned future `!Send`.
-        let bootstrap_to_store = self
+        // B1A: native strategy bootstrap for the active run — taken here,
+        // after all DB operations and the initial tick succeeded, so it is
+        // only ever committed for a fully-live run.
+        let native_strategy_bootstrap = self
             .native_strategy_bootstrap
             .lock()
             .expect("native_strategy_bootstrap mutex poisoned")
             .take();
-        if let Some(bootstrap) = bootstrap_to_store {
-            *self.state.native_strategy_bootstrap.lock().await = Some(bootstrap);
-        }
 
-        // BUNDLE-7-PHASE-7A: commit the already-evaluated, frozen
-        // dynamic-selection outcome now — after every other run-start
-        // effect above has succeeded, immediately before this run is handed
-        // to `spawn_loop`. From this point on a spawn conflict/failure MUST
-        // clear what was just committed (see the fault seam and the
-        // ownership-conflict branch in `spawn_loop` below) — this function
-        // deliberately never leaves committed selection state paired with
-        // no local loop owner.
-        //
-        // The `.take()` is hoisted for the same reason as
-        // `bootstrap_to_store` above: keep the `std::sync::MutexGuard`
-        // temporary from living across the `.await` in
-        // `commit_dynamic_selection_runtime_state`.
-        let dynamic_selection_outcome_to_commit = self
+        // BUNDLE-7-PHASE-7A: the already-evaluated, frozen dynamic-selection
+        // outcome, committed as part of the same bundle as every other
+        // run-start effect — never separately, and never before ownership
+        // is reserved (already true: reservation is this trait's very first
+        // call).
+        let dynamic_selection_outcome = self
             .dynamic_selection_outcome
             .lock()
             .expect("dynamic_selection_outcome mutex poisoned")
             .take();
-        if let Some(outcome) = dynamic_selection_outcome_to_commit {
-            self.state
-                .commit_dynamic_selection_runtime_state(outcome)
-                .await;
-        }
 
-        // BUNDLE-7-PHASE-7A fault seam: immediately after the process-local
-        // selection commit above, before this function returns `Ok(())`.
-        // Selection state IS committed at this point — but the caller
+        self.state
+            .commit_run_start_bundle(
+                run_id,
+                crate::state::RunStartLocalBundle {
+                    execution_snapshot,
+                    accepted_artifact,
+                    native_strategy_bootstrap,
+                    dynamic_selection_outcome,
+                },
+            )
+            .await;
+
+        // BUNDLE-7-PHASE-7A fault seam: immediately after the run-start
+        // bundle commit above, before this function returns `Ok(())`. The
+        // bundle IS committed at this point — but the caller
         // (`advance_run_to_active`) now runs `rollback_local_effects` (a
         // run_id-scoped compare-and-clear) on this `Err` uniformly, so this
         // branch itself only needs to release the orchestrator lease it
@@ -1978,11 +2230,8 @@ impl crate::daily_data_readiness::RuntimeStartEffects for ProductionRuntimeStart
             )
             .await
         {
-            if let Err(rel_err) = orchestrator.release_runtime_leadership().await {
-                tracing::warn!(
-                    "runtime_lease_release_failed_on_dynamic_selection_fault_seam error={rel_err}"
-                );
-            }
+            self.release_orchestrator_leadership(orchestrator, "dynamic_selection_fault_seam")
+                .await;
             return Err(RuntimeStartEffectsError::internal(
                 "dynamic_selection.fault_seam.after_process_local_selection_commit",
                 "test-injected fault after process-local selection commit",
@@ -1996,31 +2245,18 @@ impl crate::daily_data_readiness::RuntimeStartEffects for ProductionRuntimeStart
         Ok(())
     }
 
-    /// ATOMICITY-SINGLE-SNAPSHOT-REPAIR requirement 3: reserve the local
-    /// loop-ownership slot strictly before `spawn_loop` constructs any
-    /// task. Relies on `AppState::lifecycle_op` (held for the whole
-    /// duration of `start_execution_runtime`, including this call and the
-    /// later `spawn_loop`/rollback) to serialize every local start/stop/
-    /// halt attempt within one process — no other writer can install a
-    /// handle into `execution_loop` between this check and `spawn_loop`'s
-    /// later install. A real ownership conflict here is refused *before*
-    /// any task is ever created, closing the pre-existing detached-task
-    /// window (the previous code called `spawn_execution_loop` — which
-    /// `tokio::spawn`s the ticking task immediately — before checking for
-    /// a conflict, so a conflict left an orphaned, untracked task running).
-    async fn reserve_local_ownership(
+    /// Only called after `start_runtime_effects` has returned `Ok` — the
+    /// slot is already `Reserved{run_id}` (from `reserve_local_ownership`,
+    /// this trait's first call) and the run-start bundle is already
+    /// committed, so this only has to spawn the task and flip the slot to
+    /// `Active`.
+    async fn spawn_loop(
         &self,
-        _run_id: uuid::Uuid,
+        run_id: uuid::Uuid,
     ) -> Result<(), crate::daily_data_readiness::RuntimeStartEffectsError> {
-        use crate::daily_data_readiness::RuntimeStartEffectsError;
+        use crate::daily_data_readiness::{RuntimeStartEffectsError, RuntimeStartPhase};
 
-        // BUNDLE-7-PHASE-7A fault seam: immediately before loop spawn — now
-        // evaluated at the ownership-reservation step, strictly before any
-        // task is constructed. `rollback_local_effects` (called by
-        // `advance_run_to_active` on this `Err`) clears the selection state
-        // `start_runtime_effects` already committed; the orchestrator lease
-        // acquired above is released below, in this same branch, since only
-        // this struct holds it.
+        // BUNDLE-7-PHASE-7A fault seam: immediately before loop spawn.
         if self
             .state
             .dynamic_selection_fault_seam_is(
@@ -2028,24 +2264,14 @@ impl crate::daily_data_readiness::RuntimeStartEffects for ProductionRuntimeStart
             )
             .await
         {
-            // Hoisted into its own statement (not the `if let` scrutinee) so
-            // the `std::sync::MutexGuard` temporary is dropped before the
-            // `.await` below — a guard alive across the scrutinee is kept
-            // alive for the whole `if let` block by Rust's temporary-
-            // lifetime rules, which would make this function's returned
-            // future `!Send` (same pattern as `bootstrap_to_store` in
-            // `start_runtime_effects` above).
             let orchestrator_to_release = self
                 .orchestrator
                 .lock()
                 .expect("orchestrator mutex poisoned")
                 .take();
-            if let Some(mut orchestrator) = orchestrator_to_release {
-                if let Err(rel_err) = orchestrator.release_runtime_leadership().await {
-                    tracing::warn!(
-                        "runtime_lease_release_failed_on_dynamic_selection_fault_seam error={rel_err}"
-                    );
-                }
+            if let Some(orchestrator) = orchestrator_to_release {
+                self.release_orchestrator_leadership(orchestrator, "dynamic_selection_fault_seam")
+                    .await;
             }
             return Err(RuntimeStartEffectsError::internal(
                 "dynamic_selection.fault_seam.immediately_before_loop_spawn",
@@ -2053,74 +2279,85 @@ impl crate::daily_data_readiness::RuntimeStartEffects for ProductionRuntimeStart
             ));
         }
 
-        let lock = self.state.execution_loop.lock().await;
-        if lock.is_some() {
-            drop(lock);
-            // BUNDLE-7-PHASE-7A: real loop-ownership conflict — no task is
-            // ever constructed for this attempt. The orchestrator built by
-            // `start_runtime_effects` will never be used; release its
-            // lease now rather than leaking it until Drop.
-            let orchestrator_to_release = self
-                .orchestrator
-                .lock()
-                .expect("orchestrator mutex poisoned")
-                .take();
-            if let Some(mut orchestrator) = orchestrator_to_release {
-                if let Err(rel_err) = orchestrator.release_runtime_leadership().await {
-                    tracing::warn!(
-                        "runtime_lease_release_failed_on_ownership_conflict error={rel_err}"
-                    );
-                }
-            }
-            return Err(RuntimeStartEffectsError::conflict(
-                "runtime.start_refused.local_ownership_conflict",
-                "runtime ownership changed while starting; refusing duplicate loop",
-            ));
-        }
-        Ok(())
-    }
-
-    /// Only called after `reserve_local_ownership` has returned `Ok` — the
-    /// slot is known empty and no other local start attempt can run
-    /// concurrently (see `reserve_local_ownership`'s doc comment), so this
-    /// install can never race a second writer.
-    async fn spawn_loop(
-        &self,
-        run_id: uuid::Uuid,
-    ) -> Result<(), crate::daily_data_readiness::RuntimeStartEffectsError> {
-        let orchestrator = self
+        let orchestrator_to_spawn = self
             .orchestrator
             .lock()
             .expect("orchestrator mutex poisoned")
-            .take()
-            .expect("spawn_loop must be called only after reserve_local_ownership succeeds");
+            .take();
+        let Some(orchestrator) = orchestrator_to_spawn else {
+            // ATOMIC-OWNERSHIP-AND-ROLLBACK-TRUTH-01 requirement 7: a
+            // duplicate/misordered `spawn_loop` call (no orchestrator left
+            // to spawn — `start_runtime_effects` must have failed or never
+            // ran) is a stable typed error, not a panic.
+            return Err(RuntimeStartEffectsError::internal(
+                "runtime.start_refused.spawn_loop_missing_orchestrator",
+                "spawn_loop called without a constructed orchestrator; \
+                 start_runtime_effects must succeed first",
+            ));
+        };
         let handle = spawn_execution_loop(
             Arc::clone(self.state),
             orchestrator,
             run_id,
             self.legacy_assignments.clone(),
         );
-        *self.state.execution_loop.lock().await = Some(handle);
+        if let Err(install_err) = self
+            .state
+            .install_active_execution_loop_slot(run_id, handle)
+            .await
+        {
+            return Err(RuntimeStartEffectsError::internal(
+                "runtime.start_refused.spawn_loop_install_failed",
+                format!("failed to install the spawned execution loop: {install_err}"),
+            ));
+        }
+        self.set_phase(RuntimeStartPhase::LoopInstalled);
         Ok(())
     }
 
-    /// ATOMICITY-SINGLE-SNAPSHOT-REPAIR requirement 2/4: clear every local
-    /// effect this attempt may have committed, run_id-scoped where the
-    /// underlying state carries a run_id. Idempotent — safe to call
-    /// regardless of how far the attempt got (some fields may never have
-    /// been touched for an early failure; clearing them again is a no-op).
-    async fn rollback_local_effects(&self, run_id: uuid::Uuid) {
+    /// ATOMIC-OWNERSHIP-AND-ROLLBACK-TRUTH-01 requirements 2/3/4: clear
+    /// every local effect this attempt may have committed, run_id-scoped —
+    /// the loop-ownership reservation, the run-start bundle (run_id-tagged
+    /// as one unit), and dynamic-selection state (independently run_id-
+    /// tagged). Idempotent — safe to call regardless of how far the attempt
+    /// got. Also releases any orchestrator lease this attempt still holds
+    /// (defense in depth — every `start_runtime_effects`/`spawn_loop`
+    /// failure branch above already released it inline before returning
+    /// `Err`, recording the outcome via `release_orchestrator_leadership`;
+    /// this only catches a future failure path that forgets to).
+    async fn rollback_local_effects(
+        &self,
+        run_id: uuid::Uuid,
+    ) -> crate::daily_data_readiness::LocalRollbackOutcome {
+        let orchestrator_to_release = self
+            .orchestrator
+            .lock()
+            .expect("orchestrator mutex poisoned")
+            .take();
+        if let Some(orchestrator) = orchestrator_to_release {
+            self.release_orchestrator_leadership(orchestrator, "rollback_local_effects")
+                .await;
+        }
+
         self.state
-            .clear_dynamic_selection_runtime_state_for_run(run_id)
+            .release_execution_loop_reservation_for_run(run_id)
             .await;
-        *self.state.accepted_artifact.write().await = None;
-        *self.state.native_strategy_bootstrap.lock().await = None;
-        *self.state.execution_snapshot.write().await = None;
-        self.state.day_signal_count.store(0, Ordering::SeqCst);
-        self.state.reset_symbol_day_order_counts().await;
-        self.state.reset_signal_blocked_alert_state();
-        self.state.reset_bar_tick_counters();
-        self.state.clear_per_symbol_target_states().await;
+        self.state.rollback_run_start_bundle_for_run(run_id).await;
+
+        crate::daily_data_readiness::LocalRollbackOutcome {
+            leadership_release_outcome: self
+                .leadership_release_outcome
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .take(),
+        }
+    }
+
+    fn start_phase_reached(&self) -> crate::daily_data_readiness::RuntimeStartPhase {
+        *self
+            .start_phase
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 }
 
@@ -2666,7 +2903,7 @@ mod dynamic_selection_cleanup_contract_tests {
             stop_tx,
             join_handle,
         };
-        *state.execution_loop.lock().await = Some(handle);
+        *state.execution_loop.lock().await = crate::state::types::ExecutionLoopSlot::Active(handle);
 
         let exit = state
             .reap_finished_execution_loop()

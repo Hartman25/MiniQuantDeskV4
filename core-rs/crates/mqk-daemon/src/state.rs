@@ -138,7 +138,10 @@ pub use types::{
     OperatorAuthMode, ReconcileStatusSnapshot, RestartTruthSnapshot, RuntimeLifecycleError,
     StatusSnapshot, StrategyMarketDataSource,
 };
-pub(crate) use types::{ExecutionLoopCommand, ExecutionLoopExit, ExecutionLoopHandle};
+pub(crate) use types::{
+    ExecutionLoopCommand, ExecutionLoopExit, ExecutionLoopHandle, ExecutionLoopSlot,
+    InstallActiveExecutionLoopSlotError,
+};
 pub use ws_gap_recovery::WsGapRecoveryOutcome;
 // Internal (crate-visible) re-exports used across this module.
 #[cfg(test)]
@@ -309,8 +312,10 @@ pub struct AppState {
     pub operator_auth: OperatorAuthMode,
     /// Runtime adapter/deployment selection resolved from config/env at bootstrap.
     runtime_selection: RuntimeSelection,
-    /// The single daemon-owned execution loop handle, if any.
-    execution_loop: Arc<Mutex<Option<ExecutionLoopHandle>>>,
+    /// The single daemon-owned execution loop ownership slot.
+    /// ATOMIC-OWNERSHIP-AND-ROLLBACK-TRUTH-01: `Empty`/`Reserved{run_id}`/
+    /// `Active(handle)`, never a plain `Option` — see `ExecutionLoopSlot`.
+    execution_loop: Arc<Mutex<ExecutionLoopSlot>>,
     /// Serializes start/stop/halt transitions.
     lifecycle_op: Arc<Mutex<()>>,
     /// Authoritative exchange calendar spec derived from deployment mode.
@@ -750,6 +755,29 @@ pub struct AppState {
     /// fault-injection seam for the atomic start-commit sequence. `None` in
     /// production and for every test that does not explicitly install one.
     dynamic_selection_fault_seam: Arc<RwLock<Option<DynamicSelectionLifecycleFaultSeam>>>,
+    /// ATOMIC-OWNERSHIP-AND-ROLLBACK-TRUTH-01 requirement 3: run_id tag for
+    /// the legacy run-start local field bundle (`execution_snapshot`,
+    /// `accepted_artifact`, `native_strategy_bootstrap`, per-run counters,
+    /// per-symbol target state) — those fields carry no run_id themselves,
+    /// so this tag is what lets rollback compare-and-clear them instead of
+    /// unconditionally clearing whatever the fields currently hold. `None`
+    /// means no run currently owns the bundle.
+    run_start_commit_owner: Arc<RwLock<Option<Uuid>>>,
+}
+
+/// ATOMIC-OWNERSHIP-AND-ROLLBACK-TRUTH-01 requirement 2: every locally-
+/// prepared value a successful run-start attempt commits to `AppState` in
+/// one call (`AppState::commit_run_start_bundle`), built up entirely from
+/// local (unpublished) bindings before any of it is written. `None` fields
+/// are legitimate (e.g. `execution_snapshot` when the orchestrator's first
+/// snapshot call failed; `dynamic_selection_outcome` is always `Some` in
+/// production but kept optional for callers that never evaluate dynamic
+/// selection).
+pub(crate) struct RunStartLocalBundle {
+    pub(crate) execution_snapshot: Option<mqk_runtime::observability::ExecutionSnapshot>,
+    pub(crate) accepted_artifact: Option<AcceptedArtifactProvenance>,
+    pub(crate) native_strategy_bootstrap: Option<NativeStrategyBootstrap>,
+    pub(crate) dynamic_selection_outcome: Option<DynamicSelectionRuntimeState>,
 }
 
 /// BROKER-FILL-REST-RECOVERY-01: Injectable abstraction over Alpaca REST activity fetch.
@@ -1381,7 +1409,7 @@ impl AppState {
             reconcile_status: Arc::new(RwLock::new(initial_reconcile_status())),
             operator_auth,
             runtime_selection,
-            execution_loop: Arc::new(Mutex::new(None)),
+            execution_loop: Arc::new(Mutex::new(ExecutionLoopSlot::Empty)),
             lifecycle_op: Arc::new(Mutex::new(())),
             calendar_spec,
             broker_snapshot_source,
@@ -1468,6 +1496,7 @@ impl AppState {
                 autonomous_completed_bar_task::AutonomousCompletedBarTaskRuntime::default(),
             dynamic_selection_runtime: Arc::new(RwLock::new(None)),
             dynamic_selection_fault_seam: Arc::new(RwLock::new(None)),
+            run_start_commit_owner: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -3494,9 +3523,12 @@ operator_reconcile_or_repair_required"
 
     async fn active_owned_run_id(&self) -> Option<Uuid> {
         let lock = self.execution_loop.lock().await;
-        lock.as_ref()
-            .filter(|handle| !handle.join_handle.is_finished())
-            .map(|handle| handle.run_id)
+        match &*lock {
+            ExecutionLoopSlot::Active(handle) if !handle.join_handle.is_finished() => {
+                Some(handle.run_id)
+            }
+            _ => None,
+        }
     }
 
     pub async fn locally_owned_run_id(&self) -> Option<Uuid> {
@@ -3508,7 +3540,15 @@ operator_reconcile_or_repair_required"
     ) -> Result<Option<ExecutionLoopHandle>, RuntimeLifecycleError> {
         let handle = {
             let mut lock = self.execution_loop.lock().await;
-            lock.take()
+            match &*lock {
+                ExecutionLoopSlot::Active(_) => {
+                    match std::mem::replace(&mut *lock, ExecutionLoopSlot::Empty) {
+                        ExecutionLoopSlot::Active(handle) => Some(handle),
+                        _ => unreachable!("checked Active above"),
+                    }
+                }
+                _ => None,
+            }
         };
 
         match handle {
@@ -3540,7 +3580,17 @@ operator_reconcile_or_repair_required"
 
     async fn take_execution_loop_for_shutdown(&self) -> Option<ExecutionLoopHandle> {
         let mut lock = self.execution_loop.lock().await;
-        lock.take()
+        match std::mem::replace(&mut *lock, ExecutionLoopSlot::Empty) {
+            ExecutionLoopSlot::Active(handle) => Some(handle),
+            other => {
+                // Not `Active` — put back whatever was there (`Empty` or a
+                // live `Reserved{run_id}` from a start attempt still in
+                // flight; shutdown must not silently steal a reservation it
+                // does not own a handle for).
+                *lock = other;
+                None
+            }
+        }
     }
 
     async fn reap_finished_execution_loop(
@@ -3548,11 +3598,15 @@ operator_reconcile_or_repair_required"
     ) -> Result<Option<ExecutionLoopExit>, RuntimeLifecycleError> {
         let handle = {
             let mut lock = self.execution_loop.lock().await;
-            if lock
-                .as_ref()
-                .is_some_and(|handle| handle.join_handle.is_finished())
-            {
-                lock.take()
+            let is_finished = matches!(
+                &*lock,
+                ExecutionLoopSlot::Active(handle) if handle.join_handle.is_finished()
+            );
+            if is_finished {
+                match std::mem::replace(&mut *lock, ExecutionLoopSlot::Empty) {
+                    ExecutionLoopSlot::Active(handle) => Some(handle),
+                    _ => unreachable!("checked Active+finished above"),
+                }
             } else {
                 None
             }
@@ -3572,6 +3626,138 @@ operator_reconcile_or_repair_required"
             }
             None => Ok(None),
         }
+    }
+
+    // -----------------------------------------------------------------
+    // ATOMIC-OWNERSHIP-AND-ROLLBACK-TRUTH-01 requirement 2: the only three
+    // legal `execution_loop` transitions. `reserve_execution_loop_slot` is
+    // the sole path from `Empty`; `install_active_execution_loop_slot` is
+    // the sole path from `Reserved{run_id}` to `Active`; both compare
+    // explicitly rather than trusting caller ordering, so a bug elsewhere
+    // cannot silently steal or overwrite a different run's slot.
+    // -----------------------------------------------------------------
+
+    /// Atomically claim the slot for `run_id`. `Empty -> Reserved{run_id}`
+    /// on success. Refuses (leaving the slot untouched) when the slot is
+    /// already `Reserved` or `Active` for any run_id, including `run_id`
+    /// itself (a second reservation attempt for the same run_id is still a
+    /// conflict — reservation is meant to happen at most once per attempt).
+    pub(crate) async fn reserve_execution_loop_slot(&self, run_id: Uuid) -> Result<(), Uuid> {
+        let mut lock = self.execution_loop.lock().await;
+        match &*lock {
+            ExecutionLoopSlot::Empty => {
+                *lock = ExecutionLoopSlot::Reserved { run_id };
+                Ok(())
+            }
+            other => Err(other
+                .run_id()
+                .expect("non-Empty slot always carries a run_id")),
+        }
+    }
+
+    /// Install the running handle for `run_id`, consuming its reservation.
+    /// Only valid from `Reserved{run_id}` for the exact same `run_id`.
+    /// ATOMIC-OWNERSHIP-AND-ROLLBACK-TRUTH-01 requirement 7: a duplicate or
+    /// misordered call (no matching reservation) returns a typed `Err`
+    /// instead of panicking — reaching this call without a matching
+    /// reservation is a caller-ordering bug, but the slot's own state is a
+    /// perfectly good typed error carrier, so there is no need for a panic
+    /// to report it. `handle`'s task is already running by the time this is
+    /// called (`spawn_execution_loop` already `tokio::spawn`ed it) — on
+    /// `Err` this stops and joins it before returning, rather than dropping
+    /// the handle and leaking a detached task (the exact hazard this
+    /// patch's reserve-before-spawn ordering exists to prevent).
+    pub(crate) async fn install_active_execution_loop_slot(
+        &self,
+        run_id: Uuid,
+        handle: ExecutionLoopHandle,
+    ) -> Result<(), InstallActiveExecutionLoopSlotError> {
+        let mut lock = self.execution_loop.lock().await;
+        let err = match &*lock {
+            ExecutionLoopSlot::Reserved { run_id: reserved } if *reserved == run_id => {
+                *lock = ExecutionLoopSlot::Active(handle);
+                return Ok(());
+            }
+            ExecutionLoopSlot::Reserved { run_id: reserved } => {
+                InstallActiveExecutionLoopSlotError::ReservedForDifferentRun {
+                    reserved_run_id: *reserved,
+                }
+            }
+            ExecutionLoopSlot::Empty => InstallActiveExecutionLoopSlotError::NoReservation,
+            ExecutionLoopSlot::Active(active) => {
+                InstallActiveExecutionLoopSlotError::AlreadyActive {
+                    active_run_id: active.run_id,
+                }
+            }
+        };
+        drop(lock);
+        let _ = handle.stop_tx.send(ExecutionLoopCommand::Stop);
+        let _ = handle.join_handle.await;
+        Err(err)
+    }
+
+    /// Release a reservation this attempt holds, if any — compare-and-clear
+    /// on `run_id`. A no-op when the slot is `Empty`, `Active` (a
+    /// reservation cannot be released after `install_active_execution_loop_
+    /// slot` — the loop must be stopped/halted instead), or `Reserved` for a
+    /// *different* run_id (a stale/losing attempt's rollback must never
+    /// clear a different, newer attempt's live reservation).
+    pub(crate) async fn release_execution_loop_reservation_for_run(&self, run_id: Uuid) {
+        let mut lock = self.execution_loop.lock().await;
+        if matches!(&*lock, ExecutionLoopSlot::Reserved { run_id: reserved } if *reserved == run_id)
+        {
+            *lock = ExecutionLoopSlot::Empty;
+        }
+    }
+
+    /// Commit every run-scoped legacy local field this attempt prepared, as
+    /// one bundle, tagged with `run_id`. Must only be called after
+    /// `reserve_execution_loop_slot(run_id)` has already succeeded
+    /// (requirement 2's "reserve before publish") — this function itself
+    /// does not check the slot, since the caller (`ProductionRuntimeStart
+    /// Effects::start_runtime_effects`) already holds `AppState::
+    /// lifecycle_op` for the whole attempt and has already reserved.
+    pub(crate) async fn commit_run_start_bundle(&self, run_id: Uuid, bundle: RunStartLocalBundle) {
+        *self.execution_snapshot.write().await = bundle.execution_snapshot;
+        *self.accepted_artifact.write().await = bundle.accepted_artifact;
+        *self.native_strategy_bootstrap.lock().await = bundle.native_strategy_bootstrap;
+        self.day_signal_count.store(0, Ordering::SeqCst);
+        self.reset_symbol_day_order_counts().await;
+        self.reset_signal_blocked_alert_state();
+        self.reset_bar_tick_counters();
+        self.clear_per_symbol_target_states().await;
+        if let Some(outcome) = bundle.dynamic_selection_outcome {
+            self.commit_dynamic_selection_runtime_state(outcome).await;
+        }
+        *self.run_start_commit_owner.write().await = Some(run_id);
+    }
+
+    /// ATOMIC-OWNERSHIP-AND-ROLLBACK-TRUTH-01 requirement 3: run_id-scoped
+    /// compare-and-clear for the legacy local field bundle. Only clears when
+    /// `run_start_commit_owner == Some(run_id)` — a rollback for a losing or
+    /// stale run_id can never clear a different, legitimate owner's already-
+    /// committed bundle. A no-op (including for `dynamic_selection_runtime`,
+    /// which has its own independent compare-and-clear) when the bundle was
+    /// never committed for `run_id` in the first place — safe to call
+    /// unconditionally from every failure branch regardless of how far the
+    /// attempt got.
+    pub(crate) async fn rollback_run_start_bundle_for_run(&self, run_id: Uuid) {
+        self.clear_dynamic_selection_runtime_state_for_run(run_id)
+            .await;
+        let mut owner = self.run_start_commit_owner.write().await;
+        if *owner != Some(run_id) {
+            return;
+        }
+        *owner = None;
+        drop(owner);
+        *self.execution_snapshot.write().await = None;
+        *self.accepted_artifact.write().await = None;
+        *self.native_strategy_bootstrap.lock().await = None;
+        self.day_signal_count.store(0, Ordering::SeqCst);
+        self.reset_symbol_day_order_counts().await;
+        self.reset_signal_blocked_alert_state();
+        self.reset_bar_tick_counters();
+        self.clear_per_symbol_target_states().await;
     }
 
     // -----------------------------------------------------------------
@@ -3678,6 +3864,52 @@ operator_reconcile_or_repair_required"
 // ---------------------------------------------------------------------------
 
 impl AppState {
+    /// ATOMIC-OWNERSHIP-AND-ROLLBACK-TRUTH-01 requirement 3: read-only test
+    /// accessor for `accepted_artifact` — private in production (no
+    /// operator route exposes raw provenance), but needed by sentinel-
+    /// preservation tests to prove a losing start attempt's rollback left a
+    /// different, legitimate owner's committed provenance untouched.
+    pub async fn accepted_artifact_snapshot_for_test(&self) -> Option<AcceptedArtifactProvenance> {
+        self.accepted_artifact.read().await.clone()
+    }
+
+    /// ATOMIC-OWNERSHIP-AND-ROLLBACK-TRUTH-01 requirement 3: read-only test
+    /// accessor for `day_signal_count`, for the same sentinel-preservation
+    /// reason as `accepted_artifact_snapshot_for_test`.
+    pub fn day_signal_count_snapshot_for_test(&self) -> u32 {
+        self.day_signal_count.load(Ordering::SeqCst)
+    }
+
+    /// ATOMIC-OWNERSHIP-AND-ROLLBACK-TRUTH-01 requirement 3: plant a
+    /// sentinel `accepted_artifact` value, for a sentinel-preservation test
+    /// to prove a *different* run's failed/rolled-back start attempt never
+    /// clears it.
+    pub async fn plant_accepted_artifact_for_test(
+        &self,
+        value: Option<AcceptedArtifactProvenance>,
+    ) {
+        *self.accepted_artifact.write().await = value;
+    }
+
+    /// ATOMIC-OWNERSHIP-AND-ROLLBACK-TRUTH-01 requirement 3: plant a
+    /// sentinel `day_signal_count` value, for the same reason as
+    /// `plant_accepted_artifact_for_test`.
+    pub fn plant_day_signal_count_for_test(&self, value: u32) {
+        self.day_signal_count.store(value, Ordering::SeqCst)
+    }
+
+    /// ATOMIC-OWNERSHIP-AND-ROLLBACK-TRUTH-01 requirement 3: `pub` test-only
+    /// wrapper over the `pub(crate)` `commit_dynamic_selection_runtime_
+    /// state`, so an external integration test can plant a sentinel
+    /// dynamic-selection value for a run without driving a real start
+    /// attempt.
+    pub async fn commit_dynamic_selection_runtime_state_for_test(
+        &self,
+        state: DynamicSelectionRuntimeState,
+    ) {
+        self.commit_dynamic_selection_runtime_state(state).await;
+    }
+
     /// Inject a never-finishing fake execution loop for tests.
     pub async fn inject_running_loop_for_test(&self, run_id: Uuid) {
         let (stop_tx, mut stop_rx) = watch::channel(ExecutionLoopCommand::Run);
@@ -3698,7 +3930,7 @@ impl AppState {
             join_handle,
         };
         let mut lock = self.execution_loop.lock().await;
-        *lock = Some(handle);
+        *lock = ExecutionLoopSlot::Active(handle);
     }
 
     /// AUTON-PAPER-03B proof seam: establish a coherent DB-backed active run

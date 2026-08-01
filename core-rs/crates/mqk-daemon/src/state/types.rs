@@ -239,6 +239,81 @@ pub(crate) struct ExecutionLoopHandle {
     pub(crate) join_handle: JoinHandle<ExecutionLoopExit>,
 }
 
+/// ATOMIC-OWNERSHIP-AND-ROLLBACK-TRUTH-01 requirement 2: explicit local
+/// loop-ownership states, replacing the prior `Option<ExecutionLoopHandle>`
+/// (which could only distinguish "no owner" from "owner installed" — it had
+/// no way to represent "a start attempt has claimed this slot but has not
+/// finished building the handle yet"). A start attempt must move
+/// `Empty -> Reserved { run_id }` atomically before it does any further
+/// work, then only ever install `Active(handle)` for that exact `run_id`.
+///
+/// `Reserved` is a genuinely distinct state from `Active`: a status reader
+/// observing `Reserved` must never report the run as running (requirement
+/// 10 — "Reserved is starting or omitted, never running"), and a
+/// compare-and-clear for a failed run A must never clear `Reserved`/`Active`
+/// for a different run B (requirement 2's "conflicting" rule).
+#[derive(Debug)]
+pub(crate) enum ExecutionLoopSlot {
+    /// No local owner. The only state a new start attempt may reserve from.
+    Empty,
+    /// A start attempt for `run_id` has claimed the slot but has not yet
+    /// installed a running handle. Conflicts with every other run_id,
+    /// including another `Reserved` or `Active` value.
+    Reserved { run_id: Uuid },
+    /// The execution loop is actually running for `run_id`.
+    Active(ExecutionLoopHandle),
+}
+
+impl ExecutionLoopSlot {
+    /// The `run_id` currently occupying the slot (`Reserved` or `Active`),
+    /// or `None` when `Empty`.
+    pub(crate) fn run_id(&self) -> Option<Uuid> {
+        match self {
+            ExecutionLoopSlot::Empty => None,
+            ExecutionLoopSlot::Reserved { run_id } => Some(*run_id),
+            ExecutionLoopSlot::Active(handle) => Some(handle.run_id),
+        }
+    }
+}
+
+/// ATOMIC-OWNERSHIP-AND-ROLLBACK-TRUTH-01 requirement 7: typed failure from
+/// `AppState::install_active_execution_loop_slot`, replacing what was
+/// previously a panic on a duplicate/misordered call.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InstallActiveExecutionLoopSlotError {
+    /// The slot is `Empty` — `reserve_execution_loop_slot` was never called
+    /// (or was already released) for this run_id.
+    NoReservation,
+    /// The slot is `Reserved` for a *different* run_id.
+    ReservedForDifferentRun { reserved_run_id: Uuid },
+    /// The slot is already `Active` — a second install was attempted.
+    AlreadyActive { active_run_id: Uuid },
+}
+
+impl fmt::Display for InstallActiveExecutionLoopSlotError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NoReservation => {
+                write!(f, "execution loop slot has no reservation to install into")
+            }
+            Self::ReservedForDifferentRun { reserved_run_id } => write!(
+                f,
+                "execution loop slot is reserved for a different run_id: {reserved_run_id}"
+            ),
+            Self::AlreadyActive { active_run_id } => write!(
+                f,
+                "execution loop slot is already active for run_id: {active_run_id}"
+            ),
+        }
+    }
+}
+
+// NOTE: `RuntimeStartPhase` lives in `crate::daily_data_readiness` (it must
+// be `pub` there — the `RuntimeStartEffects` trait it's part of is driven
+// from integration tests outside this crate's `pub(crate)` boundary), not
+// here. `ExecutionLoopSlot` above stays `pub(crate)` since nothing outside
+// this crate needs it directly.
+
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum OperatorAuthMode {
     TokenRequired(String),
