@@ -22,14 +22,19 @@
 #      is still present verbatim in state/lifecycle.rs -- Phase 7B
 #      selected-host economic dispatch has not been silently wired in by
 #      this patch.
-#   3. The economic tick body inside `spawn_execution_loop` is unchanged,
-#      by running the crate's OWN established structural guard test
-#      (`scenario_bundle7_phase7a_loop_runner_unchanged_guard_01`) rather
-#      than re-deriving a parallel, weaker byte-diff here. That test's own
-#      `STARTING_HEAD` constant is this patch's required starting commit
-#      (985dd0d1) -- each Phase 7A patch rebases it to its own starting
-#      HEAD, per that file's documented convention, composing transitively
-#      back to the original frozen reference `9323b769`.
+#   3. The economic dispatch body inside `spawn_execution_loop` is
+#      unchanged, by running the crate's OWN established structural guard
+#      test (`scenario_bundle7_phase7a_loop_runner_unchanged_guard_01`)
+#      rather than re-deriving a parallel, weaker byte-diff here. As of
+#      PHASE-7A-R6-EXHAUSTIVE-MATRIX-CLOSURE-REPAIR-01 that test's rolling
+#      comparison anchor is named `PATCH_START_HEAD` (never `STARTING_HEAD`
+#      -- that name implied permanence it never had) and points at this
+#      patch's own required starting commit (a0037af7); a separate,
+#      never-bumped `FROZEN_ECONOMIC_BASELINE` constant (`9323b769`) is
+#      asserted as a real git ancestor of `PATCH_START_HEAD` in the same
+#      test file, proving the lineage without requiring a byte-diff all
+#      the way back to a commit that predates most of this crate's own
+#      dispatch logic.
 #   4. No source file assigns a literal `true` to `approved_for_live` --
 #      `approved_for_live` must remain hardcoded false everywhere it is
 #      constructed.
@@ -68,17 +73,38 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 # ---------------------------------------------------------------------------
-# Check 2: the paper_enforced / Phase-7B-not-wired interlock string.
+# Check 2: the paper_enforced / Phase-7B-not-wired interlock -- behaviorally
+# executed, not merely grepped. PHASE-7A-R6-EXHAUSTIVE-MATRIX-CLOSURE-
+# REPAIR-01: string presence alone does not prove the refusal actually
+# fires; this now also runs the crate's own unit test that directly drives
+# `paper_enforced_dispatch_not_wired_refusal` against a constructed
+# PaperEnforcedAllowed outcome and asserts the exact fault_class comes back.
+# The string check is kept as a cheap first signal (a byte-identical
+# fault_class string the test itself also asserts on), but is no longer the
+# sole proof.
 # ---------------------------------------------------------------------------
 Write-Host ""
-Write-Host "-- Check 2: paper_enforced dispatch-not-wired interlock present --"
+Write-Host "-- Check 2: paper_enforced dispatch-not-wired interlock behaviorally executes --"
 $LifecycleFile = Join-Path $RepoRoot "core-rs\crates\mqk-daemon\src\state\lifecycle.rs"
 $InterlockHit = Select-String -Path $LifecycleFile -Pattern "runtime.start_refused.dynamic_selection_dispatch_not_wired" -SimpleMatch
 if (-not $InterlockHit) {
     Write-Host " FAIL -- interlock fault_class string not found in $LifecycleFile" -ForegroundColor Red
     $Failures++
 } else {
-    Write-Host " OK -- interlock present at line $($InterlockHit[0].LineNumber)" -ForegroundColor Green
+    Write-Host " OK -- interlock string present at line $($InterlockHit[0].LineNumber)" -ForegroundColor Green
+}
+
+Push-Location (Join-Path $RepoRoot "core-rs")
+try {
+    & cargo test -p mqk-daemon --lib paper_enforced_allowed_is_refused
+    if ($LASTEXITCODE -ne 0) {
+        Write-Host " FAIL -- paper_enforced_allowed_is_refused did not pass (behavioral proof)" -ForegroundColor Red
+        $Failures++
+    } else {
+        Write-Host " OK -- paper_enforced_allowed_is_refused behaviorally proves the refusal fires" -ForegroundColor Green
+    }
+} finally {
+    Pop-Location
 }
 
 # ---------------------------------------------------------------------------

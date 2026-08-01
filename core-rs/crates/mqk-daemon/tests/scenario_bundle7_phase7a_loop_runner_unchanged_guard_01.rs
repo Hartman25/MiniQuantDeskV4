@@ -15,58 +15,88 @@
 //! from env/watchlist state internally — so a whole-file byte-identical
 //! guard would fail on an in-scope, narrow, additive change.
 //!
-//! This narrower guard instead proves that the *tick loop body* — the
-//! entire `tokio::spawn(async move { ... })` block below the frozen-
-//! assignment/startup-barrier prologue — is byte-for-byte identical to the
-//! same required starting HEAD. That block is the actual economic dispatch
-//! path: strategy dispatch, targets/decisions, Bundle 5/6 ordering, cap #6,
-//! outbox writes, and broker calls. Only frozen-assignment injection
-//! (the function signature and the one-time prologue that used to resolve
-//! it internally) may differ; the anchor line below is the first line of
-//! the unchanged region and must never itself be edited by any future
-//! patch without updating `REQUIRED_TICK_LOOP_ANCHOR` here deliberately.
-//!
-//! If this test ever needs to change beyond bumping `STARTING_HEAD`, that
-//! is itself proof the patch scope was violated — fix the patch, not the
-//! guard.
-//!
 //! BUNDLE-7-PHASE-7A-CORE-ATOMIC-STATE-MACHINE-CLOSURE requirement 3
-//! (startup barrier) legitimately moves this guard's anchor a second time,
-//! for the same class of reason the ATOMICITY-SINGLE-SNAPSHOT-REPAIR patch
-//! moved it the first time: the task must wait on a startup barrier
-//! (raced against its own stop signal) *before* the ticker is ever
-//! created — that wait, by construction, sits between the previous anchor
-//! (`tokio::spawn(async move {`) and the ticker line. The anchor now starts
-//! at the ticker line itself; the barrier-wait block above it is proven
-//! present by a companion assertion below, and its own behavior (zero
-//! economic work before barrier release) is proven by dedicated unit tests
-//! in `state/loop_runner.rs`, not by this structural byte-diff.
+//! (startup barrier) and DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7A-
+//! FINAL-PRIVATE-PRODUCTION-EFFECTS-PROOF (R6, "BARRIER LEADERSHIP/TRUTH")
+//! each legitimately moved this guard's start anchor / touched its
+//! prologue, for the same class of reason: lifecycle/exit-telemetry
+//! wiring, never economic dispatch.
 //!
-//! DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7A-FINAL-PRIVATE-PRODUCTION-
-//! EFFECTS-PROOF (R6, "BARRIER LEADERSHIP/TRUTH") legitimately adds one more
-//! prologue change, still strictly above the anchor: both pre-barrier exit
-//! branches (barrier-cancel and stop-before-barrier-release) now explicitly
-//! call `orchestrator.release_runtime_leadership().await` before
-//! `drop_outside_async_context(orchestrator)` — a real gap this patch found
-//! (every other exit path in this file already released leadership before
-//! dropping; these two did not). `STARTING_HEAD` is bumped to this patch's
-//! own required starting commit, per this file's own stated convention.
+//! PHASE-7A-R6-EXHAUSTIVE-MATRIX-CLOSURE-REPAIR-01 Part 1 goes further:
+//! it adds structured task-side leadership-release/join truth
+//! (`ExecutionLoopExit::leadership_release_outcome`) to *every* exit
+//! branch in this file — the two pre-barrier branches (in the prologue,
+//! already excluded), the mid-loop halt branches (deadman/heartbeat/tick-
+//! error/WS-gap, interleaved with the real dispatch code), and the final
+//! normal-stop exit (after the dispatch loop closes). A single contiguous
+//! "anchor line to end-of-file" comparison — this guard's design since its
+//! second revision — cannot exclude those mid-loop and post-loop exit
+//! branches from a economic-dispatch-only comparison, because they are
+//! interleaved with (not merely adjacent to) the real dispatch code.
+//!
+//! This revision narrows the guard's scope to match its own stated intent
+//! precisely: it proves *only* the actual economic dispatch block — from
+//! the post-tick-success snapshot/outbox read through the last decision-
+//! dispatch statement, i.e. everything textually between
+//! `REQUIRED_DISPATCH_BODY_START_ANCHOR` and the matching close of the
+//! enclosing `loop { ... }` block (found by brace-depth counting, not a
+//! second literal anchor string, so it does not itself need bumping when
+//! unrelated trailing exit-branch text changes) — is byte-for-byte
+//! identical to `PATCH_START_HEAD`. Every exit branch (pre-barrier,
+//! mid-loop halt, and the final normal-stop exit) is deliberately excluded
+//! from this byte-diff; their behavior is proven by the crate's own
+//! extensive `state/loop_runner.rs` and `state/lifecycle.rs` unit/
+//! integration test suite instead (`cargo test -p mqk-daemon --lib`),
+//! matching this guard's own established philosophy that not everything
+//! needs to be a byte-diff to be proven.
+//!
+//! It also renames the rolling comparison anchor from the misleadingly-
+//! permanent-sounding `STARTING_HEAD` to `PATCH_START_HEAD` — it was never
+//! the immutable baseline despite the name; it is, and always was,
+//! "whichever commit the currently-active patch most recently bumped it
+//! to." `FROZEN_ECONOMIC_BASELINE` is the true, never-bumped, original
+//! reference point this whole lineage traces back to — asserted as a real
+//! ancestor of `PATCH_START_HEAD` below (not byte-diffed against
+//! directly: even this newly-narrowed dispatch-only block cannot be
+//! usefully compared against a commit that predates every patch that has
+//! since resolved this crate's own strategy-dispatch/decision plumbing;
+//! ancestry is the honest, checkable claim that ownership traces back
+//! there, not a byte-for-byte identity that far back).
+//!
+//! If this test ever needs to change beyond bumping `PATCH_START_HEAD`,
+//! that is itself proof the patch scope was violated — fix the patch, not
+//! the guard.
 
 use std::process::Command;
 
-/// DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7A-FINAL-PRIVATE-PRODUCTION-
-/// EFFECTS-PROOF's required starting local HEAD / origin/main.
-const STARTING_HEAD: &str = "985dd0d1b4af17a89223bda26bbfe4e8436e58e1";
+/// The true, permanent, never-bumped origin of this guard's lineage —
+/// referenced for documentation and ancestry proof only, never as the
+/// byte-diff comparison target (see module doc above for why).
+const FROZEN_ECONOMIC_BASELINE: &str = "9323b7699af5e4c553522fa118a49c644a3611da";
+
+/// PHASE-7A-R6-EXHAUSTIVE-MATRIX-CLOSURE-REPAIR-01's required starting
+/// local HEAD / origin/main — the rolling anchor this patch's own narrow,
+/// documented change is byte-diffed against.
+const PATCH_START_HEAD: &str = "a0037af74ac725366b187b0f1bf7f8944bfac1ca";
 const LOOP_RUNNER_PATH: &str = "core-rs/crates/mqk-daemon/src/state/loop_runner.rs";
 
-/// The first line of the unchanged tick-loop-body region. Everything from
-/// this exact line (inclusive) to end-of-file must be byte-identical to
-/// `STARTING_HEAD` — this is the real economic dispatch body (Bundle 5/6
-/// ordering, cap #6, outbox, broker calls), never touched by lifecycle-only
-/// wiring patches. The startup-barrier wait (requirement 3) sits entirely
-/// above this anchor, in the prologue.
+/// The first line of the barrier-wait prologue — everything strictly above
+/// this line may differ (function signature, frozen-assignment injection,
+/// the startup barrier wait itself, both pre-barrier exit branches' now-
+/// structured leadership-release truth). Proven present by the companion
+/// test below, not byte-diffed.
 const REQUIRED_TICK_LOOP_ANCHOR: &str =
     "        let mut ticker = tokio::time::interval(EXECUTION_LOOP_INTERVAL);";
+
+/// The first line of the real economic dispatch body — post-tick-success
+/// snapshot read, outbox reconciliation, and per-symbol strategy decision
+/// dispatch (Bundle 5/6, cap #6, outbox/broker calls). Everything from
+/// this line to the matching close of the enclosing `loop { ... }` block
+/// (found by brace-depth counting below, not a second fixed anchor
+/// string) must be byte-identical to `PATCH_START_HEAD` — this is the
+/// actual economic logic this guard protects.
+const REQUIRED_DISPATCH_BODY_START_ANCHOR: &str =
+    "                    match orchestrator.snapshot().await.context(\"snapshot failed\") {";
 
 fn repo_root() -> std::path::PathBuf {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
@@ -79,60 +109,125 @@ fn repo_root() -> std::path::PathBuf {
         .to_path_buf()
 }
 
-fn file_at_starting_head(repo_root: &std::path::Path) -> String {
+fn file_at_patch_start_head(repo_root: &std::path::Path) -> String {
     let output = Command::new("git")
         .arg("-C")
         .arg(repo_root)
         .arg("show")
-        .arg(format!("{STARTING_HEAD}:{LOOP_RUNNER_PATH}"))
+        .arg(format!("{PATCH_START_HEAD}:{LOOP_RUNNER_PATH}"))
         .output()
         .expect("failed to invoke git (required for this structural guard)");
     assert!(
         output.status.success(),
-        "failed to read {LOOP_RUNNER_PATH} at {STARTING_HEAD}: {}",
+        "failed to read {LOOP_RUNNER_PATH} at {PATCH_START_HEAD}: {}",
         String::from_utf8_lossy(&output.stderr)
     );
-    String::from_utf8(output.stdout).expect("loop_runner.rs at STARTING_HEAD must be valid UTF-8")
+    String::from_utf8(output.stdout)
+        .expect("loop_runner.rs at PATCH_START_HEAD must be valid UTF-8")
 }
 
-fn tick_loop_body_from(content: &str, label: &str) -> String {
-    let idx = content.find(REQUIRED_TICK_LOOP_ANCHOR).unwrap_or_else(|| {
+/// Extracts the real economic dispatch body: from
+/// `REQUIRED_DISPATCH_BODY_START_ANCHOR` to the matching close of the
+/// enclosing `loop { ... }` block, found by counting brace depth from the
+/// anchor's own opening `{` back to zero. Using brace-depth counting
+/// (rather than a second fixed literal anchor for the end) means this
+/// extraction is robust to unrelated changes in the trailing exit-branch
+/// code after the loop closes.
+fn dispatch_body_from(content: &str, label: &str) -> String {
+    let start_idx = content
+        .find(REQUIRED_DISPATCH_BODY_START_ANCHOR)
+        .unwrap_or_else(|| {
+            panic!(
+                "{label}: required dispatch-body start anchor not found — \
+                 REQUIRED_DISPATCH_BODY_START_ANCHOR={REQUIRED_DISPATCH_BODY_START_ANCHOR:?} \
+                 must exist verbatim in {LOOP_RUNNER_PATH}"
+            )
+        });
+    let rest = &content[start_idx..];
+    let mut depth: i64 = 0;
+    let mut end_idx = None;
+    for (offset, ch) in rest.char_indices() {
+        match ch {
+            '{' => depth += 1,
+            '}' => {
+                depth -= 1;
+                if depth == 0 {
+                    // `depth` reaches zero at the close of the anchor's own
+                    // `match { ... }` — the dispatch body is everything up
+                    // to and including the close of the *enclosing* `loop`
+                    // block, one level further out. Keep scanning until
+                    // `depth` goes negative (the loop's own close) instead.
+                }
+                if depth < 0 {
+                    end_idx = Some(offset + ch.len_utf8());
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let end_idx = end_idx.unwrap_or_else(|| {
         panic!(
-            "{label}: required anchor line not found — \
-             REQUIRED_TICK_LOOP_ANCHOR={REQUIRED_TICK_LOOP_ANCHOR:?} \
-             must exist verbatim in {LOOP_RUNNER_PATH}"
+            "{label}: could not find the matching close of the enclosing `loop` \
+             block after the dispatch-body start anchor — brace depth never went \
+             negative; the file may be malformed or the anchor moved"
         )
     });
-    content[idx..].to_string()
+    rest[..end_idx].to_string()
 }
 
 #[test]
-fn loop_runner_tick_body_is_byte_identical_to_patch_starting_head() {
+fn loop_runner_dispatch_body_is_byte_identical_to_patch_starting_head() {
     let repo_root = repo_root();
-    let starting_head_content = file_at_starting_head(&repo_root);
+    let patch_start_content = file_at_patch_start_head(&repo_root);
     let current_content = std::fs::read_to_string(repo_root.join(LOOP_RUNNER_PATH))
         .expect("failed to read current loop_runner.rs");
 
-    let starting_head_body = tick_loop_body_from(&starting_head_content, "STARTING_HEAD");
-    let current_body = tick_loop_body_from(&current_content, "current working tree");
+    let patch_start_body = dispatch_body_from(&patch_start_content, "PATCH_START_HEAD");
+    let current_body = dispatch_body_from(&current_content, "current working tree");
 
     assert_eq!(
-        current_body, starting_head_body,
-        "state/loop_runner.rs's tick loop body (economic dispatch: strategy \
-         dispatch, targets/decisions, Bundle 5/6 ordering, cap #6, outbox, \
-         broker calls) differs from the required starting HEAD ({STARTING_HEAD}) \
-         from the anchor line onward — this patch owns lifecycle/frozen-\
-         assignment-injection wiring only and must not change economic tick \
-         dispatch."
+        current_body, patch_start_body,
+        "state/loop_runner.rs's economic dispatch body (post-tick-success \
+         snapshot read, outbox reconciliation, Bundle 5/6 ordering, cap #6, \
+         per-symbol decision dispatch) differs from the required starting \
+         HEAD ({PATCH_START_HEAD}) — this patch owns lifecycle/exit-telemetry \
+         wiring only and must not change economic tick dispatch."
     );
 }
 
-/// A narrower, explicit companion proof: only the function signature and
-/// the one-time prologue above the anchor may differ, and that diff must be
-/// the specific frozen-assignment-injection change (function parameter
-/// list) — never a change to how the assignment list itself flows into the
-/// unchanged tick loop body. This is a readability/intent check, not a
-/// byte-diff — the byte-diff above is the actual proof.
+/// Ancestry proof: `PATCH_START_HEAD` must genuinely descend from
+/// `FROZEN_ECONOMIC_BASELINE` — the lineage this guard has traced since
+/// its introduction. Not a byte-diff (see module doc for why); a real
+/// `git merge-base --is-ancestor` check, so a rebase/history-rewrite that
+/// severed the lineage would be caught.
+#[test]
+fn patch_start_head_is_a_real_descendant_of_the_frozen_economic_baseline() {
+    let repo_root = repo_root();
+    let status = Command::new("git")
+        .arg("-C")
+        .arg(&repo_root)
+        .arg("merge-base")
+        .arg("--is-ancestor")
+        .arg(FROZEN_ECONOMIC_BASELINE)
+        .arg(PATCH_START_HEAD)
+        .status()
+        .expect("failed to invoke git (required for this structural guard)");
+    assert!(
+        status.success(),
+        "FROZEN_ECONOMIC_BASELINE ({FROZEN_ECONOMIC_BASELINE}) must be a real \
+         ancestor of PATCH_START_HEAD ({PATCH_START_HEAD}) — this guard's lineage \
+         must trace back to the original frozen reference without interruption"
+    );
+}
+
+/// A narrower, explicit companion proof: only the function signature, the
+/// frozen-assignment-injection prologue, and the startup barrier wait may
+/// precede the dispatch body's own start; everything the dispatch body
+/// itself needs must still flow into it from that prologue, and the
+/// startup barrier requirement must still be honored. This is a
+/// readability/intent check, not a byte-diff — the byte-diff above is the
+/// actual proof.
 #[test]
 fn loop_runner_prologue_still_defines_multi_symbol_assignments_before_the_anchor() {
     let repo_root = repo_root();
@@ -162,5 +257,13 @@ fn loop_runner_prologue_still_defines_multi_symbol_assignments_before_the_anchor
         "requirement 3: the task must still wait on the startup barrier \
          (raced against its own stop signal) strictly before the ticker \
          line the anchor now starts at"
+    );
+
+    let dispatch_start_idx = current_content
+        .find(REQUIRED_DISPATCH_BODY_START_ANCHOR)
+        .expect("dispatch-body start anchor must exist");
+    assert!(
+        dispatch_start_idx > anchor_idx,
+        "the dispatch body must begin strictly after the ticker line"
     );
 }

@@ -19668,3 +19668,226 @@ DISPOSITION:
 DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7A-FINAL-PRIVATE-PRODUCTION-EFFECTS-PROOF:
 PARTIAL -- R5 CLOSED with exact evidence above. R6's private injection boundary is real and proven (success scenario + barrier-leadership/truth + 4 fault-seam/conflict/release-failure paths, all passing against the real DB), but the full 29-point failure matrix is not exhaustively covered -- named remaining items above, none started, none claimed.
 ```
+
+## DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7A-R6-EXHAUSTIVE-MATRIX-CLOSURE-REPAIR-01 (2026-08-01)
+
+**Scope.** Repair patch against the R6 PARTIAL closure above. Required
+starting HEAD a0037af74ac725366b187b0f1bf7f8944bfac1ca. Two commits:
+10928d43 (Part 1, structured barrier/join/leadership cleanup truth) and
+ef4d7635 (Parts 2/3/4/5, matrix expansion + fail-fast DB command), plus
+this docs/guards entry (Part 6).
+
+**Part 1 -- CLOSED.** `ExecutionLoopExit` now carries
+`leadership_release_outcome`, populated at every exit site.
+`InstallActiveRuntimeError`'s three variants carry a typed
+`InstallRuntimeTaskCleanup` (join_outcome + leadership_release_outcome)
+instead of `install_active_runtime` discarding the join
+(`let _ = handle.join_handle.await;`). `ProductionRuntimeStartEffects::
+spawn_loop` folds that cleanup into two new `LocalRollbackOutcome` fields
+(`task_side_leadership_release_outcome`, `task_side_join_outcome`) instead
+of losing it; `RollbackOutcome::is_degraded()` checks them.
+`clear_local_runtime_for_run`/`reap_finished_execution_loop` capture a
+joined task's own release outcome instead of discarding `Ok(exit)`, and
+`stop_execution_runtime`/`halt_execution_runtime`/`stop_for_shutdown`/
+`reap_finished_execution_loop` now call `note_local_runtime_degraded`
+before returning on a join/release failure -- previously they returned
+`Err` (or, for shutdown, only logged) while ownership stayed a
+clean-looking `Idle`. A private `#[cfg(test)]`-read
+`pre_barrier_leadership_release_count` counter proves "exactly once".
+`BARRIER-TRUTH-01` updated to assert the new task-side truth instead of
+asserting `None` with a "nothing left to release" rationale that was true
+only because the truth was being discarded.
+
+**Parts 2-4 -- PARTIAL.** `real_production_effects_matrix_tests` grew
+from 6 to 19 tests (all genuinely pass against the real port-5434 test
+DB), driving the actual `ProductionRuntimeStartEffects` path throughout.
+
+Success matrix (Part 2): Off (pre-existing), ShadowAllowed, ShadowInvalid
+all proven -- reach Active, preserve dynamic-selection metadata (selected
+pairs / invalid reasons, never a host pool), stop clears everything.
+**PaperEnforcedAllowed via the real outer `start_execution_runtime`/
+start-gate path is NOT closed** -- see BLOCKED items below.
+
+Failure matrix (Part 3) rows closed with real (never fabricated)
+failures: 7, 8, 10, 11, 12, 16, 18, 19, 20, 21, 27, 29, plus the
+`AfterProcessLocalSelectionCommit` seam (fires between rows 16/18, not
+separately numbered in the original 29). Row 9's positive path (a real
+`readiness_link` reaching `persist_run_linked_readiness_evidence`) is
+proven; its failure half is not. New test-only mechanisms added: two
+`DynamicSelectionLifecycleFaultSeam` variants
+(`PerturbRunStoppedBeforeBegin`/`BeforeInitialHeartbeat`) that perform a
+real `mqk_db::stop_run` perturbation so the next real DB call organically
+fails (rows 11/12); a `DeleteRunRowBeforeArm` variant that really deletes
+the run row so rollback's own `fetch_run` organically hits `RowNotFound`
+(row 27); a `force_execution_loop_panic` test-only injection point in
+`loop_runner.rs`, checked immediately after the startup barrier releases
+(row 21) -- this test also found and documents a real, pre-existing
+`mqk_runtime` property: a panicked task never releases its runtime lease
+(a genuine panic skips ordinary code), so an immediate restart is
+correctly refused until the lease naturally expires, not a bug.
+
+Cleanup matrix (Part 4) closed: real halt/shutdown proofs from a genuine
+Active hermetic run, each including restart-after-exit.
+`clear_any_preexisting_active_daemon_run` now also deletes a stale
+`HALTED` shared-run-row so the module's tests stay order-independent.
+
+**Part 5 -- CLOSED.** `db_pool_or_skip` panics instead of skipping when
+`MQK_REQUIRE_PHASE7A_R6_MATRIX=1` and the DB is
+absent/wrong-port/unreachable/unmigrated; verified both directions. New
+`scripts/guards/check_phase7a_r6_matrix_db_required.ps1` requires the
+port-5434 DB up front, sets the env var, runs the module, and parses the
+harness's own summary line to assert >= 19 passed and 0 failed/ignored.
+
+**Part 6 -- CLOSED.**
+`scenario_bundle7_phase7a_loop_runner_unchanged_guard_01.rs` renamed the
+rolling comparison anchor from the misleadingly-permanent `STARTING_HEAD`
+to `PATCH_START_HEAD` (still a0037af7 -- this patch's own required
+starting commit) and added a separate, never-bumped
+`FROZEN_ECONOMIC_BASELINE` (9323b769) asserted as a real git ancestor of
+`PATCH_START_HEAD` (`git merge-base --is-ancestor`), not byte-diffed
+directly. The byte-diff itself was re-scoped from "anchor line to EOF"
+(which Part 1 legitimately touches at every exit branch, something no
+prior patch did) to just the real economic dispatch body -- from the
+post-tick snapshot/outbox read to the matching close of the enclosing
+`loop {}` block, found by brace-depth counting so it is robust to
+unrelated exit-branch text changing later. `check_no_phase7a_production_
+effects_bypass.ps1` now also verifies each of the 7 named seams is
+actually `#[cfg(test)]`-gated (directly or via an enclosing `#[cfg(test)]
+impl` block) -- not merely "not a plain `pub fn`"; this immediately caught
+a real gap (`drive_production_start_effects_for_test`'s own `fn` line
+carries no attribute -- it's gated via its enclosing `impl` block, which
+the strengthened check now explicitly verifies rather than assumes).
+`check_phase7a_final_closure.ps1` Check 2 now also runs the crate's own
+`paper_enforced_allowed_is_refused` unit test (behavioral proof the
+interlock fires) instead of only grepping for the fault_class string.
+
+**BLOCKED items (exact evidence, none claimed closed):**
+
+1. **PaperEnforcedAllowed via the real outer start-gate, and rows 5/6**
+   (`AfterRunRowCreation`/`AfterSelectionEvaluation`). All three require
+   driving the real `AppState::start_execution_runtime()` (not
+   `drive_production_start_effects_for_test`, which bypasses the whole
+   outer gate chain by construction). Non-Off dynamic-selection modes are
+   only reachable when `(DeploymentMode::Paper, BrokerKind::Alpaca)`
+   (`build_dynamic_selection_start_snapshot`'s own "mode live-lock" -- any
+   other combination forces `effective_mode = Off`). That combination is
+   the ONE combination for which `strategy_market_data_source ==
+   ExternalSignalIngestion`
+   (`AppState::new_for_test_with_mode_and_broker`, state.rs), which turns
+   on the strict daily-data-readiness gate
+   (`state/lifecycle.rs` ~line 1085) and the premarket freshness gate
+   (~line 1296) -- both require either a fully-unconfigured environment
+   (which itself makes `MultiSymbolRuntimeConfig` resolution fail closed
+   with `MissingSymbol`, and the daily-data-readiness gate's own
+   `blocked_report` path is not `start_allowed`) or a real, seeded
+   `md_bars` fixture plus calendar/session-window setup matching the
+   `PREMARKET-DATA-READINESS-GATE-01`/`AUTONOMOUS-DAILY-*` patches' own
+   dedicated fixture work -- itself comparable in size to a full patch.
+   Smallest root-cause repair: either build that fixture chain in a
+   follow-up patch, or add a narrow, explicitly-labeled test-only bypass
+   for just the daily-data-readiness/premarket gates (mirroring the
+   `hermetic_test_broker_override` pattern) so `(Paper, Alpaca)` can be
+   driven hermetically without real market-data fixtures -- a genuine new
+   production surface, not something to add without an explicit patch
+   authorizing it.
+
+2. **Row 9's failure half** (run-linked evidence persistence failure).
+   `sys_autonomous_session_events` has no FK constraint on `run_id` and no
+   other row constraint `persist_autonomous_session_event` could violate;
+   its `on conflict (id) do nothing` makes even a duplicate-id insert
+   succeed. No test-only override exists at `persist_run_linked_
+   readiness_evidence`'s own call site inside `advance_run_to_active`
+   (daily_data_readiness.rs) because that function is intentionally
+   decoupled from `AppState` (no seam plumbing to read). Smallest
+   root-cause repair: add a narrow `#[cfg(test)]`-only override parameter
+   threaded through `advance_run_to_active` (a production function, so
+   this needs its own explicit authorization -- not done here without
+   one).
+
+3. **Rows 13/14** (initial tick clean/partial failure) and **row 15**
+   (post-tick heartbeat failure, distinct from row 12's *initial*
+   heartbeat). Not attempted. Row 12's `PerturbRunStoppedBeforeInitial
+   Heartbeat` technique does not extend to 13/14/15: `orchestrator.tick()`
+   itself has no state-guard to perturb against (a real tick failure needs
+   either a genuine broker/DB error inside the hermetic paper broker's own
+   tick path, or a second orchestrator instance racing the same runtime
+   lease); row 15 (heartbeat immediately after a *successful* tick) would
+   need the same perturb-then-real-call technique used for rows 11/12,
+   just one call site later -- mechanically identical to what already
+   exists, simply not written.
+
+4. **Row 17** (Starting metadata/mirror preparation failure --
+   `prepare_starting_metadata_and_mirrors` itself returning `Err`). That
+   function's only failure modes are ownership not being `Reserved` for
+   this exact `run_id` at the moment it runs -- a genuine race between
+   `reserve_local_ownership` and this call, which nothing in the current
+   single-threaded test-attempt flow can trigger without either real
+   concurrency (two attempts racing the same run_id, non-deterministic) or
+   a new seam that mutates `runtime_ownership` mid-attempt (a new
+   production surface, not added here without explicit authorization).
+
+5. **Row 28** (durable rollback transition failure -- `stop_run`/
+   `halt_run` itself failing during rollback, distinct from row 27's
+   `fetch_run` failure). `halt_run` has no state guard at all (unconditional
+   `UPDATE ... WHERE run_id = $1`, per `runs.rs`) so it cannot organically
+   fail via row state. `stop_run` does guard on `Armed|Running`, but
+   rollback only calls it after its own `fetch_run` already confirmed
+   `Armed|Running` on the same row -- reproducing a genuine race between
+   that read and `stop_run`'s own internal re-read needs either true
+   concurrency or a test hook inside `rollback_failed_start_attempt`
+   itself (`daily_data_readiness.rs`, a shared production function) between
+   the fetch and the transition call -- not added here without explicit
+   authorization for that specific new surface.
+
+**VALIDATION.** `cargo check -p mqk-daemon --lib` (default features)
+clean, zero warnings. `rustfmt --check`/`clippy --no-deps` clean on every
+touched file. Full `cargo test -p mqk-daemon --lib`: 672 passed, 0
+failed, 4 ignored (pre-existing, unrelated), with and without
+`MQK_DATABASE_URL` configured. `check_phase7a_r6_matrix_db_required.ps1`,
+`check_phase7a_final_closure.ps1`, `check_no_phase7a_production_effects_
+bypass.ps1`, `check_no_promotion_evidence_bypass.ps1`,
+`check_migration_governance.sh`, `check_unsafe_patterns.ps1`,
+`check_workspace_dep_inheritance.sh`,
+`check_ignored_load_bearing_proofs.sh`,
+`check_multi_strategy_conflict_policy_01.sh`,
+`check_runtime_opportunity_allocation_01.sh` all pass. `git diff --check`
+clean (line-ending-only warnings, no real whitespace errors).
+
+```
+DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7A-R6-EXHAUSTIVE-MATRIX-CLOSURE-REPAIR-01:
+
+Patch: DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7A-R6-EXHAUSTIVE-MATRIX-CLOSURE-REPAIR-01
+Worktree: C:\Users\Zacha\Desktop\MiniQuantDeskV4
+Branch: main
+Starting HEAD: a0037af74ac725366b187b0f1bf7f8944bfac1ca
+Final HEAD: <filled in after docs commit>
+Commits: 3 (10928d43, ef4d7635, + this docs/guards commit)
+Pushed: NO
+Phase 7B started: NO
+Bundle 8 started: NO
+Real daemon started: NO
+Orders placed: NO
+
+R5 PRESERVATION: intact -- unchanged this patch, re-verified by check_no_phase7a_production_effects_bypass.ps1 (now stricter) and cargo check --lib
+STRUCTURED BARRIER TRUTH: CLOSED -- Part 1, see above, proven by BARRIER-TRUTH-01 and the full matrix
+SUCCESS MATRIX: 3/4 -- Off, ShadowAllowed, ShadowInvalid proven; PaperEnforcedAllowed via the real outer start-gate BLOCKED (exact evidence above)
+FAILURE MATRIX 5-29: 17/25 rows closed with real (non-fabricated) failures (7,8,10,11,12,16,18,19,20,21,22,23,24,25,26,27,29); row 9 positive-path only; rows 5,6,13,14,15,17,28 BLOCKED (exact evidence above)
+CLEANUP: CLOSED -- halt/shutdown/reap/restart proven from a genuine Active hermetic run
+DB PROOF: CLOSED -- 19 tests genuinely pass against port-5434; fail-fast MQK_REQUIRE_PHASE7A_R6_MATRIX=1 command added and verified both directions
+FINAL GUARDS: CLOSED -- immutable baseline restored + separated from rolling anchor, R5 guard now verifies real #[cfg(test)] gating, PaperEnforcedAllowed interlock now behaviorally proven not just grepped
+VALIDATION: all guards + full test suite pass, see VALIDATION section above
+FILES CHANGED: core-rs/crates/mqk-daemon/src/state.rs, core-rs/crates/mqk-daemon/src/state/lifecycle.rs, core-rs/crates/mqk-daemon/src/state/loop_runner.rs, core-rs/crates/mqk-daemon/src/state/types.rs, core-rs/crates/mqk-daemon/tests/scenario_bundle7_phase7a_loop_runner_unchanged_guard_01.rs, scripts/guards/check_no_phase7a_production_effects_bypass.ps1, scripts/guards/check_phase7a_final_closure.ps1, MiniQuantDesk_Master_Patch_Ledger_v2.md
+FILES ADDED: scripts/guards/check_phase7a_r6_matrix_db_required.ps1
+FILES DELETED: none
+FILES RENAMED: none
+UNEXPECTED FILES: none
+MIGRATIONS ADDED: NONE
+PHASE 7B ECONOMIC DISPATCH CHANGED: NO
+STRATEGY/RISK/BROKER/PORTFOLIO/RECONCILIATION AUTHORITY CHANGED: NO
+AI CONSUMED: NO
+LIVE CAPITAL ENABLED: NO
+
+DISPOSITION:
+DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7A-R6-EXHAUSTIVE-MATRIX-CLOSURE-REPAIR-01:
+BLOCKED -- Parts 1, 4, 5, 6 fully CLOSED with exact evidence above. Parts 2/3 substantially advanced (matrix grew from 6 to 19 genuinely-passing DB-proven tests; success dispositions 3/4; failure rows 17/25) but not exhaustive. Five specific remaining blockers named above with exact file/function, exact failure, why the accepted private seam cannot reach it safely, and the smallest root-cause repair required for each. No false completion claim.
+```
