@@ -239,68 +239,257 @@ pub(crate) struct ExecutionLoopHandle {
     pub(crate) join_handle: JoinHandle<ExecutionLoopExit>,
 }
 
-/// ATOMIC-OWNERSHIP-AND-ROLLBACK-TRUTH-01 requirement 2: explicit local
-/// loop-ownership states, replacing the prior `Option<ExecutionLoopHandle>`
-/// (which could only distinguish "no owner" from "owner installed" — it had
-/// no way to represent "a start attempt has claimed this slot but has not
-/// finished building the handle yet"). A start attempt must move
-/// `Empty -> Reserved { run_id }` atomically before it does any further
-/// work, then only ever install `Active(handle)` for that exact `run_id`.
+/// BUNDLE-7-PHASE-7A-CORE-ATOMIC-STATE-MACHINE-CLOSURE requirement 2:
+/// immutable metadata bound to a run the instant local ownership moves from
+/// `Reserved` to `Starting`. Never mutated in place after construction — a
+/// later run's metadata is always a brand-new `Arc`, never an update of this
+/// one, so a restart or a racing rollback can never observe a mix of two
+/// runs' authoritative truth.
 ///
-/// `Reserved` is a genuinely distinct state from `Active`: a status reader
-/// observing `Reserved` must never report the run as running (requirement
-/// 10 — "Reserved is starting or omitted, never running"), and a
-/// compare-and-clear for a failed run A must never clear `Reserved`/`Active`
-/// for a different run B (requirement 2's "conflicting" rule).
+/// Some fields duplicate data that also lives in a separate "economic
+/// mirror" field on `AppState` (`accepted_artifact`,
+/// `native_strategy_bootstrap`) rather than physically relocating that
+/// storage — moving those would touch the hot tick-body read paths this
+/// patch's root-cause design rule keeps out of scope. `dynamic_selection` is
+/// the one field an existing production getter (`AppState::dynamic_
+/// selection_runtime_snapshot`) genuinely projects from (requirement 2
+/// invariant 10, replacing the prior independently-authoritative field of
+/// the same name). The remaining duplicated fields below (`accepted_
+/// artifact`, `native_bootstrap_present`, `frozen_assignments`, `frozen_
+/// assignments_source`, `approved_for_live`) exist to satisfy requirement 2
+/// invariant 8 ("Active metadata includes ...") — making the ownership
+/// state genuinely self-describing — and are exercised by this patch's own
+/// tests (`state::ownership_state_machine_tests::
+/// active_status_requires_matching_run_metadata_handle`); invariant 11 says
+/// compatibility getters *may* project from them, not must, and
+/// `AppState::accepted_artifact_provenance` deliberately keeps reading the
+/// mirror directly instead — `scenario_artifact_provenance_tv01cd.rs`'s
+/// AP-01..AP-06 route contract is driven entirely through the mirror-only
+/// `set_accepted_artifact_for_test` seam, so switching that getter's source
+/// would break real, already-established route-contract proof. `#[allow(
+/// dead_code)]` below is therefore honest, not a lint workaround for
+/// something that should be wired differently.
 #[derive(Debug)]
-pub(crate) enum ExecutionLoopSlot {
-    /// No local owner. The only state a new start attempt may reserve from.
-    Empty,
-    /// A start attempt for `run_id` has claimed the slot but has not yet
-    /// installed a running handle. Conflicts with every other run_id,
-    /// including another `Reserved` or `Active` value.
-    Reserved { run_id: Uuid },
-    /// The execution loop is actually running for `run_id`.
-    Active(ExecutionLoopHandle),
+pub(crate) struct RunStartMetadata {
+    #[allow(dead_code)]
+    pub(crate) run_id: Uuid,
+    /// TV-01C provenance, mirrored here as the ownership-authoritative copy.
+    #[allow(dead_code)]
+    pub(crate) accepted_artifact: Option<AcceptedArtifactProvenance>,
+    /// `true` when B1A native strategy bootstrap was constructed for this
+    /// run. The bootstrap object itself is not `Clone` and stays solely in
+    /// the separate `AppState::native_strategy_bootstrap` economic mirror —
+    /// this is a presence witness, not a duplicate value.
+    #[allow(dead_code)]
+    pub(crate) native_bootstrap_present: bool,
+    /// The frozen dynamic-selection outcome for this run — the sole
+    /// authoritative source `AppState::dynamic_selection_runtime_snapshot`
+    /// projects from (requirement 2 invariant 10, replacing the prior
+    /// independently-authoritative `dynamic_selection_runtime` field).
+    /// `None` only for a disposition that never built one.
+    ///
+    /// Interior-mutable (unlike every other field here) purely so the
+    /// narrow test-only seam `AppState::commit_dynamic_selection_runtime_
+    /// state` can attach a sentinel value to an *already-established*
+    /// `Starting`/`Active` binding (e.g. one built by `establish_db_backed_
+    /// active_run_for_test`) without disturbing that binding's real
+    /// `ExecutionLoopHandle`. Production code always sets this once, at
+    /// metadata-construction time, and never mutates it again.
+    pub(crate) dynamic_selection: tokio::sync::RwLock<Option<DynamicSelectionRuntimeState>>,
+    /// ATOMICITY-SINGLE-SNAPSHOT-REPAIR's frozen per-symbol legacy
+    /// assignment vector for this exact start attempt.
+    #[allow(dead_code)]
+    pub(crate) frozen_assignments: Vec<super::SymbolStrategyAssignment>,
+    /// Diagnostic label for where `frozen_assignments` was resolved from
+    /// (e.g. `"start_attempt_snapshot"`, `"test_fixture"`).
+    #[allow(dead_code)]
+    pub(crate) frozen_assignments_source: &'static str,
+    /// Always `false` in this patch — Bundle 7 dynamic selection carries no
+    /// live dispatch authority under any disposition (mirrors
+    /// `DynamicSelectionRuntimeState::approved_for_live`).
+    #[allow(dead_code)]
+    pub(crate) approved_for_live: bool,
 }
 
-/// ATOMIC-OWNERSHIP-AND-ROLLBACK-TRUTH-01 requirement 7: typed failure from
-/// `AppState::install_active_execution_loop_slot`, replacing what was
-/// previously a panic on a duplicate/misordered call.
+/// Bounded, structured detail for a [`LocalRuntimeOwnership::Degraded`]
+/// state — requirement 4's "local authority removed even when DB transition
+/// fails, with degraded truth": a durable DB transition (`stop_run`/
+/// `halt_run`) failed after local ownership for `run_id` had already been
+/// fully released.
+#[derive(Debug, Clone)]
+pub(crate) struct BoundedLifecycleDegradation {
+    pub(crate) operation: &'static str,
+    pub(crate) detail: String,
+}
+
+impl fmt::Display for BoundedLifecycleDegradation {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "durable transition failed ({}): {}",
+            self.operation, self.detail
+        )
+    }
+}
+
+/// BUNDLE-7-PHASE-7A-CORE-ATOMIC-STATE-MACHINE-CLOSURE requirement 2: the
+/// single source-of-truth local runtime lifecycle-ownership state machine,
+/// replacing the prior split of three independently-mutated authorities —
+/// `ExecutionLoopSlot` (`Empty`/`Reserved`/`Active`), `run_start_commit_
+/// owner` (a bare `Option<Uuid>` tag for a separately-stored legacy field
+/// bundle), and `dynamic_selection_runtime` (an independently-committed/
+/// cleared `Option<DynamicSelectionRuntimeState>`). All three are now one
+/// enum behind one lock: `Idle` / `Reserved` / `Starting` / `Active` /
+/// `Degraded`.
+///
+/// Every non-`Idle` variant carries the exact `run_id` it is scoped to, so a
+/// compare-and-clear for run A can never mutate state that legitimately
+/// belongs to a different run B (requirement 2 invariant 5 / requirement 4's
+/// "run A cannot clear B").
+#[derive(Debug)]
+pub(crate) enum LocalRuntimeOwnership {
+    /// No active run. The only state a new start attempt may reserve from.
+    Idle,
+    /// A start attempt for `run_id` has claimed the slot but has not yet
+    /// built runtime metadata. Conflicts with every other run_id, including
+    /// another `Reserved`/`Starting`/`Active`/`Degraded` value.
+    Reserved { run_id: Uuid },
+    /// Runtime metadata and economic-mirror fields have been prepared and
+    /// committed for `run_id`, but the execution loop task has not yet
+    /// cleared the startup barrier (requirement 3) — never reported as
+    /// running (requirement 2 invariant 7).
+    Starting {
+        run_id: Uuid,
+        metadata: Arc<RunStartMetadata>,
+    },
+    /// The execution loop is installed and has cleared the startup barrier
+    /// for `run_id`. The only state `status()` may report as "running".
+    Active {
+        run_id: Uuid,
+        metadata: Arc<RunStartMetadata>,
+        handle: ExecutionLoopHandle,
+    },
+    /// Local ownership for `run_id` was released (no local authority
+    /// remains) but a subsequent durable/truth transition could not be
+    /// confirmed — an honest degraded note, never silently presented as
+    /// clean `Idle`.
+    Degraded {
+        run_id: Uuid,
+        detail: BoundedLifecycleDegradation,
+    },
+}
+
+impl LocalRuntimeOwnership {
+    /// The `run_id` this state is scoped to, or `None` for `Idle`.
+    pub(crate) fn owned_run_id(&self) -> Option<Uuid> {
+        match self {
+            Self::Idle => None,
+            Self::Reserved { run_id }
+            | Self::Starting { run_id, .. }
+            | Self::Active { run_id, .. }
+            | Self::Degraded { run_id, .. } => Some(*run_id),
+        }
+    }
+}
+
+/// Typed failure from `AppState::prepare_starting_metadata_and_mirrors` —
+/// the `Reserved { run_id } -> Starting { run_id, metadata }` transition.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum InstallActiveExecutionLoopSlotError {
-    /// The slot is `Empty` — `reserve_execution_loop_slot` was never called
-    /// (or was already released) for this run_id.
+pub(crate) enum PrepareStartingMetadataError {
+    /// The slot is `Idle` — `reserve_runtime_ownership` was never called (or
+    /// was already released) for this run_id.
     NoReservation,
     /// The slot is `Reserved` for a *different* run_id.
     ReservedForDifferentRun { reserved_run_id: Uuid },
-    /// The slot is already `Active` — a second install was attempted.
-    AlreadyActive { active_run_id: Uuid },
+    /// The slot is already past `Reserved` (`Starting`/`Active`/`Degraded`)
+    /// — a duplicate/misordered call.
+    NotReserved,
 }
 
-impl fmt::Display for InstallActiveExecutionLoopSlotError {
+impl fmt::Display for PrepareStartingMetadataError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::NoReservation => {
-                write!(f, "execution loop slot has no reservation to install into")
-            }
+            Self::NoReservation => write!(f, "runtime ownership has no reservation to prepare"),
             Self::ReservedForDifferentRun { reserved_run_id } => write!(
                 f,
-                "execution loop slot is reserved for a different run_id: {reserved_run_id}"
+                "runtime ownership is reserved for a different run_id: {reserved_run_id}"
             ),
-            Self::AlreadyActive { active_run_id } => write!(
+            Self::NotReserved => write!(
                 f,
-                "execution loop slot is already active for run_id: {active_run_id}"
+                "runtime ownership is no longer Reserved (already Starting/Active/Degraded)"
             ),
         }
     }
 }
 
+/// Typed failure from `AppState::install_active_runtime` — the `Starting {
+/// run_id, metadata } -> Active { run_id, metadata, handle }` transition.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum InstallActiveRuntimeError {
+    /// The slot is not `Starting` for this run_id at all (`Idle`/`Reserved`).
+    NotStarting,
+    /// The slot is `Starting` for a *different* run_id.
+    StartingForDifferentRun { starting_run_id: Uuid },
+    /// The slot is already `Active` — a second install was attempted.
+    AlreadyActive { active_run_id: Uuid },
+}
+
+impl fmt::Display for InstallActiveRuntimeError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::NotStarting => write!(f, "runtime ownership is not Starting"),
+            Self::StartingForDifferentRun { starting_run_id } => write!(
+                f,
+                "runtime ownership is Starting for a different run_id: {starting_run_id}"
+            ),
+            Self::AlreadyActive { active_run_id } => write!(
+                f,
+                "runtime ownership is already active for run_id: {active_run_id}"
+            ),
+        }
+    }
+}
+
+/// BUNDLE-7-PHASE-7A-CORE-ATOMIC-STATE-MACHINE-CLOSURE requirement 4:
+/// bounded reason codes for `AppState::clear_local_runtime_for_run` /
+/// `AppState::clear_currently_owned_local_runtime`, recorded only for
+/// diagnostics/tracing — every reason clears identically, none changes
+/// clearing behavior. Covers every exit path that goes through the
+/// run_id-scoped unified authority; `reap_finished_execution_loop` and the
+/// finished-loop branch of `take_execution_loop_for_control` clear directly
+/// via the same underlying mirror-clearing primitive without a reason tag
+/// (they extract by construction — a finished handle — never by run_id
+/// lookup, so there is no ambiguous "which reason" to record).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LifecycleClearReason {
+    /// Failed start (reservation, run-link persist, runtime-effects, or
+    /// barrier/install failure) — rolled back via `RuntimeStartEffects::
+    /// rollback_local_effects`.
+    FailedStart,
+    OperatorStop,
+    OperatorHalt,
+    Shutdown,
+}
+
+/// Structured result of `AppState::clear_local_runtime_for_run`.
+#[derive(Debug, Default)]
+pub(crate) struct LocalRuntimeClearOutcome {
+    /// `true` when this call actually matched and cleared `run_id` — a
+    /// different owner, or an already-`Idle` slot, leaves this `false` and
+    /// touches nothing (requirement 4's "run A cannot clear B").
+    pub(crate) cleared: bool,
+    /// `true` when an `Active` handle was found and had not yet finished —
+    /// this call sent it the stop signal and joined it.
+    pub(crate) stopped_live_handle: bool,
+    /// `Some(detail)` when joining the handle failed (a panic in the task).
+    pub(crate) join_error: Option<String>,
+}
+
 // NOTE: `RuntimeStartPhase` lives in `crate::daily_data_readiness` (it must
 // be `pub` there — the `RuntimeStartEffects` trait it's part of is driven
 // from integration tests outside this crate's `pub(crate)` boundary), not
-// here. `ExecutionLoopSlot` above stays `pub(crate)` since nothing outside
-// this crate needs it directly.
+// here. `LocalRuntimeOwnership` above stays `pub(crate)` since nothing
+// outside this crate needs it directly.
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum OperatorAuthMode {

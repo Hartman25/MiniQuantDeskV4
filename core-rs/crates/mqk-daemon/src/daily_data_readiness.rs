@@ -1785,15 +1785,23 @@ pub trait RuntimeStartEffects: Send + Sync {
 
 /// Failure from [`advance_run_to_active`]. `RunLinkPersistFailed` is
 /// REPAIR 4's fail-closed policy: the run row already exists but is never
-/// armed/begun/ticked and the loop is never spawned. `Effects` carries the
-/// original fault plus the full rollback truth (requirement 5) — never
-/// masked, and a caller can check `rollback.is_degraded()` before treating
-/// the original error as an ordinary, fully-cleaned-up start refusal.
+/// armed/begun/ticked and the loop is never spawned. Carries the same
+/// structured [`RollbackOutcome`] truth `Effects` does (BUNDLE-7-PHASE-7A-
+/// CORE-ATOMIC-STATE-MACHINE-CLOSURE requirement 8: "structured rollback
+/// truth returned") — the only local effect a run-link failure can ever
+/// need rolled back is the reservation this function's caller made just
+/// before attempting the link write, so `rollback.local` here only ever
+/// reflects a reservation release, never a runtime-effects/spawn rollback.
+/// `Effects` carries the original fault plus the full rollback truth
+/// (requirement 5) — never masked, and a caller can check `rollback.is_
+/// degraded()` before treating the original error as an ordinary,
+/// fully-cleaned-up start refusal.
 #[derive(Debug)]
 pub enum RuntimeStartSequenceError {
     RunLinkPersistFailed {
         evaluation_id: uuid::Uuid,
         run_id: uuid::Uuid,
+        rollback: RollbackOutcome,
     },
     Effects {
         original: RuntimeStartEffectsError,
@@ -1810,12 +1818,16 @@ pub enum RuntimeStartSequenceError {
 /// computed for this start attempt) — such attempts proceed straight to
 /// runtime effects, exactly as before this patch.
 ///
-/// The run-linked evidence persist (pre-existing REPAIR 4 fail-closed
-/// policy, unrelated to local loop ownership) runs first, exactly as
-/// before this patch. `RuntimeStartEffects::reserve_local_ownership` is
-/// then the very first *trait* call (ATOMIC-OWNERSHIP-AND-ROLLBACK-TRUTH-01
-/// requirement 2) — strictly before `start_runtime_effects` does any
-/// runtime construction or `AppState` publication.
+/// BUNDLE-7-PHASE-7A-CORE-ATOMIC-STATE-MACHINE-CLOSURE requirement 8:
+/// `RuntimeStartEffects::reserve_local_ownership` is now the very first
+/// call this function makes — strictly before the run-linked evidence
+/// persist. On a run-link-persist failure, only this reservation is
+/// released (via the same `rollback_failed_start_attempt` path every other
+/// failure branch uses — `start_runtime_effects`/`spawn_loop` were never
+/// called, so there is nothing else to roll back): no arm/begin/tick/spawn
+/// ever happens, the durable run stays non-active (never reaches `Armed`),
+/// and a prior legitimate owner (there cannot be one — reservation only
+/// just succeeded for this exact `run_id`) is left untouched.
 pub async fn advance_run_to_active<E: RuntimeStartEffects>(
     db: &PgPool,
     effects: &E,
@@ -1823,18 +1835,6 @@ pub async fn advance_run_to_active<E: RuntimeStartEffects>(
     readiness_link: Option<(uuid::Uuid, DateTime<Utc>)>,
     trace: &mut Vec<&'static str>,
 ) -> Result<(), RuntimeStartSequenceError> {
-    if let Some((evaluation_id, linked_at_utc)) = readiness_link {
-        let linked =
-            persist_run_linked_readiness_evidence(db, evaluation_id, run_id, linked_at_utc).await;
-        if !linked {
-            return Err(RuntimeStartSequenceError::RunLinkPersistFailed {
-                evaluation_id,
-                run_id,
-            });
-        }
-        trace.push(TRACE_RUN_LINK_EVENT_PERSISTED);
-    }
-
     if let Err(err) = effects.reserve_local_ownership(run_id).await {
         let rollback = rollback_failed_start_attempt(db, effects, run_id).await;
         return Err(RuntimeStartSequenceError::Effects {
@@ -1843,6 +1843,20 @@ pub async fn advance_run_to_active<E: RuntimeStartEffects>(
         });
     }
     trace.push(TRACE_OWNERSHIP_RESERVED);
+
+    if let Some((evaluation_id, linked_at_utc)) = readiness_link {
+        let linked =
+            persist_run_linked_readiness_evidence(db, evaluation_id, run_id, linked_at_utc).await;
+        if !linked {
+            let rollback = rollback_failed_start_attempt(db, effects, run_id).await;
+            return Err(RuntimeStartSequenceError::RunLinkPersistFailed {
+                evaluation_id,
+                run_id,
+                rollback,
+            });
+        }
+        trace.push(TRACE_RUN_LINK_EVENT_PERSISTED);
+    }
 
     if let Err(err) = effects.start_runtime_effects(run_id).await {
         let rollback = rollback_failed_start_attempt(db, effects, run_id).await;

@@ -55,6 +55,17 @@ pub(super) fn spawn_execution_loop(
     // existing no-op behavior of `tick_strategy_dispatch` when strategy
     // dispatch is not configured.
     multi_symbol_assignments: Vec<super::SymbolStrategyAssignment>,
+    // BUNDLE-7-PHASE-7A-CORE-ATOMIC-STATE-MACHINE-CLOSURE requirement 3:
+    // the startup barrier. The task waits here, before doing ANY economic
+    // work (no ticker, no deadman, no tick, no outbox/broker touch), until
+    // the caller (`ProductionRuntimeStartEffects::spawn_loop`) has
+    // atomically installed this exact handle as `Active` for `run_id` and
+    // released the barrier. Raced against `stop_rx` so a cancellation
+    // (install failure, or a stop/shutdown that races in) makes the task
+    // exit immediately without ever reaching the barrier's economic body —
+    // no detached task, no economic work performed while still merely
+    // `Starting`.
+    start_barrier: tokio::sync::oneshot::Receiver<()>,
 ) -> ExecutionLoopHandle {
     let (stop_tx, mut stop_rx) = watch::channel(ExecutionLoopCommand::Run);
     let snapshot_cache = Arc::clone(&state.execution_snapshot);
@@ -72,6 +83,44 @@ pub(super) fn spawn_execution_loop(
     let dry_run_strategy_ids: Vec<String> = dry_run_strategy_ids_from_env();
 
     let join_handle = tokio::spawn(async move {
+        // Requirement 3 steps 4/5/8: wait at the top of the async body,
+        // strictly before the ticker (or any other economic construct) is
+        // even created. `tokio::time::interval`'s first tick fires
+        // immediately once created — creating it before this wait would
+        // reopen the exact race this barrier exists to close.
+        tokio::select! {
+            barrier_result = start_barrier => {
+                if barrier_result.is_err() {
+                    // Sender dropped without ever releasing (install
+                    // failure took the "drop, don't send" branch) — treat
+                    // identically to an explicit stop: exit now, no
+                    // economic work. `orchestrator` must be dropped off the
+                    // async executor (see `drop_outside_async_context`) —
+                    // it was never used, but may embed a blocking-client
+                    // runtime.
+                    drop_outside_async_context(orchestrator);
+                    return ExecutionLoopExit {
+                        note: Some(
+                            "execution loop cancelled before startup barrier release".to_string(),
+                        ),
+                    };
+                }
+            }
+            changed = stop_rx.changed() => {
+                // Cancelled before the barrier ever released (e.g. a
+                // concurrent stop/shutdown signaled this handle directly).
+                // `changed.is_err()` (sender dropped) is also treated as a
+                // stop — either way, no economic work has happened.
+                let _ = changed;
+                drop_outside_async_context(orchestrator);
+                return ExecutionLoopExit {
+                    note: Some(
+                        "execution loop stopped before startup barrier release".to_string(),
+                    ),
+                };
+            }
+        }
+
         let mut ticker = tokio::time::interval(EXECUTION_LOOP_INTERVAL);
         // AUTON-PAPER-RISK-03: countdown to next External broker snapshot refresh.
         let mut external_refresh_ticks: u32 = 0;

@@ -24,7 +24,7 @@ use crate::parity_evidence::{evaluate_parity_evidence_from_env, ParityEvidenceOu
 use sqlx::PgPool;
 
 use super::loop_runner::spawn_execution_loop;
-use super::types::{DaemonOrchestrator, ExecutionLoopCommand};
+use super::types::DaemonOrchestrator;
 use super::{
     reconcile_broker_snapshot_from_schema, reconcile_local_snapshot_from_runtime_with_sides,
     spawn_reconcile_tick, uptime_secs,
@@ -1438,14 +1438,20 @@ impl AppState {
             crate::daily_data_readiness::RuntimeStartSequenceError::RunLinkPersistFailed {
                 evaluation_id,
                 run_id,
+                rollback,
             } => RuntimeLifecycleError::service_unavailable(
                 "runtime.start_refused.readiness_run_link_persist_failed",
                 format!(
                     "strict daily data readiness run-linked evidence persist failed for \
                      evaluation_id={evaluation_id} run_id={run_id}; refusing to arm, begin, \
                      tick, or spawn the execution loop — the run row exists but must not be \
-                     presented as an actively started runtime ({})",
+                     presented as an actively started runtime ({}); local ownership \
+                     reservation rollback: phase_reached={:?} durable={:?} \
+                     durable_status_unknown={}",
                     crate::daily_data_readiness::REASON_READINESS_RUN_LINK_PERSIST_FAILED,
+                    rollback.phase_reached,
+                    rollback.durable,
+                    rollback.durable_status_unknown,
                 ),
             ),
             crate::daily_data_readiness::RuntimeStartSequenceError::Effects {
@@ -1666,44 +1672,45 @@ impl AppState {
     ) -> Result<StatusSnapshot, RuntimeLifecycleError> {
         let _op = self.lifecycle_op.lock().await;
         self.reap_finished_execution_loop().await?;
-        // BUNDLE-7-PHASE-7A: an operator-initiated stop immediately
-        // disowns dynamic-selection authority — before any DB call below
-        // that could fail, and before either the truth-mismatch conflict
-        // return or the no-local-owner idle return. Idempotent no-op when
-        // already `None`.
-        self.clear_dynamic_selection_runtime_state().await;
-        let handle = match self.take_execution_loop_for_control().await? {
-            Some(handle) => handle,
-            None => {
-                if let Some(db) = self.db.as_ref() {
-                    if let Some(active) = mqk_db::fetch_active_run_for_engine(
-                        db,
-                        DAEMON_ENGINE_ID,
-                        self.deployment_mode().as_db_mode(),
-                    )
-                    .await
-                    .map_err(|err| {
-                        RuntimeLifecycleError::internal("stop active-run lookup failed", err)
-                    })? {
-                        return Err(RuntimeLifecycleError::conflict(
-                            "runtime.truth_mismatch.durable_active_without_local_owner",
-                            format!(
-                                "durable active run exists without local ownership: {}",
-                                active.run_id
-                            ),
-                        ));
-                    }
+
+        // BUNDLE-7-PHASE-7A-CORE-ATOMIC-STATE-MACHINE-CLOSURE requirement
+        // 4: the single unified cleanup authority — clears ownership
+        // (including dynamic-selection truth, via its metadata) and every
+        // economic mirror together, before any DB call below that could
+        // fail, and before either the truth-mismatch conflict return or
+        // the no-local-owner idle return.
+        let Some((run_id, outcome)) = self
+            .clear_currently_owned_local_runtime(crate::state::LifecycleClearReason::OperatorStop)
+            .await
+        else {
+            if let Some(db) = self.db.as_ref() {
+                if let Some(active) = mqk_db::fetch_active_run_for_engine(
+                    db,
+                    DAEMON_ENGINE_ID,
+                    self.deployment_mode().as_db_mode(),
+                )
+                .await
+                .map_err(|err| {
+                    RuntimeLifecycleError::internal("stop active-run lookup failed", err)
+                })? {
+                    return Err(RuntimeLifecycleError::conflict(
+                        "runtime.truth_mismatch.durable_active_without_local_owner",
+                        format!(
+                            "durable active run exists without local ownership: {}",
+                            active.run_id
+                        ),
+                    ));
                 }
-                return self.current_status_snapshot().await;
             }
+            return self.current_status_snapshot().await;
         };
 
-        let run_id = handle.run_id;
-        let _ = handle.stop_tx.send(ExecutionLoopCommand::Stop);
-        let _ = handle
-            .join_handle
-            .await
-            .map_err(|err| RuntimeLifecycleError::internal("stop join failed", err))?;
+        if let Some(join_err) = outcome.join_error {
+            return Err(RuntimeLifecycleError::internal(
+                "stop join failed",
+                join_err,
+            ));
+        }
 
         let db = self.db_pool()?;
         let run = mqk_db::fetch_run(&db, run_id)
@@ -1713,15 +1720,22 @@ impl AppState {
             run.status,
             mqk_db::RunStatus::Armed | mqk_db::RunStatus::Running
         ) {
-            mqk_db::stop_run(&db, run_id)
-                .await
-                .map_err(|err| RuntimeLifecycleError::internal("stop_run failed", err))?;
+            if let Err(err) = mqk_db::stop_run(&db, run_id).await {
+                // Requirement 4: local authority is already fully removed
+                // (handle stopped+joined, mirrors cleared) above — mark
+                // truth honestly `Degraded` rather than silently leaving a
+                // clean-looking `Idle` behind a failed durable transition.
+                self.note_local_runtime_degraded(
+                    run_id,
+                    crate::state::BoundedLifecycleDegradation {
+                        operation: "stop_run",
+                        detail: err.to_string(),
+                    },
+                )
+                .await;
+                return Err(RuntimeLifecycleError::internal("stop_run failed", err));
+            }
         }
-
-        // TV-01C: clear artifact provenance on stop — no active run means no active artifact.
-        *self.accepted_artifact.write().await = None;
-        // B1A: clear native strategy bootstrap on stop — host is not active without a run.
-        *self.native_strategy_bootstrap.lock().await = None;
 
         let snapshot = self.current_status_snapshot().await?;
         Ok(snapshot)
@@ -1732,14 +1746,18 @@ impl AppState {
     ) -> Result<StatusSnapshot, RuntimeLifecycleError> {
         let _op = self.lifecycle_op.lock().await;
         self.reap_finished_execution_loop().await?;
-        // BUNDLE-7-PHASE-7A: an operator-initiated halt immediately disowns
-        // dynamic-selection authority — before any DB call below that could
-        // fail, and before either the truth-mismatch conflict return or the
-        // no-local-owner path. Idempotent no-op when already `None`.
-        self.clear_dynamic_selection_runtime_state().await;
 
-        let handle = self.take_execution_loop_for_control().await?;
-        if handle.is_none() {
+        // BUNDLE-7-PHASE-7A-CORE-ATOMIC-STATE-MACHINE-CLOSURE requirement
+        // 4: the single unified cleanup authority — clears ownership
+        // (including dynamic-selection truth) and every economic mirror
+        // together, before any DB call below that could fail, and before
+        // either the truth-mismatch conflict return or the no-local-owner
+        // path.
+        let cleared = self
+            .clear_currently_owned_local_runtime(crate::state::LifecycleClearReason::OperatorHalt)
+            .await;
+
+        if cleared.is_none() {
             if let Some(db) = self.db.as_ref() {
                 if let Some(active) = mqk_db::fetch_active_run_for_engine(
                     db,
@@ -1768,17 +1786,28 @@ impl AppState {
         }
 
         let db = self.db_pool()?;
-        if let Some(handle) = handle {
-            let run_id = handle.run_id;
-            let _ = handle.stop_tx.send(ExecutionLoopCommand::Stop);
-            let _ = handle
-                .join_handle
-                .await
-                .map_err(|err| RuntimeLifecycleError::internal("halt join failed", err))?;
-
-            mqk_db::halt_run(&db, run_id, Utc::now())
-                .await
-                .map_err(|err| RuntimeLifecycleError::internal("halt_run failed", err))?;
+        if let Some((run_id, outcome)) = cleared {
+            if let Some(join_err) = outcome.join_error {
+                return Err(RuntimeLifecycleError::internal(
+                    "halt join failed",
+                    join_err,
+                ));
+            }
+            if let Err(err) = mqk_db::halt_run(&db, run_id, Utc::now()).await {
+                // Requirement 4: local authority is already fully removed
+                // above — mark truth honestly `Degraded` rather than
+                // silently leaving a clean-looking `Idle` behind a failed
+                // durable transition.
+                self.note_local_runtime_degraded(
+                    run_id,
+                    crate::state::BoundedLifecycleDegradation {
+                        operation: "halt_run",
+                        detail: err.to_string(),
+                    },
+                )
+                .await;
+                return Err(RuntimeLifecycleError::internal("halt_run failed", err));
+            }
         }
         mqk_db::persist_arm_state_canonical(
             &db,
@@ -1787,11 +1816,6 @@ impl AppState {
         )
         .await
         .map_err(|err| RuntimeLifecycleError::internal("persist_arm_state failed", err))?;
-
-        // TV-01C: clear artifact provenance on halt — no active run means no active artifact.
-        *self.accepted_artifact.write().await = None;
-        // B1A: clear native strategy bootstrap on halt — host is not active without a run.
-        *self.native_strategy_bootstrap.lock().await = None;
 
         let snapshot = StatusSnapshot {
             daemon_uptime_secs: uptime_secs(),
@@ -1904,45 +1928,63 @@ impl AppState {
     }
 
     pub async fn stop_for_shutdown(self: &Arc<Self>) {
-        if let Some(handle) = self.take_execution_loop_for_shutdown().await {
-            let run_id = handle.run_id;
-            let _ = handle.stop_tx.send(ExecutionLoopCommand::Stop);
-            match handle.join_handle.await {
-                Ok(_) => {
-                    if let Some(db) = self.db.as_ref() {
-                        match mqk_db::fetch_run(db, run_id).await {
-                            Ok(run) => {
-                                if matches!(
-                                    run.status,
-                                    mqk_db::RunStatus::Armed | mqk_db::RunStatus::Running
-                                ) {
-                                    if let Err(err) = mqk_db::stop_run(db, run_id).await {
-                                        tracing::warn!(
-                                            "shutdown stop_run failed for {run_id}: {err}"
-                                        );
-                                    }
-                                }
-                            }
-                            Err(err) => {
-                                tracing::warn!("shutdown fetch_run_failed for {run_id}: {err}");
-                            }
-                        }
+        // BUNDLE-7-PHASE-7A-CORE-ATOMIC-STATE-MACHINE-CLOSURE requirement
+        // 4: acquire the same lifecycle serialization every other local
+        // start/stop/halt transition uses. Because every start attempt
+        // holds this lock for its *entire* duration (including the whole
+        // reserve -> prepare-metadata -> barriered-install sequence),
+        // acquiring it here means ownership can never actually be observed
+        // as `Reserved`/`Starting` by the time this function's own body
+        // runs — shutdown either runs before a start attempt begins, or
+        // waits for one already in flight to reach its final `Idle`/
+        // `Active`/`Degraded` state first. This is what "shutdown safely
+        // cancels Reserved/Starting" means in practice here: safety by
+        // construction via serialization, not an explicit cancellation
+        // race.
+        let _op = self.lifecycle_op.lock().await;
+
+        // Clears ownership (including dynamic-selection truth) AND every
+        // economic mirror together — closing the pre-existing asymmetry
+        // where shutdown cleared dynamic-selection state but left
+        // `accepted_artifact`/`native_strategy_bootstrap`/other mirrors
+        // stale.
+        let cleared = self
+            .clear_currently_owned_local_runtime(crate::state::LifecycleClearReason::Shutdown)
+            .await;
+
+        let Some((run_id, outcome)) = cleared else {
+            return;
+        };
+        if let Some(err) = outcome.join_error {
+            tracing::warn!("shutdown join failed for {run_id}: {err}");
+            return;
+        }
+        let Some(db) = self.db.as_ref() else {
+            return;
+        };
+        match mqk_db::fetch_run(db, run_id).await {
+            Ok(run) => {
+                if matches!(
+                    run.status,
+                    mqk_db::RunStatus::Armed | mqk_db::RunStatus::Running
+                ) {
+                    if let Err(err) = mqk_db::stop_run(db, run_id).await {
+                        tracing::warn!("shutdown stop_run failed for {run_id}: {err}");
+                        self.note_local_runtime_degraded(
+                            run_id,
+                            crate::state::BoundedLifecycleDegradation {
+                                operation: "stop_run",
+                                detail: err.to_string(),
+                            },
+                        )
+                        .await;
                     }
                 }
-                Err(err) => {
-                    tracing::warn!("shutdown join failed for {run_id}: {err}");
-                }
+            }
+            Err(err) => {
+                tracing::warn!("shutdown fetch_run_failed for {run_id}: {err}");
             }
         }
-        // BUNDLE-7-PHASE-7A: unlike the pre-existing `accepted_artifact`/
-        // `native_strategy_bootstrap` fields (which this function does not
-        // clear — a pre-existing asymmetry, not introduced here), shutdown
-        // MUST clear dynamic-selection state explicitly: it runs regardless
-        // of whether a local loop handle was found, and regardless of the
-        // DB `stop_run` outcome above, so the process never carries stale
-        // selection authority into the next boot's status truth. Idempotent
-        // no-op when already `None`.
-        self.clear_dynamic_selection_runtime_state().await;
     }
 }
 
@@ -2104,7 +2146,7 @@ impl crate::daily_data_readiness::RuntimeStartEffects for ProductionRuntimeStart
         use crate::daily_data_readiness::RuntimeStartEffectsError;
 
         self.state
-            .reserve_execution_loop_slot(run_id)
+            .reserve_runtime_ownership(run_id)
             .await
             .map_err(|_conflicting_run_id| {
                 RuntimeStartEffectsError::conflict(
@@ -2319,8 +2361,17 @@ impl crate::daily_data_readiness::RuntimeStartEffects for ProductionRuntimeStart
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .take();
 
-        self.state
-            .commit_run_start_bundle(
+        // BUNDLE-7-PHASE-7A-CORE-ATOMIC-STATE-MACHINE-CLOSURE requirement
+        // 2/3: build `RunStartMetadata` and commit every economic-mirror
+        // field as one step, transitioning ownership `Reserved{run_id} ->
+        // Starting{run_id, metadata}`. Under correct caller ordering this
+        // cannot fail (reservation already succeeded above and
+        // `AppState::lifecycle_op` has serialized every other local
+        // start/stop/halt attempt for the whole duration of this call) —
+        // but the typed error is still handled without a panic.
+        if let Err(err) = self
+            .state
+            .prepare_starting_metadata_and_mirrors(
                 run_id,
                 crate::state::RunStartLocalBundle {
                     execution_snapshot,
@@ -2328,8 +2379,18 @@ impl crate::daily_data_readiness::RuntimeStartEffects for ProductionRuntimeStart
                     native_strategy_bootstrap,
                     dynamic_selection_outcome,
                 },
+                self.legacy_assignments.clone(),
+                "start_attempt_snapshot",
             )
-            .await;
+            .await
+        {
+            self.release_orchestrator_leadership(orchestrator, "prepare_starting_metadata_failed")
+                .await;
+            return Err(RuntimeStartEffectsError::internal(
+                "runtime.start_refused.prepare_starting_metadata_failed",
+                err.to_string(),
+            ));
+        }
 
         // BUNDLE-7-PHASE-7A fault seam: immediately after the run-start
         // bundle commit above, before this function returns `Ok(())`. The
@@ -2410,36 +2471,54 @@ impl crate::daily_data_readiness::RuntimeStartEffects for ProductionRuntimeStart
                  start_runtime_effects must succeed first",
             ));
         };
+        // BUNDLE-7-PHASE-7A-CORE-ATOMIC-STATE-MACHINE-CLOSURE requirement
+        // 3: the startup barrier. The task is spawned already blocked on
+        // `barrier_rx` (raced against its own stop signal) — it does zero
+        // economic work (no ticker, no deadman, no tick, no outbox/broker
+        // touch) until this barrier is released, which only happens below,
+        // strictly after `install_active_runtime` has atomically installed
+        // this exact handle as `Active` for `run_id`.
+        let (barrier_tx, barrier_rx) = tokio::sync::oneshot::channel();
         let handle = spawn_execution_loop(
             Arc::clone(self.state),
             orchestrator,
             run_id,
             self.legacy_assignments.clone(),
+            barrier_rx,
         );
-        if let Err(install_err) = self
-            .state
-            .install_active_execution_loop_slot(run_id, handle)
-            .await
-        {
+        if let Err(install_err) = self.state.install_active_runtime(run_id, handle).await {
+            // `install_active_runtime` already sent the task its stop
+            // signal and joined it on any mismatch — the task wakes via
+            // the stop arm of its startup select, never the barrier arm,
+            // so it never touches economic state. Dropping the barrier
+            // sender here (rather than sending) is inert either way; no
+            // detached task remains.
+            drop(barrier_tx);
             return Err(RuntimeStartEffectsError::internal(
                 "runtime.start_refused.spawn_loop_install_failed",
                 format!("failed to install the spawned execution loop: {install_err}"),
             ));
         }
         self.set_phase(RuntimeStartPhase::LoopInstalled);
+        // Barrier release: only now may the task build its ticker and
+        // begin real economic work.
+        let _ = barrier_tx.send(());
         Ok(())
     }
 
-    /// ATOMIC-OWNERSHIP-AND-ROLLBACK-TRUTH-01 requirements 2/3/4: clear
-    /// every local effect this attempt may have committed, run_id-scoped —
-    /// the loop-ownership reservation, the run-start bundle (run_id-tagged
-    /// as one unit), and dynamic-selection state (independently run_id-
-    /// tagged). Idempotent — safe to call regardless of how far the attempt
-    /// got. Also releases any orchestrator lease this attempt still holds
-    /// (defense in depth — every `start_runtime_effects`/`spawn_loop`
-    /// failure branch above already released it inline before returning
-    /// `Err`, recording the outcome via `release_orchestrator_leadership`;
-    /// this only catches a future failure path that forgets to).
+    /// BUNDLE-7-PHASE-7A-CORE-ATOMIC-STATE-MACHINE-CLOSURE requirement 4:
+    /// clear every local effect this attempt may have committed,
+    /// run_id-scoped, via the single unified cleanup authority
+    /// (`AppState::clear_local_runtime_for_run`) — whatever ownership state
+    /// this attempt reached (`Reserved`/`Starting`/`Active`), its metadata
+    /// (including dynamic-selection truth) and every economic-mirror field
+    /// are cleared together. Idempotent — safe to call regardless of how
+    /// far the attempt got. Also releases any orchestrator lease this
+    /// attempt still holds (defense in depth — every `start_runtime_
+    /// effects`/`spawn_loop` failure branch above already released it
+    /// inline before returning `Err`, recording the outcome via
+    /// `release_orchestrator_leadership`; this only catches a future
+    /// failure path that forgets to).
     async fn rollback_local_effects(
         &self,
         run_id: uuid::Uuid,
@@ -2455,9 +2534,8 @@ impl crate::daily_data_readiness::RuntimeStartEffects for ProductionRuntimeStart
         }
 
         self.state
-            .release_execution_loop_reservation_for_run(run_id)
+            .clear_local_runtime_for_run(run_id, crate::state::LifecycleClearReason::FailedStart)
             .await;
-        self.state.rollback_run_start_bundle_for_run(run_id).await;
 
         crate::daily_data_readiness::LocalRollbackOutcome {
             leadership_release_outcome: self
@@ -2840,9 +2918,13 @@ mod dynamic_selection_cleanup_contract_tests {
         }
     }
 
-    /// `stop_execution_runtime` clears committed dynamic-selection state
-    /// even with no active local loop and no DB configured (the "idle,
-    /// nothing to stop" path).
+    /// Test 10: `stop_execution_runtime` clears committed dynamic-selection
+    /// state AND every other economic mirror before it ever reaches a
+    /// DB-dependent step that can fail. `commit_dynamic_selection_runtime_
+    /// state`'s fixture establishes a real (trivial) `Active` loop, so stop
+    /// genuinely stops+joins it, then reaches `db_pool()?` — which errors
+    /// with no DB configured, mirroring the halt test below. The clear
+    /// itself, proven by the mirror assertions, already happened by then.
     #[tokio::test]
     async fn stop_clears_committed_state_with_no_active_loop_and_no_db() {
         let state = Arc::new(AppState::new_for_test_with_mode_and_broker(
@@ -2857,22 +2939,46 @@ mod dynamic_selection_cleanup_contract_tests {
             .commit_dynamic_selection_runtime_state(fixture_off_state(run_id))
             .await;
         assert!(state.dynamic_selection_runtime_snapshot().await.is_some());
-
         state
+            .plant_accepted_artifact_for_test(Some(AcceptedArtifactProvenance {
+                artifact_id: "stop-sentinel".to_string(),
+                artifact_type: "sentinel".to_string(),
+                stage: "sentinel".to_string(),
+                produced_by: "test".to_string(),
+            }))
+            .await;
+        state.plant_day_signal_count_for_test(77);
+
+        let err = state
             .stop_execution_runtime()
             .await
-            .expect("stop with no active loop and no DB must succeed (idle status)");
+            .expect_err("stop must reach db_pool() once the trivial fixture loop is stopped");
+        assert_eq!(
+            err.fault_class(),
+            "runtime.start_refused.service_unavailable"
+        );
         assert!(
             state.dynamic_selection_runtime_snapshot().await.is_none(),
-            "stop_execution_runtime must clear dynamic-selection state"
+            "stop_execution_runtime must clear dynamic-selection state before the \
+             DB-dependent step that can fail"
+        );
+        assert!(
+            state.accepted_artifact_snapshot_for_test().await.is_none(),
+            "stop_execution_runtime must clear accepted_artifact too, not only \
+             dynamic-selection state"
+        );
+        assert_eq!(
+            state.day_signal_count_snapshot_for_test(),
+            0,
+            "stop_execution_runtime must clear day_signal_count too"
         );
     }
 
-    /// `halt_execution_runtime` clears committed dynamic-selection state
-    /// *even when the overall call itself errors* on a missing DB — the
-    /// clear is placed before `db_pool()?` deliberately, so local
-    /// dynamic-selection authority is disowned the instant an operator halts,
-    /// independent of whether the DB bookkeeping step later succeeds.
+    /// Test 11: `halt_execution_runtime` clears committed dynamic-selection
+    /// state and every other economic mirror *even when the overall call
+    /// itself errors* on a missing DB — the clear happens before `db_pool()?`
+    /// deliberately, so local authority is disowned the instant an operator
+    /// halts, independent of whether the DB bookkeeping step later succeeds.
     #[tokio::test]
     async fn halt_clears_committed_state_even_when_the_call_itself_errors() {
         let state = Arc::new(AppState::new_for_test_with_mode_and_broker(
@@ -2887,6 +2993,15 @@ mod dynamic_selection_cleanup_contract_tests {
             .commit_dynamic_selection_runtime_state(fixture_off_state(run_id))
             .await;
         assert!(state.dynamic_selection_runtime_snapshot().await.is_some());
+        state
+            .plant_accepted_artifact_for_test(Some(AcceptedArtifactProvenance {
+                artifact_id: "halt-sentinel".to_string(),
+                artifact_type: "sentinel".to_string(),
+                stage: "sentinel".to_string(),
+                produced_by: "test".to_string(),
+            }))
+            .await;
+        state.plant_day_signal_count_for_test(88);
 
         let err = state
             .halt_execution_runtime()
@@ -2901,12 +3016,18 @@ mod dynamic_selection_cleanup_contract_tests {
             "halt_execution_runtime must clear dynamic-selection state before the DB-dependent \
              steps that can fail, not only on a fully successful halt"
         );
+        assert!(
+            state.accepted_artifact_snapshot_for_test().await.is_none(),
+            "halt_execution_runtime must clear accepted_artifact too, before the \
+             DB-dependent steps that can fail"
+        );
+        assert_eq!(state.day_signal_count_snapshot_for_test(), 0);
     }
 
-    /// `stop_for_shutdown` clears committed dynamic-selection state even
-    /// with no active local loop — unlike the pre-existing
-    /// `accepted_artifact`/`native_strategy_bootstrap` fields (which this
-    /// function does not clear at all), this is new, required behavior.
+    /// Test 12: `stop_for_shutdown` clears committed dynamic-selection state
+    /// AND every other economic mirror, even with no DB configured — unlike
+    /// the pre-existing behavior this patch closes (shutdown previously left
+    /// `accepted_artifact`/`native_strategy_bootstrap` stale).
     #[tokio::test]
     async fn stop_for_shutdown_clears_committed_state_with_no_active_loop() {
         let state = Arc::new(AppState::new_for_test_with_mode_and_broker(
@@ -2920,12 +3041,27 @@ mod dynamic_selection_cleanup_contract_tests {
         state
             .commit_dynamic_selection_runtime_state(fixture_off_state(run_id))
             .await;
+        state
+            .plant_accepted_artifact_for_test(Some(AcceptedArtifactProvenance {
+                artifact_id: "shutdown-sentinel".to_string(),
+                artifact_type: "sentinel".to_string(),
+                stage: "sentinel".to_string(),
+                produced_by: "test".to_string(),
+            }))
+            .await;
+        state.plant_day_signal_count_for_test(99);
 
         state.stop_for_shutdown().await;
         assert!(
             state.dynamic_selection_runtime_snapshot().await.is_none(),
             "stop_for_shutdown must clear dynamic-selection state"
         );
+        assert!(
+            state.accepted_artifact_snapshot_for_test().await.is_none(),
+            "stop_for_shutdown must now also clear accepted_artifact — closing the \
+             pre-existing asymmetry this patch fixes"
+        );
+        assert_eq!(state.day_signal_count_snapshot_for_test(), 0);
     }
 
     /// Cleanup is idempotent: clearing twice (or clearing when already
@@ -2991,9 +3127,10 @@ mod dynamic_selection_cleanup_contract_tests {
         );
     }
 
-    /// `reap_finished_execution_loop` clears committed dynamic-selection
-    /// state when it reaps a loop that finished on its own (crash/supervisor
-    /// exit), independent of `stop_execution_runtime`/`halt_execution_runtime`
+    /// Test 13: `reap_finished_execution_loop` clears committed
+    /// dynamic-selection state AND every other economic mirror when it
+    /// reaps a loop that finished on its own (crash/supervisor exit),
+    /// independent of `stop_execution_runtime`/`halt_execution_runtime`
     /// ever being called.
     #[tokio::test]
     async fn reap_of_a_finished_loop_clears_committed_state() {
@@ -3005,11 +3142,15 @@ mod dynamic_selection_cleanup_contract_tests {
             &uuid::Uuid::NAMESPACE_DNS,
             b"mqk-daemon.phase7a.cleanup.reap",
         );
-        state
-            .commit_dynamic_selection_runtime_state(fixture_off_state(run_id))
-            .await;
 
-        let (stop_tx, _stop_rx) = tokio::sync::watch::channel(ExecutionLoopCommand::Run);
+        // BUNDLE-7-PHASE-7A-CORE-ATOMIC-STATE-MACHINE-CLOSURE: dynamic-
+        // selection truth now lives inside ownership metadata, so the
+        // fixture and the pre-finished handle are established together as
+        // one `Active` binding, rather than via a separate `commit_
+        // dynamic_selection_runtime_state` call plus a second, independent
+        // `execution_loop` write.
+        let (stop_tx, _stop_rx) =
+            tokio::sync::watch::channel(crate::state::types::ExecutionLoopCommand::Run);
         let join_handle =
             tokio::spawn(async { crate::state::types::ExecutionLoopExit { note: None } });
         // Let the trivial task actually finish before installing it, so
@@ -3023,7 +3164,30 @@ mod dynamic_selection_cleanup_contract_tests {
             stop_tx,
             join_handle,
         };
-        *state.execution_loop.lock().await = crate::state::types::ExecutionLoopSlot::Active(handle);
+        let metadata = std::sync::Arc::new(crate::state::types::RunStartMetadata {
+            run_id,
+            accepted_artifact: None,
+            native_bootstrap_present: false,
+            dynamic_selection: tokio::sync::RwLock::new(Some(fixture_off_state(run_id))),
+            frozen_assignments: Vec::new(),
+            frozen_assignments_source: "test_fixture",
+            approved_for_live: false,
+        });
+        *state.runtime_ownership.lock().await =
+            crate::state::types::LocalRuntimeOwnership::Active {
+                run_id,
+                metadata,
+                handle,
+            };
+        state
+            .plant_accepted_artifact_for_test(Some(AcceptedArtifactProvenance {
+                artifact_id: "reap-sentinel".to_string(),
+                artifact_type: "sentinel".to_string(),
+                stage: "sentinel".to_string(),
+                produced_by: "test".to_string(),
+            }))
+            .await;
+        state.plant_day_signal_count_for_test(66);
 
         let exit = state
             .reap_finished_execution_loop()
@@ -3035,6 +3199,11 @@ mod dynamic_selection_cleanup_contract_tests {
             "reap_finished_execution_loop must clear dynamic-selection state \
              for a loop that finished on its own"
         );
+        assert!(
+            state.accepted_artifact_snapshot_for_test().await.is_none(),
+            "reap_finished_execution_loop must clear accepted_artifact too"
+        );
+        assert_eq!(state.day_signal_count_snapshot_for_test(), 0);
     }
 
     /// The fault-seam get/set primitive round-trips correctly and defaults

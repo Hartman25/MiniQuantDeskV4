@@ -165,8 +165,9 @@ pub use types::{
     StatusSnapshot, StrategyMarketDataSource,
 };
 pub(crate) use types::{
-    ExecutionLoopCommand, ExecutionLoopExit, ExecutionLoopHandle, ExecutionLoopSlot,
-    InstallActiveExecutionLoopSlotError,
+    BoundedLifecycleDegradation, ExecutionLoopCommand, ExecutionLoopExit, ExecutionLoopHandle,
+    InstallActiveRuntimeError, LifecycleClearReason, LocalRuntimeClearOutcome,
+    LocalRuntimeOwnership, PrepareStartingMetadataError, RunStartMetadata,
 };
 pub use ws_gap_recovery::WsGapRecoveryOutcome;
 // Internal (crate-visible) re-exports used across this module.
@@ -338,10 +339,13 @@ pub struct AppState {
     pub operator_auth: OperatorAuthMode,
     /// Runtime adapter/deployment selection resolved from config/env at bootstrap.
     runtime_selection: RuntimeSelection,
-    /// The single daemon-owned execution loop ownership slot.
-    /// ATOMIC-OWNERSHIP-AND-ROLLBACK-TRUTH-01: `Empty`/`Reserved{run_id}`/
-    /// `Active(handle)`, never a plain `Option` — see `ExecutionLoopSlot`.
-    execution_loop: Arc<Mutex<ExecutionLoopSlot>>,
+    /// BUNDLE-7-PHASE-7A-CORE-ATOMIC-STATE-MACHINE-CLOSURE requirement 2:
+    /// the single authoritative local runtime lifecycle-ownership state
+    /// machine — `Idle`/`Reserved`/`Starting`/`Active`/`Degraded`. Replaces
+    /// the prior split of `execution_loop` (`ExecutionLoopSlot`),
+    /// `run_start_commit_owner`, and `dynamic_selection_runtime` into one
+    /// lock. See `LocalRuntimeOwnership`.
+    runtime_ownership: Arc<Mutex<LocalRuntimeOwnership>>,
     /// Serializes start/stop/halt transitions.
     lifecycle_op: Arc<Mutex<()>>,
     /// Authoritative exchange calendar spec derived from deployment mode.
@@ -769,26 +773,10 @@ pub struct AppState {
     /// task ownership/liveness/cancellation handles. Constructed once per
     /// `AppState` and never reconstructed for the process lifetime.
     completed_bar_task: autonomous_completed_bar_task::AutonomousCompletedBarTaskRuntime,
-    /// DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7A: run-scoped
-    /// dynamic-selection lifecycle truth for the currently owned execution
-    /// run. `None` when no run is active. Committed exactly once, atomically,
-    /// as part of the same authoritative start-commit sequence that publishes
-    /// `execution_loop` ownership; cleared on every lifecycle exit path
-    /// (stop/halt/shutdown/reap/failed start/loop-ownership-conflict).
-    /// Process-local only — no durable persistence in this patch.
-    dynamic_selection_runtime: Arc<RwLock<Option<DynamicSelectionRuntimeState>>>,
     /// DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7A: test-only
     /// fault-injection seam for the atomic start-commit sequence. `None` in
     /// production and for every test that does not explicitly install one.
     dynamic_selection_fault_seam: Arc<RwLock<Option<DynamicSelectionLifecycleFaultSeam>>>,
-    /// ATOMIC-OWNERSHIP-AND-ROLLBACK-TRUTH-01 requirement 3: run_id tag for
-    /// the legacy run-start local field bundle (`execution_snapshot`,
-    /// `accepted_artifact`, `native_strategy_bootstrap`, per-run counters,
-    /// per-symbol target state) — those fields carry no run_id themselves,
-    /// so this tag is what lets rollback compare-and-clear them instead of
-    /// unconditionally clearing whatever the fields currently hold. `None`
-    /// means no run currently owns the bundle.
-    run_start_commit_owner: Arc<RwLock<Option<Uuid>>>,
 }
 
 /// ATOMIC-OWNERSHIP-AND-ROLLBACK-TRUTH-01 requirement 2: every locally-
@@ -1435,7 +1423,7 @@ impl AppState {
             reconcile_status: Arc::new(RwLock::new(initial_reconcile_status())),
             operator_auth,
             runtime_selection,
-            execution_loop: Arc::new(Mutex::new(ExecutionLoopSlot::Empty)),
+            runtime_ownership: Arc::new(Mutex::new(LocalRuntimeOwnership::Idle)),
             lifecycle_op: Arc::new(Mutex::new(())),
             calendar_spec,
             broker_snapshot_source,
@@ -1520,9 +1508,7 @@ impl AppState {
             per_symbol_position_cap_alerted_symbols: Arc::new(RwLock::new(HashSet::new())),
             completed_bar_task:
                 autonomous_completed_bar_task::AutonomousCompletedBarTaskRuntime::default(),
-            dynamic_selection_runtime: Arc::new(RwLock::new(None)),
             dynamic_selection_fault_seam: Arc::new(RwLock::new(None)),
-            run_start_commit_owner: Arc::new(RwLock::new(None)),
         }
     }
 
@@ -2011,8 +1997,18 @@ operator_reconcile_or_repair_required"
         // deadman is skipped and PT-AUTO-01 fires clean on GapDetected.
         // No dispatch assignments needed — this proof only exercises the
         // gap-detection exit path, not per-symbol dispatch.
-        let handle =
-            loop_runner::spawn_execution_loop(Arc::clone(self), orchestrator, run_id, Vec::new());
+        // Test-only direct spawn: release the startup barrier immediately
+        // so this proof's single tick runs without needing the full
+        // reserve/prepare-metadata/install sequence.
+        let (barrier_tx, barrier_rx) = tokio::sync::oneshot::channel();
+        let _ = barrier_tx.send(());
+        let handle = loop_runner::spawn_execution_loop(
+            Arc::clone(self),
+            orchestrator,
+            run_id,
+            Vec::new(),
+            barrier_rx,
+        );
 
         // Await the loop exit.  Resolves as soon as the loop terminates.
         match handle.join_handle.await {
@@ -3374,6 +3370,30 @@ operator_reconcile_or_repair_required"
     }
 
     pub async fn current_status_snapshot(&self) -> Result<StatusSnapshot, RuntimeLifecycleError> {
+        // BUNDLE-7-PHASE-7A-CORE-ATOMIC-STATE-MACHINE-CLOSURE: a `Degraded`
+        // ownership state is a truthful, explicit note — never silently
+        // presented as ordinary `idle`. Local authority has already been
+        // fully removed by the time this state exists (requirement 4), so
+        // no further reap/DB reconciliation is needed here; the honest
+        // degraded detail is surfaced directly.
+        if let LocalRuntimeOwnership::Degraded { run_id, detail } =
+            &*self.runtime_ownership.lock().await
+        {
+            let snapshot = StatusSnapshot {
+                daemon_uptime_secs: uptime_secs(),
+                active_run_id: None,
+                state: "degraded".to_string(),
+                notes: Some(format!(
+                    "local runtime ownership is degraded for run {run_id}: {detail}"
+                )),
+                integrity_armed: self.integrity_armed().await,
+                deadman_status: "unknown".to_string(),
+                deadman_last_heartbeat_utc: None,
+            };
+            self.publish_status(snapshot.clone()).await;
+            return Ok(snapshot);
+        }
+
         let reaped = self.reap_finished_execution_loop().await?;
         let reaped_note = reaped.and_then(|exit| exit.note);
         let local_owned_run_id = self.active_owned_run_id().await;
@@ -3548,10 +3568,12 @@ operator_reconcile_or_repair_required"
     }
 
     async fn active_owned_run_id(&self) -> Option<Uuid> {
-        let lock = self.execution_loop.lock().await;
+        let lock = self.runtime_ownership.lock().await;
         match &*lock {
-            ExecutionLoopSlot::Active(handle) if !handle.join_handle.is_finished() => {
-                Some(handle.run_id)
+            LocalRuntimeOwnership::Active { run_id, handle, .. }
+                if !handle.join_handle.is_finished() =>
+            {
+                Some(*run_id)
             }
             _ => None,
         }
@@ -3565,13 +3587,13 @@ operator_reconcile_or_repair_required"
         &self,
     ) -> Result<Option<ExecutionLoopHandle>, RuntimeLifecycleError> {
         let handle = {
-            let mut lock = self.execution_loop.lock().await;
+            let mut lock = self.runtime_ownership.lock().await;
             // BUNDLE-7-PHASE-7A-TRUE-ATOMIC requirement 7: unconditional
             // replace-then-restore-if-wrong-variant instead of check-then-
             // replace-then-unreachable!() — the lock is held for the whole
             // span so behavior is identical, but this has no panic path.
-            match std::mem::replace(&mut *lock, ExecutionLoopSlot::Empty) {
-                ExecutionLoopSlot::Active(handle) => Some(handle),
+            match std::mem::replace(&mut *lock, LocalRuntimeOwnership::Idle) {
+                LocalRuntimeOwnership::Active { handle, .. } => Some(handle),
                 other => {
                     *lock = other;
                     None
@@ -3582,14 +3604,17 @@ operator_reconcile_or_repair_required"
         match handle {
             Some(handle) if !handle.join_handle.is_finished() => Ok(Some(handle)),
             Some(handle) => {
+                let run_id = handle.run_id;
                 let exit = handle
                     .join_handle
                     .await
                     .map_err(|err| RuntimeLifecycleError::internal("loop reap failed", err))?;
-                // BUNDLE-7-PHASE-7A: the loop is gone (finished on its own,
-                // e.g. panic/supervisor exit) — no locally-owned run remains
-                // to hold selection authority.
-                self.clear_dynamic_selection_runtime_state().await;
+                // BUNDLE-7-PHASE-7A-CORE-ATOMIC-STATE-MACHINE-CLOSURE
+                // requirement 4: the loop is gone (finished on its own,
+                // e.g. panic/supervisor exit) — no locally-owned run
+                // remains, so every economic mirror for it is cleared too,
+                // not only dynamic-selection authority.
+                self.clear_economic_mirrors_for_run(run_id).await;
                 self.publish_status(StatusSnapshot {
                     daemon_uptime_secs: uptime_secs(),
                     active_run_id: None,
@@ -3606,32 +3631,19 @@ operator_reconcile_or_repair_required"
         }
     }
 
-    async fn take_execution_loop_for_shutdown(&self) -> Option<ExecutionLoopHandle> {
-        let mut lock = self.execution_loop.lock().await;
-        match std::mem::replace(&mut *lock, ExecutionLoopSlot::Empty) {
-            ExecutionLoopSlot::Active(handle) => Some(handle),
-            other => {
-                // Not `Active` — put back whatever was there (`Empty` or a
-                // live `Reserved{run_id}` from a start attempt still in
-                // flight; shutdown must not silently steal a reservation it
-                // does not own a handle for).
-                *lock = other;
-                None
-            }
-        }
-    }
-
     async fn reap_finished_execution_loop(
         &self,
     ) -> Result<Option<ExecutionLoopExit>, RuntimeLifecycleError> {
         let handle = {
-            let mut lock = self.execution_loop.lock().await;
+            let mut lock = self.runtime_ownership.lock().await;
             // BUNDLE-7-PHASE-7A-TRUE-ATOMIC requirement 7: unconditional
             // replace-then-restore-if-not-taken instead of check-then-
             // replace-then-unreachable!() — the lock is held for the whole
             // span so behavior is identical, but this has no panic path.
-            match std::mem::replace(&mut *lock, ExecutionLoopSlot::Empty) {
-                ExecutionLoopSlot::Active(handle) if handle.join_handle.is_finished() => {
+            match std::mem::replace(&mut *lock, LocalRuntimeOwnership::Idle) {
+                LocalRuntimeOwnership::Active { handle, .. }
+                    if handle.join_handle.is_finished() =>
+                {
                     Some(handle)
                 }
                 other => {
@@ -3643,14 +3655,17 @@ operator_reconcile_or_repair_required"
 
         match handle {
             Some(handle) => {
+                let run_id = handle.run_id;
                 let exit = handle
                     .join_handle
                     .await
                     .map_err(|err| RuntimeLifecycleError::internal("loop join failed", err))?;
-                // BUNDLE-7-PHASE-7A: reaped a finished loop directly (any
+                // BUNDLE-7-PHASE-7A-CORE-ATOMIC-STATE-MACHINE-CLOSURE
+                // requirement 4: reaped a finished loop directly (any
                 // caller, not only stop/halt) — the run it belonged to no
-                // longer has a local owner.
-                self.clear_dynamic_selection_runtime_state().await;
+                // longer has a local owner, so every economic mirror for it
+                // is cleared too.
+                self.clear_economic_mirrors_for_run(run_id).await;
                 Ok(Some(exit))
             }
             None => Ok(None),
@@ -3658,70 +3673,126 @@ operator_reconcile_or_repair_required"
     }
 
     // -----------------------------------------------------------------
-    // ATOMIC-OWNERSHIP-AND-ROLLBACK-TRUTH-01 requirement 2: the only three
-    // legal `execution_loop` transitions. `reserve_execution_loop_slot` is
-    // the sole path from `Empty`; `install_active_execution_loop_slot` is
-    // the sole path from `Reserved{run_id}` to `Active`; both compare
-    // explicitly rather than trusting caller ordering, so a bug elsewhere
-    // cannot silently steal or overwrite a different run's slot.
+    // BUNDLE-7-PHASE-7A-CORE-ATOMIC-STATE-MACHINE-CLOSURE requirement 2:
+    // the only legal `runtime_ownership` transitions. `reserve_runtime_
+    // ownership` is the sole path from `Idle`; `prepare_starting_metadata_
+    // and_mirrors` is the sole path from `Reserved` to `Starting`;
+    // `install_active_runtime` is the sole path from `Starting` to
+    // `Active`. All three compare explicitly rather than trusting caller
+    // ordering, so a bug elsewhere cannot silently steal or overwrite a
+    // different run's ownership.
     // -----------------------------------------------------------------
 
-    /// Atomically claim the slot for `run_id`. `Empty -> Reserved{run_id}`
-    /// on success. Refuses (leaving the slot untouched) when the slot is
-    /// already `Reserved` or `Active` for any run_id, including `run_id`
-    /// itself (a second reservation attempt for the same run_id is still a
-    /// conflict — reservation is meant to happen at most once per attempt).
-    pub(crate) async fn reserve_execution_loop_slot(&self, run_id: Uuid) -> Result<(), Uuid> {
-        let mut lock = self.execution_loop.lock().await;
-        // BUNDLE-7-PHASE-7A-TRUE-ATOMIC requirement 7: exhaustive match
-        // instead of `ExecutionLoopSlot::run_id().expect(...)` — every
-        // non-Empty variant's conflicting run_id is read directly from its
-        // own fields, so there is no panic path even if a future variant
-        // were added without updating `run_id()`.
+    /// Atomically claim ownership for `run_id`. `Idle -> Reserved{run_id}`
+    /// on success. Refuses (leaving ownership untouched) when any other
+    /// state is currently held, including a second reservation attempt for
+    /// `run_id` itself (reservation is meant to happen at most once per
+    /// attempt).
+    pub(crate) async fn reserve_runtime_ownership(&self, run_id: Uuid) -> Result<(), Uuid> {
+        let mut lock = self.runtime_ownership.lock().await;
         match &*lock {
-            ExecutionLoopSlot::Empty => {
-                *lock = ExecutionLoopSlot::Reserved { run_id };
+            LocalRuntimeOwnership::Idle => {
+                *lock = LocalRuntimeOwnership::Reserved { run_id };
                 Ok(())
             }
-            ExecutionLoopSlot::Reserved { run_id: existing } => Err(*existing),
-            ExecutionLoopSlot::Active(handle) => Err(handle.run_id),
+            other => Err(other.owned_run_id().unwrap_or(run_id)),
         }
     }
 
-    /// Install the running handle for `run_id`, consuming its reservation.
-    /// Only valid from `Reserved{run_id}` for the exact same `run_id`.
-    /// ATOMIC-OWNERSHIP-AND-ROLLBACK-TRUTH-01 requirement 7: a duplicate or
-    /// misordered call (no matching reservation) returns a typed `Err`
-    /// instead of panicking — reaching this call without a matching
-    /// reservation is a caller-ordering bug, but the slot's own state is a
-    /// perfectly good typed error carrier, so there is no need for a panic
-    /// to report it. `handle`'s task is already running by the time this is
-    /// called (`spawn_execution_loop` already `tokio::spawn`ed it) — on
-    /// `Err` this stops and joins it before returning, rather than dropping
-    /// the handle and leaking a detached task (the exact hazard this
-    /// patch's reserve-before-spawn ordering exists to prevent).
-    pub(crate) async fn install_active_execution_loop_slot(
+    /// Build the immutable [`RunStartMetadata`] for `run_id`, write every
+    /// economic-mirror field this attempt prepared, and transition
+    /// ownership `Reserved{run_id} -> Starting{run_id, metadata}` as one
+    /// step. Only valid immediately after `reserve_runtime_ownership
+    /// (run_id)` has already succeeded — this function itself does not
+    /// retry or wait, since the caller (`ProductionRuntimeStartEffects::
+    /// start_runtime_effects`) already holds `AppState::lifecycle_op` for
+    /// the whole attempt.
+    pub(crate) async fn prepare_starting_metadata_and_mirrors(
+        &self,
+        run_id: Uuid,
+        bundle: RunStartLocalBundle,
+        frozen_assignments: Vec<SymbolStrategyAssignment>,
+        frozen_assignments_source: &'static str,
+    ) -> Result<Arc<RunStartMetadata>, PrepareStartingMetadataError> {
+        // Economic mirrors: current separate storage, unaffected by the
+        // ownership consolidation (root-cause design rule) — initialized
+        // here, strictly after reservation, exactly as `commit_run_start_
+        // bundle` did before this patch.
+        let native_bootstrap_present = bundle.native_strategy_bootstrap.is_some();
+        *self.execution_snapshot.write().await = bundle.execution_snapshot;
+        *self.accepted_artifact.write().await = bundle.accepted_artifact.clone();
+        *self.native_strategy_bootstrap.lock().await = bundle.native_strategy_bootstrap;
+        self.day_signal_count.store(0, Ordering::SeqCst);
+        self.reset_symbol_day_order_counts().await;
+        self.reset_signal_blocked_alert_state();
+        self.reset_bar_tick_counters();
+        self.clear_per_symbol_target_states().await;
+
+        let metadata = Arc::new(RunStartMetadata {
+            run_id,
+            accepted_artifact: bundle.accepted_artifact,
+            native_bootstrap_present,
+            dynamic_selection: tokio::sync::RwLock::new(bundle.dynamic_selection_outcome),
+            frozen_assignments,
+            frozen_assignments_source,
+            approved_for_live: false,
+        });
+
+        let mut lock = self.runtime_ownership.lock().await;
+        match &*lock {
+            LocalRuntimeOwnership::Reserved { run_id: reserved } if *reserved == run_id => {
+                *lock = LocalRuntimeOwnership::Starting {
+                    run_id,
+                    metadata: Arc::clone(&metadata),
+                };
+                Ok(metadata)
+            }
+            LocalRuntimeOwnership::Reserved { run_id: reserved } => {
+                Err(PrepareStartingMetadataError::ReservedForDifferentRun {
+                    reserved_run_id: *reserved,
+                })
+            }
+            LocalRuntimeOwnership::Idle => Err(PrepareStartingMetadataError::NoReservation),
+            _ => Err(PrepareStartingMetadataError::NotReserved),
+        }
+    }
+
+    /// Install the running handle for `run_id`, consuming the `Starting`
+    /// binding. Only valid from `Starting{run_id, metadata}` for the exact
+    /// same `run_id`. `handle`'s task is already running by the time this
+    /// is called — on any mismatch this stops and joins it before
+    /// returning, rather than dropping the handle and leaking a detached
+    /// task (requirement 3's "install failure cancels/stops/joins task").
+    pub(crate) async fn install_active_runtime(
         &self,
         run_id: Uuid,
         handle: ExecutionLoopHandle,
-    ) -> Result<(), InstallActiveExecutionLoopSlotError> {
-        let mut lock = self.execution_loop.lock().await;
+    ) -> Result<(), InstallActiveRuntimeError> {
+        let mut lock = self.runtime_ownership.lock().await;
         let err = match &*lock {
-            ExecutionLoopSlot::Reserved { run_id: reserved } if *reserved == run_id => {
-                *lock = ExecutionLoopSlot::Active(handle);
+            LocalRuntimeOwnership::Starting {
+                run_id: starting,
+                metadata,
+            } if *starting == run_id => {
+                let metadata = Arc::clone(metadata);
+                *lock = LocalRuntimeOwnership::Active {
+                    run_id,
+                    metadata,
+                    handle,
+                };
                 return Ok(());
             }
-            ExecutionLoopSlot::Reserved { run_id: reserved } => {
-                InstallActiveExecutionLoopSlotError::ReservedForDifferentRun {
-                    reserved_run_id: *reserved,
+            LocalRuntimeOwnership::Starting {
+                run_id: starting, ..
+            } => InstallActiveRuntimeError::StartingForDifferentRun {
+                starting_run_id: *starting,
+            },
+            LocalRuntimeOwnership::Active { run_id: active, .. } => {
+                InstallActiveRuntimeError::AlreadyActive {
+                    active_run_id: *active,
                 }
             }
-            ExecutionLoopSlot::Empty => InstallActiveExecutionLoopSlotError::NoReservation,
-            ExecutionLoopSlot::Active(active) => {
-                InstallActiveExecutionLoopSlotError::AlreadyActive {
-                    active_run_id: active.run_id,
-                }
-            }
+            _ => InstallActiveRuntimeError::NotStarting,
         };
         drop(lock);
         let _ = handle.stop_tx.send(ExecutionLoopCommand::Stop);
@@ -3729,60 +3800,20 @@ operator_reconcile_or_repair_required"
         Err(err)
     }
 
-    /// Release a reservation this attempt holds, if any — compare-and-clear
-    /// on `run_id`. A no-op when the slot is `Empty`, `Active` (a
-    /// reservation cannot be released after `install_active_execution_loop_
-    /// slot` — the loop must be stopped/halted instead), or `Reserved` for a
-    /// *different* run_id (a stale/losing attempt's rollback must never
-    /// clear a different, newer attempt's live reservation).
-    pub(crate) async fn release_execution_loop_reservation_for_run(&self, run_id: Uuid) {
-        let mut lock = self.execution_loop.lock().await;
-        if matches!(&*lock, ExecutionLoopSlot::Reserved { run_id: reserved } if *reserved == run_id)
-        {
-            *lock = ExecutionLoopSlot::Empty;
-        }
-    }
+    // -----------------------------------------------------------------
+    // BUNDLE-7-PHASE-7A-CORE-ATOMIC-STATE-MACHINE-CLOSURE requirement 4:
+    // one unified cleanup authority for every local runtime lifecycle exit
+    // path.
+    // -----------------------------------------------------------------
 
-    /// Commit every run-scoped legacy local field this attempt prepared, as
-    /// one bundle, tagged with `run_id`. Must only be called after
-    /// `reserve_execution_loop_slot(run_id)` has already succeeded
-    /// (requirement 2's "reserve before publish") — this function itself
-    /// does not check the slot, since the caller (`ProductionRuntimeStart
-    /// Effects::start_runtime_effects`) already holds `AppState::
-    /// lifecycle_op` for the whole attempt and has already reserved.
-    pub(crate) async fn commit_run_start_bundle(&self, run_id: Uuid, bundle: RunStartLocalBundle) {
-        *self.execution_snapshot.write().await = bundle.execution_snapshot;
-        *self.accepted_artifact.write().await = bundle.accepted_artifact;
-        *self.native_strategy_bootstrap.lock().await = bundle.native_strategy_bootstrap;
-        self.day_signal_count.store(0, Ordering::SeqCst);
-        self.reset_symbol_day_order_counts().await;
-        self.reset_signal_blocked_alert_state();
-        self.reset_bar_tick_counters();
-        self.clear_per_symbol_target_states().await;
-        if let Some(outcome) = bundle.dynamic_selection_outcome {
-            self.commit_dynamic_selection_runtime_state(outcome).await;
-        }
-        *self.run_start_commit_owner.write().await = Some(run_id);
-    }
-
-    /// ATOMIC-OWNERSHIP-AND-ROLLBACK-TRUTH-01 requirement 3: run_id-scoped
-    /// compare-and-clear for the legacy local field bundle. Only clears when
-    /// `run_start_commit_owner == Some(run_id)` — a rollback for a losing or
-    /// stale run_id can never clear a different, legitimate owner's already-
-    /// committed bundle. A no-op (including for `dynamic_selection_runtime`,
-    /// which has its own independent compare-and-clear) when the bundle was
-    /// never committed for `run_id` in the first place — safe to call
-    /// unconditionally from every failure branch regardless of how far the
-    /// attempt got.
-    pub(crate) async fn rollback_run_start_bundle_for_run(&self, run_id: Uuid) {
-        self.clear_dynamic_selection_runtime_state_for_run(run_id)
-            .await;
-        let mut owner = self.run_start_commit_owner.write().await;
-        if *owner != Some(run_id) {
-            return;
-        }
-        *owner = None;
-        drop(owner);
+    /// Clear every economic-mirror field, unconditionally. Called only
+    /// after ownership has already been proven to belong to the run being
+    /// cleared (either by a run_id-scoped compare-and-clear on
+    /// `runtime_ownership`, or because the caller just extracted the
+    /// handle for that exact run) — this function itself performs no
+    /// run_id check, matching `commit_run_start_bundle`'s pre-existing
+    /// "caller already reserved" contract.
+    async fn clear_economic_mirrors_for_run(&self, _run_id: Uuid) {
         *self.execution_snapshot.write().await = None;
         *self.accepted_artifact.write().await = None;
         *self.native_strategy_bootstrap.lock().await = None;
@@ -3793,49 +3824,218 @@ operator_reconcile_or_repair_required"
         self.clear_per_symbol_target_states().await;
     }
 
-    // -----------------------------------------------------------------
-    // DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7A: run-scoped lifecycle
-    // state read/commit/clear. No mutation route is exposed beyond these
-    // three — `commit_dynamic_selection_runtime_state` is `pub(crate)` so
-    // only in-crate lifecycle wiring (never an operator route) can publish
-    // a new value.
-    // -----------------------------------------------------------------
+    /// The single cleanup authority for every local runtime lifecycle exit
+    /// path (failed start, run-link-persist failure, runtime-effects
+    /// failure, barrier/install failure, stop, halt, shutdown, reap,
+    /// loop panic/supervisor exit, restart/replacement). Clears
+    /// authoritative ownership (`runtime_ownership`, including whatever
+    /// `RunStartMetadata` — and therefore dynamic-selection truth — it
+    /// carried) AND every economic-mirror field, scoped to `run_id`.
+    /// Idempotent, and a no-op (leaving everything untouched) when `run_id`
+    /// does not match the currently-owned run — requirement 4's "run A
+    /// cannot clear B". Stops and joins any live `Active` handle found for
+    /// `run_id` before clearing mirrors, so a still-ticking loop can never
+    /// race a mirror clear.
+    pub(crate) async fn clear_local_runtime_for_run(
+        &self,
+        run_id: Uuid,
+        _reason: LifecycleClearReason,
+    ) -> LocalRuntimeClearOutcome {
+        let taken = {
+            let mut lock = self.runtime_ownership.lock().await;
+            if lock.owned_run_id() != Some(run_id) {
+                None
+            } else {
+                Some(std::mem::replace(&mut *lock, LocalRuntimeOwnership::Idle))
+            }
+        };
 
-    /// Read-only snapshot of the current dynamic-selection runtime truth.
-    /// `None` when no run is active or the active run's disposition has not
-    /// yet been committed. Cheap: every field is `Arc`-backed or `Copy`.
-    pub async fn dynamic_selection_runtime_snapshot(&self) -> Option<DynamicSelectionRuntimeState> {
-        self.dynamic_selection_runtime.read().await.clone()
+        let Some(owned) = taken else {
+            return LocalRuntimeClearOutcome::default();
+        };
+
+        let mut outcome = LocalRuntimeClearOutcome {
+            cleared: true,
+            ..Default::default()
+        };
+
+        if let LocalRuntimeOwnership::Active { handle, .. } = owned {
+            outcome.stopped_live_handle = !handle.join_handle.is_finished();
+            let _ = handle.stop_tx.send(ExecutionLoopCommand::Stop);
+            if let Err(err) = handle.join_handle.await {
+                outcome.join_error = Some(err.to_string());
+            }
+        }
+
+        self.clear_economic_mirrors_for_run(run_id).await;
+        outcome
     }
 
-    /// Publish a freshly evaluated, already-frozen dynamic-selection outcome
-    /// as the active run's authoritative truth. Always a full overwrite —
-    /// never a partial/in-place update — so a new run's commit can never
-    /// merge with a stale prior value.
+    /// Peek the currently-owned run_id (if any) and fully clear it via
+    /// `clear_local_runtime_for_run` — requirement 4's "no blanket clear
+    /// before owned run ID is known": the run_id being cleared is always
+    /// read from live ownership first, never assumed or passed in blind.
+    /// Returns `None` when ownership was already `Idle` (nothing to
+    /// clear), or when ownership changed between the peek and the clear
+    /// (e.g. a concurrent clear already ran) — the latter case leaves
+    /// `LocalRuntimeClearOutcome::cleared == false` internally, so this
+    /// wrapper simply reports "nothing was cleared by this call".
+    pub(crate) async fn clear_currently_owned_local_runtime(
+        &self,
+        reason: LifecycleClearReason,
+    ) -> Option<(Uuid, LocalRuntimeClearOutcome)> {
+        let run_id = self.runtime_ownership.lock().await.owned_run_id()?;
+        let outcome = self.clear_local_runtime_for_run(run_id, reason).await;
+        if outcome.cleared {
+            Some((run_id, outcome))
+        } else {
+            None
+        }
+    }
+
+    /// Requirement 4: mark local truth honestly `Degraded` after ownership
+    /// for `run_id` has already been fully cleared (ownership is `Idle`)
+    /// but a subsequent durable transition (`stop_run`/`halt_run`) failed —
+    /// "local authority removed even when DB transition fails, with
+    /// degraded truth", never silently presented as clean `Idle`. A no-op
+    /// if ownership is no longer `Idle` (a newer attempt has already
+    /// claimed it — never overwritten).
+    pub(crate) async fn note_local_runtime_degraded(
+        &self,
+        run_id: Uuid,
+        detail: BoundedLifecycleDegradation,
+    ) {
+        let mut lock = self.runtime_ownership.lock().await;
+        if matches!(&*lock, LocalRuntimeOwnership::Idle) {
+            *lock = LocalRuntimeOwnership::Degraded { run_id, detail };
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7A: run-scoped
+    // dynamic-selection lifecycle state, now projected from ownership
+    // metadata (requirement 2 invariant 10) instead of an independent
+    // field. Production code never calls the commit/clear helpers below —
+    // the real start path builds `dynamic_selection` directly inside
+    // `prepare_starting_metadata_and_mirrors`'s `RunStartMetadata`, and
+    // every real lifecycle exit clears it as part of `clear_local_runtime_
+    // for_run`. These remain narrow test-support seams (mirroring this
+    // codebase's established `_for_test` convention), not a second
+    // authority.
+    // -----------------------------------------------------------------
+
+    /// Read-only snapshot of the current dynamic-selection runtime truth,
+    /// projected from ownership metadata. `None` when no run is active or
+    /// the starting/active run's disposition has not committed one.
+    pub async fn dynamic_selection_runtime_snapshot(&self) -> Option<DynamicSelectionRuntimeState> {
+        let metadata = {
+            let lock = self.runtime_ownership.lock().await;
+            match &*lock {
+                LocalRuntimeOwnership::Starting { metadata, .. }
+                | LocalRuntimeOwnership::Active { metadata, .. } => Some(Arc::clone(metadata)),
+                _ => None,
+            }
+        };
+        match metadata {
+            Some(metadata) => metadata.dynamic_selection.read().await.clone(),
+            None => None,
+        }
+    }
+
+    /// Test-support entry point: publish `state` as the owning run's
+    /// dynamic-selection truth. If ownership already has a `Starting`/
+    /// `Active` binding for `state.run_id` (e.g. one established by
+    /// `establish_db_backed_active_run_for_test`), this attaches to that
+    /// binding in place — the real `ExecutionLoopHandle`, if any, is left
+    /// untouched. Otherwise this establishes a minimal `Active` binding
+    /// with a trivial self-terminating task, so cleanup-contract tests can
+    /// exercise stop/halt/shutdown/reap without a real start attempt.
+    /// Always a full overwrite when establishing fresh — never a
+    /// partial/in-place merge with a stale prior value for a *different*
+    /// run_id.
     pub(crate) async fn commit_dynamic_selection_runtime_state(
         &self,
         state: DynamicSelectionRuntimeState,
     ) {
-        *self.dynamic_selection_runtime.write().await = Some(state);
+        let run_id = state.run_id;
+        {
+            let lock = self.runtime_ownership.lock().await;
+            let existing_metadata = match &*lock {
+                LocalRuntimeOwnership::Starting {
+                    run_id: r,
+                    metadata,
+                } if *r == run_id => Some(Arc::clone(metadata)),
+                LocalRuntimeOwnership::Active {
+                    run_id: r,
+                    metadata,
+                    ..
+                } if *r == run_id => Some(Arc::clone(metadata)),
+                _ => None,
+            };
+            drop(lock);
+            if let Some(metadata) = existing_metadata {
+                *metadata.dynamic_selection.write().await = Some(state);
+                return;
+            }
+        }
+
+        let (stop_tx, mut stop_rx) = watch::channel(ExecutionLoopCommand::Run);
+        let join_handle: JoinHandle<ExecutionLoopExit> = tokio::spawn(async move {
+            tokio::select! {
+                _ = stop_rx.changed() => ExecutionLoopExit {
+                    note: Some("test loop stopped".to_string()),
+                },
+                _ = tokio::time::sleep(std::time::Duration::from_secs(86_400)) => ExecutionLoopExit {
+                    note: None,
+                },
+            }
+        });
+        let handle = ExecutionLoopHandle {
+            run_id,
+            stop_tx,
+            join_handle,
+        };
+        let metadata = Arc::new(RunStartMetadata {
+            run_id,
+            accepted_artifact: None,
+            native_bootstrap_present: false,
+            dynamic_selection: tokio::sync::RwLock::new(Some(state)),
+            frozen_assignments: Vec::new(),
+            frozen_assignments_source: "commit_dynamic_selection_runtime_state_test_seam",
+            approved_for_live: false,
+        });
+        *self.runtime_ownership.lock().await = LocalRuntimeOwnership::Active {
+            run_id,
+            metadata,
+            handle,
+        };
     }
 
-    /// Idempotent clear — safe to call on every lifecycle exit path
-    /// regardless of whether a value is currently present.
+    /// Test-support: unconditionally release ownership regardless of which
+    /// run currently holds it. Idempotent. Narrow-field-clear only — unlike
+    /// `clear_local_runtime_for_run`, this does not stop/join a live
+    /// handle before dropping it (any handle held is always this
+    /// function's own trivial self-terminating test task, which completes
+    /// on its own once its `stop_tx` is dropped). Never called from
+    /// production or from any external integration test (unlike the
+    /// `_for_test`-suffixed seams elsewhere in this file) — genuinely
+    /// in-crate-test-only, hence `#[cfg(test)]`.
+    #[cfg(test)]
     pub(crate) async fn clear_dynamic_selection_runtime_state(&self) {
-        *self.dynamic_selection_runtime.write().await = None;
+        *self.runtime_ownership.lock().await = LocalRuntimeOwnership::Idle;
     }
 
     /// ATOMICITY-SINGLE-SNAPSHOT-REPAIR requirement 4: run_id-scoped
-    /// compare-and-clear. Clears only when the currently-committed value's
-    /// `run_id` matches `run_id` — a failed start attempt's rollback for
-    /// run A must never clear a newer, already-active run B's committed
-    /// state (e.g. a rollback task still running in the background after a
-    /// later start attempt has already succeeded). Idempotent: clearing an
-    /// already-`None` or already-mismatched value is a safe no-op.
+    /// compare-and-clear. Clears only when the currently-owned run matches
+    /// `run_id` — a failed start attempt's rollback for run A must never
+    /// clear a newer, already-active run B's committed state. Idempotent:
+    /// clearing an already-`Idle` or already-mismatched value is a safe
+    /// no-op. Genuinely in-crate-test-only, hence `#[cfg(test)]`.
+    #[cfg(test)]
     pub(crate) async fn clear_dynamic_selection_runtime_state_for_run(&self, run_id: Uuid) {
-        let mut guard = self.dynamic_selection_runtime.write().await;
-        if guard.as_ref().is_some_and(|state| state.run_id == run_id) {
-            *guard = None;
+        let mut lock = self.runtime_ownership.lock().await;
+        if lock.owned_run_id() == Some(run_id) {
+            *lock = LocalRuntimeOwnership::Idle;
         }
     }
 
@@ -3962,8 +4162,20 @@ impl AppState {
             stop_tx,
             join_handle,
         };
-        let mut lock = self.execution_loop.lock().await;
-        *lock = ExecutionLoopSlot::Active(handle);
+        let metadata = Arc::new(RunStartMetadata {
+            run_id,
+            accepted_artifact: None,
+            native_bootstrap_present: false,
+            dynamic_selection: tokio::sync::RwLock::new(None),
+            frozen_assignments: Vec::new(),
+            frozen_assignments_source: "inject_running_loop_for_test",
+            approved_for_live: false,
+        });
+        *self.runtime_ownership.lock().await = LocalRuntimeOwnership::Active {
+            run_id,
+            metadata,
+            handle,
+        };
     }
 
     /// AUTON-PAPER-03B proof seam: establish a coherent DB-backed active run
@@ -4839,5 +5051,805 @@ mod tests {
             .unwrap()
             .fetch_fills_since(None);
         assert!(result.is_ok(), "dummy fetcher must return Ok");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// BUNDLE-7-PHASE-7A-CORE-ATOMIC-STATE-MACHINE-CLOSURE: `LocalRuntimeOwnership`
+// state-machine and unified-cleanup proof. Hermetic — no DB, no broker, no
+// credentials. The DB-backed reserve/rollback/loop-spawn end-to-end path is
+// proven separately (real `ProductionRuntimeStartEffects`) in
+// `scenario_bundle7_phase7a_final_atomic_ownership_and_rollback_truth_01.rs`
+// and (fake `RuntimeStartEffects`) in
+// `scenario_bundle7_phase7a_atomicity_repair_01.rs` /
+// `scenario_daily_data_readiness_start_gate_01.rs`.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod ownership_state_machine_tests {
+    use super::*;
+
+    fn fresh_state() -> Arc<AppState> {
+        Arc::new(AppState::new_for_test_with_mode_and_broker(
+            DeploymentMode::Paper,
+            BrokerKind::Alpaca,
+        ))
+    }
+
+    fn run_id_for(label: &str) -> Uuid {
+        Uuid::new_v5(
+            &Uuid::NAMESPACE_DNS,
+            format!("mqk-daemon.phase7a.core_state_machine.{label}").as_bytes(),
+        )
+    }
+
+    /// A never-finishing fake handle for `run_id` — mirrors `inject_running_
+    /// loop_for_test`'s construction, exposed here so tests can build a
+    /// full `Active` binding directly against `runtime_ownership`.
+    fn fake_handle(run_id: Uuid) -> ExecutionLoopHandle {
+        let (stop_tx, mut stop_rx) = watch::channel(ExecutionLoopCommand::Run);
+        let join_handle: JoinHandle<ExecutionLoopExit> = tokio::spawn(async move {
+            tokio::select! {
+                _ = stop_rx.changed() => ExecutionLoopExit {
+                    note: Some("test loop stopped".to_string()),
+                },
+                _ = tokio::time::sleep(std::time::Duration::from_secs(86_400)) => ExecutionLoopExit {
+                    note: None,
+                },
+            }
+        });
+        ExecutionLoopHandle {
+            run_id,
+            stop_tx,
+            join_handle,
+        }
+    }
+
+    fn sentinel_execution_snapshot(run_id: Uuid) -> mqk_runtime::observability::ExecutionSnapshot {
+        mqk_runtime::observability::ExecutionSnapshot {
+            run_id: Some(run_id),
+            active_orders: vec![],
+            pending_outbox: vec![],
+            recent_inbox_events: vec![],
+            portfolio: mqk_runtime::observability::PortfolioSnapshot {
+                cash_micros: 0,
+                realized_pnl_micros: 0,
+                positions: vec![],
+            },
+            system_block_state: None,
+            recent_risk_denials: vec![],
+            has_recent_terminal_fill: false,
+            risk_engine_sticky_halt: mqk_execution::RiskEngineHaltStatus::Unavailable,
+            snapshot_at_utc: Utc::now(),
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Test 1: Idle -> Reserved -> Starting -> Active.
+    // -----------------------------------------------------------------
+    #[tokio::test]
+    async fn idle_reserved_starting_active_transitions() {
+        let state = fresh_state();
+        let run_id = run_id_for("t1");
+
+        assert!(matches!(
+            *state.runtime_ownership.lock().await,
+            LocalRuntimeOwnership::Idle
+        ));
+
+        state
+            .reserve_runtime_ownership(run_id)
+            .await
+            .expect("Idle -> Reserved must succeed");
+        assert!(matches!(
+            *state.runtime_ownership.lock().await,
+            LocalRuntimeOwnership::Reserved { run_id: r } if r == run_id
+        ));
+        assert!(
+            state.locally_owned_run_id().await.is_none(),
+            "Reserved must never report running"
+        );
+
+        let bundle = RunStartLocalBundle {
+            execution_snapshot: None,
+            accepted_artifact: None,
+            native_strategy_bootstrap: None,
+            dynamic_selection_outcome: None,
+        };
+        let metadata = state
+            .prepare_starting_metadata_and_mirrors(run_id, bundle, Vec::new(), "test")
+            .await
+            .expect("Reserved -> Starting must succeed");
+        assert_eq!(metadata.run_id, run_id);
+        assert!(matches!(
+            *state.runtime_ownership.lock().await,
+            LocalRuntimeOwnership::Starting { run_id: r, .. } if r == run_id
+        ));
+        assert!(
+            state.locally_owned_run_id().await.is_none(),
+            "Starting must never report running"
+        );
+
+        let handle = fake_handle(run_id);
+        state
+            .install_active_runtime(run_id, handle)
+            .await
+            .expect("Starting -> Active must succeed");
+        assert!(matches!(
+            *state.runtime_ownership.lock().await,
+            LocalRuntimeOwnership::Active { run_id: r, .. } if r == run_id
+        ));
+        assert_eq!(
+            state.locally_owned_run_id().await,
+            Some(run_id),
+            "Active must report running"
+        );
+
+        // Cleanup: stop the fake loop directly (bypassing the DB-dependent
+        // stop_execution_runtime path this hermetic test does not need).
+        state
+            .clear_local_runtime_for_run(run_id, LifecycleClearReason::OperatorStop)
+            .await;
+    }
+
+    // -----------------------------------------------------------------
+    // Test 2: duplicate reservation preserves owner.
+    // -----------------------------------------------------------------
+    #[tokio::test]
+    async fn duplicate_reservation_preserves_owner() {
+        let state = fresh_state();
+        let run_id = run_id_for("t2");
+
+        state.reserve_runtime_ownership(run_id).await.unwrap();
+        let err = state
+            .reserve_runtime_ownership(run_id)
+            .await
+            .expect_err("a second reservation for the same run_id must conflict");
+        assert_eq!(err, run_id);
+        assert!(matches!(
+            *state.runtime_ownership.lock().await,
+            LocalRuntimeOwnership::Reserved { run_id: r } if r == run_id
+        ));
+
+        // A reservation attempt for a *different* run_id must also conflict,
+        // reporting the existing owner, and change nothing.
+        let other_run_id = run_id_for("t2-other");
+        let err2 = state
+            .reserve_runtime_ownership(other_run_id)
+            .await
+            .expect_err("a conflicting run_id must also be refused");
+        assert_eq!(err2, run_id);
+        assert!(matches!(
+            *state.runtime_ownership.lock().await,
+            LocalRuntimeOwnership::Reserved { run_id: r } if r == run_id
+        ));
+    }
+
+    // -----------------------------------------------------------------
+    // Test 3 / 14: wrong-run install/clear refuses without mutation — "run A
+    // cannot clear B".
+    // -----------------------------------------------------------------
+    #[tokio::test]
+    async fn wrong_run_install_and_clear_refuse_without_mutation() {
+        let state = fresh_state();
+        let run_a = run_id_for("t3-run-a");
+        let run_b = run_id_for("t3-run-b");
+
+        state.reserve_runtime_ownership(run_a).await.unwrap();
+        let bundle = RunStartLocalBundle {
+            execution_snapshot: None,
+            accepted_artifact: None,
+            native_strategy_bootstrap: None,
+            dynamic_selection_outcome: None,
+        };
+        state
+            .prepare_starting_metadata_and_mirrors(run_a, bundle, Vec::new(), "test")
+            .await
+            .unwrap();
+
+        // Installing a handle for a *different* run_id (B) while A is
+        // Starting must refuse and leave A's Starting binding untouched —
+        // the mismatched handle is stopped+joined by the install call
+        // itself (no detached task), not left dangling.
+        let handle_b = fake_handle(run_b);
+        let err = state
+            .install_active_runtime(run_b, handle_b)
+            .await
+            .expect_err("installing for a different run_id must be refused");
+        assert!(matches!(
+            err,
+            InstallActiveRuntimeError::StartingForDifferentRun {
+                starting_run_id
+            } if starting_run_id == run_a
+        ));
+        assert!(matches!(
+            *state.runtime_ownership.lock().await,
+            LocalRuntimeOwnership::Starting { run_id: r, .. } if r == run_a
+        ));
+
+        // Installing A's own handle now succeeds — proves the failed B
+        // install above left A's reservation completely intact.
+        let handle_a = fake_handle(run_a);
+        state.install_active_runtime(run_a, handle_a).await.unwrap();
+        assert_eq!(state.locally_owned_run_id().await, Some(run_a));
+
+        // clear_local_runtime_for_run(run_b, ..) must refuse to touch A's
+        // Active state — "run A cannot clear B" (requirement 4).
+        let outcome = state
+            .clear_local_runtime_for_run(run_b, LifecycleClearReason::FailedStart)
+            .await;
+        assert!(!outcome.cleared, "run B must never clear run A's ownership");
+        assert_eq!(
+            state.locally_owned_run_id().await,
+            Some(run_a),
+            "run A's Active ownership must be completely unchanged"
+        );
+
+        // The matching run_id does clear it.
+        let outcome_a = state
+            .clear_local_runtime_for_run(run_a, LifecycleClearReason::OperatorStop)
+            .await;
+        assert!(outcome_a.cleared);
+        assert!(state.locally_owned_run_id().await.is_none());
+    }
+
+    // -----------------------------------------------------------------
+    // Test 15: reservation conflict preserves complete sentinel state —
+    // every economic mirror and the existing owner's ownership metadata are
+    // exactly as they were before the conflicting attempt.
+    // -----------------------------------------------------------------
+    #[tokio::test]
+    async fn conflict_preserves_complete_sentinel_state() {
+        let state = fresh_state();
+        let run_a = run_id_for("t15-run-a");
+        let run_b = run_id_for("t15-run-b");
+
+        // Establish A as a full Active owner with sentinel values in every
+        // economic mirror this patch's cleanup authority touches.
+        let sentinel_artifact = AcceptedArtifactProvenance {
+            artifact_id: "sentinel-artifact".to_string(),
+            artifact_type: "sentinel".to_string(),
+            stage: "sentinel".to_string(),
+            produced_by: "core_state_machine_test".to_string(),
+        };
+        *state.execution_snapshot.write().await = Some(sentinel_execution_snapshot(run_a));
+        *state.accepted_artifact.write().await = Some(sentinel_artifact.clone());
+        *state.native_strategy_bootstrap.lock().await = Some(NativeStrategyBootstrap {
+            outcome: mqk_runtime::native_strategy::NativeStrategyBootstrapOutcome::Dormant,
+        });
+        state.day_signal_count.store(4242, Ordering::SeqCst);
+        state
+            .day_signal_count_by_symbol
+            .write()
+            .await
+            .insert("AAPL".to_string(), 7);
+        assert!(state.try_claim_b5_alert_for_test("AAPL").await);
+        assert!(state.try_claim_day_limit_alert());
+        assert!(
+            state
+                .try_claim_per_symbol_position_cap_alert_for_test("AAPL")
+                .await
+        );
+        state.set_bar_tick_state_for_test(9, 123, 4);
+        state
+            .record_per_symbol_target_state(PerSymbolTargetState {
+                symbol: "AAPL".to_string(),
+                strategy_id: "sentinel-strategy".to_string(),
+                current_qty: 1,
+                target_qty: 2,
+                delta: 1,
+                no_order_reason: String::new(),
+                last_decision_id: None,
+                last_decision_disposition: None,
+                updated_at_utc: "2026-01-01T00:00:00Z".to_string(),
+            })
+            .await;
+
+        state.reserve_runtime_ownership(run_a).await.unwrap();
+        let metadata_a = Arc::new(RunStartMetadata {
+            run_id: run_a,
+            accepted_artifact: Some(sentinel_artifact.clone()),
+            native_bootstrap_present: true,
+            dynamic_selection: tokio::sync::RwLock::new(None),
+            frozen_assignments: Vec::new(),
+            frozen_assignments_source: "test_fixture",
+            approved_for_live: false,
+        });
+        *state.runtime_ownership.lock().await = LocalRuntimeOwnership::Active {
+            run_id: run_a,
+            metadata: metadata_a,
+            handle: fake_handle(run_a),
+        };
+
+        // A conflicting reservation for run B must be refused and must not
+        // touch anything.
+        let err = state
+            .reserve_runtime_ownership(run_b)
+            .await
+            .expect_err("run B must be refused while A owns the slot");
+        assert_eq!(err, run_a);
+
+        // Every sentinel value must be byte-for-byte unchanged.
+        assert_eq!(state.locally_owned_run_id().await, Some(run_a));
+        assert_eq!(
+            state
+                .execution_snapshot
+                .read()
+                .await
+                .as_ref()
+                .map(|s| s.run_id),
+            Some(Some(run_a))
+        );
+        assert_eq!(
+            state.accepted_artifact.read().await.clone(),
+            Some(sentinel_artifact)
+        );
+        assert!(state.native_strategy_bootstrap.lock().await.is_some());
+        assert_eq!(state.day_signal_count.load(Ordering::SeqCst), 4242);
+        assert_eq!(
+            state
+                .day_signal_count_by_symbol
+                .read()
+                .await
+                .get("AAPL")
+                .copied(),
+            Some(7)
+        );
+        assert_eq!(state.bar_tick_dispatch_count.load(Ordering::SeqCst), 9);
+        assert_eq!(state.last_bar_signal_qty.load(Ordering::SeqCst), 123);
+        assert_eq!(state.last_bar_context_bars.load(Ordering::SeqCst), 4);
+        assert_eq!(state.per_symbol_target_states().await.len(), 1);
+
+        // Cleanup.
+        state
+            .clear_local_runtime_for_run(run_a, LifecycleClearReason::OperatorStop)
+            .await;
+    }
+
+    // -----------------------------------------------------------------
+    // Test 16: Reserved/Starting never reported running (status derivation).
+    // -----------------------------------------------------------------
+    #[tokio::test]
+    async fn reserved_and_starting_are_never_reported_running() {
+        let state = fresh_state();
+        let run_id = run_id_for("t16");
+
+        state.reserve_runtime_ownership(run_id).await.unwrap();
+        assert!(state.locally_owned_run_id().await.is_none());
+
+        let bundle = RunStartLocalBundle {
+            execution_snapshot: None,
+            accepted_artifact: None,
+            native_strategy_bootstrap: None,
+            dynamic_selection_outcome: None,
+        };
+        state
+            .prepare_starting_metadata_and_mirrors(run_id, bundle, Vec::new(), "test")
+            .await
+            .unwrap();
+        assert!(
+            state.locally_owned_run_id().await.is_none(),
+            "Starting must never report running, even with metadata committed"
+        );
+
+        // A Degraded state must also never report running.
+        state
+            .clear_local_runtime_for_run(run_id, LifecycleClearReason::FailedStart)
+            .await;
+        state
+            .note_local_runtime_degraded(
+                run_id,
+                BoundedLifecycleDegradation {
+                    operation: "test_op",
+                    detail: "test detail".to_string(),
+                },
+            )
+            .await;
+        assert!(state.locally_owned_run_id().await.is_none());
+        let lock = state.runtime_ownership.lock().await;
+        match &*lock {
+            LocalRuntimeOwnership::Degraded { run_id: r, detail } => {
+                assert_eq!(*r, run_id);
+                assert_eq!(detail.operation, "test_op");
+                assert_eq!(detail.detail, "test detail");
+            }
+            other => panic!("expected Degraded, got {other:?}"),
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Test 17: Active status requires matching run_id/metadata/handle.
+    // -----------------------------------------------------------------
+    #[tokio::test]
+    async fn active_status_requires_matching_run_metadata_handle() {
+        let state = fresh_state();
+        let run_id = run_id_for("t17");
+
+        let sentinel_artifact = AcceptedArtifactProvenance {
+            artifact_id: "t17-artifact".to_string(),
+            artifact_type: "sentinel".to_string(),
+            stage: "sentinel".to_string(),
+            produced_by: "t17-test".to_string(),
+        };
+        let frozen = vec![SymbolStrategyAssignment {
+            symbol: "AAPL".to_string(),
+            strategy_id: "t17-strategy".to_string(),
+            timeframe: "1Min".to_string(),
+        }];
+
+        state.reserve_runtime_ownership(run_id).await.unwrap();
+        let bundle = RunStartLocalBundle {
+            execution_snapshot: None,
+            accepted_artifact: Some(sentinel_artifact.clone()),
+            native_strategy_bootstrap: Some(NativeStrategyBootstrap {
+                outcome: mqk_runtime::native_strategy::NativeStrategyBootstrapOutcome::Dormant,
+            }),
+            dynamic_selection_outcome: None,
+        };
+        state
+            .prepare_starting_metadata_and_mirrors(
+                run_id,
+                bundle,
+                frozen.clone(),
+                "t17_test_source",
+            )
+            .await
+            .unwrap();
+        state
+            .install_active_runtime(run_id, fake_handle(run_id))
+            .await
+            .unwrap();
+
+        let lock = state.runtime_ownership.lock().await;
+        match &*lock {
+            LocalRuntimeOwnership::Active {
+                run_id: r,
+                metadata,
+                handle,
+            } => {
+                // Requirement 2 invariant 8: Active metadata includes run
+                // ID, accepted artifact, native bootstrap (presence),
+                // dynamic-selection state, frozen assignments/source, and
+                // approved_for_live=false — all three of run_id/
+                // metadata.run_id/handle.run_id must agree.
+                assert_eq!(*r, run_id);
+                assert_eq!(metadata.run_id, run_id);
+                assert_eq!(handle.run_id, run_id);
+                assert_eq!(metadata.accepted_artifact, Some(sentinel_artifact));
+                assert!(metadata.native_bootstrap_present);
+                assert_eq!(metadata.frozen_assignments, frozen);
+                assert_eq!(metadata.frozen_assignments_source, "t17_test_source");
+                assert!(!metadata.approved_for_live);
+            }
+            other => panic!("expected Active, got {other:?}"),
+        }
+        drop(lock);
+
+        state
+            .clear_local_runtime_for_run(run_id, LifecycleClearReason::OperatorStop)
+            .await;
+    }
+
+    // -----------------------------------------------------------------
+    // Test 9: failed-start full mirror cleanup — every listed field/counter/
+    // map is inspected.
+    // -----------------------------------------------------------------
+    #[tokio::test]
+    async fn clear_local_runtime_for_run_clears_every_economic_mirror() {
+        let state = fresh_state();
+        let run_id = run_id_for("t9");
+
+        // Plant every listed mirror field with a non-default sentinel.
+        *state.execution_snapshot.write().await = Some(sentinel_execution_snapshot(run_id));
+        *state.accepted_artifact.write().await = Some(AcceptedArtifactProvenance {
+            artifact_id: "a".to_string(),
+            artifact_type: "b".to_string(),
+            stage: "c".to_string(),
+            produced_by: "d".to_string(),
+        });
+        *state.native_strategy_bootstrap.lock().await = Some(NativeStrategyBootstrap {
+            outcome: mqk_runtime::native_strategy::NativeStrategyBootstrapOutcome::Dormant,
+        });
+        state.day_signal_count.store(99, Ordering::SeqCst);
+        state
+            .day_signal_count_by_symbol
+            .write()
+            .await
+            .insert("MSFT".to_string(), 3);
+        assert!(state.try_claim_b5_alert_for_test("MSFT").await);
+        assert!(state.try_claim_day_limit_alert());
+        assert!(
+            state
+                .try_claim_per_symbol_position_cap_alert_for_test("MSFT")
+                .await
+        );
+        state.set_bar_tick_state_for_test(5, 55, 2);
+        state
+            .record_per_symbol_target_state(PerSymbolTargetState {
+                symbol: "MSFT".to_string(),
+                strategy_id: "s".to_string(),
+                current_qty: 0,
+                target_qty: 1,
+                delta: 1,
+                no_order_reason: String::new(),
+                last_decision_id: None,
+                last_decision_disposition: None,
+                updated_at_utc: "2026-01-01T00:00:00Z".to_string(),
+            })
+            .await;
+
+        // Establish ownership for run_id (Active, with dynamic-selection
+        // metadata) so `clear_local_runtime_for_run` actually matches.
+        let dyn_state = DynamicSelectionRuntimeState {
+            run_id,
+            disposition:
+                crate::dynamic_selection_start_gate::DynamicSelectionStartGateDisposition::Off,
+            configured_mode: mqk_portfolio::DynamicSelectionMode::Off,
+            effective_mode: mqk_portfolio::DynamicSelectionMode::Off,
+            live_lock_applied: false,
+            plan: None,
+            selected_pairs: Vec::new(),
+            host_pool: None,
+            reasons: Vec::new(),
+            approved_for_live: false,
+        };
+        *state.runtime_ownership.lock().await = LocalRuntimeOwnership::Active {
+            run_id,
+            metadata: Arc::new(RunStartMetadata {
+                run_id,
+                accepted_artifact: None,
+                native_bootstrap_present: true,
+                dynamic_selection: tokio::sync::RwLock::new(Some(dyn_state)),
+                frozen_assignments: Vec::new(),
+                frozen_assignments_source: "test_fixture",
+                approved_for_live: false,
+            }),
+            handle: fake_handle(run_id),
+        };
+        assert!(state.dynamic_selection_runtime_snapshot().await.is_some());
+
+        let outcome = state
+            .clear_local_runtime_for_run(run_id, LifecycleClearReason::FailedStart)
+            .await;
+        assert!(outcome.cleared);
+        assert!(outcome.stopped_live_handle);
+        assert!(outcome.join_error.is_none());
+
+        // Ownership.
+        assert!(matches!(
+            *state.runtime_ownership.lock().await,
+            LocalRuntimeOwnership::Idle
+        ));
+        assert!(state.dynamic_selection_runtime_snapshot().await.is_none());
+
+        // Every economic mirror.
+        assert!(state.execution_snapshot.read().await.is_none());
+        assert!(state.accepted_artifact.read().await.is_none());
+        assert!(state.native_strategy_bootstrap.lock().await.is_none());
+        assert_eq!(state.day_signal_count.load(Ordering::SeqCst), 0);
+        assert!(state.day_signal_count_by_symbol.read().await.is_empty());
+        assert!(
+            state.try_claim_b5_alert_for_test("MSFT").await,
+            "b5 alert dedup must be cleared (claim succeeds again)"
+        );
+        assert!(
+            state.try_claim_day_limit_alert(),
+            "day-limit alert dedup must be cleared"
+        );
+        assert!(
+            state
+                .try_claim_per_symbol_position_cap_alert_for_test("MSFT")
+                .await,
+            "per-symbol position-cap alert dedup must be cleared"
+        );
+        assert_eq!(state.bar_tick_dispatch_count.load(Ordering::SeqCst), 0);
+        assert_eq!(state.last_bar_signal_qty.load(Ordering::SeqCst), i64::MIN);
+        assert_eq!(state.last_bar_context_bars.load(Ordering::SeqCst), -1);
+        assert!(state.per_symbol_target_states().await.is_empty());
+    }
+
+    // -----------------------------------------------------------------
+    // Idempotency: clearing an already-Idle slot is a safe no-op.
+    // -----------------------------------------------------------------
+    #[tokio::test]
+    async fn clear_local_runtime_for_run_on_idle_is_idempotent_noop() {
+        let state = fresh_state();
+        let run_id = run_id_for("t-idempotent");
+        let outcome = state
+            .clear_local_runtime_for_run(run_id, LifecycleClearReason::FailedStart)
+            .await;
+        assert!(!outcome.cleared);
+        let outcome2 = state
+            .clear_local_runtime_for_run(run_id, LifecycleClearReason::FailedStart)
+            .await;
+        assert!(!outcome2.cleared);
+    }
+
+    // -----------------------------------------------------------------
+    // Requirement 3 (startup barrier) tests 4/5: spawn the real execution
+    // loop task directly (a minimal in-process Paper orchestrator — no
+    // network, no credentials, mirrors `run_loop_one_tick_for_test`'s
+    // construction) and drive its startup barrier without going through
+    // the full reserve/prepare-metadata/install sequence.
+    // -----------------------------------------------------------------
+
+    fn spawn_barrier_test_loop(
+        state: &Arc<AppState>,
+        run_id: Uuid,
+        barrier_rx: tokio::sync::oneshot::Receiver<()>,
+    ) -> ExecutionLoopHandle {
+        use mqk_broker_paper::LockedPaperBroker;
+        use mqk_execution::BrokerOrderMap;
+        use mqk_portfolio::PortfolioState;
+        use mqk_reconcile::{BrokerSnapshot, LocalSnapshot};
+        use mqk_runtime::orchestrator::WallClock;
+        use mqk_runtime::runtime_risk::RuntimeRiskGate;
+
+        let integrity_gate = types::StateIntegrityGate {
+            integrity: Arc::clone(&state.integrity),
+        };
+        let reconcile_gate = types::ReconcileTruthGate {
+            reconcile_status: Arc::clone(&state.reconcile_status),
+        };
+        let risk_gate =
+            RuntimeRiskGate::from_run_config(&serde_json::json!({}), 1_000_000_000_i64, 0, 0);
+        let daemon_broker = broker::DaemonBroker::Paper(LockedPaperBroker::default());
+        let gateway = mqk_execution::wiring::build_gateway(
+            daemon_broker,
+            integrity_gate,
+            risk_gate,
+            reconcile_gate,
+        );
+        let pool =
+            sqlx::PgPool::connect_lazy("postgresql://127.0.0.1:5432/mqk_phase7a_barrier_test_stub")
+                .expect("connect_lazy URL parse must succeed");
+        let orchestrator = types::DaemonOrchestrator::new(
+            pool,
+            gateway,
+            BrokerOrderMap::new(),
+            BTreeMap::new(),
+            PortfolioState::new(1_000_000_000_i64),
+            run_id,
+            "phase7a-barrier-test-dispatcher",
+            "phase7a-barrier-test",
+            None,
+            WallClock,
+            Box::new(LocalSnapshot::empty),
+            Box::new(|| BrokerSnapshot::empty_at(0)),
+        );
+        loop_runner::spawn_execution_loop(
+            Arc::clone(state),
+            orchestrator,
+            run_id,
+            Vec::new(),
+            barrier_rx,
+        )
+    }
+
+    /// Test 4: the task performs zero economic work before the barrier is
+    /// released — proven by never releasing it, confirming the task is
+    /// still pending (not finished — it would only finish via one of the
+    /// two `select!` arms, neither of which has fired yet), then stopping
+    /// it directly and observing the "stopped before startup barrier
+    /// release" exit note (never a ticker/deadman/dispatch-related note).
+    #[tokio::test]
+    async fn barrier_task_performs_zero_economic_work_before_release() {
+        let state = fresh_state();
+        let run_id = run_id_for("barrier-zero-work");
+        let (barrier_tx, barrier_rx) = tokio::sync::oneshot::channel();
+        let handle = spawn_barrier_test_loop(&state, run_id, barrier_rx);
+
+        // Give the task ample opportunity to run if it were going to do any
+        // economic work (several multiples of a single tokio yield).
+        for _ in 0..50 {
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            !handle.join_handle.is_finished(),
+            "the task must still be blocked on the barrier — it must not \
+             have proceeded to build a ticker or done any economic work"
+        );
+
+        // Never release the barrier — stop the task directly instead,
+        // proving it is genuinely waiting in the barrier select, not stuck
+        // or already past it.
+        let _ = handle.stop_tx.send(ExecutionLoopCommand::Stop);
+        let exit = handle
+            .join_handle
+            .await
+            .expect("task must join cleanly, never panic, when stopped before the barrier");
+        assert_eq!(
+            exit.note.as_deref(),
+            Some("execution loop stopped before startup barrier release"),
+            "the exit note must prove the stop-before-barrier path fired, \
+             not any economic-loop exit path"
+        );
+        drop(barrier_tx);
+    }
+
+    /// Test 5: a cancelled barrier (sender dropped without ever releasing —
+    /// e.g. `install_active_runtime`'s error path never sends) makes the
+    /// task exit immediately and join cleanly, without needing an explicit
+    /// stop signal at all.
+    #[tokio::test]
+    async fn barrier_cancelled_without_send_exits_and_joins() {
+        let state = fresh_state();
+        let run_id = run_id_for("barrier-cancelled");
+        let (barrier_tx, barrier_rx) = tokio::sync::oneshot::channel();
+        let handle = spawn_barrier_test_loop(&state, run_id, barrier_rx);
+
+        // Cancel the barrier by dropping the sender — never send().
+        drop(barrier_tx);
+
+        let exit = tokio::time::timeout(std::time::Duration::from_secs(5), handle.join_handle)
+            .await
+            .expect("a cancelled barrier must let the task exit promptly, not hang")
+            .expect("task must join cleanly, never panic, on a cancelled barrier");
+        assert_eq!(
+            exit.note.as_deref(),
+            Some("execution loop cancelled before startup barrier release"),
+            "the exit note must prove the barrier-cancelled path fired"
+        );
+    }
+
+    /// Test 6 (`install_active_runtime` failure path): a handle refused by
+    /// `install_active_runtime` (because ownership is `Starting` for a
+    /// *different* run_id) is fully stopped and joined by that call itself
+    /// — proven here by observing that a shared counter the task would only
+    /// increment on exit has in fact been incremented by the time the
+    /// install call returns, i.e. no detached task remains running in the
+    /// background.
+    #[tokio::test]
+    async fn install_failure_leaves_no_detached_task() {
+        let state = fresh_state();
+        let run_a = run_id_for("install-failure-run-a");
+        let run_b = run_id_for("install-failure-run-b");
+
+        state.reserve_runtime_ownership(run_a).await.unwrap();
+        let bundle = RunStartLocalBundle {
+            execution_snapshot: None,
+            accepted_artifact: None,
+            native_strategy_bootstrap: None,
+            dynamic_selection_outcome: None,
+        };
+        state
+            .prepare_starting_metadata_and_mirrors(run_a, bundle, Vec::new(), "test")
+            .await
+            .unwrap();
+
+        let exited = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let exited_clone = Arc::clone(&exited);
+        let (stop_tx, mut stop_rx) = watch::channel(ExecutionLoopCommand::Run);
+        let join_handle: JoinHandle<ExecutionLoopExit> = tokio::spawn(async move {
+            let _ = stop_rx.changed().await;
+            exited_clone.store(true, std::sync::atomic::Ordering::SeqCst);
+            ExecutionLoopExit {
+                note: Some("test loop stopped".to_string()),
+            }
+        });
+        let handle_b = ExecutionLoopHandle {
+            run_id: run_b,
+            stop_tx,
+            join_handle,
+        };
+
+        let err = state
+            .install_active_runtime(run_b, handle_b)
+            .await
+            .expect_err("installing for run_b while run_a is Starting must be refused");
+        assert!(matches!(
+            err,
+            InstallActiveRuntimeError::StartingForDifferentRun { .. }
+        ));
+        // By the time `install_active_runtime` returned, it must already
+        // have stopped and joined `handle_b` — no detached task.
+        assert!(
+            exited.load(std::sync::atomic::Ordering::SeqCst),
+            "install_active_runtime must stop and join a refused handle \
+             before returning, leaving no detached task"
+        );
+
+        state
+            .clear_local_runtime_for_run(run_a, LifecycleClearReason::FailedStart)
+            .await;
     }
 }
