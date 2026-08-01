@@ -121,13 +121,96 @@ impl AutonomousArmRejection {
 // boundary or a slow tick).
 // ---------------------------------------------------------------------------
 
+/// BUNDLE-7-PHASE-7A-SINGLE-FROZEN-FLEET-AUTHORITY-CLOSURE: where a
+/// [`FrozenStrategyFleet`] was sourced from — explicit and deterministic, so
+/// the snapshot never reads two candidate fleet sources and silently prefers
+/// one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FrozenStrategyFleetSource {
+    /// `AppState::strategy_fleet_snapshot()` returned `Some(_)`: either the
+    /// production boot-time `MQK_STRATEGY_IDS` cache, or a test-injected
+    /// value via `AppState::set_strategy_fleet_for_test`. This is the
+    /// authoritative source whenever it is present — the test-injection seam
+    /// several existing integration tests rely on stays authoritative, with
+    /// no second production fleet source competing with it.
+    AppStateSnapshot,
+    /// `AppState::strategy_fleet_snapshot()` was genuinely `None` (no test
+    /// injection, no boot-time `MQK_STRATEGY_IDS`) — the one permitted
+    /// fallback: a single direct `daily_data_readiness::fleet_ids_from_env()`
+    /// read, performed here and nowhere else in the same start attempt.
+    EnvFallback,
+}
+
+/// BUNDLE-7-PHASE-7A-SINGLE-FROZEN-FLEET-AUTHORITY-CLOSURE: one frozen
+/// strategy-fleet capture per start attempt.
+///
+/// Prior to this repair, `StartAttemptAuthoritySnapshot::resolve` read the
+/// strategy fleet from two independent sources —
+/// `daily_data_readiness::fleet_ids_from_env()` (a live env read, for
+/// `configured_strategy_ids`) and `AppState::strategy_fleet_snapshot()` (the
+/// boot-time/test-injected cache, for the B1A bootstrap) — which could
+/// disagree within the same start attempt if `MQK_STRATEGY_IDS` changed
+/// between boot and start, or if a test injected one fleet via
+/// `set_strategy_fleet_for_test` while leaving the process-global env var set
+/// to something else. Every fleet-derived decision within a single
+/// `start_execution_runtime` call now reads this one struct: B1A bootstrap/
+/// effective binding, the dynamic-selection `configured_strategy_ids`
+/// universe, and the legacy single-symbol assignment's `strategy_id`
+/// (`MultiSymbolConfigRawInputs::legacy_strategy_id`, via
+/// [`crate::state::read_multi_symbol_config_raw_inputs_from_env_and_fleet`]).
+/// None of them call `AppState::strategy_fleet_snapshot()`,
+/// `daily_data_readiness::fleet_ids_from_env()`, or read `MQK_STRATEGY_IDS`
+/// a second time.
+struct FrozenStrategyFleet {
+    strategy_ids: Vec<String>,
+    /// Consulted by `frozen_strategy_fleet_tests` (below) to prove requirement
+    /// 1's "explicit and deterministic" source attribution; reserved for
+    /// future operator-facing observability (e.g. surfacing which source a
+    /// given start attempt's fleet came from). Not read by any other
+    /// production decision in this patch.
+    #[allow(dead_code)]
+    source: FrozenStrategyFleetSource,
+}
+
+impl FrozenStrategyFleet {
+    /// Exactly one fleet-resolution operation: read `AppState::
+    /// strategy_fleet_snapshot()` once; only when that is genuinely `None`,
+    /// fall back to exactly one direct `daily_data_readiness::
+    /// fleet_ids_from_env()` read. `Some([])` and `None` are both treated as
+    /// "no fleet configured" by `NativeStrategyBootstrap::bootstrap` (a
+    /// present-but-empty vector behaves identically to `None`), so an empty
+    /// frozen fleet still fails closed exactly where the existing Dormant/
+    /// STRATEGY-DORMANCY-01 logic already requires a configured strategy.
+    async fn resolve(state: &AppState) -> Self {
+        match state.strategy_fleet_snapshot().await {
+            Some(entries) => Self {
+                strategy_ids: entries.into_iter().map(|e| e.strategy_id).collect(),
+                source: FrozenStrategyFleetSource::AppStateSnapshot,
+            },
+            None => Self {
+                strategy_ids: crate::daily_data_readiness::fleet_ids_from_env().unwrap_or_default(),
+                source: FrozenStrategyFleetSource::EnvFallback,
+            },
+        }
+    }
+
+    /// First non-empty fleet entry, or `None` for an empty fleet — the
+    /// legacy single-symbol path's `strategy_id` input.
+    fn first(&self) -> Option<&str> {
+        self.strategy_ids.first().map(String::as_str)
+    }
+}
+
 struct StartAttemptAuthoritySnapshot {
     now_utc: chrono::DateTime<Utc>,
     effective_mode: crate::dynamic_selection_mode::EffectiveDynamicSelectionMode,
     multi_symbol_config:
         Result<crate::state::MultiSymbolRuntimeConfig, crate::state::MultiSymbolConfigError>,
     readiness_context: crate::daily_data_readiness::DailyDataReadinessContext,
-    configured_strategy_ids: Vec<String>,
+    /// BUNDLE-7-PHASE-7A-SINGLE-FROZEN-FLEET-AUTHORITY-CLOSURE requirement 1:
+    /// the one frozen fleet capture for this start attempt — see
+    /// [`FrozenStrategyFleet`].
+    frozen_fleet: FrozenStrategyFleet,
     /// ATOMIC-OWNERSHIP-AND-ROLLBACK-TRUTH-01 requirement 1: the frozen
     /// premarket required symbol/timeframe vector — the legacy
     /// PREMARKET-DATA-READINESS-GATE-01 gate below must consume this field,
@@ -171,20 +254,29 @@ impl StartAttemptAuthoritySnapshot {
             state.runtime_selection.broker_kind,
         );
         let now_utc = state.daily_data_readiness_now().await;
-        let configured_strategy_ids =
-            crate::daily_data_readiness::fleet_ids_from_env().unwrap_or_default();
 
-        // BUNDLE-7-PHASE-7A-TRUE-ATOMIC requirement 1: one raw read of the
-        // watchlist artifact and the legacy MQK_STRATEGY_SYMBOL/IDS/timeframe
-        // env vars, shared by both `MultiSymbolRuntimeConfig` construction
-        // and the premarket freshness gate's required-symbol resolution
-        // below — replaces two independent calls
-        // (`build_multi_symbol_runtime_config_from_env()`,
-        // `required_symbols_for_freshness_gate_from_env()`) that each
-        // previously performed their own, separately-timed
-        // `evaluate_watchlist_intake_from_env()` file read and their own
-        // separate env reads.
-        let multi_symbol_raw_inputs = crate::state::read_multi_symbol_config_raw_inputs_from_env();
+        // BUNDLE-7-PHASE-7A-SINGLE-FROZEN-FLEET-AUTHORITY-CLOSURE
+        // requirement 1: exactly one fleet-resolution operation for this
+        // start attempt. Every fleet-derived value below (B1A bootstrap, the
+        // legacy single-symbol assignment's strategy_id, and the
+        // dynamic-selection `configured_strategy_ids` universe) is derived
+        // from this one `FrozenStrategyFleet` — never a second,
+        // independently-timed `AppState::strategy_fleet_snapshot()` or
+        // `daily_data_readiness::fleet_ids_from_env()` call.
+        let frozen_fleet = FrozenStrategyFleet::resolve(state).await;
+
+        // BUNDLE-7-PHASE-7A-TRUE-ATOMIC requirement 1 (carried forward): one
+        // raw read of the watchlist artifact and the legacy
+        // MQK_STRATEGY_SYMBOL/timeframe env vars, shared by both
+        // `MultiSymbolRuntimeConfig` construction and the premarket
+        // freshness gate's required-symbol resolution below.
+        // requirement 4 (this patch): `legacy_strategy_id` comes from
+        // `frozen_fleet.first()` — never a second, independent
+        // `MQK_STRATEGY_IDS` read via `first_strategy_id_from_env()`.
+        let multi_symbol_raw_inputs =
+            crate::state::read_multi_symbol_config_raw_inputs_from_env_and_fleet(
+                frozen_fleet.first(),
+            );
         let multi_symbol_config = multi_symbol_raw_inputs.build_config();
         let required_freshness_symbols =
             crate::market_data_freshness::required_symbols_with_source(
@@ -195,42 +287,28 @@ impl StartAttemptAuthoritySnapshot {
             .required;
 
         // B1A construction, folded in: the exact same
-        // `bootstrap_with_effective_binding` call and fleet-id source
-        // (`AppState::strategy_fleet_snapshot()`, NOT `fleet_ids_from_env()`
-        // above) `autonomous_runtime_context::resolve_autonomous_runtime_
-        // context` uses — deliberately kept as its own, separate read.
-        // `strategy_fleet_snapshot()` is a distinct concept from
-        // `configured_strategy_ids`: it is both the production boot-time
-        // cache of `MQK_STRATEGY_IDS` *and* a dedicated test-injection seam
-        // (`AppState::set_strategy_fleet_for_test`) several existing
-        // integration tests rely on to configure the B1A bootstrap without
-        // mutating the process-global env var (which would race other
-        // tests). Sourcing B1A's bootstrap from `configured_strategy_ids`
-        // instead breaks that seam. This remains a known, narrow residual
-        // duplication — unifying it would require changing
-        // `resolve_autonomous_runtime_context`'s signature, which has call
-        // sites outside this patch's declared file scope
-        // (`autonomous_daily_coordinator.rs`, `autonomous_completed_bar_
-        // task.rs`) — not attempted here. `resolve` only *constructs* the
-        // bootstrap once; it never decides whether the attempt may proceed
-        // with it — the B1A Failed/Dormant gate check stays in
-        // `start_execution_runtime`, at its original position, reading this
-        // field by reference.
-        let fleet_ids_for_bootstrap = state.strategy_fleet_snapshot().await.map(|entries| {
-            entries
-                .into_iter()
-                .map(|entry| entry.strategy_id)
-                .collect::<Vec<_>>()
-        });
+        // `bootstrap_with_effective_binding` call
+        // `autonomous_runtime_context::resolve_autonomous_runtime_context_
+        // from_fleet` uses (the equivalent pure helper), now driven from
+        // `frozen_fleet.strategy_ids` — the same vector `configured_
+        // strategy_ids` and the legacy single-symbol assignment above use.
+        // `Some(&frozen_fleet.strategy_ids)` and the pre-repair `Option`
+        // (`None` when `strategy_fleet_snapshot()` was absent) are
+        // behaviorally identical inputs to `NativeStrategyBootstrap::
+        // bootstrap`: `None` and `Some([])` both resolve to `Dormant`.
+        // `resolve` only *constructs* the bootstrap once; it never decides
+        // whether the attempt may proceed with it — the B1A Failed/Dormant
+        // gate check stays in `start_execution_runtime`, at its original
+        // position, reading this field by reference.
         let (native_strategy_bootstrap, effective_runtime_binding) =
-            bootstrap_with_effective_binding(fleet_ids_for_bootstrap.as_deref());
+            bootstrap_with_effective_binding(Some(frozen_fleet.strategy_ids.as_slice()));
 
         Self {
             now_utc,
             effective_mode,
             multi_symbol_config,
             readiness_context: crate::daily_data_readiness::load_readiness_context_from_env(),
-            configured_strategy_ids,
+            frozen_fleet,
             required_freshness_symbols,
             native_strategy_bootstrap,
             effective_runtime_binding,
@@ -382,7 +460,7 @@ impl AppState {
         // fleet ids + clock: all frozen in `snapshot`, resolved exactly once
         // — never re-read here.
         let readiness_context = &snapshot.readiness_context;
-        let configured_strategy_ids = &snapshot.configured_strategy_ids;
+        let configured_strategy_ids = &snapshot.frozen_fleet.strategy_ids;
         let now_utc = snapshot.now_utc;
         let run_id_str = run_id.to_string();
 
@@ -2419,7 +2497,6 @@ impl crate::daily_data_readiness::RuntimeStartEffects for ProductionRuntimeStart
 #[cfg(test)]
 mod dynamic_selection_start_snapshot_tests {
     use super::*;
-    use std::sync::OnceLock;
     use tokio::sync::Mutex as TokioMutex;
 
     /// Serializes every test in this module that touches the process-global
@@ -2428,9 +2505,15 @@ mod dynamic_selection_start_snapshot_tests {
     /// `env_lock()` convention already used by the daily-data-readiness
     /// start-gate scenario tests. Scoped to this compiled test binary
     /// (`cargo test -p mqk-daemon --lib`) only.
+    ///
+    /// BUNDLE-7-PHASE-7A-SINGLE-FROZEN-FLEET-AUTHORITY-CLOSURE: delegates to
+    /// the one crate-wide `strategy_fleet_env_test_lock` so this module's
+    /// `MQK_STRATEGY_SYMBOL`/`MQK_STRATEGY_IDS`/`MQK_STRATEGY_MD_TIMEFRAME`
+    /// mutations can never race `frozen_strategy_fleet_tests`'s (below) or
+    /// `multi_symbol_config`'s own env-mutating tests, which mutate the same
+    /// process-global env vars.
     fn env_lock() -> &'static TokioMutex<()> {
-        static LOCK: OnceLock<TokioMutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| TokioMutex::new(()))
+        crate::state::shared_test_locks::strategy_fleet_env_test_lock()
     }
 
     fn clear_dynamic_selection_env() {
@@ -3149,5 +3232,217 @@ mod paper_enforced_interlock_tests {
             crate::dynamic_selection_start_gate::DynamicSelectionStartGateDisposition::ShadowInvalid,
         );
         assert!(paper_enforced_dispatch_not_wired_refusal(&o, o.run_id).is_none());
+    }
+}
+
+// ---------------------------------------------------------------------------
+// DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7A-SINGLE-FROZEN-FLEET-
+// AUTHORITY-CLOSURE: `FrozenStrategyFleet` / `StartAttemptAuthoritySnapshot::
+// resolve` proof. Pure/in-memory — no DB, no broker, no Alpaca credentials:
+// `StartAttemptAuthoritySnapshot::resolve` never touches either.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod frozen_strategy_fleet_tests {
+    use super::*;
+    use tokio::sync::Mutex as TokioMutex;
+
+    /// Serializes every test in this module that touches the process-global
+    /// `MQK_STRATEGY_SYMBOL` / `MQK_STRATEGY_IDS` / `MQK_STRATEGY_MD_TIMEFRAME`
+    /// env vars — the same shared, crate-wide lock
+    /// `dynamic_selection_start_snapshot_tests`'s `env_lock()` (above) and
+    /// `multi_symbol_config`'s own env-mutating tests delegate to, so none of
+    /// these modules can race each other under `cargo test`'s default
+    /// parallelism.
+    fn env_lock() -> &'static TokioMutex<()> {
+        crate::state::shared_test_locks::strategy_fleet_env_test_lock()
+    }
+
+    fn clear_fleet_env() {
+        std::env::remove_var("MQK_STRATEGY_IDS");
+        std::env::remove_var("MQK_STRATEGY_SYMBOL");
+        std::env::remove_var("MQK_STRATEGY_MD_TIMEFRAME");
+    }
+
+    /// Requirements 1/2/3/4/9/10 (test scenario 1): an `AppState`-injected
+    /// fleet is authoritative even though the process-global
+    /// `MQK_STRATEGY_IDS` disagrees, both before *and* after the snapshot is
+    /// captured — B1A bootstrap, the legacy single-symbol assignment, and the
+    /// dynamic-selection `configured_strategy_ids` binding (which is
+    /// literally `&snapshot.frozen_fleet.strategy_ids` in
+    /// `build_dynamic_selection_start_snapshot` above) all read the exact
+    /// same frozen vector.
+    #[tokio::test]
+    async fn appstate_fleet_wins_over_a_disagreeing_env_var_before_and_after_capture() {
+        let _guard = env_lock().lock().await;
+        clear_fleet_env();
+        std::env::set_var("MQK_STRATEGY_IDS", "strategy-x");
+        std::env::set_var("MQK_STRATEGY_SYMBOL", "AAPL");
+        std::env::set_var("MQK_STRATEGY_MD_TIMEFRAME", "5m");
+
+        let state = Arc::new(AppState::new_for_test_with_mode_and_broker(
+            DeploymentMode::Paper,
+            BrokerKind::Alpaca,
+        ));
+        state
+            .set_strategy_fleet_for_test(Some(vec![
+                crate::state::StrategyFleetEntry {
+                    strategy_id: "strategy-a".to_string(),
+                },
+                crate::state::StrategyFleetEntry {
+                    strategy_id: "strategy-b".to_string(),
+                },
+            ]))
+            .await;
+
+        let snapshot = StartAttemptAuthoritySnapshot::resolve(&state).await;
+
+        // requirement 10: mutating MQK_STRATEGY_IDS after snapshot capture
+        // cannot alter any field or decision in this start attempt.
+        std::env::set_var("MQK_STRATEGY_IDS", "strategy-y");
+        clear_fleet_env();
+
+        // requirements 1/2: frozen fleet is the AppState-injected vector,
+        // sourced from AppStateSnapshot — never the disagreeing env value.
+        assert_eq!(
+            snapshot.frozen_fleet.strategy_ids,
+            vec!["strategy-a".to_string(), "strategy-b".to_string()]
+        );
+        assert_eq!(
+            snapshot.frozen_fleet.source,
+            FrozenStrategyFleetSource::AppStateSnapshot
+        );
+
+        // requirement 3: B1A bootstrap consumed the same vector's first
+        // entry. "strategy-a" is not a real registered strategy, so the
+        // bootstrap fails closed (Failed, not Dormant) — the *attempted*
+        // strategy_id proves which vector's first entry it read.
+        match &snapshot.native_strategy_bootstrap.outcome {
+            mqk_runtime::native_strategy::NativeStrategyBootstrapOutcome::Failed {
+                strategy_id,
+                ..
+            } => assert_eq!(strategy_id, "strategy-a"),
+            _ => panic!(
+                "expected Failed (strategy-a is not registered); got truth_state={} \
+                 — the bootstrap did not consume the frozen fleet",
+                snapshot.native_strategy_bootstrap.truth_state()
+            ),
+        }
+
+        // requirement 4: the legacy single-symbol assignment's strategy_id
+        // came from the frozen fleet's first entry, not a second
+        // MQK_STRATEGY_IDS read (env was already cleared/mutated above by
+        // the time this reads the already-resolved config).
+        let cfg = snapshot
+            .multi_symbol_config
+            .as_ref()
+            .expect("legacy single-symbol config must resolve");
+        assert_eq!(cfg.symbols.len(), 1);
+        assert_eq!(cfg.symbols[0].strategy_id, "strategy-a");
+        assert_eq!(cfg.symbols[0].symbol, "AAPL");
+
+        // requirement 2/5: `build_dynamic_selection_start_snapshot`'s
+        // `configured_strategy_ids` binding reads `&snapshot.frozen_fleet.
+        // strategy_ids` directly (see that function, above) — the same
+        // vector asserted above, never a second, independent resolution.
+        assert_eq!(
+            snapshot.frozen_fleet.strategy_ids,
+            vec!["strategy-a".to_string(), "strategy-b".to_string()],
+            "dynamic-selection configured_strategy_ids source"
+        );
+    }
+
+    /// Requirement 2 (test scenario 2): no `AppState` fleet
+    /// (`set_strategy_fleet_for_test(None)`) — the one permitted fallback,
+    /// exactly one direct `MQK_STRATEGY_IDS` env read, feeds every consumer
+    /// the same normalized (split/trimmed/filtered) vector.
+    #[tokio::test]
+    async fn env_fallback_used_only_when_appstate_fleet_is_genuinely_absent() {
+        let _guard = env_lock().lock().await;
+        clear_fleet_env();
+        std::env::set_var("MQK_STRATEGY_IDS", " strategy-c , strategy-d ,, ");
+        std::env::set_var("MQK_STRATEGY_SYMBOL", "MSFT");
+        std::env::set_var("MQK_STRATEGY_MD_TIMEFRAME", "1m");
+
+        let state = Arc::new(AppState::new_for_test_with_mode_and_broker(
+            DeploymentMode::Paper,
+            BrokerKind::Alpaca,
+        ));
+        // Explicitly force "no AppState fleet" (test seam) independent of
+        // whatever MQK_STRATEGY_IDS happened to be at AppState construction.
+        state.set_strategy_fleet_for_test(None).await;
+
+        let snapshot = StartAttemptAuthoritySnapshot::resolve(&state).await;
+        clear_fleet_env();
+
+        assert_eq!(
+            snapshot.frozen_fleet.strategy_ids,
+            vec!["strategy-c".to_string(), "strategy-d".to_string()],
+            "the one permitted fallback env read must trim/split/filter \
+             exactly like the AppState boot-time reader"
+        );
+        assert_eq!(
+            snapshot.frozen_fleet.source,
+            FrozenStrategyFleetSource::EnvFallback
+        );
+
+        let cfg = snapshot
+            .multi_symbol_config
+            .as_ref()
+            .expect("legacy single-symbol config must resolve");
+        assert_eq!(cfg.symbols[0].strategy_id, "strategy-c");
+
+        match &snapshot.native_strategy_bootstrap.outcome {
+            mqk_runtime::native_strategy::NativeStrategyBootstrapOutcome::Failed {
+                strategy_id,
+                ..
+            } => assert_eq!(strategy_id, "strategy-c"),
+            _ => panic!(
+                "expected Failed (strategy-c is not registered); got truth_state={}",
+                snapshot.native_strategy_bootstrap.truth_state()
+            ),
+        }
+    }
+
+    /// Requirement 3 (test scenario 3): an empty frozen fleet — whether from
+    /// an explicitly-injected empty `AppState` vector or (implicitly) an
+    /// absent/empty env fallback — fails closed: Dormant bootstrap, and the
+    /// legacy single-symbol path refuses with `MissingStrategyId` rather than
+    /// fabricating a strategy id.
+    #[tokio::test]
+    async fn empty_frozen_fleet_fails_closed_dormant_and_missing_strategy_id() {
+        let _guard = env_lock().lock().await;
+        clear_fleet_env();
+        std::env::set_var("MQK_STRATEGY_SYMBOL", "AAPL");
+        std::env::set_var("MQK_STRATEGY_MD_TIMEFRAME", "5m");
+        // Deliberately no MQK_STRATEGY_IDS at all.
+
+        let state = Arc::new(AppState::new_for_test_with_mode_and_broker(
+            DeploymentMode::Paper,
+            BrokerKind::Alpaca,
+        ));
+        state.set_strategy_fleet_for_test(Some(Vec::new())).await;
+
+        let snapshot = StartAttemptAuthoritySnapshot::resolve(&state).await;
+        clear_fleet_env();
+
+        assert!(snapshot.frozen_fleet.strategy_ids.is_empty());
+        assert_eq!(
+            snapshot.frozen_fleet.source,
+            FrozenStrategyFleetSource::AppStateSnapshot,
+            "an explicitly-injected empty Vec is still Some(_) — \
+             AppStateSnapshot, not EnvFallback"
+        );
+        assert!(
+            snapshot.native_strategy_bootstrap.is_dormant(),
+            "an empty frozen fleet must bootstrap Dormant, exactly like the \
+             pre-repair None input — never fabricate a strategy id"
+        );
+        assert_eq!(
+            snapshot.multi_symbol_config,
+            Err(crate::state::MultiSymbolConfigError::MissingStrategyId),
+            "the legacy single-symbol path must fail closed on a missing \
+             strategy_id — no watchlist is configured and the frozen fleet \
+             is empty"
+        );
     }
 }

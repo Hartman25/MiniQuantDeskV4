@@ -34,6 +34,20 @@ mod snapshot;
 mod types;
 pub mod ws_gap_recovery;
 
+/// BUNDLE-7-PHASE-7A-SINGLE-FROZEN-FLEET-AUTHORITY-CLOSURE: one process-wide
+/// lock for every test that mutates the process-global `MQK_STRATEGY_SYMBOL`
+/// / `MQK_STRATEGY_IDS` / `MQK_STRATEGY_MD_TIMEFRAME` env vars, so tests in
+/// different modules (`state::lifecycle`, `state::multi_symbol_config`) that
+/// each read/write these same env vars never race each other under `cargo
+/// test`'s default parallelism.
+#[cfg(test)]
+pub(crate) mod shared_test_locks {
+    pub(crate) fn strategy_fleet_env_test_lock() -> &'static tokio::sync::Mutex<()> {
+        static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+        LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+    }
+}
+
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicI64, AtomicU32, AtomicU64, Ordering};
 use std::sync::Arc;
@@ -111,13 +125,18 @@ pub use multi_symbol_config::{
     MultiSymbolConfigSource, MultiSymbolRuntimeConfig, SymbolStrategyAssignment,
     MULTI_SYMBOL_RUNTIME_CONFIG_SCHEMA_VERSION,
 };
-// BUNDLE-7-PHASE-7A-TRUE-ATOMIC requirement 1: crate-internal-only raw-input
-// seam so `StartAttemptAuthoritySnapshot::resolve` (state/lifecycle.rs) can
-// read the watchlist artifact and legacy env vars exactly once and derive
-// both `MultiSymbolRuntimeConfig` and the premarket freshness gate's
-// required-symbol vector from that one read — never a second, independently
-// resolved watchlist/env read within the same start attempt.
-pub(crate) use multi_symbol_config::read_multi_symbol_config_raw_inputs_from_env;
+// BUNDLE-7-PHASE-7A-SINGLE-FROZEN-FLEET-AUTHORITY-CLOSURE requirement 4:
+// crate-internal-only raw-input seam so `StartAttemptAuthoritySnapshot::
+// resolve` (state/lifecycle.rs) can read the watchlist artifact and legacy
+// env vars exactly once and derive both `MultiSymbolRuntimeConfig` and the
+// premarket freshness gate's required-symbol vector from that one read —
+// sourcing `legacy_strategy_id` from the one frozen fleet capture instead of
+// a second `MQK_STRATEGY_IDS` read. (The non-fleet-aware
+// `read_multi_symbol_config_raw_inputs_from_env` remains `pub(crate)` in
+// `multi_symbol_config.rs` for its own internal caller,
+// `build_multi_symbol_runtime_config_from_env` — not re-exported here since
+// nothing else in the crate calls it via this path anymore.)
+pub(crate) use multi_symbol_config::read_multi_symbol_config_raw_inputs_from_env_and_fleet;
 pub use per_symbol_bar_window::{
     classify_bar_staleness, load_recent_completed_bars_for_symbol_window,
     per_symbol_loaded_bars_from_rows, EmptySymbolError, PerSymbolBarInput, PerSymbolBarWindow,

@@ -442,6 +442,12 @@ impl MultiSymbolConfigRawInputs {
 /// `evaluate_watchlist_intake_from_env()` call and exactly one read each of
 /// `MQK_PAPER_WATCHLIST_PATH`, `MQK_STRATEGY_SYMBOL`, `MQK_STRATEGY_IDS`
 /// (first non-empty entry), and `MQK_STRATEGY_MD_TIMEFRAME`.
+///
+/// Kept for callers with no independently-resolved frozen fleet of their own
+/// (`daily_data_readiness.rs`, `autonomous_completed_bar_task.rs`,
+/// `autonomous_daily_coordinator.rs`, `routes/market_data_readiness.rs`).
+/// The `start_execution_runtime` start path does **not** use this function —
+/// see [`read_multi_symbol_config_raw_inputs_from_env_and_fleet`].
 pub(crate) fn read_multi_symbol_config_raw_inputs_from_env() -> MultiSymbolConfigRawInputs {
     MultiSymbolConfigRawInputs {
         watchlist_outcome: crate::watchlist_intake::evaluate_watchlist_intake_from_env(),
@@ -449,6 +455,33 @@ pub(crate) fn read_multi_symbol_config_raw_inputs_from_env() -> MultiSymbolConfi
             .ok(),
         legacy_symbol: std::env::var(ENV_STRATEGY_SYMBOL).ok(),
         legacy_strategy_id: first_strategy_id_from_env(),
+        legacy_timeframe: std::env::var(super::STRATEGY_MD_TIMEFRAME_ENV).ok(),
+    }
+}
+
+/// BUNDLE-7-PHASE-7A-SINGLE-FROZEN-FLEET-AUTHORITY-CLOSURE requirement 4:
+/// [`read_multi_symbol_config_raw_inputs_from_env`], sourcing
+/// `legacy_strategy_id` from `frozen_first_strategy_id` — the first entry of
+/// an already-resolved, frozen start-attempt fleet capture — instead of a
+/// second, independent `MQK_STRATEGY_IDS` read via
+/// [`first_strategy_id_from_env`].
+///
+/// Every other field is read exactly once, exactly as
+/// [`read_multi_symbol_config_raw_inputs_from_env`] reads it: one watchlist
+/// evaluation, one legacy symbol read, one timeframe read. This is the
+/// constructor `StartAttemptAuthoritySnapshot::resolve` (`state/lifecycle.rs`)
+/// uses, so the legacy single-symbol assignment's `strategy_id` can never
+/// disagree with the same frozen fleet the B1A bootstrap and the
+/// dynamic-selection `configured_strategy_ids` universe were built from.
+pub(crate) fn read_multi_symbol_config_raw_inputs_from_env_and_fleet(
+    frozen_first_strategy_id: Option<&str>,
+) -> MultiSymbolConfigRawInputs {
+    MultiSymbolConfigRawInputs {
+        watchlist_outcome: crate::watchlist_intake::evaluate_watchlist_intake_from_env(),
+        configured_watchlist_path: std::env::var(crate::watchlist_intake::ENV_PAPER_WATCHLIST_PATH)
+            .ok(),
+        legacy_symbol: std::env::var(ENV_STRATEGY_SYMBOL).ok(),
+        legacy_strategy_id: frozen_first_strategy_id.map(str::to_string),
         legacy_timeframe: std::env::var(super::STRATEGY_MD_TIMEFRAME_ENV).ok(),
     }
 }
@@ -471,4 +504,109 @@ fn first_strategy_id_from_env() -> Option<String> {
             .find(|s| !s.is_empty())
             .map(String::from)
     })
+}
+
+// ---------------------------------------------------------------------------
+// BUNDLE-7-PHASE-7A-SINGLE-FROZEN-FLEET-AUTHORITY-CLOSURE tests
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod frozen_fleet_raw_inputs_tests {
+    use super::*;
+    use tokio::sync::Mutex as TokioMutex;
+
+    /// Serializes tests in this module that touch the process-global
+    /// `MQK_STRATEGY_SYMBOL` / `MQK_STRATEGY_IDS` / `MQK_STRATEGY_MD_TIMEFRAME`
+    /// / `MQK_PAPER_WATCHLIST_PATH` env vars — delegates to the one
+    /// crate-wide `strategy_fleet_env_test_lock` so these tests can never
+    /// race `state::lifecycle`'s own env-mutating tests, which mutate the
+    /// same process-global env vars.
+    fn env_lock() -> &'static TokioMutex<()> {
+        crate::state::shared_test_locks::strategy_fleet_env_test_lock()
+    }
+
+    fn clear_env() {
+        std::env::remove_var(ENV_STRATEGY_SYMBOL);
+        std::env::remove_var(ENV_STRATEGY_IDS);
+        std::env::remove_var(super::super::STRATEGY_MD_TIMEFRAME_ENV);
+        std::env::remove_var(crate::watchlist_intake::ENV_PAPER_WATCHLIST_PATH);
+    }
+
+    /// Requirement 4: `read_multi_symbol_config_raw_inputs_from_env_and_fleet`
+    /// sources `legacy_strategy_id` from its `frozen_first_strategy_id`
+    /// parameter, never from a second `MQK_STRATEGY_IDS` read — proven by
+    /// setting the env var to a disagreeing value and confirming the frozen
+    /// parameter wins.
+    #[tokio::test]
+    async fn legacy_strategy_id_comes_from_the_frozen_parameter_not_env() {
+        let _guard = env_lock().lock().await;
+        clear_env();
+        std::env::set_var(ENV_STRATEGY_SYMBOL, "AAPL");
+        std::env::set_var(ENV_STRATEGY_IDS, "env-strategy-should-be-ignored");
+        std::env::set_var(super::super::STRATEGY_MD_TIMEFRAME_ENV, "5m");
+
+        let raw = read_multi_symbol_config_raw_inputs_from_env_and_fleet(Some("frozen-strategy"));
+        clear_env();
+
+        assert_eq!(
+            raw.legacy_strategy_id,
+            Some("frozen-strategy".to_string()),
+            "legacy_strategy_id must come from the frozen fleet parameter, \
+             never from a second MQK_STRATEGY_IDS read"
+        );
+        let cfg = raw.build_config().expect("legacy config must resolve");
+        assert_eq!(cfg.symbols[0].strategy_id, "frozen-strategy");
+    }
+
+    /// `frozen_first_strategy_id: None` (empty frozen fleet) must not
+    /// fabricate a strategy id — legacy config resolution fails closed with
+    /// `MissingStrategyId`, exactly as an absent `MQK_STRATEGY_IDS` did
+    /// before this repair.
+    #[tokio::test]
+    async fn none_frozen_strategy_id_fails_closed_missing_strategy_id() {
+        let _guard = env_lock().lock().await;
+        clear_env();
+        std::env::set_var(ENV_STRATEGY_SYMBOL, "AAPL");
+        std::env::set_var(super::super::STRATEGY_MD_TIMEFRAME_ENV, "5m");
+
+        let raw = read_multi_symbol_config_raw_inputs_from_env_and_fleet(None);
+        clear_env();
+
+        assert_eq!(raw.legacy_strategy_id, None);
+        assert_eq!(
+            raw.build_config(),
+            Err(MultiSymbolConfigError::MissingStrategyId)
+        );
+    }
+
+    /// Requirement 8: watchlist-v2 assignment admission is unaffected by the
+    /// frozen fleet parameter — `build_multi_symbol_config_from_watchlist_
+    /// artifact` never consults a configured-fleet vector at all; a symbol
+    /// assigned to a strategy_id absent from the frozen fleet still resolves
+    /// here (existing behavior, unchanged by this patch). The actual
+    /// admission/registry check for that strategy_id happens downstream, in
+    /// the durable `sys_strategy_registry`-backed dynamic-selection gate
+    /// (`dynamic_selection_plan_builder.rs`), not in this pure config layer.
+    #[test]
+    fn watchlist_assignment_outside_any_fleet_still_resolves_at_this_layer() {
+        let mut strategy_assignments = std::collections::HashMap::new();
+        strategy_assignments.insert("MSFT".to_string(), "strategy-not-in-any-fleet".to_string());
+        let artifact = LoadedWatchlistArtifact {
+            schema_version: WATCHLIST_SCHEMA_VERSION_V2.to_string(),
+            symbols: vec!["MSFT".to_string()],
+            top_symbol: Some("MSFT".to_string()),
+            strategy_assignments,
+            max_symbols_to_trade: 1,
+            max_concurrent_positions: 1,
+            approved_for_autonomous_paper: false,
+        };
+        let outcome = WatchlistIntakeOutcome::LoadedApproved { artifact };
+
+        let cfg =
+            build_multi_symbol_config_from_watchlist_artifact(&outcome, "test-path", Some("5m"))
+                .expect(
+                    "this pure builder never filters by a configured fleet — \
+                     fleet admission is a separate, downstream (DB-backed) concern",
+                );
+        assert_eq!(cfg.symbols[0].strategy_id, "strategy-not-in-any-fleet");
+    }
 }
