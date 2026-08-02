@@ -21063,3 +21063,64 @@ for the full closure record.
 
 Not pushed. No other FULL-AUDIT-FAIL finding, trading semantics, or live
 capital path touched.
+
+---
+
+FULL-AUDIT-REMAINING-FAILURES-CONSOLIDATED-CLOSURE-01: BLOCKED
+9 commits on main, starting HEAD a14ede761c5fd0db3f4a5c9dd54241c228c93f38,
+ending 99e3fca6. Not pushed.
+
+Consolidated repair session for every open finding above FAIL-012 in
+docs/audits/full_repository_verification_2026-08-02.md, per operator
+authorization to combine repairs into one prompt. FAIL-012 preserved
+closed, untouched.
+
+CLOSED, with verified evidence (see audit doc's "FULL-AUDIT-REMAINING-
+FAILURES-CONSOLIDATED-CLOSURE-01" section for full detail per finding):
+FAIL-002, FAIL-003, FAIL-004, FAIL-006, FAIL-007, FAIL-008, FAIL-009,
+FAIL-010, FAIL-013, FAIL-014, FAIL-015, FAIL-017.
+
+CLOSED AS ENVIRONMENT LIMITATION WITH SUPPORTED WORKFLOW (genuine OS/machine
+constraints, not repo defects; documented workaround verified working):
+FAIL-001, FAIL-005.
+
+NOT CLOSED -- BLOCKED, two related architectural findings:
+
+FAIL-011 (6 tests): the daily-data-readiness gate can only report
+start_allowed=true via a real DB bar-provenance query. These 6 tests are
+deliberately pure in-process (db=None) to prove the *pre-DB* gate boundary
+-- confirmed empirically that no fixture-only change can make the gate
+pass through with db=None. Closing this needs either a scoped production
+change (routing a sole-blocker-is-db_unavailable verdict to the existing
+503 db_pool() path instead of 403) or accepting these tests' original
+provable boundary no longer exists and rewriting their assertions --
+both outside this patch's "fixture repair only, no expected-gate-update"
+scope. Operator decision needed.
+
+FAIL-016 (partial, 3 of 8) / FAIL-018: b1a_l04-l06's originally-diagnosed
+blocker (strategy_registry_missing) is genuinely fixed. All three, plus
+b2a_n02 (FAIL-018), then hit a second wall: reaching 200 requires a real
+AlpacaBrokerAdapter making a real HTTP call. A fake-credentials + pre-seeded-
+broker-snapshot attempt was tried and reverted after it was proven to still
+make a real network call to Alpaca's live API (a different code path,
+fetch_events at initial tick, than the one the mitigation targeted) --
+confirmed via a genuine "unauthorized" response from Alpaca's real server.
+The codebase's own hermetic-broker test seam exists but is #[cfg(test)]-
+gated at the source level, so it does not compile into the artifact
+external tests/*.rs link against -- unreachable without a production-surface
+change (removing that gate) explicitly out of scope. The other 5
+FAIL-016 tests (scenario_daemon_order_submit.rs) were not attempted --
+plausible via a genuine DB-backed fixture fix, unlike FAIL-011, but not
+attempted within this session's remaining time.
+
+DB residue: full dependency-ordered cleanup run against isolated port-5434
+mqk_test (all runs-derived tables, sys_autonomous_session_events,
+sys_strategy_registry, runtime_leader_lease/runtime_control_state
+singletons) -- zero confirmed-synthetic residue remaining across every
+checked table at session end.
+
+Not pushed. No production trading/OMS/portfolio/broker-authority semantics
+changed. No live capital enabled. No orders placed. No real credentials
+loaded (the one attempt requiring them was reverted). Ports 5432/5440 never
+touched. See docs/audits/full_repository_verification_2026-08-02.md for
+the full per-finding closure record and remaining-work recommendation.
