@@ -6,6 +6,8 @@
 export interface DynamicSelectionSymbolRow {
   symbol: string;
   selected_strategy_id: string | null;
+  /** The selected candidate's timeframe_secs, non-null iff disposition === "selected". */
+  timeframe_secs: number | null;
   disposition: string;
   reason_code: string;
   exact_reason_code: string;

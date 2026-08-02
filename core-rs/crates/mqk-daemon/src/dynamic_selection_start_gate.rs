@@ -277,6 +277,65 @@ pub enum DynamicSelectionStartGateDisposition {
     PaperEnforcedRefused,
 }
 
+impl DynamicSelectionStartGateDisposition {
+    /// The one canonical stable snake_case string for each variant, shared
+    /// by every serialization site (operator API projection, durable
+    /// evidence writer's DB vocabulary, GUI/test fixtures) -- Phase 7C
+    /// Part 5/6 closes the prior split where the API projection
+    /// (`routes/system.rs`) and the evidence writer
+    /// (`dynamic_selection_evidence_writer.rs`) each reproduced this
+    /// mapping independently. Exhaustive by construction: a new variant
+    /// added upstream fails this match at compile time rather than
+    /// silently falling through.
+    pub(crate) fn as_str(&self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::ShadowAllowed => "shadow_allowed",
+            Self::ShadowInvalid => "shadow_invalid",
+            Self::PaperEnforcedAllowed => "paper_enforced_allowed",
+            Self::PaperEnforcedRefused => "paper_enforced_refused",
+        }
+    }
+
+    /// Inverse of [`Self::as_str`]. `None` on any value outside the closed
+    /// vocabulary -- never guesses a disposition for an unrecognized value.
+    pub(crate) fn parse(raw: &str) -> Option<Self> {
+        match raw {
+            "off" => Some(Self::Off),
+            "shadow_allowed" => Some(Self::ShadowAllowed),
+            "shadow_invalid" => Some(Self::ShadowInvalid),
+            "paper_enforced_allowed" => Some(Self::PaperEnforcedAllowed),
+            "paper_enforced_refused" => Some(Self::PaperEnforcedRefused),
+            _ => None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod disposition_str_tests {
+    use super::DynamicSelectionStartGateDisposition as D;
+
+    #[test]
+    fn as_str_and_parse_round_trip_every_variant() {
+        for d in [
+            D::Off,
+            D::ShadowAllowed,
+            D::ShadowInvalid,
+            D::PaperEnforcedAllowed,
+            D::PaperEnforcedRefused,
+        ] {
+            assert_eq!(D::parse(d.as_str()), Some(d));
+        }
+    }
+
+    #[test]
+    fn parse_rejects_an_unrecognized_value() {
+        assert_eq!(D::parse("bogus"), None);
+        assert_eq!(D::parse("Off"), None, "must reject PascalCase Debug text");
+        assert_eq!(D::parse("PaperEnforcedAllowed"), None);
+    }
+}
+
 /// Result of evaluating one start attempt.
 pub struct DynamicSelectionStartGateOutcome {
     /// IR1: see [`DynamicSelectionStartGateDisposition`].

@@ -179,6 +179,7 @@ export function DynamicSelectionEvidencePanel() {
             <tr>
               <th>Symbol</th>
               <th>Selected strategy</th>
+              <th>Timeframe (s)</th>
               <th>Disposition</th>
               <th>Reason</th>
             </tr>
@@ -188,6 +189,7 @@ export function DynamicSelectionEvidencePanel() {
               <tr key={`${s.symbol}-${i}`}>
                 <td>{s.symbol}</td>
                 <td>{s.selected_strategy_id ?? "—"}</td>
+                <td>{s.timeframe_secs ?? "—"}</td>
                 <td>{s.disposition}</td>
                 <td>{s.reason_code}</td>
               </tr>

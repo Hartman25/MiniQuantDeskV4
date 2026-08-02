@@ -44,6 +44,7 @@ function validSymbolRaw(overrides: Record<string, unknown> = {}): Record<string,
   return {
     symbol: "AAPL",
     selected_strategy_id: "swing_momentum",
+    timeframe_secs: 300,
     disposition: "selected",
     reason_code: "selected_highest_score",
     exact_reason_code: "selected_highest_score",
@@ -174,6 +175,33 @@ test("parseDynamicSelectionStatus rejects a refused symbol row that carries a se
     }),
   );
   assert.equal(parsed.lifecycle, "idle");
+});
+
+test("parseDynamicSelectionStatus rejects a selected symbol row with no timeframe_secs", () => {
+  const parsed = parseDynamicSelectionStatus(
+    validStatusRaw({ selected: [validSymbolRaw({ timeframe_secs: null })] }),
+  );
+  assert.equal(parsed.lifecycle, "idle");
+});
+
+test("parseDynamicSelectionStatus rejects a refused symbol row that carries a timeframe_secs", () => {
+  const parsed = parseDynamicSelectionStatus(
+    validStatusRaw({
+      refused: [
+        validSymbolRaw({
+          disposition: "refused",
+          selected_strategy_id: null,
+          timeframe_secs: 300,
+        }),
+      ],
+    }),
+  );
+  assert.equal(parsed.lifecycle, "idle");
+});
+
+test("parseDynamicSelectionStatus rejects an unrecognized top-level disposition value", () => {
+  const parsed = parseDynamicSelectionStatus(validStatusRaw({ disposition: "PaperEnforcedAllowed" }));
+  assert.equal(parsed.lifecycle, "idle", "must reject Debug-formatted PascalCase, never accept it as truth");
 });
 
 // ---------------------------------------------------------------------------

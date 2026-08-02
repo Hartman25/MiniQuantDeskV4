@@ -28,23 +28,17 @@ fn candidate_disposition_str(d: SelectionCandidateDisposition) -> &'static str {
 }
 
 /// `Off` has no string here -- it is never passed to this function (see
-/// module docs and the call site in `state/lifecycle.rs`).
+/// module docs and the call site in `state/lifecycle.rs`). Delegates to the
+/// one canonical `DynamicSelectionStartGateDisposition::as_str` mapping
+/// (Phase 7C Part 5/6) rather than reproducing the string literals here --
+/// this wrapper only adds the "Off must never be persisted" refusal.
 fn start_gate_disposition_str(
     d: DynamicSelectionStartGateDisposition,
 ) -> Result<&'static str, String> {
-    match d {
-        DynamicSelectionStartGateDisposition::Off => {
-            Err("Off must never be persisted as durable plan evidence".to_string())
-        }
-        DynamicSelectionStartGateDisposition::ShadowAllowed => Ok("shadow_allowed"),
-        DynamicSelectionStartGateDisposition::ShadowInvalid => Ok("shadow_invalid"),
-        DynamicSelectionStartGateDisposition::PaperEnforcedAllowed => {
-            Ok("paper_enforced_allowed")
-        }
-        DynamicSelectionStartGateDisposition::PaperEnforcedRefused => {
-            Ok("paper_enforced_refused")
-        }
+    if d == DynamicSelectionStartGateDisposition::Off {
+        return Err("Off must never be persisted as durable plan evidence".to_string());
     }
+    Ok(d.as_str())
 }
 
 /// Build the durable evidence DTO for one resolved plan. `run_id` is the

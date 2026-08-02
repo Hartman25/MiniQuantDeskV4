@@ -159,11 +159,13 @@ function isValidSymbolRow(v: unknown): v is DynamicSelectionSymbolRow {
   return (
     isString(s.symbol) &&
     isNullableString(s.selected_strategy_id) &&
+    isNullableSafeInteger(s.timeframe_secs) &&
     isEnumValue(s.disposition, DYNAMIC_SELECTION_SYMBOL_DISPOSITIONS) &&
     isString(s.reason_code) &&
     isString(s.exact_reason_code) &&
-    // selected <-> selected_strategy_id present coherence
-    (s.disposition === "selected") === (s.selected_strategy_id !== null)
+    // selected <-> selected_strategy_id/timeframe_secs present coherence
+    (s.disposition === "selected") === (s.selected_strategy_id !== null) &&
+    (s.disposition === "selected") === (s.timeframe_secs !== null)
   );
 }
 
@@ -215,7 +217,7 @@ export function parseDynamicSelectionStatus(raw: unknown): DynamicSelectionStatu
   if (!isNullableEnumValue(r.committed_effective_mode, DYNAMIC_SELECTION_MODES)) return reject();
   if (!isBoolean(r.committed_live_lock_applied)) return reject();
   if (r.approved_for_live !== false) return reject(); // hard invariant — never true
-  if (!isNullableString(r.disposition)) return reject();
+  if (!isNullableEnumValue(r.disposition, DYNAMIC_SELECTION_DISPOSITIONS)) return reject();
   if (!isNullableString(r.committed_plan_id)) return reject();
   if (!isNullableString(r.committed_source_kind)) return reject();
   if (!isNullableString(r.committed_source_identity)) return reject();

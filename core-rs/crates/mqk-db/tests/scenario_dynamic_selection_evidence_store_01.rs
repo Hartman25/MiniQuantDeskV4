@@ -542,6 +542,53 @@ async fn candidate_referencing_unknown_symbol_rolls_back_the_whole_write() {
     cleanup(&pool, &[run_id]).await;
 }
 
+/// FORMAL-SOAK-GATE-TRUTH-REPAIR-01 Part 7: migration 0060 adds a UNIQUE
+/// (plan_id, symbol, strategy_id, timeframe_secs) constraint to
+/// sys_dynamic_selection_plan_candidates. Migration 0059's only uniqueness
+/// constraint was (plan_id, ordinal) -- physical insert-order identity, not
+/// the candidate's economic identity -- so two rows sharing the exact same
+/// (symbol, strategy_id, timeframe_secs) exact key under two different
+/// ordinals must now be rejected at the DB level, and (mirroring the FK
+/// rollback proof above) must never leave a partial header row behind.
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL"]
+async fn duplicate_exact_candidate_key_is_rejected_at_the_db_level() {
+    let Ok(pool) = test_pool().await else {
+        eprintln!("skipped: requires MQK_DATABASE_URL");
+        return;
+    };
+    let run_id = fixed_run_id("duplicate_candidate_key");
+    cleanup(&pool, &[run_id]).await;
+    fixture_run(&pool, run_id).await;
+
+    let plan_id = fixed_plan_id("duplicate_candidate_key");
+    let mut plan = sample_plan(run_id, plan_id);
+    // Same (symbol="AAPL", strategy_id="swing_momentum", timeframe_secs=300)
+    // exact key as the plan's existing candidate at ordinal 0, just under a
+    // different ordinal (1) -- (plan_id, ordinal) alone would have allowed
+    // this prior to migration 0060.
+    plan.candidates.push(selected_candidate("AAPL", 1));
+    plan.candidate_count = 2;
+
+    let result = insert_dynamic_selection_plan(&pool, plan).await;
+    assert!(
+        result.is_err(),
+        "a duplicate exact (symbol, strategy_id, timeframe_secs) candidate key must be \
+         rejected by the migration 0060 UNIQUE constraint"
+    );
+
+    let row = fetch_dynamic_selection_plan(&pool, plan_id)
+        .await
+        .expect("fetch should succeed");
+    assert!(
+        row.is_none(),
+        "the header row must not be left behind after the duplicate-key candidate insert \
+         failed mid-transaction"
+    );
+
+    cleanup(&pool, &[run_id]).await;
+}
+
 // ── Bounded read seam ───────────────────────────────────────────────────────
 
 fn plan_with_n_selected_symbols(

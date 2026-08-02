@@ -368,6 +368,12 @@
       "path": "0059_dynamic_selection_plan_evidence.sql",
       "status": "applied",
       "intent": "DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7C Part 1: add sys_dynamic_selection_plans (one immutable durable row per resolved DynamicSelectionPlan, plan_id = the deterministic UUIDv5 derived from canonical_plan_identity_material, written only in shadow/paper_enforced mode -- off never writes here), sys_dynamic_selection_plan_symbols (one row per SymbolSelectionResult, always present even for a zero-candidate symbol, so symbol-level disposition/reason/exact_reason facts are never lost), and sys_dynamic_selection_plan_candidates (one row per SelectionCandidateResult, carrying every result-affecting evidence field canonical_plan_identity_material serializes) so Part 3's read-side validator can reconstruct the exact plan and independently recompute plan_id. approved_for_live is constrained false at the DB level. Selection-plan evidence only -- never portfolio/P&L/order/broker truth. Additive only, does not modify any existing table. No DEFAULT now()/gen_random_uuid() -- every timestamp and identity is caller-supplied."
+    },
+    {
+      "id": "0060",
+      "path": "0060_dynamic_selection_plan_candidates_exact_key_unique.sql",
+      "status": "applied",
+      "intent": "DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7C-FORMAL-SOAK-GATE-TRUTH-REPAIR-01 Part 7: add a UNIQUE (plan_id, symbol, strategy_id, timeframe_secs) constraint to sys_dynamic_selection_plan_candidates. Migration 0059's only uniqueness constraint on that table was (plan_id, ordinal) -- physical insert-order identity, not the candidate's economic identity -- so a duplicate exact candidate key could previously be written under two different ordinals with no error. Additive only, does not modify 0059."
     }
   ]
 }

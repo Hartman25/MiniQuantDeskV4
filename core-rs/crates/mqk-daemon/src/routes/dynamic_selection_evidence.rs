@@ -50,6 +50,12 @@ struct ErrorBody {
 pub(crate) struct DynamicSelectionSymbolRow {
     pub symbol: String,
     pub selected_strategy_id: Option<String>,
+    /// The selected candidate's `timeframe_secs`, `Some` iff
+    /// `disposition == "selected"` -- Phase 7C Part 5/6: this route
+    /// previously omitted the binding's timeframe entirely, forcing callers
+    /// to cross-reference the candidate list by hand to know which
+    /// timeframe a selected symbol/strategy pair actually binds to.
+    pub timeframe_secs: Option<i64>,
     pub disposition: String,
     pub reason_code: String,
     pub exact_reason_code: String,
@@ -68,10 +74,18 @@ pub(crate) struct DynamicSelectionCandidateRow {
     pub scanner_rank: Option<i32>,
 }
 
-fn symbol_row_from_record(rec: &mqk_db::DynamicSelectionPlanSymbolRecord) -> DynamicSelectionSymbolRow {
+fn symbol_row_from_record(
+    rec: &mqk_db::DynamicSelectionPlanSymbolRecord,
+    candidates: &[mqk_db::DynamicSelectionPlanCandidateRecord],
+) -> DynamicSelectionSymbolRow {
+    let timeframe_secs = candidates
+        .iter()
+        .find(|c| c.symbol == rec.symbol && c.selected)
+        .map(|c| c.timeframe_secs);
     DynamicSelectionSymbolRow {
         symbol: rec.symbol.clone(),
         selected_strategy_id: rec.selected_strategy_id.clone(),
+        timeframe_secs,
         disposition: rec.disposition.clone(),
         reason_code: rec.reason_code.clone(),
         exact_reason_code: rec.exact_reason_code.clone(),
@@ -210,7 +224,7 @@ pub(crate) async fn dynamic_selection_status(State(st): State<Arc<AppState>>) ->
     response.committed_configured_mode = Some(snapshot.configured_mode.as_str().to_string());
     response.committed_effective_mode = Some(snapshot.effective_mode.as_str().to_string());
     response.committed_live_lock_applied = snapshot.live_lock_applied;
-    response.disposition = Some(format!("{:?}", snapshot.disposition));
+    response.disposition = Some(snapshot.disposition.as_str().to_string());
     response.host_pool_present = snapshot.host_pool_present;
     response.host_pool_count = snapshot.selected_pair_count() as u64;
     response.evidence_persisted = snapshot.evidence_persisted;
@@ -261,15 +275,19 @@ pub(crate) async fn dynamic_selection_status(State(st): State<Arc<AppState>>) ->
     )
     .await
     {
-        Ok(BoundedDynamicSelectionPlanFetch::Complete(header, symbols, _candidates)) => {
+        Ok(BoundedDynamicSelectionPlanFetch::Complete(header, symbols, candidates)) => {
             response.committed_source_kind = Some(header.source_kind.clone());
             response.committed_source_identity = Some(header.source_identity.clone());
             response.committed_plan_truth_state = Some(header.truth_state.clone());
             for s in &symbols {
                 if s.disposition == "selected" {
-                    response.selected.push(symbol_row_from_record(s));
+                    response
+                        .selected
+                        .push(symbol_row_from_record(s, &candidates));
                 } else {
-                    response.refused.push(symbol_row_from_record(s));
+                    response
+                        .refused
+                        .push(symbol_row_from_record(s, &candidates));
                 }
             }
         }
@@ -531,7 +549,10 @@ pub(crate) async fn dynamic_selection_plan_by_id(
             truth_state: Some(header.truth_state.clone()),
             blockers: header.blockers.clone(),
             created_at_utc: Some(header.created_at_utc.to_rfc3339()),
-            symbols: symbols.iter().map(symbol_row_from_record).collect(),
+            symbols: symbols
+                .iter()
+                .map(|s| symbol_row_from_record(s, &candidates))
+                .collect(),
             candidates: candidates.iter().map(candidate_row_from_record).collect(),
             validation_state: validation_code(&validation),
             validation_detail: validation_detail(&validation),

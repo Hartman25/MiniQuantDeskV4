@@ -1314,7 +1314,7 @@ async fn dynamic_selection_readiness_projection(
         live_lock_applied: snapshot.as_ref().is_some_and(|s| s.live_lock_applied),
         disposition: snapshot
             .as_ref()
-            .map(|s| dynamic_selection_disposition_str(s.disposition).to_string()),
+            .map(|s| s.disposition.as_str().to_string()),
         plan_present: snapshot.as_ref().is_some_and(|s| s.plan_present()),
         host_pool_present: snapshot.as_ref().is_some_and(|s| s.host_pool_present()),
         selected_pair_count: snapshot
@@ -1326,22 +1326,6 @@ async fn dynamic_selection_readiness_projection(
         preview_configured_mode: preview.configured_mode.as_str().to_string(),
         preview_effective_mode: preview.effective_mode.as_str().to_string(),
         preview_live_lock_applied: preview.live_lock_applied,
-    }
-}
-
-/// Stable lowercase string for each closed disposition variant. Exhaustive
-/// by construction — a new variant added upstream fails this match at
-/// compile time rather than silently falling through.
-fn dynamic_selection_disposition_str(
-    disposition: crate::dynamic_selection_start_gate::DynamicSelectionStartGateDisposition,
-) -> &'static str {
-    use crate::dynamic_selection_start_gate::DynamicSelectionStartGateDisposition as D;
-    match disposition {
-        D::Off => "off",
-        D::ShadowAllowed => "shadow_allowed",
-        D::ShadowInvalid => "shadow_invalid",
-        D::PaperEnforcedAllowed => "paper_enforced_allowed",
-        D::PaperEnforcedRefused => "paper_enforced_refused",
     }
 }
 
