@@ -602,7 +602,10 @@ mod tests {
             BrokerKind::Alpaca,
         ));
         assert!(state.db.is_none(), "precondition: no DB configured");
-        let run_id = Uuid::new_v4();
+        let run_id = Uuid::new_v5(
+            &Uuid::NAMESPACE_DNS,
+            b"test.routes.dynamic_selection_evidence.plans_list_bad_limit",
+        );
 
         let resp = dynamic_selection_plans(
             State(Arc::clone(&state)),
@@ -649,7 +652,10 @@ mod tests {
             DeploymentMode::Paper,
             BrokerKind::Alpaca,
         ));
-        let plan_id = Uuid::new_v4();
+        let plan_id = Uuid::new_v5(
+            &Uuid::NAMESPACE_DNS,
+            b"test.routes.dynamic_selection_evidence.plan_detail_unknown_id",
+        );
 
         let resp = dynamic_selection_plan_by_id(State(state), Path(plan_id.to_string()))
             .await
