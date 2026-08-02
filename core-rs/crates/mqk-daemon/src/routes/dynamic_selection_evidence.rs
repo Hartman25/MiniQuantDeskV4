@@ -782,7 +782,7 @@ mod tests {
             source_kind: "watchlist_v2".to_string(),
             source_identity: "watchlist".to_string(),
             market_date: "2099-04-01".to_string(),
-            disposition: "shadow_allowed".to_string(),
+            disposition: "shadow_invalid".to_string(),
             truth_state: "computed".to_string(),
             blockers: vec![],
             symbol_count: 0,
@@ -810,7 +810,7 @@ mod tests {
         let body = body_json(resp).await;
         assert_eq!(body["found"], true);
         assert_eq!(body["run_id"], run_id.to_string());
-        assert_eq!(body["disposition"], "shadow_allowed");
+        assert_eq!(body["disposition"], "shadow_invalid");
         assert_eq!(body["truth_state"], "computed");
         assert_eq!(body["validation_state"], "valid");
 

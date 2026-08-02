@@ -204,10 +204,18 @@ async fn n05_control_arm_provenance_ref_matches_exact_durable_audit_events_uuid(
 
     // Seed a run with engine_id='mqk-daemon' so write_control_operator_audit_event
     // can resolve a run_id anchor via fetch_latest_run_for_engine.
+    // `write_control_operator_audit_event` resolves its run anchor via
+    // `fetch_latest_run_for_engine(engine_id="mqk-daemon", mode="PAPER")` --
+    // "latest" by `started_at_utc`. A fixed historical timestamp is not
+    // guaranteed to actually BE the latest once other tests in the same
+    // shared database insert their own (typically `Utc::now()`-stamped) rows
+    // for the same (engine_id, mode) pair, so this test's own row can lose
+    // "latest" to another test's row -- including one left with a "dirty"
+    // reconcile checkpoint, which then refuses this test's arm attempt with
+    // an unrelated 403. Stamping "now" keeps this test's row genuinely
+    // latest regardless of DB history accumulated earlier in a long session.
     let run_id = uuid::Uuid::parse_str("cc000005-0000-4000-8000-000000000099").unwrap();
-    let started_at = chrono::DateTime::parse_from_rfc3339("2020-01-05T10:00:00Z")
-        .unwrap()
-        .with_timezone(&chrono::Utc);
+    let started_at = chrono::Utc::now();
 
     // Pre-test cleanup.
     sqlx::query("delete from audit_events where run_id = $1")

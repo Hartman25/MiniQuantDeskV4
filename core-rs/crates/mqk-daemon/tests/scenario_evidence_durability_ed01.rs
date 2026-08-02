@@ -90,12 +90,14 @@ async fn ed01_01_events_feed_exposes_orchestrator_halt_rows() {
     let run_id = uuid::Uuid::parse_str("ed010001-0000-4000-8000-000000000001").unwrap();
     let event_id = uuid::Uuid::parse_str("ed010001-0000-4000-8000-000000000002").unwrap();
 
-    let started_at = chrono::DateTime::parse_from_rfc3339("2026-04-18T13:00:00Z")
-        .unwrap()
-        .with_timezone(&chrono::Utc);
-    let halt_ts = chrono::DateTime::parse_from_rfc3339("2026-04-18T13:30:00Z")
-        .unwrap()
-        .with_timezone(&chrono::Utc);
+    // The orchestrator lane's events/feed query is `ORDER BY ts_utc DESC
+    // LIMIT 50` -- a fixed historical timestamp is not guaranteed to survive
+    // that bounded window once 50+ more-recent rows accumulate in the shared
+    // test database over a long session (same root cause as AH-04's fix in
+    // scenario_auton_hist_durability_ah01.rs). Neither timestamp is asserted
+    // on directly below, so stamping both "now" is safe and durable.
+    let started_at = chrono::Utc::now();
+    let halt_ts = chrono::Utc::now();
 
     // Pre-test cleanup.
     sqlx::query("delete from audit_events where event_id = $1")
