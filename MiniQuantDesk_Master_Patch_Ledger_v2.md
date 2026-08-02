@@ -21033,3 +21033,33 @@ Recommended one-patch-at-a-time repair order (see full report for detail):
 DISPOSITION:
 MINIQUANTDESK-V4-FULL-REPOSITORY-VERIFICATION-COMPLETION-01:
 COMPLETE -- FULL AUDIT COVERAGE RECORDED; AWAITING CHATGPT AND OPERATOR REVIEW BEFORE PUSH
+
+---
+
+INGEST-JOB-CANCEL-STATUS-CONSTRAINT-REPAIR-01: CLOSED_LOCAL
+f83490523af8d2e254cabb002d354850029da4d1 on eaf81bc17a9b281a2342860a4576acf19b9c896b
+
+FULL-AUDIT-FAIL-012: CLOSED BY f83490523af8d2e254cabb002d354850029da4d1
+
+Migration 0061 widens sys_ingest_jobs_status_check (same constraint name) to
+admit 'cancelled', matching IngestJobStatus::as_str()/from_str() exactly.
+DB-backed ingest-job cancellation now returns 202 instead of 503.
+
+The ingest-cancel route was rewritten so DB persistence must succeed before
+any cancelled state is published to the in-memory store (previously memory
+was mutated first, so a failed persist could leave memory saying cancelled
+while the durable row did not). While proving that fix, a second,
+pre-existing DB-write race was found and closed in the same patch per
+operator instruction: persist_ingest_job_record's upsert now carries a
+conditional WHERE clause so a background CSV/dry-run/provider-sync task's
+in-flight progress or completion write can never overwrite a durably
+cancelled row, even when that write's DB round trip lands after the
+cancellation commit. A test-only synchronization-barrier hook (AppState
+fields, no effect when unset) reproduces both race windows deterministically
+in crates/mqk-daemon/tests/scenario_ingest_jobs_data_ingest_daemon_01.rs
+(db_05-db_15) and crates/mqk-db/tests/scenario_ingest_job_cancelled_status_constraint_01.rs
+(mig_01-mig_04). See docs/audits/full_repository_verification_2026-08-02.md
+for the full closure record.
+
+Not pushed. No other FULL-AUDIT-FAIL finding, trading semantics, or live
+capital path touched.

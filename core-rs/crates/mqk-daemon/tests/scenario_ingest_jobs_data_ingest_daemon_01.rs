@@ -2524,6 +2524,758 @@ async fn db_04_cancel_persists_cancelled_status_and_reason() {
     cleanup_ingest_job(&pool, job_id).await;
 }
 
+// DB-05: after a DB-backed cancel, GET status and GET list both read the
+// cancelled status back correctly (not just the raw persisted row).
+#[tokio::test]
+async fn db_05_get_and_list_read_cancelled_after_db_cancel() {
+    let Some(pool) = ingest_job_db_pool_or_skip("DB-05").await else {
+        return;
+    };
+
+    let mut st_raw =
+        state::AppState::new_with_operator_auth(state::OperatorAuthMode::ExplicitDevNoToken);
+    st_raw.db = Some(pool.clone());
+    let st = Arc::new(st_raw);
+
+    let job_id = uuid::Uuid::new_v4();
+    let record = seed_job_record(job_id, IngestJobStatus::Queued);
+    mqk_daemon::ingest_jobs::persist_ingest_job_record(&pool, &record)
+        .await
+        .expect("persist queued ingest job");
+
+    let router_cancel = routes::build_router(Arc::clone(&st));
+    let (status, _body) = post_cancel_job(router_cancel, job_id).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "DB cancel must → 202");
+
+    // A brand new process-local state (empty in-memory store) forces the GET
+    // routes below to prove the *durable* row, not a lucky in-memory cache.
+    let mut fresh =
+        state::AppState::new_with_operator_auth(state::OperatorAuthMode::ExplicitDevNoToken);
+    fresh.db = Some(pool.clone());
+    let fresh = Arc::new(fresh);
+
+    let router_status = routes::build_router(Arc::clone(&fresh));
+    let (status, body) = get_job_status(router_status, &job_id.to_string()).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(
+        json_str(&body, "status"),
+        "cancelled",
+        "GET status must read cancelled from DB"
+    );
+
+    let router_list = routes::build_router(fresh);
+    let req = Request::builder()
+        .uri("/api/v1/ingest/jobs")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status, body) = call(router_list, req).await;
+    assert_eq!(status, StatusCode::OK);
+    let list_body = parse_json(body);
+    let jobs = list_body["jobs"]
+        .as_array()
+        .expect("list response must have a jobs array");
+    let found = jobs
+        .iter()
+        .find(|j| j["job_id"].as_str() == Some(job_id.to_string().as_str()))
+        .unwrap_or_else(|| panic!("cancelled job must appear in list: {list_body}"));
+    assert_eq!(found["status"].as_str(), Some("cancelled"));
+
+    cleanup_ingest_job(&pool, job_id).await;
+}
+
+// DB-06: repeated cancel of an already-cancelled DB-backed job is idempotent
+// — second call returns already_terminal, accepted=false, and does not
+// disturb the durable row.
+#[tokio::test]
+async fn db_06_repeated_cancel_on_db_job_is_idempotent() {
+    let Some(pool) = ingest_job_db_pool_or_skip("DB-06").await else {
+        return;
+    };
+
+    let mut st_raw =
+        state::AppState::new_with_operator_auth(state::OperatorAuthMode::ExplicitDevNoToken);
+    st_raw.db = Some(pool.clone());
+    let st = Arc::new(st_raw);
+
+    let job_id = uuid::Uuid::new_v4();
+    let record = seed_job_record(job_id, IngestJobStatus::Queued);
+    mqk_daemon::ingest_jobs::persist_ingest_job_record(&pool, &record)
+        .await
+        .expect("persist queued ingest job");
+
+    let router_first = routes::build_router(Arc::clone(&st));
+    let (status, body) = post_cancel_job(router_first, job_id).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "first cancel must → 202");
+    assert_eq!(json_str(&body, "status"), "cancelled");
+
+    let first_persisted = mqk_daemon::ingest_jobs::load_persisted_ingest_job(&pool, job_id)
+        .await
+        .expect("load after first cancel")
+        .expect("row must exist");
+
+    let router_second = routes::build_router(Arc::clone(&st));
+    let (status, body) = post_cancel_job(router_second, job_id).await;
+    assert_eq!(status, StatusCode::OK, "repeated cancel must → 200, not 202");
+    assert_eq!(json_str(&body, "truth_state"), "already_terminal");
+    assert!(
+        !json_bool(&body, "accepted"),
+        "repeated cancel must not be accepted: {body}"
+    );
+    assert_eq!(json_str(&body, "status"), "cancelled");
+
+    let second_persisted = mqk_daemon::ingest_jobs::load_persisted_ingest_job(&pool, job_id)
+        .await
+        .expect("load after second cancel")
+        .expect("row must still exist");
+    assert_eq!(
+        first_persisted.completed_at_utc, second_persisted.completed_at_utc,
+        "repeated cancel must not rewrite the durable terminal row"
+    );
+
+    cleanup_ingest_job(&pool, job_id).await;
+}
+
+// DB-07: a job never seen by this process's in-memory store (loaded fresh
+// from DB) can be cancelled, persisted, and cached coherently.
+#[tokio::test]
+async fn db_07_db_only_job_cancellation_caches_coherent_memory() {
+    let Some(pool) = ingest_job_db_pool_or_skip("DB-07") .await else {
+        return;
+    };
+
+    let job_id = uuid::Uuid::new_v4();
+    let record = seed_job_record(job_id, IngestJobStatus::Running);
+    mqk_daemon::ingest_jobs::persist_ingest_job_record(&pool, &record)
+        .await
+        .expect("persist running ingest job");
+
+    // Fresh AppState: this job_id has never been inserted into its
+    // in-memory store, so cancel must take the DB-only load-then-cancel path.
+    let mut st_raw =
+        state::AppState::new_with_operator_auth(state::OperatorAuthMode::ExplicitDevNoToken);
+    st_raw.db = Some(pool.clone());
+    let st = Arc::new(st_raw);
+
+    let router_cancel = routes::build_router(Arc::clone(&st));
+    let (status, body) = post_cancel_job(router_cancel, job_id).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "DB-only cancel must → 202");
+    assert_eq!(json_str(&body, "truth_state"), "cancel_accepted");
+    assert_eq!(json_str(&body, "status"), "cancelled");
+
+    let persisted = mqk_daemon::ingest_jobs::load_persisted_ingest_job(&pool, job_id)
+        .await
+        .expect("load cancelled job")
+        .expect("cancelled job must be persisted");
+    assert_eq!(persisted.status.as_str(), "cancelled");
+
+    // The record must now also be cached in this process's in-memory store
+    // (same st, same Arc<Mutex<HashMap>>), coherent with the durable row.
+    {
+        let cached = st
+            .ingest_jobs
+            .lock()
+            .expect("ingest_jobs lock poisoned")
+            .get(&job_id)
+            .cloned()
+            .expect("DB-only job must be cached in memory after cancel");
+        assert_eq!(cached.status, IngestJobStatus::Cancelled);
+        // Postgres truncates timestamptz to microsecond precision, so compare
+        // at that precision rather than requiring exact nanosecond equality.
+        assert_eq!(
+            cached.completed_at_utc.map(|t| t.timestamp_micros()),
+            persisted.completed_at_utc.map(|t| t.timestamp_micros())
+        );
+    }
+
+    cleanup_ingest_job(&pool, job_id).await;
+}
+
+// DB-08: when durable persistence fails mid-cancel, the route returns
+// 503/accepted=false and leaves BOTH memory and the durable row at their
+// pre-request truth (no partial/false terminal state anywhere) — then a
+// retry against a healthy DB produces one coherent cancelled state.
+#[tokio::test]
+async fn db_08_persistence_failure_then_retry_produces_one_coherent_cancel() {
+    let Some(pool) = ingest_job_db_pool_or_skip("DB-08").await else {
+        return;
+    };
+
+    let job_id = uuid::Uuid::new_v4();
+    let record = seed_job_record(job_id, IngestJobStatus::Queued);
+    // Seed the real, reachable durable row directly (not through the broken
+    // AppState below) so DB pre-request truth is established independently.
+    mqk_daemon::ingest_jobs::persist_ingest_job_record(&pool, &record)
+        .await
+        .expect("persist queued ingest job");
+
+    // A lazily-connecting pool against an unreachable address: connect()
+    // never blocks (lazy), but any query against it fails — a self-contained
+    // "DB became unreachable mid-request" fixture that never touches the
+    // real isolated test pool. Mirrors the established idiom in
+    // scenario_durable_paper_portfolio_snapshot_persistence_01.rs.
+    let unreachable_pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect_lazy("postgres://postgres:postgres@127.0.0.1:1/mqk_test?sslmode=disable")
+        .expect("lazy connect should not fail synchronously");
+
+    let mut st_raw =
+        state::AppState::new_with_operator_auth(state::OperatorAuthMode::ExplicitDevNoToken);
+    st_raw.db = Some(unreachable_pool);
+    let st = Arc::new(st_raw);
+    insert_seed_job(&st, record.clone());
+
+    let router_fail = routes::build_router(Arc::clone(&st));
+    let (status, body) = post_cancel_job(router_fail, job_id).await;
+    assert_eq!(
+        status,
+        StatusCode::SERVICE_UNAVAILABLE,
+        "cancel with broken DB must → 503: {body}"
+    );
+    assert_eq!(json_str(&body, "truth_state"), "backend_unavailable");
+    assert!(
+        !json_bool(&body, "accepted"),
+        "failed persistence must not be accepted: {body}"
+    );
+
+    // Memory must be untouched: still 'queued', not a fabricated 'cancelled'.
+    {
+        let cached = st
+            .ingest_jobs
+            .lock()
+            .expect("ingest_jobs lock poisoned")
+            .get(&job_id)
+            .cloned()
+            .expect("job must still be present in memory");
+        assert_eq!(
+            cached.status,
+            IngestJobStatus::Queued,
+            "memory must not be mutated to cancelled when persistence fails"
+        );
+    }
+
+    // The durable row (read through the healthy pool) must also be
+    // untouched.
+    let after_failure = mqk_daemon::ingest_jobs::load_persisted_ingest_job(&pool, job_id)
+        .await
+        .expect("load after failed cancel")
+        .expect("row must still exist");
+    assert_eq!(
+        after_failure.status.as_str(),
+        "queued",
+        "durable row must remain at pre-request truth when persistence fails"
+    );
+
+    // Retry with a healthy DB pool, sharing the same in-memory store (same
+    // process, same job — only the DB reachability changed, as it would
+    // across a real reconnect).
+    let mut st_retry_raw =
+        state::AppState::new_with_operator_auth(state::OperatorAuthMode::ExplicitDevNoToken);
+    st_retry_raw.db = Some(pool.clone());
+    st_retry_raw.ingest_jobs = Arc::clone(&st.ingest_jobs);
+    let st_retry = Arc::new(st_retry_raw);
+
+    let router_retry = routes::build_router(Arc::clone(&st_retry));
+    let (status, body) = post_cancel_job(router_retry, job_id).await;
+    assert_eq!(status, StatusCode::ACCEPTED, "retry cancel must → 202: {body}");
+    assert_eq!(json_str(&body, "status"), "cancelled");
+
+    let after_retry = mqk_daemon::ingest_jobs::load_persisted_ingest_job(&pool, job_id)
+        .await
+        .expect("load after retry")
+        .expect("row must exist");
+    assert_eq!(after_retry.status.as_str(), "cancelled");
+
+    let cached_after_retry = st_retry
+        .ingest_jobs
+        .lock()
+        .expect("ingest_jobs lock poisoned")
+        .get(&job_id)
+        .cloned()
+        .expect("job must be cached after retry");
+    assert_eq!(cached_after_retry.status, IngestJobStatus::Cancelled);
+    // Postgres truncates timestamptz to microsecond precision, so compare at
+    // that precision rather than requiring exact nanosecond equality.
+    assert_eq!(
+        cached_after_retry.completed_at_utc.map(|t| t.timestamp_micros()),
+        after_retry.completed_at_utc.map(|t| t.timestamp_micros()),
+        "memory and DB must agree on the single coherent cancelled state"
+    );
+
+    cleanup_ingest_job(&pool, job_id).await;
+}
+
+// ---------------------------------------------------------------------------
+// CAS guard: persist_ingest_job_record refuses to let a non-cancel write
+// overwrite a durably cancelled row (INGEST-JOB-CANCEL-STATUS-CONSTRAINT-
+// REPAIR-01 follow-up). These tests call the persistence function directly
+// in a caller-controlled order — "cancel commits, then a stale write
+// arrives" — which reproduces the exact interleaving a real race can
+// produce, deterministically and without any timing dependency: the order
+// of the two DB calls in test code IS the ordering under test.
+// ---------------------------------------------------------------------------
+
+/// A background progress write (status unchanged, only counters bumped)
+/// that lands after cancellation has already committed must not revert the
+/// durable row away from cancelled.
+#[tokio::test]
+async fn db_10_cas_blocks_stale_progress_write_after_cancel_commit() {
+    let Some(pool) = ingest_job_db_pool_or_skip("DB-10").await else {
+        return;
+    };
+
+    let job_id = uuid::Uuid::new_v4();
+    let queued = seed_job_record(job_id, IngestJobStatus::Queued);
+    mqk_daemon::ingest_jobs::persist_ingest_job_record(&pool, &queued)
+        .await
+        .expect("seed queued row");
+
+    // The cancel commit lands first.
+    let mut cancelled = queued.clone();
+    cancelled.status = IngestJobStatus::Cancelled;
+    cancelled.completed_at_utc = Some(chrono::Utc::now());
+    cancelled.error = Some("cancel requested by operator".to_string());
+    mqk_daemon::ingest_jobs::persist_ingest_job_record(&pool, &cancelled)
+        .await
+        .expect("cancel commit must persist");
+
+    // A background progress write that read its in-memory record *before*
+    // cancellation, then finally completes its own DB round trip *after*
+    // the cancel commit above — same shape as the per-symbol progress
+    // persist in run_real_provider_sync.
+    let mut stale_progress = queued.clone();
+    stale_progress.status = IngestJobStatus::Running;
+    stale_progress.api_calls_made = 5;
+    stale_progress.symbols_completed = Some(3);
+    stale_progress.symbols_failed = Some(0);
+    mqk_daemon::ingest_jobs::persist_ingest_job_record(&pool, &stale_progress)
+        .await
+        .expect("stale write must not error, only no-op");
+
+    let persisted = mqk_daemon::ingest_jobs::load_persisted_ingest_job(&pool, job_id)
+        .await
+        .expect("load")
+        .expect("row must exist");
+    assert_eq!(
+        persisted.status,
+        IngestJobStatus::Cancelled,
+        "stale progress write must not replace the durable cancelled status"
+    );
+    let err = persisted.error.as_deref().unwrap_or("");
+    assert!(
+        err.contains("cancel requested by operator"),
+        "operator cancellation reason must survive the stale write, got: {err}"
+    );
+    assert_eq!(
+        persisted.api_calls_made, 0,
+        "the blocked write's counters must not be applied either"
+    );
+
+    cleanup_ingest_job(&pool, job_id).await;
+}
+
+/// A terminal completion write (completed/failed/partial/dry_run_completed)
+/// racing in after cancellation must not replace cancelled — the guard
+/// applies to every non-cancel status value, not just in-progress ones.
+#[tokio::test]
+async fn db_11_cas_blocks_stale_terminal_completion_write_after_cancel_commit() {
+    let Some(pool) = ingest_job_db_pool_or_skip("DB-11").await else {
+        return;
+    };
+
+    for stale_status in [
+        IngestJobStatus::Completed,
+        IngestJobStatus::Failed,
+        IngestJobStatus::Partial,
+        IngestJobStatus::DryRunCompleted,
+    ] {
+        let job_id = uuid::Uuid::new_v4();
+        let queued = seed_job_record(job_id, IngestJobStatus::Running);
+        mqk_daemon::ingest_jobs::persist_ingest_job_record(&pool, &queued)
+            .await
+            .expect("seed running row");
+
+        let mut cancelled = queued.clone();
+        cancelled.status = IngestJobStatus::Cancelled;
+        cancelled.completed_at_utc = Some(chrono::Utc::now());
+        cancelled.error = Some("cancel requested by operator".to_string());
+        mqk_daemon::ingest_jobs::persist_ingest_job_record(&pool, &cancelled)
+            .await
+            .expect("cancel commit must persist");
+
+        let mut stale_terminal = queued.clone();
+        stale_terminal.status = stale_status.clone();
+        stale_terminal.completed_at_utc = Some(chrono::Utc::now());
+        stale_terminal.rows_inserted = Some(999);
+        mqk_daemon::ingest_jobs::persist_ingest_job_record(&pool, &stale_terminal)
+            .await
+            .unwrap_or_else(|e| {
+                panic!("stale terminal write ({stale_status:?}) must not error: {e}")
+            });
+
+        let persisted = mqk_daemon::ingest_jobs::load_persisted_ingest_job(&pool, job_id)
+            .await
+            .expect("load")
+            .expect("row must exist");
+        assert_eq!(
+            persisted.status,
+            IngestJobStatus::Cancelled,
+            "stale terminal write ({stale_status:?}) must not replace cancelled"
+        );
+        assert_ne!(
+            persisted.rows_inserted,
+            Some(999),
+            "blocked terminal write's fields must not be applied ({stale_status:?})"
+        );
+
+        cleanup_ingest_job(&pool, job_id).await;
+    }
+}
+
+/// Repeated stale writes (simulating a flaky/retrying background task)
+/// never accumulate into flipping the row back to a non-terminal status —
+/// each one independently no-ops against the same guard.
+#[tokio::test]
+async fn db_12_cas_blocks_repeated_stale_writes_after_cancel_commit() {
+    let Some(pool) = ingest_job_db_pool_or_skip("DB-12").await else {
+        return;
+    };
+
+    let job_id = uuid::Uuid::new_v4();
+    let queued = seed_job_record(job_id, IngestJobStatus::Running);
+    mqk_daemon::ingest_jobs::persist_ingest_job_record(&pool, &queued)
+        .await
+        .expect("seed running row");
+
+    let mut cancelled = queued.clone();
+    cancelled.status = IngestJobStatus::Cancelled;
+    cancelled.completed_at_utc = Some(chrono::Utc::now());
+    cancelled.error = Some("cancel requested by operator".to_string());
+    mqk_daemon::ingest_jobs::persist_ingest_job_record(&pool, &cancelled)
+        .await
+        .expect("cancel commit must persist");
+
+    for attempt in 0..5 {
+        let mut stale = queued.clone();
+        stale.status = IngestJobStatus::Running;
+        stale.api_calls_made = attempt;
+        mqk_daemon::ingest_jobs::persist_ingest_job_record(&pool, &stale)
+            .await
+            .expect("stale retry write must not error");
+
+        let persisted = mqk_daemon::ingest_jobs::load_persisted_ingest_job(&pool, job_id)
+            .await
+            .expect("load")
+            .expect("row must exist");
+        assert_eq!(
+            persisted.status,
+            IngestJobStatus::Cancelled,
+            "attempt {attempt}: repeated stale write must never revert cancelled"
+        );
+    }
+
+    cleanup_ingest_job(&pool, job_id).await;
+}
+
+/// The guard must not block normal writes when the job was never
+/// cancelled: queued -> running -> completed all apply as before.
+#[tokio::test]
+async fn db_13_cas_does_not_block_normal_uncancelled_progression() {
+    let Some(pool) = ingest_job_db_pool_or_skip("DB-13").await else {
+        return;
+    };
+
+    let job_id = uuid::Uuid::new_v4();
+    let queued = seed_job_record(job_id, IngestJobStatus::Queued);
+    mqk_daemon::ingest_jobs::persist_ingest_job_record(&pool, &queued)
+        .await
+        .expect("seed queued row");
+
+    let mut running = queued.clone();
+    running.status = IngestJobStatus::Running;
+    running.api_calls_made = 3;
+    mqk_daemon::ingest_jobs::persist_ingest_job_record(&pool, &running)
+        .await
+        .expect("normal running write must apply");
+
+    let after_running = mqk_daemon::ingest_jobs::load_persisted_ingest_job(&pool, job_id)
+        .await
+        .expect("load")
+        .expect("row must exist");
+    assert_eq!(after_running.status, IngestJobStatus::Running);
+    assert_eq!(after_running.api_calls_made, 3);
+
+    let mut completed = running.clone();
+    completed.status = IngestJobStatus::Completed;
+    completed.completed_at_utc = Some(chrono::Utc::now());
+    completed.rows_inserted = Some(42);
+    mqk_daemon::ingest_jobs::persist_ingest_job_record(&pool, &completed)
+        .await
+        .expect("normal completion write must apply");
+
+    let after_completed = mqk_daemon::ingest_jobs::load_persisted_ingest_job(&pool, job_id)
+        .await
+        .expect("load")
+        .expect("row must exist");
+    assert_eq!(after_completed.status, IngestJobStatus::Completed);
+    assert_eq!(after_completed.rows_inserted, Some(42));
+
+    cleanup_ingest_job(&pool, job_id).await;
+}
+
+// ---------------------------------------------------------------------------
+// Full-stack barrier proofs: a real background provider-sync task, paused
+// deterministically (via `tokio::sync::Notify` barriers, never a sleep) at
+// two different points relative to a real, fully-awaited cancel request.
+// Proves the invariant end-to-end (HTTP route -> background task -> DB ->
+// memory), not just at the persistence-function level above.
+//
+// db_14 pauses *before* the background task's own in-memory read (inside
+// the injected provider's fetch call), so cancellation's in-memory publish
+// always happens first -- this exercises the pre-existing `mutate_job`
+// terminal-status guard and proves end-to-end coherence in that ordering.
+//
+// db_15 pauses *after* the background task's own in-memory read but
+// *before* its durable persist (using `ingest_job_persist_barrier_for_test`,
+// wired into `persist_job_update` in routes/ingest.rs), so the background
+// write's captured record is a stale, non-cancelled snapshot by the time
+// cancellation commits to the DB first -- this is the exact DB-layer race
+// (a background write racing in *after* the cancel DB commit) that
+// `persist_ingest_job_record`'s conditional `where` clause exists to close,
+// reproduced through the real HTTP + background-task path rather than by
+// calling the persistence function directly.
+// ---------------------------------------------------------------------------
+
+/// A `HistoricalProvider` that deterministically signals when it has been
+/// entered and then blocks until the test releases it — the barrier that
+/// makes the race window controllable instead of timing-dependent.
+struct BarrierProvider {
+    entered: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait::async_trait]
+impl mqk_md::HistoricalProvider for BarrierProvider {
+    fn source_name(&self) -> &'static str {
+        "barrier_test_provider"
+    }
+
+    async fn fetch_bars(
+        &self,
+        _req: mqk_md::FetchBarsRequest,
+    ) -> anyhow::Result<Vec<mqk_md::ProviderBar>> {
+        self.entered.notify_one();
+        self.release.notified().await;
+        Ok(vec![])
+    }
+}
+
+#[tokio::test]
+async fn db_14_barrier_proves_background_write_cannot_overwrite_cancel_commit() {
+    let Some(pool) = ingest_job_db_pool_or_skip("DB-14").await else {
+        return;
+    };
+
+    let (mut st_raw, _) = make_provider_router_with_registry_raw();
+    st_raw.db = Some(pool.clone());
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    st_raw.set_provider_client_for_test(Arc::new(BarrierProvider {
+        entered: Arc::clone(&entered),
+        release: Arc::clone(&release),
+    }));
+    let st = Arc::new(st_raw);
+
+    let router_post = routes::build_router(Arc::clone(&st));
+    let (status, body) = post_provider_job(
+        router_post,
+        serde_json::json!({
+            "source": "twelvedata",
+            "mode": "sync_provider",
+            "timeframe": "1D",
+            "symbols_source": "registry",
+            "dry_run": false,
+            "allow_provider_api_calls": true,
+            "start": "2026-01-01",
+            "end": "2026-01-05"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "real job must queue: {body}");
+    let job_id: uuid::Uuid = json_str(&body, "job_id")
+        .parse()
+        .expect("job_id must parse");
+
+    // Deterministic barrier: block until the background task is inside
+    // fetch_bars for the first symbol. It has already checked
+    // ingest_job_is_cancelled()==false and is now paused exactly in the
+    // check-then-act gap this patch closes -- not a timing guess.
+    entered.notified().await;
+
+    // Cancel and fully await the response: guarantees both the durable row
+    // and the in-memory store are committed 'cancelled' before the
+    // background task is allowed to resume.
+    let router_cancel = routes::build_router(Arc::clone(&st));
+    let (status, body) = post_cancel_job(router_cancel, job_id).await;
+    assert_eq!(
+        status,
+        StatusCode::ACCEPTED,
+        "cancel during in-flight fetch must → 202: {body}"
+    );
+    assert_eq!(json_str(&body, "status"), "cancelled");
+
+    let persisted_before_release = mqk_daemon::ingest_jobs::load_persisted_ingest_job(&pool, job_id)
+        .await
+        .expect("load before release")
+        .expect("row must exist");
+    assert_eq!(persisted_before_release.status.as_str(), "cancelled");
+
+    // Release the paused background task. It will complete the fetch,
+    // process the (empty) result as a completed symbol, and attempt its
+    // own progress persist -- exactly the racing write this patch's CAS
+    // guard blocks -- before its own cancellation re-check makes it return.
+    release.notify_one();
+
+    // The background task's only remaining work after release is one more
+    // DB write (blocked by the guard) and its own cancellation check before
+    // returning; the race window itself was already deterministically
+    // resolved by the barrier above. Poll repeatedly through that window
+    // and require the durable row to read 'cancelled' on *every* single
+    // observation, so even a transient overwrite would fail this test.
+    for _ in 0..40 {
+        let persisted = mqk_daemon::ingest_jobs::load_persisted_ingest_job(&pool, job_id)
+            .await
+            .expect("load during settle window")
+            .expect("row must exist");
+        assert_eq!(
+            persisted.status.as_str(),
+            "cancelled",
+            "durable row must never be observed as anything but cancelled once cancel has committed"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    // In-memory must agree with the durable row.
+    let cached = st
+        .ingest_jobs
+        .lock()
+        .expect("ingest_jobs lock poisoned")
+        .get(&job_id)
+        .cloned()
+        .expect("job must be cached");
+    assert_eq!(cached.status, IngestJobStatus::Cancelled);
+    let cached_error = cached.error.as_deref().unwrap_or("");
+    assert!(
+        cached_error.contains("cancel requested by operator"),
+        "in-memory cancellation reason must be preserved, got: {cached_error}"
+    );
+
+    cleanup_ingest_job(&pool, job_id).await;
+}
+
+/// The true DB-write race: a background progress write's `mutate_job` read
+/// (capturing status=Running) completes *before* cancellation exists at
+/// all, but its durable persist is deterministically held back until
+/// *after* a concurrent cancel request has fully committed to the DB. This
+/// reproduces "a background progress write racing after the cancel DB
+/// commit" end-to-end, not just via direct sequential calls (db_10).
+#[tokio::test]
+async fn db_15_barrier_proves_stale_write_committed_after_cancel_db_commit_is_blocked() {
+    let Some(pool) = ingest_job_db_pool_or_skip("DB-15").await else {
+        return;
+    };
+
+    let (mut st_raw, _) = make_provider_router_with_registry_raw();
+    st_raw.db = Some(pool.clone());
+    // No delay needed here -- the pause point is the persist barrier below,
+    // not the provider call, so a plain zero-network fake is sufficient.
+    st_raw.set_provider_client_for_test(Arc::new(FakeProvider::empty()));
+    let persist_entered = Arc::new(tokio::sync::Notify::new());
+    let persist_release = Arc::new(tokio::sync::Notify::new());
+    st_raw.set_ingest_job_persist_barrier_entered_for_test(Arc::clone(&persist_entered));
+    st_raw.set_ingest_job_persist_barrier_for_test(Arc::clone(&persist_release));
+    let st = Arc::new(st_raw);
+
+    let router_post = routes::build_router(Arc::clone(&st));
+    let (status, body) = post_provider_job(
+        router_post,
+        serde_json::json!({
+            "source": "twelvedata",
+            "mode": "sync_provider",
+            "timeframe": "1D",
+            "symbols_source": "registry",
+            "dry_run": false,
+            "allow_provider_api_calls": true,
+            "start": "2026-01-01",
+            "end": "2026-01-05"
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::ACCEPTED, "real job must queue: {body}");
+    let job_id: uuid::Uuid = json_str(&body, "job_id")
+        .parse()
+        .expect("job_id must parse");
+
+    // Deterministic barrier: block until the background task's per-symbol
+    // progress write has already read its in-memory record (status=Running,
+    // captured *before* any cancellation exists) and is now paused
+    // immediately before its own durable persist call.
+    persist_entered.notified().await;
+
+    // Cancel and fully await the response: the durable row and in-memory
+    // store are BOTH committed 'cancelled' while the background write is
+    // still paused, holding a stale non-cancelled record it hasn't
+    // persisted yet.
+    let router_cancel = routes::build_router(Arc::clone(&st));
+    let (status, body) = post_cancel_job(router_cancel, job_id).await;
+    assert_eq!(
+        status,
+        StatusCode::ACCEPTED,
+        "cancel while background write is paused must → 202: {body}"
+    );
+    assert_eq!(json_str(&body, "status"), "cancelled");
+
+    let persisted_before_release = mqk_daemon::ingest_jobs::load_persisted_ingest_job(&pool, job_id)
+        .await
+        .expect("load before release")
+        .expect("row must exist");
+    assert_eq!(persisted_before_release.status.as_str(), "cancelled");
+
+    // Release the paused background write: it now attempts to persist its
+    // stale, captured-before-cancellation record (status=Running) — landing
+    // *after* the cancel commit above. This is exactly the race
+    // `persist_ingest_job_record`'s conditional `where` clause blocks.
+    persist_release.notify_one();
+
+    // The background write's stale persist attempt is the only remaining
+    // work; poll repeatedly through that window and require the durable row
+    // to read 'cancelled' on every single observation.
+    for _ in 0..40 {
+        let persisted = mqk_daemon::ingest_jobs::load_persisted_ingest_job(&pool, job_id)
+            .await
+            .expect("load during settle window")
+            .expect("row must exist");
+        assert_eq!(
+            persisted.status.as_str(),
+            "cancelled",
+            "the stale background write (captured before cancellation) must never overwrite \
+             the durable cancelled row, even though it lands after the cancel DB commit"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+    }
+
+    // In-memory must also stay coherent with the durable row.
+    let cached = st
+        .ingest_jobs
+        .lock()
+        .expect("ingest_jobs lock poisoned")
+        .get(&job_id)
+        .cloned()
+        .expect("job must be cached");
+    assert_eq!(cached.status, IngestJobStatus::Cancelled);
+
+    cleanup_ingest_job(&pool, job_id).await;
+}
+
 // ---------------------------------------------------------------------------
 // DAILY-DATA-READINESS-01B2-INGEST-TRUTHFULNESS-REPAIR-01 (Repair 1):
 // historical-sync symbol-mismatch truthfulness.

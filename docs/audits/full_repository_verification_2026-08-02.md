@@ -444,3 +444,27 @@ Each item below is independent and must be its own patch (no bundling), most ope
 7. **MQK-DAEMON-BACKEND-TARGET-ASSERTION-WIDEN-01** — widen the two exact-match backend-target assertions to `contains` semantics (FULL-AUDIT-FAIL-015).
 8. **RESEARCH-PY-RUN-SWEEP-SYNTAX-FIX-01** — escape the nested quotes in the dead `run_sweep.py` module, or delete it if truly unreferenced (FULL-AUDIT-FAIL-007).
 9. Not independently patch-worthy: FULL-AUDIT-FAIL-017 (order-dependence is a shared-test-DB operational hazard, not a code defect — recommend a per-suite disposable-DB or explicit-cleanup convention rather than a source patch) and FULL-AUDIT-FAIL-018 (not a defect).
+
+## INGEST-JOB-CANCEL-STATUS-CONSTRAINT-REPAIR-01 closure
+
+FULL-AUDIT-FAIL-012: CLOSED BY f83490523af8d2e254cabb002d354850029da4d1
+
+Migration `0061_ingest_job_cancelled_status.sql` widens `sys_ingest_jobs_status_check`
+(same constraint name) to admit `'cancelled'`, matching `IngestJobStatus::as_str()`/
+`from_str()` exactly; all previously legal statuses are preserved. Proven on a fresh
+migration chain and on a 0060 -> 0061 upgrade, both against disposable databases on
+the isolated port-5434 test Postgres (never the shared `mqk_test` database directly).
+
+The ingest-cancel route was also rewritten so DB persistence must succeed before any
+cancelled state is published to the in-memory store, and `persist_ingest_job_record`'s
+upsert now carries a conditional `WHERE` clause so a background CSV/dry-run/provider-
+sync write can never overwrite a durably cancelled row — a DB-write race between
+cancellation and an in-flight background persist found while proving the constraint
+fix, and closed in the same patch per operator instruction. Proven deterministically
+(direct controlled-order persistence calls plus two `tokio::sync::Notify`-barrier
+full-stack tests, no timing sleeps for the race window itself) in
+`crates/mqk-daemon/tests/scenario_ingest_jobs_data_ingest_daemon_01.rs`
+(`db_10`-`db_15`) and `crates/mqk-db/tests/scenario_ingest_job_cancelled_status_constraint_01.rs`
+(`mig_01`-`mig_04`).
+
+No other FULL-AUDIT-FAIL finding is affected by this patch.
