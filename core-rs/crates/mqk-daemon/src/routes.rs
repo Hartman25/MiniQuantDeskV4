@@ -51,6 +51,7 @@ pub(crate) mod portfolio_provenance;
 pub(crate) mod reconcile;
 pub(crate) mod repair;
 pub(crate) mod strategy;
+pub(crate) mod dynamic_selection_evidence;
 pub(crate) mod strategy_conflict;
 pub(crate) mod strategy_promotions;
 pub(crate) mod strategy_scans;
@@ -311,6 +312,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         multi_symbol_dispatch_summary, strategy_dry_run_status, strategy_signal, strategy_summary,
         strategy_suppressions,
     };
+    use dynamic_selection_evidence::{
+        dynamic_selection_plan_by_id, dynamic_selection_plans, dynamic_selection_status,
+    };
     use strategy_conflict::{
         strategy_conflict_plan_by_id, strategy_conflict_plans, strategy_conflict_status,
     };
@@ -492,6 +496,22 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/v1/strategy/conflict/plans/:plan_id",
             get(strategy_conflict_plan_by_id),
+        )
+        // DYNAMIC-STRATEGY-SYMBOL-SELECTION-01 Phase 7C Part 4: read-only
+        // durable dynamic-selection plan evidence truth. GET-only -- never
+        // starts/stops/mutates a run, mode, or host. approved_for_live is
+        // always false in every response.
+        .route(
+            "/api/v1/dynamic-selection/status",
+            get(dynamic_selection_status),
+        )
+        .route(
+            "/api/v1/dynamic-selection/plans",
+            get(dynamic_selection_plans),
+        )
+        .route(
+            "/api/v1/dynamic-selection/plans/:plan_id",
+            get(dynamic_selection_plan_by_id),
         )
         // PAPER-DAILY-PNL-CAPTURE-01D: read-only baseline provenance lookup
         // by trading_date (public, no auth). No DB writes, no broker/provider

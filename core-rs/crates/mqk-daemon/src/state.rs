@@ -4544,6 +4544,35 @@ operator_reconcile_or_repair_required"
     /// Read-only snapshot of the current dynamic-selection runtime truth,
     /// projected from ownership metadata. `None` when no run is active or
     /// the starting/active run's disposition has not committed one.
+    /// Phase 7C Part 4: the current `LocalRuntimeOwnership` state, collapsed
+    /// to the closed four-value operator vocabulary
+    /// `idle`/`starting`/`running`/`degraded` (`Reserved` counts as
+    /// `starting` — ownership exists but no run metadata is committed yet).
+    /// Read-only; never mutates ownership.
+    pub(crate) async fn local_runtime_lifecycle_label(&self) -> &'static str {
+        match &*self.runtime_ownership.lock().await {
+            LocalRuntimeOwnership::Idle => "idle",
+            LocalRuntimeOwnership::Reserved { .. } | LocalRuntimeOwnership::Starting { .. } => {
+                "starting"
+            }
+            LocalRuntimeOwnership::Active { .. } => "running",
+            LocalRuntimeOwnership::Degraded { .. } => "degraded",
+        }
+    }
+
+    /// Phase 7C Part 4: the `run_id` behind the current ownership state, for
+    /// every non-`Idle` state (`Reserved`/`Starting`/`Active`/`Degraded` all
+    /// carry one). `None` only for `Idle`.
+    pub(crate) async fn local_runtime_owning_run_id(&self) -> Option<Uuid> {
+        match &*self.runtime_ownership.lock().await {
+            LocalRuntimeOwnership::Idle => None,
+            LocalRuntimeOwnership::Reserved { run_id }
+            | LocalRuntimeOwnership::Starting { run_id, .. }
+            | LocalRuntimeOwnership::Active { run_id, .. }
+            | LocalRuntimeOwnership::Degraded { run_id, .. } => Some(*run_id),
+        }
+    }
+
     pub async fn dynamic_selection_runtime_snapshot(&self) -> Option<DynamicSelectionRuntimeState> {
         let metadata = {
             let lock = self.runtime_ownership.lock().await;
