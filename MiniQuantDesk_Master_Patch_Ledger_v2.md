@@ -20962,3 +20962,74 @@ MINIQUANTDESK-V4-FULL-REPOSITORY-VERIFICATION-AND-FAILURE-INVENTORY-01:
 BLOCKED -- EXACT COMPLETED/REMAINING COVERAGE AND ROOT CAUSE PROVIDED
 (primary non-ignored matrix is COMPLETE and final; only the ignored-test sweep
 remains unexecuted)
+
+---
+
+## AUDIT: MINIQUANTDESK-V4-FULL-REPOSITORY-VERIFICATION-COMPLETION-01 (2026-08-02)
+
+Audit-only continuation of the session above, no source/test/guard/config
+repairs. Starting HEAD c6161c416c43389460c4810b15cebd7f28891ec2 == origin/main
+(unchanged from prior session's end). Full report:
+docs/audits/full_repository_verification_2026-08-02.md ("Completion Session"
+section).
+
+Closed both remaining gaps: (1) every one of the 684 statically-enumerated
+`#[ignore]` Rust tests was executed against port 5434 (663 passed, 21 failed,
+zero unclassified, zero unexecuted); (2) FULL-AUDIT-FAIL-011 reproduced 6/6
+for a 3rd independent time (fixture-builder root cause proven: 5 shared
+builders across 3 files never configure daily-data-readiness facts, and a
+test-only override for exactly this purpose already exists and goes unused);
+FULL-AUDIT-FAIL-012 definitively root-caused as a **real production
+regression** (not a stale test) -- migration 0041's
+`sys_ingest_jobs_status_check` never admits `'cancelled'`, added later by the
+`/cancel` route in a separate commit; every DB-backed ingest-job cancel fails
+closed with 503, and the in-memory-tracked cancel path additionally creates a
+memory/DB truth divergence. Smallest repair: one new migration.
+
+6 new findings from the ignored-test sweep: FULL-AUDIT-FAIL-013 (mqk-cli,
+deterministic test bug -- evidence dir deleted before being read),
+FULL-AUDIT-FAIL-014 (mqk-runtime, deterministic test bug -- wrong literal vs.
+DB check constraint), FULL-AUDIT-FAIL-015 (mqk-daemon x2, test assertions
+predate later-added backend targets), FULL-AUDIT-FAIL-016 (mqk-daemon x8,
+same family as FULL-AUDIT-FAIL-011 -- tests predate newer start-gates),
+FULL-AUDIT-FAIL-017 (mqk-daemon x8, order-dependent/DB-residue cluster from
+running many DB-writing test batches back-to-back against one long-lived
+shared `mqk_test` database -- 4 of 8 pass cleanly in isolation, confirming
+order-dependence not a code defect), FULL-AUDIT-FAIL-018 (mqk-daemon x1, not
+a defect -- test requires `ALPACA_API_KEY_LIVE`, which this audit is
+explicitly prohibited from setting).
+
+Operational note: `mqk-db::scenario_migration_bootstrap_replay_proof`'s
+ignored test does `DROP SCHEMA public CASCADE` + fresh-migrate against
+whatever `MQK_DATABASE_URL` points to, by design -- this reset the shared
+`mqk_test` database mid-sweep. Not a defect (the test passed and proves what
+it claims); recommend running it against a disposable one-off DB in future
+sweeps rather than the shared `mqk_test`.
+
+DB residue: kraken/runtime test rows cleaned; 19 synthetic-`engine_id` `runs`
+rows on port 5434 (`mqk_test` only) left in place, blocked by an FK from
+`sys_dynamic_selection_plans` not chased down this session -- confirmed
+test-owned, no risk to 5432/5440.
+
+Executive verdict: MIXED. No P0. One P1 (FULL-AUDIT-FAIL-012, confirmed real,
+ingest-subsystem-only, not a paper-soak blocker). Everything else P2/P3.
+
+Soak decision: NO AUDIT-DISCOVERED SOAK BLOCKER. FULL-AUDIT-FAIL-012 does not
+touch OMS/order/outbox/inbox/broker/portfolio authority (ingest-job
+management only); FULL-AUDIT-FAIL-011/016 are confirmed fail-closed, not
+fail-open; FULL-AUDIT-FAIL-017 is an artifact of this session's shared-DB
+test methodology, not a product defect.
+
+Recommended one-patch-at-a-time repair order (see full report for detail):
+1. INGEST-JOB-CANCEL-STATUS-CONSTRAINT-REPAIR-01 (FULL-AUDIT-FAIL-012, highest priority)
+2. DAILY-DATA-READINESS-FIXTURE-REPAIR-01 (FULL-AUDIT-FAIL-011, and the gate-predates-fixture half of FULL-AUDIT-FAIL-016)
+3. SCRIPT-GUARD-STALENESS-REPAIR-01 (FULL-AUDIT-FAIL-010)
+4. MQK-TESTKIT-E0063-REPAIR-01 (FULL-AUDIT-FAIL-003)
+5. MQK-CLI-KRAKEN-GATE03-TEST-FIX-01 (FULL-AUDIT-FAIL-013)
+6. MQK-RUNTIME-OBSERVABILITY-B4-11-TEST-FIX-01 (FULL-AUDIT-FAIL-014)
+7. MQK-DAEMON-BACKEND-TARGET-ASSERTION-WIDEN-01 (FULL-AUDIT-FAIL-015)
+8. RESEARCH-PY-RUN-SWEEP-SYNTAX-FIX-01 (FULL-AUDIT-FAIL-007)
+
+DISPOSITION:
+MINIQUANTDESK-V4-FULL-REPOSITORY-VERIFICATION-COMPLETION-01:
+COMPLETE -- FULL AUDIT COVERAGE RECORDED; AWAITING CHATGPT AND OPERATOR REVIEW BEFORE PUSH

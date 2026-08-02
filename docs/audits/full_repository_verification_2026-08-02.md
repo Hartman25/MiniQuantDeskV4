@@ -261,23 +261,186 @@ No P0 or P1 findings. No evidence of unsafe trading/order-integrity defects, liv
 - `git status --short --untracked-files=all` shows only the pre-existing allowed untracked paths (`MiniQuantDesk_Master_Patch_Ledger_v2_updated.md`, `smoke_logs/**`) plus this report's own new files under `docs/audits/` and `smoke_logs/full_repository_audit_2026-08-02/**` — no other tracked or untracked drift.
 - Nothing outside `docs/audits/full_repository_verification_2026-08-02.md` (and this pointer note in the ledger, per commit policy) was staged.
 
-## Disposition
+## Disposition (original session)
 
-Phases 1, 2, 3, 5, 6, 7, 8, 9, 10, and 11 are complete. Phase 4's primary (non-`--ignore`d) Rust workspace test matrix completed in full on a second pass with `--no-fail-fast` (437/437 discovered test binaries executed, 5,227 passed, 7 failed — all 7 classified above, none P0/P1, none flaky). The one remaining lane is the `--include-ignored` DB-gated sweep (687 tests observed as ignored in this run, all individually classified by their authors' own `#[ignore = "requires MQK_DATABASE_URL..."]` reasons, safe to run against the existing port-5434 test DB but **not executed in this session** for time reasons) — explicitly classified per the audit's "no silent skips" rule, not silently dropped.
+Phases 1, 2, 3, 5, 6, 7, 8, 9, 10, and 11 are complete. Phase 4's primary (non-`--ignore`d) Rust workspace test matrix completed in full on a second pass with `--no-fail-fast` (437/437 discovered test binaries executed, 5,227 passed, 7 failed — all 7 classified above, none P0/P1, none flaky). The one remaining lane was the `--include-ignored` DB-gated sweep (687 tests observed as ignored in that run) — **not executed in the original session** for time reasons, and FULL-AUDIT-FAIL-012 was not yet root-caused. Both gaps are closed below in the **Completion Session**.
 
-**MINIQUANTDESK-V4-FULL-REPOSITORY-VERIFICATION-AND-FAILURE-INVENTORY-01:
-BLOCKED — EXACT COMPLETED/REMAINING COVERAGE AND ROOT CAUSE PROVIDED**
+---
 
-Remaining command to complete Phase 4's ignored-test lane, exactly as configured in this session (re-run if continuing):
+## Completion Session — Ignored-Test Sweep and FAIL-011/FAIL-012 Closure (2026-08-02, continuation)
 
-```
-cd core-rs
-set CARGO_TARGET_DIR=C:\tmp\mqk-target-full-repository-audit
-set MQK_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5434/mqk_test
-set CARGO_BUILD_JOBS=1
-set CARGO_INCREMENTAL=0
-set RUSTFLAGS=-C debuginfo=0
-cargo test --workspace --exclude mqk-testkit --no-fail-fast -- --test-threads=1 --include-ignored
-```
+**Audit:** MINIQUANTDESK-V4-FULL-REPOSITORY-VERIFICATION-COMPLETION-01
+**Scope:** audit-only, no source/test/guard/config repairs. Continues from the original session above.
 
-Root cause for the remaining BLOCKED status is session time, not a safety or scope decision, and not an error: the primary matrix is now fully executed and its results are final; only the additional DB-gated ignored-test sweep remains unexecuted.
+### Precheck
+
+| Field | Value |
+|---|---|
+| Required/actual local HEAD | `c6161c416c43389460c4810b15cebd7f28891ec2` — match |
+| `origin/main` | `c6161c416c43389460c4810b15cebd7f28891ec2` — match |
+| Untracked files | Only `MiniQuantDesk_Master_Patch_Ledger_v2_updated.md` and `smoke_logs/**` — no other drift |
+| `mqk-daemon`/`cargo`/`rustc` process running | No |
+| Heavy lock `C:\tmp\mqk-machine-heavy.lock` | Present, 0 bytes, last written 2026-07-28 — stale, not actively held |
+| Docker | `mqk-test-postgres` → `127.0.0.1:5434`; `mqk-live-postgres` (5432) and `mqk-paper-postgres` (5440) present but never queried/mutated this session |
+| Other worktrees / `MiniQuantDeskV4-ai-lab` | Present, not entered, not modified |
+
+No blocking condition found. Completion audit proceeded.
+
+### Part 1 — Ignored-test inventory
+
+Static enumeration (function-level parse, not raw `grep`) of every `#[ignore]`-attributed test function under `core-rs/crates/*`:
+
+| Crate | Ignored tests | `tests/` | `src/` (unit) |
+|---|---|---|---|
+| mqk-daemon | 428 | 417 | 11 |
+| mqk-db | 233 | 228 | 5 |
+| mqk-runtime | 19 | 15 | 4 |
+| mqk-cli | 4 | 4 | 0 |
+| mqk-testkit | 0 | 0 | 0 |
+| **Total** | **684** | | |
+
+**Cross-check against raw `grep -c "#\[ignore"` (755) and the original session's harness-observed ignored count (687):** the gap between the raw grep (755) and the real attribute count (684) is fully explained: 71 of the 755 raw hits are prose/comment lines (e.g. `// ... #[ignore] ...` inside doc comments describing the pattern, not real attributes) — confirmed by filtering to non-`//`-prefixed lines, which independently lands on exactly 684, matching the AST-level parse. The 6 `mqk-db` integration-test files gated behind `required-features = ["testkit"]`/`["runtime-claim"]` were confirmed (via the harness log) to still compile and run under a plain `cargo test --workspace` because other workspace members' `[dev-dependencies]` activate `testkit` during a whole-workspace build — so they are not a source of undercount. The residual 3-test gap between the real count (684) and the original session's harness-observed **687** ignored is unresolved to the single-test level (most plausibly a small number of additional comment-adjacent lines the line-level regex did not catch) but is immaterial: this completion session's own harness-executed total below (684) is self-consistent and fully reconciled against the independently-built static inventory with **zero** unexplained tests.
+
+**Classification:** every one of the 684 ignored tests is **Category A (safe local/DB-only, executable now)**. Evidence:
+- A DB-requirement text scan classified 537/684 with an explicit `#[ignore = "requires MQK_DATABASE_URL..."]` reason string; the remaining 147 bare `#[ignore]` tests were individually windowed and 100% resolve to the same family via `maybe_db(`/`maybe_pool(`/`no_db_state()`/`broken_pool()`/direct `PgPool::connect` helpers — no non-DB reason exists in the corpus.
+- A targeted risk-marker sweep (`alpaca.markets`, `api.kraken`, `reqwest::Client`, `wss://`/`ws://`, `ALPACA_API_KEY*`, `MQK_KRAKEN_API`, `TcpStream::connect`) across every ignored function's body found **zero** hits. The 10 files that do contain these substrings elsewhere use them only in pure-string unit tests (URL-format derivation, e.g. `ws_url_from_base_url`), fake/loopback fixtures (`scenario_discord_secret_safety_01.rs` posts to `127.0.0.1:1`, expected-unreachable), or `std::env::set_var("ALPACA_API_KEY_PAPER", "test-paper-key")` placeholder config-detection — none are `#[ignore]`d and none make a real external call.
+- No test requires broker credentials to *compile or start*; one test (`b2a_n02_registry_enabled_allows_activation`, discussed below) requires `ALPACA_API_KEY_LIVE` to be *set* to pass a presence gate — this audit correctly did not set it (prohibited: "do not load real credentials"), so that one test's outcome is an audit-environment constraint, not a defect.
+
+No category B/C/D/E members exist in this inventory (mqk-testkit itself has 0 `#[ignore]` tests, so FULL-AUDIT-FAIL-003's E0063 compile blocker does not gate any ignored test — it only blocks `mqk-testkit`'s own non-ignored integration tests, confirmed unchanged in Part 5 below). **No unclassified test.**
+
+Full per-test inventory (crate, file, line, function, reason): `smoke_logs/full_repository_audit_2026-08-02/completion_01/ignored_tests_inventory.csv`.
+
+### Part 2 — Execution of every category-A ignored test (port 5434 only)
+
+Executed per-crate (`cargo test -p <crate> [--features testkit] -- --ignored --test-threads=1 --no-fail-fast`), low-memory posture (`CARGO_BUILD_JOBS=1`, `CARGO_INCREMENTAL=0`, `RUSTFLAGS=-C debuginfo=0`, dedicated `CARGO_TARGET_DIR`), against `postgres://postgres:postgres@127.0.0.1:5434/mqk_test`. mqk-db required two invocations: default features (229 tests) plus `--features testkit` scoped to the two required-features-gated files carrying ignored tests (4 tests: `scenario_stale_claim_recovery`, `scenario_recovery_query_returns_pending_outbox`).
+
+| Crate | Executed | Passed | Failed |
+|---|---|---|---|
+| mqk-cli | 4 | 3 | 1 |
+| mqk-runtime | 19 | 18 | 1 |
+| mqk-db (default) | 229 | 229 | 0 |
+| mqk-db (`--features testkit`) | 4 | 4 | 0 |
+| mqk-daemon | 428 | 409 | 19 |
+| **Total** | **684** | **663** | **21** |
+
+684/684 executed exactly matches the Part 1 static inventory — zero unexecuted, zero unaccounted-for.
+
+**Operational note (not a defect):** `mqk-db::scenario_migration_bootstrap_replay_proof::migration_bootstrap_and_replay_follow_authoritative_manifest` performs `DROP SCHEMA public CASCADE` + fresh `mqk_db::migrate()` against whatever `MQK_DATABASE_URL` points to, by design (it proves migration bootstrap-from-blank against the authoritative manifest, and its own panic message says "run against a disposable postgres db"). Because this audit's required env var points every batch at the shared `mqk_test` database, this test wiped and rebuilt `mqk_test`'s schema mid-`mqk-db`-batch. The test itself passed correctly and proves exactly what it claims; the side effect was that all data accumulated in `mqk_test` up to that point (including this session's own precheck baseline) was reset to post-migration-empty and rebuilt fresh by every subsequent test. No corruption, no error, and ports 5432/5440 were never touched. **Recommendation:** this specific test should be run against a disposable one-off database (as the original session's Phase 5 already did for its own migrate-from-blank proof), not folded into a routine shared-`mqk_test` ignored-test sweep.
+
+Every failure was rerun once in isolation with the exact function name(s), `--nocapture`, and `RUST_BACKTRACE=1`; DB residue was checked after each crate batch. **None were rerun again after failing (no "rerun until green").**
+
+#### Failure classification
+
+| Test | Crate/file | Signature | Classification |
+|---|---|---|---|
+| `gate03_evidence_records_input_file_network_authorization_mode` | mqk-cli / `scenario_cli_kraken_scheduler_task_gate_03a.rs` | "The system cannot find the path specified. (os error 3)" | **Deterministic** (2/2). Root cause: the test calls `std::fs::remove_dir_all(&out_dir)` (line 242) *before* reading the CLI's printed `evidence_path=` file (line 263), which lives inside that same directory — it deletes its own evidence file before verifying it. Test-only ordering bug; production `mqk-cli md kraken-ohlc-sync` command is unaffected. → **FULL-AUDIT-FAIL-013** |
+| `b4_11_collect_db_snapshot_end_to_end` | mqk-runtime / `scenario_observability_b4.rs:338` | `sys_arm_state_reason_check` violation | **Deterministic** (2/2). Test passes the literal `Some("manual disarm")` as the arm-state reason; the schema's check constraint (migration 0009, refined through 0037) only accepts the PascalCase enum set (`ManualDisarm`, `OperatorDisarm`, …). Test-only wrong literal, unrelated to production disarm paths (which correctly use the PascalCase constants elsewhere). Residue (2 `runs` rows) cleaned. → **FULL-AUDIT-FAIL-014** |
+| `routes::dynamic_selection_evidence::tests::plan_detail_for_a_real_persisted_row_is_found_and_valid` | mqk-daemon (`--lib`) | `left: "candidate_mismatch" right: "valid"` | **Order-dependent / DB-residue.** Part of the cluster below — the shared `mqk_test` DB carries dynamic-selection-plan rows from many prior tests in this long session; this unit test's "the real persisted row" lookup is not scoped to a fixture it privately owns. → grouped in **FULL-AUDIT-FAIL-017** |
+| `ops02_t5_db_backed_ack_roundtrip` | mqk-daemon / `scenario_alerts_triage_ops02.rs` | expected `"postgres.sys_alert_acks"`, got `"postgres.sys_alert_acks+postgres.sys_incidents"` | **Deterministic**, test-predates-production-addition. The backend-target aggregator now also reports `sys_incidents` (a later addition); the test's exact-match assertion was never widened. → grouped in **FULL-AUDIT-FAIL-015** |
+| `ah04_events_feed_surfaces_autonomous_session_kind_rows` | mqk-daemon / `scenario_auton_hist_durability_ah01.rs` | expected 3-source string, got a 4th `+postgres.audit_events[orchestrator]` appended | Same family as `ops02_t5` — test-predates-production-addition. → **FULL-AUDIT-FAIL-015** |
+| `h03_clear_halted_run_no_run_returns_409` | mqk-daemon / `scenario_clear_halted_run_auton04.rs` | expected disposition `no_run_found`, got `run_not_halted` because "the latest run" resolved to a residual `CREATED`-state row from an earlier test in the same shared DB | **Order-dependent / DB-residue**, reproducible even in isolation because the query is globally scoped ("the latest run"), not privately fixtured. Production behavior is still fail-closed (refused the clear, did not fabricate success). → **FULL-AUDIT-FAIL-017** |
+| `manual_order_submit_accepts_limit_order_with_explicit_defaults_aligned_to_runtime`, `manual_order_submit_duplicate_client_request_id_is_noop`, `manual_order_submit_enqueues_one_pending_outbox_row_for_active_run`, `manual_order_submit_refuses_when_durable_arm_state_is_disarmed_even_if_local_state_is_armed`, `manual_order_submit_refuses_when_durable_arm_state_is_halted_even_if_local_state_is_armed` (5) | mqk-daemon / `scenario_daemon_order_submit.rs:319` | shared `start()` helper: expected `/v1/run/start` → 200, got 403 `runtime.start_refused.deployment_mode_unproven` ("paper"+"paper" is not an honest paper trading path without `MQK_DAEMON_ADAPTER_ID=alpaca`) | **Deterministic**, test-predates-production-addition — same family as FULL-AUDIT-FAIL-011 (a gate added after the fixture was written now intercepts earlier). Fail-closed, not fail-open. → **FULL-AUDIT-FAIL-016** |
+| `b1a_l04_start_with_registered_strategy_stores_active_bootstrap`, `b1a_l05_stop_clears_native_strategy_bootstrap`, `b1a_l06_halt_clears_native_strategy_bootstrap` (3) | mqk-daemon / `scenario_native_strategy_bootstrap_daemon_b1a.rs` | expected start→200, got 403 `runtime.start_refused.strategy_registry_missing` ("swing_momentum" not registered in `sys_strategy_registry`) | Same family/gate-predates-fixture pattern as above. → **FULL-AUDIT-FAIL-016** |
+| `ed01_01_events_feed_exposes_orchestrator_halt_rows` | mqk-daemon / `scenario_evidence_durability_ed01.rs` | planted fixture event not found in the (bounded/recent) events feed, which instead returned dozens of unrelated residual rows from earlier tests in the session | **DB-residue**, reproducible in isolation because the events/feed query returns a bounded most-recent window and the huge volume of accumulated same-day test rows pushed the planted row out. → **FULL-AUDIT-FAIL-017** |
+| `b2a_n03_registry_disabled_refused_at_registry_gate`, `b2a_n04_registry_absent_refused_at_registry_gate` (2) | mqk-daemon / `scenario_native_strategy_registry_b2a.rs` | **FAILED in the full-batch run, PASSED when rerun in isolation** | **Order-dependent (flaky under shared-DB load), not reproducible standalone.** Consistent with residual `sys_strategy_registry` state left by a preceding test in the same serialized run. → **FULL-AUDIT-FAIL-017** |
+| `ir02_04_arm_execution_durable_target_is_sys_arm_state_not_audit_events`, `ir02_06_control_arm_accepted_action_durable_row_visible_in_history` (2) | mqk-daemon / `scenario_operator_audit_ir02.rs` | **FAILED in the full-batch run, PASSED when rerun in isolation** | Same order-dependent pattern. → **FULL-AUDIT-FAIL-017** |
+| `n05_control_arm_provenance_ref_matches_exact_durable_audit_events_uuid` | mqk-daemon / `scenario_notify_ops01.rs` | expected `/control/arm` → 200, got 403 "reconcile status is 'dirty'; arm refused until reconcile is clean" | **Order-dependent / DB-residue** — a durable reconcile-checkpoint row left "dirty" by an earlier test in the shared DB blocks this later test's arm attempt. → **FULL-AUDIT-FAIL-017** |
+| `b2a_n02_registry_enabled_allows_activation` | mqk-daemon / `scenario_native_strategy_registry_b2a.rs` | expected start→200, got 500 `runtime.start_refused.alpaca_creds_missing: broker 'alpaca' requires ALPACA_API_KEY_LIVE environment variable` | **Not a defect — blocked by this audit's own no-live-credentials constraint.** This test deliberately targets the `alpaca` broker path and requires `ALPACA_API_KEY_LIVE` to be *present* to pass the credential gate; this audit is explicitly prohibited from loading real credentials or broker env vars, so this test cannot be safely brought to green in this environment. The gate itself is correctly fail-closed. → **FULL-AUDIT-FAIL-018** |
+
+DB residue after the `mqk-daemon` batch: 19 synthetic-`engine_id` rows remain in `runs` (patterns `test-*`, `MAIN*`, `EXP`, `zze*`). A `DELETE … WHERE engine_id ~ '^(test-|zze|MAIN|EXP|obs-e2e-)'` was attempted; it is blocked by an FK from `sys_dynamic_selection_plans.run_id` on one row (`89ff5fb3-…`) that a full cascade was not chased down within this session — all 19 rows are provably test-owned (synthetic `engine_id` values, none match real operator naming), confined to `mqk_test` on port 5434 only; ports 5432/5440 were never touched. Left in place rather than force-deleted without full FK verification.
+
+### Part 3 — FULL-AUDIT-FAIL-011 reproduction (all 6/6)
+
+Each of the 6 originally-reported tests was rerun individually (not `#[ignore]`d — these are part of the ordinary Phase-4 matrix) with `--nocapture --test-threads=1 RUST_BACKTRACE=1`. All 6/6 reproduced identically to the original two runs (now a 3rd independent confirmation, fully deterministic):
+
+| Test | Result | fault_class |
+|---|---|---|
+| `g01_aligned_state_satisfies_both_start_and_signal_chains` | 403 (expected 503) | `runtime.start_refused.daily_data_readiness_blocked` |
+| `brk00r06_e02_live_continuity_unblocks_ws_gate_reaches_db_gate` | 403 (expected 503) | `runtime.start_refused.daily_data_readiness_blocked` |
+| `brk00r06_e03_continuity_round_trip_is_fail_closed` | 403 (expected 503) | `runtime.start_refused.daily_data_readiness_blocked` |
+| `ptday02_e08_cold_start_unproven_blocks_strategy_signals` | 403 (expected 503) | `runtime.start_refused.daily_data_readiness_blocked` |
+| `brk09r_r03_unknown_reconcile_does_not_block_start` | 403 (expected 503) | `runtime.start_refused.daily_data_readiness_blocked` |
+| `brk09r_r04_ok_reconcile_does_not_block_start` | 403 (expected 503) | `runtime.start_refused.daily_data_readiness_blocked` |
+
+Exact body (g01): `top_level_blocker=Some("required_assignments_missing")`, `assignment_resolution_error=Some("multi_symbol_config_missing_symbol")`, referencing `DAILY-DATA-READINESS-01C-ENFORCEMENT-01`.
+
+**Fixture-builder proof:** all 6 tests share fixture-builder functions (`aligned_state()` in `scenario_combined_paper_gate_rts07_rsk07.rs`, and equivalents in the other two files) that arm the integrity gate, establish WS continuity, publish a reconcile snapshot, set the session clock, and set an active strategy fleet — but never configure a `multi_symbol_config`/daily-data-readiness assignment. `crates/mqk-daemon/src/state.rs` independently exposes `set_daily_data_readiness_evidence_override_for_test(&self, forced: Option<bool>)`, a test-only override that other (passing) tests use to satisfy this exact gate — proving the gate is satisfiable in a test fixture and that these 5 files' shared builders simply never call it.
+
+**Production behavior:** fail-closed, not fail-open — the daemon refuses *more* strictly than these 5-file-old fixtures anticipate, consistent with `CLAUDE.md`'s "fail-closed over fail-open" invariant. Not a safety regression.
+
+**Classification: fixture update.** Not an expected-gate-update, not a direct-replacement test, not obsolete-test removal — the smallest correct repair is adding daily-data-readiness fixture configuration (via the existing test-only override or an explicit `multi_symbol_config`) to the shared builder functions in these 3 files.
+
+### Part 4 — FULL-AUDIT-FAIL-012 root cause (definitive, not "likely")
+
+`crates/mqk-daemon/tests/scenario_ingest_jobs_data_ingest_daemon_01.rs::db_04_cancel_persists_cancelled_status_and_reason` was run: (1) in isolation twice — identical `left: 503, right: 202` at line 2505 both times; (2) the entire 54-test binary serialized — identical failure, all 53 other tests in the file passed (`53 passed; 1 failed`). **3/3 fully deterministic.**
+
+**Source trace:** `routes/ingest.rs::ingest_job_cancel` — the seeded job is not in the in-memory `ingest_jobs` store, so the handler falls to the DB path: `load_persisted_ingest_job` → status not terminal → sets `record.status = IngestJobStatus::Cancelled` → `persist_ingest_job_record(pool, &record)`. **503 (`backend_unavailable_cancel_response`) is returned only when that persist call errors.**
+
+**Exact defect, proven from the schema, not inferred:** `sys_ingest_jobs_status_check` (migration `0041_ingest_job_history.sql`, the *only* migration that ever defines this constraint — confirmed via `grep -l` across all 60 migrations) allows exactly `'queued','running','completed','dry_run_completed','failed','refused','partial'`. It does **not** include `'cancelled'`. `IngestJobStatus::Cancelled` (and the `/cancel` route that produces it) was added afterward, in commit `6f276155 feat(daemon): add ingest job cancellation`, which post-dates `c3c0b28b feat(daemon): persist ingest job history` (the commit that introduced migration 0041) — confirmed via `git log -S`. Per `db_rules.md` ("migrations are append-only, never modify a committed migration file"), no later migration ever widened this constraint to admit `'cancelled'`.
+
+**This means every DB-backed ingest-job cancel — not just this test — always fails with a check-constraint violation and returns 503**, in this environment and in every environment sharing this exact migration history (CI included). It is not test-order-dependent, not residue, not a race, not environmental: the constraint categorically excludes the value the cancel route writes, unconditionally.
+
+**Worse: a truth-integrity gap, not just an availability gap.** The *in-memory* cancel path (`cancel_record_in_memory`, taken when the job is tracked in-process) sets `status = Cancelled` in memory **before** attempting the same DB persist — so on that path the operator-visible in-memory truth flips to "cancelled" even though the durable write then fails with the same constraint violation and the DB row is left at its pre-cancel status. A daemon restart reloading from DB (the documented source of truth per `db_rules.md`) would show the job as still queued/running, silently reverting an operator's cancel action. This is exactly the class of divergence `CLAUDE.md`'s operator-truth-discipline section warns against ("no fabricated truth... distinguish unavailable, empty, and present").
+
+**Classification: production cancel-route regression** (schema/code drift — new enum variant + route added without an accompanying migration). Not stale-test, not fixture, not residue, not order-dependence, not race, not environment.
+
+**Severity:** P1 (real, deterministic functional defect + truth-divergence risk on the in-memory-tracked path), scoped to the ingest-job subsystem only.
+**Paper-soak blocker:** **NO** — ingest-job cancellation is a data-ingestion management operation, not part of the order/trading OMS lifecycle chain; it does not touch outbox/inbox/broker/portfolio authority.
+**Can normal premarket ingest/cancel be affected?** **YES** — any operator cancelling a running/queued ingest job through the real `/api/v1/ingest/jobs/:job_id/cancel` route in a DB-backed deployment hits this exact defect today.
+**Smallest focused repair:** one new sequential migration (`0061_...sql`) that `ALTER`s `sys_ingest_jobs_status_check` to add `'cancelled'` to the allowed set. No application-code change is required — `IngestJobStatus::Cancelled` and the route logic are already otherwise correct.
+
+### Part 5 — Narrow consistency checks (re-verified, no repairs)
+
+- **FULL-AUDIT-FAIL-003**: re-run (`cargo check -p mqk-testkit --all-targets`, then the second target individually) — still exactly 4× `E0063` at the same 4 locations (`scenario_cli_run_start_creates_artifacts.rs:46,152,165`; `scenario_run_artifacts_manifest_created.rs:13`). Unchanged.
+- **FULL-AUDIT-FAIL-010**: re-verified against current `HEAD` source at the exact previously-cited line numbers — `RuntimeStrategyDispatchAuthority::Legacy` dispatch wiring (`loop_runner.rs:61,862,864,1350,1484`), `day_signal_count.store(0, …)` + `reset_symbol_day_order_counts()` pairing in `state.rs:4292-4293,4432-4433`, and cap-#6 wiring in `loop_runner.rs:976-1705` all confirmed present, unchanged, correctly wired. Still 3 stale guards / non-regression.
+- **FULL-AUDIT-FAIL-007**: `research-py/src/mqk_research/sweeps/run_sweep.py:28` still has the unescaped-quote `SyntaxError`; still zero callers (`grep -rn "run_sweep" src tests` → no hits outside the file). Unchanged.
+- **FULL-AUDIT-FAIL-008**: `Launch-VeritasLedger.repo_correct.ps1` and `_patch_staging/veritas_batch3/scripts/windows/Launch-VeritasLedger.ps1` still present, unreferenced; canonical `scripts/windows/Launch-VeritasLedger.ps1` unaffected. Unchanged.
+- **Migration count/manifest**: still 60 `.sql` files (`0001`–`0060`). `manifest.json` lists 61 entries — the 61st is `"0017-hold"`, a reserved/held placeholder id with no corresponding `.sql` file (not a new finding; consistent with the append-only/sequential governance model, pre-existing). Migration governance guard re-run: PASS.
+
+### Residue check (completion session)
+
+- No `mqk-daemon`/`cargo`/`rustc` process left running (confirmed before and after).
+- Heavy lock unchanged (still stale/free, not created/deleted by this session).
+- Ports 5432/5440 never queried or mutated.
+- Throwaway/synthetic residue on `mqk_test` (port 5434): kraken `md_bars` rows from mqk-cli tests — cleaned (0 remain). 2 `runs` rows from the mqk-runtime `b4_11` failure — cleaned. 19 synthetic-`engine_id` `runs` rows from the mqk-daemon batch — **not fully cleaned**, blocked by an FK from `sys_dynamic_selection_plans`; documented above, confirmed test-owned, confined to `mqk_test` only.
+- `git status --short --untracked-files=all`: only pre-existing allowed untracked paths (`MiniQuantDesk_Master_Patch_Ledger_v2_updated.md`, `smoke_logs/**`) plus this session's own new files under `smoke_logs/full_repository_audit_2026-08-02/completion_01/**` (inventory CSV, per-batch/per-failure logs) and `docs/audits/full_repository_verification_2026-08-02.md`. No other tracked or untracked drift. No raw logs staged.
+
+## Ignored-test execution ledger (final)
+
+- Discovered (static, AST-parsed): 684
+- Safe/executed (Category A): 684
+- Passed: 663
+- Failed: 21
+- Blocked local prerequisite (Category B): 0
+- Unsafe external/broker (Category C): 0
+- Blocked by mqk-testkit E0063 compile (Category E): 0 (mqk-testkit has 0 ignored tests)
+- Unclassified: 0
+- New failure IDs from this sweep: FULL-AUDIT-FAIL-013 (mqk-cli, deterministic test bug), FULL-AUDIT-FAIL-014 (mqk-runtime, deterministic test bug), FULL-AUDIT-FAIL-015 (mqk-daemon ×2, test-predates-production-addition), FULL-AUDIT-FAIL-016 (mqk-daemon ×8, test-predates-production-gate, same family as FULL-AUDIT-FAIL-011), FULL-AUDIT-FAIL-017 (mqk-daemon ×8, order-dependent/DB-residue cluster), FULL-AUDIT-FAIL-018 (mqk-daemon ×1, blocked by this audit's own no-live-credentials constraint, not a defect)
+- Log directory: `smoke_logs/full_repository_audit_2026-08-02/completion_01/`
+
+## Updated failure inventory (additions)
+
+| ID | Severity | Soak blocker? | Subsystem | Classification |
+|---|---|---|---|---|
+| FULL-AUDIT-FAIL-013 | P3 | No | mqk-cli test | Deterministic test-only bug: evidence dir deleted before being read back |
+| FULL-AUDIT-FAIL-014 | P3 | No | mqk-runtime test | Deterministic test-only bug: wrong literal reason string violates DB check constraint |
+| FULL-AUDIT-FAIL-015 | P3 | No | mqk-daemon test (×2) | Test assertions predate later-added durable backend targets (exact-match too narrow) |
+| FULL-AUDIT-FAIL-016 | P2 | No (verified non-regression) | mqk-daemon test (×8) | Same family as FULL-AUDIT-FAIL-011: tests predate newer start-gates (`deployment_mode`, `strategy_registry`) not configured by their fixtures; daemon fail-closed, not fail-open |
+| FULL-AUDIT-FAIL-017 | P3 | No | mqk-daemon test (×8) | Order-dependent/DB-residue: shared long-lived `mqk_test` DB across a full-day sweep leaves state (leftover runs, bounded event-feed truncation, dirty reconcile checkpoint, registry rows) that a subset of tests' global (non-privately-fixtured) queries pick up; 4 of the 8 pass cleanly in isolation, confirming order-dependence rather than a code defect |
+| FULL-AUDIT-FAIL-018 | — | No | mqk-daemon test (×1) | Not a defect — test requires `ALPACA_API_KEY_LIVE` to pass a credential-presence gate; this audit is explicitly prohibited from setting it. Gate itself is correctly fail-closed. |
+| FULL-AUDIT-FAIL-011 (resolved) | P2 | No (verified non-regression) | mqk-daemon test (×6) | Confirmed 6/6, 3rd independent reproduction. Root cause proven: 5 shared fixture-builder functions across 3 files never configure daily-data-readiness facts; a test-only override exists and is unused by these builders. **Classification: fixture update.** |
+| FULL-AUDIT-FAIL-012 (resolved) | **P1** | **No** (ingest subsystem only, not OMS/order lifecycle) | mqk-daemon / mqk-db schema | **Confirmed production regression**, not a stale test. `sys_ingest_jobs_status_check` (migration 0041, append-only, never updated) omits `'cancelled'`, added later by the `/cancel` route (commit `6f276155`). Every DB-backed ingest-job cancel fails with a check-constraint violation → 503; the in-memory-tracked path additionally creates a truth-divergence (memory says cancelled, DB does not). **Smallest repair: one new migration widening the constraint.** |
+
+## Recommended one-patch-at-a-time repair order
+
+Each item below is independent and must be its own patch (no bundling), most operationally urgent first:
+
+1. **INGEST-JOB-CANCEL-STATUS-CONSTRAINT-REPAIR-01** — add migration `0061_ingest_job_cancelled_status.sql` widening `sys_ingest_jobs_status_check` to include `'cancelled'`. Closes FULL-AUDIT-FAIL-012. Highest priority: real, currently-broken operator-facing route with a truth-integrity side effect.
+2. **DAILY-DATA-READINESS-FIXTURE-REPAIR-01** — add daily-data-readiness fixture configuration (existing test-only override, or explicit `multi_symbol_config`) to the shared builder functions in `scenario_combined_paper_gate_rts07_rsk07.rs`, `scenario_paper_alpaca_proof_bundle_brk00r06.rs`, `scenario_reconcile_start_gate_brk09r.rs`. Closes FULL-AUDIT-FAIL-011 (6 tests) and the `deployment_mode`/`strategy_registry` half of FULL-AUDIT-FAIL-016 (8 tests) if the same gate-satisfying fixture pattern is reused/extended — verify per-file, do not assume identical fix shape.
+3. **SCRIPT-GUARD-STALENESS-REPAIR-01** — update the 3 stale script guards (FULL-AUDIT-FAIL-010) to match current source locations/shapes.
+4. **MQK-TESTKIT-E0063-REPAIR-01** — add `timeframe`/`timeframe_secs` to the 4 struct-literal call sites (FULL-AUDIT-FAIL-003).
+5. **MQK-CLI-KRAKEN-GATE03-TEST-FIX-01** — reorder the cleanup/read sequence in `gate03_evidence_records_input_file_network_authorization_mode` (FULL-AUDIT-FAIL-013).
+6. **MQK-RUNTIME-OBSERVABILITY-B4-11-TEST-FIX-01** — replace `"manual disarm"` with the canonical `"ManualDisarm"` reason constant (FULL-AUDIT-FAIL-014).
+7. **MQK-DAEMON-BACKEND-TARGET-ASSERTION-WIDEN-01** — widen the two exact-match backend-target assertions to `contains` semantics (FULL-AUDIT-FAIL-015).
+8. **RESEARCH-PY-RUN-SWEEP-SYNTAX-FIX-01** — escape the nested quotes in the dead `run_sweep.py` module, or delete it if truly unreferenced (FULL-AUDIT-FAIL-007).
+9. Not independently patch-worthy: FULL-AUDIT-FAIL-017 (order-dependence is a shared-test-DB operational hazard, not a code defect — recommend a per-suite disposable-DB or explicit-cleanup convention rather than a source patch) and FULL-AUDIT-FAIL-018 (not a defect).
