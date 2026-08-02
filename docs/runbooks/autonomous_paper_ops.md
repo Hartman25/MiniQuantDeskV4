@@ -971,3 +971,161 @@ this is expected, not a discrepancy to reconcile.
   truth-state qualifier (§16a).
 - Do not begin unattended (unsupervised) operation. The unattended
   10–20-session soak has not started and is not authorized by this runbook.
+
+# Part 3 — Bundle 7 Dynamic Selection Formal Soak Contract (DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7C)
+
+This Part governs the formal, actively-supervised soak required before
+Bundle 7's `paper_enforced` dynamic strategy/symbol selection may be
+considered for any expanded operating posture. It is a **prerequisite to,
+and strictly narrower than,** the unattended 10–20-session soak referenced
+throughout Part 1 and §23 — completing this Part's sessions does not begin,
+authorize, or shorten that later unattended milestone. Live capital remains
+unauthorized on every lane this runbook governs, in this Part and every
+other.
+
+### 24. Accepted baseline SHA
+
+- A formal soak session may only be counted against a specific, named
+  accepted commit SHA (the SHA the operator/reviewer explicitly accepted
+  Bundle 7 Phase 7C closure at).
+- Before starting any session, verify `git rev-parse HEAD` on the deployed
+  worktree equals that accepted SHA exactly. A session run against any other
+  SHA — including a SHA that is a superset of accepted commits, or one
+  commit ahead for an unrelated fix — is not a countable session under this
+  Part.
+- **No pre-final-SHA session counts.** Any session run before the accepted
+  SHA existed (including sessions run during development, against a draft
+  branch, or against an earlier partial Bundle 7 patch) counts zero toward
+  the required session count in this Part. The count starts fresh at zero
+  the first time a session is run against the accepted SHA.
+- If the accepted SHA changes (a follow-up repair patch lands and is
+  separately accepted), the session count resets to zero under the new SHA
+  unless the operator explicitly records a reasoned exception before
+  resuming — never a silent carry-forward.
+
+### 25. Required clean session count
+
+- **Five (5) consecutive clean sessions** are required before dynamic
+  selection may be considered for any posture beyond active, supervised
+  Paper + Alpaca operation under this runbook. This preserves the existing
+  five-session initial requirement already established for this lane; it is
+  not loosened or tightened by this Part.
+- "Consecutive" means no immediate invalidator (§27) fired between the
+  start of session *N* and the start of session *N+1* — a gap for a
+  legitimate non-trading day (market holiday, weekend) does not break
+  consecutiveness by itself, provided no invalidator fired during the gap.
+- An invalidated session (§27) resets the count to zero. It does not merely
+  pause it.
+
+### 26. Definition of one session
+
+One session is exactly one supervised Paper + Alpaca autonomous daily
+operation (§15–§17) that:
+- Starts under the accepted SHA (§24), with `MQK_DYNAMIC_STRATEGY_SYMBOL_
+  SELECTION_MODE=paper_enforced` and the live lock resolving to
+  `paper_enforced` (never demoted to `off`) at start time — verified via
+  `GET /api/v1/dynamic-selection/status`'s `preview_effective_mode` before
+  arm, and `committed_effective_mode` after start.
+- Runs the `Invoke-Bundle7Phase7cPremarketValidation.ps1` validator (Part 7)
+  to a genuine `FINAL: PASS` before start, using the operator-supplied paper
+  database (never port 5434 or 5440 — §0b, §23).
+- Is actively supervised end-to-end (§0) — never unattended.
+- Reaches a clean end-of-day stop (§10) or an explicit, logged operator
+  halt for a reason unrelated to Bundle 7 evidence/dispatch correctness
+  (e.g. a scheduled infrastructure maintenance halt) — a halt caused by any
+  Bundle 7 evidence/validation/dispatch defect is an invalidator (§27), not
+  a countable clean session.
+
+### 27. Immediate invalidators
+
+Any of the following during a session immediately invalidates it (resets
+the count to zero, §25) and requires operator investigation before the next
+session may start:
+- `evidence_validation_state` is ever anything other than `valid` while a
+  committed plan exists (per `GET /api/v1/dynamic-selection/status`).
+- `approved_for_live` is ever observed `true` anywhere (API, GUI, or DB) —
+  this is a hard defect, not a configuration mistake, and must be treated
+  as a stop-everything incident, not merely a session failure.
+- A durable evidence write failure, payload collision, or read-side
+  validation failure blocks a `paper_enforced` start (working as designed —
+  but it means the session never started under valid dynamic-selection
+  evidence, so it does not count).
+- The final Bundle 7 guard (`check_bundle7_phase7c_final_closure.ps1`) or
+  the premarket validator (Part 7) fails when re-run against the session's
+  own commit.
+- Any selected-host dispatch discrepancy: a fill, order, or signal
+  evaluation attributable to a symbol/strategy/timeframe binding not present
+  in the committed plan's selected bindings.
+- An unattended gap (loss of active operator supervision) of any duration.
+
+### 28. Per-session evidence
+
+For each session, capture and retain (mirroring the existing session
+evidence capture convention, §11, `scripts/soak/`):
+- The premarket validator's full output and the `bundle7_soak_readiness_
+  manifest.json` it wrote (Part 6), under `smoke_logs/` (never staged).
+- `GET /api/v1/dynamic-selection/status` and `GET /api/v1/dynamic-
+  selection/plans/:plan_id` (for the committed plan) captured at least once
+  pre-session and once post-session.
+- The standard end-of-day evidence already required by §21.
+- A one-line operator note recording session number, accepted SHA, and
+  clean/invalidated status.
+
+### 29. Honest no-trade-session handling
+
+A session in which dynamic selection resolves a committed `paper_enforced`
+plan with zero selected pairs (e.g. no symbol passed every evidence gate
+that day), or in which the selected host(s) generated no signal, is still a
+countable clean session provided every check in §26/§27 otherwise held. A
+quiet day is not a failure — but it must be recorded as `selected_count: 0`
+truthfully (per the durable plan evidence itself), never conflated with an
+untested or skipped session.
+
+### 30. Selected-plan changes between sessions
+
+The selected symbol/strategy/timeframe bindings are not required to be
+identical across the five sessions — each session's plan is independently
+resolved from that day's real evidence (promotion state, market data,
+watchlist). A change in selected bindings between sessions is not itself an
+invalidator. What must hold every session is that the *evidence backing
+whatever was selected* passes read-side validation (§27) — the content of
+the selection is allowed to vary; its durable proof is not allowed to be
+missing or invalid.
+
+### 31. Overnight / restart / reset procedure
+
+- A daemon restart between sessions is expected and does not by itself
+  invalidate the prior session or the running count, provided the prior
+  session already reached a clean stop (§26) before the restart.
+- A restart *during* a session follows the existing restart/recovery
+  procedure (§8, §19, §22) unchanged — Bundle 7 adds no new restart
+  semantics. On restart, a new run gets new durable dynamic-selection plan
+  evidence (a fresh `plan_id`); the prior run's evidence rows are never
+  rewritten (Part 1 requirement 8) — verify this by confirming the old
+  `plan_id` still resolves via `GET /api/v1/dynamic-selection/plans/:plan_id`
+  with its original content after the restart.
+- If a restart happens mid-session for a reason unrelated to Bundle 7 (e.g.
+  an OS-level maintenance restart) and the session resumes cleanly with a
+  fresh valid plan, the operator may judge the session countable — record
+  the restart in the per-session note (§28) either way.
+
+### 32. Stop / halt / reconciliation requirements
+
+- End-of-day stop, halt, and reconciliation follow the existing procedures
+  (§10, §19, §20) unchanged. Bundle 7 adds no new stop/halt authority and
+  removes none.
+- Before the next session starts, reconciliation must not be dirty/unknown
+  (mirrors the premarket validator's own check 7).
+- A halt triggered by any Bundle 7 evidence/validation defect (§27) must be
+  fully investigated and the root cause documented before the count resumes
+  from zero.
+
+### 33. Live capital remains unauthorized
+
+Nothing in this Part, the premarket validator (Part 7), the soak manifest
+(Part 6), or a completed five-session count grants live capital authority.
+`approved_for_live` is hard-`false` throughout Bundle 7 by construction
+(DB constraint, writer, and API/GUI projection) and remains so regardless
+of how many clean sessions accumulate. Any future live-capital authorization
+is a separate, explicit decision outside this runbook's and this patch's
+scope.

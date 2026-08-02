@@ -20358,3 +20358,205 @@ DISPOSITION:
 DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7B-TRUE-PROVENANCE-AND-RUNTIME-PROOF-REPAIR-01:
 COMPLETE -- AWAITING CHATGPT AND OPERATOR ACCEPTANCE BEFORE PUSH
 ```
+
+## DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7C-DURABLE-EVIDENCE-OPERATOR-SURFACES-AND-SOAK-READINESS-CLOSURE (2026-08-01)
+
+The final Bundle 7 coding patch. Closes durable evidence persistence, a
+shared read-side identity/coherence validator, read-only operator API/GUI
+truth, a deterministic soak-readiness manifest, a fail-fast premarket
+validator, and a final structural closure guard -- built additively on the
+accepted Phase 7A/7B baseline (`2b55cc23`) without reopening it.
+
+**Part 1 -- durable plan/candidate evidence store.** Migration 0059 adds
+three tables: `sys_dynamic_selection_plans` (one immutable header row per
+resolved `DynamicSelectionPlan`, `plan_id` the existing deterministic
+UUIDv5, `disposition` closed to `shadow_allowed`/`shadow_invalid`/
+`paper_enforced_allowed`/`paper_enforced_refused` -- distinct from
+`effective_mode` so a refused start's evidence is never confused with an
+allowed one for the same mode -- `approved_for_live` CHECK-constrained
+`false` at the DB level), `sys_dynamic_selection_plan_symbols` (one row per
+`SymbolSelectionResult`, always present even for a zero-candidate symbol),
+and `sys_dynamic_selection_plan_candidates` (one row per
+`SelectionCandidateResult`, every evidence field
+`canonical_plan_identity_material` serializes). `mqk-db`'s
+`dynamic_selection_evidence` module mirrors the accepted
+`runtime_strategy_conflict` store's transaction pattern exactly:
+begin/existence-check/rollback-and-compare-outside-the-transaction for
+idempotent replay, `PayloadCollision` (never a silent overwrite) on
+divergent content under the same `plan_id`, an unbounded fetch reserved for
+trusted internal replay comparison, and a bounded read seam
+(`DYNAMIC_SELECTION_CANDIDATE_READ_BOUND`) for API/GUI/validator
+projection. 13 DB-backed scenario tests (port 5434 only) prove round-trip,
+idempotent replay (including candidate-order-independence), payload
+collision with original-row preservation, FK-enforced rollback on a
+candidate referencing an unknown symbol, DB-level rejection of
+`approved_for_live = true` and an unrecognized mode, and bounded-read
+behavior at/over the bound.
+
+**Part 2/3 -- one write authority, one read validator.**
+`dynamic_selection_evidence_writer::build_new_dynamic_selection_plan` maps
+the already-frozen `DynamicSelectionPlan` onto the durable DTO with zero
+reevaluation/rescore/env reread. `dynamic_selection_evidence_validator::
+validate_dynamic_selection_evidence` reconstructs the plan from durable rows
+and recomputes `plan_id` through the exact same
+`derive_dynamic_selection_plan_id` helper the write path used -- never a
+second identity algorithm -- returning a typed
+`valid`/`missing`/`incomplete`/`identity_mismatch`/`run_mismatch`/
+`candidate_mismatch`/`runtime_mismatch`/`live_approval_violation` outcome;
+`verify_signal_journal_attribution` cross-checks the selected-host signal
+journal against the committed bindings. Both are wired into
+`build_dynamic_selection_start_snapshot`, ahead of the `PaperEnforcedRefused`
+early-return so refusal evidence persists before the refusal itself: `Off`
+never persists; `Shadow*`/`PaperEnforcedRefused` persist best-effort without
+changing their existing non-blocking/refusal behavior; `PaperEnforcedAllowed`
+transactionally persists and read-validates the exact plan (including
+selected-binding coherence) before this function returns -- i.e. before
+arm/begin/Starting publication/pool activation/spawn/barrier release --
+failing the whole start closed on any write or validation failure via the
+existing Phase 7A rollback contract. `DynamicSelectionRuntimeState` gains
+`evidence_persisted`/`evidence_validation_state` witnesses. Proof: 4 new
+pure unit tests (writer disposition mapping; a validator reconstruction
+round-trip proving recomputed `plan_id` matches the original) plus a full
+regression pass -- all 96 pre-existing dynamic-selection unit tests and all
+7 real DB-backed `blocker3_*` `PaperEnforcedAllowed` integration tests
+(reaching real `Active` state via the accepted Phase 7A/7B test seam) pass
+unmodified.
+
+**Part 4 -- read-only operator API.** `GET /api/v1/dynamic-selection/status`
+(committed lifecycle `idle`/`starting`/`running`/`degraded`, mode/live-lock/
+disposition/plan_id/source/truth_state, a freshly-recomputed
+`evidence_validation_state`, selected/refused bindings, host-pool witness,
+`preview_*`-prefixed fresh env-config truth kept strictly separate from
+committed truth), `GET /api/v1/dynamic-selection/plans` (bounded historical
+list, limit clamped `[1,100]`), `GET /api/v1/dynamic-selection/plans/:plan_id`
+(full detail). GET-only; `approved_for_live` always `false`. Two small
+`AppState` accessors (`local_runtime_lifecycle_label`,
+`local_runtime_owning_run_id`) collapse `LocalRuntimeOwnership` to the
+closed vocabulary. 6 tests including a real DB-backed round trip proving a
+persisted row surfaces with a freshly-recomputed `valid` state; full
+`routes::` regression (112 tests) unmodified.
+
+**Part 5 -- read-only GUI panel.** `DynamicSelectionEvidencePanel` on
+Settings/Operations, following `StrategyConflictPolicyPanel`'s established
+pattern exactly (parser/fail-closed sentinel seam, hard
+`approved_for_live=false` invariant, no mode/live/start/order control
+anywhere in the component). 22 parser tests; full 974-test GUI suite,
+typecheck, and production build all clean; the existing `SettingsScreen`
+SSR test renders the new panel without error.
+
+**Part 6/7 -- deterministic soak manifest + fail-fast premarket
+validator.** One PowerShell tool
+(`Invoke-Bundle7Phase7cPremarketValidation.ps1`) runs 18 named, always-
+reported checks (HEAD/worktree/migration-governance, DB reachability,
+stale-run/lease, arm/reconciliation posture and dynamic-selection-mode/
+evidence/binding/market-data-freshness checks when `-RequireApi`, Phase
+7A/7B + Bundle 5/6 + migration + unsafe-pattern + bypass + final-Bundle-7
+guards, an API-vs-DB cross-check, a structural no-mutating-call self-scan,
+and the manifest's own validity) and emits exactly one `FINAL: PASS`/
+`FINAL: FAIL` line with nonzero exit on FAIL -- never a silently-vanished
+check (`-RequireDb`/`-RequireApi:$false` downgrade a live check to a
+disclosed WARN, never an omission). Hard-refuses any DB host/port other
+than `127.0.0.1`/`localhost`:5434 in coding/test mode. On PASS, writes a
+deterministic, pre-write-secret-scanned `bundle7_soak_readiness_manifest.json`
+(accepted SHA, schema version, mode/live-lock/`approved_for_live=false`,
+selected bindings, guard summary, non-secret config fingerprint, a SHA256
+`manifest_id` over canonical ordered facts so equivalent runs share
+identity) to the caller's `-OutputDirectory` only. 5 end-to-end scenarios
+(`test_bundle7_phase7c_premarket_validation.ps1`, real DB at 5434, no
+daemon, no network, no order) prove the hard port refusal, a real PASS run,
+a real FAIL run, the `-RequireApi:$false` disclosed-downgrade contract, and
+a mutation-negative proof that a removed required check is caught (reported
+`NOT RUN`, verdict `FAIL`, nonzero exit) rather than silently passing.
+Two real bugs surfaced and fixed during this proof, both now documented
+in-line as comments: Windows PowerShell 5.1 promotes a nested child
+process's own stderr to a terminating error under strict
+`$ErrorActionPreference='Stop'` regardless of `*>` redirection (fixed by
+relaxing EAP around each external-process guard-delegation call only); a
+bare `bash` on this class of box can resolve to the WSL launcher instead of
+Git Bash (fixed by resolving a real Git-for-Windows `bash.exe` explicitly).
+
+**Part 8 -- formal soak contract.** New runbook Part 3
+(`docs/runbooks/autonomous_paper_ops.md` §24-33): accepted-SHA scoping (no
+pre-final-SHA session counts), the existing five-session initial
+requirement preserved unchanged, one-session definition, immediate
+invalidators, per-session evidence, honest no-trade-session handling,
+allowed selected-plan drift between sessions (evidence validity must hold,
+content need not repeat), restart/reset procedure, stop/halt/reconciliation
+requirements, and an explicit statement that live capital remains
+unauthorized regardless of accumulated clean sessions. Reconciled
+explicitly against (never redefining) the existing unattended 10-20-session
+soak language in §0/§23 -- this Part's five sessions are supervised and
+strictly prerequisite to, not the same milestone as, that later unattended
+one.
+
+**Part 9 -- final Bundle 7 guard.** `check_bundle7_phase7c_final_closure.ps1`
+proves, by direct source inspection plus delegation to the already-accepted
+Phase 7A/7B guards: one plan-ID algorithm shared by writer and validator;
+exactly one transactional writer and one read validator; evidence
+persistence textually precedes activation in `state/lifecycle.rs`; a
+payload collision is never silently ignored for `PaperEnforcedAllowed`;
+the API/GUI evidence surfaces are read-only; the manifest is secret-scanned
+before every write; the premarket validator names all 18 checks and emits
+exactly one `FINAL: PASS`/`FINAL: FAIL`; the soak manifest write is gated
+on a PASS verdict; `approved_for_live` is DB-constrained and hard-coded
+false; the validator's typed outcome enum names all 8 states. 7
+mutation-negative self-tests (persistence-after-activation reordering, an
+ignored payload collision, a reintroduced mutating route, a removed
+validator state, a removed DB CHECK constraint, a fabricated second
+`FINAL: PASS`, a duplicated validator function) each prove the
+corresponding check actually discriminates.
+
+GUARDS: check_bundle7_phase7c_final_closure.ps1 (14 checks + 7
+mutation-negative self-tests, delegating to and re-proving)
+check_phase7a_final_closure.ps1 OK; check_phase7b_selected_host_dispatch_closure.ps1
+OK; check_migration_governance.sh OK; check_unsafe_patterns.ps1 OK;
+check_no_promotion_evidence_bypass.ps1 OK; check_no_phase7a_production_effects_bypass.ps1
+OK; check_runtime_opportunity_allocation_01.sh (Bundle 5) OK;
+check_multi_strategy_conflict_policy_01.sh (Bundle 6) OK.
+VALIDATION: mqk-db cargo check/test clean (13 new DB tests, port 5434);
+mqk-daemon cargo check/clippy -D warnings clean on all new/touched files; 96
+pre-existing dynamic-selection unit tests + 7 real blocker3 DB integration
+tests + 112 routes:: tests all pass unmodified; mqk-gui full 974-test suite
++ typecheck + production build clean; Invoke-Bundle7Phase7cPremarketValidation.ps1
+5-scenario test suite (real DB, real guard chain) all pass; no test or
+guard touched DB port 5440, started a daemon, called a real network
+endpoint, or placed an order.
+FILES CHANGED: core-rs/crates/mqk-db/src/lib.rs, core-rs/crates/mqk-daemon/src/lib.rs,
+core-rs/crates/mqk-daemon/src/state.rs, core-rs/crates/mqk-daemon/src/state/lifecycle.rs,
+core-rs/crates/mqk-daemon/src/state/types.rs, core-rs/crates/mqk-daemon/src/routes.rs,
+core-rs/crates/mqk-daemon/src/routes/dynamic_selection_evidence.rs,
+core-rs/crates/mqk-db/migrations/manifest.json, core-rs/mqk-gui/src/features/settings/SettingsScreen.tsx,
+core-rs/mqk-gui/src/features/system/api.ts, core-rs/mqk-gui/src/features/system/systemStatusSections.ts,
+core-rs/mqk-gui/src/features/system/systemStatusSections.test.ts, core-rs/mqk-gui/package.json,
+docs/runbooks/autonomous_paper_ops.md, MiniQuantDesk_Master_Patch_Ledger_v2.md
+FILES ADDED: core-rs/crates/mqk-db/migrations/0059_dynamic_selection_plan_evidence.sql,
+core-rs/crates/mqk-db/src/dynamic_selection_evidence.rs,
+core-rs/crates/mqk-db/tests/scenario_dynamic_selection_evidence_store_01.rs,
+core-rs/crates/mqk-daemon/src/dynamic_selection_evidence_writer.rs,
+core-rs/crates/mqk-daemon/src/dynamic_selection_evidence_validator.rs,
+core-rs/mqk-gui/src/features/system/DynamicSelectionEvidencePanel.tsx,
+core-rs/mqk-gui/src/features/system/dynamicSelectionEvidence.ts,
+core-rs/mqk-gui/src/features/system/dynamicSelectionEvidence.test.ts,
+core-rs/mqk-gui/src/features/system/types/dynamicSelectionEvidence.ts,
+scripts/windows/Invoke-Bundle7Phase7cPremarketValidation.ps1,
+scripts/windows/tests/test_bundle7_phase7c_premarket_validation.ps1,
+scripts/guards/check_bundle7_phase7c_final_closure.ps1
+FILES DELETED: none
+FILES RENAMED: none
+UNEXPECTED FILES: none
+MIGRATIONS ADDED: 0059_dynamic_selection_plan_evidence.sql
+STRATEGY CALCULATIONS CHANGED: NO
+BUNDLE 6 POLICY CHANGED: NO
+BUNDLE 5 POLICY CHANGED: NO
+CAP #6 SEMANTICS CHANGED: NO
+RISK AUTHORITY CHANGED: NO
+BROKER/OUTBOX AUTHORITY CHANGED: NO
+PORTFOLIO/P&L AUTHORITY CHANGED: NO
+RECONCILIATION AUTHORITY CHANGED: NO
+AI CONSUMED: NO
+LIVE CAPITAL ENABLED: NO
+
+DISPOSITION:
+DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7C-DURABLE-EVIDENCE-OPERATOR-SURFACES-AND-SOAK-READINESS-CLOSURE:
+COMPLETE -- AWAITING CHATGPT AND OPERATOR ACCEPTANCE BEFORE PUSH
+```
