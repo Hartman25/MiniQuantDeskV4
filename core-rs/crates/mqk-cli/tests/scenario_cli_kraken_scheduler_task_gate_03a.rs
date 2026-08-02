@@ -217,6 +217,19 @@ async fn gate03_evidence_records_input_file_network_authorization_mode() -> anyh
         std::env::temp_dir().join(format!("mqk_cli_kraken_gate_evidence_{}", Uuid::new_v4()));
     let out_dir_s = out_dir.to_string_lossy().to_string();
 
+    // Removes `out_dir` on drop (any exit path, including a failed assert!
+    // panic) -- but only once this guard goes out of scope at the end of the
+    // function, i.e. after the evidence file has already been read and
+    // validated below. Deleting the directory any earlier would delete the
+    // evidence file this test still needs to read back.
+    struct OutDirCleanup(PathBuf);
+    impl Drop for OutDirCleanup {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    let _out_dir_cleanup = OutDirCleanup(out_dir.clone());
+
     // Explicit .env(...) override -- present before dotenvy runs inside the
     // child, so dotenvy will not replace it with .env.local's value.
     let output = run(
@@ -239,7 +252,6 @@ async fn gate03_evidence_records_input_file_network_authorization_mode() -> anyh
     );
 
     let cleanup_result = cleanup_kraken_rows(&pool).await;
-    let _ = std::fs::remove_dir_all(&out_dir);
 
     assert!(
         output.status.success(),

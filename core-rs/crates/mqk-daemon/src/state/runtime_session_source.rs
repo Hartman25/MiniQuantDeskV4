@@ -615,17 +615,26 @@ pub fn runtime_session_source_summary(
 /// are process-global and Rust runs `#[test]` functions concurrently by
 /// default; two test modules each holding their own private mutex would not
 /// actually serialize against each other, so this lock is shared.
+///
+/// `tokio::sync::Mutex` (not `std::sync::Mutex`) so `session_controller.rs`'s
+/// `#[tokio::test]` functions can hold the guard across `.await` points
+/// without a `clippy::await_holding_lock` violation — mirrors the
+/// `dynamic_selection_env_lock()` convention in `routes/system.rs`. Plain
+/// `#[test]` functions in this module use `.blocking_lock()` instead, since
+/// they run outside any tokio runtime.
 #[cfg(test)]
-pub(crate) static RUNTIME_SESSION_SOURCE_ENV_TEST_LOCK: std::sync::Mutex<()> =
-    std::sync::Mutex::new(());
+pub(crate) fn runtime_session_source_env_test_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     // Serializes env-var mutation across this module's tests AND
     // `session_controller.rs`'s tests (shared crate-level lock — see
-    // `RUNTIME_SESSION_SOURCE_ENV_TEST_LOCK` doc comment above).
-    use super::RUNTIME_SESSION_SOURCE_ENV_TEST_LOCK as ENV_LOCK;
+    // `runtime_session_source_env_test_lock()` doc comment above).
+    use super::runtime_session_source_env_test_lock;
     use chrono::TimeZone;
     use mqk_md::instrument_registry_v2::{
         ContractDefinitionV2, InstrumentDefinitionV2, InstrumentMetadataV2, InstrumentRegistryV2,
@@ -962,7 +971,7 @@ mod tests {
 
     #[test]
     fn rss18_legacy_mode_summary_never_loads_v2_registry() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = runtime_session_source_env_test_lock().blocking_lock();
         // Use an intentionally missing path: if legacy mode tried to load it,
         // the summary would carry a fallback_reason. It must not.
         let missing_path = std::env::temp_dir()
@@ -981,9 +990,9 @@ mod tests {
         assert!(summary.fallback_reason.is_none());
         assert!(summary.candidate_v2_session_state.is_none());
         assert!(summary.candidate_v2_parity_state.is_none());
-        assert_eq!(summary.production_cutover_enabled, false);
-        assert_eq!(summary.runtime_uses_session_v2, false);
-        assert_eq!(summary.trading_uses_session_v2, false);
+        assert!(!summary.production_cutover_enabled);
+        assert!(!summary.runtime_uses_session_v2);
+        assert!(!summary.trading_uses_session_v2);
         // legacy_session_state is still computed (it's the real, cheap,
         // already-running production calendar check) — only the *registry*
         // load is skipped in legacy mode.
@@ -994,7 +1003,7 @@ mod tests {
 
     #[test]
     fn rss19_summary_v2_equity_shadow_real_registry_activates_clean() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = runtime_session_source_env_test_lock().blocking_lock();
         std::env::set_var(RUNTIME_SESSION_SOURCE_ENV, "v2_equity_shadow");
         let path = real_registry_path();
         let summary = runtime_session_source_summary(&path, ts(TS_REGULAR_OPEN));
@@ -1006,14 +1015,14 @@ mod tests {
             Some("matched")
         );
         assert_eq!(summary.fallback_reason, None);
-        assert_eq!(summary.production_cutover_enabled, false);
-        assert_eq!(summary.runtime_uses_session_v2, false);
-        assert_eq!(summary.trading_uses_session_v2, false);
+        assert!(!summary.production_cutover_enabled);
+        assert!(!summary.runtime_uses_session_v2);
+        assert!(!summary.trading_uses_session_v2);
     }
 
     #[test]
     fn rss20_summary_invalid_env_value_carries_activation_refusal_reason() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = runtime_session_source_env_test_lock().blocking_lock();
         std::env::set_var(RUNTIME_SESSION_SOURCE_ENV, "totally_bogus");
         let path = real_registry_path();
         let summary = runtime_session_source_summary(&path, ts(TS_REGULAR_OPEN));
@@ -1220,17 +1229,17 @@ mod tests {
 
     #[test]
     fn rss30_summary_v2_equity_active_real_registry_accepts_clean() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = runtime_session_source_env_test_lock().blocking_lock();
         std::env::set_var(RUNTIME_SESSION_SOURCE_ENV, "v2_equity_active");
         let path = real_registry_path();
         let summary = runtime_session_source_summary(&path, ts(TS_REGULAR_OPEN));
         std::env::remove_var(RUNTIME_SESSION_SOURCE_ENV);
 
         assert_eq!(summary.session_source_mode, "v2_equity_active");
-        assert_eq!(summary.production_cutover_enabled, true);
-        assert_eq!(summary.runtime_uses_session_v2, true);
-        assert_eq!(summary.trading_uses_session_v2, true);
-        assert_eq!(summary.active_source_used, true);
+        assert!(summary.production_cutover_enabled);
+        assert!(summary.runtime_uses_session_v2);
+        assert!(summary.trading_uses_session_v2);
+        assert!(summary.active_source_used);
         assert_eq!(summary.candidate_would_activate, Some(true));
         assert_eq!(
             summary.candidate_v2_parity_state.as_deref(),
@@ -1241,7 +1250,7 @@ mod tests {
 
     #[test]
     fn rss31_summary_v2_equity_active_missing_registry_refuses_clean() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = runtime_session_source_env_test_lock().blocking_lock();
         std::env::set_var(RUNTIME_SESSION_SOURCE_ENV, "v2_equity_active");
         let missing_path = std::env::temp_dir()
             .join(format!(
@@ -1255,10 +1264,10 @@ mod tests {
 
         assert_eq!(summary.session_source_mode, "v2_equity_active");
         // Configuration is on, but never claimed to be in effect.
-        assert_eq!(summary.production_cutover_enabled, true);
-        assert_eq!(summary.runtime_uses_session_v2, false);
-        assert_eq!(summary.trading_uses_session_v2, false);
-        assert_eq!(summary.active_source_used, false);
+        assert!(summary.production_cutover_enabled);
+        assert!(!summary.runtime_uses_session_v2);
+        assert!(!summary.trading_uses_session_v2);
+        assert!(!summary.active_source_used);
         assert_eq!(summary.candidate_would_activate, None);
         let reason = summary
             .fallback_reason
@@ -1268,7 +1277,7 @@ mod tests {
 
     #[test]
     fn rss32_summary_v2_equity_shadow_never_sets_active_source_used() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let _guard = runtime_session_source_env_test_lock().blocking_lock();
         std::env::set_var(RUNTIME_SESSION_SOURCE_ENV, "v2_equity_shadow");
         let path = real_registry_path();
         let summary = runtime_session_source_summary(&path, ts(TS_REGULAR_OPEN));
@@ -1277,9 +1286,9 @@ mod tests {
         // Shadow mode evaluates cleanly (candidate_would_activate=true) but
         // must never claim to be the active source.
         assert_eq!(summary.candidate_would_activate, Some(true));
-        assert_eq!(summary.active_source_used, false);
-        assert_eq!(summary.production_cutover_enabled, false);
-        assert_eq!(summary.runtime_uses_session_v2, false);
-        assert_eq!(summary.trading_uses_session_v2, false);
+        assert!(!summary.active_source_used);
+        assert!(!summary.production_cutover_enabled);
+        assert!(!summary.runtime_uses_session_v2);
+        assert!(!summary.trading_uses_session_v2);
     }
 }

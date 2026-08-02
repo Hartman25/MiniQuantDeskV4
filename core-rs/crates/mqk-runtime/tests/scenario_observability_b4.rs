@@ -335,7 +335,7 @@ async fn b4_11_collect_db_snapshot_end_to_end() {
     mqk_db::halt_run(&pool, run_id, Utc::now())
         .await
         .expect("halt run");
-    mqk_db::persist_arm_state(&pool, "DISARMED", Some("manual disarm"))
+    mqk_db::persist_arm_state(&pool, "DISARMED", Some("ManualDisarm"))
         .await
         .expect("persist disarm");
 

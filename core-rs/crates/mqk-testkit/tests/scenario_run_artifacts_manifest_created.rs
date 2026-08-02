@@ -17,6 +17,8 @@ fn scenario_run_artifacts_manifest_created() -> Result<()> {
         strategy_name: "test_strategy",
         engine_id: "MAIN",
         mode: "PAPER",
+        timeframe: None,
+        timeframe_secs: None,
         git_hash: "deadbeef",
         config_hash: "cafebabe",
         host_fingerprint: "HOST|USER|os|arch",

@@ -81,6 +81,29 @@ fn json_str<'a>(json: &'a serde_json::Value, key: &str) -> &'a str {
         .unwrap_or_else(|| panic!("missing string key '{key}' in response: {json}"))
 }
 
+/// Asserts `actual` is exactly the closed `+`-joined set of `required`
+/// backend-target components (order-independent), rejecting any component
+/// not in `required` and any duplicate component.
+fn assert_backend_target_set(actual: &str, required: &[&str], context: &str) {
+    let mut seen = std::collections::BTreeSet::new();
+    for part in actual.split('+') {
+        if !seen.insert(part) {
+            panic!("{context}: duplicated backend-target component '{part}' in '{actual}'");
+        }
+        if !required.contains(&part) {
+            panic!(
+                "{context}: unknown backend-target component '{part}' in '{actual}'; \
+                 known closed set is {required:?}"
+            );
+        }
+    }
+    let required_set: std::collections::BTreeSet<&str> = required.iter().copied().collect();
+    assert_eq!(
+        seen, required_set,
+        "{context}: backend-target set '{actual}' does not match the required closed set {required:?}"
+    );
+}
+
 async fn ops02_test_pool() -> sqlx::PgPool {
     let url = std::env::var(mqk_db::ENV_DB_URL).unwrap_or_else(|_| {
         panic!("DB tests require MQK_DATABASE_URL; run with --include-ignored")
@@ -408,10 +431,10 @@ async fn ops02_t5_db_backed_ack_roundtrip() {
         "active",
         "OPS02-T5: truth_state must be 'active' with DB pool"
     );
-    assert_eq!(
+    assert_backend_target_set(
         json_str(&triage_json, "backend"),
-        "postgres.sys_alert_acks",
-        "OPS02-T5: backend must be 'postgres.sys_alert_acks' with DB"
+        &["postgres.sys_alert_acks", "postgres.sys_incidents"],
+        "OPS02-T5",
     );
 
     // --- Post-test cleanup ---

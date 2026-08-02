@@ -71,6 +71,29 @@ fn parse_json(b: bytes::Bytes) -> serde_json::Value {
     serde_json::from_slice(&b).expect("body is not valid JSON")
 }
 
+/// Asserts `actual` is exactly the closed `+`-joined set of `required`
+/// backend-target components (order-independent), rejecting any component
+/// not in `required` and any duplicate component.
+fn assert_backend_target_set(actual: &str, required: &[&str], context: &str) {
+    let mut seen = std::collections::BTreeSet::new();
+    for part in actual.split('+') {
+        if !seen.insert(part) {
+            panic!("{context}: duplicated backend-target component '{part}' in '{actual}'");
+        }
+        if !required.contains(&part) {
+            panic!(
+                "{context}: unknown backend-target component '{part}' in '{actual}'; \
+                 known closed set is {required:?}"
+            );
+        }
+    }
+    let required_set: std::collections::BTreeSet<&str> = required.iter().copied().collect();
+    assert_eq!(
+        seen, required_set,
+        "{context}: backend-target set '{actual}' does not match the required closed set {required:?}"
+    );
+}
+
 // ---------------------------------------------------------------------------
 // AH-01: No-DB path sets autonomous_history_degraded
 // ---------------------------------------------------------------------------
@@ -214,11 +237,15 @@ async fn ah03_degraded_flag_is_sticky() {
 async fn ah04_events_feed_surfaces_autonomous_session_kind_rows() {
     let pool = ah04_test_pool().await;
 
-    // Deterministic ID — unique namespace to avoid collisions.
+    // Deterministic ID — unique namespace to avoid collisions. The seeded row
+    // must sort within `load_recent_autonomous_session_events`'s `ORDER BY
+    // ts_utc DESC LIMIT 50` window, so it is stamped "now" rather than a
+    // fixed historical date -- a fixed old timestamp would be pushed out of
+    // that bounded window by any 50+ more-recent rows accumulated in the
+    // shared test database over a long session, which is not this fixture's
+    // row's fault to own.
     let row_id = "ah04-auton-hist-proof-001".to_string();
-    let ts = chrono::DateTime::parse_from_rfc3339("2020-07-01T14:30:00Z")
-        .unwrap()
-        .with_timezone(&chrono::Utc);
+    let ts = chrono::Utc::now();
 
     // Pre-test cleanup (idempotent).
     sqlx::query("delete from sys_autonomous_session_events where id = $1")
@@ -275,11 +302,19 @@ async fn ah04_events_feed_surfaces_autonomous_session_kind_rows() {
         "AH-04: truth_state must be 'active' with DB pool"
     );
 
-    // backend must name all three source tables including sys_autonomous_session_events.
-    assert_eq!(
-        json["backend"],
-        "postgres.runs+postgres.audit_events+postgres.sys_autonomous_session_events",
-        "AH-04: backend must include sys_autonomous_session_events"
+    // backend must name every source table this route reads from, including
+    // sys_autonomous_session_events and the orchestrator audit_events lane.
+    assert_backend_target_set(
+        json["backend"]
+            .as_str()
+            .expect("AH-04: backend must be a string"),
+        &[
+            "postgres.runs",
+            "postgres.audit_events",
+            "postgres.sys_autonomous_session_events",
+            "postgres.audit_events[orchestrator]",
+        ],
+        "AH-04",
     );
 
     let rows = json

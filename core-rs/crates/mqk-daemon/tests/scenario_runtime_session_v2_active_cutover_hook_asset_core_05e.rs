@@ -117,7 +117,13 @@ async fn call_json(router: axum::Router, uri: &str) -> (StatusCode, serde_json::
 /// (separate from the `--lib` unit tests and from
 /// `scenario_runtime_session_v2_cutover_scaffold_asset_core_05d.rs`), so a
 /// file-local lock is sufficient here.
-static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+///
+/// `tokio::sync::Mutex` (not `std::sync::Mutex`) so the guard can be held
+/// across `.await` points without a `clippy::await_holding_lock` violation.
+fn env_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
 
 // ---------------------------------------------------------------------------
 // 1-2. Default/legacy mode preserves original behavior end-to-end.
@@ -125,7 +131,7 @@ static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[tokio::test]
 async fn ac05e_01_default_unset_mode_preserves_legacy_end_to_end() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = env_lock().lock().await;
     std::env::remove_var(RUNTIME_SESSION_SOURCE_ENV);
 
     // Missing registry: if default mode touched the v2 registry at all this
@@ -164,7 +170,7 @@ async fn ac05e_01_default_unset_mode_preserves_legacy_end_to_end() {
 
 #[tokio::test]
 async fn ac05e_02_explicit_legacy_mode_matches_default() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = env_lock().lock().await;
     std::env::set_var(RUNTIME_SESSION_SOURCE_ENV, "legacy");
 
     let state = build_state(missing_registry_path("explicit_legacy"));
@@ -196,7 +202,7 @@ async fn ac05e_02_explicit_legacy_mode_matches_default() {
 
 #[tokio::test]
 async fn ac05e_03_v2_equity_shadow_never_drives_session_decision() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = env_lock().lock().await;
     std::env::set_var(RUNTIME_SESSION_SOURCE_ENV, "v2_equity_shadow");
 
     // Missing registry: if shadow mode drove is_in_session, this would force
@@ -237,7 +243,7 @@ async fn ac05e_03_v2_equity_shadow_never_drives_session_decision() {
 // ---------------------------------------------------------------------------
 
 async fn assert_active_mode_matches_legacy_at(fixed_ts: DateTime<Utc>, expect_in_session: bool) {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = env_lock().lock().await;
     std::env::set_var(RUNTIME_SESSION_SOURCE_ENV, "v2_equity_active");
 
     let state = build_state(real_registry_path());
@@ -310,7 +316,7 @@ async fn ac05e_07_active_mode_matches_legacy_around_early_close() {
 
 #[tokio::test]
 async fn ac05e_08_active_mode_refuses_missing_registry_fails_closed_at_regular_open() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = env_lock().lock().await;
     std::env::set_var(RUNTIME_SESSION_SOURCE_ENV, "v2_equity_active");
 
     let state = build_state(missing_registry_path("active_missing"));
@@ -559,7 +565,7 @@ fn ac05e_13_refused_decision_never_reports_in_session_true() {
 
 #[tokio::test]
 async fn ac05e_14_invalid_env_value_falls_back_to_legacy_never_activates() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = env_lock().lock().await;
     std::env::set_var(RUNTIME_SESSION_SOURCE_ENV, "v2_equity_super_active_typo");
 
     let state = build_state(real_registry_path());
@@ -598,7 +604,7 @@ async fn ac05e_14_invalid_env_value_falls_back_to_legacy_never_activates() {
 
 #[tokio::test]
 async fn ac05e_15_summary_active_source_used_true_only_when_accepted() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = env_lock().lock().await;
 
     // Active + accepted (real registry).
     std::env::set_var(RUNTIME_SESSION_SOURCE_ENV, "v2_equity_active");
@@ -626,7 +632,7 @@ async fn ac05e_15_summary_active_source_used_true_only_when_accepted() {
 
 #[tokio::test]
 async fn ac05e_16_summary_runtime_and_trading_use_v2_mirror_active_source_used() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = env_lock().lock().await;
     for (mode, registry) in [
         ("legacy", real_registry_path()),
         ("v2_equity_shadow", real_registry_path()),
@@ -662,7 +668,7 @@ async fn ac05e_16_summary_runtime_and_trading_use_v2_mirror_active_source_used()
 
 #[tokio::test]
 async fn ac05e_17_05d_legacy_summary_shape_unaffected() {
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = env_lock().lock().await;
     std::env::remove_var(RUNTIME_SESSION_SOURCE_ENV);
     let state = build_state(real_registry_path());
     let router = routes::build_router(state);
@@ -729,7 +735,7 @@ async fn ac05e_21_gui_daemon_contract_relevant_surfaces_unaffected() {
     // (the dedicated scenario_gui_daemon_contract_gate.rs and
     // scenario_route_contract_rt01.rs files are run separately by the
     // validation command list).
-    let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _guard = env_lock().lock().await;
     std::env::remove_var(RUNTIME_SESSION_SOURCE_ENV);
     let state = build_state(real_registry_path());
 

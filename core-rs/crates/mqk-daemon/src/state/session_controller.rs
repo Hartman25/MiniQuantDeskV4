@@ -762,7 +762,7 @@ fn env_label(state: &AppState) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::super::runtime_session_source::{
-        RUNTIME_SESSION_SOURCE_ENV, RUNTIME_SESSION_SOURCE_ENV_TEST_LOCK,
+        runtime_session_source_env_test_lock, RUNTIME_SESSION_SOURCE_ENV,
     };
     use super::*;
     use chrono::TimeZone;
@@ -871,9 +871,7 @@ mod tests {
         // transient v2_equity_active mutation from a concurrently-running
         // test in this same `--lib` binary (sw16-20 / runtime_session_source
         // tests share this same process-global env var).
-        let _guard = RUNTIME_SESSION_SOURCE_ENV_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _guard = runtime_session_source_env_test_lock().lock().await;
         std::env::remove_var(RUNTIME_SESSION_SOURCE_ENV);
         let state = Arc::new(AppState::new_for_test_with_broker_kind(
             super::super::types::BrokerKind::Alpaca,
@@ -898,9 +896,7 @@ mod tests {
 
     #[tokio::test]
     async fn sw12_nyse_premarket_is_out_of_session() {
-        let _guard = RUNTIME_SESSION_SOURCE_ENV_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _guard = runtime_session_source_env_test_lock().lock().await;
         std::env::remove_var(RUNTIME_SESSION_SOURCE_ENV);
         let state = Arc::new(AppState::new_for_test_with_broker_kind(
             super::super::types::BrokerKind::Alpaca,
@@ -922,9 +918,7 @@ mod tests {
 
     #[tokio::test]
     async fn sw13_nyse_after_hours_is_out_of_session() {
-        let _guard = RUNTIME_SESSION_SOURCE_ENV_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _guard = runtime_session_source_env_test_lock().lock().await;
         std::env::remove_var(RUNTIME_SESSION_SOURCE_ENV);
         let state = Arc::new(AppState::new_for_test_with_broker_kind(
             super::super::types::BrokerKind::Alpaca,
@@ -946,9 +940,7 @@ mod tests {
 
     #[tokio::test]
     async fn sw14_nyse_weekend_is_out_of_session() {
-        let _guard = RUNTIME_SESSION_SOURCE_ENV_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _guard = runtime_session_source_env_test_lock().lock().await;
         std::env::remove_var(RUNTIME_SESSION_SOURCE_ENV);
         let state = Arc::new(AppState::new_for_test_with_broker_kind(
             super::super::types::BrokerKind::Alpaca,
@@ -970,9 +962,7 @@ mod tests {
 
     #[tokio::test]
     async fn sw15_nyse_holiday_is_out_of_session() {
-        let _guard = RUNTIME_SESSION_SOURCE_ENV_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _guard = runtime_session_source_env_test_lock().lock().await;
         std::env::remove_var(RUNTIME_SESSION_SOURCE_ENV);
         let state = Arc::new(AppState::new_for_test_with_broker_kind(
             super::super::types::BrokerKind::Alpaca,
@@ -1023,9 +1013,7 @@ mod tests {
 
     #[tokio::test]
     async fn sw16_v2_equity_active_real_registry_drives_in_session_true_at_regular_open() {
-        let _guard = RUNTIME_SESSION_SOURCE_ENV_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _guard = runtime_session_source_env_test_lock().lock().await;
         std::env::set_var(RUNTIME_SESSION_SOURCE_ENV, "v2_equity_active");
         let state = state_with_registry(real_registry_path());
         let ts = Utc.with_ymd_and_hms(2026, 6, 25, 15, 0, 0).unwrap();
@@ -1044,9 +1032,7 @@ mod tests {
 
     #[tokio::test]
     async fn sw17_v2_equity_active_real_registry_drives_in_session_false_at_closed_weekend() {
-        let _guard = RUNTIME_SESSION_SOURCE_ENV_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _guard = runtime_session_source_env_test_lock().lock().await;
         std::env::set_var(RUNTIME_SESSION_SOURCE_ENV, "v2_equity_active");
         let state = state_with_registry(real_registry_path());
         // Saturday 2026-06-27 15:00:00 UTC — same fixed closed-weekend
@@ -1067,9 +1053,7 @@ mod tests {
 
     #[tokio::test]
     async fn sw18_v2_equity_active_missing_registry_fails_closed_even_at_legacy_regular_open() {
-        let _guard = RUNTIME_SESSION_SOURCE_ENV_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _guard = runtime_session_source_env_test_lock().lock().await;
         std::env::set_var(RUNTIME_SESSION_SOURCE_ENV, "v2_equity_active");
         let missing_path = std::env::temp_dir()
             .join(format!(
@@ -1100,9 +1084,7 @@ mod tests {
 
     #[tokio::test]
     async fn sw19_v2_equity_shadow_never_changes_is_in_session_decision() {
-        let _guard = RUNTIME_SESSION_SOURCE_ENV_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _guard = runtime_session_source_env_test_lock().lock().await;
         std::env::set_var(RUNTIME_SESSION_SOURCE_ENV, "v2_equity_shadow");
         // Point at a missing registry: if shadow mode touched this decision
         // at all, a registry load failure would have some observable effect.
@@ -1132,9 +1114,7 @@ mod tests {
 
     #[tokio::test]
     async fn sw20_default_unset_mode_is_in_session_unaffected_by_missing_registry() {
-        let _guard = RUNTIME_SESSION_SOURCE_ENV_TEST_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
+        let _guard = runtime_session_source_env_test_lock().lock().await;
         std::env::remove_var(RUNTIME_SESSION_SOURCE_ENV);
         let missing_path = std::env::temp_dir()
             .join(format!(

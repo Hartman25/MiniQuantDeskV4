@@ -79,7 +79,13 @@ async fn call_json(router: axum::Router, uri: &str) -> (StatusCode, serde_json::
 /// functions concurrently by default. Every test in this file that touches
 /// `MQK_RUNTIME_SESSION_SOURCE` takes this lock for its whole body so the
 /// env var cannot be observed half-mutated by a concurrently running test.
-static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+///
+/// `tokio::sync::Mutex` (not `std::sync::Mutex`) so the guard can be held
+/// across `.await` points without a `clippy::await_holding_lock` violation.
+fn env_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
 
 // ---------------------------------------------------------------------------
 // 1. Default/no-env mode uses legacy source.
@@ -87,7 +93,7 @@ static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
 #[tokio::test]
 async fn ac05d_01_default_no_env_uses_legacy_runtime_uses_v2_false() {
-    let _guard = ENV_LOCK.lock().unwrap();
+    let _guard = env_lock().lock().await;
     std::env::remove_var(RUNTIME_SESSION_SOURCE_ENV);
 
     let (status, body) = call_json(make_router_with_real_registry(), STATUS_ROUTE).await;
@@ -118,7 +124,7 @@ async fn ac05d_01_default_no_env_uses_legacy_runtime_uses_v2_false() {
 
 #[tokio::test]
 async fn ac05d_02_invalid_mode_refused_falls_back_to_legacy_with_reason() {
-    let _guard = ENV_LOCK.lock().unwrap();
+    let _guard = env_lock().lock().await;
     std::env::set_var(RUNTIME_SESSION_SOURCE_ENV, "not_a_real_mode");
 
     let (status, body) = call_json(make_router_with_real_registry(), STATUS_ROUTE).await;
@@ -150,7 +156,7 @@ async fn ac05d_02_invalid_mode_refused_falls_back_to_legacy_with_reason() {
 
 #[tokio::test]
 async fn ac05d_03_v2_equity_shadow_matches_legacy_at_regular_open() {
-    let _guard = ENV_LOCK.lock().unwrap();
+    let _guard = env_lock().lock().await;
     std::env::set_var(RUNTIME_SESSION_SOURCE_ENV, "v2_equity_shadow");
     let (status, body) = call_json(make_router_with_real_registry(), STATUS_ROUTE).await;
     std::env::remove_var(RUNTIME_SESSION_SOURCE_ENV);
@@ -333,7 +339,7 @@ fn ac05d_07_synthetic_parity_mismatch_refuses_activation() {
 
 #[tokio::test]
 async fn ac05d_08a_missing_registry_refuses_activation_via_route() {
-    let _guard = ENV_LOCK.lock().unwrap();
+    let _guard = env_lock().lock().await;
     std::env::set_var(RUNTIME_SESSION_SOURCE_ENV, "v2_equity_shadow");
     let (status, body) = call_json(make_router_with_missing_registry(), STATUS_ROUTE).await;
     std::env::remove_var(RUNTIME_SESSION_SOURCE_ENV);
@@ -452,7 +458,7 @@ fn ac05d_09_non_equity_enabled_row_refuses_activation() {
 
 #[tokio::test]
 async fn ac05d_10_legacy_mode_does_not_require_v2_registry_availability() {
-    let _guard = ENV_LOCK.lock().unwrap();
+    let _guard = env_lock().lock().await;
     std::env::remove_var(RUNTIME_SESSION_SOURCE_ENV);
 
     // Use a router pointed at a missing registry path. If legacy mode tried
@@ -486,7 +492,7 @@ async fn ac05d_10_legacy_mode_does_not_require_v2_registry_availability() {
 
 #[tokio::test]
 async fn ac05d_11_preflight_route_carries_summary_and_does_not_block_readiness() {
-    let _guard = ENV_LOCK.lock().unwrap();
+    let _guard = env_lock().lock().await;
     std::env::remove_var(RUNTIME_SESSION_SOURCE_ENV);
 
     let (status, body) = call_json(make_router_with_real_registry(), PREFLIGHT_ROUTE).await;
@@ -581,7 +587,7 @@ async fn ac05d_15_gui_daemon_contract_gate_relevant_surfaces_unaffected() {
     // the validation command list — neither references
     // runtime_session_source or SystemStatusResponse/PreflightStatusResponse
     // field counts, so no edit to those files was required).
-    let _guard = ENV_LOCK.lock().unwrap();
+    let _guard = env_lock().lock().await;
     std::env::remove_var(RUNTIME_SESSION_SOURCE_ENV);
 
     let router = make_router_with_real_registry();
