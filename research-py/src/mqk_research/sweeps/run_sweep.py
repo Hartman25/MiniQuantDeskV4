@@ -25,7 +25,7 @@ def run_sweep_scaffold(*, grid_json: Path, out_csv: Path) -> Path:
     grid = json.loads(Path(grid_json).read_text(encoding="utf-8"))
     rows = _grid_to_rows(grid.get("grid", {}))
     if not rows:
-        raise ValueError("grid_json must include {"grid": {param: [values...]}}")
+        raise ValueError('grid_json must include {"grid": {param: [values...]}}')
     df = pd.DataFrame(rows)
     df.insert(0, "sweep_id", [sha256_json(r) for r in rows])
     out_csv.parent.mkdir(parents=True, exist_ok=True)
