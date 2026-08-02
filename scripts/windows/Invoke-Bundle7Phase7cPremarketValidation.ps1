@@ -525,31 +525,48 @@ function Test-NoUnexpiredLeaderLease {
 }
 
 function Test-DeploymentPaperBrokerConfig {
-    Write-Step 'Paper deployment and paper broker configuration'
+    Write-Step 'Paper deployment and paper broker configuration (strict: mode, adapter identity, start-allowed, no blocker)'
     if ($null -eq $Script:SystemStatus) {
         Set-CheckResult 'deployment_paper_broker_config' 'fail' 'system/status unreachable'
         return
     }
+    # Strict, by value -- never reachability alone. The accepted operating
+    # lane is exactly daemon_mode=paper with adapter_id=alpaca (the
+    # canonical Paper+Alpaca deployment; BrokerKind::Alpaca.as_str() ==
+    # "alpaca", see core-rs/crates/mqk-daemon/src/state/types.rs). A daemon
+    # that cannot itself start (deployment_start_allowed=false or a
+    # deployment_blocker present) is never an accepted PreStart posture,
+    # even if daemon_mode/adapter_id both read correctly.
+    $problems = @()
     $mode = [string]$Script:SystemStatus.daemon_mode
-    if ($mode.ToUpperInvariant() -eq 'PAPER') {
-        Set-CheckResult 'deployment_paper_broker_config' 'pass' "daemon_mode=$mode adapter_id=$($Script:SystemStatus.adapter_id)"
+    if ($mode.ToLowerInvariant() -ne 'paper') { $problems += "daemon_mode=$mode (expected paper)" }
+    $adapterId = [string]$Script:SystemStatus.adapter_id
+    if ($adapterId.ToLowerInvariant() -ne 'alpaca') { $problems += "adapter_id=$adapterId (expected alpaca -- the accepted Paper+Alpaca deployment)" }
+    if ($Script:SystemStatus.deployment_start_allowed -ne $true) { $problems += "deployment_start_allowed=$($Script:SystemStatus.deployment_start_allowed) (expected true)" }
+    $blocker = $Script:SystemStatus.deployment_blocker
+    if ($null -ne $blocker -and $blocker -ne '') { $problems += "deployment_blocker present: $blocker" }
+    if (@($problems).Count -eq 0) {
+        Set-CheckResult 'deployment_paper_broker_config' 'pass' "daemon_mode=$mode adapter_id=$adapterId deployment_start_allowed=true deployment_blocker=absent"
     } else {
-        Set-CheckResult 'deployment_paper_broker_config' 'fail' "daemon_mode=$mode (expected paper)"
+        Set-CheckResult 'deployment_paper_broker_config' 'fail' ($problems -join '; ')
     }
 }
 
 function Test-LiveRoutingCapitalDisabled {
-    Write-Step 'Live routing/capital disabled'
+    Write-Step 'Live routing/capital disabled (strict: exactly false, never true/null/missing)'
     if ($null -eq $Script:SystemStatus) {
         Set-CheckResult 'live_routing_capital_disabled' 'fail' 'system/status unreachable'
         return
     }
+    # live_routing_enabled is Option<bool> on the wire -- a missing/null
+    # value must never be treated as an implicit pass. Only an explicit
+    # false is accepted.
     $liveRouting = $Script:SystemStatus.live_routing_enabled
-    if ($null -ne $liveRouting -and $liveRouting -eq $true) {
-        Set-CheckResult 'live_routing_capital_disabled' 'fail' 'live_routing_enabled=true -- hard blocker'
-        return
+    if ($liveRouting -eq $false) {
+        Set-CheckResult 'live_routing_capital_disabled' 'pass' 'live_routing_enabled=false'
+    } else {
+        Set-CheckResult 'live_routing_capital_disabled' 'fail' "live_routing_enabled=$liveRouting -- must be exactly false, never true/null/missing"
     }
-    Set-CheckResult 'live_routing_capital_disabled' 'pass' "live_routing_enabled=$liveRouting"
 }
 
 function Test-DynamicSelectionModePreviewPaperEnforced {
@@ -567,17 +584,25 @@ function Test-DynamicSelectionModePreviewPaperEnforced {
 }
 
 function Test-ArmIntegrityPostureSuitableForStart {
-    Write-Step 'Arm/integrity/risk/deadman posture is suitable for starting'
+    Write-Step 'Arm/integrity/risk/deadman posture is suitable for starting (strict accepted values)'
     if ($null -eq $Script:ControlStatus) {
         Set-CheckResult 'arm_integrity_posture_suitable_for_start' 'fail' 'control/status unreachable'
         return
     }
+    # integrity_state and deadman_armed_state are only ever "ARMED" or
+    # "DISARMED" at this layer (mqk_db::load_arm_state / sys_arm_state) --
+    # they never carry a literal "HALTED" string, so a prior `-eq 'HALTED'`
+    # check was structurally a no-op that let DISARMED/null/unknown values
+    # pass silently. The only accepted startable value is the exact string
+    # "ARMED"; every other value (DISARMED, null, unknown, empty) fails
+    # closed. desired_armed must also be exactly true.
     $problems = @()
-    if ($Script:ControlStatus.risk_blocked -eq $true) { $problems += "risk_blocked=true ($($Script:ControlStatus.risk_reason))" }
-    if ([string]$Script:ControlStatus.deadman_armed_state -eq 'HALTED') { $problems += 'deadman_armed_state=HALTED' }
-    if ([string]$Script:ControlStatus.integrity_state -eq 'HALTED') { $problems += 'integrity_state=HALTED' }
+    if ($Script:ControlStatus.risk_blocked -ne $false) { $problems += "risk_blocked=$($Script:ControlStatus.risk_blocked) ($($Script:ControlStatus.risk_reason))" }
+    if ($Script:ControlStatus.desired_armed -ne $true) { $problems += "desired_armed=$($Script:ControlStatus.desired_armed) (expected true)" }
+    if ([string]$Script:ControlStatus.integrity_state -ne 'ARMED') { $problems += "integrity_state=$($Script:ControlStatus.integrity_state) (expected exactly ARMED)" }
+    if ([string]$Script:ControlStatus.deadman_armed_state -ne 'ARMED') { $problems += "deadman_armed_state=$($Script:ControlStatus.deadman_armed_state) (expected exactly ARMED)" }
     if (@($problems).Count -eq 0) {
-        Set-CheckResult 'arm_integrity_posture_suitable_for_start' 'pass' "integrity_state=$($Script:ControlStatus.integrity_state) risk_blocked=false deadman_armed_state=$($Script:ControlStatus.deadman_armed_state)"
+        Set-CheckResult 'arm_integrity_posture_suitable_for_start' 'pass' "desired_armed=true integrity_state=ARMED deadman_armed_state=ARMED risk_blocked=false"
     } else {
         Set-CheckResult 'arm_integrity_posture_suitable_for_start' 'fail' ($problems -join '; ')
     }
@@ -647,9 +672,13 @@ function Test-LifecycleStartingOrRunning {
 }
 
 function Test-ExactlyOneCommittedActiveRun {
-    Write-Step 'Exactly one committed active run_id, owned locally, in an accepted durable status'
+    Write-Step 'Exactly one committed active run_id: owned locally, API-agreed, in an accepted durable status, with no second active PAPER run'
     if ($null -eq $Script:ControlStatus) {
         Set-CheckResult 'exactly_one_committed_active_run' 'fail' 'control/status unreachable'
+        return
+    }
+    if ($null -eq $Script:DynamicSelectionStatus) {
+        Set-CheckResult 'exactly_one_committed_active_run' 'fail' 'dynamic-selection/status unreachable'
         return
     }
     $activeRunId = $Script:ControlStatus.active_run_id
@@ -661,52 +690,113 @@ function Test-ExactlyOneCommittedActiveRun {
         Set-CheckResult 'exactly_one_committed_active_run' 'fail' "active_run_id=$activeRunId is not run_owned_locally"
         return
     }
+    # dynamic-selection/status and control/status must report the exact same
+    # active_run_id -- two API surfaces disagreeing on which run is active is
+    # itself evidence of an incoherent commit, never something to average
+    # over or ignore.
+    $dsActiveRunId = $Script:DynamicSelectionStatus.active_run_id
+    if ($null -eq $dsActiveRunId -or $dsActiveRunId -eq '' -or [string]$dsActiveRunId -ne [string]$activeRunId) {
+        Set-CheckResult 'exactly_one_committed_active_run' 'fail' "dynamic-selection/status active_run_id=$dsActiveRunId does not equal control/status active_run_id=$activeRunId"
+        return
+    }
     if (-not (Test-PsqlUsable)) {
         Set-CheckResult 'exactly_one_committed_active_run' 'fail' 'psql unavailable, DB URL unparsable, or RequireDb=false -- cannot verify durable run status'
         return
     }
-    $r = Invoke-PsqlScalar "select status from runs where run_id = '$activeRunId';"
+    # Exactly one applicable mqk-daemon PAPER run may be ARMED/RUNNING at a
+    # time -- a second concurrent active run (even if the API happens to
+    # report a coherent single active_run_id) is a durable-truth violation
+    # that a run_id-scoped query alone would never catch.
+    $countR = Invoke-PsqlScalar "select count(*) from runs where engine_id = 'mqk-daemon' and mode = 'PAPER' and status in ('ARMED','RUNNING');"
+    if ($countR.ExitCode -ne 0) {
+        Set-CheckResult 'exactly_one_committed_active_run' 'fail' 'durable ARMED/RUNNING PAPER run count query failed'
+        return
+    }
+    if ($countR.Output -ne '1') {
+        Set-CheckResult 'exactly_one_committed_active_run' 'fail' "expected exactly one ARMED/RUNNING PAPER run for mqk-daemon, found $($countR.Output)"
+        return
+    }
+    $r = Invoke-PsqlScalar "select run_id || '|' || status from runs where engine_id = 'mqk-daemon' and mode = 'PAPER' and status in ('ARMED','RUNNING');"
     if ($r.ExitCode -ne 0 -or $r.Output -eq '') {
         Set-CheckResult 'exactly_one_committed_active_run' 'fail' "no durable runs row for run_id=$activeRunId"
         return
     }
-    if ($r.Output -eq 'ARMED' -or $r.Output -eq 'RUNNING') {
-        $Script:ActiveRunId = $activeRunId
-        Set-CheckResult 'exactly_one_committed_active_run' 'pass' "run_id=$activeRunId status=$($r.Output) run_owned_locally=true"
-    } else {
-        Set-CheckResult 'exactly_one_committed_active_run' 'fail' "run_id=$activeRunId has durable status=$($r.Output) (expected ARMED or RUNNING)"
+    $parts = $r.Output -split '\|', 2
+    $durableRunId = $parts[0]
+    $durableStatus = if ($parts.Length -gt 1) { $parts[1] } else { '' }
+    if ($durableRunId -ne [string]$activeRunId) {
+        Set-CheckResult 'exactly_one_committed_active_run' 'fail' "the sole ARMED/RUNNING PAPER run_id=$durableRunId does not equal the API active_run_id=$activeRunId"
+        return
     }
+    if ($durableStatus -ne 'ARMED' -and $durableStatus -ne 'RUNNING') {
+        Set-CheckResult 'exactly_one_committed_active_run' 'fail' "run_id=$activeRunId has durable status=$durableStatus (expected ARMED or RUNNING)"
+        return
+    }
+    $Script:ActiveRunId = $activeRunId
+    Set-CheckResult 'exactly_one_committed_active_run' 'pass' "run_id=$activeRunId status=$durableStatus run_owned_locally=true dynamic-selection active_run_id agrees, exactly one ARMED/RUNNING PAPER run exists"
 }
 
 function Test-RunLeaseCoherent {
-    Write-Step 'Exactly one coherent, unexpired leader lease'
+    Write-Step 'Exactly one coherent, unexpired leader lease; DB holder/epoch agree with the API'
     if ($null -eq $Script:ControlStatus) {
         Set-CheckResult 'run_lease_coherent' 'fail' 'control/status unreachable'
         return
     }
-    $holder = $Script:ControlStatus.leader_holder_id
-    if ($null -eq $holder -or $holder -eq '') {
+    $apiHolder = $Script:ControlStatus.leader_holder_id
+    $apiEpoch = $Script:ControlStatus.leader_epoch
+    if ($null -eq $apiHolder -or $apiHolder -eq '') {
         Set-CheckResult 'run_lease_coherent' 'fail' 'no leader_holder_id -- no lease held'
         return
     }
-    if ($Script:ControlStatus.lease_expired -eq $true) {
-        Set-CheckResult 'run_lease_coherent' 'fail' "lease held by $holder is expired"
+    if ($null -eq $apiEpoch -and $apiEpoch -ne 0) {
+        Set-CheckResult 'run_lease_coherent' 'fail' 'no leader_epoch reported by control/status'
+        return
+    }
+    if ($Script:ControlStatus.lease_expired -ne $false) {
+        Set-CheckResult 'run_lease_coherent' 'fail' "lease_expired=$($Script:ControlStatus.lease_expired) for holder=$apiHolder (must be exactly false)"
         return
     }
     if (-not (Test-PsqlUsable)) {
-        Set-CheckResult 'run_lease_coherent' 'fail' 'psql unavailable, DB URL unparsable, or RequireDb=false -- cannot verify durable lease count'
+        Set-CheckResult 'run_lease_coherent' 'fail' 'psql unavailable, DB URL unparsable, or RequireDb=false -- cannot verify durable lease row'
         return
     }
-    $r = Invoke-PsqlScalar "select count(*) from runtime_leader_lease where lease_expires_at > now();"
-    if ($r.ExitCode -ne 0) {
-        Set-CheckResult 'run_lease_coherent' 'fail' 'lease query failed'
+    # runtime_leader_lease is a singleton table (see control.rs's own
+    # `WHERE id = 1` read) -- exactly one row must exist at all, not merely
+    # exactly one *unexpired* row (a second, differently-keyed lease row
+    # would previously have passed a count-where-unexpired check).
+    $countR = Invoke-PsqlScalar "select count(*) from runtime_leader_lease;"
+    if ($countR.ExitCode -ne 0) {
+        Set-CheckResult 'run_lease_coherent' 'fail' 'lease singleton-row count query failed'
         return
     }
-    if ($r.Output -eq '1') {
-        Set-CheckResult 'run_lease_coherent' 'pass' "exactly one unexpired lease, holder=$holder, lease_expired=false"
-    } else {
-        Set-CheckResult 'run_lease_coherent' 'fail' "expected exactly one unexpired lease row, found $($r.Output)"
+    if ($countR.Output -ne '1') {
+        Set-CheckResult 'run_lease_coherent' 'fail' "expected exactly one singleton runtime_leader_lease row, found $($countR.Output)"
+        return
     }
+    $r = Invoke-PsqlScalar "select holder_id || '|' || epoch || '|' || (case when lease_expires_at > now() then 'unexpired' else 'expired' end) from runtime_leader_lease;"
+    if ($r.ExitCode -ne 0 -or $r.Output -eq '') {
+        Set-CheckResult 'run_lease_coherent' 'fail' 'lease row query failed'
+        return
+    }
+    $parts = $r.Output -split '\|', 3
+    $dbHolder = $parts[0]
+    $dbEpoch = if ($parts.Length -gt 1) { $parts[1] } else { '' }
+    $dbExpiry = if ($parts.Length -gt 2) { $parts[2] } else { '' }
+    if ($dbExpiry -ne 'unexpired') {
+        Set-CheckResult 'run_lease_coherent' 'fail' "durable lease row is expired (holder=$dbHolder epoch=$dbEpoch)"
+        return
+    }
+    # DB is authoritative over the API's own report -- compare holder_id and
+    # epoch by value, never trust the API's self-reported facts alone.
+    if ($dbHolder -ne [string]$apiHolder) {
+        Set-CheckResult 'run_lease_coherent' 'fail' "durable lease holder_id=$dbHolder does not equal API leader_holder_id=$apiHolder"
+        return
+    }
+    if ($dbEpoch -ne [string]$apiEpoch) {
+        Set-CheckResult 'run_lease_coherent' 'fail' "durable lease epoch=$dbEpoch does not equal API leader_epoch=$apiEpoch"
+        return
+    }
+    Set-CheckResult 'run_lease_coherent' 'pass' "exactly one unexpired singleton lease, holder=$dbHolder epoch=$dbEpoch, DB and API agree"
 }
 
 function Test-CommittedDispositionPaperEnforcedAllowed {
@@ -910,24 +1000,34 @@ function Test-NoBindingMissingRequiredWindow {
 }
 
 function Test-ArmIntegrityReconciliationLiveRoutingFacts {
-    Write-Step 'Arm/integrity/risk/deadman/kill-switch/DB/live-routing facts, by value'
+    Write-Step 'Arm/integrity/risk/deadman/kill-switch/DB/live-routing/deployment facts, by value (strict accepted values)'
     if ($null -eq $Script:ControlStatus -or $null -eq $Script:SystemStatus) {
         Set-CheckResult 'arm_integrity_reconciliation_live_routing_facts' 'fail' 'control/status or system/status unreachable'
         return
     }
+    # Strict, fail-closed on null/unknown/missing -- the same repair as
+    # Test-ArmIntegrityPostureSuitableForStart and
+    # Test-DeploymentPaperBrokerConfig, but for the running ActiveCommit
+    # session: deployment/adapter/live-routing facts must still be proven,
+    # not merely proven once at PreStart.
     $problems = @()
-    if ($Script:ControlStatus.risk_blocked -eq $true) { $problems += "risk_blocked=true ($($Script:ControlStatus.risk_reason))" }
-    if ([string]$Script:ControlStatus.deadman_armed_state -eq 'HALTED') { $problems += 'deadman_armed_state=HALTED' }
-    if ($Script:SystemStatus.kill_switch_active -eq $true) { $problems += 'kill_switch_active=true' }
-    if ($Script:SystemStatus.risk_halt_active -eq $true) { $problems += 'risk_halt_active=true' }
-    if ($Script:SystemStatus.integrity_halt_active -eq $true) { $problems += 'integrity_halt_active=true' }
+    if ($Script:ControlStatus.risk_blocked -ne $false) { $problems += "risk_blocked=$($Script:ControlStatus.risk_blocked) ($($Script:ControlStatus.risk_reason))" }
+    if ($Script:ControlStatus.desired_armed -ne $true) { $problems += "desired_armed=$($Script:ControlStatus.desired_armed) (expected true)" }
+    if ([string]$Script:ControlStatus.integrity_state -ne 'ARMED') { $problems += "integrity_state=$($Script:ControlStatus.integrity_state) (expected exactly ARMED)" }
+    if ([string]$Script:ControlStatus.deadman_armed_state -ne 'ARMED') { $problems += "deadman_armed_state=$($Script:ControlStatus.deadman_armed_state) (expected exactly ARMED)" }
+    if ($Script:SystemStatus.kill_switch_active -ne $false) { $problems += "kill_switch_active=$($Script:SystemStatus.kill_switch_active) (expected false)" }
+    if ($Script:SystemStatus.risk_halt_active -ne $false) { $problems += "risk_halt_active=$($Script:SystemStatus.risk_halt_active) (expected false)" }
+    if ($Script:SystemStatus.integrity_halt_active -ne $false) { $problems += "integrity_halt_active=$($Script:SystemStatus.integrity_halt_active) (expected false)" }
     if ([string]$Script:SystemStatus.db_status -ne 'ok') { $problems += "db_status=$($Script:SystemStatus.db_status) (expected ok)" }
-    if ($null -ne $Script:SystemStatus.live_routing_enabled -and $Script:SystemStatus.live_routing_enabled -eq $true) {
-        $problems += 'live_routing_enabled=true'
-    }
+    if ($Script:SystemStatus.live_routing_enabled -ne $false) { $problems += "live_routing_enabled=$($Script:SystemStatus.live_routing_enabled) (must be exactly false, never true/null/missing)" }
     if ([string]$Script:SystemStatus.daemon_mode -ne 'paper') { $problems += "daemon_mode=$($Script:SystemStatus.daemon_mode) (expected paper)" }
+    $adapterId = [string]$Script:SystemStatus.adapter_id
+    if ($adapterId.ToLowerInvariant() -ne 'alpaca') { $problems += "adapter_id=$adapterId (expected alpaca -- the accepted Paper+Alpaca deployment)" }
+    if ($Script:SystemStatus.deployment_start_allowed -ne $true) { $problems += "deployment_start_allowed=$($Script:SystemStatus.deployment_start_allowed) (expected true)" }
+    $blocker = $Script:SystemStatus.deployment_blocker
+    if ($null -ne $blocker -and $blocker -ne '') { $problems += "deployment_blocker present: $blocker" }
     if (@($problems).Count -eq 0) {
-        Set-CheckResult 'arm_integrity_reconciliation_live_routing_facts' 'pass' 'risk/deadman/kill-switch/integrity/db/live-routing/mode facts all clean'
+        Set-CheckResult 'arm_integrity_reconciliation_live_routing_facts' 'pass' 'risk/desired_armed/deadman/integrity/kill-switch/db/live-routing/deployment/adapter facts all strictly accepted'
     } else {
         Set-CheckResult 'arm_integrity_reconciliation_live_routing_facts' 'fail' ($problems -join '; ')
     }
@@ -1172,30 +1272,56 @@ function New-Bundle7ActiveCommitManifest {
     $adapterId = if ($null -ne $Script:SystemStatus) { $Script:SystemStatus.adapter_id } else { $null }
     $liveRoutingEnabled = if ($null -ne $Script:SystemStatus) { $Script:SystemStatus.live_routing_enabled } else { $null }
     $leaseHolderId = if ($null -ne $Script:ControlStatus) { $Script:ControlStatus.leader_holder_id } else { $null }
+    $leaseEpoch = if ($null -ne $Script:ControlStatus) { $Script:ControlStatus.leader_epoch } else { $null }
     $leaseExpired = if ($null -ne $Script:ControlStatus) { $Script:ControlStatus.lease_expired } else { $null }
+    $desiredArmed = if ($null -ne $Script:ControlStatus) { $Script:ControlStatus.desired_armed } else { $null }
     $integrityState = if ($null -ne $Script:ControlStatus) { $Script:ControlStatus.integrity_state } else { $null }
+    $deadmanArmedState = if ($null -ne $Script:ControlStatus) { $Script:ControlStatus.deadman_armed_state } else { $null }
     $riskBlocked = if ($null -ne $Script:ControlStatus) { $Script:ControlStatus.risk_blocked } else { $null }
     $reconcileStatusValue = if ($null -ne $Script:ReconcileStatus) { $Script:ReconcileStatus.status } else { $null }
     $reconcileTruthState = if ($null -ne $Script:ReconcileStatus) { $Script:ReconcileStatus.truth_state } else { $null }
 
+    # Deterministic full sort (symbol, then strategy_id, then timeframe_secs)
+    # -- equivalent facts supplied in a different API-response order must
+    # still produce the same identity.
     $selectedBindings = @()
     if ($null -ne $Script:DynamicSelectionStatus) {
-        foreach ($s in @($Script:DynamicSelectionStatus.selected)) {
-            $selectedBindings += [ordered]@{
-                symbol               = $s.symbol
-                selected_strategy_id = $s.selected_strategy_id
-                timeframe_secs       = $s.timeframe_secs
-                reason_code          = $s.reason_code
-            }
-        }
+        $selectedBindings = @(
+            @($Script:DynamicSelectionStatus.selected | ForEach-Object {
+                [ordered]@{
+                    symbol               = $_.symbol
+                    selected_strategy_id = $_.selected_strategy_id
+                    timeframe_secs       = $_.timeframe_secs
+                    reason_code          = $_.reason_code
+                }
+            }) | Sort-Object -Property symbol, selected_strategy_id, timeframe_secs
+        )
     }
+
+    # Exact matched required market-data rows for the selected bindings only
+    # -- never every unrelated configuration-preview assignment row. Carries
+    # the result-affecting freshness/completeness facts the canonical
+    # readiness API exposes, not just readiness_state alone.
     $requiredMarketDataPairs = @()
     if ($null -ne $Script:MarketDataReadiness) {
-        foreach ($a in @($Script:MarketDataReadiness.assignments)) {
+        $assignments = @($Script:MarketDataReadiness.assignments)
+        foreach ($s in $selectedBindings) {
+            $match = $assignments | Where-Object {
+                $_.effective_runtime_target_symbol -eq $s.symbol -and
+                $_.effective_runtime_strategy_id -eq $s.selected_strategy_id -and
+                $_.effective_runtime_timeframe_secs -eq $s.timeframe_secs
+            } | Select-Object -First 1
             $requiredMarketDataPairs += [ordered]@{
-                symbol         = $a.assignment_symbol
-                timeframe_secs = $a.effective_runtime_timeframe_secs
-                readiness_state = $a.readiness_state
+                symbol                  = $s.symbol
+                strategy_id             = $s.selected_strategy_id
+                timeframe_secs          = $s.timeframe_secs
+                matched                 = ($null -ne $match)
+                readiness_state         = if ($null -ne $match) { $match.readiness_state } else { $null }
+                continuity_state        = if ($null -ne $match) { $match.continuity_state } else { $null }
+                provenance_state        = if ($null -ne $match) { $match.provenance_state } else { $null }
+                loaded_completed_bars   = if ($null -ne $match) { $match.loaded_completed_bars } else { $null }
+                expected_latest_bar_ts  = if ($null -ne $match) { $match.expected_latest_bar_ts } else { $null }
+                actual_latest_bar_ts    = if ($null -ne $match) { $match.actual_latest_bar_ts } else { $null }
             }
         }
     }
@@ -1210,23 +1336,47 @@ function New-Bundle7ActiveCommitManifest {
         $guardSummary[$name] = $Script:Results[$name].status
     }
 
+    # Canonical manifest identity: binds every formal fact that can change
+    # whether this is the same validated commitment -- deployment/adapter/
+    # live-routing, committed mode/disposition/live-lock, approved_for_live,
+    # run/plan identity, evidence validation state, source identity, exact
+    # selected bindings and their exact matched readiness facts, lease
+    # holder/epoch/expiry, arm/integrity/deadman/risk, reconciliation, guard
+    # summary, and verdict. generated_at_utc is deliberately never included
+    # -- a manifest regenerated instants later from identical formal facts
+    # must produce the identical manifest_id.
     $identityParts = [ordered]@{
-        stage              = 'active_commit'
-        accepted_code_sha  = $ExpectedSha
-        schema_version     = $LibrarySchemaVersion
-        market_date        = $MarketDate
-        session            = $Session
-        deployment_mode    = $deploymentMode
-        configured_mode    = $configuredMode
-        effective_mode     = $effectiveMode
-        disposition        = $disposition
-        live_lock_applied  = $liveLock
-        run_id             = $runId
-        plan_id            = $planId
-        validation_state   = $validationState
-        selected_bindings  = ($selectedBindings | Sort-Object { $_.symbol })
-        guard_summary      = $guardSummary
-        verdict            = $Verdict
+        stage                       = 'active_commit'
+        accepted_code_sha           = $ExpectedSha
+        schema_version              = $LibrarySchemaVersion
+        market_date                 = $MarketDate
+        session                     = $Session
+        deployment_mode             = $deploymentMode
+        adapter_id                  = $adapterId
+        live_routing_enabled        = $liveRoutingEnabled
+        configured_mode             = $configuredMode
+        effective_mode              = $effectiveMode
+        disposition                 = $disposition
+        live_lock_applied           = $liveLock
+        approved_for_live           = $false
+        run_id                      = $runId
+        plan_id                     = $planId
+        validation_state            = $validationState
+        source_kind                 = $sourceKind
+        source_identity             = $sourceIdentity
+        selected_bindings           = $selectedBindings
+        required_market_data_pairs  = $requiredMarketDataPairs
+        leader_holder_id            = $leaseHolderId
+        leader_epoch                = $leaseEpoch
+        lease_expired                = $leaseExpired
+        desired_armed               = $desiredArmed
+        integrity_state             = $integrityState
+        deadman_armed_state         = $deadmanArmedState
+        risk_blocked                = $riskBlocked
+        reconciliation_status       = $reconcileStatusValue
+        reconciliation_truth_state  = $reconcileTruthState
+        guard_summary               = $guardSummary
+        verdict                     = $Verdict
     }
     $identityJson = $identityParts | ConvertTo-Json -Depth 20 -Compress
     $manifestId = Get-Sha256Hex -Text $identityJson
@@ -1255,8 +1405,8 @@ function New-Bundle7ActiveCommitManifest {
         source_kind                     = $sourceKind
         source_identity                 = $sourceIdentity
         required_market_data_pairs      = $requiredMarketDataPairs
-        run_lease_coherence             = [ordered]@{ leader_holder_id = $leaseHolderId; lease_expired = $leaseExpired }
-        arm_integrity_verdict           = [ordered]@{ integrity_state = $integrityState; risk_blocked = $riskBlocked }
+        run_lease_coherence             = [ordered]@{ leader_holder_id = $leaseHolderId; leader_epoch = $leaseEpoch; lease_expired = $leaseExpired }
+        arm_integrity_verdict           = [ordered]@{ desired_armed = $desiredArmed; integrity_state = $integrityState; deadman_armed_state = $deadmanArmedState; risk_blocked = $riskBlocked }
         reconciliation_verdict          = [ordered]@{ status = $reconcileStatusValue; truth_state = $reconcileTruthState }
         readiness_verdict               = $Verdict
         migration_summary               = [ordered]@{ status = $Script:Results['migration_governance'].status }

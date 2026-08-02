@@ -465,12 +465,15 @@ pub(crate) async fn validate_dynamic_selection_evidence(
     DynamicSelectionEvidenceValidationState::Valid
 }
 
-/// Verify that every `strategy_signal_evaluations` row for `run_id` whose
-/// `strategy_id` matches a selected binding's `strategy_id` carries exactly
-/// one of that strategy_id's selected `(symbol, timeframe)` bindings.
+/// Verify that every `strategy_signal_evaluations` row for `run_id` is a
+/// member of the exact selected-binding tuple set -- the strict PaperEnforced
+/// mode. For a committed PaperEnforced run, Phase 7B proves selected-host-
+/// only dispatch and zero legacy strategy evaluation; a row whose exact
+/// `(symbol, strategy_id, timeframe)` is not one of the committed selected
+/// bindings is contradictory evidence, never an unrelated row to skip.
 ///
 /// Builds the exact allowed `(symbol, strategy_id, db_timeframe_label)`
-/// tuple set up front and checks set membership -- never the prior
+/// tuple set up front and checks set membership -- never the historical
 /// per-binding nested comparison, which required a row to match *every*
 /// binding sharing its `strategy_id` rather than *one* of them. That
 /// required-all-not-any shape falsely rejected a legitimate same-strategy
@@ -480,20 +483,12 @@ pub(crate) async fn validate_dynamic_selection_evidence(
 /// because A and B share `strategy_id = swing_momentum`, and rejected for
 /// not being MSFT.
 ///
-/// Rows whose `strategy_id` is not present in `selected_bindings` at all are
-/// skipped -- this validator only ever proves attribution for the
-/// selected-host bindings it was given, never asserts anything about a
-/// strategy_id outside that set. (The schema does not currently carry a
-/// `source`/`decision_stage` tag that distinguishes selected-host dispatch
-/// from legacy single-strategy dispatch at the row level -- both write
-/// through the same `strategy_signal_evaluations` insert path with
-/// `source = "mqk-daemon.execution_loop"` regardless of which dispatch
-/// authority drove the tick -- so strategy_id-set membership is the only
-/// evidence-backed boundary this function can assert; it does not claim a
-/// distinction the data does not carry.)
-///
 /// An empty result is authoritative: no contradicting row exists, not that
-/// none was checked.
+/// none was checked. This is the sole caller of the pure matching core
+/// below, and the sole caller currently in the codebase of the pure core --
+/// there is no looser historical mode to preserve for another caller; if one
+/// is ever introduced it must be split out explicitly rather than weakening
+/// this function.
 pub(crate) async fn verify_signal_journal_attribution(
     pool: &PgPool,
     run_id: Uuid,
@@ -508,7 +503,10 @@ pub(crate) async fn verify_signal_journal_attribution(
 
 /// Pure matching core of [`verify_signal_journal_attribution`], separated
 /// out so the exact-tuple-membership logic is unit-testable against
-/// hand-built rows without a DB round trip.
+/// hand-built rows without a DB round trip. Strict: every row is checked
+/// against the exact allowed tuple set, including rows whose `strategy_id`
+/// is not part of the selected-host set at all -- an unknown strategy_id is
+/// never silently skipped.
 pub(crate) fn find_signal_journal_attribution_violation(
     rows: &[mqk_db::StrategySignalEvaluationRecord],
     selected_bindings: &[(String, String, i64)],
@@ -525,22 +523,26 @@ pub(crate) fn find_signal_journal_attribution_violation(
     }
 
     for row in rows {
-        if !strategy_ids_selected.contains(row.strategy_id.as_str()) {
-            continue;
-        }
         let key = (
             row.symbol.clone(),
             row.strategy_id.clone(),
             row.timeframe.clone(),
         );
-        if !allowed.contains(&key) {
-            return Err(format!(
-                "signal-evaluation row evaluation_id={} for run_id={:?} strategy_id={} \
-                 carries symbol={:?} timeframe={:?}, which matches none of the selected \
-                 bindings for that strategy_id",
-                row.evaluation_id, row.run_id, row.strategy_id, row.symbol, row.timeframe
-            ));
+        if allowed.contains(&key) {
+            continue;
         }
+        let reason = if strategy_ids_selected.contains(row.strategy_id.as_str()) {
+            "matches none of the selected bindings for that strategy_id"
+        } else {
+            "strategy_id is not part of the committed selected-host set at all"
+        };
+        return Err(format!(
+            "signal-evaluation row evaluation_id={} for run_id={:?} strategy_id={} \
+             carries symbol={:?} timeframe={:?}, which {reason} (strict PaperEnforced \
+             attribution: every journal row for a committed run must match an exact \
+             selected (symbol, strategy_id, timeframe) tuple)",
+            row.evaluation_id, row.run_id, row.strategy_id, row.symbol, row.timeframe
+        ));
     }
 
     Ok(())
@@ -1014,16 +1016,14 @@ mod tests {
     }
 
     #[test]
-    fn attribution_skips_a_row_for_an_unknown_selected_host_strategy() {
+    fn attribution_rejects_an_unknown_selected_host_strategy() {
         let bindings = vec![("AAPL".to_string(), "swing_momentum".to_string(), 300i64)];
-        // A row for a strategy that is not part of the selected-host set at
-        // all (e.g. legacy single-strategy dispatch) is never asserted
-        // against -- must not error.
+        // Strict PaperEnforced mode: a row for a strategy that is not part of
+        // the committed selected-host set at all (e.g. legacy single-strategy
+        // dispatch, or a contradictory row) is contradictory evidence for a
+        // committed PaperEnforced run, never silently skipped.
         let rows = vec![signal_row("legacy_single_strategy", "GOOG", "1D")];
-        assert_eq!(
-            find_signal_journal_attribution_violation(&rows, &bindings),
-            Ok(())
-        );
+        assert!(find_signal_journal_attribution_violation(&rows, &bindings).is_err());
     }
 
     #[test]
@@ -1040,5 +1040,205 @@ mod tests {
         let bindings = vec![("AAPL".to_string(), "swing_momentum".to_string(), 123i64)];
         let rows: Vec<mqk_db::StrategySignalEvaluationRecord> = vec![];
         assert!(find_signal_journal_attribution_violation(&rows, &bindings).is_err());
+    }
+
+    // -----------------------------------------------------------------
+    // DB-backed proof for verify_signal_journal_attribution (Bundle 7
+    // Phase 7C Active-Commit repair, Defect 5) -- exercises the real DB
+    // fetch (fetch_strategy_signal_evaluations_for_run), not just the pure
+    // matching core above.
+    // -----------------------------------------------------------------
+
+    fn journal_det_uuid(seed: &str) -> Uuid {
+        Uuid::new_v5(
+            &Uuid::NAMESPACE_URL,
+            format!("dynamic_selection_evidence_validator::journal_tests::{seed}").as_bytes(),
+        )
+    }
+
+    async fn journal_make_db_pool() -> sqlx::PgPool {
+        let url = std::env::var(mqk_db::ENV_DB_URL).unwrap_or_else(|_| {
+            panic!(
+                "DB tests require MQK_DATABASE_URL; run: \
+                 MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test \
+                 cargo test -p mqk-daemon --lib dynamic_selection_evidence_validator \
+                 -- --include-ignored --test-threads=1"
+            )
+        });
+        let pool = sqlx::postgres::PgPoolOptions::new()
+            .max_connections(2)
+            .connect(&url)
+            .await
+            .expect("connect to test DB");
+        mqk_db::migrate(&pool).await.expect("run migrations");
+        pool
+    }
+
+    async fn journal_insert_row(
+        pool: &sqlx::PgPool,
+        seed: &str,
+        run_id: Uuid,
+        strategy_id: &str,
+        symbol: &str,
+        timeframe: &str,
+    ) {
+        let args = mqk_db::InsertStrategySignalEvaluationArgs {
+            evaluation_id: journal_det_uuid(seed),
+            ts_utc: chrono::Utc::now(),
+            run_id: Some(run_id),
+            strategy_id: strategy_id.to_string(),
+            symbol: symbol.to_string(),
+            timeframe: timeframe.to_string(),
+            bar_context_source: "db_loaded".to_string(),
+            bars_loaded: 10,
+            latest_bar_ts_utc: Some(chrono::Utc::now()),
+            signal_generated: true,
+            signal_qty: Some(1),
+            signal_side: Some("buy".to_string()),
+            reason_code: "ok".to_string(),
+            reason: "ok".to_string(),
+            decision_stage: "strategy_evaluated".to_string(),
+            source: "mqk-daemon.execution_loop".to_string(),
+        };
+        mqk_db::insert_strategy_signal_evaluation(pool, &args)
+            .await
+            .expect("insert strategy_signal_evaluations row");
+    }
+
+    #[tokio::test]
+    #[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+    async fn db_attribution_accepts_a_same_strategy_multi_symbol_plan() {
+        let pool = journal_make_db_pool().await;
+        let run_id = journal_det_uuid("db_attribution_accepts_a_same_strategy_multi_symbol_plan");
+        journal_insert_row(
+            &pool,
+            "db_attribution_accepts_a_same_strategy_multi_symbol_plan::AAPL",
+            run_id,
+            "swing_momentum",
+            "AAPL",
+            "5m",
+        )
+        .await;
+        journal_insert_row(
+            &pool,
+            "db_attribution_accepts_a_same_strategy_multi_symbol_plan::MSFT",
+            run_id,
+            "swing_momentum",
+            "MSFT",
+            "5m",
+        )
+        .await;
+        let bindings = vec![
+            ("AAPL".to_string(), "swing_momentum".to_string(), 300i64),
+            ("MSFT".to_string(), "swing_momentum".to_string(), 300i64),
+        ];
+        let result = verify_signal_journal_attribution(&pool, run_id, &bindings, 500).await;
+        assert_eq!(result, Ok(()));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+    async fn db_attribution_accepts_a_same_strategy_multi_timeframe_plan() {
+        let pool = journal_make_db_pool().await;
+        let run_id =
+            journal_det_uuid("db_attribution_accepts_a_same_strategy_multi_timeframe_plan");
+        journal_insert_row(
+            &pool,
+            "db_attribution_accepts_a_same_strategy_multi_timeframe_plan::5m",
+            run_id,
+            "swing_momentum",
+            "AAPL",
+            "5m",
+        )
+        .await;
+        journal_insert_row(
+            &pool,
+            "db_attribution_accepts_a_same_strategy_multi_timeframe_plan::1H",
+            run_id,
+            "swing_momentum",
+            "AAPL",
+            "1H",
+        )
+        .await;
+        let bindings = vec![
+            ("AAPL".to_string(), "swing_momentum".to_string(), 300i64),
+            ("AAPL".to_string(), "swing_momentum".to_string(), 3600i64),
+        ];
+        let result = verify_signal_journal_attribution(&pool, run_id, &bindings, 500).await;
+        assert_eq!(result, Ok(()));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+    async fn db_attribution_rejects_an_unknown_strategy() {
+        let pool = journal_make_db_pool().await;
+        let run_id = journal_det_uuid("db_attribution_rejects_an_unknown_strategy");
+        journal_insert_row(
+            &pool,
+            "db_attribution_rejects_an_unknown_strategy",
+            run_id,
+            "legacy_single_strategy",
+            "GOOG",
+            "1D",
+        )
+        .await;
+        let bindings = vec![("AAPL".to_string(), "swing_momentum".to_string(), 300i64)];
+        let result = verify_signal_journal_attribution(&pool, run_id, &bindings, 500).await;
+        assert!(
+            result.is_err(),
+            "strict mode must reject an unknown strategy_id, never skip it"
+        );
+    }
+
+    #[tokio::test]
+    #[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+    async fn db_attribution_rejects_a_wrong_symbol() {
+        let pool = journal_make_db_pool().await;
+        let run_id = journal_det_uuid("db_attribution_rejects_a_wrong_symbol");
+        journal_insert_row(
+            &pool,
+            "db_attribution_rejects_a_wrong_symbol",
+            run_id,
+            "swing_momentum",
+            "TSLA",
+            "5m",
+        )
+        .await;
+        let bindings = vec![("AAPL".to_string(), "swing_momentum".to_string(), 300i64)];
+        let result = verify_signal_journal_attribution(&pool, run_id, &bindings, 500).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+    async fn db_attribution_rejects_a_wrong_timeframe() {
+        let pool = journal_make_db_pool().await;
+        let run_id = journal_det_uuid("db_attribution_rejects_a_wrong_timeframe");
+        journal_insert_row(
+            &pool,
+            "db_attribution_rejects_a_wrong_timeframe",
+            run_id,
+            "swing_momentum",
+            "AAPL",
+            "1H",
+        )
+        .await;
+        let bindings = vec![("AAPL".to_string(), "swing_momentum".to_string(), 300i64)];
+        let result = verify_signal_journal_attribution(&pool, run_id, &bindings, 500).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    #[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+    async fn db_attribution_accepts_an_empty_journal_as_no_contradiction() {
+        let pool = journal_make_db_pool().await;
+        // No rows ever inserted for this run_id -- an empty result must be
+        // authoritative ("no contradicting row exists"), never conflated
+        // with "no rows were checked".
+        let run_id =
+            journal_det_uuid("db_attribution_accepts_an_empty_journal_as_no_contradiction");
+        let bindings = vec![("AAPL".to_string(), "swing_momentum".to_string(), 300i64)];
+        let result = verify_signal_journal_attribution(&pool, run_id, &bindings, 500).await;
+        assert_eq!(result, Ok(()));
     }
 }
