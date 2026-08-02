@@ -362,6 +362,12 @@
       "path": "0058_strategy_promotion_evidence_fingerprint_v2.sql",
       "status": "applied",
       "intent": "DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-FOUNDATION-AUTHORITY-CLOSURE-02 Defect B: add nullable evidence_fingerprint_v2 to sys_strategy_promotion_transitions, additive, does not modify 0046/0047. The legacy evidence_fingerprint hashes the matched review row after scanner_score has already been deserialized to f64, so two distinct raw decimal tokens can collide to the same legacy fingerprint while producing different exact Bundle 7 rankings. evidence_fingerprint_v2 is a versioned SHA-256 computed directly from the exact raw score token plus every other matched-row field affecting evidence identity. Legacy rows round-trip this column as NULL -- never backfilled from the mutable review-artifact filesystem at read time; Bundle 7's read-side validator refuses any identity lacking a v2 fingerprint with a distinct durable_fingerprint_v2_missing reason."
+    },
+    {
+      "id": "0059",
+      "path": "0059_dynamic_selection_plan_evidence.sql",
+      "status": "applied",
+      "intent": "DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7C Part 1: add sys_dynamic_selection_plans (one immutable durable row per resolved DynamicSelectionPlan, plan_id = the deterministic UUIDv5 derived from canonical_plan_identity_material, written only in shadow/paper_enforced mode -- off never writes here), sys_dynamic_selection_plan_symbols (one row per SymbolSelectionResult, always present even for a zero-candidate symbol, so symbol-level disposition/reason/exact_reason facts are never lost), and sys_dynamic_selection_plan_candidates (one row per SelectionCandidateResult, carrying every result-affecting evidence field canonical_plan_identity_material serializes) so Part 3's read-side validator can reconstruct the exact plan and independently recompute plan_id. approved_for_live is constrained false at the DB level. Selection-plan evidence only -- never portfolio/P&L/order/broker truth. Additive only, does not modify any existing table. No DEFAULT now()/gen_random_uuid() -- every timestamp and identity is caller-supplied."
     }
   ]
 }

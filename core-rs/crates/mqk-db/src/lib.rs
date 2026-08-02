@@ -72,6 +72,7 @@ pub mod arm_state;
 pub mod audit;
 pub mod autonomous_daily_operation;
 pub mod broker_baseline;
+pub mod dynamic_selection_evidence;
 pub mod fill_quality;
 pub mod flow;
 pub mod inbox;
@@ -95,6 +96,9 @@ pub use arm_state::*;
 pub use audit::*;
 pub use autonomous_daily_operation::*;
 pub use broker_baseline::*;
+// DYNAMIC-STRATEGY-SYMBOL-SELECTION-01 Phase 7C Part 1: durable
+// dynamic-selection plan evidence store (never portfolio/P&L/order truth).
+pub use dynamic_selection_evidence::*;
 pub use fill_quality::*;
 pub use flow::{fetch_execution_flow, ExecutionFlowRow, FlowQuery};
 pub use inbox::*;
