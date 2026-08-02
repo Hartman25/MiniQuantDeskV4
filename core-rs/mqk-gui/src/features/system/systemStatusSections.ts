@@ -4,6 +4,7 @@ export const SYSTEM_STATUS_SECTION_IDS = [
   "asset-capability-matrix",
   "runtime-opportunity-allocation",
   "strategy-conflict-policy",
+  "dynamic-selection-evidence",
 ] as const;
 
 export type SystemStatusSectionId = (typeof SYSTEM_STATUS_SECTION_IDS)[number];

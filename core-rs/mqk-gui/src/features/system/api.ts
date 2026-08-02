@@ -54,6 +54,19 @@ import type {
   ConflictStatus,
 } from "./types/strategyConflict";
 import {
+  parseDynamicSelectionPlanDetail,
+  parseDynamicSelectionPlansList,
+  parseDynamicSelectionStatus,
+  unavailableDynamicSelectionPlanDetail,
+  unavailableDynamicSelectionPlansList,
+  unavailableDynamicSelectionStatus,
+} from "./dynamicSelectionEvidence";
+import type {
+  DynamicSelectionPlanDetail,
+  DynamicSelectionPlansList,
+  DynamicSelectionStatus,
+} from "./types/dynamicSelectionEvidence";
+import {
   deriveDataSourceDetail,
   deriveExecutionSummaryFromOrders,
   mapActiveAlertsResponse,
@@ -301,6 +314,66 @@ export async function getConflictPlansList(limit = 20): Promise<GetConflictPlans
     return { ok: false, data: unavailableConflictPlansList(), error: result.error };
   }
   return { ok: true, data: parseConflictPlansList(result.data) };
+}
+
+// ---------------------------------------------------------------------------
+// DYNAMIC-STRATEGY-SYMBOL-SELECTION-01 Phase 7C Part 5: read-only durable
+// dynamic-selection evidence truth. GET-only -- no mode/start/stop/order
+// submission or any mutation.
+// ---------------------------------------------------------------------------
+
+export interface GetDynamicSelectionStatusResult {
+  ok: boolean;
+  data: DynamicSelectionStatus;
+  error?: string;
+}
+
+export async function getDynamicSelectionStatus(): Promise<GetDynamicSelectionStatusResult> {
+  const result = await fetchJsonCandidate<unknown>("/api/v1/dynamic-selection/status");
+  if (!result.ok) {
+    return {
+      ok: false,
+      data: unavailableDynamicSelectionStatus(result.error ?? "dynamic-selection status fetch failed"),
+      error: result.error,
+    };
+  }
+  return { ok: true, data: parseDynamicSelectionStatus(result.data) };
+}
+
+export interface GetDynamicSelectionPlanDetailResult {
+  ok: boolean;
+  data: DynamicSelectionPlanDetail;
+  error?: string;
+}
+
+export async function getDynamicSelectionPlanDetail(
+  planId: string,
+): Promise<GetDynamicSelectionPlanDetailResult> {
+  const result = await fetchJsonCandidate<unknown>(
+    `/api/v1/dynamic-selection/plans/${encodeURIComponent(planId)}`,
+  );
+  if (!result.ok) {
+    return { ok: false, data: unavailableDynamicSelectionPlanDetail(planId), error: result.error };
+  }
+  return { ok: true, data: parseDynamicSelectionPlanDetail(result.data, planId) };
+}
+
+export interface GetDynamicSelectionPlansListResult {
+  ok: boolean;
+  data: DynamicSelectionPlansList;
+  error?: string;
+}
+
+export async function getDynamicSelectionPlansList(
+  limit = 20,
+): Promise<GetDynamicSelectionPlansListResult> {
+  const result = await fetchJsonCandidate<unknown>(
+    `/api/v1/dynamic-selection/plans?limit=${encodeURIComponent(String(limit))}`,
+  );
+  if (!result.ok) {
+    return { ok: false, data: unavailableDynamicSelectionPlansList(), error: result.error };
+  }
+  return { ok: true, data: parseDynamicSelectionPlansList(result.data) };
 }
 
 // ---------------------------------------------------------------------------

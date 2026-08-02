@@ -2,6 +2,7 @@ import { clearSavedDaemonUrl, defaultDaemonUrl, getSavedDaemonUrl, setSavedDaemo
 import { Panel } from "../../components/common/Panel";
 import { formatLabel } from "../../lib/format";
 import { AssetCapabilityMatrixPanel } from "../system/AssetCapabilityMatrixPanel";
+import { DynamicSelectionEvidencePanel } from "../system/DynamicSelectionEvidencePanel";
 import { InstrumentRegistryV2SourcePanel } from "../system/InstrumentRegistryV2SourcePanel";
 import { RuntimeOpportunityAllocationPanel } from "../system/RuntimeOpportunityAllocationPanel";
 import { StrategyConflictPolicyPanel } from "../system/StrategyConflictPolicyPanel";
@@ -72,6 +73,7 @@ export function SettingsScreen({ model }: { model: SystemModel }) {
       {systemStatusScreenIncludes("asset-capability-matrix") && <AssetCapabilityMatrixPanel />}
       {systemStatusScreenIncludes("runtime-opportunity-allocation") && <RuntimeOpportunityAllocationPanel />}
       {systemStatusScreenIncludes("strategy-conflict-policy") && <StrategyConflictPolicyPanel />}
+      {systemStatusScreenIncludes("dynamic-selection-evidence") && <DynamicSelectionEvidencePanel />}
     </div>
   );
 }
