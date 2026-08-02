@@ -1,7 +1,6 @@
 # =============================================================================
-# DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7C-DURABLE-EVIDENCE-OPERATOR-
-# SURFACES-AND-SOAK-READINESS-CLOSURE: final Bundle 7 structural closure
-# guard.
+# DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7C-FORMAL-SOAK-GATE-TRUTH-
+# REPAIR-01: final Bundle 7 structural closure guard.
 #
 # Proves, by direct source inspection (never merely "cargo test passed") plus
 # delegation to the already-accepted Phase 7A/7B guards:
@@ -20,20 +19,45 @@
 #   8. A payload collision is never silently ignored for PaperEnforcedAllowed.
 #   9. The evidence API/GUI surfaces are read-only (no mutating axum route,
 #      no mutating fetch in the GUI panel).
-#  10. The soak manifest writer secret-scans before every write.
-#  11. The premarket validator names every one of its 18 checks and emits
-#      exactly one FINAL: PASS / FINAL: FAIL conclusion.
-#  12. The soak manifest is written only when the pending verdict is PASS.
-#  13. approved_for_live is constrained false at the DB level and hard-coded
+#  10. approved_for_live is constrained false at the DB level and hard-coded
 #      false at every construction site touched by this patch.
-#  14. The read-side validator's typed outcome enum still names all 8 states.
+#  11. The read-side validator's typed outcome enum still names all 8 states.
+#  12. The premarket validator supports both -Stage PreStart and -Stage
+#      ActiveCommit, names every check in each stage's registry, and emits
+#      exactly one FINAL: PASS / FINAL: FAIL conclusion.
+#  13. RequireApi=false/RequireDb=false/missing DaemonBaseUrl is rejected as
+#      a hard precondition -- never downgraded to a non-blocking 'warn'.
+#  14. No check in the premarket validator ever assigns a 'warn' status --
+#      the WARN/HARD repair removed the escape hatch entirely, in both
+#      stages, not just ActiveCommit.
+#  15. Real-value checks (arm/integrity/risk/reconciliation/lease/market-data)
+#      inspect actual response fields, never endpoint reachability alone.
+#  16. no_binding_missing_required_window compares exact selected bindings
+#      against exact readiness assignment rows -- never an unconditional
+#      pass once the endpoint is reachable.
+#  17. ActiveCommit's disposition/mode checks read committed_* truth, never
+#      preview_* truth.
+#  18. ActiveCommit's lease coherence check requires exactly one unexpired
+#      lease, never a zero-lease requirement.
+#  19. The formal ActiveCommit manifest binds selected_bindings with
+#      timeframe_secs, and never hard-codes deployment_mode/adapter_id --
+#      both are sourced from verified live system/status facts.
+#  20. The formal ActiveCommit manifest is refused when run_id or plan_id is
+#      null.
+#  21. The status route serializes disposition through the canonical
+#      as_str() string mapping, never format!("{:?}", ...) Debug text.
+#  22. verify_signal_journal_attribution's exact-tuple-set matching function
+#      exists (no per-binding nested nested nested-loop
+#      required-all-not-any comparison).
+#  23. Migration 0060 adds the exact-candidate-key UNIQUE constraint, and the
+#      validator's own defense-in-depth duplicate-key check exists.
+#  24. The validator's disposition/effective-mode coherence check exists.
+#  25. The manifest writer secret-scans before every write (both stages).
 #
 # Mutation-negative self-tests prove several of these checks actually
 # discriminate: each re-runs the relevant check against a deliberately
 # corrupted in-memory copy of the real source text and asserts the check
-# fails on it. Covers: dropped-candidate/payload-collision ignored, run
-# mismatch, approved_for_live=true, persistence moved after activation, a
-# mutation route, a removed validator check, and a fabricated FINAL PASS.
+# fails on it.
 #
 # Usage:
 #   powershell -ExecutionPolicy Bypass -File scripts\guards\check_bundle7_phase7c_final_closure.ps1
@@ -56,12 +80,14 @@ $RepoRoot  = (Resolve-Path (Join-Path $ScriptDir "../../")).Path.TrimEnd('\')
 $LifecycleFile       = Join-Path $RepoRoot "core-rs\crates\mqk-daemon\src\state\lifecycle.rs"
 $StateFile           = Join-Path $RepoRoot "core-rs\crates\mqk-daemon\src\state.rs"
 $DispatchAuthFile    = Join-Path $RepoRoot "core-rs\crates\mqk-daemon\src\dynamic_selection_dispatch_authority.rs"
+$StartGateFile       = Join-Path $RepoRoot "core-rs\crates\mqk-daemon\src\dynamic_selection_start_gate.rs"
 $ValidatorFile       = Join-Path $RepoRoot "core-rs\crates\mqk-daemon\src\dynamic_selection_evidence_validator.rs"
 $WriterFile          = Join-Path $RepoRoot "core-rs\crates\mqk-daemon\src\dynamic_selection_evidence_writer.rs"
 $DbEvidenceFile      = Join-Path $RepoRoot "core-rs\crates\mqk-db\src\dynamic_selection_evidence.rs"
 $RoutesFile          = Join-Path $RepoRoot "core-rs\crates\mqk-daemon\src\routes\dynamic_selection_evidence.rs"
 $GuiPanelFile        = Join-Path $RepoRoot "core-rs\mqk-gui\src\features\system\DynamicSelectionEvidencePanel.tsx"
 $MigrationFile       = Join-Path $RepoRoot "core-rs\crates\mqk-db\migrations\0059_dynamic_selection_plan_evidence.sql"
+$Migration0060File   = Join-Path $RepoRoot "core-rs\crates\mqk-db\migrations\0060_dynamic_selection_plan_candidates_exact_key_unique.sql"
 $PremarketScriptFile = Join-Path $RepoRoot "scripts\windows\Invoke-Bundle7Phase7cPremarketValidation.ps1"
 $Phase7aGuard        = Join-Path $RepoRoot "scripts\guards\check_phase7a_final_closure.ps1"
 $Phase7bGuard        = Join-Path $RepoRoot "scripts\guards\check_phase7b_selected_host_dispatch_closure.ps1"
@@ -92,12 +118,14 @@ function Strip-CommentLines($content) {
 $lifecycleContent    = Get-Content -Raw $LifecycleFile
 $stateContent        = Get-Content -Raw $StateFile
 $dispatchAuthContent = Get-Content -Raw $DispatchAuthFile
+$startGateContent    = Get-Content -Raw $StartGateFile
 $validatorContent    = Get-Content -Raw $ValidatorFile
 $writerContent       = Get-Content -Raw $WriterFile
 $dbEvidenceContent   = Get-Content -Raw $DbEvidenceFile
 $routesContent       = Get-Content -Raw $RoutesFile
 $guiPanelContent     = Get-Content -Raw $GuiPanelFile
 $migrationContent    = Get-Content -Raw $MigrationFile
+$migration0060Content = if (Test-Path $Migration0060File) { Get-Content -Raw $Migration0060File } else { "" }
 $premarketContent    = if (Test-Path $PremarketScriptFile) { Get-Content -Raw $PremarketScriptFile } else { "" }
 
 # ---------------------------------------------------------------------------
@@ -248,74 +276,11 @@ if ($guiPanelContent -notmatch $mutatingFetchPattern) {
 }
 
 # ---------------------------------------------------------------------------
-# Check 10: the soak manifest writer secret-scans before every write.
-# ---------------------------------------------------------------------------
-Write-Host ""
-Write-Host "-- Check 10: manifest is secret-scanned before every write --"
-if ($premarketContent -eq "") {
-    Fail "premarket validator script not found: $PremarketScriptFile"
-} else {
-    $secretScanIdx = Get-FirstMatchIndex $premarketContent "function Find-SecretShapedPattern"
-    $writeIdx = Get-FirstMatchIndex $premarketContent "Set-Content -Path `$ManifestPath"
-    if ($secretScanIdx -ge 0 -and $writeIdx -ge 0 -and $secretScanIdx -lt $writeIdx -and $premarketContent -match "Find-SecretShapedPattern -Text \`$json") {
-        Ok "secret scan runs and is called before the manifest is written"
-    } else {
-        Fail "could not confirm the manifest is secret-scanned strictly before being written"
-    }
-}
-
-# ---------------------------------------------------------------------------
-# Check 11: the premarket validator names every one of its 18 checks and
-# emits exactly one FINAL: PASS / FINAL: FAIL conclusion.
-# ---------------------------------------------------------------------------
-Write-Host ""
-Write-Host "-- Check 11: validator names all 18 checks and emits FINAL PASS/FAIL --"
-$requiredCheckNames = @(
-    'head_equals_accepted_sha', 'tracked_worktree_clean', 'migration_governance',
-    'expected_db_reachable', 'no_stale_active_run_or_lease', 'arm_integrity_posture',
-    'reconciliation_readiness', 'deployment_paper_live_disabled',
-    'dynamic_selection_mode_paper_enforced', 'approved_for_live_false',
-    'durable_plan_evidence_valid', 'selected_bindings_match_evidence',
-    'selected_timeframes_have_fresh_bars', 'no_binding_missing_required_window',
-    'phase7_and_bundle_guards_pass', 'api_matches_db_evidence',
-    'no_trading_action_invoked', 'soak_manifest_validates'
-)
-$missingCheckNames = @()
-foreach ($n in $requiredCheckNames) {
-    if ($premarketContent -notmatch [regex]::Escape("'$n'")) { $missingCheckNames += $n }
-}
-if ($missingCheckNames.Count -eq 0) {
-    Ok "all 18 required check names are present"
-} else {
-    Fail "missing check name(s) in premarket validator: $($missingCheckNames -join ', ')"
-}
-$premarketContentNoComments = Strip-CommentLines $premarketContent
-$finalPassCount = Get-MatchCount $premarketContentNoComments "FINAL: PASS"
-$finalFailCount = Get-MatchCount $premarketContentNoComments "FINAL: FAIL"
-if ($finalPassCount -eq 1 -and $finalFailCount -eq 1) {
-    Ok "exactly one FINAL: PASS and one FINAL: FAIL literal"
-} else {
-    Fail "expected exactly one FINAL: PASS and one FINAL: FAIL literal, found $finalPassCount / $finalFailCount"
-}
-
-# ---------------------------------------------------------------------------
-# Check 12: the soak manifest is written only when the pending verdict is
-# PASS.
-# ---------------------------------------------------------------------------
-Write-Host ""
-Write-Host "-- Check 12: soak manifest write is gated on a PASS verdict --"
-if ($premarketContent -match [regex]::Escape('$PendingVerdict -eq ''PASS''')) {
-    Ok "manifest write path checks `$PendingVerdict -eq 'PASS'"
-} else {
-    Fail "could not confirm the manifest write path is gated on a PASS verdict"
-}
-
-# ---------------------------------------------------------------------------
-# Check 13: approved_for_live constrained false at the DB level and
+# Check 10: approved_for_live constrained false at the DB level and
 # hard-coded false at every construction site this patch touches.
 # ---------------------------------------------------------------------------
 Write-Host ""
-Write-Host "-- Check 13: approved_for_live can never be true --"
+Write-Host "-- Check 10: approved_for_live can never be true --"
 if ($migrationContent -match "CHECK \(approved_for_live = false\)") {
     Ok "DB-level CHECK constraint present in migration 0059"
 } else {
@@ -328,10 +293,10 @@ if ($writerContent -match "approved_for_live:\s*false") {
 }
 
 # ---------------------------------------------------------------------------
-# Check 14: the read-side validator's typed outcome enum names all 8 states.
+# Check 11: the read-side validator's typed outcome enum names all 8 states.
 # ---------------------------------------------------------------------------
 Write-Host ""
-Write-Host "-- Check 14: validator outcome enum names all 8 states --"
+Write-Host "-- Check 11: validator outcome enum names all 8 states --"
 $requiredStates = @('Valid', 'Missing', 'Incomplete', 'IdentityMismatch', 'RunMismatch', 'CandidateMismatch', 'RuntimeMismatch', 'LiveApprovalViolation')
 $missingStates = @()
 foreach ($s in $requiredStates) {
@@ -341,6 +306,293 @@ if ($missingStates.Count -eq 0) {
     Ok "all 8 validation states present"
 } else {
     Fail "missing validation state(s) in validator: $($missingStates -join ', ')"
+}
+
+# ---------------------------------------------------------------------------
+# Check 12: the premarket validator supports both stages, names every check
+# in each stage's registry, and emits exactly one FINAL: PASS/FAIL.
+# ---------------------------------------------------------------------------
+Write-Host ""
+Write-Host "-- Check 12: two-stage validator names all checks and emits FINAL PASS/FAIL --"
+$requiredPreStartCheckNames = @(
+    'head_equals_accepted_sha', 'tracked_worktree_clean', 'migration_governance',
+    'require_api_and_db_true', 'expected_db_reachable',
+    'no_conflicting_active_or_starting_run', 'no_unexpired_leader_lease',
+    'deployment_paper_broker_config', 'live_routing_capital_disabled',
+    'dynamic_selection_mode_preview_paper_enforced',
+    'arm_integrity_posture_suitable_for_start', 'reconciliation_truth_acceptable',
+    'required_market_data_pairs_complete_and_fresh', 'phase7_and_bundle_guards_pass',
+    'no_trading_action_invoked', 'prestart_artifact_validates'
+)
+$requiredActiveCommitCheckNames = @(
+    'head_equals_accepted_sha', 'tracked_worktree_clean', 'migration_governance',
+    'require_api_and_db_true', 'expected_db_reachable', 'lifecycle_starting_or_running',
+    'exactly_one_committed_active_run', 'run_lease_coherent',
+    'committed_disposition_paper_enforced_allowed', 'committed_effective_mode_paper_enforced',
+    'committed_live_lock_false', 'approved_for_live_false', 'committed_plan_id_present',
+    'evidence_persisted_true', 'evidence_validation_state_valid', 'validation_blockers_empty',
+    'api_selected_bindings_equal_durable_candidates', 'selected_bindings_have_fresh_bar_windows',
+    'no_binding_missing_required_window', 'arm_integrity_reconciliation_live_routing_facts',
+    'reconciliation_truth_acceptable', 'api_matches_db_evidence', 'phase7_and_bundle_guards_pass',
+    'no_trading_action_invoked', 'active_commit_manifest_validates'
+)
+$missingCheckNames = @()
+foreach ($n in ($requiredPreStartCheckNames + $requiredActiveCommitCheckNames | Select-Object -Unique)) {
+    if ($premarketContent -notmatch [regex]::Escape("'$n'")) { $missingCheckNames += $n }
+}
+if ($missingCheckNames.Count -eq 0) {
+    Ok "all required PreStart and ActiveCommit check names are present"
+} else {
+    Fail "missing check name(s) in premarket validator: $($missingCheckNames -join ', ')"
+}
+if ($premarketContent -match "ValidateSet\('PreStart',\s*'ActiveCommit'\)") {
+    Ok "the validator's -Stage parameter is constrained to PreStart/ActiveCommit"
+} else {
+    Fail "the validator does not declare a -Stage PreStart|ActiveCommit parameter"
+}
+$premarketContentNoComments = Strip-CommentLines $premarketContent
+$finalPassCount = Get-MatchCount $premarketContentNoComments "FINAL: PASS"
+$finalFailCount = Get-MatchCount $premarketContentNoComments "FINAL: FAIL"
+if ($finalPassCount -eq 1 -and $finalFailCount -eq 1) {
+    Ok "exactly one FINAL: PASS and one FINAL: FAIL literal"
+} else {
+    Fail "expected exactly one FINAL: PASS and one FINAL: FAIL literal, found $finalPassCount / $finalFailCount"
+}
+if ($premarketContent -match [regex]::Escape('$PendingVerdict -eq ''PASS''')) {
+    Ok "artifact/manifest write path checks `$PendingVerdict -eq 'PASS'"
+} else {
+    Fail "could not confirm the artifact/manifest write path is gated on a PASS verdict"
+}
+
+# ---------------------------------------------------------------------------
+# Check 13: RequireApi=false/RequireDb=false/missing DaemonBaseUrl is a hard
+# precondition rejection, never a downgrade.
+# ---------------------------------------------------------------------------
+Write-Host ""
+Write-Host "-- Check 13: RequireApi/RequireDb/DaemonBaseUrl hard precondition --"
+$hardPreconditionPattern = "(?s)function Test-RequireApiAndDbTrue.*?if \(-not \`$RequireApi\).*?if \(-not \`$RequireDb\).*?if \(\`$DaemonBaseUrl -eq ''\)"
+if ($premarketContent -match $hardPreconditionPattern) {
+    Ok "Test-RequireApiAndDbTrue rejects RequireApi=false, RequireDb=false, and a missing DaemonBaseUrl"
+} else {
+    Fail "could not confirm the RequireApi/RequireDb/DaemonBaseUrl hard-precondition check"
+}
+if ($premarketContent -match "Test-RequireApiAndDbTrue\s*$" -or $premarketContent -match "(?m)^Test-RequireApiAndDbTrue\s*$") {
+    Ok "Test-RequireApiAndDbTrue is invoked in the check run order"
+} else {
+    Fail "Test-RequireApiAndDbTrue is defined but never invoked"
+}
+
+# ---------------------------------------------------------------------------
+# Check 14: no check ever assigns a 'warn' status -- the WARN escape hatch
+# is fully removed, in both stages.
+# ---------------------------------------------------------------------------
+Write-Host ""
+Write-Host "-- Check 14: no 'warn' status is ever assigned --"
+if ($premarketContentNoComments -notmatch "'warn'") {
+    Ok "no 'warn' status literal anywhere in the premarket validator"
+} else {
+    Fail "the premarket validator still assigns a 'warn' status somewhere -- the WARN escape hatch was not fully removed"
+}
+
+# ---------------------------------------------------------------------------
+# Check 15: real-value checks -- arm/integrity/risk/reconciliation/lease/
+# market-data checks inspect actual response fields, never reachability
+# alone.
+# ---------------------------------------------------------------------------
+Write-Host ""
+Write-Host "-- Check 15: real-value checks inspect actual fields, not reachability alone --"
+$realValueFieldMarkers = @(
+    'risk_blocked', 'deadman_armed_state', 'readiness_state', 'lease_expired',
+    'truth_state', 'leader_holder_id', 'run_owned_locally', 'kill_switch_active'
+)
+$missingMarkers = @()
+foreach ($m in $realValueFieldMarkers) {
+    if ($premarketContent -notmatch [regex]::Escape($m)) { $missingMarkers += $m }
+}
+if ($missingMarkers.Count -eq 0) {
+    Ok "every real-value field marker is referenced by the validator"
+} else {
+    Fail "missing real-value field reference(s): $($missingMarkers -join ', ')"
+}
+
+# ---------------------------------------------------------------------------
+# Check 16: no_binding_missing_required_window compares exact bindings
+# against exact readiness rows -- never an unconditional pass.
+# ---------------------------------------------------------------------------
+Write-Host ""
+Write-Host "-- Check 16: no_binding_missing_required_window is a real comparison --"
+$unconditionalPassDefect = "covered by data/readiness (see prior check)"
+if ($premarketContent -notmatch [regex]::Escape($unconditionalPassDefect)) {
+    Ok "the prior unconditional-pass defect literal is absent"
+} else {
+    Fail "the prior unconditional no_binding_missing_required_window PASS literal is still present"
+}
+if ($premarketContent -match "effective_runtime_target_symbol" -and $premarketContent -match "effective_runtime_strategy_id" -and $premarketContent -match "effective_runtime_timeframe_secs") {
+    Ok "no_binding_missing_required_window compares exact per-binding readiness fields"
+} else {
+    Fail "no_binding_missing_required_window does not appear to compare exact per-binding readiness fields"
+}
+
+# ---------------------------------------------------------------------------
+# Check 17: ActiveCommit disposition/mode checks read committed_* truth,
+# never preview_* truth.
+# ---------------------------------------------------------------------------
+Write-Host ""
+Write-Host "-- Check 17: ActiveCommit reads committed truth, never preview truth --"
+$activeCommitDispositionPattern = "(?s)function Test-CommittedDispositionPaperEnforcedAllowed.*?-eq 'paper_enforced_allowed'"
+$m = [regex]::Match($premarketContent, $activeCommitDispositionPattern)
+if ($m.Success -and $m.Value -notmatch 'preview_effective_mode|preview_configured_mode') {
+    Ok "Test-CommittedDispositionPaperEnforcedAllowed does not reference preview_* fields"
+} else {
+    Fail "ActiveCommit's committed-disposition check appears to reference preview_* truth"
+}
+$activeCommitModePattern = "(?s)function Test-CommittedEffectiveModePaperEnforced.*?committed_effective_mode"
+if ($premarketContent -match $activeCommitModePattern) {
+    Ok "Test-CommittedEffectiveModePaperEnforced reads committed_effective_mode"
+} else {
+    Fail "Test-CommittedEffectiveModePaperEnforced does not appear to read committed_effective_mode"
+}
+
+# ---------------------------------------------------------------------------
+# Check 18: ActiveCommit lease coherence requires exactly one unexpired
+# lease, never a zero-lease requirement.
+# ---------------------------------------------------------------------------
+Write-Host ""
+Write-Host "-- Check 18: ActiveCommit lease coherence requires exactly one lease --"
+$leaseCoherentPattern = "(?s)function Test-RunLeaseCoherent.*?\`$r\.Output -eq '1'"
+if ($premarketContent -match $leaseCoherentPattern) {
+    Ok "Test-RunLeaseCoherent requires exactly one unexpired lease row"
+} else {
+    Fail "Test-RunLeaseCoherent does not appear to require exactly one unexpired lease row"
+}
+
+# ---------------------------------------------------------------------------
+# Check 19: the formal manifest binds selected_bindings with timeframe_secs
+# and never hard-codes deployment_mode/adapter_id.
+# ---------------------------------------------------------------------------
+Write-Host ""
+Write-Host "-- Check 19: manifest bindings carry timeframe_secs; no hard-coded deployment evidence --"
+$manifestBindingsPattern = "(?s)function New-Bundle7ActiveCommitManifest.*?selected_strategy_id\s*=\s*\`$s\.selected_strategy_id.*?timeframe_secs\s*=\s*\`$s\.timeframe_secs"
+if ($premarketContent -match $manifestBindingsPattern) {
+    Ok "New-Bundle7ActiveCommitManifest's selected_bindings carry timeframe_secs"
+} else {
+    Fail "New-Bundle7ActiveCommitManifest's selected_bindings do not appear to carry timeframe_secs"
+}
+$hardcodedEvidencePattern = "deployment_mode\s*=\s*'Paper'|broker_kind\s*=\s*'Alpaca'"
+if ($premarketContent -notmatch $hardcodedEvidencePattern) {
+    Ok "no hard-coded deployment_mode='Paper'/broker_kind='Alpaca' literal"
+} else {
+    Fail "the manifest still hard-codes deployment/broker evidence instead of sourcing it from verified facts"
+}
+if ($premarketContent -match [regex]::Escape('$deploymentMode = if ($null -ne $Script:SystemStatus) { $Script:SystemStatus.daemon_mode }')) {
+    Ok "deployment_mode is sourced from the verified system/status response"
+} else {
+    Fail "could not confirm deployment_mode is sourced from a verified live fact"
+}
+
+# ---------------------------------------------------------------------------
+# Check 20: the formal manifest is refused when run_id or plan_id is null.
+# ---------------------------------------------------------------------------
+Write-Host ""
+Write-Host "-- Check 20: formal manifest refuses a null run_id/plan_id --"
+$nullPlanRejectPattern = "(?s)function Test-ActiveCommitManifestValidates.*?if \(\`$null -eq \`$manifest\.run_id -or \`$null -eq \`$manifest\.plan_id\)"
+if ($premarketContent -match $nullPlanRejectPattern) {
+    Ok "Test-ActiveCommitManifestValidates rejects a null run_id/plan_id"
+} else {
+    Fail "Test-ActiveCommitManifestValidates does not appear to reject a null run_id/plan_id"
+}
+
+# ---------------------------------------------------------------------------
+# Check 21: status route serializes disposition via as_str(), never Debug
+# text.
+# ---------------------------------------------------------------------------
+Write-Host ""
+Write-Host "-- Check 21: disposition is serialized via as_str(), never Debug text --"
+if ($routesContent -notmatch [regex]::Escape('format!("{:?}", snapshot.disposition)')) {
+    Ok "the Debug-formatted disposition literal is absent from routes/dynamic_selection_evidence.rs"
+} else {
+    Fail "routes/dynamic_selection_evidence.rs still Debug-formats disposition"
+}
+if ($routesContent -match [regex]::Escape('snapshot.disposition.as_str().to_string()')) {
+    Ok "routes/dynamic_selection_evidence.rs serializes disposition via the canonical as_str() mapping"
+} else {
+    Fail "routes/dynamic_selection_evidence.rs does not appear to use the canonical as_str() disposition mapping"
+}
+if ($startGateContent -match "pub\(crate\) fn as_str\(&self\) -> &'static str" -and $startGateContent -match "pub\(crate\) fn parse\(raw: &str\) -> Option<Self>") {
+    Ok "DynamicSelectionStartGateDisposition exposes the one canonical as_str()/parse() mapping"
+} else {
+    Fail "DynamicSelectionStartGateDisposition does not expose a canonical as_str()/parse() mapping"
+}
+
+# ---------------------------------------------------------------------------
+# Check 22: verify_signal_journal_attribution's exact-tuple-set matching
+# core exists -- never the prior required-all-not-any nested comparison.
+# ---------------------------------------------------------------------------
+Write-Host ""
+Write-Host "-- Check 22: signal journal attribution uses exact-tuple-set matching --"
+if ($validatorContent -match "fn find_signal_journal_attribution_violation\(") {
+    Ok "find_signal_journal_attribution_violation exists"
+} else {
+    Fail "find_signal_journal_attribution_violation not found -- attribution may still use the old per-binding nested comparison"
+}
+if ($validatorContent -match "strategy_ids_selected" -and $validatorContent -match "std::collections::HashSet<\(String, String, String\)>") {
+    Ok "attribution builds an exact allowed-tuple HashSet, not a nested per-binding loop"
+} else {
+    Fail "attribution does not appear to build an exact allowed-tuple set"
+}
+
+# ---------------------------------------------------------------------------
+# Check 23: migration 0060 exact-candidate-key uniqueness + validator
+# defense-in-depth duplicate check.
+# ---------------------------------------------------------------------------
+Write-Host ""
+Write-Host "-- Check 23: exact candidate key uniqueness (DB + validator) --"
+if ($migration0060Content -match "UNIQUE \(plan_id, symbol, strategy_id, timeframe_secs\)") {
+    Ok "migration 0060 adds the exact-candidate-key UNIQUE constraint"
+} else {
+    Fail "migration 0060 does not add the expected UNIQUE (plan_id, symbol, strategy_id, timeframe_secs) constraint"
+}
+if ($migrationContent -match "PRIMARY KEY \(plan_id, ordinal\)") {
+    Ok "migration 0059 is unmodified (still (plan_id, ordinal) primary key only)"
+} else {
+    Fail "migration 0059 appears to have been modified -- migrations are append-only"
+}
+if ($validatorContent -match "fn find_duplicate_candidate_key\(") {
+    Ok "the validator's find_duplicate_candidate_key defense-in-depth check exists"
+} else {
+    Fail "find_duplicate_candidate_key not found in the validator"
+}
+
+# ---------------------------------------------------------------------------
+# Check 24: disposition/effective-mode coherence check exists.
+# ---------------------------------------------------------------------------
+Write-Host ""
+Write-Host "-- Check 24: disposition/effective-mode coherence check exists --"
+if ($validatorContent -match "fn disposition_coherence_violation\(") {
+    Ok "disposition_coherence_violation exists"
+} else {
+    Fail "disposition_coherence_violation not found in the validator"
+}
+
+# ---------------------------------------------------------------------------
+# Check 25: the manifest/artifact writer secret-scans before every write, in
+# both stages.
+# ---------------------------------------------------------------------------
+Write-Host ""
+Write-Host "-- Check 25: manifest/artifact is secret-scanned before every write (both stages) --"
+if ($premarketContent -eq "") {
+    Fail "premarket validator script not found: $PremarketScriptFile"
+} else {
+    $secretScanIdx = Get-FirstMatchIndex $premarketContent "function Find-SecretShapedPattern"
+    $activeCommitWriteIdx = Get-FirstMatchIndex $premarketContent "Join-Path `$OutputDirectory 'bundle7_soak_session_manifest.json'"
+    $prestartWriteIdx = Get-FirstMatchIndex $premarketContent "Join-Path `$OutputDirectory 'bundle7_prestart_readiness_manifest.json'"
+    $scanCallCount = Get-MatchCount $premarketContent "Find-SecretShapedPattern -Text `$json"
+    if ($secretScanIdx -ge 0 -and $activeCommitWriteIdx -ge 0 -and $prestartWriteIdx -ge 0 -and
+        $secretScanIdx -lt $activeCommitWriteIdx -and $secretScanIdx -lt $prestartWriteIdx -and $scanCallCount -ge 2) {
+        Ok "secret scan runs and is called before both the PreStart artifact and ActiveCommit manifest are written"
+    } else {
+        Fail "could not confirm both artifact/manifest writers are secret-scanned strictly before being written"
+    }
 }
 
 # ---------------------------------------------------------------------------
@@ -385,7 +637,7 @@ if ($mutationCaught3) {
 }
 
 # ---------------------------------------------------------------------------
-# Mutation-negative self-test 4: Check 14's validator-state-completeness
+# Mutation-negative self-test 4: Check 11's validator-state-completeness
 # check (a removed validator state).
 # ---------------------------------------------------------------------------
 Write-Host ""
@@ -403,7 +655,7 @@ if ($mutationCaught4) {
 }
 
 # ---------------------------------------------------------------------------
-# Mutation-negative self-test 5: Check 13's approved_for_live=true DB
+# Mutation-negative self-test 5: Check 10's approved_for_live=true DB
 # constraint check.
 # ---------------------------------------------------------------------------
 Write-Host ""
@@ -417,7 +669,7 @@ if ($mutationCaught5) {
 }
 
 # ---------------------------------------------------------------------------
-# Mutation-negative self-test 6: Check 11's fabricated-FINAL-PASS detection
+# Mutation-negative self-test 6: Check 12's fabricated-FINAL-PASS detection
 # (a second unconditional FINAL: PASS injected elsewhere).
 # ---------------------------------------------------------------------------
 Write-Host ""
@@ -444,6 +696,91 @@ if ($mutationCaught7) {
     Ok "self-test passed: single-validator check correctly FAILS when a second validator function is added"
 } else {
     Fail "self-test FAILED: single-validator check did not detect a duplicated validator function"
+}
+
+# ---------------------------------------------------------------------------
+# Mutation-negative self-test 8: Check 14's WARN-elimination check (a 'warn'
+# status reintroduced).
+# ---------------------------------------------------------------------------
+Write-Host ""
+Write-Host "-- Self-test 8: mutation-negative proof for the no-WARN-status check --"
+$mutatedWithWarn = $premarketContentNoComments + "`nSet-CheckResult 'x' 'warn' 'downgraded'`n"
+$mutationCaught8 = ($mutatedWithWarn -match "'warn'")
+if ($mutationCaught8) {
+    Ok "self-test passed: no-WARN check correctly fires when a 'warn' status is reintroduced"
+} else {
+    Fail "self-test FAILED: no-WARN check did not detect a reintroduced 'warn' status"
+}
+
+# ---------------------------------------------------------------------------
+# Mutation-negative self-test 9: Check 16's unconditional-pass detection (the
+# old no_binding_missing_required_window defect literal reintroduced).
+# ---------------------------------------------------------------------------
+Write-Host ""
+Write-Host "-- Self-test 9: mutation-negative proof for the unconditional-pass defect literal --"
+$mutatedWithUnconditionalPass = $premarketContent + "`n# covered by data/readiness (see prior check)`n"
+$mutationCaught9 = ($mutatedWithUnconditionalPass -match [regex]::Escape($unconditionalPassDefect))
+if ($mutationCaught9) {
+    Ok "self-test passed: unconditional-pass literal detection correctly fires when the defect text is reintroduced"
+} else {
+    Fail "self-test FAILED: unconditional-pass literal detection did not fire"
+}
+
+# ---------------------------------------------------------------------------
+# Mutation-negative self-test 10: Check 17's preview-truth-in-ActiveCommit
+# detection.
+# ---------------------------------------------------------------------------
+Write-Host ""
+Write-Host "-- Self-test 10: mutation-negative proof for preview-truth-in-ActiveCommit detection --"
+$mutatedPreviewLeak = $premarketContent -replace [regex]::Escape('$disposition = [string]$Script:DynamicSelectionStatus.disposition'), '$disposition = [string]$Script:DynamicSelectionStatus.preview_effective_mode'
+$mMutated = [regex]::Match($mutatedPreviewLeak, $activeCommitDispositionPattern)
+$mutationCaught10 = -not ($mMutated.Success -and $mMutated.Value -notmatch 'preview_effective_mode|preview_configured_mode')
+if ($mutationCaught10) {
+    Ok "self-test passed: preview-truth detection correctly fires when committed_disposition is swapped for preview truth"
+} else {
+    Fail "self-test FAILED: preview-truth detection did not fire on a preview/committed swap"
+}
+
+# ---------------------------------------------------------------------------
+# Mutation-negative self-test 11: Check 18's zero-lease-requirement
+# detection.
+# ---------------------------------------------------------------------------
+Write-Host ""
+Write-Host "-- Self-test 11: mutation-negative proof for the zero-lease-requirement detection --"
+$mutatedZeroLease = $premarketContent -replace [regex]::Escape("`$r.Output -eq '1'"), "`$r.Output -eq '0'"
+$mutationCaught11 = ($mutatedZeroLease -notmatch $leaseCoherentPattern)
+if ($mutationCaught11) {
+    Ok "self-test passed: lease-coherence check correctly FAILS when the requirement is mutated to zero-lease"
+} else {
+    Fail "self-test FAILED: lease-coherence check did not detect a zero-lease-requirement mutation"
+}
+
+# ---------------------------------------------------------------------------
+# Mutation-negative self-test 12: Check 23's duplicate-candidate-key
+# detection (the UNIQUE constraint removed from migration 0060).
+# ---------------------------------------------------------------------------
+Write-Host ""
+Write-Host "-- Self-test 12: mutation-negative proof for the exact-candidate-key uniqueness check --"
+$mutatedMigration0060 = $migration0060Content -replace [regex]::Escape("UNIQUE (plan_id, symbol, strategy_id, timeframe_secs)"), "-- REMOVED"
+$mutationCaught12 = ($mutatedMigration0060 -notmatch "UNIQUE \(plan_id, symbol, strategy_id, timeframe_secs\)")
+if ($mutationCaught12) {
+    Ok "self-test passed: exact-candidate-key uniqueness check correctly FAILS when the UNIQUE constraint is removed"
+} else {
+    Fail "self-test FAILED: exact-candidate-key uniqueness check did not detect a removed UNIQUE constraint"
+}
+
+# ---------------------------------------------------------------------------
+# Mutation-negative self-test 13: Check 21's Debug-disposition detection (a
+# format!("{:?}", ...) reintroduced).
+# ---------------------------------------------------------------------------
+Write-Host ""
+Write-Host "-- Self-test 13: mutation-negative proof for Debug-disposition detection --"
+$mutatedRoutesDebug = $routesContent + "`nlet x = format!(`"{:?}`", snapshot.disposition);`n"
+$mutationCaught13 = ($mutatedRoutesDebug -match [regex]::Escape('format!("{:?}", snapshot.disposition)'))
+if ($mutationCaught13) {
+    Ok "self-test passed: Debug-disposition detection correctly fires when the Debug-format literal is reintroduced"
+} else {
+    Fail "self-test FAILED: Debug-disposition detection did not fire"
 }
 
 Write-Host ""

@@ -20560,3 +20560,202 @@ DISPOSITION:
 DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7C-DURABLE-EVIDENCE-OPERATOR-SURFACES-AND-SOAK-READINESS-CLOSURE:
 COMPLETE -- AWAITING CHATGPT AND OPERATOR ACCEPTANCE BEFORE PUSH
 ```
+
+## DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7C-FORMAL-SOAK-GATE-TRUTH-REPAIR-01 (2026-08-01)
+
+Independent source review of the Phase 7C closure found the premarket
+validator could report `FINAL: PASS` under `-RequireApi:$false` without
+proving any live/committed fact, plus two operator/read-validation truth
+defects. This patch repairs those defects and replaces the one-stage
+validator with an explicit two-stage `PreStart`/`ActiveCommit` formal soak
+gate. Starting HEAD: `2282f1d5753c24cc63cd913630708e8c9ea2152d`.
+
+DEFECTS CLOSED:
+1. WARN-never-blocks: `-RequireApi:$false`/`-RequireDb:$false` could
+   downgrade required checks to a non-blocking `warn` that never failed
+   `FINAL: PASS`. Removed entirely -- every check in both stages is now
+   `pass` or `fail`; a `Test-RequireApiAndDbTrue` hard precondition rejects
+   `RequireApi=false`, `RequireDb=false`, or a missing `-DaemonBaseUrl`
+   before any other check runs, in both stages.
+2. Reachability-only checks (`arm_integrity_posture`,
+   `reconciliation_readiness`, `no_binding_missing_required_window`, etc.)
+   replaced with real-value checks against actual response fields
+   (`risk_blocked`, `deadman_armed_state`, `readiness_state`,
+   `lease_expired`, `truth_state`, `kill_switch_active`, exact selected-
+   binding-to-readiness-row matching via `effective_runtime_target_symbol`/
+   `effective_runtime_strategy_id`/`effective_runtime_timeframe_secs`).
+3. Impossible one-stage timing contract (a lease-must-be-zero check versus
+   a plan-not-yet-committed "not applicable" pass) resolved by splitting
+   into `-Stage PreStart` (no unexpired lease, no conflicting active/
+   starting run) and `-Stage ActiveCommit` (exactly one unexpired lease
+   coherent with the committed run, `run_owned_locally=true`, durable
+   `runs.status in (ARMED, RUNNING)`).
+4. Manifest defects repaired: selected timeframe_secs required, real
+   per-binding market-data pairs (not symbol-only), no preview-mode use in
+   `ActiveCommit`, deployment_mode/broker facts sourced from verified
+   `system/status` (never hard-coded `'Paper'`/`'Alpaca'`). Renamed
+   `bundle7_soak_readiness_manifest.json` -> `bundle7_soak_session_
+   manifest.json` (the only countable artifact, `ActiveCommit`-only) plus a
+   new, explicitly non-countable `bundle7_prestart_readiness_manifest.json`
+   for `PreStart`.
+5. `verify_signal_journal_attribution` rewritten
+   (`dynamic_selection_evidence_validator.rs`): built an exact allowed
+   `(symbol, strategy_id, db_timeframe_label)` tuple set and checks set
+   membership, replacing the prior per-binding nested comparison that
+   required a signal-journal row to match *every* binding sharing its
+   `strategy_id` rather than *one* of them -- which falsely rejected a
+   legitimate same-strategy multi-symbol/multi-timeframe plan.
+6. Status route serialized `disposition` via `format!("{:?}", ...)`
+   (PascalCase Debug text) instead of a stable snake_case string, and
+   `selected`/`refused` rows omitted `timeframe_secs`. Added one canonical
+   `DynamicSelectionStartGateDisposition::as_str()`/`::parse()` mapping
+   (`dynamic_selection_start_gate.rs`), consumed by
+   `routes/dynamic_selection_evidence.rs`, `routes/system.rs`, and the
+   evidence writer (replacing three independent literal mappings with one).
+   `DynamicSelectionSymbolRow` now carries `timeframe_secs` (Rust + GUI
+   type/parser/panel/tests); the GUI parser now validates the top-level
+   `disposition` field against the closed vocabulary instead of accepting
+   any string.
+7. Migration 0059's only candidate uniqueness was `(plan_id, ordinal)` --
+   physical insert order, not economic identity. Added additive migration
+   0060: `UNIQUE (plan_id, symbol, strategy_id, timeframe_secs)` on
+   `sys_dynamic_selection_plan_candidates`, plus a read-side defense-in-
+   depth `find_duplicate_candidate_key` check in the validator. Added
+   `disposition_coherence_violation`: rejects a stored disposition
+   incoherent with `effective_mode`, or an Allowed disposition
+   (`paper_enforced_allowed`/`shadow_allowed`) whose stored
+   `selected_count`/`truth_state` could never have produced it per
+   `dynamic_selection_start_gate.rs`'s own contract.
+8. Read validator did not explicitly validate header disposition against
+   effective-mode/start-gate truth -- closed by defect 7's
+   `disposition_coherence_violation`.
+
+PRESTART GATE: 16 named checks (`head_equals_accepted_sha` ..
+`prestart_artifact_validates`); proves no conflicting run/lease, Paper
+deployment, live-capital/routing disabled, dynamic-selection preview mode
+`paper_enforced`, arm/integrity/risk/deadman posture, reconciliation truth,
+and market-data readiness -- all by real value. Writes only a non-countable
+prestart artifact on PASS.
+
+ACTIVE-COMMIT GATE: 25 named checks (`head_equals_accepted_sha` ..
+`active_commit_manifest_validates`); proves exactly one committed active
+run/lease, committed disposition/mode/plan/evidence, API-selected-bindings-
+equal-durable-candidates (including `timeframe_secs`, cross-checked via
+`psql`), every selected binding's exact readiness row, arm/integrity/
+reconciliation/live-routing facts, and API-DB truth agreement. Only an
+`ActiveCommit FINAL: PASS` writes the countable `bundle7_soak_session_
+manifest.json`; refuses on any null `run_id`/`plan_id`/empty
+`selected_bindings`.
+
+HARD/WARN POLICY: `'warn'` status literal fully removed from the script
+(guard Check 14 + mutation self-test 8 prove this structurally, in addition
+to the empirical `RequireApi=false` proof below).
+
+RUN/LEASE COHERENCE: `PreStart` fails on any unexpired lease or any
+ARMED/RUNNING `runs` row for `engine_id='mqk-daemon' AND mode='PAPER'`.
+`ActiveCommit` requires exactly one unexpired lease (`count = '1'`, never
+`'0'`) reported both by `control/status` (`leader_holder_id`,
+`lease_expired`) and by a direct `runtime_leader_lease` query.
+
+REAL ARM/RECONCILE/DATA CHECKS: sourced from `GET /api/v1/system/status`,
+`GET /api/v1/control/status`, `GET /api/v1/reconcile/status`, and
+`GET /api/v1/market-data/readiness` (the validator's prior `/api/v1/data/
+readiness` path did not exist as a route at all).
+
+COMMITTED API BINDINGS: `DynamicSelectionSymbolRow` now carries
+`timeframe_secs`; top-level `disposition` uses the canonical `as_str()`
+mapping.
+
+DISPOSITION VOCABULARY: one canonical `DynamicSelectionStartGateDisposition
+::as_str()`/`::parse()` (off/shadow_allowed/shadow_invalid/
+paper_enforced_allowed/paper_enforced_refused), shared by the API
+projection, the evidence writer, and (transitively) GUI/test fixtures.
+
+SIGNAL JOURNAL: `find_signal_journal_attribution_violation` (pure,
+unit-tested for same-strategy/multi-symbol, same-strategy/multi-timeframe,
+wrong symbol, wrong timeframe, unknown selected-host strategy skip, and
+empty-journal cases).
+
+DUPLICATE/DISPOSITION VALIDATION: migration 0060 UNIQUE constraint (DB
+proof: `duplicate_exact_candidate_key_is_rejected_at_the_db_level`, real
+DB test on 5434) + `find_duplicate_candidate_key`/
+`disposition_coherence_violation` (pure unit tests).
+
+FORMAL MANIFEST: `New-Bundle7ActiveCommitManifest` binds every fact from
+verified `$Script:SystemStatus`/`$Script:ControlStatus`/
+`$Script:DynamicSelectionStatus`/`$Script:ReconcileStatus`/
+`$Script:MarketDataReadiness` captures (never hard-coded); secret-scanned
+before every write (both stages); refuses on null `run_id`/`plan_id`/empty
+`selected_bindings`.
+
+RUNBOOK: `docs/runbooks/autonomous_paper_ops.md` §26-§32 updated for the
+formal two-stage sequence (PreStart gate -> start -> ActiveCommit gate ->
+only ActiveCommit PASS counts a session -> restart requires a fresh
+ActiveCommit manifest -> ActiveCommit FAIL invalidates the session).
+
+GUARDS: `check_bundle7_phase7c_final_closure.ps1` rewritten -- 25 structural
+checks + 13 mutation-negative self-tests (up from 14 + 7), all passing
+clean (0 failures) after two real bugs the guard itself caught during
+development were fixed: a self-matching regex in the premarket script's own
+`no_trading_action_invoked` fail-message (falsely counted 2 call sites) and
+a lazy-match guard-check regex that never actually inspected the
+`committed_disposition` field it claimed to verify (self-test 10 caught
+this). `check_phase7a_final_closure.ps1` OK; `check_phase7b_selected_host_
+dispatch_closure.ps1` OK; `check_migration_governance.sh` OK;
+`check_unsafe_patterns.ps1` OK (one real finding fixed: a test fixture used
+`Uuid::new_v4()`, replaced with a deterministic `Uuid::new_v5`);
+`check_no_promotion_evidence_bypass.ps1` OK; `check_no_phase7a_production_
+effects_bypass.ps1` OK; `check_runtime_opportunity_allocation_01.sh`
+(Bundle 5) OK; `check_multi_strategy_conflict_policy_01.sh` (Bundle 6) OK.
+
+VALIDATION: `cargo check`/`cargo clippy -D warnings` clean on
+mqk-daemon+mqk-db; full `mqk-daemon --lib` suite 751 passed/0 failed/5
+ignored; `mqk-db` evidence-store scenario suite 14 passed/0 failed
+(port 5434, includes the new duplicate-key DB test); Phase 7A scenario
+matrix (3 files) 9 passed/0 failed; `mqk-gui` full suite 977 passed/0
+failed, `tsc --noEmit` clean, production build clean; the premarket
+validator's own `test_bundle7_phase7c_premarket_validation.ps1` (rewritten
+for two stages) 0 violations across 8 scenarios (port-refusal both stages,
+real PreStart run against real HEAD, wrong-SHA FAIL, RequireApi=false hard
+FAIL both stages, all-16-PreStart-checks-present, mutation-negative missing
+check); `git diff --check` clean (line-ending warnings only, no whitespace
+errors). No test/guard/validation run touched DB port 5440, started a
+daemon, called a real network endpoint, or placed an order.
+
+FILES CHANGED: core-rs/crates/mqk-daemon/src/dynamic_selection_evidence_validator.rs,
+core-rs/crates/mqk-daemon/src/dynamic_selection_evidence_writer.rs,
+core-rs/crates/mqk-daemon/src/dynamic_selection_start_gate.rs,
+core-rs/crates/mqk-daemon/src/routes/dynamic_selection_evidence.rs,
+core-rs/crates/mqk-daemon/src/routes/system.rs,
+core-rs/crates/mqk-db/migrations/manifest.json,
+core-rs/crates/mqk-db/tests/scenario_dynamic_selection_evidence_store_01.rs,
+core-rs/mqk-gui/src/features/system/DynamicSelectionEvidencePanel.tsx,
+core-rs/mqk-gui/src/features/system/dynamicSelectionEvidence.test.ts,
+core-rs/mqk-gui/src/features/system/dynamicSelectionEvidence.ts,
+core-rs/mqk-gui/src/features/system/types/dynamicSelectionEvidence.ts,
+docs/runbooks/autonomous_paper_ops.md,
+scripts/guards/check_bundle7_phase7c_final_closure.ps1,
+scripts/windows/Invoke-Bundle7Phase7cPremarketValidation.ps1,
+scripts/windows/tests/test_bundle7_phase7c_premarket_validation.ps1,
+MiniQuantDesk_Master_Patch_Ledger_v2.md
+FILES ADDED: core-rs/crates/mqk-db/migrations/0060_dynamic_selection_plan_candidates_exact_key_unique.sql
+FILES DELETED: none
+FILES RENAMED: none
+UNEXPECTED FILES: none
+MIGRATIONS ADDED: 0060_dynamic_selection_plan_candidates_exact_key_unique.sql
+ECONOMIC SEMANTICS CHANGED: NO
+STRATEGY CALCULATIONS CHANGED: NO
+BUNDLE 6 POLICY CHANGED: NO
+BUNDLE 5 POLICY CHANGED: NO
+CAP #6 SEMANTICS CHANGED: NO
+RISK AUTHORITY CHANGED: NO
+BROKER/OUTBOX AUTHORITY CHANGED: NO
+PORTFOLIO/P&L AUTHORITY CHANGED: NO
+RECONCILIATION AUTHORITY CHANGED: NO
+AI CONSUMED: NO
+LIVE CAPITAL ENABLED: NO
+
+DISPOSITION:
+DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7C-FORMAL-SOAK-GATE-TRUTH-REPAIR-01:
+COMPLETE -- AWAITING CHATGPT AND OPERATOR ACCEPTANCE BEFORE PUSH
+```

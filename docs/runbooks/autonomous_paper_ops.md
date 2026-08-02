@@ -1020,21 +1020,45 @@ other.
 ### 26. Definition of one session
 
 One session is exactly one supervised Paper + Alpaca autonomous daily
-operation (§15–§17) that:
-- Starts under the accepted SHA (§24), with `MQK_DYNAMIC_STRATEGY_SYMBOL_
-  SELECTION_MODE=paper_enforced` and the live lock resolving to
-  `paper_enforced` (never demoted to `off`) at start time — verified via
-  `GET /api/v1/dynamic-selection/status`'s `preview_effective_mode` before
-  arm, and `committed_effective_mode` after start.
-- Runs the `Invoke-Bundle7Phase7cPremarketValidation.ps1` validator (Part 7)
-  to a genuine `FINAL: PASS` before start, using the operator-supplied paper
-  database (never port 5434 or 5440 — §0b, §23).
-- Is actively supervised end-to-end (§0) — never unattended.
-- Reaches a clean end-of-day stop (§10) or an explicit, logged operator
-  halt for a reason unrelated to Bundle 7 evidence/dispatch correctness
-  (e.g. a scheduled infrastructure maintenance halt) — a halt caused by any
-  Bundle 7 evidence/validation/dispatch defect is an invalidator (§27), not
-  a countable clean session.
+operation (§15–§17) that follows the **formal two-stage gate sequence**
+(FORMAL-SOAK-GATE-TRUTH-REPAIR-01):
+
+1. Run `Invoke-Bundle7Phase7cPremarketValidation.ps1 -Stage PreStart` to a
+   genuine `FINAL: PASS` before the runtime starts a run, using the
+   operator-supplied paper database (`-AllowNonTestDbPort -Environment
+   Paper`, never port 5434 or 5440 — §0b, §23). A PreStart PASS proves it is
+   safe to start; it writes only a `bundle7_prestart_readiness_manifest.json`
+   artifact, which explicitly states `run_id`/`plan_id` are not yet
+   committed and cannot authorize or count a session on its own.
+2. Start the paper runtime through the existing procedure (§15–§17), with
+   `MQK_DYNAMIC_STRATEGY_SYMBOL_SELECTION_MODE=paper_enforced` and the live
+   lock resolving to `paper_enforced` (never demoted to `off`) — verified
+   via `GET /api/v1/dynamic-selection/status`'s `committed_effective_mode`
+   after start.
+3. Run `Invoke-Bundle7Phase7cPremarketValidation.ps1 -Stage ActiveCommit`
+   to a genuine `FINAL: PASS` after the run has started — this stage proves
+   the durable committed truth of the run itself (exactly one committed
+   active run/lease, committed disposition/mode/plan/evidence, API-vs-DB
+   agreement, every selected binding's exact fresh bar window) by real
+   value, never endpoint reachability alone.
+4. **Only an ActiveCommit `FINAL: PASS` creates the countable session
+   manifest** (`bundle7_soak_session_manifest.json`). A PreStart PASS alone
+   never counts a session, regardless of what happens afterward.
+5. Only after that manifest is written may the session begin counting
+   toward §25's five-session requirement.
+6. A restart or a new run during the session requires a fresh ActiveCommit
+   gate run and a fresh manifest — a manifest from a prior run/plan_id is
+   never reused or treated as still covering a new run (§31).
+7. An `ActiveCommit FINAL: FAIL` at any point invalidates the session (§27)
+   — a session is never counted on PreStart evidence alone, no matter how
+   long the run remained active afterward.
+
+Is actively supervised end-to-end (§0) — never unattended. Reaches a clean
+end-of-day stop (§10) or an explicit, logged operator halt for a reason
+unrelated to Bundle 7 evidence/dispatch correctness (e.g. a scheduled
+infrastructure maintenance halt) — a halt caused by any Bundle 7
+evidence/validation/dispatch defect is an invalidator (§27), not a
+countable clean session.
 
 ### 27. Immediate invalidators
 
@@ -1051,8 +1075,11 @@ session may start:
   but it means the session never started under valid dynamic-selection
   evidence, so it does not count).
 - The final Bundle 7 guard (`check_bundle7_phase7c_final_closure.ps1`) or
-  the premarket validator (Part 7) fails when re-run against the session's
-  own commit.
+  either stage of the premarket validator (Part 7) fails when re-run
+  against the session's own commit.
+- The `ActiveCommit` gate ever reports `FINAL: FAIL` for the session's
+  active run — a `PreStart FINAL: PASS` alone never excuses this; the
+  session was never formally committed and does not count (§26).
 - Any selected-host dispatch discrepancy: a fill, order, or signal
   evaluation attributable to a symbol/strategy/timeframe binding not present
   in the committed plan's selected bindings.
@@ -1062,8 +1089,13 @@ session may start:
 
 For each session, capture and retain (mirroring the existing session
 evidence capture convention, §11, `scripts/soak/`):
-- The premarket validator's full output and the `bundle7_soak_readiness_
-  manifest.json` it wrote (Part 6), under `smoke_logs/` (never staged).
+- The `-Stage PreStart` validator's full output and the
+  `bundle7_prestart_readiness_manifest.json` artifact it wrote, under
+  `smoke_logs/` (never staged).
+- The `-Stage ActiveCommit` validator's full output and the countable
+  `bundle7_soak_session_manifest.json` it wrote, under `smoke_logs/` (never
+  staged) — this is the file that actually proves the session counts;
+  retain it even if the PreStart artifact above is also retained.
 - `GET /api/v1/dynamic-selection/status` and `GET /api/v1/dynamic-
   selection/plans/:plan_id` (for the committed plan) captured at least once
   pre-session and once post-session.
@@ -1104,6 +1136,10 @@ missing or invalid.
   rewritten (Part 1 requirement 8) — verify this by confirming the old
   `plan_id` still resolves via `GET /api/v1/dynamic-selection/plans/:plan_id`
   with its original content after the restart.
+- A restart or new run always requires a fresh `-Stage ActiveCommit` gate
+  run and a fresh `bundle7_soak_session_manifest.json` bound to the new
+  `run_id`/`plan_id` (§26) — a manifest minted for the prior run is never
+  reused, extended, or treated as still covering the post-restart run.
 - If a restart happens mid-session for a reason unrelated to Bundle 7 (e.g.
   an OS-level maintenance restart) and the session resumes cleanly with a
   fresh valid plan, the operator may judge the session countable — record
@@ -1114,8 +1150,9 @@ missing or invalid.
 - End-of-day stop, halt, and reconciliation follow the existing procedures
   (§10, §19, §20) unchanged. Bundle 7 adds no new stop/halt authority and
   removes none.
-- Before the next session starts, reconciliation must not be dirty/unknown
-  (mirrors the premarket validator's own check 7).
+- Before the next session starts, reconciliation must not be dirty/stale/
+  unavailable/unknown (mirrors the premarket validator's own
+  `reconciliation_truth_acceptable` check, run in both stages).
 - A halt triggered by any Bundle 7 evidence/validation defect (§27) must be
   fully investigated and the root cause documented before the count resumes
   from zero.
