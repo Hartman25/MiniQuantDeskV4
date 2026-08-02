@@ -9,7 +9,19 @@ param(
     # Use on memory-sensitive Windows hosts where linker/codegen parallelism triggers OOM.
     # All proof-lane test invocations already use --test-threads=1.
     # Compatible with any -ProofProfile value.
-    [switch]$LowMemory
+    [switch]$LowMemory,
+    # Explicit CARGO_TARGET_DIR for this run. Set only if not already
+    # overridden by the caller's environment. Lets a heavy/parallel session
+    # point this harness at an isolated build directory instead of the
+    # workspace-default core-rs/target.
+    [string]$CargoTargetDir,
+    # HEAVY-LOCK-01: acquire C:\tmp\mqk-machine-heavy.lock for the duration of
+    # this run (Windows only) so this harness never runs concurrently with
+    # another heavy build/test session on the same machine. Skipped on
+    # non-Windows hosts (path convention is Windows-specific) and when
+    # -NoHeavyLock is passed (e.g. for a caller that already holds the lock
+    # itself, such as an orchestrating script).
+    [switch]$NoHeavyLock
 )
 
 function New-LaneRecord {
@@ -201,6 +213,73 @@ function Get-ExceptionNote {
 
 function Test-IsWindowsPlatform {
     return ($env:OS -eq 'Windows_NT')
+}
+
+# HEAVY-LOCK-01: exclusive marker file so two heavy build/test sessions on
+# this machine never run concurrently and compete for memory. This is a
+# best-effort advisory lock (a marker file, not an OS-level exclusive
+# handle) -- consistent with how this repo's operator sessions have always
+# treated it (see docs/audits/full_repository_verification_2026-08-02.md's
+# precheck sections). Acquire fails loudly (never silently proceeds past a
+# held lock); release always runs from a `finally` block so a failed/killed
+# run never leaves a stale lock behind.
+function Get-HeavyLockPath {
+    return 'C:\tmp\mqk-machine-heavy.lock'
+}
+
+function Lock-HeavyMachine {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$LockPath
+    )
+
+    $lockDir = Split-Path -Parent $LockPath
+    if (-not (Test-Path -LiteralPath $lockDir)) {
+        New-Item -ItemType Directory -Force -Path $lockDir | Out-Null
+    }
+
+    if (Test-Path -LiteralPath $LockPath) {
+        throw ("EXITCODE=1;Heavy lock already present at {0}. Another heavy session may be running; " +
+               "if this is confirmed stale (no other build/test process is active), remove it manually " +
+               "before retrying. Run with -NoHeavyLock only if a caller already holds this lock itself." -f $LockPath)
+    }
+
+    $payload = "acquired_at_utc={0};pid={1};script=full_repo_proof.ps1" -f ([DateTimeOffset]::UtcNow.ToString('o')), $PID
+    Set-Content -LiteralPath $LockPath -Value $payload -NoNewline -ErrorAction Stop
+    Write-Host "Heavy lock acquired: $LockPath" -ForegroundColor Yellow
+}
+
+function Unlock-HeavyMachine {
+    param(
+        [Parameter(Mandatory = $true)]
+        [string]$LockPath
+    )
+
+    if (Test-Path -LiteralPath $LockPath) {
+        Remove-Item -LiteralPath $LockPath -Force -ErrorAction SilentlyContinue
+        Write-Host "Heavy lock released: $LockPath" -ForegroundColor Yellow
+    }
+}
+
+# Resolves which shell binary to spawn for a nested PowerShell subprocess
+# (the script guard aggregator below). Never blindly hard-codes
+# `powershell.exe`: legacy Windows PowerShell 5.1 is not guaranteed to be
+# present/startable in every environment this harness runs in. Mirrors
+# tests/script_guards/test_capture_paper_smoke_evidence.ps1's
+# Resolve-CompatibilityShellPath (Auto mode): prefer the current host
+# process, then pwsh, then legacy powershell.exe as a last resort.
+function Resolve-HarnessCompatibilityShell {
+    $current = $null
+    try { $current = (Get-Process -Id $PID).Path } catch {}
+    if ($current -and (Test-Path -LiteralPath $current)) { return $current }
+
+    $pwshPath = Get-CommandPath -Name 'pwsh'
+    if (-not [string]::IsNullOrWhiteSpace($pwshPath)) { return $pwshPath }
+
+    $legacyPath = Get-CommandPath -Name 'powershell.exe'
+    if (-not [string]::IsNullOrWhiteSpace($legacyPath)) { return $legacyPath }
+
+    throw 'EXITCODE=1;No compatible PowerShell host (current process, pwsh, or powershell.exe) is available to run the script guard aggregator.'
 }
 
 function Resolve-CompatibleRepoBash {
@@ -480,6 +559,25 @@ catch {
     throw
 }
 
+# Explicit CARGO_TARGET_DIR: set only if not already overridden by the
+# caller's environment, and only when the -CargoTargetDir param was passed.
+if ($CargoTargetDir -and -not $env:CARGO_TARGET_DIR) {
+    $env:CARGO_TARGET_DIR = $CargoTargetDir
+    Write-Host "CARGO_TARGET_DIR=$env:CARGO_TARGET_DIR" -ForegroundColor Yellow
+}
+elseif ($env:CARGO_TARGET_DIR) {
+    Write-Host "CARGO_TARGET_DIR already set by caller: $env:CARGO_TARGET_DIR" -ForegroundColor Yellow
+}
+
+# HEAVY-LOCK-01: acquire before any lane runs; release unconditionally in
+# the top-level `finally` below, so a failed or interrupted run can never
+# leave a stale lock that blocks the next session.
+$script:heavyLockPath = $null
+if (-not $NoHeavyLock -and (Test-IsWindowsPlatform)) {
+    $script:heavyLockPath = Get-HeavyLockPath
+    Lock-HeavyMachine -LockPath $script:heavyLockPath
+}
+
 # HARNESS-01: Windows low-memory profile activation.
 # Must run after preflight (so $script:CargoExe etc. are resolved) and before any lane.
 # Reproduces the exact proven Windows low-memory posture:
@@ -647,9 +745,10 @@ Invoke-ProofLane -Name 'Unsafe-pattern guard' -Required $true -Action {
 }
 
 Invoke-ProofLane -Name 'Script guard aggregator' -Required $true -Action {
-    Invoke-NativeCommand -FilePath 'powershell.exe' -Arguments @('-ExecutionPolicy', 'Bypass', '-NonInteractive', '-File', $scriptGuardAggregator) -WorkingDirectory $repoRoot
+    $guardShell = Resolve-HarnessCompatibilityShell
+    Invoke-NativeCommand -FilePath $guardShell -Arguments @('-ExecutionPolicy', 'Bypass', '-NonInteractive', '-File', $scriptGuardAggregator) -WorkingDirectory $repoRoot
     Write-Host 'Script guard aggregator passed.' -ForegroundColor Green
-    return (New-LaneNote -Note 'Script guard aggregator passed (CI-SCRIPT-GUARDS-WIRE-GHA-01 suite).')
+    return (New-LaneNote -Note ("Script guard aggregator passed (CI-SCRIPT-GUARDS-WIRE-GHA-01 suite); shell={0}." -f $guardShell))
 }
 
 Invoke-ProofLane -Name 'DB proof bootstrap / CI-10 mandatory matrix' -Required $dbRequired -Action {
@@ -897,6 +996,9 @@ catch {
     }
 }
 finally {
+    if ($script:heavyLockPath) {
+        Unlock-HeavyMachine -LockPath $script:heavyLockPath
+    }
     try {
         Stop-Transcript | Out-Null
     }

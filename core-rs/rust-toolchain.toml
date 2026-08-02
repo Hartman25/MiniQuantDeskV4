@@ -1,0 +1,9 @@
+[toolchain]
+# Canonical Rust/rustfmt version, shared by CI (dtolnay/rust-toolchain@stable
+# auto-detects this file) and every local command. Update this file (never
+# override the version ad hoc in a workflow step or a local `rustup override`)
+# when a version bump is deliberately authorized, so CI and local invocations
+# can never silently drift apart again -- see
+# scripts/windows/Invoke-CanonicalRepoVerification.ps1.
+channel = "1.93.1"
+components = ["rustfmt", "clippy"]
