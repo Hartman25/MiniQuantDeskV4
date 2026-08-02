@@ -20759,3 +20759,174 @@ DISPOSITION:
 DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7C-FORMAL-SOAK-GATE-TRUTH-REPAIR-01:
 COMPLETE -- AWAITING CHATGPT AND OPERATOR ACCEPTANCE BEFORE PUSH
 ```
+
+## DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7C-ACTIVE-COMMIT-PROOF-AND-MANIFEST-BINDING-CLOSURE-01 (2026-08-01)
+
+Starting HEAD: `901d97f23a482a1232f979ad89442649d18866f1`. Final HEAD (pre-ledger-commit):
+`f6a23886`. Two commits: `4f107600` (Rust journal validator + PowerShell
+strict values/run/lease/manifest-identity repair), `f6a23886` (hermetic
+ActiveCommit positive proof, negative mutations, strengthened guard,
+runbook correction). Not pushed. Bundle 8 not started. Real daemon not
+started. Formal soak not started. No orders placed.
+
+Closes five specific false-pass/proof defects an independent source review
+found in the already-accepted two-stage gate at 901d97f2:
+
+DEFECT 1 (no positive ActiveCommit execution proof): closed with a real
+executable path, not a source-string guard. `test_bundle7_phase7c_
+premarket_validation.ps1` gained a hermetic local HTTP fixture
+(`System.Net.HttpListener` in a background PowerShell runspace, driven by
+an in-memory facts hashtable) serving the real response shapes of
+`system/status`, `control/status`, `reconcile/status`, `dynamic-selection/
+status`, and `market-data/readiness`. Seeds the real port-5434 test DB with
+a coherent `runs`/`runtime_leader_lease`/`runtime_control_state`/
+`sys_arm_state`/`sys_dynamic_selection_plans`/`_symbols`/`_candidates` row
+set, then runs the actual `Invoke-Bundle7Phase7cPremarketValidation.ps1
+-Stage ActiveCommit` against it. Proven: `FINAL: PASS`, exit 0, exactly one
+`bundle7_soak_session_manifest.json` written whose `run_id`/`plan_id`/
+`selected_bindings` match the seeded facts, `approved_for_live=false`. No
+real daemon, broker, provider, or order action is used anywhere in the
+fixture.
+
+DEFECT 2 (manifest identity did not bind all formal facts):
+`New-Bundle7ActiveCommitManifest`'s `identityParts` now binds
+`deployment_mode`, `adapter_id`, `live_routing_enabled`, `configured_mode`,
+`effective_mode`, `disposition`, `live_lock_applied`, `approved_for_live`,
+`run_id`, `plan_id`, `validation_state`, `source_kind`, `source_identity`,
+`selected_bindings` (deterministically sorted symbol/strategy_id/
+timeframe_secs), `required_market_data_pairs` (now selected-binding-
+specific, matched via the same `effective_runtime_*` fields the readiness
+checks use -- never every unrelated configuration-preview assignment row),
+`leader_holder_id`, `leader_epoch`, `lease_expired`, `desired_armed`,
+`integrity_state`, `deadman_armed_state`, `risk_blocked`,
+`reconciliation_status`, `reconciliation_truth_state`, `guard_summary`, and
+`verdict`. `generated_at_utc` remains deliberately excluded.
+
+DEFECT 3 (permissive live-value checks): `Test-DeploymentPaperBrokerConfig`
+(PreStart) and `Test-ArmIntegrityReconciliationLiveRoutingFacts`
+(ActiveCommit) now require `adapter_id == 'alpaca'` (the accepted
+Paper+Alpaca deployment; `BrokerKind::Alpaca.as_str()`),
+`deployment_start_allowed == true`, and `deployment_blocker` absent, by
+value. `Test-LiveRoutingCapitalDisabled`/the ActiveCommit combined check
+now require `live_routing_enabled` exactly `false` -- never `true`, `null`,
+or missing. `Test-ArmIntegrityPostureSuitableForStart` (PreStart) and the
+ActiveCommit combined check now require `desired_armed == true` and
+`integrity_state`/`deadman_armed_state` exactly `'ARMED'` -- the prior
+`-eq 'HALTED'` check was a structural no-op (those fields, sourced from
+`sys_arm_state`, are only ever `'ARMED'`/`'DISARMED'` at this layer, never
+literally `'HALTED'`), so `DISARMED` previously passed silently.
+
+DEFECT 4 (inexact active-run/lease checks):
+`Test-ExactlyOneCommittedActiveRun` now requires `dynamic-selection/
+status.active_run_id == control/status.active_run_id`, counts every
+applicable `ARMED`/`RUNNING` PAPER `runs` row for `engine_id='mqk-daemon'`
+(not just a lookup scoped to the API's own `run_id`), and rejects a second
+concurrent active run or a run_id mismatch against that sole durable row.
+`Test-RunLeaseCoherent` now requires exactly one singleton
+`runtime_leader_lease` row (not merely one *unexpired* row) and compares
+DB `holder_id`/`epoch` against the API's self-reported `leader_holder_id`/
+`leader_epoch` -- DB is authoritative, the API's own report is never
+trusted alone.
+
+DEFECT 5 (unknown journal strategy silently skipped):
+`find_signal_journal_attribution_violation` (mqk-daemon) no longer skips
+`strategy_signal_evaluations` rows whose `strategy_id` is outside the
+selected-host set. Every row for a committed PaperEnforced run must now
+match an exact `(symbol, strategy_id, timeframe)` tuple from the selected
+bindings; an unknown `strategy_id` is contradictory evidence, not an
+unrelated row. Proven with 24 tests (18 pure unit + 6 new DB-backed,
+against the real port-5434 test DB, using the real
+`insert_strategy_signal_evaluation`/`fetch_strategy_signal_evaluations_
+for_run` write/read path): same-strategy multi-symbol passes, same-
+strategy multi-timeframe passes, unknown strategy fails, wrong symbol
+fails, wrong timeframe fails, empty journal is valid as "no rows yet."
+This function has exactly one caller in the codebase (the dynamic-
+selection/status route's `validation_blockers` computation) -- there was
+no looser historical mode to preserve, so strict is now the sole behavior.
+
+NEGATIVE FIXTURE PROOF: 22 mutation scenarios against the same hermetic
+fixture, each asserting `FINAL: FAIL`, nonzero exit, and no formal manifest
+written: wrong `adapter_id`, `deployment_start_allowed=false`,
+`deployment_blocker` present, `live_routing_enabled=true`/`null`,
+`desired_armed=false`, `integrity_state`/`deadman_armed_state` each
+DISARMED/HALTED/unknown (6 scenarios), `risk_blocked=true`, `db_status`
+unavailable, empty readiness assignments, a not-ready readiness row, lease
+holder mismatch, lease epoch mismatch, `lease_expired=true`, an active-run
+mismatch against the durable `runs` row, a dynamic-selection-vs-control
+`active_run_id` disagreement, and a second concurrent ARMED/RUNNING PAPER
+run. All 22 pass.
+
+RUNBOOK: `docs/runbooks/autonomous_paper_ops.md` §29 corrected -- a
+`paper_enforced_refused`/zero-selected-pair session never creates an active
+formal ActiveCommit session and cannot count (the gate structurally refuses
+before a manifest is ever written); a started `paper_enforced_allowed`
+session may still count on a day its selected host(s) generate zero trade
+signals. "No trade" and "no selected binding" are distinct facts that were
+previously conflated in the same paragraph.
+
+GUARDS: `check_bundle7_phase7c_final_closure.ps1` gained 7 new checks
+(26-32: positive-proof existence, strict null-safe adapter/deployment/
+live-routing checks in both stages, exact-run-count-and-compare, full
+manifest-identity binding, selected-binding-specific readiness pairs,
+strict journal attribution, and the corrected runbook wording) plus a new
+mutation-negative self-test (14). Two pre-existing checks (18: lease
+coherence: now also verifies the DB/API holder+epoch comparison exists,
+not just the singleton-row requirement; 19: manifest bindings: pattern
+updated for the `ForEach-Object` construction) and one self-test (11: split
+into the zero-lease-requirement proof plus a new DB-vs-API-holder-removal
+proof) were updated to match the repaired code -- the prior patterns
+matched code this repair replaced, not new code. Full guard run against
+committed HEAD: 0 failures (32 checks + 14 self-tests). Delegated Phase 7A
+and Phase 7B guards also re-verified standalone: both OK.
+
+VALIDATION (against committed HEAD `f6a23886`, DB 127.0.0.1:5434 only):
+`cargo check`/`cargo clippy -p mqk-daemon --lib -- -D warnings` clean;
+`cargo fmt --check` clean on the one touched Rust file (pre-existing
+formatting drift in an untouched file elsewhere in the crate was left
+alone -- out of this patch's scope); `cargo test -p mqk-daemon --lib`
+751 passed/0 failed/11 ignored (6 newly-ignored DB-gated journal tests),
+and with `--include-ignored` against port 5434: 24/24 passed in the
+`dynamic_selection_evidence_validator` module. `check_bundle7_phase7c_
+final_closure.ps1`, `check_phase7a_final_closure.ps1`, and `check_phase7b_
+selected_host_dispatch_closure.ps1` all OK standalone. The premarket
+validator's own test suite (`test_bundle7_phase7c_premarket_validation.
+ps1`, now 9 base scenarios + 22 mutation scenarios) reports "ALL PROOFS
+HELD (0 violations)" against the committed HEAD, including a genuine
+`FINAL: PASS` hermetic ActiveCommit run with a written, fact-matching
+manifest. `git diff --check` clean (line-ending warnings only). One
+operational note: an early exploratory run of the mutation suite was
+wrapped in a Windows `timeout.exe` call that force-killed the PowerShell
+process mid-run, bypassing its `finally` cleanup and leaving one orphaned
+`runs`+`sys_dynamic_selection_plans` row (tagged with this fixture's own
+`bundle7-hermetic-fixture-host` marker) in the port-5434 DB; this was
+identified, manually removed, and the full suite re-run clean before this
+entry was written. No test/guard/validation run touched DB port 5440,
+started a daemon, called a real network endpoint, or placed an order.
+
+FILES CHANGED: core-rs/crates/mqk-daemon/src/dynamic_selection_evidence_validator.rs,
+docs/runbooks/autonomous_paper_ops.md,
+scripts/guards/check_bundle7_phase7c_final_closure.ps1,
+scripts/windows/Invoke-Bundle7Phase7cPremarketValidation.ps1,
+scripts/windows/tests/test_bundle7_phase7c_premarket_validation.ps1,
+MiniQuantDesk_Master_Patch_Ledger_v2.md
+FILES ADDED: none
+FILES DELETED: none
+FILES RENAMED: none
+UNEXPECTED FILES: none
+MIGRATIONS ADDED: none
+ECONOMIC SEMANTICS CHANGED: NO
+STRATEGY CALCULATIONS CHANGED: NO
+BUNDLE 6 POLICY CHANGED: NO
+BUNDLE 5 POLICY CHANGED: NO
+CAP #6 SEMANTICS CHANGED: NO
+RISK AUTHORITY CHANGED: NO
+BROKER/OUTBOX AUTHORITY CHANGED: NO
+PORTFOLIO/P&L AUTHORITY CHANGED: NO
+RECONCILIATION AUTHORITY CHANGED: NO
+AI CONSUMED: NO
+LIVE CAPITAL ENABLED: NO
+
+DISPOSITION:
+DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7C-ACTIVE-COMMIT-PROOF-AND-MANIFEST-BINDING-CLOSURE-01:
+COMPLETE -- AWAITING CHATGPT AND OPERATOR ACCEPTANCE BEFORE PUSH
+```
