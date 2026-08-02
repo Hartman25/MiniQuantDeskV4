@@ -20940,15 +20940,25 @@ docs/audits/full_repository_verification_2026-08-02.md
 
 Baseline HEAD: 1dbc3807b9a9148bd1d72eed9abba31cc1b78d2f (main == origin/main at start).
 
-Executive verdict: MIXED. 10 findings recorded (FULL-AUDIT-FAIL-001..010), highest
+Executive verdict: MIXED. 12 findings recorded (FULL-AUDIT-FAIL-001..012), highest
 severity P2, none P0/P1. Notably: `cargo test --workspace` currently fails to compile
-on this HEAD (E0063 in mqk-testkit's own test files, production src/ unaffected —
+on this HEAD (E0063 in mqk-testkit's own test files, production src/ unaffected --
 FULL-AUDIT-FAIL-003); the CI windows-lane script-guard suite has 3 stale-pattern
-guard failures verified as NOT product regressions (FULL-AUDIT-FAIL-010). Full Rust
-workspace test matrix under the documented low-memory posture was still running at
-report time (machine/session time constraint, not a defect) — session disposition:
-BLOCKED, remaining commands documented in the report.
+guard failures verified as NOT product regressions (FULL-AUDIT-FAIL-010).
+
+UPDATE (same session, later): the full Rust workspace test matrix completed on a
+second pass with --no-fail-fast under the documented low-memory posture: 437 test
+binaries, 5,227 passed, 7 failed, 687 ignored. 6 of 7 failures share one exact
+signature (FULL-AUDIT-FAIL-011): a daily-data-readiness gate added after several
+test fixtures were written now intercepts with 403 before those tests reach the
+503 "no DB" state they expect -- confirmed NOT a fail-open/safety regression (the
+daemon refuses MORE strictly than the stale fixtures anticipate). 1 isolated
+failure (FULL-AUDIT-FAIL-012) is not yet root-caused. The only remaining gap is
+the --include-ignored DB-gated sweep (687 tests, all individually classified,
+not executed this session for time reasons).
 
 DISPOSITION:
 MINIQUANTDESK-V4-FULL-REPOSITORY-VERIFICATION-AND-FAILURE-INVENTORY-01:
 BLOCKED -- EXACT COMPLETED/REMAINING COVERAGE AND ROOT CAUSE PROVIDED
+(primary non-ignored matrix is COMPLETE and final; only the ignored-test sweep
+remains unexecuted)
