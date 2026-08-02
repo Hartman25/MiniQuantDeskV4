@@ -57,8 +57,19 @@ function Assert-Fail([string]$Msg) {
 $RepoRoot   = (Resolve-Path "$PSScriptRoot\..\..\").Path
 $StateRs    = Join-Path $RepoRoot "core-rs\crates\mqk-daemon\src\state.rs"
 $LoopRunner = Join-Path $RepoRoot "core-rs\crates\mqk-daemon\src\state\loop_runner.rs"
+$LifecycleRs = Join-Path $RepoRoot "core-rs\crates\mqk-daemon\src\state\lifecycle.rs"
 $TestFile   = Join-Path $RepoRoot "core-rs\crates\mqk-daemon\tests\scenario_multi_symbol_dispatch_loop_01.rs"
 $DesignDoc  = Join-Path $RepoRoot "docs\design\native_multi_symbol_dispatch.md"
+
+# G06/G07 regexes are defined once here (not just inline in the if-blocks
+# below) so the SELFTEST section at the end of this guard can re-run the
+# exact same patterns against a deliberately mutated string and prove they
+# correctly fail -- guarding against the guard itself becoming vacuously
+# true (a regex loose enough to match disconnected/bypassed code).
+$G06LegacyAssignmentsFnPattern = 'fn legacy_assignments\(&self\) -> Vec<crate::state::SymbolStrategyAssignment>'
+$G06FreezeIntoAuthorityPattern = 'RuntimeStrategyDispatchAuthority::Legacy \{\s*\r?\n\s*assignments: snapshot\.legacy_assignments\(\),'
+$G07LegacyArmPattern           = 'RuntimeStrategyDispatchAuthority::Legacy \{ assignments \} => \{'
+$G07DispatchCallPattern        = 'tick_strategy_dispatch_multi_symbol_with_bar_facts\(assignments\)'
 
 Write-Host ''
 Write-Host '============================================================'
@@ -116,32 +127,43 @@ if (Test-Path $StateRs) {
     Assert-Fail "G05: state.rs not found at $StateRs"
 }
 
+$LifecycleContent = ''
+if (Test-Path $LifecycleRs) {
+    $LifecycleContent = Get-Content $LifecycleRs -Raw
+
+    # G06 -- multi-symbol assignments are resolved exactly once per start
+    # attempt (StartAttemptAuthoritySnapshot::resolve(), via
+    # legacy_assignments()) and frozen into RuntimeStrategyDispatchAuthority::
+    # Legacy before the loop starts. PHASE-7B-SELECTED-HOST-ECONOMIC-DISPATCH-
+    # CLOSURE moved this resolution out of loop_runner.rs's former per-loop-
+    # startup `multi_symbol_assignments` binding into lifecycle.rs -- same
+    # "build once, dispatch every tick" invariant, new call site/shape.
+    if ($LifecycleContent -match $G06LegacyAssignmentsFnPattern -and
+        $LifecycleContent -match $G06FreezeIntoAuthorityPattern) {
+        Assert-Pass "G06: lifecycle.rs resolves multi-symbol assignments once per start attempt (legacy_assignments()) and freezes them into RuntimeStrategyDispatchAuthority::Legacy"
+    } else {
+        Assert-Fail "G06: lifecycle.rs does not resolve+freeze multi-symbol assignments into RuntimeStrategyDispatchAuthority::Legacy as expected"
+    }
+} else {
+    Assert-Fail "G06: lifecycle.rs not found at $LifecycleRs"
+}
+
 $LoopContent = ''
 if (Test-Path $LoopRunner) {
     $LoopContent = Get-Content $LoopRunner -Raw
 
-    # G06 -- multi_symbol_assignments built once via build_multi_symbol_runtime_config_from_env
-    if ($LoopContent -match 'let multi_symbol_assignments: Vec<super::SymbolStrategyAssignment>' -and
-        $LoopContent -match 'build_multi_symbol_runtime_config_from_env\(\)') {
-        Assert-Pass "G06: loop_runner.rs builds multi_symbol_assignments once via build_multi_symbol_runtime_config_from_env"
+    # G07 -- per-tick dispatch reads the frozen RuntimeStrategyDispatchAuthority
+    # ::Legacy assignments and calls tick_strategy_dispatch_multi_symbol_with_
+    # bar_facts (PHASE-7B-SELECTED-HOST-ECONOMIC-DISPATCH-CLOSURE Part 8's
+    # canonical per-tick branch on the frozen dispatch authority; the plain
+    # tick_strategy_dispatch_multi_symbol name from G01 is retained only for
+    # its existing test callers -- production now dispatches via the
+    # bar-facts-carrying sibling from this exact match arm).
+    if ($LoopContent -match $G07LegacyArmPattern -and
+        $LoopContent -match $G07DispatchCallPattern) {
+        Assert-Pass "G07: loop_runner.rs's Legacy dispatch-authority arm calls tick_strategy_dispatch_multi_symbol_with_bar_facts(assignments) per tick"
     } else {
-        Assert-Fail "G06: loop_runner.rs does not build multi_symbol_assignments via build_multi_symbol_runtime_config_from_env"
-    }
-
-    # G07 -- per-tick call to the multi-symbol dispatch seam.
-    #
-    # RUNTIME-OPPORTUNITY-ALLOCATION-01-READINESS-AND-AUTHORITY-REPAIR-01
-    # (Phase A): production wiring now calls
-    # `tick_strategy_dispatch_multi_symbol_with_bar_facts`, the bar-facts-
-    # carrying sibling of `tick_strategy_dispatch_multi_symbol` (still
-    # defined per G01 above, retained for its existing test callers; both
-    # ultimately call the same underlying dispatch implementation -- see
-    # state.rs). Accept either name so this guard reflects the current
-    # production seam without re-litigating G01's contract.
-    if ($LoopContent -match 'tick_strategy_dispatch_multi_symbol(_with_bar_facts)?\(\s*\r?\n?\s*&multi_symbol_assignments,?\s*\r?\n?\s*\)') {
-        Assert-Pass "G07: loop_runner.rs calls a tick_strategy_dispatch_multi_symbol* seam with &multi_symbol_assignments per tick"
-    } else {
-        Assert-Fail "G07: loop_runner.rs does not call tick_strategy_dispatch_multi_symbol(_with_bar_facts)?(&multi_symbol_assignments)"
+        Assert-Fail "G07: loop_runner.rs does not call tick_strategy_dispatch_multi_symbol_with_bar_facts(assignments) from the Legacy dispatch-authority arm"
     }
 
     # G08 -- retain_targets_matching_symbol + b1c_symbol_mismatch_skipped guard wired
@@ -172,7 +194,6 @@ if (Test-Path $LoopRunner) {
         Assert-Fail "G10: crate::decision::submit_internal_strategy_decision call NOT found in loop_runner.rs"
     }
 } else {
-    Assert-Fail "G06: loop_runner.rs not found at $LoopRunner"
     Assert-Fail "G07: loop_runner.rs not found at $LoopRunner"
     Assert-Fail "G08: loop_runner.rs not found at $LoopRunner"
     Assert-Fail "G09: loop_runner.rs not found at $LoopRunner"
@@ -234,6 +255,60 @@ if (Test-Path $DesignDoc) {
     }
 } else {
     Assert-Fail "G14: native_multi_symbol_dispatch.md not found at $DesignDoc"
+}
+
+# ---------------------------------------------------------------------------
+# SELFTEST -- mutation-negative proof that G06/G07 are not vacuously true.
+#
+# Re-runs the exact G06/G07 regexes against deliberately mutated copies of
+# the real file content with the dispatch seam disconnected. If a mutated
+# variant still matches, the guard's own pattern is too loose to catch a
+# real disconnection and this SELFTEST fails (distinct from G06/G07 above,
+# which check the real, unmutated source).
+# ---------------------------------------------------------------------------
+Write-Host ''
+Write-Host '  -- SELFTEST: guard fails when dispatch is disconnected --'
+
+function Assert-PatternFailsOnMutation {
+    param(
+        [string]$Id,
+        [string]$Description,
+        [string]$MutatedContent,
+        [string[]]$Patterns
+    )
+    $stillMatchesAll = $true
+    foreach ($p in $Patterns) {
+        if ($MutatedContent -notmatch $p) { $stillMatchesAll = $false }
+    }
+    if (-not $stillMatchesAll) {
+        Assert-Pass "$Id : guard correctly fails against mutated ($Description) content"
+    } else {
+        Assert-Fail "$Id : guard's pattern still matches mutated ($Description) content -- pattern is too loose"
+    }
+}
+
+if ($LifecycleContent) {
+    # Mutate G06: sever the freeze-into-authority call site so assignments
+    # are resolved but never actually handed to RuntimeStrategyDispatchAuthority.
+    $mutatedLifecycle = $LifecycleContent -replace `
+        [regex]::Escape('RuntimeStrategyDispatchAuthority::Legacy {'), `
+        'RuntimeStrategyDispatchAuthority::Disconnected {'
+    Assert-PatternFailsOnMutation -Id 'SELFTEST-G06' `
+        -Description 'dispatch authority disconnected from legacy_assignments()' `
+        -MutatedContent $mutatedLifecycle `
+        -Patterns @($G06LegacyAssignmentsFnPattern, $G06FreezeIntoAuthorityPattern)
+}
+
+if ($LoopContent) {
+    # Mutate G07: remove the actual dispatch call from inside the Legacy arm
+    # (simulates the per-tick dispatch being bypassed/disconnected).
+    $mutatedLoop = $LoopContent -replace `
+        [regex]::Escape('tick_strategy_dispatch_multi_symbol_with_bar_facts(assignments)'), `
+        '/* dispatch call removed */'
+    Assert-PatternFailsOnMutation -Id 'SELFTEST-G07' `
+        -Description 'per-tick dispatch call removed from the Legacy arm' `
+        -MutatedContent $mutatedLoop `
+        -Patterns @($G07LegacyArmPattern, $G07DispatchCallPattern)
 }
 
 # ---------------------------------------------------------------------------

@@ -133,15 +133,21 @@ if (Test-Path $StateRs) {
 # same-cycle candidate batch. The cap's *effect* is unchanged (same running
 # accepted-count, same dispatch order, same
 # "max_new_orders_per_tick_reached" reason) -- only *where* in the pipeline
-# the check runs. `Test-Cap6Wiring` below is the one shared check both the
-# real file (this section) and the mutation-negative fixtures (further down)
-# call, so there is exactly one definition of "correctly wired" to drift out
-# of sync.
+# the check runs. PHASE-7B-SELECTED-HOST-ECONOMIC-DISPATCH-CLOSURE Part 6
+# later wrapped each allocated decision in a provenance-carrying `envelope`
+# (re-validated immediately before this loop and again immediately before
+# submission) -- the loop header changed from `for decision in
+# allocation_outcome.decisions` to `for envelope in
+# allocation_outcome.decisions { let decision = envelope.decision; ... }`,
+# same position in the pipeline, same cap #6 ordering. `Test-Cap6Wiring`
+# below is the one shared check both the real file (this section) and the
+# mutation-negative fixtures (further down) call, so there is exactly one
+# definition of "correctly wired" to drift out of sync.
 function Test-Cap6Wiring([string]$Content) {
     $CapReadIdx       = $Content.IndexOf('state_arc.max_new_orders_per_tick().await')
     $CounterInitIdx   = $Content.IndexOf('let mut new_orders_this_tick: u32 = 0;')
     $AllocCallIdx     = $Content.IndexOf('runtime_opportunity_allocation::gather_and_apply(')
-    $PostAllocLoopIdx = $Content.IndexOf('for decision in allocation_outcome.decisions')
+    $PostAllocLoopIdx = $Content.IndexOf('for envelope in allocation_outcome.decisions')
     $ReasonCheckIdx   = $Content.IndexOf('AppState::max_new_orders_per_tick_reason(')
     $SubmitIdx        = $Content.IndexOf('submit_internal_strategy_decision(')
     $AcceptedIdx      = $Content.IndexOf('if outcome.accepted {')
@@ -186,7 +192,8 @@ let mut new_orders_this_tick: u32 = 0;
 let allocation_outcome = crate::runtime_opportunity_allocation::gather_and_apply(
     &state_arc, run_id, now_micros, market_date_today, dispatch_timeframe, all_decisions, &current_positions,
 ).await;
-for decision in allocation_outcome.decisions {
+for envelope in allocation_outcome.decisions {
+    let decision = envelope.decision;
     if AppState::max_new_orders_per_tick_reason(
         new_orders_this_tick,
         max_new_orders_per_tick_cap,
@@ -215,7 +222,8 @@ let mut new_orders_this_tick: u32 = 0;
 let allocation_outcome = crate::runtime_opportunity_allocation::gather_and_apply(
     &state_arc, run_id, now_micros, market_date_today, dispatch_timeframe, all_decisions, &current_positions,
 ).await;
-for decision in allocation_outcome.decisions {
+for envelope in allocation_outcome.decisions {
+    let decision = envelope.decision;
     let outcome = crate::decision::submit_internal_strategy_decision(&state_arc, decision).await;
     if AppState::max_new_orders_per_tick_reason(
         new_orders_this_tick,
@@ -243,7 +251,8 @@ let mut new_orders_this_tick: u32 = 0;
 let allocation_outcome = crate::runtime_opportunity_allocation::gather_and_apply(
     &state_arc, run_id, now_micros, market_date_today, dispatch_timeframe, all_decisions, &current_positions,
 ).await;
-for decision in allocation_outcome.decisions {
+for envelope in allocation_outcome.decisions {
+    let decision = envelope.decision;
     if AppState::max_new_orders_per_tick_reason(
         new_orders_this_tick,
         max_new_orders_per_tick_cap,
@@ -271,7 +280,8 @@ let mut new_orders_this_tick: u32 = 0;
 let allocation_outcome = crate::runtime_opportunity_allocation::gather_and_apply(
     &state_arc, run_id, now_micros, market_date_today, dispatch_timeframe, all_decisions, &current_positions,
 ).await;
-for decision in allocation_outcome.decisions {
+for envelope in allocation_outcome.decisions {
+    let decision = envelope.decision;
     if AppState::max_new_orders_per_tick_reason(
         new_orders_this_tick,
         max_new_orders_per_tick_cap,
@@ -299,7 +309,8 @@ let mut new_orders_this_tick: u32 = 0;
 let allocation_outcome = crate::runtime_opportunity_allocation::gather_and_apply(
     &state_arc, run_id, now_micros, market_date_today, dispatch_timeframe, all_decisions, &current_positions,
 ).await;
-for decision in allocation_outcome.decisions {
+for envelope in allocation_outcome.decisions {
+    let decision = envelope.decision;
     if AppState::max_new_orders_per_tick_reason(
         new_orders_this_tick,
         max_new_orders_per_tick_cap,

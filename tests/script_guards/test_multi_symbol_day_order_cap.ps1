@@ -117,18 +117,26 @@ if (Test-Path $StateRs) {
     Assert-Fail "G04: state.rs not found at $StateRs"
 }
 
-# G05 -- lifecycle.rs resets per-symbol counters at run start
-if (Test-Path $LifecycleRs) {
-    $LifecycleContent = Get-Content $LifecycleRs -Raw
+# G05 -- per-symbol counters are reset alongside the account-wide
+# day_signal_count reset at the same run-start/economic-mirror-clear
+# boundary. An "ownership consolidation" refactor (see git history) moved
+# this pairing out of lifecycle.rs and into state.rs, where it now appears
+# twice: once in commit_run_start_bundle's completion path, once in
+# clear_economic_mirrors_for_run -- both call sites pair the two resets
+# together identically. The reset IS paired correctly; this guard previously
+# looked in the wrong file.
+$G05ResetPattern = 'self\.day_signal_count\.store\(0,\s*Ordering::SeqCst\);\s*\r?\n\s*self\.reset_symbol_day_order_counts\(\)\.await;'
+if (Test-Path $StateRs) {
+    $StateContentForG05 = Get-Content $StateRs -Raw
+    $G05Matches = [regex]::Matches($StateContentForG05, $G05ResetPattern)
 
-    if ($LifecycleContent -match 'self\.(?:state\.)?day_signal_count\.store\(0, Ordering::SeqCst\)' -and
-        $LifecycleContent -match 'self\.(?:state\.)?reset_symbol_day_order_counts\(\)\.await') {
-        Assert-Pass "G05: lifecycle.rs resets reset_symbol_day_order_counts() alongside day_signal_count at run start"
+    if ($G05Matches.Count -ge 2) {
+        Assert-Pass "G05: state.rs pairs reset_symbol_day_order_counts() with day_signal_count.store(0, ...) at $($G05Matches.Count) run-start/economic-mirror-clear boundaries"
     } else {
-        Assert-Fail "G05: per-symbol counter reset NOT found alongside day_signal_count reset in lifecycle.rs"
+        Assert-Fail "G05: state.rs does not pair reset_symbol_day_order_counts() with the account-wide day_signal_count reset as expected (found $($G05Matches.Count) paired site(s), need >= 2)"
     }
 } else {
-    Assert-Fail "G05: lifecycle.rs not found at $LifecycleRs"
+    Assert-Fail "G05: state.rs not found at $StateRs"
 }
 
 # G06 -- decision.rs Gate 1f inserted between Gate 1 and Gate 1e
@@ -250,6 +258,31 @@ if (Test-Path $DesignDoc) {
     }
 } else {
     Assert-Fail "G11: native_multi_symbol_dispatch.md not found at $DesignDoc"
+}
+
+# ---------------------------------------------------------------------------
+# SELFTEST -- mutation-negative proof that G05 is not vacuously true.
+#
+# Re-runs the exact G05 pattern against a deliberately mutated copy of
+# state.rs with the per-symbol reset removed from both paired sites
+# (simulating the reset being dropped/disconnected). If the mutated content
+# still matches, G05's pattern is too loose to catch a real regression.
+# ---------------------------------------------------------------------------
+Write-Host ''
+Write-Host '  -- SELFTEST: guard fails when the per-symbol reset is removed --'
+
+if ($StateContentForG05) {
+    $mutatedStateForG05 = $StateContentForG05 -replace `
+        [regex]::Escape('self.reset_symbol_day_order_counts().await;'), `
+        '/* reset removed */'
+    $mutatedMatches = [regex]::Matches($mutatedStateForG05, $G05ResetPattern)
+    if ($mutatedMatches.Count -eq 0) {
+        Assert-Pass "SELFTEST-G05: guard correctly fails (0 paired sites) against mutated (per-symbol reset removed) content"
+    } else {
+        Assert-Fail "SELFTEST-G05: guard's pattern still finds $($mutatedMatches.Count) paired site(s) against mutated content -- pattern is too loose"
+    }
+} else {
+    Assert-Fail "SELFTEST-G05: state.rs content unavailable -- cannot run mutation-negative proof"
 }
 
 # ---------------------------------------------------------------------------

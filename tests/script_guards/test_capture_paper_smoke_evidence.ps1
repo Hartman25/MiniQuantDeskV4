@@ -8,10 +8,27 @@
 # No daemon, no DB, no live calls. Pure static content and offline-run checks.
 #
 # Usage:
-#   powershell -ExecutionPolicy Bypass -File tests\script_guards\test_capture_paper_smoke_evidence.ps1
+#   pwsh -ExecutionPolicy Bypass -File tests\script_guards\test_capture_paper_smoke_evidence.ps1
+#   pwsh ... -CompatibilityShell WindowsPowerShell   # force legacy powershell.exe
 #
 # Exit codes: 0 = all pass, 1 = one or more failures.
 # =============================================================================
+
+param(
+    # CPE10/CPE12 spawn TargetScript as a subprocess to prove its offline
+    # behavior. Which shell binary runs that subprocess is configurable:
+    #   Auto              -- (default) the current host process, else pwsh,
+    #                        else legacy powershell.exe -- whichever is
+    #                        actually available in this environment.
+    #   CurrentHost       -- explicitly the same executable running this guard.
+    #   Pwsh              -- explicitly require pwsh; hard-fail if absent.
+    #   WindowsPowerShell -- explicitly require legacy powershell.exe (5.1);
+    #                        hard-fail if absent. Never silently substituted
+    #                        in -- CI's windows-latest runners ship this by
+    #                        default, but sandboxed/local environments may not.
+    [ValidateSet('Auto', 'CurrentHost', 'Pwsh', 'WindowsPowerShell')]
+    [string]$CompatibilityShell = 'Auto'
+)
 
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -24,6 +41,68 @@ $Failures = 0
 
 function Pass { param([string]$Id, [string]$Msg) Write-Host "  PASS  [$Id] $Msg" -ForegroundColor Green }
 function Fail { param([string]$Id, [string]$Msg) Write-Host "  FAIL  [$Id] $Msg" -ForegroundColor Red ; $script:Failures++ }
+
+# ---------------------------------------------------------------------------
+# Resolve which shell binary CPE10/CPE12 will spawn TargetScript with.
+#
+# Never blindly hard-codes `powershell.exe`: legacy Windows PowerShell 5.1 is
+# not guaranteed to be present/startable in every environment this guard
+# runs in (sandboxed/local dev), while `pwsh` (7.x) and "whatever host is
+# currently running this guard" reliably are. A resolution failure is
+# reported as a clear CPE10a/CPE12a guard failure -- never a silent skip.
+# ---------------------------------------------------------------------------
+function Resolve-CompatibilityShellPath {
+    param([string]$Requested)
+
+    switch ($Requested) {
+        'WindowsPowerShell' {
+            $cmd = Get-Command 'powershell.exe' -ErrorAction SilentlyContinue
+            if (-not $cmd) {
+                throw "CompatibilityShell 'WindowsPowerShell' was explicitly requested but powershell.exe (Windows PowerShell 5.1) is not available/startable in this environment."
+            }
+            return $cmd.Source
+        }
+        'Pwsh' {
+            $cmd = Get-Command 'pwsh' -ErrorAction SilentlyContinue
+            if (-not $cmd) {
+                throw "CompatibilityShell 'Pwsh' was explicitly requested but pwsh is not available in this environment."
+            }
+            return $cmd.Source
+        }
+        'CurrentHost' {
+            $current = $null
+            try { $current = (Get-Process -Id $PID).Path } catch {}
+            if (-not $current -or -not (Test-Path $current)) {
+                throw "CompatibilityShell 'CurrentHost' was requested but the current host executable could not be resolved."
+            }
+            return $current
+        }
+        default {
+            # Auto: the current host process is guaranteed startable (it is
+            # what is running this guard right now); fall back to pwsh; only
+            # fall back to legacy powershell.exe as a last resort.
+            $current = $null
+            try { $current = (Get-Process -Id $PID).Path } catch {}
+            if ($current -and (Test-Path $current)) { return $current }
+
+            $pwshCmd = Get-Command 'pwsh' -ErrorAction SilentlyContinue
+            if ($pwshCmd) { return $pwshCmd.Source }
+
+            $legacyCmd = Get-Command 'powershell.exe' -ErrorAction SilentlyContinue
+            if ($legacyCmd) { return $legacyCmd.Source }
+
+            throw "No compatible PowerShell host (current process, pwsh, or powershell.exe) is available in this environment to run the CPE10/CPE12 offline subprocess proof."
+        }
+    }
+}
+
+$CompatShellPath = $null
+$CompatShellError = $null
+try {
+    $CompatShellPath = Resolve-CompatibilityShellPath -Requested $CompatibilityShell
+} catch {
+    $CompatShellError = $_.Exception.Message
+}
 
 Write-Host ""
 Write-Host "=== Capture-PaperSmokeEvidence.ps1 static guard tests (PAPER-SMOKE-EVIDENCE-01) ==="
@@ -230,18 +309,24 @@ if (Test-Path $TargetScript) {
 Write-Host ""
 Write-Host "  -- CPE10: offline dry-run exits 0 and creates evidence folder --"
 
-if (Test-Path $TargetScript) {
+if ($CompatShellError) {
+    Fail 'CPE10a' "Compatibility shell resolution failed: $CompatShellError"
+    Fail 'CPE10b' "(skipped -- no compatible shell to run the offline subprocess proof)"
+    Fail 'CPE10c' "(skipped -- no compatible shell)"
+    Fail 'CPE10d' "(skipped -- no compatible shell)"
+    Fail 'CPE10e' "(skipped -- no compatible shell)"
+} elseif (Test-Path $TargetScript) {
     $evidenceRoot = Join-Path $RepoRoot 'evidence'
     $beforeFolders = @(Get-ChildItem -Path $evidenceRoot -Directory -Filter 'paper_smoke_*guard_offline_test*' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
 
-    & powershell.exe -ExecutionPolicy Bypass -NonInteractive -File $TargetScript `
+    & $CompatShellPath -ExecutionPolicy Bypass -NonInteractive -File $TargetScript `
         -Label 'guard_offline_test' -SkipDaemon -SkipDb *>$null
     $exitCode = $LASTEXITCODE
 
     if ($exitCode -eq 0) {
-        Pass 'CPE10a' "Offline run exits 0"
+        Pass 'CPE10a' "Offline run exits 0 (shell: $CompatShellPath)"
     } else {
-        Fail 'CPE10a' "Offline run exited $exitCode (expected 0)"
+        Fail 'CPE10a' "Offline run exited $exitCode (expected 0; shell: $CompatShellPath)"
     }
 
     $afterFolders = @(Get-ChildItem -Path $evidenceRoot -Directory -Filter 'paper_smoke_*guard_offline_test*' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
@@ -340,11 +425,17 @@ if ($scriptText -match [regex]::Escape('"SKIPPED: $admissionSkipReason"')) {
 Write-Host ""
 Write-Host "  -- CPE12: notes/final_verdict.txt template hygiene --"
 
-if (Test-Path $TargetScript) {
+if ($CompatShellError) {
+    Fail 'CPE12a' "Compatibility shell resolution failed: $CompatShellError"
+    Fail 'CPE12b' "(skipped -- no compatible shell to run the offline subprocess proof)"
+    Fail 'CPE12c' "(skipped -- no compatible shell)"
+    Fail 'CPE12d' "(skipped -- no compatible shell)"
+    Fail 'CPE12e' "(skipped -- no compatible shell)"
+} elseif (Test-Path $TargetScript) {
     $evidenceRoot = Join-Path $RepoRoot 'evidence'
     $beforeFolders = @(Get-ChildItem -Path $evidenceRoot -Directory -Filter 'paper_smoke_*guard_verdict_test*' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
 
-    & powershell.exe -ExecutionPolicy Bypass -NonInteractive -File $TargetScript `
+    & $CompatShellPath -ExecutionPolicy Bypass -NonInteractive -File $TargetScript `
         -Label 'guard_verdict_test' -SkipDaemon -SkipDb *>$null
 
     $afterFolders = @(Get-ChildItem -Path $evidenceRoot -Directory -Filter 'paper_smoke_*guard_verdict_test*' -ErrorAction SilentlyContinue | Select-Object -ExpandProperty FullName)
