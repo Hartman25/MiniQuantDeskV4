@@ -819,6 +819,23 @@ pub struct AppState {
     /// economic work). Always `false` in production and for every test
     /// that does not explicitly enable it (setter is `#[cfg(test)]`-gated).
     force_execution_loop_panic: Arc<AtomicBool>,
+    /// TRUE-PROVENANCE-AND-RUNTIME-PROOF-REPAIR-01 Blocker 3: an ordered
+    /// event log recorded directly at the real Bundle 6/Bundle 5/selected-
+    /// host/legacy-dispatch/submission call sites inside the real execution
+    /// loop tick body (`state/loop_runner.rs`) and the real dispatch
+    /// backends (`state.rs`). Always present but always empty in production
+    /// — every push call site is `#[cfg(test)]`-gated inline, so this field
+    /// is inert (never written, never read) outside this crate's own test
+    /// build. No separate/fake coordinator or economic pipeline: these are
+    /// the exact production call sites, only observed.
+    ///
+    /// Neither read nor written by anything in a non-test build (both the
+    /// push call sites and the snapshot/clear readers are `#[cfg(test)]`),
+    /// so a plain `--lib` (non-test) compilation sees it as dead — allowed
+    /// deliberately rather than restructuring a field that exists solely
+    /// for this crate's own hermetic test build.
+    #[allow(dead_code)]
+    loop_call_trace: Arc<std::sync::Mutex<Vec<String>>>,
 }
 
 /// ATOMIC-OWNERSHIP-AND-ROLLBACK-TRUTH-01 requirement 2: every locally-
@@ -1081,6 +1098,29 @@ impl SelectedHostDispatchFault {
             Self::TargetSymbolMismatch { .. } => "selected_host_target_symbol_mismatch",
         }
     }
+}
+
+/// TRUE-PROVENANCE-AND-RUNTIME-PROOF-REPAIR-01 Blocker 2: explicit authority
+/// for [`AppState::record_signal_evaluation`] (and the shared bar-window
+/// preparation gate it's called from,
+/// [`AppState::prepare_bar_window_for_symbol_timeframe`]) — the caller states
+/// which run/strategy a journal row belongs to rather than the writer
+/// rediscovering it internally. `record_signal_evaluation` must never consult
+/// `native_strategy_bootstrap` or `status.active_run_id` on its own; every
+/// caller passes one of these two variants explicitly.
+#[derive(Clone, Copy)]
+enum SignalEvaluationAuthority<'a> {
+    /// The exact pre-Phase-7B behavior: resolves the active
+    /// `native_strategy_bootstrap`'s strategy_id and `status.active_run_id`
+    /// at write time. Used only by the `Legacy`/`Off`/`Shadow` dispatch
+    /// backend.
+    Legacy,
+    /// PHASE-7B `DynamicPaperEnforced`: the frozen dispatch authority's exact
+    /// `run_id` and the exact selected binding's `strategy_id` — never
+    /// rediscovered from `native_strategy_bootstrap` or the mutable status
+    /// cache, which may name a different run or a different symbol's
+    /// selected strategy entirely.
+    Explicit { run_id: Uuid, strategy_id: &'a str },
 }
 
 /// AUTON-NO-SIGNAL-OBS-01: one durable signal-evaluation journal write
@@ -1665,7 +1705,36 @@ impl AppState {
             force_leadership_release_failure: Arc::new(AtomicBool::new(false)),
             pre_barrier_leadership_release_count: Arc::new(AtomicU32::new(0)),
             force_execution_loop_panic: Arc::new(AtomicBool::new(false)),
+            loop_call_trace: Arc::new(std::sync::Mutex::new(Vec::new())),
         }
+    }
+
+    /// TRUE-PROVENANCE-AND-RUNTIME-PROOF-REPAIR-01 Blocker 3: append one
+    /// event to the real-loop call trace. `#[cfg(test)]`-gated at every call
+    /// site inline (never called unconditionally), so this never runs
+    /// outside this crate's own test build.
+    #[cfg(test)]
+    pub(crate) fn loop_call_trace_push_for_test(&self, event: impl Into<String>) {
+        self.loop_call_trace
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .push(event.into());
+    }
+
+    #[cfg(test)]
+    pub(crate) fn loop_call_trace_snapshot_for_test(&self) -> Vec<String> {
+        self.loop_call_trace
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn loop_call_trace_clear_for_test(&self) {
+        self.loop_call_trace
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clear();
     }
 
     pub fn operator_auth_mode(&self) -> &OperatorAuthMode {
@@ -2657,6 +2726,7 @@ operator_reconcile_or_repair_required"
         bar: &StrategyBarInput,
         db_bars: Vec<mqk_db::MdBarRow>,
         now_ts: i64,
+        signal_evaluation_authority: SignalEvaluationAuthority<'_>,
     ) -> BarWindowPrepOutcome {
         if db_bars.is_empty() {
             // No completed bars for this symbol/timeframe.
@@ -2691,19 +2761,22 @@ operator_reconcile_or_repair_required"
             // AUTON-NO-SIGNAL-OBS-01: durably record that this tick's
             // dispatch was refused before the strategy ever ran, so the
             // operator can see this after a restart, not just in logs.
-            self.record_signal_evaluation(SignalEvaluationAttempt {
-                now_tick: bar.now_tick,
-                symbol,
-                timeframe: md_timeframe,
-                bar_context_source: "no_bars_available",
-                bars_loaded: 0,
-                latest_bar_ts_utc: None,
-                signal_generated: false,
-                signal_qty: None,
-                reason_code: no_order_reason,
-                reason: "no completed bars in md_bars for this symbol/timeframe",
-                decision_stage: "pre_dispatch_gate",
-            })
+            self.record_signal_evaluation(
+                signal_evaluation_authority,
+                SignalEvaluationAttempt {
+                    now_tick: bar.now_tick,
+                    symbol,
+                    timeframe: md_timeframe,
+                    bar_context_source: "no_bars_available",
+                    bars_loaded: 0,
+                    latest_bar_ts_utc: None,
+                    signal_generated: false,
+                    signal_qty: None,
+                    reason_code: no_order_reason,
+                    reason: "no completed bars in md_bars for this symbol/timeframe",
+                    decision_stage: "pre_dispatch_gate",
+                },
+            )
             .await;
             return BarWindowPrepOutcome::Refused;
         }
@@ -2750,20 +2823,23 @@ operator_reconcile_or_repair_required"
             // AUTON-NO-SIGNAL-OBS-01: durably record that this tick's
             // dispatch was refused before the strategy ever ran (stale bar),
             // so the operator can see this after a restart, not just in logs.
-            self.record_signal_evaluation(SignalEvaluationAttempt {
-                now_tick: bar.now_tick,
-                symbol,
-                timeframe: md_timeframe,
-                bar_context_source: "stale_bars",
-                bars_loaded: db_bars.len() as i64,
-                latest_bar_ts_utc: latest_end_ts
-                    .and_then(|ts| DateTime::<Utc>::from_timestamp(ts, 0)),
-                signal_generated: false,
-                signal_qty: None,
-                reason_code: no_order_reason,
-                reason: "latest completed bar exceeds the per-symbol staleness threshold",
-                decision_stage: "pre_dispatch_gate",
-            })
+            self.record_signal_evaluation(
+                signal_evaluation_authority,
+                SignalEvaluationAttempt {
+                    now_tick: bar.now_tick,
+                    symbol,
+                    timeframe: md_timeframe,
+                    bar_context_source: "stale_bars",
+                    bars_loaded: db_bars.len() as i64,
+                    latest_bar_ts_utc: latest_end_ts
+                        .and_then(|ts| DateTime::<Utc>::from_timestamp(ts, 0)),
+                    signal_generated: false,
+                    signal_qty: None,
+                    reason_code: no_order_reason,
+                    reason: "latest completed bar exceeds the per-symbol staleness threshold",
+                    decision_stage: "pre_dispatch_gate",
+                },
+            )
             .await;
             return BarWindowPrepOutcome::Refused;
         }
@@ -2831,6 +2907,7 @@ operator_reconcile_or_repair_required"
                     &bar,
                     db_bars,
                     now_ts,
+                    SignalEvaluationAuthority::Legacy,
                 )
                 .await
             {
@@ -2849,6 +2926,12 @@ operator_reconcile_or_repair_required"
                     diagnostic_reason,
                 ),
             };
+        // TRUE-PROVENANCE-AND-RUNTIME-PROOF-REPAIR-01 Blocker 3: this is the
+        // one real legacy native-bootstrap invocation call site (the
+        // `Legacy`/`Off`/`Shadow` dispatch backend). A `DynamicPaperEnforced`
+        // tick must never reach here.
+        #[cfg(test)]
+        self.loop_call_trace_push_for_test(format!("legacy_dispatch:{symbol}"));
         let result = self
             .invoke_native_strategy_on_bar_from_window(bar.now_tick, window)
             .await;
@@ -2865,19 +2948,22 @@ operator_reconcile_or_repair_required"
                 .iter()
                 .map(|t| t.qty)
                 .sum();
-            self.record_signal_evaluation(SignalEvaluationAttempt {
-                now_tick: bar.now_tick,
-                symbol,
-                timeframe: md_timeframe,
-                bar_context_source: "db_loaded",
-                bars_loaded: bars_loaded as i64,
-                latest_bar_ts_utc: DateTime::<Utc>::from_timestamp(latest_bar_row.end_ts, 0),
-                signal_generated: signal_qty != 0,
-                signal_qty: Some(signal_qty),
-                reason_code: diagnostic_decision,
-                reason: diagnostic_reason,
-                decision_stage: "strategy_evaluated",
-            })
+            self.record_signal_evaluation(
+                SignalEvaluationAuthority::Legacy,
+                SignalEvaluationAttempt {
+                    now_tick: bar.now_tick,
+                    symbol,
+                    timeframe: md_timeframe,
+                    bar_context_source: "db_loaded",
+                    bars_loaded: bars_loaded as i64,
+                    latest_bar_ts_utc: DateTime::<Utc>::from_timestamp(latest_bar_row.end_ts, 0),
+                    signal_generated: signal_qty != 0,
+                    signal_qty: Some(signal_qty),
+                    reason_code: diagnostic_decision,
+                    reason: diagnostic_reason,
+                    decision_stage: "strategy_evaluated",
+                },
+            )
             .await;
         }
         // RUNTIME-OPPORTUNITY-ALLOCATION-01 authority repair (Phase A): pair
@@ -2930,22 +3016,42 @@ operator_reconcile_or_repair_required"
     /// All `&str` fields borrow from the caller's locals for the duration of
     /// the call only — `record_signal_evaluation` copies what it needs into
     /// owned `String`s before returning.
-    async fn record_signal_evaluation(&self, attempt: SignalEvaluationAttempt<'_>) {
+    async fn record_signal_evaluation(
+        &self,
+        authority: SignalEvaluationAuthority<'_>,
+        attempt: SignalEvaluationAttempt<'_>,
+    ) {
         let Some(ref pool) = self.db else {
             return;
         };
-        // No strategy_id to attribute this row to when the bootstrap is
-        // Dormant/Failed — see the AUTON-NO-SIGNAL-OBS-01 callers above.
-        let Some(strategy_id) = self
-            .native_strategy_bootstrap
-            .lock()
-            .await
-            .as_ref()
-            .and_then(|b| b.active_strategy_id().map(|s| s.to_string()))
-        else {
-            return;
+        // Blocker 2: authority is explicit, never rediscovered here. Legacy
+        // resolves the active native bootstrap/status exactly as before;
+        // Explicit (selected-host/PaperEnforced) uses only the caller's own
+        // frozen run_id/strategy_id — never `native_strategy_bootstrap` or
+        // `status.active_run_id`, which may name a different run or a
+        // different symbol's selected strategy entirely.
+        let (run_id, strategy_id) = match authority {
+            SignalEvaluationAuthority::Legacy => {
+                // No strategy_id to attribute this row to when the bootstrap
+                // is Dormant/Failed — see the AUTON-NO-SIGNAL-OBS-01 callers
+                // above.
+                let Some(strategy_id) = self
+                    .native_strategy_bootstrap
+                    .lock()
+                    .await
+                    .as_ref()
+                    .and_then(|b| b.active_strategy_id().map(|s| s.to_string()))
+                else {
+                    return;
+                };
+                let run_id = self.status.read().await.active_run_id;
+                (run_id, strategy_id)
+            }
+            SignalEvaluationAuthority::Explicit {
+                run_id,
+                strategy_id,
+            } => (Some(run_id), strategy_id.to_string()),
         };
-        let run_id = self.status.read().await.active_run_id;
         let signal_side = match attempt.signal_qty {
             Some(q) if q > 0 => Some("buy".to_string()),
             Some(q) if q < 0 => Some("sell".to_string()),
@@ -3393,6 +3499,12 @@ operator_reconcile_or_repair_required"
     /// zero decisions for the whole tick and halt.
     pub(crate) async fn tick_strategy_dispatch_selected_hosts_with_bar_facts(
         &self,
+        // TRUE-PROVENANCE-AND-RUNTIME-PROOF-REPAIR-01 Blocker 2: the active
+        // frozen dispatch authority's exact `run_id` — never the mutable
+        // `status.active_run_id` cache. Every selected-host journal row this
+        // call writes is bound to this exact value and each binding's own
+        // `strategy_id`, never `native_strategy_bootstrap`.
+        run_id: Uuid,
         bindings: &[crate::dynamic_selection_dispatch_authority::SelectedDispatchBinding],
         host_pool: &mut crate::dynamic_selection_host_pool::DynamicSelectionHostPool,
     ) -> Result<
@@ -3408,6 +3520,10 @@ operator_reconcile_or_repair_required"
         };
         let mut results = Vec::new();
         for binding in bindings {
+            let selected_authority = SignalEvaluationAuthority::Explicit {
+                run_id,
+                strategy_id: &binding.strategy_id,
+            };
             let db_bars = match &self.db {
                 Some(pool) => {
                     match mqk_db::fetch_recent_completed_bars_for_strategy(
@@ -3432,6 +3548,29 @@ operator_reconcile_or_repair_required"
                                 "phase7b_selected_host_db_bar_load_failed: no stub fallback \
                                  for selected-host dispatch; binding skipped this tick"
                             );
+                            // Blocker 2: this diagnostic is durably journaled
+                            // under the exact selected authority, not the
+                            // legacy bootstrap — the row must still name the
+                            // real selected binding even though no strategy
+                            // ever ran.
+                            self.record_signal_evaluation(
+                                selected_authority,
+                                SignalEvaluationAttempt {
+                                    now_tick: bar.now_tick,
+                                    symbol: &binding.symbol,
+                                    timeframe: &binding.db_timeframe_label,
+                                    bar_context_source: "db_load_failed",
+                                    bars_loaded: 0,
+                                    latest_bar_ts_utc: None,
+                                    signal_generated: false,
+                                    signal_qty: None,
+                                    reason_code: "selected_host_db_bar_load_failed",
+                                    reason: "DB bar-window load failed for this selected binding; \
+                                             no stub fallback",
+                                    decision_stage: "pre_dispatch_gate",
+                                },
+                            )
+                            .await;
                             continue;
                         }
                     }
@@ -3454,6 +3593,7 @@ operator_reconcile_or_repair_required"
                         &bar,
                         db_bars,
                         now_ts,
+                        selected_authority,
                     )
                     .await
                 {
@@ -3486,6 +3626,15 @@ operator_reconcile_or_repair_required"
             };
             let ctx =
                 mqk_strategy::StrategyContext::new(binding.timeframe_secs, bar.now_tick, window);
+            // TRUE-PROVENANCE-AND-RUNTIME-PROOF-REPAIR-01 Blocker 3: this is
+            // the one real selected-host invocation call site — the ONLY
+            // strategy-evaluation authority while `DynamicPaperEnforced` is
+            // active.
+            #[cfg(test)]
+            self.loop_call_trace_push_for_test(format!(
+                "host_call:{}:{}",
+                binding.symbol, binding.strategy_id
+            ));
             let bar_result = match host.on_bar(&ctx) {
                 Ok(r) => r,
                 Err(e) => {
@@ -3511,19 +3660,22 @@ operator_reconcile_or_repair_required"
                 .iter()
                 .map(|t| t.qty)
                 .sum();
-            self.record_signal_evaluation(SignalEvaluationAttempt {
-                now_tick: bar.now_tick,
-                symbol: &binding.symbol,
-                timeframe: &binding.db_timeframe_label,
-                bar_context_source: "db_loaded",
-                bars_loaded: bars_loaded as i64,
-                latest_bar_ts_utc: DateTime::<Utc>::from_timestamp(latest_bar_row.end_ts, 0),
-                signal_generated: signal_qty != 0,
-                signal_qty: Some(signal_qty),
-                reason_code: diagnostic_decision,
-                reason: diagnostic_reason,
-                decision_stage: "strategy_evaluated",
-            })
+            self.record_signal_evaluation(
+                selected_authority,
+                SignalEvaluationAttempt {
+                    now_tick: bar.now_tick,
+                    symbol: &binding.symbol,
+                    timeframe: &binding.db_timeframe_label,
+                    bar_context_source: "db_loaded",
+                    bars_loaded: bars_loaded as i64,
+                    latest_bar_ts_utc: DateTime::<Utc>::from_timestamp(latest_bar_row.end_ts, 0),
+                    signal_generated: signal_qty != 0,
+                    signal_qty: Some(signal_qty),
+                    reason_code: diagnostic_decision,
+                    reason: diagnostic_reason,
+                    decision_stage: "strategy_evaluated",
+                },
+            )
             .await;
 
             let facts = EvaluatedBarFacts {
@@ -6461,6 +6613,10 @@ mod phase7b_selected_host_dispatch_tests {
         Uuid::new_v5(&Uuid::NAMESPACE_DNS, b"phase7b.test.plan")
     }
 
+    fn test_run_id() -> Uuid {
+        Uuid::new_v5(&Uuid::NAMESPACE_DNS, b"phase7b.test.run")
+    }
+
     fn binding(
         symbol: &str,
         strategy_id: &str,
@@ -6666,7 +6822,11 @@ mod phase7b_selected_host_dispatch_tests {
             .await;
 
         let results = state
-            .tick_strategy_dispatch_selected_hosts_with_bar_facts(&bindings, &mut host_pool)
+            .tick_strategy_dispatch_selected_hosts_with_bar_facts(
+                test_run_id(),
+                &bindings,
+                &mut host_pool,
+            )
             .await
             .expect("dispatch must not fault on a coherent selected batch");
 
@@ -6690,6 +6850,214 @@ mod phase7b_selected_host_dispatch_tests {
 
         cleanup_bars(&pool, "PHASE7BAAPL").await;
         cleanup_bars(&pool, "PHASE7BMSFT").await;
+    }
+
+    // -----------------------------------------------------------------
+    // TRUE-PROVENANCE-AND-RUNTIME-PROOF-REPAIR-01 Blocker 2: selected-host
+    // signal-journal rows must be bound to the exact selected authority
+    // (run_id from the frozen dispatch authority, strategy_id from the
+    // exact selected binding) — never `native_strategy_bootstrap` or the
+    // mutable `status.active_run_id` cache.
+    // -----------------------------------------------------------------
+
+    async fn cleanup_signal_evaluations(pool: &PgPool, symbol: &str) {
+        let _ = sqlx::query("delete from strategy_signal_evaluations where symbol = $1")
+            .bind(symbol)
+            .execute(pool)
+            .await;
+    }
+
+    /// A native bootstrap deliberately different from every selected
+    /// binding's strategy_id — proves selected-host journal rows never fall
+    /// back to it.
+    async fn legacy_bootstrap_with_different_strategy() -> NativeStrategyBootstrap {
+        let registry = mqk_runtime::native_strategy::build_daemon_plugin_registry();
+        let ids = vec!["swing_momentum".to_string()];
+        NativeStrategyBootstrap::bootstrap(Some(&ids), &registry)
+    }
+
+    /// Blocker 2 requirement 6: two selected bindings using different
+    /// strategies, with the legacy bootstrap set to a third, unrelated
+    /// strategy. Every inserted row must carry the exact selected
+    /// strategy_id/symbol/timeframe/run_id for its own binding — never the
+    /// legacy bootstrap's `swing_momentum`.
+    #[tokio::test]
+    async fn selected_host_journal_rows_use_exact_selected_authority_not_legacy_bootstrap() {
+        let Some(pool) = db_pool_or_skip("PHASE7B-BLOCKER2-01").await else {
+            return;
+        };
+        let ts = recent_bar_ts();
+        seed_bar(&pool, "PHASE7BB2AAPL", "5m", ts, 100_000_000).await;
+        seed_bar(&pool, "PHASE7BB2MSFT", "1H", ts, 200_000_000).await;
+        cleanup_signal_evaluations(&pool, "PHASE7BB2AAPL").await;
+        cleanup_signal_evaluations(&pool, "PHASE7BB2MSFT").await;
+
+        let keys = vec![
+            (
+                "PHASE7BB2AAPL".to_string(),
+                "intraday_scalper".to_string(),
+                300,
+            ),
+            (
+                "PHASE7BB2MSFT".to_string(),
+                "volatility_breakout".to_string(),
+                3600,
+            ),
+        ];
+        let mut host_pool = DynamicSelectionHostPool::build(&keys).expect("pool builds");
+        let bindings = vec![
+            binding("PHASE7BB2AAPL", "intraday_scalper", 300, "5m"),
+            binding("PHASE7BB2MSFT", "volatility_breakout", 3600, "1H"),
+        ];
+
+        let state = hermetic_state_with_db(&pool);
+        // The legacy bootstrap names a strategy that is NOT selected for
+        // either binding -- if the journal writer ever consulted it, these
+        // rows would wrongly carry "swing_momentum".
+        state
+            .set_native_strategy_bootstrap_for_test(Some(
+                legacy_bootstrap_with_different_strategy().await,
+            ))
+            .await;
+        state
+            .deposit_strategy_bar_input(StrategyBarInput {
+                now_tick: 1,
+                end_ts: ts,
+                limit_price: Some(100_000_000),
+                qty: 0,
+            })
+            .await;
+
+        let authority_run_id = Uuid::new_v5(&Uuid::NAMESPACE_DNS, b"phase7b.blocker2.run_id");
+        // native_strategy_bootstrap_truth_state_for_test / status.active_run_id
+        // are deliberately left at their defaults (no active run established)
+        // -- proves the journal row's run_id came from the explicit
+        // authority parameter, not from `status.active_run_id`.
+        let results = state
+            .tick_strategy_dispatch_selected_hosts_with_bar_facts(
+                authority_run_id,
+                &bindings,
+                &mut host_pool,
+            )
+            .await
+            .expect("dispatch must not fault on a coherent selected batch");
+        assert_eq!(results.len(), 2, "both bindings must produce a result");
+
+        let rows = mqk_db::fetch_recent_strategy_signal_evaluations(&pool, 50)
+            .await
+            .expect("fetch_recent_strategy_signal_evaluations failed");
+
+        let aapl_row = rows
+            .iter()
+            .find(|r| r.symbol == "PHASE7BB2AAPL")
+            .expect("AAPL journal row must exist");
+        assert_eq!(
+            aapl_row.strategy_id, "intraday_scalper",
+            "AAPL row must carry its own selected strategy_id, not the legacy bootstrap's"
+        );
+        assert_ne!(
+            aapl_row.strategy_id, "swing_momentum",
+            "AAPL row must never fall back to the legacy bootstrap strategy"
+        );
+        assert_eq!(aapl_row.timeframe, "5m");
+        assert_eq!(aapl_row.run_id, Some(authority_run_id));
+
+        let msft_row = rows
+            .iter()
+            .find(|r| r.symbol == "PHASE7BB2MSFT")
+            .expect("MSFT journal row must exist");
+        assert_eq!(
+            msft_row.strategy_id, "volatility_breakout",
+            "MSFT row must carry its own selected strategy_id, not the legacy bootstrap's"
+        );
+        assert_ne!(
+            msft_row.strategy_id, "swing_momentum",
+            "MSFT row must never fall back to the legacy bootstrap strategy"
+        );
+        assert_eq!(msft_row.timeframe, "1H");
+        assert_eq!(msft_row.run_id, Some(authority_run_id));
+
+        cleanup_bars(&pool, "PHASE7BB2AAPL").await;
+        cleanup_bars(&pool, "PHASE7BB2MSFT").await;
+    }
+
+    /// Blocker 2 requirement 6 (idempotency half): replaying the exact same
+    /// selected-host dispatch (same bar, same `now_tick`, same bindings, same
+    /// run_id) a second time must not create duplicate rows -- the
+    /// deterministic `evaluation_id` recipe is unchanged by this repair.
+    #[tokio::test]
+    async fn selected_host_journal_replay_with_same_bar_is_idempotent() {
+        let Some(pool) = db_pool_or_skip("PHASE7B-BLOCKER2-02").await else {
+            return;
+        };
+        let ts = recent_bar_ts();
+        seed_bar(&pool, "PHASE7BB2IDEM", "5m", ts, 100_000_000).await;
+        cleanup_signal_evaluations(&pool, "PHASE7BB2IDEM").await;
+
+        let keys = vec![(
+            "PHASE7BB2IDEM".to_string(),
+            "intraday_scalper".to_string(),
+            300,
+        )];
+        let binding_row = binding("PHASE7BB2IDEM", "intraday_scalper", 300, "5m");
+        let authority_run_id = Uuid::new_v5(&Uuid::NAMESPACE_DNS, b"phase7b.blocker2.idem.run_id");
+        let state = hermetic_state_with_db(&pool);
+
+        // First dispatch.
+        let mut host_pool_1 = DynamicSelectionHostPool::build(&keys).expect("pool builds");
+        state
+            .deposit_strategy_bar_input(StrategyBarInput {
+                now_tick: 7,
+                end_ts: ts,
+                limit_price: Some(100_000_000),
+                qty: 0,
+            })
+            .await;
+        state
+            .tick_strategy_dispatch_selected_hosts_with_bar_facts(
+                authority_run_id,
+                std::slice::from_ref(&binding_row),
+                &mut host_pool_1,
+            )
+            .await
+            .expect("first dispatch must not fault");
+
+        // Second dispatch: identical now_tick/run_id/binding -- the
+        // deterministic evaluation_id must collide, making the second
+        // insert a no-op (ON CONFLICT DO NOTHING), not a second row.
+        let mut host_pool_2 = DynamicSelectionHostPool::build(&keys).expect("pool builds");
+        state
+            .deposit_strategy_bar_input(StrategyBarInput {
+                now_tick: 7,
+                end_ts: ts,
+                limit_price: Some(100_000_000),
+                qty: 0,
+            })
+            .await;
+        state
+            .tick_strategy_dispatch_selected_hosts_with_bar_facts(
+                authority_run_id,
+                std::slice::from_ref(&binding_row),
+                &mut host_pool_2,
+            )
+            .await
+            .expect("second (replayed) dispatch must not fault");
+
+        let rows: Vec<_> = mqk_db::fetch_recent_strategy_signal_evaluations(&pool, 50)
+            .await
+            .expect("fetch_recent_strategy_signal_evaluations failed")
+            .into_iter()
+            .filter(|r| r.symbol == "PHASE7BB2IDEM")
+            .collect();
+        assert_eq!(
+            rows.len(),
+            1,
+            "replaying the identical logical tick must be idempotent (exactly one row)"
+        );
+        assert_eq!(rows[0].run_id, Some(authority_run_id));
+        assert_eq!(rows[0].strategy_id, "intraday_scalper");
+
+        cleanup_bars(&pool, "PHASE7BB2IDEM").await;
     }
 
     /// Test 8: the same strategy selected for two symbols uses two isolated
@@ -6737,7 +7105,11 @@ mod phase7b_selected_host_dispatch_tests {
             .await;
 
         let results = state
-            .tick_strategy_dispatch_selected_hosts_with_bar_facts(&bindings, &mut host_pool)
+            .tick_strategy_dispatch_selected_hosts_with_bar_facts(
+                test_run_id(),
+                &bindings,
+                &mut host_pool,
+            )
             .await
             .expect("dispatch must not fault");
         assert_eq!(results.len(), 2);
@@ -6797,7 +7169,11 @@ mod phase7b_selected_host_dispatch_tests {
             .await;
 
         let results = state
-            .tick_strategy_dispatch_selected_hosts_with_bar_facts(&bindings, &mut host_pool)
+            .tick_strategy_dispatch_selected_hosts_with_bar_facts(
+                test_run_id(),
+                &bindings,
+                &mut host_pool,
+            )
             .await
             .expect("mixed-timeframe dispatch must not fault");
         assert_eq!(results.len(), 2);
@@ -6859,7 +7235,11 @@ mod phase7b_selected_host_dispatch_tests {
         assert!(!state.pending_strategy_bar_input_is_none_for_test().await);
 
         let results = state
-            .tick_strategy_dispatch_selected_hosts_with_bar_facts(&bindings, &mut host_pool)
+            .tick_strategy_dispatch_selected_hosts_with_bar_facts(
+                test_run_id(),
+                &bindings,
+                &mut host_pool,
+            )
             .await
             .expect("dispatch must not fault");
         assert_eq!(
@@ -6875,7 +7255,11 @@ mod phase7b_selected_host_dispatch_tests {
         // A second call with nothing pending must yield zero results, never
         // a stale re-dispatch of the same bar.
         let second = state
-            .tick_strategy_dispatch_selected_hosts_with_bar_facts(&bindings, &mut host_pool)
+            .tick_strategy_dispatch_selected_hosts_with_bar_facts(
+                test_run_id(),
+                &bindings,
+                &mut host_pool,
+            )
             .await
             .expect("no fault on an empty pending slot");
         assert!(second.is_empty());
@@ -6909,7 +7293,11 @@ mod phase7b_selected_host_dispatch_tests {
             .await;
 
         let err = state
-            .tick_strategy_dispatch_selected_hosts_with_bar_facts(&bindings, &mut host_pool)
+            .tick_strategy_dispatch_selected_hosts_with_bar_facts(
+                test_run_id(),
+                &bindings,
+                &mut host_pool,
+            )
             .await
             .expect_err("a missing host key must fail closed, not silently skip");
         assert!(matches!(
@@ -6947,7 +7335,11 @@ mod phase7b_selected_host_dispatch_tests {
             .await;
 
         let results = state
-            .tick_strategy_dispatch_selected_hosts_with_bar_facts(&bindings, &mut host_pool)
+            .tick_strategy_dispatch_selected_hosts_with_bar_facts(
+                test_run_id(),
+                &bindings,
+                &mut host_pool,
+            )
             .await
             .expect("missing bars must be a fail-closed no-op, not a fault");
         assert!(results.is_empty(), "no bars -> no host call -> no result");
