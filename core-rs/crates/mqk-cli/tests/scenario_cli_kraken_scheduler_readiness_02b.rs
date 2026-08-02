@@ -30,9 +30,8 @@ fn real_providers_path() -> PathBuf {
 
 fn real_policy_path() -> PathBuf {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    PathBuf::from(manifest_dir).join(
-        "../../../docs/specs/crypto_data_02a_kraken_scheduler_rate_limit_decision.json",
-    )
+    PathBuf::from(manifest_dir)
+        .join("../../../docs/specs/crypto_data_02a_kraken_scheduler_rate_limit_decision.json")
 }
 
 fn write_temp_json(label: &str, content: &str) -> PathBuf {
@@ -203,9 +202,9 @@ fn ks_01_happy_path_real_fixtures_is_active_but_not_registered() {
     );
     let stdout = String::from_utf8(output.stdout).unwrap();
     assert!(stdout.contains("truth_state=active"));
-    assert!(stdout.contains(
-        "scheduler_readiness_state=scheduler_ready_manual_registration_blocked"
-    ));
+    assert!(
+        stdout.contains("scheduler_readiness_state=scheduler_ready_manual_registration_blocked")
+    );
     assert!(stdout.contains("scheduler_registration_status=not_registered"));
     assert!(stdout.contains("daemon_job_status=absent"));
     assert!(stdout.contains("network_call_made=false"));
@@ -277,10 +276,7 @@ fn ks_03_policy_too_fast_cadence_is_invalid() {
 // KS-04: kraken.enabled=true fails closed as provider_unsafe.
 #[test]
 fn ks_04_kraken_provider_enabled_true_is_unsafe() {
-    let policy = write_temp_json(
-        "ks04_policy",
-        &policy_json(2, 86_400, "not_registered"),
-    );
+    let policy = write_temp_json("ks04_policy", &policy_json(2, 86_400, "not_registered"));
     let registry = write_temp_json(
         "ks04_registry",
         &registry_json(true, true, false, false, false, false),
@@ -628,8 +624,7 @@ fn ks_12_input_files_are_never_mutated() {
     let registry = real_registry_path();
     let providers = real_providers_path();
     let policy_before = std::fs::read_to_string(&policy).expect("read real policy fixture");
-    let registry_before =
-        std::fs::read_to_string(&registry).expect("read real registry fixture");
+    let registry_before = std::fs::read_to_string(&registry).expect("read real registry fixture");
     let providers_before =
         std::fs::read_to_string(&providers).expect("read real providers fixture");
 

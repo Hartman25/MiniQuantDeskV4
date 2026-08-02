@@ -35,15 +35,15 @@ pub use provider_registry::{
     provider_supports_historical_bars, MarketDataProviderBox, ProviderConfig, ProviderFactoryError,
 };
 pub use providers::coinlore::{
-    coinlore_aliases_from_registry_v2, fetch_coinlore_ticker_body,
-    parse_coinlore_ticker_response, CoinloreAlias, CoinloreTickerRaw, COINLORE_PROVIDER_ID,
+    coinlore_aliases_from_registry_v2, fetch_coinlore_ticker_body, parse_coinlore_ticker_response,
+    CoinloreAlias, CoinloreTickerRaw, COINLORE_PROVIDER_ID,
 };
 pub use providers::kraken::{
     fetch_kraken_ohlc_body, kraken_aliases_from_registry_v2, kraken_bar_to_provider_bar,
     kraken_query_pair_for_canonical_symbol, kraken_volume_to_scaled_i64,
     parse_kraken_ohlc_response, KrakenAlias, KrakenHistoricalProvider, KrakenOhlcBar,
-    KrakenOhlcParseError, KrakenPairOhlc, KRAKEN_BASE_URL, KRAKEN_PROVIDER_ID,
-    KRAKEN_VOLUME_SCALE, KRAKEN_VOLUME_SCALE_DECIMALS,
+    KrakenOhlcParseError, KrakenPairOhlc, KRAKEN_BASE_URL, KRAKEN_PROVIDER_ID, KRAKEN_VOLUME_SCALE,
+    KRAKEN_VOLUME_SCALE_DECIMALS,
 };
 pub mod quality;
 

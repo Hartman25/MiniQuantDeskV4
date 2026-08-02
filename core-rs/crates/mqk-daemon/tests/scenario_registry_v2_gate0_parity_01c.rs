@@ -42,7 +42,10 @@ use tower::ServiceExt;
 // Helpers (mirrors scenario_asset_class_scope_b8.rs)
 // ---------------------------------------------------------------------------
 
-async fn call(router: axum::Router, req: Request<axum::body::Body>) -> (StatusCode, serde_json::Value) {
+async fn call(
+    router: axum::Router,
+    req: Request<axum::body::Body>,
+) -> (StatusCode, serde_json::Value) {
     let resp = router.oneshot(req).await.expect("oneshot failed");
     let status = resp.status();
     let body = resp

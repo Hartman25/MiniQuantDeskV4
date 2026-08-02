@@ -35,7 +35,11 @@ fn write_bars_csv(tag: &str) -> anyhow::Result<PathBuf> {
 
 /// Fresh, never-created output directory path for a single test run.
 fn fresh_out_dir(tag: &str) -> PathBuf {
-    std::env::temp_dir().join(format!("mqk_cli_bkt_sweep_econ_out_{}_{}", tag, Uuid::new_v4()))
+    std::env::temp_dir().join(format!(
+        "mqk_cli_bkt_sweep_econ_out_{}_{}",
+        tag,
+        Uuid::new_v4()
+    ))
 }
 
 fn run_cli(args: &[&str]) -> anyhow::Result<Output> {

@@ -1079,7 +1079,12 @@ pub fn run_strategy_scan(
 /// Classify every candidate in an existing `mqk backtest scan-strategies`
 /// artifact directory into a research-review state, and write a review
 /// artifact directory alongside it.
-pub fn run_review_scan(artifact_dir: String, out_dir: String, top: usize, json: bool) -> Result<()> {
+pub fn run_review_scan(
+    artifact_dir: String,
+    out_dir: String,
+    top: usize,
+    json: bool,
+) -> Result<()> {
     if top == 0 {
         anyhow::bail!("--top must be > 0");
     }
@@ -1115,7 +1120,10 @@ pub fn run_review_scan(artifact_dir: String, out_dir: String, top: usize, json: 
         println!("candidate_count={}", manifest.candidate_count);
         println!("blocked_count={}", manifest.blocked_count);
         println!("needs_review_count={}", manifest.needs_review_count);
-        println!("watchlist_candidate_count={}", manifest.watchlist_candidate_count);
+        println!(
+            "watchlist_candidate_count={}",
+            manifest.watchlist_candidate_count
+        );
         println!("paper_candidate_count={}", manifest.paper_candidate_count);
         println!("rejected_count={}", manifest.rejected_count);
         for w in &manifest.warnings {

@@ -90,11 +90,7 @@ async fn cleanup_kraken_rows(pool: &PgPool, symbol: &str) -> anyhow::Result<()> 
         "#,
     )
     .bind(symbol)
-    .bind(&[
-        COMPLETED_END_TS[0],
-        COMPLETED_END_TS[1],
-        FORMING_END_TS,
-    ][..])
+    .bind(&[COMPLETED_END_TS[0], COMPLETED_END_TS[1], FORMING_END_TS][..])
     .execute(pool)
     .await?;
     Ok(())
@@ -144,20 +140,35 @@ async fn read_bar_row(
     pool: &PgPool,
     symbol: &str,
     end_ts: i64,
-) -> anyhow::Result<(i64, i64, bool, String, Option<String>, Option<String>, Option<String>)> {
-    let row: (i64, i64, bool, String, Option<String>, Option<String>, Option<String>) =
-        sqlx::query_as(
-            r#"
+) -> anyhow::Result<(
+    i64,
+    i64,
+    bool,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+)> {
+    let row: (
+        i64,
+        i64,
+        bool,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    ) = sqlx::query_as(
+        r#"
         select close_micros, volume, is_complete,
                provider_id, provider_source, provider_symbol, ingest_mode
         from md_bars
         where symbol = $1 and timeframe = '1D' and end_ts = $2
         "#,
-        )
-        .bind(symbol)
-        .bind(end_ts)
-        .fetch_one(pool)
-        .await?;
+    )
+    .bind(symbol)
+    .bind(end_ts)
+    .fetch_one(pool)
+    .await?;
     Ok(row)
 }
 
@@ -281,7 +292,10 @@ async fn ki02_kraken_fixture_ingest_writes_completed_bars_with_truthful_metadata
 
     // Readback: earlier completed row.
     let earlier = read_bar_row(&pool, "BTC/USD", COMPLETED_END_TS[0]).await?;
-    assert_eq!(earlier.1, BTC_EARLIER_VOLUME_SCALED, "earlier scaled volume readback");
+    assert_eq!(
+        earlier.1, BTC_EARLIER_VOLUME_SCALED,
+        "earlier scaled volume readback"
+    );
     assert!(earlier.2);
 
     assert_eq!(
@@ -326,7 +340,10 @@ async fn ki02_kraken_fixture_ingest_writes_completed_bars_with_truthful_metadata
 
     let eth_latest = read_bar_row(&pool, "ETH/USD", COMPLETED_END_TS[1]).await?;
     assert_eq!(eth_latest.0, ETH_LATEST_CLOSE_MICROS);
-    assert_eq!(eth_latest.1, ETH_LATEST_VOLUME_SCALED, "ETH scaled volume readback");
+    assert_eq!(
+        eth_latest.1, ETH_LATEST_VOLUME_SCALED,
+        "ETH scaled volume readback"
+    );
     assert_eq!(eth_latest.5.as_deref(), Some("XETHZUSD"));
 
     assert_eq!(count_kraken_rows(&pool, "ETH/USD").await?, 2);
@@ -342,8 +359,16 @@ async fn ki02_kraken_fixture_ingest_writes_completed_bars_with_truthful_metadata
     // --- Cleanup: prove zero leftover rows ---
     cleanup_kraken_rows(&pool, "BTC/USD").await?;
     cleanup_kraken_rows(&pool, "ETH/USD").await?;
-    assert_eq!(count_kraken_rows(&pool, "BTC/USD").await?, 0, "zero leftover BTC/USD rows");
-    assert_eq!(count_kraken_rows(&pool, "ETH/USD").await?, 0, "zero leftover ETH/USD rows");
+    assert_eq!(
+        count_kraken_rows(&pool, "BTC/USD").await?,
+        0,
+        "zero leftover BTC/USD rows"
+    );
+    assert_eq!(
+        count_kraken_rows(&pool, "ETH/USD").await?,
+        0,
+        "zero leftover ETH/USD rows"
+    );
 
     Ok(())
 }

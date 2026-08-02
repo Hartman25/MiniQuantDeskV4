@@ -8,7 +8,9 @@ use std::path::PathBuf;
 
 fn fixture_path(name: &str) -> PathBuf {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
-    PathBuf::from(manifest_dir).join("tests/fixtures").join(name)
+    PathBuf::from(manifest_dir)
+        .join("tests/fixtures")
+        .join(name)
 }
 
 fn providers_registry_path() -> PathBuf {
@@ -50,7 +52,10 @@ fn sc01_btc_fixture_end_to_end_from_disk() {
     assert!(bars.iter().all(|b| b.timeframe == "1D"));
 
     let latest = bars.iter().max_by_key(|b| b.end_ts).unwrap();
-    assert_eq!(latest.end_ts, 1_783_209_600, "end_ts = row.time + interval_seconds");
+    assert_eq!(
+        latest.end_ts, 1_783_209_600,
+        "end_ts = row.time + interval_seconds"
+    );
     assert_eq!(latest.close, "63085.8");
     assert_eq!(
         latest.volume, 131_715_941_434,
@@ -97,7 +102,11 @@ fn sc03_forming_candle_never_appears_in_completed_bars() {
             mqk_md::parse_kraken_ohlc_response(&body, query_pair, KRAKEN_1D_INTERVAL_SECONDS)
                 .unwrap();
         let forming_end_ts: Vec<i64> = parsed.forming_bars().iter().map(|b| b.end_ts).collect();
-        assert_eq!(forming_end_ts.len(), 1, "fixture must carry exactly 1 forming row");
+        assert_eq!(
+            forming_end_ts.len(),
+            1,
+            "fixture must carry exactly 1 forming row"
+        );
 
         let bars = parsed.completed_provider_bars(symbol, "1D").unwrap();
         for bar in &bars {
@@ -156,10 +165,9 @@ fn sc05_kraken_factory_disabled_by_default_from_real_registry() {
 // pairs, without enabling the instruments for trading.
 #[test]
 fn sc06_registry_v2_kraken_aliases_present_and_disabled() {
-    let registry = mqk_md::instrument_registry_v2::load_instrument_registry_v2(
-        &instruments_registry_path(),
-    )
-    .expect("registry-v2 fixture must load");
+    let registry =
+        mqk_md::instrument_registry_v2::load_instrument_registry_v2(&instruments_registry_path())
+            .expect("registry-v2 fixture must load");
 
     let aliases = mqk_md::kraken_aliases_from_registry_v2(&registry);
     assert_eq!(aliases.len(), 2);
@@ -209,7 +217,10 @@ async fn sc07_historical_provider_adapter_end_to_end_via_mock() {
         end: chrono::NaiveDate::from_ymd_opt(2026, 7, 5).unwrap(),
     };
 
-    let bars = provider.fetch_bars(req).await.expect("fetch_bars must succeed against mock");
+    let bars = provider
+        .fetch_bars(req)
+        .await
+        .expect("fetch_bars must succeed against mock");
     assert_eq!(bars.len(), 2);
     assert!(bars.iter().all(|b| b.is_complete));
     let latest = bars.iter().max_by_key(|b| b.end_ts).unwrap();

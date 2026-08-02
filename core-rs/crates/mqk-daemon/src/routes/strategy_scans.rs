@@ -50,8 +50,7 @@ const MAX_ARTIFACT_CANDIDATE_ROWS: usize = 200;
 const MAX_REVIEW_ARTIFACT_DECISION_ROWS: usize = 200;
 
 const RESEARCH_ONLY_WARNING: &str = "Scanner ranking is research evidence only.";
-const NOT_TRADING_APPROVAL_WARNING: &str =
-    "Scanner output is not autonomous trading approval.";
+const NOT_TRADING_APPROVAL_WARNING: &str = "Scanner output is not autonomous trading approval.";
 const NEGATIVE_RETURN_WARNING: &str =
     "Candidates can rank well while still having negative absolute returns.";
 
@@ -399,15 +398,25 @@ pub(crate) async fn strategy_scan_artifact(
     let manifest: mqk_backtest::ScanManifest = match read_artifact_json(&manifest_path) {
         Ok(m) => m,
         Err(e) => {
-            return Json(artifact_error_response("invalid_artifact", &requested, warnings, e))
-                .into_response();
+            return Json(artifact_error_response(
+                "invalid_artifact",
+                &requested,
+                warnings,
+                e,
+            ))
+            .into_response();
         }
     };
     let summary: mqk_backtest::ScanSummary = match read_artifact_json(&summary_path) {
         Ok(s) => s,
         Err(e) => {
-            return Json(artifact_error_response("invalid_artifact", &requested, warnings, e))
-                .into_response();
+            return Json(artifact_error_response(
+                "invalid_artifact",
+                &requested,
+                warnings,
+                e,
+            ))
+            .into_response();
         }
     };
     let candidates: Vec<mqk_backtest::StrategyScanCandidate> =
@@ -470,8 +479,8 @@ fn artifact_error_response(
 }
 
 fn read_artifact_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T, String> {
-    let raw =
-        std::fs::read_to_string(path).map_err(|e| format!("read failed: {}: {e}", path.display()))?;
+    let raw = std::fs::read_to_string(path)
+        .map_err(|e| format!("read failed: {}: {e}", path.display()))?;
     serde_json::from_str(&raw).map_err(|e| format!("parse failed: {}: {e}", path.display()))
 }
 

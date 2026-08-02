@@ -256,15 +256,38 @@ async fn proof_a_b_c_snapshot_fill_accounting_and_restart() {
         return;
     };
     let run_id = fixed_run_id("proof_a_b_c_snapshot_fill_accounting_and_restart");
-    seed_run(&pool, run_id, Utc.with_ymd_and_hms(2099, 6, 1, 12, 0, 0).unwrap()).await;
+    seed_run(
+        &pool,
+        run_id,
+        Utc.with_ymd_and_hms(2099, 6, 1, 12, 0, 0).unwrap(),
+    )
+    .await;
 
     let at = Utc.with_ymd_and_hms(2099, 6, 1, 13, 0, 0).unwrap();
     insert_full_fill(
-        &pool, run_id, "order-1", "AAPL", Side::Buy, 10, 150_000_000, 0, "msg-1", at,
+        &pool,
+        run_id,
+        "order-1",
+        "AAPL",
+        Side::Buy,
+        10,
+        150_000_000,
+        0,
+        "msg-1",
+        at,
     )
     .await;
     insert_full_fill(
-        &pool, run_id, "order-2", "AAPL", Side::Sell, 4, 160_000_000, 0, "msg-2", at,
+        &pool,
+        run_id,
+        "order-2",
+        "AAPL",
+        Side::Sell,
+        4,
+        160_000_000,
+        0,
+        "msg-2",
+        at,
     )
     .await;
 
@@ -342,7 +365,12 @@ async fn proof_d_incomplete_history_blocks_epoch_without_fabrication() {
         return;
     };
     let run_id = fixed_run_id("proof_d_incomplete_history_blocks_epoch_without_fabrication");
-    seed_run(&pool, run_id, Utc.with_ymd_and_hms(2099, 6, 1, 12, 0, 0).unwrap()).await;
+    seed_run(
+        &pool,
+        run_id,
+        Utc.with_ymd_and_hms(2099, 6, 1, 12, 0, 0).unwrap(),
+    )
+    .await;
 
     // No fills at all -- but the broker reports an adopted position.
     let captured_at_utc = Utc.with_ymd_and_hms(2099, 6, 1, 13, 0, 0).unwrap();
@@ -404,14 +432,37 @@ async fn proof_e_realized_pnl_positive_negative_and_zero() {
 
     // Positive: sell above entry.
     let run_pos = fixed_run_id("proof_e_realized_pnl_positive");
-    seed_run(&pool, run_pos, Utc.with_ymd_and_hms(2099, 6, 1, 12, 0, 0).unwrap()).await;
+    seed_run(
+        &pool,
+        run_pos,
+        Utc.with_ymd_and_hms(2099, 6, 1, 12, 0, 0).unwrap(),
+    )
+    .await;
     let at = Utc.with_ymd_and_hms(2099, 6, 1, 13, 0, 0).unwrap();
     insert_full_fill(
-        &pool, run_pos, "order-1", "AAPL", Side::Buy, 10, 150_000_000, 0, "msg-1", at,
+        &pool,
+        run_pos,
+        "order-1",
+        "AAPL",
+        Side::Buy,
+        10,
+        150_000_000,
+        0,
+        "msg-1",
+        at,
     )
     .await;
     insert_full_fill(
-        &pool, run_pos, "order-2", "AAPL", Side::Sell, 10, 160_000_000, 0, "msg-2", at,
+        &pool,
+        run_pos,
+        "order-2",
+        "AAPL",
+        Side::Sell,
+        10,
+        160_000_000,
+        0,
+        "msg-2",
+        at,
     )
     .await;
     accept_and_refresh(
@@ -429,18 +480,44 @@ async fn proof_e_realized_pnl_positive_negative_and_zero() {
         .await
         .expect("fetch should succeed")
         .expect("accounting state should exist");
-    assert!(acc_pos.realized_pnl_micros > 0, "(160-150)*10 must be positive");
+    assert!(
+        acc_pos.realized_pnl_micros > 0,
+        "(160-150)*10 must be positive"
+    );
     assert_eq!(acc_pos.realized_pnl_micros, 100_000_000);
 
     // Negative: sell below entry.
     let run_neg = fixed_run_id("proof_e_realized_pnl_negative");
-    seed_run(&pool, run_neg, Utc.with_ymd_and_hms(2099, 6, 1, 12, 0, 0).unwrap()).await;
-    insert_full_fill(
-        &pool, run_neg, "order-1", "AAPL", Side::Buy, 10, 150_000_000, 0, "msg-1", at,
+    seed_run(
+        &pool,
+        run_neg,
+        Utc.with_ymd_and_hms(2099, 6, 1, 12, 0, 0).unwrap(),
     )
     .await;
     insert_full_fill(
-        &pool, run_neg, "order-2", "AAPL", Side::Sell, 10, 140_000_000, 0, "msg-2", at,
+        &pool,
+        run_neg,
+        "order-1",
+        "AAPL",
+        Side::Buy,
+        10,
+        150_000_000,
+        0,
+        "msg-1",
+        at,
+    )
+    .await;
+    insert_full_fill(
+        &pool,
+        run_neg,
+        "order-2",
+        "AAPL",
+        Side::Sell,
+        10,
+        140_000_000,
+        0,
+        "msg-2",
+        at,
     )
     .await;
     accept_and_refresh(
@@ -458,19 +535,30 @@ async fn proof_e_realized_pnl_positive_negative_and_zero() {
         .await
         .expect("fetch should succeed")
         .expect("accounting state should exist");
-    assert!(acc_neg.realized_pnl_micros < 0, "(140-150)*10 must be negative");
+    assert!(
+        acc_neg.realized_pnl_micros < 0,
+        "(140-150)*10 must be negative"
+    );
     assert_eq!(acc_neg.realized_pnl_micros, -100_000_000);
 
     // Zero: flat portfolio, no fills at all.
     let run_zero = fixed_run_id("proof_e_realized_pnl_zero");
-    seed_run(&pool, run_zero, Utc.with_ymd_and_hms(2099, 6, 1, 12, 0, 0).unwrap()).await;
+    seed_run(
+        &pool,
+        run_zero,
+        Utc.with_ymd_and_hms(2099, 6, 1, 12, 0, 0).unwrap(),
+    )
+    .await;
     accept_and_refresh(&pool, run_zero, at, vec![]).await;
     let acc_zero = mqk_db::fetch_paper_portfolio_accounting_state(&pool, run_zero)
         .await
         .expect("fetch should succeed")
         .expect("accounting state should exist");
     assert_eq!(acc_zero.realized_pnl_micros, 0);
-    assert_eq!(acc_zero.accounting_epoch, "complete", "a flat portfolio has known-zero, complete truth");
+    assert_eq!(
+        acc_zero.accounting_epoch, "complete",
+        "a flat portfolio has known-zero, complete truth"
+    );
 
     cleanup_run(&pool, run_pos).await;
     cleanup_run(&pool, run_neg).await;
@@ -486,8 +574,7 @@ async fn proof_f_full_chain_and_restart_reconstructable_via_paper_lifecycle() {
     let Some(pool) = test_pool().await else {
         return;
     };
-    let run_id =
-        fixed_run_id("proof_f_full_chain_and_restart_reconstructable_via_paper_lifecycle");
+    let run_id = fixed_run_id("proof_f_full_chain_and_restart_reconstructable_via_paper_lifecycle");
     let ts = Utc.with_ymd_and_hms(2099, 6, 1, 12, 0, 0).unwrap();
     seed_run(&pool, run_id, ts).await;
 
@@ -518,7 +605,16 @@ async fn proof_f_full_chain_and_restart_reconstructable_via_paper_lifecycle() {
     };
     let json = serde_json::to_value(&event).expect("serialize");
     mqk_db::inbox_insert_deduped_with_identity(
-        &pool, run_id, "msg-fill-1", None, "order-1", "", "fill", &json, 0, ts,
+        &pool,
+        run_id,
+        "msg-fill-1",
+        None,
+        "order-1",
+        "",
+        "fill",
+        &json,
+        0,
+        ts,
     )
     .await
     .expect("inbox insert should succeed");

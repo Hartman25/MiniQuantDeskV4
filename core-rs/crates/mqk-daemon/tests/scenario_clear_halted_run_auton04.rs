@@ -248,8 +248,7 @@ async fn h02_catalog_contains_clear_halted_run_with_required_fields() {
 async fn cleanup_all_mqk_daemon_paper_runs(pool: &sqlx::PgPool) {
     const ENGINE_ID: &str = "mqk-daemon";
     const MODE: &str = "PAPER";
-    let scope_subquery =
-        "select run_id from runs where engine_id = $1 and mode = $2";
+    let scope_subquery = "select run_id from runs where engine_id = $1 and mode = $2";
 
     sqlx::query(&format!(
         "delete from broker_order_map where internal_id in (\

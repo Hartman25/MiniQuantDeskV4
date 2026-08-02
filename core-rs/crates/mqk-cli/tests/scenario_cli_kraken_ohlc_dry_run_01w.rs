@@ -243,8 +243,7 @@ fn cli07_evidence_json_output_is_valid() {
     let registry_s = registry.to_string_lossy().to_string();
     let input = btc_fixture_path();
     let input_s = input.to_string_lossy().to_string();
-    let out_dir =
-        std::env::temp_dir().join(format!("mqk_cli_kraken_evidence_{}", Uuid::new_v4()));
+    let out_dir = std::env::temp_dir().join(format!("mqk_cli_kraken_evidence_{}", Uuid::new_v4()));
     let out_dir_s = out_dir.to_string_lossy().to_string();
 
     let output = run(&[

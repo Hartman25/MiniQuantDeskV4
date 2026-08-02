@@ -210,7 +210,10 @@ fn routing_guard_allows(asset_class: AssetClass) -> bool {
             .submit(&claim(), req_with_class(asset_class))
             .unwrap_err();
         assert!(
-            matches!(err, SubmitError::Gate(GateRefusal::AssetClassDisabled { .. })),
+            matches!(
+                err,
+                SubmitError::Gate(GateRefusal::AssetClassDisabled { .. })
+            ),
             "non-equity {asset_class:?} must be rejected by the gate, not any other error: {err:?}"
         );
         false

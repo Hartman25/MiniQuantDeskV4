@@ -552,8 +552,13 @@ impl BacktestEngine {
                         // BACKTEST-MULTIPLIER-RUN-WIRE-01: parallel
                         // multiplier-aware shadow ledger update. Never reads
                         // from or mutates `self.portfolio`.
-                        self.economics_ledger
-                            .apply_fill(&intent.symbol, is_buy, intent.qty, fill_price, fee);
+                        self.economics_ledger.apply_fill(
+                            &intent.symbol,
+                            is_buy,
+                            intent.qty,
+                            fill_price,
+                            fee,
+                        );
                         self.fills.push(BacktestFill {
                             fill_id,
                             order_id,
@@ -649,8 +654,10 @@ impl BacktestEngine {
             self.economics_equity_curve.clone()
         };
 
-        let economics_report =
-            BacktestEconomicsReport::from_run(&self.economics, self.economics_realized_pnl_micros());
+        let economics_report = BacktestEconomicsReport::from_run(
+            &self.economics,
+            self.economics_realized_pnl_micros(),
+        );
 
         Ok(BacktestReport {
             strategy_name,

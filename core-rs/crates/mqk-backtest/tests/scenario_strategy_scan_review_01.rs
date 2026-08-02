@@ -7,8 +7,8 @@
 
 use mqk_backtest::{
     build_review_decisions, evaluate_scan_review_decision, StrategyScanCandidate,
-    StrategyScanMetrics, StrategyScanReasonCode, StrategyScanReviewPolicy,
-    StrategyScanReviewState, StrategyScanTruthState,
+    StrategyScanMetrics, StrategyScanReasonCode, StrategyScanReviewPolicy, StrategyScanReviewState,
+    StrategyScanTruthState,
 };
 
 /// A "clean" ranked candidate that comfortably clears every gate. Individual
@@ -67,8 +67,13 @@ fn ranked_positive_candidate_becomes_paper_candidate() {
     let policy = StrategyScanReviewPolicy::default();
     let candidate = good_candidate("AAPL");
     let decision = evaluate_scan_review_decision(&candidate, &policy);
-    assert_eq!(decision.review_state, StrategyScanReviewState::PaperCandidate);
-    assert!(decision.reason_codes.contains(&"eligible_paper_candidate".to_string()));
+    assert_eq!(
+        decision.review_state,
+        StrategyScanReviewState::PaperCandidate
+    );
+    assert!(decision
+        .reason_codes
+        .contains(&"eligible_paper_candidate".to_string()));
     assert!(decision.blockers.is_empty());
     assert_eq!(decision.scanner_rank, Some(1));
     assert_eq!(decision.scanner_score, Some(8.5));
@@ -82,9 +87,14 @@ fn negative_total_return_cannot_become_paper_candidate_even_with_positive_alpha(
     candidate.metrics.total_return_pct = Some(-3.0);
     candidate.metrics.alpha_pct = Some(6.0); // beat benchmark, still lost money
     let decision = evaluate_scan_review_decision(&candidate, &policy);
-    assert_ne!(decision.review_state, StrategyScanReviewState::PaperCandidate);
+    assert_ne!(
+        decision.review_state,
+        StrategyScanReviewState::PaperCandidate
+    );
     assert_eq!(decision.review_state, StrategyScanReviewState::Rejected);
-    assert!(decision.reason_codes.contains(&"negative_total_return".to_string()));
+    assert!(decision
+        .reason_codes
+        .contains(&"negative_total_return".to_string()));
 }
 
 // 3. Missing score blocks.
@@ -107,7 +117,9 @@ fn missing_drawdown_blocks() {
     candidate.metrics.max_drawdown_pct = None;
     let decision = evaluate_scan_review_decision(&candidate, &policy);
     assert_eq!(decision.review_state, StrategyScanReviewState::Blocked);
-    assert!(decision.reason_codes.contains(&"missing_drawdown".to_string()));
+    assert!(decision
+        .reason_codes
+        .contains(&"missing_drawdown".to_string()));
 }
 
 // 5. Too few trades blocks or needs review.
@@ -121,8 +133,13 @@ fn too_few_trades_needs_review() {
         decision.review_state,
         StrategyScanReviewState::NeedsReview | StrategyScanReviewState::Blocked
     ));
-    assert_ne!(decision.review_state, StrategyScanReviewState::PaperCandidate);
-    assert!(decision.reason_codes.contains(&"below_min_trade_count".to_string()));
+    assert_ne!(
+        decision.review_state,
+        StrategyScanReviewState::PaperCandidate
+    );
+    assert!(decision
+        .reason_codes
+        .contains(&"below_min_trade_count".to_string()));
 }
 
 // 6. Too few bars blocks.
@@ -133,7 +150,9 @@ fn too_few_bars_blocks() {
     candidate.metrics.bars_used = policy.min_bars_used - 1;
     let decision = evaluate_scan_review_decision(&candidate, &policy);
     assert_eq!(decision.review_state, StrategyScanReviewState::Blocked);
-    assert!(decision.reason_codes.contains(&"below_min_bars".to_string()));
+    assert!(decision
+        .reason_codes
+        .contains(&"below_min_bars".to_string()));
 }
 
 // 7. Excess drawdown rejects.
@@ -144,7 +163,9 @@ fn excess_drawdown_rejects() {
     candidate.metrics.max_drawdown_pct = Some(policy.max_drawdown_pct + 1.0);
     let decision = evaluate_scan_review_decision(&candidate, &policy);
     assert_eq!(decision.review_state, StrategyScanReviewState::Rejected);
-    assert!(decision.reason_codes.contains(&"excess_drawdown".to_string()));
+    assert!(decision
+        .reason_codes
+        .contains(&"excess_drawdown".to_string()));
 }
 
 // 8. Halted candidate rejects.
@@ -165,7 +186,9 @@ fn data_missing_candidate_cannot_promote() {
     let candidate = skipped_candidate("ZZZZ", StrategyScanTruthState::DataMissing);
     let decision = evaluate_scan_review_decision(&candidate, &policy);
     assert_eq!(decision.review_state, StrategyScanReviewState::Blocked);
-    assert!(decision.reason_codes.contains(&"not_candidate_ranked".to_string()));
+    assert!(decision
+        .reason_codes
+        .contains(&"not_candidate_ranked".to_string()));
 }
 
 // 10. `watchlist_candidate` is possible for marginal evidence.
@@ -175,8 +198,13 @@ fn marginal_profit_factor_becomes_watchlist_candidate() {
     let mut candidate = good_candidate("IBM");
     candidate.metrics.profit_factor = Some(policy.min_profit_factor - 0.1);
     let decision = evaluate_scan_review_decision(&candidate, &policy);
-    assert_eq!(decision.review_state, StrategyScanReviewState::WatchlistCandidate);
-    assert!(decision.reason_codes.contains(&"weak_profit_factor".to_string()));
+    assert_eq!(
+        decision.review_state,
+        StrategyScanReviewState::WatchlistCandidate
+    );
+    assert!(decision
+        .reason_codes
+        .contains(&"weak_profit_factor".to_string()));
 }
 
 // 11. Deterministic ordering of review decisions.

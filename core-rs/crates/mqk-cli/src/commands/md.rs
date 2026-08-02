@@ -741,7 +741,12 @@ pub async fn md_coinlore_latest_mark(
     }
 
     let registry_v2 = mqk_md::instrument_registry_v2::load_instrument_registry_v2(&registry)
-        .with_context(|| format!("coinlore-latest-mark: registry load failed: {}", registry.display()))?;
+        .with_context(|| {
+            format!(
+                "coinlore-latest-mark: registry load failed: {}",
+                registry.display()
+            )
+        })?;
     let all_aliases = mqk_md::coinlore_aliases_from_registry_v2(&registry_v2);
 
     let mut aliases = Vec::with_capacity(requested.len());
@@ -758,8 +763,12 @@ pub async fn md_coinlore_latest_mark(
 
     let (body, network_call_made, mode) = match &input_file {
         Some(path) => {
-            let content = fs::read_to_string(path)
-                .with_context(|| format!("coinlore-latest-mark: input-file read failed: {}", path.display()))?;
+            let content = fs::read_to_string(path).with_context(|| {
+                format!(
+                    "coinlore-latest-mark: input-file read failed: {}",
+                    path.display()
+                )
+            })?;
             (content, false, "input_file")
         }
         None => {
@@ -821,8 +830,12 @@ pub async fn md_coinlore_latest_mark(
     }
 
     if let Some(dir) = &output_dir {
-        fs::create_dir_all(dir)
-            .with_context(|| format!("coinlore-latest-mark: create output dir failed: {}", dir.display()))?;
+        fs::create_dir_all(dir).with_context(|| {
+            format!(
+                "coinlore-latest-mark: create output dir failed: {}",
+                dir.display()
+            )
+        })?;
         let produced_at_utc = chrono::DateTime::<Utc>::from_timestamp(as_of_client_request_ts, 0)
             .unwrap_or_else(Utc::now)
             .to_rfc3339();
@@ -851,8 +864,12 @@ pub async fn md_coinlore_latest_mark(
             "coinlore_latest_mark_{}.json",
             as_of_client_request_ts
         ));
-        fs::write(&out_path, serde_json::to_string_pretty(&evidence)?)
-            .with_context(|| format!("coinlore-latest-mark: write evidence failed: {}", out_path.display()))?;
+        fs::write(&out_path, serde_json::to_string_pretty(&evidence)?).with_context(|| {
+            format!(
+                "coinlore-latest-mark: write evidence failed: {}",
+                out_path.display()
+            )
+        })?;
         println!("evidence_path={}", out_path.display());
     }
 
@@ -900,7 +917,12 @@ pub async fn md_kraken_ohlc_dry_run(
     }
 
     let registry_v2 = mqk_md::instrument_registry_v2::load_instrument_registry_v2(&registry)
-        .with_context(|| format!("kraken-ohlc-dry-run: registry load failed: {}", registry.display()))?;
+        .with_context(|| {
+            format!(
+                "kraken-ohlc-dry-run: registry load failed: {}",
+                registry.display()
+            )
+        })?;
     let aliases = mqk_md::kraken_aliases_from_registry_v2(&registry_v2);
     let alias = aliases
         .iter()
@@ -913,7 +935,10 @@ pub async fn md_kraken_ohlc_dry_run(
     let (body, network_call_made, mode) = match &input_file {
         Some(path) => {
             let content = fs::read_to_string(path).with_context(|| {
-                format!("kraken-ohlc-dry-run: input-file read failed: {}", path.display())
+                format!(
+                    "kraken-ohlc-dry-run: input-file read failed: {}",
+                    path.display()
+                )
             })?;
             (content, false, "input_file")
         }
@@ -963,8 +988,14 @@ pub async fn md_kraken_ohlc_dry_run(
     println!("symbol={symbol}");
     println!("bars_completed={}", completed.len());
     println!("bars_excluded_forming={bars_excluded_forming}");
-    println!("latest_completed_start_ts={}", fmt_opt_i64(latest_completed_start_ts));
-    println!("latest_completed_end_ts={}", fmt_opt_i64(latest_completed_end_ts));
+    println!(
+        "latest_completed_start_ts={}",
+        fmt_opt_i64(latest_completed_start_ts)
+    );
+    println!(
+        "latest_completed_end_ts={}",
+        fmt_opt_i64(latest_completed_end_ts)
+    );
     for bar in &completed {
         println!(
             "end_ts={} open={} high={} low={} close={} volume_scaled={} is_complete={}",
@@ -974,7 +1005,10 @@ pub async fn md_kraken_ohlc_dry_run(
 
     if let Some(dir) = &output_dir {
         fs::create_dir_all(dir).with_context(|| {
-            format!("kraken-ohlc-dry-run: create output dir failed: {}", dir.display())
+            format!(
+                "kraken-ohlc-dry-run: create output dir failed: {}",
+                dir.display()
+            )
         })?;
         let produced_at_ts = Utc::now().timestamp();
         let produced_at_utc = chrono::DateTime::<Utc>::from_timestamp(produced_at_ts, 0)
@@ -1004,7 +1038,10 @@ pub async fn md_kraken_ohlc_dry_run(
         });
         let out_path = dir.join(format!("kraken_ohlc_dry_run_{produced_at_ts}.json"));
         fs::write(&out_path, serde_json::to_string_pretty(&evidence)?).with_context(|| {
-            format!("kraken-ohlc-dry-run: write evidence failed: {}", out_path.display())
+            format!(
+                "kraken-ohlc-dry-run: write evidence failed: {}",
+                out_path.display()
+            )
         })?;
         println!("evidence_path={}", out_path.display());
     }
@@ -1062,7 +1099,12 @@ pub async fn md_kraken_ohlc_ingest(
     }
 
     let registry_v2 = mqk_md::instrument_registry_v2::load_instrument_registry_v2(&registry)
-        .with_context(|| format!("kraken-ohlc-ingest: registry load failed: {}", registry.display()))?;
+        .with_context(|| {
+            format!(
+                "kraken-ohlc-ingest: registry load failed: {}",
+                registry.display()
+            )
+        })?;
     let aliases = mqk_md::kraken_aliases_from_registry_v2(&registry_v2);
     let alias = aliases
         .iter()
@@ -1075,7 +1117,10 @@ pub async fn md_kraken_ohlc_ingest(
     let (body, network_call_made, mode) = match &input_file {
         Some(path) => {
             let content = fs::read_to_string(path).with_context(|| {
-                format!("kraken-ohlc-ingest: input-file read failed: {}", path.display())
+                format!(
+                    "kraken-ohlc-ingest: input-file read failed: {}",
+                    path.display()
+                )
             })?;
             (content, false, "input_file")
         }
@@ -1182,8 +1227,14 @@ pub async fn md_kraken_ohlc_ingest(
     println!("ingest_id={}", res.ingest_id);
     println!("bars_completed={}", completed.len());
     println!("bars_excluded_forming={bars_excluded_forming}");
-    println!("latest_completed_start_ts={}", fmt_opt_i64(latest_completed_start_ts));
-    println!("latest_completed_end_ts={}", fmt_opt_i64(latest_completed_end_ts));
+    println!(
+        "latest_completed_start_ts={}",
+        fmt_opt_i64(latest_completed_start_ts)
+    );
+    println!(
+        "latest_completed_end_ts={}",
+        fmt_opt_i64(latest_completed_end_ts)
+    );
     println!(
         "rows_read={} rows_ok={} rejected={} inserted={} updated={}",
         res.report.coverage.rows_read,
@@ -1195,7 +1246,10 @@ pub async fn md_kraken_ohlc_ingest(
 
     if let Some(dir) = &output_dir {
         fs::create_dir_all(dir).with_context(|| {
-            format!("kraken-ohlc-ingest: create output dir failed: {}", dir.display())
+            format!(
+                "kraken-ohlc-ingest: create output dir failed: {}",
+                dir.display()
+            )
         })?;
         let produced_at_ts = Utc::now().timestamp();
         let produced_at_utc = chrono::DateTime::<Utc>::from_timestamp(produced_at_ts, 0)
@@ -1229,7 +1283,10 @@ pub async fn md_kraken_ohlc_ingest(
         });
         let out_path = dir.join(format!("kraken_ohlc_ingest_{produced_at_ts}.json"));
         fs::write(&out_path, serde_json::to_string_pretty(&evidence)?).with_context(|| {
-            format!("kraken-ohlc-ingest: write evidence failed: {}", out_path.display())
+            format!(
+                "kraken-ohlc-ingest: write evidence failed: {}",
+                out_path.display()
+            )
         })?;
         println!("evidence_path={}", out_path.display());
     }
@@ -1308,7 +1365,11 @@ fn kraken_sync_network_gate(
     if !db_url_present {
         return Err("kraken_sync_requires_database_url_for_network_mode");
     }
-    Ok(if manual_smoke_env { "manual_smoke_env" } else { "scheduled_sync_env" })
+    Ok(if manual_smoke_env {
+        "manual_smoke_env"
+    } else {
+        "scheduled_sync_env"
+    })
 }
 
 #[cfg(test)]
@@ -1333,7 +1394,10 @@ mod kraken_sync_network_gate_tests {
             kraken_sync_network_gate(true, false, false),
             Err("kraken_sync_requires_database_url_for_network_mode")
         );
-        assert_eq!(kraken_sync_network_gate(true, false, true), Ok("manual_smoke_env"));
+        assert_eq!(
+            kraken_sync_network_gate(true, false, true),
+            Ok("manual_smoke_env")
+        );
     }
 
     #[test]
@@ -1342,12 +1406,18 @@ mod kraken_sync_network_gate_tests {
             kraken_sync_network_gate(false, true, false),
             Err("kraken_sync_requires_database_url_for_network_mode")
         );
-        assert_eq!(kraken_sync_network_gate(false, true, true), Ok("scheduled_sync_env"));
+        assert_eq!(
+            kraken_sync_network_gate(false, true, true),
+            Ok("scheduled_sync_env")
+        );
     }
 
     #[test]
     fn both_env_vars_set_prefers_manual_smoke_label() {
-        assert_eq!(kraken_sync_network_gate(true, true, true), Ok("manual_smoke_env"));
+        assert_eq!(
+            kraken_sync_network_gate(true, true, true),
+            Ok("manual_smoke_env")
+        );
     }
 }
 
@@ -1385,7 +1455,12 @@ pub async fn md_kraken_ohlc_sync(
     }
 
     let registry_v2 = mqk_md::instrument_registry_v2::load_instrument_registry_v2(&registry)
-        .with_context(|| format!("kraken-ohlc-sync: registry load failed: {}", registry.display()))?;
+        .with_context(|| {
+            format!(
+                "kraken-ohlc-sync: registry load failed: {}",
+                registry.display()
+            )
+        })?;
     let aliases = mqk_md::kraken_aliases_from_registry_v2(&registry_v2);
     let alias = aliases
         .iter()
@@ -1400,7 +1475,10 @@ pub async fn md_kraken_ohlc_sync(
     let (body, network_call_made, mode) = match &input_file {
         Some(path) => {
             let content = fs::read_to_string(path).with_context(|| {
-                format!("kraken-ohlc-sync: input-file read failed: {}", path.display())
+                format!(
+                    "kraken-ohlc-sync: input-file read failed: {}",
+                    path.display()
+                )
             })?;
             (content, false, "input_file")
         }
@@ -1588,7 +1666,10 @@ pub async fn md_kraken_ohlc_sync(
     println!("ingest_id={final_ingest_id}");
     println!("sync_policy={sync_policy}");
     println!("no_update_existing={no_update_existing}");
-    println!("latest_existing_end_ts_before={}", fmt_opt_i64(latest_existing_end_ts_before));
+    println!(
+        "latest_existing_end_ts_before={}",
+        fmt_opt_i64(latest_existing_end_ts_before)
+    );
     println!("bars_completed={}", completed.len());
     println!("bars_excluded_forming={bars_excluded_forming}");
     println!("bars_considered_for_sync={}", completed.len());
@@ -1600,13 +1681,22 @@ pub async fn md_kraken_ohlc_sync(
         "rows_changed_skipped_due_to_no_update_existing={rows_changed_skipped_due_to_no_update_existing}"
     );
     println!("rows_skipped_if_known={rows_skipped_if_known}");
-    println!("latest_completed_start_ts={}", fmt_opt_i64(latest_completed_start_ts));
-    println!("latest_completed_end_ts={}", fmt_opt_i64(latest_completed_end_ts));
+    println!(
+        "latest_completed_start_ts={}",
+        fmt_opt_i64(latest_completed_start_ts)
+    );
+    println!(
+        "latest_completed_end_ts={}",
+        fmt_opt_i64(latest_completed_end_ts)
+    );
     println!("inserted={rows_inserted} updated={rows_updated}");
 
     if let Some(dir) = &output_dir {
         fs::create_dir_all(dir).with_context(|| {
-            format!("kraken-ohlc-sync: create output dir failed: {}", dir.display())
+            format!(
+                "kraken-ohlc-sync: create output dir failed: {}",
+                dir.display()
+            )
         })?;
         let produced_at_ts = Utc::now().timestamp();
         let produced_at_utc = chrono::DateTime::<Utc>::from_timestamp(produced_at_ts, 0)
@@ -1651,7 +1741,10 @@ pub async fn md_kraken_ohlc_sync(
         });
         let out_path = dir.join(format!("kraken_ohlc_sync_{produced_at_ts}.json"));
         fs::write(&out_path, serde_json::to_string_pretty(&evidence)?).with_context(|| {
-            format!("kraken-ohlc-sync: write evidence failed: {}", out_path.display())
+            format!(
+                "kraken-ohlc-sync: write evidence failed: {}",
+                out_path.display()
+            )
         })?;
         println!("evidence_path={}", out_path.display());
     }
@@ -1738,25 +1831,31 @@ pub fn md_crypto_registry_readiness(
                 providers.display()
             )
         })?;
-    let provider_cfg = provider_configs.iter().find(|p| p.provider_id == provider_id);
+    let provider_cfg = provider_configs
+        .iter()
+        .find(|p| p.provider_id == provider_id);
 
-    let (provider_enabled, api_key_required, provider_asset_classes, provider_implementation_status) =
-        match provider_cfg {
-            Some(cfg) => (
-                cfg.enabled,
-                cfg.api_key_required,
-                cfg.asset_classes.clone(),
-                cfg.implementation_status.clone(),
-            ),
-            None => {
-                truth_state = "missing_provider";
-                fail_reasons.push(format!(
-                    "provider '{provider_id}' not found in {}",
-                    providers.display()
-                ));
-                (false, false, Vec::new(), String::new())
-            }
-        };
+    let (
+        provider_enabled,
+        api_key_required,
+        provider_asset_classes,
+        provider_implementation_status,
+    ) = match provider_cfg {
+        Some(cfg) => (
+            cfg.enabled,
+            cfg.api_key_required,
+            cfg.asset_classes.clone(),
+            cfg.implementation_status.clone(),
+        ),
+        None => {
+            truth_state = "missing_provider";
+            fail_reasons.push(format!(
+                "provider '{provider_id}' not found in {}",
+                providers.display()
+            ));
+            (false, false, Vec::new(), String::new())
+        }
+    };
 
     if provider_cfg.is_some() && provider_enabled {
         truth_state = "unsafe_provider_enabled";
@@ -2225,10 +2324,7 @@ pub fn md_kraken_scheduler_readiness(
         if truth_state == "active" {
             truth_state = "backend_unavailable";
         }
-        fail_reasons.push(format!(
-            "providers file not found: {}",
-            providers.display()
-        ));
+        fail_reasons.push(format!("providers file not found: {}", providers.display()));
     } else {
         match mqk_md::provider_registry::load_provider_registry(&providers) {
             Err(e) => {
@@ -2241,7 +2337,10 @@ pub fn md_kraken_scheduler_readiness(
                 ));
             }
             Ok(provider_configs) => {
-                match provider_configs.iter().find(|p| p.provider_id == provider_id) {
+                match provider_configs
+                    .iter()
+                    .find(|p| p.provider_id == provider_id)
+                {
                     None => {
                         provider_readiness_state = "unsafe";
                         if truth_state == "active" {
@@ -2387,8 +2486,10 @@ pub fn md_kraken_scheduler_readiness(
                     Some(v) => {
                         let provider_ok =
                             v.get("provider").and_then(|p| p.as_str()) == Some("kraken");
-                        let evidence_all_passed =
-                            v.get("all_passed").and_then(|b| b.as_bool()).unwrap_or(false);
+                        let evidence_all_passed = v
+                            .get("all_passed")
+                            .and_then(|b| b.as_bool())
+                            .unwrap_or(false);
                         if !provider_ok || !evidence_all_passed {
                             evidence_readiness_state = "unsafe";
                         } else if require_fresh_evidence && age > evidence_max_age_secs {
@@ -2653,12 +2754,13 @@ pub fn md_registry_v2_translation_check(
     let mut round_trip_checked_count = 0usize;
 
     if let Some(path) = &registry_v1 {
-        let v1 = mqk_md::instrument_registry::load_instrument_registry(path).with_context(|| {
-            format!(
-                "registry-v2-translation-check: v1 load failed: {}",
-                path.display()
-            )
-        })?;
+        let v1 =
+            mqk_md::instrument_registry::load_instrument_registry(path).with_context(|| {
+                format!(
+                    "registry-v2-translation-check: v1 load failed: {}",
+                    path.display()
+                )
+            })?;
         // Deliberately not calling `validate_registry` here: this command
         // exists to prove `RegistryV2SymbolTranslationIndex::build`'s own
         // fail-closed behavior (duplicate/empty instrument_id/symbol), not
@@ -2848,7 +2950,9 @@ pub fn md_registry_v2_translation_check(
                 "no_config_file_mutated": true,
             },
         });
-        let out_path = dir.join(format!("registry_v2_translation_check_{produced_at_ts}.json"));
+        let out_path = dir.join(format!(
+            "registry_v2_translation_check_{produced_at_ts}.json"
+        ));
         fs::write(&out_path, serde_json::to_string_pretty(&evidence)?).with_context(|| {
             format!(
                 "registry-v2-translation-check: write evidence failed: {}",

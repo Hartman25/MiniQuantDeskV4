@@ -93,7 +93,11 @@ fn gate01_no_input_file_and_no_env_vars_refuses_and_names_both_gates() {
             "1D",
         ],
         &[],
-        &["MQK_ALLOW_KRAKEN_NETWORK_SMOKE", "MQK_ALLOW_KRAKEN_SCHEDULED_SYNC", "MQK_DATABASE_URL"],
+        &[
+            "MQK_ALLOW_KRAKEN_NETWORK_SMOKE",
+            "MQK_ALLOW_KRAKEN_SCHEDULED_SYNC",
+            "MQK_DATABASE_URL",
+        ],
     );
 
     assert!(
@@ -248,7 +252,10 @@ async fn gate03_evidence_records_input_file_network_authorization_mode() -> anyh
             &out_dir_s,
         ],
         &[("MQK_DATABASE_URL", &db_url)],
-        &["MQK_ALLOW_KRAKEN_NETWORK_SMOKE", "MQK_ALLOW_KRAKEN_SCHEDULED_SYNC"],
+        &[
+            "MQK_ALLOW_KRAKEN_NETWORK_SMOKE",
+            "MQK_ALLOW_KRAKEN_SCHEDULED_SYNC",
+        ],
     );
 
     let cleanup_result = cleanup_kraken_rows(&pool).await;

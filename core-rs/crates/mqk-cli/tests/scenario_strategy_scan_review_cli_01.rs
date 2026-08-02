@@ -13,7 +13,8 @@ use std::path::{Path, PathBuf};
 use uuid::Uuid;
 
 fn temp_dir(label: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("mqk_cli_scan_review_{}_{}", label, Uuid::new_v4()));
+    let dir =
+        std::env::temp_dir().join(format!("mqk_cli_scan_review_{}_{}", label, Uuid::new_v4()));
     let _ = fs::remove_dir_all(&dir);
     fs::create_dir_all(&dir).expect("create temp dir");
     dir
@@ -217,7 +218,8 @@ fn review_scan_negative_return_candidate_not_paper_candidate() {
     assert!(output.status.success());
 
     let review_dir = one_review_subdir(&out_dir);
-    let decisions = fs::read_to_string(review_dir.join("review_decisions.json")).expect("read decisions");
+    let decisions =
+        fs::read_to_string(review_dir.join("review_decisions.json")).expect("read decisions");
     assert!(decisions.contains("\"symbol\": \"MSFT\""));
     // MSFT has alpha_pct=6.0 (positive) but total_return_pct=-3.0 (negative) --
     // must never be classified as paper_candidate.

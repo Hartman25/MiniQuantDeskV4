@@ -1117,8 +1117,7 @@ async fn main() -> Result<()> {
                 input_file,
                 output_dir,
             } => {
-                md_kraken_ohlc_dry_run(registry, symbol, timeframe, input_file, output_dir)
-                    .await?;
+                md_kraken_ohlc_dry_run(registry, symbol, timeframe, input_file, output_dir).await?;
             }
             MdCmd::KrakenOhlcIngest {
                 registry,
@@ -1127,8 +1126,7 @@ async fn main() -> Result<()> {
                 input_file,
                 output_dir,
             } => {
-                md_kraken_ohlc_ingest(registry, symbol, timeframe, input_file, output_dir)
-                    .await?;
+                md_kraken_ohlc_ingest(registry, symbol, timeframe, input_file, output_dir).await?;
             }
             MdCmd::KrakenOhlcSync {
                 registry,
@@ -1460,7 +1458,8 @@ async fn main() -> Result<()> {
         Commands::Autonomous { cmd } => match cmd {
             AutonomousCmd::NoTradeDiagnostics { limit } => {
                 let pool = mqk_db::connect_from_env().await?;
-                let rows = mqk_db::fetch_recent_autonomous_no_trade_diagnostics(&pool, limit).await?;
+                let rows =
+                    mqk_db::fetch_recent_autonomous_no_trade_diagnostics(&pool, limit).await?;
                 if rows.is_empty() {
                     println!("truth_state=no_rows");
                 } else {

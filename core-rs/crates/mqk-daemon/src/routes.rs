@@ -36,6 +36,7 @@ pub(crate) mod backtests;
 pub mod control;
 pub(crate) mod control_plane;
 pub(crate) mod durable_portfolio;
+pub(crate) mod dynamic_selection_evidence;
 pub(crate) mod execution;
 pub(crate) mod execution_flow;
 pub(crate) mod execution_order_analysis;
@@ -51,7 +52,6 @@ pub(crate) mod portfolio_provenance;
 pub(crate) mod reconcile;
 pub(crate) mod repair;
 pub(crate) mod strategy;
-pub(crate) mod dynamic_selection_evidence;
 pub(crate) mod strategy_conflict;
 pub(crate) mod strategy_promotions;
 pub(crate) mod strategy_scans;
@@ -274,6 +274,9 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     use durable_portfolio::{
         portfolio_durable_positions, portfolio_durable_snapshots, portfolio_durable_summary,
     };
+    use dynamic_selection_evidence::{
+        dynamic_selection_plan_by_id, dynamic_selection_plans, dynamic_selection_status,
+    };
     use execution::{
         execution_fill_quality, execution_order_cancel, execution_order_submit, execution_orders,
         execution_signal_evaluations, execution_summary,
@@ -311,9 +314,6 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     use strategy::{
         multi_symbol_dispatch_summary, strategy_dry_run_status, strategy_signal, strategy_summary,
         strategy_suppressions,
-    };
-    use dynamic_selection_evidence::{
-        dynamic_selection_plan_by_id, dynamic_selection_plans, dynamic_selection_status,
     };
     use strategy_conflict::{
         strategy_conflict_plan_by_id, strategy_conflict_plans, strategy_conflict_status,

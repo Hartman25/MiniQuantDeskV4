@@ -85,11 +85,7 @@ fn alias03_eth_usd_alias_id_80_symbol_eth() {
 fn alias04_both_rows_remain_disabled_non_tradable() {
     let registry = load_instrument_registry_v2(&registry_fixture_path()).unwrap();
     for inst in &registry.instruments {
-        assert!(
-            !inst.enabled,
-            "{} must remain enabled=false",
-            inst.symbol
-        );
+        assert!(!inst.enabled, "{} must remain enabled=false", inst.symbol);
         assert!(
             !inst.paper_trading_enabled,
             "{} must remain paper_trading_enabled=false",

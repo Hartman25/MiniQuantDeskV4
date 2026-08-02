@@ -264,7 +264,11 @@ pub fn compute_portfolio_weights(
 ///
 /// Computed in `i128`: two `i64` factors multiplied can never overflow
 /// `i128` (max magnitude `2^126 < 2^127`).
-pub fn unrealized_pnl_micros(signed_qty: i64, avg_price_micros: i64, mark_price_micros: i64) -> i128 {
+pub fn unrealized_pnl_micros(
+    signed_qty: i64,
+    avg_price_micros: i64,
+    mark_price_micros: i64,
+) -> i128 {
     (mark_price_micros as i128 - avg_price_micros as i128) * (signed_qty as i128)
 }
 

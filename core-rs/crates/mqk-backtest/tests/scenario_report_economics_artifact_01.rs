@@ -11,8 +11,8 @@
 //! actually surfaces that truth.
 
 use mqk_backtest::{
-    BacktestBar, BacktestConfig, BacktestEconomicsReport, BacktestEngine, BacktestInstrumentEconomics,
-    BacktestReport,
+    BacktestBar, BacktestConfig, BacktestEconomicsReport, BacktestEngine,
+    BacktestInstrumentEconomics, BacktestReport,
 };
 use mqk_execution::{StrategyOutput, TargetPosition};
 use mqk_strategy::{Strategy, StrategyContext, StrategySpec};
@@ -120,7 +120,10 @@ fn brea02_multiplier_50_report_curve_is_economics_aware() {
 
     // report.equity_curve must now be the multiplier-aware curve: same shape
     // (one point per bar), but different values once a position is held.
-    assert_eq!(report50.equity_curve.len(), default_report.equity_curve.len());
+    assert_eq!(
+        report50.equity_curve.len(),
+        default_report.equity_curve.len()
+    );
     assert_ne!(
         report50.equity_curve, default_report.equity_curve,
         "multiplier=50 must change the reported equity curve"
@@ -145,7 +148,10 @@ fn brea02b_multiplier_100_report_curve_is_economics_aware() {
     let econ100 = BacktestInstrumentEconomics::new(100, None, None).unwrap();
     let report100 = run_with_economics(Some(econ100));
 
-    assert_eq!(report100.equity_curve.len(), default_report.equity_curve.len());
+    assert_eq!(
+        report100.equity_curve.len(),
+        default_report.equity_curve.len()
+    );
     assert_ne!(
         report100.equity_curve, default_report.equity_curve,
         "multiplier=100 must change the reported equity curve"

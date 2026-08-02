@@ -96,8 +96,14 @@ fn pnl08_proof_02_real_fill_computes_positive_pnl_when_mark_above_avg() {
     let qty = 3i64;
     let mark_price_micros = 320_000_000i64; // hypothetical mark for the test
     let pnl = unrealized_pnl_micros(qty, avg_price_micros, mark_price_micros);
-    assert_eq!(pnl, (mark_price_micros as i128 - avg_price_micros as i128) * qty as i128);
-    assert!(pnl > 0, "mark above avg_price must yield positive unrealized pnl");
+    assert_eq!(
+        pnl,
+        (mark_price_micros as i128 - avg_price_micros as i128) * qty as i128
+    );
+    assert!(
+        pnl > 0,
+        "mark above avg_price must yield positive unrealized pnl"
+    );
 }
 
 #[test]
@@ -106,5 +112,8 @@ fn pnl08b_proof_02_real_fill_computes_negative_pnl_when_mark_below_avg() {
     let qty = 3i64;
     let mark_price_micros = 310_000_000i64;
     let pnl = unrealized_pnl_micros(qty, avg_price_micros, mark_price_micros);
-    assert!(pnl < 0, "mark below avg_price must yield negative unrealized pnl");
+    assert!(
+        pnl < 0,
+        "mark below avg_price must yield negative unrealized pnl"
+    );
 }

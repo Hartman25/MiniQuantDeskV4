@@ -147,7 +147,10 @@ fn fixture_scan_runs_successfully_and_reports_honest_data_missing() {
     assert!(stdout.contains("universe_count=3"));
     assert!(stdout.contains("ranked_count=2"));
     assert!(stdout.contains("skipped_count=1"));
-    assert!(stdout.contains("truth_state=data_missing") || stdout.contains("skip_reason=missing_bars_file"));
+    assert!(
+        stdout.contains("truth_state=data_missing")
+            || stdout.contains("skip_reason=missing_bars_file")
+    );
 }
 
 // 4. 5m missing local data is skipped honestly (no 5m/ directory exists at all).
@@ -217,7 +220,11 @@ fn artifact_files_are_written_with_stable_schema() {
         &candidates_csv_path,
         &summary_path,
     ] {
-        assert!(p.is_file(), "expected artifact file missing: {}", p.display());
+        assert!(
+            p.is_file(),
+            "expected artifact file missing: {}",
+            p.display()
+        );
     }
 
     let csv = std::fs::read_to_string(&candidates_csv_path).unwrap();
@@ -283,7 +290,11 @@ fn top_n_truncates_printed_and_summary_rows() {
     let stdout = stdout_of(&output);
     let summary: serde_json::Value = serde_json::from_str(&stdout).expect("valid JSON summary");
     let top_ranked = summary["top_ranked"].as_array().expect("top_ranked array");
-    assert_eq!(top_ranked.len(), 1, "top=1 must truncate to exactly one row");
+    assert_eq!(
+        top_ranked.len(),
+        1,
+        "top=1 must truncate to exactly one row"
+    );
     // Both AAPL and MSFT are rankable, but only the top-1 is surfaced.
     assert_eq!(summary["ranked_count"], 2);
 }

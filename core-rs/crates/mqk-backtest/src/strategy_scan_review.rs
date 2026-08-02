@@ -475,7 +475,9 @@ pub fn review_decisions_to_csv(decisions: &[StrategyScanReviewDecision]) -> Stri
             csv_field(&d.timeframe),
             csv_field(&d.strategy_id),
             d.scanner_rank.map(|r| r.to_string()).unwrap_or_default(),
-            d.scanner_score.map(|v| format!("{v:.4}")).unwrap_or_default(),
+            d.scanner_score
+                .map(|v| format!("{v:.4}"))
+                .unwrap_or_default(),
             d.review_state.code().to_string(),
             csv_field(&d.reason_codes.join(";")),
             csv_field(&d.blockers.join(";")),
@@ -605,8 +607,12 @@ fn read_scanner_artifact_json<T: serde::de::DeserializeOwned>(path: &Path) -> Re
 /// `{out_dir}/{review_id}/`. Returns the created run directory.
 pub fn write_review_artifacts(out_dir: &Path, output: &ReviewRunOutput) -> Result<PathBuf, String> {
     let run_dir = out_dir.join(output.review_id.to_string());
-    std::fs::create_dir_all(&run_dir)
-        .map_err(|e| format!("create review artifact dir failed: {}: {e}", run_dir.display()))?;
+    std::fs::create_dir_all(&run_dir).map_err(|e| {
+        format!(
+            "create review artifact dir failed: {}: {e}",
+            run_dir.display()
+        )
+    })?;
     std::fs::write(
         run_dir.join("manifest.json"),
         serde_json::to_string_pretty(&output.manifest)
@@ -618,12 +624,22 @@ pub fn write_review_artifacts(out_dir: &Path, output: &ReviewRunOutput) -> Resul
         serde_json::to_string_pretty(&output.decisions)
             .map_err(|e| format!("serialize review decisions failed: {e}"))?,
     )
-    .map_err(|e| format!("write review_decisions.json failed: {}: {e}", run_dir.display()))?;
+    .map_err(|e| {
+        format!(
+            "write review_decisions.json failed: {}: {e}",
+            run_dir.display()
+        )
+    })?;
     std::fs::write(
         run_dir.join("review_decisions.csv"),
         review_decisions_to_csv(&output.decisions),
     )
-    .map_err(|e| format!("write review_decisions.csv failed: {}: {e}", run_dir.display()))?;
+    .map_err(|e| {
+        format!(
+            "write review_decisions.csv failed: {}: {e}",
+            run_dir.display()
+        )
+    })?;
     std::fs::write(
         run_dir.join("summary.json"),
         serde_json::to_string_pretty(&output.summary)

@@ -254,7 +254,10 @@ async fn ksr_01_real_fixtures_are_active_but_not_registered() {
         str_field(&v, "scheduler_readiness_state"),
         "scheduler_ready_manual_registration_blocked"
     );
-    assert_eq!(str_field(&v, "scheduler_registration_status"), "not_registered");
+    assert_eq!(
+        str_field(&v, "scheduler_registration_status"),
+        "not_registered"
+    );
     assert_eq!(str_field(&v, "daemon_job_status"), "absent");
     assert!(!bool_field(&v, "network_call_made"));
     assert!(!bool_field(&v, "db_write"));

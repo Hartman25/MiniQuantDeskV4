@@ -98,8 +98,11 @@ async fn connect(db_url: &str) -> sqlx::PgPool {
 /// no market-data-freshness requirement (empty required-symbol env) so only
 /// the session-window / active-run gates are exercised.
 async fn db_state_paper_alpaca_armed(pool: sqlx::PgPool) -> Arc<AppState> {
-    let st =
-        AppState::new_for_test_with_db_mode_and_broker(pool, DeploymentMode::Paper, BrokerKind::Alpaca);
+    let st = AppState::new_for_test_with_db_mode_and_broker(
+        pool,
+        DeploymentMode::Paper,
+        BrokerKind::Alpaca,
+    );
     st.update_ws_continuity(AlpacaWsContinuityState::Live {
         last_message_id: "msg-001".to_string(),
         last_event_at: "2026-03-30T14:00:00Z".to_string(),
@@ -593,7 +596,9 @@ async fn nt09_route_returns_active_with_seeded_rows_and_no_active_run() {
         "NT-09: backend must name the durable table"
     );
 
-    let rows = body["rows"].as_array().expect("NT-09: rows must be an array");
+    let rows = body["rows"]
+        .as_array()
+        .expect("NT-09: rows must be an array");
     let row = rows
         .iter()
         .find(|r| r["reason_code"].as_str() == Some("NT09_TEST_REASON"))
@@ -604,8 +609,15 @@ async fn nt09_route_returns_active_with_seeded_rows_and_no_active_run() {
         "NT-09: diagnostic_id must round-trip"
     );
     assert_eq!(row["mode"].as_str().unwrap(), "paper");
-    assert_eq!(row["session_window_state"].as_str().unwrap(), "outside_window");
-    assert_eq!(row["run_id"], Value::Null, "NT-09: run_id must honestly be null");
+    assert_eq!(
+        row["session_window_state"].as_str().unwrap(),
+        "outside_window"
+    );
+    assert_eq!(
+        row["run_id"],
+        Value::Null,
+        "NT-09: run_id must honestly be null"
+    );
 }
 
 // ---------------------------------------------------------------------------

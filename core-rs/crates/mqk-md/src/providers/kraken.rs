@@ -327,21 +327,19 @@ pub fn kraken_volume_to_scaled_i64(raw: &str, time: i64) -> Result<i64, KrakenOh
             time,
             raw_volume: raw.to_string(),
         })?;
-    let frac_val: i64 =
-        padded_frac
-            .parse()
-            .map_err(|_| KrakenOhlcParseError::VolumeOverflow {
-                time,
-                raw_volume: raw.to_string(),
-            })?;
+    let frac_val: i64 = padded_frac
+        .parse()
+        .map_err(|_| KrakenOhlcParseError::VolumeOverflow {
+            time,
+            raw_volume: raw.to_string(),
+        })?;
 
-    let scaled_int =
-        int_val
-            .checked_mul(KRAKEN_VOLUME_SCALE)
-            .ok_or_else(|| KrakenOhlcParseError::VolumeOverflow {
-                time,
-                raw_volume: raw.to_string(),
-            })?;
+    let scaled_int = int_val.checked_mul(KRAKEN_VOLUME_SCALE).ok_or_else(|| {
+        KrakenOhlcParseError::VolumeOverflow {
+            time,
+            raw_volume: raw.to_string(),
+        }
+    })?;
     scaled_int
         .checked_add(frac_val)
         .ok_or_else(|| KrakenOhlcParseError::VolumeOverflow {
@@ -451,7 +449,11 @@ pub fn parse_kraken_ohlc_response(
         .and_then(|v| v.as_i64())
         .ok_or(KrakenOhlcParseError::MissingLast)?;
 
-    let pair_keys: Vec<String> = result.keys().filter(|k| k.as_str() != "last").cloned().collect();
+    let pair_keys: Vec<String> = result
+        .keys()
+        .filter(|k| k.as_str() != "last")
+        .cloned()
+        .collect();
     if pair_keys.is_empty() {
         return Err(KrakenOhlcParseError::NoPairKey);
     }
@@ -550,7 +552,10 @@ fn row_decimal_str(
         .as_str()
         .ok_or_else(|| KrakenOhlcParseError::MalformedRow {
             index,
-            message: format!("element[{position}] is not a string: {:?}", elements[position]),
+            message: format!(
+                "element[{position}] is not a string: {:?}",
+                elements[position]
+            ),
         })?;
     crate::normalize_price_str(raw).map_err(|err| KrakenOhlcParseError::MalformedRow {
         index,
@@ -669,7 +674,11 @@ impl crate::HistoricalProvider for KrakenHistoricalProvider {
             out.extend(bars);
         }
 
-        out.sort_by(|a, b| a.symbol.cmp(&b.symbol).then_with(|| a.end_ts.cmp(&b.end_ts)));
+        out.sort_by(|a, b| {
+            a.symbol
+                .cmp(&b.symbol)
+                .then_with(|| a.end_ts.cmp(&b.end_ts))
+        });
         Ok(out)
     }
 }
@@ -769,7 +778,11 @@ mod tests {
             parse_kraken_ohlc_response(BTC_FIXTURE, "XBTUSD", KRAKEN_INTERVAL_1D_SECONDS).unwrap();
         assert_eq!(parsed.provider_pair_key, "XXBTZUSD");
         assert_eq!(parsed.query_pair, "XBTUSD");
-        assert_eq!(parsed.bars.len(), 3, "fixture carries 2 committed + 1 forming row");
+        assert_eq!(
+            parsed.bars.len(),
+            3,
+            "fixture carries 2 committed + 1 forming row"
+        );
         assert_eq!(parsed.completed_bars().len(), 2);
         assert_eq!(parsed.forming_bars().len(), 1);
     }
@@ -901,7 +914,8 @@ mod tests {
     // KP-12: a row with != 8 elements is rejected.
     #[test]
     fn kp12_malformed_row_length_rejected() {
-        let body = r#"{"error": [], "result": {"XXBTZUSD": [[1000, "1", "2", "3", "4"]], "last": 1000}}"#;
+        let body =
+            r#"{"error": [], "result": {"XXBTZUSD": [[1000, "1", "2", "3", "4"]], "last": 1000}}"#;
         let err =
             parse_kraken_ohlc_response(body, "XBTUSD", KRAKEN_INTERVAL_1D_SECONDS).unwrap_err();
         assert!(matches!(err, KrakenOhlcParseError::MalformedRow { .. }));
@@ -1038,7 +1052,11 @@ mod tests {
         let registry = load_instrument_registry_v2(&path).expect("registry must load");
         let aliases = kraken_aliases_from_registry_v2(&registry);
 
-        assert_eq!(aliases.len(), 2, "both BTC/USD and ETH/USD carry kraken_pair");
+        assert_eq!(
+            aliases.len(),
+            2,
+            "both BTC/USD and ETH/USD carry kraken_pair"
+        );
         let btc = aliases
             .iter()
             .find(|a| a.canonical_symbol == "BTC/USD")
@@ -1090,7 +1108,8 @@ mod tests {
     async fn kh02_fetch_bars_rejects_unsupported_timeframe() {
         use crate::HistoricalProvider;
 
-        let provider = KrakenHistoricalProvider::new_with_base_url("http://localhost:1".to_string());
+        let provider =
+            KrakenHistoricalProvider::new_with_base_url("http://localhost:1".to_string());
         let req = FetchBarsRequest {
             symbols: vec!["BTC/USD".to_string()],
             timeframe: crate::Timeframe::M5,
@@ -1108,7 +1127,8 @@ mod tests {
     async fn kh03_fetch_bars_rejects_unsupported_symbol() {
         use crate::HistoricalProvider;
 
-        let provider = KrakenHistoricalProvider::new_with_base_url("http://localhost:1".to_string());
+        let provider =
+            KrakenHistoricalProvider::new_with_base_url("http://localhost:1".to_string());
         let req = FetchBarsRequest {
             symbols: vec!["DOGE/USD".to_string()],
             timeframe: crate::Timeframe::D1,

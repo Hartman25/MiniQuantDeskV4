@@ -235,7 +235,9 @@ async fn review_artifact_active_for_valid_directory() {
     assert_eq!(json["truth_state"], "active");
     assert!(json["manifest"].is_object());
     assert!(json["summary"].is_object());
-    let decisions = json["decisions"].as_array().expect("decisions array present");
+    let decisions = json["decisions"]
+        .as_array()
+        .expect("decisions array present");
     assert_eq!(decisions.len(), 2);
 
     let top_paper = json["top_paper_candidates"].as_array().unwrap();
@@ -348,6 +350,10 @@ async fn review_artifact_warnings_present() {
         .iter()
         .map(|w| w.as_str().unwrap())
         .collect();
-    assert!(warnings.iter().any(|w| w.contains("research evidence only")));
-    assert!(warnings.iter().any(|w| w.contains("not autonomous trading approval")));
+    assert!(warnings
+        .iter()
+        .any(|w| w.contains("research evidence only")));
+    assert!(warnings
+        .iter()
+        .any(|w| w.contains("not autonomous trading approval")));
 }

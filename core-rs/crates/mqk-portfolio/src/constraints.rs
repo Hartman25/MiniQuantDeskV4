@@ -548,7 +548,8 @@ pub fn evaluate_sector_risk(
             signed_qty: candidate_signed_delta_qty,
         }),
     }
-    let prospective_snapshot = compute_portfolio_weights(cash_micros, &prospective_positions, marks);
+    let prospective_snapshot =
+        compute_portfolio_weights(cash_micros, &prospective_positions, marks);
 
     for snapshot in [&current_snapshot, &prospective_snapshot] {
         if snapshot.truth_state == "missing_marks" {
@@ -557,7 +558,12 @@ pub fn evaluate_sector_risk(
                  positions are missing a live mark (missing_mark_symbols={:?})",
                 snapshot.missing_mark_symbols
             );
-            return sector_risk_fail_closed("sector_weights_missing", sector, max_weight_bps, reason);
+            return sector_risk_fail_closed(
+                "sector_weights_missing",
+                sector,
+                max_weight_bps,
+                reason,
+            );
         }
         if snapshot.truth_state == "nav_unavailable" {
             let reason = format!(
@@ -565,7 +571,12 @@ pub fn evaluate_sector_risk(
                  not positive (nav_micros={:?})",
                 snapshot.nav_micros
             );
-            return sector_risk_fail_closed("sector_nav_unavailable", sector, max_weight_bps, reason);
+            return sector_risk_fail_closed(
+                "sector_nav_unavailable",
+                sector,
+                max_weight_bps,
+                reason,
+            );
         }
     }
 

@@ -47,10 +47,8 @@ fn equity_intent_without_bracket_is_unaffected_regression() {
 
 #[test]
 fn equity_intent_with_valid_bracket_legs_is_structurally_valid_but_non_routable() {
-    let intent = equity_intent().with_bracket_legs(BracketLegs::new(
-        Some(150 * ONE_UNIT),
-        Some(140 * ONE_UNIT),
-    ));
+    let intent = equity_intent()
+        .with_bracket_legs(BracketLegs::new(Some(150 * ONE_UNIT), Some(140 * ONE_UNIT)));
 
     let validation = intent.validate_model();
     assert!(validation.valid, "{validation:?}");
@@ -113,15 +111,13 @@ fn bracket_with_non_positive_take_profit_price_fails_validation() {
     let validation = intent.validate_model();
     assert!(!validation.valid, "{validation:?}");
     assert_eq!(validation.routability, IntentV2Routability::Invalid);
-    assert_eq!(
-        validation.reason_code,
-        "invalid_bracket_take_profit_price"
-    );
+    assert_eq!(validation.reason_code, "invalid_bracket_take_profit_price");
 }
 
 #[test]
 fn bracket_with_negative_stop_loss_price_fails_validation() {
-    let intent = equity_intent().with_bracket_legs(BracketLegs::new(Some(150 * ONE_UNIT), Some(-1)));
+    let intent =
+        equity_intent().with_bracket_legs(BracketLegs::new(Some(150 * ONE_UNIT), Some(-1)));
 
     let validation = intent.validate_model();
     assert!(!validation.valid, "{validation:?}");
@@ -155,7 +151,8 @@ fn crypto_intent_with_bracket_legs_reports_bracket_reason_not_asset_class_reason
 fn invalid_bracket_is_checked_before_qty_is_no_longer_relevant_but_qty_still_validates_first() {
     // Invalid qty must still fail closed even when bracket legs are present
     // and would otherwise be valid — common-field validation runs first.
-    let mut intent = equity_intent().with_bracket_legs(BracketLegs::new(Some(150 * ONE_UNIT), None));
+    let mut intent =
+        equity_intent().with_bracket_legs(BracketLegs::new(Some(150 * ONE_UNIT), None));
     intent.qty = QtyMicros::ZERO;
 
     let validation = intent.validate_model();

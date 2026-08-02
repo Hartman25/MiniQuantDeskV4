@@ -591,11 +591,7 @@ async fn duplicate_exact_candidate_key_is_rejected_at_the_db_level() {
 
 // ── Bounded read seam ───────────────────────────────────────────────────────
 
-fn plan_with_n_selected_symbols(
-    run_id: Uuid,
-    plan_id: Uuid,
-    n: i32,
-) -> NewDynamicSelectionPlan {
+fn plan_with_n_selected_symbols(run_id: Uuid, plan_id: Uuid, n: i32) -> NewDynamicSelectionPlan {
     let mut symbols = Vec::new();
     let mut candidates = Vec::new();
     for i in 0..n {

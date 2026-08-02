@@ -1254,7 +1254,12 @@ pub fn write_backtest_report(
             &manifest_path,
             &ManifestEconomics::from_backtest_economics(&report.economics),
         )
-        .with_context(|| format!("merge manifest economics failed: {}", manifest_path.display()))?;
+        .with_context(|| {
+            format!(
+                "merge manifest economics failed: {}",
+                manifest_path.display()
+            )
+        })?;
     }
 
     Ok(())
@@ -2012,7 +2017,8 @@ mod tests {
     /// Run `init_run_artifacts` then `write_backtest_report` for `report` into
     /// a fresh temp dir, then read back and parse the resulting manifest.json.
     fn init_and_write_manifest(tag: &str, report: &BacktestReport) -> (PathBuf, RunManifest) {
-        let tmp = std::env::temp_dir().join(format!("mqk_art_test_mre_{}_{}", tag, std::process::id()));
+        let tmp =
+            std::env::temp_dir().join(format!("mqk_art_test_mre_{}_{}", tag, std::process::id()));
         let _ = std::fs::remove_dir_all(&tmp);
 
         let init = init_run_artifacts(InitRunArtifactsArgs {
@@ -2096,7 +2102,10 @@ mod tests {
         let (run_dir, manifest) = init_and_write_manifest("mre03", &report);
 
         assert_eq!(manifest.economics.contract_multiplier, 50);
-        assert_eq!(manifest.economics.initial_margin_micros, Some(10_000_000_000));
+        assert_eq!(
+            manifest.economics.initial_margin_micros,
+            Some(10_000_000_000)
+        );
         assert_eq!(
             manifest.economics.maintenance_margin_micros,
             Some(5_000_000_000)

@@ -527,13 +527,7 @@ fn resolve_symbol_group(symbol: &str, group: &[&ConflictCandidateInput]) -> Conf
         } else {
             (ConflictDisposition::RefusedInvalid, v.reason_code, None)
         };
-        let candidates = vec![candidate_result(
-            c,
-            v,
-            v.valid,
-            disposition,
-            reason_code,
-        )];
+        let candidates = vec![candidate_result(c, v, v.valid, disposition, reason_code)];
         return ConflictSymbolResult {
             symbol: symbol.to_string(),
             selected_ordinal,
@@ -733,7 +727,13 @@ fn resolve_symbol_group(symbol: &str, group: &[&ConflictCandidateInput]) -> Conf
                 return candidate_result(c, v, true, group_disposition, group_reason);
             }
             if !v.valid {
-                return candidate_result(c, v, false, ConflictDisposition::RefusedInvalid, v.reason_code);
+                return candidate_result(
+                    c,
+                    v,
+                    false,
+                    ConflictDisposition::RefusedInvalid,
+                    v.reason_code,
+                );
             }
             let is_increasing = parse_side(&c.side).map(|s| matches!(s, Side::Buy)) == Some(true);
             let reason = if selected_via_reduction && is_increasing {

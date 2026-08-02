@@ -2796,11 +2796,17 @@ async fn run_real_provider_sync(
         if let Some(entered) = &persist_barrier_entered {
             entered.notify_one();
         }
-        persist_job_update(&jobs, db_pool.as_ref(), persist_barrier.as_ref(), job_id, |r| {
-            r.api_calls_made = api_calls_made;
-            r.symbols_completed = Some(symbols_completed);
-            r.symbols_failed = Some(symbols_failed);
-        })
+        persist_job_update(
+            &jobs,
+            db_pool.as_ref(),
+            persist_barrier.as_ref(),
+            job_id,
+            |r| {
+                r.api_calls_made = api_calls_made;
+                r.symbols_completed = Some(symbols_completed);
+                r.symbols_failed = Some(symbols_failed);
+            },
+        )
         .await;
 
         if ingest_job_is_cancelled(&jobs, job_id) {

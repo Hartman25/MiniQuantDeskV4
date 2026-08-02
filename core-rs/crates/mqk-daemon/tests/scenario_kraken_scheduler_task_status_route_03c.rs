@@ -353,7 +353,8 @@ async fn kts_07_network_call_made_returns_unsafe_evidence() {
 #[tokio::test]
 async fn kts_08_db_write_true_returns_unsafe_evidence() {
     let dir = tempfile::tempdir().expect("create temp dir");
-    let evidence = valid_check_only_evidence().replacen("\"db_write\": false,", "\"db_write\": true,", 1);
+    let evidence =
+        valid_check_only_evidence().replacen("\"db_write\": false,", "\"db_write\": true,", 1);
     write_evidence(&dir, &evidence);
 
     let router = make_router_with_evidence_dir(dir.path().to_str().unwrap());
@@ -405,10 +406,7 @@ async fn kts_10_env_vars_embedded_nonempty_returns_unsafe_evidence() {
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(str_field(&v, "truth_state"), "unsafe_evidence");
-    assert!(v["error"]
-        .as_str()
-        .unwrap()
-        .contains("env_vars_embedded"));
+    assert!(v["error"].as_str().unwrap().contains("env_vars_embedded"));
 }
 
 // ---------------------------------------------------------------------------

@@ -352,7 +352,10 @@ fn csv10_eth_all_rows_carry_timeframe_1d() {
 fn csv11_eth_all_rows_are_complete() {
     let bars = parse_csv_file(&eth_csv_fixture_path(), CSV_TIMEFRAME).unwrap();
     for bar in &bars {
-        assert!(bar.is_complete, "every ETH/USD fixture row must be a closed bar");
+        assert!(
+            bar.is_complete,
+            "every ETH/USD fixture row must be a closed bar"
+        );
     }
 }
 

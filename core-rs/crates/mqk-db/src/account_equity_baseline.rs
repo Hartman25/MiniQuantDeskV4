@@ -117,17 +117,17 @@ pub async fn fetch_account_equity_baseline_for_date(
     trading_date: NaiveDate,
 ) -> Result<Option<AccountEquityBaselineRecord>> {
     let row: Option<AccountEquityBaselineRow> = sqlx::query_as(
-            r#"
+        r#"
             select trading_date, equity_micros, cash_micros, currency,
                    captured_at_utc, captured_by, broker_snapshot_source, audit_event_id
             from sys_account_equity_baseline
             where trading_date = $1
             "#,
-        )
-        .bind(trading_date)
-        .fetch_optional(pool)
-        .await
-        .map_err(|e| anyhow::anyhow!("fetch_account_equity_baseline_for_date failed: {e}"))?;
+    )
+    .bind(trading_date)
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| anyhow::anyhow!("fetch_account_equity_baseline_for_date failed: {e}"))?;
 
     Ok(row.map(
         |(

@@ -81,7 +81,9 @@ async fn ac03b_02_top_level_fields_prove_model_only() {
         "non_equity_routing_enabled must be false: {body}"
     );
     assert!(
-        body["policy_source"].as_str().is_some_and(|s| !s.is_empty()),
+        body["policy_source"]
+            .as_str()
+            .is_some_and(|s| !s.is_empty()),
         "policy_source must be a non-empty string: {body}"
     );
     assert_eq!(

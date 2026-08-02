@@ -422,7 +422,10 @@ fn classify_proof_window_risk(
     max_allowed_age_secs: Option<i64>,
     passed: bool,
 ) -> (Option<i64>, Option<i64>, bool, String, Option<String>) {
-    match (effective_latest_completed_bar_age_secs, max_allowed_age_secs) {
+    match (
+        effective_latest_completed_bar_age_secs,
+        max_allowed_age_secs,
+    ) {
         (Some(age), Some(max_age)) => {
             let delta = max_age - age;
             if delta >= 0 {
@@ -441,7 +444,13 @@ fn classify_proof_window_risk(
                          starting a proof run, or wait for a fresher provider bar."
                     )
                 });
-                (Some(delta), None, near_expiry, risk.to_string(), operator_action)
+                (
+                    Some(delta),
+                    None,
+                    near_expiry,
+                    risk.to_string(),
+                    operator_action,
+                )
             } else {
                 let overage = -delta;
                 let operator_action = Some(format!(
@@ -449,7 +458,13 @@ fn classify_proof_window_risk(
                      for a fresher provider bar and re-run the intraday refresh before starting a \
                      proof run."
                 ));
-                (None, Some(overage), false, "high".to_string(), operator_action)
+                (
+                    None,
+                    Some(overage),
+                    false,
+                    "high".to_string(),
+                    operator_action,
+                )
             }
         }
         _ => (
@@ -580,12 +595,17 @@ fn parse_refresh_symbol(
     let (evidence_elapsed_secs, effective_latest_completed_bar_age_secs) =
         effective_bar_age_secs(latest_completed_bar_age_secs, produced_at_utc, now_utc);
 
-    let (freshness_headroom_secs, staleness_overage_secs, near_expiry, proof_window_risk, operator_action) =
-        classify_proof_window_risk(
-            effective_latest_completed_bar_age_secs,
-            max_allowed_age_secs,
-            passed,
-        );
+    let (
+        freshness_headroom_secs,
+        staleness_overage_secs,
+        near_expiry,
+        proof_window_risk,
+        operator_action,
+    ) = classify_proof_window_risk(
+        effective_latest_completed_bar_age_secs,
+        max_allowed_age_secs,
+        passed,
+    );
 
     IntradayRefreshSymbolStatus {
         symbol: v
@@ -1420,16 +1440,18 @@ fn kraken_ohlc_unsafe_reason(raw: &serde_json::Value) -> Option<String> {
         );
     }
 
-    if raw
-        .get("forming_candle_excluded")
-        .and_then(|v| v.as_bool())
-        == Some(false)
-    {
+    if raw.get("forming_candle_excluded").and_then(|v| v.as_bool()) == Some(false) {
         return Some("evidence claims forming_candle_excluded=false".to_string());
     }
 
-    let rows_inserted = raw.get("rows_inserted").and_then(|v| v.as_i64()).unwrap_or(0);
-    let rows_updated = raw.get("rows_updated").and_then(|v| v.as_i64()).unwrap_or(0);
+    let rows_inserted = raw
+        .get("rows_inserted")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
+    let rows_updated = raw
+        .get("rows_updated")
+        .and_then(|v| v.as_i64())
+        .unwrap_or(0);
     let db_write = raw.get("db_write").and_then(|v| v.as_bool());
     if db_write == Some(false) && (rows_inserted > 0 || rows_updated > 0) {
         return Some(
@@ -1446,7 +1468,12 @@ fn kraken_ohlc_unsafe_reason(raw: &serde_json::Value) -> Option<String> {
         );
     }
 
-    for required in ["volume_semantics", "provider_id", "provider_source", "ingest_mode"] {
+    for required in [
+        "volume_semantics",
+        "provider_id",
+        "provider_source",
+        "ingest_mode",
+    ] {
         if raw.get(required).and_then(|v| v.as_str()).is_none() {
             return Some(format!("evidence is missing required field '{required}'"));
         }
@@ -1511,14 +1538,14 @@ pub(crate) async fn kraken_ohlc_status(State(st): State<Arc<AppState>>) -> impl 
     let mut candidates: Vec<(i64, &'static str, String)> = Vec::new();
     for entry in read_dir.flatten() {
         let name = entry.file_name().to_string_lossy().to_string();
-        let (mode, prefix): (&'static str, &'static str) = if name.starts_with(KRAKEN_OHLC_INGEST_PREFIX)
-        {
-            ("ingest", KRAKEN_OHLC_INGEST_PREFIX)
-        } else if name.starts_with(KRAKEN_OHLC_SYNC_PREFIX) {
-            ("sync", KRAKEN_OHLC_SYNC_PREFIX)
-        } else {
-            continue;
-        };
+        let (mode, prefix): (&'static str, &'static str) =
+            if name.starts_with(KRAKEN_OHLC_INGEST_PREFIX) {
+                ("ingest", KRAKEN_OHLC_INGEST_PREFIX)
+            } else if name.starts_with(KRAKEN_OHLC_SYNC_PREFIX) {
+                ("sync", KRAKEN_OHLC_SYNC_PREFIX)
+            } else {
+                continue;
+            };
         if !name.ends_with(KRAKEN_OHLC_EVIDENCE_SUFFIX) {
             continue;
         }
@@ -1680,9 +1707,7 @@ pub(crate) async fn kraken_ohlc_status(State(st): State<Arc<AppState>>) -> impl 
             bars_excluded_forming: raw.get("bars_excluded_forming").and_then(|v| v.as_i64()),
             bars_considered_for_sync: raw.get("bars_considered_for_sync").and_then(|v| v.as_i64()),
             bars_missing_new: raw.get("bars_missing_new").and_then(|v| v.as_i64()),
-            bars_existing_candidate: raw
-                .get("bars_existing_candidate")
-                .and_then(|v| v.as_i64()),
+            bars_existing_candidate: raw.get("bars_existing_candidate").and_then(|v| v.as_i64()),
             rows_changed: raw.get("rows_changed").and_then(|v| v.as_i64()),
             rows_skipped_unchanged: raw.get("rows_skipped_unchanged").and_then(|v| v.as_i64()),
             rows_changed_skipped_due_to_no_update_existing: raw
@@ -1752,45 +1777,47 @@ pub(crate) async fn crypto_registry_readiness(
     let mut fail_reasons: Vec<String> = Vec::new();
     let mut truth_state = "active";
 
-    let provider_configs = mqk_md::provider_registry::load_provider_registry(std::path::Path::new(
-        &providers_path,
-    ));
-    let (provider_enabled, api_key_required, provider_asset_classes, provider_implementation_status) =
-        match &provider_configs {
-            Ok(cfgs) => match mqk_md::provider_registry::find_provider(cfgs, provider_id) {
-                Some(cfg) => {
-                    if cfg.enabled {
-                        truth_state = "unsafe_provider_enabled";
-                        fail_reasons.push(format!(
+    let provider_configs =
+        mqk_md::provider_registry::load_provider_registry(std::path::Path::new(&providers_path));
+    let (
+        provider_enabled,
+        api_key_required,
+        provider_asset_classes,
+        provider_implementation_status,
+    ) = match &provider_configs {
+        Ok(cfgs) => match mqk_md::provider_registry::find_provider(cfgs, provider_id) {
+            Some(cfg) => {
+                if cfg.enabled {
+                    truth_state = "unsafe_provider_enabled";
+                    fail_reasons.push(format!(
                             "provider '{provider_id}' is enabled=true; expected false pending an explicit, separate cutover decision (CRYPTO-REGISTRY-02)"
                         ));
-                    }
-                    (
-                        cfg.enabled,
-                        cfg.api_key_required,
-                        cfg.asset_classes.clone(),
-                        cfg.implementation_status.clone(),
-                    )
                 }
-                None => {
-                    truth_state = "missing_provider";
-                    fail_reasons.push(format!(
-                        "provider '{provider_id}' not found in {providers_path}"
-                    ));
-                    (false, false, Vec::new(), String::new())
-                }
-            },
-            Err(err) => {
-                truth_state = "parse_error";
-                fail_reasons.push(format!("providers registry load failed: {err}"));
+                (
+                    cfg.enabled,
+                    cfg.api_key_required,
+                    cfg.asset_classes.clone(),
+                    cfg.implementation_status.clone(),
+                )
+            }
+            None => {
+                truth_state = "missing_provider";
+                fail_reasons.push(format!(
+                    "provider '{provider_id}' not found in {providers_path}"
+                ));
                 (false, false, Vec::new(), String::new())
             }
-        };
+        },
+        Err(err) => {
+            truth_state = "parse_error";
+            fail_reasons.push(format!("providers registry load failed: {err}"));
+            (false, false, Vec::new(), String::new())
+        }
+    };
 
-    let registry_v2 =
-        mqk_md::instrument_registry_v2::load_instrument_registry_v2(std::path::Path::new(
-            &registry_path,
-        ));
+    let registry_v2 = mqk_md::instrument_registry_v2::load_instrument_registry_v2(
+        std::path::Path::new(&registry_path),
+    );
 
     let mut symbols: Vec<CryptoRegistrySymbolReadiness> =
         Vec::with_capacity(CRYPTO_REGISTRY_READINESS_SYMBOLS.len());
@@ -1824,9 +1851,8 @@ pub(crate) async fn crypto_registry_readiness(
                         if truth_state == "active" {
                             truth_state = "missing_symbol";
                         }
-                        fail_reasons.push(format!(
-                            "symbol '{symbol}' not found in {registry_path}"
-                        ));
+                        fail_reasons
+                            .push(format!("symbol '{symbol}' not found in {registry_path}"));
                         CryptoRegistrySymbolReadiness {
                             symbol: symbol.to_string(),
                             found: false,
@@ -2241,7 +2267,8 @@ pub(crate) async fn kraken_scheduler_readiness(
                 let check = match inst {
                     None => {
                         registry_ok = false;
-                        fail_reasons.push(format!("symbol '{symbol}' not found in {registry_path}"));
+                        fail_reasons
+                            .push(format!("symbol '{symbol}' not found in {registry_path}"));
                         KrakenSchedulerSymbolReadiness {
                             symbol: symbol.to_string(),
                             found: false,
@@ -2300,29 +2327,31 @@ pub(crate) async fn kraken_scheduler_readiness(
 
     // -- 4. Evidence (read-only, never required by this route) --
     let evidence_dir = st.md_refresh_evidence_dir.clone();
-    let evidence_readiness_state = match find_latest_kraken_ohlc_evidence_for_scheduler(
-        std::path::Path::new(&evidence_dir),
-    ) {
-        None => "missing",
-        Some((path, _epoch)) => {
-            let parsed = std::fs::read_to_string(&path)
-                .ok()
-                .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
-            match parsed {
-                None => "unsafe",
-                Some(v) => {
-                    let provider_ok = v.get("provider").and_then(|p| p.as_str()) == Some("kraken");
-                    let evidence_all_passed =
-                        v.get("all_passed").and_then(|b| b.as_bool()).unwrap_or(false);
-                    if !provider_ok || !evidence_all_passed {
-                        "unsafe"
-                    } else {
-                        "safe"
+    let evidence_readiness_state =
+        match find_latest_kraken_ohlc_evidence_for_scheduler(std::path::Path::new(&evidence_dir)) {
+            None => "missing",
+            Some((path, _epoch)) => {
+                let parsed = std::fs::read_to_string(&path)
+                    .ok()
+                    .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok());
+                match parsed {
+                    None => "unsafe",
+                    Some(v) => {
+                        let provider_ok =
+                            v.get("provider").and_then(|p| p.as_str()) == Some("kraken");
+                        let evidence_all_passed = v
+                            .get("all_passed")
+                            .and_then(|b| b.as_bool())
+                            .unwrap_or(false);
+                        if !provider_ok || !evidence_all_passed {
+                            "unsafe"
+                        } else {
+                            "safe"
+                        }
                     }
                 }
             }
-        }
-    };
+        };
     if evidence_readiness_state == "missing" || evidence_readiness_state == "unsafe" {
         warnings.push(format!(
             "Kraken OHLC evidence is {evidence_readiness_state} in {evidence_dir}; this route never requires fresh evidence to report active"
@@ -2420,8 +2449,7 @@ pub(crate) async fn kraken_scheduler_readiness(
 // (CRYPTO-DATA-03C-KRAKEN-SCHEDULER-TASK-STATUS-SURFACE-01)
 // ---------------------------------------------------------------------------
 
-const KRAKEN_SCHEDULER_TASK_STATUS_ROUTE: &str =
-    "/api/v1/market-data/kraken-scheduler/task-status";
+const KRAKEN_SCHEDULER_TASK_STATUS_ROUTE: &str = "/api/v1/market-data/kraken-scheduler/task-status";
 const KRAKEN_SCHEDULER_TASK_STATUS_EVIDENCE_FILENAME: &str = "kraken_ohlc_task_registration.json";
 const KRAKEN_SCHEDULER_TASK_STATUS_SCHEMA_VERSION: &str = "kraken-ohlc-task-registration-v1";
 
@@ -2516,7 +2544,11 @@ fn kraken_scheduler_task_status_unsafe_reason(raw: &serde_json::Value) -> Option
     {
         return Some("evidence claims network_call_made=true".to_string());
     }
-    if raw.get("db_write").and_then(|v| v.as_bool()).unwrap_or(false) {
+    if raw
+        .get("db_write")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false)
+    {
         return Some("evidence claims db_write=true".to_string());
     }
     if raw
@@ -2753,7 +2785,10 @@ pub(crate) async fn kraken_scheduler_task_status(
             .get("produced_at_utc")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string()),
-        mode: raw.get("mode").and_then(|v| v.as_str()).map(|s| s.to_string()),
+        mode: raw
+            .get("mode")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
         task_name: raw
             .get("task_name")
             .and_then(|v| v.as_str())
@@ -2788,7 +2823,10 @@ pub(crate) async fn kraken_scheduler_task_status(
             .get("timeframe")
             .and_then(|v| v.as_str())
             .map(|s| s.to_string()),
-        at: raw.get("at").and_then(|v| v.as_str()).map(|s| s.to_string()),
+        at: raw
+            .get("at")
+            .and_then(|v| v.as_str())
+            .map(|s| s.to_string()),
         scheduled_task_mutation: raw.get("scheduled_task_mutation").and_then(|v| v.as_bool()),
         network_call_made: raw.get("network_call_made").and_then(|v| v.as_bool()),
         db_write: raw.get("db_write").and_then(|v| v.as_bool()),

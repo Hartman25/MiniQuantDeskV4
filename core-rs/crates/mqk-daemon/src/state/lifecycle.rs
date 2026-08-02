@@ -498,24 +498,25 @@ impl AppState {
         let mut evidence_persisted = false;
         let mut evidence_validation_state: Option<String> = None;
         if let (Some(plan), Some(evidence_plan_id)) = (outcome.plan.as_ref(), plan_id) {
-            let new_plan = crate::dynamic_selection_evidence_writer::build_new_dynamic_selection_plan(
-                plan,
-                evidence_plan_id,
-                run_id,
-                outcome.disposition,
-                now_utc,
-            )
-            .map_err(|e| {
-                RuntimeLifecycleError::forbidden(
-                    "runtime.start_refused.dynamic_selection_evidence_build_failed",
-                    "dynamic_selection_evidence",
-                    format!(
-                        "dynamic selection start refused: could not build durable evidence \
+            let new_plan =
+                crate::dynamic_selection_evidence_writer::build_new_dynamic_selection_plan(
+                    plan,
+                    evidence_plan_id,
+                    run_id,
+                    outcome.disposition,
+                    now_utc,
+                )
+                .map_err(|e| {
+                    RuntimeLifecycleError::forbidden(
+                        "runtime.start_refused.dynamic_selection_evidence_build_failed",
+                        "dynamic_selection_evidence",
+                        format!(
+                            "dynamic selection start refused: could not build durable evidence \
                          payload for plan_id={evidence_plan_id}: {e} \
                          (DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7C)"
-                    ),
-                )
-            });
+                        ),
+                    )
+                });
 
             match (new_plan, self.db.as_ref()) {
                 (Ok(new_plan), Some(db)) => {

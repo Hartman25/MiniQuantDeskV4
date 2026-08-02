@@ -147,7 +147,11 @@ fn expected_required_trading_day(now_utc: DateTime<Utc>) -> NaiveDate {
 /// table (weekend detection is pure weekday arithmetic).
 fn a_known_saturday() -> NaiveDate {
     let d = NaiveDate::from_ymd_opt(2024, 1, 6).expect("valid date");
-    assert_eq!(d.weekday(), chrono::Weekday::Sat, "fixture must be a Saturday");
+    assert_eq!(
+        d.weekday(),
+        chrono::Weekday::Sat,
+        "fixture must be a Saturday"
+    );
     d
 }
 
@@ -178,13 +182,11 @@ async fn delete_baseline(pool: &sqlx::PgPool, trading_date: NaiveDate) {
 }
 
 async fn fetch_baseline_row_count(pool: &sqlx::PgPool, trading_date: NaiveDate) -> i64 {
-    sqlx::query_scalar(
-        "select count(*) from sys_account_equity_baseline where trading_date = $1",
-    )
-    .bind(trading_date)
-    .fetch_one(pool)
-    .await
-    .expect("row count query should succeed")
+    sqlx::query_scalar("select count(*) from sys_account_equity_baseline where trading_date = $1")
+        .bind(trading_date)
+        .fetch_one(pool)
+        .await
+        .expect("row count query should succeed")
 }
 
 // ---------------------------------------------------------------------------
@@ -203,15 +205,27 @@ async fn pdbc01_unauthorized_capture_is_refused() {
 
     let body = r#"{"action_key":"capture-account-equity-baseline","reason":"test","trading_date":"2026-07-10"}"#;
 
-    let (status, _) = call(router.clone(), post_json_auth("/api/v1/ops/action", body, None)).await;
-    assert_eq!(status, StatusCode::UNAUTHORIZED, "PDBC-01: missing bearer must be 401");
+    let (status, _) = call(
+        router.clone(),
+        post_json_auth("/api/v1/ops/action", body, None),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "PDBC-01: missing bearer must be 401"
+    );
 
     let (status, _) = call(
         router,
         post_json_auth("/api/v1/ops/action", body, Some("wrong-token")),
     )
     .await;
-    assert_eq!(status, StatusCode::UNAUTHORIZED, "PDBC-01: wrong bearer must be 401");
+    assert_eq!(
+        status,
+        StatusCode::UNAUTHORIZED,
+        "PDBC-01: wrong bearer must be 401"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -374,7 +388,10 @@ async fn pdbc08_valid_capture_writes_row_and_returns_provenance() {
     assert_eq!(cb["equity"].as_f64().expect("equity present"), 101_500.0);
     assert_eq!(cb["cash"].as_f64().expect("cash present"), 50_000.0);
     assert_eq!(cb["currency"], "USD");
-    assert_eq!(cb["captured_by"], "operator:capture-account-equity-baseline");
+    assert_eq!(
+        cb["captured_by"],
+        "operator:capture-account-equity-baseline"
+    );
     assert!(cb["broker_snapshot_source"].is_string());
     assert!(cb["audit_event_id"].is_string());
     assert_eq!(
@@ -421,10 +438,16 @@ async fn pdbc09_repeated_capture_same_date_is_idempotent() {
     let (status2, resp_body2) = call(router, post_json("/api/v1/ops/action", &body2)).await;
     assert_eq!(status2, StatusCode::OK);
     let v2 = parse_json(resp_body2);
-    assert_eq!(v2["captured_baseline"]["equity"].as_f64().unwrap(), 202_500.0);
+    assert_eq!(
+        v2["captured_baseline"]["equity"].as_f64().unwrap(),
+        202_500.0
+    );
 
     let row_count = fetch_baseline_row_count(&pool, trading_date).await;
-    assert_eq!(row_count, 1, "PDBC-09: still exactly one row after re-capture");
+    assert_eq!(
+        row_count, 1,
+        "PDBC-09: still exactly one row after re-capture"
+    );
 
     delete_baseline(&pool, trading_date).await;
 }
@@ -467,8 +490,14 @@ async fn pdbc10_capture_writes_zero_outbox_inbox_rows() {
         .await
         .expect("inbox count after");
 
-    assert_eq!(outbox_before, outbox_after, "PDBC-10: oms_outbox row count must be unchanged");
-    assert_eq!(inbox_before, inbox_after, "PDBC-10: oms_inbox row count must be unchanged");
+    assert_eq!(
+        outbox_before, outbox_after,
+        "PDBC-10: oms_outbox row count must be unchanged"
+    );
+    assert_eq!(
+        inbox_before, inbox_after,
+        "PDBC-10: oms_inbox row count must be unchanged"
+    );
 
     delete_baseline(&pool, trading_date).await;
 }
@@ -509,7 +538,10 @@ async fn pdbc11_deterministic_audit_event_id_reproducible() {
         .expect("id2 present")
         .to_string();
 
-    assert_eq!(id1, id2, "PDBC-11: identical inputs must reproduce the same audit_event_id");
+    assert_eq!(
+        id1, id2,
+        "PDBC-11: identical inputs must reproduce the same audit_event_id"
+    );
 
     delete_baseline(&pool, trading_date).await;
 }
@@ -560,8 +592,14 @@ async fn pdbc12_capture_then_summary_active_positive_daily_pnl() {
     let v = parse_json(resp_body);
     assert_eq!(v["daily_pnl_truth_state"], "active");
     let daily_pnl = v["daily_pnl"].as_f64().expect("daily_pnl present");
-    assert!((daily_pnl - 1500.0).abs() < 0.001, "expected 1500.0, got {daily_pnl}");
-    assert_eq!(v["daily_pnl_baseline_trading_date"], trading_date.to_string());
+    assert!(
+        (daily_pnl - 1500.0).abs() < 0.001,
+        "expected 1500.0, got {daily_pnl}"
+    );
+    assert_eq!(
+        v["daily_pnl_baseline_trading_date"],
+        trading_date.to_string()
+    );
 
     delete_baseline(&pool, trading_date).await;
 }
@@ -607,7 +645,10 @@ async fn pdbc13_capture_then_summary_active_negative_daily_pnl() {
     let v = parse_json(resp_body);
     assert_eq!(v["daily_pnl_truth_state"], "active");
     let daily_pnl = v["daily_pnl"].as_f64().expect("daily_pnl present");
-    assert!((daily_pnl - (-1500.0)).abs() < 0.001, "expected -1500.0, got {daily_pnl}");
+    assert!(
+        (daily_pnl - (-1500.0)).abs() < 0.001,
+        "expected -1500.0, got {daily_pnl}"
+    );
 
     delete_baseline(&pool, trading_date).await;
 }
@@ -716,7 +757,10 @@ async fn pdbc16_summary_route_never_writes_baseline_row() {
     }
 
     let row_count = fetch_baseline_row_count(&pool, trading_date).await;
-    assert_eq!(row_count, 0, "PDBC-16: summary route must never write a baseline row");
+    assert_eq!(
+        row_count, 0,
+        "PDBC-16: summary route must never write a baseline row"
+    );
 }
 
 /// PDBC-17: `?timeframe=5m` on `/api/v1/portfolio/summary` does not affect
@@ -749,7 +793,8 @@ async fn pdbc17_timeframe_query_param_does_not_affect_daily_pnl() {
     let (status, _) = call(router.clone(), post_json("/api/v1/ops/action", &body)).await;
     assert_eq!(status, StatusCode::OK);
 
-    let (status_default, body_default) = call(router.clone(), get("/api/v1/portfolio/summary")).await;
+    let (status_default, body_default) =
+        call(router.clone(), get("/api/v1/portfolio/summary")).await;
     let (status_5m, body_5m) = call(router, get("/api/v1/portfolio/summary?timeframe=5m")).await;
     assert_eq!(status_default, StatusCode::OK);
     assert_eq!(status_5m, StatusCode::OK);
@@ -757,7 +802,10 @@ async fn pdbc17_timeframe_query_param_does_not_affect_daily_pnl() {
     let v_default = parse_json(body_default);
     let v_5m = parse_json(body_5m);
     assert_eq!(v_default["daily_pnl"], v_5m["daily_pnl"]);
-    assert_eq!(v_default["daily_pnl_truth_state"], v_5m["daily_pnl_truth_state"]);
+    assert_eq!(
+        v_default["daily_pnl_truth_state"],
+        v_5m["daily_pnl_truth_state"]
+    );
     assert_eq!(
         v_default["daily_pnl_baseline_trading_date"],
         v_5m["daily_pnl_baseline_trading_date"]
@@ -860,8 +908,11 @@ async fn pdbc22_capture_then_get_baseline_is_active_with_provenance() {
     let capture_body = format!(
         r#"{{"action_key":"capture-account-equity-baseline","reason":"PDBC-22","trading_date":"{trading_date}"}}"#
     );
-    let (status, capture_resp) =
-        call(router.clone(), post_json("/api/v1/ops/action", &capture_body)).await;
+    let (status, capture_resp) = call(
+        router.clone(),
+        post_json("/api/v1/ops/action", &capture_body),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     let captured = parse_json(capture_resp);
     let expected_audit_id = captured["captured_baseline"]["audit_event_id"]

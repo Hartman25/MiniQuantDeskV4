@@ -277,7 +277,9 @@ pub fn evaluate_scan_candidate(
             bars_available,
             StrategyScanTruthState::UnsupportedTimeframe,
             StrategyScanReasonCode::TimeframeNotSupportedByScanner,
-            vec![format!("timeframe '{timeframe}' is not recognized by the scanner")],
+            vec![format!(
+                "timeframe '{timeframe}' is not recognized by the scanner"
+            )],
         );
     };
 
@@ -657,8 +659,12 @@ pub fn execute_strategy_scan(req: &ScanRunRequest) -> Result<ScanRunOutput, Stri
         return Err("top must be > 0".to_string());
     }
 
-    let instruments = load_instrument_registry(Path::new(&req.registry_path))
-        .map_err(|e| format!("load instrument registry failed: {}: {}", req.registry_path, e))?;
+    let instruments = load_instrument_registry(Path::new(&req.registry_path)).map_err(|e| {
+        format!(
+            "load instrument registry failed: {}: {}",
+            req.registry_path, e
+        )
+    })?;
     let mut universe = enabled_equity_symbols(&instruments);
     if let Some(limit) = req.limit_symbols {
         universe.truncate(limit);
@@ -787,8 +793,12 @@ pub fn execute_strategy_scan(req: &ScanRunRequest) -> Result<ScanRunOutput, Stri
 /// `{out_dir}/{scan_id}/`. Returns the created run directory.
 pub fn write_scan_artifacts(out_dir: &Path, output: &ScanRunOutput) -> Result<PathBuf, String> {
     let run_dir = out_dir.join(output.scan_id.to_string());
-    std::fs::create_dir_all(&run_dir)
-        .map_err(|e| format!("create scan artifact dir failed: {}: {e}", run_dir.display()))?;
+    std::fs::create_dir_all(&run_dir).map_err(|e| {
+        format!(
+            "create scan artifact dir failed: {}: {e}",
+            run_dir.display()
+        )
+    })?;
     std::fs::write(
         run_dir.join("manifest.json"),
         serde_json::to_string_pretty(&output.manifest)

@@ -193,15 +193,7 @@ fn sr05_missing_mark_fails_closed_only_when_enabled_for_this_sector() {
     let sectors = sector_map(&[("XLK", "sector_technology")]);
 
     // Disabled: must allow even though the mark is missing.
-    let disabled = evaluate_sector_risk(
-        cash,
-        &pos,
-        &no_marks,
-        &sectors,
-        &HashMap::new(),
-        "XLK",
-        5,
-    );
+    let disabled = evaluate_sector_risk(cash, &pos, &no_marks, &sectors, &HashMap::new(), "XLK", 5);
     assert!(disabled.allowed);
     assert_eq!(disabled.truth_state, "sector_risk_disabled");
 

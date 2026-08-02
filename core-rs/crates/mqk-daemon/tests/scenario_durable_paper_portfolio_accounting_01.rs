@@ -281,7 +281,16 @@ async fn buy_opens_long_position() {
 
     let at = Utc.with_ymd_and_hms(2099, 4, 1, 13, 0, 0).unwrap();
     insert_full_fill(
-        &pool, run_id, "order-1", "AAPL", Side::Buy, 10, 150_000_000, 0, "msg-1", at,
+        &pool,
+        run_id,
+        "order-1",
+        "AAPL",
+        Side::Buy,
+        10,
+        150_000_000,
+        0,
+        "msg-1",
+        at,
     )
     .await;
 
@@ -319,11 +328,29 @@ async fn second_buy_adds_fifo_lot() {
 
     let at = Utc.with_ymd_and_hms(2099, 4, 1, 13, 0, 0).unwrap();
     insert_full_fill(
-        &pool, run_id, "order-1", "AAPL", Side::Buy, 10, 150_000_000, 0, "msg-1", at,
+        &pool,
+        run_id,
+        "order-1",
+        "AAPL",
+        Side::Buy,
+        10,
+        150_000_000,
+        0,
+        "msg-1",
+        at,
     )
     .await;
     insert_full_fill(
-        &pool, run_id, "order-2", "AAPL", Side::Buy, 5, 155_000_000, 0, "msg-2", at,
+        &pool,
+        run_id,
+        "order-2",
+        "AAPL",
+        Side::Buy,
+        5,
+        155_000_000,
+        0,
+        "msg-2",
+        at,
     )
     .await;
 
@@ -361,11 +388,29 @@ async fn partial_sell_realizes_fifo_gain() {
 
     let at = Utc.with_ymd_and_hms(2099, 4, 1, 13, 0, 0).unwrap();
     insert_full_fill(
-        &pool, run_id, "order-1", "AAPL", Side::Buy, 10, 150_000_000, 0, "msg-1", at,
+        &pool,
+        run_id,
+        "order-1",
+        "AAPL",
+        Side::Buy,
+        10,
+        150_000_000,
+        0,
+        "msg-1",
+        at,
     )
     .await;
     insert_full_fill(
-        &pool, run_id, "order-2", "AAPL", Side::Sell, 4, 160_000_000, 0, "msg-2", at,
+        &pool,
+        run_id,
+        "order-2",
+        "AAPL",
+        Side::Sell,
+        4,
+        160_000_000,
+        0,
+        "msg-2",
+        at,
     )
     .await;
 
@@ -403,11 +448,29 @@ async fn partial_sell_realizes_fifo_loss() {
 
     let at = Utc.with_ymd_and_hms(2099, 4, 1, 13, 0, 0).unwrap();
     insert_full_fill(
-        &pool, run_id, "order-1", "AAPL", Side::Buy, 10, 150_000_000, 0, "msg-1", at,
+        &pool,
+        run_id,
+        "order-1",
+        "AAPL",
+        Side::Buy,
+        10,
+        150_000_000,
+        0,
+        "msg-1",
+        at,
     )
     .await;
     insert_full_fill(
-        &pool, run_id, "order-2", "AAPL", Side::Sell, 4, 140_000_000, 0, "msg-2", at,
+        &pool,
+        run_id,
+        "order-2",
+        "AAPL",
+        Side::Sell,
+        4,
+        140_000_000,
+        0,
+        "msg-2",
+        at,
     )
     .await;
 
@@ -444,7 +507,16 @@ async fn fees_reduce_cash() {
 
     let at = Utc.with_ymd_and_hms(2099, 4, 1, 13, 0, 0).unwrap();
     insert_full_fill(
-        &pool, run_id, "order-1", "AAPL", Side::Buy, 10, 150_000_000, 1_000_000, "msg-1", at,
+        &pool,
+        run_id,
+        "order-1",
+        "AAPL",
+        Side::Buy,
+        10,
+        150_000_000,
+        1_000_000,
+        "msg-1",
+        at,
     )
     .await;
 
@@ -482,11 +554,29 @@ async fn full_sell_closes_position() {
 
     let at = Utc.with_ymd_and_hms(2099, 4, 1, 13, 0, 0).unwrap();
     insert_full_fill(
-        &pool, run_id, "order-1", "AAPL", Side::Buy, 10, 150_000_000, 0, "msg-1", at,
+        &pool,
+        run_id,
+        "order-1",
+        "AAPL",
+        Side::Buy,
+        10,
+        150_000_000,
+        0,
+        "msg-1",
+        at,
     )
     .await;
     insert_full_fill(
-        &pool, run_id, "order-2", "AAPL", Side::Sell, 10, 160_000_000, 0, "msg-2", at,
+        &pool,
+        run_id,
+        "order-2",
+        "AAPL",
+        Side::Sell,
+        10,
+        160_000_000,
+        0,
+        "msg-2",
+        at,
     )
     .await;
 
@@ -524,7 +614,16 @@ async fn duplicate_refresh_has_zero_delta() {
 
     let at = Utc.with_ymd_and_hms(2099, 4, 1, 13, 0, 0).unwrap();
     insert_full_fill(
-        &pool, run_id, "order-1", "AAPL", Side::Buy, 10, 150_000_000, 0, "msg-1", at,
+        &pool,
+        run_id,
+        "order-1",
+        "AAPL",
+        Side::Buy,
+        10,
+        150_000_000,
+        0,
+        "msg-1",
+        at,
     )
     .await;
 
@@ -547,7 +646,10 @@ async fn duplicate_refresh_has_zero_delta() {
         .expect("fetch should succeed")
         .expect("accounting state should exist");
 
-    assert_eq!(first, second, "re-refreshing unchanged fill history must be a zero-delta no-op");
+    assert_eq!(
+        first, second,
+        "re-refreshing unchanged fill history must be a zero-delta no-op"
+    );
 
     cleanup(&pool, run_id).await;
 }
@@ -565,7 +667,15 @@ async fn partial_then_final_fill_applies_exact_total_once() {
 
     let at = Utc.with_ymd_and_hms(2099, 4, 1, 13, 0, 0).unwrap();
     insert_partial_then_final_fill(
-        &pool, run_id, "order-1", "AAPL", Side::Buy, 6, 4, 150_000_000, at,
+        &pool,
+        run_id,
+        "order-1",
+        "AAPL",
+        Side::Buy,
+        6,
+        4,
+        150_000_000,
+        at,
     )
     .await;
 
@@ -605,11 +715,29 @@ async fn restart_replay_produces_identical_state() {
 
     let at = Utc.with_ymd_and_hms(2099, 4, 1, 13, 0, 0).unwrap();
     insert_full_fill(
-        &pool, run_id, "order-1", "AAPL", Side::Buy, 10, 150_000_000, 0, "msg-1", at,
+        &pool,
+        run_id,
+        "order-1",
+        "AAPL",
+        Side::Buy,
+        10,
+        150_000_000,
+        0,
+        "msg-1",
+        at,
     )
     .await;
     insert_full_fill(
-        &pool, run_id, "order-2", "AAPL", Side::Sell, 4, 160_000_000, 0, "msg-2", at,
+        &pool,
+        run_id,
+        "order-2",
+        "AAPL",
+        Side::Sell,
+        4,
+        160_000_000,
+        0,
+        "msg-2",
+        at,
     )
     .await;
 
@@ -694,7 +822,16 @@ async fn partial_mismatch_also_blocks_accounting_epoch() {
     // Only 5 shares' worth of fill history known, but broker reports 25 --
     // e.g. 20 shares were adopted from a prior, unrecorded session.
     insert_full_fill(
-        &pool, run_id, "order-1", "AAPL", Side::Buy, 5, 150_000_000, 0, "msg-1", at,
+        &pool,
+        run_id,
+        "order-1",
+        "AAPL",
+        Side::Buy,
+        5,
+        150_000_000,
+        0,
+        "msg-1",
+        at,
     )
     .await;
 
@@ -763,7 +900,16 @@ async fn daily_pnl_baseline_table_untouched() {
 
     let at = Utc.with_ymd_and_hms(2099, 4, 1, 13, 0, 0).unwrap();
     insert_full_fill(
-        &pool, run_id, "order-1", "AAPL", Side::Buy, 10, 150_000_000, 0, "msg-1", at,
+        &pool,
+        run_id,
+        "order-1",
+        "AAPL",
+        Side::Buy,
+        10,
+        150_000_000,
+        0,
+        "msg-1",
+        at,
     )
     .await;
     accept_and_refresh(
@@ -781,7 +927,10 @@ async fn daily_pnl_baseline_table_untouched() {
         .fetch_one(&pool)
         .await
         .expect("count should succeed");
-    assert_eq!(before, after, "daily equity baseline table must be untouched");
+    assert_eq!(
+        before, after,
+        "daily equity baseline table must be untouched"
+    );
 
     cleanup(&pool, run_id).await;
 }

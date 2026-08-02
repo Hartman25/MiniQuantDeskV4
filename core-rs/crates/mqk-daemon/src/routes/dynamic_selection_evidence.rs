@@ -188,8 +188,11 @@ pub(crate) async fn dynamic_selection_status(State(st): State<Arc<AppState>>) ->
     let active_run_id = st.local_runtime_owning_run_id().await;
 
     let mode_resolution = crate::dynamic_selection_mode::resolve_dynamic_selection_mode_from_env();
-    let preview =
-        crate::dynamic_selection_mode::effective_mode(&mode_resolution, st.deployment_mode(), st.runtime_selection().broker_kind);
+    let preview = crate::dynamic_selection_mode::effective_mode(
+        &mode_resolution,
+        st.deployment_mode(),
+        st.runtime_selection().broker_kind,
+    );
 
     let mut response = DynamicSelectionStatusResponse {
         lifecycle,
@@ -240,20 +243,18 @@ pub(crate) async fn dynamic_selection_status(State(st): State<Arc<AppState>>) ->
     };
 
     let expected_bindings: Vec<(String, String, i64)> = snapshot.selected_pairs.clone();
-    let validation = validate_dynamic_selection_evidence(
-        db,
-        plan_id,
-        snapshot.run_id,
-        Some(&expected_bindings),
-    )
-    .await;
+    let validation =
+        validate_dynamic_selection_evidence(db, plan_id, snapshot.run_id, Some(&expected_bindings))
+            .await;
     response.evidence_validation_state = Some(validation_code(&validation));
     response.evidence_validation_detail = validation_detail(&validation);
     if !validation.is_valid() {
         if let Some(detail) = &response.evidence_validation_detail {
             response.validation_blockers.push(detail.clone());
         } else {
-            response.validation_blockers.push(validation_code(&validation).to_string());
+            response
+                .validation_blockers
+                .push(validation_code(&validation).to_string());
         }
     }
 
@@ -291,7 +292,10 @@ pub(crate) async fn dynamic_selection_status(State(st): State<Arc<AppState>>) ->
                 }
             }
         }
-        Ok(BoundedDynamicSelectionPlanFetch::CandidateLimitExceeded { plan, observed_at_least }) => {
+        Ok(BoundedDynamicSelectionPlanFetch::CandidateLimitExceeded {
+            plan,
+            observed_at_least,
+        }) => {
             response.committed_source_kind = Some(plan.source_kind.clone());
             response.committed_source_identity = Some(plan.source_identity.clone());
             response.committed_plan_truth_state = Some(plan.truth_state.clone());
@@ -300,11 +304,15 @@ pub(crate) async fn dynamic_selection_status(State(st): State<Arc<AppState>>) ->
             ));
         }
         Ok(BoundedDynamicSelectionPlanFetch::NotFound) => {
-            response.validation_blockers.push("evidence_row_not_found".to_string());
+            response
+                .validation_blockers
+                .push("evidence_row_not_found".to_string());
         }
         Err(err) => {
             tracing::warn!(error = %err, plan_id = %plan_id, "dynamic_selection_status_plan_query_failed");
-            response.validation_blockers.push("evidence_query_failed".to_string());
+            response
+                .validation_blockers
+                .push("evidence_query_failed".to_string());
         }
     }
 
@@ -389,7 +397,10 @@ pub(crate) async fn dynamic_selection_plans(
             .into_response();
     };
 
-    let limit = params.limit.unwrap_or(DEFAULT_PLANS_LIST_LIMIT).clamp(1, MAX_PLANS_LIST_LIMIT);
+    let limit = params
+        .limit
+        .unwrap_or(DEFAULT_PLANS_LIST_LIMIT)
+        .clamp(1, MAX_PLANS_LIST_LIMIT);
 
     match mqk_db::fetch_recent_dynamic_selection_plans(db, run_id, limit).await {
         Ok(records) => {
@@ -565,7 +576,9 @@ pub(crate) async fn dynamic_selection_plan_by_id(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::state::{shared_test_locks::strategy_fleet_env_test_lock, BrokerKind, DeploymentMode};
+    use crate::state::{
+        shared_test_locks::strategy_fleet_env_test_lock, BrokerKind, DeploymentMode,
+    };
     use axum::body::to_bytes;
 
     async fn body_json(resp: axum::response::Response) -> serde_json::Value {
@@ -766,10 +779,9 @@ mod tests {
             truth_state: "computed".to_string(),
             blockers: vec![],
         };
-        let plan_id =
-            crate::dynamic_selection_dispatch_authority::derive_dynamic_selection_plan_id(
-                &source_plan,
-            );
+        let plan_id = crate::dynamic_selection_dispatch_authority::derive_dynamic_selection_plan_id(
+            &source_plan,
+        );
         let plan = mqk_db::NewDynamicSelectionPlan {
             plan_id,
             run_id,

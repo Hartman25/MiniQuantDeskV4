@@ -27,7 +27,9 @@ use crate::state::{
     MarketCalendarProvider, NyseWeekdaysProvider,
 };
 
-use super::helpers::{exposure_breakdown, parse_decimal, parse_decimal_micros, position_market_value};
+use super::helpers::{
+    exposure_breakdown, parse_decimal, parse_decimal_micros, position_market_value,
+};
 
 // ---------------------------------------------------------------------------
 // PAPER-PNL-OPERATOR-VISIBILITY-CLOSURE-01C: broker-position mark/P&L seam
@@ -323,10 +325,7 @@ pub(crate) async fn resolve_daily_pnl(
     now_utc: DateTime<Utc>,
 ) -> DailyPnlResult {
     let Some(pool) = st.db.as_ref() else {
-        return DailyPnlResult::unavailable(
-            "db_unavailable",
-            "no_db_pool_configured".to_string(),
-        );
+        return DailyPnlResult::unavailable("db_unavailable", "no_db_pool_configured".to_string());
     };
 
     let Some(required_date) = most_recent_trading_day_before(now_utc) else {
@@ -387,9 +386,7 @@ pub(crate) async fn resolve_daily_pnl(
             }
             DailyPnlResult::unavailable(
                 "baseline_unavailable",
-                format!(
-                    "no_account_equity_baseline_for_required_trading_day:{required_date}"
-                ),
+                format!("no_account_equity_baseline_for_required_trading_day:{required_date}"),
             )
         }
         Err(err) => {
@@ -417,7 +414,8 @@ pub(crate) async fn portfolio_summary(
         let account_equity = parse_decimal(&snapshot.account.equity);
         let cash = parse_decimal(&snapshot.account.cash);
         let (long_market_value, short_market_value, _, _) = exposure_breakdown(&snapshot.positions);
-        let pnl_by_symbol = compute_broker_positions_pnl(&st, &snapshot.positions, &timeframe).await;
+        let pnl_by_symbol =
+            compute_broker_positions_pnl(&st, &snapshot.positions, &timeframe).await;
         let (unrealized_pnl, pnl_truth_state, pnl_unavailable_reason) =
             aggregate_positions_pnl(&pnl_by_symbol);
         let daily = resolve_daily_pnl(&st, account_equity, Utc::now()).await;

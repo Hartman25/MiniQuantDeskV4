@@ -178,7 +178,9 @@ fn rc_02_missing_provider_fails_closed() {
     assert!(stdout.contains("truth_state=missing_provider"));
     assert!(stdout.contains("all_passed=false"));
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("provider_not_found") || stdout.contains("reason_code=provider_not_found"));
+    assert!(
+        stderr.contains("provider_not_found") || stdout.contains("reason_code=provider_not_found")
+    );
 }
 
 // RC-03: missing BTC/USD Kraken alias fails closed with
@@ -428,8 +430,7 @@ fn rc_08_evidence_json_contains_no_db_network_trading_claims() {
 fn rc_09_registry_and_providers_files_are_never_mutated() {
     let registry = real_registry_path();
     let providers = real_providers_path();
-    let registry_before =
-        std::fs::read_to_string(&registry).expect("read real registry fixture");
+    let registry_before = std::fs::read_to_string(&registry).expect("read real registry fixture");
     let providers_before =
         std::fs::read_to_string(&providers).expect("read real providers fixture");
 
@@ -451,6 +452,12 @@ fn rc_09_registry_and_providers_files_are_never_mutated() {
         std::fs::read_to_string(&registry).expect("read real registry fixture after run");
     let providers_after =
         std::fs::read_to_string(&providers).expect("read real providers fixture after run");
-    assert_eq!(registry_before, registry_after, "registry file must be unchanged");
-    assert_eq!(providers_before, providers_after, "providers file must be unchanged");
+    assert_eq!(
+        registry_before, registry_after,
+        "registry file must be unchanged"
+    );
+    assert_eq!(
+        providers_before, providers_after,
+        "providers file must be unchanged"
+    );
 }

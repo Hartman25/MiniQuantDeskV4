@@ -125,10 +125,16 @@ pub enum LatestMarkError {
     /// The provider is disabled in the provider registry.
     DisabledProvider { provider_id: String },
     /// The provider returned a well-formed but empty response.
-    EmptyResponse { provider_id: String, message: String },
+    EmptyResponse {
+        provider_id: String,
+        message: String,
+    },
     /// The provider response could not be decoded, or a required field was
     /// missing/invalid.
-    MalformedResponse { provider_id: String, message: String },
+    MalformedResponse {
+        provider_id: String,
+        message: String,
+    },
     /// The response did not include one of the assets the caller
     /// configured/requested.
     MissingConfiguredAsset {
@@ -137,10 +143,16 @@ pub enum LatestMarkError {
     },
     /// A response entry's identity fields (id/symbol) did not match the
     /// configured alias for that asset.
-    MismatchedIdentity { provider_id: String, message: String },
+    MismatchedIdentity {
+        provider_id: String,
+        message: String,
+    },
     /// The response contained more than one entry for the same provider
     /// identity (e.g. duplicate `id`).
-    DuplicateIdentity { provider_id: String, message: String },
+    DuplicateIdentity {
+        provider_id: String,
+        message: String,
+    },
 }
 
 impl fmt::Display for LatestMarkError {
@@ -242,7 +254,15 @@ mod tests {
         let mark = sample_mark();
         let json = serde_json::to_value(&mark).unwrap();
         let obj = json.as_object().unwrap();
-        for forbidden in ["open", "high", "low", "close", "is_complete", "end_ts", "volume"] {
+        for forbidden in [
+            "open",
+            "high",
+            "low",
+            "close",
+            "is_complete",
+            "end_ts",
+            "volume",
+        ] {
             assert!(
                 !obj.contains_key(forbidden),
                 "LatestMark serialization must not contain bar-like field '{forbidden}'"

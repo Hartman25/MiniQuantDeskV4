@@ -2615,7 +2615,11 @@ async fn db_06_repeated_cancel_on_db_job_is_idempotent() {
 
     let router_second = routes::build_router(Arc::clone(&st));
     let (status, body) = post_cancel_job(router_second, job_id).await;
-    assert_eq!(status, StatusCode::OK, "repeated cancel must → 200, not 202");
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "repeated cancel must → 200, not 202"
+    );
     assert_eq!(json_str(&body, "truth_state"), "already_terminal");
     assert!(
         !json_bool(&body, "accepted"),
@@ -2639,7 +2643,7 @@ async fn db_06_repeated_cancel_on_db_job_is_idempotent() {
 // from DB) can be cancelled, persisted, and cached coherently.
 #[tokio::test]
 async fn db_07_db_only_job_cancellation_caches_coherent_memory() {
-    let Some(pool) = ingest_job_db_pool_or_skip("DB-07") .await else {
+    let Some(pool) = ingest_job_db_pool_or_skip("DB-07").await else {
         return;
     };
 
@@ -2776,7 +2780,11 @@ async fn db_08_persistence_failure_then_retry_produces_one_coherent_cancel() {
 
     let router_retry = routes::build_router(Arc::clone(&st_retry));
     let (status, body) = post_cancel_job(router_retry, job_id).await;
-    assert_eq!(status, StatusCode::ACCEPTED, "retry cancel must → 202: {body}");
+    assert_eq!(
+        status,
+        StatusCode::ACCEPTED,
+        "retry cancel must → 202: {body}"
+    );
     assert_eq!(json_str(&body, "status"), "cancelled");
 
     let after_retry = mqk_daemon::ingest_jobs::load_persisted_ingest_job(&pool, job_id)
@@ -2796,7 +2804,9 @@ async fn db_08_persistence_failure_then_retry_produces_one_coherent_cancel() {
     // Postgres truncates timestamptz to microsecond precision, so compare at
     // that precision rather than requiring exact nanosecond equality.
     assert_eq!(
-        cached_after_retry.completed_at_utc.map(|t| t.timestamp_micros()),
+        cached_after_retry
+            .completed_at_utc
+            .map(|t| t.timestamp_micros()),
         after_retry.completed_at_utc.map(|t| t.timestamp_micros()),
         "memory and DB must agree on the single coherent cancelled state"
     );
@@ -3123,10 +3133,11 @@ async fn db_14_barrier_proves_background_write_cannot_overwrite_cancel_commit() 
     );
     assert_eq!(json_str(&body, "status"), "cancelled");
 
-    let persisted_before_release = mqk_daemon::ingest_jobs::load_persisted_ingest_job(&pool, job_id)
-        .await
-        .expect("load before release")
-        .expect("row must exist");
+    let persisted_before_release =
+        mqk_daemon::ingest_jobs::load_persisted_ingest_job(&pool, job_id)
+            .await
+            .expect("load before release")
+            .expect("row must exist");
     assert_eq!(persisted_before_release.status.as_str(), "cancelled");
 
     // Release the paused background task. It will complete the fetch,
@@ -3234,10 +3245,11 @@ async fn db_15_barrier_proves_stale_write_committed_after_cancel_db_commit_is_bl
     );
     assert_eq!(json_str(&body, "status"), "cancelled");
 
-    let persisted_before_release = mqk_daemon::ingest_jobs::load_persisted_ingest_job(&pool, job_id)
-        .await
-        .expect("load before release")
-        .expect("row must exist");
+    let persisted_before_release =
+        mqk_daemon::ingest_jobs::load_persisted_ingest_job(&pool, job_id)
+            .await
+            .expect("load before release")
+            .expect("row must exist");
     assert_eq!(persisted_before_release.status.as_str(), "cancelled");
 
     // Release the paused background write: it now attempts to persist its

@@ -57,7 +57,11 @@ impl core::fmt::Display for EconomicsError {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             EconomicsError::InvalidMultiplier { multiplier } => {
-                write!(f, "contract_multiplier must be positive, got {}", multiplier)
+                write!(
+                    f,
+                    "contract_multiplier must be positive, got {}",
+                    multiplier
+                )
             }
         }
     }
@@ -187,7 +191,11 @@ fn clamp_i128_to_i64(x: i128) -> i64 {
 /// With `economics.contract_multiplier == 1` this reproduces the
 /// un-multiplied `qty * price_micros` notional computed inline today (e.g.
 /// the allocation-cap check in `BacktestEngine::run`).
-pub fn notional_micros(qty: i64, price_micros: i64, economics: &BacktestInstrumentEconomics) -> i64 {
+pub fn notional_micros(
+    qty: i64,
+    price_micros: i64,
+    economics: &BacktestInstrumentEconomics,
+) -> i64 {
     let step1 = saturating_mul_i128(qty as i128, price_micros as i128);
     let step2 = saturating_mul_i128(step1, economics.contract_multiplier as i128);
     clamp_i128_to_i64(step2)
@@ -320,9 +328,21 @@ impl BacktestEconomicsLedger {
 
         let lots = self.positions.entry(symbol.to_string()).or_default();
         if is_buy {
-            Self::buy_fifo(lots, &mut self.realized_pnl_micros, qty, price_micros, &self.economics);
+            Self::buy_fifo(
+                lots,
+                &mut self.realized_pnl_micros,
+                qty,
+                price_micros,
+                &self.economics,
+            );
         } else {
-            Self::sell_fifo(lots, &mut self.realized_pnl_micros, qty, price_micros, &self.economics);
+            Self::sell_fifo(
+                lots,
+                &mut self.realized_pnl_micros,
+                qty,
+                price_micros,
+                &self.economics,
+            );
         }
 
         if lots.iter().map(|l| l.qty_signed).sum::<i64>() == 0 {
@@ -487,7 +507,10 @@ mod tests {
     fn bmm02_futures_multiplier_scales_mark_to_market() {
         let econ = BacktestInstrumentEconomics::new(50, None, None).unwrap();
         // 2 long contracts @ mark 4,510 -> 2*4510*50 = $451,000 market value.
-        assert_eq!(mark_to_market_value_micros(2, 4_510 * M, &econ), 451_000 * M);
+        assert_eq!(
+            mark_to_market_value_micros(2, 4_510 * M, &econ),
+            451_000 * M
+        );
     }
 
     // --- bmm03: synthetic options-style multiplier (100) scales P&L/notional ---
@@ -675,7 +698,10 @@ mod tests {
         ledger50.apply_fill("ES", false, 2, 4_510 * M, 0);
 
         assert_eq!(ledger1.realized_pnl_micros(), 20 * M); // (4510-4500)*2
-        assert_eq!(ledger50.realized_pnl_micros(), 50 * ledger1.realized_pnl_micros());
+        assert_eq!(
+            ledger50.realized_pnl_micros(),
+            50 * ledger1.realized_pnl_micros()
+        );
     }
 
     #[test]
@@ -695,7 +721,10 @@ mod tests {
         ledger100.apply_fill("OPT", true, 3, 3 * M, 0);
 
         assert_eq!(ledger1.realized_pnl_micros(), 6 * M); // (5-3)*3
-        assert_eq!(ledger100.realized_pnl_micros(), 100 * ledger1.realized_pnl_micros());
+        assert_eq!(
+            ledger100.realized_pnl_micros(),
+            100 * ledger1.realized_pnl_micros()
+        );
     }
 
     #[test]

@@ -305,7 +305,10 @@ async fn db_persistence_readback_provider_metadata_and_model_chain_proof() {
         .find(|r| r.key == "USD")
         .expect("chain_db04: USD currency exposure row must exist");
     assert_eq!(usd_row.signed_notional_micros, 3_200 * MICROS_SCALE as i128);
-    assert_eq!(usd_row.absolute_notional_micros, 3_200 * MICROS_SCALE as i128);
+    assert_eq!(
+        usd_row.absolute_notional_micros,
+        3_200 * MICROS_SCALE as i128
+    );
 
     // -----------------------------------------------------------------
     // safety01: this entire test must never write to oms_outbox.

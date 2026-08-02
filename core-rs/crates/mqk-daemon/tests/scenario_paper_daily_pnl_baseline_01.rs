@@ -116,7 +116,12 @@ fn expected_required_trading_day(now_utc: DateTime<Utc>) -> NaiveDate {
     panic!("no trading day found in 10-day walk-back window");
 }
 
-async fn seed_baseline(pool: &sqlx::PgPool, trading_date: NaiveDate, equity_micros: i64, tag: &str) {
+async fn seed_baseline(
+    pool: &sqlx::PgPool,
+    trading_date: NaiveDate,
+    equity_micros: i64,
+    tag: &str,
+) {
     let audit_event_id = Uuid::new_v4();
     upsert_account_equity_baseline(
         pool,
@@ -275,10 +280,15 @@ async fn pdb04_baseline_present_equity_above_is_positive_daily_pnl() {
     assert_eq!(v["daily_pnl_truth_state"], "active");
     assert!(v["daily_pnl_unavailable_reason"].is_null());
     let daily_pnl = v["daily_pnl"].as_f64().expect("daily_pnl present");
-    assert!((daily_pnl - 1500.0).abs() < 0.001, "expected 1500.0, got {daily_pnl}");
+    assert!(
+        (daily_pnl - 1500.0).abs() < 0.001,
+        "expected 1500.0, got {daily_pnl}"
+    );
     assert_eq!(v["daily_pnl_baseline_trading_date"], required.to_string());
     assert_eq!(
-        v["daily_pnl_baseline_equity"].as_f64().expect("baseline equity present"),
+        v["daily_pnl_baseline_equity"]
+            .as_f64()
+            .expect("baseline equity present"),
         100_000.0
     );
     assert_eq!(v["daily_pnl_baseline_source"], "test:pdb04");
@@ -354,7 +364,9 @@ async fn pdb06_baseline_present_equity_equal_is_zero_daily_pnl() {
     assert_eq!(status, StatusCode::OK);
     let v = parse_json(body);
     assert_eq!(v["daily_pnl_truth_state"], "active");
-    let daily_pnl = v["daily_pnl"].as_f64().expect("daily_pnl present, not null");
+    let daily_pnl = v["daily_pnl"]
+        .as_f64()
+        .expect("daily_pnl present, not null");
     assert!(daily_pnl.abs() < 0.001, "expected 0.0, got {daily_pnl}");
 
     delete_baseline(&pool, required).await;
@@ -395,7 +407,10 @@ async fn pdb07_older_baseline_only_is_stale_baseline() {
     let (status, body) = call(router, get("/api/v1/portfolio/summary")).await;
     assert_eq!(status, StatusCode::OK);
     let v = parse_json(body);
-    assert!(v["daily_pnl"].is_null(), "stale baseline must never be silently used");
+    assert!(
+        v["daily_pnl"].is_null(),
+        "stale baseline must never be silently used"
+    );
     assert_eq!(v["daily_pnl_truth_state"], "stale_baseline");
     assert_eq!(v["daily_pnl_baseline_trading_date"], stale_date.to_string());
     let reason = v["daily_pnl_unavailable_reason"]
@@ -447,7 +462,10 @@ async fn pdb08_route_calls_never_write_baseline_rows() {
         .fetch_one(&pool)
         .await
         .expect("count after");
-    assert_eq!(count_before, count_after, "route must never write a baseline row");
+    assert_eq!(
+        count_before, count_after,
+        "route must never write a baseline row"
+    );
 
     let row_captured_by: String = sqlx::query_scalar(
         "select captured_by from sys_account_equity_baseline where trading_date = $1",
@@ -456,7 +474,10 @@ async fn pdb08_route_calls_never_write_baseline_rows() {
     .fetch_one(&pool)
     .await
     .expect("row must be unchanged");
-    assert_eq!(row_captured_by, "test:pdb08", "row content must be unchanged");
+    assert_eq!(
+        row_captured_by, "test:pdb08",
+        "row content must be unchanged"
+    );
 
     delete_baseline(&pool, required).await;
 }

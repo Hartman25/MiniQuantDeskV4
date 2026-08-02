@@ -102,10 +102,17 @@ fn bmw01_default_equity_economics_preserves_existing_backtest() {
     engine.add_strategy(Box::new(BuyHoldSell::new(10))).unwrap();
     let report = engine.run(&bars).unwrap();
 
-    assert_eq!(report.fills.len(), 2, "expect one buy fill and one sell fill");
+    assert_eq!(
+        report.fills.len(),
+        2,
+        "expect one buy fill and one sell fill"
+    );
     // The parallel multiplier-aware curve is byte-identical to the existing,
     // mqk_portfolio-driven equity curve when no economics is configured.
-    assert_eq!(engine.economics_equity_curve(), report.equity_curve.as_slice());
+    assert_eq!(
+        engine.economics_equity_curve(),
+        report.equity_curve.as_slice()
+    );
 }
 
 #[test]
@@ -151,12 +158,16 @@ fn bmw02_multiplier_50_scales_full_run_outputs() {
     let initial_cash = cfg_with_wide_cap().initial_cash_micros;
 
     let mut engine1 = BacktestEngine::new(cfg_with_wide_cap());
-    engine1.add_strategy(Box::new(BuyHoldSell::new(10))).unwrap();
+    engine1
+        .add_strategy(Box::new(BuyHoldSell::new(10)))
+        .unwrap();
     let report1 = engine1.run(&bars).unwrap();
 
     let mut engine50 = BacktestEngine::new(cfg_with_wide_cap())
         .with_economics(BacktestInstrumentEconomics::new(50, None, None).unwrap());
-    engine50.add_strategy(Box::new(BuyHoldSell::new(10))).unwrap();
+    engine50
+        .add_strategy(Box::new(BuyHoldSell::new(10)))
+        .unwrap();
     let report50 = engine50.run(&bars).unwrap();
 
     // `self.portfolio` (fills, fill count) is never touched by this seam.
@@ -166,7 +177,10 @@ fn bmw02_multiplier_50_scales_full_run_outputs() {
     // the multiplier-aware economics curve once multiplier != 1 -- closing the
     // gap this test originally documented (the underlying mqk_portfolio-driven
     // curve is still untouched; see `bmw01`'s multiplier=1 equality instead).
-    assert_eq!(report50.equity_curve, engine50.economics_equity_curve().to_vec());
+    assert_eq!(
+        report50.equity_curve,
+        engine50.economics_equity_curve().to_vec()
+    );
     assert_ne!(
         report1.equity_curve, report50.equity_curve,
         "multiplier=50 must scale reported equity, not reproduce the multiplier=1 curve"
@@ -187,7 +201,10 @@ fn bmw02_multiplier_50_scales_full_run_outputs() {
     // Report identity must diverge from the default-equity report once
     // economics is non-default (multiplier=50 here).
     assert_ne!(report1.run_id, report50.run_id);
-    assert_eq!(report1.config_id, report50.config_id, "config_id stays config-only (economics is not a BacktestConfig field)");
+    assert_eq!(
+        report1.config_id, report50.config_id,
+        "config_id stays config-only (economics is not a BacktestConfig field)"
+    );
 }
 
 #[test]
@@ -196,7 +213,9 @@ fn bmw02b_multiplier_100_scales_full_run_outputs() {
     let initial_cash = cfg_with_wide_cap().initial_cash_micros;
 
     let mut engine1 = BacktestEngine::new(cfg_with_wide_cap());
-    engine1.add_strategy(Box::new(BuyHoldSell::new(10))).unwrap();
+    engine1
+        .add_strategy(Box::new(BuyHoldSell::new(10)))
+        .unwrap();
     let report1 = engine1.run(&bars).unwrap();
 
     let mut engine100 = BacktestEngine::new(cfg_with_wide_cap())
@@ -210,7 +229,10 @@ fn bmw02b_multiplier_100_scales_full_run_outputs() {
 
     // BACKTEST-REPORT-ECONOMICS-ARTIFACT-01: same closure as bmw02, at
     // multiplier=100 instead of 50.
-    assert_eq!(report100.equity_curve, engine100.economics_equity_curve().to_vec());
+    assert_eq!(
+        report100.equity_curve,
+        engine100.economics_equity_curve().to_vec()
+    );
     assert_ne!(
         report1.equity_curve, report100.equity_curve,
         "multiplier=100 must scale reported equity, not reproduce the multiplier=1 curve"
@@ -316,7 +338,10 @@ fn bmw04_economics_metadata_round_trips_truthfully_and_margin_is_inert() {
     // round-trips the configured margin metadata truthfully, and never
     // claims enforcement that does not exist.
     assert_eq!(report_margin.economics.contract_multiplier, 50);
-    assert_eq!(report_margin.economics.initial_margin_micros, Some(10_000 * M));
+    assert_eq!(
+        report_margin.economics.initial_margin_micros,
+        Some(10_000 * M)
+    );
     assert_eq!(
         report_margin.economics.maintenance_margin_micros,
         Some(5_000 * M)

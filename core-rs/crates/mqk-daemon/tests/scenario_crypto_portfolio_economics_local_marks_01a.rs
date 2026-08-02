@@ -111,7 +111,10 @@ fn latest_close_micros_and_bridged_economics() -> (i64, mqk_portfolio::Instrumen
         .iter()
         .max_by_key(|b| b.end_ts)
         .expect("CSV fixture must have at least one bar");
-    assert_eq!(latest.close, "44100.00", "fixture close must be deterministic");
+    assert_eq!(
+        latest.close, "44100.00",
+        "fixture close must be deterministic"
+    );
 
     (decimal_str_to_micros(&latest.close), economics)
 }
@@ -143,7 +146,10 @@ fn chain02_bridged_economics_is_crypto_usd_unit_multiplier_model_only_never_trad
         .expect("BTC/USD row must be present");
 
     assert_eq!(btc_bridge.truth_state, "active", "result={btc_bridge:?}");
-    let economics = btc_bridge.economics.as_ref().expect("economics must be present");
+    let economics = btc_bridge
+        .economics
+        .as_ref()
+        .expect("economics must be present");
     assert_eq!(economics.asset_class, "crypto");
     assert_eq!(economics.quote_currency, "USD");
     assert_eq!(economics.contract_multiplier_micros, MICROS_SCALE);
@@ -173,12 +179,19 @@ fn chain03_csv_latest_close_feeds_asset_core_04a_valuation_active_with_real_noti
         account_currency: ACCOUNT_CURRENCY.to_string(),
     });
 
-    assert_eq!(value.truth_state, InstrumentEconomicsTruthState::Active, "value={value:?}");
+    assert_eq!(
+        value.truth_state,
+        InstrumentEconomicsTruthState::Active,
+        "value={value:?}"
+    );
     assert_eq!(value.asset_class, "crypto");
     assert_eq!(value.quote_currency, "USD");
     // 0.01 BTC * $44,100.00 * 1.0x multiplier = $441.00.
     assert_eq!(value.notional_micros, Some(441 * MICROS_SCALE as i128));
-    assert_eq!(value.absolute_notional_micros, Some(441 * MICROS_SCALE as i128));
+    assert_eq!(
+        value.absolute_notional_micros,
+        Some(441 * MICROS_SCALE as i128)
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -206,12 +219,19 @@ fn chain04_05_06_aggregation_is_active_with_crypto_and_usd_exposure_buckets() {
     });
 
     // CHAIN-04: aggregation is Active with a computed NAV = cash + notional.
-    assert_eq!(snapshot.truth_state, PortfolioEconomicsTruthState::Active, "snapshot={snapshot:?}");
+    assert_eq!(
+        snapshot.truth_state,
+        PortfolioEconomicsTruthState::Active,
+        "snapshot={snapshot:?}"
+    );
     assert_eq!(
         snapshot.nav_micros,
         Some(cash_micros + 441 * MICROS_SCALE as i128)
     );
-    assert_eq!(snapshot.gross_exposure_micros, Some(441 * MICROS_SCALE as i128));
+    assert_eq!(
+        snapshot.gross_exposure_micros,
+        Some(441 * MICROS_SCALE as i128)
+    );
 
     // CHAIN-05: a "crypto" asset-class exposure bucket exists with the
     // position's full notional.
@@ -220,8 +240,14 @@ fn chain04_05_06_aggregation_is_active_with_crypto_and_usd_exposure_buckets() {
         .iter()
         .find(|r| r.key == "crypto")
         .expect("crypto asset-class exposure row must exist");
-    assert_eq!(crypto_row.signed_notional_micros, 441 * MICROS_SCALE as i128);
-    assert_eq!(crypto_row.absolute_notional_micros, 441 * MICROS_SCALE as i128);
+    assert_eq!(
+        crypto_row.signed_notional_micros,
+        441 * MICROS_SCALE as i128
+    );
+    assert_eq!(
+        crypto_row.absolute_notional_micros,
+        441 * MICROS_SCALE as i128
+    );
     assert!(crypto_row.weight_bps.is_some_and(|bps| bps > 0));
 
     // CHAIN-06: a "USD" currency exposure bucket exists with the same totals

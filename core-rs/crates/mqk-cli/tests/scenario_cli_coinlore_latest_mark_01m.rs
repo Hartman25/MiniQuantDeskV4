@@ -143,7 +143,8 @@ fn cli04_evidence_json_output_is_valid() {
     let registry_s = registry.to_string_lossy().to_string();
     let input = write_temp_file("evidence", VALID_TICKER_BODY);
     let input_s = input.to_string_lossy().to_string();
-    let out_dir = std::env::temp_dir().join(format!("mqk_cli_coinlore_evidence_{}", Uuid::new_v4()));
+    let out_dir =
+        std::env::temp_dir().join(format!("mqk_cli_coinlore_evidence_{}", Uuid::new_v4()));
     let out_dir_s = out_dir.to_string_lossy().to_string();
 
     let output = run(&[
@@ -174,7 +175,8 @@ fn cli04_evidence_json_output_is_valid() {
     let evidence_path = PathBuf::from(evidence_line.trim_start_matches("evidence_path="));
 
     let content = std::fs::read_to_string(&evidence_path).expect("evidence file must exist");
-    let value: serde_json::Value = serde_json::from_str(&content).expect("evidence must be valid JSON");
+    let value: serde_json::Value =
+        serde_json::from_str(&content).expect("evidence must be valid JSON");
     assert_eq!(value["schema_version"], "coinlore-latest-mark-v1");
     assert_eq!(value["provider_id"], "coinlore");
     assert_eq!(value["network_call_made"], false);

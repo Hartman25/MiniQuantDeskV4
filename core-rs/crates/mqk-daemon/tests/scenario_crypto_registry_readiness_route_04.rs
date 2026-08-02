@@ -175,10 +175,7 @@ fn registry_json_single_btc(
     )
 }
 
-fn registry_json_both_symbols(
-    paper_trading_enabled: bool,
-    live_trading_enabled: bool,
-) -> String {
+fn registry_json_both_symbols(paper_trading_enabled: bool, live_trading_enabled: bool) -> String {
     format!(
         r#"{{
   "schema_version": 1,
@@ -223,7 +220,10 @@ async fn crr_01_real_fixtures_are_active_and_data_ready_manual_only() {
 
     assert_eq!(status, StatusCode::OK);
     assert_eq!(str_field(&v, "truth_state"), "active");
-    assert_eq!(str_field(&v, "data_readiness_state"), "data_ready_manual_only");
+    assert_eq!(
+        str_field(&v, "data_readiness_state"),
+        "data_ready_manual_only"
+    );
     assert_eq!(str_field(&v, "trading_readiness_state"), "disabled");
     assert_eq!(str_field(&v, "scheduler_readiness_state"), "absent");
     assert_eq!(str_field(&v, "provider"), "kraken");
@@ -256,8 +256,10 @@ async fn crr_01_real_fixtures_are_active_and_data_ready_manual_only() {
 // CRR-02: missing provider entry -> truth_state=missing_provider.
 #[tokio::test]
 async fn crr_02_missing_provider_fails_closed() {
-    let registry_path =
-        write_temp_json("crr02_registry", &registry_json_single_btc(false, false, true));
+    let registry_path = write_temp_json(
+        "crr02_registry",
+        &registry_json_single_btc(false, false, true),
+    );
     let providers_path = write_temp_json("crr02_providers", "[]");
 
     let router = make_router(
@@ -331,8 +333,7 @@ async fn crr_04_missing_symbol_fails_closed() {
 // CRR-05: paper_trading_enabled=true -> truth_state=unsafe_trading_enabled.
 #[tokio::test]
 async fn crr_05_paper_trading_enabled_true_is_unsafe() {
-    let registry_path =
-        write_temp_json("crr05_registry", &registry_json_both_symbols(true, false));
+    let registry_path = write_temp_json("crr05_registry", &registry_json_both_symbols(true, false));
     let providers_path = write_temp_json("crr05_providers", &providers_json(false));
 
     let router = make_router(
@@ -352,8 +353,7 @@ async fn crr_05_paper_trading_enabled_true_is_unsafe() {
 // CRR-06: live_trading_enabled=true -> truth_state=unsafe_trading_enabled.
 #[tokio::test]
 async fn crr_06_live_trading_enabled_true_is_unsafe() {
-    let registry_path =
-        write_temp_json("crr06_registry", &registry_json_both_symbols(false, true));
+    let registry_path = write_temp_json("crr06_registry", &registry_json_both_symbols(false, true));
     let providers_path = write_temp_json("crr06_providers", &providers_json(false));
 
     let router = make_router(

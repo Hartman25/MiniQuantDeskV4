@@ -177,8 +177,17 @@ async fn submit_scan(
         "top": 20,
         "out_dir": fx.out_dir.to_str().unwrap(),
     });
-    let (status, body) = call(router, post_json_body("/api/v1/strategy-scans/jobs", payload)).await;
-    assert_eq!(status, StatusCode::ACCEPTED, "submit failed: {:?}", parse_json(body.clone()));
+    let (status, body) = call(
+        router,
+        post_json_body("/api/v1/strategy-scans/jobs", payload),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::ACCEPTED,
+        "submit failed: {:?}",
+        parse_json(body.clone())
+    );
     parse_json(body)
 }
 
@@ -220,13 +229,21 @@ async fn submit_valid_scan_job_completes_and_writes_artifacts() {
     assert_ne!(job_id, Uuid::nil().to_string());
 
     let status = wait_for_terminal_job(Arc::clone(&st), &job_id).await;
-    assert_eq!(status["status"], "completed", "job did not complete: {status}");
+    assert_eq!(
+        status["status"], "completed",
+        "job did not complete: {status}"
+    );
 
     let artifact_dir = status["artifact_dir"]
         .as_str()
         .expect("completed job must carry artifact_dir");
     let dir = std::path::Path::new(artifact_dir);
-    for file in ["manifest.json", "candidates.json", "candidates.csv", "summary.json"] {
+    for file in [
+        "manifest.json",
+        "candidates.json",
+        "candidates.csv",
+        "summary.json",
+    ] {
         assert!(
             dir.join(file).is_file(),
             "expected artifact file missing: {}",
@@ -234,7 +251,9 @@ async fn submit_valid_scan_job_completes_and_writes_artifacts() {
         );
     }
 
-    let summary = status["summary"].as_object().expect("summary present on completion");
+    let summary = status["summary"]
+        .as_object()
+        .expect("summary present on completion");
     assert_eq!(summary["universe_count"], 3);
     assert_eq!(summary["ranked_count"], 2);
     assert_eq!(summary["skipped_count"], 1);
@@ -246,9 +265,15 @@ async fn submit_valid_scan_job_completes_and_writes_artifacts() {
         .iter()
         .map(|w| w.as_str().unwrap())
         .collect();
-    assert!(warnings.iter().any(|w| w.contains("research evidence only")));
-    assert!(warnings.iter().any(|w| w.contains("not autonomous trading approval")));
-    assert!(warnings.iter().any(|w| w.contains("negative absolute returns")));
+    assert!(warnings
+        .iter()
+        .any(|w| w.contains("research evidence only")));
+    assert!(warnings
+        .iter()
+        .any(|w| w.contains("not autonomous trading approval")));
+    assert!(warnings
+        .iter()
+        .any(|w| w.contains("negative absolute returns")));
 }
 
 #[tokio::test]
@@ -313,7 +338,11 @@ async fn blank_timeframe_rejected() {
         "top": 20,
         "out_dir": fx.out_dir.to_str().unwrap(),
     });
-    let (status, body) = call(router, post_json_body("/api/v1/strategy-scans/jobs", payload)).await;
+    let (status, body) = call(
+        router,
+        post_json_body("/api/v1/strategy-scans/jobs", payload),
+    )
+    .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     let json = parse_json(body);
     assert!(!json["accepted"].as_bool().unwrap());
@@ -332,7 +361,11 @@ async fn blank_strategy_rejected() {
         "top": 20,
         "out_dir": fx.out_dir.to_str().unwrap(),
     });
-    let (status, body) = call(router, post_json_body("/api/v1/strategy-scans/jobs", payload)).await;
+    let (status, body) = call(
+        router,
+        post_json_body("/api/v1/strategy-scans/jobs", payload),
+    )
+    .await;
     assert_eq!(status, StatusCode::BAD_REQUEST);
     let json = parse_json(body);
     assert!(!json["accepted"].as_bool().unwrap());
@@ -349,8 +382,16 @@ async fn top_out_of_bounds_rejected() {
             "strategy": "swing_momentum",
             "top": top,
         });
-        let (status, _) = call(router, post_json_body("/api/v1/strategy-scans/jobs", payload)).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST, "top={top} should be rejected");
+        let (status, _) = call(
+            router,
+            post_json_body("/api/v1/strategy-scans/jobs", payload),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "top={top} should be rejected"
+        );
     }
 }
 
@@ -366,8 +407,16 @@ async fn limit_symbols_out_of_bounds_rejected() {
             "top": 20,
             "limit_symbols": limit,
         });
-        let (status, _) = call(router, post_json_body("/api/v1/strategy-scans/jobs", payload)).await;
-        assert_eq!(status, StatusCode::BAD_REQUEST, "limit_symbols={limit} should be rejected");
+        let (status, _) = call(
+            router,
+            post_json_body("/api/v1/strategy-scans/jobs", payload),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "limit_symbols={limit} should be rejected"
+        );
     }
 }
 
@@ -375,12 +424,18 @@ async fn limit_symbols_out_of_bounds_rejected() {
 async fn no_db_configured_for_scan_job() {
     let fx = build_fixture();
     let st = make_state(&fx);
-    assert!(st.db.is_none(), "test AppState must not have a DB pool configured");
+    assert!(
+        st.db.is_none(),
+        "test AppState must not have a DB pool configured"
+    );
 
     let accepted = submit_scan(&st, &fx, "1D", "swing_momentum").await;
     let job_id = accepted["job_id"].as_str().unwrap().to_string();
     let status = wait_for_terminal_job(Arc::clone(&st), &job_id).await;
-    assert_eq!(status["status"], "completed", "scan job must complete without a DB pool");
+    assert_eq!(
+        status["status"], "completed",
+        "scan job must complete without a DB pool"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -408,7 +463,9 @@ async fn artifact_route_active_for_completed_job() {
     assert_eq!(json["truth_state"], "active");
     assert!(json["manifest"].is_object());
     assert!(json["summary"].is_object());
-    let candidates = json["candidates"].as_array().expect("candidates array present");
+    let candidates = json["candidates"]
+        .as_array()
+        .expect("candidates array present");
     assert_eq!(candidates.len(), 3);
 
     let top_candidates = json["top_candidates"].as_array().unwrap();
@@ -417,11 +474,16 @@ async fn artifact_route_active_for_completed_job() {
     assert_eq!(top_candidates[1]["rank"], 2);
     let score0 = top_candidates[0]["score"].as_f64().unwrap();
     let score1 = top_candidates[1]["score"].as_f64().unwrap();
-    assert!(score0 >= score1, "top_candidates must be in descending score order");
+    assert!(
+        score0 >= score1,
+        "top_candidates must be in descending score order"
+    );
 
     let skip_reasons = json["skip_reasons"].as_array().unwrap();
     assert!(
-        skip_reasons.iter().any(|r| r["reason_code"] == "missing_bars_file"),
+        skip_reasons
+            .iter()
+            .any(|r| r["reason_code"] == "missing_bars_file"),
         "NODATA's missing_bars_file skip reason must be summarized: {skip_reasons:?}"
     );
 }
@@ -510,9 +572,15 @@ async fn artifact_route_warnings_present() {
         .iter()
         .map(|w| w.as_str().unwrap())
         .collect();
-    assert!(warnings.iter().any(|w| w.contains("research evidence only")));
-    assert!(warnings.iter().any(|w| w.contains("not autonomous trading approval")));
-    assert!(warnings.iter().any(|w| w.contains("negative absolute returns")));
+    assert!(warnings
+        .iter()
+        .any(|w| w.contains("research evidence only")));
+    assert!(warnings
+        .iter()
+        .any(|w| w.contains("not autonomous trading approval")));
+    assert!(warnings
+        .iter()
+        .any(|w| w.contains("negative absolute returns")));
 }
 
 // ---------------------------------------------------------------------------

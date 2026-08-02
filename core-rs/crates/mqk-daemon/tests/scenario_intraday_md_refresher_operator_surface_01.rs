@@ -601,7 +601,11 @@ async fn irs_09_latest_candidate_selected_from_multiple_files() {
 // Shared helper for IRS-12..15: evidence with explicit age/max_age fields.
 // ---------------------------------------------------------------------------
 
-fn headroom_evidence(produced_at: &str, age_secs: Option<i64>, max_age_secs: Option<i64>) -> String {
+fn headroom_evidence(
+    produced_at: &str,
+    age_secs: Option<i64>,
+    max_age_secs: Option<i64>,
+) -> String {
     let age_field = match age_secs {
         Some(a) => format!(r#""latest_completed_bar_age_secs": {a},"#),
         None => String::new(),

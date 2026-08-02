@@ -117,10 +117,7 @@ impl From<CsvRow> for RawBar {
 ///
 /// Caller is responsible for OHLC sanity, duplicate detection, and DB
 /// persistence (via `mqk_db::ingest_provider_bars_to_md_bars`).
-pub fn parse_csv_file(
-    path: &Path,
-    timeframe_filter: &str,
-) -> Result<Vec<RawBar>, CsvIngestError> {
+pub fn parse_csv_file(path: &Path, timeframe_filter: &str) -> Result<Vec<RawBar>, CsvIngestError> {
     let mut file = std::fs::File::open(path)
         .map_err(|e| CsvIngestError::Io(format!("open '{}': {e}", path.display())))?;
 
@@ -135,10 +132,7 @@ pub fn parse_csv_file(
 /// filesystem).
 ///
 /// See [`parse_csv_file`] for the full contract.
-pub fn parse_csv_str(
-    src: &str,
-    timeframe_filter: &str,
-) -> Result<Vec<RawBar>, CsvIngestError> {
+pub fn parse_csv_str(src: &str, timeframe_filter: &str) -> Result<Vec<RawBar>, CsvIngestError> {
     let mut lines = src.lines();
 
     // --- Header ---
@@ -423,7 +417,10 @@ mod tests {
 
     #[test]
     fn blank_lines_skipped() {
-        let csv = format!("{HEADER}\n\n{}\n\n", row("AAPL", "1D", 1_000_000, 100, true));
+        let csv = format!(
+            "{HEADER}\n\n{}\n\n",
+            row("AAPL", "1D", 1_000_000, 100, true)
+        );
         let result = parse_csv_str(&csv, "1D").unwrap();
         assert_eq!(result.len(), 1);
     }

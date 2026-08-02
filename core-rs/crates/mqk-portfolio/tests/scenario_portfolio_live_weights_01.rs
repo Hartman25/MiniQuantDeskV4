@@ -158,7 +158,10 @@ fn pw05_missing_mark_blocks_nav_and_weights_lists_symbol() {
         Some(10 * M as i128),
         "known marks are still surfaced even though the snapshot-wide NAV is blocked"
     );
-    assert_eq!(aapl.weight_bps, None, "no weight is ever computed without a confirmed NAV");
+    assert_eq!(
+        aapl.weight_bps, None,
+        "no weight is ever computed without a confirmed NAV"
+    );
     assert!(!aapl.missing_mark);
 
     let msft = snap.positions.iter().find(|r| r.symbol == "MSFT").unwrap();

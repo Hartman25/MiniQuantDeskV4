@@ -216,7 +216,9 @@ pub enum InsertDynamicSelectionPlanOutcome {
     /// replay's payload. Never silently accepted as idempotent and never
     /// overwrites the original row -- fail-closed collision outcome for the
     /// caller to refuse start on.
-    PayloadCollision { detail: String },
+    PayloadCollision {
+        detail: String,
+    },
 }
 
 /// Canonical, order-independent snapshot of the plan header's comparable
@@ -514,21 +516,20 @@ pub async fn insert_dynamic_selection_plan(
         .fetch_all(&mut *tx)
         .await
         .context("insert_dynamic_selection_plan: existing symbols query failed")?;
-        let existing_symbols: Vec<DynamicSelectionPlanSymbolRecord> =
-            existing_symbol_rows.iter().map(symbol_row_to_record).collect();
+        let existing_symbols: Vec<DynamicSelectionPlanSymbolRecord> = existing_symbol_rows
+            .iter()
+            .map(symbol_row_to_record)
+            .collect();
 
-        let existing_candidate_rows = sqlx::query(&candidate_select_sql(
-            "where plan_id = $1",
-        ))
-        .bind(plan.plan_id)
-        .fetch_all(&mut *tx)
-        .await
-        .context("insert_dynamic_selection_plan: existing candidates query failed")?;
-        let existing_candidates: Vec<DynamicSelectionPlanCandidateRecord> =
-            existing_candidate_rows
-                .iter()
-                .map(candidate_row_to_record)
-                .collect();
+        let existing_candidate_rows = sqlx::query(&candidate_select_sql("where plan_id = $1"))
+            .bind(plan.plan_id)
+            .fetch_all(&mut *tx)
+            .await
+            .context("insert_dynamic_selection_plan: existing candidates query failed")?;
+        let existing_candidates: Vec<DynamicSelectionPlanCandidateRecord> = existing_candidate_rows
+            .iter()
+            .map(candidate_row_to_record)
+            .collect();
 
         tx.rollback()
             .await

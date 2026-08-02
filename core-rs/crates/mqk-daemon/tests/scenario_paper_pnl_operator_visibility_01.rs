@@ -130,8 +130,7 @@ async fn ppv01_no_snapshot_positions_and_summary_unchanged_contract() {
 #[tokio::test]
 async fn ppv02_non_flat_position_without_db_is_db_unavailable() {
     let (st, router) = make_router_with_state();
-    *st.broker_snapshot.write().await =
-        Some(make_snapshot(vec![position("AAPL", "3", "314.81")]));
+    *st.broker_snapshot.write().await = Some(make_snapshot(vec![position("AAPL", "3", "314.81")]));
 
     let (status, body) = call(router.clone(), get("/api/v1/portfolio/positions")).await;
     assert_eq!(status, StatusCode::OK);
@@ -184,8 +183,7 @@ async fn ppv03_flat_position_is_zero_pnl_without_db() {
 #[tokio::test]
 async fn ppv04_existing_position_fields_remain_populated() {
     let (st, router) = make_router_with_state();
-    *st.broker_snapshot.write().await =
-        Some(make_snapshot(vec![position("AAPL", "10", "175.50")]));
+    *st.broker_snapshot.write().await = Some(make_snapshot(vec![position("AAPL", "10", "175.50")]));
 
     let (status, body) = call(router, get("/api/v1/portfolio/positions")).await;
     assert_eq!(status, StatusCode::OK);
@@ -279,8 +277,7 @@ async fn ppv05_db_seeded_bar_above_avg_price_produces_positive_pnl() {
         pool.clone(),
         state::OperatorAuthMode::ExplicitDevNoToken,
     ));
-    *st.broker_snapshot.write().await =
-        Some(make_snapshot(vec![position(symbol, "3", "314.81")]));
+    *st.broker_snapshot.write().await = Some(make_snapshot(vec![position(symbol, "3", "314.81")]));
     let router = routes::build_router(Arc::clone(&st));
 
     let (status, body) = call(router, get("/api/v1/portfolio/positions")).await;
@@ -290,8 +287,13 @@ async fn ppv05_db_seeded_bar_above_avg_price_produces_positive_pnl() {
     assert_eq!(row["pnl_truth_state"], "active");
     assert_eq!(row["mark_price"], 320.0);
     assert_eq!(row["mark_source"], "md_bars:1D:close");
-    let pnl = row["unrealized_pnl"].as_f64().expect("unrealized_pnl present");
-    assert!(pnl > 0.0, "mark above avg_price must be a positive pnl; got {pnl}");
+    let pnl = row["unrealized_pnl"]
+        .as_f64()
+        .expect("unrealized_pnl present");
+    assert!(
+        pnl > 0.0,
+        "mark above avg_price must be a positive pnl; got {pnl}"
+    );
     assert!((pnl - 15.57).abs() < 0.001, "expected ~15.57, got {pnl}");
 
     delete_test_bars(&pool, symbol).await;
@@ -320,8 +322,7 @@ async fn ppv06_db_seeded_bar_below_avg_price_produces_negative_pnl() {
         pool.clone(),
         state::OperatorAuthMode::ExplicitDevNoToken,
     ));
-    *st.broker_snapshot.write().await =
-        Some(make_snapshot(vec![position(symbol, "3", "314.81")]));
+    *st.broker_snapshot.write().await = Some(make_snapshot(vec![position(symbol, "3", "314.81")]));
     let router = routes::build_router(Arc::clone(&st));
 
     let (status, body) = call(router, get("/api/v1/portfolio/positions")).await;
@@ -329,8 +330,13 @@ async fn ppv06_db_seeded_bar_below_avg_price_produces_negative_pnl() {
     let v = parse_json(body);
     let row = &v["rows"].as_array().expect("rows array")[0];
     assert_eq!(row["pnl_truth_state"], "active");
-    let pnl = row["unrealized_pnl"].as_f64().expect("unrealized_pnl present");
-    assert!(pnl < 0.0, "mark below avg_price must be a negative pnl; got {pnl}");
+    let pnl = row["unrealized_pnl"]
+        .as_f64()
+        .expect("unrealized_pnl present");
+    assert!(
+        pnl < 0.0,
+        "mark below avg_price must be a negative pnl; got {pnl}"
+    );
 
     delete_test_bars(&pool, symbol).await;
 }
@@ -395,8 +401,7 @@ async fn ppv08_db_summary_aggregates_unrealized_pnl_daily_pnl_stays_unavailable(
         pool.clone(),
         state::OperatorAuthMode::ExplicitDevNoToken,
     ));
-    *st.broker_snapshot.write().await =
-        Some(make_snapshot(vec![position(symbol, "3", "314.81")]));
+    *st.broker_snapshot.write().await = Some(make_snapshot(vec![position(symbol, "3", "314.81")]));
     let router = routes::build_router(Arc::clone(&st));
 
     let (status, body) = call(router, get("/api/v1/portfolio/summary")).await;
@@ -447,8 +452,7 @@ async fn ppv09_routes_make_no_outbox_writes() {
         pool.clone(),
         state::OperatorAuthMode::ExplicitDevNoToken,
     ));
-    *st.broker_snapshot.write().await =
-        Some(make_snapshot(vec![position(symbol, "3", "314.81")]));
+    *st.broker_snapshot.write().await = Some(make_snapshot(vec![position(symbol, "3", "314.81")]));
     let router = routes::build_router(Arc::clone(&st));
 
     let (status, _body) = call(router.clone(), get("/api/v1/portfolio/positions")).await;
@@ -495,8 +499,7 @@ async fn ppv10_default_no_query_still_resolves_1d() {
         pool.clone(),
         state::OperatorAuthMode::ExplicitDevNoToken,
     ));
-    *st.broker_snapshot.write().await =
-        Some(make_snapshot(vec![position(symbol, "3", "314.81")]));
+    *st.broker_snapshot.write().await = Some(make_snapshot(vec![position(symbol, "3", "314.81")]));
     let router = routes::build_router(Arc::clone(&st));
 
     let (status, body) = call(router.clone(), get("/api/v1/portfolio/positions")).await;
@@ -540,8 +543,7 @@ async fn ppv11_timeframe_5m_resolves_mark_and_pnl_when_only_5m_bar_exists() {
         pool.clone(),
         state::OperatorAuthMode::ExplicitDevNoToken,
     ));
-    *st.broker_snapshot.write().await =
-        Some(make_snapshot(vec![position(symbol, "3", "314.81")]));
+    *st.broker_snapshot.write().await = Some(make_snapshot(vec![position(symbol, "3", "314.81")]));
     let router = routes::build_router(Arc::clone(&st));
 
     let (status, body) = call(
@@ -555,7 +557,9 @@ async fn ppv11_timeframe_5m_resolves_mark_and_pnl_when_only_5m_bar_exists() {
     assert_eq!(row["pnl_truth_state"], "active");
     assert_eq!(row["mark_price"], 314.86);
     assert_eq!(row["mark_source"], "md_bars:5m:close");
-    let pnl = row["unrealized_pnl"].as_f64().expect("unrealized_pnl present");
+    let pnl = row["unrealized_pnl"]
+        .as_f64()
+        .expect("unrealized_pnl present");
     assert!((pnl - 0.15).abs() < 0.001, "expected ~0.15, got {pnl}");
 
     let (status, body) = call(router, get("/api/v1/portfolio/summary?timeframe=5m")).await;
@@ -594,8 +598,7 @@ async fn ppv12_same_symbol_default_1d_is_mark_unavailable_when_only_5m_bar_exist
         pool.clone(),
         state::OperatorAuthMode::ExplicitDevNoToken,
     ));
-    *st.broker_snapshot.write().await =
-        Some(make_snapshot(vec![position(symbol, "3", "314.81")]));
+    *st.broker_snapshot.write().await = Some(make_snapshot(vec![position(symbol, "3", "314.81")]));
     let router = routes::build_router(Arc::clone(&st));
 
     let (status, body) = call(router, get("/api/v1/portfolio/positions")).await;
@@ -619,7 +622,11 @@ async fn ppv14_blank_timeframe_query_param_defaults_to_1d() {
     let (st, router) = make_router_with_state();
     *st.broker_snapshot.write().await = Some(make_snapshot(vec![position("AAPL", "0", "0.00")]));
 
-    let (status, body) = call(router.clone(), get("/api/v1/portfolio/positions?timeframe=")).await;
+    let (status, body) = call(
+        router.clone(),
+        get("/api/v1/portfolio/positions?timeframe="),
+    )
+    .await;
     assert_eq!(status, StatusCode::OK);
     let v = parse_json(body);
     let rows = v["rows"].as_array().expect("rows array");

@@ -56,7 +56,9 @@ fn equity_notional(symbol: &str, signed_qty: i64, mark_price_micros: i64) -> i12
         account_currency: "USD".to_string(),
     });
     assert_eq!(value.truth_state, InstrumentEconomicsTruthState::Active);
-    value.notional_micros.expect("active value must carry a notional")
+    value
+        .notional_micros
+        .expect("active value must carry a notional")
 }
 
 // ---------------------------------------------------------------------------
@@ -118,7 +120,10 @@ fn eq03_partial_fill_fifo_sequence_gross_exposure_matches_scaffold() {
         (Side::Buy, 5, 60 * M),
         (Side::Sell, 8, 70 * M),
     ] {
-        apply_entry(&mut pf, LedgerEntry::Fill(Fill::new("MSFT", side, qty, px, 0)));
+        apply_entry(
+            &mut pf,
+            LedgerEntry::Fill(Fill::new("MSFT", side, qty, px, 0)),
+        );
     }
 
     let pos = &pf.positions["MSFT"];
@@ -131,7 +136,10 @@ fn eq03_partial_fill_fifo_sequence_gross_exposure_matches_scaffold() {
 
     let scaffold_notional = equity_notional("MSFT", signed_qty, mark_price);
 
-    assert_eq!(exposure.gross_exposure_micros as i128, scaffold_notional.abs());
+    assert_eq!(
+        exposure.gross_exposure_micros as i128,
+        scaffold_notional.abs()
+    );
     assert_eq!(exposure.net_exposure_micros as i128, scaffold_notional);
 }
 

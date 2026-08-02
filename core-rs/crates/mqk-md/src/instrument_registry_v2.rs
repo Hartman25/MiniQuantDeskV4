@@ -2329,8 +2329,8 @@ mod tests {
         let mut spy = base_equity("SPY");
         spy.instrument_id = "equity:US:AAPL".to_string();
         let aapl = base_equity("AAPL");
-        let err = RegistryV2SymbolTranslationIndex::build(&registry_of(vec![aapl, spy]))
-            .unwrap_err();
+        let err =
+            RegistryV2SymbolTranslationIndex::build(&registry_of(vec![aapl, spy])).unwrap_err();
         assert_eq!(
             err,
             RegistryV2SymbolTranslationError::DuplicateInstrumentId {
@@ -2347,8 +2347,8 @@ mod tests {
         let mut dup = base_equity("AAPL");
         dup.instrument_id = "equity:US:AAPL2".to_string();
         let original = base_equity("AAPL");
-        let err = RegistryV2SymbolTranslationIndex::build(&registry_of(vec![original, dup]))
-            .unwrap_err();
+        let err =
+            RegistryV2SymbolTranslationIndex::build(&registry_of(vec![original, dup])).unwrap_err();
         assert_eq!(
             err,
             RegistryV2SymbolTranslationError::DuplicateCanonicalSymbol {
@@ -2374,8 +2374,7 @@ mod tests {
     fn trans06_empty_symbol_fails() {
         let mut inst = base_equity("AAPL");
         inst.symbol = "  ".to_string();
-        let err =
-            RegistryV2SymbolTranslationIndex::build(&registry_of(vec![inst])).unwrap_err();
+        let err = RegistryV2SymbolTranslationIndex::build(&registry_of(vec![inst])).unwrap_err();
         assert_eq!(
             err,
             RegistryV2SymbolTranslationError::EmptySymbol {
@@ -2389,8 +2388,7 @@ mod tests {
     fn trans07_empty_instrument_id_fails() {
         let mut inst = base_equity("AAPL");
         inst.instrument_id = "".to_string();
-        let err =
-            RegistryV2SymbolTranslationIndex::build(&registry_of(vec![inst])).unwrap_err();
+        let err = RegistryV2SymbolTranslationIndex::build(&registry_of(vec![inst])).unwrap_err();
         assert_eq!(
             err,
             RegistryV2SymbolTranslationError::EmptyInstrumentId {
@@ -2426,8 +2424,14 @@ mod tests {
         let v2 = convert_v1_registry_to_v2(&v1);
         let index = RegistryV2SymbolTranslationIndex::build(&v2).unwrap();
         assert_eq!(index.legacy_symbol_to_instrument_id("NOSUCHSYMBOL"), None);
-        assert_eq!(index.canonical_symbol_to_instrument_id("NOSUCHSYMBOL"), None);
-        assert_eq!(index.canonical_symbol_to_legacy_symbol("NOSUCHSYMBOL"), None);
+        assert_eq!(
+            index.canonical_symbol_to_instrument_id("NOSUCHSYMBOL"),
+            None
+        );
+        assert_eq!(
+            index.canonical_symbol_to_legacy_symbol("NOSUCHSYMBOL"),
+            None
+        );
     }
 
     // TRANS-10: an unknown instrument_id lookup returns a typed miss (`None`), not a panic.
@@ -2436,7 +2440,10 @@ mod tests {
         let v1 = load_instrument_registry(&v1_registry_path()).unwrap();
         let v2 = convert_v1_registry_to_v2(&v1);
         let index = RegistryV2SymbolTranslationIndex::build(&v2).unwrap();
-        assert_eq!(index.instrument_id_to_legacy_symbol("equity:US:NOSUCH"), None);
+        assert_eq!(
+            index.instrument_id_to_legacy_symbol("equity:US:NOSUCH"),
+            None
+        );
         assert_eq!(index.record_for_instrument_id("equity:US:NOSUCH"), None);
     }
 
@@ -2457,7 +2464,10 @@ mod tests {
 
         let mut sorted_ids = ids_a.clone();
         sorted_ids.sort();
-        assert_eq!(ids_a, sorted_ids, "instrument_ids() must be in sorted order");
+        assert_eq!(
+            ids_a, sorted_ids,
+            "instrument_ids() must be in sorted order"
+        );
     }
 
     // ── REGISTRY-V2-GATE-PARITY-01B: registry_v2_gate_asset_class ──────────
@@ -2621,12 +2631,13 @@ mod tests {
             match registry_v2_gate_asset_class(class) {
                 Ok(RegistryV2GateAssetClass::Equity) => equity_count += 1,
                 Ok(RegistryV2GateAssetClass::NonEquity { .. }) => non_equity_count += 1,
-                Err(e) => panic!(
-                    "canonical asset_class={class} must classify, not error: {e}"
-                ),
+                Err(e) => panic!("canonical asset_class={class} must classify, not error: {e}"),
             }
         }
-        assert_eq!(equity_count, 1, "exactly one canonical class must be Equity");
+        assert_eq!(
+            equity_count, 1,
+            "exactly one canonical class must be Equity"
+        );
         assert_eq!(
             non_equity_count,
             CANONICAL_ASSET_CLASSES_V2.len() - 1,

@@ -167,20 +167,35 @@ async fn read_bar_row(
     pool: &PgPool,
     symbol: &str,
     end_ts: i64,
-) -> anyhow::Result<(i64, i64, bool, String, Option<String>, Option<String>, Option<String>)> {
-    let row: (i64, i64, bool, String, Option<String>, Option<String>, Option<String>) =
-        sqlx::query_as(
-            r#"
+) -> anyhow::Result<(
+    i64,
+    i64,
+    bool,
+    String,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+)> {
+    let row: (
+        i64,
+        i64,
+        bool,
+        String,
+        Option<String>,
+        Option<String>,
+        Option<String>,
+    ) = sqlx::query_as(
+        r#"
         select close_micros, volume, is_complete,
                provider_id, provider_source, provider_symbol, ingest_mode
         from md_bars
         where symbol = $1 and timeframe = '1D' and end_ts = $2
         "#,
-        )
-        .bind(symbol)
-        .bind(end_ts)
-        .fetch_one(pool)
-        .await?;
+    )
+    .bind(symbol)
+    .bind(end_ts)
+    .fetch_one(pool)
+    .await?;
     Ok(row)
 }
 
@@ -303,10 +318,20 @@ async fn kcd02_kraken_content_diff_insert_update_true_skip_and_cleans_up() -> an
     // stale content that provably differs from the fixture (close, volume,
     // provider_symbol). The newer completed row is left missing. ---
     seed_stale_earlier_row(&pool, "BTC/USD").await?;
-    assert_eq!(count_kraken_rows(&pool, "BTC/USD").await?, 1, "seed must write exactly one row");
+    assert_eq!(
+        count_kraken_rows(&pool, "BTC/USD").await?,
+        1,
+        "seed must write exactly one row"
+    );
     let seeded = read_bar_row(&pool, "BTC/USD", EARLIER_END_TS).await?;
-    assert_eq!(seeded.0, SEED_EARLIER_CLOSE_MICROS, "seed close_micros sanity check");
-    assert_eq!(seeded.1, SEED_EARLIER_VOLUME_SCALED, "seed volume sanity check");
+    assert_eq!(
+        seeded.0, SEED_EARLIER_CLOSE_MICROS,
+        "seed close_micros sanity check"
+    );
+    assert_eq!(
+        seeded.1, SEED_EARLIER_VOLUME_SCALED,
+        "seed volume sanity check"
+    );
 
     // --- Sync (default content-diff policy) ---
     let btc_input = btc_fixture_path().to_string_lossy().to_string();
@@ -321,7 +346,9 @@ async fn kcd02_kraken_content_diff_insert_update_true_skip_and_cleans_up() -> an
     assert!(stdout.contains("network_call_made=false"));
     assert!(stdout.contains("db_write=true"));
     assert!(stdout.contains("md_bars_write=true"));
-    assert!(stdout.contains("sync_policy=content_diff_skip_unchanged_update_changed_insert_missing"));
+    assert!(
+        stdout.contains("sync_policy=content_diff_skip_unchanged_update_changed_insert_missing")
+    );
     assert!(stdout.contains("provider_id=kraken"));
     assert!(stdout.contains("provider_source=kraken"));
     assert!(stdout.contains("provider_symbol=XXBTZUSD"));
@@ -330,7 +357,10 @@ async fn kcd02_kraken_content_diff_insert_update_true_skip_and_cleans_up() -> an
     assert!(stdout.contains("bars_completed=2"));
     assert!(stdout.contains("bars_excluded_forming=1"));
     assert!(stdout.contains(&format!("latest_existing_end_ts_before={EARLIER_END_TS}")));
-    assert!(stdout.contains("bars_missing_new=1"), "only the newer row is missing/new: {stdout}");
+    assert!(
+        stdout.contains("bars_missing_new=1"),
+        "only the newer row is missing/new: {stdout}"
+    );
     assert!(
         stdout.contains("bars_existing_candidate=1"),
         "the seeded older row is an existing candidate: {stdout}"
@@ -339,7 +369,10 @@ async fn kcd02_kraken_content_diff_insert_update_true_skip_and_cleans_up() -> an
         stdout.contains("rows_changed=1"),
         "the seeded row's stale content must be detected as changed: {stdout}"
     );
-    assert!(stdout.contains("rows_skipped_unchanged=0"), "nothing yet matches: {stdout}");
+    assert!(
+        stdout.contains("rows_skipped_unchanged=0"),
+        "nothing yet matches: {stdout}"
+    );
     assert!(stdout.contains("rows_changed_skipped_due_to_no_update_existing=0"));
     assert!(
         stdout.contains("inserted=1"),
@@ -359,12 +392,30 @@ async fn kcd02_kraken_content_diff_insert_update_true_skip_and_cleans_up() -> an
     // The stale seed row must now be overwritten with the fixture's real
     // values and corrected metadata.
     let earlier = read_bar_row(&pool, "BTC/USD", EARLIER_END_TS).await?;
-    assert_eq!(earlier.1, BTC_EARLIER_VOLUME_SCALED, "stale seed volume must be corrected");
-    assert_ne!(earlier.0, SEED_EARLIER_CLOSE_MICROS, "stale seed close must not survive sync");
+    assert_eq!(
+        earlier.1, BTC_EARLIER_VOLUME_SCALED,
+        "stale seed volume must be corrected"
+    );
+    assert_ne!(
+        earlier.0, SEED_EARLIER_CLOSE_MICROS,
+        "stale seed close must not survive sync"
+    );
     assert_eq!(earlier.3, "kraken", "provider_id corrected");
-    assert_eq!(earlier.4.as_deref(), Some("kraken"), "provider_source corrected");
-    assert_eq!(earlier.5.as_deref(), Some("XXBTZUSD"), "provider_symbol corrected from seed_stale");
-    assert_eq!(earlier.6.as_deref(), Some("provider_sync"), "ingest_mode corrected");
+    assert_eq!(
+        earlier.4.as_deref(),
+        Some("kraken"),
+        "provider_source corrected"
+    );
+    assert_eq!(
+        earlier.5.as_deref(),
+        Some("XXBTZUSD"),
+        "provider_symbol corrected from seed_stale"
+    );
+    assert_eq!(
+        earlier.6.as_deref(),
+        Some("provider_sync"),
+        "ingest_mode corrected"
+    );
 
     // Readback: latest completed row (the newly inserted one).
     let latest = read_bar_row(&pool, "BTC/USD", LATEST_END_TS).await?;
@@ -395,13 +446,19 @@ async fn kcd02_kraken_content_diff_insert_update_true_skip_and_cleans_up() -> an
         stdout2.contains(&format!("latest_existing_end_ts_before={LATEST_END_TS}")),
         "second run must observe the first run's high-water mark: {stdout2}"
     );
-    assert!(stdout2.contains("bars_missing_new=0"), "second run finds nothing new: {stdout2}");
+    assert!(
+        stdout2.contains("bars_missing_new=0"),
+        "second run finds nothing new: {stdout2}"
+    );
     assert!(
         stdout2.contains("rows_skipped_unchanged=2"),
         "second run's content now matches the fixture exactly for both rows: {stdout2}"
     );
     assert!(stdout2.contains("rows_changed=0"));
-    assert!(stdout2.contains("inserted=0"), "re-run must not insert new rows: {stdout2}");
+    assert!(
+        stdout2.contains("inserted=0"),
+        "re-run must not insert new rows: {stdout2}"
+    );
     assert!(
         stdout2.contains("updated=0"),
         "re-run must not update unchanged rows under true content-diff: {stdout2}"
@@ -420,7 +477,10 @@ async fn kcd02_kraken_content_diff_insert_update_true_skip_and_cleans_up() -> an
     // conservative flag detects it as changed but refuses to write it. ---
     seed_stale_earlier_row(&pool, "BTC/USD").await?;
     let dirtied = read_bar_row(&pool, "BTC/USD", EARLIER_END_TS).await?;
-    assert_eq!(dirtied.0, SEED_EARLIER_CLOSE_MICROS, "re-dirty sanity check");
+    assert_eq!(
+        dirtied.0, SEED_EARLIER_CLOSE_MICROS,
+        "re-dirty sanity check"
+    );
 
     let output3 = run_sync("BTC/USD", &btc_input, &db_url, true);
     assert!(
@@ -472,8 +532,14 @@ async fn kcd02_kraken_content_diff_insert_update_true_skip_and_cleans_up() -> an
     assert!(stdout3b.contains("rows_changed=1"));
     assert!(stdout3b.contains("updated=1"));
     let corrected = read_bar_row(&pool, "BTC/USD", EARLIER_END_TS).await?;
-    assert_ne!(corrected.0, SEED_EARLIER_CLOSE_MICROS, "default policy must correct the stale row");
-    assert_eq!(corrected.1, BTC_EARLIER_VOLUME_SCALED, "default policy must correct stale volume");
+    assert_ne!(
+        corrected.0, SEED_EARLIER_CLOSE_MICROS,
+        "default policy must correct the stale row"
+    );
+    assert_eq!(
+        corrected.1, BTC_EARLIER_VOLUME_SCALED,
+        "default policy must correct stale volume"
+    );
 
     // --- ETH/USD path: both rows missing on first sync, then rerun proves
     // unchanged-skip; readback proves scaled volume exact. ---
@@ -498,7 +564,10 @@ async fn kcd02_kraken_content_diff_insert_update_true_skip_and_cleans_up() -> an
 
     let eth_latest = read_bar_row(&pool, "ETH/USD", LATEST_END_TS).await?;
     assert_eq!(eth_latest.0, ETH_LATEST_CLOSE_MICROS);
-    assert_eq!(eth_latest.1, ETH_LATEST_VOLUME_SCALED, "ETH scaled volume readback");
+    assert_eq!(
+        eth_latest.1, ETH_LATEST_VOLUME_SCALED,
+        "ETH scaled volume readback"
+    );
     assert_eq!(eth_latest.5.as_deref(), Some("XETHZUSD"));
 
     assert_eq!(count_kraken_rows(&pool, "ETH/USD").await?, 2);
@@ -525,8 +594,16 @@ async fn kcd02_kraken_content_diff_insert_update_true_skip_and_cleans_up() -> an
     // --- Cleanup: prove zero leftover rows ---
     cleanup_kraken_rows(&pool, "BTC/USD").await?;
     cleanup_kraken_rows(&pool, "ETH/USD").await?;
-    assert_eq!(count_kraken_rows(&pool, "BTC/USD").await?, 0, "zero leftover BTC/USD rows");
-    assert_eq!(count_kraken_rows(&pool, "ETH/USD").await?, 0, "zero leftover ETH/USD rows");
+    assert_eq!(
+        count_kraken_rows(&pool, "BTC/USD").await?,
+        0,
+        "zero leftover BTC/USD rows"
+    );
+    assert_eq!(
+        count_kraken_rows(&pool, "ETH/USD").await?,
+        0,
+        "zero leftover ETH/USD rows"
+    );
 
     Ok(())
 }

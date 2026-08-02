@@ -93,8 +93,7 @@ fn disposable_db_name(label: &str) -> String {
 /// runtime `Migrator` built over it computes the exact same per-migration
 /// checksums the embedded compile-time migrator would.
 fn copy_migrations_up_to(max_version: i64) -> tempfile::TempDir {
-    let migrations_root =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("migrations");
+    let migrations_root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("migrations");
     let dest = tempfile::tempdir().expect("create temp migrations dir");
 
     for entry in std::fs::read_dir(&migrations_root).expect("read migrations dir") {
@@ -183,7 +182,9 @@ async fn mig_01_fresh_chain_accepts_cancelled() {
         .await
         .expect("connect to disposable database");
 
-    migrate_fresh(&pool).await.expect("fresh migration chain must apply cleanly");
+    migrate_fresh(&pool)
+        .await
+        .expect("fresh migration chain must apply cleanly");
 
     let job_id = Uuid::new_v4();
     insert_job_with_status(&pool, job_id, "cancelled")
@@ -230,8 +231,7 @@ async fn mig_02_0060_to_0061_upgrade_accepts_cancelled() {
     // Sanity: 'cancelled' must still be rejected at 0060, proving the
     // upgrade below is the thing that changes behavior.
     let pre_upgrade_job_id = Uuid::new_v4();
-    let pre_upgrade_result =
-        insert_job_with_status(&pool, pre_upgrade_job_id, "cancelled").await;
+    let pre_upgrade_result = insert_job_with_status(&pool, pre_upgrade_job_id, "cancelled").await;
     assert!(
         pre_upgrade_result.is_err(),
         "database at 0060 must still reject 'cancelled' before the upgrade"

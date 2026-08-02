@@ -347,8 +347,8 @@ mod tests {
     #[test]
     fn cl06_rejects_missing_configured_asset() {
         let btc_only = r#"[{"id":"90","symbol":"BTC","price_usd":"62906.61","volume24":123.0}]"#;
-        let err = parse_coinlore_ticker_response(btc_only, &btc_eth_aliases(), AS_OF_TS)
-            .unwrap_err();
+        let err =
+            parse_coinlore_ticker_response(btc_only, &btc_eth_aliases(), AS_OF_TS).unwrap_err();
         assert_eq!(
             err,
             LatestMarkError::MissingConfiguredAsset {
@@ -377,8 +377,8 @@ mod tests {
             {"id":"90","symbol":"BTC","price_usd":"6.29e4","volume24":123.0},
             {"id":"80","symbol":"ETH","price_usd":"1777.74","volume24":456.0}
         ]"#;
-        let err = parse_coinlore_ticker_response(bad_price, &btc_eth_aliases(), AS_OF_TS)
-            .unwrap_err();
+        let err =
+            parse_coinlore_ticker_response(bad_price, &btc_eth_aliases(), AS_OF_TS).unwrap_err();
         assert!(matches!(err, LatestMarkError::MalformedResponse { .. }));
     }
 
@@ -401,8 +401,8 @@ mod tests {
             {"id":"90","symbol":"NOTBTC","price_usd":"62906.61","volume24":123.0},
             {"id":"80","symbol":"ETH","price_usd":"1777.74","volume24":456.0}
         ]"#;
-        let err = parse_coinlore_ticker_response(mismatched, &btc_eth_aliases(), AS_OF_TS)
-            .unwrap_err();
+        let err =
+            parse_coinlore_ticker_response(mismatched, &btc_eth_aliases(), AS_OF_TS).unwrap_err();
         assert!(matches!(err, LatestMarkError::MismatchedIdentity { .. }));
     }
 
@@ -413,8 +413,8 @@ mod tests {
             {"symbol":"BTC","price_usd":"62906.61","volume24":123.0},
             {"id":"80","symbol":"ETH","price_usd":"1777.74","volume24":456.0}
         ]"#;
-        let err = parse_coinlore_ticker_response(missing_id, &btc_eth_aliases(), AS_OF_TS)
-            .unwrap_err();
+        let err =
+            parse_coinlore_ticker_response(missing_id, &btc_eth_aliases(), AS_OF_TS).unwrap_err();
         assert!(matches!(err, LatestMarkError::MalformedResponse { .. }));
     }
 
@@ -422,8 +422,7 @@ mod tests {
     // returning zero marks.
     #[test]
     fn cl12_rejects_empty_aliases_list() {
-        let err =
-            parse_coinlore_ticker_response(VERIFIED_SHAPE_BODY, &[], AS_OF_TS).unwrap_err();
+        let err = parse_coinlore_ticker_response(VERIFIED_SHAPE_BODY, &[], AS_OF_TS).unwrap_err();
         assert!(matches!(err, LatestMarkError::MalformedResponse { .. }));
     }
 

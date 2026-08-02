@@ -339,7 +339,9 @@ async fn maybe_db(label: &str) -> Option<sqlx::PgPool> {
     sqlx::query("delete from strategy_signal_evaluations where run_id in (select run_id from runs where engine_id like 'e4api%')")
         .execute(&pool).await.expect("clean evaluations");
     sqlx::query("delete from runs where engine_id like 'e4api%'")
-        .execute(&pool).await.expect("clean runs");
+        .execute(&pool)
+        .await
+        .expect("clean runs");
     sqlx::query("delete from sys_autonomous_daily_bar_dispatches where operation_id in (select operation_id from sys_autonomous_daily_operations where adapter_id like 'e4api-%')")
         .execute(&pool).await.expect("clean claims");
     sqlx::query("delete from sys_autonomous_session_events where id in (select 'autonomous_daily_coverage_bound:' || operation_id::text from sys_autonomous_daily_operations where adapter_id like 'e4api-%')")
@@ -347,7 +349,9 @@ async fn maybe_db(label: &str) -> Option<sqlx::PgPool> {
     sqlx::query("delete from sys_autonomous_daily_operation_events where operation_id in (select operation_id from sys_autonomous_daily_operations where adapter_id like 'e4api-%')")
         .execute(&pool).await.expect("clean operation events");
     sqlx::query("delete from sys_autonomous_daily_operations where adapter_id like 'e4api-%'")
-        .execute(&pool).await.expect("clean operations");
+        .execute(&pool)
+        .await
+        .expect("clean operations");
     Some(pool)
 }
 
@@ -376,9 +380,9 @@ fn resolve_todays_market_date_str() -> Option<String> {
             market_date,
             ..
         } => Some(market_date),
-        mqk_daemon::state::AutonomousDailySessionPlanResolution::Blocked { market_date, .. } => {
-            market_date
-        }
+        mqk_daemon::state::AutonomousDailySessionPlanResolution::Blocked {
+            market_date, ..
+        } => market_date,
     }
 }
 
@@ -598,7 +602,10 @@ async fn count_operation_events(pool: &sqlx::PgPool, operation_id: Uuid) -> i64 
 
 async fn count_all(pool: &sqlx::PgPool, table: &str) -> i64 {
     let sql = format!("select count(*) from {table}");
-    let row: (i64,) = sqlx::query_as(&sql).fetch_one(pool).await.expect("count ok");
+    let row: (i64,) = sqlx::query_as(&sql)
+        .fetch_one(pool)
+        .await
+        .expect("count ok");
     row.0
 }
 
@@ -651,7 +658,10 @@ async fn b02_explicit_market_date_fetches_exact_slot() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["truth_state"].as_str().unwrap(), "active");
     let row = &body["operation"];
-    assert_eq!(row["operation_id"].as_str().unwrap(), op.operation_id.to_string());
+    assert_eq!(
+        row["operation_id"].as_str().unwrap(),
+        op.operation_id.to_string()
+    );
     assert_eq!(row["deployment_mode"].as_str().unwrap(), "PAPER");
     assert_eq!(row["adapter_id"].as_str().unwrap(), adapter_id);
     assert_eq!(row["state"].as_str().unwrap(), mqk_db::STATE_AWAITING_OPEN);
@@ -660,7 +670,10 @@ async fn b02_explicit_market_date_fetches_exact_slot() {
     assert_eq!(row["order_activity_count"].as_i64().unwrap(), 0);
     assert_eq!(row["fill_count"].as_i64().unwrap(), 0);
     assert_eq!(row["evidence_state"].as_str().unwrap(), "pending");
-    assert_eq!(row["finalization_status"].as_str().unwrap(), "not_yet_eligible");
+    assert_eq!(
+        row["finalization_status"].as_str().unwrap(),
+        "not_yet_eligible"
+    );
     assert!(row["outcome_class"].is_null());
     assert!(row["finalized_at_utc"].is_null());
 }
@@ -700,7 +713,10 @@ async fn b03_default_market_date_uses_canonical_market_date_logic() {
         body["operation"]["operation_id"].as_str().unwrap(),
         op.operation_id.to_string()
     );
-    assert_eq!(body["operation"]["market_date"].as_str().unwrap(), market_date_str);
+    assert_eq!(
+        body["operation"]["market_date"].as_str().unwrap(),
+        market_date_str
+    );
 }
 
 #[tokio::test]
@@ -772,7 +788,10 @@ async fn b06_terminal_no_trade_row_projects_no_trade() {
     .await;
     assert_eq!(status, StatusCode::OK);
     let row = &body["operation"];
-    assert_eq!(row["state"].as_str().unwrap(), mqk_db::STATE_COMPLETED_NO_TRADE);
+    assert_eq!(
+        row["state"].as_str().unwrap(),
+        mqk_db::STATE_COMPLETED_NO_TRADE
+    );
     assert_eq!(row["outcome_class"].as_str().unwrap(), "no_trade");
     assert_eq!(
         row["outcome_reason_code"].as_str().unwrap(),
@@ -848,7 +867,10 @@ async fn b08_generic_completed_row_projects_completed() {
     let row = &body["operation"];
     assert_eq!(row["state"].as_str().unwrap(), mqk_db::STATE_COMPLETED);
     assert_eq!(row["outcome_class"].as_str().unwrap(), "completed");
-    assert!(row["outcome_reason_code"].is_null(), "usually null for generic completed");
+    assert!(
+        row["outcome_reason_code"].is_null(),
+        "usually null for generic completed"
+    );
     assert_eq!(row["finalization_status"].as_str().unwrap(), "finalized");
     // Generic administrative `completed` never certifies the automatic
     // no-trade/with-activity evidence-completeness chain, even though the
@@ -867,7 +889,14 @@ async fn b09_nonterminal_row_exposes_null_outcome_and_finalized_fields() {
     let adapter_id = unique_adapter_id("b09");
     let now = monday_at(20, 0, 0);
     let market_date = NaiveDate::from_ymd_opt(2026, 7, 20).unwrap();
-    create_operation(&pool, &adapter_id, market_date, mqk_db::STATE_AWAITING_OPEN, now).await;
+    create_operation(
+        &pool,
+        &adapter_id,
+        market_date,
+        mqk_db::STATE_AWAITING_OPEN,
+        now,
+    )
+    .await;
 
     let st = app_state(pool.clone(), &adapter_id);
     let router = build_router(st);
@@ -881,7 +910,10 @@ async fn b09_nonterminal_row_exposes_null_outcome_and_finalized_fields() {
     assert!(row["outcome_class"].is_null());
     assert!(row["outcome_reason_code"].is_null());
     assert!(row["finalized_at_utc"].is_null());
-    assert_eq!(row["finalization_status"].as_str().unwrap(), "not_yet_eligible");
+    assert_eq!(
+        row["finalization_status"].as_str().unwrap(),
+        "not_yet_eligible"
+    );
 }
 
 #[tokio::test]
@@ -907,7 +939,10 @@ async fn b10_stopped_stopping_row_exposes_awaiting_finalization() {
     .await;
     assert_eq!(status, StatusCode::OK);
     let row = &body["operation"];
-    assert_eq!(row["finalization_status"].as_str().unwrap(), "awaiting_finalization");
+    assert_eq!(
+        row["finalization_status"].as_str().unwrap(),
+        "awaiting_finalization"
+    );
     assert!(row["outcome_class"].is_null());
 }
 
@@ -1290,9 +1325,18 @@ async fn b14_history_ordering_matches_db_helper() {
         .filter(|r| r["adapter_id"].as_str() == Some(adapter_id.as_str()))
         .collect();
     assert_eq!(this_adapter.len(), 3);
-    assert_eq!(this_adapter[0]["market_date"].as_str().unwrap(), d3.to_string());
-    assert_eq!(this_adapter[1]["market_date"].as_str().unwrap(), d2.to_string());
-    assert_eq!(this_adapter[2]["market_date"].as_str().unwrap(), d1.to_string());
+    assert_eq!(
+        this_adapter[0]["market_date"].as_str().unwrap(),
+        d3.to_string()
+    );
+    assert_eq!(
+        this_adapter[1]["market_date"].as_str().unwrap(),
+        d2.to_string()
+    );
+    assert_eq!(
+        this_adapter[2]["market_date"].as_str().unwrap(),
+        d1.to_string()
+    );
 }
 
 #[tokio::test]
@@ -1397,10 +1441,8 @@ async fn b20_summary_db_failure_is_fail_soft_and_does_not_change_parent_status()
     // *only* daily-operation DB read on this path, proving specifically
     // that block's own fail-soft behavior rather than incidental robustness
     // of unrelated pre-existing DB-touching code elsewhere in the route.
-    let mut inner = AppState::new_for_test_with_mode_and_broker(
-        DeploymentMode::Paper,
-        BrokerKind::Paper,
-    );
+    let mut inner =
+        AppState::new_for_test_with_mode_and_broker(DeploymentMode::Paper, BrokerKind::Paper);
     inner.db = Some(broken_pool());
     let st = Arc::new(inner);
     let router = build_router(st);
@@ -1429,7 +1471,14 @@ async fn b21_calling_single_route_creates_zero_operation_events_and_no_state_cha
     let adapter_id = unique_adapter_id("b21");
     let now = monday_at(20, 0, 0);
     let market_date = NaiveDate::from_ymd_opt(2026, 7, 20).unwrap();
-    let op = create_operation(&pool, &adapter_id, market_date, mqk_db::STATE_AWAITING_OPEN, now).await;
+    let op = create_operation(
+        &pool,
+        &adapter_id,
+        market_date,
+        mqk_db::STATE_AWAITING_OPEN,
+        now,
+    )
+    .await;
 
     let before_events = count_operation_events(&pool, op.operation_id).await;
     let before = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, op.operation_id)
@@ -1470,7 +1519,14 @@ async fn b22_calling_both_routes_creates_zero_run_outbox_inbox_claim_evaluation_
     let adapter_id = unique_adapter_id("b22");
     let now = monday_at(20, 0, 0);
     let market_date = NaiveDate::from_ymd_opt(2026, 7, 20).unwrap();
-    create_operation(&pool, &adapter_id, market_date, mqk_db::STATE_AWAITING_OPEN, now).await;
+    create_operation(
+        &pool,
+        &adapter_id,
+        market_date,
+        mqk_db::STATE_AWAITING_OPEN,
+        now,
+    )
+    .await;
 
     let before_runs = count_all(&pool, "runs").await;
     let before_outbox = count_all(&pool, "oms_outbox").await;
@@ -1698,7 +1754,11 @@ async fn b24_no_provider_broker_discord_calls_structural() {
         "/src/routes/autonomous_daily_operations.rs"
     ))
     .expect("read route source");
-    for symbol in ["DiscordNotifier", "AlpacaBrokerAdapter", "HistoricalProvider"] {
+    for symbol in [
+        "DiscordNotifier",
+        "AlpacaBrokerAdapter",
+        "HistoricalProvider",
+    ] {
         assert!(
             !source.contains(symbol),
             "route source must never reference {symbol}"

@@ -184,7 +184,9 @@ async fn pl_db_pool() -> sqlx::PgPool {
         .connect(&url)
         .await
         .expect("pl_db_pool: connect failed");
-    mqk_db::migrate(&pool).await.expect("pl_db_pool: migrate failed");
+    mqk_db::migrate(&pool)
+        .await
+        .expect("pl_db_pool: migrate failed");
     pool
 }
 
@@ -300,7 +302,8 @@ async fn pl_07_no_run_id_resolves_latest_paper_run() {
         "PL-07: truth_state must be 'active'; got: {json}"
     );
     assert_eq!(
-        json["run_id"], run_id.to_string(),
+        json["run_id"],
+        run_id.to_string(),
         "PL-07: must resolve the far-future seeded run as latest; got: {json}"
     );
 }
@@ -353,8 +356,7 @@ async fn pl_08_signal_only_is_no_signal_durably_explained() {
     assert_eq!(status, StatusCode::OK, "PL-08: must return 200");
     let json = parse_json(body);
     assert_eq!(
-        json["lifecycle_summary"]["overall_lifecycle_state"],
-        "no_signal_durably_explained",
+        json["lifecycle_summary"]["overall_lifecycle_state"], "no_signal_durably_explained",
         "PL-08: got: {json}"
     );
     assert_eq!(json["signal_truth_state"], "present");
@@ -407,8 +409,7 @@ async fn pl_09_no_trade_diagnostic_only_is_no_signal_durably_explained() {
     assert_eq!(status, StatusCode::OK, "PL-09: must return 200");
     let json = parse_json(body);
     assert_eq!(
-        json["lifecycle_summary"]["overall_lifecycle_state"],
-        "no_signal_durably_explained",
+        json["lifecycle_summary"]["overall_lifecycle_state"], "no_signal_durably_explained",
         "PL-09: got: {json}"
     );
     assert_eq!(json["no_trade_truth_state"], "present");
@@ -447,8 +448,7 @@ async fn pl_10_outbox_only_is_order_submitted_fill_pending() {
     assert_eq!(status, StatusCode::OK, "PL-10: must return 200");
     let json = parse_json(body);
     assert_eq!(
-        json["lifecycle_summary"]["overall_lifecycle_state"],
-        "order_submitted_fill_pending",
+        json["lifecycle_summary"]["overall_lifecycle_state"], "order_submitted_fill_pending",
         "PL-10: got: {json}"
     );
     assert_eq!(json["outbox_truth_state"], "present");
@@ -509,8 +509,7 @@ async fn pl_11_outbox_plus_inbox_fill_is_order_filled_pnl_pending() {
     assert_eq!(status, StatusCode::OK, "PL-11: must return 200");
     let json = parse_json(body);
     assert_eq!(
-        json["lifecycle_summary"]["overall_lifecycle_state"],
-        "order_filled_pnl_pending",
+        json["lifecycle_summary"]["overall_lifecycle_state"], "order_filled_pnl_pending",
         "PL-11: got: {json}"
     );
     assert_eq!(json["inbox_truth_state"], "present");
@@ -625,8 +624,7 @@ async fn pl_13_empty_run_is_partial_visibility_not_fabricated() {
     let json = parse_json(body);
     assert_eq!(json["truth_state"], "active", "PL-13: got: {json}");
     assert_eq!(
-        json["lifecycle_summary"]["overall_lifecycle_state"],
-        "partial_visibility",
+        json["lifecycle_summary"]["overall_lifecycle_state"], "partial_visibility",
         "PL-13: got: {json}"
     );
     assert_eq!(json["signal_truth_state"], "empty");

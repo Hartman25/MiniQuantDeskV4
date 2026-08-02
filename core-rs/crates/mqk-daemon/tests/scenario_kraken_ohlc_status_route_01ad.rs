@@ -228,7 +228,10 @@ async fn kos_03_valid_fresh_sync_evidence_parses_correctly() {
     assert!(!bool_field(&v, "stale_or_missing_evidence"));
     assert_eq!(str_field(&v, "provider"), "kraken");
     assert_eq!(str_field(&v, "latest_mode"), "sync");
-    assert_eq!(str_field(&v, "latest_schema_version"), "kraken-ohlc-sync-v2");
+    assert_eq!(
+        str_field(&v, "latest_schema_version"),
+        "kraken-ohlc-sync-v2"
+    );
     assert_eq!(v["provider_id"].as_str(), Some("kraken"));
     assert_eq!(v["provider_source"].as_str(), Some("kraken"));
     assert_eq!(v["provider_symbol"].as_str(), Some("XXBTZUSD"));
@@ -272,7 +275,10 @@ async fn kos_04_valid_fresh_ingest_evidence_parses_correctly() {
     assert_eq!(status, StatusCode::OK);
     assert_eq!(str_field(&v, "truth_state"), "active");
     assert_eq!(str_field(&v, "latest_mode"), "ingest");
-    assert_eq!(str_field(&v, "latest_schema_version"), "kraken-ohlc-ingest-v1");
+    assert_eq!(
+        str_field(&v, "latest_schema_version"),
+        "kraken-ohlc-ingest-v1"
+    );
     assert_eq!(v["ingest_mode"].as_str(), Some("provider_ingest"));
     // Sync-only fields must be absent (None), never fabricated.
     assert!(v["sync_policy"].is_null());

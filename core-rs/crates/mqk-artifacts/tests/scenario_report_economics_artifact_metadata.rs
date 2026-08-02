@@ -67,11 +67,7 @@ fn run_and_write(label: &str, economics: Option<BacktestInstrumentEconomics>) ->
     engine.add_strategy(Box::new(BuyHoldSell::new(10))).unwrap();
     let report = engine.run(&bars).expect("engine.run must succeed");
 
-    let tmp = std::env::temp_dir().join(format!(
-        "mqk_brea03_{}_{}",
-        label,
-        std::process::id()
-    ));
+    let tmp = std::env::temp_dir().join(format!("mqk_brea03_{}_{}", label, std::process::id()));
     fs::create_dir_all(&tmp).unwrap();
 
     mqk_artifacts::write_backtest_report(&tmp, &report, initial_cash)
@@ -120,7 +116,10 @@ fn brea03b_multiplier_50_metrics_json_economics_is_truthful() {
     assert_eq!(econ["contract_multiplier"], 50);
     assert_eq!(econ["initial_margin_micros"], 10_000 * M);
     assert_eq!(econ["maintenance_margin_micros"], 5_000 * M);
-    assert_eq!(econ["margin_enforced"], false, "margin metadata must never claim enforcement");
+    assert_eq!(
+        econ["margin_enforced"], false,
+        "margin metadata must never claim enforcement"
+    );
     // Realized P&L scales by the multiplier: $100 * 50 = $5,000.
     assert_eq!(econ["realized_pnl_micros"], 50 * 100 * M);
 
@@ -138,5 +137,8 @@ fn brea03b_multiplier_50_metrics_json_economics_is_truthful() {
 fn brea03c_metrics_json_schema_version_unchanged() {
     let (metrics_json, _) = run_and_write("schema", None);
     let v: serde_json::Value = serde_json::from_str(&metrics_json).unwrap();
-    assert_eq!(v["schema_version"], 1, "economics must be additive, not a schema bump");
+    assert_eq!(
+        v["schema_version"], 1,
+        "economics must be additive, not a schema bump"
+    );
 }

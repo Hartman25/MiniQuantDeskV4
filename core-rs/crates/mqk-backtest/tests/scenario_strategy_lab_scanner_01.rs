@@ -26,7 +26,9 @@ fn synthetic_daily_bars(symbol: &str, count: usize) -> Vec<BacktestBar> {
         let close = base + wiggle;
         let high = open.max(close) + 20_000;
         let low = open.min(close) - 20_000;
-        bars.push(BacktestBar::new(symbol, end_ts, open, high, low, close, 1_000_000));
+        bars.push(BacktestBar::new(
+            symbol, end_ts, open, high, low, close, 1_000_000,
+        ));
     }
     bars
 }
@@ -49,7 +51,10 @@ fn missing_bars_file_becomes_data_missing() {
         &policy,
     );
     assert_eq!(candidate.truth_state, StrategyScanTruthState::DataMissing);
-    assert_eq!(candidate.reason_code, StrategyScanReasonCode::MissingBarsFile);
+    assert_eq!(
+        candidate.reason_code,
+        StrategyScanReasonCode::MissingBarsFile
+    );
     assert_eq!(candidate.bars_available, 0);
     assert!(candidate.score.is_none());
     assert!(candidate.rank.is_none());
@@ -70,7 +75,10 @@ fn too_few_bars_becomes_insufficient_data() {
         Some(&bars),
         &policy,
     );
-    assert_eq!(candidate.truth_state, StrategyScanTruthState::InsufficientData);
+    assert_eq!(
+        candidate.truth_state,
+        StrategyScanTruthState::InsufficientData
+    );
     assert_eq!(candidate.reason_code, StrategyScanReasonCode::NotEnoughBars);
     assert_eq!(candidate.bars_available, policy.min_bars - 1);
 }
@@ -206,7 +214,10 @@ fn ranking_is_deterministic_and_ties_sort_by_symbol_timeframe_strategy() {
 
     let symbols_a: Vec<&str> = run_a.iter().map(|c| c.symbol.as_str()).collect();
     let symbols_b: Vec<&str> = run_b.iter().map(|c| c.symbol.as_str()).collect();
-    assert_eq!(symbols_a, symbols_b, "identical inputs must rank identically");
+    assert_eq!(
+        symbols_a, symbols_b,
+        "identical inputs must rank identically"
+    );
 
     // Both candidates share the exact same bars/strategy shape, so their
     // scores are equal (deterministic replay) -> tie-break falls through
