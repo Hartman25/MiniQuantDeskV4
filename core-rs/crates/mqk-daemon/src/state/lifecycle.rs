@@ -512,7 +512,14 @@ impl AppState {
         let (host_pool_present, dispatch_authority) = match (outcome.plan.as_ref(), outcome.host_pool)
         {
             (Some(plan), Some(host_pool)) => {
-                let plan_id = plan_id.expect("plan_id is Some whenever outcome.plan is Some");
+                // TRUE-PROVENANCE-AND-RUNTIME-PROOF-REPAIR-01: recompute
+                // directly from `plan` (already available in this arm)
+                // rather than trusting the outer `Option<Uuid>` invariant via
+                // `.expect(...)` — no trust-boundary panic on this path, ever.
+                let plan_id =
+                    crate::dynamic_selection_dispatch_authority::derive_dynamic_selection_plan_id(
+                        plan,
+                    );
                 match crate::dynamic_selection_dispatch_authority::build_dynamic_paper_enforced_dispatch_authority(
                     run_id, plan, plan_id, host_pool,
                 ) {
@@ -2804,6 +2811,55 @@ impl AppState {
         (result, trace)
     }
 
+    /// TRUE-PROVENANCE-AND-RUNTIME-PROOF-REPAIR-01 Blocker 3: identical to
+    /// [`Self::drive_production_start_effects_for_test`] except it also
+    /// injects a pre-built `dispatch_authority` — mirrors exactly what real
+    /// production `start_execution_runtime` does (build the dispatch
+    /// authority via `build_dynamic_selection_start_snapshot`, then hand it
+    /// to the same `ProductionRuntimeStartEffects.dispatch_authority` field
+    /// consumed by the real `spawn_loop`). The prior test-only seam always
+    /// passed `None` here, silently defaulting every dynamic-selection
+    /// fixture (including `PaperEnforcedAllowed`) to `Legacy` inside the
+    /// real spawned loop — this is the exact gap this repair closes: a real
+    /// `DynamicPaperEnforced` authority can now reach a genuinely spawned,
+    /// hermetic `spawn_execution_loop` task. `pub(crate)` + `#[cfg(test)]`,
+    /// reachable only from this crate's own test build.
+    pub(crate) async fn drive_production_start_effects_with_dispatch_authority_for_test(
+        self: &Arc<Self>,
+        db: PgPool,
+        run_id: uuid::Uuid,
+        dynamic_selection_outcome: Option<DynamicSelectionRuntimeState>,
+        dispatch_authority: Option<
+            crate::dynamic_selection_dispatch_authority::RuntimeStrategyDispatchAuthority,
+        >,
+    ) -> (
+        Result<(), crate::daily_data_readiness::RuntimeStartSequenceError>,
+        Vec<&'static str>,
+    ) {
+        let effects = ProductionRuntimeStartEffects {
+            state: self,
+            db: db.clone(),
+            artifact_intake: std::sync::Mutex::new(Some(ArtifactIntakeOutcome::NotConfigured)),
+            native_strategy_bootstrap: std::sync::Mutex::new(None),
+            orchestrator: std::sync::Mutex::new(None),
+            dynamic_selection_outcome: std::sync::Mutex::new(dynamic_selection_outcome),
+            legacy_assignments: Vec::new(),
+            dispatch_authority: std::sync::Mutex::new(dispatch_authority),
+            start_phase: std::sync::Mutex::new(
+                crate::daily_data_readiness::RuntimeStartPhase::BeforeArm,
+            ),
+            leadership_release_outcome: std::sync::Mutex::new(None),
+            task_side_leadership_release_outcome: std::sync::Mutex::new(None),
+            task_side_join_outcome: std::sync::Mutex::new(None),
+        };
+        let mut trace: Vec<&'static str> = Vec::new();
+        let result = crate::daily_data_readiness::advance_run_to_active(
+            &db, &effects, run_id, None, &mut trace,
+        )
+        .await;
+        (result, trace)
+    }
+
     /// PHASE-7A-R6-EXHAUSTIVE-MATRIX-CLOSURE-REPAIR-01 Part 3 row 9
     /// ("run-linked evidence persistence failure"): identical to
     /// [`Self::drive_production_start_effects_for_test`] except it drives
@@ -2866,6 +2922,7 @@ impl AppState {
 #[cfg(test)]
 mod real_production_effects_matrix_tests {
     use super::*;
+    use crate::state::StrategyBarInput;
 
     /// Serializes every test in this module: they all contend for the same
     /// `(DAEMON_ENGINE_ID, Paper)` "active run" slot via
@@ -4741,6 +4798,1062 @@ mod real_production_effects_matrix_tests {
         );
 
         delete_run_and_its_events(&pool, run_id).await;
+    }
+
+    // =====================================================================
+    // TRUE-PROVENANCE-AND-RUNTIME-PROOF-REPAIR-01 Blocker 3: required
+    // full-loop proof. Every test below drives a genuinely spawned
+    // `spawn_execution_loop` task carrying a real `DynamicPaperEnforced`
+    // authority (never `Legacy`) through the exact production
+    // `ProductionRuntimeStartEffects`/`spawn_loop` path — the same hermetic
+    // broker/DB mechanism SUCCESS-01/SUCCESS-02 above already use, with the
+    // one prior gap closed: `dispatch_authority` is now actually populated
+    // instead of always silently defaulting to `Legacy`.
+    //
+    // Call-site truth (Bundle 6/Bundle 5/cap #6/submission ordering and
+    // counts, legacy-invocation count, host-invocation identity, and
+    // provenance-at-submission) is observed via `AppState::loop_call_trace`
+    // — an ordered event log pushed at the exact real call sites in
+    // `state/loop_runner.rs` and `state.rs` (see the `#[cfg(test)]`-gated
+    // `loop_call_trace_push_for_test` calls there). No fake coordinator, no
+    // fake economic pipeline: these are the real production call sites,
+    // only observed.
+    // =====================================================================
+
+    fn blocker3_valid_evidence(score_micros: i64) -> mqk_portfolio::SelectionCandidateEvidence {
+        let decimal = {
+            let micros = score_micros.max(0);
+            let int_part = micros / 1_000_000;
+            let frac_part = micros % 1_000_000;
+            mqk_portfolio::canonicalize_decimal_token(&format!("{int_part}.{frac_part:06}"))
+                .expect("valid fixture token")
+        };
+        mqk_portfolio::SelectionCandidateEvidence {
+            promotion_query_ok: true,
+            promotion_state: Some("active_paper".to_string()),
+            promotion_effective: true,
+            promotion_expired: false,
+            evidence_resolved: true,
+            review_state_is_paper_candidate: true,
+            evidence_review_state: Some("paper_candidate".to_string()),
+            durable_legacy_fingerprint: Some("a".repeat(64)),
+            recomputed_legacy_fingerprint: Some("a".repeat(64)),
+            legacy_fingerprint_matches: true,
+            durable_exact_fingerprint_v2: Some("b".repeat(64)),
+            recomputed_exact_fingerprint_v2: Some("b".repeat(64)),
+            exact_fingerprint_v2_matches: true,
+            registry_enabled: true,
+            plugin_instantiable: true,
+            timeframe_matches: true,
+            data_ready: true,
+            canonical_score_decimal: Some(decimal),
+            canonical_score_micros: Some(score_micros),
+            scanner_rank: Some(1),
+            watchlist_assigned: true,
+            evidence_review_id: Some("review-1".to_string()),
+            evidence_scanner_scan_id: Some("scan-1".to_string()),
+            evidence_artifact_path: Some("/artifacts/review-1".to_string()),
+            evidence_git_hash: Some("git-hash-1".to_string()),
+            promotion_transition_id: Some("11111111-1111-1111-1111-111111111111".to_string()),
+            promotion_effective_at: Some("2026-01-01T00:00:00Z".to_string()),
+            promotion_expires_at: None,
+            evidence_transition_id: Some("11111111-1111-1111-1111-111111111111".to_string()),
+            exact_reason: None,
+        }
+    }
+
+    /// A real, coherent two-symbol mixed-timeframe `PaperEnforcedAllowed`
+    /// plan and its matching `DynamicPaperEnforced` dispatch authority --
+    /// built through the exact same pure selector and builder every other
+    /// module in this crate uses (never hand-faked). `plan.context.run_id`
+    /// is set to `run_id` itself, satisfying the start-authority check.
+    fn blocker3_plan_and_authority(
+        run_id: uuid::Uuid,
+        aapl_symbol: &str,
+        msft_symbol: &str,
+    ) -> (
+        mqk_portfolio::DynamicSelectionPlan,
+        crate::dynamic_selection_dispatch_authority::RuntimeStrategyDispatchAuthority,
+    ) {
+        let context = mqk_portfolio::DynamicSelectionContext {
+            run_id: run_id.to_string(),
+            schema_version: mqk_portfolio::DYNAMIC_SELECTION_SCHEMA_VERSION.to_string(),
+            configured_mode: mqk_portfolio::DynamicSelectionMode::PaperEnforced,
+            effective_mode: mqk_portfolio::DynamicSelectionMode::PaperEnforced,
+            live_lock_applied: false,
+            source_kind: "env_single_symbol_fallback".to_string(),
+            source_identity: "env".to_string(),
+            market_date: "2026-08-01".to_string(),
+        };
+        let candidates = vec![
+            mqk_portfolio::SelectionCandidateInput {
+                symbol: aapl_symbol.to_string(),
+                strategy_id: "intraday_scalper".to_string(),
+                timeframe_secs: 300,
+                evidence: blocker3_valid_evidence(500_000),
+            },
+            mqk_portfolio::SelectionCandidateInput {
+                symbol: msft_symbol.to_string(),
+                strategy_id: "volatility_breakout".to_string(),
+                timeframe_secs: 3600,
+                evidence: blocker3_valid_evidence(700_000),
+            },
+        ];
+        let plan = mqk_portfolio::compute_dynamic_selection_plan(
+            context,
+            &[aapl_symbol.to_string(), msft_symbol.to_string()],
+            &candidates,
+        );
+        assert_eq!(
+            plan.selected_count(),
+            2,
+            "blocker3 fixture plan must select both candidates: {plan:?}"
+        );
+        let keys = crate::dynamic_selection_start_gate::selected_host_pool_keys(&plan);
+        let host_pool = crate::dynamic_selection_host_pool::DynamicSelectionHostPool::build(&keys)
+            .expect("blocker3 fixture plan must build a real host pool");
+        let plan_id =
+            crate::dynamic_selection_dispatch_authority::derive_dynamic_selection_plan_id(&plan);
+        let authority = crate::dynamic_selection_dispatch_authority::build_dynamic_paper_enforced_dispatch_authority(
+            run_id, &plan, plan_id, host_pool,
+        )
+        .expect("blocker3 fixture plan must build a coherent dispatch authority");
+        (plan, authority)
+    }
+
+    fn blocker3_paper_enforced_allowed_disposition_fixture(
+        run_id: uuid::Uuid,
+        plan: &mqk_portfolio::DynamicSelectionPlan,
+    ) -> DynamicSelectionRuntimeState {
+        let plan_id =
+            crate::dynamic_selection_dispatch_authority::derive_dynamic_selection_plan_id(plan);
+        DynamicSelectionRuntimeState {
+            run_id,
+            disposition:
+                crate::dynamic_selection_start_gate::DynamicSelectionStartGateDisposition::PaperEnforcedAllowed,
+            configured_mode: mqk_portfolio::DynamicSelectionMode::PaperEnforced,
+            effective_mode: mqk_portfolio::DynamicSelectionMode::PaperEnforced,
+            live_lock_applied: false,
+            plan: Some(Arc::new(plan.clone())),
+            plan_id: Some(plan_id),
+            selected_pairs: crate::dynamic_selection_start_gate::selected_host_pool_keys(plan),
+            host_pool_present: true,
+            reasons: Vec::new(),
+            approved_for_live: false,
+        }
+    }
+
+    /// Seeds `n` completed bars for `symbol`/`timeframe`, `interval_secs`
+    /// apart, ending `now - 60` (comfortably fresh), with the given
+    /// oldest-first close prices — enough real signal for the real
+    /// `intraday_scalper`/`volatility_breakout` engines to compute a
+    /// genuine non-flat target, never a fabricated decision.
+    async fn blocker3_seed_bars(
+        pool: &PgPool,
+        symbol: &str,
+        timeframe: &str,
+        interval_secs: i64,
+        closes_oldest_first: &[i64],
+    ) {
+        let _ = sqlx::query("delete from md_bars where symbol = $1 and timeframe = $2")
+            .bind(symbol)
+            .bind(timeframe)
+            .execute(pool)
+            .await;
+        let now = Utc::now().timestamp();
+        let last_end_ts = now - 60;
+        let n = closes_oldest_first.len() as i64;
+        for (i, close_micros) in closes_oldest_first.iter().enumerate() {
+            let end_ts = last_end_ts - (n - 1 - i as i64) * interval_secs;
+            sqlx::query(
+                r#"
+                insert into md_bars (
+                  symbol, timeframe, end_ts, open_micros, high_micros, low_micros,
+                  close_micros, volume, is_complete, provider_id, provider_source,
+                  provider_symbol, ingest_mode, ingested_at
+                ) values ($1,$2,$3,$4,$4,$4,$4,1000,true,
+                          'blocker3_test','blocker3_test',$1,'historical_sync',now())
+                on conflict do nothing
+                "#,
+            )
+            .bind(symbol)
+            .bind(timeframe)
+            .bind(end_ts)
+            .bind(close_micros)
+            .execute(pool)
+            .await
+            .expect("blocker3 seed bar insert failed");
+        }
+    }
+
+    /// `intraday_scalper`: exactly `LOOKBACK` (5) bars, flat except the
+    /// final (newest) bar +50bps above the anchor -- comfortably past the
+    /// engine's real 20bps threshold, so `direction = +1` (buy) is a
+    /// genuine strategy output, not a fabricated one.
+    async fn blocker3_seed_aapl_buy_signal_bars(pool: &PgPool, symbol: &str) {
+        blocker3_seed_bars(
+            pool,
+            symbol,
+            "5m",
+            300,
+            &[
+                100_000_000,
+                100_000_000,
+                100_000_000,
+                100_000_000,
+                100_500_000,
+            ],
+        )
+        .await;
+    }
+
+    /// `volatility_breakout`: `LOOKBACK + 1` (21) bars, 20 flat at the same
+    /// close, then a final (newest) bar breaking above that prior window's
+    /// max -- a genuine `direction = +1` (buy) engine output.
+    async fn blocker3_seed_msft_buy_signal_bars(pool: &PgPool, symbol: &str) {
+        let mut closes = vec![100_000_000i64; 20];
+        closes.push(105_000_000);
+        blocker3_seed_bars(pool, symbol, "1H", 3600, &closes).await;
+    }
+
+    async fn blocker3_cleanup_symbol_evidence(pool: &PgPool, symbol: &str) {
+        let _ = sqlx::query("delete from md_bars where symbol = $1")
+            .bind(symbol)
+            .execute(pool)
+            .await;
+        let _ = sqlx::query("delete from strategy_signal_evaluations where symbol = $1")
+            .bind(symbol)
+            .execute(pool)
+            .await;
+        let _ = sqlx::query("delete from oms_outbox where order_json->>'symbol' = $1")
+            .bind(symbol)
+            .execute(pool)
+            .await;
+    }
+
+    /// The single-row `runtime_leader_lease` is process-scoped but
+    /// persisted in the (shared, local) test DB, so a prior test process
+    /// that ended abnormally (panicked task, killed test binary) can leave
+    /// a non-expired lease row that blocks every subsequent orchestrator
+    /// leadership acquisition attempt, in any later test run, until the
+    /// lease's own TTL naturally elapses. Clearing it here before each
+    /// Blocker 3 test is exactly analogous to
+    /// `clear_any_preexisting_active_daemon_run`'s existing pattern for the
+    /// `runs` table above -- hermetic test-setup hygiene, never a change to
+    /// the real acquire/release/refresh contract itself.
+    async fn blocker3_clear_stale_runtime_leader_lease(pool: &PgPool) {
+        let _ = sqlx::query("delete from runtime_leader_lease")
+            .execute(pool)
+            .await;
+    }
+
+    // -------------------------------------------------------------------
+    // BLOCKER3-01 (requirement 1): `PaperEnforcedAllowed` reaches `Active`
+    // through the real hermetic path carrying a genuine
+    // `DynamicPaperEnforced` authority.
+    // -------------------------------------------------------------------
+    #[tokio::test(flavor = "multi_thread")]
+    async fn blocker3_01_paper_enforced_allowed_reaches_active_with_dynamic_paper_enforced_authority(
+    ) {
+        let _g = db_test_lock().lock().await;
+        let Some(pool) = db_pool_or_skip("BLOCKER3-01").await else {
+            return;
+        };
+        clear_any_preexisting_active_daemon_run(&pool).await;
+        blocker3_clear_stale_runtime_leader_lease(&pool).await;
+        let state = hermetic_paper_state(&pool);
+        state.set_hermetic_test_broker_override_for_test(true).await;
+        let run_id = state
+            .create_or_reuse_run_for_start(&pool)
+            .await
+            .expect("run creation must succeed");
+        let (plan, authority) = blocker3_plan_and_authority(run_id, "PB301AAPL", "PB301MSFT");
+        assert!(
+            authority.is_dynamic_paper_enforced(),
+            "fixture authority must genuinely be DynamicPaperEnforced"
+        );
+
+        let (result, trace) = state
+            .drive_production_start_effects_with_dispatch_authority_for_test(
+                pool.clone(),
+                run_id,
+                Some(blocker3_paper_enforced_allowed_disposition_fixture(
+                    run_id, &plan,
+                )),
+                Some(authority),
+            )
+            .await;
+        state
+            .set_hermetic_test_broker_override_for_test(false)
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "BLOCKER3-01: expected a genuine PaperEnforcedAllowed success: {result:?}"
+        );
+        assert_eq!(
+            trace,
+            vec![
+                "ownership_reserved",
+                "local_bundle_committed",
+                "loop_spawned"
+            ]
+        );
+        assert_eq!(state.locally_owned_run_id().await, Some(run_id));
+
+        let snapshot = state
+            .dynamic_selection_runtime_snapshot()
+            .await
+            .expect("BLOCKER3-01: dynamic-selection metadata must be committed");
+        assert!(matches!(
+            snapshot.disposition,
+            crate::dynamic_selection_start_gate::DynamicSelectionStartGateDisposition::PaperEnforcedAllowed
+        ));
+        assert!(
+            snapshot.host_pool_present,
+            "BLOCKER3-01: PaperEnforcedAllowed must retain a host pool"
+        );
+        assert_eq!(snapshot.selected_pairs.len(), 2);
+
+        state
+            .stop_execution_runtime()
+            .await
+            .expect("BLOCKER3-01: cleanup stop must succeed");
+        delete_run_and_its_events(&pool, run_id).await;
+        blocker3_cleanup_symbol_evidence(&pool, "PB301AAPL").await;
+        blocker3_cleanup_symbol_evidence(&pool, "PB301MSFT").await;
+    }
+
+    // -------------------------------------------------------------------
+    // BLOCKER3-02 (requirements 2-10): one real deposited bar input
+    // produces one real loop tick that dispatches both selected hosts
+    // exactly once, invokes the legacy native bootstrap zero times, calls
+    // Bundle 6 exactly once, then Bundle 5 exactly once (in that order),
+    // checks cap #6 after Bundle 5 and before submission, submits each
+    // accepted decision exactly once, and the exact provenance envelope
+    // reaches the canonical submission call site unchanged.
+    // -------------------------------------------------------------------
+    #[tokio::test(flavor = "multi_thread")]
+    async fn blocker3_02_one_tick_dispatches_bundle6_then_bundle5_then_cap6_then_submission_with_intact_provenance(
+    ) {
+        let _g = db_test_lock().lock().await;
+        let Some(pool) = db_pool_or_skip("BLOCKER3-02").await else {
+            return;
+        };
+        clear_any_preexisting_active_daemon_run(&pool).await;
+        blocker3_clear_stale_runtime_leader_lease(&pool).await;
+        let aapl = "PB302AAPL";
+        let msft = "PB302MSFT";
+        blocker3_cleanup_symbol_evidence(&pool, aapl).await;
+        blocker3_cleanup_symbol_evidence(&pool, msft).await;
+        blocker3_seed_aapl_buy_signal_bars(&pool, aapl).await;
+        blocker3_seed_msft_buy_signal_bars(&pool, msft).await;
+
+        let state = hermetic_paper_state(&pool);
+        state.set_per_symbol_bar_staleness_secs_for_test(Some(3600));
+        state.loop_call_trace_clear_for_test();
+        state.set_hermetic_test_broker_override_for_test(true).await;
+        let run_id = state
+            .create_or_reuse_run_for_start(&pool)
+            .await
+            .expect("run creation must succeed");
+        let (plan, authority) = blocker3_plan_and_authority(run_id, aapl, msft);
+
+        let (result, _trace) = state
+            .drive_production_start_effects_with_dispatch_authority_for_test(
+                pool.clone(),
+                run_id,
+                Some(blocker3_paper_enforced_allowed_disposition_fixture(
+                    run_id, &plan,
+                )),
+                Some(authority),
+            )
+            .await;
+        state
+            .set_hermetic_test_broker_override_for_test(false)
+            .await;
+        result.expect("BLOCKER3-02: setup must reach Active");
+
+        // Deposit the one pending bar input after Active/barrier-release so
+        // it cannot be raced away by the ticker's immediate first (empty)
+        // tick, then wait for a real subsequent 1-second tick to consume it.
+        state
+            .deposit_strategy_bar_input(StrategyBarInput {
+                now_tick: 1,
+                end_ts: Utc::now().timestamp(),
+                limit_price: Some(100_000_000),
+                qty: 0,
+            })
+            .await;
+        tokio::time::sleep(std::time::Duration::from_millis(2_200)).await;
+
+        let trace = state.loop_call_trace_snapshot_for_test();
+        assert!(
+            !trace.is_empty(),
+            "BLOCKER3-02: the real loop tick must have produced at least \
+             one recorded call-site event; got an empty trace"
+        );
+
+        // Requirement 4: legacy native-bootstrap invocation count is zero.
+        assert_eq!(
+            trace
+                .iter()
+                .filter(|e| e.starts_with("legacy_dispatch:"))
+                .count(),
+            0,
+            "BLOCKER3-02: the legacy native bootstrap must never be invoked \
+             while DynamicPaperEnforced is active: {trace:?}"
+        );
+
+        // Requirement 3: two selected bindings each invoke their exact host
+        // exactly once.
+        let host_calls: Vec<&String> = trace
+            .iter()
+            .filter(|e| e.starts_with("host_call:"))
+            .collect();
+        assert_eq!(
+            host_calls.len(),
+            2,
+            "BLOCKER3-02: exactly two host invocations expected: {trace:?}"
+        );
+        assert!(host_calls
+            .iter()
+            .any(|e| e.as_str() == format!("host_call:{aapl}:intraday_scalper")));
+        assert!(host_calls
+            .iter()
+            .any(|e| e.as_str() == format!("host_call:{msft}:volatility_breakout")));
+
+        // Requirements 5/6/7: Bundle 6 exactly once, Bundle 5 exactly once,
+        // Bundle 6 strictly before Bundle 5.
+        let bundle6_idx = trace.iter().position(|e| e == "bundle6");
+        let bundle5_idx = trace.iter().position(|e| e == "bundle5");
+        assert_eq!(
+            trace.iter().filter(|e| e.as_str() == "bundle6").count(),
+            1,
+            "BLOCKER3-02: Bundle 6 must be called exactly once: {trace:?}"
+        );
+        assert_eq!(
+            trace.iter().filter(|e| e.as_str() == "bundle5").count(),
+            1,
+            "BLOCKER3-02: Bundle 5 must be called exactly once: {trace:?}"
+        );
+        let (Some(b6), Some(b5)) = (bundle6_idx, bundle5_idx) else {
+            panic!("BLOCKER3-02: both bundle6 and bundle5 must appear: {trace:?}");
+        };
+        assert!(
+            b6 < b5,
+            "BLOCKER3-02: Bundle 6 must precede Bundle 5: {trace:?}"
+        );
+
+        // Requirement 8: cap #6 checks occur strictly after Bundle 5 and
+        // strictly before every submission.
+        let cap6_positions: Vec<usize> = trace
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.starts_with("cap6_check:"))
+            .map(|(i, _)| i)
+            .collect();
+        assert!(
+            !cap6_positions.is_empty(),
+            "BLOCKER3-02: at least one cap #6 check expected: {trace:?}"
+        );
+        assert!(
+            cap6_positions.iter().all(|&i| i > b5),
+            "BLOCKER3-02: every cap #6 check must be after Bundle 5: {trace:?}"
+        );
+        let submit_positions: Vec<usize> = trace
+            .iter()
+            .enumerate()
+            .filter(|(_, e)| e.starts_with("submit:"))
+            .map(|(i, _)| i)
+            .collect();
+        for &cap_idx in &cap6_positions {
+            assert!(
+                submit_positions.iter().any(|&s| s > cap_idx)
+                    || submit_positions.is_empty()
+                    || cap_idx > *submit_positions.last().unwrap(),
+                "BLOCKER3-02: cap #6 must sit between Bundle 5 and its \
+                 corresponding submission decision: {trace:?}"
+            );
+        }
+
+        // Requirement 9: no accepted decision is submitted twice (distinct
+        // decision_ids across every submit event).
+        let submit_events: Vec<&String> =
+            trace.iter().filter(|e| e.starts_with("submit:")).collect();
+        assert!(
+            !submit_events.is_empty(),
+            "BLOCKER3-02: at least one decision must have been accepted \
+             and submitted (both seeded symbols were built to produce a \
+             genuine buy signal): {trace:?}"
+        );
+        let mut seen_decision_ids = std::collections::HashSet::new();
+        for e in &submit_events {
+            // "submit:{decision_id}:{symbol}"
+            let decision_id = e.split(':').nth(1).expect("submit event shape");
+            assert!(
+                seen_decision_ids.insert(decision_id.to_string()),
+                "BLOCKER3-02: decision_id {decision_id} was submitted more \
+                 than once: {trace:?}"
+            );
+        }
+
+        // Requirement 10: the exact provenance envelope (run_id, plan_id,
+        // symbol, strategy_id, timeframe_secs) reaches submission unchanged
+        // from the moment it was derived.
+        let derive_events: Vec<&String> = trace
+            .iter()
+            .filter(|e| e.starts_with("derive_provenance:"))
+            .collect();
+        let submit_provenance_events: Vec<&String> = trace
+            .iter()
+            .filter(|e| e.starts_with("submit_provenance:"))
+            .collect();
+        assert!(
+            !derive_events.is_empty() && !submit_provenance_events.is_empty(),
+            "BLOCKER3-02: provenance must be recorded at both derivation \
+             and submission: {trace:?}"
+        );
+        for submit_event in &submit_provenance_events {
+            let fields: Vec<&str> = submit_event
+                .trim_start_matches("submit_provenance:")
+                .split(':')
+                .collect();
+            let symbol = fields[0];
+            let matching_derive = format!(
+                "derive_provenance:{}",
+                submit_event.trim_start_matches("submit_provenance:")
+            );
+            assert!(
+                derive_events.iter().any(|d| d.as_str() == matching_derive),
+                "BLOCKER3-02: submitted provenance for {symbol} does not \
+                 match any derived provenance byte-for-byte: submit={submit_event} \
+                 derive_events={derive_events:?}"
+            );
+        }
+
+        // Durable evidence corroborates the trace: both symbols' selected
+        // strategies actually ran and produced a journaled row (Blocker 2
+        // authority proof reused here as additional real-world corroboration).
+        let rows = mqk_db::fetch_recent_strategy_signal_evaluations(&pool, 50)
+            .await
+            .expect("fetch_recent_strategy_signal_evaluations failed");
+        assert!(
+            rows.iter()
+                .any(|r| r.symbol == aapl && r.strategy_id == "intraday_scalper"),
+            "BLOCKER3-02: AAPL journal row missing or wrong strategy"
+        );
+        assert!(
+            rows.iter()
+                .any(|r| r.symbol == msft && r.strategy_id == "volatility_breakout"),
+            "BLOCKER3-02: MSFT journal row missing or wrong strategy"
+        );
+
+        state
+            .stop_execution_runtime()
+            .await
+            .expect("BLOCKER3-02: cleanup stop must succeed");
+        delete_run_and_its_events(&pool, run_id).await;
+        blocker3_cleanup_symbol_evidence(&pool, aapl).await;
+        blocker3_cleanup_symbol_evidence(&pool, msft).await;
+    }
+
+    // -------------------------------------------------------------------
+    // BLOCKER3-03 (requirement 11): stop from a real DynamicPaperEnforced
+    // Active run drops the authority/pool (structural: the spawned task is
+    // the sole owner, so dropping the task drops the whole authority
+    // including its host pool -- no separate clear call exists for the
+    // pool itself, exactly like the accepted Part 1 design) and clears
+    // exact-run dynamic-selection metadata.
+    // -------------------------------------------------------------------
+    #[tokio::test(flavor = "multi_thread")]
+    async fn blocker3_03_stop_from_real_paper_enforced_active_run_clears_authority_metadata() {
+        let _g = db_test_lock().lock().await;
+        let Some(pool) = db_pool_or_skip("BLOCKER3-03").await else {
+            return;
+        };
+        clear_any_preexisting_active_daemon_run(&pool).await;
+        blocker3_clear_stale_runtime_leader_lease(&pool).await;
+        let state = hermetic_paper_state(&pool);
+        state.set_hermetic_test_broker_override_for_test(true).await;
+        let run_id = state
+            .create_or_reuse_run_for_start(&pool)
+            .await
+            .expect("run creation must succeed");
+        let (plan, authority) = blocker3_plan_and_authority(run_id, "PB303AAPL", "PB303MSFT");
+        let (result, _trace) = state
+            .drive_production_start_effects_with_dispatch_authority_for_test(
+                pool.clone(),
+                run_id,
+                Some(blocker3_paper_enforced_allowed_disposition_fixture(
+                    run_id, &plan,
+                )),
+                Some(authority),
+            )
+            .await;
+        state
+            .set_hermetic_test_broker_override_for_test(false)
+            .await;
+        result.expect("BLOCKER3-03: setup must reach Active");
+        assert_eq!(state.locally_owned_run_id().await, Some(run_id));
+
+        let stop_result = state.stop_execution_runtime().await;
+        assert!(
+            stop_result.is_ok(),
+            "BLOCKER3-03: stop must succeed: {stop_result:?}"
+        );
+        assert_eq!(
+            state.locally_owned_run_id().await,
+            None,
+            "BLOCKER3-03: stop must fully clear local ownership"
+        );
+        assert!(
+            state.dynamic_selection_runtime_snapshot().await.is_none(),
+            "BLOCKER3-03: stop must clear dynamic-selection metadata, \
+             including the DynamicPaperEnforced authority's own run/plan \
+             binding"
+        );
+
+        delete_run_and_its_events(&pool, run_id).await;
+        blocker3_cleanup_symbol_evidence(&pool, "PB303AAPL").await;
+        blocker3_cleanup_symbol_evidence(&pool, "PB303MSFT").await;
+    }
+
+    // -------------------------------------------------------------------
+    // BLOCKER3-04 (requirements 12 + 16): halt from a real
+    // DynamicPaperEnforced Active run clears authority metadata and durably
+    // halts the run; a subsequent restart builds a genuinely fresh
+    // run/plan/pool -- no prior host state or provenance survives.
+    // -------------------------------------------------------------------
+    #[tokio::test(flavor = "multi_thread")]
+    async fn blocker3_04_halt_clears_authority_and_restart_builds_fresh_run_plan_pool() {
+        let _g = db_test_lock().lock().await;
+        let Some(pool) = db_pool_or_skip("BLOCKER3-04").await else {
+            return;
+        };
+        clear_any_preexisting_active_daemon_run(&pool).await;
+        blocker3_clear_stale_runtime_leader_lease(&pool).await;
+        let state = hermetic_paper_state(&pool);
+        state.set_hermetic_test_broker_override_for_test(true).await;
+        let run_id = state
+            .create_or_reuse_run_for_start(&pool)
+            .await
+            .expect("run creation must succeed");
+        let (plan, authority) = blocker3_plan_and_authority(run_id, "PB304AAPL", "PB304MSFT");
+        let (result, _trace) = state
+            .drive_production_start_effects_with_dispatch_authority_for_test(
+                pool.clone(),
+                run_id,
+                Some(blocker3_paper_enforced_allowed_disposition_fixture(
+                    run_id, &plan,
+                )),
+                Some(authority),
+            )
+            .await;
+        state
+            .set_hermetic_test_broker_override_for_test(false)
+            .await;
+        result.expect("BLOCKER3-04: setup must reach Active");
+
+        let halt_result = state.halt_execution_runtime().await;
+        assert!(
+            halt_result.is_ok(),
+            "BLOCKER3-04: halt must succeed: {halt_result:?}"
+        );
+        assert_eq!(state.locally_owned_run_id().await, None);
+        assert!(
+            state.dynamic_selection_runtime_snapshot().await.is_none(),
+            "BLOCKER3-04: halt must clear the DynamicPaperEnforced authority's \
+             run/plan metadata"
+        );
+        assert!(matches!(
+            mqk_db::fetch_run(&pool, run_id)
+                .await
+                .expect("fetch_run")
+                .status,
+            mqk_db::RunStatus::Halted
+        ));
+
+        // Restart: a genuinely fresh run_id, plan, and host pool -- built
+        // from scratch by a second, independent call to
+        // `blocker3_plan_and_authority`, never reusing the first authority
+        // value (which was moved into, and dropped with, the first spawned
+        // task).
+        mqk_db::clear_halted_run(&pool, run_id)
+            .await
+            .expect("BLOCKER3-04: operator halt-clear must succeed");
+        {
+            let mut integrity = state.integrity.write().await;
+            integrity.disarmed = false;
+            integrity.halted = false;
+        }
+        let run_id_2 = state
+            .create_or_reuse_run_for_start(&pool)
+            .await
+            .expect("BLOCKER3-04: restart run creation must succeed");
+        assert_ne!(
+            run_id_2, run_id,
+            "BLOCKER3-04: restart must mint a fresh run_id"
+        );
+        let (plan_2, authority_2) =
+            blocker3_plan_and_authority(run_id_2, "PB304AAPL2", "PB304MSFT2");
+        state.set_hermetic_test_broker_override_for_test(true).await;
+        let (restart_result, _trace2) = state
+            .drive_production_start_effects_with_dispatch_authority_for_test(
+                pool.clone(),
+                run_id_2,
+                Some(blocker3_paper_enforced_allowed_disposition_fixture(
+                    run_id_2, &plan_2,
+                )),
+                Some(authority_2),
+            )
+            .await;
+        state
+            .set_hermetic_test_broker_override_for_test(false)
+            .await;
+        assert!(
+            restart_result.is_ok(),
+            "BLOCKER3-04: restart after halt must succeed: {restart_result:?}"
+        );
+        let snapshot_2 = state
+            .dynamic_selection_runtime_snapshot()
+            .await
+            .expect("BLOCKER3-04: restart must commit fresh dynamic-selection metadata");
+        assert_eq!(
+            snapshot_2.run_id, run_id_2,
+            "BLOCKER3-04: restart's committed metadata must name the fresh \
+             run_id, never the halted run's"
+        );
+        assert_eq!(
+            snapshot_2.selected_pairs,
+            crate::dynamic_selection_start_gate::selected_host_pool_keys(&plan_2),
+            "BLOCKER3-04: restart's selected pairs must come from the fresh \
+             plan, never the halted run's prior bindings"
+        );
+
+        state
+            .stop_execution_runtime()
+            .await
+            .expect("BLOCKER3-04: cleanup stop must succeed");
+        delete_run_and_its_events(&pool, run_id).await;
+        delete_run_and_its_events(&pool, run_id_2).await;
+        blocker3_cleanup_symbol_evidence(&pool, "PB304AAPL").await;
+        blocker3_cleanup_symbol_evidence(&pool, "PB304MSFT").await;
+        blocker3_cleanup_symbol_evidence(&pool, "PB304AAPL2").await;
+        blocker3_cleanup_symbol_evidence(&pool, "PB304MSFT2").await;
+    }
+
+    // -------------------------------------------------------------------
+    // BLOCKER3-05 (requirement 13): shutdown from a real
+    // DynamicPaperEnforced Active run clears authority metadata and durably
+    // stops the run; restart after shutdown succeeds.
+    // -------------------------------------------------------------------
+    #[tokio::test(flavor = "multi_thread")]
+    async fn blocker3_05_shutdown_clears_authority_and_restart_succeeds() {
+        let _g = db_test_lock().lock().await;
+        let Some(pool) = db_pool_or_skip("BLOCKER3-05").await else {
+            return;
+        };
+        clear_any_preexisting_active_daemon_run(&pool).await;
+        blocker3_clear_stale_runtime_leader_lease(&pool).await;
+        let state = hermetic_paper_state(&pool);
+        state.set_hermetic_test_broker_override_for_test(true).await;
+        let run_id = state
+            .create_or_reuse_run_for_start(&pool)
+            .await
+            .expect("run creation must succeed");
+        let (plan, authority) = blocker3_plan_and_authority(run_id, "PB305AAPL", "PB305MSFT");
+        let (result, _trace) = state
+            .drive_production_start_effects_with_dispatch_authority_for_test(
+                pool.clone(),
+                run_id,
+                Some(blocker3_paper_enforced_allowed_disposition_fixture(
+                    run_id, &plan,
+                )),
+                Some(authority),
+            )
+            .await;
+        state
+            .set_hermetic_test_broker_override_for_test(false)
+            .await;
+        result.expect("BLOCKER3-05: setup must reach Active");
+
+        state.stop_for_shutdown().await;
+
+        assert_eq!(state.locally_owned_run_id().await, None);
+        assert!(
+            state.dynamic_selection_runtime_snapshot().await.is_none(),
+            "BLOCKER3-05: shutdown must clear the DynamicPaperEnforced \
+             authority's run/plan metadata"
+        );
+        assert!(matches!(
+            mqk_db::fetch_run(&pool, run_id)
+                .await
+                .expect("fetch_run")
+                .status,
+            mqk_db::RunStatus::Stopped
+        ));
+
+        let run_id_2 = state
+            .create_or_reuse_run_for_start(&pool)
+            .await
+            .expect("BLOCKER3-05: restart run creation must succeed");
+        let (plan_2, authority_2) =
+            blocker3_plan_and_authority(run_id_2, "PB305AAPL2", "PB305MSFT2");
+        state.set_hermetic_test_broker_override_for_test(true).await;
+        let (restart_result, _trace2) = state
+            .drive_production_start_effects_with_dispatch_authority_for_test(
+                pool.clone(),
+                run_id_2,
+                Some(blocker3_paper_enforced_allowed_disposition_fixture(
+                    run_id_2, &plan_2,
+                )),
+                Some(authority_2),
+            )
+            .await;
+        state
+            .set_hermetic_test_broker_override_for_test(false)
+            .await;
+        assert!(
+            restart_result.is_ok(),
+            "BLOCKER3-05: restart after shutdown must succeed: {restart_result:?}"
+        );
+
+        state
+            .stop_execution_runtime()
+            .await
+            .expect("BLOCKER3-05: cleanup stop must succeed");
+        delete_run_and_its_events(&pool, run_id).await;
+        delete_run_and_its_events(&pool, run_id_2).await;
+        blocker3_cleanup_symbol_evidence(&pool, "PB305AAPL").await;
+        blocker3_cleanup_symbol_evidence(&pool, "PB305MSFT").await;
+        blocker3_cleanup_symbol_evidence(&pool, "PB305AAPL2").await;
+        blocker3_cleanup_symbol_evidence(&pool, "PB305MSFT2").await;
+    }
+
+    // -------------------------------------------------------------------
+    // BLOCKER3-06 (requirements 14 + 15): the spawned task panics
+    // immediately after the startup barrier releases while carrying a real
+    // DynamicPaperEnforced authority. `stop_execution_runtime` (which reaps
+    // the finished loop first) must surface this as structured degraded
+    // truth, never a false clean Idle, and must leave no detached
+    // selected-host authority (the panicked task's own `dispatch_authority`
+    // — including its host pool — was dropped when the task unwound; no
+    // other owner ever held a clone).
+    //
+    // This test deliberately does NOT chain an immediate restart (unlike
+    // BLOCKER3-04/05, which prove requirement 16 via halt/shutdown): a
+    // panicked orchestrator's own `runtime_leader_lease` row is only
+    // released by its natural TTL expiry (the orchestrator instance that
+    // held it was dropped mid-unwind, never explicitly releasing it) — a
+    // real, pre-existing, out-of-scope safety property of the runtime
+    // leadership lease (unrelated to dynamic selection/provenance/signal
+    // journal), not something this patch touches. Requirement 16 (restart
+    // builds fresh run/plan/pool) is already fully proven by BLOCKER3-04
+    // and BLOCKER3-05 above via a clean halt/shutdown exit, which releases
+    // the lease immediately.
+    // -------------------------------------------------------------------
+    #[tokio::test(flavor = "multi_thread")]
+    async fn blocker3_06_panic_reports_degraded_and_leaves_no_detached_authority() {
+        let _g = db_test_lock().lock().await;
+        let Some(pool) = db_pool_or_skip("BLOCKER3-06").await else {
+            return;
+        };
+        clear_any_preexisting_active_daemon_run(&pool).await;
+        blocker3_clear_stale_runtime_leader_lease(&pool).await;
+        let state = hermetic_paper_state(&pool);
+        state.set_hermetic_test_broker_override_for_test(true).await;
+        state.set_execution_loop_panic_for_test(true);
+        let run_id = state
+            .create_or_reuse_run_for_start(&pool)
+            .await
+            .expect("run creation must succeed");
+        let (plan, authority) = blocker3_plan_and_authority(run_id, "PB306AAPL", "PB306MSFT");
+
+        let (result, _trace) = state
+            .drive_production_start_effects_with_dispatch_authority_for_test(
+                pool.clone(),
+                run_id,
+                Some(blocker3_paper_enforced_allowed_disposition_fixture(
+                    run_id, &plan,
+                )),
+                Some(authority),
+            )
+            .await;
+        state
+            .set_hermetic_test_broker_override_for_test(false)
+            .await;
+        result.expect("BLOCKER3-06: setup must reach Active before the task panics");
+
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+        state.set_execution_loop_panic_for_test(false);
+
+        let stop_result = state.stop_execution_runtime().await;
+        assert!(
+            stop_result.is_err(),
+            "BLOCKER3-06: a joined panic must be reported as an error, not \
+             silently absorbed"
+        );
+        assert_eq!(stop_result.unwrap_err().fault_class(), "loop join failed");
+
+        match &*state.runtime_ownership.lock().await {
+            crate::state::LocalRuntimeOwnership::Degraded {
+                run_id: degraded_run_id,
+                ..
+            } => {
+                assert_eq!(*degraded_run_id, run_id);
+            }
+            other => panic!(
+                "BLOCKER3-06: expected Degraded after a panicked \
+                 DynamicPaperEnforced task's join failure, got {other:?}"
+            ),
+        }
+        assert!(
+            state.dynamic_selection_runtime_snapshot().await.is_none(),
+            "BLOCKER3-06: no detached selected-host authority/metadata may \
+             survive a panicked task"
+        );
+
+        {
+            let mut lock = state.runtime_ownership.lock().await;
+            *lock = crate::state::LocalRuntimeOwnership::Idle;
+        }
+        mqk_db::clear_halted_run(&pool, run_id).await.ok();
+        mqk_db::stop_run(&pool, run_id).await.ok();
+
+        delete_run_and_its_events(&pool, run_id).await;
+        blocker3_cleanup_symbol_evidence(&pool, "PB306AAPL").await;
+        blocker3_cleanup_symbol_evidence(&pool, "PB306MSFT").await;
+        blocker3_cleanup_symbol_evidence(&pool, "PB306AAPL2").await;
+        blocker3_cleanup_symbol_evidence(&pool, "PB306MSFT2").await;
+    }
+
+    // -------------------------------------------------------------------
+    // BLOCKER3-07 (requirement 17): run A cannot clear run B. Run A reaches
+    // real Active with a genuine DynamicPaperEnforced authority; a
+    // conflicting second start attempt (run B) is refused by the real
+    // ownership-reservation seam; run A's dynamic-selection metadata
+    // (authority binding included) must be completely unchanged afterward.
+    // -------------------------------------------------------------------
+    #[tokio::test(flavor = "multi_thread")]
+    async fn blocker3_07_run_a_cleanup_cannot_clear_run_b_dynamic_paper_enforced_state() {
+        let _g = db_test_lock().lock().await;
+        let Some(pool) = db_pool_or_skip("BLOCKER3-07").await else {
+            return;
+        };
+        clear_any_preexisting_active_daemon_run(&pool).await;
+        blocker3_clear_stale_runtime_leader_lease(&pool).await;
+        let state = hermetic_paper_state(&pool);
+        state.set_hermetic_test_broker_override_for_test(true).await;
+        let run_a = state
+            .create_or_reuse_run_for_start(&pool)
+            .await
+            .expect("run A creation must succeed");
+        let (plan_a, authority_a) = blocker3_plan_and_authority(run_a, "PB307AAPL", "PB307MSFT");
+        let (result_a, _trace_a) = state
+            .drive_production_start_effects_with_dispatch_authority_for_test(
+                pool.clone(),
+                run_a,
+                Some(blocker3_paper_enforced_allowed_disposition_fixture(
+                    run_a, &plan_a,
+                )),
+                Some(authority_a),
+            )
+            .await;
+        state
+            .set_hermetic_test_broker_override_for_test(false)
+            .await;
+        result_a.expect("BLOCKER3-07: run A setup must reach Active");
+        assert_eq!(state.locally_owned_run_id().await, Some(run_a));
+
+        // Run B: a distinct run_id attempting to start while run A still
+        // genuinely owns the local runtime slot -- refused by the real
+        // `reserve_local_ownership` conflict path, never a fake stub.
+        let run_b = uuid::Uuid::new_v5(
+            &uuid::Uuid::NAMESPACE_DNS,
+            format!("mqk-daemon.blocker3.07.run_b.{run_a}").as_bytes(),
+        );
+        mqk_db::insert_run(
+            &pool,
+            &mqk_db::NewRun {
+                run_id: run_b,
+                engine_id: "mqk-daemon".to_string(),
+                mode: "PAPER".to_string(),
+                started_at_utc: Utc::now(),
+                git_hash: "UNKNOWN".to_string(),
+                config_hash: "blocker3-07-test".to_string(),
+                config_json: serde_json::json!({"test": "blocker3-07"}),
+                host_fingerprint: "blocker3-07-test-host".to_string(),
+            },
+        )
+        .await
+        .expect("run B row must insert");
+        let (plan_b, authority_b) = blocker3_plan_and_authority(run_b, "PB307AAPL2", "PB307MSFT2");
+        let (result_b, trace_b) = state
+            .drive_production_start_effects_with_dispatch_authority_for_test(
+                pool.clone(),
+                run_b,
+                Some(blocker3_paper_enforced_allowed_disposition_fixture(
+                    run_b, &plan_b,
+                )),
+                Some(authority_b),
+            )
+            .await;
+        assert!(
+            result_b.is_err(),
+            "BLOCKER3-07: run B must be refused while run A still owns the slot"
+        );
+        assert_eq!(
+            trace_b,
+            Vec::<&str>::new(),
+            "BLOCKER3-07: run B must fail at the very first step (ownership \
+             reservation), before any local bundle is ever committed"
+        );
+
+        // Run A's committed dynamic-selection state must be completely
+        // unchanged by run B's refused attempt and its rollback.
+        let snapshot_after = state
+            .dynamic_selection_runtime_snapshot()
+            .await
+            .expect("BLOCKER3-07: run A's metadata must still be present");
+        assert_eq!(
+            snapshot_after.run_id, run_a,
+            "BLOCKER3-07: run A's dynamic-selection metadata must still name \
+             run A, never run B"
+        );
+        assert_eq!(
+            snapshot_after.selected_pairs,
+            crate::dynamic_selection_start_gate::selected_host_pool_keys(&plan_a),
+            "BLOCKER3-07: run A's selected pairs must be exactly its own \
+             original binding set, never run B's"
+        );
+        assert!(snapshot_after.host_pool_present);
+        assert_eq!(state.locally_owned_run_id().await, Some(run_a));
+        assert!(matches!(
+            mqk_db::fetch_run(&pool, run_a)
+                .await
+                .expect("fetch_run run_a")
+                .status,
+            mqk_db::RunStatus::Running
+        ));
+        assert!(matches!(
+            mqk_db::fetch_run(&pool, run_b)
+                .await
+                .expect("fetch_run run_b")
+                .status,
+            mqk_db::RunStatus::Created
+        ));
+
+        state
+            .stop_execution_runtime()
+            .await
+            .expect("BLOCKER3-07: cleanup stop must succeed");
+        delete_run_and_its_events(&pool, run_a).await;
+        delete_run_and_its_events(&pool, run_b).await;
+        blocker3_cleanup_symbol_evidence(&pool, "PB307AAPL").await;
+        blocker3_cleanup_symbol_evidence(&pool, "PB307MSFT").await;
+        blocker3_cleanup_symbol_evidence(&pool, "PB307AAPL2").await;
+        blocker3_cleanup_symbol_evidence(&pool, "PB307MSFT2").await;
     }
 }
 

@@ -40,7 +40,9 @@ $CoreRs    = Join-Path $RepoRoot "core-rs"
 # Bumped as new rows are added to real_production_effects_matrix_tests --
 # a lower actual count than this is a real regression (a test vanished,
 # didn't compile, or a filter swallowed it), not something to silently pass.
-$MinExpectedTests = 19
+# TRUE-PROVENANCE-AND-RUNTIME-PROOF-REPAIR-01 Blocker 3: bumped 19 -> 26 for
+# the 7 new real DynamicPaperEnforced full-loop proof rows (BLOCKER3-01..07).
+$MinExpectedTests = 26
 
 Write-Host "============================================================"
 Write-Host " MQK Phase 7A R6 Exhaustive Matrix -- Fail-Fast DB Command"

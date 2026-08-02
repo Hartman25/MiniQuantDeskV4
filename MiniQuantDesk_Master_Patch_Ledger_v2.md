@@ -20103,3 +20103,258 @@ DISPOSITION:
 DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7B-SELECTED-HOST-ECONOMIC-DISPATCH-CLOSURE:
 COMPLETE -- every fixed-contract Part (1-9) implemented, wired, and verified against the full existing regression suite with zero regressions (698/698 lib tests, 58/58 directly-relevant integration files, both guard suites, rustfmt/clippy/unsafe-pattern guards all clean). 28 new tests cover the core, most safety-critical invariants (fail-closed build validation, host isolation, mixed timeframe, coherence-mismatch rejection, provenance no-op-for-legacy, pending-bar-once). A subset of the prompt's 35 named items (live single-tick spawn_execution_loop integration proof of exact Bundle-6/5 call counts, and full stop/halt/shutdown/reap/panic/restart lifecycle proofs of pool cleanup) are proven by source-inspection guard + Rust-ownership argument rather than a newly-written dedicated runtime test, exactly as itemized above -- reported precisely, not rounded up. No fabricated evidence; the two categories of apparent test failures encountered were traced to their exact pre-existing root cause (parallel-DB-race across binaries; pristine-baseline-reproducible environment gate) before being set aside.
 ```
+
+## DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7B-TRUE-PROVENANCE-AND-RUNTIME-PROOF-REPAIR-01 (2026-08-01)
+
+Independent source review of the Phase 7B closure above found two production-truth
+defects and confirmed the runtime-proof gap it had already reported precisely
+(not rounded up). This patch closes all three, additively, on top of
+056122b4 (no rebase/reset/rewrite).
+
+**Blocker 1 (provenance reconstructed, not preserved).** The prior
+implementation validated provenance against a per-tick `BTreeMap<(symbol,
+strategy_id), DynamicSelectionDispatchProvenance>` built once, then
+re-consulted by key lookup before/after Bundle 6/5 -- a decision with an
+altered timeframe or wrong run/plan binding could pass merely because its
+`(symbol, strategy_id)` key existed in the map. Repaired: `provenance_matches`
+and the detached map are deleted entirely.
+`runtime_opportunity_allocation::PendingDecisionWithBarFacts` now carries
+`dynamic_selection_provenance: Option<DynamicSelectionDispatchProvenance>`
+directly on the envelope, populated once at decision-derivation time
+(`loop_runner.rs`) from the active frozen authority's own selected binding --
+`None` for every `Legacy`/`Off`/`Shadow` decision, `Some` for every
+`DynamicPaperEnforced` decision. Bundle 6
+(`runtime_strategy_conflict::ConflictPolicyOutcome`) already moved the whole
+envelope by ordinal selection and needed no change. Bundle 5
+(`runtime_opportunity_allocation::RuntimeOpportunityAllocationOutcome`) was
+the actual defect: it collapsed to `Vec<InternalStrategyDecision>`, losing
+provenance -- now returns `Vec<PendingDecisionWithBarFacts>`, and its
+`PaperEnforced`-mode qty rebuild copies `bar_facts`/`dynamic_selection_provenance`
+unchanged onto the new envelope, touching only `decision`/`qty`/`decision_id`.
+A new `dynamic_selection_envelope_ok` function validates all five fields
+(`run_id`, `plan_id`, canonical `symbol`, `strategy_id`, `timeframe_secs`)
+against the active authority's bindings at four checkpoints (pre-Bundle-6,
+post-Bundle-6, post-Bundle-5, immediately pre-submission); any mismatch fails
+the whole tick closed with zero submissions. 9 mutation-proof tests (each
+field independently, missing provenance, and swapped provenance between two
+real selected bindings) each assert zero submissions.
+
+**Blocker 2 (signal journal used legacy authority for selected-host rows).**
+`record_signal_evaluation` (and the shared `prepare_bar_window_for_symbol_
+timeframe` gate it's called from) resolved `strategy_id`/`run_id` internally
+from `native_strategy_bootstrap`/`status.active_run_id` -- correct for the
+legacy backend, but the selected-host backend called the same function,
+meaning a `PaperEnforced` run with a strategy selection that differs from the
+legacy bootstrap's first fleet strategy could durably misattribute
+`strategy_signal_evaluations` rows. Repaired: a new `SignalEvaluationAuthority
+{ Legacy, Explicit { run_id, strategy_id } }` enum makes the authority
+explicit at every call site. `tick_strategy_dispatch_selected_hosts_with_bar_
+facts` now takes the active dispatch authority's own `run_id` as a parameter
+and passes `Explicit { run_id, strategy_id: &binding.strategy_id }` to every
+journal path it touches -- missing bars, stale bars, the DB-load-failure
+diagnostic (previously not journaled at all; now is), and the successful/
+no-signal evaluation row. The legacy backend passes `Legacy` and is otherwise
+byte-unchanged. Two new DB-backed tests (port 5434 only) prove: two selected
+bindings with genuinely different strategies (`intraday_scalper`,
+`volatility_breakout`) each produce a journal row carrying their own exact
+strategy_id/symbol/timeframe/run_id while the legacy bootstrap is deliberately
+set to a third, unrelated strategy (`swing_momentum`) that never appears in
+either row; and replaying the identical logical tick (same run_id/now_tick/
+binding) is idempotent (one row, not two).
+
+**Blocker 3 (required full-loop proof was not executed).** The prior handoff
+stated precisely that exact Bundle-6/5 call counts and stop/halt/shutdown/
+reap/panic/restart cleanup were argued from source-inspection guards and Rust
+ownership, never a live `spawn_execution_loop` tick. Closed without a fake
+coordinator: `ProductionRuntimeStartEffects`'s existing `dispatch_authority`
+field (already present, previously always injected as `None` by every test
+seam, silently defaulting even a `PaperEnforcedAllowed` fixture to `Legacy`
+inside the real spawned loop) is now populated by a new sibling test seam,
+`drive_production_start_effects_with_dispatch_authority_for_test`, which
+accepts a genuinely pre-built `RuntimeStrategyDispatchAuthority`. A new
+`AppState::loop_call_trace` (`Arc<Mutex<Vec<String>>>`, always present,
+`#[allow(dead_code)]` in non-test builds since every push and every reader is
+`#[cfg(test)]`-gated inline at the real call site) records an ordered event
+log pushed directly at the real Bundle 6 call site, the real Bundle 5 call
+site, the real cap #6 check, the real canonical submission call site, the
+real selected-host `on_bar` call, the real legacy-dispatch call, and
+provenance at both derivation and submission time -- in `state/loop_runner.rs`
+and `state.rs`, never a parallel/fake pipeline. Seven new tests in
+`state::lifecycle::real_production_effects_matrix_tests`
+(BLOCKER3-01..07) drive this through the exact accepted hermetic-broker
+mechanism SUCCESS-01/02 already used, on the port-5434 DB only:
+01 proves `PaperEnforcedAllowed` reaches `Active` carrying a genuine
+`DynamicPaperEnforced` authority; 02 seeds real bar sequences that make the
+real `intraday_scalper` (5-bar +50bps) and `volatility_breakout`
+(21-bar breakout) engines compute genuine buy signals, deposits one pending
+bar, waits for one real 1-second tick, and asserts from the trace: both hosts
+invoked exactly once each, zero legacy invocations, Bundle 6 exactly once,
+Bundle 5 exactly once, Bundle 6 strictly before Bundle 5, cap #6 checks
+strictly after Bundle 5, every submitted decision_id unique, and the derived
+and submitted provenance for each symbol match field-for-field; 03/04/05
+prove stop/halt/shutdown each clear the authority's dynamic-selection
+metadata (halt and shutdown each chained with a genuinely fresh restart); 06
+proves a real mid-tick panic reports `Degraded` (never a false clean `Idle`)
+and leaves no dynamic-selection metadata, without chaining an immediate
+restart (a panicked orchestrator's own `runtime_leader_lease` DB row is only
+released by its own TTL, not by this patch's cleanup path -- a real,
+pre-existing, out-of-scope property; restart-in-general is already fully
+proven by 04/05's clean-exit chains); 07 proves a genuinely conflicting
+second start attempt is refused before run A's committed metadata is touched.
+A pre-existing hazard surfaced and was fixed as hermetic test hygiene (not a
+production change): a prior test process that panicked or was killed can
+leave the shared local test DB's single-row `runtime_leader_lease` non-expired
+for a long TTL, blocking every subsequent orchestrator-leadership acquisition
+in any later run -- `blocker3_clear_stale_runtime_leader_lease` now clears it
+at the start of every Blocker 3 test, mirroring the module's own existing
+`clear_any_preexisting_active_daemon_run` pattern for the `runs` table.
+
+**Start-authority check + panic removal.** Added
+`DispatchAuthorityBuildError::{InvalidPlanRunId, RunIdMismatch}`:
+`build_dynamic_paper_enforced_dispatch_authority` now fail-closes, before any
+other validation, if `plan.context.run_id` doesn't parse as a UUID or doesn't
+equal the actual `run_id` the authority is being built for -- defense in
+depth on top of (never a replacement for) IR3's existing upstream
+`evaluate_dynamic_selection_start_gate` coherence check. Removed the
+`plan_id.expect("plan_id is Some whenever outcome.plan is Some")` trust-
+boundary panic in `state/lifecycle.rs`'s `start_runtime_effects`: `plan_id`
+is now recomputed directly from the already-in-scope `plan` inside the
+matched arm instead of unwrapping a separately-scoped `Option`, so the path
+cannot panic at all, not merely "shouldn't." 3 new tests
+(invalid/mismatched/matching run_id) plus the two mutated-context fixtures
+this forced (`ds_context()`/`empty_plan()` now embed the real `test_run_id()`
+instead of a placeholder string, since every fixture plan's `context.run_id`
+must now equal the run_id its own test passes to the builder).
+
+**Guard repair.** `check_phase7b_selected_host_dispatch_closure.ps1`
+rewritten: 17 checks (was 12) plus 4 mutation-negative self-tests (was 1).
+New checks prove no detached key-only provenance map remains anywhere in
+production code (9), the envelope itself carries optional provenance (10),
+Bundle 6's and Bundle 5's own input/output types are the envelope type, not a
+plain decision (11 -- this is the exact check that would have caught the
+original Bundle-5 defect), all five provenance fields are compared at >= 4
+checkpoints strictly before submission (12), the selected-host journal
+accepts an explicit run_id/strategy_id authority and never reads
+`native_strategy_bootstrap`/`status.active_run_id` (13), and a real hermetic
+full-loop `DynamicPaperEnforced` test module exists (14). New mutation-
+negative self-tests prove: reintroducing the detached `contains_key`-only
+check is caught (9), removing the `plan_id` field comparison from
+`dynamic_selection_envelope_ok` is caught (12), and reintroducing a
+`native_strategy_bootstrap` reference inside the selected-host dispatch
+function is caught (4/13). A `Strip-CommentLines` helper was added after the
+first draft's Checks 4/13 false-failed on doc comments that *mention*
+`native_strategy_bootstrap`/`status.active_run_id` while explaining the code
+deliberately does not call them -- now only real (non-comment) code lines are
+checked. `check_phase7a_r6_matrix_db_required.ps1`'s `$MinExpectedTests`
+bumped 19 -> 26 for the 7 new BLOCKER3 rows.
+
+**Regression verification.** `cargo test -p mqk-daemon --lib`: 724 passed, 0
+failed, 4 ignored (up from the pre-patch 712 baseline on 056122b4; net +12
+tests -- 9 Blocker-1 mutation tests + provenance-preservation tests, 2
+Blocker-2 DB tests, 7 Blocker-3 DB tests, 3 start-authority tests, minus test
+consolidation elsewhere -- 0 regressions), all against the real port-5434
+test DB, `--test-threads=1`.
+`check_phase7a_r6_matrix_db_required.ps1`: 26 passed, 0 failed, 0 ignored.
+
+**Validation.** `cargo check -p mqk-daemon --lib` clean. `cargo clippy -p
+mqk-daemon --lib --all-targets -- -D warnings`: zero diagnostics in any of
+the 6 touched files (one `#[allow(dead_code)]` added on `loop_call_trace`
+with a documented reason -- both its writer and its reader are
+`#[cfg(test)]`-gated, so a plain non-test `--lib` build sees it as
+genuinely dead; one `needless_splitn` fixed in a new test). Remaining
+clippy/fmt findings are 100% pre-existing, unrelated toolchain-pin drift in
+files this patch never touched (`runtime_session_source.rs`,
+`session_controller.rs`, `routes/portfolio.rs`, `routes/strategy_scans.rs`,
+etc. -- confirmed by diffing clippy/fmt output against only this patch's 6
+files, all clean). `rustfmt` applied only to the 6 touched Rust files
+(via direct `rustfmt`, not `cargo fmt`, to avoid `cargo fmt`'s whole-workspace
+scope touching the pre-existing drift). `check_unsafe_patterns.ps1`: clean
+(no `Uuid::new_v4()` introduced; new test fixtures use deterministic
+`Uuid::new_v5`). `check_migration_governance.sh`,
+`check_no_phase7a_production_effects_bypass.ps1`,
+`check_no_promotion_evidence_bypass.ps1`, `check_phase7a_final_closure.ps1`,
+`check_runtime_opportunity_allocation_01.sh` (Bundle 5),
+`check_multi_strategy_conflict_policy_01.sh` (Bundle 6),
+`check_ignored_load_bearing_proofs.sh`, `check_workspace_dep_inheritance.sh`:
+all clean. `git diff --check` / `git diff --cached --check`: clean
+(LF/CRLF line-ending notices only). No migrations added. No strategy
+calculation, Bundle 6 policy, Bundle 5 policy, cap #6 semantics, risk
+authority, broker/outbox authority, portfolio/P&L authority, or
+reconciliation authority changed.
+
+```
+DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7B-TRUE-PROVENANCE-AND-RUNTIME-PROOF-REPAIR-01:
+
+Patch: DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7B-TRUE-PROVENANCE-AND-RUNTIME-PROOF-REPAIR-01
+Worktree: C:\Users\Zacha\Desktop\MiniQuantDeskV4
+Branch: main
+Starting HEAD: 056122b42c28a631c924fff0dcc7bb0a2ff67439
+Pushed: NO
+Phase 7A reopened: NO
+Final Bundle 7 evidence/API/GUI started: NO
+Bundle 8 started: NO
+Real daemon started: NO
+Orders placed: NO (hermetic in-process Paper broker only, zero network/credentials)
+
+TRUE PROVENANCE
+Envelope: PendingDecisionWithBarFacts.dynamic_selection_provenance: Option<DynamicSelectionDispatchProvenance>
+Legacy None: yes (structural -- Legacy match arm never populates it)
+PaperEnforced Some: yes, populated at decision-derivation time from the active authority's own binding
+Bundle 6 preservation: structural (whole-envelope ordinal move; unchanged by this patch)
+Bundle 5 preservation: repaired -- RuntimeOpportunityAllocationOutcome.decisions is now Vec<PendingDecisionWithBarFacts>
+All-field validation: dynamic_selection_envelope_ok, 5 fields, 4 checkpoints (pre-Bundle6/post-Bundle6/post-Bundle5/pre-submission)
+Mutation proofs: 9 tests (run_id/plan_id/symbol/strategy_id/timeframe_secs/missing/swapped), each asserts zero submissions
+No detached reconstruction: yes -- provenance_matches and the per-tick BTreeMap deleted
+
+SIGNAL JOURNAL
+Legacy authority: unchanged (native_strategy_bootstrap/status.active_run_id)
+Selected authority: SignalEvaluationAuthority::Explicit{run_id, strategy_id}, sourced from the active dispatch authority
+Missing/stale/error rows: all three (missing bars, stale bars, DB-load-failure -- previously unjournaled) use the explicit authority
+Successful/no-signal rows: use the explicit authority
+Two-strategy DB proof: yes (intraday_scalper + volatility_breakout, port 5434)
+Idempotency: yes (identical logical tick replay produces one row)
+
+REAL LOOP PROOF
+Active: yes (BLOCKER3-01)
+Host calls: exactly 2 (one per selected binding), proven via trace (BLOCKER3-02)
+Legacy calls: 0, proven via trace (BLOCKER3-02)
+Bundle 6 count: 1, proven via trace (BLOCKER3-02)
+Bundle 5 count: 1, proven via trace (BLOCKER3-02)
+Ordering: Bundle 6 < Bundle 5 < cap #6 < submission, proven via trace (BLOCKER3-02)
+Cap #6: after Bundle 5, before submission, proven via trace (BLOCKER3-02)
+Submission count: every accepted decision_id unique, proven via trace (BLOCKER3-02)
+Stop: clears authority metadata (BLOCKER3-03)
+Halt: clears authority metadata; restart builds fresh run/plan/pool (BLOCKER3-04)
+Shutdown: clears authority metadata; restart succeeds (BLOCKER3-05)
+Reap: covered by the same stop_execution_runtime reap-first path exercised in BLOCKER3-06
+Panic/degraded: Degraded (never Idle), no detached metadata (BLOCKER3-06)
+Restart: fresh run/plan/pool via BLOCKER3-04/05 (BLOCKER3-06 does not chain an immediate restart -- see note below)
+Run A/B coherence: run B refused before run A's metadata is touched (BLOCKER3-07)
+
+START AUTHORITY
+Plan run_id validation: DispatchAuthorityBuildError::{InvalidPlanRunId, RunIdMismatch}, checked first, before any other validation
+Panic removal: plan_id.expect(...) removed from state/lifecycle.rs; recomputed directly from the in-scope plan instead
+
+GUARDS: check_phase7b_selected_host_dispatch_closure.ps1 (17 checks + 4 mutation-negative self-tests) OK; check_phase7a_final_closure.ps1 OK; check_phase7a_r6_matrix_db_required.ps1 (26 passed, MinExpectedTests bumped 19->26) OK; check_no_phase7a_production_effects_bypass.ps1 OK; check_no_promotion_evidence_bypass.ps1 OK; check_unsafe_patterns.ps1 OK; check_migration_governance.sh OK; check_runtime_opportunity_allocation_01.sh (Bundle 5) OK; check_multi_strategy_conflict_policy_01.sh (Bundle 6) OK; check_ignored_load_bearing_proofs.sh OK; check_workspace_dep_inheritance.sh OK
+VALIDATION: cargo check clean; cargo clippy -D warnings clean on all 6 touched files (pre-existing unrelated drift elsewhere untouched); rustfmt applied to touched files only; check_unsafe_patterns.ps1 clean; git diff --check / --cached --check clean; 724/724 mqk-daemon --lib tests pass (--test-threads=1, real port-5434 DB)
+FILES CHANGED: core-rs/crates/mqk-daemon/src/dynamic_selection_dispatch_authority.rs, core-rs/crates/mqk-daemon/src/runtime_opportunity_allocation.rs, core-rs/crates/mqk-daemon/src/runtime_strategy_conflict.rs, core-rs/crates/mqk-daemon/src/state.rs, core-rs/crates/mqk-daemon/src/state/lifecycle.rs, core-rs/crates/mqk-daemon/src/state/loop_runner.rs, scripts/guards/check_phase7a_r6_matrix_db_required.ps1, scripts/guards/check_phase7b_selected_host_dispatch_closure.ps1, MiniQuantDesk_Master_Patch_Ledger_v2.md
+FILES ADDED: none
+FILES DELETED: none
+FILES RENAMED: none
+UNEXPECTED FILES: none
+MIGRATIONS ADDED: NONE
+STRATEGY CALCULATIONS CHANGED: NO
+BUNDLE 6 POLICY CHANGED: NO
+BUNDLE 5 POLICY CHANGED: NO
+CAP #6 SEMANTICS CHANGED: NO
+RISK AUTHORITY CHANGED: NO
+BROKER/OUTBOX AUTHORITY CHANGED: NO
+PORTFOLIO/P&L AUTHORITY CHANGED: NO
+RECONCILIATION AUTHORITY CHANGED: NO
+AI CONSUMED: NO
+LIVE CAPITAL ENABLED: NO
+
+DISPOSITION:
+DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7B-TRUE-PROVENANCE-AND-RUNTIME-PROOF-REPAIR-01:
+COMPLETE -- AWAITING CHATGPT AND OPERATOR ACCEPTANCE BEFORE PUSH
+```
