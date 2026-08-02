@@ -856,6 +856,20 @@ pub struct DynamicSelectionRuntimeState {
     /// dispatch-authoritative under any disposition here — this field exists
     /// so a future status surface never has to fabricate this invariant.
     pub approved_for_live: bool,
+    /// Phase 7C Part 2: `true` only when durable plan evidence was actually
+    /// written (`Inserted` or `AlreadyExists`) for this start attempt.
+    /// `false` for `Off`, for any disposition reached before a plan could be
+    /// built, and for a `PayloadCollision`/write failure that a non-blocking
+    /// disposition (Shadow*) tolerated rather than refusing start on. Never
+    /// `true` when evidence was not actually durably persisted.
+    pub evidence_persisted: bool,
+    /// Phase 7C Part 3: the read-side validation outcome code (see
+    /// `crate::dynamic_selection_evidence_validator::DynamicSelectionEvidenceValidationState::code`)
+    /// captured when this start attempt read-validated its own evidence
+    /// (`PaperEnforcedAllowed` only). `None` for every other disposition —
+    /// Shadow* and refused starts persist evidence but do not gate
+    /// activation on read-validation.
+    pub evidence_validation_state: Option<String>,
 }
 
 impl DynamicSelectionRuntimeState {

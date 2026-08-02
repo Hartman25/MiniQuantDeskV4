@@ -6328,6 +6328,8 @@ mod ownership_state_machine_tests {
             host_pool_present: false,
             reasons: Vec::new(),
             approved_for_live: false,
+            evidence_persisted: false,
+            evidence_validation_state: None,
         };
         *state.runtime_ownership.lock().await = LocalRuntimeOwnership::Active {
             run_id,

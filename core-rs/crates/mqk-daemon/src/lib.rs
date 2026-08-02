@@ -14,6 +14,8 @@ pub mod daily_data_readiness;
 pub mod decision;
 pub mod dev_gate;
 pub mod dynamic_selection_dispatch_authority;
+pub mod dynamic_selection_evidence_validator;
+pub mod dynamic_selection_evidence_writer;
 pub mod dynamic_selection_host_pool;
 pub mod dynamic_selection_mode;
 pub mod dynamic_selection_plan_builder;

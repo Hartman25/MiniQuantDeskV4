@@ -3303,6 +3303,8 @@ mod tests {
             host_pool_present: false,
             reasons: Vec::new(),
             approved_for_live: false,
+            evidence_persisted: false,
+            evidence_validation_state: None,
         }
     }
 

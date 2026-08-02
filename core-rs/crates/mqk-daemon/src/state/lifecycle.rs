@@ -379,6 +379,8 @@ impl AppState {
                     host_pool_present: false,
                     reasons: Vec::new(),
                     approved_for_live: false,
+                    evidence_persisted: false,
+                    evidence_validation_state: None,
                 },
                 RuntimeStrategyDispatchAuthority::Legacy {
                     assignments: snapshot.legacy_assignments(),
@@ -421,6 +423,8 @@ impl AppState {
                                 },
                             ],
                             approved_for_live: false,
+                            evidence_persisted: false,
+                            evidence_validation_state: None,
                         },
                         RuntimeStrategyDispatchAuthority::Legacy {
                             assignments: snapshot.legacy_assignments(),
@@ -474,6 +478,144 @@ impl AppState {
         )
         .await;
 
+        // Part 2: mint the one deterministic plan identity whenever a plan
+        // was actually built (Shadow* and PaperEnforcedAllowed) — evidence/
+        // status truth for every disposition that has a plan, not only the
+        // dispatch-authoritative one.
+        let plan_id = outcome
+            .plan
+            .as_ref()
+            .map(crate::dynamic_selection_dispatch_authority::derive_dynamic_selection_plan_id);
+
+        // Phase 7C Part 2 — one write authority: persist durable plan
+        // evidence per disposition policy, before arm/begin/Starting
+        // publication/pool activation/spawn/barrier release (all of which
+        // happen only after this function's caller proceeds past this
+        // point). Must run before the `PaperEnforcedRefused` early-return
+        // below so refusal evidence is persisted before the start is
+        // actually refused. Never runs for `Off` (`outcome.plan` is always
+        // `None` there).
+        let mut evidence_persisted = false;
+        let mut evidence_validation_state: Option<String> = None;
+        if let (Some(plan), Some(evidence_plan_id)) = (outcome.plan.as_ref(), plan_id) {
+            let new_plan = crate::dynamic_selection_evidence_writer::build_new_dynamic_selection_plan(
+                plan,
+                evidence_plan_id,
+                run_id,
+                outcome.disposition,
+                now_utc,
+            )
+            .map_err(|e| {
+                RuntimeLifecycleError::forbidden(
+                    "runtime.start_refused.dynamic_selection_evidence_build_failed",
+                    "dynamic_selection_evidence",
+                    format!(
+                        "dynamic selection start refused: could not build durable evidence \
+                         payload for plan_id={evidence_plan_id}: {e} \
+                         (DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7C)"
+                    ),
+                )
+            });
+
+            match (new_plan, self.db.as_ref()) {
+                (Ok(new_plan), Some(db)) => {
+                    match mqk_db::insert_dynamic_selection_plan(db, new_plan).await {
+                        Ok(mqk_db::InsertDynamicSelectionPlanOutcome::Inserted)
+                        | Ok(mqk_db::InsertDynamicSelectionPlanOutcome::AlreadyExists) => {
+                            evidence_persisted = true;
+                        }
+                        Ok(mqk_db::InsertDynamicSelectionPlanOutcome::PayloadCollision {
+                            detail,
+                        }) => {
+                            if outcome.disposition
+                                == DynamicSelectionStartGateDisposition::PaperEnforcedAllowed
+                            {
+                                return Err(RuntimeLifecycleError::forbidden(
+                                    "runtime.start_refused.dynamic_selection_evidence_payload_collision",
+                                    "dynamic_selection_evidence",
+                                    format!(
+                                        "dynamic selection paper_enforced start refused: durable \
+                                         evidence payload collision for plan_id={evidence_plan_id}: \
+                                         {detail} (DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7C)"
+                                    ),
+                                ));
+                            }
+                            // Shadow*/refused: never blocks, but must never
+                            // claim evidence was durably persisted when a
+                            // collision means it was not.
+                        }
+                        Err(e) => {
+                            if outcome.disposition
+                                == DynamicSelectionStartGateDisposition::PaperEnforcedAllowed
+                            {
+                                return Err(RuntimeLifecycleError::forbidden(
+                                    "runtime.start_refused.dynamic_selection_evidence_write_failed",
+                                    "dynamic_selection_evidence",
+                                    format!(
+                                        "dynamic selection paper_enforced start refused: durable \
+                                         evidence write failed for plan_id={evidence_plan_id}: {e} \
+                                         (DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7C)"
+                                    ),
+                                ));
+                            }
+                        }
+                    }
+
+                    if outcome.disposition
+                        == DynamicSelectionStartGateDisposition::PaperEnforcedAllowed
+                    {
+                        // Part 3: read-validate the exact plan before this
+                        // function returns — i.e. before arm/begin/Starting
+                        // publication/pool activation/spawn/barrier release.
+                        let expected_bindings =
+                            crate::dynamic_selection_start_gate::selected_host_pool_keys(plan);
+                        let validation =
+                            crate::dynamic_selection_evidence_validator::validate_dynamic_selection_evidence(
+                                db,
+                                evidence_plan_id,
+                                run_id,
+                                Some(&expected_bindings),
+                            )
+                            .await;
+                        evidence_validation_state = Some(validation.code().to_string());
+                        if !validation.is_valid() {
+                            return Err(RuntimeLifecycleError::forbidden(
+                                "runtime.start_refused.dynamic_selection_evidence_invalid",
+                                "dynamic_selection_evidence",
+                                format!(
+                                    "dynamic selection paper_enforced start refused: durable \
+                                     evidence failed read-side validation for \
+                                     plan_id={evidence_plan_id}: {validation:?} \
+                                     (DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7C)"
+                                ),
+                            ));
+                        }
+                    }
+                }
+                (Ok(_), None) => {
+                    if outcome.disposition
+                        == DynamicSelectionStartGateDisposition::PaperEnforcedAllowed
+                    {
+                        return Err(RuntimeLifecycleError::forbidden(
+                            "runtime.start_refused.dynamic_selection_evidence_db_unavailable",
+                            "dynamic_selection_evidence",
+                            "dynamic selection paper_enforced start refused: no DB pool \
+                             available to persist durable plan evidence \
+                             (DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7C)"
+                                .to_string(),
+                        ));
+                    }
+                }
+                (Err(err), _) => {
+                    if outcome.disposition
+                        == DynamicSelectionStartGateDisposition::PaperEnforcedAllowed
+                    {
+                        return Err(err);
+                    }
+                }
+            }
+        }
+
         if outcome.disposition == DynamicSelectionStartGateDisposition::PaperEnforcedRefused {
             let reason_codes: Vec<&'static str> =
                 outcome.reasons.iter().map(|r| r.code()).collect();
@@ -492,15 +634,6 @@ impl AppState {
             .as_ref()
             .map(crate::dynamic_selection_start_gate::selected_host_pool_keys)
             .unwrap_or_default();
-
-        // Part 2: mint the one deterministic plan identity whenever a plan
-        // was actually built (Shadow* and PaperEnforcedAllowed) — evidence/
-        // status truth for every disposition that has a plan, not only the
-        // dispatch-authoritative one.
-        let plan_id = outcome
-            .plan
-            .as_ref()
-            .map(crate::dynamic_selection_dispatch_authority::derive_dynamic_selection_plan_id);
 
         // Parts 1/3/9: `PaperEnforcedAllowed` is the only disposition that
         // ever builds a `DynamicPaperEnforced` dispatch authority. Building
@@ -561,6 +694,8 @@ impl AppState {
                 host_pool_present,
                 reasons: outcome.reasons,
                 approved_for_live: false,
+                evidence_persisted,
+                evidence_validation_state,
             },
             dispatch_authority,
         ))
@@ -3063,6 +3198,8 @@ mod real_production_effects_matrix_tests {
             host_pool_present: false,
             reasons: Vec::new(),
             approved_for_live: false,
+            evidence_persisted: false,
+            evidence_validation_state: None,
         }
     }
 
@@ -3084,6 +3221,8 @@ mod real_production_effects_matrix_tests {
             host_pool_present: false,
             reasons: Vec::new(),
             approved_for_live: false,
+            evidence_persisted: false,
+            evidence_validation_state: None,
         }
     }
 
@@ -3109,6 +3248,8 @@ mod real_production_effects_matrix_tests {
                 },
             ],
             approved_for_live: false,
+            evidence_persisted: false,
+            evidence_validation_state: None,
         }
     }
 
@@ -4940,6 +5081,8 @@ mod real_production_effects_matrix_tests {
             host_pool_present: true,
             reasons: Vec::new(),
             approved_for_live: false,
+            evidence_persisted: false,
+            evidence_validation_state: None,
         }
     }
 
@@ -6222,6 +6365,8 @@ mod dynamic_selection_cleanup_contract_tests {
             host_pool_present: false,
             reasons: Vec::new(),
             approved_for_live: false,
+            evidence_persisted: false,
+            evidence_validation_state: None,
         }
     }
 
