@@ -596,6 +596,7 @@ mod tests {
         PendingDecisionWithBarFacts {
             decision: decision(symbol, strategy_id, "buy", qty),
             bar_facts: Some(facts(symbol, strategy_id, bar_end_ts)),
+            dynamic_selection_provenance: None,
         }
     }
 
@@ -611,6 +612,7 @@ mod tests {
         PendingDecisionWithBarFacts {
             decision: decision(symbol, strategy_id, "sell", qty),
             bar_facts: Some(facts(symbol, strategy_id, bar_end_ts)),
+            dynamic_selection_provenance: None,
         }
     }
 
@@ -620,6 +622,7 @@ mod tests {
         PendingDecisionWithBarFacts {
             decision: decision(symbol, strategy_id, "sell", qty),
             bar_facts: None,
+            dynamic_selection_provenance: None,
         }
     }
 

@@ -31,33 +31,95 @@ use super::types::{
     BrokerSnapshotTruthSource, BusMsg, DaemonOrchestrator, ExecutionLoopCommand, ExecutionLoopExit,
     ExecutionLoopHandle, ReconcileStatusSnapshot, StatusSnapshot,
 };
-use crate::dynamic_selection_dispatch_authority::RuntimeStrategyDispatchAuthority;
+use crate::dynamic_selection_dispatch_authority::{
+    DynamicSelectionDispatchProvenance, RuntimeStrategyDispatchAuthority,
+};
 use crate::notify::CriticalAlertPayload;
+use crate::runtime_opportunity_allocation::PendingDecisionWithBarFacts;
 
 use super::{
     dry_run_strategy_ids_from_env, evaluate_dry_run_strategies, AppState, PerSymbolTargetState,
     DEADMAN_TTL_SECONDS, EXECUTION_LOOP_INTERVAL, STRATEGY_CONTEXT_LOAD_LIMIT,
 };
 
-/// PHASE-7B-SELECTED-HOST-ECONOMIC-DISPATCH-CLOSURE Part 6: `true` when
-/// `(symbol, strategy_id)` has a recorded dynamic-selection dispatch
-/// provenance entry, OR when `provenance` is empty — the latter is the
-/// `Legacy`/`Off`/`Shadow` case, which never builds a provenance map at all
-/// (Off/Shadow decisions always carry no provenance requirement). Only a
-/// non-empty map (i.e. `DynamicPaperEnforced`) enforces that every decision
-/// must be found.
-fn provenance_matches(
-    provenance: &std::collections::BTreeMap<
-        (String, String),
-        crate::dynamic_selection_dispatch_authority::DynamicSelectionDispatchProvenance,
-    >,
-    symbol: &str,
-    strategy_id: &str,
+/// TRUE-PROVENANCE-AND-RUNTIME-PROOF-REPAIR-01 Blocker 1: validates one
+/// decision envelope's `dynamic_selection_provenance` directly against the
+/// active, frozen [`RuntimeStrategyDispatchAuthority`] — never against a
+/// detached, separately-reconstructed `(symbol, strategy_id)` map. `Legacy`
+/// (Off/Shadow) requires `None`. `DynamicPaperEnforced` requires `Some` whose
+/// `run_id`, `plan_id`, canonical symbol, `strategy_id`, and
+/// `timeframe_secs` all match the active authority, AND whose
+/// `(symbol, strategy_id, timeframe_secs, plan_id)` names a real selected
+/// binding in `bindings` — an altered timeframe, wrong run/plan binding, or
+/// a reconstructed identity cannot pass merely because a `(symbol,
+/// strategy_id)` key happens to exist somewhere.
+fn dynamic_selection_envelope_ok(
+    dispatch_authority: &RuntimeStrategyDispatchAuthority,
+    envelope: &PendingDecisionWithBarFacts,
 ) -> bool {
-    if provenance.is_empty() {
-        return true;
+    match dispatch_authority {
+        RuntimeStrategyDispatchAuthority::Legacy { .. } => {
+            envelope.dynamic_selection_provenance.is_none()
+        }
+        RuntimeStrategyDispatchAuthority::DynamicPaperEnforced {
+            run_id: authority_run_id,
+            plan_id: authority_plan_id,
+            bindings,
+            ..
+        } => {
+            let Some(p) = &envelope.dynamic_selection_provenance else {
+                return false;
+            };
+            if p.run_id != *authority_run_id {
+                return false;
+            }
+            if p.plan_id != *authority_plan_id {
+                return false;
+            }
+            let canonical_provenance_symbol = mqk_portfolio::canonical_symbol(&p.symbol);
+            let canonical_decision_symbol =
+                mqk_portfolio::canonical_symbol(&envelope.decision.symbol);
+            if canonical_provenance_symbol != canonical_decision_symbol {
+                return false;
+            }
+            if p.strategy_id != envelope.decision.strategy_id {
+                return false;
+            }
+            if p.timeframe_secs != envelope.decision.timeframe_secs {
+                return false;
+            }
+            let binding_exists = bindings.iter().any(|b| {
+                mqk_portfolio::canonical_symbol(&b.symbol) == canonical_provenance_symbol
+                    && b.strategy_id == p.strategy_id
+                    && b.timeframe_secs == p.timeframe_secs
+                    && b.plan_id == p.plan_id
+            });
+            if !binding_exists {
+                return false;
+            }
+            // Bar facts, when present, must still name the same decision --
+            // never a substitute bar for a different symbol/strategy.
+            if let Some(facts) = &envelope.bar_facts {
+                if facts.symbol != envelope.decision.symbol
+                    || facts.strategy_id != envelope.decision.strategy_id
+                {
+                    return false;
+                }
+            }
+            true
+        }
     }
-    provenance.contains_key(&(symbol.to_string(), strategy_id.to_string()))
+}
+
+/// Batch form of [`dynamic_selection_envelope_ok`] — every envelope in the
+/// slice must pass, or the whole tick refuses closed with zero submissions.
+fn dynamic_selection_envelopes_ok(
+    dispatch_authority: &RuntimeStrategyDispatchAuthority,
+    envelopes: &[PendingDecisionWithBarFacts],
+) -> bool {
+    envelopes
+        .iter()
+        .all(|e| dynamic_selection_envelope_ok(dispatch_authority, e))
 }
 
 // ---------------------------------------------------------------------------
@@ -796,34 +858,6 @@ pub(super) fn spawn_execution_loop(
                     // variant is active). A selected-host coherence fault
                     // (Part 5) halts/disarms fail-closed with zero decisions
                     // for the whole tick — never a fallback to legacy dispatch.
-                    let dynamic_selection_dispatch_provenance: std::collections::BTreeMap<
-                        (String, String),
-                        crate::dynamic_selection_dispatch_authority::DynamicSelectionDispatchProvenance,
-                    > = match &dispatch_authority {
-                        RuntimeStrategyDispatchAuthority::Legacy { .. } => {
-                            std::collections::BTreeMap::new()
-                        }
-                        RuntimeStrategyDispatchAuthority::DynamicPaperEnforced {
-                            run_id: authority_run_id,
-                            plan_id,
-                            bindings,
-                            ..
-                        } => bindings
-                            .iter()
-                            .map(|b| {
-                                (
-                                    (b.symbol.clone(), b.strategy_id.clone()),
-                                    crate::dynamic_selection_dispatch_authority::DynamicSelectionDispatchProvenance {
-                                        run_id: *authority_run_id,
-                                        plan_id: *plan_id,
-                                        symbol: b.symbol.clone(),
-                                        strategy_id: b.strategy_id.clone(),
-                                        timeframe_secs: b.timeframe_secs,
-                                    },
-                                )
-                            })
-                            .collect(),
-                    };
                     let dispatch_results = match &mut dispatch_authority {
                         RuntimeStrategyDispatchAuthority::Legacy { assignments } => {
                             state_arc
@@ -831,13 +865,16 @@ pub(super) fn spawn_execution_loop(
                                 .await
                         }
                         RuntimeStrategyDispatchAuthority::DynamicPaperEnforced {
+                            run_id: authority_run_id,
                             bindings,
                             host_pool,
                             ..
                         } => {
                             match state_arc
                                 .tick_strategy_dispatch_selected_hosts_with_bar_facts(
-                                    bindings, host_pool,
+                                    *authority_run_id,
+                                    bindings,
+                                    host_pool,
                                 )
                                 .await
                             {
@@ -1295,10 +1332,59 @@ pub(super) fn spawn_execution_loop(
                             // exact same evaluated-bar facts (`bar_facts`) —
                             // captured once, at dispatch time, above; never
                             // re-fetched here or later.
+                            //
+                            // TRUE-PROVENANCE-AND-RUNTIME-PROOF-REPAIR-01
+                            // Blocker 1: every decision derived from this one
+                            // `bar_result` also shares the exact same
+                            // dynamic-selection provenance — populated
+                            // directly from the active frozen
+                            // `dispatch_authority`'s own selected binding for
+                            // this exact assignment/strategy right here, at
+                            // derivation time. `None` for `Legacy`. Never
+                            // reattached or reconstructed after this point —
+                            // it travels inside the envelope through Bundle 6
+                            // and Bundle 5 unchanged.
+                            let dynamic_selection_provenance_for_assignment: Option<
+                                DynamicSelectionDispatchProvenance,
+                            > = match &dispatch_authority {
+                                RuntimeStrategyDispatchAuthority::Legacy { .. } => None,
+                                RuntimeStrategyDispatchAuthority::DynamicPaperEnforced {
+                                    run_id: authority_run_id,
+                                    plan_id,
+                                    bindings,
+                                    ..
+                                } => bindings
+                                    .iter()
+                                    .find(|b| {
+                                        b.symbol == assignment.symbol
+                                            && b.strategy_id == strategy_id
+                                    })
+                                    .map(|b| DynamicSelectionDispatchProvenance {
+                                        run_id: *authority_run_id,
+                                        plan_id: *plan_id,
+                                        symbol: b.symbol.clone(),
+                                        strategy_id: b.strategy_id.clone(),
+                                        timeframe_secs: b.timeframe_secs,
+                                    }),
+                            };
+                            // TRUE-PROVENANCE-AND-RUNTIME-PROOF-REPAIR-01
+                            // Blocker 3 requirement 10: record the exact
+                            // provenance this decision is derived with, so a
+                            // test can later prove the same fields reach
+                            // submission unchanged.
+                            #[cfg(test)]
+                            if let Some(p) = &dynamic_selection_provenance_for_assignment {
+                                state_arc.loop_call_trace_push_for_test(format!(
+                                    "derive_provenance:{}:{}:{}:{}:{}",
+                                    p.symbol, p.strategy_id, p.run_id, p.plan_id, p.timeframe_secs
+                                ));
+                            }
                             all_decisions.extend(decisions.into_iter().map(|decision| {
-                                crate::runtime_opportunity_allocation::PendingDecisionWithBarFacts {
+                                PendingDecisionWithBarFacts {
                                     decision,
                                     bar_facts: bar_facts.clone(),
+                                    dynamic_selection_provenance:
+                                        dynamic_selection_provenance_for_assignment.clone(),
                                 }
                             }));
                         }
@@ -1319,19 +1405,15 @@ pub(super) fn spawn_execution_loop(
                         // symbol per tick.
                         let market_date_today = Utc::now().format("%Y-%m-%d").to_string();
 
-                        // PHASE-7B Part 6: validate every decision's
-                        // dynamic-selection provenance before it is handed
-                        // to Bundle 6 — a no-op (always true) for `Legacy`
-                        // (empty provenance map). Missing/mismatched
+                        // PHASE-7B Part 6 / Blocker 1: validate every
+                        // decision's dynamic-selection provenance against the
+                        // active frozen authority before it is handed to
+                        // Bundle 6 — a no-op (always true) for `Legacy`
+                        // (every envelope carries `None`). Missing/mismatched
                         // provenance in `paper_enforced` fails the whole
                         // tick closed before the first submission.
-                        let provenance_ok_pre_bundle6 = all_decisions.iter().all(|p| {
-                            provenance_matches(
-                                &dynamic_selection_dispatch_provenance,
-                                &p.decision.symbol,
-                                &p.decision.strategy_id,
-                            )
-                        });
+                        let provenance_ok_pre_bundle6 =
+                            dynamic_selection_envelopes_ok(&dispatch_authority, &all_decisions);
                         if !provenance_ok_pre_bundle6 {
                             tracing::error!(
                                 run_id = %run_id,
@@ -1347,6 +1429,12 @@ pub(super) fn spawn_execution_loop(
                         // from canonical cycle facts and each candidate's
                         // own timeframe/bar facts (already true; unchanged
                         // by Phase 7B).
+                        //
+                        // TRUE-PROVENANCE-AND-RUNTIME-PROOF-REPAIR-01
+                        // Blocker 3: this is the one real Bundle 6 call site
+                        // for this tick.
+                        #[cfg(test)]
+                        state_arc.loop_call_trace_push_for_test("bundle6");
                         let conflict_outcome = crate::runtime_strategy_conflict::gather_and_resolve(
                             &state_arc,
                             run_id,
@@ -1357,20 +1445,16 @@ pub(super) fn spawn_execution_loop(
                         )
                         .await;
 
-                        // PHASE-7B Part 6: re-validate after Bundle 6 —
-                        // provenance must survive conflict resolution
-                        // unchanged (Bundle 6 never sees this map, so it
-                        // structurally cannot rewrite it; this proves no
-                        // decision the map doesn't recognize could have
-                        // been substituted in).
-                        let provenance_ok_post_bundle6 =
-                            conflict_outcome.decisions.iter().all(|p| {
-                                provenance_matches(
-                                    &dynamic_selection_dispatch_provenance,
-                                    &p.decision.symbol,
-                                    &p.decision.strategy_id,
-                                )
-                            });
+                        // PHASE-7B Part 6 / Blocker 1: re-validate after
+                        // Bundle 6 — provenance must survive conflict
+                        // resolution unchanged (Bundle 6 only ever moves the
+                        // whole envelope by ordinal selection; it never
+                        // touches `dynamic_selection_provenance`, so it
+                        // structurally cannot drop, rewrite, or swap it).
+                        let provenance_ok_post_bundle6 = dynamic_selection_envelopes_ok(
+                            &dispatch_authority,
+                            &conflict_outcome.decisions,
+                        );
                         if !provenance_ok_post_bundle6 {
                             tracing::error!(
                                 run_id = %run_id,
@@ -1439,6 +1523,13 @@ pub(super) fn spawn_execution_loop(
                         // default) or there are no buy-side decisions this
                         // tick, this is a zero-cost passthrough — no I/O, no
                         // allocator call, `all_decisions` returned unchanged.
+                        //
+                        // TRUE-PROVENANCE-AND-RUNTIME-PROOF-REPAIR-01
+                        // Blocker 3: this is the one real Bundle 5 call site
+                        // for this tick — always strictly after the Bundle 6
+                        // call site above (same straight-line tick body).
+                        #[cfg(test)]
+                        state_arc.loop_call_trace_push_for_test("bundle5");
                         let allocation_outcome =
                             crate::runtime_opportunity_allocation::gather_and_apply(
                                 &state_arc,
@@ -1456,19 +1547,16 @@ pub(super) fn spawn_execution_loop(
                         // evidence inside gather_and_apply, best-effort —
                         // nothing further to do with it here.
 
-                        // PHASE-7B Part 6: re-validate after Bundle 5, before
-                        // cap #6/submission — provenance must survive
-                        // allocation unchanged except the permitted qty
-                        // change (symbol/strategy_id identity is untouched
-                        // by `rebuild_decision_with_qty`).
-                        let provenance_ok_post_bundle5 =
-                            allocation_outcome.decisions.iter().all(|d| {
-                                provenance_matches(
-                                    &dynamic_selection_dispatch_provenance,
-                                    &d.symbol,
-                                    &d.strategy_id,
-                                )
-                            });
+                        // PHASE-7B Part 6 / Blocker 1: re-validate after
+                        // Bundle 5, before cap #6/submission — provenance
+                        // must survive allocation unchanged except the
+                        // permitted qty/decision_id rebuild
+                        // (`rebuild_decision_with_qty` never touches symbol,
+                        // strategy_id, or `dynamic_selection_provenance`).
+                        let provenance_ok_post_bundle5 = dynamic_selection_envelopes_ok(
+                            &dispatch_authority,
+                            &allocation_outcome.decisions,
+                        );
                         if !provenance_ok_post_bundle5 {
                             tracing::error!(
                                 run_id = %run_id,
@@ -1478,13 +1566,43 @@ pub(super) fn spawn_execution_loop(
                             continue;
                         }
 
-                        for decision in allocation_outcome.decisions {
+                        // PHASE-7B Part 6 / Blocker 1: the fourth and final
+                        // checkpoint, immediately before the submission loop
+                        // below ever calls `submit_internal_strategy_decision`
+                        // — proves the exact envelope this tick is about to
+                        // submit still carries intact, matching provenance at
+                        // the last possible point before an order is placed.
+                        let provenance_ok_pre_submission = dynamic_selection_envelopes_ok(
+                            &dispatch_authority,
+                            &allocation_outcome.decisions,
+                        );
+                        if !provenance_ok_pre_submission {
+                            tracing::error!(
+                                run_id = %run_id,
+                                "phase7b_dynamic_selection_provenance_missing_pre_submission: \
+                                 refusing whole tick closed, zero submissions"
+                            );
+                            continue;
+                        }
+
+                        for envelope in allocation_outcome.decisions {
+                            let decision = envelope.decision;
                             // MULTI-SYMBOL-CAPITAL-CAPS-01 cap #6: relocated
                             // here (submission time) because it counts
                             // *accepted* decisions — see this file's
                             // "Phase F" comment above the `all_decisions`
                             // declaration for why. Same running count, same
                             // dispatch order, same reason string as before.
+                            //
+                            // TRUE-PROVENANCE-AND-RUNTIME-PROOF-REPAIR-01
+                            // Blocker 3: this is the one real cap #6 check
+                            // site — strictly after Bundle 5, strictly
+                            // before the canonical submission call below.
+                            #[cfg(test)]
+                            state_arc.loop_call_trace_push_for_test(format!(
+                                "cap6_check:{}",
+                                decision.symbol
+                            ));
                             if AppState::max_new_orders_per_tick_reason(
                                 new_orders_this_tick,
                                 max_new_orders_per_tick_cap,
@@ -1523,6 +1641,25 @@ pub(super) fn spawn_execution_loop(
                             let decision_symbol = decision.symbol.clone();
                             let decision_side = decision.side.clone();
                             let decision_qty = decision.qty;
+                            // TRUE-PROVENANCE-AND-RUNTIME-PROOF-REPAIR-01
+                            // Blocker 3 requirement 10: record the exact
+                            // provenance reaching this, the one real
+                            // canonical submission call site — a test can
+                            // diff this against the matching `derive_
+                            // provenance` event to prove the envelope
+                            // reached submission unchanged (except the
+                            // permitted qty/decision_id rebuild, which this
+                            // event does not carry).
+                            #[cfg(test)]
+                            if let Some(p) = &envelope.dynamic_selection_provenance {
+                                state_arc.loop_call_trace_push_for_test(format!(
+                                    "submit_provenance:{}:{}:{}:{}:{}",
+                                    p.symbol, p.strategy_id, p.run_id, p.plan_id, p.timeframe_secs
+                                ));
+                            }
+                            #[cfg(test)]
+                            state_arc
+                                .loop_call_trace_push_for_test(format!("submit:{did}:{decision_symbol}"));
                             let outcome = crate::decision::submit_internal_strategy_decision(
                                 &state_arc,
                                 decision,
@@ -1838,45 +1975,281 @@ pub(super) async fn publish_reconcile_failure(
 #[cfg(test)]
 mod phase7b_provenance_tests {
     use super::*;
-    use crate::dynamic_selection_dispatch_authority::DynamicSelectionDispatchProvenance;
+    use crate::decision::InternalStrategyDecision;
+    use crate::dynamic_selection_dispatch_authority::SelectedDispatchBinding;
+    use crate::dynamic_selection_host_pool::DynamicSelectionHostPool;
 
-    fn prov(
-        run_id: Uuid,
-        plan_id: Uuid,
-        symbol: &str,
-        strategy_id: &str,
-    ) -> DynamicSelectionDispatchProvenance {
-        DynamicSelectionDispatchProvenance {
-            run_id,
-            plan_id,
+    fn run_id() -> Uuid {
+        Uuid::new_v5(&Uuid::NAMESPACE_DNS, b"phase7b.test.run_id")
+    }
+
+    fn plan_id() -> Uuid {
+        Uuid::new_v5(&Uuid::NAMESPACE_DNS, b"phase7b.test.plan_id")
+    }
+
+    fn binding(symbol: &str, strategy_id: &str, timeframe_secs: i64) -> SelectedDispatchBinding {
+        SelectedDispatchBinding {
             symbol: symbol.to_string(),
             strategy_id: strategy_id.to_string(),
+            timeframe_secs,
+            db_timeframe_label: "5m".to_string(),
+            selection_reason_code: "selected".to_string(),
+            plan_id: plan_id(),
+        }
+    }
+
+    /// A `DynamicPaperEnforced` authority with one selected AAPL/
+    /// intraday_scalper/300s binding. `host_pool` is deliberately empty --
+    /// `dynamic_selection_envelope_ok` never reads it.
+    fn dynamic_authority() -> RuntimeStrategyDispatchAuthority {
+        RuntimeStrategyDispatchAuthority::DynamicPaperEnforced {
+            run_id: run_id(),
+            plan_id: plan_id(),
+            bindings: vec![binding("AAPL", "intraday_scalper", 300)],
+            host_pool: DynamicSelectionHostPool::build(&[]).expect("empty pool builds"),
+        }
+    }
+
+    fn legacy_authority() -> RuntimeStrategyDispatchAuthority {
+        RuntimeStrategyDispatchAuthority::Legacy {
+            assignments: Vec::new(),
+        }
+    }
+
+    fn decision(symbol: &str, strategy_id: &str, timeframe_secs: i64) -> InternalStrategyDecision {
+        InternalStrategyDecision {
+            decision_id: format!("{symbol}-{strategy_id}"),
+            strategy_id: strategy_id.to_string(),
+            symbol: symbol.to_string(),
+            timeframe_secs,
+            side: "buy".to_string(),
+            qty: 10,
+            order_type: "market".to_string(),
+            time_in_force: "day".to_string(),
+            limit_price: None,
+        }
+    }
+
+    fn valid_provenance() -> DynamicSelectionDispatchProvenance {
+        DynamicSelectionDispatchProvenance {
+            run_id: run_id(),
+            plan_id: plan_id(),
+            symbol: "AAPL".to_string(),
+            strategy_id: "intraday_scalper".to_string(),
             timeframe_secs: 300,
         }
     }
 
-    /// PHASE-7B Part 6: an empty provenance map (the `Legacy`/`Off`/
-    /// `Shadow` case, which never builds one) is a no-op -- every decision
-    /// passes, since Off/Shadow decisions carry no provenance requirement
-    /// at all.
+    fn envelope(
+        provenance: Option<DynamicSelectionDispatchProvenance>,
+    ) -> PendingDecisionWithBarFacts {
+        PendingDecisionWithBarFacts {
+            decision: decision("AAPL", "intraday_scalper", 300),
+            bar_facts: None,
+            dynamic_selection_provenance: provenance,
+        }
+    }
+
+    // ── Legacy: provenance must always be None ─────────────────────────
+
     #[test]
-    fn empty_provenance_map_is_a_legacy_noop() {
-        let empty = std::collections::BTreeMap::new();
-        assert!(provenance_matches(&empty, "AAPL", "intraday_scalper"));
-        assert!(provenance_matches(&empty, "ANYTHING", "ANYTHING"));
+    fn legacy_requires_none_provenance() {
+        assert!(dynamic_selection_envelope_ok(
+            &legacy_authority(),
+            &envelope(None)
+        ));
+        assert!(
+            !dynamic_selection_envelope_ok(
+                &legacy_authority(),
+                &envelope(Some(valid_provenance()))
+            ),
+            "a Legacy decision carrying provenance must be rejected"
+        );
+    }
+
+    // ── DynamicPaperEnforced: the happy path ────────────────────────────
+
+    #[test]
+    fn dynamic_paper_enforced_accepts_matching_provenance() {
+        assert!(dynamic_selection_envelope_ok(
+            &dynamic_authority(),
+            &envelope(Some(valid_provenance()))
+        ));
+    }
+
+    // ── Mutation proofs: each field independently, plus missing/swapped ──
+
+    #[test]
+    fn missing_provenance_fails_closed() {
+        assert!(!dynamic_selection_envelope_ok(
+            &dynamic_authority(),
+            &envelope(None)
+        ));
     }
 
     #[test]
-    fn non_empty_map_requires_an_exact_symbol_strategy_match() {
-        let run_id = Uuid::new_v5(&Uuid::NAMESPACE_DNS, b"phase7b.test.run_id");
-        let plan_id = Uuid::new_v5(&Uuid::NAMESPACE_DNS, b"phase7b.test.plan_id");
-        let mut map = std::collections::BTreeMap::new();
-        map.insert(
-            ("AAPL".to_string(), "intraday_scalper".to_string()),
-            prov(run_id, plan_id, "AAPL", "intraday_scalper"),
-        );
-        assert!(provenance_matches(&map, "AAPL", "intraday_scalper"));
-        assert!(!provenance_matches(&map, "MSFT", "intraday_scalper"));
-        assert!(!provenance_matches(&map, "AAPL", "swing_momentum"));
+    fn mutated_run_id_fails_closed() {
+        let mut p = valid_provenance();
+        p.run_id = Uuid::new_v5(&Uuid::NAMESPACE_DNS, b"wrong.run_id");
+        assert!(!dynamic_selection_envelope_ok(
+            &dynamic_authority(),
+            &envelope(Some(p))
+        ));
+    }
+
+    #[test]
+    fn mutated_plan_id_fails_closed() {
+        let mut p = valid_provenance();
+        p.plan_id = Uuid::new_v5(&Uuid::NAMESPACE_DNS, b"wrong.plan_id");
+        assert!(!dynamic_selection_envelope_ok(
+            &dynamic_authority(),
+            &envelope(Some(p))
+        ));
+    }
+
+    #[test]
+    fn mutated_symbol_fails_closed() {
+        // provenance claims MSFT but the decision itself is still AAPL --
+        // canonical-symbol comparison must catch the mismatch.
+        let mut p = valid_provenance();
+        p.symbol = "MSFT".to_string();
+        assert!(!dynamic_selection_envelope_ok(
+            &dynamic_authority(),
+            &envelope(Some(p))
+        ));
+    }
+
+    #[test]
+    fn mutated_strategy_id_fails_closed() {
+        let mut p = valid_provenance();
+        p.strategy_id = "swing_momentum".to_string();
+        assert!(!dynamic_selection_envelope_ok(
+            &dynamic_authority(),
+            &envelope(Some(p))
+        ));
+    }
+
+    #[test]
+    fn mutated_timeframe_secs_fails_closed() {
+        let mut p = valid_provenance();
+        p.timeframe_secs = 3600;
+        assert!(!dynamic_selection_envelope_ok(
+            &dynamic_authority(),
+            &envelope(Some(p))
+        ));
+    }
+
+    #[test]
+    fn provenance_naming_a_binding_that_does_not_exist_fails_closed() {
+        // Every field is internally self-consistent, but no binding in the
+        // active authority actually has this (symbol, strategy_id,
+        // timeframe_secs, plan_id) tuple -- a reconstructed-but-plausible
+        // identity must still be rejected.
+        let mut p = valid_provenance();
+        p.symbol = "GOOG".to_string();
+        let mut decision_envelope = envelope(Some(p));
+        decision_envelope.decision.symbol = "GOOG".to_string();
+        assert!(!dynamic_selection_envelope_ok(
+            &dynamic_authority(),
+            &decision_envelope
+        ));
+    }
+
+    #[test]
+    fn swapped_provenance_between_two_decisions_fails_closed() {
+        // Two selected bindings; swap MSFT's decision to carry AAPL's
+        // provenance and vice versa -- each must be rejected even though
+        // both provenance values are individually valid for *some*
+        // decision this tick.
+        let authority = RuntimeStrategyDispatchAuthority::DynamicPaperEnforced {
+            run_id: run_id(),
+            plan_id: plan_id(),
+            bindings: vec![
+                binding("AAPL", "intraday_scalper", 300),
+                binding("MSFT", "volatility_breakout", 3600),
+            ],
+            host_pool: DynamicSelectionHostPool::build(&[]).expect("empty pool builds"),
+        };
+        let aapl_provenance = DynamicSelectionDispatchProvenance {
+            run_id: run_id(),
+            plan_id: plan_id(),
+            symbol: "AAPL".to_string(),
+            strategy_id: "intraday_scalper".to_string(),
+            timeframe_secs: 300,
+        };
+        let msft_provenance = DynamicSelectionDispatchProvenance {
+            run_id: run_id(),
+            plan_id: plan_id(),
+            symbol: "MSFT".to_string(),
+            strategy_id: "volatility_breakout".to_string(),
+            timeframe_secs: 3600,
+        };
+        // Correct pairing: both pass.
+        let aapl_envelope_correct = PendingDecisionWithBarFacts {
+            decision: decision("AAPL", "intraday_scalper", 300),
+            bar_facts: None,
+            dynamic_selection_provenance: Some(aapl_provenance.clone()),
+        };
+        let msft_envelope_correct = PendingDecisionWithBarFacts {
+            decision: decision("MSFT", "volatility_breakout", 3600),
+            bar_facts: None,
+            dynamic_selection_provenance: Some(msft_provenance.clone()),
+        };
+        assert!(dynamic_selection_envelope_ok(
+            &authority,
+            &aapl_envelope_correct
+        ));
+        assert!(dynamic_selection_envelope_ok(
+            &authority,
+            &msft_envelope_correct
+        ));
+
+        // Swapped pairing: both must fail.
+        let aapl_envelope_swapped = PendingDecisionWithBarFacts {
+            decision: decision("AAPL", "intraday_scalper", 300),
+            bar_facts: None,
+            dynamic_selection_provenance: Some(msft_provenance),
+        };
+        let msft_envelope_swapped = PendingDecisionWithBarFacts {
+            decision: decision("MSFT", "volatility_breakout", 3600),
+            bar_facts: None,
+            dynamic_selection_provenance: Some(aapl_provenance),
+        };
+        assert!(!dynamic_selection_envelope_ok(
+            &authority,
+            &aapl_envelope_swapped
+        ));
+        assert!(!dynamic_selection_envelope_ok(
+            &authority,
+            &msft_envelope_swapped
+        ));
+    }
+
+    // ── Batch form ───────────────────────────────────────────────────────
+
+    #[test]
+    fn batch_form_fails_closed_if_any_single_envelope_fails() {
+        let good = envelope(Some(valid_provenance()));
+        let bad = envelope(None);
+        assert!(!dynamic_selection_envelopes_ok(
+            &dynamic_authority(),
+            &[good, bad]
+        ));
+    }
+
+    #[test]
+    fn batch_form_passes_when_every_envelope_passes() {
+        let good_a = envelope(Some(valid_provenance()));
+        let good_b = envelope(Some(valid_provenance()));
+        assert!(dynamic_selection_envelopes_ok(
+            &dynamic_authority(),
+            &[good_a, good_b]
+        ));
+    }
+
+    #[test]
+    fn empty_batch_is_vacuously_ok_for_either_authority() {
+        assert!(dynamic_selection_envelopes_ok(&legacy_authority(), &[]));
+        assert!(dynamic_selection_envelopes_ok(&dynamic_authority(), &[]));
     }
 }

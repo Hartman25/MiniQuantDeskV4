@@ -75,6 +75,7 @@ use chrono::Utc;
 use uuid::Uuid;
 
 use crate::decision::InternalStrategyDecision;
+use crate::dynamic_selection_dispatch_authority::DynamicSelectionDispatchProvenance;
 use crate::runtime_opportunity_artifact::LoadedRuntimeOpportunitySet;
 use crate::runtime_opportunity_mode::RuntimeOpportunityAllocationMode;
 use crate::state::{AppState, EvaluatedBarFacts};
@@ -107,6 +108,15 @@ pub struct ActiveSnapshotFacts {
 pub struct PendingDecisionWithBarFacts {
     pub decision: InternalStrategyDecision,
     pub bar_facts: Option<EvaluatedBarFacts>,
+    /// TRUE-PROVENANCE-AND-RUNTIME-PROOF-REPAIR-01 Blocker 1: the exact
+    /// dynamic-selection dispatch provenance this decision was derived
+    /// under, carried with the decision itself from the moment it is
+    /// derived through Bundle 6 and Bundle 5 — never reattached or
+    /// reconstructed from a separate lookup map afterward. `None` for
+    /// every `Legacy`/`Off`/`Shadow` decision; `Some` for every decision
+    /// derived while `RuntimeStrategyDispatchAuthority::DynamicPaperEnforced`
+    /// is active.
+    pub(crate) dynamic_selection_provenance: Option<DynamicSelectionDispatchProvenance>,
 }
 
 /// Deterministic per-cycle economic identity (Phase B): UUIDv5 of `run_id` +
@@ -188,7 +198,14 @@ pub struct RuntimeOpportunityAllocationOutcome {
     /// `submit_internal_strategy_decision` seam — sells always pass through;
     /// buys pass through unchanged (shadow), are clamped/dropped (paper
     /// enforced), or are entirely refused (missing authority).
-    pub decisions: Vec<InternalStrategyDecision>,
+    ///
+    /// TRUE-PROVENANCE-AND-RUNTIME-PROOF-REPAIR-01 Blocker 1: returns the
+    /// full envelope, not a plain decision — `dynamic_selection_provenance`
+    /// travels with each surviving decision unchanged (byte-for-byte) except
+    /// for the existing permitted `decision`/`qty` rebuild in
+    /// `PaperEnforced` mode. Callers must never re-look-up provenance by
+    /// `(symbol, strategy_id)` after this point.
+    pub decisions: Vec<PendingDecisionWithBarFacts>,
     /// `None` when `mode == Off` or there were no buy-side decisions this
     /// tick to consider. `Some` (even an all-refused one) otherwise — this
     /// is the operator-visible/durable-evidence-worthy plan.
@@ -291,7 +308,7 @@ pub fn apply_runtime_opportunity_allocation(
 ) -> RuntimeOpportunityAllocationOutcome {
     if ctx.mode == RuntimeOpportunityAllocationMode::Off {
         return RuntimeOpportunityAllocationOutcome {
-            decisions: decisions.into_iter().map(|p| p.decision).collect(),
+            decisions,
             plan: None,
         };
     }
@@ -299,8 +316,7 @@ pub fn apply_runtime_opportunity_allocation(
     let (buy_pending, other_pending): (Vec<_>, Vec<_>) = decisions
         .into_iter()
         .partition(|p| p.decision.side.eq_ignore_ascii_case("buy"));
-    let mut other_decisions: Vec<InternalStrategyDecision> =
-        other_pending.into_iter().map(|p| p.decision).collect();
+    let mut other_decisions: Vec<PendingDecisionWithBarFacts> = other_pending;
 
     if buy_pending.is_empty() {
         return RuntimeOpportunityAllocationOutcome {
@@ -475,23 +491,32 @@ pub fn apply_runtime_opportunity_allocation(
     match ctx.mode {
         RuntimeOpportunityAllocationMode::Off => unreachable!("handled above"),
         RuntimeOpportunityAllocationMode::Shadow => {
-            // Zero allocator-driven outbox changes: original buy decisions
-            // pass through exactly as the strategy computed them.
-            other_decisions.extend(buy_decisions);
+            // Zero allocator-driven outbox changes: original buy envelopes
+            // pass through exactly as the strategy computed them, provenance
+            // included byte-for-byte.
+            other_decisions.extend(buy_pending);
         }
         RuntimeOpportunityAllocationMode::PaperEnforced => {
-            for d in buy_decisions {
-                let Some(result) = plan.candidates.iter().find(|c| c.symbol == d.symbol) else {
+            for p in buy_pending {
+                let Some(result) = plan
+                    .candidates
+                    .iter()
+                    .find(|c| c.symbol == p.decision.symbol)
+                else {
                     continue; // defensive: every buy decision has a plan entry by construction
                 };
                 let delta = result.buy_delta();
                 if delta > 0 {
-                    other_decisions.push(rebuild_decision_with_qty(
-                        &d,
-                        delta,
-                        ctx.run_id,
-                        ctx.now_micros,
-                    ));
+                    // Blocker 1: only `decision` (qty/decision_id) is
+                    // rebuilt — `bar_facts` and `dynamic_selection_provenance`
+                    // are copied from the original envelope unchanged.
+                    let rebuilt_decision =
+                        rebuild_decision_with_qty(&p.decision, delta, ctx.run_id, ctx.now_micros);
+                    other_decisions.push(PendingDecisionWithBarFacts {
+                        decision: rebuilt_decision,
+                        bar_facts: p.bar_facts,
+                        dynamic_selection_provenance: p.dynamic_selection_provenance,
+                    });
                 }
                 // delta == 0 -> no capital assigned, or refused individually
                 // (missing bar facts / no score); decision is dropped (no
@@ -703,7 +728,7 @@ pub async fn gather_and_apply(
 
     if eff.effective_mode == RuntimeOpportunityAllocationMode::Off {
         return RuntimeOpportunityAllocationOutcome {
-            decisions: decisions.into_iter().map(|p| p.decision).collect(),
+            decisions,
             plan: None,
         };
     }
@@ -824,6 +849,7 @@ mod tests {
         PendingDecisionWithBarFacts {
             decision: buy(symbol, strategy_id, qty),
             bar_facts: Some(facts(symbol, strategy_id, bar_end_ts, close_micros)),
+            dynamic_selection_provenance: None,
         }
     }
 
@@ -831,6 +857,23 @@ mod tests {
         PendingDecisionWithBarFacts {
             decision,
             bar_facts: None,
+            dynamic_selection_provenance: None,
+        }
+    }
+
+    fn provenance(
+        run_id: Uuid,
+        plan_id: Uuid,
+        symbol: &str,
+        strategy_id: &str,
+        timeframe_secs: i64,
+    ) -> DynamicSelectionDispatchProvenance {
+        DynamicSelectionDispatchProvenance {
+            run_id,
+            plan_id,
+            symbol: symbol.to_string(),
+            strategy_id: strategy_id.to_string(),
+            timeframe_secs,
         }
     }
 
@@ -885,7 +928,7 @@ mod tests {
         );
         assert!(out.plan.is_none());
         assert_eq!(out.decisions.len(), 2);
-        assert_eq!(out.decisions[0].qty, 10);
+        assert_eq!(out.decisions[0].decision.qty, 10);
     }
 
     #[test]
@@ -914,9 +957,9 @@ mod tests {
             ];
             let out = apply_runtime_opportunity_allocation(&base_ctx(mode), decisions, &current);
             assert!(
-                out.decisions
-                    .iter()
-                    .any(|d| d.symbol == "TLT" && d.side == "sell" && d.qty == 3),
+                out.decisions.iter().any(|d| d.decision.symbol == "TLT"
+                    && d.decision.side == "sell"
+                    && d.decision.qty == 3),
                 "sell must pass through unchanged in {mode:?}"
             );
         }
@@ -941,7 +984,7 @@ mod tests {
         assert!(out.plan.is_some());
         assert_eq!(out.decisions.len(), 1);
         assert_eq!(
-            out.decisions[0].qty, 10,
+            out.decisions[0].decision.qty, 10,
             "shadow must not alter submitted qty"
         );
     }
@@ -967,11 +1010,95 @@ mod tests {
         );
         assert_eq!(out.decisions.len(), 1);
         assert!(
-            out.decisions[0].qty < 10_000,
+            out.decisions[0].decision.qty < 10_000,
             "expected clamp, got qty={}",
-            out.decisions[0].qty
+            out.decisions[0].decision.qty
         );
-        assert!(out.decisions[0].qty > 0);
+        assert!(out.decisions[0].decision.qty > 0);
+    }
+
+    // ── TRUE-PROVENANCE-AND-RUNTIME-PROOF-REPAIR-01 Blocker 1: Bundle 5 must
+    // carry `dynamic_selection_provenance` through unchanged, never drop or
+    // reconstruct it. ──────────────────────────────────────────────────────
+
+    #[test]
+    fn shadow_mode_preserves_provenance_byte_for_byte() {
+        let mut current = BTreeMap::new();
+        current.insert("AAPL".to_string(), 0i64);
+        let p = provenance(
+            run_id(),
+            Uuid::new_v5(&Uuid::NAMESPACE_DNS, b"test-plan-id"),
+            "AAPL",
+            "intraday_scalper",
+            300,
+        );
+        let mut pending = bound_buy("AAPL", "intraday_scalper", 10, 1_000, 100_000_000);
+        pending.dynamic_selection_provenance = Some(p.clone());
+        let out = apply_runtime_opportunity_allocation(
+            &base_ctx(RuntimeOpportunityAllocationMode::Shadow),
+            vec![pending],
+            &current,
+        );
+        assert_eq!(out.decisions.len(), 1);
+        assert_eq!(
+            out.decisions[0].dynamic_selection_provenance,
+            Some(p),
+            "shadow must carry provenance through unchanged"
+        );
+    }
+
+    #[test]
+    fn paper_enforced_clamp_preserves_provenance_unchanged() {
+        let mut current = BTreeMap::new();
+        current.insert("AAPL".to_string(), 0i64);
+        let p = provenance(
+            run_id(),
+            Uuid::new_v5(&Uuid::NAMESPACE_DNS, b"test-plan-id"),
+            "AAPL",
+            "intraday_scalper",
+            300,
+        );
+        let mut pending = bound_buy(
+            "AAPL",
+            "intraday_scalper",
+            10_000,
+            1_000,
+            10_000_000_000, // $10,000/share -> forces a clamp
+        );
+        pending.dynamic_selection_provenance = Some(p.clone());
+        let out = apply_runtime_opportunity_allocation(
+            &base_ctx(RuntimeOpportunityAllocationMode::PaperEnforced),
+            vec![pending],
+            &current,
+        );
+        assert_eq!(out.decisions.len(), 1);
+        assert!(out.decisions[0].decision.qty < 10_000, "expected a clamp");
+        assert_eq!(
+            out.decisions[0].dynamic_selection_provenance,
+            Some(p),
+            "the qty rebuild must not alter or drop the original provenance"
+        );
+    }
+
+    #[test]
+    fn off_mode_preserves_provenance_untouched() {
+        let mut current = BTreeMap::new();
+        current.insert("AAPL".to_string(), 0i64);
+        let p = provenance(
+            run_id(),
+            Uuid::new_v5(&Uuid::NAMESPACE_DNS, b"test-plan-id"),
+            "AAPL",
+            "intraday_scalper",
+            300,
+        );
+        let mut pending = bound_buy("AAPL", "intraday_scalper", 10, 1_000, 100_000_000);
+        pending.dynamic_selection_provenance = Some(p.clone());
+        let out = apply_runtime_opportunity_allocation(
+            &base_ctx(RuntimeOpportunityAllocationMode::Off),
+            vec![pending],
+            &current,
+        );
+        assert_eq!(out.decisions[0].dynamic_selection_provenance, Some(p));
     }
 
     #[test]
@@ -988,9 +1115,9 @@ mod tests {
             bound_buy("MSFT", "intraday_scalper", 10, 1_000, 100_000_000),
         ];
         let out = apply_runtime_opportunity_allocation(&ctx, decisions, &current);
-        assert!(out.decisions.iter().any(|d| d.symbol == "AAPL"));
+        assert!(out.decisions.iter().any(|d| d.decision.symbol == "AAPL"));
         assert!(
-            !out.decisions.iter().any(|d| d.symbol == "MSFT"),
+            !out.decisions.iter().any(|d| d.decision.symbol == "MSFT"),
             "MSFT should be dropped, not submitted with qty=0"
         );
     }
@@ -1004,8 +1131,8 @@ mod tests {
             unbound(sell("TLT", "intraday_scalper", 3)),
         ];
         let out = apply_runtime_opportunity_allocation(&ctx, decisions, &BTreeMap::new());
-        assert!(out.decisions.iter().any(|d| d.symbol == "TLT"));
-        assert!(!out.decisions.iter().any(|d| d.symbol == "AAPL"));
+        assert!(out.decisions.iter().any(|d| d.decision.symbol == "TLT"));
+        assert!(!out.decisions.iter().any(|d| d.decision.symbol == "AAPL"));
         assert_eq!(
             out.plan.unwrap().truth_state,
             REASON_NO_OPPORTUNITY_AUTHORITY
@@ -1114,9 +1241,9 @@ mod tests {
         let aapl = plan.candidates.iter().find(|c| c.symbol == "AAPL").unwrap();
         assert_eq!(aapl.reason_code, REASON_MISSING_OR_MISMATCHED_BAR_FACTS);
         assert_eq!(aapl.disposition, AllocationDisposition::RefusedFailClosed);
-        assert!(!out.decisions.iter().any(|d| d.symbol == "AAPL"));
+        assert!(!out.decisions.iter().any(|d| d.decision.symbol == "AAPL"));
         // MSFT (well-formed facts) is unaffected.
-        assert!(out.decisions.iter().any(|d| d.symbol == "MSFT"));
+        assert!(out.decisions.iter().any(|d| d.decision.symbol == "MSFT"));
     }
 
     #[test]
@@ -1177,7 +1304,7 @@ mod tests {
             &current,
         );
         assert_eq!(out.decisions.len(), 1);
-        assert_eq!(out.decisions[0].side, "sell");
+        assert_eq!(out.decisions[0].decision.side, "sell");
     }
 
     // ── Phase B: economic cycle identity ───────────────────────────────────
@@ -1494,6 +1621,7 @@ mod tests {
                 1_000,
                 100_000_000,
             )),
+            dynamic_selection_provenance: None,
         }];
         let out = apply_runtime_opportunity_allocation(
             &base_ctx(RuntimeOpportunityAllocationMode::PaperEnforced),
@@ -1531,6 +1659,7 @@ mod tests {
                     1_000,
                     100_000_000,
                 )),
+                dynamic_selection_provenance: None,
             },
             PendingDecisionWithBarFacts {
                 decision: buy("MSFT", "intraday_scalper", 5),
@@ -1541,6 +1670,7 @@ mod tests {
                     2_000,
                     200_000_000,
                 )),
+                dynamic_selection_provenance: None,
             },
         ];
         let mut per_symbol = BTreeMap::new();
@@ -1583,6 +1713,7 @@ mod tests {
                 1_000,
                 100_000_000,
             )),
+            dynamic_selection_provenance: None,
         }];
         let mut per_symbol = BTreeMap::new();
         per_symbol.insert("AAPL".to_string(), "5m".to_string());

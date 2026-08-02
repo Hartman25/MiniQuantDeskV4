@@ -102,6 +102,21 @@ pub(crate) struct DynamicSelectionDispatchProvenance {
 /// fail closed before activation (Part 1 requirements 9/10).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum DispatchAuthorityBuildError {
+    /// TRUE-PROVENANCE-AND-RUNTIME-PROOF-REPAIR-01 start-authority check:
+    /// `plan.context.run_id` does not parse as a UUID at all.
+    InvalidPlanRunId {
+        raw: String,
+    },
+    /// TRUE-PROVENANCE-AND-RUNTIME-PROOF-REPAIR-01 start-authority check:
+    /// `plan.context.run_id` parses, but does not equal the actual `run_id`
+    /// this authority is being built for — the plan and the run it is about
+    /// to be activated under have diverged. Never trust the caller-supplied
+    /// `run_id` alone; this plan is the frozen record of what was actually
+    /// evaluated.
+    RunIdMismatch {
+        plan_run_id: Uuid,
+        run_id: Uuid,
+    },
     EmptyPlan,
     EmptySelectedBindings,
     MissingHostPoolEntry {
@@ -132,6 +147,8 @@ pub(crate) enum DispatchAuthorityBuildError {
 impl DispatchAuthorityBuildError {
     pub(crate) fn code(&self) -> &'static str {
         match self {
+            Self::InvalidPlanRunId { .. } => "dispatch_authority_invalid_plan_run_id",
+            Self::RunIdMismatch { .. } => "dispatch_authority_run_id_mismatch",
             Self::EmptyPlan => "dispatch_authority_empty_plan",
             Self::EmptySelectedBindings => "dispatch_authority_empty_selected_bindings",
             Self::MissingHostPoolEntry { .. } => "dispatch_authority_missing_host_pool_entry",
@@ -218,6 +235,25 @@ pub(crate) fn build_dynamic_paper_enforced_dispatch_authority(
     plan_id: Uuid,
     host_pool: DynamicSelectionHostPool,
 ) -> Result<RuntimeStrategyDispatchAuthority, DispatchAuthorityBuildError> {
+    // TRUE-PROVENANCE-AND-RUNTIME-PROOF-REPAIR-01 start-authority check:
+    // fail-closed before any other validation, and before activation, that
+    // the frozen plan's own recorded run_id parses and matches the exact
+    // run_id this authority is about to be built and activated for. Never
+    // relies on the caller having already proven this upstream.
+    let plan_run_id: Uuid =
+        plan.context
+            .run_id
+            .parse()
+            .map_err(|_| DispatchAuthorityBuildError::InvalidPlanRunId {
+                raw: plan.context.run_id.clone(),
+            })?;
+    if plan_run_id != run_id {
+        return Err(DispatchAuthorityBuildError::RunIdMismatch {
+            plan_run_id,
+            run_id,
+        });
+    }
+
     if plan.symbol_results.is_empty() {
         return Err(DispatchAuthorityBuildError::EmptyPlan);
     }
@@ -305,10 +341,17 @@ mod tests {
     use super::*;
     use mqk_portfolio::DynamicSelectionPlan;
 
+    /// The one run_id every fixture plan's `context.run_id` and every
+    /// `build_dynamic_paper_enforced_dispatch_authority` call in this module
+    /// must agree on — the start-authority check requires them to match.
+    fn test_run_id() -> Uuid {
+        Uuid::new_v5(&Uuid::NAMESPACE_DNS, b"phase7b.test.run_id")
+    }
+
     fn empty_plan() -> DynamicSelectionPlan {
         DynamicSelectionPlan {
             context: mqk_portfolio::DynamicSelectionContext {
-                run_id: "11111111-1111-1111-1111-111111111111".to_string(),
+                run_id: test_run_id().to_string(),
                 schema_version: "dynamic-selection-context-v1".to_string(),
                 configured_mode: mqk_portfolio::DynamicSelectionMode::PaperEnforced,
                 effective_mode: mqk_portfolio::DynamicSelectionMode::PaperEnforced,
@@ -339,9 +382,13 @@ mod tests {
         let plan = empty_plan();
         let pool = DynamicSelectionHostPool::build(&[]).expect("empty pool builds");
         let plan_id = derive_dynamic_selection_plan_id(&plan);
-        let err =
-            build_dynamic_paper_enforced_dispatch_authority(Uuid::new_v5(&Uuid::NAMESPACE_DNS, b"phase7b.test.run_id"), &plan, plan_id, pool)
-                .unwrap_err();
+        let err = build_dynamic_paper_enforced_dispatch_authority(
+            Uuid::new_v5(&Uuid::NAMESPACE_DNS, b"phase7b.test.run_id"),
+            &plan,
+            plan_id,
+            pool,
+        )
+        .unwrap_err();
         assert_eq!(err, DispatchAuthorityBuildError::EmptyPlan);
     }
 
@@ -354,7 +401,7 @@ mod tests {
 
     fn ds_context() -> mqk_portfolio::DynamicSelectionContext {
         mqk_portfolio::DynamicSelectionContext {
-            run_id: "run-1".to_string(),
+            run_id: test_run_id().to_string(),
             schema_version: mqk_portfolio::DYNAMIC_SELECTION_SCHEMA_VERSION.to_string(),
             configured_mode: mqk_portfolio::DynamicSelectionMode::PaperEnforced,
             effective_mode: mqk_portfolio::DynamicSelectionMode::PaperEnforced,
@@ -475,9 +522,13 @@ mod tests {
         assert_eq!(plan.selected_count(), 2, "both candidates must be selected");
         let pool = host_pool_for(&plan);
         let plan_id = derive_dynamic_selection_plan_id(&plan);
-        let authority =
-            build_dynamic_paper_enforced_dispatch_authority(Uuid::new_v5(&Uuid::NAMESPACE_DNS, b"phase7b.test.run_id"), &plan, plan_id, pool)
-                .expect("a coherent two-symbol mixed-timeframe plan must build cleanly");
+        let authority = build_dynamic_paper_enforced_dispatch_authority(
+            Uuid::new_v5(&Uuid::NAMESPACE_DNS, b"phase7b.test.run_id"),
+            &plan,
+            plan_id,
+            pool,
+        )
+        .expect("a coherent two-symbol mixed-timeframe plan must build cleanly");
 
         let RuntimeStrategyDispatchAuthority::DynamicPaperEnforced {
             bindings,
@@ -511,9 +562,13 @@ mod tests {
         // of "no selected bindings").
         let pool = DynamicSelectionHostPool::build(&[]).expect("empty pool builds");
         let plan_id = derive_dynamic_selection_plan_id(&plan);
-        let err =
-            build_dynamic_paper_enforced_dispatch_authority(Uuid::new_v5(&Uuid::NAMESPACE_DNS, b"phase7b.test.run_id"), &plan, plan_id, pool)
-                .unwrap_err();
+        let err = build_dynamic_paper_enforced_dispatch_authority(
+            Uuid::new_v5(&Uuid::NAMESPACE_DNS, b"phase7b.test.run_id"),
+            &plan,
+            plan_id,
+            pool,
+        )
+        .unwrap_err();
         assert_eq!(err, DispatchAuthorityBuildError::EmptyPlan);
     }
 
@@ -576,9 +631,13 @@ mod tests {
         keys.push(("GOOG".to_string(), "intraday_scalper".to_string(), 300));
         let pool = DynamicSelectionHostPool::build(&keys).expect("pool with extra key builds");
         let plan_id = derive_dynamic_selection_plan_id(&plan);
-        let err =
-            build_dynamic_paper_enforced_dispatch_authority(Uuid::new_v5(&Uuid::NAMESPACE_DNS, b"phase7b.test.run_id"), &plan, plan_id, pool)
-                .unwrap_err();
+        let err = build_dynamic_paper_enforced_dispatch_authority(
+            Uuid::new_v5(&Uuid::NAMESPACE_DNS, b"phase7b.test.run_id"),
+            &plan,
+            plan_id,
+            pool,
+        )
+        .unwrap_err();
         assert!(matches!(
             err,
             DispatchAuthorityBuildError::ExtraHostPoolEntry { .. }
@@ -685,9 +744,13 @@ mod tests {
         let plan = computed_plan_two_symbols_mixed_timeframe();
         let pool = host_pool_for(&plan);
         let plan_id = derive_dynamic_selection_plan_id(&plan);
-        let dynamic =
-            build_dynamic_paper_enforced_dispatch_authority(Uuid::new_v5(&Uuid::NAMESPACE_DNS, b"phase7b.test.run_id"), &plan, plan_id, pool)
-                .expect("valid plan builds");
+        let dynamic = build_dynamic_paper_enforced_dispatch_authority(
+            Uuid::new_v5(&Uuid::NAMESPACE_DNS, b"phase7b.test.run_id"),
+            &plan,
+            plan_id,
+            pool,
+        )
+        .expect("valid plan builds");
         assert!(dynamic.is_dynamic_paper_enforced());
     }
 
@@ -696,11 +759,79 @@ mod tests {
         let plan = computed_plan_two_symbols_mixed_timeframe();
         let pool = host_pool_for(&plan);
         let plan_id = derive_dynamic_selection_plan_id(&plan);
-        let dynamic =
-            build_dynamic_paper_enforced_dispatch_authority(Uuid::new_v5(&Uuid::NAMESPACE_DNS, b"phase7b.test.run_id"), &plan, plan_id, pool)
-                .expect("valid plan builds");
+        let dynamic = build_dynamic_paper_enforced_dispatch_authority(
+            Uuid::new_v5(&Uuid::NAMESPACE_DNS, b"phase7b.test.run_id"),
+            &plan,
+            plan_id,
+            pool,
+        )
+        .expect("valid plan builds");
         let debug_text = format!("{dynamic:?}");
         assert!(debug_text.contains("host_pool_len"));
         assert!(!debug_text.contains("StrategyHost"));
+    }
+
+    // -----------------------------------------------------------------
+    // TRUE-PROVENANCE-AND-RUNTIME-PROOF-REPAIR-01 start-authority check:
+    // the plan's own recorded run_id must parse and match the actual run_id
+    // this authority is being built for, checked before any other
+    // validation and before activation.
+    // -----------------------------------------------------------------
+
+    #[test]
+    fn invalid_plan_run_id_fails_closed() {
+        let plan = mqk_portfolio::DynamicSelectionPlan {
+            context: mqk_portfolio::DynamicSelectionContext {
+                run_id: "not-a-uuid".to_string(),
+                ..ds_context()
+            },
+            ..computed_plan_two_symbols_mixed_timeframe()
+        };
+        let pool = host_pool_for(&plan);
+        let plan_id = derive_dynamic_selection_plan_id(&plan);
+        let err =
+            build_dynamic_paper_enforced_dispatch_authority(test_run_id(), &plan, plan_id, pool)
+                .unwrap_err();
+        assert_eq!(
+            err,
+            DispatchAuthorityBuildError::InvalidPlanRunId {
+                raw: "not-a-uuid".to_string(),
+            }
+        );
+        assert_eq!(err.code(), "dispatch_authority_invalid_plan_run_id");
+    }
+
+    #[test]
+    fn mismatched_plan_run_id_fails_closed() {
+        // The plan's own context.run_id is a real, valid UUID -- just not
+        // the same one this authority is being activated for.
+        let plan = computed_plan_two_symbols_mixed_timeframe();
+        assert_eq!(plan.context.run_id, test_run_id().to_string());
+        let pool = host_pool_for(&plan);
+        let plan_id = derive_dynamic_selection_plan_id(&plan);
+        let wrong_run_id = Uuid::new_v5(&Uuid::NAMESPACE_DNS, b"phase7b.test.wrong_run_id");
+        let err =
+            build_dynamic_paper_enforced_dispatch_authority(wrong_run_id, &plan, plan_id, pool)
+                .unwrap_err();
+        assert_eq!(
+            err,
+            DispatchAuthorityBuildError::RunIdMismatch {
+                plan_run_id: test_run_id(),
+                run_id: wrong_run_id,
+            }
+        );
+        assert_eq!(err.code(), "dispatch_authority_run_id_mismatch");
+    }
+
+    #[test]
+    fn matching_plan_run_id_builds_cleanly() {
+        let plan = computed_plan_two_symbols_mixed_timeframe();
+        let pool = host_pool_for(&plan);
+        let plan_id = derive_dynamic_selection_plan_id(&plan);
+        assert!(
+            build_dynamic_paper_enforced_dispatch_authority(test_run_id(), &plan, plan_id, pool)
+                .is_ok(),
+            "a plan whose context.run_id matches the actual run_id must build cleanly"
+        );
     }
 }
