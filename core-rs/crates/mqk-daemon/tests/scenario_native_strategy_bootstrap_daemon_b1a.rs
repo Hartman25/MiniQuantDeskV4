@@ -32,6 +32,7 @@
 use std::sync::Arc;
 
 use axum::http::{Request, StatusCode};
+use chrono::Utc;
 use http_body_util::BodyExt;
 use mqk_daemon::{routes, state};
 use state::StrategyFleetEntry;
@@ -228,6 +229,45 @@ async fn db_pool_or_skip() -> Option<sqlx::PgPool> {
     )
 }
 
+/// B2A: DB strategy registry gate (`sys_strategy_registry`) sits between the
+/// DB pool gate and run creation -- an Active bootstrap (fleet configured
+/// with a real plugin) additionally requires its strategy_id to be present
+/// AND enabled in the durable registry, or start refuses 403
+/// `strategy_registry_missing`. L04-L06 configure `swing_momentum` in the
+/// fleet expecting a successful (200) start, so they must also seed this
+/// registry row -- mirrors the exact working pattern already proven by
+/// `scenario_native_strategy_registry_b2a.rs`'s N02/N03.
+async fn seed_swing_momentum_registry(pool: &sqlx::PgPool) {
+    sqlx::query("DELETE FROM sys_strategy_registry WHERE strategy_id = $1")
+        .bind("swing_momentum")
+        .execute(pool)
+        .await
+        .ok();
+    let now = Utc::now();
+    mqk_db::upsert_strategy_registry_entry(
+        pool,
+        &mqk_db::UpsertStrategyRegistryArgs {
+            strategy_id: "swing_momentum".to_string(),
+            display_name: "Swing Momentum".to_string(),
+            enabled: true,
+            kind: "native".to_string(),
+            registered_at_utc: now,
+            updated_at_utc: now,
+            note: String::new(),
+        },
+    )
+    .await
+    .expect("seed_swing_momentum_registry: upsert must succeed");
+}
+
+async fn cleanup_swing_momentum_registry(pool: &sqlx::PgPool) {
+    sqlx::query("DELETE FROM sys_strategy_registry WHERE strategy_id = $1")
+        .bind("swing_momentum")
+        .execute(pool)
+        .await
+        .ok();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
 async fn b1a_l04_start_with_registered_strategy_stores_active_bootstrap() {
@@ -247,6 +287,7 @@ async fn b1a_l04_start_with_registered_strategy_stores_active_bootstrap() {
         .execute(&pool)
         .await
         .ok();
+    seed_swing_momentum_registry(&pool).await;
 
     let st = Arc::new(state::AppState::new_for_test_with_db_mode_and_broker(
         pool.clone(),
@@ -306,6 +347,7 @@ async fn b1a_l04_start_with_registered_strategy_stores_active_bootstrap() {
         .body(axum::body::Body::empty())
         .unwrap();
     let _ = call(routes::build_router(Arc::clone(&st)), stop_req).await;
+    cleanup_swing_momentum_registry(&pool).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -332,6 +374,7 @@ async fn b1a_l05_stop_clears_native_strategy_bootstrap() {
         .execute(&pool)
         .await
         .ok();
+    seed_swing_momentum_registry(&pool).await;
 
     let st = Arc::new(state::AppState::new_for_test_with_db_mode_and_broker(
         pool.clone(),
@@ -394,6 +437,7 @@ async fn b1a_l05_stop_clears_native_strategy_bootstrap() {
         after_stop.is_none(),
         "L05: bootstrap must be None after stop; got: {after_stop:?}"
     );
+    cleanup_swing_momentum_registry(&pool).await;
 }
 
 // ---------------------------------------------------------------------------
@@ -423,6 +467,7 @@ async fn b1a_l06_halt_clears_native_strategy_bootstrap() {
         .execute(&pool)
         .await
         .ok();
+    seed_swing_momentum_registry(&pool).await;
 
     let st = Arc::new(state::AppState::new_for_test_with_db_mode_and_broker(
         pool.clone(),
@@ -485,4 +530,5 @@ async fn b1a_l06_halt_clears_native_strategy_bootstrap() {
         after_halt.is_none(),
         "L06: bootstrap must be None after halt; got: {after_halt:?}"
     );
+    cleanup_swing_momentum_registry(&pool).await;
 }
