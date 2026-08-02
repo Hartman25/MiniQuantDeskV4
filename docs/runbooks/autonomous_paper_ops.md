@@ -1105,13 +1105,27 @@ evidence capture convention, §11, `scripts/soak/`):
 
 ### 29. Honest no-trade-session handling
 
-A session in which dynamic selection resolves a committed `paper_enforced`
-plan with zero selected pairs (e.g. no symbol passed every evidence gate
-that day), or in which the selected host(s) generated no signal, is still a
-countable clean session provided every check in §26/§27 otherwise held. A
-quiet day is not a failure — but it must be recorded as `selected_count: 0`
-truthfully (per the durable plan evidence itself), never conflated with an
-untested or skipped session.
+"No trade" and "no selected binding" are not the same fact, and must never
+be conflated:
+
+- **A zero-selected-pair session never counts.** A `paper_enforced_refused`
+  disposition, or any committed plan with zero selected pairs (e.g. no
+  symbol passed every evidence gate that day), does not create an active
+  formal ActiveCommit session at all — the ActiveCommit gate's own
+  `selected_bindings_have_fresh_bar_windows` check and the formal manifest
+  writer both hard-refuse (`FINAL: FAIL`, no manifest written) when there is
+  no selected binding. There is no countable session to record for that day;
+  it is not a "quiet clean session," it is simply not a start.
+- **A started `paper_enforced_allowed` session may still count on a quiet
+  day.** Once ActiveCommit has genuinely passed — a committed
+  `paper_enforced_allowed` disposition with at least one selected binding,
+  and a formal manifest was written — the session counts even if the
+  selected host(s) generate zero trade signals that day. A quiet day is not
+  a failure; it must be recorded as `signal_generated: false`/no fills
+  truthfully (per the durable signal-evaluation journal and evidence
+  itself), never conflated with an untested or skipped session, and never
+  used to justify recording a session that never reached ActiveCommit PASS
+  in the first place.
 
 ### 30. Selected-plan changes between sessions
 

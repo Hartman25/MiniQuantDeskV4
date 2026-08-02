@@ -89,6 +89,8 @@ $GuiPanelFile        = Join-Path $RepoRoot "core-rs\mqk-gui\src\features\system\
 $MigrationFile       = Join-Path $RepoRoot "core-rs\crates\mqk-db\migrations\0059_dynamic_selection_plan_evidence.sql"
 $Migration0060File   = Join-Path $RepoRoot "core-rs\crates\mqk-db\migrations\0060_dynamic_selection_plan_candidates_exact_key_unique.sql"
 $PremarketScriptFile = Join-Path $RepoRoot "scripts\windows\Invoke-Bundle7Phase7cPremarketValidation.ps1"
+$PremarketTestFile   = Join-Path $RepoRoot "scripts\windows\tests\test_bundle7_phase7c_premarket_validation.ps1"
+$RunbookFile         = Join-Path $RepoRoot "docs\runbooks\autonomous_paper_ops.md"
 $Phase7aGuard        = Join-Path $RepoRoot "scripts\guards\check_phase7a_final_closure.ps1"
 $Phase7bGuard        = Join-Path $RepoRoot "scripts\guards\check_phase7b_selected_host_dispatch_closure.ps1"
 
@@ -127,6 +129,8 @@ $guiPanelContent     = Get-Content -Raw $GuiPanelFile
 $migrationContent    = Get-Content -Raw $MigrationFile
 $migration0060Content = if (Test-Path $Migration0060File) { Get-Content -Raw $Migration0060File } else { "" }
 $premarketContent    = if (Test-Path $PremarketScriptFile) { Get-Content -Raw $PremarketScriptFile } else { "" }
+$premarketTestContent = if (Test-Path $PremarketTestFile) { Get-Content -Raw $PremarketTestFile } else { "" }
+$runbookContent      = if (Test-Path $RunbookFile) { Get-Content -Raw $RunbookFile } else { "" }
 
 # ---------------------------------------------------------------------------
 # Check 1/2: delegate to the already-accepted Phase 7A/7B guards.
@@ -458,12 +462,12 @@ if ($premarketContent -match $activeCommitModePattern) {
 # lease, never a zero-lease requirement.
 # ---------------------------------------------------------------------------
 Write-Host ""
-Write-Host "-- Check 18: ActiveCommit lease coherence requires exactly one lease --"
-$leaseCoherentPattern = "(?s)function Test-RunLeaseCoherent.*?\`$r\.Output -eq '1'"
+Write-Host "-- Check 18: ActiveCommit lease coherence requires exactly one lease, and DB/API holder+epoch agree --"
+$leaseCoherentPattern = "(?s)function Test-RunLeaseCoherent.*?\`$countR\.Output -ne '1'.*?\`$dbHolder -ne \[string\]\`$apiHolder.*?\`$dbEpoch -ne \[string\]\`$apiEpoch"
 if ($premarketContent -match $leaseCoherentPattern) {
-    Ok "Test-RunLeaseCoherent requires exactly one unexpired lease row"
+    Ok "Test-RunLeaseCoherent requires exactly one singleton lease row and compares DB holder/epoch to the API"
 } else {
-    Fail "Test-RunLeaseCoherent does not appear to require exactly one unexpired lease row"
+    Fail "Test-RunLeaseCoherent does not appear to require exactly one lease row with DB/API holder+epoch agreement"
 }
 
 # ---------------------------------------------------------------------------
@@ -472,7 +476,7 @@ if ($premarketContent -match $leaseCoherentPattern) {
 # ---------------------------------------------------------------------------
 Write-Host ""
 Write-Host "-- Check 19: manifest bindings carry timeframe_secs; no hard-coded deployment evidence --"
-$manifestBindingsPattern = "(?s)function New-Bundle7ActiveCommitManifest.*?selected_strategy_id\s*=\s*\`$s\.selected_strategy_id.*?timeframe_secs\s*=\s*\`$s\.timeframe_secs"
+$manifestBindingsPattern = "(?s)function New-Bundle7ActiveCommitManifest.*?selected_strategy_id\s*=\s*\`$_\.selected_strategy_id.*?timeframe_secs\s*=\s*\`$_\.timeframe_secs"
 if ($premarketContent -match $manifestBindingsPattern) {
     Ok "New-Bundle7ActiveCommitManifest's selected_bindings carry timeframe_secs"
 } else {
@@ -746,13 +750,20 @@ if ($mutationCaught10) {
 # detection.
 # ---------------------------------------------------------------------------
 Write-Host ""
-Write-Host "-- Self-test 11: mutation-negative proof for the zero-lease-requirement detection --"
-$mutatedZeroLease = $premarketContent -replace [regex]::Escape("`$r.Output -eq '1'"), "`$r.Output -eq '0'"
+Write-Host "-- Self-test 11: mutation-negative proof for the zero-lease-requirement / DB-API-agreement detection --"
+$mutatedZeroLease = $premarketContent -replace [regex]::Escape("`$countR.Output -ne '1'"), "`$countR.Output -ne '0'"
 $mutationCaught11 = ($mutatedZeroLease -notmatch $leaseCoherentPattern)
 if ($mutationCaught11) {
     Ok "self-test passed: lease-coherence check correctly FAILS when the requirement is mutated to zero-lease"
 } else {
     Fail "self-test FAILED: lease-coherence check did not detect a zero-lease-requirement mutation"
+}
+$mutatedNoHolderCompare = $premarketContent -replace [regex]::Escape("`$dbHolder -ne [string]`$apiHolder"), "`$false"
+$mutationCaught11b = ($mutatedNoHolderCompare -notmatch $leaseCoherentPattern)
+if ($mutationCaught11b) {
+    Ok "self-test passed: lease-coherence check correctly FAILS when the DB-vs-API holder comparison is removed"
+} else {
+    Fail "self-test FAILED: lease-coherence check did not detect a removed DB-vs-API holder comparison"
 }
 
 # ---------------------------------------------------------------------------
@@ -781,6 +792,147 @@ if ($mutationCaught13) {
     Ok "self-test passed: Debug-disposition detection correctly fires when the Debug-format literal is reintroduced"
 } else {
     Fail "self-test FAILED: Debug-disposition detection did not fire"
+}
+
+# ---------------------------------------------------------------------------
+# Check 26: a positive ActiveCommit executable proof exists and writes a
+# formal manifest (Active-Commit repair, Defect 1) -- never a source-string
+# guard substituted for the real executable path.
+# ---------------------------------------------------------------------------
+Write-Host ""
+Write-Host "-- Check 26: a positive hermetic ActiveCommit proof exists and asserts a written manifest --"
+if ($premarketTestContent -match [regex]::Escape('Start-Bundle7HermeticFixture') -and
+    $premarketTestContent -match [regex]::Escape("hermetic ActiveCommit run reports FINAL: PASS") -and
+    $premarketTestContent -match [regex]::Escape('exactly one countable session manifest is written')) {
+    Ok "the test suite drives a hermetic fixture through a real ActiveCommit run and asserts FINAL: PASS plus a written manifest"
+} else {
+    Fail "no positive hermetic ActiveCommit proof (fixture + FINAL: PASS + written-manifest assertion) found in the test suite"
+}
+
+# ---------------------------------------------------------------------------
+# Check 27: strict deployment/adapter/live-routing null checks (Defect 3) --
+# both PreStart and ActiveCommit must reject a null/missing/wrong value, not
+# merely an explicit true/HALTED.
+# ---------------------------------------------------------------------------
+Write-Host ""
+Write-Host "-- Check 27: strict adapter/deployment/live-routing checks reject null, in both stages --"
+$adapterCheckCount = Get-MatchCount $premarketContent "adapterId.ToLowerInvariant() -ne 'alpaca'"
+$deploymentStartAllowedStrictCount = Get-MatchCount $premarketContent 'deployment_start_allowed -ne $true'
+$preStartLiveRoutingPattern = "(?s)function Test-LiveRoutingCapitalDisabled.*?\`$liveRouting -eq \`$false"
+$activeCommitLiveRoutingPattern = "(?s)function Test-ArmIntegrityReconciliationLiveRoutingFacts.*?live_routing_enabled -ne \`$false"
+if ($adapterCheckCount -ge 2 -and $deploymentStartAllowedStrictCount -ge 2 -and
+    $premarketContent -match $preStartLiveRoutingPattern -and $premarketContent -match $activeCommitLiveRoutingPattern) {
+    Ok "adapter_id/deployment_start_allowed/live_routing_enabled are strictly checked (fail-closed on null) in both PreStart and ActiveCommit"
+} else {
+    Fail "expected the strict adapter_id/deployment_start_allowed/live_routing_enabled checks in both stages (found adapter=$adapterCheckCount start_allowed=$deploymentStartAllowedStrictCount)"
+}
+
+# ---------------------------------------------------------------------------
+# Check 28: ActiveCommit counts all active runs and compares the exact
+# run_id -- never a run_id-scoped query alone (Defect 4).
+# ---------------------------------------------------------------------------
+Write-Host ""
+Write-Host "-- Check 28: exactly-one-active-run counts ALL applicable runs and compares exact run_id --"
+$exactRunPattern = "(?s)function Test-ExactlyOneCommittedActiveRun.*?count\(\*\) from runs where engine_id = 'mqk-daemon' and mode = 'PAPER' and status in \('ARMED','RUNNING'\).*?\`$durableRunId -ne \[string\]\`$activeRunId"
+if ($premarketContent -match $exactRunPattern) {
+    Ok "Test-ExactlyOneCommittedActiveRun counts all applicable PAPER runs and compares the exact run_id"
+} else {
+    Fail "Test-ExactlyOneCommittedActiveRun does not appear to count all applicable runs and compare the exact run_id"
+}
+if ($premarketContent -match [regex]::Escape('$dsActiveRunId -ne [string]$activeRunId')) {
+    Ok "Test-ExactlyOneCommittedActiveRun requires dynamic-selection/status and control/status to agree on active_run_id"
+} else {
+    Fail "Test-ExactlyOneCommittedActiveRun does not appear to cross-check dynamic-selection/status against control/status active_run_id"
+}
+
+# ---------------------------------------------------------------------------
+# Check 29: formal manifest identity binds adapter, live-routing, source,
+# matched readiness, lease, arm, and reconciliation facts (Defect 2).
+# ---------------------------------------------------------------------------
+Write-Host ""
+Write-Host "-- Check 29: formal manifest identity binds adapter/routing/source/readiness/lease/arm/reconciliation --"
+$identityPattern = "(?s)\`$identityParts = \[ordered\]@\{.*?adapter_id.*?live_routing_enabled.*?source_kind.*?source_identity.*?required_market_data_pairs.*?leader_holder_id.*?leader_epoch.*?integrity_state.*?reconciliation_status.*?\}"
+if ($premarketContent -match $identityPattern) {
+    Ok "manifest identityParts binds adapter/live-routing/source/readiness/lease/arm/reconciliation facts"
+} else {
+    Fail "manifest identityParts does not appear to bind all required formal facts"
+}
+$activeCommitIdentityStartMatch = [regex]::Match($premarketContent, "stage\s+=\s+'active_commit'")
+$activeCommitIdentityStart = if ($activeCommitIdentityStartMatch.Success) { $activeCommitIdentityStartMatch.Index } else { -1 }
+$activeCommitIdentityJsonLine = "`$identityJson = `$identityParts | ConvertTo-Json -Depth 20 -Compress"
+$activeCommitIdentityEnd = $premarketContent.IndexOf($activeCommitIdentityJsonLine, [Math]::Max($activeCommitIdentityStart, 0))
+if ($activeCommitIdentityStart -ge 0 -and $activeCommitIdentityEnd -gt $activeCommitIdentityStart) {
+    $activeCommitIdentitySpan = $premarketContent.Substring($activeCommitIdentityStart, $activeCommitIdentityEnd - $activeCommitIdentityStart)
+    if ($activeCommitIdentitySpan -notmatch 'generated_at_utc') {
+        Ok "generated_at_utc is never folded into the manifest identity"
+    } else {
+        Fail "generated_at_utc appears inside the ActiveCommit manifest's identityParts block"
+    }
+} else {
+    Fail "could not locate the ActiveCommit identityParts block to check for generated_at_utc"
+}
+
+# ---------------------------------------------------------------------------
+# Check 30: required_market_data_pairs is selected-binding-specific, never
+# every unrelated configuration-preview assignment row.
+# ---------------------------------------------------------------------------
+Write-Host ""
+Write-Host "-- Check 30: required_market_data_pairs is selected-binding-specific --"
+$selectedSpecificPattern = "(?s)function New-Bundle7ActiveCommitManifest.*?foreach \(\`$s in \`$selectedBindings\) \{.*?\`$assignments \| Where-Object"
+if ($premarketContent -match $selectedSpecificPattern) {
+    Ok "required_market_data_pairs is built by matching each selected binding against readiness assignments"
+} else {
+    Fail "required_market_data_pairs does not appear to be selected-binding-specific"
+}
+
+# ---------------------------------------------------------------------------
+# Check 31: unknown journal strategy is not skipped in strict PaperEnforced
+# mode (Defect 5).
+# ---------------------------------------------------------------------------
+Write-Host ""
+Write-Host "-- Check 31: strict PaperEnforced journal attribution never skips an unknown strategy_id --"
+$looseSkipPattern = "(?s)if \(!strategy_ids_selected\.contains\(row\.strategy_id\.as_str\(\)\)\)\s*\{\s*continue;"
+if ($validatorContent -notmatch $looseSkipPattern) {
+    Ok "the loose skip-unknown-strategy branch is absent from find_signal_journal_attribution_violation"
+} else {
+    Fail "find_signal_journal_attribution_violation still silently skips rows for an unknown strategy_id"
+}
+if ($validatorContent -match [regex]::Escape('strategy_id is not part of the committed selected-host set at all')) {
+    Ok "an unknown strategy_id is reported as contradictory evidence, not skipped"
+} else {
+    Fail "could not confirm an unknown strategy_id is rejected as contradictory evidence"
+}
+
+# ---------------------------------------------------------------------------
+# Check 32: zero-selected sessions are not described as countable in the
+# runbook.
+# ---------------------------------------------------------------------------
+Write-Host ""
+Write-Host "-- Check 32: runbook never describes a zero-selected session as countable --"
+$staleRunbookDefect = "is still a`ncountable clean session provided every check"
+if ($runbookContent -notmatch [regex]::Escape($staleRunbookDefect)) {
+    Ok "the stale zero-selected-counts-as-clean runbook wording is absent"
+} else {
+    Fail "the runbook still describes a zero-selected-pair session as countable"
+}
+if ($runbookContent -match [regex]::Escape('A zero-selected-pair session never counts.')) {
+    Ok "the runbook explicitly states a zero-selected-pair session never counts"
+} else {
+    Fail "the runbook does not explicitly state that a zero-selected-pair session never counts"
+}
+
+# ---------------------------------------------------------------------------
+# Mutation-negative self-test 14: Check 31's strict-journal detection (the
+# loose skip branch reintroduced).
+# ---------------------------------------------------------------------------
+Write-Host ""
+Write-Host "-- Self-test 14: mutation-negative proof for the strict-journal-attribution check --"
+$mutatedValidatorLooseSkip = $validatorContent -replace [regex]::Escape("let key = (`n            row.symbol.clone(),"), "if (!strategy_ids_selected.contains(row.strategy_id.as_str())) { continue; }`n        let key = (`n            row.symbol.clone(),"
+$mutationCaught14 = ($mutatedValidatorLooseSkip -match $looseSkipPattern)
+if ($mutationCaught14) {
+    Ok "self-test passed: strict-journal check correctly fires when the loose skip branch is reintroduced"
+} else {
+    Fail "self-test FAILED: strict-journal check did not detect a reintroduced loose skip branch"
 }
 
 Write-Host ""
