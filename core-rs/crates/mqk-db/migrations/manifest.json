@@ -374,6 +374,12 @@
       "path": "0060_dynamic_selection_plan_candidates_exact_key_unique.sql",
       "status": "applied",
       "intent": "DYNAMIC-STRATEGY-SYMBOL-SELECTION-01-PHASE-7C-FORMAL-SOAK-GATE-TRUTH-REPAIR-01 Part 7: add a UNIQUE (plan_id, symbol, strategy_id, timeframe_secs) constraint to sys_dynamic_selection_plan_candidates. Migration 0059's only uniqueness constraint on that table was (plan_id, ordinal) -- physical insert-order identity, not the candidate's economic identity -- so a duplicate exact candidate key could previously be written under two different ordinals with no error. Additive only, does not modify 0059."
+    },
+    {
+      "id": "0061",
+      "path": "0061_ingest_job_cancelled_status.sql",
+      "status": "applied",
+      "intent": "INGEST-JOB-CANCEL-STATUS-CONSTRAINT-REPAIR-01 (FULL-AUDIT-FAIL-012): replace sys_ingest_jobs_status_check (same constraint name) so it admits 'cancelled', matching IngestJobStatus::as_str()/from_str() exactly. Migration 0041 predates IngestJobStatus::Cancelled and the ingest-cancel route, so DB-backed cancellation was rejected by this constraint and returned 503 instead of 202. All previously-legal statuses are preserved unchanged. Additive only, does not modify 0041."
     }
   ]
 }

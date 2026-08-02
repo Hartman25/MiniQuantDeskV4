@@ -702,6 +702,25 @@ pub struct AppState {
     /// `Some(client)` in tests: the injected capability-aware fake is used directly,
     /// allowing zero-network latest-bar tests without provider credentials.
     pub latest_bar_provider_client: Option<Arc<dyn mqk_md::MarketDataProvider>>,
+    /// INGEST-JOB-CANCEL-STATUS-CONSTRAINT-REPAIR-01: Test-only synchronization
+    /// barrier for reproducing the exact check-then-act race window in
+    /// `run_real_provider_sync`'s per-symbol progress write (routes/ingest.rs):
+    /// its in-memory record is read *before* this pause, and its durable
+    /// persist happens *after* — the same gap a concurrent cancel can commit
+    /// inside of in production.
+    ///
+    /// `None` in production: no effect. `Some(notify)` in tests: that one
+    /// write pauses at `notify.notified()` immediately before its own
+    /// `persist_ingest_job_record` call, so a test can deterministically let
+    /// a concurrent cancel commit first, then release the stale write —
+    /// reproducing the race with a real barrier instead of a timing sleep.
+    pub ingest_job_persist_barrier_for_test: Option<Arc<tokio::sync::Notify>>,
+    /// Companion signal to `ingest_job_persist_barrier_for_test`: notified
+    /// the instant a background write reaches the pause point, so a test
+    /// can deterministically wait for "the background task is now paused
+    /// here" instead of guessing with a sleep before issuing its own
+    /// concurrent write.
+    pub ingest_job_persist_barrier_entered_for_test: Option<Arc<tokio::sync::Notify>>,
     /// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E4-READ-TRUTH-AND-EVIDENCE-STATE-REPAIR-01:
     /// Test-only override forcing `gather_daily_operation_activity_counts`
     /// to report a downstream database read failure (`ActivityCounts::DatabaseUnavailable`)
@@ -1344,6 +1363,23 @@ impl AppState {
         self.latest_bar_provider_client = Some(client);
     }
 
+    /// Test helper: inject a synchronization barrier that pauses
+    /// `run_real_provider_sync`'s per-symbol progress write immediately
+    /// before its durable persist call, so a test can deterministically
+    /// interleave a concurrent cancel's own DB commit ahead of that write.
+    pub fn set_ingest_job_persist_barrier_for_test(&mut self, barrier: Arc<tokio::sync::Notify>) {
+        self.ingest_job_persist_barrier_for_test = Some(barrier);
+    }
+
+    /// Test helper: pair with `set_ingest_job_persist_barrier_for_test` so a
+    /// test can await "the background write is now paused" deterministically.
+    pub fn set_ingest_job_persist_barrier_entered_for_test(
+        &mut self,
+        entered: Arc<tokio::sync::Notify>,
+    ) {
+        self.ingest_job_persist_barrier_entered_for_test = Some(entered);
+    }
+
     /// Test helper: inject a fill activity fetcher for BROKER-FILL-REST-RECOVERY-01 tests.
     ///
     /// Production wiring is deferred to BROKER-FILL-REST-RECOVERY-APPLY-01.
@@ -1684,6 +1720,8 @@ impl AppState {
                 }),
             provider_client: None,
             latest_bar_provider_client: None,
+            ingest_job_persist_barrier_for_test: None,
+            ingest_job_persist_barrier_entered_for_test: None,
             force_activity_counts_database_unavailable_for_test: false,
             market_data_feed_status: Arc::new(RwLock::new(None)),
             market_data_feed_scheduler: Arc::new(Mutex::new(

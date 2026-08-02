@@ -262,6 +262,26 @@ fn row_to_record(row: sqlx::postgres::PgRow) -> Result<IngestJobRecord, String> 
     })
 }
 
+/// Persists `record`, refusing to overwrite a durably cancelled row with
+/// anything other than another cancel write.
+///
+/// `sys_ingest_jobs.status = 'cancelled'` is a terminal, operator-authorized
+/// fact. Every ingest job kind (CSV, dry-run, real provider sync) drives
+/// its own background task that persists progress/completion through this
+/// same function on a check-then-act basis (`ingest_job_is_cancelled` is
+/// checked in-memory, then this function is called later, awaiting a
+/// provider or DB round trip in between) — that gap is exactly where a
+/// concurrent cancel can durably commit before a stale background write
+/// lands. The in-memory guard in `mutate_job` (routes/ingest.rs) already
+/// protects the in-memory store from that race, but the two DB writes are
+/// independent async calls with no ordering guarantee between them, so the
+/// DB itself needs its own guard: the `where` clause below makes the
+/// UPDATE branch of this upsert a no-op (0 rows affected, not an error)
+/// whenever the durable row is already `cancelled` and this write is not
+/// itself setting `cancelled` — a single atomic conditional UPDATE is the
+/// one authority for "can this write proceed", evaluated by Postgres under
+/// the row's own lock, not a second application-level lock racing the
+/// first.
 pub async fn persist_ingest_job_record(
     pool: &PgPool,
     record: &IngestJobRecord,
@@ -334,6 +354,7 @@ pub async fn persist_ingest_job_record(
                 started_at_utc               = excluded.started_at_utc,
                 completed_at_utc             = excluded.completed_at_utc,
                 updated_at_utc               = excluded.updated_at_utc
+            where sys_ingest_jobs.status <> 'cancelled' or excluded.status = 'cancelled'
         "#,
     )
     .bind(record.job_id)

@@ -378,6 +378,7 @@ fn ingest_job_is_cancelled(jobs: &IngestJobStore, job_id: Uuid) -> bool {
 async fn persist_job_update<F>(
     jobs: &IngestJobStore,
     db_pool: Option<&sqlx::PgPool>,
+    persist_barrier: Option<&Arc<tokio::sync::Notify>>,
     job_id: Uuid,
     mutate: F,
 ) where
@@ -388,6 +389,15 @@ async fn persist_job_update<F>(
     };
 
     if let Some(pool) = db_pool {
+        // Test-only hook (INGEST-JOB-CANCEL-STATUS-CONSTRAINT-REPAIR-01): a
+        // test can pause exactly here, between this write's own in-memory
+        // read (above) and its durable persist (below) -- the same
+        // check-then-act gap a concurrent cancel can commit inside of in
+        // production -- to deterministically reproduce that interleaving
+        // instead of racing it via timing. No effect when unset.
+        if let Some(barrier) = persist_barrier {
+            barrier.notified().await;
+        }
         if let Err(err) = persist_ingest_job_record(pool, &record).await {
             tracing::error!(
                 job_id = %job_id,
@@ -1428,22 +1438,40 @@ pub(crate) async fn ingest_job_submit(
         .into_response()
 }
 
-enum IngestCancelOutcome {
-    Accepted(IngestJobRecord),
-    AlreadyTerminal(IngestJobRecord),
+enum IngestCancelLookup {
+    Terminal(IngestJobRecord),
+    Cancellable(IngestJobRecord),
 }
 
-fn cancel_record_in_memory(jobs: &IngestJobStore, job_id: Uuid) -> Option<IngestCancelOutcome> {
-    let mut store = jobs.lock().expect("ingest_jobs lock poisoned");
-    let record = store.get_mut(&job_id)?;
+/// Read-only snapshot of the current in-memory record: never mutates the
+/// store. Determines pre-cancel truth (already terminal vs. cancellable)
+/// without publishing any cancelled state, so a failed persist below has
+/// nothing in memory to roll back.
+fn peek_cancel_target(jobs: &IngestJobStore, job_id: Uuid) -> Option<IngestCancelLookup> {
+    let store = jobs.lock().expect("ingest_jobs lock poisoned");
+    let record = store.get(&job_id)?;
     if record.status.is_terminal() {
-        return Some(IngestCancelOutcome::AlreadyTerminal(record.clone()));
+        Some(IngestCancelLookup::Terminal(record.clone()))
+    } else {
+        Some(IngestCancelLookup::Cancellable(record.clone()))
     }
+}
 
+/// Builds the cancelled form of a record in a local value — not yet
+/// persisted or published anywhere.
+fn build_cancelled_record(mut record: IngestJobRecord) -> IngestJobRecord {
     record.status = IngestJobStatus::Cancelled;
     record.completed_at_utc = Some(Utc::now());
     record.error = Some(INGEST_JOB_CANCEL_REASON.to_string());
-    Some(IngestCancelOutcome::Accepted(record.clone()))
+    record
+}
+
+/// Publishes an already-durable (or no-DB) cancelled record to the
+/// in-memory store. Must only be called after DB persistence has succeeded,
+/// or when no DB pool is configured at all.
+fn publish_cancelled_in_memory(jobs: &IngestJobStore, cancelled: IngestJobRecord) {
+    let mut store = jobs.lock().expect("ingest_jobs lock poisoned");
+    store.insert(cancelled.job_id, cancelled);
 }
 
 fn cancel_route_response(
@@ -1502,27 +1530,35 @@ pub(crate) async fn ingest_job_cancel(
     State(st): State<Arc<AppState>>,
     AxumPath(job_id): AxumPath<Uuid>,
 ) -> Response {
-    if let Some(outcome) = cancel_record_in_memory(&st.ingest_jobs, job_id) {
-        return match outcome {
-            IngestCancelOutcome::AlreadyTerminal(record) => {
+    // Job already tracked in this process's in-memory store (submitted this
+    // process lifetime, or previously loaded/cached from DB).
+    if let Some(lookup) = peek_cancel_target(&st.ingest_jobs, job_id) {
+        return match lookup {
+            IngestCancelLookup::Terminal(record) => {
                 cancel_route_response(StatusCode::OK, "already_terminal", false, &record)
             }
-            IngestCancelOutcome::Accepted(record) => {
+            IngestCancelLookup::Cancellable(record) => {
+                let cancelled = build_cancelled_record(record);
                 if let Some(pool) = &st.db {
-                    if let Err(e) = persist_ingest_job_record(pool, &record).await {
+                    if let Err(e) = persist_ingest_job_record(pool, &cancelled).await {
+                        // Persist failed: `cancelled` was only ever a local
+                        // value. Memory still holds its pre-request record
+                        // and the DB row is untouched — nothing to roll back.
                         return backend_unavailable_cancel_response(job_id, e);
                     }
                 }
-                cancel_route_response(StatusCode::ACCEPTED, "cancel_accepted", true, &record)
+                publish_cancelled_in_memory(&st.ingest_jobs, cancelled.clone());
+                cancel_route_response(StatusCode::ACCEPTED, "cancel_accepted", true, &cancelled)
             }
         };
     }
 
+    // Not tracked in memory this process lifetime: DB-only job.
     let Some(pool) = &st.db else {
         return not_found_cancel_response(job_id);
     };
 
-    let mut record = match load_persisted_ingest_job(pool, job_id).await {
+    let record = match load_persisted_ingest_job(pool, job_id).await {
         Ok(Some(record)) => record,
         Ok(None) => return not_found_cancel_response(job_id),
         Err(e) => return backend_unavailable_cancel_response(job_id, e),
@@ -1532,20 +1568,15 @@ pub(crate) async fn ingest_job_cancel(
         return cancel_route_response(StatusCode::OK, "already_terminal", false, &record);
     }
 
-    record.status = IngestJobStatus::Cancelled;
-    record.completed_at_utc = Some(Utc::now());
-    record.error = Some(INGEST_JOB_CANCEL_REASON.to_string());
-
-    if let Err(e) = persist_ingest_job_record(pool, &record).await {
+    let cancelled = build_cancelled_record(record);
+    if let Err(e) = persist_ingest_job_record(pool, &cancelled).await {
+        // Persist failed: memory never saw this job, so there is nothing to
+        // roll back there, and the DB row remains at its pre-request status.
         return backend_unavailable_cancel_response(job_id, e);
     }
 
-    {
-        let mut store = st.ingest_jobs.lock().expect("ingest_jobs lock poisoned");
-        store.insert(job_id, record.clone());
-    }
-
-    cancel_route_response(StatusCode::ACCEPTED, "cancel_accepted", true, &record)
+    publish_cancelled_in_memory(&st.ingest_jobs, cancelled.clone());
+    cancel_route_response(StatusCode::ACCEPTED, "cancel_accepted", true, &cancelled)
 }
 
 // ---------------------------------------------------------------------------
@@ -1680,7 +1711,7 @@ async fn handle_csv_job(st: Arc<AppState>, req: IngestJobRequest, source: String
         }
 
         // Mark running.
-        persist_job_update(&jobs, db_pool.as_ref(), job_id, |r| {
+        persist_job_update(&jobs, db_pool.as_ref(), None, job_id, |r| {
             r.status = IngestJobStatus::Running;
             r.started_at_utc = Some(Utc::now()); // allow: operational
         })
@@ -1694,7 +1725,7 @@ async fn handle_csv_job(st: Arc<AppState>, req: IngestJobRequest, source: String
             run_csv_ingest_async(db_pool.clone(), csv_path, timeframe, source_label, out_dir).await;
 
         // Mark completed / failed.
-        persist_job_update(&jobs, db_pool.as_ref(), job_id, |r| {
+        persist_job_update(&jobs, db_pool.as_ref(), None, job_id, |r| {
             r.completed_at_utc = Some(Utc::now()); // allow: operational
             match result {
                 Ok(outcome) => {
@@ -2191,6 +2222,8 @@ async fn handle_provider_sync_job(
     let api_credits_per_day = req.api_credits_per_day;
     let provider_client = st.provider_client.clone();
     let db_pool = st.db.clone();
+    let persist_barrier = st.ingest_job_persist_barrier_for_test.clone();
+    let persist_barrier_entered = st.ingest_job_persist_barrier_entered_for_test.clone();
     let source_for_task = source.clone();
     let registry_path_for_task = registry_path.clone();
     let provider_registry_path_for_task = provider_registry_path.clone();
@@ -2202,6 +2235,8 @@ async fn handle_provider_sync_job(
             job_id,
             provider_client,
             db_pool,
+            persist_barrier,
+            persist_barrier_entered,
             source_for_task,
             registry_path_for_task,
             provider_registry_path_for_task,
@@ -2300,7 +2335,7 @@ async fn handle_provider_dry_run(
         }
 
         // Mark running.
-        persist_job_update(&jobs, db_pool.as_ref(), job_id, |r| {
+        persist_job_update(&jobs, db_pool.as_ref(), None, job_id, |r| {
             r.status = IngestJobStatus::Running;
             r.started_at_utc = Some(Utc::now()); // allow: operational
         })
@@ -2329,7 +2364,7 @@ async fn handle_provider_dry_run(
         });
 
         // Mark terminal.
-        persist_job_update(&jobs, db_pool.as_ref(), job_id, |r| {
+        persist_job_update(&jobs, db_pool.as_ref(), None, job_id, |r| {
             r.completed_at_utc = Some(Utc::now()); // allow: operational
             match result {
                 Ok((count, first, last)) => {
@@ -2451,6 +2486,8 @@ async fn run_real_provider_sync(
     job_id: Uuid,
     provider_client: Option<std::sync::Arc<dyn mqk_md::HistoricalProvider>>,
     db_pool: Option<sqlx::PgPool>,
+    persist_barrier: Option<Arc<tokio::sync::Notify>>,
+    persist_barrier_entered: Option<Arc<tokio::sync::Notify>>,
     source: String,
     registry_path: String,
     provider_registry_path: String,
@@ -2467,7 +2504,7 @@ async fn run_real_provider_sync(
     }
 
     // Mark running.
-    persist_job_update(&jobs, db_pool.as_ref(), job_id, |r| {
+    persist_job_update(&jobs, db_pool.as_ref(), None, job_id, |r| {
         r.status = IngestJobStatus::Running;
         r.started_at_utc = Some(Utc::now()); // allow: operational
     })
@@ -2492,7 +2529,7 @@ async fn run_real_provider_sync(
         }) {
             Ok(provider) => provider,
             Err(err) => {
-                persist_job_update(&jobs, db_pool.as_ref(), job_id, |r| {
+                persist_job_update(&jobs, db_pool.as_ref(), None, job_id, |r| {
                     r.status = IngestJobStatus::Failed;
                     r.completed_at_utc = Some(Utc::now()); // allow: operational
                     r.error = Some(format!(
@@ -2514,7 +2551,7 @@ async fn run_real_provider_sync(
         match resolve_provider_scoped_equities(&registry_path, &source, &asset_class, timeframe) {
             Ok(instruments) => {
                 if instruments.is_empty() {
-                    persist_job_update(&jobs, db_pool.as_ref(), job_id, |r| {
+                    persist_job_update(&jobs, db_pool.as_ref(), None, job_id, |r| {
                         r.status = IngestJobStatus::Failed;
                         r.completed_at_utc = Some(Utc::now()); // allow: operational
                         r.error = Some(format!(
@@ -2531,7 +2568,7 @@ async fn run_real_provider_sync(
                 let first = instruments.first().map(|e| e.symbol.clone());
                 let last = instruments.last().map(|e| e.symbol.clone());
                 let count = instruments.len();
-                persist_job_update(&jobs, db_pool.as_ref(), job_id, |r| {
+                persist_job_update(&jobs, db_pool.as_ref(), None, job_id, |r| {
                     r.symbols_count = Some(count);
                     r.planned_first_symbol = first;
                     r.planned_last_symbol = last;
@@ -2542,7 +2579,7 @@ async fn run_real_provider_sync(
                 instruments
             }
             Err(e) => {
-                persist_job_update(&jobs, db_pool.as_ref(), job_id, |r| {
+                persist_job_update(&jobs, db_pool.as_ref(), None, job_id, |r| {
                     r.status = IngestJobStatus::Failed;
                     r.completed_at_utc = Some(Utc::now()); // allow: operational
                     r.error = Some(format!("registry load failed: {}", e));
@@ -2751,7 +2788,15 @@ async fn run_real_provider_sync(
         }
 
         // Progress update after each symbol.
-        persist_job_update(&jobs, db_pool.as_ref(), job_id, |r| {
+        //
+        // Test-only (INGEST-JOB-CANCEL-STATUS-CONSTRAINT-REPAIR-01): signal
+        // "entered" right before the same in-memory-read-then-persist gap
+        // `persist_barrier` pauses, so a test can deterministically await
+        // "this write is now paused here" instead of guessing with a sleep.
+        if let Some(entered) = &persist_barrier_entered {
+            entered.notify_one();
+        }
+        persist_job_update(&jobs, db_pool.as_ref(), persist_barrier.as_ref(), job_id, |r| {
             r.api_calls_made = api_calls_made;
             r.symbols_completed = Some(symbols_completed);
             r.symbols_failed = Some(symbols_failed);
@@ -2812,7 +2857,7 @@ async fn run_real_provider_sync(
         Some(final_error.join("; "))
     };
 
-    persist_job_update(&jobs, db_pool.as_ref(), job_id, |r| {
+    persist_job_update(&jobs, db_pool.as_ref(), None, job_id, |r| {
         r.completed_at_utc = Some(Utc::now()); // allow: operational
         r.status = final_status;
         r.api_calls_made = api_calls_made;
