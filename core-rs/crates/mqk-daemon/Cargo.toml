@@ -76,6 +76,18 @@ hex = "0.4"
 # `ProductionRuntimeStartEffects`.
 async-trait = "0.1"
 
+[features]
+# FULL-AUDIT-SAFE-IGNORED-AND-SHARED-DB-FINAL-CLOSURE-01 Part 1: compile-time
+# boundary for the 9 MANUAL_EXTERNAL tests that require real Alpaca
+# credentials (see scripts/test/ignored_test_inventory.csv). Off by default:
+# default `cargo test`, the canonical safe-ignored runner, and CI never pass
+# this feature, so these 9 functions do not even exist in the compiled test
+# binary in the normal case. An operator proving these manually must pass
+# --features manual-external explicitly, AND (see the functions themselves)
+# set MQK_ALLOW_MANUAL_EXTERNAL_ORDER_TESTS=1 at runtime -- two independent,
+# separately-named gates before any real broker adapter can be constructed.
+manual-external = []
+
 [dev-dependencies]
 # Required for in-process Axum router testing via tower::ServiceExt::oneshot()
 tower = { version = "0.4", features = ["util"] }
@@ -83,3 +95,10 @@ http-body-util = "0.1"
 bytes = "1"
 # B6: temp policy files for capital budget gate proof tests
 tempfile = "3"
+# FULL-AUDIT-SAFE-IGNORED-AND-SHARED-DB-FINAL-CLOSURE-01 Part 3: activates
+# mqk_db::run_isolated / create_disposable_test_db / DisposableTestDb
+# (mqk-db's test_support module) for this crate's own tests and hermetic
+# `#[cfg(test)]` in-crate proofs. MUST NOT be moved to [dependencies] --
+# that would compile the disposable-database helper into the production
+# `mqk-daemon` binary. See scripts/guards/check_disposable_db_not_in_production.sh.
+mqk-db = { path = "../mqk-db", features = ["testkit"] }

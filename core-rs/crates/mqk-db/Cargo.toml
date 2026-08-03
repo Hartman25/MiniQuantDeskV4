@@ -66,5 +66,15 @@ name = "scenario_outbox_first_enforced"
 path = "tests/scenario_outbox_first_enforced.rs"
 required-features = ["testkit"]
 
+# FULL-AUDIT-SAFE-IGNORED-AND-SHARED-DB-FINAL-CLOSURE-01 Part 3: DB-backed
+# proofs for the hardened disposable-per-test-database helper.
+# Run: MQK_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5434/mqk_test \
+#      cargo test -p mqk-db --features testkit --test test_support_disposable_db \
+#      -- --include-ignored --test-threads=1
+[[test]]
+name = "test_support_disposable_db"
+path = "tests/test_support_disposable_db.rs"
+required-features = ["testkit"]
+
 [dev-dependencies]
 tempfile = "3"

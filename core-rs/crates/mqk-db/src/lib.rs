@@ -159,158 +159,21 @@ pub async fn migrate(pool: &PgPool) -> Result<()> {
 // engine", a bounded global feed window) and therefore cannot be isolated by
 // per-fixture-ID cleanup against the shared `MQK_DATABASE_URL` database.
 // FULL-AUDIT-FAIL-017.
+//
+// This is test-only infrastructure: it lives in `test_support`, gated so it
+// compiles into mqk-db's own unit tests automatically (`cfg(test)`) and into
+// an external crate's tests only when that crate's own `[dev-dependencies]`
+// (never `[dependencies]`) enables the `testkit` feature on this crate. The
+// default production `mqk-db` library API exposes none of this — see
+// scripts/guards/check_disposable_db_not_in_production.sh.
 // ---------------------------------------------------------------------------
+#[cfg(any(test, feature = "testkit"))]
+pub mod test_support;
 
-/// Splits a Postgres URL into `(everything before the final path segment,
-/// database name, optional query string)`. Pure string manipulation — every
-/// URL used by this repo's test harness (`MQK_DATABASE_URL`) is a plain
-/// `postgres://user:pass@host:port/dbname[?params]` with no path segments
-/// beyond the database name.
-fn split_db_url(url: &str) -> (String, String, Option<String>) {
-    let (path_part, query) = match url.split_once('?') {
-        Some((p, q)) => (p.to_string(), Some(q.to_string())),
-        None => (url.to_string(), None),
-    };
-    let idx = path_part
-        .rfind('/')
-        .expect("MQK_DATABASE_URL must contain a /<dbname> path segment");
-    (
-        path_part[..idx].to_string(),
-        path_part[idx + 1..].to_string(),
-        query,
-    )
-}
-
-fn build_db_url(base: &str, db_name: &str, query: &Option<String>) -> String {
-    match query {
-        Some(q) => format!("{base}/{db_name}?{q}"),
-        None => format!("{base}/{db_name}"),
-    }
-}
-
-/// A disposable, migrated Postgres database created for exactly one test
-/// (or one test's own private scope), on the same server as
-/// `MQK_DATABASE_URL`. Never touches any other test's rows because nothing
-/// else connects to it. Call [`DisposableTestDb::drop_database`] when done —
-/// [`run_isolated`] does this automatically, including on test panic.
-pub struct DisposableTestDb {
-    pub pool: PgPool,
-    db_name: String,
-    admin_url: String,
-}
-
-impl DisposableTestDb {
-    /// Drops the disposable database. Must be called after `self.pool` (and
-    /// any clone of it) is done being used — this closes `self.pool` first.
-    pub async fn drop_database(self) -> Result<()> {
-        self.pool.close().await;
-        let admin_pool = PgPoolOptions::new()
-            .max_connections(1)
-            .connect(&self.admin_url)
-            .await
-            .context("connect to admin db for disposable-db teardown")?;
-        sqlx::query(&format!(
-            "DROP DATABASE IF EXISTS \"{}\" WITH (FORCE)",
-            self.db_name
-        ))
-        .execute(&admin_pool)
-        .await
-        .context("drop disposable test database")?;
-        admin_pool.close().await;
-        Ok(())
-    }
-}
-
-/// Creates a fresh, migrated, uniquely-named database on the same Postgres
-/// server as `MQK_DATABASE_URL` (port 5434 in this repo's test harness), and
-/// returns a pool connected to it. `label` is sanitized to `[a-z0-9_]` and
-/// truncated so the generated name stays within Postgres' 63-byte identifier
-/// limit; the OS process ID plus a per-process monotonic counter guarantee
-/// uniqueness across concurrent test runs (deterministic inputs only --
-/// `Uuid::new_v4()` is disallowed in this crate's production src/ by
-/// scripts/guards/check_unsafe_patterns.ps1/.sh, so this does not use it).
-static DISPOSABLE_DB_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-pub async fn create_disposable_test_db(label: &str) -> Result<DisposableTestDb> {
-    let base_url =
-        std::env::var(ENV_DB_URL).with_context(|| format!("missing env var {ENV_DB_URL}"))?;
-    let (base, _orig_db, query) = split_db_url(&base_url);
-
-    let sanitized: String = label
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() {
-                c.to_ascii_lowercase()
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    let sanitized: String = sanitized.chars().take(24).collect();
-    let sequence = DISPOSABLE_DB_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let db_name = format!("mqk_disp_{sanitized}_{}_{sequence}", std::process::id());
-
-    let admin_url = build_db_url(&base, "postgres", &query);
-    let admin_pool = PgPoolOptions::new()
-        .max_connections(1)
-        .connect(&admin_url)
-        .await
-        .context("connect to admin db to create disposable test database")?;
-    sqlx::query(&format!("CREATE DATABASE \"{db_name}\""))
-        .execute(&admin_pool)
-        .await
-        .context("create disposable test database")?;
-    admin_pool.close().await;
-
-    let target_url = build_db_url(&base, &db_name, &query);
-    let pool = PgPoolOptions::new()
-        .max_connections(5)
-        .connect(&target_url)
-        .await
-        .context("connect to newly-created disposable test database")?;
-    migrate(&pool)
-        .await
-        .context("migrate disposable test database")?;
-
-    Ok(DisposableTestDb {
-        pool,
-        db_name,
-        admin_url,
-    })
-}
-
-/// Runs `test` against a fresh disposable database created just for this
-/// call, and guarantees the database is dropped afterward — including when
-/// `test` panics (an assertion failure), by running it inside `tokio::spawn`
-/// and catching the join error before propagating the original panic.
-/// This is the FULL-AUDIT-FAIL-017 replacement for global shared-DB deletion
-/// helpers and `Utc::now()`-based "latest row" racing: each caller gets an
-/// empty database, so there is no other test's row to collide with and no
-/// global query to race.
-pub async fn run_isolated<F, Fut>(label: &str, test: F)
-where
-    F: FnOnce(PgPool) -> Fut + Send + 'static,
-    Fut: std::future::Future<Output = ()> + Send + 'static,
-{
-    let disposable = create_disposable_test_db(label)
-        .await
-        .expect("create_disposable_test_db");
-    let pool = disposable.pool.clone();
-    let handle = tokio::spawn(async move { test(pool).await });
-    let result = handle.await;
-    disposable
-        .drop_database()
-        .await
-        .expect("drop_database (disposable test db teardown)");
-    if let Err(join_err) = result {
-        match join_err.try_into_panic() {
-            Ok(panic_payload) => std::panic::resume_unwind(panic_payload),
-            Err(join_err) => {
-                panic!("run_isolated: test task did not panic but failed to join: {join_err}")
-            }
-        }
-    }
-}
+#[cfg(any(test, feature = "testkit"))]
+pub use test_support::{
+    create_disposable_test_db, run_isolated, DisposableDbError, DisposableTestDb,
+};
 
 /// Simple status query (connectivity + schema presence).
 pub async fn status(pool: &PgPool) -> Result<DbStatus> {
