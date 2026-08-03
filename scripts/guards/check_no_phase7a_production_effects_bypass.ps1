@@ -63,7 +63,12 @@ $BannedSymbols = @(
     'plant_accepted_artifact_for_test',
     'plant_day_signal_count_for_test',
     'accepted_artifact_snapshot_for_test',
-    'day_signal_count_snapshot_for_test'
+    'day_signal_count_snapshot_for_test',
+    # FULL-AUDIT-FAIL-016/018: the hermetic broker-override setter. Must stay
+    # `pub(crate)` + `#[cfg(test)]` -- the sole seam that can ever flip
+    # `hermetic_test_broker_override` to true, and unreachable outside this
+    # crate's own test build.
+    'set_hermetic_test_broker_override_for_test'
 )
 
 # A plain `pub fn NAME` / `pub async fn NAME` is the bypass shape. Note this
@@ -161,6 +166,71 @@ foreach ($Symbol in $BannedSymbols) {
 if ($UngatedSymbols.Count -gt 0) {
     $Violations += $UngatedSymbols.Count
     $MatchLines += $UngatedSymbols
+}
+
+# ---------------------------------------------------------------------------
+# FULL-AUDIT-FAIL-016/018: hermetic broker-override no-production-bypass
+# proof. `hermetic_test_broker_override_enabled` (the reader) is deliberately
+# NOT `#[cfg(test)]`-gated -- production code reads it unconditionally and it
+# is always `false` there -- so it is intentionally excluded from
+# $BannedSymbols above (which would wrongly flag it as "ungated"). It must
+# instead stay `pub(crate)`, never plain `pub`, so no crate outside
+# mqk-daemon (and no route module reaching across the module tree) can read
+# or be handed a way to flip it.
+# ---------------------------------------------------------------------------
+$ReaderSymbol = 'hermetic_test_broker_override_enabled'
+$ReaderPlainPubPattern = "pub\s+(async\s+)?fn\s+$ReaderSymbol\b"
+foreach ($File in $SrcFiles) {
+    $Found = Select-String -Path $File.FullName -Pattern $ReaderPlainPubPattern
+    if ($Found) {
+        $Violations++
+        $RelPath = $File.FullName.Substring($RepoRoot.Length + 1)
+        foreach ($Hit in $Found) {
+            $MatchLines += "  ${RelPath}:$($Hit.LineNumber):$($Hit.Line.Trim()) [reader must be pub(crate), not pub]"
+        }
+    }
+}
+
+# No env var, route, or config key may exist for this override -- the private
+# `hermetic_test_broker_override: Arc<RwLock<bool>>` field on AppState is not
+# `pub`, so nothing outside `state.rs` itself (routes/*, main.rs, other
+# crates) can write it directly; the only writer is the `#[cfg(test)]`
+# setter checked above. This is a tripwire in case a future change adds an
+# env-var-driven path that calls the setter from non-test code. Matches only
+# an actual `std::env::var("...HERMETIC..." )`-shaped string-literal read, not
+# the legitimate Rust identifier `hermetic_test_broker_override` itself.
+$EnvBypassPattern = 'env::var\(\s*"[^"]*(HERMETIC|BROKER_OVERRIDE)[^"]*"'
+foreach ($File in $SrcFiles) {
+    $Found = Select-String -Path $File.FullName -Pattern $EnvBypassPattern
+    if ($Found) {
+        $Violations++
+        $RelPath = $File.FullName.Substring($RepoRoot.Length + 1)
+        foreach ($Hit in $Found) {
+            $MatchLines += "  ${RelPath}:$($Hit.LineNumber):$($Hit.Line.Trim()) [no env var may gate the hermetic broker override]"
+        }
+    }
+}
+
+# Tripwire: the default-build credential-required proofs this guard relies on
+# (informally) must still exist -- if either is ever deleted, this guard's
+# "default build still requires real credentials" claim in its own header
+# would silently stop being proven anywhere.
+$RequiredCredentialProofs = @(
+    'build_daemon_broker_paper_is_not_execution_path',
+    'env_truth_02_alpaca_live_base_url_env_var_is_not_authoritative'
+)
+foreach ($ProofSymbol in $RequiredCredentialProofs) {
+    $ProofFound = $false
+    foreach ($File in $SrcFiles) {
+        if (Select-String -Path $File.FullName -Pattern "fn\s+$ProofSymbol\b" -Quiet) {
+            $ProofFound = $true
+            break
+        }
+    }
+    if (-not $ProofFound) {
+        $Violations++
+        $MatchLines += "  required credential-gate proof test '$ProofSymbol' not found anywhere in src/ (was it deleted or renamed?)"
+    }
 }
 
 Write-Host ""

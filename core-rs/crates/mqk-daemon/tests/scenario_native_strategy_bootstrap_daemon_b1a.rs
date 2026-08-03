@@ -28,6 +28,18 @@
 //!
 //! L01–L03 are pure in-process; no DB or network required.
 //! L04–L06 are DB-backed and skip gracefully without `MQK_DATABASE_URL`.
+//!
+//! FULL-AUDIT-FAIL-016/018: L04-L06 below remain `#[ignore]`d and blocked
+//! without real `ALPACA_API_KEY_LIVE` credentials -- external integration
+//! tests cannot reach the crate's private `#[cfg(test)]` hermetic broker
+//! override (`pub(crate)`, only visible inside `mqk-daemon` itself). The
+//! positive proof these three are meant to carry now lives in-crate at
+//! `crates/mqk-daemon/src/state/hermetic_positive_proofs.rs`
+//! (`hermetic_b1a_l04_*`/`l05_*`/`l06_*`), which drives the identical real
+//! router/lifecycle/order path hermetically via that private seam. See that
+//! file's module header for the full coverage map. These originals are kept
+//! (not deleted) as a manual escape hatch for an operator with real
+//! credentials; they are never run by CI or any default command.
 
 use std::sync::Arc;
 

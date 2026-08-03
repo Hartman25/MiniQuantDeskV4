@@ -27,11 +27,15 @@
 //!
 //! **Start chain** (POST /v1/run/start):
 //! ```text
-//! Gate 1: deployment_mode     (paper+paper → 403)
-//! Gate 2: integrity_armed     (disarmed → 403)
+//! Gate 1: deployment_mode      (paper+paper → 403)
+//! Gate 2: integrity_armed      (disarmed → 403)
 //! Gate 3: alpaca_ws_continuity (gap/cold → 403)
-//! Gate 4: reconcile_truth     (dirty/stale → 403)
-//! Gate 5: db                  (no DB → 503)
+//! Gate 4: reconcile_truth      (dirty/stale → 403)
+//! Gate 5: daily_data_readiness (db=None can never report "ready" → 403;
+//!                                DAILY-DATA-READINESS-01C-ENFORCEMENT-01)
+//! Gate 6: db                   (only reachable with a real PgPool that
+//!                                satisfies Gate 5; not reachable by any
+//!                                fixture in this file — see G01 below)
 //! ```
 //!
 //! **Signal chain** (POST /api/v1/strategy/signal):
@@ -417,11 +421,38 @@ async fn r06_gate1d_limit_exceeded_intent_placed_false() {
 // RSK-07 combined coherence: the same Paper+Alpaca state that passes all
 // pre-DB start gates also passes all pre-DB signal gates.
 //
-// Start chain: deployment ✓, arm ✓, WS ✓, reconcile ✓ → 503 (DB gate).
-// Signal chain: Gate 1 ✓, 1b ✓, 1c ✓, 1d ✓ → 503 (Gate 2, DB gate).
+// FULL-AUDIT-FAIL-011 correction (coverage map — see
+// docs/audits/full_repository_verification_2026-08-02.md):
+// `daily_data_readiness` (DAILY-DATA-READINESS-01C-ENFORCEMENT-01) now sits
+// between `reconcile_truth` and `db_pool()` in `start_execution_runtime`
+// (lifecycle.rs). That gate's `evaluate_assignment` can only report
+// `readiness_state="ready"` via a real `Some(&PgPool)` bar-provenance query
+// (daily_data_readiness.rs); with `db=None` it is hardcoded to
+// `"db_unavailable"`, so `report.start_allowed` is structurally always
+// `false` for this pure in-process fixture — it is no longer possible for a
+// `db=None` start-chain fixture to reach the terminal generic-DB 503 this
+// test originally asserted. The start chain below now asserts the honest
+// current gate order instead: all four earlier gates pass, then
+// `daily_data_readiness` fires (403), before `db_pool()` is ever reached.
 //
-// This proves the two gate chains are coherent: a runtime-ready state is also
-// a signal-admission-ready state.
+// The original intent of this half of G01 — proving a fully-aligned start
+// fixture is not blocked by deployment/arm/WS/reconcile, and (separately)
+// that the DB-availability gate is reachable and enforced once
+// daily-data-readiness is itself satisfied — is preserved at the correct
+// test layer, DB-backed, in
+// `scenario_daily_data_readiness_start_gate_01.rs` (`sg_01`/`sg_21` prove
+// the db=None predicate in isolation; `sg_10`/`sg_16` prove a real `PgPool`
+// carries an aligned fixture past `daily_data_readiness` to `db_pool()`/
+// beyond). See that file's header for the full coverage map.
+//
+// Signal chain: Gate 1 ✓, 1b ✓, 1c ✓, 1d ✓ → 503 (Gate 2, DB gate).
+// `daily_data_readiness` is only invoked from `start_execution_runtime`, not
+// from the signal route, so the signal-chain half below is unaffected.
+//
+// This proves the two gate chains are coherent up to the point where a newer
+// start-only gate (daily_data_readiness) was inserted: a runtime-ready state
+// is also a signal-admission-ready state, and start's pre-DB gates all still
+// pass together before the (now earlier) daily-data-readiness refusal.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -429,16 +460,22 @@ async fn g01_aligned_state_satisfies_both_start_and_signal_chains() {
     let st = aligned_state().await;
     let router = routes::build_router(Arc::clone(&st));
 
-    // ── Start chain: all pre-DB gates pass → DB gate fires (503) ──────────
+    // ── Start chain: all pre-DB gates pass → daily_data_readiness fires (403) ──
     let (start_status, start_json) = call(routes::build_router(Arc::clone(&st)), start_req()).await;
 
     assert_eq!(
         start_status,
-        StatusCode::SERVICE_UNAVAILABLE,
-        "G01: aligned state must reach DB gate on start (503); got: {start_status} — {start_json}"
+        StatusCode::FORBIDDEN,
+        "G01: aligned state must pass deployment/arm/WS/reconcile and be refused \
+         by daily_data_readiness (403; db=None cannot satisfy DAILY-DATA-READINESS-01C-ENFORCEMENT-01); \
+         got: {start_status} — {start_json}"
+    );
+    let start_gate = start_json["gate"].as_str().unwrap_or("");
+    assert_eq!(
+        start_gate, "daily_data_readiness",
+        "G01: start must be refused specifically at daily_data_readiness, not an earlier gate; got: {start_json}"
     );
     // None of the prior start gates must have fired.
-    let start_gate = start_json["gate"].as_str().unwrap_or("");
     assert_ne!(
         start_gate, "deployment_mode",
         "G01: start must not be blocked at deployment_mode; got: {start_json}"

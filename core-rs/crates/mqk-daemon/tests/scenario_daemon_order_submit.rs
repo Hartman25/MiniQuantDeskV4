@@ -1,3 +1,18 @@
+//! FULL-AUDIT-FAIL-016/018: the five positive tests below that call
+//! `start(&st)` on the way to a real order submit
+//! (`manual_order_submit_refuses_when_durable_arm_state_is_disarmed_even_if_local_state_is_armed`,
+//! `..._is_halted_even_if_local_state_is_armed`,
+//! `manual_order_submit_enqueues_one_pending_outbox_row_for_active_run`,
+//! `manual_order_submit_duplicate_client_request_id_is_noop`,
+//! `manual_order_submit_accepts_limit_order_with_explicit_defaults_aligned_to_runtime`)
+//! remain `#[ignore]`d and blocked without real Alpaca credentials or a
+//! non-default `MQK_DAEMON_ADAPTER_ID` -- external integration tests cannot
+//! reach the crate-private `#[cfg(test)]` hermetic broker override. The
+//! positive proof now lives in-crate at
+//! `crates/mqk-daemon/src/state/hermetic_positive_proofs.rs`
+//! (`hermetic_order_submit_*`). All other tests in this file (arm/DB-absent
+//! refusals, cancel-route tests that never call `start()`) are unaffected.
+
 use std::sync::Arc;
 use std::time::Duration;
 

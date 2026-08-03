@@ -266,7 +266,8 @@ async fn brk00r06_e01_paper_alpaca_is_canonical_honest_paper_path() {
 }
 
 // ---------------------------------------------------------------------------
-// BRK00R06-E02 — Live continuity unblocks the WS gate; start reaches DB gate
+// BRK00R06-E02 — Live continuity unblocks the WS gate; start reaches
+// daily_data_readiness
 //
 // This is the key missing proof for PT-PROOF-01.
 //
@@ -274,10 +275,23 @@ async fn brk00r06_e01_paper_alpaca_is_canonical_honest_paper_path() {
 // - paper+alpaca + armed + ColdStartUnproven → start → 403 gate=alpaca_ws_continuity
 //   (confirms the baseline before Live is established)
 // - update_ws_continuity(Live) on the real AppState seam
-// - paper+alpaca + armed + Live → start → 503 (DB gate)
-//   (proves the WS gate pass-through is real: Live continuity → start unblocked)
+// - paper+alpaca + armed + Live → start → 403 gate=daily_data_readiness
+//   (proves the WS gate pass-through is real: Live continuity → start unblocked
+//   past alpaca_ws_continuity, reconcile_truth, and the bootstrap/dormancy
+//   gates, reaching the next gate in the chain)
 //
-// This is the ONLY test in the repo that proves the happy-path WS gate
+// FULL-AUDIT-FAIL-011 correction: this test's fixture sets an active fleet
+// but no `MQK_STRATEGY_SYMBOL`/watchlist env, so
+// `build_multi_symbol_runtime_config_from_env()` always resolves
+// `required_assignments_missing`, and `daily_data_readiness` always refuses
+// (403) before `db_pool()` is ever reached — a `db=None` fixture cannot
+// reach the generic "runtime DB is not configured" 503 this test originally
+// asserted (see DAILY-DATA-READINESS-01C-ENFORCEMENT-01). The DB-backed
+// proof that a fully-satisfied daily-data-readiness fixture then reaches
+// (and is refused by) the real DB-availability gate lives in
+// `scenario_daily_data_readiness_start_gate_01.rs` (`sg_10`/`sg_16`).
+//
+// This remains the ONLY test in the repo that proves the happy-path WS gate
 // pass-through against the real `start_execution_runtime` code path.
 // ---------------------------------------------------------------------------
 
@@ -325,7 +339,8 @@ async fn brk00r06_e02_live_continuity_unblocks_ws_gate_reaches_db_gate() {
         "E02: continuity must be proven after Live update"
     );
 
-    // Now start: WS gate must pass, DB gate must fire (503 — no DB configured).
+    // Now start: WS gate must pass; daily_data_readiness fires (403 — db=None
+    // can never satisfy DAILY-DATA-READINESS-01C-ENFORCEMENT-01).
     let start_req2 = Request::builder()
         .method("POST")
         .uri("/v1/run/start")
@@ -334,16 +349,14 @@ async fn brk00r06_e02_live_continuity_unblocks_ws_gate_reaches_db_gate() {
     let (status2, body2) = call(routes::build_router(Arc::clone(&st)), start_req2).await;
     assert_eq!(
         status2,
-        StatusCode::SERVICE_UNAVAILABLE,
-        "E02: paper+alpaca + Live continuity must pass WS gate and reach DB gate (503); got: {status2}"
+        StatusCode::FORBIDDEN,
+        "E02: paper+alpaca + Live continuity must pass WS gate and be refused by \
+         daily_data_readiness (403); got: {status2}"
     );
     let json2 = parse_json(body2);
-    assert!(
-        json2["error"]
-            .as_str()
-            .unwrap_or("")
-            .contains("runtime DB is not configured"),
-        "E02: error must be DB gate (not WS gate); got: {json2}"
+    assert_eq!(
+        json2["gate"], "daily_data_readiness",
+        "E02: gate must be daily_data_readiness (not WS gate); got: {json2}"
     );
 }
 
@@ -352,9 +365,18 @@ async fn brk00r06_e02_live_continuity_unblocks_ws_gate_reaches_db_gate() {
 //
 // Proves the full continuity lifecycle effect on the start decision:
 //
-// Step 1: Live → start reaches DB gate (WS gate passes)
+// Step 1: Live → start reaches daily_data_readiness (WS gate passes)
 // Step 2: GapDetected → start re-blocked at WS gate (fail-closed on disconnect)
-// Step 3: Live again → start reaches DB gate again (WS transport re-establishes)
+// Step 3: Live again → start reaches daily_data_readiness again (WS transport
+//         re-establishes)
+//
+// FULL-AUDIT-FAIL-011 correction: as in E02 above, this fixture has no
+// `MQK_STRATEGY_SYMBOL` env, so `daily_data_readiness` (not the generic DB
+// gate) is the first refusal reachable once WS passes — a `db=None` fixture
+// cannot reach the DB-not-configured 503 steps 1/3 originally asserted. The
+// round-trip property under test (WS pass → refuse → WS pass again) still
+// holds; only the terminal gate identity changed. See E02's comment for the
+// coverage-map pointer to the DB-backed proof.
 //
 // This proves the fail-closed reconnect cycle is enforced at the start gate.
 // The operator cannot bypass GapDetected by retrying start — they must wait
@@ -393,15 +415,13 @@ async fn brk00r06_e03_continuity_round_trip_is_fail_closed() {
     let (s1, b1) = try_start(Arc::clone(&st)).await;
     assert_eq!(
         s1,
-        StatusCode::SERVICE_UNAVAILABLE,
-        "E03 step1: Live must pass WS gate and reach DB gate (503); got: {s1}"
+        StatusCode::FORBIDDEN,
+        "E03 step1: Live must pass WS gate and be refused by daily_data_readiness (403); got: {s1}"
     );
-    assert!(
-        parse_json(b1)["error"]
-            .as_str()
-            .unwrap_or("")
-            .contains("runtime DB is not configured"),
-        "E03 step1: must be the DB gate, not the WS gate"
+    assert_eq!(
+        parse_json(b1)["gate"],
+        "daily_data_readiness",
+        "E03 step1: must be daily_data_readiness, not the WS gate"
     );
 
     // --- Step 2: GapDetected → WS gate re-blocks → 403 ---
@@ -444,15 +464,14 @@ async fn brk00r06_e03_continuity_round_trip_is_fail_closed() {
     let (s3, b3) = try_start(Arc::clone(&st)).await;
     assert_eq!(
         s3,
-        StatusCode::SERVICE_UNAVAILABLE,
-        "E03 step3: re-established Live must again pass WS gate and reach DB gate (503); got: {s3}"
+        StatusCode::FORBIDDEN,
+        "E03 step3: re-established Live must again pass WS gate and be refused by \
+         daily_data_readiness (403); got: {s3}"
     );
-    assert!(
-        parse_json(b3)["error"]
-            .as_str()
-            .unwrap_or("")
-            .contains("runtime DB is not configured"),
-        "E03 step3: must be DB gate again, not WS gate"
+    assert_eq!(
+        parse_json(b3)["gate"],
+        "daily_data_readiness",
+        "E03 step3: must be daily_data_readiness again, not WS gate"
     );
 }
 
@@ -769,6 +788,20 @@ async fn ptday02_e07_gap_detected_blocks_strategy_signals() {
 // WS transport reports Live.  Accepting signals before continuity is proven
 // would enqueue orders that the orchestrator might dispatch without a live fill
 // feed, creating unmonitored positions from the very first signal.
+//
+// FULL-AUDIT-FAIL-011 correction: this test was originally misclassified as
+// part of the daily-data-readiness family. Independent re-diagnosis found the
+// actual collision is unrelated: `"side": "sell"` with no active run
+// (`current_qty` resolves to 0) classifies as `OrderIntent::ShortOpen`
+// (short_entry_policy.rs), which trips the newer Gate 1j short-entry policy
+// (`external_gate_1j_short_entry`, fail-closed by default with no
+// `MQK_CAPITAL_POLICY_PATH` configured) *before* Gate 1b (WS continuity) is
+// ever evaluated — a 403 `short_entry_disabled`, not the 503 `unavailable`
+// this test asserts. The short-entry gate also predates this fixture and is
+// not the gate this test is meant to exercise. The smallest honest fix is
+// changing the signal to a `buy` (matching E07's sibling fixture above),
+// which does not classify as `ShortOpen` and so reaches the intended Gate 1b
+// ColdStartUnproven refusal unchanged.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
@@ -784,7 +817,7 @@ async fn ptday02_e08_cold_start_unproven_blocks_strategy_signals() {
         "signal_id": "ptday02-e08-signal-001",
         "strategy_id": "spy_test_v1",
         "symbol": "SPY",
-        "side": "sell",
+        "side": "buy",
         "qty": 3,
     }))
     .unwrap();

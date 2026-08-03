@@ -11,7 +11,11 @@
 //!   Gate 2: integrity_armed       (disarmed → 403)
 //!   Gate 3: alpaca_ws_continuity  (ColdStartUnproven|GapDetected → 403; Live → pass)
 //!   Gate 4: reconcile_truth       (dirty|stale → 403; ok|unknown → pass)  ← BRK-09R
-//!   Gate 5: db                    (no DB → 503)
+//!   Gate 5: daily_data_readiness  (db=None can never report "ready" → 403;
+//!                                   DAILY-DATA-READINESS-01C-ENFORCEMENT-01)
+//!   Gate 6: db                    (only reachable with a real PgPool that
+//!                                   satisfies Gate 5; not reachable by any
+//!                                   fixture in this file)
 //! ```
 //!
 //! # What each test proves
@@ -20,12 +24,25 @@
 //! |------|-----------------|---------------|-------------------------------------|
 //! | R01  | dirty           | Live          | 403 gate=reconcile_truth            |
 //! | R02  | stale           | Live          | 403 gate=reconcile_truth            |
-//! | R03  | unknown (default) | Live        | 503 DB gate (reconcile gate passes) |
-//! | R04  | ok              | Live          | 503 DB gate (reconcile gate passes) |
+//! | R03  | unknown (default) | Live        | 403 gate=daily_data_readiness (reconcile gate passes) |
+//! | R04  | ok              | Live          | 403 gate=daily_data_readiness (reconcile gate passes) |
 //! | R05  | dirty           | ColdStartUnproven | 403 gate=alpaca_ws_continuity  |
 //!
 //! R05 proves gate ordering: WS continuity fires before reconcile truth when
 //! both conditions are failing simultaneously.
+//!
+//! FULL-AUDIT-FAIL-011 correction: R03/R04's fixtures set an active fleet but
+//! no `MQK_STRATEGY_SYMBOL` env, so `daily_data_readiness` always resolves
+//! `required_assignments_missing` and refuses (403) before `db_pool()` is
+//! ever reached — a `db=None` fixture cannot reach the generic DB-not-
+//! configured 503 these two originally asserted. The property each test
+//! proves (reconcile gate passes on unknown/ok status) is unchanged; only the
+//! terminal gate identity is. The DB-backed proof that a fully-satisfied
+//! daily-data-readiness fixture then reaches the real DB-availability gate
+//! lives in `scenario_daily_data_readiness_start_gate_01.rs`
+//! (`sg_10`/`sg_16`); the pure db=None predicate is proven in isolation by
+//! `sg_01`/`sg_21` there and `ddr_07`/`ddr_08` in
+//! `scenario_daily_data_readiness_01.rs`.
 //!
 //! All tests are pure in-process (no DB required).  Reconcile state is set
 //! via the public `publish_reconcile_snapshot` seam.
@@ -213,18 +230,15 @@ async fn brk09r_r03_unknown_reconcile_does_not_block_start() {
 
     let (status, json) = call(routes::build_router(Arc::clone(&st)), try_start_req()).await;
 
-    // "unknown" passes the reconcile gate; next blocker is DB not configured (503).
+    // "unknown" passes the reconcile gate; next blocker is daily_data_readiness (403).
     assert_eq!(
         status,
-        StatusCode::SERVICE_UNAVAILABLE,
-        "R03: unknown reconcile must pass reconcile gate and reach DB gate (503); got: {status}"
+        StatusCode::FORBIDDEN,
+        "R03: unknown reconcile must pass reconcile gate and be refused by daily_data_readiness (403); got: {status}"
     );
-    assert!(
-        json["error"]
-            .as_str()
-            .unwrap_or("")
-            .contains("runtime DB is not configured"),
-        "R03: blocker must be DB gate, not reconcile gate; got: {json}"
+    assert_eq!(
+        json["gate"], "daily_data_readiness",
+        "R03: blocker must be daily_data_readiness, not reconcile gate; got: {json}"
     );
 }
 
@@ -241,18 +255,15 @@ async fn brk09r_r04_ok_reconcile_does_not_block_start() {
 
     let (status, json) = call(routes::build_router(Arc::clone(&st)), try_start_req()).await;
 
-    // "ok" passes the reconcile gate; next blocker is DB not configured (503).
+    // "ok" passes the reconcile gate; next blocker is daily_data_readiness (403).
     assert_eq!(
         status,
-        StatusCode::SERVICE_UNAVAILABLE,
-        "R04: ok reconcile must pass reconcile gate and reach DB gate (503); got: {status}"
+        StatusCode::FORBIDDEN,
+        "R04: ok reconcile must pass reconcile gate and be refused by daily_data_readiness (403); got: {status}"
     );
-    assert!(
-        json["error"]
-            .as_str()
-            .unwrap_or("")
-            .contains("runtime DB is not configured"),
-        "R04: blocker must be DB gate, not reconcile gate; got: {json}"
+    assert_eq!(
+        json["gate"], "daily_data_readiness",
+        "R04: blocker must be daily_data_readiness, not reconcile gate; got: {json}"
     );
 }
 

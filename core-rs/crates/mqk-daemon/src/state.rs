@@ -18,6 +18,8 @@ mod broker;
 mod deadman;
 mod dry_run_strategy;
 mod env;
+#[cfg(test)]
+mod hermetic_positive_proofs;
 pub mod instrument_economics_bridge;
 mod lifecycle;
 mod loop_runner;
