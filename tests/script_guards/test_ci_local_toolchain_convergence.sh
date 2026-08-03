@@ -175,6 +175,82 @@ else
     fail "TCG06" "Guard did NOT catch a diverging format-check mutation (exit=$exit_code); see $FMT_MUT/guard_output.txt"
 fi
 
+# ---------------------------------------------------------------------------
+# TCG07: doubled Linux path -- the 'rust' job's toolchain-read step loses its
+# `working-directory: ${{ github.workspace }}` override, reproducing the
+# original FULL-AUDIT-CHECKPOINT-HARDENING-REPAIR-01 defect where
+# defaults.run.working-directory=./core-rs plus a path of
+# core-rs/rust-toolchain.toml resolves to core-rs/core-rs/rust-toolchain.toml.
+# ---------------------------------------------------------------------------
+DOUBLED_LINUX="$TMP_ROOT/doubled_linux"
+build_fake_repo "$DOUBLED_LINUX"
+perl -0pi -e 's/(- name: Read canonical Rust toolchain channel\n        id: toolchain\n        shell: bash\n)        working-directory: \$\{\{ github\.workspace \}\}\n(        run: \|\n          CHANNEL=\$\(grep -m1 .\^channel. core-rs\/rust-toolchain\.toml)/\1\2/' \
+    "$DOUBLED_LINUX/.github/workflows/ci.yml"
+exit_code="$(run_guard "$DOUBLED_LINUX")"
+if [ "$exit_code" -ne 0 ] && grep -qi 'doubled path' "$DOUBLED_LINUX/guard_output.txt" && grep -q "job 'rust'" "$DOUBLED_LINUX/guard_output.txt"; then
+    pass "TCG07" "Guard catches the 'rust' job's toolchain-read step resolving to a doubled Linux path (core-rs/core-rs/rust-toolchain.toml)"
+else
+    fail "TCG07" "Guard did NOT catch the doubled Linux path regression (exit=$exit_code); see $DOUBLED_LINUX/guard_output.txt"
+fi
+
+# ---------------------------------------------------------------------------
+# TCG08: doubled Windows path -- the 'windows' job's toolchain-read step
+# loses its working-directory override the same way.
+# ---------------------------------------------------------------------------
+DOUBLED_WINDOWS="$TMP_ROOT/doubled_windows"
+build_fake_repo "$DOUBLED_WINDOWS"
+perl -0pi -e 's/(- name: Read canonical Rust toolchain channel\n        id: toolchain\n        shell: pwsh\n)        working-directory: \$\{\{ github\.workspace \}\}\n(        run: \|\n          \$line = Select-String -Path core-rs\\rust-toolchain\.toml)/\1\2/' \
+    "$DOUBLED_WINDOWS/.github/workflows/ci.yml"
+exit_code="$(run_guard "$DOUBLED_WINDOWS")"
+if [ "$exit_code" -ne 0 ] && grep -qi 'doubled path' "$DOUBLED_WINDOWS/guard_output.txt" && grep -q "job 'windows'" "$DOUBLED_WINDOWS/guard_output.txt"; then
+    pass "TCG08" "Guard catches the 'windows' job's toolchain-read step resolving to a doubled path (core-rs/core-rs/rust-toolchain.toml)"
+else
+    fail "TCG08" "Guard did NOT catch the doubled Windows path regression (exit=$exit_code); see $DOUBLED_WINDOWS/guard_output.txt"
+fi
+
+# ---------------------------------------------------------------------------
+# TCG09: one job reading a different file -- the 'db-proof' job's
+# toolchain-read step keeps its root working-directory override but the path
+# token itself drifts to a file that is not core-rs/rust-toolchain.toml.
+# ---------------------------------------------------------------------------
+WRONG_FILE="$TMP_ROOT/wrong_file"
+build_fake_repo "$WRONG_FILE"
+awk '
+    BEGIN { in_dbproof = 0; done = 0 }
+    /^  db-proof:/ { in_dbproof = 1 }
+    /^  [A-Za-z0-9_-]+:[[:space:]]*$/ && !/^  db-proof:/ { in_dbproof = 0 }
+    in_dbproof && !done && /core-rs\/rust-toolchain\.toml/ {
+        gsub(/core-rs\/rust-toolchain\.toml/, "core-rs/rust-toolchain-OTHER.toml")
+        done = 1
+    }
+    { print }
+' "$WRONG_FILE/.github/workflows/ci.yml" > "$WRONG_FILE/.github/workflows/ci.yml.tmp"
+mv "$WRONG_FILE/.github/workflows/ci.yml.tmp" "$WRONG_FILE/.github/workflows/ci.yml"
+exit_code="$(run_guard "$WRONG_FILE")"
+if [ "$exit_code" -ne 0 ] && grep -q "job 'db-proof'" "$WRONG_FILE/guard_output.txt" && grep -q 'not core-rs/rust-toolchain.toml' "$WRONG_FILE/guard_output.txt"; then
+    pass "TCG09" "Guard catches the 'db-proof' job's toolchain-read step drifting to a different file"
+else
+    fail "TCG09" "Guard did NOT catch the different-file mutation (exit=$exit_code); see $WRONG_FILE/guard_output.txt"
+fi
+
+# ---------------------------------------------------------------------------
+# TCG10: missing required root override -- a third, independent job
+# (db-proof) loses its working-directory override on the toolchain-read
+# step, proving the effective-working-directory check is scoped per-job
+# (rust and windows already proven above) rather than short-circuiting on
+# the first job checked.
+# ---------------------------------------------------------------------------
+MISSING_OVERRIDE="$TMP_ROOT/missing_override"
+build_fake_repo "$MISSING_OVERRIDE"
+perl -0pi -e 's/(- name: Read canonical Rust toolchain channel\n        id: toolchain\n        shell: bash\n)        working-directory: \$\{\{ github\.workspace \}\}\n(        run: \|\n          CHANNEL=\$\(grep -m1 .\^channel. core-rs\/rust-toolchain\.toml)/\1\2/g' \
+    "$MISSING_OVERRIDE/.github/workflows/ci.yml"
+exit_code="$(run_guard "$MISSING_OVERRIDE")"
+if [ "$exit_code" -ne 0 ] && grep -q "job 'rust'" "$MISSING_OVERRIDE/guard_output.txt" && grep -q "job 'db-proof'" "$MISSING_OVERRIDE/guard_output.txt"; then
+    pass "TCG10" "Guard independently catches missing root override in both 'rust' and 'db-proof' jobs (per-job scoping, not a single aggregate check)"
+else
+    fail "TCG10" "Guard did NOT independently catch missing-override regressions in both jobs (exit=$exit_code); see $MISSING_OVERRIDE/guard_output.txt"
+fi
+
 echo ""
 if [ "$FAILURES" -eq 0 ]; then
     echo "=== ALL TCG INVARIANTS PASSED ==="

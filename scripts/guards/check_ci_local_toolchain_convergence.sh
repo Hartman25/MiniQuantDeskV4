@@ -13,9 +13,16 @@
 # declares a "Read canonical Rust toolchain channel" step is checked
 # independently for (a) no floating toolchain-install action reference,
 # (b) a rustup install line that reads steps.toolchain.outputs.channel,
-# and (c) both rustfmt and clippy components requested. A single compliant
-# job can no longer hide a violation in a sibling job the way a whole-file
-# grep -c count could.
+# (c) both rustfmt and clippy components requested, and (d) the toolchain
+# path actually resolves to core-rs/rust-toolchain.toml once the job's
+# `defaults.run.working-directory` and any step-level `working-directory`
+# override on that specific step are combined -- not merely that the
+# substring "core-rs/rust-toolchain.toml" appears somewhere in the job
+# (a cache key's hashFiles('core-rs/rust-toolchain.toml') would satisfy a
+# whole-job substring search even when the read step itself resolves to
+# core-rs/core-rs/rust-toolchain.toml). A single compliant job can no
+# longer hide a violation in a sibling job the way a whole-file grep -c
+# count could.
 #
 # Usage: bash scripts/guards/check_ci_local_toolchain_convergence.sh
 # Exit codes: 0 = clean, 1 = violation found.
@@ -110,8 +117,73 @@ else
             fail "job '$job_name': still references a floating toolchain-install action"
         fi
 
-        if ! grep -qE "core-rs[/\\\\]rust-toolchain\.toml" "$job_file"; then
-            fail "job '$job_name': toolchain-read step does not reference core-rs/rust-toolchain.toml"
+        # -----------------------------------------------------------------
+        # Effective-working-directory resolution for the toolchain-read
+        # step specifically (not the job as a whole): job-level
+        # `defaults.run.working-directory` (captured only from lines that
+        # appear before the job's first step, so a step-level override
+        # further down can never be mistaken for the job default), then a
+        # step-level `working-directory` override scoped to just the
+        # "Read canonical Rust toolchain channel" step block, then the
+        # literal path token that step's run command actually references.
+        # -----------------------------------------------------------------
+        norm_wd() {
+            local v="$1"
+            v="$(echo "$v" | tr -d '\r' | sed -E 's/^[[:space:]]+//; s/[[:space:]]+$//')"
+            v="${v#./}"
+            v="${v%/}"
+            if [ "$v" = '${{ github.workspace }}' ] || [ "$v" = '.' ] || [ -z "$v" ]; then
+                echo ""
+            else
+                echo "$v"
+            fi
+        }
+
+        job_default_wd_raw="$(awk '
+            /^      - name:/ { exit }
+            /working-directory:/ { sub(/.*working-directory:[[:space:]]*/, ""); print; exit }
+        ' "$job_file")"
+        job_default_wd_norm="$(norm_wd "$job_default_wd_raw")"
+
+        step_block="$(awk '
+            /- name: Read canonical Rust toolchain channel/ { capture = 1; print; next }
+            capture && /^      - name:/ { exit }
+            capture { print }
+        ' "$job_file")"
+
+        if [ -z "$step_block" ]; then
+            fail "job '$job_name': could not isolate the 'Read canonical Rust toolchain channel' step block for effective-path checking"
+        else
+            step_wd_raw="$(echo "$step_block" | grep -m1 'working-directory:' | sed -E 's/.*working-directory:[[:space:]]*//')"
+            if [ -n "$step_wd_raw" ]; then
+                effective_wd_norm="$(norm_wd "$step_wd_raw")"
+            else
+                effective_wd_norm="$job_default_wd_norm"
+            fi
+
+            path_token="$(echo "$step_block" | grep -oE '[A-Za-z0-9_./\\-]*rust-toolchain[A-Za-z0-9_.-]*\.toml' | head -1 | tr '\\' '/')"
+            path_token="${path_token#./}"
+
+            if [ -z "$path_token" ]; then
+                fail "job '$job_name': toolchain-read step does not reference any *rust-toolchain*.toml path"
+            else
+                if [ -n "$effective_wd_norm" ]; then
+                    resolved_path="$effective_wd_norm/$path_token"
+                else
+                    resolved_path="$path_token"
+                fi
+
+                if [ "$resolved_path" != "core-rs/rust-toolchain.toml" ]; then
+                    case "$resolved_path" in
+                        *core-rs/core-rs*)
+                            fail "job '$job_name': toolchain-read step resolves to a doubled path '$resolved_path' (effective working-directory '${effective_wd_norm:-<repo-root>}' + path token '$path_token') -- core-rs/rust-toolchain.toml is being looked up at core-rs/core-rs/rust-toolchain.toml; add an explicit working-directory override on this step (or drop the redundant core-rs/ prefix) so effective working-directory and path token agree"
+                            ;;
+                        *)
+                            fail "job '$job_name': toolchain-read step resolves to '$resolved_path' (effective working-directory '${effective_wd_norm:-<repo-root>}' + path token '$path_token'), not core-rs/rust-toolchain.toml"
+                            ;;
+                    esac
+                fi
+            fi
         fi
 
         if ! grep -q 'rustup toolchain install' "$job_file"; then

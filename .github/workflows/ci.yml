@@ -146,6 +146,7 @@ jobs:
       - name: Read canonical Rust toolchain channel
         id: toolchain
         shell: bash
+        working-directory: ${{ github.workspace }}
         run: |
           CHANNEL=$(grep -m1 '^channel' core-rs/rust-toolchain.toml | sed -E 's/channel *= *"([^"]+)"/\1/')
           if [ -z "$CHANNEL" ]; then
@@ -213,6 +214,7 @@ jobs:
       - name: Read canonical Rust toolchain channel
         id: toolchain
         shell: bash
+        working-directory: ${{ github.workspace }}
         run: |
           CHANNEL=$(grep -m1 '^channel' core-rs/rust-toolchain.toml | sed -E 's/channel *= *"([^"]+)"/\1/')
           if [ -z "$CHANNEL" ]; then
@@ -286,6 +288,7 @@ jobs:
       - name: Read canonical Rust toolchain channel
         id: toolchain
         shell: pwsh
+        working-directory: ${{ github.workspace }}
         run: |
           $line = Select-String -Path core-rs\rust-toolchain.toml -Pattern '^channel' | Select-Object -First 1
           if (-not $line) {
