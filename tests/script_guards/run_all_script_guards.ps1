@@ -82,7 +82,8 @@ $Guards = @(
     'test_pdt_cross_symbol_summation_self_test.ps1',
     'test_multi_symbol_smoke_runner_gate.ps1',
     'test_heavy_lock_atomic_01.ps1',
-    'test_ci_local_toolchain_convergence.ps1'
+    'test_ci_local_toolchain_convergence.ps1',
+    'test_canonical_safe_ignored_matrix.ps1'
 )
 
 # FULL-AUDIT-FINAL-HERMETIC-CLOSURE-01 Part 4: never hard-code a legacy
