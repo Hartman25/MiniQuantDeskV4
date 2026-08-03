@@ -215,51 +215,11 @@ function Test-IsWindowsPlatform {
     return ($env:OS -eq 'Windows_NT')
 }
 
-# HEAVY-LOCK-01: exclusive marker file so two heavy build/test sessions on
-# this machine never run concurrently and compete for memory. This is a
-# best-effort advisory lock (a marker file, not an OS-level exclusive
-# handle) -- consistent with how this repo's operator sessions have always
-# treated it (see docs/audits/full_repository_verification_2026-08-02.md's
-# precheck sections). Acquire fails loudly (never silently proceeds past a
-# held lock); release always runs from a `finally` block so a failed/killed
-# run never leaves a stale lock behind.
-function Get-HeavyLockPath {
-    return 'C:\tmp\mqk-machine-heavy.lock'
-}
-
-function Lock-HeavyMachine {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$LockPath
-    )
-
-    $lockDir = Split-Path -Parent $LockPath
-    if (-not (Test-Path -LiteralPath $lockDir)) {
-        New-Item -ItemType Directory -Force -Path $lockDir | Out-Null
-    }
-
-    if (Test-Path -LiteralPath $LockPath) {
-        throw ("EXITCODE=1;Heavy lock already present at {0}. Another heavy session may be running; " +
-               "if this is confirmed stale (no other build/test process is active), remove it manually " +
-               "before retrying. Run with -NoHeavyLock only if a caller already holds this lock itself." -f $LockPath)
-    }
-
-    $payload = "acquired_at_utc={0};pid={1};script=full_repo_proof.ps1" -f ([DateTimeOffset]::UtcNow.ToString('o')), $PID
-    Set-Content -LiteralPath $LockPath -Value $payload -NoNewline -ErrorAction Stop
-    Write-Host "Heavy lock acquired: $LockPath" -ForegroundColor Yellow
-}
-
-function Unlock-HeavyMachine {
-    param(
-        [Parameter(Mandatory = $true)]
-        [string]$LockPath
-    )
-
-    if (Test-Path -LiteralPath $LockPath) {
-        Remove-Item -LiteralPath $LockPath -Force -ErrorAction SilentlyContinue
-        Write-Host "Heavy lock released: $LockPath" -ForegroundColor Yellow
-    }
-}
+# HEAVY-LOCK-01: atomic OS-level exclusive lock, shared by this script and
+# tests/script_guards/test_heavy_lock_atomic_01.ps1 so both exercise the
+# exact same implementation. See scripts/windows/HeavyLock.ps1 header for
+# the full atomicity/stale-recovery rationale.
+. (Join-Path $PSScriptRoot 'scripts\windows\HeavyLock.ps1')
 
 # Resolves which shell binary to spawn for a nested PowerShell subprocess
 # (the script guard aggregator below). Never blindly hard-codes
@@ -570,12 +530,13 @@ elseif ($env:CARGO_TARGET_DIR) {
 }
 
 # HEAVY-LOCK-01: acquire before any lane runs; release unconditionally in
-# the top-level `finally` below, so a failed or interrupted run can never
-# leave a stale lock that blocks the next session.
-$script:heavyLockPath = $null
+# the top-level `finally` below for the graceful-exit path. A killed process
+# is instead recovered by the OS releasing the exclusive handle (see
+# Lock-HeavyMachine's header comment) -- the `finally` below is not what
+# makes crash recovery safe.
+$script:heavyLockHandle = $null
 if (-not $NoHeavyLock -and (Test-IsWindowsPlatform)) {
-    $script:heavyLockPath = Get-HeavyLockPath
-    Lock-HeavyMachine -LockPath $script:heavyLockPath
+    $script:heavyLockHandle = Lock-HeavyMachine -LockPath (Get-HeavyLockPath)
 }
 
 # HARNESS-01: Windows low-memory profile activation.
@@ -655,32 +616,22 @@ Invoke-ProofLane -Name 'Repo identity + working tree truth' -Required $true -Act
 }
 
 Invoke-ProofLane -Name 'Rust fmt check (non-mutating)' -Required $true -Action {
-    if (Test-IsWindowsPlatform) {
-        # WINPATH-01: cargo fmt --all batches all workspace source files into one rustfmt
-        # invocation. On this repo (452 files), the combined command line is ~32,907 chars —
-        # 140 chars over Windows' CreateProcess limit of 32,767. cargo canonicalizes all
-        # source paths to \\?\C:\... before building the command, so path-shortening (subst,
-        # CARGO_TARGET_DIR) cannot reduce this. Coverage is preserved: every workspace package
-        # is checked individually — identical in substance to --all --check, within limits.
-        $metadataJson = (& $script:CargoExe metadata --format-version 1 --no-deps --manifest-path $cargoManifest 2>$null) -join ''
-        if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($metadataJson)) {
-            throw 'EXITCODE=1;cargo metadata failed; cannot enumerate workspace packages for fmt check.'
-        }
-        $packageNames = @(($metadataJson | ConvertFrom-Json).packages | ForEach-Object { $_.name })
-        if ($packageNames.Count -eq 0) {
-            throw 'EXITCODE=1;cargo metadata returned no packages for fmt check.'
-        }
-        foreach ($pkg in $packageNames) {
-            Invoke-NativeCommand -FilePath $script:CargoExe -Arguments @('fmt', '--manifest-path', $cargoManifest, '-p', $pkg, '--', '--check') -WorkingDirectory $repoRoot
-        }
-        $note = "cargo fmt --check passed for all $($packageNames.Count) workspace packages (Windows per-package; WINPATH-01)."
-        Write-Host $note -ForegroundColor Green
-        return (New-LaneNote -Note $note)
-    } else {
-        Invoke-NativeCommand -FilePath $script:CargoExe -Arguments @('fmt', '--manifest-path', $cargoManifest, '--all', '--', '--check') -WorkingDirectory $repoRoot
-        Write-Host 'cargo fmt --check passed.' -ForegroundColor Green
-        return (New-LaneNote -Note 'cargo fmt --check passed.')
+    # CI/local toolchain-and-format convergence: this delegates to the single
+    # canonical fmt-check script also invoked by .github/workflows/ci.yml's
+    # `windows` job, so local verification and CI can never independently
+    # drift on what "the format check" means (WINPATH-01 per-package
+    # Windows workaround included). See scripts/windows/Invoke-CanonicalFmtCheck.ps1.
+    $fmtScript = Join-Path $repoRoot 'scripts\windows\Invoke-CanonicalFmtCheck.ps1'
+    & $fmtScript -RepoRoot $repoRoot -CargoManifest $cargoManifest
+    if ($LASTEXITCODE -ne 0) {
+        throw 'EXITCODE=1;canonical fmt check failed (see rustfmt output above).'
     }
+    $note = if (Test-IsWindowsPlatform) {
+        'cargo fmt --check passed (Windows per-package; WINPATH-01) via Invoke-CanonicalFmtCheck.ps1.'
+    } else {
+        'cargo fmt --check passed via Invoke-CanonicalFmtCheck.ps1.'
+    }
+    return (New-LaneNote -Note $note)
 }
 
 Invoke-ProofLane -Name 'Workspace clippy' -Required $true -Action {
@@ -996,8 +947,8 @@ catch {
     }
 }
 finally {
-    if ($script:heavyLockPath) {
-        Unlock-HeavyMachine -LockPath $script:heavyLockPath
+    if ($script:heavyLockHandle) {
+        Unlock-HeavyMachine -Handle $script:heavyLockHandle
     }
     try {
         Stop-Transcript | Out-Null

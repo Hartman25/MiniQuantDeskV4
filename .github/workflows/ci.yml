@@ -107,6 +107,9 @@ jobs:
       - name: DEP-GOV-01 - Enforce workspace dependency inheritance (no inline sqlx pins)
         run: bash scripts/guards/check_workspace_dep_inheritance.sh
 
+      - name: FULL-AUDIT-FINAL-HERMETIC-CLOSURE-01 - CI/local toolchain convergence
+        run: bash scripts/guards/check_ci_local_toolchain_convergence.sh
+
   rust:
     name: "Rust (fmt + clippy + test)"
     runs-on: ubuntu-latest
@@ -137,9 +140,21 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install stable Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - name: Read canonical Rust toolchain channel
+        id: toolchain
+        shell: bash
+        run: |
+          CHANNEL=$(grep -m1 '^channel' core-rs/rust-toolchain.toml | sed -E 's/channel *= *"([^"]+)"/\1/')
+          if [ -z "$CHANNEL" ]; then
+            echo "::error::could not parse channel from core-rs/rust-toolchain.toml"
+            exit 1
+          fi
+          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
+
+      - name: Install pinned Rust toolchain (core-rs/rust-toolchain.toml is the single source of truth)
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
           components: rustfmt, clippy
 
       - name: Cache cargo artifacts
@@ -149,9 +164,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             core-rs/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('core-rs/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-${{ steps.toolchain.outputs.channel }}-${{ hashFiles('core-rs/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-
+            ${{ runner.os }}-cargo-${{ steps.toolchain.outputs.channel }}-
 
       - name: cargo fmt --check
         run: cargo fmt --check
@@ -192,8 +207,22 @@ jobs:
       - name: Checkout repository
         uses: actions/checkout@v4
 
-      - name: Install stable Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - name: Read canonical Rust toolchain channel
+        id: toolchain
+        shell: bash
+        run: |
+          CHANNEL=$(grep -m1 '^channel' core-rs/rust-toolchain.toml | sed -E 's/channel *= *"([^"]+)"/\1/')
+          if [ -z "$CHANNEL" ]; then
+            echo "::error::could not parse channel from core-rs/rust-toolchain.toml"
+            exit 1
+          fi
+          echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
+
+      - name: Install pinned Rust toolchain (core-rs/rust-toolchain.toml is the single source of truth)
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
+          components: rustfmt, clippy
 
       - name: Cache cargo artifacts
         uses: actions/cache@v4
@@ -202,9 +231,9 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             core-rs/target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('core-rs/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-${{ steps.toolchain.outputs.channel }}-${{ hashFiles('core-rs/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-
+            ${{ runner.os }}-cargo-${{ steps.toolchain.outputs.channel }}-
 
       - name: Run repo-native DB proof harness
         run: bash ../scripts/db_proof_bootstrap.sh
@@ -242,12 +271,35 @@ jobs:
         shell: pwsh
         working-directory: ${{ github.workspace }}
         run: |
-          & powershell.exe -ExecutionPolicy Bypass -NonInteractive -File tests\script_guards\run_all_script_guards.ps1
+          # Bounded shell resolver: re-invoke via this step's own declared
+          # `shell: pwsh` host ($PSHOME + pwsh's executable name), never a
+          # hard-coded legacy Windows-PowerShell path -- a Windows runner
+          # image is not guaranteed to have that older host at any fixed
+          # literal path, only the pwsh this step is already running under.
+          $selfHost = Join-Path $PSHOME 'pwsh.exe'
+          & $selfHost -ExecutionPolicy Bypass -NonInteractive -File tests\script_guards\run_all_script_guards.ps1
           if ($LASTEXITCODE -ne 0) { exit 1 }
 
-      - name: Install stable Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
+      - name: Read canonical Rust toolchain channel
+        id: toolchain
+        shell: pwsh
+        run: |
+          $line = Select-String -Path core-rs\rust-toolchain.toml -Pattern '^channel' | Select-Object -First 1
+          if (-not $line) {
+            Write-Error "could not parse channel from core-rs/rust-toolchain.toml"
+            exit 1
+          }
+          $channel = [regex]::Match($line.Line, 'channel\s*=\s*"([^"]+)"').Groups[1].Value
+          if ([string]::IsNullOrWhiteSpace($channel)) {
+            Write-Error "could not parse channel value from core-rs/rust-toolchain.toml"
+            exit 1
+          }
+          "channel=$channel" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+      - name: Install pinned Rust toolchain (core-rs/rust-toolchain.toml is the single source of truth)
+        uses: dtolnay/rust-toolchain@master
         with:
+          toolchain: ${{ steps.toolchain.outputs.channel }}
           components: rustfmt, clippy
 
       - name: Cache cargo artifacts
@@ -257,12 +309,16 @@ jobs:
             ~\.cargo\registry
             ~\.cargo\git
             core-rs\target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('core-rs/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-${{ steps.toolchain.outputs.channel }}-${{ hashFiles('core-rs/Cargo.lock') }}
           restore-keys: |
-            ${{ runner.os }}-cargo-
+            ${{ runner.os }}-cargo-${{ steps.toolchain.outputs.channel }}-
 
-      - name: cargo fmt --check
-        run: cargo fmt --check
+      - name: cargo fmt --check (canonical per-package authority, same as local)
+        shell: pwsh
+        working-directory: ${{ github.workspace }}
+        run: |
+          & scripts\windows\Invoke-CanonicalFmtCheck.ps1 -RepoRoot (Get-Location) -CargoManifest core-rs\Cargo.toml
+          if ($LASTEXITCODE -ne 0) { exit 1 }
 
       - name: cargo clippy (deny warnings)
         run: cargo clippy --workspace --all-targets -- -D warnings

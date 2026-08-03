@@ -1,9 +1,19 @@
 [toolchain]
-# Canonical Rust/rustfmt version, shared by CI (dtolnay/rust-toolchain@stable
-# auto-detects this file) and every local command. Update this file (never
-# override the version ad hoc in a workflow step or a local `rustup override`)
-# when a version bump is deliberately authorized, so CI and local invocations
-# can never silently drift apart again -- see
-# scripts/windows/Invoke-CanonicalRepoVerification.ps1.
+# Canonical Rust/rustfmt version, shared by every local command (rustup
+# reads this file directly) and by CI. CI does NOT rely on
+# dtolnay/rust-toolchain's own file auto-detection -- every Rust CI job
+# (.github/workflows/ci.yml: rust, db-proof, windows) has an explicit "Read
+# canonical Rust toolchain channel" step that parses the `channel` value
+# below out of this file and passes it as the `toolchain:` input to
+# dtolnay/rust-toolchain@master, because passing any `with:` input (this
+# repo also passes `components:`) makes the action prefer the given
+# `toolchain:` input over file auto-detection -- relying on auto-detection
+# together with an explicit `components:` input silently resolves to
+# whatever "stable" means that day instead of the version pinned here.
+# Update this file (never override the version ad hoc in a workflow step or
+# a local `rustup override`) when a version bump is deliberately authorized,
+# so CI and local invocations can never silently drift apart again -- see
+# scripts/windows/Invoke-CanonicalRepoVerification.ps1 and
+# scripts/guards/check_ci_local_toolchain_convergence.sh.
 channel = "1.93.1"
 components = ["rustfmt", "clippy"]

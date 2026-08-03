@@ -80,8 +80,16 @@ $Guards = @(
     'test_multi_symbol_smoke_evidence.ps1',
     'test_pdt_cross_symbol_summation.ps1',
     'test_pdt_cross_symbol_summation_self_test.ps1',
-    'test_multi_symbol_smoke_runner_gate.ps1'
+    'test_multi_symbol_smoke_runner_gate.ps1',
+    'test_heavy_lock_atomic_01.ps1'
 )
+
+# FULL-AUDIT-FINAL-HERMETIC-CLOSURE-01 Part 4: never hard-code a legacy
+# Windows PowerShell path -- a runner image is not guaranteed to have it at
+# any fixed literal path. Re-invoke via this script's own actual running
+# executable instead (edition-agnostic: works whether this aggregator is
+# itself hosted under pwsh or Windows PowerShell 5.1).
+$script:GuardShellHost = (Get-Process -Id $PID).Path
 
 $Results = [System.Collections.Generic.List[object]]::new()
 
@@ -101,7 +109,7 @@ foreach ($guard in $Guards) {
         continue
     }
 
-    & powershell.exe -ExecutionPolicy Bypass -NonInteractive -File $guardPath
+    & $script:GuardShellHost -ExecutionPolicy Bypass -NonInteractive -File $guardPath
     $guardExit = $LASTEXITCODE
     if ($null -eq $guardExit) { $guardExit = 0 }
 
