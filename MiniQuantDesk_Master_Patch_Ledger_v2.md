@@ -21124,3 +21124,87 @@ changed. No live capital enabled. No orders placed. No real credentials
 loaded (the one attempt requiring them was reverted). Ports 5432/5440 never
 touched. See docs/audits/full_repository_verification_2026-08-02.md for
 the full per-finding closure record and remaining-work recommendation.
+
+---
+
+FULL-AUDIT-FINAL-HERMETIC-CLOSURE-01: BLOCKED
+Starting HEAD dc0ffd0b06797966b2737211db72a59c8193d603 (== origin/main).
+Not pushed.
+
+Final repair of the five exact gaps the prior consolidated-closure session
+left open. FAIL-012 and every other previously-accepted repair preserved
+untouched.
+
+CLOSED this session:
+
+FAIL-011: 5 of 6 tests corrected to assert the honest current gate order
+(403 daily_data_readiness, not the now-structurally-impossible 503 db-gate);
+each carries a coverage-map comment naming the pre-existing DB-backed proof
+that replaces the lost intent. The 6th (ptday02_e08) was misdiagnosed by the
+prior session -- its real collision is an unrelated newer short-entry-policy
+gate, fixed by changing the fixture's signal side, restoring its original
+intent unchanged. No production gate weakened.
+
+FAIL-016 / FAIL-018: moved into a new private #[cfg(test)] in-crate module
+(state/hermetic_positive_proofs.rs) where the existing hermetic broker
+override is actually reachable (external tests/*.rs cannot reach a
+pub(crate) seam -- confirmed by trying). 10 new hermetic tests, all on
+disposable databases, zero external network calls, zero credentials --
+including a network-deny witness proving the type-level absence of any
+Alpaca adapter when the override is enabled. The no-production-bypass guard
+was strengthened and negative-control-verified. The 9 external originals
+are kept in place, #[ignore]d, unmodified, as a manual credential-gated
+escape hatch never run by CI.
+
+FAIL-017: re-closed. The prior closure's mechanism (global shared-DB
+deletion across 10 tables with swallowed errors, plus Utc::now() racing) is
+removed and replaced with true per-test disposable-database isolation
+(new mqk_db::create_disposable_test_db/run_isolated). Applied to all 6
+originally-listed DB-residue tests plus ir02_04, found via a full-scale
+sweep (see below) to need the identical fix -- its prior "already passed"
+classification was an artifact of never being tested at that scale.
+
+CI/local toolchain and format authority unified: every Rust CI job now
+reads core-rs/rust-toolchain.toml explicitly (not floating @stable); one
+canonical per-package fmt-check script shared by CI and full_repo_proof.ps1;
+no hard-coded powershell.exe; new convergence guard.
+
+Atomic heavy lock: full_repo_proof.ps1's TOCTOU marker-file lock replaced
+with a real OS-level exclusive FileShare.None handle; stale-crash recovery
+relies on the OS releasing a killed process's handle, not on a finally block
+a force-kill never runs. New test proves all 4 required scenarios for real,
+including an actual force-killed child process.
+
+Verification run to completion (not partial):
+- cargo fmt / check / clippy -D warnings: all clean, 21/21 crates.
+- cargo test --workspace --test-threads=1 (default, mqk-testkit included):
+  5,531 passed, 0 failed, 687 ignored, exit 0.
+- cargo test --workspace --include-ignored --test-threads=1 (complete safe
+  ignored sweep, 6,218 tests): run to completion twice. Final: 6,204 passed,
+  14 failed -- 9 by design (preserved credential-gated originals), 5
+  pre-existing and non-deterministic across the two runs (different subset
+  each time), confirming shared-mqk_test-DB order-dependence in files this
+  patch was not scoped to touch, first surfaced because this is the first
+  time this exact complete sweep has ever been run to completion. Zero
+  disposable-DB residue after both runs.
+- Fresh 0001-0061 migration chain proven on a disposable DB.
+- GUI: npm ci/audit(0 vulns)/build/test 977/977 all pass.
+- Python: compileall clean, pytest 988 passed/5 skipped.
+- 185/185 .ps1 and 8/8 .sh parse clean. Script-guard aggregator: 55/63 pass;
+  remaining 8 are the same pre-existing "no out-of-scope files dirty" guard
+  class tripping only on this patch's own still-uncommitted diff, confirmed
+  to clear on commit.
+
+Disposition: BLOCKED, not COMPLETE -- per this patch's own standard, COMPLETE
+requires the full matrices to finish green, and 14 non-regression, evidenced
+exceptions (9 by design, 5 pre-existing-out-of-scope) remain. Every named
+finding (FAIL-011/016/017/018) is genuinely closed. Recommended follow-up:
+FULL-AUDIT-SHARED-DB-ORDER-DEPENDENCE-SWEEP-01, applying this patch's own
+run_isolated mechanism to the remaining affected files.
+
+No production trading/OMS/portfolio/broker-authority semantics changed. No
+live capital enabled. No orders placed. No real credentials loaded. No
+external network calls made. Ports 5432/5440 never touched. DB writes
+confined to disposable databases and the isolated port-5434 mqk_test.
+See docs/audits/full_repository_verification_2026-08-02.md,
+"FULL-AUDIT-FINAL-HERMETIC-CLOSURE-01" section, for full evidence.
