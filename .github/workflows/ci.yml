@@ -110,6 +110,9 @@ jobs:
       - name: FULL-AUDIT-FINAL-HERMETIC-CLOSURE-01 - CI/local toolchain convergence
         run: bash scripts/guards/check_ci_local_toolchain_convergence.sh
 
+      - name: FULL-AUDIT-SAFE-IGNORED-AND-SHARED-DB-FINAL-CLOSURE-01 - toolchain convergence guard mutation-negative proof
+        run: bash tests/script_guards/test_ci_local_toolchain_convergence.sh
+
   rust:
     name: "Rust (fmt + clippy + test)"
     runs-on: ubuntu-latest
@@ -151,11 +154,11 @@ jobs:
           fi
           echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
 
-      - name: Install pinned Rust toolchain (core-rs/rust-toolchain.toml is the single source of truth)
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ steps.toolchain.outputs.channel }}
-          components: rustfmt, clippy
+      - name: Install pinned Rust toolchain via rustup (core-rs/rust-toolchain.toml is the single source of truth)
+        shell: bash
+        run: |
+          rustup toolchain install "${{ steps.toolchain.outputs.channel }}" --profile minimal --component rustfmt --component clippy
+          rustup default "${{ steps.toolchain.outputs.channel }}"
 
       - name: Cache cargo artifacts
         uses: actions/cache@v4
@@ -164,7 +167,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             core-rs/target
-          key: ${{ runner.os }}-cargo-${{ steps.toolchain.outputs.channel }}-${{ hashFiles('core-rs/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-${{ steps.toolchain.outputs.channel }}-${{ hashFiles('core-rs/rust-toolchain.toml') }}-${{ hashFiles('core-rs/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-${{ steps.toolchain.outputs.channel }}-
 
@@ -218,11 +221,11 @@ jobs:
           fi
           echo "channel=$CHANNEL" >> "$GITHUB_OUTPUT"
 
-      - name: Install pinned Rust toolchain (core-rs/rust-toolchain.toml is the single source of truth)
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ steps.toolchain.outputs.channel }}
-          components: rustfmt, clippy
+      - name: Install pinned Rust toolchain via rustup (core-rs/rust-toolchain.toml is the single source of truth)
+        shell: bash
+        run: |
+          rustup toolchain install "${{ steps.toolchain.outputs.channel }}" --profile minimal --component rustfmt --component clippy
+          rustup default "${{ steps.toolchain.outputs.channel }}"
 
       - name: Cache cargo artifacts
         uses: actions/cache@v4
@@ -231,7 +234,7 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             core-rs/target
-          key: ${{ runner.os }}-cargo-${{ steps.toolchain.outputs.channel }}-${{ hashFiles('core-rs/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-${{ steps.toolchain.outputs.channel }}-${{ hashFiles('core-rs/rust-toolchain.toml') }}-${{ hashFiles('core-rs/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-${{ steps.toolchain.outputs.channel }}-
 
@@ -296,11 +299,13 @@ jobs:
           }
           "channel=$channel" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
-      - name: Install pinned Rust toolchain (core-rs/rust-toolchain.toml is the single source of truth)
-        uses: dtolnay/rust-toolchain@master
-        with:
-          toolchain: ${{ steps.toolchain.outputs.channel }}
-          components: rustfmt, clippy
+      - name: Install pinned Rust toolchain via rustup (core-rs/rust-toolchain.toml is the single source of truth)
+        shell: pwsh
+        run: |
+          rustup toolchain install "${{ steps.toolchain.outputs.channel }}" --profile minimal --component rustfmt --component clippy
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          rustup default "${{ steps.toolchain.outputs.channel }}"
+          if ($LASTEXITCODE -ne 0) { exit 1 }
 
       - name: Cache cargo artifacts
         uses: actions/cache@v4
@@ -309,7 +314,7 @@ jobs:
             ~\.cargo\registry
             ~\.cargo\git
             core-rs\target
-          key: ${{ runner.os }}-cargo-${{ steps.toolchain.outputs.channel }}-${{ hashFiles('core-rs/Cargo.lock') }}
+          key: ${{ runner.os }}-cargo-${{ steps.toolchain.outputs.channel }}-${{ hashFiles('core-rs/rust-toolchain.toml') }}-${{ hashFiles('core-rs/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-${{ steps.toolchain.outputs.channel }}-
 
