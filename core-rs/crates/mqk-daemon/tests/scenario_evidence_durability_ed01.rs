@@ -56,21 +56,6 @@ fn json_str<'a>(json: &'a serde_json::Value, key: &str) -> &'a str {
         .unwrap_or_else(|| panic!("missing string key '{key}' in response: {json}"))
 }
 
-async fn ed01_test_pool() -> sqlx::PgPool {
-    let url = std::env::var(mqk_db::ENV_DB_URL).unwrap_or_else(|_| {
-        panic!(
-            "DB tests require MQK_DATABASE_URL; run: \
-             MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test \
-             cargo test -p mqk-daemon --test scenario_evidence_durability_ed01 -- --include-ignored"
-        )
-    });
-    sqlx::postgres::PgPoolOptions::new()
-        .max_connections(2)
-        .connect(&url)
-        .await
-        .expect("ed01_test_pool: connect failed")
-}
-
 // ---------------------------------------------------------------------------
 // ED01-01: events/feed exposes orchestrator_halt rows from audit_events[orchestrator]
 // ---------------------------------------------------------------------------
@@ -80,169 +65,157 @@ async fn ed01_test_pool() -> sqlx::PgPool {
 /// that the row appears with `kind="orchestrator_halt"`, correct `detail`,
 /// `run_id`, `audit_event_id`, and `provenance_ref`.
 ///
+/// FULL-AUDIT-FAIL-017 correction: the orchestrator lane's events/feed query
+/// is `ORDER BY ts_utc DESC LIMIT 50` — a bounded global window with no
+/// per-test scoping. This was previously "proven" by stamping the fixture's
+/// timestamps `Utc::now()` so the row would win a wall-clock race against
+/// every other test's rows in the shared database — not a fix, just a bet
+/// that fewer than 50 more-recent rows would land before this test read the
+/// feed. The genuine isolation is a disposable database
+/// (`mqk_db::run_isolated`): the seeded row is the *only* row in the table,
+/// so the bounded window can never be crowded out, and no timestamp value
+/// needs to be gamed. Fixed historical timestamps are used again below,
+/// exactly as ED01-01 originally intended.
+///
 /// Requires MQK_DATABASE_URL; skips when not set.
 #[tokio::test]
 #[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
 async fn ed01_01_events_feed_exposes_orchestrator_halt_rows() {
-    let pool = ed01_test_pool().await;
+    mqk_db::run_isolated("ed01_01", |pool| async move {
+        // Deterministic IDs — unique namespace avoids collision with other test suites.
+        let run_id = uuid::Uuid::parse_str("ed010001-0000-4000-8000-000000000001").unwrap();
+        let event_id = uuid::Uuid::parse_str("ed010001-0000-4000-8000-000000000002").unwrap();
 
-    // Deterministic IDs — unique namespace avoids collision with other test suites.
-    let run_id = uuid::Uuid::parse_str("ed010001-0000-4000-8000-000000000001").unwrap();
-    let event_id = uuid::Uuid::parse_str("ed010001-0000-4000-8000-000000000002").unwrap();
+        // Fixed historical timestamps — safe now that this test owns the
+        // entire disposable database, so the bounded ORDER BY ... LIMIT 50
+        // window can never be crowded out by another test's rows.
+        let started_at =
+            chrono::DateTime::parse_from_rfc3339("2020-01-01T00:00:00Z").unwrap().with_timezone(&chrono::Utc);
+        let halt_ts =
+            chrono::DateTime::parse_from_rfc3339("2020-01-01T00:01:00Z").unwrap().with_timezone(&chrono::Utc);
 
-    // The orchestrator lane's events/feed query is `ORDER BY ts_utc DESC
-    // LIMIT 50` -- a fixed historical timestamp is not guaranteed to survive
-    // that bounded window once 50+ more-recent rows accumulate in the shared
-    // test database over a long session (same root cause as AH-04's fix in
-    // scenario_auton_hist_durability_ah01.rs). Neither timestamp is asserted
-    // on directly below, so stamping both "now" is safe and durable.
-    let started_at = chrono::Utc::now();
-    let halt_ts = chrono::Utc::now();
-
-    // Pre-test cleanup.
-    sqlx::query("delete from audit_events where event_id = $1")
-        .bind(event_id)
-        .execute(&pool)
+        // Seed the run row (required by audit_events FK).
+        mqk_db::insert_run(
+            &pool,
+            &mqk_db::NewRun {
+                run_id,
+                engine_id: "mqk-daemon".to_string(),
+                mode: "PAPER".to_string(),
+                started_at_utc: started_at,
+                git_hash: "ed01-test-hash".to_string(),
+                config_hash: "ed01-config-hash".to_string(),
+                config_json: serde_json::json!({}),
+                host_fingerprint: "ed01-test-host".to_string(),
+            },
+        )
         .await
-        .expect("ED01-01: pre-test audit_events cleanup failed");
-    sqlx::query("delete from runs where run_id = $1")
-        .bind(run_id)
-        .execute(&pool)
+        .expect("ED01-01: insert_run failed");
+
+        // Seed the orchestrator halt audit event — same structure as
+        // persist_halt_and_disarm writes in production.
+        mqk_db::insert_audit_event(
+            &pool,
+            &mqk_db::NewAuditEvent {
+                event_id,
+                run_id,
+                ts_utc: halt_ts,
+                topic: "orchestrator".to_string(),
+                event_type: "ReconcileDrift".to_string(),
+                payload: serde_json::json!({
+                    "halt_reason": "ReconcileDrift",
+                    "source": "mqk-runtime.orchestrator.persist_halt_and_disarm",
+                }),
+                hash_prev: None,
+                hash_self: None,
+            },
+        )
         .await
-        .expect("ED01-01: pre-test runs cleanup failed");
+        .expect("ED01-01: insert_audit_event failed");
 
-    // Seed the run row (required by audit_events FK).
-    mqk_db::insert_run(
-        &pool,
-        &mqk_db::NewRun {
-            run_id,
-            engine_id: "mqk-daemon".to_string(),
-            mode: "PAPER".to_string(),
-            started_at_utc: started_at,
-            git_hash: "ed01-test-hash".to_string(),
-            config_hash: "ed01-config-hash".to_string(),
-            config_json: serde_json::json!({}),
-            host_fingerprint: "ed01-test-host".to_string(),
-        },
-    )
-    .await
-    .expect("ED01-01: insert_run failed");
+        // Call the events/feed route with the DB-backed AppState.
+        let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
+            pool.clone(),
+            state::OperatorAuthMode::ExplicitDevNoToken,
+        ));
+        let router = routes::build_router(Arc::clone(&st));
 
-    // Seed the orchestrator halt audit event — same structure as
-    // persist_halt_and_disarm writes in production.
-    mqk_db::insert_audit_event(
-        &pool,
-        &mqk_db::NewAuditEvent {
-            event_id,
-            run_id,
-            ts_utc: halt_ts,
-            topic: "orchestrator".to_string(),
-            event_type: "ReconcileDrift".to_string(),
-            payload: serde_json::json!({
-                "halt_reason": "ReconcileDrift",
-                "source": "mqk-runtime.orchestrator.persist_halt_and_disarm",
-            }),
-            hash_prev: None,
-            hash_self: None,
-        },
-    )
-    .await
-    .expect("ED01-01: insert_audit_event failed");
+        let req = Request::builder()
+            .uri("/api/v1/events/feed")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let (status, body) = call(router, req).await;
 
-    // Call the events/feed route with the DB-backed AppState.
-    let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
-        pool.clone(),
-        state::OperatorAuthMode::ExplicitDevNoToken,
-    ));
-    let router = routes::build_router(Arc::clone(&st));
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "ED01-01: events/feed must return 200"
+        );
 
-    let req = Request::builder()
-        .uri("/api/v1/events/feed")
-        .body(axum::body::Body::empty())
-        .unwrap();
-    let (status, body) = call(router, req).await;
+        let json = parse_json(body);
 
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "ED01-01: events/feed must return 200"
-    );
+        assert_eq!(
+            json_str(&json, "truth_state"),
+            "active",
+            "ED01-01: truth_state must be 'active' with DB pool present"
+        );
+        assert_eq!(
+            json_str(&json, "backend"),
+            "postgres.runs+postgres.audit_events+postgres.sys_autonomous_session_events+postgres.audit_events[orchestrator]",
+            "ED01-01: backend must name all four source lanes"
+        );
 
-    let json = parse_json(body);
+        let rows = json
+            .get("rows")
+            .and_then(|v| v.as_array())
+            .expect("ED01-01: rows must be a JSON array");
 
-    assert_eq!(
-        json_str(&json, "truth_state"),
-        "active",
-        "ED01-01: truth_state must be 'active' with DB pool present"
-    );
-    assert_eq!(
-        json_str(&json, "backend"),
-        "postgres.runs+postgres.audit_events+postgres.sys_autonomous_session_events+postgres.audit_events[orchestrator]",
-        "ED01-01: backend must name all four source lanes"
-    );
+        let event_id_str = event_id.to_string();
+        let expected_event_id = format!("audit_events:{event_id_str}");
 
-    let rows = json
-        .get("rows")
-        .and_then(|v| v.as_array())
-        .expect("ED01-01: rows must be a JSON array");
+        // Find the orchestrator_halt row for our seeded event.
+        let halt_row = rows
+            .iter()
+            .find(|r| {
+                r.get("event_id")
+                    .and_then(|v| v.as_str())
+                    .map(|v| v == expected_event_id)
+                    .unwrap_or(false)
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "ED01-01: orchestrator_halt row with event_id={expected_event_id} must appear \
+                     in events/feed; got rows: {rows:?}"
+                )
+            });
 
-    let event_id_str = event_id.to_string();
-    let expected_event_id = format!("audit_events:{event_id_str}");
-
-    // Find the orchestrator_halt row for our seeded event.
-    let halt_row = rows
-        .iter()
-        .find(|r| {
-            r.get("event_id")
-                .and_then(|v| v.as_str())
-                .map(|v| v == expected_event_id)
-                .unwrap_or(false)
-        })
-        .unwrap_or_else(|| {
-            panic!(
-                "ED01-01: orchestrator_halt row with event_id={expected_event_id} must appear \
-                 in events/feed; got rows: {rows:?}"
-            )
-        });
-
-    assert_eq!(
-        halt_row.get("kind").and_then(|v| v.as_str()),
-        Some("orchestrator_halt"),
-        "ED01-01: kind must be 'orchestrator_halt' for topic=orchestrator rows"
-    );
-    assert_eq!(
-        halt_row.get("detail").and_then(|v| v.as_str()),
-        Some("ReconcileDrift"),
-        "ED01-01: detail must equal event_type 'ReconcileDrift'"
-    );
-    assert_eq!(
-        halt_row.get("run_id").and_then(|v| v.as_str()),
-        Some(run_id.to_string().as_str()),
-        "ED01-01: run_id must match the seeded run"
-    );
-    assert_eq!(
-        halt_row.get("provenance_ref").and_then(|v| v.as_str()),
-        Some(expected_event_id.as_str()),
-        "ED01-01: provenance_ref must be 'audit_events:{{event_id}}'"
-    );
-    // audit_event_id must be present and equal the raw UUID (no prefix).
-    assert_eq!(
-        halt_row.get("audit_event_id").and_then(|v| v.as_str()),
-        Some(event_id_str.as_str()),
-        "ED01-01: audit_event_id must be the raw UUID string"
-    );
-
-    // Post-test cleanup.
-    sqlx::query("delete from audit_events where event_id = $1")
-        .bind(event_id)
-        .execute(&pool)
-        .await
-        .expect("ED01-01: post-test audit_events cleanup failed");
-    sqlx::query("delete from runs where run_id = $1")
-        .bind(run_id)
-        .execute(&pool)
-        .await
-        .expect("ED01-01: post-test runs cleanup failed");
+        assert_eq!(
+            halt_row.get("kind").and_then(|v| v.as_str()),
+            Some("orchestrator_halt"),
+            "ED01-01: kind must be 'orchestrator_halt' for topic=orchestrator rows"
+        );
+        assert_eq!(
+            halt_row.get("detail").and_then(|v| v.as_str()),
+            Some("ReconcileDrift"),
+            "ED01-01: detail must equal event_type 'ReconcileDrift'"
+        );
+        assert_eq!(
+            halt_row.get("run_id").and_then(|v| v.as_str()),
+            Some(run_id.to_string().as_str()),
+            "ED01-01: run_id must match the seeded run"
+        );
+        assert_eq!(
+            halt_row.get("provenance_ref").and_then(|v| v.as_str()),
+            Some(expected_event_id.as_str()),
+            "ED01-01: provenance_ref must be 'audit_events:{{event_id}}'"
+        );
+        // audit_event_id must be present and equal the raw UUID (no prefix).
+        assert_eq!(
+            halt_row.get("audit_event_id").and_then(|v| v.as_str()),
+            Some(event_id_str.as_str()),
+            "ED01-01: audit_event_id must be the raw UUID string"
+        );
+    })
+    .await;
 }
 
 // ---------------------------------------------------------------------------

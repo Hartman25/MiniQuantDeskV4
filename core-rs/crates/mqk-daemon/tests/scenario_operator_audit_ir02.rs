@@ -596,92 +596,102 @@ async fn ir02_03_operator_timeline_row_field_contract() {
 //
 // This is the honest durable-boundary proof: arm/disarm are durable but
 // not through audit_events — the sys_arm_state table is the durable store.
+//
+// FULL-AUDIT-FAIL-017 correction: this test builds `AppState` against the
+// shared `MQK_DATABASE_URL` database with no pre-test cleanup of
+// `sys_arm_state`/`sys_reconcile_status_state` at all. At small scale (this
+// file run alone) that is invisible; at true full-workspace `--include-
+// ignored` sweep scale, a residual durably-DISARMED arm-state or "dirty"
+// reconcile checkpoint left by an earlier test in the same shared DB blocks
+// this test's own arm-execution call before it ever reaches the assertions
+// below (`arm-execution must return 200` fails with 403) -- the exact same
+// order-dependence root cause `n05`/`ir02_06`/`h03` had. The `ts_before`
+// scoping only protected the *count* assertion at the bottom, not the arm
+// call itself. Moved to a disposable database (`mqk_db::run_isolated`) for
+// the same true isolation as those three, which also makes the `ts_before`
+// trick unnecessary (a fixed disposable DB has no other writers).
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
 #[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
 async fn ir02_04_arm_execution_durable_target_is_sys_arm_state_not_audit_events() {
-    let pool = ir02_test_pool().await;
+    mqk_db::run_isolated("ir02_04", |pool| async move {
+        let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
+            pool.clone(),
+            state::OperatorAuthMode::ExplicitDevNoToken,
+        ));
 
-    let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
-        pool.clone(),
-        state::OperatorAuthMode::ExplicitDevNoToken,
-    ));
+        let body = serde_json::json!({"action_key": "arm-execution"}).to_string();
+        let req = Request::builder()
+            .method("POST")
+            .uri("/api/v1/ops/action")
+            .header("content-type", "application/json")
+            .body(axum::body::Body::from(body))
+            .unwrap();
+        let (status, resp_body) = call(routes::build_router(Arc::clone(&st)), req).await;
 
-    // Capture a timestamp just before the action so the count check is scoped to
-    // rows written *after* this point.  This is robust against other tests running
-    // concurrently against the same DB.
-    let ts_before = chrono::Utc::now() - chrono::TimeDelta::milliseconds(1);
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "IR-02-04: arm-execution must return 200; body: {}",
+            String::from_utf8_lossy(&resp_body)
+        );
+        let json = parse_json(resp_body);
 
-    let body = serde_json::json!({"action_key": "arm-execution"}).to_string();
-    let req = Request::builder()
-        .method("POST")
-        .uri("/api/v1/ops/action")
-        .header("content-type", "application/json")
-        .body(axum::body::Body::from(body))
-        .unwrap();
-    let (status, resp_body) = call(routes::build_router(Arc::clone(&st)), req).await;
+        // Response must confirm accepted/applied.
+        assert_eq!(
+            json["accepted"], true,
+            "IR-02-04: arm-execution must be accepted; got: {json}"
+        );
+        assert_eq!(
+            json["disposition"].as_str(),
+            Some("applied"),
+            "IR-02-04: arm-execution disposition must be 'applied'; got: {json}"
+        );
 
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "IR-02-04: arm-execution must return 200"
-    );
-    let json = parse_json(resp_body);
+        // Audit fields: DB was present so durable_db_write must be true.
+        assert_eq!(
+            json["audit"]["durable_db_write"], true,
+            "IR-02-04: durable_db_write must be true when DB pool is present; got: {json}"
+        );
 
-    // Response must confirm accepted/applied.
-    assert_eq!(
-        json["accepted"], true,
-        "IR-02-04: arm-execution must be accepted; got: {json}"
-    );
-    assert_eq!(
-        json["disposition"].as_str(),
-        Some("applied"),
-        "IR-02-04: arm-execution disposition must be 'applied'; got: {json}"
-    );
+        // Durable target is sys_arm_state, NOT audit_events.
+        let targets = json["audit"]["durable_targets"]
+            .as_array()
+            .expect("IR-02-04: durable_targets must be an array");
+        let target_strs: Vec<&str> = targets.iter().filter_map(|v| v.as_str()).collect();
+        assert!(
+            target_strs.contains(&"sys_arm_state"),
+            "IR-02-04: durable_targets must contain sys_arm_state; got: {target_strs:?}"
+        );
+        assert!(
+            !target_strs.contains(&"audit_events"),
+            "IR-02-04: durable_targets must NOT contain audit_events for arm action; \
+             got: {target_strs:?}"
+        );
 
-    // Audit fields: DB was present so durable_db_write must be true.
-    assert_eq!(
-        json["audit"]["durable_db_write"], true,
-        "IR-02-04: durable_db_write must be true when DB pool is present; got: {json}"
-    );
+        // audit_event_id is None — arm actions do not emit an audit_events row.
+        assert!(
+            json["audit"]["audit_event_id"].is_null(),
+            "IR-02-04: audit_event_id must be null for arm-execution; got: {json}"
+        );
 
-    // Durable target is sys_arm_state, NOT audit_events.
-    let targets = json["audit"]["durable_targets"]
-        .as_array()
-        .expect("IR-02-04: durable_targets must be an array");
-    let target_strs: Vec<&str> = targets.iter().filter_map(|v| v.as_str()).collect();
-    assert!(
-        target_strs.contains(&"sys_arm_state"),
-        "IR-02-04: durable_targets must contain sys_arm_state; got: {target_strs:?}"
-    );
-    assert!(
-        !target_strs.contains(&"audit_events"),
-        "IR-02-04: durable_targets must NOT contain audit_events for arm action; \
-         got: {target_strs:?}"
-    );
+        // Confirm: no operator audit_events rows exist at all. Safe now: this
+        // disposable DB has no other writers, so a bare count (not a
+        // ts_before-scoped one) is the more direct proof.
+        let new_count: i64 =
+            sqlx::query_scalar("select count(*) from audit_events where topic = 'operator'")
+                .fetch_one(&pool)
+                .await
+                .expect("IR-02-04: failed to count audit_events after arm");
 
-    // audit_event_id is None — arm actions do not emit an audit_events row.
-    assert!(
-        json["audit"]["audit_event_id"].is_null(),
-        "IR-02-04: audit_event_id must be null for arm-execution; got: {json}"
-    );
-
-    // Confirm: no new operator audit_events rows were written after ts_before.
-    // The timestamp scope makes this robust against concurrent tests writing rows.
-    let new_count: i64 = sqlx::query_scalar(
-        "select count(*) from audit_events where topic = 'operator' and ts_utc > $1",
-    )
-    .bind(ts_before)
-    .fetch_one(&pool)
-    .await
-    .expect("IR-02-04: failed to count new audit_events after arm");
-
-    assert_eq!(
-        new_count, 0,
-        "IR-02-04: arm-execution must NOT write to audit_events table; \
-         found {new_count} new rows after action"
-    );
+        assert_eq!(
+            new_count, 0,
+            "IR-02-04: arm-execution must NOT write to audit_events table; \
+             found {new_count} rows after action"
+        );
+    })
+    .await;
 }
 
 // ---------------------------------------------------------------------------
@@ -785,218 +795,210 @@ async fn ir02_05_change_system_mode_writes_no_durable_success_row() {
 //      with correct field mappings (requested_action, disposition, provenance_ref).
 //   3. GET /api/v1/ops/operator-timeline returns the same row as kind="operator_action"
 //      with correct detail and provenance_ref.
+//
+// FULL-AUDIT-FAIL-017 correction: `write_control_operator_audit_event`
+// resolves its run anchor via `fetch_latest_run_for_engine(engine_id=
+// "mqk-daemon", mode="PAPER")` -- the same global, no-per-test-identity query
+// as `n05_control_arm_provenance_ref_matches_exact_durable_audit_events_uuid`
+// in scenario_notify_ops01.rs. This test still carried the identical latent
+// bug n05 had before its fix: a fixed historical timestamp
+// (`2020-01-06T12:00:00Z`) that is not guaranteed to actually be "latest"
+// once another test's row for the same (engine_id, mode) pair exists in the
+// shared database. The genuine isolation is a disposable database
+// (`mqk_db::run_isolated`), not a wall-clock "latest" race, so the fixed
+// historical timestamp below is honest and safe.
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
 #[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
 async fn ir02_06_control_arm_accepted_action_durable_row_visible_in_history() {
-    let pool = ir02_test_pool().await;
+    mqk_db::run_isolated("ir02_06", |pool| async move {
+        // A run row with engine_id='mqk-daemon' is needed so that
+        // write_control_operator_audit_event can resolve a run_id anchor via
+        // fetch_latest_run_for_engine(db, "mqk-daemon", "PAPER").
+        // This run is the FK prerequisite only; the audit write happens through the route.
+        let run_id = uuid::Uuid::parse_str("cc000006-0000-4000-8000-000000000001").unwrap();
+        let started_at = chrono::DateTime::parse_from_rfc3339("2020-01-06T12:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
 
-    // A run row with engine_id='mqk-daemon' is needed so that
-    // write_control_operator_audit_event can resolve a run_id anchor via
-    // fetch_latest_run_for_engine(db, "mqk-daemon", "PAPER").
-    // This run is the FK prerequisite only; the audit write happens through the route.
-    let run_id = uuid::Uuid::parse_str("cc000006-0000-4000-8000-000000000001").unwrap();
-    let started_at = chrono::DateTime::parse_from_rfc3339("2020-01-06T12:00:00Z")
-        .unwrap()
-        .with_timezone(&chrono::Utc);
-
-    // Pre-test cleanup: remove any audit_events and run row from a prior failed run.
-    sqlx::query("delete from audit_events where run_id = $1")
-        .bind(run_id)
-        .execute(&pool)
+        // Insert the FK anchor run. This disposable DB has no other rows, so no
+        // pre-test cleanup is needed and the fixed historical timestamp is
+        // guaranteed to be the sole (and therefore "latest") row.
+        mqk_db::insert_run(
+            &pool,
+            &mqk_db::NewRun {
+                run_id,
+                engine_id: "mqk-daemon".to_string(),
+                mode: "PAPER".to_string(),
+                started_at_utc: started_at,
+                git_hash: "ir02-06-test-hash".to_string(),
+                config_hash: "ir02-06-config-hash".to_string(),
+                config_json: serde_json::json!({}),
+                host_fingerprint: "ir02-06-test-host".to_string(),
+            },
+        )
         .await
-        .expect("IR-02-06: pre-test audit_events cleanup failed");
-    sqlx::query("delete from runs where run_id = $1")
-        .bind(run_id)
-        .execute(&pool)
-        .await
-        .expect("IR-02-06: pre-test runs cleanup failed");
+        .expect("IR-02-06: insert_run failed");
 
-    // Insert the FK anchor run.
-    mqk_db::insert_run(
-        &pool,
-        &mqk_db::NewRun {
-            run_id,
-            engine_id: "mqk-daemon".to_string(),
-            mode: "PAPER".to_string(),
-            started_at_utc: started_at,
-            git_hash: "ir02-06-test-hash".to_string(),
-            config_hash: "ir02-06-config-hash".to_string(),
-            config_json: serde_json::json!({}),
-            host_fingerprint: "ir02-06-test-host".to_string(),
-        },
-    )
-    .await
-    .expect("IR-02-06: insert_run failed");
+        let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
+            pool.clone(),
+            state::OperatorAuthMode::ExplicitDevNoToken,
+        ));
 
-    let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
-        pool.clone(),
-        state::OperatorAuthMode::ExplicitDevNoToken,
-    ));
+        // Step 1: POST /control/arm — accepted authoritative action.
+        // The route calls write_control_operator_audit_event which finds the run we just
+        // inserted and writes a real audit_events row, then returns audit_event_id.
+        let req = Request::builder()
+            .method("POST")
+            .uri("/control/arm")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let (status, body) = call(routes::build_router(Arc::clone(&st)), req).await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "IR-02-06: /control/arm must return 200; got body: {}",
+            String::from_utf8_lossy(&body)
+        );
+        let arm_json = parse_json(body);
 
-    // Step 1: POST /control/arm — accepted authoritative action.
-    // The route calls write_control_operator_audit_event which finds the run we just
-    // inserted and writes a real audit_events row, then returns audit_event_id.
-    let req = Request::builder()
-        .method("POST")
-        .uri("/control/arm")
-        .body(axum::body::Body::empty())
-        .unwrap();
-    let (status, body) = call(routes::build_router(Arc::clone(&st)), req).await;
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "IR-02-06: /control/arm must return 200; got body: {}",
-        String::from_utf8_lossy(&body)
-    );
-    let arm_json = parse_json(body);
+        // Response must declare accepted/applied.
+        assert_eq!(
+            arm_json["accepted"], true,
+            "IR-02-06: arm must be accepted; got: {arm_json}"
+        );
+        assert_eq!(
+            arm_json["disposition"].as_str(),
+            Some("applied"),
+            "IR-02-06: disposition must be 'applied'; got: {arm_json}"
+        );
 
-    // Response must declare accepted/applied.
-    assert_eq!(
-        arm_json["accepted"], true,
-        "IR-02-06: arm must be accepted; got: {arm_json}"
-    );
-    assert_eq!(
-        arm_json["disposition"].as_str(),
-        Some("applied"),
-        "IR-02-06: disposition must be 'applied'; got: {arm_json}"
-    );
-
-    // audit_event_id must be non-null — the route wrote a real durable row.
-    let event_id_str = arm_json["audit"]["audit_event_id"]
-        .as_str()
-        .unwrap_or_else(|| {
-            panic!(
-                "IR-02-06: audit_event_id must be non-null when a run anchor exists; \
+        // audit_event_id must be non-null — the route wrote a real durable row.
+        let event_id_str = arm_json["audit"]["audit_event_id"]
+            .as_str()
+            .unwrap_or_else(|| {
+                panic!(
+                    "IR-02-06: audit_event_id must be non-null when a run anchor exists; \
                  got: {arm_json}"
-            )
-        });
+                )
+            });
 
-    // durable_db_write must be true.
-    assert_eq!(
-        arm_json["audit"]["durable_db_write"], true,
-        "IR-02-06: durable_db_write must be true; got: {arm_json}"
-    );
+        // durable_db_write must be true.
+        assert_eq!(
+            arm_json["audit"]["durable_db_write"], true,
+            "IR-02-06: durable_db_write must be true; got: {arm_json}"
+        );
 
-    // Step 2: GET /api/v1/audit/operator-actions.
-    // Find the row by the audit_event_id that the route returned.
-    // No fixture insertion was used for the audit write — this is read-back from the
-    // row the action itself wrote.
-    let req2 = Request::builder()
-        .method("GET")
-        .uri("/api/v1/audit/operator-actions")
-        .body(axum::body::Body::empty())
-        .unwrap();
-    let (status2, body2) = call(routes::build_router(Arc::clone(&st)), req2).await;
-    assert_eq!(
-        status2,
-        StatusCode::OK,
-        "IR-02-06: audit/operator-actions must return 200"
-    );
-    let actions_json = parse_json(body2);
+        // Step 2: GET /api/v1/audit/operator-actions.
+        // Find the row by the audit_event_id that the route returned.
+        // No fixture insertion was used for the audit write — this is read-back from the
+        // row the action itself wrote.
+        let req2 = Request::builder()
+            .method("GET")
+            .uri("/api/v1/audit/operator-actions")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let (status2, body2) = call(routes::build_router(Arc::clone(&st)), req2).await;
+        assert_eq!(
+            status2,
+            StatusCode::OK,
+            "IR-02-06: audit/operator-actions must return 200"
+        );
+        let actions_json = parse_json(body2);
 
-    assert_eq!(
-        actions_json["truth_state"].as_str(),
-        Some("active"),
-        "IR-02-06: audit/operator-actions truth_state must be active; got: {actions_json}"
-    );
+        assert_eq!(
+            actions_json["truth_state"].as_str(),
+            Some("active"),
+            "IR-02-06: audit/operator-actions truth_state must be active; got: {actions_json}"
+        );
 
-    let rows = actions_json["rows"]
-        .as_array()
-        .expect("IR-02-06: rows must be array");
-    let action_row = rows
-        .iter()
-        .find(|r| r["audit_event_id"].as_str() == Some(event_id_str))
-        .unwrap_or_else(|| {
-            panic!(
-                "IR-02-06: audit_event_id {event_id_str} returned by /control/arm must be \
+        let rows = actions_json["rows"]
+            .as_array()
+            .expect("IR-02-06: rows must be array");
+        let action_row = rows
+            .iter()
+            .find(|r| r["audit_event_id"].as_str() == Some(event_id_str))
+            .unwrap_or_else(|| {
+                panic!(
+                    "IR-02-06: audit_event_id {event_id_str} returned by /control/arm must be \
                  visible in /api/v1/audit/operator-actions; got rows: {rows:?}"
-            )
-        });
+                )
+            });
 
-    // Field contract for the action-written row.
-    assert_eq!(
-        action_row["requested_action"].as_str(),
-        Some("control.arm"),
-        "IR-02-06: requested_action must be 'control.arm'; got: {action_row}"
-    );
-    assert_eq!(
-        action_row["disposition"].as_str(),
-        Some("applied"),
-        "IR-02-06: disposition must be 'applied'; got: {action_row}"
-    );
-    assert!(
-        action_row["ts_utc"].as_str().is_some_and(|s| !s.is_empty()),
-        "IR-02-06: ts_utc must be non-empty RFC3339; got: {action_row}"
-    );
-    let expected_pref = format!("audit_events:{event_id_str}");
-    assert_eq!(
-        action_row["provenance_ref"].as_str(),
-        Some(expected_pref.as_str()),
-        "IR-02-06: provenance_ref must be 'audit_events:{{event_id}}'; got: {action_row}"
-    );
+        // Field contract for the action-written row.
+        assert_eq!(
+            action_row["requested_action"].as_str(),
+            Some("control.arm"),
+            "IR-02-06: requested_action must be 'control.arm'; got: {action_row}"
+        );
+        assert_eq!(
+            action_row["disposition"].as_str(),
+            Some("applied"),
+            "IR-02-06: disposition must be 'applied'; got: {action_row}"
+        );
+        assert!(
+            action_row["ts_utc"].as_str().is_some_and(|s| !s.is_empty()),
+            "IR-02-06: ts_utc must be non-empty RFC3339; got: {action_row}"
+        );
+        let expected_pref = format!("audit_events:{event_id_str}");
+        assert_eq!(
+            action_row["provenance_ref"].as_str(),
+            Some(expected_pref.as_str()),
+            "IR-02-06: provenance_ref must be 'audit_events:{{event_id}}'; got: {action_row}"
+        );
 
-    // Step 3: GET /api/v1/ops/operator-timeline.
-    // The same durable row must appear as kind="operator_action".
-    let req3 = Request::builder()
-        .method("GET")
-        .uri("/api/v1/ops/operator-timeline")
-        .body(axum::body::Body::empty())
-        .unwrap();
-    let (status3, body3) = call(routes::build_router(Arc::clone(&st)), req3).await;
-    assert_eq!(
-        status3,
-        StatusCode::OK,
-        "IR-02-06: operator-timeline must return 200"
-    );
-    let timeline_json = parse_json(body3);
+        // Step 3: GET /api/v1/ops/operator-timeline.
+        // The same durable row must appear as kind="operator_action".
+        let req3 = Request::builder()
+            .method("GET")
+            .uri("/api/v1/ops/operator-timeline")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let (status3, body3) = call(routes::build_router(Arc::clone(&st)), req3).await;
+        assert_eq!(
+            status3,
+            StatusCode::OK,
+            "IR-02-06: operator-timeline must return 200"
+        );
+        let timeline_json = parse_json(body3);
 
-    assert_eq!(
-        timeline_json["truth_state"].as_str(),
-        Some("active"),
-        "IR-02-06: operator-timeline truth_state must be active; got: {timeline_json}"
-    );
+        assert_eq!(
+            timeline_json["truth_state"].as_str(),
+            Some("active"),
+            "IR-02-06: operator-timeline truth_state must be active; got: {timeline_json}"
+        );
 
-    let tl_rows = timeline_json["rows"]
-        .as_array()
-        .expect("IR-02-06: timeline rows must be array");
-    let tl_row = tl_rows
-        .iter()
-        .find(|r| {
-            r["kind"].as_str() == Some("operator_action")
-                && r["provenance_ref"].as_str() == Some(&expected_pref)
-        })
-        .unwrap_or_else(|| {
-            panic!(
-                "IR-02-06: operator_action row for event {event_id_str} written by \
+        let tl_rows = timeline_json["rows"]
+            .as_array()
+            .expect("IR-02-06: timeline rows must be array");
+        let tl_row = tl_rows
+            .iter()
+            .find(|r| {
+                r["kind"].as_str() == Some("operator_action")
+                    && r["provenance_ref"].as_str() == Some(&expected_pref)
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "IR-02-06: operator_action row for event {event_id_str} written by \
                  /control/arm must be visible in /api/v1/ops/operator-timeline; \
                  got rows: {tl_rows:?}"
-            )
-        });
+                )
+            });
 
-    // Field contract for the timeline row.
-    assert_eq!(
-        tl_row["detail"].as_str(),
-        Some("control.arm"),
-        "IR-02-06: timeline row detail must be 'control.arm'; got: {tl_row}"
-    );
-    assert!(
-        tl_row["ts_utc"].as_str().is_some_and(|s| !s.is_empty()),
-        "IR-02-06: timeline row ts_utc must be non-empty; got: {tl_row}"
-    );
+        // Field contract for the timeline row.
+        assert_eq!(
+            tl_row["detail"].as_str(),
+            Some("control.arm"),
+            "IR-02-06: timeline row detail must be 'control.arm'; got: {tl_row}"
+        );
+        assert!(
+            tl_row["ts_utc"].as_str().is_some_and(|s| !s.is_empty()),
+            "IR-02-06: timeline row ts_utc must be non-empty; got: {tl_row}"
+        );
 
-    // Cleanup.
-    let returned_event_id = uuid::Uuid::parse_str(event_id_str)
-        .expect("IR-02-06: audit_event_id from response must be a valid UUID");
-    sqlx::query("delete from audit_events where event_id = $1")
-        .bind(returned_event_id)
-        .execute(&pool)
-        .await
-        .expect("IR-02-06: post-test audit_events cleanup failed");
-    sqlx::query("delete from runs where run_id = $1")
-        .bind(run_id)
-        .execute(&pool)
-        .await
-        .expect("IR-02-06: post-test runs cleanup failed");
+        // No manual cleanup needed: mqk_db::run_isolated drops the entire
+        // disposable database when this closure returns.
+    })
+    .await;
 }

@@ -186,134 +186,125 @@ async fn n01_configured_notifier_fires_on_accepted_action_and_payload_is_truthfu
 /// - the payload `provenance_ref` is `"audit_events:<uuid>"` — not null, not a generic label
 /// - the UUID in provenance_ref matches the `audit_event_id` returned in the HTTP response
 /// - that UUID exists in the audit_events table (end-to-end durable linkage)
+///
+/// FULL-AUDIT-FAIL-017 correction: `write_control_operator_audit_event`
+/// resolves its run anchor via `fetch_latest_run_for_engine(engine_id=
+/// "mqk-daemon", mode="PAPER")` -- "latest" by `started_at_utc`, a global
+/// query with no per-test identity to scope by. This was previously "fixed"
+/// by stamping the fixture `Utc::now()` so it would win a wall-clock race
+/// against every other test's row for the same (engine_id, mode) pair in the
+/// shared database -- a bet, not a fix (see `ir02_06` in
+/// scenario_operator_audit_ir02.rs, which still carries the identical
+/// unpatched bug this test had before). The genuine isolation is a
+/// disposable database (`mqk_db::run_isolated`): this test's seeded run is
+/// the only (engine_id, mode) row that exists, so "latest" can only resolve
+/// to it, and a fixed historical timestamp is safe again.
 #[tokio::test]
 #[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
 async fn n05_control_arm_provenance_ref_matches_exact_durable_audit_events_uuid() {
-    let db_url = match std::env::var(mqk_db::ENV_DB_URL) {
-        Ok(u) => u,
-        Err(_) => {
-            eprintln!("N05: skipping — MQK_DATABASE_URL not set");
-            return;
-        }
-    };
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(2)
-        .connect(&db_url)
+    if std::env::var(mqk_db::ENV_DB_URL).is_err() {
+        eprintln!("N05: skipping — MQK_DATABASE_URL not set");
+        return;
+    }
+
+    mqk_db::run_isolated("n05", |pool| async move {
+        // Seed a run with engine_id='mqk-daemon' so write_control_operator_audit_event
+        // can resolve a run_id anchor via fetch_latest_run_for_engine. Fixed
+        // historical timestamp is safe: this disposable DB has no other rows
+        // to lose the "latest" race to.
+        let run_id = uuid::Uuid::parse_str("cc000005-0000-4000-8000-000000000099").unwrap();
+        let started_at = chrono::DateTime::parse_from_rfc3339("2020-01-05T10:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+
+        mqk_db::insert_run(
+            &pool,
+            &mqk_db::NewRun {
+                run_id,
+                engine_id: "mqk-daemon".to_string(),
+                mode: "PAPER".to_string(),
+                started_at_utc: started_at,
+                git_hash: "n05-test-hash".to_string(),
+                config_hash: "n05-config-hash".to_string(),
+                config_json: serde_json::json!({}),
+                host_fingerprint: "n05-test-host".to_string(),
+            },
+        )
         .await
-        .expect("N05: connect failed");
+        .expect("N05: insert_run failed");
 
-    // Seed a run with engine_id='mqk-daemon' so write_control_operator_audit_event
-    // can resolve a run_id anchor via fetch_latest_run_for_engine.
-    // `write_control_operator_audit_event` resolves its run anchor via
-    // `fetch_latest_run_for_engine(engine_id="mqk-daemon", mode="PAPER")` --
-    // "latest" by `started_at_utc`. A fixed historical timestamp is not
-    // guaranteed to actually BE the latest once other tests in the same
-    // shared database insert their own (typically `Utc::now()`-stamped) rows
-    // for the same (engine_id, mode) pair, so this test's own row can lose
-    // "latest" to another test's row -- including one left with a "dirty"
-    // reconcile checkpoint, which then refuses this test's arm attempt with
-    // an unrelated 403. Stamping "now" keeps this test's row genuinely
-    // latest regardless of DB history accumulated earlier in a long session.
-    let run_id = uuid::Uuid::parse_str("cc000005-0000-4000-8000-000000000099").unwrap();
-    let started_at = chrono::Utc::now();
+        // Build state with DB + a Discord sink.
+        let sink = start_webhook_sink().await;
+        let mut st = mqk_daemon::state::AppState::new_with_db_and_operator_auth(
+            pool.clone(),
+            mqk_daemon::state::OperatorAuthMode::ExplicitDevNoToken,
+        );
+        st.discord_notifier = mqk_daemon::notify::DiscordNotifier::from_url(&sink.url);
+        let router = mqk_daemon::routes::build_router(Arc::new(st));
 
-    // Pre-test cleanup.
-    sqlx::query("delete from audit_events where run_id = $1")
-        .bind(run_id)
-        .execute(&pool)
-        .await
-        .expect("N05: pre-test audit_events cleanup failed");
-    sqlx::query("delete from runs where run_id = $1")
-        .bind(run_id)
-        .execute(&pool)
-        .await
-        .expect("N05: pre-test runs cleanup failed");
-
-    mqk_db::insert_run(
-        &pool,
-        &mqk_db::NewRun {
-            run_id,
-            engine_id: "mqk-daemon".to_string(),
-            mode: "PAPER".to_string(),
-            started_at_utc: started_at,
-            git_hash: "n05-test-hash".to_string(),
-            config_hash: "n05-config-hash".to_string(),
-            config_json: serde_json::json!({}),
-            host_fingerprint: "n05-test-host".to_string(),
-        },
-    )
-    .await
-    .expect("N05: insert_run failed");
-
-    // Build state with DB + a Discord sink.
-    let sink = start_webhook_sink().await;
-    let mut st = mqk_daemon::state::AppState::new_with_db_and_operator_auth(
-        pool.clone(),
-        mqk_daemon::state::OperatorAuthMode::ExplicitDevNoToken,
-    );
-    st.discord_notifier = mqk_daemon::notify::DiscordNotifier::from_url(&sink.url);
-    let router = mqk_daemon::routes::build_router(Arc::new(st));
-
-    let req = Request::builder()
-        .method("POST")
-        .uri("/control/arm")
-        .body(axum::body::Body::empty())
-        .unwrap();
-    let (status, body_bytes) = call(router, req).await;
-    assert_eq!(
-        status,
-        200,
-        "N05: /control/arm must return 200; body: {}",
-        String::from_utf8_lossy(&body_bytes)
-    );
-
-    let arm_json: Value = serde_json::from_slice(&body_bytes).unwrap();
-    assert_eq!(arm_json["accepted"], true, "N05: arm must be accepted");
-
-    // The response must have a non-null audit_event_id.
-    let event_id_str = arm_json["audit"]["audit_event_id"]
-        .as_str()
-        .expect("N05: audit_event_id must be non-null when run anchor exists");
-
-    // Give the async webhook sink time to flush.
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-
-    let count = sink.call_count.load(std::sync::atomic::Ordering::SeqCst);
-    assert_eq!(count, 1, "N05: webhook must be called exactly once");
-
-    let expected_prov = format!("audit_events:{event_id_str}");
-
-    let actual_prov = {
-        let received = sink.received.lock().unwrap();
+        let req = Request::builder()
+            .method("POST")
+            .uri("/control/arm")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let (status, body_bytes) = call(router, req).await;
         assert_eq!(
-            received.len(),
-            1,
-            "N05: exactly one payload must be received"
+            status,
+            200,
+            "N05: /control/arm must return 200; body: {}",
+            String::from_utf8_lossy(&body_bytes)
         );
 
-        received[0]["provenance_ref"]
+        let arm_json: Value = serde_json::from_slice(&body_bytes).unwrap();
+        assert_eq!(arm_json["accepted"], true, "N05: arm must be accepted");
+
+        // The response must have a non-null audit_event_id.
+        let event_id_str = arm_json["audit"]["audit_event_id"]
             .as_str()
-            .unwrap_or("")
-            .to_string()
-    };
+            .expect("N05: audit_event_id must be non-null when run anchor exists");
 
-    assert_eq!(
-        actual_prov, expected_prov,
-        "N05: provenance_ref must be exact audit_events UUID reference; got: {actual_prov:?}"
-    );
+        // Give the async webhook sink time to flush.
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
 
-    // Verify the UUID actually exists in the audit_events table.
-    let event_uuid =
-        uuid::Uuid::parse_str(event_id_str).expect("N05: event_id is not a valid UUID");
-    let row: (bool,) = sqlx::query_as("select count(*) > 0 from audit_events where event_id = $1")
-        .bind(event_uuid)
-        .fetch_one(&pool)
-        .await
-        .expect("N05: DB existence check failed");
-    assert!(
-        row.0,
-        "N05: audit_events row with event_id={event_id_str} must exist in DB"
-    );
+        let count = sink.call_count.load(std::sync::atomic::Ordering::SeqCst);
+        assert_eq!(count, 1, "N05: webhook must be called exactly once");
+
+        let expected_prov = format!("audit_events:{event_id_str}");
+
+        let actual_prov = {
+            let received = sink.received.lock().unwrap();
+            assert_eq!(
+                received.len(),
+                1,
+                "N05: exactly one payload must be received"
+            );
+
+            received[0]["provenance_ref"]
+                .as_str()
+                .unwrap_or("")
+                .to_string()
+        };
+
+        assert_eq!(
+            actual_prov, expected_prov,
+            "N05: provenance_ref must be exact audit_events UUID reference; got: {actual_prov:?}"
+        );
+
+        // Verify the UUID actually exists in the audit_events table.
+        let event_uuid =
+            uuid::Uuid::parse_str(event_id_str).expect("N05: event_id is not a valid UUID");
+        let row: (bool,) =
+            sqlx::query_as("select count(*) > 0 from audit_events where event_id = $1")
+                .bind(event_uuid)
+                .fetch_one(&pool)
+                .await
+                .expect("N05: DB existence check failed");
+        assert!(
+            row.0,
+            "N05: audit_events row with event_id={event_id_str} must exist in DB"
+        );
+    })
+    .await;
 }
 
 // ---------------------------------------------------------------------------

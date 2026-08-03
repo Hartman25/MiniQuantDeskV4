@@ -26,6 +26,16 @@
 //!
 //! N01 and N05 are pure in-process (no DB).
 //! N02–N04 are DB-backed; skip gracefully without `MQK_DATABASE_URL`.
+//!
+//! FULL-AUDIT-FAIL-016/018: N02 below remains `#[ignore]`d and blocked
+//! without real `ALPACA_API_KEY_LIVE` credentials -- same constraint as
+//! scenario_native_strategy_bootstrap_daemon_b1a.rs's L04-L06 (external
+//! integration tests cannot reach the crate-private `#[cfg(test)]` hermetic
+//! broker override). The positive proof now lives in-crate at
+//! `crates/mqk-daemon/src/state/hermetic_positive_proofs.rs`
+//! (`hermetic_b2a_n02_registry_enabled_allows_activation`). N03/N04 are
+//! unaffected (they never reach broker construction — refused earlier at the
+//! strategy_registry gate) and remain here unchanged.
 
 use std::sync::Arc;
 
@@ -274,88 +284,95 @@ async fn b2a_n02_registry_enabled_allows_activation() {
 // Gate A passes (plugin exists), Gate B fires (registry row present, disabled).
 // Start must be refused with 403 and gate=strategy_registry.
 // Skips gracefully without MQK_DATABASE_URL.
+//
+// FULL-AUDIT-FAIL-017: `clean_db_state` only scopes to an exact strategy_id
+// plus the `runtime_leader_lease`/`runtime_control_state` id=1 singleton
+// rows -- those two rows are shared, global, and not owned by this test, so
+// a concurrently-running test binary against the same shared database can
+// still race this test (matching the audit's observed "FAILED in full-batch
+// run, PASSED in isolation" signature). Moved to a disposable database
+// (`mqk_db::run_isolated`) instead of the shared `MQK_DATABASE_URL` database
+// for true isolation, mirroring N02's move.
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
 async fn b2a_n03_registry_disabled_refused_at_registry_gate() {
-    let Some(pool) = db_pool_or_skip().await else {
+    if std::env::var("MQK_DATABASE_URL").is_err() {
         eprintln!("N03: skipped (MQK_DATABASE_URL not set)");
         return;
-    };
+    }
 
-    mqk_db::migrate(&pool).await.expect("migrate");
-    clean_db_state(&pool, "swing_momentum").await;
+    mqk_db::run_isolated("b2a_n03", |pool| async move {
+        // Insert disabled registry row.
+        let now = Utc::now();
+        mqk_db::upsert_strategy_registry_entry(
+            &pool,
+            &mqk_db::UpsertStrategyRegistryArgs {
+                strategy_id: "swing_momentum".to_string(),
+                display_name: "Swing Momentum".to_string(),
+                enabled: false,
+                kind: "native".to_string(),
+                registered_at_utc: now,
+                updated_at_utc: now,
+                note: String::new(),
+            },
+        )
+        .await
+        .expect("N03: upsert_strategy_registry_entry must succeed");
 
-    // Insert disabled registry row.
-    let now = Utc::now();
-    mqk_db::upsert_strategy_registry_entry(
-        &pool,
-        &mqk_db::UpsertStrategyRegistryArgs {
-            strategy_id: "swing_momentum".to_string(),
-            display_name: "Swing Momentum".to_string(),
-            enabled: false,
-            kind: "native".to_string(),
-            registered_at_utc: now,
-            updated_at_utc: now,
-            note: String::new(),
-        },
-    )
-    .await
-    .expect("N03: upsert_strategy_registry_entry must succeed");
+        let st = Arc::new(state::AppState::new_for_test_with_db_mode_and_broker(
+            pool,
+            state::DeploymentMode::LiveShadow,
+            state::BrokerKind::Alpaca,
+        ));
 
-    let st = Arc::new(state::AppState::new_for_test_with_db_mode_and_broker(
-        pool.clone(),
-        state::DeploymentMode::LiveShadow,
-        state::BrokerKind::Alpaca,
-    ));
+        let arm_req = Request::builder()
+            .method("POST")
+            .uri("/v1/integrity/arm")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let (arm_status, _) = call(routes::build_router(Arc::clone(&st)), arm_req).await;
+        assert_eq!(arm_status, StatusCode::OK, "N03: arm must succeed");
 
-    let arm_req = Request::builder()
-        .method("POST")
-        .uri("/v1/integrity/arm")
-        .body(axum::body::Body::empty())
-        .unwrap();
-    let (arm_status, _) = call(routes::build_router(Arc::clone(&st)), arm_req).await;
-    assert_eq!(arm_status, StatusCode::OK, "N03: arm must succeed");
+        st.set_strategy_fleet_for_test(Some(vec![fleet_entry("swing_momentum")]))
+            .await;
 
-    st.set_strategy_fleet_for_test(Some(vec![fleet_entry("swing_momentum")]))
+        let (start_status, start_body) = call(
+            routes::build_router(Arc::clone(&st)),
+            Request::builder()
+                .method("POST")
+                .uri("/v1/run/start")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
         .await;
 
-    let (start_status, start_body) = call(
-        routes::build_router(Arc::clone(&st)),
-        Request::builder()
-            .method("POST")
-            .uri("/v1/run/start")
-            .body(axum::body::Body::empty())
-            .unwrap(),
-    )
+        assert_eq!(
+            start_status,
+            StatusCode::FORBIDDEN,
+            "N03: disabled registry row must refuse start with 403; \
+             got: {start_status} body: {}",
+            String::from_utf8_lossy(&start_body)
+        );
+        let json = parse_json(start_body);
+        assert_eq!(
+            json["gate"], "strategy_registry",
+            "N03: gate must be strategy_registry (B2A); got: {json}"
+        );
+        assert_eq!(
+            json["fault_class"], "runtime.start_refused.strategy_registry_disabled",
+            "N03: fault_class must identify disabled registry; got: {json}"
+        );
+        assert!(
+            json["error"]
+                .as_str()
+                .unwrap_or("")
+                .contains("swing_momentum"),
+            "N03: error must name the strategy; got: {json}"
+        );
+    })
     .await;
-
-    assert_eq!(
-        start_status,
-        StatusCode::FORBIDDEN,
-        "N03: disabled registry row must refuse start with 403; \
-         got: {start_status} body: {}",
-        String::from_utf8_lossy(&start_body)
-    );
-    let json = parse_json(start_body);
-    assert_eq!(
-        json["gate"], "strategy_registry",
-        "N03: gate must be strategy_registry (B2A); got: {json}"
-    );
-    assert_eq!(
-        json["fault_class"], "runtime.start_refused.strategy_registry_disabled",
-        "N03: fault_class must identify disabled registry; got: {json}"
-    );
-    assert!(
-        json["error"]
-            .as_str()
-            .unwrap_or("")
-            .contains("swing_momentum"),
-        "N03: error must name the strategy; got: {json}"
-    );
-
-    clean_db_state(&pool, "swing_momentum").await;
 }
 
 // ---------------------------------------------------------------------------
@@ -366,66 +383,69 @@ async fn b2a_n03_registry_disabled_refused_at_registry_gate() {
 // Skips gracefully without MQK_DATABASE_URL.
 // ---------------------------------------------------------------------------
 
+// FULL-AUDIT-FAIL-017: moved to a disposable database for the same reason as
+// N03 above (the shared singleton lease/control rows are not exclusively
+// owned by this test in the shared MQK_DATABASE_URL database).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
 async fn b2a_n04_registry_absent_refused_at_registry_gate() {
-    let Some(pool) = db_pool_or_skip().await else {
+    if std::env::var("MQK_DATABASE_URL").is_err() {
         eprintln!("N04: skipped (MQK_DATABASE_URL not set)");
         return;
-    };
+    }
 
-    mqk_db::migrate(&pool).await.expect("migrate");
-    // Ensure no registry row exists for swing_momentum.
-    clean_db_state(&pool, "swing_momentum").await;
+    mqk_db::run_isolated("b2a_n04", |pool| async move {
+        // No registry row exists for swing_momentum in this fresh disposable DB.
+        let st = Arc::new(state::AppState::new_for_test_with_db_mode_and_broker(
+            pool,
+            state::DeploymentMode::LiveShadow,
+            state::BrokerKind::Alpaca,
+        ));
 
-    let st = Arc::new(state::AppState::new_for_test_with_db_mode_and_broker(
-        pool.clone(),
-        state::DeploymentMode::LiveShadow,
-        state::BrokerKind::Alpaca,
-    ));
+        let arm_req = Request::builder()
+            .method("POST")
+            .uri("/v1/integrity/arm")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let (arm_status, _) = call(routes::build_router(Arc::clone(&st)), arm_req).await;
+        assert_eq!(arm_status, StatusCode::OK, "N04: arm must succeed");
 
-    let arm_req = Request::builder()
-        .method("POST")
-        .uri("/v1/integrity/arm")
-        .body(axum::body::Body::empty())
-        .unwrap();
-    let (arm_status, _) = call(routes::build_router(Arc::clone(&st)), arm_req).await;
-    assert_eq!(arm_status, StatusCode::OK, "N04: arm must succeed");
+        st.set_strategy_fleet_for_test(Some(vec![fleet_entry("swing_momentum")]))
+            .await;
 
-    st.set_strategy_fleet_for_test(Some(vec![fleet_entry("swing_momentum")]))
+        let (start_status, start_body) = call(
+            routes::build_router(Arc::clone(&st)),
+            Request::builder()
+                .method("POST")
+                .uri("/v1/run/start")
+                .body(axum::body::Body::empty())
+                .unwrap(),
+        )
         .await;
 
-    let (start_status, start_body) = call(
-        routes::build_router(Arc::clone(&st)),
-        Request::builder()
-            .method("POST")
-            .uri("/v1/run/start")
-            .body(axum::body::Body::empty())
-            .unwrap(),
-    )
+        assert_eq!(
+            start_status,
+            StatusCode::FORBIDDEN,
+            "N04: absent registry row must refuse start with 403; \
+             got: {start_status} body: {}",
+            String::from_utf8_lossy(&start_body)
+        );
+        let json = parse_json(start_body);
+        assert_eq!(
+            json["gate"], "strategy_registry",
+            "N04: gate must be strategy_registry (B2A); got: {json}"
+        );
+        assert_eq!(
+            json["fault_class"], "runtime.start_refused.strategy_registry_missing",
+            "N04: fault_class must identify missing registry row; got: {json}"
+        );
+        assert!(
+            json["error"]
+                .as_str()
+                .unwrap_or("")
+                .contains("swing_momentum"),
+            "N04: error must name the strategy; got: {json}"
+        );
+    })
     .await;
-
-    assert_eq!(
-        start_status,
-        StatusCode::FORBIDDEN,
-        "N04: absent registry row must refuse start with 403; \
-         got: {start_status} body: {}",
-        String::from_utf8_lossy(&start_body)
-    );
-    let json = parse_json(start_body);
-    assert_eq!(
-        json["gate"], "strategy_registry",
-        "N04: gate must be strategy_registry (B2A); got: {json}"
-    );
-    assert_eq!(
-        json["fault_class"], "runtime.start_refused.strategy_registry_missing",
-        "N04: fault_class must identify missing registry row; got: {json}"
-    );
-    assert!(
-        json["error"]
-            .as_str()
-            .unwrap_or("")
-            .contains("swing_momentum"),
-        "N04: error must name the strategy; got: {json}"
-    );
 }

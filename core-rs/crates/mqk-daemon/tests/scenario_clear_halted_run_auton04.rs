@@ -232,100 +232,58 @@ async fn h02_catalog_contains_clear_halted_run_with_required_fields() {
     );
 }
 
-/// H03 proves the *global* "no run found" verdict for (engine_id="mqk-daemon",
-/// mode="PAPER") -- the production route (`mqk_db::fetch_latest_run_for_engine`,
-/// `control_plane.rs`) resolves "the latest run" by exactly that (engine_id,
-/// mode) pair, not by any test-private run_id. `cleanup_test_runs` above only
-/// removes this file's own 5 named fixture UUIDs, so H03 alone requires a
-/// stronger precondition: no row with this (engine_id, mode) pair may exist
-/// anywhere in the DB, not just none of this file's own rows -- otherwise a
-/// residual row left by any other test in the same shared `mqk_test`
-/// database (this is the isolated port-5434 test-only database, never real
-/// operator history) makes the daemon see a real "latest run" and the
-/// asserted disposition flips from `no_run_found` to `run_not_halted`.
-/// Deletes in FK dependency order across every table that references
-/// `runs.run_id`.
-async fn cleanup_all_mqk_daemon_paper_runs(pool: &sqlx::PgPool) {
-    const ENGINE_ID: &str = "mqk-daemon";
-    const MODE: &str = "PAPER";
-    let scope_subquery = "select run_id from runs where engine_id = $1 and mode = $2";
-
-    sqlx::query(&format!(
-        "delete from broker_order_map where internal_id in (\
-           select idempotency_key from oms_outbox where run_id in ({scope_subquery}))"
-    ))
-    .bind(ENGINE_ID)
-    .bind(MODE)
-    .execute(pool)
-    .await
-    .ok();
-
-    for table in [
-        "audit_events",
-        "oms_outbox",
-        "oms_inbox",
-        "fill_quality_telemetry",
-        "run_events",
-        "sys_paper_portfolio_snapshots",
-        "sys_paper_portfolio_accounting_state",
-        "sys_runtime_opportunity_allocation_plans",
-        "sys_runtime_strategy_conflict_plans",
-        "sys_dynamic_selection_plans",
-    ] {
-        sqlx::query(&format!(
-            "delete from {table} where run_id in ({scope_subquery})"
-        ))
-        .bind(ENGINE_ID)
-        .bind(MODE)
-        .execute(pool)
-        .await
-        .ok();
-    }
-
-    sqlx::query("delete from runs where engine_id = $1 and mode = $2")
-        .bind(ENGINE_ID)
-        .bind(MODE)
-        .execute(pool)
-        .await
-        .ok();
-}
-
 // ---------------------------------------------------------------------------
 // DB-backed tests (require MQK_DATABASE_URL, #[ignore] in CI)
 // ---------------------------------------------------------------------------
 
-/// H03: clear-halted-run with no run in DB → 409 no_run_found.
+/// H03 proves the *global* "no run found" verdict for (engine_id="mqk-daemon",
+/// mode="PAPER") -- the production route (`mqk_db::fetch_latest_run_for_engine`,
+/// `control_plane.rs`) resolves "the latest run" by exactly that (engine_id,
+/// mode) pair, not by any test-private run_id, so no per-fixture-ID cleanup
+/// against the shared `MQK_DATABASE_URL` database can isolate this test: any
+/// other test's row for the same (engine_id, mode) pair — inserted before,
+/// after, or concurrently — makes the daemon see a real "latest run" and
+/// flips the asserted disposition from `no_run_found` to `run_not_halted`.
+///
+/// FULL-AUDIT-FAIL-017 correction: this was previously "fixed" by
+/// `cleanup_all_mqk_daemon_paper_runs`, a helper that deleted every
+/// (engine_id='mqk-daemon', mode='PAPER') row from the shared database —
+/// including other tests' own fixtures — across 10 tables, with every
+/// deletion's error silently swallowed via `.ok()`. That is removed. Because
+/// the production query genuinely has no per-test identity to scope by, the
+/// correct isolation is a disposable database that only this test's
+/// connection can see (`mqk_db::run_isolated`), not a global wipe of shared
+/// state.
 #[tokio::test]
 #[ignore]
 async fn h03_clear_halted_run_no_run_returns_409() {
-    let pool = make_db_pool().await;
-    cleanup_test_runs(&pool).await;
-    cleanup_all_mqk_daemon_paper_runs(&pool).await;
+    mqk_db::run_isolated("auton04_h03", |pool| async move {
+        let st = Arc::new(AppState::new_for_test_with_db_mode_and_broker(
+            pool,
+            DeploymentMode::Paper,
+            BrokerKind::Paper,
+        ));
+        let router = build_router(st);
 
-    let st = Arc::new(AppState::new_for_test_with_db_mode_and_broker(
-        pool,
-        DeploymentMode::Paper,
-        BrokerKind::Paper,
-    ));
-    let router = build_router(st);
+        let (status, j) = post_action(
+            router,
+            serde_json::json!({ "action_key": "clear-halted-run" }),
+        )
+        .await;
 
-    let (status, j) = post_action(
-        router,
-        serde_json::json!({ "action_key": "clear-halted-run" }),
-    )
+        assert_eq!(
+            status,
+            StatusCode::CONFLICT,
+            "H03: clear-halted-run with no run must return 409; body: {j}"
+        );
+        assert_eq!(j["accepted"], false, "H03: must not be accepted; body: {j}");
+        assert_eq!(
+            j["disposition"].as_str(),
+            Some("no_run_found"),
+            "H03: disposition must be no_run_found; body: {j}"
+        );
+    })
     .await;
-
-    assert_eq!(
-        status,
-        StatusCode::CONFLICT,
-        "H03: clear-halted-run with no run must return 409; body: {j}"
-    );
-    assert_eq!(j["accepted"], false, "H03: must not be accepted; body: {j}");
-    assert_eq!(
-        j["disposition"].as_str(),
-        Some("no_run_found"),
-        "H03: disposition must be no_run_found; body: {j}"
-    );
 }
 
 /// H04: clear-halted-run when latest run is STOPPED → 409 run_not_halted.
