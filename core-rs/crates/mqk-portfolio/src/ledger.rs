@@ -13,11 +13,15 @@
 //!   "explicit/isolated" stated in the gap-fill spec.
 //!
 //! # Usage
-//! ```ignore
+//! ```
+//! use mqk_portfolio::{Fill, Ledger, Side, MICROS_SCALE};
+//!
 //! let mut ledger = Ledger::new(100_000 * MICROS_SCALE);
 //! ledger.append_fill(Fill::new("AAPL", Side::Buy, 10, 150_000_000, 0))?;
 //! let snap = ledger.snapshot();
-//! println!("equity ≈ {}", snap.cash_micros);
+//! println!("cash ≈ {}", snap.cash_micros);
+//! assert_eq!(snap.qty_signed("AAPL"), 10);
+//! # Ok::<(), mqk_portfolio::LedgerError>(())
 //! ```
 //!
 //! # Determinism

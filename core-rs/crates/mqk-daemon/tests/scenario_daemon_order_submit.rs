@@ -12,8 +12,20 @@
 //! `crates/mqk-daemon/src/state/hermetic_positive_proofs.rs`
 //! (`hermetic_order_submit_*`). All other tests in this file (arm/DB-absent
 //! refusals, cancel-route tests that never call `start()`) are unaffected.
+//!
+//! FULL-AUDIT-SAFE-IGNORED-AND-SHARED-DB-FINAL-CLOSURE-01 Part 1:
+//! MANUAL_EXTERNAL hardening. These five functions are additionally gated
+//! behind `#[cfg(feature = "manual-external")]` -- off by default, so they
+//! do not exist in the compiled test binary for the default workspace test
+//! run, the canonical safe-ignored runner, or CI. An operator who explicitly
+//! builds with `--features manual-external` still cannot execute them without
+//! also setting `MQK_ALLOW_MANUAL_EXTERNAL_ORDER_TESTS=1` at runtime (checked
+//! first thing in each function, before any broker adapter is constructed) --
+//! two independent, separately-named gates, neither of which is ever
+//! satisfied by accident.
 
 use std::sync::Arc;
+#[cfg(feature = "manual-external")]
 use std::time::Duration;
 
 use axum::http::{Request, StatusCode};
@@ -23,6 +35,24 @@ use tower::ServiceExt;
 use uuid::Uuid;
 
 const TEST_OPERATOR_TOKEN: &str = "test-operator-token";
+
+/// Runtime opt-in gate for MANUAL_EXTERNAL tests (see module doc). Panics
+/// with an explicit, actionable message rather than letting execution
+/// continue toward constructing a real broker adapter. This is the second,
+/// separately-named gate on top of the `manual-external` compile-time
+/// feature -- building with the feature on is not, by itself, enough to run
+/// these tests.
+#[cfg(feature = "manual-external")]
+fn require_manual_external_opt_in(test_name: &str) {
+    if std::env::var("MQK_ALLOW_MANUAL_EXTERNAL_ORDER_TESTS").as_deref() != Ok("1") {
+        panic!(
+            "{test_name}: MANUAL_EXTERNAL test refused -- requires real Alpaca credentials \
+             AND explicit runtime opt-in via MQK_ALLOW_MANUAL_EXTERNAL_ORDER_TESTS=1. This is \
+             an operator-only manual proof, never part of the default test run, the canonical \
+             safe-ignored runner, or CI."
+        );
+    }
+}
 
 fn authed(builder: axum::http::request::Builder) -> axum::http::request::Builder {
     builder.header("Authorization", format!("Bearer {TEST_OPERATOR_TOKEN}"))
@@ -324,6 +354,7 @@ async fn arm(st: &Arc<state::AppState>) {
     assert_eq!(status, StatusCode::OK, "arm failed: {}", parse_json(body));
 }
 
+#[cfg(feature = "manual-external")]
 async fn start(st: &Arc<state::AppState>) -> serde_json::Value {
     let req = authed(Request::builder())
         .method("POST")
@@ -955,9 +986,13 @@ async fn manual_order_submit_fails_closed_when_durable_arm_state_load_fails() {
 }
 
 #[tokio::test]
-#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+#[cfg(feature = "manual-external")]
+#[ignore = "MANUAL_EXTERNAL: requires --features manual-external, MQK_ALLOW_MANUAL_EXTERNAL_ORDER_TESTS=1, real Alpaca credentials, and a non-default MQK_DAEMON_ADAPTER_ID; run with --include-ignored"]
 async fn manual_order_submit_refuses_when_durable_arm_state_is_disarmed_even_if_local_state_is_armed(
 ) {
+    require_manual_external_opt_in(
+        "manual_order_submit_refuses_when_durable_arm_state_is_disarmed_even_if_local_state_is_armed",
+    );
     let st = daemon_state().await;
     arm(&st).await;
     start(&st).await;
@@ -988,9 +1023,13 @@ async fn manual_order_submit_refuses_when_durable_arm_state_is_disarmed_even_if_
 }
 
 #[tokio::test]
-#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+#[cfg(feature = "manual-external")]
+#[ignore = "MANUAL_EXTERNAL: requires --features manual-external, MQK_ALLOW_MANUAL_EXTERNAL_ORDER_TESTS=1, real Alpaca credentials, and a non-default MQK_DAEMON_ADAPTER_ID; run with --include-ignored"]
 async fn manual_order_submit_refuses_when_durable_arm_state_is_halted_even_if_local_state_is_armed()
 {
+    require_manual_external_opt_in(
+        "manual_order_submit_refuses_when_durable_arm_state_is_halted_even_if_local_state_is_armed",
+    );
     let st = daemon_state().await;
     arm(&st).await;
     start(&st).await;
@@ -1021,8 +1060,12 @@ async fn manual_order_submit_refuses_when_durable_arm_state_is_halted_even_if_lo
 }
 
 #[tokio::test]
-#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+#[cfg(feature = "manual-external")]
+#[ignore = "MANUAL_EXTERNAL: requires --features manual-external, MQK_ALLOW_MANUAL_EXTERNAL_ORDER_TESTS=1, real Alpaca credentials, and a non-default MQK_DAEMON_ADAPTER_ID; run with --include-ignored"]
 async fn manual_order_submit_enqueues_one_pending_outbox_row_for_active_run() {
+    require_manual_external_opt_in(
+        "manual_order_submit_enqueues_one_pending_outbox_row_for_active_run",
+    );
     let st = daemon_state().await;
     arm(&st).await;
     let started = start(&st).await;
@@ -1053,8 +1096,10 @@ async fn manual_order_submit_enqueues_one_pending_outbox_row_for_active_run() {
 }
 
 #[tokio::test]
-#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+#[cfg(feature = "manual-external")]
+#[ignore = "MANUAL_EXTERNAL: requires --features manual-external, MQK_ALLOW_MANUAL_EXTERNAL_ORDER_TESTS=1, real Alpaca credentials, and a non-default MQK_DAEMON_ADAPTER_ID; run with --include-ignored"]
 async fn manual_order_submit_duplicate_client_request_id_is_noop() {
+    require_manual_external_opt_in("manual_order_submit_duplicate_client_request_id_is_noop");
     let st = daemon_state().await;
     arm(&st).await;
     start(&st).await;
@@ -1092,8 +1137,12 @@ async fn manual_order_submit_duplicate_client_request_id_is_noop() {
 }
 
 #[tokio::test]
-#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+#[cfg(feature = "manual-external")]
+#[ignore = "MANUAL_EXTERNAL: requires --features manual-external, MQK_ALLOW_MANUAL_EXTERNAL_ORDER_TESTS=1, real Alpaca credentials, and a non-default MQK_DAEMON_ADAPTER_ID; run with --include-ignored"]
 async fn manual_order_submit_accepts_limit_order_with_explicit_defaults_aligned_to_runtime() {
+    require_manual_external_opt_in(
+        "manual_order_submit_accepts_limit_order_with_explicit_defaults_aligned_to_runtime",
+    );
     let st = daemon_state().await;
     arm(&st).await;
     start(&st).await;

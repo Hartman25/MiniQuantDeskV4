@@ -561,142 +561,132 @@ fn b1c_c13_close_short_position() {
 ///   `MQK_DATABASE_URL=postgres://... cargo test -p mqk-daemon \
 ///    --test scenario_native_strategy_bridge_b1c -- --include-ignored`
 #[tokio::test]
-#[ignore]
+#[ignore = "requires MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5434/mqk_test cargo test -p mqk-daemon --features testkit --test scenario_native_strategy_bridge_b1c -- --include-ignored"]
 async fn b1c_c14_loop_path_creates_durable_outbox_row() {
-    let url = match std::env::var(mqk_db::ENV_DB_URL) {
-        Ok(u) => u,
-        Err(_) => {
-            eprintln!("C14: MQK_DATABASE_URL not set — skipping DB-backed proof");
-            return;
-        }
-    };
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(2)
-        .connect(&url)
+    // `seed_active_paper_promotion` derives its transition_ids from a fixed
+    // UUIDv5 namespace keyed only on (strategy_id, symbol, timeframe_secs) --
+    // deliberately deterministic so repeated runs target the identical
+    // promotion-transition identity (STRATEGY-PROMOTION-REGISTRY-01D). Against
+    // the shared MQK_DATABASE_URL database that determinism becomes a
+    // liability: the transition row from any earlier successful run of this
+    // exact test (this session or a prior one) is never cleaned up, so a
+    // later run computes the same transition_id with a new wall-clock
+    // `effective_at_utc`/`created_at_utc` and collides against the old row's
+    // now-different payload (real failure observed: "transition_id ...
+    // already exists with a different payload"). A disposable per-test
+    // database (FULL-AUDIT-FAIL-017 pattern) removes the shared history this
+    // determinism was colliding against.
+    mqk_db::run_isolated("b1c_c14", |pool| async move {
+        // Seed strategy registry.
+        let strategy_id = "test_strategy";
+        let ts = chrono::Utc::now();
+        mqk_db::upsert_strategy_registry_entry(
+            &pool,
+            &mqk_db::UpsertStrategyRegistryArgs {
+                strategy_id: strategy_id.to_string(),
+                display_name: "B1C Test Strategy".to_string(),
+                enabled: true,
+                kind: String::new(),
+                registered_at_utc: ts,
+                updated_at_utc: ts,
+                note: String::new(),
+            },
+        )
         .await
-        .expect("C14: connect to test DB");
-    mqk_db::migrate(&pool).await.expect("C14: run migrations");
+        .expect("C14: seed strategy registry");
+        seed_active_paper_promotion(&pool, strategy_id, "AAPL", 300).await;
 
-    // Seed strategy registry.
-    let strategy_id = "test_strategy";
-    let ts = chrono::Utc::now();
-    mqk_db::upsert_strategy_registry_entry(
-        &pool,
-        &mqk_db::UpsertStrategyRegistryArgs {
-            strategy_id: strategy_id.to_string(),
-            display_name: "B1C Test Strategy".to_string(),
-            enabled: true,
-            kind: String::new(),
-            registered_at_utc: ts,
-            updated_at_utc: ts,
-            note: String::new(),
-        },
-    )
-    .await
-    .expect("C14: seed strategy registry");
-    seed_active_paper_promotion(&pool, strategy_id, "AAPL", 300).await;
+        // Build AppState with DB and arm state.
+        let st = Arc::new(state::AppState::new_with_db(pool.clone()));
+        mqk_db::persist_arm_state_canonical(&pool, mqk_db::ArmState::Armed, None)
+            .await
+            .expect("C14: arm state");
 
-    // Build AppState with DB and arm state.
-    let st = Arc::new(state::AppState::new_with_db(pool.clone()));
-    mqk_db::persist_arm_state_canonical(&pool, mqk_db::ArmState::Armed, None)
+        // Seed an active run.
+        let run_id = Uuid::new_v4();
+        let now = chrono::Utc::now();
+        mqk_db::insert_run(
+            &pool,
+            &mqk_db::NewRun {
+                run_id,
+                engine_id: "mqk-daemon".to_string(),
+                mode: "PAPER".to_string(),
+                started_at_utc: now,
+                git_hash: "test".to_string(),
+                config_hash: "test".to_string(),
+                config_json: serde_json::json!({"source": "b1c_c14"}),
+                host_fingerprint: "test-host".to_string(),
+            },
+        )
         .await
-        .expect("C14: arm state");
+        .expect("C14: insert_run");
+        mqk_db::arm_run(&pool, run_id).await.expect("C14: arm_run");
+        mqk_db::begin_run(&pool, run_id)
+            .await
+            .expect("C14: begin_run");
+        mqk_db::heartbeat_run(&pool, run_id, now)
+            .await
+            .expect("C14: heartbeat_run");
+        st.inject_running_loop_for_test(run_id).await;
 
-    // Seed an active run.
-    let run_id = Uuid::new_v4();
-    let now = chrono::Utc::now();
-    mqk_db::insert_run(
-        &pool,
-        &mqk_db::NewRun {
-            run_id,
-            engine_id: "mqk-daemon".to_string(),
-            mode: "PAPER".to_string(),
-            started_at_utc: now,
-            git_hash: "test".to_string(),
-            config_hash: "test".to_string(),
-            config_json: serde_json::json!({"source": "b1c_c14"}),
-            host_fingerprint: "test-host".to_string(),
-        },
-    )
-    .await
-    .expect("C14: insert_run");
-    mqk_db::arm_run(&pool, run_id).await.expect("C14: arm_run");
-    mqk_db::begin_run(&pool, run_id)
-        .await
-        .expect("C14: begin_run");
-    mqk_db::heartbeat_run(&pool, run_id, now)
-        .await
-        .expect("C14: heartbeat_run");
-    st.inject_running_loop_for_test(run_id).await;
+        // --- Exercise the loop-owned translation path ---
+        // Flat current position: target=+10, current=0 → delta=+10 → buy 10.
+        let result = live_result(vec![TargetPosition::new("AAPL", 10)]);
+        let decisions = bar_result_to_decisions(&result, run_id, FIXED_NOW_MICROS, &flat());
+        assert_eq!(
+            decisions.len(),
+            1,
+            "C14 precondition: one target → one decision"
+        );
 
-    // --- Exercise the loop-owned translation path ---
-    // Flat current position: target=+10, current=0 → delta=+10 → buy 10.
-    let result = live_result(vec![TargetPosition::new("AAPL", 10)]);
-    let decisions = bar_result_to_decisions(&result, run_id, FIXED_NOW_MICROS, &flat());
-    assert_eq!(
-        decisions.len(),
-        1,
-        "C14 precondition: one target → one decision"
-    );
+        let decision = decisions.into_iter().next().unwrap();
+        let decision_id = decision.decision_id.clone();
 
-    let decision = decisions.into_iter().next().unwrap();
-    let decision_id = decision.decision_id.clone();
+        // First submission: must be accepted.
+        let outcome = submit_internal_strategy_decision(&st, decision.clone()).await;
+        assert!(
+            outcome.accepted,
+            "C14: loop-path decision must be accepted; disposition={:?}, blockers={:?}",
+            outcome.disposition, outcome.blockers
+        );
+        assert_eq!(
+            outcome.disposition, "accepted",
+            "C14: disposition must be 'accepted'"
+        );
 
-    // First submission: must be accepted.
-    let outcome = submit_internal_strategy_decision(&st, decision.clone()).await;
-    assert!(
-        outcome.accepted,
-        "C14: loop-path decision must be accepted; disposition={:?}, blockers={:?}",
-        outcome.disposition, outcome.blockers
-    );
-    assert_eq!(
-        outcome.disposition, "accepted",
-        "C14: disposition must be 'accepted'"
-    );
-
-    // Verify the outbox row carries the correct signal_source.
-    let rows = sqlx::query_as::<_, (serde_json::Value,)>(
-        "SELECT order_json FROM oms_outbox WHERE idempotency_key = $1 AND run_id = $2",
-    )
-    .bind(&decision_id)
-    .bind(run_id)
-    .fetch_all(&pool)
-    .await
-    .expect("C14: query outbox");
-
-    assert_eq!(
-        rows.len(),
-        1,
-        "C14: exactly one outbox row for this decision_id"
-    );
-    let order_json = &rows[0].0;
-    assert_eq!(
-        order_json["signal_source"], "internal_strategy_decision",
-        "C14: outbox row must carry signal_source='internal_strategy_decision'; got: {}",
-        order_json
-    );
-    assert_eq!(
-        order_json["qty"], 10,
-        "C14: order qty must be the delta (10), not a fabricated value"
-    );
-
-    // Idempotency: re-submitting the same decision_id must return "duplicate".
-    let outcome2 = submit_internal_strategy_decision(&st, decision).await;
-    assert!(!outcome2.accepted, "C14: duplicate must not be accepted");
-    assert_eq!(
-        outcome2.disposition, "duplicate",
-        "C14: second submission of same decision_id → 'duplicate'"
-    );
-
-    // Cleanup.
-    sqlx::query("DELETE FROM oms_outbox WHERE run_id = $1")
+        // Verify the outbox row carries the correct signal_source.
+        let rows = sqlx::query_as::<_, (serde_json::Value,)>(
+            "SELECT order_json FROM oms_outbox WHERE idempotency_key = $1 AND run_id = $2",
+        )
+        .bind(&decision_id)
         .bind(run_id)
-        .execute(&pool)
+        .fetch_all(&pool)
         .await
-        .expect("C14: cleanup outbox");
-    sqlx::query("DELETE FROM runs WHERE run_id = $1")
-        .bind(run_id)
-        .execute(&pool)
-        .await
-        .expect("C14: cleanup runs");
+        .expect("C14: query outbox");
+
+        assert_eq!(
+            rows.len(),
+            1,
+            "C14: exactly one outbox row for this decision_id"
+        );
+        let order_json = &rows[0].0;
+        assert_eq!(
+            order_json["signal_source"], "internal_strategy_decision",
+            "C14: outbox row must carry signal_source='internal_strategy_decision'; got: {}",
+            order_json
+        );
+        assert_eq!(
+            order_json["qty"], 10,
+            "C14: order qty must be the delta (10), not a fabricated value"
+        );
+
+        // Idempotency: re-submitting the same decision_id must return "duplicate".
+        let outcome2 = submit_internal_strategy_decision(&st, decision).await;
+        assert!(!outcome2.accepted, "C14: duplicate must not be accepted");
+        assert_eq!(
+            outcome2.disposition, "duplicate",
+            "C14: second submission of same decision_id → 'duplicate'"
+        );
+    })
+    .await;
 }

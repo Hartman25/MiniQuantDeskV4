@@ -50,6 +50,24 @@ use tower::ServiceExt;
 // Helpers
 // ---------------------------------------------------------------------------
 
+/// Runtime opt-in gate for MANUAL_EXTERNAL tests (see module doc). Panics
+/// with an explicit, actionable message rather than letting execution
+/// continue toward constructing a real broker adapter. This is the second,
+/// separately-named gate on top of the `manual-external` compile-time
+/// feature -- building with the feature on is not, by itself, enough to run
+/// this test.
+#[cfg(feature = "manual-external")]
+fn require_manual_external_opt_in(test_name: &str) {
+    if std::env::var("MQK_ALLOW_MANUAL_EXTERNAL_ORDER_TESTS").as_deref() != Ok("1") {
+        panic!(
+            "{test_name}: MANUAL_EXTERNAL test refused -- requires real ALPACA_API_KEY_LIVE \
+             credentials AND explicit runtime opt-in via MQK_ALLOW_MANUAL_EXTERNAL_ORDER_TESTS=1. \
+             This is an operator-only manual proof, never part of the default test run, the \
+             canonical safe-ignored runner, or CI."
+        );
+    }
+}
+
 async fn call(router: axum::Router, req: Request<axum::body::Body>) -> (StatusCode, bytes::Bytes) {
     let resp = router.oneshot(req).await.expect("oneshot failed");
     let status = resp.status();
@@ -89,6 +107,7 @@ fn fleet_entry(strategy_id: &str) -> StrategyFleetEntry {
     }
 }
 
+#[cfg(feature = "manual-external")]
 async fn db_pool_or_skip() -> Option<sqlx::PgPool> {
     let url = match std::env::var("MQK_DATABASE_URL") {
         Ok(v) => v,
@@ -103,6 +122,7 @@ async fn db_pool_or_skip() -> Option<sqlx::PgPool> {
     )
 }
 
+#[cfg(feature = "manual-external")]
 async fn clean_db_state(pool: &sqlx::PgPool, strategy_id: &str) {
     sqlx::query("DELETE FROM runtime_leader_lease WHERE id = 1")
         .execute(pool)
@@ -203,8 +223,10 @@ async fn b2a_n05_unknown_plugin_refused_at_bootstrap_gate() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+#[cfg(feature = "manual-external")]
+#[ignore = "MANUAL_EXTERNAL: requires --features manual-external, MQK_ALLOW_MANUAL_EXTERNAL_ORDER_TESTS=1, real ALPACA_API_KEY_LIVE credentials; run with --include-ignored"]
 async fn b2a_n02_registry_enabled_allows_activation() {
+    require_manual_external_opt_in("b2a_n02_registry_enabled_allows_activation");
     let Some(pool) = db_pool_or_skip().await else {
         eprintln!("N02: skipped (MQK_DATABASE_URL not set)");
         return;

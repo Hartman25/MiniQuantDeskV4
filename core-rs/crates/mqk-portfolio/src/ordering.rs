@@ -14,7 +14,7 @@
 //!
 //! # Usage
 //!
-//! ```ignore
+//! ```
 //! use mqk_portfolio::{TaggedFill, Fill, Side, Ledger, apply_fills_canonical, MICROS_SCALE};
 //!
 //! let fills = vec![

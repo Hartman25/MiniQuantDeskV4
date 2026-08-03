@@ -798,27 +798,20 @@ mod tests {
 
     // ── DB-backed: full evidence chain proven, refused only on data readiness ──
 
-    async fn make_db_pool_for_test() -> sqlx::PgPool {
-        let url = std::env::var(mqk_db::ENV_DB_URL).unwrap_or_else(|_| {
-            panic!(
-                "DB tests require MQK_DATABASE_URL; run: \
-                 MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test \
-                 cargo test -p mqk-daemon --lib dynamic_selection_plan_builder \
-                 -- --include-ignored --test-threads=1"
-            )
-        });
-        let pool = sqlx::postgres::PgPoolOptions::new()
-            .max_connections(2)
-            .connect(&url)
-            .await
-            .expect("connect to test DB");
-        mqk_db::migrate(&pool).await.expect("run migrations");
-        pool
-    }
-
     #[tokio::test]
-    #[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+    #[ignore = "requires MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5434/mqk_test cargo test -p mqk-daemon --features testkit --lib dynamic_selection_plan_builder -- --include-ignored"]
     async fn full_evidence_chain_passes_refused_only_on_data_readiness() {
+        // `strategy_id` is fixed to a real builtin plugin name (plugin_instantiable
+        // only recognizes 5 fixed names) and `symbol` is a deterministic UUIDv5
+        // derivation -- both by design, documented below. Against the shared
+        // MQK_DATABASE_URL database that determinism means any second
+        // invocation of this exact test (this session or a prior one) finds the
+        // identity already promoted to active_paper from the first run and
+        // fails the very first shadow_approved transition as "illegal_transition"
+        // (real failure observed under the default parallel test runner, where
+        // this test's own prior invocation earlier in the same process becomes
+        // the collision). A disposable per-test database removes that residue.
+        mqk_db::run_isolated("dyn_sel_plan_builder_full_chain", |pool| async move {
         use axum::http::StatusCode;
         use http_body_util::BodyExt;
         use tower::ServiceExt;
@@ -903,7 +896,6 @@ mod tests {
         )
         .expect("write fixture review artifacts");
 
-        let pool = make_db_pool_for_test().await;
         let st = Arc::new(AppState::new_with_db_and_operator_auth(
             pool.clone(),
             OperatorAuthMode::ExplicitDevNoToken,
@@ -1036,6 +1028,8 @@ mod tests {
             "expected refusal at the data-readiness gate specifically (no md_bars \
              ingested for this fixture), proving every earlier gate passed"
         );
+      })
+      .await;
     }
 
     // ── Defect F: per-symbol strategy bound before I/O ───────────────────

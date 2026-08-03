@@ -55,21 +55,6 @@ fn json_str<'a>(json: &'a serde_json::Value, key: &str) -> &'a str {
         .unwrap_or_else(|| panic!("missing string key '{key}' in response: {json}"))
 }
 
-async fn cc06_test_pool() -> sqlx::PgPool {
-    let url = std::env::var(mqk_db::ENV_DB_URL).unwrap_or_else(|_| {
-        panic!(
-            "DB tests require MQK_DATABASE_URL; run: \
-             MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test \
-             cargo test -p mqk-daemon --test scenario_alerts_events_cc06 -- --include-ignored"
-        )
-    });
-    sqlx::postgres::PgPoolOptions::new()
-        .max_connections(2)
-        .connect(&url)
-        .await
-        .expect("cc06_test_pool: connect failed")
-}
-
 // ---------------------------------------------------------------------------
 // CC06-01: alerts/active clean state
 // ---------------------------------------------------------------------------
@@ -367,270 +352,255 @@ async fn cc06_04_events_feed_canonical_route_identity() {
 ///
 /// Requires MQK_DATABASE_URL; skips when not set.
 #[tokio::test]
-#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+#[ignore = "requires MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5434/mqk_test cargo test -p mqk-daemon --features testkit --test scenario_alerts_events_cc06 -- --include-ignored"]
 async fn cc06_05_events_feed_db_backed_positive_path_real_rows() {
-    let pool = cc06_test_pool().await;
+    // The production events/feed route is a global, newest-first, bounded
+    // ("at most 50 rows") query across every run and audit_event on the
+    // server. Against the shared MQK_DATABASE_URL database this test's
+    // fixed-2020 seeded timestamps get crowded out of that window by every
+    // other concurrently/previously run test's rows (real failure observed:
+    // the seeded runtime_transition row was missing from the response
+    // entirely once enough newer rows from other tests existed). A disposable
+    // per-test database (FULL-AUDIT-FAIL-017 pattern) makes the two seeded
+    // rows the *only* rows the global query can see, so this is deterministic
+    // regardless of what else has ever run against the shared test database.
+    mqk_db::run_isolated("cc06_05", |pool| async move {
+        // Deterministic IDs — unique namespace so parallel test suites do not collide.
+        let run_id = uuid::Uuid::parse_str("cc060005-0000-4000-8000-000000000001").unwrap();
+        let event_id = uuid::Uuid::parse_str("cc060005-0000-4000-8000-000000000002").unwrap();
 
-    // Deterministic IDs — unique namespace so parallel test suites do not collide.
-    let run_id = uuid::Uuid::parse_str("cc060005-0000-4000-8000-000000000001").unwrap();
-    let event_id = uuid::Uuid::parse_str("cc060005-0000-4000-8000-000000000002").unwrap();
+        // run created at T; audit event at T+60s — audit event is newer, so it
+        // must appear before the run row in newest-first feed order.
+        let started_at = chrono::DateTime::parse_from_rfc3339("2020-06-01T10:00:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let event_ts = chrono::DateTime::parse_from_rfc3339("2020-06-01T10:01:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
 
-    // run created at T; audit event at T+60s — audit event is newer, so it
-    // must appear before the run row in newest-first feed order.
-    let started_at = chrono::DateTime::parse_from_rfc3339("2020-06-01T10:00:00Z")
-        .unwrap()
-        .with_timezone(&chrono::Utc);
-    let event_ts = chrono::DateTime::parse_from_rfc3339("2020-06-01T10:01:00Z")
-        .unwrap()
-        .with_timezone(&chrono::Utc);
-
-    // Pre-test cleanup (idempotent — guard against prior failure).
-    sqlx::query("delete from audit_events where event_id = $1")
-        .bind(event_id)
-        .execute(&pool)
+        // --- Seed the run row (runtime_transition source) ---
+        mqk_db::insert_run(
+            &pool,
+            &mqk_db::NewRun {
+                run_id,
+                engine_id: "mqk-daemon".to_string(),
+                mode: "PAPER".to_string(),
+                started_at_utc: started_at,
+                git_hash: "cc06-test-hash".to_string(),
+                config_hash: "cc06-config-hash".to_string(),
+                config_json: serde_json::json!({}),
+                host_fingerprint: "cc06-test-host".to_string(),
+            },
+        )
         .await
-        .expect("CC06-05: pre-test audit_events cleanup failed");
-    sqlx::query("delete from runs where run_id = $1")
-        .bind(run_id)
-        .execute(&pool)
+        .expect("CC06-05: insert_run failed");
+
+        // --- Seed the audit_event row (operator_action source) ---
+        mqk_db::insert_audit_event(
+            &pool,
+            &mqk_db::NewAuditEvent {
+                event_id,
+                run_id,
+                ts_utc: event_ts,
+                topic: "operator".to_string(),
+                event_type: "run.start".to_string(),
+                payload: serde_json::json!({
+                    "runtime_transition": "RUNNING",
+                    "source": "mqk-daemon.routes"
+                }),
+                hash_prev: None,
+                hash_self: None,
+            },
+        )
         .await
-        .expect("CC06-05: pre-test runs cleanup failed");
+        .expect("CC06-05: insert_audit_event failed");
 
-    // --- Seed the run row (runtime_transition source) ---
-    mqk_db::insert_run(
-        &pool,
-        &mqk_db::NewRun {
-            run_id,
-            engine_id: "mqk-daemon".to_string(),
-            mode: "PAPER".to_string(),
-            started_at_utc: started_at,
-            git_hash: "cc06-test-hash".to_string(),
-            config_hash: "cc06-config-hash".to_string(),
-            config_json: serde_json::json!({}),
-            host_fingerprint: "cc06-test-host".to_string(),
-        },
-    )
-    .await
-    .expect("CC06-05: insert_run failed");
+        // --- Call the route ---
+        let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
+            pool.clone(),
+            state::OperatorAuthMode::ExplicitDevNoToken,
+        ));
+        let router = routes::build_router(Arc::clone(&st));
 
-    // --- Seed the audit_event row (operator_action source) ---
-    mqk_db::insert_audit_event(
-        &pool,
-        &mqk_db::NewAuditEvent {
-            event_id,
-            run_id,
-            ts_utc: event_ts,
-            topic: "operator".to_string(),
-            event_type: "run.start".to_string(),
-            payload: serde_json::json!({
-                "runtime_transition": "RUNNING",
-                "source": "mqk-daemon.routes"
-            }),
-            hash_prev: None,
-            hash_self: None,
-        },
-    )
-    .await
-    .expect("CC06-05: insert_audit_event failed");
+        let req = Request::builder()
+            .uri("/api/v1/events/feed")
+            .body(axum::body::Body::empty())
+            .unwrap();
+        let (status, body) = call(router, req).await;
 
-    // --- Call the route ---
-    let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
-        pool.clone(),
-        state::OperatorAuthMode::ExplicitDevNoToken,
-    ));
-    let router = routes::build_router(Arc::clone(&st));
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "CC06-05: events/feed must return 200"
+        );
 
-    let req = Request::builder()
-        .uri("/api/v1/events/feed")
-        .body(axum::body::Body::empty())
-        .unwrap();
-    let (status, body) = call(router, req).await;
+        let json = parse_json(body);
 
-    assert_eq!(
-        status,
-        StatusCode::OK,
-        "CC06-05: events/feed must return 200"
-    );
+        // --- Wrapper identity ---
+        assert_eq!(
+            json_str(&json, "truth_state"),
+            "active",
+            "CC06-05: truth_state must be 'active' when DB pool is present"
+        );
+        assert_eq!(
+            json_str(&json, "backend"),
+            "postgres.runs+postgres.audit_events+postgres.sys_autonomous_session_events+postgres.audit_events[orchestrator]",
+            "CC06-05: backend must name all four source lanes"
+        );
+        assert_eq!(
+            json_str(&json, "canonical_route"),
+            "/api/v1/events/feed",
+            "CC06-05: canonical_route must self-identify"
+        );
 
-    let json = parse_json(body);
+        let rows = json
+            .get("rows")
+            .and_then(|v| v.as_array())
+            .expect("CC06-05: rows must be a JSON array");
 
-    // --- Wrapper identity ---
-    assert_eq!(
-        json_str(&json, "truth_state"),
-        "active",
-        "CC06-05: truth_state must be 'active' when DB pool is present"
-    );
-    assert_eq!(
-        json_str(&json, "backend"),
-        "postgres.runs+postgres.audit_events+postgres.sys_autonomous_session_events+postgres.audit_events[orchestrator]",
-        "CC06-05: backend must name all four source lanes"
-    );
-    assert_eq!(
-        json_str(&json, "canonical_route"),
-        "/api/v1/events/feed",
-        "CC06-05: canonical_route must self-identify"
-    );
+        // In a disposable, empty-before-this-test database the two seeded
+        // rows are the only rows that can possibly exist.
+        assert_eq!(
+            rows.len(),
+            2,
+            "CC06-05: exactly the 2 seeded rows must be present in an isolated database; got {}: {rows:?}",
+            rows.len()
+        );
 
-    let rows = json
-        .get("rows")
-        .and_then(|v| v.as_array())
-        .expect("CC06-05: rows must be a JSON array");
+        // --- Validate the operator_action row (seeded audit_event) ---
+        let run_id_str = run_id.to_string();
+        let event_id_str = event_id.to_string();
+        let expected_action_event_id = format!("audit_events:{event_id_str}");
+        let expected_action_provenance = expected_action_event_id.clone();
 
-    // At minimum the two seeded rows must be present.
-    assert!(
-        rows.len() >= 2,
-        "CC06-05: at least 2 rows must be present (seeded run + audit_event); got {}",
-        rows.len()
-    );
-    assert!(
-        rows.len() <= 50,
-        "CC06-05: events/feed must return at most 50 rows"
-    );
+        let action_row = rows
+            .iter()
+            .find(|r| {
+                r.get("event_id")
+                    .and_then(|v| v.as_str())
+                    .map(|v| v == expected_action_event_id)
+                    .unwrap_or(false)
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "CC06-05: operator_action row with event_id={expected_action_event_id} \
+                     must appear in events/feed response; got rows: {rows:?}"
+                )
+            });
 
-    // --- Validate the operator_action row (seeded audit_event) ---
-    let run_id_str = run_id.to_string();
-    let event_id_str = event_id.to_string();
-    let expected_action_event_id = format!("audit_events:{event_id_str}");
-    let expected_action_provenance = expected_action_event_id.clone();
+        assert_eq!(
+            action_row.get("kind").and_then(|v| v.as_str()),
+            Some("operator_action"),
+            "CC06-05: kind must be 'operator_action' for audit_events-sourced row; got: {action_row}"
+        );
+        assert_eq!(
+            action_row.get("detail").and_then(|v| v.as_str()),
+            Some("run.start"),
+            "CC06-05: detail must equal event_type 'run.start'; got: {action_row}"
+        );
+        assert_eq!(
+            action_row.get("run_id").and_then(|v| v.as_str()),
+            Some(run_id_str.as_str()),
+            "CC06-05: run_id must match the seeded run; got: {action_row}"
+        );
+        assert_eq!(
+            action_row.get("provenance_ref").and_then(|v| v.as_str()),
+            Some(expected_action_provenance.as_str()),
+            "CC06-05: provenance_ref must be 'audit_events:{{event_id}}'; got: {action_row}"
+        );
+        // ts_utc must be a non-empty RFC 3339 string matching the seeded event_ts.
+        let action_ts = action_row
+            .get("ts_utc")
+            .and_then(|v| v.as_str())
+            .expect("CC06-05: ts_utc must be present on operator_action row");
+        assert!(
+            !action_ts.is_empty(),
+            "CC06-05: ts_utc must be non-empty; got: {action_row}"
+        );
+        let expected_event_ts_rfc = event_ts.to_rfc3339();
+        assert_eq!(
+            action_ts, expected_event_ts_rfc,
+            "CC06-05: ts_utc must exactly match the seeded event_ts ({expected_event_ts_rfc}); \
+             got: {action_ts}"
+        );
 
-    let action_row = rows
-        .iter()
-        .find(|r| {
-            r.get("event_id")
-                .and_then(|v| v.as_str())
-                .map(|v| v == expected_action_event_id)
-                .unwrap_or(false)
-        })
-        .unwrap_or_else(|| {
-            panic!(
-                "CC06-05: operator_action row with event_id={expected_action_event_id} \
-                 must appear in events/feed response; got rows: {rows:?}"
-            )
-        });
+        // --- Validate the runtime_transition CREATED row (seeded run) ---
+        let expected_created_event_id = format!("runs:{run_id_str}:started_at_utc");
+        let expected_created_provenance = expected_created_event_id.clone();
 
-    assert_eq!(
-        action_row.get("kind").and_then(|v| v.as_str()),
-        Some("operator_action"),
-        "CC06-05: kind must be 'operator_action' for audit_events-sourced row; got: {action_row}"
-    );
-    assert_eq!(
-        action_row.get("detail").and_then(|v| v.as_str()),
-        Some("run.start"),
-        "CC06-05: detail must equal event_type 'run.start'; got: {action_row}"
-    );
-    assert_eq!(
-        action_row.get("run_id").and_then(|v| v.as_str()),
-        Some(run_id_str.as_str()),
-        "CC06-05: run_id must match the seeded run; got: {action_row}"
-    );
-    assert_eq!(
-        action_row.get("provenance_ref").and_then(|v| v.as_str()),
-        Some(expected_action_provenance.as_str()),
-        "CC06-05: provenance_ref must be 'audit_events:{{event_id}}'; got: {action_row}"
-    );
-    // ts_utc must be a non-empty RFC 3339 string matching the seeded event_ts.
-    let action_ts = action_row
-        .get("ts_utc")
-        .and_then(|v| v.as_str())
-        .expect("CC06-05: ts_utc must be present on operator_action row");
-    assert!(
-        !action_ts.is_empty(),
-        "CC06-05: ts_utc must be non-empty; got: {action_row}"
-    );
-    let expected_event_ts_rfc = event_ts.to_rfc3339();
-    assert_eq!(
-        action_ts, expected_event_ts_rfc,
-        "CC06-05: ts_utc must exactly match the seeded event_ts ({expected_event_ts_rfc}); \
-         got: {action_ts}"
-    );
+        let created_row = rows
+            .iter()
+            .find(|r| {
+                r.get("event_id")
+                    .and_then(|v| v.as_str())
+                    .map(|v| v == expected_created_event_id)
+                    .unwrap_or(false)
+            })
+            .unwrap_or_else(|| {
+                panic!(
+                    "CC06-05: runtime_transition CREATED row with event_id={expected_created_event_id} \
+                     must appear in events/feed response; got rows: {rows:?}"
+                )
+            });
 
-    // --- Validate the runtime_transition CREATED row (seeded run) ---
-    let expected_created_event_id = format!("runs:{run_id_str}:started_at_utc");
-    let expected_created_provenance = expected_created_event_id.clone();
+        assert_eq!(
+            created_row.get("kind").and_then(|v| v.as_str()),
+            Some("runtime_transition"),
+            "CC06-05: kind must be 'runtime_transition' for runs-sourced row; got: {created_row}"
+        );
+        assert_eq!(
+            created_row.get("detail").and_then(|v| v.as_str()),
+            Some("CREATED"),
+            "CC06-05: detail must be 'CREATED' for started_at_utc transition; got: {created_row}"
+        );
+        assert_eq!(
+            created_row.get("run_id").and_then(|v| v.as_str()),
+            Some(run_id_str.as_str()),
+            "CC06-05: run_id must match the seeded run_id; got: {created_row}"
+        );
+        assert_eq!(
+            created_row.get("provenance_ref").and_then(|v| v.as_str()),
+            Some(expected_created_provenance.as_str()),
+            "CC06-05: provenance_ref must be 'runs:{{run_id}}:started_at_utc'; got: {created_row}"
+        );
+        let created_ts = created_row
+            .get("ts_utc")
+            .and_then(|v| v.as_str())
+            .expect("CC06-05: ts_utc must be present on runtime_transition row");
+        let expected_started_rfc = started_at.to_rfc3339();
+        assert_eq!(
+            created_ts, expected_started_rfc,
+            "CC06-05: ts_utc must exactly match the seeded started_at ({expected_started_rfc}); \
+             got: {created_ts}"
+        );
 
-    let created_row = rows
-        .iter()
-        .find(|r| {
-            r.get("event_id")
-                .and_then(|v| v.as_str())
-                .map(|v| v == expected_created_event_id)
-                .unwrap_or(false)
-        })
-        .unwrap_or_else(|| {
-            panic!(
-                "CC06-05: runtime_transition CREATED row with event_id={expected_created_event_id} \
-                 must appear in events/feed response; got rows: {rows:?}"
-            )
-        });
-
-    assert_eq!(
-        created_row.get("kind").and_then(|v| v.as_str()),
-        Some("runtime_transition"),
-        "CC06-05: kind must be 'runtime_transition' for runs-sourced row; got: {created_row}"
-    );
-    assert_eq!(
-        created_row.get("detail").and_then(|v| v.as_str()),
-        Some("CREATED"),
-        "CC06-05: detail must be 'CREATED' for started_at_utc transition; got: {created_row}"
-    );
-    assert_eq!(
-        created_row.get("run_id").and_then(|v| v.as_str()),
-        Some(run_id_str.as_str()),
-        "CC06-05: run_id must match the seeded run_id; got: {created_row}"
-    );
-    assert_eq!(
-        created_row.get("provenance_ref").and_then(|v| v.as_str()),
-        Some(expected_created_provenance.as_str()),
-        "CC06-05: provenance_ref must be 'runs:{{run_id}}:started_at_utc'; got: {created_row}"
-    );
-    let created_ts = created_row
-        .get("ts_utc")
-        .and_then(|v| v.as_str())
-        .expect("CC06-05: ts_utc must be present on runtime_transition row");
-    let expected_started_rfc = started_at.to_rfc3339();
-    assert_eq!(
-        created_ts, expected_started_rfc,
-        "CC06-05: ts_utc must exactly match the seeded started_at ({expected_started_rfc}); \
-         got: {created_ts}"
-    );
-
-    // --- Validate newest-first ordering ---
-    // The audit_event (event_ts = 10:01) is newer than the run (started_at = 10:00).
-    // In newest-first feed order, the operator_action row must appear before the
-    // runtime_transition CREATED row.
-    let action_pos = rows
-        .iter()
-        .position(|r| {
-            r.get("event_id")
-                .and_then(|v| v.as_str())
-                .map(|v| v == expected_action_event_id)
-                .unwrap_or(false)
-        })
-        .expect("CC06-05: operator_action row must be in rows");
-    let created_pos = rows
-        .iter()
-        .position(|r| {
-            r.get("event_id")
-                .and_then(|v| v.as_str())
-                .map(|v| v == expected_created_event_id)
-                .unwrap_or(false)
-        })
-        .expect("CC06-05: runtime_transition CREATED row must be in rows");
-    assert!(
-        action_pos < created_pos,
-        "CC06-05: operator_action row (pos={action_pos}, ts={event_ts}) must appear before \
-         runtime_transition CREATED row (pos={created_pos}, ts={started_at}) in newest-first order"
-    );
-
-    // --- Post-test cleanup ---
-    sqlx::query("delete from audit_events where event_id = $1")
-        .bind(event_id)
-        .execute(&pool)
-        .await
-        .expect("CC06-05: post-test audit_events cleanup failed");
-    sqlx::query("delete from runs where run_id = $1")
-        .bind(run_id)
-        .execute(&pool)
-        .await
-        .expect("CC06-05: post-test runs cleanup failed");
+        // --- Validate newest-first ordering ---
+        // The audit_event (event_ts = 10:01) is newer than the run (started_at = 10:00).
+        // In newest-first feed order, the operator_action row must appear before the
+        // runtime_transition CREATED row.
+        let action_pos = rows
+            .iter()
+            .position(|r| {
+                r.get("event_id")
+                    .and_then(|v| v.as_str())
+                    .map(|v| v == expected_action_event_id)
+                    .unwrap_or(false)
+            })
+            .expect("CC06-05: operator_action row must be in rows");
+        let created_pos = rows
+            .iter()
+            .position(|r| {
+                r.get("event_id")
+                    .and_then(|v| v.as_str())
+                    .map(|v| v == expected_created_event_id)
+                    .unwrap_or(false)
+            })
+            .expect("CC06-05: runtime_transition CREATED row must be in rows");
+        assert!(
+            action_pos < created_pos,
+            "CC06-05: operator_action row (pos={action_pos}, ts={event_ts}) must appear before \
+             runtime_transition CREATED row (pos={created_pos}, ts={started_at}) in newest-first order"
+        );
+    })
+    .await;
 }

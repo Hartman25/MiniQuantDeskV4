@@ -9,11 +9,15 @@
 //! validator against genuine durable evidence lineage, never a hand-rolled
 //! DB row.
 //!
-//! All tests require `MQK_DATABASE_URL` and are marked `#[ignore]`. Run
-//! with:
-//!   MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test \
-//!   cargo test -p mqk-daemon --test scenario_dynamic_selection_evidence_validation_01 \
-//!     -- --include-ignored --test-threads=1
+//! All tests require `MQK_DATABASE_URL` and are marked `#[ignore]`. Each test
+//! runs against its own disposable per-test database (`mqk_db::run_isolated`,
+//! FULL-AUDIT-FAIL-017) and holds a process-global async lock for the
+//! duration of its `MQK_STRATEGY_REVIEW_ARTIFACT_ROOT` env-var-sensitive
+//! section, so this file is safe under the default (parallel) test runner as
+//! well as `--test-threads=1`. Run with:
+//!   MQK_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5434/mqk_test \
+//!   cargo test -p mqk-daemon --features testkit \
+//!     --test scenario_dynamic_selection_evidence_validation_01 -- --include-ignored
 //!
 //! # Proof matrix
 //!
@@ -165,30 +169,32 @@ fn paper_candidate_no_score(
     }
 }
 
-async fn make_db_pool() -> sqlx::PgPool {
-    let url = std::env::var(mqk_db::ENV_DB_URL).unwrap_or_else(|_| {
-        panic!(
-            "DB tests require MQK_DATABASE_URL; run: \
-             MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test \
-             cargo test -p mqk-daemon --test scenario_dynamic_selection_evidence_validation_01 \
-             -- --include-ignored --test-threads=1"
-        )
-    });
-    let pool = sqlx::postgres::PgPoolOptions::new()
-        .max_connections(2)
-        .connect(&url)
-        .await
-        .expect("connect to test DB");
-    mqk_db::migrate(&pool).await.expect("run migrations");
-    pool
-}
+// `MQK_STRATEGY_REVIEW_ARTIFACT_ROOT` is process-global state. Every test in
+// this file sets it to its own private temp dir and relies on route handlers
+// reading it back later in the same test (not just at set-time), so the
+// hazard isn't only a torn write -- it's any interleaving where test A's
+// route call reads test B's root after B has already overwritten it. Real
+// failure observed: 6 of 7 tests in this file fail under the default
+// (parallel) libtest runner, each independently, non-deterministically,
+// while every one passes cleanly under `--test-threads=1` -- textbook
+// global-environment-mutation contamination, not a logic defect. A
+// process-global async lock, held for each test's entire env-var-sensitive
+// section (returned to the caller and dropped at end of the test function),
+// serializes these tests against each other without requiring the whole
+// binary to run single-threaded.
+static ENV_MUTATION_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
-fn make_state_with_db(root: &Path, pool: sqlx::PgPool) -> Arc<state::AppState> {
+async fn make_state_with_db(
+    root: &Path,
+    pool: sqlx::PgPool,
+) -> (Arc<state::AppState>, tokio::sync::MutexGuard<'static, ()>) {
+    let guard = ENV_MUTATION_LOCK.lock().await;
     std::env::set_var("MQK_STRATEGY_REVIEW_ARTIFACT_ROOT", root);
-    Arc::new(state::AppState::new_with_db_and_operator_auth(
+    let st = Arc::new(state::AppState::new_with_db_and_operator_auth(
         pool,
         state::OperatorAuthMode::ExplicitDevNoToken,
-    ))
+    ));
+    (st, guard)
 }
 
 async fn call(router: axum::Router, req: Request<axum::body::Body>) -> (StatusCode, bytes::Bytes) {
@@ -324,211 +330,239 @@ async fn promote_to_active_paper(
 #[tokio::test]
 #[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
 async fn valid_active_paper_candidate_succeeds() {
-    let root = temp_dir("valid");
-    let strategy_id = unique_id("dyn_sel_valid");
-    let review_dir = write_fixture(&root, vec![paper_candidate(&strategy_id, "AAPL", "1D")]);
-    let pool = make_db_pool().await;
-    let st = make_state_with_db(&root, pool.clone());
+    // `unique_id`/`temp_dir` are deterministic (UUIDv5 over a fixed string,
+    // by design -- see their doc comments), so a shared, never-cleaned-up
+    // MQK_DATABASE_URL database retains this test's promotion row forever
+    // after the first successful run; every later run then finds the
+    // identity already at `active_paper` and fails the very first
+    // shadow_approved transition as "illegal_transition" (real failure
+    // observed). A disposable per-test database removes that residue.
+    mqk_db::run_isolated("dyn_sel_valid", |pool| async move {
+        let root = temp_dir("valid");
+        let strategy_id = unique_id("dyn_sel_valid");
+        let review_dir = write_fixture(&root, vec![paper_candidate(&strategy_id, "AAPL", "1D")]);
+        let (st, _env_guard) = make_state_with_db(&root, pool.clone()).await;
 
-    promote_to_active_paper(
-        Arc::clone(&st),
-        &strategy_id,
-        "AAPL",
-        86400,
-        &review_dir,
-        Duration::zero(),
-        None,
-    )
+        promote_to_active_paper(
+            Arc::clone(&st),
+            &strategy_id,
+            "AAPL",
+            86400,
+            &review_dir,
+            Duration::zero(),
+            None,
+        )
+        .await;
+
+        let result =
+            validate_active_paper_candidate(&pool, &st, &strategy_id, "AAPL", 86400, Utc::now())
+                .await;
+        let evidence = result.expect("expected Ok for a valid active_paper candidate");
+        assert_eq!(evidence.canonical_score_decimal, "9");
+        assert_eq!(evidence.canonical_score_micros, Some(9_000_000));
+        assert_eq!(evidence.scanner_rank, Some(1));
+        assert!(!evidence.recomputed_legacy_fingerprint.is_empty());
+        assert!(!evidence.recomputed_exact_fingerprint_v2.is_empty());
+        assert_eq!(
+            evidence.durable_legacy_fingerprint,
+            evidence.recomputed_legacy_fingerprint
+        );
+        assert_eq!(
+            evidence.durable_exact_fingerprint_v2,
+            evidence.recomputed_exact_fingerprint_v2
+        );
+    })
     .await;
-
-    let result =
-        validate_active_paper_candidate(&pool, &st, &strategy_id, "AAPL", 86400, Utc::now()).await;
-    let evidence = result.expect("expected Ok for a valid active_paper candidate");
-    assert_eq!(evidence.canonical_score_decimal, "9");
-    assert_eq!(evidence.canonical_score_micros, Some(9_000_000));
-    assert_eq!(evidence.scanner_rank, Some(1));
-    assert!(!evidence.recomputed_legacy_fingerprint.is_empty());
-    assert!(!evidence.recomputed_exact_fingerprint_v2.is_empty());
-    assert_eq!(
-        evidence.durable_legacy_fingerprint,
-        evidence.recomputed_legacy_fingerprint
-    );
-    assert_eq!(
-        evidence.durable_exact_fingerprint_v2,
-        evidence.recomputed_exact_fingerprint_v2
-    );
 }
 
 #[tokio::test]
 #[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
 async fn no_promotion_record_is_refused() {
-    let root = temp_dir("no_record");
-    let strategy_id = unique_id("dyn_sel_no_record");
-    let pool = make_db_pool().await;
-    let st = make_state_with_db(&root, pool.clone());
+    mqk_db::run_isolated("dyn_sel_no_record", |pool| async move {
+        let root = temp_dir("no_record");
+        let strategy_id = unique_id("dyn_sel_no_record");
+        let (st, _env_guard) = make_state_with_db(&root, pool.clone()).await;
 
-    let result =
-        validate_active_paper_candidate(&pool, &st, &strategy_id, "AAPL", 86400, Utc::now()).await;
-    assert_eq!(result, Err(CandidateEvidenceReason::NoPromotionRecord));
+        let result =
+            validate_active_paper_candidate(&pool, &st, &strategy_id, "AAPL", 86400, Utc::now())
+                .await;
+        assert_eq!(result, Err(CandidateEvidenceReason::NoPromotionRecord));
+    })
+    .await;
 }
 
 #[tokio::test]
 #[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
 async fn shadow_approved_is_not_active_paper() {
-    let root = temp_dir("shadow_only");
-    let strategy_id = unique_id("dyn_sel_shadow");
-    let review_dir = write_fixture(&root, vec![paper_candidate(&strategy_id, "AAPL", "1D")]);
-    let pool = make_db_pool().await;
-    let st = make_state_with_db(&root, pool.clone());
+    mqk_db::run_isolated("dyn_sel_shadow", |pool| async move {
+        let root = temp_dir("shadow_only");
+        let strategy_id = unique_id("dyn_sel_shadow");
+        let review_dir = write_fixture(&root, vec![paper_candidate(&strategy_id, "AAPL", "1D")]);
+        let (st, _env_guard) = make_state_with_db(&root, pool.clone()).await;
 
-    let body = transition_body(
-        &strategy_id,
-        "AAPL",
-        86400,
-        "shadow_approved",
-        Some(review_dir.to_str().unwrap()),
-        Utc::now(),
-        None,
-    );
-    let (status, _) = call(
-        routes::build_router(Arc::clone(&st)),
-        post_json_req(TRANSITION_ROUTE, body),
-    )
+        let body = transition_body(
+            &strategy_id,
+            "AAPL",
+            86400,
+            "shadow_approved",
+            Some(review_dir.to_str().unwrap()),
+            Utc::now(),
+            None,
+        );
+        let (status, _) = call(
+            routes::build_router(Arc::clone(&st)),
+            post_json_req(TRANSITION_ROUTE, body),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+
+        let result =
+            validate_active_paper_candidate(&pool, &st, &strategy_id, "AAPL", 86400, Utc::now())
+                .await;
+        assert_eq!(
+            result,
+            Err(CandidateEvidenceReason::PromotionNotActivePaper)
+        );
+    })
     .await;
-    assert_eq!(status, StatusCode::OK);
-
-    let result =
-        validate_active_paper_candidate(&pool, &st, &strategy_id, "AAPL", 86400, Utc::now()).await;
-    assert_eq!(
-        result,
-        Err(CandidateEvidenceReason::PromotionNotActivePaper)
-    );
 }
 
 #[tokio::test]
 #[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
 async fn not_yet_effective_is_refused() {
-    let root = temp_dir("not_yet_effective");
-    let strategy_id = unique_id("dyn_sel_nye");
-    let review_dir = write_fixture(&root, vec![paper_candidate(&strategy_id, "AAPL", "1D")]);
-    let pool = make_db_pool().await;
-    let st = make_state_with_db(&root, pool.clone());
+    mqk_db::run_isolated("dyn_sel_nye", |pool| async move {
+        let root = temp_dir("not_yet_effective");
+        let strategy_id = unique_id("dyn_sel_nye");
+        let review_dir = write_fixture(&root, vec![paper_candidate(&strategy_id, "AAPL", "1D")]);
+        let (st, _env_guard) = make_state_with_db(&root, pool.clone()).await;
 
-    // effective_at_utc 2 minutes ahead -- inside the route's 5-minute
-    // clock-skew tolerance, so the transition itself is accepted.
-    promote_to_active_paper(
-        Arc::clone(&st),
-        &strategy_id,
-        "AAPL",
-        86400,
-        &review_dir,
-        Duration::minutes(2),
-        None,
-    )
+        // effective_at_utc 2 minutes ahead -- inside the route's 5-minute
+        // clock-skew tolerance, so the transition itself is accepted.
+        promote_to_active_paper(
+            Arc::clone(&st),
+            &strategy_id,
+            "AAPL",
+            86400,
+            &review_dir,
+            Duration::minutes(2),
+            None,
+        )
+        .await;
+
+        // authority_ts before effective_at_utc.
+        let result =
+            validate_active_paper_candidate(&pool, &st, &strategy_id, "AAPL", 86400, Utc::now())
+                .await;
+        assert_eq!(
+            result,
+            Err(CandidateEvidenceReason::PromotionNotYetEffective)
+        );
+    })
     .await;
-
-    // authority_ts before effective_at_utc.
-    let result =
-        validate_active_paper_candidate(&pool, &st, &strategy_id, "AAPL", 86400, Utc::now()).await;
-    assert_eq!(
-        result,
-        Err(CandidateEvidenceReason::PromotionNotYetEffective)
-    );
 }
 
 #[tokio::test]
 #[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
 async fn expired_is_refused() {
-    let root = temp_dir("expired");
-    let strategy_id = unique_id("dyn_sel_expired");
-    let review_dir = write_fixture(&root, vec![paper_candidate(&strategy_id, "AAPL", "1D")]);
-    let pool = make_db_pool().await;
-    let st = make_state_with_db(&root, pool.clone());
+    mqk_db::run_isolated("dyn_sel_expired", |pool| async move {
+        let root = temp_dir("expired");
+        let strategy_id = unique_id("dyn_sel_expired");
+        let review_dir = write_fixture(&root, vec![paper_candidate(&strategy_id, "AAPL", "1D")]);
+        let (st, _env_guard) = make_state_with_db(&root, pool.clone()).await;
 
-    promote_to_active_paper(
-        Arc::clone(&st),
-        &strategy_id,
-        "AAPL",
-        86400,
-        &review_dir,
-        Duration::zero(),
-        Some(Duration::minutes(1)),
-    )
+        promote_to_active_paper(
+            Arc::clone(&st),
+            &strategy_id,
+            "AAPL",
+            86400,
+            &review_dir,
+            Duration::zero(),
+            Some(Duration::minutes(1)),
+        )
+        .await;
+
+        // authority_ts far past expires_at (effective+1min, computed inside
+        // the helper relative to its own call time) -- "+1 hour from now" is
+        // safely past it regardless of the few milliseconds of test overhead
+        // above.
+        let authority_ts = Utc::now() + Duration::hours(1);
+        let result =
+            validate_active_paper_candidate(&pool, &st, &strategy_id, "AAPL", 86400, authority_ts)
+                .await;
+        assert_eq!(result, Err(CandidateEvidenceReason::PromotionExpired));
+    })
     .await;
-
-    // authority_ts far past expires_at (effective+1min, computed inside the
-    // helper relative to its own call time) -- "+1 hour from now" is safely
-    // past it regardless of the few milliseconds of test overhead above.
-    let authority_ts = Utc::now() + Duration::hours(1);
-    let result =
-        validate_active_paper_candidate(&pool, &st, &strategy_id, "AAPL", 86400, authority_ts)
-            .await;
-    assert_eq!(result, Err(CandidateEvidenceReason::PromotionExpired));
 }
 
 #[tokio::test]
 #[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
 async fn tampered_durable_fingerprint_is_refused() {
-    let root = temp_dir("tampered_fingerprint");
-    let strategy_id = unique_id("dyn_sel_tampered");
-    let review_dir = write_fixture(&root, vec![paper_candidate(&strategy_id, "AAPL", "1D")]);
-    let pool = make_db_pool().await;
-    let st = make_state_with_db(&root, pool.clone());
+    mqk_db::run_isolated("dyn_sel_tampered", |pool| async move {
+        let root = temp_dir("tampered_fingerprint");
+        let strategy_id = unique_id("dyn_sel_tampered");
+        let review_dir = write_fixture(&root, vec![paper_candidate(&strategy_id, "AAPL", "1D")]);
+        let (st, _env_guard) = make_state_with_db(&root, pool.clone()).await;
 
-    promote_to_active_paper(
-        Arc::clone(&st),
-        &strategy_id,
-        "AAPL",
-        86400,
-        &review_dir,
-        Duration::zero(),
-        None,
-    )
+        promote_to_active_paper(
+            Arc::clone(&st),
+            &strategy_id,
+            "AAPL",
+            86400,
+            &review_dir,
+            Duration::zero(),
+            None,
+        )
+        .await;
+
+        // Simulate durable drift: the artifact on disk still matches what was
+        // originally validated, but the DB's evidence_fingerprint column has
+        // since diverged (e.g. corruption, manual tampering).
+        sqlx::query(
+            "update sys_strategy_promotion_transitions set evidence_fingerprint = 'deliberately-wrong-fingerprint' \
+             where strategy_id = $1 and symbol = $2 and timeframe_secs = $3 and evidence_fingerprint is not null",
+        )
+        .bind(&strategy_id)
+        .bind("AAPL")
+        .bind(86400i64)
+        .execute(&pool)
+        .await
+        .expect("tamper update");
+
+        let result =
+            validate_active_paper_candidate(&pool, &st, &strategy_id, "AAPL", 86400, Utc::now())
+                .await;
+        assert_eq!(result, Err(CandidateEvidenceReason::FingerprintMismatch));
+    })
     .await;
-
-    // Simulate durable drift: the artifact on disk still matches what was
-    // originally validated, but the DB's evidence_fingerprint column has
-    // since diverged (e.g. corruption, manual tampering).
-    sqlx::query(
-        "update sys_strategy_promotion_transitions set evidence_fingerprint = 'deliberately-wrong-fingerprint' \
-         where strategy_id = $1 and symbol = $2 and timeframe_secs = $3 and evidence_fingerprint is not null",
-    )
-    .bind(&strategy_id)
-    .bind("AAPL")
-    .bind(86400i64)
-    .execute(&pool)
-    .await
-    .expect("tamper update");
-
-    let result =
-        validate_active_paper_candidate(&pool, &st, &strategy_id, "AAPL", 86400, Utc::now()).await;
-    assert_eq!(result, Err(CandidateEvidenceReason::FingerprintMismatch));
 }
 
 #[tokio::test]
 #[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
 async fn missing_score_is_refused() {
-    let root = temp_dir("missing_score");
-    let strategy_id = unique_id("dyn_sel_no_score");
-    let review_dir = write_fixture(
-        &root,
-        vec![paper_candidate_no_score(&strategy_id, "AAPL", "1D")],
-    );
-    let pool = make_db_pool().await;
-    let st = make_state_with_db(&root, pool.clone());
+    mqk_db::run_isolated("dyn_sel_no_score", |pool| async move {
+        let root = temp_dir("missing_score");
+        let strategy_id = unique_id("dyn_sel_no_score");
+        let review_dir = write_fixture(
+            &root,
+            vec![paper_candidate_no_score(&strategy_id, "AAPL", "1D")],
+        );
+        let (st, _env_guard) = make_state_with_db(&root, pool.clone()).await;
 
-    promote_to_active_paper(
-        Arc::clone(&st),
-        &strategy_id,
-        "AAPL",
-        86400,
-        &review_dir,
-        Duration::zero(),
-        None,
-    )
+        promote_to_active_paper(
+            Arc::clone(&st),
+            &strategy_id,
+            "AAPL",
+            86400,
+            &review_dir,
+            Duration::zero(),
+            None,
+        )
+        .await;
+
+        let result =
+            validate_active_paper_candidate(&pool, &st, &strategy_id, "AAPL", 86400, Utc::now())
+                .await;
+        assert_eq!(result, Err(CandidateEvidenceReason::ScoreMissing));
+    })
     .await;
-
-    let result =
-        validate_active_paper_candidate(&pool, &st, &strategy_id, "AAPL", 86400, Utc::now()).await;
-    assert_eq!(result, Err(CandidateEvidenceReason::ScoreMissing));
 }

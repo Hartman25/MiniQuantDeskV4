@@ -15,15 +15,31 @@
 //! future dynamic plugin model (e.g. loading `.so`/`.dll` plugins at runtime).
 //!
 //! # Usage
-//! ```ignore
+//! ```
+//! use mqk_strategy::{
+//!     PluginRegistry, Strategy, StrategyContext, StrategyMeta, StrategyOutput, StrategySpec,
+//! };
+//!
+//! struct MyStrategy;
+//!
+//! impl Strategy for MyStrategy {
+//!     fn spec(&self) -> StrategySpec {
+//!         StrategySpec::new("my_strategy", 60)
+//!     }
+//!
+//!     fn on_bar(&mut self, _ctx: &StrategyContext) -> StrategyOutput {
+//!         StrategyOutput { targets: vec![] }
+//!     }
+//! }
+//!
 //! let mut reg = PluginRegistry::new();
 //! reg.register(
 //!     StrategyMeta::new("my_strategy", "1.0.0", 60, "Simple momentum"),
-//!     || Box::new(MyStrategy::default()),
+//!     || Box::new(MyStrategy),
 //! ).unwrap();
 //!
 //! let strategy = reg.instantiate("my_strategy").unwrap();
-//! host.register(strategy).unwrap();
+//! assert_eq!(strategy.spec().name, "my_strategy");
 //! ```
 //!
 //! # Determinism

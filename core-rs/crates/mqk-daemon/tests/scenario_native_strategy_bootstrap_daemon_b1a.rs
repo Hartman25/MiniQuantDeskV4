@@ -44,6 +44,7 @@
 use std::sync::Arc;
 
 use axum::http::{Request, StatusCode};
+#[cfg(feature = "manual-external")]
 use chrono::Utc;
 use http_body_util::BodyExt;
 use mqk_daemon::{routes, state};
@@ -53,6 +54,24 @@ use tower::ServiceExt;
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/// Runtime opt-in gate for MANUAL_EXTERNAL tests (see module doc). Panics
+/// with an explicit, actionable message rather than letting execution
+/// continue toward constructing a real broker adapter. This is the second,
+/// separately-named gate on top of the `manual-external` compile-time
+/// feature -- building with the feature on is not, by itself, enough to run
+/// these tests.
+#[cfg(feature = "manual-external")]
+fn require_manual_external_opt_in(test_name: &str) {
+    if std::env::var("MQK_ALLOW_MANUAL_EXTERNAL_ORDER_TESTS").as_deref() != Ok("1") {
+        panic!(
+            "{test_name}: MANUAL_EXTERNAL test refused -- requires real ALPACA_API_KEY_LIVE \
+             credentials AND explicit runtime opt-in via MQK_ALLOW_MANUAL_EXTERNAL_ORDER_TESTS=1. \
+             This is an operator-only manual proof, never part of the default test run, the \
+             canonical safe-ignored runner, or CI."
+        );
+    }
+}
 
 async fn call(router: axum::Router, req: Request<axum::body::Body>) -> (StatusCode, bytes::Bytes) {
     let resp = router.oneshot(req).await.expect("oneshot failed");
@@ -227,6 +246,7 @@ async fn b1a_l03_no_fleet_dormant_passes_bootstrap_gate() {
 // Skips gracefully when MQK_DATABASE_URL is not set.
 // ---------------------------------------------------------------------------
 
+#[cfg(feature = "manual-external")]
 async fn db_pool_or_skip() -> Option<sqlx::PgPool> {
     let url = match std::env::var("MQK_DATABASE_URL") {
         Ok(v) => v,
@@ -249,6 +269,7 @@ async fn db_pool_or_skip() -> Option<sqlx::PgPool> {
 /// fleet expecting a successful (200) start, so they must also seed this
 /// registry row -- mirrors the exact working pattern already proven by
 /// `scenario_native_strategy_registry_b2a.rs`'s N02/N03.
+#[cfg(feature = "manual-external")]
 async fn seed_swing_momentum_registry(pool: &sqlx::PgPool) {
     sqlx::query("DELETE FROM sys_strategy_registry WHERE strategy_id = $1")
         .bind("swing_momentum")
@@ -272,6 +293,7 @@ async fn seed_swing_momentum_registry(pool: &sqlx::PgPool) {
     .expect("seed_swing_momentum_registry: upsert must succeed");
 }
 
+#[cfg(feature = "manual-external")]
 async fn cleanup_swing_momentum_registry(pool: &sqlx::PgPool) {
     sqlx::query("DELETE FROM sys_strategy_registry WHERE strategy_id = $1")
         .bind("swing_momentum")
@@ -281,8 +303,12 @@ async fn cleanup_swing_momentum_registry(pool: &sqlx::PgPool) {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+#[cfg(feature = "manual-external")]
+#[ignore = "MANUAL_EXTERNAL: requires --features manual-external, MQK_ALLOW_MANUAL_EXTERNAL_ORDER_TESTS=1, real ALPACA_API_KEY_LIVE credentials; run with --include-ignored"]
 async fn b1a_l04_start_with_registered_strategy_stores_active_bootstrap() {
+    require_manual_external_opt_in(
+        "b1a_l04_start_with_registered_strategy_stores_active_bootstrap",
+    );
     let Some(pool) = db_pool_or_skip().await else {
         eprintln!("L04: skipped (MQK_DATABASE_URL not set)");
         return;
@@ -369,8 +395,10 @@ async fn b1a_l04_start_with_registered_strategy_stores_active_bootstrap() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+#[cfg(feature = "manual-external")]
+#[ignore = "MANUAL_EXTERNAL: requires --features manual-external, MQK_ALLOW_MANUAL_EXTERNAL_ORDER_TESTS=1, real ALPACA_API_KEY_LIVE credentials; run with --include-ignored"]
 async fn b1a_l05_stop_clears_native_strategy_bootstrap() {
+    require_manual_external_opt_in("b1a_l05_stop_clears_native_strategy_bootstrap");
     let Some(pool) = db_pool_or_skip().await else {
         eprintln!("L05: skipped (MQK_DATABASE_URL not set)");
         return;
@@ -462,8 +490,10 @@ async fn b1a_l05_stop_clears_native_strategy_bootstrap() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+#[cfg(feature = "manual-external")]
+#[ignore = "MANUAL_EXTERNAL: requires --features manual-external, MQK_ALLOW_MANUAL_EXTERNAL_ORDER_TESTS=1, real ALPACA_API_KEY_LIVE credentials; run with --include-ignored"]
 async fn b1a_l06_halt_clears_native_strategy_bootstrap() {
+    require_manual_external_opt_in("b1a_l06_halt_clears_native_strategy_bootstrap");
     let Some(pool) = db_pool_or_skip().await else {
         eprintln!("L06: skipped (MQK_DATABASE_URL not set)");
         return;
