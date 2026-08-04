@@ -200,7 +200,9 @@ if ($result.Stale.Count -eq 0) {
 # test binaries).
 # ---------------------------------------------------------------------------
 $mqkDbTargetLookup = Get-TargetLookupFromMetadataTargets -MetadataTargets @(
-    (New-MetadataTarget "lib" "mqk-db" "src\lib.rs")
+    (New-MetadataTarget "lib" "mqk-db" "src\lib.rs"),
+    (New-MetadataTarget "test" "test_support_disposable_db" "tests\test_support_disposable_db.rs"),
+    (New-MetadataTarget "test" "other_scenario" "tests\other_scenario.rs")
 )
 $syntheticListOutput = @(
     "    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.88s",
@@ -363,6 +365,352 @@ if (($dClean.Disposition -eq "PASSED") -and ($dClean.ExitCode -eq 0) -and ($dSaf
     Pass "CSIM13" "Zero blocked rows with clean exit codes is PASSED; a real test failure with zero blocked rows still reports FAILED"
 } else {
     Fail "CSIM13" "Baseline disposition logic is wrong (clean=$($dClean.Disposition), safe-fail-no-blocked=$($dSafeFailedNoBlocked.Disposition))"
+}
+
+# ===========================================================================
+# FULL-AUDIT-CANONICAL-IGNORED-RUNNER-FEATURE-AUTHORITY-01 Part 1:
+# Get-PackageFeaturePlan mutation fixtures. Uses synthetic
+# `cargo metadata --no-deps`-shaped dependency arrays (never a real cargo
+# invocation) built by New-DepEntry below.
+# ===========================================================================
+
+function New-DepEntry {
+    param([string]$Name, [string]$Kind = $null, [string[]]$Features = @())
+    [pscustomobject]@{
+        name     = $Name
+        kind     = $Kind
+        features = $Features
+    }
+}
+
+# ---------------------------------------------------------------------------
+# CSIM14: a package with no mqk-db dependency entry at all receives no
+# foreign-package feature argument -- this is the exact Defect 1 case
+# reproduced against mqk-artifacts/mqk-backtest (a real, direct cargo error
+# if mqk-db/testkit were injected here).
+# ---------------------------------------------------------------------------
+$depsNoMqkDb = @{
+    "mqk-artifacts" = @(New-DepEntry -Name "anyhow")
+}
+$plan = Get-PackageFeaturePlan -PackageNames @("mqk-artifacts") -PackageDependencies $depsNoMqkDb
+if (($plan["mqk-artifacts"].FeatureArgs.Count -eq 0)) {
+    Pass "CSIM14" "Package with no mqk-db dependency receives no foreign-package feature argument"
+} else {
+    Fail "CSIM14" "Package with no mqk-db dependency wrongly received: $($plan['mqk-artifacts'].FeatureArgs -join ' ')"
+}
+
+# ---------------------------------------------------------------------------
+# CSIM15: mqk-db itself always receives its own local `--features testkit`
+# (never the foreign `mqk-db/testkit` form, which would be nonsensical for
+# the package itself).
+# ---------------------------------------------------------------------------
+$plan = Get-PackageFeaturePlan -PackageNames @("mqk-db") -PackageDependencies @{}
+$mqkDbArgs = $plan["mqk-db"].FeatureArgs -join ' '
+if ($mqkDbArgs -eq "--features testkit") {
+    Pass "CSIM15" "mqk-db itself receives its own local --features testkit"
+} else {
+    Fail "CSIM15" "mqk-db itself received the wrong feature args: '$mqkDbArgs'"
+}
+
+# ---------------------------------------------------------------------------
+# CSIM16: a package whose OWN dev-dependency declaration already enables
+# mqk-db/testkit (this repo's real shape for mqk-daemon/mqk-execution/
+# mqk-runtime/mqk-testkit) receives no explicit foreign-package feature --
+# it already compiles correctly without one, since cargo always activates
+# dev-dependencies for `cargo test`.
+# ---------------------------------------------------------------------------
+$depsAlreadyTestkit = @{
+    "mqk-daemon" = @(
+        (New-DepEntry -Name "mqk-db" -Kind $null -Features @()),
+        (New-DepEntry -Name "mqk-db" -Kind "dev" -Features @("testkit"))
+    )
+}
+$plan = Get-PackageFeaturePlan -PackageNames @("mqk-daemon") -PackageDependencies $depsAlreadyTestkit
+if ($plan["mqk-daemon"].FeatureArgs.Count -eq 0) {
+    Pass "CSIM16" "Package whose own dev-dependency already enables mqk-db/testkit receives no foreign feature injection"
+} else {
+    Fail "CSIM16" "Package with dev-dependency-granted testkit wrongly received: $($plan['mqk-daemon'].FeatureArgs -join ' ')"
+}
+
+# ---------------------------------------------------------------------------
+# CSIM17: a package that depends on mqk-db directly but has no pre-existing
+# testkit activation anywhere in its own manifest (this repo's real shape
+# for mqk-cli) receives the explicit --features mqk-db/testkit argument.
+# ---------------------------------------------------------------------------
+$depsPlainDependency = @{
+    "mqk-cli" = @(New-DepEntry -Name "mqk-db" -Kind $null -Features @())
+}
+$plan = Get-PackageFeaturePlan -PackageNames @("mqk-cli") -PackageDependencies $depsPlainDependency
+$cliArgs = $plan["mqk-cli"].FeatureArgs -join ' '
+if ($cliArgs -eq "--features mqk-db/testkit") {
+    Pass "CSIM17" "Package depending on mqk-db with no pre-existing testkit activation receives the explicit foreign-package feature"
+} else {
+    Fail "CSIM17" "Plain mqk-db dependent received the wrong feature args: '$cliArgs'"
+}
+
+# ---------------------------------------------------------------------------
+# CSIM18: one package cannot inherit another package's feature arguments --
+# building the plan for several packages at once keeps each package's
+# FeatureArgs fully isolated (no shared array reference bleed, no
+# cross-contamination of a neighbor's flag).
+# ---------------------------------------------------------------------------
+$depsMixed = @{
+    "mqk-artifacts" = @(New-DepEntry -Name "anyhow")
+    "mqk-cli"       = @(New-DepEntry -Name "mqk-db" -Kind $null -Features @())
+    "mqk-daemon"    = @(
+        (New-DepEntry -Name "mqk-db" -Kind $null -Features @()),
+        (New-DepEntry -Name "mqk-db" -Kind "dev" -Features @("testkit"))
+    )
+}
+$plan = Get-PackageFeaturePlan -PackageNames @("mqk-artifacts", "mqk-cli", "mqk-daemon", "mqk-db") -PackageDependencies $depsMixed
+$artifactsArgs = $plan["mqk-artifacts"].FeatureArgs -join ' '
+$cliArgs2 = $plan["mqk-cli"].FeatureArgs -join ' '
+$daemonArgs = $plan["mqk-daemon"].FeatureArgs -join ' '
+$dbArgs = $plan["mqk-db"].FeatureArgs -join ' '
+if (($artifactsArgs -eq "") -and ($cliArgs2 -eq "--features mqk-db/testkit") -and ($daemonArgs -eq "") -and ($dbArgs -eq "--features testkit")) {
+    Pass "CSIM18" "Each package's feature plan entry is computed independently -- no package inherits another's feature arguments"
+} else {
+    Fail "CSIM18" "Plan entries bled across packages (artifacts='$artifactsArgs' cli='$cliArgs2' daemon='$daemonArgs' db='$dbArgs')"
+}
+
+# ---------------------------------------------------------------------------
+# CSIM19: a package name with no dependency information available at all
+# (not merely "no mqk-db dependency", but entirely absent from the plan
+# input) is an unresolvable feature requirement -- a hard failure, not a
+# silent "no argument".
+# ---------------------------------------------------------------------------
+$threw = $false
+try {
+    Get-PackageFeaturePlan -PackageNames @("mqk-unknown-package") -PackageDependencies @{}
+} catch {
+    $threw = $true
+}
+if ($threw) {
+    Pass "CSIM19" "A package with no dependency information at all is an unresolvable feature requirement and throws"
+} else {
+    Fail "CSIM19" "A package missing from the plan input did NOT throw -- risks silently resolving to an empty/wrong plan"
+}
+
+# ===========================================================================
+# FULL-AUDIT-CANONICAL-IGNORED-RUNNER-FEATURE-AUTHORITY-01 Part 2:
+# Get-ManualExternalDiffResult mutation fixtures.
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# CSIM20: the clean case -- feature-on-minus-feature-off equals the
+# MANUAL_EXTERNAL inventory rows exactly. Missing/Stale/Leaked all empty.
+# ---------------------------------------------------------------------------
+$manualInventoryClean = @(
+    (New-Row "mqk-daemon" "scenario_manual" "manual_test_one" "MANUAL_EXTERNAL"),
+    (New-Row "mqk-daemon" "scenario_manual" "manual_test_two" "MANUAL_EXTERNAL")
+)
+$featureOnClean = @(
+    (New-LiveRow "mqk-daemon" "scenario_manual" "manual_test_one"),
+    (New-LiveRow "mqk-daemon" "scenario_manual" "manual_test_two"),
+    (New-LiveRow "mqk-daemon" "scenario_manual" "always_present_test")
+)
+$featureOffClean = @(
+    (New-LiveRow "mqk-daemon" "scenario_manual" "always_present_test")
+)
+$result = Get-ManualExternalDiffResult -Inventory $manualInventoryClean -FeatureOnRows $featureOnClean -FeatureOffRows $featureOffClean
+if (($result.Missing.Count -eq 0) -and ($result.Stale.Count -eq 0) -and ($result.Leaked.Count -eq 0) -and ($result.DiffKeys.Count -eq 2)) {
+    Pass "CSIM20" "Clean feature-on-minus-feature-off difference equals the MANUAL_EXTERNAL inventory exactly (a test present in both builds is correctly excluded from the difference)"
+} else {
+    Fail "CSIM20" "Clean manual-external case unexpectedly reported problems (missing=$($result.Missing.Count) stale=$($result.Stale.Count) leaked=$($result.Leaked.Count) diff=$($result.DiffKeys.Count))"
+}
+
+# ---------------------------------------------------------------------------
+# CSIM21: missing -- a feature-on-only test with no MANUAL_EXTERNAL
+# inventory row at all (an unclassified new manual-external test).
+# ---------------------------------------------------------------------------
+$featureOnMissing = @(
+    (New-LiveRow "mqk-daemon" "scenario_manual" "manual_test_one"),
+    (New-LiveRow "mqk-daemon" "scenario_manual" "brand_new_manual_test")
+)
+$manualInventoryMissing = @(
+    (New-Row "mqk-daemon" "scenario_manual" "manual_test_one" "MANUAL_EXTERNAL")
+)
+$result = Get-ManualExternalDiffResult -Inventory $manualInventoryMissing -FeatureOnRows $featureOnMissing -FeatureOffRows @()
+if (($result.Missing.Count -eq 1) -and ($result.Missing[0] -eq "mqk-daemon|scenario_manual|brand_new_manual_test") -and ($result.Stale.Count -eq 0)) {
+    Pass "CSIM21" "A feature-on test not classified MANUAL_EXTERNAL is reported missing"
+} else {
+    Fail "CSIM21" "Missing manual-external detection failed (missing=$($result.Missing -join ', '), stale count=$($result.Stale.Count))"
+}
+
+# ---------------------------------------------------------------------------
+# CSIM22: stale -- a MANUAL_EXTERNAL inventory row that no longer appears in
+# the feature-on-minus-feature-off difference (renamed, moved, or deleted).
+# ---------------------------------------------------------------------------
+$manualInventoryStale = @(
+    (New-Row "mqk-daemon" "scenario_manual" "renamed_or_deleted_manual_test" "MANUAL_EXTERNAL")
+)
+$result = Get-ManualExternalDiffResult -Inventory $manualInventoryStale -FeatureOnRows @() -FeatureOffRows @()
+if (($result.Stale.Count -eq 1) -and ($result.Missing.Count -eq 0) -and ($result.Leaked.Count -eq 0)) {
+    Pass "CSIM22" "A MANUAL_EXTERNAL inventory row absent from the feature-on-minus-feature-off difference is reported stale"
+} else {
+    Fail "CSIM22" "Stale manual-external detection failed (stale=$($result.Stale.Count) missing=$($result.Missing.Count) leaked=$($result.Leaked.Count))"
+}
+
+# ---------------------------------------------------------------------------
+# CSIM23: leaked-to-default -- a MANUAL_EXTERNAL inventory row whose exact
+# key ALSO appears in the feature-OFF (default) live set -- its
+# #[cfg(feature = "manual-external")] compile-time boundary has been lost.
+# ---------------------------------------------------------------------------
+$manualInventoryLeaked = @(
+    (New-Row "mqk-daemon" "scenario_manual" "leaked_test" "MANUAL_EXTERNAL")
+)
+$featureOnLeaked = @(
+    (New-LiveRow "mqk-daemon" "scenario_manual" "leaked_test")
+)
+$featureOffLeaked = @(
+    (New-LiveRow "mqk-daemon" "scenario_manual" "leaked_test")
+)
+$result = Get-ManualExternalDiffResult -Inventory $manualInventoryLeaked -FeatureOnRows $featureOnLeaked -FeatureOffRows $featureOffLeaked
+if (($result.Leaked.Count -eq 1) -and ($result.DiffKeys.Count -eq 0)) {
+    Pass "CSIM23" "A MANUAL_EXTERNAL row also present in the feature-off build is reported leaked (compile-time boundary lost), and never counted in the difference itself"
+} else {
+    Fail "CSIM23" "Leaked-to-default manual-external detection failed (leaked=$($result.Leaked.Count) diff=$($result.DiffKeys.Count))"
+}
+
+# ---------------------------------------------------------------------------
+# CSIM24: the safe/default classification filter (the exact list Main uses
+# before calling Get-InventoryCompletenessResult) excludes MANUAL_EXTERNAL
+# rows -- proving Defect 2 (MANUAL_EXTERNAL rows becoming false stale rows
+# once Defect 1 is fixed and every package's --ignored --list succeeds) is
+# actually closed at the filtering step, not just in prose.
+# ---------------------------------------------------------------------------
+$mixedClassInventory = @(
+    (New-Row "mqk-daemon" "scenario_manual" "manual_test_one" "MANUAL_EXTERNAL"),
+    (New-Row "mqk-daemon" "scenario_x" "safe_test" "SAFE_DB_5434"),
+    (New-Row "mqk-daemon" "scenario_y" "blocked_test" "BLOCKED_LOCAL_PREREQUISITE")
+)
+$filtered = @($mixedClassInventory | Where-Object { $_.classification -in $SafeDefaultClassifications })
+if (($filtered.Count -eq 2) -and (-not ($filtered | Where-Object { $_.classification -eq "MANUAL_EXTERNAL" }))) {
+    Pass "CSIM24" "The safe/default classification filter excludes MANUAL_EXTERNAL rows before completeness comparison"
+} else {
+    Fail "CSIM24" "Safe/default filter wrongly included or excluded rows (filtered count=$($filtered.Count))"
+}
+
+# ===========================================================================
+# FULL-AUDIT-CANONICAL-IGNORED-RUNNER-FEATURE-AUTHORITY-01 Part 3:
+# metadata-authoritative target mapping mutation fixtures.
+# ===========================================================================
+
+# ---------------------------------------------------------------------------
+# CSIM25: a custom [[test]] name/path pair where the declared Cargo target
+# name differs from the file's stem must resolve to the real metadata name,
+# never a guessed stem -- the exact defect Part 3 closes (this repo's
+# current [[test]] blocks all coincidentally have name == stem, so this
+# fixture is the only proof the code does not merely get lucky).
+# ---------------------------------------------------------------------------
+$customNameTargetLookup = Get-TargetLookupFromMetadataTargets -MetadataTargets @(
+    (New-MetadataTarget "test" "totally_custom_target_name" "tests/scenario_with_a_different_filename.rs")
+)
+$customNameListOutput = @(
+    "     Running tests\scenario_with_a_different_filename.rs (target\debug\deps\totally_custom_target_name-aaa.exe)",
+    "some_module::tests::an_ignored_case: test"
+)
+$rows = Get-ExactLiveKeysForPackage -Package "mqk-db" -ListOutput $customNameListOutput -TargetLookup $customNameTargetLookup
+if (($rows.Count -eq 1) -and ($rows[0].Target -eq "totally_custom_target_name") -and ($rows[0].TargetKind -eq "IntegrationTest")) {
+    Pass "CSIM25" "A custom [[test]] name/path pair resolves to the real Cargo target name, not a guessed file stem"
+} else {
+    Fail "CSIM25" "Custom integration-test name/path resolution failed (rows: $(($rows | ForEach-Object { $_.Target + '=' + $_.TargetKind }) -join ', '))"
+}
+
+# ---------------------------------------------------------------------------
+# CSIM26: an example target (testable, harness=true) resolves via the same
+# "Running unittests <path> (...)" header convention as lib/bin, with its
+# own real metadata name and Kind=Example -- never collapsed into Lib/Bin.
+# ---------------------------------------------------------------------------
+$exampleTargetLookup = Get-TargetLookupFromMetadataTargets -MetadataTargets @(
+    (New-MetadataTarget "example" "demo_example" "examples/demo_example.rs")
+)
+$exampleListOutput = @(
+    "     Running unittests examples\demo_example.rs (target\debug\deps\demo_example-aaa.exe)",
+    "tests::example_has_an_ignored_case: test"
+)
+$rows = Get-ExactLiveKeysForPackage -Package "mqk-db" -ListOutput $exampleListOutput -TargetLookup $exampleTargetLookup
+if (($rows.Count -eq 1) -and ($rows[0].Target -eq "demo_example") -and ($rows[0].TargetKind -eq "Example")) {
+    Pass "CSIM26" "An example target resolves to its own real metadata name and Kind=Example"
+} else {
+    Fail "CSIM26" "Example target resolution failed (rows: $(($rows | ForEach-Object { $_.Target + '=' + $_.TargetKind }) -join ', '))"
+}
+
+# ---------------------------------------------------------------------------
+# CSIM27: a proc-macro library target resolves the same way a plain lib
+# target does -- Kind=Lib, literal Name="lib" -- since both compile as the
+# crate's own single library unit-test binary and select via --lib.
+# ---------------------------------------------------------------------------
+$procMacroTargetLookup = Get-TargetLookupFromMetadataTargets -MetadataTargets @(
+    (New-MetadataTarget "proc-macro" "mqk_some_macros" "src/lib.rs")
+)
+$procMacroListOutput = @(
+    "     Running unittests src\lib.rs (target\debug\deps\mqk_some_macros-aaa.exe)",
+    "tests::macro_expansion_case: test"
+)
+$rows = Get-ExactLiveKeysForPackage -Package "mqk-some-macros" -ListOutput $procMacroListOutput -TargetLookup $procMacroTargetLookup
+if (($rows.Count -eq 1) -and ($rows[0].Target -eq "lib") -and ($rows[0].TargetKind -eq "Lib")) {
+    Pass "CSIM27" "A proc-macro library target resolves identically to a plain lib target (Kind=Lib, Name='lib')"
+} else {
+    Fail "CSIM27" "Proc-macro target resolution failed (rows: $(($rows | ForEach-Object { $_.Target + '=' + $_.TargetKind }) -join ', '))"
+}
+
+# ---------------------------------------------------------------------------
+# CSIM28: an ambiguous path match -- two distinct metadata targets whose
+# normalized source paths both satisfy the same printed-path resolution
+# (here: an exact duplicate path, the simplest way to force ambiguity) --
+# is a hard failure, never a silent "whichever one was found first".
+# ---------------------------------------------------------------------------
+$ambiguousLookup = @(
+    [pscustomobject]@{ Kind = "Bin"; Name = "tool_a"; NormalizedSrcPath = "crates/mqk-cli/src/bin/shared.rs" },
+    [pscustomobject]@{ Kind = "Bin"; Name = "tool_b"; NormalizedSrcPath = "crates/mqk-cli/src/bin/shared.rs" }
+)
+$threw = $false
+try {
+    Resolve-TestableTarget -TargetLookup $ambiguousLookup -PrintedPath "crates/mqk-cli/src/bin/shared.rs"
+} catch {
+    $threw = $true
+}
+if ($threw) {
+    Pass "CSIM28" "Two metadata targets sharing the exact same source path is an ambiguous match and throws, never silently resolved to the first one found"
+} else {
+    Fail "CSIM28" "Ambiguous path resolution did NOT throw -- risks silently resolving to the wrong target's identity"
+}
+
+# ---------------------------------------------------------------------------
+# CSIM29: a missing path match -- no metadata target corresponds to the
+# printed path at all -- returns $null (never a guessed default), so the
+# caller (Get-ExactLiveKeysForPackage) can turn it into its own explicit
+# "target lookup is out of date" failure.
+# ---------------------------------------------------------------------------
+$missingLookup = @(
+    [pscustomobject]@{ Kind = "Lib"; Name = "lib"; NormalizedSrcPath = "crates/mqk-db/src/lib.rs" }
+)
+$resolved = Resolve-TestableTarget -TargetLookup $missingLookup -PrintedPath "tests/completely_unrelated.rs"
+if ($null -eq $resolved) {
+    Pass "CSIM29" "A printed path with no corresponding metadata target resolves to `$null, never a guessed default"
+} else {
+    Fail "CSIM29" "Missing path resolution unexpectedly returned a match: $($resolved.Kind):$($resolved.Name)"
+}
+
+# ---------------------------------------------------------------------------
+# CSIM30: Get-TargetSelectorArgs produces the correct exact-scoped cargo
+# selector flags for Example and Bench kinds (added alongside Lib/Bin/
+# IntegrationTest), and still throws for an unsupported kind (e.g. Doctest,
+# which this script never selects directly).
+# ---------------------------------------------------------------------------
+$exampleSelector = Get-TargetSelectorArgs -TargetKind "Example" -TargetName "demo_example"
+$benchSelector = Get-TargetSelectorArgs -TargetKind "Bench" -TargetName "demo_bench"
+$doctestThrew = $false
+try {
+    Get-TargetSelectorArgs -TargetKind "Doctest" -TargetName "doctest"
+} catch {
+    $doctestThrew = $true
+}
+if ((($exampleSelector -join ' ') -eq "--example demo_example") -and (($benchSelector -join ' ') -eq "--bench demo_bench") -and $doctestThrew) {
+    Pass "CSIM30" "Get-TargetSelectorArgs supports Example/Bench exact-scoped selection and still rejects unsupported kinds (e.g. Doctest)"
+} else {
+    Fail "CSIM30" "Target selector args are wrong (example='$($exampleSelector -join ' ')' bench='$($benchSelector -join ' ')' doctest-threw=$doctestThrew)"
 }
 
 Write-Host ""

@@ -75,31 +75,92 @@
 #     blocked-row count and `-AuditOnlyIncludeBlocked`, and `Main` only ever
 #     prints the green message when that function reports `PASSED`.
 #
+# FULL-AUDIT-CANONICAL-IGNORED-RUNNER-FEATURE-AUTHORITY-01 hardening (three
+# more defects, all in how features/inventory/targets were derived):
+#
+#   Defect 1 -- invalid package-scoped feature injection. Every package,
+#   including ones with zero dependency on `mqk-db` at all (e.g.
+#   `mqk-artifacts`), was unconditionally invoked with `--features
+#   mqk-db/testkit`. Cargo requires the named package to be an actual direct
+#   dependency (normal or dev) of the package(s) selected with `-p`; for a
+#   package with no such dependency this is a hard `cargo` error ("the
+#   package '<pkg>' does not contain this feature: mqk-db/testkit"),
+#   reproduced directly against `mqk-artifacts` and `mqk-backtest` (the
+#   latter depends on `mqk-db` only *transitively*, via `mqk-execution` --
+#   proving cargo's `pkg/feature` syntax requires a *direct* manifest
+#   dependency, not mere transitive reachability). The fix:
+#   `Get-PackageFeaturePlan` computes one explicit, deterministic
+#   `--features` argument list per package directly from each package's own
+#   `cargo metadata --no-deps`-reported `dependencies` array (manifest
+#   truth, never a guess) -- never a single blanket string reused for every
+#   package.
+#
+#   Defect 2 -- MANUAL_EXTERNAL rows became false stale rows. Once Defect 1
+#   is fixed and every package's `--ignored --list` actually succeeds, the
+#   previous single completeness comparison (whole CSV vs. the
+#   feature-off/default live set) would report all nine MANUAL_EXTERNAL rows
+#   as stale, because those nine tests are deliberately absent from the
+#   default (manual-external feature off) build by design -- their presence
+#   is proven separately, under the feature *on*. The fix: Step 1's
+#   completeness check now only compares the SAFE_LOCAL / SAFE_DB_5434 /
+#   BLOCKED_LOCAL_PREREQUISITE inventory subset against the feature-off live
+#   set, and a second, independent check
+#   (`Get-ManualExternalDiffResult`) proves the exact
+#   (mqk-daemon, feature-on live set) minus (mqk-daemon, feature-off live
+#   set) difference equals the nine MANUAL_EXTERNAL rows exactly -- missing,
+#   stale, and "leaked into the feature-off build" (compile-time boundary
+#   lost) are each their own independent failure mode.
+#
+#   Defect 3 -- target authority was incomplete. `Get-TargetLookupFromMetadataTargets`
+#   only ever resolved `lib`/`bin` metadata targets (the only two kinds that
+#   used to be looked up), and integration-test target names were inferred
+#   from the printed path's file stem rather than cargo metadata's own `test`
+#   target `name` -- correct today only because every `[[test]] name` in
+#   this repo happens to equal its file stem, not because the code proves
+#   it. The fix: `Get-TargetLookupFromMetadataTargets` now resolves every
+#   testable target kind cargo metadata reports (`lib`/`proc-macro` ->
+#   `Lib`, `bin` -> `Bin`, `test` -> `IntegrationTest`, `example` ->
+#   `Example`, `bench` -> `Bench`) by real target name, and the single
+#   resolution function used for every "Running ..." header
+#   (`Resolve-TestableTarget`, renamed from `Resolve-UnitTestTarget`) now
+#   also detects and hard-fails on an *ambiguous* path match (more than one
+#   metadata target sharing the same resolved source path) instead of
+#   silently returning whichever one was found first.
+#
 # The comparison/disposition logic itself (Test-InventorySelfValidation,
 # Get-InventoryCompletenessResult, Get-ExactLiveKeysForPackage,
-# Get-TargetLookupFromMetadataTargets, Get-MatrixDisposition) is defined as
-# pure, cargo-free functions at script scope specifically so
+# Get-TargetLookupFromMetadataTargets, Get-MatrixDisposition,
+# Get-PackageFeaturePlan, Get-ManualExternalDiffResult) is defined as pure,
+# cargo-free functions at script scope specifically so
 # tests/script_guards/test_canonical_safe_ignored_matrix.ps1 can dot-source
 # this file and exercise duplicate/stale/missing/unknown-classification/
-# target-collision/blocked-disposition mutation fixtures against synthetic
-# data, without needing a real workspace build for every fixture. Dot-
-# sourcing this file does not invoke cargo or execute the matrix -- that
-# only happens via the `Main` guard at the bottom, which is skipped when the
-# file is dot-sourced.
+# target-collision/blocked-disposition/feature-plan/manual-diff mutation
+# fixtures against synthetic data, without needing a real workspace build for
+# every fixture. Dot-sourcing this file does not invoke cargo or execute the
+# matrix -- that only happens via the `Main` guard at the bottom, which is
+# skipped when the file is dot-sourced.
 #
 # What this script proves, in order:
 #   1. Every #[ignore]d test in the compiled workspace test harness (built
-#      with the same feature set this script itself uses) appears in the
-#      tracked inventory under its exact (package, target, function) key,
-#      where `target` is the real cargo-metadata-derived target name (never
-#      collapsed to `lib` for a non-lib unit-test binary). A newly added
-#      ignored test that is missing from the inventory is a hard failure.
-#      So is a CSV row whose exact key no longer matches any live test (a
-#      stale row -- the test was renamed, moved, or deleted). So is a
-#      duplicate exact key within the CSV itself. So is a row whose
-#      `classification` is not one of the four closed values this script
-#      knows how to handle.
-#   2. Every SAFE_LOCAL and SAFE_DB_5434 test executes and passes, one exact
+#      with this script's own deterministic, package-aware feature plan --
+#      see `Get-PackageFeaturePlan`) appears in the tracked inventory under
+#      its exact (package, target, function) key, where `target` is the
+#      real cargo-metadata-derived target name for every testable target
+#      kind (never collapsed to `lib` for a non-lib unit-test binary, and
+#      never guessed from a file stem for an integration test, example, or
+#      bench). A newly added ignored test that is missing from the
+#      SAFE_LOCAL/SAFE_DB_5434/BLOCKED_LOCAL_PREREQUISITE portion of the
+#      inventory is a hard failure. So is a CSV row (in that same portion)
+#      whose exact key no longer matches any live test (a stale row -- the
+#      test was renamed, moved, or deleted). So is a duplicate exact key
+#      within the CSV itself. So is a row whose `classification` is not one
+#      of the four closed values this script knows how to handle.
+#   2. Independently, the nine MANUAL_EXTERNAL rows are proven exact: the
+#      set of ignored tests that appear in `mqk-daemon`'s harness only when
+#      `--features mqk-daemon/manual-external` is added (feature-on minus
+#      feature-off) must equal the MANUAL_EXTERNAL inventory keys exactly --
+#      not merely "a superset of" or "disjoint from" the default build.
+#   3. Every SAFE_LOCAL and SAFE_DB_5434 test executes and passes, one exact
 #      (package, target) invocation at a time. MANUAL_EXTERNAL tests are
 #      gated behind mqk-daemon's `manual-external` Cargo feature (off in
 #      this invocation), so they do not even exist in the compiled binary
@@ -115,7 +176,7 @@
 #      BLOCKED_LOCAL_PREREQUISITE rows were excluded (the default), the
 #      final disposition is `BLOCKED`, exits nonzero, and never prints the
 #      green "PASSED" message -- a blocked proof is not a passing proof.
-#   3. The 9 MANUAL_EXTERNAL tests still compile when `--features
+#   4. The 9 MANUAL_EXTERNAL tests still compile when `--features
 #      manual-external` is explicitly requested (`--no-run`, never executed)
 #      -- proving their source has not silently bit-rotted even though they
 #      never run in the default or safe-ignored paths.
@@ -161,6 +222,17 @@ $script:KnownClassifications = @(
     "SAFE_LOCAL",
     "SAFE_DB_5434",
     "MANUAL_EXTERNAL",
+    "BLOCKED_LOCAL_PREREQUISITE"
+)
+
+# The inventory classifications that make up the "safe/default" set --
+# everything this script's default (manual-external feature OFF) build is
+# expected to compile and list. MANUAL_EXTERNAL is deliberately excluded:
+# its completeness is proven separately by Get-ManualExternalDiffResult
+# against a feature-ON build, never against the feature-off live set.
+$script:SafeDefaultClassifications = @(
+    "SAFE_LOCAL",
+    "SAFE_DB_5434",
     "BLOCKED_LOCAL_PREREQUISITE"
 )
 
@@ -247,6 +319,139 @@ function Get-InventoryCompletenessResult {
     }
 }
 
+# Pure: computes, for every workspace package, the exact `--features`
+# argument list needed so its ignored-test harness compiles under one
+# deterministic, package-aware plan -- never the blanket, unconditional
+# `mqk-db/testkit` the previous version injected into every package
+# regardless of whether that package's own manifest can even accept it
+# (FULL-AUDIT-CANONICAL-IGNORED-RUNNER-FEATURE-AUTHORITY-01 Defect 1).
+#
+# `PackageDependencies` is a hashtable keyed by package name, each value the
+# raw `dependencies` array `cargo metadata --no-deps` reports for that
+# package -- objects carrying (at least) `.name`, `.kind` (`$null` for a
+# normal dependency, `"dev"` for a dev-dependency), and `.features` (the
+# array of feature names that dependency edge itself activates). This is
+# manifest truth, not a resolved/unified view, so it is directly testable
+# against synthetic data with no cargo invocation.
+#
+# Per package (other than `mqk-db` itself):
+#   - no `mqk-db` entry at all (any kind) -> no argument. Passing
+#     `mqk-db/testkit` here is not merely unneeded, it is a hard cargo
+#     error: cargo's `pkg/feature` CLI syntax requires `pkg` to be a direct
+#     dependency (normal or dev) of the package(s) selected with `-p`, and a
+#     purely *transitive* relationship (e.g. `mqk-backtest` -> `mqk-execution`
+#     -> `mqk-db`) does not satisfy that -- reproduced directly against both
+#     `mqk-artifacts` (no relationship at all) and `mqk-backtest` (transitive
+#     only).
+#   - an `mqk-db` entry exists and at least one such entry's `features`
+#     array already contains `testkit` (this repo's shape: a dev-dependency
+#     declaration in the package's own Cargo.toml, e.g. mqk-daemon,
+#     mqk-execution, mqk-runtime, mqk-testkit) -> no argument. `cargo test`
+#     always includes dev-dependencies, so that feature is already active
+#     without any CLI flag; injecting the identical flag again would be
+#     redundant, not incorrect, but this script never emits a redundant
+#     foreign-package feature.
+#   - an `mqk-db` entry exists but none of them already carry `testkit`
+#     (this repo's shape: mqk-cli, which depends on mqk-db as a plain
+#     dependency with no testkit activation anywhere in its own manifest)
+#     -> the explicit `--features mqk-db/testkit` argument, since cargo
+#     accepts it (mqk-db is a direct dependency) and nothing in the
+#     package's own manifest already grants it.
+function Get-PackageFeaturePlan {
+    param(
+        [Parameter(Mandatory = $true)] [string[]]$PackageNames,
+        [Parameter(Mandatory = $true)] $PackageDependencies
+    )
+    $plan = [ordered]@{}
+    foreach ($pkg in ($PackageNames | Sort-Object -Unique)) {
+        if ($pkg -eq "mqk-db") {
+            $plan[$pkg] = [pscustomobject]@{
+                Package     = $pkg
+                FeatureArgs = @("--features", "testkit")
+                Reason      = "mqk-db itself: activates its own local testkit feature"
+            }
+            continue
+        }
+        if (-not $PackageDependencies.Contains($pkg)) {
+            throw "Package '$pkg' has no dependency information available -- cannot resolve its mqk-db feature requirement (unresolvable feature plan input)."
+        }
+        $mqkDbDeps = @($PackageDependencies[$pkg] | Where-Object { $_.name -eq "mqk-db" })
+        if ($mqkDbDeps.Count -eq 0) {
+            $plan[$pkg] = [pscustomobject]@{
+                Package     = $pkg
+                FeatureArgs = @()
+                Reason      = "does not depend on mqk-db (any mqk-db/testkit argument would be a hard cargo error)"
+            }
+            continue
+        }
+        $alreadyTestkit = @($mqkDbDeps | Where-Object { @($_.features) -contains "testkit" })
+        if ($alreadyTestkit.Count -gt 0) {
+            $plan[$pkg] = [pscustomobject]@{
+                Package     = $pkg
+                FeatureArgs = @()
+                Reason      = "mqk-db/testkit is already enabled via this package's own dev-dependency declaration"
+            }
+            continue
+        }
+        $plan[$pkg] = [pscustomobject]@{
+            Package     = $pkg
+            FeatureArgs = @("--features", "mqk-db/testkit")
+            Reason      = "depends on mqk-db directly with no pre-existing testkit activation; needs the explicit foreign-package feature"
+        }
+    }
+    return $plan
+}
+
+# Pure: computes the difference between a package's feature-ON and
+# feature-OFF live ignored-test key sets, and compares that difference
+# exactly against the inventory's MANUAL_EXTERNAL rows.
+# (FULL-AUDIT-CANONICAL-IGNORED-RUNNER-FEATURE-AUTHORITY-01 Defect 2.)
+#
+# Four independent failure modes, each surfaced as its own list so a test
+# can assert on exactly one at a time:
+#   - Missing: a key present in the feature-on-minus-feature-off difference
+#     that has no MANUAL_EXTERNAL inventory row (either no row at all -- an
+#     unclassified new manual-external test -- or a row present under a
+#     different classification -- a misclassified one). Either way this is
+#     "a feature-on test not classified MANUAL_EXTERNAL".
+#   - Stale: a MANUAL_EXTERNAL inventory row whose exact key does not appear
+#     in the feature-on-minus-feature-off difference at all (renamed, moved,
+#     deleted, or never actually feature-gated).
+#   - Leaked: a MANUAL_EXTERNAL inventory row whose exact key *is* present
+#     in the feature-OFF live set -- its `#[cfg(feature = "manual-external")]`
+#     compile-time boundary has been lost, so the test now exists in the
+#     default build too.
+function Get-ManualExternalDiffResult {
+    param(
+        [Parameter(Mandatory = $true)] $Inventory,
+        [Parameter(Mandatory = $true)] $FeatureOnRows,
+        [Parameter(Mandatory = $true)] $FeatureOffRows
+    )
+    $featureOnKeys = New-Object System.Collections.Generic.HashSet[string]
+    foreach ($row in $FeatureOnRows) { [void]$featureOnKeys.Add($row.Key) }
+    $featureOffKeys = New-Object System.Collections.Generic.HashSet[string]
+    foreach ($row in $FeatureOffRows) { [void]$featureOffKeys.Add($row.Key) }
+
+    $diffKeys = @($featureOnKeys | Where-Object { -not $featureOffKeys.Contains($_) })
+    $diffKeySet = New-Object System.Collections.Generic.HashSet[string]
+    foreach ($k in $diffKeys) { [void]$diffKeySet.Add($k) }
+
+    $manualRows = @($Inventory | Where-Object { $_.classification -eq "MANUAL_EXTERNAL" })
+    $manualKeySet = New-Object System.Collections.Generic.HashSet[string]
+    foreach ($row in $manualRows) { [void]$manualKeySet.Add((Get-InventoryExactKey $row)) }
+
+    $missing = @($diffKeys | Where-Object { -not $manualKeySet.Contains($_) })
+    $stale = @($manualRows | Where-Object { -not $diffKeySet.Contains((Get-InventoryExactKey $_)) })
+    $leaked = @($manualRows | Where-Object { $featureOffKeys.Contains((Get-InventoryExactKey $_)) })
+
+    return [pscustomobject]@{
+        DiffKeys = $diffKeys
+        Missing  = $missing
+        Stale    = $stale
+        Leaked   = $leaked
+    }
+}
+
 function Get-BlockedTestRows {
     param([Parameter(Mandatory = $true)] $Inventory)
     $rows = @($Inventory | Where-Object { $_.classification -eq "BLOCKED_LOCAL_PREREQUISITE" })
@@ -283,19 +488,34 @@ function Get-WorkspaceMetadata {
 }
 
 # Pure: given one package's `cargo metadata` `targets` array (each element
-# carrying `.kind` -- an array such as @("lib"), @("bin"), @("test"),
-# @("example"), @("bench") -- plus `.name` and `.src_path`), builds a list of
-# resolved lib/bin targets (real, cargo-metadata-authoritative name and
-# kind, plus the source path normalized to forward slashes) that
-# `Resolve-UnitTestTarget` matches a `Running unittests <path> (...)`
-# header's `<path>` against. This is the "compiler-artifact truth"
-# `Get-ExactLiveKeysForPackage` uses to resolve a unit-test header instead of
-# guessing "lib" for every one. Returned as a list, not a hashtable keyed by
-# the literal path: `cargo metadata`'s `src_path` is always absolute, while
-# the path cargo test prints in its own "Running unittests <path> (...)"
-# header is relative to the crate directory (e.g. "src/lib.rs") -- an exact
-# key match would never hit, so resolution has to be a suffix match instead
-# (see `Resolve-UnitTestTarget`).
+# carrying `.kind` -- an array such as @("lib"), @("proc-macro"), @("bin"),
+# @("test"), @("example"), @("bench") -- plus `.name` and `.src_path`),
+# builds a list of resolved testable targets (real, cargo-metadata-
+# authoritative name and kind, plus the source path normalized to forward
+# slashes) that `Resolve-TestableTarget` matches a "Running ..." header's
+# `<path>` against. This is the "compiler-artifact truth"
+# `Get-ExactLiveKeysForPackage` uses to resolve every such header instead of
+# guessing "lib" for every unit-test binary, or a file stem for every
+# integration test, example, or bench.
+#
+# `lib` and `proc-macro` targets both resolve to `TargetKind = "Lib"` with
+# the fixed literal `Name = "lib"` -- the long-standing convention this
+# script's inventory already carries for a crate's own unit tests -- since
+# both compile as the crate's own single library unit-test binary and
+# select via the same `--lib` flag. Every other supported kind (`bin`,
+# `test`, `example`, `bench`) keeps its real, distinct metadata `name`.
+# `bench` and `custom-build`/other unrecognized kinds beyond this closed set
+# are simply not added to the lookup (`$targetKind` stays `$null` and the
+# loop `continue`s) -- they never appear in this script's `--ignored --list`
+# output today, and an unresolvable "Running ..." header is a hard failure
+# in `Get-ExactLiveKeysForPackage`, not a silent skip.
+#
+# Returned as a list, not a hashtable keyed by the literal path: `cargo
+# metadata`'s `src_path` is always absolute, while the path cargo test
+# prints in its own "Running ... <path> (...)" header is relative to the
+# crate directory (e.g. "src/lib.rs") -- an exact key match would never hit,
+# so resolution has to be a suffix match instead (see
+# `Resolve-TestableTarget`).
 function Get-TargetLookupFromMetadataTargets {
     param([Parameter(Mandatory = $true)] $MetadataTargets)
     $resolved = New-Object System.Collections.Generic.List[object]
@@ -303,26 +523,29 @@ function Get-TargetLookupFromMetadataTargets {
         $kindStr = @($t.kind)[0]
         $targetKind = switch ($kindStr) {
             "lib" { "Lib" }
+            "proc-macro" { "Lib" }
             "bin" { "Bin" }
+            "test" { "IntegrationTest" }
+            "example" { "Example" }
+            "bench" { "Bench" }
             default { $null }
         }
         if (-not $targetKind) {
-            # Only lib/bin targets ever produce a "Running unittests ..."
-            # header; "test" (integration-test binaries) and "example" are
-            # resolved separately by their own path-stem regex below and
-            # need no metadata lookup, and other kinds (bench, custom-build,
-            # proc-macro, ...) never appear in `--ignored --list` output at
-            # all under this script's fixed `--all-targets` invocation.
+            # Unsupported/unrecognized target kind for this script's fixed
+            # `--all-targets` invocation (e.g. `custom-build`) -- never
+            # produces a "Running ..." header cargo test would print, so it
+            # is simply absent from the lookup rather than guessed at.
             continue
         }
         $normalizedPath = ($t.src_path -replace '\\', '/')
-        # A crate's own lib unit-test binary keeps the literal target name
-        # "lib" -- the long-standing convention this script's inventory
-        # already carries for every one of its existing rows -- rather than
-        # cargo metadata's raw lib target `name` (which is the crate name,
-        # not "lib"). Only a Bin target's real, distinct name is ever used,
-        # since that is exactly the identity that used to be wrongly
-        # collapsed into "lib" too.
+        # A crate's own lib (or proc-macro) unit-test binary keeps the
+        # literal target name "lib" -- the long-standing convention this
+        # script's inventory already carries for every one of its existing
+        # rows -- rather than cargo metadata's raw lib target `name` (which
+        # is the crate name, not "lib"). Every other kind keeps its real,
+        # distinct metadata name, since that is exactly the identity that
+        # used to be wrongly collapsed into "lib" (bin) or guessed from a
+        # file stem (test/example/bench).
         $name = if ($targetKind -eq "Lib") { "lib" } else { $t.name }
         $resolved.Add([pscustomobject]@{
             Kind              = $targetKind
@@ -333,22 +556,40 @@ function Get-TargetLookupFromMetadataTargets {
     return ,$resolved
 }
 
-# Pure: resolves the `<path>` captured from a `Running unittests <path> (...)`
+# Pure: resolves the `<path>` captured from a "Running ... <path> (...)"
 # header against a `-TargetLookup` list built by
 # `Get-TargetLookupFromMetadataTargets`. `cargo metadata`'s `src_path` is
 # always absolute; the printed header path is crate-relative -- so this
 # matches by exact equality first (covers a caller that already normalized
 # both to the same absolute form, e.g. a test fixture) and otherwise by
 # path-boundary suffix (the absolute metadata path ending in
-# "/<printed path>"), never a bare, boundary-unaware substring match. Returns
-# $null, never a guessed default, when nothing matches.
-function Resolve-UnitTestTarget {
+# "/<printed path>"), never a bare, boundary-unaware substring match.
+#
+# Exact matches are always preferred over suffix matches when both exist
+# (an exact match is strictly more specific). Within whichever tier
+# actually has a hit, more than one distinct metadata target sharing that
+# same resolved path is an *ambiguous* match and a hard failure -- silently
+# returning "whichever one was found first" would risk resolving a header
+# to the wrong target's identity. Returns $null, never a guessed default,
+# when nothing matches at all.
+function Resolve-TestableTarget {
     param([Parameter(Mandatory = $true)] $TargetLookup, [string]$PrintedPath)
     $normalizedPrinted = ($PrintedPath -replace '\\', '/')
-    foreach ($t in $TargetLookup) {
-        if ($t.NormalizedSrcPath -eq $normalizedPrinted) { return $t }
-        if ($t.NormalizedSrcPath.EndsWith("/$normalizedPrinted")) { return $t }
+
+    $exactMatches = @($TargetLookup | Where-Object { $_.NormalizedSrcPath -eq $normalizedPrinted })
+    if ($exactMatches.Count -gt 1) {
+        $described = ($exactMatches | ForEach-Object { "$($_.Kind):$($_.Name)" }) -join ', '
+        throw "Ambiguous testable-target resolution for printed path '$PrintedPath': $($exactMatches.Count) cargo-metadata targets share the exact same source path ($described)."
     }
+    if ($exactMatches.Count -eq 1) { return $exactMatches[0] }
+
+    $suffixMatches = @($TargetLookup | Where-Object { $_.NormalizedSrcPath.EndsWith("/$normalizedPrinted") })
+    if ($suffixMatches.Count -gt 1) {
+        $described = ($suffixMatches | ForEach-Object { "$($_.Kind):$($_.Name)" }) -join ', '
+        throw "Ambiguous testable-target resolution for printed path '$PrintedPath': $($suffixMatches.Count) cargo-metadata targets end with this path ($described)."
+    }
+    if ($suffixMatches.Count -eq 1) { return $suffixMatches[0] }
+
     return $null
 }
 
@@ -356,13 +597,16 @@ function Resolve-UnitTestTarget {
 # output into exact (package, target, function) keys. `target`/`TargetKind`
 # are derived from the "Running ..." header that precedes each test-binary's
 # listing: for a `Running unittests <path> (...)` header (emitted once per
-# unit-test binary -- a crate's own `src/lib.rs`, *and* `src/main.rs`, *and*
-# every `src/bin/<name>.rs`, each separately), `<path>` is resolved via
-# `Resolve-UnitTestTarget` against `-TargetLookup` (built from real `cargo
+# unit-test-style binary -- a crate's own `src/lib.rs`, *and* `src/main.rs`,
+# *and* every `src/bin/<name>.rs`, *and* any testable `examples/*.rs` or
+# `benches/*.rs`, each separately), `<path>` is resolved via
+# `Resolve-TestableTarget` against `-TargetLookup` (built from real `cargo
 # metadata` truth by `Get-TargetLookupFromMetadataTargets`) to get the
 # target's real name and kind -- never assumed to be `lib`. Integration-test
-# binaries (`Running tests[\/]<name>.rs (...)`) use the file stem directly,
-# and a `Doc-tests` section (present only if this is ever invoked without
+# binaries (`Running tests[\/]<name>.rs (...)`) are resolved the same way --
+# never a guessed file stem -- so a `[[test]] name` that ever differs from
+# its `path`'s stem still resolves to the correct metadata-authoritative
+# name. A `Doc-tests` section (present only if this is ever invoked without
 # --all-targets, which excludes doctests) uses the literal name `doctest`.
 # Takes plain text lines and a plain lookup list, never invokes cargo
 # itself, so a test can feed it synthetic `--list` output and a synthetic
@@ -381,18 +625,21 @@ function Get-ExactLiveKeysForPackage {
 
     foreach ($line in $ListOutput) {
         if ($line -match '^\s*Running unittests (?<path>\S+) \(.+\)\s*$') {
-            $resolved = Resolve-UnitTestTarget -TargetLookup $TargetLookup -PrintedPath $matches['path']
+            $resolved = Resolve-TestableTarget -TargetLookup $TargetLookup -PrintedPath $matches['path']
             if (-not $resolved) {
-                throw "Package '$Package': no cargo-metadata lib/bin target matches unit-test source path '$($matches['path'])' -- the target lookup is out of date or incomplete."
+                throw "Package '$Package': no cargo-metadata target matches unit-test source path '$($matches['path'])' -- the target lookup is out of date or incomplete."
             }
             $currentTarget = $resolved.Name
             $currentTargetKind = $resolved.Kind
             continue
         }
         if ($line -match '^\s*Running (?<relpath>tests[\\/][^\s]+\.rs) \(.+\)\s*$') {
-            $stem = [System.IO.Path]::GetFileNameWithoutExtension($matches['relpath'])
-            $currentTarget = $stem
-            $currentTargetKind = "IntegrationTest"
+            $resolved = Resolve-TestableTarget -TargetLookup $TargetLookup -PrintedPath $matches['relpath']
+            if (-not $resolved) {
+                throw "Package '$Package': no cargo-metadata target matches integration-test source path '$($matches['relpath'])' -- the target lookup is out of date or incomplete."
+            }
+            $currentTarget = $resolved.Name
+            $currentTargetKind = $resolved.Kind
             continue
         }
         if ($line -match '^\s*Doc-tests \S+\s*$') {
@@ -430,6 +677,8 @@ function Get-TargetSelectorArgs {
         "Lib" { return @("--lib") }
         "Bin" { return @("--bin", $TargetName) }
         "IntegrationTest" { return @("--test", $TargetName) }
+        "Example" { return @("--example", $TargetName) }
+        "Bench" { return @("--bench", $TargetName) }
         default {
             throw "Unsupported TargetKind '$TargetKind' for exact-scoped execution (target '$TargetName') -- doctests are never selected here because this script always runs --all-targets."
         }
@@ -459,7 +708,7 @@ function Get-MatrixDisposition {
         return [pscustomobject]@{
             Disposition = "FAILED"
             ExitCode    = 1
-            Message     = "MANUAL_EXTERNAL compile-only proof failed (--features mqk-db/testkit,mqk-daemon/manual-external --no-run)."
+            Message     = "MANUAL_EXTERNAL compile-only proof failed (--features mqk-daemon/manual-external --no-run)."
         }
     }
     if (($BlockedCount -gt 0) -and (-not $AuditOnlyIncludeBlocked)) {
@@ -521,19 +770,41 @@ function Main {
     Write-Host ("OK: {0} inventory rows, all exact keys unique, all classifications known." -f $inventory.Count) -ForegroundColor Green
 
     # -----------------------------------------------------------------------
-    # Step 1: inventory completeness -- every #[ignore]d test in the
-    # compiled harness must be present under its exact key, and every
-    # inventory row must correspond to a still-live test (no stale rows).
+    # Step 1a: package-aware feature plan -- one explicit, deterministic
+    # --features argument list per workspace package, derived from real
+    # cargo-metadata manifest truth. Printed before any package is listed.
     # -----------------------------------------------------------------------
     Write-Host ""
-    Write-Host "-- Step 1: inventory completeness (exact identity) --" -ForegroundColor Yellow
+    Write-Host "-- Step 1a: package-aware feature plan --" -ForegroundColor Yellow
 
     $meta = Get-WorkspaceMetadata -CargoExe $CargoExe -CargoManifest $CargoManifest
     $allPackageNames = @($meta.packages | ForEach-Object { $_.name } | Sort-Object -Unique)
     $packageTargetsByName = @{}
-    foreach ($p in $meta.packages) { $packageTargetsByName[$p.name] = $p.targets }
+    $packageDependenciesByName = @{}
+    foreach ($p in $meta.packages) {
+        $packageTargetsByName[$p.name] = $p.targets
+        $packageDependenciesByName[$p.name] = $p.dependencies
+    }
 
     $packages = if ($PackageFilter) { $PackageFilter } else { $allPackageNames }
+    $featurePlan = Get-PackageFeaturePlan -PackageNames $packages -PackageDependencies $packageDependenciesByName
+
+    foreach ($pkg in $packages) {
+        $entry = $featurePlan[$pkg]
+        $argsDisplay = if ($entry.FeatureArgs.Count -gt 0) { $entry.FeatureArgs -join ' ' } else { "(none)" }
+        Write-Host ("  {0,-20} {1,-28} {2}" -f $pkg, $argsDisplay, $entry.Reason)
+    }
+
+    # -----------------------------------------------------------------------
+    # Step 1b: inventory completeness (exact identity) -- every #[ignore]d
+    # test in the compiled harness (built under the plan above) must be
+    # present under its exact key, and every SAFE_LOCAL/SAFE_DB_5434/
+    # BLOCKED_LOCAL_PREREQUISITE inventory row must correspond to a still-
+    # live test (no stale rows). MANUAL_EXTERNAL rows are deliberately
+    # excluded from this comparison -- see Step 1c.
+    # -----------------------------------------------------------------------
+    Write-Host ""
+    Write-Host "-- Step 1b: inventory completeness (exact identity, feature-off/default) --" -ForegroundColor Yellow
     Write-Host ("Enumerating ignored tests for {0} package(s): {1}" -f $packages.Count, ($packages -join ', '))
 
     $liveRows = New-Object System.Collections.Generic.List[object]
@@ -544,11 +815,9 @@ function Main {
         }
         $targetLookup = Get-TargetLookupFromMetadataTargets -MetadataTargets $packageTargetsByName[$pkg]
 
-        $listArgs = @(
-            "test", "-p", $pkg, "--manifest-path", $CargoManifest,
-            "--features", "mqk-db/testkit", "--all-targets",
-            "--", "--ignored", "--list"
-        )
+        $listArgs = @("test", "-p", $pkg, "--manifest-path", $CargoManifest) + `
+            $featurePlan[$pkg].FeatureArgs + `
+            @("--all-targets", "--", "--ignored", "--list")
         $listOutput = & $CargoExe @listArgs 2>&1
         if ($LASTEXITCODE -ne 0) {
             Write-Host ($listOutput -join "`n")
@@ -561,7 +830,8 @@ function Main {
         }
     }
 
-    $completeness = Get-InventoryCompletenessResult -Inventory $inventory -LiveRows $liveRows -Narrowed ([bool]$PackageFilter)
+    $safeDefaultInventory = @($inventory | Where-Object { $_.classification -in $script:SafeDefaultClassifications })
+    $completeness = Get-InventoryCompletenessResult -Inventory $safeDefaultInventory -LiveRows $liveRows -Narrowed ([bool]$PackageFilter)
 
     if ($completeness.Missing.Count -gt 0) {
         Write-Host "FAIL: ignored test(s) exist in the compiled harness but are not in the canonical inventory (exact key):" -ForegroundColor Red
@@ -571,18 +841,86 @@ function Main {
     }
 
     if ($PackageFilter) {
-        Write-Host ("OK: all {0} live ignored tests (within the -PackageFilter scope) are present in the canonical inventory." -f $liveRows.Count) -ForegroundColor Green
+        Write-Host ("OK: all {0} live ignored tests (within the -PackageFilter scope) are present in the canonical safe/default inventory." -f $liveRows.Count) -ForegroundColor Green
         Write-Host "NOTE: stale-row detection skipped -- -PackageFilter narrows completeness to a subset of packages." -ForegroundColor DarkYellow
     } else {
         if ($completeness.Stale.Count -gt 0) {
-            Write-Host "FAIL: inventory row(s) no longer correspond to any live #[ignore]d test (stale -- renamed, moved, or deleted):" -ForegroundColor Red
+            Write-Host "FAIL: safe/default inventory row(s) no longer correspond to any live #[ignore]d test (stale -- renamed, moved, or deleted):" -ForegroundColor Red
             $completeness.Stale | ForEach-Object { Write-Host "  $(Get-InventoryExactKey $_)" -ForegroundColor Red }
             throw "Stale inventory row(s) found -- remove or correct them in $InventoryCsv before re-running."
         }
-        Write-Host ("OK: all {0} live ignored tests are present in the canonical inventory, and no inventory row is stale." -f $liveRows.Count) -ForegroundColor Green
+        Write-Host ("OK: all {0} live ignored tests are present in the canonical safe/default inventory, and no safe/default inventory row is stale." -f $liveRows.Count) -ForegroundColor Green
+    }
+
+    # -----------------------------------------------------------------------
+    # Step 1c: MANUAL_EXTERNAL exact feature-difference proof -- compile/list
+    # mqk-daemon a second time with `mqk-daemon/manual-external` added, and
+    # prove (feature-on minus feature-off) equals the MANUAL_EXTERNAL
+    # inventory rows exactly. Never executes any of these tests. Skipped
+    # (with a note) when -PackageFilter excludes mqk-daemon from scope --
+    # the diff cannot be honestly computed without both builds.
+    # -----------------------------------------------------------------------
+    Write-Host ""
+    Write-Host "-- Step 1c: MANUAL_EXTERNAL exact feature-difference proof --" -ForegroundColor Yellow
+
+    $manualDiffKeyCount = 0
+    if ($packages -contains "mqk-daemon") {
+        $daemonTargetLookup = Get-TargetLookupFromMetadataTargets -MetadataTargets $packageTargetsByName["mqk-daemon"]
+        $manualListArgs = @("test", "-p", "mqk-daemon", "--manifest-path", $CargoManifest) + `
+            $featurePlan["mqk-daemon"].FeatureArgs + `
+            @("--features", "mqk-daemon/manual-external", "--all-targets", "--", "--ignored", "--list")
+        $manualListOutput = & $CargoExe @manualListArgs 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            Write-Host ($manualListOutput -join "`n")
+            throw "cargo test -p mqk-daemon --features mqk-daemon/manual-external --ignored --list failed (exit $LASTEXITCODE) -- cannot verify MANUAL_EXTERNAL exactness."
+        }
+        $manualFeatureOnRows = Get-ExactLiveKeysForPackage -Package "mqk-daemon" -ListOutput $manualListOutput -TargetLookup $daemonTargetLookup
+        $daemonFeatureOffRows = @($liveRows | Where-Object { $_.Package -eq "mqk-daemon" })
+
+        $manualDiff = Get-ManualExternalDiffResult -Inventory $inventory -FeatureOnRows $manualFeatureOnRows -FeatureOffRows $daemonFeatureOffRows
+        $manualDiffKeyCount = $manualDiff.DiffKeys.Count
+
+        $manualFailed = $false
+        if ($manualDiff.Missing.Count -gt 0) {
+            Write-Host "FAIL: feature-on ignored test(s) in mqk-daemon are not classified MANUAL_EXTERNAL in the inventory (exact key):" -ForegroundColor Red
+            $manualDiff.Missing | ForEach-Object { Write-Host "  $_" -ForegroundColor Red }
+            $manualFailed = $true
+        }
+        if ($manualDiff.Stale.Count -gt 0) {
+            Write-Host "FAIL: MANUAL_EXTERNAL inventory row(s) no longer appear in the feature-on-minus-feature-off difference (stale):" -ForegroundColor Red
+            $manualDiff.Stale | ForEach-Object { Write-Host "  $(Get-InventoryExactKey $_)" -ForegroundColor Red }
+            $manualFailed = $true
+        }
+        if ($manualDiff.Leaked.Count -gt 0) {
+            Write-Host "FAIL: MANUAL_EXTERNAL inventory row(s) also appear in the feature-OFF (default) build -- compile-time boundary lost:" -ForegroundColor Red
+            $manualDiff.Leaked | ForEach-Object { Write-Host "  $(Get-InventoryExactKey $_)" -ForegroundColor Red }
+            $manualFailed = $true
+        }
+        if ($manualFailed) {
+            throw "MANUAL_EXTERNAL exact feature-difference proof failed -- see FAIL lines above."
+        }
+        Write-Host ("OK: feature-on-minus-feature-off difference for mqk-daemon equals the {0} MANUAL_EXTERNAL inventory row(s) exactly." -f $manualDiff.DiffKeys.Count) -ForegroundColor Green
+    } else {
+        Write-Host "NOTE: MANUAL_EXTERNAL exact feature-difference proof skipped -- -PackageFilter excludes mqk-daemon from scope." -ForegroundColor DarkYellow
     }
 
     if ($ListOnly) {
+        $safeLocalCount = @($inventory | Where-Object { $_.classification -eq "SAFE_LOCAL" }).Count
+        $safeDbCount = @($inventory | Where-Object { $_.classification -eq "SAFE_DB_5434" }).Count
+        $blockedInventoryCount = @($inventory | Where-Object { $_.classification -eq "BLOCKED_LOCAL_PREREQUISITE" }).Count
+        $manualExternalCount = @($inventory | Where-Object { $_.classification -eq "MANUAL_EXTERNAL" }).Count
+
+        Write-Host ""
+        Write-Host "============================================================" -ForegroundColor Cyan
+        Write-Host "List-only summary" -ForegroundColor Cyan
+        Write-Host "============================================================" -ForegroundColor Cyan
+        Write-Host "SAFE_LOCAL classified:                 $safeLocalCount"
+        Write-Host "SAFE_DB_5434 classified:                $safeDbCount"
+        Write-Host "BLOCKED_LOCAL_PREREQUISITE classified:  $blockedInventoryCount"
+        Write-Host "MANUAL_EXTERNAL classified:             $manualExternalCount"
+        Write-Host "Total feature-off live:                 $($liveRows.Count)"
+        Write-Host "Total feature-on manual difference:     $manualDiffKeyCount"
+        Write-Host "Total inventory:                        $($inventory.Count)"
         Write-Host ""
         Write-Host "PASSED (list-only): inventory completeness and self-validation are clean." -ForegroundColor Green
         exit 0
@@ -591,8 +929,9 @@ function Main {
     # -----------------------------------------------------------------------
     # Step 2: execute every SAFE_LOCAL + SAFE_DB_5434 test, one exact
     # (package, target) invocation at a time (never a single blanket
-    # `--workspace --all-targets` call). MANUAL_EXTERNAL tests are absent
-    # from this build (manual-external feature not requested).
+    # `--workspace --all-targets` call), each using the same package-aware
+    # feature plan as Step 1b. MANUAL_EXTERNAL tests are absent from this
+    # build (manual-external feature not requested).
     # BLOCKED_LOCAL_PREREQUISITE tests are excluded via `--skip --exact`
     # scoped to only the one (package, target) invocation they actually
     # belong to, unless -AuditOnlyIncludeBlocked.
@@ -635,10 +974,9 @@ function Main {
         }
 
         $selectorArgs = Get-TargetSelectorArgs -TargetKind $targetKind -TargetName $targetName
-        $targetArgs = @(
-            "test", "-p", $pkg, "--manifest-path", $CargoManifest,
-            "--features", "mqk-db/testkit"
-        ) + $selectorArgs + @(
+        $targetArgs = @("test", "-p", $pkg, "--manifest-path", $CargoManifest) + `
+            $featurePlan[$pkg].FeatureArgs + `
+            $selectorArgs + @(
             "--no-fail-fast", "--", "--ignored", "--test-threads=1", "--exact"
         ) + $skipArgs
         & $CargoExe @targetArgs
@@ -650,15 +988,16 @@ function Main {
     # -----------------------------------------------------------------------
     # Step 3: MANUAL_EXTERNAL compile-only proof -- never executed. Narrowed
     # to mqk-daemon, the only package with MANUAL_EXTERNAL-classified tests.
+    # Uses mqk-daemon's own plan entry (today empty, since its dev-dependency
+    # already grants mqk-db/testkit) plus the manual-external feature.
     # -----------------------------------------------------------------------
     Write-Host ""
     Write-Host "-- Step 3: MANUAL_EXTERNAL compile-only proof (--no-run) --" -ForegroundColor Yellow
 
-    $manualArgs = @(
-        "test", "-p", "mqk-daemon", "--manifest-path", $CargoManifest,
-        "--features", "mqk-db/testkit,mqk-daemon/manual-external", "--all-targets", "--no-run"
-    )
-    & $CargoExe @manualArgs
+    $manualCompileArgs = @("test", "-p", "mqk-daemon", "--manifest-path", $CargoManifest) + `
+        $featurePlan["mqk-daemon"].FeatureArgs + `
+        @("--features", "mqk-daemon/manual-external", "--all-targets", "--no-run")
+    & $CargoExe @manualCompileArgs
     $manualCompileExit = $LASTEXITCODE
 
     # -----------------------------------------------------------------------
@@ -673,13 +1012,15 @@ function Main {
     Write-Host "============================================================" -ForegroundColor Cyan
     Write-Host "Canonical safe-ignored matrix summary" -ForegroundColor Cyan
     Write-Host "============================================================" -ForegroundColor Cyan
-    Write-Host "SAFE_LOCAL classified:               $safeLocalCount"
-    Write-Host "SAFE_DB_5434 classified:              $safeDbCount"
-    Write-Host "MANUAL_EXTERNAL classified:           $manualExternalCount (excluded from execution; compile-proof exit=$manualCompileExit)"
-    Write-Host "BLOCKED_LOCAL_PREREQUISITE classified: $blockedCount (excluded from execution unless -AuditOnlyIncludeBlocked)"
-    Write-Host "Total inventory:                      $($inventory.Count)"
-    Write-Host "Safe execution exit code:             $safeExit"
-    Write-Host "Manual-external compile exit code:    $manualCompileExit"
+    Write-Host "SAFE_LOCAL classified:                 $safeLocalCount"
+    Write-Host "SAFE_DB_5434 classified:                $safeDbCount"
+    Write-Host "BLOCKED_LOCAL_PREREQUISITE classified:  $blockedCount (excluded from execution unless -AuditOnlyIncludeBlocked)"
+    Write-Host "MANUAL_EXTERNAL classified:             $manualExternalCount (excluded from execution; compile-proof exit=$manualCompileExit)"
+    Write-Host "Total feature-off live:                 $($liveRows.Count)"
+    Write-Host "Total feature-on manual difference:     $manualDiffKeyCount"
+    Write-Host "Total inventory:                        $($inventory.Count)"
+    Write-Host "Safe execution exit code:               $safeExit"
+    Write-Host "Manual-external compile exit code:      $manualCompileExit"
 
     $disposition = Get-MatrixDisposition -SafeExit $safeExit -ManualCompileExit $manualCompileExit `
         -BlockedCount $blockedCount -AuditOnlyIncludeBlocked ([bool]$AuditOnlyIncludeBlocked)
