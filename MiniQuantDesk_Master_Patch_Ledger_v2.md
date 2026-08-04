@@ -21208,3 +21208,84 @@ external network calls made. Ports 5432/5440 never touched. DB writes
 confined to disposable databases and the isolated port-5434 mqk_test.
 See docs/audits/full_repository_verification_2026-08-02.md,
 "FULL-AUDIT-FINAL-HERMETIC-CLOSURE-01" section, for full evidence.
+
+---
+
+## AUDIT 2: AUDIT-02-END-TO-END-INTENT-BEHAVIOR-CONFORMANCE-01 (2026-08-04)
+
+Audit-only session, no source/test/migration/config/GUI/workflow repairs.
+Full report: docs/audits/end_to_end_intent_behavior_conformance_2026-08-04.md
+
+Audited SHA: 537e048fbce575e5b5fd112a2391014650574971 (main == origin/main at
+start; unchanged throughout). Method: 8 parallel read-only research passes
+across the full strategy-intent -> outbox -> broker -> inbox -> portfolio ->
+reconcile -> operator-truth chain, each required to cite exact file:line
+evidence and an evidence tier, followed by 4 directly-executed targeted
+DB-backed tests (port 5434 only) to convert disputed findings from source-only
+to test-confirmed. No code was written or changed; only existing tests were
+re-run.
+
+Classification: NONCONFORMANT.
+Weighted robustness score: 62/100. Fragility score: 6/10 (medium-high
+confidence).
+
+Confirmed findings (soak-blocking): A2-FIND-001 (CATASTROPHIC -- duplicate
+live order possible via wall-clock-salted decision_id with no in-flight-order
+accounting across 1s ticks), A2-FIND-002 (HIGH -- crash-recovery reaper for
+orphaned CLAIMED outbox rows exists, is unit-tested, and is never called from
+any production path), A2-FIND-003 (CATASTROPHIC -- WS/REST dual-lane
+double-apply on partial fills; the identical bug pattern already caused a
+real production incident for terminal fills, fixed by migration 0040, and was
+explicitly left unfixed for partials), A2-FIND-004 (HIGH -- unknown-order
+broker fills are silently skipped rather than fail-closed halted, a
+deliberate prior design change never re-evaluated against CLAUDE.md's
+fail-closed mandate), A2-FIND-005 (HIGH -- autonomous daily finalization can
+durably certify "completed with activity" from a bare broker ACK without ever
+confirming the order reached an OMS-terminal state, compounded by WS events
+being silently dropped with no log after a run stops), A2-FIND-006 (HIGH --
+the risk kill-switch status API fails open to "inactive" on a durable-state
+read error, with no truth_state field to distinguish confirmed-clear from
+unknown -- directly undermines the operator pre-arm checklist in
+docs/runbooks/operator_workflows.md).
+
+High-confidence findings (non-blocking): A2-FIND-007 (HIGH policy-integrity,
+not live-exploitable today -- the LiveCapital TV-03C gate checks parity-
+evidence structural validity, never the live_trust_complete field it was
+built to check), A2-FIND-008 (LOW, test-infrastructure only -- a claim-lock
+proof test is not safe under default parallel cargo test execution due to an
+unscoped shared-DB cleanup race; re-run single-threaded by this audit, passes
+cleanly and confirms the underlying production locking mechanism is correct),
+A2-FIND-009/010 (MEDIUM -- two narrow operator-truth-surface gaps outside an
+otherwise well-built GUI truth-state framework), A2-FIND-011/012/013/014
+(LOW-MEDIUM hardening items: runs.status lacks a DB-level CAS guard unlike
+the correctly-built sys_autonomous_daily_operations pattern; mqk-testkit is
+listed as an unconditional production dependency in mqk-daemon/Cargo.toml
+despite zero call sites; a dormant identity-propagation bug in the Alpaca
+replace adapter, live only once replace is ever wired into production
+dispatch, which it currently is not; a documented now()-in-lifecycle-
+timestamps carve-out in tension with the determinism rule).
+
+Ordered repair backlog (patch IDs, not implemented): A2-PATCH-001 (wire the
+stale-claim reaper) -> A2-PATCH-002 (restart-stable decision identity) in
+parallel with A2-PATCH-003 (close the partial-fill dual-lane gap, migration
+required) and A2-PATCH-004 (restore fail-closed unknown-fill handling) ->
+A2-PATCH-005 (finalization + post-stop event durability) -> A2-PATCH-006
+(risk-status truth_state) -> A2-PATCH-007 (operator-truth GUI gaps,
+non-blocking) -> A2-PATCH-008 (LiveCapital trust-completeness gate,
+non-blocking for the current Paper-only soak) -> A2-PATCH-009 (grouped
+low-severity hardening, non-blocking). Full scope, tests-required, and
+migration flags for each are in the report's Required Repair Backlog section.
+
+No repair was performed by this audit. Bundle 8 remains frozen (unstarted,
+untouched). Live capital remains unauthorized (unchanged by this audit).
+
+Recommendation: do not begin, extend, or count any session toward the formal
+Paper soak, or the separate Bundle 7 Phase 7C soak, until A2-PATCH-001
+through A2-PATCH-006 are closed and independently proven -- two of the
+confirmed findings sit directly on the primary order/fill path every soak
+session exercises, and two others undermine the trustworthiness of the
+soak's own evidence record and pre-arm safety checks.
+
+DISPOSITION:
+AUDIT-02-END-TO-END-INTENT-BEHAVIOR-CONFORMANCE-01:
+COMPLETE -- AUDIT REPORT AND ORDERED REPAIR BACKLOG READY FOR CHATGPT/OPERATOR REVIEW
