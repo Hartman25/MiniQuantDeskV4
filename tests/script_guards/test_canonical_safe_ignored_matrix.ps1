@@ -7,13 +7,21 @@
 # rows, stale rows, and unknown classifications -- and that
 # BLOCKED_LOCAL_PREREQUISITE rows are excluded from execution by default.
 #
+# FULL-AUDIT-TESTKIT-AND-IGNORED-AUTHORITY-FINAL-REPAIR-01 Part 2/3: proves
+# `Get-ExactLiveKeysForPackage` resolves a `Running unittests <path> (...)`
+# header via real cargo-metadata-derived target lookup (never assumes
+# "lib"), so a package with both a lib and one or more bin unit-test
+# binaries (or two bin targets sharing a same-named test) keeps every
+# target's identity distinct -- and proves `Get-MatrixDisposition` gates the
+# final disposition on BLOCKED_LOCAL_PREREQUISITE rows, not just exit codes.
+#
 # This dot-sources the real script to reach its pure comparison functions
 # (Test-InventorySelfValidation, Get-InventoryCompletenessResult,
-# Get-ExactLiveKeysForPackage, Get-BlockedTestRows,
-# Get-SkipArgsForBlockedRows) directly against synthetic data -- no real
-# cargo invocation, no real inventory CSV, no live workspace build. Dot-
-# sourcing does not trigger Main (see the InvocationName guard at the
-# bottom of the script under test).
+# Get-ExactLiveKeysForPackage, Get-TargetLookupFromMetadataTargets,
+# Get-BlockedTestRows, Get-SkipArgsForBlockedRows, Get-MatrixDisposition)
+# directly against synthetic data -- no real cargo invocation, no real
+# inventory CSV, no live workspace build. Dot-sourcing does not trigger Main
+# (see the InvocationName guard at the bottom of the script under test).
 #
 # Usage: pwsh -File tests\script_guards\test_canonical_safe_ignored_matrix.ps1
 # Exit codes: 0 = all pass, 1 = one or more failures.
@@ -69,6 +77,18 @@ function New-LiveRow {
         Target   = $Target
         Function = $Function
         Key      = "{0}|{1}|{2}" -f $Package, $Target, $Function
+    }
+}
+
+# Builds a synthetic cargo-metadata `targets` array entry, matching the
+# shape `Get-TargetLookupFromMetadataTargets` reads (`.kind`, `.name`,
+# `.src_path`).
+function New-MetadataTarget {
+    param([string]$Kind, [string]$Name, [string]$SrcPath)
+    [pscustomobject]@{
+        kind     = @($Kind)
+        name     = $Name
+        src_path = $SrcPath
     }
 }
 
@@ -179,6 +199,9 @@ if ($result.Stale.Count -eq 0) {
 # (real captured shapes from this repo: unittests, then two integration
 # test binaries).
 # ---------------------------------------------------------------------------
+$mqkDbTargetLookup = Get-TargetLookupFromMetadataTargets -MetadataTargets @(
+    (New-MetadataTarget "lib" "mqk-db" "src\lib.rs")
+)
 $syntheticListOutput = @(
     "    Finished `test` profile [unoptimized + debuginfo] target(s) in 5.88s",
     "     Running unittests src\lib.rs (target\debug\deps\mqk_db-6c2951fba3a20d6d.exe)",
@@ -189,7 +212,7 @@ $syntheticListOutput = @(
     "     Running tests\other_scenario.rs (target\debug\deps\other_scenario-aaaa.exe)",
     "runtime_lease::tests::acquire_when_no_lease_exists: test"
 )
-$rows = Get-ExactLiveKeysForPackage -Package "mqk-db" -ListOutput $syntheticListOutput
+$rows = Get-ExactLiveKeysForPackage -Package "mqk-db" -ListOutput $syntheticListOutput -TargetLookup $mqkDbTargetLookup
 $expectedKeys = @(
     "mqk-db|lib|test_support::tests::split_db_url_handles_no_query_string",
     "mqk-db|lib|runtime_lease::tests::acquire_when_no_lease_exists",
@@ -202,6 +225,79 @@ if (($rows.Count -eq 4) -and ($missingExpected.Count -eq 0)) {
     Pass "CSIM09" "Target context (lib vs. two distinct integration-test binaries) is tracked correctly across a multi-section --list output, and a bare name repeated in two targets is kept distinct"
 } else {
     Fail "CSIM09" "Target-context tracking failed (got $($rows.Count) rows: $($actualKeys -join ', '); missing expected: $($missingExpected -join ', '))"
+}
+
+# ---------------------------------------------------------------------------
+# CSIM09b: a package with BOTH a lib and a bin unit-test binary must not
+# collapse both `Running unittests ...` headers to `lib` -- this is the
+# exact defect FULL-AUDIT-TESTKIT-AND-IGNORED-AUTHORITY-FINAL-REPAIR-01
+# Part 2 closes (mirrors this repo's real mqk-daemon shape: src/lib.rs +
+# src/main.rs, each compiled as its own separate unit-test binary).
+# ---------------------------------------------------------------------------
+$libBinTargetLookup = Get-TargetLookupFromMetadataTargets -MetadataTargets @(
+    (New-MetadataTarget "lib" "mqk-daemon" "src\lib.rs"),
+    (New-MetadataTarget "bin" "mqk-daemon" "src\main.rs")
+)
+$libBinListOutput = @(
+    "     Running unittests src\lib.rs (target\debug\deps\mqk_daemon-aaa.exe)",
+    "dynamic_selection_evidence_validator::tests::some_lib_test: test",
+    "     Running unittests src\main.rs (target\debug\deps\mqk_daemon-bbb.exe)",
+    "tests::some_main_only_test: test"
+)
+$rows = Get-ExactLiveKeysForPackage -Package "mqk-daemon" -ListOutput $libBinListOutput -TargetLookup $libBinTargetLookup
+$libRow = $rows | Where-Object { $_.Function -eq "dynamic_selection_evidence_validator::tests::some_lib_test" }
+$binRow = $rows | Where-Object { $_.Function -eq "tests::some_main_only_test" }
+if (($rows.Count -eq 2) -and $libRow -and ($libRow.Target -eq "lib") -and ($libRow.TargetKind -eq "Lib") -and `
+        $binRow -and ($binRow.Target -eq "mqk-daemon") -and ($binRow.TargetKind -eq "Bin") -and `
+        ($libRow.Key -ne $binRow.Key)) {
+    Pass "CSIM09b" "lib and main.rs unit-test binaries resolve to distinct target names/kinds (main.rs is never collapsed into 'lib')"
+} else {
+    Fail "CSIM09b" "lib vs. bin unit-test target resolution failed (rows: $(($rows | ForEach-Object { $_.Key + '=' + $_.TargetKind }) -join ', '))"
+}
+
+# ---------------------------------------------------------------------------
+# CSIM09c: the SAME qualified test name present in two different bin unit-
+# test binaries within one package remains two distinct identities (never
+# deduplicated or collided just because the qualified function string
+# matches).
+# ---------------------------------------------------------------------------
+$twoBinsTargetLookup = Get-TargetLookupFromMetadataTargets -MetadataTargets @(
+    (New-MetadataTarget "bin" "mqk_paper_loop" "src\bin\mqk_paper_loop.rs"),
+    (New-MetadataTarget "bin" "mqk_other_tool" "src\bin\mqk_other_tool.rs")
+)
+$twoBinsListOutput = @(
+    "     Running unittests src\bin\mqk_paper_loop.rs (target\debug\deps\mqk_paper_loop-aaa.exe)",
+    "tests::shared_helper_name: test",
+    "     Running unittests src\bin\mqk_other_tool.rs (target\debug\deps\mqk_other_tool-bbb.exe)",
+    "tests::shared_helper_name: test"
+)
+$rows = Get-ExactLiveKeysForPackage -Package "mqk-cli" -ListOutput $twoBinsListOutput -TargetLookup $twoBinsTargetLookup
+$keys = @($rows | ForEach-Object { $_.Key })
+if (($rows.Count -eq 2) -and ("mqk-cli|mqk_paper_loop|tests::shared_helper_name" -in $keys) -and `
+        ("mqk-cli|mqk_other_tool|tests::shared_helper_name" -in $keys)) {
+    Pass "CSIM09c" "The same qualified test name in two different bin targets remains two distinct exact identities"
+} else {
+    Fail "CSIM09c" "Same-qualified-name-in-two-bins collision was not kept distinct (rows: $($keys -join ', '))"
+}
+
+# ---------------------------------------------------------------------------
+# CSIM09d: a `Running unittests <path> (...)` header whose path has no
+# corresponding cargo-metadata lib/bin target is a hard failure, not a
+# silent fallback to "lib" -- proves the lookup miss path fails closed.
+# ---------------------------------------------------------------------------
+$threw = $false
+try {
+    Get-ExactLiveKeysForPackage -Package "mqk-daemon" -ListOutput @(
+        "     Running unittests src\lib.rs (target\debug\deps\mqk_daemon-aaa.exe)",
+        "tests::some_test: test"
+    ) -TargetLookup @()
+} catch {
+    $threw = $true
+}
+if ($threw) {
+    Pass "CSIM09d" "Unresolvable unit-test source path throws instead of silently defaulting to 'lib'"
+} else {
+    Fail "CSIM09d" "Unresolvable unit-test source path did NOT throw -- risks a silent fallback identity"
 }
 
 # ---------------------------------------------------------------------------
@@ -228,6 +324,45 @@ if ($defaultOk -and $auditOk) {
     Pass "CSIM10" "BLOCKED_LOCAL_PREREQUISITE rows are --skip-excluded by default and only included with explicit AuditOnly (false-green prevention)"
 } else {
     Fail "CSIM10" "Blocked-row skip-arg computation is wrong (default skip args: $($skipArgsDefault -join ' '); audit skip args: $($skipArgsAudit -join ' '))"
+}
+
+# ---------------------------------------------------------------------------
+# CSIM11: one or more BLOCKED_LOCAL_PREREQUISITE rows makes the default
+# (non-audit) disposition non-green -- BLOCKED, nonzero exit, and critically
+# the message text is never the "PASSED" string -- even though both cargo
+# exit codes are 0.
+# ---------------------------------------------------------------------------
+$d = Get-MatrixDisposition -SafeExit 0 -ManualCompileExit 0 -BlockedCount 2 -AuditOnlyIncludeBlocked $false
+if (($d.Disposition -eq "BLOCKED") -and ($d.ExitCode -ne 0) -and ($d.Disposition -ne "PASSED") -and ($d.Message -notmatch "^PASSED")) {
+    Pass "CSIM11" "One or more BLOCKED_LOCAL_PREREQUISITE rows makes the default disposition BLOCKED/non-green, never PASSED, even with clean exit codes"
+} else {
+    Fail "CSIM11" "Blocked rows did not force a non-green disposition (got Disposition=$($d.Disposition) ExitCode=$($d.ExitCode) Message=$($d.Message))"
+}
+
+# ---------------------------------------------------------------------------
+# CSIM12: -AuditOnlyIncludeBlocked only removes the BLOCKED disposition once
+# execution actually happened AND succeeded (SafeExit -eq 0) -- audit mode
+# does not get a free pass on its own.
+# ---------------------------------------------------------------------------
+$dAuditPass = Get-MatrixDisposition -SafeExit 0 -ManualCompileExit 0 -BlockedCount 2 -AuditOnlyIncludeBlocked $true
+$dAuditFail = Get-MatrixDisposition -SafeExit 1 -ManualCompileExit 0 -BlockedCount 2 -AuditOnlyIncludeBlocked $true
+if (($dAuditPass.Disposition -eq "PASSED") -and ($dAuditFail.Disposition -eq "FAILED") -and ($dAuditFail.Disposition -ne "PASSED")) {
+    Pass "CSIM12" "AuditOnlyIncludeBlocked is only green after blocked rows actually executed and passed (SafeExit=0); a failing execution still reports FAILED, not PASSED"
+} else {
+    Fail "CSIM12" "AuditOnlyIncludeBlocked disposition is wrong (pass-case=$($dAuditPass.Disposition), fail-case=$($dAuditFail.Disposition))"
+}
+
+# ---------------------------------------------------------------------------
+# CSIM13: zero blocked rows and clean exit codes is the only case that
+# produces PASSED -- and a nonzero SafeExit is never masked by a zero
+# BlockedCount.
+# ---------------------------------------------------------------------------
+$dClean = Get-MatrixDisposition -SafeExit 0 -ManualCompileExit 0 -BlockedCount 0 -AuditOnlyIncludeBlocked $false
+$dSafeFailedNoBlocked = Get-MatrixDisposition -SafeExit 1 -ManualCompileExit 0 -BlockedCount 0 -AuditOnlyIncludeBlocked $false
+if (($dClean.Disposition -eq "PASSED") -and ($dClean.ExitCode -eq 0) -and ($dSafeFailedNoBlocked.Disposition -eq "FAILED")) {
+    Pass "CSIM13" "Zero blocked rows with clean exit codes is PASSED; a real test failure with zero blocked rows still reports FAILED"
+} else {
+    Fail "CSIM13" "Baseline disposition logic is wrong (clean=$($dClean.Disposition), safe-fail-no-blocked=$($dSafeFailedNoBlocked.Disposition))"
 }
 
 Write-Host ""

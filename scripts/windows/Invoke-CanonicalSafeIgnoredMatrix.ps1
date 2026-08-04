@@ -34,37 +34,87 @@
 # qualified name, so the composite key is directly comparable on both sides
 # with no lossy reduction anywhere in the pipeline.
 #
-# The comparison logic itself (Test-InventorySelfValidation,
-# Get-InventoryCompletenessResult, Get-ExactLiveKeysForPackage) is defined
-# as pure, cargo-free functions at script scope specifically so
+# FULL-AUDIT-TESTKIT-AND-IGNORED-AUTHORITY-FINAL-REPAIR-01 Part 2 hardening:
+# the above rework still mapped *every* `Running unittests <path> (...)`
+# header -- cargo emits one per unit-test binary, which includes a crate's
+# own `src/lib.rs` *and* `src/main.rs` *and* every `src/bin/<name>.rs` -- to
+# the single target name `lib`, unconditionally. A crate with both a lib and
+# a bin (or multiple bins) would silently collapse their distinct unit-test
+# identities into one. The fix: `Get-ExactLiveKeysForPackage` now takes a
+# `-TargetLookup` table (built by `Get-TargetLookupFromMetadataTargets` from
+# `cargo metadata`'s own `targets[].kind`/`targets[].name`/`targets[].src_path`
+# -- compiler-artifact truth, not a guess) keyed by the exact source path
+# cargo itself prints in the `Running unittests <path> (...)` header, and
+# resolves each such header to its real target name (`lib`, or the exact bin
+# name) and kind (Lib/Bin/IntegrationTest/Example). `Get-ExactLiveKeysForPackage`
+# itself stays a pure, cargo-free function -- `Main` is the only thing that
+# ever calls `cargo metadata` to build the real lookup; a test can still pass
+# a synthetic one.
+#
+# FULL-AUDIT-TESTKIT-AND-IGNORED-AUTHORITY-FINAL-REPAIR-01 Part 3 hardening:
+# two further defects in Step 2/the final disposition:
+#   - `--skip <bare function name>` (no `--exact`) run against a single
+#     `--workspace --all-targets` invocation is a *substring* match with
+#     *workspace-wide* scope -- neither package- nor target-scoped, and not
+#     even exact-string-scoped. A `BLOCKED_LOCAL_PREREQUISITE` row's
+#     `--skip` could therefore also silently skip an unrelated, non-blocked
+#     test elsewhere in the workspace whose qualified name merely contains
+#     that same substring, which is a false-green risk this script must not
+#     admit. The fix: Step 2 now executes each live (package, exact target)
+#     pair as its own `cargo test -p <pkg> --lib|--bin <name>|--test <name>`
+#     invocation (using the same `Get-TargetLookupFromMetadataTargets`-
+#     derived kind/name from Step 1) with `--exact`, so a `--skip` can only
+#     ever affect the one specific compiled test binary the blocked row
+#     actually belongs to, matched by exact string, not substring.
+#   - the final disposition printed the green "PASSED: ... is green" message
+#     and exited 0 purely based on `$safeExit`/`$manualCompileExit`, even
+#     when one or more `BLOCKED_LOCAL_PREREQUISITE` rows had been silently
+#     excluded from execution by default -- a blocked proof is not a passing
+#     proof. The fix: `Get-MatrixDisposition` (a pure function, mutation-
+#     tested the same way as the rest of this file) now also gates on
+#     blocked-row count and `-AuditOnlyIncludeBlocked`, and `Main` only ever
+#     prints the green message when that function reports `PASSED`.
+#
+# The comparison/disposition logic itself (Test-InventorySelfValidation,
+# Get-InventoryCompletenessResult, Get-ExactLiveKeysForPackage,
+# Get-TargetLookupFromMetadataTargets, Get-MatrixDisposition) is defined as
+# pure, cargo-free functions at script scope specifically so
 # tests/script_guards/test_canonical_safe_ignored_matrix.ps1 can dot-source
-# this file and exercise duplicate/stale/missing/unknown-classification
-# mutation fixtures against synthetic data, without needing a real
-# workspace build for every fixture. Dot-sourcing this file does not invoke
-# cargo or execute the matrix -- that only happens via the `Main` guard at
-# the bottom, which is skipped when the file is dot-sourced.
+# this file and exercise duplicate/stale/missing/unknown-classification/
+# target-collision/blocked-disposition mutation fixtures against synthetic
+# data, without needing a real workspace build for every fixture. Dot-
+# sourcing this file does not invoke cargo or execute the matrix -- that
+# only happens via the `Main` guard at the bottom, which is skipped when the
+# file is dot-sourced.
 #
 # What this script proves, in order:
 #   1. Every #[ignore]d test in the compiled workspace test harness (built
 #      with the same feature set this script itself uses) appears in the
-#      tracked inventory under its exact (package, target, function) key.
-#      A newly added ignored test that is missing from the inventory is a
-#      hard failure. So is a CSV row whose exact key no longer matches any
-#      live test (a stale row -- the test was renamed, moved, or deleted).
-#      So is a duplicate exact key within the CSV itself. So is a row whose
+#      tracked inventory under its exact (package, target, function) key,
+#      where `target` is the real cargo-metadata-derived target name (never
+#      collapsed to `lib` for a non-lib unit-test binary). A newly added
+#      ignored test that is missing from the inventory is a hard failure.
+#      So is a CSV row whose exact key no longer matches any live test (a
+#      stale row -- the test was renamed, moved, or deleted). So is a
+#      duplicate exact key within the CSV itself. So is a row whose
 #      `classification` is not one of the four closed values this script
 #      knows how to handle.
-#   2. Every SAFE_LOCAL and SAFE_DB_5434 test executes and passes.
-#      MANUAL_EXTERNAL tests are gated behind mqk-daemon's `manual-external`
-#      Cargo feature (off in this invocation), so they do not even exist in
-#      the compiled binary here. BLOCKED_LOCAL_PREREQUISITE tests are
-#      explicitly `--skip`-excluded by exact name from this step -- they are
-#      classified as blocked precisely because their local prerequisite is
-#      not available, and letting them execute anyway (and either fail
-#      loudly or, worse, silently no-op) is a false-green risk this script
-#      must not admit by default. Pass `-AuditOnlyIncludeBlocked` to
-#      deliberately opt into running them anyway for a one-off audit; the
-#      script still prints which names that flag pulled back in.
+#   2. Every SAFE_LOCAL and SAFE_DB_5434 test executes and passes, one exact
+#      (package, target) invocation at a time. MANUAL_EXTERNAL tests are
+#      gated behind mqk-daemon's `manual-external` Cargo feature (off in
+#      this invocation), so they do not even exist in the compiled binary
+#      here. BLOCKED_LOCAL_PREREQUISITE tests are explicitly, exactly
+#      `--skip --exact`-excluded from only the one (package, target)
+#      invocation they actually belong to -- they are classified as blocked
+#      precisely because their local prerequisite is not available, and
+#      letting them execute anyway (and either fail loudly or, worse,
+#      silently no-op) is a false-green risk this script must not admit by
+#      default. Pass `-AuditOnlyIncludeBlocked` to deliberately opt into
+#      running them anyway for a one-off audit; the script still prints
+#      which exact keys that flag pulled back in. Whenever one or more
+#      BLOCKED_LOCAL_PREREQUISITE rows were excluded (the default), the
+#      final disposition is `BLOCKED`, exits nonzero, and never prints the
+#      green "PASSED" message -- a blocked proof is not a passing proof.
 #   3. The 9 MANUAL_EXTERNAL tests still compile when `--features
 #      manual-external` is explicitly requested (`--no-run`, never executed)
 #      -- proving their source has not silently bit-rotted even though they
@@ -222,44 +272,132 @@ function Get-SkipArgsForBlockedRows {
     return ,$skipArgs
 }
 
-function Get-WorkspaceMemberNames {
+function Get-WorkspaceMetadata {
     param([string]$CargoExe, [string]$CargoManifest)
     $metaLines = & $CargoExe metadata --no-deps --format-version=1 --manifest-path $CargoManifest 2>&1
     if ($LASTEXITCODE -ne 0) {
         Write-Host ($metaLines -join "`n")
         throw "cargo metadata failed (exit $LASTEXITCODE) -- cannot enumerate workspace packages."
     }
-    $meta = ($metaLines -join "`n") | ConvertFrom-Json
-    return @($meta.packages | ForEach-Object { $_.name } | Sort-Object -Unique)
+    return ($metaLines -join "`n") | ConvertFrom-Json
+}
+
+# Pure: given one package's `cargo metadata` `targets` array (each element
+# carrying `.kind` -- an array such as @("lib"), @("bin"), @("test"),
+# @("example"), @("bench") -- plus `.name` and `.src_path`), builds a list of
+# resolved lib/bin targets (real, cargo-metadata-authoritative name and
+# kind, plus the source path normalized to forward slashes) that
+# `Resolve-UnitTestTarget` matches a `Running unittests <path> (...)`
+# header's `<path>` against. This is the "compiler-artifact truth"
+# `Get-ExactLiveKeysForPackage` uses to resolve a unit-test header instead of
+# guessing "lib" for every one. Returned as a list, not a hashtable keyed by
+# the literal path: `cargo metadata`'s `src_path` is always absolute, while
+# the path cargo test prints in its own "Running unittests <path> (...)"
+# header is relative to the crate directory (e.g. "src/lib.rs") -- an exact
+# key match would never hit, so resolution has to be a suffix match instead
+# (see `Resolve-UnitTestTarget`).
+function Get-TargetLookupFromMetadataTargets {
+    param([Parameter(Mandatory = $true)] $MetadataTargets)
+    $resolved = New-Object System.Collections.Generic.List[object]
+    foreach ($t in $MetadataTargets) {
+        $kindStr = @($t.kind)[0]
+        $targetKind = switch ($kindStr) {
+            "lib" { "Lib" }
+            "bin" { "Bin" }
+            default { $null }
+        }
+        if (-not $targetKind) {
+            # Only lib/bin targets ever produce a "Running unittests ..."
+            # header; "test" (integration-test binaries) and "example" are
+            # resolved separately by their own path-stem regex below and
+            # need no metadata lookup, and other kinds (bench, custom-build,
+            # proc-macro, ...) never appear in `--ignored --list` output at
+            # all under this script's fixed `--all-targets` invocation.
+            continue
+        }
+        $normalizedPath = ($t.src_path -replace '\\', '/')
+        # A crate's own lib unit-test binary keeps the literal target name
+        # "lib" -- the long-standing convention this script's inventory
+        # already carries for every one of its existing rows -- rather than
+        # cargo metadata's raw lib target `name` (which is the crate name,
+        # not "lib"). Only a Bin target's real, distinct name is ever used,
+        # since that is exactly the identity that used to be wrongly
+        # collapsed into "lib" too.
+        $name = if ($targetKind -eq "Lib") { "lib" } else { $t.name }
+        $resolved.Add([pscustomobject]@{
+            Kind              = $targetKind
+            Name              = $name
+            NormalizedSrcPath = $normalizedPath
+        })
+    }
+    return ,$resolved
+}
+
+# Pure: resolves the `<path>` captured from a `Running unittests <path> (...)`
+# header against a `-TargetLookup` list built by
+# `Get-TargetLookupFromMetadataTargets`. `cargo metadata`'s `src_path` is
+# always absolute; the printed header path is crate-relative -- so this
+# matches by exact equality first (covers a caller that already normalized
+# both to the same absolute form, e.g. a test fixture) and otherwise by
+# path-boundary suffix (the absolute metadata path ending in
+# "/<printed path>"), never a bare, boundary-unaware substring match. Returns
+# $null, never a guessed default, when nothing matches.
+function Resolve-UnitTestTarget {
+    param([Parameter(Mandatory = $true)] $TargetLookup, [string]$PrintedPath)
+    $normalizedPrinted = ($PrintedPath -replace '\\', '/')
+    foreach ($t in $TargetLookup) {
+        if ($t.NormalizedSrcPath -eq $normalizedPrinted) { return $t }
+        if ($t.NormalizedSrcPath.EndsWith("/$normalizedPrinted")) { return $t }
+    }
+    return $null
 }
 
 # Pure: parses one package's `cargo test -p <pkg> ... -- --ignored --list`
-# output into exact (package, target, function) keys. `target` is derived
-# from the "Running ..." header that precedes each test-binary's listing --
-# `lib` for the crate's own unit tests, the tests/*.rs file's stem for an
-# integration test binary, or `doctest` for a doc-tests section (present
-# only if this is ever invoked without --all-targets, which excludes
-# doctests). Takes plain text lines, never invokes cargo itself, so a test
-# can feed it synthetic `--list` output directly.
+# output into exact (package, target, function) keys. `target`/`TargetKind`
+# are derived from the "Running ..." header that precedes each test-binary's
+# listing: for a `Running unittests <path> (...)` header (emitted once per
+# unit-test binary -- a crate's own `src/lib.rs`, *and* `src/main.rs`, *and*
+# every `src/bin/<name>.rs`, each separately), `<path>` is resolved via
+# `Resolve-UnitTestTarget` against `-TargetLookup` (built from real `cargo
+# metadata` truth by `Get-TargetLookupFromMetadataTargets`) to get the
+# target's real name and kind -- never assumed to be `lib`. Integration-test
+# binaries (`Running tests[\/]<name>.rs (...)`) use the file stem directly,
+# and a `Doc-tests` section (present only if this is ever invoked without
+# --all-targets, which excludes doctests) uses the literal name `doctest`.
+# Takes plain text lines and a plain lookup list, never invokes cargo
+# itself, so a test can feed it synthetic `--list` output and a synthetic
+# lookup directly.
 function Get-ExactLiveKeysForPackage {
-    param([string]$Package, [string[]]$ListOutput)
+    param(
+        [string]$Package,
+        [string[]]$ListOutput,
+        [Parameter(Mandatory = $true)] $TargetLookup
+    )
 
     $currentTarget = $null
+    $currentTargetKind = $null
     $rows = New-Object System.Collections.Generic.List[object]
     $seen = New-Object System.Collections.Generic.HashSet[string]
 
     foreach ($line in $ListOutput) {
-        if ($line -match '^\s*Running unittests \S+ \(.+\)\s*$') {
-            $currentTarget = "lib"
+        if ($line -match '^\s*Running unittests (?<path>\S+) \(.+\)\s*$') {
+            $resolved = Resolve-UnitTestTarget -TargetLookup $TargetLookup -PrintedPath $matches['path']
+            if (-not $resolved) {
+                throw "Package '$Package': no cargo-metadata lib/bin target matches unit-test source path '$($matches['path'])' -- the target lookup is out of date or incomplete."
+            }
+            $currentTarget = $resolved.Name
+            $currentTargetKind = $resolved.Kind
             continue
         }
         if ($line -match '^\s*Running (?<relpath>tests[\\/][^\s]+\.rs) \(.+\)\s*$') {
             $stem = [System.IO.Path]::GetFileNameWithoutExtension($matches['relpath'])
             $currentTarget = $stem
+            $currentTargetKind = "IntegrationTest"
             continue
         }
         if ($line -match '^\s*Doc-tests \S+\s*$') {
             $currentTarget = "doctest"
+            $currentTargetKind = "Doctest"
             continue
         }
         if ($line -match '^(?<name>[A-Za-z0-9_:]+): test$') {
@@ -270,15 +408,72 @@ function Get-ExactLiveKeysForPackage {
             $key = "{0}|{1}|{2}" -f $Package, $currentTarget, $qualified
             if ($seen.Add($key)) {
                 $rows.Add([pscustomobject]@{
-                    Package  = $Package
-                    Target   = $currentTarget
-                    Function = $qualified
-                    Key      = $key
+                    Package    = $Package
+                    Target     = $currentTarget
+                    TargetKind = $currentTargetKind
+                    Function   = $qualified
+                    Key        = $key
                 })
             }
         }
     }
     return ,$rows
+}
+
+# Pure: maps a live row's TargetKind/Target to the exact cargo target
+# selector flag(s) needed to invoke *only* that one compiled test binary --
+# the scoping that makes Step 2's per-row `--skip` an exact-identity control
+# instead of a workspace-wide substring match.
+function Get-TargetSelectorArgs {
+    param([string]$TargetKind, [string]$TargetName)
+    switch ($TargetKind) {
+        "Lib" { return @("--lib") }
+        "Bin" { return @("--bin", $TargetName) }
+        "IntegrationTest" { return @("--test", $TargetName) }
+        default {
+            throw "Unsupported TargetKind '$TargetKind' for exact-scoped execution (target '$TargetName') -- doctests are never selected here because this script always runs --all-targets."
+        }
+    }
+}
+
+# Pure: the final pass/fail/blocked disposition, decided purely from already-
+# computed exit codes and blocked-row bookkeeping -- no cargo invocation, so
+# every combination is directly mutation-testable. `Disposition` is one of
+# "PASSED", "BLOCKED", or "FAILED"; `Main` only ever prints the green
+# "PASSED: ... is green" message when this returns "PASSED".
+function Get-MatrixDisposition {
+    param(
+        [Parameter(Mandatory = $true)] [int]$SafeExit,
+        [Parameter(Mandatory = $true)] [int]$ManualCompileExit,
+        [Parameter(Mandatory = $true)] [int]$BlockedCount,
+        [Parameter(Mandatory = $true)] [bool]$AuditOnlyIncludeBlocked
+    )
+    if ($SafeExit -ne 0) {
+        return [pscustomobject]@{
+            Disposition = "FAILED"
+            ExitCode    = 1
+            Message     = "Safe-ignored matrix reported failures (see cargo test output above)."
+        }
+    }
+    if ($ManualCompileExit -ne 0) {
+        return [pscustomobject]@{
+            Disposition = "FAILED"
+            ExitCode    = 1
+            Message     = "MANUAL_EXTERNAL compile-only proof failed (--features mqk-db/testkit,mqk-daemon/manual-external --no-run)."
+        }
+    }
+    if (($BlockedCount -gt 0) -and (-not $AuditOnlyIncludeBlocked)) {
+        return [pscustomobject]@{
+            Disposition = "BLOCKED"
+            ExitCode    = 1
+            Message     = "$BlockedCount BLOCKED_LOCAL_PREREQUISITE test(s) were excluded from this run and never executed -- this is not a green proof. Pass -AuditOnlyIncludeBlocked to deliberately execute and prove them."
+        }
+    }
+    return [pscustomobject]@{
+        Disposition = "PASSED"
+        ExitCode    = 0
+        Message     = "canonical safe-ignored matrix is green."
+    }
 }
 
 function Main {
@@ -333,12 +528,22 @@ function Main {
     Write-Host ""
     Write-Host "-- Step 1: inventory completeness (exact identity) --" -ForegroundColor Yellow
 
-    $packages = if ($PackageFilter) { $PackageFilter } else { Get-WorkspaceMemberNames -CargoExe $CargoExe -CargoManifest $CargoManifest }
+    $meta = Get-WorkspaceMetadata -CargoExe $CargoExe -CargoManifest $CargoManifest
+    $allPackageNames = @($meta.packages | ForEach-Object { $_.name } | Sort-Object -Unique)
+    $packageTargetsByName = @{}
+    foreach ($p in $meta.packages) { $packageTargetsByName[$p.name] = $p.targets }
+
+    $packages = if ($PackageFilter) { $PackageFilter } else { $allPackageNames }
     Write-Host ("Enumerating ignored tests for {0} package(s): {1}" -f $packages.Count, ($packages -join ', '))
 
     $liveRows = New-Object System.Collections.Generic.List[object]
     $liveKeySet = New-Object System.Collections.Generic.HashSet[string]
     foreach ($pkg in $packages) {
+        if (-not $packageTargetsByName.ContainsKey($pkg)) {
+            throw "Package '$pkg' not found in cargo metadata -- cannot build its exact target lookup."
+        }
+        $targetLookup = Get-TargetLookupFromMetadataTargets -MetadataTargets $packageTargetsByName[$pkg]
+
         $listArgs = @(
             "test", "-p", $pkg, "--manifest-path", $CargoManifest,
             "--features", "mqk-db/testkit", "--all-targets",
@@ -349,7 +554,7 @@ function Main {
             Write-Host ($listOutput -join "`n")
             throw "cargo test -p $pkg --ignored --list failed (exit $LASTEXITCODE) -- cannot verify inventory completeness."
         }
-        foreach ($row in (Get-ExactLiveKeysForPackage -Package $pkg -ListOutput $listOutput)) {
+        foreach ($row in (Get-ExactLiveKeysForPackage -Package $pkg -ListOutput $listOutput -TargetLookup $targetLookup)) {
             if ($liveKeySet.Add($row.Key)) {
                 $liveRows.Add($row)
             }
@@ -384,16 +589,20 @@ function Main {
     }
 
     # -----------------------------------------------------------------------
-    # Step 2: execute every SAFE_LOCAL + SAFE_DB_5434 test. MANUAL_EXTERNAL
-    # tests are absent from this build (manual-external feature not
-    # requested). BLOCKED_LOCAL_PREREQUISITE tests are explicitly
-    # --skip-excluded by exact name unless -AuditOnlyIncludeBlocked.
+    # Step 2: execute every SAFE_LOCAL + SAFE_DB_5434 test, one exact
+    # (package, target) invocation at a time (never a single blanket
+    # `--workspace --all-targets` call). MANUAL_EXTERNAL tests are absent
+    # from this build (manual-external feature not requested).
+    # BLOCKED_LOCAL_PREREQUISITE tests are excluded via `--skip --exact`
+    # scoped to only the one (package, target) invocation they actually
+    # belong to, unless -AuditOnlyIncludeBlocked.
     # -----------------------------------------------------------------------
     Write-Host ""
-    Write-Host "-- Step 2: executing SAFE_LOCAL + SAFE_DB_5434 --" -ForegroundColor Yellow
+    Write-Host "-- Step 2: executing SAFE_LOCAL + SAFE_DB_5434 (exact package+target scoping) --" -ForegroundColor Yellow
 
     $blockedRows = Get-BlockedTestRows -Inventory $inventory
-    $skipArgs = Get-SkipArgsForBlockedRows -BlockedRows $blockedRows -AuditOnly ([bool]$AuditOnlyIncludeBlocked)
+    $blockedKeySet = New-Object System.Collections.Generic.HashSet[string]
+    foreach ($row in $blockedRows) { [void]$blockedKeySet.Add((Get-InventoryExactKey $row)) }
     if ($blockedRows.Count -gt 0) {
         if ($AuditOnlyIncludeBlocked) {
             Write-Host ("AUDIT MODE: {0} BLOCKED_LOCAL_PREREQUISITE test(s) will be allowed to execute:" -f $blockedRows.Count) -ForegroundColor DarkYellow
@@ -404,13 +613,39 @@ function Main {
         }
     }
 
-    $safeArgs = @(
-        "test", "--manifest-path", $CargoManifest, "--workspace",
-        "--features", "mqk-db/testkit", "--all-targets", "--no-fail-fast",
-        "--", "--ignored", "--test-threads=1"
-    ) + $skipArgs
-    & $CargoExe @safeArgs
-    $safeExit = $LASTEXITCODE
+    $safeExit = 0
+    $targetGroups = @($liveRows | Group-Object -Property Package, Target)
+    foreach ($group in $targetGroups) {
+        $sample = $group.Group[0]
+        $pkg = $sample.Package
+        $targetName = $sample.Target
+        $targetKind = $sample.TargetKind
+
+        $blockedRowsForTarget = @($group.Group | Where-Object { $blockedKeySet.Contains($_.Key) } | ForEach-Object {
+            [pscustomobject]@{ function = $_.Function }
+        })
+        $skipArgs = Get-SkipArgsForBlockedRows -BlockedRows $blockedRowsForTarget -AuditOnly ([bool]$AuditOnlyIncludeBlocked)
+
+        if (($skipArgs.Count / 2) -eq $group.Group.Count) {
+            # Every ignored test in this exact (package, target) is blocked
+            # and being skipped -- nothing would actually run here, so skip
+            # the invocation entirely rather than spinning up a process for
+            # zero effective tests.
+            continue
+        }
+
+        $selectorArgs = Get-TargetSelectorArgs -TargetKind $targetKind -TargetName $targetName
+        $targetArgs = @(
+            "test", "-p", $pkg, "--manifest-path", $CargoManifest,
+            "--features", "mqk-db/testkit"
+        ) + $selectorArgs + @(
+            "--no-fail-fast", "--", "--ignored", "--test-threads=1", "--exact"
+        ) + $skipArgs
+        & $CargoExe @targetArgs
+        if ($LASTEXITCODE -ne 0) {
+            $safeExit = $LASTEXITCODE
+        }
+    }
 
     # -----------------------------------------------------------------------
     # Step 3: MANUAL_EXTERNAL compile-only proof -- never executed. Narrowed
@@ -446,17 +681,25 @@ function Main {
     Write-Host "Safe execution exit code:             $safeExit"
     Write-Host "Manual-external compile exit code:    $manualCompileExit"
 
-    if ($safeExit -ne 0) {
-        throw "Safe-ignored matrix reported failures (see cargo test output above)."
-    }
-    if ($manualCompileExit -ne 0) {
-        throw "MANUAL_EXTERNAL compile-only proof failed (--features mqk-db/testkit,mqk-daemon/manual-external --no-run)."
-    }
+    $disposition = Get-MatrixDisposition -SafeExit $safeExit -ManualCompileExit $manualCompileExit `
+        -BlockedCount $blockedCount -AuditOnlyIncludeBlocked ([bool]$AuditOnlyIncludeBlocked)
 
     Write-Host ""
-    Write-Host ("PASSED: canonical safe-ignored matrix is green; inventory complete ({0} tests); " -f $inventory.Count) -NoNewline -ForegroundColor Green
-    Write-Host ("{0} MANUAL_EXTERNAL tests excluded from execution and compile-proven." -f $manualExternalCount) -ForegroundColor Green
-    exit 0
+    switch ($disposition.Disposition) {
+        "PASSED" {
+            Write-Host ("PASSED: canonical safe-ignored matrix is green; inventory complete ({0} tests); " -f $inventory.Count) -NoNewline -ForegroundColor Green
+            Write-Host ("{0} MANUAL_EXTERNAL tests excluded from execution and compile-proven." -f $manualExternalCount) -ForegroundColor Green
+            exit 0
+        }
+        "BLOCKED" {
+            Write-Host ("BLOCKED: {0}" -f $disposition.Message) -ForegroundColor Yellow
+            $blockedRows | ForEach-Object { Write-Host "  $(Get-InventoryExactKey $_)" -ForegroundColor Yellow }
+            exit $disposition.ExitCode
+        }
+        default {
+            throw $disposition.Message
+        }
+    }
 }
 
 # Only run the matrix when this file is executed directly (`& script.ps1` or
