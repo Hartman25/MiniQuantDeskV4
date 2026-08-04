@@ -173,7 +173,8 @@ pub mod test_support;
 #[cfg(any(test, feature = "testkit"))]
 pub use test_support::{
     create_disposable_test_db, create_disposable_test_db_with_hooks, run_isolated, CleanupOutcome,
-    DisposableDbError, DisposableDbTestHooks, DisposableTestDb, TestBarrier, TestObservations,
+    DisposableDbError, DisposableDbTestHooks, DisposableTestDb, SetupCompletion, TestBarrier,
+    TestObservations,
 };
 
 /// Simple status query (connectivity + schema presence).

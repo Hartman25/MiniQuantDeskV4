@@ -1,24 +1,30 @@
 // core-rs/crates/mqk-db/tests/test_support_disposable_db.rs
 //
 // FULL-AUDIT-SAFE-IGNORED-AND-SHARED-DB-FINAL-CLOSURE-01 Part 3 /
-// FULL-AUDIT-CHECKPOINT-HARDENING-REPAIR-01 Part 2: DB-backed proofs for the
-// hardened disposable-per-test-database helper (mqk_db::test_support).
-// Pure-logic cases (URL splitting, error typing, the run_isolated decision
-// tree, CleanupAuthority commit/no-commit) live as unit tests inside
+// FULL-AUDIT-CHECKPOINT-HARDENING-REPAIR-01 Part 2 /
+// FULL-AUDIT-TESTKIT-AND-IGNORED-AUTHORITY-FINAL-REPAIR-01 Part 1: DB-backed
+// proofs for the hardened disposable-per-test-database helper
+// (mqk_db::test_support). Pure-logic cases (URL splitting, error typing, the
+// run_isolated decision tree, CleanupAuthority commit/no-commit, the
+// ordinary-error-path cleanup-inspection proof) live as unit tests inside
 // src/test_support.rs and need no database; these integration tests need a
 // real Postgres server to create/drop real databases against, so they
 // require MQK_DATABASE_URL and the `testkit` feature (registered with
 // `required-features = ["testkit"]` in mqk-db/Cargo.toml), matching every
 // other DB-backed test in this crate.
 //
-// The cancellation and failure-injection tests below use `TestBarrier` (a
-// two-way rendezvous, not a sleep) to land a `task.abort()` or an external
-// admin-connection sabotage at an exact, named point in
-// `create_disposable_test_db_with_hooks`'s lifecycle, and `TestObservations`
-// to retrieve the generated db_name/admin_url and the background
-// `CleanupAuthority` task's JoinHandle even when the outer task never
-// returns normally (because it was aborted) -- so "zero residue" is proven
-// by awaiting that JoinHandle deterministically, never by a sleep-poll loop.
+// Ownership model under test: `create_disposable_test_db_with_hooks` spawns
+// an independent `run_setup_owner` Tokio task that performs admin connect /
+// CREATE DATABASE / target connect / migrate to completion regardless of
+// whether the *caller* awaiting that function is itself cancelled. Every
+// test below that exercises caller cancellation therefore aborts the OUTER
+// task (the one polling the result channel) and separately awaits the owner
+// task's own `JoinHandle<SetupCompletion>` (retrieved via `TestObservations`)
+// to deterministically observe what the owner task did -- never a sleep-poll
+// loop, and never a race between which side "wins": each cancellation test
+// first proves the caller is fully, provably gone (via `task.abort()` +
+// `task.await` reporting cancelled) before ever releasing the barrier that
+// lets the owner task proceed past that exact point.
 //
 // Run: MQK_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5434/mqk_test \
 //      cargo test -p mqk-db --features testkit --test test_support_disposable_db \
@@ -29,11 +35,18 @@ use std::sync::{Arc, Mutex};
 
 use sqlx::postgres::PgPoolOptions;
 use sqlx::PgPool;
+use tokio::task::JoinHandle;
 
 use mqk_db::{
     create_disposable_test_db, create_disposable_test_db_with_hooks, CleanupOutcome,
-    DisposableDbTestHooks, DisposableTestDb, TestBarrier, TestObservations,
+    DisposableDbTestHooks, DisposableTestDb, SetupCompletion, TestBarrier, TestObservations,
 };
+
+/// An address nothing listens on: connection attempts fail deterministically
+/// (no real Postgres round-trip needed), used to force an exact cleanup
+/// attempt to fail without racing real timing against a real failure
+/// injection.
+const UNREACHABLE_ADMIN_URL: &str = "postgres://user:pass@127.0.0.1:1/postgres";
 
 /// Connects to the admin `postgres` database on the same server as
 /// `MQK_DATABASE_URL` and reports whether a database with the given exact
@@ -104,8 +117,12 @@ async fn dropping_without_explicit_teardown_still_cleans_up_via_the_drop_guard()
         "sanity: database {db_name} should exist right after creation"
     );
 
-    // No explicit drop_database() call: exercise the Drop-guard fallback
-    // path that a cancelled/aborted caller would otherwise rely on.
+    // No explicit drop_database() call: exercise the CleanupAuthority
+    // fallback path that a caller who forgets teardown would otherwise rely
+    // on. By the time a caller ever holds a `DisposableTestDb`, create/
+    // connect/migrate has already fully succeeded (see the module doc-
+    // comment in src/test_support.rs), so this is an ordinary synchronous
+    // drop, not an async-cancellation hazard.
     drop(disposable);
 
     let mut cleaned = false;
@@ -205,16 +222,28 @@ async fn concurrent_disposable_db_creation_is_unique_and_cleans_up() {
 
 /// Deterministically waits for the `CleanupAuthority` background task's
 /// outcome via the JoinHandle `create_disposable_test_db_with_hooks`
-/// deposited into `observer` -- no sleep-poll loop needed even though the
-/// enclosing call was aborted and never returned normally.
+/// deposited into `observer` -- no sleep-poll loop needed.
 async fn take_cleanup_outcome(observer: &Arc<Mutex<TestObservations>>) -> CleanupOutcome {
     let join = observer
         .lock()
         .expect("observer mutex poisoned")
         .cleanup_join
         .take()
-        .expect("cleanup task JoinHandle should have been observed before the call was cancelled");
+        .expect("cleanup task JoinHandle should have been observed");
     join.await.expect("cleanup task itself must not panic")
+}
+
+/// Deterministically waits for the setup OWNER task's own outcome via the
+/// JoinHandle deposited into `observer` -- this resolves independently of
+/// whether the outer call (the one awaiting the result channel) was ever
+/// polled to completion, aborted, or cancelled.
+fn observed_setup_join(observer: &Arc<Mutex<TestObservations>>) -> JoinHandle<SetupCompletion> {
+    observer
+        .lock()
+        .expect("observer mutex poisoned")
+        .setup_join
+        .take()
+        .expect("setup_join should have been observed before the outer call was cancelled")
 }
 
 fn observed_db_name(observer: &Arc<Mutex<TestObservations>>) -> String {
@@ -237,7 +266,48 @@ fn observed_admin_url(observer: &Arc<Mutex<TestObservations>>) -> String {
 
 #[tokio::test]
 #[ignore = "requires MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5434/mqk_test cargo test -p mqk-db --features testkit --test test_support_disposable_db -- --include-ignored --test-threads=1"]
-async fn cancellation_racing_the_create_database_statement_leaves_zero_residue() {
+async fn caller_cancelled_before_admin_connect_owner_still_completes_and_cleans_up() {
+    let observer = Arc::new(Mutex::new(TestObservations::default()));
+    let hooks = DisposableDbTestHooks {
+        observer: Some(observer.clone()),
+        ..Default::default()
+    };
+
+    let outer = tokio::spawn(create_disposable_test_db_with_hooks(
+        "ts_cancel_before_admin",
+        hooks,
+    ));
+    // Let the outer task run its synchronous prefix (env lookup, name
+    // generation, spawning the owner task, recording db_name/admin_url/
+    // setup_join into `observer`) up to its first real await point
+    // (awaiting the result channel), then cancel it there -- before the
+    // owner task has necessarily even opened its admin connection.
+    tokio::task::yield_now().await;
+    outer.abort();
+    let _ = outer.await;
+
+    let db_name = observed_db_name(&observer);
+    let setup_join = observed_setup_join(&observer);
+    let completion = setup_join
+        .await
+        .expect("setup owner task itself must not panic");
+    assert_eq!(
+        completion,
+        SetupCompletion::OrphanedAfterSuccess {
+            teardown_succeeded: true
+        },
+        "expected the owner task to finish create/connect/migrate on its own and clean up the \
+         orphaned database after discovering the caller was already gone"
+    );
+    assert!(
+        !database_exists(&db_name).await,
+        "database {db_name} survived a caller cancellation that landed before admin connect"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5434/mqk_test cargo test -p mqk-db --features testkit --test test_support_disposable_db -- --include-ignored --test-threads=1"]
+async fn caller_cancelled_immediately_before_create_then_released_owner_completes_and_cleans_up() {
     let barrier = TestBarrier::new();
     let observer = Arc::new(Mutex::new(TestObservations::default()));
     let hooks = DisposableDbTestHooks {
@@ -246,37 +316,60 @@ async fn cancellation_racing_the_create_database_statement_leaves_zero_residue()
         ..Default::default()
     };
 
-    let task = tokio::spawn(create_disposable_test_db_with_hooks(
+    let outer = tokio::spawn(create_disposable_test_db_with_hooks(
         "ts_cancel_create",
         hooks,
     ));
-    // Deterministic: the call is now parked immediately before issuing the
-    // CREATE DATABASE statement. Releasing the hold and aborting with no
-    // intervening await races the cancellation against that statement
-    // itself -- exercising the one window this module cannot fully close
-    // client-side (see the module doc-comment), and proving the retry-
-    // capable background cleanup makes it safe regardless of which side of
-    // the race actually wins on the server.
+    // Deterministic: the owner task has already opened its admin connection
+    // and is now parked immediately before issuing the CREATE DATABASE
+    // statement itself.
     barrier.reached.notified().await;
-    barrier.hold.notify_one();
-    task.abort();
-    let _ = task.await;
+
+    // Cancel the caller *first*, and confirm via the aborted JoinHandle that
+    // it is fully, provably gone, before ever releasing the owner task. This
+    // proves the owner completes CREATE (and cleans up afterward) with the
+    // caller definitely already gone -- unlike a prior version of this test,
+    // which released the barrier and aborted with no intervening await,
+    // leaving it ambiguous which side of the race actually won.
+    outer.abort();
+    match outer.await {
+        Err(join_err) => assert!(
+            join_err.is_cancelled(),
+            "expected the aborted outer task's JoinError to report cancelled, got {join_err:?}"
+        ),
+        Ok(_) => {
+            panic!("expected the outer task to be aborted before it could return, but it completed")
+        }
+    }
 
     let db_name = observed_db_name(&observer);
-    let outcome = take_cleanup_outcome(&observer).await;
-    assert!(
-        matches!(outcome, CleanupOutcome::CleanedUp { succeeded: true }),
-        "expected the background cleanup task to run its retry-capable drop and succeed, got {outcome:?}"
+    let setup_join = observed_setup_join(&observer);
+
+    // Only now release the owner task -- it issues CREATE DATABASE with
+    // nobody left to ever receive the result.
+    barrier.hold.notify_one();
+
+    let completion = setup_join
+        .await
+        .expect("setup owner task itself must not panic");
+    assert_eq!(
+        completion,
+        SetupCompletion::OrphanedAfterSuccess {
+            teardown_succeeded: true
+        },
+        "expected the owner task to finish CREATE/connect/migrate and clean up the orphaned \
+         database after discovering the caller was already (and provably) gone"
     );
     assert!(
         !database_exists(&db_name).await,
-        "database {db_name} survived a cancellation racing the CREATE DATABASE statement"
+        "database {db_name} survived a cancellation that was fully complete before the owner \
+         task's CREATE DATABASE statement ran"
     );
 }
 
 #[tokio::test]
 #[ignore = "requires MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5434/mqk_test cargo test -p mqk-db --features testkit --test test_support_disposable_db -- --include-ignored --test-threads=1"]
-async fn cancellation_after_create_before_target_connect_leaves_zero_residue() {
+async fn caller_cancelled_after_create_before_target_connect_owner_completes_and_cleans_up() {
     let barrier = TestBarrier::new();
     let observer = Arc::new(Mutex::new(TestObservations::default()));
     let hooks = DisposableDbTestHooks {
@@ -285,7 +378,7 @@ async fn cancellation_after_create_before_target_connect_leaves_zero_residue() {
         ..Default::default()
     };
 
-    let task = tokio::spawn(create_disposable_test_db_with_hooks(
+    let outer = tokio::spawn(create_disposable_test_db_with_hooks(
         "ts_cancel_connect",
         hooks,
     ));
@@ -296,23 +389,87 @@ async fn cancellation_after_create_before_target_connect_leaves_zero_residue() {
         "sanity: database {db_name} should exist -- CREATE DATABASE already succeeded before this barrier"
     );
 
-    task.abort(); // cancel while parked here: CREATE succeeded, target connect never started
-    match task.await {
+    outer.abort(); // cancel while parked here: CREATE succeeded, target connect never started
+    match outer.await {
         Err(join_err) => assert!(
             join_err.is_cancelled(),
-            "expected the aborted task's JoinError to report cancelled, got {join_err:?}"
+            "expected the aborted outer task's JoinError to report cancelled, got {join_err:?}"
         ),
-        Ok(_) => panic!("expected the task to be aborted before it could return, but it completed"),
+        Ok(_) => {
+            panic!("expected the outer task to be aborted before it could return, but it completed")
+        }
     }
 
-    let outcome = take_cleanup_outcome(&observer).await;
-    assert!(
-        matches!(outcome, CleanupOutcome::CleanedUp { succeeded: true }),
-        "expected the background cleanup task to run its retry-capable drop and succeed, got {outcome:?}"
+    let setup_join = observed_setup_join(&observer);
+    barrier.hold.notify_one();
+
+    let completion = setup_join
+        .await
+        .expect("setup owner task itself must not panic");
+    assert_eq!(
+        completion,
+        SetupCompletion::OrphanedAfterSuccess {
+            teardown_succeeded: true
+        },
+        "expected the owner task to finish target connect/migrate and clean up the orphaned \
+         database after discovering the caller was already gone"
     );
     assert!(
         !database_exists(&db_name).await,
         "database {db_name} survived cancellation parked between CREATE and target connect"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5434/mqk_test cargo test -p mqk-db --features testkit --test test_support_disposable_db -- --include-ignored --test-threads=1"]
+async fn caller_cancelled_before_migration_owner_completes_and_cleans_up() {
+    let barrier = TestBarrier::new();
+    let observer = Arc::new(Mutex::new(TestObservations::default()));
+    let hooks = DisposableDbTestHooks {
+        before_migrate: Some(barrier.clone()),
+        observer: Some(observer.clone()),
+        ..Default::default()
+    };
+
+    let outer = tokio::spawn(create_disposable_test_db_with_hooks(
+        "ts_cancel_migrate",
+        hooks,
+    ));
+    barrier.reached.notified().await; // parked right before migrate(); target connect already succeeded
+    let db_name = observed_db_name(&observer);
+    assert!(
+        database_exists(&db_name).await,
+        "sanity: database {db_name} should exist -- CREATE DATABASE and target connect already succeeded"
+    );
+
+    outer.abort();
+    match outer.await {
+        Err(join_err) => assert!(
+            join_err.is_cancelled(),
+            "expected the aborted outer task's JoinError to report cancelled, got {join_err:?}"
+        ),
+        Ok(_) => {
+            panic!("expected the outer task to be aborted before it could return, but it completed")
+        }
+    }
+
+    let setup_join = observed_setup_join(&observer);
+    barrier.hold.notify_one(); // release; migrate() now runs with nobody left to receive the result
+
+    let completion = setup_join
+        .await
+        .expect("setup owner task itself must not panic");
+    assert_eq!(
+        completion,
+        SetupCompletion::OrphanedAfterSuccess {
+            teardown_succeeded: true
+        },
+        "expected the owner task to finish migrate() and clean up the orphaned database after \
+         discovering the caller was already gone"
+    );
+    assert!(
+        !database_exists(&db_name).await,
+        "database {db_name} survived cancellation parked immediately before migrate()"
     );
 }
 
@@ -327,7 +484,7 @@ async fn connect_failure_after_create_is_reported_as_connect_error_and_cleans_up
         ..Default::default()
     };
 
-    let task = tokio::spawn(create_disposable_test_db_with_hooks(
+    let outer = tokio::spawn(create_disposable_test_db_with_hooks(
         "ts_connect_fail",
         hooks,
     ));
@@ -353,7 +510,7 @@ async fn connect_failure_after_create_is_reported_as_connect_error_and_cleans_up
 
     barrier.hold.notify_one(); // release; the code's own target connect now fails
 
-    let result = task
+    let result = outer
         .await
         .expect("outer task should not panic; it should return an Err");
     match result {
@@ -379,7 +536,7 @@ async fn migration_failure_after_target_connect_is_reported_as_migrate_error_and
         ..Default::default()
     };
 
-    let task = tokio::spawn(create_disposable_test_db_with_hooks(
+    let outer = tokio::spawn(create_disposable_test_db_with_hooks(
         "ts_migrate_fail",
         hooks,
     ));
@@ -407,7 +564,7 @@ async fn migration_failure_after_target_connect_is_reported_as_migrate_error_and
 
     barrier.hold.notify_one(); // release; migrate() now runs against a pool with no live target
 
-    let result = task
+    let result = outer
         .await
         .expect("outer task should not panic; it should return an Err");
     match result {
@@ -419,5 +576,140 @@ async fn migration_failure_after_target_connect_is_reported_as_migrate_error_and
     assert!(
         !database_exists(&db_name).await,
         "database {db_name} should not exist after a migration-failure path"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5434/mqk_test cargo test -p mqk-db --features testkit --test test_support_disposable_db -- --include-ignored --test-threads=1"]
+async fn forced_orphan_cleanup_failure_is_observable_and_never_reported_as_success() {
+    let barrier = TestBarrier::new();
+    let observer = Arc::new(Mutex::new(TestObservations::default()));
+    let hooks = DisposableDbTestHooks {
+        before_create: Some(barrier.clone()),
+        observer: Some(observer.clone()),
+        force_cleanup_admin_url: Some(UNREACHABLE_ADMIN_URL.to_string()),
+        ..Default::default()
+    };
+
+    let outer = tokio::spawn(create_disposable_test_db_with_hooks(
+        "ts_forced_orphan_fail",
+        hooks,
+    ));
+    barrier.reached.notified().await;
+    outer.abort();
+    match outer.await {
+        Err(join_err) => assert!(
+            join_err.is_cancelled(),
+            "expected the aborted outer task's JoinError to report cancelled, got {join_err:?}"
+        ),
+        Ok(_) => {
+            panic!("expected the outer task to be aborted before it could return, but it completed")
+        }
+    }
+
+    let db_name = observed_db_name(&observer);
+    let setup_join = observed_setup_join(&observer);
+
+    barrier.hold.notify_one();
+
+    let completion = setup_join
+        .await
+        .expect("setup owner task itself must not panic");
+    assert_eq!(
+        completion,
+        SetupCompletion::OrphanedAfterSuccess {
+            teardown_succeeded: false
+        },
+        "the exact orphan teardown attempt was deliberately forced through an unreachable admin \
+         URL and must be reported as failed, never silently treated as success"
+    );
+
+    // The exact/forced teardown attempt above was made to fail on purpose.
+    // The redundant CleanupAuthority armed with the REAL admin URL (see the
+    // module doc-comment in src/test_support.rs) is still independently
+    // retrying against the real server -- await it explicitly, not a sleep-
+    // poll, to know for certain when the real cleanup has finished before
+    // checking for residue.
+    let cleanup_outcome = take_cleanup_outcome(&observer).await;
+    assert!(
+        matches!(
+            cleanup_outcome,
+            CleanupOutcome::CleanedUp { succeeded: true }
+        ),
+        "expected the redundant real-admin-URL CleanupAuthority to still succeed even though the \
+         exact forced teardown attempt failed, got {cleanup_outcome:?}"
+    );
+    assert!(
+        !database_exists(&db_name).await,
+        "database {db_name} survived even the redundant real-admin-URL cleanup fallback"
+    );
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5434/mqk_test cargo test -p mqk-db --features testkit --test test_support_disposable_db -- --include-ignored --test-threads=1"]
+async fn forced_ordinary_error_cleanup_failure_is_reported_and_not_silently_treated_as_success() {
+    let barrier = TestBarrier::new();
+    let observer = Arc::new(Mutex::new(TestObservations::default()));
+    let hooks = DisposableDbTestHooks {
+        before_migrate: Some(barrier.clone()),
+        observer: Some(observer.clone()),
+        force_cleanup_admin_url: Some(UNREACHABLE_ADMIN_URL.to_string()),
+        ..Default::default()
+    };
+
+    let outer = tokio::spawn(create_disposable_test_db_with_hooks(
+        "ts_forced_ordinary_fail",
+        hooks,
+    ));
+    barrier.reached.notified().await; // parked right before migrate(); target connect already succeeded
+    let db_name = observed_db_name(&observer);
+    let real_admin_url = observed_admin_url(&observer);
+    let setup_join = observed_setup_join(&observer);
+
+    // Sabotage: drop the target database out from under the already-
+    // connected pool so migrate() itself fails -- an ordinary create/
+    // connect/migrate error, not a cancellation. This also means the
+    // database is already gone by construction, independent of whatever the
+    // (deliberately forced-to-fail) cleanup attempt below reports.
+    let admin_pool = PgPoolOptions::new()
+        .max_connections(1)
+        .connect(&real_admin_url)
+        .await
+        .expect("connect as admin to sabotage the pending call");
+    sqlx::query(&format!(
+        "DROP DATABASE IF EXISTS \"{db_name}\" WITH (FORCE)"
+    ))
+    .execute(&admin_pool)
+    .await
+    .expect("drop database out from under the already-connected pool");
+    admin_pool.close().await;
+
+    barrier.hold.notify_one(); // release; migrate() now fails, and the subsequent forced cleanup attempt also fails
+
+    let result = outer
+        .await
+        .expect("outer task should not panic; it should return an Err");
+    match result {
+        Err(mqk_db::DisposableDbError::Migrate(_)) => {}
+        Err(other) => panic!("expected DisposableDbError::Migrate, got {other}"),
+        Ok(_) => panic!("expected an Err(Migrate(_)) after sabotaging the connected pool, got Ok"),
+    }
+
+    let completion = setup_join
+        .await
+        .expect("setup owner task itself must not panic");
+    assert_eq!(
+        completion,
+        SetupCompletion::SetupFailed {
+            cleanup_succeeded: false
+        },
+        "the post-failure cleanup attempt was deliberately forced through an unreachable admin \
+         URL and must be reported as failed -- there is no CleanupAuthority in this code path to \
+         silently disarm, and the observable SetupCompletion must reflect the real result"
+    );
+
+    assert!(
+        !database_exists(&db_name).await,
+        "database {db_name} unexpectedly exists after a migration-failure path"
     );
 }

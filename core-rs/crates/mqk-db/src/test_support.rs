@@ -1,9 +1,10 @@
 // core-rs/crates/mqk-db/src/test_support.rs
 //
 // FULL-AUDIT-SAFE-IGNORED-AND-SHARED-DB-FINAL-CLOSURE-01 Part 3 /
-// FULL-AUDIT-CHECKPOINT-HARDENING-REPAIR-01 Part 2: disposable per-test
-// Postgres database support, hardened and moved out of the default
-// production `mqk-db` public API.
+// FULL-AUDIT-CHECKPOINT-HARDENING-REPAIR-01 Part 2 /
+// FULL-AUDIT-TESTKIT-AND-IGNORED-AUTHORITY-FINAL-REPAIR-01 Part 1:
+// disposable per-test Postgres database support, hardened and moved out of
+// the default production `mqk-db` public API.
 //
 // This entire module is gated at its `mod test_support;` declaration in
 // lib.rs behind `#[cfg(any(test, feature = "testkit"))]` -- it is compiled
@@ -24,34 +25,51 @@
 // is no other test's row to collide with and no global query to race.
 // FULL-AUDIT-FAIL-017.
 //
-// FULL-AUDIT-CHECKPOINT-HARDENING-REPAIR-01 Part 2 hardening: the previous
-// version's cancellation safety only began the moment a `DisposableTestDb`
-// value existed (i.e. after CREATE DATABASE, target connect, *and* migrate
-// had all already succeeded) and relied solely on that value's `Drop` impl
-// firing a single detached, unobservable `tokio::runtime::Handle::spawn`
-// call. That left every earlier await point -- the admin connect, the
-// CREATE DATABASE statement itself, the target connect, and migrate --
-// completely unowned: a cancellation landing in any of them (the caller's
-// future dropped, e.g. by a timeout or an aborted task) could leave a
-// durable `mqk_disp_*` database with nothing left alive to clean it up.
+// Ownership architecture (FULL-AUDIT-TESTKIT-AND-IGNORED-AUTHORITY-FINAL-
+// REPAIR-01 Part 1): a prior revision ran admin-connect / CREATE DATABASE /
+// target-connect / migrate directly inside the async fn the caller itself
+// awaits, guarded only by a `CleanupAuthority` value carried through that
+// same call stack. That left the entire setup lifecycle at the mercy of the
+// caller's own cancellation: if the caller's future was dropped (a timeout,
+// an aborted task) while a query was in flight, the client-side future
+// vanished but the server could still be mid-execution of that statement --
+// racing a background `DROP DATABASE IF EXISTS` against a still-running
+// `CREATE DATABASE` is unsafe, because `IF EXISTS` can observe "not created
+// yet", succeed trivially, and never retry, after which the `CREATE`
+// completes server-side and leaks a `mqk_disp_*` database with nothing left
+// alive to ever clean it up.
 //
-// The fix is `CleanupAuthority`: an eagerly-spawned, independent background
-// task (not work done inside a `Drop` impl) that owns the eventual
-// best-effort `DROP DATABASE IF EXISTS ... WITH (FORCE)` for one specific
-// `mqk_disp_*` name, created *before* the admin connection is even opened.
-// The authority is carried as a plain local value through every later
-// await; if the enclosing future is cancelled at any point before an
-// explicit, awaited teardown calls `commit()`, the value's implicit drop
-// (no custom `Drop` impl needed) drops its `oneshot::Sender`, which the
-// already-running background task observes as "please clean up" and acts
-// on with its own retry loop. `DROP DATABASE IF EXISTS` makes both possible
-// outcomes of a cancellation racing the CREATE statement itself safe: if
-// the statement never actually completed server-side, the drop is a
-// harmless no-op; if it did complete, the drop removes it. The one
-// residual case this cannot fully close -- the exact instant a client-side
-// cancellation reaches the network layer while Postgres is mid-execution of
-// the CREATE statement -- is a Postgres protocol-level race, not a gap in
-// this module's ownership tracking, and is covered by retrying the drop.
+// The fix is to make the entire setup lifecycle run inside its own eagerly-
+// spawned Tokio task (`run_setup_owner`, launched via `tokio::spawn`, never
+// inside a `Drop` impl and never inside the future the caller directly
+// awaits) so that the caller dropping its own future cannot cancel it. The
+// result -- the finished `DisposableTestDb` or a `DisposableDbError` -- is
+// delivered back through a `oneshot` channel. Two disjoint cases follow from
+// that channel's own cancellation semantics:
+//
+//   * The receiver is still alive: the result is handed off normally, and
+//     from that point on cancellation safety is the caller's own affair
+//     (dropping an already-fully-constructed `DisposableTestDb` without
+//     calling `drop_database()` is an ordinary synchronous `Drop`, not an
+//     async-cancellation hazard, and is still covered by the
+//     `CleanupAuthority` background fallback armed on that value).
+//   * The receiver was dropped (the caller was cancelled) before the owner
+//     task finished: the owner task discovers this only when its `send`
+//     fails, at which point create/connect/migrate has already fully
+//     resolved one way or the other (there is no earlier point at which the
+//     owner task polls the receiver, precisely so that no DROP can ever be
+//     issued while its own CREATE is still in flight). If setup succeeded,
+//     the owner task is now the database's only owner and awaits its own
+//     exact teardown before finishing. If setup failed, the owner task
+//     already awaits and inspects a best-effort cleanup unconditionally
+//     (see `run_setup_owner`'s `Err` arm) -- whether or not the caller was
+//     still around to receive the error.
+//
+// Every terminal state `run_setup_owner` can reach is reported through its
+// `JoinHandle<SetupCompletion>` (exposed to tests via
+// `TestObservations::setup_join`), so a test can deterministically await the
+// owner task's own outcome even when the outer call was aborted and never
+// returned normally -- no sleep-poll loop required.
 use std::fmt;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -66,10 +84,9 @@ use tokio::task::JoinHandle;
 use crate::{migrate, ENV_DB_URL};
 
 // ---------------------------------------------------------------------------
-// Bounded, typed errors -- replaces the previous `.expect()`-panic-on-
-// malformed-input approach in `split_db_url` with a `Result` a caller can
-// match on, and gives every disposable-DB failure mode (create/connect/
-// migrate/drop) its own variant instead of an opaque anyhow string.
+// Bounded, typed errors -- gives every disposable-DB failure mode (create/
+// connect/migrate/drop) its own variant instead of an opaque anyhow string,
+// and a caller a `Result` to match on instead of an `.expect()` panic.
 // ---------------------------------------------------------------------------
 #[derive(Debug)]
 pub enum DisposableDbError {
@@ -179,11 +196,15 @@ fn assert_is_disposable_db_name(db_name: &str) {
 /// with a short backoff between tries so a transient admin-connect hiccup
 /// does not masquerade as a permanent leak. Returns whether the final
 /// attempt succeeded. `IF EXISTS` makes a database that was never actually
-/// created (a cancellation that raced ahead of the server completing
-/// CREATE DATABASE) or one some other caller already dropped a trivial
-/// success rather than a failure. `WITH (FORCE)` (Postgres 13+) terminates
-/// any other backend still holding a connection open, so this still
-/// succeeds against a pool with live connections.
+/// created, or one some other caller already dropped, a trivial success
+/// rather than a failure. `WITH (FORCE)` (Postgres 13+) terminates any other
+/// backend still holding a connection open, so this still succeeds against a
+/// pool with live connections.
+///
+/// Callers of this function only ever invoke it *after* the corresponding
+/// create/connect/migrate attempt has already fully resolved (see
+/// `run_setup_owner`) -- never concurrently with a still-running `CREATE
+/// DATABASE`, which is exactly the race this module must not reintroduce.
 async fn drop_with_retries(admin_url: &str, db_name: &str, attempts: u32) -> bool {
     assert_is_disposable_db_name(db_name);
     for attempt in 0..attempts.max(1) {
@@ -211,17 +232,18 @@ async fn drop_with_retries(admin_url: &str, db_name: &str, attempts: u32) -> boo
 
 // ---------------------------------------------------------------------------
 // Test-only synchronization hooks: let an external integration test
-// deterministically cancel `create_disposable_test_db` at an exact point in
-// its lifecycle, or intervene from a second connection while the call is
-// parked, instead of racing a sleep against real Postgres round-trip
-// latency (a `Notify`-barrier rendezvous, not a sleep poll).
+// deterministically cancel the caller of `create_disposable_test_db_with_hooks`
+// (or sabotage a connection) at an exact point in the owner task's lifecycle,
+// instead of racing a sleep against real Postgres round-trip latency (a
+// `Notify`-barrier rendezvous, not a sleep poll).
 // ---------------------------------------------------------------------------
 
-/// A two-way rendezvous: `create_disposable_test_db_with_hooks` notifies
-/// `reached` the instant it arrives at the named point, then blocks on
-/// `hold` until the test either releases it (`hold.notify_one()`) or aborts
-/// the awaiting task outright. This gives a test full, deterministic
-/// control over whether/when execution proceeds past that exact point.
+/// A two-way rendezvous: the owner task notifies `reached` the instant it
+/// arrives at the named point, then blocks on `hold` until the test either
+/// releases it (`hold.notify_one()`) or the test proceeds to cancel the
+/// *caller* (never this task -- see the module doc-comment) while it waits.
+/// This gives a test full, deterministic control over whether/when execution
+/// proceeds past that exact point.
 #[derive(Clone, Default)]
 pub struct TestBarrier {
     pub reached: Arc<Notify>,
@@ -238,15 +260,29 @@ impl TestBarrier {
 }
 
 /// Populated by `create_disposable_test_db_with_hooks` as soon as the
-/// corresponding internal state exists, so a test that aborts the enclosing
-/// task before it can return normally can still retrieve the generated
-/// `db_name`/`admin_url` and the background cleanup task's `JoinHandle` for
-/// fully deterministic (non-sleep) assertions about the eventual state.
+/// corresponding internal state exists, so a test that cancels the caller
+/// before it can return normally can still retrieve the generated
+/// `db_name`/`admin_url`, the owner task's own `JoinHandle<SetupCompletion>`
+/// (which keeps running and reports its outcome regardless of caller
+/// cancellation), and the post-handoff `CleanupAuthority` background task's
+/// `JoinHandle` for fully deterministic (non-sleep) assertions about the
+/// eventual state.
 #[derive(Default)]
 pub struct TestObservations {
     pub db_name: Option<String>,
     pub admin_url: Option<String>,
+    /// JoinHandle for the `CleanupAuthority` spawned once create/connect/
+    /// migrate succeeds (armed regardless of whether the value is then
+    /// successfully handed off to the caller or found to be orphaned).
     pub cleanup_join: Option<JoinHandle<CleanupOutcome>>,
+    /// JoinHandle for the setup owner task itself (`run_setup_owner`) -- the
+    /// task that performs admin connect / CREATE DATABASE / target connect /
+    /// migrate, and which keeps running to completion even if the caller
+    /// awaiting `create_disposable_test_db_with_hooks` is cancelled. Await
+    /// this to deterministically observe the owner task's own outcome
+    /// (`SetupCompletion`) without a sleep-poll loop, even when the outer
+    /// call was aborted and never returned normally.
+    pub setup_join: Option<JoinHandle<SetupCompletion>>,
 }
 
 /// Outcome reported by a `CleanupAuthority`'s background task, exposed for
@@ -257,10 +293,32 @@ pub enum CleanupOutcome {
     /// An explicit, awaited teardown already ran (or is running); this task
     /// took no action.
     Committed,
-    /// The authority was dropped without a commit (cancellation, or an
-    /// early-return path that intentionally leaves it armed); the task ran
-    /// its own retry-capable best-effort DROP DATABASE.
+    /// The authority was dropped without a commit; the task ran its own
+    /// retry-capable best-effort DROP DATABASE.
     CleanedUp { succeeded: bool },
+}
+
+/// The setup owner task's own final, observable outcome -- see the module
+/// doc-comment for the ownership architecture this reports on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SetupCompletion {
+    /// create/connect/migrate succeeded and the resulting `DisposableTestDb`
+    /// was successfully handed off to the caller through the result
+    /// channel. From this point on, cleanup is the caller's (and the
+    /// handed-off value's `CleanupAuthority`'s) responsibility.
+    HandedOff,
+    /// create/connect/migrate succeeded, but by the time the owner task
+    /// tried to hand the result off, the caller (the channel's receiver) was
+    /// already gone -- so the owner task is the database's only remaining
+    /// owner. It awaited an exact teardown of that now-orphaned database
+    /// itself before finishing; `teardown_succeeded` reports whether that
+    /// awaited DROP actually succeeded.
+    OrphanedAfterSuccess { teardown_succeeded: bool },
+    /// create/connect/migrate itself failed. The owner task always awaits a
+    /// best-effort cleanup of whatever partial state exists and inspects
+    /// its result -- regardless of whether the caller was still around to
+    /// receive the error -- and `cleanup_succeeded` reports that result.
+    SetupFailed { cleanup_succeeded: bool },
 }
 
 /// Test-only knobs for `create_disposable_test_db_with_hooks`. The plain
@@ -269,7 +327,8 @@ pub enum CleanupOutcome {
 #[derive(Clone, Default)]
 pub struct DisposableDbTestHooks {
     /// Rendezvous immediately before the CREATE DATABASE statement is
-    /// issued (used to race a cancellation against that statement itself).
+    /// issued (used to prove the owner task completes/cleans up correctly
+    /// even when the caller is cancelled while parked here).
     pub before_create: Option<TestBarrier>,
     /// Rendezvous immediately after CREATE DATABASE succeeds, before the
     /// target-database connect is attempted.
@@ -278,17 +337,29 @@ pub struct DisposableDbTestHooks {
     /// before `migrate()` is called.
     pub before_migrate: Option<TestBarrier>,
     pub observer: Option<Arc<Mutex<TestObservations>>>,
+    /// If set, every cleanup DROP attempt the owner task makes (both the
+    /// ordinary create/connect/migrate error path and the orphaned-after-
+    /// success path) connects through this URL instead of the real admin
+    /// URL, while CREATE/connect themselves are unaffected. Lets a test
+    /// force a deterministic, observable cleanup failure (e.g. pointing
+    /// this at an unreachable address) without racing real timing against a
+    /// real failure injection, and without ever touching the shared
+    /// `mqk_test` database. The real `CleanupAuthority` armed on a
+    /// successfully-created database still uses the real admin URL, so a
+    /// forced failure here does not itself leak a database long-term.
+    pub force_cleanup_admin_url: Option<String>,
 }
 
-/// Owns the eventual DROP DATABASE cleanup for exactly one `mqk_disp_*`
-/// database, from the moment it is constructed until an explicit, awaited
-/// teardown calls `commit()`. Spawned eagerly as an independent Tokio task
-/// (never inside a `Drop` impl), so that dropping this guard -- whether
-/// from an explicit early return, a panic unwinding through it, or the
-/// enclosing future being cancelled and never polled again -- reliably
-/// triggers cleanup: the task keeps running under its own poll loop,
-/// entirely independent of whatever caused this guard to be dropped. No
-/// custom `Drop` impl is needed: letting `commit_tx` (an
+/// Owns the eventual DROP DATABASE cleanup for exactly one already-created
+/// `mqk_disp_*` database, from the moment it is constructed (always *after*
+/// create/connect/migrate has already succeeded -- see `run_setup_owner`)
+/// until an explicit, awaited teardown calls `commit()`. Spawned eagerly as
+/// an independent Tokio task (never inside a `Drop` impl), so that dropping
+/// this guard -- whether from an explicit early return, a panic unwinding
+/// through it, or the value being dropped without an awaited teardown --
+/// reliably triggers cleanup: the task keeps running under its own poll
+/// loop, entirely independent of whatever caused this guard to be dropped.
+/// No custom `Drop` impl is needed: letting `commit_tx` (an
 /// `Option<oneshot::Sender<()>>`) fall out of scope while still `Some` is
 /// itself the signal the background task is waiting on.
 struct CleanupAuthority {
@@ -341,15 +412,12 @@ impl CleanupAuthority {
 /// `MQK_DATABASE_URL`. Never touches any other test's rows because nothing
 /// else connects to it.
 ///
-/// Cancellation safety: `cleanup` (a `CleanupAuthority`) is armed from
-/// before this value's `create_disposable_test_db` call ever opened an
-/// admin connection, through CREATE DATABASE, the target connect, and
-/// migrate. If this value is dropped without [`DisposableTestDb::drop_database`]
-/// ever having been called and completing successfully, the still-armed
-/// `cleanup` authority's own drop triggers its background task's
-/// retry-capable teardown — see the module-level doc-comment for the full
-/// design and the one residual, protocol-level race this cannot fully
-/// close.
+/// By the time a caller ever observes a value of this type, create/connect/
+/// migrate has already fully succeeded (see the module doc-comment for how
+/// the setup owner task guarantees this regardless of the caller's own
+/// cancellation). From this point on, `cleanup` (a `CleanupAuthority`)
+/// protects only the ordinary, synchronous case of this value being dropped
+/// without [`DisposableTestDb::drop_database`] ever having been called.
 pub struct DisposableTestDb {
     pub pool: PgPool,
     db_name: String,
@@ -367,17 +435,30 @@ impl DisposableTestDb {
     }
 
     /// Drops the disposable database. Must be called after `self.pool` (and
-    /// any clone of it) is done being used — this closes `self.pool` first.
-    /// On success, suppresses the `CleanupAuthority` background fallback
-    /// (it already happened here, synchronously and awaited); on failure,
-    /// leaves it armed so the fallback still gets a chance to clean up when
-    /// `self` is finally dropped.
-    pub async fn drop_database(mut self) -> Result<(), DisposableDbError> {
+    /// any clone of it) is done being used. On success, suppresses the
+    /// `CleanupAuthority` background fallback (it already happened here,
+    /// synchronously and awaited); on failure, leaves it armed so the
+    /// fallback still gets a chance to clean up when `self` is finally
+    /// dropped.
+    pub async fn drop_database(self) -> Result<(), DisposableDbError> {
+        let admin_url = self.admin_url.clone();
+        self.drop_database_via(&admin_url).await
+    }
+
+    /// Shared teardown logic parameterized by which admin URL to connect
+    /// through for the DROP itself. `drop_database` always uses the real
+    /// admin URL; the setup owner task's orphan-teardown path (see
+    /// `run_setup_owner`) may instead route through
+    /// `DisposableDbTestHooks::force_cleanup_admin_url` so a test can
+    /// deterministically prove cleanup-failure reporting without a real
+    /// timing race. Identity (`self.db_name`, asserted against the
+    /// `mqk_disp_*` namespace) is always the real generated name either way.
+    async fn drop_database_via(mut self, drop_admin_url: &str) -> Result<(), DisposableDbError> {
         assert_is_disposable_db_name(&self.db_name);
         self.pool.close().await;
         let admin_pool = PgPoolOptions::new()
             .max_connections(1)
-            .connect(&self.admin_url)
+            .connect(drop_admin_url)
             .await
             .map_err(DisposableDbError::Connect)?;
         // WITH (FORCE) (Postgres 13+) terminates any other backend still
@@ -415,14 +496,21 @@ pub async fn create_disposable_test_db(label: &str) -> Result<DisposableTestDb, 
     create_disposable_test_db_with_hooks(label, DisposableDbTestHooks::default()).await
 }
 
+/// The message delivered from the setup owner task back to whatever called
+/// `create_disposable_test_db_with_hooks`, through a `oneshot` channel. Not
+/// exported: external callers only ever see the `Result` that function
+/// itself returns.
+enum SetupHandoff {
+    Ready(DisposableTestDb),
+    Failed(DisposableDbError),
+}
+
 /// Full implementation behind `create_disposable_test_db`, parameterized by
-/// test-only synchronization hooks (see `DisposableDbTestHooks`). Every
-/// exit path after `db_name` is generated is covered by `cleanup`
-/// (a `CleanupAuthority`, spawned before the admin connection is even
-/// opened): a normal error return explicitly awaits a cleanup attempt and
-/// then commits the authority; a cancellation at any await point instead
-/// leaves the authority armed, and its own drop hands off to the
-/// already-running background task.
+/// test-only synchronization hooks (see `DisposableDbTestHooks`). The actual
+/// create/connect/migrate work happens in `run_setup_owner`, spawned as an
+/// independent Tokio task before this function ever awaits anything else --
+/// see the module doc-comment for why that ownership boundary is what makes
+/// this cancellation-safe.
 pub async fn create_disposable_test_db_with_hooks(
     label: &str,
     hooks: DisposableDbTestHooks,
@@ -449,7 +537,15 @@ pub async fn create_disposable_test_db_with_hooks(
     );
     let admin_url = build_db_url(&base, "postgres", &query);
 
-    if let Some(observer) = &hooks.observer {
+    let DisposableDbTestHooks {
+        before_create,
+        before_target_connect,
+        before_migrate,
+        observer,
+        force_cleanup_admin_url,
+    } = hooks;
+
+    if let Some(observer) = &observer {
         let mut observations = observer
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -457,56 +553,144 @@ pub async fn create_disposable_test_db_with_hooks(
         observations.admin_url = Some(admin_url.clone());
     }
 
-    // Armed before any I/O for this database happens: db_name is already
-    // fixed, so a cancellation at *any* later await -- including mid-flight
-    // inside the CREATE DATABASE statement itself -- still leaves a
-    // background task that knows exactly which database to retry-drop.
-    let cleanup =
-        CleanupAuthority::spawn(admin_url.clone(), db_name.clone(), hooks.observer.as_ref());
+    let (result_tx, result_rx) = oneshot::channel::<SetupHandoff>();
+    let observer_for_task = observer.clone();
 
-    if let Some(barrier) = &hooks.before_create {
-        barrier.reached.notify_one();
-        barrier.hold.notified().await;
+    // Spawned *before* this function awaits anything else: from this point
+    // on, the caller of `create_disposable_test_db_with_hooks` dropping its
+    // own future cannot cancel `run_setup_owner` -- it is an independent
+    // task on the runtime, not a sub-future of the one being awaited below.
+    let setup_join = tokio::spawn(run_setup_owner(
+        base,
+        admin_url,
+        db_name,
+        query,
+        before_create,
+        before_target_connect,
+        before_migrate,
+        observer_for_task,
+        force_cleanup_admin_url,
+        result_tx,
+    ));
+
+    if let Some(observer) = &observer {
+        let mut observations = observer
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        observations.setup_join = Some(setup_join);
     }
+    // If nobody is observing, `setup_join` is simply dropped here, which
+    // detaches the task -- it still runs to completion on the runtime
+    // regardless; only the ability to `.await` its result is lost, and
+    // production code never needs that.
 
-    let result = create_disposable_test_db_inner(
+    match result_rx
+        .await
+        .expect("run_setup_owner always sends exactly one SetupHandoff before returning")
+    {
+        SetupHandoff::Ready(db) => Ok(db),
+        SetupHandoff::Failed(e) => Err(e),
+    }
+}
+
+/// The setup owner task: performs admin connect / CREATE DATABASE / target
+/// connect / migrate to completion, then either hands the result off to
+/// whoever is still listening on `result_tx`, or -- if that receiver is
+/// already gone -- takes full responsibility for cleaning up whatever it
+/// just did. This task is never cancelled by the caller of
+/// `create_disposable_test_db_with_hooks` dropping its own future (see the
+/// module doc-comment); the only way it stops early is if the process
+/// itself is torn down.
+#[allow(clippy::too_many_arguments)]
+async fn run_setup_owner(
+    base: String,
+    admin_url: String,
+    db_name: String,
+    query: Option<String>,
+    before_create: Option<TestBarrier>,
+    before_target_connect: Option<TestBarrier>,
+    before_migrate: Option<TestBarrier>,
+    observer: Option<Arc<Mutex<TestObservations>>>,
+    force_cleanup_admin_url: Option<String>,
+    result_tx: oneshot::Sender<SetupHandoff>,
+) -> SetupCompletion {
+    let inner_result = create_disposable_test_db_inner(
         &base,
         &admin_url,
         &db_name,
         &query,
-        hooks.before_target_connect.as_ref(),
-        hooks.before_migrate.as_ref(),
+        before_create.as_ref(),
+        before_target_connect.as_ref(),
+        before_migrate.as_ref(),
     )
     .await;
 
-    match result {
-        Ok(pool) => Ok(DisposableTestDb {
-            pool,
-            db_name,
-            admin_url,
-            cleanup: Some(cleanup),
-        }),
+    let cleanup_admin_url: &str = force_cleanup_admin_url.as_deref().unwrap_or(&admin_url);
+
+    match inner_result {
+        Ok(pool) => {
+            let db = DisposableTestDb {
+                pool,
+                db_name: db_name.clone(),
+                admin_url: admin_url.clone(),
+                cleanup: Some(CleanupAuthority::spawn(
+                    admin_url.clone(),
+                    db_name.clone(),
+                    observer.as_ref(),
+                )),
+            };
+            match result_tx.send(SetupHandoff::Ready(db)) {
+                Ok(()) => SetupCompletion::HandedOff,
+                Err(SetupHandoff::Ready(orphan)) => {
+                    // The caller was gone by the time setup finished. This
+                    // task is the database's only owner now, so it must
+                    // await its own exact teardown rather than leaving that
+                    // to chance -- this is the fix for the defect where a
+                    // cancellation left nothing alive to ever clean up.
+                    // `cleanup_admin_url` lets a test deterministically
+                    // force this exact attempt to fail (via
+                    // `force_cleanup_admin_url`) without touching the real
+                    // server; the redundant `CleanupAuthority` armed above
+                    // (using the real `admin_url`) still fires its own
+                    // retry-capable drop -- using the real admin URL -- when
+                    // `orphan` is finally dropped here if this exact attempt
+                    // did not itself succeed.
+                    let teardown_result = orphan.drop_database_via(cleanup_admin_url).await;
+                    SetupCompletion::OrphanedAfterSuccess {
+                        teardown_succeeded: teardown_result.is_ok(),
+                    }
+                }
+                Err(SetupHandoff::Failed(_)) => {
+                    unreachable!("send() only ever returns the exact value it was given")
+                }
+            }
+        }
         Err(e) => {
-            // Ordinary (non-cancelled) failure: await cleanup synchronously
-            // so the returned Err already implies the database is gone,
-            // then commit the background authority so it does not also
-            // attempt a redundant (harmless but wasteful) drop.
-            drop_with_retries(&admin_url, &db_name, 1).await;
-            cleanup.commit();
-            Err(e)
+            // Ordinary (non-cancelled) failure: always await cleanup and
+            // inspect its result before reporting -- never blindly commit or
+            // disarm a fallback the way the prior version did. There is no
+            // separately-armed `CleanupAuthority` in this branch at all, so
+            // there is nothing that could be wrongly disarmed.
+            let cleanup_succeeded = drop_with_retries(cleanup_admin_url, &db_name, 3).await;
+            // Deliver the error regardless of whether the caller is still
+            // listening; if it is not, `SetupCompletion` is the only
+            // remaining signal, and it is still reported below.
+            let _ = result_tx.send(SetupHandoff::Failed(e));
+            SetupCompletion::SetupFailed { cleanup_succeeded }
         }
     }
 }
 
 /// CREATE DATABASE, then connect to it, then migrate it. Isolated from
-/// `create_disposable_test_db_with_hooks` purely so that function's
-/// `cleanup` authority and hook-observer wiring stay in one place while
-/// this one stays a straight-line happy/error path.
+/// `run_setup_owner` purely so that function's handoff/orphan/error-cleanup
+/// bookkeeping stays in one place while this one stays a straight-line
+/// happy/error path.
 async fn create_disposable_test_db_inner(
     base: &str,
     admin_url: &str,
     db_name: &str,
     query: &Option<String>,
+    before_create: Option<&TestBarrier>,
     before_target_connect: Option<&TestBarrier>,
     before_migrate: Option<&TestBarrier>,
 ) -> Result<PgPool, DisposableDbError> {
@@ -515,6 +699,12 @@ async fn create_disposable_test_db_inner(
         .connect(admin_url)
         .await
         .map_err(DisposableDbError::Connect)?;
+
+    if let Some(barrier) = before_create {
+        barrier.reached.notify_one();
+        barrier.hold.notified().await;
+    }
+
     let create_result = sqlx::query(&format!("CREATE DATABASE \"{db_name}\""))
         .execute(&admin_pool)
         .await;
@@ -791,5 +981,58 @@ mod tests {
             CleanupOutcome::CleanedUp { succeeded: false },
             "connecting to 127.0.0.1:1 must fail every retry attempt, proving the background task really tried"
         );
+    }
+
+    // -- run_setup_owner: ordinary (non-cancelled) admin-connect failure --
+    // no real Postgres needed: 127.0.0.1:1 refuses immediately, both for the
+    // create/connect/migrate attempt itself and for the cleanup attempt that
+    // must follow it. Proves defect B is closed structurally: there is no
+    // `CleanupAuthority` in this code path at all to wrongly disarm, and
+    // `SetupCompletion::SetupFailed.cleanup_succeeded` directly exposes
+    // whether the awaited cleanup actually succeeded rather than assuming it
+    // did.
+
+    #[tokio::test]
+    async fn run_setup_owner_ordinary_failure_awaits_and_reports_cleanup_result_without_disarming_anything(
+    ) {
+        let (result_tx, result_rx) = oneshot::channel::<SetupHandoff>();
+        let completion = run_setup_owner(
+            UNREACHABLE_ADMIN_URL
+                .trim_end_matches("/postgres")
+                .to_string(),
+            UNREACHABLE_ADMIN_URL.to_string(),
+            "mqk_disp_unittest_ordinary_fail".to_string(),
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            result_tx,
+        )
+        .await;
+
+        match completion {
+            SetupCompletion::SetupFailed { cleanup_succeeded } => {
+                assert!(
+                    !cleanup_succeeded,
+                    "connecting to 127.0.0.1:1 must fail every retry attempt, proving the \
+                     ordinary-error cleanup path really ran and its failure was observed \
+                     rather than silently treated as success"
+                );
+            }
+            other => panic!("expected SetupFailed, got {other:?}"),
+        }
+
+        match result_rx
+            .await
+            .expect("receiver should still get a Failed handoff")
+        {
+            SetupHandoff::Failed(DisposableDbError::Connect(_)) => {}
+            SetupHandoff::Failed(other) => panic!("expected Connect(_), got {other}"),
+            SetupHandoff::Ready(_) => {
+                panic!("expected Failed, got Ready against an unreachable admin URL")
+            }
+        }
     }
 }
