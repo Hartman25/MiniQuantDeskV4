@@ -362,11 +362,13 @@ async fn economic_fill_identity_is_durably_deduped() -> Result<()> {
         "same broker_message_id must dedupe transport duplicate"
     );
 
-    // For events without broker_fill_id, only transport deduplication applies.
-    // Use event_kind="partial_fill" here: partial fills are explicitly excluded
-    // from uq_inbox_run_order_single_fill (migration 0040), so multiple partial
-    // fills for the same order are allowed. This proves that broker_message_id
-    // is the sole dedup key when broker_fill_id is None.
+    // event_kind="partial_fill" payloads that carry `delta_qty`/`price_micros`
+    // go through the economic-match window added by
+    // PAPER-SOAK-PARTIAL-FILL-DEDUP-01 (see inbox_insert_partial_fill_deduped);
+    // see scenario_fill_dedup_ws_rest_precision_01.rs for that behavior. This
+    // payload (`{"msg": N}`) carries neither field, so it falls back to plain
+    // transport-only dedup by broker_message_id, proving that fallback path
+    // still applies when a partial_fill payload is missing economic fields.
     let no_fill_first = mqk_db::inbox_insert_deduped_with_identity(
         &pool,
         run_id,

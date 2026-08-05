@@ -1900,6 +1900,17 @@ pub(crate) async fn repair_halted_run_fill_rest_recovery(
         .ok()
         .map(|dt| dt.with_timezone(&Utc))
         .unwrap_or_else(Utc::now);
+    // PAPER-SOAK-PARTIAL-FILL-DEDUP-01: a real broker-reported event_ts_ms is
+    // required for inbox_insert_partial_fill_deduped's economic-match window
+    // (mqk-db::inbox) to discriminate between distinct partial fills for this
+    // order. `stable_msg_id` is a synthetic "alpaca-rest-recovery:{activity_id}"
+    // identity, not Alpaca wire format, so `alpaca_event_ts_ms_from_message_id`
+    // cannot derive a timestamp from it; derive one directly from the REST
+    // activity's own transaction timestamp instead. Falls back to 0 (parse
+    // failure) only when the source timestamp itself is unparseable.
+    let event_ts_ms = chrono::DateTime::parse_from_rfc3339(&rest_fill.timestamp)
+        .map(|dt| dt.timestamp_millis())
+        .unwrap_or(0);
 
     // ---------------------------------------------------------------------------
     // Gate 12: idempotent inbox insert.
@@ -1915,7 +1926,7 @@ pub(crate) async fn repair_halted_run_fill_rest_recovery(
         &body.broker_order_id,
         event_kind,
         &event_json,
-        0,
+        event_ts_ms,
         received_at,
     )
     .await

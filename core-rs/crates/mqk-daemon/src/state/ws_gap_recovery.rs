@@ -310,6 +310,20 @@ pub(crate) async fn run_ws_gap_fill_recovery_core(
             .ok()
             .map(|dt| dt.with_timezone(&Utc))
             .unwrap_or_else(Utc::now);
+        // PAPER-SOAK-PARTIAL-FILL-DEDUP-01: `stable_msg_id` here is a synthetic
+        // "{GAP_RECOVERY_MSG_PREFIX}:{activity.id}" identity, not Alpaca wire
+        // format, so it carries no timestamp `alpaca_event_ts_ms_from_message_id`
+        // could extract. inbox_insert_partial_fill_deduped's economic-match
+        // window (mqk-db::inbox) needs a real event_ts_ms to discriminate
+        // between distinct partial fills for the same order — this recovery
+        // path exists specifically to backfill fills WS may have missed, so a
+        // hardcoded 0 here would either falsely collapse two distinct
+        // recovered fills or fail to match the WS row it is meant to
+        // deduplicate against. Derive it from the activity's own transaction
+        // timestamp instead; 0 only on genuine parse failure.
+        let event_ts_ms = chrono::DateTime::parse_from_rfc3339(&activity.transaction_time)
+            .map(|dt| dt.timestamp_millis())
+            .unwrap_or(0);
 
         let fill = WsGapRecoveredFill {
             broker_activity_id: activity.id.clone(),
@@ -340,7 +354,7 @@ pub(crate) async fn run_ws_gap_fill_recovery_core(
             &activity.order_id,
             event_kind,
             &event_json,
-            0,
+            event_ts_ms,
             received_at,
         )
         .await
