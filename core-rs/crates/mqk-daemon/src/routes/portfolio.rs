@@ -651,15 +651,27 @@ pub(crate) async fn portfolio_fills(State(st): State<Arc<AppState>>) -> impl Int
 
 pub(crate) async fn risk_summary(State(st): State<Arc<AppState>>) -> impl IntoResponse {
     let snap = st.broker_snapshot.read().await.clone();
-    let durable_risk = if let Some(db) = st.db.as_ref() {
-        mqk_db::load_risk_block_state(db).await.ok().flatten()
-    } else {
-        None
+    // OPERATOR-RISK-UNKNOWN-TRUTH-01: never collapse "no DB" or a genuine
+    // query error into a confirmed-clear kill switch. Only a confirmed DB
+    // read (Some or None row) may report `kill_switch_active: false`.
+    let (truth_state, kill_switch_active) = match st.db.as_ref() {
+        None => ("no_db", true),
+        Some(db) => match mqk_db::load_risk_block_state(db).await {
+            Ok(Some(state)) => ("active", state.blocked),
+            Ok(None) => ("active", false),
+            Err(err) => {
+                tracing::warn!(
+                    error = %err,
+                    "risk_summary: load_risk_block_state query failed; \
+                     reporting kill switch as unknown/active (fail-closed)"
+                );
+                ("query_failed", true)
+            }
+        },
     };
-    let risk_blocked = durable_risk.as_ref().is_some_and(|state| state.blocked);
 
     // RISK-ENGINE-HALTED-VISIBILITY-01: read-only overlay of the live risk
-    // gate's sticky `RiskState.halted` flag. Distinct from `risk_blocked`
+    // gate's sticky `RiskState.halted` flag. Distinct from `kill_switch_active`
     // above, which is derived from the transient `sys_risk_block_state` DB
     // row and is reset every orchestrator tick.
     let risk_engine_halted = match st.current_execution_snapshot().await {
@@ -693,8 +705,9 @@ pub(crate) async fn risk_summary(State(st): State<Arc<AppState>>) -> impl IntoRe
             daily_pnl: None,
             drawdown_pct: None,
             loss_limit_utilization_pct: None,
-            kill_switch_active: risk_blocked,
-            active_breaches: usize::from(risk_blocked),
+            truth_state: truth_state.to_string(),
+            kill_switch_active,
+            active_breaches: usize::from(kill_switch_active),
             risk_engine_halted,
             risk_engine_halt_reason_code,
         }
@@ -707,8 +720,9 @@ pub(crate) async fn risk_summary(State(st): State<Arc<AppState>>) -> impl IntoRe
             daily_pnl: None,
             drawdown_pct: None,
             loss_limit_utilization_pct: None,
-            kill_switch_active: risk_blocked,
-            active_breaches: usize::from(risk_blocked),
+            truth_state: truth_state.to_string(),
+            kill_switch_active,
+            active_breaches: usize::from(kill_switch_active),
             risk_engine_halted,
             risk_engine_halt_reason_code,
         }

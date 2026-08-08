@@ -103,6 +103,7 @@ async fn gui_contract_canonical_api_surfaces_have_expected_shape() {
                 "net_exposure",
                 "concentration_pct",
                 "kill_switch_active",
+                "truth_state",
             ],
         ),
         (

@@ -946,8 +946,122 @@ async fn api_portfolio_and_risk_summary_derive_from_snapshot() {
     assert_eq!(risk_json["gross_exposure"].as_f64().unwrap(), 1100.0);
     assert_eq!(risk_json["net_exposure"].as_f64().unwrap(), 900.0);
     assert!((risk_json["concentration_pct"].as_f64().unwrap() - 90.9090909090909).abs() < 1e-9);
-    assert_eq!(risk_json["kill_switch_active"], false);
-    assert_eq!(risk_json["active_breaches"], 0);
+    // OPERATOR-RISK-UNKNOWN-TRUTH-01: this harness configures no DB, so the
+    // durable risk-block state is unconfirmed. Fail-closed: kill switch must
+    // report active/unknown, never a confirmed-clear false.
+    assert_eq!(risk_json["truth_state"], "no_db");
+    assert_eq!(risk_json["kill_switch_active"], true);
+    assert_eq!(risk_json["active_breaches"], 1);
+}
+
+// ---------------------------------------------------------------------------
+// OPERATOR-RISK-UNKNOWN-TRUTH-01: /api/v1/risk/summary must never collapse
+// an unconfirmed durable risk-block read into a confirmed-clear kill switch.
+// ---------------------------------------------------------------------------
+
+/// A pool that constructs successfully (`connect_lazy` never eagerly
+/// connects) but whose every query fails at execution time against an
+/// unreachable address -- the exact "DB configured, query itself errors"
+/// shape, with no real Postgres instance required.
+fn broken_risk_pool() -> sqlx::PgPool {
+    sqlx::postgres::PgPoolOptions::new()
+        .max_connections(1)
+        .connect_lazy("postgres://invalid:invalid@127.0.0.1:1/nonexistent_risk_test_db")
+        .expect("connect_lazy never eagerly connects")
+}
+
+#[tokio::test]
+async fn risk_summary_query_failure_reports_fail_closed_kill_switch() {
+    let st = Arc::new(state::AppState::new_for_test_with_db_mode_and_broker(
+        broken_risk_pool(),
+        state::DeploymentMode::Paper,
+        state::BrokerKind::Alpaca,
+    ));
+
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/risk/summary")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status, body) = call(routes::build_router(st), req).await;
+    assert_eq!(status, StatusCode::OK);
+    let json = parse_json(body);
+
+    // A genuine DB query failure must never be reported as a confirmed-clear
+    // kill switch -- fail-closed: unknown truth reports active/blocked.
+    assert_eq!(json["truth_state"], "query_failed");
+    assert_eq!(json["kill_switch_active"], true);
+    assert_eq!(json["active_breaches"], 1);
+}
+
+/// Acquire a real DB pool from MQK_DATABASE_URL for the confirmed-state
+/// round trip below. Panics with a clear message if the env var is absent
+/// (mirrors `denial_test_pool` immediately below in this file).
+async fn risk_summary_test_pool() -> sqlx::PgPool {
+    let url = std::env::var(mqk_db::ENV_DB_URL).unwrap_or_else(|_| {
+        panic!(
+            "DB tests require MQK_DATABASE_URL; run: \
+             MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test \
+             cargo test -p mqk-daemon risk_summary_confirmed -- --include-ignored"
+        )
+    });
+    sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&url)
+        .await
+        .expect("risk_summary_test_pool: connect failed")
+}
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+async fn risk_summary_confirmed_db_state_reports_active_truth() {
+    let pool = risk_summary_test_pool().await;
+
+    // Confirmed-absent row: truth_state "active", kill switch confirmed clear.
+    sqlx::query("delete from sys_risk_block_state where sentinel_id = 1")
+        .execute(&pool)
+        .await
+        .expect("clear sys_risk_block_state");
+
+    let st = Arc::new(state::AppState::new_for_test_with_db_mode_and_broker(
+        pool.clone(),
+        state::DeploymentMode::Paper,
+        state::BrokerKind::Alpaca,
+    ));
+    let req = Request::builder()
+        .method("GET")
+        .uri("/api/v1/risk/summary")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status, body) = call(routes::build_router(Arc::clone(&st)), req).await;
+    assert_eq!(status, StatusCode::OK);
+    let json = parse_json(body);
+    assert_eq!(json["truth_state"], "active");
+    assert_eq!(json["kill_switch_active"], false);
+    assert_eq!(json["active_breaches"], 0);
+
+    // Confirmed-blocked row: truth_state "active", kill switch confirmed active.
+    mqk_db::persist_risk_block_state(&pool, true, Some("test block"), chrono::Utc::now())
+        .await
+        .expect("persist_risk_block_state failed");
+
+    let req2 = Request::builder()
+        .method("GET")
+        .uri("/api/v1/risk/summary")
+        .body(axum::body::Body::empty())
+        .unwrap();
+    let (status2, body2) = call(routes::build_router(st), req2).await;
+    assert_eq!(status2, StatusCode::OK);
+    let json2 = parse_json(body2);
+    assert_eq!(json2["truth_state"], "active");
+    assert_eq!(json2["kill_switch_active"], true);
+    assert_eq!(json2["active_breaches"], 1);
+
+    // Cleanup so this row doesn't leak into other DB-backed tests.
+    sqlx::query("delete from sys_risk_block_state where sentinel_id = 1")
+        .execute(&pool)
+        .await
+        .expect("cleanup sys_risk_block_state");
 }
 
 #[tokio::test]

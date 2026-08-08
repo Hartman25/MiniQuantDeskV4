@@ -138,6 +138,7 @@ test("explicit not_wired truth wrappers stay mounted and render honest GUI copy"
           daily_pnl: 0,
           drawdown_pct: 0,
           loss_limit_utilization_pct: 0,
+          truth_state: "active",
           kill_switch_active: false,
           active_breaches: 0,
         });
@@ -237,6 +238,7 @@ test("authoritative active-empty truth stays distinct from not_wired wrappers", 
           daily_pnl: 0,
           drawdown_pct: 0,
           loss_limit_utilization_pct: 0,
+          truth_state: "active",
           kill_switch_active: false,
           active_breaches: 0,
         });

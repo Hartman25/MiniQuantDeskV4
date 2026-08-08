@@ -1374,6 +1374,12 @@ pub struct RiskSummaryResponse {
     pub daily_pnl: Option<f64>,
     pub drawdown_pct: Option<f64>,
     pub loss_limit_utilization_pct: Option<f64>,
+    /// `"active"` (durable risk-block state was queried, confirmed present
+    /// or confirmed absent) | `"no_db"` (no DB configured) | `"query_failed"`
+    /// (DB configured but the risk-block-state read errored). When not
+    /// `"active"`, `kill_switch_active` is fail-closed `true` rather than a
+    /// possibly-false confirmed-clear reading (OPERATOR-RISK-UNKNOWN-TRUTH-01).
+    pub truth_state: String,
     pub kill_switch_active: bool,
     pub active_breaches: usize,
     /// Sticky `RiskState.halted` flag from the live risk gate

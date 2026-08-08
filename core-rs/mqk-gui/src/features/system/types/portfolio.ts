@@ -65,6 +65,7 @@ export interface RiskSummary {
   daily_pnl: number;
   drawdown_pct: number;
   loss_limit_utilization_pct: number;
+  truth_state: string;
   kill_switch_active: boolean;
   active_breaches: number;
 }

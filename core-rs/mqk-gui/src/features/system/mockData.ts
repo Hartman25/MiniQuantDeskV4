@@ -480,6 +480,7 @@ export const MOCK_RISK_SUMMARY: RiskSummary = {
   daily_pnl: 1840.22,
   drawdown_pct: 1.82,
   loss_limit_utilization_pct: 41.8,
+  truth_state: "active",
   kill_switch_active: false,
   active_breaches: 0,
 };

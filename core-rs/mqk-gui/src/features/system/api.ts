@@ -1176,7 +1176,11 @@ export async function fetchOperatorModel(): Promise<SystemModel> {
     daily_pnl: 0,
     drawdown_pct: 0,
     loss_limit_utilization_pct: 0,
-    kill_switch_active: false,
+    // OPERATOR-RISK-UNKNOWN-TRUTH-01: mirrors the DESKTOP-10 preflight
+    // fail-closed rule above -- when the fetch itself failed, kill-switch
+    // truth is unconfirmed and must not render as a confirmed-clear "false".
+    truth_state: "unavailable",
+    kill_switch_active: true,
     active_breaches: 0,
   };
   const unavailableReconcileSummary: ReconcileSummary = {

@@ -27,7 +27,7 @@ const FALLBACK_MODEL: SystemModel = {
   positions: [],
   openOrders: [],
   fills: [],
-  riskSummary: { gross_exposure: 0, net_exposure: 0, concentration_pct: 0, daily_pnl: 0, drawdown_pct: 0, loss_limit_utilization_pct: 0, kill_switch_active: false, active_breaches: 0 },
+  riskSummary: { gross_exposure: 0, net_exposure: 0, concentration_pct: 0, daily_pnl: 0, drawdown_pct: 0, loss_limit_utilization_pct: 0, truth_state: "unavailable", kill_switch_active: true, active_breaches: 0 },
   riskDenials: [],
   reconcileSummary: { status: "unknown", last_run_at: null, mismatched_positions: 0, mismatched_orders: 0, mismatched_fills: 0, unmatched_broker_events: 0 },
   mismatches: [],
