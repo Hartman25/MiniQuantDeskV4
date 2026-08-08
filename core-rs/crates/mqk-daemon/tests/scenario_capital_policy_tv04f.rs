@@ -25,8 +25,11 @@
 //! integrity_armed          → passes (armed below)
 //! operator_auth            → passes (TokenRequired set)
 //! WS continuity            → passes (Live forced in test setup)
-//! TV-02C artifact gate     → not triggered (no MQK_ARTIFACT_PATH)
-//! TV-03C parity gate       → not triggered (no MQK_ARTIFACT_PATH)
+//! TV-02C artifact gate     → passes (F02-F05 configure a trusted artifact dir)
+//! TV-03C parity gate       → passes (evidence present)
+//! TV-03D parity trust gate → passes (live_trust_complete=true, per
+//!                             LIVE-CAPITAL-PARITY-COMPLETE-GATE-01 — otherwise
+//!                             LiveCapital would never reach TV-04F at all)
 //! TV-04F live-capital policy required  ← what F02/F03/F04 exercise
 //! TV-04A capital policy validity       → fires after TV-04F confirms presence
 //! TV-04D deployment economics          → fires after TV-04A confirms validity
@@ -126,6 +129,68 @@ fn disabled_policy(policy_id: &str) -> String {
   "per_strategy_budgets": []
 }}"#
     )
+}
+
+/// Write a minimal artifact dir (manifest + passing deployability gate +
+/// trust-complete parity evidence) satisfying TV-02C, TV-03C, and TV-03D, so
+/// LiveCapital tests can reach TV-04F. Returns `(manifest_path, dir)`.
+fn write_trusted_artifact_dir(tag: &str) -> (PathBuf, PathBuf) {
+    let artifact_id = format!("tv04f-{tag}-artifact");
+    let dir = std::env::temp_dir().join(format!(
+        "mqk_tv04f_{tag}_artifact_{}_{}",
+        std::process::id(),
+        next_id()
+    ));
+    std::fs::create_dir_all(&dir).expect("create artifact dir");
+    let manifest = dir.join("promoted_manifest.json");
+    std::fs::write(
+        &manifest,
+        format!(
+            r#"{{
+  "schema_version": "promoted-v1",
+  "artifact_id": "{artifact_id}",
+  "artifact_type": "signal_pack",
+  "stage": "paper",
+  "produced_by": "research-py/promote.py",
+  "data_root": "promoted/signal_packs/{artifact_id}"
+}}"#
+        ),
+    )
+    .expect("write manifest");
+    std::fs::write(
+        dir.join("deployability_gate.json"),
+        format!(
+            r#"{{
+  "schema_version": "gate-v1",
+  "artifact_id": "{artifact_id}",
+  "passed": true,
+  "checks": [],
+  "overall_reason": "all checks passed",
+  "evaluated_at_utc": "2026-03-01T00:00:00Z"
+}}"#
+        ),
+    )
+    .expect("write gate file");
+    std::fs::write(
+        dir.join("parity_evidence.json"),
+        serde_json::json!({
+            "schema_version": "parity-v1",
+            "artifact_id": artifact_id,
+            "gate_passed": true,
+            "gate_schema_version": "gate-v1",
+            "shadow_evidence": {
+                "evidence_available": true,
+                "evidence_note": "Shadow evaluation run completed for this artifact"
+            },
+            "comparison_basis": "paper+alpaca supervised path",
+            "live_trust_complete": true,
+            "live_trust_gaps": [],
+            "produced_at_utc": "2026-03-01T00:00:00Z"
+        })
+        .to_string(),
+    )
+    .expect("write parity evidence file");
+    (manifest, dir)
 }
 
 /// Write a policy file to a unique temp dir.  Returns `(policy_path, dir)`.
@@ -245,10 +310,16 @@ async fn f01_live_shadow_without_policy_proceeds_to_db_gate() {
 async fn f02_live_capital_without_policy_blocked_at_tv04f_gate() {
     let _lock = env_lock().lock().await;
     std::env::remove_var("MQK_CAPITAL_POLICY_PATH");
+    // TV-03D: satisfy the parity trust gate so TV-04F is what's under test.
+    let (manifest, artifact_dir) = write_trusted_artifact_dir("f02");
+    std::env::set_var("MQK_ARTIFACT_PATH", manifest.to_str().unwrap());
 
     let token = "tv04f-f02-token";
     let st = armed_live_capital_state(token).await;
     let (status, body) = call(routes::build_router(st), post_start(Some(token))).await;
+
+    std::env::remove_var("MQK_ARTIFACT_PATH");
+    cleanup(&artifact_dir);
 
     assert_eq!(
         status,
@@ -271,6 +342,11 @@ async fn f02_live_capital_without_policy_blocked_at_tv04f_gate() {
         "operator_auth",
         "F02: operator_auth gate must have passed before TV-04F; got: {j}"
     );
+    assert_ne!(
+        j.get("gate").and_then(|g| g.as_str()).unwrap_or(""),
+        "live_capital_parity_trust",
+        "F02: TV-03D parity trust gate must have passed before TV-04F; got: {j}"
+    );
 }
 
 /// F03: LiveCapital + valid capital policy → proceeds to db_pool() (503).
@@ -283,25 +359,35 @@ async fn f03_live_capital_with_valid_policy_proceeds_to_db_gate() {
     let _lock = env_lock().lock().await;
     let (path, dir) = write_policy_dir("f03", &valid_policy("tv04f-f03-policy"));
     std::env::set_var("MQK_CAPITAL_POLICY_PATH", &path);
+    // TV-03D: satisfy the parity trust gate so TV-04F/TV-04A/TV-04D are what's under test.
+    let (manifest, artifact_dir) = write_trusted_artifact_dir("f03");
+    std::env::set_var("MQK_ARTIFACT_PATH", manifest.to_str().unwrap());
 
     let token = "tv04f-f03-token";
     let st = armed_live_capital_state(token).await;
     let (status, body) = call(routes::build_router(st), post_start(Some(token))).await;
 
     cleanup(&dir);
+    cleanup(&artifact_dir);
     std::env::remove_var("MQK_CAPITAL_POLICY_PATH");
+    std::env::remove_var("MQK_ARTIFACT_PATH");
 
     assert_eq!(
         status,
         StatusCode::SERVICE_UNAVAILABLE,
         "F03: LiveCapital with valid policy must reach DB gate (503); \
-         all pre-DB gates (TV-04F + TV-04A + TV-04D) must pass; got: {status}"
+         all pre-DB gates (TV-03D + TV-04F + TV-04A + TV-04D) must pass; got: {status}"
     );
     let j = parse_json(body);
     let error = j["error"].as_str().unwrap_or("");
     assert!(
         error.contains("runtime DB is not configured") || error.contains("DB"),
         "F03: 503 body must describe DB unavailability (all pre-DB gates passed); got: {j}"
+    );
+    assert_ne!(
+        j.get("gate").and_then(|g| g.as_str()).unwrap_or(""),
+        "live_capital_parity_trust",
+        "F03: TV-03D gate must not fire when parity trust is complete; got: {j}"
     );
     assert_ne!(
         j.get("gate").and_then(|g| g.as_str()).unwrap_or(""),
@@ -328,13 +414,18 @@ async fn f04_live_capital_disabled_policy_passes_tv04f_blocked_at_tv04a() {
     let _lock = env_lock().lock().await;
     let (path, dir) = write_policy_dir("f04", &disabled_policy("tv04f-f04-disabled"));
     std::env::set_var("MQK_CAPITAL_POLICY_PATH", &path);
+    // TV-03D: satisfy the parity trust gate so TV-04F/TV-04A are what's under test.
+    let (manifest, artifact_dir) = write_trusted_artifact_dir("f04");
+    std::env::set_var("MQK_ARTIFACT_PATH", manifest.to_str().unwrap());
 
     let token = "tv04f-f04-token";
     let st = armed_live_capital_state(token).await;
     let (status, body) = call(routes::build_router(st), post_start(Some(token))).await;
 
     cleanup(&dir);
+    cleanup(&artifact_dir);
     std::env::remove_var("MQK_CAPITAL_POLICY_PATH");
+    std::env::remove_var("MQK_ARTIFACT_PATH");
 
     assert_eq!(
         status,
@@ -352,6 +443,11 @@ async fn f04_live_capital_disabled_policy_passes_tv04f_blocked_at_tv04a() {
         j.get("gate").and_then(|g| g.as_str()).unwrap_or(""),
         "live_capital_policy_required",
         "F04: TV-04F must not fire when a policy IS configured (even if disabled); got: {j}"
+    );
+    assert_ne!(
+        j.get("gate").and_then(|g| g.as_str()).unwrap_or(""),
+        "live_capital_parity_trust",
+        "F04: TV-03D gate must not fire when parity trust is complete; got: {j}"
     );
 }
 
@@ -375,6 +471,11 @@ async fn f05_semantic_separation_paper_safety_vs_live_capital_authorization() {
         call(routes::build_router(live_shadow_st), post_start(None)).await;
     let shadow_j = parse_json(shadow_body);
 
+    // TV-03D: satisfy the parity trust gate so TV-04F is what's under test
+    // for the LiveCapital branch.
+    let (manifest, artifact_dir) = write_trusted_artifact_dir("f05");
+    std::env::set_var("MQK_ARTIFACT_PATH", manifest.to_str().unwrap());
+
     let token = "tv04f-f05-token";
     let live_capital_st = armed_live_capital_state(token).await;
     let (capital_status, capital_body) = call(
@@ -383,6 +484,9 @@ async fn f05_semantic_separation_paper_safety_vs_live_capital_authorization() {
     )
     .await;
     let capital_j = parse_json(capital_body);
+
+    std::env::remove_var("MQK_ARTIFACT_PATH");
+    cleanup(&artifact_dir);
 
     assert_eq!(
         shadow_status,

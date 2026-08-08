@@ -11,12 +11,15 @@
 //!   parity evidence blocks start at the TV-03C gate with `gate=parity_evidence`.
 //! - No synthetic success path exists when parity evidence is missing or invalid:
 //!   the gate name is explicit and the 403 is unambiguous.
-//! - When parity evidence IS present (`live_trust_complete=false` in current TV-03),
-//!   the start gate does not fabricate an additional block — it proceeds honestly to
-//!   the DB gate.  The mode_transition guidance is the advisory layer; the TV-03C
-//!   parity gate is the enforcement layer for evidence existence.
+//! - When parity evidence IS present but `live_trust_complete=false` (current TV-03
+//!   pipeline ceiling), LiveCapital start is refused at a dedicated TV-03D gate —
+//!   the same fail-closed policy `evaluate_mode_transition` already advertises for
+//!   upward transitions into LiveCapital is now enforced at actual cold start, not
+//!   only at the advisory `mode-change-guidance` route (LIVE-CAPITAL-PARITY-COMPLETE-GATE-01,
+//!   closing A2-FIND-007 / A2-PATCH-008).  LiveShadow is unaffected — TV-03C's
+//!   evidence-presence-only contract (LT-04) is unchanged for that mode.
 //!
-//! # Gate ordering context for F03/F04/F05
+//! # Gate ordering context for F03/F04/F05/F06
 //!
 //! At the start boundary (armed LiveCapital+Alpaca, WS=Live, TokenRequired):
 //!   1. deployment_readiness   → passes (LiveCapital+Alpaca)
@@ -24,9 +27,10 @@
 //!   3. operator_auth          → passes (TokenRequired, valid bearer token)
 //!   4. WS continuity          → passes (Live state forced in test setup)
 //!   5. TV-02C artifact gate   → passes (manifest + gate file present)
-//!   6. TV-03C parity gate     ← what F03/F04/F05 exercise
-//!   7. TV-04A capital policy  → not triggered (no MQK_CAPITAL_POLICY_PATH)
-//!   8. db_pool()              → ServiceUnavailable (no DB in test) → 503
+//!   6. TV-03C parity gate     ← what F03/F04 exercise (evidence presence)
+//!   7. TV-03D parity trust    ← what F05/F06 exercise (LiveCapital-only)
+//!   8. TV-04A capital policy  → not triggered (no MQK_CAPITAL_POLICY_PATH) / F06 configures one
+//!   9. db_pool()              → ServiceUnavailable (no DB in test) → 503
 //!
 //! # Proof matrix
 //!
@@ -36,7 +40,8 @@
 //! | F02  | GET mode-change-guidance from LiveShadow daemon: LiveCapital target = fail_closed    |
 //! | F03  | LiveCapital+armed+WS=Live + absent parity → 403 gate=parity_evidence               |
 //! | F04  | LiveCapital+armed+WS=Live + invalid parity → 403 gate=parity_evidence              |
-//! | F05  | LiveCapital+armed+WS=Live + parity present → proceeds to DB gate (503, not 403)    |
+//! | F05  | LiveCapital+armed+WS=Live + parity present, live_trust_complete=false → 403 gate=live_capital_parity_trust |
+//! | F06  | LiveCapital+armed+WS=Live + parity present, live_trust_complete=true → proceeds to DB gate (503, not 403) |
 //!
 //! # Does not reopen
 //!
@@ -45,8 +50,8 @@
 //! - LO-03D/LO-03E: live-capital preflight and halt/disarm controls are closed
 //! - LO-03G: arm/disarm audit durability is closed
 //! - TV-03A/TV-03B/TV-03C: parity evidence seam, truth surface, and LiveShadow
-//!   start boundary are closed (F03/F04/F05 prove the same gate applies for
-//!   LiveCapital, not re-prove the LiveShadow path)
+//!   start boundary are closed (F03/F04 prove the same evidence-presence gate
+//!   applies for LiveCapital, not re-prove the LiveShadow path)
 //!
 //! All tests are pure in-process (no DB, no network, no real broker).
 //! All tests are always runnable in CI without MQK_DATABASE_URL.
@@ -192,6 +197,31 @@ fn valid_parity_json(artifact_id: &str) -> String {
         "comparison_basis": "paper+alpaca supervised path",
         "live_trust_complete": false,
         "live_trust_gaps": ["TV-02 gate evaluates historical metrics only"],
+        "produced_at_utc": "2026-03-01T00:00:00Z"
+    })
+    .to_string()
+}
+
+/// Same shape as [`valid_parity_json`] but with `live_trust_complete: true`.
+///
+/// The real Python TV-03 pipeline never produces this today (current-build
+/// ceiling per `evaluate_mode_transition`), but the TV-03D gate must be a
+/// genuine conditional check on the field's value, not a permanent hard
+/// block — this fixture proves the gate has a real pass path once the
+/// pipeline can eventually produce `live_trust_complete=true`.
+fn valid_parity_json_trusted(artifact_id: &str) -> String {
+    serde_json::json!({
+        "schema_version": "parity-v1",
+        "artifact_id": artifact_id,
+        "gate_passed": true,
+        "gate_schema_version": "gate-v1",
+        "shadow_evidence": {
+            "evidence_available": true,
+            "evidence_note": "Shadow evaluation run completed for this artifact"
+        },
+        "comparison_basis": "paper+alpaca supervised path",
+        "live_trust_complete": true,
+        "live_trust_gaps": [],
         "produced_at_utc": "2026-03-01T00:00:00Z"
     })
     .to_string()
@@ -502,35 +532,30 @@ async fn f04_live_capital_start_invalid_parity_blocked_at_parity_gate() {
 }
 
 // ===========================================================================
-// F05 — LiveCapital+armed+WS=Live + parity present → 503 DB gate
+// F05 — LiveCapital+armed+WS=Live + parity present, live_trust_complete=false
+//       → 403 gate=live_capital_parity_trust (TV-03D)
 //
-// Proves two complementary truths:
-//   (a) When evidence IS present, the parity gate does not fabricate an
-//       additional block — it passes through to the next gate.
-//   (b) live_trust_complete=false in the current TV-03 build does not cause
-//       the TV-03C gate itself to block (the advisory layer is the
-//       mode_transition verdict, not a secondary enforcement gate).
-//
-// Together, F03+F04+F05 prove: absent/invalid → blocked, present → not blocked.
-// The mode_transition advisory layer (F01/F02) covers the "why this transition
-// is not yet recommended" signal to the operator.
+// LIVE-CAPITAL-PARITY-COMPLETE-GATE-01 (closes A2-FIND-007 / A2-PATCH-008):
+// evaluate_mode_transition already advertises that upward transitions into
+// LiveCapital are fail-closed while live_trust_complete=false, but that
+// policy previously lived only in the advisory mode-change-guidance route —
+// a daemon cold-started directly into LiveCapital via
+// MQK_DAEMON_DEPLOYMENT_MODE bypassed it entirely.  TV-03D wires the same
+// policy into the actual start path, LiveCapital-only.
 // ===========================================================================
 
-/// LO-03F / F05: When the daemon is in LiveCapital mode, all pre-DB gates pass
-/// (including parity evidence present with `live_trust_complete=false`), start
-/// reaches and fires the DB gate (503 — no DB configured in test).
+/// LO-03F / F05: When the daemon is in LiveCapital mode and parity evidence
+/// is present but `live_trust_complete=false` (the current TV-03 pipeline's
+/// permanent output), start is refused at the TV-03D gate with
+/// `gate=live_capital_parity_trust` — even though TV-03C (evidence presence)
+/// passed.
 ///
 /// This proves:
-/// - The TV-03C parity gate passes when evidence is present (not doubly blocked).
-/// - The TV-04F live-capital policy gate passes when a policy is configured.
-/// - The 503 is the definitive signal that all pre-DB gates were satisfied.
-/// - No gate between the parity gate and db_pool() fabricates a new block.
-///
-/// Note: TV-04F (added) requires live-capital to have an explicit capital policy.
-/// A minimal valid policy is configured in this test so TV-04F + TV-04A + TV-04D
-/// all pass, and the test continues to prove the DB gate (503) is the final stop.
+/// - TV-03C and TV-03D are distinct gates: presence alone is not trust completeness.
+/// - The fail-closed policy `evaluate_mode_transition` already advertises for
+///   upward transitions into LiveCapital is now enforced at actual cold start.
 #[tokio::test]
-async fn f05_live_capital_start_present_parity_proceeds_to_db_gate() {
+async fn f05_live_capital_start_present_parity_incomplete_trust_blocked_at_trust_gate() {
     let _guard = env_lock().lock().await;
     let token = "lo03f-f05-token";
     let artifact_id = "lo03f-f05-present-parity";
@@ -538,15 +563,81 @@ async fn f05_live_capital_start_present_parity_proceeds_to_db_gate() {
     let parity = valid_parity_json(artifact_id);
     let (manifest, dir) = write_artifact_dir("f05", artifact_id, Some(&parity));
     std::env::set_var("MQK_ARTIFACT_PATH", manifest.to_str().unwrap());
+    std::env::remove_var("MQK_CAPITAL_POLICY_PATH");
+
+    let st = armed_live_capital_state(token).await;
+    let (status, body) = call(routes::build_router(st), post_start_with_token(token)).await;
+
+    std::env::remove_var("MQK_ARTIFACT_PATH");
+    cleanup(&dir);
+
+    let j = json(body);
+    assert_eq!(
+        status,
+        StatusCode::FORBIDDEN,
+        "F05: LiveCapital with present parity but live_trust_complete=false must be \
+         refused (403), not proceed to the DB gate; body: {j}"
+    );
+    assert_eq!(
+        j["gate"].as_str().unwrap_or(""),
+        "live_capital_parity_trust",
+        "F05: gate must be live_capital_parity_trust — evidence presence (TV-03C) is not \
+         the same as trust completeness (TV-03D); body: {j}"
+    );
+    // Explicit: TV-03C (evidence presence) passed — evidence is present.
+    assert_ne!(
+        j["gate"].as_str().unwrap_or(""),
+        "parity_evidence",
+        "F05: parity_evidence (TV-03C) gate must have passed (evidence is present); body: {j}"
+    );
+    // Explicit: WS continuity gate passed (Live state was set)
+    assert_ne!(
+        j["gate"].as_str().unwrap_or(""),
+        "alpaca_ws_continuity",
+        "F05: WS continuity gate must have passed (Live state set); body: {j}"
+    );
+    // Explicit: operator_auth gate passed (TokenRequired with valid token)
+    assert_ne!(
+        j["gate"].as_str().unwrap_or(""),
+        "operator_auth",
+        "F05: operator_auth gate must have passed (TokenRequired set); body: {j}"
+    );
+}
+
+// ===========================================================================
+// F06 — LiveCapital+armed+WS=Live + parity present, live_trust_complete=true
+//       → proceeds past TV-03D to the DB gate (503, not 403)
+//
+// Proves TV-03D is a genuine conditional check on the field's value, not a
+// permanent hard block: once the pipeline produces live_trust_complete=true,
+// start proceeds honestly to the next gate.
+// ===========================================================================
+
+/// LO-03F / F06: When the daemon is in LiveCapital mode, all pre-DB gates
+/// pass (including parity evidence present with `live_trust_complete=true`),
+/// start reaches and fires the DB gate (503 — no DB configured in test).
+///
+/// Note: TV-04F requires live-capital to have an explicit capital policy.
+/// A minimal valid policy is configured in this test so TV-04F + TV-04A +
+/// TV-04D all pass, and the test continues to prove the DB gate (503) is the
+/// final stop.
+#[tokio::test]
+async fn f06_live_capital_start_present_parity_complete_trust_proceeds_to_db_gate() {
+    let _guard = env_lock().lock().await;
+    let token = "lo03f-f06-token";
+    let artifact_id = "lo03f-f06-present-parity-trusted";
+
+    let parity = valid_parity_json_trusted(artifact_id);
+    let (manifest, dir) = write_artifact_dir("f06", artifact_id, Some(&parity));
+    std::env::set_var("MQK_ARTIFACT_PATH", manifest.to_str().unwrap());
 
     // TV-04F: live-capital requires an explicit capital policy.
-    // Write a minimal valid policy so TV-04F + TV-04A + TV-04D all pass.
     let policy_path = dir.join("capital_allocation_policy.json");
     std::fs::write(
         &policy_path,
-        r#"{"schema_version":"policy-v1","policy_id":"lo03f-f05-policy","enabled":true,"max_portfolio_notional_usd":25000,"per_strategy_budgets":[]}"#,
+        r#"{"schema_version":"policy-v1","policy_id":"lo03f-f06-policy","enabled":true,"max_portfolio_notional_usd":25000,"per_strategy_budgets":[]}"#,
     )
-    .expect("F05: write capital policy file");
+    .expect("F06: write capital policy file");
     std::env::set_var("MQK_CAPITAL_POLICY_PATH", &policy_path);
 
     let st = armed_live_capital_state(token).await;
@@ -560,31 +651,37 @@ async fn f05_live_capital_start_present_parity_proceeds_to_db_gate() {
     assert_eq!(
         status,
         StatusCode::SERVICE_UNAVAILABLE,
-        "F05: LiveCapital with present parity (live_trust_complete=false) must reach DB gate \
-         (503); any 403 means a pre-DB gate was not satisfied; body: {j}"
+        "F06: LiveCapital with present parity and live_trust_complete=true must reach the \
+         DB gate (503); any 403 means a pre-DB gate was not satisfied; body: {j}"
     );
-    // The 503 body identifies the DB as unavailable — all pre-DB gates passed.
     let error = j["error"].as_str().unwrap_or("");
     assert!(
         error.contains("runtime DB is not configured") || error.contains("DB"),
-        "F05: 503 body must describe DB unavailability; got: {j}"
+        "F06: 503 body must describe DB unavailability; got: {j}"
     );
-    // Explicit: parity gate passed (evidence present)
+    // Explicit: TV-03C (evidence presence) passed
     assert_ne!(
         j.get("gate").and_then(|g| g.as_str()).unwrap_or(""),
         "parity_evidence",
-        "F05: parity_evidence gate must have passed (evidence is present); body: {j}"
+        "F06: parity_evidence (TV-03C) gate must have passed; body: {j}"
+    );
+    // Explicit: TV-03D (trust completeness) passed
+    assert_ne!(
+        j.get("gate").and_then(|g| g.as_str()).unwrap_or(""),
+        "live_capital_parity_trust",
+        "F06: live_capital_parity_trust (TV-03D) gate must have passed \
+         (live_trust_complete=true); body: {j}"
     );
     // Explicit: WS continuity gate passed (Live state was set)
     assert_ne!(
         j.get("gate").and_then(|g| g.as_str()).unwrap_or(""),
         "alpaca_ws_continuity",
-        "F05: WS continuity gate must have passed (Live state set); body: {j}"
+        "F06: WS continuity gate must have passed (Live state set); body: {j}"
     );
     // Explicit: operator_auth gate passed (TokenRequired with valid token)
     assert_ne!(
         j.get("gate").and_then(|g| g.as_str()).unwrap_or(""),
         "operator_auth",
-        "F05: operator_auth gate must have passed (TokenRequired set); body: {j}"
+        "F06: operator_auth gate must have passed (TokenRequired set); body: {j}"
     );
 }

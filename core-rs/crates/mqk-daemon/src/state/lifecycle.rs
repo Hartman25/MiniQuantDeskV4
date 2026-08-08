@@ -997,6 +997,56 @@ impl AppState {
             }
         }
 
+        // TV-03D: LiveCapital requires a complete parity trust chain.
+        //
+        // TV-03C (above) only requires parity evidence to be present and
+        // structurally valid — by design (LIVE-TRUST-01 / LT-04), so
+        // LiveShadow can run with parity evidence present while
+        // `live_trust_complete` is still false. LiveCapital is semantically
+        // distinct: `evaluate_mode_transition` already hardcodes every
+        // upward transition into LiveCapital as `FailClosed` specifically
+        // because `live_trust_complete=false` is a current-build ceiling of
+        // the TV-03 Python pipeline — but that policy was previously
+        // enforced only at the advisory `mode-change-guidance` route, never
+        // at actual cold start (a daemon launched directly into LiveCapital
+        // via MQK_DAEMON_DEPLOYMENT_MODE bypassed it entirely).
+        //
+        // This gate wires the same fail-closed policy into the actual start
+        // path, LiveCapital-only, leaving TV-03C's LiveShadow-safe
+        // evidence-presence contract untouched
+        // (LIVE-CAPITAL-PARITY-COMPLETE-GATE-01, closes A2-FIND-007 /
+        // A2-PATCH-008).
+        //
+        // Placed after TV-03C (evidence presence) and before TV-04F (capital
+        // policy) so evidence-chain refusals are surfaced before policy
+        // refusals, matching the existing TV-03C→TV-04F ordering rationale.
+        if self.deployment_mode() == DeploymentMode::LiveCapital {
+            let parity = evaluate_parity_evidence_from_env();
+            let live_trust_complete = matches!(
+                parity,
+                ParityEvidenceOutcome::Present {
+                    live_trust_complete: true,
+                    ..
+                }
+            );
+            if !live_trust_complete {
+                return Err(RuntimeLifecycleError::forbidden(
+                    "runtime.start_refused.live_capital_parity_trust_incomplete",
+                    "live_capital_parity_trust",
+                    format!(
+                        "live-capital mode requires a complete parity trust chain \
+                         (parity_evidence.json present with live_trust_complete=true); \
+                         current parity evidence truth_state='{}' does not satisfy this. \
+                         This mirrors the fail-closed policy evaluate_mode_transition already \
+                         advertises for upward transitions into LiveCapital — no operator \
+                         action can lift this until the TV-03 parity pipeline can produce \
+                         live_trust_complete=true for this artifact",
+                        parity.truth_state()
+                    ),
+                ));
+            }
+        }
+
         // TV-04F: Live-capital requires an explicit capital allocation policy.
         //
         // Paper and LiveShadow modes are permissive: absent policy →

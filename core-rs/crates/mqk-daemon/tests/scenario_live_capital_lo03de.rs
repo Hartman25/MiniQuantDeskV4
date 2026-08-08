@@ -12,8 +12,9 @@
 //!     (deployment+integrity passed; capital-only gate fires)
 //! D4: live-capital+alpaca armed TokenRequired WS=ColdStartUnproven → 403 at
 //!     alpaca_ws_continuity gate (deployment+integrity+operator_auth all passed)
-//! D5: live-capital+alpaca armed TokenRequired WS=Live → 503 DB gate
-//!     (full pre-DB gate chain proven; all pre-DB gates pass for live-capital)
+//! D5: live-capital+alpaca armed TokenRequired WS=Live + parity evidence
+//!     present with live_trust_complete=true → 503 DB gate (full pre-DB gate
+//!     chain proven, including TV-03D per LIVE-CAPITAL-PARITY-COMPLETE-GATE-01)
 //! D6: system/preflight for live-capital+paper is honest and fail-closed
 //!     (deployment_start_allowed=false, blockers non-empty, daemon_mode correct)
 //!
@@ -36,9 +37,13 @@
 //! - LO-03A / LO-03B / LO-03C — live-shadow controls are closed
 //! - LO-03G — arm/disarm audit durability is closed
 //!
-//! All tests are pure in-process (no DB, no env vars, no real broker).
+//! All tests are pure in-process (no DB, no real broker). D5 sets
+//! MQK_CAPITAL_POLICY_PATH and MQK_ARTIFACT_PATH for the duration of its own
+//! run and clears them before returning; no other test in this file touches
+//! either var, so no cross-test env-var race is possible.
 //! All tests are always runnable in CI without MQK_DATABASE_URL.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use axum::http::{header, Request, StatusCode};
@@ -64,6 +69,66 @@ async fn call(router: axum::Router, req: Request<axum::body::Body>) -> (StatusCo
 
 fn json(b: bytes::Bytes) -> serde_json::Value {
     serde_json::from_slice(&b).expect("body is not valid JSON")
+}
+
+/// Write a minimal artifact dir (manifest + passing deployability gate +
+/// trust-complete parity evidence) satisfying TV-02C, TV-03C, and TV-03D.
+/// Returns `(manifest_path, dir)`.
+fn write_trusted_artifact_dir(tag: &str, artifact_id: &str) -> (PathBuf, PathBuf) {
+    let dir = std::env::temp_dir().join(format!(
+        "mqk_lo03d_{tag}_artifact_{}",
+        std::process::id()
+    ));
+    std::fs::create_dir_all(&dir).expect("create artifact dir");
+    let manifest = dir.join("promoted_manifest.json");
+    std::fs::write(
+        &manifest,
+        format!(
+            r#"{{
+  "schema_version": "promoted-v1",
+  "artifact_id": "{artifact_id}",
+  "artifact_type": "signal_pack",
+  "stage": "paper",
+  "produced_by": "research-py/promote.py",
+  "data_root": "promoted/signal_packs/{artifact_id}"
+}}"#
+        ),
+    )
+    .expect("write manifest");
+    std::fs::write(
+        dir.join("deployability_gate.json"),
+        format!(
+            r#"{{
+  "schema_version": "gate-v1",
+  "artifact_id": "{artifact_id}",
+  "passed": true,
+  "checks": [],
+  "overall_reason": "all checks passed",
+  "evaluated_at_utc": "2026-03-01T00:00:00Z"
+}}"#
+        ),
+    )
+    .expect("write gate file");
+    std::fs::write(
+        dir.join("parity_evidence.json"),
+        serde_json::json!({
+            "schema_version": "parity-v1",
+            "artifact_id": artifact_id,
+            "gate_passed": true,
+            "gate_schema_version": "gate-v1",
+            "shadow_evidence": {
+                "evidence_available": true,
+                "evidence_note": "Shadow evaluation run completed for this artifact"
+            },
+            "comparison_basis": "paper+alpaca supervised path",
+            "live_trust_complete": true,
+            "live_trust_gaps": [],
+            "produced_at_utc": "2026-03-01T00:00:00Z"
+        })
+        .to_string(),
+    )
+    .expect("write parity evidence file");
+    (manifest, dir)
 }
 
 // ===========================================================================
@@ -303,6 +368,10 @@ async fn lo03d_d5_live_capital_full_pre_db_gate_chain_proven() {
     .expect("D5: write policy file");
     std::env::set_var("MQK_CAPITAL_POLICY_PATH", &policy_path);
 
+    // TV-03D: live-capital requires a complete parity trust chain.
+    let (manifest, artifact_dir) = write_trusted_artifact_dir("d5", "lo03d-d5-artifact");
+    std::env::set_var("MQK_ARTIFACT_PATH", manifest.to_str().unwrap());
+
     let mut st_inner = state::AppState::new_for_test_with_mode_and_broker(
         state::DeploymentMode::LiveCapital,
         state::BrokerKind::Alpaca,
@@ -343,13 +412,15 @@ async fn lo03d_d5_live_capital_full_pre_db_gate_chain_proven() {
     let (status, body) = call(routes::build_router(Arc::clone(&st)), start_req).await;
 
     std::env::remove_var("MQK_CAPITAL_POLICY_PATH");
+    std::env::remove_var("MQK_ARTIFACT_PATH");
     let _ = std::fs::remove_dir_all(&policy_dir);
+    let _ = std::fs::remove_dir_all(&artifact_dir);
 
     assert_eq!(
         status,
         StatusCode::SERVICE_UNAVAILABLE,
-        "D5: live-capital with all pre-DB gates satisfied must reach DB gate (503); \
-         any 403 here would mean a gate was not satisfied; got: {status}"
+        "D5: live-capital with all pre-DB gates satisfied (including TV-03D parity trust) \
+         must reach DB gate (503); any 403 here would mean a gate was not satisfied; got: {status}"
     );
     let j = json(body);
     assert!(
@@ -358,6 +429,12 @@ async fn lo03d_d5_live_capital_full_pre_db_gate_chain_proven() {
             .unwrap_or("")
             .contains("runtime DB is not configured"),
         "D5: 503 must state DB is not configured — all pre-DB gates passed; got: {j}"
+    );
+    // Not a TV-03D parity trust gate error — that would be 403 with gate=live_capital_parity_trust.
+    assert_ne!(
+        j.get("gate").and_then(|g| g.as_str()).unwrap_or(""),
+        "live_capital_parity_trust",
+        "D5: TV-03D parity trust gate must have passed (evidence present, live_trust_complete=true); got: {j}"
     );
     // Not a WS gate error — that would be 403 with gate=alpaca_ws_continuity.
     assert_ne!(
