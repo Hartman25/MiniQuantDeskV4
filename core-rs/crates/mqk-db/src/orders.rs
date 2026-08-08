@@ -479,8 +479,16 @@ pub async fn outbox_mark_dispatching(
 
 /// Reset stale CLAIMED rows back to PENDING — the crash-recovery reaper (FC-6).
 ///
-/// Called on orchestrator startup (and optionally on a periodic sweep) to
-/// recover rows left in CLAIMED state by a crashed or stuck dispatcher.
+/// PAPER-SOAK-STALE-CLAIM-RECOVERY-01: wired into production at
+/// `build_execution_orchestrator` (mqk-daemon), called exactly once per run
+/// start/restart, before the orchestrator's first tick — the same
+/// established "one-time recovery pass at orchestrator construction" seam
+/// `recover_oms_and_portfolio` already uses. Scoped to `run_id`, matching
+/// every other outbox/inbox operation in this codebase (RT-3): a stale claim
+/// belonging to a different run is never touched by this run's startup,
+/// even if that other run also crashed — its own recovery path (its own
+/// future start/restart) owns resetting it, preserving that run's audit
+/// trail until then.
 ///
 /// A row is considered stale when its `claimed_at_utc` is strictly earlier
 /// than `stale_threshold`.  The threshold is caller-supplied — no wall-clock
@@ -493,6 +501,7 @@ pub async fn outbox_mark_dispatching(
 /// modified.
 pub async fn outbox_reset_stale_claims(
     pool: &PgPool,
+    run_id: Uuid,
     stale_threshold: DateTime<Utc>,
 ) -> Result<u64> {
     let result = sqlx::query(
@@ -501,11 +510,13 @@ pub async fn outbox_reset_stale_claims(
            set status         = 'PENDING',
                claimed_at_utc = null,
                claimed_by     = null
-         where status         = 'CLAIMED'
+         where run_id         = $2
+           and status         = 'CLAIMED'
            and claimed_at_utc < $1
         "#,
     )
     .bind(stale_threshold)
+    .bind(run_id)
     .execute(pool)
     .await
     .context("outbox_reset_stale_claims failed")?;

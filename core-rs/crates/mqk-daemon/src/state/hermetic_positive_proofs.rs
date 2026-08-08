@@ -598,6 +598,91 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
+    // PAPER-SOAK-STALE-CLAIM-RECOVERY-01: production wiring proof.
+    // -----------------------------------------------------------------
+
+    /// `build_execution_orchestrator` is the one unconditional construction
+    /// seam every run start AND every restart-resume of an existing RUNNING
+    /// row calls before the orchestrator's first tick -- there is no
+    /// separate "fresh start" vs. "restart" code path within it. Calling it
+    /// directly (rather than through the `/v1/run/start` HTTP route, which
+    /// would also spawn a real ticking loop and introduce timing dependence
+    /// this proof does not need) exercises the exact production seam
+    /// deterministically: a stale CLAIMED row -- simulating a dispatcher
+    /// that claimed an order and then crashed before ever reaching
+    /// DISPATCHING -- must be reset to PENDING by the time construction
+    /// returns.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn hermetic_build_execution_orchestrator_resets_stale_claim_on_construction() {
+        mqk_db::run_isolated("hermetic_stale_claim_build", |pool| async move {
+            let st = hermetic_order_daemon_state(pool.clone()).await;
+
+            let run_id = uuid::Uuid::new_v4();
+            mqk_db::insert_run(
+                &pool,
+                &mqk_db::NewRun {
+                    run_id,
+                    engine_id: "mqk-daemon".to_string(),
+                    mode: DeploymentMode::LiveShadow.as_db_mode().to_string(),
+                    started_at_utc: chrono::Utc::now(),
+                    git_hash: "TEST".to_string(),
+                    config_hash: "test".to_string(),
+                    config_json: serde_json::json!({}),
+                    host_fingerprint: "test-node".to_string(),
+                },
+            )
+            .await
+            .expect("insert_run failed");
+            mqk_db::arm_run(&pool, run_id).await.expect("arm_run failed");
+            mqk_db::begin_run(&pool, run_id).await.expect("begin_run failed");
+
+            let idem = "stale-claim-restart-proof";
+            mqk_db::outbox_enqueue(
+                &pool,
+                run_id,
+                idem,
+                serde_json::json!({"symbol": "AAPL", "qty": 1}),
+            )
+            .await
+            .expect("outbox_enqueue failed");
+            mqk_db::outbox_claim_batch(
+                &pool,
+                1,
+                "crashed-dispatcher",
+                chrono::Utc::now() - chrono::Duration::minutes(10),
+            )
+            .await
+            .expect("outbox_claim_batch failed");
+
+            let before = mqk_db::outbox_fetch_by_idempotency_key(&pool, idem)
+                .await
+                .expect("fetch failed")
+                .expect("row must exist");
+            assert_eq!(
+                before.status, "CLAIMED",
+                "precondition: row must be CLAIMED before recovery"
+            );
+
+            let _orchestrator = st
+                .build_execution_orchestrator(pool.clone(), run_id)
+                .await
+                .expect("build_execution_orchestrator must succeed");
+
+            let after = mqk_db::outbox_fetch_by_idempotency_key(&pool, idem)
+                .await
+                .expect("fetch failed")
+                .expect("row must exist");
+            assert_eq!(
+                after.status, "PENDING",
+                "the production recovery seam must reset the stale claim"
+            );
+            assert!(after.claimed_by.is_none());
+            assert!(after.claimed_at_utc.is_none());
+        })
+        .await;
+    }
+
+    // -----------------------------------------------------------------
     // Network-deny witness (FULL-AUDIT-FAIL-018 requirement 9)
     // -----------------------------------------------------------------
 

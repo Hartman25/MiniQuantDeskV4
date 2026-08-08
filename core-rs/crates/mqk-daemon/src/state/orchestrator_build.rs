@@ -84,6 +84,23 @@ impl AppState {
             .and_then(|value| value.as_i64())
             .unwrap_or(0);
 
+        // PAPER-SOAK-STALE-CLAIM-RECOVERY-01: reset any outbox row this run
+        // left stranded in CLAIMED by a crashed or stuck dispatcher, before
+        // the orchestrator's first tick can claim anything new. Threshold is
+        // "now": this orchestrator instance has not claimed anything yet, and
+        // the runtime leadership lease this run start already went through
+        // guarantees no other legitimate dispatcher is concurrently active
+        // for this run_id, so any row still CLAIMED at this exact instant is
+        // provably orphaned from a prior process lifetime -- never a live
+        // in-flight claim. Scoped to run_id: a stale claim belonging to a
+        // different run is left untouched (its own start/restart owns
+        // resetting it). DISPATCHING/SENT/ACKED rows are structurally immune
+        // (the reaper's WHERE clause only ever matches status='CLAIMED') --
+        // an order that may have reached the broker is never reset.
+        mqk_db::outbox_reset_stale_claims(&db, run_id, Utc::now())
+            .await
+            .map_err(|err| RuntimeLifecycleError::internal("outbox_reset_stale_claims failed", err))?;
+
         let (oms_orders, recovered_sides, mut portfolio) =
             recover_oms_and_portfolio(&db, run_id, initial_equity_micros).await?;
 
