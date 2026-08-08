@@ -75,10 +75,7 @@ fn json(b: bytes::Bytes) -> serde_json::Value {
 /// trust-complete parity evidence) satisfying TV-02C, TV-03C, and TV-03D.
 /// Returns `(manifest_path, dir)`.
 fn write_trusted_artifact_dir(tag: &str, artifact_id: &str) -> (PathBuf, PathBuf) {
-    let dir = std::env::temp_dir().join(format!(
-        "mqk_lo03d_{tag}_artifact_{}",
-        std::process::id()
-    ));
+    let dir = std::env::temp_dir().join(format!("mqk_lo03d_{tag}_artifact_{}", std::process::id()));
     std::fs::create_dir_all(&dir).expect("create artifact dir");
     let manifest = dir.join("promoted_manifest.json");
     std::fs::write(
