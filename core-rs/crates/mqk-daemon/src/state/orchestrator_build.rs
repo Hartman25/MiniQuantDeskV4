@@ -99,7 +99,9 @@ impl AppState {
         // an order that may have reached the broker is never reset.
         mqk_db::outbox_reset_stale_claims(&db, run_id, Utc::now())
             .await
-            .map_err(|err| RuntimeLifecycleError::internal("outbox_reset_stale_claims failed", err))?;
+            .map_err(|err| {
+                RuntimeLifecycleError::internal("outbox_reset_stale_claims failed", err)
+            })?;
 
         let (oms_orders, recovered_sides, mut portfolio) =
             recover_oms_and_portfolio(&db, run_id, initial_equity_micros).await?;

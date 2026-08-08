@@ -633,8 +633,12 @@ mod tests {
             )
             .await
             .expect("insert_run failed");
-            mqk_db::arm_run(&pool, run_id).await.expect("arm_run failed");
-            mqk_db::begin_run(&pool, run_id).await.expect("begin_run failed");
+            mqk_db::arm_run(&pool, run_id)
+                .await
+                .expect("arm_run failed");
+            mqk_db::begin_run(&pool, run_id)
+                .await
+                .expect("begin_run failed");
 
             let idem = "stale-claim-restart-proof";
             mqk_db::outbox_enqueue(
