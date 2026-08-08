@@ -1615,6 +1615,150 @@ async fn f07_stop_retry_with_mismatched_local_run_makes_zero_stop_calls() -> any
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// PAPER-SOAK-DAILY-TERMINAL-FINALIZATION-01: proves the E1 outcome-truth
+// contract's finalization-eligibility gate (docs/specs/autonomous_daily_
+// paper_operations_01e_outcome_truth_contract.md §3.2 condition 3/4) and
+// PAPER-SOAK-INBOUND-DRAIN-OWNERSHIP-01's stop_execution_runtime refusal
+// compose correctly with zero additional production code: retry_stop's
+// existing generic `Err(err) => ...schedule retry...` branch already treats
+// the new `runtime.stop.orders_draining` conflict exactly like any other
+// stop failure, so `stopped_at_utc` is never set -- and therefore
+// classify_autonomous_daily_outcome can never run -- while a broker-
+// reachable order for this operation's run remains unresolved. This closes
+// the audit's compound concern (a bare ACK could otherwise be finalized as
+// `completed_with_activity` before the order's real outcome is known)
+// without weakening the E1 contract's own deliberate, source-verified
+// decision (§5 tier 2) that reaching the broker is itself real, terminal-
+// classification-worthy activity evidence once the underlying order has
+// actually resolved.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn d11_stop_retry_defers_finalization_while_order_unresolved_then_stops_once_resolved(
+) -> anyhow::Result<()> {
+    reset_env();
+    let pool = test_pool().await?;
+    let adapter_id = format!("coord-d11-{}", unique_suffix());
+    let now = weekday_at(14, 0);
+    let run_id = Uuid::new_v4();
+    let operation_id = Uuid::new_v4();
+    let idem = format!("d11-order-{run_id}");
+
+    let operation = seed_running_operation(&pool, operation_id, &adapter_id, run_id, now).await?;
+    let (operation, _) = apply_transition(
+        &pool,
+        &operation,
+        mqk_db::STATE_STOPPING,
+        None,
+        None,
+        now,
+        None,
+        "test setup",
+    )
+    .await?;
+
+    let st = paper_state_with_db(pool.clone(), &adapter_id);
+    st.establish_db_backed_active_run_for_test(run_id).await?;
+
+    // A broker-reachable order that has not yet resolved to a terminal
+    // outcome -- exactly the scenario PAPER-SOAK-INBOUND-DRAIN-OWNERSHIP-01
+    // must refuse to stop cleanly through.
+    mqk_db::outbox_enqueue(
+        &pool,
+        run_id,
+        &idem,
+        serde_json::json!({"symbol": "SPY", "quantity": 1, "order_type": "market", "time_in_force": "day"}),
+    )
+    .await?;
+    sqlx::query("update oms_outbox set status = 'ACKED' where idempotency_key = $1")
+        .bind(&idem)
+        .execute(&pool)
+        .await?;
+
+    // First retry: the order is still unresolved.
+    let first = retry_stop(&st, &pool, operation, now).await?;
+    assert_eq!(
+        first,
+        AutonomousDailyCoordinatorTickOutcome::StopAttempted,
+        "d11: stop must be attempted-and-deferred, not treated as a clean stop"
+    );
+
+    let after_first = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation_id)
+        .await?
+        .expect("row must exist");
+    assert_eq!(
+        after_first.state,
+        mqk_db::STATE_STOP_RETRYING,
+        "d11: operation must move to stop_retrying, never stopping-with-stopped_at_utc"
+    );
+    assert!(
+        after_first.stopped_at_utc.is_none(),
+        "d11: stopped_at_utc must remain unset while a broker-reachable order is unresolved -- \
+         this is the exact precondition (E1 contract §3.2 condition 3) that keeps \
+         classify_autonomous_daily_outcome unreachable until the order actually resolves"
+    );
+    assert_eq!(
+        st.locally_owned_run_id().await,
+        Some(run_id),
+        "d11: local ownership must be preserved so a late broker event for this order is still \
+         durably ingested, not silently dropped"
+    );
+
+    // The order resolves: a late terminal fill is durably ingested, exactly
+    // as it would arrive via the WS transport while ownership is preserved.
+    let fill_msg_id = "alpaca:d11-broker-order:fill:2026-08-08T14:05:00.000000Z".to_string();
+    mqk_db::inbox_insert_deduped_with_identity(
+        &pool,
+        run_id,
+        &fill_msg_id,
+        None,
+        &idem,
+        "broker-d11-order",
+        "fill",
+        &serde_json::json!({
+            "type":               "fill",
+            "broker_message_id":  fill_msg_id,
+            "broker_fill_id":     serde_json::Value::Null,
+            "internal_order_id":  idem,
+            "broker_order_id":    "broker-d11-order",
+            "symbol":             "SPY",
+            "side":               "Buy",
+            "delta_qty":          1_i64,
+            "price_micros":       500_000_000_i64,
+            "fee_micros":         0_i64
+        }),
+        0,
+        now,
+    )
+    .await?;
+
+    // Second retry: every broker-reachable order has now resolved.
+    let second = retry_stop(&st, &pool, after_first, now).await?;
+    assert_eq!(
+        second,
+        AutonomousDailyCoordinatorTickOutcome::RuntimeStopped,
+        "d11: stop must succeed once the order has resolved"
+    );
+    let after_second = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation_id)
+        .await?
+        .expect("row must exist");
+    assert!(
+        after_second.stopped_at_utc.is_some(),
+        "d11: stopped_at_utc must now be set -- finalization is eligible"
+    );
+    assert_eq!(
+        st.locally_owned_run_id().await,
+        None,
+        "d11: local ownership must be cleared once the drained stop completes"
+    );
+
+    cleanup_operation(&pool, operation_id).await;
+    cleanup_run(&pool, run_id).await;
+    Ok(())
+}
+
 fn plan_from_stub(op: &mqk_db::AutonomousDailyOperationRecord) -> AutonomousDailySessionPlan {
     AutonomousDailySessionPlan {
         market_date: op.market_date.format("%Y-%m-%d").to_string(),
