@@ -1,3 +1,5 @@
+use std::fmt;
+
 use anyhow::{anyhow, Context, Result};
 use chrono::{DateTime, Utc};
 use serde_json::Value;
@@ -5,6 +7,62 @@ use sqlx::{postgres::PgRow, PgPool, Row};
 use uuid::Uuid;
 
 use crate::reconcile_state::reconcile_checkpoint_load_latest;
+
+// ---------------------------------------------------------------------------
+// RUN-LIFECYCLE-CAS-01
+// ---------------------------------------------------------------------------
+
+/// A run-lifecycle transition (`arm_run`/`begin_run`/`stop_run`/
+/// `clear_halted_run`/`heartbeat_run`) was refused because the row's durable
+/// `status` no longer matched what this call required at the instant its
+/// guarded `UPDATE ... WHERE status = $expected` executed.
+///
+/// Before RUN-LIFECYCLE-CAS-01 every one of these functions read `status`
+/// via a separate `fetch_run`, checked it in Rust, and then issued an
+/// unconditional `UPDATE ... WHERE run_id = $1` with no `status` guard at
+/// all -- a classic check-then-act race. Two concurrent callers observing
+/// the same valid pre-state (e.g. a `stop_run` and a `halt_run` both firing
+/// from `RUNNING`) would both pass their own pre-check and both execute
+/// their unconditional `UPDATE`; whichever committed last silently won,
+/// with no error to either caller -- so a `stop_run` could silently
+/// overwrite a `halt_run` that landed a moment earlier, breaking `HALTED`'s
+/// required sticky/fail-closed semantics.
+///
+/// Every transition's `UPDATE` now includes its own required prior
+/// `status` in the `WHERE` clause (matching the CAS-token role
+/// `sys_autonomous_daily_operations.state_version` plays for the
+/// autonomous-operation state machine, but reusing the existing `status`
+/// column directly -- this 5-state machine does not need a separate
+/// version counter). A `rows_affected() == 0` result means a concurrent
+/// writer already won; the function re-reads the row (authoritative,
+/// matching the re-read-on-ambiguity pattern used throughout this codebase)
+/// and returns this typed error rather than silently applying nothing or
+/// guessing.
+///
+/// `anyhow::Result<()>` remains every transition function's return type --
+/// dozens of existing call sites use `?`/`.expect()`/`.unwrap()` on these
+/// and do not need to change. A caller that specifically needs to
+/// distinguish "a concurrent transition already won" from any other
+/// failure can `err.downcast_ref::<StaleRunTransition>()`.
+#[derive(Debug, Clone)]
+pub struct StaleRunTransition {
+    pub run_id: Uuid,
+    pub operation: &'static str,
+    pub expected: &'static str,
+    pub actual: String,
+}
+
+impl fmt::Display for StaleRunTransition {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "{}: run {} expected status in [{}] but a concurrent transition already moved it to {}",
+            self.operation, self.run_id, self.expected, self.actual
+        )
+    }
+}
+
+impl std::error::Error for StaleRunTransition {}
 
 #[derive(Debug, Clone)]
 pub struct NewRun {
@@ -459,35 +517,46 @@ pub async fn arm_preflight(pool: &PgPool, run_id: Uuid) -> Result<()> {
     arm_run(pool, run_id).await
 }
 
-/// Arm a run: CREATED/STOPPED -> ARMED.
+/// Arm a run: CREATED/STOPPED -> ARMED. CAS-guarded (RUN-LIFECYCLE-CAS-01):
+/// the `UPDATE` only applies when `status` is still `CREATED` or `STOPPED`
+/// at the instant it executes, so a concurrent transition (e.g. a `halt_run`
+/// landing first) is never silently overwritten. On a CAS miss, returns
+/// [`StaleRunTransition`] with the actual current status.
 pub async fn arm_run(pool: &PgPool, run_id: Uuid) -> Result<()> {
-    let r = fetch_run(pool, run_id).await?;
-    match r.status {
-        RunStatus::Created | RunStatus::Stopped => {}
-        _ => return Err(anyhow!("arm_run invalid state: {}", r.status.as_str())),
-    }
-
     let res = sqlx::query(
         r#"
         update runs
         set status = 'ARMED',
             armed_at_utc = now() -- allow: ops-metadata
         where run_id = $1
+          and status in ('CREATED', 'STOPPED')
         "#,
     )
     .bind(run_id)
     .execute(pool)
     .await;
 
-    match res {
-        Ok(_) => Ok(()),
+    let done = match res {
+        Ok(done) => done,
         Err(e) => {
             if is_unique_constraint_violation(&e, "uq_live_engine_active_run") {
                 return Err(anyhow!("unique active LIVE constraint"));
             }
-            Err(anyhow::Error::new(e).context("arm_run update failed"))
+            return Err(anyhow::Error::new(e).context("arm_run update failed"));
         }
+    };
+
+    if done.rows_affected() == 1 {
+        return Ok(());
     }
+
+    let r = fetch_run(pool, run_id).await?;
+    Err(anyhow::Error::new(StaleRunTransition {
+        run_id,
+        operation: "arm_run",
+        expected: "CREATED or STOPPED",
+        actual: r.status.as_str().to_string(),
+    }))
 }
 
 /// Detect a Postgres unique constraint violation by name.
@@ -502,21 +571,20 @@ fn is_unique_constraint_violation(err: &sqlx::Error, constraint: &str) -> bool {
     }
 }
 
-/// Begin a run: ARMED -> RUNNING.
+/// Begin a run: ARMED -> RUNNING. CAS-guarded (RUN-LIFECYCLE-CAS-01): the
+/// `UPDATE` only applies when `status` is still `ARMED`, so a concurrent
+/// `stop_run`/`halt_run` landing first is never silently overwritten ("begin
+/// cannot overwrite a concurrent stop"). On a CAS miss, returns
+/// [`StaleRunTransition`] with the actual current status.
 pub async fn begin_run(pool: &PgPool, run_id: Uuid) -> Result<()> {
-    let r = fetch_run(pool, run_id).await?;
-    match r.status {
-        RunStatus::Armed => {}
-        _ => return Err(anyhow!("begin_run invalid state: {}", r.status.as_str())),
-    }
-
-    sqlx::query(
+    let done = sqlx::query(
         r#"
         update runs
         set status = 'RUNNING',
             running_at_utc = now(), -- allow: ops-metadata
             stop_requested_at_utc = null
         where run_id = $1
+          and status = 'ARMED'
         "#,
     )
     .bind(run_id)
@@ -524,23 +592,33 @@ pub async fn begin_run(pool: &PgPool, run_id: Uuid) -> Result<()> {
     .await
     .context("begin_run update failed")?;
 
-    Ok(())
-}
-
-/// Stop a run: ARMED/RUNNING -> STOPPED.
-pub async fn stop_run(pool: &PgPool, run_id: Uuid) -> Result<()> {
-    let r = fetch_run(pool, run_id).await?;
-    match r.status {
-        RunStatus::Armed | RunStatus::Running => {}
-        _ => return Err(anyhow!("stop_run invalid state: {}", r.status.as_str())),
+    if done.rows_affected() == 1 {
+        return Ok(());
     }
 
-    sqlx::query(
+    let r = fetch_run(pool, run_id).await?;
+    Err(anyhow::Error::new(StaleRunTransition {
+        run_id,
+        operation: "begin_run",
+        expected: "ARMED",
+        actual: r.status.as_str().to_string(),
+    }))
+}
+
+/// Stop a run: ARMED/RUNNING -> STOPPED. CAS-guarded (RUN-LIFECYCLE-CAS-01):
+/// the `UPDATE` only applies when `status` is still `ARMED` or `RUNNING`, so
+/// a concurrent `halt_run` landing first is never silently overwritten
+/// ("stop cannot overwrite a concurrent halt" -- `HALTED` stays sticky). On
+/// a CAS miss, returns [`StaleRunTransition`] with the actual current
+/// status.
+pub async fn stop_run(pool: &PgPool, run_id: Uuid) -> Result<()> {
+    let done = sqlx::query(
         r#"
         update runs
         set status = 'STOPPED',
             stopped_at_utc = now() -- allow: ops-metadata
         where run_id = $1
+          and status in ('ARMED', 'RUNNING')
         "#,
     )
     .bind(run_id)
@@ -548,10 +626,25 @@ pub async fn stop_run(pool: &PgPool, run_id: Uuid) -> Result<()> {
     .await
     .context("stop_run update failed")?;
 
-    Ok(())
+    if done.rows_affected() == 1 {
+        return Ok(());
+    }
+
+    let r = fetch_run(pool, run_id).await?;
+    Err(anyhow::Error::new(StaleRunTransition {
+        run_id,
+        operation: "stop_run",
+        expected: "ARMED or RUNNING",
+        actual: r.status.as_str().to_string(),
+    }))
 }
 
-/// Halt a run: ANY -> HALTED (sticky).
+/// Halt a run: ANY -> HALTED (sticky). Deliberately NOT CAS-guarded on
+/// `status` (RUN-LIFECYCLE-CAS-01): halt is the fail-closed override that
+/// must win unconditionally over every other in-flight transition,
+/// including a concurrent `arm_run`/`begin_run`/`stop_run`/`clear_halted_run`
+/// -- the exact opposite requirement from those functions, which must all
+/// yield to an already-landed halt rather than race against one.
 ///
 /// `halted_at` is injected by the caller (FC-9: no now() in enforcement path).
 pub async fn halt_run(pool: &PgPool, run_id: Uuid, halted_at: DateTime<Utc>) -> Result<()> {
@@ -579,25 +672,19 @@ pub async fn halt_run(pool: &PgPool, run_id: Uuid, halted_at: DateTime<Utc>) -> 
 /// so that start_execution_runtime can proceed via the normal stopped-run path.
 /// The caller is responsible for subsequently re-arming and re-starting.
 ///
-/// Returns Err if the run is not currently in HALTED state.
+/// CAS-guarded (RUN-LIFECYCLE-CAS-01): the `UPDATE` only applies when
+/// `status` is still `HALTED` -- guards against a concurrent second
+/// `clear_halted_run` call (e.g. two operator clicks) both trying to clear
+/// the same halt; only the first wins, the second gets
+/// [`StaleRunTransition`] instead of silently re-writing `stopped_at_utc`.
 pub async fn clear_halted_run(pool: &PgPool, run_id: Uuid) -> Result<()> {
-    let r = fetch_run(pool, run_id).await?;
-    match r.status {
-        RunStatus::Halted => {}
-        _ => {
-            return Err(anyhow!(
-                "clear_halted_run invalid state: expected HALTED, found {}",
-                r.status.as_str()
-            ))
-        }
-    }
-
-    sqlx::query(
+    let done = sqlx::query(
         r#"
         update runs
         set status = 'STOPPED',
             stopped_at_utc = now() -- allow: ops-metadata — operator-acknowledged halt clear
         where run_id = $1
+          and status = 'HALTED'
         "#,
     )
     .bind(run_id)
@@ -605,29 +692,34 @@ pub async fn clear_halted_run(pool: &PgPool, run_id: Uuid) -> Result<()> {
     .await
     .context("clear_halted_run update failed")?;
 
-    Ok(())
+    if done.rows_affected() == 1 {
+        return Ok(());
+    }
+
+    let r = fetch_run(pool, run_id).await?;
+    Err(anyhow::Error::new(StaleRunTransition {
+        run_id,
+        operation: "clear_halted_run",
+        expected: "HALTED",
+        actual: r.status.as_str().to_string(),
+    }))
 }
 
-/// Heartbeat: RUNNING only updates last_heartbeat_utc.
+/// Heartbeat: RUNNING only updates last_heartbeat_utc. CAS-guarded
+/// (RUN-LIFECYCLE-CAS-01): the `UPDATE` only applies when `status` is still
+/// `RUNNING`, so a heartbeat racing a concurrent `stop_run`/`halt_run` can
+/// never revive a stopped/halted run's `last_heartbeat_utc` into looking
+/// fresh. On a CAS miss, returns [`StaleRunTransition`] with the actual
+/// current status.
 ///
 /// `heartbeat_at` is injected by the caller (FC-9: no now() in enforcement path).
 pub async fn heartbeat_run(pool: &PgPool, run_id: Uuid, heartbeat_at: DateTime<Utc>) -> Result<()> {
-    let r = fetch_run(pool, run_id).await?;
-    match r.status {
-        RunStatus::Running => {}
-        _ => {
-            return Err(anyhow!(
-                "heartbeat_run invalid state: {}",
-                r.status.as_str()
-            ))
-        }
-    }
-
-    sqlx::query(
+    let done = sqlx::query(
         r#"
         update runs
         set last_heartbeat_utc = $2
         where run_id = $1
+          and status = 'RUNNING'
         "#,
     )
     .bind(run_id)
@@ -636,7 +728,17 @@ pub async fn heartbeat_run(pool: &PgPool, run_id: Uuid, heartbeat_at: DateTime<U
     .await
     .context("heartbeat_run update failed")?;
 
-    Ok(())
+    if done.rows_affected() == 1 {
+        return Ok(());
+    }
+
+    let r = fetch_run(pool, run_id).await?;
+    Err(anyhow::Error::new(StaleRunTransition {
+        run_id,
+        operation: "heartbeat_run",
+        expected: "RUNNING",
+        actual: r.status.as_str().to_string(),
+    }))
 }
 
 /// Deadman: compute whether a RUNNING run's heartbeat is stale.
