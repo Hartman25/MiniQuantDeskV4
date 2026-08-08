@@ -1299,10 +1299,16 @@ pub(super) fn spawn_execution_loop(
                                 }
                             }
 
-                            let decisions = crate::decision::bar_result_to_decisions(
+                            // STRATEGY-DECISION-IDEMPOTENCY-01: decision_id is anchored to
+                            // the exact completed bar this evaluation ran against, never
+                            // wall-clock `now_micros` -- see
+                            // decision::decisions_from_bar_facts's doc comment for the
+                            // full rationale and its fail-closed handling of a missing
+                            // `bar_facts`.
+                            let decisions = crate::decision::decisions_from_bar_facts(
                                 &bar_result,
                                 run_id,
-                                now_micros,
+                                bar_facts.as_ref(),
                                 &current_positions,
                             );
                             // AUTON-NO-TRADE-01: log when strategy produced no admissible

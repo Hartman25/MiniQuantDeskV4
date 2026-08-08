@@ -266,16 +266,32 @@ fn build_order_json(d: &InternalStrategyDecision) -> serde_json::Value {
 /// | —                     | `limit_price`       | `None`                   |
 ///
 /// `decision_id` is a UUIDv5 derived from
-/// `"{run_id}:{strategy_id}:{symbol}:{side}:{qty}:{now_micros}"` where `qty`
-/// is the absolute delta — idempotent across crash-restart within the same
-/// microsecond window.
+/// `"mqk.strategy-decision.v2|{run_id}|{strategy_id}|{symbol}|{timeframe_secs}|{side}|{qty}|{bar_end_ts}"`
+/// where `qty` is the absolute delta and `bar_end_ts` is the exact
+/// completed-bar identity (`EvaluatedBarFacts::bar_end_ts`) this decision
+/// was evaluated against (STRATEGY-DECISION-IDEMPOTENCY-01).
+///
+/// This parameter is named `bar_end_ts`, not `now_micros`, deliberately:
+/// the 1-second execution loop tick may re-run the same strategy evaluation
+/// against the same still-current completed bar many times before a new bar
+/// closes (e.g. while an earlier decision for that bar has not yet resolved
+/// to a terminal broker outcome). Seeding this identity from wall-clock time
+/// (the prior behavior) made every such re-evaluation produce a distinct
+/// `decision_id`, defeating the outbox's `ON CONFLICT DO NOTHING` dedup
+/// entirely — a real duplicate-live-order path, bounded only by
+/// `MAX_AUTONOMOUS_SIGNALS_PER_RUN`, not by design. Anchoring on
+/// `bar_end_ts` instead means the same logical decision (same run,
+/// strategy, symbol, timeframe, completed bar, side, qty) always produces
+/// the same `decision_id`, regardless of how many ticks re-evaluate it,
+/// matching the same bar-anchored-identity pattern already proven by
+/// `runtime_opportunity_allocation::compute_cycle_id`.
 ///
 /// This function is pure (no IO, no state mutation) and exported for test
 /// isolation.
 pub fn bar_result_to_decisions(
     result: &mqk_strategy::StrategyBarResult,
     run_id: Uuid,
-    now_micros: i64,
+    bar_end_ts: i64,
     current_positions: &BTreeMap<String, i64>,
 ) -> Vec<InternalStrategyDecision> {
     if !result.intents.should_execute() {
@@ -318,8 +334,9 @@ pub fn bar_result_to_decisions(
             let decision_id = Uuid::new_v5(
                 &Uuid::NAMESPACE_DNS,
                 format!(
-                    "{run_id}:{strategy_id}:{symbol}:{side}:{qty}:{now_micros}",
-                    symbol = t.symbol
+                    "mqk.strategy-decision.v2|{run_id}|{strategy_id}|{symbol}|{timeframe_secs}|{side}|{qty}|{bar_end_ts}",
+                    symbol = t.symbol,
+                    timeframe_secs = result.spec.timeframe_secs,
                 )
                 .as_bytes(),
             )
@@ -337,6 +354,43 @@ pub fn bar_result_to_decisions(
             })
         })
         .collect()
+}
+
+/// STRATEGY-DECISION-IDEMPOTENCY-01: the one production seam that decides
+/// whether a bar evaluation's decisions are safe to compute at all, given
+/// whatever completed-bar-identity evidence (`EvaluatedBarFacts`) the
+/// dispatch pipeline was able to establish for this tick.
+///
+/// `bar_facts.is_none()` means the legacy stub-context fallback fired
+/// (`AppState::dispatch_native_strategy_for_symbol_with_bar_and_facts`'s
+/// no-DB-context branch, which always yields `is_complete=false` and
+/// therefore empty `targets` in practice) -- there is no durably provable
+/// bar identity to anchor `decision_id` on. Rather than fall back to
+/// wall-clock time (which would silently reintroduce the exact duplicate-
+/// decision-id bug STRATEGY-DECISION-IDEMPOTENCY-01 closes), this refuses
+/// to produce any decision at all when facts are missing and the strategy
+/// nonetheless produced a nonzero target -- a structural fail-closed
+/// backstop, not the expected path.
+pub fn decisions_from_bar_facts(
+    result: &mqk_strategy::StrategyBarResult,
+    run_id: Uuid,
+    bar_facts: Option<&crate::state::EvaluatedBarFacts>,
+    current_positions: &BTreeMap<String, i64>,
+) -> Vec<InternalStrategyDecision> {
+    match bar_facts {
+        Some(facts) => bar_result_to_decisions(result, run_id, facts.bar_end_ts, current_positions),
+        None => {
+            if !result.intents.output.targets.is_empty() {
+                tracing::error!(
+                    run_id = %run_id,
+                    "decision_id_bar_anchor_missing: strategy produced target(s) with no \
+                     provable completed-bar identity (bar_facts unavailable); refusing to \
+                     submit any decision this tick"
+                );
+            }
+            Vec::new()
+        }
+    }
 }
 
 /// Validate an internally-originated strategy decision against the canonical
