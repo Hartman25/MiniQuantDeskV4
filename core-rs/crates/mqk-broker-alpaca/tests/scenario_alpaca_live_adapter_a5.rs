@@ -16,6 +16,11 @@
 //! L12 adapter cancel_order fails with Transport on unreachable URL.
 //! L13 adapter replace_order fails with Transport on unreachable URL.
 //! L14 adapter fetch_events fails with Transport (not silent empty-vec stub) on unreachable URL.
+//! L15 replace_response_to_broker_response: broker_order_id comes from the response's
+//!     new id, not the pre-replace request id (OPERATOR-RISK / REPLACE-CAPABILITY-TRUTH-01,
+//!     closes A2-FIND-013 / A2-PATCH-009 — Alpaca's replace endpoint creates a new order
+//!     with a new id; using the stale request id would point every downstream consumer
+//!     at a broker order that no longer represents the live order).
 //!
 //! All tests are pure in-memory or use an unreachable URL - no live network,
 //! no DB, no wall-clock reads.
@@ -23,7 +28,11 @@ use mqk_broker_alpaca::{
     activity_to_trade_update, build_replace_body, build_submit_body, decode_fetch_cursor,
     encode_fetch_cursor, micros_to_price_str,
     normalize::normalize_trade_update,
-    types::{AlpacaFetchCursor, AlpacaOrderActivity, AlpacaOrderFull, AlpacaSubmitResponse},
+    replace_response_to_broker_response,
+    types::{
+        AlpacaFetchCursor, AlpacaOrderActivity, AlpacaOrderFull, AlpacaReplaceResponse,
+        AlpacaSubmitResponse,
+    },
     AlpacaBrokerAdapter, AlpacaConfig,
 };
 use mqk_execution::{
@@ -225,6 +234,42 @@ fn l6_build_replace_body_limit_price_at_wire_boundary() {
 fn l6_build_replace_body_no_limit_price_for_market() {
     let body = build_replace_body(100, 0, None, "day");
     assert!(body.limit_price.is_none());
+}
+// ---------------------------------------------------------------------------
+// L15 - replace_response_to_broker_response: new broker order id from the
+// response, not the stale pre-replace request id
+//
+// REPLACE-CAPABILITY-TRUTH-01 (closes A2-FIND-013 / A2-PATCH-009): Alpaca's
+// PATCH /v2/orders/{id} replace endpoint creates a NEW broker order with a
+// new UUID -- it does not amend the original order in place. The response's
+// `id` field carries that new identity going forward.
+// ---------------------------------------------------------------------------
+#[test]
+fn l15_replace_response_uses_new_id_from_response_not_request() {
+    // Simulates Alpaca's real behavior: the PATCH response's `id` differs
+    // from the pre-replace broker_order_id used in the request URL.
+    let resp = AlpacaReplaceResponse {
+        id: "alpaca-broker-uuid-NEW-after-replace".to_string(),
+        qty: "100".to_string(),
+    };
+    let broker_resp = replace_response_to_broker_response(resp);
+    assert_eq!(
+        broker_resp.broker_order_id, "alpaca-broker-uuid-NEW-after-replace",
+        "replace response must carry the NEW broker order id from Alpaca's response, \
+         not the stale pre-replace id -- otherwise every downstream consumer (order-map \
+         updates, future cancel/replace calls, reconciliation) would target a broker \
+         order that no longer represents the live order"
+    );
+    assert_eq!(broker_resp.status, "replace_requested");
+}
+#[test]
+fn l15_replace_response_parses_from_alpaca_fixture_json() {
+    // Confirms the id-selection logic survives real wire deserialization, not
+    // just direct struct construction.
+    let json = r#"{"id":"alpaca-broker-uuid-l15-002","qty":"100"}"#;
+    let resp: AlpacaReplaceResponse = serde_json::from_str(json).expect("fixture must deserialize");
+    let broker_resp = replace_response_to_broker_response(resp);
+    assert_eq!(broker_resp.broker_order_id, "alpaca-broker-uuid-l15-002");
 }
 // ---------------------------------------------------------------------------
 // L7 - activity → trade_update → normalize: FILL → BrokerEvent::Fill

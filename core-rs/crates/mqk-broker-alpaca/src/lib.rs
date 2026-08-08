@@ -510,14 +510,9 @@ impl BrokerAdapter for AlpacaBrokerAdapter {
             &req.time_in_force,
         );
         // Step 3: send PATCH.
-        let _: AlpacaReplaceResponse =
+        let resp: AlpacaReplaceResponse =
             self.patch(&format!("/v2/orders/{}", req.broker_order_id), &body)?;
-        Ok(BrokerReplaceResponse {
-            broker_order_id: req.broker_order_id,
-            // Alpaca PATCH does not guarantee a timestamp in the response.
-            replaced_at: 0,
-            status: "replace_requested".to_string(),
-        })
+        Ok(replace_response_to_broker_response(resp))
     }
     /// Poll Alpaca for recent broker events using adapter-owned opaque resume state.
     ///
@@ -681,6 +676,26 @@ pub fn build_replace_body(
         qty: format_alpaca_qty(new_total_qty),
         limit_price: limit_price.map(format_alpaca_price),
         time_in_force: time_in_force.to_string(),
+    }
+}
+/// Convert Alpaca's `PATCH /v2/orders/{id}` response into a `BrokerReplaceResponse`.
+///
+/// # Alpaca replace-creates-a-new-order semantics
+///
+/// Alpaca's replace endpoint does not amend the existing order in place — it
+/// cancels the original and creates a **new** broker order with a new UUID.
+/// `AlpacaReplaceResponse.id` carries that new id, distinct from the
+/// `broker_order_id` used in the PATCH URL. The response's `id` — not the
+/// pre-replace request id — is the current, live broker order identity going
+/// forward; using the stale request id here would silently point every
+/// downstream consumer (order-map updates, future cancel/replace calls,
+/// reconciliation) at a broker order that no longer represents the live order.
+pub fn replace_response_to_broker_response(resp: AlpacaReplaceResponse) -> BrokerReplaceResponse {
+    BrokerReplaceResponse {
+        broker_order_id: resp.id,
+        // Alpaca PATCH does not guarantee a timestamp in the response.
+        replaced_at: 0,
+        status: "replace_requested".to_string(),
     }
 }
 /// Convert an `AlpacaOrderActivity` (REST polling) into an `AlpacaTradeUpdate`
