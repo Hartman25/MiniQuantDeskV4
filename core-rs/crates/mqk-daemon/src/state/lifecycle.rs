@@ -1853,6 +1853,61 @@ impl AppState {
         let _op = self.lifecycle_op.lock().await;
         self.reap_finished_execution_loop().await?;
 
+        // PAPER-SOAK-INBOUND-DRAIN-OWNERSHIP-01: before tearing down local
+        // ownership, prove every broker-reachable order for this run has
+        // resolved to a terminal broker outcome. A normal stop must not
+        // silently discard ownership of unresolved orders -- the WS inbound
+        // transport (alpaca_ws_transport.rs) gates durable ingest on "is a
+        // run currently locally owned", so the instant ownership clears, any
+        // late fill/partial_fill/cancel_ack/reject frame for this run would
+        // be dropped with zero logging and zero durable trace.
+        //
+        // Read-only peek (does not touch ownership) so a run with no
+        // unresolved orders falls straight through to the existing teardown
+        // below, byte-for-byte unchanged from before this patch. Skipped
+        // entirely when no DB is configured, matching this function's
+        // pre-existing no-DB behavior (the teardown below already requires
+        // DB to complete successfully). Scoped to `status == RUNNING` only --
+        // a run that is already HALTED goes through the halt/clear-halt path
+        // instead, which this patch deliberately leaves untouched (halt is a
+        // sticky, fail-closed emergency stop; retrofitting drain-gating onto
+        // halt recovery is out of this patch's scope).
+        if let Some(run_id) = self.locally_owned_run_id().await {
+            if let Some(db) = self.db.as_ref() {
+                let run = mqk_db::fetch_run(db, run_id)
+                    .await
+                    .map_err(|err| RuntimeLifecycleError::internal("stop fetch_run failed", err))?;
+
+                if matches!(run.status, mqk_db::RunStatus::Running) {
+                    // Idempotent: safe to call on every stop attempt while
+                    // drainage is still in progress -- does not move `status`
+                    // off RUNNING and does not overwrite an earlier request time.
+                    mqk_db::request_stop_run(db, run_id).await.map_err(|err| {
+                        RuntimeLifecycleError::internal("stop request_stop_run failed", err)
+                    })?;
+
+                    let unresolved = mqk_db::outbox_unresolved_broker_reachable_orders(db, run_id)
+                        .await
+                        .map_err(|err| {
+                            RuntimeLifecycleError::internal("stop drain-check failed", err)
+                        })?;
+
+                    if !unresolved.is_empty() {
+                        return Err(RuntimeLifecycleError::conflict(
+                            "runtime.stop.orders_draining",
+                            format!(
+                                "run {run_id} has {} broker-reachable order(s) still unresolved; \
+                                 new order admission is suppressed and the run continues to drain \
+                                 automatically as broker events arrive -- retry stop once drained: {}",
+                                unresolved.len(),
+                                unresolved.join(", "),
+                            ),
+                        ));
+                    }
+                }
+            }
+        }
+
         // BUNDLE-7-PHASE-7A-CORE-ATOMIC-STATE-MACHINE-CLOSURE requirement
         // 4: the single unified cleanup authority — clears ownership
         // (including dynamic-selection truth, via its metadata) and every

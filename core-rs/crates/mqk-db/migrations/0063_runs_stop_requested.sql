@@ -1,0 +1,35 @@
+-- PAPER-SOAK-INBOUND-DRAIN-OWNERSHIP-01
+--
+-- A normal stop (stop_execution_runtime) today clears local ownership and
+-- transitions runs.status straight to STOPPED with no check for broker-
+-- reachable orders (oms_outbox status SENT/ACKED/DISPATCHING/AMBIGUOUS)
+-- that have not yet resolved to a terminal broker outcome. Because the WS
+-- inbound transport gates durable ingest on "is a run currently locally
+-- owned" (alpaca_ws_transport.rs), the instant ownership clears, any late
+-- fill/partial_fill/cancel_ack/reject frame for that run is silently
+-- dropped with zero logging and zero durable trace.
+--
+-- stop_requested_at_utc records that an operator stop was requested for
+-- this run, durably, without changing `status` (the run stays RUNNING).
+-- The orchestrator tick loop reads this column every tick (same pattern as
+-- the existing Phase 0 HALT_GUARD read) and suppresses Phase 1 (new outbox
+-- claim/dispatch) once it is set, while Phase 2 (broker event fetch/ingest)
+-- and Phase 3 (inbound apply) keep running exactly as before -- so the run
+-- keeps draining broker-reachable orders to a terminal state without
+-- admitting any new economic order. Because the loop re-reads this column
+-- from durable state every tick (not from in-memory), drainage-in-progress
+-- is restart-safe for free: a daemon restart mid-drain resumes ownership of
+-- a RUNNING run exactly as it already does today, and the very next tick
+-- re-derives the same suppression from this column.
+--
+-- stop_execution_runtime only proceeds to the existing ownership-clearing
+-- teardown once a durable query proves zero unresolved broker-reachable
+-- orders remain for the run; until then it returns a typed conflict
+-- ("runtime.stop.orders_draining") instead of a false successful stop.
+--
+-- Nullable, additive only. NULL means "no stop has been requested for this
+-- run" -- the common case for every historical row and every run that never
+-- needed to drain.
+
+alter table runs
+    add column if not exists stop_requested_at_utc timestamptz null;

@@ -91,7 +91,8 @@ pub(crate) async fn system_config_diffs(State(st): State<Arc<AppState>>) -> impl
           running_at_utc,
           stopped_at_utc,
           halted_at_utc,
-          last_heartbeat_utc
+          last_heartbeat_utc,
+          stop_requested_at_utc
         from runs
         where engine_id = $1
         order by started_at_utc desc, run_id desc
@@ -133,6 +134,7 @@ pub(crate) async fn system_config_diffs(State(st): State<Arc<AppState>>) -> impl
                 stopped_at_utc: row.get("stopped_at_utc"),
                 halted_at_utc: row.get("halted_at_utc"),
                 last_heartbeat_utc: row.get("last_heartbeat_utc"),
+                stop_requested_at_utc: row.get("stop_requested_at_utc"),
             })
         }
         Ok(None) => None,

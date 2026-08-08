@@ -66,6 +66,11 @@ pub struct RunRow {
     pub stopped_at_utc: Option<DateTime<Utc>>,
     pub halted_at_utc: Option<DateTime<Utc>>,
     pub last_heartbeat_utc: Option<DateTime<Utc>>,
+    /// PAPER-SOAK-INBOUND-DRAIN-OWNERSHIP-01: set by [`request_stop_run`] when
+    /// an operator stop is requested. `status` stays RUNNING until every
+    /// broker-reachable order has drained to a terminal outcome -- see
+    /// migration 0063 for the full rationale.
+    pub stop_requested_at_utc: Option<DateTime<Utc>>,
 }
 
 fn run_row_from_row(row: PgRow) -> Result<RunRow> {
@@ -84,6 +89,7 @@ fn run_row_from_row(row: PgRow) -> Result<RunRow> {
         stopped_at_utc: row.try_get("stopped_at_utc")?,
         halted_at_utc: row.try_get("halted_at_utc")?,
         last_heartbeat_utc: row.try_get("last_heartbeat_utc")?,
+        stop_requested_at_utc: row.try_get("stop_requested_at_utc")?,
     })
 }
 
@@ -189,7 +195,8 @@ pub async fn fetch_run(pool: &PgPool, run_id: Uuid) -> Result<RunRow> {
           running_at_utc,
           stopped_at_utc,
           halted_at_utc,
-          last_heartbeat_utc
+          last_heartbeat_utc,
+          stop_requested_at_utc
         from runs
         where run_id = $1
         "#,
@@ -200,6 +207,36 @@ pub async fn fetch_run(pool: &PgPool, run_id: Uuid) -> Result<RunRow> {
     .context("fetch_run failed")?;
 
     run_row_from_row(row)
+}
+
+/// Record that an operator stop was requested for a RUNNING run, without
+/// changing `status` away from RUNNING (PAPER-SOAK-INBOUND-DRAIN-OWNERSHIP-01;
+/// see migration 0063).
+///
+/// Idempotent: a run that already has `stop_requested_at_utc` set is left
+/// unchanged (the original request time is preserved, not overwritten) --
+/// safe to call on every `stop_execution_runtime` attempt while drainage is
+/// still in progress.
+///
+/// No-op (`Ok(())`, zero rows affected) when the run is not currently
+/// RUNNING -- `stop_execution_runtime`'s existing ARMED/RUNNING-gated
+/// teardown path handles those cases exactly as before this patch.
+pub async fn request_stop_run(pool: &PgPool, run_id: Uuid) -> Result<()> {
+    sqlx::query(
+        r#"
+        update runs
+           set stop_requested_at_utc = now() -- allow: ops-metadata — records when an operator stop was requested, not an economic decision timestamp
+         where run_id = $1
+           and status = 'RUNNING'
+           and stop_requested_at_utc is null
+        "#,
+    )
+    .bind(run_id)
+    .execute(pool)
+    .await
+    .context("request_stop_run failed")?;
+
+    Ok(())
 }
 
 pub async fn fetch_latest_run_for_engine(
@@ -223,7 +260,8 @@ pub async fn fetch_latest_run_for_engine(
           running_at_utc,
           stopped_at_utc,
           halted_at_utc,
-          last_heartbeat_utc
+          last_heartbeat_utc,
+          stop_requested_at_utc
         from runs
         where engine_id = $1
           and mode = $2
@@ -261,7 +299,8 @@ pub async fn fetch_active_run_for_engine(
           running_at_utc,
           stopped_at_utc,
           halted_at_utc,
-          last_heartbeat_utc
+          last_heartbeat_utc,
+          stop_requested_at_utc
         from runs
         where engine_id = $1
           and mode = $2
@@ -475,7 +514,8 @@ pub async fn begin_run(pool: &PgPool, run_id: Uuid) -> Result<()> {
         r#"
         update runs
         set status = 'RUNNING',
-            running_at_utc = now() -- allow: ops-metadata
+            running_at_utc = now(), -- allow: ops-metadata
+            stop_requested_at_utc = null
         where run_id = $1
         "#,
     )

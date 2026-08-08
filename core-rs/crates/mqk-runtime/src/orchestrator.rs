@@ -595,14 +595,15 @@ where
         // multi-instance scenarios where a second process calls tick() after
         // the first has already written HALTED.
         // ------------------------------------------------------------------
-        {
-            let run = mqk_db::fetch_run(&self.pool, self.run_id).await?;
-            if matches!(run.status, mqk_db::RunStatus::Halted) {
-                return Err(anyhow!(
-                    "HALT_GUARD: run {} is HALTED - tick refused (I9-1)",
-                    self.run_id
-                ));
-            }
+        // PAPER-SOAK-INBOUND-DRAIN-OWNERSHIP-01: `run` stays in scope through
+        // Phase 1 below (no longer block-scoped) so its `stop_requested_at_utc`
+        // can gate new-order admission without a second `fetch_run` round trip.
+        let run = mqk_db::fetch_run(&self.pool, self.run_id).await?;
+        if matches!(run.status, mqk_db::RunStatus::Halted) {
+            return Err(anyhow!(
+                "HALT_GUARD: run {} is HALTED - tick refused (I9-1)",
+                self.run_id
+            ));
         }
         // ------------------------------------------------------------------
         // Phase 0b - A4: restart quarantine for ambiguous outbox rows.
@@ -965,16 +966,30 @@ where
         }
         // ------------------------------------------------------------------
         // Phase 1: Claim and dispatch outbox rows.
+        //
+        // PAPER-SOAK-INBOUND-DRAIN-OWNERSHIP-01: once an operator stop has
+        // been durably requested (runs.stop_requested_at_utc, migration
+        // 0063), no new outbox row is claimed or dispatched -- this is the
+        // "no new economic order creation during drainage" gate. Phase 2/3
+        // below are NOT gated by this and keep running exactly as before, so
+        // broker-reachable orders already in flight (SENT/ACKED/DISPATCHING/
+        // AMBIGUOUS) still drain to a terminal outcome via ordinary inbound
+        // processing. `claimed` is simply empty in this case; nothing else
+        // about Phase 1's shape changes.
         // ------------------------------------------------------------------
-        self.refresh_or_acquire_runtime_leadership().await?;
-        let claimed = mqk_db::outbox_claim_batch_for_run(
-            &self.pool,
-            self.run_id,
-            1,
-            &self.dispatcher_id,
-            self.time_source.now_utc(),
-        )
-        .await?;
+        let claimed = if run.stop_requested_at_utc.is_some() {
+            Vec::new()
+        } else {
+            self.refresh_or_acquire_runtime_leadership().await?;
+            mqk_db::outbox_claim_batch_for_run(
+                &self.pool,
+                self.run_id,
+                1,
+                &self.dispatcher_id,
+                self.time_source.now_utc(),
+            )
+            .await?
+        };
         for claimed_row in claimed {
             self.refresh_or_acquire_runtime_leadership().await?;
             match build_claimed_outbox_request(&claimed_row.row)? {

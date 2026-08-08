@@ -85,6 +85,62 @@ pub async fn outbox_load_restart_ambiguous_for_run(
     Ok(out)
 }
 
+/// Load the internal order IDs of every outbox row for a run that may have
+/// reached the broker but has not yet resolved to a terminal broker outcome
+/// (PAPER-SOAK-INBOUND-DRAIN-OWNERSHIP-01).
+///
+/// "May have reached the broker": `status` in `('DISPATCHING', 'SENT',
+/// 'ACKED', 'AMBIGUOUS')` -- `DISPATCHING`/`AMBIGUOUS` are included
+/// deliberately, fail-closed, for the same reason
+/// [`outbox_load_restart_ambiguous_for_run`] treats them as unsafe to ignore:
+/// submission may have been attempted before the outcome was durably known.
+/// `PENDING`/`CLAIMED` are excluded -- those orders have never been sent to
+/// the broker, so there is no possibility of a late broker event for them;
+/// they simply never get dispatched once drainage suppresses Phase 1, which
+/// is the intended effect, not a gap.
+///
+/// "Not yet resolved to a terminal outcome": no `oms_inbox` row exists for
+/// `(run_id, internal_order_id)` with `event_kind` in `('fill', 'cancel_ack',
+/// 'reject')` -- the three broker-driven events that end an order's
+/// lifecycle. `partial_fill`/`ack`/`replace_ack`/`replace_reject`/
+/// `cancel_reject` are all non-terminal by design (an order can receive any
+/// of them and still have further lifecycle ahead of it).
+///
+/// Returns an empty vec when every broker-reachable order for the run has
+/// drained -- the signal `stop_execution_runtime` uses to allow the run to
+/// actually stop. Read-only; does not modify any state.
+pub async fn outbox_unresolved_broker_reachable_orders(
+    pool: &PgPool,
+    run_id: Uuid,
+) -> Result<Vec<String>> {
+    let rows = sqlx::query(
+        r#"
+        select o.idempotency_key
+          from oms_outbox o
+         where o.run_id = $1
+           and o.status in ('DISPATCHING', 'SENT', 'ACKED', 'AMBIGUOUS')
+           and not exists (
+               select 1
+                 from oms_inbox i
+                where i.run_id = o.run_id
+                  and i.internal_order_id = o.idempotency_key
+                  and i.event_kind in ('fill', 'cancel_ack', 'reject')
+           )
+         order by o.outbox_id asc
+        "#,
+    )
+    .bind(run_id)
+    .fetch_all(pool)
+    .await
+    .context("outbox_unresolved_broker_reachable_orders failed")?;
+
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        out.push(row.try_get::<String, _>("idempotency_key")?);
+    }
+    Ok(out)
+}
+
 // ---------------------------------------------------------------------------
 // OutboxClaimToken (FC-2)
 // ---------------------------------------------------------------------------

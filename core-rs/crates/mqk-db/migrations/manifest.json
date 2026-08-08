@@ -386,6 +386,12 @@
       "path": "0062_inbox_partial_fill_economic_match_index.sql",
       "status": "applied",
       "intent": "PAPER-SOAK-PARTIAL-FILL-DEDUP-01: add idx_inbox_run_order_event_kind on oms_inbox(run_id, internal_order_id, event_kind) to support the new economic-match lookup in inbox_insert_partial_fill_deduped (mqk-db::inbox), which checks for an existing partial_fill row with matching delta_qty/price_micros within a bounded event_ts_ms window before inserting -- closing the gap where migration 0040 fixed cross-lane WS/REST duplicate terminal fills but explicitly left partial fills uncovered. Purely additive index, no constraint or column change."
+    },
+    {
+      "id": "0063",
+      "path": "0063_runs_stop_requested.sql",
+      "status": "applied",
+      "intent": "PAPER-SOAK-INBOUND-DRAIN-OWNERSHIP-01: add nullable runs.stop_requested_at_utc. Records that an operator stop was requested without changing runs.status away from RUNNING, so the orchestrator tick loop can suppress new outbox claim/dispatch (Phase 1) while continuing to run broker event fetch/ingest and inbound apply (Phase 2/3) until every broker-reachable order for the run has resolved to a terminal outcome -- closing the gap where stop_execution_runtime cleared local ownership unconditionally and the WS inbound transport (gated on local ownership) then silently dropped any late fill/cancel/reject frame with zero logging. Additive only, no constraint change."
     }
   ]
 }
