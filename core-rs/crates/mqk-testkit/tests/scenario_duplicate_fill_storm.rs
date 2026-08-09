@@ -70,6 +70,7 @@ async fn duplicate_events_remain_dedupe_safe_under_new_ordering() -> anyhow::Res
         delta_qty: 5,
         price_micros: 400_000_000,
         fee_micros: 0,
+        cum_qty_after: None,
     };
     let msg_json = serde_json::to_value(&ev)?;
 

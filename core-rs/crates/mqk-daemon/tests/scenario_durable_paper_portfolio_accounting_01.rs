@@ -195,6 +195,7 @@ async fn insert_partial_then_final_fill(
         delta_qty: partial_qty,
         price_micros,
         fee_micros: 0,
+        cum_qty_after: None,
     };
     let json = serde_json::to_value(&partial).expect("serialize PartialFill");
     mqk_db::inbox_insert_deduped_with_identity(

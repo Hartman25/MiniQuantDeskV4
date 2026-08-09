@@ -35,28 +35,47 @@
 //! | FDP07_DB | DB constraint: second 'fill' row for same order is rejected   | Yes  |
 //! | FDP08_DB | Recovery: two applied fill rows → portfolio +1, not +2        | Yes  |
 //!
-//! # PAPER-SOAK-PARTIAL-FILL-DEDUP-01 addendum
+//! # PAPER-SOAK-PARTIAL-FILL-DEDUP-01 addendum (superseded — see -02 below)
 //!
 //! FDP01-FDP08 above cover terminal ('fill') dedup (migration 0040). Migration
 //! 0040 explicitly excludes 'partial_fill' rows from its single-fill
 //! constraint (a single order legitimately produces many partial fills), so
 //! the identical WS(broker_fill_id=None)/REST(broker_fill_id=Some) dual-lane
-//! duplicate pattern was left completely uncovered for partial fills. FDP09+
-//! below prove `inbox_insert_partial_fill_deduped` (mqk-db::inbox) closes that
-//! gap using an economic-match window (internal_order_id + delta_qty +
-//! price_micros + bounded event_ts_ms proximity) instead of a shared identity
-//! neither lane actually carries.
+//! duplicate pattern was left completely uncovered for partial fills.
+//! PAPER-SOAK-PARTIAL-FILL-DEDUP-01 closed that gap with a DB-insertion-time
+//! economic-match window (internal_order_id + delta_qty + price_micros +
+//! bounded event_ts_ms proximity).
 //!
-//! | ID       | Scenario                                                        | DB?  |
-//! |----------|------------------------------------------------------------------|------|
-//! | FDP09_DB | WS partial fill then REST duplicate (same fill) → 1 row          | Yes  |
-//! | FDP10_DB | REST partial fill then WS duplicate (reverse order) → 1 row      | Yes  |
-//! | FDP11_DB | Same-lane REST retry of an already-inserted partial fill → 1 row | Yes  |
-//! | FDP12_DB | Two distinct partial fills (same qty/price, >window apart) → 2   | Yes  |
-//! | FDP13_DB | Two legitimately distinct partial fills (different qty) → 2      | Yes  |
-//! | FDP14_DB | WS+REST partial dup (collapsed) + terminal fill → correct total  | Yes  |
-//! | FDP15_DB | Restart replay after dedup: exactly one row loaded, none dupe'd  | Yes  |
-//! | FDP16_DB | Concurrent WS+REST duplicate insert race → exactly one wins      | Yes  |
+//! # PAPER-SOAK-PARTIAL-FILL-DEDUP-02 — why -01 was rejected and replaced
+//!
+//! Independent review rejected the -01 window: two *legitimate* partial
+//! fills for the same order can genuinely share quantity, price, and
+//! near-simultaneous timestamps (e.g. two 10-share fills at the same price a
+//! second apart) — a time window cannot distinguish that from the same
+//! physical fill re-delivered over WS and REST, and -01 would wrongly
+//! collapse the former.
+//!
+//! -02 removes the insertion-time heuristic entirely (`partial_fill` now
+//! dedupes on transport identity only, exactly like every other
+//! `event_kind` — see `mqk_db::inbox::inbox_insert_deduped_with_identity`)
+//! and moves economic dedup to the OMS *apply* layer
+//! (`mqk_execution::oms::state_machine::OmsOrder::apply_with_watermark`),
+//! which compares the broker-authoritative cumulative-filled-quantity
+//! (`cum_qty_after`, populated by `mqk-broker-alpaca` from Alpaca's own
+//! `order.filled_qty` on both lanes) against the order's current
+//! `filled_qty` — an exact identity, not a heuristic.
+//!
+//! | ID        | Scenario                                                            | DB?  |
+//! |-----------|----------------------------------------------------------------------|------|
+//! | FDP09_DB2 | WS partial fill then REST duplicate: BOTH insert, exactly 1 applies  | Yes  |
+//! | FDP10_DB2 | REST then WS duplicate (reverse order): same outcome                 | Yes  |
+//! | FDP11_DB2 | Same-lane retry (identical broker_message_id): still rejected at insert | Yes |
+//! | FDP12_DB2 | Two legitimate same-qty/price fills <3s apart: BOTH insert AND apply | Yes  |
+//! | FDP13_DB2 | Two legitimately distinct partial fills (different qty): both apply  | Yes  |
+//! | FDP14_DB2 | WS+REST partial dup + terminal fill → correct total via replay       | Yes  |
+//! | FDP15_DB2 | Restart replay: unapplied duplicate row resolves to a no-op          | Yes  |
+//! | FDP16_DB2 | Concurrent WS+REST insert race: both rows persist, replay applies once | Yes |
+//! | FDP17_NEG | Negative control: replaying without the watermark DOES double-apply  | No   |
 
 use anyhow::Result;
 use chrono::Utc;
@@ -551,7 +570,7 @@ fn fdp08_recovery_dedup_prevents_double_portfolio_apply() {
 }
 
 // ---------------------------------------------------------------------------
-// PAPER-SOAK-PARTIAL-FILL-DEDUP-01 — DB-backed proof
+// PAPER-SOAK-PARTIAL-FILL-DEDUP-02 — DB-backed proof
 // ---------------------------------------------------------------------------
 
 fn partial_fill_payload(delta_qty: i64, price_micros: i64) -> serde_json::Value {
@@ -563,6 +582,25 @@ fn partial_fill_payload(delta_qty: i64, price_micros: i64) -> serde_json::Value 
         "price_micros": price_micros,
         "fee_micros":   0_i64
     })
+}
+
+/// Like `partial_fill_payload`, but additionally carries `cum_qty_after` —
+/// the field `mqk-broker-alpaca` populates from Alpaca's `order.filled_qty`
+/// on both the WS and REST lanes (see `BrokerEvent::PartialFill::cum_qty_after`).
+/// Deserializing this JSON as `BrokerEvent` (exactly what
+/// `mqk_runtime::orchestrator::apply::build_canonical_apply_queue` does with
+/// durable `message_json`) round-trips this field through serde's
+/// `#[serde(default, skip_serializing_if = "Option::is_none")]`.
+fn partial_fill_payload_with_watermark(
+    delta_qty: i64,
+    price_micros: i64,
+    cum_qty_after: Option<i64>,
+) -> serde_json::Value {
+    let mut payload = partial_fill_payload(delta_qty, price_micros);
+    if let Some(v) = cum_qty_after {
+        payload["cum_qty_after"] = json!(v);
+    }
+    payload
 }
 
 async fn partial_fill_row_count(
@@ -581,12 +619,52 @@ async fn partial_fill_row_count(
     Ok(count)
 }
 
-/// FDP09_DB: WS partial fill (broker_fill_id=None) then REST duplicate of the
-/// SAME economic partial fill (broker_fill_id=Some, different broker_message_id,
-/// event_ts_ms 500ms later — inside the dedupe window) — the REST insert must
-/// be rejected and exactly one row must exist.
+/// Replay every durable `partial_fill`/`fill` inbox row for `internal_order_id`,
+/// in canonical `inbox_id` ascending order, through the SAME apply logic as
+/// production `apply_fill_step`
+/// (`mqk_runtime::orchestrator::apply::apply_fill_step`): economic_event_id =
+/// `broker_fill_id.unwrap_or(broker_message_id)`, and — this is the -02 fix —
+/// `cum_qty_after` (when present in `message_json`) passed to
+/// `apply_with_watermark` as the broker-authoritative cumulative watermark.
+/// Returns the final order for assertions.
+fn replay_rows_with_watermark(
+    rows: &[mqk_db::InboxRow],
+    internal_order_id: &str,
+    total_qty: i64,
+) -> OmsOrder {
+    let mut order = OmsOrder::new(internal_order_id, "AAPL", total_qty);
+    for row in rows {
+        let delta_qty = row
+            .message_json
+            .get("delta_qty")
+            .and_then(|v| v.as_i64())
+            .expect("delta_qty present");
+        let cum_qty_after = row
+            .message_json
+            .get("cum_qty_after")
+            .and_then(|v| v.as_i64());
+        let economic_event_id = row
+            .broker_fill_id
+            .as_deref()
+            .unwrap_or(&row.broker_message_id);
+        let event = match row.event_kind.as_str() {
+            "partial_fill" => OmsEvent::PartialFill { delta_qty },
+            "fill" => OmsEvent::Fill { delta_qty },
+            other => panic!("unexpected event_kind: {other}"),
+        };
+        let _ = order.apply_with_watermark(&event, Some(economic_event_id), cum_qty_after);
+    }
+    order
+}
+
+/// FDP09_DB2: WS partial fill (broker_fill_id=None) then REST duplicate of
+/// the SAME physical partial fill (broker_fill_id=Some, different
+/// broker_message_id, SAME cum_qty_after) — under -02 the insertion layer no
+/// longer suppresses either row (both are distinct `broker_message_id`
+/// values, exactly like any other event_kind), but replaying the durable
+/// rows through the OMS apply layer must still apply exactly once.
 #[tokio::test]
-async fn fdp09_db_ws_partial_fill_then_rest_duplicate_dedupes_to_one_row() -> Result<()> {
+async fn fdp09_db2_ws_partial_fill_then_rest_duplicate_applies_once() -> Result<()> {
     let Some(url) = db_url_or_skip() else {
         return Ok(());
     };
@@ -602,7 +680,7 @@ async fn fdp09_db_ws_partial_fill_then_rest_duplicate_dedupes_to_one_row() -> Re
     cleanup_run(&pool, run_id).await?;
     seed_running_run(&pool, run_id).await?;
 
-    let payload = partial_fill_payload(6, AAPL_PRICE);
+    let payload = partial_fill_payload_with_watermark(6, AAPL_PRICE, Some(6));
 
     let ws_inserted = mqk_db::inbox_insert_deduped_with_identity(
         &pool,
@@ -617,7 +695,7 @@ async fn fdp09_db_ws_partial_fill_then_rest_duplicate_dedupes_to_one_row() -> Re
         Utc::now(),
     )
     .await?;
-    assert!(ws_inserted, "FDP09_DB: WS partial fill must insert first");
+    assert!(ws_inserted, "FDP09_DB2: WS partial fill must insert first");
 
     let rest_inserted = mqk_db::inbox_insert_deduped_with_identity(
         &pool,
@@ -628,29 +706,39 @@ async fn fdp09_db_ws_partial_fill_then_rest_duplicate_dedupes_to_one_row() -> Re
         "alpaca-broker-fdp09",
         "partial_fill",
         &payload,
-        1_748_706_112_674, // 500ms after the WS event, within the 3s window
+        1_748_706_112_674,
         Utc::now(),
     )
     .await?;
     assert!(
-        !rest_inserted,
-        "FDP09_DB: REST duplicate of the same economic partial fill must be rejected"
+        rest_inserted,
+        "FDP09_DB2: -02 no longer suppresses the REST row at insert time — \
+         full raw evidence from both lanes must be preserved"
     );
 
     assert_eq!(
         partial_fill_row_count(&pool, run_id, internal_order_id).await?,
-        1,
-        "FDP09_DB: exactly one partial_fill row must exist"
+        2,
+        "FDP09_DB2: both distinct broker_message_id rows must exist as durable evidence"
+    );
+
+    // The economic question — does this apply once? — is answered by the
+    // apply layer, not row count.
+    let rows = mqk_db::inbox_load_all_for_run(&pool, run_id).await?;
+    let order = replay_rows_with_watermark(&rows, internal_order_id, 10);
+    assert_eq!(
+        order.filled_qty, 6,
+        "FDP09_DB2: replaying both durable rows must apply exactly once (filled_qty=6, not 12)"
     );
 
     cleanup_run(&pool, run_id).await?;
     Ok(())
 }
 
-/// FDP10_DB: reverse arrival order (REST first, then WS duplicate) — same
-/// dedupe outcome regardless of which lane arrives first.
+/// FDP10_DB2: reverse arrival order (REST first, then WS duplicate) — same
+/// outcome regardless of which lane arrives first.
 #[tokio::test]
-async fn fdp10_db_rest_partial_fill_then_ws_duplicate_dedupes_to_one_row() -> Result<()> {
+async fn fdp10_db2_rest_partial_fill_then_ws_duplicate_applies_once() -> Result<()> {
     let Some(url) = db_url_or_skip() else {
         return Ok(());
     };
@@ -666,7 +754,7 @@ async fn fdp10_db_rest_partial_fill_then_ws_duplicate_dedupes_to_one_row() -> Re
     cleanup_run(&pool, run_id).await?;
     seed_running_run(&pool, run_id).await?;
 
-    let payload = partial_fill_payload(6, AAPL_PRICE);
+    let payload = partial_fill_payload_with_watermark(6, AAPL_PRICE, Some(6));
 
     let rest_inserted = mqk_db::inbox_insert_deduped_with_identity(
         &pool,
@@ -683,7 +771,7 @@ async fn fdp10_db_rest_partial_fill_then_ws_duplicate_dedupes_to_one_row() -> Re
     .await?;
     assert!(
         rest_inserted,
-        "FDP10_DB: REST partial fill must insert first"
+        "FDP10_DB2: REST partial fill must insert first"
     );
 
     let ws_inserted = mqk_db::inbox_insert_deduped_with_identity(
@@ -700,26 +788,33 @@ async fn fdp10_db_rest_partial_fill_then_ws_duplicate_dedupes_to_one_row() -> Re
     )
     .await?;
     assert!(
-        !ws_inserted,
-        "FDP10_DB: WS duplicate arriving after REST must also be rejected"
+        ws_inserted,
+        "FDP10_DB2: WS row must also insert — evidence is never suppressed"
     );
 
     assert_eq!(
         partial_fill_row_count(&pool, run_id, internal_order_id).await?,
-        1,
-        "FDP10_DB: exactly one partial_fill row must exist"
+        2,
+        "FDP10_DB2: exactly two durable rows must exist"
+    );
+
+    let rows = mqk_db::inbox_load_all_for_run(&pool, run_id).await?;
+    let order = replay_rows_with_watermark(&rows, internal_order_id, 10);
+    assert_eq!(
+        order.filled_qty, 6,
+        "FDP10_DB2: REST-then-WS duplicate must still apply exactly once"
     );
 
     cleanup_run(&pool, run_id).await?;
     Ok(())
 }
 
-/// FDP11_DB: same-lane REST retry (identical broker_fill_id/message_id
-/// resent, e.g. after a transient network error) is rejected by the existing
-/// transport-identity path (`uq_inbox_run_broker_message_id`) before the
-/// economic-match window is even relevant.
+/// FDP11_DB2: same-lane retry (identical broker_message_id resent, e.g.
+/// after a transient network error) is still rejected by the pre-existing
+/// transport-identity path (`uq_inbox_run_broker_message_id`) — unaffected
+/// by -02, since this was never the mechanism -01 touched.
 #[tokio::test]
-async fn fdp11_db_same_lane_retry_is_rejected() -> Result<()> {
+async fn fdp11_db2_same_lane_retry_is_rejected() -> Result<()> {
     let Some(url) = db_url_or_skip() else {
         return Ok(());
     };
@@ -735,7 +830,7 @@ async fn fdp11_db_same_lane_retry_is_rejected() -> Result<()> {
     cleanup_run(&pool, run_id).await?;
     seed_running_run(&pool, run_id).await?;
 
-    let payload = partial_fill_payload(6, AAPL_PRICE);
+    let payload = partial_fill_payload_with_watermark(6, AAPL_PRICE, Some(6));
     let msg_id = "alpaca:uuid-fdp11:partial_fill:2026-05-20T14:41:52.674479Z";
 
     let first = mqk_db::inbox_insert_deduped_with_identity(
@@ -751,7 +846,7 @@ async fn fdp11_db_same_lane_retry_is_rejected() -> Result<()> {
         Utc::now(),
     )
     .await?;
-    assert!(first, "FDP11_DB: first REST delivery must insert");
+    assert!(first, "FDP11_DB2: first REST delivery must insert");
 
     let retry = mqk_db::inbox_insert_deduped_with_identity(
         &pool,
@@ -766,23 +861,26 @@ async fn fdp11_db_same_lane_retry_is_rejected() -> Result<()> {
         Utc::now(),
     )
     .await?;
-    assert!(!retry, "FDP11_DB: identical retry must be rejected");
+    assert!(!retry, "FDP11_DB2: identical retry must be rejected");
 
     assert_eq!(
         partial_fill_row_count(&pool, run_id, internal_order_id).await?,
         1,
-        "FDP11_DB: exactly one partial_fill row must exist"
+        "FDP11_DB2: exactly one partial_fill row must exist"
     );
 
     cleanup_run(&pool, run_id).await?;
     Ok(())
 }
 
-/// FDP12_DB: two partial fills that happen to share the same qty/price but
-/// are separated by more than the dedupe window must BOTH apply — dedup must
-/// not collapse genuinely distinct executions just because they look alike.
+/// FDP12_DB2 (A4, MANDATORY): two legitimate partial fills that share the
+/// same qty/price and arrive less than 3 seconds apart — the exact scenario
+/// the -01 time window would wrongly collapse — must BOTH insert AND both
+/// apply. Distinctness comes entirely from cum_qty_after (6, then 12); no
+/// timestamp or window is ever consulted.
 #[tokio::test]
-async fn fdp12_db_coincidental_same_qty_price_outside_window_both_apply() -> Result<()> {
+async fn fdp12_db2_two_legitimate_same_qty_price_fills_less_than_3s_apart_both_apply() -> Result<()>
+{
     let Some(url) = db_url_or_skip() else {
         return Ok(());
     };
@@ -798,8 +896,6 @@ async fn fdp12_db_coincidental_same_qty_price_outside_window_both_apply() -> Res
     cleanup_run(&pool, run_id).await?;
     seed_running_run(&pool, run_id).await?;
 
-    let payload = partial_fill_payload(6, AAPL_PRICE);
-
     let first = mqk_db::inbox_insert_deduped_with_identity(
         &pool,
         run_id,
@@ -808,47 +904,57 @@ async fn fdp12_db_coincidental_same_qty_price_outside_window_both_apply() -> Res
         internal_order_id,
         "alpaca-broker-fdp12",
         "partial_fill",
-        &payload,
+        &partial_fill_payload_with_watermark(6, AAPL_PRICE, Some(6)),
         1_748_706_112_000,
         Utc::now(),
     )
     .await?;
-    assert!(first, "FDP12_DB: first partial fill must insert");
+    assert!(first, "FDP12_DB2: first partial fill must insert");
 
-    // 10 seconds later — well outside PARTIAL_FILL_DEDUPE_WINDOW_MS (3s).
+    // 700ms later — well inside the OLD 3s window that used to wrongly
+    // collapse this. Same qty (6), same price, genuinely distinct execution
+    // (cumulative went 6 -> 12).
     let second = mqk_db::inbox_insert_deduped_with_identity(
         &pool,
         run_id,
-        "alpaca:uuid-fdp12:partial_fill:2026-05-20T14:42:02.000000Z",
+        "alpaca:uuid-fdp12:partial_fill:2026-05-20T14:41:52.700000Z",
         None,
         internal_order_id,
         "alpaca-broker-fdp12",
         "partial_fill",
-        &payload,
-        1_748_706_122_000,
+        &partial_fill_payload_with_watermark(6, AAPL_PRICE, Some(12)),
+        1_748_706_112_700,
         Utc::now(),
     )
     .await?;
     assert!(
         second,
-        "FDP12_DB: a later, genuinely distinct partial fill with the same \
-         qty/price must still apply — dedup must not over-collapse"
+        "FDP12_DB2: a later, genuinely distinct partial fill with the same \
+         qty/price must still insert — no window suppresses it"
     );
 
     assert_eq!(
         partial_fill_row_count(&pool, run_id, internal_order_id).await?,
         2,
-        "FDP12_DB: both distinct partial_fill rows must exist"
+        "FDP12_DB2: both distinct partial_fill rows must exist"
+    );
+
+    let rows = mqk_db::inbox_load_all_for_run(&pool, run_id).await?;
+    let order = replay_rows_with_watermark(&rows, internal_order_id, 20);
+    assert_eq!(
+        order.filled_qty, 12,
+        "FDP12_DB2: both legitimate 6-share fills must be reflected (6+6=12), \
+         not collapsed to 6"
     );
 
     cleanup_run(&pool, run_id).await?;
     Ok(())
 }
 
-/// FDP13_DB: two legitimately distinct partial fills with different qty both
-/// apply, mirroring FDP04 but through the DB-backed insert path.
+/// FDP13_DB2 (A5): two legitimately distinct partial fills with different
+/// qty both insert and both apply.
 #[tokio::test]
-async fn fdp13_db_distinct_qty_partial_fills_both_apply() -> Result<()> {
+async fn fdp13_db2_distinct_qty_partial_fills_both_apply() -> Result<()> {
     let Some(url) = db_url_or_skip() else {
         return Ok(());
     };
@@ -872,12 +978,12 @@ async fn fdp13_db_distinct_qty_partial_fills_both_apply() -> Result<()> {
         internal_order_id,
         "alpaca-broker-fdp13",
         "partial_fill",
-        &partial_fill_payload(3, AAPL_PRICE),
+        &partial_fill_payload_with_watermark(3, AAPL_PRICE, Some(3)),
         1_748_706_112_000,
         Utc::now(),
     )
     .await?;
-    assert!(first, "FDP13_DB: first partial fill (qty=3) must insert");
+    assert!(first, "FDP13_DB2: first partial fill (qty=3) must insert");
 
     let second = mqk_db::inbox_insert_deduped_with_identity(
         &pool,
@@ -887,34 +993,37 @@ async fn fdp13_db_distinct_qty_partial_fills_both_apply() -> Result<()> {
         internal_order_id,
         "alpaca-broker-fdp13",
         "partial_fill",
-        &partial_fill_payload(2, AAPL_PRICE),
+        &partial_fill_payload_with_watermark(2, AAPL_PRICE, Some(5)),
         1_748_706_112_500,
         Utc::now(),
     )
     .await?;
     assert!(
         second,
-        "FDP13_DB: second partial fill (qty=2) must also insert — different qty"
+        "FDP13_DB2: second partial fill (qty=2) must also insert — different qty"
     );
 
     assert_eq!(
         partial_fill_row_count(&pool, run_id, internal_order_id).await?,
         2,
-        "FDP13_DB: both distinct partial_fill rows must exist"
+        "FDP13_DB2: both distinct partial_fill rows must exist"
     );
+
+    let rows = mqk_db::inbox_load_all_for_run(&pool, run_id).await?;
+    let order = replay_rows_with_watermark(&rows, internal_order_id, 10);
+    assert_eq!(order.filled_qty, 5, "FDP13_DB2: 3+2=5 must both apply");
 
     cleanup_run(&pool, run_id).await?;
     Ok(())
 }
 
-/// FDP14_DB: WS+REST duplicate of a partial fill (collapsed to one row) is
-/// followed by the order's terminal fill. Replaying the durable inbox rows
-/// through the same OMS/economic-event-id logic as `apply_fill_step` must
-/// yield the exact correct cumulative filled quantity — proving the fix at
-/// the DB layer produces the correct economic outcome, not just the correct
-/// row count.
+/// FDP14_DB2 (A8): WS+REST duplicate of a partial fill is followed by the
+/// order's terminal fill. Replaying every durable inbox row through
+/// `apply_with_watermark` must yield the exact correct cumulative filled
+/// quantity — proving the -02 fix produces the correct economic outcome
+/// end-to-end, not just the correct row count.
 #[tokio::test]
-async fn fdp14_db_partial_dup_collapse_then_terminal_fill_yields_correct_total() -> Result<()> {
+async fn fdp14_db2_partial_dup_plus_terminal_fill_yields_correct_total() -> Result<()> {
     let Some(url) = db_url_or_skip() else {
         return Ok(());
     };
@@ -930,7 +1039,7 @@ async fn fdp14_db_partial_dup_collapse_then_terminal_fill_yields_correct_total()
     cleanup_run(&pool, run_id).await?;
     seed_running_run(&pool, run_id).await?;
 
-    let partial_payload = partial_fill_payload(6, AAPL_PRICE);
+    let partial_payload = partial_fill_payload_with_watermark(6, AAPL_PRICE, Some(6));
 
     // WS partial fill: 6 of 10.
     mqk_db::inbox_insert_deduped_with_identity(
@@ -947,7 +1056,8 @@ async fn fdp14_db_partial_dup_collapse_then_terminal_fill_yields_correct_total()
     )
     .await?;
 
-    // REST duplicate of the SAME 6-share partial fill — must be rejected.
+    // REST duplicate of the SAME 6-share partial fill — now inserts (raw
+    // evidence preserved) instead of being rejected at the DB layer.
     let rest_dup = mqk_db::inbox_insert_deduped_with_identity(
         &pool,
         run_id,
@@ -962,8 +1072,8 @@ async fn fdp14_db_partial_dup_collapse_then_terminal_fill_yields_correct_total()
     )
     .await?;
     assert!(
-        !rest_dup,
-        "FDP14_DB: REST duplicate partial fill must be rejected"
+        rest_dup,
+        "FDP14_DB2: REST duplicate partial fill must insert as raw evidence"
     );
 
     // Terminal fill: remaining 4 of 10.
@@ -989,48 +1099,30 @@ async fn fdp14_db_partial_dup_collapse_then_terminal_fill_yields_correct_total()
     )
     .await?;
 
-    // Replay every durable inbox row for this order through the same
-    // economic-event-id / OMS-apply logic as production `apply_fill_step`.
     let rows = mqk_db::inbox_load_all_for_run(&pool, run_id).await?;
-    let mut order = OmsOrder::new(internal_order_id, "AAPL", 10);
-    for row in &rows {
-        let delta_qty = row
-            .message_json
-            .get("delta_qty")
-            .and_then(|v| v.as_i64())
-            .expect("delta_qty present");
-        let economic_event_id = row
-            .broker_fill_id
-            .as_deref()
-            .unwrap_or(&row.broker_message_id);
-        let event = match row.event_kind.as_str() {
-            "partial_fill" => OmsEvent::PartialFill { delta_qty },
-            "fill" => OmsEvent::Fill { delta_qty },
-            other => panic!("unexpected event_kind: {other}"),
-        };
-        let _ = order.apply(&event, Some(economic_event_id));
-    }
+    let order = replay_rows_with_watermark(&rows, internal_order_id, 10);
 
     assert_eq!(
         order.filled_qty, 10,
-        "FDP14_DB: cumulative filled_qty must be exactly 10 (6 + 4), not 16 (double-counted 6)"
+        "FDP14_DB2: cumulative filled_qty must be exactly 10 (6 + 4), not 16 (double-counted 6)"
     );
     assert_eq!(
         order.state,
         OrderState::Filled,
-        "FDP14_DB: order must be Filled"
+        "FDP14_DB2: order must be Filled"
     );
 
     cleanup_run(&pool, run_id).await?;
     Ok(())
 }
 
-/// FDP15_DB: restart-replay proof. After the WS/REST duplicate collapses to
-/// one durable row and that row is marked applied, a simulated restart
-/// (`inbox_load_all_applied_for_run` + `inbox_load_unapplied_for_run`) must
-/// see exactly the one row — no duplicate ever existed to replay twice.
+/// FDP15_DB2 (A9): restart-replay proof. The WS row is marked applied; the
+/// REST duplicate row is left unapplied (as it would be if a crash occurred
+/// between its insert and its apply step). A simulated restart replays the
+/// unapplied set through `apply_with_watermark` and must resolve it to a
+/// no-op, not a second economic application.
 #[tokio::test]
-async fn fdp15_db_restart_replay_sees_exactly_one_row() -> Result<()> {
+async fn fdp15_db2_restart_replay_of_unapplied_duplicate_is_noop() -> Result<()> {
     let Some(url) = db_url_or_skip() else {
         return Ok(());
     };
@@ -1046,7 +1138,7 @@ async fn fdp15_db_restart_replay_sees_exactly_one_row() -> Result<()> {
     cleanup_run(&pool, run_id).await?;
     seed_running_run(&pool, run_id).await?;
 
-    let payload = partial_fill_payload(6, AAPL_PRICE);
+    let payload = partial_fill_payload_with_watermark(6, AAPL_PRICE, Some(6));
     let ws_msg_id = "alpaca:uuid-fdp15:partial_fill:2026-05-20T14:41:52.174478594Z";
 
     mqk_db::inbox_insert_deduped_with_identity(
@@ -1062,10 +1154,11 @@ async fn fdp15_db_restart_replay_sees_exactly_one_row() -> Result<()> {
         Utc::now(),
     )
     .await?;
+    let rest_dup_msg_id = "alpaca:uuid-fdp15:partial_fill:2026-05-20T14:41:52.674479Z";
     let rest_dup = mqk_db::inbox_insert_deduped_with_identity(
         &pool,
         run_id,
-        "alpaca:uuid-fdp15:partial_fill:2026-05-20T14:41:52.674479Z",
+        rest_dup_msg_id,
         Some("20260520104152674::fdp15-exec"),
         internal_order_id,
         "alpaca-broker-fdp15",
@@ -1076,42 +1169,54 @@ async fn fdp15_db_restart_replay_sees_exactly_one_row() -> Result<()> {
     )
     .await?;
     assert!(
-        !rest_dup,
-        "FDP15_DB: REST duplicate must be rejected before restart"
+        rest_dup,
+        "FDP15_DB2: REST duplicate must insert as raw evidence"
     );
 
+    // Simulate the WS row having been applied before a crash; the REST
+    // duplicate row was never reached (crash between insert and apply).
     mqk_db::inbox_mark_applied(&pool, run_id, ws_msg_id, Utc::now()).await?;
 
-    // Simulated restart: replay applied + unapplied sets exactly as cold-start does.
+    // Simulated restart: a fresh OMS order (filled_qty=0) replays first the
+    // applied set (to rebuild in-memory state) then the unapplied set.
     let applied = mqk_db::inbox_load_all_applied_for_run(&pool, run_id).await?;
     let unapplied = mqk_db::inbox_load_unapplied_for_run(&pool, run_id).await?;
-
-    let applied_for_order: Vec<_> = applied
-        .iter()
-        .filter(|r| r.message_json.get("delta_qty").is_some())
-        .collect();
     assert_eq!(
-        applied_for_order.len(),
+        applied.len(),
         1,
-        "FDP15_DB: exactly one applied partial_fill row must exist after restart replay"
+        "FDP15_DB2: exactly one applied row (the WS fill)"
     );
-    assert!(
-        unapplied.is_empty(),
-        "FDP15_DB: no unapplied rows should remain (the duplicate was never inserted)"
+    assert_eq!(
+        unapplied.len(),
+        1,
+        "FDP15_DB2: exactly one unapplied row (the REST duplicate) — it was never rejected"
+    );
+    assert_eq!(unapplied[0].broker_message_id, rest_dup_msg_id);
+
+    let mut all_rows = applied;
+    all_rows.extend(unapplied);
+    all_rows.sort_by_key(|r| r.inbox_id);
+    let order = replay_rows_with_watermark(&all_rows, internal_order_id, 10);
+
+    assert_eq!(
+        order.filled_qty, 6,
+        "FDP15_DB2: restart replay of the unapplied REST duplicate must be a no-op (filled_qty=6, not 12)"
     );
 
     cleanup_run(&pool, run_id).await?;
     Ok(())
 }
 
-/// FDP16_DB: concurrency proof. WS and REST deliveries of the same economic
-/// partial fill are inserted from two concurrent tasks, released
-/// simultaneously via a `tokio::sync::Barrier` (not a sleep) so both requests
-/// race to the DB together. Exactly one must succeed and exactly one row must
-/// exist — proving the advisory-lock-guarded check-then-insert is
-/// concurrency-safe, not just correct for sequential arrival.
+/// FDP16_DB2 (A7): concurrency proof. WS and REST deliveries of the same
+/// physical partial fill are inserted from two concurrent tasks, released
+/// simultaneously via a `tokio::sync::Barrier` (not a sleep). Under -02 both
+/// inserts succeed (transport identity differs, no economic suppression at
+/// insert time) — the race-safety property that matters now is that
+/// replaying the resulting durable rows through the apply layer still
+/// produces exactly one economic application, regardless of which row's
+/// insert happened to land first.
 #[tokio::test]
-async fn fdp16_db_concurrent_ws_rest_duplicate_race_exactly_one_wins() -> Result<()> {
+async fn fdp16_db2_concurrent_ws_rest_duplicate_insert_then_apply_once() -> Result<()> {
     let Some(url) = db_url_or_skip() else {
         return Ok(());
     };
@@ -1127,7 +1232,7 @@ async fn fdp16_db_concurrent_ws_rest_duplicate_race_exactly_one_wins() -> Result
     cleanup_run(&pool, run_id).await?;
     seed_running_run(&pool, run_id).await?;
 
-    let payload = partial_fill_payload(6, AAPL_PRICE);
+    let payload = partial_fill_payload_with_watermark(6, AAPL_PRICE, Some(6));
     let barrier = std::sync::Arc::new(tokio::sync::Barrier::new(2));
 
     let pool_ws = pool.clone();
@@ -1175,17 +1280,71 @@ async fn fdp16_db_concurrent_ws_rest_duplicate_race_exactly_one_wins() -> Result
     let rest_inserted = rest_result.expect("rest task must not panic")?;
 
     assert!(
-        ws_inserted != rest_inserted,
-        "FDP16_DB: exactly one of the two concurrent inserts must win \
-         (ws={ws_inserted}, rest={rest_inserted})"
+        ws_inserted && rest_inserted,
+        "FDP16_DB2: under -02 BOTH concurrent inserts must succeed \
+         (ws={ws_inserted}, rest={rest_inserted}) — no economic suppression at insert time"
     );
 
     assert_eq!(
         partial_fill_row_count(&pool, run_id, internal_order_id).await?,
-        1,
-        "FDP16_DB: exactly one partial_fill row must exist after the race"
+        2,
+        "FDP16_DB2: both rows must persist as durable evidence after the race"
+    );
+
+    let rows = mqk_db::inbox_load_all_for_run(&pool, run_id).await?;
+    let order = replay_rows_with_watermark(&rows, internal_order_id, 10);
+    assert_eq!(
+        order.filled_qty, 6,
+        "FDP16_DB2: replaying the raced insert result must still apply exactly once"
     );
 
     cleanup_run(&pool, run_id).await?;
     Ok(())
+}
+
+/// FDP17_NEG: negative control. Replaying the SAME two durable rows
+/// (WS + REST duplicate of one physical fill) through the OLD mechanism —
+/// plain `OmsOrder::apply` (pure event_id dedup, no cum_qty_after) — DOES
+/// double-apply, because the two rows carry different economic_event_id
+/// values by construction (WS has none, REST has `broker_fill_id`). This is
+/// the direct proof that `apply_with_watermark` is load-bearing: remove it
+/// (fall back to `apply`) and the exact scenario FDP09_DB2/FDP10_DB2 prove
+/// fixed reproduces the pre-fix double-apply bug.
+///
+/// No DB required — this isolates the OMS/economic-identity primitive that
+/// -01's bug and -02's fix both ultimately live or die on.
+#[test]
+fn fdp17_neg_without_watermark_the_cross_lane_duplicate_double_applies() {
+    let ws_delta = 6;
+    let rest_delta = 6; // same physical fill, so REST reports the same delta
+    let ws_event_id: Option<&str> = None; // WS never carries broker_fill_id
+    let rest_event_id = Some("20260520104152674::fdp17-exec"); // REST does
+
+    let mut order = OmsOrder::new("fdp17-order-aapl", "AAPL", 20);
+
+    // WS delivery.
+    let _ = order.apply(
+        &OmsEvent::PartialFill {
+            delta_qty: ws_delta,
+        },
+        ws_event_id.or(Some("alpaca:uuid-fdp17:partial_fill:ws")),
+    );
+    assert_eq!(order.filled_qty, 6);
+
+    // REST redelivery of the SAME physical fill: different message_id AND
+    // different economic_event_id (broker_fill_id vs broker_message_id) —
+    // pure event_id dedup has nothing to match against.
+    let _ = order.apply(
+        &OmsEvent::PartialFill {
+            delta_qty: rest_delta,
+        },
+        rest_event_id,
+    );
+
+    assert_eq!(
+        order.filled_qty, 12,
+        "FDP17_NEG: without the cum_qty_after watermark, the cross-lane duplicate DOES \
+         double-apply (6+6=12) — this is the exact -01 bug reproduced, proving \
+         apply_with_watermark (not incidental test setup) is what FDP09_DB2/FDP10_DB2 rely on"
+    );
 }

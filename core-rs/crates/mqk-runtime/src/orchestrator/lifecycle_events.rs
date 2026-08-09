@@ -189,6 +189,7 @@ mod tests {
                 delta_qty: 5,
                 price_micros: 100_000_000,
                 fee_micros: 0,
+                cum_qty_after: None,
             },
             BrokerEvent::Reject {
                 broker_message_id: "m4".to_string(),

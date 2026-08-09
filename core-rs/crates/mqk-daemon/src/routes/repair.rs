@@ -1880,6 +1880,18 @@ pub(crate) async fn repair_halted_run_fill_rest_recovery(
             delta_qty,
             price_micros,
             fee_micros: 0,
+            // This is the operator-gated, single-order, confirmation-required
+            // halted-run repair path (requires dry_run=false and an explicit
+            // "APPLY_REST_FILL_RECOVERY" confirmation string) — it does not
+            // run against a live WS lane and never batches multiple fills
+            // per invocation, so it has no cheap access to a
+            // point-in-time-correct broker cumulative watermark here (no
+            // `fetch_order` call precedes this). Correctness for this
+            // narrower, gated path continues to rest on its own explicit
+            // operator confirmation plus the still-transport-deduped inbox
+            // insert, not on the OMS apply-layer watermark introduced by
+            // PAPER-SOAK-PARTIAL-FILL-DEDUP-02.
+            cum_qty_after: None,
         },
         _ => mqk_execution::BrokerEvent::Fill {
             broker_message_id: stable_msg_id.clone(),

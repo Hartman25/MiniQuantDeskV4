@@ -127,17 +127,40 @@ pub async fn inbox_insert_deduped(
 
 /// Insert a broker message/fill into oms_inbox with explicit identity fields.
 ///
-/// Dedupe rule for every `event_kind` except `"partial_fill"` is transport-only
-/// and explicit:
+/// Dedupe rule for every `event_kind`, including `"partial_fill"`, is
+/// transport-only and explicit:
 /// - conflict key: `(run_id, broker_message_id)`
 /// - `broker_fill_id` is optional economic identity metadata and does NOT
 ///   participate in inbox insertion dedupe.
 ///
-/// `event_kind == "partial_fill"` is dispatched to
-/// [`inbox_insert_partial_fill_deduped`], which additionally guards against
-/// the same economic partial fill arriving on both the WS and REST inbound
-/// lanes under two different `broker_message_id`/`broker_fill_id` values
-/// (PAPER-SOAK-PARTIAL-FILL-DEDUP-01).
+/// # PAPER-SOAK-PARTIAL-FILL-DEDUP-02: why `partial_fill` has no special case here
+///
+/// PAPER-SOAK-PARTIAL-FILL-DEDUP-01 previously special-cased `partial_fill`
+/// here with an economic-match heuristic (same order + same delta_qty + same
+/// price_micros + broker timestamps within a fixed window). That heuristic
+/// was rejected on independent review: two *legitimate* partial fills for
+/// the same order can genuinely share quantity, price, and near-simultaneous
+/// timestamps (e.g. two 10-share fills at the same price a second apart),
+/// and a timing heuristic cannot tell that case apart from the same physical
+/// fill re-delivered over the WS and REST inbound lanes with two different
+/// transport identities — collapsing the former is exactly the failure mode
+/// PATCH-01 was meant to prevent for the latter.
+///
+/// This insertion layer therefore always inserts every distinct
+/// `(run_id, broker_message_id)` row for `partial_fill`, exactly like every
+/// other event kind — full raw evidence from both lanes is preserved, never
+/// silently collapsed. Economic dedup for the case PATCH-01 was chasing (the
+/// same physical partial fill delivered on both lanes) now happens at the
+/// OMS *apply* layer instead: `mqk_execution::oms::state_machine::OmsOrder::
+/// apply_with_watermark` recognizes a cross-lane duplicate by comparing the
+/// broker-authoritative cumulative-filled-quantity-after-this-event
+/// (`BrokerEvent::PartialFill::cum_qty_after`, populated by
+/// `mqk-broker-alpaca` from Alpaca's own `order.filled_qty` on both lanes)
+/// against the order's current `filled_qty` — an exact identity, not a
+/// heuristic, and one that can never collapse two genuinely distinct fills
+/// (cumulative filled quantity strictly increases with every real
+/// execution, so two distinct fills always carry two distinct watermark
+/// values regardless of how close in time or identical in size they are).
 #[allow(clippy::too_many_arguments)]
 pub async fn inbox_insert_deduped_with_identity(
     pool: &PgPool,
@@ -151,20 +174,6 @@ pub async fn inbox_insert_deduped_with_identity(
     event_ts_ms: i64,
     received_at: DateTime<Utc>,
 ) -> Result<bool> {
-    if event_kind == "partial_fill" {
-        return inbox_insert_partial_fill_deduped(
-            pool,
-            run_id,
-            broker_message_id,
-            broker_fill_id,
-            internal_order_id,
-            broker_order_id,
-            event_json,
-            event_ts_ms,
-            received_at,
-        )
-        .await;
-    }
     inbox_insert_transport_only_deduped(
         pool,
         run_id,
@@ -182,10 +191,11 @@ pub async fn inbox_insert_deduped_with_identity(
 
 /// Transport-identity-only insert: conflict key is `(run_id, broker_message_id)`
 /// (plus whichever other unique indexes exist on `oms_inbox`, e.g.
-/// `uq_inbox_run_order_single_fill` for terminal fills). Used directly for every
-/// `event_kind` except `"partial_fill"`, and as the fallback path for a
-/// `partial_fill` payload that is missing the fields needed for economic
-/// matching (see [`inbox_insert_partial_fill_deduped`]).
+/// `uq_inbox_run_order_single_fill` for terminal fills). Used directly for
+/// every `event_kind`, including `"partial_fill"` (see
+/// PAPER-SOAK-PARTIAL-FILL-DEDUP-02 module-level rationale on
+/// [`inbox_insert_deduped_with_identity`] for why `partial_fill` no longer
+/// gets special-cased here).
 #[allow(clippy::too_many_arguments)]
 async fn inbox_insert_transport_only_deduped(
     pool: &PgPool,
@@ -245,187 +255,6 @@ async fn inbox_insert_transport_only_deduped(
         }
 
         Err(e) => Err(e).context("inbox_insert_deduped_with_identity failed"),
-    }
-}
-
-/// PAPER-SOAK-PARTIAL-FILL-DEDUP-01: economic-identity dedupe for `partial_fill`
-/// inbox rows.
-///
-/// # Root cause
-///
-/// Alpaca delivers the same economic partial fill on two inbound lanes with no
-/// shared identity:
-/// - WS (`normalize_trade_update`): `broker_fill_id = None` (the live wire
-///   payload carries no such field), `broker_message_id` timestamp at
-///   nanosecond precision.
-/// - REST (`activity_to_trade_update`): `broker_fill_id = Some(activity.id)`,
-///   `broker_message_id` timestamp taken from `activity.transaction_time`
-///   (lower precision, and not guaranteed to match the WS instant exactly).
-///
-/// Because `event_kind = 'partial_fill'` is deliberately excluded from the
-/// `uq_inbox_run_order_single_fill` constraint added in migration 0040 (a
-/// single order legitimately produces many partial-fill rows), and because
-/// `uq_inbox_run_broker_fill_id` only fires when both rows carry a non-null
-/// `broker_fill_id`, neither existing unique index catches this case. Both
-/// rows insert, both apply (the OMS `applied_event_ids` guard also can't
-/// catch it — it dedupes on `broker_fill_id.unwrap_or(broker_message_id)`,
-/// which differs by lane for the same physical fill) — the same pattern
-/// already fixed for terminal fills by migration 0040, left open there for
-/// partial fills.
-///
-/// # Fix
-///
-/// Neither lane carries a fill identifier the other lane also carries, so
-/// economic identity is reconstructed from fields both lanes *do* carry:
-/// `internal_order_id`, `delta_qty`, `price_micros`, and `event_ts_ms`. A
-/// candidate partial-fill row is treated as a duplicate of an existing row for
-/// the same order when quantity and price match exactly and the two events'
-/// broker-reported timestamps fall within
-/// [`PARTIAL_FILL_DEDUPE_WINDOW_MS`] of each other — wide enough to cover the
-/// sub-second WS/REST precision skew documented in migration 0040, narrow
-/// enough that two genuinely distinct same-size/same-price partial fills
-/// separated by more than a few seconds still both apply (required: "two
-/// legitimate sequential partial fills for the same order are both applied
-/// once").
-///
-/// The whole check-then-insert runs inside one transaction serialized by a
-/// Postgres advisory transaction lock keyed on `(run_id, internal_order_id)`,
-/// so a genuinely concurrent WS+REST delivery of the same partial fill cannot
-/// have both callers pass the "no existing match" check before either commits.
-///
-/// A `partial_fill` payload missing `delta_qty` or `price_micros` (malformed —
-/// should not occur from `normalize_trade_update`/`activity_to_trade_update`)
-/// falls back to transport-only dedupe rather than fabricating a match window
-/// from absent data.
-pub const PARTIAL_FILL_DEDUPE_WINDOW_MS: i64 = 3_000;
-
-#[allow(clippy::too_many_arguments)]
-async fn inbox_insert_partial_fill_deduped(
-    pool: &PgPool,
-    run_id: Uuid,
-    broker_message_id: &str,
-    broker_fill_id: Option<&str>,
-    internal_order_id: &str,
-    broker_order_id: &str,
-    event_json: &serde_json::Value,
-    event_ts_ms: i64,
-    received_at: DateTime<Utc>,
-) -> Result<bool> {
-    let delta_qty = event_json.get("delta_qty").and_then(|v| v.as_i64());
-    let price_micros = event_json.get("price_micros").and_then(|v| v.as_i64());
-
-    let (delta_qty, price_micros) = match (delta_qty, price_micros) {
-        (Some(d), Some(p)) => (d, p),
-        _ => {
-            return inbox_insert_transport_only_deduped(
-                pool,
-                run_id,
-                broker_message_id,
-                broker_fill_id,
-                internal_order_id,
-                broker_order_id,
-                "partial_fill",
-                event_json,
-                event_ts_ms,
-                received_at,
-            )
-            .await;
-        }
-    };
-
-    let mut tx = pool
-        .begin()
-        .await
-        .context("inbox_insert_partial_fill_deduped: begin tx failed")?;
-
-    // Serialize concurrent partial-fill economic-match checks for this order
-    // so a racing WS+REST delivery of the same partial fill cannot both pass
-    // the "no existing match" check before either commits. Held for the
-    // duration of the transaction; released automatically on commit/rollback.
-    sqlx::query("select pg_advisory_xact_lock(hashtextextended($1, 0))")
-        .bind(format!("partial_fill:{run_id}:{internal_order_id}"))
-        .execute(&mut *tx)
-        .await
-        .context("inbox_insert_partial_fill_deduped: advisory lock failed")?;
-
-    let existing: Option<i64> = sqlx::query_scalar(
-        r#"
-        select inbox_id
-          from oms_inbox
-         where run_id = $1
-           and internal_order_id = $2
-           and event_kind = 'partial_fill'
-           and (message_json->>'delta_qty')::bigint = $3
-           and (message_json->>'price_micros')::bigint = $4
-           and abs(event_ts_ms - $5) <= $6
-         limit 1
-        "#,
-    )
-    .bind(run_id)
-    .bind(internal_order_id)
-    .bind(delta_qty)
-    .bind(price_micros)
-    .bind(event_ts_ms)
-    .bind(PARTIAL_FILL_DEDUPE_WINDOW_MS)
-    .fetch_optional(&mut *tx)
-    .await
-    .context("inbox_insert_partial_fill_deduped: duplicate lookup failed")?;
-
-    if existing.is_some() {
-        tx.rollback()
-            .await
-            .context("inbox_insert_partial_fill_deduped: rollback (duplicate) failed")?;
-        return Ok(false);
-    }
-
-    let insert_result = sqlx::query(
-        r#"
-        insert into oms_inbox (
-            run_id,
-            broker_message_id,
-            broker_fill_id,
-            internal_order_id,
-            broker_order_id,
-            event_kind,
-            message_json,
-            event_ts_ms,
-            received_at_utc,
-            applied_at_utc
-        )
-        values ($1, $2, $3, $4, $5, 'partial_fill', $6, $7, $8, null)
-        "#,
-    )
-    .bind(run_id)
-    .bind(broker_message_id)
-    .bind(broker_fill_id)
-    .bind(internal_order_id)
-    .bind(broker_order_id)
-    .bind(event_json)
-    .bind(event_ts_ms)
-    .bind(received_at)
-    .execute(&mut *tx)
-    .await;
-
-    match insert_result {
-        Ok(done) if done.rows_affected() == 1 => {
-            tx.commit()
-                .await
-                .context("inbox_insert_partial_fill_deduped: commit failed")?;
-            Ok(true)
-        }
-        Ok(_) => {
-            tx.rollback()
-                .await
-                .context("inbox_insert_partial_fill_deduped: rollback (no rows) failed")?;
-            Ok(false)
-        }
-        Err(sqlx::Error::Database(db_err)) if db_err.code().as_deref() == Some("23505") => {
-            tx.rollback()
-                .await
-                .context("inbox_insert_partial_fill_deduped: rollback (conflict) failed")?;
-            Ok(false)
-        }
-        Err(e) => Err(e).context("inbox_insert_partial_fill_deduped: insert failed"),
     }
 }
 

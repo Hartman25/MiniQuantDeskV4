@@ -73,6 +73,20 @@ fn activity_json(id: &str, order_id: &str, ts: &str) -> serde_json::Value {
     })
 }
 
+/// Build a PARTIAL_FILL activity JSON object with an explicit `qty`.
+fn partial_fill_activity_json(id: &str, order_id: &str, ts: &str, qty: &str) -> serde_json::Value {
+    serde_json::json!({
+        "id": id,
+        "activity_type": "PARTIAL_FILL",
+        "order_id": order_id,
+        "transaction_time": ts,
+        "price": "150.00",
+        "qty": qty,
+        "side": "buy",
+        "symbol": "AAPL"
+    })
+}
+
 /// Build an order JSON object for GET /v2/orders/{id}.
 fn order_json(id: &str) -> serde_json::Value {
     serde_json::json!({
@@ -82,6 +96,18 @@ fn order_json(id: &str) -> serde_json::Value {
         "side": "buy",
         "qty": "100",
         "filled_qty": "1"
+    })
+}
+
+/// Build an order JSON object with an explicit current `filled_qty`.
+fn order_json_with_filled(id: &str, filled_qty: &str) -> serde_json::Value {
+    serde_json::json!({
+        "id": id,
+        "client_order_id": "internal-order-1",
+        "symbol": "AAPL",
+        "side": "buy",
+        "qty": "100",
+        "filled_qty": filled_qty
     })
 }
 
@@ -514,4 +540,126 @@ fn p05_no_progress_full_page_fails_closed_with_transient() {
         }
         other => panic!("P05: expected Transient error, got {other:?}"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// P06/P07 — PAPER-SOAK-PARTIAL-FILL-DEDUP-02: cum_qty_after reconstruction
+// ---------------------------------------------------------------------------
+
+#[test]
+fn p06_single_partial_fill_in_page_cum_qty_after_matches_current_filled_qty() {
+    // Unambiguous case: exactly one PARTIAL_FILL activity for this order in
+    // the page, so "current" filled_qty from GET /v2/orders IS "as of this
+    // event" -- no reconstruction needed, value passes through directly.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    std::thread::spawn(move || {
+        {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = read_request_path(&mut stream);
+            let acts = serde_json::json!([partial_fill_activity_json(
+                "act-single-1",
+                "order-single",
+                "2024-01-15T10:30:00Z",
+                "10"
+            )]);
+            write_json_response(&mut stream, &acts.to_string());
+        }
+        {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = read_request_path(&mut stream);
+            write_json_response(
+                &mut stream,
+                &order_json_with_filled("order-single", "10").to_string(),
+            );
+        }
+    });
+
+    let adapter = adapter_for(port);
+    let cursor = live_cursor_no_prior();
+    let token = BrokerInvokeToken::for_test();
+
+    let (events, _new_cursor) = adapter
+        .fetch_events(Some(&cursor), &token)
+        .expect("P06: single partial fill must succeed");
+
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        events[0].cum_qty_after(),
+        Some(10),
+        "P06: unambiguous single-activity page must pass current filled_qty through as cum_qty_after"
+    );
+}
+
+#[test]
+fn p07_two_partial_fills_same_order_same_page_reconstruct_distinct_cumulative() {
+    // Ambiguous-by-default case: TWO PARTIAL_FILL activities for the SAME
+    // order in ONE page. A naive "reuse current filled_qty for every
+    // activity" implementation would wrongly attach the SAME (final) total
+    // to both. The reconstruction must instead recover each activity's own
+    // true point-in-time cumulative: first=10, second=25 (10+15), not both=25.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    std::thread::spawn(move || {
+        {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = read_request_path(&mut stream);
+            let acts = serde_json::json!([
+                partial_fill_activity_json(
+                    "act-multi-1",
+                    "order-multi",
+                    "2024-01-15T10:30:00Z",
+                    "10"
+                ),
+                partial_fill_activity_json(
+                    "act-multi-2",
+                    "order-multi",
+                    "2024-01-15T10:30:05Z",
+                    "15"
+                ),
+            ]);
+            write_json_response(&mut stream, &acts.to_string());
+        }
+        // One GET /v2/orders/{id} call per activity; current total is 25
+        // (10 + 15) both times, since nothing else has landed since.
+        for _ in 0..2 {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = read_request_path(&mut stream);
+            write_json_response(
+                &mut stream,
+                &order_json_with_filled("order-multi", "25").to_string(),
+            );
+        }
+    });
+
+    let adapter = adapter_for(port);
+    let cursor = live_cursor_no_prior();
+    let token = BrokerInvokeToken::for_test();
+
+    let (events, _new_cursor) = adapter
+        .fetch_events(Some(&cursor), &token)
+        .expect("P07: two partial fills in one page must succeed");
+
+    assert_eq!(events.len(), 2);
+    assert_eq!(
+        events[0].cum_qty_after(),
+        Some(10),
+        "P07: first activity's reconstructed cumulative must be 10, not the page-final 25"
+    );
+    assert_eq!(
+        events[1].cum_qty_after(),
+        Some(25),
+        "P07: second activity's reconstructed cumulative must be 25 (10+15)"
+    );
+    // Both delta_qty values must still be correct and distinct.
+    let deltas: Vec<i64> = events
+        .iter()
+        .map(|e| match e {
+            mqk_execution::BrokerEvent::PartialFill { delta_qty, .. } => *delta_qty,
+            other => panic!("expected PartialFill, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(deltas, vec![10, 15]);
 }

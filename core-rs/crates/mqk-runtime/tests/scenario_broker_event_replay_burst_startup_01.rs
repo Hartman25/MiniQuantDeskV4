@@ -75,6 +75,7 @@ fn make_partial_fill(order_id: &str, msg_id: &str, qty: i64) -> BrokerEvent {
         delta_qty: qty,
         price_micros: 500_000_000,
         fee_micros: 0,
+        cum_qty_after: None,
     }
 }
 

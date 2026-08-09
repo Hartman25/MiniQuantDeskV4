@@ -189,6 +189,93 @@ impl OmsOrder {
         event: &OmsEvent,
         event_id: Option<&str>,
     ) -> Result<(), TransitionError> {
+        self.apply_with_watermark(event, event_id, None)
+    }
+
+    /// PAPER-SOAK-PARTIAL-FILL-DEDUP-02: like [`apply`][Self::apply], but for
+    /// `PartialFill`/`Fill` events additionally accepts the broker-reported
+    /// authoritative cumulative-filled-quantity watermark for this order as
+    /// of this specific event (`BrokerEvent::cum_qty_after`), when the caller
+    /// has one.
+    ///
+    /// # Why this exists
+    ///
+    /// `event_id`-based dedup (the pre-existing mechanism, still the sole
+    /// guard when `cum_qty_after` is `None`) cannot detect a duplicate that
+    /// arrives with a *different* economic event id — which is exactly what
+    /// happens when the same physical partial fill is delivered once over
+    /// the WS inbound lane and once over the REST gap-recovery lane: each
+    /// lane derives a different id for the same execution (see
+    /// `mqk_db::inbox` module docs). `cum_qty_after` is the one signal both
+    /// lanes can report with the *same* true value for the *same* physical
+    /// execution, because it names a point in the order's broker-side fill
+    /// history rather than a transport-specific message identity.
+    ///
+    /// # Semantics
+    ///
+    /// - `cum_qty_after` is `Some(target)` and `target <= self.filled_qty`:
+    ///   this event's economic effect is already reflected in the order's
+    ///   state (whether via `event_id` match or a prior delivery on the
+    ///   other lane) — a no-op. `event_id`, if supplied, is still recorded
+    ///   so a same-lane retry short-circuits on the cheaper id-only path.
+    /// - `cum_qty_after` is `Some(target)` and `target > self.filled_qty`:
+    ///   this is a genuine advance. The event actually applied uses the
+    ///   broker-confirmed delta `target - self.filled_qty` — the corrected,
+    ///   authoritative amount — in place of the event's own `delta_qty`,
+    ///   which guards against a mismatched/derived delta on the REST lane.
+    /// - `cum_qty_after` is `None`: behavior is byte-for-byte identical to
+    ///   `apply` today (pure `event_id` dedup). This is the path exercised
+    ///   by every existing caller and test; it is not weakened.
+    ///
+    /// Two genuinely distinct fills — even with identical `delta_qty`,
+    /// `price_micros`, and near-simultaneous timestamps — always carry
+    /// different `cum_qty_after` values (cumulative filled quantity strictly
+    /// increases with each real execution), so this mechanism can never
+    /// collapse them: no time window, no quantity/price heuristic is used.
+    ///
+    /// # Errors
+    /// Returns [`TransitionError`] for illegal transitions. Callers **MUST**
+    /// treat this as a halt condition.
+    pub fn apply_with_watermark(
+        &mut self,
+        event: &OmsEvent,
+        event_id: Option<&str>,
+        cum_qty_after: Option<i64>,
+    ) -> Result<(), TransitionError> {
+        let is_fill_event = matches!(event, OmsEvent::PartialFill { .. } | OmsEvent::Fill { .. });
+
+        // A fill event is only ever legal (either a mutating advance or a
+        // late-duplicate no-op) from these states; from Cancelled/Rejected it
+        // is a TransitionError regardless of watermark (see `do_transition`'s
+        // match arms and the C17 acceptance tests). The watermark fast path
+        // below must not bypass that: a late/duplicate fill redelivered
+        // AFTER a confirmed cancel/reject is exactly the anomaly C17 requires
+        // to halt so an operator is alerted, not a benign no-op to swallow.
+        let fill_event_is_legal_here = matches!(
+            self.state,
+            OrderState::Open
+                | OrderState::PartiallyFilled
+                | OrderState::CancelPending
+                | OrderState::ReplacePending
+                | OrderState::Filled
+        );
+
+        // Broker-authoritative watermark check: fires before the event_id
+        // check so a cross-lane duplicate (different event_id, same
+        // already-reflected cumulative quantity) is caught even though its
+        // event_id has never been seen before. Restricted to states where a
+        // fill is legal at all, so it can never mask an illegal transition.
+        if is_fill_event && fill_event_is_legal_here {
+            if let Some(target) = cum_qty_after {
+                if target <= self.filled_qty {
+                    if let Some(id) = event_id {
+                        self.applied_event_ids.insert(id.to_string());
+                    }
+                    return Ok(());
+                }
+            }
+        }
+
         // Section B — Fill Identity & Deduplication
         // Early check: if this event_id has already been applied, return a
         // silent no-op before any state mutation. This must fire before
@@ -200,7 +287,28 @@ impl OmsOrder {
             }
         }
 
-        self.do_transition(event)?;
+        // When the watermark proves a genuine advance, apply the
+        // broker-confirmed delta rather than the event's own delta_qty —
+        // this is the authoritative amount for this order regardless of
+        // what the originating lane derived it as.
+        let corrected;
+        let effective_event = match (event, cum_qty_after) {
+            (OmsEvent::PartialFill { .. }, Some(target)) => {
+                corrected = OmsEvent::PartialFill {
+                    delta_qty: target - self.filled_qty,
+                };
+                &corrected
+            }
+            (OmsEvent::Fill { .. }, Some(target)) => {
+                corrected = OmsEvent::Fill {
+                    delta_qty: target - self.filled_qty,
+                };
+                &corrected
+            }
+            _ => event,
+        };
+
+        self.do_transition(effective_event)?;
 
         // Record identity only after a successful transition. Rejected events
         // (TransitionError propagated via `?` above) never reach this line,
@@ -1305,5 +1413,258 @@ mod tests {
             .unwrap();
         assert_eq!(o.state, OrderState::Filled);
         assert_eq!(o.filled_qty, 5);
+    }
+
+    // -----------------------------------------------------------------------
+    // PAPER-SOAK-PARTIAL-FILL-DEDUP-02: apply_with_watermark
+    // -----------------------------------------------------------------------
+
+    /// Cross-lane duplicate: the SAME physical fill arrives twice with two
+    /// DIFFERENT event ids (simulating WS then REST) but the SAME
+    /// cum_qty_after. The second delivery must be a no-op even though its
+    /// event_id has never been seen before — this is precisely the case
+    /// `event_id`-only dedup (plain `apply`) cannot catch.
+    #[test]
+    fn watermark_cross_lane_duplicate_with_different_event_ids_is_noop() {
+        let mut o = OmsOrder::new("ord-wm", "AAPL", 100);
+        o.apply_with_watermark(
+            &OmsEvent::PartialFill { delta_qty: 10 },
+            Some("ws-msg-1"),
+            Some(10),
+        )
+        .unwrap();
+        assert_eq!(o.filled_qty, 10);
+
+        // REST redelivery: different event_id, same broker-confirmed cum_qty_after.
+        o.apply_with_watermark(
+            &OmsEvent::PartialFill { delta_qty: 10 },
+            Some("rest-activity-xyz"),
+            Some(10),
+        )
+        .unwrap();
+        assert_eq!(
+            o.filled_qty, 10,
+            "cross-lane duplicate with matching cum_qty_after must not double-apply"
+        );
+        assert_eq!(o.state, OrderState::PartiallyFilled);
+    }
+
+    /// Two legitimate, distinct partial fills with IDENTICAL delta_qty and
+    /// price (only distinguishable by cum_qty_after) must BOTH apply. No
+    /// time window is involved — this is the mandatory acceptance case the
+    /// prior heuristic (PARTIAL_FILL_DEDUPE_WINDOW_MS) could wrongly collapse.
+    #[test]
+    fn watermark_two_distinct_same_size_fills_both_apply() {
+        let mut o = OmsOrder::new("ord-wm2", "AAPL", 100);
+        o.apply_with_watermark(
+            &OmsEvent::PartialFill { delta_qty: 10 },
+            Some("f1"),
+            Some(10),
+        )
+        .unwrap();
+        assert_eq!(o.filled_qty, 10);
+
+        // Second, genuinely distinct fill: same delta_qty as the first, but
+        // cum_qty_after proves it is a new execution (10 -> 20, not 0 -> 10).
+        o.apply_with_watermark(
+            &OmsEvent::PartialFill { delta_qty: 10 },
+            Some("f2"),
+            Some(20),
+        )
+        .unwrap();
+        assert_eq!(
+            o.filled_qty, 20,
+            "two distinct fills with matching qty/price must both apply"
+        );
+    }
+
+    /// When cum_qty_after proves a genuine advance, the applied delta is the
+    /// broker-confirmed correction (target - filled_qty), not the event's own
+    /// (possibly stale/mismatched) delta_qty.
+    #[test]
+    fn watermark_uses_corrected_delta_not_event_delta_qty() {
+        let mut o = OmsOrder::new("ord-wm3", "AAPL", 100);
+        o.apply_with_watermark(
+            &OmsEvent::PartialFill { delta_qty: 10 },
+            Some("f1"),
+            Some(10),
+        )
+        .unwrap();
+        assert_eq!(o.filled_qty, 10);
+
+        // Event claims delta_qty=999 (wrong/stale), but cum_qty_after=30 is
+        // authoritative -> corrected delta is 30-10=20.
+        o.apply_with_watermark(
+            &OmsEvent::PartialFill { delta_qty: 999 },
+            Some("f2"),
+            Some(30),
+        )
+        .unwrap();
+        assert_eq!(
+            o.filled_qty, 30,
+            "applied quantity must follow cum_qty_after, not the event's own delta_qty"
+        );
+    }
+
+    /// cum_qty_after == None behaves byte-for-byte like plain `apply` (pure
+    /// event_id dedup) — confirms the fallback path is unweakened.
+    #[test]
+    fn watermark_none_falls_back_to_event_id_dedup_only() {
+        let mut o = OmsOrder::new("ord-wm4", "AAPL", 100);
+        o.apply_with_watermark(&OmsEvent::PartialFill { delta_qty: 10 }, Some("f1"), None)
+            .unwrap();
+        assert_eq!(o.filled_qty, 10);
+
+        // Different event_id, no cum_qty_after -> cannot be recognized as a
+        // duplicate, so (as with plain `apply` today) it applies again.
+        o.apply_with_watermark(&OmsEvent::PartialFill { delta_qty: 10 }, Some("f2"), None)
+            .unwrap();
+        assert_eq!(o.filled_qty, 20);
+
+        // Same event_id -> id-based dedup still short-circuits.
+        o.apply_with_watermark(&OmsEvent::PartialFill { delta_qty: 10 }, Some("f2"), None)
+            .unwrap();
+        assert_eq!(o.filled_qty, 20, "same event_id retry must remain a no-op");
+    }
+
+    /// A watermark-proven duplicate on a terminal Fill is also a no-op, and
+    /// does not disturb the Filled state.
+    #[test]
+    fn watermark_duplicate_terminal_fill_is_noop() {
+        let mut o = OmsOrder::new("ord-wm5", "AAPL", 10);
+        o.apply_with_watermark(&OmsEvent::Fill { delta_qty: 10 }, Some("f1"), Some(10))
+            .unwrap();
+        assert_eq!(o.state, OrderState::Filled);
+        assert_eq!(o.filled_qty, 10);
+
+        o.apply_with_watermark(&OmsEvent::Fill { delta_qty: 10 }, Some("f2"), Some(10))
+            .unwrap();
+        assert_eq!(o.state, OrderState::Filled);
+        assert_eq!(o.filled_qty, 10);
+    }
+
+    /// Concurrent-arrival order independence: whichever lane's row is
+    /// processed FIRST in canonical apply order wins the real application;
+    /// the second is always a no-op regardless of which lane it came from
+    /// (proves A1 vs A2 symmetry at the OMS layer).
+    #[test]
+    fn watermark_apply_order_symmetric_rest_then_ws() {
+        let mut o = OmsOrder::new("ord-wm6", "AAPL", 100);
+        // REST processed first this time.
+        o.apply_with_watermark(
+            &OmsEvent::PartialFill { delta_qty: 10 },
+            Some("rest-activity-xyz"),
+            Some(10),
+        )
+        .unwrap();
+        assert_eq!(o.filled_qty, 10);
+        // WS redelivery second.
+        o.apply_with_watermark(
+            &OmsEvent::PartialFill { delta_qty: 10 },
+            Some("ws-msg-1"),
+            Some(10),
+        )
+        .unwrap();
+        assert_eq!(
+            o.filled_qty, 10,
+            "REST-then-WS duplicate must not double-apply"
+        );
+    }
+
+    /// Self-review regression: a watermark-carrying duplicate fill arriving
+    /// AFTER a confirmed cancel must still halt (TransitionError), exactly
+    /// as C17 (`c17_partial_fill_after_cancel_ack_is_transition_error`)
+    /// requires for the no-watermark path. The watermark fast path exists to
+    /// recognize benign cross-lane duplicates on a still-live order, not to
+    /// swallow a late fill redelivered after the order's lifecycle already
+    /// concluded — that anomaly must keep reaching an operator, not become a
+    /// silent no-op just because its cum_qty_after happens to already be
+    /// reflected in filled_qty.
+    #[test]
+    fn watermark_duplicate_after_cancel_ack_is_still_transition_error() {
+        let mut o = OmsOrder::new("ord-wm7", "AAPL", 100);
+        o.apply_with_watermark(
+            &OmsEvent::PartialFill { delta_qty: 40 },
+            Some("f1"),
+            Some(40),
+        )
+        .unwrap();
+        o.apply_with_watermark(&OmsEvent::CancelRequest, Some("c1"), None)
+            .unwrap();
+        o.apply_with_watermark(&OmsEvent::CancelAck, Some("c2"), None)
+            .unwrap();
+        assert_eq!(o.state, OrderState::Cancelled);
+        assert_eq!(o.filled_qty, 40);
+
+        // Cross-lane duplicate of the SAME already-applied 40-share fill,
+        // now arriving after the cancel was confirmed. cum_qty_after=40 is
+        // <= filled_qty=40 (the watermark condition that is a benign no-op
+        // on a LIVE order) but the order is Cancelled — must still error.
+        let err = o
+            .apply_with_watermark(
+                &OmsEvent::PartialFill { delta_qty: 40 },
+                Some("rest-late-dup"),
+                Some(40),
+            )
+            .unwrap_err();
+        assert_eq!(err.from, OrderState::Cancelled);
+        assert_eq!(
+            o.state,
+            OrderState::Cancelled,
+            "state must remain Cancelled, not silently swallowed"
+        );
+        assert_eq!(o.filled_qty, 40, "filled_qty must not change");
+    }
+
+    /// A7 (MANDATORY): concurrent WS + REST delivery of the SAME physical
+    /// partial fill, racing on two real OS threads synchronized with a
+    /// `std::sync::Barrier` (not a sleep), must produce exactly one economic
+    /// application. This proves `apply_with_watermark` is safe when both
+    /// deliveries reach the shared order state at genuinely the same instant
+    /// — the harder case than sequential delivery, since without external
+    /// serialization both threads could observe `filled_qty` pre-advance
+    /// simultaneously.
+    ///
+    /// The order is wrapped in `Mutex` because `OmsOrder::apply_with_watermark`
+    /// takes `&mut self` — this mirrors production, where the canonical apply
+    /// queue processes one order's events under a single lock
+    /// (`oms_orders: &mut BTreeMap<...>`) rather than truly lock-free
+    /// concurrent mutation; the Barrier forces both threads to attempt entry
+    /// at the same instant so whichever wins the lock is not deterministic,
+    /// proving the watermark — not favorable scheduling — is what prevents
+    /// the double-apply.
+    #[test]
+    fn a7_concurrent_ws_and_rest_duplicate_applies_exactly_once() {
+        use std::sync::{Arc, Barrier, Mutex};
+
+        let order = Arc::new(Mutex::new(OmsOrder::new("ord-a7", "AAPL", 100)));
+        let barrier = Arc::new(Barrier::new(2));
+
+        let run = |order: Arc<Mutex<OmsOrder>>, barrier: Arc<Barrier>, event_id: &'static str| {
+            std::thread::spawn(move || {
+                barrier.wait();
+                let mut guard = order.lock().unwrap();
+                guard
+                    .apply_with_watermark(
+                        &OmsEvent::PartialFill { delta_qty: 10 },
+                        Some(event_id),
+                        Some(10),
+                    )
+                    .unwrap();
+            })
+        };
+
+        let ws_handle = run(order.clone(), barrier.clone(), "ws-msg-1");
+        let rest_handle = run(order.clone(), barrier.clone(), "rest-activity-xyz");
+
+        ws_handle.join().unwrap();
+        rest_handle.join().unwrap();
+
+        let final_order = order.lock().unwrap();
+        assert_eq!(
+            final_order.filled_qty, 10,
+            "A7: concurrent WS+REST delivery of the same physical fill must apply exactly once, \
+             not 0 (lost) or 20 (double-applied)"
+        );
     }
 }

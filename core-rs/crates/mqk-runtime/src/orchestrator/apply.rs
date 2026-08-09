@@ -207,8 +207,15 @@ pub(super) fn apply_fill_step(
         Some(order) => {
             let pre_qty = order.filled_qty;
             let economic_event_id = event.broker_fill_id().unwrap_or(msg_id);
+            // PAPER-SOAK-PARTIAL-FILL-DEDUP-02: pass the broker-authoritative
+            // cumulative watermark (when the adapter supplied one) so a
+            // cross-lane duplicate — same physical fill, different
+            // economic_event_id per lane — is recognized as already-applied
+            // even though its event_id has never been seen before. `None`
+            // (paper broker, or an adapter that can't establish the value
+            // exactly) reproduces today's pure event-id dedup unchanged.
             order
-                .apply(&oms_event, Some(economic_event_id))
+                .apply_with_watermark(&oms_event, Some(economic_event_id), event.cum_qty_after())
                 .map_err(|e| anyhow!("OMS transition error for '{}': {}", internal_id, e))?;
             // No-op detection: if this is a fill event and filled_qty has not
             // advanced, OMS applied a silent no-op (duplicate event_id or fill

@@ -72,6 +72,7 @@ async fn out_of_order_broker_delivery_uses_real_ordering_truth() -> anyhow::Resu
             delta_qty: 3,
             price_micros: 200_000_000,
             fee_micros: 0,
+            cum_qty_after: None,
         },
         BrokerEvent::PartialFill {
             broker_message_id: "pf-1".to_string(),
@@ -83,6 +84,7 @@ async fn out_of_order_broker_delivery_uses_real_ordering_truth() -> anyhow::Resu
             delta_qty: 1,
             price_micros: 198_000_000,
             fee_micros: 0,
+            cum_qty_after: None,
         },
         BrokerEvent::PartialFill {
             broker_message_id: "pf-2".to_string(),
@@ -94,6 +96,7 @@ async fn out_of_order_broker_delivery_uses_real_ordering_truth() -> anyhow::Resu
             delta_qty: 2,
             price_micros: 199_000_000,
             fee_micros: 0,
+            cum_qty_after: None,
         },
     ];
 

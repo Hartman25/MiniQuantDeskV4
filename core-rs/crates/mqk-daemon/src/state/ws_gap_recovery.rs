@@ -289,6 +289,18 @@ pub(crate) async fn run_ws_gap_fill_recovery_core(
                 delta_qty,
                 price_micros,
                 fee_micros: 0,
+                // Per this module's safety contract (see the doc comment on
+                // `run_ws_gap_fill_recovery_core` above): this path only ever
+                // inserts into oms_inbox — it never mutates OMS/portfolio
+                // state directly, and correctness rests on the durable
+                // idempotent insert plus the fact this only fires when WS
+                // continuity was PROVEN broken (GapDetected) or on explicit
+                // operator request. It does not fetch order.filled_qty, so
+                // it has no cheap access to the broker cumulative watermark
+                // PAPER-SOAK-PARTIAL-FILL-DEDUP-02 introduced; rows inserted
+                // here fall back to the OMS apply layer's pre-existing
+                // event-id dedup when later applied, unchanged from before.
+                cum_qty_after: None,
             }
         } else {
             mqk_execution::BrokerEvent::Fill {

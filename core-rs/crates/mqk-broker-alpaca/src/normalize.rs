@@ -82,6 +82,29 @@ fn parse_price(raw: &str) -> Result<i64, NormalizeError> {
         raw: raw.to_string(),
     })
 }
+/// PAPER-SOAK-PARTIAL-FILL-DEDUP-02: soft-parse `order.filled_qty` (the
+/// broker-reported cumulative filled quantity at event time) into
+/// `BrokerEvent::PartialFill::cum_qty_after`.
+///
+/// Deliberately non-failing (`Option`, not `Result`): `cum_qty_after` is a
+/// secondary economic-dedup aid, not a primary economic field like
+/// `delta_qty`/`price_micros`. A malformed or absent value must degrade to
+/// `None` (falls back to event-id-only dedup at the OMS apply layer) rather
+/// than rejecting an otherwise-valid partial-fill event outright.
+///
+/// For the WS lane this always parses (Alpaca's live trade-update payload
+/// always carries `order.filled_qty`). The REST lane
+/// (`AlpacaBrokerAdapter::fetch_events`) deliberately writes an empty string
+/// here for activities whose true point-in-time cumulative cannot be
+/// established unambiguously within one polling page — this function's
+/// `None` on parse failure is what makes that "unknown" signal work.
+fn parse_cum_qty_after(raw: &str) -> Option<i64> {
+    let v: f64 = raw.parse().ok()?;
+    if !v.is_finite() || v < 0.0 {
+        return None;
+    }
+    Some(v.round() as i64)
+}
 /// Parse an Alpaca side string to Side.
 fn parse_side(s: &str) -> Result<Side, NormalizeError> {
     match s {
@@ -155,6 +178,7 @@ pub fn normalize_trade_update(ev: &AlpacaTradeUpdate) -> Result<BrokerEvent, Nor
                 delta_qty: parse_qty(fill_qty_str, "qty")?,
                 price_micros: parse_price(price_str)?,
                 fee_micros: 0,
+                cum_qty_after: parse_cum_qty_after(&ev.order.filled_qty),
             })
         }
         // ------------------------------------------------------------------
@@ -310,6 +334,60 @@ mod tests {
         u.broker_fill_id = Some("fill-econ-1".to_string());
         let ev = normalize_trade_update(&u).unwrap();
         assert_eq!(ev.broker_fill_id(), Some("fill-econ-1"));
+    }
+
+    // -----------------------------------------------------------------------
+    // PAPER-SOAK-PARTIAL-FILL-DEDUP-02: cum_qty_after
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn partial_fill_carries_cum_qty_after_from_order_filled_qty() {
+        let mut ord = order("alpaca-uuid-001", "internal-001", "AAPL", "buy", "100");
+        ord.filled_qty = "30".to_string();
+        let u = update("partial_fill", ord, Some("150.50"), Some("10"));
+        let ev = normalize_trade_update(&u).unwrap();
+        assert_eq!(ev.cum_qty_after(), Some(30));
+        match ev {
+            BrokerEvent::PartialFill { delta_qty, .. } => assert_eq!(delta_qty, 10),
+            other => panic!("expected PartialFill, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn partial_fill_cum_qty_after_none_when_filled_qty_unparseable() {
+        let mut ord = order("alpaca-uuid-001", "internal-001", "AAPL", "buy", "100");
+        ord.filled_qty = String::new(); // REST "ambiguous" sentinel
+        let u = update("partial_fill", ord, Some("150.50"), Some("10"));
+        let ev = normalize_trade_update(&u).unwrap();
+        assert_eq!(
+            ev.cum_qty_after(),
+            None,
+            "malformed/ambiguous filled_qty must degrade to None, not fail the whole event"
+        );
+        // delta_qty/price_micros must still be extracted correctly.
+        match ev {
+            BrokerEvent::PartialFill {
+                delta_qty,
+                price_micros,
+                ..
+            } => {
+                assert_eq!(delta_qty, 10);
+                assert_eq!(price_micros, 150_500_000);
+            }
+            other => panic!("expected PartialFill, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn fill_event_has_no_cum_qty_after_accessor_value() {
+        let ord = order("alpaca-uuid-001", "internal-001", "AAPL", "buy", "100");
+        let u = update("fill", ord, Some("150.50"), Some("100"));
+        let ev = normalize_trade_update(&u).unwrap();
+        assert_eq!(
+            ev.cum_qty_after(),
+            None,
+            "cum_qty_after is only ever Some for PartialFill"
+        );
     }
 
     #[test]

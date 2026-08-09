@@ -603,8 +603,78 @@ impl BrokerAdapter for AlpacaBrokerAdapter {
                 });
             }
 
+            // PAPER-SOAK-PARTIAL-FILL-DEDUP-02: reconstruct each PARTIAL_FILL
+            // activity's true point-in-time cumulative filled quantity for
+            // its order, so `normalize_trade_update` can populate
+            // `BrokerEvent::PartialFill::cum_qty_after` — the exact
+            // cross-lane economic identity the OMS apply layer uses to
+            // recognize the SAME physical fill re-delivered over the WS lane
+            // without a timing heuristic.
+            //
+            // `fetch_order` below returns the order's CURRENT total
+            // `filled_qty` ("now"), not "as of this specific historical
+            // activity". When a page contains exactly one PARTIAL_FILL
+            // activity for an order, "now" already equals "as of this
+            // event" (nothing else for that order has landed since). When a
+            // page contains several, each one's true cumulative is
+            // reconstructed by starting from `current_total - (sum of this
+            // order's PARTIAL_FILL quantities in this page)` and
+            // accumulating forward in page (ascending) order. This assumes
+            // no additional fill for that order lands between fetching this
+            // page and the `fetch_order` call below — the same narrow race
+            // window a single `fetch_order` call already had; this
+            // reconstruction is strictly more correct than treating "now" as
+            // "as of this event" unconditionally, never less.
+            let mut page_qty_sum_by_order: std::collections::HashMap<&str, i64> =
+                std::collections::HashMap::new();
             for activity in &activities {
-                let order = self.fetch_order(&activity.order_id)?;
+                if activity.activity_type == "PARTIAL_FILL" {
+                    if let Some(q) = activity
+                        .qty
+                        .as_deref()
+                        .and_then(|s| parse_broker_qty(s).ok())
+                    {
+                        *page_qty_sum_by_order
+                            .entry(activity.order_id.as_str())
+                            .or_insert(0) += q;
+                    }
+                }
+            }
+            let mut running_cum_by_order: std::collections::HashMap<String, i64> =
+                std::collections::HashMap::new();
+
+            for activity in &activities {
+                let mut order = self.fetch_order(&activity.order_id)?;
+                if activity.activity_type == "PARTIAL_FILL" {
+                    let reconstructed = activity
+                        .qty
+                        .as_deref()
+                        .and_then(|s| parse_broker_qty(s).ok())
+                        .zip(parse_broker_qty(&order.filled_qty).ok())
+                        .map(|(this_qty, current_total)| {
+                            let page_sum = *page_qty_sum_by_order
+                                .get(activity.order_id.as_str())
+                                .unwrap_or(&0);
+                            let baseline = current_total - page_sum;
+                            let running = running_cum_by_order
+                                .entry(activity.order_id.clone())
+                                .or_insert(baseline);
+                            *running += this_qty;
+                            *running
+                        });
+                    // Ambiguity guard: only trust the reconstruction when
+                    // both this activity's qty and the order's current
+                    // filled_qty parsed cleanly. Otherwise blank filled_qty
+                    // so normalize_trade_update's soft parse yields
+                    // cum_qty_after=None rather than a fabricated value —
+                    // the OMS apply layer then falls back to its pre-existing
+                    // event-id-only dedup for just this activity, exactly as
+                    // it does for adapters that never supply this field.
+                    order.filled_qty = match reconstructed {
+                        Some(v) => v.to_string(),
+                        None => String::new(),
+                    };
+                }
                 let trade_update = activity_to_trade_update(activity, &order).map_err(|e| {
                     BrokerError::Transient {
                         detail: format!("fetch_events: activity mapping error: {e}"),

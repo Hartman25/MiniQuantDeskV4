@@ -70,6 +70,27 @@ pub enum BrokerEvent {
         delta_qty: i64,
         price_micros: i64,
         fee_micros: i64,
+        /// PAPER-SOAK-PARTIAL-FILL-DEDUP-02: broker-authoritative cumulative
+        /// filled quantity for this order immediately after this specific
+        /// execution, when the adapter can establish it exactly.
+        ///
+        /// This is the one signal both the WS lane (Alpaca's live
+        /// `order.filled_qty` push, authoritative at message time) and the
+        /// REST lane (reconstructed from ordered account activities) can
+        /// produce with the SAME true value for the SAME physical execution
+        /// — unlike `broker_message_id`/`broker_fill_id`, which differ by
+        /// transport lane. The OMS apply layer
+        /// (`OmsOrder::apply_with_watermark`) uses it as an exact economic
+        /// identity: a candidate event whose `cum_qty_after` does not exceed
+        /// the order's current `filled_qty` has already been reflected and
+        /// is a no-op, regardless of which lane redelivered it.
+        ///
+        /// `None` when the adapter cannot establish this value exactly
+        /// (e.g. paper broker, or a REST page with ambiguous multi-activity
+        /// ordering for one order) — callers must fall back to `event_id`
+        /// based idempotency only, never fabricate a value.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        cum_qty_after: Option<i64>,
     },
     Fill {
         broker_message_id: String,
@@ -149,6 +170,18 @@ impl BrokerEvent {
             | Self::Reject {
                 broker_message_id, ..
             } => broker_message_id.as_str(),
+        }
+    }
+
+    /// PAPER-SOAK-PARTIAL-FILL-DEDUP-02: broker-authoritative cumulative
+    /// filled quantity immediately after this event, when known exactly.
+    ///
+    /// Only ever `Some` for `PartialFill`. See the field doc on
+    /// `PartialFill::cum_qty_after` for the full contract.
+    pub fn cum_qty_after(&self) -> Option<i64> {
+        match self {
+            Self::PartialFill { cum_qty_after, .. } => *cum_qty_after,
+            _ => None,
         }
     }
 
@@ -588,6 +621,7 @@ mod tests {
             delta_qty: 1,
             price_micros: 100_000_000,
             fee_micros: 0,
+            cum_qty_after: None,
         };
         assert_eq!(
             ev.fill_identity_strength(),

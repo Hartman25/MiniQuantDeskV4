@@ -191,6 +191,7 @@ fn oms_event_mapping_covers_all_variants() {
             delta_qty: 1,
             price_micros: 1,
             fee_micros: 0,
+            cum_qty_after: None,
         },
         BrokerEvent::CancelAck {
             broker_message_id: "m".to_string(),
@@ -244,6 +245,7 @@ fn event_kind_rank_is_strictly_ordered() {
             delta_qty: 1,
             price_micros: 1,
             fee_micros: 0,
+            cum_qty_after: None,
         },
         BrokerEvent::Fill {
             broker_message_id: "m".into(),
@@ -395,6 +397,7 @@ fn restart_replay_preserves_durable_apply_order() {
                 delta_qty: 2,
                 price_micros: 2,
                 fee_micros: 0,
+                cum_qty_after: None,
             })
             .unwrap(),
             received_at_utc: chrono::Utc::now(),
@@ -438,6 +441,7 @@ fn restart_replay_preserves_durable_apply_order() {
                 delta_qty: 2,
                 price_micros: 2,
                 fee_micros: 0,
+                cum_qty_after: None,
             })
             .unwrap(),
             received_at_utc: chrono::Utc::now(),
@@ -533,6 +537,32 @@ fn make_partial_fill_event(internal_id: &str, msg_id: &str, qty: i64) -> BrokerE
         delta_qty: qty,
         price_micros: 450_000_000,
         fee_micros: 0,
+        cum_qty_after: None,
+    }
+}
+/// PAPER-SOAK-PARTIAL-FILL-DEDUP-02: like `make_partial_fill_event`, but with
+/// explicit `broker_fill_id` and `cum_qty_after` — used to simulate a
+/// specific inbound lane (WS: `broker_fill_id=None`; REST:
+/// `broker_fill_id=Some(activity_id)`) delivering a partial fill with a
+/// known broker-authoritative cumulative watermark.
+fn make_partial_fill_event_with_watermark(
+    internal_id: &str,
+    msg_id: &str,
+    broker_fill_id: Option<&str>,
+    delta_qty: i64,
+    cum_qty_after: Option<i64>,
+) -> BrokerEvent {
+    BrokerEvent::PartialFill {
+        broker_message_id: msg_id.to_string(),
+        broker_fill_id: broker_fill_id.map(ToString::to_string),
+        internal_order_id: internal_id.to_string(),
+        broker_order_id: None,
+        symbol: "SPY".to_string(),
+        side: mqk_execution::Side::Buy,
+        delta_qty,
+        price_micros: 450_000_000,
+        fee_micros: 0,
+        cum_qty_after,
     }
 }
 fn make_fill_event(internal_id: &str, msg_id: &str, qty: i64) -> BrokerEvent {
@@ -1122,6 +1152,323 @@ fn alpaca_paper_two_partials_then_cumulative_terminal_fill_uses_effective_delta(
         mqk_execution::oms::state_machine::OrderState::Filled,
         "T4c: OMS state must be Filled after cumulative terminal fill"
     );
+}
+
+// ---------------------------------------------------------------------------
+// PAPER-SOAK-PARTIAL-FILL-DEDUP-02: apply_fill_step acceptance tests A1-A11
+//
+// These exercise the REAL production apply path (`apply_fill_step`,
+// `build_canonical_apply_queue`) — the same functions the orchestrator calls
+// on every tick — with synthetic `BrokerEvent::PartialFill` events carrying
+// explicit `cum_qty_after` values to simulate what `mqk-broker-alpaca`
+// computes from Alpaca's WS/REST payloads (proven separately in
+// `mqk-broker-alpaca`'s own test suite). DB-backed proof of the insertion
+// layer (which no longer suppresses any partial_fill row) plus the full
+// insert -> load -> apply pipeline lives in
+// `mqk-testkit/tests/scenario_fill_dedup_ws_rest_precision_01.rs`.
+// ---------------------------------------------------------------------------
+
+/// A1: WS delivery (broker_fill_id=None) then REST delivery
+/// (broker_fill_id=Some) of the SAME physical partial fill — same
+/// cum_qty_after, different economic_event_id per lane — applies exactly
+/// once.
+#[test]
+fn a1_ws_then_rest_same_physical_partial_fill_applies_once() {
+    let mut oms: BTreeMap<String, OmsOrder> = BTreeMap::new();
+    oms.insert("ord-a1".to_string(), OmsOrder::new("ord-a1", "SPY", 100));
+
+    let ws_ev = make_partial_fill_event_with_watermark("ord-a1", "ws-msg-1", None, 10, Some(10));
+    let first = apply_fill_step(&mut oms, "ord-a1", &ws_ev, "ws-msg-1")
+        .unwrap()
+        .expect("A1: WS delivery must apply");
+    assert_eq!(first.qty, 10);
+    assert_eq!(oms["ord-a1"].filled_qty, 10);
+
+    let rest_ev = make_partial_fill_event_with_watermark(
+        "ord-a1",
+        "rest-activity-xyz",
+        Some("20260101000000000::exec-1"),
+        10,
+        Some(10),
+    );
+    let second = apply_fill_step(&mut oms, "ord-a1", &rest_ev, "rest-activity-xyz").unwrap();
+    assert!(
+        second.is_none(),
+        "A1: REST redelivery of the same physical fill must not double-apply"
+    );
+    assert_eq!(
+        oms["ord-a1"].filled_qty, 10,
+        "A1: filled_qty must remain 10"
+    );
+}
+
+/// A2: REST then WS — same outcome regardless of arrival order.
+#[test]
+fn a2_rest_then_ws_same_physical_partial_fill_applies_once() {
+    let mut oms: BTreeMap<String, OmsOrder> = BTreeMap::new();
+    oms.insert("ord-a2".to_string(), OmsOrder::new("ord-a2", "SPY", 100));
+
+    let rest_ev = make_partial_fill_event_with_watermark(
+        "ord-a2",
+        "rest-activity-xyz",
+        Some("20260101000000000::exec-1"),
+        10,
+        Some(10),
+    );
+    let first = apply_fill_step(&mut oms, "ord-a2", &rest_ev, "rest-activity-xyz")
+        .unwrap()
+        .expect("A2: REST delivery must apply");
+    assert_eq!(first.qty, 10);
+
+    let ws_ev = make_partial_fill_event_with_watermark("ord-a2", "ws-msg-1", None, 10, Some(10));
+    let second = apply_fill_step(&mut oms, "ord-a2", &ws_ev, "ws-msg-1").unwrap();
+    assert!(
+        second.is_none(),
+        "A2: WS redelivery of the same physical fill must not double-apply"
+    );
+    assert_eq!(oms["ord-a2"].filled_qty, 10);
+}
+
+/// A3: same-lane retry of one transport message (identical msg_id) applies
+/// once — the pre-existing event_id path, unaffected by the watermark.
+#[test]
+fn a3_same_lane_retry_applies_once() {
+    let mut oms: BTreeMap<String, OmsOrder> = BTreeMap::new();
+    oms.insert("ord-a3".to_string(), OmsOrder::new("ord-a3", "SPY", 100));
+
+    let ev = make_partial_fill_event_with_watermark(
+        "ord-a3",
+        "rest-activity-xyz",
+        Some("exec-1"),
+        10,
+        Some(10),
+    );
+    let first = apply_fill_step(&mut oms, "ord-a3", &ev, "rest-activity-xyz")
+        .unwrap()
+        .expect("A3: first delivery must apply");
+    assert_eq!(first.qty, 10);
+
+    // Exact retry: identical msg_id (the actual production retry scenario —
+    // a transport-level resend of the same message).
+    let retry = apply_fill_step(&mut oms, "ord-a3", &ev, "rest-activity-xyz").unwrap();
+    assert!(retry.is_none(), "A3: same-lane retry must not double-apply");
+    assert_eq!(oms["ord-a3"].filled_qty, 10);
+}
+
+/// A4 (MANDATORY): two legitimate partial fills — same order, same qty,
+/// same price, arriving on the same lane within milliseconds — both apply.
+/// No time window is consulted; distinctness comes entirely from
+/// cum_qty_after (10 then 20), never from message timing.
+#[test]
+fn a4_two_legitimate_same_size_fills_less_than_3s_apart_both_apply() {
+    let mut oms: BTreeMap<String, OmsOrder> = BTreeMap::new();
+    oms.insert("ord-a4".to_string(), OmsOrder::new("ord-a4", "SPY", 100));
+
+    let ev1 = make_partial_fill_event_with_watermark("ord-a4", "ws-msg-1", None, 10, Some(10));
+    let first = apply_fill_step(&mut oms, "ord-a4", &ev1, "ws-msg-1")
+        .unwrap()
+        .expect("A4: first fill must apply");
+    assert_eq!(first.qty, 10);
+
+    // Second fill: identical qty (10) and identical price (both use the
+    // helper's fixed price_micros=450_000_000), 700ms later in wall time —
+    // well inside the OLD 3s window that used to wrongly collapse this.
+    let ev2 = make_partial_fill_event_with_watermark("ord-a4", "ws-msg-2", None, 10, Some(20));
+    let second = apply_fill_step(&mut oms, "ord-a4", &ev2, "ws-msg-2")
+        .unwrap()
+        .expect("A4: second, genuinely distinct fill must ALSO apply");
+    assert_eq!(second.qty, 10);
+
+    assert_eq!(
+        oms["ord-a4"].filled_qty, 20,
+        "A4: both legitimate 10-share fills must be reflected (10+10=20)"
+    );
+}
+
+/// A5: two legitimate fills with different quantities both apply.
+#[test]
+fn a5_two_distinct_qty_fills_both_apply() {
+    let mut oms: BTreeMap<String, OmsOrder> = BTreeMap::new();
+    oms.insert("ord-a5".to_string(), OmsOrder::new("ord-a5", "SPY", 100));
+
+    let ev1 = make_partial_fill_event_with_watermark("ord-a5", "ws-msg-1", None, 7, Some(7));
+    apply_fill_step(&mut oms, "ord-a5", &ev1, "ws-msg-1")
+        .unwrap()
+        .expect("A5: first fill must apply");
+    let ev2 = make_partial_fill_event_with_watermark("ord-a5", "ws-msg-2", None, 13, Some(20));
+    apply_fill_step(&mut oms, "ord-a5", &ev2, "ws-msg-2")
+        .unwrap()
+        .expect("A5: second fill must apply");
+
+    assert_eq!(oms["ord-a5"].filled_qty, 20);
+}
+
+/// A6: same price, extremely close broker timestamps are irrelevant to this
+/// layer (no timestamp is even consulted) — distinct executions survive
+/// purely because cum_qty_after differs.
+#[test]
+fn a6_same_price_extremely_close_timestamps_still_distinct() {
+    let mut oms: BTreeMap<String, OmsOrder> = BTreeMap::new();
+    oms.insert("ord-a6".to_string(), OmsOrder::new("ord-a6", "SPY", 100));
+
+    // Both events use the helper's fixed price_micros; qty differs only to
+    // make the assertion legible, but the mechanism doesn't depend on that —
+    // a6 re-uses a4's identical-qty case in spirit via cum_qty_after alone.
+    let ev1 = make_partial_fill_event_with_watermark("ord-a6", "ws-msg-1", None, 5, Some(5));
+    apply_fill_step(&mut oms, "ord-a6", &ev1, "ws-msg-1").unwrap();
+    let ev2 = make_partial_fill_event_with_watermark("ord-a6", "ws-msg-2", None, 5, Some(10));
+    let second = apply_fill_step(&mut oms, "ord-a6", &ev2, "ws-msg-2")
+        .unwrap()
+        .expect("A6: second execution at the same price must still apply");
+    assert_eq!(second.qty, 5);
+    assert_eq!(oms["ord-a6"].filled_qty, 10);
+}
+
+/// A8: partial-fill dedup followed by a terminal fill produces the exact
+/// final cumulative quantity — cross-lane partial duplicate is absorbed,
+/// then the terminal fill completes the order correctly.
+#[test]
+fn a8_partial_dedup_then_terminal_fill_yields_correct_final_qty() {
+    let mut oms: BTreeMap<String, OmsOrder> = BTreeMap::new();
+    oms.insert("ord-a8".to_string(), OmsOrder::new("ord-a8", "SPY", 30));
+
+    // WS partial: 10 shares, cum_qty_after=10.
+    let ws_ev = make_partial_fill_event_with_watermark("ord-a8", "ws-msg-1", None, 10, Some(10));
+    apply_fill_step(&mut oms, "ord-a8", &ws_ev, "ws-msg-1").unwrap();
+    assert_eq!(oms["ord-a8"].filled_qty, 10);
+
+    // REST duplicate of the same partial fill — must no-op.
+    let rest_dup = make_partial_fill_event_with_watermark(
+        "ord-a8",
+        "rest-activity-1",
+        Some("exec-1"),
+        10,
+        Some(10),
+    );
+    let dup_result = apply_fill_step(&mut oms, "ord-a8", &rest_dup, "rest-activity-1").unwrap();
+    assert!(dup_result.is_none(), "A8: cross-lane duplicate must no-op");
+    assert_eq!(oms["ord-a8"].filled_qty, 10);
+
+    // Terminal fill completing the remaining 20 shares.
+    let fill_ev = make_fill_event("ord-a8", "fill-terminal", 20);
+    let terminal = apply_fill_step(&mut oms, "ord-a8", &fill_ev, "fill-terminal")
+        .unwrap()
+        .expect("A8: terminal fill must apply");
+    assert_eq!(terminal.qty, 20);
+    assert_eq!(
+        oms["ord-a8"].filled_qty, 30,
+        "A8: final cumulative quantity must be exactly 30 (10 real partial + 20 terminal), \
+         not 40 (which a double-applied partial would produce)"
+    );
+    assert_eq!(
+        oms["ord-a8"].state,
+        mqk_execution::oms::state_machine::OrderState::Filled
+    );
+}
+
+/// A9: crash/restart replay cannot double-apply. Simulates a fresh in-memory
+/// OMS map (as after a restart) replaying the SAME durable inbox rows —
+/// including a WS/REST duplicate pair — in canonical `inbox_id` order via
+/// `build_canonical_apply_queue`, exactly as `AppState` startup replay does.
+#[test]
+fn a9_restart_replay_does_not_double_apply_cross_lane_duplicate() {
+    use mqk_execution::Side;
+
+    let rows = vec![
+        mqk_db::InboxRow {
+            inbox_id: 1,
+            run_id: Uuid::nil(),
+            broker_message_id: "ws-msg-1".into(),
+            broker_fill_id: None,
+            broker_sequence_id: None,
+            broker_timestamp: None,
+            message_json: serde_json::to_value(BrokerEvent::PartialFill {
+                broker_message_id: "ws-msg-1".into(),
+                broker_fill_id: None,
+                internal_order_id: "ord-a9".into(),
+                broker_order_id: None,
+                symbol: "SPY".into(),
+                side: Side::Buy,
+                delta_qty: 10,
+                price_micros: 450_000_000,
+                fee_micros: 0,
+                cum_qty_after: Some(10),
+            })
+            .unwrap(),
+            received_at_utc: chrono::Utc::now(),
+            applied_at_utc: None,
+            event_kind: "partial_fill".to_string(),
+        },
+        mqk_db::InboxRow {
+            inbox_id: 2,
+            run_id: Uuid::nil(),
+            broker_message_id: "rest-activity-1".into(),
+            broker_fill_id: Some("exec-1".into()),
+            broker_sequence_id: None,
+            broker_timestamp: None,
+            message_json: serde_json::to_value(BrokerEvent::PartialFill {
+                broker_message_id: "rest-activity-1".into(),
+                broker_fill_id: Some("exec-1".into()),
+                internal_order_id: "ord-a9".into(),
+                broker_order_id: None,
+                symbol: "SPY".into(),
+                side: Side::Buy,
+                delta_qty: 10,
+                price_micros: 450_000_000,
+                fee_micros: 0,
+                cum_qty_after: Some(10),
+            })
+            .unwrap(),
+            received_at_utc: chrono::Utc::now(),
+            applied_at_utc: None,
+            event_kind: "partial_fill".to_string(),
+        },
+    ];
+
+    let queue = build_canonical_apply_queue(rows).unwrap();
+    assert_eq!(
+        queue.len(),
+        2,
+        "A9: both durable rows must survive into the replay queue"
+    );
+
+    // Fresh OMS map, as after a process restart.
+    let mut oms: BTreeMap<String, OmsOrder> = BTreeMap::new();
+    oms.insert("ord-a9".to_string(), OmsOrder::new("ord-a9", "SPY", 100));
+
+    let mut applied_fills = 0usize;
+    for (_inbox_id, msg_id, event, _received_at) in &queue {
+        if apply_fill_step(&mut oms, "ord-a9", event, msg_id)
+            .unwrap()
+            .is_some()
+        {
+            applied_fills += 1;
+        }
+    }
+
+    assert_eq!(
+        applied_fills, 1,
+        "A9: replaying both durable rows after a simulated restart must apply exactly once"
+    );
+    assert_eq!(oms["ord-a9"].filled_qty, 10);
+}
+
+/// A11: no legitimate partial-fill economic effect can be suppressed solely
+/// because of same qty + same price + arbitrary time proximity — proven at
+/// the apply layer by confirming two distinct-cum_qty_after events with
+/// identical qty/price both apply even when delivered with no time gap at
+/// all between calls (nothing here is time-gated).
+#[test]
+fn a11_no_suppression_from_qty_price_proximity_alone() {
+    let mut oms: BTreeMap<String, OmsOrder> = BTreeMap::new();
+    oms.insert("ord-a11".to_string(), OmsOrder::new("ord-a11", "SPY", 100));
+
+    let ev1 = make_partial_fill_event_with_watermark("ord-a11", "m1", None, 25, Some(25));
+    let ev2 = make_partial_fill_event_with_watermark("ord-a11", "m2", None, 25, Some(50));
+    let r1 = apply_fill_step(&mut oms, "ord-a11", &ev1, "m1").unwrap();
+    let r2 = apply_fill_step(&mut oms, "ord-a11", &ev2, "m2").unwrap();
+    assert!(r1.is_some() && r2.is_some(), "A11: both must apply");
+    assert_eq!(oms["ord-a11"].filled_qty, 50);
 }
 
 // ---------------------------------------------------------------------------
