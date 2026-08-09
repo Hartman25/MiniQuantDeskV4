@@ -1514,3 +1514,88 @@ async fn a08_cursor_only_no_fetcher_with_confirmation_refused() {
     clear_broker_map(pool, &internal_id).await;
     clear_outbox(pool, &internal_id).await;
 }
+
+// ---------------------------------------------------------------------------
+// PAPER-SOAK-ALPACA-FILL-ECONOMIC-AUTHORITY-CLOSURE-01
+// E14 / NEG-5 — an unrelated account activity (order_id does not match the
+// requested broker_order_id) must never be treated as a match, even when
+// the injected fetcher returns it (simulating a fetcher/server that does
+// NOT actually filter by order_id server-side — exactly the assumption this
+// patch removes reliance on). The route's own Gate 6b exact-order_id local
+// filter must reject it regardless of what the fetcher returns.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn r09_unrelated_order_activity_is_rejected_even_if_fetcher_returns_it() {
+    let url = match std::env::var(mqk_db::ENV_DB_URL) {
+        Ok(u) => u,
+        Err(_) => {
+            eprintln!("SKIP R09: MQK_DATABASE_URL not set");
+            return;
+        }
+    };
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(4)
+        .connect(&url)
+        .await
+        .expect("R09: DB connect");
+    mqk_db::migrate(&pool).await.expect("R09: migrate");
+
+    let run_id = seed_halted_run(&pool, "r09").await;
+    let (internal_id, broker_id) = seed_sent_outbox_and_broker_map(&pool, run_id, "r09").await;
+
+    let saved_cursor = save_broker_cursor(&pool, "alpaca").await;
+    seed_broker_cursor(&pool, "alpaca", &broker_id).await;
+
+    // Fetcher (deliberately) returns an activity for an UNRELATED order —
+    // FakeFillFetcher ignores the requested broker_order_id argument
+    // entirely, standing in for a fetcher/server that does not filter.
+    let unrelated_order_id = format!("unrelated-{broker_id}");
+    let act = make_fill_activity("act-r09-unrelated", &unrelated_order_id);
+    let mut state_inner = state::AppState::new_for_test_with_db_mode_and_broker(
+        pool.clone(),
+        state::DeploymentMode::LiveShadow,
+        state::BrokerKind::Alpaca,
+    );
+    state_inner.set_fill_activity_fetcher_for_test(FakeFillFetcher::returning(vec![act]));
+    let state = Arc::new(state_inner);
+
+    let router = routes::build_router(Arc::clone(&state));
+    let (status, body) = call(
+        router,
+        recovery_req(serde_json::json!({
+            "run_id": run_id.to_string(),
+            "internal_order_id": internal_id,
+            "broker_order_id": broker_id
+        })),
+    )
+    .await;
+
+    assert_eq!(
+        status,
+        StatusCode::CONFLICT,
+        "R09: an unrelated-order activity must never be treated as a match; expected 409"
+    );
+    let j = parse_json(body);
+    assert_eq!(
+        j["gate"].as_str().unwrap_or(""),
+        "repair.no_rest_match",
+        "R09: after the exact order_id local filter removes the unrelated activity, \
+         zero fill-class activities remain for the requested order — gate must be \
+         'repair.no_rest_match', proving the route did not misattribute the unrelated \
+         fill to the requested order"
+    );
+    assert!(
+        j["rest_fill"].is_null(),
+        "R09: rest_fill must be null — nothing was recovered"
+    );
+    assert_eq!(
+        j["mutated"].as_bool(),
+        Some(false),
+        "R09: no mutation must occur"
+    );
+
+    restore_broker_cursor(&pool, "alpaca", saved_cursor.as_deref()).await;
+    clear_broker_map(&pool, &internal_id).await;
+    clear_outbox(&pool, &internal_id).await;
+}

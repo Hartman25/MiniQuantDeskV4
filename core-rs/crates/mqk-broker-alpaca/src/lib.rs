@@ -46,6 +46,7 @@
 //! `AlpacaBrokerAdapter` itself introduces no timestamps or UUIDs.  All
 //! identifiers used in canonical events come from the Alpaca response payload
 //! and are normalised through `normalize_trade_update`.
+pub mod fill_authority;
 pub mod inbound;
 pub mod normalize;
 pub mod snapshot;
@@ -75,6 +76,11 @@ pub use snapshot::{build_snapshot, normalize_account, normalize_open_order, norm
 /// response contains fewer than this many items, recovering all available
 /// activities in one call.
 pub const FILL_ACTIVITIES_PAGE_SIZE: usize = 50;
+/// Maximum pages [`AlpacaBrokerAdapter::fetch_fill_activities_for_order`]
+/// will scan before refusing to return a possibly-incomplete result set.
+/// 40 pages * 50/page = 2000 activities — a generous operational bound for a
+/// single-order repair lookup; see that method's doc comment.
+pub const FILL_ACTIVITIES_FOR_ORDER_MAX_PAGES: usize = 40;
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
@@ -264,9 +270,26 @@ impl AlpacaBrokerAdapter {
     // -----------------------------------------------------------------------
     /// Fetch all FILL-class account activities for one Alpaca broker order UUID.
     ///
-    /// Calls `GET /v2/account/activities/FILL?order_id={broker_order_id}`.
-    /// Returns raw `AlpacaOrderActivity` records without normalization or
-    /// pagination (repair path expects O(1) activities per halted order).
+    /// PAPER-SOAK-ALPACA-FILL-ECONOMIC-AUTHORITY-CLOSURE-01: Alpaca's primary
+    /// Account Activities documentation does not document `order_id` as a
+    /// supported query parameter for `GET /v2/account/activities/FILL` — a
+    /// prior implementation sent `?order_id={broker_order_id}` and trusted
+    /// the broker to filter server-side. That is not an acceptable safety
+    /// assumption for a repair path that may mutate durable accounting
+    /// truth, so this method no longer sends it. Instead it paginates
+    /// through the account-wide FILL activity feed using only documented
+    /// parameters (`direction`, `page_size`, `page_token`) and applies an
+    /// exact `activity.order_id == broker_order_id` filter locally.
+    ///
+    /// Pagination walks in `direction=desc` (most-recent-first — the target
+    /// order's activity is expected to be recent) to exhaustion (a page
+    /// shorter than [`FILL_ACTIVITIES_PAGE_SIZE`]) or up to
+    /// [`FILL_ACTIVITIES_FOR_ORDER_MAX_PAGES`], whichever comes first. If the
+    /// page budget is exhausted before reaching the end of the feed, this
+    /// returns `Err` rather than a possibly-incomplete match set — a false
+    /// "exactly one activity" conclusion merely because a matching activity
+    /// sat outside the searched window would be unsafe for a route that may
+    /// mutate durable accounting truth.
     ///
     /// Does not affect order submission, cancellation, replacement, or the
     /// `fetch_events` inbound lane.  Read-only.
@@ -274,8 +297,59 @@ impl AlpacaBrokerAdapter {
         &self,
         broker_order_id: &str,
     ) -> Result<Vec<AlpacaOrderActivity>, BrokerError> {
-        let path = format!("/v2/account/activities/FILL?order_id={broker_order_id}");
-        self.get::<Vec<AlpacaOrderActivity>>(&path)
+        let mut current_page_token: Option<String> = None;
+        let mut matched: Vec<AlpacaOrderActivity> = Vec::new();
+        let mut pages: usize = 0;
+
+        loop {
+            let mut path = format!(
+                "/v2/account/activities/FILL?direction=desc&page_size={FILL_ACTIVITIES_PAGE_SIZE}"
+            );
+            if let Some(token) = current_page_token.as_deref() {
+                path.push_str("&page_token=");
+                path.push_str(token);
+            }
+
+            let activities: Vec<AlpacaOrderActivity> = self.get(&path)?;
+            let page_len = activities.len();
+            pages += 1;
+            let prev_page_token = current_page_token.clone();
+
+            if let Some(last) = activities.last() {
+                current_page_token = Some(last.id.clone());
+            }
+
+            if page_len == FILL_ACTIVITIES_PAGE_SIZE && current_page_token == prev_page_token {
+                return Err(BrokerError::Transient {
+                    detail: format!(
+                        "fetch_fill_activities_for_order: pagination made no progress at \
+                         page_token={prev_page_token:?}; refusing to loop"
+                    ),
+                });
+            }
+
+            matched.extend(
+                activities
+                    .into_iter()
+                    .filter(|a| a.order_id == broker_order_id),
+            );
+
+            if page_len < FILL_ACTIVITIES_PAGE_SIZE {
+                return Ok(matched);
+            }
+
+            if pages >= FILL_ACTIVITIES_FOR_ORDER_MAX_PAGES {
+                return Err(BrokerError::Transient {
+                    detail: format!(
+                        "fetch_fill_activities_for_order: exhausted {FILL_ACTIVITIES_FOR_ORDER_MAX_PAGES} \
+                         pages ({} activities scanned) without reaching the end of the account \
+                         activity feed for broker_order_id='{broker_order_id}'; refusing to return a \
+                         possibly-incomplete result set — manual reconcile required",
+                        FILL_ACTIVITIES_FOR_ORDER_MAX_PAGES * FILL_ACTIVITIES_PAGE_SIZE
+                    ),
+                });
+            }
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -984,13 +1058,12 @@ pub fn micros_to_price_str(micros: i64) -> String {
 }
 /// Parse a broker decimal quantity string (e.g. `"100.000000"`) to `i64`.
 ///
-/// Returns `Err(raw)` if the string is not a finite non-negative number.
+/// Delegates to [`normalize::parse_alpaca_whole_share_qty`] — the ONE
+/// canonical whole-share parser for this crate. Returns `Err(raw)` (fails
+/// closed, does not round) if the string is not an integral, finite,
+/// non-negative number.
 fn parse_broker_qty(raw: &str) -> Result<i64, &str> {
-    let v: f64 = raw.parse().map_err(|_| raw)?;
-    if !v.is_finite() || v < 0.0 {
-        return Err(raw);
-    }
-    Ok(v.round() as i64)
+    normalize::parse_alpaca_whole_share_qty(raw).map_err(|_| raw)
 }
 /// Parse an ISO 8601 timestamp to Unix epoch milliseconds.
 fn parse_iso_to_epoch_ms(ts: &str) -> Option<u64> {

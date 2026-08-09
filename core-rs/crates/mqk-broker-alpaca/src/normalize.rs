@@ -56,22 +56,61 @@ impl std::error::Error for NormalizeError {}
 // ---------------------------------------------------------------------------
 // Internal helpers
 // ---------------------------------------------------------------------------
-/// Parse a decimal quantity string to a non-negative i64.
+/// PAPER-SOAK-ALPACA-FILL-ECONOMIC-AUTHORITY-CLOSURE-01: the ONE canonical
+/// whole-share quantity parser for every Alpaca REST/WS execution field
+/// (event qty, cum_qty, `GET /orders` filled_qty) across this crate and
+/// `mqk-daemon`'s WS-gap and halted-run REST recovery paths.
 ///
-/// Accepts both integer ("100") and decimal ("100.0") forms because Alpaca
-/// sometimes returns quantities as "100.000000".
+/// Accepts integer-valued decimal representations ("5", "5.0", "5.000000")
+/// because Alpaca returns quantities as decimal strings with variable
+/// trailing precision even though the current paper/equity execution model
+/// is whole-share `i64` end to end (`BrokerSubmitRequest.quantity`,
+/// `OmsOrder.total_qty`, `BrokerEvent::delta_qty`).
+///
+/// Fails closed (does NOT round) on any non-integral value, negative value,
+/// non-finite value (`NaN`/`inf`), or unparseable/empty string. A prior
+/// implementation of this parsing (independently duplicated across this
+/// module, `lib.rs::parse_broker_qty`, and `mqk-daemon`'s WS-gap recovery)
+/// used `f64::round()`, which silently turned a broker-reported fractional
+/// quantity (a data-quality anomaly under the whole-share model) into a
+/// plausible-looking whole share instead of surfacing the anomaly.
+pub fn parse_alpaca_whole_share_qty(raw: &str) -> Result<i64, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Err("parse_alpaca_whole_share_qty: empty string".to_string());
+    }
+    let v: f64 = trimmed
+        .parse()
+        .map_err(|_| format!("parse_alpaca_whole_share_qty: not a number: {trimmed:?}"))?;
+    if !v.is_finite() {
+        return Err(format!(
+            "parse_alpaca_whole_share_qty: not finite: {trimmed:?}"
+        ));
+    }
+    if v < 0.0 {
+        return Err(format!(
+            "parse_alpaca_whole_share_qty: negative: {trimmed:?}"
+        ));
+    }
+    if v.fract() != 0.0 {
+        return Err(format!(
+            "parse_alpaca_whole_share_qty: fractional value not supported under the \
+             whole-share execution model: {trimmed:?}"
+        ));
+    }
+    Ok(v as i64)
+}
+
+/// Parse a decimal quantity string to a non-negative whole-share i64.
+///
+/// Delegates to [`parse_alpaca_whole_share_qty`] — see that function for the
+/// canonical whole-share contract. Fails closed on fractional input rather
+/// than rounding.
 fn parse_qty(raw: &str, field: &'static str) -> Result<i64, NormalizeError> {
-    let v: f64 = raw.parse().map_err(|_| NormalizeError::InvalidQuantity {
+    parse_alpaca_whole_share_qty(raw).map_err(|_| NormalizeError::InvalidQuantity {
         field,
         raw: raw.to_string(),
-    })?;
-    if !v.is_finite() || v < 0.0 {
-        return Err(NormalizeError::InvalidQuantity {
-            field,
-            raw: raw.to_string(),
-        });
-    }
-    Ok(v.round() as i64)
+    })
 }
 /// Parse a decimal price string to integer micros.
 fn parse_price(raw: &str) -> Result<i64, NormalizeError> {
@@ -99,11 +138,7 @@ fn parse_price(raw: &str) -> Result<i64, NormalizeError> {
 /// established unambiguously within one polling page — this function's
 /// `None` on parse failure is what makes that "unknown" signal work.
 fn parse_cum_qty_after(raw: &str) -> Option<i64> {
-    let v: f64 = raw.parse().ok()?;
-    if !v.is_finite() || v < 0.0 {
-        return None;
-    }
-    Some(v.round() as i64)
+    parse_alpaca_whole_share_qty(raw).ok()
 }
 /// Parse an Alpaca side string to Side.
 fn parse_side(s: &str) -> Result<Side, NormalizeError> {
@@ -387,6 +422,43 @@ mod tests {
             ev.cum_qty_after(),
             None,
             "cum_qty_after is only ever Some for PartialFill"
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // PAPER-SOAK-ALPACA-FILL-ECONOMIC-AUTHORITY-CLOSURE-01: E17/E18 —
+    // parse_alpaca_whole_share_qty canonical whole-share parser
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn e18_whole_share_decimal_forms_canonicalize_to_five() {
+        assert_eq!(parse_alpaca_whole_share_qty("5"), Ok(5));
+        assert_eq!(parse_alpaca_whole_share_qty("5.0"), Ok(5));
+        assert_eq!(parse_alpaca_whole_share_qty("5.000000"), Ok(5));
+    }
+
+    #[test]
+    fn e17_fractional_and_invalid_values_fail_closed() {
+        assert!(parse_alpaca_whole_share_qty("5.5").is_err());
+        assert!(parse_alpaca_whole_share_qty("-1").is_err());
+        assert!(parse_alpaca_whole_share_qty("NaN").is_err());
+        assert!(parse_alpaca_whole_share_qty("inf").is_err());
+        assert!(parse_alpaca_whole_share_qty("abc").is_err());
+        assert!(parse_alpaca_whole_share_qty("").is_err());
+    }
+
+    #[test]
+    fn partial_fill_cum_qty_after_fails_closed_on_fractional_filled_qty() {
+        // Regression guard: a fractional order.filled_qty must degrade to
+        // None (fail-closed), never round to a plausible-looking whole share.
+        let mut ord = order("alpaca-uuid-001", "internal-001", "AAPL", "buy", "100");
+        ord.filled_qty = "30.5".to_string();
+        let u = update("partial_fill", ord, Some("150.50"), Some("10"));
+        let ev = normalize_trade_update(&u).unwrap();
+        assert_eq!(
+            ev.cum_qty_after(),
+            None,
+            "fractional filled_qty must degrade to None, not round to 30 or 31"
         );
     }
 

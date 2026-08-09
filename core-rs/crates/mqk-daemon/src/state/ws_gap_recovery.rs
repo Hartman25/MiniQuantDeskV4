@@ -200,131 +200,46 @@ pub(crate) async fn run_ws_gap_fill_recovery_core(
             continue 'activity;
         };
 
-        // Validate required fields — fail closed per activity on malformed data.
-        let qty_str = match activity.qty.as_deref().filter(|s| !s.is_empty()) {
-            Some(s) => s.to_owned(),
-            None => {
-                malformed_count += 1;
-                has_unsafe_fill = true;
-                tracing::warn!(
-                    "run_ws_gap_fill_recovery_core: activity '{}' has missing qty; skipped",
-                    activity.id
-                );
-                continue 'activity;
-            }
-        };
-        let price_str = match activity.price.as_deref().filter(|s| !s.is_empty()) {
-            Some(s) => s.to_owned(),
-            None => {
-                malformed_count += 1;
-                has_unsafe_fill = true;
-                tracing::warn!(
-                    "run_ws_gap_fill_recovery_core: activity '{}' has missing price; skipped",
-                    activity.id
-                );
-                continue 'activity;
-            }
-        };
+        // Raw fields retained only for the operator-facing `WsGapRecoveredFill`
+        // evidence record below — economic parsing happens exclusively
+        // through `activity_to_fill_broker_event`.
+        let qty_str = activity.qty.clone().unwrap_or_default();
+        let price_str = activity.price.clone().unwrap_or_default();
         let side = activity.side.as_str();
-        if side != "buy" && side != "sell" {
-            malformed_count += 1;
-            has_unsafe_fill = true;
-            tracing::warn!(
-                "run_ws_gap_fill_recovery_core: activity '{}' has unrecognized side='{}'; skipped",
-                activity.id,
-                side
-            );
-            continue 'activity;
-        }
 
         // Build stable broker_message_id — idempotency anchor for retry safety.
         let stable_msg_id = format!("{GAP_RECOVERY_MSG_PREFIX}:{}", activity.id);
 
-        // Parse qty / price — fail closed per activity.
-        let qty_f64: f64 = match qty_str.parse::<f64>() {
-            Ok(v) if v > 0.0 && v.is_finite() => v,
-            _ => {
+        // PAPER-SOAK-ALPACA-FILL-ECONOMIC-AUTHORITY-CLOSURE-01: build the
+        // canonical BrokerEvent through the ONE shared TradeActivity economic
+        // seam (`mqk_broker_alpaca::fill_authority`) instead of hand-rolled
+        // qty/price/side parsing. This closes two defects the hand-rolled
+        // version had: (1) `qty * 1_000_000` treated a whole-share quantity
+        // as if it were already in canonical micros, producing a
+        // 1,000,000x-inflated `delta_qty`; (2) `cum_qty_after` was
+        // hardcoded to `None`, so a WS/REST cross-lane duplicate of the same
+        // physical partial fill could not be recognized as already-applied
+        // by `apply_with_watermark` during live apply or durable replay. A
+        // REST FILL/partial_fill activity whose broker-native `cum_qty` is
+        // missing/malformed is refused here (fails the whole activity
+        // closed) rather than inserting an economically ambiguous row —
+        // the cursor does not advance past it (`has_unsafe_fill`), so it is
+        // retried on the next recovery pass.
+        let broker_event = match mqk_broker_alpaca::fill_authority::activity_to_fill_broker_event(
+            activity,
+            stable_msg_id.clone(),
+            entry.internal_order_id.clone(),
+        ) {
+            Ok(ev) => ev,
+            Err(e) => {
                 malformed_count += 1;
                 has_unsafe_fill = true;
                 tracing::warn!(
-                    "run_ws_gap_fill_recovery_core: activity '{}' qty='{}' not positive-finite; \
-                     skipped",
-                    activity.id,
-                    qty_str
+                    "run_ws_gap_fill_recovery_core: activity '{}' failed economic conversion \
+                     (fail-closed): {e}",
+                    activity.id
                 );
                 continue 'activity;
-            }
-        };
-        let delta_qty = (qty_f64 * 1_000_000.0).round() as i64;
-
-        let price_f64: f64 = match price_str.parse::<f64>() {
-            Ok(v) if v >= 0.0 && v.is_finite() => v,
-            _ => {
-                malformed_count += 1;
-                has_unsafe_fill = true;
-                tracing::warn!(
-                    "run_ws_gap_fill_recovery_core: activity '{}' price='{}' not valid; skipped",
-                    activity.id,
-                    price_str
-                );
-                continue 'activity;
-            }
-        };
-        let price_micros = match mqk_execution::price_to_micros(price_f64) {
-            Ok(m) => m,
-            Err(_) => {
-                malformed_count += 1;
-                has_unsafe_fill = true;
-                tracing::warn!(
-                    "run_ws_gap_fill_recovery_core: activity '{}' price='{}' micros conversion \
-                     failed; skipped",
-                    activity.id,
-                    price_str
-                );
-                continue 'activity;
-            }
-        };
-        let exe_side = match side {
-            "buy" => mqk_execution::Side::Buy,
-            _ => mqk_execution::Side::Sell,
-        };
-
-        // Build canonical BrokerEvent payload.
-        let broker_event = if event_kind == "partial_fill" {
-            mqk_execution::BrokerEvent::PartialFill {
-                broker_message_id: stable_msg_id.clone(),
-                broker_fill_id: Some(activity.id.clone()),
-                internal_order_id: entry.internal_order_id.clone(),
-                broker_order_id: Some(activity.order_id.clone()),
-                symbol: activity.symbol.clone(),
-                side: exe_side,
-                delta_qty,
-                price_micros,
-                fee_micros: 0,
-                // Per this module's safety contract (see the doc comment on
-                // `run_ws_gap_fill_recovery_core` above): this path only ever
-                // inserts into oms_inbox — it never mutates OMS/portfolio
-                // state directly, and correctness rests on the durable
-                // idempotent insert plus the fact this only fires when WS
-                // continuity was PROVEN broken (GapDetected) or on explicit
-                // operator request. It does not fetch order.filled_qty, so
-                // it has no cheap access to the broker cumulative watermark
-                // PAPER-SOAK-PARTIAL-FILL-DEDUP-02 introduced; rows inserted
-                // here fall back to the OMS apply layer's pre-existing
-                // event-id dedup when later applied, unchanged from before.
-                cum_qty_after: None,
-            }
-        } else {
-            mqk_execution::BrokerEvent::Fill {
-                broker_message_id: stable_msg_id.clone(),
-                broker_fill_id: Some(activity.id.clone()),
-                internal_order_id: entry.internal_order_id.clone(),
-                broker_order_id: Some(activity.order_id.clone()),
-                symbol: activity.symbol.clone(),
-                side: exe_side,
-                delta_qty,
-                price_micros,
-                fee_micros: 0,
             }
         };
         let event_json =
@@ -334,17 +249,15 @@ pub(crate) async fn run_ws_gap_fill_recovery_core(
             .ok()
             .map(|dt| dt.with_timezone(&Utc))
             .unwrap_or_else(Utc::now);
-        // PAPER-SOAK-PARTIAL-FILL-DEDUP-01: `stable_msg_id` here is a synthetic
-        // "{GAP_RECOVERY_MSG_PREFIX}:{activity.id}" identity, not Alpaca wire
-        // format, so it carries no timestamp `alpaca_event_ts_ms_from_message_id`
-        // could extract. inbox_insert_partial_fill_deduped's economic-match
-        // window (mqk-db::inbox) needs a real event_ts_ms to discriminate
-        // between distinct partial fills for the same order — this recovery
-        // path exists specifically to backfill fills WS may have missed, so a
-        // hardcoded 0 here would either falsely collapse two distinct
-        // recovered fills or fail to match the WS row it is meant to
-        // deduplicate against. Derive it from the activity's own transaction
-        // timestamp instead; 0 only on genuine parse failure.
+        // `stable_msg_id` here is a synthetic "{GAP_RECOVERY_MSG_PREFIX}:
+        // {activity.id}" identity, not Alpaca wire format, so it carries no
+        // timestamp `alpaca_event_ts_ms_from_message_id` could extract.
+        // `event_ts_ms` is diagnostic/ordering metadata on the inbox row, not
+        // an economic-dedup mechanism (that is `cum_qty_after`, carried on
+        // `broker_event` itself — see `activity_to_fill_broker_event` above
+        // — and enforced by `OmsOrder::apply_with_watermark` at apply/replay
+        // time). Derive it from the activity's own transaction timestamp;
+        // 0 only on genuine parse failure.
         let event_ts_ms = chrono::DateTime::parse_from_rfc3339(&activity.transaction_time)
             .map(|dt| dt.timestamp_millis()) // allow: broker-sourced timestamp, not wall-clock
             .unwrap_or(0);

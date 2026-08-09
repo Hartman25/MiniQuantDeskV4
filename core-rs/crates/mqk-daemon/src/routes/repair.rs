@@ -1495,6 +1495,23 @@ pub(crate) async fn repair_halted_run_fill_rest_recovery(
         }
     };
 
+    // Gate 6b: exact order_id local filter — defense in depth.
+    //
+    // PAPER-SOAK-ALPACA-FILL-ECONOMIC-AUTHORITY-CLOSURE-01 (E14/NEG-5):
+    // `fetch_fill_activities_for_order` itself no longer relies on an
+    // undocumented `order_id=` server-side filter and applies this same
+    // exact-match filter internally, but the fetcher is an injected trait
+    // object (`BrokerFillActivityFetcher`) and this route must never assume
+    // an implementation upholds that filter — trusting an implementation
+    // detail here would let a fetcher (real or test-injected) that returns
+    // unrelated-order activities cause this route to misattribute a fill to
+    // the wrong order. Re-verified here, unconditionally, regardless of what
+    // the fetcher returned.
+    let activities: Vec<mqk_broker_alpaca::types::AlpacaOrderActivity> = activities
+        .into_iter()
+        .filter(|a| a.order_id == body.broker_order_id)
+        .collect();
+
     // Gate 7: filter to genuine FILL-class activities with a recognized fill
     // subtype (PAPER-SOAK-ALPACA-TRADE-ACTIVITY-SCHEMA-01) — must be exactly
     // one match. Per Alpaca's documented TradeActivity schema, `activity_type`
@@ -1608,6 +1625,47 @@ pub(crate) async fn repair_halted_run_fill_rest_recovery(
             );
         }
     };
+
+    // Gate 8b: a partial_fill activity's broker-native cum_qty is REQUIRED.
+    //
+    // PAPER-SOAK-ALPACA-FILL-ECONOMIC-AUTHORITY-CLOSURE-01 (defect #5): a
+    // FILL/partial_fill activity without a parseable cum_qty cannot be given
+    // a cross-lane economic identity — inserting it with cum_qty_after=None
+    // would let it double-apply against a WS-applied duplicate of the same
+    // physical execution once durable replay's watermark-based dedup
+    // (`apply_with_watermark`) is in play. Refuse rather than insert
+    // ambiguous evidence.
+    let event_kind_for_gate = mqk_broker_alpaca::classify_fill_subtype(activity)
+        .ok()
+        .flatten()
+        .expect("Gate 7 already filtered to activities with a recognized fill subtype");
+    if event_kind_for_gate == "partial_fill" {
+        let cum_qty_ok = activity
+            .cum_qty
+            .as_deref()
+            .is_some_and(|s| mqk_broker_alpaca::normalize::parse_alpaca_whole_share_qty(s).is_ok());
+        if !cum_qty_ok {
+            let evidence = format!(
+                "Alpaca REST activity (id='{}') for broker_order_id='{}' is a partial_fill \
+                 with a missing/unparseable broker-native cum_qty; refusing to insert an \
+                 economically ambiguous partial-fill row. Manual reconcile required.",
+                activity.id, body.broker_order_id
+            );
+            let audit_id = write_rest_recovery_audit(
+                &rest_audit_ctx,
+                "refused",
+                "repair.recovery_data_malformed",
+                &evidence,
+            )
+            .await;
+            return refused_active!(
+                classification,
+                evidence,
+                Some("repair.recovery_data_malformed".to_string()),
+                audit_id.map(|id| id.to_string())
+            );
+        }
+    }
 
     // All evidence gates passed — build the plan evidence payload.
     let rest_fill = RestRecoveredFill {
@@ -1741,183 +1799,57 @@ pub(crate) async fn repair_halted_run_fill_rest_recovery(
     }
 
     // ---------------------------------------------------------------------------
-    // Gate 10: parse numeric fields — fail closed if qty/price do not convert.
+    // Gate 10/11: build the canonical BrokerEvent through the ONE shared
+    // TradeActivity economic seam (`mqk_broker_alpaca::fill_authority`).
     //
-    // Gate 8 already proved non-empty strings; here we prove parseable values.
-    // ---------------------------------------------------------------------------
-    let delta_qty: i64 = {
-        let v: f64 = match rest_fill.qty_str.parse() {
-            Ok(f) => f,
-            Err(_) => {
-                let evidence = format!(
-                    "REST activity (id='{}') qty='{}' is not a valid number; \
-                     manual reconcile required.",
-                    rest_fill.broker_activity_id, rest_fill.qty_str
-                );
-                let audit_id = write_rest_recovery_audit(
-                    &rest_audit_ctx,
-                    "refused",
-                    "repair.recovery_data_malformed",
-                    &evidence,
-                )
-                .await;
-                return refused_active!(
-                    classification,
-                    evidence,
-                    Some("repair.recovery_data_malformed".to_string()),
-                    audit_id.map(|id| id.to_string())
-                );
-            }
-        };
-        if !v.is_finite() || v <= 0.0 {
-            let evidence = format!(
-                "REST activity (id='{}') qty='{}' is not a positive finite number; \
-                 manual reconcile required.",
-                rest_fill.broker_activity_id, rest_fill.qty_str
-            );
-            let audit_id = write_rest_recovery_audit(
-                &rest_audit_ctx,
-                "refused",
-                "repair.recovery_data_malformed",
-                &evidence,
-            )
-            .await;
-            return refused_active!(
-                classification,
-                evidence,
-                Some("repair.recovery_data_malformed".to_string()),
-                audit_id.map(|id| id.to_string())
-            );
-        }
-        v.round() as i64
-    };
-
-    let price_micros: i64 = {
-        let f: f64 = match rest_fill.price_str.parse() {
-            Ok(v) => v,
-            Err(_) => {
-                let evidence = format!(
-                    "REST activity (id='{}') price='{}' is not a valid number; \
-                     manual reconcile required.",
-                    rest_fill.broker_activity_id, rest_fill.price_str
-                );
-                let audit_id = write_rest_recovery_audit(
-                    &rest_audit_ctx,
-                    "refused",
-                    "repair.recovery_data_malformed",
-                    &evidence,
-                )
-                .await;
-                return refused_active!(
-                    classification,
-                    evidence,
-                    Some("repair.recovery_data_malformed".to_string()),
-                    audit_id.map(|id| id.to_string())
-                );
-            }
-        };
-        match mqk_execution::price_to_micros(f) {
-            Ok(m) => m,
-            Err(_) => {
-                let evidence = format!(
-                    "REST activity (id='{}') price='{}' could not be converted to micros; \
-                     manual reconcile required.",
-                    rest_fill.broker_activity_id, rest_fill.price_str
-                );
-                let audit_id = write_rest_recovery_audit(
-                    &rest_audit_ctx,
-                    "refused",
-                    "repair.recovery_data_malformed",
-                    &evidence,
-                )
-                .await;
-                return refused_active!(
-                    classification,
-                    evidence,
-                    Some("repair.recovery_data_malformed".to_string()),
-                    audit_id.map(|id| id.to_string())
-                );
-            }
-        }
-    };
-
-    let side = match rest_fill.side.as_str() {
-        "buy" => mqk_execution::Side::Buy,
-        "sell" => mqk_execution::Side::Sell,
-        other => {
-            let evidence = format!(
-                "REST activity (id='{}') side='{}' is not 'buy' or 'sell'; \
-                 manual reconcile required.",
-                rest_fill.broker_activity_id, other
-            );
-            let audit_id = write_rest_recovery_audit(
-                &rest_audit_ctx,
-                "refused",
-                "repair.recovery_data_malformed",
-                &evidence,
-            )
-            .await;
-            return refused_active!(
-                classification,
-                evidence,
-                Some("repair.recovery_data_malformed".to_string()),
-                audit_id.map(|id| id.to_string())
-            );
-        }
-    };
-
-    // ---------------------------------------------------------------------------
-    // Gate 11: build canonical BrokerEvent and stable inbox identity.
+    // PAPER-SOAK-ALPACA-FILL-ECONOMIC-AUTHORITY-CLOSURE-01: this route
+    // previously hand-rolled its own qty/price/side parsing (a third,
+    // independent implementation alongside `fetch_events` and WS-gap
+    // recovery) and hardcoded `cum_qty_after: None` for partial fills. Using
+    // the shared seam closes both: quantity parsing is the same canonical
+    // whole-share parser used everywhere else (no independent rounding
+    // behavior to drift), and a partial_fill's broker-native `cum_qty` is
+    // now carried through as `cum_qty_after`. Gate 8b already proved this
+    // activity's `cum_qty` is present/parseable when it is a partial_fill,
+    // so this cannot fail here on that account; the other failure modes
+    // (missing/invalid qty, price, side) are the same ones Gate 8 already
+    // checked for non-emptiness, re-validated here for actual parseability.
     //
     // broker_message_id is deterministic: same activity ID → same inbox key.
     // This is the idempotency anchor for retry safety.
-    // ---------------------------------------------------------------------------
     let stable_msg_id = format!("alpaca-rest-recovery:{}", rest_fill.broker_activity_id);
-    // PAPER-SOAK-ALPACA-TRADE-ACTIVITY-SCHEMA-01: fill subtype comes from
-    // `classify_fill_subtype` (activity_type=="FILL" + the documented `type`
-    // field), not `activity_type == "PARTIAL_FILL"` — that value never
-    // appears on the real wire. Gate 7 already filtered `fill_activities` to
-    // activities with a recognized subtype, so this cannot fail here.
+    let broker_event = match mqk_broker_alpaca::fill_authority::activity_to_fill_broker_event(
+        activity,
+        stable_msg_id.clone(),
+        body.internal_order_id.clone(),
+    ) {
+        Ok(ev) => ev,
+        Err(e) => {
+            let evidence = format!(
+                "REST activity (id='{}') for broker_order_id='{}' failed economic \
+                 conversion: {e}. Manual reconcile required.",
+                rest_fill.broker_activity_id, body.broker_order_id
+            );
+            let audit_id = write_rest_recovery_audit(
+                &rest_audit_ctx,
+                "refused",
+                "repair.recovery_data_malformed",
+                &evidence,
+            )
+            .await;
+            return refused_active!(
+                classification,
+                evidence,
+                Some("repair.recovery_data_malformed".to_string()),
+                audit_id.map(|id| id.to_string())
+            );
+        }
+    };
+    // event_kind used below for the inbox insert's event_kind column.
     let event_kind = mqk_broker_alpaca::classify_fill_subtype(activity)
         .ok()
         .flatten()
         .expect("Gate 7 already filtered to activities with a recognized fill subtype");
-    let broker_event = match event_kind {
-        "partial_fill" => mqk_execution::BrokerEvent::PartialFill {
-            broker_message_id: stable_msg_id.clone(),
-            broker_fill_id: Some(rest_fill.broker_activity_id.clone()),
-            internal_order_id: body.internal_order_id.clone(),
-            broker_order_id: Some(body.broker_order_id.clone()),
-            symbol: rest_fill.symbol.clone(),
-            side,
-            delta_qty,
-            price_micros,
-            fee_micros: 0,
-            // This is the operator-gated, single-order, confirmation-required
-            // halted-run repair path (requires dry_run=false and an explicit
-            // "APPLY_REST_FILL_RECOVERY" confirmation string) — it does not
-            // run against a live WS lane and never batches multiple fills
-            // per invocation, so it has no cheap access to a
-            // point-in-time-correct broker cumulative watermark here (no
-            // `fetch_order` call precedes this). Correctness for this
-            // narrower, gated path continues to rest on its own explicit
-            // operator confirmation plus the still-transport-deduped inbox
-            // insert, not on the OMS apply-layer watermark introduced by
-            // PAPER-SOAK-PARTIAL-FILL-DEDUP-02.
-            cum_qty_after: None,
-        },
-        _ => mqk_execution::BrokerEvent::Fill {
-            broker_message_id: stable_msg_id.clone(),
-            broker_fill_id: Some(rest_fill.broker_activity_id.clone()),
-            internal_order_id: body.internal_order_id.clone(),
-            broker_order_id: Some(body.broker_order_id.clone()),
-            symbol: rest_fill.symbol.clone(),
-            side,
-            delta_qty,
-            price_micros,
-            fee_micros: 0,
-        },
-    };
     let event_json =
         serde_json::to_value(&broker_event).expect("BrokerEvent serializes to JSON infallibly");
 
@@ -1925,14 +1857,16 @@ pub(crate) async fn repair_halted_run_fill_rest_recovery(
         .ok()
         .map(|dt| dt.with_timezone(&Utc))
         .unwrap_or_else(Utc::now);
-    // PAPER-SOAK-PARTIAL-FILL-DEDUP-01: a real broker-reported event_ts_ms is
-    // required for inbox_insert_partial_fill_deduped's economic-match window
-    // (mqk-db::inbox) to discriminate between distinct partial fills for this
-    // order. `stable_msg_id` is a synthetic "alpaca-rest-recovery:{activity_id}"
-    // identity, not Alpaca wire format, so `alpaca_event_ts_ms_from_message_id`
-    // cannot derive a timestamp from it; derive one directly from the REST
-    // activity's own transaction timestamp instead. Falls back to 0 (parse
-    // failure) only when the source timestamp itself is unparseable.
+    // `event_ts_ms` is diagnostic/ordering metadata carried on the inbox row
+    // (not an economic-dedup mechanism — that is `cum_qty_after`, carried on
+    // `broker_event` itself and enforced by `OmsOrder::apply_with_watermark`
+    // at apply/replay time, per PAPER-SOAK-ALPACA-FILL-ECONOMIC-AUTHORITY-
+    // CLOSURE-01). `stable_msg_id` is a synthetic
+    // "alpaca-rest-recovery:{activity_id}" identity, not Alpaca wire format,
+    // so `alpaca_event_ts_ms_from_message_id` cannot derive a timestamp from
+    // it; derive one directly from the REST activity's own transaction
+    // timestamp instead. Falls back to 0 (parse failure) only when the
+    // source timestamp itself is unparseable.
     let event_ts_ms = chrono::DateTime::parse_from_rfc3339(&rest_fill.timestamp)
         .map(|dt| dt.timestamp_millis()) // allow: broker-sourced timestamp, not wall-clock
         .unwrap_or(0);

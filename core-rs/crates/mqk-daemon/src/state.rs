@@ -880,10 +880,23 @@ pub(crate) struct RunStartLocalBundle {
 /// it without a module cycle.  Tests inject a fake implementation; production wiring
 /// is deferred to BROKER-FILL-REST-RECOVERY-APPLY-01.
 pub trait BrokerFillActivityFetcher: Send + Sync {
-    /// Fetch all account activities for the given Alpaca broker order UUID.
+    /// Fetch account activities for the given Alpaca broker order UUID.
     ///
-    /// Callers filter the returned list for FILL/PARTIAL_FILL activity types.
-    /// Returns `Err(String)` if the REST call fails.
+    /// PAPER-SOAK-ALPACA-FILL-ECONOMIC-AUTHORITY-CLOSURE-01: Alpaca's Account
+    /// Activities endpoint does not document `order_id` as a supported query
+    /// parameter, so implementations must not rely on undocumented
+    /// server-side filtering by it. The production implementation
+    /// (`AlpacaBrokerAdapter::fetch_fill_activities_for_order`) paginates the
+    /// account-wide FILL activity feed to exhaustion (or a bounded page
+    /// limit, failing closed if exceeded) and filters to an exact
+    /// `activity.order_id == broker_order_id` match locally.
+    ///
+    /// Callers must still filter the returned list for genuine FILL-class
+    /// activities with a recognized subtype (`classify_fill_subtype`) and
+    /// must independently re-verify exact `order_id` equality before any
+    /// mutation — defense in depth against a test-injected or
+    /// non-conforming implementation of this trait that does not uphold the
+    /// exact-match contract. Returns `Err(String)` if the REST call fails.
     fn fetch_fill_activities_for_order(
         &self,
         broker_order_id: &str,

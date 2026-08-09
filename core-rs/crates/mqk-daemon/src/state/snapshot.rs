@@ -621,10 +621,40 @@ pub(crate) async fn recover_oms_and_portfolio(
             .unwrap_or_else(|| row.broker_message_id.clone());
         let oms_noop = if let Some(order) = oms_orders.get_mut(&internal_id) {
             let pre_qty = order.filled_qty;
-            let _ = order.apply(&oms_event, Some(&economic_event_id));
+            // PAPER-SOAK-ALPACA-FILL-ECONOMIC-AUTHORITY-CLOSURE-01: durable
+            // replay must use the SAME duplicate-protection semantics as the
+            // live apply path (`apply_fill_step` in
+            // mqk-runtime::orchestrator::apply). A plain `apply` here only
+            // dedups on `economic_event_id`, which differs across transport
+            // lanes for the SAME physical execution (WS vs REST) — durable
+            // replay of a cross-lane duplicate could advance filled_qty
+            // twice for one execution. `apply_with_watermark` additionally
+            // treats the event's own `cum_qty_after` (broker-native,
+            // lane-independent) as economic identity, so a cross-lane
+            // duplicate is recognized as already-applied even under a
+            // never-before-seen `economic_event_id`.
+            //
+            // The Result is now propagated instead of discarded: durable
+            // replay is authoritative accounting/restart truth and must fail
+            // closed on an illegal OMS transition (e.g. a fill after a
+            // confirmed cancel/reject) rather than silently dropping it and
+            // fabricating a portfolio that never legally existed.
+            order
+                .apply_with_watermark(&oms_event, Some(&economic_event_id), event.cum_qty_after())
+                .map_err(|e| {
+                    super::types::RuntimeLifecycleError::internal(
+                        "recover_oms_and_portfolio.illegal_transition",
+                        format!(
+                            "run_id={run_id} inbox_id={} broker_message_id={} \
+                             internal_order_id={internal_id} event={oms_event:?}: {e}",
+                            row.inbox_id, row.broker_message_id,
+                        ),
+                    )
+                })?;
             // Detect duplicate fills: if filled_qty did not advance, the OMS
-            // treated this as a no-op (duplicate event_id or terminal-state
-            // guard).  Skip the portfolio mutation to prevent double-counting.
+            // treated this as a no-op (duplicate event_id, cross-lane
+            // duplicate via watermark, or terminal-state guard).  Skip the
+            // portfolio mutation to prevent double-counting.
             is_fill && order.filled_qty == pre_qty
         } else {
             false
@@ -1602,5 +1632,490 @@ mod baseline_ledger_parity_tests {
 
         // `pf` is unchanged by the ACK — invariant must still hold.
         assert_capital_invariants_hold(&pf);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PAPER-SOAK-ALPACA-FILL-ECONOMIC-AUTHORITY-CLOSURE-01: recover_oms_and_portfolio
+// durable-replay watermark + fail-closed-transition proofs.
+//
+// These exercise the REAL `recover_oms_and_portfolio` function (not a
+// reimplementation) against a disposable Postgres DB, using the exact
+// oms_outbox/oms_inbox row shapes production writes
+// (`mqk_db::outbox_enqueue` + raw SQL SENT transition +
+// `mqk_db::inbox_insert_deduped_with_identity` + `mqk_db::inbox_mark_applied`).
+//
+// NEG-1 / E03 / E04: a single physical partial-fill execution observed on
+// both the WS lane (no broker_fill_id, economic identity = broker_message_id)
+// and the REST lane (broker_fill_id = the Alpaca activity id) leaves two
+// durable raw inbox rows with DIFFERENT broker_message_id / economic
+// identity. Before this patch, durable replay called plain `OmsOrder::apply`
+// (event_id-only dedup), so the second row was NOT recognized as a
+// duplicate and advanced filled_qty a second time — final qty 20 for one
+// physical 10-share execution. After this patch, replay uses
+// `apply_with_watermark` with the event's own broker-native `cum_qty_after`,
+// so the second row's cumulative (10) does not exceed the already-applied
+// filled_qty (10) and is a no-op regardless of raw-row order.
+//
+// NEG-6 / E20: an illegal durable transition (a Fill event applied after a
+// confirmed Reject) must now propagate as `Err`, not be silently discarded
+// by a `let _ = order.apply(...)`.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod fill_economic_authority_closure_tests {
+    use super::recover_oms_and_portfolio;
+    use chrono::{TimeZone, Utc};
+    use mqk_execution::{BrokerEvent, Side};
+    use uuid::Uuid;
+
+    fn fixed_run_id(seed: &str) -> Uuid {
+        Uuid::new_v5(
+            &Uuid::NAMESPACE_DNS,
+            format!("test.fill-economic-authority-closure.v1|{seed}").as_bytes(),
+        )
+    }
+
+    async fn fixture_run(pool: &sqlx::PgPool, run_id: Uuid) {
+        mqk_db::insert_run(
+            pool,
+            &mqk_db::NewRun {
+                run_id,
+                engine_id: "test-fill-economic-authority".to_string(),
+                mode: "PAPER".to_string(),
+                started_at_utc: Utc.with_ymd_and_hms(2099, 4, 1, 12, 0, 0).unwrap(),
+                git_hash: "test".to_string(),
+                config_hash: "test".to_string(),
+                config_json: serde_json::json!({}),
+                host_fingerprint: "test".to_string(),
+            },
+        )
+        .await
+        .expect("fixture run insert should succeed");
+    }
+
+    /// Enqueues a SENT outbox order for `order_id`/`symbol`/`total_qty` — the
+    /// prerequisite `recover_oms_and_portfolio` requires to construct an
+    /// `OmsOrder` for a given `internal_order_id`.
+    async fn fixture_order(
+        pool: &sqlx::PgPool,
+        run_id: Uuid,
+        order_id: &str,
+        symbol: &str,
+        total_qty: i64,
+        side: &str,
+    ) {
+        mqk_db::outbox_enqueue(
+            pool,
+            run_id,
+            order_id,
+            serde_json::json!({"symbol": symbol, "qty": total_qty, "side": side}),
+        )
+        .await
+        .expect("outbox_enqueue should succeed");
+        sqlx::query("update oms_outbox set status = 'SENT' where idempotency_key = $1")
+            .bind(order_id)
+            .execute(pool)
+            .await
+            .expect("mark outbox SENT should succeed");
+    }
+
+    /// Inserts one already-applied inbox row carrying `event`.
+    #[allow(clippy::too_many_arguments)]
+    async fn fixture_applied_event(
+        pool: &sqlx::PgPool,
+        run_id: Uuid,
+        broker_message_id: &str,
+        broker_fill_id: Option<&str>,
+        internal_order_id: &str,
+        broker_order_id: &str,
+        event_kind: &str,
+        event: &BrokerEvent,
+        at: chrono::DateTime<Utc>,
+    ) {
+        let json = serde_json::to_value(event).expect("serialize BrokerEvent");
+        mqk_db::inbox_insert_deduped_with_identity(
+            pool,
+            run_id,
+            broker_message_id,
+            broker_fill_id,
+            internal_order_id,
+            broker_order_id,
+            event_kind,
+            &json,
+            0,
+            at,
+        )
+        .await
+        .expect("inbox insert should succeed");
+        mqk_db::inbox_mark_applied(pool, run_id, broker_message_id, at)
+            .await
+            .expect("inbox mark applied should succeed");
+    }
+
+    fn ws_partial(order_id: &str, delta_qty: i64, price_micros: i64, cum: i64) -> BrokerEvent {
+        BrokerEvent::PartialFill {
+            broker_message_id: format!("alpaca:{order_id}:partial_fill:ws-{cum}"),
+            broker_fill_id: None,
+            internal_order_id: order_id.to_string(),
+            broker_order_id: Some("broker-order-1".to_string()),
+            symbol: "AAPL".to_string(),
+            side: Side::Buy,
+            delta_qty,
+            price_micros,
+            fee_micros: 0,
+            cum_qty_after: Some(cum),
+        }
+    }
+
+    fn rest_partial_duplicate_of(
+        order_id: &str,
+        activity_id: &str,
+        delta_qty: i64,
+        price_micros: i64,
+        cum: i64,
+    ) -> BrokerEvent {
+        BrokerEvent::PartialFill {
+            broker_message_id: format!("alpaca-rest-recovery:{activity_id}"),
+            broker_fill_id: Some(activity_id.to_string()),
+            internal_order_id: order_id.to_string(),
+            broker_order_id: Some("broker-order-1".to_string()),
+            symbol: "AAPL".to_string(),
+            side: Side::Buy,
+            delta_qty,
+            price_micros,
+            fee_micros: 0,
+            cum_qty_after: Some(cum),
+        }
+    }
+
+    /// NEG-1 / E03: WS partial applied first, REST duplicate of the SAME
+    /// physical execution applied second (different broker_message_id AND
+    /// different broker_fill_id-derived economic identity). Durable replay
+    /// must converge to qty=10, not 20.
+    #[tokio::test]
+    async fn e03_ws_then_rest_cross_lane_duplicate_replays_to_ten_not_twenty() {
+        mqk_db::run_isolated("e03_ws_then_rest_dup", |pool| async move {
+            let run_id = fixed_run_id("e03_ws_then_rest_dup");
+            let order_id = "order-e03";
+            fixture_run(&pool, run_id).await;
+            fixture_order(&pool, run_id, order_id, "AAPL", 10, "buy").await;
+
+            let at = Utc.with_ymd_and_hms(2099, 4, 1, 13, 0, 0).unwrap();
+            let ws_ev = ws_partial(order_id, 10, 100_000_000, 10);
+            fixture_applied_event(
+                &pool,
+                run_id,
+                ws_ev.broker_message_id(),
+                None,
+                order_id,
+                "broker-order-1",
+                "partial_fill",
+                &ws_ev,
+                at,
+            )
+            .await;
+            let rest_ev = rest_partial_duplicate_of(order_id, "activity-e03", 10, 100_000_000, 10);
+            fixture_applied_event(
+                &pool,
+                run_id,
+                rest_ev.broker_message_id(),
+                Some("activity-e03"),
+                order_id,
+                "broker-order-1",
+                "partial_fill",
+                &rest_ev,
+                at,
+            )
+            .await;
+
+            let (_, _, portfolio) = recover_oms_and_portfolio(&pool, run_id, 100_000_000_000)
+                .await
+                .expect("recover_oms_and_portfolio should succeed");
+            let qty = portfolio
+                .positions
+                .get("AAPL")
+                .map(|p| p.qty_signed())
+                .unwrap_or(0);
+            assert_eq!(
+                qty, 10,
+                "cross-lane WS-then-REST duplicate of one physical 10@$100 execution \
+                 must replay to qty=10, not 20"
+            );
+        })
+        .await;
+    }
+
+    /// NEG-1 / E04: same physical duplicate, REST row applied FIRST and WS
+    /// row SECOND (reversed raw-row order). Final economic result must be
+    /// identical to E03 — order of durable observation must not matter.
+    #[tokio::test]
+    async fn e04_rest_then_ws_cross_lane_duplicate_replays_to_ten_not_twenty() {
+        mqk_db::run_isolated("e04_rest_then_ws_dup", |pool| async move {
+            let run_id = fixed_run_id("e04_rest_then_ws_dup");
+            let order_id = "order-e04";
+            fixture_run(&pool, run_id).await;
+            fixture_order(&pool, run_id, order_id, "AAPL", 10, "buy").await;
+
+            let at = Utc.with_ymd_and_hms(2099, 4, 1, 13, 0, 0).unwrap();
+            let rest_ev = rest_partial_duplicate_of(order_id, "activity-e04", 10, 100_000_000, 10);
+            fixture_applied_event(
+                &pool,
+                run_id,
+                rest_ev.broker_message_id(),
+                Some("activity-e04"),
+                order_id,
+                "broker-order-1",
+                "partial_fill",
+                &rest_ev,
+                at,
+            )
+            .await;
+            let ws_ev = ws_partial(order_id, 10, 100_000_000, 10);
+            fixture_applied_event(
+                &pool,
+                run_id,
+                ws_ev.broker_message_id(),
+                None,
+                order_id,
+                "broker-order-1",
+                "partial_fill",
+                &ws_ev,
+                at,
+            )
+            .await;
+
+            let (_, _, portfolio) = recover_oms_and_portfolio(&pool, run_id, 100_000_000_000)
+                .await
+                .expect("recover_oms_and_portfolio should succeed");
+            let qty = portfolio
+                .positions
+                .get("AAPL")
+                .map(|p| p.qty_signed())
+                .unwrap_or(0);
+            assert_eq!(
+                qty, 10,
+                "cross-lane REST-then-WS duplicate of one physical 10@$100 execution \
+                 must replay to qty=10, not 20 — order of raw observation must not matter"
+            );
+        })
+        .await;
+    }
+
+    /// E06: two legitimate distinct partials (A=10@$100 cum10, B=10@$101
+    /// cum20) followed by a LATE duplicate of A (cum10) arriving after B.
+    /// The late duplicate must no-op; final qty must be exactly 20 (A+B),
+    /// never 30.
+    #[tokio::test]
+    async fn e06_late_duplicate_after_newer_partial_does_not_inflate_qty() {
+        mqk_db::run_isolated("e06_late_dup_after_newer", |pool| async move {
+            let run_id = fixed_run_id("e06_late_dup_after_newer");
+            let order_id = "order-e06";
+            fixture_run(&pool, run_id).await;
+            fixture_order(&pool, run_id, order_id, "AAPL", 20, "buy").await;
+
+            let at = Utc.with_ymd_and_hms(2099, 4, 1, 13, 0, 0).unwrap();
+            let a = ws_partial(order_id, 10, 100_000_000, 10);
+            fixture_applied_event(
+                &pool,
+                run_id,
+                a.broker_message_id(),
+                None,
+                order_id,
+                "broker-order-1",
+                "partial_fill",
+                &a,
+                at,
+            )
+            .await;
+            let b = ws_partial(order_id, 10, 101_000_000, 20);
+            fixture_applied_event(
+                &pool,
+                run_id,
+                b.broker_message_id(),
+                None,
+                order_id,
+                "broker-order-1",
+                "partial_fill",
+                &b,
+                at,
+            )
+            .await;
+            // Late duplicate of A over the REST lane — different economic
+            // identity, same cum_qty_after=10 (already reflected).
+            let late_dup_a =
+                rest_partial_duplicate_of(order_id, "activity-e06-late-a", 10, 100_000_000, 10);
+            fixture_applied_event(
+                &pool,
+                run_id,
+                late_dup_a.broker_message_id(),
+                Some("activity-e06-late-a"),
+                order_id,
+                "broker-order-1",
+                "partial_fill",
+                &late_dup_a,
+                at,
+            )
+            .await;
+
+            let (_, _, portfolio) = recover_oms_and_portfolio(&pool, run_id, 100_000_000_000)
+                .await
+                .expect("recover_oms_and_portfolio should succeed");
+            let qty = portfolio
+                .positions
+                .get("AAPL")
+                .map(|p| p.qty_signed())
+                .unwrap_or(0);
+            assert_eq!(
+                qty, 20,
+                "late duplicate of an earlier partial arriving after a newer partial \
+                 must no-op; final qty must be A+B=20, never 30"
+            );
+        })
+        .await;
+    }
+
+    /// E07: mixed-price sequence — partial 10@$100 then terminal fill
+    /// 10@$102. Final qty must be 20 with exact price attribution preserved
+    /// per-fill (proven via exact cash_micros, which sums each fill's own
+    /// price — a price-collapsing bug would produce a different total).
+    #[tokio::test]
+    async fn e07_mixed_price_terminal_sequence_preserves_exact_price_attribution() {
+        mqk_db::run_isolated("e07_mixed_price", |pool| async move {
+            let run_id = fixed_run_id("e07_mixed_price");
+            let order_id = "order-e07";
+            fixture_run(&pool, run_id).await;
+            fixture_order(&pool, run_id, order_id, "AAPL", 20, "buy").await;
+
+            let at = Utc.with_ymd_and_hms(2099, 4, 1, 13, 0, 0).unwrap();
+            let partial = ws_partial(order_id, 10, 100_000_000, 10);
+            fixture_applied_event(
+                &pool,
+                run_id,
+                partial.broker_message_id(),
+                None,
+                order_id,
+                "broker-order-1",
+                "partial_fill",
+                &partial,
+                at,
+            )
+            .await;
+            let terminal = BrokerEvent::Fill {
+                broker_message_id: format!("alpaca:{order_id}:fill:term"),
+                broker_fill_id: None,
+                internal_order_id: order_id.to_string(),
+                broker_order_id: Some("broker-order-1".to_string()),
+                symbol: "AAPL".to_string(),
+                side: Side::Buy,
+                delta_qty: 10,
+                price_micros: 102_000_000,
+                fee_micros: 0,
+            };
+            fixture_applied_event(
+                &pool,
+                run_id,
+                terminal.broker_message_id(),
+                None,
+                order_id,
+                "broker-order-1",
+                "fill",
+                &terminal,
+                at,
+            )
+            .await;
+
+            let (_, _, portfolio) = recover_oms_and_portfolio(&pool, run_id, 100_000_000_000)
+                .await
+                .expect("recover_oms_and_portfolio should succeed");
+            let qty = portfolio
+                .positions
+                .get("AAPL")
+                .map(|p| p.qty_signed())
+                .unwrap_or(0);
+            assert_eq!(qty, 20, "10@$100 + 10@$102 must total 20 shares exactly");
+            let expected_cash = 100_000_000_000 - (10 * 100_000_000 + 10 * 102_000_000);
+            assert_eq!(
+                portfolio.cash_micros, expected_cash,
+                "cash must reflect each fill's OWN price, not a collapsed/averaged price"
+            );
+        })
+        .await;
+    }
+
+    /// NEG-6 / E20: an illegal durable transition — a Fill arriving after a
+    /// confirmed Reject — must now propagate as `Err`, not be silently
+    /// discarded. This is the fail-closed proof for durable/restart replay.
+    #[tokio::test]
+    async fn neg6_e20_illegal_transition_after_reject_fails_closed() {
+        mqk_db::run_isolated("neg6_illegal_after_reject", |pool| async move {
+            let run_id = fixed_run_id("neg6_illegal_after_reject");
+            let order_id = "order-neg6";
+            fixture_run(&pool, run_id).await;
+            fixture_order(&pool, run_id, order_id, "AAPL", 10, "buy").await;
+
+            let at = Utc.with_ymd_and_hms(2099, 4, 1, 13, 0, 0).unwrap();
+            let reject = BrokerEvent::Reject {
+                broker_message_id: "reject-1".to_string(),
+                internal_order_id: order_id.to_string(),
+                broker_order_id: Some("broker-order-1".to_string()),
+            };
+            fixture_applied_event(
+                &pool,
+                run_id,
+                "reject-1",
+                None,
+                order_id,
+                "broker-order-1",
+                "reject",
+                &reject,
+                at,
+            )
+            .await;
+            // Illegal: a Fill arriving on an order the broker already
+            // confirmed Rejected.
+            let late_fill = BrokerEvent::Fill {
+                broker_message_id: "fill-late".to_string(),
+                broker_fill_id: None,
+                internal_order_id: order_id.to_string(),
+                broker_order_id: Some("broker-order-1".to_string()),
+                symbol: "AAPL".to_string(),
+                side: Side::Buy,
+                delta_qty: 10,
+                price_micros: 100_000_000,
+                fee_micros: 0,
+            };
+            fixture_applied_event(
+                &pool,
+                run_id,
+                "fill-late",
+                None,
+                order_id,
+                "broker-order-1",
+                "fill",
+                &late_fill,
+                at,
+            )
+            .await;
+
+            let result = recover_oms_and_portfolio(&pool, run_id, 100_000_000_000).await;
+            let err = result.expect_err(
+                "durable replay must fail closed on an illegal OMS transition, \
+                 not silently swallow it and fabricate a portfolio",
+            );
+            let msg = format!("{err}");
+            assert!(
+                msg.contains("run_id="),
+                "error must carry run_id for diagnosis: {msg}"
+            );
+            assert!(
+                msg.contains("fill-late"),
+                "error must carry the offending broker_message_id: {msg}"
+            );
+            assert!(
+                msg.contains(order_id),
+                "error must carry the internal_order_id: {msg}"
+            );
+        })
+        .await;
     }
 }
