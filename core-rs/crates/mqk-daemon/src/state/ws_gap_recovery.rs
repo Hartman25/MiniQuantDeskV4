@@ -322,7 +322,7 @@ pub(crate) async fn run_ws_gap_fill_recovery_core(
         // deduplicate against. Derive it from the activity's own transaction
         // timestamp instead; 0 only on genuine parse failure.
         let event_ts_ms = chrono::DateTime::parse_from_rfc3339(&activity.transaction_time)
-            .map(|dt| dt.timestamp_millis())
+            .map(|dt| dt.timestamp_millis()) // allow: broker-sourced timestamp, not wall-clock
             .unwrap_or(0);
 
         let fill = WsGapRecoveredFill {

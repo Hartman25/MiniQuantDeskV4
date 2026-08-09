@@ -1909,7 +1909,7 @@ pub(crate) async fn repair_halted_run_fill_rest_recovery(
     // activity's own transaction timestamp instead. Falls back to 0 (parse
     // failure) only when the source timestamp itself is unparseable.
     let event_ts_ms = chrono::DateTime::parse_from_rfc3339(&rest_fill.timestamp)
-        .map(|dt| dt.timestamp_millis())
+        .map(|dt| dt.timestamp_millis()) // allow: broker-sourced timestamp, not wall-clock
         .unwrap_or(0);
 
     // ---------------------------------------------------------------------------

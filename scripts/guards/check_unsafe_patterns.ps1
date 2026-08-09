@@ -26,6 +26,10 @@
 #     mqk-daemon/src/routes/backtests.rs job_id    -- "// allow: process-local transient job identifier"
 #     mqk-daemon/src/routes/ingest.rs    job_id(s) -- "// allow: process-local transient job identifier"
 #     mqk-daemon/src/state.rs            heartbeat  -- "// allow: ops-metadata"
+#     mqk-daemon/src/routes/repair.rs, mqk-daemon/src/state/ws_gap_recovery.rs
+#       event_ts_ms (parsed from broker REST activity timestamp, used as an
+#       economic-match-window discriminator, not a wall-clock read) --
+#       "// allow: broker-sourced timestamp, not wall-clock"
 #
 #   Current allow-listed items (SQL -- allow:, used in [Q] guard):
 #     mqk-db/src/lib.rs arm_run armed_at_utc       -- "-- allow: ops-metadata"

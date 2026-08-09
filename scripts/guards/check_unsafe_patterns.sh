@@ -26,6 +26,10 @@
 #     mqk-daemon/src/state.rs spawn_heartbeat ts  — "// allow: ops-metadata"
 #     (WallClock::now_utc() was moved to mqk-runtime/src/orchestrator.rs in D1-3;
 #      it is outside the [T] guard scope of mqk-db/src/)
+#     mqk-daemon/src/routes/repair.rs, mqk-daemon/src/state/ws_gap_recovery.rs
+#       event_ts_ms (parsed from broker REST activity timestamp, used as an
+#       economic-match-window discriminator, not a wall-clock read) —
+#       "// allow: broker-sourced timestamp, not wall-clock"
 #
 #   Current allow-listed items (SQL -- allow:, used in [Q] guard):
 #     mqk-db/src/lib.rs arm_run armed_at_utc      — "-- allow: ops-metadata"

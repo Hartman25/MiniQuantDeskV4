@@ -617,7 +617,10 @@ mod tests {
         mqk_db::run_isolated("hermetic_stale_claim_build", |pool| async move {
             let st = hermetic_order_daemon_state(pool.clone()).await;
 
-            let run_id = uuid::Uuid::new_v4();
+            let run_id = uuid::Uuid::new_v5(
+                &uuid::Uuid::NAMESPACE_DNS,
+                b"mqk.test.hermetic_build_execution_orchestrator_resets_stale_claim_on_construction",
+            );
             mqk_db::insert_run(
                 &pool,
                 &mqk_db::NewRun {
