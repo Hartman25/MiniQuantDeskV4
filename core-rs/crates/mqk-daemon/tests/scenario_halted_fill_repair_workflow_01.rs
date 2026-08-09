@@ -62,6 +62,7 @@ fn make_fill_activity(activity_id: &str, order_id: &str) -> AlpacaOrderActivity 
     AlpacaOrderActivity {
         id: activity_id.to_string(),
         activity_type: "FILL".to_string(),
+        trade_type: Some("fill".to_string()),
         order_id: order_id.to_string(),
         transaction_time: "2026-05-08T14:30:00.000000000Z".to_string(),
         price: Some("152.75".to_string()),

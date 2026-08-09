@@ -161,10 +161,27 @@ pub(crate) async fn run_ws_gap_fill_recovery_core(
 
     // Match each REST activity to a known broker order for this run.
     'activity: for activity in &activities {
-        // Filter: only FILL or PARTIAL_FILL activity types.
-        if activity.activity_type != "FILL" && activity.activity_type != "PARTIAL_FILL" {
-            continue;
-        }
+        // Filter: only genuine FILL-class activities with a recognized fill
+        // subtype (PAPER-SOAK-ALPACA-TRADE-ACTIVITY-SCHEMA-01). Per Alpaca's
+        // documented TradeActivity schema, `activity_type` is always `"FILL"`
+        // for a trade activity; `classify_fill_subtype` reads the separate
+        // `type` field (`"fill"` | `"partial_fill"`) for the terminal/partial
+        // distinction -- `activity_type == "PARTIAL_FILL"` never appears on
+        // the real wire.
+        let event_kind = match mqk_broker_alpaca::classify_fill_subtype(activity) {
+            Ok(Some(kind)) => kind,
+            Ok(None) => continue, // not a FILL-class activity (NEW/CANCELED/etc.)
+            Err(e) => {
+                malformed_count += 1;
+                has_unsafe_fill = true;
+                tracing::warn!(
+                    "run_ws_gap_fill_recovery_core: activity '{}' fill-subtype \
+                     classification failed (fail-closed): {e}",
+                    activity.id
+                );
+                continue 'activity;
+            }
+        };
 
         // Match order_id to broker_order_map for this run.
         let map_entry = run_broker_map
@@ -222,11 +239,6 @@ pub(crate) async fn run_ws_gap_fill_recovery_core(
 
         // Build stable broker_message_id — idempotency anchor for retry safety.
         let stable_msg_id = format!("{GAP_RECOVERY_MSG_PREFIX}:{}", activity.id);
-        let event_kind = if activity.activity_type == "PARTIAL_FILL" {
-            "partial_fill"
-        } else {
-            "fill"
-        };
 
         // Parse qty / price — fail closed per activity.
         let qty_f64: f64 = match qty_str.parse::<f64>() {

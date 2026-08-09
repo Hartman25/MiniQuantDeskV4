@@ -35,6 +35,23 @@
 //! A04-2 (MANDATORY, mission A04-2 / NEG-2): cross-page contamination is structurally
 //!      impossible now — page 1's activities each carry their own `cum_qty`, never
 //!      derived from a current-order total that already reflects page 2.
+//! P11  PAPER-SOAK-ALPACA-TRADE-ACTIVITY-SCHEMA-01 (mission S06): two partials sharing
+//!      the same price and same per-event qty are distinguished solely by `cum_qty`;
+//!      both apply as genuine, separate economic events.
+//! P12  PAPER-SOAK-ALPACA-TRADE-ACTIVITY-SCHEMA-01 (mission S08): a malformed
+//!      (non-numeric) `cum_qty` on a partial fill fails the whole page closed, same
+//!      as a missing `cum_qty` (P10).
+//! P13  PAPER-SOAK-ALPACA-TRADE-ACTIVITY-SCHEMA-01 (mission S09): a FILL-class
+//!      activity with no `type` field fails closed rather than defaulting to a
+//!      terminal fill.
+//! P14  PAPER-SOAK-ALPACA-TRADE-ACTIVITY-SCHEMA-01 (mission S10): a FILL-class
+//!      activity with an unrecognized `type` value fails closed.
+//!
+//! All real-shape fixtures in P06 onward use Alpaca's documented TradeActivity
+//! shape: `activity_type` is always `"FILL"`; the terminal/partial distinction is
+//! carried by the separate `type` field (`"fill"` | `"partial_fill"`).
+//! `activity_type: "PARTIAL_FILL"` never appears on the real wire and is no longer
+//! used by any fixture in this file (PAPER-SOAK-ALPACA-TRADE-ACTIVITY-SCHEMA-01).
 //!
 //! All tests use a local std::net::TcpListener mock server — no live network, no DB.
 //!
@@ -85,12 +102,17 @@ fn write_json_response(stream: &mut impl Write, body: &str) {
     stream.write_all(resp.as_bytes()).ok();
 }
 
-/// Build a FILL activity JSON object.  `id` and `transaction_time` carry
-/// distinct values so tests can verify the cursor uses `id`, not `transaction_time`.
+/// Build a real-shape terminal-fill activity JSON object: `activity_type`
+/// is always `"FILL"` per Alpaca's documented TradeActivity schema, with the
+/// terminal/partial distinction carried by the separate `type` field
+/// (PAPER-SOAK-ALPACA-TRADE-ACTIVITY-SCHEMA-01).  `id` and `transaction_time`
+/// carry distinct values so tests can verify the cursor uses `id`, not
+/// `transaction_time`.
 fn activity_json(id: &str, order_id: &str, ts: &str) -> serde_json::Value {
     serde_json::json!({
         "id": id,
         "activity_type": "FILL",
+        "type": "fill",
         "order_id": order_id,
         "transaction_time": ts,
         "price": "150.00",
@@ -100,9 +122,12 @@ fn activity_json(id: &str, order_id: &str, ts: &str) -> serde_json::Value {
     })
 }
 
-/// Build a PARTIAL_FILL activity JSON object with an explicit `qty` and its
-/// own broker-native `cum_qty` (PAPER-SOAK-PARTIAL-FILL-DEDUP-04: no longer
-/// reconstructed — this is the exact value `fetch_events` must pass through).
+/// Build a real-shape partial-fill activity JSON object: `activity_type` is
+/// `"FILL"` and `type` is `"partial_fill"` (Alpaca's documented shape — NOT
+/// `activity_type: "PARTIAL_FILL"`, which never appears on the real wire),
+/// with an explicit `qty` and its own broker-native `cum_qty`
+/// (PAPER-SOAK-PARTIAL-FILL-DEDUP-04: no longer reconstructed — this is the
+/// exact value `fetch_events` must pass through).
 fn partial_fill_activity_json(
     id: &str,
     order_id: &str,
@@ -112,7 +137,8 @@ fn partial_fill_activity_json(
 ) -> serde_json::Value {
     serde_json::json!({
         "id": id,
-        "activity_type": "PARTIAL_FILL",
+        "activity_type": "FILL",
+        "type": "partial_fill",
         "order_id": order_id,
         "transaction_time": ts,
         "price": "150.00",
@@ -123,8 +149,8 @@ fn partial_fill_activity_json(
     })
 }
 
-/// Build a PARTIAL_FILL activity JSON object with NO `cum_qty` field at all —
-/// simulates a malformed/incomplete broker response.
+/// Build a real-shape partial-fill activity JSON object with NO `cum_qty`
+/// field at all — simulates a malformed/incomplete broker response.
 fn partial_fill_activity_json_no_cum_qty(
     id: &str,
     order_id: &str,
@@ -133,7 +159,8 @@ fn partial_fill_activity_json_no_cum_qty(
 ) -> serde_json::Value {
     serde_json::json!({
         "id": id,
-        "activity_type": "PARTIAL_FILL",
+        "activity_type": "FILL",
+        "type": "partial_fill",
         "order_id": order_id,
         "transaction_time": ts,
         "price": "150.00",
@@ -143,7 +170,8 @@ fn partial_fill_activity_json_no_cum_qty(
     })
 }
 
-/// Build a FILL activity JSON object with an explicit `qty` and `price`.
+/// Build a real-shape terminal-fill activity JSON object with an explicit
+/// `qty` and `price`.
 fn fill_activity_json(
     id: &str,
     order_id: &str,
@@ -154,6 +182,7 @@ fn fill_activity_json(
     serde_json::json!({
         "id": id,
         "activity_type": "FILL",
+        "type": "fill",
         "order_id": order_id,
         "transaction_time": ts,
         "price": price,
@@ -930,6 +959,197 @@ fn p10_missing_cum_qty_on_partial_fill_fails_whole_page_closed() {
         }
         other => panic!("P10: expected Transient error, got {other:?}"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// P11-P14 — PAPER-SOAK-ALPACA-TRADE-ACTIVITY-SCHEMA-01: mission S06/S08/S09/S10
+// ---------------------------------------------------------------------------
+
+/// P11 (mission S06): two distinct real-shape partial fills sharing the SAME
+/// price and SAME per-event qty — only `cum_qty` distinguishes them. Both
+/// must apply as genuine, separate economic events.
+#[test]
+fn p11_same_price_same_qty_partials_distinguished_by_cum_qty_both_apply() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    std::thread::spawn(move || {
+        {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = read_request_path(&mut stream);
+            let acts = serde_json::json!([
+                partial_fill_activity_json(
+                    "act-p11-1",
+                    "order-p11",
+                    "2024-01-15T10:30:00Z",
+                    "10",
+                    "10"
+                ),
+                partial_fill_activity_json(
+                    "act-p11-2",
+                    "order-p11",
+                    "2024-01-15T10:30:05Z",
+                    "10",
+                    "20"
+                ),
+            ]);
+            write_json_response(&mut stream, &acts.to_string());
+        }
+        for _ in 0..2 {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = read_request_path(&mut stream);
+            write_json_response(&mut stream, &order_json("order-p11").to_string());
+        }
+    });
+
+    let adapter = adapter_for(port);
+    let cursor = live_cursor_no_prior();
+    let token = BrokerInvokeToken::for_test();
+
+    let (events, _new_cursor) = adapter
+        .fetch_events(Some(&cursor), &token)
+        .expect("P11: same-price same-qty partials must succeed");
+
+    assert_eq!(events.len(), 2);
+    assert_eq!(
+        events[0].cum_qty_after(),
+        Some(10),
+        "P11: first activity's cum_qty is its own value even though price/qty match the second"
+    );
+    assert_eq!(
+        events[1].cum_qty_after(),
+        Some(20),
+        "P11: second activity's cum_qty distinguishes it from the first"
+    );
+    for e in &events {
+        match e {
+            BrokerEvent::PartialFill {
+                delta_qty,
+                price_micros,
+                ..
+            } => {
+                assert_eq!(*delta_qty, 10);
+                assert_eq!(*price_micros, 150_000_000);
+            }
+            other => panic!("P11: expected PartialFill, got {other:?}"),
+        }
+    }
+}
+
+/// P12 (mission S08): a real-shape partial fill with a malformed (non-numeric)
+/// `cum_qty` must fail the whole page closed, same as a missing `cum_qty`.
+#[test]
+fn p12_malformed_cum_qty_on_partial_fill_fails_whole_page_closed() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let _ = read_request_path(&mut stream);
+        let acts = serde_json::json!([partial_fill_activity_json(
+            "act-p12",
+            "order-p12",
+            "2024-01-15T10:30:00Z",
+            "10",
+            "not-a-number"
+        )]);
+        write_json_response(&mut stream, &acts.to_string());
+        // No further requests: the adapter must fail before any per-activity
+        // order lookup for this activity.
+    });
+
+    let adapter = adapter_for(port);
+    let cursor = live_cursor_no_prior();
+    let token = BrokerInvokeToken::for_test();
+
+    let result = adapter.fetch_events(Some(&cursor), &token);
+
+    assert!(
+        result.is_err(),
+        "P12: malformed cum_qty on a partial fill must fail the page, not degrade to ambiguous None"
+    );
+    match result.unwrap_err() {
+        BrokerError::Transient { detail } => {
+            assert!(
+                detail.contains("cum_qty"),
+                "P12: error detail must name the malformed cum_qty; got: {detail}"
+            );
+        }
+        other => panic!("P12: expected Transient error, got {other:?}"),
+    }
+}
+
+/// P13 (mission S09): a FILL-class activity with NO `type` field must fail
+/// closed rather than default to a terminal fill.
+#[test]
+fn p13_fill_activity_missing_type_field_fails_closed() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let _ = read_request_path(&mut stream);
+        // Deliberately missing "type" — activity_type alone is FILL, per
+        // Alpaca's schema, but that no longer identifies the fill subtype.
+        let acts = serde_json::json!([{
+            "id": "act-p13",
+            "activity_type": "FILL",
+            "order_id": "order-p13",
+            "transaction_time": "2024-01-15T10:30:00Z",
+            "price": "150.00",
+            "qty": "10",
+            "side": "buy",
+            "symbol": "AAPL"
+        }]);
+        write_json_response(&mut stream, &acts.to_string());
+    });
+
+    let adapter = adapter_for(port);
+    let cursor = live_cursor_no_prior();
+    let token = BrokerInvokeToken::for_test();
+
+    let result = adapter.fetch_events(Some(&cursor), &token);
+
+    assert!(
+        result.is_err(),
+        "P13: FILL activity missing type must fail closed, not default to a terminal fill"
+    );
+}
+
+/// P14 (mission S10): a FILL-class activity with an unrecognized `type`
+/// value must fail closed.
+#[test]
+fn p14_fill_activity_unknown_type_value_fails_closed() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    std::thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let _ = read_request_path(&mut stream);
+        let acts = serde_json::json!([{
+            "id": "act-p14",
+            "activity_type": "FILL",
+            "type": "unexpected_value",
+            "order_id": "order-p14",
+            "transaction_time": "2024-01-15T10:30:00Z",
+            "price": "150.00",
+            "qty": "10",
+            "side": "buy",
+            "symbol": "AAPL"
+        }]);
+        write_json_response(&mut stream, &acts.to_string());
+    });
+
+    let adapter = adapter_for(port);
+    let cursor = live_cursor_no_prior();
+    let token = BrokerInvokeToken::for_test();
+
+    let result = adapter.fetch_events(Some(&cursor), &token);
+
+    assert!(
+        result.is_err(),
+        "P14: FILL activity with unknown type must fail closed"
+    );
 }
 
 // ---------------------------------------------------------------------------

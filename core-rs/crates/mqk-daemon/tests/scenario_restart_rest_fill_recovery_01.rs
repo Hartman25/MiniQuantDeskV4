@@ -80,6 +80,7 @@ fn make_fill_activity(
     AlpacaOrderActivity {
         id: activity_id.to_owned(),
         activity_type: "FILL".to_owned(),
+        trade_type: Some("fill".to_owned()),
         order_id: order_id.to_owned(),
         transaction_time: "2026-05-09T14:30:00.000000000Z".to_owned(),
         price: Some("150.00".to_owned()),

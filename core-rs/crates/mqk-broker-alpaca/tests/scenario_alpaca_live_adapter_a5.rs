@@ -76,6 +76,7 @@ fn make_submit_req(
 fn make_activity(
     id: &str,
     activity_type: &str,
+    trade_type: Option<&str>,
     order_id: &str,
     ts: &str,
     price: Option<&str>,
@@ -86,6 +87,7 @@ fn make_activity(
     AlpacaOrderActivity {
         id: id.to_string(),
         activity_type: activity_type.to_string(),
+        trade_type: trade_type.map(str::to_string),
         order_id: order_id.to_string(),
         transaction_time: ts.to_string(),
         price: price.map(str::to_string),
@@ -280,6 +282,7 @@ fn l7_fill_activity_through_normalization_pipeline() {
     let activity = make_activity(
         "20240615093000000::activity-l7",
         "FILL",
+        Some("fill"),
         "alpaca-broker-uuid-l7",
         "2024-06-15T09:30:00.000000Z",
         Some("150.50"),
@@ -326,13 +329,14 @@ fn l7_fill_activity_through_normalization_pipeline() {
     }
 }
 // ---------------------------------------------------------------------------
-// L8 - PARTIAL_FILL activity → BrokerEvent::PartialFill
+// L8 - FILL/partial_fill activity → BrokerEvent::PartialFill
 // ---------------------------------------------------------------------------
 #[test]
 fn l8_partial_fill_activity_through_normalization_pipeline() {
     let activity = make_activity(
         "20240615093100000::activity-l8",
-        "PARTIAL_FILL",
+        "FILL",
+        Some("partial_fill"),
         "alpaca-broker-uuid-l8",
         "2024-06-15T09:31:00.000000Z",
         Some("200.25"),
@@ -371,6 +375,71 @@ fn l8_partial_fill_activity_through_normalization_pipeline() {
     }
 }
 // ---------------------------------------------------------------------------
+// S09/S10 (PAPER-SOAK-ALPACA-TRADE-ACTIVITY-SCHEMA-01, MANDATORY) - a
+// FILL-class activity with a missing or unrecognized `type` subtype must
+// fail closed at the real `activity_to_trade_update` production seam, not
+// silently default to a terminal fill.
+// ---------------------------------------------------------------------------
+#[test]
+fn s09_fill_activity_missing_type_fails_closed() {
+    let activity = make_activity(
+        "20240615093150000::activity-s09",
+        "FILL",
+        None,
+        "alpaca-broker-uuid-s09",
+        "2024-06-15T09:31:50.000000Z",
+        Some("150.00"),
+        Some("10"),
+        "buy",
+        "AAPL",
+    );
+    let order = make_order_full(
+        "alpaca-broker-uuid-s09",
+        "internal-ord-s09",
+        "AAPL",
+        "buy",
+        "100",
+        "10",
+    );
+    let result = activity_to_trade_update(&activity, &order);
+    assert!(
+        result.is_err(),
+        "FILL activity with missing type must return Err, not default to a fill"
+    );
+}
+#[test]
+fn s10_fill_activity_unknown_type_fails_closed() {
+    let activity = make_activity(
+        "20240615093155000::activity-s10",
+        "FILL",
+        Some("unexpected_value"),
+        "alpaca-broker-uuid-s10",
+        "2024-06-15T09:31:55.000000Z",
+        Some("150.00"),
+        Some("10"),
+        "buy",
+        "AAPL",
+    );
+    let order = make_order_full(
+        "alpaca-broker-uuid-s10",
+        "internal-ord-s10",
+        "AAPL",
+        "buy",
+        "100",
+        "10",
+    );
+    let result = activity_to_trade_update(&activity, &order);
+    assert!(
+        result.is_err(),
+        "FILL activity with unrecognized type must return Err"
+    );
+    let msg = result.unwrap_err();
+    assert!(
+        msg.contains("unexpected_value"),
+        "error must identify the unrecognized type value, got: {msg}"
+    );
+}
+// ---------------------------------------------------------------------------
 // L9 - non-fill lifecycle activity types map through canonical normalization
 // ---------------------------------------------------------------------------
 #[test]
@@ -391,6 +460,7 @@ fn l9_non_fill_lifecycle_activity_types_map_canonically() {
         let activity = make_activity(
             "20240615093200000::activity-l9",
             activity_type,
+            None,
             "alpaca-broker-uuid-l9",
             "2024-06-15T09:32:00.000000Z",
             None,
@@ -435,6 +505,7 @@ fn l10_unknown_activity_type_returns_err_not_empty_event() {
     let activity = make_activity(
         "20240615093200000::activity-l9",
         "DIV",
+        None,
         "alpaca-broker-uuid-l9",
         "2024-06-15T09:32:00.000000Z",
         None,
@@ -467,6 +538,7 @@ fn l10_non_fill_activity_not_silently_normalized() {
         let activity = make_activity(
             "act-id",
             activity_type,
+            None,
             "alpaca-broker-uuid",
             "2024-06-15T09:30:00.000000Z",
             None,
@@ -500,6 +572,7 @@ fn l10_fill_activity_exposes_stable_broker_fill_id() {
     let activity = make_activity(
         activity_id,
         "FILL",
+        Some("fill"),
         broker_id,
         "2024-06-15T09:33:00.000000Z",
         Some("100.00"),
@@ -528,6 +601,7 @@ fn l10_fill_event_broker_message_id_has_deterministic_alpaca_format() {
     let activity = make_activity(
         "20240615093000000::l10",
         "FILL",
+        Some("fill"),
         broker_id,
         ts,
         Some("100.00"),

@@ -652,9 +652,10 @@ impl BrokerAdapter for AlpacaBrokerAdapter {
             //
             // No silent ambiguity: PAPER-SOAK-PARTIAL-FILL-DEDUP-03's
             // "leave it None, fall back to event-id-only dedup" behavior for
-            // an unreconstructable PARTIAL_FILL is not repeated here. A REST
-            // PARTIAL_FILL whose `cum_qty` cannot be trusted might be an
-            // already-WS-applied duplicate under a different transport id —
+            // an unreconstructable partial fill is not repeated here. A REST
+            // FILL/partial_fill activity whose `cum_qty` cannot be trusted
+            // might be an already-WS-applied duplicate under a different
+            // transport id —
             // event-id-only dedup cannot tell, and applying it anyway risks
             // double-counting real capital. A missing/unparseable `cum_qty`
             // on a FILL-class activity therefore fails the WHOLE page closed
@@ -671,28 +672,40 @@ impl BrokerAdapter for AlpacaBrokerAdapter {
                 // Checked before any network call: cheap and avoids an
                 // unnecessary `fetch_order` for an activity we are about to
                 // reject anyway.
-                let partial_fill_cum_qty = if activity.activity_type == "PARTIAL_FILL" {
-                    let parsed = activity
-                        .cum_qty
-                        .as_deref()
-                        .and_then(|s| parse_broker_qty(s).ok());
-                    match parsed {
-                        Some(v) => Some(v),
-                        None => {
-                            return Err(BrokerError::Transient {
-                                detail: format!(
-                                    "fetch_events: PARTIAL_FILL activity id={:?} for \
+                //
+                // PAPER-SOAK-ALPACA-TRADE-ACTIVITY-SCHEMA-01: the partial-fill
+                // signal is `activity_type == "FILL"` combined with
+                // `trade_type == "partial_fill"` (Alpaca's documented `type`
+                // field) -- NOT `activity_type == "PARTIAL_FILL"`, a value
+                // that never appears on the real wire. See
+                // `classify_fill_subtype` for the full classification and its
+                // fail-closed handling of missing/unknown subtypes.
+                let partial_fill_cum_qty =
+                    if classify_fill_subtype(activity).map_err(|e| BrokerError::Transient {
+                        detail: format!("fetch_events: {e}"),
+                    })? == Some("partial_fill")
+                    {
+                        let parsed = activity
+                            .cum_qty
+                            .as_deref()
+                            .and_then(|s| parse_broker_qty(s).ok());
+                        match parsed {
+                            Some(v) => Some(v),
+                            None => {
+                                return Err(BrokerError::Transient {
+                                    detail: format!(
+                                        "fetch_events: FILL/partial_fill activity id={:?} for \
                                      order_id={:?} is missing a parseable broker-native \
                                      cum_qty; refusing to guess cross-lane economic \
                                      identity for an ambiguous fill",
-                                    activity.id, activity.order_id
-                                ),
-                            });
+                                        activity.id, activity.order_id
+                                    ),
+                                });
+                            }
                         }
-                    }
-                } else {
-                    None
-                };
+                    } else {
+                        None
+                    };
                 let mut order = self.fetch_order(&activity.order_id)?;
                 if let Some(v) = partial_fill_cum_qty {
                     order.filled_qty = v.to_string();
@@ -790,17 +803,59 @@ pub fn replace_response_to_broker_response(resp: AlpacaReplaceResponse) -> Broke
         status: "replace_requested".to_string(),
     }
 }
+/// Classify an Alpaca REST `TradeActivity`'s fill subtype
+/// (PAPER-SOAK-ALPACA-TRADE-ACTIVITY-SCHEMA-01).
+///
+/// Per Alpaca's documented Account Activities schema, `activity_type` is
+/// always `"FILL"` for a trade activity; the execution subtype -- terminal
+/// vs. partial -- is carried by the separate `type` field (mapped to
+/// `AlpacaOrderActivity::trade_type` because `type` is a Rust keyword):
+/// `"fill"` or `"partial_fill"`.
+///
+/// Returns:
+/// - `Ok(Some("fill"))` / `Ok(Some("partial_fill"))` for a FILL-class
+///   activity with a recognized subtype.
+/// - `Ok(None)` for a non-FILL-class activity (`NEW`, `CANCELED`, etc.) --
+///   `trade_type` is not meaningful for these and the caller's existing
+///   `activity_type`-based routing applies unchanged.
+/// - `Err(String)` for a FILL-class activity whose subtype is missing or
+///   unrecognized -- fail closed rather than guess. A prior implementation
+///   inferred a partial fill from `activity_type == "PARTIAL_FILL"`, a value
+///   that does not appear in Alpaca's documented wire shape; this made the
+///   production partial-fill classification path unreachable.
+pub fn classify_fill_subtype(
+    activity: &AlpacaOrderActivity,
+) -> Result<Option<&'static str>, String> {
+    if activity.activity_type != "FILL" {
+        return Ok(None);
+    }
+    match activity.trade_type.as_deref() {
+        Some("partial_fill") => Ok(Some("partial_fill")),
+        Some("fill") => Ok(Some("fill")),
+        Some(other) => Err(format!(
+            "classify_fill_subtype: FILL activity id={:?} order_id={:?} has unsupported type: {other:?}",
+            activity.id, activity.order_id
+        )),
+        None => Err(format!(
+            "classify_fill_subtype: FILL activity id={:?} order_id={:?} is missing the required type field",
+            activity.id, activity.order_id
+        )),
+    }
+}
 /// Convert an `AlpacaOrderActivity` (REST polling) into an `AlpacaTradeUpdate`
 /// (normalizer input), given the full order state from a parallel order lookup.
 ///
-/// Only `"FILL"` and `"PARTIAL_FILL"` activity types are supported.
+/// Only `"FILL"` (with a recognized `trade_type` subtype) and the
+/// non-fill lifecycle activity types are supported.
 ///
 /// The activity `id` is mapped to `broker_fill_id` so downstream consumers can
 /// treat it as strong broker-native economic fill identity.
 ///
 /// # Errors
 ///
-/// Returns `Err(String)` if `activity.activity_type` is not a recognised fill type.
+/// Returns `Err(String)` if `activity.activity_type` is not a recognised
+/// activity class, or if it is `"FILL"` with a missing/unrecognized
+/// `trade_type` subtype -- see [`classify_fill_subtype`].
 pub fn activity_to_trade_update(
     activity: &AlpacaOrderActivity,
     order: &AlpacaOrderFull,
@@ -808,8 +863,7 @@ pub fn activity_to_trade_update(
     // Map Alpaca uppercase activity_type to normalizer event string.
     let event_type = match activity.activity_type.as_str() {
         "NEW" | "PENDING_NEW" | "ACCEPTED" => "new",
-        "FILL" => "fill",
-        "PARTIAL_FILL" => "partial_fill",
+        "FILL" => classify_fill_subtype(activity)?.expect("activity_type == FILL implies Some"),
         "CANCELED" | "EXPIRED" => "canceled",
         "CANCEL_REJECTED" => "cancel_rejected",
         "REPLACED" => "replaced",
@@ -1019,5 +1073,88 @@ fn classify_http_status(status: reqwest::StatusCode, body: &str) -> BrokerError 
         c => BrokerError::Transient {
             detail: format!("HTTP {c}: {body}"),
         },
+    }
+}
+// ---------------------------------------------------------------------------
+// Unit tests: classify_fill_subtype (PAPER-SOAK-ALPACA-TRADE-ACTIVITY-SCHEMA-01)
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod classify_fill_subtype_tests {
+    use super::*;
+
+    fn activity(activity_type: &str, trade_type: Option<&str>) -> AlpacaOrderActivity {
+        AlpacaOrderActivity {
+            id: "activity-1".to_string(),
+            activity_type: activity_type.to_string(),
+            trade_type: trade_type.map(str::to_string),
+            order_id: "order-1".to_string(),
+            transaction_time: "2024-01-15T10:30:00Z".to_string(),
+            price: Some("100.00".to_string()),
+            qty: Some("10".to_string()),
+            side: "buy".to_string(),
+            symbol: "AAPL".to_string(),
+            cum_qty: Some("10".to_string()),
+        }
+    }
+
+    // S01 (deserialization contract): real-shape JSON with both fields.
+    #[test]
+    fn s01_real_shape_partial_fill_deserializes_both_fields() {
+        let json = serde_json::json!({
+            "id": "activity-1",
+            "activity_type": "FILL",
+            "type": "partial_fill",
+            "order_id": "order-1",
+            "transaction_time": "2024-01-15T10:30:00Z",
+            "price": "100.00",
+            "qty": "10",
+            "cum_qty": "10",
+            "side": "buy",
+            "symbol": "AAPL"
+        });
+        let parsed: AlpacaOrderActivity = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed.activity_type, "FILL");
+        assert_eq!(parsed.trade_type.as_deref(), Some("partial_fill"));
+    }
+
+    #[test]
+    fn fill_class_partial_fill_type_classifies_as_partial_fill() {
+        let a = activity("FILL", Some("partial_fill"));
+        assert_eq!(classify_fill_subtype(&a).unwrap(), Some("partial_fill"));
+    }
+
+    // S03: activity_type=FILL, type=fill classifies as terminal fill.
+    #[test]
+    fn fill_class_fill_type_classifies_as_fill() {
+        let a = activity("FILL", Some("fill"));
+        assert_eq!(classify_fill_subtype(&a).unwrap(), Some("fill"));
+    }
+
+    #[test]
+    fn non_fill_activity_type_classifies_as_none() {
+        let a = activity("NEW", None);
+        assert_eq!(classify_fill_subtype(&a).unwrap(), None);
+    }
+
+    // S09: FILL activity missing the type field fails closed, not a default fill.
+    #[test]
+    fn s09_fill_class_missing_type_fails_closed() {
+        let a = activity("FILL", None);
+        let err = classify_fill_subtype(&a).unwrap_err();
+        assert!(err.contains("missing"), "unexpected error: {err}");
+    }
+
+    // S10: FILL activity with an unrecognized type value fails closed.
+    #[test]
+    fn s10_fill_class_unknown_type_fails_closed() {
+        let a = activity("FILL", Some("unexpected_value"));
+        let err = classify_fill_subtype(&a).unwrap_err();
+        assert!(err.contains("unexpected_value"), "unexpected error: {err}");
+    }
+
+    #[test]
+    fn fill_class_empty_type_fails_closed() {
+        let a = activity("FILL", Some(""));
+        assert!(classify_fill_subtype(&a).is_err());
     }
 }

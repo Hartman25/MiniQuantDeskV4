@@ -234,13 +234,24 @@ pub struct AlpacaOrderFull {
 ///
 /// Supported activity types:
 /// - `NEW` / `PENDING_NEW` / `ACCEPTED`
-/// - `PARTIAL_FILL` / `FILL`
+/// - `FILL` (execution subtype carried separately in `trade_type` -- see below)
 /// - `CANCELED` / `EXPIRED`
 /// - `CANCEL_REJECTED`
 /// - `REPLACED` / `REPLACE_REJECTED`
 /// - `REJECTED`
 ///
 /// Unknown activity types are rejected by mapping logic (fail-closed).
+///
+/// # `activity_type` vs `trade_type` (PAPER-SOAK-ALPACA-TRADE-ACTIVITY-SCHEMA-01)
+///
+/// Per Alpaca's documented `TradeActivity` schema, `activity_type` is always
+/// `"FILL"` for a trade activity -- it does NOT distinguish partial from
+/// terminal execution. That distinction is carried by the separate `type`
+/// field (`"fill"` | `"partial_fill"`), mapped here to `trade_type` because
+/// `type` is a Rust keyword. A prior version of this struct incorrectly
+/// treated `activity_type == "PARTIAL_FILL"` as the partial-fill signal; that
+/// value does not appear in Alpaca's documented wire shape, which made the
+/// production classification path unreachable for real partial fills.
 #[derive(Debug, Clone, Deserialize)]
 pub struct AlpacaOrderActivity {
     /// Unique activity ID.
@@ -253,7 +264,20 @@ pub struct AlpacaOrderActivity {
     /// Format: `"YYYYMMDDHHMMSS{fraction}::{uuid}"`.
     pub id: String,
     /// Activity type from Alpaca, e.g. `"NEW"`, `"FILL"`, `"CANCELED"`, `"DIV"`.
+    ///
+    /// For trade activities this is always `"FILL"` -- see `trade_type` for
+    /// the fill/partial_fill distinction.
     pub activity_type: String,
+    /// Execution subtype from Alpaca's `TradeActivity.type` field: `"fill"`
+    /// or `"partial_fill"`. Only present/meaningful when `activity_type ==
+    /// "FILL"`. Renamed from `type` because that is a Rust keyword.
+    ///
+    /// `#[serde(default)]` so a payload missing this field deserializes to
+    /// `None` rather than failing the whole page -- mapping logic fails
+    /// closed explicitly on a FILL-class activity with `None` here, rather
+    /// than silently defaulting to a terminal fill.
+    #[serde(default, rename = "type")]
+    pub trade_type: Option<String>,
     /// Alpaca broker-assigned order UUID.
     pub order_id: String,
     /// ISO 8601 timestamp of the transaction.

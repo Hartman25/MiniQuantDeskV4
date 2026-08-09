@@ -1495,19 +1495,27 @@ pub(crate) async fn repair_halted_run_fill_rest_recovery(
         }
     };
 
-    // Gate 7: filter to FILL/PARTIAL_FILL — must be exactly one match.
+    // Gate 7: filter to genuine FILL-class activities with a recognized fill
+    // subtype (PAPER-SOAK-ALPACA-TRADE-ACTIVITY-SCHEMA-01) — must be exactly
+    // one match. Per Alpaca's documented TradeActivity schema, `activity_type`
+    // is always `"FILL"`; `classify_fill_subtype` reads the separate `type`
+    // field (`"fill"` | `"partial_fill"`) for the terminal/partial
+    // distinction. A FILL-class activity with a missing/unknown subtype is
+    // excluded here (fails closed) rather than silently treated as a match.
     let fill_activities: Vec<&mqk_broker_alpaca::types::AlpacaOrderActivity> = activities
         .iter()
-        .filter(|a| matches!(a.activity_type.as_str(), "FILL" | "PARTIAL_FILL"))
+        .filter(|a| matches!(mqk_broker_alpaca::classify_fill_subtype(a), Ok(Some(_))))
         .collect();
 
     match fill_activities.len() {
         0 => {
             let evidence = format!(
-                "Alpaca REST returned no FILL/PARTIAL_FILL activities for \
+                "Alpaca REST returned no fill-class activities with a recognized \
+                 subtype (FILL/fill or FILL/partial_fill) for \
                  broker_order_id='{}' ({} total activities fetched). \
-                 The fill may not yet be present in the activity feed, \
-                 or the order was not filled.",
+                 The fill may not yet be present in the activity feed, the order \
+                 was not filled, or a FILL-class activity was present with a \
+                 missing/unrecognized subtype (excluded — fails closed).",
                 body.broker_order_id,
                 activities.len()
             );
@@ -1528,7 +1536,7 @@ pub(crate) async fn repair_halted_run_fill_rest_recovery(
         n if n > 1 => {
             let ids: Vec<&str> = fill_activities.iter().map(|a| a.id.as_str()).collect();
             let evidence = format!(
-                "Alpaca REST returned {n} FILL/PARTIAL_FILL activities for \
+                "Alpaca REST returned {n} fill-class activities for \
                  broker_order_id='{}'; ambiguous — cannot select a single authoritative fill. \
                  Activity IDs: {:?}. Manual broker reconcile required.",
                 body.broker_order_id, ids
@@ -1865,12 +1873,17 @@ pub(crate) async fn repair_halted_run_fill_rest_recovery(
     // This is the idempotency anchor for retry safety.
     // ---------------------------------------------------------------------------
     let stable_msg_id = format!("alpaca-rest-recovery:{}", rest_fill.broker_activity_id);
-    let event_kind = match activity.activity_type.as_str() {
-        "PARTIAL_FILL" => "partial_fill",
-        _ => "fill",
-    };
-    let broker_event = match activity.activity_type.as_str() {
-        "PARTIAL_FILL" => mqk_execution::BrokerEvent::PartialFill {
+    // PAPER-SOAK-ALPACA-TRADE-ACTIVITY-SCHEMA-01: fill subtype comes from
+    // `classify_fill_subtype` (activity_type=="FILL" + the documented `type`
+    // field), not `activity_type == "PARTIAL_FILL"` — that value never
+    // appears on the real wire. Gate 7 already filtered `fill_activities` to
+    // activities with a recognized subtype, so this cannot fail here.
+    let event_kind = mqk_broker_alpaca::classify_fill_subtype(activity)
+        .ok()
+        .flatten()
+        .expect("Gate 7 already filtered to activities with a recognized fill subtype");
+    let broker_event = match event_kind {
+        "partial_fill" => mqk_execution::BrokerEvent::PartialFill {
             broker_message_id: stable_msg_id.clone(),
             broker_fill_id: Some(rest_fill.broker_activity_id.clone()),
             internal_order_id: body.internal_order_id.clone(),
