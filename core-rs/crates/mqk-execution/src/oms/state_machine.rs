@@ -192,11 +192,11 @@ impl OmsOrder {
         self.apply_with_watermark(event, event_id, None)
     }
 
-    /// PAPER-SOAK-PARTIAL-FILL-DEDUP-02: like [`apply`][Self::apply], but for
-    /// `PartialFill`/`Fill` events additionally accepts the broker-reported
-    /// authoritative cumulative-filled-quantity watermark for this order as
-    /// of this specific event (`BrokerEvent::cum_qty_after`), when the caller
-    /// has one.
+    /// PAPER-SOAK-PARTIAL-FILL-DEDUP-02/03: like [`apply`][Self::apply], but
+    /// for `PartialFill`/`Fill` events additionally accepts the
+    /// broker-reported cumulative-filled-quantity watermark for this order
+    /// as of this specific event (`BrokerEvent::cum_qty_after`), when the
+    /// caller has one.
     ///
     /// # Why this exists
     ///
@@ -219,13 +219,40 @@ impl OmsOrder {
     ///   other lane) — a no-op. `event_id`, if supplied, is still recorded
     ///   so a same-lane retry short-circuits on the cheaper id-only path.
     /// - `cum_qty_after` is `Some(target)` and `target > self.filled_qty`:
-    ///   this is a genuine advance. The event actually applied uses the
-    ///   broker-confirmed delta `target - self.filled_qty` — the corrected,
-    ///   authoritative amount — in place of the event's own `delta_qty`,
-    ///   which guards against a mismatched/derived delta on the REST lane.
+    ///   this is a genuine advance. The event actually applied is `event`
+    ///   **unchanged** — its own `delta_qty`, never a value derived from
+    ///   `target`.
     /// - `cum_qty_after` is `None`: behavior is byte-for-byte identical to
     ///   `apply` today (pure `event_id` dedup). This is the path exercised
     ///   by every existing caller and test; it is not weakened.
+    ///
+    /// # PAPER-SOAK-PARTIAL-FILL-DEDUP-03: dedup identity only, never a
+    /// quantity source
+    ///
+    /// PAPER-SOAK-PARTIAL-FILL-DEDUP-02 additionally replaced a "genuine
+    /// advance" event's own `delta_qty` with the derived correction
+    /// `target - self.filled_qty`, on the theory that `cum_qty_after` was
+    /// unconditionally broker-authoritative. Independent review found the
+    /// REST lane's `cum_qty_after` is a *reconstruction*
+    /// (`mqk-broker-alpaca::fetch_events`) bracketed by two `GET /v2/orders`
+    /// reads that can prove no execution landed *between* them, but cannot
+    /// prove nothing landed between the activity-page fetch and the first of
+    /// those two reads — Alpaca offers no atomic joint snapshot of both
+    /// endpoints. An execution landing in that irreducible gap would inflate
+    /// `target`, and the old correction (`target - self.filled_qty`) would
+    /// then apply a wrong quantity at this event's own (correct-for-a-
+    /// different-quantity) price — exactly the forbidden failure mode: a
+    /// future/different execution's quantity applied at another execution's
+    /// price. `cum_qty_after` is therefore used *only* to decide whether
+    /// this event's economic effect is already reflected; the quantity and
+    /// price actually applied always come from the event itself. This makes
+    /// the irreducible bracket-window gap harmless for the common case (a
+    /// genuine, non-duplicate advance always applies its own true
+    /// delta_qty/price regardless of how `target` was computed) and narrows
+    /// its worst case to a duplicate redelivery being misclassified as new
+    /// only when the gap's contamination is large enough to itself cross the
+    /// no-op threshold — which, unlike the removed correction, can never
+    /// misattribute quantity to the wrong price.
     ///
     /// Two genuinely distinct fills — even with identical `delta_qty`,
     /// `price_micros`, and near-simultaneous timestamps — always carry
@@ -287,28 +314,14 @@ impl OmsOrder {
             }
         }
 
-        // When the watermark proves a genuine advance, apply the
-        // broker-confirmed delta rather than the event's own delta_qty —
-        // this is the authoritative amount for this order regardless of
-        // what the originating lane derived it as.
-        let corrected;
-        let effective_event = match (event, cum_qty_after) {
-            (OmsEvent::PartialFill { .. }, Some(target)) => {
-                corrected = OmsEvent::PartialFill {
-                    delta_qty: target - self.filled_qty,
-                };
-                &corrected
-            }
-            (OmsEvent::Fill { .. }, Some(target)) => {
-                corrected = OmsEvent::Fill {
-                    delta_qty: target - self.filled_qty,
-                };
-                &corrected
-            }
-            _ => event,
-        };
-
-        self.do_transition(effective_event)?;
+        // PAPER-SOAK-PARTIAL-FILL-DEDUP-03: `cum_qty_after` (when present)
+        // has already done its only job above -- proving this is not a
+        // no-op. The transition actually applied is always `event`
+        // unchanged: its own `delta_qty` and (via the caller's own
+        // `price_micros`) its own price. `cum_qty_after` never substitutes a
+        // derived quantity, so it can never cause a future/different
+        // execution's quantity to be applied at this event's price.
+        self.do_transition(event)?;
 
         // Record identity only after a successful transition. Rejected events
         // (TransitionError propagated via `?` above) never reach this line,
@@ -1478,11 +1491,17 @@ mod tests {
         );
     }
 
-    /// When cum_qty_after proves a genuine advance, the applied delta is the
-    /// broker-confirmed correction (target - filled_qty), not the event's own
-    /// (possibly stale/mismatched) delta_qty.
+    /// PAPER-SOAK-PARTIAL-FILL-DEDUP-03: when `cum_qty_after` proves a
+    /// genuine advance, the applied delta is always the event's OWN
+    /// `delta_qty` — `cum_qty_after` decides only whether this is a no-op,
+    /// never substitutes a derived quantity. A mismatched `cum_qty_after`
+    /// (e.g. from a REST reconstruction contaminated by the irreducible
+    /// activity-page/fetch_order race — see the `apply_with_watermark` doc
+    /// comment) therefore cannot misattribute quantity to the wrong price;
+    /// at most it affects only the no-op/genuine-advance classification
+    /// itself, never the quantity or price actually applied.
     #[test]
-    fn watermark_uses_corrected_delta_not_event_delta_qty() {
+    fn watermark_never_substitutes_a_derived_delta_for_the_events_own() {
         let mut o = OmsOrder::new("ord-wm3", "AAPL", 100);
         o.apply_with_watermark(
             &OmsEvent::PartialFill { delta_qty: 10 },
@@ -1492,17 +1511,20 @@ mod tests {
         .unwrap();
         assert_eq!(o.filled_qty, 10);
 
-        // Event claims delta_qty=999 (wrong/stale), but cum_qty_after=30 is
-        // authoritative -> corrected delta is 30-10=20.
+        // cum_qty_after=30 proves this is a genuine advance (30 > 10), but
+        // the applied delta must be the event's own 15, giving filled_qty=25
+        // -- NEVER 30 (which would mean the watermark silently overrode the
+        // event's own reported quantity).
         o.apply_with_watermark(
-            &OmsEvent::PartialFill { delta_qty: 999 },
+            &OmsEvent::PartialFill { delta_qty: 15 },
             Some("f2"),
             Some(30),
         )
         .unwrap();
         assert_eq!(
-            o.filled_qty, 30,
-            "applied quantity must follow cum_qty_after, not the event's own delta_qty"
+            o.filled_qty, 25,
+            "applied quantity must always be the event's own delta_qty (10+15=25), \
+             never a value derived from cum_qty_after (which would give 30)"
         );
     }
 

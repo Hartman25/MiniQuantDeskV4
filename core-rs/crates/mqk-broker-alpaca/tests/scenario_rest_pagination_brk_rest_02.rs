@@ -11,6 +11,17 @@
 //!      page_token=<last_id_from_page1> and NOT after=<last_id_from_page1>.
 //! P05  No-progress guard: full page whose last id equals prev page_token causes
 //!      BrokerError::Transient (fail closed rather than loop).
+//! P06  PAPER-SOAK-PARTIAL-FILL-DEDUP-02/03: single PARTIAL_FILL activity in a page,
+//!      unambiguous cumulative reconstruction.
+//! P07  PAPER-SOAK-PARTIAL-FILL-DEDUP-02/03: two PARTIAL_FILL activities for the same
+//!      order in one page, distinct reconstructed cumulatives.
+//! P08  PAPER-SOAK-PARTIAL-FILL-DEDUP-03 (defect A, MANDATORY): PARTIAL_FILL sharing a
+//!      page with the order's terminal FILL — the FILL's quantity must not be folded
+//!      into the PARTIAL_FILL's reconstructed cumulative.
+//! P09  PAPER-SOAK-PARTIAL-FILL-DEDUP-03: two partials plus a terminal fill on one page.
+//! P10  PAPER-SOAK-PARTIAL-FILL-DEDUP-03 (defect B, MANDATORY): activity-page/current-order
+//!      race — a pre/post bracket mismatch on GET /v2/orders must fail closed to an
+//!      ambiguous cum_qty_after=None, never guess.
 //!
 //! All tests use a local std::net::TcpListener mock server — no live network, no DB.
 //!
@@ -81,6 +92,26 @@ fn partial_fill_activity_json(id: &str, order_id: &str, ts: &str, qty: &str) -> 
         "order_id": order_id,
         "transaction_time": ts,
         "price": "150.00",
+        "qty": qty,
+        "side": "buy",
+        "symbol": "AAPL"
+    })
+}
+
+/// Build a FILL activity JSON object with an explicit `qty` and `price`.
+fn fill_activity_json(
+    id: &str,
+    order_id: &str,
+    ts: &str,
+    qty: &str,
+    price: &str,
+) -> serde_json::Value {
+    serde_json::json!({
+        "id": id,
+        "activity_type": "FILL",
+        "order_id": order_id,
+        "transaction_time": ts,
+        "price": price,
         "qty": qty,
         "side": "buy",
         "symbol": "AAPL"
@@ -179,7 +210,8 @@ fn p01_empty_page_returns_no_events_and_no_cursor() {
 
 #[test]
 fn p02_partial_page_cursor_uses_last_activity_id_not_timestamp() {
-    // 1 activities request (2 items, < page_size) + 2 order lookups = 3 requests.
+    // 1 activities request (2 items, < page_size) + 2 bracket (race-detection
+    // pre/post) order lookups + 2 per-activity order lookups = 5 requests.
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -198,8 +230,9 @@ fn p02_partial_page_cursor_uses_last_activity_id_not_timestamp() {
             ]);
             write_json_response(&mut stream, &acts.to_string());
         }
-        // Requests 2–3: GET /v2/orders/order-aaa (one per activity).
-        for _ in 0..2 {
+        // Requests 2-5: GET /v2/orders/order-aaa — 2 bracket reads (PAPER-SOAK-
+        // PARTIAL-FILL-DEDUP-03 race-detection pre/post) + 1 per activity.
+        for _ in 0..4 {
             let (mut stream, _) = listener.accept().unwrap();
             let _path = read_request_path(&mut stream);
             write_json_response(&mut stream, &order_json("order-aaa").to_string());
@@ -245,7 +278,9 @@ fn p02_partial_page_cursor_uses_last_activity_id_not_timestamp() {
 
 #[test]
 fn p03_full_page_second_request_uses_page_token_not_after() {
-    // Requests: 1 activities (50 items) + 50 order lookups + 1 activities (empty) = 52.
+    // Requests: 1 activities (50 items) + 2 bracket (race-detection pre/post,
+    // PAPER-SOAK-PARTIAL-FILL-DEDUP-03) + 50 per-activity order lookups
+    // + 1 activities (empty) = 54.
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -253,7 +288,7 @@ fn p03_full_page_second_request_uses_page_token_not_after() {
     let activities_call: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
     let act_call = activities_call.clone();
 
-    let total = FILL_ACTIVITIES_PAGE_SIZE + 2;
+    let total = FILL_ACTIVITIES_PAGE_SIZE + 4;
     std::thread::spawn(move || {
         for _ in 0..total {
             let (mut stream, _) = listener.accept().unwrap();
@@ -345,7 +380,10 @@ fn p03_full_page_second_request_uses_page_token_not_after() {
 
 #[test]
 fn p04_two_page_recovery_all_events_second_request_uses_page_token_not_after() {
-    // Requests: 2 activities + (FILL_ACTIVITIES_PAGE_SIZE + 1) order lookups.
+    // Requests: 2 activities + (FILL_ACTIVITIES_PAGE_SIZE + 1) per-activity
+    // order lookups + 2 bracket (race-detection pre/post) reads per page
+    // (PAPER-SOAK-PARTIAL-FILL-DEDUP-03) -- one bracket per page since each
+    // page independently re-verifies its own order group.
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let captured: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
@@ -353,7 +391,7 @@ fn p04_two_page_recovery_all_events_second_request_uses_page_token_not_after() {
     let activities_call: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
     let act_call = activities_call.clone();
 
-    let total = 2 + FILL_ACTIVITIES_PAGE_SIZE + 1;
+    let total = 2 + FILL_ACTIVITIES_PAGE_SIZE + 1 + 4;
     std::thread::spawn(move || {
         for _ in 0..total {
             let (mut stream, _) = listener.accept().unwrap();
@@ -458,9 +496,11 @@ fn p05_no_progress_full_page_fails_closed_with_transient() {
     // Stale scenario: page 2 returns FILL_ACTIVITIES_PAGE_SIZE items whose last
     // id is the same as the page_token we sent → no progress → Transient error.
     //
-    // Server handles: 1 activities (page 1) + PS order lookups + 1 activities (stale page 2).
-    // The guard fires after receiving stale page 2 but BEFORE processing its order lookups,
-    // so the server loop ends at exactly 1 + PS + 1 = PS + 2 requests.
+    // Server handles: 1 activities (page 1) + 2 bracket (race-detection pre/post,
+    // PAPER-SOAK-PARTIAL-FILL-DEDUP-03) + PS order lookups + 1 activities (stale
+    // page 2). The guard fires after receiving stale page 2 but BEFORE any
+    // reconstruction or order lookups for it, so the server loop ends at exactly
+    // 1 + 2 + PS + 1 = PS + 4 requests.
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
     let activities_call: Arc<Mutex<usize>> = Arc::new(Mutex::new(0));
@@ -469,7 +509,7 @@ fn p05_no_progress_full_page_fails_closed_with_transient() {
     // Stale last ID — the same value on both pages' last activity.
     const STALE_LAST_ID: &str = "act-stale-last";
 
-    let total = FILL_ACTIVITIES_PAGE_SIZE + 2;
+    let total = FILL_ACTIVITIES_PAGE_SIZE + 4;
     std::thread::spawn(move || {
         for _ in 0..total {
             let (mut stream, _) = listener.accept().unwrap();
@@ -549,8 +589,12 @@ fn p05_no_progress_full_page_fails_closed_with_transient() {
 #[test]
 fn p06_single_partial_fill_in_page_cum_qty_after_matches_current_filled_qty() {
     // Unambiguous case: exactly one PARTIAL_FILL activity for this order in
-    // the page, so "current" filled_qty from GET /v2/orders IS "as of this
-    // event" -- no reconstruction needed, value passes through directly.
+    // the page. PAPER-SOAK-PARTIAL-FILL-DEDUP-03's race-detection bracket
+    // reads the order's current filled_qty twice (both return "10", since
+    // this is a stable fixture with nothing else landing between reads),
+    // proving no race occurred, then reconstructs baseline=10-10=0 and
+    // cum_qty_after=0+10=10 -- the same value the old single-read
+    // implementation produced, but now proven rather than assumed.
     let listener = TcpListener::bind("127.0.0.1:0").unwrap();
     let port = listener.local_addr().unwrap().port();
 
@@ -566,7 +610,8 @@ fn p06_single_partial_fill_in_page_cum_qty_after_matches_current_filled_qty() {
             )]);
             write_json_response(&mut stream, &acts.to_string());
         }
-        {
+        // 2 bracket reads (pre/post race-detection) + 1 per-activity read.
+        for _ in 0..3 {
             let (mut stream, _) = listener.accept().unwrap();
             let _ = read_request_path(&mut stream);
             write_json_response(
@@ -622,9 +667,10 @@ fn p07_two_partial_fills_same_order_same_page_reconstruct_distinct_cumulative() 
             ]);
             write_json_response(&mut stream, &acts.to_string());
         }
-        // One GET /v2/orders/{id} call per activity; current total is 25
-        // (10 + 15) both times, since nothing else has landed since.
-        for _ in 0..2 {
+        // 2 bracket reads (race-detection pre/post, PAPER-SOAK-PARTIAL-FILL-
+        // DEDUP-03) + 1 GET /v2/orders/{id} call per activity; current total
+        // is 25 (10 + 15) on every read, since nothing else has landed since.
+        for _ in 0..4 {
             let (mut stream, _) = listener.accept().unwrap();
             let _ = read_request_path(&mut stream);
             write_json_response(
@@ -662,4 +708,241 @@ fn p07_two_partial_fills_same_order_same_page_reconstruct_distinct_cumulative() 
         })
         .collect();
     assert_eq!(deltas, vec![10, 15]);
+}
+
+// ---------------------------------------------------------------------------
+// P08–P10 — PAPER-SOAK-PARTIAL-FILL-DEDUP-03: mixed-type pages and the
+// activity-page/current-order race (defects A and B found by independent
+// review of PAPER-SOAK-PARTIAL-FILL-DEDUP-02).
+// ---------------------------------------------------------------------------
+
+/// P08 (MANDATORY, mirrors mission A03-1): a PARTIAL_FILL sharing a REST
+/// page with the same order's terminal FILL.
+///
+/// This is the exact defect-A reproduction: order total 20, PARTIAL_FILL
+/// 10@$150 then FILL 10@$102 on one page, GET /v2/orders reports
+/// filled_qty=20 (both already executed on the broker). The superseded
+/// DEDUP-02 implementation summed only PARTIAL_FILL quantities when
+/// subtracting the page sum from the current total, so it wrongly computed
+/// baseline = 20 - 10 = 10 and cum_qty_after = 10 + 10 = 20 for the
+/// PARTIAL_FILL -- silently folding the terminal fill's 10 shares into the
+/// partial fill's reconstructed cumulative. This reconstruction sums BOTH
+/// PARTIAL_FILL and FILL quantities in the baseline subtraction, so the
+/// PARTIAL_FILL's true point-in-time cumulative (10, not 20) is recovered.
+#[test]
+fn p08_mixed_partial_fill_and_terminal_fill_same_page_reconstructs_partial_correctly() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    std::thread::spawn(move || {
+        {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = read_request_path(&mut stream);
+            let acts = serde_json::json!([
+                partial_fill_activity_json(
+                    "act-mixed-1",
+                    "order-mixed",
+                    "2024-01-15T10:30:00Z",
+                    "10"
+                ),
+                fill_activity_json(
+                    "act-mixed-2",
+                    "order-mixed",
+                    "2024-01-15T10:30:05Z",
+                    "10",
+                    "102.00"
+                ),
+            ]);
+            write_json_response(&mut stream, &acts.to_string());
+        }
+        // 2 bracket reads (race-detection pre/post) + 1 per-activity read;
+        // current total is 20 on every read (both executions already
+        // happened on the broker by the time we poll).
+        for _ in 0..4 {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = read_request_path(&mut stream);
+            write_json_response(
+                &mut stream,
+                &order_json_with_filled("order-mixed", "20").to_string(),
+            );
+        }
+    });
+
+    let adapter = adapter_for(port);
+    let cursor = live_cursor_no_prior();
+    let token = BrokerInvokeToken::for_test();
+
+    let (events, _new_cursor) = adapter
+        .fetch_events(Some(&cursor), &token)
+        .expect("P08: mixed partial+terminal fill page must succeed");
+
+    assert_eq!(events.len(), 2);
+    match &events[0] {
+        mqk_execution::BrokerEvent::PartialFill {
+            delta_qty,
+            price_micros,
+            cum_qty_after,
+            ..
+        } => {
+            assert_eq!(*delta_qty, 10);
+            assert_eq!(*price_micros, 150_000_000);
+            assert_eq!(
+                *cum_qty_after,
+                Some(10),
+                "P08: PARTIAL_FILL's reconstructed cumulative must be 10 (its own \
+                 point-in-time total), NOT 20 -- 20 would mean the terminal FILL's \
+                 quantity was wrongly folded into this partial fill's watermark, the \
+                 exact defect-A failure mode DEDUP-02 had"
+            );
+        }
+        other => panic!("expected PartialFill, got {other:?}"),
+    }
+    match &events[1] {
+        mqk_execution::BrokerEvent::Fill {
+            delta_qty,
+            price_micros,
+            ..
+        } => {
+            assert_eq!(*delta_qty, 10);
+            assert_eq!(*price_micros, 102_000_000);
+        }
+        other => panic!("expected Fill, got {other:?}"),
+    }
+}
+
+/// P09 (mirrors mission A03-2): two partials plus a terminal fill, all on
+/// one page. Each activity's own quantity and reconstructed cumulative must
+/// survive distinctly: 5, 10 (=5+5), and the terminal FILL's own qty=10 is
+/// untouched by any watermark (Fill carries none).
+#[test]
+fn p09_two_partials_plus_terminal_fill_same_page_all_reconstruct_correctly() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    std::thread::spawn(move || {
+        {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = read_request_path(&mut stream);
+            let acts = serde_json::json!([
+                partial_fill_activity_json("act-p09-1", "order-p09", "2024-01-15T10:30:00Z", "5"),
+                partial_fill_activity_json("act-p09-2", "order-p09", "2024-01-15T10:30:05Z", "5"),
+                fill_activity_json(
+                    "act-p09-3",
+                    "order-p09",
+                    "2024-01-15T10:30:10Z",
+                    "10",
+                    "102.00"
+                ),
+            ]);
+            write_json_response(&mut stream, &acts.to_string());
+        }
+        // 2 bracket reads + 1 per-activity read (x3 activities) = 5.
+        for _ in 0..5 {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = read_request_path(&mut stream);
+            write_json_response(
+                &mut stream,
+                &order_json_with_filled("order-p09", "20").to_string(),
+            );
+        }
+    });
+
+    let adapter = adapter_for(port);
+    let cursor = live_cursor_no_prior();
+    let token = BrokerInvokeToken::for_test();
+
+    let (events, _new_cursor) = adapter
+        .fetch_events(Some(&cursor), &token)
+        .expect("P09: two partials plus terminal fill must succeed");
+
+    assert_eq!(events.len(), 3);
+    assert_eq!(events[0].cum_qty_after(), Some(5));
+    assert_eq!(events[1].cum_qty_after(), Some(10));
+    assert_eq!(
+        events[2].cum_qty_after(),
+        None,
+        "P09: Fill events never carry cum_qty_after"
+    );
+    match &events[2] {
+        mqk_execution::BrokerEvent::Fill { delta_qty, .. } => assert_eq!(*delta_qty, 10),
+        other => panic!("expected Fill, got {other:?}"),
+    }
+}
+
+/// P10 (MANDATORY, mirrors mission A03-7): activity-page/current-order race.
+///
+/// The order's `filled_qty` reported by the two bracketing `GET
+/// /v2/orders` reads disagrees (20, then 25) -- proving a further execution
+/// landed on this order between the two reads. The reconstruction must not
+/// guess which value (or whether either) correctly represents "as of this
+/// page's activities"; it must fail closed to an ambiguous `cum_qty_after
+/// = None` rather than fabricate a watermark, so a later execution can
+/// never be silently absorbed into an earlier activity's economic effect.
+#[test]
+fn p10_activity_page_current_order_race_fails_closed_to_ambiguous() {
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    std::thread::spawn(move || {
+        {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = read_request_path(&mut stream);
+            let acts = serde_json::json!([partial_fill_activity_json(
+                "act-race-1",
+                "order-race",
+                "2024-01-15T10:30:00Z",
+                "10"
+            )]);
+            write_json_response(&mut stream, &acts.to_string());
+        }
+        // Bracket pre-read: filled_qty=20.
+        {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = read_request_path(&mut stream);
+            write_json_response(
+                &mut stream,
+                &order_json_with_filled("order-race", "20").to_string(),
+            );
+        }
+        // Bracket post-read: filled_qty=25 -- a further execution (5 more
+        // shares) landed on this order between the two bracket reads.
+        {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = read_request_path(&mut stream);
+            write_json_response(
+                &mut stream,
+                &order_json_with_filled("order-race", "25").to_string(),
+            );
+        }
+        // Per-activity read (used only for non-qty order fields; filled_qty
+        // is overwritten to the ambiguous sentinel regardless of this value).
+        {
+            let (mut stream, _) = listener.accept().unwrap();
+            let _ = read_request_path(&mut stream);
+            write_json_response(
+                &mut stream,
+                &order_json_with_filled("order-race", "25").to_string(),
+            );
+        }
+    });
+
+    let adapter = adapter_for(port);
+    let cursor = live_cursor_no_prior();
+    let token = BrokerInvokeToken::for_test();
+
+    let (events, _new_cursor) = adapter
+        .fetch_events(Some(&cursor), &token)
+        .expect("P10: raced page must still succeed, just ambiguously");
+
+    assert_eq!(events.len(), 1);
+    assert_eq!(
+        events[0].cum_qty_after(),
+        None,
+        "P10: a pre/post bracket mismatch must fail closed to None, never guess \
+         which reading (or neither) is correct for this page's activities"
+    );
+    match &events[0] {
+        mqk_execution::BrokerEvent::PartialFill { delta_qty, .. } => assert_eq!(*delta_qty, 10),
+        other => panic!("expected PartialFill, got {other:?}"),
+    }
 }

@@ -1472,6 +1472,191 @@ fn a11_no_suppression_from_qty_price_proximity_alone() {
 }
 
 // ---------------------------------------------------------------------------
+// PAPER-SOAK-PARTIAL-FILL-DEDUP-03: A03-1 economic price-attribution proof
+//
+// These exercise the same production seam as A1-A11 (`apply_fill_step`) with
+// hand-constructed `BrokerEvent`s carrying the exact `cum_qty_after` values
+// mqk-broker-alpaca's reconstruction produces before vs. after the -03 fix
+// (proven separately by P08 in
+// `mqk-broker-alpaca/tests/scenario_rest_pagination_brk_rest_02.rs`, which
+// exercises the real REST reconstruction algorithm end to end). The mixed
+// PARTIAL_FILL(10@$100) + FILL(10@$102) page from the mission brief is the
+// scenario under test.
+// ---------------------------------------------------------------------------
+
+/// A03-1-NEG: negative control, in two parts.
+///
+/// Part 1 documents (via this comment) the DEDUP-02 defect mechanism this
+/// test used to reproduce, before the second self-review repair cycle of
+/// this patch (see the `apply_with_watermark` doc comment in
+/// `mqk-execution/src/oms/state_machine.rs`): under -02's design, a
+/// PARTIAL_FILL delivered with a wrongly-reconstructed watermark
+/// (cum_qty_after=20, as -02's page-sum bug would compute for a
+/// PARTIAL_FILL sharing a page with the order's terminal FILL — mission
+/// section 3) caused the watermark to *override* the event's own
+/// `delta_qty`, applying the partial fill's own $100 price to all 20
+/// shares, after which the genuine terminal FILL @ $102 was silently
+/// swallowed by the OMS's already-`Filled` idempotency. This was directly
+/// observed: with `apply_with_watermark`'s now-removed `corrected`/
+/// `effective_event` override still in place, this test's body (feeding
+/// `cum_qty_after: Some(20)` alongside the partial's own `delta_qty: 10`)
+/// asserted and passed on exactly `first.qty == 20 && first.price_micros ==
+/// 100_000_000` followed by `second.is_none()`.
+///
+/// Part 2 (the assertions below) is the "after" half: `apply_with_watermark`
+/// no longer treats `cum_qty_after` as a quantity source (self-review found
+/// it was *also* the mechanism through which the irreducible REST
+/// activity-page/fetch_order race window — see the same doc comment — could
+/// reintroduce this exact failure even with a fully correct reconstruction
+/// algorithm). The identical wrong watermark now changes only the
+/// no-op/genuine-advance classification, never the quantity or price
+/// applied, so the same inputs that used to corrupt this order now apply it
+/// correctly.
+#[test]
+fn a03_1_neg_wrong_watermark_no_longer_corrupts_price_attribution() {
+    let mut oms: BTreeMap<String, OmsOrder> = BTreeMap::new();
+    oms.insert(
+        "ord-a03-neg".to_string(),
+        OmsOrder::new("ord-a03-neg", "SPY", 20),
+    );
+
+    // Same wrong watermark -02's page-sum bug would have produced
+    // (cum_qty_after=20, the terminal FILL's quantity wrongly folded in) --
+    // but the event's own delta_qty (10) is what must actually apply.
+    let partial_with_bad_watermark = BrokerEvent::PartialFill {
+        broker_message_id: "rest-act-1".to_string(),
+        broker_fill_id: Some("act-1".to_string()),
+        internal_order_id: "ord-a03-neg".to_string(),
+        broker_order_id: None,
+        symbol: "SPY".to_string(),
+        side: mqk_execution::Side::Buy,
+        delta_qty: 10,
+        price_micros: 100_000_000,
+        fee_micros: 0,
+        cum_qty_after: Some(20),
+    };
+    let first = apply_fill_step(
+        &mut oms,
+        "ord-a03-neg",
+        &partial_with_bad_watermark,
+        "rest-act-1",
+    )
+    .unwrap()
+    .expect("A03-1-NEG: partial fill applies");
+    assert_eq!(
+        first.qty, 10,
+        "A03-1-NEG: applied quantity is always the event's own 10 shares, \
+         never a value derived from the (wrong) cum_qty_after=20"
+    );
+    assert_eq!(
+        first.price_micros, 100_000_000,
+        "A03-1-NEG: the 10 shares keep the partial fill's own $100 -- never \
+         stretched across a quantity that didn't come from this event"
+    );
+    assert_eq!(oms["ord-a03-neg"].filled_qty, 10);
+    assert_eq!(
+        oms["ord-a03-neg"].state,
+        mqk_execution::oms::state_machine::OrderState::PartiallyFilled
+    );
+
+    // The genuine terminal fill @ $102 now applies correctly -- it is no
+    // longer silently swallowed, because the bad watermark never advanced
+    // filled_qty past what this partial fill actually contributed.
+    let real_terminal = BrokerEvent::Fill {
+        broker_message_id: "rest-act-2".to_string(),
+        broker_fill_id: Some("act-2".to_string()),
+        internal_order_id: "ord-a03-neg".to_string(),
+        broker_order_id: None,
+        symbol: "SPY".to_string(),
+        side: mqk_execution::Side::Buy,
+        delta_qty: 10,
+        price_micros: 102_000_000,
+        fee_micros: 0,
+    };
+    let second = apply_fill_step(&mut oms, "ord-a03-neg", &real_terminal, "rest-act-2")
+        .unwrap()
+        .expect("A03-1-NEG: the real $102 terminal fill must apply, not be swallowed");
+    assert_eq!(second.qty, 10);
+    assert_eq!(second.price_micros, 102_000_000);
+    assert_eq!(oms["ord-a03-neg"].filled_qty, 20);
+}
+
+/// A03-1 (MANDATORY, mission's "MOST IMPORTANT ECONOMIC PROOF"): with the
+/// -03 reconstruction's correct watermark (cum_qty_after=10, not 20 — see
+/// P08), the same mixed-page scenario produces the exact broker economic
+/// truth: 10@$100 then 10@$102, never 20@$100.
+#[test]
+fn a03_1_mixed_partial_then_terminal_fill_price_attribution_is_exact() {
+    let mut oms: BTreeMap<String, OmsOrder> = BTreeMap::new();
+    oms.insert("ord-a03".to_string(), OmsOrder::new("ord-a03", "SPY", 20));
+
+    let partial = BrokerEvent::PartialFill {
+        broker_message_id: "rest-act-1".to_string(),
+        broker_fill_id: Some("act-1".to_string()),
+        internal_order_id: "ord-a03".to_string(),
+        broker_order_id: None,
+        symbol: "SPY".to_string(),
+        side: mqk_execution::Side::Buy,
+        delta_qty: 10,
+        price_micros: 100_000_000,
+        fee_micros: 0,
+        cum_qty_after: Some(10),
+    };
+    let first = apply_fill_step(&mut oms, "ord-a03", &partial, "rest-act-1")
+        .unwrap()
+        .expect("A03-1: partial fill applies");
+    assert_eq!(first.qty, 10, "A03-1: partial fill's own 10 shares, not 20");
+    assert_eq!(first.price_micros, 100_000_000);
+    assert_eq!(oms["ord-a03"].filled_qty, 10);
+    assert_eq!(
+        oms["ord-a03"].state,
+        mqk_execution::oms::state_machine::OrderState::PartiallyFilled
+    );
+
+    // Terminal fill carries no cum_qty_after (Fill never does) — applies via
+    // its own delta_qty, exactly as today's terminal-fill handling already
+    // does (no regression to A03-11's requirement).
+    let terminal = BrokerEvent::Fill {
+        broker_message_id: "rest-act-2".to_string(),
+        broker_fill_id: Some("act-2".to_string()),
+        internal_order_id: "ord-a03".to_string(),
+        broker_order_id: None,
+        symbol: "SPY".to_string(),
+        side: mqk_execution::Side::Buy,
+        delta_qty: 10,
+        price_micros: 102_000_000,
+        fee_micros: 0,
+    };
+    let second = apply_fill_step(&mut oms, "ord-a03", &terminal, "rest-act-2")
+        .unwrap()
+        .expect("A03-1: terminal fill must apply -- it must NOT be swallowed");
+    assert_eq!(
+        second.qty, 10,
+        "A03-1: terminal fill's own 10 shares, distinct from the partial fill"
+    );
+    assert_eq!(
+        second.price_micros, 102_000_000,
+        "A03-1: terminal fill keeps its own $102 price -- never blended with \
+         or overwritten by the partial fill's $100"
+    );
+    assert_eq!(
+        oms["ord-a03"].filled_qty, 20,
+        "A03-1: final cumulative is 20 (10+10), reached via two distinct fills"
+    );
+    assert_eq!(
+        oms["ord-a03"].state,
+        mqk_execution::oms::state_machine::OrderState::Filled
+    );
+
+    // Economic truth is 10@$100 + 10@$102 -- never collapsed into 20@$100.
+    assert!(
+        !(first.qty == 20 && first.price_micros == 100_000_000),
+        "A03-1: must never observe the defect-A failure mode (20 shares at \
+         the partial fill's price)"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // OPTR-LABEL-01: Error taxonomy proof
 // ---------------------------------------------------------------------------
 

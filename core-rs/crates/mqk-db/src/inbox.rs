@@ -154,13 +154,23 @@ pub async fn inbox_insert_deduped(
 /// OMS *apply* layer instead: `mqk_execution::oms::state_machine::OmsOrder::
 /// apply_with_watermark` recognizes a cross-lane duplicate by comparing the
 /// broker-authoritative cumulative-filled-quantity-after-this-event
-/// (`BrokerEvent::PartialFill::cum_qty_after`, populated by
-/// `mqk-broker-alpaca` from Alpaca's own `order.filled_qty` on both lanes)
-/// against the order's current `filled_qty` — an exact identity, not a
-/// heuristic, and one that can never collapse two genuinely distinct fills
-/// (cumulative filled quantity strictly increases with every real
-/// execution, so two distinct fills always carry two distinct watermark
-/// values regardless of how close in time or identical in size they are).
+/// (`BrokerEvent::PartialFill::cum_qty_after`) against the order's current
+/// `filled_qty` — when present, an exact identity, never a heuristic, and
+/// one that can never collapse two genuinely distinct fills (cumulative
+/// filled quantity strictly increases with every real execution, so two
+/// distinct fills always carry two distinct watermark values regardless of
+/// how close in time or identical in size they are).
+///
+/// PAPER-SOAK-PARTIAL-FILL-DEDUP-03: `cum_qty_after` is populated
+/// differently per lane. On the WS lane it is Alpaca's own live
+/// `order.filled_qty` from that specific push — always exact when present.
+/// On the REST lane (`mqk-broker-alpaca::fetch_events`) it is a
+/// *reconstruction* from ordered account-activity quantities, proven exact
+/// per order-group via a race-detection bracket (two back-to-back
+/// `GET /v2/orders` reads must agree) before it is trusted; a page whose
+/// bracket disagrees, or whose per-activity quantities fail to parse, is
+/// left `None` rather than guessed. `None` on either lane falls back to the
+/// pre-existing `event_id`-only dedup — never fabricated.
 #[allow(clippy::too_many_arguments)]
 pub async fn inbox_insert_deduped_with_identity(
     pool: &PgPool,
