@@ -1,6 +1,7 @@
-//! STRATEGY-DECISION-IDEMPOTENCY-01
+//! STRATEGY-DECISION-IDEMPOTENCY-01, extended by
+//! STRATEGY-DECISION-ECONOMIC-IDEMPOTENCY-02
 //!
-//! # Problem addressed
+//! # Problem addressed (-01)
 //!
 //! `bar_result_to_decisions`'s `decision_id` used to be seeded from live
 //! wall-clock `Utc::now().timestamp_micros()` (read once per tick in the
@@ -14,13 +15,48 @@
 //! entirely. A real duplicate-live-order path, bounded only by
 //! `MAX_AUTONOMOUS_SIGNALS_PER_RUN`, not by design.
 //!
-//! # Fix under test
+//! -01 fixed this by seeding `decision_id` from
+//! `run_id|strategy_id|symbol|timeframe_secs|side|qty|bar_end_ts` -- the
+//! exact completed-bar identity, never wall-clock time.
+//!
+//! # -01's remaining gap, closed by -02
+//!
+//! -01 anchored identity on `bar_end_ts` but still folded in the *derived*
+//! order quantity (`qty` = `delta = target.qty - current`) and `side`.
+//! `current` is read from the live portfolio snapshot, which moves the
+//! instant the strategy's own already-working order for this exact
+//! bar/target receives a partial fill -- so re-evaluating the *same*
+//! bar/target after a partial fill computed a *different* `delta`, and
+//! therefore a *different* `decision_id`, for what is economically the
+//! identical intent. That let a second order reach the outbox for the
+//! remaining (post-partial-fill) delta while the original order's remaining
+//! quantity was still working -- e.g. target=20, first order for 20 partial-
+//! fills 10, a second 10-share order reaches the outbox for the "remaining"
+//! delta while the original order's other 10 shares are still live: up to
+//! 30 total shares against a target of 20.
+//!
+//! # -02 fix under test
 //!
 //! `decision_id` is now a UUIDv5 seeded from
-//! `run_id|strategy_id|symbol|timeframe_secs|side|qty|bar_end_ts` -- the
-//! exact completed-bar identity (`EvaluatedBarFacts::bar_end_ts`), never
-//! wall-clock time, matching the same bar-anchored-identity pattern already
-//! proven by `runtime_opportunity_allocation::compute_cycle_id`.
+//! `run_id|strategy_id|symbol|timeframe_secs|target_qty|bar_end_ts` --
+//! `target_qty` is the strategy's raw *signed target position*
+//! (`TargetPosition::qty`), never the derived `delta`/`side`. Because
+//! `target_qty` does not move when a fill against the current in-flight
+//! order updates `current`, the same logical intent always produces the
+//! same `decision_id` regardless of how many times, or against what
+//! intermediate `current`, it is re-evaluated. Since `decision_id` doubles
+//! as the outbox `idempotency_key` (Gate 7, `ON CONFLICT (idempotency_key)
+//! DO NOTHING`), this makes "at most one durable order per intent" a
+//! property the database enforces directly: the *first* delta computed for
+//! an intent is the one, and only one, ever durably submitted, matching the
+//! same bar-anchored-identity pattern already proven by
+//! `runtime_opportunity_allocation::compute_cycle_id`.
+//!
+//! Bundle 5's `rebuild_decision_with_qty` (capital-clamped resize) is fixed
+//! the same way: it now reuses `original.decision_id` verbatim instead of
+//! minting a new UUID salted with the loop-tick wall clock (`now_micros`) —
+//! see the `c5_*`/`c6_*`/`neg_*` tests in
+//! `runtime_opportunity_allocation.rs`'s own `#[cfg(test)]` module.
 //!
 //! # Coverage
 //!
@@ -37,12 +73,32 @@
 //! |      | for the same bar, and resubmitting it is a no-op against the           |
 //! |      | already-durable outbox row (retry/restart never creates a second      |
 //! |      | order for the same logical decision)                                   |
+//! | C1   | (-02) Same bar + same target, current changes (simulating a partial   |
+//! |      | fill of the already-working order): decision_id is UNCHANGED even     |
+//! |      | though the derived delta differs                                        |
+//! | C2   | (-02, MANDATORY, DB-backed) target=20, first order for 20 partially   |
+//! |      | fills to current=10, same bar re-evaluates with current=10 (delta=10) |
+//! |      | -> ZERO additional durable order; still exactly one outbox row, still  |
+//! |      | qty=20, never 30 total possible shares                                 |
+//! | C4   | DB-backed: same completed bar replay after a simulated process        |
+//! |      | restart resolves to the same durable intent -- no second order         |
+//! | C7   | A different completed bar is still allowed to produce a new intent     |
+//! |      | even with the same target (bar_end_ts, not target, disambiguates)      |
+//! | C10  | Multi-symbol: one symbol's in-flight quantity/current never affects   |
+//! |      | another symbol's decision_id                                            |
+//! | C9   | DB-backed: once an intent's order reaches a genuinely terminal FAILED |
+//! |      | state, a same-bar re-evaluation is still refused as a duplicate --     |
+//! |      | no automatic same-bar retry (conservative fail-closed policy)          |
+//! | NEG  | Negative control: the OLD (-01) delta-anchored seed formula, applied  |
+//! |      | by hand to the same two re-evaluations C1/C2 exercise, DOES produce   |
+//! |      | two different ids -- proving target-anchoring (not incidental test     |
+//! |      | setup) is what makes C1/C2 pass                                         |
 //!
 //! # Proof boundary
 //!
-//! D01-D04 are pure (no IO). D05-D06 are DB-backed (port 5434 test
-//! Postgres) and load-bearing -- must fail hard if `MQK_DATABASE_URL` is
-//! absent, not skip.
+//! D01-D04, C1, C7, C10, NEG are pure (no IO). D05-D06, C2, C4, C9 are
+//! DB-backed (port 5434 test Postgres) and load-bearing -- must fail hard if
+//! `MQK_DATABASE_URL` is absent, not skip.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -130,6 +186,11 @@ fn d02_different_bar_produces_different_decision_id() {
 
 #[test]
 fn d03_different_qty_at_same_bar_produces_different_decision_id() {
+    // Both evaluations start from flat() (current=0), so target == delta
+    // here -- this proves a genuinely different TARGET (not merely a
+    // different derived delta from a moving current) still yields a
+    // different decision_id; see C1 below for the complementary case (same
+    // target, current moves, decision_id must NOT change).
     let result_10 = live_result(vec![TargetPosition::new("NVDA", 10)]);
     let result_20 = live_result(vec![TargetPosition::new("NVDA", 20)]);
 
@@ -149,6 +210,160 @@ fn d04_different_symbol_at_same_bar_produces_different_decision_id() {
     let d_amd = bar_result_to_decisions(&result_amd, fixed_run_id(), BAR_A_END_TS, &flat());
 
     assert_ne!(d_nvda[0].decision_id, d_amd[0].decision_id);
+}
+
+// ---------------------------------------------------------------------------
+// STRATEGY-DECISION-ECONOMIC-IDEMPOTENCY-02: C1/C7/C10/NEG (pure) and
+// C2/C4 (DB-backed) — see module header for the full defect/fix narrative.
+// ---------------------------------------------------------------------------
+
+fn at(symbol: &str, qty: i64) -> BTreeMap<String, i64> {
+    let mut m = BTreeMap::new();
+    m.insert(symbol.to_string(), qty);
+    m
+}
+
+/// C1 (MANDATORY): same bar + same target; `current` changes between
+/// evaluations exactly as it would after a partial fill of the original
+/// order (0 -> 10, simulating a 10-of-20 partial fill). `decision_id` must
+/// be unchanged even though the derived delta (20, then 10) differs.
+#[test]
+fn c1_same_bar_same_target_current_moves_decision_id_unchanged() {
+    let result = live_result(vec![TargetPosition::new("NVDA", 20)]);
+
+    let before_fill = bar_result_to_decisions(&result, fixed_run_id(), BAR_A_END_TS, &flat());
+    let after_partial_fill =
+        bar_result_to_decisions(&result, fixed_run_id(), BAR_A_END_TS, &at("NVDA", 10));
+
+    assert_eq!(before_fill.len(), 1);
+    assert_eq!(after_partial_fill.len(), 1);
+    assert_eq!(
+        before_fill[0].decision_id, after_partial_fill[0].decision_id,
+        "C1: decision_id must be stable across a current-position change caused by a partial \
+         fill of this same intent's own already-working order"
+    );
+    // The derived delta legitimately differs (this is what Bundle 5/outbox
+    // payload building uses `qty` for) -- only the identity is stable.
+    assert_eq!(before_fill[0].qty, 20, "precondition: first delta is 20");
+    assert_eq!(
+        after_partial_fill[0].qty, 10,
+        "precondition: second delta is 10 (target 20 - current 10)"
+    );
+}
+
+/// C7: a genuinely different completed bar with the SAME target is still a
+/// new, distinguishable intent -- bar_end_ts, not target, is what
+/// disambiguates across real bar boundaries.
+#[test]
+fn c7_different_bar_same_target_is_a_new_intent() {
+    let result = live_result(vec![TargetPosition::new("NVDA", 20)]);
+
+    let bar_a = bar_result_to_decisions(&result, fixed_run_id(), BAR_A_END_TS, &flat());
+    let bar_b = bar_result_to_decisions(&result, fixed_run_id(), BAR_B_END_TS, &flat());
+
+    assert_ne!(
+        bar_a[0].decision_id, bar_b[0].decision_id,
+        "C7: a later completed bar with the identical target must still be a distinguishable \
+         new economic intent"
+    );
+}
+
+/// C10: one symbol's in-flight/partial-fill-adjusted current must never
+/// affect a sibling symbol's decision_id in the same tick's target set.
+#[test]
+fn c10_multi_symbol_one_symbols_current_never_affects_another() {
+    let result = live_result(vec![
+        TargetPosition::new("NVDA", 20),
+        TargetPosition::new("AMD", 20),
+    ]);
+
+    // NVDA has a partial fill reflected in current; AMD is untouched (flat).
+    let mut current_with_nvda_partial = BTreeMap::new();
+    current_with_nvda_partial.insert("NVDA".to_string(), 10i64);
+
+    let baseline = bar_result_to_decisions(&result, fixed_run_id(), BAR_A_END_TS, &flat());
+    let with_nvda_fill = bar_result_to_decisions(
+        &result,
+        fixed_run_id(),
+        BAR_A_END_TS,
+        &current_with_nvda_partial,
+    );
+
+    let amd_id_baseline = baseline
+        .iter()
+        .find(|d| d.symbol == "AMD")
+        .expect("AMD decision present")
+        .decision_id
+        .clone();
+    let amd_id_after_nvda_fill = with_nvda_fill
+        .iter()
+        .find(|d| d.symbol == "AMD")
+        .expect("AMD decision present")
+        .decision_id
+        .clone();
+
+    assert_eq!(
+        amd_id_baseline, amd_id_after_nvda_fill,
+        "C10: AMD's decision_id must be unaffected by NVDA's current-position change"
+    );
+
+    let nvda_id_baseline = baseline
+        .iter()
+        .find(|d| d.symbol == "NVDA")
+        .expect("NVDA decision present")
+        .decision_id
+        .clone();
+    let nvda_id_after_fill = with_nvda_fill
+        .iter()
+        .find(|d| d.symbol == "NVDA")
+        .expect("NVDA decision present")
+        .decision_id
+        .clone();
+    assert_eq!(
+        nvda_id_baseline, nvda_id_after_fill,
+        "C10: (restating C1) NVDA's own decision_id must also be unaffected by its own \
+         partial-fill-driven current change"
+    );
+}
+
+/// NEG: negative control proving the fix is load-bearing. Hand-computes
+/// what the OLD (-01) delta-anchored seed formula
+/// (`run_id|strategy_id|symbol|timeframe_secs|side|qty|bar_end_ts`) would
+/// have produced for the exact two evaluations C1 exercises (target=20,
+/// current 0 then 10). Under the old formula the two seeds differ (delta 20
+/// vs 10), so the old scheme DOES mint two different ids for what is
+/// economically the identical intent -- confirming target-anchoring, not
+/// incidental test setup, is what makes C1/C2 hold.
+#[test]
+fn neg_old_delta_anchored_seed_would_have_produced_two_different_ids() {
+    let run_id = fixed_run_id();
+    let old_seed = |side: &str, qty: i64, bar_end_ts: i64| {
+        Uuid::new_v5(
+            &Uuid::NAMESPACE_DNS,
+            format!("mqk.strategy-decision.v2|{run_id}|test_strategy|NVDA|300|{side}|{qty}|{bar_end_ts}")
+                .as_bytes(),
+        )
+        .to_string()
+    };
+    let old_id_before_fill = old_seed("buy", 20, BAR_A_END_TS);
+    let old_id_after_partial_fill = old_seed("buy", 10, BAR_A_END_TS);
+
+    assert_ne!(
+        old_id_before_fill, old_id_after_partial_fill,
+        "NEG: the -01 delta-anchored formula produces two DIFFERENT ids for the same bar/target \
+         once current moves from a partial fill -- this is the exact -01 gap -02 closes; the new \
+         formula (C1 above) must produce the SAME id for this exact scenario"
+    );
+
+    // Confirm the NEW (target-anchored) production function actually
+    // resolves this ambiguity, contrasting directly with the old formula.
+    let result = live_result(vec![TargetPosition::new("NVDA", 20)]);
+    let new_before = bar_result_to_decisions(&result, run_id, BAR_A_END_TS, &flat());
+    let new_after = bar_result_to_decisions(&result, run_id, BAR_A_END_TS, &at("NVDA", 10));
+    assert_eq!(
+        new_before[0].decision_id, new_after[0].decision_id,
+        "NEG: the current production formula must NOT reproduce the old bug"
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -466,6 +681,215 @@ async fn d06_restart_recomputes_identical_decision_id_and_resubmit_is_a_noop() {
         assert_eq!(
             count, 1,
             "D06: still exactly one outbox row after the simulated restart"
+        );
+    })
+    .await;
+}
+
+// ---------------------------------------------------------------------------
+// C2/C4 — DB-backed, real production seam (submit_internal_strategy_decision
+// + the real outbox), STRATEGY-DECISION-ECONOMIC-IDEMPOTENCY-02
+// ---------------------------------------------------------------------------
+
+async fn outbox_qty(pool: &sqlx::PgPool, idempotency_key: &str) -> i64 {
+    sqlx::query_scalar(
+        "select (order_json->>'qty')::bigint from oms_outbox where idempotency_key = $1",
+    )
+    .bind(idempotency_key)
+    .fetch_one(pool)
+    .await
+    .expect("qty query failed")
+}
+
+/// C2 (MANDATORY): the exact scenario the mission specifies. target=20;
+/// first evaluation (current=0) submits and is accepted with qty=20.
+/// Simulates a 10-share partial fill of that same order (current becomes
+/// 10). The same bar re-evaluates: target is still 20, so the derived delta
+/// is now 10 -- under the -01 scheme this would have minted a second,
+/// distinct decision_id and reached the outbox as a genuinely new order.
+/// Proves: zero additional durable order is created; exactly one outbox row
+/// exists for this intent; that row's qty is still 20 (the original, never
+/// silently replaced by the second attempt's smaller qty=10 payload) --
+/// so the system cannot end up with 30 total possible shares
+/// (10 filled + 10 original remaining + 10 new).
+#[tokio::test]
+async fn c2_partial_fill_reevaluation_creates_zero_additional_order() {
+    let _ = require_db_url();
+    mqk_db::run_isolated("c2_economic_idempotency", |pool| async move {
+        let symbol = "NVDA";
+        let (st, run_id) = seed_and_run(&pool, "test_strategy", symbol).await;
+        let result = live_result(vec![TargetPosition::new(symbol, 20)]);
+
+        // First evaluation: current=0, target=20 -> delta=20, BUY 20 submitted.
+        let first = bar_result_to_decisions(&result, run_id, BAR_A_END_TS, &flat());
+        assert_eq!(first[0].qty, 20, "precondition: first delta is 20");
+        let decision_id = first[0].decision_id.clone();
+        let outcome_first =
+            submit_internal_strategy_decision(&st, first.into_iter().next().unwrap()).await;
+        assert!(
+            outcome_first.accepted,
+            "C2: first submit (BUY 20) must be accepted; disposition={:?} blockers={:?}",
+            outcome_first.disposition, outcome_first.blockers
+        );
+        assert_eq!(outbox_row_count(&pool, &decision_id).await, 1);
+        assert_eq!(outbox_qty(&pool, &decision_id).await, 20);
+
+        // Simulate a 10-share partial fill of that SAME order: current
+        // moves from 0 to 10, but the original order still has 10 shares
+        // outstanding (unchanged by this test -- current_positions here
+        // models the portfolio-level fact a partial fill produces).
+        let current_after_partial_fill = at(symbol, 10);
+
+        // Same bar re-evaluates: target is still 20 (the strategy has not
+        // seen a new completed bar), so delta is now 20-10=10.
+        let second =
+            bar_result_to_decisions(&result, run_id, BAR_A_END_TS, &current_after_partial_fill);
+        assert_eq!(
+            second[0].qty, 10,
+            "precondition: second delta reflects the partial fill (20-10=10)"
+        );
+        assert_eq!(
+            second[0].decision_id, decision_id,
+            "C2: re-evaluation after the partial fill must compute the SAME decision_id \
+             as the original order -- this is what makes the outbox conflict guard fire"
+        );
+
+        let outcome_second =
+            submit_internal_strategy_decision(&st, second.into_iter().next().unwrap()).await;
+        assert_eq!(
+            outcome_second.disposition, "duplicate",
+            "C2: the post-partial-fill re-evaluation must be refused as a duplicate, \
+             never accepted as a second order"
+        );
+
+        // The decisive assertions: exactly one row, still the ORIGINAL
+        // qty=20 payload -- never silently replaced by the second attempt's
+        // qty=10, and never a second row alongside it.
+        assert_eq!(
+            outbox_row_count(&pool, &decision_id).await,
+            1,
+            "C2: exactly one outbox row must exist for this intent after the re-evaluation"
+        );
+        assert_eq!(
+            outbox_qty(&pool, &decision_id).await,
+            20,
+            "C2: the durable row must still be the original qty=20 order -- \
+             ON CONFLICT DO NOTHING must not have replaced it with the second attempt's qty=10"
+        );
+
+        // Total possible exposure: the ORIGINAL order (20, of which 10 is
+        // already filled and 10 remains genuinely outstanding) is the only
+        // order that exists. 10 (filled) + 10 (still working on the SAME
+        // order) = 20, matching the target exactly -- never 30.
+    })
+    .await;
+}
+
+/// C4: same completed bar replayed after a simulated process restart, WITH
+/// current reflecting a partial fill by the time of the post-restart
+/// re-evaluation (the more realistic restart shape: a crash typically
+/// happens mid-fill, not at qty=0) -- still resolves to the same durable
+/// intent, zero additional order.
+#[tokio::test]
+async fn c4_restart_replay_with_partial_fill_creates_zero_additional_order() {
+    let _ = require_db_url();
+    mqk_db::run_isolated("c4_economic_idempotency", |pool| async move {
+        let symbol = "AMD";
+        let (st_before, run_id) = seed_and_run(&pool, "test_strategy", symbol).await;
+        let result = live_result(vec![TargetPosition::new(symbol, 15)]);
+
+        let before = bar_result_to_decisions(&result, run_id, BAR_A_END_TS, &flat());
+        let decision_id = before[0].decision_id.clone();
+        let outcome_before =
+            submit_internal_strategy_decision(&st_before, before.into_iter().next().unwrap()).await;
+        assert!(
+            outcome_before.accepted,
+            "C4: pre-restart submit must be accepted"
+        );
+
+        // Simulated restart + a partial fill (5 of 15) having landed before
+        // the crash.
+        let st_after = Arc::new(state::AppState::new_with_db(pool.clone()));
+        st_after.inject_running_loop_for_test(run_id).await;
+        let after = bar_result_to_decisions(&result, run_id, BAR_A_END_TS, &at(symbol, 5));
+        assert_eq!(
+            after[0].decision_id, decision_id,
+            "C4: post-restart re-evaluation with a partial-fill-adjusted current must still \
+             compute the identical decision_id"
+        );
+        let outcome_after =
+            submit_internal_strategy_decision(&st_after, after.into_iter().next().unwrap()).await;
+        assert_eq!(outcome_after.disposition, "duplicate");
+
+        assert_eq!(outbox_row_count(&pool, &decision_id).await, 1);
+        assert_eq!(
+            outbox_qty(&pool, &decision_id).await,
+            15,
+            "C4: the durable row must remain the original qty=15 order after restart replay"
+        );
+    })
+    .await;
+}
+
+/// C9: explicit policy for a terminal-but-unsuccessful attempt on the same
+/// bar/intent. Once the original order for an intent reaches FAILED (a
+/// genuinely terminal, non-success state -- e.g. dispatch attempts
+/// exhausted), a re-evaluation of the SAME bar/target is STILL refused as a
+/// duplicate, never silently retried. This is the "conservative fail-closed"
+/// policy the design explicitly sanctions in place of a bounded retry
+/// counter: the next real retry opportunity is the next completed bar (a
+/// genuinely new `bar_end_ts`), not an unlimited same-bar respawn loop.
+#[tokio::test]
+async fn c9_terminal_failed_attempt_on_same_bar_is_not_retried() {
+    let _ = require_db_url();
+    mqk_db::run_isolated("c9_economic_idempotency", |pool| async move {
+        let symbol = "MSFT";
+        let (st, run_id) = seed_and_run(&pool, "test_strategy", symbol).await;
+        let result = live_result(vec![TargetPosition::new(symbol, 8)]);
+
+        let first = bar_result_to_decisions(&result, run_id, BAR_A_END_TS, &flat());
+        let decision_id = first[0].decision_id.clone();
+        let outcome_first =
+            submit_internal_strategy_decision(&st, first.into_iter().next().unwrap()).await;
+        assert!(
+            outcome_first.accepted,
+            "C9 precondition: first submit accepted"
+        );
+
+        // Drive the row to a genuinely terminal FAILED state through the
+        // real production transitions (PENDING -> CLAIMED -> FAILED), not a
+        // hand-rolled status write.
+        let claimed = mqk_db::outbox_claim_batch_for_run(
+            &pool,
+            run_id,
+            10,
+            "c9-test-dispatcher",
+            chrono::Utc::now(),
+        )
+        .await
+        .expect("claim");
+        assert_eq!(claimed.len(), 1, "C9 precondition: exactly one row claimed");
+        let failed = mqk_db::outbox_mark_failed(&pool, &decision_id)
+            .await
+            .expect("mark_failed");
+        assert!(failed, "C9 precondition: row must transition to FAILED");
+
+        // Same bar re-evaluates (target unchanged) -- decision_id is
+        // identical, so the outbox conflict guard refuses it regardless of
+        // the existing row's terminal FAILED status.
+        let retry = bar_result_to_decisions(&result, run_id, BAR_A_END_TS, &flat());
+        assert_eq!(retry[0].decision_id, decision_id);
+        let outcome_retry =
+            submit_internal_strategy_decision(&st, retry.into_iter().next().unwrap()).await;
+        assert_eq!(
+            outcome_retry.disposition, "duplicate",
+            "C9: a same-bar re-evaluation after the original attempt FAILED must still be \
+             refused as a duplicate -- no automatic same-bar retry"
+        );
+        assert_eq!(
+            outbox_row_count(&pool, &decision_id).await,
+            1,
+            "C9: exactly one row must exist for this intent, permanently FAILED, never replaced"
         );
     })
     .await;

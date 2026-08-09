@@ -266,10 +266,12 @@ fn build_order_json(d: &InternalStrategyDecision) -> serde_json::Value {
 /// | —                     | `limit_price`       | `None`                   |
 ///
 /// `decision_id` is a UUIDv5 derived from
-/// `"mqk.strategy-decision.v2|{run_id}|{strategy_id}|{symbol}|{timeframe_secs}|{side}|{qty}|{bar_end_ts}"`
-/// where `qty` is the absolute delta and `bar_end_ts` is the exact
-/// completed-bar identity (`EvaluatedBarFacts::bar_end_ts`) this decision
-/// was evaluated against (STRATEGY-DECISION-IDEMPOTENCY-01).
+/// `"mqk.strategy-decision.v3|{run_id}|{strategy_id}|{symbol}|{timeframe_secs}|{target_qty}|{bar_end_ts}"`
+/// where `target_qty` is the strategy's raw *signed target position*
+/// (`TargetPosition::qty`, before subtracting `current`) and `bar_end_ts` is
+/// the exact completed-bar identity (`EvaluatedBarFacts::bar_end_ts`) this
+/// decision was evaluated against
+/// (STRATEGY-DECISION-IDEMPOTENCY-01/STRATEGY-DECISION-ECONOMIC-IDEMPOTENCY-02).
 ///
 /// This parameter is named `bar_end_ts`, not `now_micros`, deliberately:
 /// the 1-second execution loop tick may re-run the same strategy evaluation
@@ -279,12 +281,38 @@ fn build_order_json(d: &InternalStrategyDecision) -> serde_json::Value {
 /// (the prior behavior) made every such re-evaluation produce a distinct
 /// `decision_id`, defeating the outbox's `ON CONFLICT DO NOTHING` dedup
 /// entirely — a real duplicate-live-order path, bounded only by
-/// `MAX_AUTONOMOUS_SIGNALS_PER_RUN`, not by design. Anchoring on
-/// `bar_end_ts` instead means the same logical decision (same run,
-/// strategy, symbol, timeframe, completed bar, side, qty) always produces
-/// the same `decision_id`, regardless of how many ticks re-evaluate it,
-/// matching the same bar-anchored-identity pattern already proven by
-/// `runtime_opportunity_allocation::compute_cycle_id`.
+/// `MAX_AUTONOMOUS_SIGNALS_PER_RUN`, not by design.
+///
+/// # -02: identity is the target, not the derived delta
+///
+/// -01 anchored identity on `bar_end_ts` but still included the *derived*
+/// order quantity (`delta = target.qty - current`) and `side`. That
+/// reintroduces the same class of bug one level down: `current` is read
+/// from the live portfolio snapshot, which moves the instant the strategy's
+/// own already-working order for this exact bar/target receives a partial
+/// fill — so re-evaluating the *same* bar/target after a partial fill
+/// computed a *different* `delta`, and therefore a *different*
+/// `decision_id`, for what is economically the identical intent. That let a
+/// second order reach the outbox for the remaining (post-partial-fill)
+/// delta while the original order's remaining quantity was still working —
+/// two live orders racing to fill the same target.
+///
+/// Anchoring on `target_qty` instead (the strategy's target, which by
+/// construction does not move when a fill against the current in-flight
+/// order updates `current`) means the same logical intent — same run,
+/// strategy, symbol, timeframe, completed bar, target — always produces the
+/// same `decision_id` regardless of how `current`/`delta` drift while that
+/// intent's order is still working. Because `decision_id` is also the
+/// outbox `idempotency_key` (Gate 7, `ON CONFLICT (idempotency_key) DO
+/// NOTHING`), this makes "at most one durable order per intent" a property
+/// the database enforces directly, not something every caller must
+/// separately reason about — the *first* delta computed for an intent is
+/// the one, and only one, that is ever durably submitted; a later
+/// re-evaluation computing a smaller delta (because part of the first order
+/// already filled) is rejected as a duplicate before it can add exposure
+/// beyond the original target. See `runtime_opportunity_allocation.rs`'s
+/// `compute_cycle_id` for the same bar-anchored-identity pattern applied to
+/// the allocator's economic-cycle identity.
 ///
 /// This function is pure (no IO, no state mutation) and exported for test
 /// isolation.
@@ -331,12 +359,16 @@ pub fn bar_result_to_decisions(
                 | crate::capital_policy::OrderIntent::SellBeyondLongToShort
                 | crate::capital_policy::OrderIntent::NoOp => return None,
             };
+            // STRATEGY-DECISION-ECONOMIC-IDEMPOTENCY-02: identity is anchored
+            // on the strategy's raw signed TARGET (`t.qty`), never on the
+            // derived `delta`/`side` — see the doc comment above for why.
             let decision_id = Uuid::new_v5(
                 &Uuid::NAMESPACE_DNS,
                 format!(
-                    "mqk.strategy-decision.v2|{run_id}|{strategy_id}|{symbol}|{timeframe_secs}|{side}|{qty}|{bar_end_ts}",
+                    "mqk.strategy-decision.v3|{run_id}|{strategy_id}|{symbol}|{timeframe_secs}|{target_qty}|{bar_end_ts}",
                     symbol = t.symbol,
                     timeframe_secs = result.spec.timeframe_secs,
+                    target_qty = t.qty,
                 )
                 .as_bytes(),
             )

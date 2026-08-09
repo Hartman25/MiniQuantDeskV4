@@ -942,7 +942,22 @@ pub(super) fn spawn_execution_loop(
                         }
                     };
                     if !dispatch_results.is_empty() {
-                        let now_micros = Utc::now().timestamp_micros(); // allow: loop-context wall-clock for decision_id
+                        // STRATEGY-DECISION-ECONOMIC-IDEMPOTENCY-02: this
+                        // wall-clock value is passed to Bundle 6
+                        // (`runtime_strategy_conflict::gather_and_resolve`)
+                        // only for signature compatibility with that
+                        // module's existing `ConflictPolicyContext` shape —
+                        // Bundle 6 itself never uses it for identity (see
+                        // that module's own `let _ = now_micros;` in
+                        // `persist_plan_if_present`; evidence timestamps
+                        // there come from a fresh `Utc::now()` call, not this
+                        // value). It is deliberately NOT passed to Bundle 5
+                        // (`runtime_opportunity_allocation::gather_and_apply`)
+                        // at all — that seam no longer accepts a wall-clock
+                        // parameter, closing the defect where
+                        // `rebuild_decision_with_qty` used to salt a resized
+                        // decision's `decision_id` with it.
+                        let now_micros = Utc::now().timestamp_micros(); // allow: ops-metadata
                         // Derive current position truth from the execution snapshot
                         // settled above.  Symbols absent from the map are flat (qty=0).
                         // Q2: one shared snapshot read covers every symbol dispatched
@@ -1540,7 +1555,6 @@ pub(super) fn spawn_execution_loop(
                             crate::runtime_opportunity_allocation::gather_and_apply(
                                 &state_arc,
                                 run_id,
-                                now_micros,
                                 market_date_today,
                                 dispatch_timeframe,
                                 per_candidate_timeframe_label,

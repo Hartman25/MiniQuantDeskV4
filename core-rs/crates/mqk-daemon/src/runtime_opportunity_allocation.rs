@@ -152,9 +152,6 @@ pub struct RuntimeOpportunityAllocationContext {
     pub run_id: Uuid,
     pub market_date: String,
     pub timeframe: String,
-    /// Evidence-only (Phase G's `created_at_utc` / `rebuild_decision_with_qty`'s
-    /// decision-id salt) — never part of cycle identity (Phase B).
-    pub now_micros: i64,
     pub runtime_ceiling: usize,
     /// `None` when the artifact is not configured, missing, invalid, or stale.
     pub opportunity_set: Option<LoadedRuntimeOpportunitySet>,
@@ -212,23 +209,37 @@ pub struct RuntimeOpportunityAllocationOutcome {
     pub plan: Option<AllocationCycleResult>,
 }
 
+/// STRATEGY-DECISION-ECONOMIC-IDEMPOTENCY-02 (C-G4): resize `original`'s
+/// quantity to the allocator-approved `new_qty` WITHOUT minting a new
+/// `decision_id`.
+///
+/// # Why the id is reused verbatim, not derived
+///
+/// The previous version of this function (`PATCH-01`/original Bundle 5)
+/// computed a brand-new UUIDv5 seeded with `now_micros` — the loop-tick wall
+/// clock — so a resized decision for the exact same economic intent got a
+/// different `decision_id` merely because the same completed-bar/target
+/// cycle was reprocessed on a different tick, defeating durable outbox
+/// idempotency one layer above the -01 bug this same seam already caused
+/// once.
+///
+/// `original.decision_id` already carries the full, stable economic-intent
+/// identity (`decision::bar_result_to_decisions`: run + strategy + symbol +
+/// timeframe + target + bar_end_ts — never the derived delta/qty, never wall
+/// clock). Resizing the *quantity actually to be submitted this cycle* does
+/// not change *which* intent is being pursued, so the id must not change
+/// either — that is precisely what "preserve the original intent identity
+/// through Bundle 5" (C6) means. The outbox's `ON CONFLICT (idempotency_key)
+/// DO NOTHING` (the same key as `decision_id`) is what then guarantees at
+/// most one durable order for this intent regardless of how many times, or
+/// at how many different clamped quantities, it is resized across ticks —
+/// only the first successful enqueue ever lands.
 fn rebuild_decision_with_qty(
     original: &InternalStrategyDecision,
     new_qty: i64,
-    run_id: Uuid,
-    now_micros: i64,
 ) -> InternalStrategyDecision {
-    let decision_id = Uuid::new_v5(
-        &Uuid::NAMESPACE_DNS,
-        format!(
-            "{run_id}:{}:{}:{}:{new_qty}:{now_micros}",
-            original.strategy_id, original.symbol, original.side
-        )
-        .as_bytes(),
-    )
-    .to_string();
     InternalStrategyDecision {
-        decision_id,
+        decision_id: original.decision_id.clone(),
         strategy_id: original.strategy_id.clone(),
         symbol: original.symbol.clone(),
         timeframe_secs: original.timeframe_secs,
@@ -510,8 +521,7 @@ pub fn apply_runtime_opportunity_allocation(
                     // Blocker 1: only `decision` (qty/decision_id) is
                     // rebuilt — `bar_facts` and `dynamic_selection_provenance`
                     // are copied from the original envelope unchanged.
-                    let rebuilt_decision =
-                        rebuild_decision_with_qty(&p.decision, delta, ctx.run_id, ctx.now_micros);
+                    let rebuilt_decision = rebuild_decision_with_qty(&p.decision, delta);
                     other_decisions.push(PendingDecisionWithBarFacts {
                         decision: rebuilt_decision,
                         bar_facts: p.bar_facts,
@@ -710,7 +720,6 @@ async fn resolve_active_snapshot(
 pub async fn gather_and_apply(
     state_arc: &Arc<AppState>,
     run_id: Uuid,
-    now_micros: i64,
     market_date: String,
     timeframe: String,
     per_candidate_timeframe_label: Option<BTreeMap<String, String>>,
@@ -741,7 +750,6 @@ pub async fn gather_and_apply(
             run_id,
             market_date,
             timeframe,
-            now_micros,
             runtime_ceiling,
             opportunity_set: None,
             active_snapshot: None,
@@ -772,7 +780,6 @@ pub async fn gather_and_apply(
         run_id,
         market_date,
         timeframe,
-        now_micros,
         runtime_ceiling,
         opportunity_set,
         active_snapshot,
@@ -901,7 +908,6 @@ mod tests {
             run_id: run_id(),
             market_date: "2026-07-26".to_string(),
             timeframe: TIMEFRAME.to_string(),
-            now_micros: 1_000_000,
             runtime_ceiling: 5,
             opportunity_set: Some(opportunity_set(vec![
                 ("AAPL", "intraday_scalper", 0.9),
@@ -1015,6 +1021,99 @@ mod tests {
             out.decisions[0].decision.qty
         );
         assert!(out.decisions[0].decision.qty > 0);
+    }
+
+    // -----------------------------------------------------------------
+    // STRATEGY-DECISION-ECONOMIC-IDEMPOTENCY-02: C5/C6 — Bundle 5 resize
+    // preserves the original intent identity.
+    // -----------------------------------------------------------------
+
+    /// C6: a capital-clamped resize must NOT mint a new decision_id — the
+    /// rebuilt decision's id is byte-for-byte the original's, even though
+    /// qty changed.
+    #[test]
+    fn c6_paper_enforced_clamp_preserves_original_decision_id() {
+        let mut current = BTreeMap::new();
+        current.insert("AAPL".to_string(), 0i64);
+        let original = bound_buy("AAPL", "intraday_scalper", 10_000, 1_000, 10_000_000_000);
+        let original_decision_id = original.decision.decision_id.clone();
+        let out = apply_runtime_opportunity_allocation(
+            &base_ctx(RuntimeOpportunityAllocationMode::PaperEnforced),
+            vec![original],
+            &current,
+        );
+        assert_eq!(out.decisions.len(), 1);
+        assert!(
+            out.decisions[0].decision.qty < 10_000,
+            "precondition: this must actually be a clamp, not a pass-through"
+        );
+        assert_eq!(
+            out.decisions[0].decision.decision_id, original_decision_id,
+            "C6: Bundle 5's clamped resize must preserve the original intent's decision_id \
+             unchanged — it identifies WHICH intent is being pursued, not how much of it \
+             could be funded this cycle"
+        );
+    }
+
+    /// C5: the same economic cycle and same allocation result, processed as
+    /// two independently-constructed calls (simulating two different loop
+    /// ticks), produce the identical rebuilt decision_id. Since Bundle 5 no
+    /// longer accepts any wall-clock parameter at all
+    /// (`RuntimeOpportunityAllocationContext` has no `now_micros` field),
+    /// this holds by construction — proven here end to end through the real
+    /// `apply_runtime_opportunity_allocation` entry point rather than only
+    /// asserting the field is absent.
+    #[test]
+    fn c5_same_cycle_two_independent_ticks_yield_identical_rebuilt_decision_id() {
+        let mut current = BTreeMap::new();
+        current.insert("AAPL".to_string(), 0i64);
+        let tick1 = bound_buy("AAPL", "intraday_scalper", 10_000, 1_000, 10_000_000_000);
+        let tick2 = bound_buy("AAPL", "intraday_scalper", 10_000, 1_000, 10_000_000_000);
+        let ctx_tick1 = base_ctx(RuntimeOpportunityAllocationMode::PaperEnforced);
+        let ctx_tick2 = base_ctx(RuntimeOpportunityAllocationMode::PaperEnforced);
+
+        let out1 = apply_runtime_opportunity_allocation(&ctx_tick1, vec![tick1], &current);
+        let out2 = apply_runtime_opportunity_allocation(&ctx_tick2, vec![tick2], &current);
+
+        assert_eq!(out1.decisions.len(), 1);
+        assert_eq!(out2.decisions.len(), 1);
+        assert_eq!(
+            out1.decisions[0].decision.decision_id, out2.decisions[0].decision.decision_id,
+            "C5: reprocessing the same economic cycle/allocation result on a later tick must \
+             yield the identical rebuilt decision_id"
+        );
+        assert_eq!(
+            out1.decisions[0].decision.qty, out2.decisions[0].decision.qty,
+            "precondition: identical inputs must clamp to the identical qty"
+        );
+    }
+
+    /// NEG: negative control proving the fix is load-bearing. Hand-computes
+    /// what the OLD `rebuild_decision_with_qty` (wall-clock-salted UUID)
+    /// would have produced for the same clamped qty at two different
+    /// `now_micros` values — they differ, confirming the old formula really
+    /// did mint a fresh id per tick for the identical resize.
+    #[test]
+    fn neg_old_now_micros_salted_rebuild_would_have_produced_two_different_ids() {
+        let run_id = run_id();
+        let old_seed =
+            |strategy_id: &str, symbol: &str, side: &str, new_qty: i64, now_micros: i64| {
+                Uuid::new_v5(
+                    &Uuid::NAMESPACE_DNS,
+                    format!("{run_id}:{strategy_id}:{symbol}:{side}:{new_qty}:{now_micros}")
+                        .as_bytes(),
+                )
+                .to_string()
+            };
+        let old_id_tick1 = old_seed("intraday_scalper", "AAPL", "buy", 5, 1_000_000);
+        let old_id_tick2 = old_seed("intraday_scalper", "AAPL", "buy", 5, 99_999_999);
+
+        assert_ne!(
+            old_id_tick1, old_id_tick2,
+            "NEG: the old now_micros-salted formula mints a different id for the identical \
+             clamped resize merely because the loop tick's wall clock differs -- this is the \
+             exact defect C5/C6 close"
+        );
     }
 
     // ── TRUE-PROVENANCE-AND-RUNTIME-PROOF-REPAIR-01 Blocker 1: Bundle 5 must
@@ -1337,15 +1436,20 @@ mod tests {
     #[test]
     fn same_economic_cycle_replayed_on_a_later_tick_yields_the_same_cycle_id() {
         // Reprocessing the exact same run/artifact/bar candidate set on a
-        // later loop tick (different now_micros) must yield the identical
-        // cycle_id/plan_id -- proves identity is bound to the economic
-        // cycle, not the wall clock.
+        // later loop tick must yield the identical cycle_id/plan_id --
+        // proves identity is bound to the economic cycle, not the wall
+        // clock. `RuntimeOpportunityAllocationContext` carries no wall-clock
+        // field at all (STRATEGY-DECISION-ECONOMIC-IDEMPOTENCY-02 removed
+        // `now_micros`, the one field that used to leak into an identity
+        // seam -- Bundle 5's `rebuild_decision_with_qty`), so two separately
+        // constructed contexts for the same cycle are indistinguishable by
+        // construction; this replays the same inputs through two independent
+        // `base_ctx()` calls (simulating two separate ticks) to prove it end
+        // to end.
         let mut current = BTreeMap::new();
         current.insert("AAPL".to_string(), 0i64);
-        let mut ctx1 = base_ctx(RuntimeOpportunityAllocationMode::Shadow);
-        ctx1.now_micros = 1_000_000;
-        let mut ctx2 = base_ctx(RuntimeOpportunityAllocationMode::Shadow);
-        ctx2.now_micros = 99_999_999;
+        let ctx1 = base_ctx(RuntimeOpportunityAllocationMode::Shadow);
+        let ctx2 = base_ctx(RuntimeOpportunityAllocationMode::Shadow);
         let decisions1 = vec![bound_buy(
             "AAPL",
             "intraday_scalper",
@@ -1482,10 +1586,8 @@ mod tests {
         // genuine no-op for the same economic cycle.
         let mut current = BTreeMap::new();
         current.insert("AAPL".to_string(), 0i64);
-        let mut ctx_tick1 = base_ctx(RuntimeOpportunityAllocationMode::Shadow);
-        ctx_tick1.now_micros = 1;
-        let mut ctx_tick2 = base_ctx(RuntimeOpportunityAllocationMode::Shadow);
-        ctx_tick2.now_micros = 2;
+        let ctx_tick1 = base_ctx(RuntimeOpportunityAllocationMode::Shadow);
+        let ctx_tick2 = base_ctx(RuntimeOpportunityAllocationMode::Shadow);
         let d1 = vec![bound_buy(
             "AAPL",
             "intraday_scalper",
