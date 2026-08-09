@@ -479,16 +479,23 @@ pub async fn outbox_mark_dispatching(
 
 /// Reset stale CLAIMED rows back to PENDING — the crash-recovery reaper (FC-6).
 ///
-/// PAPER-SOAK-STALE-CLAIM-RECOVERY-01: wired into production at
-/// `build_execution_orchestrator` (mqk-daemon), called exactly once per run
-/// start/restart, before the orchestrator's first tick — the same
-/// established "one-time recovery pass at orchestrator construction" seam
-/// `recover_oms_and_portfolio` already uses. Scoped to `run_id`, matching
-/// every other outbox/inbox operation in this codebase (RT-3): a stale claim
-/// belonging to a different run is never touched by this run's startup,
-/// even if that other run also crashed — its own recovery path (its own
-/// future start/restart) owns resetting it, preserving that run's audit
-/// trail until then.
+/// # Status: not currently wired into any production caller
+///
+/// PAPER-SOAK-STALE-CLAIM-RECOVERY-01 wired this into
+/// `build_execution_orchestrator` (mqk-daemon), unconditionally, on every
+/// run start. PAPER-SOAK-STALE-CLAIM-RECOVERY-02 removed that call: it ran
+/// before any runtime leadership lease existed for the orchestrator being
+/// constructed, and the crash-recovery scenario it targeted could never
+/// actually reach it anyway (a crashed `RUNNING` run stays durably `RUNNING`
+/// in the DB, and the normal start path refuses to start when a durable
+/// active run exists without local ownership — so `build_execution_
+/// orchestrator` is never called for that run_id at all). Stale-claim
+/// recovery now happens atomically inside
+/// [`crate::clear_halted_run_and_reset_stale_claims`], gated on the run's
+/// durable `HALTED` status as the ownership proof, rather than on this
+/// threshold-based standalone primitive. This function itself is unchanged
+/// and still correct for its own documented contract; it is retained as a
+/// tested primitive with no current caller.
 ///
 /// A row is considered stale when its `claimed_at_utc` is strictly earlier
 /// than `stale_threshold`.  The threshold is caller-supplied — no wall-clock

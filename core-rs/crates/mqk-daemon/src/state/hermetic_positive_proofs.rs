@@ -598,28 +598,41 @@ mod tests {
     }
 
     // -----------------------------------------------------------------
-    // PAPER-SOAK-STALE-CLAIM-RECOVERY-01: production wiring proof.
+    // PAPER-SOAK-STALE-CLAIM-RECOVERY-02: production wiring proof.
     // -----------------------------------------------------------------
 
-    /// `build_execution_orchestrator` is the one unconditional construction
-    /// seam every run start AND every restart-resume of an existing RUNNING
-    /// row calls before the orchestrator's first tick -- there is no
-    /// separate "fresh start" vs. "restart" code path within it. Calling it
-    /// directly (rather than through the `/v1/run/start` HTTP route, which
-    /// would also spawn a real ticking loop and introduce timing dependence
-    /// this proof does not need) exercises the exact production seam
-    /// deterministically: a stale CLAIMED row -- simulating a dispatcher
-    /// that claimed an order and then crashed before ever reaching
-    /// DISPATCHING -- must be reset to PENDING by the time construction
-    /// returns.
+    /// `build_execution_orchestrator` must NOT reset stale `CLAIMED` rows on
+    /// construction.
+    ///
+    /// PAPER-SOAK-STALE-CLAIM-RECOVERY-01 wired an unconditional
+    /// `outbox_reset_stale_claims` call into this constructor, proven (only)
+    /// by this test's predecessor calling `build_execution_orchestrator`
+    /// directly and asserting the stale row flipped to `PENDING`. Independent
+    /// review rejected that repair: the call ran before any runtime
+    /// leadership lease existed for the orchestrator being constructed (the
+    /// lease is acquired later, inside `tick()`), so it had no ownership
+    /// proof that no other legitimate dispatcher could be concurrently
+    /// active — and the exact crash-recovery scenario it targeted can never
+    /// reach this constructor via the normal start path anyway (see
+    /// `scenario_stale_claim_recovery_02.rs`'s
+    /// `reachability_crashed_running_run_blocks_normal_start_before_orchestrator_build`).
+    ///
+    /// -02 moves stale-claim recovery to the operator-mediated
+    /// `clear-halted-run` action (`mqk_db::
+    /// clear_halted_run_and_reset_stale_claims`), gated on the run's durable
+    /// `HALTED` status as the ownership proof. This test now proves the
+    /// negative: constructing an orchestrator for a run that still has a
+    /// stale `CLAIMED` row must leave that row untouched — confirming the
+    /// unsafe unconditional reset was actually removed, not just relocated
+    /// under a different name.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-    async fn hermetic_build_execution_orchestrator_resets_stale_claim_on_construction() {
+    async fn hermetic_build_execution_orchestrator_does_not_reset_stale_claim_on_construction() {
         mqk_db::run_isolated("hermetic_stale_claim_build", |pool| async move {
             let st = hermetic_order_daemon_state(pool.clone()).await;
 
             let run_id = uuid::Uuid::new_v5(
                 &uuid::Uuid::NAMESPACE_DNS,
-                b"mqk.test.hermetic_build_execution_orchestrator_resets_stale_claim_on_construction",
+                b"mqk.test.hermetic_build_execution_orchestrator_does_not_reset_stale_claim_on_construction",
             );
             mqk_db::insert_run(
                 &pool,
@@ -667,7 +680,7 @@ mod tests {
                 .expect("row must exist");
             assert_eq!(
                 before.status, "CLAIMED",
-                "precondition: row must be CLAIMED before recovery"
+                "precondition: row must be CLAIMED before construction"
             );
 
             let _orchestrator = st
@@ -680,11 +693,13 @@ mod tests {
                 .expect("fetch failed")
                 .expect("row must exist");
             assert_eq!(
-                after.status, "PENDING",
-                "the production recovery seam must reset the stale claim"
+                after.status, "CLAIMED",
+                "orchestrator construction must NOT reset a stale claim — that authority \
+                 now belongs exclusively to clear_halted_run_and_reset_stale_claims, gated \
+                 on durable HALTED status, not to unconditional construction"
             );
-            assert!(after.claimed_by.is_none());
-            assert!(after.claimed_at_utc.is_none());
+            assert!(after.claimed_by.is_some());
+            assert!(after.claimed_at_utc.is_some());
         })
         .await;
     }

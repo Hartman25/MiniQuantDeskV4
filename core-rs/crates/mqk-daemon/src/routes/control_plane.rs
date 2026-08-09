@@ -1005,9 +1005,13 @@ pub(crate) async fn ops_action(
             }
 
             let run_id = latest.run_id;
-            match mqk_db::clear_halted_run(db, run_id).await {
-                Ok(_) => {
-                    info!(run_id = %run_id, "ops/action clear-halted-run");
+            match mqk_db::clear_halted_run_and_reset_stale_claims(db, run_id).await {
+                Ok(reset_count) => {
+                    info!(
+                        run_id = %run_id,
+                        stale_claims_reset = reset_count,
+                        "ops/action clear-halted-run"
+                    );
                     let audit_uuid = write_operator_audit_event(
                         &st,
                         Some(run_id),
@@ -1020,11 +1024,19 @@ pub(crate) async fn ops_action(
                     let _ = st.bus.send(BusMsg::LogLine {
                         level: "INFO".to_string(),
                         msg: format!(
-                            "ops/action: halted run {run_id} cleared to STOPPED; \
+                            "ops/action: halted run {run_id} cleared to STOPPED \
+                             ({reset_count} stale CLAIMED outbox row(s) reset to PENDING); \
                              operator must re-arm and re-start"
                         ),
                     });
+                    // PAPER-SOAK-STALE-CLAIM-RECOVERY-02: the same atomic
+                    // transaction that clears the halt also resets this
+                    // run's stale CLAIMED outbox rows, so oms_outbox is a
+                    // real durable write target whenever any were reset.
                     let mut durable_targets = vec!["runs".to_string()];
+                    if reset_count > 0 {
+                        durable_targets.push("oms_outbox".to_string());
+                    }
                     if audit_uuid.is_some() {
                         durable_targets.push("audit_events".to_string());
                     }
@@ -1037,10 +1049,12 @@ pub(crate) async fn ops_action(
                             resulting_integrity_state: None,
                             resulting_desired_armed: None,
                             blockers: vec![],
-                            warnings: vec!["Halted run cleared to STOPPED. You must re-arm \
+                            warnings: vec![format!(
+                                "Halted run cleared to STOPPED ({reset_count} stale CLAIMED \
+                                 outbox row(s) reset to PENDING). You must re-arm \
                                  (arm-execution) and then start (start-system) to begin \
                                  a new execution cycle."
-                                .to_string()],
+                            )],
                             environment: Some(st.deployment_mode().as_api_label().to_string()),
                             scope: Some("daemon_instance".to_string()),
                             audit: OperatorActionAuditFields {
@@ -1055,7 +1069,7 @@ pub(crate) async fn ops_action(
                         .into_response()
                 }
                 Err(err) => runtime_error_response(RuntimeLifecycleError::internal(
-                    "clear_halted_run update failed",
+                    "clear_halted_run_and_reset_stale_claims update failed",
                     err,
                 )),
             }

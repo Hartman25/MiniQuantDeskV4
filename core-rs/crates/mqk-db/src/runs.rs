@@ -705,6 +705,122 @@ pub async fn clear_halted_run(pool: &PgPool, run_id: Uuid) -> Result<()> {
     }))
 }
 
+/// PAPER-SOAK-STALE-CLAIM-RECOVERY-02: clear a halted run AND reclaim any
+/// `CLAIMED` outbox row it left stranded before `DISPATCHING`, atomically.
+///
+/// # Why this exists
+///
+/// The previously-pushed stale-claim reset lived in
+/// `AppState::build_execution_orchestrator`, unconditionally, for every run
+/// start — including ordinary fresh starts that could never have a `CLAIMED`
+/// row to begin with. Two problems with that placement:
+///
+/// 1. **Wrong ordering.** It ran before `ExecutionOrchestrator`'s runtime
+///    leadership lease was ever acquired (`runtime_epoch: None` at
+///    construction; the lease is acquired later, inside `tick()`). Its own
+///    comment claimed "the runtime leadership lease this run start already
+///    went through guarantees no other legitimate dispatcher is concurrently
+///    active" — false at the actual call site.
+/// 2. **Unreachable for the scenario it targeted anyway.** A process crash
+///    while a run is `RUNNING` leaves that run durably `RUNNING` in the DB
+///    (the crash never called `stop_run`/`halt_run`). The normal start path
+///    (`create_or_reuse_run_for_start`) refuses to start when a durable
+///    active run exists without local ownership
+///    (`runtime.truth_mismatch.durable_active_without_local_owner`) —
+///    exactly the state a crash-orphaned run is in. So the reset call could
+///    never actually run for the crash-recovery case it was written for.
+///
+/// # This function's authority model
+///
+/// `clear-halted-run` is this repository's existing, deliberately
+/// operator-mediated recovery path (see `clear_halted_run` above): a `RUNNING`
+/// run only ever reaches `HALTED` via deadman-timeout enforcement, an
+/// explicit operator halt, or a lease-loss/lease-unavailable safety halt —
+/// in every case, durably recording `HALTED` is itself the proof that no
+/// further dispatch may legitimately proceed for this run (the halt gate in
+/// `ExecutionOrchestrator::tick` refuses all dispatch once halted, for any
+/// process, including one that is merely slow rather than truly dead). The
+/// `WHERE status = 'HALTED'` CAS guard below is therefore the ownership
+/// proof itself: only a run currently, durably `HALTED` can have its claims
+/// reset, and only the first caller to win that CAS (a concurrent second
+/// `clear-halted-run` call gets `StaleRunTransition`, exactly as
+/// `clear_halted_run` already behaves) performs the reset — satisfying "the
+/// recovering runtime has proven exclusive durable authority to act for
+/// that run" without needing to touch the runtime leadership lease at all.
+///
+/// The threshold for "stale" is deliberately not a fixed lookback window
+/// (`PAPER-SOAK-STALE-CLAIM-RECOVERY-01` used `claimed_at_utc < now()`, which
+/// is not a staleness filter at all — it matches every `CLAIMED` row
+/// regardless of age). Ownership, not timestamp comparison, is what proves
+/// the prior claimant is dead: once the CAS above proves this run is
+/// `HALTED`, every remaining `CLAIMED` row for it is provably orphaned
+/// regardless of how recently it was claimed, so all of them are reset.
+///
+/// # Safety contract (unchanged from `outbox_reset_stale_claims`)
+///
+/// Only rows with `status = 'CLAIMED'` are touched. `DISPATCHING`, `SENT`,
+/// `ACKED`, and `AMBIGUOUS` rows are structurally immune — the `WHERE`
+/// clause never matches them, so an order that may have reached the broker
+/// is never reset. Scoped to `run_id`: a stale claim belonging to a
+/// different run is untouched (that run's own halt-clear owns resetting it).
+///
+/// Returns `Ok(reset_row_count)` on success, or `Err(StaleRunTransition)` if
+/// the run was not durably `HALTED` at the instant the CAS executed.
+pub async fn clear_halted_run_and_reset_stale_claims(pool: &PgPool, run_id: Uuid) -> Result<u64> {
+    let mut tx = pool
+        .begin()
+        .await
+        .context("clear_halted_run_and_reset_stale_claims: begin tx failed")?;
+
+    let done = sqlx::query(
+        r#"
+        update runs
+        set status = 'STOPPED',
+            stopped_at_utc = now() -- allow: ops-metadata — operator-acknowledged halt clear
+        where run_id = $1
+          and status = 'HALTED'
+        "#,
+    )
+    .bind(run_id)
+    .execute(&mut *tx)
+    .await
+    .context("clear_halted_run_and_reset_stale_claims: clear-halt update failed")?;
+
+    if done.rows_affected() != 1 {
+        tx.rollback()
+            .await
+            .context("clear_halted_run_and_reset_stale_claims: rollback (CAS miss) failed")?;
+        let r = fetch_run(pool, run_id).await?;
+        return Err(anyhow::Error::new(StaleRunTransition {
+            run_id,
+            operation: "clear_halted_run_and_reset_stale_claims",
+            expected: "HALTED",
+            actual: r.status.as_str().to_string(),
+        }));
+    }
+
+    let reset = sqlx::query(
+        r#"
+        update oms_outbox
+           set status         = 'PENDING',
+               claimed_at_utc = null,
+               claimed_by     = null
+         where run_id         = $1
+           and status         = 'CLAIMED'
+        "#,
+    )
+    .bind(run_id)
+    .execute(&mut *tx)
+    .await
+    .context("clear_halted_run_and_reset_stale_claims: outbox reset failed")?;
+
+    tx.commit()
+        .await
+        .context("clear_halted_run_and_reset_stale_claims: commit failed")?;
+
+    Ok(reset.rows_affected())
+}
+
 /// Heartbeat: RUNNING only updates last_heartbeat_utc. CAS-guarded
 /// (RUN-LIFECYCLE-CAS-01): the `UPDATE` only applies when `status` is still
 /// `RUNNING`, so a heartbeat racing a concurrent `stop_run`/`halt_run` can
