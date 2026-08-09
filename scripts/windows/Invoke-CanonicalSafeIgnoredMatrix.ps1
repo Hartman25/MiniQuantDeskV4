@@ -611,6 +611,51 @@ function Resolve-TestableTarget {
 # Takes plain text lines and a plain lookup list, never invokes cargo
 # itself, so a test can feed it synthetic `--list` output and a synthetic
 # lookup directly.
+#
+# Invokes cargo with stdout+stderr genuinely interleaved in true
+# chronological write order, then returns the combined output as a line
+# array.
+#
+# For an `--all-targets -- --ignored --list` invocation, cargo's own driver
+# process writes each "Running ..." announcement to stderr immediately
+# before running that target's compiled test binary, whose own `--list`
+# output (the test names themselves) goes to stdout -- so correctly
+# correlating a header to its test names requires the two streams to be
+# merged in real chronological order.
+#
+# PowerShell's in-process `2>&1` *variable capture* operator
+# (`$x = & prog args 2>&1`) does NOT reliably provide this: it reads stdout
+# and stderr as two separate object streams and reassembles them
+# after the fact, with no guaranteed ordering between the two --
+# reproduced empirically (a stderr "Running ..." header ending up
+# completely separated from its own stdout test-name lines, sometimes by
+# dozens of lines, most reliably on a target whose test binary was still
+# being progressively run/compiled). Redirecting to a *file* with `*>`
+# (all streams) instead uses a genuine OS-level merged file handle, which
+# preserves true write order -- confirmed by direct comparison against the
+# same invocation's raw output. Never use `2>&1` variable capture for a
+# `--list` invocation whose parsing depends on header/test-name
+# correlation; this function exists so every call site gets the correct
+# behavior by construction.
+function Invoke-CargoMergedStreams {
+    param(
+        [Parameter(Mandatory = $true)][string]$CargoExe,
+        [Parameter(Mandatory = $true)][string[]]$Arguments
+    )
+    $tempFile = [System.IO.Path]::GetTempFileName()
+    try {
+        & $CargoExe @Arguments *> $tempFile
+        $exitCode = $LASTEXITCODE
+        $lines = @(Get-Content -LiteralPath $tempFile)
+        # Preserve the native exit code past the Get-Content call above,
+        # which resets $LASTEXITCODE to its own (always-0) result.
+        $global:LASTEXITCODE = $exitCode
+        return ,$lines
+    } finally {
+        Remove-Item -LiteralPath $tempFile -ErrorAction SilentlyContinue
+    }
+}
+
 function Get-ExactLiveKeysForPackage {
     param(
         [string]$Package,
@@ -818,7 +863,7 @@ function Main {
         $listArgs = @("test", "-p", $pkg, "--manifest-path", $CargoManifest) + `
             $featurePlan[$pkg].FeatureArgs + `
             @("--all-targets", "--", "--ignored", "--list")
-        $listOutput = & $CargoExe @listArgs 2>&1
+        $listOutput = Invoke-CargoMergedStreams -CargoExe $CargoExe -Arguments $listArgs
         if ($LASTEXITCODE -ne 0) {
             Write-Host ($listOutput -join "`n")
             throw "cargo test -p $pkg --ignored --list failed (exit $LASTEXITCODE) -- cannot verify inventory completeness."
@@ -869,7 +914,12 @@ function Main {
         $manualListArgs = @("test", "-p", "mqk-daemon", "--manifest-path", $CargoManifest) + `
             $featurePlan["mqk-daemon"].FeatureArgs + `
             @("--features", "mqk-daemon/manual-external", "--all-targets", "--", "--ignored", "--list")
-        $manualListOutput = & $CargoExe @manualListArgs 2>&1
+        # See Invoke-CargoMergedStreams's own doc comment: this is exactly
+        # the call site that first surfaced the header/test-name
+        # misattribution bug plain `2>&1` variable capture produces --
+        # the first-ever `--features manual-external` build in a session
+        # is always cold, making this capture the one most exposed to it.
+        $manualListOutput = Invoke-CargoMergedStreams -CargoExe $CargoExe -Arguments $manualListArgs
         if ($LASTEXITCODE -ne 0) {
             Write-Host ($manualListOutput -join "`n")
             throw "cargo test -p mqk-daemon --features mqk-daemon/manual-external --ignored --list failed (exit $LASTEXITCODE) -- cannot verify MANUAL_EXTERNAL exactness."
