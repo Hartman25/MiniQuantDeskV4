@@ -86,6 +86,7 @@ fn make_fill_activity(
         qty: Some("5".to_owned()),
         side: side.to_owned(),
         symbol: symbol.to_owned(),
+        cum_qty: None,
     }
 }
 

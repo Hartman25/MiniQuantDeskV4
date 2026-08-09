@@ -70,25 +70,37 @@ pub enum BrokerEvent {
         delta_qty: i64,
         price_micros: i64,
         fee_micros: i64,
-        /// PAPER-SOAK-PARTIAL-FILL-DEDUP-02: broker-authoritative cumulative
-        /// filled quantity for this order immediately after this specific
-        /// execution, when the adapter can establish it exactly.
+        /// PAPER-SOAK-PARTIAL-FILL-DEDUP-02/04: broker-authoritative
+        /// cumulative filled quantity for this order immediately after this
+        /// specific execution, when the adapter can establish it exactly.
         ///
         /// This is the one signal both the WS lane (Alpaca's live
-        /// `order.filled_qty` push, authoritative at message time) and the
-        /// REST lane (reconstructed from ordered account activities) can
+        /// `order.filled_qty` push, atomic in the same trade-update message
+        /// as the fill) and the REST lane (Alpaca's own `cum_qty` field,
+        /// atomic in the same account-activity record as the fill) can
         /// produce with the SAME true value for the SAME physical execution
         /// — unlike `broker_message_id`/`broker_fill_id`, which differ by
-        /// transport lane. The OMS apply layer
+        /// transport lane. Both lanes source this value directly from the
+        /// broker; neither derives or reconstructs it from a separate,
+        /// independently-fetched snapshot. The OMS apply layer
         /// (`OmsOrder::apply_with_watermark`) uses it as an exact economic
         /// identity: a candidate event whose `cum_qty_after` does not exceed
         /// the order's current `filled_qty` has already been reflected and
         /// is a no-op, regardless of which lane redelivered it.
         ///
-        /// `None` when the adapter cannot establish this value exactly
-        /// (e.g. paper broker, or a REST page with ambiguous multi-activity
-        /// ordering for one order) — callers must fall back to `event_id`
-        /// based idempotency only, never fabricate a value.
+        /// `None` when the adapter cannot establish this value at all (e.g.
+        /// a paper/test broker that never supplies one, or the operator-gated
+        /// halted-run REST repair path, which has its own separate,
+        /// confirmation-required safety story — see
+        /// `mqk-daemon::routes::repair`). PAPER-SOAK-PARTIAL-FILL-DEDUP-04:
+        /// the live Alpaca REST lane (`mqk-broker-alpaca::fetch_events`)
+        /// specifically does NOT use `None` for an ambiguous same-page
+        /// PARTIAL_FILL — a REST partial whose broker-native `cum_qty` is
+        /// missing/unparseable fails the whole page closed instead, because
+        /// `event_id`-only fallback dedup cannot safely disambiguate a
+        /// cross-lane duplicate. `None` from that adapter therefore only
+        /// ever means "no PARTIAL_FILL activity was in play," never
+        /// "identity could not be proven."
         #[serde(default, skip_serializing_if = "Option::is_none")]
         cum_qty_after: Option<i64>,
     },

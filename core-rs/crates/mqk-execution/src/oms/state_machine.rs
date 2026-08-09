@@ -232,27 +232,29 @@ impl OmsOrder {
     /// PAPER-SOAK-PARTIAL-FILL-DEDUP-02 additionally replaced a "genuine
     /// advance" event's own `delta_qty` with the derived correction
     /// `target - self.filled_qty`, on the theory that `cum_qty_after` was
-    /// unconditionally broker-authoritative. Independent review found the
-    /// REST lane's `cum_qty_after` is a *reconstruction*
-    /// (`mqk-broker-alpaca::fetch_events`) bracketed by two `GET /v2/orders`
-    /// reads that can prove no execution landed *between* them, but cannot
-    /// prove nothing landed between the activity-page fetch and the first of
-    /// those two reads — Alpaca offers no atomic joint snapshot of both
-    /// endpoints. An execution landing in that irreducible gap would inflate
-    /// `target`, and the old correction (`target - self.filled_qty`) would
-    /// then apply a wrong quantity at this event's own (correct-for-a-
-    /// different-quantity) price — exactly the forbidden failure mode: a
-    /// future/different execution's quantity applied at another execution's
-    /// price. `cum_qty_after` is therefore used *only* to decide whether
-    /// this event's economic effect is already reflected; the quantity and
-    /// price actually applied always come from the event itself. This makes
-    /// the irreducible bracket-window gap harmless for the common case (a
-    /// genuine, non-duplicate advance always applies its own true
-    /// delta_qty/price regardless of how `target` was computed) and narrows
-    /// its worst case to a duplicate redelivery being misclassified as new
-    /// only when the gap's contamination is large enough to itself cross the
-    /// no-op threshold — which, unlike the removed correction, can never
-    /// misattribute quantity to the wrong price.
+    /// unconditionally broker-authoritative. Independent review found -02's
+    /// REST-lane `cum_qty_after` was a *reconstruction*
+    /// (`mqk-broker-alpaca::fetch_events`) derived from a separately fetched
+    /// `GET /v2/orders` snapshot, and that no number of bracketing reads of
+    /// that snapshot could make the derivation exact — a later execution or
+    /// a later REST page could each independently contaminate it (see
+    /// PAPER-SOAK-PARTIAL-FILL-DEDUP-04, which removed the reconstruction
+    /// entirely). Even a contaminated `target` cannot misattribute quantity
+    /// here, because this function never uses `target` as a quantity source
+    /// in the first place: `cum_qty_after` decides only whether an event's
+    /// economic effect is already reflected; the quantity and price actually
+    /// applied always come from the event itself.
+    ///
+    /// As of PAPER-SOAK-PARTIAL-FILL-DEDUP-04, both lanes' `cum_qty_after`
+    /// are broker-native and atomic — the WS lane's from `order.filled_qty`
+    /// in the same trade-update message as the fill, the REST lane's from
+    /// the activity's own `cum_qty` field in the same account-activity
+    /// record as the fill — so `target` is exact, not merely
+    /// non-quantity-misattributing, in ordinary operation. This function's
+    /// refusal to use `cum_qty_after` as a quantity source stands
+    /// independent of that: a fill's economic quantity and price remain
+    /// attributable only to that fill's own reported fields, never derived
+    /// from any watermark, exact or not.
     ///
     /// Two genuinely distinct fills — even with identical `delta_qty`,
     /// `price_micros`, and near-simultaneous timestamps — always carry
@@ -1494,12 +1496,11 @@ mod tests {
     /// PAPER-SOAK-PARTIAL-FILL-DEDUP-03: when `cum_qty_after` proves a
     /// genuine advance, the applied delta is always the event's OWN
     /// `delta_qty` — `cum_qty_after` decides only whether this is a no-op,
-    /// never substitutes a derived quantity. A mismatched `cum_qty_after`
-    /// (e.g. from a REST reconstruction contaminated by the irreducible
-    /// activity-page/fetch_order race — see the `apply_with_watermark` doc
-    /// comment) therefore cannot misattribute quantity to the wrong price;
-    /// at most it affects only the no-op/genuine-advance classification
-    /// itself, never the quantity or price actually applied.
+    /// never substitutes a derived quantity. A wrong `cum_qty_after` (from
+    /// any cause — see the `apply_with_watermark` doc comment) therefore
+    /// cannot misattribute quantity to the wrong price; at most it affects
+    /// only the no-op/genuine-advance classification itself, never the
+    /// quantity or price actually applied.
     #[test]
     fn watermark_never_substitutes_a_derived_delta_for_the_events_own() {
         let mut o = OmsOrder::new("ord-wm3", "AAPL", 100);

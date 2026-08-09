@@ -603,154 +603,99 @@ impl BrokerAdapter for AlpacaBrokerAdapter {
                 });
             }
 
-            // PAPER-SOAK-PARTIAL-FILL-DEDUP-03: reconstruct each PARTIAL_FILL
-            // activity's true point-in-time cumulative filled quantity for
-            // its order, so `normalize_trade_update` can populate
-            // `BrokerEvent::PartialFill::cum_qty_after` — the exact
-            // cross-lane economic identity the OMS apply layer uses to
-            // recognize the SAME physical fill re-delivered over the WS lane
-            // without a timing heuristic.
+            // PAPER-SOAK-PARTIAL-FILL-DEDUP-04: `BrokerEvent::PartialFill::
+            // cum_qty_after` now comes directly from this activity's own
+            // broker-native `cum_qty` field — Alpaca's account-activities
+            // endpoint reports it atomically as part of the SAME historical
+            // record as this activity's `qty`/`price`/`transaction_time`.
             //
-            // This value is a RECONSTRUCTION, not a broker-native field —
-            // Alpaca's account-activities endpoint reports each activity's
-            // own (non-cumulative) `qty`, never a per-activity cumulative.
-            // It is trusted only when BOTH of the following are proven, and
-            // is left ambiguous (`None`) otherwise. -02 got neither right:
+            // -02 and -03 both instead tried to RECONSTRUCT a point-in-time
+            // cumulative by subtracting page quantities from a separately
+            // fetched `GET /v2/orders` CURRENT total. Independent review of
+            // -03 proved that approach structurally unsound in two ways no
+            // amount of extra `fetch_order` reads could close:
             //
-            // 1. Every fill-type activity for the order within this page —
-            //    PARTIAL_FILL *and* FILL — must contribute to the baseline
-            //    subtraction. -02 summed only PARTIAL_FILL quantities, so a
-            //    PARTIAL_FILL sharing a page with the order's terminal FILL
-            //    had the FILL's quantity wrongly folded into its own
-            //    reconstructed cumulative — silently absorbing the terminal
-            //    fill's quantity at the partial fill's price, and then
-            //    causing the real terminal fill to be dropped entirely by
-            //    the OMS's already-`Filled` idempotency. This reconstruction
-            //    sums both types.
+            // 1. Pre-bracket contamination: a NEW execution landing on the
+            //    broker between the activities-page fetch and the
+            //    reconstruction's first `fetch_order` call inflates the
+            //    "current total" out from under the page's activities. A
+            //    same-valued two-read bracket cannot detect this — both
+            //    reads land after the new execution and agree with each
+            //    other while still being wrong for this page.
+            // 2. Cross-page contamination: `GET /v2/orders` returns the
+            //    order's CURRENT total across ALL pages, not "as of the end
+            //    of this page." Subtracting only this page's own quantity
+            //    from that total silently folds in quantity from OTHER,
+            //    already-executed pages, shifting every reconstructed
+            //    cumulative in the page by however much later-page quantity
+            //    the current total already includes — deterministically,
+            //    with no race required.
             //
-            // 2. The order's `filled_qty` must not change between the two
-            //    `fetch_order` calls bracketing the reconstruction below.
-            //    `fetch_order` returns the order's CURRENT total, not "as of
-            //    the last activity in this page" — if a *new* execution
-            //    lands on the broker between the page fetch and either
-            //    bracketing call, "current total" no longer represents this
-            //    page's activities and must not be used. -02 called
-            //    `fetch_order` once and asserted (incorrectly) that the
-            //    result was "strictly more correct, never less"; that claim
-            //    was never proven and was false whenever this race fired.
-            //    The two calls below are back-to-back specifically to keep
-            //    that window as small as possible, and the pre/post equality
-            //    check *proves* — rather than assumes — that no such
-            //    execution landed. A mismatch is left ambiguous, never
-            //    guessed.
+            // Using the activity's own `cum_qty` eliminates both failure
+            // modes by construction: it is fixed at the moment the
+            // execution happened, is intrinsic to that one historical
+            // record, and cannot be affected by any other execution,
+            // any other page, or when this record is subsequently polled.
+            // No `fetch_order` call, no bracket, no page-relative
+            // arithmetic is needed or used for this value. It is the
+            // REST-lane structural counterpart to the WS lane's
+            // `order.filled_qty` (also broker-reported atomically, in the
+            // same trade-update message as the fill it describes) — both
+            // lanes now source `cum_qty_after` the same way: directly from
+            // the broker, in the same message as the fill itself.
             //
             // Only `PartialFill` carries a `cum_qty_after` field on
             // `BrokerEvent` — `Fill` has none. A genuine terminal fill only
             // ever occurs once per order, so the OMS's pre-existing
             // already-`Filled` idempotency (`do_transition`) already handles
-            // terminal-fill redelivery correctly without a watermark, as
-            // long as no *earlier* PARTIAL_FILL wrongly consumed its
-            // quantity first — which is exactly what (1) above prevents.
-            // FILL activities' own quantity still participates in the
-            // baseline arithmetic so it is never silently absorbed by an
-            // adjacent PARTIAL_FILL's reconstruction.
-            let mut fill_type_order_ids: Vec<String> = Vec::new();
-            let mut activity_indices_by_order: std::collections::HashMap<String, Vec<usize>> =
-                std::collections::HashMap::new();
-            for (idx, activity) in activities.iter().enumerate() {
-                if activity.activity_type == "PARTIAL_FILL" || activity.activity_type == "FILL" {
-                    activity_indices_by_order
-                        .entry(activity.order_id.clone())
-                        .or_insert_with(|| {
-                            fill_type_order_ids.push(activity.order_id.clone());
-                            Vec::new()
-                        })
-                        .push(idx);
-                }
-            }
-
-            // Reconstructed cumulative filled qty, keyed by activity index.
-            // Absent means "ambiguous" — normalize_trade_update must see an
-            // unparseable filled_qty for that activity, not a fabricated one.
-            let mut reconstructed_cum_qty: std::collections::HashMap<usize, i64> =
-                std::collections::HashMap::new();
-
-            for order_id in &fill_type_order_ids {
-                let indices = &activity_indices_by_order[order_id];
-
-                let mut qtys: Vec<i64> = Vec::with_capacity(indices.len());
-                let mut page_sum: i64 = 0;
-                let mut all_qtys_parsed = true;
-                for &idx in indices {
-                    match activities[idx]
-                        .qty
+            // terminal-fill redelivery correctly with no watermark needed.
+            //
+            // No silent ambiguity: PAPER-SOAK-PARTIAL-FILL-DEDUP-03's
+            // "leave it None, fall back to event-id-only dedup" behavior for
+            // an unreconstructable PARTIAL_FILL is not repeated here. A REST
+            // PARTIAL_FILL whose `cum_qty` cannot be trusted might be an
+            // already-WS-applied duplicate under a different transport id —
+            // event-id-only dedup cannot tell, and applying it anyway risks
+            // double-counting real capital. A missing/unparseable `cum_qty`
+            // on a FILL-class activity therefore fails the WHOLE page closed
+            // (`BrokerError::Transient`, consistent with this function's
+            // existing behavior for any other unmappable/unparseable
+            // activity in the page — see the `?` on `activity_to_trade_update`
+            // and `normalize_trade_update` below) rather than emitting an
+            // event with an unprovable economic identity. The cursor does
+            // not advance past this page, so the broker-side activity record
+            // — always durably available — is retried on the next poll; no
+            // observation is lost, and no capital state is mutated on an
+            // unproven basis.
+            for activity in &activities {
+                // Checked before any network call: cheap and avoids an
+                // unnecessary `fetch_order` for an activity we are about to
+                // reject anyway.
+                let partial_fill_cum_qty = if activity.activity_type == "PARTIAL_FILL" {
+                    let parsed = activity
+                        .cum_qty
                         .as_deref()
-                        .and_then(|s| parse_broker_qty(s).ok())
-                    {
-                        Some(q) => {
-                            qtys.push(q);
-                            page_sum += q;
-                        }
+                        .and_then(|s| parse_broker_qty(s).ok());
+                    match parsed {
+                        Some(v) => Some(v),
                         None => {
-                            all_qtys_parsed = false;
-                            break;
+                            return Err(BrokerError::Transient {
+                                detail: format!(
+                                    "fetch_events: PARTIAL_FILL activity id={:?} for \
+                                     order_id={:?} is missing a parseable broker-native \
+                                     cum_qty; refusing to guess cross-lane economic \
+                                     identity for an ambiguous fill",
+                                    activity.id, activity.order_id
+                                ),
+                            });
                         }
                     }
-                }
-                if !all_qtys_parsed {
-                    continue; // Leave every activity for this order ambiguous.
-                }
-
-                // Race-detection bracket: two back-to-back reads of the
-                // order's CURRENT total. If they disagree, some execution
-                // landed on this order between them and "current total" is
-                // no longer provably "as of the last activity in this page"
-                // — fail closed rather than reconstruct from a value that
-                // may already include quantity this page never showed us.
-                let pre = self.fetch_order(order_id)?;
-                let post = self.fetch_order(order_id)?;
-                let (pre_total, post_total) = match (
-                    parse_broker_qty(&pre.filled_qty).ok(),
-                    parse_broker_qty(&post.filled_qty).ok(),
-                ) {
-                    (Some(a), Some(b)) => (a, b),
-                    _ => continue,
+                } else {
+                    None
                 };
-                if pre_total != post_total {
-                    continue;
-                }
-                // Proven stable: `pre_total` (== `post_total`) is the
-                // order's cumulative as of *after* this page's fill-type
-                // activities (these are historical events already reflected
-                // in the broker's current total — `fetch_order` cannot
-                // return a value "as of" an earlier point in time). Working
-                // backward by this page's own summed quantity recovers the
-                // cumulative immediately *before* the page's activities;
-                // reconstructing forward from that baseline is now exact,
-                // not assumed, because the bracket proved no other execution
-                // shifted the total out from under this computation.
-                let baseline = pre_total - page_sum;
-                let mut running = baseline;
-                for (i, &idx) in indices.iter().enumerate() {
-                    running += qtys[i];
-                    reconstructed_cum_qty.insert(idx, running);
-                }
-            }
-
-            for (idx, activity) in activities.iter().enumerate() {
                 let mut order = self.fetch_order(&activity.order_id)?;
-                if activity.activity_type == "PARTIAL_FILL" {
-                    order.filled_qty = match reconstructed_cum_qty.get(&idx) {
-                        Some(v) => v.to_string(),
-                        // Ambiguous: blank filled_qty so
-                        // normalize_trade_update's soft parse yields
-                        // cum_qty_after=None rather than a fabricated value
-                        // — the OMS apply layer then falls back to its
-                        // pre-existing event-id-only dedup for just this
-                        // activity, exactly as it does for adapters that
-                        // never supply this field.
-                        None => String::new(),
-                    };
+                if let Some(v) = partial_fill_cum_qty {
+                    order.filled_qty = v.to_string();
                 }
                 let trade_update = activity_to_trade_update(activity, &order).map_err(|e| {
                     BrokerError::Transient {

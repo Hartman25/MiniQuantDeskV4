@@ -161,16 +161,20 @@ pub async fn inbox_insert_deduped(
 /// distinct fills always carry two distinct watermark values regardless of
 /// how close in time or identical in size they are).
 ///
-/// PAPER-SOAK-PARTIAL-FILL-DEDUP-03: `cum_qty_after` is populated
-/// differently per lane. On the WS lane it is Alpaca's own live
-/// `order.filled_qty` from that specific push — always exact when present.
-/// On the REST lane (`mqk-broker-alpaca::fetch_events`) it is a
-/// *reconstruction* from ordered account-activity quantities, proven exact
-/// per order-group via a race-detection bracket (two back-to-back
-/// `GET /v2/orders` reads must agree) before it is trusted; a page whose
-/// bracket disagrees, or whose per-activity quantities fail to parse, is
-/// left `None` rather than guessed. `None` on either lane falls back to the
-/// pre-existing `event_id`-only dedup — never fabricated.
+/// PAPER-SOAK-PARTIAL-FILL-DEDUP-04: `cum_qty_after` is populated the same
+/// structural way on both lanes — read directly off a broker-native field
+/// carried atomically in the same message/record as the fill itself, never
+/// derived or reconstructed from a separately fetched snapshot. On the WS
+/// lane it is Alpaca's own live `order.filled_qty` from that specific push.
+/// On the REST lane (`mqk-broker-alpaca::fetch_events`) it is Alpaca's own
+/// `cum_qty` field on that specific account-activity record. A REST
+/// PARTIAL_FILL activity whose `cum_qty` is missing or unparseable fails the
+/// whole polling page closed (`BrokerError::Transient`) rather than falling
+/// back to an ambiguous `None` — `event_id`-only dedup cannot safely
+/// disambiguate a cross-lane duplicate, so an unprovable REST partial is
+/// never allowed to reach this insert path at all. `None` from the WS lane
+/// (adapters that never supply this field) still falls back to the
+/// pre-existing `event_id`-only dedup, unweakened.
 #[allow(clippy::too_many_arguments)]
 pub async fn inbox_insert_deduped_with_identity(
     pool: &PgPool,

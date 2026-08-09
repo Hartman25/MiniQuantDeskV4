@@ -266,6 +266,26 @@ pub struct AlpacaOrderActivity {
     pub side: String,
     /// Ticker symbol.
     pub symbol: String,
+    /// PAPER-SOAK-PARTIAL-FILL-DEDUP-04: broker-native cumulative quantity
+    /// filled on this order **as of this specific activity** — Alpaca's own
+    /// `cum_qty` field on `TradeActivity` records.
+    ///
+    /// This is not a derived or reconstructed value: Alpaca reports it
+    /// atomically as part of the same historical activity record as `qty`
+    /// and `price`, so it is fixed at the moment this execution happened and
+    /// cannot be affected by any later execution on the same order,
+    /// regardless of when this record is subsequently polled or which page
+    /// it appears on. It is the REST-lane counterpart to the WS lane's
+    /// `order.filled_qty` (also reported atomically, in the same trade-update
+    /// message as the fill it describes).
+    ///
+    /// `#[serde(default)]` so activities predating this field's addition (or
+    /// any malformed/absent value) deserialize to `None` rather than failing
+    /// the whole page — `fetch_events` fails closed explicitly when a
+    /// FILL-class activity is missing it, rather than silently treating
+    /// absence as ambiguous-but-safe-to-apply.
+    #[serde(default)]
+    pub cum_qty: Option<String>,
 }
 // ---------------------------------------------------------------------------
 // Snapshot fetch wire types — AP-03

@@ -78,6 +78,7 @@ fn make_fill(activity_id: &str, order_id: &str, symbol: &str, side: &str) -> Alp
         qty: Some("5".to_owned()),
         side: side.to_owned(),
         symbol: symbol.to_owned(),
+        cum_qty: None,
     }
 }
 

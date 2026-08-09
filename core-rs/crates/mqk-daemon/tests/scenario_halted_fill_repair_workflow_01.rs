@@ -68,6 +68,7 @@ fn make_fill_activity(activity_id: &str, order_id: &str) -> AlpacaOrderActivity 
         qty: Some("5".to_string()),
         side: "buy".to_string(),
         symbol: "NVDA".to_string(),
+        cum_qty: None,
     }
 }
 

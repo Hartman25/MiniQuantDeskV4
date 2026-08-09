@@ -92,6 +92,7 @@ fn make_activity(
         qty: qty.map(str::to_string),
         side: side.to_string(),
         symbol: symbol.to_string(),
+        cum_qty: None,
     }
 }
 fn make_order_full(
