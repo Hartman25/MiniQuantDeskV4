@@ -1223,6 +1223,20 @@ pub async fn deadman_expired(
 /// Deadman enforcement: if RUNNING and expired, HALT the run (sticky) and return true.
 /// Otherwise return false.
 ///
+/// PRE-SOAK-DAEMON-SUPERVISOR-HALT-FENCE-CLOSURE-01: the halt decision and
+/// the halt mutation now share [`halt_and_disarm_run_if_active`]'s single
+/// atomic, `SELECT ... FOR UPDATE`-serialized authority boundary instead of
+/// a separate `fetch_run` read followed by an unconditional `halt_run`
+/// write. The prior two-step shape left a TOCTOU window open: between this
+/// function's own status re-check and its `halt_run` write, a concurrent
+/// operator `clear_halted_run_and_reset_stale_claims` could win the `runs`
+/// row lock, observe `HALTED`, and commit `STOPPED` — and this function's
+/// unconditional write would then silently overwrite that `STOPPED` back to
+/// `HALTED` once it finally landed. `RunNotActive` (the run is no longer
+/// `RUNNING` by the time the atomic check runs) now returns `Ok(false)` —
+/// zero mutation, exactly like the "not expired" case — instead of racing a
+/// stale write against recovery.
+///
 /// `now` is injected by the caller (D1-3: no wall-clock reads in enforcement path).
 pub async fn enforce_deadman_or_halt(
     pool: &PgPool,
@@ -1235,12 +1249,8 @@ pub async fn enforce_deadman_or_halt(
         return Ok(false);
     }
 
-    // Only halt if still RUNNING at time of enforcement (avoid halting stopped/armed).
-    let r = fetch_run(pool, run_id).await?;
-    if r.status.as_str() == "RUNNING" {
-        halt_run(pool, run_id, now).await?;
-        return Ok(true);
+    match halt_and_disarm_run_if_active(pool, run_id, now, "DeadmanExpired").await? {
+        SafetyHaltOutcome::Halted | SafetyHaltOutcome::AlreadyHalted => Ok(true),
+        SafetyHaltOutcome::RunNotActive { .. } => Ok(false),
     }
-
-    Ok(false)
 }

@@ -392,6 +392,12 @@
       "path": "0063_runs_stop_requested.sql",
       "status": "applied",
       "intent": "PAPER-SOAK-INBOUND-DRAIN-OWNERSHIP-01: add nullable runs.stop_requested_at_utc. Records that an operator stop was requested without changing runs.status away from RUNNING, so the orchestrator tick loop can suppress new outbox claim/dispatch (Phase 1) while continuing to run broker event fetch/ingest and inbound apply (Phase 2/3) until every broker-reachable order for the run has resolved to a terminal outcome -- closing the gap where stop_execution_runtime cleared local ownership unconditionally and the WS inbound transport (gated on local ownership) then silently dropped any late fill/cancel/reject frame with zero logging. Additive only, no constraint change."
+    },
+    {
+      "id": "0064",
+      "path": "0064_arm_state_reason_execution_loop_tick_failure.sql",
+      "status": "applied",
+      "intent": "PRE-SOAK-DAEMON-SUPERVISOR-HALT-FENCE-CLOSURE-01: add 'ExecutionLoopTickFailure' to the sys_arm_state.reason CHECK constraint so mqk-daemon's execution-loop supervisor generic tick-error fallback (persist_execution_loop_safety_halt) can durably disarm through halt_and_disarm_run_if_active instead of failing the fenced halt write with a constraint violation. Additive only, no other constraint or column change."
     }
   ]
 }

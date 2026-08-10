@@ -74,6 +74,15 @@ name = "scenario_runtime_halt_fence_cas_01"
 path = "tests/scenario_runtime_halt_fence_cas_01.rs"
 required-features = ["testkit"]
 
+# PRE-SOAK-DAEMON-SUPERVISOR-HALT-FENCE-CLOSURE-01: enforce_deadman_or_halt
+# now routes through halt_and_disarm_run_if_active, which also touches the
+# global sys_arm_state singleton, so this test moved to a disposable
+# per-test database (mqk_db::run_isolated), which requires testkit.
+[[test]]
+name = "scenario_deadman_enforces_halt"
+path = "tests/scenario_deadman_enforces_halt.rs"
+required-features = ["testkit"]
+
 # FULL-AUDIT-SAFE-IGNORED-AND-SHARED-DB-FINAL-CLOSURE-01 Part 3: DB-backed
 # proofs for the hardened disposable-per-test-database helper.
 # Run: MQK_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5434/mqk_test \

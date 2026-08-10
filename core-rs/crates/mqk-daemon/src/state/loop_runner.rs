@@ -123,6 +123,84 @@ fn dynamic_selection_envelopes_ok(
 }
 
 // ---------------------------------------------------------------------------
+// PRE-SOAK-DAEMON-SUPERVISOR-HALT-FENCE-CLOSURE-01 — canonical
+// execution-loop supervisor safety-halt seam
+// ---------------------------------------------------------------------------
+
+/// Typed outcome of [`persist_execution_loop_safety_halt`] — the single
+/// fenced authority boundary every `spawn_execution_loop` supervisor
+/// safety-halt branch below must go through instead of raw `mqk_db::halt_run`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum SupervisorHaltOutcome {
+    /// The run was durably `RUNNING`; this call durably halted+disarmed it
+    /// (`runs.status = HALTED`, `sys_arm_state = DISARMED`, atomically).
+    Halted,
+    /// The run was already durably `HALTED` (idempotent re-halt) —
+    /// `sys_arm_state` was (re)confirmed `DISARMED`.
+    AlreadyHalted,
+    /// Refused: the run is no longer in a state this stale supervisor may
+    /// safety-halt (most commonly a successful operator halt+clear to
+    /// `STOPPED`, possibly followed by a legitimate re-arm to `ARMED`).
+    /// Zero durable mutation — `runs.status` and `sys_arm_state` are left
+    /// exactly as observed under the DB row lock.
+    Superseded { actual_status: String },
+    /// The DB write itself failed. Durable state is unconfirmed either way
+    /// — the caller must fail closed locally without claiming a durable
+    /// `HALTED` was committed.
+    PersistenceFailure,
+}
+
+/// PRE-SOAK-DAEMON-SUPERVISOR-HALT-FENCE-CLOSURE-01: the one narrow seam
+/// every `spawn_execution_loop` safety-halt branch must go through. Routes
+/// exclusively through [`mqk_db::halt_and_disarm_run_if_active`]
+/// (PRE-SOAK-RUNTIME-HALT-FENCE-CAS-01, the same atomic, `SELECT ... FOR
+/// UPDATE`-serialized authority boundary `mqk-runtime`'s own
+/// `persist_halt_and_disarm` uses) — never raw `mqk_db::halt_run`, which is
+/// unconditional ("ANY -> HALTED") and was the exact TOCTOU this closure
+/// patch exists to remove one frame above `ExecutionOrchestrator`.
+///
+/// A stale execution-loop task (its authority already superseded by an
+/// operator's halt+clear, and possibly a subsequent legitimate re-arm) can
+/// therefore never overwrite a lifecycle transition that has already
+/// landed. Correctness comes from the DB's serialization boundary, not from
+/// inspecting the error text of whatever caused this supervisor branch to
+/// decide a halt was needed (e.g. `RUNTIME_SAFETY_HALT_SUPERSEDED`,
+/// `RUNTIME_FENCED_RUN_NOT_RUNNING`, or any other tick error) — every
+/// caller of this function passes through the same fenced decision
+/// regardless of why it got here.
+async fn persist_execution_loop_safety_halt(
+    pool: &sqlx::PgPool,
+    run_id: Uuid,
+    now: chrono::DateTime<chrono::Utc>,
+    reason: &str,
+) -> SupervisorHaltOutcome {
+    match mqk_db::halt_and_disarm_run_if_active(pool, run_id, now, reason).await {
+        Ok(mqk_db::SafetyHaltOutcome::Halted) => SupervisorHaltOutcome::Halted,
+        Ok(mqk_db::SafetyHaltOutcome::AlreadyHalted) => SupervisorHaltOutcome::AlreadyHalted,
+        Ok(mqk_db::SafetyHaltOutcome::RunNotActive { actual_status }) => {
+            tracing::warn!(
+                run_id = %run_id,
+                actual_status = %actual_status,
+                reason,
+                "stale_execution_loop_halt_superseded_by_lifecycle_state: this loop's safety-halt \
+                 authority was superseded by recovery before it could persist; zero mutation"
+            );
+            SupervisorHaltOutcome::Superseded { actual_status }
+        }
+        Err(err) => {
+            tracing::error!(
+                run_id = %run_id,
+                reason,
+                error = %err,
+                "execution_loop_safety_halt_persist_failed: fenced halt authority check failed; \
+                 no durable HALTED confirmed"
+            );
+            SupervisorHaltOutcome::PersistenceFailure
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
 // spawn_execution_loop
 // ---------------------------------------------------------------------------
 
@@ -340,52 +418,59 @@ pub(super) fn spawn_execution_loop(
                             Ok(false) => {}
                             Err(err) => {
                                 tracing::error!("execution_loop_deadman_check_failed error={err}");
-                                if let Err(halt_err) = mqk_db::halt_run(pool, run_id, now).await {
-                                    tracing::error!(run_id = %run_id, "execution_loop_halt_run_persist_failed error={halt_err}");
-                                }
-                                if let Err(disarm_err) = mqk_db::persist_arm_state_canonical(
+                                let halt_outcome = persist_execution_loop_safety_halt(
                                     pool,
-                                    mqk_db::ArmState::Disarmed,
-                                    Some(mqk_db::DisarmReason::DeadmanSupervisorFailure),
+                                    run_id,
+                                    now,
+                                    mqk_db::DisarmReason::DeadmanSupervisorFailure.as_db_str(),
                                 )
-                                .await
-                                {
-                                    tracing::error!(run_id = %run_id, "execution_loop_disarm_persist_failed error={disarm_err}");
-                                }
-                                {
-                                    let mut ig = integrity.write().await;
-                                    ig.disarmed = true;
-                                    ig.halted = true;
-                                }
-                                // DISCORD-DEADMAN-ALERTS-01: supervisor failure alert.
-                                {
-                                    let notifier = state_arc.discord_notifier.clone();
-                                    let env = Some(
-                                        state_arc.deployment_mode().as_api_label().to_string(),
-                                    );
-                                    let run_id_short = format!("{:.8}", run_id);
-                                    let err_str = err.to_string();
-                                    let ts = chrono::Utc::now().to_rfc3339(); // allow: alert timestamp
-                                    tokio::spawn(async move {
-                                        notifier
-                                            .notify_critical_alert(&CriticalAlertPayload {
-                                                alert_class: "halt.deadman_supervisor_failure"
-                                                    .to_string(),
-                                                severity: "critical".to_string(),
-                                                summary: format!(
-                                                    "Deadman supervisor check failed — run \
-                                                     halted and disarmed | run={run_id_short}"
-                                                ),
-                                                detail: Some(format!(
-                                                    "disarm_reason=DeadmanSupervisorFailure \
-                                                     error={err_str}"
-                                                )),
-                                                environment: env,
-                                                run_id: Some(run_id_short),
-                                                ts_utc: ts,
-                                            })
-                                            .await;
-                                    });
+                                .await;
+                                match &halt_outcome {
+                                    SupervisorHaltOutcome::Halted
+                                    | SupervisorHaltOutcome::AlreadyHalted => {
+                                        {
+                                            let mut ig = integrity.write().await;
+                                            ig.disarmed = true;
+                                            ig.halted = true;
+                                        }
+                                        // DISCORD-DEADMAN-ALERTS-01: supervisor failure alert.
+                                        {
+                                            let notifier = state_arc.discord_notifier.clone();
+                                            let env = Some(
+                                                state_arc.deployment_mode().as_api_label().to_string(),
+                                            );
+                                            let run_id_short = format!("{:.8}", run_id);
+                                            let err_str = err.to_string();
+                                            let ts = chrono::Utc::now().to_rfc3339(); // allow: alert timestamp
+                                            tokio::spawn(async move {
+                                                notifier
+                                                    .notify_critical_alert(&CriticalAlertPayload {
+                                                        alert_class: "halt.deadman_supervisor_failure"
+                                                            .to_string(),
+                                                        severity: "critical".to_string(),
+                                                        summary: format!(
+                                                            "Deadman supervisor check failed — run \
+                                                             halted and disarmed | run={run_id_short}"
+                                                        ),
+                                                        detail: Some(format!(
+                                                            "disarm_reason=DeadmanSupervisorFailure \
+                                                             error={err_str}"
+                                                        )),
+                                                        environment: env,
+                                                        run_id: Some(run_id_short),
+                                                        ts_utc: ts,
+                                                    })
+                                                    .await;
+                                            });
+                                        }
+                                    }
+                                    SupervisorHaltOutcome::Superseded { .. }
+                                    | SupervisorHaltOutcome::PersistenceFailure => {
+                                        // Fenced refusal or unconfirmed DB write: this stale
+                                        // loop's authority has been superseded (or the durable
+                                        // write itself is unproven) — zero local integrity
+                                        // mutation, no false "run halted" alert.
+                                    }
                                 }
                                 let release_outcome = orchestrator
                                     .release_runtime_leadership()
@@ -395,7 +480,10 @@ pub(super) fn spawn_execution_loop(
                                         release_err.to_string()
                                     });
                                 let exit = ExecutionLoopExit {
-                                    note: Some(format!("execution loop halted: deadman check failed: {err}")),
+                                    note: Some(format!(
+                                        "execution loop halted: deadman check failed: {err} \
+                                         (halt_outcome={halt_outcome:?})"
+                                    )),
                                     leadership_release_outcome: Some(release_outcome),
                                 };
                                 drop_outside_async_context(orchestrator);
@@ -417,13 +505,24 @@ pub(super) fn spawn_execution_loop(
                             "execution_loop_ws_gap_halt: \
                              Alpaca WS continuity gap detected; halting execution loop"
                         );
+                        let mut halt_outcome = None;
                         if let Some(ref pool) = db {
                             let now = Utc::now();
-                            if let Err(halt_err) = mqk_db::halt_run(pool, run_id, now).await {
-                                tracing::error!(run_id = %run_id, "execution_loop_halt_run_persist_failed error={halt_err}");
-                            }
+                            halt_outcome = Some(
+                                persist_execution_loop_safety_halt(
+                                    pool,
+                                    run_id,
+                                    now,
+                                    mqk_db::DisarmReason::InboundContinuityUnproven.as_db_str(),
+                                )
+                                .await,
+                            );
                         }
-                        {
+                        if matches!(
+                            halt_outcome,
+                            None | Some(SupervisorHaltOutcome::Halted)
+                                | Some(SupervisorHaltOutcome::AlreadyHalted)
+                        ) {
                             let mut ig = integrity.write().await;
                             ig.disarmed = true;
                             ig.halted = true;
@@ -436,10 +535,10 @@ pub(super) fn spawn_execution_loop(
                                 release_err.to_string()
                             });
                         let exit = ExecutionLoopExit {
-                            note: Some(
-                                "execution loop halted: Alpaca WS continuity gap detected"
-                                    .to_string(),
-                            ),
+                            note: Some(format!(
+                                "execution loop halted: Alpaca WS continuity gap detected \
+                                 (halt_outcome={halt_outcome:?})"
+                            )),
                             leadership_release_outcome: Some(release_outcome),
                         };
                         drop_outside_async_context(orchestrator);
@@ -448,15 +547,35 @@ pub(super) fn spawn_execution_loop(
 
                     if let Err(err) = orchestrator.tick().await {
                         tracing::error!("execution_loop_halt error={err}");
+                        // PRE-SOAK-DAEMON-SUPERVISOR-HALT-FENCE-CLOSURE-01: some tick
+                        // errors (e.g. RUNTIME_SAFETY_HALT_SUPERSEDED,
+                        // RUNTIME_FENCED_RUN_NOT_RUNNING) mean the inner orchestrator's
+                        // own halt authority has already been fenced/refused by the DB —
+                        // this fallback must not blindly re-halt whatever lifecycle state
+                        // recovery has since established. Route through the same fenced
+                        // seam regardless of the error text; correctness comes from the
+                        // DB authority check, not from string-matching the error.
+                        let mut halt_outcome = None;
                         if let Some(ref pool) = db {
                             let now = Utc::now();
-                            if let Err(halt_err) = mqk_db::halt_run(pool, run_id, now).await {
-                                tracing::error!(run_id = %run_id, "execution_loop_halt_run_persist_failed error={halt_err}");
-                            }
+                            halt_outcome = Some(
+                                persist_execution_loop_safety_halt(
+                                    pool,
+                                    run_id,
+                                    now,
+                                    "ExecutionLoopTickFailure",
+                                )
+                                .await,
+                            );
                         }
-                        {
+                        if matches!(
+                            halt_outcome,
+                            None | Some(SupervisorHaltOutcome::Halted)
+                                | Some(SupervisorHaltOutcome::AlreadyHalted)
+                        ) {
                             let mut ig = integrity.write().await;
                             ig.halted = true;
+                            ig.disarmed = true;
                         }
                         let release_outcome = orchestrator
                             .release_runtime_leadership()
@@ -466,7 +585,9 @@ pub(super) fn spawn_execution_loop(
                                 release_err.to_string()
                             });
                         let exit = ExecutionLoopExit {
-                            note: Some(format!("execution loop halted: {err}")),
+                            note: Some(format!(
+                                "execution loop halted: {err} (halt_outcome={halt_outcome:?})"
+                            )),
                             leadership_release_outcome: Some(release_outcome),
                         };
                         drop_outside_async_context(orchestrator);
@@ -487,46 +608,51 @@ pub(super) fn spawn_execution_loop(
                                 "execution_loop_deadman_post_tick: tick duration exceeded \
                                  DEADMAN_TTL; halting and disarming"
                             );
-                            let _ = mqk_db::halt_run(pool, run_id, now).await;
-                            let _ = mqk_db::persist_arm_state_canonical(
+                            let halt_outcome = persist_execution_loop_safety_halt(
                                 pool,
-                                mqk_db::ArmState::Disarmed,
-                                Some(mqk_db::DisarmReason::DeadmanExpired),
+                                run_id,
+                                now,
+                                mqk_db::DisarmReason::DeadmanExpired.as_db_str(),
                             )
                             .await;
-                            {
-                                let mut ig = integrity.write().await;
-                                ig.disarmed = true;
-                                ig.halted = true;
-                            }
-                            // DISCORD-DEADMAN-ALERTS-01: post-tick deadman expiry alert.
-                            {
-                                let notifier = state_arc.discord_notifier.clone();
-                                let env = Some(
-                                    state_arc.deployment_mode().as_api_label().to_string(),
-                                );
-                                let run_id_short = format!("{:.8}", run_id);
-                                let ts = chrono::Utc::now().to_rfc3339(); // allow: alert timestamp
-                                tokio::spawn(async move {
-                                    notifier
-                                        .notify_critical_alert(&CriticalAlertPayload {
-                                            alert_class: "halt.deadman_expired".to_string(),
-                                            severity: "critical".to_string(),
-                                            summary: format!(
-                                                "Deadman TTL exceeded during tick — run halted \
-                                                 and disarmed | run={run_id_short}"
-                                            ),
-                                            detail: Some(
-                                                "disarm_reason=DeadmanExpired \
-                                                 phase=post_tick (tick blocked beyond TTL)"
-                                                    .to_string(),
-                                            ),
-                                            environment: env,
-                                            run_id: Some(run_id_short),
-                                            ts_utc: ts,
-                                        })
-                                        .await;
-                                });
+                            if matches!(
+                                halt_outcome,
+                                SupervisorHaltOutcome::Halted | SupervisorHaltOutcome::AlreadyHalted
+                            ) {
+                                {
+                                    let mut ig = integrity.write().await;
+                                    ig.disarmed = true;
+                                    ig.halted = true;
+                                }
+                                // DISCORD-DEADMAN-ALERTS-01: post-tick deadman expiry alert.
+                                {
+                                    let notifier = state_arc.discord_notifier.clone();
+                                    let env = Some(
+                                        state_arc.deployment_mode().as_api_label().to_string(),
+                                    );
+                                    let run_id_short = format!("{:.8}", run_id);
+                                    let ts = chrono::Utc::now().to_rfc3339(); // allow: alert timestamp
+                                    tokio::spawn(async move {
+                                        notifier
+                                            .notify_critical_alert(&CriticalAlertPayload {
+                                                alert_class: "halt.deadman_expired".to_string(),
+                                                severity: "critical".to_string(),
+                                                summary: format!(
+                                                    "Deadman TTL exceeded during tick — run halted \
+                                                     and disarmed | run={run_id_short}"
+                                                ),
+                                                detail: Some(
+                                                    "disarm_reason=DeadmanExpired \
+                                                     phase=post_tick (tick blocked beyond TTL)"
+                                                        .to_string(),
+                                                ),
+                                                environment: env,
+                                                run_id: Some(run_id_short),
+                                                ts_utc: ts,
+                                            })
+                                            .await;
+                                    });
+                                }
                             }
                             let release_outcome = orchestrator
                                 .release_runtime_leadership()
@@ -536,9 +662,10 @@ pub(super) fn spawn_execution_loop(
                                     release_err.to_string()
                                 });
                             let exit = ExecutionLoopExit {
-                                note: Some(
-                                    "execution loop halted: deadman expired post-tick".to_string(),
-                                ),
+                                note: Some(format!(
+                                    "execution loop halted: deadman expired post-tick \
+                                     (halt_outcome={halt_outcome:?})"
+                                )),
                                 leadership_release_outcome: Some(release_outcome),
                             };
                             drop_outside_async_context(orchestrator);
@@ -546,52 +673,57 @@ pub(super) fn spawn_execution_loop(
                         }
                         if let Err(err) = mqk_db::heartbeat_run(pool, run_id, now).await {
                             tracing::error!("execution_loop_heartbeat_failed error={err}");
-                            if let Err(halt_err) = mqk_db::halt_run(pool, run_id, now).await {
-                                tracing::error!(run_id = %run_id, "execution_loop_halt_run_persist_failed error={halt_err}");
-                            }
-                            if let Err(disarm_err) = mqk_db::persist_arm_state_canonical(
+                            // heartbeat_run's own CAS already refuses when the run left
+                            // RUNNING (e.g. a concurrent operator halt/clear) — a heartbeat
+                            // failure caused by that must never be treated as license to
+                            // re-halt the recovered lifecycle state. Route through the same
+                            // fenced seam so only a genuinely still-RUNNING run is halted.
+                            let halt_outcome = persist_execution_loop_safety_halt(
                                 pool,
-                                mqk_db::ArmState::Disarmed,
-                                Some(mqk_db::DisarmReason::DeadmanHeartbeatPersistFailed),
+                                run_id,
+                                now,
+                                mqk_db::DisarmReason::DeadmanHeartbeatPersistFailed.as_db_str(),
                             )
-                            .await
-                            {
-                                tracing::error!(run_id = %run_id, "execution_loop_disarm_persist_failed error={disarm_err}");
-                            }
-                            {
-                                let mut ig = integrity.write().await;
-                                ig.disarmed = true;
-                                ig.halted = true;
-                            }
-                            // DISCORD-DEADMAN-ALERTS-01: heartbeat persist failure alert.
-                            {
-                                let notifier = state_arc.discord_notifier.clone();
-                                let env = Some(
-                                    state_arc.deployment_mode().as_api_label().to_string(),
-                                );
-                                let run_id_short = format!("{:.8}", run_id);
-                                let err_str = err.to_string();
-                                let ts = chrono::Utc::now().to_rfc3339(); // allow: alert timestamp
-                                tokio::spawn(async move {
-                                    notifier
-                                        .notify_critical_alert(&CriticalAlertPayload {
-                                            alert_class: "halt.deadman_heartbeat_failed"
-                                                .to_string(),
-                                            severity: "critical".to_string(),
-                                            summary: format!(
-                                                "Deadman heartbeat persist failed — run halted \
-                                                 and disarmed | run={run_id_short}"
-                                            ),
-                                            detail: Some(format!(
-                                                "disarm_reason=DeadmanHeartbeatPersistFailed \
-                                                 error={err_str}"
-                                            )),
-                                            environment: env,
-                                            run_id: Some(run_id_short),
-                                            ts_utc: ts,
-                                        })
-                                        .await;
-                                });
+                            .await;
+                            if matches!(
+                                halt_outcome,
+                                SupervisorHaltOutcome::Halted | SupervisorHaltOutcome::AlreadyHalted
+                            ) {
+                                {
+                                    let mut ig = integrity.write().await;
+                                    ig.disarmed = true;
+                                    ig.halted = true;
+                                }
+                                // DISCORD-DEADMAN-ALERTS-01: heartbeat persist failure alert.
+                                {
+                                    let notifier = state_arc.discord_notifier.clone();
+                                    let env = Some(
+                                        state_arc.deployment_mode().as_api_label().to_string(),
+                                    );
+                                    let run_id_short = format!("{:.8}", run_id);
+                                    let err_str = err.to_string();
+                                    let ts = chrono::Utc::now().to_rfc3339(); // allow: alert timestamp
+                                    tokio::spawn(async move {
+                                        notifier
+                                            .notify_critical_alert(&CriticalAlertPayload {
+                                                alert_class: "halt.deadman_heartbeat_failed"
+                                                    .to_string(),
+                                                severity: "critical".to_string(),
+                                                summary: format!(
+                                                    "Deadman heartbeat persist failed — run halted \
+                                                     and disarmed | run={run_id_short}"
+                                                ),
+                                                detail: Some(format!(
+                                                    "disarm_reason=DeadmanHeartbeatPersistFailed \
+                                                     error={err_str}"
+                                                )),
+                                                environment: env,
+                                                run_id: Some(run_id_short),
+                                                ts_utc: ts,
+                                            })
+                                            .await;
+                                    });
+                                }
                             }
                             let release_outcome = orchestrator
                                 .release_runtime_leadership()
@@ -601,7 +733,10 @@ pub(super) fn spawn_execution_loop(
                                     release_err.to_string()
                                 });
                             let exit = ExecutionLoopExit {
-                                note: Some(format!("execution loop heartbeat failed: {err}")),
+                                note: Some(format!(
+                                    "execution loop heartbeat failed: {err} \
+                                     (halt_outcome={halt_outcome:?})"
+                                )),
                                 leadership_release_outcome: Some(release_outcome),
                             };
                             drop_outside_async_context(orchestrator);
@@ -896,27 +1031,25 @@ pub(super) fn spawn_execution_loop(
                                         fault = ?fault,
                                         "phase7b_selected_host_dispatch_fault: halting run"
                                     );
+                                    let mut halt_outcome = None;
                                     if let Some(ref pool) = db {
                                         let now = Utc::now();
-                                        if let Err(halt_err) =
-                                            mqk_db::halt_run(pool, run_id, now).await
-                                        {
-                                            tracing::error!(run_id = %run_id, "execution_loop_halt_run_persist_failed error={halt_err}");
-                                        }
-                                        if let Err(disarm_err) =
-                                            mqk_db::persist_arm_state_canonical(
+                                        halt_outcome = Some(
+                                            persist_execution_loop_safety_halt(
                                                 pool,
-                                                mqk_db::ArmState::Disarmed,
-                                                Some(
-                                                    mqk_db::DisarmReason::DeadmanSupervisorFailure,
-                                                ),
+                                                run_id,
+                                                now,
+                                                mqk_db::DisarmReason::DeadmanSupervisorFailure
+                                                    .as_db_str(),
                                             )
-                                            .await
-                                        {
-                                            tracing::error!(run_id = %run_id, "execution_loop_disarm_persist_failed error={disarm_err}");
-                                        }
+                                            .await,
+                                        );
                                     }
-                                    {
+                                    if matches!(
+                                        halt_outcome,
+                                        None | Some(SupervisorHaltOutcome::Halted)
+                                            | Some(SupervisorHaltOutcome::AlreadyHalted)
+                                    ) {
                                         let mut ig = integrity.write().await;
                                         ig.disarmed = true;
                                         ig.halted = true;
@@ -930,7 +1063,8 @@ pub(super) fn spawn_execution_loop(
                                         });
                                     let exit = ExecutionLoopExit {
                                         note: Some(format!(
-                                            "execution loop halted: selected-host dispatch fault: {}",
+                                            "execution loop halted: selected-host dispatch fault: {} \
+                                             (halt_outcome={halt_outcome:?})",
                                             fault.code()
                                         )),
                                         leadership_release_outcome: Some(release_outcome),
@@ -2271,5 +2405,222 @@ mod phase7b_provenance_tests {
     fn empty_batch_is_vacuously_ok_for_either_authority() {
         assert!(dynamic_selection_envelopes_ok(&legacy_authority(), &[]));
         assert!(dynamic_selection_envelopes_ok(&dynamic_authority(), &[]));
+    }
+}
+
+// ---------------------------------------------------------------------------
+// PRE-SOAK-DAEMON-SUPERVISOR-HALT-FENCE-CLOSURE-01: real-DB proof of
+// `persist_execution_loop_safety_halt` — the exact seam every one of the
+// six `spawn_execution_loop` supervisor safety-halt branches above now
+// calls instead of raw `mqk_db::halt_run`.
+//
+// This is DB-backed, not merely a fake-pool unit test: each case uses
+// `mqk_db::run_isolated` (a genuinely disposable per-test database, the
+// same pattern `scenario_runtime_halt_fence_cas_01.rs` and
+// `hermetic_positive_proofs.rs` already use), since
+// `halt_and_disarm_run_if_active` -- which this seam wraps -- writes the
+// global `sys_arm_state` singleton row and therefore cannot safely share a
+// database with concurrently-running tests.
+//
+// DSF-NEG-1 (the load-bearing negative control this patch closes): before
+// this patch, `spawn_execution_loop`'s six safety-halt branches called raw
+// `mqk_db::halt_run` -- unconditional, "ANY -> HALTED" -- so a stale
+// supervisor decision reached after an operator's halt+clear had already
+// committed `STOPPED` would silently overwrite it back to `HALTED`.
+// `dsf_neg1_seam_is_superseded_after_operator_clear_and_makes_zero_mutation`
+// below reproduces exactly that chronology (RUNNING -> stale halt decision
+// -> concurrent operator halt+clear to STOPPED -> stale decision finally
+// persists) against the real seam and proves zero mutation.
+#[cfg(test)]
+mod supervisor_halt_fence_tests {
+    use super::*;
+
+    fn ts(secs: i64) -> chrono::DateTime<chrono::Utc> {
+        chrono::DateTime::from_timestamp(secs, 0).unwrap()
+    }
+
+    async fn make_run_running(pool: &sqlx::PgPool) -> Uuid {
+        let run_id = Uuid::new_v4(); // allow: test-only — isolated DB test fixture
+        mqk_db::insert_run(
+            pool,
+            &mqk_db::NewRun {
+                run_id,
+                engine_id: format!("loop-runner-dsf-test-{run_id}"),
+                mode: "PAPER".to_string(),
+                started_at_utc: ts(0),
+                git_hash: "TEST".to_string(),
+                config_hash: format!("cfg-{run_id}"),
+                config_json: serde_json::json!({}),
+                host_fingerprint: "TESTHOST".to_string(),
+            },
+        )
+        .await
+        .expect("insert_run");
+        mqk_db::arm_run(pool, run_id).await.expect("arm_run");
+        mqk_db::begin_run(pool, run_id).await.expect("begin_run");
+        run_id
+    }
+
+    #[tokio::test]
+    #[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+    async fn seam_halts_running_run_and_disarms_atomically() {
+        mqk_db::run_isolated("dsf_seam_halt", |pool| async move {
+            let run_id = make_run_running(&pool).await;
+
+            let outcome = persist_execution_loop_safety_halt(
+                &pool,
+                run_id,
+                ts(1_000),
+                "ExecutionLoopTickFailure",
+            )
+            .await;
+            assert_eq!(outcome, SupervisorHaltOutcome::Halted);
+
+            let run = mqk_db::fetch_run(&pool, run_id).await.expect("fetch_run");
+            assert!(matches!(run.status, mqk_db::RunStatus::Halted));
+            assert_eq!(run.halted_at_utc, Some(ts(1_000)));
+
+            let arm = mqk_db::load_arm_state(&pool)
+                .await
+                .expect("load_arm_state")
+                .expect("arm state row must exist after a supervisor halt");
+            assert_eq!(arm.0, "DISARMED");
+            assert_eq!(arm.1.as_deref(), Some("ExecutionLoopTickFailure"));
+        })
+        .await;
+    }
+
+    #[tokio::test]
+    #[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+    async fn seam_is_idempotent_on_already_halted_run() {
+        mqk_db::run_isolated("dsf_seam_idempotent", |pool| async move {
+            let run_id = make_run_running(&pool).await;
+
+            let first =
+                persist_execution_loop_safety_halt(&pool, run_id, ts(2_000), "DeadmanExpired")
+                    .await;
+            assert_eq!(first, SupervisorHaltOutcome::Halted);
+
+            let second = persist_execution_loop_safety_halt(
+                &pool,
+                run_id,
+                ts(2_100),
+                "DeadmanSupervisorFailure",
+            )
+            .await;
+            assert_eq!(second, SupervisorHaltOutcome::AlreadyHalted);
+
+            let run = mqk_db::fetch_run(&pool, run_id).await.expect("fetch_run");
+            assert!(matches!(run.status, mqk_db::RunStatus::Halted));
+            assert_eq!(
+                run.halted_at_utc,
+                Some(ts(2_000)),
+                "an idempotent re-halt must not reset halted_at_utc"
+            );
+        })
+        .await;
+    }
+
+    /// DSF-NEG-1: the load-bearing proof. A stale supervisor decision that
+    /// finally persists AFTER an operator's halt+clear has already
+    /// committed `STOPPED` must be fenced -- zero mutation -- never
+    /// silently rewriting `STOPPED` back to `HALTED`.
+    #[tokio::test]
+    #[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+    async fn dsf_neg1_seam_is_superseded_after_operator_clear_and_makes_zero_mutation() {
+        mqk_db::run_isolated("dsf_neg1", |pool| async move {
+            let run_id = make_run_running(&pool).await;
+
+            // Operator recovery has already halted and cleared this run to
+            // STOPPED by the time the stale supervisor's decision persists.
+            mqk_db::halt_run(&pool, run_id, ts(3_000))
+                .await
+                .expect("operator halt_run");
+            let clear = mqk_db::clear_halted_run_and_reset_stale_claims(&pool, run_id, ts(3_100))
+                .await
+                .expect("operator clear must succeed");
+            assert!(matches!(
+                clear,
+                mqk_db::ClearHaltedRunOutcome::Success { .. }
+            ));
+
+            // The stale supervisor's safety-halt decision -- reached before
+            // the operator's recovery, persisting after it -- must be
+            // fenced, not silently win.
+            let outcome = persist_execution_loop_safety_halt(
+                &pool,
+                run_id,
+                ts(3_200),
+                "ExecutionLoopTickFailure",
+            )
+            .await;
+            assert_eq!(
+                outcome,
+                SupervisorHaltOutcome::Superseded {
+                    actual_status: "STOPPED".to_string()
+                }
+            );
+
+            let run = mqk_db::fetch_run(&pool, run_id).await.expect("fetch_run");
+            assert!(
+                matches!(run.status, mqk_db::RunStatus::Stopped),
+                "DSF-NEG-1: a stale supervisor decision must never turn STOPPED back into \
+                 HALTED, got status={:?}",
+                run.status
+            );
+        })
+        .await;
+    }
+
+    /// DSF-NEG-2 (durable half): a stale supervisor decision must not
+    /// clobber a legitimate post-clear re-arm either -- `Superseded` must
+    /// still be returned (zero mutation) even when the run has moved past
+    /// `STOPPED` to `ARMED`.
+    #[tokio::test]
+    #[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+    async fn dsf_neg2_seam_is_superseded_after_post_clear_re_arm() {
+        mqk_db::run_isolated("dsf_neg2", |pool| async move {
+            let run_id = make_run_running(&pool).await;
+
+            mqk_db::halt_run(&pool, run_id, ts(4_000))
+                .await
+                .expect("operator halt_run");
+            mqk_db::clear_halted_run_and_reset_stale_claims(&pool, run_id, ts(4_100))
+                .await
+                .expect("operator clear must succeed");
+            // Legitimate operator re-arm following the clear.
+            mqk_db::arm_run(&pool, run_id).await.expect("re-arm");
+
+            let outcome = persist_execution_loop_safety_halt(
+                &pool,
+                run_id,
+                ts(4_200),
+                "ExecutionLoopTickFailure",
+            )
+            .await;
+            assert_eq!(
+                outcome,
+                SupervisorHaltOutcome::Superseded {
+                    actual_status: "ARMED".to_string()
+                }
+            );
+
+            let run = mqk_db::fetch_run(&pool, run_id).await.expect("fetch_run");
+            assert!(
+                matches!(run.status, mqk_db::RunStatus::Armed),
+                "DSF-NEG-2: a stale supervisor decision must never overwrite a legitimate \
+                 post-clear re-arm, got status={:?}",
+                run.status
+            );
+            assert!(
+                mqk_db::load_arm_state(&pool)
+                    .await
+                    .expect("load_arm_state")
+                    .is_none(),
+                "DSF-NEG-2: zero mutation — sys_arm_state must never have been written by the \
+                 fenced stale decision"
+            );
+        })
+        .await;
     }
 }
