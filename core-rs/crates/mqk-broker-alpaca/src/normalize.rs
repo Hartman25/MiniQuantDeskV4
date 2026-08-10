@@ -121,25 +121,6 @@ fn parse_price(raw: &str) -> Result<i64, NormalizeError> {
         raw: raw.to_string(),
     })
 }
-/// PAPER-SOAK-PARTIAL-FILL-DEDUP-02: soft-parse `order.filled_qty` (the
-/// broker-reported cumulative filled quantity at event time) into
-/// `BrokerEvent::PartialFill::cum_qty_after`.
-///
-/// Deliberately non-failing (`Option`, not `Result`): `cum_qty_after` is a
-/// secondary economic-dedup aid, not a primary economic field like
-/// `delta_qty`/`price_micros`. A malformed or absent value must degrade to
-/// `None` (falls back to event-id-only dedup at the OMS apply layer) rather
-/// than rejecting an otherwise-valid partial-fill event outright.
-///
-/// For the WS lane this always parses (Alpaca's live trade-update payload
-/// always carries `order.filled_qty`). The REST lane
-/// (`AlpacaBrokerAdapter::fetch_events`) deliberately writes an empty string
-/// here for activities whose true point-in-time cumulative cannot be
-/// established unambiguously within one polling page — this function's
-/// `None` on parse failure is what makes that "unknown" signal work.
-fn parse_cum_qty_after(raw: &str) -> Option<i64> {
-    parse_alpaca_whole_share_qty(raw).ok()
-}
 /// Parse an Alpaca side string to Side.
 fn parse_side(s: &str) -> Result<Side, NormalizeError> {
     match s {
@@ -193,7 +174,19 @@ pub fn normalize_trade_update(ev: &AlpacaTradeUpdate) -> Result<BrokerEvent, Nor
         // ------------------------------------------------------------------
         // PartialFill: broker executed part of the order.
         // ev.qty is the quantity filled in THIS event (not cumulative).
-        // ------------------------------------------------------------------
+        //
+        // PAPER-SOAK-ALPACA-FILL-AUTHORITY-FINAL-CLOSURE-02 (Defect #4):
+        // `order.filled_qty` (the broker-native cumulative filled quantity
+        // at event time) is REQUIRED for a production Alpaca partial fill --
+        // it becomes `cum_qty_after`, the cross-lane economic-dedup watermark
+        // (see `OmsOrder::apply_with_watermark`). A prior version of this
+        // parser degraded a missing/malformed/fractional value to `None`
+        // ("fall back to event-id-only dedup"). That is unsafe: an
+        // event-id-only-dedup'd partial fill cannot be recognized as a
+        // cross-lane duplicate of an already-applied REST observation with a
+        // different transport identity, risking a real double-apply of
+        // capital. A malformed cumulative is therefore now a normalization
+        // failure for the whole event, not a silent degrade.
         "partial_fill" => {
             let fill_qty_str = ev
                 .qty
@@ -203,6 +196,7 @@ pub fn normalize_trade_update(ev: &AlpacaTradeUpdate) -> Result<BrokerEvent, Nor
                 .price
                 .as_deref()
                 .ok_or(NormalizeError::MissingField("price"))?;
+            let cum_qty_after = parse_qty(&ev.order.filled_qty, "order.filled_qty")?;
             Ok(BrokerEvent::PartialFill {
                 broker_message_id,
                 broker_fill_id: ev.broker_fill_id.clone(),
@@ -213,7 +207,7 @@ pub fn normalize_trade_update(ev: &AlpacaTradeUpdate) -> Result<BrokerEvent, Nor
                 delta_qty: parse_qty(fill_qty_str, "qty")?,
                 price_micros: parse_price(price_str)?,
                 fee_micros: 0,
-                cum_qty_after: parse_cum_qty_after(&ev.order.filled_qty),
+                cum_qty_after: Some(cum_qty_after),
             })
         }
         // ------------------------------------------------------------------
@@ -388,29 +382,20 @@ mod tests {
         }
     }
 
+    // FC-4: a production Alpaca PartialFill must never carry
+    // `cum_qty_after=None` -- a malformed/missing broker-native cumulative
+    // now fails normalization of the WHOLE event, not just the field.
     #[test]
-    fn partial_fill_cum_qty_after_none_when_filled_qty_unparseable() {
+    fn fc4_partial_fill_empty_filled_qty_fails_closed() {
         let mut ord = order("alpaca-uuid-001", "internal-001", "AAPL", "buy", "100");
-        ord.filled_qty = String::new(); // REST "ambiguous" sentinel
+        ord.filled_qty = String::new();
         let u = update("partial_fill", ord, Some("150.50"), Some("10"));
-        let ev = normalize_trade_update(&u).unwrap();
-        assert_eq!(
-            ev.cum_qty_after(),
-            None,
-            "malformed/ambiguous filled_qty must degrade to None, not fail the whole event"
+        let err = normalize_trade_update(&u).unwrap_err();
+        assert!(
+            matches!(err, NormalizeError::InvalidQuantity { field, .. } if field == "order.filled_qty"),
+            "empty order.filled_qty must fail normalization closed, not degrade to \
+             cum_qty_after=None: {err:?}"
         );
-        // delta_qty/price_micros must still be extracted correctly.
-        match ev {
-            BrokerEvent::PartialFill {
-                delta_qty,
-                price_micros,
-                ..
-            } => {
-                assert_eq!(delta_qty, 10);
-                assert_eq!(price_micros, 150_500_000);
-            }
-            other => panic!("expected PartialFill, got {other:?}"),
-        }
     }
 
     #[test]
@@ -448,17 +433,42 @@ mod tests {
     }
 
     #[test]
-    fn partial_fill_cum_qty_after_fails_closed_on_fractional_filled_qty() {
-        // Regression guard: a fractional order.filled_qty must degrade to
-        // None (fail-closed), never round to a plausible-looking whole share.
+    fn fc4_partial_fill_fractional_filled_qty_fails_closed() {
+        // Regression guard: a fractional order.filled_qty must fail
+        // normalization closed, never round to a plausible-looking whole
+        // share nor degrade to cum_qty_after=None.
         let mut ord = order("alpaca-uuid-001", "internal-001", "AAPL", "buy", "100");
         ord.filled_qty = "30.5".to_string();
+        let u = update("partial_fill", ord, Some("150.50"), Some("10"));
+        let err = normalize_trade_update(&u).unwrap_err();
+        assert!(
+            matches!(err, NormalizeError::InvalidQuantity { field, .. } if field == "order.filled_qty"),
+            "fractional order.filled_qty must fail normalization closed: {err:?}"
+        );
+    }
+
+    #[test]
+    fn fc4_partial_fill_nonnumeric_filled_qty_fails_closed() {
+        let mut ord = order("alpaca-uuid-001", "internal-001", "AAPL", "buy", "100");
+        ord.filled_qty = "abc".to_string();
+        let u = update("partial_fill", ord, Some("150.50"), Some("10"));
+        let err = normalize_trade_update(&u).unwrap_err();
+        assert!(
+            matches!(err, NormalizeError::InvalidQuantity { field, .. } if field == "order.filled_qty"),
+            "non-numeric order.filled_qty must fail normalization closed: {err:?}"
+        );
+    }
+
+    #[test]
+    fn fc4_partial_fill_valid_filled_qty_produces_some_cum_qty_after() {
+        let mut ord = order("alpaca-uuid-001", "internal-001", "AAPL", "buy", "100");
+        ord.filled_qty = "10".to_string();
         let u = update("partial_fill", ord, Some("150.50"), Some("10"));
         let ev = normalize_trade_update(&u).unwrap();
         assert_eq!(
             ev.cum_qty_after(),
-            None,
-            "fractional filled_qty must degrade to None, not round to 30 or 31"
+            Some(10),
+            "no valid Alpaca PartialFill may carry cum_qty_after=None"
         );
     }
 

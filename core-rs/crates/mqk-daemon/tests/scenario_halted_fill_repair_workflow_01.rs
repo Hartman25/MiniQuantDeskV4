@@ -184,17 +184,26 @@ async fn seed_sent_outbox_and_broker_map(
     .to_string();
     let now = chrono::Utc::now();
 
+    // PAPER-SOAK-ALPACA-FILL-AUTHORITY-FINAL-CLOSURE-02: the canonical
+    // durable replay seam (`recover_oms_and_portfolio`) now derives OMS
+    // order context from this row's `order_json` (`symbol`/`qty`/`side` --
+    // see `outbox_json_symbol`/`outbox_json_qty`/`outbox_json_side`). A
+    // fill referencing an internal_order_id with no such context fails
+    // closed as `UNKNOWN_ORDER_FILL`. `order_json` must therefore carry a
+    // realistic order matching `make_fill_activity`'s NVDA/qty=5/buy fill.
     sqlx::query(
         r#"
         insert into oms_outbox (run_id, idempotency_key, order_json, status,
                                 created_at_utc, sent_at_utc)
         values ($1, $2, $3, 'SENT', $4, $4)
-        on conflict (idempotency_key) do nothing
+        on conflict (idempotency_key) do update
+            set order_json = excluded.order_json,
+                status      = excluded.status
         "#,
     )
     .bind(run_id)
     .bind(&internal_id)
-    .bind(serde_json::json!({"source": "halted-fill-repair-workflow-01-test"}))
+    .bind(serde_json::json!({"symbol": "NVDA", "qty": 5, "side": "buy"}))
     .bind(now)
     .execute(pool)
     .await

@@ -365,3 +365,189 @@ mod normalize_broker_positions_tests {
         assert!(blockers.is_empty());
     }
 }
+
+// ---------------------------------------------------------------------------
+// PAPER-SOAK-ALPACA-FILL-AUTHORITY-FINAL-CLOSURE-02 (Defect #3): FC-3C.
+//
+// `replay_paper_portfolio_accounting` already sources its economic truth
+// from `super::snapshot::recover_oms_and_portfolio` directly (see the
+// `Ok((_, _, portfolio)) = super::snapshot::recover_oms_and_portfolio(...)`
+// call above) -- it was never a second, independent durable-replay
+// implementation. This proves that wiring holds and stays a regression
+// guard against it ever being decoupled: the SAME durable evidence must
+// produce identical cash/realized-P&L truth from both call sites.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod fc3c_canonical_replay_parity_tests {
+    use super::replay_paper_portfolio_accounting;
+    use chrono::{TimeZone, Utc};
+    use mqk_execution::{BrokerEvent, Side};
+    use uuid::Uuid;
+
+    fn fixed_run_id(seed: &str) -> Uuid {
+        Uuid::new_v5(
+            &Uuid::NAMESPACE_DNS,
+            format!("test.fc3c-canonical-replay-parity.v1|{seed}").as_bytes(),
+        )
+    }
+
+    async fn fixture_run(pool: &sqlx::PgPool, run_id: Uuid) {
+        mqk_db::insert_run(
+            pool,
+            &mqk_db::NewRun {
+                run_id,
+                engine_id: "test-fc3c-canonical-replay-parity".to_string(),
+                mode: "PAPER".to_string(),
+                started_at_utc: Utc.with_ymd_and_hms(2099, 4, 1, 12, 0, 0).unwrap(),
+                git_hash: "test".to_string(),
+                config_hash: "test".to_string(),
+                config_json: serde_json::json!({}),
+                host_fingerprint: "test".to_string(),
+            },
+        )
+        .await
+        .expect("fixture run insert should succeed");
+    }
+
+    async fn fixture_order(pool: &sqlx::PgPool, run_id: Uuid, order_id: &str, qty: i64) {
+        mqk_db::outbox_enqueue(
+            pool,
+            run_id,
+            order_id,
+            serde_json::json!({"symbol": "AAPL", "qty": qty, "side": "buy"}),
+        )
+        .await
+        .expect("outbox_enqueue should succeed");
+        sqlx::query("update oms_outbox set status = 'SENT' where idempotency_key = $1")
+            .bind(order_id)
+            .execute(pool)
+            .await
+            .expect("mark outbox SENT should succeed");
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn fixture_applied_event(
+        pool: &sqlx::PgPool,
+        run_id: Uuid,
+        broker_message_id: &str,
+        internal_order_id: &str,
+        event_kind: &str,
+        event: &BrokerEvent,
+        at: chrono::DateTime<Utc>,
+    ) {
+        let json = serde_json::to_value(event).expect("serialize BrokerEvent");
+        mqk_db::inbox_insert_deduped_with_identity(
+            pool,
+            run_id,
+            broker_message_id,
+            None,
+            internal_order_id,
+            "broker-order-1",
+            event_kind,
+            &json,
+            0,
+            at,
+        )
+        .await
+        .expect("inbox insert should succeed");
+        mqk_db::inbox_mark_applied(pool, run_id, broker_message_id, at)
+            .await
+            .expect("inbox mark applied should succeed");
+    }
+
+    /// FC-3C: for the SAME run_id/durable evidence, `recover_oms_and_portfolio`
+    /// (called directly) and `replay_paper_portfolio_accounting` (which calls
+    /// it internally) must derive the SAME economic cash/realized-P&L truth.
+    /// Uses the same terminal-overfill scenario as FC-1/FC-3B (order total=3,
+    /// partial 2@$100, terminal raw delta=2@$102 -> true remainder 1) so this
+    /// also re-proves Defect #1's fix is visible through this second consumer.
+    #[tokio::test]
+    async fn fc3c_recover_and_accounting_replay_agree_on_cash_and_pnl() {
+        mqk_db::run_isolated("fc3c_canonical_replay_parity", |pool| async move {
+            let run_id = fixed_run_id("fc3c_canonical_replay_parity");
+            let order_id = "order-fc3c";
+            fixture_run(&pool, run_id).await;
+            fixture_order(&pool, run_id, order_id, 3).await;
+
+            let at = Utc.with_ymd_and_hms(2099, 4, 1, 13, 0, 0).unwrap();
+            let partial = BrokerEvent::PartialFill {
+                broker_message_id: format!("alpaca:{order_id}:partial_fill:ws-2"),
+                broker_fill_id: None,
+                internal_order_id: order_id.to_string(),
+                broker_order_id: Some("broker-order-1".to_string()),
+                symbol: "AAPL".to_string(),
+                side: Side::Buy,
+                delta_qty: 2,
+                price_micros: 100_000_000,
+                fee_micros: 0,
+                cum_qty_after: Some(2),
+            };
+            fixture_applied_event(
+                &pool,
+                run_id,
+                "alpaca:order-fc3c:partial_fill:ws-2",
+                order_id,
+                "partial_fill",
+                &partial,
+                at,
+            )
+            .await;
+
+            let terminal = BrokerEvent::Fill {
+                broker_message_id: format!("alpaca:{order_id}:fill:term"),
+                broker_fill_id: None,
+                internal_order_id: order_id.to_string(),
+                broker_order_id: Some("broker-order-1".to_string()),
+                symbol: "AAPL".to_string(),
+                side: Side::Buy,
+                delta_qty: 2,
+                price_micros: 102_000_000,
+                fee_micros: 0,
+            };
+            fixture_applied_event(
+                &pool,
+                run_id,
+                "alpaca:order-fc3c:fill:term",
+                order_id,
+                "fill",
+                &terminal,
+                at,
+            )
+            .await;
+
+            // Consumer 1: recover_oms_and_portfolio, called directly.
+            let (_, _, direct) =
+                super::super::snapshot::recover_oms_and_portfolio(&pool, run_id, 0)
+                    .await
+                    .expect("direct recover_oms_and_portfolio should succeed");
+
+            // Consumer 2: replay_paper_portfolio_accounting, which calls
+            // recover_oms_and_portfolio internally.
+            let via_accounting = replay_paper_portfolio_accounting(&pool, run_id, &[])
+                .await
+                .expect("replay_paper_portfolio_accounting should succeed");
+
+            assert_eq!(
+                direct.cash_micros, via_accounting.cash_micros,
+                "FC-3C: recover_oms_and_portfolio and replay_paper_portfolio_accounting must \
+                 agree on cash_micros for identical durable evidence"
+            );
+            assert_eq!(
+                direct.realized_pnl_micros, via_accounting.realized_pnl_micros,
+                "FC-3C: recover_oms_and_portfolio and replay_paper_portfolio_accounting must \
+                 agree on realized_pnl_micros for identical durable evidence"
+            );
+            // Independent proof this scenario is the FC-1/FC-3B terminal-
+            // overfill case: cash must reflect qty=3 (2@$100 + effective
+            // 1@$102), not qty=4.
+            let expected_cash = -(2 * 100_000_000 + 102_000_000);
+            assert_eq!(
+                direct.cash_micros, expected_cash,
+                "FC-3C: cash must reflect the effective 1-share terminal fill, not the raw \
+                 2-share delta"
+            );
+        })
+        .await;
+    }
+}

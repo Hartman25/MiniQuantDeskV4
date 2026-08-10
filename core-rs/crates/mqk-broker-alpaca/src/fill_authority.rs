@@ -10,10 +10,14 @@
 //! third) time. `fetch_events` (normal REST polling) still needs
 //! `activity_to_trade_update` + `normalize_trade_update` because it must also
 //! emit non-fill lifecycle events (Ack/Cancel/etc.) from the same activity
-//! stream, but its `parse_qty`/`parse_cum_qty_after` delegate to the same
-//! canonical [`crate::normalize::parse_alpaca_whole_share_qty`] parser this
-//! module uses — so quantity/cum_qty parsing is shared even though the
-//! surrounding control flow differs.
+//! stream, but its internal `parse_qty` and partial-fill `cum_qty_after`
+//! extraction both delegate to the same canonical
+//! [`crate::normalize::parse_alpaca_whole_share_qty`] parser this module
+//! uses — so quantity/cum_qty parsing is shared even though the surrounding
+//! control flow differs, and (PAPER-SOAK-ALPACA-FILL-AUTHORITY-FINAL-CLOSURE-02)
+//! both paths now require a parseable cumulative for a production Alpaca
+//! partial fill, failing the event/page closed rather than degrading to an
+//! unproven `cum_qty_after=None`.
 use crate::classify_fill_subtype;
 use crate::normalize::parse_alpaca_whole_share_qty;
 use crate::types::AlpacaOrderActivity;

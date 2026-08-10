@@ -225,14 +225,15 @@ pub(super) fn apply_fill_step(
                 return Ok(None);
             }
             // For fill events, build the portfolio Fill from the OMS effective
-            // delta (order.filled_qty - pre_qty) rather than event.delta_qty.
-            // When Alpaca sends a terminal `fill` event with cumulative/overfill
+            // delta (order.filled_qty - pre_qty) rather than event.delta_qty,
+            // via the canonical shared semantic `effective_portfolio_fill`
+            // (also used by mqk-daemon's durable restart/replay path). When
+            // Alpaca sends a terminal `fill` event with cumulative/overfill
             // qty (observed with Alpaca paper WS), the OMS caps filled_qty at
             // total_qty.  Using the OMS delta prevents over-crediting the
             // portfolio (e.g. effective delta=1 vs broker-reported delta_qty=2).
             if is_fill {
-                let effective_delta = order.filled_qty - pre_qty;
-                return Ok(build_effective_fill(event, effective_delta));
+                return Ok(effective_portfolio_fill(event, pre_qty, order.filled_qty));
             }
         }
         None if is_fill => {
@@ -254,11 +255,37 @@ pub(super) fn apply_fill_step(
     Ok(broker_event_to_fill(event))
 }
 
+/// Compute the portfolio-effective fill for a broker fill event, given the
+/// OMS `filled_qty` immediately before (`pre_qty`) and after (`post_qty`)
+/// applying the event's `OmsEvent` transition.
+///
+/// PAPER-SOAK-ALPACA-FILL-AUTHORITY-FINAL-CLOSURE-02: this is the ONE
+/// canonical effective-fill semantic. It is shared by live apply
+/// (`apply_fill_step`, this module) and durable restart/replay
+/// (`mqk-daemon`'s `recover_oms_and_portfolio`, via this re-exported
+/// function) so that a restart can never diverge from live economic truth.
+/// Portfolio fill quantity must always come from the OMS's actual economic
+/// advance (`post_qty - pre_qty`), never from the broker's raw `delta_qty` --
+/// Alpaca's paper WS terminal-fill quirk can report a `delta_qty` that
+/// overshoots what the OMS state machine actually advances (it caps
+/// `filled_qty` at `total_qty`), so using the raw delta would silently
+/// over-credit the portfolio relative to OMS truth once that cap applies.
+/// The event's own symbol/side/price/fee are never replaced by this
+/// function -- only the quantity is re-derived from the OMS advance.
+///
+/// Exposed with narrow, fully-`pub` visibility (re-exported at
+/// `mqk_runtime::orchestrator::effective_portfolio_fill`) specifically so
+/// `mqk-daemon` can call it; everything else in this module stays
+/// `pub(super)`.
+pub fn effective_portfolio_fill(event: &BrokerEvent, pre_qty: i64, post_qty: i64) -> Option<Fill> {
+    build_effective_fill(event, post_qty - pre_qty)
+}
+
 /// Build a portfolio `Fill` from a broker fill event, using `effective_delta`
 /// instead of `event.delta_qty`.
 ///
-/// Called by `apply_fill_step` when the OMS effective delta differs from the
-/// broker-reported delta (e.g. Alpaca paper WS terminal fill overfill cap).
+/// Called by [`effective_portfolio_fill`] -- see that function for why the
+/// effective (OMS-derived) delta is used instead of the broker's raw delta.
 fn build_effective_fill(event: &BrokerEvent, effective_delta: i64) -> Option<Fill> {
     if effective_delta <= 0 {
         return None;

@@ -4,7 +4,7 @@
 //! reconcile_order_status_from_schema,
 //! reconcile_local_snapshot_from_runtime_with_sides,
 //! oms_execution_status_to_reconcile, outbox_json_symbol, outbox_json_qty,
-//! outbox_json_side, broker_event_to_oms_event, broker_event_to_portfolio_fill,
+//! outbox_json_side, broker_event_to_oms_event, recover_oms_and_portfolio,
 //! oms_state_to_broker_status, synthesize_paper_broker_snapshot,
 //! synthesize_broker_snapshot_from_execution, reconcile_broker_snapshot_from_schema,
 //! reconcile_unknown_status, reconcile_last_run_at, reconcile_counts,
@@ -20,6 +20,7 @@ use mqk_execution::{
 };
 use mqk_portfolio::{apply_entry, Fill, LedgerEntry, PortfolioState, Side};
 use mqk_reconcile::{ReconcileDiff, SnapshotFreshness, SnapshotWatermark};
+use mqk_runtime::orchestrator::effective_portfolio_fill;
 
 use super::initial_reconcile_status;
 use super::types::ReconcileStatusSnapshot;
@@ -180,40 +181,6 @@ pub(crate) fn broker_event_to_oms_event(event: &BrokerEvent) -> OmsEvent {
         },
         BrokerEvent::ReplaceReject { .. } => OmsEvent::ReplaceReject,
         BrokerEvent::Reject { .. } => OmsEvent::Reject,
-    }
-}
-
-pub(crate) fn broker_event_to_portfolio_fill(event: &BrokerEvent) -> Option<mqk_portfolio::Fill> {
-    match event {
-        BrokerEvent::Fill {
-            symbol,
-            side,
-            delta_qty,
-            price_micros,
-            fee_micros,
-            ..
-        }
-        | BrokerEvent::PartialFill {
-            symbol,
-            side,
-            delta_qty,
-            price_micros,
-            fee_micros,
-            ..
-        } => {
-            let portfolio_side = match side {
-                mqk_execution::types::Side::Buy => mqk_portfolio::Side::Buy,
-                mqk_execution::types::Side::Sell => mqk_portfolio::Side::Sell,
-            };
-            Some(mqk_portfolio::Fill {
-                symbol: symbol.clone(),
-                side: portfolio_side,
-                qty: *delta_qty,
-                price_micros: *price_micros,
-                fee_micros: *fee_micros,
-            })
-        }
-        _ => None,
     }
 }
 
@@ -600,16 +567,55 @@ pub(crate) async fn recover_oms_and_portfolio(
     let mut portfolio = PortfolioState::new(initial_equity_micros);
 
     for row in &applied {
-        let event: BrokerEvent = match serde_json::from_value(row.message_json.clone()) {
-            Ok(e) => e,
-            Err(_) => continue,
-        };
+        // PAPER-SOAK-ALPACA-FILL-AUTHORITY-FINAL-CLOSURE-02 (Defect #2): an
+        // APPLIED durable row is authoritative restart/accounting evidence.
+        // A row that fails to deserialize must fail the whole replay closed
+        // -- silently dropping it (`continue`) would omit real economic
+        // evidence from authoritative truth without any record that it was
+        // ever skipped.
+        let event: BrokerEvent = serde_json::from_value(row.message_json.clone()).map_err(|e| {
+            super::types::RuntimeLifecycleError::internal(
+                "recover_oms_and_portfolio.malformed_applied_event",
+                format!(
+                    "run_id={run_id} inbox_id={} broker_message_id={}: applied inbox row failed \
+                     to deserialize as BrokerEvent: {e}",
+                    row.inbox_id, row.broker_message_id,
+                ),
+            )
+        })?;
         let internal_id = event.internal_order_id().to_string();
         let is_fill = matches!(
             event,
             BrokerEvent::Fill { .. } | BrokerEvent::PartialFill { .. }
         );
         let oms_event = broker_event_to_oms_event(&event);
+
+        let Some(order) = oms_orders.get_mut(&internal_id) else {
+            if is_fill {
+                // PAPER-SOAK-ALPACA-FILL-AUTHORITY-FINAL-CLOSURE-02 (Defect
+                // #2): mirror live apply's Section C invariant
+                // (`apply_fill_step` in mqk-runtime::orchestrator::apply) --
+                // a fill event must never mutate the portfolio without a
+                // proven OMS order context. Durable replay must fail closed
+                // here exactly as the live path does, not silently proceed
+                // to a portfolio mutation with no OMS authority behind it.
+                return Err(super::types::RuntimeLifecycleError::internal(
+                    "recover_oms_and_portfolio.unknown_order_fill",
+                    format!(
+                        "UNKNOWN_ORDER_FILL: run_id={run_id} inbox_id={} broker_message_id={} \
+                         internal_order_id={internal_id} - fill event has no OMS order context \
+                         in durable outbox truth; refusing portfolio mutation (Section C)",
+                        row.inbox_id, row.broker_message_id,
+                    ),
+                ));
+            }
+            // Non-fill event for an order absent from this run's submitted
+            // outbox (e.g. already pruned) carries no portfolio effect --
+            // safe to skip, matching live apply_fill_step's same policy.
+            continue;
+        };
+
+        let pre_qty = order.filled_qty;
         // Mirror the live apply path: use broker_fill_id as the economic
         // event identity when present, fall back to broker_message_id.
         // This ensures WS (no fill_id, uses msg_id) and REST (fill_id
@@ -619,51 +625,51 @@ pub(crate) async fn recover_oms_and_portfolio(
             .broker_fill_id()
             .map(str::to_string)
             .unwrap_or_else(|| row.broker_message_id.clone());
-        let oms_noop = if let Some(order) = oms_orders.get_mut(&internal_id) {
-            let pre_qty = order.filled_qty;
-            // PAPER-SOAK-ALPACA-FILL-ECONOMIC-AUTHORITY-CLOSURE-01: durable
-            // replay must use the SAME duplicate-protection semantics as the
-            // live apply path (`apply_fill_step` in
-            // mqk-runtime::orchestrator::apply). A plain `apply` here only
-            // dedups on `economic_event_id`, which differs across transport
-            // lanes for the SAME physical execution (WS vs REST) — durable
-            // replay of a cross-lane duplicate could advance filled_qty
-            // twice for one execution. `apply_with_watermark` additionally
-            // treats the event's own `cum_qty_after` (broker-native,
-            // lane-independent) as economic identity, so a cross-lane
-            // duplicate is recognized as already-applied even under a
-            // never-before-seen `economic_event_id`.
-            //
-            // The Result is now propagated instead of discarded: durable
-            // replay is authoritative accounting/restart truth and must fail
-            // closed on an illegal OMS transition (e.g. a fill after a
-            // confirmed cancel/reject) rather than silently dropping it and
-            // fabricating a portfolio that never legally existed.
-            order
-                .apply_with_watermark(&oms_event, Some(&economic_event_id), event.cum_qty_after())
-                .map_err(|e| {
-                    super::types::RuntimeLifecycleError::internal(
-                        "recover_oms_and_portfolio.illegal_transition",
-                        format!(
-                            "run_id={run_id} inbox_id={} broker_message_id={} \
-                             internal_order_id={internal_id} event={oms_event:?}: {e}",
-                            row.inbox_id, row.broker_message_id,
-                        ),
-                    )
-                })?;
-            // Detect duplicate fills: if filled_qty did not advance, the OMS
-            // treated this as a no-op (duplicate event_id, cross-lane
-            // duplicate via watermark, or terminal-state guard).  Skip the
-            // portfolio mutation to prevent double-counting.
-            is_fill && order.filled_qty == pre_qty
-        } else {
-            false
-        };
-        if oms_noop {
-            continue;
-        }
-        if let Some(fill) = broker_event_to_portfolio_fill(&event) {
-            apply_entry(&mut portfolio, LedgerEntry::Fill(fill));
+        // PAPER-SOAK-ALPACA-FILL-ECONOMIC-AUTHORITY-CLOSURE-01: durable
+        // replay must use the SAME duplicate-protection semantics as the
+        // live apply path (`apply_fill_step` in
+        // mqk-runtime::orchestrator::apply). A plain `apply` here only
+        // dedups on `economic_event_id`, which differs across transport
+        // lanes for the SAME physical execution (WS vs REST) — durable
+        // replay of a cross-lane duplicate could advance filled_qty
+        // twice for one execution. `apply_with_watermark` additionally
+        // treats the event's own `cum_qty_after` (broker-native,
+        // lane-independent) as economic identity, so a cross-lane
+        // duplicate is recognized as already-applied even under a
+        // never-before-seen `economic_event_id`.
+        //
+        // The Result is propagated instead of discarded: durable replay is
+        // authoritative accounting/restart truth and must fail closed on an
+        // illegal OMS transition (e.g. a fill after a confirmed
+        // cancel/reject) rather than silently dropping it and fabricating a
+        // portfolio that never legally existed.
+        order
+            .apply_with_watermark(&oms_event, Some(&economic_event_id), event.cum_qty_after())
+            .map_err(|e| {
+                super::types::RuntimeLifecycleError::internal(
+                    "recover_oms_and_portfolio.illegal_transition",
+                    format!(
+                        "run_id={run_id} inbox_id={} broker_message_id={} \
+                         internal_order_id={internal_id} event={oms_event:?}: {e}",
+                        row.inbox_id, row.broker_message_id,
+                    ),
+                )
+            })?;
+        let post_qty = order.filled_qty;
+
+        // PAPER-SOAK-ALPACA-FILL-AUTHORITY-FINAL-CLOSURE-02 (Defect #1 /
+        // Section 3): use the SAME canonical effective-fill semantic as live
+        // apply (`mqk_runtime::orchestrator::effective_portfolio_fill`),
+        // deriving portfolio fill quantity from the OMS's actual economic
+        // advance (`post_qty - pre_qty`) rather than the event's raw
+        // `delta_qty`. This mirrors live `apply_fill_step` exactly and
+        // subsumes the old no-op check: when `post_qty == pre_qty` (a
+        // duplicate/no-op transition), `effective_portfolio_fill` returns
+        // `None` and no portfolio mutation occurs.
+        if is_fill {
+            if let Some(fill) = effective_portfolio_fill(&event, pre_qty, post_qty) {
+                apply_entry(&mut portfolio, LedgerEntry::Fill(fill));
+            }
         }
     }
 
@@ -1459,8 +1465,8 @@ mod baseline_double_count_fix_tests {
 #[cfg(test)]
 mod baseline_ledger_parity_tests {
     use super::{
-        broker_event_to_oms_event, broker_event_to_portfolio_fill, seed_portfolio_from_baseline,
-        BrokerEvent, OmsEvent, PortfolioState,
+        broker_event_to_oms_event, seed_portfolio_from_baseline, BrokerEvent, OmsEvent,
+        PortfolioState,
     };
     use mqk_reconcile::LocalSnapshot;
 
@@ -1591,19 +1597,19 @@ mod baseline_ledger_parity_tests {
     // BLP05: production-style ACK after baseline seeding does not halt /
     // invariant-fail.
     //
-    // Phase 3b applies inbox events to `portfolio` only when
-    // `broker_event_to_portfolio_fill` returns `Some(..)` (Fill/PartialFill).
-    // A non-fill `Ack` event maps to `OmsEvent::Ack` (OMS-only — no portfolio
-    // mutation), and `broker_event_to_portfolio_fill` returns `None`, so
-    // `portfolio` is byte-for-byte unchanged by the ACK. The production
-    // failure was therefore entirely a property of the seeded portfolio
-    // state itself: `check_capital_invariants` ran (as it does after every
-    // inbox-apply pass) against a `portfolio` whose `positions` already
-    // diverged from `recompute_from_ledger(&portfolio.ledger)` *before* the
-    // ACK arrived. Proving the seeded portfolio is invariant-safe — and that
-    // the ACK is a portfolio no-op — is sufficient to prove the production
-    // halt sequence (seed baseline -> broker ACK -> Phase 3b invariant check)
-    // no longer fires.
+    // Both `recover_oms_and_portfolio` (durable replay) and live
+    // `apply_fill_step` only ever mutate the portfolio for `Fill`/
+    // `PartialFill` events. A non-fill `Ack` event maps to `OmsEvent::Ack`
+    // (OMS-only — no portfolio mutation), so `portfolio` is byte-for-byte
+    // unchanged by the ACK. The production failure was therefore entirely a
+    // property of the seeded portfolio state itself: `check_capital_invariants`
+    // ran (as it does after every inbox-apply pass) against a `portfolio`
+    // whose `positions` already diverged from
+    // `recompute_from_ledger(&portfolio.ledger)` *before* the ACK arrived.
+    // Proving the seeded portfolio is invariant-safe — and that the ACK is a
+    // portfolio no-op — is sufficient to prove the production halt sequence
+    // (seed baseline -> broker ACK -> Phase 3b invariant check) no longer
+    // fires.
     #[test]
     fn blp05_seeded_baseline_survives_non_fill_ack_invariant_check() {
         let mut pf = flat_portfolio();
@@ -1623,10 +1629,15 @@ mod baseline_ledger_parity_tests {
 
         // ACK maps to an OMS-only event...
         assert_eq!(broker_event_to_oms_event(&ack), OmsEvent::Ack);
-        // ...and produces no portfolio fill, so `pf` is untouched by Phase 3b
-        // for this event.
+        // ...and is not a fill-class event, so neither
+        // `recover_oms_and_portfolio` nor live apply can ever extract a
+        // portfolio fill from it — `pf` is untouched by Phase 3b for this
+        // event.
         assert!(
-            broker_event_to_portfolio_fill(&ack).is_none(),
+            !matches!(
+                ack,
+                BrokerEvent::Fill { .. } | BrokerEvent::PartialFill { .. }
+            ),
             "a non-fill Ack must not produce a portfolio mutation"
         );
 
@@ -1663,9 +1674,12 @@ mod baseline_ledger_parity_tests {
 // ---------------------------------------------------------------------------
 #[cfg(test)]
 mod fill_economic_authority_closure_tests {
-    use super::recover_oms_and_portfolio;
+    use super::{effective_portfolio_fill, recover_oms_and_portfolio, PortfolioState};
     use chrono::{TimeZone, Utc};
-    use mqk_execution::{BrokerEvent, Side};
+    use mqk_execution::{
+        oms::state_machine::{OmsEvent, OmsOrder},
+        BrokerEvent, Side,
+    };
     use uuid::Uuid;
 
     fn fixed_run_id(seed: &str) -> Uuid {
@@ -2115,6 +2129,946 @@ mod fill_economic_authority_closure_tests {
                 msg.contains(order_id),
                 "error must carry the internal_order_id: {msg}"
             );
+        })
+        .await;
+    }
+
+    // -----------------------------------------------------------------------
+    // PAPER-SOAK-ALPACA-FILL-AUTHORITY-FINAL-CLOSURE-02
+    //
+    // FC-1: terminal effective-delta replay parity (Defect #1).
+    // FC-2A/FC-2B: fail-closed on malformed/unknown-order durable evidence
+    // (Defect #2).
+    // Section 8: direct live-vs-durable parity proof.
+    // Section 9 (D01-D06): cross-lane durable parity matrix.
+    // Section 10 (Q01-Q06): durable data-quality matrix.
+    // -----------------------------------------------------------------------
+
+    fn terminal_fill(
+        order_id: &str,
+        broker_message_id: &str,
+        delta_qty: i64,
+        price_micros: i64,
+    ) -> BrokerEvent {
+        BrokerEvent::Fill {
+            broker_message_id: broker_message_id.to_string(),
+            broker_fill_id: None,
+            internal_order_id: order_id.to_string(),
+            broker_order_id: Some("broker-order-1".to_string()),
+            symbol: "AAPL".to_string(),
+            side: Side::Buy,
+            delta_qty,
+            price_micros,
+            fee_micros: 0,
+        }
+    }
+
+    fn ledger_fills(portfolio: &PortfolioState) -> Vec<(i64, i64)> {
+        portfolio
+            .ledger
+            .iter()
+            .filter_map(|e| match e {
+                mqk_portfolio::LedgerEntry::Fill(f) => Some((f.qty, f.price_micros)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// FC-1: order total=3. Partial 2@$100 (cum=2), then a terminal `Fill`
+    /// whose RAW `delta_qty=2` overstates the true 1-share remainder
+    /// (Alpaca's observed paper-WS terminal-fill quirk). Before this patch,
+    /// durable replay applied `broker_event_to_portfolio_fill(&event)`,
+    /// which reads the event's raw `delta_qty` directly -- producing
+    /// portfolio qty=4 (2+2) for a 3-share order, diverging from OMS truth
+    /// (filled_qty capped at 3) and from live `apply_fill_step`, which uses
+    /// the OMS-derived effective delta (1, not 2) for the terminal event.
+    /// After this patch, durable replay uses the SAME
+    /// `effective_portfolio_fill` semantic live apply uses, so it must
+    /// produce qty=3, not 4.
+    #[tokio::test]
+    async fn fc1_terminal_overfill_effective_delta_caps_at_true_remainder() {
+        mqk_db::run_isolated("fc1_terminal_overfill", |pool| async move {
+            let run_id = fixed_run_id("fc1_terminal_overfill");
+            let order_id = "order-fc1";
+            fixture_run(&pool, run_id).await;
+            fixture_order(&pool, run_id, order_id, "AAPL", 3, "buy").await;
+
+            let at = Utc.with_ymd_and_hms(2099, 4, 1, 13, 0, 0).unwrap();
+            let partial = ws_partial(order_id, 2, 100_000_000, 2);
+            fixture_applied_event(
+                &pool,
+                run_id,
+                partial.broker_message_id(),
+                None,
+                order_id,
+                "broker-order-1",
+                "partial_fill",
+                &partial,
+                at,
+            )
+            .await;
+            let terminal = terminal_fill(
+                order_id,
+                &format!("alpaca:{order_id}:fill:term"),
+                2,
+                102_000_000,
+            );
+            fixture_applied_event(
+                &pool,
+                run_id,
+                terminal.broker_message_id(),
+                None,
+                order_id,
+                "broker-order-1",
+                "fill",
+                &terminal,
+                at,
+            )
+            .await;
+
+            let (oms_orders, _, portfolio) =
+                recover_oms_and_portfolio(&pool, run_id, 100_000_000_000)
+                    .await
+                    .expect("recover_oms_and_portfolio should succeed");
+
+            let qty = portfolio
+                .positions
+                .get("AAPL")
+                .map(|p| p.qty_signed())
+                .unwrap_or(0);
+            assert_eq!(
+                qty, 3,
+                "FC-1: 2@$100 + true-remainder 1@$102 must total qty=3, not qty=4 from the \
+                 raw terminal delta_qty=2"
+            );
+            let expected_cash = 100_000_000_000 - (2 * 100_000_000 + 102_000_000);
+            assert_eq!(
+                portfolio.cash_micros, expected_cash,
+                "FC-1: cash must reflect the effective 1-share terminal fill at its OWN \
+                 price ($102), not the raw 2-share delta"
+            );
+            assert_eq!(
+                ledger_fills(&portfolio),
+                vec![(2, 100_000_000), (1, 102_000_000)],
+                "FC-1: ledger fill quantities/prices must be exactly [2@$100, 1@$102]"
+            );
+            assert!(
+                !oms_orders.contains_key(order_id),
+                "FC-1: the order reached OMS Filled (terminal) and must be pruned from the \
+                 returned map, confirming filled_qty capped at total_qty=3"
+            );
+        })
+        .await;
+    }
+
+    /// FC-2A: an APPLIED durable row whose `message_json` does not
+    /// deserialize as `BrokerEvent` must fail the whole replay closed, with
+    /// the error carrying run_id/inbox_id/broker_message_id and
+    /// deserialization context -- never silently `continue`.
+    #[tokio::test]
+    async fn fc2a_malformed_applied_row_fails_closed() {
+        mqk_db::run_isolated("fc2a_malformed_applied_row", |pool| async move {
+            let run_id = fixed_run_id("fc2a_malformed_applied_row");
+            let order_id = "order-fc2a";
+            fixture_run(&pool, run_id).await;
+            fixture_order(&pool, run_id, order_id, "AAPL", 10, "buy").await;
+
+            let at = Utc.with_ymd_and_hms(2099, 4, 1, 13, 0, 0).unwrap();
+            mqk_db::inbox_insert_deduped_with_identity(
+                &pool,
+                run_id,
+                "fc2a-malformed-msg",
+                None,
+                order_id,
+                "broker-order-1",
+                "fill",
+                &serde_json::json!({"not_a_broker_event": true}),
+                0,
+                at,
+            )
+            .await
+            .expect("insert malformed row");
+            mqk_db::inbox_mark_applied(&pool, run_id, "fc2a-malformed-msg", at)
+                .await
+                .expect("mark applied");
+
+            let result = recover_oms_and_portfolio(&pool, run_id, 100_000_000_000).await;
+            let err = result.expect_err(
+                "FC-2A: a malformed applied durable row must fail the whole replay closed",
+            );
+            let msg = format!("{err}");
+            assert!(msg.contains("run_id="), "error must carry run_id: {msg}");
+            assert!(
+                msg.contains("inbox_id="),
+                "error must carry inbox_id: {msg}"
+            );
+            assert!(
+                msg.contains("fc2a-malformed-msg"),
+                "error must carry the offending broker_message_id: {msg}"
+            );
+            assert!(
+                msg.to_lowercase().contains("deserial"),
+                "error must carry deserialization error context: {msg}"
+            );
+        })
+        .await;
+    }
+
+    /// FC-2B: an APPLIED fill event whose `internal_order_id` has no
+    /// corresponding submitted/outbox OMS order must fail the whole replay
+    /// closed as `UNKNOWN_ORDER_FILL` -- mirroring live `apply_fill_step`'s
+    /// Section C invariant. Since the function returns `Err`, no partial
+    /// portfolio is ever returned to the caller: the portfolio cannot be
+    /// mutated by an economically-unauthorized fill.
+    #[tokio::test]
+    async fn fc2b_unknown_order_fill_fails_closed() {
+        mqk_db::run_isolated("fc2b_unknown_order_fill", |pool| async move {
+            let run_id = fixed_run_id("fc2b_unknown_order_fill");
+            // Deliberately no fixture_order() call: no outbox/OMS context
+            // exists for "order-fc2b-unknown".
+            fixture_run(&pool, run_id).await;
+
+            let at = Utc.with_ymd_and_hms(2099, 4, 1, 13, 0, 0).unwrap();
+            let fill = terminal_fill("order-fc2b-unknown", "fc2b-fill-1", 10, 100_000_000);
+            fixture_applied_event(
+                &pool,
+                run_id,
+                "fc2b-fill-1",
+                None,
+                "order-fc2b-unknown",
+                "broker-order-1",
+                "fill",
+                &fill,
+                at,
+            )
+            .await;
+
+            let result = recover_oms_and_portfolio(&pool, run_id, 100_000_000_000).await;
+            let err = result.expect_err(
+                "FC-2B: a fill referencing an order absent from outbox truth must fail closed, \
+                 not mutate the portfolio",
+            );
+            let msg = format!("{err}");
+            assert!(
+                msg.contains("UNKNOWN_ORDER_FILL"),
+                "error must be UNKNOWN_ORDER_FILL: {msg}"
+            );
+            assert!(
+                msg.contains("order-fc2b-unknown"),
+                "error must carry the internal_order_id: {msg}"
+            );
+        })
+        .await;
+    }
+
+    /// Section 8: direct live-vs-durable parity proof. Both sides apply the
+    /// exact SAME `BrokerEvent` sequence (partial 2@$100 then terminal
+    /// raw-delta=2@$102 on a 3-share order) and must produce identical
+    /// results: OMS final filled=3, portfolio qty=3, ledger fills [2, 1] at
+    /// [$100, $102].
+    ///
+    /// The "live" side exercises the REAL shared building blocks live apply
+    /// uses -- `OmsOrder::apply_with_watermark` (the exact OMS transition
+    /// function) and `mqk_runtime::orchestrator::effective_portfolio_fill`
+    /// (the exact, narrowly-exported pure fill-quantity helper
+    /// `apply_fill_step` itself calls) -- rather than a hand-coded
+    /// imitation of live behavior. `apply_fill_step` itself is
+    /// `pub(super)`-scoped to `mqk_runtime::orchestrator` and not reachable
+    /// across the crate boundary; the two primitives it is built from are
+    /// exercised directly and unmodified here.
+    #[tokio::test]
+    async fn section8_live_vs_durable_terminal_overfill_parity() {
+        mqk_db::run_isolated("section8_live_durable_parity", |pool| async move {
+            let run_id = fixed_run_id("section8_live_durable_parity");
+            let order_id = "order-parity";
+
+            let partial = ws_partial(order_id, 2, 100_000_000, 2);
+            let terminal = terminal_fill(
+                order_id,
+                &format!("alpaca:{order_id}:fill:term"),
+                2,
+                102_000_000,
+            );
+
+            // ---- Side A: live apply semantics.
+            let mut live_order = OmsOrder::new(order_id, "AAPL", 3);
+            let mut live_fills: Vec<(i64, i64)> = Vec::new();
+
+            let pre1 = live_order.filled_qty;
+            live_order
+                .apply_with_watermark(
+                    &OmsEvent::PartialFill { delta_qty: 2 },
+                    Some("live-partial"),
+                    Some(2),
+                )
+                .expect("live partial apply must succeed");
+            if let Some(fill) = effective_portfolio_fill(&partial, pre1, live_order.filled_qty) {
+                live_fills.push((fill.qty, fill.price_micros));
+            }
+
+            let pre2 = live_order.filled_qty;
+            live_order
+                .apply_with_watermark(
+                    &OmsEvent::Fill { delta_qty: 2 },
+                    Some("live-terminal"),
+                    None,
+                )
+                .expect("live terminal apply must succeed");
+            if let Some(fill) = effective_portfolio_fill(&terminal, pre2, live_order.filled_qty) {
+                live_fills.push((fill.qty, fill.price_micros));
+            }
+
+            assert_eq!(
+                live_order.filled_qty, 3,
+                "Section 8 LIVE: OMS final filled_qty must be 3"
+            );
+            assert_eq!(
+                live_fills,
+                vec![(2, 100_000_000), (1, 102_000_000)],
+                "Section 8 LIVE: effective fills must be [2@$100, 1@$102]"
+            );
+
+            // ---- Side B: durable replay through the real
+            // `recover_oms_and_portfolio` (the actual production function,
+            // not a reimplementation).
+            let run_id2 = run_id;
+            fixture_run(&pool, run_id2).await;
+            fixture_order(&pool, run_id2, order_id, "AAPL", 3, "buy").await;
+            let at = Utc.with_ymd_and_hms(2099, 4, 1, 13, 0, 0).unwrap();
+            fixture_applied_event(
+                &pool,
+                run_id2,
+                partial.broker_message_id(),
+                None,
+                order_id,
+                "broker-order-1",
+                "partial_fill",
+                &partial,
+                at,
+            )
+            .await;
+            fixture_applied_event(
+                &pool,
+                run_id2,
+                terminal.broker_message_id(),
+                None,
+                order_id,
+                "broker-order-1",
+                "fill",
+                &terminal,
+                at,
+            )
+            .await;
+
+            let (_, _, portfolio) = recover_oms_and_portfolio(&pool, run_id2, 0)
+                .await
+                .expect("durable replay should succeed");
+            let durable_qty = portfolio
+                .positions
+                .get("AAPL")
+                .map(|p| p.qty_signed())
+                .unwrap_or(0);
+            let durable_fills = ledger_fills(&portfolio);
+
+            assert_eq!(
+                durable_qty, 3,
+                "Section 8 DURABLE: portfolio qty must be 3, matching LIVE"
+            );
+            assert_eq!(
+                durable_fills, live_fills,
+                "Section 8: durable fill sequence must exactly match the live fill sequence"
+            );
+        })
+        .await;
+    }
+
+    // -----------------------------------------------------------------------
+    // Section 9: cross-lane durable parity matrix (D01-D06).
+    //
+    // Every case asserts OMS economic progress (via final portfolio qty),
+    // portfolio quantity, cash, AND ledger fill quantities/prices -- never
+    // final quantity alone.
+    // -----------------------------------------------------------------------
+
+    /// D01: WS partial (cum=10) then a REST duplicate of the SAME physical
+    /// execution (different broker_message_id/broker_fill_id, same cum=10).
+    #[tokio::test]
+    async fn d01_ws_partial_then_rest_duplicate() {
+        mqk_db::run_isolated("d01_ws_then_rest_dup", |pool| async move {
+            let run_id = fixed_run_id("d01_ws_then_rest_dup");
+            let order_id = "order-d01";
+            fixture_run(&pool, run_id).await;
+            fixture_order(&pool, run_id, order_id, "AAPL", 10, "buy").await;
+            let at = Utc.with_ymd_and_hms(2099, 4, 1, 13, 0, 0).unwrap();
+
+            let ws = ws_partial(order_id, 10, 100_000_000, 10);
+            fixture_applied_event(
+                &pool,
+                run_id,
+                ws.broker_message_id(),
+                None,
+                order_id,
+                "broker-order-1",
+                "partial_fill",
+                &ws,
+                at,
+            )
+            .await;
+            let rest = rest_partial_duplicate_of(order_id, "d01-activity", 10, 100_000_000, 10);
+            fixture_applied_event(
+                &pool,
+                run_id,
+                rest.broker_message_id(),
+                Some("d01-activity"),
+                order_id,
+                "broker-order-1",
+                "partial_fill",
+                &rest,
+                at,
+            )
+            .await;
+
+            let (_, _, pf) = recover_oms_and_portfolio(&pool, run_id, 0)
+                .await
+                .expect("D01 replay");
+            assert_eq!(
+                pf.positions
+                    .get("AAPL")
+                    .map(|p| p.qty_signed())
+                    .unwrap_or(0),
+                10,
+                "D01: qty must be 10"
+            );
+            assert_eq!(
+                pf.cash_micros,
+                -(10 * 100_000_000),
+                "D01: cash must reflect ONE 10-share fill"
+            );
+            assert_eq!(
+                ledger_fills(&pf),
+                vec![(10, 100_000_000)],
+                "D01: ledger must have exactly one fill entry"
+            );
+        })
+        .await;
+    }
+
+    /// D02: REST partial applied FIRST, WS duplicate of the SAME execution
+    /// SECOND (reversed lane order vs D01) -- result must be identical.
+    #[tokio::test]
+    async fn d02_rest_partial_then_ws_duplicate() {
+        mqk_db::run_isolated("d02_rest_then_ws_dup", |pool| async move {
+            let run_id = fixed_run_id("d02_rest_then_ws_dup");
+            let order_id = "order-d02";
+            fixture_run(&pool, run_id).await;
+            fixture_order(&pool, run_id, order_id, "AAPL", 10, "buy").await;
+            let at = Utc.with_ymd_and_hms(2099, 4, 1, 13, 0, 0).unwrap();
+
+            let rest = rest_partial_duplicate_of(order_id, "d02-activity", 10, 100_000_000, 10);
+            fixture_applied_event(
+                &pool,
+                run_id,
+                rest.broker_message_id(),
+                Some("d02-activity"),
+                order_id,
+                "broker-order-1",
+                "partial_fill",
+                &rest,
+                at,
+            )
+            .await;
+            let ws = ws_partial(order_id, 10, 100_000_000, 10);
+            fixture_applied_event(
+                &pool,
+                run_id,
+                ws.broker_message_id(),
+                None,
+                order_id,
+                "broker-order-1",
+                "partial_fill",
+                &ws,
+                at,
+            )
+            .await;
+
+            let (_, _, pf) = recover_oms_and_portfolio(&pool, run_id, 0)
+                .await
+                .expect("D02 replay");
+            assert_eq!(
+                pf.positions
+                    .get("AAPL")
+                    .map(|p| p.qty_signed())
+                    .unwrap_or(0),
+                10,
+                "D02: qty must be 10"
+            );
+            assert_eq!(
+                pf.cash_micros,
+                -(10 * 100_000_000),
+                "D02: cash must reflect ONE 10-share fill"
+            );
+            assert_eq!(
+                ledger_fills(&pf),
+                vec![(10, 100_000_000)],
+                "D02: ledger must have exactly one fill entry"
+            );
+        })
+        .await;
+    }
+
+    /// D03: partial A (cum=10), partial B (cum=20), then a LATE duplicate of
+    /// A (cum=10) arriving after B -- must no-op; final must be A+B=20.
+    #[tokio::test]
+    async fn d03_late_duplicate_after_newer_partial() {
+        mqk_db::run_isolated("d03_late_dup_after_newer", |pool| async move {
+            let run_id = fixed_run_id("d03_late_dup_after_newer");
+            let order_id = "order-d03";
+            fixture_run(&pool, run_id).await;
+            fixture_order(&pool, run_id, order_id, "AAPL", 20, "buy").await;
+            let at = Utc.with_ymd_and_hms(2099, 4, 1, 13, 0, 0).unwrap();
+
+            let a = ws_partial(order_id, 10, 100_000_000, 10);
+            fixture_applied_event(
+                &pool,
+                run_id,
+                a.broker_message_id(),
+                None,
+                order_id,
+                "broker-order-1",
+                "partial_fill",
+                &a,
+                at,
+            )
+            .await;
+            let b = ws_partial(order_id, 10, 101_000_000, 20);
+            fixture_applied_event(
+                &pool,
+                run_id,
+                b.broker_message_id(),
+                None,
+                order_id,
+                "broker-order-1",
+                "partial_fill",
+                &b,
+                at,
+            )
+            .await;
+            let late_a = rest_partial_duplicate_of(order_id, "d03-late-a", 10, 100_000_000, 10);
+            fixture_applied_event(
+                &pool,
+                run_id,
+                late_a.broker_message_id(),
+                Some("d03-late-a"),
+                order_id,
+                "broker-order-1",
+                "partial_fill",
+                &late_a,
+                at,
+            )
+            .await;
+
+            let (_, _, pf) = recover_oms_and_portfolio(&pool, run_id, 0)
+                .await
+                .expect("D03 replay");
+            assert_eq!(
+                pf.positions
+                    .get("AAPL")
+                    .map(|p| p.qty_signed())
+                    .unwrap_or(0),
+                20,
+                "D03: qty must be A+B=20, never 30"
+            );
+            assert_eq!(
+                pf.cash_micros,
+                -(10 * 100_000_000 + 10 * 101_000_000),
+                "D03: cash must reflect exactly A+B, not the late duplicate"
+            );
+            assert_eq!(
+                ledger_fills(&pf),
+                vec![(10, 100_000_000), (10, 101_000_000)],
+                "D03: ledger must have exactly the two legitimate fills"
+            );
+        })
+        .await;
+    }
+
+    /// D04: two legitimate SAME-size/SAME-price partials (10@$100 cum10,
+    /// 10@$100 cum20) must remain DISTINCT economic fills -- not collapsed
+    /// as if they were a duplicate of each other.
+    #[tokio::test]
+    async fn d04_same_size_same_price_partials_remain_distinct() {
+        mqk_db::run_isolated("d04_same_size_same_price", |pool| async move {
+            let run_id = fixed_run_id("d04_same_size_same_price");
+            let order_id = "order-d04";
+            fixture_run(&pool, run_id).await;
+            fixture_order(&pool, run_id, order_id, "AAPL", 20, "buy").await;
+            let at = Utc.with_ymd_and_hms(2099, 4, 1, 13, 0, 0).unwrap();
+
+            let a = ws_partial(order_id, 10, 100_000_000, 10);
+            fixture_applied_event(
+                &pool,
+                run_id,
+                a.broker_message_id(),
+                None,
+                order_id,
+                "broker-order-1",
+                "partial_fill",
+                &a,
+                at,
+            )
+            .await;
+            let b = ws_partial(order_id, 10, 100_000_000, 20);
+            fixture_applied_event(
+                &pool,
+                run_id,
+                b.broker_message_id(),
+                None,
+                order_id,
+                "broker-order-1",
+                "partial_fill",
+                &b,
+                at,
+            )
+            .await;
+
+            let (_, _, pf) = recover_oms_and_portfolio(&pool, run_id, 0)
+                .await
+                .expect("D04 replay");
+            assert_eq!(
+                pf.positions
+                    .get("AAPL")
+                    .map(|p| p.qty_signed())
+                    .unwrap_or(0),
+                20,
+                "D04: two distinct same-size/same-price partials must both apply: qty=20"
+            );
+            assert_eq!(
+                pf.cash_micros,
+                -(20 * 100_000_000),
+                "D04: cash must reflect BOTH fills"
+            );
+            assert_eq!(
+                ledger_fills(&pf),
+                vec![(10, 100_000_000), (10, 100_000_000)],
+                "D04: ledger must have TWO separate fill entries, not one"
+            );
+        })
+        .await;
+    }
+
+    /// D05: duplicate TERMINAL fill across lanes (WS terminal then REST
+    /// duplicate of the same terminal execution) -- OMS's pre-existing
+    /// already-terminal idempotency must apply the fill exactly once.
+    #[tokio::test]
+    async fn d05_duplicate_terminal_fill_across_lanes() {
+        mqk_db::run_isolated("d05_dup_terminal_cross_lane", |pool| async move {
+            let run_id = fixed_run_id("d05_dup_terminal_cross_lane");
+            let order_id = "order-d05";
+            fixture_run(&pool, run_id).await;
+            fixture_order(&pool, run_id, order_id, "AAPL", 10, "buy").await;
+            let at = Utc.with_ymd_and_hms(2099, 4, 1, 13, 0, 0).unwrap();
+
+            let ws_term = terminal_fill(
+                order_id,
+                &format!("alpaca:{order_id}:fill:ws-term"),
+                10,
+                100_000_000,
+            );
+            fixture_applied_event(
+                &pool,
+                run_id,
+                ws_term.broker_message_id(),
+                None,
+                order_id,
+                "broker-order-1",
+                "fill",
+                &ws_term,
+                at,
+            )
+            .await;
+
+            let rest_term = BrokerEvent::Fill {
+                broker_message_id: "alpaca-rest-recovery:d05-activity".to_string(),
+                broker_fill_id: Some("d05-activity".to_string()),
+                internal_order_id: order_id.to_string(),
+                broker_order_id: Some("broker-order-1".to_string()),
+                symbol: "AAPL".to_string(),
+                side: Side::Buy,
+                delta_qty: 10,
+                price_micros: 100_000_000,
+                fee_micros: 0,
+            };
+            fixture_applied_event(
+                &pool,
+                run_id,
+                rest_term.broker_message_id(),
+                Some("d05-activity"),
+                order_id,
+                "broker-order-1",
+                "fill",
+                &rest_term,
+                at,
+            )
+            .await;
+
+            let (_, _, pf) = recover_oms_and_portfolio(&pool, run_id, 0)
+                .await
+                .expect("D05 replay");
+            assert_eq!(
+                pf.positions
+                    .get("AAPL")
+                    .map(|p| p.qty_signed())
+                    .unwrap_or(0),
+                10,
+                "D05: duplicate terminal fill across lanes must apply exactly once: qty=10"
+            );
+            assert_eq!(
+                pf.cash_micros,
+                -(10 * 100_000_000),
+                "D05: cash must reflect exactly ONE terminal fill"
+            );
+            assert_eq!(
+                ledger_fills(&pf),
+                vec![(10, 100_000_000)],
+                "D05: ledger must have exactly one fill entry"
+            );
+        })
+        .await;
+    }
+
+    /// D06: partial (2@$100 cum2) + Alpaca-style oversized/cumulative
+    /// terminal Fill (raw delta_qty=5, order total=3) -- the effective
+    /// delta must cap at the true remainder (1), never apply the raw
+    /// overfill.
+    #[tokio::test]
+    async fn d06_partial_plus_oversized_cumulative_terminal_fill() {
+        mqk_db::run_isolated("d06_partial_plus_oversized_terminal", |pool| async move {
+            let run_id = fixed_run_id("d06_partial_plus_oversized_terminal");
+            let order_id = "order-d06";
+            fixture_run(&pool, run_id).await;
+            fixture_order(&pool, run_id, order_id, "AAPL", 3, "buy").await;
+            let at = Utc.with_ymd_and_hms(2099, 4, 1, 13, 0, 0).unwrap();
+
+            let partial = ws_partial(order_id, 2, 100_000_000, 2);
+            fixture_applied_event(&pool, run_id, partial.broker_message_id(), None, order_id, "broker-order-1", "partial_fill", &partial, at).await;
+            // Deliberately oversized raw delta_qty (5) -- far beyond the
+            // true 1-share remainder -- to prove the cap is not merely
+            // "off by one" tolerant but genuinely bounded by OMS truth.
+            let terminal = terminal_fill(order_id, &format!("alpaca:{order_id}:fill:oversized"), 5, 102_000_000);
+            fixture_applied_event(&pool, run_id, terminal.broker_message_id(), None, order_id, "broker-order-1", "fill", &terminal, at).await;
+
+            let (_, _, pf) = recover_oms_and_portfolio(&pool, run_id, 0).await.expect("D06 replay");
+            assert_eq!(pf.positions.get("AAPL").map(|p| p.qty_signed()).unwrap_or(0), 3, "D06: oversized terminal delta_qty=5 must still cap at true remainder; qty=3, not 7");
+            assert_eq!(pf.cash_micros, -(2 * 100_000_000 + 102_000_000), "D06: cash must reflect only the effective 1-share terminal fill");
+            assert_eq!(ledger_fills(&pf), vec![(2, 100_000_000), (1, 102_000_000)], "D06: ledger must show the effective 1-share terminal fill, not the raw 5");
+        })
+        .await;
+    }
+
+    // -----------------------------------------------------------------------
+    // Section 10: durable data-quality matrix (Q01-Q06).
+    //
+    // Q01/Q02 are FC-2A/FC-2B above (malformed applied JSON / unknown-order
+    // fill). Q03-Q06 are new.
+    // -----------------------------------------------------------------------
+
+    /// Q03: an inbound `CancelAck` durable event, replayed with no prior
+    /// `CancelPending` state, must fail closed rather than be silently
+    /// accepted or skipped.
+    ///
+    /// `OmsEvent::CancelRequest` (the transition INTO `CancelPending`) is a
+    /// purely local/outbound event never carried by any inbound
+    /// `BrokerEvent` -- it is never present in the applied inbox durable
+    /// evidence `recover_oms_and_portfolio` reconstructs OMS state from.
+    /// `(CancelPending, CancelAck) => Cancelled` is therefore the only legal
+    /// path to a confirmed cancel in the OMS state machine, and pure
+    /// inbound-only replay cannot reconstruct that intermediate state. This
+    /// is a structural property of inbound-only replay (not a
+    /// fill-economic-authority defect this patch's four defects cover), but
+    /// it is exercised here to prove the SAME fail-closed propagation this
+    /// patch's Defect #2 repair added (the `illegal_transition` `Err`, not a
+    /// silently discarded `let _ =`) makes it safe: a `CancelAck` durable
+    /// replay never silently succeeds or fabricates a `Cancelled` order out
+    /// of an unproven transition.
+    #[tokio::test]
+    async fn q03_cancel_ack_without_reconstructed_cancel_pending_fails_closed() {
+        mqk_db::run_isolated("q03_cancel_ack_no_pending", |pool| async move {
+            let run_id = fixed_run_id("q03_cancel_ack_no_pending");
+            let order_id = "order-q03";
+            fixture_run(&pool, run_id).await;
+            fixture_order(&pool, run_id, order_id, "AAPL", 10, "buy").await;
+            let at = Utc.with_ymd_and_hms(2099, 4, 1, 13, 0, 0).unwrap();
+
+            let cancel_ack = BrokerEvent::CancelAck {
+                broker_message_id: "q03-cancel-ack".to_string(),
+                internal_order_id: order_id.to_string(),
+                broker_order_id: Some("broker-order-1".to_string()),
+            };
+            fixture_applied_event(
+                &pool,
+                run_id,
+                "q03-cancel-ack",
+                None,
+                order_id,
+                "broker-order-1",
+                "cancel_ack",
+                &cancel_ack,
+                at,
+            )
+            .await;
+
+            let err = recover_oms_and_portfolio(&pool, run_id, 0)
+                .await
+                .expect_err(
+                    "Q03: a CancelAck replayed with no reconstructed CancelPending must fail \
+                     closed, not be silently accepted",
+                );
+            let msg = format!("{err}");
+            assert!(
+                msg.contains("q03-cancel-ack"),
+                "error must identify the offending event: {msg}"
+            );
+        })
+        .await;
+    }
+
+    /// Q04: a Fill arriving after a confirmed Reject must fail closed
+    /// (duplicate coverage of NEG-6/E20 above under the Q-series name).
+    #[tokio::test]
+    async fn q04_fill_after_confirmed_reject_fails_closed() {
+        mqk_db::run_isolated("q04_fill_after_reject", |pool| async move {
+            let run_id = fixed_run_id("q04_fill_after_reject");
+            let order_id = "order-q04";
+            fixture_run(&pool, run_id).await;
+            fixture_order(&pool, run_id, order_id, "AAPL", 10, "buy").await;
+            let at = Utc.with_ymd_and_hms(2099, 4, 1, 13, 0, 0).unwrap();
+
+            let reject = BrokerEvent::Reject {
+                broker_message_id: "q04-reject".to_string(),
+                internal_order_id: order_id.to_string(),
+                broker_order_id: Some("broker-order-1".to_string()),
+            };
+            fixture_applied_event(
+                &pool,
+                run_id,
+                "q04-reject",
+                None,
+                order_id,
+                "broker-order-1",
+                "reject",
+                &reject,
+                at,
+            )
+            .await;
+
+            let late_fill = terminal_fill(order_id, "q04-late-fill", 10, 100_000_000);
+            fixture_applied_event(
+                &pool,
+                run_id,
+                "q04-late-fill",
+                None,
+                order_id,
+                "broker-order-1",
+                "fill",
+                &late_fill,
+                at,
+            )
+            .await;
+
+            let err = recover_oms_and_portfolio(&pool, run_id, 0)
+                .await
+                .expect_err("Q04: a fill after a confirmed Reject must fail closed");
+            let msg = format!("{err}");
+            assert!(
+                msg.contains("q04-late-fill"),
+                "error must identify the offending fill: {msg}"
+            );
+        })
+        .await;
+    }
+
+    /// Q05: a malformed NON-fill applied event (Ack payload that fails to
+    /// deserialize) must ALSO fail the whole replay closed -- the
+    /// deserialize step in `recover_oms_and_portfolio` runs before the
+    /// event is classified as fill/non-fill, so malformed evidence can
+    /// never be silently skipped regardless of its intended kind.
+    #[tokio::test]
+    async fn q05_malformed_non_fill_event_fails_closed() {
+        mqk_db::run_isolated("q05_malformed_non_fill", |pool| async move {
+            let run_id = fixed_run_id("q05_malformed_non_fill");
+            let order_id = "order-q05";
+            fixture_run(&pool, run_id).await;
+            fixture_order(&pool, run_id, order_id, "AAPL", 10, "buy").await;
+            let at = Utc.with_ymd_and_hms(2099, 4, 1, 13, 0, 0).unwrap();
+
+            mqk_db::inbox_insert_deduped_with_identity(
+                &pool,
+                run_id,
+                "q05-malformed-ack",
+                None,
+                order_id,
+                "broker-order-1",
+                "ack",
+                &serde_json::json!({"type": "Ack", "broker_message_id": "q05-malformed-ack"}),
+                0,
+                at,
+            )
+            .await
+            .expect("insert malformed ack row (missing required fields)");
+            mqk_db::inbox_mark_applied(&pool, run_id, "q05-malformed-ack", at)
+                .await
+                .expect("mark applied");
+
+            let err = recover_oms_and_portfolio(&pool, run_id, 0)
+                .await
+                .expect_err("Q05: a malformed non-fill applied event must ALSO fail closed, not be silently skipped");
+            let msg = format!("{err}");
+            assert!(msg.contains("q05-malformed-ack"), "error must identify the offending row: {msg}");
+        })
+        .await;
+    }
+
+    /// Q06: an outbox row exists for the referenced order but cannot supply
+    /// a valid symbol/positive quantity (malformed `order_json`) -- the
+    /// order is never constructed into `oms_orders`, so an applied fill
+    /// referencing it must fail closed as `UNKNOWN_ORDER_FILL` exactly like
+    /// FC-2B (no outbox row at all), never reconstruct a portfolio without
+    /// proven OMS context.
+    #[tokio::test]
+    async fn q06_outbox_row_missing_valid_symbol_qty_fails_closed() {
+        mqk_db::run_isolated("q06_outbox_invalid_order_json", |pool| async move {
+            let run_id = fixed_run_id("q06_outbox_invalid_order_json");
+            let order_id = "order-q06";
+            fixture_run(&pool, run_id).await;
+            // Seed an outbox row that is SENT but whose order_json carries
+            // no "symbol"/"qty" -- `outbox_json_symbol`/`outbox_json_qty`
+            // both return `None`, so the submitted-orders loop in
+            // `recover_oms_and_portfolio` skips constructing an `OmsOrder`
+            // for it (matching production behavior for a legacy/malformed
+            // outbox row).
+            mqk_db::outbox_enqueue(
+                &pool,
+                run_id,
+                order_id,
+                serde_json::json!({"source": "q06-no-symbol-or-qty"}),
+            )
+            .await
+            .expect("outbox_enqueue should succeed");
+            sqlx::query("update oms_outbox set status = 'SENT' where idempotency_key = $1")
+                .bind(order_id)
+                .execute(&pool)
+                .await
+                .expect("mark outbox SENT should succeed");
+
+            let at = Utc.with_ymd_and_hms(2099, 4, 1, 13, 0, 0).unwrap();
+            let fill = terminal_fill(order_id, "q06-fill", 10, 100_000_000);
+            fixture_applied_event(&pool, run_id, "q06-fill", None, order_id, "broker-order-1", "fill", &fill, at).await;
+
+            let err = recover_oms_and_portfolio(&pool, run_id, 0)
+                .await
+                .expect_err("Q06: a fill referencing an order with no valid symbol/qty in outbox truth must fail closed");
+            let msg = format!("{err}");
+            assert!(msg.contains("UNKNOWN_ORDER_FILL"), "error must be UNKNOWN_ORDER_FILL: {msg}");
         })
         .await;
     }

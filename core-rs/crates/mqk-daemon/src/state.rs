@@ -158,6 +158,7 @@ pub use session_controller::{
 };
 pub(crate) use snapshot::{
     reconcile_broker_snapshot_from_schema, reconcile_local_snapshot_from_runtime_with_sides,
+    recover_oms_and_portfolio,
 };
 pub use types::{
     AcceptedArtifactProvenance, AlpacaWsContinuityState, AutonomousRecoveryResumeSource,

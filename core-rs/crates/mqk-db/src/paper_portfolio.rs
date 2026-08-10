@@ -21,7 +21,8 @@
 //!   itself (reading `oms_inbox` via [`crate::inbox::inbox_load_all_applied_for_run`]
 //!   and driving `mqk_portfolio::apply_fill`/`recompute_from_ledger`) lives
 //!   in mqk-daemon (B4-D), which already owns the `oms_inbox` message JSON →
-//!   `mqk_portfolio::Fill` conversion (`broker_event_to_portfolio_fill`).
+//!   `mqk_portfolio::Fill` conversion (`recover_oms_and_portfolio`, via the
+//!   canonical `mqk_runtime::orchestrator::effective_portfolio_fill` helper).
 //!   This module is the persistence layer only.
 //!
 //! # Idempotency

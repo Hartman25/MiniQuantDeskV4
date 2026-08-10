@@ -70,6 +70,13 @@ use apply::*;
 use fill_quality::build_fill_quality_row;
 use lifecycle_events::build_lifecycle_event_row;
 use outbox::*;
+// PAPER-SOAK-ALPACA-FILL-AUTHORITY-FINAL-CLOSURE-02: narrow, deliberate
+// public re-export. Everything else in `apply` is `pub(super)` (this module
+// only); `effective_portfolio_fill` alone is `pub` in `apply.rs` and
+// re-exported here so `mqk-daemon`'s durable restart/replay
+// (`recover_oms_and_portfolio`) can share the exact live effective-fill
+// semantic instead of re-deriving an approximation of it.
+pub use apply::effective_portfolio_fill;
 // ---------------------------------------------------------------------------
 // ExecutionOrchestrator
 // ---------------------------------------------------------------------------

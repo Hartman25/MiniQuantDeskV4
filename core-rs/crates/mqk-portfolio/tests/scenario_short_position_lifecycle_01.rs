@@ -13,8 +13,9 @@
 //! # What "paper fill proxy" tests mean
 //! The fill engine (`DeterministicFillEngine`) produces `BrokerEvent::Fill`
 //! with `side` and `delta_qty` fields (always positive).
-//! `broker_event_to_portfolio_fill` in `mqk-daemon` maps these to
-//! `mqk_portfolio::Fill { side, qty: delta_qty }`.
+//! `mqk-runtime`'s `effective_portfolio_fill` (live apply) and
+//! `mqk-daemon`'s `recover_oms_and_portfolio` (durable replay) both map
+//! these to `mqk_portfolio::Fill { side, qty: effective_delta }`.
 //! The proxy tests use `Fill` directly with the same `(side, qty)` pair the
 //! fill engine would emit, proving accounting correctness without driving the
 //! full broker pipeline.
@@ -355,7 +356,7 @@ fn sp10_integrity_holds_through_full_short_lifecycle() {
 // SP11 — Paper fill proxy: Fill{side=Sell, qty>0} → negative position
 //
 // The fill engine produces BrokerEvent::Fill{side=Sell, delta_qty=abs_qty>0}.
-// broker_event_to_portfolio_fill maps this to Fill{side=Sell, qty=delta_qty}.
+// Live/durable apply map this to Fill{side=Sell, qty=effective_delta}.
 // This proves that such a fill (positive qty, Sell side) opens a short lot.
 // ---------------------------------------------------------------------------
 
@@ -391,8 +392,8 @@ fn sp11_paper_fill_proxy_sell_side_opens_short() {
 // SP12 — Paper cover proxy: Fill{side=Buy, qty>0} → covers short to flat
 //
 // The fill engine produces BrokerEvent::Fill{side=Buy, delta_qty>0} for
-// buy-to-cover orders. broker_event_to_portfolio_fill maps this to
-// Fill{side=Buy, qty=delta_qty}. This proves the cover closes the short lot.
+// buy-to-cover orders. Live/durable apply map this to
+// Fill{side=Buy, qty=effective_delta}. This proves the cover closes the short lot.
 // ---------------------------------------------------------------------------
 
 #[test]

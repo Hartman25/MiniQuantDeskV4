@@ -37,7 +37,10 @@ use crate::{
         PortfolioPositionSummary, RestRecoveredFill, WsGapFillRecoveryRequest,
         WsGapFillRecoveryResponse,
     },
-    state::{reconcile_broker_snapshot_from_schema, AppState, ReconcileStatusSnapshot},
+    state::{
+        reconcile_broker_snapshot_from_schema, recover_oms_and_portfolio, AppState,
+        ReconcileStatusSnapshot,
+    },
 };
 
 pub(crate) async fn repair_outbox_ambiguous(
@@ -2259,7 +2262,17 @@ pub(crate) async fn repair_halted_run_portfolio_snapshot(
         );
     }
 
-    // Gate 5: load all applied inbox rows for the run.
+    // Gate 5: load raw applied inbox rows -- for RAW EVIDENCE COUNT, max
+    // inbox_id (deterministic audit identity), and operator diagnostics
+    // ONLY. PAPER-SOAK-ALPACA-FILL-AUTHORITY-FINAL-CLOSURE-02 (Defect #3):
+    // this route must NOT independently compute position/cash/P&L by
+    // applying these raw rows' delta_qty itself -- that was a second,
+    // hidden durable-replay implementation that could diverge from
+    // `recover_oms_and_portfolio` (no OMS context, no cross-lane watermark
+    // dedup, no terminal effective-delta correction, no unknown-order
+    // guard) and reconstruct a DIFFERENT portfolio from the SAME durable
+    // evidence. There is exactly one canonical durable economic replay
+    // seam; this route now sources positions/cash/P&L from it exclusively.
     let applied_rows = match mqk_db::inbox_load_all_applied_for_run(db, run_id).await {
         Ok(rows) => rows,
         Err(e) => {
@@ -2272,111 +2285,42 @@ pub(crate) async fn repair_halted_run_portfolio_snapshot(
         }
     };
 
-    // Compute the highest inbox_id among fill rows for the idempotency key.
+    // Compute the highest inbox_id among fill rows for the idempotency key,
+    // and the raw fill-evidence count -- diagnostics only, never economics.
     let max_fill_inbox_id: i64 = applied_rows
         .iter()
         .filter(|r| r.event_kind == "fill" || r.event_kind == "partial_fill")
         .map(|r| r.inbox_id)
         .max()
         .unwrap_or(0);
+    let applied_fill_count: usize = applied_rows
+        .iter()
+        .filter(|r| r.event_kind == "fill" || r.event_kind == "partial_fill")
+        .count();
 
     // Portfolio reconstruction starting from zero initial cash.
     // Initial cash is not extractable from the halted run config without a schema
     // contract; zero is the safe, honest baseline.  Callers receive initial_cash_micros=0
     // explicitly so they can adjust offline if needed.
     let initial_cash_micros: i64 = 0;
-    let mut pf = mqk_portfolio::PortfolioState::new(initial_cash_micros);
-    let mut applied_fill_count: usize = 0;
 
-    // Gate 6 + Gate 7: parse and apply fill rows fail-closed.
-    for row in &applied_rows {
-        // Skip non-fill events (ack, cancel_ack, replace_ack, etc.) — they do not
-        // affect portfolio state, consistent with orchestrator Phase 3.
-        if row.event_kind != "fill" && row.event_kind != "partial_fill" {
-            continue;
-        }
-
-        let broker_event =
-            match serde_json::from_value::<mqk_execution::BrokerEvent>(row.message_json.clone()) {
-                Ok(e) => e,
-                Err(e) => {
-                    return (
-                        StatusCode::CONFLICT,
-                        Json(HaltedRunPortfolioSnapshotResponse {
-                            truth_state: "active".to_string(),
-                            decision: "refused".to_string(),
-                            dry_run,
-                            run_id: body.run_id.clone(),
-                            applied_fill_count,
-                            positions: vec![],
-                            cash_micros: 0,
-                            realized_pnl_micros: 0,
-                            initial_cash_micros,
-                            snapshot_written: false,
-                            audit_event_id: None,
-                            source: "applied_inbox_rows".to_string(),
-                            evidence: format!(
-                                "applied inbox row (inbox_id={}, broker_message_id='{}') with \
-                                 event_kind='{}' failed to deserialize as BrokerEvent: {e}. \
-                                 Portfolio reconstruction refused — manual reconcile required.",
-                                row.inbox_id, row.broker_message_id, row.event_kind
-                            ),
-                            gate: Some("snapshot.malformed_applied_fill".to_string()),
-                        }),
-                    )
-                        .into_response();
+    // Gate 6: the SOLE source of economic truth for this route --
+    // `recover_oms_and_portfolio`, the same canonical durable replay used by
+    // daemon restart and `refresh_paper_portfolio_accounting_state`. It
+    // fails closed (malformed applied evidence, unknown-order fill, illegal
+    // OMS transition) exactly as restart replay does; this route surfaces
+    // that refusal instead of falling back to raw summation.
+    let pf = match recover_oms_and_portfolio(db, run_id, initial_cash_micros).await {
+        Ok((_, _, portfolio)) => portfolio,
+        Err(e) => {
+            let gate = match e.fault_class() {
+                "recover_oms_and_portfolio.malformed_applied_event" => {
+                    "snapshot.malformed_applied_fill"
                 }
+                "recover_oms_and_portfolio.unknown_order_fill" => "snapshot.unknown_order_fill",
+                "recover_oms_and_portfolio.illegal_transition" => "snapshot.illegal_transition",
+                _ => "snapshot.canonical_replay_refused",
             };
-
-        let (symbol, side, delta_qty, price_micros, fee_micros) = match broker_event {
-            mqk_execution::BrokerEvent::Fill {
-                symbol,
-                side,
-                delta_qty,
-                price_micros,
-                fee_micros,
-                ..
-            }
-            | mqk_execution::BrokerEvent::PartialFill {
-                symbol,
-                side,
-                delta_qty,
-                price_micros,
-                fee_micros,
-                ..
-            } => (symbol, side, delta_qty, price_micros, fee_micros),
-            _ => {
-                // event_kind is "fill" or "partial_fill" but variant is not — inconsistent.
-                return (
-                    StatusCode::CONFLICT,
-                    Json(HaltedRunPortfolioSnapshotResponse {
-                        truth_state: "active".to_string(),
-                        decision: "refused".to_string(),
-                        dry_run,
-                        run_id: body.run_id.clone(),
-                        applied_fill_count,
-                        positions: vec![],
-                        cash_micros: 0,
-                        realized_pnl_micros: 0,
-                        initial_cash_micros,
-                        snapshot_written: false,
-                        audit_event_id: None,
-                        source: "applied_inbox_rows".to_string(),
-                        evidence: format!(
-                            "applied inbox row (inbox_id={}, broker_message_id='{}') has \
-                             event_kind='{}' but deserializes as a non-fill BrokerEvent variant; \
-                             data is inconsistent — manual reconcile required.",
-                            row.inbox_id, row.broker_message_id, row.event_kind
-                        ),
-                        gate: Some("snapshot.malformed_applied_fill".to_string()),
-                    }),
-                )
-                    .into_response();
-            }
-        };
-
-        // Gate 7: delta_qty must be positive.
-        if delta_qty <= 0 {
             return (
                 StatusCode::CONFLICT,
                 Json(HaltedRunPortfolioSnapshotResponse {
@@ -2393,26 +2337,16 @@ pub(crate) async fn repair_halted_run_portfolio_snapshot(
                     audit_event_id: None,
                     source: "applied_inbox_rows".to_string(),
                     evidence: format!(
-                        "applied inbox row (inbox_id={}, broker_message_id='{}') has \
-                         delta_qty={delta_qty} which is not positive; \
-                         portfolio reconstruction refused — manual reconcile required.",
-                        row.inbox_id, row.broker_message_id
+                        "canonical durable economic replay refused to reconstruct run '{}': {e}. \
+                         Portfolio reconstruction refused — manual reconcile required.",
+                        body.run_id
                     ),
-                    gate: Some("snapshot.malformed_applied_fill".to_string()),
+                    gate: Some(gate.to_string()),
                 }),
             )
                 .into_response();
         }
-
-        let pf_side = match side {
-            mqk_execution::Side::Buy => mqk_portfolio::Side::Buy,
-            mqk_execution::Side::Sell => mqk_portfolio::Side::Sell,
-        };
-        let pf_fill =
-            mqk_portfolio::Fill::new(symbol, pf_side, delta_qty, price_micros, fee_micros);
-        mqk_portfolio::apply_fill(&mut pf, &pf_fill);
-        applied_fill_count += 1;
-    }
+    };
 
     // Build derived positions summary (flat symbols omitted).
     let positions: Vec<PortfolioPositionSummary> = pf
