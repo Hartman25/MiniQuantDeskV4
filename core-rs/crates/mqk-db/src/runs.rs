@@ -945,6 +945,215 @@ pub async fn clear_halted_run_and_reset_stale_claims(
     })
 }
 
+// ---------------------------------------------------------------------------
+// PRE-SOAK-RUNTIME-HALT-FENCE-CAS-01 — atomic runtime safety-halt authority
+// ---------------------------------------------------------------------------
+
+/// Typed outcome of [`halt_and_disarm_run_if_active`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SafetyHaltOutcome {
+    /// The run was durably `RUNNING`; `runs.status` is now `HALTED` and
+    /// `sys_arm_state` is now `DISARMED` with the supplied reason, committed
+    /// together in one transaction.
+    Halted,
+    /// The run was already durably `HALTED`. `sys_arm_state` was
+    /// (re)confirmed `DISARMED` with the supplied reason — idempotent,
+    /// fail-closed; `runs.status` and `halted_at_utc` are left untouched.
+    AlreadyHalted,
+    /// Refused: the run is not in a state this runtime may safety-halt
+    /// (`STOPPED`, `CREATED`, or `ARMED` — see the "Active-state policy"
+    /// section of this function's doc comment for why `ARMED` is excluded).
+    /// Zero mutation — `runs.status` and `sys_arm_state` are left exactly as
+    /// observed under the row lock. This is the fenced-refusal path: the
+    /// caller's halt authority has been superseded (most commonly by a
+    /// successful operator [`clear_halted_run_and_reset_stale_claims`],
+    /// possibly followed by a legitimate re-arm) and must not be allowed to
+    /// win a stale write.
+    RunNotActive { actual_status: String },
+}
+
+/// PRE-SOAK-RUNTIME-HALT-FENCE-CAS-01 — atomic, fenced runtime safety-halt.
+///
+/// # Why this exists
+///
+/// `PAPER-SOAK-STALE-CLAIM-RECOVERY-03` closed the pre-broker-submit races
+/// (fenced lease acquire/refresh, fenced outbox claim — see
+/// [`acquire_or_refresh_lease_for_running_run`](crate::runtime_lease::acquire_or_refresh_lease_for_running_run)
+/// and `outbox_claim_batch_for_run_with_lease_authority`). It left one
+/// TOCTOU window open: when those functions decide the caller's authority
+/// has been lost/contested/invalidated, they have already released the
+/// `runs` row lock (committed or rolled back) *before* returning that
+/// decision to the caller. The runtime then invoked its safety-halt as a
+/// second, later, separately-committed DB operation
+/// (`halt_run` unconditionally followed by `persist_arm_state`). Between
+/// "authority lost" and "halt persisted", an operator's
+/// `clear_halted_run_and_reset_stale_claims` can win the run row lock,
+/// observe `HALTED`, and commit `STOPPED` — and the old unconditional
+/// `halt_run` (`UPDATE runs SET status='HALTED' WHERE run_id=$1`, no status
+/// predicate) would then silently overwrite that `STOPPED` back to `HALTED`
+/// when the stale runtime's write finally landed.
+///
+/// This function closes that window by making the halt decision and the
+/// halt mutation share **one** atomic, serialized authority boundary instead
+/// of two separately-committed steps: fetch-then-act becomes
+/// lock-then-decide-then-mutate, all inside a single transaction.
+///
+/// # Serialization boundary
+///
+/// The `runs` row for `run_id` is locked with `SELECT ... FOR UPDATE`
+/// *before* this function inspects `status` or writes anything — the exact
+/// same row, the exact same locking primitive,
+/// `clear_halted_run_and_reset_stale_claims`,
+/// `acquire_or_refresh_lease_for_running_run`, and
+/// `outbox_claim_batch_for_run_with_lease_authority` all use. Postgres
+/// serializes any two transactions contending for the same row: whichever
+/// reaches its `FOR UPDATE` first runs to completion (commit or rollback)
+/// before the other's lock acquisition proceeds. A stale runtime calling
+/// this function can therefore never observe a status that a concurrent
+/// `clear_halted_run_and_reset_stale_claims` is still in the middle of
+/// changing, and vice versa — there is no interleaving in which "clear
+/// commits STOPPED" is followed by "stale safety-halt commits HALTED".
+///
+/// # Active-state policy: `RUNNING` only (not `ARMED`)
+///
+/// `ARMED` is deliberately excluded from the haltable set even though it is
+/// nominally "execution-active". Every production caller of this seam
+/// (`mqk-runtime::orchestrator::persist_halt_and_disarm`) runs inside
+/// `ExecutionOrchestrator::tick()`, which `start_execution_runtime` only
+/// ever invokes *after* `begin_run` (`ARMED -> RUNNING`) has already
+/// succeeded — so a genuine safety-halt decision never legitimately
+/// observes `ARMED`. Treating `ARMED` as haltable here would reopen the
+/// hazard this patch closes, just shifted one state later: after a
+/// successful `clear_halted_run_and_reset_stale_claims` (`HALTED ->
+/// STOPPED`), an operator may legitimately `arm_run` (`STOPPED -> ARMED`)
+/// the same `run_id` before a stale runtime's superseded halt decision
+/// finally executes. If `ARMED` were haltable, that late write would halt a
+/// freshly-armed run it has no authority over. Refusing on `ARMED` (via
+/// `RunNotActive`) protects that recovery boundary, not just `runs.status`
+/// while `HALTED`/`STOPPED`.
+///
+/// # `sys_arm_state` atomicity
+///
+/// `sys_arm_state` is a global singleton (`sentinel_id = 1`), not scoped by
+/// `run_id`. The write to it happens inside the *same* transaction as the
+/// `runs.status` write, after the row lock has proven the run is `RUNNING`
+/// — so the two writes are never observably split (the previous `halt_run`
+/// then `persist_arm_state` two-call shape left exactly that window open).
+///
+/// `now_utc` is caller-supplied (FC-9: no wall-clock reads in enforcement
+/// paths) so recovery-race proofs are deterministic in tests.
+pub async fn halt_and_disarm_run_if_active(
+    pool: &PgPool,
+    run_id: Uuid,
+    now_utc: DateTime<Utc>,
+    reason: &str,
+) -> Result<SafetyHaltOutcome> {
+    let mut tx = pool
+        .begin()
+        .await
+        .context("halt_and_disarm_run_if_active: begin tx failed")?;
+
+    let status: Option<String> =
+        sqlx::query_scalar("SELECT status FROM runs WHERE run_id = $1 FOR UPDATE")
+            .bind(run_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .context("halt_and_disarm_run_if_active: run lock failed")?;
+
+    let Some(status) = status else {
+        tx.rollback().await.ok();
+        return Err(anyhow!(
+            "halt_and_disarm_run_if_active: run {run_id} not found"
+        ));
+    };
+
+    match status.as_str() {
+        "RUNNING" => {
+            let done = sqlx::query(
+                r#"
+                update runs
+                set status = 'HALTED',
+                    halted_at_utc = $2
+                where run_id = $1
+                  and status = 'RUNNING'
+                "#,
+            )
+            .bind(run_id)
+            .bind(now_utc)
+            .execute(&mut *tx)
+            .await
+            .context("halt_and_disarm_run_if_active: halt update failed")?;
+
+            if done.rows_affected() != 1 {
+                // Unreachable given the row lock + status check above (no
+                // other writer can change `status` while this tx holds the
+                // row lock), but fail closed rather than assume it.
+                tx.rollback().await.ok();
+                let r = fetch_run(pool, run_id).await?;
+                return Err(anyhow::Error::new(StaleRunTransition {
+                    run_id,
+                    operation: "halt_and_disarm_run_if_active",
+                    expected: "RUNNING",
+                    actual: r.status.as_str().to_string(),
+                }));
+            }
+
+            sqlx::query(
+                r#"
+                insert into sys_arm_state (sentinel_id, state, reason, updated_at_utc)
+                values (1, 'DISARMED', $1, $2)
+                on conflict (sentinel_id) do update
+                    set state          = excluded.state,
+                        reason         = excluded.reason,
+                        updated_at_utc = excluded.updated_at_utc
+                "#,
+            )
+            .bind(reason)
+            .bind(now_utc)
+            .execute(&mut *tx)
+            .await
+            .context("halt_and_disarm_run_if_active: arm-state disarm failed")?;
+
+            tx.commit()
+                .await
+                .context("halt_and_disarm_run_if_active: commit (halted) failed")?;
+
+            Ok(SafetyHaltOutcome::Halted)
+        }
+        "HALTED" => {
+            sqlx::query(
+                r#"
+                insert into sys_arm_state (sentinel_id, state, reason, updated_at_utc)
+                values (1, 'DISARMED', $1, $2)
+                on conflict (sentinel_id) do update
+                    set state          = excluded.state,
+                        reason         = excluded.reason,
+                        updated_at_utc = excluded.updated_at_utc
+                "#,
+            )
+            .bind(reason)
+            .bind(now_utc)
+            .execute(&mut *tx)
+            .await
+            .context("halt_and_disarm_run_if_active: idempotent arm-state disarm failed")?;
+
+            tx.commit()
+                .await
+                .context("halt_and_disarm_run_if_active: commit (already halted) failed")?;
+
+            Ok(SafetyHaltOutcome::AlreadyHalted)
+        }
+        _ => {
+            tx.rollback()
+                .await
+                .context("halt_and_disarm_run_if_active: rollback (not active) failed")?;
+            Ok(SafetyHaltOutcome::RunNotActive {
+                actual_status: status,
+            })
+        }
+    }
+}
+
 /// Heartbeat: RUNNING only updates last_heartbeat_utc. CAS-guarded
 /// (RUN-LIFECYCLE-CAS-01): the `UPDATE` only applies when `status` is still
 /// `RUNNING`, so a heartbeat racing a concurrent `stop_run`/`halt_run` can

@@ -1792,44 +1792,66 @@ fn derive_runtime_holder_id(dispatcher_id: &str, run_id: Uuid) -> String {
 // ---------------------------------------------------------------------------
 // Internal helper - mandatory halt + disarm persistence
 // ---------------------------------------------------------------------------
-/// Write `runs.status = 'HALTED'` and `sys_arm_state = 'DISARMED'` to the DB
-/// as mandatory (not best-effort) operations.
+/// Atomically write `runs.status = 'HALTED'` and `sys_arm_state = 'DISARMED'`
+/// through [`mqk_db::halt_and_disarm_run_if_active`] — the single fenced
+/// authority boundary every safety-halt caller in this module shares
+/// (PRE-SOAK-RUNTIME-HALT-FENCE-CAS-01).
 ///
-/// # Fail-closed contract
+/// # Fenced-refusal contract
 ///
-/// Both writes use `?` propagation.  If either write fails the caller receives
-/// an explicit `Err` describing the DB failure rather than silently continuing.
-/// This is intentionally stricter than the previous best-effort `let _ = …`
-/// pattern: it is safer for a tick to surface `HALT_PERSISTENCE_FAILURE` than
-/// to return the original halt error while leaving `runs.status` as RUNNING,
-/// which would allow the Phase-0 HALT_GUARD to be bypassed on the next call.
+/// By the time any caller here decides to safety-halt, it has already
+/// learned its lease/claim authority for `run_id` was lost, contested, or
+/// invalidated (`Lost`, `HeldByOther`, `LeaseInvalid`) — but that decision
+/// was reached in a transaction that has *already released* the `runs` row
+/// lock before returning. A concurrent operator recovery
+/// (`clear_halted_run_and_reset_stale_claims`) can win that lock in the gap
+/// between the decision and this call. `halt_and_disarm_run_if_active`
+/// re-proves authority under its own row lock rather than trusting the
+/// stale decision: if the run is no longer `RUNNING` by the time this call
+/// actually executes, it performs **zero** mutation and this function
+/// returns a distinct `RUNTIME_SAFETY_HALT_SUPERSEDED` error instead of the
+/// caller's original halt reason — every callsite's existing
+/// `persist_halt_and_disarm(...).await?; return Err(anyhow!(<original
+/// reason>))` shape means that superseded error propagates immediately via
+/// `?`, and the original (now-misleading) reason is never returned. No
+/// per-caller status checks are needed; centralizing the fence here covers
+/// every reason (`RecoveryQuarantine`, `ReconcileDrift`, `LeaderLeaseLost`,
+/// `LeaderLeaseUnavailable`, `InboundContinuityUnproven`,
+/// `IntegrityViolation`, `CancelTargetMissing`, …) uniformly.
 ///
-/// # Order of writes
+/// # Fail-closed contract (ordinary halt path)
 ///
-/// `halt_run` is always attempted first.  If it succeeds but `persist_arm_state`
-/// fails, the arm-state error is returned; `runs.status` is already HALTED so
-/// the Phase-0 guard will still block future ticks on any orchestrator instance
-/// for this `run_id`.
+/// When the run is genuinely still `RUNNING` (the common case), the halt+
+/// disarm write is mandatory, not best-effort: a DB failure propagates as
+/// an explicit `Err` rather than silently leaving `runs.status` as RUNNING,
+/// which would let the Phase-0 HALT_GUARD be bypassed on the next tick.
 async fn persist_halt_and_disarm(
     pool: &PgPool,
     run_id: Uuid,
     now: chrono::DateTime<chrono::Utc>,
     reason: &'static str,
 ) -> anyhow::Result<()> {
-    mqk_db::halt_run(pool, run_id, now).await.with_context(|| {
-        format!(
-            "HALT_PERSISTENCE_FAILURE: run {run_id} - runs.status=HALTED could not be \
-                 written (reason={reason}); Phase-0 halt guard on restart is NOT guaranteed"
-        )
-    })?;
-    mqk_db::persist_arm_state(pool, "DISARMED", Some(reason))
+    #[cfg(test)]
+    tests::pause_before_safety_halt_persist().await;
+
+    match mqk_db::halt_and_disarm_run_if_active(pool, run_id, now, reason)
         .await
         .with_context(|| {
             format!(
-                "ARM_STATE_PERSISTENCE_FAILURE: run {run_id} - sys_arm_state=DISARMED could \
-                 not be written (reason={reason}); runs.status=HALTED was persisted"
+                "HALT_PERSISTENCE_FAILURE: run {run_id} - fenced safety-halt authority check \
+                 failed (reason={reason})"
             )
-        })?;
+        })? {
+        mqk_db::SafetyHaltOutcome::Halted | mqk_db::SafetyHaltOutcome::AlreadyHalted => {}
+        mqk_db::SafetyHaltOutcome::RunNotActive { actual_status } => {
+            return Err(anyhow!(
+                "RUNTIME_SAFETY_HALT_SUPERSEDED: run {run_id} is '{actual_status}', not \
+                 RUNNING — this runtime's halt authority (reason={reason}) was superseded by \
+                 recovery before it could persist; no run/arm-state mutation performed, no \
+                 broker call permitted"
+            ));
+        }
+    }
     // EVIDENCE-DURABILITY-01: best-effort halt-reason audit event.
     //
     // The two mandatory writes above have already succeeded. This write makes the

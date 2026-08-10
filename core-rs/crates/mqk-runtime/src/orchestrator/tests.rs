@@ -3,6 +3,42 @@ use ::chrono::TimeZone;
 use mqk_execution::oms::state_machine::OmsEvent;
 
 // ---------------------------------------------------------------------------
+// PRE-SOAK-RUNTIME-HALT-FENCE-CAS-01: test-only safety-halt pause point
+// ---------------------------------------------------------------------------
+//
+// Lets a test suspend a REAL `ExecutionOrchestrator::tick()` call at the
+// exact point production code commits its safety-halt decision to the DB
+// (inside `persist_halt_and_disarm`, immediately before
+// `mqk_db::halt_and_disarm_run_if_active` runs) so a concurrent recovery
+// actor can be interleaved deterministically instead of raced against real
+// timing. This does not exist in any non-test build — the call site in
+// `persist_halt_and_disarm` is itself `#[cfg(test)]`-gated — and is a no-op
+// even in test builds unless a test explicitly scopes it via
+// `SAFETY_HALT_PAUSE.scope(...)`.
+tokio::task_local! {
+    static SAFETY_HALT_PAUSE: std::sync::Arc<SafetyHaltTestBarrier>;
+}
+
+/// Two-way rendezvous mirroring `mqk_db::TestBarrier`'s `reached`/`hold`
+/// shape: the paused task notifies `reached` the instant it arrives at the
+/// pause point, then blocks on `hold` until the test releases it.
+#[derive(Default)]
+pub(super) struct SafetyHaltTestBarrier {
+    pub(super) reached: tokio::sync::Notify,
+    pub(super) hold: tokio::sync::Notify,
+}
+
+/// Called by `orchestrator::persist_halt_and_disarm` immediately before it
+/// invokes the real fenced safety-halt seam. A no-op unless the calling task
+/// is running inside `SAFETY_HALT_PAUSE.scope(...)`.
+pub(super) async fn pause_before_safety_halt_persist() {
+    if let Ok(barrier) = SAFETY_HALT_PAUSE.try_with(std::sync::Arc::clone) {
+        barrier.reached.notify_one();
+        barrier.hold.notified().await;
+    }
+}
+
+// ---------------------------------------------------------------------------
 // Test-only helpers (moved from orchestrator.rs outer scope)
 // ---------------------------------------------------------------------------
 
@@ -2578,6 +2614,122 @@ async fn scr03_stale_runtime_tick_after_clear_is_fenced_and_never_rehalts_stoppe
         matches!(run_final.status, mqk_db::RunStatus::Stopped),
         "NEG-6: a stale runtime's fenced tick must never turn STOPPED back into HALTED, \
          got status={:?}",
+        run_final.status
+    );
+}
+
+// ---------------------------------------------------------------------------
+// PRE-SOAK-RUNTIME-HALT-FENCE-CAS-01: real-tick TOCTOU proof (RHF-NEG-1)
+// ---------------------------------------------------------------------------
+
+/// RHF-NEG-1 at the real `ExecutionOrchestrator::tick()` level.
+///
+/// The `scr03_stale_runtime_tick_after_clear_is_fenced_and_never_rehalts_stopped`
+/// test above proves SCR03's `RunNotRunning` fence: a runtime whose lease
+/// authority *decision itself* observes the run is no longer RUNNING is
+/// fenced before it ever calls a safety-halt. This test proves the
+/// narrower, remaining TOCTOU that PRE-SOAK-RUNTIME-HALT-FENCE-CAS-01
+/// closes: the decision (`RunLeaseAuthorityOutcome::Lost`) is reached while
+/// the run genuinely *is* RUNNING, inside a transaction that has already
+/// committed/rolled back and released the `runs` row lock by the time it
+/// returns to the caller — and a concurrent operator recovery can win that
+/// lock in the gap between the decision and this runtime's subsequent
+/// safety-halt persistence.
+///
+/// Chronology:
+/// 1. Runtime A ticks once: acquires the lease, run stays RUNNING.
+/// 2. A's lease expires.
+/// 3. A ticks again: `acquire_or_refresh_lease_for_running_run` observes
+///    the run genuinely RUNNING but A's epoch already expired -> `Lost`.
+///    Production code is paused (via the `#[cfg(test)]`-only barrier)
+///    immediately before it persists its safety halt.
+/// 4. While A is paused, the operator halts and clears the run -> STOPPED.
+/// 5. A resumes. Its safety-halt write must observe STOPPED under the same
+///    row lock and refuse (`RUNTIME_SAFETY_HALT_SUPERSEDED`) instead of
+///    overwriting it back to HALTED.
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+async fn rhf_neg1_stale_runtime_safety_halt_cannot_overwrite_successful_clear() {
+    let pool = runtime_test_pool().await;
+    let clock = MutableClock::new(runtime_ts(90_000));
+    let run_id = make_running_run(&pool, clock.now_utc()).await;
+    let submits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+    let mut orchestrator = make_scr03_orchestrator(
+        pool.clone(),
+        run_id,
+        "runtime-rhf-neg1",
+        clock.clone(),
+        std::sync::Arc::clone(&submits),
+    );
+
+    // 1. Runtime A's first tick: acquires the lease, run stays RUNNING.
+    orchestrator
+        .tick()
+        .await
+        .expect("first tick acquires lease and runs cleanly");
+    assert_eq!(submits.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+    // 2. A's lease expires -- A never refreshes it again on its own.
+    clock.set(runtime_ts(90_000 + RUNTIME_LEASE_TTL_SECS + 1));
+
+    // 3/4. Spawn the recovery actor. It waits for A to reach the pause
+    // point (proving `Lost` was already established for a genuinely
+    // RUNNING run), then halts + clears to STOPPED, then releases A.
+    let pool_recovery = pool.clone();
+    let clock_recovery = clock.clone();
+    let barrier = std::sync::Arc::new(SafetyHaltTestBarrier::default());
+    let barrier_recovery = std::sync::Arc::clone(&barrier);
+    let recovery_task = tokio::spawn(async move {
+        barrier_recovery.reached.notified().await;
+        let now = clock_recovery.now_utc();
+        mqk_db::halt_run(&pool_recovery, run_id, now)
+            .await
+            .expect("operator halt_run");
+        let outcome = mqk_db::clear_halted_run_and_reset_stale_claims(&pool_recovery, run_id, now)
+            .await
+            .expect("operator clear must succeed once A's lease has expired");
+        barrier_recovery.hold.notify_one();
+        outcome
+    });
+
+    // 5. A's second tick: reaches genuine `Lost` (run still RUNNING at that
+    // instant), pauses immediately before persisting its safety halt, then
+    // resumes only after the recovery actor has committed STOPPED.
+    let tick_result = SAFETY_HALT_PAUSE.scope(barrier, orchestrator.tick()).await;
+
+    let recovery_outcome = recovery_task.await.expect("recovery task must not panic");
+    assert!(
+        matches!(
+            recovery_outcome,
+            mqk_db::ClearHaltedRunOutcome::Success { .. }
+        ),
+        "recovery must succeed once A's lease has expired, got {recovery_outcome:?}"
+    );
+
+    let err = tick_result.expect_err(
+        "RHF-NEG-1: a stale runtime whose lease was Lost after recovery already committed \
+         STOPPED must be fenced, not silently succeed",
+    );
+    assert!(
+        err.to_string().contains("RUNTIME_SAFETY_HALT_SUPERSEDED"),
+        "unexpected error: {err}"
+    );
+
+    // Zero broker calls at any point in this chronology.
+    assert_eq!(
+        submits.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "a fenced stale runtime must never reach the broker"
+    );
+
+    // The load-bearing proof: STOPPED must never be rewritten back to
+    // HALTED by the stale runtime's superseded safety-halt write.
+    let run_final = mqk_db::fetch_run(&pool, run_id).await.expect("fetch_run");
+    assert!(
+        matches!(run_final.status, mqk_db::RunStatus::Stopped),
+        "RHF-NEG-1: a stale runtime's superseded safety-halt must never turn STOPPED back \
+         into HALTED, got status={:?}",
         run_final.status
     );
 }

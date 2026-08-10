@@ -66,6 +66,14 @@ name = "scenario_outbox_first_enforced"
 path = "tests/scenario_outbox_first_enforced.rs"
 required-features = ["testkit"]
 
+# PRE-SOAK-RUNTIME-HALT-FENCE-CAS-01: halt_and_disarm_run_if_active asserts
+# on the global sys_arm_state singleton, so it needs a disposable per-test
+# database (mqk_db::run_isolated), which requires testkit.
+[[test]]
+name = "scenario_runtime_halt_fence_cas_01"
+path = "tests/scenario_runtime_halt_fence_cas_01.rs"
+required-features = ["testkit"]
+
 # FULL-AUDIT-SAFE-IGNORED-AND-SHARED-DB-FINAL-CLOSURE-01 Part 3: DB-backed
 # proofs for the hardened disposable-per-test-database helper.
 # Run: MQK_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5434/mqk_test \
