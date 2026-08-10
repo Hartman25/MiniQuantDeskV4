@@ -34,6 +34,8 @@ where
         req: BrokerSubmitRequest,
     ) -> anyhow::Result<()> {
         let order_id = claimed_row.row.idempotency_key.clone();
+        let outbox_id = claimed_row.row.outbox_id;
+        let claim_owner = claimed_row.row.claimed_by.clone();
         let claim = claimed_row.token;
         let symbol = req.symbol.clone();
         let qty = req.quantity;
@@ -45,13 +47,38 @@ where
         // outbox_mark_sent, the row stays DISPATCHING on restart.
         // outbox_reset_stale_claims only resets CLAIMED rows, so the order
         // is NOT silently requeued - preventing double-submit.
-        mqk_db::outbox_mark_dispatching(
+        //
+        // PAPER-SOAK-STALE-CLAIM-RECOVERY-03 Layer C: the CAS below proves
+        // this exact dispatcher still owns the exact durable claim (row
+        // identity + claimed_by), and its boolean result is a hard pre-
+        // broker fence -- `false` means NO gateway.submit call, no matter
+        // how this claimed_row was obtained.
+        let claim_owner = claim_owner.ok_or_else(|| {
+            anyhow!(
+                "STALE_OUTBOX_CLAIM: outbox row {} (order_id={}) has no claim owner \
+                 recorded -- refusing to advance to DISPATCHING without proof of ownership",
+                outbox_id,
+                order_id
+            )
+        })?;
+        let dispatching_ok = mqk_db::outbox_mark_dispatching(
             &self.pool,
+            outbox_id,
             &order_id,
+            &claim_owner,
             &self.dispatcher_id,
             self.time_source.now_utc(),
         )
         .await?;
+        if !dispatching_ok {
+            return Err(anyhow!(
+                "DISPATCH_FENCE_LOST: outbox row {} (order_id={}, claim_owner={}) failed the \
+                 CLAIMED->DISPATCHING ownership CAS -- refusing broker submit (zero calls)",
+                outbox_id,
+                order_id,
+                claim_owner
+            ));
+        }
         tracing::info!(
             run_id = %self.run_id,
             order_id = %order_id,
@@ -238,14 +265,38 @@ where
         target_order_id: String,
     ) -> anyhow::Result<()> {
         let request_id = claimed_row.row.idempotency_key.clone();
+        let outbox_id = claimed_row.row.outbox_id;
+        let claim_owner = claimed_row.row.claimed_by.clone();
 
-        mqk_db::outbox_mark_dispatching(
+        // PAPER-SOAK-STALE-CLAIM-RECOVERY-03 Layer C: same hard pre-broker
+        // fence as the submit path -- see rationale there. `false` means NO
+        // gateway.cancel call.
+        let claim_owner = claim_owner.ok_or_else(|| {
+            anyhow!(
+                "STALE_OUTBOX_CLAIM: outbox row {} (request_id={}) has no claim owner \
+                 recorded -- refusing to advance to DISPATCHING without proof of ownership",
+                outbox_id,
+                request_id
+            )
+        })?;
+        let dispatching_ok = mqk_db::outbox_mark_dispatching(
             &self.pool,
+            outbox_id,
             &request_id,
+            &claim_owner,
             &self.dispatcher_id,
             self.time_source.now_utc(),
         )
         .await?;
+        if !dispatching_ok {
+            return Err(anyhow!(
+                "DISPATCH_FENCE_LOST: outbox row {} (request_id={}, claim_owner={}) failed the \
+                 CLAIMED->DISPATCHING ownership CAS -- refusing broker cancel (zero calls)",
+                outbox_id,
+                request_id,
+                claim_owner
+            ));
+        }
 
         // EXEC-CANCEL-01: if the cancel target is absent from the live OMS map,
         // handle it immediately and durably.  The row is already DISPATCHING;

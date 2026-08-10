@@ -210,10 +210,18 @@ async fn dispatching_rows_never_reset_by_stale_reaper() -> anyhow::Result<()> {
     mqk_db::outbox_enqueue(&pool, run_id, &intent_id, json!({"symbol":"IWM","qty":3})).await?;
 
     let claimed_at = Utc::now() - Duration::hours(1);
-    mqk_db::outbox_claim_batch(&pool, 1, "dispatcher-mid-submit", claimed_at).await?;
+    let claimed = mqk_db::outbox_claim_batch(&pool, 1, "dispatcher-mid-submit", claimed_at).await?;
+    assert_eq!(claimed.len(), 1, "precondition: row must be claimed");
 
-    let marked =
-        mqk_db::outbox_mark_dispatching(&pool, &intent_id, "attempt-1", Utc::now()).await?;
+    let marked = mqk_db::outbox_mark_dispatching(
+        &pool,
+        claimed[0].row.outbox_id,
+        &intent_id,
+        "dispatcher-mid-submit",
+        "attempt-1",
+        Utc::now(),
+    )
+    .await?;
     assert!(marked, "row must transition CLAIMED -> DISPATCHING");
 
     // A threshold far in the future would reset any still-CLAIMED row --

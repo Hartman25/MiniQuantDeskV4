@@ -386,7 +386,15 @@ mod db_tests {
                 .await?;
         assert_eq!(claimed.len(), 1, "S2 setup: claim must succeed");
         assert!(
-            mqk_db::outbox_mark_dispatching(&pool, idem, "a4-setup-dispatcher", Utc::now()).await?,
+            mqk_db::outbox_mark_dispatching(
+                &pool,
+                claimed[0].row.outbox_id,
+                idem,
+                "a4-setup-dispatcher",
+                "a4-setup-dispatcher",
+                Utc::now()
+            )
+            .await?,
             "S2 setup: CLAIMED → DISPATCHING"
         );
         assert!(
@@ -484,8 +492,15 @@ mod db_tests {
                     .await?;
             assert_eq!(claimed.len(), 1);
             assert!(
-                mqk_db::outbox_mark_dispatching(&pool, idem_ambiguous, "s3-dispatcher", Utc::now())
-                    .await?
+                mqk_db::outbox_mark_dispatching(
+                    &pool,
+                    claimed[0].row.outbox_id,
+                    idem_ambiguous,
+                    "s3-dispatcher",
+                    "s3-dispatcher",
+                    Utc::now()
+                )
+                .await?
             );
             assert!(mqk_db::outbox_mark_ambiguous(&pool, idem_ambiguous).await?);
         }
@@ -556,7 +571,15 @@ mod db_tests {
                 .await?;
         assert_eq!(claimed.len(), 1, "S4: claim must succeed");
         assert!(
-            mqk_db::outbox_mark_dispatching(&pool, idem, "s4-dispatcher", Utc::now()).await?,
+            mqk_db::outbox_mark_dispatching(
+                &pool,
+                claimed[0].row.outbox_id,
+                idem,
+                "s4-dispatcher",
+                "s4-dispatcher",
+                Utc::now()
+            )
+            .await?,
             "S4: CLAIMED → DISPATCHING"
         );
         assert!(

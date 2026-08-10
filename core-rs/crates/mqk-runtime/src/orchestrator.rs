@@ -988,14 +988,55 @@ where
             Vec::new()
         } else {
             self.refresh_or_acquire_runtime_leadership().await?;
-            mqk_db::outbox_claim_batch_for_run(
+            // PAPER-SOAK-STALE-CLAIM-RECOVERY-03: the fenced claim call
+            // re-verifies run RUNNING + exact lease identity atomically with
+            // the claim mutation itself, closing the check-then-act gap
+            // between the refresh above and this claim (§24 — "a separate
+            // check followed by a separate mutation is NOT an atomic
+            // fence").
+            let epoch = self.runtime_epoch.ok_or_else(|| {
+                anyhow!(
+                    "INVARIANT_VIOLATION: run {} refresh_or_acquire_runtime_leadership \
+                     succeeded without setting runtime_epoch",
+                    self.run_id
+                )
+            })?;
+            match mqk_db::outbox_claim_batch_for_run_with_lease_authority(
                 &self.pool,
                 self.run_id,
+                &self.runtime_holder_id,
+                epoch,
                 1,
                 &self.dispatcher_id,
                 self.time_source.now_utc(),
             )
             .await?
+            {
+                mqk_db::FencedClaimOutcome::Claimed(rows) => rows,
+                mqk_db::FencedClaimOutcome::RunNotRunning { actual_status } => {
+                    self.runtime_epoch = None;
+                    return Err(anyhow!(
+                        "RUNTIME_FENCED_RUN_NOT_RUNNING: run {} is '{}', not RUNNING — claim \
+                         refused at the pre-mutation dispatch fence (no lease/claim/dispatch, \
+                         no re-halt)",
+                        self.run_id,
+                        actual_status
+                    ));
+                }
+                mqk_db::FencedClaimOutcome::LeaseInvalid => {
+                    self.runtime_epoch = None;
+                    let now = self.time_source.now_utc();
+                    persist_halt_and_disarm(&self.pool, self.run_id, now, "LeaderLeaseLost")
+                        .await?;
+                    return Err(anyhow!(
+                        "RUNTIME_LEASE_LOST: run {} holder={} epoch={} — claim-time lease \
+                         re-verification failed",
+                        self.run_id,
+                        self.runtime_holder_id,
+                        epoch,
+                    ));
+                }
+            }
         };
         for claimed_row in claimed {
             self.refresh_or_acquire_runtime_leadership().await?;
@@ -1635,49 +1676,61 @@ where
         };
         mqk_db::runtime_lease::release_lease(&self.pool, &self.runtime_holder_id, epoch).await
     }
+    /// PAPER-SOAK-STALE-CLAIM-RECOVERY-03: run-aware, transactionally-fenced
+    /// leadership refresh/acquire.
+    ///
+    /// Routed through `mqk_db::runtime_lease::acquire_or_refresh_lease_for_running_run`
+    /// instead of the unfenced `refresh_lease`/`acquire_lease` primitives —
+    /// see that function's doc comment for the serialization boundary it
+    /// shares with `clear_halted_run_and_reset_stale_claims`. The critical
+    /// behavioral difference from the pre-03 implementation is
+    /// `RunNotRunning`: when the run is no longer durably `RUNNING` (e.g.
+    /// already `STOPPED` by an operator's `clear-halted-run`), this function
+    /// must NOT call `persist_halt_and_disarm` — doing so would let a stale
+    /// runtime that resumes after a successful clear rewrite `STOPPED` back
+    /// to `HALTED` (§9 rehalt hazard). `RunNotRunning` is therefore a fenced
+    /// refusal, distinct from genuine lease loss/contest (`Lost`,
+    /// `HeldByOther`), which keep the existing fail-closed halt+disarm
+    /// behavior unchanged.
     async fn refresh_or_acquire_runtime_leadership(&mut self) -> anyhow::Result<()> {
         let now = self.time_source.now_utc();
-        if let Some(epoch) = self.runtime_epoch {
-            match mqk_db::runtime_lease::refresh_lease(
-                &self.pool,
-                &self.runtime_holder_id,
-                epoch,
-                now,
-                self.runtime_lease_ttl_secs,
-            )
-            .await
-            {
-                Ok(lease) => {
-                    self.runtime_epoch = Some(lease.epoch);
-                    return Ok(());
-                }
-                Err(err) => {
-                    self.runtime_epoch = None;
-                    persist_halt_and_disarm(&self.pool, self.run_id, now, "LeaderLeaseLost")
-                        .await?;
-                    return Err(anyhow!(
-                        "RUNTIME_LEASE_LOST: run {} holder={} epoch={} error={}",
-                        self.run_id,
-                        self.runtime_holder_id,
-                        epoch,
-                        err
-                    ));
-                }
-            }
-        }
-        match mqk_db::runtime_lease::acquire_lease(
+        let outcome = mqk_db::runtime_lease::acquire_or_refresh_lease_for_running_run(
             &self.pool,
+            self.run_id,
             &self.runtime_holder_id,
+            self.runtime_epoch,
             now,
             self.runtime_lease_ttl_secs,
         )
-        .await?
-        {
-            mqk_db::runtime_lease::LeaseAcquireOutcome::Acquired(lease) => {
+        .await?;
+
+        match outcome {
+            mqk_db::runtime_lease::RunLeaseAuthorityOutcome::Acquired(lease)
+            | mqk_db::runtime_lease::RunLeaseAuthorityOutcome::Refreshed(lease) => {
                 self.runtime_epoch = Some(lease.epoch);
                 Ok(())
             }
-            mqk_db::runtime_lease::LeaseAcquireOutcome::HeldByOther(current) => {
+            mqk_db::runtime_lease::RunLeaseAuthorityOutcome::RunNotRunning { actual_status } => {
+                self.runtime_epoch = None;
+                Err(anyhow!(
+                    "RUNTIME_FENCED_RUN_NOT_RUNNING: run {} is '{}', not RUNNING — dispatch \
+                     authority refused (no lease acquired/refreshed, no claim, no dispatch, \
+                     and no re-halt of a non-HALTED run)",
+                    self.run_id,
+                    actual_status
+                ))
+            }
+            mqk_db::runtime_lease::RunLeaseAuthorityOutcome::Lost => {
+                self.runtime_epoch = None;
+                persist_halt_and_disarm(&self.pool, self.run_id, now, "LeaderLeaseLost").await?;
+                Err(anyhow!(
+                    "RUNTIME_LEASE_LOST: run {} holder={} — refresh CAS failed (holder \
+                     mismatch, epoch mismatch, or lease already expired)",
+                    self.run_id,
+                    self.runtime_holder_id,
+                ))
+            }
+            mqk_db::runtime_lease::RunLeaseAuthorityOutcome::HeldByOther(current) => {
                 persist_halt_and_disarm(&self.pool, self.run_id, now, "LeaderLeaseUnavailable")
                     .await?;
                 Err(anyhow!(

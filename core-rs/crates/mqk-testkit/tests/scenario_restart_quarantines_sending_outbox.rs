@@ -216,8 +216,15 @@ async fn restart_quarantines_dispatching_row_and_refuses_dispatch() -> Result<()
             .await?;
     assert_eq!(claimed.len(), 1, "must claim the pending row");
 
-    let marked =
-        mqk_db::outbox_mark_dispatching(&pool, idem, "patch2-dispatcher", Utc::now()).await?;
+    let marked = mqk_db::outbox_mark_dispatching(
+        &pool,
+        claimed[0].row.outbox_id,
+        idem,
+        "patch2-dispatcher",
+        "patch2-dispatcher",
+        Utc::now(),
+    )
+    .await?;
     assert!(marked, "row must transition CLAIMED -> DISPATCHING");
 
     let ambiguous = mqk_db::outbox_load_restart_ambiguous_for_run(&pool, run_id).await?;

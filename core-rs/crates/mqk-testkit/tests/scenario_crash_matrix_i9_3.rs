@@ -169,8 +169,15 @@ async fn w4_crash_after_submit_before_mark_sent_no_double_submit() -> anyhow::Re
     );
 
     // Dispatcher marks DISPATCHING before broker submit (CLAIMED → DISPATCHING).
-    let marked_dispatching =
-        mqk_db::outbox_mark_dispatching(&pool, key, "i93-dispatcher", Utc::now()).await?;
+    let marked_dispatching = mqk_db::outbox_mark_dispatching(
+        &pool,
+        claimed[0].row.outbox_id,
+        key,
+        "i93-dispatcher",
+        "i93-dispatcher",
+        Utc::now(),
+    )
+    .await?;
     assert!(
         marked_dispatching,
         "W4: outbox_mark_dispatching must transition CLAIMED → DISPATCHING"
@@ -256,8 +263,15 @@ async fn w5_crash_after_atomic_sent_and_broker_map_commit_no_double_submit() -> 
     );
 
     // Production path now requires CLAIMED → DISPATCHING before submit.
-    let marked_dispatching =
-        mqk_db::outbox_mark_dispatching(&pool, key, "i93-dispatcher", Utc::now()).await?;
+    let marked_dispatching = mqk_db::outbox_mark_dispatching(
+        &pool,
+        claimed[0].row.outbox_id,
+        key,
+        "i93-dispatcher",
+        "i93-dispatcher",
+        Utc::now(),
+    )
+    .await?;
     assert!(
         marked_dispatching,
         "W5: outbox_mark_dispatching must transition CLAIMED → DISPATCHING"

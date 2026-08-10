@@ -559,7 +559,15 @@ async fn dhd03_cancel_halt_ambiguous_halts_durably() -> Result<()> {
     let claimed =
         mqk_db::outbox_claim_batch_for_run(&pool, run_id, 1, "dhd03-setup", Utc::now()).await?;
     assert_eq!(claimed.len(), 1, "DHD-03 setup: must claim submit row");
-    mqk_db::outbox_mark_dispatching(&pool, order_id, "dhd03-setup", Utc::now()).await?;
+    mqk_db::outbox_mark_dispatching(
+        &pool,
+        claimed[0].row.outbox_id,
+        order_id,
+        "dhd03-setup",
+        "dhd03-setup",
+        Utc::now(),
+    )
+    .await?;
     mqk_db::outbox_mark_sent_with_broker_map(&pool, order_id, broker_order_id, Utc::now()).await?;
 
     // Seed the cancel outbox row.  The cancel parser requires "target_order_id".

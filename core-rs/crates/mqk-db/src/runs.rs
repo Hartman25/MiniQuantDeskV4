@@ -705,7 +705,37 @@ pub async fn clear_halted_run(pool: &PgPool, run_id: Uuid) -> Result<()> {
     }))
 }
 
-/// PAPER-SOAK-STALE-CLAIM-RECOVERY-02: clear a halted run AND reclaim any
+/// Typed outcome of [`clear_halted_run_and_reset_stale_claims`].
+///
+/// Replaces the previous `Result<u64>` shape (PAPER-SOAK-STALE-CLAIM-RECOVERY-03):
+/// a refusal is not necessarily an error condition the caller should log as a
+/// failure — `ActiveRuntimeLease` in particular is the *expected*, correct
+/// outcome the very first time an operator calls this while the prior
+/// runtime process is still shutting down. Distinguishing it from
+/// `StaleRunTransition` (wrong lifecycle state) and from a genuine DB failure
+/// (still `Err(anyhow::Error)`) lets the operator route return an accurate,
+/// stable disposition instead of a generic error.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClearHaltedRunOutcome {
+    /// The run was durably `HALTED` with no active runtime lease; it is now
+    /// `STOPPED` and every stranded `CLAIMED` row for it was reset to
+    /// `PENDING`. Zero mutation occurs on any other outcome.
+    Success { stale_claims_reset: u64 },
+    /// Refused: the run is durably `HALTED`, but an unexpired runtime leader
+    /// lease still exists, so the prior runtime process may still be able to
+    /// act. No mutation was performed — `runs.status` is still `HALTED`,
+    /// every `CLAIMED` row is untouched, and the lease row is untouched.
+    ActiveRuntimeLease {
+        holder_id: String,
+        epoch: i64,
+        lease_expires_at: DateTime<Utc>,
+    },
+    /// Refused: the run was not durably `HALTED` at the instant the guarded
+    /// transaction executed (already `STOPPED`, still `RUNNING`, etc).
+    StaleRunTransition { actual_status: String },
+}
+
+/// PAPER-SOAK-STALE-CLAIM-RECOVERY-02/03: clear a halted run AND reclaim any
 /// `CLAIMED` outbox row it left stranded before `DISPATCHING`, atomically.
 ///
 /// # Why this exists
@@ -730,31 +760,57 @@ pub async fn clear_halted_run(pool: &PgPool, run_id: Uuid) -> Result<()> {
 ///    exactly the state a crash-orphaned run is in. So the reset call could
 ///    never actually run for the crash-recovery case it was written for.
 ///
-/// # This function's authority model
+/// # -02's false assumption (corrected by -03)
 ///
-/// `clear-halted-run` is this repository's existing, deliberately
-/// operator-mediated recovery path (see `clear_halted_run` above): a `RUNNING`
-/// run only ever reaches `HALTED` via deadman-timeout enforcement, an
-/// explicit operator halt, or a lease-loss/lease-unavailable safety halt —
-/// in every case, durably recording `HALTED` is itself the proof that no
-/// further dispatch may legitimately proceed for this run (the halt gate in
-/// `ExecutionOrchestrator::tick` refuses all dispatch once halted, for any
-/// process, including one that is merely slow rather than truly dead). The
-/// `WHERE status = 'HALTED'` CAS guard below is therefore the ownership
-/// proof itself: only a run currently, durably `HALTED` can have its claims
-/// reset, and only the first caller to win that CAS (a concurrent second
-/// `clear-halted-run` call gets `StaleRunTransition`, exactly as
-/// `clear_halted_run` already behaves) performs the reset — satisfying "the
-/// recovering runtime has proven exclusive durable authority to act for
-/// that run" without needing to touch the runtime leadership lease at all.
+/// -02's authority model claimed durable `HALTED` alone was "a complete,
+/// race-proof authority check — no runtime lease inspection needed", because
+/// the orchestrator's Phase-0 halt guard refuses all dispatch once a run is
+/// `HALTED`. That reasoning has a gap: the Phase-0 guard is only checked at
+/// the *top* of a tick. A runtime that already read `RUNNING` at Phase 0
+/// before a concurrent halt landed can proceed deeper into that same tick
+/// (lease refresh, outbox claim, broker submit) without ever re-observing
+/// `HALTED` — and the pre-03 `refresh_lease`/`acquire_lease` primitives
+/// verify holder/epoch/expiry only, with no notion of which run or its
+/// status. A durably `HALTED` run with a still-unexpired
+/// `runtime_leader_lease` is therefore not proof the prior owner has
+/// stopped acting; it may be a slow process mid-tick that will keep
+/// refreshing that lease and keep dispatching for as long as the lease
+/// stays valid.
+///
+/// # This function's authority model (current)
+///
+/// `clear-halted-run` requires **both**:
+/// 1. The run is durably `HALTED` (`WHERE status = 'HALTED'`, locked via
+///    `SELECT ... FOR UPDATE` before any decision is made — see below).
+/// 2. No unexpired `runtime_leader_lease` exists (Layer A / quiescence). An
+///    expired lease is not active authority and is cleaned up as part of the
+///    same atomic recovery; an active, unexpired lease is a hard refusal
+///    with zero mutation (`ClearHaltedRunOutcome::ActiveRuntimeLease`).
+///
+/// # Serialization boundary (closes the concurrent-race class, not just the
+/// sequential one)
+///
+/// The `runs` row for `run_id` is locked with `SELECT ... FOR UPDATE` before
+/// this function reads `status` or the lease table, and that lock is held
+/// for the rest of the transaction. `mqk_db::runtime_lease::
+/// acquire_or_refresh_lease_for_running_run` locks the exact same row the
+/// exact same way before *it* decides lease authority. Postgres serializes
+/// any two transactions contending for the same row lock — whichever
+/// transaction locks the row first runs to completion (commit or rollback)
+/// before the other's lock acquisition can proceed. This holds even when no
+/// `runtime_leader_lease` row exists yet at all (the locked row is `runs`,
+/// not the lease table), which is what closes the "Runtime A observed
+/// RUNNING but had not yet acquired a lease" race, not only the
+/// already-has-a-lease race.
 ///
 /// The threshold for "stale" is deliberately not a fixed lookback window
 /// (`PAPER-SOAK-STALE-CLAIM-RECOVERY-01` used `claimed_at_utc < now()`, which
 /// is not a staleness filter at all — it matches every `CLAIMED` row
 /// regardless of age). Ownership, not timestamp comparison, is what proves
-/// the prior claimant is dead: once the CAS above proves this run is
-/// `HALTED`, every remaining `CLAIMED` row for it is provably orphaned
-/// regardless of how recently it was claimed, so all of them are reset.
+/// the prior claimant is dead: once this function proves the run is
+/// `HALTED` with no active lease, every remaining `CLAIMED` row for it is
+/// provably orphaned regardless of how recently it was claimed, so all of
+/// them are reset.
 ///
 /// # Safety contract (unchanged from `outbox_reset_stale_claims`)
 ///
@@ -764,32 +820,98 @@ pub async fn clear_halted_run(pool: &PgPool, run_id: Uuid) -> Result<()> {
 /// is never reset. Scoped to `run_id`: a stale claim belonging to a
 /// different run is untouched (that run's own halt-clear owns resetting it).
 ///
-/// Returns `Ok(reset_row_count)` on success, or `Err(StaleRunTransition)` if
-/// the run was not durably `HALTED` at the instant the CAS executed.
-pub async fn clear_halted_run_and_reset_stale_claims(pool: &PgPool, run_id: Uuid) -> Result<u64> {
+/// `now_utc` is caller-supplied (FC-9: no wall-clock reads in enforcement
+/// paths) so lease-expiry proofs are deterministic in tests.
+pub async fn clear_halted_run_and_reset_stale_claims(
+    pool: &PgPool,
+    run_id: Uuid,
+    now_utc: DateTime<Utc>,
+) -> Result<ClearHaltedRunOutcome> {
     let mut tx = pool
         .begin()
         .await
         .context("clear_halted_run_and_reset_stale_claims: begin tx failed")?;
 
+    // Lock the run row FIRST — the same serialization boundary
+    // `acquire_or_refresh_lease_for_running_run` uses. See doc comment above.
+    let status: Option<String> =
+        sqlx::query_scalar("SELECT status FROM runs WHERE run_id = $1 FOR UPDATE")
+            .bind(run_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .context("clear_halted_run_and_reset_stale_claims: run lock failed")?;
+
+    let Some(status) = status else {
+        tx.rollback().await.ok();
+        return Err(anyhow!(
+            "clear_halted_run_and_reset_stale_claims: run {run_id} not found"
+        ));
+    };
+
+    if status != "HALTED" {
+        tx.rollback()
+            .await
+            .context("clear_halted_run_and_reset_stale_claims: rollback (not halted) failed")?;
+        return Ok(ClearHaltedRunOutcome::StaleRunTransition {
+            actual_status: status,
+        });
+    }
+
+    // LAYER A — quiescence before halt clear (§3/§9/-02's false assumption).
+    let lease: Option<(String, i64, DateTime<Utc>)> = sqlx::query_as(
+        "SELECT holder_id, epoch, lease_expires_at FROM runtime_leader_lease WHERE id = 1",
+    )
+    .fetch_optional(&mut *tx)
+    .await
+    .context("clear_halted_run_and_reset_stale_claims: lease read failed")?;
+
+    if let Some((ref holder_id, epoch, lease_expires_at)) = lease {
+        if lease_expires_at > now_utc {
+            tx.rollback().await.context(
+                "clear_halted_run_and_reset_stale_claims: rollback (active lease) failed",
+            )?;
+            return Ok(ClearHaltedRunOutcome::ActiveRuntimeLease {
+                holder_id: holder_id.clone(),
+                epoch,
+                lease_expires_at,
+            });
+        }
+    }
+
+    // Expired-lease cleanup (§12): delete only the exact expired row just
+    // observed, inside the same transaction as the recovery mutation below —
+    // atomic from the operator's perspective. An absent lease is a no-op.
+    if let Some((holder_id, epoch, _)) = lease {
+        sqlx::query(
+            "DELETE FROM runtime_leader_lease WHERE id = 1 AND holder_id = $1 AND epoch = $2",
+        )
+        .bind(&holder_id)
+        .bind(epoch)
+        .execute(&mut *tx)
+        .await
+        .context("clear_halted_run_and_reset_stale_claims: expired lease cleanup failed")?;
+    }
+
     let done = sqlx::query(
         r#"
         update runs
         set status = 'STOPPED',
-            stopped_at_utc = now() -- allow: ops-metadata — operator-acknowledged halt clear
+            stopped_at_utc = $2
         where run_id = $1
           and status = 'HALTED'
         "#,
     )
     .bind(run_id)
+    .bind(now_utc)
     .execute(&mut *tx)
     .await
     .context("clear_halted_run_and_reset_stale_claims: clear-halt update failed")?;
 
     if done.rows_affected() != 1 {
-        tx.rollback()
-            .await
-            .context("clear_halted_run_and_reset_stale_claims: rollback (CAS miss) failed")?;
+        // Unreachable given the row lock + status check above (no other
+        // writer can change `status` while this tx holds the row lock), but
+        // fail closed rather than assume it.
+        tx.rollback().await.ok();
         let r = fetch_run(pool, run_id).await?;
         return Err(anyhow::Error::new(StaleRunTransition {
             run_id,
@@ -818,7 +940,9 @@ pub async fn clear_halted_run_and_reset_stale_claims(pool: &PgPool, run_id: Uuid
         .await
         .context("clear_halted_run_and_reset_stale_claims: commit failed")?;
 
-    Ok(reset.rows_affected())
+    Ok(ClearHaltedRunOutcome::Success {
+        stale_claims_reset: reset.rows_affected(),
+    })
 }
 
 /// Heartbeat: RUNNING only updates last_heartbeat_utc. CAS-guarded

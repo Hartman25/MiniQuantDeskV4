@@ -2457,3 +2457,127 @@ async fn runtime_holder_id_is_compact_and_stable() {
         lease.holder_id
     );
 }
+
+// ---------------------------------------------------------------------------
+// PAPER-SOAK-STALE-CLAIM-RECOVERY-03: orchestrator-level end-to-end proof
+// ---------------------------------------------------------------------------
+
+type Scr03Orchestrator =
+    ExecutionOrchestrator<SubmitCountingBroker, AllowGate, AllowGate, AllowGate, MutableClock>;
+
+fn make_scr03_orchestrator(
+    pool: PgPool,
+    run_id: Uuid,
+    dispatcher_id: &'static str,
+    clock: MutableClock,
+    submits: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+) -> Scr03Orchestrator {
+    ExecutionOrchestrator::new(
+        pool,
+        mqk_execution::BrokerGateway::for_test(
+            SubmitCountingBroker { submits },
+            AllowGate,
+            AllowGate,
+            AllowGate,
+        ),
+        mqk_execution::BrokerOrderMap::new(),
+        BTreeMap::new(),
+        PortfolioState::new(0),
+        run_id,
+        dispatcher_id,
+        "paper",
+        None,
+        clock,
+        Box::new(mqk_reconcile::LocalSnapshot::empty),
+        Box::new(|| mqk_reconcile::BrokerSnapshot::empty_at(1)),
+    )
+}
+
+/// §18/NEG-6 at the real `ExecutionOrchestrator::tick()` level (not just the
+/// DB-primitive level exercised by the `mqk-daemon` SCR03 tests).
+///
+/// Chronology:
+/// 1. Runtime A ticks once: RUNNING observed at Phase 0, lease acquired,
+///    ordinary tick completes cleanly (no outbox rows yet — nothing to
+///    dispatch).
+/// 2. A's lease expires (models a crashed/stalled process — A never ticks
+///    again on its own).
+/// 3. The operator halts the run and clears it. Layer A permits this
+///    because A's lease has expired — not because of any timing assumption
+///    beyond the expiry itself.
+/// 4. A "resumes" (it was merely slow, not truly dead) and calls `tick()`
+///    again. Phase-0's `HALT_GUARD` only refuses on `HALTED` — by now the
+///    run is `STOPPED`, so that guard does NOT catch this. The fence that
+///    MUST catch it is `refresh_or_acquire_runtime_leadership`'s
+///    `RunNotRunning` branch.
+/// 5. The critical proof: the run must still be `STOPPED` afterward — A's
+///    fenced tick must never rewrite it back to `HALTED` (the exact -02
+///    rehalt hazard SCR03 §9 closes).
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; run with --include-ignored"]
+async fn scr03_stale_runtime_tick_after_clear_is_fenced_and_never_rehalts_stopped() {
+    let pool = runtime_test_pool().await;
+    let clock = MutableClock::new(runtime_ts(80_000));
+    let run_id = make_running_run(&pool, clock.now_utc()).await;
+    let submits = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+
+    let mut orchestrator = make_scr03_orchestrator(
+        pool.clone(),
+        run_id,
+        "runtime-scr03-a",
+        clock.clone(),
+        std::sync::Arc::clone(&submits),
+    );
+
+    // 1. Runtime A's first tick: acquires the lease, run stays RUNNING.
+    orchestrator
+        .tick()
+        .await
+        .expect("first tick acquires lease and runs cleanly");
+    assert_eq!(submits.load(std::sync::atomic::Ordering::SeqCst), 0);
+
+    // 2. A's lease expires — A never ticks again on its own.
+    clock.set(runtime_ts(80_000 + RUNTIME_LEASE_TTL_SECS + 1));
+
+    // 3. Operator halts and clears. Layer A permits this: A's lease has
+    // expired, so it is not active authority.
+    mqk_db::halt_run(&pool, run_id, clock.now_utc())
+        .await
+        .expect("halt_run");
+    let outcome = mqk_db::clear_halted_run_and_reset_stale_claims(&pool, run_id, clock.now_utc())
+        .await
+        .expect("clear must succeed once A's lease has expired");
+    assert!(
+        matches!(outcome, mqk_db::ClearHaltedRunOutcome::Success { .. }),
+        "expected Success, got {outcome:?}"
+    );
+    let run_after_clear = mqk_db::fetch_run(&pool, run_id).await.expect("fetch_run");
+    assert!(matches!(run_after_clear.status, mqk_db::RunStatus::Stopped));
+
+    // 4. Stale runtime A "resumes" and ticks again.
+    let err = orchestrator
+        .tick()
+        .await
+        .expect_err("stale runtime's tick must be fenced once the run is no longer RUNNING");
+    assert!(
+        err.to_string().contains("RUNTIME_FENCED_RUN_NOT_RUNNING"),
+        "unexpected error: {err}"
+    );
+
+    // Zero broker calls at any point in this chronology.
+    assert_eq!(
+        submits.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "a fenced stale runtime must never reach the broker"
+    );
+
+    // 5. The critical NEG-6 proof: the run must NOT have been rewritten back
+    // to HALTED by the stale runtime's fenced tick.
+    let run_final = mqk_db::fetch_run(&pool, run_id).await.expect("fetch_run");
+    assert!(
+        matches!(run_final.status, mqk_db::RunStatus::Stopped),
+        "NEG-6: a stale runtime's fenced tick must never turn STOPPED back into HALTED, \
+         got status={:?}",
+        run_final.status
+    );
+}

@@ -4,7 +4,7 @@ use serde_json::Value;
 use sqlx::{PgPool, Row};
 use uuid::Uuid;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct OutboxRow {
     pub outbox_id: i64,
     pub run_id: Uuid,
@@ -167,7 +167,7 @@ pub async fn outbox_unresolved_broker_reachable_orders(
 /// ❌  OutboxClaimToken { _priv: (), … }                    // ERROR: private field
 /// ```
 #[allow(clippy::manual_non_exhaustive)]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct OutboxClaimToken {
     /// The DB row ID of the claimed outbox entry.
     pub outbox_id: i64,
@@ -237,7 +237,7 @@ impl OutboxClaimToken {
 // test infrastructure (testkit feature) may use this type. Daemon and CLI must
 // not depend on mqk-db with either feature active.
 #[cfg(any(feature = "runtime-claim", feature = "testkit"))]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ClaimedOutboxRow {
     /// The claimed outbox row (status = `CLAIMED`).
     pub row: OutboxRow,
@@ -411,6 +411,177 @@ pub async fn outbox_claim_batch_for_run(
     outbox_claim_batch_inner(pool, Some(run_id), batch_size, dispatcher_id, claimed_at).await
 }
 
+/// Outcome of [`outbox_claim_batch_for_run_with_lease_authority`].
+#[cfg(any(feature = "runtime-claim", feature = "testkit"))]
+#[derive(Debug, Clone, PartialEq)]
+pub enum FencedClaimOutcome {
+    /// Run/lease authority was proven; the returned rows (possibly empty if
+    /// no `PENDING` rows were available) were claimed.
+    Claimed(Vec<ClaimedOutboxRow>),
+    /// Refused: the run is not durably `RUNNING`.
+    RunNotRunning { actual_status: String },
+    /// Refused: no unexpired `runtime_leader_lease` row matches the exact
+    /// `(holder_id, epoch)` the caller presented.
+    LeaseInvalid,
+}
+
+/// PAPER-SOAK-STALE-CLAIM-RECOVERY-03 — production-fenced outbox claim.
+///
+/// # Why this exists
+///
+/// `outbox_claim_batch_for_run` proves only that a `PENDING` row exists for
+/// `run_id` — it has no notion of run status or runtime lease authority at
+/// all. Production dispatch (`ExecutionOrchestrator`) called
+/// `refresh_or_acquire_runtime_leadership()` immediately before it as a
+/// separate step, which is a check-then-act gap: nothing stops the run from
+/// being halted-and-cleared in the window between the lease check completing
+/// and this claim call executing. This function closes that gap by
+/// re-verifying run status AND lease identity atomically, in the same
+/// transaction as the claim mutation itself — not by trusting an earlier,
+/// separate check.
+///
+/// # Authority proof
+///
+/// Inside one transaction, this function:
+/// 1. Locks the run row (`SELECT ... FOR UPDATE`) — the same serialization
+///    boundary `clear_halted_run_and_reset_stale_claims` and
+///    `acquire_or_refresh_lease_for_running_run` use, so a concurrent
+///    halt-clear cannot interleave with this claim.
+/// 2. Requires `runs.status = 'RUNNING'`.
+/// 3. Requires the current `runtime_leader_lease` row to exactly match
+///    `(holder_id, epoch)` and be unexpired at `claimed_at`.
+/// 4. Only then performs the ordinary `PENDING -> CLAIMED` claim (identical
+///    `FOR UPDATE SKIP LOCKED` semantics to `outbox_claim_batch_for_run`).
+///
+/// Any failure of 2/3 rolls back with zero mutation and returns a typed
+/// refusal instead of an empty claim — callers must not conflate "refused
+/// because unauthorized" with "no work available".
+///
+/// # Availability — RT-1 single-dispatcher gate
+///
+/// Same gate as `outbox_claim_batch_for_run`: `runtime-claim` (production,
+/// `mqk-runtime` only) or `testkit` (test infrastructure).
+#[cfg(any(feature = "runtime-claim", feature = "testkit"))]
+pub async fn outbox_claim_batch_for_run_with_lease_authority(
+    pool: &PgPool,
+    run_id: Uuid,
+    holder_id: &str,
+    epoch: i64,
+    batch_size: i64,
+    dispatcher_id: &str,
+    claimed_at: DateTime<Utc>,
+) -> Result<FencedClaimOutcome> {
+    let mut tx = pool
+        .begin()
+        .await
+        .context("outbox_claim_batch_for_run_with_lease_authority: begin tx failed")?;
+
+    let status: Option<String> =
+        sqlx::query_scalar("SELECT status FROM runs WHERE run_id = $1 FOR UPDATE")
+            .bind(run_id)
+            .fetch_optional(&mut *tx)
+            .await
+            .context("outbox_claim_batch_for_run_with_lease_authority: run lock failed")?;
+
+    let Some(status) = status else {
+        tx.rollback().await.ok();
+        return Err(anyhow!(
+            "outbox_claim_batch_for_run_with_lease_authority: run {run_id} not found"
+        ));
+    };
+
+    if status != "RUNNING" {
+        tx.rollback().await.context(
+            "outbox_claim_batch_for_run_with_lease_authority: rollback (not running) failed",
+        )?;
+        return Ok(FencedClaimOutcome::RunNotRunning {
+            actual_status: status,
+        });
+    }
+
+    let lease_valid: Option<(String,)> = sqlx::query_as(
+        r#"
+        SELECT holder_id
+          FROM runtime_leader_lease
+         WHERE id = 1
+           AND holder_id = $1
+           AND epoch = $2
+           AND lease_expires_at > $3
+        "#,
+    )
+    .bind(holder_id)
+    .bind(epoch)
+    .bind(claimed_at)
+    .fetch_optional(&mut *tx)
+    .await
+    .context("outbox_claim_batch_for_run_with_lease_authority: lease check failed")?;
+
+    if lease_valid.is_none() {
+        tx.rollback().await.context(
+            "outbox_claim_batch_for_run_with_lease_authority: rollback (lease invalid) failed",
+        )?;
+        return Ok(FencedClaimOutcome::LeaseInvalid);
+    }
+
+    let rows = sqlx::query(
+        r#"
+        with to_claim as (
+            select outbox_id
+            from oms_outbox
+            where run_id = $2
+              and status = 'PENDING'
+              and (next_dispatch_after_utc is null or next_dispatch_after_utc <= $4)
+            order by outbox_id asc
+            limit $1
+            for update skip locked
+        )
+        update oms_outbox
+           set status         = 'CLAIMED',
+               claimed_at_utc = $4,
+               claimed_by     = $3
+         where outbox_id in (select outbox_id from to_claim)
+        returning outbox_id, run_id, idempotency_key, order_json, status,
+                  created_at_utc, sent_at_utc, claimed_at_utc, claimed_by,
+                  dispatching_at_utc, dispatch_attempt_id
+        "#,
+    )
+    .bind(batch_size)
+    .bind(run_id)
+    .bind(dispatcher_id)
+    .bind(claimed_at)
+    .fetch_all(&mut *tx)
+    .await
+    .context("outbox_claim_batch_for_run_with_lease_authority: claim failed")?;
+
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        let outbox_row = OutboxRow {
+            outbox_id: row.try_get("outbox_id")?,
+            run_id: row.try_get("run_id")?,
+            idempotency_key: row.try_get("idempotency_key")?,
+            order_json: row.try_get("order_json")?,
+            status: row.try_get("status")?,
+            created_at_utc: row.try_get("created_at_utc")?,
+            sent_at_utc: row.try_get("sent_at_utc")?,
+            claimed_at_utc: row.try_get("claimed_at_utc")?,
+            claimed_by: row.try_get("claimed_by")?,
+            dispatching_at_utc: row.try_get("dispatching_at_utc")?,
+            dispatch_attempt_id: row.try_get("dispatch_attempt_id")?,
+        };
+        let token = OutboxClaimToken::new(outbox_row.outbox_id, &outbox_row.idempotency_key);
+        out.push(ClaimedOutboxRow {
+            row: outbox_row,
+            token,
+        });
+    }
+
+    tx.commit()
+        .await
+        .context("outbox_claim_batch_for_run_with_lease_authority: commit failed")?;
+
+    Ok(FencedClaimOutcome::Claimed(out))
+}
+
 /// Release a CLAIMED row back to PENDING.
 ///
 /// Called when a dispatcher fails before broker submit and wants to relinquish
@@ -444,15 +615,34 @@ pub async fn outbox_release_claim(pool: &PgPool, idempotency_key: &str) -> Resul
 /// `outbox_mark_dispatching` and `outbox_mark_sent` leaves the row in
 /// `DISPATCHING`, preventing silent requeue and double-submit on restart.
 ///
+/// # Claim-owner CAS (PAPER-SOAK-STALE-CLAIM-RECOVERY-03)
+///
+/// The `WHERE` clause now also requires `claimed_by = claim_owner` — not
+/// just `status = 'CLAIMED'`. Without this, an ABA sequence is possible: A
+/// claims a row, the row is legitimately reset by recovery (e.g. A's run was
+/// halted and cleared), B later claims the *same* row, and A — still holding
+/// a stale in-memory `ClaimedOutboxRow`/token from before the reset — could
+/// transition B's current claim straight to `DISPATCHING` and reach the
+/// broker for an order it no longer owns. Binding the transition to the
+/// exact `outbox_id` + `idempotency_key` + `claimed_by` recorded at claim
+/// time makes that transition provably impossible: A's stale `claim_owner`
+/// value can never match B's current `claimed_by`.
+///
 /// `dispatching_at` is caller-supplied (no SQL `now()` — FC-7 policy).
 /// `dispatch_attempt_id` identifies which dispatcher instance was in-flight;
-/// used for crash-recovery audit.
+/// used for crash-recovery audit. `claim_owner` should be the exact
+/// `claimed_by` value recorded on the row at claim time (`ClaimedOutboxRow::
+/// row::claimed_by`), not merely the caller's current identity string.
 ///
-/// Returns `true` if the row transitioned `CLAIMED → DISPATCHING`; `false` if
-/// not found or not in `CLAIMED` state.
+/// Returns `true` if the row transitioned `CLAIMED → DISPATCHING` for
+/// exactly this claim owner; `false` if not found, not in `CLAIMED` state,
+/// or currently claimed by someone else. Callers MUST treat `false` as a
+/// hard pre-broker stop — see `dispatch.rs` submit/cancel paths.
 pub async fn outbox_mark_dispatching(
     pool: &PgPool,
+    outbox_id: i64,
     idempotency_key: &str,
+    claim_owner: &str,
     dispatch_attempt_id: &str,
     dispatching_at: DateTime<Utc>,
 ) -> Result<bool> {
@@ -460,14 +650,18 @@ pub async fn outbox_mark_dispatching(
         r#"
         update oms_outbox
            set status              = 'DISPATCHING',
-               dispatching_at_utc  = $3,
-               dispatch_attempt_id = $2
-         where idempotency_key = $1
-           and status = 'CLAIMED'
+               dispatching_at_utc  = $5,
+               dispatch_attempt_id = $4
+         where outbox_id       = $1
+           and idempotency_key = $2
+           and status          = 'CLAIMED'
+           and claimed_by      = $3
         returning outbox_id
         "#,
     )
+    .bind(outbox_id)
     .bind(idempotency_key)
+    .bind(claim_owner)
     .bind(dispatch_attempt_id)
     .bind(dispatching_at)
     .fetch_optional(pool)

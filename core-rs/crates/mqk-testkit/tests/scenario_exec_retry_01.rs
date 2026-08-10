@@ -115,9 +115,17 @@ async fn claim_and_dispatch(pool: &PgPool, run_id: Uuid, dispatcher_id: &str) ->
     );
     let row = &claimed[0].row;
     let idem_key = row.idempotency_key.clone();
-    mqk_db::outbox_mark_dispatching(pool, &idem_key, dispatcher_id, now)
-        .await
-        .expect("mark_dispatching");
+    let outbox_id = row.outbox_id;
+    mqk_db::outbox_mark_dispatching(
+        pool,
+        outbox_id,
+        &idem_key,
+        dispatcher_id,
+        dispatcher_id,
+        now,
+    )
+    .await
+    .expect("mark_dispatching");
     idem_key
 }
 
@@ -272,9 +280,16 @@ async fn r04_exhausted_failed_after_max_attempts() {
         .expect("claim 1");
     assert_eq!(claimed.len(), 1, "must claim row on attempt 1");
     assert_eq!(claimed[0].row.idempotency_key, idem_key);
-    mqk_db::outbox_mark_dispatching(&pool, &idem_key, "disp-r04", t0)
-        .await
-        .expect("dispatch 1");
+    mqk_db::outbox_mark_dispatching(
+        &pool,
+        claimed[0].row.outbox_id,
+        &idem_key,
+        "disp-r04",
+        "disp-r04",
+        t0,
+    )
+    .await
+    .expect("dispatch 1");
 
     let o1 = mqk_db::outbox_record_retry(&pool, &idem_key, "err1", t0)
         .await
@@ -299,9 +314,16 @@ async fn r04_exhausted_failed_after_max_attempts() {
         .expect("claim 2");
     assert_eq!(claimed2.len(), 1, "must re-claim after backoff expires");
     assert_eq!(claimed2[0].row.idempotency_key, idem_key);
-    mqk_db::outbox_mark_dispatching(&pool, &idem_key, "disp-r04", t1)
-        .await
-        .expect("dispatch 2");
+    mqk_db::outbox_mark_dispatching(
+        &pool,
+        claimed2[0].row.outbox_id,
+        &idem_key,
+        "disp-r04",
+        "disp-r04",
+        t1,
+    )
+    .await
+    .expect("dispatch 2");
 
     let o2 = mqk_db::outbox_record_retry(&pool, &idem_key, "err2", t1)
         .await
@@ -319,9 +341,16 @@ async fn r04_exhausted_failed_after_max_attempts() {
         .expect("claim 3");
     assert_eq!(claimed3.len(), 1, "must re-claim for final attempt");
     assert_eq!(claimed3[0].row.idempotency_key, idem_key);
-    mqk_db::outbox_mark_dispatching(&pool, &idem_key, "disp-r04", t2)
-        .await
-        .expect("dispatch 3");
+    mqk_db::outbox_mark_dispatching(
+        &pool,
+        claimed3[0].row.outbox_id,
+        &idem_key,
+        "disp-r04",
+        "disp-r04",
+        t2,
+    )
+    .await
+    .expect("dispatch 3");
 
     let o3 = mqk_db::outbox_record_retry(&pool, &idem_key, "err3", t2)
         .await

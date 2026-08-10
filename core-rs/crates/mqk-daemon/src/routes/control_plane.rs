@@ -1005,8 +1005,89 @@ pub(crate) async fn ops_action(
             }
 
             let run_id = latest.run_id;
-            match mqk_db::clear_halted_run_and_reset_stale_claims(db, run_id).await {
-                Ok(reset_count) => {
+            match mqk_db::clear_halted_run_and_reset_stale_claims(db, run_id, Utc::now()).await {
+                Ok(mqk_db::ClearHaltedRunOutcome::ActiveRuntimeLease {
+                    holder_id,
+                    epoch,
+                    lease_expires_at,
+                }) => {
+                    // PAPER-SOAK-STALE-CLAIM-RECOVERY-03 Layer A: an
+                    // unexpired runtime leader lease is still-live dispatch
+                    // authority even though the run is durably HALTED — the
+                    // prior runtime process may not have observed the halt
+                    // yet. Zero mutation: runs.status, the CLAIMED rows, and
+                    // the lease row are all untouched.
+                    info!(
+                        run_id = %run_id,
+                        holder_id = %holder_id,
+                        epoch,
+                        lease_expires_at = %lease_expires_at.to_rfc3339(),
+                        "ops/action clear-halted-run refused: active runtime lease"
+                    );
+                    (
+                        StatusCode::CONFLICT,
+                        Json(OperatorActionResponse {
+                            requested_action: "clear-halted-run".to_string(),
+                            accepted: false,
+                            disposition: "active_runtime_lease".to_string(),
+                            resulting_integrity_state: None,
+                            resulting_desired_armed: None,
+                            blockers: vec![format!(
+                                "runtime.clear_halted.active_runtime_lease: run {run_id} still \
+                                 has an unexpired runtime leader lease (holder={holder_id}, \
+                                 epoch={epoch}, expires_at={}); the prior runtime process may \
+                                 still be able to act. Wait for it to release the lease (normal \
+                                 shutdown) or for the lease to expire (crashed process), then \
+                                 retry clear-halted-run.",
+                                lease_expires_at.to_rfc3339(),
+                            )],
+                            warnings: vec![],
+                            environment: Some(st.deployment_mode().as_api_label().to_string()),
+                            scope: Some("daemon_instance".to_string()),
+                            audit: OperatorActionAuditFields {
+                                durable_db_write: false,
+                                durable_targets: vec![],
+                                audit_event_id: None,
+                            },
+                            pending_restart_intent: None,
+                            captured_baseline: None,
+                        }),
+                    )
+                        .into_response()
+                }
+                Ok(mqk_db::ClearHaltedRunOutcome::StaleRunTransition { actual_status }) => {
+                    // A concurrent transition (e.g. a second operator clear)
+                    // won the race between this route's precondition fetch
+                    // above and the guarded transaction. Same disposition as
+                    // the ordinary "not currently HALTED" precondition check.
+                    (
+                        StatusCode::CONFLICT,
+                        Json(OperatorActionResponse {
+                            requested_action: "clear-halted-run".to_string(),
+                            accepted: false,
+                            disposition: "run_not_halted".to_string(),
+                            resulting_integrity_state: None,
+                            resulting_desired_armed: None,
+                            blockers: vec![format!(
+                                "The latest run {run_id} is in state '{actual_status}', not \
+                                 'HALTED'; clear-halted-run can only be applied to a HALTED run."
+                            )],
+                            warnings: vec![],
+                            environment: Some(st.deployment_mode().as_api_label().to_string()),
+                            scope: Some("daemon_instance".to_string()),
+                            audit: OperatorActionAuditFields {
+                                durable_db_write: false,
+                                durable_targets: vec![],
+                                audit_event_id: None,
+                            },
+                            pending_restart_intent: None,
+                            captured_baseline: None,
+                        }),
+                    )
+                        .into_response()
+                }
+                Ok(mqk_db::ClearHaltedRunOutcome::Success { stale_claims_reset }) => {
+                    let reset_count = stale_claims_reset;
                     info!(
                         run_id = %run_id,
                         stale_claims_reset = reset_count,

@@ -154,8 +154,15 @@ async fn w1_crash_after_sent_before_ack_no_double_submit() -> anyhow::Result<()>
         "must claim the seeded row for this run"
     );
 
-    let dispatching =
-        mqk_db::outbox_mark_dispatching(&pool, key, "eb5-dispatcher", Utc::now()).await?;
+    let dispatching = mqk_db::outbox_mark_dispatching(
+        &pool,
+        claimed[0].row.outbox_id,
+        key,
+        "eb5-dispatcher",
+        "eb5-dispatcher",
+        Utc::now(),
+    )
+    .await?;
     assert!(
         dispatching,
         "must mark CLAIMED -> DISPATCHING before broker submit"
@@ -268,8 +275,15 @@ async fn w2_crash_after_claimed_before_sent_resubmits_exactly_once() -> anyhow::
 
     // Honest recovery under current state machine:
     // CLAIMED -> DISPATCHING -> broker submit exactly once -> SENT -> ACKED
-    let dispatching =
-        mqk_db::outbox_mark_dispatching(&pool, key, "eb5-recovery", Utc::now()).await?;
+    let dispatching = mqk_db::outbox_mark_dispatching(
+        &pool,
+        claimed[0].row.outbox_id,
+        key,
+        "eb5-dispatcher",
+        "eb5-recovery",
+        Utc::now(),
+    )
+    .await?;
     assert!(
         dispatching,
         "W2: recovery must transition CLAIMED -> DISPATCHING before submit"
@@ -327,8 +341,15 @@ async fn w3_acked_row_not_reinspected_on_second_restart() -> anyhow::Result<()> 
         "must claim the seeded row for this run"
     );
 
-    let dispatching =
-        mqk_db::outbox_mark_dispatching(&pool, key, "eb5-dispatcher", Utc::now()).await?;
+    let dispatching = mqk_db::outbox_mark_dispatching(
+        &pool,
+        claimed[0].row.outbox_id,
+        key,
+        "eb5-dispatcher",
+        "eb5-dispatcher",
+        Utc::now(),
+    )
+    .await?;
     assert!(
         dispatching,
         "must mark CLAIMED -> DISPATCHING before broker submit"
