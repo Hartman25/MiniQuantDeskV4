@@ -56,6 +56,21 @@ fn fixed_run_id(seed: &str) -> Uuid {
     )
 }
 
+/// `oms_outbox.idempotency_key` is globally unique (`uq_outbox_idempotency`,
+/// migration 0001) -- NOT scoped by `run_id`. A literal logical order id
+/// (e.g. "order-1") reused across two different runs' fixtures collides at
+/// that constraint: `outbox_enqueue` silently returns `Ok(false)` for the
+/// second run, leaving it with no outbox row for that order. A subsequent
+/// fill referencing the same logical order then hits `UNKNOWN_ORDER_FILL`
+/// during durable replay (`recover_oms_and_portfolio`), which fails the
+/// best-effort accounting refresh closed -- exactly the missing
+/// `sys_paper_portfolio_accounting_state` / `pnl_truth_state = "not_found"`
+/// failures this fixture must not produce. Scoping every logical order id by
+/// `run_id` makes it globally unique without weakening the DB constraint.
+fn scoped_order_id(run_id: Uuid, logical_order_id: &str) -> String {
+    format!("{}:{logical_order_id}", run_id.simple())
+}
+
 fn expected_snapshot_id(captured_at_utc: chrono::DateTime<Utc>, run_id: Uuid) -> Uuid {
     Uuid::new_v5(
         &Uuid::NAMESPACE_DNS,
@@ -140,7 +155,7 @@ async fn insert_full_fill(
         Side::Buy => "buy",
         Side::Sell => "sell",
     };
-    mqk_db::outbox_enqueue(
+    let enqueued = mqk_db::outbox_enqueue(
         pool,
         run_id,
         order_id,
@@ -148,6 +163,12 @@ async fn insert_full_fill(
     )
     .await
     .expect("outbox_enqueue should succeed");
+    assert!(
+        enqueued,
+        "outbox_enqueue must be a fresh insertion for order_id={order_id} (run_id={run_id}); \
+         a false return means idempotency_key already exists globally -- the fixture's \
+         order id is not run-scoped"
+    );
     sqlx::query("update oms_outbox set status = 'SENT' where idempotency_key = $1")
         .bind(order_id)
         .execute(pool)
@@ -264,10 +285,12 @@ async fn proof_a_b_c_snapshot_fill_accounting_and_restart() {
     .await;
 
     let at = Utc.with_ymd_and_hms(2099, 6, 1, 13, 0, 0).unwrap();
+    let order_1 = scoped_order_id(run_id, "order-1");
+    let order_2 = scoped_order_id(run_id, "order-2");
     insert_full_fill(
         &pool,
         run_id,
-        "order-1",
+        &order_1,
         "AAPL",
         Side::Buy,
         10,
@@ -280,7 +303,7 @@ async fn proof_a_b_c_snapshot_fill_accounting_and_restart() {
     insert_full_fill(
         &pool,
         run_id,
-        "order-2",
+        &order_2,
         "AAPL",
         Side::Sell,
         4,
@@ -439,10 +462,12 @@ async fn proof_e_realized_pnl_positive_negative_and_zero() {
     )
     .await;
     let at = Utc.with_ymd_and_hms(2099, 6, 1, 13, 0, 0).unwrap();
+    let order_1_pos = scoped_order_id(run_pos, "order-1");
+    let order_2_pos = scoped_order_id(run_pos, "order-2");
     insert_full_fill(
         &pool,
         run_pos,
-        "order-1",
+        &order_1_pos,
         "AAPL",
         Side::Buy,
         10,
@@ -455,7 +480,7 @@ async fn proof_e_realized_pnl_positive_negative_and_zero() {
     insert_full_fill(
         &pool,
         run_pos,
-        "order-2",
+        &order_2_pos,
         "AAPL",
         Side::Sell,
         10,
@@ -494,10 +519,12 @@ async fn proof_e_realized_pnl_positive_negative_and_zero() {
         Utc.with_ymd_and_hms(2099, 6, 1, 12, 0, 0).unwrap(),
     )
     .await;
+    let order_1_neg = scoped_order_id(run_neg, "order-1");
+    let order_2_neg = scoped_order_id(run_neg, "order-2");
     insert_full_fill(
         &pool,
         run_neg,
-        "order-1",
+        &order_1_neg,
         "AAPL",
         Side::Buy,
         10,
@@ -510,7 +537,7 @@ async fn proof_e_realized_pnl_positive_negative_and_zero() {
     insert_full_fill(
         &pool,
         run_neg,
-        "order-2",
+        &order_2_neg,
         "AAPL",
         Side::Sell,
         10,
@@ -579,23 +606,31 @@ async fn proof_f_full_chain_and_restart_reconstructable_via_paper_lifecycle() {
     seed_run(&pool, run_id, ts).await;
 
     // order -> ack -> fill.
-    mqk_db::outbox_enqueue(
+    let order_1 = scoped_order_id(run_id, "order-1");
+    let enqueued = mqk_db::outbox_enqueue(
         &pool,
         run_id,
-        "order-1",
+        &order_1,
         serde_json::json!({"symbol": "AAPL", "qty": 10, "side": "buy"}),
     )
     .await
     .expect("outbox_enqueue should succeed");
-    sqlx::query("update oms_outbox set status = 'SENT' where idempotency_key = 'order-1'")
+    assert!(
+        enqueued,
+        "outbox_enqueue must be a fresh insertion for order_id={order_1} (run_id={run_id}); \
+         a false return means idempotency_key already exists globally -- the fixture's \
+         order id is not run-scoped"
+    );
+    sqlx::query("update oms_outbox set status = 'SENT' where idempotency_key = $1")
+        .bind(&order_1)
         .execute(&pool)
         .await
         .expect("mark outbox SENT should succeed");
-    insert_ack(&pool, run_id, "order-1", ts).await;
+    insert_ack(&pool, run_id, &order_1, ts).await;
     let event = BrokerEvent::Fill {
         broker_message_id: "msg-fill-1".to_string(),
         broker_fill_id: None,
-        internal_order_id: "order-1".to_string(),
+        internal_order_id: order_1.clone(),
         broker_order_id: None,
         symbol: "AAPL".to_string(),
         side: Side::Buy,
@@ -609,7 +644,7 @@ async fn proof_f_full_chain_and_restart_reconstructable_via_paper_lifecycle() {
         run_id,
         "msg-fill-1",
         None,
-        "order-1",
+        &order_1,
         "",
         "fill",
         &json,
