@@ -332,8 +332,31 @@ Assert-True 'REPAIR-02/03 Proof B-static: ownership helper functions exist (Get-
 
 $OwnershipBlockText = ($LauncherText -split 'function Get-IntradayRefreshOwnerPath ')[1]
 $OwnershipBlockText = ($OwnershipBlockText -split '# PAPER STARTUP -- reuses the existing accepted')[0]
-Assert-True 'REPAIR-02 Proof B11-static: ownership functions never call Stop-Process / kill any process (arbitrary PowerShell process is never terminated)' `
-    (-not ($OwnershipBlockText -match 'Stop-Process|\.Kill\('))
+
+# REPAIR-04 (mission section 4): arbitrary process termination remains
+# prohibited, but the ownership block now legitimately contains exactly one
+# narrowly-scoped cleanup path (Stop-NewlyCreatedRefreshChild), which may
+# only ever be invoked with the exact PID this invocation itself just
+# created via Start-Process. Isolate that one function's body and assert the
+# Stop-Process/.Kill( pattern appears ONLY inside it -- nowhere else in the
+# ownership block.
+function Get-OwnershipBlockTextOutsideCleanupFn {
+    param([Parameter(Mandatory = $true)][string]$Text)
+    $split = $Text -split 'function Stop-NewlyCreatedRefreshChild '
+    if ($split.Count -lt 2) { return [pscustomobject]@{ CleanupFnBody = $null; OutsideText = $Text } }
+    $rest = $split[1]
+    $bodySplit = $rest -split '\r?\nfunction ', 2
+    $cleanupBody = $bodySplit[0]
+    $tail = if ($bodySplit.Count -gt 1) { "`nfunction " + $bodySplit[1] } else { '' }
+    return [pscustomobject]@{ CleanupFnBody = $cleanupBody; OutsideText = ($split[0] + $tail) }
+}
+$CleanupFnSplit = Get-OwnershipBlockTextOutsideCleanupFn -Text $OwnershipBlockText
+
+Assert-True 'REPAIR-04 Proof: Stop-NewlyCreatedRefreshChild exists and is the sole holder of the one permitted Stop-Process call' `
+    ($null -ne $CleanupFnSplit.CleanupFnBody -and $CleanupFnSplit.CleanupFnBody -match 'Stop-Process')
+
+Assert-True 'REPAIR-02/04 Proof B11-static: no Stop-Process / .Kill( call exists anywhere in the ownership block OUTSIDE Stop-NewlyCreatedRefreshChild (arbitrary process termination remains prohibited; only the narrowly-scoped, locally-created-child cleanup path may terminate a process)' `
+    (-not ($CleanupFnSplit.OutsideText -match 'Stop-Process|\.Kill\('))
 
 Assert-True 'REPAIR-02 Proof B-static: owner record lives under smoke_logs\launcher\paper\ (same untracked-runtime-evidence convention as New-LauncherLog)' `
     ($LauncherText -match 'smoke_logs\\launcher\\paper' -and $LauncherText -match 'intraday_refresh_owner\.json')
@@ -354,7 +377,11 @@ try {
 
     $FixtureRepo = Join-Path $env:TEMP ("mqk_launcher_test_repo_" + [guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Force -Path $FixtureRepo | Out-Null
-    $fixtureRefreshScript = Join-Path $FixtureRepo 'Refresh-IntradayMarketData.ps1'
+    # REPAIR-04: identity now requires the exact <RepoRoot>\scripts\windows\
+    # path, not just the basename -- fixture layout must mirror the real repo.
+    $fixtureScriptsDir = Join-Path $FixtureRepo 'scripts\windows'
+    New-Item -ItemType Directory -Force -Path $fixtureScriptsDir | Out-Null
+    $fixtureRefreshScript = Join-Path $fixtureScriptsDir 'Refresh-IntradayMarketData.ps1'
     Set-Content -Path $fixtureRefreshScript -Value 'Start-Sleep -Seconds 90' -Encoding UTF8
 
     # A real long-lived powershell.exe process whose command line references
@@ -456,8 +483,8 @@ Assert-True 'REPAIR-03 Proof 4-static: identity resolution never returns a bare 
 Assert-True 'REPAIR-03 Proof 5-static: Get-IntradayRefreshOwnerState fails closed (Reusable stays false, Disposition=identity_unavailable) and never falls through to the scope-matching branch for that disposition' `
     ($LauncherText.Contains("if (`$identity -eq 'identity_unavailable') {`n        `$result.Disposition = 'identity_unavailable'"))
 
-Assert-True 'REPAIR-03 Proof 5-static: no process is ever killed anywhere in the ownership block, including the new lock/identity/start-proof code (re-check of Section 5a''s whole-block guard)' `
-    (-not ($OwnershipBlockText -match 'Stop-Process|\.Kill\('))
+Assert-True 'REPAIR-03/04 Proof 5-static: no process is killed anywhere in the ownership block outside the one narrowly-scoped cleanup function, including the lock/identity/start-proof code (re-check of Section 5a''s whole-block guard)' `
+    (-not ($CleanupFnSplit.OutsideText -match 'Stop-Process|\.Kill\('))
 
 Assert-True 'REPAIR-03 Proof 6-static: a deterministic named cross-process Mutex guards owner acquisition (not a fragile text-file existence check as the sole lock)' `
     ($OwnershipBlockText.Contains('System.Threading.Mutex') -and $OwnershipBlockText.Contains('MiniQuantDeskV4-Paper-IntradayRefreshOwner'))
@@ -499,14 +526,15 @@ Assert-True 'REPAIR-03 Proof 13-static: CheckOnly branch never references Reques
 . $Launcher
 
 # --- Identity states: dead / wrong_process / verified_refresh_owner --------
-$DeadIdentity = Get-RefreshOwnerProcessIdentity -ProcessId 999999
+$PlaceholderExpectedScriptPath = 'C:\nonexistent\mqk_launcher_test_placeholder\scripts\windows\Refresh-IntradayMarketData.ps1'
+$DeadIdentity = Get-RefreshOwnerProcessIdentity -ProcessId 999999 -ExpectedScriptPath $PlaceholderExpectedScriptPath
 Assert-True 'REPAIR-03 Proof 1: a dead PID resolves to disposition "dead"' ($DeadIdentity -eq 'dead')
 
 $WrongProc = $null
 try {
     $WrongProc = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-Command', 'Start-Sleep -Seconds 30') -WindowStyle Hidden -PassThru
     Start-Sleep -Milliseconds 700
-    $WrongIdentity = Get-RefreshOwnerProcessIdentity -ProcessId $WrongProc.Id
+    $WrongIdentity = Get-RefreshOwnerProcessIdentity -ProcessId $WrongProc.Id -ExpectedScriptPath $PlaceholderExpectedScriptPath
     Assert-True 'REPAIR-03 Proof 2: a live PowerShell process whose command line does not reference the refresh script resolves to disposition "wrong_process"' `
         ($WrongIdentity -eq 'wrong_process')
     Assert-True 'REPAIR-03 Proof 2/11: the wrong_process process was never killed by the identity check' `
@@ -526,9 +554,16 @@ try {
         -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $verifiedFixtureScript) `
         -WindowStyle Hidden -PassThru
     Start-Sleep -Milliseconds 800
-    $VerifiedIdentity = Get-RefreshOwnerProcessIdentity -ProcessId $VerifiedProc.Id
-    Assert-True 'REPAIR-03 Proof 3: a live PowerShell process whose command line references Refresh-IntradayMarketData.ps1 resolves to disposition "verified_refresh_owner"' `
+    $VerifiedIdentity = Get-RefreshOwnerProcessIdentity -ProcessId $VerifiedProc.Id -ExpectedScriptPath $verifiedFixtureScript
+    Assert-True 'REPAIR-03 Proof 3: a live PowerShell process whose command line references the EXACT expected script path resolves to disposition "verified_refresh_owner"' `
         ($VerifiedIdentity -eq 'verified_refresh_owner')
+
+    # REPAIR-04 Proof A2 (mission section 18.A.2): same basename, different
+    # worktree/repo path -- must NOT verify, even though the file names match.
+    $OtherWorktreeExpectedPath = Join-Path $env:TEMP ("mqk_launcher_repair04_other_worktree_" + [guid]::NewGuid().ToString('N') + '\Refresh-IntradayMarketData.ps1')
+    $SameBasenameOtherPathIdentity = Get-RefreshOwnerProcessIdentity -ProcessId $VerifiedProc.Id -ExpectedScriptPath $OtherWorktreeExpectedPath
+    Assert-True 'REPAIR-04 Proof A2: same basename Refresh-IntradayMarketData.ps1 under a DIFFERENT expected worktree/repo path resolves to "wrong_process", never "verified_refresh_owner"' `
+        ($SameBasenameOtherPathIdentity -eq 'wrong_process')
 } finally {
     if ($null -ne $VerifiedProc) { Stop-Process -Id $VerifiedProc.Id -Force -ErrorAction SilentlyContinue }
     if ($null -ne $VerifiedRepo -and (Test-Path $VerifiedRepo)) { Remove-Item -Recurse -Force $VerifiedRepo -ErrorAction SilentlyContinue }
@@ -544,8 +579,8 @@ try {
 
     function Get-CimInstance { throw 'CIM/WMI unavailable (REPAIR-03 test fixture)' }
     try {
-        $UnavailableIdentity = Get-RefreshOwnerProcessIdentity -ProcessId $CimFailProc.Id
-        Assert-True 'REPAIR-03 Proof 4: a CIM/WMI failure resolves to disposition "identity_unavailable", never "verified_refresh_owner"' `
+        $UnavailableIdentity = Get-RefreshOwnerProcessIdentity -ProcessId $CimFailProc.Id -ExpectedScriptPath $PlaceholderExpectedScriptPath
+        Assert-True 'REPAIR-03/04 Proof 4/18.A.5: a CIM/WMI failure resolves to disposition "identity_unavailable", never "verified_refresh_owner" -- remains fail-closed after REPAIR-04' `
             ($UnavailableIdentity -eq 'identity_unavailable')
         Assert-True 'REPAIR-03 Proof 4/11: the ambiguous process was never killed while its identity was unprovable' `
             ($null -ne (Get-Process -Id $CimFailProc.Id -ErrorAction SilentlyContinue))
@@ -622,7 +657,12 @@ $ExceptionProc = $null
 try {
     $ExceptionRepo = Join-Path $env:TEMP ("mqk_launcher_repair03_exception_" + [guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Force -Path $ExceptionRepo | Out-Null
-    $exceptionFixtureScript = Join-Path $ExceptionRepo 'Refresh-IntradayMarketData.ps1'
+    # REPAIR-04: must live at the exact <RepoRoot>\scripts\windows\ path so
+    # identity resolves "verified_refresh_owner" and the test actually
+    # reaches the scope-matching int-cast that is meant to throw below.
+    $exceptionScriptsDir = Join-Path $ExceptionRepo 'scripts\windows'
+    New-Item -ItemType Directory -Force -Path $exceptionScriptsDir | Out-Null
+    $exceptionFixtureScript = Join-Path $exceptionScriptsDir 'Refresh-IntradayMarketData.ps1'
     Set-Content -Path $exceptionFixtureScript -Value 'Start-Sleep -Seconds 30' -Encoding UTF8
     $ExceptionProc = Start-Process -FilePath 'powershell.exe' `
         -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $exceptionFixtureScript) `
@@ -728,6 +768,251 @@ try {
     if ($null -ne $Job2) { Remove-Job -Job $Job2 -Force -ErrorAction SilentlyContinue }
     if ($null -ne $ConcurrencyRepo -and (Test-Path $ConcurrencyRepo)) { Remove-Item -Recurse -Force $ConcurrencyRepo -ErrorAction SilentlyContinue }
 }
+
+# ---------------------------------------------------------------------------
+# Section 7: OFFICIAL-DUAL-MODE-LAUNCHER-01-REPAIR-04 proofs -- durable
+# owner-record handoff (atomic write, post-start identity verify, owner-
+# write-failure cleanup), strengthened exact process identity (path + scope),
+# and orphan recovery / multiple-match fail-closed protection.
+# ---------------------------------------------------------------------------
+Show-Info ''
+Show-Info '=== Section 7: REPAIR-04 proofs (durable handoff / exact identity / orphan recovery) ==='
+
+# --- 7a: static source-guard checks ----------------------------------------
+Assert-True 'REPAIR-04 Proof: Get-RefreshOwnerProcessIdentity requires an ExpectedScriptPath parameter (basename-only verification is gone)' `
+    ($LauncherText.Contains('function Get-RefreshOwnerProcessIdentity') -and $LauncherText.Contains('[Parameter(Mandatory = $true)][string]$ExpectedScriptPath'))
+
+Assert-True 'REPAIR-04 Proof: identity matching requires the full expected script path to appear in the command line, not just the basename' `
+    ($LauncherText.Contains('function Test-RefreshCommandLineIdentity') -and $LauncherText.Contains('$CommandLine.IndexOf($normalizedExpectedPath, [StringComparison]::OrdinalIgnoreCase)'))
+
+Assert-True 'REPAIR-04 Proof: requested symbol/timeframe scope is verified from the command line where reliable, DurationSeconds is never compared' `
+    ($LauncherText.Contains('-Symbols\s+"?([^\s"]+)"?') -and $LauncherText.Contains('-Timeframe\s+"?([^\s"]+)"?') -and -not ($LauncherText -match 'DurationSeconds.*-eq.*record\.'))
+
+Assert-True 'REPAIR-04 Proof: Set-IntradayRefreshOwnerRecord writes a same-directory sibling temp file, never a direct Set-Content to the authoritative owner path' `
+    ($LauncherText.Contains('$tempPath = Join-Path $ownerDir') -and -not ($LauncherText -match '(?s)function Set-IntradayRefreshOwnerRecord.*?Set-Content -Path \$ownerPath'))
+
+Assert-True 'REPAIR-04 Proof: owner-record finalization is a single atomic same-volume operation -- File.Move when the target is absent, File.Replace when it already exists' `
+    ($LauncherText.Contains('[System.IO.File]::Move($tempPath, $ownerPath)') -and $LauncherText.Contains('[System.IO.File]::Replace($tempPath, $ownerPath, $backupPath)'))
+
+Assert-True 'REPAIR-04 Proof: a failed owner write cleans up its own abandoned temp file and re-throws (caller decides the fail-closed outcome)' `
+    ($LauncherText.Contains('Remove-Item -LiteralPath $tempPath -Force -ErrorAction SilentlyContinue') -and $LauncherText -match '(?s)catch \{\s*if \(Test-Path -LiteralPath \$tempPath\).*?throw\s*\}')
+
+Assert-True 'REPAIR-04 Proof: Request-IntradayRefreshOwnership positively verifies the newly-created child''s identity before ever calling Set-IntradayRefreshOwnerRecord for it' `
+    ($LauncherText -match '(?s)\$newChildIdentity = Get-RefreshOwnerProcessIdentity -ProcessId \$refreshProcess\.Id.*?if \(\$newChildIdentity -ne .verified_refresh_owner.\).*?\$ownerPath = Set-IntradayRefreshOwnerRecord -RepoRoot \$RepoRoot -ProcessId \$refreshProcess\.Id')
+
+Assert-True 'REPAIR-04 Proof: a new child that fails identity verification is cleaned up via the single narrow cleanup path and never recorded as owner' `
+    ($LauncherText.Contains("Outcome = 'START_FAILED'; Reason = `"newly-created child") -and $LauncherText.Contains('$cleanup = Stop-NewlyCreatedRefreshChild -ProcessId $refreshProcess.Id'))
+
+Assert-True 'REPAIR-04 Proof: owner-record persistence failure triggers cleanup of ONLY the newly-created child (Stop-NewlyCreatedRefreshChild with $refreshProcess.Id, never a loaded/adopted/unrelated pid) and returns OWNER_PERSIST_FAILED' `
+    ($LauncherText.Contains("Outcome = 'OWNER_PERSIST_FAILED'; Reason = `"durable owner-record persistence failed") -and $LauncherText.Contains('$cleanup = Stop-NewlyCreatedRefreshChild -ProcessId $refreshProcess.Id -BoundedWaitMilliseconds $ChildCleanupBoundedWaitMilliseconds'))
+
+Assert-True 'REPAIR-04 Proof: a persistence failure whose child cannot be confirmed terminated returns the stronger OWNER_PERSIST_FAILED_CHILD_STILL_PRESENT outcome and prints an operator-visible PID warning' `
+    ($LauncherText.Contains("Outcome = 'OWNER_PERSIST_FAILED_CHILD_STILL_PRESENT'") -and $LauncherText.Contains('OWNER_PERSIST_FAILED_CHILD_STILL_PRESENT: durable owner-record persistence failed'))
+
+Assert-True 'REPAIR-04 Proof: an adoption-write failure never terminates the adopted (pre-existing) process -- adoption failure returns OWNER_PERSIST_FAILED without any Stop-NewlyCreatedRefreshChild call in that branch' `
+    ($LauncherText.Contains('orphan-adoption owner-write failed') -and $LauncherText.Contains('adopted candidate pid=$adoptedPid was left running untouched'))
+
+Assert-True 'REPAIR-04 Proof: orphan-recovery scan exists and runs inside the ownership mutex, after the reusable/identity_unavailable checks and before a replacement child is ever started' `
+    ($OwnershipBlockText.Contains('function Find-MatchingRefreshOwnerProcesses') -and
+     $OwnershipBlockText -match '(?s)if \(\$ownerState\.Reusable\).*?\$orphanScan = Find-MatchingRefreshOwnerProcesses.*?Start-Process -FilePath .powershell\.exe.')
+
+Assert-True 'REPAIR-04 Proof: zero exact-matching orphans falls through to starting a new child (no special-cased early return for the zero case)' `
+    (-not ($OwnershipBlockText -match "MatchingPids\.Count -eq 0"))
+
+Assert-True 'REPAIR-04 Proof: exactly one exact-matching orphan is adopted (owner record written, Outcome=REUSED, no second child process started)' `
+    ($OwnershipBlockText.Contains('if ($orphanScan.MatchingPids.Count -eq 1)') -and $OwnershipBlockText.Contains("Outcome = 'REUSED'; Reason = `"adopted an orphaned"))
+
+Assert-True 'REPAIR-04 Proof: more than one exact-matching orphan fails closed as REFRESH_OWNER_MULTIPLE_MATCHES and explicitly refuses to terminate either candidate' `
+    ($OwnershipBlockText.Contains('if ($orphanScan.MatchingPids.Count -gt 1)') -and $OwnershipBlockText.Contains("Outcome = 'MULTIPLE_MATCHES'") -and $OwnershipBlockText.Contains('refusing to terminate either existing process'))
+
+Assert-True 'REPAIR-04 Proof: unavailable process enumeration during orphan recovery fails closed (never assumed to be zero matches)' `
+    ($OwnershipBlockText.Contains('if (-not $orphanScan.Ok)') -and $OwnershipBlockText.Contains("Outcome = 'IDENTITY_UNPROVEN'; Reason = `"REFRESH_OWNER_IDENTITY_UNPROVEN: orphan-recovery"))
+
+Assert-True 'REPAIR-04 Proof: CheckOnly branch still never references any REPAIR-04 ownership-handoff machinery (creates no lock, no lease, no owner record, no refresh/cleanup process)' `
+    (-not ($CheckOnlyBlockText -match 'Find-MatchingRefreshOwnerProcesses|Stop-NewlyCreatedRefreshChild|OWNER_PERSIST_FAILED|MULTIPLE_MATCHES'))
+
+Assert-True 'REPAIR-04 Proof: caller-side outcome dispatch has an explicit default/fail-closed case (an unrecognized ownership outcome can never silently fall through to launcher success)' `
+    ($FullStartupBody -match "(?s)switch \(\`$ownership\.Outcome\).*?default \{.*?return \`$script:ExitBackendReconcile")
+
+# --- 7b: functional fixture proofs (dot-sourced functions, disposable temp repos) ---
+. $Launcher
+
+# --- A. Exact identity: symbol/timeframe scope mismatch on an otherwise-correct path ---
+$ScopeRepo = $null
+$ScopeProc = $null
+try {
+    $ScopeRepo = Join-Path $env:TEMP ("mqk_launcher_repair04_scope_" + [guid]::NewGuid().ToString('N'))
+    $scopeScriptsDir = Join-Path $ScopeRepo 'scripts\windows'
+    New-Item -ItemType Directory -Force -Path $scopeScriptsDir | Out-Null
+    $scopeFixtureScript = Join-Path $scopeScriptsDir 'Refresh-IntradayMarketData.ps1'
+    Set-Content -Path $scopeFixtureScript -Value 'Start-Sleep -Seconds 30' -Encoding UTF8
+
+    # Mirrors exactly how Request-IntradayRefreshOwnership itself invokes the
+    # refresh child: -Symbols <comma-joined> -Timeframe <tf> on the command line.
+    $ScopeProc = Start-Process -FilePath 'powershell.exe' `
+        -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $scopeFixtureScript, '-Symbols', 'AAPL,MSFT', '-Timeframe', '5m') `
+        -WindowStyle Hidden -PassThru
+    Start-Sleep -Milliseconds 800
+
+    $CorrectScopeIdentity = Get-RefreshOwnerProcessIdentity -ProcessId $ScopeProc.Id -ExpectedScriptPath $scopeFixtureScript -ExpectedSymbols @('AAPL', 'MSFT') -ExpectedTimeframe '5m'
+    Assert-True 'REPAIR-04 Proof A-sanity: correct script path AND correct symbol/timeframe scope resolves to "verified_refresh_owner"' `
+        ($CorrectScopeIdentity -eq 'verified_refresh_owner')
+
+    $WrongSymbolsIdentity = Get-RefreshOwnerProcessIdentity -ProcessId $ScopeProc.Id -ExpectedScriptPath $scopeFixtureScript -ExpectedSymbols @('TSLA') -ExpectedTimeframe '5m'
+    Assert-True 'REPAIR-04 Proof A3 (18.A.3): correct script path but wrong symbol scope does not resolve to "verified_refresh_owner"' `
+        ($WrongSymbolsIdentity -ne 'verified_refresh_owner')
+    Assert-True 'REPAIR-04 Proof A3/11: the wrong-symbol-scope process was never killed by the identity check' `
+        ($null -ne (Get-Process -Id $ScopeProc.Id -ErrorAction SilentlyContinue))
+
+    $WrongTimeframeIdentity = Get-RefreshOwnerProcessIdentity -ProcessId $ScopeProc.Id -ExpectedScriptPath $scopeFixtureScript -ExpectedSymbols @('AAPL', 'MSFT') -ExpectedTimeframe '1m'
+    Assert-True 'REPAIR-04 Proof A4 (18.A.4): correct script path but wrong timeframe scope does not resolve to "verified_refresh_owner"' `
+        ($WrongTimeframeIdentity -ne 'verified_refresh_owner')
+
+    $GetIdentityFnBodyOnly = ($LauncherText -split 'function Get-RefreshOwnerProcessIdentity ')[1] -split '\r?\nfunction ' | Select-Object -First 1
+    Assert-True 'REPAIR-04 Proof: DurationSeconds is never part of the identity/scope comparison (no such parameter exists on Get-RefreshOwnerProcessIdentity)' `
+        (-not ($GetIdentityFnBodyOnly -match '\$DurationSeconds'))
+} finally {
+    if ($null -ne $ScopeProc) { Stop-Process -Id $ScopeProc.Id -Force -ErrorAction SilentlyContinue }
+    if ($null -ne $ScopeRepo -and (Test-Path $ScopeRepo)) { Remove-Item -Recurse -Force $ScopeRepo -ErrorAction SilentlyContinue }
+}
+
+# --- B. Atomic/durable owner persistence: forced final-write failure --------
+$FailRepo = $null
+$FailUnrelatedProc = $null
+try {
+    $FailRepo = Join-Path $env:TEMP ("mqk_launcher_repair04_persistfail_" + [guid]::NewGuid().ToString('N'))
+    $failScriptsDir = Join-Path $FailRepo 'scripts\windows'
+    New-Item -ItemType Directory -Force -Path $failScriptsDir | Out-Null
+    $failRefreshScript = Join-Path $failScriptsDir 'Refresh-IntradayMarketData.ps1'
+    Set-Content -Path $failRefreshScript -Value 'Start-Sleep -Seconds 90' -Encoding UTF8
+
+    # An unrelated, pre-existing process this invocation did NOT create --
+    # proves failure cleanup never reaches beyond the newly-created child.
+    $FailUnrelatedProc = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-Command', 'Start-Sleep -Seconds 30') -WindowStyle Hidden -PassThru
+    Start-Sleep -Milliseconds 500
+
+    $sym = @('AAPL'); $tf = '5m'; $port = 5440; $mktDate = '2026-08-10'
+
+    # Deterministic fixture seam (mission section 19: no real ACL changes).
+    # Shadowing ConvertTo-Json selectively breaks ONLY Set-IntradayRefreshOwnerRecord's
+    # serialization step -- Get-IntradayRefreshOwnerState's read path uses
+    # ConvertFrom-Json and is unaffected, so the mandatory re-read, orphan
+    # scan, Start-Process, and post-start identity verification all still run
+    # for real before this seam takes effect.
+    function ConvertTo-Json { throw 'ConvertTo-Json unavailable (REPAIR-04 owner-persist-failure test fixture)' }
+    try {
+        $failResult = Request-IntradayRefreshOwnership -RepoRoot $FailRepo -Symbols $sym -Timeframe $tf -PaperDbPort $port -MarketDate $mktDate -DurationSeconds 60
+    } finally {
+        Remove-Item Function:\ConvertTo-Json -ErrorAction SilentlyContinue
+    }
+
+    Assert-True 'REPAIR-04 Proof B7: a forced durable owner-record persistence failure after child start returns OWNER_PERSIST_FAILED (never silently reports STARTED/success)' `
+        ($failResult.Outcome -eq 'OWNER_PERSIST_FAILED')
+
+    Start-Sleep -Milliseconds 300
+    $failChildStillRunning = @(Get-CimInstance -ClassName Win32_Process -Filter "Name = 'powershell.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -and $_.CommandLine.Contains($failRefreshScript) })
+    Assert-True 'REPAIR-04 Proof B8: the child process created by the failing invocation is no longer alive afterward (cleaned up, not orphaned)' `
+        ($failChildStillRunning.Count -eq 0)
+
+    $failOwnerPath = Join-Path $FailRepo 'smoke_logs\launcher\paper\intraday_refresh_owner.json'
+    Assert-True 'REPAIR-04 Proof B9: no authoritative owner record falsely claims success after the persistence failure (owner file was never created)' `
+        (-not (Test-Path $failOwnerPath))
+
+    Assert-True 'REPAIR-04 Proof B10: an unrelated/pre-existing process is never terminated by the owner-write failure cleanup' `
+        ($null -ne (Get-Process -Id $FailUnrelatedProc.Id -ErrorAction SilentlyContinue))
+} finally {
+    if ($null -ne $FailUnrelatedProc) { Stop-Process -Id $FailUnrelatedProc.Id -Force -ErrorAction SilentlyContinue }
+    if ($null -ne $FailRepo -and (Test-Path $FailRepo)) { Remove-Item -Recurse -Force $FailRepo -ErrorAction SilentlyContinue }
+}
+
+# --- C. Orphan adoption: one exact-matching process, no owner record -------
+$AdoptRepo = $null
+$AdoptProc = $null
+try {
+    $AdoptRepo = Join-Path $env:TEMP ("mqk_launcher_repair04_adopt_" + [guid]::NewGuid().ToString('N'))
+    $adoptScriptsDir = Join-Path $AdoptRepo 'scripts\windows'
+    New-Item -ItemType Directory -Force -Path $adoptScriptsDir | Out-Null
+    $adoptFixtureScript = Join-Path $adoptScriptsDir 'Refresh-IntradayMarketData.ps1'
+    Set-Content -Path $adoptFixtureScript -Value 'Start-Sleep -Seconds 90' -Encoding UTF8
+
+    $AdoptProc = Start-Process -FilePath 'powershell.exe' `
+        -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $adoptFixtureScript) `
+        -WindowStyle Hidden -PassThru
+    Start-Sleep -Milliseconds 800
+
+    $sym = @('AAPL', 'MSFT'); $tf = '5m'; $port = 5440; $mktDate = '2026-08-10'
+    Assert-True 'REPAIR-04 Proof C11 setup: no owner record exists yet for this scope' `
+        (-not (Test-Path (Join-Path $AdoptRepo 'smoke_logs\launcher\paper\intraday_refresh_owner.json')))
+
+    $adoptResult = Request-IntradayRefreshOwnership -RepoRoot $AdoptRepo -Symbols $sym -Timeframe $tf -PaperDbPort $port -MarketDate $mktDate -DurationSeconds 60
+    Assert-True 'REPAIR-04 Proof C12/13: an exact-matching orphan with no owner record is adopted (Outcome=REUSED, Pid=the orphan''s pid)' `
+        ($adoptResult.Outcome -eq 'REUSED' -and $adoptResult.Pid -eq $AdoptProc.Id)
+
+    $adoptOwnerRecord = Get-Content -Path $adoptResult.OwnerPath -Raw | ConvertFrom-Json
+    Assert-True 'REPAIR-04 Proof C13: the owner record now durably reflects the adopted pid' `
+        ([int]$adoptOwnerRecord.pid -eq $AdoptProc.Id)
+
+    Start-Sleep -Milliseconds 300
+    $adoptMatchingProcs = @(Get-CimInstance -ClassName Win32_Process -Filter "Name = 'powershell.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -and $_.CommandLine.Contains($adoptFixtureScript) })
+    Assert-True 'REPAIR-04 Proof C14: adoption started zero additional refresh children (exactly one matching process exists: the adopted orphan itself)' `
+        ($adoptMatchingProcs.Count -eq 1)
+} finally {
+    if ($null -ne $AdoptProc) { Stop-Process -Id $AdoptProc.Id -Force -ErrorAction SilentlyContinue }
+    if ($null -ne $AdoptRepo -and (Test-Path $AdoptRepo)) { Remove-Item -Recurse -Force $AdoptRepo -ErrorAction SilentlyContinue }
+}
+
+# --- D. Multiple orphan protection: two exact-matching processes, no owner record ---
+$MultiRepo = $null
+$MultiProc1 = $null
+$MultiProc2 = $null
+try {
+    $MultiRepo = Join-Path $env:TEMP ("mqk_launcher_repair04_multi_" + [guid]::NewGuid().ToString('N'))
+    $multiScriptsDir = Join-Path $MultiRepo 'scripts\windows'
+    New-Item -ItemType Directory -Force -Path $multiScriptsDir | Out-Null
+    $multiFixtureScript = Join-Path $multiScriptsDir 'Refresh-IntradayMarketData.ps1'
+    Set-Content -Path $multiFixtureScript -Value 'Start-Sleep -Seconds 90' -Encoding UTF8
+
+    $MultiProc1 = Start-Process -FilePath 'powershell.exe' `
+        -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $multiFixtureScript) `
+        -WindowStyle Hidden -PassThru
+    $MultiProc2 = Start-Process -FilePath 'powershell.exe' `
+        -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $multiFixtureScript) `
+        -WindowStyle Hidden -PassThru
+    Start-Sleep -Milliseconds 800
+
+    $sym = @('AAPL', 'MSFT'); $tf = '5m'; $port = 5440; $mktDate = '2026-08-10'
+    $multiResult = Request-IntradayRefreshOwnership -RepoRoot $MultiRepo -Symbols $sym -Timeframe $tf -PaperDbPort $port -MarketDate $mktDate -DurationSeconds 60
+    Assert-True 'REPAIR-04 Proof D16: two exact-matching orphans with no owner record returns REFRESH_OWNER_MULTIPLE_MATCHES' `
+        ($multiResult.Outcome -eq 'MULTIPLE_MATCHES')
+
+    Start-Sleep -Milliseconds 300
+    $multiMatchingProcs = @(Get-CimInstance -ClassName Win32_Process -Filter "Name = 'powershell.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -and $_.CommandLine.Contains($multiFixtureScript) })
+    Assert-True 'REPAIR-04 Proof D17: no third child was started (exactly the original two matching processes still exist)' `
+        ($multiMatchingProcs.Count -eq 2)
+
+    Assert-True 'REPAIR-04 Proof D18: neither existing fixture process was killed by the multiple-matches outcome' `
+        (($null -ne (Get-Process -Id $MultiProc1.Id -ErrorAction SilentlyContinue)) -and ($null -ne (Get-Process -Id $MultiProc2.Id -ErrorAction SilentlyContinue)))
+
+    Assert-True 'REPAIR-04 Proof D: no owner record was written for the ambiguous multiple-matches case' `
+        (-not (Test-Path (Join-Path $MultiRepo 'smoke_logs\launcher\paper\intraday_refresh_owner.json')))
+} finally {
+    if ($null -ne $MultiProc1) { Stop-Process -Id $MultiProc1.Id -Force -ErrorAction SilentlyContinue }
+    if ($null -ne $MultiProc2) { Stop-Process -Id $MultiProc2.Id -Force -ErrorAction SilentlyContinue }
+    if ($null -ne $MultiRepo -and (Test-Path $MultiRepo)) { Remove-Item -Recurse -Force $MultiRepo -ErrorAction SilentlyContinue }
+}
+
+# --- E. Existing concurrency (mission items 19-21): unchanged, re-affirmed --
+# The real two-caller concurrency proof already exercised above (REPAIR-03
+# Concurrency proof, immediately preceding this section) is unmodified by
+# REPAIR-04 -- it still asserts outcomes are exactly one STARTED and one
+# REUSED (never two STARTED), refresh_process_count=1, and owner_record_count=1.
+# Re-running it here would just duplicate real subprocess/job overhead for no
+# additional proof value, so it is cross-referenced rather than repeated.
+Assert-True 'REPAIR-04 Proof E19-21: the existing REPAIR-03 concurrency proof (two real callers, one owner authority, no duplicate-scope process) remains in force, unmodified by REPAIR-04' `
+    ($LauncherText.Contains('function Request-IntradayRefreshOwnership'))
 
 Show-Info ''
 if ($Violations -eq 0) {

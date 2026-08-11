@@ -761,14 +761,28 @@ function Get-IntradayRefreshOwnerPath {
 }
 
 # =============================================================================
-# DEFECT 1 REPAIR (OFFICIAL-DUAL-MODE-LAUNCHER-01-REPAIR-03): process identity
-# must be POSITIVELY established, never assumed.
+# DEFECT 1 REPAIR (OFFICIAL-DUAL-MODE-LAUNCHER-01-REPAIR-03, strengthened in
+# REPAIR-04): process identity must be POSITIVELY established, never assumed.
 #
-# Root cause: the REPAIR-02 implementation fell back to a process-name-only
-# verdict ("ProcessName matches powershell*") whenever Get-CimInstance
-# Win32_Process failed. A stale owner-record PID that Windows later reused for
-# an unrelated PowerShell process (any script, any user session) would then
-# be silently accepted as a valid launcher-managed refresh owner.
+# Root cause (REPAIR-03): the REPAIR-02 implementation fell back to a
+# process-name-only verdict ("ProcessName matches powershell*") whenever
+# Get-CimInstance Win32_Process failed. A stale owner-record PID that Windows
+# later reused for an unrelated PowerShell process (any script, any user
+# session) would then be silently accepted as a valid launcher-managed
+# refresh owner.
+#
+# Root cause (REPAIR-04): the REPAIR-03 fix still verified only the basename
+# "Refresh-IntradayMarketData.ps1", which exists identically in every
+# worktree of this repo (e.g. both MiniQuantDeskV4 and MiniQuantDeskV4-ops).
+# A process belonging to a completely different worktree/repo could be
+# accepted as this repo's refresh owner. Fix: require the full normalized
+# EXPECTED script path (caller-supplied, derived from the requested RepoRoot)
+# to appear in the actual Win32_Process command line -- basename alone is
+# never sufficient. Requested symbol/timeframe scope is additionally verified
+# whenever those flags are present on the command line (best-effort --
+# DurationSeconds is intentionally never compared, since a retry naturally
+# computes a shorter remaining session window for what is still the same
+# owner).
 #
 # Fix: return one of four distinguishable identity states instead of a single
 # boolean. "identity_unavailable" (CIM/WMI could not be queried, or returned
@@ -776,8 +790,44 @@ function Get-IntradayRefreshOwnerPath {
 # closed on that state, not guess. No state here ever terminates a process;
 # this function only observes.
 # =============================================================================
+function Test-RefreshCommandLineIdentity {
+    param(
+        [Parameter(Mandatory = $true)][AllowEmptyString()][string]$CommandLine,
+        [Parameter(Mandatory = $true)][string]$ExpectedScriptPath,
+        [string[]]$ExpectedSymbols = @(),
+        [string]$ExpectedTimeframe = $null
+    )
+
+    if ([string]::IsNullOrWhiteSpace($CommandLine)) { return $false }
+
+    $normalizedExpectedPath = $ExpectedScriptPath.Trim().TrimEnd('\')
+    if ($CommandLine.IndexOf($normalizedExpectedPath, [StringComparison]::OrdinalIgnoreCase) -lt 0) {
+        return $false
+    }
+
+    if ($ExpectedSymbols -and @($ExpectedSymbols).Count -gt 0) {
+        $expectedSymbolsArg = (@($ExpectedSymbols) -join ',')
+        if ($CommandLine -match '-Symbols\s+"?([^\s"]+)"?') {
+            if ($Matches[1] -ne $expectedSymbolsArg) { return $false }
+        }
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($ExpectedTimeframe)) {
+        if ($CommandLine -match '-Timeframe\s+"?([^\s"]+)"?') {
+            if ($Matches[1] -ne $ExpectedTimeframe) { return $false }
+        }
+    }
+
+    return $true
+}
+
 function Get-RefreshOwnerProcessIdentity {
-    param([Parameter(Mandatory = $true)][int]$ProcessId)
+    param(
+        [Parameter(Mandatory = $true)][int]$ProcessId,
+        [Parameter(Mandatory = $true)][string]$ExpectedScriptPath,
+        [string[]]$ExpectedSymbols = @(),
+        [string]$ExpectedTimeframe = $null
+    )
 
     $proc = $null
     try { $proc = Get-Process -Id $ProcessId -ErrorAction Stop } catch { return 'dead' }
@@ -793,11 +843,46 @@ function Get-RefreshOwnerProcessIdentity {
         return 'identity_unavailable'
     }
 
-    if ($cim.CommandLine -match [regex]::Escape('Refresh-IntradayMarketData.ps1')) {
+    if (Test-RefreshCommandLineIdentity -CommandLine $cim.CommandLine -ExpectedScriptPath $ExpectedScriptPath `
+            -ExpectedSymbols $ExpectedSymbols -ExpectedTimeframe $ExpectedTimeframe) {
         return 'verified_refresh_owner'
     }
 
     return 'wrong_process'
+}
+
+# =============================================================================
+# DEFECT 9 REPAIR (OFFICIAL-DUAL-MODE-LAUNCHER-01-REPAIR-04): orphan recovery.
+#
+# Scans all live powershell.exe processes for an EXACT match against the
+# requested refresh identity (full script path + symbol/timeframe scope where
+# present) -- see mission section 9. Used only to find candidates; it never
+# starts, stops, or adopts anything itself. Callers use the returned
+# MatchingPids to decide: zero -> safe to start; exactly one -> adopt;
+# more than one -> fail closed. Ok=$false means enumeration itself was
+# unavailable, which callers must treat as fail-closed (never "assume zero").
+# =============================================================================
+function Find-MatchingRefreshOwnerProcesses {
+    param(
+        [Parameter(Mandatory = $true)][string]$ExpectedScriptPath,
+        [string[]]$ExpectedSymbols = @(),
+        [string]$ExpectedTimeframe = $null
+    )
+
+    try {
+        $candidates = @(Get-CimInstance -ClassName Win32_Process -Filter "Name = 'powershell.exe'" -ErrorAction Stop)
+    } catch {
+        return [pscustomobject]@{ Ok = $false; Reason = "process enumeration unavailable: $($_.Exception.Message)"; MatchingPids = @() }
+    }
+
+    $matchingPids = @()
+    foreach ($c in $candidates) {
+        if (Test-RefreshCommandLineIdentity -CommandLine $c.CommandLine -ExpectedScriptPath $ExpectedScriptPath `
+                -ExpectedSymbols $ExpectedSymbols -ExpectedTimeframe $ExpectedTimeframe) {
+            $matchingPids += [int]$c.ProcessId
+        }
+    }
+    return [pscustomobject]@{ Ok = $true; Reason = 'ok'; MatchingPids = $matchingPids }
 }
 
 # Deterministic per-scope cross-process lock name for intraday-refresh owner
@@ -854,7 +939,12 @@ function Get-IntradayRefreshOwnerState {
     # dead / wrong_process -> safe to replace (existing process, if any, is
     # never touched). identity_unavailable -> FAIL CLOSED, caller must NOT
     # reuse and must NOT start a replacement, per REPAIR-03 mission section 4.
-    $identity = Get-RefreshOwnerProcessIdentity -ProcessId ([int]$record.pid)
+    # REPAIR-04: identity now requires the exact expected script path for
+    # THIS RepoRoot (not just the basename) plus symbol/timeframe scope where
+    # the command line makes that reliably observable.
+    $expectedScriptPath = Join-Path $RepoRoot 'scripts\windows\Refresh-IntradayMarketData.ps1'
+    $identity = Get-RefreshOwnerProcessIdentity -ProcessId ([int]$record.pid) -ExpectedScriptPath $expectedScriptPath `
+        -ExpectedSymbols $Symbols -ExpectedTimeframe $Timeframe
 
     if ($identity -eq 'dead') {
         $result.Disposition = 'dead'
@@ -894,6 +984,27 @@ function Get-IntradayRefreshOwnerState {
     return $result
 }
 
+# =============================================================================
+# DEFECT 5 REPAIR (OFFICIAL-DUAL-MODE-LAUNCHER-01-REPAIR-04): atomic owner
+# write.
+#
+# Root cause: this function previously wrote the authoritative owner JSON
+# directly with `Set-Content -Path $ownerPath`. A process crash, disk-full
+# condition, or any exception mid-write could leave a partially-written or
+# truncated owner file behind while the refresh child it was meant to record
+# remains alive -- an unrecoverable "process alive, no durable truth" state.
+#
+# Fix: serialize the complete record first, write it to a unique same-
+# directory sibling temp file, flush/close it, then finalize with a single
+# atomic same-volume operation -- `[System.IO.File]::Move` when the target
+# does not yet exist, `[System.IO.File]::Replace` when it does (Move throws
+# if the destination already exists; Replace requires it to). Both are atomic
+# renames on NTFS, so the target is only ever observed either fully absent,
+# fully as its previous complete content, or fully as its new complete
+# content -- never partially written. Any failure removes the abandoned temp
+# file and re-throws so the caller (Request-IntradayRefreshOwnership) can
+# apply the mission-section-6 failure contract.
+# =============================================================================
 function Set-IntradayRefreshOwnerRecord {
     param(
         [Parameter(Mandatory = $true)][string]$RepoRoot,
@@ -905,6 +1016,7 @@ function Set-IntradayRefreshOwnerRecord {
     )
 
     $ownerPath = Get-IntradayRefreshOwnerPath -RepoRoot $RepoRoot
+    $ownerDir = Split-Path -Parent $ownerPath
     $record = [ordered]@{
         pid            = $ProcessId
         started_at_utc = (Get-Date).ToUniversalTime().ToString('o')
@@ -914,8 +1026,70 @@ function Set-IntradayRefreshOwnerRecord {
         paper_db_port  = $PaperDbPort
         repo_root      = $RepoRoot
     }
-    ($record | ConvertTo-Json -Depth 4) | Set-Content -Path $ownerPath -Encoding UTF8
+    $json = ($record | ConvertTo-Json -Depth 4)
+
+    $tempPath = Join-Path $ownerDir (".intraday_refresh_owner.$([guid]::NewGuid().ToString('N')).tmp")
+    # File.Replace's destinationBackupFileName accepts null per its .NET
+    # contract, but passing $null through PowerShell 5.1's method-argument
+    # marshalling for this overload throws "The path is not of a legal form"
+    # on this toolchain -- supply a real same-directory backup path instead
+    # (deterministic, still same-volume/atomic) and remove it afterward.
+    $backupPath = Join-Path $ownerDir (".intraday_refresh_owner.$([guid]::NewGuid().ToString('N')).bak")
+    try {
+        [System.IO.File]::WriteAllText($tempPath, $json, (New-Object System.Text.UTF8Encoding($false)))
+        if (Test-Path -LiteralPath $ownerPath) {
+            [System.IO.File]::Replace($tempPath, $ownerPath, $backupPath)
+        } else {
+            [System.IO.File]::Move($tempPath, $ownerPath)
+        }
+    } catch {
+        if (Test-Path -LiteralPath $tempPath) {
+            Remove-Item -LiteralPath $tempPath -Force -ErrorAction SilentlyContinue
+        }
+        throw
+    } finally {
+        if (Test-Path -LiteralPath $backupPath) {
+            Remove-Item -LiteralPath $backupPath -Force -ErrorAction SilentlyContinue
+        }
+    }
     return $ownerPath
+}
+
+# =============================================================================
+# DEFECT (OFFICIAL-DUAL-MODE-LAUNCHER-01-REPAIR-04): the ONLY function in this
+# file permitted to terminate a process. It may ONLY be invoked with the
+# exact PID that THIS invocation of Request-IntradayRefreshOwnership itself
+# just created a few lines above the call site (the live `Process`/PID object
+# is still held locally at the call site) -- never a PID loaded from an owner
+# record, never a reused/adopted PID, never a scope-mismatched or
+# identity-unavailable PID, never any other process on the system. See
+# mission section 4/12. The bounded wait polls rather than blocking forever,
+# so a caller can always distinguish "confirmed exited" from "still present"
+# and choose the correct fail-closed outcome.
+# =============================================================================
+function Stop-NewlyCreatedRefreshChild {
+    param(
+        [Parameter(Mandatory = $true)][int]$ProcessId,
+        [Parameter(Mandatory = $true)][int]$BoundedWaitMilliseconds
+    )
+
+    try {
+        Stop-Process -Id $ProcessId -Force -ErrorAction Stop
+    } catch {
+        # Already exited, or genuinely could not be signaled -- the bounded
+        # poll below is the authoritative verdict either way.
+    }
+
+    $deadline = (Get-Date).AddMilliseconds($BoundedWaitMilliseconds)
+    $exited = $false
+    while ((Get-Date) -lt $deadline) {
+        if ($null -eq (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)) { $exited = $true; break }
+        Start-Sleep -Milliseconds 100
+    }
+    if (-not $exited) {
+        $exited = ($null -eq (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue))
+    }
+    return [pscustomobject]@{ Exited = $exited }
 }
 
 # =============================================================================
@@ -932,14 +1106,27 @@ function Set-IntradayRefreshOwnerRecord {
 # Fix: this single function is the ONLY entry point that may start or reuse a
 # refresh owner. It holds a named cross-process Mutex (see
 # Get-IntradayRefreshOwnerLockName) for the entire critical section --
-# re-read owner -> validate -> reuse OR start replacement -> write owner
-# record -- and releases it in `finally`. The re-read happens AFTER lock
-# acquisition (mandatory: a pre-lock read is stale by the time the lock is
-# granted). Bounded + fail-closed: WaitOne times out rather than blocking
-# forever, and an abandoned mutex (prior holder terminated without releasing)
-# is still granted to us -- the mandatory re-read below is what protects
-# against a stale/interrupted write from that prior holder, not the mutex
-# state itself.
+# re-read owner -> validate -> orphan recovery -> reuse/adopt/start
+# replacement -> write owner record -- and releases it in `finally`. The
+# re-read happens AFTER lock acquisition (mandatory: a pre-lock read is stale
+# by the time the lock is granted). Bounded + fail-closed: WaitOne times out
+# rather than blocking forever, and an abandoned mutex (prior holder
+# terminated without releasing) is still granted to us -- the mandatory
+# re-read below is what protects against a stale/interrupted write from that
+# prior holder, not the mutex state itself.
+#
+# REPAIR-04 additions (mission sections 3/6/9/12): after starting a new
+# child, its identity is positively re-verified BEFORE the owner record is
+# written; if identity verification or durable owner persistence fails, ONLY
+# the child this invocation itself created is cleaned up (never an existing
+# owner or an unrelated process), bounded-verified gone, and a deterministic
+# fail-closed outcome is returned instead of ever reporting STARTED for an
+# unrecorded/unverified child. Before starting any replacement, a narrow
+# orphan-recovery scan (Find-MatchingRefreshOwnerProcesses) looks for an
+# exact-matching process that already exists with no owner record -- zero
+# matches starts a new child, exactly one is adopted (owner record written,
+# no second child), more than one fails closed with
+# REFRESH_OWNER_MULTIPLE_MATCHES without killing either candidate.
 # =============================================================================
 function Request-IntradayRefreshOwnership {
     param(
@@ -950,7 +1137,8 @@ function Request-IntradayRefreshOwnership {
         [Parameter(Mandatory = $true)][string]$MarketDate,
         [Parameter(Mandatory = $true)][int]$DurationSeconds,
         [int]$LockTimeoutMilliseconds = 15000,
-        [int]$StartAliveCheckMilliseconds = 700
+        [int]$StartAliveCheckMilliseconds = 700,
+        [int]$ChildCleanupBoundedWaitMilliseconds = 3000
     )
 
     $lockName = Get-IntradayRefreshOwnerLockName -RepoRoot $RepoRoot
@@ -967,6 +1155,8 @@ function Request-IntradayRefreshOwnership {
             return [pscustomobject]@{ Outcome = 'LOCK_TIMEOUT'; Reason = 'REFRESH_OWNER_LOCK_TIMEOUT: could not acquire the intraday-refresh ownership lock within the bounded timeout'; Pid = $null; OwnerPath = $null }
         }
 
+        $expectedScriptPath = Join-Path $RepoRoot 'scripts\windows\Refresh-IntradayMarketData.ps1'
+
         # Mandatory re-read AFTER lock acquisition -- see comment block above.
         $ownerState = Get-IntradayRefreshOwnerState -RepoRoot $RepoRoot -Symbols $Symbols -Timeframe $Timeframe -PaperDbPort $PaperDbPort -MarketDate $MarketDate
 
@@ -978,11 +1168,38 @@ function Request-IntradayRefreshOwnership {
             return [pscustomobject]@{ Outcome = 'REUSED'; Reason = $ownerState.Reason; Pid = [int]$ownerState.Record.pid; OwnerPath = $ownerState.OwnerPath }
         }
 
-        # Safe to start a replacement: no_record / dead / wrong_process / scope_mismatch.
+        # DEFECT 9 REPAIR (REPAIR-04, mission section 9): the owner record is
+        # absent/corrupt/dead/wrong -- before starting a brand-new child,
+        # scan for an already-running EXACT-matching process with no (or a
+        # stale) owner record. This protects against a prior launcher being
+        # terminated between child-start and owner-write, a previous
+        # transient owner-write failure, or an owner file removed by hand
+        # while the refresh process itself remains healthy.
+        $orphanScan = Find-MatchingRefreshOwnerProcesses -ExpectedScriptPath $expectedScriptPath -ExpectedSymbols $Symbols -ExpectedTimeframe $Timeframe
+        if (-not $orphanScan.Ok) {
+            return [pscustomobject]@{ Outcome = 'IDENTITY_UNPROVEN'; Reason = "REFRESH_OWNER_IDENTITY_UNPROVEN: orphan-recovery process enumeration unavailable ($($orphanScan.Reason)) -- refusing to start blindly"; Pid = $null; OwnerPath = $null }
+        }
+        if ($orphanScan.MatchingPids.Count -gt 1) {
+            return [pscustomobject]@{ Outcome = 'MULTIPLE_MATCHES'; Reason = "REFRESH_OWNER_MULTIPLE_MATCHES: found $($orphanScan.MatchingPids.Count) exact-matching refresh processes (pids=$($orphanScan.MatchingPids -join ', ')) with no single authoritative owner -- refusing to start a third child and refusing to terminate either existing process"; Pid = $null; OwnerPath = $null }
+        }
+        if ($orphanScan.MatchingPids.Count -eq 1) {
+            $adoptedPid = $orphanScan.MatchingPids[0]
+            try {
+                $ownerPath = Set-IntradayRefreshOwnerRecord -RepoRoot $RepoRoot -ProcessId $adoptedPid -Symbols $Symbols -Timeframe $Timeframe -PaperDbPort $PaperDbPort -MarketDate $MarketDate
+            } catch {
+                # Adoption target is a PRE-EXISTING process this invocation did
+                # not create -- it is never terminated by an adoption-write failure.
+                return [pscustomobject]@{ Outcome = 'OWNER_PERSIST_FAILED'; Reason = "orphan-adoption owner-write failed: $($_.Exception.Message) (adopted candidate pid=$adoptedPid was left running untouched -- it is a pre-existing process this invocation did not create)"; Pid = $null; OwnerPath = $null }
+            }
+            return [pscustomobject]@{ Outcome = 'REUSED'; Reason = "adopted an orphaned exact-matching refresh process (pid=$adoptedPid) that had no prior owner record -- no second child started"; Pid = $adoptedPid; OwnerPath = $ownerPath }
+        }
+
+        # Safe to start a replacement: no_record / dead / wrong_process /
+        # scope_mismatch / corrupt_record, AND zero exact-matching orphans.
         # DEFECT/ITEM 8 REPAIR: bounded proof of survival before the owner
         # record is written -- an owner record is never written for a child
         # that exited immediately (no false-green owner record).
-        $refreshScript = Join-Path $RepoRoot 'scripts\windows\Refresh-IntradayMarketData.ps1'
+        $refreshScript = $expectedScriptPath
         $refreshLogDir = Join-Path $RepoRoot 'exports\launcher'
         New-Item -ItemType Directory -Force -Path $refreshLogDir | Out-Null
         $stamp = Get-Date -Format 'yyyyMMdd_HHmmss_fff'
@@ -1002,8 +1219,38 @@ function Request-IntradayRefreshOwnership {
             return [pscustomobject]@{ Outcome = 'START_FAILED'; Reason = "child process (pid=$($refreshProcess.Id)) exited before the bounded alive-check completed -- no owner record written"; Pid = $null; OwnerPath = $null }
         }
 
-        $ownerPath = Set-IntradayRefreshOwnerRecord -RepoRoot $RepoRoot -ProcessId $refreshProcess.Id -Symbols $Symbols -Timeframe $Timeframe -PaperDbPort $PaperDbPort -MarketDate $MarketDate
-        return [pscustomobject]@{ Outcome = 'STARTED'; Reason = 'started and passed the bounded alive-check'; Pid = $refreshProcess.Id; OwnerPath = $ownerPath }
+        # DEFECT 1 REPAIR (REPAIR-04, mission section 12): positively verify
+        # the newly-created child's EXACT identity before it is ever recorded
+        # as authoritative owner. An unverified child is never persisted.
+        $newChildIdentity = Get-RefreshOwnerProcessIdentity -ProcessId $refreshProcess.Id -ExpectedScriptPath $expectedScriptPath `
+            -ExpectedSymbols $Symbols -ExpectedTimeframe $Timeframe
+        if ($newChildIdentity -ne 'verified_refresh_owner') {
+            $cleanup = Stop-NewlyCreatedRefreshChild -ProcessId $refreshProcess.Id -BoundedWaitMilliseconds $ChildCleanupBoundedWaitMilliseconds
+            if ($cleanup.Exited) {
+                return [pscustomobject]@{ Outcome = 'START_FAILED'; Reason = "newly-created child (pid=$($refreshProcess.Id)) failed exact-identity verification post-start (disposition=$newChildIdentity) -- terminated the child this invocation created and confirmed it exited; no owner record written"; Pid = $null; OwnerPath = $null }
+            }
+            Write-Fail "REFRESH_OWNER_NEW_CHILD_IDENTITY_FAILED_CHILD_STILL_PRESENT: newly-created child pid=$($refreshProcess.Id) failed post-start identity verification (disposition=$newChildIdentity) and could not be confirmed terminated within the bounded wait. Operator must manually verify/terminate pid=$($refreshProcess.Id)."
+            return [pscustomobject]@{ Outcome = 'START_FAILED_CHILD_STILL_PRESENT'; Reason = "newly-created child (pid=$($refreshProcess.Id)) failed identity verification and could not be confirmed terminated within the bounded wait"; Pid = $refreshProcess.Id; OwnerPath = $null }
+        }
+
+        # DEFECT (REPAIR-04, mission sections 2/6): durable owner-record
+        # persistence must never be assumed to succeed. On failure, clean up
+        # ONLY the child this invocation itself just created and verified,
+        # bounded-confirm it exited, and fail closed rather than risk leaving
+        # an alive, unrecorded refresh process behind.
+        try {
+            $ownerPath = Set-IntradayRefreshOwnerRecord -RepoRoot $RepoRoot -ProcessId $refreshProcess.Id -Symbols $Symbols -Timeframe $Timeframe -PaperDbPort $PaperDbPort -MarketDate $MarketDate
+        } catch {
+            $persistFailureReason = $_.Exception.Message
+            $cleanup = Stop-NewlyCreatedRefreshChild -ProcessId $refreshProcess.Id -BoundedWaitMilliseconds $ChildCleanupBoundedWaitMilliseconds
+            if ($cleanup.Exited) {
+                return [pscustomobject]@{ Outcome = 'OWNER_PERSIST_FAILED'; Reason = "durable owner-record persistence failed ($persistFailureReason) -- terminated the child this invocation created (pid=$($refreshProcess.Id)) and confirmed it exited; no authoritative owner record was written"; Pid = $null; OwnerPath = $null }
+            }
+            Write-Fail "OWNER_PERSIST_FAILED_CHILD_STILL_PRESENT: durable owner-record persistence failed for pid=$($refreshProcess.Id) ($persistFailureReason) and the child could not be confirmed terminated within the bounded wait. Operator must manually verify/terminate pid=$($refreshProcess.Id)."
+            return [pscustomobject]@{ Outcome = 'OWNER_PERSIST_FAILED_CHILD_STILL_PRESENT'; Reason = "durable owner-record persistence failed ($persistFailureReason) and the newly-created child (pid=$($refreshProcess.Id)) could not be confirmed terminated within the bounded wait"; Pid = $refreshProcess.Id; OwnerPath = $null }
+        }
+
+        return [pscustomobject]@{ Outcome = 'STARTED'; Reason = 'started, identity-verified, and passed the bounded alive-check'; Pid = $refreshProcess.Id; OwnerPath = $ownerPath }
     } finally {
         if ($acquired) {
             try { $mutex.ReleaseMutex() } catch {}
@@ -1302,6 +1549,30 @@ function Invoke-PaperStartup {
             Write-LauncherLogEntry -Path $LogPath -Entry $logEntry
             return $script:ExitBackendReconcile
         }
+        'START_FAILED_CHILD_STILL_PRESENT' {
+            Write-Fail "REFRESH_OWNER_NEW_CHILD_IDENTITY_FAILED_CHILD_STILL_PRESENT: $($ownership.Reason). Operator must manually verify/terminate pid=$($ownership.Pid)."
+            $logEntry.stages += @{ name = 'intraday_refresh'; ok = $false; reason = 'REFRESH_OWNER_NEW_CHILD_IDENTITY_FAILED_CHILD_STILL_PRESENT'; unresolved_pid = $ownership.Pid }
+            Write-LauncherLogEntry -Path $LogPath -Entry $logEntry
+            return $script:ExitBackendReconcile
+        }
+        'OWNER_PERSIST_FAILED' {
+            Write-Fail "OWNER_PERSIST_FAILED: $($ownership.Reason)"
+            $logEntry.stages += @{ name = 'intraday_refresh'; ok = $false; reason = 'OWNER_PERSIST_FAILED' }
+            Write-LauncherLogEntry -Path $LogPath -Entry $logEntry
+            return $script:ExitBackendReconcile
+        }
+        'OWNER_PERSIST_FAILED_CHILD_STILL_PRESENT' {
+            Write-Fail "OWNER_PERSIST_FAILED_CHILD_STILL_PRESENT: $($ownership.Reason). Operator must manually verify/terminate pid=$($ownership.Pid)."
+            $logEntry.stages += @{ name = 'intraday_refresh'; ok = $false; reason = 'OWNER_PERSIST_FAILED_CHILD_STILL_PRESENT'; unresolved_pid = $ownership.Pid }
+            Write-LauncherLogEntry -Path $LogPath -Entry $logEntry
+            return $script:ExitBackendReconcile
+        }
+        'MULTIPLE_MATCHES' {
+            Write-Fail "REFRESH_OWNER_MULTIPLE_MATCHES: $($ownership.Reason)"
+            $logEntry.stages += @{ name = 'intraday_refresh'; ok = $false; reason = 'REFRESH_OWNER_MULTIPLE_MATCHES' }
+            Write-LauncherLogEntry -Path $LogPath -Entry $logEntry
+            return $script:ExitBackendReconcile
+        }
         'REUSED' {
             Write-Ok "Reusing existing launcher-managed intraday refresh loop (pid=$($ownership.Pid)): $($ownership.Reason)"
             $logEntry.stages += @{ name = 'intraday_refresh'; ok = $true; reused = $true; pid = $ownership.Pid; duration_seconds = $durationSeconds; symbols = $requiredSymbols; timeframe = $refreshTimeframe; market_date = $marketDateLabel }
@@ -1309,6 +1580,14 @@ function Invoke-PaperStartup {
         'STARTED' {
             Write-Ok "Intraday refresh loop started in background (pid=$($ownership.Pid), duration=${durationSeconds}s, symbols=$($requiredSymbols -join ', '), timeframe=$refreshTimeframe). Owner recorded at $($ownership.OwnerPath)."
             $logEntry.stages += @{ name = 'intraday_refresh'; ok = $true; reused = $false; pid = $ownership.Pid; duration_seconds = $durationSeconds; symbols = $requiredSymbols; timeframe = $refreshTimeframe; market_date = $marketDateLabel }
+        }
+        default {
+            # Fail closed on any unrecognized outcome rather than silently
+            # falling through to launcher success.
+            Write-Fail "Unrecognized intraday-refresh ownership outcome '$($ownership.Outcome)': $($ownership.Reason)"
+            $logEntry.stages += @{ name = 'intraday_refresh'; ok = $false; reason = "unrecognized outcome: $($ownership.Outcome)" }
+            Write-LauncherLogEntry -Path $LogPath -Entry $logEntry
+            return $script:ExitBackendReconcile
         }
     }
 
