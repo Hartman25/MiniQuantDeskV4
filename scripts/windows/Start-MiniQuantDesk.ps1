@@ -18,20 +18,27 @@
 #
 # Usage:
 #   Start-MiniQuantDesk.ps1                          interactive Paper/Live menu
-#   Start-MiniQuantDesk.ps1 -Mode Paper               full paper startup
-#   Start-MiniQuantDesk.ps1 -Mode Paper -CheckOnly    read-only paper diagnostic
-#   Start-MiniQuantDesk.ps1 -Mode Paper -ArmPaper     full paper startup + arm
+#   Start-MiniQuantDesk.ps1 -Mode Paper               full paper startup -- ALWAYS
+#                                                      establishes an armed state (see
+#                                                      OFFICIAL-DUAL-MODE-LAUNCHER-01-REPAIR-01)
+#   Start-MiniQuantDesk.ps1 -Mode Paper -CheckOnly    read-only paper diagnostic (never arms)
+#   Start-MiniQuantDesk.ps1 -Mode Paper -ArmPaper     legacy flag, retained for backward
+#                                                      compatibility only -- no longer required;
+#                                                      full paper startup always arms.
 #   Start-MiniQuantDesk.ps1 -Mode Live                live readiness report (blocked today)
 #   Start-MiniQuantDesk.ps1 -Mode Live -CheckOnly     read-only live diagnostic
-#   Start-MiniQuantDesk.ps1 -Mode Paper -Scheduled    unattended paper start (future Task Scheduler)
+#   Start-MiniQuantDesk.ps1 -Mode Paper -Scheduled    unattended paper start (future Task Scheduler);
+#                                                      also always arms; fails closed if an
+#                                                      authoritative session-close time cannot be
+#                                                      established (no silent 30-minute fallback)
 #   Start-MiniQuantDesk.ps1 -Scheduled                STARTUP_REFUSED (Mode required when -Scheduled)
 #
 # Exit codes:
 #   0 = ready / successfully attached or prepared
-#   1 = generic startup failure
+#   1 = generic startup failure (includes DB/Docker/migration prerequisite failures)
 #   2 = safety refusal (e.g. -Scheduled without -Mode, live_routing_enabled=true, declined LIVE confirmation)
-#   3 = data readiness failure (symbol universe / market-data gate)
-#   4 = backend/reconcile failure
+#   3 = data readiness failure (symbol universe / market-data gate / session-close truth unavailable)
+#   4 = backend/reconcile/arm failure
 #   5 = LIVE blocked by trust/readiness gates
 #   6 = unattended live start not authorized
 # =============================================================================
@@ -101,6 +108,117 @@ function Write-LauncherLogEntry {
     } catch {
         Write-Warn "Could not write launcher log to $Path"
     }
+}
+
+# =============================================================================
+# DEFECT 2 REPAIR (OFFICIAL-DUAL-MODE-LAUNCHER-01-REPAIR-01): safe .env.local /
+# .env loading for the OFFICIAL PARENT launcher process itself.
+#
+# Root cause: Launch-VeritasLedger.ps1 previously loaded .env.local only in a
+# CHILD `powershell.exe` process (see Invoke-PaperStartup below). Child-process
+# environment mutations never propagate back to this parent process, so a
+# normal configuration where MQK_OPERATOR_TOKEN/MQK_DATABASE_URL/etc. exist
+# only in .env.local left this parent's own environment empty after the child
+# exited -- causing this launcher's own HTTP calls (arm, reconcile, halt
+# recovery) to fail with "MQK_OPERATOR_TOKEN is not configured" even though
+# the child-started daemon was healthy.
+#
+# Fix: this parent process loads the same candidate files itself, using the
+# same safe parsing rules as Launch-VeritasLedger.ps1's
+# Import-LauncherEnvironmentFiles (quoted-value handling, process-env values
+# always win over file values, no secret values ever printed). This makes the
+# parent self-sufficient regardless of what the child process does.
+# =============================================================================
+function Parse-DotEnvLine {
+    param([Parameter(Mandatory = $true)][string]$Line)
+
+    $trimmed = $Line.Trim()
+    if (-not $trimmed) { return $null }
+    if ($trimmed.StartsWith('#')) { return $null }
+
+    $idx = $trimmed.IndexOf('=')
+    if ($idx -lt 1) { return $null }
+
+    $name = $trimmed.Substring(0, $idx).Trim()
+    $value = $trimmed.Substring($idx + 1).Trim()
+
+    if (-not $name) { return $null }
+
+    if (($value.StartsWith('"') -and $value.EndsWith('"')) -or ($value.StartsWith("'") -and $value.EndsWith("'"))) {
+        if ($value.Length -ge 2) {
+            $value = $value.Substring(1, $value.Length - 2)
+        }
+    }
+
+    return [pscustomobject]@{
+        Name = $name
+        Value = $value
+    }
+}
+
+function Import-DotEnvIfPresent {
+    param(
+        [Parameter(Mandatory = $true)][string]$Path,
+        [Parameter(Mandatory = $true)][AllowEmptyCollection()]$ImportedNames
+    )
+
+    if (-not (Test-Path $Path)) {
+        return
+    }
+
+    if ($null -eq $ImportedNames) {
+        throw "ImportedNames cannot be null."
+    }
+
+    foreach ($line in Get-Content -Path $Path) {
+        if ($null -eq $line) { continue }
+        if ([string]::IsNullOrWhiteSpace($line)) { continue }
+
+        $entry = Parse-DotEnvLine -Line $line
+        if ($null -eq $entry) { continue }
+
+        if ($ImportedNames.Contains($entry.Name)) { continue }
+
+        $existing = [Environment]::GetEnvironmentVariable($entry.Name, 'Process')
+        if ($null -ne $existing -and $existing.Trim().Length -gt 0) { continue }
+
+        Set-Item -Path ("Env:{0}" -f $entry.Name) -Value $entry.Value
+        [void]$ImportedNames.Add($entry.Name)
+    }
+
+    Write-Step "Loaded launcher environment hints from $Path"
+}
+
+function Import-LauncherEnvironmentFiles {
+    param([Parameter(Mandatory = $true)][string]$RepoRoot)
+
+    $importedNames = New-Object 'System.Collections.Generic.HashSet[string]' ([System.StringComparer]::OrdinalIgnoreCase)
+    $candidates = @(
+        (Join-Path $RepoRoot '.env.local'),
+        (Join-Path $RepoRoot '.env'),
+        (Join-Path $RepoRoot 'core-rs\.env.local'),
+        (Join-Path $RepoRoot 'core-rs\.env'),
+        (Join-Path $RepoRoot 'core-rs\mqk-gui\.env.local')
+    )
+
+    foreach ($candidate in $candidates) {
+        Import-DotEnvIfPresent -Path $candidate -ImportedNames $importedNames
+    }
+}
+
+function Get-EnvValue {
+    param([Parameter(Mandatory = $true)][string]$Name)
+
+    $processValue = [Environment]::GetEnvironmentVariable($Name, 'Process')
+    if ($null -ne $processValue -and $processValue.Trim().Length -gt 0) { return $processValue }
+
+    $userValue = [Environment]::GetEnvironmentVariable($Name, 'User')
+    if ($null -ne $userValue -and $userValue.Trim().Length -gt 0) { return $userValue }
+
+    $machineValue = [Environment]::GetEnvironmentVariable($Name, 'Machine')
+    if ($null -ne $machineValue -and $machineValue.Trim().Length -gt 0) { return $machineValue }
+
+    return $null
 }
 
 function Invoke-JsonGet {
@@ -413,6 +531,201 @@ function Invoke-LiveStartup {
 }
 
 # =============================================================================
+# DEFECT 4 REPAIR (OFFICIAL-DUAL-MODE-LAUNCHER-01-REPAIR-01): DB/Docker/
+# migration prerequisites the official launcher must own before daemon start.
+#
+# Mirrors the accepted equivalents already proven in
+# Start-PaperTradingSmoke.ps1 STEP 2 (Docker), STEP 3 (paper Postgres
+# container), and STEP 5 (migrations) -- but implemented narrowly inline here
+# rather than delegating to that script, because Start-PaperTradingSmoke.ps1
+# also stops stale daemon/GUI processes and starts its own daemon, which
+# would create two competing daemon-startup authorities alongside
+# Launch-VeritasLedger.ps1 (already the accepted daemon-start path for this
+# launcher). Delegating would violate "one startup authority".
+#
+# Never runs in -CheckOnly (CheckOnly must never mutate: no docker start, no
+# migrations).
+# =============================================================================
+function Invoke-PaperDbPrerequisites {
+    param([Parameter(Mandatory = $true)][string]$RepoRoot)
+
+    $result = [pscustomobject]@{ Ok = $false; Reason = $null }
+    $containerName = 'mqk-paper-postgres'
+    $paperDbUrl = 'postgres://postgres:postgres@127.0.0.1:5440/miniquantdesk_paper?sslmode=disable'
+
+    Write-Section 'PAPER -- DB prerequisites (Docker, container, Postgres readiness, migrations)'
+
+    try {
+        $null = Get-Command 'docker' -ErrorAction Stop
+    } catch {
+        $result.Reason = 'docker command not found. Install/start Docker Desktop and retry.'
+        Write-Fail $result.Reason
+        return $result
+    }
+    $dockerInfo = docker info 2>&1
+    if ($LASTEXITCODE -ne 0) {
+        $result.Reason = 'Docker is not running or not accessible. Start Docker Desktop and retry.'
+        Write-Fail $result.Reason
+        return $result
+    }
+    Write-Ok 'Docker available and running.'
+
+    try {
+        $inspect = docker inspect $containerName 2>&1
+        if ($LASTEXITCODE -eq 0) {
+            $inspectJson = $inspect | ConvertFrom-Json
+            $status = $inspectJson[0].State.Status
+            if ($status -ne 'running') {
+                Write-Warn "Container '$containerName' exists but status=$status. Starting..."
+                docker start $containerName 2>&1 | Out-Null
+                if ($LASTEXITCODE -ne 0) {
+                    $result.Reason = "Failed to start container '$containerName'."
+                    Write-Fail $result.Reason
+                    return $result
+                }
+                Start-Sleep -Seconds 2
+            }
+            Write-Ok "Paper DB container '$containerName' is running."
+        } else {
+            $result.Reason = "Container '$containerName' not found. Create it with: docker run --name mqk-paper-postgres -e POSTGRES_PASSWORD=postgres -e POSTGRES_USER=postgres -e POSTGRES_DB=miniquantdesk_paper -p 5440:5432 -d postgres:16"
+            Write-Fail $result.Reason
+            return $result
+        }
+    } catch {
+        $result.Reason = "docker inspect failed: $($_.Exception.Message)"
+        Write-Fail $result.Reason
+        return $result
+    }
+
+    $pgReady = $false
+    $pgRetries = 0
+    while (-not $pgReady -and $pgRetries -lt 10) {
+        try {
+            $null = docker exec $containerName pg_isready -U postgres -d miniquantdesk_paper 2>&1
+            if ($LASTEXITCODE -eq 0) { $pgReady = $true }
+        } catch {}
+        if (-not $pgReady) { $pgRetries++; Start-Sleep -Seconds 1 }
+    }
+    if (-not $pgReady) {
+        $result.Reason = "Postgres inside '$containerName' is not ready after $pgRetries retries. Check: docker logs $containerName"
+        Write-Fail $result.Reason
+        return $result
+    }
+    Write-Ok "Postgres is ready inside '$containerName' (port 5440)."
+
+    # PAPER DB HARD FENCE: reassert MQK_DATABASE_URL to the accepted paper DB
+    # regardless of what .env.local/-Import-LauncherEnvironmentFiles resolved,
+    # mirroring Start-PaperTradingSmoke.ps1 STEP 4b. Never 5432/5434.
+    $env:MQK_DATABASE_URL = $paperDbUrl
+    Write-Ok 'MQK_DATABASE_URL reasserted to paper DB 127.0.0.1:5440/miniquantdesk_paper (value not printed).'
+
+    $migrationsPath = Join-Path $RepoRoot 'core-rs\crates\mqk-db\migrations'
+    $sqlxCmd = $null
+    try { $sqlxCmd = (Get-Command 'sqlx' -ErrorAction Stop).Source } catch {}
+
+    if ($null -ne $sqlxCmd) {
+        Write-Step 'Running: sqlx migrate run'
+        & $sqlxCmd migrate run --database-url $env:MQK_DATABASE_URL --source $migrationsPath 2>&1 | Out-Host
+        if ($LASTEXITCODE -ne 0) {
+            $result.Reason = "sqlx migrate run failed (exit $LASTEXITCODE)."
+            Write-Fail $result.Reason
+            return $result
+        }
+    } else {
+        Write-Step 'sqlx CLI not found; running via cargo sqlx'
+        try {
+            $cargo = (Get-Command 'cargo' -ErrorAction Stop).Source
+        } catch {
+            $result.Reason = 'Neither sqlx CLI nor cargo were found; cannot run DB migrations.'
+            Write-Fail $result.Reason
+            return $result
+        }
+        Push-Location (Join-Path $RepoRoot 'core-rs')
+        try {
+            $local:ErrorActionPreference = 'Continue'
+            & $cargo run --quiet --bin sqlx -- migrate run --database-url $env:MQK_DATABASE_URL --source $migrationsPath 2>&1 | Out-Host
+            if ($LASTEXITCODE -ne 0) {
+                $result.Reason = "cargo sqlx migrate run failed (exit $LASTEXITCODE)."
+                Write-Fail $result.Reason
+                return $result
+            }
+        } finally { Pop-Location }
+    }
+    Write-Ok 'DB migrations applied.'
+
+    $result.Ok = $true
+    return $result
+}
+
+# =============================================================================
+# DEFECT 3 REPAIR (OFFICIAL-DUAL-MODE-LAUNCHER-01-REPAIR-01): authoritative
+# full-session intraday-refresh duration.
+#
+# Root cause: the prior implementation split GET /api/v1/system/session's
+# `session_stop_utc` on ':' and cast the first token to an int. That field
+# does not exist on SessionStateResponse at all (dead code -- always $null),
+# so every run silently fell back to a 1800s (30-minute) refresh loop
+# regardless of how much of the trading session remained.
+#
+# Fix: use the authoritative, DST-correct NYSE calendar via
+# GET /api/v1/market-data/readiness, which serves `session_close_utc` as a
+# full RFC3339 UTC timestamp (mqk-daemon/src/routes/market_data_readiness.rs,
+# derived from state::market_calendar::resolve_market_session_schedule) plus
+# `calendar_coverage_state` ("active" | "stale" | "invalid" | "out_of_range" |
+# "unknown" | "not_applicable"). Only "active" + a present session_close_utc
+# is treated as authoritative truth. Per CLAUDE.md fail-closed doctrine, both
+# Scheduled AND interactive full startups fail closed (ExitDataReadiness) when
+# that truth is unavailable -- never a silent 1800s default.
+# =============================================================================
+function Get-AuthoritativeIntradayRefreshDuration {
+    param(
+        [Parameter(Mandatory = $true)][string]$DaemonBaseUrl
+    )
+
+    $result = [pscustomobject]@{ Ok = $false; DurationSeconds = 0; Reason = $null; CloseUtc = $null }
+
+    $readiness = Invoke-JsonGet -Url ($DaemonBaseUrl + '/api/v1/market-data/readiness') -TimeoutSec 10
+    if (-not $readiness.Ok -or $null -eq $readiness.Json) {
+        $result.Reason = 'GET /api/v1/market-data/readiness unreachable or returned no body.'
+        return $result
+    }
+
+    $coverage = $readiness.Json.calendar_coverage_state
+    $closeUtcStr = $readiness.Json.session_close_utc
+
+    if ($coverage -ne 'active' -or [string]::IsNullOrWhiteSpace($closeUtcStr)) {
+        $result.Reason = "authoritative session-close truth unavailable (calendar_coverage_state=$coverage, session_close_utc=$closeUtcStr)"
+        return $result
+    }
+
+    try {
+        $closeUtc = [DateTimeOffset]::Parse(
+            $closeUtcStr,
+            [System.Globalization.CultureInfo]::InvariantCulture,
+            [System.Globalization.DateTimeStyles]::RoundtripKind
+        ).UtcDateTime
+    } catch {
+        $result.Reason = "could not parse session_close_utc='$closeUtcStr' as an ISO8601/RFC3339 timestamp: $($_.Exception.Message)"
+        return $result
+    }
+
+    $nowUtc = (Get-Date).ToUniversalTime()
+    $bufferedStop = $closeUtc.AddMinutes(15)
+    $remaining = [int]([TimeSpan]($bufferedStop - $nowUtc)).TotalSeconds
+    # Floor for a launch that starts at/after today's close+buffer (e.g. an
+    # after-hours interactive run). This is a floor on a REAL computed value
+    # derived from authoritative close truth -- not a truth-unavailable
+    # fallback -- so it does not reintroduce the forbidden 1800s default.
+    if ($remaining -lt 300) { $remaining = 300 }
+
+    $result.Ok = $true
+    $result.DurationSeconds = $remaining
+    $result.Reason = 'ok'
+    $result.CloseUtc = $closeUtc.ToString('o')
+    return $result
+}
+
+# =============================================================================
 # PAPER STARTUP -- reuses the existing accepted Launch-VeritasLedger.ps1 /
 # Prep-PremarketMarketData.ps1 / Refresh-IntradayMarketData.ps1 paths rather
 # than reimplementing them. This launcher NEVER calls the start-system
@@ -475,6 +788,15 @@ function Invoke-PaperStartup {
     }
 
     # --- Full startup ---
+    $dbPrereq = Invoke-PaperDbPrerequisites -RepoRoot $RepoRoot
+    if (-not $dbPrereq.Ok) {
+        Write-Fail "DB prerequisites failed: $($dbPrereq.Reason)"
+        $logEntry.stages += @{ name = 'db_prerequisites'; ok = $false; reason = $dbPrereq.Reason }
+        Write-LauncherLogEntry -Path $LogPath -Entry $logEntry
+        return $script:ExitGeneric
+    }
+    $logEntry.stages += @{ name = 'db_prerequisites'; ok = $true }
+
     Write-Section 'PAPER -- daemon + GUI (delegates to Launch-VeritasLedger.ps1)'
     $lvlArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $launchScript, '-Mode', $LauncherModeArg)
     if ($ForceRebuildDaemon) { $lvlArgs += '-RebuildDaemon' }
@@ -489,10 +811,14 @@ function Invoke-PaperStartup {
     }
     $logEntry.stages += @{ name = 'daemon_gui'; exit_code = 0 }
 
-    $operatorToken = [Environment]::GetEnvironmentVariable('MQK_OPERATOR_TOKEN', 'Process')
-    if ([string]::IsNullOrWhiteSpace($operatorToken)) { $operatorToken = [Environment]::GetEnvironmentVariable('MQK_OPERATOR_TOKEN', 'User') }
+    # DEFECT 2 REPAIR: Get-EnvValue resolves Process -> User -> Machine. This
+    # parent process already ran Import-LauncherEnvironmentFiles at startup
+    # (see main dispatch below), so a token that exists only in .env.local is
+    # now visible here even though Launch-VeritasLedger.ps1 loaded its own
+    # copy in a separate child process whose environment never propagated up.
+    $operatorToken = Get-EnvValue -Name 'MQK_OPERATOR_TOKEN'
     if ([string]::IsNullOrWhiteSpace($operatorToken)) {
-        Write-Fail 'MQK_OPERATOR_TOKEN is not configured; cannot proceed past daemon attach.'
+        Write-Fail 'MQK_OPERATOR_TOKEN is not configured (checked process/.env.local/.env/user/machine); cannot proceed past daemon attach.'
         Write-LauncherLogEntry -Path $LogPath -Entry $logEntry
         return $script:ExitGeneric
     }
@@ -541,22 +867,21 @@ function Invoke-PaperStartup {
     $logEntry.stages += @{ name = 'market_data_prep'; exit_code = 0; symbols = $requiredSymbols; timeframe = $planTimeframe }
 
     Write-Section 'PAPER -- recurring intraday refresh for the full session'
-    $sessionResp = Invoke-JsonGet -Url ($daemonBaseUrl + '/api/v1/system/session') -TimeoutSec 5
-    $durationSeconds = 1800
-    if ($sessionResp.Ok -and $sessionResp.Json.session_stop_utc) {
-        try {
-            $parts = $sessionResp.Json.session_stop_utc -split ':'
-            $nowUtc = (Get-Date).ToUniversalTime()
-            $stopUtc = (Get-Date -Year $nowUtc.Year -Month $nowUtc.Month -Day $nowUtc.Day -Hour ([int]$parts[0]) -Minute ([int]$parts[1]) -Second 0).ToUniversalTime()
-            $bufferedStop = $stopUtc.AddMinutes(15)
-            $remaining = [int]([TimeSpan]($bufferedStop - $nowUtc)).TotalSeconds
-            if ($remaining -gt 60) { $durationSeconds = $remaining } else { $durationSeconds = 900 }
-        } catch {
-            Write-Warn 'Could not parse session_stop_utc; using 1800s default intraday-refresh duration.'
-        }
-    } else {
-        Write-Warn 'session_stop_utc unavailable; using 1800s default intraday-refresh duration.'
+    $refreshDuration = Get-AuthoritativeIntradayRefreshDuration -DaemonBaseUrl $daemonBaseUrl
+    if (-not $refreshDuration.Ok) {
+        # Fail closed for BOTH -Scheduled and interactive full startups per
+        # CLAUDE.md's fail-closed doctrine (truth unavailable => deny, never
+        # optimistically pass). The mission text mandates this for -Scheduled;
+        # applying it to interactive too avoids silently handing back a
+        # 1800s window that does not actually cover the session.
+        Write-Fail "Cannot establish an authoritative full-session refresh window: $($refreshDuration.Reason)"
+        Write-Fail 'Refusing to start a fallback-duration refresh loop. Resolve calendar/market-data-readiness truth and re-run.'
+        $logEntry.stages += @{ name = 'intraday_refresh'; ok = $false; reason = $refreshDuration.Reason }
+        Write-LauncherLogEntry -Path $LogPath -Entry $logEntry
+        return $script:ExitDataReadiness
     }
+    $durationSeconds = $refreshDuration.DurationSeconds
+    Write-Ok "Authoritative session close: $($refreshDuration.CloseUtc) (source=/api/v1/market-data/readiness, calendar_coverage_state=active). Refresh duration=${durationSeconds}s (close + 15min buffer, floor 300s)."
     $refreshTimeframe = if ($planTimeframe -and $planTimeframe -ne '1D') { $planTimeframe } else { '5m' }
     $refreshLogDir = Join-Path $RepoRoot 'exports\launcher'
     New-Item -ItemType Directory -Force -Path $refreshLogDir | Out-Null
@@ -621,28 +946,60 @@ function Invoke-PaperStartup {
         $logEntry.stages += @{ name = 'halt_recovery'; needed = $false }
     }
 
-    Write-Section 'PAPER -- arm'
+    Write-Section 'PAPER -- arm (official full Paper startup always establishes ARMED state)'
+    # DEFECT 1 REPAIR: arming is no longer gated by -ArmPaper. Every
+    # non-CheckOnly Paper full startup (interactive and -Scheduled) must
+    # leave the system in an authoritative ARMED state before declaring
+    # startup successful -- this is the contract of the official launcher.
+    # -ArmPaper is accepted for backward compatibility only; it is a no-op.
     if ($ArmPaperFlag) {
-        $freshStatus = Invoke-JsonGet -Url ($daemonBaseUrl + '/api/v1/system/status') -TimeoutSec 5
-        if (-not $freshStatus.Ok -or $freshStatus.Json.live_routing_enabled -eq $true -or $freshStatus.Json.daemon_mode -ne 'paper' -or $freshStatus.Json.adapter_id -ne 'alpaca') {
-            Write-Fail 'Arm refused: fresh daemon status failed the paper-only safety pre-check.'
-            $logEntry.stages += @{ name = 'arm'; requested = $true; accepted = $false }
-            Write-LauncherLogEntry -Path $LogPath -Entry $logEntry
-            return $script:ExitSafetyRefusal
-        }
-        $arm = Invoke-OpsAction -BaseUrl $daemonBaseUrl -OperatorToken $operatorToken -ActionKey 'arm-execution'
-        if ($arm.StatusCode -ne 200 -or $arm.Json.accepted -ne $true) {
-            Write-Fail "arm-execution was not accepted (status=$($arm.StatusCode)). Runtime not started, no orders submitted."
-            $logEntry.stages += @{ name = 'arm'; requested = $true; accepted = $false }
-            Write-LauncherLogEntry -Path $LogPath -Entry $logEntry
-            return $script:ExitBackendReconcile
-        }
-        Write-Ok 'arm-execution accepted. ARMED ONLY -- runtime not started, no orders submitted.'
-        $logEntry.stages += @{ name = 'arm'; requested = $true; accepted = $true }
-    } else {
-        Write-Ok '-ArmPaper not requested; leaving arm state as-is. Pass -ArmPaper to arm explicitly.'
-        $logEntry.stages += @{ name = 'arm'; requested = $false }
+        Write-Ok '-ArmPaper was passed; note it is no longer required -- official Paper full startup always arms.'
     }
+
+    $freshStatus = Invoke-JsonGet -Url ($daemonBaseUrl + '/api/v1/system/status') -TimeoutSec 5
+    if (-not $freshStatus.Ok -or $freshStatus.Json.live_routing_enabled -eq $true -or $freshStatus.Json.daemon_mode -ne 'paper' -or $freshStatus.Json.adapter_id -ne 'alpaca') {
+        Write-Fail 'Arm refused: fresh daemon status failed the paper-only safety pre-check.'
+        $logEntry.stages += @{ name = 'arm'; accepted = $false; final_arm_state = 'precheck_failed' }
+        Write-LauncherLogEntry -Path $LogPath -Entry $logEntry
+        return $script:ExitSafetyRefusal
+    }
+
+    $arm = Invoke-OpsAction -BaseUrl $daemonBaseUrl -OperatorToken $operatorToken -ActionKey 'arm-execution'
+    if ($arm.StatusCode -ne 200 -or $arm.Json.accepted -ne $true) {
+        Write-Fail "arm-execution was not accepted (status=$($arm.StatusCode)). Runtime not started, no orders submitted."
+        $logEntry.stages += @{ name = 'arm'; accepted = $false; final_arm_state = 'rejected' }
+        Write-LauncherLogEntry -Path $LogPath -Entry $logEntry
+        return $script:ExitBackendReconcile
+    }
+
+    # Bounded authoritative verification against GET /api/v1/autonomous/readiness.
+    # arm_state='arm_pending' is deliberately NOT accepted as success: per
+    # mqk-daemon/src/routes/system.rs, "arm_pending" is returned both when the
+    # durable DB row is truly ARMED (self-heal in progress) AND when the DB
+    # row is missing/unreadable -- the two cases are indistinguishable from
+    # this response alone, so treating arm_pending as success here could mask
+    # an unknown durable-truth state. Only "armed" counts. This also directly
+    # proves runtime_can_start_unarmed=false is never bypassed by the
+    # launcher's own success criteria: mqk-daemon's start_execution_runtime
+    # itself refuses whenever integrity.disarmed || integrity.halted is true,
+    # which is still true for both "arm_pending" and "disarmed_db".
+    $finalArmState = 'unknown'
+    for ($i = 0; $i -lt 6; $i++) {
+        $arCheck = Invoke-JsonGet -Url ($daemonBaseUrl + '/api/v1/autonomous/readiness') -TimeoutSec 5
+        if ($arCheck.Ok -and $arCheck.Json.arm_state) { $finalArmState = $arCheck.Json.arm_state }
+        if ($finalArmState -eq 'armed') { break }
+        Start-Sleep -Milliseconds 500
+    }
+
+    if ($finalArmState -ne 'armed') {
+        Write-Fail "arm-execution was accepted but authoritative arm_state='$finalArmState' (expected 'armed'). Refusing to report startup success."
+        $logEntry.stages += @{ name = 'arm'; accepted = $true; final_arm_state = $finalArmState }
+        Write-LauncherLogEntry -Path $LogPath -Entry $logEntry
+        return $script:ExitBackendReconcile
+    }
+
+    Write-Ok 'arm-execution accepted and verified: arm_state=armed. ARMED ONLY -- runtime not started, no orders submitted.'
+    $logEntry.stages += @{ name = 'arm'; accepted = $true; final_arm_state = 'armed' }
 
     if ($CaptureEvidenceFlag) {
         Write-Section 'PAPER -- evidence capture'
@@ -662,6 +1019,12 @@ function Invoke-PaperStartup {
 # MAIN DISPATCH
 # =============================================================================
 $RepoRoot = Get-RepoRoot
+
+# DEFECT 2 REPAIR: load .env.local/.env into THIS parent process's own
+# environment before anything below needs MQK_OPERATOR_TOKEN, MQK_DATABASE_URL,
+# MQK_STRATEGY_SYMBOL, MQK_STRATEGY_MD_TIMEFRAME, MQK_STRATEGY_IDS, watchlist
+# config, or Alpaca paper config. Never prints values.
+Import-LauncherEnvironmentFiles -RepoRoot $RepoRoot
 
 if ($Scheduled.IsPresent -and [string]::IsNullOrWhiteSpace($Mode)) {
     Write-Host ''
@@ -696,7 +1059,13 @@ try {
         exit $code
     }
     else {
-        $launcherModeArg = if ($ArmPaper.IsPresent) { 'TradeReady' } else { 'Observe' }
+        # DEFECT 1 REPAIR: official full Paper startup always requires a
+        # trade-ready backend and always arms afterward (see
+        # Invoke-PaperStartup's arm section) -- no longer conditional on
+        # -ArmPaper. CheckOnly is unaffected (Invoke-PaperStartup's CheckOnly
+        # branch returns before $launcherModeArg is ever used for daemon
+        # startup semantics).
+        $launcherModeArg = 'TradeReady'
         $forceRebuildDaemon = $Rebuild.IsPresent -or $RebuildDaemon.IsPresent
         $forceRebuildGui = $Rebuild.IsPresent -or $RebuildGui.IsPresent
         $effectiveSkipGui = $SkipGui.IsPresent -or $Scheduled.IsPresent
