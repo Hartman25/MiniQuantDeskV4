@@ -682,7 +682,7 @@ function Get-AuthoritativeIntradayRefreshDuration {
         [Parameter(Mandatory = $true)][string]$DaemonBaseUrl
     )
 
-    $result = [pscustomobject]@{ Ok = $false; DurationSeconds = 0; Reason = $null; CloseUtc = $null }
+    $result = [pscustomobject]@{ Ok = $false; DurationSeconds = 0; Reason = $null; CloseUtc = $null; MarketDate = $null }
 
     $readiness = Invoke-JsonGet -Url ($DaemonBaseUrl + '/api/v1/market-data/readiness') -TimeoutSec 10
     if (-not $readiness.Ok -or $null -eq $readiness.Json) {
@@ -692,9 +692,14 @@ function Get-AuthoritativeIntradayRefreshDuration {
 
     $coverage = $readiness.Json.calendar_coverage_state
     $closeUtcStr = $readiness.Json.session_close_utc
+    # DEFECT 9 REPAIR (OFFICIAL-DUAL-MODE-LAUNCHER-01-REPAIR-03): market_date
+    # is now sourced from this same authoritative readiness route rather than
+    # the machine-local calendar date, making the official launcher
+    # timezone-independent (mission section 9).
+    $marketDateStr = $readiness.Json.market_date
 
-    if ($coverage -ne 'active' -or [string]::IsNullOrWhiteSpace($closeUtcStr)) {
-        $result.Reason = "authoritative session-close truth unavailable (calendar_coverage_state=$coverage, session_close_utc=$closeUtcStr)"
+    if ($coverage -ne 'active' -or [string]::IsNullOrWhiteSpace($closeUtcStr) -or [string]::IsNullOrWhiteSpace($marketDateStr)) {
+        $result.Reason = "authoritative session-close truth unavailable (calendar_coverage_state=$coverage, session_close_utc=$closeUtcStr, market_date=$marketDateStr)"
         return $result
     }
 
@@ -722,6 +727,7 @@ function Get-AuthoritativeIntradayRefreshDuration {
     $result.DurationSeconds = $remaining
     $result.Reason = 'ok'
     $result.CloseUtc = $closeUtc.ToString('o')
+    $result.MarketDate = $marketDateStr
     return $result
 }
 
@@ -754,26 +760,66 @@ function Get-IntradayRefreshOwnerPath {
     return (Join-Path $dir 'intraday_refresh_owner.json')
 }
 
-function Test-RefreshOwnerProcessAlive {
+# =============================================================================
+# DEFECT 1 REPAIR (OFFICIAL-DUAL-MODE-LAUNCHER-01-REPAIR-03): process identity
+# must be POSITIVELY established, never assumed.
+#
+# Root cause: the REPAIR-02 implementation fell back to a process-name-only
+# verdict ("ProcessName matches powershell*") whenever Get-CimInstance
+# Win32_Process failed. A stale owner-record PID that Windows later reused for
+# an unrelated PowerShell process (any script, any user session) would then
+# be silently accepted as a valid launcher-managed refresh owner.
+#
+# Fix: return one of four distinguishable identity states instead of a single
+# boolean. "identity_unavailable" (CIM/WMI could not be queried, or returned
+# no command line) is NEVER collapsed into "verified" -- callers must fail
+# closed on that state, not guess. No state here ever terminates a process;
+# this function only observes.
+# =============================================================================
+function Get-RefreshOwnerProcessIdentity {
     param([Parameter(Mandatory = $true)][int]$ProcessId)
 
     $proc = $null
-    try { $proc = Get-Process -Id $ProcessId -ErrorAction Stop } catch { return $false }
-    if ($proc.ProcessName -notmatch '^powershell') { return $false }
+    try { $proc = Get-Process -Id $ProcessId -ErrorAction Stop } catch { return 'dead' }
+    if ($proc.ProcessName -notmatch '^powershell') { return 'wrong_process' }
 
-    # Best-effort command-line confirmation. Some environments restrict WMI/CIM
-    # access; when that happens we fall back to the process-name check above
-    # rather than refusing to reuse (or falsely killing) a legitimate owner.
     try {
         $cim = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = $ProcessId" -ErrorAction Stop
-        if ($cim -and $cim.CommandLine -and ($cim.CommandLine -notmatch [regex]::Escape('Refresh-IntradayMarketData.ps1'))) {
-            return $false
-        }
     } catch {
-        # CIM unavailable -- keep the process-name-only verdict from above.
+        return 'identity_unavailable'
     }
 
-    return $true
+    if (-not $cim -or [string]::IsNullOrWhiteSpace($cim.CommandLine)) {
+        return 'identity_unavailable'
+    }
+
+    if ($cim.CommandLine -match [regex]::Escape('Refresh-IntradayMarketData.ps1')) {
+        return 'verified_refresh_owner'
+    }
+
+    return 'wrong_process'
+}
+
+# Deterministic per-scope cross-process lock name for intraday-refresh owner
+# acquisition (DEFECT 2 REPAIR). Local\ (session-scoped) is used rather than
+# Global\ -- this launcher only ever runs interactively or via Task Scheduler
+# in the operator's own logon session, never across Terminal Services
+# sessions or as a service, so Local\ avoids any risk of a Global\ namespace
+# permission failure (SeCreateGlobalPrivilege) on a locked-down operator
+# account while still providing real cross-process mutual exclusion for every
+# caller that matters. The name is scoped to a hash of RepoRoot so a launcher
+# run against one worktree/repo never contends with a completely unrelated
+# one on the same machine.
+function Get-IntradayRefreshOwnerLockName {
+    param([Parameter(Mandatory = $true)][string]$RepoRoot)
+    $sha256 = [System.Security.Cryptography.SHA256]::Create()
+    try {
+        $hashBytes = $sha256.ComputeHash([System.Text.Encoding]::UTF8.GetBytes($RepoRoot.ToLowerInvariant()))
+    } finally {
+        $sha256.Dispose()
+    }
+    $hashHex = ([BitConverter]::ToString($hashBytes) -replace '-', '').Substring(0, 16)
+    return "Local\MiniQuantDeskV4-Paper-IntradayRefreshOwner-$hashHex"
 }
 
 function Get-IntradayRefreshOwnerState {
@@ -786,26 +832,47 @@ function Get-IntradayRefreshOwnerState {
     )
 
     $ownerPath = Get-IntradayRefreshOwnerPath -RepoRoot $RepoRoot
-    $result = [pscustomobject]@{ Reusable = $false; Reason = 'no owner record'; OwnerPath = $ownerPath; Record = $null }
+    $result = [pscustomobject]@{ Reusable = $false; Disposition = 'no_record'; Reason = 'no owner record'; OwnerPath = $ownerPath; Record = $null }
     if (-not (Test-Path $ownerPath)) { return $result }
 
     try {
         $record = Get-Content -Path $ownerPath -Raw | ConvertFrom-Json
     } catch {
+        $result.Disposition = 'corrupt_record'
         $result.Reason = "owner record unreadable/corrupt: $($_.Exception.Message)"
         return $result
     }
     $result.Record = $record
 
     if ($null -eq $record -or $null -eq $record.pid) {
+        $result.Disposition = 'corrupt_record'
         $result.Reason = 'owner record missing pid'
         return $result
     }
-    if (-not (Test-RefreshOwnerProcessAlive -ProcessId ([int]$record.pid))) {
-        $result.Reason = "recorded pid $($record.pid) is not a live launcher-managed refresh process"
+
+    # DEFECT 1 REPAIR: four distinguishable dispositions, never collapsed.
+    # dead / wrong_process -> safe to replace (existing process, if any, is
+    # never touched). identity_unavailable -> FAIL CLOSED, caller must NOT
+    # reuse and must NOT start a replacement, per REPAIR-03 mission section 4.
+    $identity = Get-RefreshOwnerProcessIdentity -ProcessId ([int]$record.pid)
+
+    if ($identity -eq 'dead') {
+        $result.Disposition = 'dead'
+        $result.Reason = "recorded pid $($record.pid) is dead -- safe to replace"
+        return $result
+    }
+    if ($identity -eq 'wrong_process') {
+        $result.Disposition = 'wrong_process'
+        $result.Reason = "recorded pid $($record.pid) is alive but verified NOT to be a launcher-managed refresh process -- safe to replace the owner record; the unrelated process is left untouched"
+        return $result
+    }
+    if ($identity -eq 'identity_unavailable') {
+        $result.Disposition = 'identity_unavailable'
+        $result.Reason = "recorded pid $($record.pid) is a live PowerShell process but its command-line identity could not be established (CIM/WMI unavailable or returned no command line) -- REFRESH_OWNER_IDENTITY_UNPROVEN: refusing to reuse or replace"
         return $result
     }
 
+    # $identity -eq 'verified_refresh_owner' from here on.
     $recordSymbols = @($record.symbols)
     $sameSymbolCount = ($recordSymbols.Count -eq @($Symbols).Count)
     $sameSymbols = $sameSymbolCount -and (-not (Compare-Object $recordSymbols $Symbols))
@@ -816,12 +883,14 @@ function Get-IntradayRefreshOwnerState {
                  ($record.repo_root -eq $RepoRoot)
 
     if (-not $sameScope) {
-        $result.Reason = "recorded owner scope does not match requested scope (symbols=$($recordSymbols -join ','), timeframe=$($record.timeframe), paper_db_port=$($record.paper_db_port), market_date=$($record.market_date))"
+        $result.Disposition = 'scope_mismatch'
+        $result.Reason = "recorded owner is a verified live refresh process but its scope does not match the requested scope (symbols=$($recordSymbols -join ','), timeframe=$($record.timeframe), paper_db_port=$($record.paper_db_port), market_date=$($record.market_date)) -- safe replacement policy: start a new owned process for this scope, leave the mismatched-scope process untouched"
         return $result
     }
 
     $result.Reusable = $true
-    $result.Reason = 'existing launcher-managed refresh loop matches requested scope and is alive'
+    $result.Disposition = 'verified_refresh_owner'
+    $result.Reason = 'existing launcher-managed refresh loop matches requested scope, verified alive with matching command-line identity'
     return $result
 }
 
@@ -850,6 +919,100 @@ function Set-IntradayRefreshOwnerRecord {
 }
 
 # =============================================================================
+# DEFECT 2 REPAIR (OFFICIAL-DUAL-MODE-LAUNCHER-01-REPAIR-03): atomic owner
+# acquisition.
+#
+# Root cause: the REPAIR-02 flow was
+#   Get-IntradayRefreshOwnerState -> not reusable -> Start-Process -> Set-IntradayRefreshOwnerRecord
+# with no synchronization between the read and the write. Two launcher
+# processes racing this sequence could both observe "not reusable" before
+# either wrote a record, each starting its own refresh child -- two loops for
+# the same scope.
+#
+# Fix: this single function is the ONLY entry point that may start or reuse a
+# refresh owner. It holds a named cross-process Mutex (see
+# Get-IntradayRefreshOwnerLockName) for the entire critical section --
+# re-read owner -> validate -> reuse OR start replacement -> write owner
+# record -- and releases it in `finally`. The re-read happens AFTER lock
+# acquisition (mandatory: a pre-lock read is stale by the time the lock is
+# granted). Bounded + fail-closed: WaitOne times out rather than blocking
+# forever, and an abandoned mutex (prior holder terminated without releasing)
+# is still granted to us -- the mandatory re-read below is what protects
+# against a stale/interrupted write from that prior holder, not the mutex
+# state itself.
+# =============================================================================
+function Request-IntradayRefreshOwnership {
+    param(
+        [Parameter(Mandatory = $true)][string]$RepoRoot,
+        [Parameter(Mandatory = $true)][string[]]$Symbols,
+        [Parameter(Mandatory = $true)][string]$Timeframe,
+        [Parameter(Mandatory = $true)][int]$PaperDbPort,
+        [Parameter(Mandatory = $true)][string]$MarketDate,
+        [Parameter(Mandatory = $true)][int]$DurationSeconds,
+        [int]$LockTimeoutMilliseconds = 15000,
+        [int]$StartAliveCheckMilliseconds = 700
+    )
+
+    $lockName = Get-IntradayRefreshOwnerLockName -RepoRoot $RepoRoot
+    $mutex = New-Object System.Threading.Mutex($false, $lockName)
+    $acquired = $false
+    try {
+        try {
+            $acquired = $mutex.WaitOne($LockTimeoutMilliseconds)
+        } catch [System.Threading.AbandonedMutexException] {
+            $acquired = $true
+        }
+
+        if (-not $acquired) {
+            return [pscustomobject]@{ Outcome = 'LOCK_TIMEOUT'; Reason = 'REFRESH_OWNER_LOCK_TIMEOUT: could not acquire the intraday-refresh ownership lock within the bounded timeout'; Pid = $null; OwnerPath = $null }
+        }
+
+        # Mandatory re-read AFTER lock acquisition -- see comment block above.
+        $ownerState = Get-IntradayRefreshOwnerState -RepoRoot $RepoRoot -Symbols $Symbols -Timeframe $Timeframe -PaperDbPort $PaperDbPort -MarketDate $MarketDate
+
+        if ($ownerState.Disposition -eq 'identity_unavailable') {
+            return [pscustomobject]@{ Outcome = 'IDENTITY_UNPROVEN'; Reason = $ownerState.Reason; Pid = $null; OwnerPath = $null }
+        }
+
+        if ($ownerState.Reusable) {
+            return [pscustomobject]@{ Outcome = 'REUSED'; Reason = $ownerState.Reason; Pid = [int]$ownerState.Record.pid; OwnerPath = $ownerState.OwnerPath }
+        }
+
+        # Safe to start a replacement: no_record / dead / wrong_process / scope_mismatch.
+        # DEFECT/ITEM 8 REPAIR: bounded proof of survival before the owner
+        # record is written -- an owner record is never written for a child
+        # that exited immediately (no false-green owner record).
+        $refreshScript = Join-Path $RepoRoot 'scripts\windows\Refresh-IntradayMarketData.ps1'
+        $refreshLogDir = Join-Path $RepoRoot 'exports\launcher'
+        New-Item -ItemType Directory -Force -Path $refreshLogDir | Out-Null
+        $stamp = Get-Date -Format 'yyyyMMdd_HHmmss_fff'
+        $refreshStdout = Join-Path $refreshLogDir "intraday_refresh_$stamp.stdout.log"
+        $refreshStderr = Join-Path $refreshLogDir "intraday_refresh_$stamp.stderr.log"
+        $refreshArgs = @(
+            '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $refreshScript,
+            '-Symbols', ($Symbols -join ','), '-Timeframe', $Timeframe,
+            '-IntervalSeconds', 300, '-DurationSeconds', $DurationSeconds
+        )
+        $refreshProcess = Start-Process -FilePath 'powershell.exe' -ArgumentList $refreshArgs -WindowStyle Hidden `
+            -RedirectStandardOutput $refreshStdout -RedirectStandardError $refreshStderr -PassThru
+
+        Start-Sleep -Milliseconds $StartAliveCheckMilliseconds
+        $stillAlive = $null -ne (Get-Process -Id $refreshProcess.Id -ErrorAction SilentlyContinue)
+        if (-not $stillAlive) {
+            return [pscustomobject]@{ Outcome = 'START_FAILED'; Reason = "child process (pid=$($refreshProcess.Id)) exited before the bounded alive-check completed -- no owner record written"; Pid = $null; OwnerPath = $null }
+        }
+
+        $ownerPath = Set-IntradayRefreshOwnerRecord -RepoRoot $RepoRoot -ProcessId $refreshProcess.Id -Symbols $Symbols -Timeframe $Timeframe -PaperDbPort $PaperDbPort -MarketDate $MarketDate
+        return [pscustomobject]@{ Outcome = 'STARTED'; Reason = 'started and passed the bounded alive-check'; Pid = $refreshProcess.Id; OwnerPath = $ownerPath }
+    } finally {
+        if ($acquired) {
+            try { $mutex.ReleaseMutex() } catch {}
+        }
+        $mutex.Dispose()
+    }
+}
+
+# =============================================================================
 # PAPER STARTUP -- reuses the existing accepted Launch-VeritasLedger.ps1 /
 # Prep-PremarketMarketData.ps1 / Refresh-IntradayMarketData.ps1 paths rather
 # than reimplementing them. This launcher NEVER calls the start-system
@@ -872,7 +1035,6 @@ function Invoke-PaperStartup {
 
     $launchScript   = Join-Path $RepoRoot 'scripts\windows\Launch-VeritasLedger.ps1'
     $prepScript     = Join-Path $RepoRoot 'scripts\windows\Prep-PremarketMarketData.ps1'
-    $refreshScript  = Join-Path $RepoRoot 'scripts\windows\Refresh-IntradayMarketData.ps1'
     $evidenceScript = Join-Path $RepoRoot 'scripts\windows\Capture-PaperSmokeEvidence.ps1'
     $daemonBaseUrl  = 'http://127.0.0.1:8899'
 
@@ -1093,7 +1255,7 @@ function Invoke-PaperStartup {
     Write-Ok 'arm-execution accepted and verified: arm_state=armed. ARMED ONLY -- runtime not started, no orders submitted.'
     $logEntry.stages += @{ name = 'arm'; accepted = $true; final_arm_state = 'armed' }
 
-    Write-Section 'PAPER -- recurring intraday refresh for the full session (idempotent ownership)'
+    Write-Section 'PAPER -- recurring intraday refresh for the full session (idempotent ownership, single-owner lock)'
     $refreshDuration = Get-AuthoritativeIntradayRefreshDuration -DaemonBaseUrl $daemonBaseUrl
     if (-not $refreshDuration.Ok) {
         # Fail closed for BOTH -Scheduled and interactive full startups per
@@ -1108,38 +1270,46 @@ function Invoke-PaperStartup {
         return $script:ExitDataReadiness
     }
     $durationSeconds = $refreshDuration.DurationSeconds
-    Write-Ok "Authoritative session close: $($refreshDuration.CloseUtc) (source=/api/v1/market-data/readiness, calendar_coverage_state=active). Refresh duration=${durationSeconds}s (close + 15min buffer, floor 300s)."
+    $marketDateLabel = $refreshDuration.MarketDate
+    Write-Ok "Authoritative session close: $($refreshDuration.CloseUtc) market_date=$marketDateLabel (source=/api/v1/market-data/readiness, calendar_coverage_state=active). Refresh duration=${durationSeconds}s (close + 15min buffer, floor 300s)."
     $refreshTimeframe = if ($planTimeframe -and $planTimeframe -ne '1D') { $planTimeframe } else { '5m' }
     $paperDbPort = 5440
-    $marketDateLabel = Get-Date -Format 'yyyy-MM-dd'
 
-    # DEFECT B REPAIR (OFFICIAL-DUAL-MODE-LAUNCHER-01-REPAIR-02): before
-    # launching a new refresh child, check for an existing launcher-managed
-    # refresh loop already owning the SAME repo/symbols/timeframe/paper-DB/
-    # market-date scope. A Task Scheduler retry after a later-stage failure
-    # must reuse that loop, never stack a second one for the same scope.
-    $ownerState = Get-IntradayRefreshOwnerState -RepoRoot $RepoRoot -Symbols $requiredSymbols -Timeframe $refreshTimeframe -PaperDbPort $paperDbPort -MarketDate $marketDateLabel
+    # DEFECT 1+2 REPAIR (OFFICIAL-DUAL-MODE-LAUNCHER-01-REPAIR-03):
+    # Request-IntradayRefreshOwnership is the single atomic entry point --
+    # see its definition above for the full lock/re-read/reuse-or-start/write
+    # contract. It never returns a partial or racy result: LOCK_TIMEOUT and
+    # IDENTITY_UNPROVEN both fail this launcher run closed rather than risk
+    # starting a duplicate refresh loop or guessing about an ambiguous PID.
+    $ownership = Request-IntradayRefreshOwnership -RepoRoot $RepoRoot -Symbols $requiredSymbols -Timeframe $refreshTimeframe -PaperDbPort $paperDbPort -MarketDate $marketDateLabel -DurationSeconds $durationSeconds
 
-    if ($ownerState.Reusable) {
-        Write-Ok "Reusing existing launcher-managed intraday refresh loop (pid=$($ownerState.Record.pid)): $($ownerState.Reason)"
-        $logEntry.stages += @{ name = 'intraday_refresh'; ok = $true; reused = $true; pid = $ownerState.Record.pid; duration_seconds = $durationSeconds; symbols = $requiredSymbols; timeframe = $refreshTimeframe }
-    } else {
-        Write-Step "No reusable refresh owner found ($($ownerState.Reason)); starting exactly one refresh loop."
-        $refreshLogDir = Join-Path $RepoRoot 'exports\launcher'
-        New-Item -ItemType Directory -Force -Path $refreshLogDir | Out-Null
-        $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
-        $refreshStdout = Join-Path $refreshLogDir "intraday_refresh_$stamp.stdout.log"
-        $refreshStderr = Join-Path $refreshLogDir "intraday_refresh_$stamp.stderr.log"
-        $refreshArgs = @(
-            '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $refreshScript,
-            '-Symbols', ($requiredSymbols -join ','), '-Timeframe', $refreshTimeframe,
-            '-IntervalSeconds', 300, '-DurationSeconds', $durationSeconds
-        )
-        $refreshProcess = Start-Process -FilePath 'powershell.exe' -ArgumentList $refreshArgs -WindowStyle Hidden `
-            -RedirectStandardOutput $refreshStdout -RedirectStandardError $refreshStderr -PassThru
-        $ownerPath = Set-IntradayRefreshOwnerRecord -RepoRoot $RepoRoot -ProcessId $refreshProcess.Id -Symbols $requiredSymbols -Timeframe $refreshTimeframe -PaperDbPort $paperDbPort -MarketDate $marketDateLabel
-        Write-Ok "Intraday refresh loop started in background (pid=$($refreshProcess.Id), duration=${durationSeconds}s, symbols=$($requiredSymbols -join ', '), timeframe=$refreshTimeframe). Owner recorded at $ownerPath."
-        $logEntry.stages += @{ name = 'intraday_refresh'; ok = $true; reused = $false; pid = $refreshProcess.Id; duration_seconds = $durationSeconds; symbols = $requiredSymbols; timeframe = $refreshTimeframe }
+    switch ($ownership.Outcome) {
+        'LOCK_TIMEOUT' {
+            Write-Fail $ownership.Reason
+            $logEntry.stages += @{ name = 'intraday_refresh'; ok = $false; reason = 'REFRESH_OWNER_LOCK_TIMEOUT' }
+            Write-LauncherLogEntry -Path $LogPath -Entry $logEntry
+            return $script:ExitBackendReconcile
+        }
+        'IDENTITY_UNPROVEN' {
+            Write-Fail "REFRESH_OWNER_IDENTITY_UNPROVEN: $($ownership.Reason). Refusing to start a possibly-duplicate refresh loop and refusing to assume the existing process is safe to replace."
+            $logEntry.stages += @{ name = 'intraday_refresh'; ok = $false; reason = 'REFRESH_OWNER_IDENTITY_UNPROVEN' }
+            Write-LauncherLogEntry -Path $LogPath -Entry $logEntry
+            return $script:ExitBackendReconcile
+        }
+        'START_FAILED' {
+            Write-Fail "Failed to start intraday refresh loop: $($ownership.Reason)"
+            $logEntry.stages += @{ name = 'intraday_refresh'; ok = $false; reason = $ownership.Reason }
+            Write-LauncherLogEntry -Path $LogPath -Entry $logEntry
+            return $script:ExitBackendReconcile
+        }
+        'REUSED' {
+            Write-Ok "Reusing existing launcher-managed intraday refresh loop (pid=$($ownership.Pid)): $($ownership.Reason)"
+            $logEntry.stages += @{ name = 'intraday_refresh'; ok = $true; reused = $true; pid = $ownership.Pid; duration_seconds = $durationSeconds; symbols = $requiredSymbols; timeframe = $refreshTimeframe; market_date = $marketDateLabel }
+        }
+        'STARTED' {
+            Write-Ok "Intraday refresh loop started in background (pid=$($ownership.Pid), duration=${durationSeconds}s, symbols=$($requiredSymbols -join ', '), timeframe=$refreshTimeframe). Owner recorded at $($ownership.OwnerPath)."
+            $logEntry.stages += @{ name = 'intraday_refresh'; ok = $true; reused = $false; pid = $ownership.Pid; duration_seconds = $durationSeconds; symbols = $requiredSymbols; timeframe = $refreshTimeframe; market_date = $marketDateLabel }
+        }
     }
 
     if ($CaptureEvidenceFlag) {

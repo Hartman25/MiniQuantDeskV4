@@ -325,9 +325,10 @@ Show-Info ''
 Show-Info '=== Section 5: REPAIR-02 Defect B proofs (intraday refresh ownership) ==='
 
 # --- 5a: static source-guard checks ----------------------------------------
-Assert-True 'REPAIR-02 Proof B-static: ownership helper functions exist (Get-IntradayRefreshOwnerPath / Test-RefreshOwnerProcessAlive / Get-IntradayRefreshOwnerState / Set-IntradayRefreshOwnerRecord)' `
-    ($LauncherText -match 'function Get-IntradayRefreshOwnerPath' -and $LauncherText -match 'function Test-RefreshOwnerProcessAlive' -and
-     $LauncherText -match 'function Get-IntradayRefreshOwnerState' -and $LauncherText -match 'function Set-IntradayRefreshOwnerRecord')
+Assert-True 'REPAIR-02/03 Proof B-static: ownership helper functions exist (Get-IntradayRefreshOwnerPath / Get-RefreshOwnerProcessIdentity / Get-IntradayRefreshOwnerState / Set-IntradayRefreshOwnerRecord / Request-IntradayRefreshOwnership)' `
+    ($LauncherText -match 'function Get-IntradayRefreshOwnerPath' -and $LauncherText -match 'function Get-RefreshOwnerProcessIdentity' -and
+     $LauncherText -match 'function Get-IntradayRefreshOwnerState' -and $LauncherText -match 'function Set-IntradayRefreshOwnerRecord' -and
+     $LauncherText -match 'function Request-IntradayRefreshOwnership')
 
 $OwnershipBlockText = ($LauncherText -split 'function Get-IntradayRefreshOwnerPath ')[1]
 $OwnershipBlockText = ($OwnershipBlockText -split '# PAPER STARTUP -- reuses the existing accepted')[0]
@@ -428,6 +429,304 @@ finally {
     if ($null -ne $FixtureProc) { Stop-Process -Id $FixtureProc.Id -Force -ErrorAction SilentlyContinue }
     if ($null -ne $UnrelatedProc) { Stop-Process -Id $UnrelatedProc.Id -Force -ErrorAction SilentlyContinue }
     if ($null -ne $FixtureRepo -and (Test-Path $FixtureRepo)) { Remove-Item -Recurse -Force $FixtureRepo -ErrorAction SilentlyContinue }
+}
+
+# ---------------------------------------------------------------------------
+# Section 6: OFFICIAL-DUAL-MODE-LAUNCHER-01-REPAIR-03 proofs -- process
+# identity contract (four distinguishable states, fail-closed on ambiguity),
+# atomic single-owner lock (bounded, abandoned-mutex-aware, release-in-
+# finally, mandatory post-lock re-read), and authoritative market_date.
+# ---------------------------------------------------------------------------
+Show-Info ''
+Show-Info '=== Section 6: REPAIR-03 proofs (identity states / atomic lock / market_date) ==='
+
+# --- 6a: static source-guard checks ----------------------------------------
+Assert-True 'REPAIR-03 Proof 1-4-static: Get-RefreshOwnerProcessIdentity returns all four distinguishable identity states' `
+    ($LauncherText.Contains("return 'dead'") -and $LauncherText.Contains("return 'wrong_process'") -and
+     $LauncherText.Contains("return 'identity_unavailable'") -and $LauncherText.Contains("return 'verified_refresh_owner'"))
+
+$IdentityFnBody = ($LauncherText -split 'function Get-RefreshOwnerProcessIdentity ')[1]
+$IdentityFnBody = ($IdentityFnBody -split 'function Get-IntradayRefreshOwnerLockName')[0]
+Assert-True 'REPAIR-03 Proof 4-static: a CIM/WMI query failure returns identity_unavailable directly from the catch block (never falls through to a weaker process-name-only verdict)' `
+    ($IdentityFnBody.Contains("} catch {`n        return 'identity_unavailable'"))
+
+Assert-True 'REPAIR-03 Proof 4-static: identity resolution never returns a bare boolean -- fully replaced by explicit string states, so identity_unavailable can never be silently collapsed into a truthy "reusable" verdict' `
+    (-not ($IdentityFnBody -match 'return \$true|return \$false'))
+
+Assert-True 'REPAIR-03 Proof 5-static: Get-IntradayRefreshOwnerState fails closed (Reusable stays false, Disposition=identity_unavailable) and never falls through to the scope-matching branch for that disposition' `
+    ($LauncherText.Contains("if (`$identity -eq 'identity_unavailable') {`n        `$result.Disposition = 'identity_unavailable'"))
+
+Assert-True 'REPAIR-03 Proof 5-static: no process is ever killed anywhere in the ownership block, including the new lock/identity/start-proof code (re-check of Section 5a''s whole-block guard)' `
+    (-not ($OwnershipBlockText -match 'Stop-Process|\.Kill\('))
+
+Assert-True 'REPAIR-03 Proof 6-static: a deterministic named cross-process Mutex guards owner acquisition (not a fragile text-file existence check as the sole lock)' `
+    ($OwnershipBlockText.Contains('System.Threading.Mutex') -and $OwnershipBlockText.Contains('MiniQuantDeskV4-Paper-IntradayRefreshOwner'))
+
+Assert-True 'REPAIR-03 Proof 6-static: lock name is scoped Local\ (documented session-scoped choice)' `
+    ($OwnershipBlockText.Contains('Local\MiniQuantDeskV4-Paper-IntradayRefreshOwner-'))
+
+Assert-True 'REPAIR-03 Proof 6-static: the owner record is explicitly re-read AFTER lock acquisition inside Request-IntradayRefreshOwnership (mandatory second read)' `
+    ($OwnershipBlockText.Contains('Mandatory re-read AFTER lock acquisition') -and $OwnershipBlockText.Contains('$ownerState = Get-IntradayRefreshOwnerState -RepoRoot $RepoRoot'))
+
+Assert-True 'REPAIR-03 Proof 7-static: lock acquisition is bounded (WaitOne with a timeout, not an unbounded wait) and fails closed with REFRESH_OWNER_LOCK_TIMEOUT' `
+    ($OwnershipBlockText.Contains('$mutex.WaitOne($LockTimeoutMilliseconds)') -and $OwnershipBlockText.Contains('REFRESH_OWNER_LOCK_TIMEOUT'))
+
+Assert-True 'REPAIR-03 Proof 7-static: the mutex is released in a finally block' `
+    ($OwnershipBlockText.Contains('finally {') -and $OwnershipBlockText.Contains('$mutex.ReleaseMutex()') -and $OwnershipBlockText.Contains('$mutex.Dispose()'))
+
+Assert-True 'REPAIR-03 Proof 7-static: an abandoned mutex is explicitly handled (AbandonedMutexException caught and treated as acquired, never left to crash the launcher)' `
+    ($OwnershipBlockText.Contains('[System.Threading.AbandonedMutexException]'))
+
+Assert-True 'REPAIR-03 Proof 8-static: after Start-Process, a bounded alive-check runs and the owner record is written only when the child survives it (no false-green record on immediate exit)' `
+    ($OwnershipBlockText.Contains('Start-Sleep -Milliseconds $StartAliveCheckMilliseconds') -and $OwnershipBlockText.Contains('$stillAlive') -and $OwnershipBlockText.Contains("Outcome = 'START_FAILED'"))
+
+Assert-True 'REPAIR-03 Proof 9-static: market_date is sourced from GET /api/v1/market-data/readiness (market_date field), not the machine-local calendar date' `
+    ($LauncherText.Contains('$marketDateStr = $readiness.Json.market_date') -and $FullStartupBody.Contains('$marketDateLabel = $refreshDuration.MarketDate'))
+
+Assert-True 'REPAIR-03 Proof 9-static: the old machine-local Get-Date market_date assignment is gone from the full-startup refresh section' `
+    (-not ($FullStartupBody -match "\`$marketDateLabel = Get-Date -Format 'yyyy-MM-dd'"))
+
+Assert-True 'REPAIR-03 Proof 9-static: authoritative refresh duration is refused (Ok=false) when market_date is blank, same fail-closed treatment as session_close_utc/calendar_coverage_state' `
+    ($LauncherText.Contains('IsNullOrWhiteSpace($marketDateStr)'))
+
+Assert-True 'REPAIR-03 Proof 10-static (order unchanged): full Paper startup still reaches arm before the refresh/ownership section' `
+    ($FullStartupBody -match "(?s)final_arm_state = 'armed'\s*\}\s*.*?PAPER -- recurring intraday refresh.*?Request-IntradayRefreshOwnership")
+
+Assert-True 'REPAIR-03 Proof 13-static: CheckOnly branch never references Request-IntradayRefreshOwnership (creates no lock, no lease, no owner record, no refresh process)' `
+    (-not ($CheckOnlyBlockText -match 'Request-IntradayRefreshOwnership'))
+
+# --- 6b: functional fixture proofs (dot-sourced functions, disposable temp repos) ---
+. $Launcher
+
+# --- Identity states: dead / wrong_process / verified_refresh_owner --------
+$DeadIdentity = Get-RefreshOwnerProcessIdentity -ProcessId 999999
+Assert-True 'REPAIR-03 Proof 1: a dead PID resolves to disposition "dead"' ($DeadIdentity -eq 'dead')
+
+$WrongProc = $null
+try {
+    $WrongProc = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-Command', 'Start-Sleep -Seconds 30') -WindowStyle Hidden -PassThru
+    Start-Sleep -Milliseconds 700
+    $WrongIdentity = Get-RefreshOwnerProcessIdentity -ProcessId $WrongProc.Id
+    Assert-True 'REPAIR-03 Proof 2: a live PowerShell process whose command line does not reference the refresh script resolves to disposition "wrong_process"' `
+        ($WrongIdentity -eq 'wrong_process')
+    Assert-True 'REPAIR-03 Proof 2/11: the wrong_process process was never killed by the identity check' `
+        ($null -ne (Get-Process -Id $WrongProc.Id -ErrorAction SilentlyContinue))
+} finally {
+    if ($null -ne $WrongProc) { Stop-Process -Id $WrongProc.Id -Force -ErrorAction SilentlyContinue }
+}
+
+$VerifiedRepo = $null
+$VerifiedProc = $null
+try {
+    $VerifiedRepo = Join-Path $env:TEMP ("mqk_launcher_repair03_verified_" + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Force -Path $VerifiedRepo | Out-Null
+    $verifiedFixtureScript = Join-Path $VerifiedRepo 'Refresh-IntradayMarketData.ps1'
+    Set-Content -Path $verifiedFixtureScript -Value 'Start-Sleep -Seconds 30' -Encoding UTF8
+    $VerifiedProc = Start-Process -FilePath 'powershell.exe' `
+        -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $verifiedFixtureScript) `
+        -WindowStyle Hidden -PassThru
+    Start-Sleep -Milliseconds 800
+    $VerifiedIdentity = Get-RefreshOwnerProcessIdentity -ProcessId $VerifiedProc.Id
+    Assert-True 'REPAIR-03 Proof 3: a live PowerShell process whose command line references Refresh-IntradayMarketData.ps1 resolves to disposition "verified_refresh_owner"' `
+        ($VerifiedIdentity -eq 'verified_refresh_owner')
+} finally {
+    if ($null -ne $VerifiedProc) { Stop-Process -Id $VerifiedProc.Id -Force -ErrorAction SilentlyContinue }
+    if ($null -ne $VerifiedRepo -and (Test-Path $VerifiedRepo)) { Remove-Item -Recurse -Force $VerifiedRepo -ErrorAction SilentlyContinue }
+}
+
+# --- identity_unavailable / fail-closed proofs (CIM shadowed to fail so the
+# real result is deterministic rather than depending on this box's WMI health) ---
+$CimFailProc = $null
+$CimFailRepo = $null
+try {
+    $CimFailProc = Start-Process -FilePath 'powershell.exe' -ArgumentList @('-NoProfile', '-Command', 'Start-Sleep -Seconds 30') -WindowStyle Hidden -PassThru
+    Start-Sleep -Milliseconds 700
+
+    function Get-CimInstance { throw 'CIM/WMI unavailable (REPAIR-03 test fixture)' }
+    try {
+        $UnavailableIdentity = Get-RefreshOwnerProcessIdentity -ProcessId $CimFailProc.Id
+        Assert-True 'REPAIR-03 Proof 4: a CIM/WMI failure resolves to disposition "identity_unavailable", never "verified_refresh_owner"' `
+            ($UnavailableIdentity -eq 'identity_unavailable')
+        Assert-True 'REPAIR-03 Proof 4/11: the ambiguous process was never killed while its identity was unprovable' `
+            ($null -ne (Get-Process -Id $CimFailProc.Id -ErrorAction SilentlyContinue))
+
+        $CimFailRepo = Join-Path $env:TEMP ("mqk_launcher_repair03_unproven_" + [guid]::NewGuid().ToString('N'))
+        New-Item -ItemType Directory -Force -Path $CimFailRepo | Out-Null
+        $sym = @('AAPL'); $tf = '5m'; $port = 5440; $mktDate = '2026-08-10'
+        Set-IntradayRefreshOwnerRecord -RepoRoot $CimFailRepo -ProcessId $CimFailProc.Id -Symbols $sym -Timeframe $tf -PaperDbPort $port -MarketDate $mktDate | Out-Null
+
+        $unprovenState = Get-IntradayRefreshOwnerState -RepoRoot $CimFailRepo -Symbols $sym -Timeframe $tf -PaperDbPort $port -MarketDate $mktDate
+        Assert-True 'REPAIR-03 Proof 5: Get-IntradayRefreshOwnerState reports Disposition=identity_unavailable and Reusable=false when identity cannot be proven' `
+            ($unprovenState.Disposition -eq 'identity_unavailable' -and -not $unprovenState.Reusable)
+
+        $ownershipUnproven = Request-IntradayRefreshOwnership -RepoRoot $CimFailRepo -Symbols $sym -Timeframe $tf -PaperDbPort $port -MarketDate $mktDate -DurationSeconds 60
+        Assert-True 'REPAIR-03 Proof 4/5: Request-IntradayRefreshOwnership returns IDENTITY_UNPROVEN (fails closed) instead of reusing or starting a replacement' `
+            ($ownershipUnproven.Outcome -eq 'IDENTITY_UNPROVEN')
+
+        $recordAfter = Get-Content -Path (Get-IntradayRefreshOwnerPath -RepoRoot $CimFailRepo) -Raw | ConvertFrom-Json
+        Assert-True 'REPAIR-03 Proof 4/5: the ambiguous owner record was left completely unchanged (no replacement process started, no record overwritten)' `
+            ([int]$recordAfter.pid -eq $CimFailProc.Id)
+    } finally {
+        Remove-Item Function:\Get-CimInstance -ErrorAction SilentlyContinue
+    }
+} finally {
+    if ($null -ne $CimFailProc) { Stop-Process -Id $CimFailProc.Id -Force -ErrorAction SilentlyContinue }
+    if ($null -ne $CimFailRepo -and (Test-Path $CimFailRepo)) { Remove-Item -Recurse -Force $CimFailRepo -ErrorAction SilentlyContinue }
+}
+
+# --- Atomic lock: bounded timeout fails closed, no child created -----------
+# NOTE: Windows named mutexes have THREAD affinity, not object-handle
+# affinity -- if the SAME thread that holds the mutex calls WaitOne() again
+# (even via a brand-new Mutex .NET object for the same name), it reacquires
+# recursively and returns immediately instead of blocking. The external
+# holder therefore has to live on a genuinely different thread/process
+# (a background job) for this to be a real contention proof.
+$LockTimeoutRepo = $null
+$HolderJob = $null
+try {
+    $LockTimeoutRepo = Join-Path $env:TEMP ("mqk_launcher_repair03_locktimeout_" + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Force -Path $LockTimeoutRepo | Out-Null
+    $lockName = Get-IntradayRefreshOwnerLockName -RepoRoot $LockTimeoutRepo
+
+    $HolderJob = Start-Job -ScriptBlock {
+        param($LockName)
+        $m = New-Object System.Threading.Mutex($false, $LockName)
+        $null = $m.WaitOne()
+        Start-Sleep -Seconds 8
+        $m.ReleaseMutex()
+        $m.Dispose()
+    } -ArgumentList $lockName
+    Start-Sleep -Milliseconds 1500
+    Assert-True 'REPAIR-03 Proof 7 setup: background holder job acquired the scope lock on a separate process/thread' `
+        ($HolderJob.State -eq 'Running')
+
+    $timeoutResult = Request-IntradayRefreshOwnership -RepoRoot $LockTimeoutRepo -Symbols @('AAPL') -Timeframe '5m' -PaperDbPort 5440 -MarketDate '2026-08-10' -DurationSeconds 60 -LockTimeoutMilliseconds 800
+    Assert-True 'REPAIR-03 Proof 7: lock acquisition that cannot complete within the bounded timeout returns LOCK_TIMEOUT' `
+        ($timeoutResult.Outcome -eq 'LOCK_TIMEOUT')
+    Assert-True 'REPAIR-03 Proof 7: a lock-timeout run never starts a refresh process or writes an owner record' `
+        (-not (Test-Path (Get-IntradayRefreshOwnerPath -RepoRoot $LockTimeoutRepo)))
+} finally {
+    if ($null -ne $HolderJob) {
+        Wait-Job -Job $HolderJob -Timeout 15 | Out-Null
+        Remove-Job -Job $HolderJob -Force -ErrorAction SilentlyContinue
+    }
+    if ($null -ne $LockTimeoutRepo -and (Test-Path $LockTimeoutRepo)) { Remove-Item -Recurse -Force $LockTimeoutRepo -ErrorAction SilentlyContinue }
+}
+
+# --- Atomic lock: released in finally even when the critical section throws.
+# A malformed non-numeric paper_db_port field forces a real, uncaught cast
+# exception inside the locked scope-matching check -- a realistic corrupt-
+# record scenario, not a synthetic test-only hook.
+$ExceptionRepo = $null
+$ExceptionProc = $null
+try {
+    $ExceptionRepo = Join-Path $env:TEMP ("mqk_launcher_repair03_exception_" + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Force -Path $ExceptionRepo | Out-Null
+    $exceptionFixtureScript = Join-Path $ExceptionRepo 'Refresh-IntradayMarketData.ps1'
+    Set-Content -Path $exceptionFixtureScript -Value 'Start-Sleep -Seconds 30' -Encoding UTF8
+    $ExceptionProc = Start-Process -FilePath 'powershell.exe' `
+        -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $exceptionFixtureScript) `
+        -WindowStyle Hidden -PassThru
+    Start-Sleep -Milliseconds 800
+
+    $sym = @('AAPL'); $tf = '5m'; $mktDate = '2026-08-10'
+    $badRecord = [ordered]@{
+        pid = $ExceptionProc.Id; started_at_utc = (Get-Date).ToUniversalTime().ToString('o')
+        market_date = $mktDate; symbols = $sym; timeframe = $tf; paper_db_port = 'notanumber'; repo_root = $ExceptionRepo
+    }
+    $badOwnerPath = Get-IntradayRefreshOwnerPath -RepoRoot $ExceptionRepo
+    ($badRecord | ConvertTo-Json -Depth 4) | Set-Content -Path $badOwnerPath -Encoding UTF8
+
+    $threw = $false
+    try {
+        Request-IntradayRefreshOwnership -RepoRoot $ExceptionRepo -Symbols $sym -Timeframe $tf -PaperDbPort 5440 -MarketDate $mktDate -DurationSeconds 60 | Out-Null
+    } catch {
+        $threw = $true
+    }
+    Assert-True 'REPAIR-03 Proof 9 setup: the malformed owner record forced a real exception inside the locked critical section (proves the release-in-finally path actually ran, not a no-op)' $threw
+
+    # NOTE: re-acquiring from the SAME thread that (maybe) still holds the
+    # mutex would trivially succeed either way (Windows named mutexes are
+    # thread-affine/recursive) and would not actually prove the release
+    # happened. Verify from a background job (a genuinely different thread)
+    # instead: it can only acquire within the bounded timeout if the throwing
+    # call's `finally` truly released the mutex.
+    $lockName = Get-IntradayRefreshOwnerLockName -RepoRoot $ExceptionRepo
+    $verifyJob = Start-Job -ScriptBlock {
+        param($LockName)
+        $m = New-Object System.Threading.Mutex($false, $LockName)
+        $acquired = $m.WaitOne(3000)
+        if ($acquired) { $m.ReleaseMutex() }
+        $m.Dispose()
+        return $acquired
+    } -ArgumentList $lockName
+    $null = Wait-Job -Job $verifyJob -Timeout 10
+    $reacquired = Receive-Job -Job $verifyJob -ErrorAction SilentlyContinue
+    Remove-Job -Job $verifyJob -Force -ErrorAction SilentlyContinue
+    Assert-True 'REPAIR-03 Proof 9: the ownership lock is released in `finally` even when the critical section throws (a different thread can acquire it immediately afterward)' `
+        ($reacquired -eq $true)
+} finally {
+    if ($null -ne $ExceptionProc) { Stop-Process -Id $ExceptionProc.Id -Force -ErrorAction SilentlyContinue }
+    if ($null -ne $ExceptionRepo -and (Test-Path $ExceptionRepo)) { Remove-Item -Recurse -Force $ExceptionRepo -ErrorAction SilentlyContinue }
+}
+
+# --- Concurrency proof (mission section 16): two real PowerShell processes,
+# same owner scope, same acquisition function. Expected: exactly one refresh
+# process and one owner record survive; the second caller re-reads the owner
+# after acquiring the lock and reuses it.
+$ConcurrencyRepo = $null
+$Job1 = $null
+$Job2 = $null
+try {
+    $ConcurrencyRepo = Join-Path $env:TEMP ("mqk_launcher_repair03_concurrency_" + [guid]::NewGuid().ToString('N'))
+    $concurrencyScriptsDir = Join-Path $ConcurrencyRepo 'scripts\windows'
+    New-Item -ItemType Directory -Force -Path $concurrencyScriptsDir | Out-Null
+    $concurrencyRefreshScript = Join-Path $concurrencyScriptsDir 'Refresh-IntradayMarketData.ps1'
+    Set-Content -Path $concurrencyRefreshScript -Value 'Start-Sleep -Seconds 90' -Encoding UTF8
+
+    $sym = @('AAPL', 'MSFT'); $tf = '5m'; $port = 5440; $mktDate = '2026-08-10'
+
+    $callerScriptBlock = {
+        param($LauncherPath, $RepoRoot, $Symbols, $Timeframe, $Port, $MarketDate)
+        . $LauncherPath
+        Request-IntradayRefreshOwnership -RepoRoot $RepoRoot -Symbols $Symbols -Timeframe $Timeframe -PaperDbPort $Port -MarketDate $MarketDate -DurationSeconds 90
+    }
+
+    $Job1 = Start-Job -ScriptBlock $callerScriptBlock -ArgumentList $Launcher, $ConcurrencyRepo, $sym, $tf, $port, $mktDate
+    $Job2 = Start-Job -ScriptBlock $callerScriptBlock -ArgumentList $Launcher, $ConcurrencyRepo, $sym, $tf, $port, $mktDate
+
+    $null = Wait-Job -Job $Job1, $Job2 -Timeout 60
+    $Result1 = Receive-Job -Job $Job1 -ErrorAction SilentlyContinue
+    $Result2 = Receive-Job -Job $Job2 -ErrorAction SilentlyContinue
+
+    Assert-True 'REPAIR-03 Concurrency proof: both concurrent callers completed (no hang, no unhandled exception)' `
+        ($null -ne $Result1 -and $null -ne $Result2)
+
+    $outcomes = @($Result1.Outcome, $Result2.Outcome) | Sort-Object
+    Assert-True 'REPAIR-03 Concurrency proof: outcomes are exactly one STARTED and one REUSED -- never two STARTED (no duplicate owner)' `
+        (($outcomes -join ',') -eq 'REUSED,STARTED')
+
+    $startedResult = if ($Result1.Outcome -eq 'STARTED') { $Result1 } else { $Result2 }
+    $reusedResult = if ($Result1.Outcome -eq 'REUSED') { $Result1 } else { $Result2 }
+    Assert-True 'REPAIR-03 Concurrency proof: the REUSED caller re-read the owner record after acquiring the lock and saw the pid the STARTED caller just wrote (proves the mandatory post-lock re-read, not a stale pre-lock snapshot)' `
+        ($null -ne $startedResult -and $null -ne $reusedResult -and [int]$reusedResult.Pid -eq [int]$startedResult.Pid)
+
+    $refreshProcessCount = @(Get-CimInstance -ClassName Win32_Process -Filter "Name = 'powershell.exe'" -ErrorAction SilentlyContinue |
+        Where-Object { $_.CommandLine -and $_.CommandLine.Contains($concurrencyRefreshScript) }).Count
+    Assert-True 'REPAIR-03 Concurrency proof: refresh_process_count=1 (exactly one fixture refresh process exists for this scope)' `
+        ($refreshProcessCount -eq 1)
+
+    $ownerRecordFiles = @(Get-ChildItem -Path (Join-Path $ConcurrencyRepo 'smoke_logs\launcher\paper') -Filter 'intraday_refresh_owner.json' -ErrorAction SilentlyContinue)
+    Assert-True 'REPAIR-03 Concurrency proof: owner_record_count=1 (exactly one owner record file exists for this scope)' `
+        ($ownerRecordFiles.Count -eq 1)
+
+    if ($null -ne $startedResult -and $startedResult.Pid) {
+        Stop-Process -Id $startedResult.Pid -Force -ErrorAction SilentlyContinue
+    }
+} finally {
+    if ($null -ne $Job1) { Remove-Job -Job $Job1 -Force -ErrorAction SilentlyContinue }
+    if ($null -ne $Job2) { Remove-Job -Job $Job2 -Force -ErrorAction SilentlyContinue }
+    if ($null -ne $ConcurrencyRepo -and (Test-Path $ConcurrencyRepo)) { Remove-Item -Recurse -Force $ConcurrencyRepo -ErrorAction SilentlyContinue }
 }
 
 Show-Info ''
