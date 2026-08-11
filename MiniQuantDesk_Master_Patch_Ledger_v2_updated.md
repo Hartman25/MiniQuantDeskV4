@@ -22,7 +22,7 @@ This document is the whole-repository completion ledger for MiniQuantDeskV4. It 
 The equity/ETF paper-trading core (orchestrator, OMS state machine, outbox/inbox, broker adapters, risk, portfolio, reconciliation, backtest engine, promotion gates, GUI truth-state discipline) is **evidence-provably complete and fail-closed** at HEAD. No RED (soak-blocking) source defect was found anywhere in the audited codebase. The repository's real remaining gaps cluster in three places: (1) live-capital readiness — deliberately and completely gated off pending a trust-chain proof that doesn't exist yet; (2) operational hardening around multi-symbol dispatch resilience, CLI/daemon control-plane parity, and Discord alert coverage; (3) one uncommitted-but-well-formed patch closing a narrow halt/deadman race that needs a harness run before it can be called closed.
 
 ### Current Paper Verdict
-**PAPER_SOAK_READY.** Both the core-execution audit and the paper/risk/portfolio/reconciliation audit independently concluded there is no known concrete soak-blocking defect in current source. All previously-tracked blockers (TradeActivity schema mismatch, partial-fill dedup, stale-claim recovery, terminal-fill replay parity) have corresponding committed fixes at HEAD. The one open item is `PRE-SOAK-DAEMON-LOCAL-QUIESCENCE-AND-DEADMAN-SIDE-EFFECT-FENCE-01` (uncommitted, code+test written, not yet harness-proven) — it closes a real but narrow race, does not reopen a prior blocker, and should be committed once its `#[ignore]`d DB test (`h08_deadman_halt_cannot_be_cleared_under_live_local_loop`) is run once against a live Postgres and confirmed passing.
+**PAPER_SOAK_GO** (`FINAL-CANONICAL-PRE-SOAK-VALIDATION-01`, 2026-08-10, HEAD `e44e3ddd`). The one previously-open item, `PRE-SOAK-DAEMON-LOCAL-QUIESCENCE-AND-DEADMAN-SIDE-EFFECT-FENCE-01`, is now CLOSED — its H08 test passed against a real local Postgres as part of a full canonical safe-ignored matrix run (733/733 tests green: H01-H08, daemon-supervisor halt fence, runtime halt fence CAS, stale-claim recovery, deadman, durable portfolio/P&L, fill/replay authority, outbox/pre-submit authority, risk/kill-switch/reconcile all proven with zero failures). All previously-tracked blockers (TradeActivity schema mismatch, partial-fill dedup, stale-claim recovery, terminal-fill replay parity) have corresponding committed fixes at HEAD, and this validation reproduced no new regression against any of them. No known accepted-list paper-soak code blocker remains.
 
 ### Current Live Verdict
 **NOT READY, and cannot become ready without new work.** `LiveCapital` cold-start is hard-gated behind a trust-chain proof (`live_trust_complete`) that is **hardcoded `false`** in `research-py`'s TV-03 pipeline — this is by design, not a bug, and correctly enforced at both the advisory and cold-start-enforcement layers. Separately, live account truth is wrong today: `buying_power` is aliased to `cash` rather than pulled from Alpaca's real `buying_power`/`daytrading_buying_power` fields, which is economically dangerous for a margin account. No live-capital smoke-test tooling exists. A prior memory record claiming "daemon defaults to real Alpaca WS unless forced to paper" is **stale** — current default (`Paper`/`Paper`) is fail-closed and safe; this session is correcting that memory record.
@@ -34,7 +34,7 @@ Core Execution/OMS (~97%), Database Layer (~97%), Reconciliation (~97%), Risk Sy
 Live Capital Trading (~40%, gated by design but genuinely far from proven), CLI/Daemon control-plane parity (~60%, no CLI path to arm/halt/clear the live daemon), Discord/Alerting coverage (~70%, multi-channel routing built but unused, no data-staleness/daily-summary pushes), Options/Futures/Forex (~5%, enum + risk-multiplier stub only, explicitly gated off).
 
 ### Active Patch Counts
-READY: 33 · BLOCKED: 4 · DEFERRED: 8 · IMPLEMENTED_PENDING_REVIEW: 1 · CLOSED (this session): 0
+READY: 33 · BLOCKED: 4 · DEFERRED: 8 · IMPLEMENTED_PENDING_REVIEW: 0 · CLOSED (this session): 1
 
 ### GREEN / YELLOW / RED Patch Counts
 GREEN: 27 · YELLOW: 12 · RED: 7
@@ -120,12 +120,12 @@ Every patch below carries a stable ID, explicit status, priority, paper-impact c
 
 #### PRE-SOAK-DAEMON-LOCAL-QUIESCENCE-AND-DEADMAN-SIDE-EFFECT-FENCE-01 — Fence stale local execution-loop tasks around clear-halted-run
 
-**Status:** IMPLEMENTED_PENDING_REVIEW
+**Status:** CLOSED
 **Priority:** P0
 **Paper Impact:** RED
 **Subsystem:** Daemon supervisor / halt-clear control plane
 
-**Current Source Truth:** Working tree (uncommitted) modifies `core-rs/crates/mqk-daemon/src/routes/control_plane.rs`, `state.rs`, `state/loop_runner.rs`, and adds test `h08_deadman_halt_cannot_be_cleared_under_live_local_loop` to `core-rs/crates/mqk-daemon/tests/scenario_clear_halted_run_auton04.rs:765` (registered in `scripts/test/ignored_test_inventory.csv` as `SAFE_DB_5434`). The change adds a `st.locally_owned_run_id().await == Some(run_id)` check to `clear-halted-run` (`control_plane.rs:1012-1067`), returning 409 `local_execution_loop_active` if a stale in-process execution-loop task can still be alive after a durable deadman halt commits. Root cause: the DB runtime lease (90s TTL) can outlive the deadman TTL (120s) by up to 30s in the worst case, creating a window where `clear-halted-run` could proceed while a stale task is still mid-exit.
+**Current Source Truth:** Committed at `e44e3ddd6b41b32e5285436226100d2b867829b0` (`fix: require local quiescence before halt clear`), modifying `core-rs/crates/mqk-daemon/src/routes/control_plane.rs`, `state.rs`, `state/loop_runner.rs`, and adding test `h08_deadman_halt_cannot_be_cleared_under_live_local_loop` to `core-rs/crates/mqk-daemon/tests/scenario_clear_halted_run_auton04.rs:765` (registered in `scripts/test/ignored_test_inventory.csv` as `SAFE_DB_5434`). The change adds a `st.locally_owned_run_id().await == Some(run_id)` check to `clear-halted-run` (`control_plane.rs:1012-1067`), returning 409 `local_execution_loop_active` if a stale in-process execution-loop task can still be alive after a durable deadman halt commits. Root cause: the 120s deadman TTL (`DEADMAN_TTL_SECONDS`) can outlive the 90s runtime lease TTL (`orchestrator.rs:50`) by approximately 30 seconds, so lease expiry alone cannot prove same-process task quiescence — this creates a window where `clear-halted-run` could proceed while a stale task is still mid-exit.
 
 **Problem:** An operator (or automated retry) calling `clear-halted-run` during that up-to-30s window could allow a stale execution-loop task to perform a late write (e.g., clobber a since-recovered ARMED state) after the halt was supposed to be final. The fix is written and appears internally consistent, but per `.claude/rules/audit_repo_truth_rules.md`, "scenario test file presence alone is not closure — a harness pass result is required," and this test has never been run.
 
@@ -158,10 +158,10 @@ git diff --check
 **Exact CLOSED End State:** CLOSED when H08 has been run once against a real DB and passes, the five files are committed as a single patch, `scripts/test/ignored_test_inventory.csv`'s new row accurately reflects the committed test location, and no other in-flight uncommitted changes remain in the working tree touching halt/clear/deadman logic.
 **Expected Handoff:** Start HEAD `0a019b8b...`; end HEAD = new commit SHA; files changed = the five listed; test run output pasted into the closure record; git status clean; not pushed.
 
-**Implementation Commit:** PENDING
-**Independent Review:** PENDING
-**Closure Commit / Accepted HEAD:** PENDING
-**Closure Date:** PENDING
+**Implementation Commit:** `e44e3ddd6b41b32e5285436226100d2b867829b0`
+**Independent Review:** ACCEPTED (`FINAL-CANONICAL-PRE-SOAK-VALIDATION-01`, 2026-08-10) — confirmed: the duplicate `DeadmanExpired` durable DISARM path was removed; same-daemon local task quiescence is required before halt clear; `h08_deadman_halt_cannot_be_cleared_under_live_local_loop` passed against a real local Postgres (`127.0.0.1:5434/mqk_test`) as part of the canonical safe-ignored matrix (733/733 tests green, 0 failures); post-exit clear/re-arm state cannot be overwritten by stale execution-loop code; crashed-prior-process recovery remains permitted; H01-H07 and all other accepted-list paper-soak scenario families remain green with no regression. No further accepted-list paper code blocker remains.
+**Closure Commit / Accepted HEAD:** `e44e3ddd6b41b32e5285436226100d2b867829b0`
+**Closure Date:** 2026-08-10
 
 ---
 
@@ -607,10 +607,10 @@ git diff --check
 
 #### DEADMAN-LEASE-TTL-RECONCILE-01 — Align 90s runtime-lease TTL with 120s deadman TTL at the root
 
-**Status:** READY (implementation deferred until after `PRE-SOAK-DAEMON-LOCAL-QUIESCENCE-AND-DEADMAN-SIDE-EFFECT-FENCE-01` closes) · **Priority:** P1 · **Paper Impact:** RED · **Subsystem:** mqk-daemon halt/deadman
-**Current Source Truth:** Runtime lease TTL = 90s (`orchestrator.rs:50`); deadman TTL = 120s (`DEADMAN_TTL_SECONDS`). The asymmetry is the root cause of the race that `PRE-SOAK-DAEMON-LOCAL-QUIESCENCE-AND-DEADMAN-SIDE-EFFECT-FENCE-01` fences around rather than eliminates.
+**Status:** READY (dependency closed; unblocked, but still RED — do not attempt during the active soak without explicit operator authorization) · **Priority:** P1 · **Paper Impact:** RED · **Subsystem:** mqk-daemon halt/deadman
+**Current Source Truth:** Runtime lease TTL = 90s (`orchestrator.rs:50`); deadman TTL = 120s (`DEADMAN_TTL_SECONDS`). The 120s deadman interval can outlive the 90s runtime lease by approximately 30 seconds, so lease expiry alone cannot prove same-process task quiescence — this asymmetry is the root cause of the race that `PRE-SOAK-DAEMON-LOCAL-QUIESCENCE-AND-DEADMAN-SIDE-EFFECT-FENCE-01` (CLOSED at `e44e3ddd`) fences around rather than eliminates.
 **Problem:** The fence patch treats the symptom (a stale task might still be alive); this patch would address the cause (why the windows don't align).
-**Dependencies:** `PRE-SOAK-DAEMON-LOCAL-QUIESCENCE-AND-DEADMAN-SIDE-EFFECT-FENCE-01` (must close first — do not attempt a TTL redesign while the fence is still unproven).
+**Dependencies:** NONE (formerly `PRE-SOAK-DAEMON-LOCAL-QUIESCENCE-AND-DEADMAN-SIDE-EFFECT-FENCE-01`, now CLOSED at `e44e3ddd`).
 **In Scope:** Analyze and, if safe, align the two TTLs (or document why they must differ and add a comment explaining the intentional gap). **Out of Scope:** Any other halt/deadman logic change.
 **Likely Files:** `core-rs/crates/mqk-runtime/src/orchestrator.rs`, deadman-related config in `mqk-daemon/src/state/`.
 **Required Implementation Rules:** This is RED — must not be attempted during the active soak without explicit operator authorization to pause/restart the soak for validation.
@@ -829,9 +829,9 @@ git diff --check
 ## 6. Dependency Graph
 
 ```text
-PRE-SOAK-DAEMON-LOCAL-QUIESCENCE-AND-DEADMAN-SIDE-EFFECT-FENCE-01 (Lane A, IMPLEMENTED_PENDING_REVIEW)
+PRE-SOAK-DAEMON-LOCAL-QUIESCENCE-AND-DEADMAN-SIDE-EFFECT-FENCE-01 (Lane A, CLOSED at e44e3ddd)
     |
-    +--> DEADMAN-LEASE-TTL-RECONCILE-01 (Lane D, must wait for fence to close)
+    +--> DEADMAN-LEASE-TTL-RECONCILE-01 (Lane D, unblocked; still RED, soak-authorization required)
     |
     +--> (unlocks nothing else directly; closes the halt-fence lineage)
 
@@ -880,7 +880,7 @@ STATE-RS-LEAN-OUT-01 first sub-patch (dedupe alert blocks) (Lane F)
 ```
 
 Critical paths:
-- **Paper operational maturity:** already achieved (PAPER_SOAK_READY); only `PRE-SOAK-DAEMON-LOCAL-QUIESCENCE-AND-DEADMAN-SIDE-EFFECT-FENCE-01` stands between "READY" and "fully proven with zero open items."
+- **Paper operational maturity:** fully achieved (PAPER_SOAK_GO); `PRE-SOAK-DAEMON-LOCAL-QUIESCENCE-AND-DEADMAN-SIDE-EFFECT-FENCE-01` is CLOSED — zero open Lane A items remain.
 - **Live trading:** `LIVE-TINY-CAPITAL-SMOKE-01` → `LIVE-TRUST-CHAIN-SHADOW-CAPTURE-01` → `-PARITY-SCORER-01` → `-EVIDENCE-SIGNER-01` → `LIVE-CAPITAL-EXTERNAL-PROOF-01` is the entire critical path; nothing else blocks live capital.
 - **Backtesting / research pipeline:** already essentially complete; `PROMOTION-WALKFORWARD-GATE-WIRING-01` is the one remaining correctness gap, independent of everything else.
 - **GUI completion:** `GUI-OPERATOR-ACTION-409-BODY-SURFACE-01` is a standalone fix with no dependencies.
@@ -891,7 +891,7 @@ Critical paths:
 
 ## 7. Execution Lanes (summary)
 
-- **Lane A — Paper Soak:** 1 item (`PRE-SOAK-DAEMON-LOCAL-QUIESCENCE-AND-DEADMAN-SIDE-EFFECT-FENCE-01`), the only reproducible in-flight soak-adjacent item.
+- **Lane A — Paper Soak:** 0 open items — `PRE-SOAK-DAEMON-LOCAL-QUIESCENCE-AND-DEADMAN-SIDE-EFFECT-FENCE-01` CLOSED at `e44e3ddd`; no reproducible in-flight soak-adjacent item remains.
 - **Lane B — Green Parallel Completion:** 22 items, safe to work during the soak.
 - **Lane C — Live Development:** 10 items (including 2 blocked sub-patches and 1 operator-only closure), on a separate branch/worktree.
 - **Lane D — Post-Soak Shared Core:** 10 items, YELLOW/RED, wait for soak baseline acceptance (except where noted as buildable-on-branch-now).
@@ -969,9 +969,9 @@ A `CLOSED` patch must not be reopened merely because further hardening is imagin
 ## 12. Recommended Order After Paper Soak Continues
 
 ```text
-PAPER SOAK RUNNING (PAPER_SOAK_READY, no known blocker)
+PAPER SOAK GO (PAPER_SOAK_GO, no known blocker; Lane A fence CLOSED at e44e3ddd)
         |
-        +--> PRE-SOAK-DAEMON-LOCAL-QUIESCENCE-AND-DEADMAN-SIDE-EFFECT-FENCE-01 (commit + prove, Lane A)
+        +--> Start the 4-session supervised autonomous US equity/ETF Alpaca-paper soak
         |
         +--> Lane B GREEN work in parallel (any order, no soak risk):
         |         GUI-OPERATOR-ACTION-409-BODY-SURFACE-01
@@ -1016,16 +1016,16 @@ No ledger patch ID from the legacy `v2.md` history was found to conflict with or
 
 | Order | Patch | Lane | Impact | Priority | Why Now | Depends On |
 |---|---|---|---|---|---|---|
-| 1 | `PRE-SOAK-DAEMON-LOCAL-QUIESCENCE-AND-DEADMAN-SIDE-EFFECT-FENCE-01` | A | RED | P0 | Already written, uncommitted, blocking a clean soak-proof state; just needs a harness run + commit. | NONE |
-| 2 | `GUI-OPERATOR-ACTION-409-BODY-SURFACE-01` | B | GREEN | P1 | Real operator-safety defect, one file, no dependencies. | NONE |
-| 3 | `CLI-DAEMON-CONTROL-PASSTHROUGH-01` | B | GREEN | P1 | Closes the incident-response CLI/HTTP parity gap; pure passthrough, low risk. | NONE |
-| 4 | `PROMOTION-WALKFORWARD-GATE-WIRING-01` | B | GREEN | P1 | Largest correctness gap in the research pipeline; self-contained. | NONE |
-| 5 | `LIVE-ACCOUNT-TRUTH-01` | C | YELLOW | P1 | Real-money-relevant defect; should land early in the live-development branch. | NONE |
-| 6 | `LIVE-TINY-CAPITAL-SMOKE-01` | C | GREEN | P1 | Zero capital risk, unlocks the entire live-trust-chain sequence. | NONE |
-| 7 | `STRATEGY-MEAN-REVERSION-UNIT-TESTS-01` | B | GREEN | P2 | Closes a real proof gap on a currently-dispatchable strategy. | NONE |
-| 8 | `STRATEGY-VOLATILITY-BREAKOUT-UNIT-TESTS-01` | B | GREEN | P2 | Same rationale as #7. | NONE |
-| 9 | `STRATEGY-SWING-MOMENTUM-UNIT-TESTS-01` | B | GREEN | P2 | Same rationale as #7. | NONE |
-| 10 | `README-SNAPSHOT-REFRESH-01` | B | GREEN | P2 | Trivial, prevents new operators from trusting stale status claims. | NONE |
+| 1 | `GUI-OPERATOR-ACTION-409-BODY-SURFACE-01` | B | GREEN | P1 | Real operator-safety defect, one file, no dependencies. | NONE |
+| 2 | `CLI-DAEMON-CONTROL-PASSTHROUGH-01` | B | GREEN | P1 | Closes the incident-response CLI/HTTP parity gap; pure passthrough, low risk. | NONE |
+| 3 | `PROMOTION-WALKFORWARD-GATE-WIRING-01` | B | GREEN | P1 | Largest correctness gap in the research pipeline; self-contained. | NONE |
+| 4 | `LIVE-ACCOUNT-TRUTH-01` | C | YELLOW | P1 | Real-money-relevant defect; should land early in the live-development branch. | NONE |
+| 5 | `LIVE-TINY-CAPITAL-SMOKE-01` | C | GREEN | P1 | Zero capital risk, unlocks the entire live-trust-chain sequence. | NONE |
+| 6 | `STRATEGY-MEAN-REVERSION-UNIT-TESTS-01` | B | GREEN | P2 | Closes a real proof gap on a currently-dispatchable strategy. | NONE |
+| 7 | `STRATEGY-VOLATILITY-BREAKOUT-UNIT-TESTS-01` | B | GREEN | P2 | Same rationale as #6. | NONE |
+| 8 | `STRATEGY-SWING-MOMENTUM-UNIT-TESTS-01` | B | GREEN | P2 | Same rationale as #6. | NONE |
+| 9 | `README-SNAPSHOT-REFRESH-01` | B | GREEN | P2 | Trivial, prevents new operators from trusting stale status claims. | NONE |
+| 10 | `BROKER-ALPACA-DEAD-CODE-CLEANUP-01` | B | GREEN | P3 | Removes confusing uncompiled duplicate code (`client.rs`/`config.rs`), zero risk to the live path. | NONE |
 
 This is an operational queue, not a permanent ordering — future accepted patches may change the ranking.
 
@@ -1068,4 +1068,65 @@ No Rust test matrix, no clippy, no DB, no broker calls were run in this audit se
 
 ---
 
-*End of MiniQuantDesk V4 Authoritative Master Completion Ledger — FULL-REPO-COMPLETION-AUDIT-01.*
+## 17. Validation History — `FINAL-CANONICAL-PRE-SOAK-VALIDATION-01`
+
+**Validation date:** 2026-08-10
+**Validation HEAD:** `e44e3ddd6b41b32e5285436226100d2b867829b0` (unchanged going in; this ledger-only commit is the only change produced by this session)
+**Mode:** VALIDATION ONLY — no application source (Rust/Python/GUI) modified. Only this ledger file changed.
+
+**Git safety:** branch `main`; HEAD, `origin/main` HEAD, and expected baseline all equal `e44e3ddd`; `git status --short` showed only untracked `smoke_logs/` (protected, untouched) going in.
+
+**Commands / test families run:**
+```text
+bash scripts/guards/check_migration_governance.sh
+pwsh scripts/windows/Invoke-CanonicalSafeIgnoredMatrix.ps1   (MQK_DATABASE_URL -> 127.0.0.1:5434/mqk_test)
+pwsh scripts/windows/Invoke-CanonicalFmtCheck.ps1
+cargo clippy --manifest-path core-rs/Cargo.toml --workspace --all-targets -- -D warnings
+pwsh scripts/guards/check_unsafe_patterns.ps1
+bash scripts/guards/check_ignored_load_bearing_proofs.sh
+bash scripts/guards/check_disposable_db_not_in_production.sh
+bash scripts/guards/check_workspace_dep_inheritance.sh
+bash scripts/guards/check_ci_local_toolchain_convergence.sh
+pwsh scripts/guards/check_no_promotion_evidence_bypass.ps1
+pwsh scripts/guards/check_no_phase7a_production_effects_bypass.ps1
+pwsh scripts/guards/validate_autonomous_daily_paper_operations_01g_bundle_3_final_closure.ps1
+git diff --check
+cargo test --manifest-path core-rs/Cargo.toml --workspace --no-run
+cd core-rs/mqk-gui && npm run test && npm run build
+pwsh scripts/windows/Get-PaperOperatorStatus.ps1   (read-only; daemon intentionally not started)
+```
+
+**Migration validation:** PASS — `check_migration_governance.sh` confirms the manifest matches the authoritative SQL chain (0001-0064, no unauthorized migration directories); `migrate_idempotent_on_clean_db`, `migration_bootstrap_and_replay_follow_authoritative_manifest`, and the `test_support_disposable_db` migration-owner tests all executed and passed as part of the canonical matrix below.
+
+**Ignored-test inventory:** PASS — `missing=0, unknown=0, duplicate=0, stale=0`. 742 total inventory rows (8 SAFE_LOCAL, 725 SAFE_DB_5434, 9 MANUAL_EXTERNAL, 0 BLOCKED_LOCAL_PREREQUISITE), self-validation clean, live-vs-inventory completeness clean, MANUAL_EXTERNAL feature-difference exact (9/9).
+
+**Canonical safe-ignored regression matrix (`Invoke-CanonicalSafeIgnoredMatrix.ps1`, full run, not `-ListOnly`):** PASSED. 733/733 SAFE_LOCAL+SAFE_DB_5434 tests green, 0 failures, safe execution exit code 0; 9 MANUAL_EXTERNAL tests compile-proven (`--no-run`, exit code 0). This single canonical run is the proof source for: H01-H08 (local quiescence / halt-clear, including the new H08), daemon supervisor halt fence (DSF), runtime halt fence CAS (RHF), stale-claim recovery (SCR03), deadman (`scenario_deadman_enforces_halt`, `scenario_deadman_after_start_01`), durable paper portfolio/P&L, fill/partial-fill/replay authority, outbox/pre-submit authority, and risk/kill-switch/PDT/reconcile scenario families — all classified `SAFE_LOCAL`/`SAFE_DB_5434` in the inventory and all executed as part of this one matrix run.
+
+**Build/static validation:** `cargo fmt --check` PASS (21/21 workspace packages via the canonical per-package Windows runner); `cargo clippy --workspace --all-targets -- -D warnings` PASS (exit 0, zero warnings across the full workspace, superset of the paper-critical crate list); unsafe-pattern guard PASS; `git diff --check` clean; workspace `cargo test --workspace --no-run` PASS (exit 0, all test binaries compiled).
+
+**GUI:** `npm run test` — 977/977 pass, 0 fail; `npm run build` (tsc + vite) — clean, zero type errors (only non-blocking chunk-size warnings from vite's bundler).
+
+**Autonomous daily paper operations:** `validate_autonomous_daily_paper_operations_01g_bundle_3_final_closure.ps1` — 1 non-blocking violation found: its nested `validate_daily_data_readiness_01e_closure.ps1` check `[20]` asserts `MiniQuantDesk_Master_Patch_Ledger_v2_updated.md` must never be git-tracked. That assumption predates and is superseded by this repo's own deliberate, documented decision (commit `e3a87c4a`, "docs: establish authoritative V4 completion ledger") to track this file as the new authoritative ledger. This is a stale documentation-tracking-policy assumption in an older guard, not a reproducible economic/safety/execution/risk/reconcile defect — classified non-blocking per validation-mission scope (does not touch any halt/execution/risk/portfolio/broker path). Recorded here rather than spawning a new patch ID; correcting the stale guard assumption is optional future GREEN backlog work.
+
+**Data/session readiness:** PASS — `mqk-integrity/src/calendar.rs` hardcodes and tests US market holidays/early-closes through 2028, with the full 2026 table present (New Year's, MLK, Presidents', Good Friday, Memorial Day, Juneteenth, Independence Day (observed), Labor Day, Thanksgiving + day-after early close, Christmas + Christmas Eve early close). No 2026 calendar gap exists.
+
+**Paper environment readiness (read-only inspection, no mutation):**
+- Paper DB `127.0.0.1:5440` reachable (not wiped, not migrated in this session).
+- `.env.local` (this machine) resolves `MQK_DATABASE_URL` to `127.0.0.1:5440/miniquantdesk_paper`, `MQK_DAEMON_ADAPTER_ID=alpaca`, `ALPACA_BASE_URL`/`ALPACA_PAPER_BASE_URL=https://paper-api.alpaca.markets`. `ALPACA_LIVE_BASE_URL` is present in the file but confirmed by an in-source comment (`ENV-TRUTH-02`) to never be read by the daemon.
+- Source-level default (`state.rs:193-194`): `DEFAULT_DAEMON_DEPLOYMENT_MODE`/`DEFAULT_DAEMON_ADAPTER_ID` are both `"paper"`; an explicit Paper+Paper combination is refused at `deployment_mode_readiness` (`state/env.rs:146-156`) as "not an honest paper trading path" (no bar-feed wired to `LockedPaperBroker`), forcing the only authoritative paper route through Paper+Alpaca.
+- Daemon was intentionally not started during this validation (per mission scope). `Get-PaperOperatorStatus.ps1` (read-only, no mutation, no broker call) was run and honestly reported every daemon-backed field as `UNAVAILABLE` — daemon offline, port 8899 not responding. This is expected, not a defect: runtime lease, halted-run, reconcile/risk, and arm-state truth can only be observed once the daemon is started for the actual soak session.
+- No secret values were printed at any point in this validation.
+
+**Alpaca paper connectivity:** `ALPACA_PAPER_CONNECTIVITY=NOT_EXECUTED, reason=no_canonical_read_only_probe` — no standalone script exists that queries Alpaca paper connectivity independent of the daemon's own `/api/v1/system/status` route, and starting the daemon was out of scope for this validation. Per protocol, this alone is not disqualifying: the daemon's own configured readiness gate (`deployment_mode_readiness`, confirmed above) performs this check at actual startup.
+
+**Live capital exposure:** `NONE`. Confirmed via: (1) source-level default deployment mode/adapter both `"paper"`; (2) Paper+Paper fails closed by design, forcing Paper+Alpaca as the only honest paper route; (3) `LiveCapital` cold-start remains gated behind `live_trust_complete`, hardcoded `false` in the TV-03 evidence pipeline (`parity_evidence.rs`, `api_types.rs`) — unchanged, not reopened, not weakened; (4) this machine's live-capital-adjacent env var (`ALPACA_LIVE_BASE_URL`) is present but confirmed unread by the daemon; (5) no live DB (`127.0.0.1:5432`) was connected to, read, or written at any point in this session.
+
+**Final decision:** `PAPER_SOAK_GO`. All 24 GO criteria in the governing validation protocol are met; no reproducible soak-blocking defect was found against any accepted paper-soak contract. The one prior open item (`PRE-SOAK-DAEMON-LOCAL-QUIESCENCE-AND-DEADMAN-SIDE-EFFECT-FENCE-01`) is now CLOSED per the acceptance record in §5 above.
+
+**Non-blocking findings (backlog, not new P0 patches):**
+1. `validate_daily_data_readiness_01e_closure.ps1` check `[20]`'s ledger-tracking assumption is stale relative to `e3a87c4a`'s deliberate decision — optional future doc-guard correction, GREEN.
+2. Halt-notification delivery through Discord remains asynchronous/best-effort (existing, previously-recorded observability item, YELLOW backlog — Discord is an outbound signal rail, not trading authority, and cannot submit orders, mutate run state, or bypass risk/reconcile).
+
+---
+
+*End of MiniQuantDesk V4 Authoritative Master Completion Ledger — FULL-REPO-COMPLETION-AUDIT-01, updated by FINAL-CANONICAL-PRE-SOAK-VALIDATION-01.*
