@@ -20,8 +20,8 @@
     "venue": "NASDAQ",
     "currency": "USD",
     "enabled": true,
-    "timeframes": ["1D", "5m"],
-    "notes": "MARKET-DATA-PROVIDER-PROVENANCE-01: permanent provider=alpaca / timeframes 1D+5m. Authoritative current paper config (.env.local: MQK_STRATEGY_SYMBOL=AAPL, MQK_STRATEGY_MD_TIMEFRAME=5m, MQK_DAEMON_ADAPTER_ID=alpaca; no watchlist override, so EnvSingleSymbolFallback=AAPL/5m is the live approved paper universe). 2026-08-11 incident proved TwelveData returns only stale prior-day intraday bars while Alpaca returns fresh same-day AAPL/5m bars. Scope limited to AAPL, the only symbol in the current approved paper universe -- not a bulk equity-universe conversion."
+    "timeframes": ["5m"],
+    "notes": "MARKET-DATA-PROVIDER-PROVENANCE-01 / -REPAIR-01: permanent provider=alpaca / timeframes narrowed to 5m only. Authoritative current paper config (.env.local: MQK_STRATEGY_SYMBOL=AAPL, MQK_STRATEGY_MD_TIMEFRAME=5m, MQK_DAEMON_ADAPTER_ID=alpaca; no watchlist override, so EnvSingleSymbolFallback=AAPL/5m is the live approved paper universe). 2026-08-11 incident proved TwelveData returns only stale prior-day intraday bars while Alpaca returns fresh same-day AAPL/5m bars. Scope limited to AAPL, the only symbol in the current approved paper universe -- not a bulk equity-universe conversion. REPAIR-01: '1D' removed from timeframes -- daily_data_readiness::resolve_daily_bar_timestamp_convention treats (alpaca, 1D) as DailyBarTimestampConvention::Unverified (no committed fixture/parser proves Alpaca's 1Day end_ts convention; see core-rs/crates/mqk-daemon/src/daily_data_readiness.rs), so claiming alpaca+1D as an authorized automatic provider/timeframe pairing would be untruthful and would make any 1D-scoped registry resolution silently select an instrument this provider cannot honestly serve at 1D. Historical AAPL/1D rows already in md_bars (previously ingested under provider=twelvedata) are NOT deleted -- this narrows only which provider/timeframe pairing is automatically authorized going forward for AAPL; 1D backtests/history remain readable."
   },
   {
     "instrument_id": "equity:US:ACHR",

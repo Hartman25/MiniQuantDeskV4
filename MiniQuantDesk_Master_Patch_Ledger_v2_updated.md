@@ -218,6 +218,65 @@ git diff --check
 
 ---
 
+#### MARKET-DATA-PROVIDER-PROVENANCE-01-REPAIR-01 — Operational repair of the AAPL/5m automatic provider-provenance path
+
+**Status:** IMPLEMENTED_PENDING_REVIEW
+**Priority:** P0
+**Paper Impact:** RED
+**Subsystem:** mqk-cli market-data ingest / instrument registry / Windows premarket+intraday scripts
+
+**Current Source Truth:** Implemented in isolated worktree `C:\Users\Zacha\Desktop\MiniQuantDeskV4-data`, branch `fix-market-data-provider-provenance`, on top of `dae446b337b77245417a4cc982ff7fa22736b098`. Not merged.
+
+**Problem (independent GitHub review of `dae446b3`):** The core provider-id fix was directionally correct but left the *normal automatic* Paper market-data path still unable to satisfy provenance:
+- Raw `--symbols AAPL` (the mode `Refresh-IntradayMarketData.ps1` actually invokes) resolved to `provider_symbol=None`, which readiness treats as `REASON_PROVIDER_PROVENANCE_INVALID`, even after `provider_id` was fixed.
+- `--symbols-from-registry` loaded ALL enabled equities with no provider/timeframe scoping, so `md sync-provider --source alpaca --symbols-from-registry` could select a `twelvedata`-only instrument and stamp it `provider_id=alpaca`.
+- `Refresh-IntradayMarketData.ps1` defaulted `-Source` to `twelvedata` and `Start-PaperTradingSmoke.ps1`'s `-StartIntradayRefreshLoop` never passed `-Source`, so the scheduled AAPL/5m refresh would still hit TwelveData (the exact 2026-08-11 failure mode) despite the registry saying `alpaca`.
+- `Prep-PremarketMarketData.ps1`'s provider-sync top-off stage unconditionally called `--source twelvedata` regardless of `-Timeframe`; `Start-PaperTradingSmoke.ps1` STEP 5B calls it with `-Timeframe $env:MQK_STRATEGY_MD_TIMEFRAME` (=`5m` per `.env.local`), so the default smoke path was actively writing `twelvedata`-labeled AAPL/5m rows into the readiness window before the later Alpaca top-off ran — `evaluate_bar_readiness` checks provenance on every bar in the window, not just the latest, so this silently broke provenance on every default smoke run.
+- The AAPL registry entry claimed `timeframes=["1D","5m"]` under `provider=alpaca`, but `daily_data_readiness::resolve_daily_bar_timestamp_convention` treats `(alpaca, 1D)` as `Unverified` (no committed fixture/parser proof) — claiming it as authorized was untruthful.
+
+**Fix:**
+1. `resolve_symbols_with_provider_symbol`'s raw `--symbols` branch now returns `Some(symbol)` instead of `None` — verified true because `AlpacaHistoricalProvider`/`TwelveDataHistoricalProvider::fetch_bars` forward the raw symbol to the provider request unmodified (not a forged registry alias).
+2. New `resolve_provider_scoped_registry_instruments`/`resolve_symbols_for_provider_operation` in `mqk-cli` mirror `mqk-daemon::routes::ingest::resolve_provider_scoped_equities`'s admission contract (enabled + asset_class=equity + provider==source + timeframe authorized) for `--symbols-from-registry`, duplicated narrowly rather than adding an `mqk-cli -> mqk-daemon` crate dependency.
+3. `Refresh-IntradayMarketData.ps1`'s `-Source` now defaults to `''` and auto-derives per-symbol from the registry (same admission contract), failing closed (no guessing, no silent multi-provider pick) rather than defaulting to `twelvedata`. `Start-PaperTradingSmoke.ps1` was left untouched — not passing `-Source` now correctly inherits registry auto-derivation.
+4. `Prep-PremarketMarketData.ps1`'s provider-sync top-off resolves each symbol's provider from the registry (scoped to that symbol/timeframe) and skips the stage (warn, non-fatal) rather than guessing when it doesn't resolve to exactly one instrument.
+5. `config/instruments/equities.json` AAPL entry narrowed to `timeframes=["5m"]` — historical 1D rows are not deleted, only automatic provider/timeframe authorization is narrowed.
+
+**Dependencies:** `MARKET-DATA-PROVIDER-PROVENANCE-01`
+**Unlocks:** Nothing new — repairs the same operational gap `MARKET-DATA-PROVIDER-PROVENANCE-01` was meant to close.
+**In Scope:** `mqk-cli` symbol-resolution helpers, `Refresh-IntradayMarketData.ps1`, `Prep-PremarketMarketData.ps1`, AAPL registry entry, targeted CLI/script tests.
+**Out of Scope:** Autonomous retry (`AUTONOMOUS-DAILY-OPERATOR-RETRY-01`), full required-universe scheduler (`MARKET-DATA-AUTOFRESH-REQUIRED-UNIVERSE-01`), live trading, risk/OMS/portfolio/broker/GUI/Discord/backtests/scheduler-task-definitions.
+**Likely Files / Surfaces:** `core-rs/crates/mqk-cli/src/commands/md.rs`, `core-rs/crates/mqk-cli/src/main.rs` (doc-comment only), `config/instruments/equities.json`, `scripts/windows/Refresh-IntradayMarketData.ps1`, `scripts/windows/Prep-PremarketMarketData.ps1`, `tests/script_guards/test_intraday_market_data_refresh.ps1`.
+**Required Implementation Rules:** Never guess a provider for a symbol/timeframe the registry doesn't cleanly authorize; never widen registry-scoping beyond the daemon's own admission contract; never claim `(alpaca, 1D)` is readiness-approved without committed proof.
+**Safety / Compatibility Requirements:** Provenance/freshness/continuity/registry validation must not be weakened — proved by RS-SCOPE-03/04/05/07 negative controls (wrong-provider, wrong-timeframe, and no-match-fails-closed).
+**Required Negative Controls:** `rs_scope_03_provider_scoping_excludes_wrong_provider_symbol`, `rs_scope_04_wrong_timeframe_is_excluded_not_silently_authorized`, `rs_scope_05_scoped_operation_fails_closed_on_no_match`, `rs_scope_07_canonical_registry_alpaca_1d_resolves_to_nothing`.
+**Required Positive Controls:** `pp_01_raw_symbols_carry_request_symbol_provenance`, `rs_scope_02_provider_scoping_selects_only_matching_provider`, `rs_scope_06_canonical_registry_alpaca_5m_resolves_to_aapl_only`, `dbs_01_raw_symbols_mode_end_to_end_matches_windows_refresh_path`, `dbs_02_registry_scoped_mode_end_to_end_persists_truthful_provenance`.
+**Required Regression Tests:** `mqk-cli --bin mqk-cli` (37/37, incl. 5 DB-gated `--include-ignored`); `mqk-db --test scenario_md_ingest_provider` (13/13 unchanged); `mqk-daemon --test scenario_daily_data_readiness_01` (66/66 unchanged); `tests\script_guards\test_intraday_market_data_refresh.ps1` (29/29); `tests\script_guards\test_premarket_market_data_prep.ps1` (16/16).
+**Required Validation:**
+```powershell
+$env:MQK_DATABASE_URL = "postgresql://postgres:postgres@127.0.0.1:5434/mqk_test"
+cargo test --manifest-path .\core-rs\Cargo.toml -p mqk-cli --bin mqk-cli -- --include-ignored
+cargo test --manifest-path .\core-rs\Cargo.toml -p mqk-db --test scenario_md_ingest_provider -- --include-ignored
+cargo test --manifest-path .\core-rs\Cargo.toml -p mqk-daemon --test scenario_daily_data_readiness_01 -- --include-ignored
+powershell -ExecutionPolicy Bypass -File tests\script_guards\test_intraday_market_data_refresh.ps1
+powershell -ExecutionPolicy Bypass -File tests\script_guards\test_premarket_market_data_prep.ps1
+bash scripts/guards/check_unsafe_patterns.sh
+bash scripts/guards/check_workspace_dep_inheritance.sh
+git diff --check
+```
+**Forbidden Validation / Side Effects:** No live/paper DB writes from real provider network calls, no manual DB provenance edits, no orders, no runtime start.
+**Acceptance Criteria:**
+1. `md sync-provider --source alpaca --symbols AAPL --timeframe 5m` (the exact mode the Windows refresh script uses) persists `provider_id=alpaca`, `provider_source=alpaca`, `provider_symbol=AAPL`, `ingest_mode=provider_sync`.
+2. `--symbols-from-registry` never selects an instrument configured for a different provider or an unauthorized timeframe.
+3. The default `Start-PaperTradingSmoke.ps1 -StartIntradayRefreshLoop` path resolves to `alpaca` for AAPL/5m, never `twelvedata`.
+4. `Prep-PremarketMarketData.ps1` never writes a wrong-provider row into a symbol's readiness window.
+5. `(alpaca, 1D)` is not claimed as an authorized registry pairing without committed proof.
+6. All listed regression suites remain green.
+**Multi-Symbol Atomicity:** Unchanged from `MARKET-DATA-PROVIDER-PROVENANCE-01` — `ingest_provider_bars_with_truthful_provenance` still issues one DB call per symbol (not one atomic multi-symbol transaction), so a partial commit is possible across symbols within a single CLI invocation. Not addressed here (the current single-symbol AAPL/5m operational closure does not require it); tracked as `MARKET-DATA-CLI-MULTISYMBOL-ATOMICITY-01` if/when a real multi-symbol registry-scoped call needs the guarantee.
+**Exact CLOSED End State:** Not yet CLOSED — `IMPLEMENTED_PENDING_REVIEW` until code-reviewed and merged.
+**Expected Handoff:** Start HEAD `dae446b337b77245417a4cc982ff7fa22736b098`; end HEAD = new commit SHA on `fix-market-data-provider-provenance`; not pushed, not merged.
+
+---
+
 #### AUTONOMOUS-DAILY-OPERATOR-RETRY-01 — Autonomous retry/reset for market-data provider sync (blocked/future)
 
 **Status:** OPEN · **Priority:** P2 · **Paper Impact:** YELLOW · **Subsystem:** Autonomous daily operations

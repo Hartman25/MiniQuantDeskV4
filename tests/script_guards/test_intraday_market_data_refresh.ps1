@@ -198,12 +198,82 @@ if ($scriptText -match '\$sym\b' -or $scriptText -match '\$symbolList') {
 }
 
 # ---------------------------------------------------------------------------
-# IMR15: -Source parameter present (CURRENT-SESSION-5M-BAR-PROVIDER-01)
+# IMR15: -Source parameter present and restricted to twelvedata|alpaca
+# (CURRENT-SESSION-5M-BAR-PROVIDER-01). MARKET-DATA-PROVIDER-PROVENANCE-01-
+# REPAIR-01 replaced the static [ValidateSet(...)] attribute (which forced a
+# non-empty default) with an explicit runtime check, because -Source must be
+# allowed to default to '' so the registry can auto-derive it -- so this
+# assertion now accepts either form, as long as both values remain the only
+# ones honored.
 # ---------------------------------------------------------------------------
-if ($scriptText -match '\[ValidateSet\(.*twelvedata.*alpaca') {
-    Pass 'IMR15' "-Source parameter with ValidateSet(twelvedata, alpaca) present."
+$hasValidateSetSource = $scriptText -match '\[ValidateSet\(.*twelvedata.*alpaca'
+$hasRuntimeSourceCheck = $scriptText -match "-ne\s*'twelvedata'[\s\S]*?-ne\s*'alpaca'"
+if ($hasValidateSetSource -or $hasRuntimeSourceCheck) {
+    Pass 'IMR15' "-Source is restricted to twelvedata|alpaca (ValidateSet or runtime check)."
 } else {
-    Fail 'IMR15' "-Source ValidateSet parameter missing (expected twelvedata|alpaca)."
+    Fail 'IMR15' "-Source is not provably restricted to twelvedata|alpaca."
+}
+
+# ---------------------------------------------------------------------------
+# IMR20: -Source defaults to '' (registry auto-derivation), not a hardcoded
+# provider string (MARKET-DATA-PROVIDER-PROVENANCE-01-REPAIR-01, defect B).
+# A hardcoded non-empty default (e.g. 'twelvedata') would silently override
+# the instrument registry's authoritative provider assignment.
+# ---------------------------------------------------------------------------
+if ($scriptText -match "\`$Source\s*=\s*''") {
+    Pass 'IMR20' "-Source defaults to '' -- never a hardcoded provider string."
+} else {
+    Fail 'IMR20' "-Source does not default to '' -- may reintroduce a stale hardcoded provider default."
+}
+
+# ---------------------------------------------------------------------------
+# IMR21: registry-derivation path exists and is fail-closed (throws / exits
+# non-zero) rather than silently choosing a provider when the registry does
+# not cleanly resolve.
+# ---------------------------------------------------------------------------
+$hasResolveFn = $scriptText -match 'function Resolve-RegistryProvider'
+$callsResolveWhenEmpty = $scriptText -match '\[string\]::IsNullOrWhiteSpace\(\$Source\)[\s\S]*?Resolve-RegistryProvider'
+$failsClosedOnResolveError = $scriptText -match 'Could not auto-derive provider from registry[\s\S]*?exit 1'
+if ($hasResolveFn -and $callsResolveWhenEmpty -and $failsClosedOnResolveError) {
+    Pass 'IMR21' "Registry-derivation path exists, is invoked when -Source is empty, and fails closed on resolution failure."
+} else {
+    Fail 'IMR21' "Registry-derivation path missing, not wired to the empty-Source case, or does not fail closed."
+}
+
+# ---------------------------------------------------------------------------
+# IMR22: registry scoping mirrors the daemon's admission contract -- the
+# derivation must check enabled, asset_class=equity, and per-symbol
+# timeframe authorization, never just provider alone.
+# ---------------------------------------------------------------------------
+$scopesEnabled      = $scriptText -match '\$_\.enabled\s*-eq\s*\$true'
+$scopesAssetClass   = $scriptText -match '\$_\.asset_class\s*-eq\s*.equity.'
+$scopesTimeframe    = $scriptText -match '-contains\s*\$tfTrim'
+if ($scopesEnabled -and $scopesAssetClass -and $scopesTimeframe) {
+    Pass 'IMR22' "Registry derivation scopes on enabled + asset_class=equity + timeframe authorization."
+} else {
+    Fail 'IMR22' "Registry derivation does not provably scope on enabled/asset_class/timeframe."
+}
+
+# ---------------------------------------------------------------------------
+# IMR23: Start-PaperTradingSmoke.ps1's intraday-refresh-loop launch (STEP 8C)
+# does not pass -Source, so it inherits Refresh-IntradayMarketData.ps1's
+# registry auto-derivation rather than pinning a provider that could drift
+# from the registry (MARKET-DATA-PROVIDER-PROVENANCE-01-REPAIR-01, defect B:
+# the smoke script must not silently override registry truth).
+# ---------------------------------------------------------------------------
+$smokeScript = Join-Path $RepoRoot 'scripts\windows\Start-PaperTradingSmoke.ps1'
+if (Test-Path $smokeScript) {
+    $smokeText = Get-Content -Path $smokeScript -Raw
+    $intradayArgsBlock = [regex]::Match($smokeText, '(?s)\$intradayArgs = @\(.*?\)')
+    if ($intradayArgsBlock.Success -and $intradayArgsBlock.Value -notmatch "'-Source'") {
+        Pass 'IMR23' "Start-PaperTradingSmoke.ps1's intraday refresh launch does not pin -Source, so registry auto-derivation applies."
+    } elseif ($intradayArgsBlock.Success) {
+        Fail 'IMR23' "Start-PaperTradingSmoke.ps1's intraday refresh launch passes -Source, which would override registry auto-derivation -- verify it is registry-derived, not hardcoded."
+    } else {
+        Fail 'IMR23' "Could not isolate Start-PaperTradingSmoke.ps1's `$intradayArgs block."
+    }
+} else {
+    Fail 'IMR23' "Start-PaperTradingSmoke.ps1 not found at $smokeScript."
 }
 
 # ---------------------------------------------------------------------------
@@ -319,7 +389,7 @@ if ($loopDiscardsRet) {
 # ---------------------------------------------------------------------------
 Write-Host ""
 if ($Failures -eq 0) {
-    Write-Host "  ALL PASS  (25/25 assertions)" -ForegroundColor Green
+    Write-Host "  ALL PASS  (29/29 assertions)" -ForegroundColor Green
     exit 0
 } else {
     Write-Host "  $Failures FAILURE(S)  -- see FAIL lines above" -ForegroundColor Red

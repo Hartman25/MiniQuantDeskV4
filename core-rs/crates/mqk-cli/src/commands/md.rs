@@ -221,10 +221,20 @@ pub fn resolve_symbols(
 ///
 /// - `--symbols-from-registry`: the registry's authoritative `provider_symbol`
 ///   per instrument is known and returned as `Some(..)`.
-/// - `--symbols`: a raw comma list carries no registry mapping, so every
-///   entry is `None` — populating a guessed `provider_symbol` here would
-///   forge provenance the caller does not actually have
-///   (MARKET-DATA-PROVIDER-PROVENANCE-01, D10: never forge provider_symbol).
+/// - `--symbols`: a raw comma list carries no registry alias mapping, but the
+///   raw token itself IS the exact string forwarded verbatim to the provider
+///   request (`AlpacaHistoricalProvider`/`TwelveDataHistoricalProvider::
+///   fetch_bars` both pass `req.symbols` straight through with no
+///   translation) — so `Some(symbol)` here is genuine request-symbol
+///   provenance, not a forged registry mapping
+///   (MARKET-DATA-PROVIDER-PROVENANCE-01-REPAIR-01, defect A: the earlier
+///   `None` default caused `provider_symbol=NULL` to persist for the raw
+///   `--symbols` path, which `daily_data_readiness::evaluate_bar_readiness`
+///   treats as `REASON_PROVIDER_PROVENANCE_INVALID` — blocking the normal
+///   automatic `Refresh-IntradayMarketData.ps1 -> md sync-provider --symbols
+///   AAPL` path even after provider_id was fixed. D10 ("never forge
+///   provider_symbol") still holds: this is not forgery because it is
+///   exactly what was sent, never a guessed alias).
 pub fn resolve_symbols_with_provider_symbol(
     symbols: Option<&str>,
     symbols_from_registry: Option<&std::path::Path>,
@@ -243,7 +253,7 @@ pub fn resolve_symbols_with_provider_symbol(
                 .split(',')
                 .map(|s| s.trim())
                 .filter(|s| !s.is_empty())
-                .map(|s| (s.to_string(), None))
+                .map(|s| (s.to_string(), Some(s.to_string())))
                 .collect();
             if syms.is_empty() {
                 anyhow::bail!("--symbols must contain at least one symbol");
@@ -263,6 +273,119 @@ pub fn resolve_symbols_with_provider_symbol(
                 );
             }
             Ok(enabled
+                .into_iter()
+                .map(|i| (i.symbol.clone(), Some(i.provider_symbol.clone())))
+                .collect())
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Provider/timeframe-scoped registry resolution
+// (MARKET-DATA-PROVIDER-PROVENANCE-01-REPAIR-01, defect A items 4-5)
+// ---------------------------------------------------------------------------
+
+/// Mirrors `mqk-daemon::routes::ingest::instrument_authorizes_timeframe`
+/// (via `mqk-daemon::state::market_data_latest_bar`) exactly: an instrument
+/// authorizes `timeframe` when at least one of its `timeframes` strings
+/// parses (through the canonical [`mqk_md::Timeframe::parse`]) to the same
+/// value. Duplicated narrowly here rather than adding an
+/// `mqk-cli -> mqk-daemon` crate dependency — `mqk-daemon` is a leaf
+/// binary/service crate, not a shared library the CLI should depend on.
+/// [`rs_scope_01_instrument_authorizes_timeframe_matches_and_rejects`] pins
+/// this function's behavior against the same fixture shapes the daemon side
+/// is tested with, so any future drift between the two copies is caught by
+/// tests rather than silently diverging.
+fn instrument_authorizes_timeframe(
+    instrument: &mqk_md::instrument_registry::TrackedInstrument,
+    timeframe: mqk_md::Timeframe,
+) -> bool {
+    instrument.timeframes.iter().any(|tf| {
+        mqk_md::Timeframe::parse(tf)
+            .map(|parsed| parsed == timeframe)
+            .unwrap_or(false)
+    })
+}
+
+/// Resolve enabled equity instruments from the registry at `registry_path`,
+/// scoped to `source`'s exact configured provider (case-insensitive,
+/// trimmed) and to instruments whose `timeframes` authorize `timeframe`.
+///
+/// Mirrors `mqk-daemon::routes::ingest::resolve_provider_scoped_equities`'s
+/// admission contract (enabled + asset_class=="equity" + provider==source +
+/// timeframe authorized), so `md ingest-provider`/`md sync-provider
+/// --symbols-from-registry` can never select an instrument configured for a
+/// different provider (e.g. a `twelvedata`-only instrument under `--source
+/// alpaca`) and stamp it with the requested source's `provider_id` — the
+/// registry-scoping gap this repair patch closes (defect A item 4).
+///
+/// Deterministic ordering (sorted by symbol), matching
+/// `enabled_equities()`/`resolve_provider_scoped_equities`.
+fn resolve_provider_scoped_registry_instruments(
+    registry_path: &Path,
+    source: &str,
+    timeframe: mqk_md::Timeframe,
+) -> Result<Vec<mqk_md::instrument_registry::TrackedInstrument>> {
+    let instruments = mqk_md::instrument_registry::load_instrument_registry(registry_path)
+        .with_context(|| format!("failed to load registry: {}", registry_path.display()))?;
+    mqk_md::instrument_registry::validate_registry(&instruments)
+        .with_context(|| format!("registry validation failed: {}", registry_path.display()))?;
+    let mut filtered: Vec<mqk_md::instrument_registry::TrackedInstrument> = instruments
+        .into_iter()
+        .filter(|i| {
+            i.enabled
+                && i.asset_class.trim().eq_ignore_ascii_case("equity")
+                && i.provider.trim().eq_ignore_ascii_case(source.trim())
+                && instrument_authorizes_timeframe(i, timeframe)
+        })
+        .collect();
+    filtered.sort_by(|a, b| a.symbol.cmp(&b.symbol));
+    Ok(filtered)
+}
+
+/// Resolve the symbol list for `md ingest-provider`/`md sync-provider`,
+/// scoped to the requested `source` and `timeframe`
+/// (MARKET-DATA-PROVIDER-PROVENANCE-01-REPAIR-01).
+///
+/// - `--symbols`: delegates to [`resolve_symbols_with_provider_symbol`]'s
+///   raw-list branch, which now carries genuine request-symbol provenance
+///   (defect A).
+/// - `--symbols-from-registry`: delegates to
+///   [`resolve_provider_scoped_registry_instruments`] instead of the
+///   unscoped `enabled_equities()` — never selects an instrument configured
+///   for a different provider or an unauthorized timeframe, mirroring the
+///   daemon's canonical admission contract (defect A items 4-5). Fails closed
+///   (clear error, never a silent empty/partial selection) when no enabled
+///   instrument authorizes the requested (source, timeframe) pair.
+fn resolve_symbols_for_provider_operation(
+    symbols: Option<&str>,
+    symbols_from_registry: Option<&Path>,
+    source: &str,
+    timeframe: mqk_md::Timeframe,
+) -> Result<Vec<(String, Option<String>)>> {
+    match (symbols, symbols_from_registry) {
+        (Some(_), Some(_)) => {
+            anyhow::bail!(
+                "--symbols and --symbols-from-registry are mutually exclusive; provide only one"
+            )
+        }
+        (None, None) => {
+            anyhow::bail!("one of --symbols or --symbols-from-registry is required")
+        }
+        (Some(_), None) => resolve_symbols_with_provider_symbol(symbols, None),
+        (None, Some(path)) => {
+            let instruments = resolve_provider_scoped_registry_instruments(path, source, timeframe)?;
+            if instruments.is_empty() {
+                anyhow::bail!(
+                    "registry at {} contains no enabled equity instruments whose provider matches \
+                     '{}' and whose timeframes authorize '{}' — refusing to guess a provider or \
+                     select an unauthorized instrument",
+                    path.display(),
+                    source,
+                    timeframe.as_str()
+                );
+            }
+            Ok(instruments
                 .into_iter()
                 .map(|i| (i.symbol.clone(), Some(i.provider_symbol.clone())))
                 .collect())
@@ -408,13 +531,21 @@ pub async fn md_ingest_provider(
         );
     }
 
-    let sym_pairs =
-        resolve_symbols_with_provider_symbol(symbols.as_deref(), symbols_from_registry.as_deref())?;
+    let tf = mqk_md::Timeframe::parse(&timeframe)?;
+
+    // Registry-scoped resolution (MARKET-DATA-PROVIDER-PROVENANCE-01-REPAIR-01):
+    // never selects an instrument configured for a different provider or an
+    // unauthorized timeframe when --symbols-from-registry is used.
+    let sym_pairs = resolve_symbols_for_provider_operation(
+        symbols.as_deref(),
+        symbols_from_registry.as_deref(),
+        &source_lc,
+        tf,
+    )?;
     let syms: Vec<String> = sym_pairs.iter().map(|(s, _)| s.clone()).collect();
     let provider_symbol_of: std::collections::BTreeMap<String, Option<String>> =
         sym_pairs.into_iter().collect();
 
-    let tf = mqk_md::Timeframe::parse(&timeframe)?;
     let start_d = NaiveDate::parse_from_str(start.trim(), "%Y-%m-%d")
         .with_context(|| format!("invalid --start date: {}", start))?;
     let end_d = NaiveDate::parse_from_str(end.trim(), "%Y-%m-%d")
@@ -595,13 +726,20 @@ pub async fn md_sync_provider(
         );
     }
 
-    let sym_pairs =
-        resolve_symbols_with_provider_symbol(symbols.as_deref(), symbols_from_registry.as_deref())?;
+    let tf = mqk_md::Timeframe::parse(&timeframe)?;
+
+    // Registry-scoped resolution (MARKET-DATA-PROVIDER-PROVENANCE-01-REPAIR-01):
+    // never selects an instrument configured for a different provider or an
+    // unauthorized timeframe when --symbols-from-registry is used.
+    let sym_pairs = resolve_symbols_for_provider_operation(
+        symbols.as_deref(),
+        symbols_from_registry.as_deref(),
+        &source_lc,
+        tf,
+    )?;
     let syms: Vec<String> = sym_pairs.iter().map(|(s, _)| s.clone()).collect();
     let provider_symbol_of: std::collections::BTreeMap<String, Option<String>> =
         sym_pairs.into_iter().collect();
-
-    let tf = mqk_md::Timeframe::parse(&timeframe)?;
 
     // Wall clock is acceptable here — this is an operator CLI command, not a deterministic path.
     let end_d = match &end {
@@ -3374,16 +3512,22 @@ mod tests {
     // MARKET-DATA-PROVIDER-PROVENANCE-01
     // -----------------------------------------------------------------------
 
-    // PP-01: --symbols (raw list) has no registry mapping, so provider_symbol
-    // must be None for every entry — never forged (D10).
+    // PP-01: --symbols (raw list) carries genuine request-symbol provenance
+    // (MARKET-DATA-PROVIDER-PROVENANCE-01-REPAIR-01, defect A). The raw
+    // token IS the exact string forwarded to the provider (verified against
+    // both `AlpacaHistoricalProvider`/`TwelveDataHistoricalProvider::
+    // fetch_bars`, which pass `req.symbols` through unmodified), so
+    // `Some(symbol)` here is truthful, not a forged registry alias — D10
+    // ("never forge provider_symbol") is preserved because this is exactly
+    // what was sent, never a guess.
     #[test]
-    fn pp_01_raw_symbols_have_no_provider_symbol_mapping() {
+    fn pp_01_raw_symbols_carry_request_symbol_provenance() {
         let pairs = resolve_symbols_with_provider_symbol(Some("AAPL,SPY"), None).unwrap();
         assert_eq!(
             pairs,
             vec![
-                ("AAPL".to_string(), None),
-                ("SPY".to_string(), None),
+                ("AAPL".to_string(), Some("AAPL".to_string())),
+                ("SPY".to_string(), Some("SPY".to_string())),
             ]
         );
     }
@@ -3413,6 +3557,173 @@ mod tests {
             .map(|(s, _)| s)
             .collect();
         assert_eq!(plain, via_pairs);
+    }
+
+    // -----------------------------------------------------------------------
+    // resolve_provider_scoped_registry_instruments / instrument_authorizes_timeframe
+    // / resolve_symbols_for_provider_operation —
+    // MARKET-DATA-PROVIDER-PROVENANCE-01-REPAIR-01, defect A items 4-5/12-13
+    // -----------------------------------------------------------------------
+
+    fn scoped_test_instrument(
+        symbol: &str,
+        provider: &str,
+        timeframes: &[&str],
+    ) -> mqk_md::instrument_registry::TrackedInstrument {
+        mqk_md::instrument_registry::TrackedInstrument {
+            instrument_id: format!("equity:US:{symbol}"),
+            symbol: symbol.to_string(),
+            asset_class: "equity".to_string(),
+            provider: provider.to_string(),
+            provider_symbol: symbol.to_string(),
+            venue: "NASDAQ".to_string(),
+            currency: "USD".to_string(),
+            enabled: true,
+            timeframes: timeframes.iter().map(|s| s.to_string()).collect(),
+            notes: "fixture".to_string(),
+            instrument_kind: None,
+            sector: None,
+            category: None,
+        }
+    }
+
+    /// Writes a fixture registry mirroring item 12/13's mission spec:
+    /// AAPL: provider=alpaca, timeframes=["5m"]
+    /// MSFT: provider=twelvedata, timeframes=["1D"]
+    ///
+    /// `label` must be unique per call site (not randomized — this repo's
+    /// unsafe-pattern guard bans `Uuid::new_v4`/`SystemTime::now` anywhere
+    /// under `src/`, including test modules) so parallel `cargo test`
+    /// execution of different call sites never race on the same file.
+    fn write_scope_fixture_registry(label: &str) -> std::path::PathBuf {
+        let instruments = vec![
+            scoped_test_instrument("AAPL", "alpaca", &["5m"]),
+            scoped_test_instrument("MSFT", "twelvedata", &["1D"]),
+        ];
+        let json = serde_json::to_string(&instruments).unwrap();
+        let path = std::env::temp_dir().join(format!(
+            "mqk_test_cli_scope_fixture_{}_{}.json",
+            std::process::id(),
+            label
+        ));
+        fs::write(&path, json).expect("write scope fixture");
+        path
+    }
+
+    // RS-SCOPE-01: instrument_authorizes_timeframe matches a listed
+    // timeframe and rejects an unlisted one, tolerating registry string
+    // variants the canonical Timeframe parser normalizes.
+    #[test]
+    fn rs_scope_01_instrument_authorizes_timeframe_matches_and_rejects() {
+        let inst = scoped_test_instrument("AAPL", "alpaca", &["5m"]);
+        assert!(instrument_authorizes_timeframe(&inst, mqk_md::Timeframe::M5));
+        assert!(!instrument_authorizes_timeframe(&inst, mqk_md::Timeframe::D1));
+    }
+
+    // RS-SCOPE-02 (mission item 12): source=alpaca timeframe=5m selects
+    // AAPL and does NOT select MSFT (wrong provider).
+    #[test]
+    fn rs_scope_02_provider_scoping_selects_only_matching_provider() {
+        let path = write_scope_fixture_registry("rs02");
+        let selected =
+            resolve_provider_scoped_registry_instruments(&path, "alpaca", mqk_md::Timeframe::M5)
+                .unwrap();
+        fs::remove_file(&path).ok();
+        let symbols: Vec<&str> = selected.iter().map(|i| i.symbol.as_str()).collect();
+        assert_eq!(symbols, vec!["AAPL"], "must select AAPL only, never MSFT");
+    }
+
+    // RS-SCOPE-03 (mission item 12): source=twelvedata timeframe=1D does
+    // NOT select AAPL (wrong provider — AAPL is alpaca-only in the fixture).
+    #[test]
+    fn rs_scope_03_provider_scoping_excludes_wrong_provider_symbol() {
+        let path = write_scope_fixture_registry("rs03");
+        let selected = resolve_provider_scoped_registry_instruments(
+            &path,
+            "twelvedata",
+            mqk_md::Timeframe::D1,
+        )
+        .unwrap();
+        fs::remove_file(&path).ok();
+        let symbols: Vec<&str> = selected.iter().map(|i| i.symbol.as_str()).collect();
+        assert_eq!(symbols, vec!["MSFT"], "must select MSFT only, never AAPL");
+    }
+
+    // RS-SCOPE-04 (mission item 13): a wrong-timeframe request against a
+    // correctly-matched provider must not silently select the instrument —
+    // AAPL only authorizes 5m, so source=alpaca timeframe=1D selects nothing.
+    #[test]
+    fn rs_scope_04_wrong_timeframe_is_excluded_not_silently_authorized() {
+        let path = write_scope_fixture_registry("rs04");
+        let selected =
+            resolve_provider_scoped_registry_instruments(&path, "alpaca", mqk_md::Timeframe::D1)
+                .unwrap();
+        fs::remove_file(&path).ok();
+        assert!(
+            selected.is_empty(),
+            "alpaca+1D must select nothing: AAPL only authorizes 5m"
+        );
+    }
+
+    // RS-SCOPE-05: resolve_symbols_for_provider_operation fails closed with
+    // a clear error (never an empty-but-Ok selection) when no instrument
+    // authorizes the requested (source, timeframe) pair.
+    #[test]
+    fn rs_scope_05_scoped_operation_fails_closed_on_no_match() {
+        let path = write_scope_fixture_registry("rs05");
+        let result = resolve_symbols_for_provider_operation(
+            None,
+            Some(&path),
+            "alpaca",
+            mqk_md::Timeframe::D1,
+        );
+        fs::remove_file(&path).ok();
+        assert!(result.is_err(), "no authorized instrument must be Err, not empty Ok");
+        let msg = result.unwrap_err().to_string();
+        assert!(
+            msg.contains("no enabled equity instruments"),
+            "error must explain the scoping failure: {msg}"
+        );
+    }
+
+    // RS-SCOPE-06: on the real canonical registry, source=alpaca
+    // timeframe=5m resolves to exactly AAPL with provider_symbol carried
+    // through — the exact selection `md sync-provider --source alpaca
+    // --symbols-from-registry --timeframe 5m` performs today.
+    #[test]
+    fn rs_scope_06_canonical_registry_alpaca_5m_resolves_to_aapl_only() {
+        let path = canonical_registry_path();
+        let pairs = resolve_symbols_for_provider_operation(
+            None,
+            Some(&path),
+            "alpaca",
+            mqk_md::Timeframe::M5,
+        )
+        .unwrap();
+        assert_eq!(
+            pairs,
+            vec![("AAPL".to_string(), Some("AAPL".to_string()))],
+            "AAPL must be the sole alpaca/5m-authorized instrument in the canonical registry"
+        );
+    }
+
+    // RS-SCOPE-07: on the real canonical registry, source=alpaca
+    // timeframe=1D resolves to nothing — AAPL's registry entry no longer
+    // authorizes 1D (narrowed by this repair patch, item 14) and no other
+    // instrument is assigned provider=alpaca.
+    #[test]
+    fn rs_scope_07_canonical_registry_alpaca_1d_resolves_to_nothing() {
+        let path = canonical_registry_path();
+        let result = resolve_symbols_for_provider_operation(
+            None,
+            Some(&path),
+            "alpaca",
+            mqk_md::Timeframe::D1,
+        );
+        assert!(
+            result.is_err(),
+            "alpaca+1D must be refused on the canonical registry, not silently empty"
+        );
     }
 
     fn provider_bar(symbol: &str, end_ts: i64) -> mqk_db::md::ProviderBar {
@@ -3575,11 +3886,16 @@ mod tests {
             .ok();
     }
 
-    // DBP-03: a symbol with no registry mapping (raw --symbols list; absent
-    // from provider_symbol_of) persists provider_symbol=NULL — never forged
-    // — while provider_id/provider_source/ingest_mode stay truthful. This is
-    // the D10 boundary: provider_id is always known and fixed by this patch;
-    // provider_symbol is only ever populated when genuinely known.
+    // DBP-03: `ingest_provider_bars_with_truthful_provenance`'s own
+    // defensive "never forge" behavior — if a symbol is absent from
+    // `provider_symbol_of` (which cannot happen via the real CLI paths
+    // after MARKET-DATA-PROVIDER-PROVENANCE-01-REPAIR-01, since both the
+    // raw `--symbols` branch and the `--symbols-from-registry` branch now
+    // always populate every resolved symbol's entry — see PP-01/PP-02 and
+    // DBS-01..04 below), the helper still persists provider_symbol=NULL
+    // rather than guessing, while provider_id/provider_source/ingest_mode
+    // stay truthful. This is the D10 boundary at the helper-function level,
+    // independent of caller behavior.
     #[tokio::test]
     #[ignore = "requires MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-cli --bin mqk-cli -- --include-ignored"]
     async fn dbp_03_unmapped_symbol_never_forges_provider_symbol() {
@@ -3591,7 +3907,8 @@ mod tests {
             .await
             .unwrap();
 
-        // Empty map: mirrors a raw `--symbols` invocation with no registry lookup.
+        // Empty map: exercises the defensive branch directly (see updated
+        // comment above — no real CLI caller produces this anymore).
         let provider_symbol_of = std::collections::BTreeMap::new();
 
         // D1-5: deterministic UUIDv5, not new_v4, even in test fixtures.
@@ -3612,6 +3929,134 @@ mod tests {
         assert_eq!(row.0, "alpaca", "provider_id is still truthful");
         assert_eq!(row.1.as_deref(), Some("alpaca"));
         assert_eq!(row.2, None, "provider_symbol must never be forged when unknown");
+
+        sqlx::query("delete from md_bars where symbol = $1")
+            .bind(symbol)
+            .execute(&pool)
+            .await
+            .ok();
+    }
+
+    // -----------------------------------------------------------------------
+    // End-to-end CLI/helper-boundary provenance proof — mission items 10/11
+    // (MARKET-DATA-PROVIDER-PROVENANCE-01-REPAIR-01)
+    //
+    // The `ddr_62`-style proof in DBP-01..03 above manually constructs
+    // `provider_symbol_of` and never exercises the actual resolution
+    // helpers, so it does not prove that `Refresh-IntradayMarketData.ps1 ->
+    // mqk-cli md sync-provider --symbols AAPL` (raw-symbol mode) or `md
+    // sync-provider --symbols-from-registry` (registry-scoped mode)
+    // actually produce this metadata. DBS-01/02 close that gap: both go
+    // through the real resolution helper first, then the real
+    // `ingest_provider_bars_with_truthful_provenance` wrapper — no manually
+    // constructed substitute `MdBarProviderMetadata`.
+    // -----------------------------------------------------------------------
+
+    // DBS-01: source=alpaca, symbol=AAPL-shaped, timeframe=5m, raw
+    // --symbols mode — the exact mode `Refresh-IntradayMarketData.ps1`
+    // invokes today.
+    #[tokio::test]
+    #[ignore = "requires MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-cli --bin mqk-cli -- --include-ignored"]
+    async fn dbs_01_raw_symbols_mode_end_to_end_matches_windows_refresh_path() {
+        let pool = db_pool().await.unwrap();
+        let symbol = "ZZDBS01AAPL";
+        sqlx::query("delete from md_bars where symbol = $1")
+            .bind(symbol)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // Exact resolution path `md sync-provider --symbols <symbol>`
+        // performs — no manual provider_symbol_of construction.
+        let sym_pairs = resolve_symbols_with_provider_symbol(Some(symbol), None).unwrap();
+        let provider_symbol_of: std::collections::BTreeMap<String, Option<String>> =
+            sym_pairs.into_iter().collect();
+
+        // D1-5: deterministic UUIDv5, not new_v4, even in test fixtures.
+        let ingest_id = Uuid::new_v5(&Uuid::NAMESPACE_DNS, symbol.as_bytes());
+        ingest_provider_bars_with_truthful_provenance(
+            &pool,
+            ingest_id,
+            "alpaca",
+            "5m",
+            "provider_sync",
+            &provider_symbol_of,
+            vec![provider_bar(symbol, 1_708_041_600)],
+        )
+        .await
+        .unwrap();
+
+        let row = fetch_provenance_row(&pool, symbol, 1_708_041_600).await;
+        assert_eq!(row.0, "alpaca", "provider_id");
+        assert_eq!(row.1.as_deref(), Some("alpaca"), "provider_source");
+        assert_eq!(
+            row.2.as_deref(),
+            Some(symbol),
+            "provider_symbol must equal the exact raw request symbol"
+        );
+        assert_eq!(row.3.as_deref(), Some("provider_sync"), "ingest_mode");
+
+        sqlx::query("delete from md_bars where symbol = $1")
+            .bind(symbol)
+            .execute(&pool)
+            .await
+            .ok();
+    }
+
+    // DBS-02: --symbols-from-registry mode, scoped resolution end-to-end —
+    // source=alpaca, timeframe=5m against a fixture registry entry, proving
+    // the scoped selection's provider_symbol also lands truthfully. Uses a
+    // dedicated fixture symbol (not the real "AAPL") to avoid colliding with
+    // any real AAPL/5m rows on a shared dev/test DB.
+    #[tokio::test]
+    #[ignore = "requires MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-cli --bin mqk-cli -- --include-ignored"]
+    async fn dbs_02_registry_scoped_mode_end_to_end_persists_truthful_provenance() {
+        let pool = db_pool().await.unwrap();
+        let symbol = "ZZDBS02SYM";
+        sqlx::query("delete from md_bars where symbol = $1")
+            .bind(symbol)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let path = std::env::temp_dir().join(format!(
+            "mqk_test_cli_dbs02_fixture_{}.json",
+            std::process::id()
+        ));
+        let instruments = vec![scoped_test_instrument(symbol, "alpaca", &["5m"])];
+        fs::write(&path, serde_json::to_string(&instruments).unwrap()).expect("write fixture");
+
+        // Exact resolution path `md sync-provider --symbols-from-registry
+        // --source alpaca --timeframe 5m` performs.
+        let sym_pairs = resolve_symbols_for_provider_operation(
+            None,
+            Some(&path),
+            "alpaca",
+            mqk_md::Timeframe::M5,
+        )
+        .unwrap();
+        fs::remove_file(&path).ok();
+        let provider_symbol_of: std::collections::BTreeMap<String, Option<String>> =
+            sym_pairs.into_iter().collect();
+
+        let ingest_id = Uuid::new_v5(&Uuid::NAMESPACE_DNS, symbol.as_bytes());
+        ingest_provider_bars_with_truthful_provenance(
+            &pool,
+            ingest_id,
+            "alpaca",
+            "5m",
+            "provider_sync",
+            &provider_symbol_of,
+            vec![provider_bar(symbol, 1_708_041_600)],
+        )
+        .await
+        .unwrap();
+
+        let row = fetch_provenance_row(&pool, symbol, 1_708_041_600).await;
+        assert_eq!(row.0, "alpaca");
+        assert_eq!(row.1.as_deref(), Some("alpaca"));
+        assert_eq!(row.2.as_deref(), Some(symbol));
+        assert_eq!(row.3.as_deref(), Some("provider_sync"));
 
         sqlx::query("delete from md_bars where symbol = $1")
             .bind(symbol)

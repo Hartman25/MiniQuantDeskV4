@@ -20,9 +20,16 @@
 #       -IntervalSeconds 300 -DurationSeconds 1800
 #
 # Parameters:
-#   -Source               Market-data provider: twelvedata | alpaca. Default: twelvedata
+#   -Source               Market-data provider: twelvedata | alpaca. Default: '' (empty) --
+#                          auto-derived from the canonical instrument registry
+#                          (config\instruments\equities.json) for -Symbols/-Timeframe
+#                          (MARKET-DATA-PROVIDER-PROVENANCE-01-REPAIR-01). A stale
+#                          hardcoded default must never override the registry; pass
+#                          -Source explicitly only to deliberately override it.
 #   -Symbols              Comma-separated ticker list. Default: AAPL
 #   -Timeframe            Bar timeframe. Default: 5m
+#   -RegistryPath          Instrument registry path, relative to -RepoRoot, used only
+#                          for -Source auto-derivation. Default: config\instruments\equities.json
 #   -IntervalSeconds      Seconds between refreshes in loop mode. Default: 300
 #   -MinRefreshIntervalSeconds
 #                          Minimum seconds between refresh attempts in loop mode. Default: 300
@@ -43,14 +50,17 @@
 #   - Never calls broker order endpoints.
 #   - No signal injection, no OMS writes.
 #   - Fails clearly on missing provider key when sync is needed.
+#   - Fails closed (no guessing) if -Source is not passed and the registry does not
+#     cleanly authorize a single provider for every requested -Symbols/-Timeframe pair.
 # =============================================================================
 
 [CmdletBinding()]
 param(
-    [ValidateSet('twelvedata', 'alpaca')]
-    [string] $Source              = 'twelvedata',
+    [AllowEmptyString()]
+    [string] $Source              = '',
     [string] $Symbols             = 'AAPL',
     [string] $Timeframe           = '5m',
+    [string] $RegistryPath        = 'config\instruments\equities.json',
     [int]    $IntervalSeconds     = 300,
     [int]    $MinRefreshIntervalSeconds = 300,
     [int]    $DurationSeconds     = 1800,
@@ -129,6 +139,79 @@ Write-Ok "Paper DB guard passed (port 5440 confirmed)."
 # ---------------------------------------------------------------------------
 
 # ---------------------------------------------------------------------------
+# Parse symbol list
+# ---------------------------------------------------------------------------
+$symbolList = @($Symbols -split '[,; ]+' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ForEach-Object { $_.Trim().ToUpper() })
+if ($symbolList.Count -eq 0) {
+    Write-Fail "No symbols provided."
+    exit 1
+}
+Write-Step "Symbols: $($symbolList -join ', ')  Timeframe: $Timeframe"
+
+# ---------------------------------------------------------------------------
+# Resolve -Source from the instrument registry when not explicitly passed
+# (MARKET-DATA-PROVIDER-PROVENANCE-01-REPAIR-01, defect B). A stale hardcoded
+# default must never override the registry: -Source now defaults to '' and,
+# when empty, is derived per-symbol from config\instruments\equities.json,
+# scoped to instruments that are enabled, asset_class=equity, and whose
+# timeframes authorize -Timeframe -- mirroring the same admission contract
+# `mqk-cli md sync-provider --symbols-from-registry` enforces. Fails closed
+# (exit 1, no guessing) rather than silently picking a provider when the
+# registry doesn't cleanly resolve, or when -Symbols mixes providers this
+# single -Source script cannot represent (that grouping/orchestration
+# belongs to MARKET-DATA-AUTOFRESH-REQUIRED-UNIVERSE-01).
+# ---------------------------------------------------------------------------
+function Resolve-RegistryProvider {
+    param([string[]]$Symbols, [string]$Timeframe, [string]$RegistryFullPath)
+    if (-not (Test-Path $RegistryFullPath)) {
+        throw "instrument registry not found at $RegistryFullPath -- cannot auto-derive provider. Pass -Source explicitly."
+    }
+    try {
+        $registryJson = Get-Content -Path $RegistryFullPath -Raw | ConvertFrom-Json
+    } catch {
+        throw "instrument registry at $RegistryFullPath could not be parsed ($_) -- cannot auto-derive provider. Pass -Source explicitly."
+    }
+    $tfTrim = $Timeframe.Trim()
+    $resolvedProviders = @{}
+    foreach ($sym in $Symbols) {
+        $registryMatches = @($registryJson | Where-Object {
+            $_.enabled -eq $true -and
+            $_.asset_class -eq 'equity' -and
+            $_.symbol -eq $sym -and
+            (@($_.timeframes) -contains $tfTrim)
+        })
+        if ($registryMatches.Count -eq 0) {
+            throw "registry has no enabled equity instrument for symbol=$sym timeframe=$tfTrim -- refusing to guess a provider. Pass -Source explicitly, or fix the registry entry."
+        }
+        if ($registryMatches.Count -gt 1) {
+            throw "registry has $($registryMatches.Count) enabled equity instruments for symbol=$sym timeframe=$tfTrim -- ambiguous. Pass -Source explicitly."
+        }
+        $resolvedProviders[$sym] = $registryMatches[0].provider
+    }
+    $distinctProviders = @($resolvedProviders.Values | Select-Object -Unique)
+    if ($distinctProviders.Count -gt 1) {
+        throw "symbols [$($Symbols -join ', ')] resolve to multiple providers ($($distinctProviders -join ', ')) for timeframe=$tfTrim -- this script represents a single -Source value and refuses to silently pick one. Split into separate invocations, pass -Source explicitly, or wait for MARKET-DATA-AUTOFRESH-REQUIRED-UNIVERSE-01."
+    }
+    return $distinctProviders[0]
+}
+
+if ([string]::IsNullOrWhiteSpace($Source)) {
+    $registryFullPath = Join-Path $RepoRoot $RegistryPath
+    try {
+        $Source = Resolve-RegistryProvider -Symbols $symbolList -Timeframe $Timeframe -RegistryFullPath $registryFullPath
+        Write-Ok "Provider auto-derived from instrument registry: source=$Source (symbols=$($symbolList -join ','), timeframe=$Timeframe, registry=$registryFullPath)"
+    } catch {
+        Write-Fail "Could not auto-derive provider from registry: $_"
+        Write-Fail "Pass -Source twelvedata|alpaca explicitly, or fix the registry entry at $registryFullPath."
+        exit 1
+    }
+}
+if ($Source -ne 'twelvedata' -and $Source -ne 'alpaca') {
+    Write-Fail "Unsupported -Source '$Source'. Supported: twelvedata, alpaca."
+    exit 1
+}
+
+# ---------------------------------------------------------------------------
 # Provider key presence check (never print values)
 # ---------------------------------------------------------------------------
 Write-Step "Provider source: $Source"
@@ -152,16 +235,6 @@ if ($Source -eq 'alpaca') {
         Write-Warn "Add TWELVEDATA_API_KEY to .env.local to enable live sync."
     }
 }
-
-# ---------------------------------------------------------------------------
-# Parse symbol list
-# ---------------------------------------------------------------------------
-$symbolList = @($Symbols -split '[,; ]+' | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ForEach-Object { $_.Trim().ToUpper() })
-if ($symbolList.Count -eq 0) {
-    Write-Fail "No symbols provided."
-    exit 1
-}
-Write-Step "Symbols: $($symbolList -join ', ')  Timeframe: $Timeframe"
 
 function Test-IsIntradayTimeframe {
     param([string]$Tf)

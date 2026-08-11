@@ -30,11 +30,23 @@
 #                      is an explicit opt-in, so it never silently falls back to AAPL.
 #   -DaemonPort        Daemon HTTP port, used only with -SymbolsFromIngestPlan. Default: 8899.
 #
+# Provider sync top-off (MARKET-DATA-PROVIDER-PROVENANCE-01-REPAIR-01):
+#   The per-symbol provider sync top-off stage no longer hardcodes
+#   --source twelvedata. It resolves each symbol's provider from the
+#   canonical instrument registry (config\instruments\equities.json), scoped
+#   to that symbol/-Timeframe pair, and skips the stage (warn, non-fatal)
+#   when it does not resolve to exactly one enabled equity instrument --
+#   never guesses a provider. This keeps a -Timeframe 5m invocation (e.g.
+#   -SymbolsFromIngestPlan, or STEP 5B's MQK_STRATEGY_MD_TIMEFRAME=5m) from
+#   writing wrong-provider rows into a symbol's readiness window.
+#
 # Hard rules:
 #   - Paper DB only. Refuses if MQK_DATABASE_URL does not contain port 5440.
 #   - Never prints TWELVEDATA_API_KEY, ALPACA keys, or any DB credentials.
 #   - Never touches oms_outbox, oms_inbox, broker_order_map, runs, or arm_state.
 #   - Fails clearly on missing provider key when data is stale or insufficient.
+#   - Never guesses a provider for the sync top-off stage; skips (non-fatal) when
+#     the registry does not cleanly authorize exactly one provider for a symbol/timeframe.
 # =============================================================================
 
 [CmdletBinding()]
@@ -234,6 +246,33 @@ function Get-StalenessDays {
 }
 
 # ---------------------------------------------------------------------------
+# Helper: resolve the authoritative registry provider for one symbol/timeframe
+# (MARKET-DATA-PROVIDER-PROVENANCE-01-REPAIR-01, defect item 9).
+#
+# Returns the provider string ('twelvedata' | 'alpaca' | ...) when exactly
+# one enabled equity instrument in the registry matches Symbol/Timeframe, or
+# $null when it does not resolve cleanly (missing registry, unparseable
+# registry, no match, or ambiguous match) -- callers must fail closed (skip
+# the provider-sync stage, never guess a provider) on $null.
+# ---------------------------------------------------------------------------
+function Resolve-SymbolRegistryProvider {
+    param([string]$Symbol, [string]$Timeframe, [string]$RegistryFullPath)
+    if (-not (Test-Path $RegistryFullPath)) { return $null }
+    try {
+        $registryJson = Get-Content -Path $RegistryFullPath -Raw | ConvertFrom-Json
+    } catch { return $null }
+    $tfTrim = $Timeframe.Trim()
+    $registryMatches = @($registryJson | Where-Object {
+        $_.enabled -eq $true -and
+        $_.asset_class -eq 'equity' -and
+        $_.symbol -eq $Symbol -and
+        (@($_.timeframes) -contains $tfTrim)
+    })
+    if ($registryMatches.Count -ne 1) { return $null }
+    return $registryMatches[0].provider
+}
+
+# ---------------------------------------------------------------------------
 # Helper: write evidence JSON to exports/market_data/
 # ---------------------------------------------------------------------------
 function Write-Evidence {
@@ -385,29 +424,69 @@ foreach ($sym in $symbolList) {
     }
 
     # --- Provider sync top-off ---
-    if ($twelvekeyPresent) {
-        Write-Step "Provider sync top-off for $sym / $Timeframe ..."
-        Push-Location $coreRs
-        try {
-            # PS7 with $ErrorActionPreference='Stop' can promote cargo stderr (compilation
-            # messages) to NativeCommandError. Suppress via local Continue so the exit-code
-            # check below handles failures non-fatally.
-            $local:ErrorActionPreference = 'Continue'
-            cargo run -p mqk-cli --bin mqk-cli -- md sync-provider `
-                --source twelvedata `
-                --symbols $sym `
-                --timeframe $Timeframe `
-                --full-start "2024-01-01" 2>&1 | Out-Host
-            if ($LASTEXITCODE -ne 0) {
-                Write-Warn "Provider sync top-off failed for $sym (exit $LASTEXITCODE). Using existing bars."
-            } else {
-                Write-Ok "Provider sync top-off complete for $sym."
-            }
-        } catch {
-            Write-Warn "Provider sync top-off threw exception for $sym ($_). Using existing bars."
-        } finally { Pop-Location }
+    # MARKET-DATA-PROVIDER-PROVENANCE-01-REPAIR-01, defect item 9: this stage
+    # previously hardcoded --source twelvedata regardless of $sym/$Timeframe,
+    # so an invocation with -Timeframe 5m (e.g. via -SymbolsFromIngestPlan,
+    # or STEP 5B's MQK_STRATEGY_MD_TIMEFRAME=5m) would write TwelveData-
+    # labeled AAPL/5m rows into the readiness window even though the
+    # registry assigns AAPL/5m to alpaca -- daily_data_readiness::
+    # evaluate_bar_readiness checks provider_id on every bar in the bounded
+    # window, not just the latest, so this silently broke provenance. The
+    # provider is now resolved per-symbol from the registry and the stage is
+    # skipped (not guessed) when it does not resolve cleanly.
+    $registryFullPath = Join-Path $RepoRoot 'config\instruments\equities.json'
+    $topOffProvider = Resolve-SymbolRegistryProvider -Symbol $sym -Timeframe $Timeframe -RegistryFullPath $registryFullPath
+    if ([string]::IsNullOrWhiteSpace($topOffProvider)) {
+        Write-Warn "Skipping provider sync top-off for $sym/$Timeframe (no single enabled registry instrument authorizes this symbol/timeframe pair at $registryFullPath; refusing to guess a provider)."
+    } elseif ($topOffProvider -eq 'twelvedata') {
+        if ($twelvekeyPresent) {
+            Write-Step "Provider sync top-off for $sym / $Timeframe (registry provider=twelvedata) ..."
+            Push-Location $coreRs
+            try {
+                # PS7 with $ErrorActionPreference='Stop' can promote cargo stderr (compilation
+                # messages) to NativeCommandError. Suppress via local Continue so the exit-code
+                # check below handles failures non-fatally.
+                $local:ErrorActionPreference = 'Continue'
+                cargo run -p mqk-cli --bin mqk-cli -- md sync-provider `
+                    --source twelvedata `
+                    --symbols $sym `
+                    --timeframe $Timeframe `
+                    --full-start "2024-01-01" 2>&1 | Out-Host
+                if ($LASTEXITCODE -ne 0) {
+                    Write-Warn "Provider sync top-off failed for $sym (exit $LASTEXITCODE). Using existing bars."
+                } else {
+                    Write-Ok "Provider sync top-off complete for $sym."
+                }
+            } catch {
+                Write-Warn "Provider sync top-off threw exception for $sym ($_). Using existing bars."
+            } finally { Pop-Location }
+        } else {
+            Write-Warn "Skipping provider sync top-off for $sym (registry provider=twelvedata but TWELVEDATA_API_KEY not set)."
+        }
+    } elseif ($topOffProvider -eq 'alpaca') {
+        if ($alpacaPaperConfigured) {
+            Write-Step "Provider sync top-off for $sym / $Timeframe (registry provider=alpaca) ..."
+            Push-Location $coreRs
+            try {
+                $local:ErrorActionPreference = 'Continue'
+                cargo run -p mqk-cli --bin mqk-cli -- md sync-provider `
+                    --source alpaca `
+                    --symbols $sym `
+                    --timeframe $Timeframe `
+                    --full-start "2024-01-01" 2>&1 | Out-Host
+                if ($LASTEXITCODE -ne 0) {
+                    Write-Warn "Provider sync top-off failed for $sym (exit $LASTEXITCODE). Using existing bars."
+                } else {
+                    Write-Ok "Provider sync top-off complete for $sym."
+                }
+            } catch {
+                Write-Warn "Provider sync top-off threw exception for $sym ($_). Using existing bars."
+            } finally { Pop-Location }
+        } else {
+            Write-Warn "Skipping provider sync top-off for $sym (registry provider=alpaca but ALPACA_API_KEY_PAPER/ALPACA_API_SECRET_PAPER not fully configured)."
+        }
     } else {
-        Write-Warn "Skipping provider sync for $sym (TWELVEDATA_API_KEY not set)."
+        Write-Warn "Skipping provider sync top-off for $sym (unsupported registry provider '$topOffProvider')."
     }
 
     # --- Alpaca intraday top-off (intraday timeframes only) ---

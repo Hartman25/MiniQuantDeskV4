@@ -490,7 +490,10 @@ enum MdCmd {
         symbols: Option<String>,
 
         /// Path to instrument registry JSON (e.g. config/instruments/equities.json).
-        /// Loads all enabled equity symbols. Mutually exclusive with --symbols.
+        /// Loads enabled equity instruments scoped to --source's exact provider
+        /// and to timeframes each instrument's own `timeframes` list authorizes
+        /// (MARKET-DATA-PROVIDER-PROVENANCE-01-REPAIR-01) -- never a different
+        /// provider's instrument. Mutually exclusive with --symbols.
         #[arg(long)]
         symbols_from_registry: Option<PathBuf>,
 
@@ -523,7 +526,10 @@ enum MdCmd {
         symbols: Option<String>,
 
         /// Path to instrument registry JSON (e.g. config/instruments/equities.json).
-        /// Loads all enabled equity symbols. Mutually exclusive with --symbols.
+        /// Loads enabled equity instruments scoped to --source's exact provider
+        /// and to timeframes each instrument's own `timeframes` list authorizes
+        /// (MARKET-DATA-PROVIDER-PROVENANCE-01-REPAIR-01) -- never a different
+        /// provider's instrument. Mutually exclusive with --symbols.
         #[arg(long)]
         symbols_from_registry: Option<PathBuf>,
 
