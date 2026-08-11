@@ -726,6 +726,130 @@ function Get-AuthoritativeIntradayRefreshDuration {
 }
 
 # =============================================================================
+# DEFECT B REPAIR (OFFICIAL-DUAL-MODE-LAUNCHER-01-REPAIR-02): intraday refresh
+# ownership.
+#
+# Root cause: the prior implementation unconditionally started a background
+# Refresh-IntradayMarketData.ps1 process on every full Paper startup. A later
+# stage failure (reconcile/halt-recovery/arm) followed by a Task Scheduler
+# retry re-ran the whole launcher and started a SECOND refresh loop for the
+# same symbol/timeframe/Paper-DB/market-date scope, stacking duplicate
+# ingest work.
+#
+# Fix: before starting a refresh child, record and check a narrow ownership
+# file under smoke_logs\launcher\paper\ (untracked runtime evidence,
+# consistent with this launcher's existing smoke_logs\launcher\<mode>\
+# convention for launch_*.json -- see New-LauncherLog). A recorded owner is
+# only reused when its PID is still alive, still looks like a
+# launcher-managed Refresh-IntradayMarketData.ps1 PowerShell process, AND its
+# recorded repo/symbols/timeframe/paper-DB-port/market-date scope matches
+# this run's scope exactly. No process is ever killed here -- a dead or
+# scope-mismatched owner simply is not reused, and exactly one replacement
+# process is started and recorded.
+# =============================================================================
+function Get-IntradayRefreshOwnerPath {
+    param([Parameter(Mandatory = $true)][string]$RepoRoot)
+    $dir = Join-Path $RepoRoot 'smoke_logs\launcher\paper'
+    New-Item -ItemType Directory -Force -Path $dir | Out-Null
+    return (Join-Path $dir 'intraday_refresh_owner.json')
+}
+
+function Test-RefreshOwnerProcessAlive {
+    param([Parameter(Mandatory = $true)][int]$ProcessId)
+
+    $proc = $null
+    try { $proc = Get-Process -Id $ProcessId -ErrorAction Stop } catch { return $false }
+    if ($proc.ProcessName -notmatch '^powershell') { return $false }
+
+    # Best-effort command-line confirmation. Some environments restrict WMI/CIM
+    # access; when that happens we fall back to the process-name check above
+    # rather than refusing to reuse (or falsely killing) a legitimate owner.
+    try {
+        $cim = Get-CimInstance -ClassName Win32_Process -Filter "ProcessId = $ProcessId" -ErrorAction Stop
+        if ($cim -and $cim.CommandLine -and ($cim.CommandLine -notmatch [regex]::Escape('Refresh-IntradayMarketData.ps1'))) {
+            return $false
+        }
+    } catch {
+        # CIM unavailable -- keep the process-name-only verdict from above.
+    }
+
+    return $true
+}
+
+function Get-IntradayRefreshOwnerState {
+    param(
+        [Parameter(Mandatory = $true)][string]$RepoRoot,
+        [Parameter(Mandatory = $true)][string[]]$Symbols,
+        [Parameter(Mandatory = $true)][string]$Timeframe,
+        [Parameter(Mandatory = $true)][int]$PaperDbPort,
+        [Parameter(Mandatory = $true)][string]$MarketDate
+    )
+
+    $ownerPath = Get-IntradayRefreshOwnerPath -RepoRoot $RepoRoot
+    $result = [pscustomobject]@{ Reusable = $false; Reason = 'no owner record'; OwnerPath = $ownerPath; Record = $null }
+    if (-not (Test-Path $ownerPath)) { return $result }
+
+    try {
+        $record = Get-Content -Path $ownerPath -Raw | ConvertFrom-Json
+    } catch {
+        $result.Reason = "owner record unreadable/corrupt: $($_.Exception.Message)"
+        return $result
+    }
+    $result.Record = $record
+
+    if ($null -eq $record -or $null -eq $record.pid) {
+        $result.Reason = 'owner record missing pid'
+        return $result
+    }
+    if (-not (Test-RefreshOwnerProcessAlive -ProcessId ([int]$record.pid))) {
+        $result.Reason = "recorded pid $($record.pid) is not a live launcher-managed refresh process"
+        return $result
+    }
+
+    $recordSymbols = @($record.symbols)
+    $sameSymbolCount = ($recordSymbols.Count -eq @($Symbols).Count)
+    $sameSymbols = $sameSymbolCount -and (-not (Compare-Object $recordSymbols $Symbols))
+    $sameScope = $sameSymbols -and
+                 ($record.timeframe -eq $Timeframe) -and
+                 ([int]$record.paper_db_port -eq $PaperDbPort) -and
+                 ($record.market_date -eq $MarketDate) -and
+                 ($record.repo_root -eq $RepoRoot)
+
+    if (-not $sameScope) {
+        $result.Reason = "recorded owner scope does not match requested scope (symbols=$($recordSymbols -join ','), timeframe=$($record.timeframe), paper_db_port=$($record.paper_db_port), market_date=$($record.market_date))"
+        return $result
+    }
+
+    $result.Reusable = $true
+    $result.Reason = 'existing launcher-managed refresh loop matches requested scope and is alive'
+    return $result
+}
+
+function Set-IntradayRefreshOwnerRecord {
+    param(
+        [Parameter(Mandatory = $true)][string]$RepoRoot,
+        [Parameter(Mandatory = $true)][int]$ProcessId,
+        [Parameter(Mandatory = $true)][string[]]$Symbols,
+        [Parameter(Mandatory = $true)][string]$Timeframe,
+        [Parameter(Mandatory = $true)][int]$PaperDbPort,
+        [Parameter(Mandatory = $true)][string]$MarketDate
+    )
+
+    $ownerPath = Get-IntradayRefreshOwnerPath -RepoRoot $RepoRoot
+    $record = [ordered]@{
+        pid            = $ProcessId
+        started_at_utc = (Get-Date).ToUniversalTime().ToString('o')
+        market_date    = $MarketDate
+        symbols        = @($Symbols)
+        timeframe      = $Timeframe
+        paper_db_port  = $PaperDbPort
+        repo_root      = $RepoRoot
+    }
+    ($record | ConvertTo-Json -Depth 4) | Set-Content -Path $ownerPath -Encoding UTF8
+    return $ownerPath
+}
+
+# =============================================================================
 # PAPER STARTUP -- reuses the existing accepted Launch-VeritasLedger.ps1 /
 # Prep-PremarketMarketData.ps1 / Refresh-IntradayMarketData.ps1 paths rather
 # than reimplementing them. This launcher NEVER calls the start-system
@@ -866,38 +990,6 @@ function Invoke-PaperStartup {
     Write-Ok "REFRESHED_SYMBOLS == REQUIRED_SYMBOLS confirmed ($($requiredSymbols -join ', '))."
     $logEntry.stages += @{ name = 'market_data_prep'; exit_code = 0; symbols = $requiredSymbols; timeframe = $planTimeframe }
 
-    Write-Section 'PAPER -- recurring intraday refresh for the full session'
-    $refreshDuration = Get-AuthoritativeIntradayRefreshDuration -DaemonBaseUrl $daemonBaseUrl
-    if (-not $refreshDuration.Ok) {
-        # Fail closed for BOTH -Scheduled and interactive full startups per
-        # CLAUDE.md's fail-closed doctrine (truth unavailable => deny, never
-        # optimistically pass). The mission text mandates this for -Scheduled;
-        # applying it to interactive too avoids silently handing back a
-        # 1800s window that does not actually cover the session.
-        Write-Fail "Cannot establish an authoritative full-session refresh window: $($refreshDuration.Reason)"
-        Write-Fail 'Refusing to start a fallback-duration refresh loop. Resolve calendar/market-data-readiness truth and re-run.'
-        $logEntry.stages += @{ name = 'intraday_refresh'; ok = $false; reason = $refreshDuration.Reason }
-        Write-LauncherLogEntry -Path $LogPath -Entry $logEntry
-        return $script:ExitDataReadiness
-    }
-    $durationSeconds = $refreshDuration.DurationSeconds
-    Write-Ok "Authoritative session close: $($refreshDuration.CloseUtc) (source=/api/v1/market-data/readiness, calendar_coverage_state=active). Refresh duration=${durationSeconds}s (close + 15min buffer, floor 300s)."
-    $refreshTimeframe = if ($planTimeframe -and $planTimeframe -ne '1D') { $planTimeframe } else { '5m' }
-    $refreshLogDir = Join-Path $RepoRoot 'exports\launcher'
-    New-Item -ItemType Directory -Force -Path $refreshLogDir | Out-Null
-    $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
-    $refreshStdout = Join-Path $refreshLogDir "intraday_refresh_$stamp.stdout.log"
-    $refreshStderr = Join-Path $refreshLogDir "intraday_refresh_$stamp.stderr.log"
-    $refreshArgs = @(
-        '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $refreshScript,
-        '-Symbols', ($requiredSymbols -join ','), '-Timeframe', $refreshTimeframe,
-        '-IntervalSeconds', 300, '-DurationSeconds', $durationSeconds
-    )
-    Start-Process -FilePath 'powershell.exe' -ArgumentList $refreshArgs -WindowStyle Hidden `
-        -RedirectStandardOutput $refreshStdout -RedirectStandardError $refreshStderr | Out-Null
-    Write-Ok "Intraday refresh loop started in background (duration=${durationSeconds}s, symbols=$($requiredSymbols -join ', '), timeframe=$refreshTimeframe)."
-    $logEntry.stages += @{ name = 'intraday_refresh_started'; duration_seconds = $durationSeconds; symbols = $requiredSymbols; timeframe = $refreshTimeframe }
-
     Write-Section 'PAPER -- reconciliation (hard gate)'
     $adopt = Invoke-JsonPost -Url ($daemonBaseUrl + '/api/v1/ops/repair/adopt-broker-position-baseline') -OperatorToken $operatorToken -Body @{ confirmation = 'ADOPT_BROKER_POSITION_BASELINE' }
     if ($adopt.StatusCode -eq 200 -or $adopt.StatusCode -eq 409) {
@@ -1001,6 +1093,55 @@ function Invoke-PaperStartup {
     Write-Ok 'arm-execution accepted and verified: arm_state=armed. ARMED ONLY -- runtime not started, no orders submitted.'
     $logEntry.stages += @{ name = 'arm'; accepted = $true; final_arm_state = 'armed' }
 
+    Write-Section 'PAPER -- recurring intraday refresh for the full session (idempotent ownership)'
+    $refreshDuration = Get-AuthoritativeIntradayRefreshDuration -DaemonBaseUrl $daemonBaseUrl
+    if (-not $refreshDuration.Ok) {
+        # Fail closed for BOTH -Scheduled and interactive full startups per
+        # CLAUDE.md's fail-closed doctrine (truth unavailable => deny, never
+        # optimistically pass). The mission text mandates this for -Scheduled;
+        # applying it to interactive too avoids silently handing back a
+        # 1800s window that does not actually cover the session.
+        Write-Fail "Cannot establish an authoritative full-session refresh window: $($refreshDuration.Reason)"
+        Write-Fail 'Refusing to start a fallback-duration refresh loop. Resolve calendar/market-data-readiness truth and re-run.'
+        $logEntry.stages += @{ name = 'intraday_refresh'; ok = $false; reason = $refreshDuration.Reason }
+        Write-LauncherLogEntry -Path $LogPath -Entry $logEntry
+        return $script:ExitDataReadiness
+    }
+    $durationSeconds = $refreshDuration.DurationSeconds
+    Write-Ok "Authoritative session close: $($refreshDuration.CloseUtc) (source=/api/v1/market-data/readiness, calendar_coverage_state=active). Refresh duration=${durationSeconds}s (close + 15min buffer, floor 300s)."
+    $refreshTimeframe = if ($planTimeframe -and $planTimeframe -ne '1D') { $planTimeframe } else { '5m' }
+    $paperDbPort = 5440
+    $marketDateLabel = Get-Date -Format 'yyyy-MM-dd'
+
+    # DEFECT B REPAIR (OFFICIAL-DUAL-MODE-LAUNCHER-01-REPAIR-02): before
+    # launching a new refresh child, check for an existing launcher-managed
+    # refresh loop already owning the SAME repo/symbols/timeframe/paper-DB/
+    # market-date scope. A Task Scheduler retry after a later-stage failure
+    # must reuse that loop, never stack a second one for the same scope.
+    $ownerState = Get-IntradayRefreshOwnerState -RepoRoot $RepoRoot -Symbols $requiredSymbols -Timeframe $refreshTimeframe -PaperDbPort $paperDbPort -MarketDate $marketDateLabel
+
+    if ($ownerState.Reusable) {
+        Write-Ok "Reusing existing launcher-managed intraday refresh loop (pid=$($ownerState.Record.pid)): $($ownerState.Reason)"
+        $logEntry.stages += @{ name = 'intraday_refresh'; ok = $true; reused = $true; pid = $ownerState.Record.pid; duration_seconds = $durationSeconds; symbols = $requiredSymbols; timeframe = $refreshTimeframe }
+    } else {
+        Write-Step "No reusable refresh owner found ($($ownerState.Reason)); starting exactly one refresh loop."
+        $refreshLogDir = Join-Path $RepoRoot 'exports\launcher'
+        New-Item -ItemType Directory -Force -Path $refreshLogDir | Out-Null
+        $stamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+        $refreshStdout = Join-Path $refreshLogDir "intraday_refresh_$stamp.stdout.log"
+        $refreshStderr = Join-Path $refreshLogDir "intraday_refresh_$stamp.stderr.log"
+        $refreshArgs = @(
+            '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $refreshScript,
+            '-Symbols', ($requiredSymbols -join ','), '-Timeframe', $refreshTimeframe,
+            '-IntervalSeconds', 300, '-DurationSeconds', $durationSeconds
+        )
+        $refreshProcess = Start-Process -FilePath 'powershell.exe' -ArgumentList $refreshArgs -WindowStyle Hidden `
+            -RedirectStandardOutput $refreshStdout -RedirectStandardError $refreshStderr -PassThru
+        $ownerPath = Set-IntradayRefreshOwnerRecord -RepoRoot $RepoRoot -ProcessId $refreshProcess.Id -Symbols $requiredSymbols -Timeframe $refreshTimeframe -PaperDbPort $paperDbPort -MarketDate $marketDateLabel
+        Write-Ok "Intraday refresh loop started in background (pid=$($refreshProcess.Id), duration=${durationSeconds}s, symbols=$($requiredSymbols -join ', '), timeframe=$refreshTimeframe). Owner recorded at $ownerPath."
+        $logEntry.stages += @{ name = 'intraday_refresh'; ok = $true; reused = $false; pid = $refreshProcess.Id; duration_seconds = $durationSeconds; symbols = $requiredSymbols; timeframe = $refreshTimeframe }
+    }
+
     if ($CaptureEvidenceFlag) {
         Write-Section 'PAPER -- evidence capture'
         & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $evidenceScript -Label 'launcher_startup' | Out-Host
@@ -1017,7 +1158,16 @@ function Invoke-PaperStartup {
 
 # =============================================================================
 # MAIN DISPATCH
+#
+# Guarded so scripts\windows\tests\test_official_dual_mode_launcher.ps1 can
+# `. $Launcher` to load every function above (including the REPAIR-02
+# intraday-refresh-ownership functions) for deterministic, fixture-based unit
+# proof, without executing the interactive/live/paper dispatch, spawning a
+# daemon, or calling exit. `$MyInvocation.InvocationName -eq '.'` is true only
+# when the file is dot-sourced; normal `powershell.exe -File Start-MiniQuantDesk.ps1`
+# invocation is unaffected.
 # =============================================================================
+if ($MyInvocation.InvocationName -ne '.') {
 $RepoRoot = Get-RepoRoot
 
 # DEFECT 2 REPAIR: load .env.local/.env into THIS parent process's own
@@ -1059,13 +1209,30 @@ try {
         exit $code
     }
     else {
-        # DEFECT 1 REPAIR: official full Paper startup always requires a
-        # trade-ready backend and always arms afterward (see
-        # Invoke-PaperStartup's arm section) -- no longer conditional on
-        # -ArmPaper. CheckOnly is unaffected (Invoke-PaperStartup's CheckOnly
-        # branch returns before $launcherModeArg is ever used for daemon
-        # startup semantics).
-        $launcherModeArg = 'TradeReady'
+        # DEFECT 1 REPAIR (REPAIR-01): official full Paper startup always
+        # arms afterward (see Invoke-PaperStartup's arm section) -- no longer
+        # conditional on -ArmPaper. CheckOnly is unaffected (Invoke-PaperStartup's
+        # CheckOnly branch returns before $launcherModeArg is ever used for
+        # daemon startup semantics).
+        #
+        # DEFECT A REPAIR (REPAIR-02): daemon bootstrap uses Launch-VeritasLedger.ps1
+        # -Mode Observe, NOT -Mode TradeReady. TradeReady requires arm_ready,
+        # session_in_window, runtime_start_allowed, and overall_ready to
+        # already be true (Get-TradeReadinessReasons in Launch-VeritasLedger.ps1)
+        # -- but this launcher only establishes those itself (ingest-plan,
+        # reconcile, halt recovery, arm-execution, below) AFTER
+        # Launch-VeritasLedger.ps1 returns. Requiring TradeReady here created
+        # a circular pre-open dependency that made a before-open Paper start
+        # (session_in_window=false, as expected before market open) fail
+        # every time. Observe mode only requires Get-BackendProbe's
+        # IdentityVerified gate -- verified canonical paper+alpaca identity,
+        # valid operator auth, live_routing_enabled=false, daemon reachable
+        # -- which is exactly the daemon-bootstrap contract this launcher
+        # needs before it performs its own readiness work below.
+        # Launch-VeritasLedger.ps1's own TradeReady semantics/definition are
+        # UNCHANGED by this fix; they remain available for operator
+        # diagnostics via Launch-VeritasLedger.ps1 -Mode TradeReady directly.
+        $launcherModeArg = 'Observe'
         $forceRebuildDaemon = $Rebuild.IsPresent -or $RebuildDaemon.IsPresent
         $forceRebuildGui = $Rebuild.IsPresent -or $RebuildGui.IsPresent
         $effectiveSkipGui = $SkipGui.IsPresent -or $Scheduled.IsPresent
@@ -1082,4 +1249,5 @@ catch {
     Write-Fail "LAUNCH FAILED: $($_.Exception.Message)"
     Write-Host ''
     exit $script:ExitGeneric
+}
 }

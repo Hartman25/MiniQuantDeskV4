@@ -196,11 +196,17 @@ Assert-True 'Proof 3: Get-EnvValue precedence is Process -> User -> Machine (pro
 Assert-True 'Proof 4: full (non-CheckOnly) Paper startup always reaches an arm-execution stage, not gated behind -ArmPaper' `
     ($FullStartupBody -match "ActionKey 'arm-execution'" -and -not ($FullStartupBody -match "if\s*\(\s*\`$ArmPaperFlag\s*\)\s*\{[^}]*ActionKey 'arm-execution'"))
 
+# NOTE: this assertion targeted the literal daemon-bootstrap mode value.
+# REPAIR-02 changed that value from 'TradeReady' to 'Observe' (see Section 4
+# below for the full pre-open-circularity proof) -- the underlying contract
+# this proof exists to protect (launcherModeArg is unconditional, never
+# `if ($ArmPaper.IsPresent)`-gated) is unchanged and re-asserted here against
+# the corrected value.
 Assert-True 'Proof 4/5: -ArmPaper is no longer required for the official full Paper startup dispatch (launcherModeArg is unconditional, not `if ($ArmPaper.IsPresent)`)' `
-    ($LauncherText -match "\`$launcherModeArg = 'TradeReady'" -and -not ($LauncherText -match "\`$launcherModeArg = if \(\`$ArmPaper\.IsPresent\)"))
+    ($LauncherText -match "\`$launcherModeArg = 'Observe'" -and -not ($LauncherText -match "\`$launcherModeArg = if \(\`$ArmPaper\.IsPresent\)"))
 
 $ArmSectionBody = ($FullStartupBody -split "Write-Section 'PAPER -- arm")[1]
-$ArmSectionBody = ($ArmSectionBody -split "Write-Section 'PAPER -- evidence|Write-Section 'PAPER -- runtime start")[0]
+$ArmSectionBody = ($ArmSectionBody -split "Write-Section 'PAPER -- recurring intraday refresh|Write-Section 'PAPER -- evidence|Write-Section 'PAPER -- runtime start")[0]
 Assert-True 'Proof 5: the arm-establishment section does not branch on -Scheduled (identical contract for interactive and scheduled full startup)' `
     (-not ($ArmSectionBody -match '\$ScheduledFlag'))
 
@@ -261,6 +267,168 @@ Assert-True 'Proof 18/19: -Mode Live -Scheduled remains unattended-live-unauthor
 
 Assert-True 'Proof 20: -Mode Live -CheckOnly still performs zero live order/runtime/DB mutation after REPAIR-01 (re-check of r3)' `
     ($r3.Output -match 'No live runtime was started\.' -and $r3.Output -match 'No live broker orders were enabled\.' -and $r3.Output -match 'No live DB was mutated\.')
+
+# ---------------------------------------------------------------------------
+# Section 4: OFFICIAL-DUAL-MODE-LAUNCHER-01-REPAIR-02 proofs -- Defect A
+# (pre-open circularity: daemon bootstrap must use Observe, not TradeReady)
+# ---------------------------------------------------------------------------
+Show-Info ''
+Show-Info '=== Section 4: REPAIR-02 Defect A proofs (pre-open Observe bootstrap) ==='
+
+Assert-True 'REPAIR-02 Proof A1: official full Paper startup delegates lower-level daemon bootstrap in Observe mode, not TradeReady' `
+    ($LauncherText -match "\`$launcherModeArg = 'Observe'" -and -not ($LauncherText -match "\`$launcherModeArg = 'TradeReady'"))
+
+$PreArmFullStartupBody = ($FullStartupBody -split "Write-Section 'PAPER -- arm")[0]
+Assert-True 'REPAIR-02 Proof A2: launcher does not require session_in_window truth before it can reach its own arm stage' `
+    (-not ($PreArmFullStartupBody -match 'session_in_window'))
+
+Assert-True 'REPAIR-02 Proof A2: launcher does not require overall_ready truth before it can reach its own arm stage' `
+    (-not ($PreArmFullStartupBody -match 'overall_ready'))
+
+Assert-True 'REPAIR-02 Proof A2: launcher does not require runtime_start_allowed truth before it can reach its own arm stage' `
+    (-not ($PreArmFullStartupBody -match 'runtime_start_allowed'))
+
+Assert-True 'REPAIR-02 Proof A3: Launch-VeritasLedger.ps1 TradeReady semantics are unchanged -- still gate on arm_ready/session_in_window/runtime_start_allowed/overall_ready' `
+    ($VeritasLedgerText -match 'arm_ready' -and $VeritasLedgerText -match 'session_in_window' -and
+     $VeritasLedgerText -match 'runtime_start_allowed' -and $VeritasLedgerText -match 'overall_ready' -and
+     $VeritasLedgerText -match "requireTradeReady = \`$LauncherMode -eq 'TradeReady'")
+
+Assert-True 'REPAIR-02 Proof A3: Launch-VeritasLedger.ps1 -Mode ValidateSet still offers both Observe (default) and TradeReady, unchanged' `
+    ($VeritasLedgerText -match "\[ValidateSet\('Observe',\s*'TradeReady'\)\]" -and $VeritasLedgerText -match "\[string\]\`$Mode = 'Observe'")
+
+Assert-True 'REPAIR-02 Proof A4: Paper full startup still always reaches an arm-execution stage (unchanged contract from REPAIR-01 proof 4)' `
+    ($FullStartupBody -match "ActionKey 'arm-execution'")
+
+Assert-True 'REPAIR-02 Proof A5: arm_state=="armed" remains required before launcher success (unchanged contract from REPAIR-01 proof 7)' `
+    ($FullStartupBody -match "if \(\`$finalArmState -ne 'armed'\)" -and -not ($FullStartupBody -match "-or \`$finalArmState -eq 'arm_pending'"))
+
+Assert-True 'REPAIR-02 Proof A6: launcher never contains the start-system action_key literal (re-verified after REPAIR-02 reordering)' `
+    (-not ($LauncherText -match "'start-system'" -or $LauncherText -match '"start-system"'))
+
+Assert-True 'REPAIR-02 Proof A7: reordered sequence starts/reuses the refresh loop after arm verification, before evidence capture/return (per mission section 11)' `
+    ($FullStartupBody -match "(?s)final_arm_state = 'armed'\s*\}\s*.*?PAPER -- recurring intraday refresh.*?PAPER -- evidence capture")
+
+# ---------------------------------------------------------------------------
+# Section 5: OFFICIAL-DUAL-MODE-LAUNCHER-01-REPAIR-02 proofs -- Defect B
+# (intraday refresh loop must be idempotent / ownership-aware)
+#
+# Sub-section 5a is static source-guard checks. Sub-section 5b dot-sources
+# Start-MiniQuantDesk.ps1 (safe: MAIN DISPATCH is guarded by
+# `if ($MyInvocation.InvocationName -ne '.')`, so dot-sourcing only defines
+# functions -- no daemon start, no Alpaca call, no trading runtime, no exit)
+# and exercises the real Get-/Set-IntradayRefreshOwner* functions against a
+# disposable temp-repo fixture and a real (but harmless) long-lived
+# powershell.exe fixture process, per mission section 16's "safe process
+# fixture/mock" instruction.
+# ---------------------------------------------------------------------------
+Show-Info ''
+Show-Info '=== Section 5: REPAIR-02 Defect B proofs (intraday refresh ownership) ==='
+
+# --- 5a: static source-guard checks ----------------------------------------
+Assert-True 'REPAIR-02 Proof B-static: ownership helper functions exist (Get-IntradayRefreshOwnerPath / Test-RefreshOwnerProcessAlive / Get-IntradayRefreshOwnerState / Set-IntradayRefreshOwnerRecord)' `
+    ($LauncherText -match 'function Get-IntradayRefreshOwnerPath' -and $LauncherText -match 'function Test-RefreshOwnerProcessAlive' -and
+     $LauncherText -match 'function Get-IntradayRefreshOwnerState' -and $LauncherText -match 'function Set-IntradayRefreshOwnerRecord')
+
+$OwnershipBlockText = ($LauncherText -split 'function Get-IntradayRefreshOwnerPath ')[1]
+$OwnershipBlockText = ($OwnershipBlockText -split '# PAPER STARTUP -- reuses the existing accepted')[0]
+Assert-True 'REPAIR-02 Proof B11-static: ownership functions never call Stop-Process / kill any process (arbitrary PowerShell process is never terminated)' `
+    (-not ($OwnershipBlockText -match 'Stop-Process|\.Kill\('))
+
+Assert-True 'REPAIR-02 Proof B-static: owner record lives under smoke_logs\launcher\paper\ (same untracked-runtime-evidence convention as New-LauncherLog)' `
+    ($LauncherText -match 'smoke_logs\\launcher\\paper' -and $LauncherText -match 'intraday_refresh_owner\.json')
+
+Assert-True 'REPAIR-02 Proof B14-static: CheckOnly branch never references the ownership functions (creates no active ownership state)' `
+    (-not ($CheckOnlyBlockText -match 'IntradayRefreshOwner'))
+
+$RealOwnerPath = Join-Path $RepoRoot 'smoke_logs\launcher\paper\intraday_refresh_owner.json'
+Assert-True 'REPAIR-02 Proof B14-functional: -Mode Paper -CheckOnly (Section 2''s r4) created no active refresh-ownership record in the real repo' `
+    (-not (Test-Path $RealOwnerPath))
+
+# --- 5b: functional fixture proofs (dot-sourced functions, disposable temp repo) ---
+$FixtureRepo = $null
+$FixtureProc = $null
+$UnrelatedProc = $null
+try {
+    . $Launcher
+
+    $FixtureRepo = Join-Path $env:TEMP ("mqk_launcher_test_repo_" + [guid]::NewGuid().ToString('N'))
+    New-Item -ItemType Directory -Force -Path $FixtureRepo | Out-Null
+    $fixtureRefreshScript = Join-Path $FixtureRepo 'Refresh-IntradayMarketData.ps1'
+    Set-Content -Path $fixtureRefreshScript -Value 'Start-Sleep -Seconds 90' -Encoding UTF8
+
+    # A real long-lived powershell.exe process whose command line references
+    # Refresh-IntradayMarketData.ps1 -- stands in for the actual background
+    # refresh child without touching Alpaca or any daemon.
+    $FixtureProc = Start-Process -FilePath 'powershell.exe' `
+        -ArgumentList @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $fixtureRefreshScript) `
+        -WindowStyle Hidden -PassThru
+    Start-Sleep -Milliseconds 800
+
+    $sym = @('AAPL', 'MSFT')
+    $tf = '5m'
+    $port = 5440
+    $mktDate = '2026-08-10'
+
+    $before = Get-IntradayRefreshOwnerState -RepoRoot $FixtureRepo -Symbols $sym -Timeframe $tf -PaperDbPort $port -MarketDate $mktDate
+    Assert-True 'REPAIR-02 Proof B7: with no owner record yet, state is not reusable (first invocation would launch exactly one owner)' `
+        (-not $before.Reusable)
+
+    $ownerPath = Set-IntradayRefreshOwnerRecord -RepoRoot $FixtureRepo -ProcessId $FixtureProc.Id -Symbols $sym -Timeframe $tf -PaperDbPort $port -MarketDate $mktDate
+    Assert-True 'REPAIR-02 Proof B7: Set-IntradayRefreshOwnerRecord writes exactly one owner record at the expected path' `
+        (Test-Path $ownerPath)
+
+    $sameScope = Get-IntradayRefreshOwnerState -RepoRoot $FixtureRepo -Symbols $sym -Timeframe $tf -PaperDbPort $port -MarketDate $mktDate
+    Assert-True 'REPAIR-02 Proof B8: second same-scope invocation reuses the existing owner (Reusable=true, matching live pid)' `
+        ($sameScope.Reusable -and [int]$sameScope.Record.pid -eq $FixtureProc.Id)
+
+    $mismatchedSymbols = Get-IntradayRefreshOwnerState -RepoRoot $FixtureRepo -Symbols @('TSLA') -Timeframe $tf -PaperDbPort $port -MarketDate $mktDate
+    $mismatchedTimeframe = Get-IntradayRefreshOwnerState -RepoRoot $FixtureRepo -Symbols $sym -Timeframe '1m' -PaperDbPort $port -MarketDate $mktDate
+    $mismatchedDate = Get-IntradayRefreshOwnerState -RepoRoot $FixtureRepo -Symbols $sym -Timeframe $tf -PaperDbPort $port -MarketDate '2026-08-11'
+    Assert-True 'REPAIR-02 Proof B10: mismatched symbol scope is not silently treated as matching' (-not $mismatchedSymbols.Reusable)
+    Assert-True 'REPAIR-02 Proof B10: mismatched timeframe scope is not silently treated as matching' (-not $mismatchedTimeframe.Reusable)
+    Assert-True 'REPAIR-02 Proof B10: mismatched market-date scope is not silently treated as matching' (-not $mismatchedDate.Reusable)
+
+    $deadPid = 999999
+    Set-IntradayRefreshOwnerRecord -RepoRoot $FixtureRepo -ProcessId $deadPid -Symbols $sym -Timeframe $tf -PaperDbPort $port -MarketDate $mktDate | Out-Null
+    $deadState = Get-IntradayRefreshOwnerState -RepoRoot $FixtureRepo -Symbols $sym -Timeframe $tf -PaperDbPort $port -MarketDate $mktDate
+    Assert-True 'REPAIR-02 Proof B9: a stale/dead recorded pid is not reused (one replacement would be launched instead)' `
+        (-not $deadState.Reusable)
+
+    # An unrelated real powershell.exe process (command line does NOT reference
+    # Refresh-IntradayMarketData.ps1). Even if a stale/forged owner record
+    # pointed at it, it must never be treated as reusable, and -- critically
+    # -- it must never be killed by any ownership check.
+    $UnrelatedProc = Start-Process -FilePath 'powershell.exe' `
+        -ArgumentList @('-NoProfile', '-Command', 'Start-Sleep -Seconds 90') `
+        -WindowStyle Hidden -PassThru
+    Start-Sleep -Milliseconds 800
+    Set-IntradayRefreshOwnerRecord -RepoRoot $FixtureRepo -ProcessId $UnrelatedProc.Id -Symbols $sym -Timeframe $tf -PaperDbPort $port -MarketDate $mktDate | Out-Null
+    $unrelatedState = Get-IntradayRefreshOwnerState -RepoRoot $FixtureRepo -Symbols $sym -Timeframe $tf -PaperDbPort $port -MarketDate $mktDate
+    Assert-True 'REPAIR-02 Proof B11: an unrelated PowerShell process (no matching command line) is not treated as a valid owner' `
+        (-not $unrelatedState.Reusable)
+    Start-Sleep -Milliseconds 200
+    Assert-True 'REPAIR-02 Proof B11-functional: the unrelated PowerShell process was never killed by the ownership check' `
+        ($null -ne (Get-Process -Id $UnrelatedProc.Id -ErrorAction SilentlyContinue))
+
+    $ownerJson = Get-Content -Path $ownerPath -Raw
+    $ownerObj = $ownerJson | ConvertFrom-Json
+    $allowedKeys = @('pid', 'started_at_utc', 'market_date', 'symbols', 'timeframe', 'paper_db_port', 'repo_root')
+    $actualKeys = @($ownerObj.PSObject.Properties.Name)
+    $unexpectedKeys = @($actualKeys | Where-Object { $allowedKeys -notcontains $_ })
+    Assert-True 'REPAIR-02 Proof B12: owner record contains only the documented non-secret fields, nothing else' `
+        ($unexpectedKeys.Count -eq 0)
+    Assert-True 'REPAIR-02 Proof B12: owner record content contains no secret-shaped strings (token/password/secret/api_key/bearer)' `
+        (-not ($ownerJson -match '(?i)token|password|secret|api_key|bearer'))
+
+    $trackedOwnerFiles = @(& git -C $RepoRoot ls-files 'smoke_logs' 2>&1 | Where-Object { $_ -match 'intraday_refresh_owner' })
+    Assert-True 'REPAIR-02 Proof B13: the owner-record path is not tracked by git (untracked runtime evidence, same as other smoke_logs\launcher\* state)' `
+        ($trackedOwnerFiles.Count -eq 0)
+}
+finally {
+    if ($null -ne $FixtureProc) { Stop-Process -Id $FixtureProc.Id -Force -ErrorAction SilentlyContinue }
+    if ($null -ne $UnrelatedProc) { Stop-Process -Id $UnrelatedProc.Id -Force -ErrorAction SilentlyContinue }
+    if ($null -ne $FixtureRepo -and (Test-Path $FixtureRepo)) { Remove-Item -Recurse -Force $FixtureRepo -ErrorAction SilentlyContinue }
+}
 
 Show-Info ''
 if ($Violations -eq 0) {
