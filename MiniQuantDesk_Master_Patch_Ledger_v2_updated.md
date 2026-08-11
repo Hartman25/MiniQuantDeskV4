@@ -479,6 +479,40 @@ git diff --check
 **Exact CLOSED End State:** CLOSED when committed.
 **Acceptance History:** PENDING / PENDING / PENDING / PENDING.
 
+#### OFFICIAL-DUAL-MODE-LAUNCHER-01 — Official Paper/Live dual-mode launcher (scripts/windows/Start-MiniQuantDesk.ps1)
+
+**Status:** IMPLEMENTED_PENDING_REVIEW · **Priority:** P2 · **Paper Impact:** GREEN (new orchestration script + one narrow `-SkipGui` addition to `Launch-VeritasLedger.ps1`; zero Rust/Python trading code touched) · **Subsystem:** Ops tooling / operator launcher
+**Current Source Truth:** Built entirely in the isolated worktree `C:\Users\Zacha\Desktop\MiniQuantDeskV4-ops` on branch `ops-official-launcher`, forked from the protected paper-soak baseline `54082a448c84b6429713a429bfb9403da8822131`. `scripts/windows/Start-MiniQuantDesk.ps1` (new) is the official `-Mode Paper|Live` entrypoint; `scripts/windows/Launch-VeritasLedger.ps1` gained one additive `-SkipGui` switch (default off, behavior unchanged unless passed) so scheduled/headless Paper attach never pops a GUI window. `scripts/windows/tests/test_official_dual_mode_launcher.ps1` (new) is the guard-test proof, 34/34 assertions green.
+**Problem:** No single official entrypoint existed for starting MiniQuantDesk; operators had to know whether to run `Launch-VeritasLedger.ps1` or `Start-PaperTradingSmoke.ps1`, and no Live-mode surface existed at all.
+**Dependencies:** NONE.
+**In Scope:** Interactive Paper/Live menu; explicit `-Mode`/`-CheckOnly`/`-Scheduled`/`-ArmPaper` CLI surface; `-Scheduled` with no `-Mode` fails closed (`STARTUP_REFUSED`, exit 2); Paper full-run delegates daemon/GUI start to `Launch-VeritasLedger.ps1`, resolves the authoritative symbol universe via `GET /api/v1/market-data/ingest-plan` + `Prep-PremarketMarketData.ps1 -SymbolsFromIngestPlan`, starts a session-length `Refresh-IntradayMarketData.ps1` background loop, runs the broker-baseline-adopt + reconcile hard gate, runs halt recovery (disarm→clear-halted-run) if needed, optionally arms (`-ArmPaper`), and never calls the `start-system` action_key — runtime start authority stays with the autonomous session controller. Live mode runs seven read-only/source-guard preflight checks (environment, broker config, account truth, reconciliation, risk, trust chain, authorization) that dynamically read `MiniQuantDesk_Master_Patch_Ledger_v2_updated.md` and `research-py/src/mqk_research/deployment/parity.py` for current truth rather than hardcoding a verdict; interactive non-CheckOnly Live requires a typed `LIVE` confirmation that cannot bypass the readiness gates; Live never starts a process, calls a broker, or mutates a DB in this patch. **Out of Scope (explicitly not done):** Windows Task Scheduler registration; any change to `live_trust_complete`, broker trust rules, live reconciliation, live risk, live execution, shadow parity, evidence signing, or live capital authorization; any Rust trading code, strategy code, broker economics, risk engine, portfolio/P&L, or reconciliation semantics change; `Install-VeritasLedgerDesktopShortcut.ps1` was deliberately left untouched (still targets `Launch-VeritasLedger.ps1` directly) to avoid materially expanding scope — see `docs/runbooks/operator_workflows.md` for the follow-up note.
+**Likely Files / Surfaces:** `scripts/windows/Start-MiniQuantDesk.ps1` (new), `scripts/windows/Launch-VeritasLedger.ps1` (narrow `-SkipGui` addition), `scripts/windows/tests/test_official_dual_mode_launcher.ps1` (new), `docs/runbooks/operator_workflows.md`, `docs/runbooks/operator_control_surface.md`, this ledger.
+**Required Implementation Rules:** One patch, minimal scope, no bundling with any Rust/Python change; built and committed only in the isolated `-ops` worktree; the protected paper-soak `main` worktree was never checked out to another branch, never had a new branch created inside it, and received zero commits from this session.
+**Safety / Compatibility Requirements:** `-CheckOnly` never arms, clears halt, starts runtime, submits orders, mutates DB, or launches broker activity (proven by guard-test Section 1 CheckOnly-scope check + Section 2 real invocation). Live mode never enables live routing, never sets `MQK_DAEMON_DEPLOYMENT_MODE`/`MQK_DAEMON_ADAPTER_ID` to a live value, and never prints `ALPACA_API_KEY_LIVE`/`ALPACA_API_SECRET_LIVE` values. `-Scheduled -Mode Live` fails closed (`unattended_live_start_not_authorized`, exit 6) because no explicit unattended-live authority exists in repo source today.
+**Required Negative Controls:** `-Scheduled` with no `-Mode` → exit 2 (proven). `-Mode Live -Scheduled` → exit 6, no interactive prompt (proven). `-Mode Live -CheckOnly` → completes without hanging on stdin, reports BLOCKED with real ledger patch IDs (proven).
+**Required Positive Controls:** `-Mode Paper -CheckOnly` → delegates to and surfaces `Launch-VeritasLedger.ps1 -CheckOnly`'s real read-only report (proven; this dev worktree correctly reports exit 1 because `.env.local` was never copied into it — expected, not a launcher defect).
+**Required Regression Tests:** `scripts/windows/tests/test_official_dual_mode_launcher.ps1` (new, 34/34 green). `Launch-VeritasLedger.ps1`'s own existing behavior is unchanged when `-SkipGui` is not passed (guarded by an `if (-not $SkipGui.IsPresent)` wrap around the pre-existing GUI resolve/launch block only).
+**Required Validation:**
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows\tests\test_official_dual_mode_launcher.ps1
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows\Start-MiniQuantDesk.ps1 -Mode Paper -CheckOnly
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\windows\Start-MiniQuantDesk.ps1 -Mode Live -CheckOnly
+```
+**Forbidden Validation / Side Effects:** No real live order, no live runtime start, no live DB mutation, no push, no merge to `main`.
+**Acceptance Criteria:** 1) `-Mode`/`-CheckOnly`/`-Scheduled`/`-ArmPaper` all behave exactly as specified. 2) Live mode reports real, current ledger-sourced blockers, never a fabricated verdict. 3) Paper mode never manually invokes `start-system`. 4) Guard-test suite green. 5) Protected `main` worktree provably untouched.
+**Exact CLOSED End State:** CLOSED when an operator has independently reviewed the diff in the `-ops` worktree, confirmed the protected `main` baseline is unaffected, and either merges via an explicit separate decision or accepts the branch as the new operational default — none of which this patch itself performs.
+**Acceptance History:** PENDING / PENDING / PENDING / PENDING.
+
+#### PAPER-AUTOMATIC-PREOPEN-SCHEDULER-01 — Windows Task Scheduler registration for unattended Paper start
+
+**Status:** BLOCKED (depends on OFFICIAL-DUAL-MODE-LAUNCHER-01 CLOSED) · **Priority:** P2 · **Paper Impact:** GREEN (additive scheduling only) · **Subsystem:** Ops tooling
+**Current Source Truth:** Not started. `OFFICIAL-DUAL-MODE-LAUNCHER-01` establishes the `-Scheduled -Mode Paper` contract this patch would register against (`Register-PremarketDataRefreshTask.ps1` is the closest existing precedent for scheduled-task registration style, but it only ever calls `Prep-PremarketMarketData.ps1`, never a full startup).
+**Problem:** No Windows Scheduled Task exists that invokes `Start-MiniQuantDesk.ps1 -Mode Paper -Scheduled` at the correct pre-open boundary.
+**Dependencies:** `OFFICIAL-DUAL-MODE-LAUNCHER-01` CLOSED.
+**In Scope (future patch, not this one):** Task Scheduler registration mirroring `Register-PremarketDataRefreshTask.ps1`'s registration pattern, invoking exactly `Start-MiniQuantDesk.ps1 -Mode Paper -Scheduled`. **Out of Scope:** Any Live scheduling (blocked indefinitely behind the full `LIVE-*` critical path).
+**Exact CLOSED End State:** CLOSED when a registered, idempotent scheduled task reliably invokes the official launcher's `-Scheduled -Mode Paper` path and this is proven across at least one real unattended run.
+**Acceptance History:** PENDING / PENDING / PENDING / PENDING.
+
 ---
 
 ### LANE C — Live Development (live-only + carefully controlled shared work, separate branch/worktree)

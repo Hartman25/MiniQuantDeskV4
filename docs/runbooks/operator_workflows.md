@@ -474,17 +474,64 @@ The `live_trust_gaps` list in parity_evidence.json makes the remaining gaps expl
 
 ## 10. Normal Desktop Launcher (LAUNCHER-MD-01)
 
-`Launch-VeritasLedger.ps1` is the canonical **normal operator startup** path.
-It starts the daemon and native desktop GUI but does **not** auto-arm, auto-start
-the runtime, or submit orders.  It is separate from the smoke harness.
+### 10.0 Official launcher (OFFICIAL-DUAL-MODE-LAUNCHER-01)
+
+`Start-MiniQuantDesk.ps1` is the **official, top-level entrypoint** for starting
+MiniQuantDesk manually and (in a future patch) via Windows Task Scheduler. It
+selects between two top-level trading modes and delegates the actual startup
+work to the existing accepted scripts below rather than reimplementing them.
+
+```powershell
+# Interactive Paper/Live menu
+.\scripts\windows\Start-MiniQuantDesk.ps1
+
+# Paper — full startup (delegates to Launch-VeritasLedger.ps1 + market-data +
+# reconcile + halt-recovery; never calls start-system)
+.\scripts\windows\Start-MiniQuantDesk.ps1 -Mode Paper
+
+# Paper — read-only diagnostic, no daemon/GUI/build/mutation
+.\scripts\windows\Start-MiniQuantDesk.ps1 -Mode Paper -CheckOnly
+
+# Live — read-only readiness report against the real ledger (blocked today;
+# never starts a live process, never calls a broker, never mutates a DB)
+.\scripts\windows\Start-MiniQuantDesk.ps1 -Mode Live
+.\scripts\windows\Start-MiniQuantDesk.ps1 -Mode Live -CheckOnly
+
+# Future scheduled Paper start (Task Scheduler registration is a separate,
+# not-yet-built patch: PAPER-AUTOMATIC-PREOPEN-SCHEDULER-01)
+.\scripts\windows\Start-MiniQuantDesk.ps1 -Mode Paper -Scheduled
+```
+
+`-Scheduled` with no `-Mode` fails closed (`STARTUP_REFUSED`,
+`reason=scheduled_mode_requires_explicit_trading_mode`, exit 2) — an
+unattended invocation can never silently default to either mode. Selecting
+`-Mode Live` in the launcher does **not** mean LiveCapital is authorized:
+the launcher's live-readiness chain reads real, current blockers from
+`MiniQuantDesk_Master_Patch_Ledger_v2_updated.md` and
+`research-py/src/mqk_research/deployment/parity.py`; existing live
+trust/reconcile/risk gates in `mqk-daemon` remain the sole authority and are
+never weakened or bypassed by this launcher.
+
+**Known follow-up (not done in this patch):** `Install-VeritasLedgerDesktopShortcut.ps1`
+still targets `Launch-VeritasLedger.ps1` directly rather than
+`Start-MiniQuantDesk.ps1`. Retargeting the desktop shortcut is the next
+launcher UX patch, deferred here to keep this patch's scope to orchestration
+only.
+
+`Launch-VeritasLedger.ps1` remains the canonical **normal operator startup**
+path underneath Paper mode. It starts the daemon and native desktop GUI but
+does **not** auto-arm, auto-start the runtime, or submit orders. It is
+separate from the smoke harness.
 
 ### Script role separation
 
 | Script | Purpose |
 |--------|---------|
-| `Launch-VeritasLedger.ps1` | Normal desktop startup — daemon + GUI, optional arm, no runtime auto-start |
+| `Start-MiniQuantDesk.ps1` | **Official entrypoint** — Paper/Live mode selection, orchestrates the scripts below |
+| `Launch-VeritasLedger.ps1` | Normal desktop startup — daemon + GUI (`-SkipGui` for headless attach), optional arm, no runtime auto-start |
 | `Start-PaperTradingSmoke.ps1` | Proof / smoke harness — full lifecycle including arm and autonomous runtime start |
 | `Prep-PremarketMarketData.ps1` | Standalone market-data prep or check — no daemon, no orders |
+| `Refresh-IntradayMarketData.ps1` | Standalone recurring intraday bar refresh loop |
 | `Capture-PaperSmokeEvidence.ps1` | Read-only evidence bundle capture — API snapshots, DB snapshots, operator notes |
 
 ### Canonical desktop launcher commands
