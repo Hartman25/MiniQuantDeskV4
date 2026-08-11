@@ -931,6 +931,13 @@ pub(crate) async fn ops_action(
                 });
             };
 
+            // PRE-SOAK-DAEMON-LOCAL-QUIESCENCE-AND-DEADMAN-SIDE-EFFECT-FENCE-01:
+            // serialize against a concurrent start/stop/halt on this same
+            // AppState for the whole clear attempt, so the local-quiescence
+            // check below and the durable clear cannot straddle a race with
+            // another lifecycle transition.
+            let _op = st.lifecycle_guard().await;
+
             let latest = match mqk_db::fetch_latest_run_for_engine(
                 db,
                 DAEMON_ENGINE_ID,
@@ -1005,6 +1012,61 @@ pub(crate) async fn ops_action(
             }
 
             let run_id = latest.run_id;
+
+            // PRE-SOAK-DAEMON-LOCAL-QUIESCENCE-AND-DEADMAN-SIDE-EFFECT-FENCE-01:
+            // a durable runtime-leader lease (checked inside
+            // clear_halted_run_and_reset_stale_claims below) is cross-process
+            // authority only -- it is not proof that a same-daemon
+            // execution-loop task for this exact run has actually stopped. A
+            // stale task can still be alive, mid-exit, with its runtime
+            // lease already expired (e.g. right after its own deadman-halt
+            // commit): DEADMAN_TTL_SECONDS (120s) can outlive the runtime
+            // lease TTL (90s), so the lease alone is not sufficient
+            // quiescence proof. Refuse here if THIS AppState still locally
+            // owns an unfinished task for run_id -- `locally_owned_run_id`
+            // is already conservative in our favor: it reports `None` the
+            // instant the task's `JoinHandle` finishes, even before that
+            // handle has been reaped, so this can never falsely block on a
+            // task that has actually already exited.
+            if st.locally_owned_run_id().await == Some(run_id) {
+                info!(
+                    run_id = %run_id,
+                    "ops/action clear-halted-run refused: local execution-loop task still active"
+                );
+                return (
+                    StatusCode::CONFLICT,
+                    Json(OperatorActionResponse {
+                        requested_action: "clear-halted-run".to_string(),
+                        accepted: false,
+                        disposition: "local_execution_loop_active".to_string(),
+                        resulting_integrity_state: None,
+                        resulting_desired_armed: None,
+                        blockers: vec![format!(
+                            "runtime.clear_halted.local_execution_loop_active: run {run_id} \
+                             still has a live execution-loop task in this daemon process. Its \
+                             runtime lease may already be expired, but lease expiry alone does \
+                             not prove the local task has stopped -- clearing now could let it \
+                             perform a stale post-halt durable write or in-memory mutation after \
+                             you clear and re-arm. Wait for the task to exit (it will, once its \
+                             own halt path completes) and retry clear-halted-run; if it is \
+                             genuinely stuck, restart/shut down this daemon rather than clearing \
+                             state underneath a live task.",
+                        )],
+                        warnings: vec![],
+                        environment: Some(st.deployment_mode().as_api_label().to_string()),
+                        scope: Some("daemon_instance".to_string()),
+                        audit: OperatorActionAuditFields {
+                            durable_db_write: false,
+                            durable_targets: vec![],
+                            audit_event_id: None,
+                        },
+                        pending_restart_intent: None,
+                        captured_baseline: None,
+                    }),
+                )
+                    .into_response();
+            }
+
             match mqk_db::clear_halted_run_and_reset_stale_claims(db, run_id, Utc::now()).await {
                 Ok(mqk_db::ClearHaltedRunOutcome::ActiveRuntimeLease {
                     holder_id,

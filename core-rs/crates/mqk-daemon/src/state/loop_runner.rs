@@ -360,12 +360,34 @@ pub(super) fn spawn_execution_loop(
                         let now = Utc::now();
                         match mqk_db::enforce_deadman_or_halt(pool, run_id, DEADMAN_TTL_SECONDS, now).await {
                             Ok(true) => {
-                                let _ = mqk_db::persist_arm_state_canonical(
-                                    pool,
-                                    mqk_db::ArmState::Disarmed,
-                                    Some(mqk_db::DisarmReason::DeadmanExpired),
-                                )
-                                .await;
+                                // PRE-SOAK-DAEMON-LOCAL-QUIESCENCE-AND-DEADMAN-SIDE-EFFECT-FENCE-01:
+                                // `enforce_deadman_or_halt` already routed through
+                                // `halt_and_disarm_run_if_active`, which atomically committed
+                                // `runs.status = HALTED` and `sys_arm_state = DISARMED` in one
+                                // transaction. A second, standalone `persist_arm_state_canonical`
+                                // write here would be redundant and — worse — ungenerationed:
+                                // it is not fenced to the run lifecycle the way the helper's own
+                                // write is, so a stale loop reaching this line after an operator
+                                // has already cleared and re-armed could silently clobber that
+                                // recovered `sys_arm_state` back to DISARMED. There is exactly
+                                // one durable authority write for this halt: the helper's.
+                                //
+                                // Test-only pause point: lets a test deterministically hold this
+                                // task here — durable halt already committed, but this loop's
+                                // local integrity mutation/alert/leadership-release/exit have not
+                                // yet run — so it can drive the real clear-halted-run route while
+                                // this task is still a live local owner. `None` in production.
+                                if let Some(pause) =
+                                    state_arc.deadman_local_quiescence_pause_for_test.clone()
+                                {
+                                    if let Some(entered) = state_arc
+                                        .deadman_local_quiescence_pause_entered_for_test
+                                        .clone()
+                                    {
+                                        entered.notify_one();
+                                    }
+                                    pause.notified().await;
+                                }
                                 {
                                     let mut ig = integrity.write().await;
                                     ig.disarmed = true;

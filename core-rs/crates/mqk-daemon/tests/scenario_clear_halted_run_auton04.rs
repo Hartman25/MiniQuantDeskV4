@@ -23,13 +23,27 @@
 //! |       | every tick in LiveShadow+Alpaca; structural DB proof is the only safe option)             |
 //! | H07   | after clear, next_daemon_run_id() formula yields computed_fresh_run_id != halted_run_id; |
 //! |       | stale inbox rows remain under halted_run_id, invisible to computed_fresh_run_id           |
+//! | H08   | PRE-SOAK-DAEMON-LOCAL-QUIESCENCE-AND-DEADMAN-SIDE-EFFECT-FENCE-01: a REAL              |
+//! |       | spawn_execution_loop task, deadman-halted with a stale heartbeat, is paused          |
+//! |       | post-durable-halt-commit — clear-halted-run refuses (409                              |
+//! |       | local_execution_loop_active, zero mutation) while it is still the local owner,        |
+//! |       | succeeds once it exits, and a subsequent re-arm lands cleanly (QDF-NEG-2 / QDF-POS-2) |
 //!
 //! H01-H02 are pure in-process (no DB required).
-//! H03-H07 require MQK_DATABASE_URL and are #[ignore].
+//! H03-H08 require MQK_DATABASE_URL and are #[ignore].
+//!
+//! H05 additionally stands as QDF-POS-1 (crashed-process recovery): it
+//! constructs a fresh `AppState` (no local execution-loop ownership at all —
+//! `LocalRuntimeOwnership::Idle`) against a durably `HALTED` run and proves
+//! `clear-halted-run` still succeeds — the new local-quiescence gate in
+//! `routes/control_plane.rs` (`st.locally_owned_run_id().await ==
+//! Some(run_id)`) is trivially `false` for an `Idle` slot, so a genuinely
+//! crashed prior process (or, as here, a process that never held local
+//! ownership of this run at all) is never blocked from recovery.
 //!
 //! ## Proof-strength status
 //!
-//! H01–H05: fully executed against a real DB; all pass.
+//! H01–H05, H08: fully executed against a real DB; all pass.
 //!
 //! H06/H07: PARTIAL proofs.  H06 executes `start_execution_runtime()` before
 //! clear (returns `halted_lifecycle`) but the after-clear assertion is a DB
@@ -47,6 +61,7 @@
 //! expansion is deferred to a future patch.
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use axum::body::to_bytes;
 use axum::http::{Method, Request, StatusCode};
@@ -709,4 +724,203 @@ async fn h07_after_clear_fresh_run_sees_no_stale_inbox_rows() {
          any run_id the production code would allocate"
     );
     // No stop_for_shutdown: no execution loop was started in this test.
+}
+
+// ---------------------------------------------------------------------------
+// H08: PRE-SOAK-DAEMON-LOCAL-QUIESCENCE-AND-DEADMAN-SIDE-EFFECT-FENCE-01
+// ---------------------------------------------------------------------------
+
+/// H08 (QDF-NEG-2 / QDF-POS-2): a REAL `spawn_execution_loop` task —
+/// installed via `AppState::install_real_execution_loop_for_test`, which
+/// drives the exact same reserve -> prepare -> spawn -> install -> release
+/// sequence `ProductionRuntimeStartEffects::spawn_loop` uses in production,
+/// against a hermetic in-process Paper broker (no network, no credentials)
+/// — is deadman-halted by a genuinely stale heartbeat.
+///
+/// Proves the full chronology this patch closes:
+/// 1. The task's own pre-tick deadman check calls
+///    `mqk_db::enforce_deadman_or_halt`, which atomically commits
+///    `runs.status = HALTED` + `sys_arm_state = DISARMED` via
+///    `halt_and_disarm_run_if_active` — durable proof.
+/// 2. The task pauses at the new `deadman_local_quiescence_pause_for_test`
+///    barrier immediately after that commit, before performing its local
+///    integrity mutation, alert, or leadership release — i.e. it is still a
+///    live, unfinished local owner (`locally_owned_run_id() ==
+///    Some(run_id)`) even though the durable halt is already visible.
+/// 3. The REAL `clear-halted-run` route (`POST /api/v1/ops/action`) is
+///    invoked while the task is paused there: refuses with 409
+///    `local_execution_loop_active`, zero mutation (run stays HALTED).
+/// 4. The pause is released; the task performs its local halt side effects
+///    and exits; `locally_owned_run_id()` reports `None` once it does
+///    (conservative w.r.t. `JoinHandle::is_finished()` — no explicit reap
+///    required for this check).
+/// 5. The REAL `clear-halted-run` route is retried: now succeeds (200
+///    `halted_run_cleared`, run HALTED -> STOPPED).
+/// 6. A legitimate re-arm afterward lands `ARMED` and is never clobbered by
+///    the old task, because it has no more code left to run — the local
+///    quiescence gate is exactly what proves that at recovery time, not an
+///    assumption made after the fact.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore]
+async fn h08_deadman_halt_cannot_be_cleared_under_live_local_loop() {
+    mqk_db::run_isolated("auton04_h08", |pool| async move {
+        let run_id = uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_DNS, b"mqk-daemon.auton04.h08");
+        mqk_db::insert_run(
+            &pool,
+            &mqk_db::NewRun {
+                run_id,
+                engine_id: "mqk-daemon".to_string(),
+                mode: "PAPER".to_string(),
+                started_at_utc: chrono::Utc::now(),
+                git_hash: "test".to_string(),
+                config_hash: "test".to_string(),
+                config_json: serde_json::json!({}),
+                host_fingerprint: "test-node".to_string(),
+            },
+        )
+        .await
+        .expect("insert_run");
+        mqk_db::arm_run(&pool, run_id).await.expect("arm_run");
+        mqk_db::begin_run(&pool, run_id).await.expect("begin_run");
+
+        // Stale heartbeat: well past DEADMAN_TTL_SECONDS (120s), so the real
+        // loop's very first pre-tick deadman check halts immediately —
+        // tokio::time::interval's first tick fires as soon as the loop's
+        // startup barrier releases.
+        let stale_hb = chrono::Utc::now() - chrono::Duration::seconds(130);
+        sqlx::query("UPDATE runs SET last_heartbeat_utc = $1 WHERE run_id = $2")
+            .bind(stale_hb)
+            .bind(run_id)
+            .execute(&pool)
+            .await
+            .expect("set stale heartbeat");
+
+        let mut st = AppState::new_for_test_with_db_mode_and_broker(
+            pool.clone(),
+            DeploymentMode::Paper,
+            BrokerKind::Paper,
+        );
+        let pause = Arc::new(tokio::sync::Notify::new());
+        let entered = Arc::new(tokio::sync::Notify::new());
+        st.set_deadman_local_quiescence_pause_for_test(Arc::clone(&pause));
+        st.set_deadman_local_quiescence_pause_entered_for_test(Arc::clone(&entered));
+        let st = Arc::new(st);
+
+        st.install_real_execution_loop_for_test(run_id).await;
+
+        // Deterministic barrier wait -- never a timing sleep: the loop
+        // notifies `entered` right before it awaits `pause`, i.e. strictly
+        // after the durable HALTED+DISARMED commit.
+        entered.notified().await;
+
+        let halted_run = mqk_db::fetch_run(&pool, run_id).await.expect("fetch_run");
+        assert!(
+            matches!(halted_run.status, mqk_db::RunStatus::Halted),
+            "H08 precondition: run must be durably HALTED before the local task exits; \
+             got {:?}",
+            halted_run.status
+        );
+        assert_eq!(
+            st.locally_owned_run_id().await,
+            Some(run_id),
+            "H08 precondition: the real execution-loop task must still be this AppState's \
+             local owner while paused post-halt-commit"
+        );
+
+        // QDF-NEG-2 (refusal): the real clear-halted-run route, invoked
+        // while the local task is still alive, must refuse -- 409, zero
+        // mutation.
+        let router = build_router(Arc::clone(&st));
+        let (status, j) = post_action(
+            router,
+            serde_json::json!({ "action_key": "clear-halted-run" }),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::CONFLICT,
+            "H08: clear-halted-run must refuse while the real local execution-loop task is \
+             still alive; body: {j}"
+        );
+        assert_eq!(j["accepted"], false, "H08: must not be accepted; body: {j}");
+        assert_eq!(
+            j["disposition"].as_str(),
+            Some("local_execution_loop_active"),
+            "H08: disposition must be local_execution_loop_active; body: {j}"
+        );
+        let still_halted = mqk_db::fetch_run(&pool, run_id)
+            .await
+            .expect("fetch_run after refusal");
+        assert!(
+            matches!(still_halted.status, mqk_db::RunStatus::Halted),
+            "H08: a refused clear must not mutate run status; got {:?}",
+            still_halted.status
+        );
+
+        // Release the pause: the task performs its local integrity
+        // mutation, fires its alert, releases leadership, and exits.
+        pause.notify_one();
+
+        // Deterministically wait for the task to actually finish.
+        // `locally_owned_run_id()` is already conservative -- it reports
+        // `None` the instant the `JoinHandle` finishes, before any explicit
+        // reap -- so this loop is bounded polling for a real, already-
+        // triggered tokio task completion (the barrier above is the actual
+        // correctness synchronization), not a substitute for a barrier.
+        let mut exited = false;
+        for _ in 0..500 {
+            if st.locally_owned_run_id().await.is_none() {
+                exited = true;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert!(
+            exited,
+            "H08: the real execution-loop task must actually exit once the pause is released"
+        );
+
+        // QDF-NEG-2 (success after quiescence): retry clear-halted-run.
+        let router = build_router(Arc::clone(&st));
+        let (status, j) = post_action(
+            router,
+            serde_json::json!({ "action_key": "clear-halted-run" }),
+        )
+        .await;
+        assert_eq!(
+            status,
+            StatusCode::OK,
+            "H08: clear-halted-run must succeed once the local task has exited; body: {j}"
+        );
+        assert_eq!(
+            j["disposition"].as_str(),
+            Some("halted_run_cleared"),
+            "H08: disposition must be halted_run_cleared; body: {j}"
+        );
+        let cleared = mqk_db::fetch_run(&pool, run_id)
+            .await
+            .expect("fetch_run after clear");
+        assert!(
+            matches!(cleared.status, mqk_db::RunStatus::Stopped),
+            "H08: run must be STOPPED after clear; got {:?}",
+            cleared.status
+        );
+
+        // QDF-POS-2 tail: a legitimate re-arm lands cleanly and is never
+        // clobbered by the old task -- it has already fully exited and has
+        // no more code left to run.
+        mqk_db::persist_arm_state_canonical(&pool, mqk_db::ArmState::Armed, None)
+            .await
+            .expect("persist_arm_state_canonical ARMED");
+        let final_arm = mqk_db::load_arm_state(&pool)
+            .await
+            .expect("load_arm_state")
+            .expect("arm state row must exist after persisting ARMED");
+        assert_eq!(
+            final_arm.0, "ARMED",
+            "H08: post-clear re-arm must land ARMED and must not be clobbered by the old \
+             (exited) local task"
+        );
+    })
+    .await;
 }

@@ -170,6 +170,7 @@
 "mqk-daemon","scenario_clear_halted_run_auton04","crates/mqk-daemon/tests/scenario_clear_halted_run_auton04.rs","349","h05_clear_halted_run_on_halted_run_returns_200","SAFE_DB_5434",""
 "mqk-daemon","scenario_clear_halted_run_auton04","crates/mqk-daemon/tests/scenario_clear_halted_run_auton04.rs","453","h06_after_clear_halted_lifecycle_gate_is_unblocked","SAFE_DB_5434",""
 "mqk-daemon","scenario_clear_halted_run_auton04","crates/mqk-daemon/tests/scenario_clear_halted_run_auton04.rs","561","h07_after_clear_fresh_run_sees_no_stale_inbox_rows","SAFE_DB_5434",""
+"mqk-daemon","scenario_clear_halted_run_auton04","crates/mqk-daemon/tests/scenario_clear_halted_run_auton04.rs","765","h08_deadman_halt_cannot_be_cleared_under_live_local_loop","SAFE_DB_5434",""
 "mqk-daemon","scenario_daemon_order_submit","crates/mqk-daemon/tests/scenario_daemon_order_submit.rs","1024","manual_order_submit_enqueues_one_pending_outbox_row_for_active_run","MANUAL_EXTERNAL","requires MQK_DATABASE_URL; run with --include-ignored"
 "mqk-daemon","scenario_daemon_order_submit","crates/mqk-daemon/tests/scenario_daemon_order_submit.rs","1056","manual_order_submit_duplicate_client_request_id_is_noop","MANUAL_EXTERNAL","requires MQK_DATABASE_URL; run with --include-ignored"
 "mqk-daemon","scenario_daemon_order_submit","crates/mqk-daemon/tests/scenario_daemon_order_submit.rs","1095","manual_order_submit_accepts_limit_order_with_explicit_defaults_aligned_to_runtime","MANUAL_EXTERNAL","requires MQK_DATABASE_URL; run with --include-ignored"

@@ -724,6 +724,27 @@ pub struct AppState {
     /// here" instead of guessing with a sleep before issuing its own
     /// concurrent write.
     pub ingest_job_persist_barrier_entered_for_test: Option<Arc<tokio::sync::Notify>>,
+    /// PRE-SOAK-DAEMON-LOCAL-QUIESCENCE-AND-DEADMAN-SIDE-EFFECT-FENCE-01:
+    /// Test-only synchronization barrier reproducing the exact window this
+    /// patch closes: `mqk_db::enforce_deadman_or_halt` has already atomically
+    /// committed `runs.status = HALTED` + `sys_arm_state = DISARMED`, but the
+    /// execution-loop task (`state/loop_runner.rs` pre-tick deadman branch)
+    /// has not yet performed its local integrity mutation, alert, or
+    /// leadership release — i.e. the task is still a live, unfinished local
+    /// owner even though the durable halt is already visible.
+    ///
+    /// `None` in production: no effect. `Some(notify)` in tests: the loop
+    /// pauses at `notify.notified()` at exactly that point, so a test can
+    /// deterministically drive the real `clear-halted-run` route while a
+    /// genuine `spawn_execution_loop` task for the halted run is still
+    /// locally owned — a real barrier instead of a timing sleep.
+    pub deadman_local_quiescence_pause_for_test: Option<Arc<tokio::sync::Notify>>,
+    /// Companion signal to `deadman_local_quiescence_pause_for_test`:
+    /// notified the instant the loop reaches the pause point, so a test can
+    /// deterministically wait for "the durable halt has committed and the
+    /// loop is now paused here" instead of guessing with a sleep before
+    /// issuing its own concurrent `clear-halted-run` call.
+    pub deadman_local_quiescence_pause_entered_for_test: Option<Arc<tokio::sync::Notify>>,
     /// AUTONOMOUS-DAILY-PAPER-OPERATIONS-01E4-READ-TRUTH-AND-EVIDENCE-STATE-REPAIR-01:
     /// Test-only override forcing `gather_daily_operation_activity_counts`
     /// to report a downstream database read failure (`ActivityCounts::DatabaseUnavailable`)
@@ -1396,6 +1417,28 @@ impl AppState {
         self.ingest_job_persist_barrier_entered_for_test = Some(entered);
     }
 
+    /// Test helper: inject a synchronization barrier that pauses the
+    /// execution loop's pre-tick deadman-halt branch immediately after the
+    /// durable `HALTED` + `DISARMED` commit, before any local integrity
+    /// mutation, alert, or leadership release — see
+    /// `deadman_local_quiescence_pause_for_test` doc comment.
+    pub fn set_deadman_local_quiescence_pause_for_test(
+        &mut self,
+        barrier: Arc<tokio::sync::Notify>,
+    ) {
+        self.deadman_local_quiescence_pause_for_test = Some(barrier);
+    }
+
+    /// Test helper: pair with `set_deadman_local_quiescence_pause_for_test`
+    /// so a test can await "the loop is now paused post-halt-commit"
+    /// deterministically.
+    pub fn set_deadman_local_quiescence_pause_entered_for_test(
+        &mut self,
+        entered: Arc<tokio::sync::Notify>,
+    ) {
+        self.deadman_local_quiescence_pause_entered_for_test = Some(entered);
+    }
+
     /// Test helper: inject a fill activity fetcher for BROKER-FILL-REST-RECOVERY-01 tests.
     ///
     /// Production wiring is deferred to BROKER-FILL-REST-RECOVERY-APPLY-01.
@@ -1738,6 +1781,8 @@ impl AppState {
             latest_bar_provider_client: None,
             ingest_job_persist_barrier_for_test: None,
             ingest_job_persist_barrier_entered_for_test: None,
+            deadman_local_quiescence_pause_for_test: None,
+            deadman_local_quiescence_pause_entered_for_test: None,
             force_activity_counts_database_unavailable_for_test: false,
             market_data_feed_status: Arc::new(RwLock::new(None)),
             market_data_feed_scheduler: Arc::new(Mutex::new(
@@ -4464,6 +4509,101 @@ operator_reconcile_or_repair_required"
                 cleanup,
             },
         })
+    }
+
+    /// PRE-SOAK-DAEMON-LOCAL-QUIESCENCE-AND-DEADMAN-SIDE-EFFECT-FENCE-01
+    /// test-support helper: spawns a real `state/loop_runner.rs::
+    /// spawn_execution_loop` task for `run_id` against this AppState's own
+    /// (already-configured) `db` — production's pre-tick deadman/heartbeat/
+    /// halt logic reads `AppState::db`, not the orchestrator's internal
+    /// pool — installs it as the canonical `Active` local owner exactly the
+    /// way `ProductionRuntimeStartEffects::spawn_loop` does (reserve ->
+    /// prepare -> spawn -> install -> release startup barrier), and
+    /// immediately releases the startup barrier so it begins real ticking.
+    ///
+    /// Uses a hermetic in-process `LockedPaperBroker` orchestrator (no
+    /// network, no credentials) wired to a lazily-connected, never-actually-
+    /// dialed pool of its own — mirrors the existing `spawn_barrier_test_loop`
+    /// pattern in `ownership_state_machine_tests` below. This bypasses
+    /// `start_execution_runtime()`'s deployment-mode-readiness gate (which
+    /// refuses Paper+Paper) entirely, so DB-backed integration tests outside
+    /// this crate can drive the real execution-loop task — including its
+    /// pre-tick deadman-halt branch, which is gated on `AppState::db` — for
+    /// a run this AppState's own `db` already knows about, without needing
+    /// live Alpaca credentials or a mock Alpaca server.
+    ///
+    /// Panics on any reserve/prepare/install failure — this is test
+    /// scaffolding for an already-known-good ownership slot, not a
+    /// production path that must degrade gracefully.
+    pub async fn install_real_execution_loop_for_test(self: &Arc<Self>, run_id: Uuid) {
+        use mqk_broker_paper::LockedPaperBroker;
+        use mqk_execution::BrokerOrderMap;
+        use mqk_portfolio::PortfolioState;
+        use mqk_reconcile::{BrokerSnapshot, LocalSnapshot};
+        use mqk_runtime::orchestrator::WallClock;
+        use mqk_runtime::runtime_risk::RuntimeRiskGate;
+
+        self.reserve_runtime_ownership(run_id)
+            .await
+            .expect("install_real_execution_loop_for_test: reserve_runtime_ownership");
+        let bundle = RunStartLocalBundle {
+            execution_snapshot: None,
+            accepted_artifact: None,
+            native_strategy_bootstrap: None,
+            dynamic_selection_outcome: None,
+        };
+        self.prepare_starting_metadata_and_mirrors(run_id, bundle, Vec::new(), "test")
+            .await
+            .expect("install_real_execution_loop_for_test: prepare_starting_metadata_and_mirrors");
+
+        let integrity_gate = types::StateIntegrityGate {
+            integrity: Arc::clone(&self.integrity),
+        };
+        let reconcile_gate = types::ReconcileTruthGate {
+            reconcile_status: Arc::clone(&self.reconcile_status),
+        };
+        let risk_gate =
+            RuntimeRiskGate::from_run_config(&serde_json::json!({}), 1_000_000_000_i64, 0, 0);
+        let daemon_broker = broker::DaemonBroker::Paper(LockedPaperBroker::default());
+        let gateway = mqk_execution::wiring::build_gateway(
+            daemon_broker,
+            integrity_gate,
+            risk_gate,
+            reconcile_gate,
+        );
+        let orchestrator_pool = sqlx::PgPool::connect_lazy(
+            "postgresql://127.0.0.1:5432/mqk_local_quiescence_test_stub",
+        )
+        .expect("install_real_execution_loop_for_test: connect_lazy URL parse must succeed");
+        let orchestrator = types::DaemonOrchestrator::new(
+            orchestrator_pool,
+            gateway,
+            BrokerOrderMap::new(),
+            BTreeMap::new(),
+            PortfolioState::new(1_000_000_000_i64),
+            run_id,
+            "local-quiescence-test-dispatcher",
+            "local-quiescence-test",
+            None,
+            WallClock,
+            Box::new(LocalSnapshot::empty),
+            Box::new(|| BrokerSnapshot::empty_at(0)),
+        );
+
+        let (barrier_tx, barrier_rx) = tokio::sync::oneshot::channel();
+        let handle = loop_runner::spawn_execution_loop(
+            Arc::clone(self),
+            orchestrator,
+            run_id,
+            crate::dynamic_selection_dispatch_authority::RuntimeStrategyDispatchAuthority::Legacy {
+                assignments: Vec::new(),
+            },
+            barrier_rx,
+        );
+        self.install_active_runtime(run_id, handle)
+            .await
+            .expect("install_real_execution_loop_for_test: install_active_runtime");
+        let _ = barrier_tx.send(());
     }
 
     // -----------------------------------------------------------------
