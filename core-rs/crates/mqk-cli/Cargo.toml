@@ -27,6 +27,10 @@ clap.workspace = true
 dotenvy.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+# MARKET-DATA-PROVIDER-PROVENANCE-01: promoted from dev-dependencies — the
+# per-symbol truthful-provenance ingest helper in commands/md.rs names
+# `sqlx::PgPool` directly in production code, not just in tests.
+sqlx.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
@@ -50,7 +54,4 @@ mqk-reconcile = { path = "../mqk-reconcile" }
 [dev-dependencies]
 assert_cmd = "2"
 predicates = "3"
-# DEP-GOV-01: workspace = true so sqlx upgrade propagates automatically.
-# Previously hard-pinned to 0.7.4 (exact patch) — that pin would survive a workspace
-# upgrade to 0.8 and silently hold cli dev tests on the old version.
-sqlx.workspace = true
+# sqlx itself moved to [dependencies] above (MARKET-DATA-PROVIDER-PROVENANCE-01).

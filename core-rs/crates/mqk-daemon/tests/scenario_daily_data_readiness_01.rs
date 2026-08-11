@@ -2271,3 +2271,254 @@ fn ddr_61_no_blockers_and_loaded_bars_is_ok_absent_bars_is_unknown() {
     assert_eq!(derive_continuity_state(&[], Some(20)), "ok");
     assert_eq!(derive_continuity_state(&[], None), "unknown");
 }
+
+// ---------------------------------------------------------------------------
+// MARKET-DATA-PROVIDER-PROVENANCE-01: end-to-end proof that rows written
+// through the canonical metadata-aware ingest path (the same
+// `ingest_provider_bars_to_md_bars_with_provider_metadata` call
+// `mqk-cli::commands::md`'s `ingest-provider`/`sync-provider` now route
+// through, instead of the metadata-less `"unknown"`-defaulting helper) are
+// seen as truthfully provenanced by this evaluator — no manual DB UPDATE of
+// `provider_id`/`provider_source`/`provider_symbol`/`ingest_mode` anywhere in
+// these two tests; every row here originates through normal ingestion.
+// ---------------------------------------------------------------------------
+
+/// Seed `md_bars` via the real production ingest function
+/// (`mqk_db::md::ingest_provider_bars_to_md_bars_with_provider_metadata`),
+/// stamped with the exact metadata shape
+/// `ingest_provider_bars_with_truthful_provenance` (mqk-cli) now constructs
+/// per symbol: `provider_id`/`provider_source` = the actual selected
+/// provider, `provider_symbol` = the registry's mapping for this symbol,
+/// `ingest_mode = "provider_sync"`. Never a raw `INSERT`/`UPDATE`.
+async fn seed_bars_via_normal_ingestion(
+    pool: &sqlx::PgPool,
+    symbol: &str,
+    timeframe: &str,
+    expected_ts: &[i64],
+    provider_id: &str,
+) {
+    sqlx::query("delete from md_bars where symbol = $1 and timeframe = $2")
+        .bind(symbol)
+        .bind(timeframe)
+        .execute(pool)
+        .await
+        .expect("cleanup failed");
+
+    let bars: Vec<mqk_db::md::ProviderBar> = expected_ts
+        .iter()
+        .map(|&end_ts| mqk_db::md::ProviderBar {
+            symbol: symbol.to_string(),
+            timeframe: timeframe.to_string(),
+            end_ts,
+            open: "100".to_string(),
+            high: "101".to_string(),
+            low: "99".to_string(),
+            close: "100.5".to_string(),
+            volume: 1_000_000,
+            is_complete: true,
+        })
+        .collect();
+
+    let metadata = mqk_db::md::MdBarProviderMetadata {
+        provider_id: provider_id.to_string(),
+        provider_source: Some(provider_id.to_string()),
+        provider_symbol: Some(symbol.to_string()),
+        ingest_mode: Some("provider_sync".to_string()),
+        provider_bar_id: None,
+        provider_updated_at_utc: None,
+    };
+
+    mqk_db::md::ingest_provider_bars_to_md_bars_with_provider_metadata(
+        pool,
+        mqk_db::md::IngestProviderBarsArgs {
+            source: provider_id.to_string(),
+            timeframe: timeframe.to_string(),
+            ingest_id: uuid::Uuid::new_v4(),
+            bars,
+        },
+        metadata,
+    )
+    .await
+    .expect("normal metadata-aware ingestion must succeed");
+}
+
+/// Mirrors `daily_data_readiness::evaluate_readiness_with_binding`'s own
+/// `provenance_state` derivation (identical `REASON_*` set, identical
+/// "any-of these blockers -> invalid" rule). `evaluate_bar_readiness` is the
+/// production evaluator itself and intentionally returns only a raw blockers
+/// list — this one-line dedup is not a second implementation of the
+/// provenance *logic*, just a direct read of which reasons it returned.
+fn blockers_indicate_provenance_invalid(blockers: &[&'static str]) -> bool {
+    blockers.iter().any(|b| {
+        matches!(
+            *b,
+            REASON_PROVIDER_PROVENANCE_INVALID
+                | REASON_PROVIDER_SYMBOL_MISMATCH
+                | REASON_PROVIDER_ID_MISMATCH
+                | REASON_PROVIDER_UNKNOWN
+                | REASON_PROVIDER_DISABLED
+                | REASON_PROVIDER_CAPABILITY_MISMATCH
+                | REASON_PROVIDER_TIMESTAMP_CONVENTION_UNVERIFIED
+                | REASON_PROVIDER_INGEST_TIME_FUTURE
+        )
+    })
+}
+
+/// Positive proof: bars are ingested through the normal metadata-aware path
+/// with `source=alpaca`, matching the registry's expected provider; the
+/// production evaluator (`evaluate_bar_readiness`) must report no
+/// provenance-invalidating blocker — i.e. `provenance_state=ok`. Closes
+/// MARKET-DATA-PROVIDER-PROVENANCE-01's required readiness proof.
+///
+/// Calls `evaluate_bar_readiness` directly rather than `evaluate_assignment`
+/// so the calendar fixture (a fixed, deterministic 2024 instant, like every
+/// other direct-call test in this file) can stay decoupled from `now_ts`
+/// (real `Utc::now()`, required because `md_bars.ingested_at` is stamped by
+/// the DB's own `default now()` — see migration 0003 — at real insert time,
+/// not by anything the ingest call can override). `evaluate_assignment`
+/// forces both onto a single shared `now`, which would make this proof
+/// depend on real NYSE market hours at whatever moment the suite happens to
+/// run — flaky in CI. `schedule`/`calendar_provider` only feed continuity
+/// (unrelated to provenance), so this stays an honest proof of the
+/// provenance path specifically.
+#[tokio::test]
+async fn ddr_62_provider_provenance_ok_when_ingested_with_truthful_metadata() {
+    let Some(db_url) = get_test_db_url() else {
+        eprintln!("DDR-62: skipped (no MQK_DATABASE_URL)");
+        return;
+    };
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&db_url)
+        .await
+        .expect("DDR-62: pool connect failed");
+
+    let symbol = "ZZDDRTEST62";
+    seed_bars_via_normal_ingestion(
+        &pool,
+        symbol,
+        "5m",
+        &[1_713_190_500, 1_713_190_800],
+        "alpaca",
+    )
+    .await;
+
+    let rows = mqk_db::md::fetch_bounded_bars_with_provenance(&pool, symbol, "5m", 10)
+        .await
+        .expect("DDR-62: fetch failed");
+    assert!(!rows.is_empty(), "DDR-62: rows must exist after normal ingestion");
+
+    let mut actual_provider_ids: Vec<String> = Vec::new();
+    for row in &rows {
+        if !actual_provider_ids.contains(&row.provider_id) {
+            actual_provider_ids.push(row.provider_id.clone());
+        }
+    }
+    assert_eq!(
+        actual_provider_ids,
+        vec!["alpaca".to_string()],
+        "DDR-62: rows ingested via the normal metadata-aware path must carry provider_id=alpaca, never unknown"
+    );
+
+    let calendar_provider = NyseWeekdaysProvider;
+    let schedule = resolve_market_session_schedule(&calendar_provider, ts(MON_2024_04_15_935AM_EDT));
+    let real_now_ts = Utc::now().timestamp();
+
+    let blockers = evaluate_bar_readiness(
+        &rows,
+        mqk_md::Timeframe::M5,
+        &schedule,
+        &calendar_provider,
+        1,
+        real_now_ts,
+        900,
+        300,
+        &provider_configs(),
+        "equity",
+        "alpaca",
+        symbol,
+    );
+
+    assert!(
+        !blockers_indicate_provenance_invalid(&blockers),
+        "DDR-62: matching, truthfully-ingested provider metadata must yield provenance_state=ok: {blockers:?}"
+    );
+
+    sqlx::query("delete from md_bars where symbol = $1")
+        .bind(symbol)
+        .execute(&pool)
+        .await
+        .ok();
+}
+
+/// Negative proof: bars are ingested through the same normal metadata-aware
+/// path but with `source=twelvedata` while the caller expects `alpaca` (a
+/// genuine provider mismatch, not a fabricated "unknown"). The evaluator
+/// must still block under `REASON_PROVIDER_ID_MISMATCH` and report
+/// provenance as invalid — this patch fixes truth propagation, it does not
+/// weaken provenance validation. See DDR-62's doc comment for why this calls
+/// `evaluate_bar_readiness` directly instead of `evaluate_assignment`.
+#[tokio::test]
+async fn ddr_63_provider_provenance_mismatch_still_blocks() {
+    let Some(db_url) = get_test_db_url() else {
+        eprintln!("DDR-63: skipped (no MQK_DATABASE_URL)");
+        return;
+    };
+    let pool = sqlx::postgres::PgPoolOptions::new()
+        .max_connections(2)
+        .connect(&db_url)
+        .await
+        .expect("DDR-63: pool connect failed");
+
+    let symbol = "ZZDDRTEST63";
+    // Truthfully ingested from twelvedata; the caller below expects alpaca —
+    // an honest mismatch, not a bug.
+    seed_bars_via_normal_ingestion(
+        &pool,
+        symbol,
+        "5m",
+        &[1_713_190_500, 1_713_190_800],
+        "twelvedata",
+    )
+    .await;
+
+    let rows = mqk_db::md::fetch_bounded_bars_with_provenance(&pool, symbol, "5m", 10)
+        .await
+        .expect("DDR-63: fetch failed");
+    assert!(!rows.is_empty());
+    assert!(rows.iter().all(|r| r.provider_id == "twelvedata"));
+
+    let calendar_provider = NyseWeekdaysProvider;
+    let schedule = resolve_market_session_schedule(&calendar_provider, ts(MON_2024_04_15_935AM_EDT));
+    let real_now_ts = Utc::now().timestamp();
+
+    let blockers = evaluate_bar_readiness(
+        &rows,
+        mqk_md::Timeframe::M5,
+        &schedule,
+        &calendar_provider,
+        1,
+        real_now_ts,
+        900,
+        300,
+        &provider_configs(),
+        "equity",
+        "alpaca", // expected provider: alpaca -> genuine mismatch against twelvedata rows
+        symbol,
+    );
+
+    assert!(
+        blockers.contains(&REASON_PROVIDER_ID_MISMATCH),
+        "DDR-63: genuine provider mismatch must still block: {blockers:?}"
+    );
+    assert!(
+        blockers_indicate_provenance_invalid(&blockers),
+        "DDR-63: mismatched provider must never report provenance_state=ok: {blockers:?}"
+    );
+
+    sqlx::query("delete from md_bars where symbol = $1")
+        .bind(symbol)
+        .execute(&pool)
+        .await
+        .ok();
+}

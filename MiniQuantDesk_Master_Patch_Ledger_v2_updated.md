@@ -165,6 +165,79 @@ git diff --check
 
 ---
 
+#### MARKET-DATA-PROVIDER-PROVENANCE-01 — Fix provider-provenance defect in the normal market-data provider-sync path
+
+**Status:** IMPLEMENTED_PENDING_REVIEW
+**Priority:** P0
+**Paper Impact:** RED
+**Subsystem:** mqk-cli market-data ingest / mqk-daemon daily-data-readiness evaluator
+
+**Current Source Truth:** Implemented in isolated worktree `C:\Users\Zacha\Desktop\MiniQuantDeskV4-data`, branch `fix-market-data-provider-provenance`, base `54082a448c84b6429713a429bfb9403da8822131` (`origin/main`). Not merged into the primary worktree/branch as of this writing.
+
+**Problem (2026-08-11 PAPER incident):** `mqk-cli md ingest-provider` and `mqk-cli md sync-provider` called the metadata-less `mqk_db::md::ingest_provider_bars_to_md_bars` (defaults `provider_id="unknown"`) instead of the metadata-aware `..._with_provider_metadata` variant, even though the CLI already knows the actual selected provider (`source_lc`) at the call site. Every row written by the normal provider-sync CLI path landed with `provider_id="unknown"` regardless of `--source alpaca` or `--source twelvedata`, which the daily-data-readiness evaluator (`mqk-daemon/src/daily_data_readiness.rs`) treats as `REASON_PROVIDER_PROVENANCE_INVALID` — permanently blocking the market-data readiness gate for any symbol ingested this way. Separately, TwelveData was observed returning only stale prior-day intraday bars for AAPL/5m while Alpaca returned fresh same-day data, and the daemon's own `POST /api/v1/ingest/jobs mode=sync_provider` route (`routes/ingest.rs::run_real_provider_sync`) already wrote truthful `provider_id="alpaca"` via the same metadata-aware helper — proving the DB schema and provider layer were never the defect, only the CLI call sites.
+
+**Why This Matters:** This directly blocked the daily-data-readiness/instrument-registry gate for the currently-approved paper trading universe (AAPL/5m via Alpaca, per `.env.local`: `MQK_STRATEGY_SYMBOL=AAPL`, `MQK_STRATEGY_MD_TIMEFRAME=5m`, `MQK_DAEMON_ADAPTER_ID=alpaca`, no watchlist override).
+
+**Root Cause:** `md_ingest_provider`/`md_sync_provider` (`core-rs/crates/mqk-cli/src/commands/md.rs`) called `mqk_db::md::ingest_provider_bars_to_md_bars(pool, IngestProviderBarsArgs{..})` with no metadata argument, which internally defaults to `MdBarProviderMetadata::unknown()`. The already-known `source_lc` was never threaded into a metadata struct, unlike `ingest_csv_to_md_bars` (CRYPTO-DATA-01F precedent) and `md_kraken_ohlc_ingest`, which both already used the metadata-aware path correctly.
+
+**Fix:** Both CLI commands now route through a new `ingest_provider_bars_with_truthful_provenance` helper that groups the fetched bars by symbol and issues one `ingest_provider_bars_to_md_bars_with_provider_metadata` call per symbol (mirroring `run_real_provider_sync`'s existing per-instrument pattern), stamping `provider_id`/`provider_source = source_lc` and `ingest_mode = "provider_ingest"`/`"provider_sync"` on every row. `provider_symbol` is populated only when genuinely known: a new `resolve_symbols_with_provider_symbol` (superset of the existing `resolve_symbols`) carries the registry's real `provider_symbol` through for `--symbols-from-registry`, and stays `None` for a raw `--symbols` list (never forged, per D10). The metadata-less `ingest_provider_bars_to_md_bars` helper itself is unchanged — it remains the honest "provider truly unknown" path for any caller that doesn't know the provider.
+
+**Registry Decision:** `config/instruments/equities.json`'s `AAPL` entry changed from `provider="twelvedata"`, `timeframes=["1D"]` to `provider="alpaca"`, `timeframes=["1D","5m"]` — scoped to AAPL only (the sole symbol in the current approved paper universe), not a bulk equity-universe conversion. The primary worktree (`C:\Users\Zacha\Desktop\MiniQuantDeskV4`) independently carries an equivalent temporary same-day operational edit to the same file/field (uncommitted, made 2026-08-11 during the live incident response) — this ledger entry and that primary-worktree edit will need reconciliation when this patch is reviewed and merged; neither this session nor this patch touched the primary worktree's copy.
+
+**Readiness Proof (`mqk-daemon/tests/scenario_daily_data_readiness_01.rs`, `ddr_62`/`ddr_63`):** Bars written through the exact production metadata-aware ingest call (never a raw DB `INSERT`/`UPDATE`) and read back through `mqk_db::md::fetch_bounded_bars_with_provenance`, then evaluated by the production `evaluate_bar_readiness` function. `ddr_62`: `source=alpaca` matching the expected provider yields zero provenance-invalidating blockers (`provenance_state`-equivalent = `ok`). `ddr_63`: `source=twelvedata` against an `alpaca`-expecting caller still blocks under `REASON_PROVIDER_ID_MISMATCH` (provenance validation not weakened).
+
+**Dependencies:** NONE
+**Unlocks:** `AUTONOMOUS-DAILY-OPERATOR-RETRY-01`, `MARKET-DATA-AUTOFRESH-REQUIRED-UNIVERSE-01`, `INSTRUMENT-UNIVERSE-REFRESH-01` (all OPEN, not started by this patch)
+**In Scope:** `mqk-cli` provider-sync/ingest-provider call sites, `resolve_symbols` extension, targeted DB/CLI/readiness proof tests, the single-symbol AAPL registry decision.
+**Out of Scope:** Autonomous retry/reset, full scheduler/freshness redesign, official launcher, risk/OMS/portfolio/broker/GUI/Discord/futures/options/crypto/live trading, bulk equity-universe provider conversion.
+**Likely Files / Surfaces:** `core-rs/crates/mqk-cli/src/commands/md.rs`, `core-rs/crates/mqk-cli/Cargo.toml`, `core-rs/crates/mqk-daemon/tests/scenario_daily_data_readiness_01.rs`, `config/instruments/equities.json`.
+**Required Implementation Rules:** Never infer provider identity from symbol/URL/API-key/DB-state/registry-guess; never forge `provider_symbol`; never change the metadata-less helper's `"unknown"` default semantics.
+**Safety / Compatibility Requirements:** Provenance/freshness/continuity/registry validation must not be weakened (proved by `ddr_63`'s negative control).
+**Required Negative Controls:** `ddr_63_provider_provenance_mismatch_still_blocks`.
+**Required Positive Controls:** `ddr_62_provider_provenance_ok_when_ingested_with_truthful_metadata`; `dbp_01`/`dbp_02` (alpaca/twelvedata truthful `provider_id` round-trip); `dbp_03` (unmapped symbol never forges `provider_symbol`).
+**Required Regression Tests:** `mqk-db --test scenario_md_ingest_provider` (13/13, unchanged); `mqk-daemon --test scenario_daily_data_readiness_01` (66/66, all prior DDR-01..61 unchanged); `mqk-cli --bin mqk-cli` unit tests (28/28, including pre-existing `resolve_symbols` RS-01..08).
+**Required Validation:**
+```powershell
+$env:MQK_DATABASE_URL = "postgresql://postgres:postgres@127.0.0.1:5434/mqk_test"
+cargo test --manifest-path .\core-rs\Cargo.toml -p mqk-cli --bin mqk-cli -- --include-ignored
+cargo test --manifest-path .\core-rs\Cargo.toml -p mqk-db --test scenario_md_ingest_provider -- --include-ignored
+cargo test --manifest-path .\core-rs\Cargo.toml -p mqk-daemon --test scenario_daily_data_readiness_01 -- --test-threads=1
+bash scripts/guards/check_unsafe_patterns.sh
+bash scripts/guards/check_workspace_dep_inheritance.sh
+git diff --check
+```
+**Forbidden Validation / Side Effects:** No live/paper DB, no real provider network call, no manual DB provenance edits, no orders.
+**Acceptance Criteria:**
+1. `--source alpaca` and `--source twelvedata` durably persist their true `provider_id` (never `unknown`).
+2. Readiness evaluator sees `provenance_state=ok` for correctly-provenanced rows and still blocks a genuine mismatch.
+3. `provider_symbol` never forged for symbols with no registry mapping.
+4. All listed regression suites remain green.
+5. Primary and ops worktrees unmodified by this patch.
+**Exact CLOSED End State:** Not yet CLOSED — `IMPLEMENTED_PENDING_REVIEW` until code-reviewed, the primary-worktree AAPL registry edit is reconciled, and the patch is merged.
+**Expected Handoff:** Start HEAD `54082a44` (dev worktree base = `origin/main`); end HEAD = new commit SHA on `fix-market-data-provider-provenance`; not pushed, not merged.
+
+---
+
+#### AUTONOMOUS-DAILY-OPERATOR-RETRY-01 — Autonomous retry/reset for market-data provider sync (blocked/future)
+
+**Status:** OPEN · **Priority:** P2 · **Paper Impact:** YELLOW · **Subsystem:** Autonomous daily operations
+**Problem:** No autonomous retry/reset exists yet around the provider-sync path fixed by `MARKET-DATA-PROVIDER-PROVENANCE-01`. Explicitly out of scope for that patch; not started.
+**Dependencies:** `MARKET-DATA-PROVIDER-PROVENANCE-01`
+
+#### MARKET-DATA-AUTOFRESH-REQUIRED-UNIVERSE-01 — Automatic freshness maintenance for the required market-data universe (blocked/future)
+
+**Status:** OPEN · **Priority:** P2 · **Paper Impact:** YELLOW · **Subsystem:** Market-data scheduler/freshness
+**Problem:** Full automatic maintenance of freshness (beyond the single-invocation provenance fix landed by `MARKET-DATA-PROVIDER-PROVENANCE-01`) does not exist yet. Explicitly out of scope for that patch; not started.
+**Dependencies:** `MARKET-DATA-PROVIDER-PROVENANCE-01`
+
+#### INSTRUMENT-UNIVERSE-REFRESH-01 — Bulk instrument-registry provider/timeframe review beyond AAPL (blocked/future)
+
+**Status:** OPEN · **Priority:** P3 · **Paper Impact:** GREEN · **Subsystem:** Instrument registry
+**Problem:** `MARKET-DATA-PROVIDER-PROVENANCE-01`'s registry decision was deliberately scoped to AAPL only (the current approved paper universe). Whether other seeded equities' `provider`/`timeframes` need the same review is undecided and not started. Also tracks the open architecture question (documented, not implemented, by `MARKET-DATA-PROVIDER-PROVENANCE-01`) of whether the registry's single `provider` field is sufficient long-term versus separate historical/intraday/streaming/execution provider concepts.
+**Dependencies:** `MARKET-DATA-PROVIDER-PROVENANCE-01`
+
+---
+
 ### LANE B — GREEN Parallel Completion (safe during soak)
 
 #### RISK-AUTHORITY-DOC-NOTE-01 — Clarify risk-crate authority boundary in docs

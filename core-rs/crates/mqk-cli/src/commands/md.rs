@@ -198,10 +198,37 @@ pub async fn md_ingest_csv(path: String, timeframe: String, source: String) -> R
 /// - `--symbols`: comma-separated list; must contain at least one non-empty token.
 /// - `--symbols-from-registry`: load the registry JSON, validate it, and return
 ///   all enabled equity `provider_symbol` values in deterministic alphabetical order.
+///
+/// Kept as a thin, independently-tested wrapper around
+/// [`resolve_symbols_with_provider_symbol`] for callers that only need the
+/// symbol list; both `md_ingest_provider`/`md_sync_provider` now call the
+/// `_with_provider_symbol` variant directly (MARKET-DATA-PROVIDER-PROVENANCE-01).
+#[allow(dead_code)]
 pub fn resolve_symbols(
     symbols: Option<&str>,
     symbols_from_registry: Option<&std::path::Path>,
 ) -> Result<Vec<String>> {
+    Ok(
+        resolve_symbols_with_provider_symbol(symbols, symbols_from_registry)?
+            .into_iter()
+            .map(|(sym, _provider_symbol)| sym)
+            .collect(),
+    )
+}
+
+/// Resolve the symbol list exactly like [`resolve_symbols`], but also return
+/// each symbol's provider-specific symbol mapping when it is genuinely known.
+///
+/// - `--symbols-from-registry`: the registry's authoritative `provider_symbol`
+///   per instrument is known and returned as `Some(..)`.
+/// - `--symbols`: a raw comma list carries no registry mapping, so every
+///   entry is `None` — populating a guessed `provider_symbol` here would
+///   forge provenance the caller does not actually have
+///   (MARKET-DATA-PROVIDER-PROVENANCE-01, D10: never forge provider_symbol).
+pub fn resolve_symbols_with_provider_symbol(
+    symbols: Option<&str>,
+    symbols_from_registry: Option<&std::path::Path>,
+) -> Result<Vec<(String, Option<String>)>> {
     match (symbols, symbols_from_registry) {
         (Some(_), Some(_)) => {
             anyhow::bail!(
@@ -212,11 +239,11 @@ pub fn resolve_symbols(
             anyhow::bail!("one of --symbols or --symbols-from-registry is required")
         }
         (Some(csv), None) => {
-            let syms: Vec<String> = csv
+            let syms: Vec<(String, Option<String>)> = csv
                 .split(',')
                 .map(|s| s.trim())
                 .filter(|s| !s.is_empty())
-                .map(|s| s.to_string())
+                .map(|s| (s.to_string(), None))
                 .collect();
             if syms.is_empty() {
                 anyhow::bail!("--symbols must contain at least one symbol");
@@ -228,16 +255,122 @@ pub fn resolve_symbols(
                 .with_context(|| format!("failed to load registry: {}", path.display()))?;
             mqk_md::instrument_registry::validate_registry(&instruments)
                 .with_context(|| format!("registry validation failed: {}", path.display()))?;
-            let syms = mqk_md::instrument_registry::enabled_equity_symbols(&instruments);
-            if syms.is_empty() {
+            let enabled = mqk_md::instrument_registry::enabled_equities(&instruments);
+            if enabled.is_empty() {
                 anyhow::bail!(
                     "registry at {} contains no enabled equity instruments",
                     path.display()
                 );
             }
-            Ok(syms)
+            Ok(enabled
+                .into_iter()
+                .map(|i| (i.symbol.clone(), Some(i.provider_symbol.clone())))
+                .collect())
         }
     }
+}
+
+// ---------------------------------------------------------------------------
+// Truthful per-symbol provider-metadata ingest (MARKET-DATA-PROVIDER-PROVENANCE-01)
+// ---------------------------------------------------------------------------
+
+/// Group already-sorted `(symbol ASC, end_ts ASC)` provider bars by symbol,
+/// preserving deterministic symbol-ascending order.
+fn group_bars_by_symbol(
+    bars: Vec<mqk_db::md::ProviderBar>,
+) -> Vec<(String, Vec<mqk_db::md::ProviderBar>)> {
+    let mut grouped: std::collections::BTreeMap<String, Vec<mqk_db::md::ProviderBar>> =
+        std::collections::BTreeMap::new();
+    for b in bars {
+        grouped.entry(b.symbol.clone()).or_default().push(b);
+    }
+    grouped.into_iter().collect()
+}
+
+/// Ingest provider bars into `md_bars` through the metadata-aware DB path,
+/// stamping every row with the actual selected provider (`source_lc`) instead
+/// of falling through to the metadata-less helper's `"unknown"` default.
+///
+/// Root cause (MARKET-DATA-PROVIDER-PROVENANCE-01): `MdBarProviderMetadata`
+/// carries a single `provider_symbol` applied uniformly to every row in one
+/// DB call, so a multi-symbol batch cannot honestly carry per-symbol
+/// `provider_symbol` truth through a single call. This mirrors
+/// `mqk-daemon::routes::ingest::run_real_provider_sync`'s existing
+/// per-instrument metadata-aware write pattern: bars are grouped by symbol
+/// and ingested with one call per symbol, each stamped with that symbol's own
+/// `provider_symbol` (known only when resolved via `--symbols-from-registry`;
+/// `None` for a raw `--symbols` list — never forged, per D10).
+///
+/// Returns a synthetic combined [`mqk_db::md::MdQualityReport`] (keyed under
+/// `parent_ingest_id`) for operator output / artifact purposes; the durable
+/// `md_quality_reports` truth is the one row persisted per per-symbol
+/// sub-ingest-id (deterministic UUIDv5 of `parent_ingest_id|symbol`).
+async fn ingest_provider_bars_with_truthful_provenance(
+    pool: &sqlx::PgPool,
+    parent_ingest_id: Uuid,
+    source_lc: &str,
+    timeframe: &str,
+    ingest_mode: &str,
+    provider_symbol_of: &std::collections::BTreeMap<String, Option<String>>,
+    bars: Vec<mqk_db::md::ProviderBar>,
+) -> Result<(mqk_db::md::MdQualityReport, Vec<(String, Uuid)>)> {
+    let mut combined_coverage = mqk_db::md::CoverageTotals {
+        rows_read: 0,
+        rows_ok: 0,
+        rows_rejected: 0,
+        rows_inserted: 0,
+        rows_updated: 0,
+    };
+    let mut combined_per_symbol_timeframe = std::collections::BTreeMap::new();
+    let mut sub_ingest_ids: Vec<(String, Uuid)> = Vec::new();
+
+    for (symbol, symbol_bars) in group_bars_by_symbol(bars) {
+        let symbol_ingest_id = Uuid::new_v5(
+            &Uuid::NAMESPACE_DNS,
+            format!("{}|{}", parent_ingest_id, symbol).as_bytes(),
+        );
+        sub_ingest_ids.push((symbol.clone(), symbol_ingest_id));
+        let provider_symbol = provider_symbol_of.get(&symbol).cloned().flatten();
+        let metadata = mqk_db::md::MdBarProviderMetadata {
+            provider_id: source_lc.to_string(),
+            provider_source: Some(source_lc.to_string()),
+            provider_symbol,
+            ingest_mode: Some(ingest_mode.to_string()),
+            provider_bar_id: None,
+            provider_updated_at_utc: None,
+        };
+
+        let res = mqk_db::md::ingest_provider_bars_to_md_bars_with_provider_metadata(
+            pool,
+            mqk_db::md::IngestProviderBarsArgs {
+                source: source_lc.to_string(),
+                timeframe: timeframe.to_string(),
+                ingest_id: symbol_ingest_id,
+                bars: symbol_bars,
+            },
+            metadata,
+        )
+        .await
+        .with_context(|| format!("provider-metadata ingest failed for symbol {symbol}"))?;
+
+        combined_coverage.rows_read += res.report.coverage.rows_read;
+        combined_coverage.rows_ok += res.report.coverage.rows_ok;
+        combined_coverage.rows_rejected += res.report.coverage.rows_rejected;
+        combined_coverage.rows_inserted += res.report.coverage.rows_inserted;
+        combined_coverage.rows_updated += res.report.coverage.rows_updated;
+        combined_per_symbol_timeframe.extend(res.report.per_symbol_timeframe);
+    }
+
+    Ok((
+        mqk_db::md::MdQualityReport {
+            ingest_id: parent_ingest_id,
+            source: source_lc.to_string(),
+            timeframe: timeframe.to_string(),
+            coverage: combined_coverage,
+            per_symbol_timeframe: combined_per_symbol_timeframe,
+        },
+        sub_ingest_ids,
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -275,7 +408,11 @@ pub async fn md_ingest_provider(
         );
     }
 
-    let syms = resolve_symbols(symbols.as_deref(), symbols_from_registry.as_deref())?;
+    let sym_pairs =
+        resolve_symbols_with_provider_symbol(symbols.as_deref(), symbols_from_registry.as_deref())?;
+    let syms: Vec<String> = sym_pairs.iter().map(|(s, _)| s.clone()).collect();
+    let provider_symbol_of: std::collections::BTreeMap<String, Option<String>> =
+        sym_pairs.into_iter().collect();
 
     let tf = mqk_md::Timeframe::parse(&timeframe)?;
     let start_d = NaiveDate::parse_from_str(start.trim(), "%Y-%m-%d")
@@ -375,45 +512,49 @@ pub async fn md_ingest_provider(
     let csv_path = out_dir.join("provider_bars.csv");
     write_provider_bars_csv(&csv_path, &bars)?;
 
-    // DB ingest.
+    // DB ingest: one metadata-aware call per symbol so every row carries the
+    // actual selected provider (source_lc) instead of "unknown"
+    // (MARKET-DATA-PROVIDER-PROVENANCE-01).
     let pool = mqk_db::connect_from_env().await?;
-    let res = mqk_db::md::ingest_provider_bars_to_md_bars(
+    let (report, sub_ingest_ids) = ingest_provider_bars_with_truthful_provenance(
         &pool,
-        mqk_db::md::IngestProviderBarsArgs {
-            source: source_lc.clone(),
-            timeframe: tf.as_str().to_string(),
-            ingest_id,
-            bars,
-        },
+        ingest_id,
+        &source_lc,
+        tf.as_str(),
+        "provider_ingest",
+        &provider_symbol_of,
+        bars,
     )
     .await?;
 
     // Write quality report artifact.
     let report_path = out_dir.join("data_quality.json");
-    let report_json = serde_json::to_string_pretty(&res.report).context("serialize report")?;
+    let report_json = serde_json::to_string_pretty(&report).context("serialize report")?;
     fs::write(&report_path, report_json)
         .with_context(|| format!("write {} failed", report_path.display()))?;
 
     // Operator output.
-    println!("ingest_id={}", res.ingest_id);
+    println!("ingest_id={}", ingest_id);
     println!("source={}", source_lc);
     println!("timeframe={}", tf.as_str());
     println!("symbols={}", syms.join(","));
     println!("chunks={}", chunks.len());
     println!(
         "rows_read={} rows_ok={} rejected={} inserted={} updated={}",
-        res.report.coverage.rows_read,
-        res.report.coverage.rows_ok,
-        res.report.coverage.rows_rejected,
-        res.report.coverage.rows_inserted,
-        res.report.coverage.rows_updated
+        report.coverage.rows_read,
+        report.coverage.rows_ok,
+        report.coverage.rows_rejected,
+        report.coverage.rows_inserted,
+        report.coverage.rows_updated
     );
     println!("csv_artifact={}", csv_path.display());
     println!("artifact={}", report_path.display());
-    println!(
-        "sql=select ingest_id, created_at, stats_json from md_quality_reports where ingest_id='{}';",
-        res.ingest_id
-    );
+    for (symbol, sub_ingest_id) in &sub_ingest_ids {
+        println!(
+            "sql=select ingest_id, created_at, stats_json from md_quality_reports where ingest_id='{}'; -- symbol={}",
+            sub_ingest_id, symbol
+        );
+    }
 
     Ok(())
 }
@@ -428,8 +569,12 @@ pub async fn md_ingest_provider(
 /// - No bars exist → `--full-start` is required; the full date range is fetched.
 /// - Bars exist → effective start = latest bar date − overlap window; only new bars are fetched.
 ///
-/// All per-symbol bars are batched into a single `ingest_provider_bars_to_md_bars` call so the
-/// quality report and DB upsert are atomic at the ingest level.
+/// Bars are ingested one metadata-aware DB call per symbol (see
+/// `ingest_provider_bars_with_truthful_provenance`) so every row carries the
+/// actual selected provider (`--source`) and, when resolved via
+/// `--symbols-from-registry`, that symbol's real `provider_symbol` — instead
+/// of falling through to the metadata-less helper's `"unknown"` default
+/// (MARKET-DATA-PROVIDER-PROVENANCE-01).
 ///
 /// Wall clock (`Utc::now()`) is used only here, in this operator command, to default `--end`.
 /// No wall-clock use is introduced in deterministic src/ paths.
@@ -450,7 +595,11 @@ pub async fn md_sync_provider(
         );
     }
 
-    let syms = resolve_symbols(symbols.as_deref(), symbols_from_registry.as_deref())?;
+    let sym_pairs =
+        resolve_symbols_with_provider_symbol(symbols.as_deref(), symbols_from_registry.as_deref())?;
+    let syms: Vec<String> = sym_pairs.iter().map(|(s, _)| s.clone()).collect();
+    let provider_symbol_of: std::collections::BTreeMap<String, Option<String>> =
+        sym_pairs.into_iter().collect();
 
     let tf = mqk_md::Timeframe::parse(&timeframe)?;
 
@@ -579,30 +728,33 @@ pub async fn md_sync_provider(
         })
         .collect();
 
-    // --- Ingest all bars in one atomic quality-report pass ---
-    let res = mqk_db::md::ingest_provider_bars_to_md_bars(
+    // --- Ingest: one metadata-aware DB call per symbol so every row carries
+    // the actual selected provider (source_lc), and, when known via
+    // --symbols-from-registry, that symbol's real provider_symbol
+    // (MARKET-DATA-PROVIDER-PROVENANCE-01). ---
+    let (report, sub_ingest_ids) = ingest_provider_bars_with_truthful_provenance(
         &pool,
-        mqk_db::md::IngestProviderBarsArgs {
-            source: source_lc.clone(),
-            timeframe: tf.as_str().to_string(),
-            ingest_id,
-            bars: all_bars,
-        },
+        ingest_id,
+        &source_lc,
+        tf.as_str(),
+        "provider_sync",
+        &provider_symbol_of,
+        all_bars,
     )
     .await?;
 
     // --- Write quality report artifact ---
-    let out_dir = Path::new("../exports/md_ingest").join(res.ingest_id.to_string());
+    let out_dir = Path::new("../exports/md_ingest").join(ingest_id.to_string());
     fs::create_dir_all(&out_dir)
         .with_context(|| format!("failed to create {}", out_dir.display()))?;
     let report_path = out_dir.join("data_quality.json");
-    let report_json = serde_json::to_string_pretty(&res.report).context("serialize report")?;
+    let report_json = serde_json::to_string_pretty(&report).context("serialize report")?;
     fs::write(&report_path, report_json)
         .with_context(|| format!("write {} failed", report_path.display()))?;
 
     // --- Operator-visible output ---
     println!("mode=sync-provider");
-    println!("ingest_id={}", res.ingest_id);
+    println!("ingest_id={}", ingest_id);
     println!("source={}", source_lc);
     println!("timeframe={}", tf.as_str());
     for (sym, effective_start) in &sym_start_pairs {
@@ -610,17 +762,19 @@ pub async fn md_sync_provider(
     }
     println!(
         "rows_read={} rows_ok={} rejected={} inserted={} updated={}",
-        res.report.coverage.rows_read,
-        res.report.coverage.rows_ok,
-        res.report.coverage.rows_rejected,
-        res.report.coverage.rows_inserted,
-        res.report.coverage.rows_updated
+        report.coverage.rows_read,
+        report.coverage.rows_ok,
+        report.coverage.rows_rejected,
+        report.coverage.rows_inserted,
+        report.coverage.rows_updated
     );
     println!("artifact={}", report_path.display());
-    println!(
-        "sql=select ingest_id, created_at, stats_json from md_quality_reports where ingest_id='{}';",
-        res.ingest_id
-    );
+    for (symbol, sub_ingest_id) in &sub_ingest_ids {
+        println!(
+            "sql=select ingest_id, created_at, stats_json from md_quality_reports where ingest_id='{}'; -- symbol={}",
+            sub_ingest_id, symbol
+        );
+    }
 
     Ok(())
 }
@@ -3213,6 +3367,257 @@ mod tests {
             msg.contains("failed to load registry"),
             "error must mention 'failed to load registry': {msg}"
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // resolve_symbols_with_provider_symbol / group_bars_by_symbol —
+    // MARKET-DATA-PROVIDER-PROVENANCE-01
+    // -----------------------------------------------------------------------
+
+    // PP-01: --symbols (raw list) has no registry mapping, so provider_symbol
+    // must be None for every entry — never forged (D10).
+    #[test]
+    fn pp_01_raw_symbols_have_no_provider_symbol_mapping() {
+        let pairs = resolve_symbols_with_provider_symbol(Some("AAPL,SPY"), None).unwrap();
+        assert_eq!(
+            pairs,
+            vec![
+                ("AAPL".to_string(), None),
+                ("SPY".to_string(), None),
+            ]
+        );
+    }
+
+    // PP-02: --symbols-from-registry carries the registry's real
+    // provider_symbol for each resolved instrument (equities: identical to
+    // the canonical symbol in this registry, e.g. AAPL -> "AAPL").
+    #[test]
+    fn pp_02_registry_symbols_carry_real_provider_symbol() {
+        let path = canonical_registry_path();
+        let pairs = resolve_symbols_with_provider_symbol(None, Some(&path)).unwrap();
+        let aapl = pairs
+            .iter()
+            .find(|(sym, _)| sym == "AAPL")
+            .expect("AAPL must be present");
+        assert_eq!(aapl.1.as_deref(), Some("AAPL"));
+    }
+
+    // PP-03: resolve_symbols (the plain symbol-list wrapper) is unaffected —
+    // still returns just the symbol strings, same as before this patch.
+    #[test]
+    fn pp_03_resolve_symbols_wrapper_unchanged() {
+        let plain = resolve_symbols(Some("AAPL,SPY"), None).unwrap();
+        let via_pairs: Vec<String> = resolve_symbols_with_provider_symbol(Some("AAPL,SPY"), None)
+            .unwrap()
+            .into_iter()
+            .map(|(s, _)| s)
+            .collect();
+        assert_eq!(plain, via_pairs);
+    }
+
+    fn provider_bar(symbol: &str, end_ts: i64) -> mqk_db::md::ProviderBar {
+        mqk_db::md::ProviderBar {
+            symbol: symbol.to_string(),
+            timeframe: "5m".to_string(),
+            end_ts,
+            open: "1".to_string(),
+            high: "1".to_string(),
+            low: "1".to_string(),
+            close: "1".to_string(),
+            volume: 1,
+            is_complete: true,
+        }
+    }
+
+    // PP-04: group_bars_by_symbol splits a multi-symbol batch into
+    // per-symbol groups in deterministic symbol-ascending order, preserving
+    // each row.
+    #[test]
+    fn pp_04_group_bars_by_symbol_splits_deterministically() {
+        let bars = vec![
+            provider_bar("SPY", 100),
+            provider_bar("AAPL", 100),
+            provider_bar("AAPL", 200),
+        ];
+        let grouped = group_bars_by_symbol(bars);
+        assert_eq!(grouped.len(), 2, "two distinct symbols");
+        assert_eq!(grouped[0].0, "AAPL", "AAPL sorts before SPY");
+        assert_eq!(grouped[0].1.len(), 2);
+        assert_eq!(grouped[1].0, "SPY");
+        assert_eq!(grouped[1].1.len(), 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // ingest_provider_bars_with_truthful_provenance — DB-backed proof,
+    // MARKET-DATA-PROVIDER-PROVENANCE-01
+    // -----------------------------------------------------------------------
+    //
+    // Proves the exact function `md_ingest_provider`/`md_sync_provider` now
+    // call persists a truthful `provider_id` (never falling through to the
+    // metadata-less helper's `"unknown"` default), for both supported
+    // sources, and never forges `provider_symbol` for symbols with no
+    // registry mapping. DB-backed, gated on MQK_DATABASE_URL, matching
+    // `mqk-db/tests/scenario_md_ingest_provider.rs`'s convention. Run with:
+    // `MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-cli --bin mqk-cli -- --include-ignored`
+
+    async fn db_pool() -> Result<sqlx::PgPool> {
+        match std::env::var(mqk_db::ENV_DB_URL) {
+            Ok(_) => mqk_db::testkit_db_pool().await,
+            Err(_) => anyhow::bail!(
+                "DB tests require MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-cli --bin mqk-cli -- --include-ignored"
+            ),
+        }
+    }
+
+    async fn fetch_provenance_row(
+        pool: &sqlx::PgPool,
+        symbol: &str,
+        end_ts: i64,
+    ) -> (String, Option<String>, Option<String>, Option<String>) {
+        sqlx::query_as(
+            r#"
+            select provider_id, provider_source, provider_symbol, ingest_mode
+            from md_bars
+            where symbol = $1 and timeframe = '5m' and end_ts = $2
+            "#,
+        )
+        .bind(symbol)
+        .bind(end_ts)
+        .fetch_one(pool)
+        .await
+        .expect("row must exist")
+    }
+
+    // DBP-01: source=alpaca -> durable provider_id=alpaca (root-cause proof:
+    // BEFORE this patch this landed as "unknown" via the metadata-less
+    // helper regardless of --source).
+    #[tokio::test]
+    #[ignore = "requires MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-cli --bin mqk-cli -- --include-ignored"]
+    async fn dbp_01_alpaca_source_persists_truthful_provider_id() {
+        let pool = db_pool().await.unwrap();
+        let symbol = "ZZDBP01ALPACA";
+        sqlx::query("delete from md_bars where symbol = $1")
+            .bind(symbol)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let mut provider_symbol_of = std::collections::BTreeMap::new();
+        provider_symbol_of.insert(symbol.to_string(), Some(symbol.to_string()));
+
+        // D1-5: deterministic UUIDv5, not new_v4, even in test fixtures.
+        let ingest_id = Uuid::new_v5(&Uuid::NAMESPACE_DNS, symbol.as_bytes());
+        ingest_provider_bars_with_truthful_provenance(
+            &pool,
+            ingest_id,
+            "alpaca",
+            "5m",
+            "provider_sync",
+            &provider_symbol_of,
+            vec![provider_bar(symbol, 1_708_041_600)],
+        )
+        .await
+        .unwrap();
+
+        let row = fetch_provenance_row(&pool, symbol, 1_708_041_600).await;
+        assert_eq!(row.0, "alpaca", "provider_id must be the truthful source, never unknown");
+        assert_eq!(row.1.as_deref(), Some("alpaca"));
+        assert_eq!(row.2.as_deref(), Some(symbol));
+        assert_eq!(row.3.as_deref(), Some("provider_sync"));
+
+        sqlx::query("delete from md_bars where symbol = $1")
+            .bind(symbol)
+            .execute(&pool)
+            .await
+            .ok();
+    }
+
+    // DBP-02: source=twelvedata -> durable provider_id=twelvedata (proves
+    // the fix is source-driven, not hardcoded to alpaca).
+    #[tokio::test]
+    #[ignore = "requires MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-cli --bin mqk-cli -- --include-ignored"]
+    async fn dbp_02_twelvedata_source_persists_truthful_provider_id() {
+        let pool = db_pool().await.unwrap();
+        let symbol = "ZZDBP02TWELVEDATA";
+        sqlx::query("delete from md_bars where symbol = $1")
+            .bind(symbol)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        let mut provider_symbol_of = std::collections::BTreeMap::new();
+        provider_symbol_of.insert(symbol.to_string(), Some(symbol.to_string()));
+
+        // D1-5: deterministic UUIDv5, not new_v4, even in test fixtures.
+        let ingest_id = Uuid::new_v5(&Uuid::NAMESPACE_DNS, symbol.as_bytes());
+        ingest_provider_bars_with_truthful_provenance(
+            &pool,
+            ingest_id,
+            "twelvedata",
+            "5m",
+            "provider_ingest",
+            &provider_symbol_of,
+            vec![provider_bar(symbol, 1_708_041_600)],
+        )
+        .await
+        .unwrap();
+
+        let row = fetch_provenance_row(&pool, symbol, 1_708_041_600).await;
+        assert_eq!(row.0, "twelvedata");
+        assert_eq!(row.1.as_deref(), Some("twelvedata"));
+        assert_eq!(row.2.as_deref(), Some(symbol));
+        assert_eq!(row.3.as_deref(), Some("provider_ingest"));
+
+        sqlx::query("delete from md_bars where symbol = $1")
+            .bind(symbol)
+            .execute(&pool)
+            .await
+            .ok();
+    }
+
+    // DBP-03: a symbol with no registry mapping (raw --symbols list; absent
+    // from provider_symbol_of) persists provider_symbol=NULL — never forged
+    // — while provider_id/provider_source/ingest_mode stay truthful. This is
+    // the D10 boundary: provider_id is always known and fixed by this patch;
+    // provider_symbol is only ever populated when genuinely known.
+    #[tokio::test]
+    #[ignore = "requires MQK_DATABASE_URL; run: MQK_DATABASE_URL=postgres://user:pass@localhost/mqk_test cargo test -p mqk-cli --bin mqk-cli -- --include-ignored"]
+    async fn dbp_03_unmapped_symbol_never_forges_provider_symbol() {
+        let pool = db_pool().await.unwrap();
+        let symbol = "ZZDBP03NOMAP";
+        sqlx::query("delete from md_bars where symbol = $1")
+            .bind(symbol)
+            .execute(&pool)
+            .await
+            .unwrap();
+
+        // Empty map: mirrors a raw `--symbols` invocation with no registry lookup.
+        let provider_symbol_of = std::collections::BTreeMap::new();
+
+        // D1-5: deterministic UUIDv5, not new_v4, even in test fixtures.
+        let ingest_id = Uuid::new_v5(&Uuid::NAMESPACE_DNS, symbol.as_bytes());
+        ingest_provider_bars_with_truthful_provenance(
+            &pool,
+            ingest_id,
+            "alpaca",
+            "5m",
+            "provider_ingest",
+            &provider_symbol_of,
+            vec![provider_bar(symbol, 1_708_041_600)],
+        )
+        .await
+        .unwrap();
+
+        let row = fetch_provenance_row(&pool, symbol, 1_708_041_600).await;
+        assert_eq!(row.0, "alpaca", "provider_id is still truthful");
+        assert_eq!(row.1.as_deref(), Some("alpaca"));
+        assert_eq!(row.2, None, "provider_symbol must never be forged when unknown");
+
+        sqlx::query("delete from md_bars where symbol = $1")
+            .bind(symbol)
+            .execute(&pool)
+            .await
+            .ok();
     }
 
     // -----------------------------------------------------------------------
