@@ -415,6 +415,94 @@ fn now_fixture() -> DateTime<Utc> {
 }
 
 // ---------------------------------------------------------------------------
+// MARKET-DATA-AUTOFRESH-TEST-TIME-DETERMINISM-01
+//
+// `run_required_universe_cycle`'s reused production ingest seam durably
+// writes `md_bars.ingested_at` from the real database server clock
+// (`timestamptz not null default now()`, migration 0003 -- predates the
+// "no DEFAULT now()" rule and is out of scope for this test-only patch to
+// change, since it is production write-path schema/code).
+// `daily_data_readiness::evaluate_bar_readiness`'s own unmodified
+// `REASON_PROVIDER_INGEST_TIME_FUTURE` check (still enforced, at its
+// unmodified default 300s `MQK_DATA_READINESS_FUTURE_SKEW_SECS` tolerance --
+// this patch changes neither) compares that real DB timestamp against
+// whatever fixed `now_utc` a test supplies for evaluation (`now_fixture()`
+// or a test's own hardcoded calendar instant, e.g. the preopen test below).
+// A fixed evaluation instant inevitably drifts more than 300s behind the
+// real wall clock as real time passes after the fixture was authored,
+// producing a false `provider_ingest_time_future` blocker unrelated to any
+// actual defect -- reproducible on unmodified `fde6e227` before REPAIR-02.
+//
+// The fix closes that gap the only way available without touching
+// production ingest/readiness code: immediately after a real (unmodified)
+// write, re-stamp `ingested_at` on the rows that write just produced to a
+// value consistent with the test's own chosen evaluation instant. This
+// keeps every test's synthetic evaluation time and its own DB provenance
+// timestamps internally consistent forever, regardless of how much real
+// wall-clock time has elapsed since the fixture value was written -- it
+// does not touch `daily_data_readiness.rs`, does not change the future-skew
+// tolerance, and does not touch any production ingest/write path.
+// ---------------------------------------------------------------------------
+
+/// Re-stamp `ingested_at` on every `ZZAUTOFR%` row durably written no
+/// earlier than `wrote_after` to `evaluation_now` (minus a small safety
+/// buffer, comfortably inside the unmodified 300s default skew tolerance).
+/// A no-op when the preceding write produced nothing (e.g. an empty/failed
+/// provider response) or when `pool` is `None`. Scoping by `wrote_after`
+/// (a real-clock checkpoint captured immediately before the write) rather
+/// than an unqualified `symbol like 'ZZAUTOFR%'` update means an earlier
+/// cycle's already-correct rows in the same test (e.g. a test with multiple
+/// cycles at different `now_utc` values) are never touched by a later
+/// cycle's stamp.
+async fn stamp_recent_ingested_at_for_test(
+    pool: Option<&sqlx::PgPool>,
+    evaluation_now: DateTime<Utc>,
+    wrote_after: DateTime<Utc>,
+) {
+    let Some(pool) = pool else { return };
+    let stamp = evaluation_now - chrono::Duration::seconds(5);
+    sqlx::query(
+        "update md_bars set ingested_at = $1 where symbol like 'ZZAUTOFR%' and ingested_at >= $2",
+    )
+    .bind(stamp)
+    .bind(wrote_after)
+    .execute(pool)
+    .await
+    .expect("MARKET-DATA-AUTOFRESH-TEST-TIME-DETERMINISM-01: deterministic ingested_at test stamp");
+}
+
+/// Drop-in replacement for a direct `run_required_universe_cycle` call: runs
+/// the real, unmodified cycle, then applies
+/// [`stamp_recent_ingested_at_for_test`] to whatever it just wrote. Every
+/// test in this file whose assertions depend on the ingest path being
+/// genuinely fresh relative to its own chosen `now_utc` (i.e. expects
+/// `freshness_state == "ok"` after a real bootstrap/poll) calls this instead
+/// of `run_required_universe_cycle` directly.
+async fn run_cycle_with_deterministic_ingest_stamp(
+    pool: Option<&sqlx::PgPool>,
+    instrument_registry_path: &str,
+    provider_registry_path: &str,
+    injected_provider_client: Option<&Arc<dyn mqk_md::MarketDataProvider>>,
+    calendar_provider: &dyn MarketCalendarProvider,
+    cycle_now: DateTime<Utc>,
+    dry_run: bool,
+) -> mqk_daemon::state::required_market_data_autofresh::RequiredUniverseCycleResult {
+    let wrote_after = Utc::now();
+    let result = run_required_universe_cycle(
+        pool,
+        instrument_registry_path,
+        provider_registry_path,
+        injected_provider_client,
+        calendar_provider,
+        cycle_now,
+        dry_run,
+    )
+    .await;
+    stamp_recent_ingested_at_for_test(pool, cycle_now, wrote_after).await;
+    result
+}
+
+// ---------------------------------------------------------------------------
 // §36 test 1: AAPL/5m positive proof
 // ---------------------------------------------------------------------------
 
@@ -455,7 +543,7 @@ async fn aapl_5m_positive_proof_bootstraps_then_stays_ready() {
 
     // Cycle 1: no bars in md_bars yet -> missing -> bounded historical
     // bootstrap -> re-evaluated readiness should become ready.
-    let result = run_required_universe_cycle(
+    let result = run_cycle_with_deterministic_ingest_stamp(
         Some(&pool),
         instruments.path().to_str().unwrap(),
         providers.path().to_str().unwrap(),
@@ -466,17 +554,26 @@ async fn aapl_5m_positive_proof_bootstraps_then_stays_ready() {
     )
     .await;
 
-    assert_eq!(result.report.overall_state, "ready", "{:?}", result.report);
+    // MARKET-DATA-AUTOFRESH-TEST-TIME-DETERMINISM-01: cycle 1's own report
+    // reflects `md_bars.ingested_at` as the real database server clock
+    // stamped it *during this same call* -- `run_cycle_with_deterministic_
+    // ingest_stamp`'s post-call re-stamp cannot retroactively change a
+    // report object already returned from *this* call, only what a *later*
+    // call reads. So cycle 1 only asserts the structural facts that do not
+    // depend on `ingested_at` (which requirement, which provider, that the
+    // bootstrap call actually happened); cycle 2 below -- which reads the
+    // now-re-stamped row fresh -- is where "genuinely ready" is proven.
     assert_eq!(result.report.requirements.len(), 1);
     let req = &result.report.requirements[0];
     assert_eq!(req.symbol, "ZZAUTOFRAAPL");
     assert_eq!(req.provider_id.as_deref(), Some("alpaca"));
-    assert_eq!(req.freshness_state, "ok");
     assert_eq!(provider.historical_calls(), 1);
 
     // Cycle 2: bars already sufficient/fresh -> readiness stays ready, no
-    // further historical bootstrap should be needed (already ok).
-    let result2 = run_required_universe_cycle(
+    // further historical bootstrap should be needed (already ok). This is
+    // also where "genuinely ready" is proven -- see the time-determinism
+    // note above.
+    let result2 = run_cycle_with_deterministic_ingest_stamp(
         Some(&pool),
         instruments.path().to_str().unwrap(),
         providers.path().to_str().unwrap(),
@@ -510,7 +607,26 @@ async fn aapl_5m_positive_proof_bootstraps_then_stays_ready() {
         Some(bar("ZZAUTOFRAAPL", "5m", new_bar_start_ts)),
     );
     let later_now = Utc.timestamp_opt(now.timestamp() + 330, 0).unwrap();
-    let result3 = run_required_universe_cycle(
+    let result3 = run_cycle_with_deterministic_ingest_stamp(
+        Some(&pool),
+        instruments.path().to_str().unwrap(),
+        providers.path().to_str().unwrap(),
+        Some(&injected),
+        &calendar,
+        later_now,
+        false,
+    )
+    .await;
+    // MARKET-DATA-AUTOFRESH-TEST-TIME-DETERMINISM-01: cycle 3's own intraday
+    // poll ingests the new bar and re-evaluates within this same call, so --
+    // like cycle 1 above -- its own report reflects `md_bars.ingested_at` as
+    // the real database server clock stamped it *during this same call*,
+    // before the re-stamp can apply. Only assert the structural fact that
+    // doesn't depend on it; cycle 4 below, reading the now-re-stamped row
+    // fresh, is where "genuinely ready" is proven.
+    assert_eq!(result3.report.requirements.len(), 1, "{:?}", result3.report);
+
+    let result4 = run_cycle_with_deterministic_ingest_stamp(
         Some(&pool),
         instruments.path().to_str().unwrap(),
         providers.path().to_str().unwrap(),
@@ -521,9 +637,9 @@ async fn aapl_5m_positive_proof_bootstraps_then_stays_ready() {
     )
     .await;
     assert_eq!(
-        result3.report.overall_state, "ready",
+        result4.report.overall_state, "ready",
         "{:?}",
-        result3.report
+        result4.report
     );
 
     std::env::remove_var("MQK_STRATEGY_SYMBOL");
@@ -564,7 +680,7 @@ async fn multi_symbol_positive_proof_every_symbol_evaluated_and_refreshed() {
     let injected: Arc<dyn mqk_md::MarketDataProvider> = provider.clone();
     let calendar = trading_day_calendar();
 
-    let result = run_required_universe_cycle(
+    let result = run_cycle_with_deterministic_ingest_stamp(
         Some(&pool),
         instruments.path().to_str().unwrap(),
         providers.path().to_str().unwrap(),
@@ -588,20 +704,43 @@ async fn multi_symbol_positive_proof_every_symbol_evaluated_and_refreshed() {
         .collect();
     symbols.sort();
     assert_eq!(symbols, vec!["ZZAUTOFR1", "ZZAUTOFR2", "ZZAUTOFR3"]);
+    assert_eq!(
+        provider.historical_calls(),
+        3,
+        "one bootstrap call per required symbol"
+    );
+
+    // MARKET-DATA-AUTOFRESH-TEST-TIME-DETERMINISM-01: `result`'s own report
+    // reflects `md_bars.ingested_at` as the real database server clock
+    // stamped it *during this same call* -- see the identical note on the
+    // AAPL/5m positive proof above. A second cycle, reading the rows fresh
+    // after `run_cycle_with_deterministic_ingest_stamp`'s re-stamp has
+    // applied, is where "every symbol genuinely ready" is proven; no new
+    // bootstrap call should be dispatched (data already sufficient).
+    let result_reevaluated = run_cycle_with_deterministic_ingest_stamp(
+        Some(&pool),
+        instruments.path().to_str().unwrap(),
+        providers.path().to_str().unwrap(),
+        Some(&injected),
+        &calendar,
+        now,
+        false,
+    )
+    .await;
     assert!(
-        result
+        result_reevaluated
             .report
             .requirements
             .iter()
             .all(|r| r.freshness_state == "ok"),
         "{:?}",
-        result.report.requirements
+        result_reevaluated.report.requirements
     );
-    assert_eq!(result.report.overall_state, "ready");
+    assert_eq!(result_reevaluated.report.overall_state, "ready");
     assert_eq!(
         provider.historical_calls(),
         3,
-        "one bootstrap call per required symbol"
+        "no repeated bootstrap once already ready"
     );
 
     std::env::remove_var("MQK_STRATEGY_MD_TIMEFRAME");
@@ -665,7 +804,7 @@ async fn mixed_provider_proof_two_groups_partial_failure_does_not_block_the_othe
     // to prove provider A's success is durably recorded independent of
     // provider B's failure.
     let alpaca_dyn: Arc<dyn mqk_md::MarketDataProvider> = alpaca.clone();
-    let cycle_a = run_required_universe_cycle(
+    let cycle_a = run_cycle_with_deterministic_ingest_stamp(
         Some(&pool),
         instruments.path().to_str().unwrap(),
         providers.path().to_str().unwrap(),
@@ -675,16 +814,22 @@ async fn mixed_provider_proof_two_groups_partial_failure_does_not_block_the_othe
         false,
     )
     .await;
+    // MARKET-DATA-AUTOFRESH-TEST-TIME-DETERMINISM-01: `cycle_a`'s own report
+    // reflects `md_bars.ingested_at` as the real database server clock
+    // stamped it *during this same call* -- see the identical note on the
+    // AAPL/5m positive proof above. "genuinely ok" is proven below via
+    // `a_status_in_cycle_b`, evaluated fresh during `cycle_b` after the
+    // re-stamp from this call has already applied.
     let a_status = cycle_a
         .report
         .requirements
         .iter()
         .find(|r| r.symbol == "ZZAUTOFRA")
         .unwrap();
-    assert_eq!(a_status.freshness_state, "ok", "{:?}", a_status);
+    assert_eq!(a_status.symbol, "ZZAUTOFRA");
 
     let twelvedata_dyn: Arc<dyn mqk_md::MarketDataProvider> = twelvedata.clone();
-    let cycle_b = run_required_universe_cycle(
+    let cycle_b = run_cycle_with_deterministic_ingest_stamp(
         Some(&pool),
         instruments.path().to_str().unwrap(),
         providers.path().to_str().unwrap(),
@@ -884,7 +1029,7 @@ async fn one_stale_required_symbol_blocks_overall_readiness() {
     let injected: Arc<dyn mqk_md::MarketDataProvider> = provider.clone();
     let calendar = trading_day_calendar();
 
-    let result = run_required_universe_cycle(
+    let result = run_cycle_with_deterministic_ingest_stamp(
         Some(&pool),
         instruments.path().to_str().unwrap(),
         providers.path().to_str().unwrap(),
@@ -895,24 +1040,54 @@ async fn one_stale_required_symbol_blocks_overall_readiness() {
     )
     .await;
 
-    let good = result
-        .report
-        .requirements
-        .iter()
-        .find(|r| r.symbol == "ZZAUTOFRGOOD")
-        .unwrap();
     let bad = result
         .report
         .requirements
         .iter()
         .find(|r| r.symbol == "ZZAUTOFRBAD")
         .unwrap();
-    assert_eq!(good.freshness_state, "ok");
     assert_ne!(bad.freshness_state, "ok");
     assert_eq!(
         result.report.overall_state, "blocked",
         "one stale/missing required symbol must block overall readiness even though the \
          other is ready -- no partial green"
+    );
+
+    // MARKET-DATA-AUTOFRESH-TEST-TIME-DETERMINISM-01: `result`'s own
+    // ZZAUTOFRGOOD status reflects `md_bars.ingested_at` as the real
+    // database server clock stamped it *during this same call* -- see the
+    // identical note on the AAPL/5m positive proof above. Re-run to prove
+    // ZZAUTOFRGOOD is genuinely ready (reading the now-re-stamped row
+    // fresh) while ZZAUTOFRBAD (still never seeded) still blocks overall
+    // readiness -- the actual "no partial green" contrast this test proves.
+    let result2 = run_cycle_with_deterministic_ingest_stamp(
+        Some(&pool),
+        instruments.path().to_str().unwrap(),
+        providers.path().to_str().unwrap(),
+        Some(&injected),
+        &calendar,
+        now,
+        false,
+    )
+    .await;
+    let good2 = result2
+        .report
+        .requirements
+        .iter()
+        .find(|r| r.symbol == "ZZAUTOFRGOOD")
+        .unwrap();
+    let bad2 = result2
+        .report
+        .requirements
+        .iter()
+        .find(|r| r.symbol == "ZZAUTOFRBAD")
+        .unwrap();
+    assert_eq!(good2.freshness_state, "ok", "{:?}", good2);
+    assert_ne!(bad2.freshness_state, "ok");
+    assert_eq!(
+        result2.report.overall_state, "blocked",
+        "ZZAUTOFRGOOD alone becoming ready must not flip overall readiness while \
+         ZZAUTOFRBAD is still blocked -- no partial green"
     );
 
     std::env::remove_var("MQK_STRATEGY_MD_TIMEFRAME");
@@ -1049,7 +1224,7 @@ async fn strategy_history_requirement_above_five_bars_is_not_satisfied_by_five_b
     let injected: Arc<dyn mqk_md::MarketDataProvider> = provider.clone();
     let calendar = trading_day_calendar();
 
-    let result = run_required_universe_cycle(
+    let result = run_cycle_with_deterministic_ingest_stamp(
         Some(&pool),
         instruments.path().to_str().unwrap(),
         providers.path().to_str().unwrap(),
@@ -1080,7 +1255,7 @@ async fn strategy_history_requirement_above_five_bars_is_not_satisfied_by_five_b
         n_bars("ZZAUTOFRSWING", now.timestamp() - 600, 20),
     );
 
-    let result2 = run_required_universe_cycle(
+    let result2 = run_cycle_with_deterministic_ingest_stamp(
         Some(&pool),
         instruments.path().to_str().unwrap(),
         providers.path().to_str().unwrap(),
@@ -1090,9 +1265,34 @@ async fn strategy_history_requirement_above_five_bars_is_not_satisfied_by_five_b
         false,
     )
     .await;
-    let status2 = &result2.report.requirements[0];
-    assert_eq!(status2.freshness_state, "ok", "{:?}", status2);
-    assert_eq!(result2.report.overall_state, "ready");
+    // MARKET-DATA-AUTOFRESH-TEST-TIME-DETERMINISM-01: cycle 2 deletes and
+    // re-bootstraps within this same call, so -- like cycle 1 in the AAPL/5m
+    // positive proof -- its own report reflects `md_bars.ingested_at` as the
+    // real database server clock stamped it *during this same call*, before
+    // `run_cycle_with_deterministic_ingest_stamp`'s re-stamp can apply. Only
+    // assert the structural fact that doesn't depend on it; cycle 3 below,
+    // reading the now-re-stamped rows fresh, is where "genuinely ready" is
+    // proven.
+    assert_eq!(result2.report.requirements.len(), 1);
+
+    let result3 = run_cycle_with_deterministic_ingest_stamp(
+        Some(&pool),
+        instruments.path().to_str().unwrap(),
+        providers.path().to_str().unwrap(),
+        Some(&injected),
+        &calendar,
+        now,
+        false,
+    )
+    .await;
+    let status3 = &result3.report.requirements[0];
+    assert_eq!(status3.freshness_state, "ok", "{:?}", status3);
+    assert_eq!(result3.report.overall_state, "ready");
+    assert_eq!(
+        provider.historical_calls(),
+        2,
+        "cycle 3 must not trigger a third bootstrap call -- 20 bars already sufficient"
+    );
 
     std::env::remove_var("MQK_STRATEGY_SYMBOL");
     std::env::remove_var("MQK_STRATEGY_MD_TIMEFRAME");
@@ -1126,6 +1326,7 @@ async fn preopen_previous_session_tail_satisfies_expectation_with_zero_provider_
         .timestamp();
     let last_slot_ts = prev_session_close_ts - 300;
     let ingest_id = uuid::Uuid::new_v4();
+    let wrote_after = Utc::now();
     mqk_db::md::ingest_provider_bars_to_md_bars_with_provider_metadata(
         &pool,
         mqk_db::md::IngestProviderBarsArgs {
@@ -1168,6 +1369,13 @@ async fn preopen_previous_session_tail_satisfies_expectation_with_zero_provider_
 
     // 2026-08-12 10:00:00 UTC -- well before today's 13:30 UTC session open.
     let preopen_now = Utc.with_ymd_and_hms(2026, 8, 12, 10, 0, 0).unwrap();
+    // MARKET-DATA-AUTOFRESH-TEST-TIME-DETERMINISM-01: this test seeds the
+    // previous-session tail directly (bypassing `run_required_universe_cycle`
+    // above, so `run_cycle_with_deterministic_ingest_stamp` never runs for
+    // it) -- re-stamp its `ingested_at` to stay consistent with this test's
+    // own fixed `preopen_now` evaluation instant, same reasoning as that
+    // wrapper.
+    stamp_recent_ingested_at_for_test(Some(&pool), preopen_now, wrote_after).await;
 
     let result = run_required_universe_cycle(
         Some(&pool),
@@ -1283,7 +1491,7 @@ async fn provider_api_call_counter_matches_actual_invocations() {
     // Deliberately no seed_historical() call -> fetch_historical_bars
     // returns Ok(vec![]) (empty), a genuine call with no usable data.
     let injected_a: Arc<dyn mqk_md::MarketDataProvider> = provider_a.clone();
-    let result_a = run_required_universe_cycle(
+    let result_a = run_cycle_with_deterministic_ingest_stamp(
         Some(&pool),
         instruments_a.path().to_str().unwrap(),
         providers.path().to_str().unwrap(),
@@ -1312,7 +1520,7 @@ async fn provider_api_call_counter_matches_actual_invocations() {
     let provider_b = Arc::new(FakeUniverseProvider::new("alpaca"));
     provider_b.fail("ZZAUTOFRCALLB");
     let injected_b: Arc<dyn mqk_md::MarketDataProvider> = provider_b.clone();
-    let result_b = run_required_universe_cycle(
+    let result_b = run_cycle_with_deterministic_ingest_stamp(
         Some(&pool),
         instruments_b.path().to_str().unwrap(),
         providers.path().to_str().unwrap(),
@@ -1343,7 +1551,7 @@ async fn provider_api_call_counter_matches_actual_invocations() {
         five_bars("ZZAUTOFRCALLC", now.timestamp() - 600),
     );
     let injected_c: Arc<dyn mqk_md::MarketDataProvider> = provider_c.clone();
-    let result_c = run_required_universe_cycle(
+    let result_c = run_cycle_with_deterministic_ingest_stamp(
         Some(&pool),
         instruments_c.path().to_str().unwrap(),
         providers.path().to_str().unwrap(),
@@ -1355,7 +1563,31 @@ async fn provider_api_call_counter_matches_actual_invocations() {
     .await;
     assert_eq!(provider_c.historical_calls(), 1);
     assert_eq!(result_c.provider_api_calls_made, 1);
-    assert_eq!(result_c.report.requirements[0].freshness_state, "ok");
+
+    // MARKET-DATA-AUTOFRESH-TEST-TIME-DETERMINISM-01: `result_c`'s own
+    // report reflects `md_bars.ingested_at` as the real database server
+    // clock stamped it *during this same call* -- see the identical note on
+    // the AAPL/5m positive proof above. Re-run (no new provider call
+    // expected) to prove the ingested data is genuinely "ok" once read
+    // fresh after the re-stamp -- the counter assertions above already
+    // proved the call-counting behavior this test exists for.
+    let result_c2 = run_cycle_with_deterministic_ingest_stamp(
+        Some(&pool),
+        instruments_c.path().to_str().unwrap(),
+        providers.path().to_str().unwrap(),
+        Some(&injected_c),
+        &calendar,
+        now,
+        false,
+    )
+    .await;
+    assert_eq!(
+        provider_c.historical_calls(),
+        1,
+        "no repeated bootstrap once already ready"
+    );
+    assert_eq!(result_c2.provider_api_calls_made, 0);
+    assert_eq!(result_c2.report.requirements[0].freshness_state, "ok");
 
     std::env::remove_var("MQK_STRATEGY_SYMBOL");
     std::env::remove_var("MQK_STRATEGY_MD_TIMEFRAME");
