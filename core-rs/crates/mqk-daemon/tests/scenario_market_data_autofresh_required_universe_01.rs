@@ -224,6 +224,16 @@ fn five_bars(symbol: &str, end_ts: i64) -> Vec<mqk_md::CanonicalBar> {
         .collect()
 }
 
+/// `n` completed 5m bars ending at start-label `last_start_ts`, spaced
+/// exactly one interval (300s) apart. Generalizes `five_bars` to prove
+/// REPAIR-01 §4/§29 -- a strategy that genuinely needs more than 5 bars of
+/// history must not be reported ready merely because 5 exist.
+fn n_bars(symbol: &str, last_start_ts: i64, n: usize) -> Vec<mqk_md::CanonicalBar> {
+    (0..n)
+        .map(|i| bar(symbol, "5m", last_start_ts - ((n - 1 - i) as i64) * 300))
+        .collect()
+}
+
 fn instrument_registry_file(entries: &[(&str, &str, &str)]) -> NamedTempFile {
     let mut file = NamedTempFile::new().expect("create fake instrument registry");
     let json: Vec<serde_json::Value> = entries
@@ -339,6 +349,13 @@ async fn aapl_5m_positive_proof_bootstraps_then_stays_ready() {
     };
     std::env::set_var("MQK_STRATEGY_SYMBOL", "ZZAUTOFRAAPL");
     std::env::set_var("MQK_STRATEGY_MD_TIMEFRAME", "5m");
+    // REPAIR-01 Defect A: the controller now resolves each required symbol's
+    // strategy assignment (via `build_multi_symbol_runtime_config_from_env`)
+    // to source `required_history_bars` from the strategy that will actually
+    // run, instead of a hardcoded 5-bar minimum -- the legacy single-symbol
+    // env path needs MQK_STRATEGY_IDS set for that resolution to succeed.
+    // `intraday_scalper`'s own LOOKBACK is 5, matching `five_bars()` below.
+    std::env::set_var("MQK_STRATEGY_IDS", "intraday_scalper");
     std::env::remove_var("MQK_PAPER_WATCHLIST_PATH");
 
     let instruments = instrument_registry_file(&[("ZZAUTOFRAAPL", "alpaca", "5m")]);
@@ -347,7 +364,15 @@ async fn aapl_5m_positive_proof_bootstraps_then_stays_ready() {
     let provider = Arc::new(FakeUniverseProvider::new("alpaca"));
     provider.seed_historical(
         "ZZAUTOFRAAPL",
-        five_bars("ZZAUTOFRAAPL", now.timestamp() - 300),
+        // REPAIR-01 §6: the strict readiness authority's expected window is
+        // publication-grace-aware -- with the default 900s configured grace
+        // (effective_grace_seconds = min(900, 300) = 300 for this 5m
+        // timeframe), the bar spanning [now-300, now) has not yet cleared
+        // its grace period at `now` itself, so the expected window's last
+        // slot is one interval earlier than `now - interval` alone would
+        // suggest. `now.timestamp() - 600` lands the fixture's last bar
+        // exactly on that grace-aware expected slot.
+        five_bars("ZZAUTOFRAAPL", now.timestamp() - 600),
     );
     let injected: Arc<dyn mqk_md::MarketDataProvider> = provider.clone();
     let calendar = trading_day_calendar();
@@ -394,12 +419,21 @@ async fn aapl_5m_positive_proof_bootstraps_then_stays_ready() {
 
     // Cycle 3: a newer completed bar becomes available -> intraday poll
     // ingests it, readiness remains ready.
-    let newer_end_ts = now.timestamp() + 300 - (now.timestamp() % 300);
+    //
+    // REPAIR-01 §6/§24: the strict readiness authority's expected window is
+    // publication-grace-aware, so the newly-expected slot at `later_now` is
+    // the grid slot starting exactly one interval before `now` (`now -
+    // 300`) -- not an arbitrary next epoch-5m-boundary. Advancing the clock
+    // past that slot's own grace period (interval + grace = 600s from the
+    // slot's start) and seeding exactly that bar is what makes the strict
+    // evaluator's `expected_latest_bar_missing` -> bounded, constrained
+    // latest-bar poll -> `ready` sequence line up.
+    let new_bar_start_ts = now.timestamp() - 300;
     provider.seed_latest(
         "ZZAUTOFRAAPL",
-        Some(bar("ZZAUTOFRAAPL", "5m", newer_end_ts - 300)),
+        Some(bar("ZZAUTOFRAAPL", "5m", new_bar_start_ts)),
     );
-    let later_now = Utc.timestamp_opt(newer_end_ts + 30, 0).unwrap();
+    let later_now = Utc.timestamp_opt(now.timestamp() + 330, 0).unwrap();
     let result3 = run_required_universe_cycle(
         Some(&pool),
         instruments.path().to_str().unwrap(),
@@ -418,6 +452,7 @@ async fn aapl_5m_positive_proof_bootstraps_then_stays_ready() {
 
     std::env::remove_var("MQK_STRATEGY_SYMBOL");
     std::env::remove_var("MQK_STRATEGY_MD_TIMEFRAME");
+    std::env::remove_var("MQK_STRATEGY_IDS");
 }
 
 // ---------------------------------------------------------------------------
@@ -447,7 +482,8 @@ async fn multi_symbol_positive_proof_every_symbol_evaluated_and_refreshed() {
     let now = now_fixture();
     let provider = Arc::new(FakeUniverseProvider::new("alpaca"));
     for symbol in ["ZZAUTOFR1", "ZZAUTOFR2", "ZZAUTOFR3"] {
-        provider.seed_historical(symbol, five_bars(symbol, now.timestamp() - 300));
+        // See the grace-aware offset note on the AAPL/5m positive proof above.
+        provider.seed_historical(symbol, five_bars(symbol, now.timestamp() - 600));
     }
     let injected: Arc<dyn mqk_md::MarketDataProvider> = provider.clone();
     let calendar = trading_day_calendar();
@@ -518,7 +554,8 @@ async fn mixed_provider_proof_two_groups_partial_failure_does_not_block_the_othe
     let now = now_fixture();
 
     let alpaca = Arc::new(FakeUniverseProvider::new("alpaca"));
-    alpaca.seed_historical("ZZAUTOFRA", five_bars("ZZAUTOFRA", now.timestamp() - 300));
+    // See the grace-aware offset note on the AAPL/5m positive proof above.
+    alpaca.seed_historical("ZZAUTOFRA", five_bars("ZZAUTOFRA", now.timestamp() - 600));
     let twelvedata = Arc::new(FakeUniverseProvider::new("twelvedata"));
     twelvedata.fail("ZZAUTOFRM"); // provider B fails
 
@@ -763,7 +800,8 @@ async fn one_stale_required_symbol_blocks_overall_readiness() {
     let provider = Arc::new(FakeUniverseProvider::new("alpaca"));
     provider.seed_historical(
         "ZZAUTOFRGOOD",
-        five_bars("ZZAUTOFRGOOD", now.timestamp() - 300),
+        // See the grace-aware offset note on the AAPL/5m positive proof above.
+        five_bars("ZZAUTOFRGOOD", now.timestamp() - 600),
     );
     // ZZAUTOFRBAD deliberately has no historical fixture seeded -> bootstrap
     // returns zero bars -> stays missing/blocked.
@@ -816,6 +854,7 @@ async fn dry_run_makes_zero_provider_calls_and_zero_db_writes() {
     };
     std::env::set_var("MQK_STRATEGY_SYMBOL", "ZZAUTOFRDRY");
     std::env::set_var("MQK_STRATEGY_MD_TIMEFRAME", "5m");
+    std::env::set_var("MQK_STRATEGY_IDS", "intraday_scalper");
     std::env::remove_var("MQK_PAPER_WATCHLIST_PATH");
 
     let instruments = instrument_registry_file(&[("ZZAUTOFRDRY", "alpaca", "5m")]);
@@ -852,6 +891,7 @@ async fn dry_run_makes_zero_provider_calls_and_zero_db_writes() {
 
     std::env::remove_var("MQK_STRATEGY_SYMBOL");
     std::env::remove_var("MQK_STRATEGY_MD_TIMEFRAME");
+    std::env::remove_var("MQK_STRATEGY_IDS");
 }
 
 // ---------------------------------------------------------------------------
@@ -899,6 +939,466 @@ async fn ingest_plan_and_autofresh_plan_agree_on_required_symbols() {
 
     std::env::remove_var("MQK_STRATEGY_SYMBOL");
     std::env::remove_var("MQK_STRATEGY_MD_TIMEFRAME");
+}
+
+// ---------------------------------------------------------------------------
+// MARKET-DATA-AUTOFRESH-REQUIRED-UNIVERSE-01-REPAIR-01 new load-bearing tests
+// ---------------------------------------------------------------------------
+
+/// §4/§29: a strategy whose real `required_history_bars` is above the old
+/// evaluator's fixed 5-bar minimum must not be reported ready merely because
+/// 5 bars exist. `swing_momentum`'s registered `StrategyDataRequirements`
+/// needs 20 completed bars.
+#[tokio::test]
+async fn strategy_history_requirement_above_five_bars_is_not_satisfied_by_five_bars() {
+    let Some(pool) = maybe_db("strategy_history_requirement_above_five_bars").await else {
+        return;
+    };
+    std::env::set_var("MQK_STRATEGY_SYMBOL", "ZZAUTOFRSWING");
+    std::env::set_var("MQK_STRATEGY_MD_TIMEFRAME", "5m");
+    std::env::set_var("MQK_STRATEGY_IDS", "swing_momentum");
+    std::env::remove_var("MQK_PAPER_WATCHLIST_PATH");
+
+    let instruments = instrument_registry_file(&[("ZZAUTOFRSWING", "alpaca", "5m")]);
+    let providers = provider_registry_file(&["alpaca"]);
+    let now = now_fixture();
+    let provider = Arc::new(FakeUniverseProvider::new("alpaca"));
+    // Deliberately seed only 5 bars for the historical bootstrap -- enough
+    // for the old fixed-5-bar evaluator, not enough for swing_momentum's
+    // real 20-bar requirement.
+    provider.seed_historical(
+        "ZZAUTOFRSWING",
+        five_bars("ZZAUTOFRSWING", now.timestamp() - 600),
+    );
+    let injected: Arc<dyn mqk_md::MarketDataProvider> = provider.clone();
+    let calendar = trading_day_calendar();
+
+    let result = run_required_universe_cycle(
+        Some(&pool),
+        instruments.path().to_str().unwrap(),
+        providers.path().to_str().unwrap(),
+        Some(&injected),
+        &calendar,
+        now,
+        false,
+    )
+    .await;
+
+    let status = &result.report.requirements[0];
+    assert_eq!(
+        status.freshness_state, "insufficient_history",
+        "5 bars must not satisfy a real 20-bar strategy requirement: {:?}",
+        status
+    );
+    assert_eq!(result.report.overall_state, "blocked");
+
+    // Now seed the real 20-bar requirement, starting from a clean slate, and
+    // confirm the requirement becomes genuinely ready.
+    sqlx::query("delete from md_bars where symbol = $1")
+        .bind("ZZAUTOFRSWING")
+        .execute(&pool)
+        .await
+        .expect("clean seeded rows between sub-cases");
+    provider.seed_historical(
+        "ZZAUTOFRSWING",
+        n_bars("ZZAUTOFRSWING", now.timestamp() - 600, 20),
+    );
+
+    let result2 = run_required_universe_cycle(
+        Some(&pool),
+        instruments.path().to_str().unwrap(),
+        providers.path().to_str().unwrap(),
+        Some(&injected),
+        &calendar,
+        now,
+        false,
+    )
+    .await;
+    let status2 = &result2.report.requirements[0];
+    assert_eq!(status2.freshness_state, "ok", "{:?}", status2);
+    assert_eq!(result2.report.overall_state, "ready");
+
+    std::env::remove_var("MQK_STRATEGY_SYMBOL");
+    std::env::remove_var("MQK_STRATEGY_MD_TIMEFRAME");
+    std::env::remove_var("MQK_STRATEGY_IDS");
+}
+
+/// §5/§27: before the first current-session bar becomes expected, a
+/// previous trading session's already-durable final bars must satisfy the
+/// requirement -- and must never trigger a provider call, regardless of
+/// their wall-clock age.
+#[tokio::test]
+async fn preopen_previous_session_tail_satisfies_expectation_with_zero_provider_calls() {
+    let Some(pool) = maybe_db("preopen_previous_session_tail").await else {
+        return;
+    };
+    std::env::set_var("MQK_STRATEGY_SYMBOL", "ZZAUTOFRPREOPEN");
+    std::env::set_var("MQK_STRATEGY_MD_TIMEFRAME", "5m");
+    std::env::set_var("MQK_STRATEGY_IDS", "intraday_scalper"); // required = 5
+    std::env::remove_var("MQK_PAPER_WATCHLIST_PATH");
+
+    let instruments = instrument_registry_file(&[("ZZAUTOFRPREOPEN", "alpaca", "5m")]);
+    let providers = provider_registry_file(&["alpaca"]);
+
+    // Previous trading session (2026-08-11, a Tuesday) closes 20:00:00 UTC;
+    // its final 5 session-anchored grid slots (starts) are 19:35..19:55.
+    // Durably present already -- simulates yesterday's close having been
+    // captured normally, before this morning's preopen evaluation.
+    let prev_session_close_ts = Utc
+        .with_ymd_and_hms(2026, 8, 11, 20, 0, 0)
+        .unwrap()
+        .timestamp();
+    let last_slot_ts = prev_session_close_ts - 300;
+    let ingest_id = uuid::Uuid::new_v4();
+    mqk_db::md::ingest_provider_bars_to_md_bars_with_provider_metadata(
+        &pool,
+        mqk_db::md::IngestProviderBarsArgs {
+            source: "alpaca".to_string(),
+            timeframe: "5m".to_string(),
+            ingest_id,
+            bars: n_bars("ZZAUTOFRPREOPEN", last_slot_ts, 5)
+                .into_iter()
+                .map(|b| mqk_db::md::ProviderBar {
+                    symbol: b.symbol,
+                    timeframe: b.timeframe,
+                    end_ts: b.end_ts,
+                    open: b.open,
+                    high: b.high,
+                    low: b.low,
+                    close: b.close,
+                    volume: b.volume,
+                    is_complete: b.is_complete,
+                })
+                .collect(),
+        },
+        mqk_db::md::MdBarProviderMetadata {
+            provider_id: "alpaca".to_string(),
+            provider_source: Some("alpaca".to_string()),
+            provider_symbol: Some("ZZAUTOFRPREOPEN".to_string()),
+            ingest_mode: Some("test_fixture_previous_session_tail".to_string()),
+            provider_bar_id: None,
+            provider_updated_at_utc: None,
+        },
+    )
+    .await
+    .expect("seed previous-session tail");
+
+    // A provider client that would still register a call if one were ever
+    // dispatched -- the assertions below require historical_calls() == 0
+    // and latest_calls() == 0.
+    let provider = Arc::new(FakeUniverseProvider::new("alpaca"));
+    let injected: Arc<dyn mqk_md::MarketDataProvider> = provider.clone();
+    let calendar = trading_day_calendar();
+
+    // 2026-08-12 10:00:00 UTC -- well before today's 13:30 UTC session open.
+    let preopen_now = Utc.with_ymd_and_hms(2026, 8, 12, 10, 0, 0).unwrap();
+
+    let result = run_required_universe_cycle(
+        Some(&pool),
+        instruments.path().to_str().unwrap(),
+        providers.path().to_str().unwrap(),
+        Some(&injected),
+        &calendar,
+        preopen_now,
+        false,
+    )
+    .await;
+
+    let status = &result.report.requirements[0];
+    assert_eq!(
+        status.freshness_state, "ok",
+        "previous-session tail must satisfy preopen expectation: {:?}",
+        status
+    );
+    assert_eq!(result.report.overall_state, "ready");
+    assert_eq!(
+        provider.historical_calls(),
+        0,
+        "no historical bootstrap call"
+    );
+    assert_eq!(provider.latest_calls(), 0, "no latest-bar poll call");
+    assert_eq!(result.provider_api_calls_made, 0);
+
+    std::env::remove_var("MQK_STRATEGY_SYMBOL");
+    std::env::remove_var("MQK_STRATEGY_MD_TIMEFRAME");
+    std::env::remove_var("MQK_STRATEGY_IDS");
+}
+
+/// §16/§20: an instrument-registry load failure and a provider-registry
+/// load failure must surface distinguishable reason codes, never both
+/// flattened into `provider_registry_invalid`.
+#[tokio::test]
+async fn instrument_vs_provider_registry_error_truth_is_distinguished() {
+    let Some(pool) = maybe_db("instrument_vs_provider_registry_error_truth").await else {
+        return;
+    };
+    std::env::set_var("MQK_STRATEGY_SYMBOL", "ZZAUTOFRREGERR");
+    std::env::set_var("MQK_STRATEGY_MD_TIMEFRAME", "5m");
+    std::env::remove_var("MQK_PAPER_WATCHLIST_PATH");
+
+    let providers = provider_registry_file(&["alpaca"]);
+    let now = now_fixture();
+    let calendar = trading_day_calendar();
+
+    // Case 1: the instrument registry path does not exist -- must surface
+    // `instrument_registry_invalid`, never `provider_registry_invalid`.
+    let missing_instruments_path = "Z:\\this\\path\\does\\not\\exist\\instruments.json";
+    let result_instr = run_required_universe_cycle(
+        Some(&pool),
+        missing_instruments_path,
+        providers.path().to_str().unwrap(),
+        None,
+        &calendar,
+        now,
+        false,
+    )
+    .await;
+    assert_eq!(
+        result_instr.report.requirements[0].freshness_state, "instrument_registry_invalid",
+        "{:?}",
+        result_instr.report
+    );
+
+    // Case 2: the instrument registry is valid but the provider registry
+    // path does not exist -- must surface `provider_registry_invalid`.
+    let instruments = instrument_registry_file(&[("ZZAUTOFRREGERR", "alpaca", "5m")]);
+    let missing_providers_path = "Z:\\this\\path\\does\\not\\exist\\providers.json";
+    let result_prov = run_required_universe_cycle(
+        Some(&pool),
+        instruments.path().to_str().unwrap(),
+        missing_providers_path,
+        None,
+        &calendar,
+        now,
+        false,
+    )
+    .await;
+    assert_eq!(
+        result_prov.report.requirements[0].freshness_state, "provider_registry_invalid",
+        "{:?}",
+        result_prov.report
+    );
+
+    std::env::remove_var("MQK_STRATEGY_SYMBOL");
+    std::env::remove_var("MQK_STRATEGY_MD_TIMEFRAME");
+}
+
+/// §18/§19: `provider_api_calls_made_this_cycle` must equal the number of
+/// actual provider method invocations -- never under-report a call that
+/// happened but returned empty/no data, and never count a capability
+/// refusal (no call dispatched) as one.
+#[tokio::test]
+async fn provider_api_call_counter_matches_actual_invocations() {
+    let Some(pool) = maybe_db("provider_api_call_counter_matches_actual_invocations").await else {
+        return;
+    };
+    std::env::set_var("MQK_STRATEGY_MD_TIMEFRAME", "5m");
+    std::env::set_var("MQK_STRATEGY_IDS", "intraday_scalper");
+    let now = now_fixture();
+    let calendar = trading_day_calendar();
+    let providers = provider_registry_file(&["alpaca"]);
+
+    // Case A: provider called, returns an empty historical result -> one
+    // real call, `CalledNoData`, counted.
+    std::env::set_var("MQK_STRATEGY_SYMBOL", "ZZAUTOFRCALLA");
+    std::env::remove_var("MQK_PAPER_WATCHLIST_PATH");
+    let instruments_a = instrument_registry_file(&[("ZZAUTOFRCALLA", "alpaca", "5m")]);
+    let provider_a = Arc::new(FakeUniverseProvider::new("alpaca"));
+    // Deliberately no seed_historical() call -> fetch_historical_bars
+    // returns Ok(vec![]) (empty), a genuine call with no usable data.
+    let injected_a: Arc<dyn mqk_md::MarketDataProvider> = provider_a.clone();
+    let result_a = run_required_universe_cycle(
+        Some(&pool),
+        instruments_a.path().to_str().unwrap(),
+        providers.path().to_str().unwrap(),
+        Some(&injected_a),
+        &calendar,
+        now,
+        false,
+    )
+    .await;
+    assert_eq!(
+        provider_a.historical_calls(),
+        1,
+        "the call must be dispatched"
+    );
+    assert_eq!(
+        result_a.provider_api_calls_made, 1,
+        "an empty-but-genuine call must still be counted: {:?}",
+        result_a.report
+    );
+    assert_ne!(result_a.report.requirements[0].freshness_state, "ok");
+
+    // Case B: provider called, the historical fetch errors -> one real
+    // call, `CalledError`, counted.
+    std::env::set_var("MQK_STRATEGY_SYMBOL", "ZZAUTOFRCALLB");
+    let instruments_b = instrument_registry_file(&[("ZZAUTOFRCALLB", "alpaca", "5m")]);
+    let provider_b = Arc::new(FakeUniverseProvider::new("alpaca"));
+    provider_b.fail("ZZAUTOFRCALLB");
+    let injected_b: Arc<dyn mqk_md::MarketDataProvider> = provider_b.clone();
+    let result_b = run_required_universe_cycle(
+        Some(&pool),
+        instruments_b.path().to_str().unwrap(),
+        providers.path().to_str().unwrap(),
+        Some(&injected_b),
+        &calendar,
+        now,
+        false,
+    )
+    .await;
+    assert_eq!(
+        provider_b.historical_calls(),
+        1,
+        "the call must be dispatched"
+    );
+    assert_eq!(
+        result_b.provider_api_calls_made, 1,
+        "a failed-but-genuine call must still be counted: {:?}",
+        result_b.report
+    );
+    assert_ne!(result_b.report.requirements[0].freshness_state, "ok");
+
+    // Case C: successful call, real data ingested -> one real call, counted.
+    std::env::set_var("MQK_STRATEGY_SYMBOL", "ZZAUTOFRCALLC");
+    let instruments_c = instrument_registry_file(&[("ZZAUTOFRCALLC", "alpaca", "5m")]);
+    let provider_c = Arc::new(FakeUniverseProvider::new("alpaca"));
+    provider_c.seed_historical(
+        "ZZAUTOFRCALLC",
+        five_bars("ZZAUTOFRCALLC", now.timestamp() - 600),
+    );
+    let injected_c: Arc<dyn mqk_md::MarketDataProvider> = provider_c.clone();
+    let result_c = run_required_universe_cycle(
+        Some(&pool),
+        instruments_c.path().to_str().unwrap(),
+        providers.path().to_str().unwrap(),
+        Some(&injected_c),
+        &calendar,
+        now,
+        false,
+    )
+    .await;
+    assert_eq!(provider_c.historical_calls(), 1);
+    assert_eq!(result_c.provider_api_calls_made, 1);
+    assert_eq!(result_c.report.requirements[0].freshness_state, "ok");
+
+    std::env::remove_var("MQK_STRATEGY_SYMBOL");
+    std::env::remove_var("MQK_STRATEGY_MD_TIMEFRAME");
+    std::env::remove_var("MQK_STRATEGY_IDS");
+}
+
+/// §10/§33: two concurrent scheduler-start callers against the same
+/// `AppState`, with a genuine pollable requirement configured (so the
+/// scheduler has real ongoing work and stays `running` across the whole
+/// call, not just for a sub-microsecond window), must admit exactly one
+/// starter -- the other refused with zero state mutation -- and the
+/// immediate controller cycle must run exactly once, never once per
+/// starter.
+// Deliberately does not take `precedence_env_lock()`: that std::sync::Mutex
+// would be held across this test's `.await` points (clippy::await_holding_lock)
+// -- matches the existing convention every other `#[tokio::test]` in this
+// file already follows (only the three sync `#[test]` precedence proofs
+// below use that lock, to serialize against each other).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn concurrent_scheduler_start_admits_exactly_one_starter() {
+    std::env::remove_var("MQK_PAPER_WATCHLIST_PATH");
+    std::env::set_var("MQK_STRATEGY_SYMBOL", "ZZAUTOFRCONC");
+    std::env::set_var("MQK_STRATEGY_MD_TIMEFRAME", "5m");
+
+    let instruments = instrument_registry_file(&[("ZZAUTOFRCONC", "alpaca", "5m")]);
+    let providers = provider_registry_file(&["alpaca"]);
+
+    let mut st = mqk_daemon::state::AppState::new();
+    st.instrument_registry_path = instruments.path().to_str().unwrap().to_string();
+    st.provider_registry_path = providers.path().to_str().unwrap().to_string();
+    // Deterministic: the readiness/refresh path is irrelevant to this proof
+    // (it only needs `plan.groups` non-empty so `next_poll_utc` stays
+    // `Some`, keeping the scheduler `running` for the duration of this
+    // test) -- force the no-DB path so no real Postgres state leaks in.
+    st.db = None;
+    let st = std::sync::Arc::new(st);
+    // A real trading-day instant (Wednesday, mid-August, no US market
+    // holiday) so the active (env-selected, real NYSE-weekday) calendar
+    // provider `run_and_record_cycle` uses internally reports a trading day
+    // and the plan resolves at least one provider/timeframe group.
+    let now = now_fixture();
+
+    let st1 = st.clone();
+    let st2 = st.clone();
+    let (r1, r2) = tokio::join!(
+        mqk_daemon::state::required_market_data_autofresh::start_required_universe_scheduler(
+            &st1, true, now,
+        ),
+        mqk_daemon::state::required_market_data_autofresh::start_required_universe_scheduler(
+            &st2, true, now,
+        ),
+    );
+
+    let outcomes = [r1.is_ok(), r2.is_ok()];
+    let accepted = outcomes.iter().filter(|ok| **ok).count();
+    let refused = outcomes.iter().filter(|ok| !**ok).count();
+
+    {
+        let scheduler = st.required_universe_scheduler.lock().await;
+        let cycle_count = scheduler.cycle_count;
+        let groups_present = scheduler
+            .last_report
+            .as_ref()
+            .map(|r| !r.groups.is_empty())
+            .unwrap_or(false);
+        drop(scheduler);
+        mqk_daemon::state::required_market_data_autofresh::stop_required_universe_scheduler(
+            &st, now,
+        )
+        .await;
+
+        assert!(
+            groups_present,
+            "test setup must produce at least one pollable group so the scheduler has real \
+             ongoing work"
+        );
+        assert_eq!(
+            accepted, 1,
+            "exactly one concurrent starter must be accepted: {r1:?} {r2:?}"
+        );
+        assert_eq!(refused, 1, "exactly one concurrent starter must be refused");
+        assert_eq!(
+            cycle_count, 1,
+            "the immediate controller cycle must run exactly once, not once per starter"
+        );
+    }
+
+    std::env::remove_var("MQK_STRATEGY_SYMBOL");
+    std::env::remove_var("MQK_STRATEGY_MD_TIMEFRAME");
+}
+
+/// §11/§32: when the immediate cycle finds nothing left to poll (no
+/// required symbols configured), the scheduler must settle truthfully as
+/// stopped -- never `running=true` with no task and no future cycle.
+#[tokio::test]
+async fn no_work_scheduler_settles_stopped_after_start() {
+    std::env::remove_var("MQK_STRATEGY_SYMBOL");
+    std::env::remove_var("MQK_PAPER_WATCHLIST_PATH");
+    std::env::remove_var("MQK_STRATEGY_MD_TIMEFRAME");
+
+    let st = std::sync::Arc::new(mqk_daemon::state::AppState::new());
+    let now = now_fixture();
+
+    let report =
+        mqk_daemon::state::required_market_data_autofresh::start_required_universe_scheduler(
+            &st, true, now,
+        )
+        .await
+        .expect("start must succeed");
+    assert_eq!(report.overall_state, "not_applicable");
+
+    let scheduler = st.required_universe_scheduler.lock().await;
+    assert!(
+        !scheduler.running,
+        "a no-work immediate cycle must settle the scheduler as stopped"
+    );
+    assert!(scheduler.next_cycle_utc.is_none());
+    assert!(scheduler.task.is_none());
+    assert_eq!(scheduler.cycle_count, 1);
 }
 
 /// Serializes every test in this file that mutates the process-global

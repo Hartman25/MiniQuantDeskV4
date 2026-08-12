@@ -71,9 +71,10 @@ use tokio::task::JoinHandle;
 use mqk_md::instrument_registry::TrackedInstrument;
 use mqk_md::provider_registry::ProviderConfig;
 
+use crate::daily_data_readiness::{self, AssignmentReadiness};
 use crate::market_data_freshness::{
-    evaluate_md_freshness_status, normalize_required_symbols,
-    required_symbols_with_source_from_env, RequiredSymbolTimeframe, RequiredSymbolsResolution,
+    normalize_required_symbols, required_symbols_with_source_from_env, RequiredSymbolTimeframe,
+    RequiredSymbolsResolution,
 };
 use crate::state::market_calendar::{
     active_calendar_provider_from_env, resolve_market_session_schedule, MarketCalendarProvider,
@@ -81,9 +82,14 @@ use crate::state::market_calendar::{
 };
 use crate::state::market_data_latest_bar::{
     instrument_authorizes_timeframe, poll_and_ingest_latest_closed_bar,
-    resolve_latest_bar_poll_target, LatestBarPollOutcome, LatestBarPollSeamInput,
+    resolve_latest_bar_poll_target, ExpectedLatestBarConstraint, LatestBarPollOutcome,
+    LatestBarPollSeamInput,
 };
-use crate::state::AppState;
+use crate::state::{
+    build_multi_symbol_runtime_config_from_env, AppState, MultiSymbolConfigError,
+    MultiSymbolRuntimeConfig, SymbolStrategyAssignment,
+};
+use mqk_runtime::native_strategy::EffectiveRuntimeBinding;
 
 /// Post-session-close grace before the required-universe scheduler treats
 /// intraday maintenance for `market_date` as complete (§22/§23/§session-
@@ -578,23 +584,63 @@ fn load_validated_provider_registry(path: &str) -> Result<Vec<ProviderConfig>, S
 }
 
 /// Outcome of one bounded refresh attempt for a single resolved requirement.
+///
+/// REPAIR-01 Defect D: the prior two-variant-plus-error shape
+/// (`Skipped`/`Success`/`ProviderError`) conflated "no provider call was
+/// made" with "a provider call was made and returned no usable data" — a
+/// capability refusal (no call) and a historical fetch that genuinely
+/// succeeded with zero completed bars (one real call) both surfaced as
+/// `Skipped`, so `provider_api_calls_made_this_cycle` could under-report the
+/// true number of provider method invocations. This shape makes "was the
+/// provider actually invoked" the only axis the `Skipped`/`Skipped` mixup
+/// could hide: [`RefreshAttemptOutcome::NoCall`] is the sole variant that
+/// must not increment the counter; every other variant represents exactly
+/// one real provider call (§18/§19 of the repair spec).
 #[derive(Debug, Clone)]
 enum RefreshAttemptOutcome {
-    Skipped,
-    Success,
-    ProviderError(String),
+    /// No provider method was invoked (capability/timeframe/admission
+    /// refusal, or provider-client construction failure — a config
+    /// problem, not a network call).
+    NoCall,
+    /// A provider call was made and returned usable data that was ingested.
+    CalledSuccess,
+    /// A provider call was made and returned no usable data (empty
+    /// historical result, or no completed bar available yet).
+    CalledNoData,
+    /// A provider call was made and failed (transport error, rejected,
+    /// provenance-invalid response, or the subsequent DB ingest failed).
+    CalledError(String),
+}
+
+impl RefreshAttemptOutcome {
+    /// `true` for every variant except [`Self::NoCall`] — the exact
+    /// predicate `provider_api_calls_made_this_cycle` must count against
+    /// (§19).
+    fn is_actual_call(&self) -> bool {
+        !matches!(self, Self::NoCall)
+    }
 }
 
 /// Bounded historical lookback window, in calendar days, used only to
 /// satisfy §17/§18's "bounded provider sync" requirement when a
-/// requirement's freshness is `missing`/`insufficient` — never a full
-/// history resync, and never re-run once the readiness gate reports `ok`.
-/// Intraday timeframes need far fewer calendar days than daily to clear the
-/// 5-completed-bar minimum (`market_data_freshness::MD_FRESHNESS_MIN_BARS`).
-fn bounded_bootstrap_lookback_days(timeframe: mqk_md::Timeframe) -> i64 {
+/// requirement's freshness is `missing`/`insufficient`/`interior_gap` —
+/// never a full history resync, and never re-run once the readiness
+/// authority reports ready.
+///
+/// REPAIR-01 §4/§29: sized from the strategy's own `required_history_bars`
+/// (sourced from [`daily_data_readiness::evaluate_assignment`], never a
+/// fixed 5-bar assumption) instead of a flat per-timeframe constant, so a
+/// strategy that genuinely needs more history than a handful of bars gets a
+/// lookback window wide enough to have a chance of covering it in one
+/// bounded attempt. Intraday timeframes still need far fewer calendar days
+/// than daily to cover the same bar count (~78 5m bars/session).
+fn bounded_bootstrap_lookback_days(
+    timeframe: mqk_md::Timeframe,
+    required_history_bars: usize,
+) -> i64 {
     match timeframe {
-        mqk_md::Timeframe::D1 => 30,
-        _ => 10,
+        mqk_md::Timeframe::D1 => (required_history_bars as i64) * 2 + 10,
+        _ => ((required_history_bars as i64 / 50) + 1) * 10,
     }
 }
 
@@ -643,22 +689,26 @@ async fn attempt_bounded_historical_bootstrap(
     provider_config: &ProviderConfig,
     injected_client: Option<&Arc<dyn mqk_md::MarketDataProvider>>,
     resolved: &ResolvedRequirement,
+    required_history_bars: usize,
     now_utc: DateTime<Utc>,
 ) -> RefreshAttemptOutcome {
     let Ok(timeframe) = mqk_md::Timeframe::parse(&resolved.timeframe) else {
-        return RefreshAttemptOutcome::Skipped;
+        return RefreshAttemptOutcome::NoCall;
     };
+    // Provider-client construction is a config-shaped step (registry
+    // lookup/credential resolution), not a network call — a failure here
+    // must not be counted as an actual provider invocation (§19).
     let handle = match resolve_provider_handle(provider_config, injected_client) {
         Ok(handle) => handle,
-        Err(error) => return RefreshAttemptOutcome::ProviderError(error),
+        Err(_error) => return RefreshAttemptOutcome::NoCall,
     };
     let provider = handle.as_dyn();
     let capabilities = provider.capabilities();
     if !capabilities.historical_bars {
-        return RefreshAttemptOutcome::Skipped;
+        return RefreshAttemptOutcome::NoCall;
     }
 
-    let lookback_days = bounded_bootstrap_lookback_days(timeframe);
+    let lookback_days = bounded_bootstrap_lookback_days(timeframe, required_history_bars);
     let end = now_utc.date_naive();
     let start = end - chrono::Duration::days(lookback_days);
 
@@ -675,8 +725,9 @@ async fn attempt_bounded_historical_bootstrap(
         // Every historical-fetch error (rate-limited, provider-unavailable,
         // or otherwise) is reported the same way here: a bootstrap failure
         // never retries within this bounded call (§34/§35) regardless of
-        // whether the underlying cause is transient.
-        Err(error) => return RefreshAttemptOutcome::ProviderError(error.to_string()),
+        // whether the underlying cause is transient. The call itself DID
+        // happen — this counts against the provider-call counter (§19).
+        Err(error) => return RefreshAttemptOutcome::CalledError(error.to_string()),
     };
 
     let completed_bars: Vec<mqk_db::md::ProviderBar> = bars
@@ -696,7 +747,9 @@ async fn attempt_bounded_historical_bootstrap(
         .collect();
 
     if completed_bars.is_empty() {
-        return RefreshAttemptOutcome::Skipped;
+        // The call happened and succeeded; the provider simply had nothing
+        // to return in the requested window (§19 "empty historical result").
+        return RefreshAttemptOutcome::CalledNoData;
     }
 
     let ingest_id = uuid::Uuid::new_v5(
@@ -731,8 +784,8 @@ async fn attempt_bounded_historical_bootstrap(
     )
     .await
     {
-        Ok(_) => RefreshAttemptOutcome::Success,
-        Err(error) => RefreshAttemptOutcome::ProviderError(format!("db ingest failed: {error}")),
+        Ok(_) => RefreshAttemptOutcome::CalledSuccess,
+        Err(error) => RefreshAttemptOutcome::CalledError(format!("db ingest failed: {error}")),
     }
 }
 
@@ -741,6 +794,19 @@ async fn attempt_bounded_historical_bootstrap(
 /// Phase C autonomous driver use. Never loops, never retries within this
 /// call — one call in, at most one provider call out (§18/§34/§35 bounded
 /// refresh).
+/// Attempt exactly one bounded latest-closed-bar poll for `resolved`,
+/// reusing the same production seam the manual poll-once route and the
+/// Phase C autonomous driver use. Never loops, never retries within this
+/// call — one call in, at most one provider call out (§18/§34/§35 bounded
+/// refresh).
+///
+/// REPAIR-01 §24: `expected_bar_constraint`, when `Some`, is the strict
+/// readiness authority's own `expected_latest_bar_ts` for this requirement
+/// (never `None` when the caller is repairing a genuine
+/// `expected_latest_bar_missing` blocker) — so a provider that returns an
+/// older, lagging bar is recorded as `ProviderLaggingExpectedBar` rather
+/// than silently accepted as satisfying today's expectation (§24 "provider
+/// lag").
 #[allow(clippy::too_many_arguments)]
 async fn attempt_bounded_refresh(
     pool: &PgPool,
@@ -748,10 +814,11 @@ async fn attempt_bounded_refresh(
     provider_config: &ProviderConfig,
     injected_client: Option<&Arc<dyn mqk_md::MarketDataProvider>>,
     resolved: &ResolvedRequirement,
+    expected_bar_constraint: Option<ExpectedLatestBarConstraint>,
     now_utc: DateTime<Utc>,
 ) -> RefreshAttemptOutcome {
     let Ok(timeframe) = mqk_md::Timeframe::parse(&resolved.timeframe) else {
-        return RefreshAttemptOutcome::Skipped;
+        return RefreshAttemptOutcome::NoCall;
     };
     let target = match resolve_latest_bar_poll_target(
         instruments,
@@ -760,12 +827,12 @@ async fn attempt_bounded_refresh(
         timeframe,
     ) {
         Ok(target) => target,
-        Err(_) => return RefreshAttemptOutcome::Skipped,
+        Err(_) => return RefreshAttemptOutcome::NoCall,
     };
 
     let handle = match resolve_provider_handle(provider_config, injected_client) {
         Ok(handle) => handle,
-        Err(error) => return RefreshAttemptOutcome::ProviderError(error),
+        Err(_error) => return RefreshAttemptOutcome::NoCall,
     };
 
     match poll_and_ingest_latest_closed_bar(
@@ -775,28 +842,185 @@ async fn attempt_bounded_refresh(
             target: &target,
             now_utc,
             ingest_mode: "required_universe_autofresh",
-            expected_bar_constraint: None,
+            expected_bar_constraint,
         },
     )
     .await
     {
         LatestBarPollOutcome::InsertedNewBar { .. }
-        | LatestBarPollOutcome::AlreadyStored { .. } => RefreshAttemptOutcome::Success,
-        LatestBarPollOutcome::NoCompletedBarAvailable => RefreshAttemptOutcome::Skipped,
-        LatestBarPollOutcome::Unsupported { detail }
-        | LatestBarPollOutcome::ProviderRejected { detail }
+        | LatestBarPollOutcome::AlreadyStored { .. }
+        | LatestBarPollOutcome::ProviderLaggingExpectedBar { .. }
+        | LatestBarPollOutcome::UnexpectedOrFutureBar { .. } => {
+            RefreshAttemptOutcome::CalledSuccess
+        }
+        LatestBarPollOutcome::NoCompletedBarAvailable => RefreshAttemptOutcome::CalledNoData,
+        // Capability/timeframe refusal decided before any provider call was
+        // dispatched (see `poll_and_ingest_latest_closed_bar`'s own guard) —
+        // not an actual invocation (§19).
+        LatestBarPollOutcome::Unsupported { .. } => RefreshAttemptOutcome::NoCall,
+        LatestBarPollOutcome::ProviderRejected { detail }
         | LatestBarPollOutcome::ProviderTemporarilyUnavailable { detail } => {
-            RefreshAttemptOutcome::ProviderError(detail)
+            RefreshAttemptOutcome::CalledError(detail)
         }
         LatestBarPollOutcome::ProvenanceRejected { detail, .. } => {
-            RefreshAttemptOutcome::ProviderError(detail)
+            RefreshAttemptOutcome::CalledError(detail)
         }
         LatestBarPollOutcome::DatabaseFailure { detail, .. } => {
-            RefreshAttemptOutcome::ProviderError(detail)
+            RefreshAttemptOutcome::CalledError(detail)
         }
-        LatestBarPollOutcome::ProviderLaggingExpectedBar { .. }
-        | LatestBarPollOutcome::UnexpectedOrFutureBar { .. } => RefreshAttemptOutcome::Success,
     }
+}
+
+// ---------------------------------------------------------------------------
+// Strict readiness authority integration (REPAIR-01 Defect A, §2-4)
+// ---------------------------------------------------------------------------
+//
+// Before this repair, `run_required_universe_cycle` decided missing/
+// insufficient/stale/ok purely from `market_data_freshness::
+// evaluate_md_freshness_status` — a fixed 5-completed-bar, wall-clock-age
+// evaluator that can disagree with the strict readiness authority
+// (`daily_data_readiness::evaluate_assignment`) autonomous Paper trading's
+// own start gate uses, most concretely on how many bars a requirement
+// actually needs (the *strategy's* `required_history_bars`, not a hardcoded
+// constant) and on session-anchored (not wall-clock-age) staleness.
+//
+// This integration reuses `evaluate_assignment` verbatim — never a second,
+// hand-rolled readiness calculator — via the same "synthetic binding"
+// pattern `dynamic_selection_plan_builder::evaluate_candidate` already
+// establishes: construct an `EffectiveRuntimeBinding`/`SymbolStrategyAssignment`
+// pair that trivially matches the one requirement under evaluation, which
+// neutralizes `evaluate_assignment`'s binding-mismatch checks (those exist
+// to gate Tier A's single *actively bound* runtime strategy, not a
+// required-universe requirement that may not be the active binding at all)
+// and lets the real bar/provider/calendar readiness logic run standalone.
+
+/// The exact bounded set of readiness blockers this controller may attempt
+/// to repair by polling (§21). Every other blocker
+/// `daily_data_readiness::evaluate_assignment` can produce is a
+/// registry/provenance/binding/calendar-config defect — not remediable by
+/// more polling, and never retried here.
+const REFRESHABLE_READINESS_REASONS: &[&str] = &[
+    daily_data_readiness::REASON_MARKET_DATA_MISSING,
+    daily_data_readiness::REASON_INSUFFICIENT_HISTORY,
+    daily_data_readiness::REASON_INTERIOR_GAP,
+    daily_data_readiness::REASON_EXPECTED_LATEST_BAR_MISSING,
+];
+
+fn is_refreshable_reason(reason: &str) -> bool {
+    REFRESHABLE_READINESS_REASONS.contains(&reason)
+}
+
+/// `true` when the bounded historical-bars bootstrap (not the latest-bar
+/// poll) is the correct repair for `blockers` (§17/§22): an interior gap
+/// cannot be closed by observing only the newest bar, and a missing/
+/// insufficient history requirement needs the same wider provider fetch.
+fn needs_historical_bootstrap(blockers: &[&'static str]) -> bool {
+    blockers.contains(&daily_data_readiness::REASON_MARKET_DATA_MISSING)
+        || blockers.contains(&daily_data_readiness::REASON_INSUFFICIENT_HISTORY)
+        || blockers.contains(&daily_data_readiness::REASON_INTERIOR_GAP)
+}
+
+/// Derive this requirement's `freshness_state` status-surface string from a
+/// finished [`AssignmentReadiness`] evaluation (§26). Refreshable reasons
+/// take priority over other simultaneously-present blockers so the status
+/// surface reflects what the controller is actually acting on; falls back to
+/// the first blocker for the non-refreshable (registry/binding/calendar)
+/// case.
+fn freshness_state_from_readiness(readiness: &AssignmentReadiness) -> String {
+    if readiness.is_ready() {
+        return "ok".to_string();
+    }
+    if matches!(readiness.readiness_state, "db_unavailable" | "query_failed") {
+        return "unavailable".to_string();
+    }
+    for reason in REFRESHABLE_READINESS_REASONS {
+        if readiness.blockers.contains(reason) {
+            return (*reason).to_string();
+        }
+    }
+    readiness
+        .blockers
+        .first()
+        .map(|s| s.to_string())
+        .unwrap_or_else(|| "blocked".to_string())
+}
+
+/// Resolve the one [`SymbolStrategyAssignment`] the current multi-symbol
+/// runtime configuration assigns to `symbol` — the strategy identity
+/// [`daily_data_readiness::evaluate_assignment`]'s `required_history_bars`
+/// (§4/§29) and binding checks are evaluated against. `Err` is a
+/// registry-class blocker (never auto-repaired by polling): either the
+/// multi-symbol runtime configuration itself could not be built, or this
+/// exact required symbol has no assignment in it (can only happen if the
+/// required-symbol resolver and the multi-symbol config builder — which
+/// read the same watchlist/legacy env inputs — momentarily disagree, e.g. a
+/// watchlist file edited between the two reads within one cycle).
+fn resolve_strategy_assignment<'a>(
+    multi_symbol_config: &'a Result<MultiSymbolRuntimeConfig, MultiSymbolConfigError>,
+    symbol: &str,
+) -> Result<&'a SymbolStrategyAssignment, String> {
+    match multi_symbol_config {
+        Ok(cfg) => cfg
+            .symbols
+            .iter()
+            .find(|a| a.symbol.trim().eq_ignore_ascii_case(symbol.trim()))
+            .ok_or_else(|| {
+                format!(
+                    "required symbol '{symbol}' has no resolvable strategy assignment in the \
+                     current multi-symbol runtime configuration"
+                )
+            }),
+        Err(err) => Err(format!(
+            "multi-symbol runtime configuration could not be resolved: {}",
+            err.as_str()
+        )),
+    }
+}
+
+/// Evaluate the strict readiness authority for one resolved requirement.
+/// `Err` is a registry-class blocker (strategy assignment/plugin-registry
+/// construction failure) — never retried by polling; `Ok` is the real
+/// [`AssignmentReadiness`] verdict, ready or blocked.
+async fn evaluate_strict_readiness_for_resolved(
+    db_pool: &PgPool,
+    resolved: &ResolvedRequirement,
+    multi_symbol_config: &Result<MultiSymbolRuntimeConfig, MultiSymbolConfigError>,
+    calendar_provider: &dyn MarketCalendarProvider,
+    providers: &[ProviderConfig],
+    instruments: &[TrackedInstrument],
+    now_utc: DateTime<Utc>,
+) -> Result<AssignmentReadiness, String> {
+    let assignment = resolve_strategy_assignment(multi_symbol_config, &resolved.symbol)?;
+    let strategy_id = assignment.strategy_id.clone();
+
+    let mut registry = mqk_strategy::PluginRegistry::new();
+    mqk_strategy::engines::register_builtin_strategies(&mut registry, resolved.symbol.clone())
+        .map_err(|error| format!("strategy registry construction failed: {error}"))?;
+
+    let synthetic_binding = EffectiveRuntimeBinding {
+        effective_runtime_strategy_id: Some(strategy_id.clone()),
+        effective_runtime_target_symbol: Some(resolved.symbol.clone()),
+        effective_runtime_timeframe_secs: mqk_md::Timeframe::parse(&resolved.timeframe)
+            .ok()
+            .map(|tf| tf.duration_secs()),
+    };
+    let synthetic_assignment = SymbolStrategyAssignment {
+        symbol: resolved.symbol.clone(),
+        strategy_id,
+        timeframe: resolved.timeframe.clone(),
+    };
+
+    Ok(daily_data_readiness::evaluate_assignment(
+        Some(db_pool),
+        &synthetic_assignment,
+        &synthetic_binding,
+        calendar_provider,
+        providers,
+        instruments,
+        &registry,
+        now_utc,
+    )
+    .await)
 }
 
 /// Result of one full required-universe controller cycle.
@@ -845,7 +1069,12 @@ pub async fn run_required_universe_cycle(
         Ok(instruments) => instruments,
         Err(error) => {
             return RequiredUniverseCycleResult {
-                report: registry_unavailable_report(&resolution, &schedule, error),
+                report: registry_unavailable_report(
+                    &resolution,
+                    &schedule,
+                    "instrument_registry_invalid",
+                    error,
+                ),
                 provider_api_calls_made: 0,
             };
         }
@@ -854,7 +1083,12 @@ pub async fn run_required_universe_cycle(
         Ok(providers) => providers,
         Err(error) => {
             return RequiredUniverseCycleResult {
-                report: registry_unavailable_report(&resolution, &schedule, error),
+                report: registry_unavailable_report(
+                    &resolution,
+                    &schedule,
+                    "provider_registry_invalid",
+                    error,
+                ),
                 provider_api_calls_made: 0,
             };
         }
@@ -867,10 +1101,16 @@ pub async fn run_required_universe_cycle(
         schedule.market_date,
     );
 
-    let now_ts = now_utc.timestamp();
+    // §2-4: the strict readiness authority's `required_history_bars` comes
+    // from the strategy actually assigned to each required symbol, resolved
+    // once per cycle from the same watchlist/legacy-env inputs the
+    // required-symbol resolver above just read.
+    let multi_symbol_config = build_multi_symbol_runtime_config_from_env();
+
     let mut statuses: Vec<RequiredMarketDataStatus> = Vec::with_capacity(plan.resolutions.len());
     let mut provider_api_calls_made = 0_u64;
 
+    let now_ts = now_utc.timestamp();
     let past_close_grace =
         now_ts > schedule.session_close_utc.timestamp() + SESSION_CLOSE_POLL_BUFFER_SECS;
 
@@ -931,101 +1171,151 @@ pub async fn run_required_universe_cycle(
                     }
                 }
 
-                let mut freshness = evaluate_md_freshness_status(
-                    Some(db_pool),
-                    &resolved.symbol,
-                    &resolved.timeframe,
-                    now_ts,
+                // §2-4: strict readiness authority, never the legacy
+                // fixed-5-bar/wall-clock-age evaluator.
+                let readiness = match evaluate_strict_readiness_for_resolved(
+                    db_pool,
+                    resolved,
+                    &multi_symbol_config,
+                    calendar_provider,
+                    &providers,
+                    &instruments,
+                    now_utc,
                 )
-                .await;
+                .await
+                {
+                    Ok(readiness) => readiness,
+                    Err(detail) => {
+                        statuses.push(RequiredMarketDataStatus {
+                            symbol: resolved.symbol.clone(),
+                            timeframe: resolved.timeframe.clone(),
+                            provider_id: Some(resolved.provider_id.clone()),
+                            provider_symbol: Some(resolved.provider_symbol.clone()),
+                            freshness_state: "strategy_assignment_unresolved".to_string(),
+                            latest_completed_bar_ts: None,
+                            blockers: vec![detail],
+                        });
+                        continue;
+                    }
+                };
 
+                // §21: only the bounded, typed refreshable-reason set may
+                // trigger a bounded provider attempt — never a
+                // registry/binding/calendar/provenance blocker, and never
+                // when the bar stage itself could not run (db_unavailable/
+                // query_failed).
                 let should_attempt_refresh = !dry_run
                     && !past_close_grace
-                    && matches!(
-                        freshness.freshness_state.as_str(),
-                        "missing" | "insufficient" | "stale"
-                    );
+                    && !readiness.is_ready()
+                    && !matches!(readiness.readiness_state, "db_unavailable" | "query_failed")
+                    && readiness.blockers.iter().any(|b| is_refreshable_reason(b));
 
                 if should_attempt_refresh {
                     if let Some(provider_config) = providers
                         .iter()
                         .find(|p| p.provider_id.eq_ignore_ascii_case(&resolved.provider_id))
                     {
-                        // §17/§18: two distinct data responsibilities.
-                        // `missing`/`insufficient` need historical/readiness
-                        // bootstrap (a bounded historical-bars provider
-                        // call); `stale` means bars already exist and only
-                        // the newest completed bar needs to be observed
-                        // (the ordinary latest-closed-bar poll). Never run a
-                        // full historical resync merely because the latest
-                        // bar is a few minutes old.
-                        let outcome = if freshness.freshness_state == "stale" {
+                        // §17/§22/§23: interior gaps and missing/insufficient
+                        // history need the bounded historical bootstrap; an
+                        // otherwise-ready requirement missing only today's
+                        // expected latest bar needs exactly one constrained
+                        // latest-bar poll (§24 — never `expected_bar_
+                        // constraint=None` for this repair path).
+                        let outcome = if needs_historical_bootstrap(&readiness.blockers) {
+                            let required = readiness.required_history_bars.unwrap_or(0);
+                            attempt_bounded_historical_bootstrap(
+                                db_pool,
+                                provider_config,
+                                injected_provider_client,
+                                resolved,
+                                required,
+                                now_utc,
+                            )
+                            .await
+                        } else {
+                            let constraint = readiness
+                                .expected_latest_bar_ts
+                                .map(|exact_end_ts| ExpectedLatestBarConstraint { exact_end_ts });
                             attempt_bounded_refresh(
                                 db_pool,
                                 &instruments,
                                 provider_config,
                                 injected_provider_client,
                                 resolved,
-                                now_utc,
-                            )
-                            .await
-                        } else {
-                            attempt_bounded_historical_bootstrap(
-                                db_pool,
-                                provider_config,
-                                injected_provider_client,
-                                resolved,
+                                constraint,
                                 now_utc,
                             )
                             .await
                         };
-                        if !matches!(outcome, RefreshAttemptOutcome::Skipped) {
+                        if outcome.is_actual_call() {
                             provider_api_calls_made += 1;
                         }
-                        // Re-run canonical readiness after the bounded
-                        // attempt (§18) regardless of its outcome — the
-                        // freshness evaluator is the single source of truth
-                        // for whether the requirement is now ready, not the
-                        // refresh call's own return value.
-                        freshness = evaluate_md_freshness_status(
-                            Some(db_pool),
-                            &resolved.symbol,
-                            &resolved.timeframe,
-                            now_ts,
+
+                        // Re-run the strict readiness authority after the
+                        // bounded attempt (§18) regardless of its outcome —
+                        // it is the single source of truth for whether the
+                        // requirement is now ready, not the refresh call's
+                        // own return value.
+                        let reevaluated = evaluate_strict_readiness_for_resolved(
+                            db_pool,
+                            resolved,
+                            &multi_symbol_config,
+                            calendar_provider,
+                            &providers,
+                            &instruments,
+                            now_utc,
                         )
                         .await;
-                        if let RefreshAttemptOutcome::ProviderError(detail) = outcome {
-                            if freshness.freshness_state != "ok" {
+
+                        match reevaluated {
+                            Ok(readiness2) => {
+                                let mut blockers: Vec<String> =
+                                    readiness2.blockers.iter().map(|s| s.to_string()).collect();
+                                if let RefreshAttemptOutcome::CalledError(detail) = &outcome {
+                                    if !readiness2.is_ready() {
+                                        blockers.push(detail.clone());
+                                    }
+                                }
                                 statuses.push(RequiredMarketDataStatus {
                                     symbol: resolved.symbol.clone(),
                                     timeframe: resolved.timeframe.clone(),
                                     provider_id: Some(resolved.provider_id.clone()),
                                     provider_symbol: Some(resolved.provider_symbol.clone()),
-                                    freshness_state: freshness.freshness_state.clone(),
-                                    latest_completed_bar_ts: freshness
-                                        .latest_completed_bar_ts
-                                        .clone(),
-                                    blockers: vec![freshness.reason.clone(), detail],
+                                    freshness_state: freshness_state_from_readiness(&readiness2),
+                                    latest_completed_bar_ts: readiness2
+                                        .actual_latest_bar_ts
+                                        .and_then(|ts| DateTime::<Utc>::from_timestamp(ts, 0))
+                                        .map(|dt| dt.to_rfc3339()),
+                                    blockers,
                                 });
-                                continue;
+                            }
+                            Err(detail) => {
+                                statuses.push(RequiredMarketDataStatus {
+                                    symbol: resolved.symbol.clone(),
+                                    timeframe: resolved.timeframe.clone(),
+                                    provider_id: Some(resolved.provider_id.clone()),
+                                    provider_symbol: Some(resolved.provider_symbol.clone()),
+                                    freshness_state: "strategy_assignment_unresolved".to_string(),
+                                    latest_completed_bar_ts: None,
+                                    blockers: vec![detail],
+                                });
                             }
                         }
+                        continue;
                     }
                 }
 
-                let blockers = if freshness.is_start_blocker() {
-                    vec![freshness.reason.clone()]
-                } else {
-                    Vec::new()
-                };
                 statuses.push(RequiredMarketDataStatus {
                     symbol: resolved.symbol.clone(),
                     timeframe: resolved.timeframe.clone(),
                     provider_id: Some(resolved.provider_id.clone()),
                     provider_symbol: Some(resolved.provider_symbol.clone()),
-                    freshness_state: freshness.freshness_state.clone(),
-                    latest_completed_bar_ts: freshness.latest_completed_bar_ts.clone(),
-                    blockers,
+                    freshness_state: freshness_state_from_readiness(&readiness),
+                    latest_completed_bar_ts: readiness
+                        .actual_latest_bar_ts
+                        .and_then(|ts| DateTime::<Utc>::from_timestamp(ts, 0))
+                        .map(|dt| dt.to_rfc3339()),
+                    blockers: readiness.blockers.iter().map(|s| s.to_string()).collect(),
                 });
             }
         }
@@ -1085,9 +1375,17 @@ fn not_applicable_report(
     }
 }
 
+/// REPAIR-01 §16/§20: `reason_code` must name the registry that actually
+/// failed to load — `"instrument_registry_invalid"` or
+/// `"provider_registry_invalid"` — never a hardcoded
+/// `"provider_registry_invalid"` regardless of which registry the caller
+/// was loading. Both call sites in [`run_required_universe_cycle`] pass the
+/// reason matching the specific loader (`load_validated_instrument_registry`
+/// / `load_validated_provider_registry`) that returned `Err`.
 fn registry_unavailable_report(
     resolution: &RequiredSymbolsResolution,
     schedule: &MarketSessionSchedule,
+    reason_code: &'static str,
     error: String,
 ) -> RequiredUniverseStatusReport {
     let normalized = normalize_required_symbols(&resolution.required);
@@ -1098,7 +1396,7 @@ fn registry_unavailable_report(
             timeframe: r.timeframe,
             provider_id: None,
             provider_symbol: None,
-            freshness_state: "provider_registry_invalid".to_string(),
+            freshness_state: reason_code.to_string(),
             latest_completed_bar_ts: None,
             blockers: vec![error.clone()],
         })
@@ -1123,14 +1421,64 @@ fn registry_unavailable_report(
     }
 }
 
+/// REPAIR-01 §6/§7/§8: the next session-anchored publication-grace-aware
+/// poll boundary for one timeframe. `None` means "nothing left to poll for
+/// `market_date` on this timeframe" — either the schedule's own date is not
+/// a trading day, or every grid boundary through the final-capture horizon
+/// has already passed.
+///
+/// Deliberately never `mqk_md::next_poll_time_ts` (an epoch-boundary
+/// cadence with no session/grace awareness): that produced a wake every
+/// `timeframe` epoch-boundary regardless of whether the market had even
+/// opened yet (§7's "no 5-minute heartbeat before open" defect). Every
+/// candidate here is `session_open_utc`-anchored grid-slot-close +
+/// `effective_grace_seconds` — the same session-anchored expectation
+/// `daily_data_readiness::expected_intraday_end_ts_window`/
+/// `intraday_grid_starts` compute, reused via the same grid-construction
+/// helper (`daily_data_readiness::intraday_grid_starts`) rather than a
+/// second, hand-rolled grid walk.
+fn next_session_anchored_boundary(
+    timeframe: mqk_md::Timeframe,
+    schedule: &MarketSessionSchedule,
+    now_ts: i64,
+    effective_grace_seconds: i64,
+) -> Option<i64> {
+    if !schedule.is_trading_day {
+        return None;
+    }
+    let close_ts = schedule.session_close_utc.timestamp();
+    let close_horizon_ts = close_ts + SESSION_CLOSE_POLL_BUFFER_SECS;
+    if now_ts >= close_horizon_ts {
+        return None;
+    }
+    if timeframe == mqk_md::Timeframe::D1 {
+        // One expected bar per session, labeled at session close (§8's
+        // "final capture horizon" retained as the outer clamp).
+        let boundary = close_ts + effective_grace_seconds;
+        return Some(boundary.max(now_ts + 1).min(close_horizon_ts));
+    }
+    let interval = timeframe.duration_secs();
+    for slot in daily_data_readiness::intraday_grid_starts(
+        schedule.session_open_utc,
+        schedule.session_close_utc,
+        interval,
+    ) {
+        let boundary = slot + interval + effective_grace_seconds;
+        if boundary > now_ts {
+            return Some(boundary.min(close_horizon_ts));
+        }
+    }
+    // Every intraday grid boundary already passed, but the final-capture
+    // horizon has not — keep one last scheduled poll there (§8).
+    Some(close_horizon_ts)
+}
+
 /// Compute the next scheduler poll instant for a plan's groups: the
-/// earliest next-completed-bar boundary across every distinct timeframe in
-/// `groups`, using the authoritative latest-closed-bar/next-poll-time math
-/// (`mqk_md::next_poll_time_ts`) — never a fixed 5-minute-from-now
-/// heuristic. Returns `None` when there are no groups (nothing to poll) or
-/// once the session close + grace window has passed for the day (§22/§23,
-/// session-close proof: the scheduler stops scheduling further polls for
-/// `market_date`).
+/// earliest [`next_session_anchored_boundary`] across every distinct
+/// timeframe in `groups`. Returns `None` when there are no groups (nothing
+/// to poll) or once every timeframe's own session-anchored horizon has
+/// passed for the day (§22/§23, session-close proof: the scheduler stops
+/// scheduling further polls for `market_date`).
 fn next_poll_time_for_groups(
     groups: &[ProviderTimeframeGroup],
     schedule: &MarketSessionSchedule,
@@ -1140,23 +1488,25 @@ fn next_poll_time_for_groups(
         return None;
     }
     let now_ts = now_utc.timestamp();
-    let close_horizon_ts = schedule.session_close_utc.timestamp() + SESSION_CLOSE_POLL_BUFFER_SECS;
-    if now_ts >= close_horizon_ts {
-        return None;
-    }
+    let configured_grace = daily_data_readiness::configured_grace_seconds_from_env();
     let mut earliest: Option<i64> = None;
     for group in groups {
         let Ok(timeframe) = mqk_md::Timeframe::parse(&group.timeframe) else {
             continue;
         };
-        let candidate = mqk_md::next_poll_time_ts(timeframe, now_ts);
-        earliest = Some(match earliest {
-            Some(current) => current.min(candidate),
-            None => candidate,
-        });
+        let grace = daily_data_readiness::effective_grace_seconds(
+            configured_grace,
+            timeframe.duration_secs(),
+        );
+        if let Some(candidate) = next_session_anchored_boundary(timeframe, schedule, now_ts, grace)
+        {
+            earliest = Some(match earliest {
+                Some(current) => current.min(candidate),
+                None => candidate,
+            });
+        }
     }
     earliest
-        .map(|ts| ts.min(close_horizon_ts))
         .and_then(|ts| DateTime::<Utc>::from_timestamp(ts, 0))
         .map(|dt| dt.to_rfc3339())
 }
@@ -1249,20 +1599,29 @@ pub async fn run_and_record_cycle(
 /// Returns `Err` (no state mutation) if the scheduler is already running —
 /// mirrors the existing feed scheduler's `already_running` conflict
 /// contract.
+///
+/// REPAIR-01 Defect B: the stopped -> running transition is now the check
+/// and the set inside one single mutex acquisition, so two concurrent
+/// callers can never both observe `running == false` and both proceed to
+/// claim ownership — exactly one of any two concurrent calls gets `Ok`, the
+/// other gets the `already_running` `Err` with no state mutation, and the
+/// immediate controller cycle + background task are each started exactly
+/// once (proven by `concurrent_start_admits_exactly_one_starter` in the
+/// scenario test file).
 pub async fn start_required_universe_scheduler(
     st: &Arc<AppState>,
     dry_run: bool,
     now_utc: DateTime<Utc>,
 ) -> Result<RequiredUniverseStatusReport, String> {
     {
-        let scheduler = st.required_universe_scheduler.lock().await;
+        let mut scheduler = st.required_universe_scheduler.lock().await;
         if scheduler.running {
             return Err("required-universe scheduler is already running".to_string());
         }
-    }
-
-    {
-        let mut scheduler = st.required_universe_scheduler.lock().await;
+        // Atomic with the check above: no other caller can observe
+        // `running == false` between the check and this assignment, because
+        // both happen under the same held lock and this function never
+        // `.await`s while holding it.
         *scheduler = RequiredUniverseSchedulerRuntimeState {
             running: true,
             dry_run,
@@ -1274,10 +1633,21 @@ pub async fn start_required_universe_scheduler(
     let report = run_and_record_cycle(st, now_utc, dry_run).await;
 
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
-    let still_running = {
+    // §11: if the immediate cycle already determined there is nothing left
+    // to poll for `market_date` (no groups, non-trading day, or already past
+    // the session-close horizon), settle the scheduler truthfully as
+    // stopped right here — never leave `running=true` with no task and no
+    // future cycle.
+    let should_spawn = {
         let mut scheduler = st.required_universe_scheduler.lock().await;
         if !scheduler.running {
             // Stopped concurrently while the immediate cycle ran.
+            false
+        } else if report.next_poll_utc.is_none() {
+            scheduler.running = false;
+            scheduler.stopped_at_ts = Some(now_utc.timestamp());
+            scheduler.stop_tx = None;
+            scheduler.next_cycle_utc = None;
             false
         } else {
             scheduler.stop_tx = Some(stop_tx);
@@ -1285,7 +1655,7 @@ pub async fn start_required_universe_scheduler(
         }
     };
 
-    if still_running && report.next_poll_utc.is_some() {
+    if should_spawn {
         let task = tokio::spawn(required_universe_scheduler_loop(
             st.clone(),
             stop_rx,
