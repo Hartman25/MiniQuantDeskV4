@@ -43,6 +43,12 @@ param(
     #   Non-fatal: a capture failure warns but does not abort the launcher.
     [switch]$CaptureStartupEvidence,
 
+    # -SkipGui: OFFICIAL-DUAL-MODE-LAUNCHER-01 -- skip resolving/launching the
+    #   desktop GUI. For headless/scheduled attach where no interactive
+    #   desktop session should receive a GUI window. Daemon start/verify
+    #   behavior is unaffected.
+    [switch]$SkipGui,
+
     # -CheckOnly: read-only startup status report (PAPER-OPERATOR-STARTUP-LAUNCHER-01).
     #   Prints repo/.env.local/Docker/paper-DB/daemon/GUI/AAPL bars/sys_arm_state/
     #   live-daemon-truth status and a "Next action" recommendation, then exits.
@@ -1607,11 +1613,18 @@ try {
             Invoke-ArmPaper -BaseUrl $env:MQK_GUI_DAEMON_URL -OperatorToken $operatorToken -Probe $verified
         }
 
-        Write-LauncherStep 'Resolving desktop GUI binary'
-        $guiExe = Ensure-GuiBinary -RepoRoot $repoRoot -ForceRebuild:$forceRebuildGui
+        $guiLaunched = $false
+        if (-not $SkipGui.IsPresent) {
+            Write-LauncherStep 'Resolving desktop GUI binary'
+            $guiExe = Ensure-GuiBinary -RepoRoot $repoRoot -ForceRebuild:$forceRebuildGui
 
-        Write-LauncherStep 'Launching desktop GUI against verified local daemon'
-        Start-Process -FilePath $guiExe -WorkingDirectory (Split-Path -Parent $guiExe) | Out-Null
+            Write-LauncherStep 'Launching desktop GUI against verified local daemon'
+            Start-Process -FilePath $guiExe -WorkingDirectory (Split-Path -Parent $guiExe) | Out-Null
+            $guiLaunched = $true
+        }
+        else {
+            Write-LauncherStep 'GUI launch skipped (-SkipGui)'
+        }
 
         if ($daemonInfo.Started) {
             if ($Mode -eq 'TradeReady') {
@@ -1627,11 +1640,16 @@ try {
             Write-LauncherSuccess 'Verified local paper daemon was already running; GUI attached without starting runtime'
         }
 
-        if ($Mode -eq 'TradeReady') {
-            Write-LauncherSuccess 'GUI opened in trade-ready mode against the verified canonical backend. Trading runtime remains idle until you explicitly start it.'
+        if ($guiLaunched) {
+            if ($Mode -eq 'TradeReady') {
+                Write-LauncherSuccess 'GUI opened in trade-ready mode against the verified canonical backend. Trading runtime remains idle until you explicitly start it.'
+            }
+            else {
+                Write-LauncherSuccess 'GUI opened in observe/attach mode against the verified canonical backend. No runtime auto-start was performed.'
+            }
         }
         else {
-            Write-LauncherSuccess 'GUI opened in observe/attach mode against the verified canonical backend. No runtime auto-start was performed.'
+            Write-LauncherSuccess 'GUI launch skipped (-SkipGui); verified canonical backend is attached headless. No runtime auto-start was performed.'
         }
 
         if ($CaptureStartupEvidence.IsPresent) {
