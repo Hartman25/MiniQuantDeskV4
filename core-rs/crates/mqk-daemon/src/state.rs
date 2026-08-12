@@ -29,6 +29,7 @@ mod multi_symbol_config;
 mod orchestrator_build;
 mod paper_portfolio_accounting;
 mod per_symbol_bar_window;
+pub mod required_market_data_autofresh;
 pub mod runtime_session_source;
 mod session_controller;
 mod signal_intake;
@@ -760,6 +761,17 @@ pub struct AppState {
     ///
     /// Disabled by default. Holds only in-memory task/config/status state.
     pub market_data_feed_scheduler: Arc<Mutex<MarketDataFeedSchedulerRuntimeState>>,
+    /// MARKET-DATA-AUTOFRESH-REQUIRED-UNIVERSE-01: Process-local required-
+    /// universe market-data freshness controller/scheduler.
+    ///
+    /// Disabled by default. Maintains every symbol/timeframe the currently
+    /// configured autonomous Paper operation requires (derived from the same
+    /// `required_symbols_with_source_from_env()` resolver as the ingest-plan
+    /// and premarket readiness surfaces) by reusing the existing latest-bar
+    /// poll seam per resolved provider/timeframe group. Not durable across
+    /// restart — see `required_market_data_autofresh` module docs.
+    pub required_universe_scheduler:
+        Arc<Mutex<required_market_data_autofresh::RequiredUniverseSchedulerRuntimeState>>,
     /// BROKER-FILL-REST-RECOVERY-01: Injectable Alpaca fill activity fetcher.
     ///
     /// `None` when REST recovery is not configured on this daemon instance.
@@ -1787,6 +1799,9 @@ impl AppState {
             market_data_feed_status: Arc::new(RwLock::new(None)),
             market_data_feed_scheduler: Arc::new(Mutex::new(
                 MarketDataFeedSchedulerRuntimeState::default(),
+            )),
+            required_universe_scheduler: Arc::new(Mutex::new(
+                required_market_data_autofresh::RequiredUniverseSchedulerRuntimeState::default(),
             )),
             fill_activity_fetcher,
             ws_gap_fill_fetcher,

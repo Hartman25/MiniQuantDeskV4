@@ -42,6 +42,28 @@
 #   -RepoRoot             Repo root. Default: auto-resolved two levels up from this script.
 #   -CheckOnly            Read-only check: bar count, freshness, key presence. No mutations.
 #   -Once                 One refresh then exit (no loop).
+#   -DaemonPort           Daemon HTTP port, used only for the required-universe
+#                          scheduler conflict guard below. Default: 8899.
+#   -AllowConcurrentWithRequiredUniverseScheduler
+#                          Explicit override: skip the conflict guard and start
+#                          the interval loop even if the daemon's required-
+#                          universe scheduler is already running. Off by default.
+#
+# MARKET-DATA-AUTOFRESH-REQUIRED-UNIVERSE-01 (permanent direction):
+#   The daemon now owns required-universe market-data maintenance
+#   (POST/GET /api/v1/market-data/required-universe/{start,stop,status,plan}),
+#   deriving the required symbol/timeframe/provider set from the same
+#   canonical resolver this script already uses via -SymbolsFromIngestPlan-
+#   style routes. This script remains a valid manual/operator bootstrap and
+#   bounded-refresh (-Once / -CheckOnly) tool, but its recurring INTERVAL LOOP
+#   mode is not the primary ongoing-maintenance path anymore -- two
+#   independent long-running refresh schedulers must never poll the same
+#   symbols concurrently (duplicate provider calls, no single source of
+#   next-poll-time truth). Before entering the interval loop, this script
+#   queries the daemon's required-universe scheduler status and refuses to
+#   start (exit 1) if it is already running, unless
+#   -AllowConcurrentWithRequiredUniverseScheduler is passed explicitly.
+#   -Once and -CheckOnly are unaffected (bounded, not a competing loop).
 #
 # Hard rules:
 #   - Paper DB only. Refuses if MQK_DATABASE_URL does not contain port 5440.
@@ -69,7 +91,9 @@ param(
     [string] $PaperDbUrl         = 'postgres://postgres:postgres@127.0.0.1:5440/miniquantdesk_paper?sslmode=disable',
     [string] $RepoRoot            = '',
     [switch] $CheckOnly,
-    [switch] $Once
+    [switch] $Once,
+    [int]    $DaemonPort          = 8899,
+    [switch] $AllowConcurrentWithRequiredUniverseScheduler
 )
 
 Set-StrictMode -Version Latest
@@ -695,6 +719,30 @@ if ($Once) {
     Write-Sect "One-shot complete"
     $exitCode = if ($ok) { 0 } else { 1 }
     exit $exitCode
+}
+
+# ---------------------------------------------------------------------------
+# GUARD (MARKET-DATA-AUTOFRESH-REQUIRED-UNIVERSE-01): refuse to start the
+# recurring interval loop if the daemon's required-universe scheduler is
+# already running -- two independent long-running schedulers must never
+# poll the same symbols concurrently. Best-effort: if the daemon is
+# unreachable, this cannot prove a conflict either way, so it proceeds (the
+# daemon-owned scheduler cannot be running if the daemon itself is down).
+# -AllowConcurrentWithRequiredUniverseScheduler bypasses this explicitly.
+# ---------------------------------------------------------------------------
+if (-not $AllowConcurrentWithRequiredUniverseScheduler) {
+    $requiredUniverseStatusUrl = "http://127.0.0.1:$DaemonPort/api/v1/market-data/required-universe/status"
+    try {
+        $ruStatus = Invoke-RestMethod -Uri $requiredUniverseStatusUrl -Method Get -TimeoutSec 3 -ErrorAction Stop
+        if ($ruStatus.running -eq $true) {
+            Write-Fail "The daemon's required-universe market-data scheduler is already running (GET $requiredUniverseStatusUrl -> running=true)."
+            Write-Fail "Running this script's own interval loop at the same time would risk duplicate/uncoordinated provider polling."
+            Write-Fail "Use -Once or -CheckOnly for a manual bounded refresh, or pass -AllowConcurrentWithRequiredUniverseScheduler to override explicitly."
+            exit 1
+        }
+    } catch {
+        Write-Warn "Could not reach daemon required-universe status route at $requiredUniverseStatusUrl ($_); proceeding (daemon-owned scheduler cannot be running if the daemon is unreachable)."
+    }
 }
 
 # ---------------------------------------------------------------------------

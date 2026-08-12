@@ -28,7 +28,21 @@
 #                      the -Symbols/-Timeframe parameters. Fails clearly (exit 1) if the
 #                      daemon is unreachable or the plan has no required symbols -- this
 #                      is an explicit opt-in, so it never silently falls back to AAPL.
-#   -DaemonPort        Daemon HTTP port, used only with -SymbolsFromIngestPlan. Default: 8899.
+#   -SymbolsFromRequiredUniverse
+#                      MARKET-DATA-AUTOFRESH-REQUIRED-UNIVERSE-01 (preferred going
+#                      forward): resolve -Symbols/-Timeframe from
+#                      GET /api/v1/market-data/required-universe/plan on the local
+#                      daemon -- the same canonical required-symbol resolver as
+#                      -SymbolsFromIngestPlan, plus per-requirement resolved
+#                      provider/blocker truth. Fails clearly (exit 1) if the daemon is
+#                      unreachable, the plan has no requirements, or any requirement
+#                      carries a registry/provenance blocker (provider_registry_invalid,
+#                      instrument_registry_invalid, provider_symbol_mismatch,
+#                      unsupported_timeframe, provider_disabled,
+#                      provider_capability_mismatch, provider_provenance_invalid) --
+#                      never silently drops the blocked symbol and proceeds with the rest.
+#   -DaemonPort        Daemon HTTP port, used only with -SymbolsFromIngestPlan or
+#                      -SymbolsFromRequiredUniverse. Default: 8899.
 #
 # Provider sync top-off (MARKET-DATA-PROVIDER-PROVENANCE-01-REPAIR-01):
 #   The per-symbol provider sync top-off stage no longer hardcodes
@@ -60,6 +74,7 @@ param(
     [switch]  $CheckOnly,
     [switch]  $SkipAlpacaIntraday,
     [switch]  $SymbolsFromIngestPlan,
+    [switch]  $SymbolsFromRequiredUniverse,
     [int]     $DaemonPort       = 8899
 )
 
@@ -160,7 +175,44 @@ if ($alpacaPaperConfigured) {
 # Parse symbol list -- or resolve from the daemon ingest-plan route
 # (WATCHLIST-INGEST-PLAN-01) when -SymbolsFromIngestPlan is set.
 # ---------------------------------------------------------------------------
-if ($SymbolsFromIngestPlan) {
+if ($SymbolsFromRequiredUniverse) {
+    # MARKET-DATA-AUTOFRESH-REQUIRED-UNIVERSE-01: thin call into the daemon's
+    # authoritative required-universe controller instead of re-deriving
+    # per-symbol provider truth locally. Read-only (dry-run): zero provider
+    # API calls, zero DB writes on the daemon side.
+    Write-Sect "Resolving symbols/timeframe from daemon required-universe plan (port $DaemonPort)"
+    $requiredUniversePlanUrl = "http://127.0.0.1:$DaemonPort/api/v1/market-data/required-universe/plan"
+    try {
+        $ruPlan = Invoke-RestMethod -Uri $requiredUniversePlanUrl -Method Get -TimeoutSec 5 -ErrorAction Stop
+    } catch {
+        Write-Fail "Could not reach daemon required-universe plan route at $requiredUniversePlanUrl ($_)."
+        Write-Fail "Start the daemon first, or omit -SymbolsFromRequiredUniverse to use -Symbols/-Timeframe or -SymbolsFromIngestPlan directly."
+        exit 1
+    }
+
+    if (-not $ruPlan.requirements -or @($ruPlan.requirements).Count -eq 0) {
+        Write-Fail ("Daemon required-universe plan returned no requirements " +
+                     "(overall_state=$($ruPlan.overall_state), symbol_source=$($ruPlan.symbol_source)).")
+        Write-Fail "Configure MQK_PAPER_WATCHLIST_PATH or MQK_STRATEGY_SYMBOL/MQK_STRATEGY_MD_TIMEFRAME on the daemon, or omit -SymbolsFromRequiredUniverse."
+        exit 1
+    }
+
+    $blockedRequirements = @($ruPlan.requirements | Where-Object { @($_.blockers).Count -gt 0 })
+    if ($blockedRequirements.Count -gt 0) {
+        foreach ($b in $blockedRequirements) {
+            Write-Fail "Requirement $($b.symbol)/$($b.timeframe) is blocked: freshness_state=$($b.freshness_state) blockers=$($b.blockers -join '; ')"
+        }
+        Write-Fail "One or more required-universe requirements carry a registry/provenance blocker -- refusing to proceed with a partial universe."
+        Write-Fail "Fix the blocked requirement(s) in the instrument/provider registry, or omit -SymbolsFromRequiredUniverse."
+        exit 1
+    }
+
+    $symbolList = @($ruPlan.requirements | ForEach-Object { $_.symbol.Trim().ToUpper() })
+    $Symbols    = ($symbolList -join ',')
+    $Timeframe  = $ruPlan.requirements[0].timeframe
+    Write-Ok ("Required-universe plan: source=$($ruPlan.symbol_source) market_date=$($ruPlan.market_date) " +
+              "symbols=$($symbolList -join ', ') timeframe=$Timeframe groups=$($ruPlan.groups.Count)")
+} elseif ($SymbolsFromIngestPlan) {
     Write-Sect "Resolving symbols/timeframe from daemon ingest-plan (port $DaemonPort)"
     $ingestPlanUrl = "http://127.0.0.1:$DaemonPort/api/v1/market-data/ingest-plan"
     try {

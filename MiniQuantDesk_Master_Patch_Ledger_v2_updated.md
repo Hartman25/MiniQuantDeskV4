@@ -279,7 +279,7 @@ git diff --check
 
 #### AUTONOMOUS-DAILY-OPERATOR-RETRY-01 — Safe operator recovery from manual_intervention_required after a preflight/readiness repair
 
-**Status:** IMPLEMENTED_PENDING_REVIEW
+**Status:** ACCEPTED_PENDING_INTEGRATION — independently reviewed against commit `035cabf0f43f64957f046aafc6e8136533c93939` (worktree `MiniQuantDeskV4-retry`, branch `fix-autonomous-daily-operator-retry`) during `MARKET-DATA-AUTOFRESH-REQUIRED-UNIVERSE-01`'s session (2026-08-11). Review confirmed `035cabf0` is reachable, its worktree/branch are exactly as recorded below, and it is used unmodified as the base commit for the new patch. Review did not re-run its own test suite in this session. **Not merged to `main`.**
 **Priority:** P0
 **Paper Impact:** YELLOW (new operator-authenticated route only; touches no order/execution/portfolio/broker/GUI path; reuses the existing durable operation state-machine's already-legal `manual_intervention_required -> preparing_data` edge)
 **Subsystem:** mqk-daemon autonomous daily operation coordinator / operator control plane
@@ -319,11 +319,33 @@ git diff --check
 **Exact CLOSED End State:** Not yet CLOSED — `IMPLEMENTED_PENDING_REVIEW` until code-reviewed and merged.
 **Expected Handoff:** Start HEAD `4bc78c70` (dev worktree base = `fix-market-data-provider-provenance`); end HEAD = new commit SHA on `fix-autonomous-daily-operator-retry`; not pushed, not merged.
 
-#### MARKET-DATA-AUTOFRESH-REQUIRED-UNIVERSE-01 — Automatic freshness maintenance for the required market-data universe (blocked/future)
+#### MARKET-DATA-AUTOFRESH-REQUIRED-UNIVERSE-01 — Automatic freshness maintenance for the required market-data universe
 
-**Status:** OPEN · **Priority:** P2 · **Paper Impact:** YELLOW · **Subsystem:** Market-data scheduler/freshness
-**Problem:** Full automatic maintenance of freshness (beyond the single-invocation provenance fix landed by `MARKET-DATA-PROVIDER-PROVENANCE-01`) does not exist yet. Explicitly out of scope for that patch; not started.
-**Dependencies:** `MARKET-DATA-PROVIDER-PROVENANCE-01`
+**Status:** IMPLEMENTED_PENDING_REVIEW
+**Priority:** P0
+**Paper Impact:** YELLOW (new market-data-only routes/scheduler; touches no order/execution/portfolio/broker/GUI path; reuses the existing latest-bar poll/ingest seam and the existing required-symbol resolver unchanged)
+**Subsystem:** mqk-daemon market-data freshness controller / scheduler
+
+**Problem:** The system previously had strict readiness gates and manual refresh tools, but lacked one authoritative controller that derived the complete required trading-data universe and maintained every requirement automatically before and throughout the trading session. An operator had to manually know which ticker(s) needed refreshing, which provider owned each ticker, which timeframe was required, whether historical bootstrap was missing, whether the latest completed bar was stale, and when to poll again.
+
+**Current Source Truth:** Implemented in isolated worktree `C:\Users\Zacha\Desktop\MiniQuantDeskV4-autofresh`, branch `fix-market-data-autofresh-required-universe`, on top of `035cabf0f43f64957f046aafc6e8136533c93939` (`fix-autonomous-daily-operator-retry`, `AUTONOMOUS-DAILY-OPERATOR-RETRY-01`'s accepted base). Not merged.
+
+**Fix:** New pure/business-logic module `core-rs/crates/mqk-daemon/src/state/required_market_data_autofresh.rs` that (1) resolves the required symbol/timeframe universe via the unchanged, pre-existing `market_data_freshness::required_symbols_with_source_from_env()` — the same resolver `GET /api/v1/market-data/ingest-plan` and the premarket readiness gate already use, so all three surfaces can never disagree; (2) resolves each requirement's provider through the validated instrument/provider registries (provider always comes from the instrument's own registered `provider` field — never hardcoded, never first-provider-wins); (3) groups resolved requirements into a typed `RequiredMarketDataRefreshPlan` by `(provider_id, timeframe)` so one provider call never mixes incompatible authority across symbols; (4) distinguishes typed registry/provenance blockers (`provider_registry_invalid`, `instrument_registry_invalid`, `provider_symbol_mismatch`, `unsupported_timeframe`, `provider_disabled`, `provider_capability_mismatch`, `provider_provenance_invalid`) — never retried by polling — from freshness blockers (`missing`/`insufficient`/`stale`, from the existing `evaluate_md_freshness_status`) which may trigger one bounded refresh attempt per cycle; (5) reuses the existing `state::market_data_latest_bar::{resolve_latest_bar_poll_target, poll_and_ingest_latest_closed_bar}` seam for the actual provider call and durable `md_bars` write — no second HTTP client, parser, or writer; (6) derives poll cadence and session-close cutoff from the existing `state::market_calendar::resolve_market_session_schedule` (DST/holiday/early-close aware, no HST/ET wall-clock hardcode); (7) never auto-repairs a bar whose stamped `provider_id` disagrees with the registry-resolved provider (wrong-provider negative control). New thin Axum routes in `core-rs/crates/mqk-daemon/src/routes/required_market_data.rs`: `GET /api/v1/market-data/required-universe/plan` (read-only dry-run, §46: zero provider calls, zero DB writes), `GET /api/v1/market-data/required-universe/status`, `POST /api/v1/market-data/required-universe/start` / `POST .../stop` (operator, requires auth) controlling a new process-local scheduler (`AppState::required_universe_scheduler`, not durable across restart — re-derived from `md_bars` + a fresh plan on every restart, matching the existing feed scheduler's own non-durability). All existing `market-data/feed/*` and `market-data/ingest-plan` routes are unchanged and continue to work; the required-universe surface is additive.
+**Dependencies:** `MARKET-DATA-PROVIDER-PROVENANCE-01`, `AUTONOMOUS-DAILY-OPERATOR-RETRY-01` (base commit; this patch does not call its retry route)
+**Unlocks:** `INSTRUMENT-UNIVERSE-REFRESH-01` (multi-symbol registry review), `MARKET-DATA-CLI-MULTISYMBOL-ATOMICITY-01`, `AUTONOMOUS-DATA-BLOCKER-AUTO-RECOVERY-01` (all OPEN, not started by this patch)
+**In Scope:** New state module, new routes module + route registration, `AppState` scheduler-state field, focused scenario tests, `Prep-PremarketMarketData.ps1` / `Refresh-IntradayMarketData.ps1` / `Start-PaperTradingSmoke.ps1` updates to use the new required-universe authority, this ledger update.
+**Out of Scope:** GUI changes; official-launcher branch/merge; Windows Task Scheduler registration; automatic invocation of `AUTONOMOUS-DAILY-OPERATOR-RETRY-01`'s retry route; live trading; strategy/OMS/portfolio/broker code; bulk instrument-registry review beyond the currently-approved universe (`INSTRUMENT-UNIVERSE-REFRESH-01`, still separate/OPEN).
+**Likely Files / Surfaces:** `core-rs/crates/mqk-daemon/src/state/required_market_data_autofresh.rs` (new), `core-rs/crates/mqk-daemon/src/routes/required_market_data.rs` (new), `core-rs/crates/mqk-daemon/src/routes.rs`, `core-rs/crates/mqk-daemon/src/state.rs`, `core-rs/crates/mqk-daemon/tests/scenario_market_data_autofresh_required_universe_01.rs` (new), `core-rs/crates/mqk-daemon/tests/scenario_market_data_autofresh_plan_resolution_01.rs` (new), `scripts/windows/Prep-PremarketMarketData.ps1`, `scripts/windows/Refresh-IntradayMarketData.ps1`, `scripts/windows/Start-PaperTradingSmoke.ps1`.
+**Required Implementation Rules:** No second required-symbol resolver; provider identity always read from the instrument registry's own `provider` field; registry/provenance blockers never retried by polling; overall readiness requires every required requirement ready (no partial green); zero order/execution/arm/halt/reconcile calls anywhere in this module (verified by grep — see closure evidence).
+**Safety / Compatibility Requirements:** Existing `market-data/feed/*`, `market-data/ingest-plan`, and `market-data/readiness` routes unchanged; `md_bars` upsert idempotency unchanged (reused seam); no migration.
+**Exact CLOSED End State:** Not yet CLOSED — `IMPLEMENTED_PENDING_REVIEW` until code-reviewed, its scenario tests run against a real local Postgres by a reviewer, and merged.
+**Expected Handoff:** Start HEAD `035cabf0f43f64957f046aafc6e8136533c93939` (dev worktree base = `fix-autonomous-daily-operator-retry`); end HEAD = new commit SHA on `fix-market-data-autofresh-required-universe`; not pushed, not merged.
+
+#### AUTONOMOUS-DATA-BLOCKER-AUTO-RECOVERY-01 — Automatic retry of manual_intervention_required once autofresh repairs data (blocked/future)
+
+**Status:** OPEN · **Priority:** P3 · **Paper Impact:** YELLOW · **Subsystem:** Autonomous daily operation / market-data freshness
+**Problem:** `MARKET-DATA-AUTOFRESH-REQUIRED-UNIVERSE-01` may expose `operator_retry_required`-shaped truth when a required symbol is blocked, but deliberately never calls `AUTONOMOUS-DAILY-OPERATOR-RETRY-01`'s retry route automatically (out of scope, §33 of the originating spec). Whether/how to safely automate that composition is undecided and not started.
+**Dependencies:** `MARKET-DATA-AUTOFRESH-REQUIRED-UNIVERSE-01`, `AUTONOMOUS-DAILY-OPERATOR-RETRY-01`
 
 #### INSTRUMENT-UNIVERSE-REFRESH-01 — Bulk instrument-registry provider/timeframe review beyond AAPL (blocked/future)
 

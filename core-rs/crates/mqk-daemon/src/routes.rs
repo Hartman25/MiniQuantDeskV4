@@ -52,6 +52,7 @@ pub(crate) mod portfolio_allocation;
 pub(crate) mod portfolio_provenance;
 pub(crate) mod reconcile;
 pub(crate) mod repair;
+pub(crate) mod required_market_data;
 pub(crate) mod strategy;
 pub(crate) mod strategy_conflict;
 pub(crate) mod strategy_promotions;
@@ -312,6 +313,10 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         repair_adopt_broker_position_baseline, repair_halted_run_fill_apply,
         repair_halted_run_fill_plan, repair_halted_run_fill_rest_recovery,
         repair_halted_run_portfolio_snapshot, repair_outbox_ambiguous, repair_ws_gap_fill_recovery,
+    };
+    use required_market_data::{
+        required_universe_plan, required_universe_scheduler_start,
+        required_universe_scheduler_stop, required_universe_status,
     };
     use strategy::{
         multi_symbol_dispatch_summary, strategy_dry_run_status, strategy_signal, strategy_summary,
@@ -723,6 +728,19 @@ pub fn build_router(state: Arc<AppState>) -> Router {
             "/api/v1/market-data/readiness",
             get(market_data_readiness_status),
         )
+        // MARKET-DATA-AUTOFRESH-REQUIRED-UNIVERSE-01: read-only required-
+        // universe plan/dry-run (public, no auth). Zero provider API calls,
+        // zero DB writes -- reads md_bars read-only for current freshness.
+        .route(
+            "/api/v1/market-data/required-universe/plan",
+            get(required_universe_plan),
+        )
+        // MARKET-DATA-AUTOFRESH-REQUIRED-UNIVERSE-01: read-only required-
+        // universe scheduler status (public, no auth).
+        .route(
+            "/api/v1/market-data/required-universe/status",
+            get(required_universe_status),
+        )
         .route("/v1/trading/account", get(trading_account))
         .route("/v1/trading/positions", get(trading_positions))
         .route("/v1/trading/orders", get(trading_orders))
@@ -864,6 +882,19 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/v1/market-data/feed/scheduler/stop",
             post(market_data_feed_scheduler_stop),
+        )
+        // MARKET-DATA-AUTOFRESH-REQUIRED-UNIVERSE-01: start/stop the
+        // required-universe market-data freshness controller (operator,
+        // requires auth). Controls only this market-data scheduler --
+        // never the execution runtime, never arm/halt/reconcile state, no
+        // order submission (§43).
+        .route(
+            "/api/v1/market-data/required-universe/start",
+            post(required_universe_scheduler_start),
+        )
+        .route(
+            "/api/v1/market-data/required-universe/stop",
+            post(required_universe_scheduler_stop),
         )
         // AUTONOMOUS-DAILY-OPERATOR-RETRY-01: narrow, explicit operator
         // recovery from `manual_intervention_required` after a pre-start /

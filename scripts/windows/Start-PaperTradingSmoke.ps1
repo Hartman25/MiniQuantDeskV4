@@ -56,6 +56,26 @@
 #                      (-RequireIntradayRefresh) will let the script proceed to STEP 15. Controls
 #                      only this script's preflight quality bar -- it does not change
 #                      MQK_INTRADAY_BAR_MAX_AGE_SECS or any daemon gate. Default: 120.
+#   -StartRequiredUniverseScheduler
+#                      MARKET-DATA-AUTOFRESH-REQUIRED-UNIVERSE-01 (preferred going forward):
+#                      in new STEP 8D, call POST /api/v1/market-data/required-universe/start
+#                      on the daemon so it maintains freshness for every symbol/timeframe the
+#                      currently configured autonomous Paper operation requires (derived from
+#                      the same canonical resolver as STEP 5B/STEP 9B) for the rest of this
+#                      session. Data-only: never starts/stops the execution runtime, never
+#                      arms/disarms, never clears halt/kill-switch/reconcile, submits zero
+#                      orders. Default: off, same opt-in posture as -StartIntradayRefreshLoop.
+#                      Passing both -StartRequiredUniverseScheduler and
+#                      -StartIntradayRefreshLoop in the same run is refused (STEP 8D) --
+#                      two independent long-running market-data schedulers must never run
+#                      concurrently for the same symbols; see Refresh-IntradayMarketData.ps1's
+#                      own conflict guard for the reverse case (standalone script vs. an
+#                      already-running daemon scheduler).
+#   -RequiredUniverseSchedulerDryRun
+#                      Start the required-universe scheduler in dry-run mode (checkonly):
+#                      zero provider API calls, zero DB writes, status/plan only. Used only
+#                      with -StartRequiredUniverseScheduler. Default: off (real bounded
+#                      refresh, matching -StartIntradayRefreshLoop's real-refresh default).
 #
 # Hard rules enforced by this script:
 #   - Paper+Alpaca path only. Fails if daemon_mode != paper.
@@ -81,7 +101,9 @@ param(
     [switch]$RequireIntradayRefresh,
     [int]   $IntradayRefreshIntervalSeconds = 300,
     [int]   $IntradayRefreshDurationSeconds = 1800,
-    [int]   $MinFreshnessHeadroomSeconds = 120
+    [int]   $MinFreshnessHeadroomSeconds = 120,
+    [switch]$StartRequiredUniverseScheduler,
+    [switch]$RequiredUniverseSchedulerDryRun
 )
 
 Set-StrictMode -Version Latest
@@ -1055,6 +1077,60 @@ if ($StartIntradayRefreshLoop) {
     Write-Step "  STEP 5B's one-shot market-data prep does not stay fresh for a full market-hours session."
     Write-Step "  To keep intraday bars fresh yourself, run in a separate terminal:"
     Write-Step "  powershell -ExecutionPolicy Bypass -File scripts\windows\Refresh-IntradayMarketData.ps1 -IntervalSeconds 300 -DurationSeconds 1800"
+    Write-Step "  Or, preferred going forward: -StartRequiredUniverseScheduler (STEP 8D below) lets the daemon own ongoing freshness."
+}
+
+# ---------------------------------------------------------------------------
+# STEP 8D: Required-universe scheduler (optional, -StartRequiredUniverseScheduler)
+# MARKET-DATA-AUTOFRESH-REQUIRED-UNIVERSE-01
+#
+# Data-only: calls the daemon's required-universe market-data controller,
+# which derives every symbol/timeframe the currently configured autonomous
+# Paper operation requires (the same canonical resolver STEP 5B/STEP 9B
+# already use) and keeps it fresh through the rest of this session. Never
+# starts/stops the execution runtime, never arms/disarms, never clears
+# halt/kill-switch/reconcile, submits zero orders -- this step only calls
+# POST /api/v1/market-data/required-universe/start on the already-running
+# daemon (STEP 7/STEP 8 verified it above). Default: off, same explicit
+# opt-in posture -StartIntradayRefreshLoop already established -- this
+# script never starts provider refresh network activity on its own.
+# ---------------------------------------------------------------------------
+Write-Section "STEP 8D: Required-universe scheduler (optional, -StartRequiredUniverseScheduler)"
+
+if ($StartRequiredUniverseScheduler -and $StartIntradayRefreshLoop) {
+    Write-Fail "Both -StartRequiredUniverseScheduler and -StartIntradayRefreshLoop were passed."
+    Write-Fail "Two independent long-running market-data schedulers must never run concurrently for the same symbols."
+    Write-Fail "Pass exactly one of the two flags."
+    Write-EvidenceCapture "STEP 8D: refused -- both scheduler flags set"
+    exit 1
+}
+
+if ($StartRequiredUniverseScheduler) {
+    try {
+        $ruStartBody = @{ dry_run = [bool]$RequiredUniverseSchedulerDryRun }
+        $ruStart = Invoke-DaemonPost -Path '/api/v1/market-data/required-universe/start' -Body $ruStartBody
+        if ($ruStart.StatusCode -eq 200) {
+            $ruReport = $ruStart.Body.report
+            Write-Ok ("Required-universe scheduler started: truth_state=$($ruStart.Body.truth_state) " +
+                      "overall_state=$($ruReport.overall_state) requirements=$($ruReport.requirements.Count) " +
+                      "groups=$($ruReport.groups.Count) dry_run=$([bool]$RequiredUniverseSchedulerDryRun)")
+            foreach ($ruReq in @($ruReport.requirements)) {
+                if (@($ruReq.blockers).Count -gt 0) {
+                    Write-Warn "Required-universe requirement $($ruReq.symbol)/$($ruReq.timeframe): freshness_state=$($ruReq.freshness_state) blockers=$($ruReq.blockers -join '; ')"
+                }
+            }
+        } elseif ($ruStart.StatusCode -eq 409) {
+            Write-Warn "Required-universe scheduler was already running (truth_state=$($ruStart.Body.truth_state)); continuing."
+        } else {
+            Write-Warn "Required-universe scheduler start returned HTTP $($ruStart.StatusCode) (non-fatal): $($ruStart.Body.error)"
+        }
+    } catch {
+        Write-Warn "Failed to start required-universe scheduler (non-fatal): $_"
+    }
+} else {
+    Write-Step "Required-universe scheduler not requested (-StartRequiredUniverseScheduler not set)."
+    Write-Step "  To let the daemon maintain data freshness for the rest of this session, pass -StartRequiredUniverseScheduler."
+    Write-Step "  Read-only plan/status without starting anything: GET /api/v1/market-data/required-universe/plan (or /status)."
 }
 
 # ---------------------------------------------------------------------------
