@@ -872,6 +872,49 @@ blocker, or manually create coverage or evaluation evidence. There is no manual 
 | Database/API unavailable (`backend_unavailable` / `query_failed`) | Confirm DB container is healthy (`docker ps`, §0b); restart the daemon once DB is confirmed reachable; do not treat this as a finalized/degraded operation outcome — it is a transport/backend truth distinct from operation truth |
 | Daemon restart needed | Stop the daemon process; restart per §15.3; verify §15.5–15.7 again before resuming supervision |
 | GUI restart needed | Restart per §15.4; the GUI has no independent state — a restart only re-establishes polling, it never changes daemon/DB truth |
+| `manual_intervention_required` caused by a repaired pre-start/preflight condition (e.g. market-data readiness) | See §19a below — `POST /api/v1/autonomous/daily-operation/retry` |
+
+### 19a. Operator retry after a preflight repair (AUTONOMOUS-DAILY-OPERATOR-RETRY-01)
+
+When a daily operation is `manual_intervention_required` **because of a
+pre-start/preflight condition that has since been genuinely repaired**
+(the canonical example: daily-data-readiness failed, the underlying
+market-data defect was fixed, and the operation never re-evaluated), an
+operator may call:
+
+```
+POST /api/v1/autonomous/daily-operation/retry
+Authorization: Bearer <MQK_OPERATOR_TOKEN>
+Content-Type: application/json
+
+{"operation_id": "<uuid>"}
+```
+
+This route independently re-proves the operation is pristine (no run, no
+started_at, no dispatched bars, no run lineage), belongs to a narrow closed
+set of pre-start/readiness blocker reasons, still matches today's canonical
+configuration, and that a fresh read-only readiness re-evaluation now
+passes — before doing anything. Response `truth_state` is one of
+`recovered` / `already_recovered` / `not_manual` / `still_blocked` /
+`not_recoverable` / `not_authorized` / `session_closed` / `conflict` /
+`not_found` / `backend_unavailable`.
+
+**Safety boundary — read before use:**
+- Retry does not clear halt.
+- Retry does not clear kill switch.
+- Retry does not mark reconcile clean.
+- Retry does not arm.
+- Retry does not start runtime.
+- Retry does not submit orders.
+- Retry only re-enters the canonical coordinator pipeline at
+  `preparing_data` — the ordinary strict-readiness → `awaiting_open` →
+  typed-arm → canonical-start sequence still applies in full afterward,
+  with every normal gate intact.
+
+This route is **operator-invoked only**. It does not change coordinator
+behavior for any other `manual_intervention_required` operation — those
+remain sticky durable truth requiring investigation, exactly as documented
+throughout this section.
 
 ## 20. Stop and emergency posture
 

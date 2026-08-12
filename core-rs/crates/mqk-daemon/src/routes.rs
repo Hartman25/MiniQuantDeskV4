@@ -31,6 +31,7 @@
 pub(crate) mod alerts_events;
 pub(crate) mod audit_ops;
 pub(crate) mod autonomous_daily_operations;
+pub(crate) mod autonomous_daily_operator;
 pub(crate) mod autonomous_paper_status;
 pub(crate) mod backtests;
 pub mod control;
@@ -263,6 +264,7 @@ pub fn build_router(state: Arc<AppState>) -> Router {
     };
     use audit_ops::{audit_artifacts, audit_operator_actions, ops_operator_timeline};
     use autonomous_daily_operations::{autonomous_daily_operation, autonomous_daily_operations};
+    use autonomous_daily_operator::autonomous_daily_operation_retry;
     use autonomous_paper_status::autonomous_paper_status;
     use backtests::{
         backtest_economics_suggestion, backtest_job_status, backtest_job_submit, backtest_jobs_list,
@@ -862,6 +864,16 @@ pub fn build_router(state: Arc<AppState>) -> Router {
         .route(
             "/api/v1/market-data/feed/scheduler/stop",
             post(market_data_feed_scheduler_stop),
+        )
+        // AUTONOMOUS-DAILY-OPERATOR-RETRY-01: narrow, explicit operator
+        // recovery from `manual_intervention_required` after a pre-start /
+        // preflight condition (typically daily-data-readiness) has been
+        // repaired. Never starts the runtime, never arms, never clears
+        // halt/kill-switch/reconcile authority, never submits orders — only
+        // re-enters the canonical coordinator pipeline at `preparing_data`.
+        .route(
+            "/api/v1/autonomous/daily-operation/retry",
+            post(autonomous_daily_operation_retry),
         )
         .merge(control::router())
         .layer(axum::middleware::from_fn_with_state(

@@ -277,11 +277,47 @@ git diff --check
 
 ---
 
-#### AUTONOMOUS-DAILY-OPERATOR-RETRY-01 — Autonomous retry/reset for market-data provider sync (blocked/future)
+#### AUTONOMOUS-DAILY-OPERATOR-RETRY-01 — Safe operator recovery from manual_intervention_required after a preflight/readiness repair
 
-**Status:** OPEN · **Priority:** P2 · **Paper Impact:** YELLOW · **Subsystem:** Autonomous daily operations
-**Problem:** No autonomous retry/reset exists yet around the provider-sync path fixed by `MARKET-DATA-PROVIDER-PROVENANCE-01`. Explicitly out of scope for that patch; not started.
-**Dependencies:** `MARKET-DATA-PROVIDER-PROVENANCE-01`
+**Status:** IMPLEMENTED_PENDING_REVIEW
+**Priority:** P0
+**Paper Impact:** YELLOW (new operator-authenticated route only; touches no order/execution/portfolio/broker/GUI path; reuses the existing durable operation state-machine's already-legal `manual_intervention_required -> preparing_data` edge)
+**Subsystem:** mqk-daemon autonomous daily operation coordinator / operator control plane
+
+**Current Source Truth:** Implemented in isolated worktree `C:\Users\Zacha\Desktop\MiniQuantDeskV4-retry`, branch `fix-autonomous-daily-operator-retry`, on top of `4bc78c7003257fca65d006d65aa660afe4b35a60` (`fix-market-data-provider-provenance`, `MARKET-DATA-PROVIDER-PROVENANCE-01`'s accepted base). Not merged.
+
+**Problem (2026-08-11 incident, restated):** `market-data readiness failed` → daily operation entered `manual_intervention_required` → market data was repaired (`MARKET-DATA-PROVIDER-PROVENANCE-01`) → the durable operation remained `manual_intervention_required` forever, because ordinary coordinator ticks (`autonomous_daily_coordinator.rs::dispatch_by_state`) treat `STATE_MANUAL_INTERVENTION_REQUIRED` as sticky durable truth and only re-project `ManualInterventionRequired { newly_applied: false }` — no code path re-ran the readiness/start pipeline. No operator recovery route existed at all.
+
+**Root Cause:** `dispatch_by_state`'s `STATE_MANUAL_INTERVENTION_REQUIRED` arm is read-only by design (correctly — manual states must not auto-clear); nothing else in the daemon ever issues the legal `manual_intervention_required -> preparing_data` DB transition (`mqk_db::is_legal_operation_transition`) that would let a repaired operation re-enter the coordinator pipeline.
+
+**Fix:** New operator-authenticated route `POST /api/v1/autonomous/daily-operation/retry` (`core-rs/crates/mqk-daemon/src/routes/autonomous_daily_operator.rs`, registered in the existing `operator` router in `routes.rs` — same `token_auth_middleware` every other mutating operator route uses, zero new auth code). Given `{operation_id, expected_market_date?}`, it independently re-proves, in order, before any mutation: (1) `deployment_mode == "PAPER"` (refuses `not_authorized` otherwise); (2) the operation is currently `manual_intervention_required` (`not_manual` otherwise — deliberately never assumes a non-manual `preparing_data` row got there via a prior retry, since current state alone cannot prove that); (3) pristine pre-start class only, via the existing `check_operation_pristine` (`not_recoverable` on any runtime activity — `run_id`, `started_at_utc`, bar dispatch, or validated run lineage); (4) the session window has not closed; (5) a new closed-set `ManualRetryEligibility` classifier (`RecoverablePreflight` / `UnsafeRuntimeHistory` / `AdministrativeOrIdentityConflict` / `UnknownFailClosed`) accepts the operation's stored `state_reason_code` only if it is exact-membership in a static allow-list of `daily_data_readiness::REASON_*` constants plus `"assignment_missing"` — never substring/regex matching, and every halt/reconcile/arm/runtime-ownership reason fails closed; (6) the operation's identity (freshly re-derived via the same `derive_assignment_identity`/`derive_runtime_binding_identity`/`derive_autonomous_daily_operation_id` calls the coordinator itself uses) still matches today's canonical configuration (`not_recoverable` on drift); (7) a fresh, read-only re-run of the exact production `daily_data_readiness::evaluate_readiness_with_binding` reports `start_allowed` (`still_blocked` otherwise, no mutation). Only if all seven hold does it perform the canonical durable CAS transition (`mqk_db::transition_autonomous_daily_operation`, `manual_intervention_required -> preparing_data`, clearing `state_reason_code`/`state_blocker_signature`, preserving the original blocker event in the append-only `sys_autonomous_daily_operation_events` table) plus a best-effort `mqk_db::clear_retry_timing`. It never calls `start_execution_runtime`, `try_autonomous_arm_typed`, or any halt/kill-switch/reconcile-clearing path; `runtime_started`/`arm_modified`/`halt_changed`/`reconcile_changed` are hardcoded `false` and `orders_submitted` hardcoded `0` in every response branch. The existing `run_session_controller` loop (30s poll) picks up the `preparing_data` transition automatically and re-runs strict readiness -> `awaiting_open` -> typed arm -> canonical start with no shortcut.
+
+**Dependencies:** `MARKET-DATA-PROVIDER-PROVENANCE-01` (base commit; provides the AAPL/5m/alpaca provenance fix this patch's proof scenario exercises)
+**Unlocks:** NONE yet (operator-invoked only per §36 of the originating spec; automatic manual-state retry is explicitly deferred to a future patch)
+**In Scope:** New route + handler module, new request/response API types, route registration, one new scenario test file.
+**Out of Scope:** Automatic/scheduled retry of manual states (explicitly deferred), any change to `autonomous_retry_policy.rs`'s `ManualInterventionRequired`/`RetryableTransient` classification, strategy/OMS/portfolio/broker/GUI/launcher/Task-Scheduler code, live-capital support (route hard-refuses non-`PAPER` `deployment_mode`).
+**Likely Files / Surfaces:** `core-rs/crates/mqk-daemon/src/routes/autonomous_daily_operator.rs` (new), `core-rs/crates/mqk-daemon/src/routes.rs`, `core-rs/crates/mqk-daemon/src/api_types.rs`, `core-rs/crates/mqk-daemon/tests/scenario_autonomous_daily_operator_retry_01.rs` (new).
+**Required Implementation Rules:** No string/substring/regex authority over `state_reason_code` — exact static membership only; never call `start_execution_runtime`/`try_autonomous_arm_typed`/any halt-clearing path; never transition directly to `running`; CAS only via the existing `mqk_db::transition_autonomous_daily_operation` primitive (never a raw `UPDATE`).
+**Safety / Compatibility Requirements:** Preserve arm-before-start (proved, not just asserted — see R10 below); preserve halt/kill-switch/reconcile authority (proved via R09); idempotent under repeated calls (R08 / T01's second-call check); race-safe under a stale CAS (R07, proved directly against the CAS primitive).
+**Required Negative Controls:** R1 (still blocked → refused, `still_blocked`) · R2 (runtime history present → `not_recoverable`) · R3 (identity mismatch → `not_recoverable`) · R4 (session closed → `session_closed`) · R5 (wrong `operation_id` → `not_found`) · R6 (LIVE deployment → `not_authorized`, `403`) · R7 (stale CAS version → refused, never applied) · unsafe-runtime-history / administrative-identity-conflict / unknown-reason-class refusals · not-currently-manual → `not_manual`.
+**Required Positive Controls:** T01 — full lifecycle: pristine operation → real coordinator CAS to `manual_intervention_required` with `REASON_MARKET_DATA_MISSING` → retry refused (`still_blocked`) while data is missing → bars repaired through the real metadata-aware ingest path (AAPL/5m/alpaca, mirroring `MARKET-DATA-PROVIDER-PROVENANCE-01`'s accepted lane) → retry accepted (`recovered`, `preparing_data`) → original blocker event preserved + recovery event recorded in `sys_autonomous_daily_operation_events` → coordinator `dispatch_by_state` progresses to `awaiting_open` → second retry call is a safe non-mutating no-op. R09 — halt/disarm state unchanged across a successful retry. R10 — a recovered, `awaiting_open` operation still cannot start without a successful typed arm (`attempt_canonical_start` under `DISARMED`/`halted` refuses; `start_attempt_count` stays `0`). Auth: missing/wrong/valid operator token proofs, mirroring `scenario_ctrl_auth_01.rs`'s established pattern.
+**Required Regression Tests:** `scenario_autonomous_daily_session_coordinator_01` (35/35), `scenario_autonomous_daily_coordinator_policy_01` (8/8), `scenario_autonomous_daily_phase_d_integration_01` (49/49), `scenario_daily_data_readiness_01` (86/86), `scenario_daemon_routes` (66/66) — all green, zero regressions, run against the same DB-backed test suite this new patch's own tests use.
+**Required Validation:**
+```powershell
+$env:MQK_DATABASE_URL = "postgresql://postgres:postgres@127.0.0.1:5434/mqk_test"
+cargo test --manifest-path .\core-rs\Cargo.toml -p mqk-daemon --test scenario_autonomous_daily_operator_retry_01 -- --include-ignored --test-threads=1
+cargo test --manifest-path .\core-rs\Cargo.toml -p mqk-daemon --test scenario_autonomous_daily_session_coordinator_01 --test scenario_autonomous_daily_coordinator_policy_01 --test scenario_autonomous_daily_phase_d_integration_01 --test scenario_daily_data_readiness_01 --test scenario_daemon_routes -- --include-ignored --test-threads=1
+powershell -File scripts/guards/check_unsafe_patterns.ps1
+git diff --check
+```
+**Forbidden Validation / Side Effects:** No live DB, no paper-soak production DB, no real Alpaca/broker call, no orders, no manual DB edits, no push, no merge.
+**Acceptance Criteria:**
+1. All 16 new scenario tests pass against a real local Postgres.
+2. All five listed regression suites remain green (244/244 combined, 0 failures).
+3. `check_unsafe_patterns.ps1` clean; `git diff --check` clean.
+4. No file outside the four listed is modified; `main`, the `-ops`, and the `-data` worktrees remain untouched.
+**Exact CLOSED End State:** Not yet CLOSED — `IMPLEMENTED_PENDING_REVIEW` until code-reviewed and merged.
+**Expected Handoff:** Start HEAD `4bc78c70` (dev worktree base = `fix-market-data-provider-provenance`); end HEAD = new commit SHA on `fix-autonomous-daily-operator-retry`; not pushed, not merged.
 
 #### MARKET-DATA-AUTOFRESH-REQUIRED-UNIVERSE-01 — Automatic freshness maintenance for the required market-data universe (blocked/future)
 

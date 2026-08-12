@@ -1162,6 +1162,66 @@ pub struct AutonomousDailyOperationsResponse {
     pub message: Option<String>,
 }
 
+/// Request body for `POST /api/v1/autonomous/daily-operation/retry`
+/// (AUTONOMOUS-DAILY-OPERATOR-RETRY-01). `operation_id` is required so the
+/// operator always targets an exact durable operation — this route never
+/// retries "whatever operation happens to exist". `expected_market_date`
+/// (`"YYYY-MM-DD"`), when supplied, is an additional safety assertion: a
+/// mismatch against the target operation's own `market_date` refuses the
+/// request without mutating anything.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AutonomousDailyOperationRetryRequest {
+    pub operation_id: Uuid,
+    pub expected_market_date: Option<String>,
+}
+
+/// Response for `POST /api/v1/autonomous/daily-operation/retry`
+/// (AUTONOMOUS-DAILY-OPERATOR-RETRY-01).
+///
+/// `truth_state`:
+/// - `"recovered"` — the operation durably left `manual_intervention_required`
+///   for `preparing_data` this call.
+/// - `"already_recovered"` — this call's own CAS write raced into an
+///   already-applied outcome (the DB proved the exact same transition was
+///   already durably applied). No mutation.
+/// - `"not_manual"` — the operation is not currently `manual_intervention_required`.
+///   A repeat call after a prior successful recovery lands here too (the
+///   operation is by then `preparing_data`) — an operation's current state
+///   alone cannot prove *why* it left the manual state, so this is the
+///   honest response rather than an assumed `"already_recovered"`.
+/// - `"still_blocked"` — the canonical read-only readiness/identity
+///   re-evaluation this call performed still reports a blocker. No mutation.
+/// - `"not_recoverable"` — the operation does not belong to the narrow
+///   pristine-pre-start recoverable class (runtime activity present, an
+///   unsafe/administrative blocker reason, or a stale identity). No mutation.
+/// - `"not_authorized"` — refused for a non-paper `deployment_mode`.
+/// - `"session_closed"` — the operation's authorized session window has
+///   already closed. No mutation.
+/// - `"conflict"` — the operation's durable state changed between this
+///   call's read and its CAS write. No mutation.
+/// - `"not_found"` — no operation exists for the supplied `operation_id`.
+/// - `"backend_unavailable"` — the DB was unreachable, or a required read/
+///   write failed. No claimed mutation.
+///
+/// `runtime_started` / `arm_modified` / `halt_changed` / `reconcile_changed`
+/// are always `false` and `orders_submitted` is always `0` on every branch —
+/// this route never performs any of those actions, on any path.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AutonomousDailyOperationRetryResponse {
+    pub canonical_route: String,
+    pub truth_state: String,
+    pub operation_id: String,
+    pub previous_state: Option<String>,
+    pub new_state: Option<String>,
+    pub previous_reason_code: Option<String>,
+    pub runtime_started: bool,
+    pub arm_modified: bool,
+    pub halt_changed: bool,
+    pub reconcile_changed: bool,
+    pub orders_submitted: i64,
+    pub message: Option<String>,
+}
+
 /// Compact additive daily-operation outcome summary, embedded unchanged into
 /// `AutonomousPaperReadinessResponse`, `AutonomousPaperStatusResponse`, and
 /// `PreflightStatusResponse`. Fails soft independently of its parent route:
