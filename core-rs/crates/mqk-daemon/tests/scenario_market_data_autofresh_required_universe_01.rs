@@ -423,15 +423,20 @@ fn now_fixture() -> DateTime<Utc> {
 // "no DEFAULT now()" rule and is out of scope for this test-only patch to
 // change, since it is production write-path schema/code).
 // `daily_data_readiness::evaluate_bar_readiness`'s own unmodified
-// `REASON_PROVIDER_INGEST_TIME_FUTURE` check (still enforced, at its
-// unmodified default 300s `MQK_DATA_READINESS_FUTURE_SKEW_SECS` tolerance --
-// this patch changes neither) compares that real DB timestamp against
-// whatever fixed `now_utc` a test supplies for evaluation (`now_fixture()`
-// or a test's own hardcoded calendar instant, e.g. the preopen test below).
-// A fixed evaluation instant inevitably drifts more than 300s behind the
-// real wall clock as real time passes after the fixture was authored,
-// producing a false `provider_ingest_time_future` blocker unrelated to any
-// actual defect -- reproducible on unmodified `fde6e227` before REPAIR-02.
+// `REASON_PROVIDER_INGEST_TIME_FUTURE` check (still enforced; this patch
+// changes neither it nor its tolerance) compares that real DB timestamp
+// against whatever fixed `now_utc` a test supplies for evaluation
+// (`now_fixture()` or a test's own hardcoded calendar instant, e.g. the
+// preopen test below). The *configured* default ceiling
+// (`MQK_DATA_READINESS_FUTURE_SKEW_SECS`, `DEFAULT_FUTURE_SKEW_SECS`) is
+// 300s, but the check actually enforces `effective_future_skew_seconds =
+// min(configured_future_skew_seconds, 60, timeframe.duration_secs())` --
+// for these tests' 5m timeframe under default config that's `min(300, 60,
+// 300) = 60` seconds, not 300. A fixed evaluation instant inevitably drifts
+// more than that 60s effective ceiling behind the real wall clock as real
+// time passes after the fixture was authored, producing a false
+// `provider_ingest_time_future` blocker unrelated to any actual defect --
+// reproducible on unmodified `fde6e227` before REPAIR-02.
 //
 // The fix closes that gap the only way available without touching
 // production ingest/readiness code: immediately after a real (unmodified)
@@ -446,9 +451,12 @@ fn now_fixture() -> DateTime<Utc> {
 
 /// Re-stamp `ingested_at` on every `ZZAUTOFR%` row durably written no
 /// earlier than `wrote_after` to `evaluation_now` (minus a small safety
-/// buffer, comfortably inside the unmodified 300s default skew tolerance).
-/// A no-op when the preceding write produced nothing (e.g. an empty/failed
-/// provider response) or when `pool` is `None`. Scoping by `wrote_after`
+/// buffer, comfortably inside the unmodified effective skew tolerance --
+/// `min(configured_future_skew_seconds, 60, timeframe.duration_secs())`,
+/// which is 60s for these tests' 5m timeframe under the default 300s
+/// configured ceiling, not 300s). A no-op when the preceding write produced
+/// nothing (e.g. an empty/failed provider response) or when `pool` is
+/// `None`. Scoping by `wrote_after`
 /// (a real-clock checkpoint captured immediately before the write) rather
 /// than an unqualified `symbol like 'ZZAUTOFR%'` update means an earlier
 /// cycle's already-correct rows in the same test (e.g. a test with multiple
