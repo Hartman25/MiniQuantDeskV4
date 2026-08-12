@@ -1534,6 +1534,18 @@ pub struct RequiredUniverseSchedulerRuntimeState {
     pub last_error: Option<String>,
     pub stop_tx: Option<tokio::sync::watch::Sender<bool>>,
     pub task: Option<JoinHandle<()>>,
+    /// REPAIR-02 §8/§9: monotonically-changing ownership token. Every
+    /// successful `start` obtains a strictly newer generation than any
+    /// generation previously issued for this scheduler slot. A cycle/task
+    /// belonging to an old generation must never mutate state or install a
+    /// task once a newer generation is current — see
+    /// [`run_and_record_cycle`], [`start_required_universe_scheduler`], and
+    /// [`required_universe_scheduler_loop`], which each re-check
+    /// `generation` under the lock before writing/spawning. Never reset to
+    /// `0` on a state reset at `start` — see `start_required_universe_scheduler`,
+    /// which increments the previous value rather than relying on
+    /// `..Default::default()` for this field.
+    pub generation: u64,
 }
 
 impl Default for RequiredUniverseSchedulerRuntimeState {
@@ -1551,15 +1563,27 @@ impl Default for RequiredUniverseSchedulerRuntimeState {
             last_error: None,
             stop_tx: None,
             task: None,
+            generation: 0,
         }
     }
 }
 
 /// Run one required-universe cycle against `st` and record the result on
-/// the scheduler runtime state. Returns the produced report for the caller
-/// (e.g. the HTTP route) to respond with immediately.
+/// the scheduler runtime state — but ONLY if `generation` still matches the
+/// scheduler's current ownership token at the moment the result is ready to
+/// write (REPAIR-02 §11). The provider/DB work behind `run_required_universe_
+/// cycle` always runs and cannot be undone once dispatched, but a cycle
+/// whose generation has been superseded by a newer `start` while it was
+/// in-flight (the stop/restart ABA race, §8) must not overwrite
+/// `last_report`/`next_cycle_utc`, increment `cycle_count`/`provider_api_
+/// calls_made`, or otherwise touch state that now belongs to the newer
+/// generation. The caller always receives the actual computed report
+/// regardless of whether it was recorded, so a synchronous HTTP caller (the
+/// immediate cycle inside `start_required_universe_scheduler`) still gets a
+/// truthful answer even when superseded.
 pub async fn run_and_record_cycle(
     st: &Arc<AppState>,
+    generation: u64,
     now_utc: DateTime<Utc>,
     dry_run: bool,
 ) -> RequiredUniverseStatusReport {
@@ -1576,16 +1600,18 @@ pub async fn run_and_record_cycle(
     .await;
 
     let mut scheduler = st.required_universe_scheduler.lock().await;
-    scheduler.last_cycle_utc = Some(now_utc.timestamp());
-    scheduler.cycle_count += 1;
-    scheduler.provider_api_calls_made += result.provider_api_calls_made;
-    scheduler.next_cycle_utc = result
-        .report
-        .next_poll_utc
-        .as_deref()
-        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-        .map(|dt| dt.with_timezone(&Utc).timestamp());
-    scheduler.last_report = Some(result.report.clone());
+    if scheduler.generation == generation {
+        scheduler.last_cycle_utc = Some(now_utc.timestamp());
+        scheduler.cycle_count += 1;
+        scheduler.provider_api_calls_made += result.provider_api_calls_made;
+        scheduler.next_cycle_utc = result
+            .report
+            .next_poll_utc
+            .as_deref()
+            .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+            .map(|dt| dt.with_timezone(&Utc).timestamp());
+        scheduler.last_report = Some(result.report.clone());
+    }
     result.report
 }
 
@@ -1613,11 +1639,20 @@ pub async fn start_required_universe_scheduler(
     dry_run: bool,
     now_utc: DateTime<Utc>,
 ) -> Result<RequiredUniverseStatusReport, String> {
-    {
+    let generation = {
         let mut scheduler = st.required_universe_scheduler.lock().await;
         if scheduler.running {
             return Err("required-universe scheduler is already running".to_string());
         }
+        // REPAIR-02 §9/§10: claim a strictly newer generation than any
+        // previously issued, preserved explicitly across the state reset
+        // below rather than left to `..Default::default()` (which would
+        // reset it to `0` and reopen the ABA race this token exists to
+        // close). Wrapping is intentional and harmless: a wrap back to `0`
+        // is still guaranteed distinct from whatever generation an
+        // in-flight cycle from `u64::MAX` cycles ago could hold in
+        // practice.
+        let new_generation = scheduler.generation.wrapping_add(1);
         // Atomic with the check above: no other caller can observe
         // `running == false` between the check and this assignment, because
         // both happen under the same held lock and this function never
@@ -1626,22 +1661,28 @@ pub async fn start_required_universe_scheduler(
             running: true,
             dry_run,
             started_at_ts: Some(now_utc.timestamp()),
+            generation: new_generation,
             ..RequiredUniverseSchedulerRuntimeState::default()
         };
-    }
+        new_generation
+    };
 
-    let report = run_and_record_cycle(st, now_utc, dry_run).await;
+    let report = run_and_record_cycle(st, generation, now_utc, dry_run).await;
 
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
-    // §11: if the immediate cycle already determined there is nothing left
-    // to poll for `market_date` (no groups, non-trading day, or already past
-    // the session-close horizon), settle the scheduler truthfully as
-    // stopped right here — never leave `running=true` with no task and no
-    // future cycle.
+    // §11/§12: if the immediate cycle already determined there is nothing
+    // left to poll for `market_date` (no groups, non-trading day, or
+    // already past the session-close horizon), settle the scheduler
+    // truthfully as stopped right here — never leave `running=true` with no
+    // task and no future cycle. Both branches require `generation` to still
+    // be current: a stopped-then-restarted scheduler (a newer generation
+    // now owns the slot) must never be settled-stopped or spawned into by
+    // this superseded caller.
     let should_spawn = {
         let mut scheduler = st.required_universe_scheduler.lock().await;
-        if !scheduler.running {
-            // Stopped concurrently while the immediate cycle ran.
+        if !scheduler.running || scheduler.generation != generation {
+            // Stopped concurrently while the immediate cycle ran, or a
+            // newer generation has already taken ownership of the slot.
             false
         } else if report.next_poll_utc.is_none() {
             scheduler.running = false;
@@ -1660,11 +1701,15 @@ pub async fn start_required_universe_scheduler(
             st.clone(),
             stop_rx,
             dry_run,
+            generation,
         ));
         let mut scheduler = st.required_universe_scheduler.lock().await;
-        if scheduler.running {
+        if scheduler.running && scheduler.generation == generation {
             scheduler.task = Some(task);
         } else {
+            // Ownership flipped to a newer generation between spawn and
+            // this re-check (§12) — never install this generation's task
+            // as if it were current.
             task.abort();
         }
     }
@@ -1691,15 +1736,23 @@ pub async fn stop_required_universe_scheduler(st: &Arc<AppState>, now_utc: DateT
     true
 }
 
+/// REPAIR-02 §13: `generation` is the ownership token this loop was spawned
+/// under. Every checkpoint — before the wait, after the wait, and after the
+/// awaited cycle — re-verifies `scheduler.running && scheduler.generation ==
+/// generation` before doing anything that would act as the current
+/// scheduler. An old loop whose generation has been superseded (a stop
+/// followed by a new start) must return immediately rather than continue
+/// polling or mutate state belonging to the newer generation.
 async fn required_universe_scheduler_loop(
     st: Arc<AppState>,
     mut stop_rx: tokio::sync::watch::Receiver<bool>,
     dry_run: bool,
+    generation: u64,
 ) {
     loop {
         let next_ts = {
             let scheduler = st.required_universe_scheduler.lock().await;
-            if !scheduler.running {
+            if !scheduler.running || scheduler.generation != generation {
                 return;
             }
             match scheduler.next_cycle_utc {
@@ -1726,14 +1779,21 @@ async fn required_universe_scheduler_loop(
         if *stop_rx.borrow() {
             return;
         }
+        {
+            let scheduler = st.required_universe_scheduler.lock().await;
+            if !scheduler.running || scheduler.generation != generation {
+                return;
+            }
+        }
 
         let now_utc = Utc::now();
-        let report = run_and_record_cycle(&st, now_utc, dry_run).await;
+        let report = run_and_record_cycle(&st, generation, now_utc, dry_run).await;
         if report.next_poll_utc.is_none() {
             // Session-close horizon reached: mark the scheduler stopped for
-            // this market_date rather than spinning forever with no work.
+            // this market_date rather than spinning forever with no work —
+            // but only if this generation still owns the slot.
             let mut scheduler = st.required_universe_scheduler.lock().await;
-            if scheduler.running {
+            if scheduler.running && scheduler.generation == generation {
                 scheduler.running = false;
                 scheduler.stopped_at_ts = Some(now_utc.timestamp());
                 scheduler.stop_tx = None;

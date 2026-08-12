@@ -1127,6 +1127,176 @@ if ($StartIntradayRefreshLoop) {
 }
 
 # ---------------------------------------------------------------------------
+# Required-universe scheduler ownership establishment (STEP 8D helper)
+# MARKET-DATA-AUTOFRESH-REQUIRED-UNIVERSE-01-REPAIR-02
+#
+# Normal Paper startup must NOT knowingly proceed toward reconcile/arm when
+# the default required-universe data-maintenance authority was not
+# established. A 200 start response or a 409 "already_running" response is
+# NOT itself proof of maintenance authority -- both are verified against the
+# scheduler's own status route before STEP 8D can call the outcome
+# "established". Extracted as standalone, self-contained functions (rather
+# than inlined into STEP 8D) so a guard script can load just these two
+# functions, shadow Invoke-DaemonGet/Invoke-DaemonPost with mocked HTTP
+# responses, and exercise every fail-closed branch with zero real
+# daemon/network/DB/order side effects.
+#
+# Both functions return a [pscustomobject] with:
+#   Established -- [bool] true only for a proven non-dry-run maintenance
+#                  scheduler, OR the legitimate non-trading-day/no-required-
+#                  symbols no-work case.
+#   Reason      -- bounded machine-readable reason code.
+#   Detail      -- human-readable explanation for the operator (may be $null).
+#   Report      -- the required-universe status report, when available.
+# ---------------------------------------------------------------------------
+
+function Confirm-RequiredUniverseSchedulerOwnership {
+    param(
+        [bool]$AllowReuse
+    )
+    try {
+        $status = Invoke-DaemonGet -Path '/api/v1/market-data/required-universe/status'
+    } catch {
+        return [pscustomobject]@{
+            Established = $false
+            Reason      = 'REQUIRED_UNIVERSE_SCHEDULER_STATUS_REQUEST_FAILED'
+            Detail      = "$_"
+            Report      = $null
+        }
+    }
+
+    if (-not $status.running) {
+        return [pscustomobject]@{
+            Established = $false
+            Reason      = 'REQUIRED_UNIVERSE_SCHEDULER_NOT_RUNNING'
+            Detail      = 'required-universe/status reported running=false after start/reuse'
+            Report      = $status.report
+        }
+    }
+    if ($status.dry_run) {
+        # A dry-run scheduler makes zero provider calls and zero DB writes --
+        # it cannot be trusted as the default data-maintenance authority,
+        # whether it is the scheduler this call just started or a pre-
+        # existing owner discovered via 409.
+        return [pscustomobject]@{
+            Established = $false
+            Reason      = 'REQUIRED_UNIVERSE_SCHEDULER_BLOCKED_DRY_RUN_OWNER'
+            Detail      = 'the running required-universe scheduler is dry_run=true (zero provider calls, zero DB writes) and cannot maintain trading data freshness'
+            Report      = $status.report
+        }
+    }
+    $ruReport = $status.report
+    if ($null -eq $ruReport) {
+        return [pscustomobject]@{
+            Established = $false
+            Reason      = 'REQUIRED_UNIVERSE_SCHEDULER_STATUS_MISSING_REPORT'
+            Detail      = 'required-universe/status reported running=true dry_run=false but no report is present'
+            Report      = $null
+        }
+    }
+    if ($ruReport.overall_state -eq 'blocked') {
+        $blockerLines = @()
+        foreach ($ruReq in @($ruReport.requirements)) {
+            if (@($ruReq.blockers).Count -gt 0) {
+                $blockerLines += "$($ruReq.symbol)/$($ruReq.timeframe): freshness_state=$($ruReq.freshness_state) blockers=$($ruReq.blockers -join '; ')"
+            }
+        }
+        return [pscustomobject]@{
+            Established = $false
+            Reason      = 'REQUIRED_UNIVERSE_SCHEDULER_BLOCKED'
+            Detail      = ($blockerLines -join ' | ')
+            Report      = $ruReport
+        }
+    }
+
+    return [pscustomobject]@{
+        Established = $true
+        Reason      = if ($AllowReuse) { 'REQUIRED_UNIVERSE_SCHEDULER_VERIFIED_REUSE' } else { 'REQUIRED_UNIVERSE_SCHEDULER_NEW_ACTIVE' }
+        Detail      = $null
+        Report      = $ruReport
+    }
+}
+
+function Start-OrVerifyRequiredUniverseScheduler {
+    param(
+        [bool]$DryRun
+    )
+    try {
+        $ruStartBody = @{ dry_run = $DryRun }
+        $ruStart = Invoke-DaemonPost -Path '/api/v1/market-data/required-universe/start' -Body $ruStartBody
+    } catch {
+        return [pscustomobject]@{
+            Established = $false
+            Reason      = 'REQUIRED_UNIVERSE_SCHEDULER_START_REQUEST_FAILED'
+            Detail      = "$_"
+            Report      = $null
+        }
+    }
+
+    if ($null -eq $ruStart -or $null -eq $ruStart.StatusCode) {
+        return [pscustomobject]@{
+            Established = $false
+            Reason      = 'REQUIRED_UNIVERSE_SCHEDULER_START_REQUEST_FAILED'
+            Detail      = 'no HTTP response from daemon for required-universe/start'
+            Report      = $null
+        }
+    }
+
+    if ($ruStart.StatusCode -eq 200) {
+        $ruReport = $ruStart.Body.report
+        if ($null -eq $ruReport) {
+            return [pscustomobject]@{
+                Established = $false
+                Reason      = 'REQUIRED_UNIVERSE_SCHEDULER_START_RESPONSE_MISSING_REPORT'
+                Detail      = 'required-universe/start returned 200 with no report'
+                Report      = $null
+            }
+        }
+        if ($ruReport.overall_state -eq 'blocked') {
+            $blockerLines = @()
+            foreach ($ruReq in @($ruReport.requirements)) {
+                if (@($ruReq.blockers).Count -gt 0) {
+                    $blockerLines += "$($ruReq.symbol)/$($ruReq.timeframe): freshness_state=$($ruReq.freshness_state) blockers=$($ruReq.blockers -join '; ')"
+                }
+            }
+            return [pscustomobject]@{
+                Established = $false
+                Reason      = 'REQUIRED_UNIVERSE_SCHEDULER_BLOCKED'
+                Detail      = ($blockerLines -join ' | ')
+                Report      = $ruReport
+            }
+        }
+        if ($ruReport.overall_state -eq 'not_applicable') {
+            # A legitimate non-trading day / empty required-symbol set makes
+            # zero provider calls and settles the scheduler stopped -- that
+            # is a valid no-work result, never a failure.
+            return [pscustomobject]@{
+                Established = $true
+                Reason      = 'REQUIRED_UNIVERSE_NO_WORK_NOT_APPLICABLE'
+                Detail      = "is_trading_day=$($ruReport.is_trading_day)"
+                Report      = $ruReport
+            }
+        }
+        # overall_state=ready: verify actual scheduler ownership via the
+        # status route rather than trusting the start response alone.
+        return Confirm-RequiredUniverseSchedulerOwnership -AllowReuse:$false
+    }
+
+    if ($ruStart.StatusCode -eq 409) {
+        # A 409 alone is not proof -- verify the existing owner is a
+        # genuine, non-dry-run maintenance scheduler.
+        return Confirm-RequiredUniverseSchedulerOwnership -AllowReuse:$true
+    }
+
+    return [pscustomobject]@{
+        Established = $false
+        Reason      = "REQUIRED_UNIVERSE_SCHEDULER_START_HTTP_$($ruStart.StatusCode)"
+        Detail      = "$($ruStart.Body.error)"
+        Report      = $null
+    }
+}
+
+# ---------------------------------------------------------------------------
 # STEP 8D: Required-universe scheduler (optional, -StartRequiredUniverseScheduler)
 # MARKET-DATA-AUTOFRESH-REQUIRED-UNIVERSE-01
 #
@@ -1140,6 +1310,11 @@ if ($StartIntradayRefreshLoop) {
 # daemon (STEP 7/STEP 8 verified it above). Default: off, same explicit
 # opt-in posture -StartIntradayRefreshLoop already established -- this
 # script never starts provider refresh network activity on its own.
+#
+# REPAIR-02: unlike the prior REPAIR-01 shape, a failure to establish real
+# (non-dry-run) required-universe data-maintenance authority on the default
+# path is FATAL -- the script must not knowingly proceed toward
+# reconcile/arm without it (fail-closed, not fail-open).
 # ---------------------------------------------------------------------------
 Write-Section "STEP 8D: Required-universe scheduler (default-on; see -SkipRequiredUniverseScheduler / -StartIntradayRefreshLoop / -CheckOnly)"
 
@@ -1148,26 +1323,25 @@ Write-Section "STEP 8D: Required-universe scheduler (default-on; see -SkipRequir
 # (including STEP 8C above) -- see the early-validation block near the top
 # of this script. $UseRequiredUniverseScheduler is computed there.
 if ($UseRequiredUniverseScheduler) {
-    try {
-        $ruStartBody = @{ dry_run = [bool]$RequiredUniverseSchedulerDryRun }
-        $ruStart = Invoke-DaemonPost -Path '/api/v1/market-data/required-universe/start' -Body $ruStartBody
-        if ($ruStart.StatusCode -eq 200) {
-            $ruReport = $ruStart.Body.report
-            Write-Ok ("Required-universe scheduler started: truth_state=$($ruStart.Body.truth_state) " +
-                      "overall_state=$($ruReport.overall_state) requirements=$($ruReport.requirements.Count) " +
-                      "groups=$($ruReport.groups.Count) dry_run=$([bool]$RequiredUniverseSchedulerDryRun)")
-            foreach ($ruReq in @($ruReport.requirements)) {
-                if (@($ruReq.blockers).Count -gt 0) {
-                    Write-Warn "Required-universe requirement $($ruReq.symbol)/$($ruReq.timeframe): freshness_state=$($ruReq.freshness_state) blockers=$($ruReq.blockers -join '; ')"
-                }
+    $ruResult = Start-OrVerifyRequiredUniverseScheduler -DryRun ([bool]$RequiredUniverseSchedulerDryRun)
+    if (-not $ruResult.Established) {
+        Write-Fail "Required-universe scheduler data-maintenance authority was not established (reason=$($ruResult.Reason))."
+        if ($ruResult.Detail) { Write-Fail "  detail: $($ruResult.Detail)" }
+        Write-Fail "Refusing to proceed toward reconcile/arm without established required-universe data-maintenance authority."
+        exit 1
+    }
+    $ruReport = $ruResult.Report
+    if ($ruResult.Reason -eq 'REQUIRED_UNIVERSE_NO_WORK_NOT_APPLICABLE') {
+        Write-Ok "Required-universe scheduler: no work required today (overall_state=not_applicable, is_trading_day=$($ruReport.is_trading_day))."
+    } else {
+        Write-Ok ("Required-universe scheduler data-maintenance authority established (reason=$($ruResult.Reason)): " +
+                  "overall_state=$($ruReport.overall_state) requirements=$($ruReport.requirements.Count) " +
+                  "groups=$($ruReport.groups.Count) market_date=$($ruReport.market_date) dry_run=false")
+        foreach ($ruReq in @($ruReport.requirements)) {
+            if (@($ruReq.blockers).Count -gt 0) {
+                Write-Warn "Required-universe requirement $($ruReq.symbol)/$($ruReq.timeframe): freshness_state=$($ruReq.freshness_state) blockers=$($ruReq.blockers -join '; ')"
             }
-        } elseif ($ruStart.StatusCode -eq 409) {
-            Write-Warn "Required-universe scheduler was already running (truth_state=$($ruStart.Body.truth_state)); continuing."
-        } else {
-            Write-Warn "Required-universe scheduler start returned HTTP $($ruStart.StatusCode) (non-fatal): $($ruStart.Body.error)"
         }
-    } catch {
-        Write-Warn "Failed to start required-universe scheduler (non-fatal): $_"
     }
 } else {
     if ($CheckOnly) {

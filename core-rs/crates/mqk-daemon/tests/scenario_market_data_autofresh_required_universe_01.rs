@@ -18,7 +18,10 @@ use chrono::{DateTime, TimeZone, Utc};
 use mqk_daemon::state::market_calendar::{
     MarketCalendarProvider, MarketSessionState, MarketSessionTruth,
 };
-use mqk_daemon::state::required_market_data_autofresh::run_required_universe_cycle;
+use mqk_daemon::state::required_market_data_autofresh::{
+    run_required_universe_cycle, start_required_universe_scheduler,
+    stop_required_universe_scheduler,
+};
 use tempfile::NamedTempFile;
 
 // ---------------------------------------------------------------------------
@@ -158,6 +161,79 @@ impl mqk_md::MarketDataProvider for FakeUniverseProvider {
             .get(&request.symbol)
             .cloned()
             .flatten())
+    }
+}
+
+/// REPAIR-02 §15: a provider whose very first `fetch_historical_bars` call
+/// parks on a test-controlled barrier before delegating to an inner
+/// [`FakeUniverseProvider`] -- used only by
+/// `stop_start_generation_race_old_cycle_cannot_overwrite_new_owner` to
+/// reproduce the stop/restart ABA ownership race deterministically (no real
+/// network call, no timing-based sleep). Only the first call blocks: every
+/// call after that (i.e. a second scheduler generation's own call, made
+/// while the first is still parked) passes straight through, exactly
+/// mirroring "generation B establishes ownership while generation A's
+/// delayed provider call is still in flight".
+struct BarrierDelayedProvider {
+    inner: FakeUniverseProvider,
+    blocked_once: AtomicUsize,
+    call_started: Arc<tokio::sync::Notify>,
+    release_gate: Arc<tokio::sync::Notify>,
+}
+
+impl BarrierDelayedProvider {
+    fn new(
+        provider_id: &'static str,
+        call_started: Arc<tokio::sync::Notify>,
+        release_gate: Arc<tokio::sync::Notify>,
+    ) -> Self {
+        Self {
+            inner: FakeUniverseProvider::new(provider_id),
+            blocked_once: AtomicUsize::new(0),
+            call_started,
+            release_gate,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl mqk_md::MarketDataProvider for BarrierDelayedProvider {
+    fn provider_id(&self) -> &str {
+        self.inner.provider_id()
+    }
+
+    fn display_name(&self) -> &str {
+        self.inner.display_name()
+    }
+
+    fn capabilities(&self) -> mqk_md::MarketDataProviderCapabilities {
+        self.inner.capabilities()
+    }
+
+    fn health(&self) -> mqk_md::MarketDataProviderHealth {
+        self.inner.health()
+    }
+
+    fn rate_limits(&self) -> Option<mqk_md::MarketDataProviderRateLimits> {
+        self.inner.rate_limits()
+    }
+
+    async fn fetch_historical_bars(
+        &self,
+        request: mqk_md::HistoricalBarsRequest,
+    ) -> Result<Vec<mqk_md::CanonicalBar>, mqk_md::MarketDataProviderError> {
+        if self.blocked_once.fetch_add(1, Ordering::SeqCst) == 0 {
+            self.call_started.notify_one();
+            self.release_gate.notified().await;
+        }
+        self.inner.fetch_historical_bars(request).await
+    }
+
+    async fn fetch_latest_closed_bar(
+        &self,
+        request: mqk_md::LatestClosedBarRequest,
+    ) -> Result<Option<mqk_md::CanonicalBar>, mqk_md::MarketDataProviderError> {
+        self.inner.fetch_latest_closed_bar(request).await
     }
 }
 
@@ -1399,6 +1475,195 @@ async fn no_work_scheduler_settles_stopped_after_start() {
     assert!(scheduler.next_cycle_utc.is_none());
     assert!(scheduler.task.is_none());
     assert_eq!(scheduler.cycle_count, 1);
+}
+
+/// MARKET-DATA-AUTOFRESH-REQUIRED-UNIVERSE-01-REPAIR-02 §15: the real
+/// stop/restart ABA ownership race.
+///
+/// Sequence (mirrors the repair spec exactly):
+///   1. Start A claims generation A.
+///   2. A's immediate provider cycle blocks on a test-controlled barrier
+///      (proven via [`BarrierDelayedProvider`] -- no timing-based sleep).
+///   3. Stop A.
+///   4. Start B claims generation B.
+///   5. B establishes current ownership (its own provider call passes
+///      straight through the barrier, since only the first call blocks).
+///   6. A's old delayed provider call is released.
+///   7. A's call finishes and A's `start_required_universe_scheduler`
+///      resumes to completion.
+///
+/// Proves: generation B remains current; A cannot overwrite B's
+/// `last_report`/ownership; A cannot install a second task; A cannot
+/// increment B's generation-owned `cycle_count`; exactly one current
+/// background scheduler authority remains (B's); the old A loop/cycle is
+/// superseded with no panic/deadlock. A sequential start test alone (see
+/// `concurrent_scheduler_start_admits_exactly_one_starter`, retained above)
+/// is not enough to prove this -- that test never has two starts whose
+/// *provider calls* genuinely overlap in time.
+#[tokio::test]
+async fn stop_start_generation_race_old_cycle_cannot_overwrite_new_owner() {
+    let Some(pool) = maybe_db("stop_start_generation_race").await else {
+        return;
+    };
+    std::env::remove_var("MQK_PAPER_WATCHLIST_PATH");
+    std::env::set_var("MQK_STRATEGY_SYMBOL", "ZZAUTOFRRACE");
+    std::env::set_var("MQK_STRATEGY_MD_TIMEFRAME", "5m");
+    std::env::set_var("MQK_STRATEGY_IDS", "intraday_scalper");
+
+    let instruments = instrument_registry_file(&[("ZZAUTOFRRACE", "alpaca", "5m")]);
+    let providers = provider_registry_file(&["alpaca"]);
+
+    // Deliberately real `Utc::now()`, NOT the shared fixed `now_fixture()`:
+    // unlike every other test in this file, this one drives the real
+    // `start_required_universe_scheduler`/background-loop machinery
+    // end-to-end, and that loop always schedules its next real wake-up
+    // relative to actual wall-clock time (`required_universe_scheduler_loop`
+    // computes `wait_secs` against `Utc::now()`, independent of whatever
+    // `now_utc` the immediate cycle was called with). A stale fixed
+    // timestamp whose own 5-minute poll grid has already fallen behind real
+    // wall-clock would make the background loop fire an extra, genuine
+    // real-time cycle before this test's own assertions/cleanup run --
+    // flaky, and nothing to do with the generation race this test proves.
+    let now_a = Utc::now();
+    let call_started = Arc::new(tokio::sync::Notify::new());
+    let release_gate = Arc::new(tokio::sync::Notify::new());
+    let provider = Arc::new(BarrierDelayedProvider::new(
+        "alpaca",
+        call_started.clone(),
+        release_gate.clone(),
+    ));
+    provider.inner.seed_historical(
+        "ZZAUTOFRRACE",
+        five_bars("ZZAUTOFRRACE", now_a.timestamp() - 600),
+    );
+    let injected: Arc<dyn mqk_md::MarketDataProvider> = provider.clone();
+
+    let mut st = mqk_daemon::state::AppState::new();
+    st.instrument_registry_path = instruments.path().to_str().unwrap().to_string();
+    st.provider_registry_path = providers.path().to_str().unwrap().to_string();
+    st.db = Some(pool);
+    st.set_latest_bar_provider_client_for_test(injected);
+    let st = Arc::new(st);
+
+    // Step 1/2: Start A claims generation A; its immediate cycle's
+    // historical-bootstrap provider call parks on `release_gate`. Run on a
+    // spawned task since `start_required_universe_scheduler` will not
+    // return until that call is released.
+    let st_a = st.clone();
+    let handle_a =
+        tokio::spawn(async move { start_required_universe_scheduler(&st_a, false, now_a).await });
+
+    tokio::time::timeout(std::time::Duration::from_secs(10), call_started.notified())
+        .await
+        .expect("A's provider call must start within 10s");
+
+    let gen_a = {
+        let scheduler = st.required_universe_scheduler.lock().await;
+        assert!(scheduler.running, "A must be recorded as running");
+        scheduler.generation
+    };
+    assert_ne!(
+        gen_a, 0,
+        "a successful start must claim a nonzero generation"
+    );
+
+    // Step 3: Stop A while its immediate cycle is still parked mid-call.
+    let stopped = stop_required_universe_scheduler(&st, now_a).await;
+    assert!(stopped, "stop must observe A as running and stop it");
+
+    // Step 4/5: Start B. Its own historical-bootstrap call is the *second*
+    // call to the shared provider, so it passes straight through the
+    // barrier (does not block) and B establishes ownership synchronously.
+    // A fresh real `Utc::now()` again -- same reasoning as `now_a` above.
+    let now_b = Utc::now();
+    let report_b = start_required_universe_scheduler(&st, false, now_b)
+        .await
+        .expect("start B must succeed once A has stopped");
+
+    let gen_b = {
+        let scheduler = st.required_universe_scheduler.lock().await;
+        scheduler.generation
+    };
+    assert_ne!(
+        gen_b, gen_a,
+        "B must claim a strictly different generation than A"
+    );
+
+    // Step 6: release A's delayed provider call. A's DB write (if any) may
+    // now genuinely happen -- it targets the same idempotent upsert path B
+    // already used, so it cannot corrupt B's already-ingested data -- but
+    // its RESULT must never reach the shared scheduler state.
+    release_gate.notify_one();
+
+    // Step 7: let A's `start_required_universe_scheduler` call run to
+    // completion.
+    let result_a = tokio::time::timeout(std::time::Duration::from_secs(10), handle_a)
+        .await
+        .expect("A's start call must complete within 10s (no deadlock)")
+        .expect("A's task must not panic");
+    assert!(
+        result_a.is_ok(),
+        "A's own start call still resolves Ok even though it was superseded: {result_a:?}"
+    );
+
+    // ---- Proofs ----
+    let scheduler = st.required_universe_scheduler.lock().await;
+
+    assert_eq!(
+        scheduler.generation, gen_b,
+        "generation B must remain current after A's late cycle completes"
+    );
+    assert_eq!(
+        scheduler.cycle_count, 1,
+        "A's superseded cycle must not increment B's generation-owned cycle_count"
+    );
+    let recorded_last_poll = scheduler
+        .last_report
+        .as_ref()
+        .expect("a report must be recorded")
+        .last_poll_utc
+        .clone();
+    assert_eq!(
+        recorded_last_poll,
+        Some(now_b.to_rfc3339()),
+        "A's late result must not overwrite B's last_report (expected B's now_utc={}, got {:?})",
+        now_b.to_rfc3339(),
+        recorded_last_poll,
+    );
+    assert!(
+        scheduler.running,
+        "B's scheduler must still be running -- A's superseded stop-settle path must not touch it"
+    );
+    assert!(
+        scheduler.task.is_some(),
+        "exactly one current background scheduler authority (B's) must be installed"
+    );
+    assert!(
+        scheduler.stop_tx.is_some(),
+        "B's stop channel must be installed; A must never have replaced/cleared it"
+    );
+    assert_eq!(
+        report_b.market_date,
+        scheduler.last_report.as_ref().unwrap().market_date,
+        "B's own returned report and the recorded scheduler report must agree"
+    );
+    drop(scheduler);
+
+    // Cleanup: stop B's background task so it does not leak into later
+    // tests, then confirm the shared BarrierDelayedProvider was called
+    // exactly twice (A's original call plus B's) -- proving A's call really
+    // did happen (its DB side effect cannot be undone) while still failing
+    // to regain authority.
+    stop_required_universe_scheduler(&st, now_b).await;
+    assert_eq!(
+        provider.inner.historical_calls(),
+        2,
+        "both A's and B's historical-bootstrap provider calls must have actually been dispatched"
+    );
+
+    std::env::remove_var("MQK_STRATEGY_SYMBOL");
+    std::env::remove_var("MQK_STRATEGY_MD_TIMEFRAME");
+    std::env::remove_var("MQK_STRATEGY_IDS");
 }
 
 /// Serializes every test in this file that mutates the process-global
