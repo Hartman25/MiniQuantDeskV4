@@ -30,16 +30,17 @@
 #   Start-MiniQuantDesk.ps1 -Mode Live                live readiness report (blocked today)
 #   Start-MiniQuantDesk.ps1 -Mode Live -CheckOnly     read-only live diagnostic
 #   Start-MiniQuantDesk.ps1 -Mode Paper -Scheduled    unattended paper start (future Task Scheduler);
-#                                                      also always arms; fails closed if an
-#                                                      authoritative session-close time cannot be
-#                                                      established (no silent 30-minute fallback)
+#                                                      also always arms; uses the same required-universe
+#                                                      scheduler contract as interactive Paper and fails
+#                                                      closed if that authority is not established (no
+#                                                      silent fallback)
 #   Start-MiniQuantDesk.ps1 -Scheduled                STARTUP_REFUSED (Mode required when -Scheduled)
 #
 # Exit codes:
 #   0 = ready / successfully attached or prepared
 #   1 = generic startup failure (includes DB/Docker/migration prerequisite failures)
 #   2 = safety refusal (e.g. -Scheduled without -Mode, live_routing_enabled=true, declined LIVE confirmation)
-#   3 = data readiness failure (symbol universe / market-data gate / session-close truth unavailable)
+#   3 = data readiness failure (symbol universe / required-universe scheduler state not established)
 #   4 = backend/reconcile/arm failure
 #   5 = LIVE blocked by trust/readiness gates
 #   6 = unattended live start not authorized
@@ -698,10 +699,77 @@ function Invoke-PaperDbPrerequisites {
 # .../start is never itself treated as proof of maintenance authority -- the
 # scheduler's own status route is always checked (or re-checked) before an
 # outcome is called "established": running=true AND dry_run=false AND a
-# present, non-blocked report. A genuine overall_state=not_applicable +
-# is_trading_day=false (or an empty required universe) is accepted as a
-# legitimate no-work result without requiring running=true.
+# present, non-blocked report. A genuine overall_state=not_applicable is
+# accepted as a legitimate no-work result ONLY when is_trading_day=false (the
+# holiday/weekend case) without requiring running=true -- an empty required
+# universe on a trading day is a configuration defect, not no-work, and must
+# fail closed. See Test-RequiredUniverseReportAcceptable for the single
+# closed-set interpretation of overall_state shared by both functions below
+# (PAPER-OPS-AUTOFRESH-LAUNCHER-INTEGRATION-01-REPAIR-01).
 # =============================================================================
+function Test-RequiredUniverseReportAcceptable {
+    param(
+        [Parameter(Mandatory = $true)]$Report
+    )
+    $overallState = $Report.overall_state
+
+    if ($overallState -eq 'blocked') {
+        $blockerLines = @()
+        foreach ($ruReq in @($Report.requirements)) {
+            if (@($ruReq.blockers).Count -gt 0) {
+                $blockerLines += "$($ruReq.symbol)/$($ruReq.timeframe): freshness_state=$($ruReq.freshness_state) blockers=$($ruReq.blockers -join '; ')"
+            }
+        }
+        return [pscustomobject]@{
+            Acceptable = $false
+            NoWork     = $false
+            Reason     = 'REQUIRED_UNIVERSE_SCHEDULER_BLOCKED'
+            Detail     = ($blockerLines -join ' | ')
+        }
+    }
+
+    if ($overallState -eq 'ready') {
+        return [pscustomobject]@{
+            Acceptable = $true
+            NoWork     = $false
+            Reason     = $null
+            Detail     = $null
+        }
+    }
+
+    if ($overallState -eq 'not_applicable') {
+        if ($Report.is_trading_day -eq $false) {
+            # Legitimate non-trading day: zero provider calls, scheduler
+            # settles stopped -- a valid no-work result, never a failure.
+            return [pscustomobject]@{
+                Acceptable = $true
+                NoWork     = $true
+                Reason     = 'REQUIRED_UNIVERSE_NO_WORK_NOT_APPLICABLE'
+                Detail     = "is_trading_day=$($Report.is_trading_day)"
+            }
+        }
+        # overall_state=not_applicable on a trading day means the required
+        # universe resolved empty -- a configuration defect, not a
+        # legitimate no-work day. Must fail closed.
+        return [pscustomobject]@{
+            Acceptable = $false
+            NoWork     = $false
+            Reason     = 'REQUIRED_UNIVERSE_NOT_APPLICABLE_ON_TRADING_DAY'
+            Detail     = 'required-universe scheduler reported overall_state=not_applicable on a trading day (is_trading_day=true) -- no authoritative required market-data universe exists for today; refusing to proceed'
+        }
+    }
+
+    # Closed-set contract: only ready|blocked|not_applicable are recognized.
+    # Any other value -- unknown string, missing, null, or blank -- fails
+    # closed. There is no "anything except blocked = ready" fallthrough.
+    return [pscustomobject]@{
+        Acceptable = $false
+        NoWork     = $false
+        Reason     = 'REQUIRED_UNIVERSE_SCHEDULER_STATE_UNKNOWN'
+        Detail     = "required-universe report overall_state='$overallState' is not a recognized value (expected ready|blocked|not_applicable)"
+    }
+}
+
 function Confirm-RequiredUniverseSchedulerOwnership {
     param(
         [Parameter(Mandatory = $true)][string]$DaemonBaseUrl,
@@ -745,25 +813,20 @@ function Confirm-RequiredUniverseSchedulerOwnership {
             Report      = $null
         }
     }
-    if ($ruReport.overall_state -eq 'blocked') {
-        $blockerLines = @()
-        foreach ($ruReq in @($ruReport.requirements)) {
-            if (@($ruReq.blockers).Count -gt 0) {
-                $blockerLines += "$($ruReq.symbol)/$($ruReq.timeframe): freshness_state=$($ruReq.freshness_state) blockers=$($ruReq.blockers -join '; ')"
-            }
-        }
+    $verdict = Test-RequiredUniverseReportAcceptable -Report $ruReport
+    if (-not $verdict.Acceptable) {
         return [pscustomobject]@{
             Established = $false
-            Reason      = 'REQUIRED_UNIVERSE_SCHEDULER_BLOCKED'
-            Detail      = ($blockerLines -join ' | ')
+            Reason      = $verdict.Reason
+            Detail      = $verdict.Detail
             Report      = $ruReport
         }
     }
 
     return [pscustomobject]@{
         Established = $true
-        Reason      = if ($AllowReuse) { 'REQUIRED_UNIVERSE_SCHEDULER_VERIFIED_REUSE' } else { 'REQUIRED_UNIVERSE_SCHEDULER_NEW_ACTIVE' }
-        Detail      = $null
+        Reason      = if ($verdict.NoWork) { $verdict.Reason } elseif ($AllowReuse) { 'REQUIRED_UNIVERSE_SCHEDULER_VERIFIED_REUSE' } else { 'REQUIRED_UNIVERSE_SCHEDULER_NEW_ACTIVE' }
+        Detail      = $verdict.Detail
         Report      = $ruReport
     }
 }
@@ -795,28 +858,25 @@ function Start-OrVerifyRequiredUniverseScheduler {
                 Report      = $null
             }
         }
-        if ($ruReport.overall_state -eq 'blocked') {
-            $blockerLines = @()
-            foreach ($ruReq in @($ruReport.requirements)) {
-                if (@($ruReq.blockers).Count -gt 0) {
-                    $blockerLines += "$($ruReq.symbol)/$($ruReq.timeframe): freshness_state=$($ruReq.freshness_state) blockers=$($ruReq.blockers -join '; ')"
-                }
-            }
+        $verdict = Test-RequiredUniverseReportAcceptable -Report $ruReport
+        if (-not $verdict.Acceptable) {
             return [pscustomobject]@{
                 Established = $false
-                Reason      = 'REQUIRED_UNIVERSE_SCHEDULER_BLOCKED'
-                Detail      = ($blockerLines -join ' | ')
+                Reason      = $verdict.Reason
+                Detail      = $verdict.Detail
                 Report      = $ruReport
             }
         }
-        if ($ruReport.overall_state -eq 'not_applicable') {
-            # A legitimate non-trading day / empty required-symbol set makes
-            # zero provider calls and settles the scheduler stopped -- that
-            # is a valid no-work result, never a failure.
+        if ($verdict.NoWork) {
+            # A legitimate non-trading day makes zero provider calls and
+            # settles the scheduler stopped -- that is a valid no-work
+            # result, never a failure. An empty required universe on a
+            # trading day is NOT this case -- see
+            # Test-RequiredUniverseReportAcceptable, which fails that closed.
             return [pscustomobject]@{
                 Established = $true
-                Reason      = 'REQUIRED_UNIVERSE_NO_WORK_NOT_APPLICABLE'
-                Detail      = "is_trading_day=$($ruReport.is_trading_day)"
+                Reason      = $verdict.Reason
+                Detail      = $verdict.Detail
                 Report      = $ruReport
             }
         }
@@ -982,9 +1042,10 @@ function Invoke-PaperStartup {
     # fail-closed start/verify contract exactly (Confirm-RequiredUniverseSchedulerOwnership /
     # Start-OrVerifyRequiredUniverseScheduler, defined above) -- a 200/409
     # response is never itself treated as proof; the scheduler's own status
-    # route is always checked. A genuine overall_state=not_applicable (non-
-    # trading day / empty required universe) is accepted as legitimate
-    # no-work, never a failure.
+    # route is always checked. A genuine overall_state=not_applicable is
+    # accepted as legitimate no-work only on a non-trading day
+    # (is_trading_day=false); an empty required universe on a trading day
+    # fails closed instead (Test-RequiredUniverseReportAcceptable).
     $ruResult = Start-OrVerifyRequiredUniverseScheduler -DaemonBaseUrl $daemonBaseUrl -OperatorToken $operatorToken
     if (-not $ruResult.Established) {
         Write-Fail "Required-universe scheduler data-maintenance authority was not established (reason=$($ruResult.Reason))."

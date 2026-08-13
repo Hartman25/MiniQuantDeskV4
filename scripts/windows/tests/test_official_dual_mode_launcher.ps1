@@ -489,6 +489,54 @@ Assert-True 'L12: required-universe establishment happens before arm, and arm_st
 Assert-True 'L12: full-startup function returns ExitOk only after the arm section (arm gates final success, unchanged)' `
     ($FullStartupBody.IndexOf('return $script:ExitOk') -gt $FullStartupBody.IndexOf("Write-Section 'PAPER -- arm"))
 
+# ---------------------------------------------------------------------------
+# PAPER-OPS-AUTOFRESH-LAUNCHER-INTEGRATION-01-REPAIR-01: closed-set,
+# fail-closed interpretation of overall_state. L13-L16 prove the launcher can
+# no longer treat "anything except blocked" as success -- an empty required
+# universe on a trading day and any unrecognized/missing state must both fail
+# closed, on both the 200 (Start-OrVerifyRequiredUniverseScheduler) and 409
+# reuse (Confirm-RequiredUniverseSchedulerOwnership) paths.
+# ---------------------------------------------------------------------------
+
+# --- L13: 200 response, overall_state=not_applicable, is_trading_day=true,
+# empty required universe -> must fail closed (the verified defect) --------
+Reset-RequiredUniverseMocks
+$script:MockPostResult = [pscustomobject]@{ StatusCode = 200; Json = [pscustomobject]@{ report = (New-FakeRequiredUniverseReport -OverallState 'not_applicable' -IsTradingDay $true -Requirements @()) } }
+$l13 = Start-OrVerifyRequiredUniverseScheduler -DaemonBaseUrl 'http://127.0.0.1:8899' -OperatorToken 'fake-token'
+Assert-True 'L13: overall_state=not_applicable / is_trading_day=true / empty universe -> Established=false, REQUIRED_UNIVERSE_NOT_APPLICABLE_ON_TRADING_DAY (must not continue toward reconcile/arm on a trading day with no required universe)' `
+    (-not $l13.Established -and $l13.Reason -eq 'REQUIRED_UNIVERSE_NOT_APPLICABLE_ON_TRADING_DAY')
+
+# --- L14: 200 response, unrecognized overall_state -> fail closed ----------
+Reset-RequiredUniverseMocks
+$script:MockPostResult = [pscustomobject]@{ StatusCode = 200; Json = [pscustomobject]@{ report = (New-FakeRequiredUniverseReport -OverallState 'mystery_state' -IsTradingDay $true) } }
+$l14 = Start-OrVerifyRequiredUniverseScheduler -DaemonBaseUrl 'http://127.0.0.1:8899' -OperatorToken 'fake-token'
+Assert-True 'L14: 200 response with unrecognized overall_state=mystery_state -> Established=false, REQUIRED_UNIVERSE_SCHEDULER_STATE_UNKNOWN' `
+    (-not $l14.Established -and $l14.Reason -eq 'REQUIRED_UNIVERSE_SCHEDULER_STATE_UNKNOWN')
+
+# --- L15: 409 reuse, running=true/dry_run=false, but the reused scheduler's
+# own report carries an unrecognized overall_state -> fail closed (a running
+# scheduler is not sufficient if its report state is unrecognized) ----------
+Reset-RequiredUniverseMocks
+$script:MockPostResult = [pscustomobject]@{ StatusCode = 409; Json = [pscustomobject]@{ error = 'already_running' } }
+$script:MockGetResult  = [pscustomobject]@{ Ok = $true; Json = [pscustomobject]@{ running = $true; dry_run = $false; report = (New-FakeRequiredUniverseReport -OverallState 'mystery_state' -IsTradingDay $true) } }
+$l15 = Start-OrVerifyRequiredUniverseScheduler -DaemonBaseUrl 'http://127.0.0.1:8899' -OperatorToken 'fake-token'
+Assert-True 'L15: 409 reuse + running=true + dry_run=false but report overall_state=mystery_state -> Established=false, REQUIRED_UNIVERSE_SCHEDULER_STATE_UNKNOWN' `
+    (-not $l15.Established -and $l15.Reason -eq 'REQUIRED_UNIVERSE_SCHEDULER_STATE_UNKNOWN')
+
+# --- L16: report present but overall_state missing/null/blank -> fail
+# closed (PowerShell `$null -ne 'blocked'` must not become success) ---------
+Reset-RequiredUniverseMocks
+$script:MockPostResult = [pscustomobject]@{ StatusCode = 200; Json = [pscustomobject]@{ report = (New-FakeRequiredUniverseReport -OverallState $null -IsTradingDay $true) } }
+$l16 = Start-OrVerifyRequiredUniverseScheduler -DaemonBaseUrl 'http://127.0.0.1:8899' -OperatorToken 'fake-token'
+Assert-True 'L16: report present with overall_state=null/missing -> Established=false, REQUIRED_UNIVERSE_SCHEDULER_STATE_UNKNOWN (no optimistic fallthrough)' `
+    (-not $l16.Established -and $l16.Reason -eq 'REQUIRED_UNIVERSE_SCHEDULER_STATE_UNKNOWN')
+
+# --- L6 positive control re-affirmed: holiday/weekend (is_trading_day=false)
+# with an empty required universe remains legitimate no-work, unchanged by
+# the REPAIR-01 closed-set fix ------------------------------------------------
+Assert-True 'L6 (re-affirmed post-REPAIR-01): overall_state=not_applicable / is_trading_day=false / empty universe still -> Established=true, REQUIRED_UNIVERSE_NO_WORK_NOT_APPLICABLE' `
+    ($l6.Established -and $l6.Reason -eq 'REQUIRED_UNIVERSE_NO_WORK_NOT_APPLICABLE')
+
 # --- Real repo: -Mode Paper -CheckOnly (Section 2's r4) created no active
 # required-universe scheduler side effect (defense in depth -- CheckOnly
 # only ever performed a read-only GET against a local daemon that may not
