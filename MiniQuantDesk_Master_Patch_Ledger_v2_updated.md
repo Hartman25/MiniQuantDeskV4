@@ -1607,4 +1607,29 @@ pwsh scripts/windows/Get-PaperOperatorStatus.ps1   (read-only; daemon intentiona
 
 ---
 
+## 20. `PAPER-SOAK-CLIPPY-RETRY-TEST-LINT-REPAIR-01`
+
+**Status:** `IMPLEMENTED_PENDING_REVIEW`
+**Branch:** `integrate-paper-autofresh-launcher` (worktree `MiniQuantDeskV4-integration`)
+
+**Context:** Gate I (`cargo clippy --workspace --all-targets -- -D warnings`) failed with exit 101 on two lints in `core-rs/crates/mqk-daemon/tests/scenario_autonomous_daily_operator_retry_01.rs`, blocking the workspace clippy gate. `cargo check --workspace` (no `-D warnings`) was already clean, and the full `mqk-daemon`/`mqk-cli` test suites had already passed — this defect was purely a clippy-strictness compile blocker, unrelated to any change made earlier in this mission.
+
+**Classification:** `PRODUCT_DEFECT` (pre-existing, test-only, non-behavioral) — introduced whole in commit `035cabf0` (`fix: add safe autonomous daily retry`), not by this mission's earlier repairs.
+
+**Findings and repairs:**
+1. `dynamic_session_now()` (line ~182): `clippy::while_let_loop` — a `loop { match ... { pat => ..., _ => break } }` that clippy can prove is exactly a `while let` loop. Rewritten to `while let chrono::Weekday::Sat | chrono::Weekday::Sun = candidate_date.weekday() { candidate_date += ChronoDuration::days(1); }` — behaviorally identical, mechanical simplification only.
+2. `real_transition()` (line ~285): `clippy::too_many_arguments` (9/7). The sibling test-fixture builder `seed_operation_row` in the same file (same original commit, same 9-parameter shape) already carries `#[allow(clippy::too_many_arguments)]` — `real_transition` was simply missed. Added the identical, narrow, function-scoped `#[allow(clippy::too_many_arguments)]` to match the file's own established precedent for named-parameter test-fixture helpers. This is not a blanket/crate-level allow; each of these test builder functions takes many named DB-fixture fields where a struct wrapper would not improve clarity over the existing call sites.
+
+**Production code:** Not touched — both findings are in a test file only.
+
+**Validation:**
+- `cargo clippy -p mqk-daemon --all-targets -- -D warnings`: **PASS** (0 errors; same pre-existing unrelated sqlx future-incompat warning only).
+- Targeted DB-backed proof (test module is `#[ignore]`-gated per its own doc, run with `--include-ignored` and the real DB per the mission's ignore-gated test rule): `cargo test -p mqk-daemon --test scenario_autonomous_daily_operator_retry_01 -- --test-threads=1 --include-ignored` against `postgresql://127.0.0.1:5434/mqk_test`: **16 passed / 0 failed / 0 ignored**.
+- `cargo check -p mqk-daemon --tests`: **PASS**.
+- `git diff --check`: clean.
+
+**Commit:** test-only, narrow, separate from all prior repairs in this mission.
+
+---
+
 *End of MiniQuantDesk V4 Authoritative Master Completion Ledger — FULL-REPO-COMPLETION-AUDIT-01, updated by FINAL-CANONICAL-PRE-SOAK-VALIDATION-01.*

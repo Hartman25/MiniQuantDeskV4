@@ -180,13 +180,8 @@ fn weekday_at(hour: u32, minute: u32) -> DateTime<Utc> {
 /// reliably reports `Applicable`.
 fn dynamic_session_now() -> DateTime<Utc> {
     let mut candidate_date = Utc::now().date_naive() + ChronoDuration::days(1);
-    loop {
-        match candidate_date.weekday() {
-            chrono::Weekday::Sat | chrono::Weekday::Sun => {
-                candidate_date += ChronoDuration::days(1);
-            }
-            _ => break,
-        }
+    while let chrono::Weekday::Sat | chrono::Weekday::Sun = candidate_date.weekday() {
+        candidate_date += ChronoDuration::days(1);
     }
     Utc.from_utc_datetime(&candidate_date.and_hms_opt(14, 30, 0).unwrap())
 }
@@ -282,6 +277,7 @@ async fn seed_operation_row(
 /// `Applied`. Every fixture in this file reaches `manual_intervention_required`
 /// (and, for R2, `running`) only through this — the real production CAS
 /// primitive the coordinator itself uses — never a raw `UPDATE`.
+#[allow(clippy::too_many_arguments)]
 async fn real_transition(
     pool: &sqlx::PgPool,
     operation_id: Uuid,
