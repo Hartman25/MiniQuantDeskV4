@@ -1632,4 +1632,54 @@ pwsh scripts/windows/Get-PaperOperatorStatus.ps1   (read-only; daemon intentiona
 
 ---
 
+## 21. Mission Closure — `PAPER-SOAK-FINISH-LINE-RECOVERY-MERGE-CUTOVER-01`
+
+**Mission date:** 2026-08-12
+**Scope:** finish the paper-launcher integration, exhaust deterministic repo/test blockers one root cause at a time, fast-forward merge to `main`, cut the permanent scheduler over from the temporary August task, and clean up only proven-merged branches — without touching Live, without submitting orders, without manually starting the economic runtime.
+
+**Focused repairs landed this mission (three separate commits, each a single root cause):**
+1. `c45aa4c2` — `PAPER-SOAK-PROVIDER-SCOPED-INGEST-TEST-REPAIR-01` (§18): `STALE_TEST`, six provider-scoped ingest expectations updated from hardcoded `88` to a registry-derived count; production `resolve_provider_scoped_equities` unchanged. 65/65 passed.
+2. `83e0707d` — `PAPER-SOAK-WS-GAP-HALT-NOTE-TRUTH-REPAIR-01` (§19): `STALE_TEST`, E14a's hardcoded exit-note string updated to match the `(halt_outcome=...)` suffix intentionally added by the already-closed `PRE-SOAK-DAEMON-SUPERVISOR-HALT-FENCE-CLOSURE-01` fence; production `loop_runner.rs` unchanged. 31/31 passed (full proof bundle).
+3. `e63a3170` — `PAPER-SOAK-CLIPPY-RETRY-TEST-LINT-REPAIR-01` (§20): `PRODUCT_DEFECT` (pre-existing, test-only), two clippy lints in `scenario_autonomous_daily_operator_retry_01.rs` (`while_let_loop` mechanical rewrite; a missed `#[allow(clippy::too_many_arguments)]` matching the sibling fixture builder in the same file). 16/16 passed with `--include-ignored` against the real DB.
+
+No additional deterministic blockers were found beyond these three — the full `mqk-daemon` and `mqk-cli` regressions were each green on the first real-DB run after the third repair.
+
+**Final validation tallies (this session, against `postgresql://127.0.0.1:5434/mqk_test`):**
+- `mqk-daemon` full suite: **3271 passed / 0 failed / 463 ignored**.
+- `mqk-cli` full suite: **135 passed / 0 failed / 9 ignored**.
+- `cargo check --workspace`: **PASS**.
+- `cargo clippy --workspace --all-targets -- -D warnings`: **PASS** (0 errors after repair #3).
+- `git diff --check`: clean at every commit boundary.
+
+**Config conflict (surfaced and resolved by explicit operator decision, not assumed):** the main worktree's uncommitted `config/instruments/equities.json` carried a `TEMPORARY same-day override (2026-08-11)` that re-added AAPL `1D` alongside `5m`, past its own stated revert deadline. This conflicted with the integration branch's permanent, reasoned `MARKET-DATA-PROVIDER-PROVENANCE-01-REPAIR-01` decision (`alpaca`+`1D` is `DailyBarTimestampConvention::Unverified`). Per the mission's explicit STOP-on-any-diff instruction, this was surfaced to the operator rather than resolved unilaterally; the operator chose to keep the integration branch's `5m`-only permanent decision. Working copy backed up to `%TEMP%\MiniQuantDeskV4-premerge-20260812\equities.json` before `git restore --source=HEAD` was run.
+
+**Merge:** `git merge --ff-only origin/integrate-paper-autofresh-launcher` from `main` — **fast-forward, no merge commit**. `54082a44` → `e63a3170`.
+
+**CheckOnly proofs (main, post-merge, read-only):**
+- Paper: prerequisites OK, daemon not started, no mutation.
+- Live: **`LIVE START REFUSED`** (exit 5) — `broker configuration`, `account truth`, `reconciliation`, `risk`, `trust chain` all `BLOCKED`/`BLOCKED_NOT_IMPLEMENTED`, `live_trust_complete=FALSE`. This is the expected fail-closed gate, not a defect. No live broker orders enabled, no live runtime started, no live DB mutated.
+
+**Push proof:** `integrate-paper-autofresh-launcher` pushed (`096f6826..e63a3170`) and verified equal to local before the merge; `main` pushed (`54082a44..e63a3170`) and verified equal to local (`origin/main` = `e63a3170`) after.
+
+**Scheduler cutover:**
+- Permanent task `\MiniQuantDesk\MiniQuantDesk-Paper-Preopen-Startup` rehomed from the integration worktree to `C:\Users\Zacha\Desktop\MiniQuantDeskV4` via `Register-PaperStartupTask.ps1`, registered `DISABLED` first; verified zero `MiniQuantDeskV4-integration` references anywhere in the exported task XML; action/working-directory/trigger (Mon–Fri 02:00 local)/settings (`IgnoreNew`, `RestartCount=2`, `RestartInterval=10m`, `ExecutionTimeLimit=1h`, `StartWhenAvailable=true`, `WakeToRun=true`)/principal (current user, Interactive, Limited) all confirmed correct.
+- Temporary task `MiniQuantDesk-2026-08-PaperSoak-Startup` state recorded before cutover (`Ready`, last run `2026-08-11 02:00:01` result `0`, 1 missed run, already pointed at `main`, not deleted).
+- Cutover: temporary task disabled (`Disable-ScheduledTask`) → permanent task enabled (`Register-PaperStartupTask.ps1 -Enable`) → verified exactly one of the two tasks (`Ready`) at a time throughout. Neither task was manually started.
+- Post-cutover: permanent = `Ready`, `NextRunTime = 2026-08-13 02:00:00` (Thursday); temporary = `Disabled`, still registered (rollback path retained, not deleted).
+
+**Branch cleanup:** ancestry proven (`git merge-base --is-ancestor`, local and remote) for all five candidates before any deletion: `fix-market-data-provider-provenance`, `fix-autonomous-daily-operator-retry`, `fix-market-data-autofresh-required-universe`, `ops-official-launcher`, `integrate-paper-autofresh-launcher`. Their five corresponding worktrees (`MiniQuantDeskV4-data`, `-retry`, `-autofresh`, `-ops`, `-integration`) were each confirmed clean (or only protected `smoke_logs/`), then detached to the final `main` SHA (`git switch --detach e63a3170`) rather than removed — `smoke_logs/` in `-ops` and `-integration` preserved and reconfirmed present after detach. Only then were the five branches deleted, `git branch -d` (safe/non-force) locally and `git push origin --delete` remotely, followed by `git fetch --prune`. Retained: `main`, `codex/audit-last-two-patches-and-fix-stuck-state`, `review/ai-ml-local-lab-foundation-01`, `review/bundle4-final-coherence`, `review/premarket-script-guard-truth-repair` — all confirmed still present after prune.
+
+**Final state:**
+- `main` = `origin/main` = `e63a31706954f21fa7b5ed48d018576e15bb39d0`.
+- `git status --short` in the main worktree: `?? smoke_logs/` only.
+- Exactly one Paper-startup scheduled task enabled (the permanent one).
+- No Live runtime started, no Live routing exercised, no manual `Start-ScheduledTask`, no manual economic Paper runtime start, no orders submitted, no `branch -D`, no `git clean`, no `reset --hard`, no forced worktree removal, `smoke_logs/` not deleted anywhere, temporary task not deleted.
+
+**Status distinctions (per this repo's honest-status vocabulary):**
+- Code / merge / scheduler cutover: **CLOSED** — all proof above holds against committed HEAD.
+- Unattended permanent-scheduler proof: **PENDING** — remains open until the real Thursday 2026-08-13 02:00 run executes.
+- Paper soak day result: **PENDING** — remains open until Thursday's market-session evidence shows either a valid `NO_SIGNAL` or a valid fill/trade path, and not a `BLOCKED` state.
+
+---
+
 *End of MiniQuantDesk V4 Authoritative Master Completion Ledger — FULL-REPO-COMPLETION-AUDIT-01, updated by FINAL-CANONICAL-PRE-SOAK-VALIDATION-01.*
