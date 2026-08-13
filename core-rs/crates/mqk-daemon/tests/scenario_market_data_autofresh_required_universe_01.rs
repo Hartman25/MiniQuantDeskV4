@@ -656,6 +656,153 @@ async fn aapl_5m_positive_proof_bootstraps_then_stays_ready() {
 }
 
 // ---------------------------------------------------------------------------
+// PAPER-SOAK-FRIDAY-RECOVERY-LAUNCHER-HARDENING-AND-MONITOR-01, Phase 6A.
+//
+// The positive proof above (§36 test 1) only ever exercises
+// `REASON_MARKET_DATA_MISSING` (DB starts empty). `needs_historical_
+// bootstrap()` treats `market_data_missing`, `insufficient_history`, and
+// `interior_gap` identically (a single `.contains()` check across all
+// three), but no existing test drove the controller through the
+// `interior_gap`-specifically-present case end to end. This closes that
+// gap: seed a full window, punch a hole in the middle (matching the shape
+// of Thursday 2026-08-13's real AAPL/5m gap -- history existing both
+// before and after a missing stretch), and prove the controller performs
+// exactly one bounded historical bootstrap call that repairs it.
+//
+// Punching one row out of an exactly-`required_history_bars`-sized window
+// also drops the row count below that requirement, so `insufficient_
+// history` co-occurs with `interior_gap` in the raw `blockers` list here
+// -- `ddr_56_history_insufficient_continuity_state_never_ok`
+// (scenario_daily_data_readiness_01.rs) documents this as the realistic,
+// expected co-occurrence under the live evaluator, not a test defect. The
+// dry-run read below still explicitly asserts `interior_gap` is present in
+// the raw blockers, proving this fixture is genuinely an interior-gap
+// scenario and not merely a re-run of the missing-history case above.
+// ---------------------------------------------------------------------------
+#[tokio::test]
+async fn interior_gap_specifically_triggers_bounded_historical_bootstrap() {
+    let Some(pool) = maybe_db("interior_gap_bootstrap").await else {
+        return;
+    };
+    std::env::set_var("MQK_STRATEGY_SYMBOL", "ZZAUTOFRGAP");
+    std::env::set_var("MQK_STRATEGY_MD_TIMEFRAME", "5m");
+    std::env::set_var("MQK_STRATEGY_IDS", "intraday_scalper");
+    std::env::remove_var("MQK_PAPER_WATCHLIST_PATH");
+
+    let instruments = instrument_registry_file(&[("ZZAUTOFRGAP", "alpaca", "5m")]);
+    let providers = provider_registry_file(&["alpaca"]);
+    let now = now_fixture();
+    let end_ts = now.timestamp() - 600;
+    let provider = Arc::new(FakeUniverseProvider::new("alpaca"));
+    provider.seed_historical("ZZAUTOFRGAP", five_bars("ZZAUTOFRGAP", end_ts));
+    let injected: Arc<dyn mqk_md::MarketDataProvider> = provider.clone();
+    let calendar = trading_day_calendar();
+
+    // Cycle 1: empty DB -> market_data_missing -> bootstrap all 5 bars.
+    let result1 = run_cycle_with_deterministic_ingest_stamp(
+        Some(&pool),
+        instruments.path().to_str().unwrap(),
+        providers.path().to_str().unwrap(),
+        Some(&injected),
+        &calendar,
+        now,
+        false,
+    )
+    .await;
+    assert_eq!(provider.historical_calls(), 1);
+    assert_eq!(result1.report.requirements[0].symbol, "ZZAUTOFRGAP");
+
+    // Punch an interior hole: delete just the middle bar (five_bars' i=2
+    // slot, end_ts - 600) directly against the DB, bypassing the provider
+    // entirely -- history remains present both before and after the hole.
+    let middle_end_ts = end_ts - 600;
+    sqlx::query("delete from md_bars where symbol = $1 and timeframe = '5m' and end_ts = $2")
+        .bind("ZZAUTOFRGAP")
+        .bind(middle_end_ts)
+        .execute(&pool)
+        .await
+        .expect("punch interior gap");
+
+    // Confirm the fixture is genuinely an interior_gap scenario via a
+    // read-only dry_run cycle (zero provider calls, zero DB writes) before
+    // asking the controller to repair it.
+    let dry_run_result = run_cycle_with_deterministic_ingest_stamp(
+        Some(&pool),
+        instruments.path().to_str().unwrap(),
+        providers.path().to_str().unwrap(),
+        Some(&injected),
+        &calendar,
+        now,
+        true,
+    )
+    .await;
+    assert_eq!(
+        provider.historical_calls(),
+        1,
+        "dry_run must make zero additional provider calls"
+    );
+    assert!(
+        dry_run_result.report.requirements[0]
+            .blockers
+            .contains(&"interior_gap".to_string()),
+        "punching the middle bar must produce interior_gap in the raw blockers list: {:?}",
+        dry_run_result.report.requirements[0].blockers
+    );
+
+    // Cycle 2 (real, dry_run=false): interior_gap must drive exactly one
+    // more bounded historical bootstrap call that repairs the hole.
+    //
+    // MARKET-DATA-AUTOFRESH-TEST-TIME-DETERMINISM-01 (see the module-level
+    // note above `stamp_recent_ingested_at_for_test`): this call's own
+    // report reflects the repaired bar's `ingested_at` as the real database
+    // server clock stamped it *during this same call*, before this call's
+    // own post-write re-stamp can apply -- so only assert the structural
+    // fact that doesn't depend on it (the call count). Cycle 3 below, which
+    // reads the now-re-stamped row fresh, is where "genuinely ready" is
+    // proven -- exactly mirroring cycle 1/cycle 2 of the market_data_missing
+    // proof above.
+    let result2 = run_cycle_with_deterministic_ingest_stamp(
+        Some(&pool),
+        instruments.path().to_str().unwrap(),
+        providers.path().to_str().unwrap(),
+        Some(&injected),
+        &calendar,
+        now,
+        false,
+    )
+    .await;
+    assert_eq!(
+        provider.historical_calls(),
+        2,
+        "interior_gap must trigger exactly one bounded historical bootstrap call"
+    );
+    assert_eq!(result2.report.requirements.len(), 1, "{:?}", result2.report);
+
+    // Cycle 3: re-evaluated readiness (reading the now-re-stamped rows
+    // fresh) is ready, with no further repair.
+    let result3 = run_cycle_with_deterministic_ingest_stamp(
+        Some(&pool),
+        instruments.path().to_str().unwrap(),
+        providers.path().to_str().unwrap(),
+        Some(&injected),
+        &calendar,
+        now,
+        false,
+    )
+    .await;
+    assert_eq!(result3.report.overall_state, "ready", "{:?}", result3.report);
+    assert_eq!(
+        provider.historical_calls(),
+        2,
+        "no repeated historical bootstrap once already ready"
+    );
+
+    std::env::remove_var("MQK_STRATEGY_SYMBOL");
+    std::env::remove_var("MQK_STRATEGY_MD_TIMEFRAME");
+    std::env::remove_var("MQK_STRATEGY_IDS");
+}
+
+// ---------------------------------------------------------------------------
 // §36 test 2: multi-symbol positive proof
 // ---------------------------------------------------------------------------
 
