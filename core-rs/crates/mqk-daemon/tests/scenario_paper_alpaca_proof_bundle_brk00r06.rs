@@ -1543,11 +1543,21 @@ async fn ptauto01b_e14a_gap_detected_halts_real_execution_loop() {
     let exit_note = st.run_loop_one_tick_for_test(run_id).await;
 
     // The loop must exit with the PT-AUTO-01 note (not tick error, not deadman).
+    //
+    // PRE-SOAK-DAEMON-SUPERVISOR-HALT-FENCE-CLOSURE-01 (commit 0a019b8b) added
+    // an explicit `(halt_outcome=...)` suffix to this exit note so the
+    // supervisor's durable-halt-persistence outcome (Halted / AlreadyHalted /
+    // Superseded / PersistenceFailure / None) is always truthfully surfaced,
+    // never silently omitted. In this test seam `state.db` is `None` for all
+    // `new_for_test_with_*` AppState constructors (see
+    // `run_loop_one_tick_for_test` above), so `persist_execution_loop_safety_halt`
+    // is never called and `halt_outcome` stays `None` — that is the correct,
+    // expected value here, not a defect.
     assert_eq!(
         exit_note.as_deref(),
-        Some("execution loop halted: Alpaca WS continuity gap detected"),
-        "E14a: real loop must exit with PT-AUTO-01 halt note on GapDetected; \
-         got: {exit_note:?}"
+        Some("execution loop halted: Alpaca WS continuity gap detected (halt_outcome=None)"),
+        "E14a: real loop must exit with PT-AUTO-01 halt note on GapDetected, \
+         with halt_outcome=None in this no-DB test seam; got: {exit_note:?}"
     );
 
     // Integrity must be disarmed AND halted — both are set by the PT-AUTO-01 path.

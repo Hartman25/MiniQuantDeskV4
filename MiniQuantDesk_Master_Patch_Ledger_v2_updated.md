@@ -1576,4 +1576,35 @@ pwsh scripts/windows/Get-PaperOperatorStatus.ps1   (read-only; daemon intentiona
 
 ---
 
+## 19. `PAPER-SOAK-WS-GAP-HALT-NOTE-TRUTH-REPAIR-01`
+
+**Status:** `IMPLEMENTED_PENDING_REVIEW`
+**Branch:** `integrate-paper-autofresh-launcher` (worktree `MiniQuantDeskV4-integration`)
+
+**Context:** After the ingest repair above, the full `mqk-daemon` test binary progressed further and exposed `ptauto01b_e14a_gap_detected_halts_real_execution_loop` (in `scenario_paper_alpaca_proof_bundle_brk00r06.rs`) failing with actual exit note `"execution loop halted: Alpaca WS continuity gap detected (halt_outcome=None)"` against an old expectation of `"execution loop halted: Alpaca WS continuity gap detected"` (no suffix).
+
+**Classification:** `STALE_TEST` — not a production defect.
+
+**Root cause:** Commit `0a019b8b` (`fix: fence daemon supervisor safety halts`, `PRE-SOAK-DAEMON-SUPERVISOR-HALT-FENCE-CLOSURE-01`, already `CLOSED` per prior ledger record) deliberately added a `(halt_outcome={halt_outcome:?})` suffix to every supervisor safety-halt exit note in `core-rs/crates/mqk-daemon/src/state/loop_runner.rs`, including the PT-AUTO-01 WS-continuity-gap branch (`loop_runner.rs:559-563`). This is an intentional truthfulness/observability contract: the exit note must always surface whether the durable halt was `Halted`, `AlreadyHalted`, `Superseded`, `PersistenceFailure`, or (when no DB pool is present) `None` — never silently omitted. The `ptauto01b_e14a_*` test's harness helper `run_loop_one_tick_for_test` (`state.rs:2284-2359`) is documented in-source (`state.rs:2334-2336`) to use a `db = None` seam for all `new_for_test_with_*` AppState constructors, so `persist_execution_loop_safety_halt` is never invoked and `halt_outcome` is correctly `None` in this seam. The test's hardcoded expected string simply predated the `0a019b8b` observability change and was never updated.
+
+**Production code:** **Not changed.** `loop_runner.rs`'s halt-outcome-suffix behavior is the accepted, already-closed fence contract — weakening or removing it to satisfy the old string would regress an accepted safety/observability invariant.
+
+**Repair (test-only):** `core-rs/crates/mqk-daemon/tests/scenario_paper_alpaca_proof_bundle_brk00r06.rs`, `ptauto01b_e14a_gap_detected_halts_real_execution_loop` — updated the exact-match assertion to the new canonical string `"execution loop halted: Alpaca WS continuity gap detected (halt_outcome=None)"`, with an inline comment explaining why `None` is correct for this no-DB seam (not a loosened/prefix-only assertion — still an exact match on the full canonical PT-AUTO-01 halt reason plus its expected halt outcome for this seam). `ptauto01b_e14b_*` (Live continuity, PT-AUTO-01 must NOT fire) was inspected and required no change — its `assert_ne!` never matched the WS-gap string family before or after this repair.
+
+**Safety invariants preserved (unchanged by this repair):**
+- `GapDetected` still causes the real execution loop to self-halt via PT-AUTO-01.
+- `integrity.disarmed` and `integrity.halted` both become `true` on this path.
+- The loop still exits before reaching economic dispatch.
+- No weaker safety behavior was introduced; no production code touched.
+
+**Validation:**
+- Targeted: `cargo test -p mqk-daemon --test scenario_paper_alpaca_proof_bundle_brk00r06 ptauto01b_e14a_gap_detected_halts_real_execution_loop -- --exact --nocapture`: **1 passed / 0 failed**.
+- Full binary: `cargo test -p mqk-daemon --test scenario_paper_alpaca_proof_bundle_brk00r06 -- --test-threads=1 --nocapture`: **31 passed / 0 failed / 0 ignored**.
+- `cargo check -p mqk-daemon --tests`: **PASS** (same pre-existing unrelated sqlx future-incompat warning only).
+- `git diff --check`: clean.
+
+**Commit:** test-only, separate from the ingest repair (not amended into it).
+
+---
+
 *End of MiniQuantDesk V4 Authoritative Master Completion Ledger — FULL-REPO-COMPLETION-AUDIT-01, updated by FINAL-CANONICAL-PRE-SOAK-VALIDATION-01.*
