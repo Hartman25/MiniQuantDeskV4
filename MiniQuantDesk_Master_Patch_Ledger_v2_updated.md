@@ -848,6 +848,31 @@ git diff --check
 **Expected Handoff:** Start HEAD `1a9c4b8f150e728675d3aa996c4cef844da10c2e`; end HEAD = new commit on `integrate-paper-autofresh-launcher` titled `fix: fail closed on invalid required universe`; not pushed, not merged to `main`.
 **Acceptance History:** PENDING / PENDING / PENDING / PENDING.
 
+#### PAPER-SOAK-RUST-TIMING-TEST-HARDENING-01 — Reproduction attempt for the stop/start generation-race timing discrepancy
+
+**Status:** OPEN (not reproduced; no Rust change made) · **Priority:** P2 · **Paper Impact:** GREEN (investigation-only, zero source touched) · **Subsystem:** `mqk-daemon` test suite
+
+**Current Source Truth:** Investigated in the same worktree/branch as the integration patches above, `C:\Users\Zacha\Desktop\MiniQuantDeskV4-integration`, branch `integrate-paper-autofresh-launcher`, starting HEAD `3d2894d39a184b1740faa1f20694dcba5b498f78`. No commit produced beyond this ledger entry.
+
+**Problem:** `PAPER-OPS-AUTOFRESH-LAUNCHER-INTEGRATION-01` (above) documented a cross-session tally discrepancy on `stop_start_generation_race_old_cycle_cannot_overwrite_new_owner` (`core-rs/crates/mqk-daemon/tests/scenario_market_data_autofresh_required_universe_01.rs:1744`): the implementing agent's background/sandboxed session saw 0/8 passing runs, every failure identical — `A's provider call must start within 10s: Elapsed(())` at line 1798 (the outer `tokio::time::timeout` wrapping `call_started.notified()`, not the deterministic `Notify`-based generation-ownership barrier itself, which was unaffected). The reviewing coordinator's interactive session saw only 1/7 failures on the same commit. This task was scoped to reproduce that discrepancy under a bounded matrix and, only if reproduced, apply a deterministic test-only hardening fix (no sleep/timeout increases, no retries, no `#[ignore]`).
+
+**Reproduction matrix (this session, commit `3d2894d3`, `MQK_DATABASE_URL=postgresql://postgres:postgres@127.0.0.1:5434/mqk_test`):**
+- Targeted, normal execution (`-p mqk-daemon stop_start_generation_race_old_cycle_cannot_overwrite_new_owner -- --nocapture`): 1/1 pass (0.24s).
+- Targeted, single-thread (`--test-threads=1`): 1/1 pass (0.21s).
+- 25x repeated targeted normal execution (bounded PowerShell/bash loop, stop on first failure): 25/25 pass, 0 skipped (confirmed via `test ... ok` line count, not just exit code).
+- Narrow historical-context reproduction — the exact command the parent ledger entry's own `Required Validation` block specifies (`--test scenario_market_data_autofresh_required_universe_01 --test scenario_market_data_autofresh_plan_resolution_01 --test scenario_daily_data_readiness_01 --test scenario_market_data_latest_bar_poll_01 --test scenario_market_data_latest_bar_scheduler_01 -- --test-threads=1 --include-ignored`): 41/41 pass across all five files, including the target test.
+
+One methodological note preserved for future investigators: the first attempt at each of these runs silently short-circuited (`skipped DB-backed proof because MQK_DATABASE_URL is not set` → reported as `ok` by the harness) because the ambient environment did not have `MQK_DATABASE_URL` set. That is not the timing discrepancy being investigated — it is a distinct, environment-dependent false-pass hazard specific to invoking this test file without first setting the DB URL, worth flagging separately but out of scope for this task (no source changed).
+
+**No failure was reproduced in this session under any of the four conditions above**, including the specific narrow context the ledger recorded as previously 0/8-failing for the implementing agent. Per audit rules, no deterministic-barrier patch was written on the strength of a historical (unreproduced-here) timing suspicion alone. The original discrepancy is not disproven — only not observed in this session's execution context — so the test remains unmodified and the underlying resource-contention theory in the parent entry stands as the best available explanation.
+
+**Dependencies:** None (standalone investigation, references `PAPER-OPS-AUTOFRESH-LAUNCHER-INTEGRATION-01`'s discrepancy record above).
+**Unlocks:** Nothing; the standalone test-hardening follow-up flagged in `PAPER-OPS-AUTOFRESH-LAUNCHER-INTEGRATION-01`'s `Exact CLOSED End State` remains open.
+**In Scope:** Reproduction only — no files changed except this ledger entry.
+**Out of Scope:** Any Rust source or test change (none was warranted); scheduler activation; full canonical/integrated validation; `main`.
+**Exact CLOSED End State:** Not CLOSED — `OPEN`. Reclassify to `PARKED` or re-attempt reproduction under harder resource contention (e.g. concurrent background compiles/tests) if this needs to be chased further; do not mark `CLOSED` on the strength of this session's clean tallies alone, since the original discrepancy was itself session-dependent.
+**Expected Handoff:** Start HEAD `3d2894d39a184b1740faa1f20694dcba5b498f78`; no Rust changed; ledger-only commit expected on `integrate-paper-autofresh-launcher`; not pushed, not merged to `main`.
+
 #### PAPER-AUTOMATIC-PREOPEN-SCHEDULER-01 — Windows Task Scheduler registration for unattended Paper start
 
 **Status:** IMPLEMENTED_PENDING_REVIEW · **Priority:** P2 · **Paper Impact:** GREEN (additive scheduling only) · **Subsystem:** Ops tooling
