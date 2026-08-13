@@ -477,9 +477,10 @@ The `live_trust_gaps` list in parity_evidence.json makes the remaining gaps expl
 ### 10.0 Official launcher (OFFICIAL-DUAL-MODE-LAUNCHER-01)
 
 `Start-MiniQuantDesk.ps1` is the **official, top-level entrypoint** for starting
-MiniQuantDesk manually and (in a future patch) via Windows Task Scheduler. It
-selects between two top-level trading modes and delegates the actual startup
-work to the existing accepted scripts below rather than reimplementing them.
+MiniQuantDesk both manually and via Windows Task Scheduler
+(`Register-PaperStartupTask.ps1`, see §10.1 below). It selects between two
+top-level trading modes and delegates the actual startup work to the existing
+accepted scripts below rather than reimplementing them.
 
 ```powershell
 # Interactive Paper/Live menu
@@ -498,8 +499,8 @@ work to the existing accepted scripts below rather than reimplementing them.
 .\scripts\windows\Start-MiniQuantDesk.ps1 -Mode Live
 .\scripts\windows\Start-MiniQuantDesk.ps1 -Mode Live -CheckOnly
 
-# Future scheduled Paper start (Task Scheduler registration is a separate,
-# not-yet-built patch: PAPER-AUTOMATIC-PREOPEN-SCHEDULER-01)
+# Scheduled Paper start -- the same command a registered Task Scheduler
+# action invokes unattended (PAPER-AUTOMATIC-PREOPEN-SCHEDULER-01, §10.1)
 .\scripts\windows\Start-MiniQuantDesk.ps1 -Mode Paper -Scheduled
 ```
 
@@ -535,6 +536,78 @@ only.
 path underneath Paper mode. It starts the daemon and native desktop GUI but
 does **not** auto-arm, auto-start the runtime, or submit orders. It is
 separate from the smoke harness.
+
+### 10.1 Permanent Paper pre-open scheduled task (PAPER-AUTOMATIC-PREOPEN-SCHEDULER-01)
+
+`Register-PaperStartupTask.ps1` registers (creates or reconciles) a permanent
+Windows Scheduled Task whose action delegates entirely to the official
+launcher's accepted scheduled contract:
+
+```powershell
+# Register/reconcile the permanent task definition (default: left DISABLED)
+.\scripts\windows\Register-PaperStartupTask.ps1
+
+# Register/reconcile AND explicitly activate the permanent task
+.\scripts\windows\Register-PaperStartupTask.ps1 -Enable
+
+# Override the default Monday-Friday 02:00 local trigger time
+.\scripts\windows\Register-PaperStartupTask.ps1 -StartTime 02:30
+```
+
+The registered task action invokes **only**:
+
+```
+Start-MiniQuantDesk.ps1 -Mode Paper -Scheduled
+```
+
+No other launcher argument (`-RepoRoot`, `-SkipGui`, `-ArmPaper`, etc.) is
+ever passed — `-Scheduled` alone already causes the launcher's own unattended
+startup behavior. The task is registered in the `\MiniQuantDesk\` Task
+Scheduler folder as `MiniQuantDesk-Paper-Preopen-Startup`, with:
+
+- **Trigger:** Monday-Friday at 02:00 local time by default (the accepted
+  pre-open operational boundary). This does not attempt to reproduce the
+  NYSE holiday calendar — the daemon's own required-universe scheduler
+  (§ PAPER-OPS-AUTOFRESH-LAUNCHER-INTEGRATION-01 above) already fails closed
+  or reports legitimate non-trading-day no-work from authoritative
+  market-calendar truth.
+- **Principal:** Interactive logon, Limited run level, running as the
+  current Windows identity. This requires the desktop user to remain signed
+  in (the session may be locked). No Windows password is stored or
+  requested.
+- **Retry/overlap policy:** `MultipleInstances=IgnoreNew`, `RestartCount=2`,
+  `RestartInterval=10 minutes`, `ExecutionTimeLimit=1 hour`,
+  `StartWhenAvailable=true`, `WakeToRun=true`.
+- **Working directory:** the canonical repository root (never `System32`).
+
+The daemon's required-universe scheduler remains the sole ongoing
+market-data authority for this scheduled invocation, exactly as it is for
+interactive Paper startup — this task never starts a separate market-data
+refresh process.
+
+**Temporary-soak coexistence:** the existing temporary August soak task
+remains the authoritative unattended-start mechanism during its acceptance
+window and is never touched by `Register-PaperStartupTask.ps1`. To avoid two
+enabled tasks concurrently invoking the official Paper launcher, a
+newly-created permanent task is always registered **DISABLED**; re-running
+the registration helper without `-Enable` reconciles drift in the task
+definition (action/trigger/settings/principal) while preserving whatever
+enabled/disabled state the task already had. `-Enable` is reserved for an
+explicit, deliberate operator decision to cut over from the temporary task to
+the permanent one — it is not run automatically by this patch.
+
+After every create/update, the helper re-reads the task from Task Scheduler
+and fails closed (non-zero exit) unless the task has exactly one action, the
+executable/arguments/working directory match the intended definition
+exactly, and the resulting activation state matches what was requested.
+
+Non-mutating proof: `scripts\windows\tests\test_paper_preopen_scheduler.ps1`
+statically verifies the registration helper's source (default name/time/
+trigger, the exact `-Mode Paper -Scheduled` action contract, absence of any
+other startup-authority script reference, retry/overlap/principal settings,
+the disabled-by-default + explicit-`-Enable` coexistence contract, and the
+post-registration self-check) without registering, updating, enabling,
+disabling, starting, or stopping any real scheduled task.
 
 ### Script role separation
 
