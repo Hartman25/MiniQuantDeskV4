@@ -112,46 +112,28 @@ Write-Step "Task action exe: $WindowsPowerShellPath"
 Write-Step "Task action arg: $ExpectedArguments"
 
 # ---------------------------------------------------------------------------
-# Trigger: Monday-Friday at $StartTime local time. This is the accepted
-# pre-open operational boundary. This helper does not attempt to reproduce
-# the NYSE holiday calendar in Task Scheduler -- the daemon's own
-# required-universe scheduler already fails closed or reports legitimate
-# non-trading-day no-work from authoritative market-calendar truth.
+# Verify the ScheduledTasks module is available before constructing or
+# querying any task-scheduler objects -- this must happen before the first
+# such cmdlet is used, not after, so an unavailable module fails with the
+# intended prerequisite message instead of an unhandled command-not-found
+# error.
 # ---------------------------------------------------------------------------
-$trigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At $StartTime
-
-$action = New-ScheduledTaskAction -Execute $WindowsPowerShellPath -Argument $ExpectedArguments -WorkingDirectory $RepoRoot
-
-$settings = New-ScheduledTaskSettingsSet `
-    -MultipleInstances IgnoreNew `
-    -RestartCount 2 `
-    -RestartInterval (New-TimeSpan -Minutes 10) `
-    -ExecutionTimeLimit (New-TimeSpan -Hours 1) `
-    -StartWhenAvailable `
-    -WakeToRun
-
-$principal = New-ScheduledTaskPrincipal `
-    -UserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) `
-    -LogonType Interactive `
-    -RunLevel Limited
-
 if (-not (Get-Module -Name ScheduledTasks -ListAvailable)) {
     Write-Fail 'ScheduledTasks module not available. Windows 8 / Server 2012+ required.'
     exit 1
 }
 
 # ---------------------------------------------------------------------------
-# Idempotent create-or-update. An existing task's current enabled/disabled
-# state is preserved unless -Enable is passed. A brand-new task is always
-# left DISABLED unless -Enable is passed -- during temporary-soak
-# coexistence, two enabled tasks could invoke the official Paper launcher
-# concurrently.
+# Determine the existing task and the desired final activation state BEFORE
+# constructing the ScheduledTaskSettings object. An existing task's current
+# enabled/disabled state is preserved unless -Enable is passed. A brand-new
+# task is always left DISABLED unless -Enable is passed -- during
+# temporary-soak coexistence, two enabled tasks could invoke the official
+# Paper launcher concurrently. Resolving $desiredEnabled here, before the
+# settings object is built, is what lets the settings definition itself
+# encode the disabled state atomically (see below) instead of relying on a
+# later, separate call to flip activation state.
 # ---------------------------------------------------------------------------
-Write-Sect 'Register/reconcile permanent Paper pre-open startup task'
-Write-Step "Task name : $TaskName"
-Write-Step "Task path : $TaskPath"
-Write-Step "Trigger   : Monday-Friday at $StartTime local time"
-
 $existingTask = Get-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath -ErrorAction SilentlyContinue
 $taskExistedBefore = ($null -ne $existingTask)
 $priorEnabledState = if ($taskExistedBefore) { ($existingTask.State -ne 'Disabled') } else { $null }
@@ -163,6 +145,60 @@ if ($Enable) {
 } else {
     $desiredEnabled = $false
 }
+
+# ---------------------------------------------------------------------------
+# Trigger: Monday-Friday at $StartTime local time. This is the accepted
+# pre-open operational boundary. This helper does not attempt to reproduce
+# the NYSE holiday calendar in Task Scheduler -- the daemon's own
+# required-universe scheduler already fails closed or reports legitimate
+# non-trading-day no-work from authoritative market-calendar truth.
+# ---------------------------------------------------------------------------
+$trigger = New-ScheduledTaskTrigger -Weekly -DaysOfWeek Monday,Tuesday,Wednesday,Thursday,Friday -At $StartTime
+
+$action = New-ScheduledTaskAction -Execute $WindowsPowerShellPath -Argument $ExpectedArguments -WorkingDirectory $RepoRoot
+
+# ---------------------------------------------------------------------------
+# Settings: $desiredEnabled (resolved above) is encoded directly into the
+# settings definition via -Disable when the final state must be disabled.
+# This is what makes registration/reconciliation atomic with respect to
+# activation state -- there is never a window where the task is
+# registered or updated as enabled and only disabled by a later, separate
+# call.
+# ---------------------------------------------------------------------------
+if ($desiredEnabled) {
+    $settings = New-ScheduledTaskSettingsSet `
+        -MultipleInstances IgnoreNew `
+        -RestartCount 2 `
+        -RestartInterval (New-TimeSpan -Minutes 10) `
+        -ExecutionTimeLimit (New-TimeSpan -Hours 1) `
+        -StartWhenAvailable `
+        -WakeToRun
+} else {
+    $settings = New-ScheduledTaskSettingsSet `
+        -MultipleInstances IgnoreNew `
+        -RestartCount 2 `
+        -RestartInterval (New-TimeSpan -Minutes 10) `
+        -ExecutionTimeLimit (New-TimeSpan -Hours 1) `
+        -StartWhenAvailable `
+        -WakeToRun `
+        -Disable
+}
+
+$principal = New-ScheduledTaskPrincipal `
+    -UserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) `
+    -LogonType Interactive `
+    -RunLevel Limited
+
+# ---------------------------------------------------------------------------
+# Idempotent create-or-update. The settings object built above already
+# encodes the desired activation state, so both the registration path
+# (brand-new task) and the reconciliation path (existing task) register or
+# update the task definition already in its final activation state.
+# ---------------------------------------------------------------------------
+Write-Sect 'Register/reconcile permanent Paper pre-open startup task'
+Write-Step "Task name : $TaskName"
+Write-Step "Task path : $TaskPath"
+Write-Step "Trigger   : Monday-Friday at $StartTime local time"
 
 try {
     if ($taskExistedBefore) {
@@ -181,15 +217,21 @@ try {
     exit 1
 }
 
-try {
-    if ($desiredEnabled) {
+# ---------------------------------------------------------------------------
+# The settings object registered/updated above already encodes the desired
+# activation state. For the enabled case only, an explicit
+# Enable-ScheduledTask call is retained as a final, defense-in-depth
+# operation. For the disabled case, no post-registration call to flip
+# activation state is made -- the definition is already disabled, so there
+# is no register-enabled-then-disable window to rely on.
+# ---------------------------------------------------------------------------
+if ($desiredEnabled) {
+    try {
         Enable-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath | Out-Null
-    } else {
-        Disable-ScheduledTask -TaskName $TaskName -TaskPath $TaskPath | Out-Null
+    } catch {
+        Write-Fail "Failed to set activation state: $_"
+        exit 1
     }
-} catch {
-    Write-Fail "Failed to set activation state: $_"
-    exit 1
 }
 
 # ---------------------------------------------------------------------------

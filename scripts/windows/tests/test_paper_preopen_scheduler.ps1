@@ -205,6 +205,105 @@ Assert-True 'post-registration verification checks activation state and fails cl
     ($HelperText -match [regex]::Escape('activation_state_mismatch') -and $HelperText -match [regex]::Escape('exit 1'))
 
 # ---------------------------------------------------------------------------
+# Section 7: transient-enable race repair (PAPER-AUTOMATIC-PREOPEN-SCHEDULER-01-REPAIR-01)
+#
+# The prior implementation built a single ScheduledTaskSettings object
+# without -Disable, called Register-ScheduledTask/Set-ScheduledTask (which
+# leaves a brand-new task Enabled by Task Scheduler's own default), and only
+# afterward called Disable-ScheduledTask for the desiredEnabled=false case.
+# For a new task, this left a transient window in which the task existed
+# registered and Enabled (with StartWhenAvailable/WakeToRun already set)
+# before being disabled. This section proves the atomic-disabled-settings
+# fix: desiredEnabled is resolved before settings construction, the
+# false-path settings object is built with -Disable, that same object is
+# what Register-ScheduledTask/Set-ScheduledTask consume, and no
+# post-registration Disable-ScheduledTask call exists to fall back on.
+# ---------------------------------------------------------------------------
+Show-Info ''
+Show-Info '=== Section 7: transient-enable race repair ==='
+
+# A. desiredEnabled is resolved before settings construction.
+$desiredEnabledAssignIndex = $HelperText.IndexOf('$desiredEnabled = $false')
+$firstSettingsConstructIndex = $HelperText.IndexOf('New-ScheduledTaskSettingsSet')
+Assert-True 'desiredEnabled is resolved (assignment present) before the first ScheduledTaskSettings object is constructed' `
+    ($desiredEnabledAssignIndex -ge 0 -and $firstSettingsConstructIndex -ge 0 -and $desiredEnabledAssignIndex -lt $firstSettingsConstructIndex)
+
+# Isolate the two settings-construction branches by text position so B/C/D
+# below can prove which branch does/does not carry -Disable, without
+# depending on Register-ScheduledTask/Set-ScheduledTask/Enable-ScheduledTask/
+# Disable-ScheduledTask execution (still fully non-mutating / static).
+$settingsIfIndex = $HelperText.IndexOf('if ($desiredEnabled) {')
+$settingsElseIndex = if ($settingsIfIndex -ge 0) { $HelperText.IndexOf('} else {', $settingsIfIndex) } else { -1 }
+$settingsDisableIndex = if ($settingsElseIndex -ge 0) { $HelperText.IndexOf('-Disable', $settingsElseIndex) } else { -1 }
+$settingsElseCloseIndex = if ($settingsDisableIndex -ge 0) { $HelperText.IndexOf('}', $settingsDisableIndex) } else { -1 }
+
+$enabledSettingsBranch = if ($settingsIfIndex -ge 0 -and $settingsElseIndex -gt $settingsIfIndex) {
+    $HelperText.Substring($settingsIfIndex, $settingsElseIndex - $settingsIfIndex)
+} else { '' }
+$disabledSettingsBranch = if ($settingsElseIndex -ge 0 -and $settingsElseCloseIndex -gt $settingsElseIndex) {
+    $HelperText.Substring($settingsElseIndex, $settingsElseCloseIndex - $settingsElseIndex)
+} else { '' }
+
+# B. the false/disabled path constructs ScheduledTaskSettings with -Disable.
+Assert-True 'the desiredEnabled=false settings branch builds New-ScheduledTaskSettingsSet with -Disable' `
+    ($disabledSettingsBranch -ne '' -and $disabledSettingsBranch -match 'New-ScheduledTaskSettingsSet' -and $disabledSettingsBranch -match '-Disable')
+
+Assert-True 'the desiredEnabled=true settings branch does NOT pass -Disable' `
+    ($enabledSettingsBranch -ne '' -and $enabledSettingsBranch -match 'New-ScheduledTaskSettingsSet' -and -not ($enabledSettingsBranch -match '-Disable'))
+
+# C. Register-ScheduledTask (and Set-ScheduledTask, the reconcile path)
+#    consume that same settings object -- there is only one $settings
+#    variable, built above before either call.
+$registerConsumesSettings = [regex]::Match($HelperText, '(?s)Register-ScheduledTask\b.{0,200}?-Settings\s+\$settings')
+Assert-True 'Register-ScheduledTask (create path) is passed -Settings $settings, the object already encoding desiredEnabled' `
+    ($registerConsumesSettings.Success)
+
+$setConsumesSettings = [regex]::Match($HelperText, '(?s)Set-ScheduledTask\b.{0,200}?-Settings\s+\$settings')
+Assert-True 'Set-ScheduledTask (reconcile path) is passed -Settings $settings, the object already encoding desiredEnabled' `
+    ($setConsumesSettings.Success)
+
+# D. there is no new-task path that registers an enabled definition and only
+#    later disables it -- proven by the combination of B (the disabled
+#    settings object already carries -Disable) and the absence of any
+#    post-registration Disable-ScheduledTask call to fall back on.
+Assert-True 'no Disable-ScheduledTask call exists anywhere in the helper (the disabled-path settings object is already disabled at registration/update time, not disabled afterward)' `
+    (-not ($HelperText -match 'Disable-ScheduledTask'))
+
+# E. explicit -Enable still exists, and Enable-ScheduledTask is only invoked
+#    for the desiredEnabled=true path (defense-in-depth, not the mechanism
+#    that establishes disabled safety).
+Assert-True 'explicit -Enable switch is still honored (desiredEnabled = $true when -Enable is passed)' `
+    ($HelperText -match [regex]::Escape('if ($Enable) {') -and $HelperText -match [regex]::Escape('$desiredEnabled = $true'))
+
+Assert-True 'Enable-ScheduledTask is only called inside the desiredEnabled=true branch' `
+    ($HelperText -match '(?s)if\s*\(\s*\$desiredEnabled\s*\)\s*\{\s*try\s*\{\s*Enable-ScheduledTask')
+
+# F. existing task state-preservation semantics remain: existingTask /
+#    taskExistedBefore / priorEnabledState are all resolved before
+#    $desiredEnabled is finalized, so an existing task's current
+#    enabled/disabled state still flows into the settings object built from
+#    $desiredEnabled above.
+$existingTaskIndex = $HelperText.IndexOf('$existingTask = Get-ScheduledTask')
+$priorEnabledIndex = $HelperText.IndexOf('$priorEnabledState =')
+Assert-True 'existingTask/taskExistedBefore/priorEnabledState are all resolved before desiredEnabled, and before settings construction' `
+    ($existingTaskIndex -ge 0 -and $priorEnabledIndex -ge 0 -and $existingTaskIndex -lt $desiredEnabledAssignIndex -and $priorEnabledIndex -lt $firstSettingsConstructIndex)
+
+# G. module-availability check occurs before the first New-ScheduledTask*
+#    construction call (and before the first Get-ScheduledTask query, which
+#    also requires the ScheduledTasks module).
+$moduleCheckIndex = $HelperText.IndexOf('Get-Module -Name ScheduledTasks -ListAvailable')
+$firstNewScheduledTaskIndex = $HelperText.IndexOf('New-ScheduledTask')
+$firstGetScheduledTaskIndex = $HelperText.IndexOf('Get-ScheduledTask')
+Assert-True 'ScheduledTasks module-availability check occurs before the first New-ScheduledTask* construction call' `
+    ($moduleCheckIndex -ge 0 -and $firstNewScheduledTaskIndex -gt $moduleCheckIndex)
+
+Assert-True 'ScheduledTasks module-availability check occurs before the first Get-ScheduledTask query' `
+    ($moduleCheckIndex -ge 0 -and $firstGetScheduledTaskIndex -gt $moduleCheckIndex)
+
+Assert-True 'ScheduledTasks module-availability check appears exactly once (not duplicated, not left in its old post-construction position)' `
+    (([regex]::Matches($HelperText, [regex]::Escape('ScheduledTasks module not available'))).Count -eq 1)
+
+# ---------------------------------------------------------------------------
 # Summary
 # ---------------------------------------------------------------------------
 Show-Info ''
