@@ -29,6 +29,9 @@
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Continue'
+if (Test-Path variable:PSNativeCommandUseErrorActionPreference) {
+    $PSNativeCommandUseErrorActionPreference = $false
+}
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $RepoRoot  = (Resolve-Path (Join-Path $ScriptDir '..\..')).Path
@@ -152,6 +155,114 @@ Assert-True 'LVL17' '-CheckOnly does not invoke smoke runners (no & call of Run-
     ($Content -notmatch '&\s*[''"]?[^\r\n]*Run-AAPL5mMarketSmoke\.ps1' -and
      $Content -notmatch '&\s*[''"]?[^\r\n]*Start-PaperTradingSmoke\.ps1' -and
      $Content -notmatch 'Invoke-ExternalCommand[^\r\n]*Smoke')
+
+# ---------------------------------------------------------------------------
+# Section: STALE-DAEMON-BINARY-PROVENANCE-01 functional proofs
+#
+# Root cause (Thursday 2026-08-13): a reused mqk-daemon.exe predated the
+# required-universe/retry functionality that had landed later the same day.
+# Ensure-DaemonBinary now requires a provenance sidecar recording the
+# core-rs git tree identity the binary was built from, and rebuilds
+# whenever that identity is missing or does not match the current tree.
+#
+# Dot-sourcing is safe: MAIN DISPATCH is guarded by
+# `if ($MyInvocation.InvocationName -ne '.')`, so this only defines
+# functions -- no daemon start, no real build, no exit. All git/build
+# operations below run against a disposable temp fixture repo, never the
+# real MiniQuantDeskV4 repo.
+# ---------------------------------------------------------------------------
+Write-Host ""
+Write-Host "=== Section: STALE-DAEMON-BINARY-PROVENANCE-01 functional proofs ===" -ForegroundColor Cyan
+
+. $Target
+
+$FixtureRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("lvl_provenance_" + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Force -Path (Join-Path $FixtureRoot 'core-rs') | Out-Null
+
+$gitExe = (Get-Command 'git' -ErrorAction SilentlyContinue).Source
+if ($null -eq $gitExe) {
+    Write-Host "  SKIP [LVL18-26] git not found on PATH; provenance functional proofs skipped" -ForegroundColor Yellow
+} else {
+    Push-Location $FixtureRoot
+    try {
+        & $gitExe init -q . 2>&1 | Out-Null
+        & $gitExe config user.email 'test@example.com' 2>&1 | Out-Null
+        & $gitExe config user.name 'test' 2>&1 | Out-Null
+        & $gitExe config core.autocrlf false 2>&1 | Out-Null
+        # Mirror the real repo's .gitignore (target/ excluded) so creating the
+        # fixture's fake build artifact under core-rs\target does not itself
+        # make the tree look dirty.
+        Set-Content -Path (Join-Path $FixtureRoot '.gitignore') -Value "target/`n**/target/`n"
+        Set-Content -Path (Join-Path $FixtureRoot 'core-rs\marker.txt') -Value 'v1'
+        & $gitExe add -A 2>&1 | Out-Null
+        & $gitExe commit -q -m 'initial' 2>&1 | Out-Null
+
+        $identityV1 = Get-CoreRsTreeIdentity -RepoRoot $FixtureRoot
+        Assert-True 'LVL18' 'Get-CoreRsTreeIdentity resolves a 40-char git tree SHA for core-rs on a clean commit' `
+            ($identityV1 -match '^[0-9a-f]{40}$')
+
+        $releaseDir = Join-Path $FixtureRoot 'core-rs\target\release'
+        New-Item -ItemType Directory -Force -Path $releaseDir | Out-Null
+        $fakeExe = Join-Path $releaseDir 'mqk-daemon.exe'
+        Set-Content -Path $fakeExe -Value 'fake'
+
+        Assert-True 'LVL19' 'Missing provenance sidecar -> Test-DaemonBinaryProvenanceMatches=false (rebuild required)' `
+            (-not (Test-DaemonBinaryProvenanceMatches -RepoRoot $FixtureRoot -DaemonExePath $fakeExe))
+
+        Write-DaemonBuildProvenance -RepoRoot $FixtureRoot
+        Assert-True 'LVL20' 'Matching provenance sidecar -> Test-DaemonBinaryProvenanceMatches=true (binary reusable)' `
+            (Test-DaemonBinaryProvenanceMatches -RepoRoot $FixtureRoot -DaemonExePath $fakeExe)
+
+        Set-Content -Path (Join-Path $FixtureRoot 'core-rs\marker.txt') -Value 'v2-uncommitted'
+        $identityDirty = Get-CoreRsTreeIdentity -RepoRoot $FixtureRoot
+        Assert-True 'LVL21' 'Uncommitted core-rs change -> identity suffixed -dirty, and no longer matches the sidecar' `
+            ($identityDirty -eq "$identityV1-dirty" -and
+             -not (Test-DaemonBinaryProvenanceMatches -RepoRoot $FixtureRoot -DaemonExePath $fakeExe))
+
+        & $gitExe add -A 2>&1 | Out-Null
+        & $gitExe commit -q -m 'second commit' 2>&1 | Out-Null
+        $identityV2 = Get-CoreRsTreeIdentity -RepoRoot $FixtureRoot
+        Assert-True 'LVL22' 'New commit changes core-rs tree identity -> stale sidecar still does not match (mismatched identity -> rebuild required)' `
+            ($identityV2 -ne $identityV1 -and -not (Test-DaemonBinaryProvenanceMatches -RepoRoot $FixtureRoot -DaemonExePath $fakeExe))
+
+        Write-DaemonBuildProvenance -RepoRoot $FixtureRoot
+        Assert-True 'LVL23' 'Rewriting the provenance sidecar after a rebuild makes the binary reusable again' `
+            (Test-DaemonBinaryProvenanceMatches -RepoRoot $FixtureRoot -DaemonExePath $fakeExe)
+
+        # Ensure-DaemonBinary end-to-end, with the real build tools shadowed
+        # so no real cargo build runs against the fixture.
+        Remove-Item (Join-Path $FixtureRoot 'core-rs\target\release\mqk-daemon.build-tree.txt') -ErrorAction SilentlyContinue
+        $script:BuildInvoked = $false
+        function Get-CommandPath {
+            param($Name)
+            if ($Name -eq 'cargo') { return 'cargo.fake' }
+            return (Get-Command $Name -ErrorAction Stop).Source
+        }
+        function Invoke-ExternalCommand {
+            param($FilePath, $Arguments, $WorkingDirectory, [switch]$AllowFailure)
+            $script:BuildInvoked = $true
+            Set-Content -Path $fakeExe -Value 'rebuilt'
+        }
+
+        $null = Ensure-DaemonBinary -RepoRoot $FixtureRoot -ForceRebuild $false
+        Assert-True 'LVL24' 'Ensure-DaemonBinary rebuilds when the provenance sidecar is missing (ForceRebuild=false)' `
+            ($script:BuildInvoked -eq $true -and (Test-Path (Join-Path $FixtureRoot 'core-rs\target\release\mqk-daemon.build-tree.txt')))
+
+        $script:BuildInvoked = $false
+        $null = Ensure-DaemonBinary -RepoRoot $FixtureRoot -ForceRebuild $false
+        Assert-True 'LVL25' 'Ensure-DaemonBinary reuses the binary when provenance matches (ForceRebuild=false, no rebuild triggered)' `
+            ($script:BuildInvoked -eq $false)
+
+        $script:BuildInvoked = $false
+        $null = Ensure-DaemonBinary -RepoRoot $FixtureRoot -ForceRebuild $true
+        Assert-True 'LVL26' 'Ensure-DaemonBinary -ForceRebuild always rebuilds regardless of matching provenance' `
+            ($script:BuildInvoked -eq $true)
+    }
+    finally {
+        Pop-Location
+        Remove-Item -Recurse -Force $FixtureRoot -ErrorAction SilentlyContinue
+    }
+}
 
 # ---------------------------------------------------------------------------
 Write-Host ""

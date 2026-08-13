@@ -189,6 +189,105 @@ function Ensure-NodeModules {
     Invoke-ExternalCommand -FilePath $npm -Arguments @('ci') -WorkingDirectory $GuiRoot
 }
 
+function Get-DaemonBuildProvenancePath {
+    param([Parameter(Mandatory = $true)][string]$RepoRoot)
+
+    return Join-Path $RepoRoot 'core-rs\target\release\mqk-daemon.build-tree.txt'
+}
+
+# STALE-DAEMON-BINARY-PROVENANCE-01: deterministic build-identity check.
+#
+# Root cause (Thursday 2026-08-13 unattended failure): a reused
+# mqk-daemon.exe predated the required-universe/retry functionality that
+# had landed later the same day. Filesystem mtimes are not proof of
+# correspondence to the current Rust workspace -- a binary can be newer
+# than a stale checkout, or a working tree can be dirty in ways mtime
+# cannot distinguish. The git tree SHA of core-rs is deterministic and
+# exactly identifies the source the binary was (or wasn't) built from.
+#
+# Contract:
+#   - Uses `git rev-parse HEAD:core-rs` as the current build identity.
+#   - If core-rs has uncommitted changes, the identity is suffixed with
+#     "-dirty" so a dirty rebuild is never mistaken for a committed one.
+#   - A sidecar file next to the binary records the identity the binary
+#     was actually built from. Reuse requires an exact string match.
+#   - Any inability to resolve git identity fails closed to rebuild --
+#     never trusts an unproven existing binary.
+function Get-CoreRsTreeIdentity {
+    param([Parameter(Mandatory = $true)][string]$RepoRoot)
+
+    try {
+        $git = Get-CommandPath 'git'
+    }
+    catch {
+        return $null
+    }
+
+    $treeSha = & $git -C $RepoRoot rev-parse 'HEAD:core-rs' 2>$null
+    if ($LASTEXITCODE -ne 0 -or [string]::IsNullOrWhiteSpace($treeSha)) {
+        return $null
+    }
+    $treeSha = $treeSha.Trim()
+
+    $statusOutput = & $git -C $RepoRoot status --porcelain -- core-rs 2>$null
+    if ($LASTEXITCODE -ne 0) {
+        return $null
+    }
+
+    if ($statusOutput -and @($statusOutput | Where-Object { $_ -and $_.Trim().Length -gt 0 }).Count -gt 0) {
+        return "$treeSha-dirty"
+    }
+
+    return $treeSha
+}
+
+function Test-DaemonBinaryProvenanceMatches {
+    param(
+        [Parameter(Mandatory = $true)][string]$RepoRoot,
+        [Parameter(Mandatory = $true)][string]$DaemonExePath
+    )
+
+    if (-not (Test-Path $DaemonExePath)) {
+        return $false
+    }
+
+    $sidecarPath = Get-DaemonBuildProvenancePath -RepoRoot $RepoRoot
+    if (-not (Test-Path $sidecarPath)) {
+        return $false
+    }
+
+    $currentIdentity = Get-CoreRsTreeIdentity -RepoRoot $RepoRoot
+    if ($null -eq $currentIdentity) {
+        # Cannot prove identity -- fail closed to rebuild rather than trust
+        # an unproven existing binary.
+        return $false
+    }
+
+    $recordedIdentity = (Get-Content -Path $sidecarPath -Raw -ErrorAction SilentlyContinue)
+    if ($null -eq $recordedIdentity) {
+        return $false
+    }
+    $recordedIdentity = $recordedIdentity.Trim()
+
+    return ($recordedIdentity -eq $currentIdentity)
+}
+
+function Write-DaemonBuildProvenance {
+    param(
+        [Parameter(Mandatory = $true)][string]$RepoRoot
+    )
+
+    $identity = Get-CoreRsTreeIdentity -RepoRoot $RepoRoot
+    if ($null -eq $identity) {
+        Write-LauncherWarn 'Could not resolve core-rs git tree identity after build; provenance sidecar not written. Next launch will rebuild.'
+        return
+    }
+
+    $sidecarPath = Get-DaemonBuildProvenancePath -RepoRoot $RepoRoot
+    Set-Content -Path $sidecarPath -Value $identity -NoNewline -Encoding ASCII
+    Write-LauncherStep "Recorded daemon build provenance: $identity"
+}
+
 function Ensure-DaemonBinary {
     param(
         [Parameter(Mandatory = $true)][string]$RepoRoot,
@@ -199,20 +298,26 @@ function Ensure-DaemonBinary {
         $cargo = Get-CommandPath 'cargo'
         Write-LauncherStep 'Rebuilding mqk-daemon --release'
         Invoke-ExternalCommand -FilePath $cargo -Arguments @('build', '-p', 'mqk-daemon', '--release') -WorkingDirectory (Join-Path $RepoRoot 'core-rs')
+        Write-DaemonBuildProvenance -RepoRoot $RepoRoot
         return Resolve-DaemonBinary -RepoRoot $RepoRoot
     }
 
-    try {
-        $existing = Resolve-DaemonBinary -RepoRoot $RepoRoot
-        Write-LauncherStep 'Daemon rebuild skipped; binary present (use -RebuildDaemon or -RebuildAll to force)'
-        return $existing
-    }
-    catch {
-        $cargo = Get-CommandPath 'cargo'
-        Write-LauncherStep 'Daemon binary missing; building mqk-daemon --release'
-        Invoke-ExternalCommand -FilePath $cargo -Arguments @('build', '-p', 'mqk-daemon', '--release') -WorkingDirectory (Join-Path $RepoRoot 'core-rs')
+    $daemonExePath = Join-Path $RepoRoot 'core-rs\target\release\mqk-daemon.exe'
+    if (Test-DaemonBinaryProvenanceMatches -RepoRoot $RepoRoot -DaemonExePath $daemonExePath) {
+        Write-LauncherStep 'Daemon rebuild skipped; binary provenance matches current core-rs tree (use -RebuildDaemon or -RebuildAll to force)'
         return Resolve-DaemonBinary -RepoRoot $RepoRoot
     }
+
+    if (Test-Path $daemonExePath) {
+        Write-LauncherStep 'Daemon binary present but provenance is missing or does not match current core-rs tree; rebuilding mqk-daemon --release'
+    }
+    else {
+        Write-LauncherStep 'Daemon binary missing; building mqk-daemon --release'
+    }
+    $cargo = Get-CommandPath 'cargo'
+    Invoke-ExternalCommand -FilePath $cargo -Arguments @('build', '-p', 'mqk-daemon', '--release') -WorkingDirectory (Join-Path $RepoRoot 'core-rs')
+    Write-DaemonBuildProvenance -RepoRoot $RepoRoot
+    return Resolve-DaemonBinary -RepoRoot $RepoRoot
 }
 
 function Ensure-GuiBinary {
@@ -1551,9 +1656,16 @@ function Invoke-StartupCheckOnly {
     }
 }
 
+# STALE-DAEMON-BINARY-PROVENANCE-01 / SCHEDULED-HEADLESS-BOOTSTRAP-01: guard
+# MAIN DISPATCH so this file can be safely dot-sourced by tests (defines
+# functions only -- no daemon start, no build, no exit) when the file is
+# dot-sourced; normal `powershell.exe -File Launch-VeritasLedger.ps1`
+# invocation is unaffected.
+#
 # DESKTOP-LAUNCH-01: Outer catch surfaces any startup failure in the console
 # window before it closes, so the operator can read the error instead of
 # seeing a flash-and-close with no diagnostic information.
+if ($MyInvocation.InvocationName -ne '.') {
 try {
     $repoRoot = Get-RepoRoot
     Import-LauncherEnvironmentFiles -RepoRoot $repoRoot
@@ -1668,4 +1780,5 @@ catch {
     Write-Host 'Review the error above. Press Enter to close this window.' -ForegroundColor Yellow
     $null = Read-Host
     exit 1
+}
 }
