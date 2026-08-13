@@ -21,8 +21,9 @@ use mqk_db::{
     AutonomousDailyOperationRecord, AutonomousDailyTransitionOutcome,
     CreateAutonomousDailyOperationArgs, CreateOrRecoverAutonomousDailyOperationOutcome,
     TransitionAutonomousDailyOperationArgs, ENV_DB_URL, STATE_AWAITING_PREOPEN,
-    STATE_CALENDAR_UNAVAILABLE, STATE_COMPLETED, STATE_PREFLIGHT_BLOCKED, STATE_PREPARING_DATA,
-    STATE_RUNNING, STATE_START_RETRYING, STATE_STOPPING,
+    STATE_CALENDAR_UNAVAILABLE, STATE_COMPLETED, STATE_MANUAL_INTERVENTION_REQUIRED,
+    STATE_PREFLIGHT_BLOCKED, STATE_PREPARING_DATA, STATE_RUNNING, STATE_START_RETRYING,
+    STATE_STOPPING,
 };
 use uuid::Uuid;
 
@@ -838,6 +839,99 @@ async fn different_market_date_creates_different_row() -> anyhow::Result<()> {
 
     cleanup_operation(&pool, r1.operation_id).await;
     cleanup_operation(&pool, r2.operation_id).await;
+    Ok(())
+}
+
+/// PAPER-SOAK-FRIDAY-RECOVERY-LAUNCHER-HARDENING-AND-MONITOR-01, Phase 5.
+///
+/// A prior day's operation left TERMINAL in `manual_intervention_required`
+/// (Thursday 2026-08-13's real record: `reason=interior_gap`) must never
+/// block, gate, or leak into the next day's operation. The daily slot key
+/// `(market_date, deployment_mode, adapter_id)` plus a `market_date`-seeded
+/// deterministic `operation_id` should make day 2's create-or-recover
+/// entirely independent of day 1's terminal state. `different_market_date_
+/// creates_different_row` above already proves cross-date independence in
+/// general, but never against a day 1 row actually left in
+/// `manual_intervention_required` -- this closes that specific gap.
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn manual_intervention_required_prior_day_does_not_block_next_day() -> anyhow::Result<()> {
+    let pool = test_pool().await?;
+    let adapter = format!("adapter_mireq_{}", unique_suffix());
+    let now = Utc::now();
+    let day1 = NaiveDate::from_ymd_opt(2099, 3, 19).unwrap();
+    let day2 = NaiveDate::from_ymd_opt(2099, 3, 20).unwrap();
+
+    // Day 1: create, then walk the real interior_gap path -- preparing_data
+    // (data readiness gate runs here) -> manual_intervention_required -- and
+    // leave it there, terminal for the day, exactly like Thursday's real
+    // record.
+    let args1 = make_create_args(
+        day1, "paper", &adapter, "splan-d1", "asgn-d1", "bind-d1", now,
+    );
+    let day1_op = unwrap_created(create_or_recover_autonomous_daily_operation(&pool, &args1).await?);
+
+    let to_preparing = TransitionAutonomousDailyOperationArgs {
+        operation_id: day1_op.operation_id,
+        expected_state: STATE_AWAITING_PREOPEN.to_string(),
+        expected_state_version: 1,
+        new_state: STATE_PREPARING_DATA.to_string(),
+        reason_code: None,
+        blocker_signature: None,
+        occurred_at_utc: now,
+        run_id: None,
+        bounded_detail: "data readiness gate running".to_string(),
+    };
+    transition_autonomous_daily_operation(&pool, &to_preparing).await?;
+
+    let to_manual = TransitionAutonomousDailyOperationArgs {
+        operation_id: day1_op.operation_id,
+        expected_state: STATE_PREPARING_DATA.to_string(),
+        expected_state_version: 2,
+        new_state: STATE_MANUAL_INTERVENTION_REQUIRED.to_string(),
+        reason_code: Some("interior_gap".to_string()),
+        blocker_signature: Some("interior_gap".to_string()),
+        occurred_at_utc: now,
+        run_id: None,
+        bounded_detail: "interior_gap: AAPL/5m required-universe readiness blocked".to_string(),
+    };
+    let manual_outcome = transition_autonomous_daily_operation(&pool, &to_manual).await?;
+    let day1_final = match manual_outcome {
+        AutonomousDailyTransitionOutcome::Applied(r) => r,
+        other => panic!("expected Applied, got {other:?}"),
+    };
+    assert_eq!(day1_final.state, STATE_MANUAL_INTERVENTION_REQUIRED);
+
+    // Day 2: an entirely fresh create-or-recover call for the *same*
+    // deployment_mode/adapter_id, a different market_date. Must succeed and
+    // must not be seeded from, blocked by, or in any way reflect day 1's
+    // terminal manual_intervention_required row.
+    let args2 = make_create_args(
+        day2, "paper", &adapter, "splan-d2", "asgn-d2", "bind-d2", now,
+    );
+    let day2_op = unwrap_created(create_or_recover_autonomous_daily_operation(&pool, &args2).await?);
+
+    assert_ne!(
+        day2_op.operation_id, day1_final.operation_id,
+        "day 2 must get its own distinct operation_id, not day 1's"
+    );
+    assert_eq!(
+        day2_op.state, STATE_AWAITING_PREOPEN,
+        "day 2 must start fresh at awaiting_preopen, never inheriting day 1's manual_intervention_required"
+    );
+    assert_eq!(day2_op.market_date, day2);
+
+    // Fetching day 1's slot directly still honestly reports its own terminal
+    // state -- day 1's history is preserved, not rewritten or deleted by
+    // day 2's creation.
+    let day1_refetched = fetch_autonomous_daily_operation_for_slot(&pool, day1, "paper", &adapter)
+        .await?
+        .expect("day 1 row must still exist");
+    assert_eq!(day1_refetched.state, STATE_MANUAL_INTERVENTION_REQUIRED);
+    assert_eq!(day1_refetched.operation_id, day1_final.operation_id);
+
+    cleanup_operation(&pool, day1_final.operation_id).await;
+    cleanup_operation(&pool, day2_op.operation_id).await;
     Ok(())
 }
 
