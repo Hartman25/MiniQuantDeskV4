@@ -1151,12 +1151,109 @@ async fn te_05_no_db_required() {
 }
 
 // ---------------------------------------------------------------------------
+// PAPER-SOAK-PROVIDER-SCOPED-INGEST-TEST-REPAIR-01
+//
+// TEST-ONLY: derive the expected provider/timeframe-scoped symbol set
+// directly from the canonical registry file, independent of the production
+// resolver (`resolve_provider_scoped_equities` in routes/ingest.rs). This
+// filters explicitly (enabled + asset_class + provider + timeframe-string
+// membership) so the assertions below prove the resolver's live behavior
+// against an independently derived truth, not a restatement of the
+// resolver's own logic.
+// ---------------------------------------------------------------------------
+fn expected_registry_symbols_for_provider_timeframe(
+    provider: &str,
+    asset_class: &str,
+    timeframe: &str,
+) -> Vec<String> {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let registry_path = std::path::PathBuf::from(manifest_dir)
+        .join("../../../config/instruments/equities.json")
+        .canonicalize()
+        .expect("registry path must resolve from CARGO_MANIFEST_DIR");
+    let instruments = mqk_md::instrument_registry::load_instrument_registry(&registry_path)
+        .expect("canonical registry must parse");
+
+    let mut symbols: Vec<String> = instruments
+        .into_iter()
+        .filter(|i| {
+            i.enabled
+                && i.asset_class.eq_ignore_ascii_case(asset_class)
+                && i.provider.eq_ignore_ascii_case(provider)
+                && i.timeframes.iter().any(|tf| tf == timeframe)
+        })
+        .map(|i| i.symbol)
+        .collect();
+    symbols.sort();
+    symbols
+}
+
+// PROV-SCOPE-01: canonical registry provider scoping intentionally excludes
+// Alpaca-assigned AAPL from the TwelveData/1D provider-sync plan.
+//
+// This exists to prevent someone from later "fixing" the ingest resolver
+// back to whole-registry behavior and silently destroying provider
+// provenance (MARKET-DATA-PROVIDER-PROVENANCE-01 / -REPAIR-01).
+#[test]
+fn canonical_registry_provider_scoping_excludes_alpaca_aapl_from_twelvedata_1d() {
+    let manifest_dir = env!("CARGO_MANIFEST_DIR");
+    let registry_path = std::path::PathBuf::from(manifest_dir)
+        .join("../../../config/instruments/equities.json")
+        .canonicalize()
+        .expect("registry path must resolve from CARGO_MANIFEST_DIR");
+    let instruments = mqk_md::instrument_registry::load_instrument_registry(&registry_path)
+        .expect("canonical registry must parse");
+
+    let enabled_count = instruments.iter().filter(|i| i.enabled).count();
+    assert_eq!(
+        enabled_count, 88,
+        "canonical registry must still contain 88 enabled equities"
+    );
+
+    let aapl = instruments
+        .iter()
+        .find(|i| i.symbol == "AAPL")
+        .expect("AAPL must be present in the registry");
+    assert_eq!(
+        aapl.provider, "alpaca",
+        "AAPL must be provider=alpaca (MARKET-DATA-PROVIDER-PROVENANCE-01-REPAIR-01)"
+    );
+    assert!(
+        aapl.timeframes.iter().any(|tf| tf == "5m"),
+        "AAPL must authorize 5m"
+    );
+    assert!(
+        !aapl.timeframes.iter().any(|tf| tf == "1D"),
+        "AAPL must NOT authorize 1D"
+    );
+
+    let td_1d = expected_registry_symbols_for_provider_timeframe("twelvedata", "equity", "1D");
+    assert_eq!(
+        td_1d.len(),
+        87,
+        "TwelveData/1D provider-scoped set must be 87"
+    );
+    assert!(
+        !td_1d.contains(&"AAPL".to_string()),
+        "AAPL must be excluded from the TwelveData/1D provider-scoped set"
+    );
+
+    let alpaca_5m = expected_registry_symbols_for_provider_timeframe("alpaca", "equity", "5m");
+    assert_eq!(
+        alpaca_5m,
+        vec!["AAPL".to_string()],
+        "Alpaca/5m provider-scoped set must be exactly [AAPL] at this registry revision"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // DATA-INGEST-DAEMON-PROVIDER-JOBS-01: Provider sync job tests
 //
 // | Test   | What it proves                                                                |
 // |--------|-------------------------------------------------------------------------------|
 // | PD-01  | POST dry_run=true → 202, accepted=true, dry_run=true, api_calls_made=0      |
-// | PD-02  | After wait, job is dry_run_completed, symbols_count=88, api_calls_made=0    |
+// | PD-02  | After wait, job is dry_run_completed, symbols_count=provider-scoped (87),   |
+// |        | api_calls_made=0                                                             |
 // | PD-03  | dry_run=false + allow_provider_api_calls=false → 400 refused                |
 // | PD-04  | dry_run=false + allow_provider_api_calls=true + fake provider → 202 queued  |
 // | PD-05  | source=twelvedata without mode → 400 refused (IJ-05 compat preserved)      |
@@ -1336,9 +1433,9 @@ async fn pd_01_provider_dryryn_accepted() {
     assert!(!job_id.is_nil(), "job_id must be non-nil");
 }
 
-// PD-02: after wait → dry_run_completed, symbols_count=88, api_calls_made=0
+// PD-02: after wait → dry_run_completed, symbols_count=provider-scoped (87), api_calls_made=0
 #[tokio::test]
-async fn pd_02_provider_dryryn_completes_88_symbols_zero_api_calls() {
+async fn pd_02_provider_dryrun_completes_provider_scoped_symbols_zero_api_calls() {
     let (st, _) = make_provider_router_with_registry();
 
     // POST the job.
@@ -1373,13 +1470,17 @@ async fn pd_02_provider_dryryn_completes_88_symbols_zero_api_calls() {
         "job must reach dry_run_completed; got: {job_status}. body: {body}"
     );
 
-    // symbols_count must equal the canonical registry size.
+    // symbols_count must equal the TwelveData/1D provider-scoped registry size
+    // (AAPL is excluded: it is Alpaca/5m-only — see PROV-SCOPE-01 above).
+    let expected =
+        expected_registry_symbols_for_provider_timeframe("twelvedata", "equity", "1D").len()
+            as u64;
     let symbols_count = body["symbols_count"]
         .as_u64()
         .expect("symbols_count must be a number in completed job");
     assert_eq!(
-        symbols_count, 88,
-        "symbols_count must be 88 (canonical registry), got: {symbols_count}"
+        symbols_count, expected,
+        "symbols_count must be {expected} (TwelveData/1D provider-scoped registry), got: {symbols_count}"
     );
 
     // api_calls_made must be exactly 0 — the dry-run invariant.
@@ -2017,7 +2118,7 @@ async fn pd_10_real_provider_job_runs_with_fake_provider() {
     assert_eq!(status, StatusCode::ACCEPTED, "must → 202 (queued): {body}");
     let job_id = json_str(&body, "job_id").to_string();
 
-    // Wait for background task to complete.  88 fake symbols × instant = fast.
+    // Wait for background task to complete. Provider-scoped fake symbols × instant = fast.
     tokio::time::sleep(std::time::Duration::from_millis(1000)).await;
 
     let router_get = routes::build_router(Arc::clone(&st));
@@ -2037,11 +2138,15 @@ async fn pd_10_real_provider_job_runs_with_fake_provider() {
         "api_calls_made must be > 0; fake provider was called for each symbol. got: {api_calls}"
     );
 
-    // symbols_count must be 88 (full registry).
+    // symbols_count must be the TwelveData/1D provider-scoped registry size
+    // (AAPL is excluded: it is Alpaca/5m-only — see PROV-SCOPE-01 above).
+    let expected =
+        expected_registry_symbols_for_provider_timeframe("twelvedata", "equity", "1D").len()
+            as u64;
     let symbols_count = body["symbols_count"].as_u64().unwrap_or(0);
     assert_eq!(
-        symbols_count, 88,
-        "symbols_count must be 88, got: {symbols_count}"
+        symbols_count, expected,
+        "symbols_count must be {expected}, got: {symbols_count}"
     );
 
     // dry_run must be false; provider_api_calls_allowed must be true.
@@ -2189,7 +2294,7 @@ async fn pd_12_api_credits_per_minute_guardrail_stops_batch() {
     let st = Arc::new(st_raw);
 
     let router_post = routes::build_router(Arc::clone(&st));
-    // Cap at 3 API calls — should stop after 3 symbols out of 88.
+    // Cap at 3 API calls — should stop after 3 symbols out of the provider-scoped set.
     let (status, body) = post_provider_job(
         router_post,
         serde_json::json!({
@@ -2227,11 +2332,15 @@ async fn pd_12_api_credits_per_minute_guardrail_stops_batch() {
         "api_calls_made must be <= 3 (guardrail cap), got: {api_calls}"
     );
 
-    // symbols_count must be 88 (all symbols were resolved).
+    // symbols_count must be the TwelveData/1D provider-scoped registry size
+    // (AAPL is excluded: it is Alpaca/5m-only — see PROV-SCOPE-01 above).
+    let expected =
+        expected_registry_symbols_for_provider_timeframe("twelvedata", "equity", "1D").len()
+            as u64;
     let symbols_count = body["symbols_count"].as_u64().unwrap_or(0);
     assert_eq!(
-        symbols_count, 88,
-        "symbols_count must be 88 (registry size), got: {symbols_count}"
+        symbols_count, expected,
+        "symbols_count must be {expected} (provider-scoped registry size), got: {symbols_count}"
     );
 
     // Job must have reached a terminal state.
@@ -2244,14 +2353,28 @@ async fn pd_12_api_credits_per_minute_guardrail_stops_batch() {
 // PD-13: per-symbol failure tracking — symbols_failed is non-zero for failing symbols
 #[tokio::test]
 async fn pd_13_per_symbol_failure_tracked() {
+    // The provider-sync plan processes the TwelveData/1D provider-scoped set
+    // in alphabetical order (AAPL is excluded: it is Alpaca/5m-only — see
+    // PROV-SCOPE-01 above), and the guardrail below caps the batch at 2 API
+    // calls. Fail exactly the first two symbols that will actually be
+    // attempted so this test keeps proving per-symbol failure tracking
+    // regardless of future registry edits, instead of hardcoding symbols
+    // that may no longer be reached within the guardrail cap.
+    let scoped_symbols =
+        expected_registry_symbols_for_provider_timeframe("twelvedata", "equity", "1D");
+    let first_two_symbols: Vec<String> = scoped_symbols.into_iter().take(2).collect();
+    assert_eq!(
+        first_two_symbols.len(),
+        2,
+        "provider-scoped registry must have at least 2 symbols to exercise this guardrail"
+    );
+
     let (mut st_raw, _) = make_provider_router_with_registry_raw();
-    // FakeProvider that fails for all symbols (simulates provider errors).
-    st_raw.set_provider_client_for_test(Arc::new(FakeProvider::failing(vec![
-        // We use a small cap so the test runs quickly.
-        // The guardrail will stop after 2 calls, both of which fail.
-        "AAPL".to_string(),
-        "MSFT".to_string(),
-    ])));
+    // FakeProvider that fails for the first two symbols the guardrail will
+    // actually reach (small cap so the test runs quickly; both calls fail).
+    st_raw.set_provider_client_for_test(Arc::new(FakeProvider::failing(
+        first_two_symbols.clone(),
+    )));
     let st = Arc::new(st_raw);
 
     let router_post = routes::build_router(Arc::clone(&st));
@@ -2280,9 +2403,16 @@ async fn pd_13_per_symbol_failure_tracked() {
     let router_get = routes::build_router(Arc::clone(&st));
     let (_, body) = get_job_status(router_get, &job_id).await;
 
-    // symbols_count must be 88 (all resolved from registry).
+    // symbols_count must be the TwelveData/1D provider-scoped registry size
+    // (AAPL is excluded: it is Alpaca/5m-only — see PROV-SCOPE-01 above).
+    let expected_symbols_count =
+        expected_registry_symbols_for_provider_timeframe("twelvedata", "equity", "1D").len()
+            as u64;
     let symbols_count = body["symbols_count"].as_u64().unwrap_or(0);
-    assert_eq!(symbols_count, 88, "symbols_count must be 88: {body}");
+    assert_eq!(
+        symbols_count, expected_symbols_count,
+        "symbols_count must be {expected_symbols_count}: {body}"
+    );
 
     // api_calls_made must be <= 2 (guardrail).
     let api_calls = body["api_calls_made"].as_i64().unwrap_or(999);
@@ -2291,11 +2421,12 @@ async fn pd_13_per_symbol_failure_tracked() {
         "api_calls_made must be <= 2 (per_day guardrail), got: {api_calls}"
     );
 
-    // symbols_failed must be > 0 (at least AAPL or MSFT was attempted and failed).
+    // symbols_failed must be > 0 (at least one of the first two provider-scoped
+    // symbols, which FakeProvider was configured to fail, was attempted).
     let symbols_failed = body["symbols_failed"].as_u64().unwrap_or(0);
     assert!(
         symbols_failed > 0,
-        "symbols_failed must be > 0 (fake provider fails for AAPL/MSFT), got: {symbols_failed}"
+        "symbols_failed must be > 0 (fake provider fails for {first_two_symbols:?}), got: {symbols_failed}"
     );
 
     // Job must have reached a terminal state.
@@ -2344,7 +2475,11 @@ async fn db_01_provider_dry_run_persists_and_fresh_state_reads() {
         "dry-run must complete without provider calls"
     );
     assert_eq!(persisted.api_calls_made, 0, "dry-run must make zero calls");
-    assert_eq!(persisted.symbols_count, Some(88));
+    // TwelveData/1D provider-scoped registry size (AAPL is excluded: it is
+    // Alpaca/5m-only — see PROV-SCOPE-01 above).
+    let expected_symbols_count =
+        expected_registry_symbols_for_provider_timeframe("twelvedata", "equity", "1D").len();
+    assert_eq!(persisted.symbols_count, Some(expected_symbols_count));
 
     let mut fresh =
         state::AppState::new_with_operator_auth(state::OperatorAuthMode::ExplicitDevNoToken);
@@ -2424,8 +2559,12 @@ async fn db_02_fake_provider_real_sync_persists_progress_and_terminal_state() {
         persisted.api_calls_made > 0,
         "fake provider must be called through the real sync path"
     );
-    assert_eq!(persisted.symbols_count, Some(88));
-    assert_eq!(persisted.symbols_completed, Some(88));
+    // TwelveData/1D provider-scoped registry size (AAPL is excluded: it is
+    // Alpaca/5m-only — see PROV-SCOPE-01 above).
+    let expected_symbols_count =
+        expected_registry_symbols_for_provider_timeframe("twelvedata", "equity", "1D").len();
+    assert_eq!(persisted.symbols_count, Some(expected_symbols_count));
+    assert_eq!(persisted.symbols_completed, Some(expected_symbols_count));
     assert_eq!(persisted.rows_inserted, Some(0));
     assert_eq!(persisted.rows_rejected, Some(0));
 

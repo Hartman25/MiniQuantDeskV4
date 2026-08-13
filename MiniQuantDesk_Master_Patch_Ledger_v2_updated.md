@@ -1550,4 +1550,30 @@ pwsh scripts/windows/Get-PaperOperatorStatus.ps1   (read-only; daemon intentiona
 
 ---
 
+## 18. `PAPER-SOAK-PROVIDER-SCOPED-INGEST-TEST-REPAIR-01`
+
+**Status:** `IMPLEMENTED_PENDING_REVIEW`
+**Branch:** `integrate-paper-autofresh-launcher` (worktree `MiniQuantDeskV4-integration`)
+**Commit:** `66761a89c39a43cd62c279fa53a214cb0933da4b` — `test: align ingest expectations with provider-scoped registry`
+
+**Context:** Final Gate G of the paper-launcher integration mission exposed six provider-sync test failures asserting `symbols_count == 88` where the actual value was `87`.
+
+**Classification:** `STALE_TEST` — not a production defect.
+
+**Root cause:** The canonical registry (`config/instruments/equities.json`) contains 88 enabled equities, but AAPL is intentionally scoped `provider=alpaca`, `timeframes=["5m"]` only (established by `MARKET-DATA-PROVIDER-PROVENANCE-01` / `-REPAIR-01`, see memory `project_market_data_provider_provenance_01.md`). The TwelveData/equity/1D provider-scoped universe therefore correctly contains 87 symbols (88 minus AAPL); the Alpaca/equity/5m provider-scoped universe correctly contains AAPL. The six failing tests were asserting the old whole-registry count against a resolver that has correctly been provider-scoped since the provenance repair landed — the tests were never updated to match.
+
+**Production code:** `core-rs/crates/mqk-daemon/src/routes/ingest.rs::resolve_provider_scoped_equities` was reviewed and **not changed**. Its provider/timeframe-scoping behavior is correct and intentional.
+
+**Repair:** Six stale provider-scoped test expectations (`pd_02`, `pd_10`, `pd_12`, `pd_13`, `db_01`, `db_02`) in `core-rs/crates/mqk-daemon/tests/scenario_ingest_jobs_data_ingest_daemon_01.rs` were repaired to derive their expected count from an independent registry-filter helper (`expected_registry_symbols_for_provider_timeframe`) rather than hardcoding `88`. Whole-registry `TE-*` expectations (`te_01` etc.) remain `88` — unchanged, since those correctly assert the full enabled-registry count, not a provider-scoped subset.
+
+**New regression proof:** `canonical_registry_provider_scoping_excludes_alpaca_aapl_from_twelvedata_1d` (`PROV-SCOPE-01`) added — asserts registry enabled-count is 88, AAPL is `provider=alpaca` with `5m` and not `1D`, TwelveData/1D scoped set is 87 and excludes AAPL, Alpaca/5m scoped set is exactly `[AAPL]`. This exists specifically to catch any future regression back to whole-registry provider-sync behavior, which would silently destroy provider provenance.
+
+**Validation (re-verified this session against committed HEAD, not carried over from prior claims):**
+- `cargo test -p mqk-daemon --test scenario_ingest_jobs_data_ingest_daemon_01 -- --test-threads=1`: **65 passed / 0 failed / 0 ignored**.
+- `cargo check -p mqk-daemon --tests`: **PASS** (only a pre-existing, unrelated `sqlx-postgres` future-incompatibility warning).
+- Full daemon suite progressed further after this repair and exposed a distinct `E14a` halt-note failure (tracked separately below).
+- No `main`/config/scheduler/Live/order-path changes. `smoke_logs/` untouched.
+
+---
+
 *End of MiniQuantDesk V4 Authoritative Master Completion Ledger — FULL-REPO-COMPLETION-AUDIT-01, updated by FINAL-CANONICAL-PRE-SOAK-VALIDATION-01.*
