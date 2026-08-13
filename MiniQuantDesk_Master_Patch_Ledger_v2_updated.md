@@ -1677,9 +1677,77 @@ No additional deterministic blockers were found beyond these three — the full 
 
 **Status distinctions (per this repo's honest-status vocabulary):**
 - Code / merge / scheduler cutover: **CLOSED** — all proof above holds against committed HEAD.
-- Unattended permanent-scheduler proof: **PENDING** — remains open until the real Thursday 2026-08-13 02:00 run executes.
-- Paper soak day result: **PENDING** — remains open until Thursday's market-session evidence shows either a valid `NO_SIGNAL` or a valid fill/trade path, and not a `BLOCKED` state.
+- Unattended permanent-scheduler proof: **CLOSED, result = UNATTENDED_FAIL** — resolved below (§22): the real 2026-08-13 02:00 run fired and was killed by Task Scheduler's `ExecutionTimeLimit` after an ~8-hour hang; the configured retry never fired.
+- Paper soak day result: **CLOSED, result = BLOCKED** — resolved below (§22): zero bar dispatch, zero strategy evaluation, zero orders/fills on 2026-08-13; not a valid `NO_SIGNAL` (no genuine strategy invocation occurred).
 
 ---
 
-*End of MiniQuantDesk V4 Authoritative Master Completion Ledger — FULL-REPO-COMPLETION-AUDIT-01, updated by FINAL-CANONICAL-PRE-SOAK-VALIDATION-01.*
+## 22. Mission — `PAPER-SOAK-FRIDAY-RECOVERY-LAUNCHER-HARDENING-AND-MONITOR-01`
+
+**Mission date:** 2026-08-13 (Thursday)
+**Scope:** honestly classify Thursday's unattended-scheduler failure, repair every proven root cause before Friday 2026-08-14 02:00 HST's permanent scheduled run, restore AAPL/5m market-data continuity through canonical Paper-only mechanisms, then monitor Friday's unattended startup and market session. One root cause per commit.
+
+### Thursday 2026-08-13 failure — honest classification
+
+- **Scheduler result: `UNATTENDED_FAIL`.** Permanent task `\MiniQuantDesk\MiniQuantDesk-Paper-Preopen-Startup` fired at `02:00:01` (`LastRunTime`), was terminated by Task Scheduler at `LastTaskResult=267014` (`SCHED_S_TASK_TERMINATED`, i.e. killed at the 1-hour `ExecutionTimeLimit`), and the configured `RestartCount=2`/`RestartInterval=10m` retry never fired (`NumberOfMissedRuns=0` — no second attempt was ever recorded). A second, manually-invoked official-launcher attempt separately hung for ~8 hours before intervention.
+- **Soak result: `BLOCKED`.** `bar_tick_dispatch_count=0`, `strategy_evaluation_count=0`, zero new Paper orders/fills. The pre-existing AAPL x3 position remained reconciled; no Live activity occurred. This is not a valid `NO_SIGNAL` — no genuine strategy invocation occurred at all.
+- **Contributing fact, not itself the root cause:** the daemon binary in use predated `MARKET-DATA-AUTOFRESH-REQUIRED-UNIVERSE-01`'s retry functionality (built ~2026-08-11 02:06; that functionality landed later the same day) — `Ensure-DaemonBinary` had no way to detect this and reused the stale binary.
+
+### Correction to the interior-gap diagnosis
+
+Thursday's ~11:19 HST direct `required-universe/start` diagnostic ran **after** regular close + grace, so `provider_api_calls_made_this_cycle=0` at that check is expected controller behavior (§21's `SESSION_CLOSE_POLL_BUFFER_SECS` gate correctly refuses both the historical-bootstrap and latest-bar-poll refresh paths once `now > session_close_utc + 15min`), **not evidence that `interior_gap` is non-refreshable**. Verified directly in source (`required_market_data_autofresh.rs`): `REFRESHABLE_READINESS_REASONS` includes `market_data_missing`, `insufficient_history`, `interior_gap`, `expected_latest_bar_missing`; `needs_historical_bootstrap()` returns `true` for `interior_gap` identically to the other three. The controller was never rewritten or weakened on this mission — no defect was found in it.
+
+### Root cause 1 — stale daemon binary accepted as current
+
+`Ensure-DaemonBinary` (`scripts\windows\Launch-VeritasLedger.ps1`) previously reused any existing `mqk-daemon.exe` with zero proof it matched the current `core-rs` source. Fixed with a deterministic build-provenance sidecar: the `core-rs` git tree SHA (`git rev-parse HEAD:core-rs`, suffixed `-dirty` for an uncommitted tree) is written to `core-rs\target\release\mqk-daemon.build-tree.txt` after every successful build; reuse requires an exact match, and any failure to resolve git identity fails closed to a rebuild. `Launch-VeritasLedger.ps1`'s `MAIN DISPATCH` is now dot-source-guarded so the new functions are directly testable.
+**Commit:** `d5de48b4` — `fix: verify daemon binary matches rust workspace`. **Proof:** 26/26 new functional assertions (`tests\script_guards\test_launch_veritas_ledger.ps1`, LVL18–26) against a disposable git fixture — matching identity reuses, missing/mismatched provenance rebuilds, a successful build writes provenance, `-ForceRebuild` always rebuilds.
+
+### Root cause 2 — scheduled/headless bootstrap could hang indefinitely
+
+Empirically reproduced: `Start-MiniQuantDesk.ps1` invoked `Launch-VeritasLedger.ps1` as `& powershell.exe @lvlArgs | Out-Host` with no `-NonInteractive`; that script's outer `catch` called `Read-Host` unconditionally on any failure. An isolated probe confirmed `Read-Host` blocks indefinitely without `-NonInteractive` (killed after 15s) and, given this script's own `$ErrorActionPreference='Stop'`, throws immediately and exits 1 with `-NonInteractive`. Fixed in two layers: (1) `Launch-VeritasLedger.ps1`'s outer catch now skips `Read-Host` and exits 1 immediately whenever `-SkipGui` is present (the headless/scheduled contract — `-Scheduled` always implies it); (2) `Start-MiniQuantDesk.ps1` replaces the raw pipeline with `Invoke-BoundedChildScript`, driving the child via `System.Diagnostics.ProcessStartInfo` directly (`Start-Process -PassThru` was found to have an unreliable `ExitCode` readback when combined with redirection — confirmed empirically, not assumed), always adding `-NonInteractive`, and enforcing an internal `-BootstrapTimeoutSeconds` (default 2400s) well under Task Scheduler's 1-hour `ExecutionTimeLimit` so a genuinely stuck child still returns a real nonzero exit for Task Scheduler's retry to act on. `Process.Kill(bool)` (kill entire tree) does not exist under Windows PowerShell 5.1 (the runtime Task Scheduler actually launches, confirmed via `$PSVersionTable`); the plain `Kill()` overload is used instead.
+**Commit:** `20491a33` — `fix: make scheduled daemon bootstrap noninteractive and bounded`. **Proof:** isolated Read-Host/-NonInteractive probes; a bounded real run of the fixed launcher against a forced port-8899 failure completed in **5.3s, exit code 1**, no prompt — versus the prior unbounded hang. New static + functional proofs in `test_official_dual_mode_launcher.ps1` (`SCHEDULED-HEADLESS-BOOTSTRAP-01` section): bounded timeout kills only the wrapper (never the independently-started daemon), `-NonInteractive` converts a would-be `Read-Host` hang into a fast nonzero exit, fast success/failure exit codes propagate correctly.
+
+### Prior-day operation isolation (coverage gap, not a defect)
+
+Investigated whether Thursday's terminal `manual_intervention_required` (`reason=interior_gap`) record could block, gate, or leak into Friday's operation. Confirmed by design: the daily slot key `(market_date, deployment_mode, adapter_id)` is a DB unique constraint (migration `0048`), and `operation_id` is deterministically derived including `market_date`, so `create_or_recover_autonomous_daily_operation` for a new date always inserts an independent row. The one query that isn't `market_date`-scoped (`fetch_relevant_open_autonomous_daily_operation`) is only reachable via resolution-failure/nontrading-day fallbacks and structurally excludes a `manual_intervention_required` row with no `run_id`. No existing test drove this exact scenario end to end.
+**Commit:** `5190a274` — `test: prove prior-day manual_intervention_required does not block next day`. **Proof:** new test walks day 1 through the real `preparing_data -> manual_intervention_required` path and leaves it terminal, then proves day 2's `create_or_recover` succeeds independently with its own `operation_id` and a fresh `awaiting_preopen` state, while day 1's history remains intact. 27/27 passed (full file).
+
+### interior_gap bootstrap proof (coverage gap, not a defect)
+
+`scenario_market_data_autofresh_required_universe_01.rs`'s only positive end-to-end proof exercised `market_data_missing` (empty DB), never `interior_gap` specifically, even though `needs_historical_bootstrap()` treats all three refreshable reasons identically in code.
+**Commit:** `0cea94a4` — `test: prove interior_gap alone drives bounded historical bootstrap`. **Proof:** new test seeds a full 5-bar window, punches a hole in the middle bar directly against the DB (matching the shape of Thursday's real gap), confirms via a read-only `dry_run` cycle that the fixture genuinely produces `interior_gap` in the raw blockers list (co-occurring with `insufficient_history`, which `ddr_56_history_insufficient_continuity_state_never_ok` already documents as the realistic, expected pairing), then proves the controller performs exactly one more bounded historical provider call that repairs it and settles `ready`, with no further repair on subsequent cycles. 19/19 passed (full file, including the new test).
+
+### Pre-Friday AAPL/5m historical repair — honest finding, no repair performed
+
+Investigated the canonical Alpaca historical-ingest surfaces available in the current repo: `mqk-cli md sync-provider`/`ingest-provider` are both TwelveData-only (`--source <SOURCE> (only: twelvedata)`) — explicitly forbidden for AAPL by this mission. `Refresh-IntradayMarketData.ps1`, referenced in code comments as "untouched, remains available as a manual/compatibility operator tool," **no longer exists in the repo** (removed in an earlier cleanup; the comment is now stale). The daemon's `/api/v1/market-data/required-universe/start` route — the only real Alpaca historical-ingest path — is deliberately gated by `SESSION_CLOSE_POLL_BUFFER_SECS` (15 min): `attempt_bounded_historical_bootstrap` never fires once `now > session_close_utc + 15min`, confirmed empirically via a real dry-run against the live daemon (`provider_api_calls_made_this_cycle: 0`, `overall_state: "blocked"`, well past Thursday's 20:00 UTC close). Per the mission's own instruction for this situation, this sub-step was stopped rather than bypassing a deliberately-designed fail-closed gate with ad-hoc code. **Operator decision (confirmed): let Friday's real pre-open self-heal it live** — Phase 6A's own end-to-end proof (above) already demonstrates the controller correctly performs exactly one bounded historical bootstrap and repairs `interior_gap` when called within a valid session window, and this mission's Phases 3–4 now guarantee Friday's launcher will actually reach that call instead of hanging. **No bars were fabricated. TwelveData was not used for AAPL. The legacy 1D task was not re-enabled. No alternate market-data authority was introduced.**
+
+Real dry-run evidence captured against the live daemon (2026-08-13T22:13 UTC): required universe resolves to exactly `AAPL/5m/alpaca` (`symbol_source=env_strategy_symbol`); readiness reports `blockers: ["interior_gap", "expected_latest_bar_missing"]`, `freshness_state: "interior_gap"`, `latest_completed_bar_ts: "2026-08-11T18:10:00+00:00"` — confirming the gap's exact shape and start point independently of the mission brief's own statement of it.
+
+### Rehearsal (after-hours manual, not the unattended proof)
+
+`Launch-VeritasLedger.ps1 -Mode Observe -SkipGui`: daemon started, verified `paper+alpaca` identity, `live_routing_enabled` false, wrapper returned in seconds, daemon remained alive headless, no runtime start, no orders — then stopped cleanly.
+
+`Start-MiniQuantDesk.ps1 -Mode Paper -Scheduled` (manual after-hours rehearsal): **returned in 9.13s, exit code 3 (`ExitDataReadiness`)** — DB prerequisites passed, `Launch-VeritasLedger.ps1` bootstrap returned (paper safety guard confirmed: `live_routing_enabled=false, daemon_mode=paper, adapter_id=alpaca`), the required-universe call executed and correctly reported `REQUIRED_UNIVERSE_SCHEDULER_BLOCKED` with the honest `interior_gap`/`expected_latest_bar_missing` reason, and the launcher correctly refused to proceed toward reconcile/arm. This is the mission's documented acceptable outcome B (fails closed quickly with a truthful reason) — no hang, no Live, no runtime start, no orders. Daemon left running headless per contract; stopped cleanly post-rehearsal.
+
+### Validation tallies (this session)
+
+- `git diff --check` (full mission diff from `main`): clean.
+- `cargo check -p mqk-daemon`: **PASS**. `cargo clippy -p mqk-daemon --all-targets -- -D warnings`: **PASS** (0 errors; same pre-existing unrelated `sqlx-postgres` future-incompat warning only). Same for `mqk-db`.
+- `tests\script_guards\test_launch_veritas_ledger.ps1`: **26/26 passed** (17 pre-existing + 9 new LVL18–26).
+- `scripts\windows\tests\test_official_dual_mode_launcher.ps1`: **ALL PROOFS HELD (0 violations)** — includes the new `SCHEDULED-HEADLESS-BOOTSTRAP-01` static + functional proofs.
+- `scripts\windows\tests\test_paper_preopen_scheduler.ps1`: **all proofs held, 0 violations**.
+- `scenario_market_data_autofresh_required_universe_01` (real DB, `--include-ignored --test-threads=1`): **18/19 passed** — the 1 failure (`stop_start_generation_race_old_cycle_cannot_overwrite_new_owner`, a 10s-budget concurrency race) reproduces **identically against the unmodified pre-mission file** (confirmed via `git stash`), i.e. pre-existing host-timing flakiness, not a regression introduced by this mission.
+- `scenario_daily_data_readiness_01`: **66/66 passed**. `scenario_autonomous_daily_operator_retry_01`: **16/16 passed**. `scenario_autonomous_daily_operation_store_01` (mqk-db): **27/27 passed**.
+
+**Note on the local test DB:** `mqk-test-postgres` (port 5434) was found with `migration 6 was previously applied but has been modified` — a pre-existing environment-drift defect blocking all DB-backed tests, unrelated to this mission's code changes. Recreated fresh (disposable named-volume container, no bind mounts, no production/paper data involved) so current migrations apply cleanly; all tallies above are against the fresh container.
+
+### Status at end of Phases 1–8
+
+- Root causes 1 and 2: **CLOSED** — code committed, tests committed, tests passing (see commits above).
+- Prior-day isolation and interior_gap bootstrap coverage gaps: **CLOSED** — tests committed and passing; no production defect found, none fixed.
+- Pre-Friday AAPL/5m repair: **PARKED by explicit operator decision** — deferred to Friday's live pre-open self-heal, not performed manually.
+- Merge to `main`, push, Friday host preparation, and Friday's actual unattended monitoring: **OPEN** — see below as this mission continues.
+
+---
+
+*End of MiniQuantDesk V4 Authoritative Master Completion Ledger — FULL-REPO-COMPLETION-AUDIT-01, updated by PAPER-SOAK-FRIDAY-RECOVERY-LAUNCHER-HARDENING-AND-MONITOR-01.*
