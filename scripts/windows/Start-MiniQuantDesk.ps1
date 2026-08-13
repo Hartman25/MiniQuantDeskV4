@@ -57,7 +57,17 @@ param(
     [switch]$Rebuild,
     [switch]$RebuildDaemon,
     [switch]$RebuildGui,
-    [switch]$CaptureEvidence
+    [switch]$CaptureEvidence,
+    # -BootstrapTimeoutSeconds: bounded internal timeout for the
+    # Launch-VeritasLedger.ps1 daemon/GUI bootstrap child (SCHEDULED-
+    # HEADLESS-BOOTSTRAP-01). Must stay substantially below Task Scheduler's
+    # ExecutionTimeLimit so a hung/slow bootstrap fails with a real nonzero
+    # process exit that Task Scheduler's configured retry can act on, rather
+    # than relying on ExecutionTimeLimit to kill the task (Thursday
+    # 2026-08-13 proved that path leaves the configured retry un-fired).
+    # Default 2400s (40min) comfortably covers a full daemon rebuild while
+    # still returning well inside a 1-hour ExecutionTimeLimit.
+    [int]$BootstrapTimeoutSeconds = 2400
 )
 
 Set-StrictMode -Version Latest
@@ -110,6 +120,110 @@ function Write-LauncherLogEntry {
         ($Entry | ConvertTo-Json -Depth 8) | Set-Content -Path $Path -Encoding UTF8
     } catch {
         Write-Warn "Could not write launcher log to $Path"
+    }
+}
+
+# =============================================================================
+# SCHEDULED-HEADLESS-BOOTSTRAP-01: bounded, noninteractive child-script
+# invocation.
+#
+# Root cause (Thursday 2026-08-13, ~8 hour hang on a second official-launcher
+# attempt): the daemon/GUI bootstrap child was invoked as a native
+# powershell.exe pipeline piped to Out-Host, without -NonInteractive. On any
+# launch failure, Launch-VeritasLedger.ps1's outer catch called Read-Host
+# unconditionally, which blocks forever with no console attached under a
+# scheduled/headless invocation -- and Task Scheduler's 1-hour
+# ExecutionTimeLimit kill does not cause its own configured retry to fire.
+#
+# This helper replaces that pipeline with a Start-Process invocation that:
+#   - always adds -NonInteractive (Read-Host throws immediately instead of
+#     blocking once Launch-VeritasLedger.ps1's own EAP=Stop is hit -- proven
+#     empirically; this is defense-in-depth alongside that script's own
+#     -SkipGui-aware Read-Host guard)
+#   - redirects stdout/stderr to durable log files (stronger evidence
+#     retention than the previous Out-Host pipeline, which left nothing on
+#     disk under a headless/no-console invocation)
+#   - enforces an internal timeout substantially shorter than Task
+#     Scheduler's ExecutionTimeLimit, so a genuinely stuck child causes THIS
+#     wrapper to return a real nonzero exit code Task Scheduler's retry can
+#     act on, rather than depending on ExecutionTimeLimit's kill
+#   - on timeout, kills only the stuck wrapper child (powershell.exe running
+#     Launch-VeritasLedger.ps1) -- never the daemon, which Launch-
+#     VeritasLedger.ps1 starts as its own independent Start-Process and which
+#     may legitimately keep running headless after the wrapper returns
+# =============================================================================
+function Invoke-BoundedChildScript {
+    param(
+        [Parameter(Mandatory = $true)][string]$ScriptPath,
+        [string[]]$ScriptArgs = @(),
+        [Parameter(Mandatory = $true)][string]$WorkingDirectory,
+        [Parameter(Mandatory = $true)][string]$StdoutLogPath,
+        [Parameter(Mandatory = $true)][string]$StderrLogPath,
+        [Parameter(Mandatory = $true)][int]$TimeoutSeconds
+    )
+
+    $fullArgs = @('-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', $ScriptPath) + $ScriptArgs
+
+    # Uses System.Diagnostics.Process directly rather than the Start-Process
+    # cmdlet: Start-Process -PassThru combined with output redirection has a
+    # well-known reliability gap where the returned Process object's
+    # ExitCode reads back empty even after WaitForExit(ms) returns true.
+    # Driving ProcessStartInfo directly gives deterministic exit-code and
+    # timeout/kill behavior. ProcessStartInfo.ArgumentList is unavailable
+    # under Windows PowerShell 5.1 (the host Task Scheduler actually
+    # launches), so arguments are joined into the classic .Arguments string
+    # with each token individually quoted.
+    $quotedArgs = $fullArgs | ForEach-Object { '"' + ($_ -replace '"', '""') + '"' }
+
+    $psi = New-Object System.Diagnostics.ProcessStartInfo
+    $psi.FileName = 'powershell.exe'
+    $psi.Arguments = ($quotedArgs -join ' ')
+    $psi.WorkingDirectory = $WorkingDirectory
+    $psi.UseShellExecute = $false
+    $psi.RedirectStandardOutput = $true
+    $psi.RedirectStandardError = $true
+    $psi.CreateNoWindow = $true
+
+    $process = New-Object System.Diagnostics.Process
+    $process.StartInfo = $psi
+
+    $stdoutBuilder = New-Object System.Text.StringBuilder
+    $stderrBuilder = New-Object System.Text.StringBuilder
+    Register-ObjectEvent -InputObject $process -EventName OutputDataReceived -Action { if ($null -ne $EventArgs.Data) { $Event.MessageData.AppendLine($EventArgs.Data) | Out-Null } } -MessageData $stdoutBuilder | Out-Null
+    Register-ObjectEvent -InputObject $process -EventName ErrorDataReceived -Action { if ($null -ne $EventArgs.Data) { $Event.MessageData.AppendLine($EventArgs.Data) | Out-Null } } -MessageData $stderrBuilder | Out-Null
+
+    try {
+        [void]$process.Start()
+        $process.BeginOutputReadLine()
+        $process.BeginErrorReadLine()
+
+        $finished = $process.WaitForExit($TimeoutSeconds * 1000)
+
+        if (-not $finished) {
+            Write-Fail "Bootstrap child (PID $($process.Id)) exceeded the bounded timeout of ${TimeoutSeconds}s; terminating the launcher wrapper only. Any daemon process it started is independent and is left running per contract."
+            try {
+                # Process.Kill(bool) (kill entire tree) requires .NET Core
+                # 3.0+ and does not exist under Windows PowerShell 5.1 (the
+                # runtime Task Scheduler actually launches here). This
+                # process is a direct powershell.exe child with no shell
+                # wrapper in between, so the parameterless Kill() is
+                # sufficient.
+                $process.Kill()
+                $process.WaitForExit(5000) | Out-Null
+            } catch {
+                Write-Warn "Could not stop timed-out child PID $($process.Id): $($_.Exception.Message)"
+            }
+            Set-Content -Path $StdoutLogPath -Value $stdoutBuilder.ToString() -NoNewline
+            Set-Content -Path $StderrLogPath -Value $stderrBuilder.ToString() -NoNewline
+            return [pscustomobject]@{ ExitCode = 1; TimedOut = $true; ProcessId = $process.Id; StdoutLogPath = $StdoutLogPath; StderrLogPath = $StderrLogPath }
+        }
+
+        Set-Content -Path $StdoutLogPath -Value $stdoutBuilder.ToString() -NoNewline
+        Set-Content -Path $StderrLogPath -Value $stderrBuilder.ToString() -NoNewline
+        return [pscustomobject]@{ ExitCode = $process.ExitCode; TimedOut = $false; ProcessId = $process.Id; StdoutLogPath = $StdoutLogPath; StderrLogPath = $StderrLogPath }
+    }
+    finally {
+        Get-EventSubscriber | Where-Object { $_.SourceObject -eq $process } | Unregister-Event
     }
 }
 
@@ -943,7 +1057,7 @@ function Invoke-PaperStartup {
 
     if ($CheckOnlyFlag) {
         Write-Section 'PAPER -- read-only diagnostic (delegates to Launch-VeritasLedger.ps1 -CheckOnly)'
-        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $launchScript -CheckOnly | Out-Host
+        & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $launchScript -CheckOnly | Out-Host
         $checkExit = $LASTEXITCODE
 
         Write-Section 'PAPER -- symbol universe + required-universe scheduler status (best-effort read-only)'
@@ -981,15 +1095,40 @@ function Invoke-PaperStartup {
     }
     $logEntry.stages += @{ name = 'db_prerequisites'; ok = $true }
 
-    Write-Section 'PAPER -- daemon + GUI (delegates to Launch-VeritasLedger.ps1)'
-    $lvlArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', $launchScript, '-Mode', $LauncherModeArg)
+    Write-Section 'PAPER -- daemon + GUI (delegates to Launch-VeritasLedger.ps1, bounded + noninteractive)'
+    $lvlArgs = @('-Mode', $LauncherModeArg)
     if ($ForceRebuildDaemon) { $lvlArgs += '-RebuildDaemon' }
     if ($ForceRebuildGui)    { $lvlArgs += '-RebuildGui' }
     if ($SkipGuiFlag)        { $lvlArgs += '-SkipGui' }
-    & powershell.exe @lvlArgs | Out-Host
-    if ($LASTEXITCODE -ne 0) {
-        Write-Fail 'Launch-VeritasLedger.ps1 failed to bring up a verified paper daemon/GUI.'
-        $logEntry.stages += @{ name = 'daemon_gui'; exit_code = $LASTEXITCODE }
+
+    $bootstrapLogDir = Join-Path $RepoRoot 'exports\launcher'
+    New-Item -ItemType Directory -Force -Path $bootstrapLogDir | Out-Null
+    $bootstrapStamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+    $bootstrapStdoutLog = Join-Path $bootstrapLogDir "bootstrap_$bootstrapStamp.stdout.log"
+    $bootstrapStderrLog = Join-Path $bootstrapLogDir "bootstrap_$bootstrapStamp.stderr.log"
+
+    $bootstrapResult = Invoke-BoundedChildScript -ScriptPath $launchScript -ScriptArgs $lvlArgs `
+        -WorkingDirectory $RepoRoot -StdoutLogPath $bootstrapStdoutLog -StderrLogPath $bootstrapStderrLog `
+        -TimeoutSeconds $script:BootstrapTimeoutSeconds
+
+    Get-Content -Path $bootstrapResult.StdoutLogPath -ErrorAction SilentlyContinue | Out-Host
+    $bootstrapStderrContent = Get-Content -Path $bootstrapResult.StderrLogPath -ErrorAction SilentlyContinue
+    if ($bootstrapStderrContent) { $bootstrapStderrContent | Out-Host }
+
+    if ($bootstrapResult.TimedOut -or $bootstrapResult.ExitCode -ne 0) {
+        $reason = if ($bootstrapResult.TimedOut) {
+            "Launch-VeritasLedger.ps1 exceeded the bounded bootstrap timeout ($($script:BootstrapTimeoutSeconds)s) and was terminated"
+        } else {
+            "Launch-VeritasLedger.ps1 failed to bring up a verified paper daemon/GUI (exit $($bootstrapResult.ExitCode))"
+        }
+        Write-Fail $reason
+        $logEntry.stages += @{
+            name        = 'daemon_gui'
+            exit_code   = $bootstrapResult.ExitCode
+            timed_out   = $bootstrapResult.TimedOut
+            stdout_log  = $bootstrapResult.StdoutLogPath
+            stderr_log  = $bootstrapResult.StderrLogPath
+        }
         Write-LauncherLogEntry -Path $LogPath -Entry $logEntry
         return $script:ExitGeneric
     }
@@ -1184,7 +1323,7 @@ function Invoke-PaperStartup {
 
     if ($CaptureEvidenceFlag) {
         Write-Section 'PAPER -- evidence capture'
-        & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $evidenceScript -Label 'launcher_startup' | Out-Host
+        & powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File $evidenceScript -Label 'launcher_startup' | Out-Host
         if ($LASTEXITCODE -ne 0) { Write-Warn "Evidence capture exited $LASTEXITCODE; launcher continues." }
         $logEntry.stages += @{ name = 'evidence_capture'; requested = $true }
     }

@@ -128,11 +128,125 @@ Assert-True 'Paper full run delegates daemon/GUI startup to Launch-VeritasLedger
 Assert-True 'Paper full run never invokes Prep-PremarketMarketData.ps1 (PAPER-OPS-AUTOFRESH-LAUNCHER-INTEGRATION-01: daemon required-universe scheduler owns bootstrap/repair/provider-mapping instead)' `
     (-not ($LauncherText -match '&\s*powershell\.exe.*Prep-PremarketMarketData'))
 
-Assert-True 'Paper full run never starts Refresh-IntradayMarketData.ps1 as a child process (no Start-Process call anywhere in the launcher)' `
-    (-not ($LauncherText -match 'Start-Process'))
+Assert-True 'Paper full run never starts Refresh-IntradayMarketData.ps1 as a child process (no invocation of that script anywhere in the launcher; historical comment mentions are fine)' `
+    (-not ($LauncherText -match '(?i)(&|Start-Process)[^\r\n]*Refresh-IntradayMarketData'))
+
+Assert-True 'SCHEDULED-HEADLESS-BOOTSTRAP-01: the bootstrap child is driven by a dedicated ProcessStartInfo (not Start-Process, which had an unreliable ExitCode readback when combined with redirection), targeting powershell.exe' `
+    ($LauncherText -match [regex]::Escape('$psi.FileName = ') -and $LauncherText -match "'powershell.exe'")
 
 Assert-True 'Paper full run establishes required-universe scheduler authority via POST .../required-universe/start' `
     ($LauncherText -match '/api/v1/market-data/required-universe/start')
+
+# ---------------------------------------------------------------------------
+# SCHEDULED-HEADLESS-BOOTSTRAP-01 static proofs.
+#
+# Root cause (Thursday 2026-08-13, ~8 hour hang): the daemon/GUI bootstrap
+# child was a native `& powershell.exe @lvlArgs | Out-Host` pipeline with no
+# -NonInteractive, and Launch-VeritasLedger.ps1's outer catch called
+# Read-Host unconditionally on any failure -- which blocks forever under a
+# scheduled/headless invocation with no console attached, and Task
+# Scheduler's ExecutionTimeLimit kill does not cause its own configured
+# retry to fire.
+# ---------------------------------------------------------------------------
+Assert-True 'SCHEDULED-HEADLESS-BOOTSTRAP-01: daemon/GUI bootstrap goes through the bounded Invoke-BoundedChildScript wrapper, not a raw Out-Host pipeline' `
+    ($LauncherText -match [regex]::Escape('Invoke-BoundedChildScript -ScriptPath $launchScript') -and
+     -not ($LauncherText -match [regex]::Escape('& powershell.exe @lvlArgs | Out-Host')))
+
+Assert-True 'SCHEDULED-HEADLESS-BOOTSTRAP-01: Invoke-BoundedChildScript always adds -NonInteractive to the child' `
+    ($LauncherText -match [regex]::Escape("'-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass'"))
+
+Assert-True 'SCHEDULED-HEADLESS-BOOTSTRAP-01: Invoke-BoundedChildScript enforces a real process timeout via WaitForExit, distinct from Task Scheduler''s ExecutionTimeLimit' `
+    ($LauncherText -match [regex]::Escape('$process.WaitForExit($TimeoutSeconds * 1000)'))
+
+Assert-True 'SCHEDULED-HEADLESS-BOOTSTRAP-01: on timeout, only the wrapper child is killed -- daemon independence is documented and Kill() targets the wrapper process only' `
+    ($LauncherText -match [regex]::Escape('$process.Kill()') -and
+     $LauncherText -match 'daemon process it started is independent and is left running')
+
+Assert-True 'SCHEDULED-HEADLESS-BOOTSTRAP-01: -CheckOnly delegation to Launch-VeritasLedger.ps1 also uses -NonInteractive' `
+    ($LauncherText -match [regex]::Escape("powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `$launchScript -CheckOnly"))
+
+Assert-True 'SCHEDULED-HEADLESS-BOOTSTRAP-01: evidence-capture child invocation also uses -NonInteractive' `
+    ($LauncherText -match [regex]::Escape("powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -File `$evidenceScript"))
+
+Assert-True 'SCHEDULED-HEADLESS-BOOTSTRAP-01: bootstrap timeout is a launcher parameter, tunable independently of Task Scheduler config' `
+    ($LauncherText -match '\[int\]\$BootstrapTimeoutSeconds = 2400')
+
+Assert-True 'SCHEDULED-HEADLESS-BOOTSTRAP-01: Launch-VeritasLedger.ps1''s outer catch skips Read-Host for -SkipGui (headless/scheduled) invocations' `
+    ($VeritasLedgerText -match '(?s)if \(\$SkipGui\.IsPresent\)\s*\{\s*Write-Host [^\r\n]*exiting nonzero without prompting[\s\S]*?exit 1\s*\}[\s\S]*?\$null = Read-Host')
+
+Assert-True 'SCHEDULED-HEADLESS-BOOTSTRAP-01: Launch-VeritasLedger.ps1 MAIN DISPATCH is dot-source-guarded (safe to test without a real launch)' `
+    ($VeritasLedgerText -match [regex]::Escape("if (`$MyInvocation.InvocationName -ne '.') {"))
+
+# ---------------------------------------------------------------------------
+# SCHEDULED-HEADLESS-BOOTSTRAP-01 functional proofs: dot-source the real
+# launcher (safe -- MAIN DISPATCH is guarded, see above) and exercise the
+# real Invoke-BoundedChildScript against small disposable probe scripts.
+# Zero real daemon/network/DB/order/runtime side effects.
+# ---------------------------------------------------------------------------
+Show-Info ''
+Show-Info '=== Section 1b: SCHEDULED-HEADLESS-BOOTSTRAP-01 functional proofs ==='
+
+# Dot-sourcing is safe: MAIN DISPATCH is guarded by
+# `if ($MyInvocation.InvocationName -ne '.')`, so this only defines
+# functions -- no daemon start, no Alpaca call, no trading runtime, no exit.
+# (Section 5 below dot-sources $Launcher again for its own mocks; re-sourcing
+# is harmless, it only re-defines the same functions.)
+. $Launcher
+
+$ProbeDir = Join-Path ([System.IO.Path]::GetTempPath()) ("lvl_bootstrap_probe_" + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Force -Path $ProbeDir | Out-Null
+try {
+    $fastOkProbe = Join-Path $ProbeDir 'fast_ok.ps1'
+    Set-Content -Path $fastOkProbe -Value "exit 0"
+
+    $fastFailProbe = Join-Path $ProbeDir 'fast_fail.ps1'
+    Set-Content -Path $fastFailProbe -Value "exit 7"
+
+    $hangProbe = Join-Path $ProbeDir 'hang.ps1'
+    Set-Content -Path $hangProbe -Value "Start-Sleep -Seconds 999"
+
+    $readHostProbe = Join-Path $ProbeDir 'readhost.ps1'
+    Set-Content -Path $readHostProbe -Value @'
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+try {
+    throw "simulated failure"
+} catch {
+    Write-Host "FAILED: $($_.Exception.Message)"
+    $null = Read-Host
+    exit 1
+}
+'@
+
+    $b1 = Invoke-BoundedChildScript -ScriptPath $fastOkProbe -ScriptArgs @() -WorkingDirectory $ProbeDir `
+        -StdoutLogPath (Join-Path $ProbeDir 'b1.out.log') -StderrLogPath (Join-Path $ProbeDir 'b1.err.log') -TimeoutSeconds 30
+    Assert-True 'Functional: successful headless bootstrap returns promptly with the child''s real exit code (0), not timed out' `
+        (-not $b1.TimedOut -and $b1.ExitCode -eq 0)
+
+    $b2 = Invoke-BoundedChildScript -ScriptPath $fastFailProbe -ScriptArgs @() -WorkingDirectory $ProbeDir `
+        -StdoutLogPath (Join-Path $ProbeDir 'b2.out.log') -StderrLogPath (Join-Path $ProbeDir 'b2.err.log') -TimeoutSeconds 30
+    Assert-True 'Functional: a fast child failure propagates its real nonzero exit code (7), not timed out' `
+        (-not $b2.TimedOut -and $b2.ExitCode -eq 7)
+
+    $b3Start = Get-Date
+    $b3 = Invoke-BoundedChildScript -ScriptPath $hangProbe -ScriptArgs @() -WorkingDirectory $ProbeDir `
+        -StdoutLogPath (Join-Path $ProbeDir 'b3.out.log') -StderrLogPath (Join-Path $ProbeDir 'b3.err.log') -TimeoutSeconds 5
+    $b3Elapsed = ((Get-Date) - $b3Start).TotalSeconds
+    Assert-True 'Functional: a hung child is bounded by the internal timeout -> TimedOut=true, deterministic nonzero exit code (1)' `
+        ($b3.TimedOut -and $b3.ExitCode -eq 1)
+    Assert-True 'Functional: the bounded timeout actually returns control well under Task Scheduler''s 1-hour ExecutionTimeLimit (returned in well under 60s for a 5s timeout)' `
+        ($b3Elapsed -lt 60)
+    Start-Sleep -Milliseconds 500
+    Assert-True 'Functional: the timed-out wrapper child process is actually terminated, not left running' `
+        ($null -eq (Get-Process -Id $b3.ProcessId -ErrorAction SilentlyContinue))
+
+    $b4 = Invoke-BoundedChildScript -ScriptPath $readHostProbe -ScriptArgs @() -WorkingDirectory $ProbeDir `
+        -StdoutLogPath (Join-Path $ProbeDir 'b4.out.log') -StderrLogPath (Join-Path $ProbeDir 'b4.err.log') -TimeoutSeconds 30
+    Assert-True 'Functional: -NonInteractive (always added by Invoke-BoundedChildScript) converts a would-be Read-Host hang into a fast nonzero exit, never reaching the internal timeout' `
+        (-not $b4.TimedOut -and $b4.ExitCode -eq 1)
+} finally {
+    Remove-Item -Recurse -Force $ProbeDir -ErrorAction SilentlyContinue
+}
 
 Assert-True 'Paper full run verifies scheduler ownership via GET .../required-universe/status (200/409 alone is never treated as proof)' `
     ($LauncherText -match '/api/v1/market-data/required-universe/status')
@@ -436,7 +550,8 @@ Assert-True 'L6: overall_state=not_applicable / non-trading-day -> Established=t
 # official normal Paper startup (already covered in Section 1, re-affirmed
 # here under its L-series identity) -----------------------------------------
 Assert-True 'L7: official normal Paper startup never starts Refresh-IntradayMarketData.ps1 as a child process (re-check)' `
-    (-not ($FullStartupBody -match 'Refresh-IntradayMarketData') -and -not ($LauncherText -match 'Start-Process'))
+    (-not ($FullStartupBody -match 'Refresh-IntradayMarketData') -and
+     -not ($LauncherText -match '(?i)(&|Start-Process)[^\r\n]*Refresh-IntradayMarketData'))
 
 # --- L8: static -- -CheckOnly starts neither the scheduler nor the refresh
 # child (re-affirmed under its L-series identity) ---------------------------

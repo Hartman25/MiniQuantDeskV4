@@ -1777,6 +1777,18 @@ catch {
     Write-Host '[Veritas Ledger] LAUNCH FAILED' -ForegroundColor Red
     Write-Host "  $($_.Exception.Message)" -ForegroundColor Red
     Write-Host ''
+
+    # SCHEDULED-HEADLESS-BOOTSTRAP-NONINTERACTIVE-01: -SkipGui is the
+    # headless/scheduled invocation contract (Start-MiniQuantDesk.ps1 always
+    # sets it for -Scheduled). A headless failure must return a deterministic
+    # nonzero exit immediately -- it must never block on Read-Host waiting for
+    # a keypress a scheduled/unattended invocation can never supply. Prompting
+    # remains available only for genuine interactive runs (no -SkipGui).
+    if ($SkipGui.IsPresent) {
+        Write-Host 'Headless invocation (-SkipGui): exiting nonzero without prompting for input.' -ForegroundColor Yellow
+        exit 1
+    }
+
     Write-Host 'Review the error above. Press Enter to close this window.' -ForegroundColor Yellow
     $null = Read-Host
     exit 1
