@@ -44,7 +44,8 @@
 //! | `runtime.start_refused.readiness_evidence_persist_failed` | `ServiceUnavailable` | `ReadinessEvidencePersistFailed` | Manual |
 //! | `runtime.start_refused.readiness_run_link_persist_failed` | `ServiceUnavailable` | `ReadinessRunLinkPersistFailed` | Manual |
 //! | `runtime.truth_mismatch.durable_active_without_local_owner` | `Conflict` | `DurableActiveRunWithoutLocalOwner` | Manual |
-//! | every other fault class (deployment-mode, capital/artifact/parity/economics gates, WS-continuity-unproven, `daily_data_readiness_blocked`, `strategy_registry_missing`/`disabled`, `market_data_not_fresh`, `fixed_window_override_invalid`, `already_owned`, `halted_lifecycle`, `durable_run_active`, any other `Internal` context, and any unrecognized label on a known variant) | any | `UnclassifiedFailClosed { fault_class }` | Manual |
+//! | `runtime.start_refused.latest_completed_bar_pending` (OPENING-BAR-FRESHNESS-AUTHORITY-REPAIR-01: the legacy `market_data_freshness` gate's "stale" verdict is structurally guaranteed — the session just opened and the first bar's interval + publication grace has not yet elapsed, so no current-session bar can exist yet) | `Forbidden` | `LatestCompletedBarPending` | WaitForCondition |
+//! | every other fault class (deployment-mode, capital/artifact/parity/economics gates, WS-continuity-unproven, `daily_data_readiness_blocked`, `strategy_registry_missing`/`disabled`, `market_data_not_fresh` (genuine staleness — outside the opening-bar window, or blocking on `missing`/`insufficient` rather than `stale`), `fixed_window_override_invalid`, `already_owned`, `halted_lifecycle`, `durable_run_active`, any other `Internal` context, and any unrecognized label on a known variant) | any | `UnclassifiedFailClosed { fault_class }` | Manual |
 //!
 //! Notes on the conservative fallback (never a guess in the transient or
 //! wait-for-condition direction):
@@ -314,6 +315,17 @@ pub fn coordinator_reason_from_runtime_lifecycle_error(
             }
             "runtime.start_refused.strategy_bootstrap_dormant" => {
                 AutonomousCoordinatorReason::NativeStrategyBootstrapDormant
+            }
+            // OPENING-BAR-FRESHNESS-AUTHORITY-REPAIR-01: the session just
+            // opened and the first bar's interval + publication grace has
+            // not yet elapsed — a structurally temporary condition the
+            // coordinator can simply retry, never a genuine data problem.
+            // Deliberately a distinct fault_class from
+            // `"runtime.start_refused.market_data_not_fresh"` (never the
+            // same string reclassified by inference) — see
+            // `market_data_freshness::is_awaiting_first_session_bar`.
+            "runtime.start_refused.latest_completed_bar_pending" => {
+                AutonomousCoordinatorReason::LatestCompletedBarPending
             }
             // D1D1-POLICY-CLOSURE-REPAIR-01: `"runtime.start_refused.service_unavailable"`
             // is not currently produced as `Forbidden` by any audited source
@@ -924,6 +936,52 @@ mod tests {
         assert_eq!(
             coordinator_reason_from_runtime_lifecycle_error(&err),
             AutonomousCoordinatorReason::ReconcileDirty
+        );
+    }
+
+    #[test]
+    fn opening_bar_awaiting_first_session_bar_maps_wait_for_condition() {
+        // OPENING-BAR-FRESHNESS-AUTHORITY-REPAIR-01: a structurally pending
+        // first bar must classify WaitForCondition, never Manual — the
+        // coordinator can retry on its own without operator intervention.
+        let err = RuntimeLifecycleError::forbidden(
+            "runtime.start_refused.latest_completed_bar_pending",
+            "market_data_freshness",
+            "latest completed bar for the current session is not yet available",
+        );
+        assert_eq!(
+            coordinator_reason_from_runtime_lifecycle_error(&err),
+            AutonomousCoordinatorReason::LatestCompletedBarPending
+        );
+        assert_eq!(
+            classify_autonomous_reason(&coordinator_reason_from_runtime_lifecycle_error(&err)),
+            AutonomousRetryClass::WaitForCondition,
+            "a structurally pending first bar must never durably trap the \
+             operation in manual_intervention_required"
+        );
+    }
+
+    #[test]
+    fn opening_bar_genuine_market_data_not_fresh_still_maps_manual() {
+        // Test D (mission): outside the opening-bar window, or blocking on
+        // missing/insufficient rather than stale, the ORIGINAL fault class
+        // is unchanged and must still fail closed to Manual — this patch
+        // only ever adds a new, distinct fault_class string; it never
+        // reclassifies the existing one.
+        let err = RuntimeLifecycleError::forbidden(
+            "runtime.start_refused.market_data_not_fresh",
+            "market_data_freshness",
+            "genuinely stale intraday data well inside the session",
+        );
+        let reason = coordinator_reason_from_runtime_lifecycle_error(&err);
+        assert!(matches!(
+            reason,
+            AutonomousCoordinatorReason::UnclassifiedFailClosed { .. }
+        ));
+        assert_eq!(
+            classify_autonomous_reason(&reason),
+            AutonomousRetryClass::ManualInterventionRequired,
+            "genuine intraday staleness must never be weakened by this patch"
         );
     }
 

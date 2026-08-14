@@ -563,6 +563,128 @@ pub fn required_symbols_for_freshness_gate_from_env() -> Vec<RequiredSymbolTimef
     required_symbols_with_source_from_env().required
 }
 
+// ---------------------------------------------------------------------------
+// OPENING-BAR-FRESHNESS-AUTHORITY-REPAIR-01: structurally-pending first bar
+// ---------------------------------------------------------------------------
+
+/// True when `now_ts` falls within the structurally-guaranteed publication
+/// window for the *first* bar of the current trading session on `timeframe`
+/// — the session has opened, but the first bar's interval plus publication
+/// grace has not yet elapsed, so no current-session bar can possibly exist
+/// yet. Every completed bar this evaluator can see is therefore necessarily
+/// from a prior session, and a flat wall-clock "stale" verdict from
+/// [`evaluate_md_freshness_snapshot`] reflects that structural fact, not a
+/// genuine data problem.
+///
+/// `false` on a non-trading day (`schedule.is_trading_day == false`) or
+/// before the session has opened — neither condition means "awaiting the
+/// first bar", and both are already gated elsewhere (`AwaitingSessionOpen`/
+/// `NonTradingDay`) before this evaluator would ever run.
+///
+/// Once `now_ts` reaches `session_open_utc + timeframe_secs +
+/// effective_grace_seconds`, the first bar should exist; from that instant
+/// on this returns `false` and ordinary staleness rules resume unchanged
+/// (OPENING-BAR-FRESHNESS-AUTHORITY-REPAIR-01).
+pub fn is_awaiting_first_session_bar(
+    schedule: &crate::state::market_calendar::MarketSessionSchedule,
+    timeframe_secs: i64,
+    effective_grace_seconds: i64,
+    now_ts: i64,
+) -> bool {
+    if !schedule.is_trading_day {
+        return false;
+    }
+    let open_ts = schedule.session_open_utc.timestamp();
+    if now_ts < open_ts {
+        return false;
+    }
+    now_ts < open_ts + timeframe_secs + effective_grace_seconds
+}
+
+#[cfg(test)]
+mod opening_bar_tests {
+    use super::*;
+    use crate::state::market_calendar::CalendarCoverageState;
+
+    fn schedule(
+        session_open_utc_ts: i64,
+        is_trading_day: bool,
+    ) -> crate::state::market_calendar::MarketSessionSchedule {
+        crate::state::market_calendar::MarketSessionSchedule {
+            market_date: (2024, 4, 15),
+            session_open_utc: DateTime::<Utc>::from_timestamp(session_open_utc_ts, 0).unwrap(),
+            session_close_utc: DateTime::<Utc>::from_timestamp(session_open_utc_ts + 6 * 3600 + 1800, 0)
+                .unwrap(),
+            previous_trading_date: (2024, 4, 12),
+            is_early_close: false,
+            is_trading_day,
+            calendar_source: "test",
+            coverage_state: CalendarCoverageState::Active,
+        }
+    }
+
+    const OPEN_TS: i64 = 1_713_180_600; // 2024-04-15 13:30 UTC (09:30 EDT)
+
+    #[test]
+    fn obf_01_true_45_seconds_after_open_for_5m_timeframe() {
+        let sched = schedule(OPEN_TS, true);
+        assert!(is_awaiting_first_session_bar(&sched, 300, 300, OPEN_TS + 45));
+    }
+
+    #[test]
+    fn obf_02_false_once_first_bar_interval_plus_grace_has_elapsed() {
+        let sched = schedule(OPEN_TS, true);
+        assert!(!is_awaiting_first_session_bar(
+            &sched,
+            300,
+            300,
+            OPEN_TS + 300 + 300
+        ));
+    }
+
+    #[test]
+    fn obf_03_false_well_inside_the_session() {
+        let sched = schedule(OPEN_TS, true);
+        assert!(!is_awaiting_first_session_bar(
+            &sched,
+            300,
+            300,
+            OPEN_TS + 3600
+        ));
+    }
+
+    #[test]
+    fn obf_04_false_on_a_non_trading_day_regardless_of_wall_clock() {
+        let sched = schedule(OPEN_TS, false);
+        assert!(!is_awaiting_first_session_bar(&sched, 300, 300, OPEN_TS + 45));
+    }
+
+    #[test]
+    fn obf_05_false_before_session_open() {
+        let sched = schedule(OPEN_TS, true);
+        assert!(!is_awaiting_first_session_bar(
+            &sched,
+            300,
+            300,
+            OPEN_TS - 10
+        ));
+    }
+
+    #[test]
+    fn obf_06_boundary_instant_itself_is_no_longer_pending() {
+        let sched = schedule(OPEN_TS, true);
+        // now_ts == open + interval + grace exactly: the window is a
+        // half-open [open, open+interval+grace) — the boundary instant
+        // itself is not "awaiting" (the bar should exist by now).
+        assert!(!is_awaiting_first_session_bar(
+            &sched,
+            300,
+            300,
+            OPEN_TS + 600
+        ));
+    }
+}
+
 /// Source label: an approved `watchlist-v2` artifact supplied the required
 /// symbols (WATCHLIST-INGEST-PLAN-01).
 pub const SYMBOL_SOURCE_WATCHLIST_V2: &str = "watchlist_v2";

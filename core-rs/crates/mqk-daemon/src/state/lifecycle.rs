@@ -18,7 +18,9 @@ use crate::capital_policy::{
     evaluate_capital_policy_from_env, evaluate_deployment_economics_from_env, CapitalPolicyOutcome,
     DeploymentEconomicsOutcome,
 };
-use crate::market_data_freshness::evaluate_md_freshness_status_for_symbols;
+use crate::market_data_freshness::{
+    evaluate_md_freshness_status_for_symbols, is_awaiting_first_session_bar, timeframe_secs,
+};
 use crate::parity_evidence::{evaluate_parity_evidence_from_env, ParityEvidenceOutcome};
 
 use sqlx::PgPool;
@@ -37,6 +39,174 @@ use super::{
 use super::{AppState, DAEMON_ENGINE_ID, RECONCILE_TICK_INTERVAL};
 
 use mqk_runtime::native_strategy::{bootstrap_with_effective_binding, NativeStrategyBootstrap};
+
+// ---------------------------------------------------------------------------
+// OPENING-BAR-FRESHNESS-AUTHORITY-REPAIR-01
+// ---------------------------------------------------------------------------
+
+/// True when every blocking symbol in `readiness` is blocked *only* by a
+/// structurally-guaranteed pending first bar: `freshness_state == "stale"`
+/// (never `"missing"`/`"insufficient"` — those mean no historical data
+/// exists at all, a genuine problem unrelated to the session just opening)
+/// and, for that exact symbol/timeframe, `now_utc` falls within
+/// [`is_awaiting_first_session_bar`]'s window.
+///
+/// Fail-closed by construction: `false` when `readiness.per_symbol` carries
+/// no blocker at all (the call site only reaches this when
+/// `!readiness.start_allowed`, but this stays defensive rather than trusting
+/// that invariant), when any blocker's timeframe cannot be parsed, or when
+/// any blocker is anything other than exactly this one temporal condition —
+/// a single non-covered blocker keeps the whole verdict on the original
+/// `market_data_not_fresh` fail-closed path.
+fn readiness_blocked_only_by_pending_first_session_bar(
+    readiness: &crate::api_types::MultiSymbolFreshnessReport,
+    calendar_provider: &dyn crate::state::market_calendar::MarketCalendarProvider,
+    now_utc: chrono::DateTime<Utc>,
+) -> bool {
+    let blockers: Vec<_> = readiness
+        .per_symbol
+        .iter()
+        .filter(|s| s.is_start_blocker())
+        .collect();
+    if blockers.is_empty() {
+        return false;
+    }
+    let configured_grace = crate::daily_data_readiness::configured_grace_seconds_from_env();
+    let schedule =
+        crate::state::market_calendar::resolve_market_session_schedule(calendar_provider, now_utc);
+    blockers.iter().all(|status| {
+        if status.freshness_state != "stale" {
+            return false;
+        }
+        let Some(tf_secs) = timeframe_secs(&status.timeframe) else {
+            return false;
+        };
+        let grace = crate::daily_data_readiness::effective_grace_seconds(configured_grace, tf_secs);
+        is_awaiting_first_session_bar(&schedule, tf_secs, grace, now_utc.timestamp())
+    })
+}
+
+#[cfg(test)]
+mod opening_bar_freshness_authority_tests {
+    use super::*;
+    use crate::api_types::MultiSymbolFreshnessReport;
+    use crate::market_data_freshness::evaluate_md_freshness_snapshot;
+    use crate::state::market_calendar::{resolve_market_session_schedule, NyseWeekdaysProvider};
+
+    // Monday 2024-04-15, well inside NyseWeekdaysProvider's covered range.
+    const REF_INSTANT: i64 = 1_713_188_100; // 2024-04-15 13:35 UTC
+
+    fn session_open_ts() -> i64 {
+        let provider = NyseWeekdaysProvider;
+        let now = chrono::DateTime::<Utc>::from_timestamp(REF_INSTANT, 0).unwrap();
+        resolve_market_session_schedule(&provider, now)
+            .session_open_utc
+            .timestamp()
+    }
+
+    fn report_from(statuses: Vec<crate::api_types::MarketDataFreshnessStatus>) -> MultiSymbolFreshnessReport {
+        crate::market_data_freshness::aggregate_freshness_statuses(
+            statuses.iter().map(|s| s.symbol.clone()).collect(),
+            statuses,
+        )
+    }
+
+    #[test]
+    fn obf_lc_01_stale_45s_after_open_is_covered() {
+        let open_ts = session_open_ts();
+        let now = open_ts + 45;
+        // Only a prior-session bar exists — structurally guaranteed this
+        // early, so `evaluate_md_freshness_snapshot` reports "stale".
+        let status = evaluate_md_freshness_snapshot("ZZLC01", "5m", 10, Some(open_ts - 20_000), now);
+        assert_eq!(status.freshness_state, "stale");
+        let report = report_from(vec![status]);
+        let provider = NyseWeekdaysProvider;
+        let now_utc = chrono::DateTime::<Utc>::from_timestamp(now, 0).unwrap();
+        assert!(
+            readiness_blocked_only_by_pending_first_session_bar(&report, &provider, now_utc),
+            "TEST A: a lone stale blocker 45s after open must be covered by the carve-out"
+        );
+    }
+
+    #[test]
+    fn obf_lc_02_stale_well_inside_session_is_not_covered() {
+        let open_ts = session_open_ts();
+        let now = open_ts + 3600; // 1 hour into the session
+        let status = evaluate_md_freshness_snapshot("ZZLC02", "5m", 10, Some(open_ts - 20_000), now);
+        assert_eq!(status.freshness_state, "stale");
+        let report = report_from(vec![status]);
+        let provider = NyseWeekdaysProvider;
+        let now_utc = chrono::DateTime::<Utc>::from_timestamp(now, 0).unwrap();
+        assert!(
+            !readiness_blocked_only_by_pending_first_session_bar(&report, &provider, now_utc),
+            "TEST D: genuine staleness well inside the session must never be \
+             waved through — no weakening"
+        );
+    }
+
+    #[test]
+    fn obf_lc_03_missing_is_never_covered_even_45s_after_open() {
+        let open_ts = session_open_ts();
+        let now = open_ts + 45;
+        let status = evaluate_md_freshness_snapshot("ZZLC03", "5m", 0, None, now);
+        assert_eq!(status.freshness_state, "missing");
+        let report = report_from(vec![status]);
+        let provider = NyseWeekdaysProvider;
+        let now_utc = chrono::DateTime::<Utc>::from_timestamp(now, 0).unwrap();
+        assert!(
+            !readiness_blocked_only_by_pending_first_session_bar(&report, &provider, now_utc),
+            "TEST E: no historical data at all is a genuine problem, never a \
+             pending-first-bar condition, regardless of session timing"
+        );
+    }
+
+    #[test]
+    fn obf_lc_04_insufficient_is_never_covered_even_45s_after_open() {
+        let open_ts = session_open_ts();
+        let now = open_ts + 45;
+        let status = evaluate_md_freshness_snapshot("ZZLC04", "5m", 2, Some(open_ts - 20_000), now);
+        assert_eq!(status.freshness_state, "insufficient");
+        let report = report_from(vec![status]);
+        let provider = NyseWeekdaysProvider;
+        let now_utc = chrono::DateTime::<Utc>::from_timestamp(now, 0).unwrap();
+        assert!(
+            !readiness_blocked_only_by_pending_first_session_bar(&report, &provider, now_utc),
+            "insufficient history is a genuine problem, never a pending-first-bar condition"
+        );
+    }
+
+    #[test]
+    fn obf_lc_05_one_covered_one_not_refuses_the_whole_verdict() {
+        let open_ts = session_open_ts();
+        let now = open_ts + 45;
+        let pending = evaluate_md_freshness_snapshot("ZZLC05A", "5m", 10, Some(open_ts - 20_000), now);
+        let missing = evaluate_md_freshness_snapshot("ZZLC05B", "5m", 0, None, now);
+        let report = report_from(vec![pending, missing]);
+        let provider = NyseWeekdaysProvider;
+        let now_utc = chrono::DateTime::<Utc>::from_timestamp(now, 0).unwrap();
+        assert!(
+            !readiness_blocked_only_by_pending_first_session_bar(&report, &provider, now_utc),
+            "a mixed verdict must never be softened just because one of several \
+             blockers happens to be a pending first bar"
+        );
+    }
+
+    #[test]
+    fn obf_lc_06_no_blockers_at_all_is_false_defensively() {
+        let report = MultiSymbolFreshnessReport {
+            aggregate_status: "ok".to_string(),
+            start_allowed: true,
+            required_symbols: vec![],
+            per_symbol: vec![],
+            blockers: vec![],
+        };
+        let provider = NyseWeekdaysProvider;
+        let now_utc = chrono::DateTime::<Utc>::from_timestamp(REF_INSTANT, 0).unwrap();
+        assert!(!readiness_blocked_only_by_pending_first_session_bar(
+            &report, &provider, now_utc
+        ));
+    }
+}
 
 // ---------------------------------------------------------------------------
 // AUTONOMOUS-DAILY-PAPER-OPERATIONS-01D2: typed autonomous arm outcome
@@ -1532,6 +1702,38 @@ impl AppState {
             )
             .await;
             if !readiness.start_allowed {
+                // OPENING-BAR-FRESHNESS-AUTHORITY-REPAIR-01: a "stale"
+                // verdict this early in the session (before the first bar's
+                // interval + publication grace has elapsed) is structurally
+                // guaranteed, not a genuine data problem — see
+                // `readiness_blocked_only_by_pending_first_session_bar`.
+                // Every other blocking case (missing/insufficient, or stale
+                // outside that narrow window) is completely unchanged below.
+                if readiness_blocked_only_by_pending_first_session_bar(
+                    &readiness,
+                    start_attempt_snapshot
+                        .readiness_context
+                        .calendar_provider
+                        .as_ref(),
+                    start_attempt_snapshot.now_utc,
+                ) {
+                    return Err(RuntimeLifecycleError::forbidden(
+                        "runtime.start_refused.latest_completed_bar_pending",
+                        "market_data_freshness",
+                        format!(
+                            "latest completed bar for the current session is not \
+                             yet available (aggregate_status='{}', \
+                             required_symbols={:?}): {} the session has opened \
+                             but the first bar's interval plus publication grace \
+                             has not yet elapsed; the autonomous coordinator will \
+                             retry automatically \
+                             (OPENING-BAR-FRESHNESS-AUTHORITY-REPAIR-01)",
+                            readiness.aggregate_status,
+                            readiness.required_symbols,
+                            readiness.blockers.join("; "),
+                        ),
+                    ));
+                }
                 return Err(RuntimeLifecycleError::forbidden(
                     "runtime.start_refused.market_data_not_fresh",
                     "market_data_freshness",
