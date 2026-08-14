@@ -1612,3 +1612,144 @@ async fn t_legacy_full_recovery_lifecycle_market_data_not_fresh() -> anyhow::Res
     cleanup_operation(&pool, operation_id).await;
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// T-PRESTART — PAPER-SOAK-FRIDAY-PRESTART-OBSERVATION-RETRY-SEMANTICS-01
+//
+// The second 2026-08-14 Friday recovery blocker this closes: before the
+// legacy `market_data_freshness` gate refused canonical start (T-LEGACY's
+// exact scenario), the completed-bar driver's `PrepareDataOnly` mode --
+// legal in `preparing_data`/`awaiting_open`/etc, see
+// `state::autonomous_completed_bar_driver::AutonomousCompletedBarDriverMode`
+// -- had already durably observed one completed bar for this operation via
+// the real production recorder (`mqk_db::record_completed_bar_observed`):
+// `bars_observed = 1`, `last_completed_bar_ts` set, with zero `run_id`, zero
+// `started_at_utc`, zero `bars_dispatched`, zero dispatch claims, and zero
+// validated run lineage -- because `PrepareDataOnly` never creates a
+// dispatch claim, deposits a pending strategy bar, or invokes native
+// strategy code. Before this patch, the route's reuse of
+// `autonomous_daily_coverage_authority::check_operation_pristine` (a
+// different, intentionally stricter coverage-anchor-binding contract that
+// treats any `bars_observed != 0` as `HasActivity`) refused this exact
+// prestart-only operation with `not_recoverable`. This test proves the
+// route's own retry-specific `check_prestart_retry_safety` predicate
+// recognizes it as safe instead, while `check_operation_pristine` itself
+// remains byte-for-byte unchanged (see the
+// `prestart_retry_safety_tests::coverage_pristine_check_is_unaffected_and_still_reports_has_activity`
+// inline unit test in `routes/autonomous_daily_operator.rs`).
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn t_prestart_bars_observed_only_retry_succeeds() -> anyhow::Result<()> {
+    const LEGACY_REASON: &str = "runtime.start_refused.market_data_not_fresh";
+
+    reset_env();
+    set_active_assignment_env();
+    let pool = test_pool().await?;
+    let adapter_id = format!("retry-prestart-{}", unique_suffix());
+    let now = dynamic_session_now();
+
+    let st = paper_state_with_db(pool.clone(), &adapter_id);
+    active_fleet_st(&st).await;
+    st.set_daily_data_readiness_clock_override_for_test(Some(now))
+        .await;
+
+    let (plan, assignment_identity, runtime_binding_identity, operation_id) =
+        resolve_active_identity(&st, &adapter_id, now).await;
+
+    cleanup_bars(&pool, SYMBOL, TIMEFRAME).await;
+
+    seed_operation_row(
+        &pool,
+        &plan,
+        operation_id,
+        &adapter_id,
+        "PAPER",
+        &assignment_identity,
+        &runtime_binding_identity,
+        now,
+        STATE_PREPARING_DATA,
+        None,
+    )
+    .await?;
+
+    // The completed-bar driver's `PrepareDataOnly` mode durably observes one
+    // bar before the legacy freshness gate refuses -- via the exact
+    // production recorder, never a raw UPDATE.
+    let bars = expected_bar_window(now, 5);
+    let observed_ts = bars[0];
+    let observed =
+        mqk_db::record_completed_bar_observed(&pool, operation_id, observed_ts, now).await?;
+    assert!(matches!(
+        observed,
+        mqk_db::RecordCompletedBarObservedOutcome::Recorded { bars_observed: 1 }
+    ));
+
+    let pre_manual = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation_id)
+        .await?
+        .expect("row must exist");
+    assert_eq!(pre_manual.bars_observed, 1);
+    assert_eq!(pre_manual.last_completed_bar_ts, Some(observed_ts));
+    assert_eq!(pre_manual.run_id, None);
+    assert_eq!(pre_manual.started_at_utc, None);
+    assert_eq!(pre_manual.bars_dispatched, 0);
+
+    // The coordinator durably transitions to manual_intervention_required
+    // with the exact legacy fault_class string, same as T-LEGACY -- the bar
+    // observation above is independent of this refusal.
+    let manual = real_transition(
+        &pool,
+        operation_id,
+        STATE_PREPARING_DATA,
+        pre_manual.state_version,
+        STATE_MANUAL_INTERVENTION_REQUIRED,
+        Some(LEGACY_REASON),
+        None,
+        now,
+        "legacy market_data_freshness gate refusal after prestart observation (test fixture)",
+    )
+    .await;
+    assert_eq!(manual.state, STATE_MANUAL_INTERVENTION_REQUIRED);
+    assert_eq!(manual.state_reason_code.as_deref(), Some(LEGACY_REASON));
+    assert_eq!(
+        manual.bars_observed, 1,
+        "prestart observation must survive into manual state"
+    );
+
+    // Repair data through normal ingestion; canonical readiness now passes.
+    seed_bars_via_normal_ingestion(&pool, &bars).await;
+
+    let (status, json) = call(
+        mqk_daemon::routes::build_router(Arc::clone(&st)),
+        retry_req(operation_id, Some(&plan.market_date)),
+    )
+    .await;
+    assert_eq!(
+        status,
+        StatusCode::OK,
+        "a genuinely prestart-observed operation must recover: {json}"
+    );
+    assert_eq!(json["truth_state"], "recovered", "{json}");
+    assert_eq!(json["previous_state"], STATE_MANUAL_INTERVENTION_REQUIRED, "{json}");
+    assert_eq!(json["new_state"], STATE_PREPARING_DATA, "{json}");
+    assert_eq!(json["previous_reason_code"], LEGACY_REASON, "{json}");
+    assert_eq!(json["runtime_started"], false, "{json}");
+    assert_eq!(json["arm_modified"], false, "{json}");
+    assert_eq!(json["halt_changed"], false, "{json}");
+    assert_eq!(json["reconcile_changed"], false, "{json}");
+    assert_eq!(json["orders_submitted"], 0, "{json}");
+
+    let recovered = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation_id)
+        .await?
+        .expect("row must exist");
+    assert_eq!(recovered.state, STATE_PREPARING_DATA);
+    assert_eq!(
+        recovered.bars_observed, 1,
+        "the durable prestart observation must never be reset by this route"
+    );
+
+    cleanup_bars(&pool, SYMBOL, TIMEFRAME).await;
+    cleanup_operation(&pool, operation_id).await;
+    Ok(())
+}

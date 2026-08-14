@@ -43,10 +43,10 @@ use axum::{
     response::{IntoResponse, Response},
     Json,
 };
+use sqlx::PgPool;
 use uuid::Uuid;
 
 use crate::api_types::{AutonomousDailyOperationRetryRequest, AutonomousDailyOperationRetryResponse};
-use crate::state::autonomous_daily_coverage_authority::{check_operation_pristine, PristineCheckOutcome};
 use crate::state::autonomous_daily_operation::{
     derive_assignment_identity, derive_autonomous_daily_operation_id,
     derive_runtime_binding_identity, resolve_autonomous_daily_session_plan_from_env,
@@ -176,6 +176,87 @@ pub(crate) fn classify_manual_retry_eligibility(
         return ManualRetryEligibility::RecoverablePreflight;
     }
     ManualRetryEligibility::UnknownFailClosed
+}
+
+// ---------------------------------------------------------------------------
+// §12/§13 (revised) — retry-specific prestart-observation-safe evidence check
+// ---------------------------------------------------------------------------
+
+/// PAPER-SOAK-FRIDAY-PRESTART-OBSERVATION-RETRY-SEMANTICS-01: this route's
+/// own retry-safety contract, deliberately distinct from
+/// `autonomous_daily_coverage_authority::check_operation_pristine`, which
+/// this function never calls and which remains completely unmodified.
+/// `check_operation_pristine` gates a different question — whether the
+/// coordinator may bind a *coverage anchor* — and is intentionally stricter
+/// there: it must refuse to fabricate an anchor after *any* durable
+/// evidence at all, including a mere observed bar, so it treats
+/// `bars_observed != 0` as activity. This route's own original design intent
+/// (`MiniQuantDesk_Master_Patch_Ledger_v2_updated.md`'s
+/// `AUTONOMOUS-DAILY-OPERATOR-RETRY-01` entry) was narrower: refuse only on
+/// genuine runtime/economic evidence — `run_id`, `started_at_utc`, bar
+/// *dispatch*, or validated run lineage — not on mere data preparation. The
+/// original implementation reused `check_operation_pristine` wholesale for
+/// convenience, which incidentally also refused a pristine-pre-start
+/// operation whose only durable evidence was a completed-bar *observation*.
+///
+/// A bar observation alone is provably not runtime/economic activity: the
+/// completed-bar driver's `PrepareDataOnly` mode — the only mode legal in
+/// any state this route can ever see (`awaiting_preopen`/`preparing_data`/
+/// `awaiting_open`/`preflight_blocked`/`start_retrying`; never `running`,
+/// see `state::autonomous_completed_bar_task::select_driver_mode_for_state`)
+/// — records the observation and then stops; by construction (see its own
+/// match arm in `state::autonomous_completed_bar_driver::
+/// observe_and_dispatch_if_ready`) it never creates a dispatch claim,
+/// deposits a pending strategy bar, or invokes native strategy code. Only
+/// `RunningDispatch` mode (gated behind `operation.state == running` and a
+/// bound `run_id`) can do any of those, and this route already refuses
+/// unconditionally on `run_id.is_some()` below.
+///
+/// This function therefore reuses the exact same two DB-backed activity
+/// queries `check_operation_pristine` uses (`count_autonomous_daily_bar_
+/// dispatch_claims`, `fetch_and_validate_autonomous_daily_operation_run_
+/// lineage` — never a second, independently-derived query) plus the same
+/// `run_id`/`started_at_utc`/`bars_dispatched`/`last_dispatched_bar_ts`
+/// field checks, but never inspects `bars_observed` or
+/// `last_completed_bar_ts`. No boolean flag on the coverage-anchor
+/// function — a separate type for a separate contract.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum PrestartRetrySafety {
+    /// No genuine runtime/economic activity evidence found — safe for this
+    /// route to re-enter the coordinator pipeline at `preparing_data`.
+    Safe,
+    /// At least one runtime/economic activity signal is present — this
+    /// route must never mutate.
+    UnsafeActivity,
+}
+
+pub(crate) async fn check_prestart_retry_safety(
+    pool: &PgPool,
+    operation: &AutonomousDailyOperationRecord,
+) -> anyhow::Result<PrestartRetrySafety> {
+    if operation.run_id.is_some()
+        || operation.started_at_utc.is_some()
+        || operation.bars_dispatched != 0
+        || operation.last_dispatched_bar_ts.is_some()
+    {
+        return Ok(PrestartRetrySafety::UnsafeActivity);
+    }
+
+    let claim_count =
+        mqk_db::count_autonomous_daily_bar_dispatch_claims(pool, operation.operation_id).await?;
+    if claim_count > 0 {
+        return Ok(PrestartRetrySafety::UnsafeActivity);
+    }
+
+    let lineage =
+        mqk_db::fetch_and_validate_autonomous_daily_operation_run_lineage(pool, operation).await?;
+    match lineage {
+        Ok(lineage) if lineage.is_empty() => Ok(PrestartRetrySafety::Safe),
+        Ok(_) => Ok(PrestartRetrySafety::UnsafeActivity),
+        // A contradictory lineage is itself activity evidence this check
+        // cannot safely wave through as safe.
+        Err(_) => Ok(PrestartRetrySafety::UnsafeActivity),
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -309,11 +390,16 @@ pub(crate) async fn autonomous_daily_operation_retry(
             .into_response();
     }
 
-    // §12/§13: pristine pre-start class only — no run_id, no started_at, no
-    // bars dispatched, no validated run lineage.
-    match check_operation_pristine(&pool, &operation).await {
-        Ok(PristineCheckOutcome::Pristine) => {}
-        Ok(PristineCheckOutcome::HasActivity) => {
+    // §12/§13 (revised, PAPER-SOAK-FRIDAY-PRESTART-OBSERVATION-RETRY-
+    // SEMANTICS-01): retry-specific safety only — no run_id, no started_at,
+    // no bars dispatched, no dispatch claim, no validated run lineage. A
+    // mere prestart bar *observation* (`bars_observed`/
+    // `last_completed_bar_ts`) is deliberately not checked here — see
+    // `check_prestart_retry_safety`'s doc comment for why that is safe and
+    // why this is not the same contract as coverage-anchor pristine.
+    match check_prestart_retry_safety(&pool, &operation).await {
+        Ok(PrestartRetrySafety::Safe) => {}
+        Ok(PrestartRetrySafety::UnsafeActivity) => {
             return (
                 StatusCode::CONFLICT,
                 Json(refusal_response(
@@ -325,7 +411,7 @@ pub(crate) async fn autonomous_daily_operation_retry(
                 .into_response();
         }
         Err(err) => {
-            tracing::error!("autonomous_daily_operation_retry: pristine check failed: {err}");
+            tracing::error!("autonomous_daily_operation_retry: prestart retry safety check failed: {err}");
             return (
                 StatusCode::SERVICE_UNAVAILABLE,
                 Json(base_response(operation.operation_id, "backend_unavailable")),
@@ -631,5 +717,351 @@ mod manual_retry_eligibility_tests {
             .filter(|&&r| r == "runtime.start_refused.market_data_not_fresh")
             .count();
         assert_eq!(occurrences, 1);
+    }
+}
+
+/// PAPER-SOAK-FRIDAY-PRESTART-OBSERVATION-RETRY-SEMANTICS-01: DB-backed
+/// proof for `check_prestart_retry_safety`, and for the invariant that
+/// `check_operation_pristine` remains completely unmodified. Every test
+/// requires `MQK_DATABASE_URL` (the port-5434 local test DB only) and skips
+/// (not fails) without it, matching this crate's other inline DB-backed
+/// test modules (e.g. `state::lifecycle::real_production_effects_matrix_
+/// tests`). Run with:
+///   MQK_DATABASE_URL=postgres://postgres:postgres@127.0.0.1:5434/mqk_test \
+///   cargo test -p mqk-daemon --lib routes::autonomous_daily_operator::prestart_retry_safety_tests \
+///   -- --test-threads=1 --nocapture
+#[cfg(test)]
+mod prestart_retry_safety_tests {
+    use super::*;
+    use chrono::{Duration as ChronoDuration, NaiveDate, TimeZone, Utc};
+    use mqk_db::{
+        CreateAutonomousDailyOperationArgs, CreateOrRecoverAutonomousDailyOperationOutcome,
+        RecordCompletedBarObservedOutcome, TransitionAutonomousDailyOperationToRunningArgs,
+        STATE_AWAITING_OPEN, STATE_START_RETRYING,
+    };
+
+    async fn db_pool_or_skip() -> Option<PgPool> {
+        let Ok(url) = std::env::var("MQK_DATABASE_URL") else {
+            return None;
+        };
+        if !url.contains(":5434") {
+            panic!(
+                "prestart_retry_safety_tests: MQK_DATABASE_URL must be the port-5434 local \
+                 test DB, refusing to run against: {url}"
+            );
+        }
+        Some(mqk_db::testkit_db_pool().await.expect("test db pool"))
+    }
+
+    fn unique_suffix() -> String {
+        Uuid::new_v4().to_string().replace('-', "")[..10].to_string()
+    }
+
+    fn test_operation_id(seed: &str) -> Uuid {
+        Uuid::new_v5(&Uuid::NAMESPACE_DNS, seed.as_bytes())
+    }
+
+    async fn create_test_operation(
+        pool: &PgPool,
+        adapter_id: &str,
+        occurred_at_utc: chrono::DateTime<Utc>,
+    ) -> AutonomousDailyOperationRecord {
+        let market_date = NaiveDate::from_ymd_opt(2026, 8, 14).unwrap();
+        let open = Utc.with_ymd_and_hms(2026, 8, 14, 13, 30, 0).unwrap();
+        let close = open + ChronoDuration::hours(6) + ChronoDuration::minutes(30);
+        let preopen = open - ChronoDuration::minutes(30);
+        let postclose = close + ChronoDuration::minutes(15);
+        let previous_trading_date = market_date - ChronoDuration::days(3);
+        let operation_id = test_operation_id(&format!("prestart-retry-safety|{adapter_id}"));
+        let args = CreateAutonomousDailyOperationArgs {
+            operation_id,
+            market_date,
+            deployment_mode: "PAPER".to_string(),
+            adapter_id: adapter_id.to_string(),
+            session_plan_identity: format!("prestart-retry-safety-plan|{adapter_id}"),
+            assignment_identity: "prestart-retry-safety-assignment".to_string(),
+            runtime_binding_identity: "prestart-retry-safety-binding".to_string(),
+            calendar_source: "nyse_weekdays_heuristic".to_string(),
+            calendar_coverage_state: "active".to_string(),
+            schedule_source: "nyse_weekdays_heuristic".to_string(),
+            effective_operation_open_utc: open,
+            effective_operation_close_utc: close,
+            exchange_session_open_utc: open,
+            exchange_session_close_utc: close,
+            exchange_is_early_close: false,
+            previous_trading_date,
+            preopen_start_utc: preopen,
+            postclose_finalize_utc: postclose,
+            initial_state: STATE_PREPARING_DATA.to_string(),
+            data_refresh_state: "not_started".to_string(),
+            occurred_at_utc,
+            bounded_detail: "prestart retry safety test fixture".to_string(),
+            stop_attempt_count: 0,
+        };
+        match mqk_db::create_or_recover_autonomous_daily_operation(pool, &args)
+            .await
+            .expect("create operation")
+        {
+            CreateOrRecoverAutonomousDailyOperationOutcome::Created(record) => record,
+            CreateOrRecoverAutonomousDailyOperationOutcome::Recovered(record) => record,
+            CreateOrRecoverAutonomousDailyOperationOutcome::IdentityConflict { .. } => {
+                panic!("unexpected identity conflict in prestart retry safety test fixture")
+            }
+        }
+    }
+
+    async fn cleanup(pool: &PgPool, operation_id: Uuid) {
+        let _ = sqlx::query(
+            "delete from sys_autonomous_daily_operation_events where operation_id = $1",
+        )
+        .bind(operation_id)
+        .execute(pool)
+        .await;
+        let _ = sqlx::query("delete from sys_autonomous_daily_operations where operation_id = $1")
+            .bind(operation_id)
+            .execute(pool)
+            .await;
+    }
+
+    /// Positive: a genuinely pristine-pre-start operation whose only
+    /// durable evidence is one completed-bar *observation* — the exact
+    /// production shape the completed-bar driver's `PrepareDataOnly` mode
+    /// produces — is `Safe`.
+    #[tokio::test]
+    async fn bars_observed_only_is_safe() {
+        let Some(pool) = db_pool_or_skip().await else {
+            return;
+        };
+        let adapter_id = format!("safety-observed-{}", unique_suffix());
+        let t0 = Utc.with_ymd_and_hms(2026, 8, 14, 13, 0, 0).unwrap();
+        let operation = create_test_operation(&pool, &adapter_id, t0).await;
+
+        let observed =
+            mqk_db::record_completed_bar_observed(&pool, operation.operation_id, 1_800_000_000, t0)
+                .await
+                .expect("record observed ok");
+        assert!(matches!(
+            observed,
+            RecordCompletedBarObservedOutcome::Recorded { bars_observed: 1 }
+        ));
+
+        let refreshed = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation.operation_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(refreshed.bars_observed, 1);
+
+        assert_eq!(
+            check_prestart_retry_safety(&pool, &refreshed).await.unwrap(),
+            PrestartRetrySafety::Safe
+        );
+
+        cleanup(&pool, operation.operation_id).await;
+    }
+
+    /// Invariant preservation: `check_operation_pristine` itself is
+    /// completely untouched by this patch and still reports `HasActivity`
+    /// for the exact same bars-observed-only fixture the previous test
+    /// proves is `Safe` for retry purposes — the coverage-anchor contract
+    /// must remain exactly as strict as before this patch.
+    #[tokio::test]
+    async fn coverage_pristine_check_is_unaffected_and_still_reports_has_activity() {
+        let Some(pool) = db_pool_or_skip().await else {
+            return;
+        };
+        use crate::state::autonomous_daily_coverage_authority::{
+            check_operation_pristine, PristineCheckOutcome,
+        };
+
+        let adapter_id = format!("safety-pristine-{}", unique_suffix());
+        let t0 = Utc.with_ymd_and_hms(2026, 8, 14, 13, 0, 0).unwrap();
+        let operation = create_test_operation(&pool, &adapter_id, t0).await;
+        mqk_db::record_completed_bar_observed(&pool, operation.operation_id, 1_800_000_000, t0)
+            .await
+            .expect("record observed ok");
+        let refreshed = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation.operation_id)
+            .await
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            check_operation_pristine(&pool, &refreshed).await.unwrap(),
+            PristineCheckOutcome::HasActivity,
+            "check_operation_pristine must remain unchanged: bars_observed != 0 is still \
+             activity for the coverage-anchor contract"
+        );
+
+        cleanup(&pool, operation.operation_id).await;
+    }
+
+    /// Negative: a dispatch claim (even uncompleted) is genuine
+    /// runtime-adjacent evidence and must remain unsafe.
+    #[tokio::test]
+    async fn dispatch_claim_present_is_unsafe() {
+        let Some(pool) = db_pool_or_skip().await else {
+            return;
+        };
+        let adapter_id = format!("safety-claim-{}", unique_suffix());
+        let t0 = Utc.with_ymd_and_hms(2026, 8, 14, 13, 0, 0).unwrap();
+        let operation = create_test_operation(&pool, &adapter_id, t0).await;
+        let bar_end_ts = 1_800_000_300_i64;
+        mqk_db::record_completed_bar_observed(&pool, operation.operation_id, bar_end_ts, t0)
+            .await
+            .expect("record observed ok");
+        mqk_db::claim_autonomous_daily_bar_dispatch(
+            &pool,
+            operation.operation_id,
+            "ZZPRESTART",
+            "5m",
+            bar_end_ts,
+            t0,
+        )
+        .await
+        .expect("claim ok");
+
+        let refreshed = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation.operation_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            check_prestart_retry_safety(&pool, &refreshed).await.unwrap(),
+            PrestartRetrySafety::UnsafeActivity
+        );
+
+        cleanup(&pool, operation.operation_id).await;
+    }
+
+    /// Negative: a completed dispatch (`bars_dispatched > 0`,
+    /// `last_dispatched_bar_ts` set) is genuine economic-path evidence and
+    /// must remain unsafe.
+    #[tokio::test]
+    async fn bars_dispatched_present_is_unsafe() {
+        let Some(pool) = db_pool_or_skip().await else {
+            return;
+        };
+        let adapter_id = format!("safety-dispatched-{}", unique_suffix());
+        let t0 = Utc.with_ymd_and_hms(2026, 8, 14, 13, 0, 0).unwrap();
+        let operation = create_test_operation(&pool, &adapter_id, t0).await;
+        let bar_end_ts = 1_800_000_600_i64;
+        mqk_db::record_completed_bar_observed(&pool, operation.operation_id, bar_end_ts, t0)
+            .await
+            .expect("record observed ok");
+        mqk_db::claim_autonomous_daily_bar_dispatch(
+            &pool,
+            operation.operation_id,
+            "ZZPRESTART",
+            "5m",
+            bar_end_ts,
+            t0,
+        )
+        .await
+        .expect("claim ok");
+        mqk_db::complete_autonomous_daily_bar_dispatch(
+            &pool,
+            operation.operation_id,
+            "ZZPRESTART",
+            "5m",
+            bar_end_ts,
+            t0 + ChronoDuration::seconds(1),
+            None,
+        )
+        .await
+        .expect("complete ok");
+
+        let refreshed = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation.operation_id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(refreshed.bars_dispatched > 0);
+        assert!(refreshed.last_dispatched_bar_ts.is_some());
+        assert_eq!(
+            check_prestart_retry_safety(&pool, &refreshed).await.unwrap(),
+            PrestartRetrySafety::UnsafeActivity
+        );
+
+        cleanup(&pool, operation.operation_id).await;
+    }
+
+    /// Negative: `run_id`/`started_at_utc` present — a genuine canonical
+    /// start, driven through the real legal transition chain, never faked
+    /// via raw SQL — must remain unsafe.
+    #[tokio::test]
+    async fn run_id_and_started_at_present_is_unsafe() {
+        let Some(pool) = db_pool_or_skip().await else {
+            return;
+        };
+        let adapter_id = format!("safety-running-{}", unique_suffix());
+        let t0 = Utc.with_ymd_and_hms(2026, 8, 14, 13, 0, 0).unwrap();
+        let operation = create_test_operation(&pool, &adapter_id, t0).await;
+
+        let v2 = match mqk_db::transition_autonomous_daily_operation(
+            &pool,
+            &TransitionAutonomousDailyOperationArgs {
+                operation_id: operation.operation_id,
+                expected_state: STATE_PREPARING_DATA.to_string(),
+                expected_state_version: operation.state_version,
+                new_state: STATE_AWAITING_OPEN.to_string(),
+                reason_code: None,
+                blocker_signature: None,
+                occurred_at_utc: t0,
+                run_id: None,
+                bounded_detail: "test: preopen readiness satisfied".to_string(),
+            },
+        )
+        .await
+        .unwrap()
+        {
+            AutonomousDailyTransitionOutcome::Applied(record) => record,
+            other => panic!("expected Applied, got {other:?}"),
+        };
+        let v3 = match mqk_db::transition_autonomous_daily_operation(
+            &pool,
+            &TransitionAutonomousDailyOperationArgs {
+                operation_id: operation.operation_id,
+                expected_state: STATE_AWAITING_OPEN.to_string(),
+                expected_state_version: v2.state_version,
+                new_state: STATE_START_RETRYING.to_string(),
+                reason_code: None,
+                blocker_signature: None,
+                occurred_at_utc: t0,
+                run_id: None,
+                bounded_detail: "test: entering start sequence".to_string(),
+            },
+        )
+        .await
+        .unwrap()
+        {
+            AutonomousDailyTransitionOutcome::Applied(record) => record,
+            other => panic!("expected Applied, got {other:?}"),
+        };
+
+        let run_id = Uuid::new_v4();
+        let v4 = match mqk_db::transition_autonomous_daily_operation_to_running(
+            &pool,
+            &TransitionAutonomousDailyOperationToRunningArgs {
+                operation_id: operation.operation_id,
+                expected_state: STATE_START_RETRYING.to_string(),
+                expected_state_version: v3.state_version,
+                run_id,
+                started_at_utc: t0,
+                occurred_at_utc: t0,
+                bounded_detail: "test: canonical start succeeded".to_string(),
+            },
+        )
+        .await
+        .unwrap()
+        {
+            AutonomousDailyTransitionOutcome::Applied(record) => record,
+            other => panic!("expected Applied, got {other:?}"),
+        };
+        assert_eq!(v4.run_id, Some(run_id));
+        assert!(v4.started_at_utc.is_some());
+
+        assert_eq!(
+            check_prestart_retry_safety(&pool, &v4).await.unwrap(),
+            PrestartRetrySafety::UnsafeActivity
+        );
+
+        cleanup(&pool, operation.operation_id).await;
     }
 }
