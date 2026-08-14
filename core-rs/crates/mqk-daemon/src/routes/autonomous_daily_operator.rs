@@ -87,13 +87,31 @@ pub(crate) enum ManualRetryEligibility {
 /// `handle_preparing_data` / `handle_preflight_blocked` — the two PRE-START
 /// handlers, strictly before any arm or start attempt) plus
 /// `"assignment_missing"`, the one non-readiness pre-start reason those same
-/// two handlers can also apply. Deliberately excludes every reason that
-/// implies halt / kill-switch / reconcile / runtime-ownership / arm history,
-/// even though a handful of those can theoretically also surface from
-/// `resolve_autonomous_runtime_context` inside the same two handlers — this
-/// route must never be the seam that papers over one of those.
+/// two handlers can also apply, plus one legacy pre-start reason from the
+/// older `market_data_freshness` gate inside `start_execution_runtime`
+/// (PAPER-SOAK-FRIDAY-LEGACY-FRESHNESS-OPERATOR-RETRY-RECOVERY-01):
+/// `"runtime.start_refused.market_data_not_fresh"` — the exact fault_class
+/// string stored verbatim as `state_reason_code` when that gate refuses (see
+/// `autonomous_retry_policy::reason_code_str`'s `UnclassifiedFailClosed`
+/// arm). Like every other entry here, it is still a PRE-START condition
+/// gated strictly before any arm/start attempt, and it remains covered by
+/// every one of this route's other independent safety checks (pristine
+/// history, session window, identity match, and — critically — a fresh
+/// re-run of canonical `daily_data_readiness` before any mutation, since
+/// this legacy gate is not itself re-evaluated). Deliberately excludes
+/// every reason that implies halt / kill-switch / reconcile / runtime-
+/// ownership / arm history, even though a handful of those can theoretically
+/// also surface from `resolve_autonomous_runtime_context` inside the same
+/// two handlers — this route must never be the seam that papers over one of
+/// those. Also deliberately excludes the newer sibling fault_class from the
+/// same legacy gate, `"runtime.start_refused.latest_completed_bar_pending"`
+/// (OPENING-BAR-FRESHNESS-AUTHORITY-REPAIR-01): that one classifies
+/// `WaitForCondition`, not `ManualInterventionRequired`, so it can never
+/// durably reach this route's stored `state_reason_code` in the first
+/// place — including it here would be unaudited, unused breadth.
 const RECOVERABLE_PREFLIGHT_REASON_CODES: &[&str] = &[
     "assignment_missing",
+    "runtime.start_refused.market_data_not_fresh",
     crate::daily_data_readiness::REASON_REQUIRED_ASSIGNMENTS_MISSING,
     crate::daily_data_readiness::REASON_ASSIGNMENT_RESOLUTION_FAILED,
     crate::daily_data_readiness::REASON_RUNTIME_STRATEGY_ASSIGNMENT_MISMATCH,
@@ -535,5 +553,83 @@ pub(crate) async fn autonomous_daily_operation_retry(
             )
                 .into_response()
         }
+    }
+}
+
+#[cfg(test)]
+mod manual_retry_eligibility_tests {
+    use super::*;
+
+    /// PAPER-SOAK-FRIDAY-LEGACY-FRESHNESS-OPERATOR-RETRY-RECOVERY-01: the
+    /// 2026-08-14 incident this closes. The legacy `market_data_freshness`
+    /// gate's own fault_class string is stored verbatim as
+    /// `state_reason_code` (via `AutonomousCoordinatorReason::
+    /// UnclassifiedFailClosed { fault_class }`, see
+    /// `autonomous_retry_policy::reason_code_str`), so this route must
+    /// recognize the exact dotted string, not a bare `"market_data_not_fresh"`.
+    #[test]
+    fn legacy_market_data_not_fresh_is_recoverable_preflight() {
+        assert_eq!(
+            classify_manual_retry_eligibility(Some("runtime.start_refused.market_data_not_fresh")),
+            ManualRetryEligibility::RecoverablePreflight
+        );
+    }
+
+    /// OPENING-BAR-FRESHNESS-AUTHORITY-REPAIR-01 added a second fault_class
+    /// from the same `market_data_freshness` source
+    /// (`runtime.start_refused.latest_completed_bar_pending`), but that one
+    /// classifies `WaitForCondition` in `autonomous_retry_policy` and can
+    /// never durably land in `manual_intervention_required` — it must stay
+    /// out of this route's closed recoverable set. Widening for it would be
+    /// dead-weight at best and an unaudited seam at worst.
+    #[test]
+    fn latest_completed_bar_pending_is_not_widened_into_recoverable() {
+        assert_eq!(
+            classify_manual_retry_eligibility(Some(
+                "runtime.start_refused.latest_completed_bar_pending"
+            )),
+            ManualRetryEligibility::UnknownFailClosed
+        );
+    }
+
+    /// Negative test #1: an unrelated/unaudited `runtime.start_refused.*`
+    /// fault_class must still fail closed — no prefix or substring match.
+    #[test]
+    fn unrelated_runtime_start_refused_reason_fails_closed() {
+        assert_eq!(
+            classify_manual_retry_eligibility(Some(
+                "runtime.start_refused.some_future_gate_not_yet_audited"
+            )),
+            ManualRetryEligibility::UnknownFailClosed
+        );
+    }
+
+    /// Negative tests #2-#5: reasons implying runtime/halt/reconcile/arm
+    /// history stay refused regardless of this patch.
+    #[test]
+    fn unsafe_runtime_history_reasons_stay_refused() {
+        for reason in [
+            "reconcile_dirty",
+            "integrity_halted",
+            "kill_switch_active",
+            "runtime_run_id_mismatch",
+        ] {
+            assert_eq!(
+                classify_manual_retry_eligibility(Some(reason)),
+                ManualRetryEligibility::UnsafeRuntimeHistory,
+                "{reason} must remain UnsafeRuntimeHistory"
+            );
+        }
+    }
+
+    /// No widening of the eligibility surface itself: the recoverable set
+    /// must contain the new legacy code exactly once and nothing else new.
+    #[test]
+    fn recoverable_set_contains_the_new_legacy_code_exactly_once() {
+        let occurrences = RECOVERABLE_PREFLIGHT_REASON_CODES
+            .iter()
+            .filter(|&&r| r == "runtime.start_refused.market_data_not_fresh")
+            .count();
+        assert_eq!(occurrences, 1);
     }
 }

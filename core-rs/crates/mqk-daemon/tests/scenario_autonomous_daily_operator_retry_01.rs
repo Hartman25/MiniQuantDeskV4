@@ -1468,3 +1468,147 @@ async fn auth_valid_token_is_evaluated_not_rejected_at_auth_layer() -> anyhow::R
     assert_eq!(json["truth_state"], "not_found", "{json}");
     Ok(())
 }
+
+// ---------------------------------------------------------------------------
+// T-LEGACY — PAPER-SOAK-FRIDAY-LEGACY-FRESHNESS-OPERATOR-RETRY-RECOVERY-01
+//
+// The 2026-08-14 Friday incident this closes end to end: the coordinator's
+// canonical runtime start was refused by the older `market_data_freshness`
+// gate inside `start_execution_runtime` with
+// `runtime.start_refused.market_data_not_fresh`, which
+// `autonomous_retry_policy` durably classifies `ManualInterventionRequired`.
+// Before this patch, this route's closed recoverable set only recognized
+// `daily_data_readiness` reason codes, so it refused the exact legacy
+// string with `not_recoverable` even after market data was repaired. This
+// mirrors T01's full-recovery shape but seeds the operation with the exact
+// legacy fault_class string T01 never exercises.
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+#[ignore = "requires MQK_DATABASE_URL; see module doc for run command"]
+async fn t_legacy_full_recovery_lifecycle_market_data_not_fresh() -> anyhow::Result<()> {
+    const LEGACY_REASON: &str = "runtime.start_refused.market_data_not_fresh";
+
+    reset_env();
+    set_active_assignment_env();
+    let pool = test_pool().await?;
+    let adapter_id = format!("retry-legacy-{}", unique_suffix());
+    let now = dynamic_session_now();
+
+    let st = paper_state_with_db(pool.clone(), &adapter_id);
+    active_fleet_st(&st).await;
+    st.set_daily_data_readiness_clock_override_for_test(Some(now))
+        .await;
+
+    let (plan, assignment_identity, runtime_binding_identity, operation_id) =
+        resolve_active_identity(&st, &adapter_id, now).await;
+
+    cleanup_bars(&pool, SYMBOL, TIMEFRAME).await;
+
+    // Pristine operation, data readiness genuinely fails (no bars).
+    seed_operation_row(
+        &pool,
+        &plan,
+        operation_id,
+        &adapter_id,
+        "PAPER",
+        &assignment_identity,
+        &runtime_binding_identity,
+        now,
+        STATE_PREPARING_DATA,
+        None,
+    )
+    .await?;
+
+    // The coordinator durably transitions to manual_intervention_required
+    // with the exact legacy fault_class string as stored by
+    // `AutonomousCoordinatorReason::UnclassifiedFailClosed { fault_class }`
+    // (see `autonomous_retry_policy::reason_code_str`) — never a bare
+    // `"market_data_not_fresh"`.
+    let manual = real_transition(
+        &pool,
+        operation_id,
+        STATE_PREPARING_DATA,
+        1,
+        STATE_MANUAL_INTERVENTION_REQUIRED,
+        Some(LEGACY_REASON),
+        None,
+        now,
+        "legacy market_data_freshness gate refusal (test fixture)",
+    )
+    .await;
+    assert_eq!(manual.state, STATE_MANUAL_INTERVENTION_REQUIRED);
+    assert_eq!(manual.state_reason_code.as_deref(), Some(LEGACY_REASON));
+
+    // Negative test #9: retry while the blocker still genuinely exists ->
+    // 409 still_blocked, zero state mutation, even though the legacy reason
+    // is now in the recoverable set.
+    let (status, json) = call(
+        mqk_daemon::routes::build_router(Arc::clone(&st)),
+        retry_req(operation_id, None),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "still blocked: {json}");
+    assert_eq!(json["truth_state"], "still_blocked", "{json}");
+
+    let row = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation_id)
+        .await?
+        .expect("row must exist");
+    assert_eq!(
+        row.state, STATE_MANUAL_INTERVENTION_REQUIRED,
+        "a still-blocked retry must not mutate state"
+    );
+    assert_eq!(row.state_version, manual.state_version);
+
+    // Repair data through normal ingestion; canonical readiness now passes.
+    let bars = expected_bar_window(now, 5);
+    seed_bars_via_normal_ingestion(&pool, &bars).await;
+
+    // POST retry with the exact operation_id -> durable state becomes
+    // preparing_data; the legacy blocker is cleared from current-state
+    // fields. This is the exact request/response shape of the authorized
+    // production recovery action.
+    let (status, json) = call(
+        mqk_daemon::routes::build_router(Arc::clone(&st)),
+        retry_req(operation_id, Some(&plan.market_date)),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "recovery must succeed: {json}");
+    assert_eq!(json["truth_state"], "recovered", "{json}");
+    assert_eq!(json["previous_state"], STATE_MANUAL_INTERVENTION_REQUIRED, "{json}");
+    assert_eq!(json["new_state"], STATE_PREPARING_DATA, "{json}");
+    assert_eq!(json["previous_reason_code"], LEGACY_REASON, "{json}");
+    assert_eq!(json["runtime_started"], false, "{json}");
+    assert_eq!(json["arm_modified"], false, "{json}");
+    assert_eq!(json["halt_changed"], false, "{json}");
+    assert_eq!(json["reconcile_changed"], false, "{json}");
+    assert_eq!(json["orders_submitted"], 0, "{json}");
+
+    let recovered = mqk_db::fetch_autonomous_daily_operation_by_id(&pool, operation_id)
+        .await?
+        .expect("row must exist");
+    assert_eq!(recovered.state, STATE_PREPARING_DATA);
+    assert_eq!(
+        recovered.state_reason_code, None,
+        "the legacy blocker reason must be cleared from current-state fields"
+    );
+
+    // Next coordinator tick reevaluates readiness and progresses on its own
+    // — this route never shortcuts into awaiting_open/start itself.
+    let outcome = mqk_daemon::state::autonomous_daily_coordinator::dispatch_by_state(
+        &st, &pool, recovered, &plan, now,
+    )
+    .await?;
+    assert!(
+        matches!(
+            outcome,
+            mqk_daemon::state::autonomous_daily_coordinator::AutonomousDailyCoordinatorTickOutcome::AwaitingOpen
+                | mqk_daemon::state::autonomous_daily_coordinator::AutonomousDailyCoordinatorTickOutcome::PreparingData
+        ),
+        "coordinator must progress toward awaiting_open with readiness now satisfied, got {outcome:?}"
+    );
+
+    cleanup_bars(&pool, SYMBOL, TIMEFRAME).await;
+    cleanup_operation(&pool, operation_id).await;
+    Ok(())
+}
