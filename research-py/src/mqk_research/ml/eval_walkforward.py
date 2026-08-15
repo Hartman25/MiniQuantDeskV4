@@ -322,7 +322,15 @@ def run_walkforward_eval(
     eval_dir = run_dir / "eval"
     eval_dir.mkdir(parents=True, exist_ok=True)
 
+    symbol_all = df["symbol"]
+
     fold_metrics: List[Dict[str, Any]] = []
+    # RESEARCH-ECONOMIC-WALKFORWARD-01: OUT-OF-SAMPLE prediction rows, TEST-fold
+    # only. Never populated from training or holdout rows — only from `te_mask`
+    # within a fold that was not skipped for too-few-rows. This is the sole
+    # feed for economic simulation; classification-label fwd_ret must never be
+    # substituted for it (see mqk_research.ml.economic_walkforward).
+    oos_rows: List[Dict[str, Any]] = []
     for i, (tr_s, tr_e, te_s, te_e) in enumerate(folds_raw, start=1):
         tr_candidate_mask = usable_mask & (ts_all >= tr_s) & (ts_all < tr_e)
         te_mask = usable_mask & (ts_all >= te_s) & (ts_all < te_e)
@@ -417,6 +425,22 @@ def run_walkforward_eval(
 
         min_test_feature_ts = ts_all[te_mask].min() if test_rows > 0 else None
 
+        if test_rows > 0:
+            te_symbols = symbol_all[te_mask].to_numpy()
+            te_decision_ts = ts_all[te_mask].to_numpy()
+            te_label_end = label_end_all[te_mask].to_numpy() if label_end_all is not None else None
+            for row_idx in range(test_rows):
+                oos_rows.append({
+                    "fold": i,
+                    "symbol": te_symbols[row_idx],
+                    "decision_ts": pd.Timestamp(te_decision_ts[row_idx]).isoformat(),
+                    "label_end_ts": (
+                        pd.Timestamp(te_label_end[row_idx]).isoformat() if te_label_end is not None else None
+                    ),
+                    "ml_score": float(p_te[row_idx]),
+                    "target": int(y_te[row_idx]),
+                })
+
         fold_metrics.append({
             "fold": i,
             "train_start_utc": tr_s.isoformat(),
@@ -439,6 +463,18 @@ def run_walkforward_eval(
     folds_used = sum(1 for f in fold_metrics if not f.get("skipped"))
     if folds_used == 0:
         raise RuntimeError("Fail-closed: no usable walk-forward folds after purge/embargo/holdout isolation")
+
+    # RESEARCH-ECONOMIC-WALKFORWARD-01: persist the TEST-fold-only OOS
+    # prediction stream. Stable ordering; duplicate (fold,symbol,decision_ts)
+    # fails closed rather than silently keeping first/last.
+    oos_predictions_path = eval_dir / "walk_forward_oos_predictions.csv"
+    oos_df = pd.DataFrame(
+        oos_rows, columns=["fold", "symbol", "decision_ts", "label_end_ts", "ml_score", "target"]
+    )
+    oos_df = oos_df.sort_values(["fold", "symbol", "decision_ts"], kind="mergesort").reset_index(drop=True)
+    if oos_df[["fold", "symbol", "decision_ts"]].duplicated().any():
+        raise RuntimeError("Fail-closed: duplicate (fold,symbol,decision_ts) in OOS prediction rows")
+    oos_df.to_csv(oos_predictions_path, index=False)
 
     holdout_rows = int(holdout_mask.sum())
     holdout_boundary_purged_rows = int(holdout_boundary_purge_mask.sum())
@@ -495,6 +531,9 @@ def run_walkforward_eval(
             "features_csv": file_record(features_path),
             "targets_csv": file_record(targets_path),
             "feature_schema": file_record(schema_path),
+        },
+        "outputs": {
+            "oos_predictions_csv": file_record(oos_predictions_path),
         },
         "folds": fold_metrics,
     }

@@ -646,6 +646,8 @@ def test_deterministic_replay(tmp_path):
     obj_b = json.loads(bytes_b)
     obj_a["inputs"] = None
     obj_b["inputs"] = None
+    obj_a["outputs"] = None
+    obj_b["outputs"] = None
     obj_a["ids"] = None
     obj_b["ids"] = None
     assert json.dumps(obj_a, sort_keys=True) == json.dumps(obj_b, sort_keys=True)
